@@ -93,14 +93,25 @@ def test_sae_supervised_predicts_on_training_X(synthetic):
     assert r2 > 0.0, f"expected positive in-sample R^2, got {r2}"
 
 
-def test_sae_supervised_oos_predict_is_explicit_not_silent(synthetic):
+def test_sae_supervised_oos_predict_runs_the_frozen_decoder_encoder(synthetic):
+    """``predict`` on rows the SAE never saw runs ``ManifoldSAE.encode``, the
+    frozen-decoder out-of-sample solve, and feeds its assignments to the head.
+    Rows perturbed by 1e-6 carry the same signal as the training rows, so the
+    head must still explain the supervised response on them."""
     X, y, mask = synthetic
     result = gamfit.examples.sae_supervised(
         X, y, mask, K=4, d_atom=2, atom_topology="circle",
     )
     X_new = X + 1e-6  # Not bit-equal to training.
-    with pytest.raises(NotImplementedError, match="OOS SAE assignments"):
-        result.predict(X_new)
+    preds = np.asarray(result.predict(X_new), dtype=np.float64).reshape(-1)
+    assert preds.shape == (X.shape[0],)
+    assert np.all(np.isfinite(preds)), "out-of-sample predictions must be finite"
+    y_sup = y[mask]
+    p_sup = preds[mask]
+    ss_res = float(np.sum((y_sup - p_sup) ** 2))
+    ss_tot = float(np.sum((y_sup - y_sup.mean()) ** 2))
+    r2 = 1.0 - ss_res / max(ss_tot, 1e-12)
+    assert r2 > 0.0, f"expected positive out-of-sample R^2 on perturbed rows, got {r2}"
 
 
 def test_sae_supervised_empty_mask_is_clean_error():
