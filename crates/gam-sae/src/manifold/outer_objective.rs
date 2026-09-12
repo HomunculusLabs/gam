@@ -32,7 +32,9 @@ pub(crate) fn reconstruction_explained_variance(
             sst += centered * centered;
         }
     }
-    if ssr.is_finite() && sst.is_finite() && sst > f64::MIN_POSITIVE {
+    // Any positive total sum of squares defines the ratio; only an exactly constant
+    // target has none.
+    if ssr.is_finite() && sst.is_finite() && sst > 0.0 {
         Some(1.0 - ssr / sst)
     } else {
         None
