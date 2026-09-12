@@ -1670,6 +1670,10 @@ fn term_edf_resolution(
             .slice_mut(ndarray::s![range.clone(), range])
             .scaled_add(lambda, &penalty.local);
     }
+    // The estimand is symmetric, but a penalty block rebuilt through its PSD-cone
+    // projection carries triangle roundoff; symmetrize as the optimizer does for
+    // the same sum before certifying the factor.
+    gam_linalg::matrix::symmetrize_in_place(&mut hessian);
     let factor =
         gam_linalg::utils::certified_spd_factorize(&hessian, "adaptive spatial EDF resolution")
             .ok()?;
