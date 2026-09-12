@@ -5476,5 +5476,14 @@
     ],
     "reason": "Public functions no product uses, the private streaming-border helpers only submit_chunk reached (fold_or_park, chunk_gram, fold_chunk, absorb), CoresetMarginVerdict (returned only by certify_margin), and the two tests that only drove deleted code: the #1026 dense-reference framed Schur matvec test and the #2372 periodic Duchon psi-triplet finite-difference test.",
     "evidence": "Consumer scan job 539356 and narrow scan job 541705 at 0bf5b572b gave verdict no_production_user. MSI validation job 545537 produced exactly these guarded identities on the built commit. At the landed tree, git grep -w finds no occurrence of any removed name except homonyms: two `0..num_components` comments in evidence.rs; for absorb, other types' methods (gam-linalg matrix hashing, gam-sae score route stats, gam-terms structure evidence), a test-local fn in gam-terms tests, and the English word in comments."
+  },
+  {
+    "base": "d8b502af45a7f50272ee45846e7a1c2f86a64da0",
+    "items": [
+      "crates/gam-solve/src/gaussian_reml.rs:struct:GaussianRemlWarmStart",
+      "crates/gam-solve/src/quadrature.rs:struct:CLogLogConvolutionDerivatives"
+    ],
+    "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). gam-solve's GaussianRemlWarmStart (a lambda plus eigen-cache carrier with an empty impl) and CLogLogConvolutionDerivatives (a CLogLog Gauss-Hermite derivative carrier) are named by no code in any crate, tests included. The #2829 deletions of the allocation-free Gaussian REML batch path and of the CLogLog GHQ derivative entry point left them with no producer or consumer.",
+    "evidence": "The prune-api-c type census at 524486bd1 (/scratch.global/sauer354/pool/prune-api-c/verify_types.tsv) finds no production use of either. At the base, git grep -w finds GaussianRemlWarmStart only at its definition, its empty impl and one test doc comment reworded here, and CLogLogConvolutionDerivatives only at its definition. The item list comes from emulating source_removal_guard.py's ITEM rule over the before and after blobs: two pub structs, and no fn removed, so there is no public-api-census entry."
   }
 ]

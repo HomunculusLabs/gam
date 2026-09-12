@@ -271,7 +271,7 @@ fn penalty_gradient_does_not_read_an_eigenvalue_the_cache_classified_as_null() {
 
 /// #2739 follow-up. The shared predicate makes the selected count equal
 /// `penalty_rank` only when `penalty_rank` was derived from this same array. A
-/// cache supplied through `GaussianRemlWarmStart` or `prepare_gaussian_reml`'s
+/// cache supplied through `prepare_gaussian_reml`'s
 /// `Some(eigen_cache)` can carry a rank computed under another rule, so the
 /// cache boundary must refuse a declared rank its own spectrum does not support.
 /// Both cases below leave `penalty_rank + nullity == p` intact, so a refusal

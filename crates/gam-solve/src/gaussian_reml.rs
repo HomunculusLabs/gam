@@ -885,15 +885,6 @@ impl GaussianRemlEigenCache {
     }
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct GaussianRemlWarmStart {
-    pub lambda: Option<f64>,
-    pub eigen_cache: Option<GaussianRemlEigenCache>,
-}
-
-impl GaussianRemlWarmStart {
-}
-
 #[derive(Clone, Debug)]
 pub struct GaussianRemlResult {
     pub lambda: f64,

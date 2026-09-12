@@ -4492,36 +4492,6 @@ fn sigmoid(x: f64) -> f64 {
 // in μ and σ):
 //   ∂^a_μ ∂^b_σ L ≈ (√2)^b / √π  Σ_m ω_m x_m^b g^{(a+b)}(t_m)
 
-/// All partial derivatives of `L(μ,σ) = E[g(μ + σZ)]` up to fourth order,
-/// where `g` is the CLogLog inverse link and `Z ~ N(0,1)`.
-#[derive(Clone, Copy, Debug)]
-pub struct CLogLogConvolutionDerivatives {
-    // 0th order
-    pub l: f64,
-
-    // 1st order
-    pub l_mu: f64,
-    pub l_sigma: f64,
-
-    // 2nd order
-    pub l_mumu: f64,
-    pub l_musigma: f64,
-    pub l_sigmasigma: f64,
-
-    // 3rd order
-    pub l_mumumu: f64,
-    pub l_mumusigma: f64,
-    pub l_musigmasigma: f64,
-    pub l_sigmasigmasigma: f64,
-
-    // 4th order
-    pub l_mumumumu: f64,
-    pub l_mumumusigma: f64,
-    pub l_mumusigmasigma: f64,
-    pub l_musigmasigmasigma: f64,
-    pub l_sigmasigmasigmasigma: f64,
-}
-
 #[inline]
 pub(crate) fn cloglog_point_jet5(t: f64) -> (f64, f64, f64, f64, f64, f64) {
     if t.is_nan() {
