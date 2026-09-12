@@ -359,12 +359,18 @@ fn custom_family_joint_jeffreys_term_from_information<
     z_joint: &Array2<f64>,
 ) -> Result<(f64, Array1<f64>, Array2<f64>), CustomFamilyError> {
     // The reduced information and its conditioning gate are authoritative and
-    // are prepared before this lazy provider can run.  A gated-off term therefore
-    // performs ZERO all-axes builds.  When active, the provider is called once and
-    // returns the same canonical `{Hdot[e_a]}` batch the prior eager path used.
-    let term = gam_solve::estimate::reml::jeffreys_subspace::joint_jeffreys_term_batched(
+    // are prepared before either lazy provider can run.  A gated-off term therefore
+    // performs ZERO all-axes builds.  When active, a family that forms the rotated
+    // rows supplies them and no `p × p` axis matrix is built (#1082); otherwise the
+    // dense provider is called once and returns the canonical `{Hdot[e_a]}` batch.
+    let term = gam_solve::estimate::reml::jeffreys_subspace::joint_jeffreys_term_batched_rotated(
         h_joint.view(),
         z_joint.view(),
+        |basis| {
+            family.joint_jeffreys_information_directional_derivative_rotated_all_axes_with_specs(
+                states, specs, basis,
+            )
+        },
         || {
             family.joint_jeffreys_information_directional_derivative_all_axes_with_specs(
                 states, specs,
@@ -929,19 +935,35 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
         // curvature requires every exact derivative; an absent batch is an
         // error, since substituting zero would change the outer objective's
         // derivative.
-        let all_axes = family
-            .joint_jeffreys_information_directional_derivative_all_axes_with_specs(
+        // A family that forms the rotated rows hands them over, and no `p × p` axis
+        // matrix is built (#1082).
+        let rotated = family
+            .joint_jeffreys_information_directional_derivative_rotated_all_axes_with_specs(
                 &states,
                 &specs,
+                plan.ambient_eigenbasis().view(),
             )?;
-        let axes = all_axes.ok_or_else(|| {
-            CustomFamilyError::trial_point(
-                "active Jeffreys drift requires exact first information derivatives".to_string(),
-            )
-        })?;
-        gam_solve::estimate::reml::jeffreys_subspace::JeffreysHphiDriftBase::prepare_with_plan_axes(
-            plan.clone(), axes,
-        )?.map(Arc::new).ok_or_else(|| CustomFamilyError::trial_point(
+        let base = match rotated {
+            Some(rows) => gam_solve::estimate::reml::jeffreys_subspace::JeffreysHphiDriftBase::prepare_with_plan_rotated_rows(
+                plan.clone(), rows,
+            )?,
+            None => {
+                let all_axes = family
+                    .joint_jeffreys_information_directional_derivative_all_axes_with_specs(
+                        &states,
+                        &specs,
+                    )?;
+                let axes = all_axes.ok_or_else(|| {
+                    CustomFamilyError::trial_point(
+                        "active Jeffreys drift requires exact first information derivatives".to_string(),
+                    )
+                })?;
+                gam_solve::estimate::reml::jeffreys_subspace::JeffreysHphiDriftBase::prepare_with_plan_axes(
+                    plan.clone(), axes,
+                )?
+            }
+        };
+        base.map(Arc::new).ok_or_else(|| CustomFamilyError::trial_point(
             "active Jeffreys drift could not prepare its information derivative base".to_string()
         ))
         }).clone())

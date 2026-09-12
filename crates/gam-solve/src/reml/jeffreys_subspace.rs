@@ -1611,6 +1611,13 @@ impl JointJeffreysPlan {
         self.reduced_dim != 0 && self.gate_weight != 0.0
     }
 
+    /// `U = Z_J V`, the reduced information's eigenbasis in coefficient space: the basis a
+    /// family rotates the axis derivatives into when it forms the rows the drift reads
+    /// (#1082).
+    pub fn ambient_eigenbasis(&self) -> Array2<f64> {
+        self.z_j.dot(&self.evecs)
+    }
+
     /// `Φ = G · ½ Σ_i g(λ_i; floor)` — the gated Jeffreys value this spectrum
     /// carries, emitted through the same `JeffreysLogdetAtom` projection the
     /// full value/gradient/curvature term uses, so a value-only evaluation of
@@ -2449,6 +2456,105 @@ fn joint_jeffreys_term_from_plan<AxesFn>(
 where
     AxesFn: FnOnce() -> Result<Option<Vec<Array2<f64>>>, String>,
 {
+    joint_jeffreys_term_from_reduced_axes(plan, |z_j, evecs| {
+        reduce_dense_jeffreys_axes(z_j, evecs, hessian_axes)
+    })
+}
+
+/// [`joint_jeffreys_term_batched`] from a provider of the axes already rotated into the
+/// plan's eigenbasis `U = Z_J V`: row `k` of `rotated_axes(U)` is `vec(sym(Uᵀ Hdot[e_k] U))`,
+/// so no `p × p` axis matrix is formed (#1082). When the provider declines, `hessian_axes`
+/// supplies the dense batch and the term is exactly [`joint_jeffreys_term_batched`]'s.
+pub fn joint_jeffreys_term_batched_rotated<RotatedFn, AxesFn>(
+    h_joint: ArrayView2<'_, f64>,
+    z_j: ArrayView2<'_, f64>,
+    rotated_axes: RotatedFn,
+    hessian_axes: AxesFn,
+) -> Result<(f64, Array1<f64>, Array2<f64>), String>
+where
+    RotatedFn: FnOnce(ArrayView2<'_, f64>) -> Result<Option<Array2<f64>>, String>,
+    AxesFn: FnOnce() -> Result<Option<Vec<Array2<f64>>>, String>,
+{
+    let plan = JointJeffreysPlan::prepare(h_joint, z_j)?;
+    joint_jeffreys_term_from_reduced_axes(plan, |z_j, evecs| {
+        let p = z_j.nrows();
+        let m = evecs.ncols();
+        let basis = z_j.dot(evecs);
+        let Some(rows) = rotated_axes(basis.view())? else {
+            return reduce_dense_jeffreys_axes(z_j, evecs, hessian_axes);
+        };
+        if rows.dim() != (p, m * m) {
+            return Err(format!(
+                "joint_jeffreys_term: rotated axis rows have shape {:?}, expected ({p}, {})",
+                rows.dim(),
+                m * m
+            ));
+        }
+        Ok(Some(
+            rows.outer_iter()
+                .map(|row| {
+                    row.to_owned()
+                        .into_shape_with_order((m, m))
+                        .expect("each rotated axis row holds one m x m block")
+                })
+                .collect(),
+        ))
+    })
+}
+
+/// `Ṽ_k = Vᵀ (Z_Jᵀ Hdot[e_k] Z_J) V` for every canonical axis from the dense batch, or
+/// `None` when the family does not expose the exact derivative.
+fn reduce_dense_jeffreys_axes<AxesFn>(
+    z_j: &Array2<f64>,
+    evecs: &Array2<f64>,
+    hessian_axes: AxesFn,
+) -> Result<Option<Vec<Array2<f64>>>, String>
+where
+    AxesFn: FnOnce() -> Result<Option<Vec<Array2<f64>>>, String>,
+{
+    let p = z_j.nrows();
+    let hdots = match hessian_axes()? {
+        Some(hdots) => hdots,
+        None => return Ok(None),
+    };
+    if hdots.len() != p {
+        return Err(format!(
+            "joint_jeffreys_term: got {} canonical Hdot matrices, expected {p}",
+            hdots.len()
+        ));
+    }
+    for hdot in &hdots {
+        if hdot.nrows() != p || hdot.ncols() != p {
+            return Err(format!(
+                "joint_jeffreys_term: Hdot shape {}x{} != {p}x{p}",
+                hdot.nrows(),
+                hdot.ncols()
+            ));
+        }
+    }
+    // Reduced derivative D_k = Z_J^T Hdot Z_J (m x m), rotated into the
+    // eigenbasis: Ṽ_k = Vᵀ D_k V.
+    Ok(Some(
+        hdots
+            .into_iter()
+            .map(|hdot| {
+                let hdz = hdot.dot(z_j);
+                let d_k = z_j.t().dot(&hdz);
+                evecs.t().dot(&d_k).dot(evecs)
+            })
+            .collect(),
+    ))
+}
+
+/// The Jeffreys triple from the plan and the reduced axis derivatives `Ṽ_k` that
+/// `reduced_axes(Z_J, V)` supplies. `None` degenerates to `(phi, 0, 0)`.
+fn joint_jeffreys_term_from_reduced_axes<ReducedFn>(
+    plan: JointJeffreysPlan,
+    reduced_axes: ReducedFn,
+) -> Result<(f64, Array1<f64>, Array2<f64>), String>
+where
+    ReducedFn: FnOnce(&Array2<f64>, &Array2<f64>) -> Result<Option<Vec<Array2<f64>>>, String>,
+{
     let p = plan.coefficient_dim();
     if !plan.is_active() {
         return Ok((0.0, Array1::zeros(p), Array2::zeros((p, p))));
@@ -2565,24 +2671,15 @@ where
     // does not expose the exact derivative and the whole term degenerates to
     // `(gate_weight·phi, 0, 0)` (matching the serial first-None behaviour); any
     // `Err` propagates.
-    let hdots = match hessian_axes()? {
-        Some(hdots) => hdots,
+    let reduced = match reduced_axes(&z_j, &evecs)? {
+        Some(reduced) => reduced,
         None => return Ok((phi, Array1::zeros(p), Array2::zeros((p, p)))),
     };
-    if hdots.len() != p {
+    if reduced.len() != p || reduced.iter().any(|a_k| a_k.dim() != (m, m)) {
         return Err(format!(
-            "joint_jeffreys_term: got {} canonical Hdot matrices, expected {p}",
-            hdots.len()
+            "joint_jeffreys_term: got {} reduced axis derivatives, expected {p} of shape {m}x{m}",
+            reduced.len()
         ));
-    }
-    for hdot in &hdots {
-        if hdot.nrows() != p || hdot.ncols() != p {
-            return Err(format!(
-                "joint_jeffreys_term: Hdot shape {}x{} != {p}x{p}",
-                hdot.nrows(),
-                hdot.ncols()
-            ));
-        }
     }
     let mut reduced_drift: HashMap<usize, Arc<Array2<f64>>> = HashMap::with_capacity(p);
     let mut floor_drift: HashMap<usize, f64> = HashMap::new();
@@ -2590,12 +2687,7 @@ where
     // Empty when the gate is saturated (`∂G = 0`), so a clean/fully-active fit is
     // byte-unchanged.
     let mut gate_dot: HashMap<usize, f64> = HashMap::new();
-    for (k, hdot) in hdots.into_iter().enumerate() {
-        // Reduced derivative D_k = Z_J^T Hdot Z_J (m x m), rotated into the
-        // eigenbasis: Ṽ_k = Vᵀ D_k V.
-        let hdz = hdot.dot(&z_j);
-        let d_k = z_j.t().dot(&hdz);
-        let a_k = evecs.t().dot(&d_k).dot(&evecs);
+    for (k, a_k) in reduced.into_iter().enumerate() {
         // FLOOR-RESPONSE term (see the `floor` block above). The atom consumes
         // `floor_dot` beside `Ṽ_k`, so `dΦ/dβ_k` remains the derivative of its
         // own `value()`.
@@ -3708,6 +3800,52 @@ impl JeffreysHphiDriftBase {
             ));
         }
         Self::from_plan_axis_derivatives(plan, hdots)
+    }
+
+    /// [`Self::prepare_with_plan_axes`] from the axes already rotated into the plan's
+    /// eigenbasis: row `a` of `rows` is `vec(sym(Uᵀ Hdot[e_a] U))` with
+    /// `U = JointJeffreysPlan::ambient_eigenbasis()`, the rows the dense path contracts, so
+    /// no `p × p` axis matrix is needed (#1082).
+    pub fn prepare_with_plan_rotated_rows(
+        plan: JointJeffreysPlan,
+        rows: Array2<f64>,
+    ) -> Result<Option<JeffreysHphiDriftBase>, String> {
+        if !plan.is_active() {
+            return Ok(None);
+        }
+        let p = plan.coefficient_dim();
+        let m = plan.reduced_dim;
+        if rows.dim() != (p, m * m) {
+            return Err(format!(
+                "JeffreysHphiDriftBase::prepare_with_plan_rotated_rows: rows have shape {:?}, expected ({p}, {})",
+                rows.dim(),
+                m * m
+            ));
+        }
+        let ambient_eigenbasis = plan.ambient_eigenbasis();
+        let psi = floored_inverse_divided_differences(&plan.evals, plan.floor);
+        let psi_values = psi.as_slice().expect("Jeffreys kernel is contiguous");
+        let mut aw_rows = rows.clone();
+        for mut aw_row in aw_rows.axis_iter_mut(ndarray::Axis(0)) {
+            for (aw_out, &psi_value) in aw_row.iter_mut().zip(psi_values) {
+                *aw_out = psi_value * *aw_out;
+            }
+        }
+        Ok(Some(JeffreysHphiDriftBase {
+            p,
+            m,
+            ambient_eigenbasis,
+            evals: plan.evals,
+            floor: plan.floor,
+            gate_weight: plan.gate_weight,
+            floor_in_relative_regime: plan.floor_in_relative_regime,
+            idx_min: plan.idx_min,
+            idx_max: plan.idx_max,
+            a_rows: rows,
+            aw_rows,
+            divided_differences: std::sync::OnceLock::new(),
+            weighted_gram: std::sync::OnceLock::new(),
+        }))
     }
 
     /// Shared reduction: from the `p` first-directional derivatives `{Hdot[e_a]}`
@@ -5219,6 +5357,135 @@ mod tests {
             per_axis_error.contains("requires a second directional information derivative"),
             "unexpected per-axis derivative-contract error: {per_axis_error}"
         );
+    }
+
+    /// #1082: the Jeffreys term and the drift base from rotated axis rows, over the full span
+    /// and over a Jeffreys span narrower than the coefficient space. A declining provider
+    /// leaves the term bitwise equal to the dense entry; rows that are the dense axes rotated
+    /// into the plan's eigenbasis reproduce the dense term to rounding and the dense drift
+    /// base bitwise.
+    #[test]
+    fn jeffreys_term_and_drift_base_from_rotated_rows_match_the_dense_axes_1082() {
+        let p = 4usize;
+        let h0 = array![
+            [30.0, 1.0, 0.5, 0.2],
+            [1.0, 12.0, 0.3, 0.1],
+            [0.5, 0.3, 5.0, 0.4],
+            [0.2, 0.1, 0.4, 1.5],
+        ];
+        let make_sym = |seed: f64| -> Array2<f64> {
+            let a = Array2::from_shape_fn((p, p), |(i, j)| {
+                (seed + 0.37 * i as f64 - 0.19 * j as f64).sin()
+                    + 0.5 * ((i + j) as f64 * seed).cos()
+            });
+            (&a + &a.t()).mapv(|v| 0.5 * v)
+        };
+        let hdots: Vec<Array2<f64>> = (0..p).map(|a| make_sym(1.0 + a as f64)).collect();
+        let other: Vec<Array2<f64>> = (0..p).map(|a| make_sym(11.0 + a as f64)).collect();
+        let half = std::f64::consts::FRAC_1_SQRT_2;
+        let narrow = array![
+            [1.0, 0.0, 0.0],
+            [0.0, half, 0.0],
+            [0.0, half, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let max_abs = |values: &[f64]| values.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
+        let max_gap = |left: &[f64], right: &[f64]| {
+            left.iter()
+                .zip(right.iter())
+                .fold(0.0_f64, |acc, (a, b)| acc.max((a - b).abs()))
+        };
+        let bitwise = |left: &[f64], right: &[f64]| {
+            left.len() == right.len()
+                && left.iter().zip(right.iter()).all(|(a, b)| a.to_bits() == b.to_bits())
+        };
+        for z in [Array2::<f64>::eye(p), narrow] {
+            let width = z.ncols();
+            let dense = joint_jeffreys_term_batched(h0.view(), z.view(), || Ok(Some(hdots.clone())))
+                .expect("dense Jeffreys term");
+            let declined = joint_jeffreys_term_batched_rotated(
+                h0.view(),
+                z.view(),
+                |_| Ok(None),
+                || Ok(Some(hdots.clone())),
+            )
+            .expect("declined rotated Jeffreys term");
+            assert_eq!(dense.0.to_bits(), declined.0.to_bits(), "span width {width}: declined value");
+            assert!(
+                bitwise(dense.1.as_slice().expect("gradient"), declined.1.as_slice().expect("gradient")),
+                "span width {width}: a declining provider must leave the gradient bitwise unchanged"
+            );
+            assert!(
+                bitwise(dense.2.as_slice().expect("curvature"), declined.2.as_slice().expect("curvature")),
+                "span width {width}: a declining provider must leave the curvature bitwise unchanged"
+            );
+
+            let rotated = joint_jeffreys_term_batched_rotated(
+                h0.view(),
+                z.view(),
+                |basis| gam_model_api::jeffreys_rotated_axis_rows(&hdots, basis).map(Some),
+                || Err("the dense provider must not run when rows are supplied".to_string()),
+            )
+            .expect("rotated Jeffreys term");
+            let gradient = dense.1.as_slice().expect("gradient");
+            let curvature = dense.2.as_slice().expect("curvature");
+            let scale = max_abs(gradient).max(max_abs(curvature));
+            let tolerance = 1e-10 * (1.0 + scale);
+            assert!(
+                scale > 1e3 * tolerance,
+                "positive control: span width {width}: the term must exceed the agreement bar by three \
+                 orders (scale {scale:e}, bar {tolerance:e})"
+            );
+            assert_eq!(dense.0.to_bits(), rotated.0.to_bits(), "span width {width}: rotated value");
+            let gradient_gap = max_gap(gradient, rotated.1.as_slice().expect("gradient"));
+            let curvature_gap = max_gap(curvature, rotated.2.as_slice().expect("curvature"));
+            assert!(
+                gradient_gap <= tolerance && curvature_gap <= tolerance,
+                "span width {width}: rotated rows differ from the dense axes (gradient {gradient_gap:e}, \
+                 curvature {curvature_gap:e}, bar {tolerance:e})"
+            );
+            let wrong = joint_jeffreys_term_batched_rotated(
+                h0.view(),
+                z.view(),
+                |basis| gam_model_api::jeffreys_rotated_axis_rows(&other, basis).map(Some),
+                || Ok(None),
+            )
+            .expect("rotated Jeffreys term of other axes");
+            let wrong_gap = max_gap(curvature, wrong.2.as_slice().expect("curvature"));
+            assert!(
+                wrong_gap > 1e3 * tolerance,
+                "negative control: span width {width}: other axes must break agreement (gap {wrong_gap:e}, \
+                 bar {tolerance:e})"
+            );
+
+            let plan = JointJeffreysPlan::prepare(h0.view(), z.view()).expect("Jeffreys plan");
+            let rows = gam_model_api::jeffreys_rotated_axis_rows(&hdots, plan.ambient_eigenbasis().view())
+                .expect("rotated dense axes");
+            let dense_base = JeffreysHphiDriftBase::prepare_with_plan_axes(plan.clone(), hdots.clone())
+                .expect("dense drift base")
+                .expect("the gate-band spectrum keeps the term active");
+            let rows_base = JeffreysHphiDriftBase::prepare_with_plan_rotated_rows(plan, rows)
+                .expect("rows drift base")
+                .expect("the gate-band spectrum keeps the term active");
+            assert!(
+                max_abs(dense_base.a_rows.as_slice().expect("a_rows")) > 0.0,
+                "positive control: span width {width}: the drift base rows must not vanish"
+            );
+            for (label, dense_values, rows_values) in [
+                ("a_rows", &dense_base.a_rows, &rows_base.a_rows),
+                ("aw_rows", &dense_base.aw_rows, &rows_base.aw_rows),
+                ("ambient_eigenbasis", &dense_base.ambient_eigenbasis, &rows_base.ambient_eigenbasis),
+            ] {
+                assert_eq!(dense_values.dim(), rows_values.dim(), "span width {width}: {label} shape");
+                assert!(
+                    bitwise(
+                        dense_values.as_slice().expect("owned base arrays are contiguous"),
+                        rows_values.as_slice().expect("owned base arrays are contiguous"),
+                    ),
+                    "span width {width}: {label} from rows must equal the dense base bitwise"
+                );
+            }
+        }
     }
 
     /// The drift read from contractions against the ambient axis kernels equals the
