@@ -1878,9 +1878,11 @@ impl SaeManifoldTerm {
                 .map_err(|err| {
                     format!("SaeManifoldTerm::penalized_quasi_laplace_criterion: {err}")
                 })?;
+            // `grad_norm` was read at this round's entry, before its refine iterations ran,
+            // so it sits beside the post-round objective under its own name (#2228).
             log::info!(
                 "[SAE-REFINE] round={refine_rounds} penalized_objective={new_loss_total:.10e} \
-                 ‖g‖={grad_norm:.6e}",
+                 entry ‖g‖={grad_norm:.6e}",
             );
             // Two stagnation signals, both required: (1) the latest refine round
             // contributed a negligible FRACTION of the total objective reduction
