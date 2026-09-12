@@ -79,8 +79,6 @@ const TRANSPORT_SPLINE_DEGREE: usize = 3;
 /// unpenalized on a circle; the open variant leaves affine maps unpenalized on
 /// an interval — exactly the isometry-adjacent null spaces.
 const TRANSPORT_PENALTY_ORDER: usize = 2;
-/// Minimum paired observations for a transport fit.
-const MIN_TRANSPORT_OBS: usize = 16;
 /// Target observations per basis function when auto-sizing the basis.
 const OBS_PER_BASIS: usize = 8;
 /// Periodic basis size bounds (auto-derived from `n`, never a caller knob).
@@ -1041,10 +1039,13 @@ pub fn fit_transport_map(
             coords_to.len()
         ));
     }
-    if n < MIN_TRANSPORT_OBS {
-        return Err(format!(
-            "layer transport needs at least {MIN_TRANSPORT_OBS} paired observations, got {n}"
-        ));
+    // Identifiability is the REML fit's own typed refusal: its residual degrees
+    // of freedom `n − nullity` must be positive, where the nullity is the
+    // penalty null space (constants on a circle, affine maps on an interval).
+    // The only precondition this entry owns is a non-empty pairing, which the
+    // empirical isometry-defect average divides by.
+    if n == 0 {
+        return Err("layer transport needs paired observations, got none".to_string());
     }
     if coords_from
         .iter()

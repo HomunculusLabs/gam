@@ -167,11 +167,6 @@ fn run(
         inner_iters,
     )?;
     let n = a.coords_radians.len().min(b.coords_radians.len());
-    if n < 16 {
-        return Err(format!(
-            "need at least 16 paired fitted coordinates, got {n}"
-        ));
-    }
     let coord_a = ModelCoordinate::new(
         a.label,
         a.coords_radians.slice(s![0..n]).to_owned(),

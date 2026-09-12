@@ -208,10 +208,9 @@ fn run(args: &Args) -> Result<PathBuf, String> {
     let kept: Vec<usize> = (0..n_full).filter(|&i| keep_mask[i]).collect();
     let n_kept = kept.len();
     let take = args.max_rows.min(n_kept);
-    if take < 16 {
+    if take == 0 {
         return Err(format!(
-            "only {take} usable paired rows after gating (need at least 16); \
-             n_full={n_full}, kept={n_kept}"
+            "no usable paired rows after gating; n_full={n_full}, kept={n_kept}"
         ));
     }
     let stride = (n_kept / take).max(1);

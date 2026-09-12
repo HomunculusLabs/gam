@@ -61,9 +61,6 @@ fn run(path_a: &Path, path_b: &Path, max_rows: usize) -> Result<(), String> {
     let (n_a_full, p_a, x_a) = read_npy_subsample_f64(path_a, max_rows)?;
     let (n_b_full, p_b, x_b) = read_npy_subsample_f64(path_b, max_rows)?;
     let n = x_a.nrows().min(x_b.nrows());
-    if n < 16 {
-        return Err(format!("need at least 16 paired rows, got {n}"));
-    }
 
     let x_a = x_a.slice(ndarray::s![0..n, ..]).to_owned();
     let x_b = x_b.slice(ndarray::s![0..n, ..]).to_owned();
