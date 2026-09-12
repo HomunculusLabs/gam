@@ -42,7 +42,7 @@ pub trait RiemannianObjective {
 /// The context string of the trust-region first-order certificate, shared by the
 /// refusal in [`RiemannianTrustRegion::minimize`] and by callers that re-report
 /// the same verdict from [`TrustRegionTermination`].
-pub const TRUST_REGION_RELATIVE_GRADIENT_CONTEXT: &str =
+pub(crate) const TRUST_REGION_RELATIVE_GRADIENT_CONTEXT: &str =
     "Riemannian trust-region optimization (relative gradient norm)";
 
 /// Terminal state of a trust-region run: the iterate reached, and the numbers the
@@ -131,7 +131,7 @@ impl RiemannianTrustRegion {
     /// a non-finite value, an invalid radius, an objective or manifold error —
     /// are still `Err` here; only the first-order test is demoted from an error
     /// to a reported verdict.
-    pub fn minimize_reporting_termination(
+    pub(crate) fn minimize_reporting_termination(
         &self,
         manifold: &dyn RiemannianManifold,
         objective: &mut dyn RiemannianObjective,

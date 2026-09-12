@@ -82,7 +82,7 @@ fn resolve_reference(reference: isize, d: usize) -> usize {
 /// Helmert (pivot-coordinate) orthonormal contrast basis `V` of shape
 /// `(d, d-1)`. Its columns are an orthonormal basis of the sum-zero hyperplane
 /// (the CLR subspace); `ilr(x) = clr(x)·V` and `clr = ilr·Vᵀ`.
-pub fn helmert_ilr_basis(d: usize) -> Result<Array2<f64>, String> {
+pub(crate) fn helmert_ilr_basis(d: usize) -> Result<Array2<f64>, String> {
     if d < 2 {
         return Err("ILR basis requires at least two parts".to_string());
     }
@@ -188,7 +188,7 @@ pub fn clr_jet(values: ArrayView2<'_, f64>) -> Result<(Array2<f64>, Array3<f64>)
 }
 
 /// ILR value and per-row Jacobian `J[row,m,i] = V[i,m]/x_i`.
-pub fn ilr_jet(values: ArrayView2<'_, f64>) -> Result<(Array2<f64>, Array3<f64>), String> {
+pub(crate) fn ilr_jet(values: ArrayView2<'_, f64>) -> Result<(Array2<f64>, Array3<f64>), String> {
     let value = simplex::clr(values)?;
     let d = value.ncols();
     let v = helmert_ilr_basis(d)?;
@@ -209,7 +209,7 @@ pub fn ilr_jet(values: ArrayView2<'_, f64>) -> Result<(Array2<f64>, Array3<f64>)
 
 /// inverse-ILR value and per-row Jacobian
 /// `J[row,j,i] = p_j (V[j,i] − Σ_k p_k V[k,i])`.
-pub fn inverse_ilr_jet(coords: ArrayView2<'_, f64>) -> Result<(Array2<f64>, Array3<f64>), String> {
+pub(crate) fn inverse_ilr_jet(coords: ArrayView2<'_, f64>) -> Result<(Array2<f64>, Array3<f64>), String> {
     let value = inverse_ilr(coords)?;
     let (n, dm1) = coords.dim();
     let d = dm1 + 1;
@@ -231,7 +231,7 @@ pub fn inverse_ilr_jet(coords: ArrayView2<'_, f64>) -> Result<(Array2<f64>, Arra
 
 /// ALR value and per-row Jacobian
 /// `J[row,m,i] = δ_{i,k_m}/x_{k_m} − δ_{i,ref}/x_ref`.
-pub fn alr_jet(
+pub(crate) fn alr_jet(
     values: ArrayView2<'_, f64>,
     reference: isize,
 ) -> Result<(Array2<f64>, Array3<f64>), String> {
@@ -254,7 +254,7 @@ pub fn alr_jet(
 
 /// inverse-ALR value and per-row Jacobian
 /// `J[row,j,m] = p_j (δ_{j,k_m} − p_{k_m})`.
-pub fn inverse_alr_jet(
+pub(crate) fn inverse_alr_jet(
     coords: ArrayView2<'_, f64>,
     reference: isize,
 ) -> Result<(Array2<f64>, Array3<f64>), String> {

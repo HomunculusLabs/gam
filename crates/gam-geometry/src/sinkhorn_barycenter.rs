@@ -51,7 +51,7 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 /// still saturates near `LOG_ZERO_SENTINEL` after a `logsumexp` — i.e.
 /// the corresponding row's contribution vanishes from the barycenter,
 /// which is exactly the desired mathematical behaviour.
-pub const LOG_ZERO_SENTINEL: f64 = -1.0e300;
+pub(crate) const LOG_ZERO_SENTINEL: f64 = -1.0e300;
 
 const LOG_ZERO_SATURATION_THRESHOLD: f64 = LOG_ZERO_SENTINEL * 0.5;
 
@@ -303,7 +303,7 @@ fn normalize_weights(weights: ArrayView1<'_, f64>) -> Vec<f64> {
     weights.iter().map(|w| w / total).collect()
 }
 
-/// Output of [`sinkhorn_barycenter_forward_state`] — exposes the final
+/// Output of `sinkhorn_barycenter_forward_state` — exposes the final
 /// dual state after the requested finite Sinkhorn iteration count.
 pub struct SinkhornState {
     /// `(K, M)` log dual potentials on the "data-fit" side.
@@ -323,7 +323,7 @@ pub struct SinkhornState {
 /// Run the log-domain Sinkhorn barycenter forward pass and return the
 /// full dual state. Use [`sinkhorn_barycenter`] for the simpler "just
 /// the barycenter" entry point.
-pub fn sinkhorn_barycenter_forward_state(
+pub(crate) fn sinkhorn_barycenter_forward_state(
     atoms: ArrayView2<'_, f64>,
     weights: ArrayView1<'_, f64>,
     cost: ArrayView2<'_, f64>,

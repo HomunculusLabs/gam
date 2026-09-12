@@ -66,7 +66,7 @@ pub const BOUNDARY_EPS: f64 = 1.0e-5;
 /// Floor for raw norms / divisors that could otherwise be zero at the
 /// origin. Distinct from [`BOUNDARY_EPS`] because origin-side zeros are
 /// not a degeneracy — they are the well-defined identity case.
-pub const ORIGIN_EPS: f64 = 1.0e-15;
+pub(crate) const ORIGIN_EPS: f64 = 1.0e-15;
 
 /// Largest radial exp-map argument `s = sqrt(k)|v|` worth evaluating
 /// hyperbolic functions at. Above this, `tanh(s)` is already

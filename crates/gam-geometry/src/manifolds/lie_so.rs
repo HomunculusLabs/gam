@@ -39,7 +39,7 @@ pub fn rho_so2_jvp(theta: ArrayView1<'_, f64>) -> Array3<f64> {
 
 /// Closed-form `SO(3)` exponential `exp([ω]×)` (Rodrigues) for a single
 /// rotation vector, returned as a row-major 3×3 array.
-pub fn rho_so3_single(ox: f64, oy: f64, oz: f64) -> [[f64; 3]; 3] {
+pub(crate) fn rho_so3_single(ox: f64, oy: f64, oz: f64) -> [[f64; 3]; 3] {
     // Rodrigues in the unnormalised vector ω = θ·a: R = I + (sin θ/θ)·[ω]× +
     // ((1 − cos θ)/θ²)·[ω]×², with 1 − cos θ = 2·sin²(θ/2), so both coefficients take
     // their exact limits 1 and ½ at θ = 0 without normalising the axis.
@@ -111,7 +111,7 @@ pub fn rho_so3(omega: ArrayView2<'_, f64>) -> Result<Array3<f64>, String> {
 /// use the second-order polynomial `J_r ≈ I − ½[ω]× + (1/6)[ω]×²`, which
 /// agrees with the exact expression to relative O(θ⁴) and avoids the
 /// 0/0 in `A/θ`, `B/θ`.
-pub fn so3_right_jacobian_times_vec(
+pub(crate) fn so3_right_jacobian_times_vec(
     ox: f64,
     oy: f64,
     oz: f64,

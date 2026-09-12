@@ -380,7 +380,7 @@ impl RiemannianManifold for SphereManifold {
     }
 }
 
-pub fn validate_sphere_matrix(values: ArrayView2<'_, f64>) -> Result<(), String> {
+pub(crate) fn validate_sphere_matrix(values: ArrayView2<'_, f64>) -> Result<(), String> {
     let (n, d) = values.dim();
     if n == 0 || d < 2 {
         return Err(
@@ -395,7 +395,7 @@ pub fn validate_sphere_matrix(values: ArrayView2<'_, f64>) -> Result<(), String>
     Ok(())
 }
 
-pub fn normalize_sphere_matrix(values: ArrayView2<'_, f64>) -> Result<Array2<f64>, String> {
+pub(crate) fn normalize_sphere_matrix(values: ArrayView2<'_, f64>) -> Result<Array2<f64>, String> {
     validate_sphere_matrix(values)?;
     let (n, d) = values.dim();
     let mut out = Array2::<f64>::zeros((n, d));

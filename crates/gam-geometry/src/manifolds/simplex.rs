@@ -2,7 +2,7 @@ use ndarray::{Array2, ArrayView1, ArrayView2};
 
 use crate::normalize_weights;
 
-pub fn validate_simplex_array(points: ArrayView2<'_, f64>) -> Result<(), String> {
+pub(crate) fn validate_simplex_array(points: ArrayView2<'_, f64>) -> Result<(), String> {
     let (n, d) = points.dim();
     if n == 0 || d < 2 {
         return Err(
