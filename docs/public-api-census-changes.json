@@ -2050,5 +2050,13 @@
     },
     "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). transition_score_polynomials was a test-only pub wrapper over the private gap_score_polynomials. Its one test now lives in marginal.rs's test module and calls gap_score_polynomials directly.",
     "evidence": "At the base, git grep -w finds transition_score_polynomials only at its definition, the gam-event-history lib.rs re-export and one unit test, all changed in this commit. The prune-api-c census v2 over cc3ae0022 (/scratch.global/sauer354/pool/prune-api-c/census2.tsv) lists no product or other-crate reference."
+  },
+  {
+    "base": "48ec96497cc1494aa94561794d7553f4be49ddc6",
+    "removed": {
+      "crates/gam-custom-family/src/psi_design.rs::new": 1
+    },
+    "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). ZeroPsiDerivativeOperator and its pub constructor new are used only by two gam-custom-family unit tests, and move into that test file as private test support.",
+    "evidence": "At the base, git grep -w finds ZeroPsiDerivativeOperator only in psi_design.rs and in two tests in src/tests/inner_solver_numerics.rs. The one pub fn declaration removed from psi_design.rs is ZeroPsiDerivativeOperator::new. The prune-api-c census v2 over cc3ae0022 (/scratch.global/sauer354/pool/prune-api-c/census2.tsv) lists no product or other-crate reference."
   }
 ]
