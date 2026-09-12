@@ -622,16 +622,6 @@ const LM_STEP_STALL_REL_FLOOR: f64 = 1.0e-24;
 /// tensor harmonic basis is always Nyquist-oversampled on the audit grid.
 pub(crate) const TORUS_TRANSPORT_MIN_NODES_PER_AXIS: usize = 48;
 
-/// Identity of one flow mode (for tests and diagnostics): which coordinate
-/// component the vector field moves, its integer frequency vector, and its
-/// phase (`cos` vs `sin`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TorusFlowModeKey {
-    pub component: usize,
-    pub freq: (i32, i32),
-    pub is_cos: bool,
-}
-
 /// Per-mode sample of a `d = 2` flow basis at one chart point `t`: the scalar
 /// field value `f(t)` (the displacement this mode adds to coordinate
 /// `component`) and its gradient `∇f(t)` (the mode's contribution to row
@@ -685,29 +675,6 @@ impl TorusFlowBasis {
     /// frequency representatives = 48 at the default order.
     pub fn dim(&self) -> usize {
         4 * self.freqs.len()
-    }
-
-    /// Mode identities in coefficient order: for each component, for each
-    /// frequency representative, the `sin` mode then the `cos` mode. This IS
-    /// the `θ` index layout — [`Self::mode_samples`] returns samples in the
-    /// same order.
-    pub fn mode_layout(&self) -> Vec<TorusFlowModeKey> {
-        let mut keys = Vec::with_capacity(self.dim());
-        for component in 0..2 {
-            for &freq in &self.freqs {
-                keys.push(TorusFlowModeKey {
-                    component,
-                    freq,
-                    is_cos: false,
-                });
-                keys.push(TorusFlowModeKey {
-                    component,
-                    freq,
-                    is_cos: true,
-                });
-            }
-        }
-        keys
     }
 
     /// Sample every mode (value + gradient) at chart point `t`, in `θ` order.
@@ -892,8 +859,7 @@ pub struct TorusIsometryFlowReparameterization {
     /// audit grid — the same congruence object the `d = 1` path and the
     /// affine gauge canonicalization use to transport the smoothness Gram.
     pub decoder_transport: Array2<f64>,
-    /// Optimal flow coefficients `θ` (layout per
-    /// `TorusFlowBasis::mode_layout`).
+    /// Optimal flow coefficients `θ`.
     pub flow_theta: Vec<f64>,
     /// Isometry defect `E(0)` of the fitted chart (identity flow).
     pub defect_initial: f64,
@@ -1902,14 +1868,6 @@ pub(crate) const PATCH_FLOW_GUARD_NODES_PER_AXIS: usize = 48;
 /// grid (scaled up with the basis width like the torus path).
 pub(crate) const PATCH_TRANSPORT_MIN_NODES_PER_AXIS: usize = 48;
 
-/// Identity of one free-patch flow mode (for tests / diagnostics): which
-/// coordinate component the vector field moves and its monomial exponents.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PatchFlowModeKey {
-    pub component: usize,
-    pub exps: (usize, usize),
-}
-
 /// Truncated polynomial vector-field basis on a `d = 2` Euclidean patch,
 /// `v_{c,(a,b)}(t) = e_c · u₀^a · u₁^b` where `u = (t − center) ⊙ inv_half ∈
 /// [−1, 1]²` is the affinely-normalized patch coordinate (conditioning: the raw
@@ -1965,18 +1923,6 @@ impl FreePatchFlowBasis {
     /// Number of flow coefficients `θ`: 2 components × #monomials.
     pub fn dim(&self) -> usize {
         2 * self.exps.len()
-    }
-
-    /// Mode identities in coefficient order (for each component, each monomial).
-    /// This IS the `θ` index layout — [`Self::mode_samples`] matches it.
-    pub fn mode_layout(&self) -> Vec<PatchFlowModeKey> {
-        let mut keys = Vec::with_capacity(self.dim());
-        for component in 0..2 {
-            for &exps in &self.exps {
-                keys.push(PatchFlowModeKey { component, exps });
-            }
-        }
-        keys
     }
 
     /// Normalized patch coordinate `u = (t − center) ⊙ inv_half`.
@@ -2087,8 +2033,7 @@ pub struct PatchIsometryFlowReparameterization {
     /// The `(m, m)` basis transport `T` with `Φ(φ(u)) · T ≈ Φ(u)` on the audit
     /// grid — the congruence object that transports the smoothness Gram.
     pub decoder_transport: Array2<f64>,
-    /// Optimal flow coefficients `θ` (layout per
-    /// `FreePatchFlowBasis::mode_layout`).
+    /// Optimal flow coefficients `θ`.
     pub flow_theta: Vec<f64>,
     /// Isometry defect `E(0)` of the fitted chart (identity flow).
     pub defect_initial: f64,
@@ -2298,19 +2243,6 @@ pub(crate) const SPHERE_FLOW_DIFFEO_MIN_DET: f64 = SAE_FLOW_DIFFEO_MIN_DET;
 /// hairy-ball obstruction, scoped to exactly where it bites.
 pub const SPHERE_FLOW_POLE_MARGIN: f64 = 0.20;
 
-/// Identity of one sphere conformal-boost flow mode (for tests / diagnostics):
-/// which round-sphere axis the boost points along.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SphereBoostAxis {
-    /// Zonal boost toward the poles, `cos(lat) ∂_lat` — pole-free in its single
-    /// (latitude) component, the dominant sphere chart pathology.
-    Z,
-    /// Boost toward the `x = (lat 0, lon 0)` point.
-    X,
-    /// Boost toward the `y = (lat 0, lon π/2)` point.
-    Y,
-}
-
 /// The three conformal-boost vector fields on the round `S²` in `(lat, lon)`
 /// coordinates — the **non-isometric** part of the conformal group, i.e. the
 /// gradient fields of the degree-1 spherical harmonics `z, x, y`.
@@ -2353,12 +2285,6 @@ impl SphereBoostFlowBasis {
     /// The three boost modes are always present; the dimension is fixed at 3.
     pub fn dim(&self) -> usize {
         3
-    }
-
-    /// Mode identities in coefficient order: `[Z, X, Y]`. This IS the `θ`
-    /// index layout — `Self::mode_samples` returns samples in the same order.
-    pub fn mode_layout(&self) -> [SphereBoostAxis; 3] {
-        [SphereBoostAxis::Z, SphereBoostAxis::X, SphereBoostAxis::Y]
     }
 
     /// The displacement `v_k(t)` of each boost mode at chart point `t`.

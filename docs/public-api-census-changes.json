@@ -2128,5 +2128,13 @@
     },
     "reason": "#2899 public API sweep of gam-sae (prune-api-d): manifold::stack_augmented_target has no production caller (production stacks with stack_crosscoder_targets and builds layouts with CrosscoderLayout::new). It was the only production consumer of CrosscoderLayout::from_blocks, which was the only production consumer of the OutputBlock carrier, so their public functions are deleted with them.",
     "evidence": "At cc62aa545, git grep -n -w finds stack_augmented_target called only from tests, CrosscoderLayout::from_blocks called only by stack_augmented_target and one layout unit test, and OutputBlock's constructor and accessors used only by from_blocks and tests. The removed map is public_api_census.py's census difference over this change, computed on MSI."
+  },
+  {
+    "base": "478dab197f3920637bbed2744e7a6bfce97261a1",
+    "removed": {
+      "crates/gam-sae/src/chart_canonicalization.rs::mode_layout": 3
+    },
+    "reason": "#2829 public-surface rule (docs/rust-library-surface.md, 6e5362f23): a pub item that no product uses is deleted. chart_canonicalization.rs::mode_layout is one restored-in-place identity declared three times, on TorusFlowBasis, FreePatchFlowBasis and SphereBoostFlowBasis. No code calls any of the three.",
+    "evidence": "restored_consumers_2829.py at 3693c2c2c (MSI job 539356) scores mode_layout as consumed_unexplained, and narrow_scan_2829.py at 0bf5b572b (MSI job 541705, /scratch.global/sauer354/pool/api2829/narrow.0bf5b572b5a4d6fb95b30aefcf5da3387fa92bee.rows.tsv) scores it as no_production_user. At the base, git grep -w mode_layout finds the three declarations and two doc comments only. The removed identities are public_api_census.py's own difference for the unpushed tree, computed on MSI (job 542607, /scratch.global/sauer354/pool/api2829/validate.542607.log)."
   }
 ]

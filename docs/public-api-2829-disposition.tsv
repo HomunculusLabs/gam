@@ -426,7 +426,7 @@ crates/gam-sae/src/candidate_index.rs	recall_report	retired-by-later-deletion:aa
 crates/gam-sae/src/candidate_index.rs	routability_shortlist_size	retired-by-later-deletion:aa4199edbf
 crates/gam-sae/src/candidate_index.rs	route_exact	retired-by-later-deletion:728caa9b19
 crates/gam-sae/src/candidate_index.rs	sublinearity_ratio	retired-by-later-deletion:aa4199edbf
-crates/gam-sae/src/chart_canonicalization.rs	mode_layout	restored-in-place
+crates/gam-sae/src/chart_canonicalization.rs	mode_layout	retired-no-product-user
 crates/gam-sae/src/chart_canonicalization.rs	sphere_chart_isometry_defect	retired-by-later-deletion:fb8fada8d2
 crates/gam-sae/src/coactivation_conditionality.rs	derive_residual_cluster_labels	retired-by-later-deletion:10ac599e4c
 crates/gam-sae/src/coactivation_conditionality.rs	estimate_from_designed_sample	retired-by-later-deletion:10ac599e4c
