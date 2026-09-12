@@ -25,7 +25,7 @@ use faer::sparse::SparseColMat;
 use gam_linalg::faer_ndarray::{
     FaerEigh, FaerLinalgError, FaerSymmetricFactor, array1_to_col_matmut,
 };
-use gam_linalg::matrix::{DesignMatrix, LinearOperator, SymmetricMatrix};
+use gam_linalg::matrix::{DesignMatrix, SymmetricMatrix};
 use gam_linalg::utils::{StableSolver, array_is_finite, inf_norm};
 use gam_problem::{Coefficients, GlmLikelihoodSpec, InverseLink};
 use ndarray::{ArcArray1, Array1, Array2, ArrayView1, ShapeBuilder};
