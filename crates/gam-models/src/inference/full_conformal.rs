@@ -837,6 +837,8 @@ pub struct GaussianRemlRhoResponse<'a> {
     xtx: Array2<f64>,
     xty: Array1<f64>,
     yty: f64,
+    rho_domain: (f64, f64),
+    augmented_rho_domain: (f64, f64),
 }
 
 /// One closed-form evaluation of the (possibly augmented) Gaussian REML
@@ -914,6 +916,25 @@ impl<'a> GaussianRemlRhoResponse<'a> {
         let xtx = x.t().dot(x);
         let xty = x.t().dot(y);
         let yty = y.dot(y);
+        // #2902 row 8: ρ is searched in the #2812 resolvability domain of the Gram
+        // against S. The test row adds `x_* x_*ᵀ` to the Gram whatever z is, so
+        // every ρ̂(z) shares one augmented domain.
+        let domain_of = |gram: &Array2<f64>| {
+            gam_solve::estimate::rho_domain::coordinate_domain(
+                gam_solve::estimate::rho_domain::penalty_range_gammas_from_gram(gram, s)
+                    .as_deref()
+                    .and_then(gam_solve::estimate::rho_domain::resolvability_interval),
+                None,
+            )
+        };
+        let rho_domain = domain_of(&xtx);
+        let mut augmented_xtx = xtx.clone();
+        for i in 0..p {
+            for j in 0..p {
+                augmented_xtx[[i, j]] += x_star[i] * x_star[j];
+            }
+        }
+        let augmented_rho_domain = domain_of(&augmented_xtx);
         Ok(Self {
             x,
             y,
@@ -925,6 +946,8 @@ impl<'a> GaussianRemlRhoResponse<'a> {
             xtx,
             xty,
             yty,
+            rho_domain,
+            augmented_rho_domain,
         })
     }
 
@@ -1147,8 +1170,9 @@ impl<'a> GaussianRemlRhoResponse<'a> {
     /// The REML-selected log smoothing strength for the training response
     /// with the test response set to `z` (or the training-only criterion for
     /// `None`), found by the workspace's outer engine: one ρ coordinate with
-    /// the analytic gradient and Hessian `eval` already provides, the engine's
-    /// own domain, seed cascade and stationarity certificate. This replaced a
+    /// the analytic gradient and Hessian `eval` already provides, searched in
+    /// the #2812 resolvability domain of its Gram against `S` (#2902 row 8),
+    /// with the engine's seed cascade and stationarity certificate. This replaced a
     /// 61-point grid over a hand box `[−25, 25]` followed by an uncertified
     /// Newton with a `±5` widening, a `1e-12` curvature floor and a `1e-13`
     /// step tolerance that returned its last iterate after 100 steps (#2469,
@@ -1165,9 +1189,15 @@ impl<'a> GaussianRemlRhoResponse<'a> {
         // fails at an extreme strength) is a property of that trial point, so
         // the search retreats from it rather than abandoning the problem.
         let refuse = |error: String| EstimationError::TrialPointRefused { reason: error };
+        let (lower, upper) = if z.is_some() {
+            self.augmented_rho_domain
+        } else {
+            self.rho_domain
+        };
         let problem = OuterProblem::new(1)
             .with_gradient(Derivative::Analytic)
-            .with_hessian(gam_problem::DeclaredHessianForm::Dense);
+            .with_hessian(gam_problem::DeclaredHessianForm::Dense)
+            .with_bounds(Array1::from_elem(1, lower), Array1::from_elem(1, upper));
         let mut objective = problem.build_objective(
             (),
             |_: &mut (), rho: &Array1<f64>| self.eval(rho[0], z).map(|ev| ev.value).map_err(refuse),
@@ -1308,8 +1338,9 @@ impl<'a> GaussianRemlRhoResponse<'a> {
         //     and never touches a wall stays strictly inside, so
         //     `sup_z |ρ̂(z) − ρ̂₀| < E` and `L · sup < margin`.
         //
-        // The engine confines every selected ρ̂ to `[−RHO_BOUND, RHO_BOUND]`, so a
-        // wall beyond that domain cannot be reached and needs no quadratic. What
+        // `select_rho` confines every ρ̂(z) to the augmented resolvability domain,
+        // so a wall beyond either face of it cannot be reached and needs no
+        // quadratic. What
         // the certificate is conditional on is stated by its name: the branch of
         // REML stationary points through the anchor. A second, disconnected REML
         // minimum is outside every frozen-ρ argument, sampled or exact.
@@ -1320,7 +1351,8 @@ impl<'a> GaussianRemlRhoResponse<'a> {
         let branch_anchor_rho = self.select_rho(Some(z_mid))?;
         let anchor_inside = (branch_anchor_rho - rho0).abs() < excursion;
         let wall_unreached = |wall: f64| -> Result<bool, String> {
-            if wall.abs() > gam_solve::estimate::RHO_BOUND {
+            let (lower, upper) = self.augmented_rho_domain;
+            if wall < lower || wall > upper {
                 return Ok(true);
             }
             Ok(self.stationarity_quadratic_in_z(wall)?.has_no_root_in(z_lo, z_hi) == Some(true))
@@ -2970,6 +3002,32 @@ mod tests {
             r[j] = (j as f64 * PI * t).cos();
         }
         r
+    }
+
+    /// #2902 row 8: `select_rho` searches the #2812 resolvability domain of its
+    /// Gram against the penalty. Orthogonal columns make the generalized
+    /// eigenvalue closed form, `γ = ‖x₁‖²/s₁₁`, so the domain is
+    /// `[ln(√ε·γ), ln(γ/√ε)]`; the test row adds `x_*x_*ᵀ` to the Gram and moves
+    /// γ from 2 to 5/2.
+    #[test]
+    fn select_rho_domain_is_the_resolvability_interval_of_its_gram_2902() {
+        let x = Array2::from_shape_vec((4, 2), vec![1.0, 1.0, 1.0, -1.0, 1.0, 1.0, 1.0, -1.0])
+            .expect("design");
+        let y = Array1::from_vec(vec![1.0, 2.0, 3.0, 5.0]);
+        let s = Array2::from_shape_vec((2, 2), vec![0.0, 0.0, 0.0, 2.0]).expect("penalty");
+        let x_star = Array1::from_vec(vec![0.0, 1.0]);
+        let resp = GaussianRemlRhoResponse::new(&x, &y, &s, &x_star).expect("response");
+        let half_log_epsilon = 0.5 * f64::EPSILON.ln();
+        for (domain, gamma, label) in [
+            (resp.rho_domain, 4.0_f64 / 2.0, "training"),
+            (resp.augmented_rho_domain, 5.0_f64 / 2.0, "augmented"),
+        ] {
+            let expected = (gamma.ln() + half_log_epsilon, gamma.ln() - half_log_epsilon);
+            assert!(
+                (domain.0 - expected.0).abs() <= 1.0e-12 && (domain.1 - expected.1).abs() <= 1.0e-12,
+                "{label} ρ domain {domain:?} is not the resolvability interval {expected:?}"
+            );
+        }
     }
 
     /// `select_rho(Some(z))` lands on a genuine stationary point of the
