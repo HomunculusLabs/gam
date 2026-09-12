@@ -1102,42 +1102,6 @@ impl GaussianComponentEval {
         })
     }
 
-    fn isotropic(charts: &[StableScalarMeanChart], variance: f64) -> Result<Self, String> {
-        let d = charts.len();
-        if d == 0 {
-            return Err("isotropic Gaussian density requires positive dimension".to_string());
-        }
-        if !(variance.is_finite() && variance > 0.0) {
-            return Err(format!(
-                "isotropic Gaussian variance must be finite and positive, got {variance}"
-            ));
-        }
-        let inverse_variance = variance.recip();
-        if !inverse_variance.is_finite() {
-            return Err(format!(
-                "isotropic Gaussian precision is non-finite for variance {variance}"
-            ));
-        }
-        let mut precision = Array2::<f64>::zeros((d, d));
-        for axis in 0..d {
-            precision[[axis, axis]] = inverse_variance;
-        }
-        let log_norm = -0.5 * d as f64 * ((2.0 * std::f64::consts::PI).ln() + variance.ln());
-        if !log_norm.is_finite() {
-            return Err("isotropic Gaussian log normalizer is non-finite".to_string());
-        }
-        Ok(Self {
-            residual_origin: Array1::from_iter(charts.iter().map(|chart| chart.origin)),
-            residual_scale: Array1::from_iter(charts.iter().map(|chart| chart.scale)),
-            residual_normalized_offset: Array1::from_iter(
-                charts.iter().map(|chart| chart.normalized_offset),
-            ),
-            precision,
-            log_norm,
-            d,
-        })
-    }
-
     #[inline]
     fn log_density(&self, y: ArrayView1<'_, f64>) -> f64 {
         let residual = self.residual(y);
@@ -2806,56 +2770,6 @@ pub struct UnionStructureFit {
     pub total_parameters: usize,
 }
 
-/// The shared fitted-density representation used by both in-sample BIC and
-/// held-out predictive scoring. `Line` and `PointCluster` deliberately share
-/// the Gaussian evaluator after fitting, but differ in covariance constraints
-/// and parameter count.
-#[derive(Debug, Clone)]
-enum UnionDensityModel {
-    Gaussian(GaussianComponentEval),
-    Circle(CircularGaussianFit2d),
-}
-
-#[derive(Debug, Clone)]
-struct UnionComponentDensity {
-    kind: UnionComponentKind,
-    row_count: usize,
-    num_parameters: usize,
-    mixing_weight: f64,
-    log_weight: f64,
-    model: UnionDensityModel,
-}
-
-impl UnionComponentDensity {
-    fn dimension(&self) -> usize {
-        match &self.model {
-            UnionDensityModel::Gaussian(eval) => eval.d,
-            UnionDensityModel::Circle(_) => 2,
-        }
-    }
-
-}
-
-#[derive(Debug, Clone, Copy)]
-struct StableScalarMeanChart {
-    origin: f64,
-    scale: f64,
-    normalized_offset: f64,
-}
-
-impl StableScalarMeanChart {
-    #[inline]
-    fn centered(self, value: f64) -> Result<f64, String> {
-        let relative = value - self.origin;
-        let centered = (-self.normalized_offset).mul_add(self.scale, relative);
-        if centered.is_finite() {
-            Ok(centered)
-        } else {
-            Err("union isotropic point residual is not representable".to_string())
-        }
-    }
-}
-
 /// One fitted model in a REML/LAML evidence comparison.
 #[derive(Clone, Debug)]
 pub struct RemlCandidate {
@@ -3162,15 +3076,6 @@ impl Default for TopologySelectOptions {
             score_scale: TopologyScoreScale::PerObservation,
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Laplace evidence
-// ---------------------------------------------------------------------------
-
-#[inline]
-const fn splitmix64(state: &mut u64) -> u64 {
-    gam_linalg::utils::splitmix64(state)
 }
 
 // ---------------------------------------------------------------------------

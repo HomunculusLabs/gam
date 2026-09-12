@@ -11,9 +11,4 @@
 //! (`ResidualGaugeReport`, `CertificateInputs`) carry theirs in
 //! `gam_sae::certificate_impls`. The bodies moved byte-identically, so there
 //! remains exactly one source of truth for each verdict.
-//!
-//! The two margin-resolution helpers (`coreset_race_verdict`,
-//! `enclosure_margin_verdict`) descended into `gam-solve` alongside the
-//! gam-solve impls; they are re-exported here so existing
-//! `crate::certificate_impls::*` paths resolve unchanged.
 

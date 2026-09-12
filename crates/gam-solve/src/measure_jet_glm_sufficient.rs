@@ -30,9 +30,8 @@
 //! irreducible IRLS work and run every iteration over the cached rows.
 //!
 //! This is distinct from `measure_jet_gram_cache::FixedDesignRowCache`, which
-//! exposes recompute accessors without the byte-stability invariant; this module
-//! makes the n-free-across-trials guarantee a first-class, testable property by
-//! fingerprinting the stored design and proving it is never mutated by a query.
+//! exposes recompute accessors; this module owns the design privately and every
+//! query borrows it immutably, so no query rebuilds or mutates the n-row design.
 
 use gam_linalg::faer_ndarray::{fast_xt_diag_x, fast_xt_diag_y};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
@@ -46,10 +45,6 @@ pub struct GlmFixedDesignSufficient {
     x: Array2<f64>,
     n: usize,
     p: usize,
-    /// Order-insensitive fingerprint of the stored design bytes, captured at
-    /// construction. A query that respects the n-free-across-trials invariant
-    /// must leave this fingerprint unchanged.
-    design_fingerprint: u64,
 }
 
 impl GlmFixedDesignSufficient {
@@ -69,12 +64,10 @@ impl GlmFixedDesignSufficient {
         let n = x.nrows();
         let p = x.ncols();
         let x_owned = x.to_owned();
-        let design_fingerprint = fingerprint_matrix(x_owned.view());
         Ok(Self {
             x: x_owned,
             n,
             p,
-            design_fingerprint,
         })
     }
 
@@ -157,31 +150,6 @@ fn validate_finite_vector(name: &str, vector: ArrayView1<'_, f64>) -> Result<(),
         }
     }
     Ok(())
-}
-
-/// Order-sensitive bit fingerprint of a dense matrix.
-///
-/// Mixes each entry's raw IEEE-754 bits with its position so a permutation or
-/// any single-bit change of the stored design is detected. Used to prove the
-/// cache never mutates the n-row design on a query.
-fn fingerprint_matrix(matrix: ArrayView2<'_, f64>) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    let (nrows, ncols) = matrix.dim();
-    hash = mix(hash, nrows as u64);
-    hash = mix(hash, ncols as u64);
-    for ((row, col), value) in matrix.indexed_iter() {
-        hash = mix(hash, row as u64);
-        hash = mix(hash, col as u64);
-        hash = mix(hash, value.to_bits());
-    }
-    hash
-}
-
-/// FNV-1a style 64-bit mixing step.
-fn mix(mut hash: u64, value: u64) -> u64 {
-    hash ^= value;
-    hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    hash
 }
 
 #[cfg(test)]

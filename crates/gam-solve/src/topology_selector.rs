@@ -42,7 +42,6 @@ use crate::evidence::{
 use crate::priority_selection::{PriorityCandidate, rank_priority_candidates};
 use crate::row_sampling_measure::CoresetCertificate;
 use ndarray::{Array2, ArrayView2};
-use statrs::distribution::ContinuousCDF;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
