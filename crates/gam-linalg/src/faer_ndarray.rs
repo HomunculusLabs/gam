@@ -67,7 +67,7 @@ impl Drop for NestedParallelGuard {
 
 /// Run `body` with the current thread marked as inside a data-parallel row
 /// region, so any faer GEMM it issues (directly or transitively) pins to
-/// `Par::Seq` via [`effective_global_parallelism`] instead of re-fanning the
+/// `Par::Seq` via `effective_global_parallelism` instead of re-fanning the
 /// global Rayon pool. The guard is held for exactly the duration of `body` and
 /// dropped on return — including early `?` returns from inside `body`, since the
 /// guard lives in this function's frame.
@@ -188,7 +188,7 @@ pub struct EighCensus {
 ///   scoped decision or a global left over from an earlier phase.
 /// * the cores available to THIS PROCESS, which is not the machine's core count.
 ///
-/// Deliberately NOT reported: [`effective_global_parallelism`]. That is
+/// Deliberately NOT reported: `effective_global_parallelism`. That is
 /// thread-local and only governs the codebase's own `matmul` calls; it cannot
 /// reach faer's high-level entry points, so printing it beside a factorization
 /// would name a policy that did not apply to it.
@@ -315,7 +315,7 @@ impl std::fmt::Display for ParallelismSnapshot {
 /// Use this in place of `faer::get_global_parallelism()` for any matmul that can
 /// be reached from inside a row-parallel closure.
 #[inline]
-pub fn effective_global_parallelism() -> Par {
+pub(crate) fn effective_global_parallelism() -> Par {
     if in_nested_parallel_region() {
         Par::Seq
     } else {
@@ -401,7 +401,7 @@ impl Drop for FaerSequentialScope {
 /// The depth is what distinguishes "faer is sequential because a solve here
 /// asked for it" from "faer is sequential and nobody knows who did it", and it
 /// is readable without a logger, which `log::info!` is not under `cargo test`.
-pub fn faer_sequential_scope_depth() -> usize {
+pub(crate) fn faer_sequential_scope_depth() -> usize {
     FAER_SEQ_STATE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1302,7 +1302,7 @@ pub fn fast_av_view_into<S1: Data<Elem = f64>, S2: Data<Elem = f64>>(
 /// materially faster for repeated cache-resident dense applications; callers
 /// that need Dot2's near-double-precision reduction should keep using
 /// [`fast_av_view_into`].
-pub fn fast_av_standard_view_into<S1: Data<Elem = f64>, S2: Data<Elem = f64>>(
+pub(crate) fn fast_av_standard_view_into<S1: Data<Elem = f64>, S2: Data<Elem = f64>>(
     a: &ArrayBase<S1, Ix2>,
     v: &ArrayBase<S2, Ix1>,
     mut out: ArrayViewMut1<'_, f64>,
@@ -1468,7 +1468,7 @@ fn fast_atv_impl<S1: Data<Elem = f64>, S2: Data<Elem = f64>>(
 /// Compute A^T * v into a pre-allocated output buffer.
 /// `out` must be length p where A is (n, p) and v is length n.
 #[inline]
-pub fn fast_atv_into<S1: Data<Elem = f64>, S2: Data<Elem = f64>>(
+pub(crate) fn fast_atv_into<S1: Data<Elem = f64>, S2: Data<Elem = f64>>(
     a: &ArrayBase<S1, Ix2>,
     v: &ArrayBase<S2, Ix1>,
     out: &mut Array1<f64>,
@@ -2620,7 +2620,7 @@ impl FaerCholeskyFactor {
         self.factor.solve_in_place(rhsview.as_mut());
     }
 
-    pub fn solve_mat_into<S: Data<Elem = f64>>(
+    pub(crate) fn solve_mat_into<S: Data<Elem = f64>>(
         &self,
         rhs: &ArrayBase<S, Ix2>,
         out: &mut Array2<f64>,

@@ -10,7 +10,7 @@
 //! recurrence — `alpha = rz/pᵀAp`, `x += alpha p`, `r -= alpha Ap`,
 //! `beta = rz'/rz`, `p = z + beta p` — is identical.
 //!
-//! [`pcg_core`] is that one recurrence. The two callers are thin wrappers that
+//! `pcg_core` is that one recurrence. The two callers are thin wrappers that
 //! pick a refresh period, opt into diagnostics, and decide what a breakdown
 //! means (the CPU rejects it as `None`; the GPU keeps the partial iterate).
 //!
@@ -85,7 +85,7 @@ pub enum PcgStop {
     BadPreconditioner,
 }
 
-/// Result of a [`pcg_core`] run. The solution is written into the caller's
+/// Result of a `pcg_core` run. The solution is written into the caller's
 /// buffer; this carries the metadata about how the run terminated.
 #[derive(Debug, Clone)]
 pub struct PcgCoreResult {
@@ -209,7 +209,7 @@ fn dot(a: &ArrayView1<f64>, b: &ArrayView1<f64>, reduction: DotReduction) -> f64
 /// length as `rhs`). On [`PcgStop::Converged`]/[`PcgStop::MaxIters`]/
 /// [`PcgStop::Breakdown`] it holds the last valid iterate; on
 /// [`PcgStop::BadPreconditioner`] it is left as the zero initial guess.
-pub fn pcg_core<F>(
+pub(crate) fn pcg_core<F>(
     mut apply: F,
     rhs: &ArrayView1<f64>,
     precond_diag: &ArrayView1<f64>,

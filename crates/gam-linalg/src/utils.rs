@@ -1099,7 +1099,7 @@ fn pcg_solve_info(result: &PcgCoreResult) -> PcgSolveInfo {
     }
 }
 
-pub fn solve_spd_pcg_with_info<F>(
+pub(crate) fn solve_spd_pcg_with_info<F>(
     apply: F,
     rhs: &Array1<f64>,
     preconditioner_diag: &Array1<f64>,

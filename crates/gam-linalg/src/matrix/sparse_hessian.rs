@@ -14,12 +14,12 @@ use std::sync::Arc;
 /// Shared via `Arc` across all parallel workers so that only the mutable values
 /// buffer needs to be cloned per worker.
 ///
-/// Public so a design matrix can hold the pattern it induces for its own
-/// lifetime; the fields stay private because the invariants that make
+/// Crate-visible so a design matrix can hold the pattern it induces for its
+/// own lifetime; the fields stay private because the invariants that make
 /// `add_upper` sound (upper-triangle-only, `values.len() == nnz`,
 /// `first_row`/`contiguous` agreeing with `row_indices`) are established
 /// solely by `SparseHessianSymbolic::build`.
-pub struct SparseHessianSymbolic {
+pub(crate) struct SparseHessianSymbolic {
     dim: usize,
     nnz: usize,
     /// CSC column pointers, length `dim + 1`.
@@ -122,7 +122,7 @@ impl SparseHessianSymbolic {
 /// computed once from the design matrices; each parallel worker then owns a
 /// cheap values buffer (the symbolic structure is `Arc`-shared) and accumulates
 /// with `O(nnz)` memory instead of `O(p²)`.
-pub struct SparseHessianAccumulator {
+pub(crate) struct SparseHessianAccumulator {
     sym: Arc<SparseHessianSymbolic>,
     /// Values buffer, length `sym.nnz`. Crate-visible for reductions; callers
     /// must not resize it because unchecked accumulation relies on this invariant.
@@ -143,19 +143,13 @@ impl Clone for SparseHessianAccumulator {
 impl SparseHessianAccumulator {
     // ── pattern builders ─────────────────────────────────────────────
 
-    /// Build the symbolic upper-triangle pattern of the block Hessian produced
-    /// by multiple sparse CSR designs that share the same column space.
-    pub fn from_multi_csr(csrs: &[&SparseRowMat<usize, f64>], dim: usize) -> Self {
-        Self::from_symbolic(Arc::new(SparseHessianSymbolic::build(csrs, dim)))
-    }
-
     /// Build the symbolic pattern for `dim` columns, returning it for reuse.
     ///
     /// The pattern is a function of the design's sparsity alone — the weights
     /// never enter it — so a caller that assembles `Xᵀ diag(w) X` repeatedly
     /// for one fixed `X` can build it once and hand the same `Arc` back to
     /// [`Self::from_symbolic`] on every later assembly.
-    pub fn build_symbolic(
+    pub(crate) fn build_symbolic(
         csrs: &[&SparseRowMat<usize, f64>],
         dim: usize,
     ) -> Arc<SparseHessianSymbolic> {
@@ -163,7 +157,7 @@ impl SparseHessianAccumulator {
     }
 
     /// Zero-valued accumulator over an already-built pattern.
-    pub fn from_symbolic(sym: Arc<SparseHessianSymbolic>) -> Self {
+    pub(crate) fn from_symbolic(sym: Arc<SparseHessianSymbolic>) -> Self {
         let nnz = sym.nnz;
         SparseHessianAccumulator {
             sym,
@@ -180,7 +174,7 @@ impl SparseHessianAccumulator {
     /// This avoids the double-counting bug that arises when both `(ca, cb)`
     /// and `(cb, ca)` are mapped to the same upper-triangle slot.
     #[inline(always)]
-    pub fn add_upper(&mut self, r: usize, c: usize, val: f64) {
+    pub(crate) fn add_upper(&mut self, r: usize, c: usize, val: f64) {
         assert!(r <= c, "add_upper requires r <= c, got ({r}, {c})");
         let s = &*self.sym;
         if s.contiguous {
@@ -224,7 +218,7 @@ impl SparseHessianAccumulator {
 
     /// Element-wise `self.values += other`.
     #[inline]
-    pub fn add_values(&mut self, other: &[f64]) {
+    pub(crate) fn add_values(&mut self, other: &[f64]) {
         assert_eq!(self.values.len(), other.len());
         for (a, &b) in self.values.iter_mut().zip(other.iter()) {
             *a += b;
@@ -232,7 +226,7 @@ impl SparseHessianAccumulator {
     }
 
     /// Create a zero-valued copy sharing the same symbolic structure.
-    pub fn empty_clone(&self) -> Self {
+    pub(crate) fn empty_clone(&self) -> Self {
         SparseHessianAccumulator {
             sym: Arc::clone(&self.sym),
             values: vec![0.0; self.values.len()],
@@ -246,7 +240,7 @@ impl SparseHessianAccumulator {
     /// Constructs the CSC matrix directly from the symbolic structure — no
     /// triplet roundtrip.  If this is the last reference to the symbolic
     /// pattern, it is moved rather than cloned.
-    pub fn into_sparse_col_mat(self) -> SparseColMat<usize, f64> {
+    pub(crate) fn into_sparse_col_mat(self) -> SparseColMat<usize, f64> {
         use faer::sparse::SymbolicSparseColMat;
 
         // Try to take ownership of the symbolic data (avoids clone when the
@@ -287,7 +281,9 @@ mod tests {
         )
         .expect("sparse column matrix");
         let csr = sparse.to_row_major().expect("csr conversion");
-        let accumulator = SparseHessianAccumulator::from_multi_csr(&[&csr], 3);
+        let accumulator = SparseHessianAccumulator::from_symbolic(
+            SparseHessianAccumulator::build_symbolic(&[&csr], 3),
+        );
 
         assert_eq!(accumulator.sym.col_ptrs, vec![0, 1, 3, 6]);
         assert_eq!(accumulator.sym.row_indices, vec![0, 0, 1, 0, 1, 2]);

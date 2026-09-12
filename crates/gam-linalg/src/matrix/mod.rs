@@ -46,7 +46,7 @@ const TENSOR_GEMM_MAX_INTERMEDIATE_BYTES: usize = 128 * 1024 * 1024; // 128 MB
 pub use crate::utils::PcgSolveInfo;
 
 mod sparse_hessian;
-pub use sparse_hessian::{SparseHessianAccumulator, SparseHessianSymbolic};
+pub(crate) use sparse_hessian::{SparseHessianAccumulator, SparseHessianSymbolic};
 
 mod weights;
 pub use weights::{FiniteSignedWeightsView, PsdWeightsView, SignedWeightsArc, SignedWeightsView};
@@ -159,7 +159,7 @@ fn governed_dense_operator_to_dense_by_chunks<O: DenseDesignOperator + ?Sized>(
     dense_operator_to_dense_by_chunks(op).map(|matrix| reservation.bind(matrix))
 }
 
-pub fn checked_dense_nbytes(nrows: usize, ncols: usize, context: &str) -> Result<usize, String> {
+pub(crate) fn checked_dense_nbytes(nrows: usize, ncols: usize, context: &str) -> Result<usize, String> {
     nrows
         .checked_mul(ncols)
         .and_then(|cells| cells.checked_mul(std::mem::size_of::<f64>()))
@@ -736,7 +736,7 @@ fn sparse_csr_weighted_xtwx_rows(
     xtwx
 }
 
-pub fn streaming_sparse_csc_xt_diag_x(
+pub(crate) fn streaming_sparse_csc_xt_diag_x(
     col_ptr: &[usize],
     row_idx: &[usize],
     vals: &[f64],
@@ -989,7 +989,7 @@ impl SparseDesignMatrix {
     /// ties the pattern's lifetime to the data that determines it, so a
     /// dropped-and-reallocated design can never inherit a stale neighbour's
     /// pattern (#2416).
-    pub fn hessian_accumulator_template(&self) -> Option<SparseHessianAccumulator> {
+    pub(crate) fn hessian_accumulator_template(&self) -> Option<SparseHessianAccumulator> {
         if let Some(sym) = self.hessian_pattern_cache.get() {
             return Some(SparseHessianAccumulator::from_symbolic(Arc::clone(sym)));
         }
@@ -2298,7 +2298,7 @@ impl RandomEffectOperator {
     ///
     /// Column g of the result = Σ_{i: group\[i\]=g} w\[i\] * X_dense.row(i).
     /// Total cost: O(n × p_dense).
-    pub fn weighted_cross_with_dense(
+    pub(crate) fn weighted_cross_with_dense(
         &self,
         dense: &Array2<f64>,
         weights: &Array1<f64>,
@@ -2334,7 +2334,7 @@ impl RandomEffectOperator {
     /// For two RE operators, compute X_re_a' diag(w) X_re_b → (qa × qb).
     /// Entry (a, b) = Σ_{i: group_a\[i\]=a AND group_b\[i\]=b} w\[i\].
     /// Cost: O(n).
-    pub fn weighted_cross_with_re(
+    pub(crate) fn weighted_cross_with_re(
         &self,
         other: &RandomEffectOperator,
         weights: &Array1<f64>,
@@ -4927,7 +4927,7 @@ impl DesignMatrix {
 
     /// Policy-aware form of [`Self::try_to_dense_governed`]. Structural
     /// operator-only policies refuse before consulting or charging the ledger.
-    pub fn try_to_dense_governed_with_policy(
+    pub(crate) fn try_to_dense_governed_with_policy(
         &self,
         policy: &MaterializationPolicy,
         context: &'static str,
@@ -5924,36 +5924,6 @@ impl DesignMatrix {
         <Self as DenseDesignOperator>::quadratic_form_diag(self, middle)
     }
 
-    pub fn apply_weighted_normal(
-        &self,
-        weights: &Array1<f64>,
-        vector: &Array1<f64>,
-        penalty: Option<&Array2<f64>>,
-        ridge: f64,
-    ) -> Result<Array1<f64>, String> {
-        let finite =
-            certify_signed_weights("DesignMatrix::apply_weighted_normal", weights, self.nrows())?;
-        if vector.len() != self.ncols() {
-            return Err(format!(
-                "DesignMatrix::apply_weighted_normal vector length mismatch: vector={}, ncols={}",
-                vector.len(),
-                self.ncols()
-            ));
-        }
-        Ok(<Self as LinearOperator>::apply_weighted_normal(
-            self, finite, vector, penalty, ridge,
-        ))
-    }
-
-    pub fn solve_system(
-        &self,
-        weights: &Array1<f64>,
-        rhs: &Array1<f64>,
-        penalty: Option<&Array2<f64>>,
-    ) -> Result<Array1<f64>, String> {
-        <Self as LinearOperator>::solve_system(self, weights, rhs, penalty)
-    }
-
     pub fn solve_systemwith_policy(
         &self,
         weights: &Array1<f64>,
@@ -5970,14 +5940,6 @@ impl DesignMatrix {
             ridge_floor,
             ridge_policy,
         )
-    }
-
-    pub fn factorize_system(
-        &self,
-        weights: &Array1<f64>,
-        penalty: Option<&Array2<f64>>,
-    ) -> Result<Box<dyn FactorizedSystem>, String> {
-        <Self as LinearOperator>::factorize_system(self, weights, penalty)
     }
 }
 

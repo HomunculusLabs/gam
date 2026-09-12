@@ -100,7 +100,7 @@ impl<'a> LowRankWeight<'a> {
     }
 
     #[inline]
-    pub fn is_rank_zero(&self) -> bool {
+    pub(crate) fn is_rank_zero(&self) -> bool {
         self.rank() == 0
     }
 
