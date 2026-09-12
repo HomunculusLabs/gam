@@ -5126,7 +5126,7 @@ pub fn discover_primary_atom_topologies(
                     local[[out_row, col]] = target[[src_row, col]] - mean[col];
                 }
             }
-            let (_u, _s, vt_opt) = local.svd(false, true).map_err(|error| {
+            let (_u, singular_values, vt_opt) = local.svd(false, true).map_err(|error| {
                 format!(
                     "discover_primary_atom_topologies: SVD failed for auto atom {atom_idx}: {error}"
                 )
@@ -5136,7 +5136,16 @@ pub fn discover_primary_atom_topologies(
                     "discover_primary_atom_topologies: SVD returned no right-singular frame for auto atom {atom_idx}"
                 )
             })?;
-            let n_pcs = vt.nrows().min(4);
+            // Directions past the numerical rank `σ > max(rows, p)·ε·σ_max` carry only
+            // rounding, so they never enter the chart, and every kept component has a
+            // positive in-cluster spread.
+            let sigma_max = singular_values.iter().copied().fold(0.0_f64, f64::max);
+            let rank_cutoff = rows.len().max(p_out) as f64 * f64::EPSILON * sigma_max;
+            let numerical_rank = singular_values
+                .iter()
+                .filter(|&&sigma| sigma > rank_cutoff)
+                .count();
+            let n_pcs = vt.nrows().min(numerical_rank).min(4);
             if n_pcs < 2 {
                 return Err(format!(
                     "discover_primary_atom_topologies: auto atom {atom_idx} has principal rank {n_pcs}; at least two directions are required"
@@ -5160,7 +5169,7 @@ pub fn discover_primary_atom_topologies(
                 for &row in &rows {
                     acc += proj[[row, pc]] * proj[[row, pc]];
                 }
-                (acc * inv_count).sqrt().max(1e-12)
+                (acc * inv_count).sqrt()
             };
             let phase = |a: f64, b: f64| -> f64 {
                 let frac = b.atan2(a) / std::f64::consts::TAU;
