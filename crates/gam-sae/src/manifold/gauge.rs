@@ -214,20 +214,33 @@ fn fit_beta_mle(r: &[f64]) -> Option<(f64, f64, f64)> {
         return None;
     }
     // Method-of-moments seed: `common = m(1−m)/v − 1`, `α = m·common`,
-    // `β = (1−m)·common`. Guard positivity so Newton starts in the interior.
-    let common = (mean * (1.0 - mean) / var - 1.0).max(1.0e-3);
-    let mut alpha = (mean * common).max(1.0e-3);
-    let mut beta = ((1.0 - mean) * common).max(1.0e-3);
+    // `β = (1−m)·common`. Every sample lies strictly inside `(0, 1)`, so
+    // `v < m(1−m)` (Bhatia–Davis) and the seed is interior; only rounding at that
+    // bound can break it, and then the uniform `Beta(1, 1)` is the interior start.
+    let common = mean * (1.0 - mean) / var - 1.0;
+    let (mut alpha, mut beta) = if common > 0.0 {
+        (mean * common, (1.0 - mean) * common)
+    } else {
+        (1.0, 1.0)
+    };
 
     let s_ln = sum_ln / nf;
     let s_ln1m = sum_ln1m / nf;
     // Newton on the per-sample-averaged score (concave objective; the Hessian is
     // negative definite, so a damped Newton with step-halving converges).
-    for _ in 0..100 {
+    loop {
+        let psi_a = digamma(alpha);
+        let psi_b = digamma(beta);
         let psi_ab = digamma(alpha + beta);
-        let g_a = s_ln - (digamma(alpha) - psi_ab);
-        let g_b = s_ln1m - (digamma(beta) - psi_ab);
-        if g_a.abs() < 1.0e-12 && g_b.abs() < 1.0e-12 {
+        let g_a = s_ln - (psi_a - psi_ab);
+        let g_b = s_ln1m - (psi_b - psi_ab);
+        // The score is numerical zero once each component sits inside the rounding
+        // of its own evaluation: `α + β`, the two digammas, their difference and
+        // the subtraction from the mean log are five roundings on its three terms.
+        let score_band = gam_linalg::roundoff::accumulation_growth(5);
+        if g_a.abs() <= score_band * (s_ln.abs() + psi_a.abs() + psi_ab.abs())
+            && g_b.abs() <= score_band * (s_ln1m.abs() + psi_b.abs() + psi_ab.abs())
+        {
             break;
         }
         let t_ab = trigamma(alpha + beta);
@@ -246,11 +259,26 @@ fn fit_beta_mle(r: &[f64]) -> Option<(f64, f64, f64)> {
         // Step-halving to keep `(α, β)` strictly positive and non-decreasing in
         // loglik — a standard safeguard, no wall-clock budget.
         let base = beta_loglik_avg(alpha, beta, s_ln, s_ln1m);
+        // Halve only while a trial can still differ from `(α, β)` in floating point:
+        // past step `u·|α|/|Δα|` (and likewise for `β`) no trial moves either shape.
+        let resolvable_step = |value: f64, direction: f64| -> f64 {
+            if direction == 0.0 {
+                f64::INFINITY
+            } else {
+                gam_linalg::roundoff::UNIT_ROUNDOFF * value / direction.abs()
+            }
+        };
+        let smallest_step = resolvable_step(alpha, d_a).min(resolvable_step(beta, d_b));
+        let halvings = if smallest_step < 1.0 {
+            (-smallest_step.log2()).ceil() as u64 + 1
+        } else {
+            1
+        };
         let accepted = match backtracking_line_search::<_, std::convert::Infallible>(
             BacktrackConfig {
                 initial_step: 1.0,
                 contraction: 0.5,
-                max_steps: 40,
+                max_steps: halvings as _,
             },
             |step| {
                 let na = alpha + step * d_a;
@@ -294,7 +322,7 @@ fn beta_loglik_avg(alpha: f64, beta: f64, s_ln: f64, s_ln1m: f64) -> f64 {
 // `ψ` and `ψ₁` come from the workspace's single polygamma implementation. The
 // local copies they replace recursed only to `x ≥ 10` and stopped at `B₆`,
 // which left `7.6e−10` / `3.1e−10` relative error — enough to matter to the
-// Beta Newton below, whose own convergence test is `|g| < 1e−12`.
+// Beta Newton above, which stops when the score sits inside its rounding band.
 
 /// `ln Γ(x)` for `x > 0` via the Lanczos approximation (g = 7). Hand-derived
 /// closed form; used only to report the Beta log-likelihood.
