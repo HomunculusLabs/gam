@@ -1995,12 +1995,16 @@ pub(crate) fn build_duchon_basis_designwithworkspace(
     } else {
         kernel_constraint_nullspace(centers, nullspace_order, &mut workspace.cache)?
     };
-    // #1355: fold the frozen data-metric radial reparameterization `V` into the
-    // constrained kernel transform (`Z' = Z·V`) so the realized design columns
-    // `K·Z·V` rotate into the `G_c`-orthonormal generalized eigenbasis. Applied
-    // here identically to the penalty assembly keeps design and penalty
-    // bit-consistent at fit, predict, and κ-trial time.
-    let z = if let Some(v) = radial_reparam {
+    // #1355: the frozen data-metric radial reparameterization `V` rotates the
+    // constrained kernel columns into the `G_c`-orthonormal generalized eigenbasis,
+    // `K·Z·V`. The kernel pass forms `K·Z`, and `V` rotates the assembled block
+    // afterwards (below), because that is the product order the cold build takes
+    // when it adopts `V` (`duchon_resolve_radial_chart`: `(K·Z)·V` off its one
+    // kernel pass). Folding `V` into the transform first gives `K·(Z·V)`: the same
+    // matrix in exact arithmetic, not in floating point. The polynomial-orthogonal
+    // combinations in `K·Z` cancel large kernel entries, so a frozen replay drifted
+    // from its fit-time design while every replayed matrix was bit-identical.
+    if let Some(v) = radial_reparam {
         if v.nrows() != z_raw.ncols() {
             crate::bail_dim_basis!(
                 "Duchon radial reparam shape {:?} does not match constrained kernel dimension {}",
@@ -2008,10 +2012,8 @@ pub(crate) fn build_duchon_basis_designwithworkspace(
                 z_raw.ncols()
             );
         }
-        fast_ab(&z_raw, v)
-    } else {
-        z_raw
-    };
+    }
+    let z = z_raw;
 
     let coeffs = length_scale
         .map(|ls| {
@@ -2207,6 +2209,22 @@ pub(crate) fn build_duchon_basis_designwithworkspace(
     basis_result?;
     if poly_cols > 0 {
         basis.slice_mut(s![.., kernel_cols..]).assign(&poly_block);
+    }
+    // Rotate the assembled `K·Z` block by the frozen `V` exactly as
+    // `duchon_resolve_radial_chart` rotates its raw basis, so a replay reproduces the
+    // cold build's design bit for bit.
+    if let Some(v) = radial_reparam {
+        let rotated_kernel = fast_ab(&basis.slice(s![.., 0..kernel_cols]), v);
+        let mut rotated = Array2::<f64>::zeros((n, rotated_kernel.ncols() + poly_cols));
+        rotated
+            .slice_mut(s![.., 0..rotated_kernel.ncols()])
+            .assign(&rotated_kernel);
+        if poly_cols > 0 {
+            rotated
+                .slice_mut(s![.., rotated_kernel.ncols()..])
+                .assign(&basis.slice(s![.., kernel_cols..]));
+        }
+        basis = rotated;
     }
 
     Ok(DuchonBasisDesign { basis })
