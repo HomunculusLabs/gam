@@ -5164,11 +5164,14 @@ pub(crate) fn discover_primary_atom_topologies(
         .map(|atom_idx| -> Result<PrimaryTopologyChoice, String> {
             let rows: Vec<usize> =
                 (0..n_obs).filter(|&row| labels[row] == atom_idx).collect();
-            // Too few rows to score a 2-candidate race honestly.
-            if rows.len() < 16 {
+            // A cluster needs rows before it has a principal frame. How many rows a race
+            // needs is not a count set here: a cluster whose principal rank is below two
+            // refuses just below, and each candidate's REML fit refuses a design it cannot
+            // identify or one that interpolates its target, so a race with no identifiable
+            // candidate refuses with their reasons.
+            if rows.is_empty() {
                 return Err(format!(
-                    "discover_primary_atom_topologies: auto atom {atom_idx} has only {} seed-cluster rows; at least 16 are required for an evidence race (name an explicit topology when discovery is not identifiable)",
-                    rows.len()
+                    "discover_primary_atom_topologies: auto atom {atom_idx} has no seed-cluster rows (name an explicit topology when discovery is not identifiable)"
                 ));
             }
             // Cluster-local principal frame: up to 4 components of the atom's

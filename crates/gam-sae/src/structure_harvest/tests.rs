@@ -129,7 +129,7 @@ fn auto_primary_topology_never_falls_back_on_race_failure_2238_2239() {
         .expect_err("an undersupported automatic race must be rejected");
 
     assert!(error.contains("auto atom 0"), "unexpected error: {error}");
-    assert!(error.contains("at least 16"), "unexpected error: {error}");
+    assert!(error.contains("principal rank"), "unexpected error: {error}");
     assert_eq!(basis, vec!["auto"], "failure must not install a fallback");
     assert_eq!(dims, vec![2], "failure must not rewrite latent dimension");
 }
