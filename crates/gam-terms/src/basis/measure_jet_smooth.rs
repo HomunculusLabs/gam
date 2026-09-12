@@ -1079,13 +1079,13 @@ pub(crate) fn bounding_box_diagonal(points: ArrayView2<'_, f64>) -> f64 {
 ///
 /// ## How far the screen may reach (#2761)
 ///
-/// Up to [`MeasureJetRangeBracket::feasibility_ceiling`]: the range at which the
+/// Up to the range at which the
 /// closest node pair stops being distinguishable in the chart's own arithmetic,
 /// [`measure_jet_range_feasibility_ceiling`]. It is the SAME wall
 /// [`measure_jet_ln_range_window`] gives the outer search, for the same reason:
 /// a search may not be caged tighter than the model.
 ///
-/// The screen used to stop at [`MeasureJetRangeBracket::node_diameter`], on the
+/// The screen used to stop at the node bounding-box diameter, on the
 /// argument that at `ℓ` that long every pair of representers overlaps at
 /// `≥ exp(−1/2)`, so "there is no distinct model past it". That argument is
 /// measurably wrong: `measure_jet_ln_range_window` records that *"the profiled
@@ -1097,15 +1097,6 @@ pub(crate) fn bounding_box_diagonal(points: ArrayView2<'_, f64>) -> f64 {
 pub struct MeasureJetRangeBracket {
     /// The realized scale band, ascending: where the screen's searches start.
     pub nodes: Vec<f64>,
-    /// The band's own log step.
-    pub log_step: f64,
-    /// The node bounding-box diagonal. A geometric fact about the cloud,
-    /// reported because the band's own ceiling is half of it; NOT a stopping
-    /// rule (see the type docs).
-    pub node_diameter: f64,
-    /// The feasibility wall [`measure_jet_range_feasibility_ceiling`]: the upper
-    /// end of [`measure_jet_ln_range_window`], which the screen searches.
-    pub feasibility_ceiling: f64,
 }
 
 /// The range at which a node pair separated by `spacing` stops being
@@ -1121,7 +1112,7 @@ pub struct MeasureJetRangeBracket {
 ///
 /// ONE definition, used by the outer search's window
 /// ([`measure_jet_ln_range_window`], which the response screen searches too) and
-/// reported as [`MeasureJetRangeBracket::feasibility_ceiling`], so the two cannot
+/// read by the response screen's walk, so the two cannot
 /// drift into disagreeing about where the model ends (#2761).
 pub fn measure_jet_range_feasibility_ceiling(spacing: f64) -> f64 {
     spacing / (2.0 * f64::EPSILON.sqrt()).sqrt()
@@ -1153,14 +1144,8 @@ pub fn measure_jet_range_bracket(
     }
     let (nodes, _masses) = measure_jet_quadrature_nodes(data, seed_centers.view())?;
     let band = measure_jet_band(nodes.view(), spec.num_scales)?;
-    // The band floor IS the median nearest-node spacing, so the feasibility
-    // wall is read off the bracket's own first node rather than remeasured.
-    let feasibility_ceiling = measure_jet_range_feasibility_ceiling(band.eps[0]);
     Ok(MeasureJetRangeBracket {
         nodes: band.eps,
-        log_step: band.log_step,
-        node_diameter: bounding_box_diagonal(nodes.view()),
-        feasibility_ceiling,
     })
 }
 
@@ -1197,7 +1182,7 @@ pub fn measure_jet_range_bracket(
 ///
 /// ## What this deliberately is NOT
 ///
-/// It is **not** [`MeasureJetRangeBracket::node_diameter`], the node bounding-box
+/// It is **not** the node bounding-box
 /// diagonal. That is where the response screen USED to stop walking, a stopping
 /// rule for a search over nodes rather than a wall in the model: measured on
 /// three fixtures (`measure_jet_formula_fit_robustness_sweep` seed 1,

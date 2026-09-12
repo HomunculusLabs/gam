@@ -36,6 +36,7 @@
 
 use gam_terms::basis::{
     CenterStrategy, MeasureJetBasisSpec, measure_jet_ln_range_window, measure_jet_range_bracket,
+    measure_jet_range_feasibility_ceiling,
 };
 use ndarray::Array2;
 
@@ -86,7 +87,7 @@ fn ln_range_window_floor_is_the_bracket_floor_and_its_width_is_pure_precision() 
 #[test]
 fn the_screen_walk_and_the_search_window_stop_at_the_same_wall_2761() {
     // They did not, and that was a defect rather than a design (#2761). The
-    // walk used to stop at `MeasureJetRangeBracket::node_diameter`, on the
+    // walk used to stop at the node bounding-box diameter, on the
     // argument that at a range that long every pair of representers overlaps at
     // `>= exp(-1/2)` so no distinct model survives. Two places in the tree
     // already recorded the opposite -- `measure_jet_ln_range_window`'s own docs
@@ -104,24 +105,14 @@ fn the_screen_walk_and_the_search_window_stop_at_the_same_wall_2761() {
     let data = chart(1.0);
     let spec = spec(40);
     let bracket = measure_jet_range_bracket(data.view(), &spec).expect("bracket realizes");
-    let (lo, hi) = measure_jet_ln_range_window(data.view(), &spec).expect("window realizes");
+    let (_, hi) = measure_jet_ln_range_window(data.view(), &spec).expect("window realizes");
+    let walk_ceiling = measure_jet_range_feasibility_ceiling(bracket.nodes[0]);
     assert_eq!(
-        bracket.feasibility_ceiling.ln(),
+        walk_ceiling.ln(),
         hi,
         "the screen's walk stop and the outer search's window ceiling must be the SAME \
          number, not two derivations of the same idea: walk={} window={}",
-        bracket.feasibility_ceiling,
-        hi.exp()
-    );
-    // And the diameter, which is still reported as the geometric fact it is,
-    // must sit strictly inside that wall -- otherwise the old stop was not a
-    // tightening and this change is not the one described.
-    assert!(
-        bracket.node_diameter.ln() < hi && lo < bracket.node_diameter.ln(),
-        "the node diameter must sit strictly inside the window it used to cap: diameter={} \
-         window=[{}, {}]",
-        bracket.node_diameter,
-        lo.exp(),
+        walk_ceiling,
         hi.exp()
     );
 }
@@ -193,7 +184,7 @@ fn ln_range_window_brackets_the_auto_range_it_seeds() {
         hi.exp()
     );
     assert!(
-        bracket.feasibility_ceiling > bracket.nodes[bracket.nodes.len() - 1],
+        measure_jet_range_feasibility_ceiling(bracket.nodes[0]) > bracket.nodes[bracket.nodes.len() - 1],
         "the walk ceiling is above the band's top node, so the screen may still walk past every \
          node it scored"
     );
