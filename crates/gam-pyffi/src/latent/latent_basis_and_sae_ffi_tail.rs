@@ -1386,6 +1386,10 @@ fn sae_manifold_certify_external<'py>(
                 report.inner.quotient_gradient_norm,
             )?;
             inner.set_item("stationarity_bound", report.inner.stationarity_bound)?;
+            match &report.inner.newton_decrement_relative {
+                Ok(relative) => inner.set_item("newton_decrement_relative", *relative)?,
+                Err(reason) => inner.set_item("newton_decrement_unresolved", reason.as_str())?,
+            }
             let parameter_space = PyDict::new(py);
             let parameter_certifies = report.inner.parameter_space.certifies();
             match &report.inner.parameter_space {

@@ -73,6 +73,7 @@ fn audit_accepts_either_valid_stationarity_currency() {
             scaled_gradient_max: 9.0e-6,
             stationarity_bound: 1.0e-5,
         },
+        newton_decrement_relative: Err("not priced in this unit fixture".to_string()),
     };
     assert!(parameter_certified.certifies());
 
@@ -88,4 +89,37 @@ fn audit_accepts_either_valid_stationarity_currency() {
         ..parameter_certified
     };
     assert!(!unresolved.certifies());
+}
+
+/// #2263 — the native inner solve accepts a state on the affine-invariant
+/// Newton decrement, so the zero-step audit must accept that currency too.
+/// The numbers are the natively certified replay measured by guarded pool job
+/// 541721 at 5e8436c44: ‖g‖ 55.6 along smoothing directions with curvature
+/// ~5e12, against a KKT band of 5.3e-5, while ½λ²/(|f| + 1) = 1.34e-11. The
+/// test's perturbed decoder measured ½λ²/(|f| + 1) = 1.0.
+#[test]
+fn audit_accepts_the_native_newton_decrement_certificate() {
+    let stiff_optimum = SaeInstalledInnerKktAudit {
+        raw_gradient_norm: 55.6,
+        quotient_gradient_norm: 55.6,
+        stationarity_bound: 5.3e-5,
+        parameter_space: SaeParameterSpaceKktAudit::Resolved {
+            scaled_gradient_max: 2.4e6,
+            stationarity_bound: 2.0e-5,
+        },
+        newton_decrement_relative: Ok(1.34e-11),
+    };
+    assert!(stiff_optimum.certifies());
+
+    let descending = SaeInstalledInnerKktAudit {
+        newton_decrement_relative: Ok(1.0),
+        ..stiff_optimum.clone()
+    };
+    assert!(!descending.certifies());
+
+    let unpriced = SaeInstalledInnerKktAudit {
+        newton_decrement_relative: Err("deflated evidence factorization failed".to_string()),
+        ..stiff_optimum
+    };
+    assert!(!unpriced.certifies());
 }

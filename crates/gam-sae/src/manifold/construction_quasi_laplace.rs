@@ -385,10 +385,7 @@ impl SaeManifoldTerm {
         //    Schur once per evaluation (at the stationary iterate) instead of
         //    once per refine round — lives inside
         //    `converge_inner_for_undamped_logdet`.
-        let options = ArrowSolveOptions::direct()
-            .with_gpu_policy(self.gpu_policy)
-            .with_newton_schur_tikhonov(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR)
-            .with_evidence_unit_deflation(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR);
+        let options = self.evidence_factor_options();
         // #2080 — the evidence root is converged, priced and, where `A` refuses on
         // resolved negative basin curvature, descended and converged again, all in
         // ONE gate-frozen scope, so every objective value compared below belongs to
@@ -1495,7 +1492,7 @@ impl SaeManifoldTerm {
                         .map(|obj| obj.abs() + 1.0)
                         .unwrap_or(f64::INFINITY);
                     let predicted_relative_decrease = 0.5 * decrement_sq / limit_scale;
-                    if predicted_relative_decrease <= SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL {
+                    if Self::inner_decrement_certifies(predicted_relative_decrease) {
                         log::debug!(
                             "SAE inner limit-boundary decrement acceptance: ‖g‖={grad_norm:.6e} \
                              (tol {grad_tolerance:.6e}) ½λ²/scale={predicted_relative_decrease:.6e} \
@@ -1647,7 +1644,7 @@ impl SaeManifoldTerm {
                         // THERE (restore + re-factor) — the continuation is
                         // over, so nothing consumes the restore.
                         let best_clears = best_seen.as_ref().is_some_and(|(c, _, _)| {
-                            *c < excursion_cert && *c <= SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL
+                            *c < excursion_cert && Self::inner_decrement_certifies(*c)
                         });
                         if best_clears {
                             let (best_cert, best_g, best_state) =
@@ -1677,7 +1674,7 @@ impl SaeManifoldTerm {
                             // excursion so state + final_cache stay consistent,
                             // then fall through to the honest refusal below.
                             self.restore_mutable_state(&excursion)?;
-                        } else if excursion_cert <= SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL {
+                        } else if Self::inner_decrement_certifies(excursion_cert) {
                             log::debug!(
                                 "SAE inner final-gate decrement acceptance: ‖g‖={grad_norm:.6e} \
                                  (tol {grad_tolerance:.6e}) λ²={newton_decrement_sq:.6e} \
@@ -1986,7 +1983,7 @@ impl SaeManifoldTerm {
                     // the inner gate blind to curvature while the outer gate
                     // trusts it was inconsistent, and no budget can close a gap
                     // that the objective's own resolution cannot express.)
-                    if predicted_relative_decrease <= SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL {
+                    if Self::inner_decrement_certifies(predicted_relative_decrease) {
                         return Ok(stationary_cache);
                     }
                     // #2267/#2283 — permitted at every armed plateau. What re-arms
@@ -2394,10 +2391,6 @@ impl SaeManifoldTerm {
         Ok(scaled_max)
     }
 
-    /// The sole acceptance gate for a differentiable inner-envelope root.
-    /// Objective stagnation, a finite deflated factor, or a small Newton
-    /// decrement may diagnose conditioning but cannot substitute for raw or
-    /// quotient KKT stationarity.
     /// #2228 DIAGNOSTIC — the INTENSIVE companion of the bar this loop enforces.
     ///
     /// `quasi_laplace_kkt_stationary` compares an EXTENSIVE L2 gradient norm
@@ -2685,13 +2678,76 @@ impl SaeManifoldTerm {
                 || (quotient_grad_norm.is_finite() && quotient_grad_norm <= tolerance))
     }
 
+    /// The undamped evidence factorization options every inner acceptance lane
+    /// factors with: Direct, Newton–Schur Tikhonov and unit-stiffness evidence
+    /// deflation, both at the shared spectral floor.
+    pub(crate) fn evidence_factor_options(&self) -> ArrowSolveOptions {
+        ArrowSolveOptions::direct()
+            .with_gpu_policy(self.gpu_policy)
+            .with_newton_schur_tikhonov(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR)
+            .with_evidence_unit_deflation(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR)
+    }
+
+    /// The affine-invariant inner acceptance certificate (#2226/#2228/#2253).
+    /// `relative_decrease` is `½λ²/scale`, with `λ² = −gᵀΔ` the Newton decrement
+    /// on the deflated exact factor and `scale` the objective scale. At or below
+    /// the stall detector's no-meaningful-change band, no step lowers the
+    /// penalized objective by a resolvable amount, however large the ambient ‖g‖
+    /// is along a stiff direction. The objective-stall, budget-limit, best-seen
+    /// and final-gate acceptances and the installed-state audit all read this
+    /// one predicate, so a state the native inner solve accepts is a state the
+    /// zero-step audit accepts (#2263).
+    pub(crate) fn inner_decrement_certifies(relative_decrease: f64) -> bool {
+        relative_decrease.is_finite()
+            && relative_decrease <= SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL
+    }
+
+    /// `½λ²/(|f| + 1)` at the installed state, priced exactly as the budget-limit
+    /// and final-gate acceptances price it: assemble at `(term, rho)`, take the
+    /// deflated evidence factor with [`Self::evidence_factor_options`], and read
+    /// the Newton decrement off that factor's discarded step. The state is not
+    /// moved.
+    pub(crate) fn installed_newton_decrement_relative(
+        &mut self,
+        target: ArrayView2<'_, f64>,
+        rho: &SaeManifoldRho,
+        registry: Option<&AnalyticPenaltyRegistry>,
+    ) -> Result<f64, String> {
+        let options = self.evidence_factor_options();
+        let lambda_smooth = rho.lambda_smooth_vec().map_err(|err| err.to_string())?;
+        let scale = self
+            .penalized_objective_total(target, rho, registry, 1.0)
+            .map_err(|err| err.to_string())?
+            .abs()
+            + 1.0;
+        let mut sys = self
+            .assemble_arrow_schur(target, rho, registry)
+            .map_err(|err| err.to_string())?;
+        let factor =
+            self.factor_deflated_evidence_with_grad_norms(&mut sys, &lambda_smooth, &options)?;
+        let decrement_sq = sae_manifold_newton_directional_decrease(
+            &sys,
+            factor.delta_t.view(),
+            factor.delta_beta.view(),
+        );
+        // `f64::max` returns the non-NaN operand, so a NaN decrement clamped
+        // first would price as 0 and certify. Refuse it before clamping the
+        // roundoff-negative side.
+        if !decrement_sq.is_finite() {
+            return Err(format!(
+                "installed-state Newton decrement is non-finite: λ²={decrement_sq:e}"
+            ));
+        }
+        Ok(0.5 * decrement_sq.max(0.0) / scale)
+    }
+
     /// Install the per-row spectral deflation on an ACCEPTANCE system, take its
     /// undamped (ridge-0) criterion factorization, and read back both KKT residual
     /// norms (raw and quotient) off the SAME assembled system. This is the
     /// objective-stall diagnostic factorization (#1095/#2228/#1094): the returned
     /// [`DeflatedEvidenceFactor`] carries the finite deflated cache plus the
     /// discarded Newton step retained for the affine Newton-decrement diagnostic
-    /// (#2226). Only its KKT residual fields can authorize acceptance. A solve failure surfaces as `Err`,
+    /// (#2226) that [`Self::inner_decrement_certifies`] accepts on. A solve failure surfaces as `Err`,
     /// exactly the `if let Ok(..)` guard the caller uses to fall through to the
     /// persistent-stall counter.
     fn factor_deflated_evidence_with_grad_norms(
@@ -3887,10 +3943,7 @@ impl SaeManifoldTerm {
         // `PerRowFactorFailed` at base ridge 0. Sharing the driver puts both lanes
         // at the SAME inner state — but not, since #2330 Phase-2, on the same
         // evidence operator; see the #2509 note below.
-        let options = ArrowSolveOptions::direct()
-            .with_gpu_policy(self.gpu_policy)
-            .with_newton_schur_tikhonov(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR)
-            .with_evidence_unit_deflation(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR);
+        let options = self.evidence_factor_options();
         // The converged arrow-factor cache is the per-row factored Hessian
         // (matrix-free, feasible at massive K — the dense border_dim² Schur is
         // never materialised here); it is RETURNED so the EFS lane can take its

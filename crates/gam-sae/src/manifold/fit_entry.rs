@@ -311,6 +311,10 @@ pub struct SaeInstalledInnerKktAudit {
     pub quotient_gradient_norm: f64,
     pub stationarity_bound: f64,
     pub parameter_space: SaeParameterSpaceKktAudit,
+    /// `½λ²/(|f| + 1)`, the Newton decrement on the deflated exact factor at the
+    /// installed state: the affine-invariant certificate the native inner solve
+    /// accepts on (#2263). `Err` carries the reason that factorization failed.
+    pub newton_decrement_relative: Result<f64, String>,
 }
 
 impl SaeInstalledInnerKktAudit {
@@ -320,6 +324,10 @@ impl SaeInstalledInnerKktAudit {
             self.quotient_gradient_norm,
             self.stationarity_bound,
         ) || self.parameter_space.certifies()
+            || self
+                .newton_decrement_relative
+                .as_ref()
+                .is_ok_and(|relative| SaeManifoldTerm::inner_decrement_certifies(*relative))
     }
 }
 
@@ -368,11 +376,14 @@ fn installed_inner_kkt_audit(
         },
         Err(reason) => SaeParameterSpaceKktAudit::Unresolved(reason),
     };
+    let newton_decrement_relative =
+        term.installed_newton_decrement_relative(target, rho, Some(registry));
     Ok(SaeInstalledInnerKktAudit {
         raw_gradient_norm,
         quotient_gradient_norm,
         stationarity_bound: super::SAE_MANIFOLD_INNER_GRAD_REL_TOL * term.inner_iterate_scale(),
         parameter_space,
+        newton_decrement_relative,
     })
 }
 
@@ -1951,11 +1962,12 @@ pub fn run_sae_manifold_certify(
             None,
             format!(
                 "installed external state failed inner KKT stationarity: raw={:.6e}, \
-                 quotient={:.6e}, bound={:.6e}, parameter-space={}",
+                 quotient={:.6e}, bound={:.6e}, parameter-space={}, newton-decrement={:?}",
                 inner_audit.raw_gradient_norm,
                 inner_audit.quotient_gradient_norm,
                 inner_audit.stationarity_bound,
                 inner_audit.parameter_space,
+                inner_audit.newton_decrement_relative,
             ),
         ));
     }

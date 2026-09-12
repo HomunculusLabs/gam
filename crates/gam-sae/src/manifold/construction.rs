@@ -776,8 +776,8 @@ include!("construction_rank_charge_derivative.rs");
 /// off the SAME assembled system. Produced by
 /// [`SaeManifoldTerm::factor_deflated_evidence_with_grad_norms`] at the
 /// objective-stall diagnostic point; the discarded Newton step
-/// `(delta_t, delta_beta)` is retained only to report the affine Newton
-/// decrement. A small decrement cannot replace the KKT acceptance gate.
+/// `(delta_t, delta_beta)` is retained to price the affine Newton decrement
+/// `½λ²/scale` that `SaeManifoldTerm::inner_decrement_certifies` accepts on.
 pub(crate) struct DeflatedEvidenceFactor {
     pub(crate) delta_t: Array1<f64>,
     pub(crate) delta_beta: Array1<f64>,
