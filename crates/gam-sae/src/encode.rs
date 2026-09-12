@@ -603,7 +603,7 @@ pub struct AtomEncodeAtlas {
 /// batch. `converged[row]` is a numerical first-order stationarity verdict for
 /// the shared-residual objective, not a Newton--Kantorovich certificate.
 #[derive(Debug, Clone)]
-pub(crate) struct JointEncodeResult {
+pub struct JointEncodeResult {
     /// Per-atom coordinate blocks, each shaped `n_rows × latent_dim_k`.
     pub coords: Vec<Array2<f64>>,
     /// Joint row solve reached the first-order tolerance.
