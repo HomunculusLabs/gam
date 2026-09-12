@@ -848,19 +848,6 @@ impl SaeAssignment {
     }
 
     #[must_use = "build error must be handled"]
-    pub fn from_blocks_with_mode(
-        logits: Array2<f64>,
-        coord_blocks: Vec<Array2<f64>>,
-        mode: AssignmentMode,
-    ) -> Result<Self, String> {
-        let coords = coord_blocks
-            .iter()
-            .map(|c| LatentCoordValues::from_matrix(c.view(), LatentIdMode::None))
-            .collect();
-        Self::with_mode(logits, coords, mode)
-    }
-
-    #[must_use = "build error must be handled"]
     pub fn from_blocks_with_mode_and_manifolds(
         logits: Array2<f64>,
         coord_blocks: Vec<Array2<f64>>,
@@ -1397,9 +1384,10 @@ mod ordered_beta_bernoulli_exact_hessian_tests {
             Array2::from_shape_vec((n, k), vec![0.2, -0.3, 0.7, -0.1, 0.4, 0.5, -0.2, 0.6])
                 .unwrap();
         let coords = vec![Array2::<f64>::zeros((n, 1)); k];
-        let assignment = SaeAssignment::from_blocks_with_mode(
+        let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
             logits,
             coords,
+            vec![LatentManifold::Euclidean; k],
             AssignmentMode::ordered_beta_bernoulli(0.8, 1.7, false),
         )
         .unwrap();
@@ -2128,9 +2116,10 @@ mod ordered_alpha_domain_tests {
     use gam_problem::{LOG_STRENGTH_MAX, LOG_STRENGTH_MIN};
 
     fn ordered_assignment(alpha: f64) -> SaeAssignment {
-        SaeAssignment::from_blocks_with_mode(
+        SaeAssignment::from_blocks_with_mode_and_manifolds(
             Array2::<f64>::zeros((3, 2)),
             vec![Array2::<f64>::zeros((3, 1)); 2],
+            vec![LatentManifold::Euclidean; 2],
             AssignmentMode::ordered_beta_bernoulli(0.8, alpha, true),
         )
         .unwrap()
@@ -2184,7 +2173,13 @@ mod fill_into_buffer_1557_tests {
         let coords: Vec<Array2<f64>> = (0..k)
             .map(|_| Array2::from_shape_fn((n, 1), |(i, _)| 0.1 + 0.05 * (i as f64)))
             .collect();
-        SaeAssignment::from_blocks_with_mode(logits, coords, mode).unwrap()
+        SaeAssignment::from_blocks_with_mode_and_manifolds(
+            logits,
+            coords,
+            vec![LatentManifold::Euclidean; k],
+            mode,
+        )
+        .unwrap()
     }
 
     fn assert_into_matches_alloc(a: &SaeAssignment) {
@@ -2270,9 +2265,10 @@ mod frozen_routing_1033_tests {
             .map(|_| Array2::from_shape_fn((n, 1), |(i, _)| (i as f64) * 0.1))
             .collect();
         // learnable_alpha = false: alpha is ρ-independent, isolating the routing.
-        SaeAssignment::from_blocks_with_mode(
+        SaeAssignment::from_blocks_with_mode_and_manifolds(
             logits,
             coords,
+            vec![LatentManifold::Euclidean; k],
             AssignmentMode::ordered_beta_bernoulli(0.5, 1.0, false),
         )
         .unwrap()
@@ -2367,8 +2363,13 @@ mod frozen_routing_1033_tests {
         let coords: Vec<Array2<f64>> = (0..k)
             .map(|_| Array2::from_shape_fn((n, 1), |(i, _)| (i as f64) * 0.1))
             .collect();
-        let a = SaeAssignment::from_blocks_with_mode(logits, coords, AssignmentMode::softmax(1.0))
-            .unwrap();
+        let a = SaeAssignment::from_blocks_with_mode_and_manifolds(
+            logits,
+            coords,
+            vec![LatentManifold::Euclidean; k],
+            AssignmentMode::softmax(1.0),
+        )
+        .unwrap();
         // Softmax + frozen routing is rejected (the coupled-simplex entropy
         // majorizer would be inconsistent with a frozen, non-optimized routing).
         let snapshot = a.logits.clone();

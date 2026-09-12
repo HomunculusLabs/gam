@@ -113,7 +113,7 @@ fn sparse_lane_constructs_no_dense_assignment() {
 
     // A dense-assignment CONSTRUCTION is a struct literal (`SaeAssignment {`) or
     // any associated-fn call (`SaeAssignment::…`, covering every constructor —
-    // `new`, `from_blocks_with_mode`, `from_blocks_with_mode_and_manifolds`, …).
+    // `new`, `from_blocks_with_mode_and_manifolds`, …).
     // `SaeManifoldTerm` is the dense engine aggregate: its only constructor takes a
     // `SaeAssignment`, so naming it here forces the dense `N×K` state (#2693).
     const CONSTRUCTION_NEEDLES: [&str; 3] =

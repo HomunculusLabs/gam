@@ -24,6 +24,7 @@
 //! `(n·p, M_k·p)` channel-replicated block that previously broadcast-panicked
 //! when routed through the cross-block flat audit.
 
+use gam::terms::latent::LatentManifold;
 use gam::terms::sae::manifold::{
     AssignmentMode, SaeAssignment, SaeAtomBasisKind, SaeManifoldAtom, SaeManifoldRho,
     SaeManifoldTerm,
@@ -65,7 +66,13 @@ fn make_assignment(k_atoms: usize) -> SaeAssignment {
     let coords: Vec<Array2<f64>> = (0..k_atoms)
         .map(|_| Array2::<f64>::zeros((N, LATENT_DIM)))
         .collect();
-    SaeAssignment::from_blocks_with_mode(logits, coords, AssignmentMode::softmax(1.0)).unwrap()
+    SaeAssignment::from_blocks_with_mode_and_manifolds(
+        logits,
+        coords,
+        vec![LatentManifold::Euclidean; k_atoms],
+        AssignmentMode::softmax(1.0),
+    )
+    .unwrap()
 }
 
 fn make_rho(k_atoms: usize) -> SaeManifoldRho {

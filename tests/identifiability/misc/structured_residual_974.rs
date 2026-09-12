@@ -38,7 +38,8 @@ use gam::inference::residual_factor::{ResidualFactorInput, StructuredResidualMod
 use gam::inference::row_metric::{MetricProvenance, RowMetric};
 use gam::solver::arrow_schur::ArrowSchurSystem;
 use gam::terms::{
-    sae::manifold::AssignmentMode, sae::manifold::SaeAssignment, sae::manifold::SaeAtomBasisKind,
+    latent::LatentManifold, sae::manifold::AssignmentMode, sae::manifold::SaeAssignment,
+    sae::manifold::SaeAtomBasisKind,
     sae::manifold::SaeManifoldAtom, sae::manifold::SaeManifoldRho, sae::manifold::SaeManifoldTerm,
 };
 
@@ -367,9 +368,14 @@ fn build_sae_term(
         atoms.push(atom);
         coord_blocks.push(Array2::from_shape_fn((n, d), |_| 0.5 * next(&mut rng)));
     }
-    let assignment =
-        SaeAssignment::from_blocks_with_mode(logits, coord_blocks, AssignmentMode::softmax(1.0))
-            .expect("assignment builds");
+    let manifolds = vec![LatentManifold::Euclidean; coord_blocks.len()];
+    let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
+        logits,
+        coord_blocks,
+        manifolds,
+        AssignmentMode::softmax(1.0),
+    )
+    .expect("assignment builds");
     let term = SaeManifoldTerm::new(atoms, assignment).expect("term builds");
     // Smoothness ρ-suppressed (very negative log-λ) so the smoothness penalty is
     // machine-negligible; the β-dependent objective is then the whitened data-fit

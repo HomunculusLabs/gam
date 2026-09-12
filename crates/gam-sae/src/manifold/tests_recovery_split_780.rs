@@ -756,10 +756,11 @@ pub(crate) fn warmstart_test_objective() -> SaeManifoldOuterObjective {
     .unwrap()
     .with_basis_evaluator(evaluator.clone())
     .with_basis_second_jet(evaluator);
-    let assignment = SaeAssignment::from_blocks_with_mode(
+    let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
         // Nonzero assignment mass so H_tt carries genuine data curvature.
         array![[0.9_f64], [0.8], [0.7], [0.6]],
         vec![coords],
+        vec![LatentManifold::Euclidean],
         AssignmentMode::softmax(0.7),
     )
     .unwrap();
@@ -793,9 +794,10 @@ pub(crate) fn warmstart_test_objective_with_evaluator() -> SaeManifoldOuterObjec
     .unwrap()
     .with_basis_evaluator(evaluator.clone())
     .with_basis_second_jet(evaluator);
-    let assignment = SaeAssignment::from_blocks_with_mode(
+    let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
         array![[0.9_f64], [0.8], [0.7], [0.6]],
         vec![coords],
+        vec![LatentManifold::Euclidean],
         AssignmentMode::softmax(0.7),
     )
     .unwrap();
@@ -953,9 +955,10 @@ pub(crate) fn rank_deficient_euclidean_outer_gradient_objective() -> SaeManifold
         Array2::<f64>::eye(2),
     )
     .unwrap();
-    let assignment = SaeAssignment::from_blocks_with_mode(
+    let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
         array![[0.9_f64], [0.8], [0.7], [0.6]],
         vec![coords],
+        vec![LatentManifold::Euclidean],
         AssignmentMode::softmax(0.7),
     )
     .unwrap();

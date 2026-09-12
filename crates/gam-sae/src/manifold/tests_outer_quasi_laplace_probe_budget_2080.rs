@@ -50,9 +50,10 @@ fn joint_decoder_gauge_quotients_full_rank_atom_redistribution_2080() -> Result<
         )
     };
     let coords = Array2::<f64>::zeros((n, 1));
-    let assignment = SaeAssignment::from_blocks_with_mode(
+    let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
         Array2::<f64>::zeros((n, 2)),
         vec![coords.clone(), coords],
+        vec![LatentManifold::Euclidean; 2],
         AssignmentMode::softmax(1.0),
     )?;
     let term = SaeManifoldTerm::new(

@@ -26,7 +26,8 @@
 use ndarray::{Array1, Array2, Array3};
 
 use gam::terms::{
-    sae::manifold::AssignmentMode, sae::manifold::SaeAssignment, sae::manifold::SaeAtomBasisKind,
+    latent::LatentManifold, sae::manifold::AssignmentMode, sae::manifold::SaeAssignment,
+    sae::manifold::SaeAtomBasisKind,
     sae::manifold::SaeManifoldAtom, sae::manifold::SaeManifoldRho, sae::manifold::SaeManifoldTerm,
 };
 
@@ -105,8 +106,10 @@ fn build_term(
         coord_blocks.push(Array2::from_shape_fn((n, d), |_| lcg_f64(&mut rng) * 0.5));
     }
 
-    let assignment = SaeAssignment::from_blocks_with_mode(logits, coord_blocks, mode)
-        .unwrap_or_else(|e| panic!("SaeAssignment::from_blocks_with_mode failed: {e}"));
+    let manifolds = vec![LatentManifold::Euclidean; coord_blocks.len()];
+    let assignment =
+        SaeAssignment::from_blocks_with_mode_and_manifolds(logits, coord_blocks, manifolds, mode)
+            .unwrap_or_else(|e| panic!("SaeAssignment construction failed: {e}"));
     let term = SaeManifoldTerm::new(atoms, assignment)
         .unwrap_or_else(|e| panic!("SaeManifoldTerm::new failed: {e}"));
 

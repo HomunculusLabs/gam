@@ -293,9 +293,10 @@ pub(crate) fn criterion_gauge_deflation_count_guard_reanchors_then_rejects_runaw
 pub(crate) fn k1_gate_modes_do_not_pin_assignment_to_one() {
     // Ordered Beta--Bernoulli, K=1: the neutral sigmoid gate is σ(0/τ)=0.5. The ordered
     // prior is scored separately and never caps the final function.
-    let ordered_beta_bernoulli = SaeAssignment::from_blocks_with_mode(
+    let ordered_beta_bernoulli = SaeAssignment::from_blocks_with_mode_and_manifolds(
         array![[0.0]],
         vec![array![[0.0]]],
+        vec![LatentManifold::Euclidean],
         AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false),
     )
     .unwrap();
@@ -307,9 +308,10 @@ pub(crate) fn k1_gate_modes_do_not_pin_assignment_to_one() {
     );
 
     // Smooth threshold gate, K=1: the logit remains a live logistic coordinate.
-    let jr = SaeAssignment::from_blocks_with_mode(
+    let jr = SaeAssignment::from_blocks_with_mode_and_manifolds(
         array![[-1.0]],
         vec![array![[0.0]]],
+        vec![LatentManifold::Euclidean],
         AssignmentMode::threshold_gate(1.0, 0.0),
     )
     .unwrap();
@@ -324,9 +326,10 @@ pub(crate) fn k1_gate_modes_do_not_pin_assignment_to_one() {
     // atom, canonicalized so the reference column is 0), so K=1 is a single
     // zero column — not the K-1 `assignment_coord_dim` layout. The K=1 pin
     // in `try_assignments_row` keys off `k_atoms() == 1`, i.e. one column.
-    let sm = SaeAssignment::from_blocks_with_mode(
+    let sm = SaeAssignment::from_blocks_with_mode_and_manifolds(
         Array2::<f64>::zeros((1, 1)),
         vec![array![[0.0]]],
+        vec![LatentManifold::Euclidean],
         AssignmentMode::softmax(1.0),
     )
     .unwrap();
@@ -5639,9 +5642,10 @@ pub(crate) fn sae_arrow_schur_beta_quadratic_model_matches_penalized_loss_change
         energy_factor.t().dot(&energy_factor),
     )
     .unwrap();
-    let assignment = SaeAssignment::from_blocks_with_mode(
+    let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
         Array2::<f64>::zeros((3, 1)),
         vec![coords],
+        vec![LatentManifold::Euclidean],
         AssignmentMode::softmax(0.7),
     )
     .unwrap();

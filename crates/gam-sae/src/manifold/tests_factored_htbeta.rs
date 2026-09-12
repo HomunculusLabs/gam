@@ -282,9 +282,10 @@ pub(crate) fn factored_evidence_matches_full_b_at_small_p() {
 
     let mut term = SaeManifoldTerm::new(
         vec![atom],
-        SaeAssignment::from_blocks_with_mode(
+        SaeAssignment::from_blocks_with_mode_and_manifolds(
             Array2::<f64>::zeros((m, 1)),
             vec![Array2::<f64>::zeros((m, 1))],
+            vec![LatentManifold::Euclidean],
             AssignmentMode::softmax(0.7),
         )
         .unwrap(),

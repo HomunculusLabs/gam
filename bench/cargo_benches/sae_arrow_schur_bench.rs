@@ -28,7 +28,8 @@ use std::time::Instant;
 
 use gam::solver::arrow_schur::ArrowSolveOptions;
 use gam::terms::{
-    sae::manifold::AssignmentMode, sae::manifold::SaeAssignment, sae::manifold::SaeAtomBasisKind,
+    latent::LatentManifold, sae::manifold::AssignmentMode, sae::manifold::SaeAssignment,
+    sae::manifold::SaeAtomBasisKind,
     sae::manifold::SaeManifoldAtom, sae::manifold::SaeManifoldRho, sae::manifold::SaeManifoldTerm,
 };
 
@@ -159,8 +160,10 @@ fn build_term(cfg: &BenchConfig, mode: AssignmentMode) -> (SaeManifoldTerm, Arra
         coord_blocks.push(coords);
     }
 
-    let assignment = SaeAssignment::from_blocks_with_mode(logits, coord_blocks, mode)
-        .expect("SaeAssignment::from_blocks_with_mode failed in benchmark fixture");
+    let manifolds = vec![LatentManifold::Euclidean; coord_blocks.len()];
+    let assignment =
+        SaeAssignment::from_blocks_with_mode_and_manifolds(logits, coord_blocks, manifolds, mode)
+            .expect("SaeAssignment construction failed in benchmark fixture");
 
     let term = SaeManifoldTerm::new(atoms, assignment)
         .expect("SaeManifoldTerm::new failed in benchmark fixture");

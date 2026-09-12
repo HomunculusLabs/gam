@@ -1966,5 +1966,13 @@
     },
     "reason": "#2905: the complete D² completion matrix completion_second_drift_matrix replaces the frozen-policy-only frozen_completion_second_drift_matrix in the gam-custom-family outer Hessian, which left the frozen matrix with no product user.",
     "evidence": "At base, the only product call of frozen_completion_second_drift_matrix is custom_family_outer_jeffreys_hphi_drift_batched in crates/gam-custom-family/src/jeffreys.rs, switched here to completion_second_drift_matrix. The other callers were a test harness in jeffreys_subspace.rs, deleted here. The census falls by exactly that one pub method in mixed.rs; the fourth-order helpers moved out of the jeffreys_subspace.rs test module stay in the same file, so their counts are unchanged. Not compiled locally; compile rests on the shared tip check."
+  },
+  {
+    "base": "7014e8c8b3e6a5bf6e3735f8cad97e1504321667",
+    "removed": {
+      "crates/gam-sae/src/assignment.rs::from_blocks_with_mode": 1
+    },
+    "reason": "#2899 public API sweep of gam-sae (prune-api-d): SaeAssignment::from_blocks_with_mode, the Euclidean special case of from_blocks_with_mode_and_manifolds, had no production caller; its test and benchmark callers now call the production constructor directly.",
+    "evidence": "At 8376b160b, git grep -n -w finds from_blocks_with_mode called only from test code and one benchmark fixture, every one rewritten here. The removed map is public_api_census.py's census difference over this change, computed on MSI."
   }
 ]

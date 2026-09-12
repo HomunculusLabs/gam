@@ -1,6 +1,6 @@
 use gam::solver::rho_optimizer::OuterObjective;
 use gam::terms::decoders::gated_decoder::GatedSAEDecoder;
-use gam::terms::latent::{LatentCoordValues, LatentIdMode};
+use gam::terms::latent::{LatentCoordValues, LatentIdMode, LatentManifold};
 use gam::terms::sae::manifold::{
     AssignmentMode, GumbelTemperatureSchedule, SaeAssignment, SaeManifoldAtom,
     SaeManifoldOuterObjective, SaeManifoldRho, SaeManifoldTerm, ScheduleKind,
@@ -112,9 +112,10 @@ fn latent_coord_assignment_decode_roundtrip_matches_dictionary_atom() {
     let coords =
         LatentCoordValues::from_matrix(array![[0.3, -0.7], [1.2, 0.5]].view(), LatentIdMode::None);
     let logits = array![[20.0, -20.0], [-20.0, 20.0]];
-    let assignment = SaeAssignment::from_blocks_with_mode(
+    let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
         logits,
         vec![coords.as_matrix(), coords.as_matrix()],
+        vec![LatentManifold::Euclidean; 2],
         AssignmentMode::softmax(1e-3),
     )
     .expect("test setup must construct assignment");
@@ -160,9 +161,10 @@ fn sae_assignment_modes_follow_documented_behavior() {
         array![[0.0], [0.0]],
     ];
 
-    let soft = SaeAssignment::from_blocks_with_mode(
+    let soft = SaeAssignment::from_blocks_with_mode_and_manifolds(
         array![[1.0, 0.0, -1.0], [3.0, 2.0, 1.0]],
         coord_blocks.clone(),
+        vec![LatentManifold::Euclidean; coord_blocks.len()],
         AssignmentMode::softmax(0.7),
     )
     .expect("softmax assignment should build");
@@ -177,9 +179,10 @@ fn sae_assignment_modes_follow_documented_behavior() {
         );
     }
 
-    let ordered_beta_bernoulli = SaeAssignment::from_blocks_with_mode(
+    let ordered_beta_bernoulli = SaeAssignment::from_blocks_with_mode_and_manifolds(
         array![[0.0, 0.0, 0.0]],
         vec![array![[0.0]], array![[0.0]], array![[0.0]]],
+        vec![LatentManifold::Euclidean; 3],
         AssignmentMode::ordered_beta_bernoulli(1.0, 0.1, false),
     )
     .expect("ordered Beta--Bernoulli assignment should build");
@@ -193,9 +196,10 @@ fn sae_assignment_modes_follow_documented_behavior() {
         "The ordered prior is scored once by the penalty and must not be multiplied into the posterior-mean reconstruction gate."
     );
 
-    let threshold_gate = SaeAssignment::from_blocks_with_mode(
+    let threshold_gate = SaeAssignment::from_blocks_with_mode_and_manifolds(
         array![[0.2, 0.6, -2.0]],
         vec![array![[0.0]], array![[0.0]], array![[0.0]]],
+        vec![LatentManifold::Euclidean; 3],
         AssignmentMode::threshold_gate(0.5, 0.5),
     )
     .expect("threshold-gate assignment should build");
@@ -258,9 +262,10 @@ fn gated_sae_decoder_reconstructs_dictionary_atom_at_zero_residual() {
 fn build_collapse_probe_term(coords: Array2<f64>) -> SaeManifoldTerm {
     let n = coords.nrows();
     let d = coords.ncols();
-    let assignment = SaeAssignment::from_blocks_with_mode(
+    let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
         Array2::<f64>::zeros((n, 1)),
         vec![coords.clone()],
+        vec![LatentManifold::Euclidean],
         AssignmentMode::softmax(1.0),
     )
     .expect("assignment should build");
@@ -353,9 +358,10 @@ fn penalized_quasi_laplace_criterion_has_interior_minimum_in_log_lambda_smooth()
     // rank(S) > 0 and the Occam term is active.
     let n = 6;
     let coords = array![[0.2], [0.8], [-0.5], [1.3], [-1.1], [0.4]];
-    let assignment = SaeAssignment::from_blocks_with_mode(
+    let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
         Array2::<f64>::zeros((n, 1)),
         vec![coords.clone()],
+        vec![LatentManifold::Euclidean],
         AssignmentMode::softmax(1.0),
     )
     .expect("assignment should build");
@@ -550,9 +556,10 @@ fn efs_ard_fixed_point_recovers_cost_criterion_argmin_and_stays_finite() {
 fn temperature_schedule_is_applied_each_iteration_and_near_zero_behaves_like_argmax() {
     let logits = array![[2.0, 1.0, -4.0]];
     let mut term = {
-        let assignment = SaeAssignment::from_blocks_with_mode(
+        let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
             logits.clone(),
             vec![array![[0.0]], array![[0.0]], array![[0.0]]],
+            vec![LatentManifold::Euclidean; 3],
             AssignmentMode::softmax(2.0),
         )
         .expect("assignment should build");
@@ -582,9 +589,10 @@ fn temperature_schedule_is_applied_each_iteration_and_near_zero_behaves_like_arg
         "When a temperature schedule is provided, the assignment mode should immediately use the schedule temperature for the current iteration."
     );
 
-    let near_zero = SaeAssignment::from_blocks_with_mode(
+    let near_zero = SaeAssignment::from_blocks_with_mode_and_manifolds(
         logits,
         vec![array![[0.0]], array![[0.0]], array![[0.0]]],
+        vec![LatentManifold::Euclidean; 3],
         AssignmentMode::softmax(1e-6),
     )
     .expect("near-zero temperature assignment should build");
