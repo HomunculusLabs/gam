@@ -10,13 +10,13 @@ use gam_terms::term_builder::build_termspec;
 use ndarray::ArrayView2;
 
 /// Name of the node-time column visible to the formula.
-pub const TIME_COLUMN: &str = "time";
+pub(crate) const TIME_COLUMN: &str = "time";
 
 /// A row matrix over the cohort's covariate columns and `time` as an encoded
 /// dataset: continuous columns stay continuous, a categorical covariate
 /// carries its level labels so factor terms, `by=` gates and random effects
 /// resolve against the labels the user supplied.
-pub fn node_dataset(
+pub(crate) fn node_dataset(
     rows: ArrayView2<'_, f64>,
     cohort: &EventHistoryCohort,
 ) -> Result<EncodedDataset, EventHistoryError> {
@@ -63,7 +63,7 @@ pub fn node_dataset(
 
 /// Resolve a formula right-hand side such as `x + s(time)` into the term
 /// collection that every mark's log-intensity uses, against `rows`.
-pub fn covariate_spec_from_formula(
+pub(crate) fn covariate_spec_from_formula(
     right_hand_side: &str,
     rows: ArrayView2<'_, f64>,
     cohort: &EventHistoryCohort,

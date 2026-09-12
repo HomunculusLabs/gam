@@ -1339,7 +1339,7 @@ fn identity_pattern_design(n_obs: usize, width: usize) -> Result<Array2<f64>, Ev
 /// the posterior mode of its loading under its prior, along the direction
 /// and at the rate the covariance score named. Nothing here is a symmetric
 /// start a deterministic Newton could leave symmetric.
-pub fn latent_block_spec(
+pub(crate) fn latent_block_spec(
     n_obs: usize,
     marks: usize,
     atoms: usize,
@@ -1431,7 +1431,7 @@ pub fn latent_block_spec(
 }
 
 /// The block of one mark's covariate/time smooths.
-pub fn mark_block_spec(name: &str, design: &TermCollectionDesign) -> ParameterBlockSpec {
+pub(crate) fn mark_block_spec(name: &str, design: &TermCollectionDesign) -> ParameterBlockSpec {
     ParameterBlockSpec {
         name: name.to_string(),
         design: design.design.clone(),
@@ -2709,7 +2709,7 @@ fn fit_event_history_on_grid(
 /// verify reference discretisation at fixed coefficients. If unresolved,
 /// repeat selection under the refined objective; never reinterpret a rank
 /// selected under stationary-prior centring as reference-law evidence.
-pub fn fit_event_history(
+pub(crate) fn fit_event_history(
     cohort: &mut EventHistoryCohort, spec: &EventHistorySpec,
 ) -> Result<EventHistoryFit, EventHistoryError> {
     if !(spec.reference_tolerance.is_finite() && spec.reference_tolerance > 0.0) {

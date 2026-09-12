@@ -44,7 +44,9 @@ pub fn temporal_covariance(
 
 /// Eigenvalues (descending) and matching unit eigenvectors (columns) of a
 /// symmetric matrix.
-pub fn eigenmodes(matrix: &Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), EventHistoryError> {
+pub(crate) fn eigenmodes(
+    matrix: &Array2<f64>,
+) -> Result<(Array1<f64>, Array2<f64>), EventHistoryError> {
     let n = matrix.nrows();
     if n == 0 {
         return Ok((Array1::zeros(0), Array2::zeros((0, 0))));
@@ -267,7 +269,7 @@ fn direction_information(
 /// far below roundoff, and it extends to where the integrand has fallen
 /// sixty nats below its peak, which is `e⁻⁶⁰` of it. The sums are formed in
 /// log space.
-pub fn quartic_moments(mu: f64, information: f64, lambda: f64) -> (f64, f64, f64) {
+pub(crate) fn quartic_moments(mu: f64, information: f64, lambda: f64) -> (f64, f64, f64) {
     let a = mu - lambda;
     let j = information;
     let g = |t: f64| 0.5 * a * t * t - 0.25 * j * t * t * t * t;
@@ -469,7 +471,7 @@ pub struct RidgeProfile {
 /// `d²c/dλ² = Σ_i [1/(2λ²) − ¼ Var_i(t²)]`, from the Laplace-scale start of
 /// the first direction. A profile whose first direction has its maximiser
 /// at zero has no finite minimiser and is refused without a search.
-pub fn empirical_bayes_ridge(directions: &[DirectionEvidence]) -> RidgeProfile {
+pub(crate) fn empirical_bayes_ridge(directions: &[DirectionEvidence]) -> RidgeProfile {
     let refused = RidgeProfile {
         log_lambda: f64::INFINITY,
         gain: 0.0,

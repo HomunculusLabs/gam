@@ -25,23 +25,21 @@ mod static_state;
 
 pub use cohort::{
     CohortNodes, CovariateSegment, Event, EventHistoryCohort, EventHistoryError, MarkKind,
-    SubjectHistory, SubjectNodes, design_rows, expand_nodes, quadrature_order_for_degree,
+    SubjectHistory, SubjectNodes,
 };
 pub use covariance::{
-    DirectionEvidence, DirectionProfile, RidgeProfile, effective_rank, eigenmodes,
-    empirical_bayes_ridge, quartic_moments, temporal_covariance,
+    DirectionEvidence, DirectionProfile, RidgeProfile, effective_rank, temporal_covariance,
 };
 pub use family::{
     EventHistoryFamily, EventHistoryFit, EventHistorySpec, JointEvaluation, QuadratureCertificate,
-    RankStart, RankStep, ReferenceTables, RefinementCheck, RiskSetCentring, fit_event_history,
-    fit_event_history_formulas, latent_block_spec, mark_block_spec,
+    RankStart, RankStep, ReferenceTables, RefinementCheck, RiskSetCentring,
+    fit_event_history_formulas,
 };
 pub use forecast::{
     Forecast, ForecastRequest, FutureSegment, HistoryForecastRequest, PopulationForecastRequest,
     SmoothedLatentState, SpellPit, forecast, forecast_history, latent_state, pit_uniform_distance,
     population_forecast, predictive_pit, baseline_log_rates,
 };
-pub use formula::{TIME_COLUMN, covariate_spec_from_formula, node_dataset};
 pub use marginal::transition_score_polynomials;
 pub use preserve::{ReferenceGrid, ReferenceStrata};
 

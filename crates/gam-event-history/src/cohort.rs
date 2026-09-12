@@ -557,7 +557,7 @@ impl CohortNodes {
 /// degree: the order that integrates products of the basis exactly on a
 /// cell, so the baseline part of the compensator is resolved to roundoff and
 /// the mesh refinement only has to serve the latent path.
-pub fn quadrature_order_for_degree(degree: usize) -> usize {
+pub(crate) fn quadrature_order_for_degree(degree: usize) -> usize {
     2 * degree + 3
 }
 
@@ -624,7 +624,7 @@ pub(crate) fn cell_rule<'a>(
 
 /// Expand every subject into quadrature and event nodes at mesh refinement
 /// `refinement`.
-pub fn expand_nodes(
+pub(crate) fn expand_nodes(
     cohort: &EventHistoryCohort,
     quadrature_order: usize,
     refinement: usize,
@@ -758,7 +758,7 @@ pub fn expand_nodes(
 /// the event-free mesh. No event time enters, so a data-adaptive basis
 /// (quantile knots, a data-driven range) is a function of the design alone
 /// and the time basis spans every follow-up window to its ends.
-pub fn design_rows(
+pub(crate) fn design_rows(
     cohort: &EventHistoryCohort,
     quadrature_order: usize,
 ) -> Result<Array2<f64>, EventHistoryError> {
