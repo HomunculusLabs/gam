@@ -15,19 +15,13 @@
 //! crate needing an FD cross-check gets it from a leaf dependency it already
 //! has, instead of dragging the entire model layer into its test build.
 //!
-//! The `ndarray`-shaped helpers here are *only* for tests. The scalar
-//! self-certifying oracle they build on is not: it lives in
-//! [`crate::numeric_derivative`] because the production outer-gradient FD
-//! audit differences the real criterion with the same code, and is re-exported
-//! below so there is one implementation rather than two.
+//! The scalar self-certifying oracle these helpers build on lives in
+//! [`super::numeric_derivative`], and is re-exported below so there is one
+//! implementation rather than two.
 
 use ndarray::{Array1, Array2};
 
-// The self-certifying oracle itself is production numerics, not a test
-// helper: the outer-gradient FD audit inside the optimizer differences the
-// real criterion with it. It lives in `gam_linalg::numeric_derivative` and is
-// re-exported here so the test-level checkers keep one path to it.
-pub use crate::numeric_derivative::{FdDerivative, FdVerdict, RiddersConfig, ridders_derivative};
+pub use super::numeric_derivative::{FdDerivative, FdVerdict, RiddersConfig, ridders_derivative};
 
 /// [`ridders_derivative`] applied to coordinate `coord` of a scalar objective
 /// at `x`.

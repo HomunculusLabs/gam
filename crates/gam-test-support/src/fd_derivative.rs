@@ -2,10 +2,10 @@
 //! derivative, for gradient tests.
 //!
 //! These methods decide agreement and render the ladder for a diagnostic line.
-//! Only tests call them, so they live here rather than on the production
-//! [`FdDerivative`] type, whose measurement API stays in `gam-linalg`.
+//! They live here rather than on the [`FdDerivative`] type, whose measurement
+//! API stays in `gam-linalg`'s `test_support`.
 
-use gam_linalg::numeric_derivative::{FdDerivative, FdVerdict};
+use gam_linalg::test_support::numeric_derivative::{FdDerivative, FdVerdict};
 
 /// Test-side judgement of an [`FdDerivative`] measurement.
 pub trait FdDerivativeJudgement {

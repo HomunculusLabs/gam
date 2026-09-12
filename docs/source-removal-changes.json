@@ -3935,5 +3935,26 @@
     ],
     "reason": "#2829 public-surface rule: no product or test uses these gam-terms functions. Two dependents cascade with them. MeasureJetEnergyJets was only measure_jet_energy_form_with_jets's return type. PenaltyManifest::ROW_BLOCK_DIAGONAL, the trait associated const and its 22 impl values, was read only by AnalyticPenaltyKind::is_row_block_diagonal.",
     "evidence": "At the base, git grep -w ROW_BLOCK_DIAGONAL finds the trait declaration and 22 impl lines in analytic_penalties/manifest.rs, plus the single read inside is_row_block_diagonal in registry.rs's define_analytic_penalty_kind macro body. git grep -w MeasureJetEnergyJets finds its declaration, the deleted function's signature and body, and basis/mod.rs's pub use. The module doc's 'Exact (s, α) penalty jets are shipped' bullet described only the deleted function and is gone. A scan of each touched file for private fns and imports finds none that lose their last use. term_specs.rs holds uncommitted foreign work in the shared tree, so its blob was derived from main's copy and the shared file was left untouched. The item list applies source_removal_guard.py's ITEM regex and occurrence rule by hand. Compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "1b97afdfb4f20fa2a2cd0915245bf8bbca7b5bc2",
+    "items": [
+      "crates/gam-linalg/src/numeric_derivative.rs:enum:FdVerdict",
+      "crates/gam-linalg/src/numeric_derivative.rs:enum:StencilErrorPowers",
+      "crates/gam-linalg/src/numeric_derivative.rs:fn:agreement_bound",
+      "crates/gam-linalg/src/numeric_derivative.rs:fn:band",
+      "crates/gam-linalg/src/numeric_derivative.rs:fn:central_extrapolation_cancels_even_error_powers",
+      "crates/gam-linalg/src/numeric_derivative.rs:fn:default",
+      "crates/gam-linalg/src/numeric_derivative.rs:fn:exponent",
+      "crates/gam-linalg/src/numeric_derivative.rs:fn:one_sided_extrapolation_cancels_odd_error_powers",
+      "crates/gam-linalg/src/numeric_derivative.rs:fn:resolved",
+      "crates/gam-linalg/src/numeric_derivative.rs:fn:ridders_derivative",
+      "crates/gam-linalg/src/numeric_derivative.rs:fn:ridders_from_stencil",
+      "crates/gam-linalg/src/numeric_derivative.rs:fn:self_band",
+      "crates/gam-linalg/src/numeric_derivative.rs:struct:FdDerivative",
+      "crates/gam-linalg/src/numeric_derivative.rs:struct:RiddersConfig"
+    ],
+    "reason": "SPEC rule 2 (#2901): gam_linalg::numeric_derivative lived in the production tree only because the outer optimizer ran a finite-difference audit of its own criterion with it. That audit was deleted in 1bc46ac50, so the Ridders oracle's only callers are tests, and the module moves to crates/gam-linalg/src/test_support/numeric_derivative.rs unchanged apart from its module doc. Every identity below is re-declared at the new path; none is deleted.",
+    "evidence": "At the base, git grep -F numeric_derivative in crates, src, tests, examples and benches finds only its pub mod line in crates/gam-linalg/src/lib.rs (removed here), the re-export in crates/gam-linalg/src/test_support/fd_checker.rs, crates/gam-test-support/src/fd_derivative.rs, and crates/gam-models/tests/survival_acceptance/follow_up_mode_response_fd_2765.rs. All three now import from gam_linalg::test_support::numeric_derivative. The item list applies source_removal_guard.py's ITEM regex to the base blob by hand. The ten public identities are guarded outright, the two test functions are test-scoped, and the private fn default and fn exponent occur 5258 and 497 times tree-wide. docs/public-api-2829-disposition.tsv moves the restored-in-place agreement_bound row to the new path. Compile is covered by the lead's shared tip check."
   }
 ]

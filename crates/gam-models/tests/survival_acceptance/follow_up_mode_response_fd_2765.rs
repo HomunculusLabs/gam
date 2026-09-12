@@ -30,7 +30,9 @@
 //! follow-up margin changes, while the complete profiled-gradient calculus is
 //! covered by its own outer-gradient gates.
 
-use gam_linalg::numeric_derivative::{RiddersConfig, StencilErrorPowers, ridders_from_stencil};
+use gam_linalg::test_support::numeric_derivative::{
+    RiddersConfig, StencilErrorPowers, ridders_from_stencil,
+};
 use gam_solve::estimate::outer_eval_capture::{
     OuterSeedOrder, OuterSeedProbe, observe_next_outer_seed,
 };

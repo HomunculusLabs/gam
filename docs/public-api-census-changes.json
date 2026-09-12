@@ -1490,5 +1490,18 @@
     },
     "reason": "#2829 public-surface rule (docs/rust-library-surface.md, 6e5362f23): a pub item that no product uses is deleted. These fifteen restored-in-place gam-terms identities have no user in gam-cli, gam-pyffi or Python, examples/, another crate's production code, or any test.",
     "evidence": "restored_consumers_2829.py at d8f6ef9be (MSI job 527977, /scratch.global/sauer354/pool/api2829/consumers.d8f6ef9be98996b5c98bd08667aa4fe121561e8f.rows.tsv) scores all fifteen as unreferenced. At the base, git grep -w over crates, src, tests, examples, python and bench finds each name only in its own file. The three measure_jet_smooth names also appear in gam-terms basis/mod.rs's pub use block. In-file hits are the declaration, a module-doc intra-doc link to measure_jet_energy_form_with_jets, and one comment naming measure_jet_scale_spectrum. The seven *withworkspace functions are 9-to-11-line forwarding wrappers over surviving builders."
+  },
+  {
+    "base": "1b97afdfb4f20fa2a2cd0915245bf8bbca7b5bc2",
+    "removed": {
+      "crates/gam-linalg/src/numeric_derivative.rs::agreement_bound": 1,
+      "crates/gam-linalg/src/numeric_derivative.rs::band": 1,
+      "crates/gam-linalg/src/numeric_derivative.rs::resolved": 1,
+      "crates/gam-linalg/src/numeric_derivative.rs::ridders_derivative": 1,
+      "crates/gam-linalg/src/numeric_derivative.rs::ridders_from_stencil": 1,
+      "crates/gam-linalg/src/numeric_derivative.rs::self_band": 1
+    },
+    "reason": "SPEC rule 2 (#2901): the Ridders oracle moves from crates/gam-linalg/src/numeric_derivative.rs to crates/gam-linalg/src/test_support/numeric_derivative.rs, because after 1bc46ac50 only tests call it. These six pub fns are re-declared at the new path; none is deleted.",
+    "evidence": "public_api_census.py's public_functions predicate over the base blob of crates/gam-linalg/src/numeric_derivative.rs yields FdDerivative::self_band, band, resolved and agreement_bound, and the free functions ridders_derivative and ridders_from_stencil. The same six appear in the new test_support file. No other changed file loses a pub fn."
   }
 ]

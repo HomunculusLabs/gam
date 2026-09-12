@@ -1,4 +1,4 @@
-//! Self-certifying numerical differentiation.
+//! Self-certifying numerical differentiation, for tests.
 //!
 //! A finite difference is an estimator, not a fact. Its error is
 //! `ν/h + h²·f‴/6`, and neither `ν` (the evaluator's absolute noise floor) nor
@@ -16,10 +16,9 @@
 //! verdict (`Agree` / `Disagree` / `Unresolved`) so a caller can decline to
 //! judge a component its oracle cannot measure.
 //!
-//! It lives in the production tree, not under `test_support`, because the
-//! outer-gradient FD audit that the κ/geometry gates consume is production
-//! code: it runs inside the outer optimizer and differences the real
-//! criterion. One implementation serves both it and the test-level checkers.
+//! Only tests call it. Production code takes no finite difference (SPEC rule
+//! 2), so a test that grades an analytic derivative forms its difference here,
+//! and the `ndarray`-shaped checkers in [`super::fd_checker`] build on it.
 
 /// Configuration for the self-certifying [`ridders_derivative`] oracle.
 ///

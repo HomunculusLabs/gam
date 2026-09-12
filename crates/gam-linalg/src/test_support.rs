@@ -15,6 +15,11 @@
 //! means a crate cross-checking an analytic derivative pulls one leaf dependency
 //! it already has instead of the whole model layer.
 //!
+//! [`numeric_derivative`] is the scalar self-certifying oracle `fd_checker`
+//! builds on. It lived in the production tree while the outer optimizer ran a
+//! finite-difference audit of its own criterion; production now differences
+//! nothing (SPEC rule 2, #2901), so its only callers are tests.
+//!
 //! [`paired_holdout_partition`] is likewise model-free deterministic numerical
 //! test design. Keeping its row-ranking primitive here lets downstream quality
 //! tests share one paired partition without making its invariant test compile
