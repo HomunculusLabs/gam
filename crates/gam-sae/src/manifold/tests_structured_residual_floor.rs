@@ -88,6 +88,12 @@ mod tests {
         residual_energy / (n * p) as f64
     }
 
+    /// The inner iteration budget the production front door runs (`gamfit`'s
+    /// `sae_manifold_fit`, `n_iter = 50`). The fixture used to run 4. Guarded job
+    /// 581184 at bde47070e split the pass-0 premise's 2.107e-9 into radial 8.29e-10
+    /// and tangential 1.28e-9, so the residual was mostly unconverged coordinates.
+    const PRODUCTION_INNER_ITERATIONS: usize = 50;
+
     /// Drive the full typed primary pipeline on `target` (mirrors
     /// `examples/sae_fit.rs` / the tier0 primary test with a single periodic atom).
     /// The structured-residual alternation runs UNCONDITIONALLY inside this entry
@@ -141,7 +147,7 @@ mod tests {
             assignment_kind,
             sparsity_strength: 1.0,
             smoothness,
-            max_iter: 4,
+            max_iter: PRODUCTION_INNER_ITERATIONS,
             learning_rate: 1.0,
             ridge_ext_coord: 1.0e-6,
             ridge_beta: 1.0e-6,
@@ -170,7 +176,7 @@ mod tests {
             target,
             registry,
             initial_rho,
-            max_iter: 4,
+            max_iter: PRODUCTION_INNER_ITERATIONS,
             learning_rate: 1.0,
             ridge_ext_coord: 1.0e-6,
             ridge_beta: 1.0e-6,
