@@ -2002,7 +2002,7 @@ where
 /// finer target, or the finer traversal exceeds its `subdivision_budget`, the
 /// last complete certificate is returned unchanged so the caller can issue its
 /// domain-specific typed refusal.
-pub fn maximize_score_1d_value_ordered<E, Eval, Enclose>(
+pub(crate) fn maximize_score_1d_value_ordered<E, Eval, Enclose>(
     lo: f64,
     hi: f64,
     initial_resolution: f64,
