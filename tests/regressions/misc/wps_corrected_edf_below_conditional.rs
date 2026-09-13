@@ -1,8 +1,8 @@
-//! Bug hunt: the Wood–Pya–Säfken (WPS) smoothing-parameter-uncertainty
-//! correction to the effective degrees of freedom comes out NEGATIVE on an
-//! ordinary penalized Gaussian smooth, so the "corrected" EDF is SMALLER than
-//! the conditional EDF and the corrected AIC penalizes complexity LESS than the
-//! conditional AIC — the exact reverse of what the correction is for.
+//! Regression: the Wood–Pya–Säfken (WPS) smoothing-parameter-uncertainty
+//! correction to the effective degrees of freedom is non-negative on an
+//! ordinary penalized Gaussian smooth, so the corrected EDF is never smaller
+//! than the conditional EDF and the corrected AIC never penalizes complexity
+//! less than the conditional AIC.
 //!
 //! ## The math (why this must be non-negative)
 //!
@@ -13,31 +13,28 @@
 //! and `CorrectedEdf::rho_uncertainty_df() = τ − tr(F) = tr(X'WX · Σ_ρ)`.
 //! Both factors are symmetric positive-semidefinite:
 //!   * `X'WX` is a weighted Gram matrix (PSD by construction), and
-//!   * `Σ_ρ = J·Var(ρ̂)·Jᵀ` is a covariance contribution that
-//!     `compute_smoothing_correction` (solver/estimate.rs ~1747) explicitly
-//!     eigenvalue-floors to PSD before storing.
+//!   * `Σ_ρ = J·Var(ρ̂)·Jᵀ` is a covariance contribution, PSD whenever
+//!     `Var(ρ̂)` is.
 //! For two symmetric PSD matrices `tr(A·B) = tr(A^{1/2} B A^{1/2}) ≥ 0`, so the
-//! ρ-uncertainty EDF inflation is necessarily `≥ 0`. The unit tests in
-//! `model_comparison.rs` assert exactly this (`rho_uncertainty_df()` of `6.0`
-//! and `0.0`), and the field doc calls it how much λ-uncertainty is *inflating*
-//! the complexity penalty.
+//! ρ-uncertainty EDF inflation is necessarily `≥ 0`.
 //!
-//! ## What actually happens
+//! ## The defect this test was written for
 //!
-//! `wps_correction_term` reconstructs `X'WX` as `H · F` where
+//! `wps_correction_term` reconstructed `X'WX` as `H · F` where
 //! `H = penalized_hessian` and `F = coefficient_influence = H⁻¹X'WX`. But the
-//! fit's stored `H` and `F` do NOT satisfy `H·F = X'WX`: their product is
+//! fit's stored `H` and `F` did NOT satisfy `H·F = X'WX`: their product was
 //! grossly *asymmetric* and indefinite (observed max off-symmetry ≈ 2.4e2 and
-//! min eigenvalue ≈ −3.6e2 on a 24-coefficient `s(x)` fit), because `F` is built
-//! from the covariance inverse (`I − Vb_unscaled·S`) while `H` is a different
+//! min eigenvalue ≈ −3.6e2 on a 24-coefficient `s(x)` fit), because `F` was built
+//! from the covariance inverse (`I − Vb_unscaled·S`) while `H` was a different
 //! stored Hessian surface. The "PSD × PSD ⇒ non-negative trace" guarantee then
-//! does not apply, and `tr(H·F·Σ_ρ)` lands negative.
+//! did not apply, and `tr(H·F·Σ_ρ)` landed negative. `wps_correction_term`
+//! (`crates/gam-inference/src/model_comparison.rs`) now takes the fit's stored
+//! weighted Gram `X'WX` (`UnifiedFitResult::weighted_gram`, #1027) directly.
 //!
 //! This test fits a plain Gaussian `y ~ s(x)`, builds the model-comparison
 //! payload through the public `model_comparison_from_unified`, and asserts the
 //! WPS-corrected EDF is at least the conditional EDF (the non-negativity of the
-//! ρ-uncertainty df, up to genuine round-off). It currently fails because the
-//! correction is a sizeable negative number.
+//! ρ-uncertainty df, up to genuine round-off).
 
 use csv::StringRecord;
 use gam::inference::model_comparison::model_comparison_from_unified;
@@ -138,10 +135,7 @@ fn wps_corrected_edf_is_not_below_conditional_edf() {
          Both X'WX and Σ_ρ are symmetric PSD, so this trace must be ≥ 0; a \
          negative value means the corrected EDF ({corrected:.4}) dropped BELOW \
          the conditional EDF ({conditional:.4}), making the WPS-corrected AIC \
-         under-penalize complexity. Root cause: the stored penalized_hessian (H) \
-         and coefficient_influence (F) do not satisfy H·F = X'WX, so \
-         wps_correction_term's reconstruction is not the PSD weighted Gram it \
-         assumes."
+         under-penalize complexity."
     );
     assert!(
         aic_corrected >= cmp.aic_conditional - tol,

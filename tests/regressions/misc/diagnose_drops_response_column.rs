@@ -1,57 +1,29 @@
-//! Regression: `gam diagnose <model> <data>` cannot run on the
-//! very data the model was fit on — it always aborts with
+//! Regression: `gam diagnose <model> <data>` runs on the very data the model
+//! was fit on.
+//!
+//! `diagnose` needs the response to form leave-one-out residuals, and a survival
+//! fit's diagnostics replay the likelihood row by row and need the event column.
+//! Neither is a prediction-required column: forming a prediction never reads a
+//! standard GAM's response or whether a survival event occurred.
+//!
+//! The defect this test was written for: `run_diagnose` loaded its dataset
+//! through the *prediction* column contract (`prediction_required_columns()`),
+//! which keeps only the columns the formula's right-hand side names so unrelated
+//! ID/label columns don't strict-validate at predict time (#840). For `y ~ s(x)`
+//! the projected frame was just `{x}`, so `diagnose` aborted before computing
+//! anything, on the data the model was just fit on:
 //!
 //!   error: response column 'y' not found in data. Available columns: [x]
 //!
-//! even though the CSV plainly contains `y`. `diagnose` needs the response to
-//! form leave-one-out residuals, but it loads its dataset through the
-//! *prediction* column contract, which deliberately drops the response.
+//! A `Surv(time, event)` fit aborted the same way with "survival event column
+//! 'event' not found" (#2301). `run_diagnose`
+//! (`crates/gam-cli/src/main/run_diagnose.rs`) now loads through
+//! `load_datasetwith_model_schema_for_diagnostics`, which folds in the model's
+//! `diagnostic_extra_columns()`: the weight column, the survival event column for
+//! both Surv arities, and a bare response column.
 //!
-//! Root cause (files/lines read):
-//!
-//!  * `run_diagnose` loads the diagnostic dataset with
-//!    `load_datasetwith_model_schema(&args.data, &model)`
-//!    (`src/main.rs:3897`). That helper projects the frame onto
-//!    `FittedModel::prediction_required_columns()` (`src/main.rs:8162` →
-//!    `..._extra` → `load_dataset_auto_with_schema_projected`), the post-#840
-//!    contract that keeps only the columns the *formula* names so unrelated
-//!    ID/label columns don't strict-validate at predict time.
-//!
-//!  * `prediction_required_columns()` (`src/inference/model.rs:2484`) collects
-//!    only RHS term columns plus offsets, and adds the *response* only for
-//!    `Surv(...)` responses and `TransformationNormal` models — never the bare
-//!    response of a standard GAM. So for `y ~ s(x)` the projected frame is just
-//!    `{x}`; `y` is dropped.
-//!
-//!  * `run_diagnose` then immediately needs the response:
-//!    `resolve_role_col(&col_map, &parsed.response, "response")`
-//!    (`src/main.rs:3903`) fails because `y` is no longer in the column map,
-//!    raising the "response column 'y' not found" error from
-//!    `src/inference/data.rs:131`.
-//!
-//!  * The two model classes whose response *is* kept by
-//!    `prediction_required_columns()` (Surv / TransformationNormal) are
-//!    explicitly rejected by `diagnose` up front (`src/main.rs:3888`,
-//!    `predict_model_class() != Standard`). So `diagnose` is unusable for
-//!    exactly the model class it claims to support: every standard GAM fit.
-//!
-//! Expected: `gam diagnose model.json train.csv` succeeds and prints its ALO
-//! diagnostics table (the success path ends with `cli_out!("ALO diagnostics
-//! (top leverage rows):")`, `src/main.rs:4026`).
-//!
-//! Observed: it aborts before computing anything, on the data the model was
-//! just fit on.
-//!
-//! The fix is to load the response for `diagnose` (e.g. request the response
-//! column as an `extra_required` for the projected loader, or use a
-//! non-projected load). This test drives the real `gam` binary end to end: it
-//! fails today at the `diagnose` step and passes once the response column is
-//! available, with no edits.
-//!
-//! NOTE: building the `gam` binary this test spawns also requires the crate to
-//! compile, which it currently does not — see the sibling
-//! `bug_hunt_sphere_gpu_macro_unscoped_breaks_build` ticket. Once that
-//! one-line compile fix lands, this test builds and exercises the diagnose bug.
+//! These tests drive the real `gam` binary end to end and assert that
+//! `gam diagnose model train.csv` succeeds and prints its ALO diagnostics table.
 
 use std::path::Path;
 use std::process::Command;

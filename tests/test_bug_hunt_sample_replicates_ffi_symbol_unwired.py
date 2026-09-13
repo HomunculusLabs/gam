@@ -19,8 +19,8 @@ generative law is its own ground truth, no reference tool needed):
     predicted rate `g^{-1}(Xβ̂)` as `n_draws` grows;
   * draws are seed-deterministic (same seed identical, different seed differs).
 
-It fails today at the very first call (missing FFI symbol) and will pass
-unchanged once `generative_replicates` is actually wired into the FFI.
+`generative_replicates` is now registered in
+`crates/gam-pyffi/src/manifold/geometry_ffi.rs`.
 """
 
 from __future__ import annotations

@@ -4,9 +4,9 @@
 //! 2. Predict data with lat outside [-90, 90] must produce a clear error,
 //!    not propagate NaN/Inf silently.
 //! 3. Near-boundary lat = 90.0 (exactly) must succeed.
-//! 4. Lat = 90 + ε due to floating-point roundoff (ε = 1e-9) currently fails
-//!    the strict validator — flag this as an ergonomics problem if the
-//!    failure message is opaque.
+//! 4. Lat = 90 + ε from floating-point roundoff (the test uses ε = 1e-12) is
+//!    rejected by the strict validator, not silently clamped, and the error
+//!    names the latitude bound.
 
 use csv::StringRecord;
 use gam::smooth::build_term_collection_design;

@@ -1,5 +1,5 @@
-"""Bug hunt: left-truncated (delayed-entry) survival fits collapse to a
-degenerate, covariate-independent survival curve.
+"""Contract: a left-truncated (delayed-entry) survival fit with a genuine
+covariate effect predicts a non-degenerate, covariate-dependent survival curve.
 
 The three-argument ``Surv(entry, exit, event)`` form denotes *left truncation*
 (delayed entry): a subject is only under observation from ``entry`` onward, and
@@ -7,39 +7,37 @@ its likelihood contribution conditions on survival to ``entry``. This is a
 standard, documented survival feature; the two-argument ``Surv(exit, event)``
 form (equivalently ``entry == 0``) is the ordinary right-censored case.
 
-Observed: any nonzero ``entry`` destroys the fit. On data with a clear
-covariate effect (hazard ``0.4·exp(0.9·x)``):
+Observed when this test was written, on data with a clear covariate effect
+(hazard ``0.4·exp(0.9·x)``):
 
-* ``entry == 0`` (control): predicted survival is well-posed —
+* ``entry == 0`` (control): predicted survival was well-posed —
   ``S(0.5) ≈ 0.90`` for the low-hazard covariate, ``S`` decreasing in ``t``,
-  and the two covariate values give clearly *different* curves. The predicted
-  cumulative hazard matches the truth (``H(1) ≈ 0.2``).
-* ``entry == 0.05`` (or any ``entry > 0``): the predicted cumulative hazard is
+  and the two covariate values gave clearly *different* curves. The predicted
+  cumulative hazard matched the truth (``H(1) ≈ 0.2``).
+* ``entry == 0.05`` (or any ``entry > 0``): the predicted cumulative hazard was
   inflated by ~10³× (``H ≈ 186``, and nearly flat in ``t``), so ``S(t)``
-  collapses to ``0`` at every queried time AND becomes *identical* across
-  covariate values — the covariate no longer affects the prediction at all.
-  The fit itself emits a railed smoothing parameter / gradient-objective
-  desync under left truncation.
+  collapsed to ``0`` at every queried time AND was *identical* across
+  covariate values. The fit emitted a railed smoothing parameter /
+  gradient-objective desync under left truncation.
 
-This reproduces deterministically for every seed and every ``entry > 0``
-(``1e-6 … 0.5``); ``entry == 0`` always fits correctly.
+That reproduced deterministically for every seed and every ``entry > 0``
+(``1e-6 … 0.5``).
 
-Root-cause read: the delayed-entry design (the ``x_entry_time`` log-entry basis
-built in ``crates/gam-models/src/survival/construction.rs`` ~lines 1250-1359)
-destabilizes the transformation-survival smoothing selection, railing a penalty
-direction and producing a degenerate baseline whose cumulative hazard swamps
+Root-cause read at the time: the delayed-entry design (the ``x_entry_time``
+log-entry basis built in ``crates/gam-models/src/survival/construction.rs``)
+destabilized the transformation-survival smoothing selection, railing a penalty
+direction and producing a degenerate baseline whose cumulative hazard swamped
 the covariate smooth. The Python ``gamfit/_survival.py`` interpolation shell
-faithfully returns the degenerate Rust surface.
+faithfully returned the degenerate Rust surface.
 
-Contract asserted here (well-posed): a left-truncated survival model with a
-genuine covariate effect must produce a NON-DEGENERATE, COVARIATE-DEPENDENT
-survival curve — the same qualitative behavior the ``entry == 0`` fit produces
-on identical ``exit``/``event``/``x``. This test fits with ``entry = 0.05`` and
-asserts (a) early-time survival for the low-hazard covariate is not collapsed
-to ~0 and (b) the two covariate values give materially different survival
-curves. It currently fails (``S ≡ 0``, curves identical); once left truncation
-is handled correctly it passes without edits. The ``entry == 0`` control is
-asserted well-posed too, to pin the defect to the delayed-entry path.
+Contract asserted here: a left-truncated survival model with a genuine covariate
+effect must produce a NON-DEGENERATE, COVARIATE-DEPENDENT survival curve — the
+same qualitative behavior the ``entry == 0`` fit produces on identical
+``exit``/``event``/``x``. This test fits with ``entry = 0.05`` and asserts (a)
+early-time survival for the low-hazard covariate is not collapsed to ~0 and (b)
+the two covariate values give materially different survival curves. The
+``entry == 0`` control is asserted well-posed too, to pin any failure to the
+delayed-entry path.
 """
 
 from __future__ import annotations

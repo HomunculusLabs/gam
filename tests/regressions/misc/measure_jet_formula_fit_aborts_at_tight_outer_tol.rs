@@ -1,9 +1,9 @@
-//! Bug hunt: a plain 1-D Gaussian measure-jet smooth `s(x, bs="mjs")` is
-//! unfittable through the public formula API (`fit_from_formula`, which is the
-//! exact path `gamfit.fit` / `fit_table` take) even though the `gam` CLI fits
-//! the *identical* data without complaint.
+//! Regression: a plain 1-D Gaussian measure-jet smooth `s(x, bs="mjs")` is
+//! fittable through the public formula API (`fit_from_formula`, the path
+//! `gamfit.fit` / `fit_table` take), as it is from the `gam` CLI on the identical
+//! data.
 //!
-//! Reproduction (all on the same deterministic dataset written below):
+//! The defect this test was written for, on the deterministic dataset below:
 //!
 //! ```text
 //! $ gam fit det.csv 'y ~ s(x, bs="mjs")' --out det.gam       # saved model: det.gam
@@ -14,26 +14,18 @@
 //!   (final_objective=-2.1e2, final_grad_norm=3.4e1)
 //! ```
 //!
-//! Root cause (best read): the measure-jet representer length-scale is REML-learned
-//! through the same anisotropic-dial joint κ optimizer as Matérn/Duchon
-//! (`src/terms/smooth/spatial_optimization.rs`). The CLI builds its `FitOptions`
-//! in `src/main/run_fit.rs` with the outer smoothing tolerance `tol = 1e-6`,
-//! while the formula/FFI path builds them in
-//! `src/solver/workflow/materialize.rs:2193` with `tol = 1e-10` (deliberately
-//! tightened for the `w=c ⇔ c-fold replication` invariance, #893). At the
-//! tighter outer tolerance the REML-seeded κ optimization hits its 80-iteration
-//! cap with a large projected gradient and the non-convergence is escalated to a
-//! fatal error at `spatial_optimization.rs:2859` instead of falling back to the
-//! frozen baseline geometry (the path that succeeds for the CLI). The model is
-//! demonstrably fittable — the CLI fits this exact data — so the formula API
-//! aborting is the bug.
+//! Root cause as read when this test was written: the measure-jet representer
+//! length-scale is REML-learned through the same anisotropic-dial joint κ
+//! optimizer as Matérn/Duchon. The CLI built its `FitOptions` with the outer
+//! smoothing tolerance `tol = 1e-6`, while the formula/FFI path used `tol = 1e-10`
+//! (tightened for the `w=c ⇔ c-fold replication` invariance, #893). At the
+//! tighter tolerance the κ optimization hit its 80-iteration cap with a large
+//! projected gradient, and the non-convergence was escalated to a fatal error.
+//! The model is demonstrably fittable, since the CLI fits this exact data.
 //!
 //! This test fits the measure-jet smooth through `fit_from_formula` and asserts
-//! the fit produces a usable result (finite coefficients, a finite and
-//! genuinely-smoothed effective dof). It currently fails because
-//! `fit_from_formula` returns `Err(IntegrationFailed)`. When the formula path is
-//! made as robust as the CLI (align the tolerance, or fall back to the baseline
-//! geometry on κ-optimizer non-convergence), it will pass without edits.
+//! the fit produces a usable result: finite coefficients and a finite,
+//! genuinely-smoothed effective dof.
 
 use csv::StringRecord;
 use gam::{
@@ -82,8 +74,7 @@ fn measure_jet_formula_fit_succeeds_like_the_cli() {
 
     let result = fit_from_formula("y ~ s(x, bs=\"mjs\")", &data, &config).expect(
         "a 1-D Gaussian measure-jet smooth must fit through the formula API \
-         (the gam CLI fits this exact data); it currently aborts with a spatial \
-         kappa optimization non-convergence",
+         (the gam CLI fits this exact data)",
     );
 
     let FitResult::Standard(fit) = result else {

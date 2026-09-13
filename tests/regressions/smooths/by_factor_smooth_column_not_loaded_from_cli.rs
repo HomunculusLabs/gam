@@ -1,37 +1,14 @@
-//! Bug: a factor-`by` smooth `s(x, by=g)` is **unfittable from the `gam` CLI**
-//! because the `by=` grouping variable is never added to the set of columns the
-//! CLI reads from the input file. The fit aborts before any numerics with
-//! `column 'g' not found in data. Available columns: [x, y]`.
+//! Regression: a factor-`by` smooth `s(x, by=g)` is fittable from the `gam` CLI
+//! with `g` named only through `by=`, and recovers each level's curve.
 //!
-//! Root cause: `collect_term_column_names` (`src/main.rs:8013`) builds the
-//! CLI's required-column set from the parsed formula. For a smooth term it does
+//! The parser stores the `by=` grouping variable in `ParsedTerm::Smooth.options`
+//! as `{"by": "g"}`, not in the smooth's `vars`, and the design builder consumes
+//! it from there, so the column is genuinely required at fit time.
 //!
-//! ```ignore
-//! ParsedTerm::Smooth { vars, .. } => { out.extend(vars.iter().cloned()); }
-//! ```
-//!
-//! i.e. it collects only the smooth's `vars` (here `["x"]`) and ignores the
-//! `by=` variable, which the parser stores in `ParsedTerm::Smooth.options` as
-//! `{"by": "g"}` (`src/inference/formula_dsl.rs:1114`), not in `vars`. The
-//! design builder *does* consume it from there (`options.get("by")` in
-//! `src/terms/term_builder.rs:427` and `:1281`), so the column is genuinely
-//! required — but `required_columns_for_fit` → `required_columns_for_formula`
-//! (`src/main.rs:8059,8036`) never lists it, the CLI loads the file with only
-//! `{x, y}`, and `validate_response`/column resolution (`src/inference/data.rs:137`,
-//! `src/solver/workflow.rs:175`) rejects the fit with the "not found" error.
-//!
-//! The functionality itself is fully implemented and correct: declaring the
-//! by-variable a second time as a parametric term — `y ~ s(x, by=g) + g` —
-//! makes `collect_term_column_names` pick it up via the `ParsedTerm::Linear`
-//! arm, the column loads, and the fit recovers each level's curve to ~1e-2
-//! (verified). So the smooth works; it is merely unreachable from the CLI
-//! without a redundant `+ g`.
-//!
-//! The same gap also affects a numeric (continuous) `by=z` varying-coefficient
-//! smooth and the sibling helper `parsed_terms_reference_column`
-//! (`src/inference/formula_dsl.rs:1153`), which likewise only inspects `vars`.
-//!
-//! Reproduction (confirmed against the `gam` CLI):
+//! The defect this test was written for: the CLI's required-column walk
+//! (`collect_term_column_names`) collected only a smooth's `vars` (here `["x"]`)
+//! and ignored `by=`, so the CLI loaded the file with only `{x, y}` and the fit
+//! aborted before any numerics:
 //!
 //! ```text
 //!   $ gam fit data.csv 'y ~ s(x, by=g)' --out model.json
@@ -40,13 +17,15 @@
 //!   saved model: model.json
 //! ```
 //!
-//! Expected: `s(x, by=g)` loads `g` and fits, recovering the per-level curves.
+//! A numeric `by=z` varying-coefficient smooth had the same gap.
+//! `collect_term_column_names` (`crates/gam-cli/src/main/dataset_io.rs`) now
+//! delegates to the shared formula walk `parsed_term_column_names`
+//! (`crates/gam-terms/src/inference/formula_dsl.rs`), which adds a smooth's `by`
+//! column.
 //!
-//! This test fits the by-smooth, then predicts each level at a point where the
-//! two true curves have opposite sign, and asserts the recovered predictions
-//! have the correct, distinct signs — so it fails today at the fit step and
-//! passes once the `by=` column is added to the required-column set, with no
-//! edits.
+//! This test fits the by-smooth from the CLI, then predicts each level at a point
+//! where the two true curves have opposite sign, and asserts the recovered
+//! predictions have the correct, distinct signs.
 
 use gam::test_support::cli_harness::{read_prediction_means, write_predict_csv_rows};
 use std::path::Path;
@@ -103,8 +82,8 @@ fn by_factor_smooth_loads_its_by_column_and_recovers_per_level_curves() {
     let fit_out = fit_cmd.output().expect("spawn gam fit");
     assert!(
         fit_out.status.success(),
-        "`gam fit 'y ~ s(x, by=g)'` failed — the by= column was not loaded \
-         (collect_term_column_names ignores ParsedTerm::Smooth.options[\"by\"]).\n\
+        "`gam fit 'y ~ s(x, by=g)'` failed; the required-column set must include \
+         the by= column `g`.\n\
          --- stdout ---\n{}\n--- stderr ---\n{}",
         String::from_utf8_lossy(&fit_out.stdout),
         String::from_utf8_lossy(&fit_out.stderr),
