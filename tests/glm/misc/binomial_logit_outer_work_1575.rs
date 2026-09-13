@@ -108,7 +108,6 @@ fn logit_fit_options() -> FitOptions {
         nullspace_dims: vec![1, 1, 1],
         linear_constraints: None,
         firth_bias_reduction: false,
-        adaptive_regularization: None,
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
