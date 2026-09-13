@@ -1986,13 +1986,6 @@ impl LikelihoodScaleMetadata {
         }
     }
 
-    /// Whether the Negative-Binomial overdispersion `theta` is estimated from
-    /// data (the default for NB families, issue #802).
-    #[inline]
-    pub const fn negbin_theta_is_estimated(self) -> bool {
-        matches!(self, Self::EstimatedNegBinTheta { .. })
-    }
-
     /// The Negative-Binomial `theta` carried in the scale metadata (estimated
     /// or user-fixed), or `None` for non-NB families.
     #[inline]
@@ -2685,13 +2678,6 @@ impl GlmLikelihoodSpec {
             self.scale = LikelihoodScaleMetadata::EstimatedTweediePhi { phi };
         }
         self
-    }
-
-    /// Whether the Negative-Binomial overdispersion `theta` is estimated from
-    /// data (issue #802).
-    #[inline]
-    pub fn negbin_theta_is_estimated(&self) -> bool {
-        self.scale.negbin_theta_is_estimated()
     }
 
     /// Mutate the Negative-Binomial overdispersion `theta` in place, on BOTH the

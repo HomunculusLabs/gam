@@ -16,7 +16,7 @@
 //! `NEGBIN_THETA_JOINT_DRIFT_TOL` (5%), re-freeze the search at `θ_final`, reset
 //! the outer seed state, and re-run the ρ search; iterate to the joint `(ρ, θ)`
 //! fixed point or a round cap (8). For non-NB / user-fixed-θ fits the loop runs
-//! exactly once (the criterion `negbin_theta_is_estimated()` is never met), so
+//! exactly once (the scale metadata is never `EstimatedNegBinTheta`), so
 //! those fits are byte-identical to the pre-#1448 single pass.
 //!
 //! ## What this test asserts — public API, non-vacuous
@@ -47,6 +47,7 @@
 //! engaged and the alternation had a real fixed point to reach.
 
 use csv::StringRecord;
+use gam::types::LikelihoodScaleMetadata;
 use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
 };
@@ -129,7 +130,10 @@ fn owed_1448_negbin_theta_lambda_alternation_reaches_joint_fixed_point() {
         .negbin_theta()
         .expect("estimated NB fit must report an estimated theta_hat");
     assert!(
-        fit_est.fit.likelihood_scale.negbin_theta_is_estimated(),
+        matches!(
+            fit_est.fit.likelihood_scale,
+            LikelihoodScaleMetadata::EstimatedNegBinTheta { .. }
+        ),
         "Fit A must be in ESTIMATED-θ mode (the #1448 regime)",
     );
     let rho_estimated = fit_est.fit.log_lambdas.clone();
@@ -159,7 +163,10 @@ fn owed_1448_negbin_theta_lambda_alternation_reaches_joint_fixed_point() {
         panic!("negative-binomial GLM should produce a Standard fit");
     };
     assert!(
-        !fit_fixed.fit.likelihood_scale.negbin_theta_is_estimated(),
+        !matches!(
+            fit_fixed.fit.likelihood_scale,
+            LikelihoodScaleMetadata::EstimatedNegBinTheta { .. }
+        ),
         "Fit B must be in FIXED-θ mode",
     );
     let rho_fixed = fit_fixed.fit.log_lambdas.clone();
