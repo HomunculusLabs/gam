@@ -13,8 +13,8 @@
 
 use ndarray::Array1;
 use opt::{
-    Bfgs, BfgsError, FirstOrderSample, FusedObjective, GradientTolerance, InitialMetric,
-    MaxIterations, ObjectiveEvalError, Profile,
+    Bfgs, BfgsError, CostStallConfig, FirstOrderSample, FusedObjective, GradientTolerance,
+    InitialMetric, MaxIterations, ObjectiveEvalError, Profile, TerminationReason,
 };
 
 use crate::estimate::EstimationError;
@@ -43,6 +43,13 @@ pub(crate) struct RemlOuterGpuInput {
     pub gradient_tolerance: GradientTolerance,
     /// Hard cap on outer BFGS iterations.
     pub max_iterations: usize,
+    /// Relative improvement floor of the walk's cost-stall stop: an accepted
+    /// step buys nothing when it improves the best value by at most
+    /// `rel_tol·(1 + |best|)`. The host BFGS arm derives the same floor (#2817).
+    pub cost_stall_rel_tol: f64,
+    /// Projected-gradient band a cost stall must clear to count as stationary
+    /// rather than as a non-converged floor. Mirrors the host arm's band.
+    pub cost_stall_projected_grad_tol: f64,
     /// Per-axis step caps applied to BFGS line-search trial points. `None`
     /// disables axis-wise capping (matches the default opt::Bfgs behaviour).
     pub axis_step_caps: Option<Array1<f64>>,
@@ -198,13 +205,25 @@ where
         .with_gradient_tolerance(input.gradient_tolerance)
         .with_max_iterations(max_iterations)
         .with_initial_metric(InitialMetric::Scalar(initial_scale))
-        .with_profile(Profile::Robust);
+        .with_profile(Profile::Robust)
+        // opt's native cost stall with escapes disabled: a window that bought no
+        // resolved descent ends the walk at its best iterate, instead of the
+        // iteration count (#2817). Whether that point is stationary rides on its
+        // termination, below.
+        .with_cost_stall(CostStallConfig::new(
+            input.cost_stall_rel_tol,
+            crate::rho_optimizer::COST_STALL_WINDOW,
+            input.cost_stall_projected_grad_tol,
+        ));
     if let Some(caps) = input.axis_step_caps {
         optimizer = optimizer.with_axis_step_caps(caps);
     }
 
     let (solution, converged) = match optimizer.run() {
-        Ok(solution) => (solution, true),
+        Ok(solution) => {
+            let converged = !matches!(solution.termination, TerminationReason::CostStallFloor { .. });
+            (solution, converged)
+        }
         Err(BfgsError::MaxIterationsReached { last_solution })
         | Err(BfgsError::LineSearchFailed { last_solution, .. }) => (*last_solution, false),
         Err(BfgsError::ObjectiveFailed { message }) => {
@@ -253,6 +272,8 @@ mod tests {
             bounds: (Array1::<f64>::zeros(0), Array1::<f64>::zeros(0)),
             gradient_tolerance: GradientTolerance::absolute(1.0e-6),
             max_iterations: 10,
+            cost_stall_rel_tol: 1.0e-7,
+            cost_stall_projected_grad_tol: 1.0e-3,
             axis_step_caps: None,
             admission: dummy_admission(0),
             seed_objective: 42.0,
@@ -283,6 +304,8 @@ mod tests {
             bounds: (Array1::from_elem(4, -10.0), Array1::from_elem(4, 10.0)),
             gradient_tolerance: GradientTolerance::absolute(1.0e-8),
             max_iterations: 100,
+            cost_stall_rel_tol: 1.0e-7,
+            cost_stall_projected_grad_tol: 1.0e-3,
             axis_step_caps: None,
             admission: dummy_admission(4),
             seed_objective: 0.5 * seed_diff.dot(&seed_diff),
@@ -310,6 +333,8 @@ mod tests {
             bounds: (Array1::from(vec![-1.0]), Array1::from(vec![1.0])),
             gradient_tolerance: GradientTolerance::absolute(1.0e-8),
             max_iterations: 10,
+            cost_stall_rel_tol: 1.0e-7,
+            cost_stall_projected_grad_tol: 1.0e-3,
             axis_step_caps: None,
             admission: dummy_admission(1),
             seed_objective: 3.0,

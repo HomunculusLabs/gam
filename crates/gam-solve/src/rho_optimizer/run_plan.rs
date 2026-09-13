@@ -2110,6 +2110,16 @@ pub(crate) fn run_outer_with_plan(
                         bounds: bounds_dev,
                         gradient_tolerance: grad_tol_dev,
                         max_iterations: config.max_iter,
+                        // The host BFGS arm's cost-stall floor and band, derived the
+                        // same way, so the device walk ends on the same progress
+                        // test instead of its iteration count (#2817).
+                        cost_stall_rel_tol: config
+                            .rel_cost_tolerance
+                            .unwrap_or(config.tolerance * 1.0e-2)
+                            .max(COST_STALL_REL_TOL_FLOOR),
+                        cost_stall_projected_grad_tol: grad_tol_dev
+                            .abs
+                            .max(COST_STALL_PROJECTED_GRAD_FLOOR),
                         axis_step_caps: axis_caps_dev,
                         admission,
                         seed_objective: seed_eval_dev.cost,
