@@ -1043,12 +1043,21 @@ pub fn streamed_lambda_max(
     // Both ends are checked: the operator and the diagonal are two independent
     // readings of the same object, and this is the one place they can be
     // compared without materializing anything.
-    let slack = f64::EPSILON * (dim as f64) * trace;
+    //
+    // Each reading accumulates every root row into each entry it touches, so a
+    // relative rounding of `ε` per accumulated term bounds each reading's
+    // disagreement with the exact operator by `root_rows·ε` of its scale, and the
+    // trace sums `dim` such entries. `dim·ε` alone was the band of the trace sum
+    // without its terms: a rank-one curvature (`λ_max = tr(H)` exactly) read
+    // both ends equal to seven digits and still refused.
+    let slack = f64::EPSILON * ((dim + operator.root_rows()) as f64) * trace;
     if lambda_max < -slack || lambda_max > trace + slack {
         return Err(format!(
-            "streamed curvature: λ_max = {lambda_max:.6e} is outside the PSD bracket \
-             [0, tr(H) = {trace:.6e}] its own diagonal gives; the operator's matvec and \
-             its diagonal disagree"
+            "streamed curvature: λ_max = {lambda_max:.17e} is outside the PSD bracket \
+             [0, tr(H) = {trace:.17e}] its own diagonal gives, beyond the rounding band \
+             {slack:.3e} of {} root rows over {dim} parameters; the operator's matvec and \
+             its diagonal disagree",
+            operator.root_rows(),
         ));
     }
     let lambda_max = lambda_max.clamp(0.0, trace);
