@@ -332,7 +332,9 @@ pub(crate) fn factor_gauge_deflated_evidence_row(
             continue;
         }
         let norm_sq = gauge.iter().map(|&v| v * v).sum::<f64>();
-        if !(norm_sq.is_finite() && norm_sq > 1.0e-24) {
+        // Only a zero gauge has no direction. The qualification bar below is
+        // proportional to `|g|^2`, so a small gauge qualifies exactly as a unit one would.
+        if !(norm_sq.is_finite() && norm_sq > 0.0) {
             continue;
         }
         let curvature = row_gauge_curvature(row, d, gauge)?;
