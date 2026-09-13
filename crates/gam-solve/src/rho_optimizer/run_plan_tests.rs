@@ -2176,6 +2176,8 @@ fn hybrid_efs_backtracking_uses_half_step_after_first_rejection() {
         consecutive_psi_zero_iters: 0,
         last_restored_incumbent_streak: None,
         recurrent_incumbent_exit: Arc::new(Mutex::new(None)),
+        progress: FixedPointProgress::new(COST_STALL_REL_TOL_FLOOR, COST_STALL_WINDOW),
+        unprogressing_exit: Arc::new(Mutex::new(None)),
     };
 
     let sample = bridge
@@ -2255,6 +2257,8 @@ fn hybrid_efs_backtracking_propagates_fatal_cost_failure() {
         consecutive_psi_zero_iters: 0,
         last_restored_incumbent_streak: None,
         recurrent_incumbent_exit: Arc::new(Mutex::new(None)),
+        progress: FixedPointProgress::new(COST_STALL_REL_TOL_FLOOR, COST_STALL_WINDOW),
+        unprogressing_exit: Arc::new(Mutex::new(None)),
     };
 
     let error = bridge
@@ -2334,6 +2338,8 @@ fn fixed_point_stops_on_second_consecutive_restored_incumbent_2241() {
         consecutive_psi_zero_iters: 0,
         last_restored_incumbent_streak: None,
         recurrent_incumbent_exit: Arc::new(Mutex::new(None)),
+        progress: FixedPointProgress::new(COST_STALL_REL_TOL_FLOOR, COST_STALL_WINDOW),
+        unprogressing_exit: Arc::new(Mutex::new(None)),
     };
 
     let first = bridge

@@ -882,6 +882,73 @@ fn an_operator_route_stall_that_bought_resolved_descent_keeps_moving_2817() {
     assert!(published.is_none(), "a licensed run publishes no stop");
 }
 
+// ─── an unprogressing fixed-point walk stops ─────────────────────────────────
+
+/// A fixed-point walk caught in a limit cycle stops when its second window
+/// fills (#2817).
+///
+/// The map alternates between two points and never improves on the first
+/// value, so nothing after the first evaluation buys anything. The first filled
+/// window is licensed. The second bought no resolved improvement and did not
+/// contract the step at the incumbent, so the walk stops there. Before, a
+/// cycling walk ran until its iteration count ran out.
+#[test]
+fn a_limit_cycling_fixed_point_walk_stops_at_its_second_window_2817() {
+    let mut progress = FixedPointProgress::new(FLOOR_2817, COST_STALL_WINDOW);
+    let stop = 2 * COST_STALL_WINDOW;
+    for index in 0..=stop {
+        let value = if index % 2 == 0 {
+            COST_2817
+        } else {
+            COST_2817 + 1.0
+        };
+        let stopped = progress.observe(value, 0.5);
+        assert_eq!(
+            stopped,
+            index == stop,
+            "evaluation {index}: the walk must stop exactly when its second window fills"
+        );
+    }
+}
+
+/// NEGATIVE CONTROL: no resolved improvement between the windows, but the step
+/// at the incumbent halved. The walk is converging, so it keeps walking.
+///
+/// Each evaluation improves by `1e-6`, below the resolution `1.001e-4`, so every
+/// one counts toward the window while the incumbent still moves and carries the
+/// step of the point that set it.
+#[test]
+fn a_fixed_point_walk_whose_step_contracted_keeps_walking_2817() {
+    let mut progress = FixedPointProgress::new(FLOOR_2817, COST_STALL_WINDOW);
+    for index in 0..=(2 * COST_STALL_WINDOW + 1) {
+        let step_norm = if index <= COST_STALL_WINDOW { 0.5 } else { 0.25 };
+        let stopped = progress.observe(COST_2817 - 1.0e-6 * index as f64, step_norm);
+        assert!(
+            !stopped,
+            "evaluation {index}: a walk whose incumbent step halved must keep walking"
+        );
+    }
+}
+
+/// NEGATIVE CONTROL: the incumbent improved by 10000 resolutions between the two
+/// windows, which licenses the second.
+#[test]
+fn a_fixed_point_walk_that_bought_resolved_improvement_keeps_walking_2817() {
+    let mut progress = FixedPointProgress::new(FLOOR_2817, COST_STALL_WINDOW);
+    for index in 0..=(2 * COST_STALL_WINDOW + 1) {
+        let value = if index <= COST_STALL_WINDOW {
+            COST_2817
+        } else {
+            COST_2817 - 1.0
+        };
+        let stopped = progress.observe(value, 0.5);
+        assert!(
+            !stopped,
+            "evaluation {index}: a walk that bought a resolved improvement must keep walking"
+        );
+    }
+}
+
 // ─── an exhausted budget refuses ─────────────────────────────────────────────
 
 /// An exhausted ARC budget is a refusal that carries its iteration ledger, not a

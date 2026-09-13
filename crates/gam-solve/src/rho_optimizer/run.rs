@@ -9043,6 +9043,9 @@ pub(crate) fn run_fixed_point_outer_solver(
     // count comes back through this cell and is stamped onto the returned
     // `OuterResult` below.
     let recurrent_incumbent_exit = Arc::new(Mutex::new(None));
+    // Publication slot for the unprogressing-walk stop (#2817), read below the
+    // same way.
+    let unprogressing_exit = Arc::new(Mutex::new(None));
     let evaluated_inner_seed = Arc::new(Mutex::new(None));
     let mut objective = OuterFixedPointBridge {
         obj: &mut *obj,
@@ -9053,6 +9056,16 @@ pub(crate) fn run_fixed_point_outer_solver(
         consecutive_psi_zero_iters: 0,
         last_restored_incumbent_streak: None,
         recurrent_incumbent_exit: Arc::clone(&recurrent_incumbent_exit),
+        // The same resolution floor the gradient routes' cost-stall guard uses,
+        // and its first-order window.
+        progress: FixedPointProgress::new(
+            config
+                .rel_cost_tolerance
+                .unwrap_or(config.tolerance * 1.0e-2)
+                .max(COST_STALL_REL_TOL_FLOOR),
+            COST_STALL_WINDOW,
+        ),
+        unprogressing_exit: Arc::clone(&unprogressing_exit),
     };
     let seed_sample = match objective.eval_step(seed) {
         Ok(sample) => sample,
@@ -9139,6 +9152,33 @@ pub(crate) fn run_fixed_point_outer_solver(
                     }),
                 };
                 return Ok(result);
+            }
+            // The bridge stopped a walk that bought nothing since its previous
+            // window (#2817). That is no convergence claim: the best iterate the
+            // walk evaluated is a checkpoint for the terminal certificate, as an
+            // exhausted walk's is.
+            if let Some(evaluations) = unprogressing_exit.lock().ok().and_then(|slot| *slot) {
+                let best = best_iterate
+                    .lock()
+                    .expect("fixed-point best-iterate publication lock poisoned")
+                    .clone();
+                let mut checkpoint = if best.sample.value.is_finite()
+                    && (!result.final_value.is_finite() || best.sample.value < result.final_value)
+                {
+                    let mut substituted = OuterResult::new(
+                        best.point,
+                        best.sample.value,
+                        result.iterations.max(evaluations),
+                        false,
+                        the_plan,
+                    );
+                    substituted.origin = OuterResultOrigin::FixedPointBestIterateSubstitution;
+                    substituted
+                } else {
+                    result
+                };
+                checkpoint.termination = OuterTermination::Exhausted;
+                return Ok(checkpoint);
             }
             // Every other stop is a step-norm test: the map proposed a step below
             // `config.tolerance`, through the bridge's per-coordinate test or opt's

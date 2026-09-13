@@ -4247,6 +4247,85 @@ pub(crate) fn build_bridge_hessian_for_source(
     }
 }
 
+/// The progress certificate that ends a stalled fixed-point walk instead of an
+/// iteration count (#2817).
+///
+/// A fixed-point walk is not a descent method: neither its cost nor its step is
+/// monotone along it, and a limit cycle of the map buys nothing forever. What
+/// the walk can buy is a better incumbent, a value lower by more than the
+/// criterion's resolution `rel_tol·(1 + |V|)`, or near the fixed point a smaller
+/// proposed step at the incumbent. `window` evaluations without a resolved
+/// improvement fill a window, and a filled window continues only when, since
+/// the previous licensed window, the incumbent improved by a resolution or its
+/// step contracted: the rule [`CostStallGuard::license_continuation`] applies on
+/// the gradient routes, with the proposed step standing in for the gradient.
+///
+/// Termination needs no count. The criterion is bounded below on the declared
+/// domain, so resolved improvements are finite, and every other licence strictly
+/// lowers a floating-point step norm bounded below by zero.
+pub(crate) struct FixedPointProgress {
+    rel_tol: f64,
+    window: usize,
+    best_value: f64,
+    best_step_norm: f64,
+    streak: usize,
+    licensed_incumbent: Option<(f64, f64)>,
+    evaluations: usize,
+}
+
+impl FixedPointProgress {
+    pub(crate) fn new(rel_tol: f64, window: usize) -> Self {
+        Self {
+            rel_tol,
+            window,
+            best_value: f64::INFINITY,
+            best_step_norm: f64::INFINITY,
+            streak: 0,
+            licensed_incumbent: None,
+            evaluations: 0,
+        }
+    }
+
+    /// Fold one evaluated point in. `true` when a filled window has bought
+    /// nothing since the previous licensed one, so the walk should stop.
+    pub(crate) fn observe(&mut self, value: f64, step_norm: f64) -> bool {
+        self.evaluations = self.evaluations.saturating_add(1);
+        if !value.is_finite() || !step_norm.is_finite() {
+            return false;
+        }
+        if value < self.best_value {
+            let resolved = self.best_value - value > self.rel_tol * (1.0 + value.abs());
+            self.best_value = value;
+            self.best_step_norm = step_norm;
+            if resolved {
+                self.streak = 0;
+                return false;
+            }
+        }
+        self.streak = self.streak.saturating_add(1);
+        if self.streak < self.window {
+            return false;
+        }
+        self.streak = 0;
+        let licensed = match self.licensed_incumbent {
+            None => true,
+            Some((previous_value, previous_step_norm)) => {
+                previous_value - self.best_value > self.rel_tol * (1.0 + self.best_value.abs())
+                    || self.best_step_norm < previous_step_norm
+            }
+        };
+        if licensed {
+            self.licensed_incumbent = Some((self.best_value, self.best_step_norm));
+        }
+        !licensed
+    }
+
+    /// Evaluations folded in so far.
+    pub(crate) fn evaluations(&self) -> usize {
+        self.evaluations
+    }
+}
+
 pub(crate) struct OuterFixedPointBridge<'a> {
     pub(crate) obj: &'a mut dyn OuterObjective,
     pub(crate) layout: OuterThetaLayout,
@@ -4282,6 +4361,12 @@ pub(crate) struct OuterFixedPointBridge<'a> {
     /// [`OuterConvergedVia::RecurrentIncumbent`]. `None` slot after the run
     /// means the walk stopped through the ordinary step-norm test instead.
     pub(crate) recurrent_incumbent_exit: Arc<Mutex<Option<usize>>>,
+    /// The progress certificate that stops a walk that has bought nothing since
+    /// its previous window (#2817).
+    pub(crate) progress: FixedPointProgress,
+    /// Publication slot for that stop: the evaluations folded in when it fired.
+    /// `None` after the run means the walk stopped some other way.
+    pub(crate) unprogressing_exit: Arc<Mutex<Option<usize>>>,
 }
 
 impl OuterFixedPointBridge<'_> {
@@ -4576,6 +4661,29 @@ impl FixedPointObjective for OuterFixedPointBridge<'_> {
                 restores,
                 self.layout.rho_dim(),
                 self.layout.psi_dim,
+            );
+            return Ok(FixedPointSample {
+                value: current_cost,
+                step: raw_step,
+                status: FixedPointStatus::Stop,
+            });
+        }
+        // #2817 — a walk that has bought neither a resolved improvement nor a
+        // smaller step since its previous window stops at the incumbent, rather
+        // than walking until an iteration count runs out.
+        if self
+            .progress
+            .observe(current_cost, raw_step.dot(&raw_step).sqrt())
+        {
+            let evaluations = self.progress.evaluations();
+            if let Ok(mut slot) = self.unprogressing_exit.lock() {
+                *slot = Some(evaluations);
+            }
+            log::info!(
+                "[OUTER] fixed-point walk stopping at an unprogressing stall after \
+                 {evaluations} evaluation(s): a window bought no resolved improvement of the \
+                 incumbent and no contraction of its step since the previous one; the terminal \
+                 certificate judges the incumbent (#2817). cost={current_cost:.6e}"
             );
             return Ok(FixedPointSample {
                 value: current_cost,
