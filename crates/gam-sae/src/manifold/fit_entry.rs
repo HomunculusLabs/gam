@@ -1975,6 +1975,14 @@ pub fn run_sae_manifold_certify(
     term.assignment
         .validate_rho_domain(&rho)
         .map_err(SaeFitError::Fit)?;
+    // The joint fit's entry stages, derived from the installed state. A native fit
+    // passes them before its outer loop, so its atoms can carry a data-supported basis
+    // reduction (#1117) and decoder frames (#972). An external state arrives full
+    // width, and the frozen zero-iteration joint fit returns before those stages, so
+    // without them the audit prices a different criterion than the fit it certifies
+    // (#2263: job 631598 priced the native certificate on border 2 and the audit on 6).
+    term.reduce_atoms_to_data_supported_rank().map_err(SaeFitError::Fit)?;
+    term.ensure_decoder_frames_active_for_current_decoder().map_err(SaeFitError::Fit)?;
 
     let inner_audit = installed_inner_kkt_audit(&mut term, z.view(), &rho, &registry)?;
     if !inner_audit.certifies() {
