@@ -777,6 +777,34 @@ fn survival_location_scale_outer_link_shape_gradient_matches_finite_difference_s
         assert!(probe.inner_converged, "a probe inner solve did not converge");
         probe.objective
     };
+    // The base point again, warm-started from the base mode, value-only and with
+    // the gradient. An objective or gradient that moves under a warm re-solve came
+    // from a state the base solve had not settled; a value-only objective that
+    // differs from the value-and-gradient objective at the same mode is a value
+    // path that disagrees with the gradient path.
+    let warm_value = value_at(epsilon0, log_delta0, &rho);
+    let warm = crate::custom_family::evaluate_custom_family_joint_hyper_owned(
+        &family_at(epsilon0, log_delta0),
+        &specs,
+        &options,
+        &rho,
+        &layout_at(epsilon0, log_delta0),
+        Some(&base.warm_start),
+        gam_problem::EvalMode::ValueAndGradient,
+    )
+    .expect("warm exact-joint LAML value and gradient at the base point")
+    .result;
+    eprintln!(
+        "[2695] base objective={:.12e}, warm value-only={:.12e}, warm value+gradient={:.12e} \
+         (base converged {}, warm converged {})",
+        base.objective, warm_value, warm.objective, base.inner_converged, warm.inner_converged
+    );
+    for k in 0..base.gradient.len() {
+        eprintln!(
+            "[2695] component {k}: base gradient={:.9e}, warm re-solve gradient={:.9e}",
+            base.gradient[k], warm.gradient[k]
+        );
+    }
     let shape_difference = |axis: usize, h: f64| {
         let (plus, minus) = if axis == 0 {
             ((epsilon0 + h, log_delta0), (epsilon0 - h, log_delta0))
