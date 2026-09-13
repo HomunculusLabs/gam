@@ -1096,7 +1096,10 @@ pub(crate) fn joint_unpenalized_dim(p_local: usize, active_penalties: &[ActivePe
                 // All penalties identically zero ⇒ unpenalized block.
                 return p_local;
             }
-            let tol = max_abs * (p_local as f64) * 1e-12;
+            // The joint null space is read at the crate's one penalty-spectrum rank
+            // cutoff, so this dimension agrees with the ranks the term's penalties
+            // carry everywhere else.
+            let tol = crate::basis::spectral_tolerance(&evals);
             let rank = evals.iter().filter(|&&v| v > tol).count();
             return p_local.saturating_sub(rank);
         }
