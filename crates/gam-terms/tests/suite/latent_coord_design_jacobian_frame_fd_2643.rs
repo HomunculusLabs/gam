@@ -27,7 +27,7 @@ use gam_terms::basis::{
     CenterStrategy, LatentCoordDesignDerivative, LocalDesignJacobianProvider, MaternBasisSpec,
     MaternIdentifiability, MaternLengthScale, MaternNu,
 };
-use gam_terms::latent::{LatentCoordValues, LatentIdMode};
+use gam_terms::latent::{LatentCoordValues, LatentIdMode, LatentManifold};
 use gam_terms::smooth::input_standardization::estimate_isotropic_scale;
 use gam_terms::smooth::{
     ShapeConstraint, SmoothBasisSpec, SmoothTermSpec, TermCollectionSpec,
@@ -154,12 +154,10 @@ fn operator_under_test(
     else {
         panic!("fixture must produce Matérn metadata");
     };
-    let flat = Array1::from_iter(data.iter().copied());
-    let latent = std::sync::Arc::new(LatentCoordValues::from_flat(
-        flat,
-        data.nrows(),
-        2,
+    let latent = std::sync::Arc::new(LatentCoordValues::from_matrix_with_manifold(
+        data.view(),
         LatentIdMode::None,
+        LatentManifold::Euclidean,
     ));
     LatentCoordDesignDerivative::new_matern(
         latent,

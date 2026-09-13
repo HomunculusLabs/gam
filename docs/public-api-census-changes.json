@@ -3554,5 +3554,14 @@
     "reason": "#2899, SPEC rule 25. SimplicialFactor::factor_nnz returned l_values.len(); its one caller, SparseExactFactor::factor_nnz, was deleted by #2829 as having no product user, and no other caller exists.",
     "evidence": "At the base, git grep -w factor_nnz over crates, src, tests, bench and examples finds only the declaration in crates/gam-linalg/src/sparse_exact.rs. The earlier #2829 ledger entry that deleted SparseExactFactor::factor_nnz describes it as delegating to this accessor. Guarded check job 609222 (/scratch.global/sauer354/pool/prune-api-a/check42.609222.log) compiled this deletion together with a since-dropped RidgePolicy slice: cargo check --workspace --all-targets --exclude gam-pyffi exited 0.",
     "base": "3adfb621fa3be424839a4f7cd16baf3690e49f10"
+  },
+  {
+    "base": "eba81029454c21085969e4e35ebcaeb63902e46a",
+    "removed": {
+      "crates/gam-terms/src/latent.rs::from_flat": 1,
+      "crates/gam-terms/src/latent.rs::from_flat_with_manifold": 1
+    },
+    "reason": "#2829 product-root rule: LatentCoordValues::from_flat, restored in place from d484a091a, has no product caller. Only the gam-terms latent_coord_design_jacobian_frame_fd_2643 test calls it. from_flat_with_manifold, narrowed to pub(crate) earlier, is called only by from_flat. Both are deleted. The test builds the same Euclidean latent block through the public from_matrix_with_manifold: the fixture flattened its 2-column matrix row-major, which is exactly the layout that constructor writes.",
+    "evidence": "At eba81029454c21085969e4e35ebcaeb63902e46a, git grep -n -E 'LatentCoordValues::from_flat\\(|Self::from_flat\\(' over crates, src and tests finds one call, in crates/gam-terms/tests/suite/latent_coord_design_jacobian_frame_fd_2643.rs. The other from_flat declarations in the tree belong to SaeManifoldRho, the gam-solve latent cache and gam-geometry. git grep -n -w from_flat_with_manifold finds only its declaration, its call inside from_flat and an error-string context in from_flat_with_manifold_and_retraction_and_id. Pool job 612031 on sw0k at b4753af5fe359ab3ad65afaa6ef90a42f10e13a4, the chain latentflat, linalg, runtime, solve, spec, terms, logit, cascade, kl on 07f9b8d88bcd5a060d5003a98298a977412467cf, whose Rust blobs this landing reproduces (log /scratch.global/sauer354/pool/api2829/check.612031.log): source_removal_guard.py and public_api_census.py exited 0 on all nine links, and cargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0. The same job's run of the moved residual_cascade past-cap test had not reported when these landed."
   }
 ]

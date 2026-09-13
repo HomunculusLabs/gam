@@ -1199,8 +1199,8 @@ crates/gam-terms/src/inference/lawley.rs	lawley_lr_bartlett_factor_with_rho_vari
 crates/gam-terms/src/inference/structure_evidence.rs	confirmed	retired-no-product-user
 crates/gam-terms/src/inference/structure_evidence.rs	contested	retired-no-product-user
 crates/gam-terms/src/latent.rs	apply_tospec	retired-no-product-user
-crates/gam-terms/src/latent.rs	from_flat	restored-in-place
-crates/gam-terms/src/latent.rs	from_flat_with_manifold	narrowed-to-crate
+crates/gam-terms/src/latent.rs	from_flat	retired-no-product-user
+crates/gam-terms/src/latent.rs	from_flat_with_manifold	retired-no-product-user
 crates/gam-terms/src/latent.rs	project_matrix_columns_to_tangent	retired-by-later-deletion:dc325f1909
 crates/gam-terms/src/latent.rs	project_matrix_columns_to_tangent_into	retired-no-product-user
 crates/gam-terms/src/smooth/coefficient_transforms.rs	cumulative_exp	retired-by-later-deletion:843e0fc200

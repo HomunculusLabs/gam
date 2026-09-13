@@ -914,41 +914,6 @@ impl LatentCoordValues {
         out
     }
 
-    /// Construct directly from a flat (`n_obs * latent_dim`) array.
-    pub fn from_flat(
-        values: Array1<f64>,
-        n_obs: usize,
-        latent_dim: usize,
-        id_mode: LatentIdMode,
-    ) -> Self {
-        Self::from_flat_with_manifold(
-            values,
-            n_obs,
-            latent_dim,
-            id_mode,
-            LatentManifold::Euclidean,
-        )
-    }
-
-    /// Construct directly from a flat array and explicit latent manifold.
-    pub(crate) fn from_flat_with_manifold(
-        values: Array1<f64>,
-        n_obs: usize,
-        latent_dim: usize,
-        id_mode: LatentIdMode,
-        manifold: LatentManifold,
-    ) -> Self {
-        Self::from_flat_with_manifold_and_retraction_and_id(
-            values,
-            n_obs,
-            latent_dim,
-            id_mode,
-            manifold,
-            LatentRetractionRegistry::all_euclidean(),
-            next_latent_coord_id(),
-        )
-    }
-
     pub fn from_flat_with_manifold_and_retraction_and_id(
         values: Array1<f64>,
         n_obs: usize,
