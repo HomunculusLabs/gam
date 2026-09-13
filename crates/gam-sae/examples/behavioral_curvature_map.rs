@@ -293,6 +293,7 @@ fn run(args: &Args) -> Result<PathBuf, String> {
                 "adjacent": b == a + 1,
                 "winding": class.winding,
                 "class": format!("{:?}", class.class),
+                "class_probability": jf(class.class_probability()),
                 "phase_rad": jf(class.phase),
                 "phase_deg": jf(class.phase_degrees()),
                 "o2_defect": jf(class.defect),

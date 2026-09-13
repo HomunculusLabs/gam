@@ -185,6 +185,10 @@ fn run(
     println!("transport_n_obs={}", report.n_obs);
     if let Some(circle) = &report.circle {
         println!("transport_rigid_class={:?}", circle.class);
+        println!(
+            "transport_rigid_class_probability={:.9}",
+            circle.class_probability()
+        );
         println!("transport_winding={}", circle.winding);
         println!("transport_phase_rad={:.9}", circle.phase);
         println!("transport_phase_degrees={:.9}", circle.phase_degrees());

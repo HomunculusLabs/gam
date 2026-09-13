@@ -90,8 +90,9 @@ fn run(path_a: &Path, path_b: &Path, max_rows: usize) -> Result<(), String> {
     );
     if let Some(circle) = &report.circle {
         println!(
-            "O(2): class={:?} winding={:+} phase={:+.6} rad ({:+.3} deg) defect={:.6e} gauge_scale={:.6e}",
+            "O(2): class={:?} p={:.6} winding={:+} phase={:+.6} rad ({:+.3} deg) defect={:.6e} gauge_scale={:.6e}",
             circle.class,
+            circle.class_probability(),
             circle.winding,
             circle.phase,
             circle.phase_degrees(),

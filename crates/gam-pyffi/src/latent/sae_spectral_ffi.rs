@@ -146,7 +146,13 @@ fn transport_report_dict<'py>(
     out.set_item("defect", report.defect)?;
     out.set_item("resultant_shift", report.resultant_shift)?;
     out.set_item("resultant_reflect", report.resultant_reflect)?;
+    let class_probabilities = PyDict::new(py);
+    class_probabilities.set_item("mixing", report.class_probabilities.mixing)?;
+    class_probabilities.set_item("shift", report.class_probabilities.shift)?;
+    class_probabilities.set_item("reflect", report.class_probabilities.reflect)?;
     out.set_item("class", class_name)?;
+    out.set_item("class_probability", report.class_probability())?;
+    out.set_item("class_probabilities", class_probabilities)?;
     Ok(out)
 }
 
