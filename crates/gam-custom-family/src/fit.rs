@@ -3234,13 +3234,13 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     warm,
                 );
             }
-            return Err(CustomFamilyError::Optimization {
-                context: "fit_custom_family outer smoothing",
+            return Err(CustomFamilyError::OuterSmoothingFailed {
                 reason: format!(
                     "outer smoothing optimization failed certified-fit validation after exhausting strategy fallbacks: \
                      {e}; last_evaluated_rho={last_evaluated_rho:?}; no fit was assembled.\
                      {last_error_detail}"
                 ),
+                last_refusal: obj.state.last_error.take().map(Box::new),
             });
         }
     };

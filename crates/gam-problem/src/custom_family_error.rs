@@ -665,6 +665,21 @@ pub enum CustomFamilyError {
     /// untrue.
     #[error("inner solve refused this trial point: {reason}")]
     TrialPointRefused { reason: String },
+    /// The outer smoothing search ended without a certified optimum after
+    /// every strategy fallback, so no fit was assembled.
+    ///
+    /// `last_refusal` is the typed refusal of the search's last objective
+    /// evaluation, or `None` when that evaluation did not refuse. It used to
+    /// travel only inside [`Self::Optimization`]'s text, so a caller that acts
+    /// on WHY the fit refused could only substring-match the message. The
+    /// Jeffreys arming lifecycle is one: it arms on a descending ray, a null
+    /// penalized Hessian or a divergent inner state (#979). The rendered message
+    /// is the one that `Optimization` printed for this context.
+    #[error("custom-family optimization error in fit_custom_family outer smoothing: {reason}")]
+    OuterSmoothingFailed {
+        reason: String,
+        last_refusal: Option<Box<CustomFamilyError>>,
+    },
 }
 
 impl CustomFamilyError {
@@ -1348,7 +1363,10 @@ impl CustomFamilyError {
             | Self::UnsupportedConfiguration { .. }
             | Self::BasisDecompositionFailed { .. }
             | Self::IdentifiabilityFailure { .. }
-            | Self::MapUniquenessFailure { .. } => false,
+            | Self::MapUniquenessFailure { .. }
+            // The whole search refused; its last refusal is carried for the
+            // caller to read, not re-graded here.
+            | Self::OuterSmoothingFailed { .. } => false,
         }
     }
 }
