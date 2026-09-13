@@ -212,17 +212,18 @@ impl DenseSpectralOperator {
             for index in indices.into_iter().take(rank) {
                 mask[index] = true;
             }
-            // Structural aliases account only for roundoff-sized eigenvalues.
+            // Structural aliases account only for roundoff-sized eigenvalues: an
+            // excluded eigenvalue outside `H`'s rounding band is curvature
+            // `identified_rank` would keep, so it is refused rather than dropped.
             // A negative saddle direction must not be discarded in favor of a
             // tiny positive numerical alias when selecting the retained rank.
-            let spectral_scale = eigenvalues
-                .iter()
-                .fold(0.0_f64, |scale, value| scale.max(value.abs()));
-            let backward_error = 64.0 * n.max(1) as f64 * f64::EPSILON * spectral_scale;
+            let rounding_band = Self::rounding_band(eigenvalues.as_slice().ok_or_else(|| {
+                "dense spectral pseudo-logdet: the eigenvalue array is not contiguous".to_string()
+            })?);
             for (index, &value) in eigenvalues.iter().enumerate() {
-                if !mask[index] && value.abs() > backward_error {
+                if !mask[index] && value.abs() > rounding_band {
                     return Err(format!(
-                        "Hessian excluded structural alias has resolved curvature {value:.6e} (eigenvalue backward error {backward_error:.6e})"
+                        "Hessian excluded structural alias has resolved curvature {value:.6e} (outside H's rounding band p*eps*||H||_2 = {rounding_band:.6e})"
                     ));
                 }
             }
