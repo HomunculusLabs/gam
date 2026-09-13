@@ -678,7 +678,7 @@ impl TorusFlowBasis {
     }
 
     /// Sample every mode (value + gradient) at chart point `t`, in `θ` order.
-    pub fn mode_samples(&self, t: [f64; 2]) -> Vec<FlowModeSample> {
+    pub(crate) fn mode_samples(&self, t: [f64; 2]) -> Vec<FlowModeSample> {
         let tau = std::f64::consts::TAU;
         let mut out = Vec::with_capacity(self.dim());
         for component in 0..2 {
@@ -1938,7 +1938,7 @@ impl FreePatchFlowBasis {
     /// (∂f/∂u_d)·(∂u_d/∂t_d) = (∂f/∂u_d)·inv_half[d]` by the chain rule, so the
     /// returned gradient is already in the chart coordinate the flow Jacobian
     /// `Dφ = I + Σ θ_k ∂v_k/∂t` lives in.
-    pub fn mode_samples(&self, t: [f64; 2]) -> Vec<FlowModeSample> {
+    pub(crate) fn mode_samples(&self, t: [f64; 2]) -> Vec<FlowModeSample> {
         let u = self.normalize(t);
         let mut out = Vec::with_capacity(self.dim());
         for component in 0..2 {

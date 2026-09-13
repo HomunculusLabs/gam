@@ -460,7 +460,7 @@ pub fn ctn_response_bases_at(
 /// Past the modelling interval the transform continues affinely, so its
 /// curvature there is exactly zero and those rows are zero. At the boundary knots
 /// the interior one-sided value is kept, the convention the first derivative uses.
-pub fn ctn_response_second_derivative_basis_at(
+pub(crate) fn ctn_response_second_derivative_basis_at(
     response: ArrayView1<'_, f64>,
     knots: ArrayView1<'_, f64>,
     degree: usize,
