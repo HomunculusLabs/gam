@@ -3051,8 +3051,13 @@ impl<'d> SpatialJointContext<'d> {
         )?;
         let mut working_response = obs.eta.clone();
         for i in 0..working_response.len() {
-            let wi = obs.fisherweight[i].max(1e-12);
-            working_response[i] += obs.score[i] / wi;
+            // A row with positive Fisher weight has the working response
+            // `η + score/W` exactly. A row with none enters every weighted sum
+            // with zero weight, so its working response stays `η`.
+            let wi = obs.fisherweight[i];
+            if wi > 0.0 {
+                working_response[i] += obs.score[i] / wi;
+            }
         }
         Ok(Some((obs.fisherweight, working_response)))
     }
