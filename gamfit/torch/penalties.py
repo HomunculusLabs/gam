@@ -13,15 +13,12 @@ import torch
 from torch import nn
 from torch.optim import Optimizer
 
+from .. import _penalties
 from .._binding import rust_module
 from .._penalty_bridge import (
     GumbelTemperatureSchedule,
-    ard_descriptor,
-    block_orthogonality_descriptor,
     call_rust_value_grad as _call_rust_value_grad,
     latent_json as _latent_json,
-    mechanism_sparsity_descriptor,
-    ordered_beta_bernoulli_descriptor,
     penalty_json as _penalty_json,
 )
 from .._select_topology import TopologyAutoSelector
@@ -330,7 +327,7 @@ class ARDPenalty(_RustPenaltyModule):
     ) -> _PenaltyCall:
         del basis
         latent = _check_matrix(primary, "latent")
-        descriptor = ard_descriptor(self.target, self.weight)
+        descriptor = _penalties.ARDPenalty(self.weight, target=self.target).to_rust_descriptor()
         return _PenaltyCall(
             target=latent,
             rho=self._rho(latent),
@@ -367,13 +364,13 @@ class BlockOrthogonalityPenalty(_RustPenaltyModule):
     ) -> _PenaltyCall:
         del basis
         latent = _check_matrix(primary, "latent")
-        descriptor = block_orthogonality_descriptor(
-            self.target,
+        descriptor = _penalties.BlockOrthogonalityPenalty(
             self.groups,
             self.weight,
             int(self.n_eff or latent.shape[0]),
-            learnable=self.learnable,
-        )
+            self.learnable,
+            target=self.target,
+        ).to_rust_descriptor()
         rho = _rho_tensor(
             getattr(self, "log_weight", None), latent, 1 if self.learnable else 0
         )
@@ -555,14 +552,14 @@ class MechanismSparsityPenalty(_RustPenaltyModule):
     ) -> _PenaltyCall:
         del basis
         weights = _check_matrix(primary, "weights")
-        descriptor = mechanism_sparsity_descriptor(
-            self.target,
+        descriptor = _penalties.MechanismSparsityPenalty(
             self.feature_groups,
             self.weight,
-            self.smoothing_eps,
             self.n_eff,
-            learnable=self.learnable,
-        )
+            self.smoothing_eps,
+            self.learnable,
+            target=self.target,
+        ).to_rust_descriptor()
         rho = _rho_tensor(
             getattr(self, "log_weight", None), weights, 1 if self.learnable else 0
         )
@@ -604,13 +601,9 @@ class OrderedBetaBernoulliPenalty(_RustPenaltyModule):
         logits = _check_matrix(primary, "logits")
         if logits.shape[1] != self.k_max:
             raise ValueError("logits width must equal k_max")
-        descriptor = ordered_beta_bernoulli_descriptor(
-            self.target,
-            self.k_max,
-            self.alpha,
-            self.tau,
-            learnable=self.learnable,
-        )
+        descriptor = _penalties.OrderedBetaBernoulliPenalty(
+            self.k_max, self.alpha, self.tau, self.learnable, target=self.target
+        ).to_rust_descriptor()
         rho = _rho_tensor(
             getattr(self, "log_alpha", None), logits, 1 if self.learnable else 0
         )
@@ -753,13 +746,12 @@ class SmoothThresholdPenalty(_RustPenaltyModule):
         """
         del basis
         latent = _check_matrix(primary, "latent")
-        descriptor = {
-            "kind": "smooth_threshold",
-            "target": self.target,
-            "thresholds": to_numpy_f64(self.thresholds).reshape(-1).tolist(),
-            "weight": self.weight,
-            "smoothing_eps": self.smoothing_eps,
-        }
+        descriptor = _penalties.SmoothThresholdPenalty(
+            to_numpy_f64(self.thresholds).reshape(-1),
+            self.weight,
+            self.smoothing_eps,
+            target=self.target,
+        ).to_rust_descriptor()
         rho = self.log_threshold.to(device=latent.device, dtype=latent.dtype)
         return _PenaltyCall(
             target=latent,

@@ -11,7 +11,6 @@ Every penalty surface in gamfit — the ``nn.Module`` autograd shells in
   (:func:`call_rust_value_grad`, including the isometry-Jacobian variant),
 * wrap the result for the active backend (the JAX ``custom_vjp`` core lives
   in :func:`jax_value_grad_from_rust`, re-exported here),
-* construct the per-kind descriptor dict (:func:`*_descriptor`),
 * and anneal the Gumbel temperature through exactly one
   :class:`GumbelTemperatureSchedule`.
 
@@ -23,7 +22,7 @@ single source of truth for the math; this module only marshals JSON / arrays.
 from __future__ import annotations
 
 import json
-from typing import Any, Literal, Sequence
+from typing import Any, Literal
 
 from ._binding import rust_module as _rust_module
 from ._penalty_jax_vjp import jax_value_grad_from_rust
@@ -34,10 +33,6 @@ __all__ = [
     "torch_value_grad_from_rust",
     "call_rust_value_grad",
     "jax_value_grad_from_rust",
-    "ard_descriptor",
-    "ordered_beta_bernoulli_descriptor",
-    "block_orthogonality_descriptor",
-    "mechanism_sparsity_descriptor",
     "GumbelTemperatureSchedule",
 ]
 
@@ -148,75 +143,6 @@ def call_rust_value_grad(
     grad_rho_t = from_numpy_like(grad_rho, rho).reshape_as(rho)
     grad_jac_t = None if grad_jac is None else from_numpy_like(grad_jac, target)
     return value_t, grad_t, grad_rho_t, grad_jac_t
-
-
-# ---------------------------------------------------------------------------
-# Per-kind descriptor builders (single source of truth for the JSON dicts)
-# ---------------------------------------------------------------------------
-
-
-def ard_descriptor(target: str, weight: float) -> dict[str, Any]:
-    """ARD descriptor with its constant base weight."""
-    return {"kind": "ard", "target": str(target), "weight": float(weight)}
-
-
-def ordered_beta_bernoulli_descriptor(
-    target: str,
-    k_max: int,
-    alpha: float,
-    tau: float,
-    *,
-    learnable: bool = False,
-) -> dict[str, Any]:
-    """Ordered independent Beta--Bernoulli assignment-logit descriptor."""
-    return {
-        "kind": "ordered_beta_bernoulli",
-        "target": str(target),
-        "k_max": int(k_max),
-        "alpha": float(alpha),
-        "tau": float(tau),
-        "learnable": bool(learnable),
-    }
-
-
-def block_orthogonality_descriptor(
-    target: str,
-    groups: Sequence[Sequence[int]],
-    weight: float,
-    n_eff: int,
-    *,
-    learnable: bool = False,
-) -> dict[str, Any]:
-    """Between-block orthogonality descriptor over latent-axis groups."""
-    return {
-        "kind": "block_orthogonality",
-        "target": str(target),
-        "groups": [[int(axis) for axis in group] for group in groups],
-        "weight": float(weight),
-        "n_eff": int(n_eff),
-        "learnable": bool(learnable),
-    }
-
-
-def mechanism_sparsity_descriptor(
-    target: str,
-    feature_groups: Sequence[Sequence[int]],
-    weight: float,
-    smoothing_eps: float,
-    n_eff: float,
-    *,
-    learnable: bool = False,
-) -> dict[str, Any]:
-    """Per-latent group-lasso sparsity descriptor over decoder feature groups."""
-    return {
-        "kind": "mechanism_sparsity",
-        "target": str(target),
-        "feature_groups": [[int(f) for f in group] for group in feature_groups],
-        "weight": float(weight),
-        "smoothing_eps": float(smoothing_eps),
-        "n_eff": float(n_eff),
-        "learnable": bool(learnable),
-    }
 
 
 # ---------------------------------------------------------------------------
