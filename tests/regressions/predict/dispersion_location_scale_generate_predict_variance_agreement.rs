@@ -93,6 +93,20 @@ impl Lcg {
             }
         }
     }
+    /// Beta(mu, phi): X ~ Gamma(mu*phi,1), Y ~ Gamma((1-mu)*phi,1), X/(X+Y).
+    fn beta(&mut self, mu: f64, phi: f64) -> f64 {
+        let a = self.gamma((mu * phi).max(1e-6), 1.0);
+        let b = self.gamma(((1.0 - mu) * phi).max(1e-6), 1.0);
+        (a / (a + b)).clamp(1e-6, 1.0 - 1e-6)
+    }
+    /// Tweedie(mu, phi, p), 1<p<2, via the compound Poisson–Gamma representation.
+    fn tweedie(&mut self, mu: f64, phi: f64, p: f64) -> f64 {
+        let lambda = mu.powf(2.0 - p) / (phi * (2.0 - p));
+        let alpha = (2.0 - p) / (p - 1.0);
+        let scale = phi * (p - 1.0) * mu.powf(p - 1.0);
+        let n = self.poisson(lambda) as usize;
+        (0..n).map(|_| self.gamma(alpha, scale)).sum()
+    }
 }
 
 /// Which dispersion-LS family a scenario exercises.
@@ -100,6 +114,8 @@ impl Lcg {
 enum Fam {
     Gamma,
     NegativeBinomial,
+    Beta,
+    Tweedie,
 }
 
 /// One dispersion-LS scenario: family config + truth surfaces + a draw.
@@ -124,6 +140,8 @@ fn kind_matches(kind: &DispersionFamilyKind, fam: Fam) -> bool {
                 DispersionFamilyKind::NegativeBinomial,
                 Fam::NegativeBinomial
             )
+            | (DispersionFamilyKind::Beta, Fam::Beta)
+            | (DispersionFamilyKind::Tweedie { .. }, Fam::Tweedie)
     )
 }
 
@@ -172,6 +190,16 @@ fn run_scenario(s: &Scenario) {
                 let mu = (0.6 + 0.4 * xi).exp();
                 let shape = (1.0 - 0.8 * xi).exp(); // precision falls with x
                 rng.gamma(shape, mu / shape)
+            }
+            Fam::Beta => {
+                let mu = 1.0 / (1.0 + (-(0.2 + 0.5 * xi)).exp());
+                let phi = (1.6 + 1.0 * xi).exp(); // precision rises with x
+                rng.beta(mu, phi)
+            }
+            Fam::Tweedie => {
+                let mu = (0.5 + 0.4 * xi).exp();
+                let phi = (-0.4 + 0.8 * xi).exp(); // dispersion rises with x
+                rng.tweedie(mu, phi, 1.5)
             }
         })
         .collect();
@@ -330,5 +358,27 @@ fn dispersion_location_scale_generate_matches_predict_variance_negbin() {
         family: "negbin",
         fam: Fam::NegativeBinomial,
         likelihood: DispersionFamilyKind::NegativeBinomial.likelihood_spec(),
+    });
+}
+
+#[test]
+fn dispersion_location_scale_generate_matches_predict_variance_beta() {
+    run_scenario(&Scenario {
+        name: "beta-LS",
+        family: "beta",
+        fam: Fam::Beta,
+        likelihood: DispersionFamilyKind::Beta.likelihood_spec(),
+    });
+}
+
+#[test]
+fn dispersion_location_scale_generate_matches_predict_variance_tweedie() {
+    run_scenario(&Scenario {
+        name: "tweedie-LS",
+        family: "tweedie",
+        fam: Fam::Tweedie,
+        // Tweedie carries the variance power p on the spec; phi is the reciprocal
+        // of the precision exp(eta_d) — the arm most prone to a units slip.
+        likelihood: DispersionFamilyKind::Tweedie { p: 1.5 }.likelihood_spec(),
     });
 }
