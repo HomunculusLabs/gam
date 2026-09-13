@@ -49,8 +49,8 @@
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
 use gam::test_support::reference::{
-    Column, PairedFoldComparison, QualityPair, assert_paired_match_or_beat, pearson, relative_l2,
-    rmse, run_python,
+    Column, PairedFoldComparison, QualityPair, assert_paired_match_or_beat, auc_no_skill_floor,
+    pearson, relative_l2, rmse, run_python,
 };
 use gam::{FitConfig, FitResult, fit_from_formula, init_parallelism, load_csvwith_inferred_schema};
 use ndarray::Array2;
@@ -307,24 +307,6 @@ emit("edf", edf_all)
     // across the shared draws: gam's averaged recovery error may be no worse than
     // pyGAM's by more than 10%, nor resolved worse draw by draw.
     assert_paired_match_or_beat("pygam_logistic_1d::err_to_truth", &panel, 1.10);
-}
-
-/// Lowest held-out AUC that is `z` standard errors above the no-skill value
-/// (0.5), given the class counts in the held-out split. Under the null that the
-/// scores carry no information, the Mann-Whitney AUC has mean 0.5 and standard
-/// error `sqrt((n_pos + n_neg + 1) / (12 * n_pos * n_neg))`; a fit whose AUC sits
-/// `z` SE above 0.5 discriminates the classes at the corresponding one-sided
-/// significance (z=2 ≈ 97.7%). This is the principled tool-free bar for held-out
-/// discrimination on real data with NO known truth: it scales with the test-set
-/// size and class balance instead of hard-coding an absolute AUC that the data's
-/// intrinsic signal may not support. A flat or wrong fit (AUC ≈ 0.5) fails it;
-/// any genuine separation clears it. The achievable AUC ceiling here is set by
-/// how much the predictor actually carries, which the match-or-beat-the-reference
-/// arm scores directly — this floor only certifies "better than chance".
-fn auc_no_skill_floor(n_pos: usize, n_neg: usize, z: f64) -> f64 {
-    let (p, q) = (n_pos as f64, n_neg as f64);
-    let se = ((p + q + 1.0) / (12.0 * p * q)).sqrt();
-    0.5 + z * se
 }
 
 /// Held-out AUC (rank statistic = P(score_pos > score_neg)) of `score` against

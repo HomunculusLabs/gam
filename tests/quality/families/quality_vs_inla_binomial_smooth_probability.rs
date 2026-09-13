@@ -61,8 +61,8 @@ use gam::predict::standard::StandardPredictor;
 use gam::predict::{PosteriorMeanOptions, PredictInput, PredictableModel};
 use gam::smooth::build_term_collection_design;
 use gam::test_support::reference::{
-    Column, PairedFoldComparison, QualityPair, assert_paired_match_or_beat, r_package_available,
-    relative_l2, rmse, run_r,
+    Column, PairedFoldComparison, QualityPair, assert_paired_match_or_beat, auc_no_skill_floor,
+    r_package_available, relative_l2, rmse, run_r,
 };
 use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
 use gam::{
@@ -422,22 +422,6 @@ fn gam_binomial_smooth_recovers_true_probability() {
         "gam's +/-2SD probability band under-covers the true curve: \
          pooled coverage={coverage:.3} (floor 0.80)"
     );
-}
-
-/// Lowest held-out AUC that is `z` standard errors above the no-skill value
-/// (0.5) for a split with `n_pos`/`n_neg` classes. Under the null that scores
-/// carry no information the Mann-Whitney AUC has mean 0.5 and standard error
-/// `sqrt((n_pos + n_neg + 1) / (12 * n_pos * n_neg))`; an AUC `z` SE above 0.5
-/// discriminates at the matching one-sided significance (z=2 ≈ 97.7%). This is
-/// the principled tool-free held-out bar on real data with NO known truth: it is
-/// sized to the test split rather than hard-coding an absolute AUC the predictor
-/// may be physically unable to reach (the prostate PCs cap out near 0.69 here for
-/// INLA and gam alike). A flat/wrong fit (AUC ≈ 0.5) fails it; any genuine
-/// separation clears it. The accuracy ceiling itself is scored by match-or-beat.
-fn auc_no_skill_floor(n_pos: usize, n_neg: usize, z: f64) -> f64 {
-    let (p, q) = (n_pos as f64, n_neg as f64);
-    let se = ((p + q + 1.0) / (12.0 * p * q)).sqrt();
-    0.5 + z * se
 }
 
 /// Area under the ROC curve for predicted probabilities `prob` against binary

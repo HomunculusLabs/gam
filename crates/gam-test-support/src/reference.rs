@@ -519,6 +519,25 @@ pub fn rmse(a: &[f64], b: &[f64]) -> f64 {
     (s / a.len().max(1) as f64).sqrt()
 }
 
+/// Lowest held-out AUC that is `z` standard errors above the no-skill value
+/// (0.5) for a split with `n_pos`/`n_neg` classes.
+///
+/// Under the null that scores carry no information, the Mann-Whitney AUC has
+/// mean 0.5 and standard error `sqrt((n_pos + n_neg + 1) / (12 * n_pos * n_neg))`,
+/// so an AUC `z` SE above 0.5 discriminates at the matching one-sided
+/// significance (z = 2 ≈ 97.7%). This is the principled tool-free held-out bar on
+/// real data with no known truth: it is sized to the test split instead of
+/// hard-coding an absolute AUC the predictors may be unable to carry. On the
+/// prostate split mgcv REML reaches only 0.6912–0.6920, so an absolute bar of
+/// 0.70 there asserts discrimination no mature penalized smoother achieves. A
+/// flat or wrong fit (AUC ≈ 0.5) fails it; any genuine separation clears it. The
+/// accuracy ceiling itself belongs to a match-or-beat arm.
+pub fn auc_no_skill_floor(n_pos: usize, n_neg: usize, z: f64) -> f64 {
+    let (p, q) = (n_pos as f64, n_neg as f64);
+    let se = ((p + q + 1.0) / (12.0 * p * q)).sqrt();
+    0.5 + z * se
+}
+
 /// A single machine-readable GAM-vs-reference quality pair for the #1561
 /// whole-suite meta-gate.
 ///

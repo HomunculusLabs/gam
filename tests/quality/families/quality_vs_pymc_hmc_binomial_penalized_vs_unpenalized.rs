@@ -790,7 +790,8 @@ emit("rhat", [rhat])
     // (AUC ≈ 0.5) still fails it; the accuracy ceiling is scored by the
     // match-or-beat arm below.
     let test_pos = test_y.iter().filter(|&&v| v > 0.5).count();
-    let no_skill = auc_no_skill_floor(test_pos, test_y.len() - test_pos, 2.0);
+    let no_skill =
+        gam::test_support::reference::auc_no_skill_floor(test_pos, test_y.len() - test_pos, 2.0);
     assert!(
         gam_auc >= no_skill,
         "gam's held-out AUC not above chance: {gam_auc:.4} (< {no_skill:.4}, \
@@ -825,22 +826,6 @@ emit("rhat", [rhat])
              were still enforced above."
         );
     }
-}
-
-/// Lowest held-out AUC that is `z` standard errors above the no-skill value
-/// (0.5) for a split with `n_pos`/`n_neg` classes. Under the null that scores
-/// carry no information the Mann-Whitney AUC has mean 0.5 and standard error
-/// `sqrt((n_pos + n_neg + 1) / (12 * n_pos * n_neg))`; an AUC `z` SE above 0.5
-/// discriminates at the matching one-sided significance (z=2 ≈ 97.7%). This is
-/// the principled tool-free held-out bar on real data with NO known truth: it is
-/// sized to the test split rather than hard-coding an absolute AUC the predictor
-/// may be physically unable to reach (mgcv REML tops out at 0.6912–0.6920 on this
-/// prostate split). A flat/wrong fit (AUC ≈ 0.5) fails it; any genuine separation
-/// clears it. The accuracy ceiling itself is scored by match-or-beat.
-fn auc_no_skill_floor(n_pos: usize, n_neg: usize, z: f64) -> f64 {
-    let (p, q) = (n_pos as f64, n_neg as f64);
-    let se = ((p + q + 1.0) / (12.0 * p * q)).sqrt();
-    0.5 + z * se
 }
 
 /// Held-out binary cross-entropy (log-loss) of predicted probabilities against

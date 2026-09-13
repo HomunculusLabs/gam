@@ -5,8 +5,10 @@
 //! known truth): a deterministic train/test split of the real `prostate.csv`
 //! binary outcome. We fit `y ~ s(pc1,k=5)+s(pc2,k=5)` on the TRAIN rows only,
 //! predict the held-out TEST rows, invert the logit link ourselves, and assert
-//! gam's held-out **AUC** clears an absolute bar (`>= 0.70`) AND matches-or-beats
-//! the best mature baseline on the SAME split (gam_test_auc >= best_ref - 0.02).
+//! gam's held-out **AUC** is significantly above chance (`auc_no_skill_floor`, 2 SE
+//! above 0.5 for the split) AND matches-or-beats the best mature baseline on the
+//! SAME split (gam_test_auc >= best_ref - 0.02). No absolute AUC bar: on this
+//! split mgcv and scikit-learn reach only about 0.69.
 //! AUC on truly held-out cases is an honest generalization claim: a model that
 //! merely memorized the training fit (or that another tool happened to also fit)
 //! cannot game it. mgcv (penalized binomial GAM) and scikit-learn's
@@ -14,8 +16,9 @@
 //! reproduce; their fitted values are printed for context only.
 //!
 //! Plus one GROUND-TRUTH correctness check that is NOT "same as a peer tool":
-//! gam's 1-D *unpenalized* (penalized-zero) logistic regression on a single
-//! linear term reduces *mathematically* to ordinary MLE logistic regression, the
+//! gam's 1-D *unpenalized* logistic regression on a single linear term
+//! (`linear(pc1, double_penalty=false)`, opting out of the default null-recovery
+//! ridge) reduces *mathematically* to ordinary MLE logistic regression, the
 //! exact convex objective scikit-learn (`penalty=None`) solves. Agreement there
 //! is correctness vs the analytic MLE, so we keep it as a tight assertion.
 //!
@@ -26,7 +29,9 @@
 use gam::data::EncodedDataset;
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
-use gam::test_support::reference::{Column, pad_to, relative_l2, run_python, run_r};
+use gam::test_support::reference::{
+    Column, auc_no_skill_floor, pad_to, relative_l2, run_python, run_r,
+};
 use gam::{FitConfig, FitResult, fit_from_formula, init_parallelism, load_csvwith_inferred_schema};
 use ndarray::Array2;
 use std::path::Path;
@@ -237,10 +242,15 @@ emit("coef1", [float(clf1.coef_[0, 0]), float(clf1.intercept_[0])])
     let sk_coef1 = sk.vector("coef1"); // [slope, intercept]
     assert_eq!(sk_prob.len(), ntest, "sklearn held-out probability length");
 
-    // ---- (D) gam 1-D *linear* binomial-logit fit on FULL data: y ~ pc1 ----
-    // No smooth: ordinary penalized-zero logistic regression on pc1, fit on the
-    // SAME full data sklearn used. Its coefficient must match the analytic MLE.
-    let lin = fit_from_formula("y ~ pc1", &ds, &cfg).expect("gam linear logit fit");
+    // ---- (D) gam 1-D *linear* binomial-logit fit on FULL data, unridged ----
+    // No smooth and no null-recovery ridge. A bare numeric term carries that
+    // ridge by default (SPEC rules 12, 14), so `y ~ pc1` is not the MLE: at
+    // 2afadd67b (MSI job 579742) it gave slope -0.0239 against the MLE's -0.0297.
+    // `linear(pc1, double_penalty=false)` opts out, leaving ordinary unpenalized
+    // logistic regression on pc1 over the SAME full data sklearn used. Its
+    // coefficient must match the analytic MLE.
+    let lin = fit_from_formula("y ~ linear(pc1, double_penalty=false)", &ds, &cfg)
+        .expect("gam linear logit fit");
     let FitResult::Standard(linfit) = lin else {
         panic!("linear binomial(logit) should be a Standard fit");
     };
@@ -276,14 +286,20 @@ emit("coef1", [float(clf1.coef_[0, 0]), float(clf1.intercept_[0])])
         train_rows.len()
     );
 
-    // (1) PRIMARY objective claim — gam generalizes: held-out AUC clears an
-    // absolute bar. pc1/pc2 carry real signal for this outcome; a correct
-    // penalized binomial GAM ranks held-out cases well above chance. 0.70 is a
-    // principled floor (well above the 0.5 chance line) that a genuinely broken
-    // link inversion or under/over-smoothed fit could not reach.
+    // (1) PRIMARY objective claim — gam generalizes: held-out AUC significantly
+    // above chance, at least 2 SE above 0.5 for this split's class counts. The
+    // achievable AUC here is capped by what pc1/pc2 carry about the outcome: at
+    // 2afadd67b (MSI job 579742) gam reached 0.6921, mgcv 0.6912 and sklearn
+    // 0.6909, so the absolute 0.70 this used to assert is a bar no mature fitter
+    // clears on this split. A flat or wrong fit (AUC ≈ 0.5) still fails it; the
+    // accuracy ceiling is scored by the match-or-beat arm below.
+    let test_pos = y_test.iter().filter(|&&v| v > 0.5).count();
+    let no_skill = auc_no_skill_floor(test_pos, y_test.len() - test_pos, 2.0);
     assert!(
-        gam_auc >= 0.70,
-        "gam held-out AUC below objective bar: {gam_auc:.4} < 0.70"
+        gam_auc >= no_skill,
+        "gam held-out AUC not above chance: {gam_auc:.4} < {no_skill:.4} \
+         (2 SE above 0.5 for {test_pos}/{} positives)",
+        y_test.len()
     );
 
     // (2) Match-or-beat the best mature baseline on the SAME split. gam's
