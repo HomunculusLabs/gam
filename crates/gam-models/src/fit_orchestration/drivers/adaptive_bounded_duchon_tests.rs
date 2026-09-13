@@ -1142,6 +1142,120 @@ mod adaptive_bounded_duchon_tests {
         }
     }
 
+    /// #2903: `{D³H[u, v, e_a]}` must equal a five-point difference of the
+    /// analytic `D²H[u, v]` along each coefficient axis, on the likelihoods whose
+    /// observation kernel carries a closed-form `W'''`: Gaussian, where only the
+    /// bounded transform curves, and Poisson and logit binomial, where `W'''`
+    /// enters. A probit binomial has no fifth η-derivative and must not declare
+    /// the channel.
+    #[test]
+    fn bounded_joint_hessian_third_directional_all_axes_matches_difference_of_second_2903() {
+        let x = array![[0.2, -1.0], [0.8, 0.5], [1.1, 1.2], [1.7, -0.3]];
+        let family_for =
+            |spec: LikelihoodSpec, y: Array1<f64>, prior: BoundedCoefficientPriorSpec| {
+                BoundedLinearFamily {
+                    likelihood: gam_spec::GlmLikelihoodSpec::canonical(spec),
+                    latent_cloglog_state: None,
+                    mixture_link_state: None,
+                    sas_link_state: None,
+                    weights: Array1::ones(y.len()),
+                    y,
+                    design: x.clone(),
+                    designzeroed: {
+                        let mut dz = x.clone();
+                        dz.column_mut(0).fill(0.0);
+                        dz
+                    },
+                    offset: Array1::zeros(x.nrows()),
+                    bounded_terms: vec![BoundedLinearTermMeta {
+                        col_idx: 0,
+                        min: -1.0,
+                        max: 2.0,
+                        prior,
+                    }],
+                }
+            };
+        assert!(
+            !family_for(
+                LikelihoodSpec::binomial_probit(),
+                array![0.0, 1.0, 1.0, 0.0],
+                BoundedCoefficientPriorSpec::Uniform,
+            )
+            .joint_jeffreys_information_third_directional_available(),
+            "a probit binomial has no closed-form W''' and must not declare the channel"
+        );
+        let cases = [
+            (
+                LikelihoodSpec::gaussian_identity(),
+                array![0.4, 1.0, 1.7, 2.2],
+                BoundedCoefficientPriorSpec::Uniform,
+            ),
+            (
+                LikelihoodSpec::poisson_log(),
+                array![0.0, 1.0, 3.0, 2.0],
+                BoundedCoefficientPriorSpec::Beta { a: 2.0, b: 3.0 },
+            ),
+            (
+                LikelihoodSpec::binomial_logit(),
+                array![0.0, 1.0, 1.0, 0.0],
+                BoundedCoefficientPriorSpec::Beta { a: 1.5, b: 2.5 },
+            ),
+        ];
+        let u = array![0.3, -0.4];
+        let v = array![-0.25, 0.5];
+        let beta = array![0.4, -0.2];
+        let h = 1e-3;
+        for (case, (spec, y, prior)) in cases.into_iter().enumerate() {
+            let rows = y.len();
+            let family = family_for(spec, y, prior);
+            assert!(
+                family.joint_jeffreys_information_third_directional_available(),
+                "case {case}: a closed-form W''' must declare the third information derivative"
+            );
+            let axes = family
+                .joint_hessian_third_directional_all_axes(&beta, &u, &v)
+                .expect("analytic third derivative")
+                .expect("a closed-form W''' reaches the third derivative");
+            assert_eq!(axes.len(), beta.len(), "case {case}: one matrix per axis");
+            let second_at = |axis: usize, t: f64| {
+                let mut moved = beta.clone();
+                moved[axis] += t;
+                family
+                    .exact_newton_joint_hessiansecond_directional_derivative(
+                        &[ParameterBlockState {
+                            beta: moved,
+                            eta: Array1::zeros(rows),
+                        }],
+                        &u,
+                        &v,
+                    )
+                    .expect("second directional derivative")
+                    .expect("joint second derivative")
+            };
+            let mut largest = 0.0_f64;
+            for axis in 0..beta.len() {
+                let difference = (-second_at(axis, 2.0 * h) + 8.0 * second_at(axis, h)
+                    - 8.0 * second_at(axis, -h)
+                    + second_at(axis, -2.0 * h))
+                    / (12.0 * h);
+                for ((i, j), &want) in difference.indexed_iter() {
+                    let got = axes[axis][[i, j]];
+                    largest = largest.max(got.abs());
+                    assert!(
+                        (got - want).abs() <= 1e-6 * (1.0 + want.abs().max(got.abs())),
+                        "case {case} axis {axis} D³H[{i}][{j}]: analytic {got:+.15e}, \
+                         difference {want:+.15e}"
+                    );
+                }
+            }
+            assert!(
+                largest > 1e-3,
+                "case {case}: the third derivative is too small ({largest:.3e}) for the \
+                 agreement to say anything"
+            );
+        }
+    }
+
     #[test]
     fn two_block_exact_joint_setup_sanitizes_non_finite_rho_seed() {
         let setup = ExactJointHyperSetup::new(
