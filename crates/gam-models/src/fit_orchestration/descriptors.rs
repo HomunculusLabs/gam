@@ -1413,7 +1413,7 @@ mod tests {
     //! and one set of error messages for every caller — no entry point can drift
     //! away from these without breaking the suite.
 
-    use super::build_analytic_penalty_registry_from_descriptors;
+    use super::{AnalyticPenaltyKind, build_analytic_penalty_registry_from_descriptors};
     use serde_json::json;
 
     /// A two-block `latents` fixture every accepted-penalty case targets.
