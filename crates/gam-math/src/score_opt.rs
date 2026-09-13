@@ -371,8 +371,11 @@ pub struct GlobalScoreCertificate {
     /// quantities.
     pub maximum_excess: f64,
     /// Outward sum of the selected point evaluator's forward error and the
-    /// largest competing representative's forward error. Exact terminal
-    /// ranges remain separate in [`Self::maximum_excess`].
+    /// largest competing candidate's comparison allowance. A point candidate's
+    /// allowance is its forward error. A resolution-flat region's allowance is
+    /// its representative's forward error plus the region's certified score
+    /// gap, which the region's own certificate already proved immaterial.
+    /// Exact terminal ranges remain separate in [`Self::maximum_excess`].
     pub comparison_resolution: f64,
 }
 
@@ -772,11 +775,12 @@ struct SearchNode {
 #[derive(Clone, Copy)]
 struct TerminalScoreCandidate {
     score: ScoreValueEnclosure,
-    /// Forward error of the rounded representative used to compare this
-    /// candidate with the selected representative. For a region certificate
-    /// this is kept separate from the exact range: the range bounds the
-    /// terminal maximum, while the error belongs to an actually evaluated
-    /// point.
+    /// Allowance for comparing this candidate with the selected
+    /// representative: the forward error of the rounded representative, plus,
+    /// for a resolution-flat region, the region's certified score gap (see
+    /// `resolution_flat_candidate`). For a region certificate this is kept
+    /// separate from the exact range: the range bounds the terminal maximum,
+    /// while the error belongs to an actually evaluated point.
     comparison_error: f64,
     /// Present only when the terminal maximum is the exact score at this
     /// represented point. Region certificates deliberately carry `None` so
@@ -1423,25 +1427,44 @@ where
 /// Prove that every score value in a cell is indistinguishable from one of its
 /// endpoint samples at the point evaluator's certified f64 resolution.
 ///
-/// If the exact score range is `[L, U]`, every pair of exact scores in the cell
-/// differs by at most `U-L`. If each nearest-rounded point value has absolute
-/// forward error at most `rho`, a comparison of two such values has uncertainty
-/// at most `2 rho`. The cell is resolution-flat only when `U-L <= 2 rho`.
+/// Two outer bounds on how far exact scores in the cell can differ are in hand.
+/// If the exact score range is `[L, U]`, every pair differs by at most `U-L`.
+/// If the exact derivative range over `[a, b]` is `D`, the mean value theorem
+/// bounds every pair by `max|D|·(b-a)`. Both are valid, so the smaller is too.
+/// If each nearest-rounded point value has absolute forward error at most
+/// `rho`, a comparison of two such values has uncertainty at most `2 rho`. The
+/// cell is resolution-flat only when the smaller bound is at most `2 rho`.
+///
+/// The derivative bound is what makes the verdict reachable for an oracle that
+/// builds its value range from endpoint balls. That range already holds both
+/// endpoints' forward error, so `U-L` exceeds `2 rho` at every positive width
+/// and the diameter alone never retires a cell. On the spline scan's
+/// near-interpolation tail the derivative's own rounding floor straddles zero
+/// as well, so those cells could be neither retired, sign-excluded nor
+/// dominated, and the search subdivided them until its budget ran out (#2902
+/// row 3: order 3 missed `U-L <= 2 rho` by `max|D|·(b-a)` exactly).
 ///
 /// Both sides are expressed in score-value units and are invariant under
 /// adding a constant to the objective. Derivative-evaluator error is
-/// deliberately absent: integrating it would bound the error of a hypothetical
-/// numerical quadrature, not the forward error of `ScoreJet::value`.
+/// deliberately absent from the resolution: integrating it would bound the
+/// error of a hypothetical numerical quadrature, not the forward error of
+/// `ScoreJet::value`. The derivative range enters only as a bound on how much
+/// the exact score moves.
 fn resolution_flat_region(
     node: SearchNode,
     enclosure: DerivativeEnclosure,
 ) -> Option<ResolutionFlatRegion> {
     let score = enclosure.score;
-    let max_score_gap = if score.value.lo == score.value.hi {
+    let diameter_gap = if score.value.lo == score.value.hi {
         0.0
     } else {
         next_up(score.value.hi - score.value.lo)
     };
+    let mean_value_gap = product_up(
+        enclosure.derivative.max_abs(),
+        sum_up(node.right.sample.x, -node.left.sample.x),
+    );
+    let max_score_gap = diameter_gap.min(mean_value_gap);
     let score_resolution = if score.evaluation_error == 0.0 {
         0.0
     } else {
@@ -1462,6 +1485,54 @@ fn resolution_flat_region(
         max_score_gap,
         score_resolution,
     })
+}
+
+/// The terminal candidate a resolution-flat region contributes to the global
+/// value certificate.
+///
+/// The region's exact maximum lies in `[score(sample), score(sample) + gap]`
+/// with `gap = region.max_score_gap`, so its outer range is intersected with
+/// the representative's own point range raised by that gap. Both contain the
+/// exact score at the representative, so an empty intersection breaks the
+/// oracle's containment contract and is refused rather than reconciled.
+///
+/// The comparison allowance is the representative's forward error plus the
+/// gap. The region certificate already proved the gap numerically immaterial,
+/// so a region whose representative does not exceed the selected one orders
+/// at resolution exactly as a point candidate does. Without the gap in the
+/// allowance, a region holding the selected representative could never close
+/// the global certificate: its range carries both balls and the gap, against
+/// an allowance of two balls.
+fn resolution_flat_candidate<E>(
+    region: ResolutionFlatRegion,
+    range: ScoreValueEnclosure,
+    representative: ScoreValueEnclosure,
+) -> Result<TerminalScoreCandidate, ScoreSearchError<E>> {
+    let value = ClosedInterval::new(
+        range.value.lo.max(representative.value.lo),
+        range
+            .value
+            .hi
+            .min(sum_up(representative.value.hi, region.max_score_gap)),
+    );
+    if !value.is_valid() {
+        return Err(ScoreSearchError::ScoreValueEnclosureMissesEndpoint {
+            lo: region.bracket.lo,
+            hi: region.bracket.hi,
+            endpoint: region.sample,
+            score: range,
+        });
+    }
+    Ok(TerminalScoreCandidate::region(
+        ScoreValueEnclosure {
+            value,
+            evaluation_error: range.evaluation_error,
+        },
+        sum_up(
+            representative.evaluation_error.max(range.evaluation_error),
+            region.max_score_gap,
+        ),
+    ))
 }
 
 /// Turn strict concavity plus an unresolved point derivative into a direct
@@ -1789,12 +1860,11 @@ where
                 };
                 let representative_score = certify_point(&mut representative, &mut enclose)?.score;
                 incumbent_lower = incumbent_lower.max(representative_score.value.lo);
-                terminal_maxima.push(TerminalScoreCandidate::region(
+                terminal_maxima.push(resolution_flat_candidate::<E>(
+                    flat,
                     maximum,
-                    representative_score
-                        .evaluation_error
-                        .max(maximum.evaluation_error),
-                ));
+                    representative_score,
+                )?);
                 resolution_flat_regions.push(flat);
                 continue;
             }
@@ -1888,12 +1958,11 @@ where
             };
             let representative_score = certify_point(&mut representative, &mut enclose)?.score;
             incumbent_lower = incumbent_lower.max(representative_score.value.lo);
-            terminal_maxima.push(TerminalScoreCandidate::region(
+            terminal_maxima.push(resolution_flat_candidate::<E>(
+                flat,
                 enclosure.score,
-                representative_score
-                    .evaluation_error
-                    .max(enclosure.score.evaluation_error),
-            ));
+                representative_score,
+            )?);
             resolution_flat_regions.push(flat);
             continue;
         }
@@ -5014,7 +5083,7 @@ mod tests {
     }
 
     #[test]
-    fn resolution_flatness_is_exactly_value_diameter_vs_pairwise_error() {
+    fn resolution_flatness_is_the_tighter_variation_bound_vs_pairwise_error() {
         let sample = SearchSample {
             sample: ScoreSample {
                 x: 0.0,
@@ -5036,6 +5105,8 @@ mod tests {
             },
         };
         let error = 0.125;
+        // The derivative range [-1, 1] over the unit cell bounds the motion by
+        // 1, above twice the value error, so the diameter decides.
         for (upper, expected) in [(1024.25, true), (next_up(1024.25), false)] {
             let enclosure = DerivativeEnclosure {
                 score: ScoreValueEnclosure {
@@ -5050,9 +5121,109 @@ mod tests {
             assert_eq!(
                 resolution_flat_region(node, enclosure).is_some(),
                 expected,
-                "flatness must be equivalent to outward diameter <= outward 2*value error"
+                "with a loose derivative, flatness must be equivalent to outward diameter <= \
+                 outward 2*value error"
             );
         }
+        // A value range far wider than twice the value error, as an oracle that
+        // builds its range from endpoint balls produces, is still flat when the
+        // exact derivative range bounds the motion across the cell inside it.
+        let resolution = next_up(2.0 * error);
+        for (slope, expected) in [(resolution, true), (next_up(resolution), false)] {
+            let enclosure = DerivativeEnclosure {
+                score: ScoreValueEnclosure {
+                    value: ClosedInterval::new(1024.0, 2048.0),
+                    evaluation_error: error,
+                },
+                derivative: ClosedInterval::new(-slope, 0.5 * slope),
+                curvature: ClosedInterval::new(-1.0, 1.0),
+            };
+            let region = resolution_flat_region(node, enclosure);
+            assert_eq!(
+                region.is_some(),
+                expected,
+                "flatness must read max|D|*(b-a) <= outward 2*value error when that bound is \
+                 the tighter one"
+            );
+            if let Some(region) = region {
+                assert_eq!(region.max_score_gap, slope);
+                assert_eq!(region.score_resolution, resolution);
+            }
+        }
+    }
+
+    /// #2902 row 3: a plateau whose derivative oracle carries a rounding floor far
+    /// above the exact slope, and whose value ranges are built from endpoint
+    /// balls, as the spline scan's near-interpolation tail is. No cell there can
+    /// be sign-excluded, isolated or dominated, and every value diameter exceeds
+    /// twice the value error, so the diameter test alone leaves the search
+    /// subdividing until its budget runs out. The derivative bound retires the
+    /// plateau at resolution, and the global value ordering closes at the
+    /// boundary the exact score decreases from.
+    #[test]
+    fn a_ball_oracle_plateau_retires_by_its_derivative_bound_and_orders_its_value() {
+        const SLOPE_SCALE: f64 = 1.0e-9;
+        const VALUE_ERROR: f64 = 1.0e-6;
+        const DERIVATIVE_FLOOR: f64 = 1.0e-4;
+        let score = |x: f64| -SLOPE_SCALE * x.exp();
+        let result = maximize_score_1d(
+            -12.0,
+            0.0,
+            f64::EPSILON.sqrt(),
+            |x| -> Result<_, String> {
+                let value = score(x);
+                Ok(ScoreJet {
+                    value,
+                    derivative: value,
+                    curvature: value,
+                    third: value,
+                })
+            },
+            |left, right| -> Result<_, String> {
+                let (a, b) = (left.x, right.x);
+                let (fa, fb) = (score(a), score(b));
+                // |f'| is largest at the right end. The value range adds the
+                // interior motion to the endpoint balls.
+                let steepest = SLOPE_SCALE * b.exp();
+                let motion = steepest * (b - a);
+                let floored = ClosedInterval::new(
+                    -steepest - DERIVATIVE_FLOOR,
+                    -SLOPE_SCALE * a.exp() + DERIVATIVE_FLOOR,
+                );
+                Ok(DerivativeEnclosure {
+                    score: ScoreValueEnclosure {
+                        value: ClosedInterval::new(
+                            fa.min(fb) - VALUE_ERROR - motion,
+                            fa.max(fb) + VALUE_ERROR + motion,
+                        ),
+                        evaluation_error: VALUE_ERROR,
+                    },
+                    derivative: floored,
+                    curvature: floored,
+                })
+            },
+        )
+        .expect("the plateau is resolution-flat by its derivative bound");
+        assert!(
+            !result.resolution_flat_regions.is_empty(),
+            "fixture premise: the plateau must be retired as resolution-flat regions"
+        );
+        for region in &result.resolution_flat_regions {
+            let diameter = region.score.hi - region.score.lo;
+            assert!(
+                diameter > region.score_resolution
+                    && region.max_score_gap <= region.score_resolution,
+                "every retirement must come from the derivative bound, not the ball-wide \
+                 diameter: {region:?}"
+            );
+        }
+        assert_eq!(result.location, ScoreOptimumLocation::LowerBoundary);
+        assert!(
+            result.value_certificate.maximum_excess
+                <= result.value_certificate.comparison_resolution,
+            "the global value ordering must close: {:?}",
+            result.value_certificate
+        );
     }
 
     #[test]
