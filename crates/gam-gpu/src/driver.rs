@@ -822,7 +822,7 @@ fn append_versioned_linux_libcuda_candidates(out: &mut Vec<String>, dir: &Path) 
     }
 }
 
-pub fn cuda_library_candidates() -> &'static [&'static str] {
+pub(crate) fn cuda_library_candidates() -> &'static [&'static str] {
     if cfg!(target_os = "windows") {
         &["nvcuda.dll"]
     } else if cfg!(target_os = "macos") {
