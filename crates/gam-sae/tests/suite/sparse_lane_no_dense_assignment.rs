@@ -165,19 +165,27 @@ fn sparse_lane_constructs_no_dense_assignment() {
     );
 }
 
-/// Runtime lock (complements the static source scan): at a large-`K` shape
-/// (`K ≫ P`) the front door demotes to the sparse-code lane, the dense-engine
+/// Runtime lock (complements the static source scan): at an overcomplete shape
+/// (`K > P`) the front door demotes to the sparse-code lane, the dense-engine
 /// guard REFUSES, and a real `fit_sparse_dictionary` returns fixed-width sparse
 /// state `N×s` — never the dense `N×K` assignment the front door exists to avoid.
 #[test]
 fn large_k_sparse_fit_stays_fixed_width_and_never_materializes_dense_n_by_k() {
-    // A wildly overcomplete shape: K = 256 atoms into a P = 8 response. The dense
-    // assignment N·K would be 32× the response scale N·P, so this is squarely the
-    // sparse lane the guard reserves the dense engine against.
+    // An overcomplete shape: K = 12 atoms into a P = 8 response, so the dense
+    // assignment N·K is 1.5× the response N·P and the front door demotes it.
+    //
+    // #2822: this used to be K = 256 into P = 8 with s = 4 over 96 rows. That shape
+    // cannot become a model any more: every epoch the trainer revives the atoms no
+    // row routes to, and a fit is returned only from an epoch with zero accepted
+    // births and a settled routing (the absolute fixed point, #2902). Pool job 578260
+    // at 078a8f339 read `InnerNonConvergence { epochs: 30, accepted_births: 12,
+    // decoder_fixed_point_residual: 1.0, routing_residual: 1.048 }` on it, which is
+    // production's intended answer to the K ≫ rank limit cycle. The storage contract
+    // this test locks does not need that regime, only K > P and a returned fit.
     let n_obs = 96usize;
     let p_out = 8usize;
-    let k_atoms = 256usize;
-    let active = 4usize;
+    let k_atoms = 12usize;
+    let active = 1usize;
 
     // Front-door admission: this shape routes to sparse codes, and the dense-engine
     // guard refuses it, pointing the caller at the sparse-code lane.
@@ -190,32 +198,45 @@ fn large_k_sparse_fit_stays_fixed_width_and_never_materializes_dense_n_by_k() {
         "refusal must point at the sparse-code lane; got: {refusal}"
     );
 
-    // Deterministic planted data: each row is a scaled copy of one of `p_out`
-    // orthonormal axes so the fit has real structure to route (no RNG dependency).
+    // Deterministic planted data (no RNG dependency): twelve distinct signed lines in
+    // P = 8, the eight axes and the four normalized axis-pair sums, eight rows on each.
+    // The largest cosine between two lines is 1/√2, so every row routes to its own
+    // line and every atom has rows: no atom is dead, nothing is revived, and the
+    // routing can settle.
     // #2822: a dictionary that reproduces every row exactly leaves zero residual,
     // and the shared-ρ Fellner–Schall step refuses the resulting `ρ = 0` as
     // boundary evidence. A deterministic perturbation keeps the residual above the
-    // arithmetic floor while the planted axis still dominates every row.
+    // arithmetic floor while the planted line still dominates every row.
+    let mut atoms = Array2::<f32>::zeros((k_atoms, p_out));
+    for axis in 0..p_out {
+        atoms[[axis, axis]] = 1.0;
+    }
+    for pair in 0..(k_atoms - p_out) {
+        atoms[[p_out + pair, 2 * pair]] = std::f32::consts::FRAC_1_SQRT_2;
+        atoms[[p_out + pair, 2 * pair + 1]] = std::f32::consts::FRAC_1_SQRT_2;
+    }
     let mut x = Array2::<f32>::zeros((n_obs, p_out));
     for row in 0..n_obs {
-        let axis = row % p_out;
-        x[[row, axis]] = 1.0 + 0.01 * (row / p_out) as f32;
+        let atom = row % k_atoms;
+        let scale = 1.0 + 0.01 * (row / k_atoms) as f32;
         for col in 0..p_out {
             let phase = (row as f32 + 1.0) * 12.9898 + (col as f32 + 1.0) * 78.233;
-            x[[row, col]] += 0.02 * (phase.sin() * 43758.5453).sin();
+            x[[row, col]] =
+                scale * atoms[[atom, col]] + 0.01 * (phase.sin() * 43758.5453).sin();
         }
     }
 
-    // #2822: the default epoch budget. A hand-set `max_epochs: 5` sits below every
-    // returning budget of this fixture: job 531890's lane sweep over perturbation
-    // amplitudes 0.02 down to 1e-5 first returned a fit at 12–19 epochs, and at 0.02
-    // (this fixture) at epoch 15, certified. Five epochs refuse with
-    // `InnerNonConvergence`, which is production's correct answer to that cap.
     let config = SparseDictConfig {
         active,
         ..SparseDictConfig::new(k_atoms)
     };
     let fit = fit_sparse_dictionary(x.view(), &config).expect("sparse dictionary fit");
+    assert!(
+        fit.convergence.certified && fit.convergence.accepted_births == 0,
+        "a returned fit is a certified fixed point with no births; got certified={} births={}",
+        fit.convergence.certified,
+        fit.convergence.accepted_births
+    );
 
     // The whole point: the fitted routing state is fixed-width sparse `N×s`, with
     // `s = min(active, K) ≪ K`. It is NEVER an `N×K` dense assignment.
@@ -233,7 +254,5 @@ fn large_k_sparse_fit_stays_fixed_width_and_never_materializes_dense_n_by_k() {
 
     // The dense-Cholesky decline → certified block CG contract is pinned by
     // `sparse_dict::update::exact_solve_tests::a_declined_dense_cholesky_routes_through_certified_block_cg_2822`
-    // on a constructed singular component. This fit only reaches a decline by
-    // routing accident: across job 531890's eight perturbation amplitudes, one
-    // (1e-3) produced a single decline and seven produced none.
+    // on a constructed singular component, not on this fit.
 }
