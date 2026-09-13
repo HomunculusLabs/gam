@@ -59,7 +59,9 @@ use gam_solve::estimate::{
     FittedLinkState, UnifiedFitResult, saved_latent_cloglog_state_from_fit,
     saved_mixture_state_from_fit, saved_sas_state_from_fit,
 };
-use gam_terms::inference::formula_dsl::{parse_formula, parse_surv_response};
+use gam_terms::inference::formula_dsl::{
+    parse_formula, parse_surv_interval_response, parse_surv_response,
+};
 use gam_terms::smooth::{BlockwisePenalty, TermCollectionDesign, TermCollectionSpec};
 use ndarray::{Array1, Array2, s};
 use std::collections::HashMap;
@@ -2749,8 +2751,19 @@ fn payload_for_latent_window(
     let parsed = parse_formula(&formula).map_err(|err| {
         format!("failed to re-parse latent survival formula for FFI payload: {err}")
     })?;
-    let (entryname, exitname, eventname) = parse_surv_response(&parsed.response)?
-        .ok_or_else(|| "latent survival/binary FFI requires Surv(...) response".to_string())?;
+    // An interval-censored `SurvInterval(L, R, event)` fit materializes L as its
+    // exit column with no entry column (`materialize/survival.rs`), and every saved
+    // model reader already resolves that response with `parse_surv_interval_response`
+    // (`FittedModel::prediction_required_columns`). The save path must accept it too.
+    let (entryname, exitname, eventname) = match parse_surv_response(&parsed.response)? {
+        Some(names) => names,
+        None => parse_surv_interval_response(&parsed.response)?
+            .map(|names| (None, names.0, names.2))
+            .ok_or_else(|| {
+                "latent survival/binary FFI requires a Surv(...) or SurvInterval(...) response"
+                    .to_string()
+            })?,
+    };
 
     // For latent survival, splice the fitted latent_sd into the persisted
     // HazardMultiplier frailty (mirrors CLI behaviour at main.rs:5541).
