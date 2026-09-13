@@ -333,33 +333,6 @@ pub(crate) fn reset_array2(arr: &mut Array2<f64>, rows: usize, cols: usize) {
     }
 }
 
-pub(crate) struct TimewiggleMarginalPsiRowLift {
-    pub(crate) dir: Array1<f64>,
-    pub(crate) u_q0_time: Array1<f64>,
-    pub(crate) u_q1_time: Array1<f64>,
-    pub(crate) u_qd1_time: Array1<f64>,
-    pub(crate) u_q0_marginal: Array1<f64>,
-    pub(crate) u_q1_marginal: Array1<f64>,
-    pub(crate) u_qd1_marginal: Array1<f64>,
-    pub(crate) x_entry_base: Array1<f64>,
-    pub(crate) x_exit_base: Array1<f64>,
-    pub(crate) x_deriv_base: Array1<f64>,
-    pub(crate) marginal_row: Array1<f64>,
-    pub(crate) entry_basis_d1: Array1<f64>,
-    pub(crate) entry_basis_d2: Array1<f64>,
-    pub(crate) exit_basis_d1: Array1<f64>,
-    pub(crate) exit_basis_d2: Array1<f64>,
-    pub(crate) exit_basis_d3: Array1<f64>,
-    pub(crate) entry_m2: f64,
-    pub(crate) entry_m3: f64,
-    pub(crate) exit_m2: f64,
-    pub(crate) exit_m3: f64,
-    pub(crate) exit_m4: f64,
-    pub(crate) d_raw: f64,
-    pub(crate) mu: f64,
-    pub(crate) psi_row: Array1<f64>,
-}
-
 /// A design-moving ψ's loading onto the row program's primary space.
 ///
 /// Sized by the family's own frame (`core_primary_dimension`), not by the

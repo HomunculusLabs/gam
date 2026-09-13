@@ -1439,7 +1439,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     // baseline-chart and learned log-σ axes, and between a chart and a design axis only through
     // the FLEX family program. The third derivatives have closed forms on the rigid frame for
     // design and chart axes but not for a learned log σ (gam#2765), and through the ζ
-    // composition of `timewiggle_third` for a time wiggle with a score warp or link deviation
+    // composition of `timewiggle_third` for every time-wiggle frame it serves
     // whose ψ coordinates are all design axes (gam#2893). Any other θ keeps the analytic
     // gradient without declared curvature: declaring it would refuse every trial point that
     // asks for curvature.
@@ -1448,7 +1448,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             && (!initial_family.joint_jeffreys_term_required()
                 || initial_family.rigid_psi_jeffreys_third_served()
                 || (setup.auxiliary_dim() == 0
-                    && initial_family.timewiggle_flex_design_psi_third_available())));
+                    && initial_family.timewiggle_zeta_available())));
     let analytic_joint_hessian_available = analytic_joint_derivatives_available
         && joint_hessian.is_analytic()
         && psi_curvature_exact;

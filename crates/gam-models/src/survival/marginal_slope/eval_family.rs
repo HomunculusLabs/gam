@@ -821,7 +821,7 @@ impl SurvivalMarginalSlopeFamily {
     /// `{D_β_a D_β ∂_ψ H[v]}` along every coefficient axis `a` for a design
     /// hyperparameter ψ (gam#2765); see
     /// `SurvivalMarginalSlopeRowKernel::design_psi_third_information_all_axes_from`, and
-    /// `timewiggle_third` for a time wiggle with a score warp or link deviation (gam#2893).
+    /// `timewiggle_third` for every time-wiggle frame the ζ composition serves (gam#2893).
     pub(crate) fn design_psi_hessian_second_directional_derivative_all_beta_axes_with_options(
         &self,
         block_states: &[ParameterBlockState],
@@ -832,8 +832,8 @@ impl SurvivalMarginalSlopeFamily {
     ) -> Result<Option<Vec<Array2<f64>>>, String> {
         let d_beta = self.finite_flat_direction(block_states, d_beta_flat)?;
         let row_weights = self.rigid_third_row_weights(options);
-        if self.timewiggle_flex_design_psi_third_available() {
-            return self.timewiggle_flex_design_psi_third_information_all_axes(
+        if self.timewiggle_zeta_available() {
+            return self.timewiggle_design_psi_third_information_all_axes(
                 block_states,
                 derivative_blocks,
                 psi_index,
@@ -859,7 +859,7 @@ impl SurvivalMarginalSlopeFamily {
     /// `{D_β_a ∂²_ψiψj H}` along every coefficient axis `a` for a pair of design
     /// hyperparameters (gam#2765); see
     /// `SurvivalMarginalSlopeRowKernel::design_psi_pair_third_information_all_axes_from`, and
-    /// `timewiggle_third` for a time wiggle with a score warp or link deviation (gam#2893).
+    /// `timewiggle_third` for every time-wiggle frame the ζ composition serves (gam#2893).
     pub(crate) fn design_psi_pair_hessian_directional_derivative_all_beta_axes_with_options(
         &self,
         block_states: &[ParameterBlockState],
@@ -869,8 +869,8 @@ impl SurvivalMarginalSlopeFamily {
         options: &BlockwiseFitOptions,
     ) -> Result<Option<Vec<Array2<f64>>>, String> {
         let row_weights = self.rigid_third_row_weights(options);
-        if self.timewiggle_flex_design_psi_third_available() {
-            return self.timewiggle_flex_design_psi_pair_third_information_all_axes(
+        if self.timewiggle_zeta_available() {
+            return self.timewiggle_design_psi_pair_third_information_all_axes(
                 block_states,
                 derivative_blocks,
                 psi_i,

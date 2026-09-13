@@ -722,14 +722,6 @@ fn flat_beta(block_states: &[ParameterBlockState]) -> Result<Array1<f64>, String
 }
 
 impl SurvivalMarginalSlopeFamily {
-    /// Whether the ζ composition serves this family's third information derivatives, its joint
-    /// `D²H`/`D³H` sweeps and the design-ψ mixed ones: every frame
-    /// `timewiggle_design_psi_terms_available` admits, from the FLEX base or from the rigid row
-    /// program's closed-form fifth likelihood derivatives.
-    pub(crate) fn timewiggle_flex_design_psi_third_available(&self) -> bool {
-        self.timewiggle_design_psi_terms_available()
-    }
-
     /// The ζ frame of this family. A family without a time-wiggle basis has no z block, and the
     /// FLEX row program carries one slope primary, so a follow-up-varying slope beside it has no ζ
     /// frame; both are refused.
@@ -1185,7 +1177,7 @@ impl SurvivalMarginalSlopeFamily {
     /// axis, for a time wiggle on every frame the ζ composition serves (gam#2893). One row pass
     /// serves every axis, where the single-direction evaluator rebuilds each row's flex base
     /// once per axis. The module documentation derives the ζ composition this evaluates.
-    pub(crate) fn exact_newton_joint_hessian_second_directional_derivative_timewiggle_flex_all_axes(
+    pub(crate) fn exact_newton_joint_hessian_second_directional_derivative_timewiggle_all_axes(
         &self,
         block_states: &[ParameterBlockState],
         d_u: &Array1<f64>,
@@ -1223,7 +1215,7 @@ impl SurvivalMarginalSlopeFamily {
     /// Third directional derivative `D³H[u, v, e_a]` of the joint Hessian along every
     /// coefficient axis, for a time wiggle on every frame the ζ composition serves (gam#2893).
     /// The module documentation derives the ζ composition this evaluates.
-    pub(crate) fn exact_newton_joint_hessian_third_directional_derivative_timewiggle_flex_all_axes(
+    pub(crate) fn exact_newton_joint_hessian_third_directional_derivative_timewiggle_all_axes(
         &self,
         block_states: &[ParameterBlockState],
         d_u: &Array1<f64>,
@@ -1265,7 +1257,7 @@ impl SurvivalMarginalSlopeFamily {
     /// `w = Ã_ψ β`, a row contributes `Ãᵀ(∇⁵[w, Ãv, Ãe_a] + ∇⁴[Ã_ψv, Ãe_a] + ∇⁴[Ãv, Ã_ψe_a])Ã`
     /// and `Ã_ψᵀ ∇⁴[Ãv, Ãe_a] Ã` with its transpose. Returns `None` where the family has no ψ
     /// block for the axis.
-    pub(crate) fn timewiggle_flex_design_psi_third_information_all_axes(
+    pub(crate) fn timewiggle_design_psi_third_information_all_axes(
         &self,
         block_states: &[ParameterBlockState],
         derivative_blocks: &[Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>],
@@ -1359,7 +1351,7 @@ impl SurvivalMarginalSlopeFamily {
     /// row contributes `Ãᵀ(∇⁴[w, Ãe_a] + ∇³[Ã_ψe_a])Ã` and `Ã_ψᵀ ∇³[Ãe_a] Ã` with its
     /// transpose, so one row pass serves every axis. Returns `None` where the family has no ψ
     /// block for the axis.
-    pub(crate) fn timewiggle_flex_design_psi_hessian_all_beta_axes(
+    pub(crate) fn timewiggle_design_psi_hessian_all_beta_axes(
         &self,
         block_states: &[ParameterBlockState],
         derivative_blocks: &[Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>],
@@ -1450,7 +1442,7 @@ impl SurvivalMarginalSlopeFamily {
     /// `Ã_iᵀ(∇⁴[w_j, z] + ∇³[z_j])Ã` and `Ã_jᵀ(∇⁴[w_i, z] + ∇³[z_i])Ã` with their transposes,
     /// and `Ã_ijᵀ ∇³[z] Ã + Ã_iᵀ ∇³[z] Ã_j` with theirs. `Ã_ij` is zero across blocks. Returns
     /// `None` where the family has no ψ block for either axis.
-    pub(crate) fn timewiggle_flex_design_psi_pair_third_information_all_axes(
+    pub(crate) fn timewiggle_design_psi_pair_third_information_all_axes(
         &self,
         block_states: &[ParameterBlockState],
         derivative_blocks: &[Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>],
@@ -1618,11 +1610,12 @@ impl SurvivalMarginalSlopeFamily {
 }
 
 impl SurvivalMarginalSlopeFamily {
-    /// Whether the ζ composition serves this family's design-ψ terms, their Hessian drift and the
-    /// pair terms (gam#2893): a time wiggle with a single score slope. The FLEX row program serves a
-    /// time-constant slope; the rigid row program serves a time-constant or follow-up-varying slope
-    /// on its own four or six primaries.
-    pub(crate) fn timewiggle_design_psi_terms_available(&self) -> bool {
+    /// Whether the ζ composition serves this family (gam#2893): a time wiggle with a single score
+    /// slope. On such a frame it serves the design-ψ terms, their drift and pair terms, the joint
+    /// `D²H`/`D³H` sweeps, the Jeffreys third information derivative and the design-ψ mixed third
+    /// derivatives. The FLEX row program serves a time-constant slope. The rigid program serves a
+    /// time-constant or follow-up-varying slope on its own four or six primaries.
+    pub(crate) fn timewiggle_zeta_available(&self) -> bool {
         self.flex_timewiggle_active()
             && !self.per_z_slope_active()
             && !(self.flex_active() && self.slope_is_follow_up_varying())
@@ -1825,7 +1818,7 @@ impl SurvivalMarginalSlopeFamily {
     /// `D_β ∂_ψ H[v]` for a design ψ along the coefficient direction `d_beta` under the row measure
     /// of `options` (gam#2893). With `w = Ã_ψβ`, a row contributes
     /// `Ãᵀ(∇⁴[w, Ãv] + ∇³[Ã_ψv])Ã + Ã_ψᵀ∇³[Ãv]Ã + Ãᵀ∇³[Ãv]Ã_ψ`, the single-direction case of
-    /// `timewiggle_flex_design_psi_hessian_all_beta_axes`. Returns `None` where the family has no ψ
+    /// `timewiggle_design_psi_hessian_all_beta_axes`. Returns `None` where the family has no ψ
     /// block for the axis.
     pub(crate) fn timewiggle_design_psi_hessian_drift(
         &self,

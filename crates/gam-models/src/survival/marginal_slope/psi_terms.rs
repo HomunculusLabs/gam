@@ -92,102 +92,6 @@ impl SurvivalMarginalSlopeFamily {
         Ok(())
     }
 
-    /// U_{iB}^α contribution to score (eq 46, term 1) for timewiggle + marginal ψ.
-    pub(crate) fn accumulate_score_timewiggle_psi_u(
-        lift: &TimewiggleMarginalPsiRowLift,
-        f_pi: &Array1<f64>,
-        score_t: &mut Array1<f64>,
-        score_m: &mut Array1<f64>,
-    ) {
-        let ut = [&lift.u_q0_time, &lift.u_q1_time, &lift.u_qd1_time];
-        let um = [
-            &lift.u_q0_marginal,
-            &lift.u_q1_marginal,
-            &lift.u_qd1_marginal,
-        ];
-        for q in 0..3 {
-            if f_pi[q] != 0.0 {
-                score_t.scaled_add(f_pi[q], ut[q]);
-            }
-        }
-        for q in 0..3 {
-            if f_pi[q] != 0.0 {
-                score_m.scaled_add(f_pi[q], um[q]);
-            }
-        }
-    }
-
-    /// Compute u_i^{ψε} = D_ψ D_β π_i · d_beta for hessian directional derivative.
-    /// With timewiggle + marginal ψ, includes T''(h) cross-terms.
-    pub(crate) fn timewiggle_psi_action(
-        &self,
-        row: usize,
-        block_states: &[ParameterBlockState],
-        slices: &BlockSlices,
-        primary_layout: Option<&FlexPrimarySlices>,
-        psi_row: &Array1<f64>,
-        beta_psi: &Array1<f64>,
-        d_beta_flat: &Array1<f64>,
-    ) -> Result<Array1<f64>, String> {
-        let beta_time = &block_states[0].beta;
-        let time_tail = self.time_wiggle_range();
-        let p_base = time_tail.start;
-        let beta_time_w = beta_time.slice(s![time_tail.clone()]);
-        let ec = self
-            .design_entry
-            .try_row_chunk(row..row + 1)
-            .map_err(|e| format!("timewiggle_psi_action design_entry: {e}"))?;
-        let xc = self
-            .design_exit
-            .try_row_chunk(row..row + 1)
-            .map_err(|e| format!("timewiggle_psi_action design_exit: {e}"))?;
-        let dc = self
-            .design_derivative_exit
-            .try_row_chunk(row..row + 1)
-            .map_err(|e| format!("timewiggle_psi_action design_derivative_exit: {e}"))?;
-        let x_e = ec.row(0).slice(s![..p_base]).to_owned();
-        let x_x = xc.row(0).slice(s![..p_base]).to_owned();
-        let x_d = dc.row(0).slice(s![..p_base]).to_owned();
-        let mc = self
-            .marginal_design
-            .try_row_chunk(row..row + 1)
-            .map_err(|e| format!("timewiggle_psi_action marginal_design: {e}"))?;
-        let x_m = mc.row(0).to_owned();
-        let bm = block_states[1].eta[row];
-        let h0 = x_e.dot(&beta_time.slice(s![..p_base])) + self.offset_entry[row] + bm;
-        let h1 = x_x.dot(&beta_time.slice(s![..p_base])) + self.offset_exit[row] + bm;
-        let d_raw = x_d.dot(&beta_time.slice(s![..p_base])) + self.derivative_offset_exit[row];
-        let eg = self
-            .time_wiggle_geometry(Array1::from_vec(vec![h0]).view(), beta_time_w)?
-            .ok_or_else(|| "missing entry timewiggle for psi action".to_string())?;
-        let xg = self
-            .time_wiggle_geometry(Array1::from_vec(vec![h1]).view(), beta_time_w)?
-            .ok_or_else(|| "missing exit timewiggle for psi action".to_string())?;
-        let mu = psi_row.dot(beta_psi);
-        let dt = d_beta_flat.slice(s![slices.time.clone()]);
-        let dm = d_beta_flat.slice(s![slices.marginal.clone()]);
-        let dh0 = x_e.dot(&dt.slice(s![..p_base])) + x_m.dot(&dm);
-        let dh1 = x_x.dot(&dt.slice(s![..p_base])) + x_m.dot(&dm);
-        let dd_raw = x_d.dot(&dt.slice(s![..p_base]));
-        let dmu = psi_row.dot(&dm);
-        let mut out = Array1::zeros(
-            primary_layout.map_or_else(|| self.core_primary_dimension(), |primary| primary.total),
-        );
-        let q0_idx = primary_layout.map_or(0, |primary| primary.q0);
-        let q1_idx = primary_layout.map_or(1, |primary| primary.q1);
-        let qd1_idx = primary_layout.map_or(2, |primary| primary.qd1);
-        // `m_k = Σ_l B_l^{(k)}(h)·γ_l` moves with the wiggle coefficients as well as with `h`
-        // (gam#2893).
-        let d_wiggle = dt.slice(s![time_tail.clone()]);
-        let dm1_entry = eg.d2q_dq02[0] * dh0 + eg.basis_d1.row(0).dot(&d_wiggle);
-        let dm1_exit = xg.d2q_dq02[0] * dh1 + xg.basis_d1.row(0).dot(&d_wiggle);
-        let dm2_exit = xg.d3q_dq03[0] * dh1 + xg.basis_d2.row(0).dot(&d_wiggle);
-        out[q0_idx] = dm1_entry * mu + eg.dq_dq0[0] * dmu;
-        out[q1_idx] = dm1_exit * mu + xg.dq_dq0[0] * dmu;
-        out[qd1_idx] = dm2_exit * d_raw * mu + xg.d2q_dq02[0] * (dd_raw * mu + d_raw * dmu);
-        Ok(out)
-    }
-
     pub(crate) fn psi_terms_inner(
         &self,
         block_states: &[ParameterBlockState],
@@ -220,13 +124,24 @@ impl SurvivalMarginalSlopeFamily {
     ) -> Result<Option<ExactNewtonJointPsiTerms>, String> {
         // A time wiggle moves every design ψ through the ζ composition, which differentiates the
         // time-wiggle map itself instead of lifting its Jacobian by hand (gam#2893).
-        if self.timewiggle_design_psi_terms_available() {
+        if self.timewiggle_zeta_available() {
             return self.timewiggle_design_psi_terms(
                 block_states,
                 derivative_blocks,
                 psi_index,
                 options,
             );
+        }
+        // Every other time-wiggle frame has no design-ψ calculus: per-score slopes, and the FLEX
+        // program beside a follow-up-varying slope, which carries one slope primary.
+        if self.flex_timewiggle_active() {
+            return Err(SurvivalMarginalSlopeError::UnsupportedConfiguration {
+                reason: "survival marginal-slope design ψ beside a time wiggle is served by the ζ \
+                         composition only, which per-score slopes and a FLEX program beside a \
+                         follow-up-varying slope do not have"
+                    .to_string(),
+            }
+            .into());
         }
         let flex_active = self.effective_flex_active(block_states)?;
         let flex_primary = flex_active.then(|| flex_primary_slices(self));
@@ -242,11 +157,6 @@ impl SurvivalMarginalSlopeFamily {
             _ => &block_states[2].beta,
         };
 
-        let timewiggle_active = self.flex_timewiggle_active();
-        let timewiggle_psi = timewiggle_active && block_idx == 1;
-
-        // NOTE: old dense timewiggle early return removed; now handled by
-        // block path with lifted Jacobians below.
         let p_t = slices.time.len();
         let p_m = slices.marginal.len();
         let p_g = slices.slope.len();
@@ -301,45 +211,16 @@ impl SurvivalMarginalSlopeFamily {
                         .row_vector(row)
                         .map_err(|e| format!("survival rowwise psi map: {e}"))?;
 
-                    let q_geom = if timewiggle_active {
-                        Some(self.row_dynamic_q_geometry(row, block_states)?)
-                    } else {
-                        None
-                    };
-
-                    let psi_lift = if timewiggle_psi {
-                        Some(self.timewiggle_marginal_psi_row_lift(
-                            row,
-                            block_states,
-                            flex_primary.as_ref(),
-                            &psi_row,
-                            beta_psi,
-                        )?)
-                    } else {
-                        None
-                    };
-
                     let channels =
                         psi_row_channels(self, flex_primary.as_ref(), row, block_idx, psi_row)?;
-                    let dir = if let Some(lift) = psi_lift.as_ref() {
-                        lift.dir.clone()
-                    } else {
-                        channels.direction(beta_psi.view())
-                    };
+                    let dir = channels.direction(beta_psi.view());
 
-                    let q_geom_lazy;
                     let (mut f_pi, mut f_pipi) = if let Some(primary) = flex_primary.as_ref() {
-                        let q_ref = match q_geom.as_ref() {
-                            Some(q) => q,
-                            None => {
-                                q_geom_lazy = self.row_dynamic_q_geometry(row, block_states)?;
-                                &q_geom_lazy
-                            }
-                        };
+                        let q_geom = self.row_dynamic_q_geometry(row, block_states)?;
                         let (_, g, h) = self.compute_row_flex_primary_gradient_hessian_exact(
                             row,
                             block_states,
-                            q_ref,
+                            &q_geom,
                             primary,
                         )?;
                         (g, h)
@@ -376,16 +257,7 @@ impl SurvivalMarginalSlopeFamily {
                         }
                     }
                     let pb = f_pipi.dot(&dir);
-                    if let Some(lift) = psi_lift.as_ref() {
-                        Self::accumulate_score_timewiggle_psi_u(lift, &f_pi, &mut a.1, &mut a.2);
-                    }
-                    if let Some(q) = q_geom.as_ref() {
-                        self.accumulate_score_with_q_geometry(
-                            row, q, &pb, &mut a.1, &mut a.2, &mut a.3,
-                        )?;
-                    } else {
-                        self.accumulate_score_blockwise(row, &pb, &mut a.1, &mut a.2, &mut a.3)?;
-                    }
+                    self.accumulate_score_blockwise(row, &pb, &mut a.1, &mut a.2, &mut a.3)?;
                     self.accumulate_score_identity_blocks(
                         flex_primary.as_ref(),
                         &pb,
@@ -395,34 +267,9 @@ impl SurvivalMarginalSlopeFamily {
 
                     for (loading, design_row) in channels.channels() {
                         let right_primary = f_pipi.dot(loading);
-                        if let Some(q) = q_geom.as_ref() {
-                            a.6.add_rank1_psi_cross_with_q_geometry(
-                                self,
-                                row,
-                                q,
-                                block_idx,
-                                design_row,
-                                &right_primary,
-                            )?;
-                        } else {
-                            a.6.add_rank1_psi_cross(self, row, block_idx, design_row, &right_primary)?;
-                        }
+                        a.6.add_rank1_psi_cross(self, row, block_idx, design_row, &right_primary)?;
                     }
-                    if let Some(q) = q_geom.as_ref() {
-                        let zero_grad = Array1::zeros(third.nrows());
-                        a.6.add_pullback_with_q_geometry(self, row, q, &zero_grad, &third)?;
-                    } else {
-                        a.6.add_pullback(self, row, &third)?;
-                    }
-                    if let Some(lift) = psi_lift.as_ref() {
-                        let q = q_geom.as_ref().expect(
-                            "a ψ-lift exists only when timewiggle_psi holds, which implies \
-                             timewiggle_active — exactly when q_geom is Some",
-                        );
-                        a.6.add_timewiggle_psi_u_cross(self, row, q, lift, &f_pipi)?;
-                        a.6.add_second_pullback_weighted(q, &pb);
-                        a.6.add_timewiggle_psi_kappa_alpha(self, lift, &f_pi);
-                    }
+                    a.6.add_pullback(self, row, &third)?;
 
                     Ok(())
                 },
@@ -746,7 +593,7 @@ impl SurvivalMarginalSlopeFamily {
         options: &BlockwiseFitOptions,
     ) -> Result<Option<ExactNewtonJointPsiSecondOrderTerms>, String> {
         // A time wiggle takes the ζ composition; see `psi_terms_inner_with_options` (gam#2893).
-        if self.timewiggle_design_psi_terms_available() {
+        if self.timewiggle_zeta_available() {
             return self.timewiggle_design_psi_second_order_terms(
                 block_states,
                 derivative_blocks,
@@ -754,6 +601,17 @@ impl SurvivalMarginalSlopeFamily {
                 psi_j,
                 options,
             );
+        }
+        // Every other time-wiggle frame has no design-ψ calculus: per-score slopes, and the FLEX
+        // program beside a follow-up-varying slope, which carries one slope primary.
+        if self.flex_timewiggle_active() {
+            return Err(SurvivalMarginalSlopeError::UnsupportedConfiguration {
+                reason: "survival marginal-slope design ψ beside a time wiggle is served by the ζ \
+                         composition only, which per-score slopes and a FLEX program beside a \
+                         follow-up-varying slope do not have"
+                    .to_string(),
+            }
+            .into());
         }
         let flex_active = self.effective_flex_active(block_states)?;
         let flex_primary = flex_active.then(|| flex_primary_slices(self));
@@ -778,10 +636,6 @@ impl SurvivalMarginalSlopeFamily {
             1 => &block_states[1].beta,
             _ => &block_states[2].beta,
         };
-
-        let timewiggle_active = self.flex_timewiggle_active();
-        let timewiggle_psi_i = timewiggle_active && block_idx_i == 1;
-        let timewiggle_psi_j = timewiggle_active && block_idx_j == 1;
 
         let p_t = slices.time.len();
         let p_m = slices.marginal.len();
@@ -870,49 +724,12 @@ impl SurvivalMarginalSlopeFamily {
                     .row_vector(row)
                     .map_err(|e| format!("survival rowwise psi map: {e}"))?;
 
-                let q_geom = if timewiggle_active {
-                    Some(self.row_dynamic_q_geometry(row, block_states)?)
-                } else {
-                    None
-                };
-
-                let psi_lift_i = if timewiggle_psi_i {
-                    Some(self.timewiggle_marginal_psi_row_lift(
-                        row,
-                        block_states,
-                        flex_primary.as_ref(),
-                        &psi_row_i,
-                        beta_i,
-                    )?)
-                } else {
-                    None
-                };
-                let psi_lift_j = if timewiggle_psi_j {
-                    Some(self.timewiggle_marginal_psi_row_lift(
-                        row,
-                        block_states,
-                        flex_primary.as_ref(),
-                        &psi_row_j,
-                        beta_j,
-                    )?)
-                } else {
-                    None
-                };
-
                 let channels_i =
                     psi_row_channels(self, flex_primary.as_ref(), row, block_idx_i, psi_row_i)?;
                 let channels_j =
                     psi_row_channels(self, flex_primary.as_ref(), row, block_idx_j, psi_row_j)?;
-                let dir_i = if let Some(lift) = psi_lift_i.as_ref() {
-                    lift.dir.clone()
-                } else {
-                    channels_i.direction(beta_i.view())
-                };
-                let dir_j = if let Some(lift) = psi_lift_j.as_ref() {
-                    lift.dir.clone()
-                } else {
-                    channels_j.direction(beta_j.view())
-                };
+                let dir_i = channels_i.direction(beta_i.view());
+                let dir_j = channels_j.direction(beta_j.view());
 
                 // The cross-ψ rows, kept only when they are present AND not
                 // identically zero. Both consumers below need the rows
@@ -937,19 +754,12 @@ impl SurvivalMarginalSlopeFamily {
                     None => Array1::<f64>::zeros(dir_i.len()),
                 };
 
-                let q_geom_lazy;
                 let (mut f_pi, mut f_pipi) = if let Some(primary) = flex_primary.as_ref() {
-                    let q_ref = match q_geom.as_ref() {
-                        Some(q) => q,
-                        None => {
-                            q_geom_lazy = self.row_dynamic_q_geometry(row, block_states)?;
-                            &q_geom_lazy
-                        }
-                    };
+                    let q_geom = self.row_dynamic_q_geometry(row, block_states)?;
                     let (_, g, h) = self.compute_row_flex_primary_gradient_hessian_exact(
                         row,
                         block_states,
-                        q_ref,
+                        &q_geom,
                         primary,
                     )?;
                     (g, h)
@@ -1007,24 +817,13 @@ impl SurvivalMarginalSlopeFamily {
                     }
                 }
                 let pb1 = f_pipi.dot(&dir_ij);
-                if let Some(q) = q_geom.as_ref() {
-                    self.accumulate_score_with_q_geometry(
-                        row,
-                        q,
-                        &pb1,
-                        &mut a.score_t,
-                        &mut a.score_m,
-                        &mut a.score_g,
-                    )?;
-                } else {
-                    self.accumulate_score_blockwise(
-                        row,
-                        &pb1,
-                        &mut a.score_t,
-                        &mut a.score_m,
-                        &mut a.score_g,
-                    )?;
-                }
+                self.accumulate_score_blockwise(
+                    row,
+                    &pb1,
+                    &mut a.score_t,
+                    &mut a.score_m,
+                    &mut a.score_g,
+                )?;
                 self.accumulate_score_identity_blocks(
                     flex_primary.as_ref(),
                     &pb1,
@@ -1032,24 +831,13 @@ impl SurvivalMarginalSlopeFamily {
                     Some(&mut a.score_w),
                 );
                 let pb2 = third_i.dot(&dir_j);
-                if let Some(q) = q_geom.as_ref() {
-                    self.accumulate_score_with_q_geometry(
-                        row,
-                        q,
-                        &pb2,
-                        &mut a.score_t,
-                        &mut a.score_m,
-                        &mut a.score_g,
-                    )?;
-                } else {
-                    self.accumulate_score_blockwise(
-                        row,
-                        &pb2,
-                        &mut a.score_t,
-                        &mut a.score_m,
-                        &mut a.score_g,
-                    )?;
-                }
+                self.accumulate_score_blockwise(
+                    row,
+                    &pb2,
+                    &mut a.score_t,
+                    &mut a.score_m,
+                    &mut a.score_g,
+                )?;
                 self.accumulate_score_identity_blocks(
                     flex_primary.as_ref(),
                     &pb2,
@@ -1061,24 +849,13 @@ impl SurvivalMarginalSlopeFamily {
                 if let Some(channels) = channels_ij.as_ref() {
                     for (loading, design_row) in channels.channels() {
                         let rp_ij = f_pipi.dot(loading);
-                        if let Some(q) = q_geom.as_ref() {
-                            a.hessian.add_rank1_psi_cross_with_q_geometry(
-                                self,
-                                row,
-                                q,
-                                block_idx_i,
-                                design_row,
-                                &rp_ij,
-                            )?;
-                        } else {
-                            a.hessian.add_rank1_psi_cross(
-                                self,
-                                row,
-                                block_idx_i,
-                                design_row,
-                                &rp_ij,
-                            )?;
-                        }
+                        a.hessian.add_rank1_psi_cross(
+                            self,
+                            row,
+                            block_idx_i,
+                            design_row,
+                            &rp_ij,
+                        )?;
                     }
                 }
                 for (loading_i, row_i) in channels_i.channels() {
@@ -1094,89 +871,21 @@ impl SurvivalMarginalSlopeFamily {
                 }
                 for (loading_i, row_i) in channels_i.channels() {
                     let rp_i = third_j.t().dot(loading_i);
-                    if let Some(q) = q_geom.as_ref() {
-                        a.hessian.add_rank1_psi_cross_with_q_geometry(
-                            self,
-                            row,
-                            q,
-                            block_idx_i,
-                            row_i,
-                            &rp_i,
-                        )?;
-                    } else {
-                        a.hessian
-                            .add_rank1_psi_cross(self, row, block_idx_i, row_i, &rp_i)?;
-                    }
+                    a.hessian
+                        .add_rank1_psi_cross(self, row, block_idx_i, row_i, &rp_i)?;
                 }
                 for (loading_j, row_j) in channels_j.channels() {
                     let rp_j = third_i.t().dot(loading_j);
-                    if let Some(q) = q_geom.as_ref() {
-                        a.hessian.add_rank1_psi_cross_with_q_geometry(
-                            self,
-                            row,
-                            q,
-                            block_idx_j,
-                            row_j,
-                            &rp_j,
-                        )?;
-                    } else {
-                        a.hessian
-                            .add_rank1_psi_cross(self, row, block_idx_j, row_j, &rp_j)?;
-                    }
-                }
-                if let Some(q) = q_geom.as_ref() {
-                    let zero_grad = Array1::zeros(fourth.nrows());
                     a.hessian
-                        .add_pullback_with_q_geometry(self, row, q, &zero_grad, &fourth)?;
-                } else {
-                    a.hessian.add_pullback(self, row, &fourth)?;
+                        .add_rank1_psi_cross(self, row, block_idx_j, row_j, &rp_j)?;
                 }
+                a.hessian.add_pullback(self, row, &fourth)?;
                 let mut third_ij =
                     self.row_primary_third_contracted_general(row, block_states, &dir_ij)?;
                 if w != 1.0 {
                     third_ij.mapv_inplace(|v| v * w);
                 }
-                if let Some(q) = q_geom.as_ref() {
-                    let zero_grad = Array1::zeros(third_ij.nrows());
-                    a.hessian
-                        .add_pullback_with_q_geometry(self, row, q, &zero_grad, &third_ij)?;
-                } else {
-                    a.hessian.add_pullback(self, row, &third_ij)?;
-                }
-
-                // Timewiggle psi corrections for ψ_i (terms 1,2,4,5 of eq 47)
-                if let Some(lift_i) = psi_lift_i.as_ref() {
-                    let q = q_geom.as_ref().expect(
-                        "a ψ_i-lift exists only when timewiggle_psi_i holds, which implies \
-                         timewiggle_active — exactly when q_geom is Some",
-                    );
-                    // U_i^α cross terms with third_j Hessian
-                    a.hessian
-                        .add_timewiggle_psi_u_cross(self, row, q, lift_i, &third_j)?;
-                    // Second pullback weighted by T_j[dir_j] applied to dir_i
-                    let hu_i = f_pipi.dot(&dir_i);
-                    a.hessian.add_second_pullback_weighted(q, &hu_i);
-                    // K^{BC,α_i} weighted by gradient
-                    a.hessian
-                        .add_timewiggle_psi_kappa_alpha(self, lift_i, &f_pi);
-                }
-                // Timewiggle psi corrections for ψ_j
-                if let Some(lift_j) = psi_lift_j.as_ref() {
-                    let q = q_geom.as_ref().expect(
-                        "a ψ_j-lift exists only when timewiggle_psi_j holds, which implies \
-                         timewiggle_active — exactly when q_geom is Some",
-                    );
-                    a.hessian
-                        .add_timewiggle_psi_u_cross(self, row, q, lift_j, &third_i)?;
-                    let hu_j = f_pipi.dot(&dir_j);
-                    a.hessian.add_second_pullback_weighted(q, &hu_j);
-                    if psi_lift_i.is_none() {
-                        // Only add gradient-weighted K^α for j if we didn't already
-                        // add it for i (when both are marginal, it's already covered)
-                        a.hessian
-                            .add_timewiggle_psi_kappa_alpha(self, lift_j, &f_pi);
-                    }
-                }
+                a.hessian.add_pullback(self, row, &third_ij)?;
 
                 Ok(())
             },
@@ -1260,6 +969,17 @@ impl SurvivalMarginalSlopeFamily {
         d_beta_flat: &Array1<f64>,
         options: &BlockwiseFitOptions,
     ) -> Result<Option<(BlockHessianAccumulator, BlockSlices)>, String> {
+        // Every other time-wiggle frame has no design-ψ calculus: per-score slopes, and the FLEX
+        // program beside a follow-up-varying slope, which carries one slope primary.
+        if self.flex_timewiggle_active() {
+            return Err(SurvivalMarginalSlopeError::UnsupportedConfiguration {
+                reason: "survival marginal-slope design ψ beside a time wiggle is served by the ζ \
+                         composition only, which per-score slopes and a FLEX program beside a \
+                         follow-up-varying slope do not have"
+                    .to_string(),
+            }
+            .into());
+        }
         let flex_active = self.effective_flex_active(block_states)?;
         let flex_primary = flex_active.then(|| flex_primary_slices(self));
         let slices = block_slices(self, block_states);
@@ -1277,9 +997,6 @@ impl SurvivalMarginalSlopeFamily {
             1 => d_beta_flat.slice(s![slices.marginal.clone()]),
             _ => d_beta_flat.slice(s![slices.slope.clone()]),
         };
-
-        let timewiggle_active = self.flex_timewiggle_active();
-        let timewiggle_psi = timewiggle_active && block_idx == 1;
 
         let p_t = slices.time.len();
         let p_m = slices.marginal.len();
@@ -1311,78 +1028,17 @@ impl SurvivalMarginalSlopeFamily {
                     .row_vector(row)
                     .map_err(|e| format!("survival rowwise psi map: {e}"))?;
 
-                let q_geom = if timewiggle_active {
-                    Some(self.row_dynamic_q_geometry(row, block_states)?)
-                } else {
-                    None
-                };
-
-                let psi_lift = if timewiggle_psi {
-                    Some(self.timewiggle_marginal_psi_row_lift(
-                        row,
-                        block_states,
-                        flex_primary.as_ref(),
-                        &psi_row,
-                        beta_psi,
-                    )?)
-                } else {
-                    None
-                };
-
-                let lift_action = if psi_lift.is_some() {
-                    Some(self.timewiggle_psi_action(
-                        row,
-                        block_states,
-                        &slices,
-                        flex_primary.as_ref(),
-                        &psi_row,
-                        beta_psi,
-                        d_beta_flat,
-                    )?)
-                } else {
-                    None
-                };
                 let channels =
                     psi_row_channels(self, flex_primary.as_ref(), row, block_idx, psi_row)?;
-                let psi_dir = if let Some(lift) = psi_lift.as_ref() {
-                    lift.dir.clone()
-                } else {
-                    channels.direction(beta_psi.view())
-                };
-                let psi_action = match lift_action {
-                    Some(action) => action,
-                    None => channels.direction(d_beta_block),
-                };
+                let psi_dir = channels.direction(beta_psi.view());
+                let psi_action = channels.direction(d_beta_block);
                 let row_dir = self.row_primary_direction_from_flat_dynamic(
                     row,
                     block_states,
                     &slices,
                     d_beta_flat,
                 )?;
-                let q_geom_lazy;
-                let mut h_pi = if let Some(primary) = flex_primary.as_ref() {
-                    let q_ref = match q_geom.as_ref() {
-                        Some(q) => q,
-                        None => {
-                            q_geom_lazy = self.row_dynamic_q_geometry(row, block_states)?;
-                            &q_geom_lazy
-                        }
-                    };
-                    self.compute_row_flex_primary_gradient_hessian_exact(
-                        row,
-                        block_states,
-                        q_ref,
-                        primary,
-                    )?
-                    .2
-                } else {
-                    self.compute_row_primary_gradient_hessian_uncached(row, block_states)?
-                        .2
-                };
                 let w = row_weights[row];
-                if w != 1.0 {
-                    h_pi.mapv_inplace(|v| v * w);
-                }
                 let mut third_beta =
                     self.row_primary_third_contracted_general(row, block_states, &row_dir)?;
                 let mut fourth = self.row_primary_fourth_contracted_general(
@@ -1398,49 +1054,15 @@ impl SurvivalMarginalSlopeFamily {
 
                 for (loading, design_row) in channels.channels() {
                     let right_primary = third_beta.t().dot(loading);
-                    if let Some(q) = q_geom.as_ref() {
-                        acc.add_rank1_psi_cross_with_q_geometry(
-                            self,
-                            row,
-                            q,
-                            block_idx,
-                            design_row,
-                            &right_primary,
-                        )?;
-                    } else {
-                        acc.add_rank1_psi_cross(self, row, block_idx, design_row, &right_primary)?;
-                    }
+                    acc.add_rank1_psi_cross(self, row, block_idx, design_row, &right_primary)?;
                 }
-                if let Some(q) = q_geom.as_ref() {
-                    let zero_grad = Array1::zeros(fourth.nrows());
-                    acc.add_pullback_with_q_geometry(self, row, q, &zero_grad, &fourth)?;
-                } else {
-                    acc.add_pullback(self, row, &fourth)?;
-                }
+                acc.add_pullback(self, row, &fourth)?;
                 let mut third_action =
                     self.row_primary_third_contracted_general(row, block_states, &psi_action)?;
                 if w != 1.0 {
                     third_action.mapv_inplace(|v| v * w);
                 }
-                if let Some(q) = q_geom.as_ref() {
-                    let zero_grad = Array1::zeros(third_action.nrows());
-                    acc.add_pullback_with_q_geometry(self, row, q, &zero_grad, &third_action)?;
-                } else {
-                    acc.add_pullback(self, row, &third_action)?;
-                }
-                // Timewiggle psi corrections
-                if let Some(lift) = psi_lift.as_ref() {
-                    let q = q_geom.as_ref().expect(
-                        "a ψ-lift exists only when timewiggle_psi holds, which implies \
-                         timewiggle_active — exactly when q_geom is Some",
-                    );
-                    // U^α cross with third_beta (D_β H term)
-                    acc.add_timewiggle_psi_u_cross(self, row, q, lift, &third_beta)?;
-                    let second_pullback_weight = third_beta.dot(&psi_dir) + h_pi.dot(&psi_action);
-                    acc.add_second_pullback_weighted(q, &second_pullback_weight);
-                    let kappa_weight = h_pi.dot(&row_dir);
-                    acc.add_timewiggle_psi_kappa_alpha(self, lift, &kappa_weight);
-                }
+                acc.add_pullback(self, row, &third_action)?;
                 Ok(())
             },
             |total, chunk| {
@@ -1466,7 +1088,7 @@ impl SurvivalMarginalSlopeFamily {
         options: &BlockwiseFitOptions,
     ) -> Result<Option<Array2<f64>>, String> {
         // A time wiggle takes the ζ composition; see `psi_terms_inner_with_options` (gam#2893).
-        if self.timewiggle_design_psi_terms_available() {
+        if self.timewiggle_zeta_available() {
             return self.timewiggle_design_psi_hessian_drift(
                 block_states,
                 derivative_blocks,
@@ -1508,10 +1130,10 @@ impl SurvivalMarginalSlopeFamily {
     /// axis with the sparse loading column; only the design pullbacks remain
     /// per axis.
     ///
-    /// A time wiggle with a score warp or link deviation takes the ζ sweep of
-    /// `timewiggle_third` under the same row measure (gam#2893). The other flex
-    /// frames and a follow-up-varying slope carry their own primary layout and ψ
-    /// lifts, and keep the per-axis path: this returns `None` there, exactly as it
+    /// A time wiggle takes the ζ sweep of `timewiggle_third` under the same row
+    /// measure (gam#2893). A FLEX frame or a follow-up-varying slope without one
+    /// carries its own primary layout and keeps the per-axis path: this returns
+    /// `None` there, exactly as it
     /// does where the per-axis path has no ψ block, so a caller falls back to the
     /// per-axis sweep with identical semantics.
     pub(crate) fn psi_hessian_directional_derivatives_all_beta_axes_with_options(
@@ -1521,8 +1143,8 @@ impl SurvivalMarginalSlopeFamily {
         psi_index: usize,
         options: &BlockwiseFitOptions,
     ) -> Result<Option<Vec<Array2<f64>>>, String> {
-        if self.timewiggle_flex_design_psi_third_available() {
-            return self.timewiggle_flex_design_psi_hessian_all_beta_axes(
+        if self.timewiggle_zeta_available() {
+            return self.timewiggle_design_psi_hessian_all_beta_axes(
                 block_states,
                 derivative_blocks,
                 psi_index,
@@ -1704,7 +1326,7 @@ impl SurvivalMarginalSlopeFamily {
         options: &BlockwiseFitOptions,
     ) -> Result<Option<Arc<dyn HyperOperator>>, String> {
         // A time wiggle takes the ζ composition; see `psi_terms_inner_with_options` (gam#2893).
-        if self.timewiggle_design_psi_terms_available() {
+        if self.timewiggle_zeta_available() {
             return Ok(self
                 .timewiggle_design_psi_hessian_drift(
                     block_states,

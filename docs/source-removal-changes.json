@@ -8905,5 +8905,30 @@
     ],
     "reason": "#2900 (SPEC rules 6, 10, 25). JointHessianWork::matrix_free_route (rule D, CG charged p products) chose a representation in two production places, neither involving CG. blockwise_logdet_terms_with_workspace switched at p = 3n between the family's workspace source and its direct dense joint Hessian, two dense builds of one matrix (every workspace-serving family's exact_newton_joint_hessian returns Some at every shape); the logdet now takes the direct build at every shape, admitted against the memory governor's single-materialization cap when the family advertises an explicit joint Hessian. SurvivalLocationScaleFamily::outer_hyper_hessian_dense_available returned !matrix_free_route, but its only consumer, exact_outer_derivative_order, returns Second whenever the family's always-available outer HVP is, so the flag chose nothing; the override is deleted. With no production caller left, matrix_free_route, matrix_free_route_under_cap and their two tests go.",
     "evidence": "At the base, git grep finds matrix_free_route called in production only from crates/gam-custom-family/src/joint_newton.rs (blockwise_logdet_terms_with_workspace) and crates/gam-models/src/survival/location_scale/family_solver.rs (outer_hyper_hessian_dense_available), plus the two options.rs tests and the survival location-scale route pin, all rewritten in this commit; outer_hyper_hessian_dense_available's consumers are the trait's exact_outer_derivative_order and two log lines. Guarded compile: pool job 616985 (cargo check --workspace --all-targets --exclude gam-pyffi --keep-going with this patch applied); this record's 5 items are the exact list scripts/source_removal_guard.py printed for this patch in that job."
+  },
+  {
+    "base": "e1f107b60e0c513685479c30cf24e8fc403814e7",
+    "items": [
+      "crates/gam-models/src/survival/marginal_slope/hessian.rs:fn:add_rank1_psi_cross_with_q_geometry",
+      "crates/gam-models/src/survival/marginal_slope/hessian.rs:fn:add_second_pullback_weighted",
+      "crates/gam-models/src/survival/marginal_slope/hessian.rs:fn:add_timewiggle_psi_kappa_alpha",
+      "crates/gam-models/src/survival/marginal_slope/hessian.rs:fn:add_timewiggle_psi_u_cross",
+      "crates/gam-models/src/survival/marginal_slope/primary_geometry.rs:struct:TimewiggleMarginalPsiRowLift",
+      "crates/gam-models/src/survival/marginal_slope/psi_terms.rs:fn:accumulate_score_timewiggle_psi_u",
+      "crates/gam-models/src/survival/marginal_slope/psi_terms.rs:fn:timewiggle_psi_action",
+      "crates/gam-models/src/survival/marginal_slope/tests/time_wiggle_and_psi_derivatives.rs:fn:timewiggle_flex_design_psi_by_beta_third_information_matches_finite_difference_2893",
+      "crates/gam-models/src/survival/marginal_slope/tests/time_wiggle_and_psi_derivatives.rs:fn:timewiggle_flex_design_psi_hessian_all_beta_axes_matches_single_axis_2893",
+      "crates/gam-models/src/survival/marginal_slope/tests/time_wiggle_and_psi_derivatives.rs:fn:timewiggle_flex_design_psi_pair_third_information_matches_finite_difference_2893",
+      "crates/gam-models/src/survival/marginal_slope/timewiggle_geometry.rs:fn:timewiggle_marginal_psi_row_lift",
+      "crates/gam-models/src/survival/marginal_slope/timewiggle_third.rs:fn:exact_newton_joint_hessian_second_directional_derivative_timewiggle_flex_all_axes",
+      "crates/gam-models/src/survival/marginal_slope/timewiggle_third.rs:fn:exact_newton_joint_hessian_third_directional_derivative_timewiggle_flex_all_axes",
+      "crates/gam-models/src/survival/marginal_slope/timewiggle_third.rs:fn:timewiggle_design_psi_terms_available",
+      "crates/gam-models/src/survival/marginal_slope/timewiggle_third.rs:fn:timewiggle_flex_design_psi_hessian_all_beta_axes",
+      "crates/gam-models/src/survival/marginal_slope/timewiggle_third.rs:fn:timewiggle_flex_design_psi_pair_third_information_all_axes",
+      "crates/gam-models/src/survival/marginal_slope/timewiggle_third.rs:fn:timewiggle_flex_design_psi_third_available",
+      "crates/gam-models/src/survival/marginal_slope/timewiggle_third.rs:fn:timewiggle_flex_design_psi_third_information_all_axes"
+    ],
+    "reason": "#979 (former #2893; SPEC rules 15, 25). The hand design-ψ calculus of the survival marginal-slope time wiggle (the ψ row lift, its action, the score lift and the lift accumulators) double-counted x_ψ·T'(h) and never differentiated the time-wiggle map along v. 940ba0cf6, 8f027a3b5 and cbdebe6c4 route every single-slope time-wiggle frame through the ζ composition of timewiggle_third, so the lift is deleted with add_rank1_psi_cross_with_q_geometry, which only it called. A per-score slope or a FLEX program beside a follow-up-varying slope now refuses design ψ by name. timewiggle_flex_design_psi_third_available merges into timewiggle_zeta_available, and the ζ sweeps drop \"flex\" from their names because they serve the rigid row program since cbdebe6c4.",
+    "evidence": "Guarded compile: pool job 620859 (sw0g, acn02), with this patch applied at e1f107b60 and committed locally, ran cargo check --workspace --all-targets --exclude gam-pyffi: CHECK_RC=0, /scratch.global/sauer354/pool/gpu2826/combo12.check.620859.log. This record's items and the census entry's functions are the exact lists that scripts/source_removal_guard.py and scripts/public_api_census.py printed for this patch in that job (combo12.srg.620859.txt, combo12.census.620859.txt). Job 615371 at 5df882b79 ran the same deletion through the guarded check: CHECK_RC=0, combo10.check.615371.log."
   }
 ]

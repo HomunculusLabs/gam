@@ -20,8 +20,8 @@ impl crate::custom_family::JeffreysThirdInformationDerivative for SurvivalMargin
         // A time wiggle takes the ζ composition of `timewiggle_third` on every frame it serves,
         // from the FLEX base or the rigid closed-form fifth derivatives (gam#2893).
         if self.flex_timewiggle_active() {
-            return if self.timewiggle_flex_design_psi_third_available() {
-                self.exact_newton_joint_hessian_third_directional_derivative_timewiggle_flex_all_axes(
+            return if self.timewiggle_zeta_available() {
+                self.exact_newton_joint_hessian_third_directional_derivative_timewiggle_all_axes(
                     states, u, v,
                 )
                 .map(Some)
@@ -762,9 +762,9 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
         // A time wiggle: one row pass of the ζ composition in `timewiggle_third` serves every axis
         // on every frame it serves, where the per-axis loop below rebuilds each row's program once
         // per axis (gam#2893).
-        if self.flex_timewiggle_active() && self.timewiggle_flex_design_psi_third_available() {
+        if self.flex_timewiggle_active() && self.timewiggle_zeta_available() {
             let axes = self
-                .exact_newton_joint_hessian_second_directional_derivative_timewiggle_flex_all_axes(
+                .exact_newton_joint_hessian_second_directional_derivative_timewiggle_all_axes(
                     block_states,
                     d_beta_u_flat,
                 )?;
@@ -868,7 +868,7 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
         &self,
     ) -> Option<&dyn crate::custom_family::JeffreysThirdInformationDerivative> {
         let served = if self.flex_timewiggle_active() {
-            self.timewiggle_flex_design_psi_third_available()
+            self.timewiggle_zeta_available()
         } else {
             !self.per_z_slope_active() && self.influence_absorber.is_none()
         };
