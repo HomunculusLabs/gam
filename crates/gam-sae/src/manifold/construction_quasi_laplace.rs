@@ -4884,8 +4884,13 @@ impl SaeManifoldTerm {
         // takes the exact log-det off one eigendecomposition; otherwise it
         // evaluates the frozen rational surrogate (#2731). Value-only SLQ callers
         // retain the historical memory-derived split.
-        let dense_reduced_schur_admitted =
-            plan.estimated_dense_schur_bytes <= plan.in_core_budget_bytes;
+        // The chunked branch below builds this block through `build_dense_schur_direct`,
+        // which refuses above the memory governor's single-materialization cap, so the
+        // admission reads the same cap and an admitted build is never refused.
+        let dense_reduced_schur_admitted = plan.estimated_dense_schur_bytes
+            <= plan.in_core_budget_bytes
+            && plan.estimated_dense_schur_bytes
+                <= gam_runtime::resource::MemoryGovernor::global().single_materialization_cap_bytes();
         if !dense_reduced_schur_admitted || lane.is_some() {
             // #988 memory-matrix-free evidence route. The dense k×k reduced Schur
             // (≈8 GB at the K=32k manifold border) does NOT fit the in-core

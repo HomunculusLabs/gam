@@ -4,13 +4,6 @@
 
 use super::*;
 
-/// Host budget for a dense reduced Schur `k × k` f64 matrix (#1017). Above this
-/// the dense assembly is refused with a loud `SchurFactorFailed` rather than
-/// OOM-killing the host. 8 GiB ⇒ `k ≈ 32768`; every currently-feasible SAE border
-/// (k ≤ 5120 ⇒ 0.2 GiB) is well under it, while the qwen LLM border (k = 98304 ⇒
-/// 77 GiB) is correctly rejected as matrix-free-only.
-pub(crate) const DENSE_SCHUR_BYTES_BUDGET: u128 = 8 * 1024 * 1024 * 1024;
-
 /// Reduce one contiguous device tile's rows into a private `-Σ leftᵀ·right`
 /// partial (`k×k`).
 ///
@@ -296,6 +289,25 @@ pub(crate) fn build_dense_schur_direct<B: BatchedBlockSolver + Sync>(
     backend: &B,
     gpu_policy: gam_gpu::GpuPolicy,
 ) -> Result<Array2<f64>, ArrowSchurError> {
+    build_dense_schur_direct_under_cap(
+        sys,
+        htt_factors,
+        ridge_beta,
+        backend,
+        gpu_policy,
+        gam_runtime::resource::MemoryGovernor::global().single_materialization_cap_bytes(),
+    )
+}
+
+/// [`build_dense_schur_direct`] against an explicit materialization cap.
+pub(crate) fn build_dense_schur_direct_under_cap<B: BatchedBlockSolver + Sync>(
+    sys: &ArrowSchurSystem,
+    htt_factors: &ArrowFactorSlab,
+    ridge_beta: f64,
+    backend: &B,
+    gpu_policy: gam_gpu::GpuPolicy,
+    cap_bytes: usize,
+) -> Result<Array2<f64>, ArrowSchurError> {
     let k = sys.k;
     // Materialise H_ββ via the BetaPenaltyOp trait (#296): DensePenaltyOp
     // for the legacy dense path, structured ops for SAE / Kronecker smooths.
@@ -309,19 +321,19 @@ pub(crate) fn build_dense_schur_direct<B: BatchedBlockSolver + Sync>(
     // At SAE LLM borders (qwen `k = 98304` ⇒ 77 GiB) materialising it would crash
     // the host. Direct deliberately uses this one canonical dense Schur for both
     // the Newton step and evidence; large-border matrix-free solves belong to
-    // InexactPCG (and automatic selection routes them there). Refuse an explicit
-    // oversized Direct request with an actionable error rather than duplicating
-    // ownership or degrading silently into an OOM. The budget is generous so
-    // every currently-feasible border (k ≤ 5120 ⇒ 0.2 GiB) is unaffected.
+    // InexactPCG. Refuse an explicit oversized Direct request with an actionable
+    // error rather than duplicating ownership or degrading silently into an OOM.
+    // The ceiling is the memory governor's single-materialization cap, the one
+    // routing threshold a dense materialization in this process reads.
     let dense_bytes = (k as u128).saturating_mul(k as u128).saturating_mul(8);
-    if dense_bytes > DENSE_SCHUR_BYTES_BUDGET {
+    if dense_bytes > cap_bytes as u128 {
         return Err(ArrowSchurError::SchurFactorFailed {
             reason: format!(
-                "dense reduced Schur is {k}×{k} f64 = {} MiB, exceeding the {} MiB host budget; \
-                 Direct requires one canonical dense Schur for its step and evidence; select \
-                 InexactPCG for a matrix-free large-border step",
+                "dense reduced Schur is {k}×{k} f64 = {} MiB, exceeding the memory governor's \
+                 {} MiB single-materialization cap; Direct requires one canonical dense Schur \
+                 for its step and evidence; select InexactPCG for a matrix-free large-border step",
                 dense_bytes / (1024 * 1024),
-                DENSE_SCHUR_BYTES_BUDGET / (1024 * 1024),
+                cap_bytes / (1024 * 1024),
             ),
         });
     }
@@ -348,6 +360,25 @@ pub(crate) fn build_dense_schur_sqrt_ba<B: BatchedBlockSolver + Sync>(
     backend: &B,
     gpu_policy: gam_gpu::GpuPolicy,
 ) -> Result<Array2<f64>, ArrowSchurError> {
+    build_dense_schur_sqrt_ba_under_cap(
+        sys,
+        htt_factors,
+        ridge_beta,
+        backend,
+        gpu_policy,
+        gam_runtime::resource::MemoryGovernor::global().single_materialization_cap_bytes(),
+    )
+}
+
+/// [`build_dense_schur_sqrt_ba`] against an explicit materialization cap.
+pub(crate) fn build_dense_schur_sqrt_ba_under_cap<B: BatchedBlockSolver + Sync>(
+    sys: &ArrowSchurSystem,
+    htt_factors: &ArrowFactorSlab,
+    ridge_beta: f64,
+    backend: &B,
+    gpu_policy: gam_gpu::GpuPolicy,
+    cap_bytes: usize,
+) -> Result<Array2<f64>, ArrowSchurError> {
     let k = sys.k;
     // Materialise H_ββ via the BetaPenaltyOp trait (#296).
     let op = sys.effective_penalty_op();
@@ -359,16 +390,17 @@ pub(crate) fn build_dense_schur_sqrt_ba<B: BatchedBlockSolver + Sync>(
     }
     // Same fail-loud host-memory contract as the Direct reduction (#1017).  The
     // square-root BA route still materialises the same dense `k×k` reduced
-    // Schur; letting this path bypass the budget would preserve an OOM-class
+    // Schur; letting this path bypass the cap would preserve an OOM-class
     // fallback even after Direct learned to refuse matrix-free-only borders.
     let dense_bytes = (k as u128).saturating_mul(k as u128).saturating_mul(8);
-    if dense_bytes > DENSE_SCHUR_BYTES_BUDGET {
+    if dense_bytes > cap_bytes as u128 {
         return Err(ArrowSchurError::SchurFactorFailed {
             reason: format!(
                 "square-root BA dense reduced Schur is {k}×{k} f64 = {} MiB, exceeding the \
-                 {} MiB host budget; this border is matrix-free-only",
+                 memory governor's {} MiB single-materialization cap; this border is \
+                 matrix-free-only",
                 dense_bytes / (1024 * 1024),
-                DENSE_SCHUR_BYTES_BUDGET / (1024 * 1024),
+                cap_bytes / (1024 * 1024),
             ),
         });
     }

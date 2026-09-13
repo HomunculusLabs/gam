@@ -8796,5 +8796,13 @@
     ],
     "reason": "#2695 ruling (09-13): the inner solve stops on its own certificate. DIRECT_JOINT_HYPER_MIN_CYCLES = 200 raised every psi-derivative evaluation's inner budget, and the rho-only joint path raised its tightened budget with the same literal max(200). Both floors papered over one constructor, fit_bounded_term_collection_with_design (design_construction.rs), which passed the outer max_iter (typically 40) as inner_max_cycles instead of the family's 1200. That constructor now takes the family budget, both floors are deleted, and the derivative-quality pins assert that the caller's budget is carried through unchanged.",
     "evidence": "At the base, git grep -n -w DIRECT_JOINT_HYPER_MIN_CYCLES finds only its declaration and its one use in derivative_quality_options_and_warm_start (crates/gam-custom-family/src/psi_hyper.rs), a comment in the gam-custom-family direct_joint_hyper_never_loosens_caller_inner_tolerance test, and an earlier docs/source-removal-changes.json batch entry. That batch also lists derivative_quality_options_and_warm_start and other psi_hyper.rs functions that still exist, so it is not a prior deletion of this constant. git log -S on psi_hyper.rs shows the constant arriving with the crate extraction e8bf4a3ab and never changing count since."
+  },
+  {
+    "base": "8b25770f71c970cb65b5d4113d34041919640fc1",
+    "items": [
+      "crates/gam-solve/src/arrow_schur/reduced_solve.rs:const:DENSE_SCHUR_BYTES_BUDGET"
+    ],
+    "reason": "#2900 rules 6/23 (arrow-Schur row, owner sae2822b): the dense reduced Schur refusal in build_dense_schur_direct and build_dense_schur_sqrt_ba read an independent 8 GiB literal. Both now refuse above the memory governor single_materialization_cap_bytes (3/4 of process capacity), through build_dense_schur_direct_under_cap and build_dense_schur_sqrt_ba_under_cap, and the SAE streaming evidence admits the chunked dense Schur at the same cap, so no admitted build is refused.",
+    "evidence": "Guarded pool job 618141 (lane sw0, node acn34) at 9fc4825b1461eff7269eb4dd48229daea974454c with exactly this three-file patch overlaid (HEAD==PIN, 3 dirty files): cargo check --locked --workspace --all-targets --exclude gam-pyffi --keep-going CHECK_RC=101; the only compile error in the log is tests/regressions/smooths/duchon_hybrid_length_scale_default.rs:24 unused import gam::ResourcePolicy in the gam regressions test target, introduced by a3a1017d9 and removed by bd65a0ef9 on main; this patch touches neither that file nor the gam root; cargo test --locked -p gam-solve --lib build_dense_schur_direct_refuses_oversize_border_1017 TEST_RC=0 (1 passed). Log: /scratch.global/sauer354/pool/sae2822b/cap2900check.618141.log"
   }
 ]

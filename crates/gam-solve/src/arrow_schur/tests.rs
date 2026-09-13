@@ -6527,9 +6527,11 @@ fn build_dense_schur_direct_refuses_oversize_border_1017() {
     use crate::arrow_schur::prelude::SharedBetaMatvec;
     use std::sync::Arc;
 
-    // k chosen so k×k×8 bytes > the 8 GiB budget (k=40000 ⇒ ~11.9 GiB) while the
-    // structured op keeps the actual allocation tiny.
+    // The cap sits one byte below k×k×8 (k=40000 ⇒ ~11.9 GiB), so the guard refuses
+    // whatever this process's capacity is, while the structured op keeps the actual
+    // allocation tiny.
     let k = 40_000usize;
+    let cap_bytes = k * k * std::mem::size_of::<f64>() - 1;
     let n = 2usize;
     let d = 2usize;
     let mut sys = ArrowSchurSystem::new_with_per_row_dims_empty_hbb_and_htbeta_cols(vec![d; n], k, k);
@@ -6557,26 +6559,38 @@ fn build_dense_schur_direct_refuses_oversize_border_1017() {
         .factor_blocks(&sys.rows, 0.0, d, false)
         .expect("SPD per-row blocks must factor");
 
-    let err =
-        build_dense_schur_direct(&sys, &htt_factors, 1e-6, &backend, gam_gpu::GpuPolicy::Auto)
-            .expect_err("oversize border must be refused, not allocated");
+    let err = build_dense_schur_direct_under_cap(
+        &sys,
+        &htt_factors,
+        1e-6,
+        &backend,
+        gam_gpu::GpuPolicy::Auto,
+        cap_bytes,
+    )
+    .expect_err("oversize border must be refused, not allocated");
     match err {
         ArrowSchurError::SchurFactorFailed { reason } => {
             assert!(
-                reason.contains("host budget") && reason.contains("matrix-free"),
+                reason.contains("materialization cap") && reason.contains("matrix-free"),
                 "refusal must be actionable (border-too-large, matrix-free-only): {reason}"
             );
         }
         other => panic!("expected SchurFactorFailed for oversize border, got {other:?}"),
     }
 
-    let err =
-        build_dense_schur_sqrt_ba(&sys, &htt_factors, 1e-6, &backend, gam_gpu::GpuPolicy::Auto)
-            .expect_err("oversize square-root BA border must be refused, not allocated");
+    let err = build_dense_schur_sqrt_ba_under_cap(
+        &sys,
+        &htt_factors,
+        1e-6,
+        &backend,
+        gam_gpu::GpuPolicy::Auto,
+        cap_bytes,
+    )
+    .expect_err("oversize square-root BA border must be refused, not allocated");
     match err {
         ArrowSchurError::SchurFactorFailed { reason } => {
             assert!(
-                reason.contains("host budget") && reason.contains("matrix-free"),
+                reason.contains("materialization cap") && reason.contains("matrix-free"),
                 "sqrt-BA refusal must be actionable (border-too-large, matrix-free-only): {reason}"
             );
         }
