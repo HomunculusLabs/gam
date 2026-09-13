@@ -80,7 +80,6 @@ use crate::penalized_vector_glm::{
 use crate::vector_response::{MultinomialLogitLikelihood, validate_multinomial_simplex};
 use gam_data::ColumnKindTag;
 use gam_data::EncodedDataset;
-use gam_linalg::faer_ndarray::FaerCholesky;
 use gam_problem::{
     FixedLambdaCheckpoint, FixedLambdaResidualKind, FixedLambdaSolverStage, FixedLambdaStallReason,
     FixedLambdaStationarityEvidence, ResponseColumnKind,
@@ -1818,6 +1817,22 @@ pub struct MultinomialSavedModel {
     /// finite variance to propagate (#2337 Thm 2.3).
     #[serde(default)]
     pub smoothing_correction_flat: Option<Vec<f64>>,
+    /// The terminal posterior precision the fit certified at `β̂`, in the same raw
+    /// units and block order as [`Self::coefficient_covariance_flat`], flattened
+    /// row-major over the `(P·M)×(P·M)` matrix. It is present exactly when
+    /// [`Self::separation_evidence`] armed the Jeffreys/Firth prior, and there it
+    /// is `H + S_λ + H_Φ + completion`, the matrix `compute_joint_posterior`
+    /// assembled and then inverted into the covariance.
+    ///
+    /// The posterior-mean predictive reads the fitted prior's curvature out of this
+    /// matrix. It used to recover the matrix as the inverse of the saved covariance
+    /// instead, which is a second numerical route to one quantity (#1082). That
+    /// inversion's error grows with the covariance's condition number, which the
+    /// selected λ sets (up to 4.9e10 on the penguins real-data fit, pool job
+    /// 580128), and the curvature it feeds is the small difference
+    /// `T − (XᵀWX + S_λ)`.
+    #[serde(default)]
+    pub terminal_precision_flat: Option<Vec<f64>>,
     /// Joint coefficient-space influence matrix `F = H⁻¹ X'WX` (#1101),
     /// block-ordered identically to [`Self::coefficient_covariance_flat`].
     /// Its per-term diagonal block trace is the term's effective degrees of
@@ -2043,11 +2058,33 @@ impl MultinomialSavedModel {
                 );
             }
         }
+        if let Some(precision) = self.terminal_precision_flat.as_ref() {
+            if self.separation_evidence.is_none() {
+                crate::bail_invalid_estim!(
+                    "multinomial saved model carries {} terminal-precision values but armed no \
+                     proper prior, so no fitted prior curvature belongs to it",
+                    precision.len(),
+                );
+            }
+            if precision.len() != covariance_len {
+                crate::bail_invalid_estim!(
+                    "multinomial saved model has {} terminal-precision values, expected \
+                     {covariance_len}",
+                    precision.len(),
+                );
+            }
+        } else if self.separation_evidence.is_some() {
+            crate::bail_invalid_estim!(
+                "multinomial saved model armed the Jeffreys/Firth prior but carries no terminal \
+                 precision; the payload predates it and the model must be refitted"
+            );
+        }
         if let Some((index, value)) = self
             .coefficients_flat
             .iter()
             .chain(self.coefficient_covariance_flat.iter())
             .chain(self.smoothing_correction_flat.iter().flat_map(|c| c.iter()))
+            .chain(self.terminal_precision_flat.iter().flat_map(|c| c.iter()))
             .copied()
             .enumerate()
             .find(|(_, value)| !value.is_finite())
@@ -2472,17 +2509,25 @@ impl MultinomialSavedModel {
         // and its saved covariance is the inverse of that objective's terminal
         // precision `H + S_λ + H_Φ + completion`. The predictive integrates the same
         // posterior, so it receives that precision (#1082).
-        let terminal_precision = if self.separation_evidence.is_some() {
-            let covariance = self.coefficient_covariance()?;
-            let factor = covariance.cholesky(faer::Side::Lower).map_err(|error| {
-                EstimationError::InvalidInput(format!(
-                    "multinomial predictive: the saved posterior covariance is not positive \
-                     definite ({error}), so it carries no terminal precision to integrate"
-                ))
-            })?;
-            Some(factor.solve_mat(&Array2::<f64>::eye(covariance.nrows())))
-        } else {
-            None
+        let terminal_precision = match self.terminal_precision_flat.as_ref() {
+            Some(flat) => {
+                let d = self
+                    .p_per_class
+                    .checked_mul(self.n_active_classes)
+                    .ok_or_else(|| {
+                        EstimationError::InvalidInput(
+                            "multinomial saved terminal-precision dimension overflowed usize"
+                                .to_string(),
+                        )
+                    })?;
+                Some(Array2::from_shape_vec((d, d), flat.clone()).map_err(|error| {
+                    EstimationError::InvalidInput(format!(
+                        "multinomial saved terminal precision is inconsistent with (P·M)x(P·M): \
+                         {error}"
+                    ))
+                })?)
+            }
+            None => None,
         };
         let model = self.predictive_model(
             design.view(),
@@ -4240,6 +4285,64 @@ pub fn fit_penalized_multinomial_formula(
     // is a typed absence rather than an error: the conditional definition is
     // still a correct answer to a narrower question, and the consumers say which
     // one they used.
+    // The fit's own terminal precision `H + S_λ + H_Φ + completion`, the matrix
+    // `compute_joint_posterior` certified and inverted (#1082). It is a precision,
+    // so the affine map pulls it back as `A⁻ᵀ T A⁻¹` rather than pushing it forward.
+    // `A⁻¹` is closed-form: `β_std[col] = scale·β_raw[col]`, and the intercept returns
+    // the centering mass, `β_std[i0] = β_raw[i0] + Σ_col center·β_raw[col]`.
+    let terminal_precision_flat = if separation_evidence.is_some() {
+        let geometry = fit.geometry.as_ref().ok_or_else(|| {
+            EstimationError::InvalidInput(
+                "multinomial REML armed the Jeffreys/Firth prior but the fit carries no \
+                 certified terminal geometry"
+                    .to_string(),
+            )
+        })?;
+        if !geometry.coefficient_gauge.is_identity() {
+            crate::bail_invalid_estim!(
+                "multinomial REML: the certified terminal precision sits in a reduced gauge, \
+                 but multinomial blocks are locked to raw width"
+            );
+        }
+        let precision_std = geometry.penalized_hessian.as_array();
+        if precision_std.dim() != (expected_joint, expected_joint) {
+            crate::bail_invalid_estim!(
+                "multinomial REML certified a {}x{} terminal precision, expected \
+                 {expected_joint}x{expected_joint}",
+                precision_std.nrows(),
+                precision_std.ncols(),
+            );
+        }
+        if parametric_standardization.is_empty() {
+            Some(precision_std.iter().copied().collect::<Vec<f64>>())
+        } else {
+            let mut inverse_class = Array2::<f64>::eye(p_per_class);
+            for &(col, center, scale) in &parametric_standardization {
+                if col >= p_per_class {
+                    continue;
+                }
+                inverse_class[[col, col]] = scale;
+                if let Some(i0) = intercept_col0
+                    && i0 < p_per_class
+                {
+                    inverse_class[[i0, col]] = center;
+                }
+            }
+            let mut inverse_joint = Array2::<f64>::eye(expected_joint);
+            for a in 0..m {
+                let base = a * p_per_class;
+                for i in 0..p_per_class {
+                    for j in 0..p_per_class {
+                        inverse_joint[[base + i, base + j]] = inverse_class[[i, j]];
+                    }
+                }
+            }
+            let raw = inverse_joint.t().dot(precision_std).dot(&inverse_joint);
+            Some(raw.iter().copied().collect::<Vec<f64>>())
+        }
+    } else {
+        None
+    };
     let smoothing_correction_flat = fit.inference.as_ref().and_then(|info| {
         info.smoothing_correction
             .as_ref()
@@ -4395,6 +4498,7 @@ pub fn fit_penalized_multinomial_formula(
         edf_per_penalty,
         coefficient_covariance_flat,
         smoothing_correction_flat,
+        terminal_precision_flat,
         coefficient_influence_flat,
         smooth_term_spans,
         training_design_flat,
