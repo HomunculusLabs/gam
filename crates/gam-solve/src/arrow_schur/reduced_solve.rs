@@ -282,6 +282,67 @@ pub(crate) fn reduce_row_schur_contributions<B: BatchedBlockSolver + Sync>(
     Ok(())
 }
 
+/// #2731/#2900 — a dense `k × k` route for a reduced-Schur `log|S|`, priced against the
+/// matrix-free route that is its alternative.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DenseReducedSchurRoute {
+    /// The criterion lane materializes `S` with `k` operator products, factors it, and
+    /// inverts the factor for its derivative bundle.
+    Lane,
+    /// The chunked evidence route pulls every row's elimination term back into `S`, at
+    /// `pullback_flops`, then factors it.
+    ChunkedEvidence { pullback_flops: u64 },
+}
+
+/// #2731/#2900 — how a reduced-Schur `log|S|` of dimension `k` may use its matrix-free
+/// route before the dense `route`, when one matrix-free product of the reduced Schur costs
+/// `apply_flops`. This is gam-linalg's dense-route work model: `PcgAttempt::Only` when the
+/// route's blocks exceed the memory governor's single-materialization cap, otherwise
+/// `PcgAttempt::Budgeted { products }`, the dense route's `build + k³/3` flops in products.
+///
+/// Either route holds about six `k × k` blocks at its peak. The lane holds the applied
+/// operator, the factorization's working copy, its inverse or eigenvectors, the derivative
+/// bundle, and the EFS probes with their inverse images. The chunked route holds three
+/// accumulators, each chunk's Schur and two classification metrics, and the log-det's two
+/// metric clones and factor. The lane's build is its `k` products plus the triangular
+/// inverse's `k³/3`; the chunked route's is its pullback. A caller whose alternative has a
+/// fixed product count, such as SLQ, takes the dense route when `products` is below it; a
+/// caller whose alternative is iterative spends at most `products` before the dense route.
+pub fn dense_reduced_schur_route(
+    route: DenseReducedSchurRoute,
+    k: usize,
+    apply_flops: u64,
+) -> gam_linalg::pcg::PcgAttempt {
+    dense_reduced_schur_route_under_cap(
+        route,
+        k,
+        apply_flops,
+        gam_runtime::resource::MemoryGovernor::global().single_materialization_cap_bytes(),
+    )
+}
+
+/// [`dense_reduced_schur_route`] against an explicit materialization cap.
+pub(crate) fn dense_reduced_schur_route_under_cap(
+    route: DenseReducedSchurRoute,
+    k: usize,
+    apply_flops: u64,
+    cap_bytes: usize,
+) -> gam_linalg::pcg::PcgAttempt {
+    const DENSE_ROUTE_BLOCKS: usize = 6;
+    let dim = k as u64;
+    let build = match route {
+        DenseReducedSchurRoute::Lane => dim
+            .saturating_mul(apply_flops)
+            .saturating_add(dim.saturating_mul(dim).saturating_mul(dim) / 3),
+        DenseReducedSchurRoute::ChunkedEvidence { pullback_flops } => pullback_flops,
+    };
+    gam_linalg::pcg::DenseRouteWork {
+        build,
+        apply: apply_flops,
+    }
+    .pcg_attempt_under_cap(k, cap_bytes / DENSE_ROUTE_BLOCKS)
+}
+
 pub(crate) fn build_dense_schur_direct<B: BatchedBlockSolver + Sync>(
     sys: &ArrowSchurSystem,
     htt_factors: &ArrowFactorSlab,

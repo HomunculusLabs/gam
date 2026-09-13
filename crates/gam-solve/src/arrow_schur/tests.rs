@@ -6511,6 +6511,90 @@ fn shared_block_diagonal_survives_dense_workspace_reclamation_2548() {
     assert_eq!(system.shared_block_diagonal(), expected);
 }
 
+/// #2731/#2900 — the dense reduced-Schur route is priced by its six `k × k` blocks and by
+/// its flops against the matrix-free route. No `k × k` buffer is allocated here.
+#[test]
+fn dense_reduced_schur_route_prices_blocks_and_flops_2731() {
+    use gam_linalg::pcg::PcgAttempt;
+    let budgeted = |attempt: PcgAttempt| match attempt {
+        PcgAttempt::Budgeted { products } => Some(products),
+        PcgAttempt::Only => None,
+    };
+    let k = 40_000usize;
+    let six_blocks = k * k * std::mem::size_of::<f64>() * 6;
+    // Bytes: one byte under six blocks has no dense route; six blocks has one.
+    assert_eq!(
+        dense_reduced_schur_route_under_cap(
+            DenseReducedSchurRoute::ChunkedEvidence { pullback_flops: 1 },
+            k,
+            1,
+            six_blocks - 1,
+        ),
+        PcgAttempt::Only,
+        "a cap one byte under six blocks must leave only the matrix-free route"
+    );
+    assert!(
+        budgeted(dense_reduced_schur_route_under_cap(
+            DenseReducedSchurRoute::ChunkedEvidence { pullback_flops: 1 },
+            k,
+            1,
+            six_blocks,
+        ))
+        .is_some(),
+        "six blocks under the cap must admit the dense route"
+    );
+    // Flops, against SLQ's fixed `(probes + 1)·steps` products. At the k64 census shape
+    // (n = 4000, q = 128, k = 30720, 2·p·(support + q) = 1.0e5 flops per row) the pullback
+    // costs more than SLQ, so the value-only verdict goes matrix-free.
+    let slq_products = (SCHUR_SLQ_LOGDET_PROBES + 1) * SCHUR_SLQ_LOGDET_LANCZOS_STEPS;
+    let cap = usize::MAX;
+    let (rows, q, border) = (4_000u64, 128u64, 30_720u64);
+    let apply = rows * 2 * 160 * (192 + q);
+    let products = budgeted(dense_reduced_schur_route_under_cap(
+        DenseReducedSchurRoute::ChunkedEvidence {
+            pullback_flops: rows * q * border * border,
+        },
+        border as usize,
+        apply,
+        cap,
+    ))
+    .expect("an unbounded cap must admit the dense route by bytes");
+    assert!(
+        products > slq_products,
+        "the k64 pullback must cost more products than SLQ: {products} vs {slq_products}"
+    );
+    // Negative control at the #2731 cell's shape (n = 256, q = 4, k = 288, p = 2048): the
+    // dense route costs fewer products than SLQ, so the verdict stays dense there.
+    let (rows, q, border, p) = (256u64, 4u64, 288u64, 2048u64);
+    let apply = rows * 2 * p * (4 + q);
+    let products = budgeted(dense_reduced_schur_route_under_cap(
+        DenseReducedSchurRoute::ChunkedEvidence {
+            pullback_flops: rows * q * border * border,
+        },
+        border as usize,
+        apply,
+        cap,
+    ))
+    .expect("an unbounded cap must admit the dense route by bytes");
+    assert!(
+        products < slq_products,
+        "the #2731 cell's dense route must cost fewer products than SLQ: {products}"
+    );
+    // The lane's build is its k products plus the triangular inverse, so it is never
+    // budgeted below k products.
+    let products = budgeted(dense_reduced_schur_route_under_cap(
+        DenseReducedSchurRoute::Lane,
+        288,
+        apply,
+        cap,
+    ))
+    .expect("an unbounded cap must admit the dense route by bytes");
+    assert!(
+        products >= 288,
+        "the lane must budget at least its k products: {products}"
+    );
+}
+
 /// #1017 fail-loud guard: at an SAE LLM-scale border the dense reduced Schur is a
 /// `k × k` f64 matrix (qwen `k = 98304` ⇒ 77 GiB). `build_dense_schur_direct` must
 /// REFUSE that allocation with a `SchurFactorFailed` carrying an actionable
