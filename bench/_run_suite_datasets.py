@@ -502,8 +502,8 @@ def brier_score(y: np.ndarray, p: np.ndarray) -> float:
     return float(_gamfit_rust().brier_from_predictions(_flat_float_list(y), _flat_float_list(p)))
 
 
-def log_loss_score(y: np.ndarray, p: np.ndarray, eps: float = 1e-12) -> float:
-    return float(_gamfit_rust().log_loss_from_predictions(_flat_float_list(y), _flat_float_list(p), float(eps)))
+def log_loss_score(y: np.ndarray, p: np.ndarray) -> float:
+    return float(_gamfit_rust().log_loss_from_predictions(_flat_float_list(y), _flat_float_list(p)))
 
 
 def nagelkerke_r2_score(
@@ -511,13 +511,11 @@ def nagelkerke_r2_score(
     p: np.ndarray,
     *,
     null_mean: float,
-    eps: float = 1e-12,
 ) -> float | None:
     value = _gamfit_rust().nagelkerke_r2_from_predictions(
         _flat_float_list(y),
         _flat_float_list(p),
         float(null_mean),
-        float(eps),
     )
     return None if value is None else float(value)
 
@@ -638,8 +636,8 @@ def score_survival_fold(
     return metrics
 
 
-def gaussian_log_loss_score(y: np.ndarray, mu: np.ndarray, sigma: np.ndarray | float, eps: float = 1e-12) -> float:
-    return float(_gamfit_rust().gaussian_log_loss_from_predictions(_flat_float_list(y), _flat_float_list(mu), _sigma_float_list(sigma), float(eps)))
+def gaussian_log_loss_score(y: np.ndarray, mu: np.ndarray, sigma: np.ndarray | float) -> float:
+    return float(_gamfit_rust().gaussian_log_loss_from_predictions(_flat_float_list(y), _flat_float_list(mu), _sigma_float_list(sigma)))
 
 
 def gaussian_prediction_scores(

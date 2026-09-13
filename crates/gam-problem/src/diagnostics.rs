@@ -67,15 +67,6 @@ pub struct PredictionDiagnostics {
     pub residuals: Vec<f64>,
 }
 
-/// Probability clipping used by the bundled classification diagnostic panel.
-/// Individual log-loss and Nagelkerke APIs accept an explicit clipping value;
-/// this named policy keeps the combined Rust/Python diagnostic contract in one
-/// core location.
-pub(crate) const DEFAULT_PROBABILITY_CLIP: f64 = 1.0e-12;
-
-/// Smallest standard deviation used by the bundled Gaussian score panel.
-pub const DEFAULT_GAUSSIAN_SCALE_FLOOR: f64 = 1.0e-12;
-
 /// Number of equal-width probability bins in the bundled expected-calibration
 /// error diagnostic.
 pub(crate) const DEFAULT_CALIBRATION_BINS: usize = 20;
@@ -124,15 +115,6 @@ fn validate_metric_inputs(
     {
         return Err(format!(
             "{metric}: predicted_mean[{index}] must be finite; got {value}"
-        ));
-    }
-    Ok(())
-}
-
-fn validate_probability_clip(metric: &str, probability_clip: f64) -> Result<(), String> {
-    if !(probability_clip.is_finite() && probability_clip > 0.0 && probability_clip < 0.5) {
-        return Err(format!(
-            "{metric}: probability_clip must be finite and in (0, 0.5); got {probability_clip}"
         ));
     }
     Ok(())
@@ -293,28 +275,37 @@ pub fn brier_from_predictions(observed: &[f64], predicted_mean: &[f64]) -> Resul
     Ok(diagnostics.rmse * diagnostics.rmse)
 }
 
-/// Mean Bernoulli log loss with a caller-selected probability clip.
-pub fn binary_log_loss_from_predictions(
-    observed: &[f64],
-    predicted_mean: &[f64],
-    probability_clip: f64,
-) -> Result<f64, String> {
-    validate_probability_inputs("log_loss", observed, predicted_mean)?;
-    validate_probability_clip("log_loss", probability_clip)?;
-    let loss = observed
+/// Bernoulli log likelihood `Σ y·ln p + (1 − y)·ln(1 − p)` of validated
+/// probability inputs. A term whose weight (`y` or `1 − y`) is exactly zero is
+/// omitted, which is its exact limit `0·ln 0 = 0`. A prediction of exactly 0
+/// or 1 therefore costs nothing on the outcome it matches and `−∞` on one it
+/// contradicts. Every other term is finite, so the sum is never `NaN`.
+fn bernoulli_log_likelihood(observed: &[f64], predicted_mean: &[f64]) -> f64 {
+    observed
         .iter()
         .zip(predicted_mean)
         .map(|(&y, &prediction)| {
-            let probability = prediction.clamp(probability_clip, 1.0 - probability_clip);
-            -(y * probability.ln() + (1.0 - y) * (1.0 - probability).ln())
+            let mut term = 0.0;
+            if y > 0.0 {
+                term += y * prediction.ln();
+            }
+            if y < 1.0 {
+                term += (1.0 - y) * (1.0 - prediction).ln();
+            }
+            term
         })
-        .sum::<f64>()
-        / observed.len() as f64;
-    if loss.is_finite() {
-        Ok(loss)
-    } else {
-        Err("log_loss: result is not representable in f64".to_string())
-    }
+        .sum()
+}
+
+/// Mean Bernoulli log loss of the predicted probabilities as given. A
+/// prediction of exactly 0 or 1 that contradicts its observation has zero
+/// likelihood, so the loss is `+∞`.
+pub fn binary_log_loss_from_predictions(
+    observed: &[f64],
+    predicted_mean: &[f64],
+) -> Result<f64, String> {
+    validate_probability_inputs("log_loss", observed, predicted_mean)?;
+    Ok(-bernoulli_log_likelihood(observed, predicted_mean) / observed.len() as f64)
 }
 
 /// Nagelkerke's rescaling of Cox-Snell R² from model/null log likelihoods.
@@ -338,18 +329,18 @@ pub fn nagelkerke_r_squared_from_log_likelihoods(
     }
 }
 
-/// Nagelkerke R² for binomial predictions against an explicit null mean.
+/// Nagelkerke R² for binomial predictions against an explicit null mean. A
+/// prediction of exactly 0 or 1 that contradicts its observation gives the
+/// model zero likelihood, and the R² is then undefined (`None`).
 pub fn nagelkerke_r_squared_from_predictions(
     observed: &[f64],
     predicted_mean: &[f64],
     null_mean: f64,
-    probability_clip: f64,
 ) -> Result<Option<f64>, String> {
     if observed.is_empty() {
         return Ok(None);
     }
     validate_probability_inputs("nagelkerke_r_squared", observed, predicted_mean)?;
-    validate_probability_clip("nagelkerke_r_squared", probability_clip)?;
     if !null_mean.is_finite() || null_mean <= 0.0 || null_mean >= 1.0 {
         return Ok(None);
     }
@@ -360,14 +351,7 @@ pub fn nagelkerke_r_squared_from_predictions(
         .iter()
         .map(|&y| y * log_null + (1.0 - y) * log_not_null)
         .sum::<f64>();
-    let model_log_likelihood = observed
-        .iter()
-        .zip(predicted_mean)
-        .map(|(&y, &prediction)| {
-            let probability = prediction.clamp(probability_clip, 1.0 - probability_clip);
-            y * probability.ln() + (1.0 - y) * (1.0 - probability).ln()
-        })
-        .sum::<f64>();
+    let model_log_likelihood = bernoulli_log_likelihood(observed, predicted_mean);
     Ok(nagelkerke_r_squared_from_log_likelihoods(
         model_log_likelihood,
         null_log_likelihood,
@@ -457,7 +441,6 @@ pub fn gaussian_log_loss_from_predictions(
     observed: &[f64],
     predicted_mean: &[f64],
     sigma: &[f64],
-    sigma_floor: f64,
 ) -> Result<f64, String> {
     validate_metric_inputs("gaussian_log_loss", observed, predicted_mean)?;
     if sigma.len() != 1 && sigma.len() != observed.len() {
@@ -467,25 +450,19 @@ pub fn gaussian_log_loss_from_predictions(
             sigma.len()
         ));
     }
-    if !(sigma_floor.is_finite() && sigma_floor > 0.0) {
-        return Err(format!(
-            "gaussian_log_loss: sigma_floor must be finite and positive; got {sigma_floor}"
-        ));
-    }
     let shared_sigma = sigma.len() == 1;
     let mut total = 0.0_f64;
     for (index, (&y, &mean)) in observed.iter().zip(predicted_mean).enumerate() {
-        let raw_sigma = if shared_sigma { sigma[0] } else { sigma[index] };
-        if !raw_sigma.is_finite() || raw_sigma <= 0.0 {
+        let scale = if shared_sigma { sigma[0] } else { sigma[index] };
+        if !scale.is_finite() || scale <= 0.0 {
             return Err(format!(
-                "gaussian_log_loss: sigma[{}] must be finite and positive; got {raw_sigma}",
+                "gaussian_log_loss: sigma[{}] must be finite and positive; got {scale}",
                 if shared_sigma { 0 } else { index }
             ));
         }
-        let sigma = raw_sigma.max(sigma_floor);
-        let standardized_residual = (y - mean) / sigma;
+        let standardized_residual = (y - mean) / scale;
         total += 0.5 * std::f64::consts::TAU.ln()
-            + sigma.ln()
+            + scale.ln()
             + 0.5 * standardized_residual * standardized_residual;
     }
     let loss = total / observed.len() as f64;
@@ -507,16 +484,11 @@ pub fn classification_metrics_from_predictions(
         auc: auc_from_predictions(observed, predicted_mean)?,
         precision_recall_auc: precision_recall_auc_from_predictions(observed, predicted_mean)?,
         brier: brier_from_predictions(observed, predicted_mean)?,
-        log_loss: binary_log_loss_from_predictions(
-            observed,
-            predicted_mean,
-            DEFAULT_PROBABILITY_CLIP,
-        )?,
+        log_loss: binary_log_loss_from_predictions(observed, predicted_mean)?,
         nagelkerke_r_squared: nagelkerke_r_squared_from_predictions(
             observed,
             predicted_mean,
             null_mean,
-            DEFAULT_PROBABILITY_CLIP,
         )?,
         expected_calibration_error: expected_calibration_error_from_predictions(
             observed,
@@ -823,21 +795,45 @@ mod tests {
     fn probability_scores_match_closed_forms() {
         let observed = [0.0, 1.0];
         let predicted = [0.5, 0.5];
-        let log_loss =
-            binary_log_loss_from_predictions(&observed, &predicted, DEFAULT_PROBABILITY_CLIP)
-                .unwrap();
+        let log_loss = binary_log_loss_from_predictions(&observed, &predicted).unwrap();
         assert!((log_loss - std::f64::consts::LN_2).abs() < 1.0e-15);
         assert_eq!(brier_from_predictions(&observed, &predicted).unwrap(), 0.25);
         assert_eq!(
             expected_calibration_error_from_predictions(&observed, &predicted, 2).unwrap(),
             0.0
         );
-        assert!(
-            binary_log_loss_from_predictions(&observed, &predicted, 0.5).is_err(),
-            "a clip that collapses the probability interval must be rejected"
-        );
         assert!(classification_metrics_from_predictions(&observed, &[0.5, 2.0], 0.5).is_err());
         assert!(classification_metrics_from_predictions(&[-0.1, 1.0], &predicted, 0.5).is_err());
+    }
+
+    /// Predictions are scored as given. A certain prediction costs nothing on
+    /// the outcome it matches and `+∞` on one it contradicts, and a tiny
+    /// positive standard deviation is its own density. A 1e-12 probability clip
+    /// had capped the first at `−ln 1e-12 ≈ 27.6`, and a 1e-12 scale floor had
+    /// replaced the last with 1e-12.
+    #[test]
+    fn scores_take_their_exact_limits_without_a_clip_or_floor() {
+        assert_eq!(
+            binary_log_loss_from_predictions(&[0.0, 1.0], &[0.0, 1.0]).unwrap(),
+            0.0
+        );
+        assert_eq!(
+            binary_log_loss_from_predictions(&[1.0, 0.0], &[0.0, 0.5]).unwrap(),
+            f64::INFINITY
+        );
+        assert_eq!(
+            nagelkerke_r_squared_from_predictions(&[0.0, 1.0], &[0.0, 1.0], 0.5).unwrap(),
+            Some(1.0)
+        );
+        assert_eq!(
+            nagelkerke_r_squared_from_predictions(&[0.0, 1.0], &[1.0, 1.0], 0.5).unwrap(),
+            None
+        );
+        let tiny = 1.0e-13_f64;
+        assert_eq!(
+            gaussian_log_loss_from_predictions(&[2.0], &[2.0], &[tiny]).unwrap(),
+            0.5 * std::f64::consts::TAU.ln() + tiny.ln()
+        );
     }
 
     #[test]
@@ -849,23 +845,11 @@ mod tests {
         assert_eq!(metrics.precision_recall_auc, 1.0);
         assert_eq!(
             metrics.nagelkerke_r_squared,
-            nagelkerke_r_squared_from_predictions(
-                &observed,
-                &predicted,
-                0.5,
-                DEFAULT_PROBABILITY_CLIP,
-            )
-            .unwrap()
+            nagelkerke_r_squared_from_predictions(&observed, &predicted, 0.5).unwrap()
         );
         assert!(metrics.nagelkerke_r_squared.unwrap() > 0.8);
         assert_eq!(
-            nagelkerke_r_squared_from_predictions(
-                &observed,
-                &predicted,
-                1.0,
-                DEFAULT_PROBABILITY_CLIP,
-            )
-            .unwrap(),
+            nagelkerke_r_squared_from_predictions(&observed, &predicted, 1.0).unwrap(),
             None
         );
     }
@@ -875,32 +859,10 @@ mod tests {
         let observed = [1.0, 2.0, 3.0, 4.0];
         let predicted = observed;
         let sigma = [1.5];
-        let got = gaussian_log_loss_from_predictions(
-            &observed,
-            &predicted,
-            &sigma,
-            DEFAULT_GAUSSIAN_SCALE_FLOOR,
-        )
-        .unwrap();
+        let got = gaussian_log_loss_from_predictions(&observed, &predicted, &sigma).unwrap();
         let expected = 0.5 * (std::f64::consts::TAU * 1.5 * 1.5).ln();
         assert!((got - expected).abs() < 1.0e-12);
-        assert!(
-            gaussian_log_loss_from_predictions(
-                &observed,
-                &predicted,
-                &[1.0, 2.0],
-                DEFAULT_GAUSSIAN_SCALE_FLOOR,
-            )
-            .is_err()
-        );
-        assert!(
-            gaussian_log_loss_from_predictions(
-                &observed,
-                &predicted,
-                &[0.0],
-                DEFAULT_GAUSSIAN_SCALE_FLOOR,
-            )
-            .is_err()
-        );
+        assert!(gaussian_log_loss_from_predictions(&observed, &predicted, &[1.0, 2.0]).is_err());
+        assert!(gaussian_log_loss_from_predictions(&observed, &predicted, &[0.0]).is_err());
     }
 }

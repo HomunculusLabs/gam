@@ -8043,5 +8043,15 @@
     ],
     "reason": "#2234, SPEC rule 25. gaussian_reml_stationary_set re-ran the closed-form Gaussian REML stationary enumeration to publish a GaussianRemlStationarySet. Its only caller, layer_transport fit_penalized_1d, compared the selected rho bit for bit against gaussian_reml_closed_form_with_nullspace_dim, which runs the same enumeration and refuses an ambiguous structure. a905d68bf removed that comparison, which left the wrapper and its certificate type with no user.",
     "evidence": "At the base, git grep -n -w for gaussian_reml_stationary_set and GaussianRemlStationarySet finds matches only in crates/gam-solve/src/gaussian_reml.rs: the struct declaration, its doc link, the function declaration and the function body constructing the struct. No crate, test, bench, example, pyffi or doc names either. Guarded pool job 602897 at a905d68bf with this deletion applied (HEAD equal to the pin, 0 dirty files; log /scratch.global/sauer354/pool/steer/drift2234.602897.log): cargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0."
+  },
+  {
+    "base": "6965a4bfd391ac8f2c68f7a28ff0619949a7b86f",
+    "items": [
+      "crates/gam-problem/src/diagnostics.rs:const:DEFAULT_PROBABILITY_CLIP",
+      "crates/gam-problem/src/diagnostics.rs:const:DEFAULT_GAUSSIAN_SCALE_FLOOR",
+      "crates/gam-problem/src/diagnostics.rs:fn:validate_probability_clip"
+    ],
+    "reason": "SPEC rule 23 (#2469). DEFAULT_PROBABILITY_CLIP (1e-12) clamped predicted probabilities into [1e-12, 1 - 1e-12] before the Bernoulli log loss and the Nagelkerke model likelihood, and DEFAULT_GAUSSIAN_SCALE_FLOOR (1e-12) replaced any positive sigma below it in the Gaussian NLL. Both kernels now score the predictions as given: a zero-weight Bernoulli term is omitted (its exact limit 0), so a contradicted certain prediction gives log loss +inf and Nagelkerke None, and a tiny positive sigma is its own density. validate_probability_clip only validated the deleted clip parameter.",
+    "evidence": "At the base, git grep -n -w finds DEFAULT_PROBABILITY_CLIP only in crates/gam-problem/src/diagnostics.rs (the declaration, the panel, three tests), DEFAULT_GAUSSIAN_SCALE_FLOOR there (the declaration, three tests) and in crates/gam-pyffi/src/latent/reml_latent_fit_ffi.rs (gaussian_prediction_scores_from_predictions), and validate_probability_clip only in diagnostics.rs (the declaration and two calls). The candidate tree has no reference to any of the three, to probability_clip or to sigma_floor in crates, src, python, bench, examples or tests."
   }
 ]

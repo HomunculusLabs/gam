@@ -4424,28 +4424,22 @@ fn brier_from_predictions(observed: Vec<f64>, predicted_mean: Vec<f64>) -> PyRes
         .map_err(py_value_error)
 }
 
-#[pyfunction(signature = (observed, predicted_mean, eps = 1e-12))]
-fn log_loss_from_predictions(
-    observed: Vec<f64>,
-    predicted_mean: Vec<f64>,
-    eps: f64,
-) -> PyResult<f64> {
-    gam::inference::diagnostics::binary_log_loss_from_predictions(&observed, &predicted_mean, eps)
+#[pyfunction]
+fn log_loss_from_predictions(observed: Vec<f64>, predicted_mean: Vec<f64>) -> PyResult<f64> {
+    gam::inference::diagnostics::binary_log_loss_from_predictions(&observed, &predicted_mean)
         .map_err(py_value_error)
 }
 
-#[pyfunction(signature = (observed, predicted_mean, null_mean, eps = 1e-12))]
+#[pyfunction]
 fn nagelkerke_r2_from_predictions(
     observed: Vec<f64>,
     predicted_mean: Vec<f64>,
     null_mean: f64,
-    eps: f64,
 ) -> PyResult<Option<f64>> {
     gam::inference::diagnostics::nagelkerke_r_squared_from_predictions(
         &observed,
         &predicted_mean,
         null_mean,
-        eps,
     )
     .map_err(py_value_error)
 }
@@ -4601,25 +4595,18 @@ fn gaussian_log_loss_value(
     observed: &[f64],
     predicted_mean: &[f64],
     sigma: &[f64],
-    eps: f64,
 ) -> PyResult<f64> {
-    gam::inference::diagnostics::gaussian_log_loss_from_predictions(
-        observed,
-        predicted_mean,
-        sigma,
-        eps,
-    )
-    .map_err(py_value_error)
+    gam::inference::diagnostics::gaussian_log_loss_from_predictions(observed, predicted_mean, sigma)
+        .map_err(py_value_error)
 }
 
-#[pyfunction(signature = (observed, predicted_mean, sigma, eps = 1e-12))]
+#[pyfunction]
 fn gaussian_log_loss_from_predictions(
     observed: Vec<f64>,
     predicted_mean: Vec<f64>,
     sigma: Vec<f64>,
-    eps: f64,
 ) -> PyResult<f64> {
-    gaussian_log_loss_value(&observed, &predicted_mean, &sigma, eps)
+    gaussian_log_loss_value(&observed, &predicted_mean, &sigma)
 }
 
 #[pyfunction]
@@ -4632,12 +4619,7 @@ fn gaussian_prediction_scores_from_predictions(
     let diag =
         gam::inference::diagnostics::diagnostics_from_predictions(&observed, &predicted_mean)
             .map_err(py_value_error)?;
-    let logloss = gaussian_log_loss_value(
-        &observed,
-        &predicted_mean,
-        &sigma,
-        gam::inference::diagnostics::DEFAULT_GAUSSIAN_SCALE_FLOOR,
-    )?;
+    let logloss = gaussian_log_loss_value(&observed, &predicted_mean, &sigma)?;
 
     let out = PyDict::new(py);
     out.set_item("n_obs", diag.n_obs)?;

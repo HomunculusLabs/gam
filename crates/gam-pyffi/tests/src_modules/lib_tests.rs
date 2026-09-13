@@ -1651,7 +1651,7 @@ fn gaussian_log_loss_value_matches_closed_form() {
     let y = vec![1.0, 2.0, 3.0, 4.0];
     let mu = vec![1.0, 2.0, 3.0, 4.0];
     let sigma_scalar = vec![1.5];
-    let got = gaussian_log_loss_value(&y, &mu, &sigma_scalar, 1.0e-12).expect("log-loss");
+    let got = gaussian_log_loss_value(&y, &mu, &sigma_scalar).expect("log-loss");
     let expected = 0.5 * (std::f64::consts::TAU * 1.5 * 1.5).ln();
     assert!(
         (got - expected).abs() < 1.0e-12,
@@ -1660,7 +1660,7 @@ fn gaussian_log_loss_value_matches_closed_form() {
 
     // Per-row σ matches the scalar broadcast when all entries agree.
     let sigma_vec = vec![1.5; y.len()];
-    let got_vec = gaussian_log_loss_value(&y, &mu, &sigma_vec, 1.0e-12).expect("vec sigma");
+    let got_vec = gaussian_log_loss_value(&y, &mu, &sigma_vec).expect("vec sigma");
     assert!((got_vec - got).abs() < 1.0e-12);
 }
 
@@ -1669,7 +1669,7 @@ fn gaussian_log_loss_value_rejects_invalid_sigma_length() {
     let y = vec![0.0, 1.0, 2.0];
     let mu = vec![0.0, 1.0, 2.0];
     let bad_sigma = vec![1.0, 2.0]; // length 2 with n=3
-    assert!(gaussian_log_loss_value(&y, &mu, &bad_sigma, 1.0e-12).is_err());
+    assert!(gaussian_log_loss_value(&y, &mu, &bad_sigma).is_err());
 }
 
 #[test]
