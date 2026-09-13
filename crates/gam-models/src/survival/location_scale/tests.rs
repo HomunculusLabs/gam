@@ -2282,6 +2282,110 @@ fn survival_ls_second_directional_axis_contractions_are_the_dense_axes_contracte
     }
 }
 
+/// #2668: survival location-scale hands the Jeffreys term, its drift base and the gate motion
+/// the rotated first information rows `vec(sym(Uᵀ I'[e_a] U))` from each row's third
+/// contractions and projected channel rows, not from `p` dense axis matrices. They must be the
+/// dense all-axes matrices rotated and symmetrized, to roundoff, on the `n = 300` two-tile
+/// fixture with multi-column blocks, for a full-width basis and a narrower non-orthogonal one.
+#[test]
+fn survival_ls_rotated_first_directional_rows_are_the_dense_axes_rotated_2668() {
+    use crate::row_kernel::{RowSet, row_kernel_directional_derivative_all_axes};
+
+    let n = 300usize;
+    let p_thr = 3usize;
+    let p_ls = 3usize;
+    let x_time_entry = Array2::from_elem((n, 1), 0.7);
+    let x_time_exit =
+        Array2::from_shape_fn((n, 1), |(r, _)| 1.2 + 0.4 * ((r as f64) * 0.37).sin());
+    let x_time_deriv = Array2::from_elem((n, 1), 1.0);
+    let x_threshold = Array2::from_shape_fn((n, p_thr), |(r, j)| {
+        0.3 + 0.5 * ((r as f64) * 0.11 + j as f64).cos() - 0.02 * (j as f64)
+    });
+    let x_log_sigma = Array2::from_shape_fn((n, p_ls), |(r, j)| {
+        0.1 + 0.4 * ((r as f64) * 0.07 - 0.5 * (j as f64)).sin()
+    });
+    let beta_t = array![0.3];
+    let beta_thr = array![-0.4, 0.25, 0.1];
+    let beta_ls = array![0.2, -0.15, 0.05];
+    let p = 1 + p_thr + p_ls;
+    let full = Array2::from_shape_fn((p, p), |(i, j)| {
+        (0.4 * ((i + 2 * j) as f64)).sin() + if i == j { 1.0 } else { 0.0 }
+    });
+    let narrow =
+        Array2::from_shape_fn((p, 3), |(i, j)| (0.3 * (((i + 1) * (j + 2)) as f64)).cos());
+
+    for distribution in [ResidualDistribution::Gaussian, ResidualDistribution::Logistic] {
+        let mut family = survival_exact_newton_test_familywith_inverse_link(
+            residual_distribution_inverse_link(distribution),
+        );
+        family.n = n;
+        family.y = Array1::from_iter((0..n).map(|r| if r % 3 == 0 { 0.0 } else { 1.0 }));
+        family.w = Array1::from_iter((0..n).map(|r| 0.6 + 0.1 * ((r % 7) as f64)));
+        family.x_time_entry = Arc::new(x_time_entry.clone());
+        family.x_time_exit = Arc::new(x_time_exit.clone());
+        family.x_time_deriv = Arc::new(x_time_deriv.clone());
+        family.x_threshold =
+            DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(x_threshold.clone()));
+        family.x_log_sigma =
+            DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(x_log_sigma.clone()));
+        let mut eta_time = Array1::<f64>::zeros(3 * n);
+        for i in 0..n {
+            eta_time[i] = x_time_entry[[i, 0]] * beta_t[0];
+            eta_time[n + i] = x_time_exit[[i, 0]] * beta_t[0];
+            eta_time[2 * n + i] = x_time_deriv[[i, 0]] * beta_t[0];
+        }
+        let states = vec![
+            ParameterBlockState {
+                beta: beta_t.clone(),
+                eta: eta_time,
+            },
+            ParameterBlockState {
+                beta: beta_thr.clone(),
+                eta: x_threshold.dot(&beta_thr),
+            },
+            ParameterBlockState {
+                beta: beta_ls.clone(),
+                eta: x_log_sigma.dot(&beta_ls),
+            },
+        ];
+        let dynamic = family
+            .build_dynamic_geometry(&states)
+            .expect("dynamic geometry");
+        let kernel = family.survival_ls_row_kernel_rescaled(&dynamic, 0.0);
+        let axes = row_kernel_directional_derivative_all_axes(&kernel, &RowSet::All)
+            .expect("dense all-axes first directional derivative");
+        assert_eq!(axes.len(), p, "{distribution:?}: one axis matrix per coefficient");
+        for basis in [&full, &narrow] {
+            let r = basis.ncols();
+            let rotated = kernel
+                .directional_derivative_rotated_all_axes(basis.view())
+                .expect("rotated axis rows");
+            assert_eq!(rotated.dim(), (p, r * r), "{distribution:?}: one r x r row per axis");
+            let mut largest = 0.0_f64;
+            for (a, axis) in axes.iter().enumerate() {
+                let reduced = basis.t().dot(axis).dot(basis);
+                for s in 0..r {
+                    for t in 0..r {
+                        let want = 0.5 * (reduced[[s, t]] + reduced[[t, s]]);
+                        let got = rotated[[a, s * r + t]];
+                        largest = largest.max(want.abs());
+                        assert!(
+                            (got - want).abs() <= 1.0e-10 * (1.0 + want.abs()),
+                            "{distribution:?} width {r} axis {a} [{s}][{t}]: rotated {got:+.15e}, \
+                             dense {want:+.15e}"
+                        );
+                    }
+                }
+            }
+            assert!(
+                largest > 1.0e-3,
+                "{distribution:?} width {r}: rotated rows too small ({largest:.3e}) for agreement \
+                 to say anything"
+            );
+        }
+    }
+}
+
 fn sparse_survival_exact_newton_test_family() -> SurvivalLocationScaleFamily {
     let mut family = survival_exact_newton_test_family();
     family.x_threshold = sparse_design_from_dense(&array![[1.0], [0.4], [-0.6]]);

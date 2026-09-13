@@ -549,6 +549,158 @@ impl SurvivalLsRowKernel<'_> {
         Ok(())
     }
 
+    /// `vec(sym(Uᵀ I'[e_a] U))` for every coefficient axis `a` and a Jeffreys basis `U`
+    /// (`p × r`), row-major, without forming any axis matrix.
+    ///
+    /// Per row, `I'[e_a] = Σ_{x,y} T3[J·e_a]_{xy} r_x r_yᵀ` over the channel design rows `r_x`,
+    /// and `J·e_a = Σ_c r_c[a]·e_c`, so with `g_x = Uᵀ r_x`
+    ///
+    /// ```text
+    ///   Uᵀ I'[e_a] U = Σ_row Σ_c r_c[a] · M_c,   M_c = Σ_{x,y} T3[e_c]_{xy} g_x g_yᵀ .
+    /// ```
+    ///
+    /// Each row forms its nine `T3[e_c]` from one outer plan and projects its channel rows onto
+    /// `U` once. Each channel then scatters its `M_c` rows through one design product per
+    /// `ARROW_ROW_CHUNK` tile, and tiles combine in tile order. That is `K·p_b·r + K²·r + K·r²`
+    /// row work per channel plus one `n × r²` product, against the dense route's `p` axis
+    /// pullbacks of `K²·p_b²` per row (#2668). A row without an exact kernel (non-positive
+    /// weight) contributes nothing, as in the per-axis fold.
+    pub(crate) fn directional_derivative_rotated_all_axes(
+        &self,
+        basis: ndarray::ArrayView2<'_, f64>,
+    ) -> Result<Array2<f64>, String> {
+        let p = crate::row_kernel::RowKernel::<SLS_ROW_K>::n_coefficients(self);
+        let (basis_rows, r) = basis.dim();
+        if basis_rows != p {
+            return Err(format!(
+                "survival location-scale rotated axis rows: the basis has {basis_rows} rows for \
+                 {p} coefficients"
+            ));
+        }
+        let squared = r * r;
+        let n = gam_math::jet_tower::RowProgram::n_rows(self);
+        let tiles = (0..arrow_row_chunk_count(n))
+            .into_par_iter()
+            .map(|chunk_idx| -> Result<Array2<f64>, String> {
+                let start = chunk_idx * ARROW_ROW_CHUNK;
+                let end = (start + ARROW_ROW_CHUNK).min(n);
+                let len = end - start;
+                let stride = SLS_ROW_K * r;
+                let mut chans = Vec::with_capacity(len);
+                let mut thirds = vec![[[[0.0_f64; SLS_ROW_K]; SLS_ROW_K]; SLS_ROW_K]; len];
+                let mut projected = vec![0.0_f64; len * stride];
+                for row in start..end {
+                    let local = row - start;
+                    let row_chans = self.cached_channel_rows(row);
+                    if let Some((primary, exact)) = self.row_nll_inputs_opt(row)? {
+                        let plan = sls_outer_plan::<5>(&exact);
+                        let g = &mut projected[local * stride..(local + 1) * stride];
+                        for (c, slot) in row_chans.iter().enumerate() {
+                            let Some((off_c, row_c)) = slot.as_ref() else {
+                                continue;
+                            };
+                            let mut unit = [0.0_f64; SLS_ROW_K];
+                            unit[c] = 1.0;
+                            thirds[local][c] =
+                                sls_row_third_generated_with_plan(&primary, &plan, &unit);
+                            let g_c = &mut g[c * r..(c + 1) * r];
+                            for (ib, &entry) in row_c.iter().enumerate() {
+                                if entry == 0.0 {
+                                    continue;
+                                }
+                                for (value, &u) in g_c.iter_mut().zip(basis.row(off_c + ib).iter())
+                                {
+                                    *value += entry * u;
+                                }
+                            }
+                        }
+                    }
+                    chans.push(row_chans);
+                }
+                let mut total = Array2::<f64>::zeros((p, squared));
+                let mut half_product = vec![0.0_f64; r];
+                for c in 0..SLS_ROW_K {
+                    let Some(block) = self.channel_block(c) else {
+                        continue;
+                    };
+                    if chans.iter().all(|row_chans| row_chans[c].is_none()) {
+                        continue;
+                    }
+                    let offset = self.offsets[block];
+                    let width = self.offsets[block + 1] - offset;
+                    let mut design = Array2::<f64>::zeros((len, width));
+                    let mut weighted = Array2::<f64>::zeros((len, squared));
+                    let weighted_values = weighted
+                        .as_slice_mut()
+                        .expect("row-weighted basis products are contiguous");
+                    for (local, row_chans) in chans.iter().enumerate() {
+                        let Some(row_c) = row_chans[c].as_ref().map(|slot| &slot.1) else {
+                            continue;
+                        };
+                        if row_c.len() != width {
+                            return Err(format!(
+                                "survival location-scale rotated axis rows: channel {c} has a \
+                                 design row of width {} in a block of width {width}",
+                                row_c.len()
+                            ));
+                        }
+                        design.row_mut(local).assign(row_c);
+                        let third = &thirds[local][c];
+                        let g = &projected[local * stride..(local + 1) * stride];
+                        let output = &mut weighted_values[local * squared..(local + 1) * squared];
+                        for x in 0..SLS_ROW_K {
+                            half_product.fill(0.0);
+                            for y in 0..SLS_ROW_K {
+                                let entry = third[x][y];
+                                if entry == 0.0 {
+                                    continue;
+                                }
+                                for (value, &g_y) in half_product.iter_mut().zip(&g[y * r..(y + 1) * r])
+                                {
+                                    *value += entry * g_y;
+                                }
+                            }
+                            for s in 0..r {
+                                let g_xs = g[x * r + s];
+                                if g_xs == 0.0 {
+                                    continue;
+                                }
+                                for (value, &h_t) in
+                                    output[s * r..(s + 1) * r].iter_mut().zip(&half_product)
+                                {
+                                    *value += g_xs * h_t;
+                                }
+                            }
+                        }
+                    }
+                    let moments = fast_atb_with_parallelism(&design, &weighted, faer::Par::Seq);
+                    let mut target = total.slice_mut(s![offset..offset + width, ..]);
+                    target += &moments;
+                }
+                Ok(total)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let mut rows = Array2::<f64>::zeros((p, squared));
+        for tile in tiles {
+            rows += &tile;
+        }
+        if squared > 0 {
+            let values = rows
+                .as_slice_mut()
+                .expect("rotated axis rows are contiguous");
+            for axis in values.chunks_exact_mut(squared) {
+                for s in 0..r {
+                    for t in (s + 1)..r {
+                        let average = 0.5 * (axis[s * r + t] + axis[t * r + s]);
+                        axis[s * r + t] = average;
+                        axis[t * r + s] = average;
+                    }
+                }
+            }
+        }
+        Ok(rows)
+    }
+
     pub(crate) fn row_primary_values(&self, row: usize) -> [f64; SLS_ROW_K] {
         let inv_sigma_exit = self.dynamic.inv_sigma_exit[row];
         let eta_t_exit = -self.dynamic.q_base_exit[row] / inv_sigma_exit;
@@ -1017,8 +1169,18 @@ fn sls_row_third_generated(
     kernel: &SurvivalExactRowKernel,
     direction: &[f64; SLS_ROW_K],
 ) -> [[f64; SLS_ROW_K]; SLS_ROW_K] {
-    let plan = sls_outer_plan::<5>(kernel);
-    let (u1, g) = sls_program_stacks(&plan);
+    sls_row_third_generated_with_plan(primary, &sls_outer_plan::<5>(kernel), direction)
+}
+
+/// [`sls_row_third_generated`] from the row's outer derivative plan, for a sweep over many
+/// directions of one row; the contraction has this one source either way.
+#[inline(always)]
+fn sls_row_third_generated_with_plan(
+    primary: &[f64; SLS_ROW_K],
+    plan: &SlsOuterPlan<5>,
+    direction: &[f64; SLS_ROW_K],
+) -> [[f64; SLS_ROW_K]; SLS_ROW_K] {
+    let (u1, g) = sls_program_stacks(plan);
     sls_row_program_third_contracted(
         primary[0], primary[1], primary[2], primary[3], primary[4], primary[5], primary[6],
         primary[7], primary[8], plan.u0[0], plan.u0[1], plan.u0[2], plan.u0[3],

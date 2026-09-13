@@ -1129,6 +1129,35 @@ impl CustomFamily for SurvivalLocationScaleFamily {
         Ok(Some(axes))
     }
 
+    /// The rows `vec(sym(Uᵀ I'[e_a] U))` the Jeffreys term, its drift base and the gate
+    /// motion read. On the non-wiggle row kernel they come from each row's nine third
+    /// contractions and its channel rows projected onto `U`, so the `p` dense axis matrices of
+    /// [`Self::joint_jeffreys_information_directional_derivative_all_axes_with_specs`] are
+    /// never formed (#2668). The link-wiggle lowering has no fixed-width row kernel and
+    /// declines.
+    fn joint_jeffreys_information_directional_derivative_rotated_all_axes_with_specs(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        basis: ndarray::ArrayView2<'_, f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        self.validate_joint_specs(
+            specs,
+            "SurvivalLocationScaleFamily joint Jeffreys rotated first directional derivative",
+        )?;
+        if !self.row_kernel_directional_supported() {
+            return Ok(None);
+        }
+        crate::block_layout::block_count::validate_block_count::<SurvivalLocationScaleError>(
+            "SurvivalLocationScaleFamily joint Jeffreys rotated first directional derivative",
+            self.expected_blocks(),
+            block_states.len(),
+        )?;
+        let dynamic = self.build_dynamic_geometry(block_states)?;
+        let kernel = self.survival_ls_row_kernel_rescaled(&dynamic, 0.0);
+        kernel.directional_derivative_rotated_all_axes(basis).map(Some)
+    }
+
     fn joint_jeffreys_information_second_directional_derivative_with_specs(
         &self,
         block_states: &[ParameterBlockState],
