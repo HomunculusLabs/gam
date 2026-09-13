@@ -96,9 +96,11 @@ pub struct BlockQuadratureMarginal {
     pub rho_gradient: Array1<f64>,
     /// Per-axis Gauss–Hermite orders of the product rule that produced `value`.
     pub axis_orders: Vec<usize>,
-    /// For each axis `r`, `|Δ_b − Δ_b⁽ʳ⁾|`, where `Δ_b⁽ʳ⁾` repeats the scalar
-    /// integral with axis `r` one order lower, in the same log-likelihood units
-    /// as `value`. `+∞` on an axis at order one, which has no lower rule.
+    /// For each axis `r`, the larger of `|Δ_b − Δ_b⁽ʳ⁾|` over the integrals
+    /// repeated with axis `r` one and two orders lower (the same-parity rule
+    /// tracks a sequence the next lower rule can cross), in the same
+    /// log-likelihood units as `value`. `+∞` on an axis at order one, which has no
+    /// lower rule.
     pub axis_quadrature_errors: Vec<f64>,
     /// The largest entry of `axis_quadrature_errors`, `0` for an empty block.
     pub quadrature_error: f64,
@@ -234,23 +236,23 @@ fn axis_resolved(paired_error: f64, resolution_target: f64) -> bool {
 ///
 /// The correction exists to remove the `O(1/n_eff)` Laplace term, so its
 /// quadrature error must sit below the next-order remainder: an axis is resolved
-/// when its paired difference with the next lower rule is below
+/// when its paired difference with the two next lower rules is below
 /// `min(|Δ_b|, next_order_remainder)`, with `next_order_remainder = 1/n_eff²`.
 ///
-/// Every axis starts at order three. At order two the lower rule is the single
-/// node at the mode, where `ΔF = 0`, so that axis's paired difference is `|Δ_b|`
-/// itself and cannot resolve `min(|Δ_b|, ·)`. Each unresolved axis is raised by
-/// one order at a time, so an axis stops at the first order that resolves it.
-/// The search ends when every axis is resolved, or when the corrector refuses
-/// the next orders (the memory budget, or a rule past the representable order),
-/// which is reported with the unresolved axis named.
+/// Every axis starts at order four. At orders two and three one of the lower
+/// rules is the single node at the mode, where `ΔF = 0`, so that axis's paired
+/// difference is `|Δ_b|` itself and cannot resolve `min(|Δ_b|, ·)`. Each
+/// unresolved axis is raised by one order at a time, so an axis stops at the
+/// first order that resolves it. The search ends when every axis is resolved, or
+/// when the corrector refuses the next orders (the memory budget, or a rule past
+/// the representable order), which is reported with the unresolved axis named.
 pub fn select_block_quadrature_orders(
     corrector: &dyn LaplaceMarginalCorrector,
     target: &dyn BlockExcessTarget,
     next_order_remainder: f64,
 ) -> Result<BlockQuadratureMarginal, BlockQuadratureOrderRefusal> {
     let m = target.block_dim();
-    let mut axis_orders = vec![3usize; m];
+    let mut axis_orders = vec![4usize; m];
     // The unresolved axis raised on the last step, with its paired difference and
     // target, so a refusal of the raised rule names what it was raising.
     let mut raising: Option<(usize, f64, f64)> = None;

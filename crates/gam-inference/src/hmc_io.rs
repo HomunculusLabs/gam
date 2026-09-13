@@ -2597,8 +2597,9 @@ mod tests {
 
     #[test]
     fn near_gaussian_block_latches_the_lowest_order() {
-        // ΔF = a t⁴ at λ = 1 with a tiny: the order-two rule reads E[t⁴] as 1
-        // instead of 3, so the paired difference at order three is ≈ 2a, below
+        // ΔF = a t⁴ at λ = 1 with a tiny. Orders three and four both integrate t⁴
+        // exactly, and the order-two rule reads E[t⁴] as 1 instead of 3, so at
+        // order four the larger paired difference is |Q₄ − Q₂| ≈ 2a, below
         // min(|Δ_b| ≈ 3a, remainder). The admission must stop at the first order
         // it tries rather than escalate an axis that is already resolved.
         let target = AnharmonicBlock {
@@ -2611,7 +2612,7 @@ mod tests {
             1e-4,
         )
         .expect("a near-Gaussian block resolves");
-        assert_eq!(marginal.axis_orders, vec![3]);
+        assert_eq!(marginal.axis_orders, vec![4]);
         let resolution_target = marginal.value.abs().min(1e-4);
         assert!(
             marginal.axis_quadrature_errors[0] < resolution_target,
@@ -2637,7 +2638,7 @@ mod tests {
         )
         .expect("the quartic block resolves within the memory budget");
         let order = marginal.axis_orders[0];
-        assert!(order > 3, "a strongly quartic block must escalate, latched {order}");
+        assert!(order > 4, "a strongly quartic block must escalate past the starting order, latched {order}");
         let resolution_target = marginal.value.abs().min(remainder);
         assert!(marginal.axis_quadrature_errors[0] < resolution_target);
         let lower = super::block_quadrature_marginal_correction(&target, &[order - 1])
@@ -5445,9 +5446,14 @@ pub fn block_quadrature_marginal_correction<T: BlockExcessTarget + ?Sized>(
         (Array1::zeros(k), None)
     };
     // Paired-rule difference per axis: repeat only the scalar integral with that
-    // axis one order lower and every other axis unchanged. Each difference is in
-    // the same log-marginal units as Δ_b and is deterministic across rho. An axis
-    // at order one has no lower rule, so nothing certifies it.
+    // axis one and two orders lower, every other axis unchanged, and keep the
+    // larger difference. The odd-order and even-order Gauss–Hermite sequences
+    // converge at different rates and can cross, so a difference with the next
+    // lower rule alone can be small while each sequence is still far from the
+    // integral (#2623: |Q5 − Q4| = 2.6e-3 against an order-five error of 2.1e-2),
+    // while the same-parity rule two orders lower tracks each sequence. Each
+    // difference is in the same log-marginal units as Δ_b and is deterministic
+    // across rho. An axis at order one has no lower rule, so nothing certifies it.
     let mut axis_quadrature_errors = Vec::with_capacity(m);
     for axis in 0..m {
         let order = axis_orders[axis];
@@ -5455,44 +5461,49 @@ pub fn block_quadrature_marginal_correction<T: BlockExcessTarget + ?Sized>(
             axis_quadrature_errors.push(f64::INFINITY);
             continue;
         }
-        let mut coarse_rules = rules.clone();
-        coarse_rules[axis] =
-            crate::rho_posterior::standard_normal_gh_rule(order - 1).map_err(Integration)?;
-        let mut coarse_nodes = Vec::new();
-        crate::rho_posterior::enumerate_gh_product(
-            &coarse_rules,
-            0,
-            &mut Array1::zeros(m),
-            0.0,
-            &mut coarse_nodes,
-        );
-        let mut coarse_draws = Array2::<f64>::zeros((m, coarse_nodes.len()));
-        for (s, (z, _)) in coarse_nodes.iter().enumerate() {
-            for r in 0..m {
-                coarse_draws[(r, s)] = z[r] * inv_sqrt_lambda[r];
+        let mut paired_error = 0.0_f64;
+        for lower in (order.saturating_sub(2).max(1)..order).rev() {
+            let mut coarse_rules = rules.clone();
+            coarse_rules[axis] =
+                crate::rho_posterior::standard_normal_gh_rule(lower).map_err(Integration)?;
+            let mut coarse_nodes = Vec::new();
+            crate::rho_posterior::enumerate_gh_product(
+                &coarse_rules,
+                0,
+                &mut Array1::zeros(m),
+                0.0,
+                &mut coarse_nodes,
+            );
+            let mut coarse_draws = Array2::<f64>::zeros((m, coarse_nodes.len()));
+            for (s, (z, _)) in coarse_nodes.iter().enumerate() {
+                for r in 0..m {
+                    coarse_draws[(r, s)] = z[r] * inv_sqrt_lambda[r];
+                }
             }
+            let coarse_values = target.excess_batch(&coarse_draws);
+            // The coarse estimate is the same self-normalised reduction as the
+            // fine one (infeasible nodes contribute zero weight to the numerator
+            // and keep their weight in the normaliser, exactly as in the fine
+            // loop).
+            let coarse_log_numerator = streaming_log_sum_exp(
+                coarse_values
+                    .iter()
+                    .zip(&coarse_nodes)
+                    .filter(|(excess, _)| excess.is_finite())
+                    .map(|(excess, (_, log_w))| log_w - excess),
+            );
+            if !coarse_log_numerator.is_finite() {
+                return Err(Integration(format!(
+                    "block_quadrature_marginal_correction: every node of the rule with axis \
+                     {axis} at order {lower} was infeasible"
+                )));
+            }
+            let coarse_log_norm =
+                streaming_log_sum_exp(coarse_nodes.iter().map(|(_, log_w)| *log_w));
+            paired_error =
+                paired_error.max((value - (coarse_log_numerator - coarse_log_norm)).abs());
         }
-        let coarse_values = target.excess_batch(&coarse_draws);
-        // The coarse estimate is the same self-normalised reduction as the fine
-        // one (infeasible nodes contribute zero weight to the numerator and keep
-        // their weight in the normaliser, exactly as in the fine loop).
-        let coarse_log_numerator = streaming_log_sum_exp(
-            coarse_values
-                .iter()
-                .zip(&coarse_nodes)
-                .filter(|(excess, _)| excess.is_finite())
-                .map(|(excess, (_, log_w))| log_w - excess),
-        );
-        if !coarse_log_numerator.is_finite() {
-            return Err(Integration(format!(
-                "block_quadrature_marginal_correction: every node of the rule with axis {axis} \
-                 at order {} was infeasible",
-                order - 1
-            )));
-        }
-        let coarse_log_norm =
-            streaming_log_sum_exp(coarse_nodes.iter().map(|(_, log_w)| *log_w));
-        axis_quadrature_errors.push((value - (coarse_log_numerator - coarse_log_norm)).abs());
+        axis_quadrature_errors.push(paired_error);
     }
     let quadrature_error = axis_quadrature_errors
         .iter()
