@@ -1442,20 +1442,25 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     // the unified REML/LAML planner chooses the matrix-free outer-HVP route for
     // large `(n, p, K)` shapes instead of falling back to first-order BFGS.
     //
-    // An armed Jeffreys objective's exact outer Hessian over ψ reads the ψ-mixed third
-    // information derivatives (`prepare_explicit_jeffreys_curvature_drifts`). They have closed
-    // forms on the rigid frame, and through the ζ composition of `timewiggle_third` for a time
-    // wiggle with a score warp or link deviation whose ψ coordinates are all design axes. Any
-    // other frame beside ψ coordinates keeps the analytic gradient without declared curvature:
-    // declaring it would refuse every trial point that asks for curvature (gam#2893).
-    let psi_jeffreys_curvature_exact = setup.theta0().len() == setup.rho_dim()
-        || !initial_family.joint_jeffreys_term_required()
-        || initial_family.rigid_third_information_available()
-        || (setup.auxiliary_dim() == 0
-            && initial_family.timewiggle_flex_design_psi_third_available());
+    // An exact outer Hessian over ψ reads `second_order_terms` for every ψ pair and, while the
+    // Jeffreys objective is armed, the ψ-mixed third information derivatives
+    // (`prepare_explicit_jeffreys_curvature_drifts`). The pairs are installed among design,
+    // baseline-chart and learned log-σ axes, and between a chart and a design axis only through
+    // the FLEX family program. The third derivatives have closed forms on the rigid frame for
+    // design and chart axes but not for a learned log σ (gam#2765), and through the ζ
+    // composition of `timewiggle_third` for a time wiggle with a score warp or link deviation
+    // whose ψ coordinates are all design axes (gam#2893). Any other θ keeps the analytic
+    // gradient without declared curvature: declaring it would refuse every trial point that
+    // asks for curvature.
+    let psi_curvature_exact = setup.theta0().len() == setup.rho_dim()
+        || (initial_family.psi_second_order_pairs_served(setup.log_kappa_dim())
+            && (!initial_family.joint_jeffreys_term_required()
+                || initial_family.rigid_psi_jeffreys_third_served()
+                || (setup.auxiliary_dim() == 0
+                    && initial_family.timewiggle_flex_design_psi_third_available())));
     let analytic_joint_hessian_available = analytic_joint_derivatives_available
         && joint_hessian.is_analytic()
-        && psi_jeffreys_curvature_exact;
+        && psi_curvature_exact;
     log::info!(
         "[survival-marginal-slope] initial derivative probe end gradient_analytic={} hessian_analytic={} elapsed={:.3}s",
         analytic_joint_gradient_available,

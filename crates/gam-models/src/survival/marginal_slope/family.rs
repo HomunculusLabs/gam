@@ -244,6 +244,26 @@ impl SurvivalMarginalSlopeFamily {
             STATIC_SLOPE_PRIMARIES
         }
     }
+
+    /// Whether the ψ workspace installs a second-order pair calculus for every pair of this
+    /// family's ψ coordinates beside `design_axes` design axes; see
+    /// [`second_order_psi_pairs_served`] (gam#2765).
+    pub(crate) fn psi_second_order_pairs_served(&self, design_axes: usize) -> bool {
+        second_order_psi_pairs_served(
+            self.family_hyper.baseline_axis_count,
+            self.family_hyper.log_sigma_axis.is_some(),
+            design_axes,
+            !self.per_z_slope_active() && (self.flex_active() || self.flex_timewiggle_active()),
+        )
+    }
+
+    /// Whether the rigid frame serves every ψ-mixed third information derivative an armed
+    /// Jeffreys objective's exact outer Hessian reads. Design and baseline-chart axes have
+    /// closed forms there; a learned log σ has none along a coefficient direction, and the ψ
+    /// workspace refuses it (gam#2765).
+    pub(crate) fn rigid_psi_jeffreys_third_served(&self) -> bool {
+        self.rigid_third_information_available() && self.family_hyper.log_sigma_axis.is_none()
+    }
 }
 
 impl SurvivalMarginalSlopeFamily {
@@ -517,5 +537,54 @@ impl SurvivalMarginalSlopeFamily {
             ));
         }
         Ok(z_tilde.row(row).dot(gamma))
+    }
+}
+
+/// Whether the survival marginal-slope ψ workspace installs a second-order pair calculus for
+/// every pair of a θ with these ψ coordinates. `second_order_terms` serves (design, design),
+/// (log σ, log σ) and (baseline chart, baseline chart) pairs, a (chart, design) pair only
+/// through the FLEX family program, and nothing for a learned log σ beside any other axis. An
+/// exact outer Hessian over such a θ reads every pair, so declaring one there would refuse
+/// every trial point that asks for curvature (gam#2765).
+pub(crate) fn second_order_psi_pairs_served(
+    baseline_axes: usize,
+    learned_log_sigma: bool,
+    design_axes: usize,
+    baseline_design_through_flex: bool,
+) -> bool {
+    !(learned_log_sigma && baseline_axes + design_axes > 0)
+        && (baseline_axes == 0 || design_axes == 0 || baseline_design_through_flex)
+}
+
+#[cfg(test)]
+mod psi_curvature_declaration_tests {
+    use super::*;
+
+    /// gam#2765: the pairs `second_order_terms` installs. Before this predicate the outer
+    /// Hessian declaration accepted every refused row below on the rigid frame, whatever the
+    /// ψ roles were.
+    #[test]
+    fn second_order_psi_pairs_served_matches_the_installed_pair_calculus_2765() {
+        // (baseline chart axes, learned log σ, design axes, chart×design through FLEX)
+        let served = [
+            ((2, false, 0, false), true), // Weibull chart alone: the #2765 recovery fixture
+            ((0, false, 3, false), true), // design axes alone
+            ((0, true, 0, false), true),  // learned log σ alone
+            ((2, false, 2, true), true),  // chart beside design through the FLEX program
+        ];
+        let refused = [
+            ((2, true, 0, false), false),  // log σ beside a chart axis
+            ((0, true, 2, false), false),  // log σ beside a design axis
+            ((2, false, 2, false), false), // rigid chart beside a design axis
+            ((2, true, 2, true), false),   // log σ refuses through FLEX too
+        ];
+        for ((baseline, sigma, design, through_flex), expected) in served.into_iter().chain(refused)
+        {
+            assert_eq!(
+                second_order_psi_pairs_served(baseline, sigma, design, through_flex),
+                expected,
+                "baseline={baseline} log_sigma={sigma} design={design} through_flex={through_flex}"
+            );
+        }
     }
 }
