@@ -14,26 +14,28 @@ pub(crate) fn block_param_ranges(specs: &[ParameterBlockSpec]) -> Vec<(usize, us
 /// Build the joint Jeffreys/Firth basis `Z_J` for the universal robustness
 /// term — the directions the term is allowed to act on.
 ///
-/// The term exists to supply the `O(1)`-bounding curvature a near-separating
-/// direction has none of, so the span it acts on is the set of directions the
-/// model does not ALREADY bound. A smoothing penalty bounds exactly
-/// `range(S)`, because `(H + S_λ)v = Hv + λSv`; on `range(S)` the model already
-/// carries a proper prior and a second one is not a bias correction there but a
-/// duplicate. So `Z_J = ker(S)`.
+/// Three routes, in precedence order:
 ///
-/// Two routes reach that kernel, and they agree wherever both apply:
-///
+/// * a family that has MEASURED the directions it fails to bound states them
+///   directly through [`CustomFamily::jeffreys_span_basis`] (gam#2612);
 /// * a family whose smoothing rides on a JOINT penalty bundle (gam#1587) leaves
 ///   every per-block `penalties` list empty, so it states the aggregate whose
 ///   kernel is the span through
 ///   [`CustomFamily::jeffreys_span_aggregate_penalty`] (gam#2612);
-/// * otherwise each block contributes its own per-block span and the bases are
-///   embedded block-diagonally into the joint `total_p x m_total` matrix.
+/// * otherwise each block contributes its FULL identifiable span, `Z_J = I_p`,
+///   and the bases are embedded block-diagonally into the joint
+///   `total_p x m_total` matrix.
 ///
-/// A family with NO penalized component at all therefore keeps the full
-/// identifiable span, which is the `S_λ = 0` case of the same statement.
-/// Returns `None` for an empty system, and for a system every smoothing
-/// parameter reaches (nothing is left for the term to bound).
+/// The last route is not `ker(S)`. The Jeffreys penalty is self-limiting: its
+/// score is `O(1)` against the data's `O(n)` Fisher information, so on a
+/// data-identified direction its only effect is the `O(1/n)` Firth correction.
+/// It bites only where `I(β)` is near-singular, whether that direction lies in
+/// `ker(S)` or in `range(S)`, and a `ker(S)` span could not reach a
+/// near-separation along a penalized spline direction (see
+/// `jeffreys_subspace_from_penalty` in gam-solve).
+///
+/// Returns `None` for an empty system, and when a family's measured or aggregate
+/// route leaves nothing for the term to bound.
 ///
 /// The Jeffreys conditioning gate then decides whether this basis contributes
 /// at the current iterate.
