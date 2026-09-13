@@ -2778,10 +2778,10 @@ fn exact_joint_spatial_seed(
             };
         }
         log::info!(
-            "[spatial-kappa] joint rho domain per coordinate: lower={:?} upper={:?} seed={:?}",
-            rho_lower.iter().map(|v| (v * 1e3).round() / 1e3).collect::<Vec<_>>(),
-            rho_upper.iter().map(|v| (v * 1e3).round() / 1e3).collect::<Vec<_>>(),
-            theta0.iter().take(rho_dim).map(|v| (v * 1e3).round() / 1e3).collect::<Vec<_>>(),
+            "[spatial-kappa] joint rho domain per coordinate: lower={:.3?} upper={:.3?} seed={:.3?}",
+            rho_lower.to_vec(),
+            rho_upper.to_vec(),
+            theta0.iter().take(rho_dim).copied().collect::<Vec<_>>(),
         );
     }
     let kind = if use_aniso {
@@ -7607,10 +7607,10 @@ where
             };
         }
         log::info!(
-            "[spatial-exact-joint] joint rho domain per coordinate: lower={:?} upper={:?} seed={:?}",
-            lower.iter().take(rho_dim).map(|v| (v * 1e3).round() / 1e3).collect::<Vec<_>>(),
-            upper.iter().take(rho_dim).map(|v| (v * 1e3).round() / 1e3).collect::<Vec<_>>(),
-            theta0.iter().take(rho_dim).map(|v| (v * 1e3).round() / 1e3).collect::<Vec<_>>(),
+            "[spatial-exact-joint] joint rho domain per coordinate: lower={:.3?} upper={:.3?} seed={:.3?}",
+            lower.iter().take(rho_dim).copied().collect::<Vec<_>>(),
+            upper.iter().take(rho_dim).copied().collect::<Vec<_>>(),
+            theta0.iter().take(rho_dim).copied().collect::<Vec<_>>(),
         );
     }
     // Capability vs realized policy: the family may *advertise* an exact
