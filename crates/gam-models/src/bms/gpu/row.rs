@@ -3310,6 +3310,7 @@ mod row_kernel_tests {
             });
 
             let family = BernoulliMarginalSlopeFamily {
+                jeffreys_armed: true,
                 y: Arc::new(y),
                 weights: Arc::new(weights),
                 z: Arc::new(z.clone()),

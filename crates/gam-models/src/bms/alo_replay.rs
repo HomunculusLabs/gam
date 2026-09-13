@@ -336,6 +336,7 @@ pub(crate) fn replay_saved_bernoulli_marginal_slope_alo(
 
     let policy = gam_runtime::resource::ResourcePolicy::default_library();
     let family = BernoulliMarginalSlopeFamily {
+        jeffreys_armed: true,
         y: Arc::new(input.response.clone()),
         weights: Arc::new(input.prior_weights.clone()),
         z: Arc::new(input.latent_z.clone()),

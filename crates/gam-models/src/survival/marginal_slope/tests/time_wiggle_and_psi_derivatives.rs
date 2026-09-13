@@ -8,6 +8,7 @@ fn timewiggle_scorewarp_family_supports_second_order_exact_outer_path() {
     let score_runtime = test_deviation_runtime();
     let (time_wiggle_knots, time_wiggle_degree, time_wiggle_ncols) = standard_test_time_wiggle();
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![0.0]),
         weights: Arc::new(array![1.0]),
@@ -152,6 +153,7 @@ fn exact_outer_row_work_gate_keeps_large_timewiggle_link_models_under_linear_fle
     let link_runtime = test_deviation_runtime();
     let (time_wiggle_knots, time_wiggle_degree, time_wiggle_ncols) = standard_test_time_wiggle();
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 80,
         event: Arc::new(array![0.0]),
         weights: Arc::new(array![1.0]),
@@ -195,6 +197,7 @@ fn timewiggle_scorewarp_beta_hessian_directional_derivative_returns_finite_matri
     let marginal_beta = array![0.35, -0.1];
     let (time_wiggle_knots, time_wiggle_degree, time_wiggle_ncols) = standard_test_time_wiggle();
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![1.0]),
@@ -264,6 +267,7 @@ fn timewiggle_scorewarp_beta_hessian_second_directional_derivative_returns_finit
     let marginal_beta = array![0.35, -0.1];
     let (time_wiggle_knots, time_wiggle_degree, time_wiggle_ncols) = standard_test_time_wiggle();
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![1.0]),
@@ -339,6 +343,7 @@ fn timewiggle_scorewarp_beta_hessian_second_directional_derivative_returns_finit
 fn timewiggle_marginal_slope_family(score_warp: Option<DeviationRuntime>) -> SurvivalMarginalSlopeFamily {
     let (time_wiggle_knots, time_wiggle_degree, time_wiggle_ncols) = standard_test_time_wiggle();
     SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![1.0]),
@@ -1050,6 +1055,7 @@ fn link_flex_blockwise_exact_newton_matches_joint_principal_blocks() {
     let marginal_design = array![[0.7, -0.2], [0.1, 0.6]];
     let slope_design = array![[1.0], [0.5]];
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 2,
         event: Arc::new(array![1.0, 0.0]),
         weights: Arc::new(array![1.0, 0.8]),
@@ -1111,6 +1117,7 @@ fn link_flex_marginal_psi_terms_return_finite_joint_terms() {
     let marginal_beta = array![0.35, -0.1];
     let slope_beta = array![0.2];
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![1.0]),
@@ -1192,6 +1199,7 @@ fn link_flex_marginal_psi_second_order_returns_finite_joint_terms() {
     let slope_design = array![[1.2, -0.3]];
     let slope_beta = array![0.2, -0.05];
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![1.0]),
@@ -1280,6 +1288,7 @@ fn link_flex_marginal_psi_hessian_directional_returns_finite_matrix() {
     let marginal_design = array![[0.7, -0.2]];
     let marginal_beta = array![0.35, -0.1];
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![1.0]),
@@ -1368,6 +1377,7 @@ fn timewiggle_marginal_psi_terms_return_finite_joint_terms() {
     let marginal_beta = array![0.35, -0.1];
     let (time_wiggle_knots, time_wiggle_degree, time_wiggle_ncols) = standard_test_time_wiggle();
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![1.0]),
@@ -1444,6 +1454,7 @@ fn timewiggle_blockwise_exact_newton_matches_joint_principal_blocks() {
     let slope_beta = array![0.2];
     let (time_wiggle_knots, time_wiggle_degree, time_wiggle_ncols) = standard_test_time_wiggle();
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 2,
         event: Arc::new(array![1.0, 0.0]),
         weights: Arc::new(array![1.0, 0.8]),
@@ -1510,6 +1521,7 @@ fn flex_timewiggle_fast_gradient_matches_dense_joint_gradient() {
     let slope_beta = array![0.2];
     let (time_wiggle_knots, time_wiggle_degree, time_wiggle_ncols) = standard_test_time_wiggle();
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![1.0]),
@@ -1602,6 +1614,7 @@ fn timewiggle_joint_hessian_matches_central_fd_of_joint_gradient() {
     let slope_beta = array![0.2];
     let (time_wiggle_knots, time_wiggle_degree, time_wiggle_ncols) = standard_test_time_wiggle();
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![1.0]),
@@ -1793,6 +1806,7 @@ fn row_dynamic_q_geometry_into_pooled_matches_fresh_allocation_bitwise() {
     let slope_beta = array![0.2];
     let (time_wiggle_knots, time_wiggle_degree, time_wiggle_ncols) = standard_test_time_wiggle();
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 2,
         event: Arc::new(array![1.0, 0.0]),
         weights: Arc::new(array![1.0, 0.8]),
@@ -1971,6 +1985,7 @@ fn flex_timewiggle_operator_to_dense_matches_evaluate_dense_joint_hessian() {
     let slope_beta = array![0.2];
     let (time_wiggle_knots, time_wiggle_degree, time_wiggle_ncols) = standard_test_time_wiggle();
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 2,
         event: Arc::new(array![1.0, 0.0]),
         weights: Arc::new(array![1.0, 0.8]),
@@ -2053,6 +2068,7 @@ fn timewiggle_marginal_slope_psi_second_order_returns_finite_joint_terms() {
     let slope_beta = array![0.2, -0.05];
     let (time_wiggle_knots, time_wiggle_degree, time_wiggle_ncols) = standard_test_time_wiggle();
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![1.0]),
@@ -2137,6 +2153,7 @@ fn timewiggle_marginal_psi_hessian_directional_returns_finite_matrix() {
     let marginal_beta = array![0.35, -0.1];
     let (time_wiggle_knots, time_wiggle_degree, time_wiggle_ncols) = standard_test_time_wiggle();
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![1.0]),

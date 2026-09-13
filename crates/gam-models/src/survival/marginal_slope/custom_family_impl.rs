@@ -133,14 +133,22 @@ impl crate::custom_family::JeffreysCompletionOuterDerivatives for SurvivalMargin
     }
 }
 
+impl crate::custom_family::JeffreysArming for SurvivalMarginalSlopeFamily {
+    fn with_jeffreys_armed(&self, armed: bool) -> Self {
+        Self {
+            jeffreys_armed: armed,
+            ..self.clone()
+        }
+    }
+}
+
 impl CustomFamily for SurvivalMarginalSlopeFamily {
     // Survival marginal-slope fits have a genuine under-identification regime
-    // (near-collinear clustered-PC trends), so opt into the self-limiting
-    // Jeffreys/Firth curvature. The trait default flipped to OFF in gam#1395
-    // (the flat-prior exact-Newton objective carries no Jeffreys term); families
-    // with a real separation/under-identification regime opt in.
+    // (near-collinear clustered-PC trends). The self-limiting Jeffreys/Firth
+    // curvature bounds it there, but it is armed only when the unarmed fit
+    // proves it is needed (#979).
     fn joint_jeffreys_term_required(&self) -> bool {
-        true
+        self.jeffreys_armed
     }
 
     /// #808: engage the inner self-vanishing Levenberg–Marquardt μ on a

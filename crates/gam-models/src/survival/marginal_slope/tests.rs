@@ -268,6 +268,7 @@ fn make_closed_form_test_family(n: usize) -> SurvivalMarginalSlopeFamily {
     let derivative_offset_exit: Array1<f64> =
         Array1::from_iter((0..n).map(|i| 0.5 + 0.05 * ((i * 23 + 1) % 3) as f64));
     SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n,
         event: Arc::new(event),
         weights: Arc::new(weights),
@@ -611,6 +612,7 @@ fn test_family(
     link_dev: Option<DeviationRuntime>,
 ) -> SurvivalMarginalSlopeFamily {
     SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![0.0]),
         weights: Arc::new(array![1.0]),
@@ -1076,6 +1078,7 @@ fn block_view_is_transpose_symmetric_across_present_pairs() {
 #[test]
 fn exact_flex_row_matches_rigid_closed_form_without_deviations() {
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![1.7]),
@@ -1425,6 +1428,7 @@ fn oracle_rigid_family(
     // Strictly positive derivative-exit design so qd1 > 0 (monotone).
     let design_deriv = Array2::from_shape_fn((n, 1), |(r, _)| 1.2 + 0.21 * (r as f64).abs().sqrt());
     SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n,
         event: Arc::new(Array1::from(event.to_vec())),
         weights: Arc::new(Array1::from(weights.to_vec())),
@@ -1751,6 +1755,7 @@ fn exact_flex_row_value_matches_rigid_with_zero_score_and_link_coefficients() {
     let score_runtime = test_deviation_runtime();
     let link_runtime = test_deviation_runtime();
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![0.0]),
         weights: Arc::new(array![0.9]),
@@ -1895,6 +1900,7 @@ fn flex_contracted_tower_matches_independent_rigid_tower_and_catches_sign_flip()
 
     for fix in &fixtures {
         let family = SurvivalMarginalSlopeFamily {
+            jeffreys_armed: true,
             n: 1,
             event: Arc::new(array![fix.event]),
             weights: Arc::new(array![fix.weight]),
@@ -2091,6 +2097,7 @@ fn flex_contracted_tower_matches_independent_fd_witness_nonzero_deviation() {
     let event = 1.0_f64;
 
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![event]),
         weights: Arc::new(array![weight]),
@@ -2532,6 +2539,7 @@ fn link_flex_family_supports_second_order_exact_outer_path() {
     let score_runtime = test_deviation_runtime();
     let link_runtime = test_deviation_runtime();
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![0.0]),
         weights: Arc::new(array![1.0]),
@@ -2578,6 +2586,7 @@ fn sigma_exact_joint_psi_terms_returns_analytic_terms() {
     let slope_beta = array![0.2];
     let sigma = 0.65;
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![1.0]),
@@ -2639,6 +2648,7 @@ fn sigma_exact_joint_psi_terms_returns_analytic_terms() {
 #[test]
 fn censored_rows_still_reject_invalid_time_derivative() {
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![0.0]),
         weights: Arc::new(array![1.0]),
@@ -2709,6 +2719,7 @@ fn standard_test_time_wiggle() -> (Array1<f64>, usize, usize) {
 #[test]
 fn exact_newton_evaluation_propagates_invalid_rows() {
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![1.0]),
@@ -2772,6 +2783,7 @@ fn exact_newton_evaluation_propagates_invalid_rows() {
 #[test]
 fn time_constraints_use_exact_derivative_guard_rows() {
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 2,
         event: Arc::new(array![0.0, 1.0]),
         weights: Arc::new(array![1.0, 1.0]),
@@ -2865,6 +2877,7 @@ fn time_constraints_use_exact_derivative_guard_rows() {
 #[test]
 fn time_block_constraints_synthesize_qd1_rows_when_stored_constraints_missing() {
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![1.0]),
@@ -2937,6 +2950,7 @@ fn time_block_constraints_synthesize_qd1_rows_when_stored_constraints_missing() 
 #[test]
 fn time_block_max_feasible_step_uses_synthesized_qd1_rows() {
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![1.0]),
@@ -3000,6 +3014,7 @@ fn coupled_qd1_guard_limits_time_step_before_post_update_projection() {
     .expect("time derivative guard constraints")
     .expect("coupled row");
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![0.0]),
         weights: Arc::new(array![1.0]),
@@ -3076,6 +3091,7 @@ fn timewiggle_tail_step_is_clipped_before_it_can_flip_derivative() {
         .expect("tail constraints")
         .expect("time constraints");
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![0.0]),
         weights: Arc::new(array![1.0]),
@@ -3129,6 +3145,7 @@ fn timewiggle_tail_step_is_clipped_before_it_can_flip_derivative() {
 #[test]
 fn time_block_post_update_rejects_infeasible_beta_instead_of_projecting() {
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![0.0]),
         weights: Arc::new(array![1.0]),
@@ -3217,6 +3234,7 @@ fn time_block_post_update_rejects_infeasible_beta_instead_of_projecting() {
 #[test]
 fn time_block_post_update_rejects_qd1_when_no_linear_constraints() {
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![1.0]),
@@ -3301,6 +3319,7 @@ fn time_block_post_update_rejects_qd1_when_no_linear_constraints() {
 #[test]
 fn time_block_post_update_errors_when_current_violates_qd1() {
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![1.0]),
@@ -3371,6 +3390,7 @@ fn time_block_post_update_errors_when_current_violates_qd1() {
 #[test]
 fn time_block_feasible_step_stays_inside_derivative_guard() {
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![0.0]),
         weights: Arc::new(array![1.0]),
@@ -3469,6 +3489,7 @@ fn time_block_feasible_step_stays_inside_derivative_guard() {
 #[test]
 fn mixed_blockwise_exact_newton_preserves_sparse_block_hessians() {
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 2,
         event: Arc::new(array![1.0, 0.0]),
         weights: Arc::new(array![1.0, 0.8]),
@@ -3805,6 +3826,7 @@ fn make_block_psi_test_family(n: usize) -> SurvivalMarginalSlopeFamily {
         0.2 + 0.5 * (((i * 37 + 9) % n) as f64) / (n as f64)
     });
     SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n,
         event: Arc::new(event),
         weights: Arc::new(weights),
@@ -3944,6 +3966,7 @@ fn make_flex_baseline_psi_test_fixture() -> (
         SurvivalMarginalSlopeFamilyHyperState::new(Some(Arc::clone(&geometry)), None)
             .expect("install FLEX baseline family coordinates");
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![0.9]),
@@ -4849,6 +4872,7 @@ fn make_flex_no_wiggle_test_family(n: usize) -> SurvivalMarginalSlopeFamily {
         0.2 + 0.5 * (((i * 37 + 9) % n) as f64) / (n as f64)
     });
     SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n,
         event: Arc::new(event),
         weights: Arc::new(weights),
@@ -5567,6 +5591,7 @@ fn flex_contraction_fixture_family(
     let score_runtime = test_deviation_runtime();
     let link_runtime = test_deviation_runtime();
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![fixture.event]),
         weights: Arc::new(array![fixture.weight]),
@@ -5789,6 +5814,7 @@ fn flex_production_fourth_contraction_matches_scalar_fd_witness() {
 /// row scaling. Mirrors the field layout of the other in-module fixtures.
 fn make_time_guard_family(deriv_coeff: f64, deriv_offset: f64) -> SurvivalMarginalSlopeFamily {
     SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n: 1,
         event: Arc::new(array![1.0]),
         weights: Arc::new(array![1.0]),
@@ -6010,6 +6036,7 @@ fn zz_diag_failure1_flex_vs_rigid_vs_fdhess() {
         let score_runtime = test_deviation_runtime();
         let link_runtime = test_deviation_runtime();
         let family = SurvivalMarginalSlopeFamily {
+            jeffreys_armed: true,
             n: 1,
             event: Arc::new(array![event]),
             weights: Arc::new(array![weight]),
@@ -7371,6 +7398,7 @@ fn make_timewiggle_test_family(
         Array2::from_shape_fn((n, p_m), |(row, col)| 0.2 + 0.1 * (row + col) as f64 * 0.25);
 
     SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n,
         event: Arc::new(event),
         weights: Arc::new(weights),

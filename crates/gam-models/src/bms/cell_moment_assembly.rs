@@ -3818,6 +3818,7 @@ mod empirical_rigid_jet_oracle_tests {
             )))
         };
         BernoulliMarginalSlopeFamily {
+            jeffreys_armed: true,
             y: Arc::new(Array1::from_vec(y)),
             weights: Arc::new(Array1::from_vec(weights)),
             z: Arc::new(Array1::from_vec(z)),
@@ -4474,6 +4475,7 @@ mod empirical_flex_jet_oracle_tests {
             )))
         };
         let family = BernoulliMarginalSlopeFamily {
+            jeffreys_armed: true,
             y: Arc::new(Array1::from_vec(vec![1.0])),
             weights: Arc::new(Array1::from_vec(vec![1.0])),
             z: Arc::new(Array1::from_vec(vec![0.45])),

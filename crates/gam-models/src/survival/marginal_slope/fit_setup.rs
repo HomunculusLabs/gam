@@ -179,7 +179,8 @@ pub(crate) fn inner_fit(
     blocks: &[ParameterBlockSpec],
     options: &BlockwiseFitOptions,
 ) -> Result<UnifiedFitResult, String> {
-    fit_custom_family(family, blocks, options).map_err(|e| e.to_string())
+    crate::custom_family::fit_custom_family_arming_on_evidence(family, blocks, options)
+        .map_err(|e| e.to_string())
 }
 
 pub(crate) fn inner_fit_from_certified_outer(

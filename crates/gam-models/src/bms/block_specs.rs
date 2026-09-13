@@ -1931,7 +1931,8 @@ fn inner_fit(
     // path with full-data polish, so make it the primary nested smoother.
     options.use_outer_hessian = false;
     options.outer_tol = options.outer_tol.max(2.0e-5);
-    fit_custom_family(family, blocks, &options).map_err(|e| e.to_string())
+    crate::custom_family::fit_custom_family_arming_on_evidence(family, blocks, &options)
+        .map_err(|e| e.to_string())
 }
 
 fn inner_fit_from_certified_outer(
@@ -2666,6 +2667,7 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
             .expect("reduce slope design for family construction")
             .design;
         BernoulliMarginalSlopeFamily {
+            jeffreys_armed: true,
             y: Arc::clone(&y),
             weights: Arc::clone(&weights),
             z: Arc::clone(&z),

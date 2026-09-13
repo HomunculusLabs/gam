@@ -67,6 +67,10 @@ pub(super) struct BernoulliMarginalSlopeFamily {
     /// updated atomically so two threads cannot both decide "new ρ" and
     /// double-bump.
     pub(super) auto_subsample_last_rho: Arc<Mutex<Option<Array1<f64>>>>,
+    /// Whether this member's Jeffreys/Firth prior is armed. A fit arms it only
+    /// on the unarmed fit's own evidence, through
+    /// `fit_custom_family_arming_on_evidence` (#979).
+    pub(super) jeffreys_armed: bool,
 }
 
 /// Number of outer-gradient evaluations the auto-subsample schedule

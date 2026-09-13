@@ -353,6 +353,7 @@ pub fn replay_saved_survival_marginal_slope_alo(
         }
     };
     let family = SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n,
         event: Arc::new(input.event.clone()),
         weights: Arc::new(input.prior_weights.clone()),

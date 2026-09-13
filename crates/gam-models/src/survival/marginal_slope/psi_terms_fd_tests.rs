@@ -272,6 +272,7 @@ fn family_at(axis: PsiAxis, frame: SlopeFrame, t: f64) -> SurvivalMarginalSlopeF
     };
 
     SurvivalMarginalSlopeFamily {
+        jeffreys_armed: true,
         n,
         event: Arc::new(event),
         weights: Arc::new(weights),

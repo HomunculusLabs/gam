@@ -959,6 +959,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         )?;
         slope_layout.validate_for(spec.z.ncols())?;
         Ok(SurvivalMarginalSlopeFamily {
+            jeffreys_armed: true,
             n,
             event: Arc::clone(&event),
             weights: Arc::clone(&weights),

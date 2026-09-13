@@ -5632,6 +5632,7 @@ mod moment_engine_tests {
             0.2 + 0.5 * (((i * 37 + 9) % n) as f64) / (n as f64)
         });
         SurvivalMarginalSlopeFamily {
+            jeffreys_armed: true,
             n,
             event: Arc::new(event),
             weights: Arc::new(weights),

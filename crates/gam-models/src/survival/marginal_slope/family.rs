@@ -182,6 +182,10 @@ pub(crate) struct SurvivalMarginalSlopeFamily {
     /// the cache to length-`n`. When `None`, the solver behaves exactly as it
     /// did before the warm-start machinery was added (closed-form rigid seed).
     pub(crate) intercept_warm_starts: Option<Arc<SurvivalInterceptWarmStartCache>>,
+    /// Whether this member's Jeffreys/Firth prior is armed. A fit arms it only
+    /// on the unarmed fit's own evidence, through
+    /// `fit_custom_family_arming_on_evidence` (#979).
+    pub(crate) jeffreys_armed: bool,
 }
 
 impl SurvivalMarginalSlopeFamily {

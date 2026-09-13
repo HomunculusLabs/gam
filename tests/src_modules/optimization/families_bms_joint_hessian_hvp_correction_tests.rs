@@ -672,6 +672,7 @@ fn make_flex_hvp_cache_test_family(
         }
     });
     let family = BernoulliMarginalSlopeFamily {
+        jeffreys_armed: true,
         y: Arc::new(y),
         weights: Arc::new(weights),
         z: Arc::new(z.clone()),
@@ -885,6 +886,7 @@ fn bernoulli_row_cell_moment_upgrade_reuses_base_partitions_without_lru() {
 #[test]
 fn bernoulli_value_cell_moments_use_shared_lru() {
     let family = BernoulliMarginalSlopeFamily {
+        jeffreys_armed: true,
         cell_moment_lru: Arc::new(exact_kernel::CellMomentLruCache::new(16 * 1024 * 1024)),
         cell_moment_cache_stats: Arc::new(exact_kernel::CellMomentCacheStats::default()),
         ..default_test_family()
@@ -1714,6 +1716,7 @@ fn bernoulli_contracted_psi_second_order_matches_per_pair_contraction() {
     });
     let slope = Array2::from_shape_fn((n, 1), |_| 1.0);
     let family = BernoulliMarginalSlopeFamily {
+        jeffreys_armed: true,
         y: Arc::new(y),
         weights: Arc::new(weights),
         z: Arc::new(z),
@@ -1887,6 +1890,7 @@ fn bernoulli_contracted_psi_hook_matches_per_pair_with_penalty() {
     });
     let slope = Array2::from_shape_fn((n, 1), |_| 1.0);
     let family = BernoulliMarginalSlopeFamily {
+        jeffreys_armed: true,
         y: Arc::new(y),
         weights: Arc::new(weights),
         z: Arc::new(z),
@@ -2174,6 +2178,7 @@ fn bernoulli_batched_outer_gradient_matches_hypercoord_path_for_rho_and_psi() {
     });
     let slope = Array2::from_shape_fn((n, 1), |_| 1.0);
     let family = BernoulliMarginalSlopeFamily {
+        jeffreys_armed: true,
         y: Arc::new(y),
         weights: Arc::new(weights),
         z: Arc::new(z),
@@ -2553,6 +2558,7 @@ fn bernoulli_isotropic_matern_psi_psi_joint_hessian_matches_fd_of_first() {
         ));
         let slope_design = design.design.clone();
         let family = BernoulliMarginalSlopeFamily {
+            jeffreys_armed: true,
             y: Arc::new(y.clone()),
             weights: Arc::new(weights.clone()),
             z: Arc::new(z.clone()),
@@ -2797,6 +2803,7 @@ fn profiled_theta_hvp_outer_hessian_matches_fd_of_gradient_psi_and_mixed() {
         let slope_design = design.design.clone();
 
         let family = BernoulliMarginalSlopeFamily {
+            jeffreys_armed: true,
             y: Arc::clone(&y_arc),
             weights: Arc::clone(&w_arc),
             z: Arc::clone(&z_arc),
@@ -3013,6 +3020,7 @@ fn bernoulli_rigid_batched_all_axes_second_directional_matches_per_axis_scatter(
 
     for frailty in [None, Some(0.7_f64)] {
         let family = BernoulliMarginalSlopeFamily {
+            jeffreys_armed: true,
             gaussian_frailty_sd: frailty,
             ..test_family_with_dense_designs(
                 y.clone(),
@@ -3126,6 +3134,7 @@ fn bernoulli_rigid_batched_all_axes_first_directional_matches_per_axis_scatter()
 
     for frailty in [None, Some(0.7_f64)] {
         let family = BernoulliMarginalSlopeFamily {
+            jeffreys_armed: true,
             gaussian_frailty_sd: frailty,
             ..test_family_with_dense_designs(
                 y.clone(),

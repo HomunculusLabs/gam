@@ -674,6 +674,19 @@ impl crate::custom_family::JeffreysThirdInformationDerivative for BernoulliMargi
     }
 }
 
+impl crate::custom_family::JeffreysArming for BernoulliMarginalSlopeFamily {
+    fn with_jeffreys_armed(&self, armed: bool) -> Self {
+        Self {
+            jeffreys_armed: armed,
+            // Each member runs its own auto-subsample schedule from zero, as a
+            // freshly built family does at the start of a fit.
+            auto_subsample_phase_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            auto_subsample_last_rho: Arc::new(Mutex::new(None)),
+            ..self.clone()
+        }
+    }
+}
+
 impl CustomFamily for BernoulliMarginalSlopeFamily {
     fn outer_derivative_pilot_schedule(
         &self,
@@ -685,12 +698,11 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
     }
 
     // Bernoulli marginal-slope fits have a genuine separation regime
-    // (near-perfectly-classified rows), so opt into the self-limiting
-    // Jeffreys/Firth curvature that bounds the coefficient there. The trait
-    // default flipped to OFF in gam#1395 (the flat-prior exact-Newton objective
-    // carries no Jeffreys term); families with a real separation regime opt in.
+    // (near-perfectly-classified rows). The self-limiting Jeffreys/Firth
+    // curvature bounds the coefficient there, but it is armed only when the
+    // unarmed fit proves it is needed (#979).
     fn joint_jeffreys_term_required(&self) -> bool {
-        true
+        self.jeffreys_armed
     }
 
     fn exact_newton_joint_hessian_beta_dependent(&self) -> bool {
