@@ -3215,6 +3215,14 @@ fn cholesky_solve_block(mat: &Array2<f64>, rhs: &Array2<f64>) -> Option<Array2<f
 /// stay fixed and still enter their neighbours' `g`. Rows are normalized here
 /// without orientation, because `A` carries the codes' signs; the caller orients
 /// afterwards.
+///
+/// The sweep is Gauss–Seidel over a greedy coloring of the co-firing graph. Atoms
+/// of one color share no coupling `A_ab`, so their conditional minimizations read
+/// only rows outside the class and commute exactly: a class is computed in
+/// parallel, then written. A serial sweep costs `(K + 2·nnz(A))·P` scalar work per
+/// pass, the same order as one operator application of the parallel block-CG solve
+/// it follows. The classes, the class order and the accumulated decrease are fixed
+/// by atom order alone, so the result does not depend on the thread count.
 pub(super) fn polish_unit_rows_against_normal_eq(
     decoder: &mut Array2<f32>,
     eq: &DecoderNormalEq,
@@ -3235,8 +3243,34 @@ pub(super) fn polish_unit_rows_against_normal_eq(
         neigh[a as usize].push((b as usize, value));
         neigh[b as usize].push((a as usize, value));
     }
-    for list in neigh.iter_mut() {
+    neigh.par_iter_mut().for_each(|list| {
         list.sort_by_key(|&(nb, _)| nb);
+    });
+    let mut color_of = vec![usize::MAX; k];
+    let mut classes: Vec<Vec<usize>> = Vec::new();
+    let mut used: Vec<usize> = Vec::new();
+    for atom in (0..k).filter(|&atom| refresh[atom]) {
+        used.clear();
+        used.extend(
+            neigh[atom]
+                .iter()
+                .map(|&(nb, _)| color_of[nb])
+                .filter(|&color| color != usize::MAX),
+        );
+        used.sort_unstable();
+        used.dedup();
+        let mut color = 0usize;
+        for &taken in &used {
+            if taken != color {
+                break;
+            }
+            color += 1;
+        }
+        color_of[atom] = color;
+        if classes.len() == color {
+            classes.push(Vec::new());
+        }
+        classes[color].push(atom);
     }
     for atom in (0..k).filter(|&atom| refresh[atom]) {
         let mut row = decoder.row_mut(atom);
@@ -3252,40 +3286,57 @@ pub(super) fn polish_unit_rows_against_normal_eq(
             row.mapv_inplace(|v| (f64::from(v) / norm) as f32);
         }
     }
+    // (atom, conditional optimum row, loss decrease, rounding of the written row)
+    type RowUpdate = (usize, Vec<f32>, f64, f64);
     let row_rounding = f64::from(f32::EPSILON) * (p as f64).sqrt();
-    let mut g = vec![0.0_f64; p];
     loop {
         let mut decrease = 0.0_f64;
         let mut resolution = 0.0_f64;
-        for atom in (0..k).filter(|&atom| refresh[atom]) {
-            for (c, slot) in g.iter_mut().enumerate() {
-                *slot = eq.b[[atom, c]];
-            }
-            for &(nb, value) in &neigh[atom] {
-                let row = decoder.row(nb);
-                for (slot, &entry) in g.iter_mut().zip(row.iter()) {
-                    *slot -= value * f64::from(entry);
+        for class in &classes {
+            let updates: Vec<Result<Option<RowUpdate>, String>> = {
+                let current = decoder.view();
+                class
+                    .par_iter()
+                    .map(|&atom| -> Result<Option<RowUpdate>, String> {
+                        let mut g: Vec<f64> = eq.b.row(atom).to_vec();
+                        for &(nb, value) in &neigh[atom] {
+                            for (slot, &entry) in g.iter_mut().zip(current.row(nb).iter()) {
+                                *slot -= value * f64::from(entry);
+                            }
+                        }
+                        let g_norm = g.iter().map(|v| v * v).sum::<f64>().sqrt();
+                        if !g_norm.is_finite() {
+                            return Err(format!(
+                                "decoder polish: atom {atom} has a non-finite conditional direction"
+                            ));
+                        }
+                        if g_norm == 0.0 {
+                            return Ok(None);
+                        }
+                        let aligned = current
+                            .row(atom)
+                            .iter()
+                            .zip(g.iter())
+                            .map(|(&entry, &gc)| f64::from(entry) * gc)
+                            .sum::<f64>();
+                        let row: Vec<f32> = g.iter().map(|&gc| (gc / g_norm) as f32).collect();
+                        Ok(Some((
+                            atom,
+                            row,
+                            2.0 * (g_norm - aligned),
+                            2.0 * row_rounding * g_norm,
+                        )))
+                    })
+                    .collect()
+            };
+            for update in updates {
+                if let Some((atom, row, step_decrease, step_resolution)) = update? {
+                    for (entry, &value) in decoder.row_mut(atom).iter_mut().zip(row.iter()) {
+                        *entry = value;
+                    }
+                    decrease += step_decrease;
+                    resolution += step_resolution;
                 }
-            }
-            let g_norm = g.iter().map(|v| v * v).sum::<f64>().sqrt();
-            if !g_norm.is_finite() {
-                return Err(format!(
-                    "decoder polish: atom {atom} has a non-finite conditional direction"
-                ));
-            }
-            if g_norm == 0.0 {
-                continue;
-            }
-            let mut row = decoder.row_mut(atom);
-            let aligned = row
-                .iter()
-                .zip(g.iter())
-                .map(|(&entry, &gc)| f64::from(entry) * gc)
-                .sum::<f64>();
-            decrease += 2.0 * (g_norm - aligned);
-            resolution += 2.0 * row_rounding * g_norm;
-            for (entry, &gc) in row.iter_mut().zip(g.iter()) {
-                *entry = (gc / g_norm) as f32;
             }
         }
         if !(decrease > resolution) {
