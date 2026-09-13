@@ -1,6 +1,5 @@
-"""Bug hunt: ``predict(covariance_mode=...)`` is silently ignored for binomial
-smooth models — the smoothing-parameter-uncertainty correction never reaches the
-interval, so binomial credible intervals are the bare conditional ones.
+"""Contract: ``predict(covariance_mode=...)`` is honoured for binomial smooth
+models, so the smoothing-parameter-uncertainty correction reaches the interval.
 
 ``Model.predict``'s ``covariance_mode`` selects the covariance source for the
 response-scale SE: ``"conditional"`` = ``H^{-1}`` only; ``"smoothing"`` /
@@ -8,43 +7,27 @@ response-scale SE: ``"conditional"`` = ``H^{-1}`` only; ``"smoothing"`` /
 first-order smoothing correction ``J·Var(rho_hat)·J^T`` and errors if it cannot
 be formed (``gamfit/_model.py:84-95``).
 For a smooth model with REML-selected ``rho``, the correction is non-trivial, so
-the modes must produce *different* standard errors — and they do for Poisson,
+the modes must produce *different* standard errors, as they do for Poisson,
 Gamma and Gaussian.
 
-For binomial the two modes return **bitwise-identical** standard errors: the
-correction is simply not applied. As a result a binomial ``s(x)`` model's
-default credible intervals omit the smoothing uncertainty that every other
-family includes by default, so they are systematically too narrow, and
-``covariance_mode`` is a no-op.
+The defect this test was written for: binomial returned **bitwise-identical**
+standard errors under both modes, so a binomial ``s(x)`` model's default
+credible intervals omitted the smoothing uncertainty every other family
+includes, and ``covariance_mode`` was a no-op. ``predict_columns`` in
+``crates/gam-pyffi`` dispatched on
+``(interval, model.prediction_uses_posterior_mean())``, which is ``true`` for
+exactly the binomial family (every link) and the wiggle models. The
+``(Some(level), true)`` arm called ``predict_posterior_mean`` and never parsed
+``options.covariance_mode``, while the sibling ``(Some(level), false)`` arm
+taken by Poisson/Gamma/Gaussian parsed it and fed it into
+``predict_full_uncertainty``.
 
-Root cause (read, no patch): same dispatch as the sibling observation-interval
-defect. ``crates/gam-pyffi/src/lib.rs`` ``predict_columns`` branches on
-``(interval, model.prediction_uses_posterior_mean())``.
-``prediction_uses_posterior_mean()`` is ``true`` for exactly the binomial family
-(every link) and the wiggle models (``src/inference/model.rs:2681-2692``). The
-``(Some(level), true)`` arm (``lib.rs:25389-25415``) calls
-``predictor.predict_posterior_mean(&predict_input, &fit, Some(level))`` and
-**never parses or threads ``options.covariance_mode``** — the
-``predict_posterior_mean`` signature has no covariance-mode parameter, and
-``StandardPredictor::predict_posterior_mean`` builds its backend from the stored
-conditional covariance via ``posterior_mean_backend_or_warn`` (no smoothing
-correction; ``src/inference/predict/mod.rs:1133-1176``). The sibling
-``(Some(level), false)`` arm (``lib.rs:25416-25445``), taken by
-Poisson/Gamma/Gaussian, *does* call ``parse_covariance_mode(options.covariance_mode)``
-and feeds it into ``predict_full_uncertainty`` /
-``select_uncertainty_backend``. So binomial — the only standard family on the
-posterior-mean arm — can never observe ``covariance_mode`` nor the smoothing
-correction.
+This test asserts that ``covariance_mode`` is honoured for binomial: the
+smoothing-corrected SE must differ from (and not be smaller than) the
+conditional SE, exactly as it does for the Poisson control.
 
-This test asserts the contract that ``covariance_mode`` is honoured for binomial:
-the smoothing-corrected SE must differ from (and not be smaller than) the
-conditional SE, exactly as it does for the Poisson control. It fails today
-(the binomial SEs are identical across modes) and will pass once the
-posterior-mean dispatch threads ``covariance_mode`` through.
-
-Related: #811 (same dispatch arm silently drops ``observation_interval`` for
-binomial). Both are the binomial/posterior-mean path ignoring options the
-sibling full-uncertainty arm honours.
+Related: #811 (the same dispatch arm dropped ``observation_interval`` for
+binomial).
 """
 from __future__ import annotations
 
@@ -78,7 +61,6 @@ def test_binomial_smooth_se_responds_to_covariance_mode() -> None:
 
     # The smoothing correction J·Var(rho)·J^T is non-trivial for a REML-selected
     # smooth, so the smoothing-corrected SE must differ from the conditional SE.
-    # Today they are bitwise identical (the correction is never applied).
     assert not np.allclose(se_cond, se_smooth, rtol=1e-6, atol=1e-12), (
         "binomial std_error is identical for covariance_mode='conditional' and "
         "'smoothing' — the smoothing-parameter-uncertainty correction is being "
@@ -94,7 +76,7 @@ def test_binomial_smooth_se_responds_to_covariance_mode() -> None:
 
 def test_poisson_smooth_se_responds_to_covariance_mode_control() -> None:
     # Control: the same mechanism is honoured for a family routed through the
-    # full-uncertainty arm (Poisson is `uses_posterior_mean=False`). Passes today.
+    # full-uncertainty arm (Poisson is `uses_posterior_mean=False`).
     model = _fit("poisson", lambda r, x: r.poisson(np.exp(0.5 + np.sin(3.0 * x))))
     se_cond = _se(model, "conditional")
     se_smooth = _se(model, "smoothing")

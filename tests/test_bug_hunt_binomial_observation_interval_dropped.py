@@ -1,5 +1,5 @@
-"""Bug hunt: ``predict(observation_interval=True)`` is silently dropped for
-binomial / Bernoulli models.
+"""Contract: ``predict(observation_interval=True)`` returns the observation
+interval columns for binomial / Bernoulli models.
 
 ``Model.predict`` documents an ``observation_interval`` switch that, when
 ``True`` together with ``interval``, adds response-scale *prediction*-interval
@@ -12,43 +12,34 @@ variance ``p·(1-p)`` and emits the interval
 (``src/inference/predict/mod.rs:5827-5835``). Gaussian, Poisson and Gamma all
 return the two extra columns when asked.
 
-Binomial returns neither column and raises no error. The request is dropped on
-the floor.
-
-Root cause (``crates/gam-pyffi/src/lib.rs``, ``predict_columns``): the engine is
-dispatched on ``(options.interval, model.prediction_uses_posterior_mean())``.
-``prediction_uses_posterior_mean`` is ``true`` for *exactly* the binomial family
-(every link) plus the link-/baseline-wiggle models
-(``src/inference/model.rs:2681-2692``). So a binomial fit with an interval takes
-the ``(Some(level), true)`` match arm (``lib.rs:25389-25415``), which calls
-``predict_posterior_mean`` — a path that has no observation-interval capability —
-and **never references ``options.observation_interval``**. Only the sibling
-``(Some(level), false)`` arm (``lib.rs:25416-25464``, taken by Poisson / Gamma /
-Gaussian, whose ``prediction_uses_posterior_mean`` is ``false``) threads
-``includeobservation_interval`` into ``predict_full_uncertainty`` and copies the
-``observation_lower`` / ``observation_upper`` columns out. The capability the
-engine implements for binomial is therefore unreachable through the API.
+The defect this test was written for: binomial returned neither column and
+raised no error. ``predict_columns`` in ``crates/gam-pyffi`` dispatched on
+``(options.interval, model.prediction_uses_posterior_mean())``, which is
+``true`` for exactly the binomial family (every link) plus the link-/baseline-
+wiggle models. A binomial fit with an interval took the ``(Some(level), true)``
+arm, which called ``predict_posterior_mean`` and never referenced
+``options.observation_interval``. Only the sibling ``(Some(level), false)`` arm,
+taken by Poisson / Gamma / Gaussian, threaded ``includeobservation_interval``
+into ``predict_full_uncertainty`` and copied the ``observation_lower`` /
+``observation_upper`` columns out.
 
 Why it matters: for an imbalanced / rare-event binomial (small ``p``) the
 binomial observation interval is genuinely informative — the band
 ``mu ± z·sqrt(Var(mu_hat) + p(1-p))`` clamped to ``[0, 1]`` does not saturate
-the whole unit interval — so silently dropping it loses a real, documented
-feature, not just a degenerate Bernoulli edge case.
+the whole unit interval — so dropping it loses a real, documented feature, not
+just a degenerate Bernoulli edge case.
 
 This test asserts the contract: a binomial model asked for an observation
 interval must return the columns, and they must be a valid response-scale
 prediction band (inside ``[0, 1]``, containing the point prediction, and no
 narrower than the credible interval for the mean, because they add the
-non-negative ``p(1-p)`` observation-variance term). It fails today (the columns
-are absent) and will pass once the binomial / posterior-mean dispatch threads
-``observation_interval`` through, the same way the Poisson / Gamma arm already
-does. The Poisson control anchors that the feature is wired for some families,
-so binomial's absence is a per-family gap rather than a missing global feature.
+non-negative ``p(1-p)`` observation-variance term). The Poisson control asks
+for the same columns on a family routed through the full-uncertainty arm.
 
 Related: #800 (Poisson observation interval crossed below support), #801 (Beta
 observation interval ignored estimated phi), #802 (NegBin observation interval
 froze theta) — that family addressed the *values* of observation intervals;
-this one is the binomial interval being *absent entirely*.
+this one was the binomial interval being *absent entirely*.
 """
 from __future__ import annotations
 
@@ -77,9 +68,8 @@ def test_binomial_predict_emits_observation_interval_columns() -> None:
     out = model.predict(_grid(), interval=0.95, observation_interval=True)
     cols = list(out.columns)
 
-    # The core defect: the requested observation-interval columns are simply
-    # missing (the `(Some, true)` posterior-mean dispatch arm never looks at
-    # `observation_interval`). Both must be present.
+    # Both requested observation-interval columns must be present; the
+    # posterior-mean dispatch arm once dropped them without an error.
     assert "observation_lower" in cols, (
         "binomial predict(observation_interval=True) dropped 'observation_lower' "
         f"silently; got columns {cols}"
@@ -122,8 +112,7 @@ def test_binomial_observation_interval_is_a_valid_response_band() -> None:
 def test_poisson_observation_interval_present_control() -> None:
     # Control: the same request IS honoured for a family whose dispatch does not
     # route through the posterior-mean arm (Poisson is `uses_posterior_mean=False`).
-    # This anchors that observation intervals are a real, wired feature, so the
-    # binomial omission above is a per-family dispatch gap, not a global absence.
+    # This anchors observation intervals on the full-uncertainty arm.
     rng = np.random.default_rng(6)
     n = 2000
     x = rng.uniform(0.0, 1.0, n)

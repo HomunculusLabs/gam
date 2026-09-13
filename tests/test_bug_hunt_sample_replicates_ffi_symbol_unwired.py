@@ -1,29 +1,14 @@
-"""Bug hunt: the documented posterior-predictive replicate API is dead — the
-Python wrapper calls an FFI symbol that was never added to the Rust module.
+"""Contract: the documented posterior-predictive replicate API
+``gamfit.Model.sample_replicates`` reaches its FFI symbol and draws from the
+family's generative law.
 
 `gamfit.Model.sample_replicates` was introduced by commit 5a33b0703
 ("feat(#1057): wire generative replicate sampling + posterior-predictive
-checks").  The commit message claims a "New
-pyffi `generative_replicates(model_bytes, headers, rows, n_draws, seed)`" was
-added, but the commit's diff only touched `gamfit/_model.py` and a test — the
-`#[pyfunction] generative_replicates` it describes was never committed to
-`crates/gam-pyffi/src/lib.rs`.  The Rust extension module therefore exposes
-`build_sample_payload_json` and `sample_table`, but NOT
-`generative_replicates`:
-
-    >>> import gamfit._rust as r
-    >>> [s for s in dir(r) if "replic" in s or "generat" in s]
-    []
-
-So `gamfit/_model.py:483`
-
-    return rust_module().generative_replicates(...)
-
-raises `AttributeError: module 'gamfit._rust' has no attribute
-'generative_replicates'` on every call.  The whole #1057 feature — replicate
-sampling, posterior-predictive checks, simulation-based calibration — is
-unreachable from Python, even though the Rust core
-(`crates/gam-models/src/inference/generative.rs::sampleobservation_seeded_replicates`) is implemented.
+checks"). That commit touched only `gamfit/_model.py` and a test: the
+`#[pyfunction] generative_replicates` its message described was never
+committed, so every call raised `AttributeError: module 'gamfit._rust' has no
+attribute 'generative_replicates'`, and replicate sampling, posterior-predictive
+checks and simulation-based calibration were unreachable from Python.
 
 This test asserts the user-facing contract with OBJECTIVE checks (the family
 generative law is its own ground truth, no reference tool needed):
