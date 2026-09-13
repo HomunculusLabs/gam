@@ -1398,7 +1398,10 @@ fn block_reports(
 pub(super) fn stable_rank_symmetric(c: ArrayView2<'_, f64>) -> f32 {
     use gam_linalg::faer_ndarray::FaerEigh;
     let trace: f64 = (0..c.nrows()).map(|i| c[[i, i]]).sum();
-    if trace <= 1.0e-24 {
+    // Both callers build `C` only by adding code outer products `w·wᵀ` and scaling
+    // by `γ² ≥ 0`, so each diagonal entry is a sum of squares and the trace is zero
+    // exactly when the block coded nothing.
+    if trace == 0.0 {
         return 0.0;
     }
     let owned = c.to_owned();
@@ -1406,7 +1409,10 @@ pub(super) fn stable_rank_symmetric(c: ArrayView2<'_, f64>) -> f32 {
         Ok((evals, _)) => evals.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
         Err(_) => trace, // degenerate: report rank 1
     };
-    if lambda_max <= 1.0e-24 {
+    // A PSD `C` with positive trace has `λ_max ≥ tr C / b`, far above the
+    // eigensolver's `O(b·ε·tr C)` backward error, so a finite block never reaches
+    // this refusal; it only keeps a malformed spectrum from dividing.
+    if lambda_max <= 0.0 {
         return 0.0;
     }
     (trace / lambda_max) as f32
