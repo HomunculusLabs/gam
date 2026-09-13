@@ -1545,9 +1545,9 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
             // certificate was evaluated, so there is no tolerance that decided
             // anything here.
             final_kkt_tolerance: None,
-            // Zero-iteration synthesis: no LM damping was exercised, so
-            // hand the next solve the cold default.
-            final_lm_lambda: 1e-6,
+            // Zero-iteration synthesis: no LM damping was exercised, so there is
+            // no hint to hand on; every warm-start consumer reads 0 as none (#2469).
+            final_lm_lambda: 0.0,
             // Zero-iteration synthesis: no LM gain ratio was measured.
             final_accept_rho: None,
             // Zero-iteration synthesis assembles the Hessian with prior

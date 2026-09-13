@@ -469,7 +469,7 @@ pub struct PirlsResult {
     /// Levenberg-Marquardt damping coefficient at the converged inner
     /// iter. Cached by the REML runtime so the next PIRLS call in the
     /// same outer optimization can seed `λ_LM` to this value instead
-    /// of cold-starting at `1e-6`. Mirrors `WorkingModelPirlsResult::final_lm_lambda`.
+    /// of cold-starting at `MADSEN_DAMPING_FLOOR`. Mirrors `WorkingModelPirlsResult::final_lm_lambda`.
     pub final_lm_lambda: f64,
     /// Gain ratio of the last accepted LM step inside this PIRLS solve,
     /// `None` when no step was accepted (e.g. zero-iteration synthesis,

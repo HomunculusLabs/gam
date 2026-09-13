@@ -972,7 +972,8 @@ mod linux_impl {
             } else {
                 f64::INFINITY
             },
-            final_lm_lambda: 1e-6,
+            // No LM damping was exercised: 0 reads as no hint (#2469).
+            final_lm_lambda: 0.0,
             final_accept_rho: None,
             exported_laplace_curvature: ExportedLaplaceCurvature::ExpectedInformationSurrogate,
         };
@@ -1046,7 +1047,8 @@ mod linux_impl {
             last_step_halving: 0,
             hessian_curvature: HessianCurvatureKind::Fisher,
             exported_laplace_curvature: ExportedLaplaceCurvature::ExpectedInformationSurrogate,
-            final_lm_lambda: 1e-6,
+            // No LM damping was exercised: 0 reads as no hint (#2469).
+            final_lm_lambda: 0.0,
             final_accept_rho: None,
             constraint_kkt: constraint_kkt_val,
             final_kkt_tolerance: None,
