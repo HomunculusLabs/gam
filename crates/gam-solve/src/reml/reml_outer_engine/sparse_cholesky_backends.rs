@@ -714,82 +714,56 @@ impl DenseCholeskyOperator {
         Self::factorize_positive_definite(h)
     }
 
-    /// Smooth-logdet value-lane shortcut, admitted only when its exact
-    /// log-determinant is certified to agree with the smooth spectral scalar.
+    /// Value-lane shortcut, admitted only when its exact log-determinant is
+    /// certified to agree with the `log|H|₊` every derivative lane prices on H's
+    /// identified subspace (gam#2457, #2901 V22).
     ///
-    /// Returns `Err` if `h` is not SPD or if its exact log-determinant would not
-    /// agree with the smooth-floored one every derivative lane prices
-    /// (gam#2457, below).
-    /// On refusal, the caller routes the evaluation to
-    /// [`DenseSpectralOperator`], which owns the floored convention.
-    pub(crate) fn from_spd_with_smooth_logdet_agreement(h: &Array2<f64>) -> Result<Self, String> {
+    /// Returns `Err` if `h` is not SPD or if the certificate below cannot be
+    /// met. On refusal, the caller routes the evaluation to
+    /// [`DenseSpectralOperator::from_symmetric_on_identified_subspace`].
+    pub(crate) fn from_spd_with_logdet_agreement(h: &Array2<f64>) -> Result<Self, String> {
         let operator = Self::factorize_positive_definite(h)?;
         let n = operator.n_dim;
         let cached_logdet = operator.cached_logdet;
 
-        // gam#2457 — THIS OPERATOR AND THE SPECTRAL ONE PRICE DIFFERENT SCALARS.
+        // gam#2457 — THIS OPERATOR AND THE SPECTRAL ONE CAN PRICE DIFFERENT SCALARS.
         //
-        // The LLT returns the exact `Σ ln σ_j`.  Every derivative-bearing lane
-        // reaches [`DenseSpectralOperator`] instead, whose smooth floor makes
-        // its log-determinant `Σ ln r_ε(σ_j)` with
-        // `r_ε(σ) = ½(σ + √(σ² + 4ε²))` and `ε = spectral_epsilon` — and the
-        // analytic gradient `tr(G_ε Ḣ)` and its Hessian are the exact
-        // derivatives of THAT floored object.  So the floored log-determinant
-        // is the criterion, and this fast path is a legitimate shortcut only
-        // where the two coincide.  Where they do not, the outer objective
-        // returns one value to `OuterEvalOrder::Value` (line-search probes,
-        // the terminal value certificate) and another to `ValueAndGradient`
-        // (the trust-region model, the certificate's analytic sample) at the
-        // SAME ρ — measured at 663× the value-agreement envelope on
-        // `kappa_zero_fit_recovers_planted_flat_signal`, whose `H = XᵀWX + S_λ`
-        // carries an eigenvalue at ≈7ε once λ = e^−8.9 stops regularizing it.
+        // The LLT returns the exact `Σ ln σ_j` over every eigenvalue. Every
+        // derivative-bearing lane prices `log|H|₊` over H's identified subspace
+        // and drops the eigenvalues inside the rounding band `n·ε·‖H‖₂`. Where
+        // the two disagree, the outer objective returns one value to
+        // `OuterEvalOrder::Value` (line-search probes, the terminal value
+        // certificate) and another to `ValueAndGradient` (the trust-region
+        // model, the certificate's analytic sample) at the SAME ρ — measured at
+        // 663× the value-agreement envelope on
+        // `kappa_zero_fit_recovers_planted_flat_signal` while those lanes still
+        // priced a smooth spectral floor.
         //
-        // The gap is bounded without ever forming the spectrum.  For SPD `H`,
-        // `√(1 + 4t) ≤ 1 + 2t` gives `r_ε(σ)/σ ≤ 1 + ε²/σ²`, and `ln(1+t) ≤ t`,
-        // so
-        //
-        //     0 ≤ Σ_j ln(r_ε(σ_j)/σ_j) ≤ ε² · Σ_j σ_j⁻² = ε² · tr(H⁻²)
-        //
-        // and `tr(H⁻²) = ‖H⁻¹‖_F²` comes straight out of the factorization
-        // already in hand.  The bound is tight in the regime that matters (a
-        // single near-floor eigenvalue dominates both sides), so gating on it
-        // costs the speedup only where the floor genuinely bites.
-        //
-        // Admit the fast path only when that gap AND the factorization
-        // roundoff estimate are inside the
-        // same relative envelope the outer audit applies to the scalar this
-        // log-determinant feeds — ONE predicate, named once, reused rather than
-        // re-derived. Both call sites use the spectral operator when a
-        // separate value kernel cannot resolve this envelope. The terminal
-        // audit still checks the actual agreement independently.
-        let epsilon = spectral_epsilon_for_dim(n);
+        // #2834: LLT and eigh also perturb an assembled H differently. At a
+        // legitimate large smoothing penalty, that O(n·ε·‖H‖) perturbation
+        // changes log|H| by tr(H⁻¹ΔH), an O(ε·κ(H)) gap hundreds of times the
+        // audit. Budget both kernels' first-order error with the Frobenius
+        // duality bound `2γ_n‖H‖_F‖H⁻¹‖_F`, and admit the fast path only inside
+        // the same relative envelope the outer audit applies to the scalar this
+        // log-determinant feeds — ONE predicate, named once. That bound also
+        // holds `κ(H) ≤ κ_F(H) ≤ max(|log|H||, 1)/(2n√ε)`, far below `1/(nε)`,
+        // so every eigenvalue of an admitted H clears the rounding band and its
+        // identified subspace is all of it. The terminal audit still checks the
+        // actual agreement independently.
         let h_inverse = operator.chol.solve_mat(&Array2::<f64>::eye(n));
-        let floor_gap_bound =
-            epsilon * epsilon * h_inverse.iter().map(|entry| entry * entry).sum::<f64>();
-        // #2834: even when every eigenvalue is far above the smooth floor,
-        // LLT and eigh perturb an assembled H differently. At a legitimate
-        // large smoothing penalty, that O(n*eps*||H||) perturbation changes
-        // log|H| by tr(H^-1 dH). The floor-only check admitted matrices with
-        // an O(eps*kappa(H)) gap hundreds of times larger than the audit.
-        // Budget both kernels' first-order error using the Frobenius duality
-        // bound. The inverse is already available for the floor check, so
-        // this costs only reductions; well-conditioned probes retain LLT.
         let dimension_roundoff = n as f64 * f64::EPSILON;
         let gamma_n = dimension_roundoff / (1.0 - dimension_roundoff);
         let matrix_norm = operator.matrix.iter().fold(0.0_f64, |norm, &v| norm.hypot(v));
         let inverse_norm = h_inverse.iter().fold(0.0_f64, |norm, &v| norm.hypot(v));
         let factorization_gap_bound = 2.0 * gamma_n * matrix_norm * inverse_norm;
-        let total_gap_bound = floor_gap_bound + factorization_gap_bound;
         let agreement_envelope =
             crate::rho_optimizer::outer_value_agreement_bound(cached_logdet, cached_logdet);
-        if !(total_gap_bound <= agreement_envelope) {
+        if !(factorization_gap_bound <= agreement_envelope) {
             return Err(format!(
                 "DenseCholeskyOperator declines a {n}-dimensional Hessian: its exact \
-                 log-determinant can differ from the smooth-floored log|H| the derivative lanes \
-                 price by an estimated {total_gap_bound:.3e} (smooth floor \
-                 {floor_gap_bound:.3e}, factorization roundoff {factorization_gap_bound:.3e}), \
-                 above the {agreement_envelope:.3e} \
-                 value-agreement envelope (spectral floor eps={epsilon:.3e})"
+                 log-determinant can differ from the identified-subspace log|H| the derivative \
+                 lanes price by an estimated {factorization_gap_bound:.3e} of factorization \
+                 roundoff, above the {agreement_envelope:.3e} value-agreement envelope"
             ));
         }
 

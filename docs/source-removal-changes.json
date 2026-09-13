@@ -6613,5 +6613,17 @@
     "reason": "#2899 no product user: gam_geometry::ClosureFamily (new, raw_dim, row_jet, design, the private row writers and SIMD lane helpers) and ClosureProfileCi have no user outside their own module and its tests. closure_family.rs is deleted with its tests, including the double-double trig reference that only certified the deleted recurrence. inv_std_normal moves unchanged, with its test, into curvature_estimand.rs, its only consumer.",
     "evidence": "git grep -n -w over crates, src, tests, examples, bench, benches, python and gamfit finds ClosureFamily and ClosureProfileCi only in closure_family.rs and the gam-geometry crate-root re-export, and inv_std_normal only in closure_family.rs and curvature_estimand.rs (plus an unrelated private copy in a root regression test). Item list from source_removal_guard.py --base ef1e74ddd --head 3c10e63bd (job 579772, /scratch.global/sauer354/pool/prune-api-a/stack4.check.579772.log).",
     "base": "3250f2aa1f71221352bf322e4c9d939c947e12b5"
+  },
+  {
+    "base": "aee8d5ec604cc6bcd1255e505c9ba152b8fa4928",
+    "items": [
+      "crates/gam-solve/src/reml/reml_outer_engine/corrected_covariance.rs:fn:spectral_epsilon_for_dim",
+      "crates/gam-solve/src/reml/reml_outer_engine/logdet_lane_agreement_2457_tests.rs:fn:floor_touching_spectrum",
+      "crates/gam-solve/src/reml/reml_outer_engine/logdet_lane_agreement_2457_tests.rs:fn:only_a_floor_touching_hessian_separates_the_two_logdets_2457",
+      "crates/gam-solve/src/reml/reml_outer_engine/logdet_lane_agreement_2457_tests.rs:fn:raw_cholesky_logdet",
+      "crates/gam-solve/src/reml/reml_outer_engine/sparse_cholesky_backends.rs:fn:from_spd_with_smooth_logdet_agreement"
+    ],
+    "reason": "SPEC rules 5 and 23 (#2901 V22, slice 5b). Since 88cd62b75 every derivative lane of the dense standard REML prices log|H| on H's identified subspace with exact kernels. DenseCholeskyOperator::from_spd_with_smooth_logdet_agreement still certified the value-only LLT against the smooth-floored sum of ln r_eps(sigma) at eps = sqrt(machine eps)*p, a floor no standard lane prices. It is renamed from_spd_with_logdet_agreement and certified by the factorization roundoff bound alone, which also holds every eigenvalue above the rounding band. spectral_epsilon_for_dim served only that certificate beside spectral_epsilon, so it is inlined into spectral_epsilon. The #2457 tests are restated against the identified-subspace operator. floor_touching_spectrum becomes small_resolved_spectrum, and the smooth-floor control only_a_floor_touching_hessian_separates_the_two_logdets_2457 becomes only_a_band_touching_hessian_separates_the_two_logdets_2457, which compares the analytic full-spectrum log-determinant instead of raw_cholesky_logdet's LLT.",
+    "evidence": "At the base, git grep -n from_spd_with_smooth_logdet_agreement finds its definition, one production call in crates/gam-solve/src/reml/objective.rs (renamed here) and five calls in logdet_lane_agreement_2457_tests.rs (restated here). git grep -n spectral_epsilon_for_dim finds its definition, spectral_epsilon, the certificate and the 2457 test fixture. floor_touching_spectrum, raw_cholesky_logdet and the control test are named only in logdet_lane_agreement_2457_tests.rs. Not compiled locally; a guarded job follows."
   }
 ]

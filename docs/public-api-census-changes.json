@@ -2702,5 +2702,14 @@
     "reason": "#2899 no product user: ClosureFamily's public methods are deleted with the struct; inv_std_normal moves to curvature_estimand.rs as a private helper of its one consumer.",
     "evidence": "public_api_census.py --base ef1e74ddd --head 3c10e63bd reports these five identities among the stack's removals (job 579772, /scratch.global/sauer354/pool/prune-api-a/stack4.check.579772.log).",
     "base": "3250f2aa1f71221352bf322e4c9d939c947e12b5"
+  },
+  {
+    "base": "aee8d5ec604cc6bcd1255e505c9ba152b8fa4928",
+    "removed": {
+      "crates/gam-solve/src/reml/reml_outer_engine/corrected_covariance.rs::spectral_epsilon_for_dim": 1,
+      "crates/gam-solve/src/reml/reml_outer_engine/sparse_cholesky_backends.rs::from_spd_with_smooth_logdet_agreement": 1
+    },
+    "reason": "SPEC rules 5 and 23 (#2901 V22 slice 5b). The value-only LLT certificate no longer compares against a smooth spectral floor that no standard lane prices, so from_spd_with_smooth_logdet_agreement is renamed from_spd_with_logdet_agreement, and the floor helper spectral_epsilon_for_dim, which only that certificate called besides spectral_epsilon, is inlined into spectral_epsilon.",
+    "evidence": "At the base, git grep -n finds from_spd_with_smooth_logdet_agreement called only from crates/gam-solve/src/reml/objective.rs and logdet_lane_agreement_2457_tests.rs, and spectral_epsilon_for_dim only from spectral_epsilon, the certificate and that test file. All are rewritten in this commit."
   }
 ]

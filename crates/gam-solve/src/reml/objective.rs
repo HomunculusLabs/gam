@@ -1400,7 +1400,7 @@ impl<'a> RemlState<'a> {
             && !c_nontrivial
             && !force_spectral_logdet
         {
-            match DenseCholeskyOperator::from_spd_with_smooth_logdet_agreement(
+            match DenseCholeskyOperator::from_spd_with_logdet_agreement(
                 h_for_operator.as_ref(),
             ) {
                 Ok(chol_op) => std::sync::Arc::new(chol_op),
