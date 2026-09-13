@@ -31,7 +31,7 @@
 
 use gam::estimate::outer_eval_capture::{enable_rho_outer_audit, take_rho_outer_audit};
 use gam::estimate::{
-    ExternalOptimOptions, evaluate_externalcost_andridge, evaluate_externalgradient,
+    ExternalOptimOptions, evaluate_externalcost, evaluate_externalgradient,
 };
 use gam::smooth::BlockwisePenalty;
 use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
@@ -187,7 +187,7 @@ fn sampled_marginal_splice_outer_gradient_matches_finite_difference_2623() {
 
     let cost_at = |theta: &Array1<f64>| -> (f64, Vec<usize>) {
         enable_rho_outer_audit();
-        let cost = evaluate_externalcost_andridge(
+        let cost = evaluate_externalcost(
             fix.y.view(),
             fix.w.view(),
             fix.x.clone(),
@@ -196,8 +196,7 @@ fn sampled_marginal_splice_outer_gradient_matches_finite_difference_2623() {
             &fix.opts,
             theta,
         )
-        .expect("cost evaluation")
-        .0;
+        .expect("cost evaluation");
         let audit = take_rho_outer_audit().expect("rho audit armed");
         let block = audit
             .quadrature_marginal

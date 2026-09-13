@@ -194,9 +194,8 @@ where
     reml_state.compute_gradient(rho)
 }
 
-/// Evaluate the external cost. The second element is identically zero: no
-/// PIRLS fit carries a stabilization ridge (#2901 V22).
-pub fn evaluate_externalcost_andridge<X>(
+/// Evaluate the external outer REML/LAML cost at `rho`.
+pub fn evaluate_externalcost<X>(
     y: ArrayView1<'_, f64>,
     w: ArrayView1<'_, f64>,
     x: X,
@@ -204,7 +203,7 @@ pub fn evaluate_externalcost_andridge<X>(
     s_list: &[BlockwisePenalty],
     opts: &ExternalOptimOptions,
     rho: &Array1<f64>,
-) -> Result<(f64, f64), EstimationError>
+) -> Result<f64, EstimationError>
 where
     X: Into<DesignMatrix>,
 {
@@ -215,12 +214,12 @@ where
     }
 
     let p = x.ncols();
-    validate_penalty_specs(&specs, p, "evaluate_externalcost_andridge")?;
+    validate_penalty_specs(&specs, p, "evaluate_externalcost")?;
     let (canonical, active_nullspace_dims) = gam_terms::construction::canonicalize_penalty_specs(
         &specs,
         &opts.nullspace_dims,
         p,
-        "evaluate_externalcost_andridge",
+        "evaluate_externalcost",
     )?;
     if rho.len() != active_nullspace_dims.len() {
         crate::bail_invalid_estim!(
@@ -258,8 +257,7 @@ where
         cfg.link_kind.sas_state().copied(),
     );
 
-    let cost = reml_state.compute_cost(rho)?;
-    Ok((cost, 0.0))
+    reml_state.compute_cost(rho)
 }
 
 #[cfg(test)]

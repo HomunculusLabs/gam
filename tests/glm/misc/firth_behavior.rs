@@ -1,5 +1,5 @@
 use gam::construction::CanonicalPenalty;
-use gam::estimate::{ExternalOptimOptions, PenaltySpec, evaluate_externalcost_andridge};
+use gam::estimate::{ExternalOptimOptions, PenaltySpec, evaluate_externalcost};
 use gam::pirls::{PenaltyConfig, PirlsConfig, PirlsProblem, fit_model_for_fixed_rho};
 use gam::smooth::BlockwisePenalty;
 use gam::types::{
@@ -144,7 +144,7 @@ fn firthfd_step_size_sensitivity() {
     };
     let base_rho = 12.0;
     let cost_at = |rho: f64| -> f64 {
-        evaluate_externalcost_andridge(
+        evaluate_externalcost(
             y.view(),
             w.view(),
             x.view(),
@@ -153,7 +153,6 @@ fn firthfd_step_size_sensitivity() {
             &opts,
             &array![rho],
         )
-        .map(|(c, _)| c)
         .expect("cost")
     };
     assert!(s_dense.iter().all(|v| v.is_finite()));

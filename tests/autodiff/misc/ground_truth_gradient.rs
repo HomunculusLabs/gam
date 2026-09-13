@@ -1,5 +1,5 @@
 use gam::estimate::{
-    ExternalOptimOptions, evaluate_externalcost_andridge, evaluate_externalgradient,
+    ExternalOptimOptions, evaluate_externalcost, evaluate_externalgradient,
 };
 use gam::smooth::BlockwisePenalty;
 use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
@@ -56,7 +56,7 @@ fn fd_central(
     for k in 0..rho.len() {
         let mut rp = rho.clone();
         rp[k] += h;
-        let fp = evaluate_externalcost_andridge(
+        let fp = evaluate_externalcost(
             y.view(),
             w.view(),
             x.view(),
@@ -65,12 +65,11 @@ fn fd_central(
             opts,
             &rp,
         )
-        .map(|(c, _)| c)
         .expect("cost+");
 
         let mut rm = rho.clone();
         rm[k] -= h;
-        let fm = evaluate_externalcost_andridge(
+        let fm = evaluate_externalcost(
             y.view(),
             w.view(),
             x.view(),
@@ -79,7 +78,6 @@ fn fd_central(
             opts,
             &rm,
         )
-        .map(|(c, _)| c)
         .expect("cost-");
 
         g[k] = (fp - fm) / (2.0 * h);

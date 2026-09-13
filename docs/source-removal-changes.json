@@ -6438,5 +6438,15 @@
     ],
     "reason": "SPEC rules 14, 23 and 25 (#2899 row O16). The Pca smooth penalizes the fitted function's empirical mass, beta^T S beta = mean_i((Z beta)_i^2), and smooth_penalty multiplied that matrix. The REML smoothing coordinate multiplying the same penalty selects its strength, so a positive value only moved where the search started and 0 switched the penalty off. The option is deleted from SmoothBasisSpec::Pca, BasisMetadata::Pca, the pca() formula option keys, the smooths descriptor, the latent design cache key and gamfit Pca, and default_pca_smooth_penalty, its serde default, goes with it.",
     "evidence": "At the base, git grep -n -w default_pca_smooth_penalty finds only crates/gam-terms/src/smooth/term_specs.rs:394 (the serde default attribute on SmoothBasisSpec::Pca) and :1342 (the definition)."
+  },
+  {
+    "base": "dee293dd61343cc8eef82e4bff2d59ca690b3415",
+    "items": [
+      "crates/gam-solve/src/estimate/evaluation.rs:fn:evaluate_externalcost_andridge",
+      "tests/regressions/optimization/reml_unified_2_3.rs:fn:bug_stabilization_ledger_missing_ridge_entries",
+      "tests/regressions/optimization/reml_unified_2_3.rs:fn:external_cost_and_ridge"
+    ],
+    "reason": "SPEC rules 5, 23 and 25 (#2901 V22, slice 4c). Since 8b5f0fdb5 the second element of evaluate_externalcost_andridge's (cost, ridge) tuple was identically 0.0, so the function is renamed evaluate_externalcost and returns the cost alone. reml_unified_2_3.rs's external_cost_and_ridge helper only projected that tuple, and bug_stabilization_ledger_missing_ridge_entries asserted properties of the recorded ridge. The test is restated as score_is_deterministic_and_gradient_consistent_under_extreme_smoothing over the same fixture and rho grid, keeping its determinism and cost/gradient finite-difference assertions.",
+    "evidence": "At the base, git grep -n evaluate_externalcost_andridge finds its definition and pub use in crates/gam-solve (estimate/evaluation.rs, estimate/mod.rs) and 25 call sites in crates/gam-models (spatial_realizer_chart_2760_tests.rs), tests/, examples/ and bench/. Every call projects the cost with .0 or .map(|(c, _)| c); the only reader of the ridge was reml_unified_2_3.rs's ledger test, via external_cost_and_ridge. All are rewritten in this commit. Not compiled locally; a guarded job follows."
   }
 ]

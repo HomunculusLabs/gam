@@ -1,5 +1,5 @@
 use gam::estimate::{
-    ExternalOptimOptions, evaluate_externalcost_andridge, evaluate_externalgradient,
+    ExternalOptimOptions, evaluate_externalcost, evaluate_externalgradient,
 };
 use gam::smooth::BlockwisePenalty;
 use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
@@ -105,7 +105,7 @@ fn cost(
     opts: &ExternalOptimOptions,
     rho: &Array1<f64>,
 ) -> f64 {
-    evaluate_externalcost_andridge(
+    evaluate_externalcost(
         y.view(),
         w.view(),
         x.clone(),
@@ -115,7 +115,6 @@ fn cost(
         rho,
     )
     .expect("cost evaluation should succeed")
-    .0
 }
 
 #[test]

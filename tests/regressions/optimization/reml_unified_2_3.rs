@@ -3,8 +3,8 @@
 //! Each test here was previously a placeholder `assert!(false, ...)` stub. They
 //! are now genuine tests written against the public `gam-solve` REML API:
 //!
-//!   * `evaluate_externalcost_andridge` — outer REML/LAML score (`EvalMode::ValueOnly`
-//!     internally) plus the stabilization ridge that was applied.
+//!   * `evaluate_externalcost` — outer REML/LAML score (`EvalMode::ValueOnly`
+//!     internally).
 //!   * `evaluate_externalgradient` — analytic outer score derivative
 //!     (`EvalMode::ValueAndGradient` internally).
 //!   * `InnerSolutionBuilder` + `compute_efs_update` / `compute_hybrid_efs_update`
@@ -13,7 +13,7 @@
 //! The named invariants are solver-correctness properties, so a faithful test
 //! DISPROVES the historical "bug" by passing.
 
-use gam::estimate::{ExternalOptimOptions, evaluate_externalcost_andridge, evaluate_externalgradient};
+use gam::estimate::{ExternalOptimOptions, evaluate_externalcost, evaluate_externalgradient};
 use gam::smooth::BlockwisePenalty;
 use gam::solver::estimate::reml::reml_outer_engine::{
     DenseSpectralOperator, DispersionHandling, HessianFactorization, InnerSolutionBuilder,
@@ -125,25 +125,7 @@ fn gaussian_opts(nullspace_dims: Vec<usize>) -> ExternalOptimOptions {
 }
 
 fn external_cost(prob: &GaussianProblem, opts: &ExternalOptimOptions, rho: &Array1<f64>) -> f64 {
-    evaluate_externalcost_andridge(
-        prob.y.view(),
-        prob.w.view(),
-        prob.x.clone(),
-        prob.offset.view(),
-        &prob.s_list,
-        opts,
-        rho,
-    )
-    .expect("external REML cost evaluation should succeed")
-    .0
-}
-
-fn external_cost_and_ridge(
-    prob: &GaussianProblem,
-    opts: &ExternalOptimOptions,
-    rho: &Array1<f64>,
-) -> (f64, f64) {
-    evaluate_externalcost_andridge(
+    evaluate_externalcost(
         prob.y.view(),
         prob.w.view(),
         prob.x.clone(),
@@ -182,7 +164,7 @@ fn external_gradient(
 
 /// The analytic outer score derivative (`evaluate_externalgradient`, which runs
 /// the evaluator in `EvalMode::ValueAndGradient`) must agree with a central
-/// finite difference of the value-only score (`evaluate_externalcost_andridge`,
+/// finite difference of the value-only score (`evaluate_externalcost`,
 /// which runs `EvalMode::ValueOnly`). Both share the same converged inner state,
 /// so any drift between the value-mode and gradient-mode code paths surfaces
 /// here.
@@ -324,56 +306,39 @@ fn bug_hybrid_efs_blend_one_not_equal_plain_efs() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  5. Stabilization ledger records every ridge used during score evaluation
+//  5. Score evaluation under extreme smoothing
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Every stabilization ridge δ applied during a score evaluation must be
-/// recorded and surfaced coherently: `evaluate_externalcost_andridge` returns
-/// exactly the recorded δ. The invariant has three observable consequences that
-/// a "missing / mislabeled ledger entry" bug would violate:
+/// No PIRLS fit adds a stabilization ridge (#2901 V22): at every ρ the score
+/// prices `XᵀWX + S_λ` with nothing added. Two observable consequences, at
+/// moderate and at extreme smoothing where `S(λ)` dominates:
 ///
-///   1. The recorded δ is a well-formed quantity (finite, non-negative) at
-///      every ρ, including extreme heavy smoothing where stabilization may fire.
-///   2. It is deterministic — the same ρ yields the same recorded δ bit-for-bit.
-///   3. The recorded ridge is applied consistently to BOTH the value and the
-///      gradient path (they read the same eval bundle / ledger), so the analytic
-///      gradient still matches the finite difference of the cost even while a
-///      ridge is active. A ridge that was used but not recorded on one path
-///      would desynchronize cost and gradient.
+///   1. The score is finite and deterministic: the same ρ yields the same value
+///      bit-for-bit.
+///   2. The value and gradient paths read one evaluation, so the analytic
+///      gradient matches the finite difference of the value-only score.
 #[test]
-fn bug_stabilization_ledger_missing_ridge_entries() {
+fn score_is_deterministic_and_gradient_consistent_under_extreme_smoothing() {
     let prob = build_gaussian_problem(0x1861_0005);
     let opts = gaussian_opts(prob.nullspace_dims.clone());
     let h = 1e-5;
 
-    // Span moderate to extreme smoothing; large ρ drives S(λ) to dominate and
-    // exercises the stabilization path.
+    // Span moderate to extreme smoothing; large ρ drives S(λ) to dominate.
     for &rho0 in &[-2.0_f64, 0.0, 3.0, 8.0, 16.0, 24.0] {
         let rho = Array1::from_vec(vec![rho0]);
 
-        let (cost1, ridge1) = external_cost_and_ridge(&prob, &opts, &rho);
-        let (cost2, ridge2) = external_cost_and_ridge(&prob, &opts, &rho);
+        let cost1 = external_cost(&prob, &opts, &rho);
+        let cost2 = external_cost(&prob, &opts, &rho);
 
-        // (1) well-formed recorded ridge.
-        assert!(
-            ridge1.is_finite() && ridge1 >= 0.0,
-            "recorded stabilization ridge must be finite and non-negative at ρ={rho0}, got {ridge1}"
-        );
+        // (1) finite and deterministic.
         assert!(cost1.is_finite(), "score must be finite at ρ={rho0}");
-
-        // (2) deterministic ledger read.
-        assert_eq!(
-            ridge1.to_bits(),
-            ridge2.to_bits(),
-            "recorded ridge must be deterministic at ρ={rho0}: {ridge1} vs {ridge2}"
-        );
         assert_eq!(
             cost1.to_bits(),
             cost2.to_bits(),
             "score must be deterministic at ρ={rho0}: {cost1} vs {cost2}"
         );
 
-        // (3) the recorded ridge drives cost and gradient consistently.
+        // (2) cost and gradient come from one evaluation.
         let g = external_gradient(&prob, &opts, &rho);
         let mut rp = rho.clone();
         rp[0] += h;
@@ -384,9 +349,8 @@ fn bug_stabilization_ledger_missing_ridge_entries() {
         let tol = 1e-3 * (1.0 + fd.abs());
         assert!(
             diff <= tol,
-            "with recorded ridge δ={ridge1:.3e} active at ρ={rho0}, the analytic gradient must \
-             remain consistent with the value-path finite difference: analytic={} fd={} \
-             |diff|={diff:.3e} tol={tol:.3e}",
+            "at ρ={rho0} the analytic gradient must remain consistent with the value-path \
+             finite difference: analytic={} fd={} |diff|={diff:.3e} tol={tol:.3e}",
             g[0],
             fd
         );

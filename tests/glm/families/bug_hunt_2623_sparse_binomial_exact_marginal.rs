@@ -21,7 +21,7 @@
 //! higher-order correction to reduce that surface error materially.
 
 use gam::estimate::outer_eval_capture::{enable_rho_outer_audit, take_rho_outer_audit};
-use gam::estimate::{ExternalOptimOptions, evaluate_externalcost_andridge};
+use gam::estimate::{ExternalOptimOptions, evaluate_externalcost};
 use gam::smooth::BlockwisePenalty;
 use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
 use ndarray::{Array1, Array2, array};
@@ -107,7 +107,7 @@ fn higher_order_laml_tracks_exact_sparse_binomial_marginal_2623() {
         let rho_scalar = half_step as f64 * 0.5;
         let rho = array![rho_scalar];
         enable_rho_outer_audit();
-        let corrected_cost = evaluate_externalcost_andridge(
+        let corrected_cost = evaluate_externalcost(
             y.view(),
             weights.view(),
             design.clone(),
@@ -116,8 +116,7 @@ fn higher_order_laml_tracks_exact_sparse_binomial_marginal_2623() {
             &opts,
             &rho,
         )
-        .expect("sparse-binomial LAML evaluation")
-        .0;
+        .expect("sparse-binomial LAML evaluation");
         let audit = take_rho_outer_audit().expect("rho audit armed");
         if !audit.quadrature_marginal_engaged {
             continue;

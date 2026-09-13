@@ -32,7 +32,7 @@
 //! # Objectives covered
 //!
 //! 1. The universal GLM-family REML/LAML objective behind
-//!    `evaluate_externalcost_andridge` (value) /
+//!    `evaluate_externalcost` (value) /
 //!    `evaluate_externalgradient` (analytic ∇V). This single public shim
 //!    is the value+gradient surface for Gaussian, Binomial (canonical
 //!    *and* non-canonical link, with/without Firth), Poisson, Gamma, Beta
@@ -75,7 +75,7 @@ use gam::custom_family::{
     ParameterBlockState, PenaltyMatrix,
 };
 use gam::estimate::{
-    ExternalOptimOptions, evaluate_externalcost_andridge, evaluate_externalgradient,
+    ExternalOptimOptions, evaluate_externalcost, evaluate_externalgradient,
 };
 use gam::families::custom_family::{
     CustomFamilyBlockPsiDerivative, CustomFamilyHyperLayout, EvalMode,
@@ -202,7 +202,7 @@ fn standard_spec(family: ResponseFamily, link: StandardLink) -> LikelihoodSpec {
 }
 
 fn glm_cost(fix: &GlmFixture, opts: &ExternalOptimOptions, rho: &Array1<f64>) -> f64 {
-    evaluate_externalcost_andridge(
+    evaluate_externalcost(
         fix.y.view(),
         fix.w.view(),
         fix.x.clone(),
@@ -212,7 +212,6 @@ fn glm_cost(fix: &GlmFixture, opts: &ExternalOptimOptions, rho: &Array1<f64>) ->
         rho,
     )
     .expect("GLM REML/LAML cost evaluation should succeed")
-    .0
 }
 
 fn glm_grad(fix: &GlmFixture, opts: &ExternalOptimOptions, rho: &Array1<f64>) -> Array1<f64> {

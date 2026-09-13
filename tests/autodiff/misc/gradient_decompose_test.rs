@@ -19,7 +19,7 @@
 
 use faer::Side;
 use gam::estimate::{
-    ExternalOptimOptions, evaluate_externalcost_andridge, evaluate_externalgradient,
+    ExternalOptimOptions, evaluate_externalcost, evaluate_externalgradient,
 };
 use gam::faer_ndarray::{FaerCholesky, FaerEigh};
 use gam::smooth::BlockwisePenalty;
@@ -78,7 +78,7 @@ fn fd_gradient_from_externalcost(
 ) -> Array1<f64> {
     numerical_gradient_central_diff(
         |rho| {
-            evaluate_externalcost_andridge(
+            evaluate_externalcost(
                 y.view(),
                 w.view(),
                 x.view(),
@@ -87,7 +87,6 @@ fn fd_gradient_from_externalcost(
                 opts,
                 rho,
             )
-            .map(|(c, _)| c)
             .expect("cost")
         },
         rho,

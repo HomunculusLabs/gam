@@ -29,7 +29,7 @@
 
 use csv::StringRecord;
 use gam::estimate::{
-    ExternalOptimOptions, evaluate_externalcost_andridge, evaluate_externalgradient,
+    ExternalOptimOptions, evaluate_externalcost, evaluate_externalgradient,
 };
 use gam::smooth::build_term_collection_design;
 use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
@@ -224,7 +224,7 @@ fn outer_criterion_has_no_jump_across_the_block_correction_threshold_2748() {
         -1.046_274_404_504_386_8,
     ]);
     let value_at = |theta: &Array1<f64>| -> f64 {
-        evaluate_externalcost_andridge(
+        evaluate_externalcost(
             y.view(),
             weights.view(),
             x.clone(),
@@ -234,7 +234,6 @@ fn outer_criterion_has_no_jump_across_the_block_correction_threshold_2748() {
             theta,
         )
         .expect("outer criterion value")
-        .0
     };
     let gradient = evaluate_externalgradient(
         y.view(),

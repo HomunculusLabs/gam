@@ -22,7 +22,7 @@
 use csv::StringRecord;
 use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
 use gam::{FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism};
-use gam_solve::estimate::{ExternalOptimOptions, evaluate_externalcost_andridge, smooth_term_summary_rows};
+use gam_solve::estimate::{ExternalOptimOptions, evaluate_externalcost, smooth_term_summary_rows};
 use ndarray::Array1;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -93,7 +93,7 @@ fn reml_profile_1266_probe() {
         };
         let rho_hat = std_fit.fit.log_lambdas.clone();
         let cost = |rho: &Array1<f64>| {
-            evaluate_externalcost_andridge(
+            evaluate_externalcost(
                 y.view(),
                 w.view(),
                 std_fit.design.design.clone(),
@@ -102,7 +102,6 @@ fn reml_profile_1266_probe() {
                 &opts,
                 rho,
             )
-            .map(|(value, _)| value)
         };
         let base = cost(&rho_hat).expect("cost at the fitted rho");
         let reported = std_fit.fit.reml_score();

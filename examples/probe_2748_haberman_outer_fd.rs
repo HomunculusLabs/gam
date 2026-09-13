@@ -26,7 +26,7 @@
 //! inlined exactly as in `probe_2748_haberman_outer`.
 
 use gam::estimate::{
-    ExternalOptimOptions, evaluate_externalcost_andridge, evaluate_externalgradient,
+    ExternalOptimOptions, evaluate_externalcost, evaluate_externalgradient,
 };
 use gam::smooth::build_term_collection_design;
 use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
@@ -188,7 +188,7 @@ fn main() {
     println!("[2748-fd] rho = {:?}", rho.to_vec());
 
     let value_at = |theta: &Array1<f64>| -> f64 {
-        evaluate_externalcost_andridge(
+        evaluate_externalcost(
             y.view(),
             weights.view(),
             x.clone(),
@@ -198,7 +198,6 @@ fn main() {
             theta,
         )
         .expect("outer criterion value")
-        .0
     };
 
     let analytic = evaluate_externalgradient(

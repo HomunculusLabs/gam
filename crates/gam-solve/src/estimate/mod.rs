@@ -84,7 +84,7 @@ pub use crate::model_types::{
     validate_dense_hessian_export, validate_explicit_dense_hessian_for_whitening,
 };
 pub use edf_accounting::{EdfBundle, collapsed_to_penalty_null_space, penalized_edf_bundle};
-pub use evaluation::{evaluate_externalcost_andridge, evaluate_externalgradient};
+pub use evaluation::{evaluate_externalcost, evaluate_externalgradient};
 pub use external_options::{ExternalOptimOptions, ExternalOptimResult};
 pub(crate) use external_options::{
     effective_sas_link_for_family, resolved_external_config, validate_penalty_spec_shape,

@@ -1,5 +1,5 @@
 use gam::estimate::{
-    ExternalOptimOptions, evaluate_externalcost_andridge, evaluate_externalgradient,
+    ExternalOptimOptions, evaluate_externalcost, evaluate_externalgradient,
 };
 use gam::smooth::BlockwisePenalty;
 use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
@@ -82,7 +82,7 @@ fn analytic_gradient_matchescost_trend() {
     let local_steps = [1e-2, 5e-2, 1e-1];
     let mut local_derivs = Vec::new();
     for &h in &local_steps {
-        let cost_minus = evaluate_externalcost_andridge(
+        let cost_minus = evaluate_externalcost(
             y.view(),
             w.view(),
             x.view(),
@@ -91,9 +91,8 @@ fn analytic_gradient_matchescost_trend() {
             &opts,
             &array![12.0 - h],
         )
-        .map(|(c, _)| c)
         .expect("cost_minus");
-        let cost_plus = evaluate_externalcost_andridge(
+        let cost_plus = evaluate_externalcost(
             y.view(),
             w.view(),
             x.view(),
@@ -102,7 +101,6 @@ fn analytic_gradient_matchescost_trend() {
             &opts,
             &array![12.0 + h],
         )
-        .map(|(c, _)| c)
         .expect("cost_plus");
         local_derivs.push((cost_plus - cost_minus) / (2.0 * h));
     }
@@ -176,7 +174,7 @@ fn hypothesis_analytic_gradient_matchescost_trend() {
         )
         .expect("gradients");
         let delta = 0.25;
-        let cost_minus = evaluate_externalcost_andridge(
+        let cost_minus = evaluate_externalcost(
             y.view(),
             w.view(),
             x.view(),
@@ -185,9 +183,8 @@ fn hypothesis_analytic_gradient_matchescost_trend() {
             &opts,
             &array![rhoval - delta],
         )
-        .map(|(c, _)| c)
         .expect("cost_minus");
-        let cost_plus = evaluate_externalcost_andridge(
+        let cost_plus = evaluate_externalcost(
             y.view(),
             w.view(),
             x.view(),
@@ -196,7 +193,6 @@ fn hypothesis_analytic_gradient_matchescost_trend() {
             &opts,
             &array![rhoval + delta],
         )
-        .map(|(c, _)| c)
         .expect("cost_plus");
         let cost_trend = cost_plus - cost_minus;
 

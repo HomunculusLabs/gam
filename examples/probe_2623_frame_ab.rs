@@ -33,7 +33,7 @@ use gam::estimate::outer_eval_capture::{
     RhoOuterAudit, enable_rho_outer_audit, take_rho_outer_audit,
 };
 use gam::estimate::{
-    ExternalOptimOptions, evaluate_externalcost_andridge, evaluate_externalgradient,
+    ExternalOptimOptions, evaluate_externalcost, evaluate_externalgradient,
 };
 use gam::smooth::BlockwisePenalty;
 use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
@@ -156,7 +156,7 @@ fn fixture(n: usize, k: usize, amp: f64, link: StandardLink, design: Design) -> 
 /// One audited value evaluation at `rho`.
 fn audited_cost(fix: &Fixture, rho: &Array1<f64>) -> (f64, RhoOuterAudit) {
     enable_rho_outer_audit();
-    let cost = evaluate_externalcost_andridge(
+    let cost = evaluate_externalcost(
         fix.y.view(),
         fix.w.view(),
         fix.x.clone(),
@@ -165,8 +165,7 @@ fn audited_cost(fix: &Fixture, rho: &Array1<f64>) -> (f64, RhoOuterAudit) {
         &fix.opts,
         rho,
     )
-    .expect("cost evaluation")
-    .0;
+    .expect("cost evaluation");
     (cost, take_rho_outer_audit().expect("audit armed"))
 }
 

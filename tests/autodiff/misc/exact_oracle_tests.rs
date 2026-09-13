@@ -1,7 +1,7 @@
 use ndarray::{Array1, Array2, array};
 
 use gam::estimate::{
-    ExternalOptimOptions, evaluate_externalcost_andridge, evaluate_externalgradient,
+    ExternalOptimOptions, evaluate_externalcost, evaluate_externalgradient,
 };
 use gam::smooth::BlockwisePenalty;
 use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
@@ -16,7 +16,7 @@ use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
 // "Laplace approximation tight" and cannot distinguish the two.
 //
 // Replacement: finite-difference self-consistency. We compute the cost
-// at ρ ± δ using the same `evaluate_externalcost_andridge` path that
+// at ρ ± δ using the same `evaluate_externalcost` path that
 // `evaluate_externalgradient` differentiates, take the central FD, and
 // compare to the analytic gradient. This tests the gradient code itself
 // against the cost code itself; both sides use the SAME Laplace
@@ -75,7 +75,7 @@ fn fd_grad_at(
     let s_list = vec![BlockwisePenalty::new(0..2, Array2::eye(2))];
     let cost_at = |r: f64| -> f64 {
         let rho_arr = array![r];
-        evaluate_externalcost_andridge(
+        evaluate_externalcost(
             y.view(),
             w.view(),
             x.clone(),
@@ -85,7 +85,6 @@ fn fd_grad_at(
             &rho_arr,
         )
         .expect("external cost evaluation should succeed")
-        .0
     };
     let cp = cost_at(rho + delta);
     let cm = cost_at(rho - delta);

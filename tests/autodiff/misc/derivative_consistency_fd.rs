@@ -7,7 +7,7 @@
 //! loose enough not to flake on f64 round-off at the chosen step size.
 //!
 //! Public-API access:
-//!   * `evaluate_externalcost_andridge` — V(ρ).
+//!   * `evaluate_externalcost` — V(ρ).
 //!   * `evaluate_externalgradient`      — ∇V(ρ) (analytic).
 //!
 //! The outer Hessian ∇²V and the IFT predictor `predict_warm_start_beta_
@@ -15,7 +15,7 @@
 //! (`pub(crate)` only). See the module-level NOTE blocks on the Hessian
 //! and IFT tests for the workaround and the limitation.
 
-use gam::estimate::{ExternalOptimOptions, evaluate_externalcost_andridge, evaluate_externalgradient};
+use gam::estimate::{ExternalOptimOptions, evaluate_externalcost, evaluate_externalgradient};
 use gam::smooth::BlockwisePenalty;
 use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
 use ndarray::{Array1, Array2};
@@ -184,7 +184,7 @@ fn cost_at(
     opts: &ExternalOptimOptions,
     rho: &Array1<f64>,
 ) -> f64 {
-    evaluate_externalcost_andridge(
+    evaluate_externalcost(
         y.view(),
         w.view(),
         x.clone(),
@@ -194,7 +194,6 @@ fn cost_at(
         rho,
     )
     .expect("cost eval should succeed")
-    .0
 }
 
 fn grad_at(

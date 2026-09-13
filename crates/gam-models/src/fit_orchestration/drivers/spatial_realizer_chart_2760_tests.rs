@@ -151,7 +151,7 @@ mod spatial_realizer_chart_2760_tests {
         opts: &ExternalOptimOptions,
         rho: &Array1<f64>,
     ) -> f64 {
-        gam_solve::estimate::evaluate_externalcost_andridge(
+        gam_solve::estimate::evaluate_externalcost(
             y.view(),
             weights.view(),
             d.design.clone(),
@@ -161,7 +161,6 @@ mod spatial_realizer_chart_2760_tests {
             rho,
         )
         .expect("scalar criterion")
-        .0
     }
 
     /// Design, penalties, nullities and criterion of the replay against the

@@ -2619,5 +2619,13 @@
     },
     "reason": "#2829 no product user: SaeAssignmentState::active_state_bytes has no caller, and index_cells, gate_cells, coord_cells, active_state_cells and STATE_CELL_BYTES were reached only through it.",
     "evidence": "At d6daf8081204715c9e238a76f16841a6a3e8cc96, git grep -n -w over crates, src and tests finds active_state_cells, index_cells, gate_cells, coord_cells and STATE_CELL_BYTES only inside crates/gam-sae/src/assignment_state.rs, called only by each other and by active_state_bytes. Every other active_state_bytes occurrence (front_door.rs:209, manifold/streaming_plan.rs) is the SaeTopKCurvedBudget field. No test named sparse_topk_state_memory_shape_matches_budget_formula exists; only the module doc named it."
+  },
+  {
+    "base": "dee293dd61343cc8eef82e4bff2d59ca690b3415",
+    "removed": {
+      "crates/gam-solve/src/estimate/evaluation.rs::evaluate_externalcost_andridge": 1
+    },
+    "reason": "SPEC rules 5, 23 and 25 (#2901 V22 slice 4c). The (cost, ridge) tuple's ridge was identically 0.0 after 8b5f0fdb5, so the function is renamed evaluate_externalcost and returns the cost alone.",
+    "evidence": "At the base, git grep -n evaluate_externalcost_andridge over crates, src, tests, examples and bench finds only its definition, its pub use in estimate/mod.rs and call sites that project the cost; all are rewritten in this commit."
   }
 ]

@@ -1,4 +1,4 @@
-use gam::estimate::{ExternalOptimOptions, evaluate_externalcost_andridge, evaluate_externalgradient};
+use gam::estimate::{ExternalOptimOptions, evaluate_externalcost, evaluate_externalgradient};
 use gam::mixture_link::state_from_sasspec;
 use gam::smooth::BlockwisePenalty;
 use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, SasLinkSpec, StandardLink};
@@ -93,7 +93,7 @@ fn analytic_gradient_sign_matches_localcost_trend() {
     .expect("gradients");
 
     let h = 0.25;
-    let c_minus = evaluate_externalcost_andridge(
+    let c_minus = evaluate_externalcost(
         y.view(),
         w.view(),
         x.view(),
@@ -102,9 +102,8 @@ fn analytic_gradient_sign_matches_localcost_trend() {
         &opts,
         &array![12.0 - h],
     )
-    .map(|(c, _)| c)
     .expect("cost-");
-    let c_plus = evaluate_externalcost_andridge(
+    let c_plus = evaluate_externalcost(
         y.view(),
         w.view(),
         x.view(),
@@ -113,7 +112,6 @@ fn analytic_gradient_sign_matches_localcost_trend() {
         &opts,
         &array![12.0 + h],
     )
-    .map(|(c, _)| c)
     .expect("cost+");
     let trend = c_plus - c_minus;
 
@@ -177,7 +175,7 @@ fn sas_helpercost_depends_on_link_state() {
     opts_b.family = binomial_sas_spec(sas_link_b);
     opts_b.sas_link = Some(sas_link_b);
 
-    let cost_a = evaluate_externalcost_andridge(
+    let cost_a = evaluate_externalcost(
         y.view(),
         w.view(),
         x.view(),
@@ -186,9 +184,8 @@ fn sas_helpercost_depends_on_link_state() {
         &opts_a,
         &rho,
     )
-    .map(|(cost, _)| cost)
     .expect("sas cost with baseline state");
-    let cost_b = evaluate_externalcost_andridge(
+    let cost_b = evaluate_externalcost(
         y.view(),
         w.view(),
         x.view(),
@@ -197,7 +194,6 @@ fn sas_helpercost_depends_on_link_state() {
         &opts_b,
         &rho,
     )
-    .map(|(cost, _)| cost)
     .expect("sas cost with shifted state");
 
     assert!(
