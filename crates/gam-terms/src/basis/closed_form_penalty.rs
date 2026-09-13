@@ -1215,13 +1215,15 @@ pub(crate) fn riesz_block_radial_derivatives(
     let half_d = d as f64 / 2.0;
     let mut out = Vec::with_capacity(max_order + 1);
 
-    // Log case detection: `2j − d` is a non-negative even integer
-    // (within ε). For fractional `j` this never fires.
-    const LOG_EPS: f64 = 1e-12;
+    // Log case detection: `2j − d` is exactly a non-negative even integer.
+    // `j` arrives as an integer or as `a + 2s`, so a pole needs `4s` to be an
+    // integer; every such `s` is a multiple of 1/4, which f64 holds exactly, and
+    // so is `2j − d`. A pole is therefore hit exactly or not at all, and a band
+    // around it would only relabel a genuinely fractional order as a pole.
     let offset = two_j - d as f64;
-    let log_case = offset >= -LOG_EPS && {
+    let log_case = offset >= 0.0 && {
         let n_f = (offset / 2.0).round();
-        n_f >= 0.0 && (n_f * 2.0 - offset).abs() < LOG_EPS
+        n_f * 2.0 == offset
     };
     if log_case {
         // R_j^d(r) = c · r^{2n} · (ln r + A_n).
@@ -1320,8 +1322,8 @@ pub(crate) fn radial_derivatives_of_isotropic_duchon(
         // Scale-free Duchon with fractional s rides directly into the
         // Riesz block-derivatives at the real-valued block order
         // `j = a + 2s` — `riesz_block_radial_derivatives` already
-        // accepts fractional `j` via `r.powf(2j − d)` and the
-        // log-case detector ε-bounds.
+        // accepts fractional `j` via `r.powf(2j − d)`, and its log-case
+        // detector hits a pole exactly.
         return riesz_block_radial_derivatives(d, a as f64 + 2.0 * s, r, max_order);
     }
 
