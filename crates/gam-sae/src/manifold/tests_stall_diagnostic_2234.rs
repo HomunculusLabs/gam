@@ -68,6 +68,9 @@ use super::*;
 fn zz_planted_circle_plain_engine_stall_diagnostic_2234() {
     use gam_solve::rho_optimizer::OuterProblem;
     use gam_solve::seeding::SeedConfig;
+    // #2234 — surface the exact-A refusal and `[SAE-SADDLE]` descent lines; the
+    // telemetry counts refusals but cannot say whether any descent committed.
+    gam_runtime::test_support::install_diagnostic_logger();
 
     // Mirrors the frozen #2253 weekday-L17 discriminator after its exact
     // orthonormal reduction: K=1, d_atom=1, n=42, p=48. The prior n=200, p=8,
