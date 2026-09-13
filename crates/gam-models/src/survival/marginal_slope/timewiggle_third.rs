@@ -1,6 +1,7 @@
 //! Exact coefficient-directional derivatives of the joint Hessian along every coefficient axis
-//! for a time wiggle with a score warp or link deviation (gam#2893): the second `D²H[u, e_a]`
-//! and the third `D³H[u, v, e_a]`.
+//! for a time wiggle with a score warp or link deviation (gam#2893): the second `D²H[u, e_a]`,
+//! the third `D³H[u, v, e_a]`, and the design-ψ mixed third derivatives the explicit Jeffreys
+//! curvature reads.
 //!
 //! A row's negative log-likelihood is `ℓ(G(ζ))`. The row coordinate ζ is affine in β. Its
 //! z block holds the entry index `h₀`, the exit index `h₁`, the raw derivative index `d`
@@ -9,12 +10,13 @@
 //! are nonlinear: `q₀ = h₀ + B(h₀)·γ`, `q₁ = h₁ + B(h₁)·γ` and `q̇₁ = (1 + B'(h₁)·γ)·d`,
 //! and each is at most linear in γ and in `d`. The row Hessian is `Ãᵀ ∇²_ζ(ℓ∘G) Ã`, so
 //! `D²H[u, w] = Ãᵀ ∇⁴_ζ(ℓ∘G)[Ãu, Ãw] Ã` and `D³H[u, v, w] = Ãᵀ ∇⁵_ζ(ℓ∘G)[Ãu, Ãv, Ãw] Ã`.
+//! A design ψ moves `Ã` itself, through the ζ image `Ã_ψ` of its design-derivative row.
 //!
 //! Each derivative of the composition is Faà di Bruno over the set partitions of the two free
-//! axes and the directions: 15 for the fourth, 52 for the fifth. When a partition puts both
-//! free axes in one block, the ℓ contraction of the other blocks weights a curvature of `G`
-//! over both axes. When it separates them, an ℓ derivative sits between two one-axis
-//! derivatives of `G`. Every derivative of `G` has a closed form in the wiggle basis
+//! axes and the directions: 5 for the third, 15 for the fourth, 52 for the fifth. When a
+//! partition puts both free axes in one block, the ℓ contraction of the other blocks weights a
+//! curvature of `G` over both axes. When it separates them, an ℓ derivative sits between two
+//! one-axis derivatives of `G`. Every derivative of `G` has a closed form in the wiggle basis
 //! derivatives. Every ℓ contraction is linear in the ζ-axis direction. So each row contracts
 //! once per primary axis, assembles once per ζ axis, and pulls back once per coefficient axis.
 
@@ -379,19 +381,30 @@ struct ZetaRow {
     images: Vec<ZetaImage>,
 }
 
-impl ZetaRow {
-    /// `Ã·direction`.
-    fn image_of(&self, direction: &Array1<f64>, width: usize) -> Array1<f64> {
-        let mut zeta = Array1::<f64>::zeros(width);
-        for (c, image) in self.images.iter().enumerate() {
-            if direction[c] != 0.0 {
-                for &(index, weight) in image.entries() {
-                    zeta[index] += weight * direction[c];
-                }
+/// One row's ζ calculus: its geometry and images, the q-map Jacobian `Ĵ` and curvature `D²q`
+/// over the z block, and the ℓ derivatives every sweep contracts.
+struct ZetaRowCalculus {
+    zeta_row: ZetaRow,
+    jq: Array2<f64>,
+    k0: [Array2<f64>; 3],
+    gradient: Array1<f64>,
+    hessian: Array2<f64>,
+    /// `ℓ³[e_k]` along every primary axis `k`.
+    third: Vec<Array2<f64>>,
+    base: FlexThirdRowBase,
+}
+
+/// `Ã·direction` for the column images `images`.
+fn zeta_image_of(images: &[ZetaImage], direction: &Array1<f64>, width: usize) -> Array1<f64> {
+    let mut zeta = Array1::<f64>::zeros(width);
+    for (c, image) in images.iter().enumerate() {
+        if direction[c] != 0.0 {
+            for &(index, weight) in image.entries() {
+                zeta[index] += weight * direction[c];
             }
         }
-        zeta
     }
+    zeta
 }
 
 /// `Σ_k w_k·axes[k]` over the primary axes.
@@ -405,35 +418,43 @@ fn combine_axes(axes: &[Array2<f64>], weights: &Array1<f64>, primary_total: usiz
     out
 }
 
-/// `acc += Ãᵀ Φ Ã` for one row, where column `c` of `Ã` is `images[c]`; `right` is scratch
-/// for `Φ Ã`.
-fn add_zeta_pullback(
+/// `out += scale·Σ_{(ζ, w)∈image} w·Φ_ζ` over the per-ζ-axis derivatives `phi_axes`.
+fn add_combined_axes(phi_axes: &[Array2<f64>], image: &ZetaImage, scale: f64, out: &mut Array2<f64>) {
+    for &(zeta, weight) in image.entries() {
+        out.scaled_add(scale * weight, &phi_axes[zeta]);
+    }
+}
+
+/// `acc += Lᵀ Φ R` for one row, where column `c` of `L` is `left[c]` and column `c` of `R`
+/// is `right[c]`; `scratch` holds `Φ R`.
+fn add_zeta_sandwich(
     phi: &Array2<f64>,
-    images: &[ZetaImage],
-    right: &mut Array2<f64>,
+    left: &[ZetaImage],
+    right: &[ZetaImage],
+    scratch: &mut Array2<f64>,
     acc: &mut Array2<f64>,
 ) {
-    right.fill(0.0);
-    for (c, image) in images.iter().enumerate() {
-        let mut column = right.column_mut(c);
+    scratch.fill(0.0);
+    for (c, image) in right.iter().enumerate() {
+        let mut column = scratch.column_mut(c);
         for &(zeta, weight) in image.entries() {
             column.scaled_add(weight, &phi.column(zeta));
         }
     }
-    for (c, image) in images.iter().enumerate() {
+    for (c, image) in left.iter().enumerate() {
         let mut row = acc.row_mut(c);
         for &(zeta, weight) in image.entries() {
-            row.scaled_add(weight, &right.row(zeta));
+            row.scaled_add(weight, &scratch.row(zeta));
         }
     }
 }
 
 /// `acc[c] += Ãᵀ (Σ_ζ Ã_{ζc}·Φ_ζ) Ã` for every coefficient axis `c` of one row, from the
-/// per-ζ-axis derivatives `phi_axes`; `right` and `phi_axis` are scratch.
+/// per-ζ-axis derivatives `phi_axes`; `scratch` and `phi_axis` are scratch.
 fn pull_back_axes(
     phi_axes: &[Array2<f64>],
     images: &[ZetaImage],
-    right: &mut Array2<f64>,
+    scratch: &mut Array2<f64>,
     phi_axis: &mut Array2<f64>,
     acc: &mut [Array2<f64>],
 ) {
@@ -442,14 +463,95 @@ fn pull_back_axes(
             continue;
         }
         phi_axis.fill(0.0);
-        for &(zeta, weight) in image.entries() {
-            phi_axis.scaled_add(weight, &phi_axes[zeta]);
-        }
-        add_zeta_pullback(phi_axis, images, right, &mut acc[c]);
+        add_combined_axes(phi_axes, image, 1.0, phi_axis);
+        add_zeta_sandwich(phi_axis, images, images, scratch, &mut acc[c]);
     }
 }
 
+/// The ζ image `Ã_ψ` of every coefficient axis under a design ψ that moves block `block_idx`
+/// through the design-derivative row `x_psi`: a marginal row moves both indices, and a slope
+/// row moves the slope coordinate.
+fn psi_zeta_images(
+    frame: &ZetaFrame<'_>,
+    block_idx: usize,
+    x_psi: &Array1<f64>,
+) -> Result<Vec<ZetaImage>, String> {
+    let slices = &frame.slices;
+    let mut images = vec![ZetaImage::default(); slices.total];
+    let range = match block_idx {
+        1 => slices.marginal.clone(),
+        2 => slices.slope.clone(),
+        _ => {
+            return Err(format!(
+                "time-wiggle ζ composition: a design ψ on block {block_idx} has no ζ image"
+            ));
+        }
+    };
+    if x_psi.len() != range.len() {
+        return Err(format!(
+            "time-wiggle ζ composition: a design ψ row has {} entries for a block of width {}",
+            x_psi.len(),
+            range.len()
+        ));
+    }
+    for (local, &value) in x_psi.iter().enumerate() {
+        let image = &mut images[range.start + local];
+        if block_idx == 1 {
+            image.push(ZETA_H0, value);
+            image.push(ZETA_H1, value);
+        } else {
+            image.push(frame.slope_zeta, value);
+        }
+    }
+    Ok(images)
+}
+
+/// `∇³_ζ(ℓ∘G)[e_ζ]` for every ζ axis: Faà di Bruno over the 5 set partitions of the two free
+/// axes and the ζ axis.
+fn order_three_axes(frame: &ZetaFrame<'_>, calc: &ZetaRowCalculus) -> Vec<Array2<f64>> {
+    let layout = &frame.layout;
+    let p_primary = frame.primary.total;
+    let geometry = &calc.zeta_row.geometry;
+    let mut phi_axes = Vec::with_capacity(layout.width);
+    for zeta_axis in 0..layout.width {
+        let mut unit = Array1::<f64>::zeros(layout.width);
+        unit[zeta_axis] = 1.0;
+        let dir_z = geometry.direction(unit.slice(s![..layout.z_width]));
+        let dirs = [&ZetaDirection::ZERO, &ZetaDirection::ZERO, &dir_z];
+        let jz = layout.primary_image(&calc.jq, &unit, p_primary);
+        let jz1 = geometry.q_rows(dirs, Z);
+        let mut phi = Array2::<f64>::zeros((layout.width, layout.width));
+
+        // Both free axes in one block.
+        layout.add_curvature(&mut phi, &calc.hessian.dot(&jz), &calc.k0);
+        layout.add_curvature(&mut phi, &calc.gradient, &geometry.q_matrices(dirs, Z));
+
+        // Free axes in separate blocks.
+        layout.add_full_sandwich(&mut phi, &calc.jq, &combine_axes(&calc.third, &jz, p_primary));
+        layout.add_symmetric_half_sandwich(&mut phi, &jz1, &calc.hessian, &calc.jq);
+        phi_axes.push(phi);
+    }
+    phi_axes
+}
+
+/// The flat coefficient vector of `block_states`, in block order.
+fn flat_beta(block_states: &[ParameterBlockState]) -> Result<Array1<f64>, String> {
+    let views: Vec<ArrayView1<'_, f64>> = block_states.iter().map(|state| state.beta.view()).collect();
+    ndarray::concatenate(Axis(0), &views).map_err(|error| error.to_string())
+}
+
 impl SurvivalMarginalSlopeFamily {
+    /// Whether the ζ composition serves this family's design-ψ third information derivatives:
+    /// a time wiggle with a score warp or link deviation, no influence absorber, a single score
+    /// slope, and a slope design without a follow-up margin.
+    pub(crate) fn timewiggle_flex_design_psi_third_available(&self) -> bool {
+        self.flex_timewiggle_active()
+            && (self.score_warp.is_some() || self.link_dev.is_some())
+            && self.influence_absorber.is_none()
+            && !self.per_z_slope_active()
+            && self.slope_layout.time_margin().is_none()
+    }
+
     /// The ζ frame of this family. An influence absorber's primary has no ζ coordinate, and a
     /// family without a time-wiggle basis has no z block, so both are refused.
     fn timewiggle_zeta_frame(
@@ -622,6 +724,223 @@ impl SurvivalMarginalSlopeFamily {
         })
     }
 
+    /// Row `row`'s ζ calculus, contracting `base`: the fifth-moment base where an order-five
+    /// sweep reads it, the third-moment base otherwise.
+    fn timewiggle_zeta_row_calculus(
+        &self,
+        frame: &ZetaFrame<'_>,
+        block_states: &[ParameterBlockState],
+        row: usize,
+        base: FlexThirdRowBase,
+    ) -> Result<ZetaRowCalculus, String> {
+        let zeta_row = self.timewiggle_zeta_row(frame, block_states, row)?;
+        let zero = [&ZetaDirection::ZERO; 3];
+        let jq = zeta_row.geometry.q_rows(zero, 0);
+        let k0 = zeta_row.geometry.q_matrices(zero, 0);
+        let q_geom = self.row_dynamic_q_geometry(row, block_states)?;
+        let (_, gradient, hessian) = self.compute_row_flex_primary_gradient_hessian_exact(
+            row,
+            block_states,
+            &q_geom,
+            &frame.primary,
+        )?;
+        let p_primary = frame.primary.total;
+        let mut third = Vec::with_capacity(p_primary);
+        for k in 0..p_primary {
+            let mut axis = Array1::<f64>::zeros(p_primary);
+            axis[k] = 1.0;
+            third.push(self.row_flex_third_contract_from_base(&base, &axis)?);
+        }
+        Ok(ZetaRowCalculus {
+            zeta_row,
+            jq,
+            k0,
+            gradient,
+            hessian,
+            third,
+            base,
+        })
+    }
+
+    /// `∇⁴_ζ(ℓ∘G)[u, e_ζ]` for every ζ axis, for a ζ direction `u`: Faà di Bruno over the 15 set
+    /// partitions of the two free axes, `u` and the ζ axis.
+    fn timewiggle_order_four_axes(
+        &self,
+        frame: &ZetaFrame<'_>,
+        calc: &ZetaRowCalculus,
+        u_zeta: &Array1<f64>,
+    ) -> Result<Vec<Array2<f64>>, String> {
+        let layout = &frame.layout;
+        let p_primary = frame.primary.total;
+        let geometry = &calc.zeta_row.geometry;
+        let (jq, hessian, gradient) = (&calc.jq, &calc.hessian, &calc.gradient);
+
+        // ── Derivatives of G that do not read the ζ axis ──
+        let dir_u = geometry.direction(u_zeta.slice(s![..layout.z_width]));
+        let fixed = [&dir_u, &ZetaDirection::ZERO, &ZetaDirection::ZERO];
+        let ju = layout.primary_image(jq, u_zeta, p_primary);
+        let ju1 = geometry.q_rows(fixed, U);
+        let ku = geometry.q_matrices(fixed, U);
+
+        // ── ℓ contractions along u, once per primary axis ──
+        let mut fourth_u = Vec::with_capacity(p_primary);
+        for k in 0..p_primary {
+            let mut axis = Array1::<f64>::zeros(p_primary);
+            axis[k] = 1.0;
+            fourth_u.push(self.row_flex_fourth_contract_from_base(&calc.base, &ju, &axis)?);
+        }
+        let t_u = combine_axes(&calc.third, &ju, p_primary);
+        let c_z = hessian.dot(&ju);
+
+        // ── ∇⁴_ζ(ℓ∘G)[u, e_ζ], once per ζ axis ──
+        let mut phi_axes = Vec::with_capacity(layout.width);
+        for zeta_axis in 0..layout.width {
+            let mut unit = Array1::<f64>::zeros(layout.width);
+            unit[zeta_axis] = 1.0;
+            let dir_z = geometry.direction(unit.slice(s![..layout.z_width]));
+            let dirs = [&dir_u, &ZetaDirection::ZERO, &dir_z];
+            let jz = layout.primary_image(jq, &unit, p_primary);
+            let g2uz = layout.on_primaries(geometry.q_derivative(dirs, U | Z), p_primary);
+            let jz1 = geometry.q_rows(dirs, Z);
+            let juz2 = geometry.q_rows(dirs, U | Z);
+            let t_z = combine_axes(&calc.third, &jz, p_primary);
+            let mut phi = Array2::<f64>::zeros((layout.width, layout.width));
+
+            // Both free axes in one block: the ℓ contraction of the remaining blocks weights
+            // the curvature of G over both axes.
+            let c_empty = t_u.dot(&jz) + hessian.dot(&g2uz);
+            let c_u = hessian.dot(&jz);
+            layout.add_curvature(&mut phi, &c_empty, &calc.k0);
+            layout.add_curvature(&mut phi, &c_u, &ku);
+            layout.add_curvature(&mut phi, &c_z, &geometry.q_matrices(dirs, Z));
+            layout.add_curvature(&mut phi, gradient, &geometry.q_matrices(dirs, U | Z));
+
+            // Free axes in separate blocks: an ℓ derivative between one-axis derivatives of G.
+            let m_empty =
+                combine_axes(&fourth_u, &jz, p_primary) + combine_axes(&calc.third, &g2uz, p_primary);
+            layout.add_full_sandwich(&mut phi, jq, &m_empty);
+            layout.add_symmetric_half_sandwich(&mut phi, &ju1, &t_z, jq);
+            layout.add_symmetric_half_sandwich(&mut phi, &jz1, &t_u, jq);
+            layout.add_symmetric_row_sandwich(&mut phi, &ju1, hessian, &jz1);
+            layout.add_symmetric_half_sandwich(&mut phi, &juz2, hessian, jq);
+            phi_axes.push(phi);
+        }
+        Ok(phi_axes)
+    }
+
+    /// `∇⁵_ζ(ℓ∘G)[u, v, e_ζ]` for every ζ axis, for ζ directions `u` and `v`: Faà di Bruno over
+    /// the 52 set partitions of the two free axes, `u`, `v` and the ζ axis. `calc` must contract
+    /// the fifth-moment base.
+    fn timewiggle_order_five_axes(
+        &self,
+        frame: &ZetaFrame<'_>,
+        calc: &ZetaRowCalculus,
+        u_zeta: &Array1<f64>,
+        v_zeta: &Array1<f64>,
+    ) -> Result<Vec<Array2<f64>>, String> {
+        let layout = &frame.layout;
+        let p_primary = frame.primary.total;
+        let geometry = &calc.zeta_row.geometry;
+        let (jq, hessian, gradient, third) = (&calc.jq, &calc.hessian, &calc.gradient, &calc.third);
+
+        // ── Derivatives of G that do not read the ζ axis ──
+        let dir_u = geometry.direction(u_zeta.slice(s![..layout.z_width]));
+        let dir_v = geometry.direction(v_zeta.slice(s![..layout.z_width]));
+        let fixed = [&dir_u, &dir_v, &ZetaDirection::ZERO];
+        let ju = layout.primary_image(jq, u_zeta, p_primary);
+        let jv = layout.primary_image(jq, v_zeta, p_primary);
+        let g2uv = layout.on_primaries(geometry.q_derivative(fixed, U | V), p_primary);
+        let ju1 = geometry.q_rows(fixed, U);
+        let jv1 = geometry.q_rows(fixed, V);
+        let juv2 = geometry.q_rows(fixed, U | V);
+        let ku = geometry.q_matrices(fixed, U);
+        let kv = geometry.q_matrices(fixed, V);
+        let kuv = geometry.q_matrices(fixed, U | V);
+
+        // ── ℓ contractions along u and v, once per primary axis ──
+        let mut fourth_u = Vec::with_capacity(p_primary);
+        let mut fourth_v = Vec::with_capacity(p_primary);
+        let mut fourth_uv = Vec::with_capacity(p_primary);
+        for k in 0..p_primary {
+            let mut axis = Array1::<f64>::zeros(p_primary);
+            axis[k] = 1.0;
+            fourth_u.push(self.row_flex_fourth_contract_from_base(&calc.base, &ju, &axis)?);
+            fourth_v.push(self.row_flex_fourth_contract_from_base(&calc.base, &jv, &axis)?);
+            fourth_uv.push(self.row_flex_fourth_contract_from_base(&calc.base, &g2uv, &axis)?);
+        }
+        let fifth = self.row_flex_fifth_contract_all_primary_axes_from_base(&calc.base, &ju, &jv)?;
+        let t_u = combine_axes(third, &ju, p_primary);
+        let t_v = combine_axes(third, &jv, p_primary);
+        let q_uv = combine_axes(&fourth_u, &jv, p_primary);
+        let m_z = &q_uv + &combine_axes(third, &g2uv, p_primary);
+        let c_z = t_u.dot(&jv) + hessian.dot(&g2uv);
+        let c_uz = hessian.dot(&jv);
+        let c_vz = hessian.dot(&ju);
+
+        // ── ∇⁵_ζ(ℓ∘G)[u, v, e_ζ], once per ζ axis ──
+        let mut phi_axes = Vec::with_capacity(layout.width);
+        for zeta_axis in 0..layout.width {
+            let mut unit = Array1::<f64>::zeros(layout.width);
+            unit[zeta_axis] = 1.0;
+            let dir_z = geometry.direction(unit.slice(s![..layout.z_width]));
+            let dirs = [&dir_u, &dir_v, &dir_z];
+            let jz = layout.primary_image(jq, &unit, p_primary);
+            let g2uz = layout.on_primaries(geometry.q_derivative(dirs, U | Z), p_primary);
+            let g2vz = layout.on_primaries(geometry.q_derivative(dirs, V | Z), p_primary);
+            let g3uvz = layout.on_primaries(geometry.q_derivative(dirs, U | V | Z), p_primary);
+            let jz1 = geometry.q_rows(dirs, Z);
+            let juz2 = geometry.q_rows(dirs, U | Z);
+            let jvz2 = geometry.q_rows(dirs, V | Z);
+            let juvz3 = geometry.q_rows(dirs, U | V | Z);
+            let t_z = combine_axes(third, &jz, p_primary);
+            let mut phi = Array2::<f64>::zeros((layout.width, layout.width));
+
+            // Both free axes in one block: the ℓ contraction of the remaining blocks weights
+            // the curvature of G over both axes.
+            let c_empty = q_uv.dot(&jz)
+                + t_z.dot(&g2uv)
+                + t_v.dot(&g2uz)
+                + t_u.dot(&g2vz)
+                + hessian.dot(&g3uvz);
+            let c_u = t_v.dot(&jz) + hessian.dot(&g2vz);
+            let c_v = t_u.dot(&jz) + hessian.dot(&g2uz);
+            let c_uv = hessian.dot(&jz);
+            layout.add_curvature(&mut phi, &c_empty, &calc.k0);
+            layout.add_curvature(&mut phi, &c_u, &ku);
+            layout.add_curvature(&mut phi, &c_v, &kv);
+            layout.add_curvature(&mut phi, &c_z, &geometry.q_matrices(dirs, Z));
+            layout.add_curvature(&mut phi, &c_uv, &kuv);
+            layout.add_curvature(&mut phi, &c_uz, &geometry.q_matrices(dirs, U | Z));
+            layout.add_curvature(&mut phi, &c_vz, &geometry.q_matrices(dirs, V | Z));
+            layout.add_curvature(&mut phi, gradient, &geometry.q_matrices(dirs, U | V | Z));
+
+            // Free axes in separate blocks: an ℓ derivative between one-axis derivatives of G.
+            let m_empty = combine_axes(&fifth, &jz, p_primary)
+                + combine_axes(&fourth_uv, &jz, p_primary)
+                + combine_axes(&fourth_v, &g2uz, p_primary)
+                + combine_axes(&fourth_u, &g2vz, p_primary)
+                + combine_axes(third, &g3uvz, p_primary);
+            let m_u = combine_axes(&fourth_v, &jz, p_primary) + combine_axes(third, &g2vz, p_primary);
+            let m_v = combine_axes(&fourth_u, &jz, p_primary) + combine_axes(third, &g2uz, p_primary);
+            layout.add_full_sandwich(&mut phi, jq, &m_empty);
+            layout.add_symmetric_half_sandwich(&mut phi, &ju1, &m_u, jq);
+            layout.add_symmetric_half_sandwich(&mut phi, &jv1, &m_v, jq);
+            layout.add_symmetric_half_sandwich(&mut phi, &jz1, &m_z, jq);
+            layout.add_symmetric_row_sandwich(&mut phi, &ju1, &t_z, &jv1);
+            layout.add_symmetric_row_sandwich(&mut phi, &ju1, &t_v, &jz1);
+            layout.add_symmetric_row_sandwich(&mut phi, &jv1, &t_u, &jz1);
+            layout.add_symmetric_half_sandwich(&mut phi, &juv2, &t_z, jq);
+            layout.add_symmetric_half_sandwich(&mut phi, &juz2, &t_v, jq);
+            layout.add_symmetric_half_sandwich(&mut phi, &jvz2, &t_u, jq);
+            layout.add_symmetric_row_sandwich(&mut phi, &juv2, hessian, &jz1);
+            layout.add_symmetric_row_sandwich(&mut phi, &juz2, hessian, &jv1);
+            layout.add_symmetric_row_sandwich(&mut phi, &jvz2, hessian, &ju1);
+            layout.add_symmetric_half_sandwich(&mut phi, &juvz3, hessian, jq);
+            phi_axes.push(phi);
+        }
+        Ok(phi_axes)
+    }
+
     /// Second directional derivative `D²H[u, e_a]` of the joint Hessian along every coefficient
     /// axis, for a time wiggle with a score warp or link deviation (gam#2893). One row pass
     /// serves every axis, where the single-direction evaluator rebuilds each row's flex base
@@ -632,103 +951,23 @@ impl SurvivalMarginalSlopeFamily {
         d_u: &Array1<f64>,
     ) -> Result<Vec<Array2<f64>>, String> {
         let frame = self.timewiggle_zeta_frame(block_states)?;
-        let layout = &frame.layout;
+        let width = frame.layout.width;
         let p_total = frame.slices.total;
-        let p_primary = frame.primary.total;
-        let z_width = layout.z_width;
         let zeros = || vec![Array2::<f64>::zeros((p_total, p_total)); p_total];
         let result = gam_linalg::pairwise_reduce::par_deterministic_try_block_fold(
             self.n,
             |range| -> Result<Vec<Array2<f64>>, String> {
                 let mut acc = zeros();
-                let mut right = Array2::<f64>::zeros((layout.width, p_total));
-                let mut phi_axis = Array2::<f64>::zeros((layout.width, layout.width));
+                let mut scratch = Array2::<f64>::zeros((width, p_total));
+                let mut phi_axis = Array2::<f64>::zeros((width, width));
                 for row in range {
-                    let zeta_row = self.timewiggle_zeta_row(&frame, block_states, row)?;
-                    let geometry = &zeta_row.geometry;
-                    let u_zeta = zeta_row.image_of(d_u, layout.width);
-
-                    // ── Derivatives of G that do not read the ζ axis ──
-                    let dir_u = geometry.direction(u_zeta.slice(s![..z_width]));
-                    let fixed = [&dir_u, &ZetaDirection::ZERO, &ZetaDirection::ZERO];
-                    let jq = geometry.q_rows(fixed, 0);
-                    let ju = layout.primary_image(&jq, &u_zeta, p_primary);
-                    let ju1 = geometry.q_rows(fixed, U);
-                    let k0 = geometry.q_matrices(fixed, 0);
-                    let ku = geometry.q_matrices(fixed, U);
-
-                    // ── ℓ contractions, once per primary axis ──
-                    let q_geom = self.row_dynamic_q_geometry(row, block_states)?;
-                    let (_, gradient, hessian) = self
-                        .compute_row_flex_primary_gradient_hessian_exact(
-                            row,
-                            block_states,
-                            &q_geom,
-                            &frame.primary,
-                        )?;
-                    let base = self.build_row_flex_third_base_with_states(
-                        row,
-                        block_states,
-                        &frame.primary,
-                    )?;
-                    let mut third = Vec::with_capacity(p_primary);
-                    let mut fourth_u = Vec::with_capacity(p_primary);
-                    for k in 0..p_primary {
-                        let mut axis = Array1::<f64>::zeros(p_primary);
-                        axis[k] = 1.0;
-                        third.push(self.row_flex_third_contract_from_base(&base, &axis)?);
-                        fourth_u.push(self.row_flex_fourth_contract_from_base(&base, &ju, &axis)?);
-                    }
-                    let t_u = combine_axes(&third, &ju, p_primary);
-                    let c_z = hessian.dot(&ju);
-
-                    // ── ∇⁴_ζ(ℓ∘G)[Ãu, e_ζ], once per ζ axis ──
-                    let mut phi_axes = Vec::with_capacity(layout.width);
-                    for zeta_axis in 0..layout.width {
-                        let mut unit = Array1::<f64>::zeros(layout.width);
-                        unit[zeta_axis] = 1.0;
-                        let dir_z = geometry.direction(unit.slice(s![..z_width]));
-                        let dirs = [&dir_u, &ZetaDirection::ZERO, &dir_z];
-                        let jz = layout.primary_image(&jq, &unit, p_primary);
-                        let g2uz =
-                            layout.on_primaries(geometry.q_derivative(dirs, U | Z), p_primary);
-                        let jz1 = geometry.q_rows(dirs, Z);
-                        let juz2 = geometry.q_rows(dirs, U | Z);
-                        let t_z = combine_axes(&third, &jz, p_primary);
-                        let mut phi = Array2::<f64>::zeros((layout.width, layout.width));
-
-                        // Both free axes in one block: the ℓ contraction of the remaining
-                        // blocks weights the curvature of G over both axes.
-                        let c_empty = t_u.dot(&jz) + hessian.dot(&g2uz);
-                        let c_u = hessian.dot(&jz);
-                        layout.add_curvature(&mut phi, &c_empty, &k0);
-                        layout.add_curvature(&mut phi, &c_u, &ku);
-                        layout.add_curvature(&mut phi, &c_z, &geometry.q_matrices(dirs, Z));
-                        layout.add_curvature(
-                            &mut phi,
-                            &gradient,
-                            &geometry.q_matrices(dirs, U | Z),
-                        );
-
-                        // Free axes in separate blocks: an ℓ derivative between one-axis
-                        // derivatives of G.
-                        let m_empty = combine_axes(&fourth_u, &jz, p_primary)
-                            + combine_axes(&third, &g2uz, p_primary);
-                        layout.add_full_sandwich(&mut phi, &jq, &m_empty);
-                        layout.add_symmetric_half_sandwich(&mut phi, &ju1, &t_z, &jq);
-                        layout.add_symmetric_half_sandwich(&mut phi, &jz1, &t_u, &jq);
-                        layout.add_symmetric_row_sandwich(&mut phi, &ju1, &hessian, &jz1);
-                        layout.add_symmetric_half_sandwich(&mut phi, &juz2, &hessian, &jq);
-                        phi_axes.push(phi);
-                    }
-
-                    pull_back_axes(
-                        &phi_axes,
-                        &zeta_row.images,
-                        &mut right,
-                        &mut phi_axis,
-                        &mut acc,
-                    );
+                    let base =
+                        self.build_row_flex_third_base_with_states(row, block_states, &frame.primary)?;
+                    let calc = self.timewiggle_zeta_row_calculus(&frame, block_states, row, base)?;
+                    let images = &calc.zeta_row.images;
+                    let u_zeta = zeta_image_of(images, d_u, width);
+                    let phi_axes = self.timewiggle_order_four_axes(&frame, &calc, &u_zeta)?;
+                    pull_back_axes(&phi_axes, images, &mut scratch, &mut phi_axis, &mut acc);
                 }
                 Ok(acc)
             },
@@ -753,155 +992,24 @@ impl SurvivalMarginalSlopeFamily {
         d_v: &Array1<f64>,
     ) -> Result<Vec<Array2<f64>>, String> {
         let frame = self.timewiggle_zeta_frame(block_states)?;
-        let layout = &frame.layout;
+        let width = frame.layout.width;
         let p_total = frame.slices.total;
-        let p_primary = frame.primary.total;
-        let z_width = layout.z_width;
         let zeros = || vec![Array2::<f64>::zeros((p_total, p_total)); p_total];
         let result = gam_linalg::pairwise_reduce::par_deterministic_try_block_fold(
             self.n,
             |range| -> Result<Vec<Array2<f64>>, String> {
                 let mut acc = zeros();
-                let mut right = Array2::<f64>::zeros((layout.width, p_total));
-                let mut phi_axis = Array2::<f64>::zeros((layout.width, layout.width));
+                let mut scratch = Array2::<f64>::zeros((width, p_total));
+                let mut phi_axis = Array2::<f64>::zeros((width, width));
                 for row in range {
-                    let zeta_row = self.timewiggle_zeta_row(&frame, block_states, row)?;
-                    let geometry = &zeta_row.geometry;
-                    let u_zeta = zeta_row.image_of(d_u, layout.width);
-                    let v_zeta = zeta_row.image_of(d_v, layout.width);
-
-                    // ── Derivatives of G that do not read the ζ axis ──
-                    let dir_u = geometry.direction(u_zeta.slice(s![..z_width]));
-                    let dir_v = geometry.direction(v_zeta.slice(s![..z_width]));
-                    let fixed = [&dir_u, &dir_v, &ZetaDirection::ZERO];
-                    let jq = geometry.q_rows(fixed, 0);
-                    let ju = layout.primary_image(&jq, &u_zeta, p_primary);
-                    let jv = layout.primary_image(&jq, &v_zeta, p_primary);
-                    let g2uv = layout.on_primaries(geometry.q_derivative(fixed, U | V), p_primary);
-                    let ju1 = geometry.q_rows(fixed, U);
-                    let jv1 = geometry.q_rows(fixed, V);
-                    let juv2 = geometry.q_rows(fixed, U | V);
-                    let k0 = geometry.q_matrices(fixed, 0);
-                    let ku = geometry.q_matrices(fixed, U);
-                    let kv = geometry.q_matrices(fixed, V);
-                    let kuv = geometry.q_matrices(fixed, U | V);
-
-                    // ── ℓ contractions, once per primary axis ──
-                    let q_geom = self.row_dynamic_q_geometry(row, block_states)?;
-                    let (_, gradient, hessian) = self
-                        .compute_row_flex_primary_gradient_hessian_exact(
-                            row,
-                            block_states,
-                            &q_geom,
-                            &frame.primary,
-                        )?;
-                    let base = self.build_row_flex_fifth_base_with_states(
-                        row,
-                        block_states,
-                        &frame.primary,
-                    )?;
-                    let mut third = Vec::with_capacity(p_primary);
-                    let mut fourth_u = Vec::with_capacity(p_primary);
-                    let mut fourth_v = Vec::with_capacity(p_primary);
-                    let mut fourth_uv = Vec::with_capacity(p_primary);
-                    for k in 0..p_primary {
-                        let mut axis = Array1::<f64>::zeros(p_primary);
-                        axis[k] = 1.0;
-                        third.push(self.row_flex_third_contract_from_base(&base, &axis)?);
-                        fourth_u.push(self.row_flex_fourth_contract_from_base(&base, &ju, &axis)?);
-                        fourth_v.push(self.row_flex_fourth_contract_from_base(&base, &jv, &axis)?);
-                        fourth_uv
-                            .push(self.row_flex_fourth_contract_from_base(&base, &g2uv, &axis)?);
-                    }
-                    let fifth =
-                        self.row_flex_fifth_contract_all_primary_axes_from_base(&base, &ju, &jv)?;
-                    let t_u = combine_axes(&third, &ju, p_primary);
-                    let t_v = combine_axes(&third, &jv, p_primary);
-                    let q_uv = combine_axes(&fourth_u, &jv, p_primary);
-                    let m_z = &q_uv + &combine_axes(&third, &g2uv, p_primary);
-                    let c_z = t_u.dot(&jv) + hessian.dot(&g2uv);
-                    let c_uz = hessian.dot(&jv);
-                    let c_vz = hessian.dot(&ju);
-
-                    // ── ∇⁵_ζ(ℓ∘G)[Ãu, Ãv, e_ζ], once per ζ axis ──
-                    let mut phi_axes = Vec::with_capacity(layout.width);
-                    for zeta_axis in 0..layout.width {
-                        let mut unit = Array1::<f64>::zeros(layout.width);
-                        unit[zeta_axis] = 1.0;
-                        let dir_z = geometry.direction(unit.slice(s![..z_width]));
-                        let dirs = [&dir_u, &dir_v, &dir_z];
-                        let jz = layout.primary_image(&jq, &unit, p_primary);
-                        let g2uz =
-                            layout.on_primaries(geometry.q_derivative(dirs, U | Z), p_primary);
-                        let g2vz =
-                            layout.on_primaries(geometry.q_derivative(dirs, V | Z), p_primary);
-                        let g3uvz =
-                            layout.on_primaries(geometry.q_derivative(dirs, U | V | Z), p_primary);
-                        let jz1 = geometry.q_rows(dirs, Z);
-                        let juz2 = geometry.q_rows(dirs, U | Z);
-                        let jvz2 = geometry.q_rows(dirs, V | Z);
-                        let juvz3 = geometry.q_rows(dirs, U | V | Z);
-                        let t_z = combine_axes(&third, &jz, p_primary);
-                        let mut phi = Array2::<f64>::zeros((layout.width, layout.width));
-
-                        // Both free axes in one block: the ℓ contraction of the remaining
-                        // blocks weights the curvature of G over both axes.
-                        let c_empty = q_uv.dot(&jz)
-                            + t_z.dot(&g2uv)
-                            + t_v.dot(&g2uz)
-                            + t_u.dot(&g2vz)
-                            + hessian.dot(&g3uvz);
-                        let c_u = t_v.dot(&jz) + hessian.dot(&g2vz);
-                        let c_v = t_u.dot(&jz) + hessian.dot(&g2uz);
-                        let c_uv = hessian.dot(&jz);
-                        layout.add_curvature(&mut phi, &c_empty, &k0);
-                        layout.add_curvature(&mut phi, &c_u, &ku);
-                        layout.add_curvature(&mut phi, &c_v, &kv);
-                        layout.add_curvature(&mut phi, &c_z, &geometry.q_matrices(dirs, Z));
-                        layout.add_curvature(&mut phi, &c_uv, &kuv);
-                        layout.add_curvature(&mut phi, &c_uz, &geometry.q_matrices(dirs, U | Z));
-                        layout.add_curvature(&mut phi, &c_vz, &geometry.q_matrices(dirs, V | Z));
-                        layout.add_curvature(
-                            &mut phi,
-                            &gradient,
-                            &geometry.q_matrices(dirs, U | V | Z),
-                        );
-
-                        // Free axes in separate blocks: an ℓ derivative between one-axis
-                        // derivatives of G.
-                        let m_empty = combine_axes(&fifth, &jz, p_primary)
-                            + combine_axes(&fourth_uv, &jz, p_primary)
-                            + combine_axes(&fourth_v, &g2uz, p_primary)
-                            + combine_axes(&fourth_u, &g2vz, p_primary)
-                            + combine_axes(&third, &g3uvz, p_primary);
-                        let m_u = combine_axes(&fourth_v, &jz, p_primary)
-                            + combine_axes(&third, &g2vz, p_primary);
-                        let m_v = combine_axes(&fourth_u, &jz, p_primary)
-                            + combine_axes(&third, &g2uz, p_primary);
-                        layout.add_full_sandwich(&mut phi, &jq, &m_empty);
-                        layout.add_symmetric_half_sandwich(&mut phi, &ju1, &m_u, &jq);
-                        layout.add_symmetric_half_sandwich(&mut phi, &jv1, &m_v, &jq);
-                        layout.add_symmetric_half_sandwich(&mut phi, &jz1, &m_z, &jq);
-                        layout.add_symmetric_row_sandwich(&mut phi, &ju1, &t_z, &jv1);
-                        layout.add_symmetric_row_sandwich(&mut phi, &ju1, &t_v, &jz1);
-                        layout.add_symmetric_row_sandwich(&mut phi, &jv1, &t_u, &jz1);
-                        layout.add_symmetric_half_sandwich(&mut phi, &juv2, &t_z, &jq);
-                        layout.add_symmetric_half_sandwich(&mut phi, &juz2, &t_v, &jq);
-                        layout.add_symmetric_half_sandwich(&mut phi, &jvz2, &t_u, &jq);
-                        layout.add_symmetric_row_sandwich(&mut phi, &juv2, &hessian, &jz1);
-                        layout.add_symmetric_row_sandwich(&mut phi, &juz2, &hessian, &jv1);
-                        layout.add_symmetric_row_sandwich(&mut phi, &jvz2, &hessian, &ju1);
-                        layout.add_symmetric_half_sandwich(&mut phi, &juvz3, &hessian, &jq);
-                        phi_axes.push(phi);
-                    }
-
-                    pull_back_axes(
-                        &phi_axes,
-                        &zeta_row.images,
-                        &mut right,
-                        &mut phi_axis,
-                        &mut acc,
-                    );
+                    let base =
+                        self.build_row_flex_fifth_base_with_states(row, block_states, &frame.primary)?;
+                    let calc = self.timewiggle_zeta_row_calculus(&frame, block_states, row, base)?;
+                    let images = &calc.zeta_row.images;
+                    let u_zeta = zeta_image_of(images, d_u, width);
+                    let v_zeta = zeta_image_of(images, d_v, width);
+                    let phi_axes = self.timewiggle_order_five_axes(&frame, &calc, &u_zeta, &v_zeta)?;
+                    pull_back_axes(&phi_axes, images, &mut scratch, &mut phi_axis, &mut acc);
                 }
                 Ok(acc)
             },
@@ -914,5 +1022,275 @@ impl SurvivalMarginalSlopeFamily {
         )?
         .unwrap_or_else(zeros);
         Ok(result)
+    }
+
+    /// `{D_β_a D_β ∂_ψ H[v]}` along every coefficient axis `a` for a design ψ, under the row
+    /// measure `row_weights` (gam#2893). With `Ã_ψ` the ζ image of the design motion and
+    /// `w = Ã_ψ β`, a row contributes `Ãᵀ(∇⁵[w, Ãv, Ãe_a] + ∇⁴[Ã_ψv, Ãe_a] + ∇⁴[Ãv, Ã_ψe_a])Ã`
+    /// and `Ã_ψᵀ ∇⁴[Ãv, Ãe_a] Ã` with its transpose. Returns `None` where the family has no ψ
+    /// block for the axis.
+    pub(crate) fn timewiggle_flex_design_psi_third_information_all_axes(
+        &self,
+        block_states: &[ParameterBlockState],
+        derivative_blocks: &[Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>],
+        psi_index: usize,
+        d_beta: &Array1<f64>,
+        row_weights: &[f64],
+    ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        let Some((block_idx, local_idx, p_psi, label)) =
+            self.psi_block_info(derivative_blocks, psi_index)?
+        else {
+            return Ok(None);
+        };
+        let frame = self.timewiggle_zeta_frame(block_states)?;
+        let width = frame.layout.width;
+        let p_total = frame.slices.total;
+        if d_beta.len() != p_total || row_weights.len() != self.n {
+            return Err(format!(
+                "time-wiggle design ψ third information derivative requires a direction of length \
+                 {p_total} and {} row weights",
+                self.n
+            ));
+        }
+        let beta = flat_beta(block_states)?;
+        let policy = gam_runtime::resource::ResourcePolicy::default_library();
+        let psi_map = crate::custom_family::resolve_custom_family_x_psi_map(
+            &derivative_blocks[block_idx][local_idx],
+            self.n,
+            p_psi,
+            0..self.n,
+            label,
+            &policy,
+        )
+        .map_err(|error| error.to_string())?;
+        let zeros = || vec![Array2::<f64>::zeros((p_total, p_total)); p_total];
+        let result = gam_linalg::pairwise_reduce::par_deterministic_try_block_fold(
+            self.n,
+            |range| -> Result<Vec<Array2<f64>>, String> {
+                let mut acc = zeros();
+                let mut scratch = Array2::<f64>::zeros((width, p_total));
+                let mut phi_axis = Array2::<f64>::zeros((width, width));
+                for row in range {
+                    let weight = row_weights[row];
+                    if weight == 0.0 {
+                        continue;
+                    }
+                    let base =
+                        self.build_row_flex_fifth_base_with_states(row, block_states, &frame.primary)?;
+                    let calc = self.timewiggle_zeta_row_calculus(&frame, block_states, row, base)?;
+                    let images = &calc.zeta_row.images;
+                    let x_psi = psi_map.row_vector(row).map_err(|error| {
+                        format!("time-wiggle design ψ third information row: {error}")
+                    })?;
+                    let psi_images = psi_zeta_images(&frame, block_idx, &x_psi)?;
+                    let w = zeta_image_of(&psi_images, &beta, width);
+                    let v_zeta = zeta_image_of(images, d_beta, width);
+                    let psi_v_zeta = zeta_image_of(&psi_images, d_beta, width);
+                    let fourth_v = self.timewiggle_order_four_axes(&frame, &calc, &v_zeta)?;
+                    let fifth_wv = self.timewiggle_order_five_axes(&frame, &calc, &w, &v_zeta)?;
+                    let fourth_psi_v = self.timewiggle_order_four_axes(&frame, &calc, &psi_v_zeta)?;
+                    for c in 0..p_total {
+                        let (image, psi_image) = (&images[c], &psi_images[c]);
+                        if image.entries().is_empty() && psi_image.entries().is_empty() {
+                            continue;
+                        }
+                        phi_axis.fill(0.0);
+                        add_combined_axes(&fifth_wv, image, weight, &mut phi_axis);
+                        add_combined_axes(&fourth_psi_v, image, weight, &mut phi_axis);
+                        add_combined_axes(&fourth_v, psi_image, weight, &mut phi_axis);
+                        add_zeta_sandwich(&phi_axis, images, images, &mut scratch, &mut acc[c]);
+                        if !image.entries().is_empty() {
+                            phi_axis.fill(0.0);
+                            add_combined_axes(&fourth_v, image, weight, &mut phi_axis);
+                            add_zeta_sandwich(&phi_axis, &psi_images, images, &mut scratch, &mut acc[c]);
+                            add_zeta_sandwich(&phi_axis, images, &psi_images, &mut scratch, &mut acc[c]);
+                        }
+                    }
+                }
+                Ok(acc)
+            },
+            |mut a, b| -> Result<_, String> {
+                for (ai, bi) in a.iter_mut().zip(b.into_iter()) {
+                    *ai += &bi;
+                }
+                Ok(a)
+            },
+        )?
+        .unwrap_or_else(zeros);
+        Ok(Some(result))
+    }
+
+    /// `{D_β_a ∂²_ψiψj H}` along every coefficient axis `a` for a pair of design ψ, under the
+    /// row measure `row_weights` (gam#2893). With the ζ images `Ã_i`, `Ã_j` and `Ã_ij` of the
+    /// design motions, `w_• = Ã_• β` and `z_• = Ã_• e_a`, a row contributes
+    /// `Ãᵀ(∇⁵[w_i, w_j, z] + ∇⁴[w_ij, z] + ∇⁴[w_j, z_i] + ∇⁴[w_i, z_j] + ∇³[z_ij])Ã`,
+    /// `Ã_iᵀ(∇⁴[w_j, z] + ∇³[z_j])Ã` and `Ã_jᵀ(∇⁴[w_i, z] + ∇³[z_i])Ã` with their transposes,
+    /// and `Ã_ijᵀ ∇³[z] Ã + Ã_iᵀ ∇³[z] Ã_j` with theirs. `Ã_ij` is zero across blocks. Returns
+    /// `None` where the family has no ψ block for either axis.
+    pub(crate) fn timewiggle_flex_design_psi_pair_third_information_all_axes(
+        &self,
+        block_states: &[ParameterBlockState],
+        derivative_blocks: &[Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>],
+        psi_i: usize,
+        psi_j: usize,
+        row_weights: &[f64],
+    ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        let Some((block_i, local_i, p_psi_i, label_i)) =
+            self.psi_block_info(derivative_blocks, psi_i)?
+        else {
+            return Ok(None);
+        };
+        let Some((block_j, local_j, p_psi_j, label_j)) =
+            self.psi_block_info(derivative_blocks, psi_j)?
+        else {
+            return Ok(None);
+        };
+        let frame = self.timewiggle_zeta_frame(block_states)?;
+        let width = frame.layout.width;
+        let p_total = frame.slices.total;
+        let n = self.n;
+        if row_weights.len() != n {
+            return Err(format!(
+                "time-wiggle design ψ-pair third information derivative has {} row weights for \
+                 {n} rows",
+                row_weights.len()
+            ));
+        }
+        let beta = flat_beta(block_states)?;
+        let policy = gam_runtime::resource::ResourcePolicy::default_library();
+        let map_i = crate::custom_family::resolve_custom_family_x_psi_map(
+            &derivative_blocks[block_i][local_i],
+            n,
+            p_psi_i,
+            0..n,
+            label_i,
+            &policy,
+        )
+        .map_err(|error| error.to_string())?;
+        let map_j = crate::custom_family::resolve_custom_family_x_psi_map(
+            &derivative_blocks[block_j][local_j],
+            n,
+            p_psi_j,
+            0..n,
+            label_j,
+            &policy,
+        )
+        .map_err(|error| error.to_string())?;
+        let map_ij = if block_i == block_j {
+            Some(
+                crate::custom_family::resolve_custom_family_x_psi_psi_map(
+                    &derivative_blocks[block_i][local_i],
+                    &derivative_blocks[block_j][local_j],
+                    local_j,
+                    n,
+                    p_psi_i,
+                    0..n,
+                    label_i,
+                    &policy,
+                )
+                .map_err(|error| error.to_string())?,
+            )
+        } else {
+            None
+        };
+        let row_error = |error| format!("time-wiggle design ψ-pair third information row: {error}");
+        let zeros = || vec![Array2::<f64>::zeros((p_total, p_total)); p_total];
+        let result = gam_linalg::pairwise_reduce::par_deterministic_try_block_fold(
+            n,
+            |range| -> Result<Vec<Array2<f64>>, String> {
+                let mut acc = zeros();
+                let mut scratch = Array2::<f64>::zeros((width, p_total));
+                let mut phi_axis = Array2::<f64>::zeros((width, width));
+                for row in range {
+                    let weight = row_weights[row];
+                    if weight == 0.0 {
+                        continue;
+                    }
+                    let base =
+                        self.build_row_flex_fifth_base_with_states(row, block_states, &frame.primary)?;
+                    let calc = self.timewiggle_zeta_row_calculus(&frame, block_states, row, base)?;
+                    let images = &calc.zeta_row.images;
+                    let images_i =
+                        psi_zeta_images(&frame, block_i, &map_i.row_vector(row).map_err(row_error)?)?;
+                    let images_j =
+                        psi_zeta_images(&frame, block_j, &map_j.row_vector(row).map_err(row_error)?)?;
+                    let images_ij = map_ij
+                        .as_ref()
+                        .map(|map| -> Result<Vec<ZetaImage>, String> {
+                            psi_zeta_images(&frame, block_i, &map.row_vector(row).map_err(row_error)?)
+                        })
+                        .transpose()?;
+                    let w_i = zeta_image_of(&images_i, &beta, width);
+                    let w_j = zeta_image_of(&images_j, &beta, width);
+                    let third_axes = order_three_axes(&frame, &calc);
+                    let fourth_i = self.timewiggle_order_four_axes(&frame, &calc, &w_i)?;
+                    let fourth_j = self.timewiggle_order_four_axes(&frame, &calc, &w_j)?;
+                    let fifth_ij = self.timewiggle_order_five_axes(&frame, &calc, &w_i, &w_j)?;
+                    let fourth_ij = images_ij
+                        .as_ref()
+                        .map(|images_ij| {
+                            self.timewiggle_order_four_axes(
+                                &frame,
+                                &calc,
+                                &zeta_image_of(images_ij, &beta, width),
+                            )
+                        })
+                        .transpose()?;
+                    for c in 0..p_total {
+                        let (image, image_i, image_j) = (&images[c], &images_i[c], &images_j[c]);
+                        let image_ij = images_ij.as_ref().map(|images_ij| &images_ij[c]);
+                        if image.entries().is_empty()
+                            && image_i.entries().is_empty()
+                            && image_j.entries().is_empty()
+                            && image_ij.is_none_or(|image_ij| image_ij.entries().is_empty())
+                        {
+                            continue;
+                        }
+                        // `Ã_ijᵀ ∇³[z] Ã + Ã_iᵀ ∇³[z] Ã_j`, with their transposes.
+                        if !image.entries().is_empty() {
+                            phi_axis.fill(0.0);
+                            add_combined_axes(&third_axes, image, weight, &mut phi_axis);
+                            if let Some(images_ij) = images_ij.as_ref() {
+                                add_zeta_sandwich(&phi_axis, images_ij, images, &mut scratch, &mut acc[c]);
+                                add_zeta_sandwich(&phi_axis, images, images_ij, &mut scratch, &mut acc[c]);
+                            }
+                            add_zeta_sandwich(&phi_axis, &images_i, &images_j, &mut scratch, &mut acc[c]);
+                            add_zeta_sandwich(&phi_axis, &images_j, &images_i, &mut scratch, &mut acc[c]);
+                        }
+                        // `Ã_iᵀ(∇⁴[w_j, z] + ∇³[z_j])Ã`, with its transpose.
+                        phi_axis.fill(0.0);
+                        add_combined_axes(&fourth_j, image, weight, &mut phi_axis);
+                        add_combined_axes(&third_axes, image_j, weight, &mut phi_axis);
+                        add_zeta_sandwich(&phi_axis, &images_i, images, &mut scratch, &mut acc[c]);
+                        add_zeta_sandwich(&phi_axis, images, &images_i, &mut scratch, &mut acc[c]);
+                        // `Ã_jᵀ(∇⁴[w_i, z] + ∇³[z_i])Ã`, with its transpose.
+                        phi_axis.fill(0.0);
+                        add_combined_axes(&fourth_i, image, weight, &mut phi_axis);
+                        add_combined_axes(&third_axes, image_i, weight, &mut phi_axis);
+                        add_zeta_sandwich(&phi_axis, &images_j, images, &mut scratch, &mut acc[c]);
+                        add_zeta_sandwich(&phi_axis, images, &images_j, &mut scratch, &mut acc[c]);
+                        // `Ãᵀ(∇⁵[w_i, w_j, z] + ∇⁴[w_ij, z] + ∇⁴[w_j, z_i] + ∇⁴[w_i, z_j] + ∇³[z_ij])Ã`.
+                        phi_axis.fill(0.0);
+                        add_combined_axes(&fifth_ij, image, weight, &mut phi_axis);
+                        add_combined_axes(&fourth_j, image_i, weight, &mut phi_axis);
+                        add_combined_axes(&fourth_i, image_j, weight, &mut phi_axis);
+                        if let (Some(fourth_ij), Some(image_ij)) = (fourth_ij.as_ref(), image_ij) {
+                            add_combined_axes(fourth_ij, image, weight, &mut phi_axis);
+                            add_combined_axes(&third_axes, image_ij, weight, &mut phi_axis);
+                        }
+                        add_zeta_sandwich(&phi_axis, images, images, &mut scratch, &mut acc[c]);
+                    }
+                }
+                Ok(acc)
+            },
+            |mut a, b| -> Result<_, String> {
+                for (ai, bi) in a.iter_mut().zip(b.into_iter()) {
+                    *ai += &bi;
+                }
+                Ok(a)
+            },
+        )?
+        .unwrap_or_else(zeros);
+        Ok(Some(result))
     }
 }

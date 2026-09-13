@@ -1444,12 +1444,15 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     //
     // An armed Jeffreys objective's exact outer Hessian over ψ reads the ψ-mixed third
     // information derivatives (`prepare_explicit_jeffreys_curvature_drifts`). They have closed
-    // forms on the rigid frame only, so a score warp, link deviation or time wiggle beside ψ
-    // coordinates keeps the analytic gradient without declared curvature: declaring it would
-    // refuse every trial point that asks for curvature (gam#2893).
+    // forms on the rigid frame, and through the ζ composition of `timewiggle_third` for a time
+    // wiggle with a score warp or link deviation whose ψ coordinates are all design axes. Any
+    // other frame beside ψ coordinates keeps the analytic gradient without declared curvature:
+    // declaring it would refuse every trial point that asks for curvature (gam#2893).
     let psi_jeffreys_curvature_exact = setup.theta0().len() == setup.rho_dim()
         || !initial_family.joint_jeffreys_term_required()
-        || initial_family.rigid_third_information_available();
+        || initial_family.rigid_third_information_available()
+        || (setup.auxiliary_dim() == 0
+            && initial_family.timewiggle_flex_design_psi_third_available());
     let analytic_joint_hessian_available = analytic_joint_derivatives_available
         && joint_hessian.is_analytic()
         && psi_jeffreys_curvature_exact;

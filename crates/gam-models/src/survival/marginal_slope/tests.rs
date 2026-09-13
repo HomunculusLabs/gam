@@ -3356,6 +3356,116 @@ fn timewiggle_flex_all_axes_second_directional_derivative_matches_single_axis_28
     }
 }
 
+/// Two design ψ axes for `timewiggle_marginal_slope_family`: a marginal length scale, then a
+/// slope length scale, each with its diagonal second design derivative.
+fn timewiggle_design_psi_blocks() -> Vec<Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>>
+{
+    let axis = |x_psi: Array2<f64>, x_psi_psi: Array2<f64>| {
+        let width = x_psi.ncols();
+        crate::custom_family::CustomFamilyBlockPsiDerivative::new(
+            None,
+            x_psi,
+            Array2::zeros((width, width)),
+            None,
+            Some(vec![x_psi_psi]),
+            None,
+            None,
+        )
+    };
+    vec![
+        Vec::new(),
+        vec![axis(array![[0.3, -0.25]], array![[0.12, 0.07]])],
+        vec![axis(array![[0.4]], array![[-0.15]])],
+        Vec::new(),
+    ]
+}
+
+/// gam#2893: the flex + time-wiggle `{D_β_a D_β ∂_ψ H[v]}` served through the ζ composition
+/// matches a Ridders-certified central difference of the ψ Hessian drift `D_β ∂_ψ H[v]` along
+/// every coefficient axis, for a marginal and a slope design ψ.
+#[test]
+fn timewiggle_flex_design_psi_by_beta_third_information_matches_finite_difference_2893() {
+    let family = timewiggle_marginal_slope_family(Some(test_deviation_runtime()));
+    let beta = timewiggle_marginal_slope_beta(&family);
+    let states = timewiggle_marginal_slope_states(&family, &beta);
+    let blocks = timewiggle_design_psi_blocks();
+    let options = BlockwiseFitOptions::default();
+    assert!(family.timewiggle_flex_design_psi_third_available());
+    let v = Array1::from_shape_fn(beta.len(), |i| ((i * 5 + 1) % 13) as f64 / 13.0 - 0.5);
+    for psi in 0..2 {
+        let analytic = family
+            .design_psi_hessian_second_directional_derivative_all_beta_axes_with_options(
+                &states, &blocks, psi, &v, &options,
+            )
+            .expect("design-by-coefficient third information derivative")
+            .expect("a design ψ axis publishes its third information derivative");
+        assert_eq!(analytic.len(), beta.len());
+        for (axis_idx, matrix) in analytic.iter().enumerate() {
+            let mut axis = Array1::<f64>::zeros(beta.len());
+            axis[axis_idx] = 1.0;
+            assert_matches_ridders_2893(&format!("ψ {psi} axis {axis_idx}"), matrix, &|t| {
+                family
+                    .psi_hessian_directional_derivative_with_options(
+                        &timewiggle_marginal_slope_states(&family, &(&beta + &(&axis * t))),
+                        &blocks,
+                        psi,
+                        &v,
+                        &options,
+                    )
+                    .expect("design ψ Hessian drift")
+                    .expect("a design ψ axis publishes its Hessian drift")
+            });
+        }
+    }
+}
+
+/// gam#2893: the flex + time-wiggle `{D_β_a ∂²_ψiψj H}` served through the ζ composition
+/// matches a Ridders-certified central difference of the ψψ Hessian along every coefficient
+/// axis, for the marginal diagonal, the cross-block and the slope diagonal pairs.
+#[test]
+fn timewiggle_flex_design_psi_pair_third_information_matches_finite_difference_2893() {
+    let family = timewiggle_marginal_slope_family(Some(test_deviation_runtime()));
+    let beta = timewiggle_marginal_slope_beta(&family);
+    let states = timewiggle_marginal_slope_states(&family, &beta);
+    let blocks = timewiggle_design_psi_blocks();
+    let options = BlockwiseFitOptions::default();
+    let total = beta.len();
+    for (psi_i, psi_j) in [(0, 0), (0, 1), (1, 1)] {
+        let analytic = family
+            .design_psi_pair_hessian_directional_derivative_all_beta_axes_with_options(
+                &states, &blocks, psi_i, psi_j, &options,
+            )
+            .expect("design-pair third information derivative")
+            .expect("a design pair publishes its third information derivative");
+        assert_eq!(analytic.len(), total);
+        for (axis_idx, matrix) in analytic.iter().enumerate() {
+            let mut axis = Array1::<f64>::zeros(total);
+            axis[axis_idx] = 1.0;
+            assert_matches_ridders_2893(
+                &format!("ψ pair ({psi_i},{psi_j}) axis {axis_idx}"),
+                matrix,
+                &|t| {
+                    let terms = family
+                        .psi_second_order_terms_inner_with_options(
+                            &timewiggle_marginal_slope_states(&family, &(&beta + &(&axis * t))),
+                            &blocks,
+                            psi_i,
+                            psi_j,
+                            None,
+                            &options,
+                        )
+                        .expect("design pair terms")
+                        .expect("a design pair publishes its terms");
+                    match terms.hessian_psi_psi_operator.as_ref() {
+                        Some(operator) => operator.mul_mat(&Array2::<f64>::eye(total)),
+                        None => terms.hessian_psi_psi.clone(),
+                    }
+                },
+            );
+        }
+    }
+}
+
 
 #[test]
 fn link_flex_blockwise_exact_newton_matches_joint_principal_blocks() {
