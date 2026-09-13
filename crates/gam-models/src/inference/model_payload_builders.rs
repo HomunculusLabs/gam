@@ -3091,8 +3091,22 @@ mod latent_saved_baseline_tests {
         };
         let time_design_entry = request.spec.time_block.design_entry.clone();
         let time_design_exit = request.spec.time_block.design_exit.clone();
-        let offset_entry = request.spec.time_block.offset_entry.clone();
-        let offset_exit = request.spec.time_block.offset_exit.clone();
+        // The fit selects its baseline together with ρ (#2714), so the request's
+        // prepared offsets belong to the seed baseline. The in-memory side realizes
+        // them at the fitted chart point through the chart the fit itself uses;
+        // nothing there is rebuilt from saved fields.
+        let chart = crate::survival::construction::LatentSurvivalFrozenOffsetChart::new(
+            &request.spec.age_entry,
+            &request.spec.age_exit,
+            None,
+            &request.spec.baseline_config,
+            &request.spec.time_block.offset_entry,
+            &request.spec.time_block.offset_exit,
+            &request.spec.time_block.derivative_offset_exit,
+            &Array1::zeros(n),
+        )
+        .expect("latent survival baseline chart")
+        .expect("a Weibull baseline has chart coordinates");
         let unloaded_entry = request.spec.unloaded_mass_entry.clone();
         let unloaded_exit = request.spec.unloaded_mass_exit.clone();
         let mean_offset = request.spec.mean_offset.clone();
@@ -3111,6 +3125,13 @@ mod latent_saved_baseline_tests {
              (got {:?})",
             fitted_baseline.shape
         );
+        let fitted_theta =
+            crate::survival::construction::survival_baseline_theta_from_config(&fitted_baseline)
+                .expect("fitted baseline chart coordinates")
+                .expect("a Weibull baseline has chart coordinates");
+        let fitted_offsets = chart
+            .evaluate(&fitted_theta)
+            .expect("the chart realizes the fitted baseline");
 
         let mean_beta = result
             .fit
@@ -3125,8 +3146,8 @@ mod latent_saved_baseline_tests {
             .beta
             .clone();
         let eta = result.design.design.dot(&mean_beta) + &mean_offset;
-        let q_entry = time_design_entry.dot(&time_beta) + &offset_entry;
-        let q_exit = time_design_exit.dot(&time_beta) + &offset_exit;
+        let q_entry = time_design_entry.dot(&time_beta) + &fitted_offsets.offset_entry;
+        let q_exit = time_design_exit.dot(&time_beta) + &fitted_offsets.offset_exit;
         let quadrature = gam_solve::quadrature::QuadratureContext::new();
         let in_memory_log_survival = Array1::from_shape_fn(n, |row| {
             let latent_row = LatentSurvivalRow::right_censored(
