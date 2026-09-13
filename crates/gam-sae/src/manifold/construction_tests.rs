@@ -1173,22 +1173,52 @@ mod exact_stationarity_solve_1418_tests {
             .expect("exact stationarity solve");
         let exact_resid = a_residual_norm(&term, &rho, target.view(), &cache, &x, &rhs);
 
+        // The RHS component on the declared null band, read off the production
+        // geometry at this state. #2267 — the band includes every positive direction
+        // only the evidence factor's substituted stiffness resolves, and the
+        // pseudoinverse leaves exactly this component unsolved, so it is removed
+        // from the bar below and nothing else is.
+        let geometry = term
+            .materialize_exact_stationarity_geometry(&rho, target.view(), &cache)
+            .expect("exact stationarity geometry");
+        let dim = geometry.eigenvalues.len();
+        let rhs_flat = Array1::from_iter(rhs.t.iter().chain(rhs.beta.iter()).copied());
+        let mut band = Array1::<f64>::zeros(dim);
+        let mut band_directions = 0usize;
+        for index in 0..dim {
+            if geometry.eigenvalues[index].abs() <= geometry.rank_floor(index) {
+                let direction = geometry.eigenvectors.column(index);
+                band.scaled_add(direction.dot(&rhs_flat), &direction);
+                band_directions += 1;
+            }
+        }
+        let band_norm = band.dot(&band).sqrt();
+        let rhs_range = SaeArrowVector {
+            t: &rhs.t - &band.slice(s![..total_t]),
+            beta: &rhs.beta - &band.slice(s![total_t..]),
+        };
+        let range_resid = a_residual_norm(&term, &rho, target.view(), &cache, &x, &rhs_range);
+
         // Surrogate solve x_B = B⁻¹ rhs (the pre-#1418 implicit step).
         let x_b = solver
             .solve(rhs.t.view(), rhs.beta.view())
             .expect("B inverse");
         let surrogate_resid = a_residual_norm(&term, &rho, target.view(), &cache, &x_b, &rhs);
 
-        // 1) The exact solve drives the FULL ambient residual `Ax-rhs` to ~0.
+        // 1) The exact solve drives the residual on the retained range to ~0.
         //    #2674 — this used to be asserted on the chart-gauge quotient of the
-        //    residual, because the solve deleted that orbit and could not reduce
-        //    an arbitrary RHS's component along it. It no longer deletes it, so
-        //    the whole residual is now in scope and this bar is strictly harder.
+        //    residual, because the solve deleted that orbit before inverting; that
+        //    deletion is gone, so no direction is excluded by declaration. What
+        //    is excluded is the spectral band `|λ| ≤ rank_floor`, the one null
+        //    predicate the value, the differential and this solve share, so the
+        //    bar is `‖A x − (rhs − P_band rhs)‖` at the full ambient strength.
         assert!(
-            exact_resid <= 1.0e-6 * rhs_norm,
-            "solve_exact_stationarity must invert the EXACT A: ‖A x − rhs‖/‖rhs‖ = {:.3e} \
-             (rhs_norm={rhs_norm:.3e}) — the IFT step is not solving A x = rhs (#1418)",
-            exact_resid / rhs_norm
+            range_resid <= 1.0e-6 * rhs_norm,
+            "solve_exact_stationarity must invert the EXACT A on its retained range: \
+             ‖A x − (rhs − P_band rhs)‖/‖rhs‖ = {:.3e} (rhs_norm={rhs_norm:.3e}, band \
+             directions={band_directions}, ‖P_band rhs‖={band_norm:.3e}, full residual \
+             {exact_resid:.3e}) — the IFT step is not solving A x = rhs (#1418)",
+            range_resid / rhs_norm
         );
 
         // 2) Non-vacuity: the surrogate B-solve leaves a materially large
@@ -1202,10 +1232,12 @@ mod exact_stationarity_solve_1418_tests {
             surrogate_resid / rhs_norm
         );
 
-        // 3) The exact solve is a strict, large improvement over the surrogate.
+        // 3) The exact solve is a strict, large improvement over the surrogate on
+        //    the range it inverts.
         assert!(
-            exact_resid < 1.0e-3 * surrogate_resid,
-            "exact A-solve residual {exact_resid:.3e} must be far below surrogate {surrogate_resid:.3e}"
+            range_resid < 1.0e-3 * surrogate_resid,
+            "exact A-solve range residual {range_resid:.3e} must be far below surrogate \
+             {surrogate_resid:.3e}"
         );
     }
 }
