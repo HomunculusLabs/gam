@@ -31,11 +31,12 @@
 //!     log Λ(t | x) = s(log t) + f_Age(Age) + f_x(x_continuous) ,
 //!     S(t | x)     = exp( −exp( log Λ(t | x) ) )                  (PH link),
 //!
-//! with penalized covariate smooths and a penalized log-time baseline, smoothing
-//! parameters chosen by REML. gam: `survival_likelihood="transformation"`,
+//! with penalized covariate smooths and a penalized log-time baseline. gam chooses its
+//! smoothing parameters by REML and pstpm2 by GCV. gam: `survival_likelihood="transformation"`,
 //! I-spline log-time baseline, `s(Age,k=10)+s(x_continuous)+survmodel(spec=net)`.
-//! pstpm2: `pstpm2(Surv(t,event) ~ s(Age)+s(x_continuous),
-//! smooth.formula=~s(log(t)), link.type="PH", criterion="REML")`. Identical
+//! pstpm2: `pstpm2(Surv(t, event) ~ 1, smooth.formula = ~ s(log(t)) + s(Age) + s(x_continuous),
+//! link.type = "PH", control = list(criterion = "GCV"))`. GCV is the smoothing selector this
+//! rstpm2 build exposes on the penalized path. Identical
 //! `(t, event, Age, x_continuous)` rows feed both.
 //!
 //! ## OBJECTIVE METRICS ASSERTED (un-weakened)
@@ -346,7 +347,7 @@ fn gam_smooth_covariate_recovers_flat_noise_effect_and_valid_survival_on_bone() 
     // ---- fit the SAME model with rstpm2::pstpm2 ---------------------------
     // pstpm2 fits a PENALIZED generalized survival model on the log-cumulative-
     // hazard scale (link.type="PH" => log Λ): s(log t) baseline + s(Age) + s(x) smooth
-    // covariates, smoothing parameters by REML (criterion="REML"). We read back:
+    // covariates, smoothing parameters by GCV (control = list(criterion = "GCV")). We read back:
     //   * total edf (sum of per-term edf),
     //   * the ∂ log Λ / ∂x slope surface via central FD of predict(type="link")
     //     on the IDENTICAL x grid / step / Age=mean,
@@ -393,7 +394,7 @@ fn gam_smooth_covariate_recovers_flat_noise_effect_and_valid_survival_on_bone() 
                         link.type = "PH", control = list(criterion = "GCV"))
 
             # Total effective degrees of freedom of the penalized fit (baseline
-            # spline + both covariate splines + parametric terms), the REML-selected
+            # spline + both covariate splines + parametric terms), the GCV-selected
             # complexity comparable to gam's edf_total. pstpm2 stores the penalized
             # working fit's effective df as the trace of the smoother/hat operator
             # in edf_var; sum it. Fall back to the coefficient count only if the
