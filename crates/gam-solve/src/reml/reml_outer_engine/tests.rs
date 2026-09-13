@@ -6646,7 +6646,7 @@ pub(crate) fn implicit_hyper_operator_multiplies_through_the_active_basis_map_27
         .expect("materialize_first should succeed on the tiny fixture");
     let mut x_tau_original = Array2::<f64>::zeros((n, p_full));
     x_tau_original
-        .slice_mut(s![.., term.clone()])
+        .slice_mut(ndarray::s![.., term.clone()])
         .assign(&dx_term);
     let qs_z = qs.dot(&z);
     let x_active = x_original.dot(&qs_z);
@@ -6664,7 +6664,7 @@ pub(crate) fn implicit_hyper_operator_multiplies_through_the_active_basis_map_27
         w_diag: gam_linalg::matrix::SignedWeightsArc::from_array(weights.clone()),
         s_psi: s_psi.clone(),
         p,
-        coefficient_map: Arc::new(qs_z.slice(s![term.clone(), ..]).to_owned()),
+        coefficient_map: Arc::new(qs_z.slice(ndarray::s![term.clone(), ..]).to_owned()),
         c_x_psi_beta: Some(Arc::new(c_x_psi_beta.clone())),
     };
 

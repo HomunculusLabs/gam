@@ -317,11 +317,11 @@ fn a_redundant_penalty_map_still_fits_and_certifies_2676() {
             pair_defects(&canonical),
         ));
         if invariance.dimension() >= 1 {
-            chosen = Some((scale, canonical, p, invariance));
+            chosen = Some((scale, canonical, p));
             break;
         }
     }
-    let Some((scale, canonical, p, invariance)) = chosen else {
+    let Some((scale, canonical, p)) = chosen else {
         panic!(
             "no length scale on the ladder produces a penalty map with an exact linear \
              redundancy, so this acceptance has nothing to gate. Re-derive it against whatever \
