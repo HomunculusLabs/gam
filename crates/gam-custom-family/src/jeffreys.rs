@@ -1272,20 +1272,43 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
                 );
                 Arc::new(move |deltas: &[Array1<f64>]| {
                     let base = prepare()?;
+                    // The rotated `{H²[δ, e_a]}` feeds only the gate and floor motion, so it is
+                    // formed only where they move, and then every direction's axes come from one
+                    // family request (gam#2905).
+                    let rotated_seconds = if base.hessian_motion_active() {
+                        let mut slots = Vec::with_capacity(deltas.len());
+                        slots.resize_with(deltas.len(), || None);
+                        let complete = family
+                            .joint_jeffreys_information_second_directional_rotated_all_axes_each_with_specs(
+                                &states,
+                                &specs,
+                                deltas,
+                                base.ambient_eigenbasis(),
+                                &mut |index, rows| {
+                                    slots[index] = Some(base.rotated_axes_from_rows(rows)?);
+                                    Ok(())
+                                },
+                            )
+                            .map_err(CustomFamilyError::trial_point)?;
+                        if !complete {
+                            return Err(missing("second information derivatives"));
+                        }
+                        slots
+                            .into_iter()
+                            .map(|slot| slot.ok_or_else(|| missing("second information derivatives")))
+                            .collect::<Result<Vec<_>, CustomFamilyError>>()?
+                    } else {
+                        Vec::new()
+                    };
                     deltas
                         .iter()
-                        .map(|delta| -> Result<Array2<f64>, CustomFamilyError> {
+                        .enumerate()
+                        .map(|(index, delta)| -> Result<Array2<f64>, CustomFamilyError> {
                             let information = family
                                 .joint_jeffreys_information_directional_derivative_with_specs(
                                     &states, &specs, delta,
                                 )?
                                 .ok_or_else(|| missing("first information derivatives"))?;
-                            let axes = family
-                                .joint_jeffreys_information_second_directional_all_axes_with_specs(
-                                    &states, &specs, delta,
-                                )?
-                                .ok_or_else(|| missing("second information derivatives"))?;
-                            let rotated = base.rotate_axes(&axes)?;
                             let contracted =
                                 |weight: &Array2<f64>| -> Result<Array2<f64>, String> {
                                     family
@@ -1311,7 +1334,7 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
                             };
                             let mut drift = base.completion_drift_matrix(
                                 &information,
-                                &rotated,
+                                rotated_seconds.get(index),
                                 &contracted,
                                 &along,
                             )?;

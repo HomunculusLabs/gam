@@ -4455,7 +4455,7 @@ mod tests {
         let contracted_along_u =
             |weight: &Array2<f64>| contract(weight, &|a, b| third(beta, &u, &axis(a), &axis(b)));
         let matrix = base
-            .completion_drift_matrix(&pert_u, &second_u, &contracted, &contracted_along_u)
+            .completion_drift_matrix(&pert_u, Some(&second_u), &contracted, &contracted_along_u)
             .expect("completion drift matrix");
         let mut largest = 0.0_f64;
         let mut worst = 0.0_f64;
@@ -4614,7 +4614,7 @@ mod tests {
                 .expect("rotated H²[u,·]");
             base.completion_drift_matrix(
                 &first(b, &u),
-                &second_u,
+                Some(&second_u),
                 &|weight: &Array2<f64>| contract(weight, &|a, c| second(b, &axis(a), &axis(c))),
                 &|weight: &Array2<f64>| contract(weight, &|a, c| third(b, &u, &axis(a), &axis(c))),
             )

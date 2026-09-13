@@ -495,22 +495,23 @@ impl JeffreysHphiDriftBase {
     ///
     /// `CTH_u(W)_ab = ⟨W, H'''[u, e_a, e_b]⟩`. The two contractions are the caller's (a
     /// family's contracted-trace hooks); everything spectral is formed here from
-    /// `H[u]` and the rotated `{H''[u, e_a]}`. Every column is the motion-completed
+    /// `H[u]` and the rotated `{H''[u, e_a]}`. The rotated axes feed only the gate and
+    /// floor motion `(E, R)`, so they are read only where [`Self::hessian_motion_active`]
+    /// holds, and are required there. Every column is the motion-completed
     /// [`Self::completion_drift_action_from_rotated`] along that axis.
     pub fn completion_drift_matrix(
         &self,
         pert_u: &Array2<f64>,
-        second_u: &JeffreysRotatedAxes,
+        second_u: Option<&JeffreysRotatedAxes>,
         contracted: &dyn Fn(&Array2<f64>) -> Result<Array2<f64>, String>,
         contracted_along_u: &dyn Fn(&Array2<f64>) -> Result<Array2<f64>, String>,
     ) -> Result<Array2<f64>, String> {
         let (p, m) = (self.p, self.m);
-        if pert_u.dim() != (p, p) || second_u.rows.dim() != (p, m * m) {
+        if pert_u.dim() != (p, p) || second_u.is_some_and(|axes| axes.rows.dim() != (p, m * m)) {
             return Err("Jeffreys completion drift matrix dimension mismatch".into());
         }
         let basis = &self.ambient_eigenbasis;
         let e_u = symmetric_basis_contraction(pert_u.view(), basis.view());
-        let b_u = &second_u.rows;
         let a_rows = &self.a_rows;
         let (imin, imax) = (self.idx_min, self.idx_max);
         let evals = &self.evals;
@@ -548,6 +549,9 @@ impl JeffreysHphiDriftBase {
         let motion = self.hessian_motion_active();
         let mut remainder_drift = Array2::<f64>::zeros((p, p));
         if motion {
+            let b_u = &second_u
+                .ok_or("Jeffreys completion drift matrix requires H²[u,·] where the gate or the floor moves")?
+                .rows;
             let (g11, g12, g22) = conditioning_gate_weight_hess(lambda_min, lambda_max);
             let (g111, g112, g122, g222) = conditioning_gate_weight_third(lambda_min, lambda_max);
             let mut ungated = 0.0_f64;
