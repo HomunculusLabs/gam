@@ -1124,9 +1124,21 @@ impl SaeManifoldTerm {
             None
         };
         // #2915 — so does a reduced-Schur clamp-basin price.
+        // The border clamp is the decoder priors' remainder at the unit penalty scale of
+        // the full evidence system this lane factors.
+        let border_remainder = if clamp.is_some() && cache.beta_schur_conditioning.is_some() {
+            self.decoder_prior_border_remainder_op(cache.k, 1.0)
+                .map_err(|reason| ArrowSchurError::SchurFactorFailed { reason })?
+        } else {
+            None
+        };
         let beta_price = match clamp.as_ref() {
-            Some(clamp) => Self::beta_schur_clamp_basin_price_weights(cache, clamp.view())
-                .map_err(|reason| ArrowSchurError::SchurFactorFailed { reason })?,
+            Some(clamp) => Self::beta_schur_clamp_basin_price_weights(
+                cache,
+                clamp.view(),
+                border_remainder.as_ref().map(|op| op as &dyn BetaPenaltyOp),
+            )
+            .map_err(|reason| ArrowSchurError::SchurFactorFailed { reason })?,
             None => None,
         };
         for row in 0..n {

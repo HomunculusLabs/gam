@@ -5660,8 +5660,19 @@ impl SaeManifoldTerm {
         };
         // #2915 — so does a reduced-Schur clamp-basin price, which the selected
         // inverse does not see either.
+        // The border clamp is the decoder priors' remainder at the unit penalty scale of
+        // the full evidence system this lane factors.
+        let border_remainder = if clamp.is_some() && cache.beta_schur_conditioning.is_some() {
+            self.decoder_prior_border_remainder_op(cache.k, 1.0)?
+        } else {
+            None
+        };
         let beta_price = match clamp.as_ref() {
-            Some(clamp) => Self::beta_schur_clamp_basin_price_weights(cache, clamp.view())?,
+            Some(clamp) => Self::beta_schur_clamp_basin_price_weights(
+                cache,
+                clamp.view(),
+                border_remainder.as_ref().map(|op| op as &dyn BetaPenaltyOp),
+            )?,
             None => None,
         };
         let assignment_dim = self.assignment.assignment_coord_dim();
@@ -6089,17 +6100,23 @@ impl SaeManifoldTerm {
     pub(crate) fn beta_schur_clamp_basin_price_weights(
         cache: &ArrowFactorCache,
         clamp: ArrayView1<'_, f64>,
+        border_remainder: Option<&dyn BetaPenaltyOp>,
     ) -> Result<Option<Vec<(Array2<f64>, Array1<f64>)>>, String> {
-        Ok(Self::beta_schur_clamp_basin_operands(cache, clamp)?
+        Ok(Self::beta_schur_clamp_basin_operands(cache, clamp, border_remainder)?
             .map(|operands| Self::beta_schur_basin_row_weights(cache, clamp, &operands)))
     }
 
     /// The operands every reduced-Schur clamp-basin weight is built from: `G_i Q`
     /// per row, `R` in the reduced-Schur eigenbasis, and each basin's eigen-index
-    /// with `1/λ̃_w`. `None` when the factor records no reduced-Schur clamp basin.
+    /// with `1/λ̃_w`. Since cf712b006 the classification's clamp metric also carries
+    /// the decoder priors' border clamp `E_ββ = −remainder` (#2828), so
+    /// `C = Σ_i G_iᵀ diag(E_i) G_i + E_ββ`. `border_remainder` is that remainder at the
+    /// penalty scale the evidence system was assembled with. `None` when the factor
+    /// records no reduced-Schur clamp basin.
     fn beta_schur_clamp_basin_operands(
         cache: &ArrowFactorCache,
         clamp: ArrayView1<'_, f64>,
+        border_remainder: Option<&dyn BetaPenaltyOp>,
     ) -> Result<Option<(Vec<Array2<f64>>, Array2<f64>, Vec<(usize, f64)>)>, String> {
         let Some(spec) = cache.beta_schur_conditioning.as_ref() else {
             return Ok(None);
@@ -6177,6 +6194,34 @@ impl SaeManifoldTerm {
                 }
             }
         }
+        // `E_ββ = −remainder`, the decoder priors' border clamp, joins `C`.
+        if let Some(remainder) = border_remainder {
+            if remainder.dim() != k {
+                return Err(format!(
+                    "beta_schur_clamp_basin_operands: the border remainder has width {} for \
+                     border width {k}",
+                    remainder.dim()
+                ));
+            }
+            let mut applied = vec![0.0_f64; k];
+            for (index, &(w, _)) in basins.iter().enumerate() {
+                applied.fill(0.0);
+                let direction = basis.column(w).to_owned();
+                remainder.matvec(
+                    direction
+                        .as_slice()
+                        .expect("an owned eigenvector is contiguous"),
+                    &mut applied,
+                );
+                for v in 0..k {
+                    let mut acc = 0.0_f64;
+                    for b in 0..k {
+                        acc += basis[[b, v]] * applied[b];
+                    }
+                    clamp_rotated[[index, v]] -= acc;
+                }
+            }
+        }
         let mut response = Array2::<f64>::zeros((k, k));
         for (index, &(w, inv_price)) in basins.iter().enumerate() {
             for v in 0..k {
@@ -6239,13 +6284,14 @@ impl SaeManifoldTerm {
     /// A θ also moves `H_tβ^(i)` and `H_ββ`, so `dS` gains
     /// `dH_ββ + dH_βt,i G_i + G_iᵀ dH_tβ,i` and `dG_i` gains `−Φ_i⁻¹ dH_tβ,i`. Returns
     /// per row `X_i = G_i Q R Qᵀ − Φ_i⁻¹ E_i G_i Ω` with `Ω = Σ_w w wᵀ / λ̃_w`, which
-    /// adds to the row's `(H⁻¹)_tβ` block wherever it contracts `dH_tβ,i`, and
-    /// `Q R Qᵀ`, which contracts a direct `dH_ββ`.
+    /// adds to the row's `(H⁻¹)_tβ` block wherever it contracts `dH_tβ,i`, `Q R Qᵀ`,
+    /// which contracts a direct `dH_ββ`, and `Ω`, which contracts the border clamp's
+    /// own `∂E_ββ/∂β`.
     fn beta_schur_basin_border_weights(
         cache: &ArrowFactorCache,
         clamp: ArrayView1<'_, f64>,
         operands: &(Vec<Array2<f64>>, Array2<f64>, Vec<(usize, f64)>),
-    ) -> Result<(Vec<Array2<f64>>, Array2<f64>), String> {
+    ) -> Result<(Vec<Array2<f64>>, Array2<f64>, Array2<f64>), String> {
         let Some(spec) = cache.beta_schur_conditioning.as_ref() else {
             return Err(
                 "beta_schur_basin_border_weights: the factor records no reduced-Schur spectrum"
@@ -6272,7 +6318,16 @@ impl SaeManifoldTerm {
             }
             borders.push(rotated.dot(&basis.t()));
         }
-        Ok((borders, basis.dot(response).dot(&basis.t())))
+        let k = basis.nrows();
+        let mut omega = Array2::<f64>::zeros((k, k));
+        for &(w, inv_price) in basins {
+            for a in 0..k {
+                for b in 0..k {
+                    omega[[a, b]] += inv_price * basis[[a, w]] * basis[[b, w]];
+                }
+            }
+        }
+        Ok((borders, basis.dot(response).dot(&basis.t()), omega))
     }
 
     /// β-tier selected inverse `(H⁻¹)_ββ`, shared across rows (#932 FRONT C). On
@@ -7188,9 +7243,20 @@ impl SaeManifoldTerm {
         };
         // #2915 — so does a reduced-Schur clamp-basin price, which also moves with the
         // border and `H_ββ`; the selected inverse sees none of that motion.
+        // The border clamp is the decoder priors' remainder at the unit penalty scale of
+        // the full evidence system this lane factors.
+        let border_remainder = if exact_a && cache.beta_schur_conditioning.is_some() {
+            self.decoder_prior_border_remainder_op(cache.k, 1.0)?
+        } else {
+            None
+        };
         let beta_basin = match clamp_price_inputs.as_ref() {
             Some((clamp, _)) => {
-                match Self::beta_schur_clamp_basin_operands(cache, clamp.view())? {
+                match Self::beta_schur_clamp_basin_operands(
+                    cache,
+                    clamp.view(),
+                    border_remainder.as_ref().map(|op| op as &dyn BetaPenaltyOp),
+                )? {
                     Some(operands) => Some((
                         Self::beta_schur_basin_row_weights(cache, clamp.view(), &operands),
                         Self::beta_schur_basin_border_weights(cache, clamp.view(), &operands)?,
@@ -7337,7 +7403,7 @@ impl SaeManifoldTerm {
                 true,
                 "logdet_theta_adjoint_from_probes",
             )?;
-            if let Some((row_weights, (border_weights, _))) = beta_basin.as_ref() {
+            if let Some((row_weights, (border_weights, _, _))) = beta_basin.as_ref() {
                 inv_vv += &row_weights[row].0;
                 inv_vbeta += &border_weights[row];
             }
@@ -7453,7 +7519,7 @@ impl SaeManifoldTerm {
             // against `∂H_ββ/∂θ_w = Σ_c (∂b_c/∂θ_w b_cᵀ + b_c ∂b_cᵀ/∂θ_w)`, so the row's
             // border jets `b_c` are folded through `QRQᵀ` once.
             let beta_fold = match beta_basin.as_ref() {
-                Some((_, (_, beta_weight))) if bjet_len > 0 => {
+                Some((_, (_, beta_weight, _))) if bjet_len > 0 => {
                     let mut coefficients = Array2::<f64>::zeros((bjet_len, k_border));
                     for (beta_pos, channel) in border.iter().enumerate() {
                         let bj = jets.beta(beta_pos);
@@ -7738,7 +7804,7 @@ impl SaeManifoldTerm {
                     cache, &prepared, solved.view(), probe.view(), inv_m, &mut gamma_beta,
                 )?;
             }
-            if let Some((_, (_, beta_weight))) = beta_basin.as_ref() {
+            if let Some((_, (_, beta_weight, basin_omega))) = beta_basin.as_ref() {
                 // The reduced-Schur basin prices contract `QRQᵀ` against the decoder
                 // prior's own `∂H_ββ/∂β`.
                 let mut unit = Array1::<f64>::zeros(k_border);
@@ -7753,6 +7819,10 @@ impl SaeManifoldTerm {
                         &mut gamma_beta,
                     )?;
                     unit[col] = 0.0;
+                }
+                if border_remainder.is_some() {
+                    // A border clamp moves with β itself: `Ω` contracts `∂E_ββ/∂β`.
+                    gamma_beta += &self.decoder_prior_gap_theta_trace(cache, basin_omega.view())?;
                 }
             }
         }
