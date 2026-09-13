@@ -633,8 +633,16 @@ impl BlockPlusRowsSpectrum {
         // Each pass moves the shift strictly above the highest colliding eigenvalue,
         // by at least `8ε·max(|λ|, |s|)` net, which leaves that eigenvalue outside
         // its tolerance; only higher eigenvalues can collide afterwards, so the
-        // passes end within the eigenvalue count.
+        // passes end within the eigenvalue count. That argument needs a finite
+        // shift: at `s = ∞` every finite eigenvalue collides (`|λ − ∞| ≤ 8ε·∞`) and
+        // the nudge returns `∞` again, so a non-finite shift, whether given or
+        // reached by overflow past an infinite eigenvalue, is refused.
         loop {
+            if !shift.is_finite() {
+                return Err(format!(
+                    "residual gauge curvature: inertia shift {shift} is not finite"
+                ));
+            }
             let mut collided: Option<f64> = None;
             for lambda in self.block_eigenvalues.iter() {
                 let tol = 8.0 * f64::EPSILON * lambda.abs().max(shift.abs());
