@@ -65,31 +65,6 @@ fn validate_structured_residual_passes(passes: usize) -> Result<(), SaeFitError>
     Ok(())
 }
 
-/// Absolute precision floor on the RELATIVE post-dictionary residual energy
-/// `‖Z − Ẑ‖²_F / ‖Z‖²_F` below which the structured-residual pass is skipped and
-/// the fit degrades to the already-certified pass-0 iid model.
-///
-/// A dictionary that explains the target to within this bound leaves only the
-/// fit's own numerical-convergence noise as "residual": there is genuinely no
-/// structured covariance to whiten. Fitting a residual-covariance model on that
-/// noise is DEGENERATE — the idiosyncratic diagonal `D` collapses toward its
-/// floor (`residual_factor` floors it at `1e-6 · mean_var`, still ~6 orders
-/// below a genuine noise scale on near-noiseless data),
-/// the whitening metric `1/D` becomes near-singular, and the whitened-residual
-/// penalized quasi-Laplace criterion the outer ρ-optimizer then descends is ill-conditioned with no interior
-/// stationary point. The outer correctly refuses to certify a non-stationary
-/// optimum, so a fit that SHOULD succeed (its iid pass-0 already certified)
-/// instead fails. Skipping the structured pass when there is nothing to model is
-/// the correct behavior, not a workaround.
-///
-/// DERIVED: the value `1e-10` on the relative *energy* corresponds to a residual
-/// RMS of `1e-5` relative to the target RMS — an order of magnitude below the
-/// inner SAE solve's own convergence scale (`SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL`
-/// `= 1e-8`), so it triggers only on numerically-exact reconstructions while
-/// leaving every genuinely-structured residual (relative energy `≥ ~1e-8`, i.e. a
-/// fit that leaves `≥ 1e-4` RMS unexplained) to run the pass unchanged.
-pub(crate) const STRUCTURED_RESIDUAL_MIN_REL_ENERGY: f64 = 1.0e-10;
-
 /// #2071 residual-promotion alignment threshold under the random-direction
 /// null. Rank one has no informative angle, so its threshold is exactly one.
 /// Keeping this derivation in `gam-sae` makes the typed fit entry self-sufficient
@@ -135,13 +110,39 @@ pub fn metric_provenance_label(provenance: MetricProvenance) -> &'static str {
 }
 
 /// Fit the whitened residual-covariance model on the current fitted residuals of
-/// `term` against `target`, or `Ok(None)` when there is nothing to mine (fewer
-/// than two output channels). Errors propagate a genuine fit breakdown (#2070/
-/// #2021) rather than degrading silently to prior-pass geometry.
+/// `term` against `target`, or `Ok(None)` when there is nothing to mine: fewer than
+/// two output channels, or a reconstruction loss within the resolution of the
+/// certified fit that `loss` reports. Errors propagate a genuine fit breakdown
+/// (#2070/#2021) rather than degrading silently to prior-pass geometry.
 fn sae_structured_residual_model(
     term: &SaeManifoldTerm,
     target: ndarray::ArrayView2<'_, f64>,
+    loss: &SaeManifoldLoss,
 ) -> Result<Option<StructuredResidualModel>, String> {
+    // Degeneracy guard: when the dictionary explains the target within what the
+    // certified fit can resolve, the residual is convergence noise with no structured
+    // covariance to model. Fitting a residual-factor model on it collapses the
+    // idiosyncratic diagonal `D → 0`, the whitening `1/D` goes near-singular, and the
+    // whitened-residual penalized quasi-Laplace criterion the outer optimizer then
+    // descends has no interior stationary point, so a fit that SHOULD certify refuses.
+    // Degrade to the already-certified fit instead.
+    //
+    // The certified fit's penalized objective sums `n·P` residual cells, so it is known
+    // only to `r·|f|` with `r = √(n·P)·ε` (the #2634 descent resolution). A stationary
+    // point is resolved no finer than `√r`: near a minimum `f − f* ≈ ½·h·δ²`, so the
+    // objective recurrence any certificate can ask for is `√r·|f|` and no finer. This
+    // is `SaeSupportSparseTerm::fixed_point_tolerance`'s derivation (f5a112b85), in the
+    // dense fit's own cells. A reconstruction loss at or below `√r·|f|` is one the
+    // certified state cannot tell apart from an exact reconstruction, so the residual
+    // carries no certified structure to whiten. `f` is the penalized loss the certified
+    // fit reports, in the objective that fit descended, so the rule holds at every
+    // pass, whitened or not, and sets no floor of its own.
+    let (rows, columns) = target.dim();
+    let cells = (rows * columns).max(1) as f64;
+    let certified_resolution = (cells.sqrt() * f64::EPSILON).sqrt() * loss.total().abs();
+    if loss.data_fit <= certified_resolution {
+        return Ok(None);
+    }
     let fitted = term.try_fitted_target_aware(target, None)?;
     let (n, p) = fitted.dim();
     // Need >= 2 output channels for an off-diagonal factor subspace.
@@ -158,20 +159,6 @@ fn sae_structured_residual_model(
     // owned temporary outlives the in-place subtraction.
     let mut residuals = target.to_owned();
     residuals -= &fitted;
-    // Degeneracy guard: when the dictionary already explains the target to within
-    // numerical precision, the residual is pure convergence noise with no
-    // structured covariance to model. Fitting a residual-factor model on it
-    // collapses the idiosyncratic diagonal `D → 0`, the whitening `1/D` goes
-    // near-singular, and the whitened-residual penalized quasi-Laplace criterion the outer optimizer descends
-    // has no interior stationary point (a fit that SHOULD certify then refuses).
-    // Degrade to the pass-0 iid fit (which already certified) instead. Scale-free:
-    // the floor is on the residual energy RELATIVE to the target energy. See
-    // `STRUCTURED_RESIDUAL_MIN_REL_ENERGY`.
-    let target_energy: f64 = target.iter().map(|v| v * v).sum();
-    let residual_energy: f64 = residuals.iter().map(|v| v * v).sum();
-    if residual_energy <= STRUCTURED_RESIDUAL_MIN_REL_ENERGY * target_energy {
-        return Ok(None);
-    }
     // Activity = per-row total assignment mass (mirrors structure_harvest.rs and
     // the fit tail's own assignment read).
     let assignments = term.assignment.assignments();
@@ -1721,7 +1708,7 @@ fn run_sae_manifold_fit_on_target(request: SaeFitRequest) -> Result<SaeFitOutcom
         let mut total_passes = structured_passes;
         let mut pass = 0usize;
         while pass < total_passes {
-            let Some(model) = sae_structured_residual_model(&term, z.view())? else {
+            let Some(model) = sae_structured_residual_model(&term, z.view(), &loss)? else {
                 break;
             };
             let gamma = (pass as f64 + 1.0) / (total_passes as f64 + 1.0);

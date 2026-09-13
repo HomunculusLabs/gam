@@ -14,10 +14,11 @@
 //! "all declared solver plans exhausted".
 //!
 //! Fix: `sae_structured_residual_model` returns `None` (→ the alternation breaks
-//! and the already-certified pass-0 iid fit is returned) when the relative
-//! residual energy is below [`STRUCTURED_RESIDUAL_MIN_REL_ENERGY`]. These tests
-//! pin both halves: a near-exact fit certifies with the structured pass SKIPPED,
-//! and a genuinely-residual fit still RUNS the structured pass (no regression).
+//! and the already-certified iid fit is returned) when the certified fit's
+//! reconstruction loss is within the objective resolution the certified state can
+//! resolve, `√(√(n·P)·ε)·|f|`. These tests pin both halves: a near-exact fit
+//! certifies with the structured pass SKIPPED, and a genuinely-residual fit still
+//! RUNS the structured pass (no regression).
 
 #[cfg(test)]
 mod tests {
@@ -201,22 +202,23 @@ mod tests {
     fn near_exact_fit_skips_structured_pass_and_certifies() {
         // #2822: an exactly representable target leaves a profiled residual of zero, which
         // Gaussian REML refuses to score by design (#2723), so the target carries a small
-        // perturbation that keeps the residual resolvable. Both knobs are sized in the
-        // guard's frame, where this circle's floor admits a raw residual energy of
-        // 1e-10 · n·p · σ_c² = 8e-10.
+        // perturbation that keeps the residual resolvable.
         //
-        // Neither knob sets the residual that fails the premise. Guarded job 543027 at
-        // 96b42e9e8 read a guard fraction of 2.02e-9 at smoothness 1 and σ = 3e-5. Guarded
-        // job 558087 at 3aab85774 read 2.040e-9 at smoothness 1e-3 and σ = 5e-6, which is
-        // 1000× less smoothing and 36× less perturbation energy. So the residual is neither
-        // penalty shrinkage nor the perturbation. The premise message splits it into the
-        // radial part (amplitude) and the tangential part (coordinates) in the guard's frame.
+        // The guard skips when the certified fit's reconstruction loss is within the
+        // objective resolution the certified state can resolve, `√(√(n·P)·ε)·|f|`. Guarded
+        // job 543027 at 96b42e9e8 read a standardized residual fraction of 2.02e-9 at
+        // smoothness 1 and σ = 3e-5, and job 558087 at 3aab85774 read 2.040e-9 at smoothness
+        // 1e-3 and σ = 5e-6: 1000× less smoothing and 36× less perturbation energy left the
+        // residual where the solve's convergence put it. The premise message still reports
+        // that fraction and its radial/tangential split.
         const SMOOTHNESS: f64 = 1.0e-3;
         let target = with_noise(circle_target(7.0), 5.0e-6);
-        let floor = crate::manifold::fit_entry::STRUCTURED_RESIDUAL_MIN_REL_ENERGY;
+        let (n_rows, n_columns) = target.dim();
+        let relative_resolution = (((n_rows * n_columns) as f64).sqrt() * f64::EPSILON).sqrt();
         // Premise, measured rather than assumed: the regime this test exists for is a
-        // pass-0 fit whose residual is already inside the guard's floor, in the guard's frame.
+        // pass-0 fit whose reconstruction loss is already within its certified resolution.
         let pass0 = run_primary(target.clone(), SMOOTHNESS, 0);
+        let pass0_resolution = relative_resolution * pass0.loss.total().abs();
         let pass0_fraction = guard_frame_residual_fraction(&target, &pass0.fitted);
         let (n, p) = target.dim();
         let mut radial_energy = 0.0_f64;
@@ -242,14 +244,18 @@ mod tests {
         }
         let cells = (n * p) as f64;
         assert!(
-            pass0_fraction <= floor,
-            "premise: the pass-0 fit leaves residual energy fraction {:e} above the \
-             structured-residual floor {:e}, so this fixture is not in the near-exact regime \
-             the skip guard exists for, and the skip assertion below would measure nothing. \
-             Guard-frame split: radial {:e}, tangential {:e}, worst standardized cell {:e}; \
-             pass-0 log_lambda_sparse {}, log_lambda_smooth {:?}, R² {}",
+            pass0.loss.data_fit <= pass0_resolution,
+            "premise: the pass-0 fit leaves reconstruction loss {:e} above its certified \
+             objective resolution {:e} (relative resolution {:e}, penalized loss {:e}), so this \
+             fixture is not in the near-exact regime the skip guard exists for, and the skip \
+             assertion below would measure nothing. Standardized residual fraction {:e}; split \
+             radial {:e}, tangential {:e}, worst standardized cell {:e}; pass-0 \
+             log_lambda_sparse {}, log_lambda_smooth {:?}, R² {}",
+            pass0.loss.data_fit,
+            pass0_resolution,
+            relative_resolution,
+            pass0.loss.total(),
             pass0_fraction,
-            floor,
             radial_energy / cells,
             (total_energy - radial_energy) / cells,
             worst_cell,
@@ -263,12 +269,13 @@ mod tests {
         assert!(
             report.structured_residual_diagnostics.is_empty(),
             "near-exact fit must SKIP the structured-residual pass (nothing to \
-             whiten); got {} pass diagnostic(s) {:?}; returned residual energy fraction \
-             {:e} against the floor {:e}",
+             whiten); got {} pass diagnostic(s) {:?}; returned reconstruction loss {:e} \
+             against its certified resolution {:e}, standardized residual fraction {:e}",
             report.structured_residual_diagnostics.len(),
             report.structured_residual_diagnostics,
+            report.loss.data_fit,
+            relative_resolution * report.loss.total().abs(),
             guard_frame_residual_fraction(&target, &report.fitted),
-            floor
         );
     }
 
