@@ -3095,12 +3095,17 @@ fn saddle_point_tilt(
         // of the norm cannot stall short of one.
         let mut alpha = 1.0f64;
         let mut accepted = false;
-        while alpha > 1e-12 {
+        loop {
             let trial: Vec<f64> = v
                 .iter()
                 .zip(step.iter())
                 .map(|(value, delta)| value + alpha * delta)
                 .collect();
+            // Halve until the step no longer moves the iterate: past that point every
+            // trial is the point already judged, so the search has stalled (#2469).
+            if trial == v {
+                break;
+            }
             if let Some((trial_f, _, trial_derivative)) = residual(&trial)
                 && infinity_norm(&trial_f) <= (1.0 - 1e-4 * alpha) * norm
             {
