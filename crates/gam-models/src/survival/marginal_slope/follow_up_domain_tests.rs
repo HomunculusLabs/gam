@@ -582,3 +582,393 @@ fn blocks_for(
         })
         .collect()
 }
+
+/// The Jeffreys reference values the candidate objectives below are built from, mirrored from
+/// gam-solve `reml::jeffreys_subspace`, where they are crate-private: `REDUCED_INFO_ABSOLUTE_FLOOR`,
+/// `REDUCED_INFO_RELATIVE_FLOOR`, and `CONDITIONING_GATE_ABSOLUTE_CLEAR`, the top saturation `Λ`
+/// that `jeffreys_cap` reads.
+const JEFFREYS_ABSOLUTE_FLOOR: f64 = 1e-12;
+const JEFFREYS_RELATIVE_FLOOR: f64 = 1e-10;
+const JEFFREYS_TOP_SATURATION: f64 = 16.0;
+
+/// `g(λ)` on `jeffreys_antiderivative`'s four branches, with the bottom floor and the top
+/// saturation passed in so one spectrum can be scored under each candidate objective.
+/// `cap = +∞` removes the top saturation.
+fn jeffreys_candidate_value(lambda: f64, floor: f64, cap: f64) -> f64 {
+    if lambda >= cap {
+        cap.ln() + 1.0 - cap / lambda
+    } else if lambda >= floor {
+        lambda.ln()
+    } else if lambda >= 0.0 {
+        lambda / floor + floor.ln() - 1.0
+    } else {
+        floor.ln() - 1.0 + lambda / (floor - lambda)
+    }
+}
+
+/// `g′(λ)` on the same four branches.
+fn jeffreys_candidate_slope(lambda: f64, floor: f64, cap: f64) -> f64 {
+    if lambda >= cap {
+        cap / (lambda * lambda)
+    } else if lambda >= floor {
+        1.0 / lambda
+    } else if lambda >= 0.0 {
+        1.0 / floor
+    } else {
+        floor / ((floor - lambda) * (floor - lambda))
+    }
+}
+
+/// `Φ = ½ Σ g(λ_i)` for one candidate objective, and the roundoff one eigensolve leaves on it.
+/// Every `λ_i` is known only to `m·ε·λ_max`, and `g′` carries that into `Φ`; this is the bound
+/// `JointJeffreysPlan::value_roundoff_bound` states for the production value.
+fn jeffreys_candidate(spectrum: &[f64], floor: f64, cap: f64) -> (f64, f64) {
+    let lambda_max = spectrum.iter().fold(0.0_f64, |acc, &lambda| acc.max(lambda));
+    let perturbation = spectrum.len() as f64 * f64::EPSILON * lambda_max.max(floor);
+    let phi = 0.5
+        * spectrum
+            .iter()
+            .map(|&lambda| jeffreys_candidate_value(lambda, floor, cap))
+            .sum::<f64>();
+    let sensitivity = 0.5
+        * spectrum
+            .iter()
+            .map(|&lambda| jeffreys_candidate_slope(lambda, floor, cap).abs())
+            .sum::<f64>();
+    (phi, perturbation * sensitivity)
+}
+
+/// One point of a walk into the follow-up face, read the way a fit reads it.
+struct FacePoint {
+    margin: f64,
+    neg_log_likelihood: f64,
+    spectrum: Vec<f64>,
+    production_phi: f64,
+    production_roundoff: f64,
+    production_gate: f64,
+}
+
+fn face_point(
+    family: &SurvivalMarginalSlopeFamily,
+    base: &[ParameterBlockState],
+    direction: &Array1<f64>,
+    alpha: f64,
+) -> FacePoint {
+    let moved = family
+        .displaced_block_states(base, direction, alpha)
+        .expect("the fixture's blocks and direction agree in width");
+    let margin = family
+        .follow_up_domain_margin(&moved)
+        .expect("the fixture is on the follow-up-varying frame")
+        .expect("the follow-up frame reports a margin");
+    let neg_log_likelihood = -family
+        .log_likelihood_only(&moved)
+        .expect("an interior point has a likelihood");
+    let specs = blocks_for(family, moved[2].beta.clone());
+    let information = family
+        .joint_jeffreys_information_with_specs(&moved, &specs)
+        .expect("an interior point has a joint information")
+        .expect("the family serves its joint information");
+    // This family states neither a span basis nor an aggregate penalty, so
+    // `build_joint_jeffreys_subspace` gives the Jeffreys term the whole coefficient space.
+    let span = Array2::<f64>::eye(information.nrows());
+    let plan = gam_solve::estimate::reml::jeffreys_subspace::JointJeffreysPlan::prepare(
+        information.view(),
+        span.view(),
+    )
+    .expect("the reduced information has a spectrum");
+    let strength = family.joint_jeffreys_term_strength();
+    let basis = plan.ambient_eigenbasis();
+    let mut spectrum: Vec<f64> = (0..basis.ncols())
+        .map(|index| {
+            let column = basis.column(index);
+            column.dot(&information.dot(&column))
+        })
+        .collect();
+    spectrum.sort_by(f64::total_cmp);
+    FacePoint {
+        margin,
+        neg_log_likelihood,
+        spectrum,
+        production_phi: plan.value() * strength,
+        production_roundoff: plan.value_roundoff_bound() * strength.abs(),
+        production_gate: plan.conditioning_gate_weight(),
+    }
+}
+
+/// `dV/d(−ln ε)` with `V = −ℓ − Φ`, read between the third-last and the last decade that
+/// `admitted` accepts, returned with those two decades' indices. `None` when fewer than three
+/// decades are admitted.
+fn barrier_rate(
+    points: &[FacePoint],
+    phi: &[f64],
+    admitted: &dyn Fn(usize) -> bool,
+) -> Option<(f64, usize, usize)> {
+    let decades: Vec<usize> = (0..points.len()).filter(|&index| admitted(index)).collect();
+    if decades.len() < 3 {
+        return None;
+    }
+    let first = decades[decades.len() - 3];
+    let last = decades[decades.len() - 1];
+    let objective = |index: usize| points[index].neg_log_likelihood - phi[index];
+    let rate = (objective(last) - objective(first))
+        / (points[first].margin.ln() - points[last].margin.ln());
+    Some((rate, first, last))
+}
+
+/// The armed Jeffreys objective keeps the likelihood's barrier at the follow-up face (#2765).
+///
+/// This is the face-boundedness gate on slice 3 of the #979 Jeffreys ruling (b): `G ≡ 1` inside
+/// an armed fit, with the gate, its ramps and the relative floor deleted.
+///
+/// An event row carries `−ln ε` with `ε = η′₁`, and its curvature `uuᵀ/ε² − B/ε`
+/// (`u = ∇η′₁`, `B = ∇²η′₁`) drives the reduced information without limit as a walk reaches
+/// the face. One eigenvalue grows like `|u|²/ε²`. On `u⊥` the Schur complement is
+/// `−B⊥/ε + O(1)`, so `r` eigenvalues grow like `|μ|/ε`, one for each negative eigenvalue `μ` of
+/// `B⊥`, and the rest stay `O(1)` or fall like `−μ/ε`. The objective `V = −ℓ − Φ` with
+/// `Φ = ½ Σ g(λ_i)` keeps its barrier exactly when `Φ` grows slower than `−ln ε`. Each
+/// objective's rate `dV/d(−ln ε)`:
+///
+/// * armed: `G ≡ 1`, absolute floor, top saturation `Λ`. `g ≤ ln Λ + 1`, so `Φ` is bounded and
+///   the rate is `1`;
+/// * no floor at all, `Λ` kept: the same top bound, so the rate is `1` wherever the value exists
+///   (a positive spectrum);
+/// * production: `G·½Σg` with the relative floor and the floor-collapse factor. `G = 0` past the
+///   band, so the rate is `1`;
+/// * control, `Λ` removed: `½ ln λ₁` cancels the barrier and the rate is `−r/2`;
+/// * control, relative floor `1e-10·λ_max` with `G ≡ 1` (#2919): past `floor = Λ` every `g` is
+///   `ln floor ± 1`, and the rate is `1 − m`.
+///
+/// The controls must fail the rate-½ predicate the other objectives pass, or the predicate
+/// measures nothing. Each rate is read over the last three decades of `ε` at which one
+/// eigensolve's roundoff on that objective's `Φ` stays below a twentieth of a decade of barrier;
+/// the relative-floor control also has to be past `floor = Λ` there. The table prints before any
+/// assertion.
+#[test]
+fn the_armed_jeffreys_objective_keeps_the_follow_up_barrier_2765() {
+    const DECADES: usize = 10;
+    const GRID: usize = 4096;
+    let family = family(true);
+    assert!(
+        family
+            .jeffreys_span_basis()
+            .expect("the span basis hook answers")
+            .is_none()
+            && family
+                .jeffreys_span_aggregate_penalty()
+                .expect("the aggregate penalty hook answers")
+                .is_none(),
+        "the walk scores the whole coefficient space, which is this family's Jeffreys span only \
+         while it states neither a span basis nor an aggregate penalty"
+    );
+    let base = states(&family, interior_slope_beta());
+    let direction = exiting_direction();
+    let base_margin = margin_along(&family, &base, &direction, 0.0);
+    // The first grid point outside the domain brackets the face the walk approaches.
+    let mut outside = 1.0_f64;
+    for step in 1..=GRID {
+        let probe = step as f64 / GRID as f64;
+        if !(margin_along(&family, &base, &direction, probe) > 0.0) {
+            outside = probe;
+            break;
+        }
+    }
+    let points: Vec<FacePoint> = (1..=DECADES)
+        .map(|decade| {
+            let target = base_margin * 10.0_f64.powi(-(decade as i32));
+            let mut inside = 0.0_f64;
+            let mut beyond = outside;
+            for _ in 0..128 {
+                let middle = 0.5 * (inside + beyond);
+                if margin_along(&family, &base, &direction, middle) > target {
+                    inside = middle;
+                } else {
+                    beyond = middle;
+                }
+            }
+            face_point(&family, &base, &direction, inside)
+        })
+        .collect();
+
+    let armed: Vec<(f64, f64)> = points
+        .iter()
+        .map(|point| {
+            jeffreys_candidate(&point.spectrum, JEFFREYS_ABSOLUTE_FLOOR, JEFFREYS_TOP_SATURATION)
+        })
+        .collect();
+    let no_floor: Vec<(f64, f64)> = points
+        .iter()
+        .map(|point| {
+            if point.spectrum[0] > 0.0 {
+                jeffreys_candidate(&point.spectrum, 0.0, JEFFREYS_TOP_SATURATION)
+            } else {
+                (f64::NAN, f64::NAN)
+            }
+        })
+        .collect();
+    let no_cap: Vec<(f64, f64)> = points
+        .iter()
+        .map(|point| jeffreys_candidate(&point.spectrum, JEFFREYS_ABSOLUTE_FLOOR, f64::INFINITY))
+        .collect();
+    let relative_floors: Vec<f64> = points
+        .iter()
+        .map(|point| {
+            let lambda_max = point
+                .spectrum
+                .iter()
+                .fold(0.0_f64, |acc, &lambda| acc.max(lambda));
+            (JEFFREYS_RELATIVE_FLOOR * lambda_max).max(JEFFREYS_ABSOLUTE_FLOOR)
+        })
+        .collect();
+    let relative_floor: Vec<(f64, f64)> = points
+        .iter()
+        .zip(relative_floors.iter())
+        .map(|(point, &floor)| {
+            jeffreys_candidate(&point.spectrum, floor, JEFFREYS_TOP_SATURATION.max(floor))
+        })
+        .collect();
+
+    for (index, point) in points.iter().enumerate() {
+        let spectrum = point
+            .spectrum
+            .iter()
+            .map(|lambda| format!("{lambda:.3e}"))
+            .collect::<Vec<String>>()
+            .join(",");
+        let decade = index + 1;
+        let eps = point.margin;
+        let nll = point.neg_log_likelihood;
+        let gate = point.production_gate;
+        let production = point.production_phi;
+        let production_roundoff = point.production_roundoff;
+        let (armed_value, armed_roundoff) = armed[index];
+        let no_floor_value = no_floor[index].0;
+        let (no_cap_value, no_cap_roundoff) = no_cap[index];
+        let relative_value = relative_floor[index].0;
+        let floor = relative_floors[index];
+        eprintln!(
+            "[2765-FACE] decade={decade} eps={eps:.3e} nll={nll:.9e} spectrum=[{spectrum}] \
+             G={gate:.3e} phi_production={production:.6e}+-{production_roundoff:.1e} \
+             phi_armed={armed_value:.6e}+-{armed_roundoff:.1e} phi_no_floor={no_floor_value:.6e} \
+             phi_no_cap={no_cap_value:.6e}+-{no_cap_roundoff:.1e} \
+             phi_relative_floor={relative_value:.6e} relative_floor={floor:.3e}"
+        );
+    }
+
+    let resolved = 0.05 * std::f64::consts::LN_10;
+    let phi_of = |readings: &[(f64, f64)]| {
+        readings
+            .iter()
+            .map(|reading| reading.0)
+            .collect::<Vec<f64>>()
+    };
+    let armed_phi = phi_of(&armed);
+    let no_floor_phi = phi_of(&no_floor);
+    let no_cap_phi = phi_of(&no_cap);
+    let relative_floor_phi = phi_of(&relative_floor);
+    let production_phi: Vec<f64> = points.iter().map(|point| point.production_phi).collect();
+    let barrier_only = vec![0.0_f64; points.len()];
+
+    let barrier = barrier_rate(&points, &barrier_only, &|index: usize| index < points.len());
+    let armed_rate = barrier_rate(&points, &armed_phi, &|index: usize| {
+        armed[index].1 <= resolved
+    });
+    let no_floor_rate = barrier_rate(&points, &no_floor_phi, &|index: usize| {
+        no_floor[index].1 <= resolved
+    });
+    let production_rate = barrier_rate(&points, &production_phi, &|index: usize| {
+        points[index].production_roundoff <= resolved
+    });
+    let no_cap_rate = barrier_rate(&points, &no_cap_phi, &|index: usize| {
+        no_cap[index].1 <= resolved
+    });
+    let relative_floor_rate = barrier_rate(&points, &relative_floor_phi, &|index: usize| {
+        relative_floors[index] >= JEFFREYS_TOP_SATURATION && relative_floor[index].1 <= resolved
+    });
+
+    let report = |label: &str, reading: Option<(f64, usize, usize)>| match reading {
+        Some((rate, first, last)) => {
+            let first_decade = first + 1;
+            let last_decade = last + 1;
+            let first_eps = points[first].margin;
+            let last_eps = points[last].margin;
+            eprintln!(
+                "[2765-FACE-RATE] {label} rate={rate:.4} decades={first_decade}..{last_decade} \
+                 eps={first_eps:.3e}..{last_eps:.3e}"
+            );
+        }
+        None => eprintln!("[2765-FACE-RATE] {label} unresolved: fewer than three decades admitted"),
+    };
+    report("barrier(-l)", barrier);
+    report("armed", armed_rate);
+    report("no_floor", no_floor_rate);
+    report("production", production_rate);
+    report("control_no_cap", no_cap_rate);
+    report("control_relative_floor", relative_floor_rate);
+    if let Some((rate, first, last)) = armed_rate {
+        let decades = points[first].margin.log10() - points[last].margin.log10();
+        let exponents = points[first]
+            .spectrum
+            .iter()
+            .zip(points[last].spectrum.iter())
+            .map(|(early, late)| {
+                format!("{:.3}", (late.abs().log10() - early.abs().log10()) / decades)
+            })
+            .collect::<Vec<String>>()
+            .join(",");
+        let first_decade = first + 1;
+        let last_decade = last + 1;
+        eprintln!(
+            "[2765-FACE-SPECTRUM] armed window decades {first_decade}..{last_decade} \
+             rate={rate:.4}: growth exponent of |lambda| in 1/eps along the ascending spectrum \
+             [{exponents}] (2: |u|^2/eps^2, 1: |mu|/eps, 0: O(1))"
+        );
+    }
+
+    let predicate = 0.5;
+    let barrier = barrier.expect("every decade is admitted for the likelihood alone");
+    assert!(
+        barrier.0 >= 0.9,
+        "the walk must reach the face: -l rose at rate {:.4} per e-fold of the margin, below the \
+         one -ln(eta1') an event row carries",
+        barrier.0
+    );
+    let armed_rate =
+        armed_rate.expect("the armed objective must be resolved over three decades of the walk");
+    assert!(
+        armed_rate.0 >= predicate,
+        "the armed objective (G = 1, absolute floor, top saturation kept) lost the follow-up \
+         barrier: rate {:.4}",
+        armed_rate.0
+    );
+    let production_rate = production_rate
+        .expect("the production objective must be resolved over three decades of the walk");
+    assert!(
+        production_rate.0 >= predicate,
+        "the production objective lost the follow-up barrier: rate {:.4}",
+        production_rate.0
+    );
+    if let Some(no_floor_rate) = no_floor_rate {
+        assert!(
+            no_floor_rate.0 >= predicate,
+            "the floorless objective with the top saturation kept lost the follow-up barrier: \
+             rate {:.4}",
+            no_floor_rate.0
+        );
+    }
+    let no_cap_rate =
+        no_cap_rate.expect("the control without a top saturation must be resolved over three decades");
+    assert!(
+        no_cap_rate.0 < predicate,
+        "positive control: removing the top saturation must lose the barrier, rate {:.4}",
+        no_cap_rate.0
+    );
+    let relative_floor_rate = relative_floor_rate.expect(
+        "the relative-floor control must be past floor = top saturation over three resolved decades",
+    );
+    assert!(
+        relative_floor_rate.0 < predicate,
+        "positive control: the relative floor with G = 1 must lose the barrier, rate {:.4}",
+        relative_floor_rate.0
+    );
+}
