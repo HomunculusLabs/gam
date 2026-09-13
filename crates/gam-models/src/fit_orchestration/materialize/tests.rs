@@ -3046,10 +3046,13 @@ fn gaussian_location_scale_engine_matches_reference_flow() {
         "[2627-CONE] gaussian wiggle: arming evidence {arming_evidence}; covariance published {}; {decline_summary}",
         engine_wiggle.fit.fit.beta_covariance().is_some()
     );
-    // #2635: the ambient Hessian is indefinite, but the fitted cone excludes
-    // its negative direction and the exact certificate proves the truncated
-    // posterior proper. Preserve that converged diagnostic fit and its cone,
-    // while refusing to relabel its optimizer mode as a posterior mean.
+    // #2635: the ambient Hessian is indefinite, so the fit keeps its converged mode
+    // under a typed moment decline and refuses to relabel that mode as a posterior
+    // mean. Jeffreys ruling (b) (#979): the decline's exact cone certificate must
+    // decide properness, and a published fit that did not arm cannot carry a
+    // proved-improper cone, because that proof is arming evidence. The fixture
+    // prints which objective the published fit is the mode of, and why, before it
+    // asserts.
     assert!(
         engine_wiggle.fit.fit.beta_covariance().is_none(),
         "the indefinite ambient precision has no Gaussian covariance to report"
@@ -3058,11 +3061,22 @@ fn gaussian_location_scale_engine_matches_reference_flow() {
         .fit
         .fit
         .posterior_moment_decline()
-        .expect("the proper-cone fit must retain a typed moment decline");
-    assert_eq!(
+        .expect("the indefinite-precision fit must retain a typed moment decline");
+    let arming = &engine_wiggle.fit.fit.artifacts.jeffreys_arming_evidence;
+    println!(
+        "[#979 engine] jeffreys_arming_evidence={arming:?} verdict={:?} decline={}",
         decline.properness.is_proper(),
-        Some(true),
-        "the exact cone certificate must survive assembly"
+        decline.summary()
+    );
+    assert!(
+        decline.properness.is_proper().is_some(),
+        "the exact cone certificate must survive assembly with a decided verdict: {}",
+        decline.summary()
+    );
+    assert!(
+        arming.is_some() || decline.properness.is_proper() == Some(true),
+        "an unarmed fit whose cone posterior is proved improper must have armed: {}",
+        decline.summary()
     );
     let refusal = engine_wiggle
         .fit
