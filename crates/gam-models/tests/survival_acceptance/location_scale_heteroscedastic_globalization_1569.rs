@@ -180,8 +180,13 @@ fn survival_location_scale_heteroscedastic_globalization_converges_1569() {
     // Provisional truth-recovery bars (re-measure + tighten when buildable).
     assert!(
         r.rmse_loc <= 0.20,
-        "#1569: AFT location recovery too coarse: rmse_loc={:.4}",
-        r.rmse_loc
+        "#1569: AFT location recovery too coarse: rmse_loc={:.4} (outer_iterations={}, \
+         inner_cycles={}, outer_gradient_norm={:?}, censored fraction={:.3})",
+        r.rmse_loc,
+        r.outer_iterations,
+        r.inner_cycles,
+        r.grad_norm,
+        r.censor_frac,
     );
     assert!(
         r.rmse_logsig <= 0.40,

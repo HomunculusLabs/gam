@@ -1290,7 +1290,7 @@ fn sas_beta_raw_epsilon_sensitivity_matchesfd_at_seed19() {
     dbeta_exact *= d_eps_d_raw;
 
     let fd_h = 1e-4 * (1.0 + theta[1].abs());
-    let beta_at = |raw_eps: f64| -> (Array1<f64>, f64) {
+    let beta_at = |raw_eps: f64| -> Array1<f64> {
         let mut state = RemlState::newwith_offset(
             y.view(),
             conditioning.apply_to_design(&DesignMatrix::Dense(

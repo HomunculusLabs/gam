@@ -99,7 +99,7 @@ pub(crate) use gam::families::survival::survival_event_code_from_value;
 
 pub(crate) use gam::families::survival::{
     SavedSurvivalTimeBasis, SurvivalBaselineConfig, SurvivalBaselineTarget, SurvivalLikelihoodMode,
-    SurvivalMarginalSlopeFrozenOffsetChart, SurvivalTimeBasisConfig, SurvivalTimeBuildOutput,
+    SurvivalMarginalSlopeFrozenOffsetChart, SurvivalTimeBasisConfig,
     add_survival_time_derivative_guard_offset, baseline_chain_rule_gradient,
     build_survival_time_basis, build_survival_time_offsets_for_likelihood,
     build_survival_timewiggle_derivative_design, build_time_varying_survival_covariate_template,

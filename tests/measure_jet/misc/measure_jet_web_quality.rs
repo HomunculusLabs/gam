@@ -432,6 +432,7 @@ fn measure_jet_extrapolation_variance_for_fit(
                 | PenaltySource::OperatorMass
                 | PenaltySource::OperatorTension
                 | PenaltySource::OperatorStiffness
+                | PenaltySource::OperatorThirdOrder
                 | PenaltySource::OperatorRelevance { .. }
                 | PenaltySource::TensorMarginal { .. }
                 | PenaltySource::TensorSeparable { .. }
