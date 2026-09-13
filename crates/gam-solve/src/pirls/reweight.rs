@@ -2521,9 +2521,14 @@ where
             let polish_dev_scale = model.penalized_deviance_scale()?;
             let obj_before = penalizedobjective(&state, polish_dev_scale);
             let obj_after = penalizedobjective(&polished_state, polish_dev_scale);
+            // "Did not increase" is judged at the resolution of the two
+            // evaluations: each carries its own rounding band, so an increase
+            // inside their sum is arithmetic, not overshoot (#2469).
             let objective_ok = obj_before.is_finite()
                 && obj_after.is_finite()
-                && obj_after <= obj_before + obj_before.abs().max(1.0) * 1e-12;
+                && obj_after - obj_before
+                    <= penalized_objective_rounding_band(&state, polish_dev_scale)
+                        + penalized_objective_rounding_band(&polished_state, polish_dev_scale);
             let resolvable_decrease = obj_before - obj_after
                 > penalized_objective_rounding_band(&state, polish_dev_scale);
             let residual_improved = g_norm_after < g_norm_before;
