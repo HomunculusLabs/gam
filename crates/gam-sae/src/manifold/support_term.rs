@@ -6168,96 +6168,23 @@ impl SaeSupportSparseTerm {
             *previous_step = None;
             return Ok(None);
         }
-        // #2576 — `d` solves `B d = −g` on the majorizer `B`, which drops the
-        // residual's second-jet term. Measured on the 3000×48 chart of #2576
-        // (09-04), the exact curvature along `d` is 2.3–4.1× the majorizer's. In
-        // job 452209 every exact-model coupled step landed as predicted, yet the
-        // state kept moving by 6e-3 to 5e-2 per cycle and the objective fell about
-        // 1e-3 per cycle for hundreds of cycles. A direction that is only the first
-        // `B`-preconditioned iteration captures a small share of the Newton
-        // decrease whenever `B⁻¹A` is spread, and on that chart it is: the profile
-        // adjoint's flexible GMRES on the same 19,680-dimensional exact information
-        // needed about 256 iterations to reach `√ε`.
-        //
-        // So the direction is the inexact Newton step `A x = −g`, solved by the
-        // flexible right-preconditioned GMRES the profile adjoint uses, with `B⁻¹`
-        // as its preconditioner, warm-started at `d`, to this step's own
-        // `stationarity_tolerance`. That GMRES certifies the physical residual and
-        // does not need `A` to be definite. The Newton direction is taken only when
-        // it is finite and descends (`gᵀx < 0`); a refused or non-descending solve
-        // keeps `d`. Everything below reads whichever direction won: the exact first
-        // scale `s* = −g·x / xᵀA x`, the span with the previous step, and
-        // backtracking on the actual objective.
+        // #2576 — the step is the FIRST iteration of Steihaug–Toint CG on the
+        // exact observed information `A`, preconditioned by the majorizer `B`.
+        // `d` solves `B d = −g`, which is that iteration's search direction, and
+        // one exact Hessian–vector product prices the objective's own curvature
+        // `dᵀA d` along it, so the exact model's minimiser along `d` is
+        // `s* = −g·d / dᵀA d`. Measured on the 3000×48 chart of #2576 (09-04),
+        // the objective is quadratic along the majorizer step to 2–5 %, with
+        // curvature 2.3–4.1× the majorizer's (the residual's second-jet term the
+        // majorizer drops). The ladder from `s = 1` therefore accepted `½` or `¼`
+        // on 67 of 93 steps where `s* ≈ ⅓` is the model's own answer.
+        // Backtracking from `s*` keeps acceptance on the actual objective. A
+        // non-positive exact curvature leaves `s*` undefined, while `d` is still a
+        // descent direction, so the ladder then starts from `s = 1` exactly as
+        // before. Further Steihaug iterations would each need another majorizer
+        // inverse (the reduced-Schur CG, ~1.4 s per apply in that measurement), so
+        // they are not taken here.
         let (beta_offsets, beta_dim) = self.beta_layout()?;
-        if delta_beta.len() != beta_dim {
-            return Err(format!(
-                "SaeSupportSparseTerm::joint_newton_step: arrow border width {} != decoder \
-                 width {beta_dim}",
-                delta_beta.len()
-            ));
-        }
-        let rows = self.support_outer_differential_rows(target, ard_precisions, &beta_offsets)?;
-        let mut newton_rhs = SaeArrowVector {
-            t: Array1::<f64>::zeros(delta_t.len()),
-            beta: system.gb.mapv(|value| -value),
-        };
-        for (row, block) in system.rows.iter().enumerate() {
-            let offset = system.row_offsets[row];
-            for j in 0..system.row_dims[row] {
-                newton_rhs.t[offset + j] = -block.gt[j];
-            }
-        }
-        let majorizer_step = SaeArrowVector {
-            t: delta_t,
-            beta: delta_beta,
-        };
-        let newton = CpuBatchedBlockSolver
-            .factor_blocks(&system.rows, 0.0, system.d, true)
-            .map_err(|error| format!("row factorization: {error}"))
-            .and_then(|factors| {
-                solve_b_preconditioned_gmres_to(
-                    &newton_rhs,
-                    &majorizer_step,
-                    |vector| self.support_outer_exact_hessian_apply(&system, &rows, vector),
-                    |rhs| support_arrow_majorizer_inverse(&system, &factors, rhs),
-                    stationarity_tolerance,
-                )
-            });
-        let SaeArrowVector {
-            t: delta_t,
-            beta: delta_beta,
-        } = match newton {
-            Ok((solution, iterations)) => {
-                let descent =
-                    newton_rhs.t.dot(&solution.t) + newton_rhs.beta.dot(&solution.beta);
-                let finite = solution
-                    .t
-                    .iter()
-                    .chain(solution.beta.iter())
-                    .all(|value| value.is_finite());
-                if finite && descent.is_finite() && descent > 0.0 {
-                    log::info!(
-                        "support joint Newton: exact Newton direction after {iterations} \
-                         flexible GMRES iterations (-g.x={descent:.3e})"
-                    );
-                    solution
-                } else {
-                    log::info!(
-                        "support joint Newton: exact Newton direction does not descend \
-                         (-g.x={descent:.3e} after {iterations} iterations); keeping the \
-                         majorizer direction"
-                    );
-                    majorizer_step
-                }
-            }
-            Err(error) => {
-                log::info!(
-                    "support joint Newton: exact Newton solve refused ({error}); keeping the \
-                     majorizer direction"
-                );
-                majorizer_step
-            }
-        };
         let gradient_dot_step = {
             let mut acc = 0.0_f64;
             for (row, block) in system.rows.iter().enumerate() {
@@ -6271,6 +6198,14 @@ impl SaeSupportSparseTerm {
             }
             acc
         };
+        if delta_beta.len() != beta_dim {
+            return Err(format!(
+                "SaeSupportSparseTerm::joint_newton_step: arrow border width {} != decoder \
+                 width {beta_dim}",
+                delta_beta.len()
+            ));
+        }
+        let rows = self.support_outer_differential_rows(target, ard_precisions, &beta_offsets)?;
         let direction = SaeArrowVector {
             t: delta_t.clone(),
             beta: delta_beta.clone(),
