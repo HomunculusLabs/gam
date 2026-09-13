@@ -3099,12 +3099,12 @@ fn value_lane_prices_at_shared_fixed_point_2228() {
             );
         }
         Err(err) => {
-            let message = err.numerical_message().unwrap_or_else(|| {
+            let super::construction::SaeCriterionError::Numerical(message) = err else {
                 panic!(
                     "the coarse budget may only be inadequate via the typed NUMERICAL \
                      non-convergence refusal; got a different typed refusal: {err:?}"
                 )
-            });
+            };
             eprintln!(
                 "[#2228] coarse budget REFUSED (the stronger form of coarse-vs-full \
                  disagreement); v_true={v_true:.16e}; refusal: {message}"
