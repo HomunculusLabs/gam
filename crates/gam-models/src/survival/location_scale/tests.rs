@@ -849,6 +849,41 @@ fn survival_location_scale_outer_link_shape_gradient_matches_finite_difference_s
                 .and_then(|probe_audit| probe_audit.criterion)
                 .map(|(cost, components)| (cost, components))
         };
+        // Raw values, not only their differences: whether each probe's inner solve
+        // moved the coefficients off the base mode, and what the kkt and logdet_h
+        // components are at the base and at each probe.
+        let beta_at = |rho_probe: &Array1<f64>| -> [f64; 3] {
+            let probe = crate::custom_family::evaluate_custom_family_joint_hyper_owned(
+                &family_at(epsilon0, log_delta0),
+                &specs,
+                &options,
+                rho_probe,
+                &layout_at(epsilon0, log_delta0),
+                Some(&base.warm_start),
+                gam_problem::EvalMode::ValueOnly,
+            )
+            .expect("coefficient probe")
+            .result;
+            let coefficient = |block: usize| {
+                probe.warm_start.block_beta_view(block).expect("block coefficients")[0]
+            };
+            [coefficient(0), coefficient(1), coefficient(2)]
+        };
+        let base_beta = [0, 1, 2].map(|block| {
+            base.warm_start.block_beta_view(block).expect("block coefficients")[0]
+        });
+        let base_components = audit.criterion.map_or([f64::NAN; 4], |(_, components)| components);
+        eprintln!(
+            "[2695] base components fixed_beta={:.12e} logdet_h={:.12e} logdet_s={:.12e} \
+             kkt={:.12e}; base beta={:.12e},{:.12e},{:.12e}",
+            base_components[0],
+            base_components[1],
+            base_components[2],
+            base_components[3],
+            base_beta[0],
+            base_beta[1],
+            base_beta[2]
+        );
         let step = 1e-4;
         for part in &audit.parts {
             let k = part.index;
@@ -861,6 +896,24 @@ fn survival_location_scale_outer_link_shape_gradient_matches_finite_difference_s
             minus[k] -= step;
             match (components_at(&plus), components_at(&minus)) {
                 (Some((cost_plus, plus_components)), Some((cost_minus, minus_components))) => {
+                    let plus_beta = beta_at(&plus);
+                    let minus_beta = beta_at(&minus);
+                    eprintln!(
+                        "[2695] rho {k} values: kkt base={:.12e} plus={:.12e} minus={:.12e}; \
+                         logdet_h plus={:.12e} minus={:.12e}; beta plus-base={:.3e},{:.3e},{:.3e} \
+                         minus-base={:.3e},{:.3e},{:.3e}",
+                        base_components[3],
+                        plus_components[3],
+                        minus_components[3],
+                        plus_components[1],
+                        minus_components[1],
+                        plus_beta[0] - base_beta[0],
+                        plus_beta[1] - base_beta[1],
+                        plus_beta[2] - base_beta[2],
+                        minus_beta[0] - base_beta[0],
+                        minus_beta[1] - base_beta[1],
+                        minus_beta[2] - base_beta[2]
+                    );
                     let fd = |idx: usize| (plus_components[idx] - minus_components[idx]) / (2.0 * step);
                     let analytic_kkt = part.total - (part.fixed_beta + part.logdet_h + part.logdet_s);
                     eprintln!(
