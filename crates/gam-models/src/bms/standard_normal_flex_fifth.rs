@@ -42,7 +42,7 @@ const ORDERINGS: [[usize; 3]; 6] = [
 
 /// One derivative slot of an explicit partial in `(a, θ)`.
 #[derive(Clone, Copy)]
-enum ExplicitSlot {
+pub(super) enum ExplicitSlot {
     U,
     V,
     Intercept,
@@ -839,6 +839,69 @@ impl LinkCrossing {
             rest = (rest - 1) & moving;
         }
         total
+    }
+}
+
+/// The link-knot crossings of one row's partition, for adding their
+/// moving-boundary terms to explicit calibration partials a lowering
+/// accumulates cell by cell.
+pub(super) struct CalibrationCrossings {
+    crossings: Vec<LinkCrossing>,
+}
+
+impl CalibrationCrossings {
+    /// `Σ_crossings D^S E` over `slots`.
+    pub(super) fn partial(&self, slots: &[ExplicitSlot]) -> f64 {
+        self.crossings
+            .iter()
+            .map(|crossing| crossing.partial(slots))
+            .sum()
+    }
+}
+
+impl BernoulliMarginalSlopeFamily {
+    /// Every link-knot crossing of the partition `cells` at intercept `a` and
+    /// slope `b`. The direction slots read `directions`.
+    pub(super) fn standard_normal_flex_calibration_crossings(
+        &self,
+        primary: &PrimarySlices,
+        a: f64,
+        b: f64,
+        cells: &[exact_kernel::DenestedPartitionCell],
+        directions: [&Array1<f64>; 2],
+    ) -> Result<CalibrationCrossings, String> {
+        let scale = self.probit_frailty_scale();
+        let atoms = |partition_cell: &exact_kernel::DenestedPartitionCell| {
+            let cell = partition_cell.cell;
+            let z_mid = exact_kernel::interval_probe_point(cell.left, cell.right)?;
+            IndexAtoms::new(
+                self,
+                primary,
+                a,
+                b,
+                cell_base_partials(partition_cell, a, b, scale),
+                z_mid,
+                a + b * z_mid,
+                directions,
+            )
+        };
+        let mut crossings = Vec::new();
+        for window in cells.windows(2) {
+            let (left, right) = (&window[0], &window[1]);
+            if !matches!(left.right_edge, exact_kernel::PartitionEdge::Crossing { .. })
+                || right.cell.left != left.cell.right
+            {
+                continue;
+            }
+            crossings.push(LinkCrossing::new(
+                left.cell,
+                &atoms(left)?,
+                right.cell,
+                &atoms(right)?,
+                b,
+            ));
+        }
+        Ok(CalibrationCrossings { crossings })
     }
 }
 

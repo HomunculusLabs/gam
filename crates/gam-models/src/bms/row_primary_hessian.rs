@@ -6519,56 +6519,67 @@ impl BernoulliMarginalSlopeFamily {
             )?;
         }
 
-        // Moving-boundary Leibniz flux (#2347). At 4th order the 3rd-derivative
-        // calibration integrand F₃ ∝ c₃ ∝ L'''(a+bz) is DISCONTINUOUS at
-        // interior link-knot crossings z*=(τ-a)/b, and z* moves with a and b. So
-        // the honest ∂⁴M picks up a boundary term that the fixed-domain cell sum
-        // misses. Only c₃ jumps (the lower F₃ terms are continuous), and by the
-        // symmetry of mixed partials every differentiation ordering agrees, so
-        //   flux = Σ_knots (-6·scale·Δc₃/b)·e^{-q(z*)}/2π · ∏(∂u/∂slot)
-        // with ∂u/∂a=1, ∂u/∂b=z*, ∂u/∂(warp or q)=0. The flux therefore lands
-        // only on the b/a-heavy entries of each 4th-order calibration moment
-        // (validated to 5 digits by zz_measure_2347_bb_moment_fd). 3rd order is
-        // exact — its integrand ∝ L'' is continuous — which is why the H→t3 rung
-        // needs no flux. Score-warp knots live in z-space (fixed), so only link
-        // knots contribute; Δc₃ is automatically zero at a score-only boundary.
+        // Moving-boundary terms of every link-knot crossing z* = (τ − a)/b
+        // (#2347, #2901). The fixed-domain cell sum misses them because z* moves
+        // with a, b and the directions' slope components. The link deviation is
+        // C² at an interior knot but only C⁰ at a support edge, where its tails
+        // turn constant, so an edge crossing adds terms from order two up and an
+        // interior knot from order four up.
         {
-            let inv_two_pi = 1.0 / (2.0 * std::f64::consts::PI);
-            let lg = primary.slope;
-            let du_b = dir_u[lg];
-            let dv_b = dir_v[lg];
-            for window in cells.windows(2) {
-                let z_star = window[0].partition_cell.cell.right;
-                // Adjacent partition cells share a bit-identical edge copied from
-                // one split-point list, so a differing left edge means the builder
-                // dropped a degenerate window between them.
-                if !z_star.is_finite() || window[1].partition_cell.cell.left != z_star {
-                    continue;
+            use super::standard_normal_flex_fifth::ExplicitSlot::{Coordinate, Intercept, U, V};
+            let partition: Vec<exact::DenestedPartitionCell> =
+                cells.iter().map(|entry| entry.partition_cell).collect();
+            let crossings = self
+                .standard_normal_flex_calibration_crossings(primary, a, b, &partition, directions)?;
+            let direction_slots = [U, V];
+            f_aa += crossings.partial(&[Intercept, Intercept]);
+            f_aaa += crossings.partial(&[Intercept, Intercept, Intercept]);
+            f_aaaa += crossings.partial(&[Intercept, Intercept, Intercept, Intercept]);
+            f_a_mixed[0] += crossings.partial(&[Intercept, U, V]);
+            f_aa_mixed[0] += crossings.partial(&[Intercept, Intercept, U, V]);
+            for (direction, &slot) in direction_slots.iter().enumerate() {
+                f_a_dir[direction] += crossings.partial(&[Intercept, slot]);
+                f_aa_dir[direction] += crossings.partial(&[Intercept, Intercept, slot]);
+            }
+            for left in 1..r {
+                let lc = Coordinate(left);
+                f_au[left] += crossings.partial(&[Intercept, lc]);
+                f_aau[left] += crossings.partial(&[Intercept, Intercept, lc]);
+                f_aaau[left] += crossings.partial(&[Intercept, Intercept, Intercept, lc]);
+                f_au_mixed[left] += crossings.partial(&[Intercept, lc, U, V]);
+                for (direction, &slot) in direction_slots.iter().enumerate() {
+                    f_au_dir[direction * r + left] += crossings.partial(&[Intercept, lc, slot]);
                 }
-                let delta_c3 =
-                    window[0].partition_cell.link_span.c3 - window[1].partition_cell.link_span.c3;
-                if delta_c3 == 0.0 {
-                    continue;
+                for right in left..r {
+                    let rc = Coordinate(right);
+                    let uv = crossings.partial(&[lc, rc]);
+                    let auv = crossings.partial(&[Intercept, lc, rc]);
+                    let aauv = crossings.partial(&[Intercept, Intercept, lc, rc]);
+                    let uv_mixed = crossings.partial(&[lc, rc, U, V]);
+                    let uv_dirs = [
+                        crossings.partial(&[lc, rc, U]),
+                        crossings.partial(&[lc, rc, V]),
+                    ];
+                    let auv_dirs = [
+                        crossings.partial(&[Intercept, lc, rc, U]),
+                        crossings.partial(&[Intercept, lc, rc, V]),
+                    ];
+                    let orderings: &[(usize, usize)] = if left == right {
+                        &[(left, right)]
+                    } else {
+                        &[(left, right), (right, left)]
+                    };
+                    for &(k, l) in orderings {
+                        f_uv[[k, l]] += uv;
+                        f_auv[[k, l]] += auv;
+                        f_aauv[[k, l]] += aauv;
+                        f_uv_mixed[k * r + l] += uv_mixed;
+                        for direction in 0..direction_slots.len() {
+                            f_uv_dir[direction * r * r + k * r + l] += uv_dirs[direction];
+                            f_auv_dir[direction * r * r + k * r + l] += auv_dirs[direction];
+                        }
+                    }
                 }
-                let w_knot = (-window[0].partition_cell.cell.q(z_star)).exp()
-                    * inv_two_pi
-                    * (-6.0 * scale * delta_c3 / b);
-                let z2 = z_star * z_star;
-                let z3 = z2 * z_star;
-                let z4 = z2 * z2;
-                // a-chain 4th moments (slots list ∂u/∂: aaaa→1, aaa·b→z*,
-                // aa·bb→z*², a·bb·dir→z*³·dir_b).
-                f_aaaa += w_knot;
-                f_aaau[lg] += w_knot * z_star;
-                f_aauv[[lg, lg]] += w_knot * z2;
-                for d in 0..directions.len() {
-                    f_auv_dir[d * r * r + lg * r + lg] += w_knot * z3 * directions[d][lg];
-                }
-                // explicit mixed 4th moments (aa·du·dv→z*²·du_b·dv_b,
-                // a·b·du·dv→z*³·du_b·dv_b, bb·du·dv→z*⁴·du_b·dv_b).
-                f_aa_mixed[0] += w_knot * z2 * du_b * dv_b;
-                f_au_mixed[lg] += w_knot * z3 * du_b * dv_b;
-                f_uv_mixed[lg * r + lg] += w_knot * z4 * du_b * dv_b;
             }
         }
 
