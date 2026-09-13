@@ -2992,5 +2992,13 @@
     },
     "reason": "#2899 row O17: the jackknife+ conformal substrate (GaussianJackknifePlusStats and its methods, jackknife_plus_interval) has no caller since gamfit and the CLI run only the exact full-conformal and split-conformal routes (13df3ae51, baf308726).",
     "evidence": "At the base, git grep -n -w for each deleted name as a call on GaussianJackknifePlusStats or as a free function finds only the pyffi predict_table_jackknife_plus route and the payload producer, both deleted in the same commit; the same-named methods on ExactFullConformalSubstrate and the other full_conformal.rs types keep their callers."
+  },
+  {
+    "removed": {
+      "crates/gam-geometry/src/sinkhorn_barycenter.rs::sinkhorn_barycenter_forward_state": 1
+    },
+    "reason": "#2899 dead state: the crate-private sinkhorn_barycenter_forward_state is folded into sinkhorn_barycenter, its only caller.",
+    "evidence": "public_api_census.py --base 5bd613805 --head d83624fb3 in check job 584240 reports exactly this identity as removed (CENSUS_REMOVED line, /scratch.global/sauer354/pool/prune-api-a/check3.584240.log).",
+    "base": "6228e4db05ec1d51031b327c5ac25c0ebe68f2e6"
   }
 ]

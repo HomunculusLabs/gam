@@ -303,33 +303,15 @@ fn normalize_weights(weights: ArrayView1<'_, f64>) -> Vec<f64> {
     weights.iter().map(|w| w / total).collect()
 }
 
-/// Output of `sinkhorn_barycenter_forward_state` — exposes the final
-/// dual state after the requested finite Sinkhorn iteration count.
-pub struct SinkhornState {
-    /// `(K, M)` log dual potentials on the "data-fit" side.
-    pub log_u: Array2<f64>,
-    /// `(K, M)` log dual potentials on the "barycenter" side.
-    pub log_v: Array2<f64>,
-    /// `(M,)` log of the entropic barycenter.
-    pub log_a: Array1<f64>,
-    /// `(M, M)` precomputed log kernel `-cost / eps`.
-    pub log_kernel: Array2<f64>,
-    /// `(K, M)` log of the (sanitized) input atoms.
-    pub log_atoms: Array2<f64>,
-    /// `(K,)` normalized mixing weights.
-    pub weights: Vec<f64>,
-}
-
-/// Run the log-domain Sinkhorn barycenter forward pass and return the
-/// full dual state. Use [`sinkhorn_barycenter`] for the simpler "just
-/// the barycenter" entry point.
-pub(crate) fn sinkhorn_barycenter_forward_state(
+/// Log-domain Sinkhorn barycenter forward pass: returns the converged
+/// barycenter as a simplex vector of length `M`.
+pub fn sinkhorn_barycenter(
     atoms: ArrayView2<'_, f64>,
     weights: ArrayView1<'_, f64>,
     cost: ArrayView2<'_, f64>,
     eps: f64,
     n_iter: usize,
-) -> Result<SinkhornState, String> {
+) -> Result<Array1<f64>, String> {
     validate_inputs(atoms, weights, cost, eps, n_iter)?;
     let atoms_norm = normalize_atoms(atoms)?;
     let weights_norm = normalize_weights(weights);
@@ -385,33 +367,13 @@ pub(crate) fn sinkhorn_barycenter_forward_state(
         log_a = next_log_a;
     }
 
-    Ok(SinkhornState {
-        log_u,
-        log_v,
-        log_a,
-        log_kernel,
-        log_atoms,
-        weights: weights_norm,
-    })
-}
-
-/// Convenience forward: returns the converged barycenter as a simplex
-/// vector of length `M`.
-pub fn sinkhorn_barycenter(
-    atoms: ArrayView2<'_, f64>,
-    weights: ArrayView1<'_, f64>,
-    cost: ArrayView2<'_, f64>,
-    eps: f64,
-    n_iter: usize,
-) -> Result<Array1<f64>, String> {
-    let state = sinkhorn_barycenter_forward_state(atoms, weights, cost, eps, n_iter)?;
-    if log_vector_is_sentinel_saturated(state.log_a.view()) {
+    if log_vector_is_sentinel_saturated(log_a.view()) {
         return Err(
             "sinkhorn barycenter degenerated: all log_a saturated to sentinel -- try larger eps or check cost matrix"
                 .to_string(),
         );
     }
-    softmax_1d(state.log_a.view())
+    softmax_1d(log_a.view())
 }
 
 /// Output of [`sinkhorn_barycenter_vjp`]: gradients w.r.t. the input
