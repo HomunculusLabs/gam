@@ -761,8 +761,9 @@ fn spectral_qr_cholesky_factor(weighted_vt: &Array2<f64>) -> Option<Array2<f64>>
 }
 
 /// Jacobi/Van der Sluis diagonal equilibration scale for a symmetric matrix
-/// (#2015): `d_a = sqrt(|schur[a,a]|)`, floored at `√JACOBI_DIAGONAL_PD_FLOOR`
-/// so a numerically-empty diagonal entry never divides by ~0. This is a PURE
+/// (#2015): `d_a = sqrt(|schur[a,a]|)`. An exactly zero or non-finite diagonal
+/// carries no scale, so that coordinate is left unscaled (`d_a = 1`) rather
+/// than divided by a picked substitute (#2469). This is a PURE
 /// numerical-conditioning aid for [`factor_dense_reduced_schur`] below — it is
 /// never returned or exposed, and it changes no value any caller of that
 /// function sees, only the accuracy of computing it.
@@ -777,7 +778,7 @@ fn spectral_qr_cholesky_factor(weighted_vt: &Array2<f64>) -> Option<Array2<f64>>
 ///
 /// Reading the SIGNED entry made the equilibration ANTI-equilibrating on exactly
 /// the operators the floor exists for. A collapsed reduced Schur carries a
-/// NEGATIVE diagonal; `S_aa > JACOBI_DIAGONAL_PD_FLOOR` is then false, so that
+/// NEGATIVE diagonal; the signed test `S_aa > 1e-18` then in place was false, so that
 /// direction was scaled by the substitute `√1e-18 = 1e-9` — dividing an entry of
 /// magnitude `|S_aa|` by `1e-18` and AMPLIFYING it by eighteen decades instead of
 /// normalising it to unit magnitude. `spectral_pd_floored_schur` then reads
@@ -795,14 +796,13 @@ fn spectral_qr_cholesky_factor(weighted_vt: &Array2<f64>) -> Option<Array2<f64>>
 /// still receives its minimal positive stiffness.
 fn jacobi_diagonal_scale(schur: &Array2<f64>) -> Array1<f64> {
     let n = schur.nrows();
-    let floor_sqrt = JACOBI_DIAGONAL_PD_FLOOR.sqrt();
     let mut d = Array1::<f64>::zeros(n);
     for a in 0..n {
         let magnitude = schur[[a, a]].abs();
-        d[a] = if magnitude.is_finite() && magnitude > JACOBI_DIAGONAL_PD_FLOOR {
+        d[a] = if magnitude.is_finite() && magnitude > 0.0 {
             magnitude.sqrt()
         } else {
-            floor_sqrt
+            1.0
         };
     }
     d
@@ -4259,12 +4259,6 @@ pub struct JacobiPreconditioner {
 /// Maximum block size for which we attempt dense block-Jacobi factorization.
 pub(crate) const BLOCK_JACOBI_MAX_BLOCK: usize = 256;
 
-/// Positive-definiteness floor on a Schur-complement Jacobi diagonal entry.
-/// A diagonal at or below this value (or non-finite) signals a non-PD reduced
-/// system: the preconditioner cannot invert it, so the PCG solve fails loudly
-/// and demands operator regularization rather than returning a garbage scale.
-pub(crate) const JACOBI_DIAGONAL_PD_FLOOR: f64 = 1e-18;
-
 impl JacobiPreconditioner {
     /// Build the block-Jacobi (or scalar fallback) preconditioner from the
     /// Arrow-Schur system without materializing the full dense Schur
@@ -4413,7 +4407,7 @@ impl JacobiPreconditioner {
         let mut blocks = Vec::with_capacity(k);
         for a in 0..k {
             let v = diag[a];
-            if !v.is_finite() || v <= JACOBI_DIAGONAL_PD_FLOOR {
+            if !v.is_finite() || v <= 0.0 {
                 return Err(ArrowSchurError::PcgFailed {
                     reason: format!(
                         "invalid Schur Jacobi diagonal at index {a}: {v}; \
@@ -4571,7 +4565,7 @@ impl JacobiPreconditioner {
         let mut blocks = Vec::with_capacity(k);
         for a in 0..k {
             let v = diag[a];
-            if !v.is_finite() || v <= JACOBI_DIAGONAL_PD_FLOOR {
+            if !v.is_finite() || v <= 0.0 {
                 return Err(ArrowSchurError::PcgFailed {
                     reason: format!(
                         "invalid SAE-resident Schur Jacobi diagonal at index {a}: {v}; \
@@ -4726,7 +4720,7 @@ impl JacobiPreconditioner {
                 let mut inv = Array1::<f64>::zeros(b);
                 for bi in 0..b {
                     let v = schur_block[[bi, bi]];
-                    if !v.is_finite() || v <= JACOBI_DIAGONAL_PD_FLOOR {
+                    if !v.is_finite() || v <= 0.0 {
                         return Err(ArrowSchurError::PcgFailed {
                             reason: format!(
                                 "SAE-resident block Jacobi scalar fallback: non-PD diagonal at \
@@ -4887,7 +4881,7 @@ impl JacobiPreconditioner {
                 let mut inv = Array1::<f64>::zeros(b);
                 for bi in 0..b {
                     let v = schur_block[[bi, bi]];
-                    if !v.is_finite() || v <= JACOBI_DIAGONAL_PD_FLOOR {
+                    if !v.is_finite() || v <= 0.0 {
                         return Err(ArrowSchurError::PcgFailed {
                             reason: format!(
                                 "block Jacobi scalar fallback: non-PD diagonal at \
@@ -5841,7 +5835,7 @@ pub(crate) fn incomplete_cholesky_level0(
                 diag -= ljk * ljk;
             }
         }
-        if !diag.is_finite() || diag <= JACOBI_DIAGONAL_PD_FLOOR {
+        if !diag.is_finite() || diag <= 0.0 {
             return None;
         }
         let ljj = diag.sqrt();
@@ -5897,7 +5891,7 @@ pub(crate) fn build_schur_scalar_inv<B: BatchedBlockSolver>(
             s -= acc;
         }
         e_g[gi] = 0.0;
-        if !s.is_finite() || s <= JACOBI_DIAGONAL_PD_FLOOR {
+        if !s.is_finite() || s <= 0.0 {
             return Err(ArrowSchurError::PcgFailed {
                 reason: format!(
                     "cluster Schur scalar fallback: non-PD diagonal at index {gi}: {s}"
