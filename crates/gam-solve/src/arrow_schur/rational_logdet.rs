@@ -868,11 +868,6 @@ impl ShiftedDiagonalPreconditioner {
         Self { diagonal: None }
     }
 
-    /// Whether this preconditioner does anything.
-    pub fn is_identity(&self) -> bool {
-        self.diagonal.is_none()
-    }
-
     /// Spread `max(d + t) / min(d + t)` of the shifted diagonal: the factor by
     /// which this preconditioner can widen a system's condition number. `1` for
     /// the identity.

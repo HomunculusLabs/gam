@@ -8398,5 +8398,13 @@
     ],
     "reason": "#2829 product-root rule: MemoryGovernor::availability, restored in place from d484a091a, has no caller. The process availability is read through process_memory_availability and the governor ledger. It is deleted.",
     "evidence": "At 169cc255a6805ad715f8350247e81ef891100992, git grep -n -E '[.:]availability\\(' over crates, src, tests and examples finds only GpuRuntime::availability calls in gam-gpu. The ledger's availability field keeps its readers in process_memory_availability and the reservation refusal in crates/gam-runtime/src/resource.rs. Pool job 612031 on sw0k at b4753af5fe359ab3ad65afaa6ef90a42f10e13a4, the chain latentflat, linalg, runtime, solve, spec, terms, logit, cascade, kl on 07f9b8d88bcd5a060d5003a98298a977412467cf, whose Rust blobs this landing reproduces (log /scratch.global/sauer354/pool/api2829/check.612031.log): source_removal_guard.py and public_api_census.py exited 0 on all nine links, and cargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0. The same job's run of the moved residual_cascade past-cap test had not reported when these landed."
+  },
+  {
+    "base": "d39affbb4d976e243a2954941366e1279e2f9e60",
+    "items": [
+      "crates/gam-solve/src/arrow_schur/rational_logdet.rs:fn:is_identity"
+    ],
+    "reason": "#2829 product-root rule: ShiftedDiagonalPreconditioner::is_identity, restored in place from d484a091a, has no caller. Every is_identity call in the tree is on a coefficient gauge. It is deleted.",
+    "evidence": "At d39affbb4d976e243a2954941366e1279e2f9e60, git grep -n -E '[.:]is_identity\\(' over crates/gam-solve finds no call. Across crates, src and tests, every call is on a gauge or coefficient_gauge value in gam-custom-family, gam-identifiability, gam-inference, gam-models or gam-predict. Pool job 612031 on sw0k at b4753af5fe359ab3ad65afaa6ef90a42f10e13a4, the chain latentflat, linalg, runtime, solve, spec, terms, logit, cascade, kl on 07f9b8d88bcd5a060d5003a98298a977412467cf, whose Rust blobs this landing reproduces (log /scratch.global/sauer354/pool/api2829/check.612031.log): source_removal_guard.py and public_api_census.py exited 0 on all nine links, and cargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0. The same job's run of the moved residual_cascade past-cap test had not reported when these landed."
   }
 ]

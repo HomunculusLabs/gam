@@ -840,7 +840,7 @@ crates/gam-solve/src/arrow_schur/factorization.rs	cross_row_penalty_fingerprint	
 crates/gam-solve/src/arrow_schur/penalty_ops.rs	frame_output_gram	retired-no-surviving-dependent
 crates/gam-solve/src/arrow_schur/penalty_ops.rs	from_frames_and_blocks	retired-no-surviving-dependent
 crates/gam-solve/src/arrow_schur/rational_logdet.rs	directional_derivative	restored-in-place
-crates/gam-solve/src/arrow_schur/rational_logdet.rs	is_identity	restored-in-place
+crates/gam-solve/src/arrow_schur/rational_logdet.rs	is_identity	retired-no-product-user
 crates/gam-solve/src/arrow_schur/rational_logdet.rs	with_deflation	retired-by-later-deletion:e3b50feaf1
 crates/gam-solve/src/arrow_schur/rational_logdet.rs	with_two_sided_deflation	retired-by-later-deletion:e3b50feaf1
 crates/gam-solve/src/arrow_schur/reduced_solve.rs	arrow_precond_ladder_iteration_study	retired-by-later-deletion:e3b50feaf1
