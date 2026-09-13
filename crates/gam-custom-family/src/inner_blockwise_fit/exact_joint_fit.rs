@@ -3132,7 +3132,14 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     if !spectrum.has_resolvable_negative_curvature()
                         && search_norm.is_finite()
                         && joint_trust_radius.is_finite()
-                        && search_norm <= joint_trust_radius * (1.0 + 1e-12)
+                        // Inside the ball up to the norm's own rounding: a sum of
+                        // `p` squares of two roundings each.
+                        && search_norm
+                            <= joint_trust_radius
+                                * (1.0
+                                    + gam_linalg::roundoff::accumulation_growth(
+                                        search_delta.len() + 2,
+                                    ))
                     {
                         trial_delta = search_delta.clone();
                     } else {
@@ -4158,8 +4165,10 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     0.25,
                 );
             }
-            let radius_held =
-                (joint_trust_radius - old_radius).abs() <= 1e-12 * old_radius.abs().max(1.0);
+            // A shrink pinned at the radius floor returns the floor bit for bit,
+            // and any other update moves the radius by a factor, so "held" is
+            // equality.
+            let radius_held = joint_trust_radius == old_radius;
             let joint_math = JointNewtonMathDiagnostic {
                 old_kkt_inf: current_kkt_norm,
                 linearized_next_kkt_inf,
