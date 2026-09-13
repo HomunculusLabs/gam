@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Iterator, Mapping
 
 from ._paired import CumulativeIncidenceDraws, PairedPosteriorSamples
@@ -352,53 +351,6 @@ class PosteriorSamples:
         link_spec = _required_link_spec(p, source="FFI posterior-predict payload")
         return (eta, mean, str(p.get("family_kind", self.family_kind)),
                 str(p.get("model_class", self.model_class)), link_spec)
-
-    def save(self, path: str | Path) -> str:
-        import numpy as np
-        # numpy.savez appends ".npz" unless the target already carries that
-        # suffix. Mirror that rule here so the returned path is the file that
-        # actually lands on disk and so load(save(p)) round-trips for any p.
-        out = Path(path)
-        if out.suffix != ".npz":
-            out = out.with_name(out.name + ".npz")
-        md = {"coefficient_names": list(self.coefficient_names), "method": self.method,
-              "exact": self.exact, "covariance_source": self.covariance_source,
-              "model_class": self.model_class, "family_kind": self.family_kind,
-              "link_spec": self.link_spec, "config": self.config.to_dict()}
-        np.savez(out, samples=np.asarray(self.samples, dtype=float),
-                 mean=np.asarray(self.mean, dtype=float), std=np.asarray(self.std, dtype=float),
-                 rhat=np.float64(self.rhat), ess=np.float64(self.ess), converged=np.bool_(self.converged),
-                 model_bytes=np.frombuffer(self._model_bytes, dtype=np.uint8),
-                 metadata=np.asarray(json.dumps(md), dtype=object))
-        return str(out)
-
-    @classmethod
-    def load(cls, path: str | Path) -> "PosteriorSamples":
-        import numpy as np
-        # Tolerate the numpy ".npz" auto-suffix: a path written by save() with
-        # no explicit extension lives on disk at "<path>.npz". Resolve to the
-        # file that exists so load() accepts both the literal and suffixed form.
-        target = Path(path)
-        if not target.exists() and target.suffix != ".npz":
-            suffixed = target.with_name(target.name + ".npz")
-            if suffixed.exists():
-                target = suffixed
-        npz = np.load(target, allow_pickle=True)
-        md = json.loads(str(npz["metadata"].item()))
-        samples = np.asarray(npz["samples"], dtype=float)
-        nc = int(samples.shape[1])
-        names = _coefficient_names(md.get("coefficient_names", []), nc)
-        return cls(samples=samples, coefficient_names=names,
-                   mean=np.asarray(npz["mean"], dtype=float), std=np.asarray(npz["std"], dtype=float),
-                   rhat=float(npz["rhat"].item()), ess=float(npz["ess"].item()),
-                   converged=bool(npz["converged"].item()),
-                   method=str(md["method"]), exact=bool(md["exact"]),
-                   covariance_source=str(md["covariance_source"]),
-                   model_class=str(md.get("model_class", "standard")),
-                   family_kind=str(md.get("family_kind", "identity")),
-                   link_spec=_required_link_spec(md, source="saved posterior samples"),
-                   config=_config_from_payload(md.get("config", {})),
-                   _model_bytes=bytes(np.asarray(npz["model_bytes"], dtype=np.uint8).tobytes()))
 
     def plot_trace(self, *, coefficients: Any = None, max_panels: int = 8) -> Any:
         import matplotlib.pyplot as plt

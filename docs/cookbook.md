@@ -311,10 +311,7 @@ print(f"OR = {or_draws.mean():.2f} "
 
 ```python
 model.save("model.gam")
-posterior.save("posterior.npz")
-
-m  = gamfit.load("model.gam")
-ps = gamfit.load_posterior("posterior.npz")
+m = gamfit.load("model.gam")
 ```
 
 ## Catch schema errors

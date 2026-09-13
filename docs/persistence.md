@@ -1,6 +1,6 @@
 # Save and load
 
-`gamfit` persists fitted models (`.gam`) and posterior samples (`.npz`).
+`gamfit` persists fitted models (`.gam`).
 
 ## Models — `.gam`
 
@@ -71,40 +71,11 @@ loaded.diagnose(test)
 loaded.sample(test, seed=42)
 ```
 
-## Posterior samples — `.npz`
+## Posterior samples
 
-```python
-posterior = model.sample(train, seed=42)
-posterior.save("posterior.npz")
-
-restored = gamfit.load_posterior("posterior.npz")
-# equivalent:
-restored = gamfit.PosteriorSamples.load("posterior.npz")
-```
-
-The archive (written via `numpy.savez`) contains:
-
-| Array | Shape / dtype | Meaning |
-| --- | --- | --- |
-| `samples` | `(n_draws, n_coeffs)` float64 | Raw draws. |
-| `mean` | `(n_coeffs,)` float64 | Per-coefficient posterior mean. |
-| `std` | `(n_coeffs,)` float64 | Per-coefficient posterior std. |
-| `rhat` | scalar float64 | Convergence diagnostic. |
-| `ess` | scalar float64 | Effective sample size. |
-| `converged` | scalar bool | Convergence flag. |
-| `model_bytes` | 1-D uint8 | The fitted model's serialised bytes. |
-| `metadata` | 0-D object (JSON) | `coefficient_names`, `method`, `model_class`, `family_kind`, `config`. |
-
-`PosteriorSamples.load` requires `allow_pickle=True` to round-trip the
-metadata object array; only load archives produced by `save`.
-
-Because the model bytes are bundled, posterior prediction keeps its
-usual model-class support after a round-trip:
-
-```python
-restored = gamfit.load_posterior("posterior.npz")
-bands    = restored.predict(test, level=0.95)
-```
+Posterior draws have no gamfit file format. `posterior.to_numpy()` and
+`posterior.to_pandas()` hand the draw matrix to NumPy or pandas, and the saved
+model is what `model.sample(...)` draws from again.
 
 ## Version compatibility
 
@@ -114,16 +85,6 @@ current `MODEL_PAYLOAD_VERSION`; a schema mismatch fails to load. For
 long-term archival, pin the `gamfit` version or refit after upgrades.
 
 ## Patterns
-
-### Save model and posterior together
-
-```python
-model.save("model.gam")
-model.sample(train, seed=42).save("posterior.npz")
-```
-
-The posterior archive carries the model bytes, so loading just the
-posterior is enough to call `predict()` for supported model classes.
 
 ### Inspect a model without the training data
 

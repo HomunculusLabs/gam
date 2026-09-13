@@ -258,22 +258,6 @@ Each row has two panels: the trace (draws vs iteration index) on the
 left, a marginal density histogram on the right. With `coefficients=None`
 the first `min(max_panels, n_coeffs)` coefficients are plotted.
 
-### Save and load
-
-```python
-posterior.save("posterior.npz")
-loaded = gamfit.PosteriorSamples.load("posterior.npz")
-# or
-loaded = gamfit.load_posterior("posterior.npz")
-
-bands = loaded.predict(new_data)
-```
-
-The `.npz` archive bundles the saved-model bytes, so `predict` works
-after a round-trip. The archive uses `allow_pickle=True` on load
-(the metadata is stored as a 0-d object array); only load files you
-produced.
-
 `posterior.predict(...)` works for models with a closed-form design
 matrix. Model classes that require the full saved-model predict path
 (link-wiggle, survival, Bernoulli marginal-slope, transformation-normal,

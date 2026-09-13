@@ -59,8 +59,7 @@ Using a fitted model
   `GAMClassifier`, pipelines, cross-validation.
 - [PyTorch integration](torch.md) — differentiable REML primitives,
   response-geometry transforms, frozen fitted-model modules.
-- [Save and load](persistence.md) — `.gam` model files and `.npz`
-  posteriors.
+- [Save and load](persistence.md) — `.gam` model files.
 
 Reference
 
@@ -108,7 +107,6 @@ print(posterior.predict(test, level=0.95))    # posterior mean bands
 
 # 6. Persist.
 model.save("model.gam")
-posterior.save("posterior.npz")
 ```
 
 ## License

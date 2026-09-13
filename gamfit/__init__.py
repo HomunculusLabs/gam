@@ -32,7 +32,6 @@ See https://github.com/SauersML/gam for the full guide.
 """
 
 from importlib import metadata as _metadata
-from pathlib import Path
 
 from ._api import (
     SUPPORT_SAE_SCHEMA,
@@ -404,9 +403,6 @@ _LAZY_TORCH_ATTRS: dict[str, tuple[str, str]] = {
 }
 
 
-_EXCLUDE_FROM_ALL = {"Path"}
-
-
 def __getattr__(name: str):
     """Lazy attribute hook for optional-extra primitives exposed at the top level.
 
@@ -433,32 +429,6 @@ def __getattr__(name: str):
             ) from exc
         return getattr(module, attr)
     raise AttributeError(f"module 'gamfit' has no attribute {name!r}")
-
-
-def load_posterior(path: str | Path) -> PosteriorSamples:
-    """Load a :class:`PosteriorSamples` archive from disk.
-
-    Thin wrapper around :meth:`PosteriorSamples.load` provided for symmetry
-    with :func:`gamfit.load` / :func:`gamfit.fit` at module level.
-
-    Parameters
-    ----------
-    path : str or pathlib.Path
-        Filesystem path to an ``.npz`` archive previously written by
-        :meth:`PosteriorSamples.save`.
-
-    Returns
-    -------
-    PosteriorSamples
-        Reconstructed posterior draws and metadata.
-
-    Examples
-    --------
-    >>> draws = gamfit.load_posterior("posterior.npz")
-    >>> draws.beta.shape
-    (1000, 42)
-    """
-    return PosteriorSamples.load(path)
 
 
 def _build_public_api() -> list[str]:
@@ -493,10 +463,8 @@ def _build_public_api() -> list[str]:
     for name, value in globals().items():
         if name.startswith("_"):
             continue
-        if name in _EXCLUDE_FROM_ALL:
-            continue
         # Skip module objects unless they are explicitly in the public
-        # submodule allowlist: ``importlib``, ``Path``, etc. were imported
+        # submodule allowlist: ``importlib`` etc. were imported
         # for internal use and should not leak into star imports.
         if isinstance(value, ModuleType) and name not in public_submodules:
             continue

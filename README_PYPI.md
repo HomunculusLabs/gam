@@ -133,7 +133,6 @@ model.report("report.html")
 | --- | --- |
 | `gamfit.fit(data, formula, **kwargs)` | Fit a model. |
 | `gamfit.load(path)` / `gamfit.loads(bytes)` | Reload a saved model. |
-| `gamfit.load_posterior(path)` | Reload a `PosteriorSamples` archive. |
 | `gamfit.validate_formula(data, formula, ...)` | Type-check a formula without fitting. |
 | `gamfit.build_info()` | Native extension build metadata. |
 | `gamfit.cuda_diagnostics()` / `gamfit.format_cuda_diagnostics()` | CUDA probe results. |

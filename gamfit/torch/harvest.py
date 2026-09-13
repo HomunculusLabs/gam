@@ -886,7 +886,7 @@ def harvest_downstream_output_fisher_factors(
 def save_harvest_shard(shard: HarvestShard, path: str | Path) -> str:
     """Write one strict, self-describing Fisher harvest artifact.
 
-    Mirrors :mod:`gamfit._sampling`'s ``.npz`` suffix rule. Factors are stored
+    Applies numpy's ``.npz`` suffix rule to the path. Factors are stored
     f32 (their working precision); ``rank`` is recorded so the loader can assert
     the ``(n, p, r)`` layout. Returns the path that actually landed on disk.
     """
