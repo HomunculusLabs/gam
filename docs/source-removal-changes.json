@@ -6793,5 +6793,13 @@
     ],
     "reason": "#2829 no product user: these getters have no caller in crates, src, tests, benches, bench or examples, and every field they returned keeps another reader.",
     "evidence": "At 5f03a97073020f195205fa0c6ca1508a7d0d8684, git grep -n for each name as a method call (.name( or ::name() over crates, src, tests and examples finds no call on the owning type; same-named items elsewhere are different types (checked by reading), and each returned field is still read inside its own impl."
+  },
+  {
+    "base": "fa8ea13999d0ba1c18c9494a405217d4cf976ec8",
+    "items": [
+      "crates/gam-solve/src/rho_optimizer/kl_certificate.rs:const:POWER_THETA_MIN_DENOM"
+    ],
+    "reason": "#2469: POWER_THETA_MIN_DENOM (1e-9) dropped the power-law rate model in fit_rate when |2s + 2| was at most 1e-9. The only consumer of that model, forecast_iters in assess, reads exponent_s alone and refuses p = -s - 1 <= 0, so a denominator near zero (s near -1, p near 0) is already refused as non-convergent. An exactly zero denominator gives a non-finite kl_theta, which the existing is_finite check refuses. The guard and the constant are deleted.",
+    "evidence": "git grep -n -w POWER_THETA_MIN_DENOM over the base finds two lines, both in crates/gam-solve/src/rho_optimizer/kl_certificate.rs: the declaration and its single use in fit_rate. No test names it, and kl_theta is read by no decision path (git grep -n -w kl_theta finds only the struct field, its docs and the constructor). Not compiled or run locally (user directive); compile is covered by the lead shared tip check."
   }
 ]

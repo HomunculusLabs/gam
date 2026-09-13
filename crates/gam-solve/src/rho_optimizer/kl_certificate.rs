@@ -152,12 +152,6 @@ pub(crate) const DEFAULT_WINDOW_CAPACITY: usize = 24;
 /// residual-based model selection carries signal.
 const MIN_FIT_POINTS: usize = 3;
 
-/// Guard for the `2ŝ_raw + 2` denominator in the θ̂ inversion (I'). In the
-/// valid regime `ŝ_raw < −2` so the denominator is `< −2`; a value near zero
-/// means the fit landed outside the certifiable band and the power model is
-/// rejected as uninformative.
-const POWER_THETA_MIN_DENOM: f64 = 1.0e-9;
-
 /// Relative backward-error band used by [`assess`] when it screens the window
 /// for a monotonicity defect. An accepted-step *increase* below
 /// `MONOTONICITY_ROUNDING_BAND_REL · max|d_k|` is attributed to floating-point
@@ -454,11 +448,9 @@ pub(crate) fn fit_rate(window: &DecreaseWindow) -> Option<RateModel> {
     });
 
     let power = least_squares_line(&ln_k, &ln_d).and_then(|fit| {
-        let denom = 2.0 * fit.slope + 2.0;
-        if denom.abs() <= POWER_THETA_MIN_DENOM {
-            return None;
-        }
-        let theta = fit.slope / denom;
+        // A zero denominator gives a non-finite theta, refused below. Past it the
+        // forecast reads only the slope, and refuses a non-convergent one (#2469).
+        let theta = fit.slope / (2.0 * fit.slope + 2.0);
         if theta.is_finite() {
             Some(RateModel::Power {
                 exponent_s: fit.slope,
