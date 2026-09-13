@@ -157,6 +157,7 @@ pub(crate) mod slope_geometry;
 mod spec;
 mod timepoint_exact;
 mod timewiggle_geometry;
+mod timewiggle_third;
 
 pub use alo_replay::*;
 pub use block_jacobians::*;

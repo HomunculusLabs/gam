@@ -3251,6 +3251,67 @@ fn timewiggle_flex_all_axes_directional_derivative_matches_single_axis_2893() {
         );
     }
 }
+/// gam#2893: the flex + time-wiggle joint third information derivative `D³H[u, v, e_a]`, served
+/// by the Jeffreys hook, matches a Ridders-certified central difference of `D²H[u, v]` along
+/// every coefficient axis, and it is symmetric under swapping its third axis with a free axis.
+/// The fixture's entry, exit and derivative design rows, marginal row, slope, score warp and
+/// wiggle coefficients all move ζ, so every block of the ζ composition is exercised.
+#[test]
+fn timewiggle_flex_joint_third_information_matches_differenced_second_directional_2893() {
+    let family = timewiggle_marginal_slope_family(Some(test_deviation_runtime()));
+    let beta = timewiggle_marginal_slope_beta(&family);
+    let states = timewiggle_marginal_slope_states(&family, &beta);
+    let specs = vec![
+        dummy_blockspec(5),
+        dummy_blockspec(2),
+        dummy_blockspec(1),
+        dummy_blockspec(beta.len() - 8),
+    ];
+    assert!(family.joint_jeffreys_information_third_directional_available());
+    let u = Array1::from_shape_fn(beta.len(), |i| ((i * 7 + 3) % 11) as f64 / 11.0 - 0.45);
+    let v = Array1::from_shape_fn(beta.len(), |i| ((i * 5 + 1) % 13) as f64 / 13.0 - 0.5);
+    let axes = family
+        .joint_jeffreys_information_third_directional_all_axes_with_specs(&states, &specs, &u, &v)
+        .expect("third information derivative")
+        .expect("flex with a time wiggle publishes the third information derivative");
+    assert_eq!(axes.len(), beta.len());
+    let scale = axes
+        .iter()
+        .flat_map(|matrix| matrix.iter())
+        .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+    assert!(
+        scale > 1e-8,
+        "the joint third information derivative must be nonzero on this fixture"
+    );
+    for c in 0..beta.len() {
+        for a in 0..beta.len() {
+            for b in 0..beta.len() {
+                let gap = (axes[c][[a, b]] - axes[a][[c, b]]).abs();
+                assert!(
+                    gap <= 1e-9 * scale,
+                    "D3H[u, v, e_{c}][{a}, {b}] vs D3H[u, v, e_{a}][{c}, {b}]: gap {gap:e}, \
+                     scale {scale:e}"
+                );
+            }
+        }
+    }
+    let states_at = |beta: &Array1<f64>| timewiggle_marginal_slope_states(&family, beta);
+    for (axis_idx, analytic) in axes.iter().enumerate() {
+        let mut axis = Array1::<f64>::zeros(beta.len());
+        axis[axis_idx] = 1.0;
+        assert_matches_ridders_2893(&format!("axis {axis_idx}"), analytic, &|t| {
+            family
+                .exact_newton_joint_hessiansecond_directional_derivative(
+                    &states_at(&(&beta + &(&axis * t))),
+                    &u,
+                    &v,
+                )
+                .expect("D2_beta H")
+                .expect("a time wiggle publishes D2_beta H")
+        });
+    }
+}
+
 
 #[test]
 fn link_flex_blockwise_exact_newton_matches_joint_principal_blocks() {

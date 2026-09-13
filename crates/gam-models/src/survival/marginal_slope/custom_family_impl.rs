@@ -717,12 +717,14 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
 
     fn joint_jeffreys_information_third_directional_available(&self) -> bool {
         // The rigid single-slope row kernel has a closed-form third information
-        // derivative, and a score warp or link deviation without a time wiggle has the
-        // order-five flex contraction. The hook below returns `None` for a per-score
-        // slope, a time wiggle and an influence absorber; declaring the capability on
-        // those would plan an outer Hessian with no derivative to consume.
+        // derivative. A score warp or link deviation has the order-five flex contraction,
+        // pulled back linearly without a time wiggle and through the ζ composition of
+        // `timewiggle_third` with one. The hook below returns `None` for a per-score slope,
+        // a time wiggle without a score warp or link deviation, and an influence absorber;
+        // declaring the capability on those would plan an outer Hessian with no derivative
+        // to consume.
         !(self.per_z_slope_active()
-            || self.flex_timewiggle_active()
+            || (self.flex_timewiggle_active() && !self.flex_active())
             || self.influence_absorber.is_some())
     }
 
@@ -737,17 +739,22 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
             return Err("survival third information derivative block count mismatch".into());
         }
         if self.per_z_slope_active()
-            || self.flex_timewiggle_active()
+            || (self.flex_timewiggle_active() && !self.flex_active())
             || self.influence_absorber.is_some()
         {
             return Ok(None);
         }
         if self.effective_flex_active(states)? {
-            return self
-                .exact_newton_joint_hessian_third_directional_derivative_flex_no_wiggle_all_axes(
+            return if self.flex_timewiggle_active() {
+                self.exact_newton_joint_hessian_third_directional_derivative_timewiggle_flex_all_axes(
                     states, u, v,
                 )
-                .map(Some);
+            } else {
+                self.exact_newton_joint_hessian_third_directional_derivative_flex_no_wiggle_all_axes(
+                    states, u, v,
+                )
+            }
+            .map(Some);
         }
         in_slope_frame!(self, P, Frame, {
             let kernel =
