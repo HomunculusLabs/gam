@@ -8788,5 +8788,13 @@
     ],
     "reason": "#2623 ruling A: the #784 block Gauss–Hermite correction selects each axis's order once at admission and reserves its product rule's working memory on the memory governor, so the node ceiling is the budget. BLOCK_GH_MAX_DIM encoded the hand-set 4096-node ceiling of the fixed five-node rule; its hmc_io and block_quadrature_correction declines are replaced by the governor refusal and a typed unrepresentable-order refusal.",
     "evidence": "At 6a5b38ce9d85e663eaa5711676377ccdd1944dcd, git grep BLOCK_GH_MAX_DIM finds only its definition in crates/gam-problem/src/laplace_sampler_contract.rs, the gam-inference hmc_io re-export and dimension check, and the gam-solve block_quadrature_correction decline, all removed by this landing. Pool job 619037 on sw0o at 0f8d063d186bff4c591252a68ed83495ec9e78f5 with this landing's patch (log /scratch.global/sauer354/pool/t2627core/j5.619037.log): cargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0 with no error or warning lines."
+  },
+  {
+    "base": "7afcb5facf5bf90628b134ded61b827f0aa54867",
+    "items": [
+      "crates/gam-custom-family/src/psi_hyper.rs:const:DIRECT_JOINT_HYPER_MIN_CYCLES"
+    ],
+    "reason": "#2695 ruling (09-13): the inner solve stops on its own certificate. DIRECT_JOINT_HYPER_MIN_CYCLES = 200 raised every psi-derivative evaluation's inner budget, and the rho-only joint path raised its tightened budget with the same literal max(200). Both floors papered over one constructor, fit_bounded_term_collection_with_design (design_construction.rs), which passed the outer max_iter (typically 40) as inner_max_cycles instead of the family's 1200. That constructor now takes the family budget, both floors are deleted, and the derivative-quality pins assert that the caller's budget is carried through unchanged.",
+    "evidence": "At the base, git grep -n -w DIRECT_JOINT_HYPER_MIN_CYCLES finds only its declaration and its one use in derivative_quality_options_and_warm_start (crates/gam-custom-family/src/psi_hyper.rs), a comment in the gam-custom-family direct_joint_hyper_never_loosens_caller_inner_tolerance test, and an earlier docs/source-removal-changes.json batch entry. That batch also lists derivative_quality_options_and_warm_start and other psi_hyper.rs functions that still exist, so it is not a prior deletion of this constant. git log -S on psi_hyper.rs shows the constant arriving with the crate extraction e8bf4a3ab and never changing count since."
   }
 ]

@@ -1437,15 +1437,9 @@ pub(crate) fn direct_joint_hyper_never_loosens_caller_inner_tolerance() {
         eval_options.inner_tol, options.inner_tol,
         "a looser outer target cannot weaken the coefficient-stationarity contract"
     );
-    // A BUDGET IS NOT A TOLERANCE. Carrying ψ derivatives raises the cycle
-    // budget to `DIRECT_JOINT_HYPER_MIN_CYCLES`, which can only make the
-    // caller's `inner_tol` MORE reachable -- it never relaxes the stationarity
-    // equation this test is named for. Pin the floored value exactly rather
-    // than the caller's 100, which asserted the pre-#2460-followup behaviour
-    // where the floor was gated on `tighten` and therefore unreachable
-    // whenever `inner_tol == outer_tol` (i.e. on every model constructor).
-    assert_eq!(eval_options.inner_max_cycles, 200);
-    assert!(eval_options.inner_max_cycles >= options.inner_max_cycles);
+    // A budget is not a tolerance: carrying ψ derivatives leaves the caller's
+    // cycle budget exactly as given (#2695).
+    assert_eq!(eval_options.inner_max_cycles, options.inner_max_cycles);
     assert!(strict_warm_start.is_none());
 
     let (rho_default, _) = derivative_quality_options_and_warm_start(&options, None, false);
@@ -1462,7 +1456,7 @@ pub(crate) fn direct_joint_hyper_never_loosens_caller_inner_tolerance() {
     };
     let (tightened, _) = derivative_quality_options_and_warm_start(&outer_is_stricter, None, true);
     assert_eq!(tightened.inner_tol, outer_is_stricter.outer_tol);
-    assert_eq!(tightened.inner_max_cycles, 200);
+    assert_eq!(tightened.inner_max_cycles, outer_is_stricter.inner_max_cycles);
 
     let (rho_only, _) = derivative_quality_options_and_warm_start(&outer_is_stricter, None, false);
     assert_eq!(rho_only.inner_tol, outer_is_stricter.inner_tol);
@@ -1479,10 +1473,9 @@ pub(crate) fn direct_joint_hyper_never_loosens_caller_inner_tolerance() {
     };
     let (preserved, _) = derivative_quality_options_and_warm_start(&explicitly_tight, None, true);
     assert_eq!(preserved.inner_tol, explicitly_tight.inner_tol);
-    // Same one-way rule as above: an already-strict inner tolerance is carried
-    // through untouched, while the ψ-derivative cycle floor still applies.
-    assert_eq!(preserved.inner_max_cycles, 200);
-    assert!(preserved.inner_max_cycles >= explicitly_tight.inner_max_cycles);
+    // Same one-way rule as above: an already-strict inner tolerance and the
+    // caller's cycle budget are carried through untouched.
+    assert_eq!(preserved.inner_max_cycles, explicitly_tight.inner_max_cycles);
 }
 
 #[test]

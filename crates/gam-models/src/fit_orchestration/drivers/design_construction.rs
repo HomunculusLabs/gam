@@ -3130,7 +3130,6 @@ fn fit_bounded_term_collection_with_design(
         &family_adapter,
         &[blockspec],
         &BlockwiseFitOptions {
-            inner_max_cycles: options.max_iter,
             inner_tol: options.tol,
             outer_max_iter: options.max_iter,
             outer_tol: options.tol,
