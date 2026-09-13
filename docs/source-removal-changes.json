@@ -7356,5 +7356,14 @@
     ],
     "reason": "#2899 slop: gam_inference::gpu_polya_gamma::splitmix64_mix was a one-line wrapper over gam_linalg::utils::splitmix64_hash. Its one Rust caller, XorwowState::new, now calls splitmix64_hash directly, so the per-row seeding is bit-identical. The CUDA source string keeps its own C splitmix64_mix, which this does not touch.",
     "evidence": "At the base, git grep -n -w splitmix64_mix over crates/gam-inference finds the wrapper (gpu_polya_gamma.rs:126-131), its one call in XorwowState::new (line 159), and two lines of the embedded CUDA C source (472, 494). No other crate, test, example or benchmark names the gam-inference wrapper. gam-solve's reml_trace::splitmix64_mix is a separate function and stays."
+  },
+  {
+    "base": "759fb9394a6939b3d90e9d26fd388df6f9a0418e",
+    "items": [
+      "tests/src_modules/misc/cli_tests.rs:fn:build_termspec_leaves_parametric_linear_terms_unpenalized_by_default",
+      "tests/src_modules/misc/cli_tests.rs:fn:parametric_double_penalty_is_an_explicit_opt_in"
+    ],
+    "reason": "#2627, after b7b874a2a (#2901, SPEC rules 12 and 14). Formula linear effects (bare x, numeric a:b, linear(), constrain(), nonnegative(), nonpositive()) now carry the REML-selected null-recovery ridge by default, and double_penalty=false opts out. Two gam-cli binary tests pinned the old unpenalized default under names that stated it. They are rewritten to pin the new default and the explicit opt-out, under names that state the new contract.",
+    "evidence": "The removed identities are two #[test] fns in tests/src_modules/misc/cli_tests.rs, which crates/gam-cli/src/main.rs compiles into the gam binary by #[path]. Their replacements in the same file are build_termspec_gives_parametric_linear_terms_the_null_recovery_ridge_by_default (same fixture, now asserts every linear term carries the ridge) and parametric_double_penalty_is_the_default_with_an_explicit_opt_out (parses linear(x, double_penalty=false) + z:w and asserts the opt-out and the interaction's default ridge). At the base, git grep -n -w finds each old name only at its own declaration. Census job 597798 at 9c266da56 (HEAD verified, dirty=0, /scratch.global/sauer354/pool/t2627models/census_9c266da56.597798.log) shows both old tests failing on their unpenalized-default assertions."
   }
 ]

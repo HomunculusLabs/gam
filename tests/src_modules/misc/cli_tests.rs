@@ -3821,7 +3821,9 @@ fn parse_linear_termwith_box_constraints() {
         } => {
             assert_eq!(name, "mu_hat");
             assert!(*explicit);
-            assert!(!*double_penalty);
+            // A box-constrained effect keeps the null-recovery ridge by default:
+            // zero lies inside the box REML can shrink toward (SPEC rules 12, 14).
+            assert!(*double_penalty);
             assert_eq!(*coefficient_min, Some(0.0));
             assert_eq!(*coefficient_max, Some(1.0));
         }
@@ -3843,7 +3845,7 @@ fn parse_linear_termwith_box_constraints() {
 }
 
 #[test]
-fn build_termspec_leaves_parametric_linear_terms_unpenalized_by_default() {
+fn build_termspec_gives_parametric_linear_terms_the_null_recovery_ridge_by_default() {
     let parsed = parse_formula("y ~ x + linear(z) + nonnegative(w)")
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "formula", e));
     let ds = Dataset {
@@ -3890,9 +3892,11 @@ fn build_termspec_leaves_parametric_linear_terms_unpenalized_by_default() {
     .unwrap_or_else(|e| panic!("{} failed: {:?}", "term spec", e));
 
     assert_eq!(spec.linear_terms.len(), 3);
+    // SPEC rules 12 and 14: a bare `x`, `linear(z)` and `nonnegative(w)` each own
+    // the REML-selected null-recovery ridge unless the formula opts out.
     assert!(
-        spec.linear_terms.iter().all(|term| !term.double_penalty),
-        "parametric linear terms should be unpenalized by default: {:?}",
+        spec.linear_terms.iter().all(|term| term.double_penalty),
+        "parametric linear terms should carry the null-recovery ridge by default: {:?}",
         spec.linear_terms
             .iter()
             .map(|term| (&term.name, term.double_penalty))
@@ -3901,16 +3905,16 @@ fn build_termspec_leaves_parametric_linear_terms_unpenalized_by_default() {
 }
 
 #[test]
-fn parametric_double_penalty_is_an_explicit_opt_in() {
-    let parsed = parse_formula("y ~ linear(x, double_penalty=true) + z:w")
+fn parametric_double_penalty_is_the_default_with_an_explicit_opt_out() {
+    let parsed = parse_formula("y ~ linear(x, double_penalty=false) + z:w")
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "formula", e));
     assert_eq!(parsed.terms.len(), 2);
     match &parsed.terms[0] {
-        ParsedTerm::Linear { double_penalty, .. } => assert!(*double_penalty),
+        ParsedTerm::Linear { double_penalty, .. } => assert!(!*double_penalty),
         other => panic!("expected explicit linear term, got {other:?}"),
     }
     match &parsed.terms[1] {
-        ParsedTerm::Interaction { double_penalty, .. } => assert!(!*double_penalty),
+        ParsedTerm::Interaction { double_penalty, .. } => assert!(*double_penalty),
         other => panic!("expected bare interaction term, got {other:?}"),
     }
 }
