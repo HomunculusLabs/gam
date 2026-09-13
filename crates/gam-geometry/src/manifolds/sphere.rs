@@ -1,3 +1,5 @@
+use faer::Side;
+use gam_linalg::faer_ndarray::FaerEigh;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 use crate::manifold::{
@@ -557,23 +559,10 @@ fn sphere_orthogonal_unit(vector: ArrayView1<'_, f64>) -> Result<Array1<f64>, St
     Ok(tangent.mapv(|v| v / tangent_norm))
 }
 
-/// Fixed power-iteration step count used when seeding the spherical-mean search
-/// with the dominant axis of the weighted second-moment matrix. The seed only
-/// needs to land in the right basin (the subsequent Riemannian iteration
-/// refines it), so a modest fixed budget suffices and avoids a per-call
-/// convergence test on the hot seeding path.
-const SPHERE_SEED_POWER_ITERS: usize = 64;
-
-/// Power-iteration step count for the standalone dominant-axis helper. Larger
-/// than the seed budget because its result is consumed directly (not refined
-/// downstream), so it iterates further toward the true leading eigenvector.
-const SPHERE_DOMINANT_AXIS_POWER_ITERS: usize = 128;
-
 fn sphere_mean_candidates(
     values: ArrayView2<'_, f64>,
     weights: ArrayView1<'_, f64>,
 ) -> Result<Vec<Array1<f64>>, String> {
-    let (_, d) = values.dim();
     let mut candidates: Vec<Array1<f64>> = Vec::new();
     // Weighted extrinsic mean `Σ wᵢ pᵢ = Pᵀ w`: a single matrix–vector product
     // over all points, dispatched to GPU by `fast_atv` for large batches.
@@ -585,26 +574,7 @@ fn sphere_mean_candidates(
     // `M = Σ wᵢ pᵢ pᵢᵀ = Pᵀ diag(w) P` over all n points: the same GPU-dispatched
     // weighted cross-product used by `sphere_second_moment`.
     let moment = sphere_second_moment(values, weights);
-    let mut v = Array1::<f64>::from_elem(d, 1.0 / (d as f64).sqrt());
-    for _ in 0..SPHERE_SEED_POWER_ITERS {
-        let mut nv = Array1::<f64>::zeros(d);
-        for r in 0..d {
-            let mut acc = 0.0;
-            for c in 0..d {
-                acc += moment[[r, c]] * v[c];
-            }
-            nv[r] = acc;
-        }
-        let nrm = norm(nv.view());
-        if nrm <= 0.0 {
-            break;
-        }
-        nv.mapv_inplace(|x| x / nrm);
-        v = nv;
-    }
-    let v_norm = norm(v.view());
-    if v_norm > 0.0 {
-        let unit = v.mapv(|x| x / v_norm);
+    if let Some(unit) = sphere_dominant_axis(moment.view()) {
         candidates.push(unit.clone());
         candidates.push(unit.mapv(|x| -x));
     }
@@ -628,69 +598,31 @@ fn sphere_mean_candidates(
     Ok(candidates)
 }
 
-/// Orthonormal eigenbasis of a symmetric PSD matrix via power iteration with
-/// Hotelling deflation.
+/// Orthonormal eigenbasis of a symmetric PSD matrix, from one symmetric
+/// eigendecomposition.
 ///
-/// Reuses the same power-iteration scheme as [`sphere_dominant_axis`] (so no new
-/// linear-algebra dependency is introduced): repeatedly extract the current
-/// dominant eigenvector, then deflate it out of the matrix (`M ← M − λ a aᵀ`) so
-/// the next pass yields the next eigenvector. The returned set spans the full
-/// `d`-dimensional eigenbasis, covering the least-dominant (orthogonal) axes that
-/// the dominant-only seed never reaches.
+/// The returned set spans the full `d`-dimensional space, covering the
+/// least-dominant (orthogonal) axes that the dominant-only seed never reaches,
+/// including the null space of `M` (the pole for an equatorial great-circle
+/// spread), which is where the true Fréchet mean lives. A decomposition that
+/// fails contributes no seeds; the extrinsic and dominant-axis seeds remain.
 fn sphere_eigenbasis(moment: ArrayView2<'_, f64>) -> Vec<Array1<f64>> {
-    let d = moment.nrows();
-    let mut basis: Vec<Array1<f64>> = Vec::new();
-    if d == 0 {
-        return basis;
-    }
-    let mut residual = moment.to_owned();
-    for _ in 0..d {
-        let axis = match sphere_dominant_axis(residual.view()) {
-            Some(a) => a,
-            None => break,
-        };
-        // Rayleigh quotient λ = aᵀ M a for the deflation magnitude.
-        let mut ma = Array1::<f64>::zeros(d);
-        for r in 0..d {
-            let mut acc = 0.0;
-            for c in 0..d {
-                acc += residual[[r, c]] * axis[c];
-            }
-            ma[r] = acc;
-        }
-        let lambda = dot(axis.view(), ma.view());
-        if lambda <= 1.0e-12 {
-            // Remaining spectrum is (numerically) zero: power iteration can no
-            // longer distinguish a direction, so it would just repeat the same
-            // axis. Complete the eigenbasis deterministically by Gram–Schmidt over
-            // the coordinate axes against the directions already found — this is
-            // exactly the null space of `M` (e.g. the pole for an equatorial
-            // great-circle spread), which is where the true Fréchet mean lives.
-            for k in 0..d {
-                let mut cand = Array1::<f64>::zeros(d);
-                cand[k] = 1.0;
-                for b in &basis {
-                    let proj = dot(cand.view(), b.view());
-                    for col in 0..d {
-                        cand[col] -= proj * b[col];
-                    }
-                }
-                let nrm = norm(cand.view());
-                if nrm > 1.0e-9 {
-                    let unit = cand.mapv(|x| x / nrm);
-                    basis.push(unit);
-                }
-            }
-            break;
-        }
-        basis.push(axis.clone());
-        for r in 0..d {
-            for c in 0..d {
-                residual[[r, c]] -= lambda * axis[r] * axis[c];
-            }
-        }
-    }
-    basis
+    sphere_moment_eigensystem(moment)
+        .map(|system| {
+            system
+                .1
+                .columns()
+                .into_iter()
+                .map(|column| column.to_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The symmetric eigendecomposition `(values, vectors)` of a moment matrix, or
+/// `None` for a decomposition that fails.
+fn sphere_moment_eigensystem(moment: ArrayView2<'_, f64>) -> Option<(Array1<f64>, Array2<f64>)> {
+    moment.eigh(Side::Lower).ok()
 }
 
 /// Build the weighted second-moment matrix `M = Σ wᵢ pᵢ pᵢᵀ = Pᵀ diag(w) P`.
@@ -704,35 +636,24 @@ fn sphere_second_moment(values: ArrayView2<'_, f64>, weights: ArrayView1<'_, f64
     gam_linalg::faer_ndarray::fast_xt_diag_x(&values, &weights)
 }
 
-/// Dominant eigenvector of a symmetric PSD matrix via power iteration.
+/// Dominant eigenvector of a symmetric PSD matrix: the eigenvector of its
+/// largest eigenvalue from one symmetric eigendecomposition, or `None` when that
+/// eigenvalue is not positive (a zero matrix has no dominant direction).
 fn sphere_dominant_axis(moment: ArrayView2<'_, f64>) -> Option<Array1<f64>> {
-    let d = moment.nrows();
-    if d == 0 {
+    let (values, vectors) = sphere_moment_eigensystem(moment)?;
+    if values.is_empty() {
         return None;
     }
-    let mut v = Array1::<f64>::from_elem(d, 1.0 / (d as f64).sqrt());
-    for _ in 0..SPHERE_DOMINANT_AXIS_POWER_ITERS {
-        let mut nv = Array1::<f64>::zeros(d);
-        for r in 0..d {
-            let mut acc = 0.0;
-            for c in 0..d {
-                acc += moment[[r, c]] * v[c];
-            }
-            nv[r] = acc;
+    let mut top = 0usize;
+    for index in 1..values.len() {
+        if values[index] > values[top] {
+            top = index;
         }
-        let nrm = norm(nv.view());
-        if nrm <= 0.0 {
-            return None;
-        }
-        nv.mapv_inplace(|x| x / nrm);
-        v = nv;
     }
-    let nrm = norm(v.view());
-    if nrm > 0.0 {
-        Some(v.mapv(|x| x / nrm))
-    } else {
-        None
+    if !(values[top] > 0.0) {
+        return None;
     }
+    Some(vectors.column(top).to_owned())
 }
 
 /// Deterministic equatorial minimizer for a non-identifiable (antipodal /
