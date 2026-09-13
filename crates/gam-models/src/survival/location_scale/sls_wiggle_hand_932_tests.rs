@@ -9,8 +9,8 @@
 //! hand-derived speed. Until now the only gate, `SLS-WIGGLE-DYN-932`, raced a
 //! reused arena against a fresh one, which measures the arena, not the derivative
 //! schedule. This module holds the hand schedule, its parity with production, and
-//! the release cell that races the two. It starts with the Hessian; the third and
-//! fourth contractions follow.
+//! the release cell that races the two. It holds the Hessian and the directional third
+//! contraction; the second-directional fourth contraction follows.
 //!
 //! The row NLL is a sum of three scalar compositions, `F0(u0w) + F1(u1w) + F2(g)`:
 //! - `u0w = x0 + q0 + Σ βw_j·B0_j(q0)` with `q0 = −x4·e^{−x7}`;
@@ -25,7 +25,7 @@
 #![cfg(test)]
 
 use super::*;
-use gam_math::jet_scalar::{DynamicJetArena, DynamicOrder2, RuntimeJetScalar};
+use gam_math::jet_scalar::{DynamicJetArena, DynamicOneSeed, DynamicOrder2, RuntimeJetScalar};
 use gam_math::paired_timing::{SpeedGate, batched, paired_interleaved};
 
 /// Reusable buffers for the hand schedule, the counterpart of production's
@@ -479,12 +479,13 @@ fn hand_order2_checksum(
         .fold(0.0, |acc, (index, value)| acc + value * (1.0 + index as f64 * 1e-3))
 }
 
-/// #932 release cell: production's packed-jet Hessian must not be measurably
-/// slower than the hand schedule at runtime widths 3 and 12 (SPEC rule 1's "match
-/// or surpass hand-derived speed"). Both arms consume every entry, and both reuse
-/// their buffers across rows as production does. Release profile only
-/// (`SpeedGate::open` documents why); parity is pinned by
-/// `hand_sls_wiggle_row_hessian_matches_production_jet_932`.
+/// #932 release cells: production's packed-jet Hessian and directional third
+/// contraction must not be measurably slower than the hand schedules at runtime
+/// widths 3 and 12 (SPEC rule 1's "match or surpass hand-derived speed"). Both arms
+/// consume every entry, and both reuse their buffers across rows as production
+/// does. Release profile only (`SpeedGate::open` documents why); parity is pinned
+/// by `hand_sls_wiggle_row_hessian_matches_production_jet_932` and
+/// `hand_sls_wiggle_row_third_matches_production_jet_932`.
 #[test]
 fn release_measure_sls_wiggle_production_jet_vs_hand_932() {
     if cfg!(debug_assertions) {
@@ -520,6 +521,572 @@ fn release_measure_sls_wiggle_production_jet_vs_hand_932() {
             "production_jet",
             "strongest_hand",
         );
+        let dir = wiggle_direction(SLS_ROW_K + pw);
+        let mut third_scratch = HandWiggleThirdScratch::new();
+        let timing_third = paired_interleaved(
+            15,
+            2_000,
+            0x9320_5803 ^ pw as u64,
+            batched(ROWS, |nudge| {
+                let mut shifted = p;
+                shifted[0] += nudge;
+                production_order3_checksum(&shifted, &betaw, &kernel, &basis, &dir, &mut arena)
+            }),
+            batched(ROWS, |nudge| {
+                let mut shifted = p;
+                shifted[0] += nudge;
+                hand_order3_checksum(&shifted, &betaw, &kernel, &basis, &dir, &mut third_scratch)
+            }),
+        );
+        gate.not_slower(
+            &format!("order=3 pw={pw}"),
+            &timing_third,
+            "production_jet",
+            "strongest_hand",
+        );
     }
     gate.finish();
+}
+
+fn dot(left: &[f64], right: &[f64]) -> f64 {
+    left.iter().zip(right).map(|(a, b)| a * b).sum()
+}
+
+/// `out = M·v` for a row-major `kw × kw` matrix `M`.
+fn matvec(matrix: &[f64], kw: usize, v: &[f64], out: &mut Vec<f64>) {
+    out.clear();
+    out.extend((0..kw).map(|a| dot(&matrix[a * kw..(a + 1) * kw], v)));
+}
+
+/// One intermediate's derivative tower over the `KW` primaries: its gradient, its
+/// Hessian and its third derivative contracted with the direction `d`.
+struct WiggleTower {
+    grad: Vec<f64>,
+    hess: Vec<f64>,
+    third: Vec<f64>,
+}
+
+impl WiggleTower {
+    fn new() -> Self {
+        Self {
+            grad: Vec::new(),
+            hess: Vec::new(),
+            third: Vec::new(),
+        }
+    }
+
+    fn reset(&mut self, kw: usize) {
+        self.grad.clear();
+        self.grad.resize(kw, 0.0);
+        self.hess.clear();
+        self.hess.resize(kw * kw, 0.0);
+        self.third.clear();
+        self.third.resize(kw * kw, 0.0);
+    }
+}
+
+/// Reusable buffers for the hand third contraction.
+struct HandWiggleThirdScratch {
+    entry: WiggleTower,
+    exit: WiggleTower,
+    multiplier: WiggleTower,
+    rate_index: WiggleTower,
+    rate: WiggleTower,
+    hess_dir: Vec<f64>,
+    multiplier_hess_dir: Vec<f64>,
+    rate_index_hess_dir: Vec<f64>,
+    third: Vec<f64>,
+}
+
+impl HandWiggleThirdScratch {
+    fn new() -> Self {
+        Self {
+            entry: WiggleTower::new(),
+            exit: WiggleTower::new(),
+            multiplier: WiggleTower::new(),
+            rate_index: WiggleTower::new(),
+            rate: WiggleTower::new(),
+            hess_dir: Vec::new(),
+            multiplier_hess_dir: Vec::new(),
+            rate_index_hess_dir: Vec::new(),
+            third: Vec::new(),
+        }
+    }
+}
+
+/// The tower of `U = x_linear + G(q, βw)` with `q = −x_numerator·e^{−x_log_scale}`.
+/// `derivs` holds `∂G/∂q`, `∂²G/∂q²` and `∂³G/∂q³`. `slots` holds, per wiggle
+/// coefficient, `∂G/∂βw_j`, `∂²G/∂q∂βw_j` and `∂³G/∂q²∂βw_j`. `G` is linear in `βw`,
+/// so no second `βw` derivative exists. With `∇q = (−s at numerator, −q at
+/// log_scale)` and `∇²q = (s at (numerator, log_scale), q at (log_scale, log_scale))`:
+/// - `∇U = e_linear + G_q·∇q + Σ_j G_βj·e_j`;
+/// - `∇²U = G_qq·∇q∇qᵀ + G_q·∇²q + Σ_j G_qβj·(e_j∇qᵀ + ∇qe_jᵀ)`;
+/// - `∇³U[d] = (G_qqq·dq + Σ_j G_qqβj·dβ_j)·∇q∇qᵀ + (G_qq·dq + Σ_j G_qβj·dβ_j)·∇²q
+///   + G_qq·(h∇qᵀ + ∇qhᵀ) + G_q·∇³q[d] + Σ_j [G_qqβj·dq·(e_j∇qᵀ + ∇qe_jᵀ) + G_qβj·(e_jhᵀ + he_jᵀ)]`,
+///
+/// where `dq = ∇q·d`, `h = ∇²q·d`, and `∇³q[d] = (−s·d_log_scale at (numerator,
+/// log_scale), dq at (log_scale, log_scale))`.
+#[inline(never)]
+fn warp_tower(
+    kw: usize,
+    linear: Option<usize>,
+    numerator: usize,
+    log_scale: usize,
+    scale: f64,
+    q: f64,
+    derivs: [f64; 3],
+    slots: [&[f64]; 3],
+    dir: &[f64],
+    tower: &mut WiggleTower,
+) {
+    tower.reset(kw);
+    let pw = kw - SLS_ROW_K;
+    let [g_q, g_qq, g_qqq] = derivs;
+    let dq = -scale * dir[numerator] - q * dir[log_scale];
+    let grad_q = [(numerator, -scale), (log_scale, -q)];
+    let hess_q_dir = [
+        (numerator, scale * dir[log_scale]),
+        (log_scale, scale * dir[numerator] + q * dir[log_scale]),
+    ];
+    let mut slot1_dir = 0.0;
+    let mut slot2_dir = 0.0;
+    for j in 0..pw {
+        slot1_dir += slots[1][j] * dir[SLS_ROW_K + j];
+        slot2_dir += slots[2][j] * dir[SLS_ROW_K + j];
+    }
+    let WiggleTower { grad, hess, third } = tower;
+    if let Some(index) = linear {
+        grad[index] = 1.0;
+    }
+    for (index, value) in grad_q {
+        grad[index] += g_q * value;
+    }
+    for j in 0..pw {
+        grad[SLS_ROW_K + j] = slots[0][j];
+    }
+    for (a, left) in grad_q {
+        for (b, right) in grad_q {
+            hess[a * kw + b] += g_qq * left * right;
+            third[a * kw + b] += (g_qqq * dq + slot2_dir) * left * right;
+        }
+    }
+    add_symmetric(hess, kw, numerator, log_scale, g_q * scale);
+    add_symmetric(hess, kw, log_scale, log_scale, g_q * q);
+    let curvature_scale = g_qq * dq + slot1_dir;
+    add_symmetric(third, kw, numerator, log_scale, curvature_scale * scale);
+    add_symmetric(third, kw, log_scale, log_scale, curvature_scale * q);
+    for (a, left) in hess_q_dir {
+        for (b, right) in grad_q {
+            add_pair(third, kw, a, b, g_qq * left * right);
+        }
+    }
+    add_symmetric(third, kw, numerator, log_scale, -g_q * scale * dir[log_scale]);
+    add_symmetric(third, kw, log_scale, log_scale, g_q * dq);
+    for j in 0..pw {
+        for (index, value) in grad_q {
+            add_symmetric(hess, kw, SLS_ROW_K + j, index, slots[1][j] * value);
+            add_symmetric(third, kw, SLS_ROW_K + j, index, slots[2][j] * dq * value);
+        }
+        for (index, value) in hess_q_dir {
+            add_symmetric(third, kw, SLS_ROW_K + j, index, slots[1][j] * value);
+        }
+    }
+}
+
+/// The tower of `qdot0 = e^{−x6}·(x3·x8 − x5)`. Its nonzero third partials are
+/// `(x3, x6, x8) = −s6`, `(x3, x6, x6) = s6·x8`, `(x5, x6, x6) = −s6`,
+/// `(x6, x6, x6) = −qdot0` and `(x6, x6, x8) = s6·x3`.
+#[inline(never)]
+fn rate_index_tower(
+    kw: usize,
+    p: &[f64; SLS_ROW_K],
+    s6: f64,
+    qdot0: f64,
+    dir: &[f64],
+    tower: &mut WiggleTower,
+) {
+    tower.reset(kw);
+    let WiggleTower { grad, hess, third } = tower;
+    grad[3] = s6 * p[8];
+    grad[5] = -s6;
+    grad[6] = -qdot0;
+    grad[8] = s6 * p[3];
+    add_symmetric(hess, kw, 3, 8, s6);
+    add_symmetric(hess, kw, 3, 6, -s6 * p[8]);
+    add_symmetric(hess, kw, 5, 6, s6);
+    add_symmetric(hess, kw, 6, 6, qdot0);
+    add_symmetric(hess, kw, 6, 8, -s6 * p[3]);
+    add_symmetric(third, kw, 3, 8, -s6 * dir[6]);
+    add_symmetric(third, kw, 3, 6, -s6 * dir[8] + s6 * p[8] * dir[6]);
+    add_symmetric(third, kw, 5, 6, -s6 * dir[6]);
+    add_symmetric(
+        third,
+        kw,
+        6,
+        6,
+        s6 * p[8] * dir[3] - s6 * dir[5] - qdot0 * dir[6] + s6 * p[3] * dir[8],
+    );
+    add_symmetric(third, kw, 6, 8, -s6 * dir[3] + s6 * p[3] * dir[6]);
+}
+
+/// The tower of `g = x2 + m·r` from the towers of `m = m1` and `r = qdot0`, by the
+/// product rule through third order:
+/// `∇³g[d] = r·∇³m[d] + (∇r·d)·∇²m + (∇²m·d)∇rᵀ + ∇r(∇²m·d)ᵀ + (∇²r·d)∇mᵀ + ∇m(∇²r·d)ᵀ
+/// + (∇m·d)·∇²r + m·∇³r[d]`.
+#[inline(never)]
+fn rate_tower(
+    kw: usize,
+    m: f64,
+    r: f64,
+    multiplier: &WiggleTower,
+    rate_index: &WiggleTower,
+    dir: &[f64],
+    multiplier_hess_dir: &mut Vec<f64>,
+    rate_index_hess_dir: &mut Vec<f64>,
+    tower: &mut WiggleTower,
+) {
+    tower.reset(kw);
+    let dm = dot(&multiplier.grad, dir);
+    let dr = dot(&rate_index.grad, dir);
+    matvec(&multiplier.hess, kw, dir, multiplier_hess_dir);
+    matvec(&rate_index.hess, kw, dir, rate_index_hess_dir);
+    let WiggleTower { grad, hess, third } = tower;
+    grad[2] = 1.0;
+    for a in 0..kw {
+        let (ma, ra) = (multiplier.grad[a], rate_index.grad[a]);
+        grad[a] += r * ma + m * ra;
+        for b in 0..kw {
+            let index = a * kw + b;
+            let (mb, rb) = (multiplier.grad[b], rate_index.grad[b]);
+            hess[index] =
+                r * multiplier.hess[index] + ma * rb + ra * mb + m * rate_index.hess[index];
+            third[index] = r * multiplier.third[index]
+                + dr * multiplier.hess[index]
+                + multiplier_hess_dir[a] * rb
+                + ra * multiplier_hess_dir[b]
+                + rate_index_hess_dir[a] * mb
+                + ma * rate_index_hess_dir[b]
+                + dm * rate_index.hess[index]
+                + m * rate_index.third[index];
+        }
+    }
+}
+
+/// Add the direction derivative of `F″·∇u∇uᵀ + F′·∇²u` along `d`:
+/// `F‴·du·∇u∇uᵀ + F″·(w∇uᵀ + ∇uwᵀ) + F″·du·∇²u + F′·∇³u[d]`, with `du = ∇u·d`,
+/// `w = ∇²u·d` and `outer = (F′, F″, F‴)`.
+#[inline(never)]
+fn add_composition_third(
+    out: &mut [f64],
+    kw: usize,
+    outer: [f64; 3],
+    tower: &WiggleTower,
+    dir: &[f64],
+    hess_dir: &mut Vec<f64>,
+) {
+    let [first, second, third] = outer;
+    let du = dot(&tower.grad, dir);
+    matvec(&tower.hess, kw, dir, hess_dir);
+    for a in 0..kw {
+        for b in 0..kw {
+            let index = a * kw + b;
+            out[index] += third * du * tower.grad[a] * tower.grad[b]
+                + second * (hess_dir[a] * tower.grad[b] + tower.grad[a] * hess_dir[b])
+                + second * du * tower.hess[index]
+                + first * tower.third[index];
+        }
+    }
+}
+
+/// The per-row directional third contraction `T[a][b] = Σ_c ∂³ℓ/∂a∂b∂c·d_c` of
+/// `sls_row_nll_wiggle`, row-major into `scratch.third`, from the towers of `u0w`,
+/// `u1w` and `g`. It skips inactive terms exactly as `hand_sls_wiggle_row_hessian`
+/// does.
+#[inline(never)]
+fn hand_sls_wiggle_row_third(
+    p: &[f64; SLS_ROW_K],
+    betaw: &[f64],
+    kernel: &SurvivalExactRowKernel,
+    basis: &SlsWiggleRowBasis<'_>,
+    dir: &[f64],
+    scratch: &mut HandWiggleThirdScratch,
+) {
+    let pw = betaw.len();
+    let kw = SLS_ROW_K + pw;
+    let entry_stack = [
+        kernel.log_s0,
+        -kernel.r0,
+        -kernel.dr0,
+        -kernel.ddr0,
+        -kernel.dddr0,
+    ];
+    let exit_stack = [
+        kernel.log_s1,
+        -kernel.r1,
+        -kernel.dr1,
+        -kernel.ddr1,
+        -kernel.dddr1,
+    ];
+    let pdf_stack = [
+        kernel.logphi1,
+        kernel.dlogphi1,
+        kernel.d2logphi1,
+        kernel.d3logphi1,
+        kernel.d4logphi1,
+    ];
+    let rate_stack = [
+        kernel.log_g,
+        kernel.d_log_g,
+        kernel.d2_log_g,
+        kernel.d3_log_g,
+        kernel.d4_log_g,
+    ];
+    let censored_weight = kernel.w * (1.0 - kernel.d);
+    let event_weight = kernel.w * kernel.d;
+    let entry_active = !stack_is_zero(&entry_stack);
+    let censored_active = censored_weight != 0.0 && !stack_is_zero(&exit_stack);
+    let pdf_active = event_weight != 0.0 && !stack_is_zero(&pdf_stack);
+    let rate_active = event_weight != 0.0 && !stack_is_zero(&rate_stack);
+    let entry_outer = [
+        kernel.w * entry_stack[1],
+        kernel.w * entry_stack[2],
+        kernel.w * entry_stack[3],
+    ];
+    let mut exit_outer = [0.0; 3];
+    for k in 0..3 {
+        if censored_active {
+            exit_outer[k] -= censored_weight * exit_stack[k + 1];
+        }
+        if pdf_active {
+            exit_outer[k] -= event_weight * pdf_stack[k + 1];
+        }
+    }
+    let rate_outer = [
+        -event_weight * rate_stack[1],
+        -event_weight * rate_stack[2],
+        -event_weight * rate_stack[3],
+    ];
+
+    let s7 = (-p[7]).exp();
+    let q0 = -p[4] * s7;
+    let s6 = (-p[6]).exp();
+    let q1 = -p[3] * s6;
+    let qdot0 = s6 * (p[3] * p[8] - p[5]);
+    let (b0, b1) = (basis.b_u0, basis.b_u1);
+    // `∂u0w/∂q0` through `∂³u0w/∂q0³`, the same for `u1w` over `q1`, and
+    // `∂m1/∂q1` through `∂³m1/∂q1³`; the value of `m1` equals `∂u1w/∂q1`.
+    let mut entry_derivs = [1.0, 0.0, 0.0];
+    let mut exit_derivs = [1.0, 0.0, 0.0];
+    let mut multiplier_derivs = [0.0; 3];
+    for j in 0..pw {
+        for k in 0..3 {
+            entry_derivs[k] += betaw[j] * b0[k + 1][j];
+            exit_derivs[k] += betaw[j] * b1[k + 1][j];
+            multiplier_derivs[k] += betaw[j] * b1[k + 2][j];
+        }
+    }
+
+    let HandWiggleThirdScratch {
+        entry,
+        exit,
+        multiplier,
+        rate_index,
+        rate,
+        hess_dir,
+        multiplier_hess_dir,
+        rate_index_hess_dir,
+        third,
+    } = scratch;
+    third.clear();
+    third.resize(kw * kw, 0.0);
+    if entry_active {
+        warp_tower(kw, Some(0), 4, 7, s7, q0, entry_derivs, [b0[0], b0[1], b0[2]], dir, entry);
+        add_composition_third(third, kw, entry_outer, entry, dir, hess_dir);
+    }
+    if censored_active || pdf_active {
+        warp_tower(kw, Some(1), 3, 6, s6, q1, exit_derivs, [b1[0], b1[1], b1[2]], dir, exit);
+        add_composition_third(third, kw, exit_outer, exit, dir, hess_dir);
+    }
+    if rate_active {
+        warp_tower(
+            kw,
+            None,
+            3,
+            6,
+            s6,
+            q1,
+            multiplier_derivs,
+            [b1[1], b1[2], b1[3]],
+            dir,
+            multiplier,
+        );
+        rate_index_tower(kw, p, s6, qdot0, dir, rate_index);
+        rate_tower(
+            kw,
+            exit_derivs[0],
+            qdot0,
+            multiplier,
+            rate_index,
+            dir,
+            multiplier_hess_dir,
+            rate_index_hess_dir,
+            rate,
+        );
+        add_composition_third(third, kw, rate_outer, rate, dir, hess_dir);
+    }
+}
+
+/// Production's per-row directional third lowering, as
+/// `SurvivalLsWiggleRowKernel::row_third_contracted` runs it.
+fn production_row_third(
+    p: &[f64; SLS_ROW_K],
+    betaw: &[f64],
+    kernel: &SurvivalExactRowKernel,
+    basis: &SlsWiggleRowBasis<'_>,
+    dir: &[f64],
+    arena: &mut DynamicJetArena,
+) -> Vec<f64> {
+    arena.reset();
+    let arena: &DynamicJetArena = arena;
+    let kw = SLS_ROW_K + betaw.len();
+    let vars = arena.alloc_slice_fill_with(kw, |a| {
+        let x = if a < SLS_ROW_K {
+            p[a]
+        } else {
+            betaw[a - SLS_ROW_K]
+        };
+        DynamicOneSeed::seed_direction(x, a, dir[a], kw, arena)
+    });
+    sls_row_nll_wiggle(vars, kernel, betaw.len(), basis)
+        .contracted_third()
+        .to_vec()
+}
+
+/// A direction with every primary live, distinct across axes.
+fn wiggle_direction(kw: usize) -> Vec<f64> {
+    (0..kw)
+        .map(|a| (((a * 5 + 3) % 11) as f64 / 11.0 - 0.45) * 1.2)
+        .collect()
+}
+
+/// #932 row 58, stage 2: the hand directional third contraction equals production's
+/// `DynamicOneSeed` lowering on every entry, at runtime widths 3 and 7, on an event
+/// row, a censored row and an untruncated event row, along a direction with every
+/// primary live. It uses the band and the measure-then-assert structure of the
+/// Hessian test. The control corrupts the exit stack's third slot, which no
+/// order-two quantity reads.
+#[test]
+fn hand_sls_wiggle_row_third_matches_production_jet_932() {
+    let band = |a: f64, b: f64| 1e-11 * a.abs().max(b.abs()).max(1.0);
+    let mut arena = DynamicJetArena::new();
+    let mut scratch = HandWiggleThirdScratch::new();
+    let mut worst_over_band = 0.0_f64;
+    let mut failures = Vec::new();
+    let mut corrupted_trip = 0.0_f64;
+    for pw in [3usize, 7] {
+        let rows = BasisRows::new(pw);
+        let basis = rows.view();
+        let betaw = wiggle_amplitudes(pw);
+        let kw = SLS_ROW_K + pw;
+        let dir = wiggle_direction(kw);
+        for (label, event, entry_truncated) in [
+            ("event", 1.0, true),
+            ("censored", 0.0, true),
+            ("event_untruncated", 1.0, false),
+        ] {
+            let (p, kernel) = row_fixture(event, entry_truncated);
+            let production = production_row_third(&p, &betaw, &kernel, &basis, &dir, &mut arena);
+            assert_eq!(production.len(), kw * kw);
+            hand_sls_wiggle_row_third(&p, &betaw, &kernel, &basis, &dir, &mut scratch);
+            for a in 0..kw {
+                for b in 0..kw {
+                    let want = production[a * kw + b];
+                    let got = scratch.third[a * kw + b];
+                    let over = (want - got).abs() / band(want, got);
+                    if !(over <= worst_over_band) {
+                        worst_over_band = over;
+                    }
+                    if !(over <= 1.0) {
+                        failures.push(format!(
+                            "pw={pw} {label} T[{a}][{b}]: production {want:+.15e} hand {got:+.15e}"
+                        ));
+                    }
+                }
+            }
+            if label == "censored" {
+                let mut corrupted = kernel;
+                corrupted.ddr1 *= 1.0 + 1e-6;
+                hand_sls_wiggle_row_third(&p, &betaw, &corrupted, &basis, &dir, &mut scratch);
+                for a in 0..kw {
+                    for b in 0..kw {
+                        let want = production[a * kw + b];
+                        let got = scratch.third[a * kw + b];
+                        let trip = (want - got).abs() / band(want, got);
+                        if !(trip <= corrupted_trip) {
+                            corrupted_trip = trip;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    eprintln!(
+        "SLS-WIGGLE-HAND-932 order=3 worst_over_band={worst_over_band:.3e} \
+         corrupted_ddr1_trip_over_band={corrupted_trip:.3e}"
+    );
+    assert!(
+        failures.is_empty(),
+        "{} third-contraction entries miss the band:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    assert!(
+        corrupted_trip > 1.0,
+        "a one-ppm corruption of the exit stack's third slot stayed inside the band \
+         ({corrupted_trip:.3e} of it)"
+    );
+}
+
+#[inline(never)]
+fn production_order3_checksum(
+    p: &[f64; SLS_ROW_K],
+    betaw: &[f64],
+    kernel: &SurvivalExactRowKernel,
+    basis: &SlsWiggleRowBasis<'_>,
+    dir: &[f64],
+    arena: &mut DynamicJetArena,
+) -> f64 {
+    arena.reset();
+    let arena: &DynamicJetArena = arena;
+    let kw = SLS_ROW_K + betaw.len();
+    let vars = arena.alloc_slice_fill_with(kw, |a| {
+        let x = if a < SLS_ROW_K {
+            p[a]
+        } else {
+            betaw[a - SLS_ROW_K]
+        };
+        DynamicOneSeed::seed_direction(x, a, dir[a], kw, arena)
+    });
+    sls_row_nll_wiggle(vars, kernel, betaw.len(), basis)
+        .contracted_third()
+        .iter()
+        .enumerate()
+        .fold(0.0, |acc, (index, value)| acc + value * (1.0 + index as f64 * 1e-3))
+}
+
+#[inline(never)]
+fn hand_order3_checksum(
+    p: &[f64; SLS_ROW_K],
+    betaw: &[f64],
+    kernel: &SurvivalExactRowKernel,
+    basis: &SlsWiggleRowBasis<'_>,
+    dir: &[f64],
+    scratch: &mut HandWiggleThirdScratch,
+) -> f64 {
+    hand_sls_wiggle_row_third(p, betaw, kernel, basis, dir, scratch);
+    scratch
+        .third
+        .iter()
+        .enumerate()
+        .fold(0.0, |acc, (index, value)| acc + value * (1.0 + index as f64 * 1e-3))
 }
