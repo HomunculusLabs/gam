@@ -351,8 +351,17 @@ pub fn propose_curve_promotion(
 /// ambient frame, dropping directions that are (numerically) already in the span.
 /// The retained count `r ≤ s` is the effective rank of the block span.
 fn gram_schmidt(atoms: ArrayView2<'_, f64>) -> Vec<Array1<f64>> {
-    let (s, _p) = atoms.dim();
+    let (s, p) = atoms.dim();
     let mut basis: Vec<Array1<f64>> = Vec::with_capacity(s);
+    // A direction lying in the span of the stored bases must come out of modified
+    // Gram–Schmidt as rounding, and nothing more. Each projection forms one
+    // length-`P` inner product and updates every entry with a product and a
+    // subtraction, leaking at most `γ_{P+4}·‖w‖`; it also leaks what the stored bases'
+    // own loss of orthogonality leaves behind, at most `Σ ω·‖w‖`. After `k` projections
+    // a dependent residual stays inside `k·(γ_{P+4} + Σ ω)·‖w‖`, and a basis stored
+    // from residual `r` of row `w` carries `ω = band·‖w‖/‖r‖`.
+    let projection_growth = gam_linalg::roundoff::accumulation_growth(p + 4);
+    let mut orthogonality_defect = 0.0_f64;
     for j in 0..s {
         let mut v = atoms.row(j).to_owned();
         for q in &basis {
@@ -360,11 +369,10 @@ fn gram_schmidt(atoms: ArrayView2<'_, f64>) -> Vec<Array1<f64>> {
             v.scaled_add(-proj, q);
         }
         let norm = v.dot(&v).sqrt();
-        // Relative drop threshold: a residual whose norm collapses under the
-        // atom's own scale carries no new direction. Uses the row norm as the
-        // reference so the test is scale-free, not a hand-set absolute floor.
         let row_norm = atoms.row(j).dot(&atoms.row(j)).sqrt();
-        if norm > row_norm * f64::EPSILON.sqrt() {
+        let band = basis.len() as f64 * (projection_growth + orthogonality_defect);
+        if norm > band * row_norm {
+            orthogonality_defect += band * row_norm / norm;
             v.mapv_inplace(|x| x / norm);
             basis.push(v);
         }
