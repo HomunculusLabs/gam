@@ -7,6 +7,7 @@ pub mod interval_policy;
 pub mod linalg;
 pub mod posterior_bands;
 pub mod posterior_predict;
+pub mod term_diagnostics;
 
 pub use affine_design::*;
 pub use alo::*;

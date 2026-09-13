@@ -8445,47 +8445,9 @@ fn affine_design_array_impl(
     affine_design_for_dataset(&model, dataset)
 }
 
-/// Population variance (divide by `n`, matching numpy `np.var`'s default).
-fn population_variance(values: &[f64]) -> f64 {
-    if values.is_empty() {
-        return 0.0;
-    }
-    let mean = values.iter().sum::<f64>() / values.len() as f64;
-    values
-        .iter()
-        .map(|value| (value - mean) * (value - mean))
-        .sum::<f64>()
-        / values.len() as f64
-}
-
-/// Population covariance (divide by `n`, matching `population_variance`).
-fn population_covariance(a: &[f64], b: &[f64]) -> Result<f64, String> {
-    let n = a.len();
-    if n != b.len() {
-        return Err(format!(
-            "population covariance requires equal-length slices, got {n} and {}",
-            b.len()
-        ));
-    }
-    if n == 0 {
-        return Ok(0.0);
-    }
-    let mean_a = a.iter().sum::<f64>() / n as f64;
-    let mean_b = b.iter().sum::<f64>() / n as f64;
-    Ok(a.iter()
-        .zip(b.iter())
-        .map(|(&va, &vb)| (va - mean_a) * (vb - mean_b))
-        .sum::<f64>()
-        / n as f64)
-}
-
-/// Per-term partial dependence on a grid table.
-///
-/// For the requested `term` this evaluates `f_t(x) = X_t(x) β_t` and the
-/// matching delta-method standard error `sqrt(diag(X_t V_t X_tᵀ))`, where
-/// `V_t` is the term-block of the fitted coefficient covariance. The design
-/// build, `β`, `V`, and the term column ranges are all owned by the Rust
-/// core; the caller only supplies the evaluation grid.
+/// Per-term partial dependence on a grid table, evaluated by
+/// `gam_predict::term_diagnostics::term_partial_dependence` on the model's
+/// mean-block design at the grid rows, with the covariance the fit publishes.
 fn model_partial_dependence_encoded_impl(
     model_bytes: &[u8],
     term: &str,
@@ -8519,41 +8481,19 @@ fn model_partial_dependence_encoded_impl(
             let available: Vec<&str> = blocks.iter().map(|(n, _, _, _)| n.as_str()).collect();
             format!("partial_dependence: term {term:?} not found; available: {available:?}")
         })?;
-    let n = x.nrows();
-    let mut predicted = vec![0.0_f64; n];
-    let mut se = vec![0.0_f64; n];
-    for i in 0..n {
-        let xi = x.row(i);
-        let mut f = 0.0_f64;
-        for c in start..end {
-            f += xi[c] * beta[c];
-        }
-        predicted[i] = f;
-        let mut var = 0.0_f64;
-        for a in start..end {
-            let xa = xi[a];
-            for b in start..end {
-                var += xa * cov[[a, b]] * xi[b];
-            }
-        }
-        se[i] = var.max(0.0).sqrt();
-    }
+    let (predicted, se) = gam_predict::term_diagnostics::term_partial_dependence(
+        x.view(),
+        beta.view(),
+        cov.view(),
+        start..end,
+    )?;
     Ok((predicted, se, covariance_source.as_str().to_string()))
 }
 
-/// Per-term variance share: `cov(X_t β_t, X β) / var(X β)` for each
-/// non-intercept term block (or a single `term` when supplied). Evaluated on
-/// the caller's grid table; `β` and the term column ranges come from the Rust
-/// core.
-///
-/// This is a genuine variance decomposition: `var(η) = Σ_t cov(f_t, η)`, so
-/// the shares sum to exactly 1 (the intercept contributes a constant with
-/// zero covariance). Each term's cross-covariance with every other term is
-/// split symmetrically — half to each side — which is the Shapley allocation
-/// for a sum of terms. The naive `var(f_t) / var(η)` it replaces dropped all
-/// cross terms: for `f_1 = x`, `f_2 = -0.9x` it reported shares 100 and 81
-/// against a total of 0.01·var(x). A share can exceed 1 or be negative only
-/// when terms genuinely anticorrelate, which is honest rather than a bug.
+/// Per-term variance share for each non-intercept term block (or the single
+/// `term` when supplied), evaluated by
+/// `gam_predict::term_diagnostics::term_variance_shares` on the model's
+/// mean-block design at the caller's grid rows.
 fn model_variance_share_encoded_impl(
     model_bytes: &[u8],
     source: EncodedDataset,
@@ -8563,47 +8503,14 @@ fn model_variance_share_encoded_impl(
     let dataset = dataset_with_model_schema_from_encoded(&model, &source)?;
     let x = standard_mean_design_dense(&model, dataset)?;
     let fit = fit_result_from_saved_model_for_prediction(&model)?;
-    let beta = &fit.beta;
-    let blocks = term_blocks_for_model_impl(model_bytes)?;
-    let n = x.nrows();
-    let p = beta.len();
-    let mut eta = vec![0.0_f64; n];
-    for i in 0..n {
-        let xi = x.row(i);
-        let mut s = 0.0_f64;
-        for c in 0..p {
-            s += xi[c] * beta[c];
-        }
-        eta[i] = s;
-    }
-    let total_var = population_variance(&eta);
-    let mut out: Vec<(String, f64)> = Vec::new();
-    for (name, kind, start, end) in &blocks {
-        if kind.as_str() == "intercept" {
-            continue;
-        }
-        if let Some(t) = term.as_ref() {
-            if name.as_str() != t.as_str() {
-                continue;
-            }
-        }
-        let mut contrib = vec![0.0_f64; n];
-        for i in 0..n {
-            let xi = x.row(i);
-            let mut s = 0.0_f64;
-            for c in *start..*end {
-                s += xi[c] * beta[c];
-            }
-            contrib[i] = s;
-        }
-        let share = if total_var > 0.0 {
-            population_covariance(&contrib, &eta)? / total_var
-        } else {
-            0.0
-        };
-        out.push((name.clone(), share));
-    }
-    Ok(out)
+    let selected: Vec<(String, std::ops::Range<usize>)> = term_blocks_for_model_impl(model_bytes)?
+        .into_iter()
+        .filter(|(name, kind, _, _)| {
+            kind.as_str() != "intercept" && term.as_deref().is_none_or(|t| name.as_str() == t)
+        })
+        .map(|(name, _, start, end)| (name, start..end))
+        .collect();
+    gam_predict::term_diagnostics::term_variance_shares(x.view(), fit.beta.view(), &selected)
 }
 
 #[pyfunction]
