@@ -1,7 +1,7 @@
 //! #2818 recovery of the public nested-dual contracts behind #932.
 
 use gam_math::jet_tower::Tower4;
-use gam_math::nested_dual::{Dual2, Dual22, JetField};
+use gam_math::nested_dual::{Dual2, JetField};
 
 fn smooth_program<J: JetField>(x: &J, y: &J) -> J {
     let exponential_argument = x.mul(y).add(&x.scale(0.3));
@@ -26,7 +26,7 @@ fn smooth_program<J: JetField>(x: &J, y: &J) -> J {
         .sub(&difference.mul(&difference).scale(0.7))
 }
 
-fn directional_seed(value: f64, outer: f64, inner: f64) -> Dual22 {
+fn directional_seed(value: f64, outer: f64, inner: f64) -> Dual2<Dual2<f64>> {
     Dual2 {
         v: Dual2 {
             v: value,

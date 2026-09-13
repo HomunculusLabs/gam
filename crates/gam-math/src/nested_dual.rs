@@ -275,7 +275,7 @@ impl<S: JetFieldConst> JetFieldConst for Dual2<S> {
 /// (inner): value `x`, unit first derivative along both requested directions.
 /// `p0` should be seeded `(a=1, b=0)` and `p1` `(a=0, b=1)` for a two-primary
 /// program (mirrors `Tower4::variable(x, 0)` / `Tower4::variable(x, 1)`).
-pub type Dual22 = Dual2<Dual2<f64>>;
+pub(crate) type Dual22 = Dual2<Dual2<f64>>;
 
 impl Dual22 {
 
