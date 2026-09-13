@@ -7451,5 +7451,13 @@
     ],
     "reason": "#2668 row 23, lead ruling 09-12 on q28 and 8bee1c631, option B: keep the end-slope double-penalty model and drop its coefficient chart. charge_null_ridge_along_mean_end_slope builds the null ridge as m*v*v^T with v = phi/(phi^T n) in the basis's own chart, so natural_tail_null_chart and apply_natural_tail_null_chart, which composed the chart M (cond about 65) into Z, the design and every penalty, have no caller. uses_natural_tail_null_chart is renamed uses_mean_end_slope_ridge and also admits FrozenTransform, so a frozen replay rebuilds the fit-time ridge.",
     "evidence": "At the landing tree git grep -n -w over crates, src and tests finds none of the three removed names. Guarded pool job 603362 (sw0j, acn105) at 03e0cac32 plus this patch, /scratch.global/sauer354/pool/regress2668/optb.603362.log: scripts/source_removal_guard.py rc=0 with 3 guarded removals; cargo check --workspace --all-targets --exclude gam-pyffi rc=0 in 140 s; gam-terms lib pins bspline 51 passed, double_penalty 20 passed, ridge 13 passed, nullspace 16 passed, streaming 3 passed, 0 failed. The #1266 module and owed_1477_factorial were still building when this landed."
-  }
-]
+  },
+  {
+    "base": "940ba0cf692e4cdb1427fa4e53bd56c32538bbb1",
+    "items": [
+      "crates/gam-sae/src/manifold/local_charts.rs:fn:width_level_recovery_rate"
+    ],
+    "reason": "#2280 (folded #2906): holonomy_quotient_coordinates loses its Möbius arm. Its flat glide-reflection read is not a loop coordinate on the embedded band: the centerline's geodesic curvature -cos(u/2)/2 turns the developed tangent by up to two radians, so the projection onto the glide axis runs backwards over part of the loop. width_level_recovery_rate scored only that arm's width against the principal double cover, inside holonomy_seeded_loops_recover_their_planted_parameter_2906, and goes with it.",
+    "evidence": "At the base, git grep -n width_level_recovery_rate finds its declaration and its two calls, all in the Möbius block of holonomy_seeded_loops_recover_their_planted_parameter_2906 in crates/gam-sae/src/manifold/local_charts.rs, which this change removes. Job 588786 (/scratch.global/sauer354/pool/sae2280/follow1.full.588786.txt) measured that block at 0.0381 base recovery and 0.0000 width levels against the principal seed's 1.0000."
+   }
+ ]

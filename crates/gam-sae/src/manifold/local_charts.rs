@@ -94,10 +94,9 @@ struct DevelopingMap {
     in_tree: Vec<bool>,
 }
 
-/// A non-tree transition's holonomy in the developed frame, `h(x) = linear·x + translation`
-/// (see `LocalAtlas::holonomy_quotient_coordinates`).
+/// A non-tree transition's holonomy in the developed frame, `h(x) = M x + translation`,
+/// and whether `M` reverses orientation (see `LocalAtlas::holonomy_quotient_coordinates`).
 struct DevelopedHolonomy {
-    linear: Array2<f64>,
     translation: Array1<f64>,
     reversing: bool,
 }
@@ -983,17 +982,19 @@ impl LocalAtlas {
     ///   axis and length. The coordinates are the fraction of the loop along that axis and the
     ///   height across it, centered and scaled to unit spread, the convention the cylinder seed
     ///   uses.
-    /// * a Möbius band (chart rank 2): every orientation-reversing holonomy is an odd power of
-    ///   the band's glide reflection, so the one with the smallest glide is the generator. Its
-    ///   `M` is a reflection with axis `a` and normal `n`, and `v = α a + β n` puts the glide
-    ///   `α` along the axis and the axis at offset `β/2`. A row at `x` reads `s = x·a / α` on
-    ///   the period-two double cover and signed width `w = x·n − β/2`, folded onto the
-    ///   fundamental domain `s ∈ [0, 1)` through the deck twin `(s + 1, −w)` and divided by
-    ///   twice the width spread, the convention `mobius_double_cover_coords_from_projection`
-    ///   gives the deck-invariant basis.
+    ///
+    /// Both reads project onto a straight line, so they need the loop to develop straight: a
+    /// 1-manifold always does, and a cylinder does when its loop is a geodesic of the surface.
+    /// No such read is offered for a Möbius band. On the standard embedding the centerline
+    /// `(2 cos u, 2 sin u, 0)` has geodesic curvature `−cos(u/2)/2` against the width ruling,
+    /// so its developed tangent turns by `−2 sin(u/2)`, two radians at `u = π`, and the
+    /// developed centerline ends `4π·(J₀(2), −H₀(2)) ≈ (2.81, −9.94)` from its start in the
+    /// seam tangent's frame. The reversing holonomy reflects across that tangent, and the
+    /// centerline's projection onto it runs backwards wherever `sin(u/2) > π/4`, so no
+    /// projection onto the glide axis is a loop coordinate.
     ///
     /// Refused for any other manifold or chart rank, for a cover with no holonomy of the
-    /// class the read needs, and for a degenerate glide or width.
+    /// class the read needs, and for a degenerate period or height.
     pub(crate) fn holonomy_quotient_coordinates(
         &self,
         z: ArrayView2<'_, f64>,
@@ -1069,62 +1070,6 @@ impl LocalAtlas {
                 }
                 for row in 0..n {
                     coords[[row, 1]] = (coords[[row, 1]] - mean) / spread;
-                }
-                Ok(coords)
-            }
-            (GraphCompressionKind::MobiusStrip, 2) => {
-                // (axis, normal, glide, offset) of the reversing holonomy with the smallest glide.
-                let mut generator: Option<([f64; 2], [f64; 2], f64, f64)> = None;
-                for holonomy in holonomies.iter().filter(|holonomy| holonomy.reversing) {
-                    let cosine = 0.5 * (holonomy.linear[[0, 0]] - holonomy.linear[[1, 1]]);
-                    let sine = 0.5 * (holonomy.linear[[1, 0]] + holonomy.linear[[0, 1]]);
-                    let half = 0.5 * sine.atan2(cosine);
-                    let mut axis = [half.cos(), half.sin()];
-                    let normal = [-half.sin(), half.cos()];
-                    let v = &holonomy.translation;
-                    let mut glide = v[0] * axis[0] + v[1] * axis[1];
-                    if glide < 0.0 {
-                        axis = [-axis[0], -axis[1]];
-                        glide = -glide;
-                    }
-                    let offset = v[0] * normal[0] + v[1] * normal[1];
-                    if generator.map_or(true, |incumbent| glide < incumbent.2) {
-                        generator = Some((axis, normal, glide, offset));
-                    }
-                }
-                let (axis, normal, glide, offset) = generator.ok_or_else(|| {
-                    "holonomy_quotient_coordinates: no orientation-reversing non-tree transition, so no glide reflection to read"
-                        .to_string()
-                })?;
-                if !(glide > 0.0 && glide.is_finite()) {
-                    return Err(format!(
-                        "holonomy_quotient_coordinates: the generating glide reflection has no glide ({glide:.3e})"
-                    ));
-                }
-                let mut coords = Array2::<f64>::zeros((n, 2));
-                for row in 0..n {
-                    let (x0, x1) = (developed[[row, 0]], developed[[row, 1]]);
-                    let lift = (x0 * axis[0] + x1 * axis[1]) / glide;
-                    let on_cover = lift - 2.0 * (0.5 * lift).floor();
-                    let width = x0 * normal[0] + x1 * normal[1] - 0.5 * offset;
-                    let (s, w) = if on_cover >= 1.0 {
-                        (on_cover - 1.0, -width)
-                    } else {
-                        (on_cover, width)
-                    };
-                    coords[[row, 0]] = s;
-                    coords[[row, 1]] = w;
-                }
-                let width_sd = (coords.column(1).iter().map(|w| w * w).sum::<f64>()
-                    / n.max(1) as f64)
-                    .sqrt();
-                if !(width_sd > 0.0 && width_sd.is_finite()) {
-                    return Err(format!(
-                        "holonomy_quotient_coordinates: the signed width is degenerate (spread {width_sd:.3e})"
-                    ));
-                }
-                for row in 0..n {
-                    coords[[row, 1]] = (coords[[row, 1]] / (2.0 * width_sd)).clamp(-1.0, 1.0);
                 }
                 Ok(coords)
             }
@@ -1311,7 +1256,6 @@ impl LocalAtlas {
                 - linear.dot(&map.offset[from]);
             let reversing = determinant(&linear) < 0.0;
             holonomies.push(DevelopedHolonomy {
-                linear,
                 translation,
                 reversing,
             });
@@ -2380,13 +2324,11 @@ mod tests {
             .fold(f64::INFINITY, f64::min)
     }
 
-    /// #2906 — the holonomy of a planted circle and of a planted Möbius band dictates their
+    /// #2906 — the holonomy of a planted circle and of a planted cylinder dictates their
     /// quotient coordinates. Every row's loop coordinate must land within half a lattice
     /// step of its planted position after the best rotation and reflection, so the loop
-    /// order is recovered exactly. On the band the width magnitudes must also keep the
-    /// planted width levels apart, in order, in every loop column. The magnitude is the
-    /// deck-invariant half of the width, so the seam where a row folds onto its twin cannot
-    /// flip it.
+    /// order is recovered exactly. On the cylinder the height must also keep the planted
+    /// width order in every loop column.
     #[test]
     fn holonomy_quotient_recovers_the_planted_loop_2906() {
         let n = 400usize;
@@ -2404,41 +2346,6 @@ mod tests {
         );
 
         let (n_u, n_v) = (60usize, 14usize);
-        let band = mobius_strip(n_u, n_v);
-        let atlas = LocalAtlas::build(band.view(), LocalAtlasConfig::balanced(band.nrows(), 2))
-            .expect("the planted band's atlas builds");
-        let quotient = atlas
-            .holonomy_quotient_coordinates(band.view(), GraphCompressionKind::MobiusStrip)
-            .expect("the planted band's holonomy reads a glide reflection");
-        let planted: Vec<f64> = (0..band.nrows())
-            .map(|row| (row / n_v) as f64 / n_u as f64)
-            .collect();
-        let worst = worst_loop_residual(quotient.column(0), &planted);
-        assert!(
-            worst < 0.5 / n_u as f64,
-            "every band row must land within half a loop step of its planted base position: worst {worst:.3e}"
-        );
-        // The planted widths are symmetric about zero, so each column's rows form `n_v / 2`
-        // magnitude levels; the recovered magnitudes must keep neighbouring levels apart.
-        let mut misordered = Vec::new();
-        for column in 0..n_u {
-            let magnitude = |iv: usize| quotient[[column * n_v + iv, 1]].abs();
-            for level in 0..(n_v / 2 - 1) {
-                let inner = magnitude(n_v / 2 - 1 - level).max(magnitude(n_v / 2 + level));
-                let outer = magnitude(n_v / 2 - 2 - level).min(magnitude(n_v / 2 + 1 + level));
-                if !(inner < outer) {
-                    misordered.push(format!(
-                        "column {column} level {level}: inner {inner:.3e} vs outer {outer:.3e}"
-                    ));
-                }
-            }
-        }
-        assert!(
-            misordered.is_empty(),
-            "the band's width magnitudes must recover the planted levels: {}",
-            misordered.join("; ")
-        );
-
         let cylinder = cylinder_strip(n_u, n_v);
         let atlas =
             LocalAtlas::build(cylinder.view(), LocalAtlasConfig::balanced(cylinder.nrows(), 2))
@@ -2446,6 +2353,9 @@ mod tests {
         let quotient = atlas
             .holonomy_quotient_coordinates(cylinder.view(), GraphCompressionKind::Cylinder)
             .expect("the planted cylinder's holonomy reads a loop translation");
+        let planted: Vec<f64> = (0..cylinder.nrows())
+            .map(|row| (row / n_v) as f64 / n_u as f64)
+            .collect();
         let worst = worst_loop_residual(quotient.column(0), &planted);
         assert!(
             worst < 0.5 / n_u as f64,
@@ -2526,33 +2436,14 @@ mod tests {
         }))
     }
 
-    /// Fraction of neighbouring planted width levels whose recovered magnitudes stay apart in
-    /// order, over every loop column of an `n_u × n_v` lattice whose widths are symmetric
-    /// about zero.
-    fn width_level_recovery_rate(width: ArrayView1<'_, f64>, n_u: usize, n_v: usize) -> f64 {
-        let (mut kept, mut checked) = (0usize, 0usize);
-        for column in 0..n_u {
-            let magnitude = |iv: usize| width[column * n_v + iv].abs();
-            for level in 0..(n_v / 2 - 1) {
-                let inner = magnitude(n_v / 2 - 1 - level).max(magnitude(n_v / 2 + level));
-                let outer = magnitude(n_v / 2 - 2 - level).min(magnitude(n_v / 2 + 1 + level));
-                checked += 1;
-                if inner < outer {
-                    kept += 1;
-                }
-            }
-        }
-        kept as f64 / checked.max(1) as f64
-    }
-
-    /// #2906 acceptance — circle, cylinder and Möbius atoms seeded from the atlas's holonomy
-    /// recover their planted loop parameter at least as well as the principal-projection seed
-    /// on the same fixture. Recovery is the fraction of rows whose loop coordinate lands within
-    /// half a lattice step of its planted position after the best rotation and reflection. On
-    /// the band it is also the fraction of neighbouring width levels kept in order. The
-    /// principal seeds are the ones discovery races: the leading pair's phase, the cylinder's
-    /// phase with the third component as height, and the double-cover chart the Möbius
-    /// candidate reads off three principal components.
+    /// #2906 acceptance — circle and cylinder atoms seeded from the atlas's holonomy recover
+    /// their planted loop parameter at least as well as the principal-projection seed on the
+    /// same fixture. Recovery is the fraction of rows whose loop coordinate lands within half a
+    /// lattice step of its planted position after the best rotation and reflection. The
+    /// principal seeds are the ones discovery races: the leading pair's phase, and the
+    /// cylinder's phase with the third component as height. The Möbius band keeps its
+    /// principal double-cover seed, because its developed centerline curls
+    /// (`LocalAtlas::holonomy_quotient_coordinates`).
     #[test]
     fn holonomy_seeded_loops_recover_their_planted_parameter_2906() {
         let mut shortfalls: Vec<String> = Vec::new();
@@ -2599,28 +2490,6 @@ mod tests {
             "cylinder_strip(60, 14) loop",
             loop_recovery_rate(holonomy.column(0), &planted, step),
             loop_recovery_rate(principal.view(), &planted, step),
-        );
-
-        let band = mobius_strip(n_u, n_v);
-        let holonomy = LocalAtlas::build(band.view(), LocalAtlasConfig::balanced(band.nrows(), 2))
-            .expect("the planted band's atlas builds")
-            .holonomy_quotient_coordinates(band.view(), GraphCompressionKind::MobiusStrip)
-            .expect("the planted band's holonomy reads a glide reflection");
-        let all_rows: Vec<usize> = (0..band.nrows()).collect();
-        let principal = crate::manifold::mobius_double_cover_coords_from_projection(
-            principal_projection(&band, 3).view(),
-            &all_rows,
-        )
-        .expect("the planted band's principal double cover reads");
-        compare(
-            "mobius_strip(60, 14) base",
-            loop_recovery_rate(holonomy.column(0), &planted, step),
-            loop_recovery_rate(principal.column(0), &planted, step),
-        );
-        compare(
-            "mobius_strip(60, 14) width levels",
-            width_level_recovery_rate(holonomy.column(1), n_u, n_v),
-            width_level_recovery_rate(principal.column(1), n_u, n_v),
         );
 
         assert!(

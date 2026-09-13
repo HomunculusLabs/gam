@@ -4571,8 +4571,8 @@ fn race_birth_topology(
         None
     };
     // #2906 — the atlas's holonomy as a second challenger. When the readout names a circle
-    // at chart rank 1, or a cylinder or Möbius band at rank 2, that kind races on the
-    // quotient coordinates the non-tree holonomies dictate. Fail-open like the intrinsic
+    // at chart rank 1, or a cylinder at rank 2, that kind races on the quotient coordinates
+    // the non-tree holonomies dictate. Fail-open like the intrinsic
     // arm: a quotient that does not read, or does not race, leaves the other arms' verdict
     // untouched.
     let all_rows: Vec<usize> = (0..target.nrows()).collect();
@@ -5564,12 +5564,12 @@ pub(crate) fn discover_primary_atom_topologies(
                 None => None,
             };
             // #2906 — the atlas's holonomy as a third challenger. When the readout names a
-            // circle at chart rank 1 or a Möbius band at rank 2, that kind races on the
-            // quotient coordinates the non-tree holonomies dictate, instead of on phases of
-            // a principal projection. It races under the same REML evidence, and a named
-            // loop whose holonomy does not read is returned as an error. A primary atom cannot
-            // be installed as a cylinder (`sae_build_atom_plans` refuses the kind; cylinders
-            // are born), so a cylinder verdict offers no primary challenger.
+            // circle at chart rank 1, the circle races on the quotient coordinate the non-tree
+            // holonomies dictate, instead of on phases of a principal projection. It races
+            // under the same REML evidence, and a named loop whose holonomy does not read is
+            // returned as an error. A primary atom cannot be installed as a cylinder
+            // (`sae_build_atom_plans` refuses the kind; cylinders are born), so a cylinder
+            // verdict offers no primary challenger.
             let names_cylinder = atlas.as_ref().and_then(|readout| readout.observed_manifold())
                 == Some(GraphCompressionKind::Cylinder);
             let quotient_specs = if names_cylinder {
@@ -5792,7 +5792,9 @@ fn developed_sheet_specs(
 }
 
 /// The atlas's holonomy quotient as a loop challenger (#2906), or `None` unless the readout
-/// names a circle at chart rank 1, or a cylinder or Möbius band at chart rank 2. The candidate
+/// names a circle at chart rank 1 or a cylinder at chart rank 2. A Möbius verdict offers none,
+/// because the band's developed centerline curls and no flat read of it is a loop coordinate
+/// (`LocalAtlas::holonomy_quotient_coordinates`). The candidate
 /// is the kind the readout names, on the coordinates `LocalAtlas::holonomy_quotient_coordinates`
 /// reads off the non-tree holonomies, so a loop is seeded from the deck transformation the
 /// atlas measured rather than from phases of a principal projection. A circle or cylinder
@@ -5813,10 +5815,9 @@ fn quotient_loop_specs(
         (Some(atlas), Some(GraphCompressionKind::Circle)) if atlas.intrinsic_dim() == 1 => {
             (atlas, GraphCompressionKind::Circle)
         }
-        (
-            Some(atlas),
-            Some(kind @ (GraphCompressionKind::Cylinder | GraphCompressionKind::MobiusStrip)),
-        ) if atlas.intrinsic_dim() == 2 => (atlas, kind),
+        (Some(atlas), Some(GraphCompressionKind::Cylinder)) if atlas.intrinsic_dim() == 2 => {
+            (atlas, GraphCompressionKind::Cylinder)
+        }
         _ => return Ok(None),
     };
     let local = atlas.holonomy_quotient_coordinates(local_target, manifold)?;
@@ -5840,7 +5841,8 @@ fn quotient_loop_specs(
             LatentManifold::Circle { period: 1.0 },
             coords,
         )?,
-        GraphCompressionKind::Cylinder => TopologyCandidateSpec::new(
+        // The match above admits only a circle or a cylinder.
+        _ => TopologyCandidateSpec::new(
             AutoTopologyKind::Cylinder,
             SaeAtomGeometryPlan::new(
                 SaeAtomBasisKind::Cylinder,
@@ -5854,24 +5856,6 @@ fn quotient_loop_specs(
             LatentManifold::Product(vec![
                 LatentManifold::Circle { period: 1.0 },
                 LatentManifold::Euclidean,
-            ]),
-            coords,
-        )?,
-        // The match above admits only a circle, a cylinder or a Möbius band.
-        _ => TopologyCandidateSpec::new(
-            AutoTopologyKind::Mobius,
-            SaeAtomGeometryPlan::new(
-                SaeAtomBasisKind::Mobius,
-                2,
-                SaeBasisResolution::MobiusHarmonics {
-                    circle_order: crate::manifold::SAE_MOBIUS_CIRCLE_HARMONICS,
-                    width_degree: crate::manifold::SAE_MOBIUS_WIDTH_DEGREE,
-                },
-                SaeReferenceMetricPlan::MobiusQuotient,
-            )?,
-            LatentManifold::Product(vec![
-                LatentManifold::Circle { period: 2.0 },
-                LatentManifold::Interval { lo: -1.0, hi: 1.0 },
             ]),
             coords,
         )?,
