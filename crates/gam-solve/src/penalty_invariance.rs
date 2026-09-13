@@ -626,17 +626,19 @@ impl PenaltyMapInvariance {
 /// Modified Gram-Schmidt with a relative drop tolerance, returning `None` when
 /// nothing survives.
 ///
-/// The drop tolerance is the loss-of-orthogonality scale `64 * n * EPSILON`
-/// relative to the incoming column norm. **This coefficient is chosen, not
-/// derived**: the eigenpair backward-error floor it used to share was replaced
-/// by that residual's own evaluation bound (`gam_linalg::roundoff`).
-/// A column whose residual against the accepted basis has fallen that far is
-/// numerically dependent, and keeping it would admit a direction determined
-/// entirely by round-off.
+/// A column is dropped when its residual against the accepted basis is no
+/// larger than what the projection arithmetic alone can leave behind. For a
+/// column `x` in the span of `k` accepted unit columns of length `n`, one
+/// projection forms the `n`-term inner product `qᵀx`, then one product and one
+/// subtraction per entry, so by Higham's model (`gam_linalg::roundoff`) it leaves
+/// at most `γ_{n+3}·‖x‖₂` behind. Two passes over the `k` columns, and the
+/// `n + 1` operations of each of the residual and incoming norms, give the drop
+/// tolerance `γ_{2k(n+3)+2(n+1)}` relative to the incoming norm. A residual at
+/// or below it is determined entirely by round-off, and keeping it would admit
+/// a direction nothing but round-off determined.
 pub fn orthonormalize_columns(columns: &Array2<f64>) -> Option<Array2<f64>> {
     let rows = columns.nrows();
     let mut accepted: Vec<Array1<f64>> = Vec::with_capacity(columns.ncols());
-    let drop_relative = 64.0 * (rows.max(1) as f64) * f64::EPSILON;
     for index in 0..columns.ncols() {
         let mut vector = columns.column(index).to_owned();
         let incoming = vector.dot(&vector).sqrt();
@@ -652,6 +654,9 @@ pub fn orthonormalize_columns(columns: &Array2<f64>) -> Option<Array2<f64>> {
             }
         }
         let residual = vector.dot(&vector).sqrt();
+        let drop_relative = gam_linalg::roundoff::accumulation_growth(
+            2 * accepted.len() * (rows + 3) + 2 * (rows + 1),
+        );
         if !residual.is_finite() || residual <= drop_relative * incoming {
             continue;
         }
