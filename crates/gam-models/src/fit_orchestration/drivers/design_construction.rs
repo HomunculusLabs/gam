@@ -2953,6 +2953,42 @@ fn transform_bounded_latent_precision_to_user_internal(
     Ok(out)
 }
 
+/// `M·J·C·J·Mᵀ` of a latent coefficient-space bilinear form, with `J = diag(dβ/dθ)`
+/// the bounded transform's Jacobian and `M` the conditioning back-transform: the
+/// congruence that takes the latent conditional covariance to user scale (#2903).
+fn bounded_latent_bilinear_to_user(
+    latent: &Array2<f64>,
+    jac_diag: &Array1<f64>,
+    conditioning: &LinearFitConditioning,
+) -> Result<Array2<f64>, EstimationError> {
+    let p = latent.nrows();
+    if latent.ncols() != p || jac_diag.len() != p {
+        crate::bail_invalid_estim!(
+            "bounded bilinear transform dimension mismatch: form is {}x{}, jacobian has {} entries",
+            latent.nrows(),
+            latent.ncols(),
+            jac_diag.len()
+        );
+    }
+    let mut scaled = latent.clone();
+    for i in 0..p {
+        let scale = jac_diag[i];
+        scaled.row_mut(i).mapv_inplace(|value| value * scale);
+        scaled.column_mut(i).mapv_inplace(|value| value * scale);
+    }
+    let mut left = Array2::<f64>::zeros((p, p));
+    for j in 0..p {
+        left.column_mut(j)
+            .assign(&conditioning.backtransform_beta(&scaled.column(j).to_owned()));
+    }
+    let mut out = Array2::<f64>::zeros((p, p));
+    for i in 0..p {
+        out.row_mut(i)
+            .assign(&conditioning.backtransform_beta(&left.row(i).to_owned()));
+    }
+    Ok(out)
+}
+
 fn fit_bounded_term_collection_with_design(
     y: ArrayView1<'_, f64>,
     weights: ArrayView1<'_, f64>,
@@ -3114,7 +3150,11 @@ fn fit_bounded_term_collection_with_design(
             // works on every bounded fit — including the common no-smoothing
             // path where the inner solve surfaces no covariance at all (the
             // gam#854 "bounded fit emits no user-scale covariance" symptom).
-            compute_covariance: false,
+            // A penalized fit with inference on still requests the latent
+            // conditional covariance: it is the `V_cond` through which
+            // `fit_custom_family` mints the first-order smoothing correction from
+            // the certified outer rho-Hessian, pushed to user scale below (#2903).
+            compute_covariance: options.compute_inference && !fit_penalties.is_empty(),
             ..BlockwiseFitOptions::default()
         },
     )
@@ -3281,6 +3321,35 @@ fn fit_bounded_term_collection_with_design(
                 "bounded coefficient covariance cannot produce standard errors: {err}"
             ))
         })?;
+    // #2903: with lambda selected, `fit_custom_family` minted the first-order
+    // correction `C = A·V_ρ·Aᵀ`, `A = V_cond·U`, `U[:, k] = λ_k S_k θ̂`, on the latent
+    // coefficients from the certified outer rho-Hessian. The user coefficients are
+    // `M·b(θ)`, so `∂β_user/∂ρ = M·J·∂θ̂/∂ρ` and C reaches user scale through the
+    // conditional covariance's own congruence. It carries no dispersion factor,
+    // because `∂θ̂/∂ρ` has none. A fit that selects no lambda has `Vp = Vb`
+    // exactly; a penalized fit whose correction was refused keeps the typed absence.
+    let smoothing_corrected = match (fit.smoothing_correction(), fit.smoothing_correction_method())
+    {
+        (Some(latent_correction), Some(method)) => Some((
+            bounded_latent_bilinear_to_user(latent_correction, &jac_diag, &conditioning)?,
+            method,
+        )),
+        _ => None,
+    };
+    let covariance_corrected = match (smoothing_corrected.as_ref(), beta_covariance.as_ref()) {
+        (Some((correction, _)), Some(v_cond)) => Some(v_cond + correction),
+        (None, Some(v_cond)) if fit_penalties.is_empty() => Some(v_cond.clone()),
+        _ => None,
+    };
+    let beta_standard_errors_corrected = covariance_corrected
+        .as_ref()
+        .map(gam_problem::se_from_covariance)
+        .transpose()
+        .map_err(|err| {
+            EstimationError::InvalidInput(format!(
+                "bounded corrected coefficient covariance cannot produce standard errors: {err}"
+            ))
+        })?;
     let working_response = exact_standard_working_response(&eta_state)?;
 
     let geometry = Some(gam_solve::estimate::FitGeometry {
@@ -3304,10 +3373,18 @@ fn fit_bounded_term_collection_with_design(
                 edf_by_block,
                 penalty_block_trace,
                 edf_total,
-                smoothing_correction: None,
-                smoothing_correction_method: None,
-                smoothing_correction_first_order: None,
-                smoothing_correction_method_first_order: None,
+                // This lane publishes only the first-order correction, so its
+                // retained first-order pair is its primary pair.
+                smoothing_correction: smoothing_corrected
+                    .as_ref()
+                    .map(|(correction, _)| correction.clone()),
+                smoothing_correction_method: smoothing_corrected.as_ref().map(|(_, method)| *method),
+                smoothing_correction_first_order: smoothing_corrected
+                    .as_ref()
+                    .map(|(correction, _)| correction.clone()),
+                smoothing_correction_method_first_order: smoothing_corrected
+                    .as_ref()
+                    .map(|(_, method)| *method),
                 // Boundary adapter: `penalized_hessian` storage is now
                 // `UnscaledPrecision`.
                 penalized_hessian: penalized_hessian.clone().into(),
@@ -3317,8 +3394,8 @@ fn fit_bounded_term_collection_with_design(
                     .clone()
                     .map(gam_problem::dispersion_cov::PhiScaledCovariance::from),
                 beta_standard_errors,
-                beta_covariance_corrected: None,
-                beta_standard_errors_corrected: None,
+                beta_covariance_corrected: covariance_corrected.clone(),
+                beta_standard_errors_corrected,
                 beta_covariance_frequentist: None,
                 coefficient_influence: None,
                 weighted_gram: None,
@@ -3353,7 +3430,7 @@ fn fit_bounded_term_collection_with_design(
                 outer_gradient_norm: fit.outer_gradient_norm,
                 standard_deviation,
                 covariance_conditional,
-                covariance_corrected: None,
+                covariance_corrected,
                 inference: Some(inf),
                 fitted_link: gam_solve::estimate::FittedLinkState::Standard(None),
                 geometry,
