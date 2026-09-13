@@ -52,8 +52,11 @@ pub(crate) fn classify_cell_for_gpu(
         c3: cell.c3,
     };
     match branch_cell(cpu_cell) {
-        Ok(ExactCellBranch::Affine) => Ok(GpuCellBranchTag::Affine),
-        Ok(ExactCellBranch::Quartic) | Ok(ExactCellBranch::Sextic) => {
+        // A finite affine cell takes the Gauss–Legendre branch like a curved one:
+        // the affine `T_n` recurrence amplifies roundoff like `(n−1)!!` on a finite
+        // interval, and the host oracle evaluates such a cell on the ladder
+        // (`cubic_cell_kernel::evaluate_affine_cell_state`).
+        Ok(ExactCellBranch::Affine | ExactCellBranch::Quartic | ExactCellBranch::Sextic) => {
             Ok(GpuCellBranchTag::NonAffineFinite)
         }
         Err(_) => Err(CubicCellMomentStatus::InvalidInterval),
@@ -132,6 +135,15 @@ mod tests {
     #[test]
     fn finite_sextic_routes_to_non_affine_finite() {
         let c = cell(-1.0, 1.0, 0.2, 0.3, 0.4, 0.5);
+        assert_eq!(
+            classify_cell_for_gpu(c),
+            Ok(GpuCellBranchTag::NonAffineFinite)
+        );
+    }
+
+    #[test]
+    fn finite_affine_routes_to_non_affine_finite() {
+        let c = cell(-0.3, 0.2, 0.4, -0.7, 0.0, 0.0);
         assert_eq!(
             classify_cell_for_gpu(c),
             Ok(GpuCellBranchTag::NonAffineFinite)

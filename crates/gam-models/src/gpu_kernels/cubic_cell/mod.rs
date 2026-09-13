@@ -11,11 +11,11 @@
 //!   η(z) = c_0 + c_1·z + c_2·z² + c_3·z³.
 //! ```
 //!
-//! Three branches feed into the same device API:
+//! Two branches feed into the same device API:
 //!
-//! * **Affine** (`c_2 = c_3 = 0`, finite interval): closed-form via the
-//!   `T_n(a,b)` recurrence used by `affine_anchor_moment_vector_into`.
-//! * **Non-affine finite**: fixed 384-point Gauss–Legendre on the cell.
+//! * **Finite** (any polynomial class): fixed 384-point Gauss–Legendre on the
+//!   cell. The kernel's affine `T_n` recurrence branch is not dispatched: on a
+//!   finite interval it amplifies roundoff like `(n−1)!!`.
 //! * **Affine tail**: closed-form on a semi-infinite (or whole-line) interval.
 //!
 //! This is **distinct** from `src/gpu/cubic_bspline_moments.rs`, which
@@ -89,11 +89,9 @@ pub(crate) struct GpuDenestedCubicCell {
 // suppressing the lint; the oracles that exercise it are gated alongside it.
 #[cfg(target_os = "linux")]
 pub(crate) enum GpuCellBranchTag {
-    /// `c_2 = c_3 = 0` and the interval is finite — closed-form `T_n`
-    /// recurrence at the affine anchor.
-    Affine,
-    /// Finite interval with at least one of `c_2`, `c_3` non-zero — fixed
-    /// 384-point Gauss–Legendre on the cell.
+    /// Finite interval, affine or not — fixed 384-point Gauss–Legendre on the
+    /// cell. The affine `T_n` recurrence amplifies roundoff like `(n−1)!!` on a
+    /// finite interval, so no finite cell takes it.
     NonAffineFinite,
     /// Semi-infinite (or whole-line) affine tail with `c_2 = c_3 = 0` —
     /// closed-form on the tail interval.

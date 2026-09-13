@@ -2951,6 +2951,13 @@ fn truncated_gaussian_zeroth_moment(a: f64, b: f64) -> f64 {
 /// times per affine cell, which dominated the wall time of the
 /// transformation-normal and bernoulli-marginal-slope inner solves with
 /// `max_degree = 64` (the transport order's required degree budget).
+///
+/// The sweep is forward-stable only where `T_n` grows like the recurrence's
+/// homogeneous solution `(n−1)!!`, as it does on a semi-infinite interval. On a
+/// finite interval inside the Gaussian bulk `T_n` shrinks instead and the
+/// roundoff in `T_0` and `T_1` swamps it within about ten degrees, so
+/// `affine_cell_moments` routes finite cells to quadrature and calls this only
+/// for tails.
 fn fill_truncated_gaussian_moments(a: f64, b: f64, out: &mut [f64]) {
     if out.is_empty() {
         return;
@@ -3168,25 +3175,18 @@ fn validate_affine_cell_inputs(cell: DenestedCubicCell, max_degree: usize) -> Re
     Ok(())
 }
 
-/// Evaluate an affine cell (c2=c3=0) with a value/moment-consistent primitive.
-///
-/// Value and moments are now generated from the same affine moment primitive.
-/// The zero-moment derivative is exact, and `value` is reconstructed by
-/// integrating `d value / d alpha = INV_TWO_PI * moments[0]` over `alpha`
-/// on a transformed semi-infinite domain.
+/// Evaluate an affine cell (c2=c3=0): the value from the bivariate-normal closed
+/// form, the moments from `affine_cell_moments`.
 pub(crate) fn evaluate_affine_cell_state(
     cell: DenestedCubicCell,
     max_degree: usize,
 ) -> Result<CellMomentState, String> {
     validate_affine_cell_inputs(cell, max_degree)?;
-    let alpha = cell.c0;
-    let beta = cell.c1;
-    let value = affine_value_from_moment_primitive(alpha, beta, cell.left, cell.right)?;
-    let moments = affine_anchor_moment_vector(alpha, beta, cell.left, cell.right, max_degree);
+    let value = affine_value_from_moment_primitive(cell.c0, cell.c1, cell.left, cell.right)?;
     Ok(CellMomentState {
         branch: ExactCellBranch::Affine,
         value,
-        moments: moments.into(),
+        moments: affine_cell_moments(cell, max_degree),
     })
 }
 
@@ -3195,13 +3195,31 @@ fn evaluate_affine_cell_derivative_state(
     max_degree: usize,
 ) -> Result<CellDerivativeMomentState, String> {
     validate_affine_cell_inputs(cell, max_degree)?;
-    let alpha = cell.c0;
-    let beta = cell.c1;
-    let moments = affine_anchor_moment_vector(alpha, beta, cell.left, cell.right, max_degree);
     Ok(CellDerivativeMomentState {
         branch: ExactCellBranch::Affine,
-        moments: moments.into(),
+        moments: affine_cell_moments(cell, max_degree),
     })
+}
+
+/// The moment vector of a validated affine cell: the affine anchor on a
+/// semi-infinite interval, the certified Gauss–Legendre ladder on a finite one.
+///
+/// The anchor's `T_n` recurrence amplifies the roundoff in `T_0` and `T_1` like
+/// `(n−1)!!`. On a semi-infinite interval `T_n` grows at that same rate, so no
+/// precision is lost; on a finite interval inside the Gaussian bulk `T_n` shrinks
+/// instead. On the cell `[−0.3, 0.2]`, `η = 0.4 − 0.7z`, the anchor's relative
+/// error was 2.0e-2 at degree 15 and 8.3e4 at degree 21 (pool job 580277),
+/// degrees the BMS row Hessians read. A finite affine cell is an ordinary instance
+/// of the ladder's integrand `zᵏ·e^{−½(z² + η²)}`. It arises where a deviation
+/// runtime splits the line at knots and a span is locally linear, and those rows
+/// already evaluate their curved cells through the same ladder. Rigid rows have no
+/// split points, so their single whole-line cell keeps the anchor.
+fn affine_cell_moments(cell: DenestedCubicCell, max_degree: usize) -> CellMomentVec {
+    if cell.left.is_finite() && cell.right.is_finite() {
+        evaluate_non_affine_cell_simd::<false>(cell, max_degree).0
+    } else {
+        affine_anchor_moment_vector(cell.c0, cell.c1, cell.left, cell.right, max_degree).into()
+    }
 }
 
 /// Accumulate `mw * z^k` into `moments[k]` for k=0..moments.len(). The
@@ -3729,8 +3747,11 @@ pub fn evaluate_cell_moments_cached(
     cache: &CellMomentLruCache,
     stats: Option<&CellMomentCacheStats>,
 ) -> Result<CellMomentState, String> {
-    // Affine cells (every rigid-path cell and every tail cell) evaluate
-    // through the closed-form anchor — cheaper than a single LRU probe. The
+    // Affine cells bypass the LRU. Every rigid-path cell and every tail cell is
+    // semi-infinite and evaluates through the closed-form anchor, which is
+    // cheaper than a single LRU probe. A finite affine cell takes the quadrature
+    // ladder (`affine_cell_moments`), but it only arises under an active deviation
+    // runtime, whose callers skip this cache anyway. The
     // LRU exists only to amortize the EXPENSIVE non-affine transport across
     // recurring cells; at large n the row scalars `(a, b)` are unique per
     // row, so affine cells never recur and routing them through the sharded
@@ -4352,16 +4373,18 @@ mod tests {
         }
     }
 
-    /// #932: the affine anchor's moments must equal the integrals they define
-    /// through degree 34, the highest moment the order-five flex base-moment jet
-    /// reads, on a narrow cell inside the Gaussian bulk, a narrow off-centre cell
-    /// and a wide cell. `fill_truncated_gaussian_moments` walks the upward
-    /// recurrence `T_n = a^{n−1}e^{−a²/2} − b^{n−1}e^{−b²/2} + (n−1)·T_{n−2}`. Its
-    /// homogeneous solution grows like `(n−1)!!`, while `T_n` on an interval with
-    /// `|y| < √n` shrinks relative to it, so that is where roundoff in `T_0` and
-    /// `T_1` would be amplified. The Simpson reference with 20 000 panels carries
-    /// a truncation error below 1e-11 relative on these cells, far under the 1e-8
-    /// bar. Every run prints each cell's relative error by degree before asserting.
+    /// #932: an affine cell's moments must equal the integrals they define through
+    /// degree 34, the highest moment the order-five flex base-moment jet reads, on
+    /// a narrow cell inside the Gaussian bulk, a narrow off-centre cell and a wide
+    /// cell. The anchor's upward recurrence
+    /// `T_n = a^{n−1}e^{−a²/2} − b^{n−1}e^{−b²/2} + (n−1)·T_{n−2}` amplifies the
+    /// roundoff in `T_0` and `T_1` like `(n−1)!!`, while `T_n` on a finite interval
+    /// shrinks relative to it. On `narrow_bulk` it reached relative error 2.0e-2 at
+    /// degree 15 and 2.1e20 at degree 34 (pool job 580277), which is why finite
+    /// affine cells now take the quadrature ladder. The Simpson reference with
+    /// 20 000 panels carries a truncation error below 1e-11 relative on these
+    /// cells, far under the 1e-8 bar. Every cell is measured and printed before any
+    /// assertion.
     #[test]
     fn affine_anchor_moments_match_quadrature_through_degree_34_932() {
         let cells = [
@@ -4399,28 +4422,34 @@ mod tests {
                 },
             ),
         ];
-        for (label, cell) in cells {
-            let state = evaluate_affine_cell_state(cell, 34).expect("affine cell");
-            let relative_errors: Vec<f64> = (0..=34)
-                .map(|degree| {
-                    let target = simpson_integral(cell.left, cell.right, 20_000, |z| {
-                        z.powi(degree as i32) * (-cell.q(z)).exp()
-                    });
-                    (state.moments[degree] - target).abs() / target.abs()
-                })
-                .collect();
-            eprintln!(
-                "AFFINE-ANCHOR-932 {label} relative_error_by_degree={}",
-                relative_errors
-                    .iter()
-                    .map(|error| format!("{error:.1e}"))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            );
+        let measured: Vec<(&str, Vec<f64>)> = cells
+            .into_iter()
+            .map(|(label, cell)| {
+                let state = evaluate_affine_cell_state(cell, 34).expect("affine cell");
+                let relative_errors: Vec<f64> = (0..=34)
+                    .map(|degree| {
+                        let target = simpson_integral(cell.left, cell.right, 20_000, |z| {
+                            z.powi(degree as i32) * (-cell.q(z)).exp()
+                        });
+                        (state.moments[degree] - target).abs() / target.abs()
+                    })
+                    .collect();
+                eprintln!(
+                    "AFFINE-ANCHOR-932 {label} relative_error_by_degree={}",
+                    relative_errors
+                        .iter()
+                        .map(|error| format!("{error:.1e}"))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
+                (label, relative_errors)
+            })
+            .collect();
+        for (label, relative_errors) in &measured {
             for (degree, error) in relative_errors.iter().enumerate() {
                 assert!(
                     *error <= 1e-8,
-                    "{label}: affine anchor moment {degree} is off by {error:.3e} relative"
+                    "{label}: affine cell moment {degree} is off by {error:.3e} relative"
                 );
             }
         }

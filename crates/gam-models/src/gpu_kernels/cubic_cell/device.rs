@@ -181,7 +181,6 @@ impl CubicCellGpuBackend {
             match classify_cell_for_gpu(gpu_cell) {
                 Ok(host_tag) => {
                     branch_code[i] = match host_tag {
-                        GpuCellBranchTag::Affine => 0,
                         GpuCellBranchTag::NonAffineFinite => 1,
                         GpuCellBranchTag::AffineTail => 2,
                     };
