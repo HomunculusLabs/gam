@@ -557,9 +557,9 @@ pub(crate) fn conditioning_gate_weight(lambda_min: f64, lambda_max: f64) -> f64 
         CONDITIONING_GATE_ABSOLUTE,
         CONDITIONING_GATE_ABSOLUTE_CLEAR,
     );
-    let ratio = (lambda_min / lambda_max).max(f64::MIN_POSITIVE);
+    let log10_ratio = conditioning_log10_ratio(lambda_min, lambda_max);
     let w_rel = ramp_down(
-        ratio.log10(),
+        log10_ratio,
         CONDITIONING_GATE_RELATIVE.log10(),
         CONDITIONING_GATE_RELATIVE_CLEAR.log10(),
     );
@@ -604,9 +604,9 @@ pub(crate) fn conditioning_gate_weight_grad(lambda_min: f64, lambda_max: f64) ->
         CONDITIONING_GATE_ABSOLUTE,
         CONDITIONING_GATE_ABSOLUTE_CLEAR,
     );
-    let ratio = (lambda_min / lambda_max).max(f64::MIN_POSITIVE);
+    let log10_ratio = conditioning_log10_ratio(lambda_min, lambda_max);
     let (w_rel, dw_rel_dlogratio) = ramp_down_value_and_deriv(
-        ratio.log10(),
+        log10_ratio,
         CONDITIONING_GATE_RELATIVE.log10(),
         CONDITIONING_GATE_RELATIVE_CLEAR.log10(),
     );
@@ -664,9 +664,9 @@ pub(crate) fn conditioning_gate_weight_hess(lambda_min: f64, lambda_max: f64) ->
         CONDITIONING_GATE_ABSOLUTE,
         CONDITIONING_GATE_ABSOLUTE_CLEAR,
     );
-    let ratio = (lambda_min / lambda_max).max(f64::MIN_POSITIVE);
+    let log10_ratio = conditioning_log10_ratio(lambda_min, lambda_max);
     let (w_rel, dw_rel_dr, d2w_rel_dr2) = ramp_down_value_d1_d2(
-        ratio.log10(),
+        log10_ratio,
         CONDITIONING_GATE_RELATIVE.log10(),
         CONDITIONING_GATE_RELATIVE_CLEAR.log10(),
     );
@@ -711,9 +711,9 @@ pub(crate) fn conditioning_gate_weight_third(
         CONDITIONING_GATE_ABSOLUTE,
         CONDITIONING_GATE_ABSOLUTE_CLEAR,
     );
-    let ratio = (lambda_min / lambda_max).max(f64::MIN_POSITIVE);
+    let log10_ratio = conditioning_log10_ratio(lambda_min, lambda_max);
     let (w_rel, d1w, d2w, d3w) = conditioning_ramp_down_derivatives(
-        ratio.log10(),
+        log10_ratio,
         CONDITIONING_GATE_RELATIVE.log10(),
         CONDITIONING_GATE_RELATIVE_CLEAR.log10(),
     );
@@ -756,9 +756,9 @@ pub(crate) fn conditioning_gate_weight_fourth(
         CONDITIONING_GATE_ABSOLUTE,
         CONDITIONING_GATE_ABSOLUTE_CLEAR,
     );
-    let ratio = (lambda_min / lambda_max).max(f64::MIN_POSITIVE);
+    let log10_ratio = conditioning_log10_ratio(lambda_min, lambda_max);
     let (w_rel, d1w, d2w, d3w) = conditioning_ramp_down_derivatives(
-        ratio.log10(),
+        log10_ratio,
         CONDITIONING_GATE_RELATIVE.log10(),
         CONDITIONING_GATE_RELATIVE_CLEAR.log10(),
     );
@@ -808,6 +808,19 @@ fn conditioning_ramp_down_derivatives(x: f64, under: f64, clear: f64) -> (f64, f
     let d2 = -6.0 * (1.0 - 2.0 * t) / (span * span);
     let d3 = 12.0 / (span * span * span);
     (value, d1, d2, d3)
+}
+
+/// `log10(lambda_min / lambda_max)` for the relative conditioning ramps, or `-inf`
+/// when the ratio is not positive (a non-positive or underflowed `lambda_min`), which
+/// every ramp reads as the fully active gate below its lower knot (#2469).
+#[inline]
+fn conditioning_log10_ratio(lambda_min: f64, lambda_max: f64) -> f64 {
+    let ratio = lambda_min / lambda_max;
+    if ratio > 0.0 {
+        ratio.log10()
+    } else {
+        f64::NEG_INFINITY
+    }
 }
 
 /// Below this joint dimension the dense reduced eigendecomposition in
@@ -2183,9 +2196,9 @@ impl JointJeffreysPlan {
                 CONDITIONING_GATE_ABSOLUTE,
                 CONDITIONING_GATE_ABSOLUTE_CLEAR,
             );
-            let ratio = (self.lambda_min / self.lambda_max).max(f64::MIN_POSITIVE);
+            let log10_ratio = conditioning_log10_ratio(self.lambda_min, self.lambda_max);
             let weight_relative = ramp_down(
-                ratio.log10(),
+                log10_ratio,
                 CONDITIONING_GATE_RELATIVE.log10(),
                 CONDITIONING_GATE_RELATIVE_CLEAR.log10(),
             );
