@@ -2918,7 +2918,8 @@ pub(crate) fn shrink_active_joint_block_trust_radii(
             .filter(|(radius, step_norm)| {
                 joint_block_step_hit_trust_boundary(**step_norm, **radius)
             })
-            .all(|(radius, _)| *radius <= RADIUS_FLOOR * (1.0 + 1.0e-12));
+            // Radii are clamped to `RADIUS_FLOOR`, so one at the floor equals it.
+            .all(|(radius, _)| *radius <= RADIUS_FLOOR);
     // Snapshot the joint max BEFORE the shrink loop so the max-holding
     // block(s) — boundary OR interior — always participate. The
     // Moré–Sorensen inner step uses the SCALAR
@@ -2944,7 +2945,9 @@ pub(crate) fn shrink_active_joint_block_trust_radii(
         let at_boundary = joint_block_step_hit_trust_boundary(*step_norm, *radius);
         let holds_max = max_radius_before > 0.0
             && max_radius_before.is_finite()
-            && *radius >= max_radius_before * (1.0 - 1.0e-12);
+            // `max_radius_before` is a fold-max of these same radii, so the holder
+            // equals it.
+            && *radius >= max_radius_before;
         let participates = if all_boundary_blocks_at_floor {
             // Boundary-at-floor stall: the boundary blocks cannot shrink any
             // further, so participate every block (including interior ones)
@@ -5530,7 +5533,9 @@ pub(crate) fn joint_preconditioned_descent_delta(
         )?;
         let curvature = delta.dot(&hpen_delta);
         if curvature.is_finite() && curvature > 0.0 {
-            let alpha = (directional / curvature).clamp(1.0e-12, 1.0);
+            // Both factors are positive here, so the model-minimizing scale is
+            // positive and only the full preconditioned step caps it.
+            let alpha = (directional / curvature).min(1.0);
             delta.mapv_inplace(|v| alpha * v);
         }
     }
