@@ -39,8 +39,7 @@ With the fixed ``kappa=`` honoured, the spherical and hyperbolic fits below
 diverge. The data lives strictly inside the ``κ = ±3`` chart (``‖x‖² < 1/3``) so
 both fixed-curvature fits are well posed.
 
-Related: #2151 (the workspace does not build at HEAD; this test — like every
-test target — can only run once that build break is cleared).
+Related: #2151.
 """
 
 from __future__ import annotations
