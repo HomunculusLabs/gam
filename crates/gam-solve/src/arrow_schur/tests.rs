@@ -4337,8 +4337,8 @@ fn rational_reduced_schur_log_det_matches_dense_evidence() {
 /// The derived Hutch++ deflation rank must (a) leave the log|S| estimate exact
 /// (deflation is an unbiased variance-reduction split, so the value cannot move
 /// outside the error bar) while (b) tightening the Hutchinson std_err below the
-/// bare-probe pilot when the target bar demands it. `deflation_max_rank == 0`
-/// must return the bare plan (bit-identical to
+/// bare-probe pilot when the target bar demands it. A target the pilot already
+/// clears must return the bare plan (bit-identical to
 /// `rational_reduced_schur_log_det`'s plan). The derived plan's frozen `Q` is
 /// what the gradient contracts against, so this pins the value the criterion
 /// swap will consume.
@@ -4364,7 +4364,8 @@ fn rational_reduced_schur_plan_derived_deflates_to_target() {
     let l = cholesky_lower(&schur).expect("reduced Schur must be SPD");
     let exact_logdet: f64 = (0..k).map(|i| 2.0 * l[[i, i]].ln()).sum();
 
-    // Bare pilot (rank-0): the variance the deflation must beat.
+    // Bare pilot (rank-0): the variance the deflation must beat. A relative bar of
+    // 1 is cleared by the pilot itself, so the builder returns it undeflated.
     let bare = rational_reduced_schur_plan_derived(
         &sys,
         &htt_factors,
@@ -4376,9 +4377,8 @@ fn rational_reduced_schur_plan_derived_deflates_to_target() {
         seed,
         1e-9,
         1e-11,
-        0,
         4,
-        0.0,
+        1.0,
     )
     .expect("bare plan must build");
     let bare_eval = bare.entry_evaluation;
@@ -4401,12 +4401,13 @@ fn rational_reduced_schur_plan_derived_deflates_to_target() {
     // only a fraction of the variance and cannot reach 0.1·bare. The bar is
     // reachable — `std_err → 0` monotonically as the frozen basis approaches full
     // rank (a full basis projects every probe to zero, leaving the deterministic
-    // term1 = exact log|S|) — but only with a ceiling that lets the peel grow
-    // past 32. Use `k`: the ladder still STOPS at the first rank that certifies,
-    // so on a genuinely wide-κ operator it returns a low-rank Q; here it peels
-    // deeper because the fixture demands it. This keeps the aggressive 0.1× bar
-    // (a real quality contract) rather than weakening it to whatever rank-32
-    // happens to achieve on a poorly-conditioned-for-deflation fixture.
+    // term1 = exact log|S|) — and the ladder's ceiling is the operator's own
+    // dimension, so the peel may grow past 32 (#2731). The ladder still STOPS at
+    // the first rank that certifies, so on a genuinely wide-κ operator it returns
+    // a low-rank Q; here it peels deeper because the fixture demands it. This
+    // keeps the aggressive 0.1× bar (a real quality contract) rather than
+    // weakening it to whatever rank-32 happens to achieve on a
+    // poorly-conditioned-for-deflation fixture.
     let target_rel = 0.1 * bare_eval.std_err / (exact_logdet.abs() + 1.0);
     let derived = rational_reduced_schur_plan_derived(
         &sys,
@@ -4419,7 +4420,6 @@ fn rational_reduced_schur_plan_derived_deflates_to_target() {
         seed,
         1e-9,
         1e-11,
-        k, // deflation_max_rank: resource ceiling with headroom to certify 0.1×bare
         6, // subspace_iters
         target_rel,
     )
@@ -4442,10 +4442,12 @@ fn rational_reduced_schur_plan_derived_deflates_to_target() {
         derived_eval.std_err
     );
 
-    // The rank ceiling is resource admission, not a license to consume an
-    // under-certified stochastic criterion. A zero requested bar cannot be met
-    // by one deflated direction with a finite probe block, so the plan must
-    // refuse instead of returning the deepest attempted Q.
+    // The rank ceiling is not a license to consume an under-certified stochastic
+    // criterion. A zero requested bar is certified only by an exactly zero probe
+    // remainder, and the deepest basis the ladder reaches, the operator's own
+    // dimension, still leaves the projection's rounding (or a collapsed column's
+    // live variance) in every projected probe, so the plan must refuse at the
+    // ceiling instead of returning the deepest attempted Q.
     let under_certified = rational_reduced_schur_plan_derived(
         &sys,
         &htt_factors,
@@ -4457,7 +4459,6 @@ fn rational_reduced_schur_plan_derived_deflates_to_target() {
         seed,
         1e-9,
         1e-11,
-        1,
         2,
         0.0,
     );
@@ -6233,7 +6234,6 @@ fn matrix_free_exact_a_prices_a_clamp_basin_before_refusing_a_saddle_2515() {
         seed: 0x2515,
         rel_tol: 1.0e-10,
         cg_rel_tol: 1.0e-12,
-        deflation_max_rank: 0,
         deflation_subspace_iters: 1,
         deflation_target_std_err_rel: 1.0,
     });
@@ -6270,7 +6270,6 @@ fn matrix_free_exact_a_prices_a_clamp_basin_before_refusing_a_saddle_2515() {
         seed: 0x2515,
         rel_tol: 1.0e-10,
         cg_rel_tol: 1.0e-12,
-        deflation_max_rank: 0,
         deflation_subspace_iters: 1,
         deflation_target_std_err_rel: 1.0,
     });

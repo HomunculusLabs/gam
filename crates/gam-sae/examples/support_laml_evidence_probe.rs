@@ -142,7 +142,6 @@ fn main() -> Result<(), String> {
             seed: 0xC0FFEE,
             rel_tol: 1.0e-8,
             cg_rel_tol: 1.0e-8,
-            deflation_max_rank: 128,
             deflation_subspace_iters: 4,
             deflation_target_std_err_rel: target_rel,
         });

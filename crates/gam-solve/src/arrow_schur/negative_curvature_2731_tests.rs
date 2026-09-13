@@ -290,7 +290,6 @@ fn the_rational_lane_prices_or_refuses_a_bottom_mode_its_fixed_step_conditioning
             seed: 0x2731,
             rel_tol: 1.0e-10,
             cg_rel_tol: 1.0e-12,
-            deflation_max_rank: 0,
             deflation_subspace_iters: 1,
             deflation_target_std_err_rel: 1.0,
         })

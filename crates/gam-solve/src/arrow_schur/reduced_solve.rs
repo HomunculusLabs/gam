@@ -2070,17 +2070,18 @@ pub(crate) fn maybe_build_evidence_gpu_matvec(
 }
 
 /// Fixed configuration for the #2080 rational-surrogate evidence lane: the probe
-/// count, seeds, quadrature/CG tolerances, and derived-rank deflation budget the
+/// count, seeds, quadrature/CG tolerances, and derived-rank deflation schedule the
 /// [`SurrogateLaneState`] plan is (re)built with. The caller (the SAE streaming
 /// criterion) supplies these once; `deflation_target_std_err_rel` is the derived
-/// bar `0.1 · STALL_REL_TOL` (see `rational_reduced_schur_plan_derived`).
+/// bar `0.1 · STALL_REL_TOL` (see `rational_reduced_schur_plan_derived`). The
+/// deflation rank has no requested ceiling: the ladder may climb to the
+/// operator's own dimension (#2731).
 #[derive(Clone)]
 pub struct SurrogateLaneConfig {
     pub num_probes: usize,
     pub seed: u64,
     pub rel_tol: f64,
     pub cg_rel_tol: f64,
-    pub deflation_max_rank: usize,
     pub deflation_subspace_iters: usize,
     pub deflation_target_std_err_rel: f64,
 }
@@ -2431,7 +2432,6 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
                         cfg.seed,
                         cfg.rel_tol,
                         cfg.cg_rel_tol,
-                        cfg.deflation_max_rank,
                         cfg.deflation_subspace_iters,
                         cfg.deflation_target_std_err_rel,
                     ) {
@@ -3076,12 +3076,13 @@ pub fn rational_reduced_schur_log_det<B: BatchedBlockSolver + Sync>(
 /// `0.1 · STALL_REL_TOL`; `log|S|` is the criterion's dominant term at wide `k`
 /// so `|log|S||+1` is the right objective scale to `O(1)` and the `0.1` margin
 /// absorbs the loss/Occam remainder). The peel rank grows on a doubling schedule
-/// until the Hutchinson error bar clears the target. `deflation_max_rank` is a
-/// resource-admission ceiling, not permission to return an under-certified
-/// estimate: exhausting it before the bar clears returns `None` and the caller
-/// surfaces a typed evidence failure. `deflation_max_rank == 0` explicitly
-/// requests the bare-Hutchinson plan; a pilot already under target also returns
-/// it. Deterministic for fixed inputs (`Q` and probes are seed-derived). The
+/// until the Hutchinson error bar clears the target. The ladder's ceiling is the
+/// operator's own dimension, lowered only where the host cannot hold the plan's
+/// storage at that rank (#2731). It is not permission to return an
+/// under-certified estimate: exhausting it before the bar clears returns `Err`
+/// and the caller surfaces a typed evidence failure. A pilot already under
+/// target returns the bare-Hutchinson plan. Deterministic for fixed inputs (`Q`
+/// and probes are seed-derived). The
 /// returned plan's `Q` is FROZEN, so
 /// `RationalLogdetPlan::directional_derivative` on its evaluations is the exact
 /// surrogate gradient.
@@ -3104,7 +3105,6 @@ pub(crate) fn rational_reduced_schur_plan_derived<B: BatchedBlockSolver + Sync>(
     seed: u64,
     rel_tol: f64,
     cg_rel_tol: f64,
-    deflation_max_rank: usize,
     deflation_subspace_iters: usize,
     deflation_target_std_err_rel: f64,
 ) -> Result<DerivedRationalLogdetPlan, String> {
@@ -3258,12 +3258,6 @@ pub(crate) fn rational_reduced_schur_plan_derived<B: BatchedBlockSolver + Sync>(
                 cg_budget.min(k.max(1))
             )
         })?;
-    if deflation_max_rank == 0 {
-        return Ok(DerivedRationalLogdetPlan {
-            plan: base_plan,
-            entry_evaluation: pilot,
-        });
-    }
     let target = deflation_target_std_err_rel * (pilot.estimate.abs() + 1.0);
     if pilot.std_err <= target {
         return Ok(DerivedRationalLogdetPlan {
@@ -3273,10 +3267,44 @@ pub(crate) fn rational_reduced_schur_plan_derived<B: BatchedBlockSolver + Sync>(
     }
     let pilot_std_err = pilot.std_err;
     // Grow from the smallest nonzero peel rank (doubling ⇒ log-many re-solves)
-    // until the bar clears. The caller's cap is a resource ceiling; reaching it
-    // with an over-target bar refuses the surrogate rather than silently
-    // weakening the requested statistical-accuracy contract.
-    let cap = deflation_max_rank.min(k);
+    // until the bar clears. Reaching the ceiling with an over-target bar refuses
+    // the surrogate rather than silently weakening the requested
+    // statistical-accuracy contract.
+    //
+    // #2731 — the ceiling is the operator's own dimension `k`. A basis spanning
+    // the whole operator projects every probe to its rounding, so the value is
+    // the deterministic rational log-det, and an interior-variance operator that
+    // no low rank deflates reaches its bar there instead of refusing. Job 578261
+    // (`p = 2048, charts = 32`, reduced Schur dim 288) refused at the former
+    // literal ceiling 128 after removing 2.3 % of the pilot variance against a
+    // 1e-9 relative bar. Only memory lowers the ceiling: a rank-`r` plan freezes
+    // `r` basis columns and keeps one shifted solve per column per quadrature
+    // node, `(nodes + 1)·r·k` doubles, so the host admits the ranks whose storage
+    // its single-materialization cap holds.
+    let rank_storage_bytes = (base_plan.nodes.len() + 1)
+        .saturating_mul(k)
+        .saturating_mul(std::mem::size_of::<f64>());
+    let admitted_rank = gam_runtime::resource::ResourcePolicy::default_library()
+        .max_single_materialization_bytes
+        / rank_storage_bytes;
+    let cap = k.min(admitted_rank);
+    // Every number the caller needs to decide whether to relax the target or take
+    // the estimate as it stands.
+    let ceiling_refusal = |std_err: f64, estimate: f64| {
+        format!(
+            "deflation reached its rank ceiling {cap} (reduced Schur dim {k}, memory admits \
+             rank {admitted_rank}) with the Hutchinson bar still over target: std_err \
+             {std_err:.6e} against target {target:.6e} (= {deflation_target_std_err_rel:.3e} × \
+             (|estimate| + 1)), estimate {estimate:.6e}; the rank-0 pilot's bar was \
+             {pilot_std_err:.6e}, so deflation removed {:.1}% of the pilot variance and \
+             needed {:.1}%",
+            100.0 * (1.0 - std_err / pilot_std_err),
+            100.0 * (1.0 - target / pilot_std_err),
+        )
+    };
+    if cap == 0 {
+        return Err(ceiling_refusal(pilot_std_err, pilot.estimate));
+    }
     let mut rank = 1usize;
     // Basis iteration only steers Q for variance reduction. Derive its looser
     // true-residual tolerance from the evaluation solve's tolerance instead of
@@ -3342,20 +3370,7 @@ pub(crate) fn rational_reduced_schur_plan_derived<B: BatchedBlockSolver + Sync>(
             // deliberate refusal rather than a silent weakening of the accuracy
             // contract — but a refusal that names only its dimension cannot be
             // acted on, and this one aborts a fit that has already converged.
-            // Every number the caller needs to decide whether to raise the cap,
-            // relax the target, or take the estimate as it stands is here.
-            return Err(format!(
-                "deflation reached its rank ceiling {cap} (requested {deflation_max_rank}, \
-                 reduced Schur dim {k}) with the Hutchinson bar still over target: std_err \
-                 {:.6e} against target {target:.6e} (= {deflation_target_std_err_rel:.3e} × \
-                 (|estimate| + 1)), estimate {:.6e}; the rank-0 pilot's bar was \
-                 {pilot_std_err:.6e}, so deflation removed {:.1}% of the pilot variance and \
-                 needed {:.1}%",
-                eval.std_err,
-                eval.estimate,
-                100.0 * (1.0 - eval.std_err / pilot_std_err),
-                100.0 * (1.0 - target / pilot_std_err),
-            ));
+            return Err(ceiling_refusal(eval.std_err, eval.estimate));
         }
         rank = rank.saturating_mul(2);
     }
