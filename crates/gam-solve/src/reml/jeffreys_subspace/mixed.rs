@@ -1650,10 +1650,14 @@ impl JeffreysHphiDriftBase {
             for knot in [0.0, self.floor, cap] {
                 let resolution = 16.0 * f64::EPSILON * value.abs().max(knot.abs());
                 if (value - knot).abs() <= resolution {
-                    return Err(
-                        "Jeffreys mixed drift is undefined at an inverse-kernel branch boundary"
-                            .into(),
-                    );
+                    return Err(format!(
+                        "Jeffreys mixed drift is undefined at an inverse-kernel branch boundary: \
+                         reduced information eigenvalue {value:e} sits on the knot {knot:e} \
+                         (floor {floor:e}, cap {cap:e}, resolution {resolution:e}) of the \
+                         {m} eigenvalues",
+                        floor = self.floor,
+                        m = self.evals.len(),
+                    ));
                 }
             }
         }
