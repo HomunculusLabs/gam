@@ -3606,6 +3606,10 @@ fn fit_custom_family_user_fixed_log_lambdas_impl<
     options: &BlockwiseFitOptions,
     warm_start: Option<&CustomFamilyWarmStart>,
 ) -> Result<gam_solve::model_types::UnifiedFitResult, CustomFamilyError> {
+    // The same channel wiring the outer entry installs (#558): without it a
+    // multi-output family's shared constant columns read as cross-block aliases.
+    let wired = wire_output_channels(family, raw_specs)?;
+    let raw_specs: &[ParameterBlockSpec] = wired.as_deref().unwrap_or(raw_specs);
     let canonical =
         gam_identifiability::canonical::canonicalize_for_identifiability_with_operating_scalars(
             raw_specs,
@@ -3886,11 +3890,17 @@ fn fit_custom_family_fixed_log_lambdas_from_owned_mode_with_provenance<
     }
     let penalty_counts = validate_blockspecs(specs)?;
     let per_block = split_log_lambdas(&rho, &penalty_counts)?;
+    // Audit the geometry the outer entry audits: a family's declared output
+    // channels are installed first (#558). Without them the latent survival
+    // family's constant log-σ column reads as an alias of the mean intercept and
+    // a certified mode is refused as still needing reduction (#2714).
+    let wired = wire_output_channels(family, specs)?;
+    let audit_specs: &[ParameterBlockSpec] = wired.as_deref().unwrap_or(specs);
     let canonical =
         gam_identifiability::canonical::canonicalize_for_identifiability_with_operating_scalars(
-            specs,
-            &pre_fit_coefficient_coordinates(family, specs),
-            pre_fit_operating_scalars(family, specs)?,
+            audit_specs,
+            &pre_fit_coefficient_coordinates(family, audit_specs),
+            pre_fit_operating_scalars(family, audit_specs)?,
         )?;
     if !canonical.gauge.is_identity()
         || canonical.reduced_specs.len() != specs.len()
@@ -3908,7 +3918,7 @@ fn fit_custom_family_fixed_log_lambdas_from_owned_mode_with_provenance<
     }
     audit_converged_identifiability(
         family,
-        specs,
+        audit_specs,
         &canonical,
         &inner.block_states,
         outer_iterations,
@@ -4128,6 +4138,9 @@ pub fn fit_custom_family_fixed_log_lambda_warm_start<
     raw_specs: &[ParameterBlockSpec],
     options: &BlockwiseFitOptions,
 ) -> Result<(Vec<Array1<f64>>, bool, usize), CustomFamilyError> {
+    // The same channel wiring the outer entry installs (#558).
+    let wired = wire_output_channels(family, raw_specs)?;
+    let raw_specs: &[ParameterBlockSpec] = wired.as_deref().unwrap_or(raw_specs);
     let canonical =
         gam_identifiability::canonical::canonicalize_for_identifiability_with_operating_scalars(
             raw_specs,
