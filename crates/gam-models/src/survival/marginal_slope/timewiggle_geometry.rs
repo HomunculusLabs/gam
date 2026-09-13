@@ -611,8 +611,9 @@ impl SurvivalMarginalSlopeFamily {
             .ok_or_else(|| "missing exit timewiggle geometry for marginal psi lift".to_string())?;
 
         let mu = psi_row.dot(beta_marginal);
-        let mut dir =
-            Array1::<f64>::zeros(primary_layout.map_or(N_PRIMARY, |primary| primary.total));
+        let mut dir = Array1::<f64>::zeros(
+            primary_layout.map_or_else(|| self.core_primary_dimension(), |primary| primary.total),
+        );
         let q0_idx = primary_layout.map_or(0, |primary| primary.q0);
         let q1_idx = primary_layout.map_or(1, |primary| primary.q1);
         let qd1_idx = primary_layout.map_or(2, |primary| primary.qd1);

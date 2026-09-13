@@ -4130,6 +4130,18 @@ impl SurvivalMarginalSlopeFamily {
         coefficient_direction: Option<&FlexCoefficientRowDirection<'_>>,
     ) -> Result<FlexFamilyDirectionRowTerms, String> {
         self.ensure_scalar_flex_exact_score_geometry("FLEX family-direction row program")?;
+        // This program carries the single time-constant slope primary `g`. A
+        // time-wiggle baseline routes its baseline-chart calculus here, so on a
+        // follow-up-varying slope running it would differentiate a different
+        // model (gam#2767).
+        if self.slope_is_follow_up_varying() {
+            return Err(
+                "survival marginal-slope FLEX family-direction row program evaluates the \
+                 time-constant slope frame; a follow-up-varying slope has no baseline-chart \
+                 calculus here"
+                    .to_string(),
+            );
+        }
         let expected_blocks = 3
             + usize::from(self.score_warp.is_some())
             + usize::from(self.link_dev.is_some())

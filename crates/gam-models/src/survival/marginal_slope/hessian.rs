@@ -1141,20 +1141,6 @@ impl BlockHessianAccumulator {
         lift: &TimewiggleMarginalPsiRowLift,
         ph: &Array2<f64>,
     ) -> Result<(), String> {
-        // This is the FLEX / time-wiggle assembler, and it reads the slope's
-        // single primary column by index. Both of those surfaces are refused
-        // together with a follow-up-varying slope at construction, so this is a
-        // guard against a future caller rather than a reachable branch — but an
-        // unguarded index here would silently assemble the Hessian of a
-        // different model (gam#2765).
-        if family.slope_layout.is_follow_up_varying() {
-            return Err(
-                "the flex / time-wiggle pullback assembler does not carry a \
-                 follow-up-varying slope's three primary channels"
-                    .to_string(),
-            );
-        }
-
         let jt = [&qg.dq0_time, &qg.dq1_time, &qg.dqd1_time];
         let jm = [&qg.dq0_marginal, &qg.dq1_marginal, &qg.dqd1_marginal];
         let ut = [&lift.u_q0_time, &lift.u_q1_time, &lift.u_qd1_time];
@@ -1198,31 +1184,33 @@ impl BlockHessianAccumulator {
                 self.h_tm[[a, b]] += v;
             }
         }
-        let gc = family
-            .slope_layout
-            .coefficient_design()
-            .try_row_chunk(row..row + 1)
-            .map_err(|e| format!("add_timewiggle_psi_u_cross slope try_row_chunk: {e}"))?;
-        let gr = gc.row(0);
-        for a in 0..pt {
-            let mut wt = 0.0;
-            for u in 0..3 {
-                wt += ph[[u, 3]] * ut[u][a];
-            }
-            if wt != 0.0 {
-                for b in 0..gr.len() {
-                    self.h_tg[[a, b]] += wt * gr[b];
+        // Once per follow-up channel, each against its own design row: one channel
+        // on a time-constant slope, three on a follow-up-varying one (gam#2767).
+        for &(slope_primary, slope_design) in family.slope_layout.primary_channels().as_slice() {
+            let gc = slope_design
+                .try_row_chunk(row..row + 1)
+                .map_err(|e| format!("add_timewiggle_psi_u_cross slope try_row_chunk: {e}"))?;
+            let gr = gc.row(0);
+            for a in 0..pt {
+                let mut wt = 0.0;
+                for u in 0..3 {
+                    wt += ph[[u, slope_primary]] * ut[u][a];
+                }
+                if wt != 0.0 {
+                    for b in 0..gr.len() {
+                        self.h_tg[[a, b]] += wt * gr[b];
+                    }
                 }
             }
-        }
-        for a in 0..pm {
-            let mut wt = 0.0;
-            for u in 0..3 {
-                wt += ph[[u, 3]] * um[u][a];
-            }
-            if wt != 0.0 {
-                for b in 0..gr.len() {
-                    self.h_mg[[a, b]] += wt * gr[b];
+            for a in 0..pm {
+                let mut wt = 0.0;
+                for u in 0..3 {
+                    wt += ph[[u, slope_primary]] * um[u][a];
+                }
+                if wt != 0.0 {
+                    for b in 0..gr.len() {
+                        self.h_mg[[a, b]] += wt * gr[b];
+                    }
                 }
             }
         }

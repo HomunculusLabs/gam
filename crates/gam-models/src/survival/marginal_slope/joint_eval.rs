@@ -310,32 +310,36 @@ impl SurvivalMarginalSlopeFamily {
                 acc[[slices.marginal.start + b, slices.time.start + a]] += v;
             }
         }
-        let gc = self
-            .slope_layout
-            .coefficient_design()
-            .try_row_chunk(row..row + 1)
-            .map_err(|e| format!("slope_design try_row_chunk: {e}"))?;
-        let gr = gc.row(0);
-        for a in 0..p_time {
-            let mut w = 0.0;
-            for qu in 0..3 {
-                w += h_pi[[qu, 3]] * djt[qu][a];
+        // Time×slope and marginal×slope: once per follow-up channel, each against
+        // its own design row. A time-constant slope has one channel, so this is the
+        // single `coefficient_design()` cross it was; a follow-up-varying slope has
+        // three (gam#2767).
+        for &(slope_primary, slope_design) in self.slope_layout.primary_channels().as_slice() {
+            let gc = slope_design
+                .try_row_chunk(row..row + 1)
+                .map_err(|e| format!("slope_design try_row_chunk: {e}"))?;
+            let gr = gc.row(0);
+            for a in 0..p_time {
+                let mut w = 0.0;
+                for qu in 0..3 {
+                    w += h_pi[[qu, slope_primary]] * djt[qu][a];
+                }
+                for b in 0..slices.slope.len() {
+                    let v = w * gr[b];
+                    acc[[slices.time.start + a, slices.slope.start + b]] += v;
+                    acc[[slices.slope.start + b, slices.time.start + a]] += v;
+                }
             }
-            for b in 0..slices.slope.len() {
-                let v = w * gr[b];
-                acc[[slices.time.start + a, slices.slope.start + b]] += v;
-                acc[[slices.slope.start + b, slices.time.start + a]] += v;
-            }
-        }
-        for a in 0..p_marginal {
-            let mut w = 0.0;
-            for qu in 0..3 {
-                w += h_pi[[qu, 3]] * djm[qu][a];
-            }
-            for b in 0..slices.slope.len() {
-                let v = w * gr[b];
-                acc[[slices.marginal.start + a, slices.slope.start + b]] += v;
-                acc[[slices.slope.start + b, slices.marginal.start + a]] += v;
+            for a in 0..p_marginal {
+                let mut w = 0.0;
+                for qu in 0..3 {
+                    w += h_pi[[qu, slope_primary]] * djm[qu][a];
+                }
+                for b in 0..slices.slope.len() {
+                    let v = w * gr[b];
+                    acc[[slices.marginal.start + a, slices.slope.start + b]] += v;
+                    acc[[slices.slope.start + b, slices.marginal.start + a]] += v;
+                }
             }
         }
 
@@ -455,17 +459,16 @@ impl SurvivalMarginalSlopeFamily {
                             self.compute_row_primary_gradient_hessian_uncached(row, block_states)?;
                         (&primary_owned.1, &primary_owned.2)
                     };
-                    // Inline primary direction from already-computed q_geom
-                    // (avoids redundant row_dynamic_q_geometry call)
-                    let d_slope = d_beta_flat.slice(s![slices.slope.clone()]);
-                    let u_d = Array1::from_vec(vec![
-                        q_geom.dq0_time.dot(&d_time) + q_geom.dq0_marginal.dot(&d_marginal),
-                        q_geom.dq1_time.dot(&d_time) + q_geom.dq1_marginal.dot(&d_marginal),
-                        q_geom.dqd1_time.dot(&d_time) + q_geom.dqd1_marginal.dot(&d_marginal),
-                        self.slope_layout
-                            .coefficient_design()
-                            .dot_row_view(row, d_slope),
-                    ]);
+                    // Primary direction from the already-computed q_geom, in the
+                    // family's own slope frame (one slope entry per follow-up
+                    // channel, gam#2767).
+                    let u_d = self.row_primary_direction_from_flat_dynamic_with_q_geometry(
+                        row,
+                        block_states,
+                        &slices,
+                        &q_geom,
+                        d_beta_flat,
+                    )?;
                     let t_ud = self.row_primary_third_contracted(row, block_states, u_d.view())?;
                     let h_ud = h_pi.dot(&u_d);
 
@@ -731,10 +734,8 @@ impl SurvivalMarginalSlopeFamily {
         let p_base = time_tail.start;
         let du_t = d_u.slice(s![slices.time.clone()]);
         let du_m = d_u.slice(s![slices.marginal.clone()]);
-        let du_g = d_u.slice(s![slices.slope.clone()]);
         let dv_t = d_v.slice(s![slices.time.clone()]);
         let dv_m = d_v.slice(s![slices.marginal.clone()]);
-        let dv_g = d_v.slice(s![slices.slope.clone()]);
         let beta_time = &block_states[0].beta;
         let beta_tw = beta_time.slice(s![time_tail.clone()]);
         let flex_primary = self
@@ -789,23 +790,21 @@ impl SurvivalMarginalSlopeFamily {
                         let (_, f_pi, h_pi) =
                             self.compute_row_primary_gradient_hessian_uncached(row, block_states)?;
 
-                        // Primary directions
-                        let ud = Array1::from_vec(vec![
-                            q_geom.dq0_time.dot(&du_t) + q_geom.dq0_marginal.dot(&du_m),
-                            q_geom.dq1_time.dot(&du_t) + q_geom.dq1_marginal.dot(&du_m),
-                            q_geom.dqd1_time.dot(&du_t) + q_geom.dqd1_marginal.dot(&du_m),
-                            self.slope_layout
-                                .coefficient_design()
-                                .dot_row_view(row, du_g),
-                        ]);
-                        let ue = Array1::from_vec(vec![
-                            q_geom.dq0_time.dot(&dv_t) + q_geom.dq0_marginal.dot(&dv_m),
-                            q_geom.dq1_time.dot(&dv_t) + q_geom.dq1_marginal.dot(&dv_m),
-                            q_geom.dqd1_time.dot(&dv_t) + q_geom.dqd1_marginal.dot(&dv_m),
-                            self.slope_layout
-                                .coefficient_design()
-                                .dot_row_view(row, dv_g),
-                        ]);
+                        // Primary directions, in the family's own slope frame.
+                        let ud = self.row_primary_direction_from_flat_dynamic_with_q_geometry(
+                            row,
+                            block_states,
+                            &slices,
+                            &q_geom,
+                            d_u,
+                        )?;
+                        let ue = self.row_primary_direction_from_flat_dynamic_with_q_geometry(
+                            row,
+                            block_states,
+                            &slices,
+                            &q_geom,
+                            d_v,
+                        )?;
 
                         let t_d = self.row_primary_third_contracted(row, block_states, ud.view())?;
                         let t_e = self.row_primary_third_contracted(row, block_states, ue.view())?;
@@ -977,12 +976,20 @@ impl SurvivalMarginalSlopeFamily {
                         &q_geom.dq1_marginal,
                         &q_geom.dqd1_marginal,
                     ];
-                    let gc = self
+                    // One design row per slope follow-up channel: one on a time-constant
+                    // slope, three on a follow-up-varying one (gam#2767).
+                    let slope_chunks = self
                         .slope_layout
-                        .coefficient_design()
-                        .try_row_chunk(row..row + 1)
-                        .map_err(|e| format!("slope_design try_row_chunk: {e}"))?;
-                    let gr = gc.row(0);
+                        .primary_channels()
+                        .as_slice()
+                        .iter()
+                        .map(|&(primary, design)| {
+                            design
+                                .try_row_chunk(row..row + 1)
+                                .map(|chunk| (primary, chunk))
+                                .map_err(|e| format!("slope_design try_row_chunk: {e}"))
+                        })
+                        .collect::<Result<Vec<_>, String>>()?;
 
                     // ── Helper: accumulate a symmetrized bilinear term ──
                     // Adds Σ W[qu,qv] * (left[qu,a]*right[qv,b] + right[qu,a]*left[qv,b])
@@ -1038,28 +1045,31 @@ impl SurvivalMarginalSlopeFamily {
                     // those columns and a `dJ^T W dJ` term does not.
                     macro_rules! accum_j_cross {
                         ($w:expr, $lt:expr, $lm:expr) => {
-                            for a in 0..p_time {
-                                let mut w2 = 0.0;
-                                for qu in 0..3 {
-                                    w2 += $w[[qu, 3]] * $lt[qu][a];
+                            for (slope_primary, slope_chunk) in &slope_chunks {
+                                let gr = slope_chunk.row(0);
+                                for a in 0..p_time {
+                                    let mut w2 = 0.0;
+                                    for qu in 0..3 {
+                                        w2 += $w[[qu, *slope_primary]] * $lt[qu][a];
+                                    }
+                                    for b in 0..slices.slope.len() {
+                                        let v = w2 * gr[b];
+                                        acc[[slices.time.start + a, slices.slope.start + b]] += v;
+                                        acc[[slices.slope.start + b, slices.time.start + a]] += v;
+                                    }
                                 }
-                                for b in 0..slices.slope.len() {
-                                    let v = w2 * gr[b];
-                                    acc[[slices.time.start + a, slices.slope.start + b]] += v;
-                                    acc[[slices.slope.start + b, slices.time.start + a]] += v;
-                                }
-                            }
-                            for a in 0..p_marginal {
-                                let mut w2 = 0.0;
-                                for qu in 0..3 {
-                                    w2 += $w[[qu, 3]] * $lm[qu][a];
-                                }
-                                for b in 0..slices.slope.len() {
-                                    let v = w2 * gr[b];
-                                    acc[[slices.marginal.start + a, slices.slope.start + b]] +=
-                                        v;
-                                    acc[[slices.slope.start + b, slices.marginal.start + a]] +=
-                                        v;
+                                for a in 0..p_marginal {
+                                    let mut w2 = 0.0;
+                                    for qu in 0..3 {
+                                        w2 += $w[[qu, *slope_primary]] * $lm[qu][a];
+                                    }
+                                    for b in 0..slices.slope.len() {
+                                        let v = w2 * gr[b];
+                                        acc[[slices.marginal.start + a, slices.slope.start + b]] +=
+                                            v;
+                                        acc[[slices.slope.start + b, slices.marginal.start + a]] +=
+                                            v;
+                                    }
                                 }
                             }
                             for (primary_range, joint_range) in identity_blocks.iter() {

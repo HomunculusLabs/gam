@@ -3082,6 +3082,144 @@ fn timewiggle_beta_hessian_second_directional_derivative_matches_finite_differen
     }
 }
 
+/// `timewiggle_marginal_slope_family` with its slope varying along follow-up: the exit
+/// channel keeps the family's own slope design, and the entry and exit-rate channels get
+/// their own rows (gam#2767).
+fn timewiggle_follow_up_slope_family() -> SurvivalMarginalSlopeFamily {
+    let mut family = timewiggle_marginal_slope_family(None);
+    let layout: SlopeLayout = DesignMatrix::from(array![[1.0]]).into();
+    family.slope_layout = layout
+        .with_follow_up(
+            DesignMatrix::from(array![[0.6]]),
+            DesignMatrix::from(array![[0.45]]),
+        )
+        .expect("a shared slope layout accepts a follow-up margin");
+    family
+}
+
+/// gam#2767: a time-wiggle baseline beside a follow-up-varying slope. The wiggle deforms the
+/// three location primaries only, so every coefficient-space object it assembles must pull the
+/// three slope channels back through their own design rows. The joint gradient is graded
+/// against the joint log-likelihood, the joint Hessian against the joint gradient, `D_β H[v]`
+/// against the joint Hessian, and `D²_β H[u, v]` against `D_β H[v]`, each with a
+/// Ridders-certified central difference.
+#[test]
+fn timewiggle_follow_up_slope_beta_calculus_matches_finite_difference_2767() {
+    let family = timewiggle_follow_up_slope_family();
+    assert!(family.flex_timewiggle_active(), "the fixture must engage the time wiggle");
+    assert!(
+        family.slope_is_follow_up_varying(),
+        "the fixture must run the six-primary frame"
+    );
+    let beta = timewiggle_marginal_slope_beta(&family);
+    let states_at = |beta: &Array1<f64>| timewiggle_marginal_slope_states(&family, beta);
+    let u = Array1::from_shape_fn(beta.len(), |i| ((i * 7 + 3) % 11) as f64 / 11.0 - 0.45);
+    let v = Array1::from_shape_fn(beta.len(), |i| ((i * 5 + 1) % 13) as f64 / 13.0 - 0.5);
+    let h = 1e-3;
+    let gate = |what: &str, analytic: &Array2<f64>, at: &dyn Fn(f64) -> Array2<f64>| {
+        let coarse = (at(h) - at(-h)) / (2.0 * h);
+        let fine = (at(0.5 * h) - at(-0.5 * h)) / h;
+        let scale = analytic
+            .iter()
+            .fold(0.0_f64, |acc, value| acc.max(value.abs()))
+            .max(1e-12);
+        for ((index, &want), (&c, &f)) in analytic
+            .indexed_iter()
+            .zip(coarse.iter().zip(fine.iter()))
+        {
+            let value = (4.0 * f - c) / 3.0;
+            let uncertainty = (f - c).abs() / 3.0;
+            let denominator = scale.max(want.abs()).max(value.abs());
+            assert!(
+                uncertainty <= 0.05 * denominator,
+                "{what}{index:?}: the difference oracle did not resolve \
+                 (value={value:.6e}, uncertainty={uncertainty:.3e})"
+            );
+            assert!(
+                (want - value).abs() <= 1e-5 * denominator + 4.0 * uncertainty,
+                "{what}{index:?}: analytic={want:.9e} fd={value:.9e} \
+                 uncertainty={uncertainty:.3e} scale={scale:.3e}"
+            );
+        }
+    };
+    let states = states_at(&beta);
+
+    // The score pullback is graded on its own, not only as the reference `H v` is
+    // differenced against.
+    let (log_likelihood, gradient) = family
+        .evaluate_exact_newton_joint_gradient_dynamic_q(&states)
+        .expect("joint gradient");
+    assert!(log_likelihood.is_finite(), "the fixture must sit inside the follow-up domain");
+    gate("g . v", &array![[gradient.dot(&v)]], &|t| {
+        let displaced = family
+            .evaluate_exact_newton_joint_gradient_dynamic_q(&states_at(&(&beta + &(&v * t))))
+            .expect("displaced joint log-likelihood")
+            .0;
+        array![[displaced]]
+    });
+
+    let hessian = family
+        .exact_newton_joint_hessian(&states)
+        .expect("joint Hessian")
+        .expect("survival marginal-slope publishes an explicit joint Hessian");
+
+    // The entry and rate channels must reach the Hessian, or this gate cannot tell the
+    // six-primary pullback from the time-constant one it replaced.
+    let static_family = timewiggle_marginal_slope_family(None);
+    let static_hessian = static_family
+        .exact_newton_joint_hessian(&timewiggle_marginal_slope_states(&static_family, &beta))
+        .expect("static joint Hessian")
+        .expect("survival marginal-slope publishes an explicit joint Hessian");
+    assert!(
+        (&hessian - &static_hessian)
+            .iter()
+            .any(|difference| difference.abs() > 1e-6),
+        "the follow-up channels must move the joint Hessian"
+    );
+
+    let hv = hessian.dot(&v).insert_axis(Axis(1));
+    gate("H v", &hv, &|t| {
+        let displaced_gradient = family
+            .evaluate_exact_newton_joint_gradient_dynamic_q(&states_at(&(&beta + &(&v * t))))
+            .expect("displaced joint gradient")
+            .1;
+        (-displaced_gradient).insert_axis(Axis(1))
+    });
+
+    let first = family
+        .exact_newton_joint_hessian_directional_derivative(&states, &v)
+        .expect("D_beta H[v]")
+        .expect("a time wiggle publishes D_beta H");
+    assert!(
+        first.row(7).iter().any(|value| value.abs() > 1e-8),
+        "D_beta H[v] must carry a slope row for this gate to grade the slope crosses"
+    );
+    gate("D_beta H[v]", &first, &|t| {
+        family
+            .exact_newton_joint_hessian(&states_at(&(&beta + &(&v * t))))
+            .expect("joint Hessian")
+            .expect("survival marginal-slope publishes an explicit joint Hessian")
+    });
+
+    let second = family
+        .exact_newton_joint_hessiansecond_directional_derivative(&states, &u, &v)
+        .expect("D2_beta H[u, v]")
+        .expect("a time wiggle publishes D2_beta H");
+    assert!(
+        second.row(7).iter().any(|value| value.abs() > 1e-8),
+        "D2_beta H[u, v] must carry a slope row for this gate to grade the slope crosses"
+    );
+    gate("D2_beta H[u, v]", &second, &|t| {
+        family
+            .exact_newton_joint_hessian_directional_derivative(
+                &states_at(&(&beta + &(&u * t))),
+                &v,
+            )
+            .expect("displaced D_beta H[v]")
+            .expect("a time wiggle publishes D_beta H")
+    });
+}
+
 /// gam#2893: the build-once flex + time-wiggle sweep reproduces the single-axis `D_β H[e_a]` on
 /// every coefficient axis.
 #[test]

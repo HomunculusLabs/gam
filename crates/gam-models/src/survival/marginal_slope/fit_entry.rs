@@ -195,16 +195,20 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         &spec.slope_template,
     )?;
     if slope_follow_up.is_some() {
-        // The flex/time-wiggle surfaces all evaluate the row program through the
-        // four-primary frame. Each is a real combination to support, and each is a
-        // separate piece of chain rule; refusing by name is honest, whereas running
-        // them would silently differentiate a model that is not the one being
-        // fitted. A spatial term on the slope surface is supported: the ψ calculus
-        // lifts the covariate derivative onto the three channel designs from the
-        // stored margin (gam#2767). So is a Gaussian-shift frailty, fixed or
-        // learned: its scale reaches the row program as the probit-scale input the
-        // follow-up frame applies to all three slope features, and the log-σ
-        // hyperparameter calculus differentiates that same frame.
+        // The flex surfaces evaluate the row program through the four-primary
+        // frame. Each is a real combination to support, and each is a separate
+        // piece of chain rule; refusing by name is honest, whereas running them
+        // would silently differentiate a model that is not the one being fitted.
+        // A spatial term on the slope surface is supported: the ψ calculus lifts
+        // the covariate derivative onto the three channel designs from the stored
+        // margin (gam#2767). So is a Gaussian-shift frailty, fixed or learned: its
+        // scale reaches the row program as the probit-scale input the follow-up
+        // frame applies to all three slope features, and the log-σ hyperparameter
+        // calculus differentiates that same frame. So is a time-wiggle baseline:
+        // the wiggle deforms only the three location primaries, and its coefficient
+        // calculus pulls every slope channel back through its own design row. Its
+        // baseline-chart calculus runs the FLEX family program instead, which is
+        // why a learned baseline chart stays refused beside it.
         if spec.score_warp.is_some() || spec.link_dev.is_some() {
             return Err(SurvivalMarginalSlopeError::InvalidInput {
                 reason: "a follow-up-varying slope is not yet supported together with a \
@@ -223,10 +227,17 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             }
             .into());
         }
-        if spec.timewiggle_block.is_some() {
+        if spec.timewiggle_block.is_some()
+            && matches!(
+                spec.baseline_hyper,
+                SurvivalMarginalSlopeBaselineHyperSpec::Nonlinear { .. }
+            )
+        {
             return Err(SurvivalMarginalSlopeError::InvalidInput {
                 reason: "a follow-up-varying slope is not yet supported together with a \
-                         time-wiggle baseline"
+                         time-wiggle baseline whose baseline chart is learned: that chart's \
+                         hyperparameter calculus runs the FLEX family program, which carries \
+                         the time-constant slope frame"
                     .to_string(),
             }
             .into());

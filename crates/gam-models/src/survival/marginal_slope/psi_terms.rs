@@ -170,7 +170,9 @@ impl SurvivalMarginalSlopeFamily {
         let dh1 = x_x.dot(&dt.slice(s![..p_base])) + x_m.dot(&dm);
         let dd_raw = x_d.dot(&dt.slice(s![..p_base]));
         let dmu = psi_row.dot(&dm);
-        let mut out = Array1::zeros(primary_layout.map_or(N_PRIMARY, |primary| primary.total));
+        let mut out = Array1::zeros(
+            primary_layout.map_or_else(|| self.core_primary_dimension(), |primary| primary.total),
+        );
         let q0_idx = primary_layout.map_or(0, |primary| primary.q0);
         let q1_idx = primary_layout.map_or(1, |primary| primary.q1);
         let qd1_idx = primary_layout.map_or(2, |primary| primary.qd1);
