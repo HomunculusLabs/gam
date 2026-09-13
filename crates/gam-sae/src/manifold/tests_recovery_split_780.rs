@@ -1778,6 +1778,17 @@ fn classify_fd_anchor_candidate(
         return Err("no row deflates; regime requires at least one".to_string());
     }
     let stratum = FiniteDifferenceStratumCertificate::from_arrow_cache(&cache);
+    // Every stencil through the anchor asserts its center carries no unresolved row
+    // invariant-subspace block (`assert_same_stratum`), so a center that carries one
+    // is not a point where the asserted derivative is defined. That is a property of
+    // the state, so it belongs in the certificate, not in the first sample.
+    if stratum.unresolved_eigengap {
+        return Err(
+            "a row deflation spectrum has an unresolved invariant-subspace block, where \
+             the frozen log-determinant's derivative is not defined"
+                .to_string(),
+        );
+    }
     Ok(CertifiedFdAnchor {
         term,
         rho,
