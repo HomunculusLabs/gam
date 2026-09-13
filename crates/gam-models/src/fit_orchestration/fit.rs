@@ -2531,7 +2531,12 @@ fn fit_cause_specific_survival_transformation_custom(
         penalty_blocks.len(),
         penalty_block_gamma_priors,
     )?;
-    let mut fit = fit_custom_family_with_rho_prior(&family, &block_specs, &fit_options, rho_prior)
+    let mut fit = crate::custom_family::fit_custom_family_arming_on_evidence_with_rho_prior(
+        &family,
+        &block_specs,
+        &fit_options,
+        rho_prior,
+    )
         .map_err(|err| format!("cause-specific survival custom-family fit failed: {err}"))?;
     fit.likelihood_family = Some(LikelihoodSpec::royston_parmar());
     let time_basis = crate::survival::construction::SavedSurvivalTimeBasis::from_build(

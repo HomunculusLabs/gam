@@ -172,7 +172,10 @@ pub use covariance::{
 };
 pub use fit::*;
 pub(crate) use inner_blockwise_fit::*;
-pub use jeffreys_arming::{JeffreysArming, fit_custom_family_arming_on_evidence};
+pub use jeffreys_arming::{
+    JeffreysArming, fit_custom_family_arming_on_evidence,
+    fit_custom_family_arming_on_evidence_with_rho_prior,
+};
 pub(crate) use jeffreys::*;
 pub(crate) use joint_derivatives::*;
 pub use joint_newton::*;
@@ -187,6 +190,8 @@ pub use self::psi_design::*;
 pub use psi_hyper::*;
 pub use warm_start::*;
 
+#[cfg(test)]
+mod jeffreys_arming_979_tests;
 #[cfg(test)]
 mod soft_rho_guard_floor_2629_tests;
 #[cfg(test)]

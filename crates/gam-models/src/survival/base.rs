@@ -250,6 +250,10 @@ pub struct CauseSpecificRoystonParmarBlock {
 #[derive(Debug, Clone)]
 pub struct CauseSpecificRoystonParmarFamily {
     blocks: Vec<CauseSpecificRoystonParmarBlock>,
+    /// Whether this member's Jeffreys/Firth prior is armed. A fit arms it only
+    /// on the unarmed fit's own evidence, through
+    /// `fit_custom_family_arming_on_evidence_with_rho_prior` (#979).
+    jeffreys_armed: bool,
 }
 
 impl CauseSpecificRoystonParmarFamily {
@@ -269,7 +273,10 @@ impl CauseSpecificRoystonParmarFamily {
                 .to_string()
             })?;
         }
-        Ok(Self { blocks })
+        Ok(Self {
+            blocks,
+            jeffreys_armed: true,
+        })
     }
 
 }
@@ -733,12 +740,23 @@ impl crate::custom_family::JeffreysThirdInformationDerivative for CauseSpecificR
     }
 }
 
+impl crate::custom_family::JeffreysArming for CauseSpecificRoystonParmarFamily {
+    fn with_jeffreys_armed(
+        &self,
+        evidence: Option<&gam_problem::jeffreys_arming::JeffreysArmingEvidence>,
+    ) -> Self {
+        Self {
+            jeffreys_armed: evidence.is_some(),
+            ..self.clone()
+        }
+    }
+}
+
 impl CustomFamily for CauseSpecificRoystonParmarFamily {
-    // Preserve the pre-gam#1395 behavior: the trait default flipped to OFF (the
-    // flat-prior exact-Newton objective carries no Jeffreys term), so families
-    // that historically armed the term by default opt back in explicitly.
+    // The self-limiting Jeffreys/Firth curvature bounds a direction the data do
+    // not, but it is armed only when the unarmed fit proves it is needed (#979).
     fn joint_jeffreys_term_required(&self) -> bool {
-        true
+        self.jeffreys_armed
     }
 
     fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {

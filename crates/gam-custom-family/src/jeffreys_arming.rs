@@ -5,7 +5,7 @@
 use super::*;
 
 use gam_problem::jeffreys_arming::JeffreysArmingEvidence;
-use gam_solve::constrained_posterior::ConePropernessEvidence;
+use gam_solve::constrained_posterior::{ConePropernessEvidence, ConstrainedPosteriorMomentStatus};
 use gam_solve::model_types::UnifiedFitResult;
 
 /// A family whose Jeffreys/Firth prior arms on evidence rather than by
@@ -43,8 +43,31 @@ pub fn fit_custom_family_arming_on_evidence<F: JeffreysArming + Send + Sync + 's
     specs: &[ParameterBlockSpec],
     options: &BlockwiseFitOptions,
 ) -> Result<UnifiedFitResult, CustomFamilyError> {
-    let (evidence, warm_specs) =
-        match fit_custom_family(&family.with_jeffreys_armed(None), specs, options) {
+    fit_custom_family_arming_on_evidence_with_rho_prior(
+        family,
+        specs,
+        options,
+        gam_problem::RhoPrior::Flat,
+    )
+}
+
+/// [`fit_custom_family_arming_on_evidence`] under a prior on the log smoothing
+/// strengths. The unarmed fit and the armed refit select their strengths under
+/// the same prior.
+pub fn fit_custom_family_arming_on_evidence_with_rho_prior<
+    F: JeffreysArming + Send + Sync + 'static,
+>(
+    family: &F,
+    specs: &[ParameterBlockSpec],
+    options: &BlockwiseFitOptions,
+    rho_prior: gam_problem::RhoPrior,
+) -> Result<UnifiedFitResult, CustomFamilyError> {
+    let (evidence, warm_specs) = match fit_custom_family_with_rho_prior(
+        &family.with_jeffreys_armed(None),
+        specs,
+        options,
+        rho_prior.clone(),
+    ) {
             Ok(fit) => match improper_cone_posterior_evidence(&fit) {
                 None => return Ok(fit),
                 Some(evidence) => (evidence, Some(warm_started_specs(specs, &fit)?)),
@@ -59,20 +82,27 @@ pub fn fit_custom_family_arming_on_evidence<F: JeffreysArming + Send + Sync + 's
          {evidence:?}; warm start from the unarmed mode: {}",
         warm_specs.is_some(),
     );
-    let mut armed = fit_custom_family(
+    let mut armed = fit_custom_family_with_rho_prior(
         &family.with_jeffreys_armed(Some(&evidence)),
         warm_specs.as_deref().unwrap_or(specs),
         options,
+        rho_prior,
     )?;
     armed.artifacts.jeffreys_arming_evidence = Some(evidence);
     Ok(armed)
 }
 
 /// The face evidence a certified fit carries: its constrained mode's
-/// cone-truncated posterior proved improper (#979).
+/// cone-truncated posterior proved improper (#979). A declined posterior and a
+/// certified boundary-mode law both keep that evidence, so both arm.
 fn improper_cone_posterior_evidence(fit: &UnifiedFitResult) -> Option<JeffreysArmingEvidence> {
-    let ConePropernessEvidence::Certificate(certificate) = &fit.posterior_moment_decline()?.properness
-    else {
+    let geometry = fit.geometry.as_ref()?.constrained_posterior.as_ref()?;
+    let decline = match &geometry.moment_status {
+        ConstrainedPosteriorMomentStatus::Available => return None,
+        ConstrainedPosteriorMomentStatus::Declined(decline)
+        | ConstrainedPosteriorMomentStatus::BoundaryApproximation { decline, .. } => decline,
+    };
+    let ConePropernessEvidence::Certificate(certificate) = &decline.properness else {
         return None;
     };
     (certificate.is_proper() == Some(false)).then(|| {

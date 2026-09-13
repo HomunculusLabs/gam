@@ -5,7 +5,6 @@
 
 use gam_custom_family::{
     AdditiveBlockJacobian, BlockwiseFitOptions, ParameterBlockSpec, PenaltyMatrix,
-    fit_custom_family_with_rho_prior,
 };
 
 use gam_solve::estimate::{FitOptions, FittedLinkState, UnifiedFitResult};
