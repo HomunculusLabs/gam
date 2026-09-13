@@ -125,13 +125,7 @@ fn sae_fit_error_to_pyerr(py: Python<'_>, err: gam::terms::sae::manifold::SaeFit
     max_iter = 200,
     grad_tol = 1.0e-8,
     stationarity_reference = None,
-    trust_radius = 1.0,
-    max_radius = 1.0e6,
-    n_restarts = 1,
-    restart_scale = 0.25,
-    seed = 0,
     init = "spectral".to_string(),
-    seed_neighbors = 10,
 ))]
 fn gaussian_reml_optimize_latent<'py>(
     py: Python<'py>,
@@ -157,17 +151,8 @@ fn gaussian_reml_optimize_latent<'py>(
     max_iter: usize,
     grad_tol: f64,
     stationarity_reference: Option<f64>,
-    trust_radius: f64,
-    max_radius: f64,
-    n_restarts: usize,
-    restart_scale: f64,
-    seed: u64,
     init: String,
-    seed_neighbors: usize,
 ) -> PyResult<Py<PyDict>> {
-    use rand::SeedableRng;
-    use rand_distr::Distribution;
-
     let family = match aux_family.to_ascii_lowercase().as_str() {
         "ridge" => AuxPriorFamily::Ridge,
         "linear" => AuxPriorFamily::Linear,
@@ -182,9 +167,6 @@ fn gaussian_reml_optimize_latent<'py>(
         .map(|values| ValidatedDimSelectionPrecisions::new(values.as_array(), latent_dim))
         .transpose()
         .map_err(py_value_error)?;
-    if n_restarts == 0 {
-        return Err(py_value_error("n_restarts must be at least 1".to_string()));
-    }
     if !(grad_tol.is_finite() && grad_tol > 0.0) {
         return Err(py_value_error(format!(
             "grad_tol must be finite and positive; got {grad_tol}"
@@ -197,21 +179,6 @@ fn gaussian_reml_optimize_latent<'py>(
             )));
         }
     }
-    if !(trust_radius.is_finite() && trust_radius > 0.0) {
-        return Err(py_value_error(format!(
-            "trust_radius must be finite and positive; got {trust_radius}"
-        )));
-    }
-    if !(max_radius.is_finite() && max_radius >= trust_radius) {
-        return Err(py_value_error(format!(
-            "max_radius must be finite and at least trust_radius ({trust_radius}); got {max_radius}"
-        )));
-    }
-    if !(restart_scale.is_finite() && restart_scale > 0.0) {
-        return Err(py_value_error(format!(
-            "restart_scale must be finite and positive; got {restart_scale}"
-        )));
-    }
     let expected = n_obs
         .checked_mul(latent_dim)
         .ok_or_else(|| py_value_error("n_obs * latent_dim overflows usize".to_string()))?;
@@ -222,19 +189,19 @@ fn gaussian_reml_optimize_latent<'py>(
             t_values.len()
         )));
     }
-    // Choose the base start for restart 0 (further restarts perturb it). A
-    // spectral seed escapes the random-init local optimum that leaves the outer
-    // optimizer stuck (#627); `"caller"` keeps the passed-in `t` unchanged for
-    // callers that already have a good warm start or want a pure local solve.
-    let base_start = match init.to_ascii_lowercase().as_str() {
-        "caller" | "warm" | "passthrough" => t_values.clone(),
-        "spectral" | "laplacian" | "eigenmap" => latent_spectral_seed_start(
+    // Choose the start. A spectral seed escapes the random-init local optimum
+    // that leaves the outer optimizer stuck (#627); `"caller"` keeps the
+    // passed-in `t` unchanged for callers that already have a good warm start or
+    // want a pure local solve.
+    let start = match init.as_str() {
+        "caller" => t_values.clone(),
+        "spectral" => latent_spectral_seed_start(
             y.as_array(),
             centers.as_array(),
             &manifold,
             n_obs,
             latent_dim,
-            seed_neighbors,
+            gam::geometry::SPECTRAL_SEED_NEIGHBORS,
             t_values.view(),
         )
         .map_err(py_value_error)?,
@@ -284,77 +251,46 @@ fn gaussian_reml_optimize_latent<'py>(
     let manifold_box =
         build_latent_outer_manifold(&manifold, n_obs, latent_dim).map_err(py_value_error)?;
     let trust_region = gam::geometry::RiemannianTrustRegion {
-        radius: trust_radius,
-        max_radius,
         max_iter,
         grad_tol,
+        ..gam::geometry::RiemannianTrustRegion::default()
     };
 
-    // Restart 0 starts from `base_start` (the spectral seed, or the caller's `t`
-    // when `init="caller"`); further restarts perturb it in the tangent space and
-    // retract back onto the manifold, then we keep the lowest-score latent.
-    let (best_t, best_value, best_start_grad_norm, best_restart) = py
-        .detach(|| -> Result<(Array1<f64>, f64, f64, usize), String> {
+    let (best_t, best_value, best_start_grad_norm) = py
+        .detach(|| -> Result<(Array1<f64>, f64, f64), String> {
             let manifold_ref: &dyn gam::geometry::RiemannianManifold = manifold_box.as_ref();
-            let normal =
-                rand_distr::Normal::new(0.0, restart_scale).map_err(|err| err.to_string())?;
-            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-            let mut best: Option<(Array1<f64>, f64, f64, usize)> = None;
-            for restart in 0..n_restarts {
-                let start = if restart == 0 {
-                    base_start.clone()
-                } else {
-                    let noise =
-                        Array1::from_shape_fn(base_start.len(), |_| normal.sample(&mut rng));
-                    let tangent = manifold_ref
-                        .project_tangent(base_start.view(), noise.view())
-                        .map_err(|err| err.to_string())?;
-                    manifold_ref
-                        .retract(base_start.view(), tangent.view())
-                        .map_err(|err| err.to_string())?
-                };
-                // Every manifold accepted by `build_latent_outer_manifold`
-                // carries the induced ambient metric. Its Riemannian gradient
-                // is therefore the tangent projection and its norm is the
-                // Euclidean norm in ambient coordinates. Record the scale at
-                // THIS restart's initial point: the winning restart must be
-                // certified against the same reference its optimizer used.
-                let (_, start_gradient) = problem.value_and_grad(start.view(), true);
-                let start_gradient = start_gradient.ok_or_else(|| {
-                    format!("restart {restart} did not produce an initial latent gradient")
-                })?;
-                let start_projected = manifold_ref
-                    .riemannian_gradient(start.view(), start_gradient.view())
-                    .map_err(|err| err.to_string())?;
-                let start_grad_norm = start_projected
-                    .iter()
-                    .map(|value| value * value)
-                    .sum::<f64>()
-                    .sqrt();
-                // A zero iteration budget is an intentional checkpoint probe:
-                // evaluate the caller's start and let this FFI wrapper emit its
-                // typed, resumable convergence evidence below. Sending the
-                // probe through `RiemannianTrustRegion::minimize` loses that
-                // evidence because the generic optimizer can only return its
-                // unstructured "0 iterations" error.
-                let optimized = if max_iter == 0 {
-                    start
-                } else {
-                    let mut objective = LatentOuterObjective { problem: &problem };
-                    trust_region
-                        .minimize(manifold_ref, &mut objective, start.view())
-                        .map_err(|err| err.to_string())?
-                };
-                let (value, _) = problem.value_and_grad(optimized.view(), false);
-                let improved = best
-                    .as_ref()
-                    .map(|(_, incumbent, _, _)| value < *incumbent)
-                    .unwrap_or(true);
-                if improved {
-                    best = Some((optimized, value, start_grad_norm, restart));
-                }
-            }
-            best.ok_or_else(|| "no restart produced a latent".to_string())
+            // Every manifold accepted by `build_latent_outer_manifold` carries the
+            // induced ambient metric. Its Riemannian gradient is therefore the
+            // tangent projection and its norm is the Euclidean norm in ambient
+            // coordinates. Record the scale at the start: the optimized latent is
+            // certified against the same reference its optimizer used.
+            let (_, start_gradient) = problem.value_and_grad(start.view(), true);
+            let start_gradient = start_gradient
+                .ok_or_else(|| "the start did not produce an initial latent gradient".to_string())?;
+            let start_projected = manifold_ref
+                .riemannian_gradient(start.view(), start_gradient.view())
+                .map_err(|err| err.to_string())?;
+            let start_grad_norm = start_projected
+                .iter()
+                .map(|value| value * value)
+                .sum::<f64>()
+                .sqrt();
+            // A zero iteration budget is an intentional checkpoint probe:
+            // evaluate the caller's start and let this FFI wrapper emit its
+            // typed, resumable convergence evidence below. Sending the
+            // probe through `RiemannianTrustRegion::minimize` loses that
+            // evidence because the generic optimizer can only return its
+            // unstructured "0 iterations" error.
+            let optimized = if max_iter == 0 {
+                start
+            } else {
+                let mut objective = LatentOuterObjective { problem: &problem };
+                trust_region
+                    .minimize(manifold_ref, &mut objective, start.view())
+                    .map_err(|err| err.to_string())?
+            };
+            let (value, _) = problem.value_and_grad(optimized.view(), false);
+            Ok((optimized, value, start_grad_norm))
         })
         .map_err(py_value_error)?;
 
@@ -381,7 +317,7 @@ fn gaussian_reml_optimize_latent<'py>(
         }
         None => f64::INFINITY,
     };
-    // The winning restart carries its own initial-gradient scale. A resumed
+    // The start carries its own initial-gradient scale. A resumed
     // solve may supply the original scale explicitly so the convergence test
     // remains the same test across process/wall boundaries instead of silently
     // renormalizing at the checkpoint.
@@ -442,7 +378,7 @@ fn gaussian_reml_optimize_latent<'py>(
         let err = RemlConvergenceError::new_err(format!(
             "gaussian_reml_optimize_latent did not reach latent stationarity: relative \
              gradient {grad_t_norm_scaled:.6e} did not satisfy grad_tol {grad_tol:.6e} with a \
-             budget of {max_iter} iteration(s) x {n_restarts} restart(s) (projected gradient {grad_t_norm:.6e}, \
+             budget of {max_iter} iteration(s) (projected gradient {grad_t_norm:.6e}, \
              seed gradient {grad0_norm:.6e}, objective {best_value:.9e}, latent spread \
              {latent_t_std:.6e}). No fit is minted from a non-converged optimization; \
              resume from the exception's `checkpoint_t` and \
@@ -462,8 +398,6 @@ fn gaussian_reml_optimize_latent<'py>(
             bound.setattr("latent_t_std", latent_t_std)?;
             bound.setattr("objective_value", best_value)?;
             bound.setattr("max_iter", max_iter)?;
-            bound.setattr("n_restarts", n_restarts)?;
-            bound.setattr("restart_index", best_restart)?;
             bound.setattr("init", init.as_str())?;
             bound.setattr("checkpoint_t", best_t.into_pyarray(py))?;
             bound.setattr("checkpoint_shape", (n_obs, latent_dim))?;
@@ -578,7 +512,6 @@ fn gaussian_reml_optimize_latent<'py>(
     out.set_item("response_r2", response_r2)?;
     out.set_item("response_residual_norm", response_residual_norm)?;
     out.set_item("objective_value", best_value)?;
-    out.set_item("n_restarts", n_restarts)?;
     out.set_item("init", init)?;
     Ok(out.unbind())
 }

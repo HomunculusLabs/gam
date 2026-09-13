@@ -25,6 +25,10 @@ use gam_linalg::faer_ndarray::FaerEigh;
 use gam_linalg::utils::splitmix64;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayViewMut1, Axis, Zip, concatenate, s};
 
+/// Neighbours per row in the latent optimizer's spectral-seed graph: the
+/// k-nearest-neighbour size the #627 latent-coordinate recovery was validated at.
+pub const SPECTRAL_SEED_NEIGHBORS: usize = 10;
+
 /// Laplacian-eigenmaps embedding of `features` (`n × q`) into `latent_dim`
 /// intrinsic coordinates, each axis affinely rescaled to `[0, 1]`.
 ///

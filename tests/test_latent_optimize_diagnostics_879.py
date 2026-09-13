@@ -45,8 +45,6 @@ def test_nonconvergence_is_typed_evidence_with_resumable_checkpoint_879():
         "latent_t_std",
         "objective_value",
         "max_iter",
-        "n_restarts",
-        "restart_index",
         "checkpoint_t",
         "checkpoint_shape",
         "checkpoint_stationarity_reference",

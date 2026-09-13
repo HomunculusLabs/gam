@@ -18,7 +18,7 @@ pub use curvature_estimand::{
     CurvatureVerdict, FlatnessTest, KappaEstimateSupport, KappaProfileCi, flatness_lr_test,
     wald_half_width,
 };
-pub use latent_seed::laplacian_eigenmap_coords;
+pub use latent_seed::{SPECTRAL_SEED_NEIGHBORS, laplacian_eigenmap_coords};
 pub use manifold::{GeometryError, GeometryResult, ManifoldSpec, RiemannianManifold};
 pub use manifolds::{
     CircleManifold, ConstantCurvature, EuclideanManifold, GrassmannManifold, ProductManifold,

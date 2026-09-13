@@ -2971,13 +2971,7 @@ def gaussian_reml_optimize_latent(
     max_iter: int = 200,
     grad_tol: float = 1.0e-8,
     stationarity_reference: float | None = None,
-    trust_radius: float = 1.0,
-    max_radius: float = 1.0e6,
-    n_restarts: int = 1,
-    restart_scale: float = 0.25,
-    seed: int = 0,
     init: str = "spectral",
-    seed_neighbors: int = 10,
 ) -> dict[str, Any]:
     """Estimate the per-row latent coordinate ``t`` *and* the decoder.
 
@@ -2991,23 +2985,21 @@ def gaussian_reml_optimize_latent(
 
     The objective is non-convex (a GP-LVM-style coordinate problem), so a cold
     random start settles in a poor local optimum (see issue #627). With the
-    default ``init="spectral"`` the optimizer seeds restart 0 from a
+    default ``init="spectral"`` the optimizer seeds its start from a
     Laplacian-eigenmaps embedding of ``y`` — which recovers the intrinsic
     coordinate up to a monotone/rotation gauge — then polishes it, so a good
     initial ``t`` is *not* required. ``t`` is optional; when omitted a zero
     vector is used as the fallback start (taken only when the spectral seed is
     unavailable, e.g. too few rows or a non-Euclidean ``manifold``). Pass
     ``init="caller"`` to start from ``t`` unchanged (a pure local solve / explicit
-    warm start), ``n_restarts > 1`` to additionally try perturbed starts and keep
-    the lowest-score result, and ``seed_neighbors`` to set the spectral seed's
-    k-nearest-neighbour graph size.
+    warm start).
 
     The ``centers`` / ``penalty`` / ``basis_kind`` arguments define the decoder
     basis exactly as in :func:`gaussian_reml_fit_latent`; the spectral seed is
     affinely mapped onto the span of ``centers`` so it lands where ``Φ`` is
     well-conditioned. The result also carries ``"grad_t_norm"``,
     ``"grad_t_norm_init"``, ``"grad_t_norm_scaled"``, ``"objective_value"``,
-    ``"n_restarts"``, and ``"init"`` diagnostics. A separate convergence flag
+    and ``"init"`` diagnostics. A separate convergence flag
     is unnecessary: returning a fit is itself the convergence certificate.
 
     Convergence is decided from ``"grad_t_norm_scaled"`` -- the *relative*
@@ -3028,7 +3020,7 @@ def gaussian_reml_optimize_latent(
     of returning a degraded payload. The exception carries the evidence as
     attributes (``grad_t_norm``, ``grad_t_norm_init``, ``grad_t_norm_scaled``,
     ``grad_tol``, ``latent_t_std``, ``objective_value``, ``max_iter``,
-    ``n_restarts``, ``restart_index``, ``init``) plus the one-dimensional
+    ``init``) plus the one-dimensional
     ``checkpoint_t`` and its ``checkpoint_shape``. Resume with
     ``t=exc.checkpoint_t``, ``init="caller"``, and
     ``stationarity_reference=exc.checkpoint_stationarity_reference``: carrying
@@ -3072,13 +3064,7 @@ def gaussian_reml_optimize_latent(
             int(max_iter),
             float(grad_tol),
             None if stationarity_reference is None else float(stationarity_reference),
-            float(trust_radius),
-            float(max_radius),
-            int(n_restarts),
-            float(restart_scale),
-            int(seed),
             str(init),
-            int(seed_neighbors),
         )
     except Exception as exc:
         raise map_exception(exc) from exc
