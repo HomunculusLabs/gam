@@ -16,6 +16,30 @@ use super::tests_recovery_split_780::{
     rho_ladder_family, rho_ladder_family_with_tolerance, sparse_lift_ladder,
 };
 
+/// The exact `(z_j, S⁻¹ z_j)` bundle at full-basis probes `√k·e_j`, where the
+/// Hutchinson outer products `logdet_theta_adjoint_from_probes` contracts are
+/// algebraically exact.
+fn full_basis_probe_bundle(cache: &ArrowFactorCache) -> (Vec<Array1<f64>>, Vec<Array1<f64>>) {
+    let k = cache.k;
+    let sqrt_k = (k as f64).sqrt();
+    let probes: Vec<Array1<f64>> = (0..k)
+        .map(|j| {
+            let mut probe = Array1::<f64>::zeros(k);
+            probe[j] = sqrt_k;
+            probe
+        })
+        .collect();
+    let sinv = probes
+        .iter()
+        .map(|probe| {
+            cache
+                .schur_inverse_apply(probe.view())
+                .expect("exact reduced-Schur solve at a full-basis probe")
+        })
+        .collect();
+    (probes, sinv)
+}
+
 #[derive(Clone, Copy)]
 struct TinyComplex {
     re: f64,
@@ -884,12 +908,22 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_full_rank_whitening_2144
     let term = anchor.term;
     let rho = anchor.rho;
     let cache = anchor.cache;
-    let solver = DeflatedArrowSolver::plain(&cache);
-    let inv = term
-        .materialize_joint_inverse(&cache, &solver)
-        .expect("dense joint inverse");
+    // #2144 — the majorized θ-adjoint production contracts, at full-basis probes
+    // where its Hutchinson outer products are exact. The dense
+    // `logdet_theta_adjoint_dense(.., exact_a = false, ..)` arm carries no ordered
+    // Beta--Bernoulli prior-majorizer channel (neither the local direct-z entry nor
+    // the shared-mass column pass), so under a rank-deficient whitening metric it
+    // read `analytic = 2.15e-14` against `fd = 1.4285` on atom 1's logit.
+    let (probes, sinv) = full_basis_probe_bundle(&cache);
     let gamma = term
-        .logdet_theta_adjoint_dense(&rho, &cache, &inv, false, false, None)
+        .logdet_theta_adjoint_from_probes(
+            &rho,
+            &cache,
+            &probes,
+            &sinv,
+            EvidenceOperator::Majorizer,
+            None,
+        )
         .expect("Gamma");
     let h = 1.0e-5;
     let fd_stratum = anchor.stratum;
@@ -984,12 +1018,22 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_ordered_beta_bernoulli_l
     let term = anchor.term;
     let rho = anchor.rho;
     let cache = anchor.cache;
-    let solver = DeflatedArrowSolver::plain(&cache);
-    let inv = term
-        .materialize_joint_inverse(&cache, &solver)
-        .expect("dense joint inverse");
+    // #2144 — the majorized θ-adjoint production contracts, at full-basis probes
+    // where its Hutchinson outer products are exact. The dense
+    // `logdet_theta_adjoint_dense(.., exact_a = false, ..)` arm carries no ordered
+    // Beta--Bernoulli prior-majorizer channel (neither the local direct-z entry nor
+    // the shared-mass column pass), so under a rank-deficient whitening metric it
+    // read `analytic = 2.15e-14` against `fd = 1.4285` on atom 1's logit.
+    let (probes, sinv) = full_basis_probe_bundle(&cache);
     let gamma = term
-        .logdet_theta_adjoint_dense(&rho, &cache, &inv, false, false, None)
+        .logdet_theta_adjoint_from_probes(
+            &rho,
+            &cache,
+            &probes,
+            &sinv,
+            EvidenceOperator::Majorizer,
+            None,
+        )
         .expect("Gamma");
     let h = 1.0e-5;
     let fd_stratum = anchor.stratum;
@@ -1077,12 +1121,22 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_ordered_beta_bernoulli_l
     let term = anchor.term;
     let rho = anchor.rho;
     let cache = anchor.cache;
-    let solver = DeflatedArrowSolver::plain(&cache);
-    let inv = term
-        .materialize_joint_inverse(&cache, &solver)
-        .expect("dense joint inverse");
+    // #2144 — the majorized θ-adjoint production contracts, at full-basis probes
+    // where its Hutchinson outer products are exact. The dense
+    // `logdet_theta_adjoint_dense(.., exact_a = false, ..)` arm carries no ordered
+    // Beta--Bernoulli prior-majorizer channel (neither the local direct-z entry nor
+    // the shared-mass column pass), so under a rank-deficient whitening metric it
+    // read `analytic = 2.15e-14` against `fd = 1.4285` on atom 1's logit.
+    let (probes, sinv) = full_basis_probe_bundle(&cache);
     let gamma = term
-        .logdet_theta_adjoint_dense(&rho, &cache, &inv, false, false, None)
+        .logdet_theta_adjoint_from_probes(
+            &rho,
+            &cache,
+            &probes,
+            &sinv,
+            EvidenceOperator::Majorizer,
+            None,
+        )
         .expect("Gamma");
     let h = 1.0e-5;
     let fd_stratum = anchor.stratum;
@@ -1214,12 +1268,18 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_fd_on_deflated_fixture_2330() {
     let term = anchor.term;
     let rho = anchor.rho;
     let cache = anchor.cache;
-    let solver = DeflatedArrowSolver::plain(&cache);
-    let inv = term
-        .materialize_joint_inverse(&cache, &solver)
-        .expect("dense joint inverse");
+    // #2144 — the majorized θ-adjoint production contracts, at full-basis probes
+    // where its Hutchinson outer products are exact, as the three pins above.
+    let (probes, sinv) = full_basis_probe_bundle(&cache);
     let gamma = term
-        .logdet_theta_adjoint_dense(&rho, &cache, &inv, false, false, None)
+        .logdet_theta_adjoint_from_probes(
+            &rho,
+            &cache,
+            &probes,
+            &sinv,
+            EvidenceOperator::Majorizer,
+            None,
+        )
         .expect("Gamma_joint");
 
     let h = 1.0e-5;
