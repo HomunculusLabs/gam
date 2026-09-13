@@ -1892,6 +1892,34 @@ pub(crate) fn run_outer_with_plan(
                             }
                         }
                         Err(ArcError::ObjectiveFailed { message })
+                            if message == ARC_UNPROGRESSING_STALL_SENTINEL =>
+                        {
+                            // A stall window carried no progress since the last
+                            // one, so the run stopped at its incumbent without a
+                            // convergence claim; the terminal certificate judges
+                            // that point from a fresh evaluation (#2817).
+                            let exit = cost_stall_exit.lock().ok().and_then(|mut slot| slot.take());
+                            match exit {
+                                Some(exit) => {
+                                    let mut result = outer_result_with_gradient_norm(
+                                        exit.rho,
+                                        exit.value,
+                                        exit.iterations.max(arc_census.steps_taken()),
+                                        Some(exit.grad_norm),
+                                        false,
+                                        *the_plan,
+                                    );
+                                    result.origin =
+                                        OuterResultOrigin::ArcUnprogressingStallCheckpoint;
+                                    Ok(result)
+                                }
+                                None => Err(EstimationError::RemlOptimizationFailed(format!(
+                                    "ARC unprogressing-stall sentinel fired without a published \
+                                     best iterate ({context})"
+                                ))),
+                            }
+                        }
+                        Err(ArcError::ObjectiveFailed { message })
                             if message == ARC_CURVATURE_STATIONARY_SENTINEL =>
                         {
                             // #2817 — the bridge stopped ARC at a point its own

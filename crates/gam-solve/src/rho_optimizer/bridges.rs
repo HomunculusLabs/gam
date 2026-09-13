@@ -229,6 +229,16 @@ pub(crate) const ARC_INFEASIBLE_STALL_SENTINEL: &str = "OUTER_ARC_INFEASIBLE_STA
 /// curvature (#1082, #2612).
 pub(crate) const ARC_CURVATURE_STATIONARY_SENTINEL: &str = "OUTER_ARC_CURVATURE_STATIONARY";
 
+/// Sentinel returned when a filled cost-stall window on the dense-ARC route
+/// carries no progress since the previous one, so the search stops at its
+/// incumbent instead of spending another window it has no evidence can buy
+/// anything (#2817). See [`CostStallGuard::license_continuation`].
+///
+/// The runner maps this sentinel to a NON-converged checkpoint: the point is
+/// the trajectory's best feasible iterate, and whether it is stationary is the
+/// terminal certificate's question, answered from a fresh evaluation.
+pub(crate) const ARC_UNPROGRESSING_STALL_SENTINEL: &str = "OUTER_ARC_UNPROGRESSING_STALL";
+
 /// Verdict produced by folding one accepted outer iterate into
 /// [`CostStallGuard::observe`].
 pub(crate) enum CostStallVerdict {
@@ -735,6 +745,11 @@ pub(crate) struct CostStallGuard {
     /// next escape is not a replay of it. `None` before the first escape of a
     /// streak, and cleared wherever [`Self::stuck_escapes`] is replenished.
     incumbent_at_last_escape: Option<EscapeIncumbent>,
+    /// `(best value, best projected-gradient norm)` when the previous filled
+    /// window was licensed to continue a non-stationary stall on the ARC route;
+    /// `None` before the first. What the next licence is judged against (see
+    /// [`Self::license_continuation`]).
+    continuation_incumbent: Option<(f64, f64)>,
     /// #2241 — the most recent trusted accepted iterates `(ρ_i, f_i)` (finite
     /// cost, inner solve converged), newest last, capped at `window + 1`
     /// entries. This is the raw evidence for the probe-noise-floor flat
@@ -770,6 +785,7 @@ impl CostStallGuard {
             accepted_iters: 0,
             stuck_escapes: 0,
             incumbent_at_last_escape: None,
+            continuation_incumbent: None,
             recent: std::collections::VecDeque::new(),
             exit,
         }
@@ -821,6 +837,44 @@ impl CostStallGuard {
         self.incumbent_at_last_escape = Some(incumbent);
         self.no_improve_streak = 0;
         true
+    }
+
+    /// Whether a filled window at a non-stationary stall may be followed by
+    /// another one on the ARC route (#2817).
+    ///
+    /// This is the progress certificate that ends a stalled search instead of
+    /// an iteration count. A window is licensed when, since the previous
+    /// licensed window, the search bought either
+    ///
+    /// * resolved descent: the incumbent improved by more than the criterion's
+    ///   resolution `rel_tol·(1 + |V|)`, the same floor that decides whether one
+    ///   step counts as an improvement; or
+    /// * stationarity: the incumbent's projected gradient contracted.
+    ///
+    /// The first window is always licensed, since nothing has yet been measured
+    /// about what continuing buys. A window that bought neither has measured
+    /// that continuing buys nothing, and spending another one on the same
+    /// evidence is the grind this exists to end, so the run stops at its
+    /// incumbent and the terminal certificate judges that point.
+    ///
+    /// Termination follows without a count. The criterion is bounded below on
+    /// the declared domain, so resolved descent can be bought only finitely
+    /// often; every other licence strictly lowers the incumbent's projected
+    /// gradient, a floating-point value bounded below by zero, which can also
+    /// happen only finitely often.
+    pub(crate) fn license_continuation(&mut self) -> bool {
+        let licensed = match self.continuation_incumbent {
+            None => true,
+            Some((previous_value, previous_grad_norm)) => {
+                let resolution = self.rel_tol * (1.0 + self.best_value.abs());
+                previous_value - self.best_value > resolution
+                    || self.best_grad_norm < previous_grad_norm
+            }
+        };
+        if licensed {
+            self.continuation_incumbent = Some((self.best_value, self.best_grad_norm));
+        }
+        licensed
     }
 
     /// Record one trusted accepted iterate into the #2241 noise-evidence
@@ -2768,6 +2822,7 @@ impl OuterSecondOrderBridge<'_> {
             guard.observe_second_order(x, cost, projected_g_norm, inner_converged, hessian_psd)
         };
         let mut adjudicate_second_order = false;
+        let window_filled = !matches!(verdict, CostStallVerdict::Continue);
         match verdict {
             CostStallVerdict::Continue => {}
             CostStallVerdict::StuckKeepDescending {
@@ -2854,7 +2909,47 @@ impl OuterSecondOrderBridge<'_> {
                 return verdict;
             }
         }
+        // Neither test accepted the point, so continuing needs evidence that
+        // continuing buys something. Without it the run stops at its incumbent
+        // rather than spending windows until an iteration count runs out (#2817).
+        if window_filled {
+            return self.unprogressing_stall_exit();
+        }
         None
+    }
+
+    /// Stop the run at its incumbent when a filled stall window has bought
+    /// nothing since the previous one (#2817). See
+    /// [`CostStallGuard::license_continuation`].
+    fn unprogressing_stall_exit(&mut self) -> Option<ObjectiveEvalError> {
+        let guard = self.cost_stall.as_mut()?;
+        if guard.license_continuation() {
+            return None;
+        }
+        let best_rho = guard.best_rho.clone()?;
+        log::info!(
+            "[OUTER] ARC stopping at an unprogressing stall: the window filled again at \
+             value={:.6e} |Pg|={:.3e} after {} accepted outer iteration(s), with no resolved \
+             descent and no contraction of the projected gradient since the last one; the \
+             terminal certificate judges the incumbent (#2817).",
+            guard.best_value,
+            guard.best_grad_norm,
+            guard.accepted_iters,
+        );
+        if let Ok(mut slot) = guard.exit.lock() {
+            *slot = Some(CostStallExit {
+                rho: best_rho,
+                value: guard.best_value,
+                grad_norm: guard.best_grad_norm,
+                iterations: guard.accepted_iters,
+                converged: false,
+                noise_grad_bound: None,
+                probe_scale: None,
+            });
+        }
+        Some(ObjectiveEvalError::fatal(
+            ARC_UNPROGRESSING_STALL_SENTINEL.to_string(),
+        ))
     }
 
     /// The certificate's own acceptance test, applied online to the point ARC

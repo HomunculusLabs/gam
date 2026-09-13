@@ -642,6 +642,140 @@ fn a_residual_along_a_sub_resolution_negative_direction_keeps_the_search_moving_
     );
 }
 
+// ─── an unprogressing stall stops ────────────────────────────────────────────
+
+/// Drive a flat stall at `gradient` for two whole windows plus one evaluation
+/// and report what the bridge did, so the two stop fixtures below share one
+/// schedule.
+fn drive_two_flat_windows_2817(gradient: f64) -> (Vec<Result<f64, String>>, Option<CostStallExit>) {
+    drive_arc_oracle_2817(
+        array![0.5],
+        flatlined_2817(array![gradient], 2 * ARC_COST_STALL_WINDOW + 3),
+        array![[1.0]],
+        wide_box_2817(1),
+        Some(FLOOR_2817),
+    )
+}
+
+/// The stop both fixtures below must produce: nothing halts before the second
+/// window fills, and that window stops the run on the unprogressing sentinel
+/// at the incumbent, without a convergence claim.
+fn assert_stops_at_the_second_window_2817(
+    outcomes: &[Result<f64, String>],
+    published: Option<CostStallExit>,
+) {
+    let stop = 2 * ARC_COST_STALL_WINDOW;
+    assert_eq!(
+        outcomes.len(),
+        stop + 1,
+        "the run must stop exactly when its second window fills: {outcomes:?}"
+    );
+    assert!(
+        outcomes[..stop].iter().all(|outcome| outcome.is_ok()),
+        "nothing may stop before the second window fills: {outcomes:?}"
+    );
+    let message = outcomes[stop]
+        .clone()
+        .expect_err("the second unprogressing window must stop the run");
+    assert_eq!(
+        message, ARC_UNPROGRESSING_STALL_SENTINEL,
+        "the stop must be the unprogressing-stall sentinel, not an objective failure"
+    );
+    let exit = published.expect("the stop must publish the incumbent it stopped at");
+    assert!(!exit.converged, "an unprogressing stop makes no convergence claim");
+    assert_eq!(exit.rho, array![0.5]);
+    assert_eq!(exit.value, COST_2817);
+}
+
+/// A flat stall inside the guard's first-order band that the certificate does
+/// not accept stops when a second window has bought nothing (#2817).
+///
+/// `|g| = 1` sits inside the guard's score-relative band `min(1e-3·(1 + |V|), 1)`,
+/// so the guard calls the stall converged and defers to ARC; its Newton
+/// decrement `0.5` is 5000× the criterion's resolution, so the certificate's
+/// own rung refuses it. That is the split this issue's sleepstudy fit fell
+/// into: ARC kept spending windows at |Pg| = 8.6e-2 against a bound of 1.6e-3
+/// until its 200-iteration count ran out. The first window is licensed, since
+/// nothing about what continuing buys has been measured yet. The second bought
+/// no resolved descent and did not contract the residual, so the run stops.
+#[test]
+fn a_deferred_stall_that_buys_nothing_stops_at_its_second_window_2817() {
+    let (outcomes, published) = drive_two_flat_windows_2817(1.0);
+    assert_stops_at_the_second_window_2817(&outcomes, published);
+}
+
+/// The same stop for a residual above the guard's escape threshold, where the
+/// first window grants a stuck-stall escape instead of a deferral.
+///
+/// `|g| = 2` exceeds `1.5×` the score-relative band, so the first filled window
+/// is a stuck-stall escape. The escape bought nothing either, and the second
+/// window stops the run on the same licence.
+#[test]
+fn an_escape_that_buys_nothing_stops_at_its_second_window_2817() {
+    let (outcomes, published) = drive_two_flat_windows_2817(2.0);
+    assert_stops_at_the_second_window_2817(&outcomes, published);
+}
+
+/// NEGATIVE CONTROL: the same residual, and a criterion that bought a whole unit
+/// of decrease between the two windows. Resolved descent licenses the second
+/// window, so nothing stops.
+#[test]
+fn a_stall_that_bought_resolved_descent_between_windows_keeps_moving_2817() {
+    let flat = ARC_COST_STALL_WINDOW + 1;
+    let schedule: Vec<(f64, Array1<f64>)> = (0..2 * flat + 1)
+        .map(|index| {
+            let cost = if index < flat {
+                COST_2817
+            } else {
+                COST_2817 - 1.0
+            };
+            (cost, array![1.0])
+        })
+        .collect();
+    let (outcomes, _) = drive_arc_oracle_2817(
+        array![0.5],
+        schedule,
+        array![[1.0]],
+        wide_box_2817(1),
+        Some(FLOOR_2817),
+    );
+    assert!(
+        outcomes.iter().all(|outcome| outcome.is_ok()),
+        "a window that bought 10000 resolutions of descent must license the next one: \
+         {outcomes:?}"
+    );
+}
+
+/// NEGATIVE CONTROL: no resolved descent between the windows, but the
+/// incumbent's projected gradient halved. The search is buying stationarity,
+/// so the second window is licensed.
+///
+/// Each step improves by `1e-6`, below the resolution `1.001e-4`, so every step
+/// counts toward the window while the incumbent still moves and carries the
+/// gradient of the point that set it.
+#[test]
+fn a_stall_whose_residual_contracted_between_windows_keeps_moving_2817() {
+    let flat = ARC_COST_STALL_WINDOW + 1;
+    let schedule: Vec<(f64, Array1<f64>)> = (0..2 * flat + 1)
+        .map(|index| {
+            let gradient = if index < flat { 1.0 } else { 0.5 };
+            (COST_2817 - 1.0e-6 * index as f64, array![gradient])
+        })
+        .collect();
+    let (outcomes, _) = drive_arc_oracle_2817(
+        array![0.5],
+        schedule,
+        array![[1.0]],
+        wide_box_2817(1),
+        Some(FLOOR_2817),
+    );
+    assert!(
+        outcomes.iter().all(|outcome| outcome.is_ok()),
+        "a window that halved the incumbent's residual must license the next one: \
+         {outcomes:?}"
+    );
+}
+
 // ─── an exhausted budget refuses ─────────────────────────────────────────────
 
 /// An exhausted ARC budget is a refusal that carries its iteration ledger, not a
