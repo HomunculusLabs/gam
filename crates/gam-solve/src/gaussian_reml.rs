@@ -4487,10 +4487,13 @@ fn validate_reml_profile_residuals(
         let residual = unpenalized_residual + penalized_residual;
         let resolution = profile_residual_resolution(cache, ywy[output]);
         if !(residual.is_finite() && residual > resolution) {
-            return Err(EstimationError::InvalidInput(format!(
-                "Gaussian REML profiled residual {output} is not resolvably positive at rho={rho}: {residual} against its own arithmetic resolution {resolution} (gamma_m * 2 * ywy, ywy={}); the design interpolates its response, so the profiled dispersion has no finite value",
-                ywy[output]
-            )));
+            return Err(EstimationError::ProfiledResidualUnresolved {
+                output,
+                rho,
+                residual,
+                resolution,
+                ywy: ywy[output],
+            });
         }
     }
     Ok(())

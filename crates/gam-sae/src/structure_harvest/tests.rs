@@ -306,18 +306,24 @@ fn klein_r4_embedding_beats_the_unrestricted_torus_cover() {
 
 /// #2238 — a genuinely two-dimensional primary factor must not be pinned to
 /// the old one-dimensional circle. A full 8x8 planar grid is represented
-/// exactly by the flat 2-D candidate, while phase alone discards radius.
+/// exactly by the flat 2-D candidate, while phase alone discards radius. The
+/// grid carries a small deterministic observation perturbation: a sheet design
+/// reproduces the noiseless grid exactly, Gaussian REML refuses that candidate
+/// for having no finite profiled dispersion, and the race is then undecided
+/// rather than won (#2280).
 #[test]
 fn auto_primary_topology_selects_two_dimensional_factor_2238() {
     let side = 8usize;
-    let target = Array2::<f64>::from_shape_fn((side * side, 2), |(row, col)| {
+    let n = side * side;
+    let target = Array2::<f64>::from_shape_fn((n, 2), |(row, col)| {
         let i = row / side;
         let j = row % side;
-        if col == 0 {
+        let planted = if col == 0 {
             i as f64 - 0.5 * (side - 1) as f64
         } else {
             j as f64 - 0.5 * (side - 1) as f64
-        }
+        };
+        planted + (((row + 1) * (col + 3)) as f64).sin() / n as f64
     });
     let labels = vec![0usize; target.nrows()];
     let choices = discover_primary_atom_topologies(target.view(), &labels, 1, &[2])
@@ -2022,10 +2028,10 @@ fn birth_topology_race_d2_includes_and_selects_cylinder() {
     }
     // Observation noise, as every birth residual carries. The cylinder design reproduces the
     // noiseless image exactly, so its profiled residual is rounding and Gaussian REML refuses
-    // it ("the design interpolates its response"), handing the race to whichever candidate
-    // fits only approximately. A deterministic Gaussian perturbation at a twentieth of the
-    // channel scale gives every candidate a finite dispersion, and the cylinder has to win on
-    // evidence.
+    // it ("the design interpolates its response"), and the race is undecided
+    // (`birth_topology_race_d2_is_undecided_on_an_interpolated_target`). A deterministic
+    // Gaussian perturbation at a twentieth of the channel scale gives every candidate a finite
+    // dispersion, and the cylinder has to win on evidence.
     let mut state = 0x2280_2027_u64;
     let mut unit = || {
         state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -2051,6 +2057,58 @@ fn birth_topology_race_d2_includes_and_selects_cylinder() {
         "a cylindrical birth residual (periodic along one axis, linear along the \
          other) must win the Cylinder topology by evidence; got {:?}",
         cyl_fit.geometry.kind()
+    );
+}
+
+/// #2280 — a birth race whose best candidate reproduces the target exactly must not install a
+/// runner-up. The noiseless cylinder target is exactly the cylinder design on the template
+/// chart, so Gaussian REML refuses that candidate (its profiled dispersion has no finite value)
+/// while approximate candidates still score. The race returns the typed undecided verdict
+/// naming the cylinder instead of handing the birth to the Möbius band that scored next.
+#[test]
+fn birth_topology_race_d2_is_undecided_on_an_interpolated_target() {
+    use std::f64::consts::TAU;
+    let n = 120usize;
+    let coords = Array2::<f64>::from_shape_fn((n, 3), |(row, axis)| {
+        let t = row as f64 / n as f64;
+        match axis {
+            0 => t * 2.0,
+            1 => t * 3.0 - 1.5,
+            _ => (t * TAU).cos(),
+        }
+    });
+    let mut target = Array2::<f64>::zeros((n, 4));
+    for row in 0..n {
+        target[[row, 0]] = (TAU * coords[[row, 0]]).cos();
+        target[[row, 1]] = (TAU * coords[[row, 0]]).sin();
+        target[[row, 2]] = coords[[row, 1]];
+    }
+    let weights = Array1::<f64>::ones(n);
+    let verdict = race_birth_topology(coords.view(), target.view(), weights.view(), 2);
+    let description = match &verdict {
+        Ok(Some(fit)) => format!("installed {:?}", fit.geometry.kind()),
+        Ok(None) => "offered nothing".to_string(),
+        Err(error) => error.to_string(),
+    };
+    let undecided = match verdict {
+        Err(TopologyRaceError::Undecided(undecided)) => Some(undecided),
+        Ok(_) | Err(TopologyRaceError::Failed(_)) => None,
+    };
+    assert!(
+        undecided.is_some(),
+        "an interpolated target must leave the race undecided; the race {description}"
+    );
+    let undecided = undecided.expect("checked just above");
+    assert!(
+        undecided
+            .interpolating
+            .iter()
+            .any(|(kind, _)| *kind == AutoTopologyKind::Cylinder),
+        "the undecided verdict must name the cylinder that interpolates the target: {description}"
+    );
+    assert!(
+        description.starts_with("race undecided:"),
+        "the verdict renders as undecided: {description}"
     );
 }
 

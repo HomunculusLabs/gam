@@ -800,6 +800,23 @@ pub enum EstimationError {
     #[error("Invalid input: {0}")]
     InvalidInput(String),
 
+    /// Gaussian REML's profiled residual for output `output` does not clear its own arithmetic
+    /// resolution at `rho`: the design reproduces its response, so the profiled dispersion has
+    /// no finite value and no smoothing parameter can be scored (#2723). Typed rather than
+    /// carried as prose, because a caller comparing candidates must tell a candidate that fits
+    /// the response exactly from one that failed (#2280). It renders as the `InvalidInput` it
+    /// replaced, so no message a user or a test reads changes.
+    #[error(
+        "Invalid input: Gaussian REML profiled residual {output} is not resolvably positive at rho={rho}: {residual} against its own arithmetic resolution {resolution} (gamma_m * 2 * ywy, ywy={ywy}); the design interpolates its response, so the profiled dispersion has no finite value"
+    )]
+    ProfiledResidualUnresolved {
+        output: usize,
+        rho: f64,
+        residual: f64,
+        resolution: f64,
+        ywy: f64,
+    },
+
     #[error(
         "Inverse-link domain violation for {link}: eta={eta:?} is outside the supported \
          interval [{lower}, {upper}]"
@@ -1006,6 +1023,7 @@ impl EstimationError {
             | Self::GradientUnavailable { .. }
             | Self::LayoutError { .. }
             | Self::InvalidInput { .. }
+            | Self::ProfiledResidualUnresolved { .. }
             | Self::InverseLinkDomainViolation { .. }
             | Self::PirlsRowGeometryUnrepresentable { .. }
             | Self::ExactTweedieSeriesWorkLimit { .. }

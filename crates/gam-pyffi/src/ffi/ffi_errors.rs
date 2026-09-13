@@ -637,7 +637,9 @@ fn estimation_error_to_pyerr_with_message(err: &EstimationError, message: String
             IllConditionedError::new_err(message)
         }
         EstimationError::ModelIsIllConditioned { .. } => IllConditionedError::new_err(message),
-        EstimationError::InvalidInput(_) => InvalidInputError::new_err(message),
+        EstimationError::InvalidInput(_) | EstimationError::ProfiledResidualUnresolved { .. } => {
+            InvalidInputError::new_err(message)
+        }
         EstimationError::InverseLinkDomainViolation { .. }
         | EstimationError::PirlsRowGeometryUnrepresentable { .. }
         | EstimationError::LogStrengthDomainViolation { .. } => InvalidInputError::new_err(message),

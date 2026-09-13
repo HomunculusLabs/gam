@@ -88,6 +88,7 @@ use crate::manifold::{AssignmentMode, AtlasSeamKind, AtlasTopologyReadout, Graph
 use crate::migration_ledger::SaeMigrationLedger;
 use crate::null_sampler::{NULL_REPLICATES, coactivation_exceedance_for_pairs};
 use gam_linalg::faer_ndarray::FaerSvd;
+use gam_problem::EstimationError;
 use gam_runtime::warm_start::Fingerprinter;
 use gam_solve::gaussian_reml::{
     gaussian_reml_multi_shared_dispersion_closed_form,
@@ -3615,7 +3616,7 @@ fn fit_topology_candidate(
     spec: &TopologyCandidateSpec,
     target: ArrayView2<'_, f64>,
     weights: ArrayView1<'_, f64>,
-) -> Result<TopologyAutoFitEvidence<TopologyRaceFit>, String> {
+) -> Result<TopologyAutoFitEvidence<TopologyRaceFit>, CandidateFitRefusal> {
     if spec.geometry.kind() == &SaeAtomBasisKind::Torus {
         fit_torus_metric_candidate(spec, target, weights)
     } else if spec.kind == AutoTopologyKind::ConstantCurvature {
@@ -3654,7 +3655,7 @@ fn evaluate_constant_curvature_profile(
         Some(weights),
         None,
     )
-    .map_err(|error| ObjectiveEvalError::fatal(format!("curvature REML: {error}")))?;
+    .map_err(|error| ObjectiveEvalError::fatal_from(error).with_context("curvature REML"))?;
     let penalty_gradient = gaussian_reml_multi_shared_dispersion_penalty_gradient_from_fit(
         phi,
         target,
@@ -3687,7 +3688,7 @@ fn fit_constant_curvature_metric_candidate(
     spec: &TopologyCandidateSpec,
     target: ArrayView2<'_, f64>,
     weights: ArrayView1<'_, f64>,
-) -> Result<TopologyAutoFitEvidence<TopologyRaceFit>, String> {
+) -> Result<TopologyAutoFitEvidence<TopologyRaceFit>, CandidateFitRefusal> {
     let (lower, upper) = spec
         .geometry
         .constant_curvature_domain()?
@@ -3698,9 +3699,9 @@ fn fit_constant_curvature_metric_candidate(
         evaluate_constant_curvature_profile(spec, phi.view(), target, weights, kappa)
     };
     let lower_sample = evaluate(lower)
-        .map_err(|error| format!("constant-curvature lower-endpoint profile: {error}"))?;
+        .map_err(|error| profile_refusal("constant-curvature lower-endpoint profile", &error))?;
     let upper_sample = evaluate(upper)
-        .map_err(|error| format!("constant-curvature upper-endpoint profile: {error}"))?;
+        .map_err(|error| profile_refusal("constant-curvature upper-endpoint profile", &error))?;
     let lower_gradient = lower_sample.gradient[0];
     let upper_gradient = upper_sample.gradient[0];
     let span = upper - lower;
@@ -3751,7 +3752,8 @@ fn fit_constant_curvature_metric_candidate(
     if !(kappa.is_finite() && kappa >= lower && kappa <= upper) {
         return Err(format!(
             "constant-curvature optimizer returned {kappa} outside [{lower}, {upper}]"
-        ));
+        )
+        .into());
     }
     let fitted_spec = TopologyCandidateSpec::new(
         AutoTopologyKind::ConstantCurvature,
@@ -3882,7 +3884,7 @@ fn evaluate_torus_metric_profile(
         Some(weights),
         None,
     )
-    .map_err(|error| ObjectiveEvalError::fatal(format!("torus metric REML: {error}")))?;
+    .map_err(|error| ObjectiveEvalError::fatal_from(error).with_context("torus metric REML"))?;
     let penalty_gradient = gaussian_reml_multi_shared_dispersion_penalty_gradient_from_fit(
         phi,
         target,
@@ -3915,19 +3917,22 @@ fn optimize_torus_metric_coordinate(
     family: TorusMetricFamily,
     lower: f64,
     upper: f64,
-) -> Result<f64, String> {
+) -> Result<f64, CandidateFitRefusal> {
     if !(lower.is_finite() && upper.is_finite() && lower < upper) {
         return Err(format!(
             "torus reference-metric coordinate domain [{lower}, {upper}] is invalid"
-        ));
+        )
+        .into());
     }
     let evaluate = |coordinate: f64| {
         evaluate_torus_metric_profile(phi, target, weights, per_axis_order, family, coordinate)
     };
-    let lower_sample = evaluate(lower)
-        .map_err(|error| format!("{family:?} torus lower-endpoint profile: {error}"))?;
-    let upper_sample = evaluate(upper)
-        .map_err(|error| format!("{family:?} torus upper-endpoint profile: {error}"))?;
+    let lower_sample = evaluate(lower).map_err(|error| {
+        profile_refusal(&format!("{family:?} torus lower-endpoint profile"), &error)
+    })?;
+    let upper_sample = evaluate(upper).map_err(|error| {
+        profile_refusal(&format!("{family:?} torus upper-endpoint profile"), &error)
+    })?;
     let lower_gradient = lower_sample.gradient[0];
     let upper_gradient = upper_sample.gradient[0];
     let position_tolerance = f64::EPSILON.sqrt();
@@ -4016,7 +4021,8 @@ fn optimize_torus_metric_coordinate(
     if !(coordinate.is_finite() && coordinate >= lower && coordinate <= upper) {
         return Err(format!(
             "torus reference-metric optimizer returned invalid coordinate {coordinate} outside [{lower}, {upper}]"
-        ));
+        )
+        .into());
     }
     Ok(coordinate)
 }
@@ -4025,9 +4031,9 @@ fn fit_torus_metric_candidate(
     spec: &TopologyCandidateSpec,
     target: ArrayView2<'_, f64>,
     weights: ArrayView1<'_, f64>,
-) -> Result<TopologyAutoFitEvidence<TopologyRaceFit>, String> {
+) -> Result<TopologyAutoFitEvidence<TopologyRaceFit>, CandidateFitRefusal> {
     let SaeBasisResolution::TorusHarmonics { per_axis_order } = spec.geometry.resolution() else {
-        return Err("torus candidate does not carry a torus harmonic resolution".to_string());
+        return Err("torus candidate does not carry a torus harmonic resolution".into());
     };
     let evaluator = spec.geometry.build_evaluator()?;
     let (phi, _) = evaluator.evaluate(spec.coords.view())?;
@@ -4105,7 +4111,7 @@ fn fit_topology_candidate_at_fixed_metric(
     spec: &TopologyCandidateSpec,
     target: ArrayView2<'_, f64>,
     weights: ArrayView1<'_, f64>,
-) -> Result<TopologyAutoFitEvidence<TopologyRaceFit>, String> {
+) -> Result<TopologyAutoFitEvidence<TopologyRaceFit>, CandidateFitRefusal> {
     let n = target.nrows();
     let bundle = spec.geometry.evaluate_bundle(spec.coords.view())?;
     let phi = bundle.basis_values;
@@ -4116,13 +4122,15 @@ fn fit_topology_candidate_at_fixed_metric(
         return Err(format!(
             "fit_topology_candidate: basis rows {} != target rows {n}",
             phi.nrows()
-        ));
+        )
+        .into());
     }
     if weights.len() != n {
         return Err(format!(
             "fit_topology_candidate: weights length {} != target rows {n}",
             weights.len()
-        ));
+        )
+        .into());
     }
 
     // Validate the per-row reconstruction mass and reject a degenerate
@@ -4182,12 +4190,21 @@ fn fit_topology_candidate_at_fixed_metric(
         Some(weights),
         None,
     )
-    .map_err(|e| format!("fit_topology_candidate: REML evidence: {e:?}"))?;
+    .map_err(|error| {
+        let reason = format!("fit_topology_candidate: REML evidence: {error:?}");
+        match error {
+            EstimationError::ProfiledResidualUnresolved { .. } => {
+                CandidateFitRefusal::InterpolatesResponse(reason)
+            }
+            _ => CandidateFitRefusal::Failed(reason),
+        }
+    })?;
     let lambda = reml_fit.lambda;
     if !(lambda.is_finite() && lambda >= 0.0) {
         return Err(format!(
             "fit_topology_candidate: REML returned a non-finite/negative λ ({lambda})"
-        ));
+        )
+        .into());
     }
     let raw_reml = reml_fit.reml_score;
     if !raw_reml.is_finite() {
@@ -4529,7 +4546,7 @@ fn race_birth_topology(
     target: ArrayView2<'_, f64>,
     weights: ArrayView1<'_, f64>,
     d_k: usize,
-) -> Result<Option<TopologyRaceFit>, String> {
+) -> Result<Option<TopologyRaceFit>, TopologyRaceError> {
     // #2280 — proposal-time atlas prior (recognition-only, fail-open). The atlas is
     // built at the birth's OWN chart rank `d_k`, because the classification
     // dispatches on rank before it reads the invariant table (a circle and a
@@ -4552,7 +4569,9 @@ fn race_birth_topology(
     // image, which unrolls the fold. The challenger enters under the IDENTICAL
     // REML evidence and wins only when it scores strictly better; on a non-fold it
     // ties the linear seed and the default (template) is kept. Fail-safe: any
-    // embedding/race failure leaves the template winner untouched.
+    // embedding/race failure leaves the template winner untouched, but an undecided race is
+    // the verdict, because its interpolating candidate outranks every scored arm
+    // (`challenger_race`).
     //
     // GATED to a FLAT template verdict (EuclideanPatch): a genuinely curved born
     // atom (circle/torus/sphere/cylinder) already wins its specialized chart on the
@@ -4566,7 +4585,7 @@ fn race_birth_topology(
         Some(SaeAtomBasisKind::EuclideanPatch)
     );
     let intrinsic_winner = if template_is_sheet {
-        race_intrinsic_coords(target, weights, d_k, atlas.as_ref()).unwrap_or(None)
+        challenger_race(race_intrinsic_coords(target, weights, d_k, atlas.as_ref()))?
     } else {
         None
     };
@@ -4584,7 +4603,7 @@ fn race_birth_topology(
         weights,
         &all_rows,
     ) {
-        Ok(Some(specs)) => race_spec_set(specs, target, weights, atlas.as_ref()).unwrap_or(None),
+        Ok(Some(specs)) => challenger_race(race_spec_set(specs, target, weights, atlas.as_ref()))?,
         _ => None,
     };
     // Lower TK/REML cost wins (issue #396 sign convention). The arms are read in a fixed
@@ -4710,7 +4729,7 @@ fn race_template_coords(
     weights: ArrayView1<'_, f64>,
     d_k: usize,
     atlas: Option<&AtlasTopologyReadout>,
-) -> Result<Option<TopologyRaceOutcome>, String> {
+) -> Result<Option<TopologyRaceOutcome>, TopologyRaceError> {
     let base_specs = realize_birth_harmonic_orders(
         topology_candidates_for_dim(CandidateBases::with_ambient(coords, target), d_k)?,
         target,
@@ -4731,13 +4750,16 @@ fn race_template_coords(
     // is unchanged.
     if let Ok(Some(promoted)) = radial_promoted_specs(coords, target, d_k) {
         if !promoted.is_empty() {
-            // Try the promoted circle-vs-cylinder-vs-disk race; on ANY failure
-            // (a degenerate d=2 fit, an empty ranking) fall back to the base race
-            // so a radial-flagged birth never regresses relative to the un-promoted
-            // path — the promotion can only ever ADD adjudicated candidates.
-            if let Ok(Some(fit)) = realize_birth_harmonic_orders(promoted, target, weights)
-                .and_then(|promoted| race_spec_set(promoted, target, weights, atlas))
-            {
+            // Try the promoted circle-vs-cylinder-vs-disk race; on a failure (a
+            // degenerate d=2 fit, an empty ranking) fall back to the base race so a
+            // radial-flagged birth never regresses relative to the un-promoted path —
+            // the promotion can only ever ADD adjudicated candidates. An undecided
+            // promoted race names a candidate that reproduces the image exactly, which
+            // no base candidate can outrank, so it is the verdict.
+            let promoted_race = realize_birth_harmonic_orders(promoted, target, weights)
+                .map_err(TopologyRaceError::Failed)
+                .and_then(|promoted| race_spec_set(promoted, target, weights, atlas));
+            if let Some(fit) = challenger_race(promoted_race)? {
                 return Ok(Some(fit));
             }
         }
@@ -4757,7 +4779,7 @@ fn race_intrinsic_coords(
     weights: ArrayView1<'_, f64>,
     d_k: usize,
     atlas: Option<&AtlasTopologyReadout>,
-) -> Result<Option<TopologyRaceOutcome>, String> {
+) -> Result<Option<TopologyRaceOutcome>, TopologyRaceError> {
     // Folds are a d ≥ 2 story: a 1-D manifold has no ambient fold a geodesic
     // embedding could unroll that a line/circle basis does not already capture,
     // and the geodesic 1-D embedding of a closed loop is degenerate. Restricting
@@ -4847,12 +4869,105 @@ impl RankedTopology {
     }
 }
 
+/// Why one topology candidate produced no selectable evidence (#2280).
+///
+/// Gaussian REML refuses a candidate whose design reproduces the response exactly, because the
+/// profiled dispersion of an exact fit has no finite value. That refusal is not a loss: the
+/// candidate fits the data at least as well as every candidate that scored. Every other refusal
+/// says the candidate cannot be fit on this chart.
+#[derive(Clone, Debug)]
+enum CandidateFitRefusal {
+    InterpolatesResponse(String),
+    Failed(String),
+}
+
+impl std::fmt::Display for CandidateFitRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InterpolatesResponse(reason) | Self::Failed(reason) => f.write_str(reason),
+        }
+    }
+}
+
+impl From<String> for CandidateFitRefusal {
+    fn from(reason: String) -> Self {
+        Self::Failed(reason)
+    }
+}
+
+impl From<&str> for CandidateFitRefusal {
+    fn from(reason: &str) -> Self {
+        Self::Failed(reason.to_string())
+    }
+}
+
+/// A metric profile's evaluation failure as a candidate refusal, keeping Gaussian REML's typed
+/// verdict that the response is interpolated.
+fn profile_refusal(context: &str, error: &ObjectiveEvalError) -> CandidateFitRefusal {
+    let reason = format!("{context}: {error}");
+    match error.downcast_ref::<EstimationError>() {
+        Some(EstimationError::ProfiledResidualUnresolved { .. }) => {
+            CandidateFitRefusal::InterpolatesResponse(reason)
+        }
+        _ => CandidateFitRefusal::Failed(reason),
+    }
+}
+
+/// A topology race that cannot name a winner (#2280): a candidate reproduced the response
+/// exactly and was refused, so no candidate that scored may be installed in its place.
+#[derive(Clone, Debug, PartialEq)]
+struct UndecidedTopologyRace {
+    /// Every candidate refused for interpolating the response, with Gaussian REML's reason.
+    interpolating: Vec<(AutoTopologyKind, String)>,
+}
+
+/// Why a topology race returned no fit.
+#[derive(Clone, Debug)]
+enum TopologyRaceError {
+    /// A candidate fits the response exactly, so the race refuses to install a runner-up.
+    Undecided(UndecidedTopologyRace),
+    /// The race could not be run: a chart, a menu or the selector failed.
+    Failed(String),
+}
+
+impl std::fmt::Display for TopologyRaceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Undecided(undecided) => {
+                write!(f, "race undecided:")?;
+                for (kind, reason) in &undecided.interpolating {
+                    write!(f, " {name} refused: {reason};", name = kind.display_name())?;
+                }
+                Ok(())
+            }
+            Self::Failed(reason) => f.write_str(reason),
+        }
+    }
+}
+
+impl From<String> for TopologyRaceError {
+    fn from(reason: String) -> Self {
+        Self::Failed(reason)
+    }
+}
+
+/// A challenger arm's race, failing open on a failure but never on an undecided verdict: a
+/// challenger's candidate that reproduces the response exactly outranks every scored arm.
+fn challenger_race(
+    race: Result<Option<TopologyRaceOutcome>, TopologyRaceError>,
+) -> Result<Option<TopologyRaceOutcome>, TopologyRaceError> {
+    match race {
+        Err(TopologyRaceError::Failed(_)) => Ok(None),
+        other => other,
+    }
+}
+
 fn race_spec_set(
     specs: Vec<TopologyCandidateSpec>,
     target: ArrayView2<'_, f64>,
     weights: ArrayView1<'_, f64>,
     atlas: Option<&AtlasTopologyReadout>,
-) -> Result<Option<TopologyRaceOutcome>, String> {
+) -> Result<Option<TopologyRaceOutcome>, TopologyRaceError> {
     if specs.is_empty() {
         return Ok(None);
     }
@@ -4923,15 +5038,31 @@ fn race_spec_set(
     // FIXED-curvature fit: a κ nobody estimated. The key now arrives the only
     // honest way, as a real entry in `specs` above whose plan carries a fitted
     // `kappa`, so the loop below indexes it like any other candidate.
+    // A candidate whose design reproduces the target exactly is refused for having no finite
+    // evidence, yet it fits at least as well as every candidate that scored. The race must not
+    // install a runner-up in its place, so any such refusal makes the verdict undecided.
+    let mut interpolating: Vec<(AutoTopologyKind, String)> = Vec::new();
     let ranked = select_topology_with_fit(&selector, |kind| {
         let spec = by_kind.get(&kind).ok_or_else(|| {
-            format!(
+            CandidateFitRefusal::Failed(format!(
                 "race_birth_topology: no realized candidate for fused topology {:?}",
                 kind.display_name()
-            )
+            ))
         })?;
-        fit_topology_candidate(spec, target, weights)
-    })?;
+        match fit_topology_candidate(spec, target, weights) {
+            Err(CandidateFitRefusal::InterpolatesResponse(reason)) => {
+                interpolating.push((kind, reason.clone()));
+                Err(CandidateFitRefusal::InterpolatesResponse(reason))
+            }
+            other => other,
+        }
+    });
+    if !interpolating.is_empty() {
+        return Err(TopologyRaceError::Undecided(UndecidedTopologyRace {
+            interpolating,
+        }));
+    }
+    let ranked = ranked?;
     let winner = ranked
         .winner()
         .ok_or_else(|| "race_birth_topology: empty ranking".to_string())?;
@@ -6602,13 +6733,15 @@ fn born_atom(
     // win, seed the born atom from the winning evaluator + penalized decoder; on
     // no realizable candidate (cluster-null d_k, degenerate image), fall back to
     // the template basis (warm inheritance), and let the post-fit curved-vs-linear
-    // rung adjudicate as before.
+    // rung adjudicate as before. An undecided race refuses the birth with its reason
+    // rather than seeding a runner-up.
     let raced = race_birth_topology(
         template_coords.view(),
         birth_target.view(),
         weights.view(),
         template.latent_dim(),
-    )?;
+    )
+    .map_err(|error| error.to_string())?;
     // The born atom + its coordinate block. The race-won path carries the winning
     // topology's coordinate block (dimension-matched to its evaluator, manifold
     // set to the winning chart); the fallback path reuses the template block.

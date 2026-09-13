@@ -135,6 +135,19 @@ fn chart_of(seed: &Array3<f64>, atom_idx: usize) -> Array2<f64> {
     out
 }
 
+/// The planted rows plus a deterministic observation perturbation of at most `1/n` per
+/// coordinate. A sheet decoder on the unrolled chart reproduces the noiseless roll exactly,
+/// so Gaussian REML refuses that candidate for having no finite profiled dispersion and the
+/// automatic race is undecided rather than won (#2280). The perturbation keeps it scoreable
+/// without moving any chart the roll's extent could see.
+fn observed(mut z: Array2<f64>) -> Array2<f64> {
+    let n = z.nrows();
+    for ((row, column), value) in z.indexed_iter_mut() {
+        *value += (((row + 1) * (column + 3)) as f64).sin() / n as f64;
+    }
+    z
+}
+
 /// END-TO-END PRIMARY (#2280 guardrail, fable-mobius Q2): the FULL auto-seed path
 /// — discover → race → resolve_auto_primary_atoms → minimal_seed — must install the
 /// UNFOLDED geodesic chart as the final seed coordinates, not a PCA-folded rebuild.
@@ -143,7 +156,7 @@ fn chart_of(seed: &Array3<f64>, atom_idx: usize) -> Array2<f64> {
 /// chain, not just the primitive. Asserts the FINAL seed's held-out R² clears 0.99.
 #[test]
 fn swiss_roll_auto_seed_propagates_unfolded_coords_end_to_end() {
-    let z = swiss_roll_grid();
+    let z = observed(swiss_roll_grid());
     let report = build_sae_minimal_seed(SaeMinimalSeedRequest {
         target: z.view(),
         atom_basis: vec!["auto".to_string()],
@@ -361,7 +374,7 @@ fn planted_swiss_roll_is_a_sheet_with_unrolled_coordinates_2280() {
         }
     }
 
-    let z = super::tests_topology_fixtures::swiss_roll(80, 16);
+    let z = observed(super::tests_topology_fixtures::swiss_roll(80, 16));
     let readout = observe_atlas_topology(
         &LocalAtlas::build(z.view(), LocalAtlasConfig::balanced(z.nrows(), 2))
             .expect("the planted roll's atlas builds"),
