@@ -994,9 +994,8 @@ pub(crate) fn evidence_row_recovers_intrinsic_dimension_flat_block_without_gauge
 /// "ρ values" that straddle the bare floor. Without the hysteresis band the
 /// positive near-floor eigenvalue would be counted as deflated on one side
 /// (`λ ≤ floor`) and live on the other (`λ > floor`), flipping the per-row
-/// count and tripping the quotient-dimension guard
-/// (`record_criterion_gauge_deflation_count`) mid-optimization — the slow
-/// seed/homotopy cascade. The genuine indefinite direction (the true
+/// count, and with it the unit-stiffness substitution along that direction,
+/// between two neighbouring evaluations. The genuine indefinite direction (the true
 /// quotient null) is deflated on BOTH sides, so the count is stable.
 #[test]
 pub(crate) fn evidence_row_spectral_deflation_count_is_stable_across_the_cutoff() {

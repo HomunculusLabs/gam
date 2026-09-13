@@ -1042,9 +1042,6 @@ impl SaeManifoldOuterObjective {
         let init_rho = init_rho
             .for_assignment(term.assignment.mode)
             .with_curvature(Self::curvature_seed(&term));
-        term.expected_criterion_gauge_deflated_directions = None;
-        term.criterion_gauge_deflation_reanchors = 0;
-        term.criterion_gauge_deflation_last_delta_sign = 0;
         term.dictionary_cocollapse_reseeds = 0;
         term.best_cocollapse_incumbent = None;
         term.structural_cocollapse_reseeds = 0;

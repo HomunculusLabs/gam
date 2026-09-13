@@ -407,12 +407,6 @@ impl SaeManifoldTerm {
         // ONE gate-frozen scope, so every objective value compared below belongs to
         // the same objective (#2228 Zeno ratchet).
         let gates_were_frozen = self.freeze_collapse_prevention_gates();
-        // The gauge-deflation count is recorded ONCE per evaluation, for the cache
-        // the evaluation ends on. The re-anchor guard compares quotient dimensions
-        // ACROSS ρ; the intermediate caches a descent pass converges through are
-        // never compared, and charging their flicker to the per-optimization
-        // reversal budget exhausts it on evaluations that merely descended.
-        let mut final_gauge_deflated_directions: Option<usize> = None;
         let evidence_root = loop {
             let cache = match self.converge_inner_for_undamped_logdet_gate_frozen(
                 target,
@@ -431,7 +425,6 @@ impl SaeManifoldTerm {
                 Ok(cache) => cache,
                 Err(err) => break Err(SaeCriterionError::from(err)),
             };
-            final_gauge_deflated_directions = Some(cache.gauge_deflated_directions);
             loss.criterion_gauge_deflated_directions = cache.gauge_deflated_directions;
             // #2330 Phase-2: rank the EXACT observed-information Laplace term ½log|A|
             // (A = B + ΔC = ∇²_θθ L), not the majorizer surrogate ½log|B|. One
@@ -480,9 +473,6 @@ impl SaeManifoldTerm {
             }
         };
         self.streaming_gates_frozen = gates_were_frozen;
-        if let Some(count) = final_gauge_deflated_directions {
-            self.record_criterion_gauge_deflation_count(count, refine_progress_extension)?;
-        }
         let (cache, log_det) = evidence_root?;
 
         // 3. Smoothing-penalty Occam term `−½·Σ_k r_k·rank(S_k)·log λ_smooth`
@@ -578,157 +568,6 @@ impl SaeManifoldTerm {
             value
         };
         Ok((v, loss, cache))
-    }
-
-    /// The #1037 quotient-dimension invariant: a Laplace normalizer `½log|H|` is
-    /// only comparable across ρ at a COMMON quotient (gauge-deflation) dimension.
-    /// The first observation pins the expected count; a later match is a no-op.
-    ///
-    /// A later observation that DIFFERS is, under the K>1 fit, a LEGITIMATE
-    /// quotient-dimension event — an atom born, reseeded (the #976 collapse
-    /// guards), or rank-reduced moves the number of gauge-flat rows. Because a
-    /// deflated direction is lifted to unit stiffness and contributes the
-    /// ρ-independent `log 1 = 0` to the evidence, re-anchoring the comparison to
-    /// the new dimension is exactly evidence-preserving and keeps every future
-    /// cross-ρ comparison consistent — the principled response, not an abort.
-    ///
-    /// The genuine pathology the guard still catches is a count that NEVER
-    /// STABILIZES: re-anchors are bounded by the per-atom structural-event budget
-    /// (`k·(reseed_budget+1)+1`), and a runaway quotient dimension past that
-    /// bound refuses loudly. This supersedes the prior strict-constant guard and
-    /// its ±1 flicker band (#1117) at root — the band was masking exactly the
-    /// legitimate K>1 dimension changes this re-anchoring now handles.
-    /// `re_anchor == false` (value-probe / line-search lanes): the transient
-    /// count is READ-ONLY — the anchor, the drift-direction memory, and the
-    /// reversal budget are all left untouched. #2253/#1037: the criterion's
-    /// quotient dimension may only move at ACCEPTED iterates; a probe that
-    /// re-anchored mid-line-search let the bookkeeping dimension flicker inside
-    /// a Wolfe bracket (a live discontinuity generator between two probes of
-    /// the same search), and a bracket of probes could burn the reversal budget
-    /// that exists to catch a genuinely oscillating ACCEPTED trajectory. Each
-    /// deflated direction contributes the ρ-independent `log 1 = 0` to
-    /// `½log|H|`, so skipping the probe-lane anchor move never changes any
-    /// probe's value.
-    pub(crate) fn record_criterion_gauge_deflation_count(
-        &mut self,
-        count: usize,
-        re_anchor: bool,
-    ) -> Result<(), String> {
-        if !re_anchor {
-            return Ok(());
-        }
-        match self.expected_criterion_gauge_deflated_directions {
-            Some(expected) if expected == count => Ok(()),
-            Some(expected) => {
-                // A change in the gauge-deflation count between two evidence
-                // factorizations is a legitimate quotient-dimension event under
-                // the K>1 fit: an atom can be born, reseeded (the #976 collapse
-                // guards), or rank-reduced across the ρ-walk, and each such event
-                // moves the number of gauge-flat rows. The #1037 invariant is
-                // NOT "the count never changes" — it is "two Laplace normalizers
-                // are only comparable at a COMMON quotient dimension". The
-                // principled response to a legitimate change is therefore to
-                // RE-ANCHOR the comparison to the new dimension (so every future
-                // cross-ρ comparison within the optimization is consistent), not
-                // to abort the fit. This is exactly evidence-preserving: each
-                // gauge-deflated direction is lifted to unit stiffness and
-                // contributes the ρ-independent `log 1 = 0` to `½log|H|`, so the
-                // converged criterion value is identical whether a given row is
-                // counted as deflated or not — only the BOOKKEEPING dimension
-                // must agree across a comparison, and re-anchoring restores that.
-                //
-                // The genuine pathology the guard must still catch is a count
-                // that NEVER STABILIZES — an OSCILLATING quotient dimension that
-                // re-anchors without converging, signalling a truly ill-posed
-                // evidence surface. But the deflation count is NOT a discrete
-                // dictionary-level event count: it is the per-ROW-summed number of
-                // near-null evidence directions across all N rows (#1217). On real
-                // K≥2 activations it is an O(N) quantity that drifts SMOOTHLY and
-                // monotonically as the conditioning improves over the ρ-walk
-                // (e.g. 171→156→…→113 as smoothing increases) — a benign,
-                // evidence-neutral change (each deflated direction contributes the
-                // ρ-independent `log 1 = 0` to `½log|H|`, so re-anchoring never
-                // moves the criterion value). Charging such a monotone drift
-                // against a `k`-sized "structural event" budget was wrong: it
-                // counts threshold crossings of a continuous per-row quantity, not
-                // atom births/reseeds, so the budget tripped on a perfectly healthy
-                // converging K=2 fit (#1217 regression from the #1189/#1190
-                // basin-escape fixes, which shifted which rows sit near the
-                // deflation floor).
-                //
-                // The principled discriminator is DIRECTION REVERSALS: a count
-                // that drifts one way and settles is benign; a count that bounces
-                // up and down without settling is the oscillating-quotient
-                // pathology. We therefore charge the re-anchor budget ONLY on a
-                // reversal of the change direction, and size the budget by the
-                // number of distinct dictionary structural events (births/reseeds)
-                // that can each legitimately flip the drift direction. A monotone
-                // drift of any length re-anchors freely (it is consistently
-                // re-anchored and evidence-neutral); a genuinely oscillating count
-                // exhausts the reversal budget and refuses loudly.
-                let delta_sign: i8 = if count > expected { 1 } else { -1 };
-                let is_reversal = self.criterion_gauge_deflation_last_delta_sign != 0
-                    && delta_sign != self.criterion_gauge_deflation_last_delta_sign;
-                self.criterion_gauge_deflation_last_delta_sign = delta_sign;
-                // A reversal alone is NOT the pathology — a BOUNDED flicker of a
-                // few rows crossing the near-null deflation floor reverses
-                // direction every step yet is the discretization jitter of a
-                // continuous evidence spectrum, fully evidence-neutral (each
-                // deflated direction contributes `log 1 = 0` either way). The
-                // genuine "quotient dimension not stabilizing" pathology is a
-                // WIDE-amplitude oscillation: a substantial FRACTION of the
-                // dimension flipping back and forth. The count is an O(N) per-row
-                // sum, so the discriminator must be the reversal AMPLITUDE
-                // relative to the dimension level, not the bare reversal. Charge
-                // the reversal budget only when a reversal's step exceeds a
-                // relative jitter band; a converged-but-flickering fit (e.g.
-                // 150<->147 on N=200, ~2% of the level) re-anchors freely while a
-                // true runaway (e.g. 9<->2, ~80% of the level) still trips every
-                // reversal and exhausts the budget. This was the second #795 root
-                // cause: the single-planted-circle fit's per-row count flickers
-                // 150<->147 near the deflation floor, so the bare-reversal guard
-                // refused the simplest possible fit — with the isometry gauge ON
-                // *or* OFF — long before the gauge magnitude mattered.
-                let amplitude = expected.abs_diff(count);
-                let level = expected.max(count);
-                let jitter_band = (level / 4).max(2);
-                if is_reversal && amplitude > jitter_band {
-                    self.criterion_gauge_deflation_reanchors += 1;
-                }
-                let reversal_budget = self
-                    .k_atoms()
-                    .saturating_mul(
-                        SAE_ATOM_COLLAPSE_RESEED_BUDGET
-                            + SAE_DICTIONARY_COCOLLAPSE_RESEED_BUDGET
-                            + 1,
-                    )
-                    .saturating_add(1);
-                if self.criterion_gauge_deflation_reanchors > reversal_budget {
-                    return Err(format!(
-                        "SaeManifoldTerm::penalized_quasi_laplace_criterion: row-gauge criterion deflation count \
-                         oscillated (reversed direction {} times, last {expected}->{count}) within \
-                         one optimization, exceeding the {reversal_budget}-reversal budget for {} \
-                         atoms; the quotient dimension is not stabilizing, refusing to compare \
-                         Laplace normalizers",
-                        self.criterion_gauge_deflation_reanchors,
-                        self.k_atoms()
-                    ));
-                }
-                log::debug!(
-                    "SaeManifoldTerm::penalized_quasi_laplace_criterion: per-row criterion deflation count changed \
-                     {expected}->{count} (a benign per-row conditioning drift across the ρ-walk; \
-                     reversal {}/{reversal_budget}); re-anchoring the Laplace normalizer comparison \
-                     to the new dimension",
-                    self.criterion_gauge_deflation_reanchors
-                );
-                self.expected_criterion_gauge_deflated_directions = Some(count);
-                Ok(())
-            }
-            None => {
-                self.expected_criterion_gauge_deflated_directions = Some(count);
-                Ok(())
-            }
-        }
     }
 
     pub(crate) fn is_undamped_evidence_row_non_pd(err: &ArrowSchurError) -> bool {

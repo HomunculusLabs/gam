@@ -1397,9 +1397,6 @@ fn over_tiling_physical_excision_reduces_k_toward_one() {
     term.border_hbb_workspace = Array2::<f64>::ones((3, 3));
     term.decoder_repulsion_gate = Some(vec![(0, 1, 1.0)]);
     term.streaming_gates_frozen = true;
-    term.expected_criterion_gauge_deflated_directions = Some(7);
-    term.criterion_gauge_deflation_reanchors = 2;
-    term.criterion_gauge_deflation_last_delta_sign = -1;
     term.dictionary_cocollapse_reseeds = 3;
     term.structural_cocollapse_reseeds = 4;
     let accepted_glue = |a: usize, b: usize| MoveRecord {
@@ -1460,9 +1457,6 @@ fn over_tiling_physical_excision_reduces_k_toward_one() {
     assert_eq!(term.border_hbb_workspace.dim(), (0, 0));
     assert!(term.decoder_repulsion_gate.is_none());
     assert!(!term.streaming_gates_frozen);
-    assert_eq!(term.expected_criterion_gauge_deflated_directions, None);
-    assert_eq!(term.criterion_gauge_deflation_reanchors, 0);
-    assert_eq!(term.criterion_gauge_deflation_last_delta_sign, 0);
     assert_eq!(term.dictionary_cocollapse_reseeds, 0);
     assert_eq!(term.structural_cocollapse_reseeds, 0);
     // The two survivors each now cover a half-circle and STILL glue — the round

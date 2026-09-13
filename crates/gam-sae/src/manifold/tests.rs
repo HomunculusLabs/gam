@@ -116,7 +116,7 @@ pub(crate) fn phi_eta_one_reproduces_current_atom_bases_bit_for_bit() {
 }
 
 /// Minimal K=1 term for direct unit tests of term-state machinery that does
-/// not depend on a real fit (e.g. the gauge-deflation count guard).
+/// not depend on a real fit.
 pub(crate) fn trivial_k1_euclidean_term() -> SaeManifoldTerm {
     let n = 4usize;
     let p = 3usize;
@@ -141,142 +141,6 @@ pub(crate) fn trivial_k1_euclidean_term() -> SaeManifoldTerm {
     );
     SaeManifoldTerm::new(vec![atom], assignment)
         .expect("term fixture: every atom's row count matches the assignment's")
-}
-
-/// #795 (second root cause) — a BOUNDED low-amplitude flicker of the per-row
-/// gauge-deflation count is benign jitter, NOT the oscillating-quotient
-/// pathology, so it must re-anchor freely no matter how many times it reverses.
-///
-/// The count is an O(N) per-row sum of near-null evidence directions; a handful
-/// of rows sitting right at the deflation floor cross it back and forth as the
-/// ρ-walk nudges the conditioning, reversing direction every step while staying
-/// within a few of a large level (the single-planted-circle fit flickers
-/// 150<->147 on N=200). Each such change is evidence-neutral (a deflated
-/// direction contributes the ρ-independent `log 1 = 0` to `½log|H|` either way),
-/// so re-anchoring is exactly correct and the fit must not be refused. The
-/// bare-reversal guard charged the budget on every one of these and aborted the
-/// simplest possible manifold-SAE fit (isometry on OR off) — this pins that a
-/// sustained small-amplitude flicker survives indefinitely.
-#[test]
-pub(crate) fn criterion_gauge_deflation_count_bounded_flicker_reanchors_freely() {
-    let mut term = trivial_k1_euclidean_term();
-    // Pin the expected count at a realistic large level (like the circle fit).
-    term.record_criterion_gauge_deflation_count(150, true)
-        .unwrap();
-    // A sustained 150<->147 flicker reverses direction on EVERY step — far more
-    // reversals than the K=1 budget of 6 — yet the amplitude (3) is well inside
-    // the relative jitter band (150/4 = 37), so none charge the budget.
-    let flicker = [
-        147usize, 150, 147, 150, 147, 150, 147, 150, 147, 150, 147, 150, 147, 150,
-    ];
-    for &c in &flicker {
-        term.record_criterion_gauge_deflation_count(c, true)
-            .expect("a bounded low-amplitude flicker must re-anchor, never abort");
-    }
-    assert_eq!(
-        term.criterion_gauge_deflation_reanchors, 0,
-        "a flicker inside the relative jitter band charges no reversals"
-    );
-    assert_eq!(
-        term.expected_criterion_gauge_deflated_directions,
-        Some(150),
-        "the comparison re-anchors to the latest observed count"
-    );
-
-    // But a WIDE-amplitude oscillation at the SAME level is still the runaway
-    // pathology and must still be refused: 150<->40 swings ~73% of the level.
-    let mut term2 = trivial_k1_euclidean_term();
-    term2
-        .record_criterion_gauge_deflation_count(150, true)
-        .unwrap();
-    let mut errored = false;
-    for &c in &[
-        40usize, 150, 40, 150, 40, 150, 40, 150, 40, 150, 40, 150, 40, 150,
-    ] {
-        if term2
-            .record_criterion_gauge_deflation_count(c, true)
-            .is_err()
-        {
-            errored = true;
-            break;
-        }
-    }
-    assert!(
-        errored,
-        "a wide-amplitude oscillation must still exhaust the reversal budget"
-    );
-}
-
-/// The #1037 quotient-dimension guard, with #1217 oscillation semantics: the
-/// recorded count of gauge-deflated evidence directions need not be CONSTANT —
-/// it is a per-ROW-summed O(N) count of near-null evidence directions that
-/// drifts smoothly across the ρ-walk, and every change is evidence-preserving (a
-/// deflated direction contributes `log 1 = 0` to `½log|H|` either way). The
-/// guard RE-ANCHORS the comparison to the new dimension instead of aborting. A
-/// MONOTONE drift of any length is benign (the conditioning is just improving),
-/// so it never trips the budget; the genuine pathology the guard must still
-/// catch is an OSCILLATING count — repeated direction reversals that never
-/// settle — which is refused loudly past the reversal budget.
-#[test]
-pub(crate) fn criterion_gauge_deflation_count_guard_reanchors_then_rejects_runaway() {
-    let mut term = trivial_k1_euclidean_term();
-    assert!(term.expected_criterion_gauge_deflated_directions.is_none());
-
-    // First observation pins the expected count (high, like a real K=2 walk
-    // that starts with many near-null evidence directions).
-    term.record_criterion_gauge_deflation_count(60, true)
-        .unwrap();
-    assert_eq!(term.expected_criterion_gauge_deflated_directions, Some(60));
-
-    // A matching later observation is a no-op (still Ok, count unchanged).
-    term.record_criterion_gauge_deflation_count(60, true)
-        .unwrap();
-    assert_eq!(term.expected_criterion_gauge_deflated_directions, Some(60));
-
-    // A MONOTONE drift (the #1217 benign case — a per-row conditioning count
-    // shrinking across the ρ-walk) re-anchors freely without charging the budget,
-    // no matter how many steps it takes. This is exactly the real-OLMo K=2
-    // signature (171→…→113) that the old `k`-event budget wrongly tripped on.
-    for c in [50usize, 40, 33, 21, 12, 9, 6, 4, 3, 2] {
-        term.record_criterion_gauge_deflation_count(c, true)
-            .unwrap();
-        assert_eq!(term.expected_criterion_gauge_deflated_directions, Some(c));
-    }
-    assert_eq!(
-        term.criterion_gauge_deflation_reanchors, 0,
-        "monotone drift charges no reversals"
-    );
-
-    // An OSCILLATING count (up/down/up/down…) IS the runaway pathology. K=1 ⇒
-    // reversal budget = 1·(RESEED_BUDGET + 1) + 1 = 6. Each direction reversal
-    // charges one; a sustained oscillation exhausts the budget and refuses.
-    let mut last_ok = 2usize;
-    let oscillation = [9usize, 2, 9, 2, 9, 2, 9, 2, 9, 2, 9, 2, 9, 2];
-    let mut errored = false;
-    for &c in &oscillation {
-        match term.record_criterion_gauge_deflation_count(c, true) {
-            Ok(()) => {
-                last_ok = c;
-            }
-            Err(err) => {
-                assert!(
-                    err.contains("not stabilizing") && err.contains("oscillated"),
-                    "guard must report the oscillating quotient dimension explicitly; got: {err}"
-                );
-                // On the refusal the expected count is NOT re-anchored.
-                assert_eq!(
-                    term.expected_criterion_gauge_deflated_directions,
-                    Some(last_ok)
-                );
-                errored = true;
-                break;
-            }
-        }
-    }
-    assert!(
-        errored,
-        "a sustained oscillation must exceed the reversal budget and error"
-    );
 }
 
 /// `try_assignments_row` may only pin the K==1 assignment to `1.0` for
@@ -2999,12 +2863,6 @@ pub(crate) fn sae_value_probe_refusal_classification_is_inner_only() {
     assert!(
         !SaeManifoldOuterObjective::is_recoverable_value_probe_refusal(
             "SaeManifoldTerm::penalized_quasi_laplace_criterion: ArrowFactorCache::arrow_log_det returned None (undamped joint Hessian log-det unavailable for the Laplace normaliser)"
-        )
-    );
-    assert!(
-        !SaeManifoldOuterObjective::is_recoverable_value_probe_refusal(
-            "SaeManifoldTerm::penalized_quasi_laplace_criterion: row-gauge criterion deflation count re-anchored \
-                 4 times within one optimization; the quotient dimension is not stabilizing"
         )
     );
 }

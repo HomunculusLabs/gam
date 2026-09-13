@@ -174,7 +174,6 @@ struct RankChargeArm {
     collapse_events: usize,
     dict_cocollapse_reseeds: usize,
     struct_cocollapse_reseeds: usize,
-    evidence_reanchors: usize,
 }
 
 fn rank_charge_zoo_arm(train: &Array2<f64>, test: &Array2<f64>) -> RankChargeArm {
@@ -220,7 +219,6 @@ fn rank_charge_zoo_arm(train: &Array2<f64>, test: &Array2<f64>) -> RankChargeArm
         collapse_events: fitted.term.collapse_events().len(),
         dict_cocollapse_reseeds: fitted.term.dictionary_cocollapse_reseeds,
         struct_cocollapse_reseeds: fitted.term.structural_cocollapse_reseeds,
-        evidence_reanchors: fitted.term.criterion_gauge_deflation_reanchors,
     }
 }
 
@@ -235,7 +233,7 @@ fn zz_rank_charge_zoo_micro_2022() {
     eprintln!(
         "[#2022 rank-charge zoo] fit={:.1}s conv={} iters={} \
              grad={:?} | native_ev={:.4} cold_train={:.4} cold_test={:.4} | \
-             K={} deaths={} dict_reseed={} struct_reseed={} reanchor={} | crit={:.6e}",
+             K={} deaths={} dict_reseed={} struct_reseed={} | crit={:.6e}",
         arm.fit_secs,
         arm.converged,
         arm.iterations,
@@ -247,7 +245,6 @@ fn zz_rank_charge_zoo_micro_2022() {
         arm.collapse_events,
         arm.dict_cocollapse_reseeds,
         arm.struct_cocollapse_reseeds,
-        arm.evidence_reanchors,
         arm.final_value,
     );
 

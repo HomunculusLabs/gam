@@ -2547,9 +2547,9 @@ pub(crate) fn remove_atoms(
     rho.log_ard = keep.iter().map(|&j| rho.log_ard[j].clone()).collect();
     // Drop every K-dependent cache and optimization ledger.  Compaction changes
     // both the column order and the quotient dimension, so retaining any of the
-    // old assembly layout, frozen pair gates, evidence-deflation anchor, or
-    // per-atom diagnostic reports would make the polish refit interpret old-K
-    // state as if it described the reduced dictionary.
+    // old assembly layout, frozen pair gates, or per-atom diagnostic reports
+    // would make the polish refit interpret old-K state as if it described the
+    // reduced dictionary.
     term.collapse_events.clear();
     term.last_row_layout = None;
     term.last_frames_active = false;
@@ -2559,9 +2559,6 @@ pub(crate) fn remove_atoms(
     term.barrier_coactivation_gate = None;
     term.streaming_gates_frozen = false;
     term.curvature_walk_report = None;
-    term.expected_criterion_gauge_deflated_directions = None;
-    term.criterion_gauge_deflation_reanchors = 0;
-    term.criterion_gauge_deflation_last_delta_sign = 0;
     term.dictionary_cocollapse_reseeds = 0;
     term.structural_cocollapse_reseeds = 0;
     term.atom_inner_fits = None;

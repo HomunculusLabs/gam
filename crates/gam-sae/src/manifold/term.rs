@@ -554,36 +554,12 @@ pub struct SaeManifoldTerm {
     /// / collapse outcome is observable — never a silent fallback. Cleared by
     /// the objective's `reset` so each seed's walk reports only its own run.
     pub(crate) curvature_walk_report: Option<CurvatureWalkReport>,
-    /// Deflated row-gauge direction count established by the first undamped
-    /// criterion factorization in the current optimization. A later change means
-    /// the quotient dimension changed mid-solve, which is a structural event and
-    /// must not be hidden inside the Laplace normalizer.
-    pub(crate) expected_criterion_gauge_deflated_directions: Option<usize>,
-    /// #1037 re-anchor counter: how many times the quotient (gauge-deflation)
-    /// dimension has been re-anchored within the current optimization. A
-    /// legitimate quotient-dimension change (an atom born / reseeded /
-    /// rank-reduced) re-anchors the comparison once; an unbounded churn that
-    /// never settles is the genuine pathology the guard must still catch. Reset
-    /// to `0` alongside `expected_criterion_gauge_deflated_directions`.
-    pub(crate) criterion_gauge_deflation_reanchors: usize,
-    /// #1217 oscillation detector: the sign of the most recent change in the
-    /// gauge-deflation count (`+1` when it last increased, `−1` when it last
-    /// decreased, `0` before the first change). The deflation count is a
-    /// per-ROW-summed count of near-null evidence directions, so on real K≥2
-    /// data it drifts smoothly (and monotonically) as the conditioning improves
-    /// across the ρ-walk — a benign O(N) quantity, NOT a discrete dictionary
-    /// event. The genuine pathology the #1037 guard must catch is an
-    /// OSCILLATING count (repeated direction reversals that never settle), so
-    /// the re-anchor budget is charged only on a direction REVERSAL, not on
-    /// every monotone drift step. Reset to `0` alongside the re-anchor counter.
-    pub(crate) criterion_gauge_deflation_last_delta_sign: i8,
     /// #976 / #1117 K>1 robustness: how many full-dictionary co-collapse
     /// multi-starts the decoder-norm guard has already spent in the current
     /// optimization. Bounded by [`SAE_DICTIONARY_COCOLLAPSE_RESEED_BUDGET`];
-    /// reset to `0` alongside [`Self::criterion_gauge_deflation_reanchors`] at the
-    /// start of each outer optimization. Distinct from the per-atom reseed
-    /// ledger in [`Self::collapse_events`] because a co-collapse reseed is a
-    /// whole-dictionary multi-start, not a per-atom second chance.
+    /// reset to `0` at the start of each outer optimization. Distinct from the
+    /// per-atom reseed ledger in [`Self::collapse_events`] because a co-collapse
+    /// reseed is a whole-dictionary multi-start, not a per-atom second chance.
     pub(crate) dictionary_cocollapse_reseeds: usize,
     /// #2267/#2762 — the inner solver's complete globalization state, carried
     /// across re-entries of the joint fit.
@@ -869,11 +845,6 @@ impl Clone for SaeManifoldTerm {
             arrow_assembly_workspace: SaeArrowAssemblyWorkspace::default(),
             certificate_dispersion: self.certificate_dispersion,
             curvature_walk_report: self.curvature_walk_report.clone(),
-            expected_criterion_gauge_deflated_directions: self
-                .expected_criterion_gauge_deflated_directions,
-            criterion_gauge_deflation_reanchors: self.criterion_gauge_deflation_reanchors,
-            criterion_gauge_deflation_last_delta_sign: self
-                .criterion_gauge_deflation_last_delta_sign,
             dictionary_cocollapse_reseeds: self.dictionary_cocollapse_reseeds,
             // Transient globalization hint — a fresh clone re-establishes the
             // whole line-search/trust-region state together.

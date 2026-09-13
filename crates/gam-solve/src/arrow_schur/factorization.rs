@@ -453,20 +453,19 @@ pub use gam_linalg::utils::SPECTRAL_DEFLATION_REL_FLOOR;
 /// applied to the spectral-deflation decision for *positive* near-floor
 /// eigenvalues, to stop the per-row deflation COUNT from flickering as a small
 /// positive curvature direction wanders across the cutoff over a ρ/θ-walk
-/// (#1117). The quotient-dimension guard (`record_criterion_gauge_deflation_count`)
-/// correctly refuses to compare Laplace normalizers across different deflated
-/// dimensions, so a single eigenvalue oscillating around the bare floor would
-/// otherwise toggle the count 6↔7 within one optimization and trip the guard
-/// spuriously, forcing a slow seed/homotopy cascade.
+/// (#1117). A single eigenvalue oscillating around the bare floor would otherwise
+/// toggle the count 6↔7 within one optimization, swapping a floor-scale
+/// curvature for unit stiffness along that direction between neighbouring
+/// evaluations, so the factor and every inverse read from it would jump.
 ///
 /// The decision is split by the only physically meaningful distinction at the
 /// inner optimum: a NON-POSITIVE (or non-finite) eigenvalue is a genuine null /
 /// indefinite quotient direction and is ALWAYS deflated — that boundary sits at
 /// exact zero, far from where live curvature lives, so it does not flicker (a
-/// curvature direction genuinely crossing zero IS a structural event the guard
-/// must still catch). Only a *positive* eigenvalue near `floor` is ambiguous,
-/// and for it we use the LOWER band edge `floor·(1−ε)`: a positive eigenvalue
-/// parked at the bare floor is `> floor·(1−ε)` and is therefore consistently
+/// curvature direction genuinely crossing zero IS a structural event). Only a
+/// *positive* eigenvalue near `floor` is ambiguous, and for it we use the LOWER
+/// band edge `floor·(1−ε)`: a positive eigenvalue parked at the bare floor is
+/// `> floor·(1−ε)` and is therefore consistently
 /// KEPT on both sides of the walk, so the count is stable by construction. A
 /// direction that is genuinely numerically flat sits orders of magnitude below
 /// `floor` (a true rank deficiency, `λ ≪ floor·(1−ε)`), so it is still deflated
