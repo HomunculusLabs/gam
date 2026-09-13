@@ -4182,65 +4182,48 @@ fn with_gh_nodesweights<R>(
     }
 }
 
-/// Stack-allocated Cholesky factor for `D x D` symmetric PSD matrices.
+/// Stack-allocated Cholesky factor of a `D x D` symmetric positive semidefinite
+/// covariance, with no heap allocation: per-row GHQ runs it once per observation.
 ///
-/// Returns the lower-triangular factor `L` (with strict upper triangle = 0)
-/// such that `L L^T = cov`, or `None` if `cov` is not positive definite
-/// (non-finite or non-positive pivot encountered).
-///
-/// This mirrors a standard textbook Cholesky inner loop bit-for-bit at a
-/// single jitter level, but avoids any heap allocation — critical for
-/// per-row GHQ where this runs once per observation.
+/// Returns the lower-triangular `L` (strict upper triangle zero) with
+/// `L L^T = cov`, or `None` when `cov` is non-finite or indefinite beyond
+/// rounding. Every entry is the accumulation `cov_ij − Σ_{k<j} l_ik·l_jk` of
+/// `j + 1` rounded terms, known only to `gam_linalg::roundoff::accumulation_band`
+/// of their absolute sum. A pivot inside its band is the exact zero of a rank-deficient
+/// covariance: its column stays zero and the Gaussian has no spread along it.
+/// An exact PSD matrix has a zero column below a zero pivot, so a Schur entry
+/// there outside its own band, or a pivot below minus its band, is refused as
+/// indefinite. No jitter is added, and a positive definite `cov` factors
+/// bit-for-bit as the textbook inner loop does (#2469).
 #[inline]
 fn cholesky_static<const D: usize>(cov: &[[f64; D]; D]) -> Option<[[f64; D]; D]> {
+    if D == 0 {
+        return None;
+    }
     let mut l = [[0.0_f64; D]; D];
     for i in 0..D {
         for j in 0..=i {
             let mut sum = cov[i][j];
+            let mut absolute_sum = cov[i][j].abs();
             for k in 0..j {
-                sum -= l[i][k] * l[j][k];
+                let product = l[i][k] * l[j][k];
+                sum -= product;
+                absolute_sum += product.abs();
             }
+            let band = gam_linalg::roundoff::accumulation_band(j + 1, absolute_sum);
             if i == j {
-                if !sum.is_finite() || sum <= 0.0 {
+                if !sum.is_finite() || sum < -band {
                     return None;
                 }
-                l[i][j] = sum.sqrt();
-            } else {
+                l[i][j] = if sum > band { sum.sqrt() } else { 0.0 };
+            } else if l[j][j] > 0.0 {
                 l[i][j] = sum / l[j][j];
+            } else if !(sum.abs() <= band) {
+                return None;
             }
         }
     }
     Some(l)
-}
-
-/// Stack-allocated Cholesky with a jitter-retry ladder
-/// (0, 1e-12, 1e-11, …, 1e-6 added to diagonal).
-#[inline]
-fn cholesky_static_with_jitter<const D: usize>(cov: &[[f64; D]; D]) -> Option<[[f64; D]; D]> {
-    if D == 0 {
-        return None;
-    }
-    for retry in 0..8 {
-        let jitter = if retry == 0 {
-            0.0
-        } else {
-            1e-12 * 10f64.powi(retry - 1)
-        };
-        if jitter == 0.0 {
-            if let Some(l) = cholesky_static::<D>(cov) {
-                return Some(l);
-            }
-        } else {
-            let mut base = *cov;
-            for i in 0..D {
-                base[i][i] = cov[i][i] + jitter;
-            }
-            if let Some(l) = cholesky_static::<D>(&base) {
-                return Some(l);
-            }
-        }
-    }
-    None
 }
 
 #[inline]
@@ -4267,14 +4250,14 @@ where
     let n = adaptive_point_countwith_cap(maxvar.sqrt(), max_n);
 
     // Sanitize variances on the stack (clamp negative diagonal to 0),
-    // then run a stack-allocated Cholesky-with-jitter. This avoids the
+    // then run the stack-allocated semidefinite Cholesky. This avoids the
     // `Vec<Vec<f64>>` per-row allocation that previously serialized
     // through the global allocator inside parallel workers.
     let mut cov_arr = cov;
     for i in 0..D {
         cov_arr[i][i] = cov_arr[i][i].max(0.0);
     }
-    let Some(l) = cholesky_static_with_jitter::<D>(&cov_arr) else {
+    let Some(l) = cholesky_static::<D>(&cov_arr) else {
         return Ok(None);
     };
     let norm = 1.0 / std::f64::consts::PI.powf(0.5 * D as f64);
@@ -5961,7 +5944,7 @@ mod tests {
             [[4.0, -1.5], [-1.5, 2.25]],
         ];
         for cov in cases {
-            let stack = cholesky_static_with_jitter::<2>(cov).expect("stack cholesky");
+            let stack = cholesky_static::<2>(cov).expect("stack cholesky");
             let heap_in: Vec<Vec<f64>> = cov.iter().map(|r| r.to_vec()).collect();
             let heap = ref_cholesky_heap(&heap_in).expect("heap cholesky");
             for i in 0..2 {
@@ -5984,7 +5967,7 @@ mod tests {
             [[4.0, 1.0, 0.5], [1.0, 3.0, 0.25], [0.5, 0.25, 2.0]],
         ];
         for cov in cases {
-            let stack = cholesky_static_with_jitter::<3>(cov).expect("stack cholesky");
+            let stack = cholesky_static::<3>(cov).expect("stack cholesky");
             let heap_in: Vec<Vec<f64>> = cov.iter().map(|r| r.to_vec()).collect();
             let heap = ref_cholesky_heap(&heap_in).expect("heap cholesky");
             for i in 0..3 {
@@ -6001,21 +5984,26 @@ mod tests {
 
     #[test]
     fn cholesky_static_d1() {
-        let l = cholesky_static_with_jitter::<1>(&[[2.25]]).expect("d=1");
+        let l = cholesky_static::<1>(&[[2.25]]).expect("d=1");
         assert_eq!(l[0][0], 1.5);
-        // Tiny negative diagonal (roundoff-scale) is rescued by the
-        // additive jitter ladder (1e-12 … 1e-6). At retry 1 the diagonal
-        // becomes -1e-13 + 1e-12 ≈ 9e-13 > 0, so Cholesky succeeds.
-        // The original assertion here used `-1.0`, but additive jitter
-        // capped at 1e-6 cannot recover a diagonal of -1.0 → -1.0+1e-6
-        // < 0 for every retry, so that assertion was unsatisfiable under
-        // the function's documented jitter ladder. The intent of the
-        // assertion was clearly to cover the "rescued by jitter" path,
-        // which is what a roundoff-scale negative diagonal exercises.
-        assert!(cholesky_static_with_jitter::<1>(&[[-1.0e-13]]).is_some());
-        // A negative variance triggers jitter; with jitter <= 1e-6 it still
-        // can't reach positive — should return None.
-        assert!(cholesky_static_with_jitter::<1>(&[[-1.0e3]]).is_none());
+        // A zero variance is a point mass along its axis: the factor column is zero.
+        let point = cholesky_static::<1>(&[[0.0]]).expect("zero variance");
+        assert_eq!(point[0][0], 0.0);
+        // A negative variance is indefinite at every magnitude, because the band
+        // a pivot is judged against scales with the pivot's own terms.
+        assert!(cholesky_static::<1>(&[[-1.0e-13]]).is_none());
+        assert!(cholesky_static::<1>(&[[-1.0e3]]).is_none());
+    }
+
+    #[test]
+    fn cholesky_static_factors_a_rank_one_covariance_and_refuses_an_indefinite_one() {
+        // [[1, 1], [1, 1]] has pivots 1 and exactly 0: the second column is zero,
+        // so the Gaussian integrates along the major axis only.
+        let rank_one = cholesky_static::<2>(&[[1.0, 1.0], [1.0, 1.0]]).expect("rank one");
+        assert_eq!(rank_one, [[1.0, 0.0], [1.0, 0.0]]);
+        // [[0, 1], [1, 0]] has a zero pivot above a unit Schur entry, which no
+        // positive semidefinite matrix has.
+        assert!(cholesky_static::<2>(&[[0.0, 1.0], [1.0, 0.0]]).is_none());
     }
 }
 

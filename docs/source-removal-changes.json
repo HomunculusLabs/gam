@@ -8270,5 +8270,13 @@
     ],
     "reason": "#2899 moved tests: gam-cli's cli_tests.rs module and the root regressions binary's terms_supporting.rs were the only Rust users outside gam-terms of term_builder::parse_duchon_order, unique_count_column and heuristic_knots_for_column, which production calls only inside gam-terms. The four tests move verbatim into crates/gam-terms/src/term_builder/tests.rs, and the three functions narrow to pub(crate).",
     "evidence": "At the base, git grep -n -w over crates, src, tests, examples and bench finds the three functions outside crates/gam-terms/src only in tests/src_modules/misc/cli_tests.rs (the import at :77 and the three tests) and tests/regressions/misc/terms_supporting.rs (the import and one test), plus Python docstrings and plain-text doc mentions that cannot call them. Every removed identity reappears unchanged as a test in crates/gam-terms/src/term_builder/tests.rs."
+  },
+  {
+    "base": "08a06205eda76edc765bcd35d6098526a2d2cd74",
+    "items": [
+      "crates/gam-solve/src/quadrature.rs:fn:cholesky_static_with_jitter"
+    ],
+    "reason": "#2469. cholesky_static_with_jitter retried a failed stack Cholesky for the multivariate GHQ covariance with absolute diagonal jitters 1e-12, 1e-11, ..., 1e-6, a picked ladder that distorts any covariance whose variances are small. cholesky_static is now the one stack Cholesky and is positive semidefinite: each entry cov_ij - sum_k l_ik l_jk is judged against gam_linalg::roundoff::accumulation_band of its j + 1 terms, a pivot inside its band gives a zero factor column (no spread along that direction), and a pivot or a zero-pivot Schur entry outside its band is refused as indefinite. ghq_nd_integrate_try calls it directly. A positive definite covariance factors bit-for-bit as before.",
+    "evidence": "At the base, git grep -n -w cholesky_static_with_jitter finds its declaration and its one production call in ghq_nd_integrate_try (crates/gam-solve/src/quadrature.rs), plus five calls in that file's cholesky_static tests, all rewritten in this commit: matches_heap_d2 and d3 call cholesky_static, d1 now pins a zero variance as a zero column and a negative variance as refused, and a new test pins a rank-one covariance and an indefinite one. Guarded pool job 606052 (sw0g, acn50, HEAD verified at 3d6711312, /scratch.global/sauer354/pool/const2469a/w17.606052.log) ran this change together with the orthonormal_range_basis rename: scripts/source_removal_guard.py rc=0 with 4 guarded removals, cargo check --workspace --all-targets --exclude gam-pyffi rc=0, gam-solve lib filters cholesky_static ghq bivariate orthonormal_range_basis hutchpp arrow_schur:: 115 passed 0 failed."
   }
 ]
