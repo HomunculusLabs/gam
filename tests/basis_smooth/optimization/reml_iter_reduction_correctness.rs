@@ -12,7 +12,7 @@
 //! perturb the converged β at this n, this test FAILS and the change
 //! must be redesigned, not the assertion relaxed.
 //!
-//! The reference is produced by fitting via `optimize_external_design`
+//! The reference is produced by fitting through the external-design route
 //! with `tol = 1e-12`. The new scale-aware floor `max(1e-12, n·1e-9)`
 //! degenerates to `n·1e-9 = 1e-5` at n=10K — identical to the floor
 //! when called with `tol = 1e-7`. So both fits run with the SAME

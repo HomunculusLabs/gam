@@ -8,8 +8,8 @@
 //! inverse links (docs/families-and-links.md, docs/formulas.md). Its two learned
 //! parameters (`epsilon`, `log_delta`) are optimized jointly with the smoothing
 //! log-λ in a single augmented outer vector `θ = [ρ_smooth …, ε, log_δ]`, handled
-//! by the "mixture/SAS flexible link" arm of `optimize_external_design…`
-//! (src/solver/estimate/optimizer.rs).
+//! by the "mixture/SAS flexible link" arm of the external-design outer optimizer
+//! (crates/gam-solve/src/estimate/optimizer.rs).
 //!
 //! ROOT CAUSE (confirmed by backtrace): after the outer optimizer converges, that
 //! arm calls the convergence-guard re-evaluation

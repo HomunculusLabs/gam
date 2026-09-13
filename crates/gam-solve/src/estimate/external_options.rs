@@ -128,7 +128,7 @@ pub(crate) fn resolve_external_family(
     };
     if !external_glm_supported {
         crate::bail_invalid_estim!(
-            "optimize_external_design requires a supported standard GLM family/link; got {}. \
+            "the external-design route requires a supported standard GLM family/link; got {}. \
              The external-design route supports Gaussian(identity), Binomial(logit/probit/cloglog/loglog/cauchit/SAS/Beta-Logistic), \
              Beta(logit), and Poisson/Gamma/Tweedie/Negative-Binomial(log). For Beta precision modeling \
              add a noise_formula to upgrade to the dispersion-location-scale route",
@@ -146,7 +146,7 @@ pub(crate) fn resolve_external_family(
 
     if let ResponseFamily::Tweedie { p } = &family.response {
         if !gam_problem::is_valid_tweedie_power(*p) {
-            crate::bail_invalid_estim!("optimize_external_design requires a GLM family; Tweedie variance power must be finite and strictly between 1 and 2; use PoissonLog or GammaLog for boundary cases"
+            crate::bail_invalid_estim!("the external-design route requires a GLM family; Tweedie variance power must be finite and strictly between 1 and 2; use PoissonLog or GammaLog for boundary cases"
                     .to_string(),);
         }
     }

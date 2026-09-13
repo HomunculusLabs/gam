@@ -11,7 +11,7 @@
 //! (src/types.rs:1258-1260) unconditionally returns
 //! `LikelihoodScaleMetadata::EstimatedNegBinTheta` for `NegativeBinomial`,
 //! whatever value the user passed. The PIRLS driver then re-estimates whenever
-//! `scale.negbin_theta_is_estimated()` is true (src/solver/pirls/mod.rs:2157),
+//! the scale is `EstimatedNegBinTheta` (src/solver/pirls/mod.rs:2157 at the time),
 //! overwriting the supplied value. There is no "fixed NB theta" scale variant, so
 //! the documented *fixed* mode does not exist.
 //!

@@ -661,11 +661,10 @@ fn hifreq_tensor_k6() -> Result<(), String> {
 // before it means anything. The k8 numbers stand: that arm is byte-identical.
 //
 // What does NOT depend on the saturation is the shape of the cost. The PENALTY
-// side already exploits the tensor's Kronecker structure fully (marginal
-// penalties are simultaneously diagonalized by
-// `kronecker_reparameterization_engine`, so `S_λ` is diagonal and its log-det +
-// λ-derivatives are O(p)); the DATA Gram `XᵀWX` does not inherit that structure
-// under a general PIRLS weight W, so its factorization is a true dense p×p one.
+// side exploited the tensor's Kronecker structure through a Kronecker
+// reparameterization, which a88c62eee removed with the Kronecker runtime; the
+// DATA Gram `XᵀWX` never inherits that structure under a general PIRLS weight W,
+// so its factorization is a true dense p×p one.
 // And `kb` cannot be capped to shrink p: the ground truth is `sin(k·θ)`, whose
 // periodic marginal needs ≥ k Fourier modes, so k8/k10 require kb ≳ 18. Growing
 // the grid, not capping the basis, is what keeps `p/n` bounded — which is what

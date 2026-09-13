@@ -1711,7 +1711,7 @@ impl LikelihoodSpec {
             // A user-supplied `--negative-binomial-theta` is the opposite
             // contract (issue #983): `theta_fixed = true` routes to the
             // non-estimated scale variant, so the inner solver's refresh gate
-            // (`negbin_theta_is_estimated()`) stays closed and the fit honours
+            // (open only for `EstimatedNegBinTheta`) stays closed and the fit honours
             // the held value everywhere it enters.
             ResponseFamily::NegativeBinomial { theta, theta_fixed } => {
                 if *theta_fixed {
@@ -2665,7 +2665,7 @@ impl GlmLikelihoodSpec {
     /// No-op for a user-fixed `theta` (`theta_fixed = true` /
     /// `FixedNegBinTheta`, issue #983): the held value is the contract, and
     /// this mutator must never let an estimation path overwrite it — the
-    /// PIRLS refresh gate (`negbin_theta_is_estimated()`) already skips the
+    /// PIRLS refresh gate (open only for `EstimatedNegBinTheta`) already skips the
     /// call, this enforces the same invariant at the data itself.
     #[inline]
     #[must_use]
@@ -2726,8 +2726,8 @@ impl GlmLikelihoodSpec {
     /// (λ) search (#1082). Converts an `EstimatedNegBinTheta` spec into the
     /// statistically-identical `FixedNegBinTheta` form (`theta_fixed = true`),
     /// which gates off the per-inner-solve ML refresh in
-    /// `GamWorkingModel::update_with_curvature` (its guard is
-    /// `negbin_theta_is_estimated()`).
+    /// `GamWorkingModel::update_with_curvature` (its guard admits only
+    /// `EstimatedNegBinTheta`).
     ///
     /// Rationale: with θ estimated, the inner solver re-derives θ from each
     /// outer iterate's *warm-start* η, so θ — and hence the NB working response,

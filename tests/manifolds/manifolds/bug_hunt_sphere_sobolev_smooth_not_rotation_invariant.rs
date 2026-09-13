@@ -6,7 +6,7 @@
 //! points on S² alone (`k(cos γ)`, with `cos γ` = the dot product of the two
 //! unit vectors), so it is intrinsically invariant under any rotation of S²,
 //! including a rigid longitude shift `lon -> lon + Δ` (a rotation about the
-//! pole). The `spherical_wahba_kernel_matrix_cpu` evaluation is indeed built
+//! pole). The Wahba kernel evaluation (`spherical_wahba_kernel_matrix_with_kind`) is indeed built
 //! from `cos γ` and is invariant. The defect is upstream, in how the basis
 //! CENTERS are chosen: `select_spherical_farthest_point_centers`
 //! (`crates/gam-terms/src/basis/workspace_cache.rs`) laid down a fixed

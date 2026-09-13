@@ -1031,12 +1031,12 @@ where
     }
 
     let p = x.ncols();
-    validate_penalty_specs(&s_list, p, "optimize_external_design")?;
+    validate_penalty_specs(&s_list, p, "external-design fit")?;
     let (canonical, active_nullspace_dims) = gam_terms::construction::canonicalize_penalty_specs(
         &s_list,
         &opts.nullspace_dims,
         p,
-        "optimize_external_design",
+        "external-design fit",
     )?;
     let conditioning = ParametricColumnConditioning::infer_from_penalty_specs(&x, &s_list);
     let x_fit = conditioning.apply_to_design(&x);

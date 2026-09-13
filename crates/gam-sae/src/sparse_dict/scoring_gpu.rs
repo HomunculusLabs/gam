@@ -411,7 +411,7 @@ pub const DEVICE_SCORE_BLOCK_MIN_ELEMS: usize = gam_gpu::DEFAULT_DICTIONARY_SCOR
 pub enum ScoreBlockPath {
     /// The NVRTC `sparse_dict_score_block` kernel ran on the device.
     Device,
-    /// The CPU `score_block_cpu` reference ran.
+    /// The CPU reference scorer ran.
     Cpu,
 }
 

@@ -407,8 +407,8 @@ pub fn scalar_family_from_name(
         ),
         // #983: a user-supplied `--negative-binomial-theta` holds θ
         // fixed at exactly that value (`theta_fixed = true` →
-        // `FixedNegBinTheta` scale → the PIRLS refresh gate
-        // `negbin_theta_is_estimated()` stays closed). With no flag,
+        // `FixedNegBinTheta` scale → the PIRLS refresh gate, which opens only
+        // for `EstimatedNegBinTheta`, stays closed). With no flag,
         // θ is the running ML estimate (the #802 default seed 1.0).
         "nb" | "negbin" | "negative-binomial" => {
             let (theta, theta_fixed) = resolve_negative_binomial_theta()?;

@@ -52,7 +52,7 @@ fn spectral_kernel(cos_gamma: f64, m: usize, l_max: usize) -> f64 {
     sum
 }
 
-/// Use the public `spherical_wahba_kernel_matrix` to evaluate K(p, q) for a
+/// Use `spherical_wahba_kernel_matrix_with_kind` to evaluate K(p, q) for a
 /// single (p, q) pair. We construct two single-row coordinate arrays.
 fn closed_form_kernel_with_kind(cos_gamma: f64, m: usize, kernel: SphereWahbaKernel) -> f64 {
     // Place point A at the north pole (lat=90°, lon=0°), point B at colatitude
