@@ -9035,5 +9035,20 @@
     "reason": "#2899, SPEC rule 25. RhoPrior::upper_tail_gradient_vanishes is narrowed to pub(crate): its production reader is gam-spec's upper_tail_gradient_vanishes_everywhere, and only gam-solve tests called the per-coordinate form. The test of the predicate's own semantics moves verbatim beside the predicate, into gam-spec's test module.",
     "evidence": "At the base, git grep -w upper_tail_gradient_vanishes over crates, src, tests, bench and examples finds the declaration and its _everywhere caller in crates/gam-spec/src/lib.rs, plus two tests in crates/gam-solve/src/model_types/result_types.rs (shipped_criterion_identity_tests). The production rail certificate (gam-solve rail_face_limit.rs:74) calls upper_tail_gradient_vanishes_everywhere. every_spelling_of_an_unset_coordinate_answers_the_same_2450 moves unchanged into gam-spec lib.rs mod tests, minus its gam_problem::RhoPrior import (super::* supplies RhoPrior). The item list is the guard's refusal list from the guarded check job named in the commit message.",
     "base": "9d7798639c495ef035fcb77400e96b674f82745b"
+  },
+  {
+    "base": "b7e8944fb3506a6ec744324b840e5d6c3743fd57",
+    "items": [
+      "tests/regressions/misc/subsample_k_cap_and_audit.rs:const:LARGE_SCALE_N",
+      "tests/regressions/misc/subsample_k_cap_and_audit.rs:const:OBSERVED_K_IN_RUN",
+      "tests/regressions/misc/subsample_k_cap_and_audit.rs:const:SURVIVAL_WORK_PER_K_UNIT",
+      "tests/regressions/misc/subsample_k_cap_and_audit.rs:fn:h1a_target_k_with_default_work_per_k_picks_noise_rule",
+      "tests/regressions/misc/subsample_k_cap_and_audit.rs:fn:h1b_target_k_with_survival_work_per_k_picks_work_rule",
+      "tests/regressions/misc/subsample_k_cap_and_audit.rs:fn:h1c_maybe_install_honors_outer_work_per_k_unit_argument",
+      "tests/regressions/misc/subsample_k_cap_and_audit.rs:fn:h1d_direct_capped_options_do_produce_small_k",
+      "tests/regressions/misc/subsample_k_cap_and_audit.rs:fn:h3a_uncapped_vs_capped_subsample_size_ratio_is_about_10x"
+    ],
+    "reason": "#979 (folded #2897), mission rule 7.4 (no public API without a product user). The K-cap regression tests h1a-h1d and h3a, and the three constants only they used, move from the root regressions binary into gam-models marginal_slope_shared::subsample_k_cap_tests with the same names and assertions. The seven auto outer-subsample items they named through the gam::families facade are narrowed to pub(crate). The root file keeps the identifiability audit tests h2a and h2b.",
+    "evidence": "At the base, outside crates/gam-models/src, AUTO_OUTER_WORK_BUDGET, AUTO_OUTER_MIN_K_FLOOR, AutoOuterCapReason, auto_outer_target_k and maybe_install_auto_outer_subsample are named only by tests/regressions/misc/subsample_k_cap_and_audit.rs. AutoOuterKChoice is named nowhere else. auto_outer_score_subsample is otherwise named only in doc comments (gam-model-api options.rs, gam-problem outer_subsample.rs) and a comment in tests/src_modules/optimization/families_bms_joint_hessian_hvp_correction_tests.rs. The one production caller of the installer is bms/custom_family_impl.rs in gam-models."
   }
 ]
