@@ -78,12 +78,29 @@ use std::fmt;
 
 use gam_linalg::faer_ndarray::FaerSvd;
 
-use super::AtlasOrientability;
 use super::intrinsic_seed::{intrinsic_geodesic_embedding_on_graph, intrinsic_knn_graph};
+use super::{AtlasOrientability, GraphCompressionKind};
 
 #[cfg(test)]
 #[path = "local_chart_recovery_tests.rs"]
 mod recovered_transition_tests;
+
+/// The developing map's placement (see `LocalAtlas::developed_coordinates`): each chart's
+/// rigid motion `G_a(c) = Q_a c + s_a` into the root chart's frame, and whether each
+/// transition is one the spanning tree glued through.
+struct DevelopingMap {
+    rotation: Vec<Array2<f64>>,
+    offset: Vec<Array1<f64>>,
+    in_tree: Vec<bool>,
+}
+
+/// A non-tree transition's holonomy in the developed frame, `h(x) = linear·x + translation`
+/// (see `LocalAtlas::holonomy_quotient_coordinates`).
+struct DevelopedHolonomy {
+    linear: Array2<f64>,
+    translation: Array1<f64>,
+    reversing: bool,
+}
 
 /// The angular resolution of one chart frame, returned as a SINE, derived from the
 /// patch's own captured-variance certificate. Not a tolerance and not a knob.
@@ -940,6 +957,133 @@ impl LocalAtlas {
         &self,
         z: ArrayView2<'_, f64>,
     ) -> Result<Array2<f64>, String> {
+        let map = self.developing_map()?;
+        let mut coords = self.develop_rows(z, &map)?;
+        let mean = coords
+            .mean_axis(ndarray::Axis(0))
+            .ok_or_else(|| "developed_coordinates: there are no rows to develop".to_string())?;
+        coords -= &mean;
+        Ok(coords)
+    }
+
+    /// The quotient coordinates the atlas's holonomy dictates for a manifold its readout
+    /// names (#2906), in the convention the matching seed uses.
+    ///
+    /// Developing a shared row through the `from` chart of a non-tree transition
+    /// `c_to ≈ R c_from + t` and through its `to` chart gives two images related by the
+    /// holonomy `h(x) = M x + v`, with `M = Q_to R Q_fromᵀ` and `v = Q_to t + s_to − M s_from`.
+    /// Over a flat quotient every holonomy is a deck transformation of the developed chart,
+    /// so the quotient is read off them instead of off a principal projection:
+    ///
+    /// * a circle (chart rank 1): a non-trivial holonomy translates the developed line by a
+    ///   multiple of the loop length, and a transition crossing the seam once carries one
+    ///   length. The period is the largest orientation-preserving translation, and the
+    ///   coordinate is the fraction of that period in `[0, 1)`, the periodic seed's convention.
+    /// * a Möbius band (chart rank 2): every orientation-reversing holonomy is an odd power of
+    ///   the band's glide reflection, so the one with the smallest glide is the generator. Its
+    ///   `M` is a reflection with axis `a` and normal `n`, and `v = α a + β n` puts the glide
+    ///   `α` along the axis and the axis at offset `β/2`. A row at `x` reads `s = x·a / α` on
+    ///   the period-two double cover and signed width `w = x·n − β/2`, folded onto the
+    ///   fundamental domain `s ∈ [0, 1)` through the deck twin `(s + 1, −w)` and divided by
+    ///   twice the width spread, the convention `mobius_double_cover_coords_from_projection`
+    ///   gives the deck-invariant basis.
+    ///
+    /// Refused for any other manifold or chart rank, for a cover with no holonomy of the
+    /// class the read needs, and for a degenerate glide or width.
+    pub(crate) fn holonomy_quotient_coordinates(
+        &self,
+        z: ArrayView2<'_, f64>,
+        manifold: GraphCompressionKind,
+    ) -> Result<Array2<f64>, String> {
+        let map = self.developing_map()?;
+        let developed = self.develop_rows(z, &map)?;
+        let holonomies = self.non_tree_holonomies(&map);
+        let n = developed.nrows();
+        match (manifold, self.intrinsic_dim) {
+            (GraphCompressionKind::Circle, 1) => {
+                let period = holonomies
+                    .iter()
+                    .filter(|holonomy| !holonomy.reversing)
+                    .map(|holonomy| holonomy.translation[0].abs())
+                    .fold(0.0_f64, f64::max);
+                if !(period > 0.0 && period.is_finite()) {
+                    return Err(format!(
+                        "holonomy_quotient_coordinates: no non-tree transition translates the developed line (largest translation {period:.3e})"
+                    ));
+                }
+                let mut coords = Array2::<f64>::zeros((n, 1));
+                for row in 0..n {
+                    let fraction = developed[[row, 0]] / period;
+                    coords[[row, 0]] = fraction - fraction.floor();
+                }
+                Ok(coords)
+            }
+            (GraphCompressionKind::MobiusStrip, 2) => {
+                // (axis, normal, glide, offset) of the reversing holonomy with the smallest glide.
+                let mut generator: Option<([f64; 2], [f64; 2], f64, f64)> = None;
+                for holonomy in holonomies.iter().filter(|holonomy| holonomy.reversing) {
+                    let cosine = 0.5 * (holonomy.linear[[0, 0]] - holonomy.linear[[1, 1]]);
+                    let sine = 0.5 * (holonomy.linear[[1, 0]] + holonomy.linear[[0, 1]]);
+                    let half = 0.5 * sine.atan2(cosine);
+                    let mut axis = [half.cos(), half.sin()];
+                    let normal = [-half.sin(), half.cos()];
+                    let v = &holonomy.translation;
+                    let mut glide = v[0] * axis[0] + v[1] * axis[1];
+                    if glide < 0.0 {
+                        axis = [-axis[0], -axis[1]];
+                        glide = -glide;
+                    }
+                    let offset = v[0] * normal[0] + v[1] * normal[1];
+                    if generator.map_or(true, |incumbent| glide < incumbent.2) {
+                        generator = Some((axis, normal, glide, offset));
+                    }
+                }
+                let (axis, normal, glide, offset) = generator.ok_or_else(|| {
+                    "holonomy_quotient_coordinates: no orientation-reversing non-tree transition, so no glide reflection to read"
+                        .to_string()
+                })?;
+                if !(glide > 0.0 && glide.is_finite()) {
+                    return Err(format!(
+                        "holonomy_quotient_coordinates: the generating glide reflection has no glide ({glide:.3e})"
+                    ));
+                }
+                let mut coords = Array2::<f64>::zeros((n, 2));
+                for row in 0..n {
+                    let (x0, x1) = (developed[[row, 0]], developed[[row, 1]]);
+                    let lift = (x0 * axis[0] + x1 * axis[1]) / glide;
+                    let on_cover = lift - 2.0 * (0.5 * lift).floor();
+                    let width = x0 * normal[0] + x1 * normal[1] - 0.5 * offset;
+                    let (s, w) = if on_cover >= 1.0 {
+                        (on_cover - 1.0, -width)
+                    } else {
+                        (on_cover, width)
+                    };
+                    coords[[row, 0]] = s;
+                    coords[[row, 1]] = w;
+                }
+                let width_sd = (coords.column(1).iter().map(|w| w * w).sum::<f64>()
+                    / n.max(1) as f64)
+                    .sqrt();
+                if !(width_sd > 0.0 && width_sd.is_finite()) {
+                    return Err(format!(
+                        "holonomy_quotient_coordinates: the signed width is degenerate (spread {width_sd:.3e})"
+                    ));
+                }
+                for row in 0..n {
+                    coords[[row, 1]] = (coords[[row, 1]] / (2.0 * width_sd)).clamp(-1.0, 1.0);
+                }
+                Ok(coords)
+            }
+            (other, rank) => Err(format!(
+                "holonomy_quotient_coordinates: no flat quotient read for {other:?} at chart rank {rank}"
+            )),
+        }
+    }
+
+    /// The developing map's placement (#2280): each chart's rigid motion
+    /// `G_a(c) = Q_a c + s_a` into the root chart's frame, and which transitions the
+    /// spanning tree glued through.
+    fn developing_map(&self) -> Result<DevelopingMap, String> {
         fn find_root(parent: &mut [usize], mut node: usize) -> usize {
             while parent[node] != node {
                 parent[node] = parent[parent[node]];
@@ -948,24 +1092,6 @@ impl LocalAtlas {
             node
         }
 
-        let (n, p) = z.dim();
-        if p != self.ambient_dim {
-            return Err(format!(
-                "developed_coordinates: rows have {p} columns but the atlas was built in {} dimensions",
-                self.ambient_dim
-            ));
-        }
-        let largest_member = self
-            .patches
-            .iter()
-            .flat_map(|patch| patch.members.iter().copied())
-            .max()
-            .unwrap_or(0);
-        if n <= largest_member {
-            return Err(format!(
-                "developed_coordinates: the atlas charts row {largest_member} but only {n} rows were supplied"
-            ));
-        }
         let d = self.intrinsic_dim;
         let m = self.charts.len();
         let mut order: Vec<usize> = (0..self.transitions.len())
@@ -984,6 +1110,7 @@ impl LocalAtlas {
         });
         let mut parent: Vec<usize> = (0..m).collect();
         let mut tree: Vec<Vec<usize>> = vec![Vec::new(); m];
+        let mut in_tree = vec![false; self.transitions.len()];
         let mut tree_edges = 0usize;
         for edge in order {
             let transition = &self.transitions[edge];
@@ -993,12 +1120,13 @@ impl LocalAtlas {
                 parent[from.max(to)] = from.min(to);
                 tree[transition.from_patch].push(edge);
                 tree[transition.to_patch].push(edge);
+                in_tree[edge] = true;
                 tree_edges += 1;
             }
         }
         if tree_edges + 1 != m {
             return Err(format!(
-                "developed_coordinates: the well-conditioned transitions leave the {m} charts in {} components",
+                "developing map: the well-conditioned transitions leave the {m} charts in {} components",
                 m - tree_edges
             ));
         }
@@ -1037,7 +1165,40 @@ impl LocalAtlas {
                 queue.push_back(next);
             }
         }
+        Ok(DevelopingMap {
+            rotation,
+            offset,
+            in_tree,
+        })
+    }
 
+    /// Every row of `z` through its home chart's placement, uncentered. A row's home is the
+    /// patch that contains it with the nearest center (lowest index on a tie); a row no patch
+    /// contains takes the nearest center's chart, whose map `Fᵀ(x − μ)` is defined at every
+    /// ambient point.
+    fn develop_rows(
+        &self,
+        z: ArrayView2<'_, f64>,
+        map: &DevelopingMap,
+    ) -> Result<Array2<f64>, String> {
+        let (n, p) = z.dim();
+        if p != self.ambient_dim {
+            return Err(format!(
+                "developing map: rows have {p} columns but the atlas was built in {} dimensions",
+                self.ambient_dim
+            ));
+        }
+        let largest_member = self
+            .patches
+            .iter()
+            .flat_map(|patch| patch.members.iter().copied())
+            .max()
+            .unwrap_or(0);
+        if n <= largest_member {
+            return Err(format!(
+                "developing map: the atlas charts row {largest_member} but only {n} rows were supplied"
+            ));
+        }
         let mut home: Vec<Option<(usize, f64)>> = vec![None; n];
         for (chart, patch) in self.patches.iter().enumerate() {
             for &row in &patch.members {
@@ -1051,7 +1212,7 @@ impl LocalAtlas {
                 }
             }
         }
-        let mut coords = Array2::<f64>::zeros((n, d));
+        let mut coords = Array2::<f64>::zeros((n, self.intrinsic_dim));
         for (row, owner) in home.into_iter().enumerate() {
             let chart = match owner {
                 Some((chart, _)) => chart,
@@ -1068,15 +1229,40 @@ impl LocalAtlas {
                     nearest_chart
                 }
             };
-            let image =
-                rotation[chart].dot(&self.charts[chart].project(z.row(row))) + &offset[chart];
+            let image = map.rotation[chart].dot(&self.charts[chart].project(z.row(row)))
+                + &map.offset[chart];
             coords.row_mut(row).assign(&image);
         }
-        let mean = coords
-            .mean_axis(ndarray::Axis(0))
-            .ok_or_else(|| "developed_coordinates: there are no rows to develop".to_string())?;
-        coords -= &mean;
         Ok(coords)
+    }
+
+    /// The holonomy of every well-conditioned transition the spanning tree did not use, in
+    /// the developed frame (see `holonomy_quotient_coordinates`).
+    fn non_tree_holonomies(&self, map: &DevelopingMap) -> Vec<DevelopedHolonomy> {
+        let mut holonomies = Vec::new();
+        for (index, transition) in self.transitions.iter().enumerate() {
+            if map.in_tree[index]
+                || !matches!(
+                    transition.conditioning,
+                    TransitionConditioning::WellConditioned
+                )
+            {
+                continue;
+            }
+            let (from, to) = (transition.from_patch, transition.to_patch);
+            let linear = map.rotation[to]
+                .dot(&transition.rotation)
+                .dot(&map.rotation[from].t());
+            let translation = map.rotation[to].dot(&transition.translation) + &map.offset[to]
+                - linear.dot(&map.offset[from]);
+            let reversing = determinant(&linear) < 0.0;
+            holonomies.push(DevelopedHolonomy {
+                linear,
+                translation,
+                reversing,
+            });
+        }
+        holonomies
     }
 
     /// Numerically well-conditioned observed transition signs as
@@ -2111,5 +2297,92 @@ mod tests {
             .developed_coordinates(z.view())
             .expect_err("a two-component cover has no single developed chart");
         assert!(refusal.contains("components"), "{refusal}");
+    }
+
+    /// Worst circular distance from each row's phase to its planted loop fraction, after the
+    /// best rotation and reflection of the loop. The rotation is the circular mean of the
+    /// phase differences, a closed form, for each of the two reflections.
+    fn worst_loop_residual(phase: ArrayView1<'_, f64>, planted: &[f64]) -> f64 {
+        let tau = std::f64::consts::TAU;
+        [1.0_f64, -1.0]
+            .into_iter()
+            .map(|orientation| {
+                let (mut sine, mut cosine) = (0.0_f64, 0.0_f64);
+                for (row, &truth) in planted.iter().enumerate() {
+                    let angle = tau * (phase[row] - orientation * truth);
+                    sine += angle.sin();
+                    cosine += angle.cos();
+                }
+                let shift = sine.atan2(cosine) / tau;
+                planted
+                    .iter()
+                    .enumerate()
+                    .map(|(row, &truth)| {
+                        let offset = phase[row] - orientation * truth - shift;
+                        (offset - offset.round()).abs()
+                    })
+                    .fold(0.0_f64, f64::max)
+            })
+            .fold(f64::INFINITY, f64::min)
+    }
+
+    /// #2906 — the holonomy of a planted circle and of a planted Möbius band dictates their
+    /// quotient coordinates. Every row's loop coordinate must land within half a lattice
+    /// step of its planted position after the best rotation and reflection, so the loop
+    /// order is recovered exactly. On the band the width magnitudes must also keep the
+    /// planted width levels apart, in order, in every loop column. The magnitude is the
+    /// deck-invariant half of the width, so the seam where a row folds onto its twin cannot
+    /// flip it.
+    #[test]
+    fn holonomy_quotient_recovers_the_planted_loop_2906() {
+        let n = 400usize;
+        let points = crate::manifold::tests_topology_fixtures::circle(n, 2.0);
+        let atlas = LocalAtlas::build(points.view(), LocalAtlasConfig::balanced(n, 1))
+            .expect("the planted circle's atlas builds");
+        let phase = atlas
+            .holonomy_quotient_coordinates(points.view(), GraphCompressionKind::Circle)
+            .expect("the planted circle's holonomy reads a period");
+        let planted: Vec<f64> = (0..n).map(|row| row as f64 / n as f64).collect();
+        let worst = worst_loop_residual(phase.column(0), &planted);
+        assert!(
+            worst < 0.5 / n as f64,
+            "every circle row must land within half a lattice step of its planted phase: worst {worst:.3e}"
+        );
+
+        let (n_u, n_v) = (60usize, 14usize);
+        let band = mobius_strip(n_u, n_v);
+        let atlas = LocalAtlas::build(band.view(), LocalAtlasConfig::balanced(band.nrows(), 2))
+            .expect("the planted band's atlas builds");
+        let quotient = atlas
+            .holonomy_quotient_coordinates(band.view(), GraphCompressionKind::MobiusStrip)
+            .expect("the planted band's holonomy reads a glide reflection");
+        let planted: Vec<f64> = (0..band.nrows())
+            .map(|row| (row / n_v) as f64 / n_u as f64)
+            .collect();
+        let worst = worst_loop_residual(quotient.column(0), &planted);
+        assert!(
+            worst < 0.5 / n_u as f64,
+            "every band row must land within half a loop step of its planted base position: worst {worst:.3e}"
+        );
+        // The planted widths are symmetric about zero, so each column's rows form `n_v / 2`
+        // magnitude levels; the recovered magnitudes must keep neighbouring levels apart.
+        let mut misordered = Vec::new();
+        for column in 0..n_u {
+            let magnitude = |iv: usize| quotient[[column * n_v + iv, 1]].abs();
+            for level in 0..(n_v / 2 - 1) {
+                let inner = magnitude(n_v / 2 - 1 - level).max(magnitude(n_v / 2 + level));
+                let outer = magnitude(n_v / 2 - 2 - level).min(magnitude(n_v / 2 + 1 + level));
+                if !(inner < outer) {
+                    misordered.push(format!(
+                        "column {column} level {level}: inner {inner:.3e} vs outer {outer:.3e}"
+                    ));
+                }
+            }
+        }
+        assert!(
+            misordered.is_empty(),
+            "the band's width magnitudes must recover the planted levels: {}",
+            misordered.join("; ")
+        );
     }
 }
