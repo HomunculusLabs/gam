@@ -183,6 +183,11 @@ def resolve_layers(model: Any) -> Any:
         root = getattr(model, root_name, None)
         if root is not None and hasattr(root, layer_name):
             return getattr(root, layer_name)
+        # A conditional-generation wrapper such as Qwen3.5's nests the decoder
+        # at `model.language_model`.
+        inner = getattr(root, "language_model", None) if root is not None else None
+        if inner is not None and hasattr(inner, layer_name):
+            return getattr(inner, layer_name)
     raise ValueError("could not locate transformer block list on model")
 
 
