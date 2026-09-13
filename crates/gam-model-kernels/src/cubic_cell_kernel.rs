@@ -1453,8 +1453,8 @@ pub(crate) const GL20_WEIGHTS: [f64; 20] = [
     0.017_614_007_139_152_12,
 ];
 
-/// Provenance-tagged breakpoint dedup: sorts ascending and merges entries
-/// coinciding within 1e-12, but when a fixed score break and a link-knot
+/// Provenance-tagged breakpoint dedup: sorts ascending and merges equal
+/// entries, but when a fixed score break and a link-knot
 /// crossing coincide (the kink configuration), the surviving entry keeps
 /// the `Fixed` tag — a deterministic choice; the z location is identical
 /// either way.
@@ -1465,13 +1465,7 @@ fn dedup_sorted_tagged_breakpoints(points: &mut Vec<(f64, PartitionEdge)>) {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     points.dedup_by(|lhs, rhs| {
-        let coincide = if lhs.0 == rhs.0 {
-            true
-        } else if lhs.0.is_finite() && rhs.0.is_finite() {
-            (lhs.0 - rhs.0).abs() <= 1e-12
-        } else {
-            false
-        };
+        let coincide = lhs.0 == rhs.0;
         if coincide && matches!(lhs.1, PartitionEdge::Fixed(_)) {
             // `dedup_by` keeps `rhs` (the earlier element) — propagate the
             // Fixed tag onto the survivor.
@@ -2403,7 +2397,7 @@ where
         .iter()
         .map(|&sigma| (sigma, PartitionEdge::Fixed(sigma)))
         .collect();
-    if b.abs() > 1e-12 {
+    if b != 0.0 {
         for &tau in link_breaks {
             let z = (tau - a) / b;
             if z.is_finite() {
@@ -2470,7 +2464,7 @@ where
     for window in split_points.windows(2) {
         let (left, left_edge) = window[0];
         let (right, right_edge) = window[1];
-        if !left.is_finite() || !right.is_finite() || right - left <= 1e-12 {
+        if !left.is_finite() || !right.is_finite() || right <= left {
             continue;
         }
         let mid = interval_probe_point(left, right)?;
