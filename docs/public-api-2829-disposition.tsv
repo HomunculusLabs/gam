@@ -926,9 +926,9 @@ crates/gam-solve/src/gpu_kernels/reml_trace.rs	should_use_gpu_hutchinson	retired
 crates/gam-solve/src/gpu_kernels/sae_resident.rs	cpu_reference_outer_sequence	retired-no-product-user
 crates/gam-solve/src/gpu_kernels/sae_resident.rs	device_fit_outer_sequence	retired-no-product-user
 crates/gam-solve/src/gpu/pirls_gpu.rs	cholesky_lower_gpu	retired-no-product-user
-crates/gam-solve/src/gpu/pirls_gpu.rs	solve_pirls_step_on_stream	restored-in-place
-crates/gam-solve/src/gpu/pirls_gpu.rs	solve_pirls_step_on_stream_device	restored-in-place
-crates/gam-solve/src/gpu/pirls_gpu.rs	solve_step_on_stream_device	restored-in-place
+crates/gam-solve/src/gpu/pirls_gpu.rs	solve_pirls_step_on_stream	retired-no-product-user
+crates/gam-solve/src/gpu/pirls_gpu.rs	solve_pirls_step_on_stream_device	retired-no-product-user
+crates/gam-solve/src/gpu/pirls_gpu.rs	solve_step_on_stream_device	retired-no-product-user
 crates/gam-solve/src/inference/alo.rs	compute_alo_diagnostics_from_fit	retired-no-product-user
 crates/gam-solve/src/inference/alo.rs	compute_alo_diagnostics_from_pirls	retired-no-product-user
 crates/gam-solve/src/inference/alo.rs	compute_case_deletion_from_pirls	retired-no-product-user
