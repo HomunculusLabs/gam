@@ -6801,5 +6801,21 @@
     ],
     "reason": "#2469: POWER_THETA_MIN_DENOM (1e-9) dropped the power-law rate model in fit_rate when |2s + 2| was at most 1e-9. The only consumer of that model, forecast_iters in assess, reads exponent_s alone and refuses p = -s - 1 <= 0, so a denominator near zero (s near -1, p near 0) is already refused as non-convergent. An exactly zero denominator gives a non-finite kl_theta, which the existing is_finite check refuses. The guard and the constant are deleted.",
     "evidence": "git grep -n -w POWER_THETA_MIN_DENOM over the base finds two lines, both in crates/gam-solve/src/rho_optimizer/kl_certificate.rs: the declaration and its single use in fit_rate. No test names it, and kl_theta is read by no decision path (git grep -n -w kl_theta finds only the struct field, its docs and the constructor). Not compiled or run locally (user directive); compile is covered by the lead shared tip check."
+  },
+  {
+    "base": "8d1a516bc9094d1f2162286593baa7ae618c03f8",
+    "items": [
+      "crates/gam-terms/src/basis/zz_measure_2638_tests.rs:fn:aniso_fixture",
+      "crates/gam-terms/src/basis/zz_measure_2638_tests.rs:fn:constrained_fixture",
+      "crates/gam-terms/src/basis/zz_measure_2638_tests.rs:fn:duchon_cold_spec_psi_jet_matches_fd_at_the_resolved_chart",
+      "crates/gam-terms/src/basis/zz_measure_2638_tests.rs:fn:duchon_metadata_chart",
+      "crates/gam-terms/src/basis/zz_measure_2638_tests.rs:fn:duchon_resolve_chart_reproduces_the_cold_build",
+      "crates/gam-terms/src/basis/zz_measure_2638_tests.rs:fn:fro",
+      "crates/gam-terms/src/basis/zz_measure_2638_tests.rs:fn:no_ident_fixture",
+      "crates/gam-terms/src/basis/zz_measure_2638_tests.rs:fn:zz_measure_2638_chart_motion",
+      "crates/gam-terms/src/basis/zz_measure_2638_tests.rs:fn:zz_measure_2638_fd_step_sweep"
+    ],
+    "reason": "#2818 retirement after a restoration. a5daa52e4 restored these #2638 tests from c0a21b554^, but their subject, gam_terms::basis::build_duchon_basis_log_kappa_derivatives(data, spec), the psi-jet entry point that resolves a cold spec's chart itself, was deleted by dc325f190 as unreferenced. The surviving build_duchon_basis_log_kappa_derivativeswith_collocationwithworkspace takes explicit centers and transform, so the cold-spec contract these tests pin has no production subject, and the gam-terms lib test target did not compile (E0425 x3, tip check e890e5d3e).",
+    "evidence": "At 8d1a516bc9094d1f2162286593baa7ae618c03f8, git grep finds no declaration of build_duchon_basis_log_kappa_derivatives( in crates; git log -S shows dc325f190 removed it. The file is restored to its pre-a5daa52e4 module doc, whose blob is a5daa52e4^:crates/gam-terms/src/basis/zz_measure_2638_tests.rs."
   }
 ]

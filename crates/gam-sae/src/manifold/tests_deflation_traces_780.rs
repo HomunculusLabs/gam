@@ -105,11 +105,10 @@ pub(crate) fn assignment_log_strength_trace_ignores_fixed_logit_bug4() {
     let (mut term, target, mut rho) = gamma_fd_tiny_fixture();
     term.assignment.mode = AssignmentMode::ordered_beta_bernoulli(0.7, 0.9, true);
     // Atom 1 is the #1026 ungated background tier: a FIXED (inert) logit.
-    term.assignment = term
-        .assignment
-        .clone()
-        .with_ungated(vec![false, true])
-        .unwrap();
+    // The deleted builder checked the flag count against K and refused Softmax routing,
+    // then set the field; this ordered Beta--Bernoulli fixture has K = 2, so set it directly.
+    assert_eq!(term.assignment.ungated.len(), 2, "the tiny fixture has two atoms");
+    term.assignment.ungated = vec![false, true];
     assert!(
         term.assignment.logit_is_fixed(1) && !term.assignment.logit_is_fixed(0),
         "atom 1 must be the fixed (ungated) logit, atom 0 free"

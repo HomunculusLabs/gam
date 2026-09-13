@@ -941,3 +941,14 @@ print-only scan to that standard, so these three are deleted, with their
   `outer_gradient_at_large_rho_has_a_lambda_infinity_face_2450`.
 - `zz_measure_rho_gradient_part_decomposition_binomial_2623`. Its own doc says the channel (D)
   gate belongs in the commit that fixes it.
+
+### A restored #2638 file retired after landing
+
+`a5daa52e4` restored `crates/gam-terms/src/basis/zz_measure_2638_tests.rs` from
+`c0a21b554^`. The four tests call `build_duchon_basis_log_kappa_derivatives(data, spec)`,
+the psi-jet entry point that resolves a cold spec's chart before differentiating.
+`dc325f190` deleted that entry point as unreferenced, and gam-terms' lib tests stopped
+compiling. The surviving `build_duchon_basis_log_kappa_derivativeswith_collocationwithworkspace`
+takes explicit centers and transform, so the cold-spec contract the file pins has no
+production subject. The body is removed again, and its identities are recorded in
+`docs/source-removal-changes.json`.
