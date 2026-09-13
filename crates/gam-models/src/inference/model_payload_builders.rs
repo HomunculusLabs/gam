@@ -2569,8 +2569,7 @@ fn payload_for_survival_location_scale(
     time_basis: Option<SavedSurvivalTimeBasis>,
 ) -> Result<FittedModelPayload, String> {
     use crate::survival::construction::{
-        parse_survival_baseline_config, parse_survival_likelihood_mode,
-        survival_likelihood_modename,
+        SurvivalLikelihoodMode, parse_survival_baseline_config, survival_likelihood_modename,
     };
     // The time basis is CARRIED from the materialization that produced this fit
     // (#2470). It is not re-derived here: `materialize_survival` switches the
@@ -2593,7 +2592,6 @@ fn payload_for_survival_location_scale(
         fit_config.baseline_rate,
         fit_config.baseline_makeham,
     )?;
-    let likelihood_mode = parse_survival_likelihood_mode(fit_config.resolved_survival_likelihood())?;
 
     let fitted_inverse_link = ls_result.inverse_link.clone();
     // Compact the inner UnifiedFitResult and apply the fitted link state so
@@ -2641,11 +2639,17 @@ fn payload_for_survival_location_scale(
             survivalspec: "net".to_string(),
             baseline_cfg,
             time_basis,
-            survival_likelihood_label: survival_likelihood_modename(likelihood_mode).to_string(),
+            // A location-scale fit result is one whatever the configuration named:
+            // a noise formula or `linkwiggle(...)` selects this model under the
+            // default `transformation` likelihood.
+            survival_likelihood_label: survival_likelihood_modename(
+                SurvivalLikelihoodMode::LocationScale,
+            )
+            .to_string(),
             time_parameterization: ls_result.fit.time_parameterization,
             threshold_time_basis: ls_result.fit.threshold_time_basis.clone(),
             log_sigma_time_basis: ls_result.fit.log_sigma_time_basis.clone(),
-            formula_noise: None,
+            formula_noise: fit_config.noise_formula.clone(),
             survival_beta_time: ls_result.fit.fit.beta_time().to_vec(),
             survival_beta_threshold: ls_result.fit.fit.beta_threshold().to_vec(),
             survival_beta_log_sigma: ls_result.fit.fit.beta_log_sigma().to_vec(),

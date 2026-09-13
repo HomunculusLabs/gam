@@ -131,6 +131,43 @@ pub(crate) fn materialize_survival<'a>(
     if parsed.linkwiggle.is_some() && survival_mode == SurvivalLikelihoodMode::Transformation {
         survival_mode = SurvivalLikelihoodMode::LocationScale;
     }
+    // A noise formula is the log-sigma predictor, which only the location-scale
+    // likelihood has. Under the default `transformation` likelihood it selects
+    // that model, as `linkwiggle(...)` does. An explicit likelihood with no sigma
+    // block is refused rather than fitted with the noise formula dropped.
+    if config.noise_formula.is_some() {
+        if survival_mode == SurvivalLikelihoodMode::Transformation {
+            survival_mode = SurvivalLikelihoodMode::LocationScale;
+        }
+        if survival_mode != SurvivalLikelihoodMode::LocationScale {
+            return Err(WorkflowError::InvalidConfig {
+                reason: format!(
+                    "noise_formula requires the survival location-scale likelihood; survival_likelihood='{}' has no log-sigma predictor",
+                    config.resolved_survival_likelihood()
+                ),
+            });
+        }
+    }
+    // `survmodel(spec=...)` names the risk the fit estimates. Every survival
+    // likelihood here fits one hazard per cause, which is the net risk. A crude
+    // risk combines the cause-specific hazards, so it is refused rather than
+    // fitted as net.
+    if let Some(spec) = parsed.survivalspec.as_ref().and_then(|s| s.spec.as_deref()) {
+        let spec = spec.to_ascii_lowercase();
+        if spec == "crude" {
+            return Err(WorkflowError::InvalidConfig {
+                reason: "survival spec 'crude' is not supported by the one-hazard fitter; use survmodel(spec=net) and compute crude risk from separate cause-specific hazards"
+                    .to_string(),
+            });
+        }
+        if spec != "net" {
+            return Err(WorkflowError::InvalidConfig {
+                reason: format!(
+                    "unsupported survmodel(spec='{spec}'); only spec=net is accepted by the one-hazard fitter"
+                ),
+            });
+        }
+    }
     if age_right.is_some() && survival_mode != SurvivalLikelihoodMode::Latent {
         return Err(WorkflowError::InvalidConfig {
             reason: format!(
@@ -437,9 +474,30 @@ pub(crate) fn materialize_survival<'a>(
         )?;
     }
 
-    let residual_dist = parse_survival_distribution(&config.survival_distribution)?;
+    // `survmodel(distribution=...)` in the formula names the residual law, as
+    // `survival_distribution` does in the configuration; the formula wins.
+    let residual_dist = parse_survival_distribution(
+        parsed
+            .survivalspec
+            .as_ref()
+            .and_then(|s| s.survival_distribution.as_deref())
+            .unwrap_or(config.survival_distribution.as_str()),
+    )?;
     let survival_inverse_link = residual_distribution_inverse_link(residual_dist);
     let link_choice = parse_link_choice(config.link.as_deref(), config.flexible_link)?;
+    // Only the location-scale likelihood fits the anchored link deviation a
+    // `flexible(...)` link asks for; another likelihood would drop it.
+    if link_choice.as_ref().is_some_and(|choice| {
+        matches!(choice.mode, gam_terms::inference::formula_dsl::LinkMode::Flexible)
+    }) && survival_mode != SurvivalLikelihoodMode::LocationScale
+    {
+        return Err(WorkflowError::InvalidConfig {
+            reason: format!(
+                "survival flexible(...) links are supported only with survival_likelihood='location-scale'; got '{}'",
+                config.resolved_survival_likelihood()
+            ),
+        });
+    }
     let effective_linkwiggle =
         effectivelinkwiggle_formulaspec(parsed.linkwiggle.as_ref(), link_choice.as_ref());
     let effective_linkwiggle_cfg = effective_linkwiggle.clone().map(|cfg| LinkWiggleConfig {
