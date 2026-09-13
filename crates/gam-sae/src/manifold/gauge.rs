@@ -256,8 +256,8 @@ fn fit_beta_mle(r: &[f64]) -> Option<(f64, f64, f64)> {
         // Newton step `Δ = H⁻¹ g` (H is the negative Hessian, g the gradient).
         let d_a = (h_bb * g_a - h_ab * g_b) / det;
         let d_b = (h_aa * g_b - h_ab * g_a) / det;
-        // Step-halving to keep `(α, β)` strictly positive and non-decreasing in
-        // loglik — a standard safeguard, no wall-clock budget.
+        // Step-halving to keep `(α, β)` strictly positive and strictly increasing
+        // in loglik — a standard safeguard, no wall-clock budget.
         let base = beta_loglik_avg(alpha, beta, s_ln, s_ln1m);
         // Halve only while a trial can still differ from `(α, β)` in floating point:
         // past step `u·|α|/|Δα|` (and likewise for `β`) no trial moves either shape.
@@ -291,7 +291,12 @@ fn fit_beta_mle(r: &[f64]) -> Option<(f64, f64, f64)> {
                     Ok(None)
                 }
             },
-            |_, f| f >= base,
+            // Only a strict increase is accepted. A tie is what a trial that moves
+            // neither shape returns, so accepting it re-entered the loop at the same
+            // state forever whenever the polygamma evaluation kept the score just
+            // outside its band. Each accepted pass now raises the computed loglik by
+            // at least one ulp, which it can do only finitely often.
+            |_, f| f > base,
         ) {
             Ok(v) => v,
             Err(never) => match never {},
