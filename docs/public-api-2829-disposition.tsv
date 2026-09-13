@@ -1166,7 +1166,7 @@ crates/gam-terms/src/basis/workspace_cache.rs	spherical_wahba_kernel_matrix_cpu	
 crates/gam-terms/src/construction.rs	block_dimension	retired-no-product-user
 crates/gam-terms/src/construction.rs	kronecker_reparameterization_engine	retired-by-later-deletion:dc325f1909
 crates/gam-terms/src/construction.rs	max_balanced_eigenvalue	retired-no-product-user
-crates/gam-terms/src/construction.rs	trace_product	restored-in-place
+crates/gam-terms/src/construction.rs	trace_product	retired-no-product-user
 crates/gam-terms/src/decoders/behavioral_head.rs	from_score_influence	retired-by-later-deletion:843e0fc200
 crates/gam-terms/src/decoders/behavioral_head.rs	head_feature_significance	retired-by-later-deletion:843e0fc200
 crates/gam-terms/src/decoders/behavioral_head.rs	head_working_weights	retired-by-later-deletion:843e0fc200
@@ -1211,7 +1211,7 @@ crates/gam-terms/src/smooth/term_specs.rs	build_smooth_design_withworkspace	reti
 crates/gam-terms/src/smooth/term_specs.rs	is_interaction	retired-by-later-deletion:843e0fc200
 crates/gam-terms/src/smooth/term_specs.rs	logdet_and_derivatives	retired-by-later-deletion:843e0fc200
 crates/gam-terms/src/smooth/term_specs.rs	map_term_coefficients	retired-by-later-deletion:843e0fc200
-crates/gam-terms/src/smooth/term_specs.rs	num_penalties	restored-in-place
+crates/gam-terms/src/smooth/term_specs.rs	num_penalties	retired-no-product-user
 crates/gam-terms/src/smooth/term_specs.rs	total_smooth_cols	restored-in-place
 crates/gam-terms/src/smooth/term_specs.rs	with_prior_mean	retired-by-later-deletion:843e0fc200
 crates/gam-terms/src/structure/anova_atom.rs	fit_pair_surface	retired-by-later-deletion:843e0fc200

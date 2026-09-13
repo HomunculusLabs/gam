@@ -977,22 +977,6 @@ impl CanonicalPenalty {
             .scaled_add(lambda, &self.local);
     }
 
-    /// Compute `scale * tr(M · S_k)` where M is a `p × p` dense matrix.
-    /// Only reads `M[start..end, start..end]` — O(block_dim²) not O(p²).
-    pub fn trace_product(&self, m: &Array2<f64>, scale: f64) -> f64 {
-        if self.rank() == 0 || scale == 0.0 {
-            return 0.0;
-        }
-        let r = &self.col_range;
-        let m_block = m.slice(s![r.start..r.end, r.start..r.end]);
-        let rm = self.root.dot(&m_block);
-        scale
-            * rm.iter()
-                .zip(self.root.iter())
-                .map(|(&a, &b)| a * b)
-                .sum::<f64>()
-    }
-
     /// Compute `scale * v^T S_k v` (quadratic form).
     /// Only reads `v[start..end]` — O(rank × block_dim) not O(rank × p).
     pub fn quadratic(&self, v: &Array1<f64>, scale: f64) -> f64 {

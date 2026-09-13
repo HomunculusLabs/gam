@@ -2581,12 +2581,6 @@ impl TermCollectionDesign {
             .collect()
     }
 
-    /// Number of penalty blocks.
-    #[inline]
-    pub fn num_penalties(&self) -> usize {
-        self.penalties.len()
-    }
-
     /// Resolve coefficient groups against this design's global coefficient
     /// layout and append their penalties after the existing term penalties.
     pub fn realize_coefficient_groups(
