@@ -861,7 +861,6 @@ pub(crate) fn inner_block_accepts_penalty_improving_step_even_if_loglik_drops() 
         compute_covariance: false,
         use_outer_hessian: false,
         screening_max_inner_iterations: None,
-        outer_inner_max_iterations: None,
         seed_screening: false,
         early_exit_threshold: None,
         outer_score_subsample: None,

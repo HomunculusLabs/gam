@@ -1694,10 +1694,9 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
                     cap.as_ref().map(|value| value.load(std::sync::atomic::Ordering::Relaxed))
                 };
                 format!(
-                    "inner cycle budget inputs: base={}, screening_cap={:?}, outer_cap={:?}",
+                    "inner cycle budget inputs: base={}, screening_cap={:?}",
                     outer_options.inner_max_cycles,
                     load_cap(&outer_options.screening_max_inner_iterations),
-                    load_cap(&outer_options.outer_inner_max_iterations),
                 )
             };
             let selection = if let Some(value_selection) = owned_value_mode {

@@ -3536,5 +3536,15 @@
     },
     "reason": "#2829 product-root rule: DenseRightProductView::quadratic_form_diag and EmbeddedColumnBlock::quadratic_form_diag, restored in place from d484a091a, have no caller. Each only materializes its view into a DesignMatrix and delegates, and no call in the tree has either view as its receiver. Both are deleted. DesignMatrix::quadratic_form_diag, which the sweep did not remove, is called only inside gam-linalg, so it narrows to pub(crate).",
     "evidence": "At 4439e507f5b220fcf6a3b22ce6cec6f230d49074, git grep -n -E '\\.quadratic_form_diag\\(' over crates, src and tests finds calls only in crates/gam-linalg/src/matrix/mod.rs. They sit inside other operators' quadratic_form_diag implementations and inside the two deleted methods' own delegations to DesignMatrix, and none has a DenseRightProductView or EmbeddedColumnBlock receiver. The public declarations of quadratic_form_diag in that file are the two view methods and DesignMatrix's inherent method. Pool job 607651 on sw0c at d0abe5366341e5c5819917a47794c5e606484b51, the chain stream, negbin, roles, latent, logit, quadratic on 2d79c690d83871f0d3a5d871bf01f5a88db4c0f2 (log /scratch.global/sauer354/pool/api2829/check.607651.log): source_removal_guard.py and public_api_census.py exited 0 on all six links. cargo check --workspace --all-targets --exclude gam-pyffi --keep-going reported errors in only two places, neither from this commit: tests/quality/families/quality_vs_pymc_nuts_binomial_logit.rs, two callers of the logit commit's deleted constructor, which is held back and not landed; and crates/gam-models/src/inference/model_payload_builders.rs:3286, the FittedModelPayload Debug red from 5d443c3c8 at the chain base, which 3a5be6550 fixed on main. Main had moved these files since the checked chain base, so the landed blobs are the checked blobs three-way merged with main's change: crates/gam-linalg/src/matrix/mod.rs (85eaa378a bfb09a938)."
+  },
+  {
+    "base": "2a793c30dfc4e30b5defe77f712d76e9cdbbc5cf",
+    "removed": {
+      "crates/gam-custom-family/src/custom_family_persistent_warm_start.rs::evaluate_past_inner_cycle_cap": 1,
+      "crates/gam-custom-family/src/custom_family_persistent_warm_start.rs::update_custom_outer_inner_cap_from_warm_start": 1,
+      "crates/gam-custom-family/src/warm_start.rs::with_inner_cap": 1
+    },
+    "reason": "#2695 lead ruling (09-13): the custom-family outer's adaptive inner-cycle cap, its full-budget retry and CustomOuterState's cap sharing are deleted; an inner solve stops on its own certificate.",
+    "evidence": "The removed declarations are pub(crate) fn update_custom_outer_inner_cap_from_warm_start and pub(crate) fn evaluate_past_inner_cycle_cap (crates/gam-custom-family/src/custom_family_persistent_warm_start.rs) and pub(crate) fn with_inner_cap (crates/gam-custom-family/src/warm_start.rs). At the base git grep -n -w finds their callers only in crates/gam-custom-family/src/fit.rs and the lib.rs re-export, all removed in the same commit."
   }
 ]

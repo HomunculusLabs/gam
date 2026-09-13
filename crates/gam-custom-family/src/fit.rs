@@ -2362,11 +2362,6 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     use gam_solve::rho_optimizer::{OuterEvalOrder, OuterProblem};
 
     let screening_cap = Arc::new(AtomicUsize::new(0));
-    let outer_inner_cap = options
-        .outer_inner_max_iterations
-        .clone()
-        .unwrap_or_else(|| Arc::new(AtomicUsize::new(options.inner_max_cycles.max(1))));
-    outer_inner_cap.store(options.inner_max_cycles.max(1), Ordering::Relaxed);
     // #2349 — shared "re-evaluate COLD" pulse. The outer cost-stall guard raises
     // it when it grants a STUCK-stall escape (a near-separating profiled fit
     // whose warm-started trajectory carries value hysteresis on a near-flat
@@ -2377,7 +2372,6 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     let outer_force_cold = Arc::new(AtomicBool::new(false));
     let mut outer_options = options.clone();
     outer_options.screening_max_inner_iterations = Some(Arc::clone(&screening_cap));
-    outer_options.outer_inner_max_iterations = Some(Arc::clone(&outer_inner_cap));
 
     let n_rho = rho0.len();
     let (cap_gradient, cap_hessian) =
@@ -2711,15 +2705,9 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         // #2349: consume the cold-reeval pulse once per outer evaluation. When
         // active (a near-separating warm-start-hysteresis stall the outer guard
         // flagged), every inner solve in this evaluation drops the warm cache
-        // and runs cold + uncapped so search descends a trajectory-independent
-        // objective surface.
+        // and runs cold so search descends a trajectory-independent objective
+        // surface.
         let force_cold = outer.take_force_cold();
-        if force_cold {
-            outer_options
-                .outer_inner_max_iterations
-                .as_ref()
-                .map(|cap| cap.store(0, Ordering::Relaxed));
-        }
         // Genuinely value-only fulfilment (#979). A `Value` request from an outer
         // cost, screening, or reactive-domain probe never consumes the outer
         // gradient. The inner solve in `EvalMode::ValueOnly` already produces the
@@ -2732,22 +2720,15 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             } else {
                 screened_outer_warm_start(outer.warm_cache.as_ref(), rho)
             };
-            return match evaluate_past_inner_cycle_cap(
-                &outer_inner_cap,
-                options.inner_max_cycles.max(1),
-                || {
-                    outerobjectivegradienthessian_labeled(
-                        family,
-                        specs,
-                        &outer_options,
-                        &label_layout,
-                        rho,
-                        warm_ref,
-                        &rho_prior,
-                        EvalMode::ValueOnly,
-                    )
-                },
-                |evaluation| (!evaluation.inner_converged).then_some(evaluation.inner.cycles),
+            return match outerobjectivegradienthessian_labeled(
+                family,
+                specs,
+                &outer_options,
+                &label_layout,
+                rho,
+                warm_ref,
+                &rho_prior,
+                EvalMode::ValueOnly,
             ) {
                 Ok(eval) if eval.inner_converged && eval.objective.is_finite() => {
                     let inner_beta_hint = Some(Array1::from_iter(
@@ -2828,26 +2809,19 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         } else {
             screened_outer_warm_start(outer.warm_cache.as_ref(), rho)
         };
-        let eval_result = match evaluate_past_inner_cycle_cap(
-            &outer_inner_cap,
-            options.inner_max_cycles.max(1),
-            || {
-                outerobjectivegradienthessian_labeled(
-                    family,
-                    specs,
-                    &outer_options,
-                    &label_layout,
-                    rho,
-                    warm_ref,
-                    &rho_prior,
-                    if request_hessian {
-                        EvalMode::ValueGradientHessian
-                    } else {
-                        EvalMode::ValueAndGradient
-                    },
-                )
+        let eval_result = match outerobjectivegradienthessian_labeled(
+            family,
+            specs,
+            &outer_options,
+            &label_layout,
+            rho,
+            warm_ref,
+            &rho_prior,
+            if request_hessian {
+                EvalMode::ValueGradientHessian
+            } else {
+                EvalMode::ValueAndGradient
             },
-            |evaluation| (!evaluation.inner_converged).then_some(evaluation.inner.cycles),
         ) {
             Ok(eval) if !eval.inner_converged => {
                 let failure = inner_solve_not_converged_error(&eval.inner, rho.len(), 0);
@@ -2872,22 +2846,6 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     } =>
             {
                 let warm_start = eval.warm_start.clone();
-                let gradient_norm = eval
-                    .gradient
-                    .iter()
-                    .map(|value| value * value)
-                    .sum::<f64>()
-                    .sqrt();
-                // #2349: keep the cap uncapped while the cold-reeval latch is
-                // active so cold solves reach their fixed point.
-                if !force_cold {
-                    update_custom_outer_inner_cap_from_warm_start(
-                        &outer_options,
-                        &warm_start,
-                        Some(gradient_norm),
-                        &mut outer.initial_gradient_norm,
-                    );
-                }
                 outer.warm_cache = Some(warm_start.clone());
                 store_persistent_custom_family_warm_start(
                     persistent_warm_start_cache.as_ref(),
@@ -2961,10 +2919,6 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             initial_warm_cache,
             Arc::clone(&outer_force_cold),
         )
-        .with_inner_cap(
-            Arc::clone(&outer_inner_cap),
-            options.inner_max_cycles.max(1),
-        )
         .with_outer_derivative_pilot(family.outer_derivative_pilot_schedule()),
         |outer: &mut CustomOuterState, rho: &Array1<f64>| {
             // Always use warm cache when available — the previous inner solution
@@ -2974,58 +2928,25 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             //
             // #2349: once the outer cost-stall guard has raised the cold-reeval
             // pulse (near-separating warm-start hysteresis), drop the warm cache
-            // and run this probe cold + uncapped so the profiled objective is a
-            // consistent function of ρ.
+            // and run this probe cold so the profiled objective is a consistent
+            // function of ρ.
             let force_cold = outer.take_force_cold();
             let warm_ref = if force_cold {
-                outer_options
-                    .outer_inner_max_iterations
-                    .as_ref()
-                    .map(|cap| cap.store(0, Ordering::Relaxed));
                 canonical_seed.as_ref()
             } else {
                 screened_outer_warm_start(outer.warm_cache.as_ref(), rho)
             };
-            match evaluate_past_inner_cycle_cap(
-                &outer_inner_cap,
-                options.inner_max_cycles.max(1),
-                || {
-                    outerobjectivegradienthessian_labeled(
-                        family,
-                        specs,
-                        &outer_options,
-                        &label_layout,
-                        rho,
-                        warm_ref,
-                        &rho_prior,
-                        EvalMode::ValueOnly,
-                    )
-                },
-                |evaluation| (!evaluation.inner_converged).then_some(evaluation.inner.cycles),
+            match outerobjectivegradienthessian_labeled(
+                family,
+                specs,
+                &outer_options,
+                &label_layout,
+                rho,
+                warm_ref,
+                &rho_prior,
+                EvalMode::ValueOnly,
             ) {
                 Ok(eval) if eval.inner_converged && eval.objective.is_finite() => {
-                    // Adapt the inner-cycle cap from THIS probe's converged
-                    // cost, exactly as the value+gradient main eval does below.
-                    // Value-only line-search probes are the MOST FREQUENT outer
-                    // call (several per outer iteration), and omitting the cap
-                    // update here left every probe running the full
-                    // `inner_max_cycles` (1200) budget even after a warm-started
-                    // solve converges in a handful of cycles — the dominant
-                    // runtime multiplier on a large joint design (the multinomial
-                    // smooth-by-factor >360s cliff). `gradient_norm = None`: a
-                    // value-only probe has no gradient, so the cap is driven
-                    // purely by the converged cycle count (the gradient-norm
-                    // near-optimum uncapping is handled by the main eval).
-                    // #2349: while the cold-reeval latch is active, leave the cap
-                    // uncapped so every cold solve reaches its fixed point.
-                    if !force_cold {
-                        update_custom_outer_inner_cap_from_warm_start(
-                            &outer_options,
-                            &eval.warm_start,
-                            None,
-                            &mut outer.initial_gradient_norm,
-                        );
-                    }
                     outer.warm_cache = Some(eval.warm_start);
                     outer.last_error = None;
                     Ok(eval.objective)
@@ -3283,7 +3204,6 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     }
     let per_block = split_labeled_log_lambdas(&rho_star, &label_layout)?;
     let mut final_options = options.clone();
-    final_options.outer_inner_max_iterations = None;
     // Reconstruct only the deterministic penalty geometry needed by covariance
     // and EDF assembly. The coefficient mode itself already came from this
     // exact rho-specific bundle and is never solved or evaluated again.

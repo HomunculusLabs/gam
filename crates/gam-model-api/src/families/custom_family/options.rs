@@ -475,10 +475,6 @@ pub struct BlockwiseFitOptions {
     /// Shared cap engaged during seed screening so cost-only evaluations can
     /// stop inner iterations early without affecting the full solve.
     pub screening_max_inner_iterations: Option<Arc<AtomicUsize>>,
-    /// Shared cap engaged during regular outer iterations. Unlike screening,
-    /// this is only a budget: capped solves still have to earn the ordinary
-    /// KKT certificate before derivatives may be exposed.
-    pub outer_inner_max_iterations: Option<Arc<AtomicUsize>>,
     /// Optional line-search objective ceiling for lazy log-likelihood-only
     /// evaluations. Families whose per-row log-likelihood contributions are
     /// non-positive may stop once the partial negative log-likelihood is already
@@ -629,7 +625,6 @@ impl Default for BlockwiseFitOptions {
             use_outer_hessian: true,
             compute_covariance: false,
             screening_max_inner_iterations: None,
-            outer_inner_max_iterations: None,
             seed_screening: false,
             early_exit_threshold: None,
             outer_score_subsample: None,
