@@ -5348,17 +5348,105 @@ impl SaeSupportSparseTerm {
         Ok(())
     }
 
-    /// One row's exact Gauss-Newton coordinate step with manifold-aware
-    /// backtracking, on the row's caller-held coordinate block. Semantically
-    /// the serial sweep's row iteration.
+    /// The exact Hessian of one row's frozen-decoder coordinate objective
+    /// `½‖y − Σ_s f_s(t_s)‖² + Σ V_ard(t)`: the Gauss-Newton gram `J Jᵀ`, less the
+    /// residual's second-jet term `Σ_o r_o ∂²f_o/∂t_a∂t_b` within each slot (the slots'
+    /// decodes add, so cross-slot second derivatives vanish), plus each axis's exact
+    /// prior curvature. `None` when a slot's retraction does not add the step, so a
+    /// coordinate Newton step is not the motion the retraction takes, or when a slot's
+    /// basis exposes no analytic second jet.
+    fn exact_row_coordinate_hessian(
+        &self,
+        row: usize,
+        coords_row: &[f64],
+        offsets: &[Range<usize>],
+        support: &[u32],
+        jacobian: &Array2<f64>,
+        residual: &Array1<f64>,
+        ard_precisions: &[Vec<f64>],
+    ) -> Result<Option<Array2<f64>>, String> {
+        let mut hessian = jacobian.dot(&jacobian.t());
+        for (slot, &atom_index) in support.iter().enumerate() {
+            let atom_index = atom_index as usize;
+            if !self.assignment.atom_retraction_adds_the_step(atom_index) {
+                return Ok(None);
+            }
+            let atom = &self.atoms[atom_index];
+            let d = atom.latent_dim();
+            let m = atom.basis_size();
+            let start = offsets[slot].start;
+            let coordinates = ArrayView2::from_shape((1, d), &coords_row[offsets[slot].clone()])
+                .map_err(|error| {
+                    format!(
+                        "support row {row} exact coordinate Hessian: atom {atom_index} \
+                         coordinate view: {error}"
+                    )
+                })?;
+            let Some(second) = self.slot_second_jet(atom_index, coordinates)? else {
+                return Ok(None);
+            };
+            if second.dim() != (1, m, d, d) {
+                return Err(format!(
+                    "support row {row} exact coordinate Hessian: atom {atom_index} second jet \
+                     shape {:?} != (1, {m}, {d}, {d})",
+                    second.dim()
+                ));
+            }
+            // `D_basis · r` once per basis function, so the residual curvature of an axis
+            // pair is one pass over the basis.
+            let decoder = atom.decoder_coefficients();
+            let weighted: Vec<f64> = (0..m)
+                .map(|basis| decoder.row(basis).dot(residual))
+                .collect();
+            let periods = self.assignment.atom_axis_periods(atom_index);
+            for axis_a in 0..d {
+                for axis_b in 0..d {
+                    let residual_curvature: f64 = (0..m)
+                        .map(|basis| second[[0, basis, axis_a, axis_b]] * weighted[basis])
+                        .sum();
+                    hessian[[start + axis_a, start + axis_b]] -= residual_curvature;
+                }
+                hessian[[start + axis_a, start + axis_a]] += ArdAxisPrior::eval(
+                    ard_precisions[atom_index][axis_a],
+                    coords_row[start + axis_a],
+                    periods[axis_a],
+                )
+                .hess;
+            }
+        }
+        Ok(Some(hessian))
+    }
+
+    /// Whether a row Hessian makes the trust-region model strictly convex: every
+    /// eigenvalue above the REML positive-eigenspace band, the rank rule the support
+    /// lane's penalty spectra use.
+    fn row_hessian_is_positive_definite(hessian: &Array2<f64>) -> Result<bool, String> {
+        let (eigenvalues, _) = hessian
+            .eigh(Side::Lower)
+            .map_err(|error| format!("support row coordinate Hessian eigh: {error}"))?;
+        let values = eigenvalues.to_vec();
+        let threshold =
+            gam_solve::estimate::reml::reml_outer_engine::positive_eigenvalue_threshold(&values);
+        Ok(values.iter().all(|&value| value > threshold))
+    }
+
+    /// One row's coordinate step with manifold-aware backtracking, on the row's
+    /// caller-held coordinate block. Semantically the serial sweep's row iteration.
+    /// The trust-region model is the row's exact Hessian where every slot's retraction
+    /// adds the step and that Hessian is positive definite, and the Gauss-Newton
+    /// majorizer otherwise.
     ///
-    /// Storage-wise: nothing here allocates. The scratch is the CALLER's, held
+    /// Storage-wise: the Gauss-Newton path allocates nothing. The scratch is the CALLER's, held
     /// per rayon worker and reused across every row that worker takes (#2575).
     /// It used to be per-row — eighteen allocations per row, `N` rows per
     /// sweep, hundreds of sweeps per fit — and the doc comment's claim that
     /// "the line-search halvings allocate nothing" was true within a row and
     /// misleading across them; the profiled 12.4% of self time in
     /// `malloc`/`free`/`memmove` is what that cost.
+    ///
+    /// A row that takes a step also evaluates each slot's analytic second jet for the exact
+    /// Hessian (#2576): one allocation per active slot, which buys a quadratic local rate
+    /// where the majorizer contracts linearly.
     fn row_coordinate_solve(
         &self,
         row: usize,
@@ -5443,10 +5531,28 @@ impl SaeSupportSparseTerm {
         if raw_gradient_max <= stationarity_tolerance * row_objective_scale {
             return Ok(0.0);
         }
+        // #2576: the Gauss-Newton gram drops the residual's second-jet term and clamps the
+        // signed periodic ARD curvature, so a row whose residual does not vanish contracts
+        // only linearly near its fixed point. Job 609612's frozen-decoder polish lowered its
+        // raw coordinate KKT only from 1.02e-2 to 4.83e-3 between sweeps 64 and 200. Where
+        // the row's exact Hessian is available and positive definite, the trust-region model
+        // is that Hessian and the step is the exact Newton step.
+        let curvature = match self.exact_row_coordinate_hessian(
+            row,
+            coords_row,
+            offsets,
+            support,
+            jacobian,
+            &residual,
+            ard_precisions,
+        )? {
+            Some(hessian) if Self::row_hessian_is_positive_definite(&hessian)? => hessian,
+            _ => gram,
+        };
         // SPEC-22: the exact PSD trust-region subproblem is general outer
         // optimizer machinery and lives in `opt`. gam kept a private copy
         // until #2574.
-        let delta = opt::solve_psd_trust_region(gram.view(), rhs_vector.view(), trust_radius)
+        let delta = opt::solve_psd_trust_region(curvature.view(), rhs_vector.view(), trust_radius)
         .map_err(|error| format!("SaeSupportSparseTerm::coordinate_sweep: {error}"))?;
         // `retract_row_coords` moves the point with the manifold exponential map,
         // which travels only the TANGENT component of the step -- anything radial is

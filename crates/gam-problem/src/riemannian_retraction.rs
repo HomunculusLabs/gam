@@ -116,6 +116,18 @@ impl RetractionKind {
         }
     }
 
+    /// Whether retracting moves the point by the tangent step itself, up to wrapping a
+    /// period: Euclidean and circle axes do, and a sphere normalizes the moved point. A
+    /// caller that takes a Newton step in coordinates travels that step only where this
+    /// holds.
+    pub fn adds_the_step(&self) -> bool {
+        match self {
+            Self::Euclidean { .. } | Self::Circle => true,
+            Self::Sphere { .. } => false,
+            Self::Product(product) => product.parts.iter().all(RetractionKind::adds_the_step),
+        }
+    }
+
     pub fn metric_weights(&self) -> Vec<f64> {
         match self {
             Self::Euclidean { dim } => vec![1.0; *dim],
@@ -185,6 +197,15 @@ impl LatentRetractionRegistry {
 
     pub fn is_all_euclidean(&self) -> bool {
         self.block.is_none()
+    }
+
+    /// Whether the override retraction moves the point by the tangent step itself (see
+    /// [`RetractionKind::adds_the_step`]). With no override installed this is `true`, and
+    /// the caller's own latent manifold decides.
+    pub fn adds_the_step(&self) -> bool {
+        self.block
+            .as_ref()
+            .map_or(true, RetractionKind::adds_the_step)
     }
 
     pub(crate) fn ambient_dim(&self, fallback_dim: usize) -> usize {

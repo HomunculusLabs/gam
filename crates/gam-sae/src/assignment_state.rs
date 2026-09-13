@@ -266,6 +266,32 @@ impl SaeAssignmentState {
         self.atom_coord_meta[atom].latent_dim
     }
 
+    /// Whether [`Self::retract_row_coords`] moves this atom's coordinates by the step
+    /// itself, up to wrapping a period or clamping an interval, so that a Newton step in
+    /// coordinates is the motion the retraction takes. A sphere normalizes the moved
+    /// point instead.
+    pub(crate) fn atom_retraction_adds_the_step(&self, atom: usize) -> bool {
+        let meta = &self.atom_coord_meta[atom];
+        if meta.retraction.is_all_euclidean() {
+            Self::manifold_retraction_adds_the_step(&meta.manifold)
+        } else {
+            meta.retraction.adds_the_step()
+        }
+    }
+
+    fn manifold_retraction_adds_the_step(manifold: &LatentManifold) -> bool {
+        match manifold {
+            LatentManifold::Euclidean
+            | LatentManifold::Circle { .. }
+            | LatentManifold::Interval { .. } => true,
+            LatentManifold::Sphere { .. } => false,
+            LatentManifold::Product(parts)
+            | LatentManifold::ProductWithMetric {
+                manifolds: parts, ..
+            } => parts.iter().all(Self::manifold_retraction_adds_the_step),
+        }
+    }
+
     /// Effective per-axis periodicity for one atom, including a retraction
     /// override attached to an otherwise Euclidean coordinate block.
     ///
