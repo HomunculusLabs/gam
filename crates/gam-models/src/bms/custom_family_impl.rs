@@ -2761,6 +2761,34 @@ impl ExactNewtonJointHessianWorkspace for BernoulliMarginalSlopeExactNewtonJoint
             )
     }
 
+    /// Every canonical axis's Hessian derivative, served from this workspace's own exact cache.
+    ///
+    /// Without it, `custom_family_joint_jeffreys_term_from_workspace` declines. Each Jeffreys
+    /// term then re-forms the information and its axes through the family, which for a flex
+    /// fit rebuilds the exact cache at a β this workspace already holds (#979). The rigid path
+    /// declines: its family route is one batched row-kernel pass and builds no flex cache. The
+    /// family hook's trust gate refuses only an untrusted layout whose joint Hessian is
+    /// block-diagonal. A flex layout never is, because its score-warp and link-deviation blocks
+    /// enter every row's likelihood jointly with the marginal and slope blocks. Testing coupling
+    /// here would re-form that Hessian through the family, which is the rebuild this hook exists
+    /// to avoid.
+    fn directional_derivative_all_axes(&self) -> Result<Option<Vec<Array2<f64>>>, String> {
+        if !self.family.effective_flex_active(&self.block_states)? {
+            return Ok(None);
+        }
+        let total = self.cache.slices.total;
+        let mut axes = Vec::with_capacity(total);
+        for index in 0..total {
+            let mut axis = Array1::<f64>::zeros(total);
+            axis[index] = 1.0;
+            match self.directional_derivative(&axis)? {
+                Some(derivative) => axes.push(derivative),
+                None => return Ok(None),
+            }
+        }
+        Ok(Some(axes))
+    }
+
     fn second_directional_derivative_operator(
         &self,
         d_beta_u_flat: &Array1<f64>,
