@@ -379,8 +379,8 @@ crates/gam-sae/src/assignment_state.rs	from_topk_support	retired-by-later-deleti
 crates/gam-sae/src/assignment_state.rs	full_support	retired-by-later-deletion:b66a7d04e2
 crates/gam-sae/src/assignment_state.rs	gate_cells	retired-no-product-user
 crates/gam-sae/src/assignment_state.rs	index_cells	retired-no-product-user
-crates/gam-sae/src/assignment_state.rs	is_full_support	narrowed-to-crate
-crates/gam-sae/src/assignment_state.rs	materialize_dense	restored-in-place
+crates/gam-sae/src/assignment_state.rs	is_full_support	retired-no-product-user
+crates/gam-sae/src/assignment_state.rs	materialize_dense	retired-no-product-user
 crates/gam-sae/src/assignment.rs	assignment_prior_grad_hdiag	retired-by-later-deletion:b66a7d04e2
 crates/gam-sae/src/assignment.rs	assignment_prior_log_strength_derivative	retired-by-later-deletion:b66a7d04e2
 crates/gam-sae/src/assignment.rs	assignment_prior_log_strength_hdiag	retired-by-later-deletion:b66a7d04e2

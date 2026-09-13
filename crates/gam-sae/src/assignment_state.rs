@@ -13,12 +13,11 @@
 //!   * `coords[i]`       — the on-manifold coordinates of ONLY the active atoms,
 //!     flattened in support order (`Σ_{k∈S_i} d_k` scalars per row).
 //!
-//! The dense [`SaeAssignment`] (`assignment.rs`) is the FULL-SUPPORT
-//! materialization of this state: `S_i = [0, K)` for every row, so the
+//! The dense `SaeAssignment` (`assignment.rs`) is the FULL-SUPPORT
+//! specialization of this state: `S_i = [0, K)` for every row, so the
 //! per-`(row, atom)` coordinate storage is the transpose of the dense
 //! `Vec<LatentCoordValues>` per-atom blocks, and `gate_params[i]` is the dense
-//! `logits` row. `SaeAssignmentState::materialize_dense` reconstructs that dense
-//! layout bit-for-bit.
+//! `logits` row.
 //!
 //! # Layout contract vs. the `SaeTopKCurvedBudget` ledger
 //!
@@ -39,39 +38,29 @@
 //! 8 bytes per cell.
 
 use gam_problem::LatentRetractionRegistry;
-use gam_terms::latent::{LatentCoordValues, LatentIdMode, LatentManifold};
-use ndarray::{Array1, Array2};
+use gam_terms::latent::LatentManifold;
+use ndarray::Array1;
 
-use crate::assignment::{AssignmentMode, SaeAssignment};
+use crate::assignment::AssignmentMode;
 
-/// Per-atom coordinate metadata needed to reconstruct the dense
-/// [`LatentCoordValues`] block bit-for-bit on materialization.
+/// Per-atom coordinate metadata.
 #[derive(Debug, Clone)]
 struct AtomCoordMeta {
     latent_dim: usize,
-    id_mode: LatentIdMode,
     manifold: LatentManifold,
     retraction: LatentRetractionRegistry,
-    /// Process-local stable identity of the source block. Preserved so a
-    /// dense → state → dense round-trip is identity-stable, not merely
-    /// value-stable.
-    latent_id: u64,
 }
 
 /// Coordinate geometry for one atom in a support-sparse assignment.
 ///
 /// Unlike the former `d_max` constructor, this is indexed by atom and therefore
 /// preserves mixed intrinsic dimensions and topologies without padding inactive
-/// coordinates. The retraction and stable identity travel with the coordinate
-/// block so a later full-support specialization remains an exact inverse of the
-/// dense representation.
+/// coordinates. The retraction travels with the coordinate block.
 #[derive(Debug, Clone)]
 pub struct SaeAssignmentAtomSpec {
     pub latent_dim: usize,
-    pub id_mode: LatentIdMode,
     pub manifold: LatentManifold,
     pub retraction: LatentRetractionRegistry,
-    pub latent_id: u64,
 }
 
 impl SaeAssignmentAtomSpec {
@@ -80,18 +69,16 @@ impl SaeAssignmentAtomSpec {
     pub fn euclidean(latent_dim: usize) -> Self {
         Self {
             latent_dim,
-            id_mode: LatentIdMode::None,
             manifold: LatentManifold::Euclidean,
             retraction: LatentRetractionRegistry::all_euclidean(),
-            latent_id: 0,
         }
     }
 
 }
 
 /// Support-sparse per-row assignment state (see module docs). Internal type: the
-/// unified engine's ONE routing state, of which the dense [`SaeAssignment`] is
-/// the full-support specialization.
+/// unified engine's ONE routing state, of which the dense `SaeAssignment` is the
+/// full-support specialization.
 #[derive(Debug, Clone)]
 pub struct SaeAssignmentState {
     n_obs: usize,
@@ -104,16 +91,9 @@ pub struct SaeAssignmentState {
     /// Active-atom coordinates per row, flattened in support order: for row `i`
     /// the concatenation over `j` of the `d_{indices[i][j]}` coordinate scalars.
     coords: Vec<Vec<f64>>,
-    /// Per-atom coordinate metadata (length `K`) for dense reconstruction.
+    /// Per-atom coordinate metadata (length `K`).
     atom_coord_meta: Vec<AtomCoordMeta>,
     mode: AssignmentMode,
-    /// #1026 per-atom ungated flag (length `K`).
-    ungated: Vec<bool>,
-    /// #1033 frozen/amortized routing, dense `(N, K)` when engaged (a
-    /// full-support-only field; the sparse TopK lane never freezes routing).
-    frozen_logits: Option<Array2<f64>>,
-    /// #1777 per-fit ordered Beta--Bernoulli-α override.
-    ordered_beta_bernoulli_alpha_override: Option<f64>,
 }
 
 impl SaeAssignmentState {
@@ -238,10 +218,8 @@ impl SaeAssignmentState {
             .into_iter()
             .map(|spec| AtomCoordMeta {
                 latent_dim: spec.latent_dim,
-                id_mode: spec.id_mode,
                 manifold: spec.manifold,
                 retraction: spec.retraction,
-                latent_id: spec.latent_id,
             })
             .collect();
         Ok(Self {
@@ -252,9 +230,6 @@ impl SaeAssignmentState {
             coords,
             atom_coord_meta,
             mode: AssignmentMode::top_k_support(support_k),
-            ungated: vec![false; k_atoms],
-            frozen_logits: None,
-            ordered_beta_bernoulli_alpha_override: None,
         })
     }
 
@@ -562,90 +537,6 @@ impl SaeAssignmentState {
             cursor = end;
         }
         Ok(())
-    }
-
-    /// Whether every row's support is the full `[0, K)` in ascending order (the
-    /// dense-materialization precondition).
-    pub(crate) fn is_full_support(&self) -> bool {
-        if self.n_obs == 0 {
-            return true;
-        }
-        self.indices.iter().all(|row| {
-            row.len() == self.k_atoms && row.iter().enumerate().all(|(k, &a)| a as usize == k)
-        })
-    }
-
-    /// Materialize the exact dense [`SaeAssignment`] layout this state
-    /// represents. Requires [`Self::is_full_support`]: the dense engine only
-    /// exists for the `S_i = [0, K)` specialization, and a proper-sparse state
-    /// has no dense `N×K` image.
-    #[must_use = "materialization error must be handled"]
-    pub fn materialize_dense(&self) -> Result<SaeAssignment, String> {
-        if !self.is_full_support() {
-            return Err(
-                "SaeAssignmentState::materialize_dense: requires a full-support state (S_i = [0, K) \
-                 for every row); a proper support-sparse state has no dense N×K materialization"
-                    .to_string(),
-            );
-        }
-        let n = self.n_obs;
-        let k = self.k_atoms;
-
-        // logits[i, k] = gate_params[i][k] (full support ⇒ index j == atom k).
-        let mut logits = Array2::<f64>::zeros((n, k));
-        for i in 0..n {
-            for (col, &g) in self.gate_params[i].iter().enumerate() {
-                logits[[i, col]] = g;
-            }
-        }
-
-        // Rebuild each atom's LatentCoordValues from the per-row support blocks.
-        // In full-support order the coord offset of atom k in a row is the prefix
-        // sum of the atoms' latent dims.
-        let mut coord_offsets = Vec::with_capacity(k);
-        let mut cursor = 0usize;
-        for meta in &self.atom_coord_meta {
-            coord_offsets.push(cursor);
-            cursor += meta.latent_dim;
-        }
-        let mut coords = Vec::with_capacity(k);
-        for (atom, meta) in self.atom_coord_meta.iter().enumerate() {
-            let d = meta.latent_dim;
-            let mut flat = Array1::<f64>::zeros(n * d);
-            if d > 0 {
-                let off = coord_offsets[atom];
-                for i in 0..n {
-                    let row = &self.coords[i];
-                    for axis in 0..d {
-                        flat[i * d + axis] = row[off + axis];
-                    }
-                }
-            }
-            coords.push(
-                LatentCoordValues::from_flat_with_manifold_and_retraction_and_id(
-                    flat,
-                    n,
-                    d,
-                    meta.id_mode.clone(),
-                    meta.manifold.clone(),
-                    meta.retraction.clone(),
-                    meta.latent_id,
-                ),
-            );
-        }
-
-        // Direct field construction (all fields are `pub`, in-crate): the logits
-        // are the state's own stored routing scalars, so re-routing them through
-        // the validating/canonicalizing `with_mode` is unnecessary and would only
-        // risk a non-identity round-trip.
-        Ok(SaeAssignment {
-            logits,
-            coords,
-            mode: self.mode,
-            ungated: self.ungated.clone(),
-            frozen_logits: self.frozen_logits.clone(),
-            ordered_beta_bernoulli_alpha_override: self.ordered_beta_bernoulli_alpha_override,
-        })
     }
 }
 

@@ -2390,13 +2390,10 @@ impl SaeSupportSparseTerm {
             let atom_specs = self
                 .atoms
                 .iter()
-                .enumerate()
-                .map(|(atom, template)| SaeAssignmentAtomSpec {
+                .map(|template| SaeAssignmentAtomSpec {
                     latent_dim: template.latent_dim(),
-                    id_mode: gam_terms::latent::LatentIdMode::None,
                     manifold: template.basis_kind().latent_manifold(template.latent_dim()),
                     retraction: gam_problem::LatentRetractionRegistry::all_euclidean(),
-                    latent_id: super::support_seed::splitmix64(atom as u64),
                 })
                 .collect();
             let assignment = SaeAssignmentState::from_topk_support_heterogeneous(
@@ -2594,13 +2591,10 @@ impl SaeSupportSparseTerm {
         let atom_specs = self
             .atoms
             .iter()
-            .enumerate()
-            .map(|(atom, template)| SaeAssignmentAtomSpec {
+            .map(|template| SaeAssignmentAtomSpec {
                 latent_dim: template.latent_dim(),
-                id_mode: gam_terms::latent::LatentIdMode::None,
                 manifold: template.basis_kind().latent_manifold(template.latent_dim()),
                 retraction: gam_problem::LatentRetractionRegistry::all_euclidean(),
-                latent_id: super::support_seed::splitmix64(atom as u64),
             })
             .collect();
         let assignment = SaeAssignmentState::from_topk_support_heterogeneous(
@@ -7450,10 +7444,8 @@ mod tests {
         )];
         let specs = vec![SaeAssignmentAtomSpec {
             latent_dim: 1,
-            id_mode: LatentIdMode::None,
             manifold: SaeAtomBasisKind::Periodic.latent_manifold(1),
             retraction: gam_problem::LatentRetractionRegistry::all_euclidean(),
-            latent_id: 1,
         }];
         let state = SaeAssignmentState::from_topk_support_heterogeneous(
             1,

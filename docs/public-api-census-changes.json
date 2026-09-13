@@ -2635,5 +2635,14 @@
     },
     "reason": "#2267 slop removal. exact_stationarity_materialization_forecast existed only to print the [SAE-NEWTON] FORECAST info line in terminal_exact_newton_polish, and every polish step paid for it whatever the log level. It built prepare_decoder_prior_beta_curvature and prepare_residual_curvature_rows, which materialize_exact_hessian_dense_with_gap_border builds again moments later in the same step, and it ran one exact Hessian-vector apply. The materialization already logs the measured build time per probe ([SAE-EXACT-DENSE] operator BUILT) and the eigendecomposition time ([SAE-EXACT-DENSE] eigendecomposition DONE). So the forecast repeated work to predict a number the same step then measures. Its doc says it is not a bar, and nothing reads its value.",
     "evidence": "At the base, git grep -n exact_stationarity_materialization_forecast finds only construction_exact_hessian.rs (the declaration and its own error string) and construction_quasi_laplace.rs (the one call, in terminal_exact_newton_polish). Outside construction_quasi_laplace.rs, git grep -n FORECAST finds only this function's doc comment and two unrelated comments in tests/quality/misc. The polish-local polish_started clock fed only the forecast line and is removed with it. Not compiled or run locally."
+  },
+  {
+    "base": "1ca8c5df70b8f2860a2b4a4972ce4ef9a9af3e4b",
+    "removed": {
+      "crates/gam-sae/src/assignment_state.rs::is_full_support": 1,
+      "crates/gam-sae/src/assignment_state.rs::materialize_dense": 1
+    },
+    "reason": "#2829 no product user: SaeAssignmentState::materialize_dense has no caller, and is_full_support was reached only through it. The state and metadata fields only materialize_dense read are deleted with it.",
+    "evidence": "At 1ca8c5df70b8f2860a2b4a4972ce4ef9a9af3e4b, git grep -n over crates, src and tests finds no call of SaeAssignmentState::materialize_dense: gam-sae names it only inside assignment_state.rs, and every other materialize_dense( call is on a Hessian, penalty or operator type. is_full_support is called only by materialize_dense. The ungated, frozen_logits and ordered_beta_bernoulli_alpha_override state fields and the AtomCoordMeta id_mode and latent_id fields were read only by materialize_dense, and SaeAssignmentAtomSpec id_mode and latent_id were only copied into that metadata."
   }
 ]

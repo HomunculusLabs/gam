@@ -170,10 +170,8 @@ fn effective_atom(
         latent_dim,
         SaeAssignmentAtomSpec {
             latent_dim,
-            id_mode: gam_terms::latent::LatentIdMode::None,
             manifold: kind.latent_manifold(latent_dim),
             retraction: gam_problem::LatentRetractionRegistry::all_euclidean(),
-            latent_id: splitmix64(atom as u64),
         },
     ))
 }
@@ -740,15 +738,14 @@ mod tests {
         let p = 5usize;
         let k = 2usize;
         let kind = sae_atom_basis_kind_from_str("periodic").expect("periodic kind");
-        let specs: Vec<SaeAssignmentAtomSpec> = (0..k)
-            .map(|atom| SaeAssignmentAtomSpec {
+        let specs: Vec<SaeAssignmentAtomSpec> = vec![
+            SaeAssignmentAtomSpec {
                 latent_dim: 1,
-                id_mode: gam_terms::latent::LatentIdMode::None,
                 manifold: kind.latent_manifold(1),
                 retraction: gam_problem::LatentRetractionRegistry::all_euclidean(),
-                latent_id: atom as u64 + 1,
-            })
-            .collect();
+            };
+            k
+        ];
         let period = match specs[0].manifold {
             gam_terms::latent::LatentManifold::Circle { period } => period,
             ref other => panic!("periodic kind must chart a circle; got {other:?}"),

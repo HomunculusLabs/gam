@@ -1313,10 +1313,8 @@ mod tests {
         let specs = vec![
             SaeAssignmentAtomSpec {
                 latent_dim: 1,
-                id_mode: LatentIdMode::None,
                 manifold: SaeAtomBasisKind::Periodic.latent_manifold(1),
                 retraction: gam_problem::LatentRetractionRegistry::all_euclidean(),
-                latent_id: 1,
             },
             SaeAssignmentAtomSpec::euclidean(2),
         ];
