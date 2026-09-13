@@ -6410,7 +6410,8 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
             .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
         let mut inv_diag = Vec::with_capacity(k);
         for (idx, &d) in diag_host.iter().enumerate() {
-            if !d.is_finite() || d <= 1.0e-18 {
+            // Any positive finite diagonal is a valid Jacobi preconditioner (#2469).
+            if !d.is_finite() || d <= 0.0 {
                 return Err(ArrowSchurGpuFailure::SchurFactorFailed {
                     reason: format!(
                         "framed SAE GPU PCG: non-positive Jacobi diagonal at {idx}: {d:e}"
@@ -6855,7 +6856,8 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
             .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
         let mut inv_diag = Vec::with_capacity(k);
         for (idx, &d) in diag_host.iter().enumerate() {
-            if !d.is_finite() || d <= 1.0e-18 {
+            // Any positive finite diagonal is a valid Jacobi preconditioner (#2469).
+            if !d.is_finite() || d <= 0.0 {
                 return Err(ArrowSchurGpuFailure::SchurFactorFailed {
                     reason: format!(
                         "SAE matrix-free GPU PCG: non-positive Schur Jacobi diagonal at {idx}: {d:e}"
