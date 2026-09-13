@@ -894,11 +894,10 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
                 // cost is ~50_000 units per K-unit at large scale, which
                 // with `AUTO_OUTER_WORK_BUDGET = 5×10⁸` caps
                 //   K_work ≈ 5e8 / 50_000 = 10_000,
-                // matching the existing default `min_k = 10_000` and so
-                // never binding tighter than the noise rule in current
-                // production configurations — the cap exists to guard
-                // against pathological per-row cost regressions, not to
-                // change today's nominal K.
+                // the noise target's floor `AUTO_OUTER_MIN_K`. BMS phase 1
+                // therefore samples K = 10_000 at every n > 10_000: the
+                // noise rule sets K up to n = 100_000 and this cap sets it
+                // above.
                 50_000,
             ) {
                 Some(cloned) => {

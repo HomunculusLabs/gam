@@ -47,7 +47,7 @@ fn h1a_target_k_with_default_work_per_k_picks_noise_rule() {
         "default work_per_k=1 should leave the noise rule binding; got cap_reason={:?}",
         choice.cap_reason
     );
-    // round(0.10 * 195_780) = 19_578, max(min_k=10_000) leaves 19_578.
+    // round(0.10 * 195_780) = 19_578, max(AUTO_OUTER_MIN_K = 10_000) leaves 19_578.
     assert_eq!(choice.k_noise, 19_578, "k_noise math: round(0.1 n)");
     assert_eq!(choice.k, 19_578, "k = noise rule when work cap is inactive");
     // k_work = 5e8 / 1 = 5e8: effectively no cap at n=195_780.

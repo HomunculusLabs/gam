@@ -950,7 +950,9 @@ pub fn auto_outer_target_k(n: usize, outer_work_per_k_unit: u64) -> Option<AutoO
 /// Stratification matches `build_outer_score_subsample`: 100 z-deciles
 /// × the supplied secondary stratum (typically the {0, 1} response
 /// indicator). When `stratum_secondary` is `None` the secondary
-/// dimension collapses to a single bin.
+/// dimension collapses to a single bin. A secondary stratum whose length
+/// differs from `z` is a caller error that `build_outer_score_subsample`
+/// asserts against; it never silently reverts to the full row measure.
 ///
 /// The returned mask carries proper Horvitz–Thompson weights so that
 /// `Σ_{i ∈ mask} weight_i · row_i` is an unbiased estimate of the
@@ -965,10 +967,6 @@ pub fn auto_outer_score_subsample(
     let k = auto_outer_target_k(n, outer_work_per_k_unit)?.k;
     let secondary_storage;
     let secondary: &[u8] = if let Some(s) = stratum_secondary {
-        if s.len() != n {
-            // Caller error; fall through to no-subsample rather than panic.
-            return None;
-        }
         s
     } else {
         secondary_storage = vec![0u8; n];

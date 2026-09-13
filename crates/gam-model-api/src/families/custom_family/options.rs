@@ -488,12 +488,12 @@ pub struct BlockwiseFitOptions {
     /// many places `BlockwiseFitOptions` is duplicated per-eval.
     pub outer_score_subsample: Option<Arc<crate::OuterScoreSubsample>>,
     /// Gate for marginal-slope families to auto-derive a stratified
-    /// outer-score subsample at large scale (see
-    /// `crate::families::marginal_slope_shared::auto_outer_score_subsample`).
+    /// outer-score subsample whenever the shared size rule picks `K < n` (see
+    /// `gam_models::marginal_slope_shared::auto_outer_score_subsample`).
     ///
     /// **Default `true`.** Auto-subsampling makes the early rho-gradient
-    /// evaluations unbiased stochastic estimators with bounded relative
-    /// variance (≈ 1 % at the conservative defaults), then the family switches
+    /// evaluations unbiased stochastic estimators with relative noise about
+    /// `1/√K` (1 % at `K = 10_000`, 2 % at `K = 2_000`), then the family switches
     /// back to full-data gradients for the remaining outer iterations. That
     /// keeps large marginal-slope fits fast during the high-motion part of the
     /// trajectory while preserving the default tight `outer_tol` polish on
