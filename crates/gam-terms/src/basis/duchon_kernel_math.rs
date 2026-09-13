@@ -905,7 +905,7 @@ pub(crate) fn bessel_k_real_half_integer_or_integer(
     z: f64,
 ) -> Result<f64, BasisError> {
     let two_nu = (2.0 * nu_abs).round();
-    if (two_nu - 2.0 * nu_abs).abs() > 1e-12 {
+    if two_nu != 2.0 * nu_abs {
         crate::bail_invalid_basis!(
             "unsupported Bessel-K order ν={nu_abs}; only integer/half-integer orders are supported"
         );
