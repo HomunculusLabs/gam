@@ -182,18 +182,80 @@ fn tensor_index(mask: usize, labels: &[usize; 5], r: usize) -> usize {
     flat
 }
 
-/// Per-label primary indices of entry `flat` of the tensor over `mask`'s free labels.
+/// The label type of a mask: whether it holds `u` and `v`, and how many free
+/// labels. Every label subset of one type holds the same symmetric tensor, so one
+/// tensor per type is stored.
 #[inline]
-fn decode_labels(mask: usize, flat: usize, r: usize) -> [usize; 5] {
-    let mut labels = [0_usize; 5];
-    let mut remainder = flat;
-    for (label, index) in labels.iter_mut().enumerate() {
-        if mask & FREE_LABELS & (1 << label) != 0 {
-            *index = remainder % r;
-            remainder /= r;
+fn label_type(mask: usize) -> usize {
+    (usize::from(mask & LABEL_U != 0) * 2 + usize::from(mask & LABEL_V != 0)) * 4
+        + free_count(mask) as usize
+}
+
+/// The mask of a label type whose free labels are the lowest ones.
+#[inline]
+fn type_representative(label_type: usize) -> usize {
+    let mut mask = ((1 << (label_type % 4)) - 1) << 2;
+    if label_type / 4 & 2 != 0 {
+        mask |= LABEL_U;
+    }
+    if label_type / 4 & 1 != 0 {
+        mask |= LABEL_V;
+    }
+    mask
+}
+
+/// Every non-decreasing assignment of primary indices to the free labels of
+/// `mask`, with its flat index: one entry per distinct value of a symmetric tensor.
+fn sorted_entries(mask: usize, r: usize) -> Vec<([usize; 5], usize)> {
+    let free: Vec<usize> = (0..5)
+        .filter(|&label| mask & FREE_LABELS & (1 << label) != 0)
+        .collect();
+    let n = free.len();
+    let mut indices = [0_usize; 3];
+    let mut entries = Vec::new();
+    loop {
+        let mut labels = [0_usize; 5];
+        for (position, &label) in free.iter().enumerate() {
+            labels[label] = indices[position];
+        }
+        entries.push((labels, tensor_index(mask, &labels, r)));
+        let mut position = n;
+        loop {
+            if position == 0 {
+                return entries;
+            }
+            position -= 1;
+            if indices[position] + 1 < r {
+                indices[position] += 1;
+                for later in position + 1..n {
+                    indices[later] = indices[position];
+                }
+                break;
+            }
         }
     }
-    labels
+}
+
+/// Copy each sorted entry of a symmetric tensor over the free labels of `mask`
+/// to every ordering of its indices.
+fn symmetrize(values: &mut [f64], mask: usize, entries: &[([usize; 5], usize)], r: usize) {
+    let free: Vec<usize> = (0..5)
+        .filter(|&label| mask & FREE_LABELS & (1 << label) != 0)
+        .collect();
+    let n = free.len();
+    for (labels, flat) in entries {
+        let value = values[*flat];
+        for ordering in &ORDERINGS {
+            if ordering[..n].iter().any(|&position| position >= n) {
+                continue;
+            }
+            let target = ordering[..n]
+                .iter()
+                .rev()
+                .fold(0, |acc, &position| acc * r + labels[free[position]]);
+            values[target] = value;
+        }
+    }
 }
 
 /// Explicit partials of one map in `(a, θ)`, keyed by their signature
@@ -280,6 +342,10 @@ struct IndexAtoms {
     link_leading: Vec<f64>,
     /// The slope and every deviation coordinate whose column does not vanish here.
     active: Vec<usize>,
+    /// `∂^S η` for every block content: a direction code (`u` is 2, `v` is 1),
+    /// the intercept and slope orders, and the deviation coordinate plus one
+    /// (zero for none). Filled once per cell, so a subset is a lookup.
+    content: Vec<[f64; 4]>,
 }
 
 impl IndexAtoms {
@@ -362,7 +428,7 @@ impl IndexAtoms {
                         && deviation[p].iter().flatten().flatten().any(|&value| value != 0.0))
             })
             .collect();
-        Ok(Self {
+        let mut atoms = Self {
             q: primary.q,
             slope: primary.slope,
             base,
@@ -371,32 +437,49 @@ impl IndexAtoms {
             slope_components: [directions[0][primary.slope], directions[1][primary.slope]],
             link_leading,
             active,
-        })
+            content: Vec::new(),
+        };
+        let mut content = vec![[0.0; 4]; 4 * 4 * 4 * (r + 1)];
+        for direction_code in 0..4 {
+            for n_a in 0..4 {
+                for n_b in 0..4 - n_a {
+                    for deviation in 0..=r {
+                        content[Self::content_index(direction_code, n_a, n_b, deviation, r)] = atoms
+                            .content_polynomial(direction_code, n_a, n_b, deviation.checked_sub(1));
+                    }
+                }
+            }
+        }
+        atoms.content = content;
+        Ok(atoms)
     }
 
-    /// `∂^S η` over the slots of `slots` selected by `mask`. Each direction
-    /// differentiates through its slope component or through its deviation
-    /// components, and at most one deviation derivative survives.
+    #[inline]
+    fn content_index(
+        direction_code: usize,
+        n_a: usize,
+        n_b: usize,
+        deviation: usize,
+        r: usize,
+    ) -> usize {
+        ((direction_code * 4 + n_a) * 4 + n_b) * (r + 1) + deviation
+    }
+
+    /// `∂^S η` over the slots of `slots` selected by `mask`, read from the
+    /// content table.
     fn subset_polynomial(&self, slots: &[ExplicitSlot], mask: usize) -> [f64; 4] {
+        let mut direction_code = 0;
         let mut n_a = 0;
         let mut n_b = 0;
-        let mut coordinate_deviation = None;
+        let mut deviation = 0;
         let mut deviations = 0;
-        let mut directions = [0_usize; 2];
-        let mut direction_count = 0;
         for (position, &slot) in slots.iter().enumerate() {
             if mask & (1 << position) == 0 {
                 continue;
             }
             match slot {
-                ExplicitSlot::U => {
-                    directions[direction_count] = 0;
-                    direction_count += 1;
-                }
-                ExplicitSlot::V => {
-                    directions[direction_count] = 1;
-                    direction_count += 1;
-                }
+                ExplicitSlot::U => direction_code |= 2,
+                ExplicitSlot::V => direction_code |= 1,
                 ExplicitSlot::Intercept => n_a += 1,
                 ExplicitSlot::Coordinate(p) => {
                     if p == self.q {
@@ -406,11 +489,38 @@ impl IndexAtoms {
                         n_b += 1;
                     } else {
                         deviations += 1;
-                        coordinate_deviation = Some(p);
+                        deviation = p + 1;
                     }
                 }
             }
         }
+        if deviations > 1 || n_a + n_b > 3 {
+            return [0.0; 4];
+        }
+        self.content[Self::content_index(direction_code, n_a, n_b, deviation, self.deviation.len())]
+    }
+
+    /// `∂^S η` for one block content. Each direction differentiates through its
+    /// slope component or through its deviation components, and at most one
+    /// deviation derivative survives.
+    fn content_polynomial(
+        &self,
+        direction_code: usize,
+        n_a: usize,
+        n_b: usize,
+        coordinate_deviation: Option<usize>,
+    ) -> [f64; 4] {
+        let mut directions = [0_usize; 2];
+        let mut direction_count = 0;
+        if direction_code & 2 != 0 {
+            directions[direction_count] = 0;
+            direction_count += 1;
+        }
+        if direction_code & 1 != 0 {
+            directions[direction_count] = 1;
+            direction_count += 1;
+        }
+        let deviations = usize::from(coordinate_deviation.is_some());
         let mut out = [0.0; 4];
         for on_slope in 0..(1_usize << direction_count) {
             let mut weight = 1.0;
@@ -639,14 +749,16 @@ impl KnotFlux {
     }
 }
 
-/// Add `Σ_{R ⊆ B} Σ_{π ∈ Π(B∖R)} X[R; |π|]·Π_{P ∈ π} a_P` to `out`: the chain rule
-/// of an explicit map `X(a(θ), θ)` over the labels of `mask`, where `R` holds the
-/// labels the map differentiates directly and each block `P` enters through the
-/// intercept derivative `a_P`. With `solving`, the single-block term `X_a·a_B`
-/// is left out so the caller can solve for `a_B`.
+/// Add `Σ_{R ⊆ B} Σ_{π ∈ Π(B∖R)} X[R; |π|]·Π_{P ∈ π} a_P` to the sorted `entries`
+/// of `out`: the chain rule of an explicit map `X(a(θ), θ)` over the labels of
+/// `mask`, where `R` holds the labels the map differentiates directly and each
+/// block `P` enters through the intercept derivative `a_P`, read by its label
+/// type. With `solving`, the single-block term `X_a·a_B` is left out so the caller
+/// can solve for `a_B`.
 fn accumulate_chain_rule(
     out: &mut [f64],
     mask: usize,
+    entries: &[([usize; 5], usize)],
     explicit: &ExplicitTensors,
     intercept: &[Vec<f64>],
     solving: bool,
@@ -667,13 +779,12 @@ fn accumulate_chain_rule(
                 return;
             }
             let coefficients = &explicit.values[signature];
-            for (flat, target) in out.iter_mut().enumerate() {
-                let labels = decode_labels(mask, flat, r);
-                let mut term = coefficients[tensor_index(raw, &labels, r)];
+            for (labels, flat) in entries {
+                let mut term = coefficients[tensor_index(raw, labels, r)];
                 for &block in blocks {
-                    term *= intercept[block][tensor_index(block, &labels, r)];
+                    term *= intercept[label_type(block)][tensor_index(block, labels, r)];
                 }
-                *target += term;
+                out[*flat] += term;
             }
         });
         if raw == 0 {
@@ -683,53 +794,80 @@ fn accumulate_chain_rule(
     }
 }
 
-/// `a_B` for every label subset `B`, in order of size, from `D^B M = 0`.
+/// `a_B` for every label type, in order of size, from `D^B M = 0`.
 fn implicit_intercept_totals(calibration: &ExplicitTensors, f_a: f64) -> Vec<Vec<f64>> {
     let r = calibration.r;
-    let mut intercept: Vec<Vec<f64>> = (0..32)
-        .map(|mask| vec![0.0; r.pow(free_count(mask))])
+    let mut intercept: Vec<Vec<f64>> = (0..16)
+        .map(|label_type| vec![0.0; r.pow(free_count(type_representative(label_type)))])
         .collect();
-    let mut masks: Vec<usize> = (1..32).collect();
-    masks.sort_by_key(|mask| mask.count_ones());
-    for mask in masks {
-        let mut accumulated = vec![0.0; intercept[mask].len()];
-        accumulate_chain_rule(&mut accumulated, mask, calibration, &intercept, true);
-        for value in &mut accumulated {
-            *value /= -f_a;
+    let mut types: Vec<usize> = (1..16).collect();
+    types.sort_by_key(|&label_type| type_representative(label_type).count_ones());
+    for label_type in types {
+        let mask = type_representative(label_type);
+        let entries = sorted_entries(mask, r);
+        let mut accumulated = vec![0.0; intercept[label_type].len()];
+        accumulate_chain_rule(&mut accumulated, mask, &entries, calibration, &intercept, true);
+        for entry in &entries {
+            accumulated[entry.1] /= -f_a;
         }
-        intercept[mask] = accumulated;
+        symmetrize(&mut accumulated, mask, &entries, r);
+        intercept[label_type] = accumulated;
     }
     intercept
 }
 
-/// `D^B G` for every label subset `B`.
+/// `D^B G` for every label type.
 fn observed_index_totals(index: &ExplicitTensors, intercept: &[Vec<f64>]) -> Vec<Vec<f64>> {
     let r = index.r;
-    (0..32)
-        .map(|mask| {
+    (0..16)
+        .map(|label_type| {
+            let mask = type_representative(label_type);
             let mut out = vec![0.0; r.pow(free_count(mask))];
             if mask != 0 {
-                accumulate_chain_rule(&mut out, mask, index, intercept, false);
+                let entries = sorted_entries(mask, r);
+                accumulate_chain_rule(&mut out, mask, &entries, index, intercept, false);
+                symmetrize(&mut out, mask, &entries, r);
             }
             out
         })
         .collect()
 }
 
-/// `D⁵ℓ[u, v, c, k, l] = Σ_π ℓ⁽|π|⁾·Π_{P ∈ π} D^P G` over the partitions of all five labels.
-fn compose_loss(index_totals: &[Vec<f64>], loss: &[f64; 6], r: usize) -> Vec<f64> {
-    let mut fifth = vec![0.0; r * r * r];
-    for_each_partition(ALL_LABELS, |blocks| {
-        for (flat, target) in fifth.iter_mut().enumerate() {
-            let labels = decode_labels(ALL_LABELS, flat, r);
-            let mut term = loss[blocks.len()];
+/// `D^{|B|}ℓ = Σ_{π ∈ Π(B)} ℓ⁽|π|⁾·Π_{P ∈ π} D^P G` over the labels of `mask`, as a
+/// dense symmetric tensor over its free labels.
+fn compose_loss(index_totals: &[Vec<f64>], loss: &[f64; 6], mask: usize, r: usize) -> Vec<f64> {
+    let mut contraction = vec![0.0; r.pow(free_count(mask))];
+    let entries = sorted_entries(mask, r);
+    for_each_partition(mask, |blocks| {
+        let derivative = loss[blocks.len()];
+        for (labels, flat) in &entries {
+            let mut term = derivative;
             for &block in blocks {
-                term *= index_totals[block][tensor_index(block, &labels, r)];
+                term *= index_totals[label_type(block)][tensor_index(block, labels, r)];
             }
-            *target += term;
+            contraction[*flat] += term;
         }
     });
-    fifth
+    symmetrize(&mut contraction, mask, &entries, r);
+    contraction
+}
+
+/// Every total derivative `D^B G` of one standard-normal FLEX row's observed index
+/// over the slot labels `{u, v, c, k, l}`, with the loss derivative stack. Any
+/// contraction of the row loss over those labels composes from them.
+pub(super) struct StandardNormalFlexRowTotals {
+    index_totals: Vec<Vec<f64>>,
+    loss: [f64; 6],
+    r: usize,
+}
+
+impl StandardNormalFlexRowTotals {
+    /// `D^{|B|}ℓ` over the labels of `mask` (bit 0 is `u`, bit 1 is `v`, bits 2 to
+    /// 4 are free primary coordinates), as a dense tensor over its free labels with
+    /// the first free label fastest.
+    pub(super) fn contraction(&self, mask: usize) -> Vec<f64> {
+        compose_loss(&self.index_totals, &self.loss, mask, self.r)
+    }
 }
 
 impl BernoulliMarginalSlopeFamily {
@@ -749,15 +887,41 @@ impl BernoulliMarginalSlopeFamily {
         dir_v: &Array1<f64>,
     ) -> Result<Vec<Array2<f64>>, String> {
         let r = primary.total;
+        if dir_u.len() == r
+            && dir_v.len() == r
+            && (dir_u.iter().all(|value| *value == 0.0) || dir_v.iter().all(|value| *value == 0.0))
+        {
+            return Ok((0..r).map(|_| Array2::<f64>::zeros((r, r))).collect());
+        }
+        let fifth = self
+            .standard_normal_flex_row_totals(row, primary, q, b, beta_h, beta_w, row_ctx, dir_u, dir_v)?
+            .contraction(ALL_LABELS);
+        Ok((0..r)
+            .map(|c| Array2::from_shape_fn((r, r), |(k, l)| fifth[c + k * r + l * r * r]))
+            .collect())
+    }
+
+    /// The observed-index totals and loss stack of one standard-normal FLEX row over
+    /// the slot labels `{u, v, c, k, l}`, for primary-space directions `u` and `v`.
+    pub(super) fn standard_normal_flex_row_totals(
+        &self,
+        row: usize,
+        primary: &PrimarySlices,
+        q: f64,
+        b: f64,
+        beta_h: Option<&Array1<f64>>,
+        beta_w: Option<&Array1<f64>>,
+        row_ctx: &BernoulliMarginalSlopeRowExactContext,
+        dir_u: &Array1<f64>,
+        dir_v: &Array1<f64>,
+    ) -> Result<StandardNormalFlexRowTotals, String> {
+        let r = primary.total;
         if dir_u.len() != r || dir_v.len() != r {
             return Err(format!(
                 "bernoulli standard-normal flex fifth contraction direction lengths ({},{}) != primary dimension {r}",
                 dir_u.len(),
                 dir_v.len()
             ));
-        }
-        if dir_u.iter().all(|value| *value == 0.0) || dir_v.iter().all(|value| *value == 0.0) {
-            return Ok((0..r).map(|_| Array2::<f64>::zeros((r, r))).collect());
         }
         if !(row_ctx.intercept.is_finite() && row_ctx.m_a.is_finite() && row_ctx.m_a > 0.0) {
             return Err("non-finite standard-normal flexible row context in fifth contraction".into());
@@ -924,10 +1088,10 @@ impl BernoulliMarginalSlopeFamily {
             ));
         }
         let intercept = implicit_intercept_totals(&calibration, f_a);
-        let index_totals = observed_index_totals(&index, &intercept);
-        let fifth = compose_loss(&index_totals, &loss, r);
-        Ok((0..r)
-            .map(|c| Array2::from_shape_fn((r, r), |(k, l)| fifth[c + k * r + l * r * r]))
-            .collect())
+        Ok(StandardNormalFlexRowTotals {
+            index_totals: observed_index_totals(&index, &intercept),
+            loss,
+            r,
+        })
     }
 }

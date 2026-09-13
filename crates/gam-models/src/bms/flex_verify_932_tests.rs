@@ -935,6 +935,62 @@ fn standard_normal_flex_fifth_slabs_differentiate_the_fourth_contraction_2901() 
         .primary_point_from_block_states(row, &states, &primary)
         .expect("StandardNormal FLEX primary point");
     let (q, b, beta_h, beta_w) = family.primary_point_components(&point, &primary);
+    let row_ctx = BernoulliMarginalSlopeFamily::row_ctx(&cache, row);
+    let classify = |index: usize| -> String {
+        if index == primary.q {
+            "q".to_string()
+        } else if index == primary.slope {
+            "slope".to_string()
+        } else if h_range.contains(&index) {
+            format!("h{}", index - h_range.start)
+        } else {
+            format!("w{}", index - w_range.start)
+        }
+    };
+
+    // The totals the fifth slabs compose from also compose the third and fourth
+    // contractions the canonical lowerings serve. Agreement there confines any gap
+    // in the fifth slabs to its order-five terms.
+    let totals = family
+        .standard_normal_flex_row_totals(
+            row,
+            &primary,
+            q,
+            b,
+            beta_h.as_ref(),
+            beta_w.as_ref(),
+            row_ctx,
+            &dir_u,
+            &dir_v,
+        )
+        .expect("StandardNormal FLEX row totals");
+    let composed_third = totals.contraction(0b01101);
+    let composed_fourth = totals.contraction(0b01111);
+    let canonical_third = family
+        .row_primary_third_contracted_with_moments(row, &states, &cache, row_ctx, &dir_u)
+        .expect("canonical StandardNormal t3 lowering");
+    let canonical_fourth = family
+        .row_primary_fourth_contracted_ordered(row, &states, &cache, row_ctx, &dir_u, &dir_v)
+        .expect("canonical StandardNormal t4 lowering");
+    let mut max_third_gap = 0.0_f64;
+    let mut max_fourth_gap = 0.0_f64;
+    for k in 0..r {
+        for l in 0..r {
+            max_third_gap = max_third_gap.max(derivative_ladder_relative_error(
+                composed_third[k + l * r],
+                canonical_third[[k, l]],
+            ));
+            max_fourth_gap = max_fourth_gap.max(derivative_ladder_relative_error(
+                composed_fourth[k + l * r],
+                canonical_fourth[[k, l]],
+            ));
+        }
+    }
+    eprintln!(
+        "#2901 composed vs canonical: t3 max relative gap {max_third_gap:.3e}, t4 max relative gap {max_fourth_gap:.3e}"
+    );
+
+    let started = std::time::Instant::now();
     let slabs = family
         .standard_normal_flex_row_fifth_axis_slabs(
             row,
@@ -943,11 +999,15 @@ fn standard_normal_flex_fifth_slabs_differentiate_the_fourth_contraction_2901() 
             b,
             beta_h.as_ref(),
             beta_w.as_ref(),
-            BernoulliMarginalSlopeFamily::row_ctx(&cache, row),
+            row_ctx,
             &dir_u,
             &dir_v,
         )
         .expect("StandardNormal FLEX fifth slabs");
+    eprintln!(
+        "#2901 StandardNormal FLEX fifth slabs for one row, r={r}: {:.3e} s",
+        started.elapsed().as_secs_f64()
+    );
     assert_eq!(slabs.len(), r);
 
     let fourth_along = |axis: usize, step: f64| -> Array2<f64> {
@@ -968,7 +1028,7 @@ fn standard_normal_flex_fifth_slabs_differentiate_the_fourth_contraction_2901() 
             )
             .expect("shifted StandardNormal t4 lowering")
     };
-    let mut max_error = 0.0_f64;
+    let mut rows: Vec<(f64, usize, usize, usize, f64, f64, f64)> = Vec::new();
     let mut signal = 0.0_f64;
     for axis in 0..r {
         let central = |step: f64| (fourth_along(axis, step) - fourth_along(axis, -step)) / (2.0 * step);
@@ -978,28 +1038,59 @@ fn standard_normal_flex_fifth_slabs_differentiate_the_fourth_contraction_2901() 
         for k in 0..r {
             for l in 0..r {
                 let analytic = slabs[axis][[k, l]];
-                let witness = richardson[[k, l]];
                 assert!(
                     analytic.is_finite(),
                     "axis={axis} k={k} l={l}: non-finite fifth slab {analytic}"
                 );
                 signal = signal.max(analytic.abs());
-                let error = derivative_ladder_relative_error(analytic, witness);
-                max_error = max_error.max(error);
-                assert!(
-                    error <= 1e-5,
-                    "axis={axis} k={k} l={l}: fifth={analytic:+.6e} richardson={witness:+.6e} coarse={:+.6e} rel={error:.3e}",
-                    coarse[[k, l]]
-                );
+                let witness = richardson[[k, l]];
+                rows.push((
+                    derivative_ladder_relative_error(analytic, witness),
+                    axis,
+                    k,
+                    l,
+                    analytic,
+                    witness,
+                    coarse[[k, l]],
+                ));
             }
         }
     }
+    // Print the worst entries before asserting, so a red run still names the
+    // blocks that carry the gap.
+    rows.sort_by(|left, right| {
+        right
+            .0
+            .partial_cmp(&left.0)
+            .expect("finite relative errors order totally")
+    });
+    for &(error, axis, k, l, analytic, witness, coarse) in rows.iter().take(16) {
+        eprintln!(
+            "#2901   {error:.3e} | T[{}][{}][{}] | fifth={analytic:+.9e} richardson={witness:+.9e} coarse={coarse:+.9e}",
+            classify(axis),
+            classify(k),
+            classify(l)
+        );
+    }
+    let max_error = rows.first().map_or(0.0, |worst| worst.0);
+    eprintln!(
+        "#2901 StandardNormal FLEX fifth slabs vs Richardson t4: max relative error {max_error:.3e}, max |T|={signal:.3e}"
+    );
+    assert!(
+        max_third_gap <= 1e-9,
+        "composed t3 departs from the canonical lowering: {max_third_gap:.3e}"
+    );
+    assert!(
+        max_fourth_gap <= 1e-9,
+        "composed t4 departs from the canonical lowering: {max_fourth_gap:.3e}"
+    );
     assert!(
         signal > 1e-8,
         "StandardNormal FLEX fifth slabs must carry nonzero signal, max |T|={signal:.3e}"
     );
-    eprintln!(
-        "#2901 StandardNormal FLEX fifth slabs vs Richardson t4: max relative error {max_error:.3e}, max |T|={signal:.3e}"
+    assert!(
+        max_error <= 1e-5,
+        "StandardNormal FLEX fifth slabs depart from the Richardson t4 witness: {max_error:.3e}"
     );
 }
 

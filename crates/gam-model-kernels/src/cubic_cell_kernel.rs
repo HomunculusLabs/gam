@@ -2215,9 +2215,9 @@ impl CellPartitionMoments {
 
     /// Contracted derivative over `order` slots. `subset_coefficients[S]` is the
     /// z-polynomial of the index coefficients' mixed partial over the slot subset
-    /// `S`, a bitmask over the slots (index 0 is unused). Each set partition is
-    /// visited once, as a restricted growth string, and a block whose polynomial
-    /// vanishes drops its whole term.
+    /// `S`, a bitmask over the slots (index 0 is unused). The set partitions come
+    /// from a table built once per process, and a partition with a vanishing block
+    /// is skipped by one mask test.
     pub fn derivative(
         &self,
         order: usize,
@@ -2230,57 +2230,80 @@ impl CellPartitionMoments {
             ))
             .into());
         }
-        let mut block = [0_usize; 5];
-        let mut total = 0.0;
-        loop {
-            let mut masks = [0_usize; 5];
-            let mut blocks = 0_usize;
-            for (slot, &index) in block[..order].iter().enumerate() {
-                masks[index] |= 1 << slot;
-                blocks = blocks.max(index + 1);
-            }
-            total += self.partition_term(&masks[..blocks], subset_coefficients);
-            let mut position = order;
-            loop {
-                if position <= 1 {
-                    return Ok(total);
-                }
-                position -= 1;
-                let ceiling = 1 + block[..position].iter().copied().max().unwrap_or(0);
-                if block[position] < ceiling {
-                    block[position] += 1;
-                    for later in block[position + 1..order].iter_mut() {
-                        *later = 0;
-                    }
-                    break;
-                }
+        let mut nonzero = 0_u32;
+        for (mask, polynomial) in subset_coefficients.iter().enumerate().take(1 << order).skip(1) {
+            if polynomial.iter().any(|&value| value != 0.0) {
+                nonzero |= 1 << mask;
             }
         }
+        let mut total = 0.0;
+        for (masks, blocks) in slot_partitions(order) {
+            let masks = &masks[..*blocks];
+            if masks.iter().all(|&mask| nonzero & (1 << mask) != 0) {
+                total += self.partition_term(masks, subset_coefficients);
+            }
+        }
+        Ok(total)
     }
 
     fn partition_term(&self, masks: &[usize], subset_coefficients: &[[f64; 4]; 32]) -> f64 {
         let mut product = [0.0_f64; 16];
-        let mut len = 0_usize;
-        for &mask in masks {
+        product[..4].copy_from_slice(&subset_coefficients[masks[0]]);
+        let mut len = 4_usize;
+        for &mask in &masks[1..] {
             let factor = &subset_coefficients[mask];
-            if factor.iter().all(|&value| value == 0.0) {
-                return 0.0;
-            }
-            if len == 0 {
-                product[..4].copy_from_slice(factor);
-                len = 4;
-            } else {
-                let mut next = [0.0_f64; 16];
-                for (i, &left) in product[..len].iter().enumerate() {
-                    for (j, &right) in factor.iter().enumerate() {
-                        next[i + j] += left * right;
-                    }
+            let mut next = [0.0_f64; 16];
+            for (i, &left) in product[..len].iter().enumerate() {
+                for (j, &right) in factor.iter().enumerate() {
+                    next[i + j] += left * right;
                 }
-                product = next;
-                len += 3;
             }
+            product = next;
+            len += 3;
         }
         moment_dot_with_coefficients_unchecked(&product[..len], &self.weighted[masks.len() - 1])
+    }
+}
+
+/// Every set partition of `order ≤ 5` derivative slots, as its block masks and
+/// block count, built once per process.
+fn slot_partitions(order: usize) -> &'static [([usize; 5], usize)] {
+    static PARTITIONS: std::sync::OnceLock<Vec<Vec<([usize; 5], usize)>>> =
+        std::sync::OnceLock::new();
+    &PARTITIONS.get_or_init(|| (0..=5).map(enumerate_slot_partitions).collect())[order]
+}
+
+/// The set partitions of `order` slots, each visited once as a restricted growth
+/// string: `block[0] = 0` and `block[i] ≤ 1 + max(block[..i])`.
+fn enumerate_slot_partitions(order: usize) -> Vec<([usize; 5], usize)> {
+    let mut partitions = Vec::new();
+    if order == 0 {
+        return partitions;
+    }
+    let mut block = [0_usize; 5];
+    loop {
+        let mut masks = [0_usize; 5];
+        let mut blocks = 0_usize;
+        for (slot, &index) in block[..order].iter().enumerate() {
+            masks[index] |= 1 << slot;
+            blocks = blocks.max(index + 1);
+        }
+        partitions.push((masks, blocks));
+        let mut position = order;
+        loop {
+            if position <= 1 {
+                return partitions;
+            }
+            position -= 1;
+            let ceiling = 1 + block[..position].iter().copied().max().unwrap_or(0);
+            if block[position] < ceiling {
+                block[position] += 1;
+                for later in block[position + 1..order].iter_mut() {
+                    *later = 0;
+                }
+                break;
+            }
+        }
     }
 }
 
