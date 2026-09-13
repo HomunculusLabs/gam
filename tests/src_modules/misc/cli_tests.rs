@@ -1778,6 +1778,8 @@ fn cli_surv_predict_noise_routes_to_survival_location_scale() {
         uncertainty: false,
         level: 0.95,
         covariance_mode: Some(InferenceCovarianceMode::SmoothingCorrected),
+        conformal: false,
+        calibration: None,
     })
     .unwrap_or_else(|e| {
         panic!(
@@ -2001,6 +2003,8 @@ fn cli_bernoulli_marginal_slope_fit_saves_covariance_so_default_predict_succeeds
         uncertainty: false,
         level: 0.95,
         covariance_mode: Some(InferenceCovarianceMode::SmoothingCorrected),
+        conformal: false,
+        calibration: None,
     })
     .unwrap_or_else(|e| {
         panic!(
@@ -2619,6 +2623,8 @@ fn cli_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         uncertainty: false,
         level: 0.95,
         covariance_mode: Some(InferenceCovarianceMode::SmoothingCorrected),
+        conformal: false,
+        calibration: None,
     };
     run_predict(predict_args).unwrap_or_else(|e| {
         panic!(
@@ -2658,6 +2664,8 @@ fn cli_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         uncertainty: true,
         level: 0.95,
         covariance_mode: Some(InferenceCovarianceMode::SmoothingCorrected),
+        conformal: false,
+        calibration: None,
     };
     run_predict(band_args).unwrap_or_else(|e| {
         panic!(
@@ -2900,6 +2908,8 @@ fn cli_firth_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         uncertainty: false,
         level: 0.95,
         covariance_mode: Some(InferenceCovarianceMode::SmoothingCorrected),
+        conformal: false,
+        calibration: None,
     };
     run_predict(predict_args).unwrap_or_else(|e| {
         panic!(
@@ -2939,6 +2949,8 @@ fn cli_firth_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         uncertainty: true,
         level: 0.95,
         covariance_mode: Some(InferenceCovarianceMode::SmoothingCorrected),
+        conformal: false,
+        calibration: None,
     };
     run_predict(band_args).unwrap_or_else(|e| {
         panic!(
@@ -3111,6 +3123,8 @@ fn posterior_mean_prediction_for_model(model: &SavedModel) -> f64 {
         uncertainty: false,
         level: 0.95,
         covariance_mode: Some(InferenceCovarianceMode::SmoothingCorrected),
+        conformal: false,
+        calibration: None,
     };
     run_predict(args)
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "predict binomial location-scale", e));
@@ -4460,6 +4474,8 @@ fn saved_bernoulli_marginal_slope_prediction_replays_latent_z_normalization() {
         uncertainty: false,
         level: 0.95,
         covariance_mode: Some(InferenceCovarianceMode::SmoothingCorrected),
+        conformal: false,
+        calibration: None,
     })
     .unwrap_or_else(|e| {
         panic!(
@@ -6201,6 +6217,8 @@ fn run_predict_survival_supports_saved_baseline_timewiggle_model() {
         // fit refuses (#2779). The posterior-mean point needs a backend the
         // model actually has.
         covariance_mode: None,
+        conformal: false,
+        calibration: None,
     };
     super::run_predict_survival(
         &args,
@@ -6362,6 +6380,8 @@ fn run_predict_survival_supports_saved_latent_survival_model() {
         // fit refuses (#2779). The posterior-mean point needs a backend the
         // model actually has.
         covariance_mode: None,
+        conformal: false,
+        calibration: None,
     };
 
     super::run_predict_survival(

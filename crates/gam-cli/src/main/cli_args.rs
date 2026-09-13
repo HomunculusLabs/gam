@@ -402,6 +402,16 @@ pub(crate) struct PredictArgs {
     /// is a requirement that refuses when the fit cannot supply it (#2779).
     #[arg(long = "covariance-mode", value_parser = parse_covariance_mode_arg)]
     pub(crate) covariance_mode: Option<InferenceCovarianceMode>,
+    /// Replace the posterior band with a distribution-free conformal band at
+    /// `--level`: the exact full-conformal set of a Gaussian-identity fit that
+    /// precomputed its substrate, or with `--calibration` the split-conformal
+    /// band calibrated on a held-out labeled table.
+    #[arg(long = "conformal", default_value_t = false, conflicts_with = "uncertainty")]
+    pub(crate) conformal: bool,
+    /// Held-out labeled table (CSV or parquet, including the response column)
+    /// that calibrates the split-conformal band.
+    #[arg(long = "calibration", requires = "conformal")]
+    pub(crate) calibration: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]

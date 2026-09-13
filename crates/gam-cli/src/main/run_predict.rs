@@ -1341,12 +1341,102 @@ pub(crate) fn run_predict_residual_cascade(
     Ok(())
 }
 
+/// `gam predict --conformal`: the exact full-conformal set, or with
+/// `--calibration` the split-conformal band, at coverage `--level`, built by
+/// `gam_predict::conformal_routes` for a standard model.
+fn run_predict_conformal(
+    args: &PredictArgs,
+    model: &SavedModel,
+    ds: &Dataset,
+    col_map: &HashMap<String, usize>,
+    predict_offset: &Array1<f64>,
+    predict_noise_offset: &Array1<f64>,
+    effective_offset_column: Option<&str>,
+    effective_noise_offset_column: Option<&str>,
+) -> Result<(), String> {
+    let columns = match args.calibration.as_ref() {
+        None => gam_predict::conformal_routes::full_conformal_prediction_columns(
+            model,
+            ds.values.view(),
+            col_map,
+            args.level,
+        )?,
+        Some(calibration_path) => {
+            let response = gam::terms::inference::formula_dsl::formula_response_column(
+                &model.payload().formula,
+            )
+            .ok_or_else(|| {
+                "--calibration: could not resolve the response column from the saved formula"
+                    .to_string()
+            })?;
+            let mut extras = vec![response];
+            extras.extend(
+                [effective_offset_column, effective_noise_offset_column]
+                    .into_iter()
+                    .flatten()
+                    .map(str::to_string),
+            );
+            let calibration = load_datasetwith_model_schema_extra(calibration_path, model, &extras)?;
+            require_dataset_rows("predict --calibration", calibration_path, calibration.values.nrows())?;
+            let calibration_col_map = calibration.column_map();
+            let (calibration_offset, calibration_noise_offset) = resolve_predict_offsets(
+                model,
+                &calibration,
+                &calibration_col_map,
+                effective_offset_column,
+                effective_noise_offset_column,
+            )?;
+            gam_predict::conformal_routes::split_conformal_prediction_columns(
+                model,
+                &gam_predict::conformal_routes::ConformalRows {
+                    data: ds.values.view(),
+                    col_map,
+                    offset: predict_offset,
+                    noise_offset: predict_noise_offset,
+                },
+                &gam_predict::conformal_routes::ConformalRows {
+                    data: calibration.values.view(),
+                    col_map: &calibration_col_map,
+                    offset: &calibration_offset,
+                    noise_offset: &calibration_noise_offset,
+                },
+                args.level,
+                args.covariance_mode,
+                false,
+            )?
+        }
+    };
+    let ordered: Vec<(&str, &[f64])> = [
+        "linear_predictor_plugin",
+        "mean_plugin",
+        "posterior_mean",
+        "posterior_mean_standard_error",
+        "posterior_mean_lower",
+        "posterior_mean_upper",
+        "frozen_rho_certified",
+    ]
+    .into_iter()
+    .filter_map(|name| columns.get(name).map(|values| (name, values.as_slice())))
+    .collect();
+    write_prediction_csv_unified(&args.out, &ordered)?;
+    cli_out!(
+        "wrote conformal predictions: {} (rows={}, level={})",
+        args.out.display(),
+        ds.values.nrows(),
+        args.level
+    );
+    Ok(())
+}
+
 pub(crate) fn run_predict(args: PredictArgs) -> Result<(), String> {
     validate_level(args.level)?;
     // A multinomial model persists as its own softmax-envelope file, not a
     // scalar `SavedModel`; dispatch on the file discriminator before the
     // standard load so `SavedModel::load_from_path` is never handed one.
     if is_multinomial_model_file(&args.model) {
+        if args.conformal {
+            return Err("--conformal supports standard models only".to_string());
+        }
         return run_predict_multinomial(&args);
     }
     let phase_start = std::time::Instant::now();
@@ -1389,16 +1479,29 @@ pub(crate) fn run_predict(args: PredictArgs) -> Result<(), String> {
         effective_offset_column,
         effective_noise_offset_column,
     )?;
-    let result = run_predict_model(
-        &args,
-        &model,
-        ds.values.view(),
-        &col_map,
-        training_headers,
-        &predict_offset,
-        &predict_noise_offset,
-        effective_noise_offset_column.is_some(),
-    );
+    let result = if args.conformal {
+        run_predict_conformal(
+            &args,
+            &model,
+            &ds,
+            &col_map,
+            &predict_offset,
+            &predict_noise_offset,
+            effective_offset_column,
+            effective_noise_offset_column,
+        )
+    } else {
+        run_predict_model(
+            &args,
+            &model,
+            ds.values.view(),
+            &col_map,
+            training_headers,
+            &predict_offset,
+            &predict_noise_offset,
+            effective_noise_offset_column.is_some(),
+        )
+    };
     if result.is_ok() {
         if let Some((id_column, values)) = id_values.as_ref() {
             prepend_id_column_to_prediction_csv(&args.out, id_column, values)?;
