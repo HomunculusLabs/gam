@@ -1285,17 +1285,12 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             FlexActivation::OffForRigidPilot,
         )?;
         let mut pilot_options = options.clone();
-        // The pilot is only a warm start. Avoid production covariance assembly
-        // and cap inner cycles so a bad seed cannot silently consume minutes
-        // before the real outer optimizer starts. Empirically, large-scale
-        // survival pilots descend the joint objective by ~5 orders of
-        // magnitude in the first 10 cycles and then enter a trust-region-
-        // clipped tail; 30 cycles is a budget that catches the descent
-        // shoulder without burning into the long tail. At ~0.5s/cycle for
-        // a 350k-row LOSO fold that's ~15s — within the "no silent
-        // minutes" envelope this cap protects.
+        // The pilot is only a warm start, so it skips production covariance
+        // assembly. Its inner solve runs at the family's cycle budget and stops on
+        // its own KKT certificate or the joint-Newton loop's typed stall exits,
+        // the rule every custom-family trial follows since 67fb2fd4c. A picked
+        // cycle cap is a wall-clock budget under another name.
         pilot_options.compute_covariance = false;
-        pilot_options.inner_max_cycles = pilot_options.inner_max_cycles.min(30);
         match fit_custom_family_fixed_log_lambda_warm_start(
             &rigid_family,
             &rigid_blocks,
