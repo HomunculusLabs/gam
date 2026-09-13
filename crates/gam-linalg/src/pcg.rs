@@ -39,6 +39,66 @@ fn attainable_relative_residual(rows: usize) -> f64 {
     crate::roundoff::accumulation_growth(rows)
 }
 
+/// Work of the two routes for one symmetric positive-definite solve, in flops.
+///
+/// The dense route assembles the `p × p` matrix once (`build`) and factors it
+/// (`p³/3`). The matrix-free route runs preconditioned CG, one operator product
+/// (`apply`) per iteration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DenseRouteWork {
+    /// Flops to assemble the dense matrix once.
+    pub build: u64,
+    /// Flops of one operator product.
+    pub apply: u64,
+}
+
+impl DenseRouteWork {
+    /// How the solve may use preconditioned CG before the dense route.
+    ///
+    /// A matrix whose dense storage exceeds the memory governor's
+    /// single-materialization cap has no dense route, so CG is the only solve.
+    /// Otherwise CG may spend what the dense route costs, `(build + p³/3) / apply`
+    /// products, and the dense route takes over if CG has not converged by then.
+    /// Whichever route wins, the solve costs at most twice the cheaper one, and no
+    /// CG iteration count has to be predicted.
+    pub fn pcg_attempt(&self, p: usize) -> PcgAttempt {
+        self.pcg_attempt_under_cap(
+            p,
+            gam_runtime::resource::MemoryGovernor::global().single_materialization_cap_bytes(),
+        )
+    }
+
+    /// [`Self::pcg_attempt`] against an explicit materialization cap.
+    pub fn pcg_attempt_under_cap(&self, p: usize, cap_bytes: usize) -> PcgAttempt {
+        let p = p as u128;
+        let dense_bytes = p
+            .saturating_mul(p)
+            .saturating_mul(std::mem::size_of::<f64>() as u128);
+        if dense_bytes > cap_bytes as u128 {
+            return PcgAttempt::Only;
+        }
+        let factor = p.saturating_mul(p).saturating_mul(p) / 3;
+        let dense_work = (self.build as u128).saturating_add(factor);
+        let products = dense_work.checked_div(self.apply as u128).unwrap_or(u128::MAX);
+        PcgAttempt::Budgeted {
+            products: usize::try_from(products).unwrap_or(usize::MAX),
+        }
+    }
+}
+
+/// How a solve may use preconditioned CG ([`DenseRouteWork::pcg_attempt`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PcgAttempt {
+    /// The dense matrix exceeds the materialization cap, so CG is the only solve.
+    Only,
+    /// CG may take up to `products` operator products before the dense route
+    /// takes over.
+    Budgeted {
+        /// `(build + p³/3) / apply`, the dense route's cost in products.
+        products: usize,
+    },
+}
+
 /// Per-iteration trace of the PCG recurrence, sufficient to reconstruct the
 /// Lanczos tridiagonal and hence Ritz-based condition estimates. Populated only
 /// when the caller requests diagnostics.
@@ -1648,5 +1708,41 @@ mod tests {
             "expected ‖r‖={r_norm:.3e} ≤ rel_tol·‖rhs‖={:.3e}",
             rel_tol * rhs_norm
         );
+    }
+}
+
+#[cfg(test)]
+mod dense_route_work_tests {
+    use super::*;
+
+    #[test]
+    fn pcg_attempt_spends_the_dense_route_cost_on_a_row_pullback() {
+        // A row pullback at n = 195,000, p = 44 builds n·p², factors p³/3 and
+        // streams 2·n·p per product, so CG gets ⌊(n·p² + p³/3) / (2·n·p)⌋ = 22
+        // products before the dense route takes over.
+        let (n, p) = (195_000u64, 44u64);
+        let work = DenseRouteWork {
+            build: n * p * p,
+            apply: 2 * n * p,
+        };
+        assert_eq!(
+            work.pcg_attempt_under_cap(p as usize, usize::MAX),
+            PcgAttempt::Budgeted { products: 22 }
+        );
+    }
+
+    #[test]
+    fn pcg_attempt_is_the_only_solve_past_the_materialization_cap() {
+        let p = 64usize;
+        let work = DenseRouteWork {
+            build: 1_000_000 * 64 * 64,
+            apply: 2 * 1_000_000 * 64,
+        };
+        let dense_bytes = p * p * std::mem::size_of::<f64>();
+        assert_eq!(
+            work.pcg_attempt_under_cap(p, dense_bytes),
+            PcgAttempt::Budgeted { products: 32 }
+        );
+        assert_eq!(work.pcg_attempt_under_cap(p, dense_bytes - 1), PcgAttempt::Only);
     }
 }

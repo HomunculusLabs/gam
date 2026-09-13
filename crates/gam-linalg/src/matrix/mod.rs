@@ -21,12 +21,9 @@ use std::ops::Deref;
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
-const MATRIX_FREE_PCG_MIN_P: usize = 2048;
-const MATRIX_FREE_PCG_REL_TOL: f64 = 1e-8;
-/// Minimum numerical ridge added to the (penalized) normal matrix before an SPD
-/// solve. Near `f64` precision: large enough to lift an exactly-singular system
-/// off zero so the factorization succeeds, small enough not to bias a
-/// well-conditioned solve. Acts as a floor on any caller-supplied `ridge_floor`.
+/// Products a matrix-free PCG normal-equation solve may take when the dense
+/// `p × p` system exceeds the memory governor's materialization cap, so no
+/// factorization can take over.
 const MATRIX_FREE_PCG_MAX_ITER: usize = 2000;
 /// Dense-materialization row-chunk working-set target. The same quantity as
 /// the library row-chunk target, imported rather than transcribed (#2704).
@@ -1843,13 +1840,6 @@ impl LinearOperator for DenseDesignMatrix {
             Self::Lazy(op) => op.apply_weighted_normal(weights, vector, penalty, ridge),
         }
     }
-
-    fn uses_matrix_free_pcg(&self) -> bool {
-        match self {
-            Self::Materialized(_) => true,
-            Self::Lazy(op) => op.uses_matrix_free_pcg(),
-        }
-    }
 }
 
 impl DenseDesignOperator for DenseDesignMatrix {
@@ -2389,12 +2379,6 @@ impl LinearOperator for RandomEffectOperator {
             }
         }
         out
-    }
-
-    // Restored: the dead-code sweep (d484a091a) deleted this override; it is
-    // reached only through the trait, so the sweep fell back to the default.
-    fn uses_matrix_free_pcg(&self) -> bool {
-        true
     }
 }
 
@@ -3074,13 +3058,6 @@ impl LinearOperator for BlockDesignOperator {
         }
         out
     }
-
-    fn uses_matrix_free_pcg(&self) -> bool {
-        // Enable PCG when any block is non-dense (RE, Operator, or Intercept).
-        self.blocks
-            .iter()
-            .any(|b| matches!(b, DesignBlock::RandomEffect(_) | DesignBlock::Intercept(_)))
-    }
 }
 
 impl DenseDesignOperator for BlockDesignOperator {
@@ -3281,10 +3258,6 @@ impl LinearOperator for MultiChannelOperator {
             diag += &ch.diag_gram_view(weights.slice(s![i * n..(i + 1) * n]))?;
         }
         Ok(diag)
-    }
-
-    fn uses_matrix_free_pcg(&self) -> bool {
-        true
     }
 }
 
@@ -3659,13 +3632,6 @@ impl LinearOperator for ConditionedDesign {
         }
         Ok(result)
     }
-
-    fn uses_matrix_free_pcg(&self) -> bool {
-        match &self.inner {
-            DesignMatrix::Dense(_) => true,
-            DesignMatrix::Sparse(_) => false,
-        }
-    }
 }
 
 impl DenseDesignOperator for ConditionedDesign {
@@ -3932,35 +3898,28 @@ pub trait LinearOperator {
         }
         out
     }
-    fn uses_matrix_free_pcg(&self) -> bool {
-        false
-    }
-    fn solve_system_matrix_free_pcg_try(
+    /// Matrix-free PCG solve of the penalized weighted normal equations
+    /// `(XᵀWX + S + ridge·I) β = rhs` within at most `max_products` products.
+    ///
+    /// CG stops at the residual's own rounding band, `‖r‖ ≤ γ_p·‖rhs‖` (a zero
+    /// relative tolerance is raised to it), which bounds the backward error
+    /// `‖r‖ / (‖A‖·‖β‖ + ‖rhs‖)` by `γ_p`, so a returned solution answers the same
+    /// question as the exact factorization. `Ok(None)` when CG does not reach it
+    /// within the products, or breaks down; the caller decides what takes over.
+    fn solve_system_matrix_free_pcg_within(
         &self,
         weights: &Array1<f64>,
         rhs: &Array1<f64>,
         penalty: Option<&Array2<f64>>,
         baseridge: f64,
-    ) -> Result<Array1<f64>, String> {
-        self.solve_system_matrix_free_pcg_with_info_try(weights, rhs, penalty, baseridge)
-            .map(|(solution, _)| solution)
-    }
-    fn solve_system_matrix_free_pcg_with_info_try(
-        &self,
-        weights: &Array1<f64>,
-        rhs: &Array1<f64>,
-        penalty: Option<&Array2<f64>>,
-        baseridge: f64,
-    ) -> Result<(Array1<f64>, PcgSolveInfo), String> {
+        max_products: usize,
+    ) -> Result<Option<(Array1<f64>, PcgSolveInfo)>, String> {
         if rhs.len() != self.ncols() {
             return Err(format!(
                 "matrix-free PCG solve rhs dimension mismatch: rhs length {} != ncols {}",
                 rhs.len(),
                 self.ncols()
             ));
-        }
-        if !self.uses_matrix_free_pcg() {
-            return Err("matrix-free PCG is only enabled for eligible operator types".to_string());
         }
         if let Some(pen) = penalty
             && (pen.nrows() != self.ncols() || pen.ncols() != self.ncols())
@@ -3975,7 +3934,7 @@ pub trait LinearOperator {
         }
         let p = self.ncols();
         let finite_weights = certify_signed_weights(
-            "solve_system_matrix_free_pcg_with_info_try",
+            "solve_system_matrix_free_pcg_within",
             weights,
             self.nrows(),
         )?;
@@ -3993,36 +3952,25 @@ pub trait LinearOperator {
         };
         let preconditioner = normal_op.jacobi_preconditioner()?;
         let attempt_started = std::time::Instant::now();
-        let (solution, info) = crate::utils::solve_spd_pcg_with_info(
+        let Some((solution, info)) = crate::utils::solve_spd_pcg_with_info(
             |v| normal_op.apply(v),
             rhs,
             &preconditioner,
-            MATRIX_FREE_PCG_REL_TOL,
-            MATRIX_FREE_PCG_MAX_ITER.max(4 * p),
-        )
-        .ok_or_else(|| {
-            format!("matrix-free PCG broke down for explicitly requested ridge {baseridge:.3e}")
-        })?;
+            0.0,
+            max_products,
+        ) else {
+            return Ok(None);
+        };
         if !solution.iter().all(|value| value.is_finite()) {
             return Err("matrix-free PCG produced a non-finite solution".to_string());
         }
         log::debug!(
-            "[matrix-free PCG] solved: p={p} ridge={baseridge:.3e} iters={} converged={} rel_resid={:.3e} elapsed={:.3}s",
+            "[matrix-free PCG] solved: p={p} ridge={baseridge:.3e} iters={} rel_resid={:.3e} elapsed={:.3}s",
             info.iterations,
-            info.converged,
             info.relative_residual_norm,
             attempt_started.elapsed().as_secs_f64(),
         );
-        // An iteration-capped PCG iterate is not a solution of the system the
-        // policy selected this algorithm for; surface it (#2900).
-        if !info.converged {
-            return Err(format!(
-                "matrix-free PCG did not converge for p={p}: {} iterations reached relative \
-                 residual {:.3e}, above the {MATRIX_FREE_PCG_REL_TOL:e} tolerance",
-                info.iterations, info.relative_residual_norm,
-            ));
-        }
-        Ok((solution, info))
+        Ok(Some((solution, info)))
     }
     fn factorize_system(
         &self,
@@ -4076,11 +4024,55 @@ pub trait LinearOperator {
             ));
         }
         let ridge = ridge_floor;
-        // The size policy selects exactly one algorithm. A failed matrix-free
-        // solve is surfaced; silently switching algorithms or escalating ridge
-        // would change both performance and the solved system.
-        if self.uses_matrix_free_pcg() && self.ncols() >= MATRIX_FREE_PCG_MIN_P {
-            return self.solve_system_matrix_free_pcg_try(weights, rhs, penalty, ridge);
+        // `XᵀWX + S + ridge·I` is a row pullback plus a dense `p × p` penalty. The
+        // dense route assembles `XᵀWX` (`n·p²`) and factors it (`p³/3`); one CG product
+        // streams the rows forward and back (`2·n·p`) and applies the penalty (`p²`).
+        // CG may spend what the dense route costs, and if it has not reached its
+        // roundoff floor by then the exact factorization takes over, so both routes
+        // answer the same question. Past the memory governor's materialization cap
+        // there is no dense route and CG is the only solve (#2900).
+        let p = self.ncols();
+        let rows = self.nrows() as u64;
+        let cols = p as u64;
+        let penalty_product = if penalty.is_some() {
+            cols.saturating_mul(cols)
+        } else {
+            0
+        };
+        let work = crate::pcg::DenseRouteWork {
+            build: rows.saturating_mul(cols.saturating_mul(cols)),
+            apply: rows
+                .saturating_mul(cols)
+                .saturating_mul(2)
+                .saturating_add(penalty_product),
+        };
+        match work.pcg_attempt(p) {
+            crate::pcg::PcgAttempt::Only => {
+                let max_products = MATRIX_FREE_PCG_MAX_ITER.max(4 * p);
+                return match self
+                    .solve_system_matrix_free_pcg_within(weights, rhs, penalty, ridge, max_products)?
+                {
+                    Some((solution, _)) => Ok(solution),
+                    None => Err(format!(
+                        "matrix-free PCG did not reach its roundoff floor for p={p} within \
+                         {max_products} products, and the dense system exceeds the \
+                         materialization cap"
+                    )),
+                };
+            }
+            crate::pcg::PcgAttempt::Budgeted { products } => {
+                if products > 0
+                    && let Some((solution, info)) = self
+                        .solve_system_matrix_free_pcg_within(weights, rhs, penalty, ridge, products)?
+                {
+                    log::debug!(
+                        "[normal-equations] route=pcg p={p} cg_iterations={} budget={products}",
+                        info.iterations
+                    );
+                    return Ok(solution);
+                }
+                log::debug!("[normal-equations] route=dense p={p} budget={products}");
+            }
         }
         let mut system = self.diag_xtw_x(weights)?;
         if let Some(pen) = penalty {
@@ -4119,13 +4111,6 @@ pub trait LinearOperator {
 }
 
 impl LinearOperator for DesignMatrix {
-    fn uses_matrix_free_pcg(&self) -> bool {
-        match self {
-            Self::Dense(matrix) => matrix.uses_matrix_free_pcg(),
-            Self::Sparse(_) => false,
-        }
-    }
-
     fn nrows(&self) -> usize {
         match self {
             Self::Dense(matrix) => matrix.nrows(),
@@ -6749,6 +6734,27 @@ mod tests {
                 dense_sol[i]
             );
         }
+    }
+
+    #[test]
+    fn policy_solve_answers_the_penalized_normal_equations_on_a_wide_design() {
+        // p = 64 > 3·n with n = 8 Walsh rows: XᵀX has rank 8 and a constant diagonal,
+        // so XᵀX + ½I has at most nine distinct eigenvalues and the CG attempt can
+        // answer within its products. Whichever route answers must solve the system.
+        let (n, p) = (8usize, 64usize);
+        let x = Array2::from_shape_fn((n, p), |(i, j)| {
+            if (i & j).count_ones() % 2 == 0 { 1.0 } else { -1.0 }
+        });
+        let design = DesignMatrix::Dense(crate::matrix::DenseDesignMatrix::from(x.clone()));
+        let weights = Array1::from_elem(n, 1.0);
+        let penalty = Array2::<f64>::eye(p) * 0.5;
+        let rhs = Array1::from_shape_fn(p, |j| (j as f64 * 0.37).sin());
+        let beta = design
+            .solve_system(&weights, &rhs, Some(&penalty))
+            .expect("policy solve should answer a wide penalized system");
+        let residual = (x.t().dot(&x) + &penalty).dot(&beta) - &rhs;
+        let relative = residual.dot(&residual).sqrt() / rhs.dot(&rhs).sqrt();
+        assert!(relative < 1e-10, "relative residual {relative:e}");
     }
 
     #[test]

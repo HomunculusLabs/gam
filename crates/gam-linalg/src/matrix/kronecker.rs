@@ -411,10 +411,6 @@ impl LinearOperator for TensorProductDesignOperator {
         }
         Ok(Array1::from_vec(diag))
     }
-
-    fn uses_matrix_free_pcg(&self) -> bool {
-        true
-    }
 }
 
 impl DenseDesignOperator for TensorProductDesignOperator {
@@ -702,10 +698,6 @@ impl LinearOperator for RowwiseKroneckerOperator {
             }
         }
         Ok(out)
-    }
-
-    fn uses_matrix_free_pcg(&self) -> bool {
-        true
     }
 }
 
