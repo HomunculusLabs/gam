@@ -13,10 +13,11 @@ Mathematical contract:
     δs[e] = R_e^{(u→e)}(s_{u_e}) − R_e^{(v→e)}(s_{v_e})
 
 The sheaf Laplacian ``L = δᵀ δ`` is never materialised — gradients and HVPs
-route through two matvecs (apply δ then δᵀ). ``harmonic_modes(tol)`` returns
-the number of eigenvalues of ``L`` strictly below ``tol``; this generalises
-the connected-component count of a graph Laplacian and quantifies the space
-of globally consistent sections.
+route through two matvecs (apply δ then δᵀ). ``harmonic_modes()`` returns
+the dimension of the null space of ``L``, counted within each component
+block's eigensolver backward-error band; this generalises the
+connected-component count of a graph Laplacian and quantifies the space of
+globally consistent sections.
 
 Reference: Hansen & Ghrist, "Toward a Spectral Theory of Cellular Sheaves",
 J. Appl. Comput. Topol. 3 (2019).
@@ -170,7 +171,7 @@ class SheafConsistencyPenalty:
     >>> z = {0: np.zeros(3), 1: np.zeros(3), 2: np.zeros(3)}
     >>> float(sheaf(z))
     0.0
-    >>> sheaf.harmonic_modes(1e-10)
+    >>> sheaf.harmonic_modes()
     3
     """
 
@@ -291,8 +292,8 @@ class SheafConsistencyPenalty:
         v_flat = self._stack(v)
         return np.asarray(self._rust.hvp(flat, v_flat), dtype=np.float64)
 
-    def harmonic_modes(self, tol: float = 1e-8) -> int:
-        return int(self._rust.harmonic_modes(float(tol)))
+    def harmonic_modes(self) -> int:
+        return int(self._rust.harmonic_modes())
 
     def __repr__(self) -> str:
         return repr(self._rust)

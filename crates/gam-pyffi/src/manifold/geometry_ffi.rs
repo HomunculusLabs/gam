@@ -4329,14 +4329,8 @@ impl SheafConsistencyPenalty {
         Ok(hv.into_pyarray(py))
     }
 
-    #[pyo3(signature = (tol = 1e-8))]
-    fn harmonic_modes(&self, tol: f64) -> PyResult<usize> {
-        if !(tol.is_finite() && tol >= 0.0) {
-            return Err(PyValueError::new_err(format!(
-                "SheafConsistencyPenalty.harmonic_modes: tol must be finite and >= 0, got {tol}"
-            )));
-        }
-        self.inner.harmonic_modes(tol).map_err(PyValueError::new_err)
+    fn harmonic_modes(&self) -> PyResult<usize> {
+        self.inner.harmonic_modes().map_err(PyValueError::new_err)
     }
 
     fn __repr__(&self) -> String {

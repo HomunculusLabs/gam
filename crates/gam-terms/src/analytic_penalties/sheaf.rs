@@ -33,7 +33,7 @@
 //!     `None` it defaults to the identity (`δs[e] = R_uv·s_u − s_v`), which
 //!     is the "single-restriction edge" convention common in sheaf-diffusion
 //!     networks.
-//!   * `harmonic_modes(tol)` counts exactly at every size: `L` is block
+//!   * `harmonic_modes()` counts exactly at every size: `L` is block
 //!     diagonal over the connected components of the edge graph, and each
 //!     component block is counted by faer's self-adjoint eigendecomposition
 //!     (`gam_linalg::faer_ndarray::FaerEigh`) under a memory-ledger charge.
@@ -514,23 +514,21 @@ impl SheafConsistencyPenalty {
         block
     }
 
-    /// Count eigenvalues of the unweighted Laplacian `L` strictly below
-    /// `tol`. Equals the number of harmonic modes (global sections, mod the
-    /// `tol`-tolerance). The penalty weight is **not** folded in: harmonic
-    /// modes are an intrinsic property of `δ`.
+    /// Number of harmonic modes of the unweighted Laplacian `L`: the dimension of
+    /// its null space, the global sections of the sheaf. The penalty weight is
+    /// **not** folded in: harmonic modes are an intrinsic property of `δ`.
     ///
     /// `L` is block diagonal over the connected components of the edge graph, so
-    /// the count is the sum of exact dense counts over the component blocks, and
-    /// it is exact at every total stalk dimension. An edge-free component has a
-    /// zero block, so each of its coordinates counts when `tol > 0`. Each dense
-    /// block and its eigenvectors are charged on the memory ledger, and a
-    /// component too large for the ledger returns an error instead of a count.
-    pub fn harmonic_modes(&self, tol: f64) -> Result<usize, String> {
-        if !(tol.is_finite() && tol >= 0.0) {
-            return Err(format!(
-                "SheafConsistencyPenalty::harmonic_modes requires finite non-negative tol, got {tol}"
-            ));
-        }
+    /// the count is the sum over the component blocks, and it is exact at every
+    /// total stalk dimension. A block's null eigenvalues are counted within its
+    /// eigendecomposition's backward-error band `dim·ε·λ_max`: a backward-stable
+    /// self-adjoint eigensolver moves every eigenvalue by at most that much
+    /// (Weyl), so an exact zero is counted and a resolved positive eigenvalue is
+    /// not. An edge-free component has a zero block, so all of its coordinates
+    /// are harmonic. Each dense block and its eigenvectors are charged on the
+    /// memory ledger, and a component too large for the ledger returns an error
+    /// instead of a count.
+    pub fn harmonic_modes(&self) -> Result<usize, String> {
         let components = self.components();
         let k = self.stalk_dims.len();
         let mut component_of = vec![0usize; k];
@@ -553,9 +551,7 @@ impl SheafConsistencyPenalty {
         let mut count = 0usize;
         for (index, &dim) in component_dims.iter().enumerate() {
             if component_edges[index].is_empty() {
-                if tol > 0.0 {
-                    count += dim;
-                }
+                count += dim;
                 continue;
             }
             let reservation = governor
@@ -578,7 +574,11 @@ impl SheafConsistencyPenalty {
                      component Laplacian failed: {error:?}"
                 )
             })?;
-            count += eigenvalues.iter().filter(|&&value| value < tol).count();
+            let max_abs = eigenvalues
+                .iter()
+                .fold(0.0_f64, |acc, &value| acc.max(value.abs()));
+            let band = dim as f64 * f64::EPSILON * max_abs;
+            count += eigenvalues.iter().filter(|&&value| value <= band).count();
             drop(reservation);
         }
         Ok(count)
@@ -702,12 +702,15 @@ mod tests {
         l
     }
 
-    /// Dense-eigh count of eigenvalues of the matvec Laplacian below `tol`.
-    fn dense_count_below(pen: &SheafConsistencyPenalty, tol: f64) -> usize {
+    /// Dense-eigh count of the matvec Laplacian's null eigenvalues, within the
+    /// dense eigendecomposition's backward-error band `dim·ε·λ_max`.
+    fn dense_null_count(pen: &SheafConsistencyPenalty) -> usize {
         let (evals, _) = dense_laplacian(pen)
             .eigh(Side::Lower)
             .expect("dense Laplacian eigendecomposition");
-        evals.iter().filter(|&&value| value < tol).count()
+        let max_abs = evals.iter().fold(0.0_f64, |acc, &value| acc.max(value.abs()));
+        let band = pen.total_dim() as f64 * f64::EPSILON * max_abs;
+        evals.iter().filter(|&&value| value <= band).count()
     }
 
     // #2900: the component blocks must reassemble the matvec Laplacian exactly on a
@@ -734,8 +737,9 @@ mod tests {
 
     // #2900: on a sheaf with several components (one with a self-loop, one edge-free
     // vertex, one rank-deficient restriction), the component count must equal the
-    // dense count of the whole matvec Laplacian for tolerances below, between and
-    // above its eigenvalues.
+    // dense null count of the whole matvec Laplacian. The smallest resolved
+    // eigenvalue sits many orders above both bands, so neither eigensolver's
+    // roundoff can move a mode across one.
     #[test]
     fn harmonic_modes_matches_the_dense_count_across_components_2900() {
         let edges = vec![(0usize, 1usize), (1usize, 1usize), (3usize, 4usize)];
@@ -747,23 +751,44 @@ mod tests {
         let pen = SheafConsistencyPenalty::new(edges, restrictions, 1.0, vec![2, 2, 3, 2, 2])
             .expect("build");
         let (evals, _) = dense_laplacian(&pen).eigh(Side::Lower).expect("eigh");
-        // Probes sit well away from every eigenvalue, so the two eigensolvers'
-        // roundoff cannot put an eigenvalue on opposite sides of a probe: above
-        // the null modes, midway across each resolved gap, and above the spectrum.
         let top = evals.iter().copied().fold(0.0_f64, f64::max);
-        let mut probes = vec![1e-10_f64, top + 1.0];
-        probes.extend(
-            evals
-                .windows(2)
-                .into_iter()
-                .filter(|pair| pair[1] - pair[0] > 1e-6)
-                .map(|pair| 0.5 * (pair[0] + pair[1])),
+        let band = pen.total_dim() as f64 * f64::EPSILON * top;
+        let smallest_resolved = evals
+            .iter()
+            .copied()
+            .filter(|&value| value > band)
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            smallest_resolved > 1.0e6 * band,
+            "the fixture must have a resolved gap above the null band: {smallest_resolved:e} vs {band:e}"
         );
-        for tol in probes {
+        assert_eq!(
+            pen.harmonic_modes().expect("harmonic modes"),
+            dense_null_count(&pen)
+        );
+    }
+
+    // The harmonic-mode count is a property of the sheaf's kernel, so scaling
+    // every restriction by a constant must not move it. With restrictions
+    // 2^-17·I, each identity pair's block is 2^-34·[[1, -1], [-1, 1]], with
+    // eigenvalues {0, 2^-33 ≈ 1.2e-10}. The retired default tolerance 1e-8
+    // counted both as harmonic. The scale is a power of two, so the scaled
+    // block's rounding is the unscaled block's, bit for bit.
+    #[test]
+    fn harmonic_mode_count_does_not_depend_on_the_restriction_scale() {
+        let pairs = 64usize;
+        for scale in [1.0_f64, 2.0_f64.powi(-17)] {
+            let edges: Vec<(usize, usize)> = (0..pairs).map(|p| (2 * p, 2 * p + 1)).collect();
+            let restrictions =
+                std::iter::repeat_with(|| EdgeRestriction::paired(identity(1) * scale, identity(1) * scale))
+                    .take(pairs)
+                    .collect();
+            let pen = SheafConsistencyPenalty::new(edges, restrictions, 1.0, vec![1; 2 * pairs])
+                .expect("build");
             assert_eq!(
-                pen.harmonic_modes(tol).expect("harmonic modes"),
-                dense_count_below(&pen, tol),
-                "tol = {tol:e}"
+                pen.harmonic_modes().expect("harmonic modes"),
+                pairs,
+                "restriction scale {scale:e}"
             );
         }
     }
@@ -782,7 +807,7 @@ mod tests {
         let pen = SheafConsistencyPenalty::new(edges, restrictions, 1.0, vec![1; 2 * pairs])
             .expect("build");
         assert_eq!(pen.total_dim(), 4200);
-        assert_eq!(pen.harmonic_modes(1e-10).expect("harmonic modes"), pairs);
+        assert_eq!(pen.harmonic_modes().expect("harmonic modes"), pairs);
     }
 
     #[test]
@@ -859,7 +884,7 @@ mod tests {
     fn harmonic_modes_two_components_identity_restrictions() {
         // Two disconnected vertices (no edges), d = 3 each → ker L = R^{6}, all 6 modes.
         let pen = SheafConsistencyPenalty::new(vec![], vec![], 1.0, vec![3, 3]).expect("build");
-        let h = pen.harmonic_modes(1e-10).expect("harmonic modes");
+        let h = pen.harmonic_modes().expect("harmonic modes");
         assert_eq!(h, 6);
 
         // K=4, two connected components: (0-1) and (2-3) with identity restrictions, d=2 each.
@@ -872,7 +897,7 @@ mod tests {
         ];
         let pen2 = SheafConsistencyPenalty::new(edges, restrictions, 1.0, vec![2, 2, 2, 2])
             .expect("build");
-        let h2 = pen2.harmonic_modes(1e-10).expect("harmonic modes");
+        let h2 = pen2.harmonic_modes().expect("harmonic modes");
         assert_eq!(h2, 4);
     }
 

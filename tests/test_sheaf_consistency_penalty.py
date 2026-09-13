@@ -93,7 +93,7 @@ def test_harmonic_modes_disconnected_components() -> None:
         restriction_ops=[np.eye(2), np.eye(2)],
         weight=1.0,
     )
-    h = sheaf.harmonic_modes(1e-10)
+    h = sheaf.harmonic_modes()
     # Each component contributes d = 2 harmonic (constant-section) modes.
     assert h == 4
 
