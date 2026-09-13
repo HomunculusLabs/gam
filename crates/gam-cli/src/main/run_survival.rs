@@ -579,6 +579,7 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
                 location_scale_uses_probit_survival_baseline(Some(&survival_inverse_link));
             baseline_cfg = optimize_survival_baseline_config_with_gradient_only(
                 &baseline_cfg,
+                age_exit.view(),
                 "survival location-scale baseline",
                 |candidate| {
                     let prepared = prepare_survival_time_stack(
@@ -1236,6 +1237,7 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
             // outer evaluations on the small 2–3 dim θ-surface.
             baseline_cfg = optimize_survival_baseline_config_with_gradient_only(
                 &baseline_cfg,
+                age_exit.view(),
                 if likelihood_mode == SurvivalLikelihoodMode::Latent {
                     "latent survival baseline"
                 } else {

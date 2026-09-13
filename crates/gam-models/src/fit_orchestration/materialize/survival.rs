@@ -1160,6 +1160,7 @@ pub(crate) fn materialize_survival<'a>(
             location_scale_uses_probit_survival_baseline(Some(&survival_inverse_link));
         let baseline_outcome = optimize_survival_baseline_config_with_gradient_only(
             &baseline_cfg,
+            age_exit.view(),
             "workflow survival location-scale baseline",
             |candidate| {
                 let fit_result = fit_survival_location_scale_model(build_location_scale_request(
@@ -1238,6 +1239,7 @@ pub(crate) fn materialize_survival<'a>(
         // converged baseline θ. BFGS converges in ≲10 outer evaluations.
         let baseline_outcome = optimize_survival_baseline_config_with_gradient_only(
             &baseline_cfg,
+            age_exit.view(),
             "workflow latent survival baseline",
             |candidate| {
                 let (log_likelihood, stable_penalty_term, residuals) = match survival_mode {

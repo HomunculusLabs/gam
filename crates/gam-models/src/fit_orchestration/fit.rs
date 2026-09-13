@@ -3087,6 +3087,7 @@ pub(crate) fn fit_survival_transformation_model(
         // in ≲10 outer evaluations on the 2–3 dim surface.
         baseline_cfg = optimize_survival_baseline_config_with_gradient_only(
             &baseline_cfg,
+            spec.age_exit.view(),
             "workflow survival transformation baseline",
             |candidate| {
                 let (_, _, beta0, structural_lower_bounds, mut model) =

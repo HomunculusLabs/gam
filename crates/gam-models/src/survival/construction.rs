@@ -559,6 +559,56 @@ pub fn initial_survival_baseline_config_for_fit(
     )
 }
 
+/// The range each baseline θ coordinate can move while the criterion still
+/// resolves it, centred on the seed.
+///
+/// Every coordinate gets the same number of e-folds either side of its seed:
+/// `ln(1/√ε)`, the gradient resolution every derived ρ-domain edge sits at
+/// (`gam_problem::log_gradient_resolution`, #2812). A log-scale coordinate
+/// (Weibull scale and shape, Gompertz rate, the Makeham term) moves its
+/// quantity by one e-fold per unit, so its interval is `seed ± ln(1/√ε)`.
+/// The Gompertz shape enters the hazard as `exp(shape·t)`, so the same
+/// number of e-folds at the oldest observed exit age is `ln(1/√ε) / max t`.
+/// It is the one baseline θ domain: the marginal-slope frozen offset chart owns
+/// it for its joint solver, and the standalone baseline optimizer searches it.
+/// It replaces a hand-supplied `seed ± 6` box and, in the standalone optimizer,
+/// the outer engine's ±30 fallback (SPEC rule 20, #2902 row 8).
+fn survival_baseline_theta_domain(
+    target: SurvivalBaselineTarget,
+    seed: &Array1<f64>,
+    age_exit: ndarray::ArrayView1<'_, f64>,
+) -> Result<(Array1<f64>, Array1<f64>), String> {
+    let e_folds = -gam_problem::log_gradient_resolution();
+    let oldest_exit = age_exit.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let shape_radius = || {
+        if oldest_exit.is_finite() && oldest_exit > 0.0 {
+            Ok(e_folds / oldest_exit)
+        } else {
+            Err(format!(
+                "survival baseline Gompertz θ domain needs a positive finite exit age, got {oldest_exit}"
+            ))
+        }
+    };
+    let radius = match target {
+        SurvivalBaselineTarget::Linear => {
+            return Err("survival linear baseline has no θ coordinates".to_string());
+        }
+        SurvivalBaselineTarget::Weibull => Array1::from_vec(vec![e_folds, e_folds]),
+        SurvivalBaselineTarget::Gompertz => Array1::from_vec(vec![e_folds, shape_radius()?]),
+        SurvivalBaselineTarget::GompertzMakeham => {
+            Array1::from_vec(vec![e_folds, shape_radius()?, e_folds])
+        }
+    };
+    if radius.len() != seed.len() {
+        return Err(format!(
+            "survival baseline θ domain has {} radii for a {}-coordinate seed",
+            radius.len(),
+            seed.len()
+        ));
+    }
+    Ok((seed - &radius, seed + &radius))
+}
+
 pub fn survival_baseline_theta_from_config(
     cfg: &SurvivalBaselineConfig,
 ) -> Result<Option<Array1<f64>>, String> {
@@ -734,6 +784,7 @@ impl BaselineDerivativeContract {
 /// `contract` selecting the `OuterProblem` derivative declaration.
 fn run_baseline_theta_optimizer<Fc, Fe>(
     initial: &SurvivalBaselineConfig,
+    age_exit: ndarray::ArrayView1<'_, f64>,
     context: &str,
     contract: BaselineDerivativeContract,
     cost_fn: Fc,
@@ -752,12 +803,14 @@ where
     };
     let dim = seed.len();
     let target = initial.target;
-    // The baseline shape search runs on the outer engine's own domain; the
-    // private `seed ± 6` box that used to be handed in here was a hand-supplied
-    // bound of exactly the kind that decided the survival time-block λ until
-    // a03438645 (#2670).
+    // The baseline shape search runs on the domain the criterion resolves, the
+    // one the frozen offset chart owns. Neither the private `seed ± 6` box that
+    // decided the survival time-block λ until a03438645 (#2670) nor the
+    // engine's ±30 fallback applies (#2902 row 8).
+    let (lower, upper) = survival_baseline_theta_domain(target, &seed, age_exit)?;
     let problem = contract
         .configure(OuterProblem::new(dim).with_prefer_gradient_only(true))
+        .with_bounds(lower, upper)
         .with_initial_rho(seed.clone())
         .with_seed_config(crate::seeding::SeedConfig {
             max_seeds: 1,
@@ -808,6 +861,7 @@ where
 /// `contract` it forwards to [`run_baseline_theta_optimizer`].
 fn run_baseline_theta_optimizer_with_eval<F>(
     initial: &SurvivalBaselineConfig,
+    age_exit: ndarray::ArrayView1<'_, f64>,
     context: &str,
     contract: BaselineDerivativeContract,
     objective: F,
@@ -878,7 +932,7 @@ where
         *cost_eval_cache.borrow_mut() = Some((theta.clone(), eval.clone()));
         Ok(eval)
     };
-    run_baseline_theta_optimizer(initial, context, contract, cost_fn, eval_fn)
+    run_baseline_theta_optimizer(initial, age_exit, context, contract, cost_fn, eval_fn)
 }
 
 /// Gradient-only outer baseline-config optimizer. Thin adapter over
@@ -890,9 +944,12 @@ where
 /// closed-form θ-gradient (`baseline_chain_rule_gradient` /
 /// `marginal_slope_baseline_chain_rule_gradient`) but no native analytic
 /// θ-Hessian; BFGS on a 2–3 dim problem with an exact gradient typically
-/// converges in 5–10 outer evaluations.
+/// converges in 5–10 outer evaluations. The search domain is derived at the
+/// seed, and the Gompertz shape's radius reads the oldest exit age in
+/// `age_exit`.
 pub fn optimize_survival_baseline_config_with_gradient_only<F>(
     initial: &SurvivalBaselineConfig,
+    age_exit: ndarray::ArrayView1<'_, f64>,
     context: &str,
     mut objective: F,
 ) -> Result<SurvivalBaselineConfig, String>
@@ -902,6 +959,7 @@ where
     use gam_problem::{HessianValue, OuterEval};
     run_baseline_theta_optimizer_with_eval(
         initial,
+        age_exit,
         context,
         BaselineDerivativeContract::GradientOnly,
         move |cfg| {
@@ -3565,8 +3623,11 @@ impl SurvivalMarginalSlopeFrozenOffsetChart {
                     "survival marginal-slope frozen offset chart requires a nonlinear baseline",
                 )
             })?;
-        let (lower_theta, upper_theta) =
-            Self::derived_theta_domain(initial_config.target, &initial_geometry.theta, age_exit)?;
+        let (lower_theta, upper_theta) = survival_baseline_theta_domain(
+            initial_config.target,
+            &initial_geometry.theta,
+            age_exit.view(),
+        )?;
         Ok(Self {
             age_entry: age_entry.clone(),
             age_exit: age_exit.clone(),
@@ -3594,56 +3655,6 @@ impl SurvivalMarginalSlopeFrozenOffsetChart {
     /// terminal certificate cannot silently choose a different domain.
     pub(crate) fn theta_bounds(&self) -> (&Array1<f64>, &Array1<f64>) {
         (&self.lower_theta, &self.upper_theta)
-    }
-
-    /// The range each chart coordinate can move while the criterion still
-    /// resolves it, centred on the data-matched seed.
-    ///
-    /// Every coordinate gets the same number of e-folds either side of its seed:
-    /// `ln(1/√ε)`, the gradient resolution every derived ρ-domain edge sits at
-    /// (`gam_problem::log_gradient_resolution`, #2812). A log-scale coordinate
-    /// (Weibull scale and shape, Gompertz rate, the Makeham term) moves its
-    /// quantity by one e-fold per unit, so its interval is `seed ± ln(1/√ε)`.
-    /// The Gompertz shape enters the hazard as `exp(shape·t)`, so the same
-    /// number of e-folds at the oldest observed exit age is `ln(1/√ε) / max t`.
-    /// This replaces a hand-supplied `seed ± 6` box (SPEC rule 20); the
-    /// standalone baseline optimizer dropped the same box in #2670.
-    fn derived_theta_domain(
-        target: SurvivalBaselineTarget,
-        seed: &Array1<f64>,
-        age_exit: &Array1<f64>,
-    ) -> Result<(Array1<f64>, Array1<f64>), String> {
-        let e_folds = -gam_problem::log_gradient_resolution();
-        let oldest_exit = age_exit.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let shape_radius = || {
-            if oldest_exit.is_finite() && oldest_exit > 0.0 {
-                Ok(e_folds / oldest_exit)
-            } else {
-                Err(format!(
-                    "survival marginal-slope Gompertz chart domain needs a positive finite exit age, got {oldest_exit}"
-                ))
-            }
-        };
-        let radius = match target {
-            SurvivalBaselineTarget::Linear => {
-                return Err(
-                    "survival marginal-slope linear baseline has no chart coordinates".to_string(),
-                );
-            }
-            SurvivalBaselineTarget::Weibull => Array1::from_vec(vec![e_folds, e_folds]),
-            SurvivalBaselineTarget::Gompertz => Array1::from_vec(vec![e_folds, shape_radius()?]),
-            SurvivalBaselineTarget::GompertzMakeham => {
-                Array1::from_vec(vec![e_folds, shape_radius()?, e_folds])
-            }
-        };
-        if radius.len() != seed.len() {
-            return Err(format!(
-                "survival marginal-slope chart domain has {} radii for a {}-coordinate seed",
-                radius.len(),
-                seed.len()
-            ));
-        }
-        Ok((seed - &radius, seed + &radius))
     }
 
     pub fn evaluate(
@@ -5645,6 +5656,7 @@ mod tests {
         let previous_theta = RefCell::new(None::<Array1<f64>>);
         let fitted = optimize_survival_baseline_config_with_gradient_only(
             &initial,
+            ndarray::array![1.5, 3.0, 5.5].view(),
             "#2714 duplicate-evaluation regression",
             |cfg| {
                 let theta = survival_baseline_theta_from_config(cfg)?
