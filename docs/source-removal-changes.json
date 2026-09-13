@@ -8946,5 +8946,16 @@
     ],
     "reason": "#2899 slop: FrozenAnalyticPenaltyOp::penalty, a read-only accessor to the frozen op's AnalyticPenaltyKind, has no caller. Once the op is crate-private, rustc reports it never used. The same commit narrows seven gam-terms items that only gam-terms uses and that no public item exposes: FrozenAnalyticPenaltyOp, ScaledPenaltyOp, SmoothStructureAnalysis, and the three sphere_spectral functions.",
     "evidence": "At the base, git grep -n -w penalty finds no .penalty() call on a FrozenAnalyticPenaltyOp. Pool job 627786 (log /scratch.global/sauer354/pool/prune-api-b/r18b.627786.log, r18b.cargo.out) compiled the op crate-private, and rustc reported crates/gam-terms/src/analytic_penalties/registry.rs:336 method `penalty` is never used."
+  },
+  {
+    "base": "d1798fff4a9ccffbcdf3a1199dafc253251e5afb",
+    "items": [
+      "tests/glm/families/pg_moments_devroye_1521.rs:fn:moments_match_devroye_sampler",
+      "tests/regressions/families/sample_generative_polya_gamma.rs:fn:bug_polya_gamma_augmentation_marginal_identity_matches_documented_posterior",
+      "tests/regressions/families/sample_generative_polya_gamma.rs:fn:bug_polya_gamma_pg11_mean_matches_theory_with_clt_bound",
+      "tests/regressions/families/sample_generative_polya_gamma.rs:fn:pg_theoretical_mean"
+    ],
+    "reason": "#2899 moved tests: three root tests were the only users outside gam-inference of gam_inference::polya_gamma::PolyaGamma, which production uses only inside gam-inference (gpu_polya_gamma.rs). They move into polya_gamma.rs's unit-test module, and PolyaGamma narrows to pub(crate). The two mean tests call that module's identical theoretical_mean instead of their own pg_theoretical_mean copy. One of them drops a NutsResult placeholder that existed only to keep a symbol referenced.",
+    "evidence": "At the base, git grep -n -w PolyaGamma over crates, src, tests, examples and bench finds it outside crates/gam-inference/src only in tests/glm/families/pg_moments_devroye_1521.rs (moments_match_devroye_sampler) and tests/regressions/families/sample_generative_polya_gamma.rs (bug_polya_gamma_pg11_mean_matches_theory_with_clt_bound and bug_polya_gamma_augmentation_marginal_identity_matches_documented_posterior, with their pg_theoretical_mean helper). Each moved test reappears in crates/gam-inference/src/polya_gamma.rs, and pg_theoretical_mean has the same formula as the module's theoretical_mean."
   }
 ]

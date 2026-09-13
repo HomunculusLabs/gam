@@ -28,4 +28,3 @@ mod owed_1477;
 mod owed_1477_double_vs_single_penalty;
 mod owed_1477_factorial;
 mod perf_1074_gamma_shape_freeze;
-mod pg_moments_devroye_1521;

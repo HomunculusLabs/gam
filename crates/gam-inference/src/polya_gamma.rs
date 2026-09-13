@@ -41,7 +41,7 @@ impl<R: Rng + ?Sized> rand_core_06::RngCore for Rand08<'_, R> {
 /// Gibbs and validation paths. Shape selection and all sampling mathematics
 /// stay inside the upstream crate.
 #[derive(Debug, Clone)]
-pub struct PolyaGamma {
+pub(crate) struct PolyaGamma {
     upstream: polya_gamma::PolyaGamma,
 }
 
@@ -173,5 +173,77 @@ mod tests {
                 "PG(1,{c}) variance: empirical {variance:.6e}, theory {expected_variance:.6e}, relative error {variance_relative_error:.3e}",
             );
         }
+    }
+
+    /// #1521: the closed-form Pólya–Gamma moments (`pg_moments`, in gam-solve) agree
+    /// with the empirical PG(1, c) sampler to its own tolerance, locking the analytic
+    /// formula to the Devroye truth. Moved from the root
+    /// `tests/glm/families/pg_moments_devroye_1521.rs`.
+    #[test]
+    fn moments_match_devroye_sampler() {
+        use crate::pg_moments::pg_moments;
+        let pg = PolyaGamma::new();
+        for &c in &[0.0_f64, 0.5, 1.0, 3.0] {
+            let mut rng = StdRng::seed_from_u64(11 ^ (c.to_bits()));
+            let n = 200_000;
+            let mut sum = 0.0;
+            let mut sum_sq = 0.0;
+            for _ in 0..n {
+                let s = pg.draw(&mut rng, c);
+                sum += s;
+                sum_sq += s * s;
+            }
+            let emp_mean = sum / n as f64;
+            let emp_var = sum_sq / n as f64 - emp_mean * emp_mean;
+            let m = pg_moments(1.0, c);
+            assert!(
+                (emp_mean - m.mean).abs() / m.mean.max(1e-9) < 2e-2,
+                "PG(1,{c}) mean: emp {emp_mean}, analytic {}",
+                m.mean
+            );
+            assert!(
+                (emp_var - m.variance).abs() / m.variance.max(1e-9) < 5e-2,
+                "PG(1,{c}) var: emp {emp_var}, analytic {}",
+                m.variance
+            );
+        }
+    }
+
+    #[test]
+    fn bug_polya_gamma_pg11_mean_matches_theory_with_clt_bound() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let pg = PolyaGamma::new();
+        let n = 100_000usize;
+        let c = 1.1;
+        let draws: Vec<f64> = (0..n).map(|_| pg.draw(&mut rng, c)).collect();
+        let mean = draws.iter().sum::<f64>() / n as f64;
+        let var = draws.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n as f64 - 1.0);
+        let se = (var / n as f64).sqrt();
+        let theory = theoretical_mean(c);
+        assert!(
+            (mean - theory).abs() <= 3.0 * se,
+            "PG(1,{c}) empirical mean should lie within 3 standard errors of the analytic mean"
+        );
+    }
+
+    #[test]
+    fn bug_polya_gamma_augmentation_marginal_identity_matches_documented_posterior() {
+        let mut rng = StdRng::seed_from_u64(101);
+        let pg = PolyaGamma::new();
+        let n = 50_000usize;
+        let beta = 1.3;
+        let draws: Vec<f64> = (0..n).map(|_| pg.draw(&mut rng, beta)).collect();
+        let omega_mean = draws.iter().sum::<f64>() / n as f64;
+        let rhs = theoretical_mean(beta);
+        let var = draws
+            .iter()
+            .map(|draw| (draw - omega_mean).powi(2))
+            .sum::<f64>()
+            / (n as f64 - 1.0);
+        let se = (var / n as f64).sqrt();
+        assert!(
+            (omega_mean - rhs).abs() <= 3.0 * se,
+            "Polya-Gamma augmentation integral identity should recover the documented marginal posterior"
+        );
     }
 }

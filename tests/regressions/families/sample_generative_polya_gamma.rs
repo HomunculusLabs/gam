@@ -1,35 +1,7 @@
 use gam::generative::{NoiseModel, generativespec_from_predict};
-use gam::hmc::NutsResult;
-use gam::polya_gamma::PolyaGamma;
 use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
 use gam_predict::PredictResult;
 use ndarray::{Array1, Array2, Axis};
-use rand::{SeedableRng, rngs::StdRng};
-
-fn pg_theoretical_mean(c: f64) -> f64 {
-    if c.abs() < 1e-12 {
-        0.25
-    } else {
-        (0.5 * c).tanh() / (2.0 * c)
-    }
-}
-
-#[test]
-fn bug_polya_gamma_pg11_mean_matches_theory_with_clt_bound() {
-    let mut rng = StdRng::seed_from_u64(7);
-    let pg = PolyaGamma::new();
-    let n = 100_000usize;
-    let c = 1.1;
-    let draws: Vec<f64> = (0..n).map(|_| pg.draw(&mut rng, c)).collect();
-    let mean = draws.iter().sum::<f64>() / n as f64;
-    let var = draws.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n as f64 - 1.0);
-    let se = (var / n as f64).sqrt();
-    let theory = pg_theoretical_mean(c);
-    assert!(
-        (mean - theory).abs() <= 3.0 * se,
-        "PG(1,{c}) empirical mean should lie within 3 standard errors of the analytic mean"
-    );
-}
 
 #[test]
 fn bug_sample_standard_gaussian_draw_covariance_matches_posterior_covariance() {
@@ -82,28 +54,4 @@ fn bug_generativespec_from_predict_roundtrip_recovers_response_distribution() {
         }
         _ => panic!("predict -> generative round-trip should yield Gaussian noise model"),
     }
-}
-
-#[test]
-fn bug_polya_gamma_augmentation_marginal_identity_matches_documented_posterior() {
-    // Keep the `NutsResult` symbol load-bearing (it must stay exported).
-    let nuts_placeholder: Option<NutsResult> = None;
-    assert!(nuts_placeholder.is_none());
-    let mut rng = StdRng::seed_from_u64(101);
-    let pg = PolyaGamma::new();
-    let n = 50_000usize;
-    let beta = 1.3;
-    let draws: Vec<f64> = (0..n).map(|_| pg.draw(&mut rng, beta)).collect();
-    let omega_mean = draws.iter().sum::<f64>() / n as f64;
-    let rhs = pg_theoretical_mean(beta);
-    let var = draws
-        .iter()
-        .map(|draw| (draw - omega_mean).powi(2))
-        .sum::<f64>()
-        / (n as f64 - 1.0);
-    let se = (var / n as f64).sqrt();
-    assert!(
-        (omega_mean - rhs).abs() <= 3.0 * se,
-        "Polya-Gamma augmentation integral identity should recover the documented marginal posterior"
-    );
 }
