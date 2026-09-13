@@ -4505,7 +4505,8 @@ impl SaeManifoldTerm {
     /// border, so it can only price `A` if the blocks exist (#2509).
     ///
     /// Every channel is row-local — (1a)/(1b) residual curvature, (2) the softmax
-    /// entropy-minus-Gershgorin delta, (3) the periodic ARD concave clamp — except
+    /// entropy-minus-Gershgorin delta, (3) the periodic ARD concave clamp, (3b) the
+    /// ThresholdGate concave remainder on logit slots — except
     /// ordered Beta–Bernoulli, whose integrated-marginal prior couples every row
     /// within an atom column. That mode has no arrow-structured `ΔC` and is
     /// REFUSED here rather than silently dropped: pricing `B` while claiming `A`
@@ -4555,6 +4556,18 @@ impl SaeManifoldTerm {
                 let inv_tau = 1.0 / temperature;
                 Some(rho.lambda_sparse()? * sparsity * inv_tau * inv_tau)
             }
+            _ => None,
+        };
+        // (3b) #2520 — the ThresholdGate's concave remainder, from the producer the
+        // applier and the clamp diagonal read; `None` off the threshold gate.
+        let threshold_gate_remainder = match self.assignment.mode {
+            AssignmentMode::ThresholdGate { .. } => Some(
+                crate::assignment::threshold_gate_negative_hessian_remainder_weighted(
+                    &self.assignment,
+                    rho,
+                    row_loss_w,
+                )?,
+            ),
             _ => None,
         };
 
@@ -4680,6 +4693,23 @@ impl SaeManifoldTerm {
                 let neg = prior.negative_hessian_remainder();
                 if neg != 0.0 {
                     tt[[a, a]] += w_row * neg;
+                }
+            }
+            // (3b) #2520 threshold gate: the applier's channel (3b), on logit slots.
+            // `B` carries the PSD clamp of the gate's curvature. Without the
+            // non-positive remainder the arrow system prices `B` on every switched-on
+            // logit, while the classification's clamp diagonal restores a concave
+            // half the operator never subtracted (#2915). The producer already
+            // applies `w_row` and the fixed-logit mask.
+            if let Some(remainder) = threshold_gate_remainder.as_ref() {
+                for (a, va) in jets.vars.iter().enumerate() {
+                    let SaeLocalRowVar::Logit { atom } = *va else {
+                        continue;
+                    };
+                    let neg = remainder[row * k_atoms + atom];
+                    if neg != 0.0 {
+                        tt[[a, a]] += neg;
+                    }
                 }
             }
 
