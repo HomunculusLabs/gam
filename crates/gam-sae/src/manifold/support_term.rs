@@ -6852,22 +6852,35 @@ impl SaeSupportSparseTerm {
                              treating it as the no-op it is"
                         );
                     } else {
-                        match moved.solve_coordinates_fixed_decoder(
+                        // #2576: the polish only has to descend. Adoption needs a measured
+                        // decrease on the actual objective and resets the recurrence, so a
+                        // polish that descended without recurring is still a valid
+                        // comparison; only an objective that cannot be evaluated rejects
+                        // the move. At the derived tolerance, job 604148 (3cf917ddf, 3000x48
+                        // chart) logged 20 proposals as unpolishable; its plateau proposals'
+                        // polishes did not recur within 200 cycles, at relative coordinate
+                        // KKT ~1e-6.
+                        let polish = moved.solve_coordinates_fixed_decoder(
                             target,
                             ard_precisions,
                             max_iter,
                             tolerance,
                             trust_radius,
-                        ) {
+                        );
+                        if let Err(error) = &polish {
+                            log::info!(
+                                "support move polish did not recur at cycle {iteration}; \
+                                 comparing the objective it reached: {error}"
+                            );
+                        }
+                        match moved.penalized_objective(target, lambda_smooth, ard_precisions) {
                             Err(error) => {
                                 log::info!(
-                                    "support move unpolishable at cycle {iteration}, \
+                                    "support move unevaluable at cycle {iteration}, \
                                      rejected: {error}"
                                 );
                             }
-                            Ok(_) => {
-                                let after = moved
-                                    .penalized_objective(target, lambda_smooth, ard_precisions)?;
+                            Ok(after) => {
                                 if objective - after > self.objective_descent_resolution(objective) {
                                     log::info!(
                                         "support move accepted at cycle {iteration}: objective \
@@ -6984,10 +6997,12 @@ impl SaeSupportSparseTerm {
                 if support_k > 0 {
                     plateau_window_start = iteration;
                     objective_at_window_start = objective;
-                    // A proposal that cannot be polished is a REJECTED proposal,
-                    // never a dead fit: the incumbent is untouched, so erroring
-                    // out here would discard a healthy model over a speculative
-                    // move (the exact discard shape this lane keeps re-finding).
+                    // A proposal whose objective cannot be evaluated is a REJECTED
+                    // proposal, never a dead fit: the incumbent is untouched, so
+                    // erroring out here would discard a healthy model over a
+                    // speculative move (the exact discard shape this lane keeps
+                    // re-finding). As at the certificate, the polish only has to
+                    // descend (#2576): a polish that did not recur is still compared.
                     let mut moved =
                         self.reroute_fixed_decoder_ard(target, support_k, 0, ard_precisions)?;
                     moved.set_decoder_fista_passes(self.decoder_fista_passes);
@@ -6997,27 +7012,28 @@ impl SaeSupportSparseTerm {
                              support; treating it as the no-op it is"
                         );
                     } else {
-                        let polished = moved.solve_coordinates_fixed_decoder(
+                        let polish = moved.solve_coordinates_fixed_decoder(
                             target,
                             ard_precisions,
                             max_iter,
                             tolerance,
                             trust_radius,
                         );
-                        match polished {
+                        if let Err(error) = &polish {
+                            log::info!(
+                                "plateau support move polish did not recur at cycle {iteration}; \
+                                 comparing the objective it reached: {error}"
+                            );
+                        }
+                        match moved.penalized_objective(target, lambda_smooth, ard_precisions) {
                             Err(error) => {
                                 // fall through to the normal cycle tail: the
                                 // accelerator bookkeeping must see every cycle.
                                 log::info!(
-                                    "plateau support move unpolishable at cycle {iteration}: {error}"
+                                    "plateau support move unevaluable at cycle {iteration}: {error}"
                                 );
                             }
-                            Ok(_) => {
-                                let after = moved.penalized_objective(
-                                    target,
-                                    lambda_smooth,
-                                    ard_precisions,
-                                )?;
+                            Ok(after) => {
                                 if objective - after > self.objective_descent_resolution(objective) {
                                     log::info!(
                                         "plateau support move accepted at cycle {iteration}: \
