@@ -803,6 +803,10 @@ fn report_coverage_diagnostics(z: &[f64], resid: &[f64], se: &[f64], radius: &[f
 /// one is two-sided and is accompanied by a width guard.
 #[test]
 fn large_scale_reml_stress_coverage() {
+    // The outer loop's seed ledger (ARC budget exhaustion, #2748 exhausted-seed
+    // records) and the phase clocks are `log::warn!`/`log::info!` lines; a test
+    // binary without a logger prints none of them.
+    gam_runtime::test_support::install_diagnostic_logger();
     // ── The in-model mean function ──────────────────────────────────────
     //
     // One pilot fit on the analytic DGP supplies the geometry: freezing its
