@@ -502,12 +502,15 @@ def fit_gam_flat(x_tr, x_te, mean_tr, *, K, top_k, minibatch, score_mode,
     return held_out_ev(x_te, recon, mean_tr), fit.explained_variance
 
 
-def fit_curved_topk(x_tr, x_te, mean_tr, *, K, top_k, d_atom, topology, max_epochs, seed):
+def fit_curved_topk(x_tr, x_te, mean_tr, *, K, top_k, d_atom, topology, seed):
     import gamfit
 
+    # The curved fit keeps its own inner budget. `--max-epochs` is the flat tier's
+    # epoch cap; passed as `n_iter` it set every criterion evaluation's refine
+    # ceilings to 16x and 64x that cap (#2283).
     model = gamfit.sae_manifold_fit(
         x_tr, K=K, d_atom=d_atom, atom_topology=topology,
-        assignment="topk", top_k=top_k, n_iter=max_epochs, random_state=seed)
+        assignment="topk", top_k=top_k, random_state=seed)
     recon = np.asarray(model.reconstruct(x_te), dtype=np.float32)
     return held_out_ev(x_te, recon, mean_tr)
 
@@ -615,7 +618,6 @@ def fit_hybrid_curved_resume(
     curved_k,
     d,
     topology,
-    max_epochs,
     seed,
     collect,
 ):
@@ -636,8 +638,7 @@ def fit_hybrid_curved_resume(
     t1 = time.perf_counter()
     curved = gamfit.sae_manifold_fit(
         r_tr, K=curved_K, d_atom=d, atom_topology=topology,
-        assignment="topk", top_k=curved_k, n_iter=max_epochs,
-        random_state=seed)
+        assignment="topk", top_k=curved_k, random_state=seed)
     print(f"[hybrid_rust] curved tier fit {time.perf_counter()-t1:.0f}s", flush=True)
     # `converged_latents` is an f64 native entry, and the residual here is f32 (an
     # f32 activation block minus an f32 flat reconstruction). Handing it the f32
@@ -909,7 +910,7 @@ def main() -> int:
     elif args.arm == "curved_topk":
         ev = fit_curved_topk(x_tr, x_te, mean_tr, K=args.K, top_k=args.top_k,
                              d_atom=args.d_atom, topology=args.atom_topology,
-                             max_epochs=args.max_epochs, seed=args.seed)
+                             seed=args.seed)
     elif args.arm == "hybrid_rust":
         flat_config = _hybrid_flat_config(
             K=args.K,
@@ -945,7 +946,6 @@ def main() -> int:
                 curved_k=args.curved_k,
                 d=args.d_atom,
                 topology=args.atom_topology,
-                max_epochs=args.max_epochs,
                 seed=args.seed,
                 collect=collect,
             )
