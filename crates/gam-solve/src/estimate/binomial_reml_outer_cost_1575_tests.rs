@@ -1015,3 +1015,172 @@ fn binomial_logit_inner_refusal_names_its_carried_datum_1575() {
          rho alone.\n{summary}"
     );
 }
+
+/// #2901 V22, the finalizing pin: a clean, converged, rank-deficient fit
+/// certifies its identified rank over the outer certificate's own Newton step,
+/// and publishes that verdict together with the directions it dropped. The
+/// #1575 fixture is an intercept plus three uncentered cubic B-spline blocks
+/// penalized by second differences. Every block sums to one at every row, and
+/// a constant coefficient vector lies in the second-difference null, so
+/// `v_j = (1, −1 on block j)` has `Xv_j = 0` and `Sv_j = 0`: H has exactly three
+/// structural nulls, while the data resolve every linear trend.
+#[test]
+fn binomial_logit_fit_publishes_a_certified_identified_subspace_2901() {
+    let (x, y, s_list) = build_fixture();
+    let weights = Array1::<f64>::ones(N);
+    let offset = Array1::<f64>::zeros(N);
+    let fit = fit_gamwith_heuristic_lambdas(
+        x,
+        y.view(),
+        weights.view(),
+        offset.view(),
+        &s_list,
+        None,
+        LikelihoodSpec::new(
+            ResponseFamily::Binomial,
+            InverseLink::Standard(StandardLink::Logit),
+        ),
+        &logit_options(),
+    )
+    .expect("binomial/logit P-spline REML fit should succeed");
+    let inference = fit.inference.as_ref().expect("the fit computed inference");
+    let subspace = inference
+        .identified_subspace
+        .as_ref()
+        .expect("a dense, non-Firth REML fit publishes its identified subspace");
+    let hessian = inference.penalized_hessian.as_array();
+    let p = hessian.nrows();
+    assert_eq!(p, 1 + N_SMOOTH * K, "the fixture's coefficient count");
+    assert_eq!(
+        subspace.rank,
+        p - N_SMOOTH,
+        "one structural null per partition-of-unity block beside the intercept"
+    );
+    assert_eq!(
+        subspace.unidentified_basis.dim(),
+        (p, N_SMOOTH),
+        "the unidentified basis carries one column per dropped direction"
+    );
+    assert!(
+        matches!(
+            subspace.rank_constancy,
+            crate::model_types::IdentifiedRankConstancy::Certified { .. }
+        ),
+        "a clean fit must certify its identified rank: {:?}",
+        subspace.rank_constancy
+    );
+    if let crate::model_types::IdentifiedRankConstancy::Certified {
+        step_radius,
+        smallest_identified,
+        band,
+        ..
+    } = subspace.rank_constancy
+    {
+        assert!(
+            step_radius.is_finite() && step_radius >= 0.0,
+            "the certificate's Newton step radius is {step_radius}"
+        );
+        assert!(
+            smallest_identified > band,
+            "the smallest identified eigenvalue {smallest_identified:.3e} must clear the band \
+             {band:.3e}"
+        );
+        // σ_{r+1} ≤ band by the rank rule, and the congruence product rounds by
+        // at most another band.
+        for column in subspace.unidentified_basis.columns() {
+            let curvature = column.dot(&hessian.dot(&column));
+            let length = column.dot(&column);
+            assert!(
+                curvature.abs() <= 2.0 * band * length,
+                "a published unidentified direction must lie inside the rounding band: \
+                 vᵀHv = {curvature:.3e}, band {band:.3e}, |v|² = {length:.3e}"
+            );
+        }
+    }
+}
+
+/// #2901 V22, the refusal pin: the certificate refuses a real fit's identified
+/// rank once the step it must hold over can carry the smallest identified
+/// eigenvalue under the rounding band, and certifies the same fit at a zero
+/// step. A converged, well-posed fit's own Newton step is far too small to
+/// refuse, so the step is set from the fit's own spectrum: with
+/// `t = ln(σ_r / band)`, `e^{−t}·σ_r = band < e^{t}·band`.
+#[test]
+fn a_fits_identified_rank_refuses_over_a_step_that_reaches_its_band_2901() {
+    let (x, y, s_list) = build_fixture();
+    let weights = Array1::<f64>::ones(N);
+    let offset = Array1::<f64>::zeros(N);
+    let fit = fit_gamwith_heuristic_lambdas(
+        x.clone(),
+        y.view(),
+        weights.view(),
+        offset.view(),
+        &s_list,
+        None,
+        LikelihoodSpec::new(
+            ResponseFamily::Binomial,
+            InverseLink::Standard(StandardLink::Logit),
+        ),
+        &logit_options(),
+    )
+    .expect("binomial/logit P-spline REML fit should succeed");
+    let pirls = fit
+        .artifacts
+        .pirls
+        .as_ref()
+        .expect("the fit keeps its PIRLS state");
+    assert!(
+        matches!(
+            pirls.stabilizedhessian_transformed,
+            gam_linalg::matrix::SymmetricMatrix::Dense(..)
+        ),
+        "the #1575 fixture takes the dense spectral route"
+    );
+    if let gam_linalg::matrix::SymmetricMatrix::Dense(hessian) = &pirls.stabilizedhessian_transformed
+    {
+        let spectrum = super::identified_hessian::FittedHessianSpectrum::of(
+            hessian,
+            pirls.reparam_result.e_transformed.nrows(),
+        )
+        .expect("the fitted Hessian decomposes");
+        let design = gam_linalg::matrix::DesignMatrix::from(x);
+        let coordinates = fit.lambdas.len();
+        let outer_hessian = Array2::<f64>::eye(coordinates);
+        let (at_zero_step, zero_radius) = super::identified_hessian::certify_fitted_identified_rank(
+            pirls,
+            &spectrum,
+            &fit.lambdas,
+            &design,
+            &outer_hessian,
+            &Array1::<f64>::zeros(coordinates),
+            &[],
+        )
+        .expect("a zero step certifies the fitted rank");
+        assert_eq!(zero_radius, 0.0);
+        assert_eq!(at_zero_step.rank, spectrum.rank());
+        let reaching_step = (at_zero_step.smallest_identified / at_zero_step.band).ln();
+        assert!(
+            reaching_step > 0.0,
+            "the fit resolves its smallest identified direction: {:.3e} against band {:.3e}",
+            at_zero_step.smallest_identified,
+            at_zero_step.band
+        );
+        let refusal = super::identified_hessian::certify_fitted_identified_rank(
+            pirls,
+            &spectrum,
+            &fit.lambdas,
+            &design,
+            &outer_hessian.mapv(|entry| entry / reaching_step),
+            &Array1::<f64>::ones(coordinates),
+            &[],
+        )
+        .expect_err("a step reaching the band refuses the fitted rank");
+        assert!(
+            matches!(
+                refusal,
+                EstimationError::IdentifiedRankNotLocallyConstant { .. }
+            ),
+            "{refusal}"
+        );
+    }
+}
