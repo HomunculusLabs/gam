@@ -3191,3 +3191,118 @@ mod latent_saved_baseline_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod survival_payload_decline_tests {
+    use super::*;
+    use crate::survival::lognormal_kernel::FrailtySpec;
+    use gam_problem::LinearInequalityConstraints;
+    use gam_problem::types::{LikelihoodScaleMetadata, LogLikelihoodNormalization};
+    use gam_solve::constrained_posterior::{
+        ConePosteriorMomentDecline, ConePropernessEvidence, ConstrainedPosteriorGeometry,
+    };
+    use gam_solve::estimate::{FitArtifacts, FitGeometry, FittedBlock};
+    use gam_solve::pirls::PirlsStatus;
+    use ndarray::{Array1, Array2, array};
+
+    /// A two-coefficient Royston-Parmar fit. Declined, it stores the mode `(0, 0.5)`
+    /// on the bound `β₀ ≥ 0` under a typed moment decline and has no covariance;
+    /// otherwise it carries a covariance and no constrained geometry.
+    fn survival_fit(declined: bool) -> UnifiedFitResult {
+        let geometry = declined.then(|| FitGeometry {
+            coefficient_gauge: gam_problem::gauge::Gauge::identity(&[2]),
+            penalized_hessian: array![[1.0, 0.0], [0.0, -2.0]].into(),
+            constrained_posterior: Some(ConstrainedPosteriorGeometry::with_decline(
+                LinearInequalityConstraints::new(array![[1.0, 0.0]], array![0.0])
+                    .expect("a 1x2 inequality system with a matching bound is well formed"),
+                array![0.0, 0.5],
+                ConePosteriorMomentDecline {
+                    ambient_precision_failure: "fixture: the ambient precision is indefinite"
+                        .to_string(),
+                    properness: ConePropernessEvidence::CertificationFailed {
+                        reason: "fixture: properness was not certified".to_string(),
+                    },
+                    active_rows: vec![0],
+                },
+            )),
+            working: None,
+        });
+        UnifiedFitResult::try_from_parts(gam_solve::estimate::UnifiedFitResultParts {
+            blocks: vec![FittedBlock {
+                beta: array![0.0, 0.5],
+                role: BlockRole::Threshold,
+                edf: 0.0,
+                lambdas: Array1::zeros(0),
+            }],
+            training_sample_size: 16,
+            log_lambdas: Array1::zeros(0),
+            lambdas: Array1::zeros(0),
+            likelihood_family: Some(LikelihoodSpec::royston_parmar()),
+            likelihood_scale: LikelihoodScaleMetadata::Unspecified,
+            log_likelihood_normalization: LogLikelihoodNormalization::Full,
+            log_likelihood: 0.0,
+            deviance: 0.0,
+            reml_score: Some(0.0),
+            stable_penalty_term: 0.0,
+            penalized_objective: Some(0.0),
+            used_device: false,
+            outer_iterations: 0,
+            outer_converged: true,
+            outer_gradient_norm: None,
+            standard_deviation: 1.0,
+            covariance_conditional: (!declined).then(|| Array2::eye(2)),
+            covariance_corrected: None,
+            inference: None,
+            fitted_link: FittedLinkState::Standard(None),
+            geometry,
+            block_states: Vec::new(),
+            pirls_status: PirlsStatus::Converged,
+            max_abs_eta: 0.0,
+            constraint_kkt: None,
+            artifacts: FitArtifacts {
+                pirls: None,
+                ..Default::default()
+            },
+            inner_cycles: 0,
+        })
+        .expect("the survival fixture fit must assemble")
+    }
+
+    /// #979: a fit that keeps its optimizer mode under a moment decline has no
+    /// posterior mean, so no survival contract may save it. The refusal must name
+    /// the operation, the missing estimand and the decline's own reason. The
+    /// control is the same fit with reportable moments, which must still assemble.
+    #[test]
+    fn a_declined_survival_fit_is_refused_at_saved_model_assembly_979() {
+        let schema = DataSchema { columns: Vec::new() };
+        let refusal = new_royston_parmar_survival_payload(
+            "Surv(time, status) ~ x".to_string(),
+            survival_fit(true),
+            schema.clone(),
+            "royston-parmar",
+            None,
+            FrailtySpec::None,
+        )
+        .expect_err("a declined fit stores a mode, not a posterior mean, and must not be saved");
+        for needle in [
+            "survival saved-model assembly",
+            "posterior-mean",
+            "the ambient precision is indefinite",
+        ] {
+            assert!(
+                refusal.contains(needle),
+                "the refusal must name {needle:?}, got: {refusal}"
+            );
+        }
+        let payload = new_royston_parmar_survival_payload(
+            "Surv(time, status) ~ x".to_string(),
+            survival_fit(false),
+            schema,
+            "royston-parmar",
+            None,
+            FrailtySpec::None,
+        )
+        .expect("a fit with reportable posterior moments must assemble");
+        assert!(payload.fit_result.is_some(), "the control payload must carry its fit");
+    }
+}
