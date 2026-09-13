@@ -3035,36 +3035,41 @@ fn value_lane_prices_at_shared_fixed_point_2228() {
     // satisfy, not easier: a Value lane wrongly rebuilt on the coarse budget would
     // surface `OuterEval::infeasible` (+inf) rather than a merely-~1%-off value,
     // so the regression this test exists to catch still goes red.
+    // The full budget must be ADEQUATE, not merely non-erroring: the Value lane prices
+    // a converged root, and a converged root does not move when the drive continues
+    // from it with twice the budget. Doubling the budget on a FRESH clone asks a
+    // different question — whether two trajectories land in one basin — and this
+    // fixture's inner problem is not convex. Pool job 633684 at `eff77dea3`
+    // (`zz_measure_value_lane_root_continuation_2228`,
+    // `/scratch.global/sauer354/pool/sae2228/g8.cont.633684.txt`) read the imi = 16 root
+    // at V=1.8379915453902222e3, recurring bit-for-bit when driven again at 16 and when
+    // continued at 32 (undamped ‖Δ‖ = 4.09e-6 at acceptance), while a fresh imi = 32
+    // clone reached another basin at V=1.8367263434677006e3, 1.167 lower in loss.
+    let mut root_term = term.clone();
     let (v_true, v_true_loss) = {
-        let mut t = term.clone();
-        let evaluated = t
+        let evaluated = root_term
             .penalized_quasi_laplace_criterion_with_cache(z.view(), &rho, None, imi, lr, re, rb)
             .expect("full-budget bare criterion evaluates");
         (evaluated.0, evaluated.1.total())
     };
-    // The full budget must be ADEQUATE, not merely non-erroring: a root that still
-    // moves when given twice the budget is not the root the Value lane is supposed to
-    // price, and pinning the test to one would make every assertion below a statement
-    // about a budget rather than about a fixed point. Doubling must not move it.
     let (v_true_double, v_true_double_loss) = {
-        let mut t = term.clone();
-        let evaluated = t
+        let evaluated = root_term
             .penalized_quasi_laplace_criterion_with_cache(z.view(), &rho, None, 2 * imi, lr, re, rb)
-            .expect("double-budget bare criterion evaluates");
+            .expect("double-budget continuation from the root evaluates");
         (evaluated.0, evaluated.1.total())
     };
     // Printed before the assertion: a moved root is either a different penalized
     // objective or the same objective with different complexity terms.
     eprintln!(
         "[#2228] v_true={v_true:.16e} loss={v_true_loss:.16e} \
-         v_true(2x)={v_true_double:.16e} loss(2x)={v_true_double_loss:.16e}"
+         v_true(2x continued)={v_true_double:.16e} loss(2x continued)={v_true_double_loss:.16e}"
     );
     let root_bound = f64::EPSILON.sqrt() * v_true.abs().max(v_true_double.abs()).max(1.0);
     assert!(
         (v_true - v_true_double).abs() <= root_bound,
-        "the full budget must reach a converged root, but doubling it moved the value: \
-         v_true={v_true:.16e}, v_true(2x)={v_true_double:.16e}, diff={:.3e} > {root_bound:.3e} \
-         (raise `imi` until it stops moving)",
+        "the full budget must reach a converged root, but continuing from it with twice the \
+         budget moved the value: v_true={v_true:.16e}, v_true(2x continued)={v_true_double:.16e}, \
+         diff={:.3e} > {root_bound:.3e} (raise `imi` until it stops moving)",
         (v_true - v_true_double).abs()
     );
     let coarse = {
