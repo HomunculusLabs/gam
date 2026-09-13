@@ -849,7 +849,6 @@ fn constant_curvature_kappa_profile_optimum(
     let x_term = select_columns(data, feature_cols).map_err(EstimationError::from)?;
     let profile = ConstantCurvatureProfile::new(x_term.view(), y, base_spec)?;
     let mut seed_config = gam_problem::SeedConfig::default();
-    seed_config.bounds = (kappa_min, kappa_max);
     seed_config.max_seeds = 1;
     seed_config.seed_budget = 1;
     seed_config.risk_profile = gam_problem::SeedRiskProfile::Gaussian;

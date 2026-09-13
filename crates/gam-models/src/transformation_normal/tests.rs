@@ -929,7 +929,6 @@ pub(crate) fn transformation_normal_uses_compact_gaussian_outer_seeding() {
     let psi = array![0.15, -0.10];
     let (family, _, _, _) = toy_family_and_derivatives(&psi);
     let seed_config = family.outer_seed_config(6);
-    assert_eq!(seed_config.bounds, (-12.0, 12.0));
     assert_eq!(seed_config.max_seeds, 1);
     assert_eq!(seed_config.seed_budget, 1);
     assert_eq!(seed_config.screen_max_inner_iterations, 2);

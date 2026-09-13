@@ -765,10 +765,6 @@ pub fn gaussian_reml_fit_blocks_exact(
     };
 
     let mut seed_config = gam_problem::SeedConfig::default();
-    seed_config.bounds = (
-        rho_lower.iter().copied().fold(f64::INFINITY, f64::min),
-        rho_upper.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-    );
     seed_config.risk_profile = gam_problem::SeedRiskProfile::Gaussian;
     let mut problem = OuterProblem::new(f_blocks)
         .with_gradient(Derivative::Analytic)

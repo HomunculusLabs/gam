@@ -493,7 +493,6 @@ pub(crate) fn external_reml_seed_config(k: usize, link: LinkFunction) -> SeedCon
         // beats the invariant neutral anchor.  The ordinary optimizer and its
         // analytic terminal certificate remain mandatory either way.
         return SeedConfig {
-            bounds: (-12.0, 12.0),
             max_seeds: 1,
             // The generic lattice remains disabled. The three budget slots are
             // for the unique analytic candidates assembled below: base,
@@ -507,7 +506,6 @@ pub(crate) fn external_reml_seed_config(k: usize, link: LinkFunction) -> SeedCon
     }
     if k >= REML_SEED_SCREENING_RHO_CAP {
         return SeedConfig {
-            bounds: (-12.0, 12.0),
             max_seeds: 2,
             seed_budget: 2,
             risk_profile: SeedRiskProfile::GeneralizedLinear,
@@ -517,7 +515,6 @@ pub(crate) fn external_reml_seed_config(k: usize, link: LinkFunction) -> SeedCon
         };
     }
     SeedConfig {
-        bounds: (-12.0, 12.0),
         max_seeds: if k <= 4 {
             6
         } else if k <= 12 {
@@ -953,11 +950,28 @@ pub(crate) fn freeze_lambda_search_nuisance_at_canonical_anchor_with_ext_count(
     reml_state.clear_warm_start_predictor_state();
     reml_state.clear_warm_start_adaptive_signals();
 
+    // The anchors are clamped into the envelope of the design's own #2812
+    // resolvability domain, the domain the λ search then runs on (#2902 row 9).
+    let (domain_lower, domain_upper) =
+        crate::estimate::rho_domain::resolvability_domain_from_design(
+            reml_state.weights,
+            &reml_state.x,
+            &reml_state.canonical_penalties,
+        )
+        .map_err(EstimationError::LayoutError)?;
     let mut anchors = vec![Array1::<f64>::zeros(k)];
     anchors.extend(
-        crate::seeding::generate_rho_candidates(k, heuristic_lambdas, seed_config)?
-            .into_iter()
-            .filter(|candidate| candidate.iter().any(|value| *value != 0.0)),
+        crate::seeding::generate_rho_candidates(
+            k,
+            heuristic_lambdas,
+            seed_config,
+            gam_problem::OrderedRhoBounds::envelope(
+                domain_lower.iter().copied(),
+                domain_upper.iter().copied(),
+            )?,
+        )
+        .into_iter()
+        .filter(|candidate| candidate.iter().any(|value| *value != 0.0)),
     );
     for anchor in &anchors {
         if let Err(error) =

@@ -8382,7 +8382,11 @@ pub(crate) fn run_per_atom_efs_if_frontier(
                 cap.n_params,
                 config.heuristic_lambdas.as_deref(),
                 &config.seed_config,
-            )?;
+                gam_problem::OrderedRhoBounds::envelope(
+                    model_domain_bounds.0.iter().copied(),
+                    model_domain_bounds.1.iter().copied(),
+                )?,
+            );
             match generated.into_iter().next() {
                 Some(first) => first,
                 None => Array1::<f64>::zeros(cap.n_params),

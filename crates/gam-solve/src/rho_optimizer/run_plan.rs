@@ -527,18 +527,22 @@ pub(crate) fn run_outer_with_plan(
     the_plan: &OuterPlan,
     allow_tail_snap_reseed: bool,
 ) -> Result<PlanRunOutcome, EstimationError> {
-    let mut seeds = {
-        let generated = crate::seeding::generate_rho_candidates(
-            cap.n_params,
-            config.heuristic_lambdas.as_deref(),
-            &config.seed_config,
-        )?;
-        if generated.is_empty() {
-            Vec::new()
-        } else {
-            generated
-        }
-    };
+    // Derivative/IFT masking belongs to the model domain, never to a temporary
+    // active-set search face. In particular, freezing a model-lower-rail
+    // coordinate creates a singleton search interval whose "upper" endpoint
+    // is still the MODEL LOWER bound; recording it as an active model upper
+    // bound silently erases the feasible inward derivative (#2514). The seed
+    // lattice is clamped into this domain's envelope (#2902 row 9).
+    let model_domain_bounds = outer_model_domain_bounds_template(config, cap.n_params);
+    let mut seeds = crate::seeding::generate_rho_candidates(
+        cap.n_params,
+        config.heuristic_lambdas.as_deref(),
+        &config.seed_config,
+        gam_problem::OrderedRhoBounds::envelope(
+            model_domain_bounds.0.iter().copied(),
+            model_domain_bounds.1.iter().copied(),
+        )?,
+    );
     // Explicit model-derived candidates precede the generic generator and are
     // not truncated by `SeedConfig::max_seeds`. Insert in reverse so the
     // primary `initial_rho` remains slot zero and the caller's candidate order
@@ -562,12 +566,6 @@ pub(crate) fn run_outer_with_plan(
         )));
     }
 
-    // Derivative/IFT masking belongs to the model domain, never to a temporary
-    // active-set search face. In particular, freezing a model-lower-rail
-    // coordinate creates a singleton search interval whose "upper" endpoint
-    // is still the MODEL LOWER bound; recording it as an active model upper
-    // bound silently erases the feasible inward derivative (#2514).
-    let model_domain_bounds = outer_model_domain_bounds_template(config, cap.n_params);
     crate::estimate::reml::outer_eval::record_current_outer_rho_model_upper_bounds_for_ift(
         &model_domain_bounds.1,
     );

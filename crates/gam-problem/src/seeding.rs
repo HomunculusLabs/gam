@@ -80,7 +80,6 @@ impl SeedRiskProfile {
 
 #[derive(Clone, Copy, Debug)]
 pub struct SeedConfig {
-    pub bounds: (f64, f64),
     pub max_seeds: usize,
     /// Nominal number of seed starts to run in heuristic order.
     ///
@@ -103,7 +102,6 @@ pub struct SeedConfig {
 impl Default for SeedConfig {
     fn default() -> Self {
         Self {
-            bounds: (-12.0, 12.0),
             max_seeds: 12,
             seed_budget: 2,
             screen_max_inner_iterations: 3,
@@ -176,6 +174,24 @@ impl OrderedRhoBounds {
     #[inline]
     pub fn clamp(self, value: f64) -> f64 {
         value.clamp(self.lo, self.hi)
+    }
+
+    /// The smallest interval holding every coordinate's declared domain: the
+    /// minimum lower face and the maximum upper face. A seed lattice built in one
+    /// scalar box then never clamps a coordinate onto a face its own domain does
+    /// not have, and the caller projects each seed per coordinate afterwards
+    /// (#2902 row 9). A domain with no coordinates is the supported log-strength
+    /// domain, on which `exp(ρ)` is evaluated exactly.
+    pub fn envelope(
+        lower: impl IntoIterator<Item = f64>,
+        upper: impl IntoIterator<Item = f64>,
+    ) -> Result<Self, crate::estimation_error::EstimationError> {
+        let lo = lower.into_iter().fold(f64::INFINITY, f64::min);
+        let hi = upper.into_iter().fold(f64::NEG_INFINITY, f64::max);
+        if lo == f64::INFINITY && hi == f64::NEG_INFINITY {
+            return Self::new(crate::LOG_STRENGTH_MIN, crate::LOG_STRENGTH_MAX);
+        }
+        Self::new(lo, hi)
     }
 }
 
@@ -299,5 +315,22 @@ mod tests {
         assert_eq!(b.clamp(1.0), 1.0);
         assert_eq!(b.clamp(-10.0), -3.0);
         assert_eq!(b.clamp(100.0), 5.0);
+    }
+
+    /// #2902 row 9: the seed box is the envelope of every coordinate's declared
+    /// domain, a domain with no coordinates is the representable log-strength
+    /// domain, and an envelope that inverts is still a typed refusal (#2379).
+    #[test]
+    fn ordered_rho_bounds_envelope_spans_every_coordinate_domain_2902() {
+        let b = OrderedRhoBounds::envelope([-3.0, -7.5, 1.0], [4.0, 9.0, 2.5])
+            .expect("ordered envelope");
+        assert_eq!((b.lower(), b.upper()), (-7.5, 9.0));
+        let empty = OrderedRhoBounds::envelope(std::iter::empty(), std::iter::empty())
+            .expect("representable log-strength domain");
+        assert_eq!(
+            (empty.lower(), empty.upper()),
+            (crate::LOG_STRENGTH_MIN, crate::LOG_STRENGTH_MAX)
+        );
+        assert!(OrderedRhoBounds::envelope([2.0], [1.0]).is_err());
     }
 }

@@ -4870,8 +4870,12 @@ fn finite_outer_eval_reports_gradient_length_mismatch() {
 #[test]
 fn run_with_initial_seed_still_considers_generated_candidates() {
     let generated =
-        crate::seeding::generate_rho_candidates(1, None, &gam_problem::SeedConfig::default())
-            .expect("ordered seed bounds");
+        crate::seeding::generate_rho_candidates(
+            1,
+            None,
+            &gam_problem::SeedConfig::default(),
+            gam_problem::OrderedRhoBounds::new(-12.0, 12.0).expect("fixture seed domain"),
+        );
     let valid_seed = generated
         .first()
         .expect("seed generator should yield at least one candidate")

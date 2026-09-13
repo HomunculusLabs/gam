@@ -7,8 +7,12 @@ fn run_fixture(continuation_is_stationary: bool) -> (OuterResult, usize) {
     let mut seed_config = gam_problem::SeedConfig::default();
     seed_config.max_seeds = 4;
     seed_config.seed_budget = 2;
-    let recovery_seed = crate::seeding::generate_rho_candidates(1, None, &seed_config)
-        .expect("the bounded recovery lattice must be constructible")
+    let recovery_seed = crate::seeding::generate_rho_candidates(
+        1,
+        None,
+        &seed_config,
+        gam_problem::OrderedRhoBounds::new(-12.0, 12.0).expect("fixture seed domain"),
+    )
         .into_iter()
         .next()
         .expect("the bounded recovery lattice must contain a seed");

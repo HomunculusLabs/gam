@@ -295,7 +295,6 @@ fn screen_measure_jet_range(
             continue;
         }
         let mut seed_config = gam_problem::SeedConfig::default();
-        seed_config.bounds = (lower, upper);
         seed_config.max_seeds = 1;
         seed_config.seed_budget = 1;
         let problem = OuterProblem::new(1)

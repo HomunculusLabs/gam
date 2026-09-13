@@ -254,7 +254,7 @@ fn parsimony_multistart_breaks_after_sharp_well_penalized_first_seed() {
         seed_config.seed_budget = 2;
         seed_config.risk_profile = gam_problem::SeedRiskProfile::GeneralizedLinear;
         let candidates: Vec<Array1<f64>> =
-            crate::seeding::generate_rho_candidates(1, None, &seed_config).expect("ordered seed bounds");
+            crate::seeding::generate_rho_candidates(1, None, &seed_config, gam_problem::OrderedRhoBounds::new(-12.0, 12.0).expect("fixture seed domain"));
         // The optimum must not coincide with any generated seed, so only true
         // seed-startup evals (which land exactly on a candidate) are counted.
         assert!(
@@ -390,7 +390,7 @@ fn run_screening_reorders_expensive_generated_seeds_before_full_startup_eval() {
     seed_config.seed_budget = 2;
     seed_config.risk_profile = gam_problem::SeedRiskProfile::GeneralizedLinear;
     let screening_cap = Arc::new(AtomicUsize::new(0));
-    let valid_seed = crate::seeding::generate_rho_candidates(1, None, &seed_config).expect("ordered seed bounds")
+    let valid_seed = crate::seeding::generate_rho_candidates(1, None, &seed_config, gam_problem::OrderedRhoBounds::new(-12.0, 12.0).expect("fixture seed domain"))
         .last()
         .expect("seed generator should yield at least one candidate")
         .clone();
@@ -594,7 +594,7 @@ fn run_screening_reorders_bfgs_seeds_before_full_startup_eval() {
     seed_config.risk_profile = gam_problem::SeedRiskProfile::Gaussian;
     let screening_cap = Arc::new(AtomicUsize::new(0));
     let initial_seed = array![9.0];
-    let valid_seed = crate::seeding::generate_rho_candidates(1, None, &seed_config).expect("ordered seed bounds")
+    let valid_seed = crate::seeding::generate_rho_candidates(1, None, &seed_config, gam_problem::OrderedRhoBounds::new(-12.0, 12.0).expect("fixture seed domain"))
         .first()
         .expect("seed generator should yield at least one candidate")
         .clone();
@@ -750,7 +750,7 @@ fn rank_seeds_cascade_escalates_when_initial_cap_collapses_all() {
     seed_config.screen_max_inner_iterations = 3;
     let screening_cap = Arc::new(AtomicUsize::new(0));
     let initial_seed = array![5.0];
-    let valid_seed = crate::seeding::generate_rho_candidates(1, None, &seed_config).expect("ordered seed bounds")
+    let valid_seed = crate::seeding::generate_rho_candidates(1, None, &seed_config, gam_problem::OrderedRhoBounds::new(-12.0, 12.0).expect("fixture seed domain"))
         .first()
         .expect("seed generator should yield at least one candidate")
         .clone();

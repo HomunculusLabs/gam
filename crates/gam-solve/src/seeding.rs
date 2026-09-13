@@ -1,9 +1,7 @@
 use ndarray::Array1;
 use std::collections::HashSet;
 
-pub use gam_problem::{SeedConfig, SeedRiskProfile};
-use crate::estimate::EstimationError;
-use gam_problem::OrderedRhoBounds;
+pub use gam_problem::{OrderedRhoBounds, SeedConfig, SeedRiskProfile};
 
 fn add_seed_dedup(seeds: &mut Vec<Array1<f64>>, seen: &mut HashSet<Vec<u64>>, seed: Array1<f64>) {
     let key: Vec<u64> = seed.iter().map(|&v| v.to_bits()).collect();
@@ -201,28 +199,26 @@ fn first_primes(n: usize) -> Vec<usize> {
     primes
 }
 
+/// The seed lattice for `num_penalties` log-strength coordinates, clamped into
+/// `bounds`, the envelope of the domain the caller declares for the search (see
+/// [`OrderedRhoBounds::envelope`]). The box is an argument derived from that
+/// domain rather than a `SeedConfig` literal, so no seed is clamped onto a face
+/// the search does not have (SPEC rule 20, #2902 row 9). `OrderedRhoBounds`
+/// refuses an inverted or non-finite interval where the caller builds it (#2379).
 pub fn generate_rho_candidates(
     num_penalties: usize,
     heuristic_rhos: Option<&[f64]>,
     config: &SeedConfig,
-) -> Result<Vec<Array1<f64>>, EstimationError> {
+    bounds: OrderedRhoBounds,
+) -> Vec<Array1<f64>> {
     let mut seeds = Vec::new();
     let mut seen: HashSet<Vec<u64>> = HashSet::new();
-
-    // Validate the seed ρ-box ONCE, at the boundary where it enters the
-    // candidate lattice, and REFUSE an inverted/non-finite interval rather than
-    // silently reordering it (#2379). Every clamp below then operates on an
-    // interval that is ordered by construction. This is the same disease and the
-    // same cure as the outer-optimizer prepass: an inverted box means two
-    // independently-owned constants have drifted apart, and a swap would make the
-    // lattice explore a different, silently substituted box.
-    let bounds = OrderedRhoBounds::new(config.bounds.0, config.bounds.1)?;
     let max_seeds = config.max_seeds.max(1);
     let risk_shift = config.risk_profile.anchor_rho_shift();
 
     if num_penalties == 0 {
         add_seed_dedup(&mut seeds, &mut seen, Array1::<f64>::zeros(0));
-        return Ok(seeds);
+        return seeds;
     }
 
     // Prefer a full heuristic vector (length == k) as the primary anchor.
@@ -509,40 +505,32 @@ pub fn generate_rho_candidates(
         seeds.push(Array1::<f64>::zeros(num_penalties));
     }
 
-    Ok(seeds)
+    seeds
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// #2379 (mechanism B): the candidate lattice REFUSES an inverted seed box
-    /// with a typed error rather than silently reordering it — the same contract
-    /// the outer-optimizer prepass now enforces. A future constant drift that
-    /// inverts `SeedConfig.bounds` fails loud here instead of quietly generating
-    /// a lattice over a different, substituted box.
-    #[test]
-    fn generate_rho_candidates_refuses_inverted_bounds() {
-        let cfg = SeedConfig {
-            bounds: (10.0, -10.0),
-            ..SeedConfig::default()
-        };
-        let err = generate_rho_candidates(3, None, &cfg)
-            .expect_err("an inverted seed box must be refused, not swapped");
-        assert!(
-            matches!(err, EstimationError::InvalidInput(_)),
-            "inverted seed box must be a typed InvalidInput, got {err:?}"
-        );
+    /// The declared domain these lattice tests clamp into: a fixture's own domain.
+    /// Production callers pass the envelope of the domain they declare, and
+    /// `OrderedRhoBounds::new` refuses an inverted box where it is built (#2379).
+    fn fixture_domain() -> OrderedRhoBounds {
+        OrderedRhoBounds::new(-12.0, 12.0).expect("fixture seed domain")
     }
 
-    /// The ordered default box still produces a full lattice — the refusal never
-    /// fires on any real config (every `SeedConfig.bounds` in the tree is the
-    /// ordered constant `(-12.0, 12.0)`).
+    /// The lattice is never empty, and every seed lies inside the declared domain.
     #[test]
     fn generate_rho_candidates_accepts_ordered_bounds() {
-        let cfg = SeedConfig::default();
-        let seeds = generate_rho_candidates(3, None, &cfg).expect("ordered box is accepted");
+        let domain = fixture_domain();
+        let seeds = generate_rho_candidates(3, None, &SeedConfig::default(), domain);
         assert!(!seeds.is_empty());
+        assert!(
+            seeds.iter().all(|seed| seed
+                .iter()
+                .all(|&rho| domain.lower() <= rho && rho <= domain.upper())),
+            "every generated seed must lie inside the declared domain"
+        );
     }
 
     #[test]
@@ -552,7 +540,7 @@ mod tests {
             ..SeedConfig::default()
         };
         let heur = [-2.0, 0.0, 2.0];
-        let seeds = generate_rho_candidates(3, Some(&heur), &cfg).expect("ordered seed bounds");
+        let seeds = generate_rho_candidates(3, Some(&heur), &cfg, fixture_domain());
         assert!(!seeds.is_empty());
         let first = &seeds[0];
         assert_eq!(first.len(), 3);
@@ -569,7 +557,7 @@ mod tests {
             ..SeedConfig::default()
         };
         let heur = [-6.0, -5.0, -4.0, 0.0, 2.0, 4.0, -3.0, 0.0, 3.0, 5.0];
-        let seeds = generate_rho_candidates(10, Some(&heur), &cfg).expect("ordered seed bounds");
+        let seeds = generate_rho_candidates(10, Some(&heur), &cfg, fixture_domain());
         assert!(seeds.len() <= 18);
         // Presence of at least one asymmetric cluster-conflict seed:
         // some coordinates increased while others decreased vs primary.
@@ -592,7 +580,7 @@ mod tests {
     #[test]
     fn includes_neutralzero_seed() {
         let cfg = SeedConfig::default();
-        let seeds = generate_rho_candidates(5, None, &cfg).expect("ordered seed bounds");
+        let seeds = generate_rho_candidates(5, None, &cfg, fixture_domain());
         let haszero = seeds
             .iter()
             .any(|s| s.iter().all(|v| (*v - 0.0).abs() < 1e-12));
@@ -605,8 +593,8 @@ mod tests {
             risk_profile: SeedRiskProfile::GeneralizedLinear,
             ..SeedConfig::default()
         };
-        let seeds = generate_rho_candidates(3, None, &cfg).expect("ordered seed bounds");
-        let retreat = Array1::from_elem(3, cfg.bounds.1);
+        let seeds = generate_rho_candidates(3, None, &cfg, fixture_domain());
+        let retreat = Array1::from_elem(3, fixture_domain().upper());
         let retreat_idx = seeds
             .iter()
             .position(|seed| seed == retreat)
@@ -620,7 +608,7 @@ mod tests {
     #[test]
     fn three_penalty_seeds_include_nu2_reverse_manifold_triplets() {
         let cfg = SeedConfig::default();
-        let seeds = generate_rho_candidates(3, None, &cfg).expect("ordered seed bounds");
+        let seeds = generate_rho_candidates(3, None, &cfg, fixture_domain());
         let ln4 = 4.0_f64.ln();
         let has_nu2_manifold_seed = seeds
             .iter()
@@ -632,7 +620,7 @@ mod tests {
     fn three_penalty_seeds_include_general_spde_manifold_points() {
         let cfg = SeedConfig::default();
         let heur = [2.0, 10.0, 3.0];
-        let seeds = generate_rho_candidates(3, Some(&heur), &cfg).expect("ordered seed bounds");
+        let seeds = generate_rho_candidates(3, Some(&heur), &cfg, fixture_domain());
         let has_non_nu2 = seeds.iter().any(|s| {
             // For nu=2, 2*rho1-rho0-rho2 = ln(4).
             // General nu manifold should include points away from ln(4).
@@ -643,11 +631,8 @@ mod tests {
 
     #[test]
     fn three_penalty_seeds_include_first_order_fallbackwith_rho2_floor() {
-        let cfg = SeedConfig {
-            bounds: (-12.0, 12.0),
-            ..SeedConfig::default()
-        };
-        let seeds = generate_rho_candidates(3, None, &cfg).expect("ordered seed bounds");
+        let cfg = SeedConfig::default();
+        let seeds = generate_rho_candidates(3, None, &cfg, fixture_domain());
         let has_floor = seeds
             .iter()
             .any(|s| s.len() == 3 && (s[2] - (-12.0)).abs() < 1e-12);
@@ -665,7 +650,7 @@ mod tests {
             ..SeedConfig::default()
         };
         let heur = [0.0, 10.0_f64.ln(), 0.0, 0.0]; // rhos + SAS initials
-        let seeds = generate_rho_candidates(4, Some(&heur), &cfg).expect("ordered seed bounds");
+        let seeds = generate_rho_candidates(4, Some(&heur), &cfg, fixture_domain());
         assert!(!seeds.is_empty());
         // EVERY seed must have the auxiliary dims pinned to 0.0.
         for (idx, seed) in seeds.iter().enumerate() {
@@ -695,14 +680,14 @@ mod tests {
             risk_profile: SeedRiskProfile::GeneralizedLinear,
             ..SeedConfig::default()
         };
-        let seeds_with_aux = generate_rho_candidates(3, None, &cfg).expect("ordered seed bounds");
+        let seeds_with_aux = generate_rho_candidates(3, None, &cfg, fixture_domain());
         let cfg_no_aux = SeedConfig {
             num_auxiliary_trailing: 0,
             max_seeds: 32,
             risk_profile: SeedRiskProfile::GeneralizedLinear,
             ..SeedConfig::default()
         };
-        let seeds_without_aux = generate_rho_candidates(3, None, &cfg_no_aux).expect("ordered seed bounds");
+        let seeds_without_aux = generate_rho_candidates(3, None, &cfg_no_aux, fixture_domain());
         // Aux pinning causes many seeds to collapse, so fewer unique seeds.
         assert!(seeds_with_aux.len() <= seeds_without_aux.len());
     }

@@ -3996,10 +3996,6 @@ fn run_exact_joint_spatial_optimization(
         // #1066 2-D binomial geo, #1069 GP/kriging). p = baseline design column
         // count.
         Some((data.nrows(), baseline_design.design.ncols())),
-        // #1464: widen the over-smoothing ρ ceiling + seed a high-λ probe when a
-        // constant-curvature term is present (collapsing +κ kernel needs a large
-        // smoothing λ beyond the historical ±12 box).
-        !constant_curvature_term_indices(resolvedspec).is_empty(),
         // The scalar Matérn endpoint comparison has already selected and
         // certified the range basin. Give its explicit theta0 the only joint
         // start; anisotropic and non-Matérn paths keep their established seed
@@ -7340,15 +7336,6 @@ pub(crate) fn exact_joint_multistart_outer_problem(
     // scale-free *absolute* floor and the solver's curvature reference are
     // corrected. `None` preserves the prior scale-free calibration.
     profiled_objective_size: Option<(usize, usize)>,
-    // #1464: `true` when the fit carries a constant-curvature `curv()` term. Its
-    // geodesic-exponential kernel collapses toward the constant function on the
-    // +κ side, so the joint REML optimum there is a LARGE smoothing λ beyond the
-    // historical ±12 ρ box. For that case the over-smoothing ρ ceiling is widened
-    // to `RHO_BOUND` and an explicit high-ρ over-smoothing multistart probe is
-    // seeded so the joint ARC can reach that basin. `false` keeps the historical
-    // ±12 box and seed grid byte-for-byte for every other spatial/Matérn/Duchon/
-    // sphere/survival joint fit.
-    has_constant_curvature: bool,
     // `true` only after the isotropic Matérn endpoint profiler has certified a
     // winning range basin. The explicit theta0 then owns the sole joint-start
     // budget; generic multi-block and latent-coordinate callers retain their
@@ -7373,22 +7360,6 @@ pub(crate) fn exact_joint_multistart_outer_problem(
     for (value, lambda) in seed_heuristic[..rho_dim].iter_mut().zip(initial_lambdas) {
         *value = lambda;
     }
-    // Over-smoothing ρ ceiling: widened only for a constant-curvature fit (see
-    // the `has_constant_curvature` param doc). Drives both the scalar saturation
-    // reference and the seed-grid clamp; the actual box is the per-dim
-    // `lower`/`upper` arrays passed in.
-    // #2812: the ρ domain arrives from the caller, derived per coordinate from
-    // the design and its penalties; the seed lattice spans the same domain.
-    let seed_rho_floor = lower
-        .iter()
-        .take(rho_dim)
-        .copied()
-        .fold(f64::INFINITY, f64::min);
-    let seed_rho_ceiling = upper
-        .iter()
-        .take(rho_dim)
-        .copied()
-        .fold(f64::NEG_INFINITY, f64::max);
     let mut problem = gam_solve::rho_optimizer::OuterProblem::new(n_params)
         .with_gradient(gradient)
         .with_hessian(hessian)
@@ -7452,30 +7423,24 @@ pub(crate) fn exact_joint_multistart_outer_problem(
         .with_initial_rho(theta0.clone())
         .with_bfgs_step_cap(bfgs_step_cap)
         .with_bfgs_step_cap_psi(bfgs_step_cap_psi)
-        .with_seed_config({
-            let mut sc = exact_joint_seed_config(risk_profile, auxiliary_dim, initial_seed_only);
-            if has_constant_curvature {
-                // Let the seed grid reach the widened over-smoothing ceiling so a
-                // smooth whose true REML optimum genuinely lives at large λ can be
-                // discovered (#1464).
-                sc.bounds = (seed_rho_floor, seed_rho_ceiling);
-                // gam#1464: do NOT inject an explicit over-smoothing probe at
-                // ρ ≈ +15 for constant-curvature terms. The probe seeds the joint
-                // [ρ, ψ] solve at the collapsed-kernel corner where the geodesic
-                // exponential exp(−d_κ/L) degenerates to a near-constant. There the
-                // criterion is flat in κ (the kernel no longer resolves curvature)
-                // and reduces to the monotone log-det Occam term, so keep-best
-                // adopts the low-Occam collapsed null regardless of the true κ sign
-                // — the bit-identical κ̂ → +chart-bound rail for both ±κ datasets
-                // (the headline #1464 sign-blindness). Curvature is instead chosen
-                // once by the sign-correct continuous likelihood-profile solve before
-                // this joint nuisance optimization, and its coordinate is pinned
-                // here. The widened ρ ceiling is retained: legitimate
-                // over-smoothing remains reachable by the analytic gradient solve
-                // without pre-pinning a start at the collapsed corner.
-            }
-            sc
-        })
+        // gam#1464: no explicit over-smoothing probe for constant-curvature terms.
+        // The probe seeds the joint [ρ, ψ] solve at the collapsed-kernel corner
+        // where the geodesic exponential exp(−d_κ/L) degenerates to a
+        // near-constant. There the criterion is flat in κ (the kernel no longer
+        // resolves curvature) and reduces to the monotone log-det Occam term, so
+        // keep-best adopts the low-Occam collapsed null regardless of the true κ
+        // sign: the bit-identical κ̂ → +chart-bound rail for both ±κ datasets (the
+        // headline #1464 sign-blindness). Curvature is instead chosen once by the
+        // sign-correct continuous likelihood-profile solve before this joint
+        // nuisance optimization, and its coordinate is pinned here. The seed
+        // lattice spans the declared domain `lower`/`upper` for every fit (#2902
+        // row 9), so legitimate over-smoothing stays reachable by the analytic
+        // gradient solve without pre-pinning a start at the collapsed corner.
+        .with_seed_config(exact_joint_seed_config(
+            risk_profile,
+            auxiliary_dim,
+            initial_seed_only,
+        ))
         .with_heuristic_lambdas(seed_heuristic);
     if let Some((n_obs, p_cols)) = profiled_objective_size {
         // Calibrate to the n-scaled profiled criterion (see the param doc).
@@ -7804,11 +7769,6 @@ where
         // n-scaled profiled-criterion calibration for every family (#1053 /
         // #1066 / #1069 iso-κ non-convergence cure).
         Some((n_total, joint_p_cols)),
-        // #1464: widen the over-smoothing ρ ceiling + seed a high-λ probe when
-        // any block carries a constant-curvature term.
-        block_specs
-            .iter()
-            .any(|s| !constant_curvature_term_indices(s).is_empty()),
         // Multi-block optimization has no preceding scalar Matérn endpoint
         // certificate, so retain its family-specific seed cascade.
         false,
@@ -8530,9 +8490,6 @@ fn try_exact_joint_latent_coord_optimization(
         // n-scaled profiled-criterion calibration (same absolute-gradient-floor
         // correction as the spatial paths; #1053 / #1066 / #1069).
         Some((data.nrows(), best.design.design.ncols().max(1))),
-        // #1464: widen the over-smoothing ρ ceiling and seed the high-ρ probe
-        // only when a constant-curvature curv() term is present in this fit.
-        !constant_curvature_term_indices(resolvedspec).is_empty(),
         // Latent-coordinate optimization is not a profiled Matérn range solve.
         false,
     )?;

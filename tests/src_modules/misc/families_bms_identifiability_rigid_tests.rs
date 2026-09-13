@@ -141,8 +141,12 @@ fn bernoulli_marginal_slope_outer_seed_config_screens_glm_stability_anchors() {
     assert_eq!(config.screen_max_inner_iterations, 8);
     assert_eq!(config.max_seeds, 6);
 
-    let seeds = gam_solve::seeding::generate_rho_candidates(6, None, &config)
-        .expect("ordered seed bounds");
+    let seeds = gam_solve::seeding::generate_rho_candidates(
+        6,
+        None,
+        &config,
+        gam_solve::seeding::OrderedRhoBounds::new(-12.0, 12.0).expect("fixture seed domain"),
+    );
     for anchor in [2.0, 4.0] {
         assert!(
             seeds

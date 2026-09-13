@@ -184,7 +184,6 @@ impl CustomFamily for TransformationNormalFamily {
 
     fn outer_seed_config(&self, n_params: usize) -> gam_solve::seeding::SeedConfig {
         gam_solve::seeding::SeedConfig {
-            bounds: (-12.0, 12.0),
             max_seeds: if n_params <= 8 { 1 } else { 2 },
             seed_budget: 1,
             screen_max_inner_iterations: 2,
