@@ -481,6 +481,15 @@ pub fn run_per_atom_efs(
     let mut final_step_inf = f64::INFINITY;
     let mut last_cost = f64::INFINITY;
     let mut converged = false;
+    // The progress certificate the dense fixed-point walk carries (#2817): a
+    // window that bought no resolved improvement and no smaller step since the
+    // previous one ends the walk as a stall, instead of the iteration count.
+    // Floor and window are the ones the outer cost-stall guard derives from the
+    // same outer tolerance.
+    let mut progress = crate::rho_optimizer::FixedPointProgress::new(
+        (cfg.tolerance * 1.0e-2).max(crate::rho_optimizer::COST_STALL_REL_TOL_FLOOR),
+        crate::rho_optimizer::COST_STALL_WINDOW,
+    );
 
     for _ in 0..cfg.max_iter.max(1) {
         iterations += 1;
@@ -570,6 +579,15 @@ pub fn run_per_atom_efs(
         final_step_inf = step_inf;
         if step_inf < cfg.tolerance {
             converged = true;
+            break;
+        }
+        if progress.observe(efs.cost, step_inf) {
+            log::info!(
+                "[PER-ATOM-EFS] stopping at an unprogressing walk after {iterations} \
+                 iteration(s) at cost={:.6e}: a window bought no resolved improvement and no \
+                 smaller step since the previous one; reporting stall (#2817)",
+                efs.cost,
+            );
             break;
         }
 
