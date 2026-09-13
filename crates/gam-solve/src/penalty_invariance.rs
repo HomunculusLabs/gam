@@ -626,11 +626,10 @@ impl PenaltyMapInvariance {
 /// Modified Gram-Schmidt with a relative drop tolerance, returning `None` when
 /// nothing survives.
 ///
-/// The drop tolerance is the classical loss-of-orthogonality scale
-/// `64 * n * EPSILON` relative to the incoming column norm — the same
-/// arithmetic-floor coefficient the sibling
-/// `crate::estimate::smoothing_correction::eigenpair_backward_error_bound`
-/// uses, kept identical so the two places that decide "this is round-off" agree.
+/// The drop tolerance is the loss-of-orthogonality scale `64 * n * EPSILON`
+/// relative to the incoming column norm. **This coefficient is chosen, not
+/// derived**: the eigenpair backward-error floor it used to share was replaced
+/// by that residual's own evaluation bound (`gam_linalg::roundoff`).
 /// A column whose residual against the accepted basis has fallen that far is
 /// numerically dependent, and keeping it would admit a direction determined
 /// entirely by round-off.

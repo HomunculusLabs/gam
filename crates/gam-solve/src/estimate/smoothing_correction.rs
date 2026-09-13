@@ -508,14 +508,16 @@ fn smoothing_correction_gram(
 /// applied here; routing this through the shared constructor is what records
 /// that choice at every comparison site.
 ///
-/// Two measured components, whichever is larger:
-///
-/// * `max_i ‖H v_i − σ_i v_i‖₂`, a certified `‖δH‖₂` for the eigenpairs as
-///   returned — exactly Weyl's perturbation, computed rather than assumed;
-/// * `64·n·ε·max|H_jk|`, a floor for the case where that residual rounds to
-///   zero (a diagonal input, say). **This coefficient is chosen, not derived**,
-///   and predates #2690; it is recorded as such rather than laundered, and it
-///   is not moved here because moving it moves a live bar.
+/// The measured quantity is `max_i ‖H v_i − σ_i v_i‖₂`, a certified `‖δH‖₂` for
+/// the eigenpairs as returned — exactly Weyl's perturbation, computed rather
+/// than assumed. That residual is itself computed in floating point, so where it
+/// rounds to zero (a diagonal input, say) it certifies only down to its own
+/// evaluation error. Component `j` is the `n`-term inner product `Σ_k H_jk v_k`,
+/// one product `σ_i v_j` and one subtraction, so Higham's model
+/// (`gam_linalg::roundoff`) puts the exact component within
+/// `γ_{n+1}·(Σ_k |H_jk||v_k| + |σ_i||v_j|)` of the computed one. Each eigenpair
+/// bounds its exact residual norm by the computed norm plus the norm of those
+/// bounds, and the resolution is the largest; no coefficient is chosen.
 ///
 /// ⚠ This bounds *"given this matrix, how wrong is σ?"*. It says nothing about
 /// *"how wrong is this matrix?"* — the assembly error of `H` itself, which is
@@ -536,22 +538,22 @@ pub(crate) fn eigenpair_backward_error_bound(
     {
         return Err("eigendecomposition contains a non-finite value".into());
     }
-    let matrix_scale = matrix
-        .iter()
-        .copied()
-        .map(f64::abs)
-        .fold(0.0_f64, f64::max);
-    let mut max_residual_norm = 0.0_f64;
+    let magnitudes = matrix.mapv(f64::abs);
+    let evaluation_growth = gam_linalg::roundoff::accumulation_growth(n + 1);
+    let mut resolution = 0.0_f64;
     for column in 0..n {
         let vector = eigenvectors.column(column);
-        let residual = matrix.dot(&vector) - &vector.mapv(|value| value * eigenvalues[column]);
-        max_residual_norm = max_residual_norm.max(residual.dot(&residual).sqrt());
+        let eigenvalue = eigenvalues[column];
+        let residual = matrix.dot(&vector) - &vector.mapv(|value| value * eigenvalue);
+        let evaluation_scale = magnitudes.dot(&vector.mapv(f64::abs))
+            + &vector.mapv(|value| (value * eigenvalue).abs());
+        resolution = resolution.max(
+            residual.dot(&residual).sqrt()
+                + evaluation_growth * evaluation_scale.dot(&evaluation_scale).sqrt(),
+        );
     }
-    let arithmetic_bound = 64.0 * n.max(1) as f64 * f64::EPSILON * matrix_scale;
-    gam_linalg::curvature_resolution::CurvatureResolution::analytic_weyl(
-        max_residual_norm.max(arithmetic_bound),
-    )
-    .map_err(|error| error.to_string())
+    gam_linalg::curvature_resolution::CurvatureResolution::analytic_weyl(resolution)
+        .map_err(|error| error.to_string())
 }
 
 /// Invert the ρ-Hessian on the subspace where its curvature is actually
