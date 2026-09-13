@@ -3409,5 +3409,29 @@
     },
     "reason": "#2917: gam-solve's single-replicate joint cubature is replaced by ConstrainedPosteriorJointRule, which serves every replicate lattice so the survival location-scale response moments certify on replicate spread; the per-row moment function it fed is replaced by TruncatedResponseRow and a per-node survival probability.",
     "evidence": "The removed declarations are pub fn constrained_posterior_joint_cubature (crates/gam-solve/src/constrained_posterior.rs), replaced by ConstrainedPosteriorJointRule::new and visit_nodes, and pub(crate) fn truncated_survival_response_moments_row (crates/gam-models/src/survival/location_scale/truncated_moments.rs), replaced by TruncatedResponseRow::survival_probability. At the base git grep -n -w finds no caller of either outside those two files."
+  },
+  {
+    "removed": {
+      "crates/gam-math/src/jet_scalar.rs::add": 1,
+      "crates/gam-math/src/jet_scalar.rs::compose_unary": 1,
+      "crates/gam-math/src/jet_scalar.rs::constant": 1,
+      "crates/gam-math/src/jet_scalar.rs::contracted_fourth": 1,
+      "crates/gam-math/src/jet_scalar.rs::exp": 1,
+      "crates/gam-math/src/jet_scalar.rs::lane": 1,
+      "crates/gam-math/src/jet_scalar.rs::ln": 1,
+      "crates/gam-math/src/jet_scalar.rs::ln_gamma": 1,
+      "crates/gam-math/src/jet_scalar.rs::mul": 1,
+      "crates/gam-math/src/jet_scalar.rs::neg": 1,
+      "crates/gam-math/src/jet_scalar.rs::powf": 1,
+      "crates/gam-math/src/jet_scalar.rs::recip": 1,
+      "crates/gam-math/src/jet_scalar.rs::scale": 1,
+      "crates/gam-math/src/jet_scalar.rs::seed": 1,
+      "crates/gam-math/src/jet_scalar.rs::sqrt": 1,
+      "crates/gam-math/src/jet_scalar.rs::sub": 1,
+      "crates/gam-math/src/jet_scalar.rs::variable": 1
+    },
+    "reason": "#2899, SPEC rule 25. TwoSeedLane re-typed the two-seed contracted-fourth scalar onto Order2Lane so one wide::f64x4 instance carried four rows. No product builds it: production row kernels evaluate through TwoSeed and the runtime-width DynamicTwoSeedBatch, and the lane-batched one-seed scalar OneSeedLane (used by the survival location-scale row kernel) does not depend on it. The struct, its TwoSeedBatch alias and lane() extractor, and its own lane-identity oracle (check_twoseed, twoseed_lanes_contracted_fourth_bit_identical, the TwoSeed and TwoSeedLane RowAlg impls) are removed together.",
+    "evidence": "git grep at the base finds TwoSeedLane and TwoSeedBatch only in crates/gam-math/src/jet_scalar.rs (and in one past ledger reason string): the definition, its impls, batch_tests and two extreme_unary_tests arms. extreme_unary_tests keeps the contracted-fourth channel on the production TwoSeed (powf channel by channel, and sqrt at expected[4]). Guarded job 603697 at 90f405d0d on a905d68bf: cargo check --workspace --all-targets --exclude gam-pyffi exited 0, and cargo test -p gam-math --lib jet_scalar::extreme_unary_tests jet_scalar::batch_tests passed 4 of 4. The removed map is public_api_census.py's CENSUS_REMOVED line, and the source-removal item list is the guard's refusal list from that job (/scratch.global/sauer354/pool/prune-api-a/check41.603697.log).",
+    "base": "2886c28035eb803a87b5c29efe66cb808921c587"
   }
 ]

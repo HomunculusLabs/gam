@@ -8168,5 +8168,33 @@
     ],
     "reason": "#2917: survival location-scale truncated response moments certify on the spread of the joint rule's replicate lattices instead of stopping when consecutive doublings of one lattice moved no moment by more than 1e-4, the rule gam-solve's orthant cubature retired because it cannot see bias. The three picked point-count and tolerance constants go. The replicate count, starting node count, maximum node count and relative accuracy are the orthant cubature's own, declared once in gam-solve and served by ConstrainedPosteriorJointRule; each row is certified against sqrt(E[S](1 - E[S])) less the integrand's f64 rounding, and retired once certified. The row evaluator splits into per-row setup (TruncatedResponseRow) and a per-node survival probability, which replaces truncated_survival_response_moments_row and evaluate_truncated_rows. gam-solve's constrained_posterior_joint_cubature, its point type and its accumulator are replaced by the replicate-indexed rule, and the #2679 joint-cubature test moves onto it.",
     "evidence": "At the base, git grep -n -w finds constrained_posterior_joint_cubature and ConstrainedPosteriorJointPoint only in crates/gam-solve/src/constrained_posterior.rs (their definitions, JointCubatureAccumulator and the #2679 joint-cubature test) and crates/gam-models/src/survival/location_scale/truncated_moments.rs (the module doc link, the import, the law field and the law builder). JointCubatureAccumulator is found only in constrained_posterior.rs. TRUNCATED_RESPONSE_MOMENT_ABSOLUTE_TOLERANCE, TRUNCATED_RESPONSE_MOMENT_INITIAL_POINTS, TRUNCATED_RESPONSE_MOMENT_MAXIMUM_POINTS, truncated_survival_response_moments_row and evaluate_truncated_rows are found only in truncated_moments.rs, at their declarations and in truncated_survival_response_moments and evaluate_truncated_rows. The same commit moves the #2679 joint-cubature test onto ConstrainedPosteriorJointRule."
+  },
+  {
+    "items": [
+      "crates/gam-math/src/jet_scalar.rs:fn:add",
+      "crates/gam-math/src/jet_scalar.rs:fn:check_twoseed",
+      "crates/gam-math/src/jet_scalar.rs:fn:compose_unary",
+      "crates/gam-math/src/jet_scalar.rs:fn:constant",
+      "crates/gam-math/src/jet_scalar.rs:fn:contracted_fourth",
+      "crates/gam-math/src/jet_scalar.rs:fn:exp",
+      "crates/gam-math/src/jet_scalar.rs:fn:lane",
+      "crates/gam-math/src/jet_scalar.rs:fn:ln",
+      "crates/gam-math/src/jet_scalar.rs:fn:ln_gamma",
+      "crates/gam-math/src/jet_scalar.rs:fn:mul",
+      "crates/gam-math/src/jet_scalar.rs:fn:neg",
+      "crates/gam-math/src/jet_scalar.rs:fn:powf",
+      "crates/gam-math/src/jet_scalar.rs:fn:recip",
+      "crates/gam-math/src/jet_scalar.rs:fn:scale",
+      "crates/gam-math/src/jet_scalar.rs:fn:seed",
+      "crates/gam-math/src/jet_scalar.rs:fn:sqrt",
+      "crates/gam-math/src/jet_scalar.rs:fn:sub",
+      "crates/gam-math/src/jet_scalar.rs:fn:twoseed_lanes_contracted_fourth_bit_identical",
+      "crates/gam-math/src/jet_scalar.rs:fn:variable",
+      "crates/gam-math/src/jet_scalar.rs:struct:TwoSeedLane",
+      "crates/gam-math/src/jet_scalar.rs:type:TwoSeedBatch"
+    ],
+    "reason": "#2899, SPEC rule 25. TwoSeedLane re-typed the two-seed contracted-fourth scalar onto Order2Lane so one wide::f64x4 instance carried four rows. No product builds it: production row kernels evaluate through TwoSeed and the runtime-width DynamicTwoSeedBatch, and the lane-batched one-seed scalar OneSeedLane (used by the survival location-scale row kernel) does not depend on it. The struct, its TwoSeedBatch alias and lane() extractor, and its own lane-identity oracle (check_twoseed, twoseed_lanes_contracted_fourth_bit_identical, the TwoSeed and TwoSeedLane RowAlg impls) are removed together.",
+    "evidence": "git grep at the base finds TwoSeedLane and TwoSeedBatch only in crates/gam-math/src/jet_scalar.rs (and in one past ledger reason string): the definition, its impls, batch_tests and two extreme_unary_tests arms. extreme_unary_tests keeps the contracted-fourth channel on the production TwoSeed (powf channel by channel, and sqrt at expected[4]). Guarded job 603697 at 90f405d0d on a905d68bf: cargo check --workspace --all-targets --exclude gam-pyffi exited 0, and cargo test -p gam-math --lib jet_scalar::extreme_unary_tests jet_scalar::batch_tests passed 4 of 4. The item list is the guard's refusal list from that job (/scratch.global/sauer354/pool/prune-api-a/check41.603697.log).",
+    "base": "2886c28035eb803a87b5c29efe66cb808921c587"
   }
 ]

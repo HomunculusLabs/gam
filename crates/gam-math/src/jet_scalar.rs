@@ -4565,9 +4565,9 @@ pub trait Lane: Copy {
     fn unary3(self, stack: impl Fn(f64) -> [f64; 3]) -> [Self; 3];
     /// Build the order-≤4 derivative stack `[f, f′, f″, f‴, f⁗]` **per lane**
     /// from the lane value `u`, via the SAME scalar `stack` closure the per-row
-    /// path runs. The one-/two-seed scalars ([`OneSeedLane`] / [`TwoSeedLane`])
-    /// need outer derivatives one / two orders beyond their order-2 base, so
-    /// they build their composition stack through this five-entry variant. As
+    /// path runs. The one-seed scalar ([`OneSeedLane`]) needs outer derivatives
+    /// one order beyond its order-2 base, so it builds its composition stack
+    /// through this five-entry variant. As
     /// with [`unary3`](Lane::unary3), only the transcendental/rational stack is
     /// evaluated per lane (bit-identically to the scalar path); the subsequent
     /// tensor composition is vectorised.
@@ -5804,245 +5804,6 @@ impl<const K: usize> crate::nested_dual::JetField for TwoSeed<K> {
     }
 }
 
-// ── TwoSeedLane<L, K>: lane-batched two-seed, contracted fourth (doc §A.3) ─
-
-/// Lane-batched [`TwoSeed`]: the same two-seed scalar with its four [`Order2`]
-/// parts re-typed to [`Order2Lane<L, K>`], so one `L = f64x4` instance carries
-/// FOUR rows' contracted-fourth evaluations per vector pass.
-///
-/// Every operation is a term-for-term structural re-type of the scalar
-/// [`TwoSeed`] ops onto the lane-implemented [`Order2Lane`] algebra. With
-/// `L = f64`, `TwoSeedLane<f64, K>` is `to_bits`-identical to [`TwoSeed<K>`];
-/// with `L = f64x4`, lane `i` is `to_bits`-identical to that (see `batch_tests`).
-#[derive(Clone, Copy, Debug)]
-pub struct TwoSeedLane<L: Lane, const K: usize> {
-    /// The `ε⁰δ⁰` part.
-    pub base: Order2Lane<L, K>,
-    /// The `ε¹δ⁰` part.
-    pub eps: Order2Lane<L, K>,
-    /// The `ε⁰δ¹` part.
-    pub del: Order2Lane<L, K>,
-    /// The `ε¹δ¹` part. After a `seed(u, v)` evaluation, `eps_del.h[a][b]`
-    /// lane `i` is row `i`'s `Σ_{cd} ℓ_{abcd} u_c v_d`.
-    pub eps_del: Order2Lane<L, K>,
-}
-
-/// The 4-rows-per-pass batched two-seed scalar (`wide::f64x4` lanes).
-pub type TwoSeedBatch<const K: usize> = TwoSeedLane<wide::f64x4, K>;
-
-impl<L: Lane, const K: usize> TwoSeedLane<L, K> {
-    /// A constant: base = `constant(c)`, all seed parts zero (mirrors
-    /// [`TwoSeed::constant`]).
-    #[inline]
-    pub fn constant(c: L) -> Self {
-        let z = Order2Lane::constant(L::splat(0.0));
-        TwoSeedLane {
-            base: Order2Lane::constant(c),
-            eps: z,
-            del: z,
-            eps_del: z,
-        }
-    }
-
-    /// The seeded variable `p_axis` at (per-lane) value `value`, no ε/δ direction
-    /// (mirrors [`TwoSeed::variable`]).
-    #[inline]
-    pub fn variable(value: L, axis: usize) -> Self {
-        let z = Order2Lane::constant(L::splat(0.0));
-        TwoSeedLane {
-            base: Order2Lane::variable(value, axis),
-            eps: z,
-            del: z,
-            eps_del: z,
-        }
-    }
-
-    /// Seed primary `axis` at (per-lane) value `value` with ε-direction `u_axis`
-    /// and δ-direction `v_axis` (mirrors [`TwoSeed::seed`]). With `L = f64x4`,
-    /// each argument packs the four rows' values for primary `axis`.
-    #[inline]
-    pub fn seed(value: L, axis: usize, u_axis: L, v_axis: L) -> Self {
-        TwoSeedLane {
-            base: Order2Lane::variable(value, axis),
-            eps: Order2Lane::constant(u_axis),
-            del: Order2Lane::constant(v_axis),
-            eps_del: Order2Lane::constant(L::splat(0.0)),
-        }
-    }
-
-    /// The contracted-fourth channel after a `seed(u, v)` evaluation:
-    /// `out[a][b]` lane `i` is row `i`'s `Σ_{cd} ℓ_{abcd} u_c v_d`
-    /// (the εδ-part Hessian).
-    #[inline]
-    #[must_use]
-    pub fn contracted_fourth(&self) -> [[L; K]; K] {
-        self.eps_del.h
-    }
-
-    /// Lane-wise `self + o` (mirrors [`TwoSeed::add`](crate::nested_dual::JetField::add)).
-    #[inline]
-    pub fn add(&self, o: &Self) -> Self {
-        TwoSeedLane {
-            base: self.base.add(&o.base),
-            eps: self.eps.add(&o.eps),
-            del: self.del.add(&o.del),
-            eps_del: self.eps_del.add(&o.eps_del),
-        }
-    }
-
-    /// Lane-wise `self - o` (mirrors [`TwoSeed::sub`](crate::nested_dual::JetField::sub)).
-    #[inline]
-    pub fn sub(&self, o: &Self) -> Self {
-        TwoSeedLane {
-            base: self.base.sub(&o.base),
-            eps: self.eps.sub(&o.eps),
-            del: self.del.sub(&o.del),
-            eps_del: self.eps_del.sub(&o.eps_del),
-        }
-    }
-
-    /// Lane-wise `self · o`, ε² = δ² = 0 truncation (mirrors [`TwoSeed::mul`](crate::nested_dual::JetField::mul)).
-    #[inline]
-    pub fn mul(&self, o: &Self) -> Self {
-        let a = self;
-        let b = o;
-        let base = a.base.mul(&b.base);
-        let eps = a.base.mul(&b.eps).add(&a.eps.mul(&b.base));
-        let del = a.base.mul(&b.del).add(&a.del.mul(&b.base));
-        let eps_del = a
-            .base
-            .mul(&b.eps_del)
-            .add(&a.eps.mul(&b.del))
-            .add(&a.del.mul(&b.eps))
-            .add(&a.eps_del.mul(&b.base));
-        TwoSeedLane {
-            base,
-            eps,
-            del,
-            eps_del,
-        }
-    }
-
-    /// Negate every part (mirrors [`TwoSeed::neg`](crate::nested_dual::JetField::neg)).
-    #[inline]
-    pub fn neg(&self) -> Self {
-        TwoSeedLane {
-            base: self.base.neg(),
-            eps: self.eps.neg(),
-            del: self.del.neg(),
-            eps_del: self.eps_del.neg(),
-        }
-    }
-
-    /// Multiply every part by the plain scalar `s` (mirrors [`TwoSeed::scale`](crate::nested_dual::JetField::scale)).
-    #[inline]
-    pub fn scale(&self, s: f64) -> Self {
-        TwoSeedLane {
-            base: self.base.scale(s),
-            eps: self.eps.scale(s),
-            del: self.del.scale(s),
-            eps_del: self.eps_del.scale(s),
-        }
-    }
-
-    /// Exact composition `f ∘ self`, given the per-lane outer-derivative stack
-    /// `d = [f, f′, f″, f‴, f⁗]`. Term-for-term identical to
-    /// [`TwoSeed::compose_unary`](crate::nested_dual::JetField::compose_unary): base reads `d[0..=2]`, `f′(base)` reads
-    /// `d[1..=3]`, `f″(base)` reads `d[2..=4]`, and the cross part carries
-    /// `f″·eps·del + f′·eps_del`.
-    #[inline]
-    pub fn compose_unary(&self, d: [L; 5]) -> Self {
-        let base = self.base.compose_unary([d[0], d[1], d[2]]);
-        let fprime = self.base.compose_unary([d[1], d[2], d[3]]);
-        let fsecond = self.base.compose_unary([d[2], d[3], d[4]]);
-        let eps = fprime.mul(&self.eps);
-        let del = fprime.mul(&self.del);
-        let eps_del = fsecond
-            .mul(&self.eps)
-            .mul(&self.del)
-            .add(&fprime.mul(&self.eps_del));
-        TwoSeedLane {
-            base,
-            eps,
-            del,
-            eps_del,
-        }
-    }
-
-    /// `e^self`, per-lane stack `[e; 5]` (matches [`JetScalar::exp`]).
-    #[inline]
-    pub fn exp(&self) -> Self {
-        let d = self.base.v.unary5(|u| {
-            let e = u.exp();
-            [e, e, e, e, e]
-        });
-        self.compose_unary(d)
-    }
-
-    /// `ln(self)`; caller guarantees positivity (matches [`JetScalar::ln`]).
-    #[inline]
-    pub fn ln(&self) -> Self {
-        let d = self.base.v.unary5(|u| {
-            let r = 1.0 / u;
-            [u.ln(), r, -r * r, 2.0 * r * r * r, -6.0 * r * r * r * r]
-        });
-        self.compose_unary(d)
-    }
-
-    /// `√self`; caller guarantees positivity (matches [`JetScalar::sqrt`]).
-    #[inline]
-    pub fn sqrt(&self) -> Self {
-        let d = self.base.v.unary5(crate::jet_tower::sqrt_derivative_stack);
-        self.compose_unary(d)
-    }
-
-    /// `1/self` (matches [`JetScalar::recip`]).
-    #[inline]
-    pub fn recip(&self) -> Self {
-        let d = self.base.v.unary5(|u| {
-            let r = 1.0 / u;
-            let r2 = r * r;
-            [r, -r2, 2.0 * r2 * r, -6.0 * r2 * r2, 24.0 * r2 * r2 * r]
-        });
-        self.compose_unary(d)
-    }
-
-    /// `self^a` for real `a`; caller guarantees a positive base (matches
-    /// [`JetScalar::powf`]).
-    #[inline]
-    pub fn powf(&self, a: f64) -> Self {
-        let d = self.base.v.unary5(|u| crate::jet_tower::power_derivative_stack(u, a));
-        self.compose_unary(d)
-    }
-
-    /// `ln Γ(self)`; caller guarantees positivity (matches [`JetScalar::ln_gamma`]).
-    #[inline]
-    pub fn ln_gamma(&self) -> Self {
-        let d = self
-            .base
-            .v
-            .unary5(crate::jet_tower::ln_gamma_derivative_stack);
-        self.compose_unary(d)
-    }
-
-}
-
-impl<const K: usize> TwoSeedBatch<K> {
-    /// Extract lane `i`'s parts as a production [`TwoSeed<K>`]. Lane `i` is
-    /// `to_bits`-identical to evaluating the same program at [`TwoSeed<K>`] on
-    /// row `i` (see `batch_tests`).
-    #[inline]
-    #[must_use]
-    pub fn lane(&self, i: usize) -> TwoSeed<K> {
-        TwoSeed {
-            base: self.base.lane(i),
-            eps: self.eps.lane(i),
-            del: self.del.lane(i),
-            eps_del: self.eps_del.lane(i),
-        }
-    }
-}
-
 // ── Tower3<K>: value / gradient / Hessian / third tensor ────────────────
 
 /// The order-≤3 [`crate::jet_tower::Tower3`] is also a [`JetScalar`]. It serves
@@ -6286,7 +6047,6 @@ mod extreme_unary_tests {
             let a = degree as f64;
             let batch2 = Order2Batch::<1>::variable(packed, 0).powf(a);
             let batch3 = OneSeedBatch::<1>::seed_direction(packed, 0, wide::f64x4::ONE).powf(a);
-            let batch4 = TwoSeedBatch::<1>::seed(packed, 0, wide::f64x4::ONE, wide::f64x4::ONE).powf(a);
             for (lane, u) in values.into_iter().enumerate() {
                 let expected = match degree {
                     0 => [1.0, 0.0, 0.0, 0.0, 0.0],
@@ -6307,10 +6067,9 @@ mod extreme_unary_tests {
                     assert_channels(&[output.base.0.v, output.base.0.g[0], output.base.0.h[0][0],
                         output.contracted_third()[0][0]], &expected);
                 }
-                for output in [TwoSeed::<1>::seed(u, 0, 1.0, 1.0).powf(a), batch4.lane(lane)] {
-                    assert_channels(&[output.base.0.v, output.base.0.g[0], output.base.0.h[0][0],
-                        output.eps.0.h[0][0], output.contracted_fourth()[0][0]], &expected);
-                }
+                let output = TwoSeed::<1>::seed(u, 0, 1.0, 1.0).powf(a);
+                assert_channels(&[output.base.0.v, output.base.0.g[0], output.base.0.h[0][0],
+                    output.eps.0.h[0][0], output.contracted_fourth()[0][0]], &expected);
             }
         }
     }
@@ -6340,7 +6099,7 @@ mod extreme_unary_tests {
             assert_eq!([output.0.v, output.0.g[0], output.0.h[0][0]], expected[..3]);
             let output = OneSeedBatch::<1>::seed_direction(packed, 0, wide::f64x4::ONE).sqrt().lane(0);
             assert_eq!(output.contracted_third()[0][0], expected[3]);
-            let output = TwoSeedBatch::<1>::seed(packed, 0, wide::f64x4::ONE, wide::f64x4::ONE).sqrt().lane(0);
+            let output = JetScalar::sqrt(&TwoSeed::<1>::seed(u, 0, 1.0, 1.0));
             assert_eq!(output.contracted_fourth()[0][0], expected[4]);
         }
     }
@@ -7218,7 +6977,6 @@ mod batch_tests {
 
     use super::{
         JetScalar, Lane, OneSeed, OneSeedBatch, OneSeedLane, Order2, Order2Batch, Order2Lane,
-        TwoSeed, TwoSeedBatch, TwoSeedLane,
     };
     // The scalar-field algebra (`value`, `add`, …) lives on the shared `JetField`
     // base now, so the concrete-typed channel reads below need it in scope.
@@ -7461,60 +7219,6 @@ mod batch_tests {
         }
     }
 
-    impl<const K: usize> RowAlg<K> for TwoSeed<K> {
-        fn constant(c: f64) -> Self {
-            <Self as JetScalar<K>>::constant(c)
-        }
-        fn add(&self, o: &Self) -> Self {
-            crate::nested_dual::JetField::add(self, o)
-        }
-        fn sub(&self, o: &Self) -> Self {
-            crate::nested_dual::JetField::sub(self, o)
-        }
-        fn mul(&self, o: &Self) -> Self {
-            crate::nested_dual::JetField::mul(self, o)
-        }
-        fn scale(&self, s: f64) -> Self {
-            crate::nested_dual::JetField::scale(self, s)
-        }
-        fn exp(&self) -> Self {
-            JetScalar::exp(self)
-        }
-        fn sqrt(&self) -> Self {
-            JetScalar::sqrt(self)
-        }
-        fn recip(&self) -> Self {
-            JetScalar::recip(self)
-        }
-    }
-
-    impl<L: Lane, const K: usize> RowAlg<K> for TwoSeedLane<L, K> {
-        fn constant(c: f64) -> Self {
-            TwoSeedLane::constant(L::splat(c))
-        }
-        fn add(&self, o: &Self) -> Self {
-            TwoSeedLane::add(self, o)
-        }
-        fn sub(&self, o: &Self) -> Self {
-            TwoSeedLane::sub(self, o)
-        }
-        fn mul(&self, o: &Self) -> Self {
-            TwoSeedLane::mul(self, o)
-        }
-        fn scale(&self, s: f64) -> Self {
-            TwoSeedLane::scale(self, s)
-        }
-        fn exp(&self) -> Self {
-            TwoSeedLane::exp(self)
-        }
-        fn sqrt(&self) -> Self {
-            TwoSeedLane::sqrt(self)
-        }
-        fn recip(&self) -> Self {
-            TwoSeedLane::recip(self)
-        }
-    }
-
     fn check_oneseed<const K: usize>(state: &mut u64, batches: usize) -> usize {
         let mut rows_checked = 0;
         for _ in 0..batches {
@@ -7581,70 +7285,6 @@ mod batch_tests {
         rows_checked
     }
 
-    fn check_twoseed<const K: usize>(state: &mut u64, batches: usize) -> usize {
-        let mut rows_checked = 0;
-        for _ in 0..batches {
-            let rows: [[f64; K]; 4] =
-                std::array::from_fn(|_| std::array::from_fn(|_| rand_unit(state)));
-            let u: [[f64; K]; 4] =
-                std::array::from_fn(|_| std::array::from_fn(|_| rand_unit(state)));
-            let v: [[f64; K]; 4] =
-                std::array::from_fn(|_| std::array::from_fn(|_| rand_unit(state)));
-
-            let prod: [TwoSeed<K>; 4] = std::array::from_fn(|r| {
-                let p: [TwoSeed<K>; K] =
-                    std::array::from_fn(|a| TwoSeed::seed(rows[r][a], a, u[r][a], v[r][a]));
-                row_expr(&p)
-            });
-
-            let scal: [TwoSeedLane<f64, K>; 4] = std::array::from_fn(|r| {
-                let p: [TwoSeedLane<f64, K>; K] =
-                    std::array::from_fn(|a| TwoSeedLane::seed(rows[r][a], a, u[r][a], v[r][a]));
-                row_expr(&p)
-            });
-
-            let pbatch: [TwoSeedBatch<K>; K] = std::array::from_fn(|a| {
-                let val = wide::f64x4::new([rows[0][a], rows[1][a], rows[2][a], rows[3][a]]);
-                let uu = wide::f64x4::new([u[0][a], u[1][a], u[2][a], u[3][a]]);
-                let vv = wide::f64x4::new([v[0][a], v[1][a], v[2][a], v[3][a]]);
-                TwoSeedBatch::seed(val, a, uu, vv)
-            });
-            let batch = row_expr(&pbatch);
-
-            for r in 0..4 {
-                let want = prod[r].contracted_fourth();
-                let got_scal = scal[r].contracted_fourth();
-                let got_batch = batch.lane(r).contracted_fourth();
-                assert_eq!(
-                    scal[r].base.v.to_bits(),
-                    prod[r].base.value().to_bits(),
-                    "TwoSeed K={K} scalar value"
-                );
-                assert_eq!(
-                    batch.lane(r).base.value().to_bits(),
-                    prod[r].base.value().to_bits(),
-                    "TwoSeed K={K} batch lane {r} value"
-                );
-                for a in 0..K {
-                    for b in 0..K {
-                        assert_eq!(
-                            got_scal[a][b].to_bits(),
-                            want[a][b].to_bits(),
-                            "TwoSeed K={K} scalar fourth[{a}][{b}]"
-                        );
-                        assert_eq!(
-                            got_batch[a][b].to_bits(),
-                            want[a][b].to_bits(),
-                            "TwoSeed K={K} batch lane {r} fourth[{a}][{b}]"
-                        );
-                    }
-                }
-                rows_checked += 1;
-            }
-        }
-        rows_checked
-    }
-
     /// ≥2000 random 4-row batches per K, across K ∈ {2,3,4,9}: the
     /// contracted-third channel of every `OneSeedLane` lane is `to_bits`-identical
     /// to the production [`OneSeed`] per row.
@@ -7656,22 +7296,6 @@ mod batch_tests {
             + check_oneseed::<3>(&mut state, batches)
             + check_oneseed::<4>(&mut state, batches)
             + check_oneseed::<9>(&mut state, batches);
-        // 4 widths × `batches` batches × 4 rows each: a silently empty inner
-        // loop would leave this at zero instead of passing as a no-op.
-        assert_eq!(rows_checked, 4 * batches * 4);
-    }
-
-    /// ≥2000 random 4-row batches per K, across K ∈ {2,3,4,9}: the
-    /// contracted-fourth channel of every `TwoSeedLane` lane is `to_bits`-identical
-    /// to the production [`TwoSeed`] per row.
-    #[test]
-    fn twoseed_lanes_contracted_fourth_bit_identical() {
-        let mut state = 0x0FED_CBA9_8765_4321_u64;
-        let batches = 2000;
-        let rows_checked = check_twoseed::<2>(&mut state, batches)
-            + check_twoseed::<3>(&mut state, batches)
-            + check_twoseed::<4>(&mut state, batches)
-            + check_twoseed::<9>(&mut state, batches);
         // 4 widths × `batches` batches × 4 rows each: a silently empty inner
         // loop would leave this at zero instead of passing as a no-op.
         assert_eq!(rows_checked, 4 * batches * 4);
