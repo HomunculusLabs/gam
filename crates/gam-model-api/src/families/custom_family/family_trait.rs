@@ -1234,41 +1234,6 @@ pub trait CustomFamily {
         false
     }
 
-    /// Opt families in to the matrix-free inner-Newton/PCG path on top of the
-    /// row-pullback work model (`JointHessianWork::matrix_free_route`).
-    ///
-    /// The work model prices a dense `n·p²` assembly plus factorization against
-    /// CG's worst case of `p` row-streaming products, which suits families with
-    /// cheap per-row work. Families with very expensive per-row work (e.g. BMS
-    /// flex streaming cell partitions + flex-jet evaluations per row) can
-    /// override this to force the operator path even at moderate `p`, because
-    /// each HVP reuses the row stream once and PCG converges in a handful of
-    /// iters. Default `false` leaves the work model's route for everyone else.
-    fn prefers_matrix_free_inner_joint(
-        &self,
-        specs: &[ParameterBlockSpec],
-        block_states: &[ParameterBlockState],
-    ) -> bool {
-        // The default does not consult these, but they are still a contract:
-        // a NaN coefficient reaching a family hook is a bug in the caller,
-        // and naming the block makes the report attributable (#780 ban).
-        assert!(
-            block_states
-                .iter()
-                .all(|state| state.beta.iter().all(|v| !v.is_nan())),
-            "a family hook received a NaN coefficient"
-        );
-        assert!(
-            specs.len() == block_states.len(),
-            "a family hook received {} block specs for {} block states",
-            specs.len(),
-            block_states.len()
-        );
-        assert_valid_blockspecs(specs, "matrix-free inner-joint preference");
-        assert_states_match_specs(block_states, specs, "matrix-free inner-joint preference");
-        false
-    }
-
     /// Whether the joint workspace returns the exact current log likelihood.
     ///
     /// `specs` must be a valid block layout. The default validates it and

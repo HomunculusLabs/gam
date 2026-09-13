@@ -360,6 +360,23 @@ impl JointHessianWork {
         let dense_work = (self.build as u128).saturating_add(factor);
         dense_work > p.saturating_mul(self.apply as u128)
     }
+
+    /// How the inner Newton step may solve with preconditioned CG before the
+    /// dense route: the same attempt the penalized normal equations make
+    /// ([`gam_linalg::pcg::DenseRouteWork::pcg_attempt`]), priced by this work.
+    ///
+    /// CG may spend what the dense route costs, `(build + p³/3) / apply`
+    /// products, and the dense route takes over if CG has not converged by then,
+    /// so no CG iteration count has to be predicted, where
+    /// [`Self::matrix_free_route`] charges CG its worst case of `p` products. Past
+    /// the memory governor's single-materialization cap CG is the only solve.
+    pub fn pcg_attempt(&self, p: usize) -> gam_linalg::pcg::PcgAttempt {
+        gam_linalg::pcg::DenseRouteWork {
+            build: self.build,
+            apply: self.apply,
+        }
+        .pcg_attempt(p)
+    }
 }
 
 /// Compute β-block column ranges from a slice of `ParameterBlockSpec`s.

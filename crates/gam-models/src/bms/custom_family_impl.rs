@@ -806,19 +806,17 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
         let order = ExactOuterDerivativeOrder::Second;
         if log_exact_work(self.y.len()) {
             let p_total = specs.iter().map(|spec| spec.design.ncols()).sum::<usize>();
-            let matrix_free_inner_requested =
+            let inner_pcg_attempt =
                 crate::custom_family::JointHessianWork::row_pullback(self.y.len() as u64, p_total as u64)
-                    .matrix_free_route(p_total);
+                    .pcg_attempt(p_total);
             let workspace_available = self.inner_coefficient_hessian_hvp_available(specs);
-            let inner_route = if matrix_free_inner_requested && workspace_available {
-                "workspace-hvp"
-            } else if workspace_available {
-                "workspace-dense"
+            let inner_route = if workspace_available {
+                "workspace"
             } else {
                 "direct-dense"
             };
             log::info!(
-                "[BMS outer-derivative-policy] n={} p={} flex={} order={:?} declared_hessian=analytic outer_hessian_requested={} outer_subsample={} inner_route={} matrix_free_inner_requested={} dense_available={} outer_hvp_available={}",
+                "[BMS outer-derivative-policy] n={} p={} flex={} order={:?} declared_hessian=analytic outer_hessian_requested={} outer_subsample={} inner_route={} inner_pcg_attempt={:?} dense_available={} outer_hvp_available={}",
                 self.y.len(),
                 p_total,
                 flex_active,
@@ -826,7 +824,7 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
                 options.use_outer_hessian,
                 options.outer_score_subsample.is_some(),
                 inner_route,
-                matrix_free_inner_requested,
+                inner_pcg_attempt,
                 dense_available,
                 hvp_available,
             );
@@ -1562,36 +1560,6 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
 
     fn inner_joint_workspace_log_likelihood_available(&self, specs: &[ParameterBlockSpec]) -> bool {
         parameter_block_specs_match_rows(specs, self.y.len())
-    }
-
-    /// Request the matrix-free inner-Newton/PCG path for BMS flex, on top of
-    /// the row-pullback work model (`JointHessianWork::matrix_free_route`).
-    ///
-    /// Without a pinned per-row primary Hessian cache, dense joint-H assembly
-    /// streams every row through the expensive flex row kernel and pays a
-    /// BLAS-3 design-matrix gram per chunk on top (~63s per inner cycle at
-    /// n≈195k with `linkwiggle()`). Each HVP reuses the row stream at
-    /// near-gradient cost (~3s), and PCG with the joint penalty preconditioner
-    /// typically converges in a handful of iters. The work model prices CG at
-    /// its worst case of `p` products, which keeps a tall flex fit dense, but
-    /// BMS-flex per-row work is heavy enough that the matrix-free path wins
-    /// there, so this family requests it.
-    ///
-    /// The request selects PCG only when the workspace serves an operator
-    /// source, which `matrix_free_inner_route` decides from the row-primary
-    /// cache plan. A pinned cache serves a dense source and keeps the dense
-    /// spectral solve. No row count chooses the route (gam#2900 row 6.10).
-    fn prefers_matrix_free_inner_joint(
-        &self,
-        specs: &[ParameterBlockSpec],
-        states: &[ParameterBlockState],
-    ) -> bool {
-        assert!(
-            crate::custom_family::validate_blockspec_consistency(specs).is_ok(),
-            "BernoulliMarginalSlopeFamily matrix-free inner-joint preference: \
-             inconsistent parameter block specs"
-        );
-        self.effective_flex_active(states).unwrap_or(false)
     }
 
     fn exact_newton_joint_hessian_directional_derivative(
@@ -2417,11 +2385,11 @@ impl BernoulliMarginalSlopeExactNewtonJointHessianWorkspace {
     /// build streams all `n` rows and pays the full flex row-kernel cost per
     /// chunk plus a BLAS-3 design-matrix gram on top; at large-scale shape
     /// (n≈195k, p≈44) that pushes one dense build past 60s while each HVP
-    /// reuses the same row stream at ~gradient-pass cost (~3s). PCG with the
-    /// joint penalty preconditioner typically converges in a handful of HVPs,
-    /// so routing the inner solve through the operator path beats per-cycle
-    /// dense reassembly. Both costs scale with `n`, so the cache plan, not a
-    /// row count, chooses the route (gam#2900 row 6.10).
+    /// reuses the same row stream at ~gradient-pass cost (~3s). Serving an
+    /// operator lets the inner solve try PCG within the dense build's cost and
+    /// materialize only if CG has not converged by then
+    /// (`JointHessianWork::pcg_attempt`). Both costs scale with `n`, so the
+    /// cache plan, not a row count, chooses the representation (gam#2900).
     pub(super) fn matrix_free_inner_route(&self) -> bool {
         if self.cache.row_primary_hessians.is_tiled() {
             return true;

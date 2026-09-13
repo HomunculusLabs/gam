@@ -1556,15 +1556,16 @@ pub(crate) fn outerobjective_andgradient<F: CustomFamily + Clone + Send + Sync +
 pub(crate) struct OneBlockIdentityFamily;
 
 #[test]
-pub(crate) fn large_scale_shape_margslope_flex_cycle0_uses_bounded_dense_route() {
+pub(crate) fn large_scale_shape_margslope_flex_cycle0_bounds_cg_by_the_dense_route_cost() {
+    // p = 51, n = 320k: the dense route builds n·p² and factors p³/3 while one
+    // product streams 2·n·p, so the cycle-0 CG attempt hands the step to the dense
+    // route after 25 products, not after the historical 4·p = 204.
     let total_p = 51;
     let total_n = 320_000;
-    let max_pcg_hvps_before_fix = JOINT_PCG_MAX_ITER_MULTIPLIER * total_p;
-
-    assert_eq!(max_pcg_hvps_before_fix, 204);
-    assert!(
-        !JointHessianWork::row_pullback(total_n, total_p as u64).matrix_free_route(total_p),
-        "p=51/n=320k should materialize exactly 51 columns instead of risking up to {max_pcg_hvps_before_fix} expensive PCG matvecs in cycle 0"
+    assert_eq!(JOINT_PCG_MAX_ITER_MULTIPLIER * total_p, 204);
+    assert_eq!(
+        JointHessianWork::row_pullback(total_n, total_p as u64).pcg_attempt(total_p),
+        gam_linalg::pcg::PcgAttempt::Budgeted { products: 25 }
     );
 }
 

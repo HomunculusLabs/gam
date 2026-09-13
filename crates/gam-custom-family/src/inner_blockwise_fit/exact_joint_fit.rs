@@ -341,7 +341,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         mut cached_joint_hessian_source,
         objective_state,
         joint_workspace_requested,
-        matrix_free_joint_requested,
+        joint_pcg_attempt,
         total_joint_n,
         prelude_log,
         inner_started,
@@ -1528,18 +1528,17 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             );
         }
 
-        let solve_joint_constraints_dense =
-            joint_constraints.is_some() || !matrix_free_joint_requested || joint_hessian_is_dense;
+        let solve_joint_constraints_dense = joint_constraints.is_some() || joint_hessian_is_dense;
         if cycle == 0 {
             log::info!(
-                "[JN-BRANCH-DIAG #1040] cycle=0 joint_constraints_is_some={} matrix_free_joint_requested={} joint_hessian_is_dense={} solve_joint_constraints_dense={} -> branch={} total_p={} levenberg_on_ill_cond={}",
+                "[JN-BRANCH-DIAG #1040] cycle=0 joint_constraints_is_some={} joint_pcg_attempt={:?} joint_hessian_is_dense={} solve_joint_constraints_dense={} -> branch={} total_p={} levenberg_on_ill_cond={}",
                 joint_constraints.is_some(),
-                matrix_free_joint_requested,
+                joint_pcg_attempt,
                 joint_hessian_is_dense,
                 solve_joint_constraints_dense,
                 if solve_joint_constraints_dense && joint_constraints.is_some() {
                     "CONSTRAINED_QP"
-                } else if matrix_free_joint_requested && !joint_hessian_is_dense {
+                } else if !joint_hessian_is_dense {
                     "MATRIX_FREE_PCG"
                 } else {
                     "DENSE_SPECTRAL"
@@ -1937,13 +1936,22 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     _ => None,
                 };
             let pcg_started = std::time::Instant::now();
-            let pcg_requested = matrix_free_joint_requested
-                && !joint_hessian_is_dense
+            // CG spends at most what the dense route costs (gam#2900). A `Budgeted`
+            // attempt that has not converged within its products hands the step to
+            // the dense route below. `Only` (no dense route fits the memory cap)
+            // keeps the historical cap and refuses. One product per iteration, plus
+            // a residual refresh every 32 iterations.
+            let pcg_max_products = match joint_pcg_attempt {
+                gam_linalg::pcg::PcgAttempt::Only => JOINT_PCG_MAX_ITER_MULTIPLIER * total_p.max(1),
+                gam_linalg::pcg::PcgAttempt::Budgeted { products } => products,
+            };
+            let pcg_requested = !joint_hessian_is_dense
                 && !returned_mode_curvature_pending
                 && !true_jeffreys_hessian_required
-                && inner_jeffreys_term.is_none();
+                && inner_jeffreys_term.is_none()
+                && pcg_max_products > 0;
             let mut spectral_nullity_for_step = 0usize;
-            let mut delta = if pcg_requested {
+            let pcg_solution = if pcg_requested {
                 let preconditioner_diag = match &joint_hessian_source {
                     JointHessianSource::Dense(h_joint) => joint_penalty_preconditioner_diag(
                         &h_joint.diag().to_owned(),
@@ -1994,7 +2002,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                             &rhs,
                             &preconditioner_diag,
                             pcg_rel_tol,
-                            JOINT_PCG_MAX_ITER_MULTIPLIER * total_p.max(1),
+                            pcg_max_products,
                         )
                         .map(|(solution, info)| {
                             log_joint_pcg_diagnostics(
@@ -2004,7 +2012,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                                 &preconditioner_diag,
                                 &info,
                             );
-                            solution
+                            (solution, info.iterations)
                         })
                     }
                     JointHessianSource::Operator { apply_into, .. } => {
@@ -2036,7 +2044,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                             &rhs,
                             &preconditioner_diag,
                             pcg_rel_tol,
-                            JOINT_PCG_MAX_ITER_MULTIPLIER * total_p.max(1),
+                            pcg_max_products,
                         )
                         .map(|(solution, info)| {
                             log_joint_pcg_diagnostics(
@@ -2046,7 +2054,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                                 &preconditioner_diag,
                                 &info,
                             );
-                            solution
+                            (solution, info.iterations)
                         });
                         if let Some(error) = matvec_failure.into_inner() {
                             return Err(CustomFamilyError::trial_point(format!(
@@ -2061,21 +2069,27 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             } else {
                 None
             };
+            let pcg_iterations = pcg_solution.as_ref().map(|(_, iterations)| *iterations);
+            let mut delta = pcg_solution.map(|(solution, _)| solution);
             if pcg_requested {
+                // Which route produced this step, and how much of the attempt it used.
                 log::info!(
-                    "[PIRLS/joint-PCG] cycle {:>3} | n={} p={} solved={} elapsed={:.3}s",
+                    "[PIRLS/joint-PCG] cycle {:>3} | n={} p={} route={} cg_iterations={} attempt={:?} elapsed={:.3}s",
                     cycle,
                     total_joint_n,
                     total_p,
-                    delta.is_some(),
+                    if delta.is_some() { "pcg" } else { "dense" },
+                    pcg_iterations.map_or_else(|| "none".to_string(), |used| used.to_string()),
+                    joint_pcg_attempt,
                     pcg_started.elapsed().as_secs_f64()
                 );
             }
             if delta.is_none() {
-                if pcg_requested {
+                if pcg_requested && joint_pcg_attempt == gam_linalg::pcg::PcgAttempt::Only {
                     return Err(CustomFamilyError::trial_point(format!(
                         "exact joint Newton at cycle {cycle}: the preconditioned CG solve of the \
-                         penalized Newton system returned no solution at this iterate"
+                         penalized Newton system returned no solution at this iterate, and the \
+                         dense Hessian exceeds the materialization cap"
                     )));
                 }
                 let likelihood_hessian = materialize_joint_hessian_source(

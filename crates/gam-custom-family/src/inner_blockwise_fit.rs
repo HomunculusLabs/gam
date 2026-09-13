@@ -60,7 +60,7 @@ struct ExactJointFitContext<'a, F> {
     cached_joint_hessian_source: Option<JointHessianSource>,
     objective_state: crate::assembly::InnerObjectiveState,
     joint_workspace_requested: bool,
-    matrix_free_joint_requested: bool,
+    joint_pcg_attempt: gam_linalg::pcg::PcgAttempt,
     total_joint_n: usize,
     prelude_log: bool,
     inner_started: &'a std::time::Instant,
@@ -2864,10 +2864,11 @@ fn inner_blockwise_fit_for_product<F: CustomFamily + Clone + Send + Sync + 'stat
             specs.len(),
         );
     }
-    let matrix_free_joint_requested =
+    // An operator-served inner solve tries preconditioned CG within the dense
+    // route's cost before it materializes the Hessian (gam#2900).
+    let joint_pcg_attempt =
         JointHessianWork::row_pullback(total_joint_n as u64, total_joint_p as u64)
-            .matrix_free_route(total_joint_p)
-            || family.prefers_matrix_free_inner_joint(specs, &states);
+            .pcg_attempt(total_joint_p);
     let has_workspace_source = family.inner_coefficient_hessian_hvp_available(specs);
     // Probe the *spec-aware* joint Hessian: it is the canonical source of the
     // coupled joint curvature. A family may override only
@@ -3407,7 +3408,7 @@ fn inner_blockwise_fit_for_product<F: CustomFamily + Clone + Send + Sync + 'stat
             cached_joint_hessian_source,
             objective_state,
             joint_workspace_requested,
-            matrix_free_joint_requested,
+            joint_pcg_attempt,
             total_joint_n,
             prelude_log,
             inner_started: &inner_started,
