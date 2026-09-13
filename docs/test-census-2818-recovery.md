@@ -952,3 +952,65 @@ compiling. The surviving `build_duchon_basis_log_kappa_derivativeswith_collocati
 takes explicit centers and transform, so the cold-spec contract the file pins has no
 production subject. The body is removed again, and its identities are recorded in
 `docs/source-removal-changes.json`.
+
+### Unsuffixed swept tests: files cut to their module doc
+
+The census covers issue-suffixed names only. A scan at origin/main found the other half
+of the sweep: 56 test files that `c0a21b554` cut to their module doc. Their tests have no
+issue suffix, so neither the census nor this record saw them. Restored so far:
+
+- `8ade9c77f` (`fbcb5d8c8` then dropped two deleted option fields): the five
+  `tests/regressions` files for #682, #582, #584 and the two PIRLS convergence guards
+- `a5daa52e4`, `31fa35d5b` and `8a850262e`: `tests_joint_vs_cascade_2131.rs`,
+  `latent_coord_design_jacobian_frame_fd_2643.rs`, `duchon_lazy_anisotropic_reparam_1818.rs`,
+  `owed_1448.rs`, `conformal_coverage_quality.rs` and `tests_deflation_traces_780.rs`
+- `497f37257`: the Beta and Tweedie arms of the dispersion location-scale variance gate
+- `358e2a197`: `row_metric_loud_vs_loadbearing.rs` (`from_blocks_with_mode` is the
+  `_and_manifolds` form on Euclidean blocks) and the #1124 negative-binomial seed-spec test
+
+`07a6cfb7e` deleted `gaussian_reml_weight_rescaling_changes_fit.rs` as an expected-red
+module under SPEC rule 16. The files below stay at their module doc. For each one, a
+production function its tests call is gone from origin/main, or the tests exercised a
+test-only harness that `c0a21b554` removed with them. The removing commit is the one
+that deleted the function's declaration.
+
+| File | Tests | Why they stay absent |
+| --- | --- | --- |
+| `crates/gam-models/src/gamlss/tests_outer_derivatives.rs` | `outer_lamlgradient_matches_finite_differencewhen_joint_exact_path_is_active`, `rho_only_outer_objective_matches_joint_hyper_when_psi_is_empty`, `outer_lamlgradient_diagonal_binomial_location_scale_matchesfd`, `outer_lamlgradient_diagonal_binomial_location_scale_hard_case_matchesfd`, `outer_lamlhessian_joint_exact_binomial_location_scale_matchesfd`, `outer_lamlhessian_joint_exact_binomial_location_scale_hard_case_matchesfd` | calls `evaluate_rho_outer_criterion_for_diagnostics`, deleted by `48f48f910` |
+| `crates/gam-models/src/gpu_kernels/cubic_cell/host_substrate.rs` | `host_oracle_accepts_empty_workload`, `host_oracle_rejects_unsupported_degree`, `host_substrate_matches_cpu_for_quartic_finite_cell`, `host_substrate_matches_cpu_for_sextic_finite_cell_at_d21`, `host_substrate_matches_cpu_for_affine_tail_cell`, `host_substrate_matches_cpu_for_whole_line_affine`, `host_substrate_zeros_invalid_cell_and_records_status`, `cubic_cell_substrate_parity_against_cpu_evaluator` | calls `validate_host_view`, deleted by `d484a091a` |
+| `crates/gam-sae/src/manifold/probe_report_cost_2757_tests.rs` | `probe_2757_report_phase_profile_euclidean`, `probe_2757_report_phase_profile_gauge_driving`, `probe_2757_gauge_branch_cost_law` | test-only harness `unit_rho_for_probe` (`tests_frame_curvature_2757.rs`), removed with them by `c0a21b554`; no production subject |
+| `crates/gam-sae/src/manifold/tests_crosscoder_rho_2231.rs` | `outer_criterion_prices_block_relevance_2231`, `block_relevance_has_interior_stationary_minimum_2231`, `block_gradient_matches_central_difference_of_cost_2231`, `block_efs_step_reaches_gradient_root_2231` | calls `with_log_lambda_block`, deleted by `e6fd4251e` |
+| `crates/gam-sae/src/manifold/tests_graph_atom.rs` | `graph_atom_reads_continuous_circle_as_one_loop_from_knn_edges`, `graph_atom_reads_weekdays_as_atomic_cycle_without_fixed_menu_selection`, `learned_graph_reads_path_as_interval`, `learned_graph_reads_two_disconnected_cycles`, `non_uniform_cycle_reports_no_standard_name`, `learned_graph_reads_branching_tree_and_detects_branch_vertex`, `two_date_modular_synthetic_binds_super_resolution_to_graph_base`, `coactivation_ring_enrolls_as_graph_atom_with_cycle_betti` | calls `knn_candidate_edges`, deleted by `fea430c0c` |
+| `crates/gam-sae/src/manifold/tests_graph_spectral_decode.rs` | `eigengap_selects_two_for_circle_and_decouples_from_betti`, `spectral_penalty_is_the_graph_dirichlet_form`, `nystrom_recovers_noisy_circle_angle`, `nystrom_jet_matches_central_difference`, `spectral_decode_beats_single_circle_on_figure_eight`, `nystrom_evaluator_matches_batched_coordinates` | calls `spectral_decode_basis`, deleted by `fea430c0c` |
+| `crates/gam-sae/src/manifold/tests_tier0_shared_mean_2023.rs` | `tier0_fit_demeans_and_reconstruction_adds_mean_back`, `tier0_makes_dc_zombie_ev_invisible_six_circles` | calls `fit_tier0_mean`, deleted by `e6fd4251e` |
+| `crates/gam-solve/src/reml/boundary_laml.rs` | `log_boundary_g_matches_direct_integral`, `log_boundary_g_zero_multiplier_is_half_gaussian`, `log_boundary_g_large_positive_ratio_is_reciprocal`, `log_boundary_g_far_interior_recovers_gaussian`, `log_boundary_g_derivatives_match_central_difference`, `interior_factor_joins_active_factor_at_the_boundary`, `interior_factor_far_from_boundary_recovers_full_gaussian`, `interior_factor_matches_gaussian_tail_integral`, `interior_factor_derivatives_match_central_difference`, `log_gaussian_orthant_diagonal_is_exact_product`, `log_gaussian_orthant_first_order_correction_beats_product`, `log_gaussian_orthant_bracket_contains_exact`, `log_gaussian_orthant_bracket_escalates_on_nonpositive_curvature` | calls `log_boundary_g`, deleted by `d484a091a` |
+| `crates/gam-solve/tests/suite/sae_evidence_matvec_1017.rs` | `evidence_matvec_deterministic_and_matches_cpu`, `evidence_matvec_utilization_loop` | calls `sae_framed_schur_matvec_cpu`, deleted by `aa3e5cf99` |
+| `tests/arrow_gpu/gpu/gpu_numerical_stability.rs` | `pirls_gpu_matches_cpu_across_stability_grid`, `reml_gpu_logdet_and_score_match_cpu` | test-only harness `gpu_gate` (`tests/common/gpu/gpu_gate.rs`), removed with them by `c0a21b554`; no production subject |
+| `tests/autodiff/optimization/channel_hessian_matches_fd.rs` | `bernoulli_channel_hessian_matches_fd` | calls `from_eta_pilot`, deleted by `d484a091a` |
+| `tests/basis_smooth/smooths/bspline_derivative_fd_oracle.rs` | `bspline_derivatives_1_through_4_match_central_finite_differences`, `bspline_derivative_matches_fd_on_uniform_open_knots`, `bspline_derivative_partition_of_unity_sums_to_zero` | calls `evaluate_bsplinesecond_derivative_scalar`, deleted by `d484a091a` |
+| `tests/glm/misc/beta_generative_phi_drives_draw_variance.rs` | `beta_generative_draw_variance_tracks_forwarded_phi_not_seed` | calls `sampleobservation_replicates`, deleted by `d484a091a` |
+| `tests/identifiability/misc/topology_mixture_refinement.rs` | `off_ladder_truths_k4_and_k6_are_recovered_exactly`, `in_ladder_truth_k7_is_unaffected_and_bracketed`, `circle_truth_refinement_brackets_instead_of_creeping` | calls `fit_mixture_rung`, deleted by `b6bda0923` |
+| `tests/identifiability/misc/topology_race_calibration.rs` | `repeated_draws_are_accurate_and_decisive_calls_are_never_wrong` | calls `fit_mixture_rung`, deleted by `b6bda0923` |
+| `tests/identifiability/misc/topology_two_verdict_race.rs` | `circle_read_discretely_yields_two_different_verdicts`, `quadrant_readout_computational_verdict_recovers_k4` | calls `fit_mixture_rung`, deleted by `b6bda0923` |
+| `tests/identifiability/misc/topology_union_candidates.rs` | `two_circles_prefer_structured_union_over_single_torus_and_circle`, `circle_plus_outlier_cluster_prefers_structured_union_over_pure_rungs`, `single_circle_negative_control_does_not_prefer_any_union`, `fit_union_candidate_prices_by_total_parameter_count` | calls `fit_union_rung`, deleted by `b6bda0923` |
+| `tests/measure_jet/misc/measure_jet_ell_outer_gradient_fd_2761.rs` | `measure_jet_ell_outer_gradient_matches_fd_without_double_penalty`, `measure_jet_ell_outer_gradient_matches_fd` | calls `enable_outer_gradient_fd_capture`, deleted by `1bc46ac50` |
+| `tests/misc/misc/composed_config_depth3_layout_consistency_2315.rs` | `composed_two_of_everything_depth3_layout_stays_consistent_2315`, `composed_depth3_group_priors_land_on_their_own_outer_coordinate_2315` | calls `realize_coefficient_groups_for_custom_family`, deleted by `48f48f910` |
+| `tests/perf_scale/misc/pair_surface_grid_consumer.rs` | `pair_surface_grid_backend_matches_dense_oracle`, `pair_surface_feeds_carve_additive_splits_bound_refuses`, `pair_surface_large_gridded_n_recovers_truth_end_to_end` | calls `fit_pair_surface`, deleted by `843e0fc20` |
+| `tests/perf_scale/misc/power_law_analyzer.rs` | `fit_recovers_clean_power_law`, `fit_rejects_insufficient_data`, `fit_rejects_degenerate_x_collapse`, `fit_flags_outlier_in_max_log_resid`, `fit_reports_input_length`, `power_law_fit_struct_roundtrips`, `report_extrapolation_verdicts_track_budget_boundary`, `report_returns_fit_but_skips_extrapolation_when_fit_poor`, `fit_ignores_non_positive_or_non_finite_points`, `fit_recovers_random_clean_power_laws` | test-only harness `fit_power_law` (`tests/perf_scale/misc/power_law_common.rs`), removed with them by `c0a21b554`; no production subject |
+| `tests/perf_scale/misc/row_measure_enrichment.rs` | `enrichment_oversamples_rare_loud_feature_without_touching_loss`, `no_harvest_is_todays_uniform_behavior` | calls `is_enriched`, deleted by `272905c19` |
+| `tests/perf_scale/sae/rho_posterior_tier1_sae_coverage.rs` | `tier1_rho_quadrature_improves_sae_smooth_band_coverage` | calls `rho_posterior_tier1_quadrature`, deleted by `1fdca1867` |
+| `tests/perf_scale/smooths/glm_frozen_w_tensor_n_independence.rs` | `glm_frozen_w_outer_objects_are_n_independent`, `glm_frozen_w_accessor_shapes_are_fixed_k_across_n` | calls `d2gram_dpsi2`, deleted by `272905c19` |
+| `tests/perf_scale/smooths/grid_spline_2d_exact_oracle.rs` | `streaming_band_assembly_matches_dense_oracle`, `reml_fit_beats_the_noise_floor`, `assembled_penalty_matches_closed_form_quadratic_energy` | calls `fit_grid_spline_2d_at`, deleted by `dc325f190` |
+| `tests/prediction/gpu/predict_on_cpu_only_host_does_not_panic_with_cudarc.rs` | `predict_after_load_on_cpu_only_host_does_not_panic_with_cudarc` | calls `cuda_driver_available`, deleted by `5d498d0e9` |
+| `tests/quality/families/quality_vs_brute_force_loo_binomial_logit.rs` | `alo_eta_tilde_matches_exact_loo_binomial_logit` | calls `compute_alo_diagnostics_from_fit`, deleted by `272905c19` |
+| `tests/quality/families/quality_vs_scipy_sandwich_glm_gaussian.rs` | `gam_alo_sandwich_ci_covers_true_linear_predictor_at_nominal_rate` | calls `compute_alo_diagnostics_from_fit`, deleted by `272905c19` |
+| `tests/quality/misc/quality_corrected_aic_psis_loo_selection.rs` | `corrected_aic_penalizes_at_least_as_much_as_conditional`, `psis_loo_paired_comparison_prefers_the_true_generator` | calls `compute_alo_diagnostics_from_fit`, deleted by `272905c19` |
+| `tests/quality/misc/quality_mixture_rung_vs_reference.rs` | `cluster_regime_gam_selects_mixture_and_recovers_k_match_or_beat_sklearn`, `circle_regime_gam_selects_smooth_circle_not_mixture_via_interpolated_holdout` | calls `fit_mixture_rung`, deleted by `b6bda0923` |
+| `tests/quality/misc/quality_vs_mgcv_pair_surface_live_backend.rs` | `fit_pair_surface_recovers_truth_and_matches_or_beats_mgcv_te` | calls `fit_pair_surface`, deleted by `843e0fc20` |
+| `tests/quality/misc/quality_vs_scipy_spd_frechet_mean.rs` | `spd_frechet_mean_is_the_riemannian_center_of_mass`, `spd_frechet_mean_is_the_riemannian_center_of_mass_on_real_data` | calls `spd_frechet_mean`, deleted by `210b5196b` |
+| `tests/regressions/survival/cloglog_survival_large_sigma_asymptotic_biased_low.rs` | `cloglog_survival_value_matches_reference_in_large_sigma_band` | calls `log_kernel_term`, deleted by `d484a091a` |
+| `tests/survival/survival/survival_marginal_slope_outer_gradient_fd_1040.rs` | `survival_marginal_slope_outer_gradient_fd_audit_matern`, `survival_marginal_slope_outer_gradient_fd_audit_duchon` | calls `enable_outer_gradient_fd_capture`, deleted by `1bc46ac50` |
+| `tests/perf_scale/smooths/grid_spline_2d_streaming_bench.rs` | `n_10_000_000_streaming_acceptance_bench` | calls `GridSpline2dDesign`, the 2-D grid spline engine that `85abc4592` retired because no product used it |
+| `tests/identifiability/misc/ladder_cert_rate_measure.rs` | `report_non_affine_ladder_cert_distribution_on_flex_path` | a #979 measurement whose one assertion is that cells were evaluated. Its import `gam::families::cubic_cell_kernel` no longer resolves, because the kernel lives in gam-model-kernels and the facade does not re-export it |
+
+Three more files diverged from their base header after the sweep and are still being reconciled: `tests/autodiff/misc/contract_gradient_gates.rs`, `tests/identifiability/misc/constant_curvature_kappa_coverage_sims.rs` and `tests/survival/survival/owed_1388.rs`.
