@@ -5208,28 +5208,52 @@ fn flex_no_wiggle_beta(family: &SurvivalMarginalSlopeFamily) -> Array1<f64> {
 
 /// Grade `analytic` against a Ridders-certified central difference of `at(t)` at `t = 0`.
 fn assert_matches_ridders_2893(label: &str, analytic: &Array2<f64>, at: &dyn Fn(f64) -> Array2<f64>) {
+    assert_all_match_ridders_2893(label, std::slice::from_ref(analytic), &|t| vec![at(t)]);
+}
+
+/// Grade every `analytic[k]` against a Ridders-certified central difference of `at(t)[k]` at
+/// `t = 0`. `at` is evaluated once per ladder point, so a sweep of `p` matrices costs four
+/// evaluations rather than four per matrix.
+fn assert_all_match_ridders_2893(
+    label: &str,
+    analytic: &[Array2<f64>],
+    at: &dyn Fn(f64) -> Vec<Array2<f64>>,
+) {
     let h = 1e-3;
-    let coarse = (at(h) - at(-h)) / (2.0 * h);
-    let fine = (at(0.5 * h) - at(-0.5 * h)) / h;
-    let scale = analytic
-        .iter()
-        .fold(0.0_f64, |acc, value| acc.max(value.abs()))
-        .max(1e-12);
-    for ((index, &want), (&c, &f)) in analytic
-        .indexed_iter()
-        .zip(coarse.iter().zip(fine.iter()))
-    {
-        let value = (4.0 * f - c) / 3.0;
-        let uncertainty = (f - c).abs() / 3.0;
-        let denominator = scale.max(want.abs()).max(value.abs());
-        assert!(
-            uncertainty <= 0.05 * denominator,
-            "{label} {index:?}: the difference oracle did not resolve (value={value:.6e}, uncertainty={uncertainty:.3e})"
+    let (plus, minus) = (at(h), at(-h));
+    let (half_plus, half_minus) = (at(0.5 * h), at(-0.5 * h));
+    for ladder in [&plus, &minus, &half_plus, &half_minus] {
+        assert_eq!(
+            ladder.len(),
+            analytic.len(),
+            "{label}: the difference oracle returned {} matrices for {}",
+            ladder.len(),
+            analytic.len()
         );
-        assert!(
-            (want - value).abs() <= 1e-5 * denominator + 4.0 * uncertainty,
-            "{label} {index:?}: analytic={want:.9e} fd={value:.9e} uncertainty={uncertainty:.3e} scale={scale:.3e}"
-        );
+    }
+    for (k, want_matrix) in analytic.iter().enumerate() {
+        let coarse = (&plus[k] - &minus[k]) / (2.0 * h);
+        let fine = (&half_plus[k] - &half_minus[k]) / h;
+        let scale = want_matrix
+            .iter()
+            .fold(0.0_f64, |acc, value| acc.max(value.abs()))
+            .max(1e-12);
+        for ((index, &want), (&c, &f)) in want_matrix
+            .indexed_iter()
+            .zip(coarse.iter().zip(fine.iter()))
+        {
+            let value = (4.0 * f - c) / 3.0;
+            let uncertainty = (f - c).abs() / 3.0;
+            let denominator = scale.max(want.abs()).max(value.abs());
+            assert!(
+                uncertainty <= 0.05 * denominator,
+                "{label} [{k}] {index:?}: the difference oracle did not resolve (value={value:.6e}, uncertainty={uncertainty:.3e})"
+            );
+            assert!(
+                (want - value).abs() <= 1e-5 * denominator + 4.0 * uncertainty,
+                "{label} [{k}] {index:?}: analytic={want:.9e} fd={value:.9e} uncertainty={uncertainty:.3e} scale={scale:.3e}"
+            );
+        }
     }
 }
 
@@ -5332,9 +5356,50 @@ fn survival_flex_fourth_contraction_matches_differenced_third_along_q_axes_932()
     }
 }
 
+/// gam#2893: the build-once flex no-wiggle sweep of `D²_β H[u, e_a]` reproduces the single-direction
+/// second directional derivative on every coefficient axis.
+#[test]
+fn flex_no_wiggle_all_axes_second_directional_derivative_matches_single_axis_2893() {
+    let family = make_flex_no_wiggle_test_family(40);
+    let beta = flex_no_wiggle_beta(&family);
+    let states = flex_no_wiggle_states_at_beta(&family, &beta);
+    let u = Array1::from_shape_fn(beta.len(), |i| ((i * 7 + 3) % 11) as f64 / 11.0 - 0.45);
+    let swept = family
+        .exact_newton_joint_hessian_second_directional_derivative_flex_no_wiggle_all_axes(&states, &u)
+        .expect("build-once all-axes second sweep");
+    assert_eq!(swept.len(), beta.len());
+    let single: Vec<Array2<f64>> = (0..beta.len())
+        .map(|index| {
+            let mut axis = Array1::<f64>::zeros(beta.len());
+            axis[index] = 1.0;
+            family
+                .exact_newton_joint_hessiansecond_directional_derivative(&states, &u, &axis)
+                .expect("single-axis D2_beta H")
+                .expect("flex publishes D2_beta H")
+        })
+        .collect();
+    let scale = single
+        .iter()
+        .flat_map(|matrix| matrix.iter())
+        .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+    assert!(
+        scale > 1e-8,
+        "D2_beta H[u, e_a] must be nonzero on this fixture"
+    );
+    for (index, (swept_axis, single_axis)) in swept.iter().zip(single.iter()).enumerate() {
+        let gap = (swept_axis - single_axis)
+            .iter()
+            .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+        assert!(
+            gap <= 1e-10 * scale,
+            "axis {index}: build-once sweep vs single axis: gap {gap:e}, scale {scale:e}"
+        );
+    }
+}
+
 /// gam#2893: the flex no-wiggle joint third information derivative `D³H[u, v, e_a]`, served
-/// by the Jeffreys hook, matches a Ridders-certified central difference of `D²H[u, v]` along
-/// every coefficient axis.
+/// by the Jeffreys hook, matches a Ridders-certified central difference of the build-once
+/// `{D²H[v, e_a]}` sweep along `u` on every coefficient axis.
 #[test]
 fn survival_flex_joint_third_information_matches_differenced_second_directional_2893() {
     let family = make_flex_no_wiggle_test_family(40);
@@ -5361,20 +5426,18 @@ fn survival_flex_joint_third_information_matches_differenced_second_directional_
         axes.iter().any(|matrix| matrix.iter().any(|value| value.abs() > 1e-8)),
         "the joint third information derivative must be nonzero on this fixture"
     );
-    for (axis_idx, analytic) in axes.iter().enumerate() {
-        let mut axis = Array1::<f64>::zeros(beta.len());
-        axis[axis_idx] = 1.0;
-        assert_matches_ridders_2893(&format!("axis {axis_idx}"), analytic, &|t| {
-            family
-                .exact_newton_joint_hessiansecond_directional_derivative(
-                    &flex_no_wiggle_states_at_beta(&family, &(&beta + &(&axis * t))),
-                    &u,
-                    &v,
-                )
-                .expect("D2_beta H")
-                .expect("flex publishes D2_beta H")
-        });
-    }
+    // Mixed partials commute: `D³H[u, v, e_a] = D_u D²H[v, e_a]`. One Ridders ladder along u of the
+    // build-once `{D²H[v, e_a]}` sweep grades every axis in four displaced passes instead of four per
+    // axis; flex_no_wiggle_all_axes_second_directional_derivative_matches_single_axis_2893 grades that
+    // sweep against the single-direction routine.
+    assert_all_match_ridders_2893("D3H[u, v, e_a]", &axes, &|t| {
+        family
+            .exact_newton_joint_hessian_second_directional_derivative_flex_no_wiggle_all_axes(
+                &flex_no_wiggle_states_at_beta(&family, &(&beta + &(&u * t))),
+                &v,
+            )
+            .expect("displaced D2_beta H[v, e_a] sweep")
+    });
 }
 
 #[test]

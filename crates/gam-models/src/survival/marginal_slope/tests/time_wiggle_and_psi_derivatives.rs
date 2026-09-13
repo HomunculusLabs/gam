@@ -677,9 +677,9 @@ fn timewiggle_flex_all_axes_directional_derivative_matches_single_axis_2893() {
     }
 }
 /// gam#2893: the time-wiggle joint third information derivative `D³H[u, v, e_a]`, served by the
-/// Jeffreys hook through the ζ composition, matches a Ridders-certified central difference of
-/// `D²H[u, v]` along every coefficient axis, and it is symmetric under swapping its third axis with a
-/// free axis. Every ζ frame is graded: the rigid program's closed-form fifth derivatives beside a
+/// Jeffreys hook through the ζ composition, matches a Ridders-certified central difference of the ζ
+/// sweep `{D²H[v, e_a]}` along `u` on every coefficient axis, and it is symmetric under swapping its
+/// third axis with a free axis. Every ζ frame is graded: the rigid program's closed-form fifth derivatives beside a
 /// time-constant and a follow-up-varying slope, and the FLEX base with a score warp, alone and beside
 /// an influence absorber.
 #[test]
@@ -721,21 +721,18 @@ fn timewiggle_joint_third_information_matches_differenced_second_directional_289
                 }
             }
         }
-        let states_at = |beta: &Array1<f64>| timewiggle_marginal_slope_states(&family, beta);
-        for (axis_idx, analytic) in axes.iter().enumerate() {
-            let mut axis = Array1::<f64>::zeros(beta.len());
-            axis[axis_idx] = 1.0;
-            assert_matches_ridders_2893(&format!("{frame:?} axis {axis_idx}"), analytic, &|t| {
-                family
-                    .exact_newton_joint_hessiansecond_directional_derivative(
-                        &states_at(&(&beta + &(&axis * t))),
-                        &u,
-                        &v,
-                    )
-                    .expect("D2_beta H")
-                    .expect("a time wiggle publishes D2_beta H")
-            });
-        }
+        // Mixed partials commute: `D³H[u, v, e_a] = D_u D²H[v, e_a]`. One Ridders ladder along u of
+        // the ζ `{D²H[v, e_a]}` sweep grades every axis in four displaced passes instead of four per
+        // axis; timewiggle_all_axes_second_directional_derivative_matches_single_axis_2893 grades
+        // that sweep against the single-direction routine.
+        assert_all_match_ridders_2893(&format!("{frame:?} D3H[u, v, e_a]"), &axes, &|t| {
+            family
+                .exact_newton_joint_hessian_second_directional_derivative_timewiggle_flex_all_axes(
+                    &timewiggle_marginal_slope_states(&family, &(&beta + &(&u * t))),
+                    &v,
+                )
+                .expect("displaced D2_beta H[v, e_a] sweep")
+        });
     }
 }
 
