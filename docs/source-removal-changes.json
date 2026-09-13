@@ -6492,5 +6492,15 @@
     ],
     "reason": "#2829 no product user: SaeAssignmentState::materialize_dense has no caller, and is_full_support was reached only through it. The state and metadata fields only materialize_dense read are deleted with it.",
     "evidence": "At 1ca8c5df70b8f2860a2b4a4972ce4ef9a9af3e4b, git grep -n over crates, src and tests finds no call of SaeAssignmentState::materialize_dense: gam-sae names it only inside assignment_state.rs, and every other materialize_dense( call is on a Hessian, penalty or operator type. is_full_support is called only by materialize_dense. The ungated, frozen_logits and ordered_beta_bernoulli_alpha_override state fields and the AtomCoordMeta id_mode and latent_id fields were read only by materialize_dense, and SaeAssignmentAtomSpec id_mode and latent_id were only copied into that metadata."
+  },
+  {
+    "base": "0c86c760a03bd07ad8bb9fb6094f4092074a6ff2",
+    "items": [
+      "crates/gam-models/src/fit_orchestration/drivers/iso_kappa_reml_gradient_fd_tests.rs:fn:zz_measure_iso_kappa_rail_gradient_fd_2425",
+      "crates/gam-models/src/fit_orchestration/drivers/iso_kappa_reml_gradient_fd_tests.rs:fn:zz_measure_iso_kappa_face_saturation_ladder_2425",
+      "crates/gam-models/src/fit_orchestration/drivers/iso_kappa_reml_gradient_fd_tests.rs:fn:zz_measure_rho_gradient_part_decomposition_binomial_2623"
+    ],
+    "reason": "#2818 retirement of three print-only measurements. 05d39b8be restored these #2425 and #2623 probes from d484a091a^, but each one's own doc says 'MEASUREMENT (reports, never fails)': it prints an FD or rho-part ladder and asserts nothing about its subject, so it cannot go red, which SPEC rule 16 rules out as a passing gate. The #2425 rail question stays gated by iso_kappa_rail_gradient_matches_fd_at_both_faces_2444 and outer_gradient_at_large_rho_has_a_lambda_infinity_face_2450. The #2623 probe's own doc says the channel (D) gate belongs in the commit that fixes it.",
+    "evidence": "At 0c86c760a03bd07ad8bb9fb6094f4092074a6ff2, each body between `fn NAME() {` and its closing brace contains no assert, and each doc comment contains 'reports, never fails'; the landing script checks both before it deletes. iso_kappa_fd_variant_driver keeps 16 other call sites in the file, rho_gradient_part_ladder_family_2454 keeps its Gaussian wrapper caller, and every RhoGradientLadderRow2454 field is still read outside the #2623 probe, so nothing else becomes dead."
   }
 ]

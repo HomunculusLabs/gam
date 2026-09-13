@@ -926,3 +926,18 @@ body at `c0a21b554^`, and its removing commit comes from `git log -S` on origin/
 The witness builders named in the section above had one more historical caller,
 `laplace_value_and_gradient_are_route_invariant_2515`. It is retired here, so they
 stay deleted.
+
+### Three restored iso-kappa measurements retired
+
+`05d39b8be` restored seven iso-kappa pins. Three of them are measurements whose own
+doc comments say "reports, never fails": they print a finite-difference or rho-part
+ladder and assert nothing about their subject. Tonight's retirements hold every
+print-only scan to that standard, so these three are deleted, with their
+`docs/source-removal-changes.json` entry:
+
+- `zz_measure_iso_kappa_rail_gradient_fd_2425` and
+  `zz_measure_iso_kappa_face_saturation_ladder_2425`. The #2425 rail question stays gated
+  by `iso_kappa_rail_gradient_matches_fd_at_both_faces_2444` and
+  `outer_gradient_at_large_rho_has_a_lambda_infinity_face_2450`.
+- `zz_measure_rho_gradient_part_decomposition_binomial_2623`. Its own doc says the channel (D)
+  gate belongs in the commit that fixes it.

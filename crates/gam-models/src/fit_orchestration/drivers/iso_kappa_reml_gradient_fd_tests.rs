@@ -3388,62 +3388,12 @@ fn production_kappa_route_psi_gradient_matches_its_value_2895() {
     );
 }
 
-
-/// #2425 MEASUREMENT (reports, never fails): is the analytic iso-κ outer
-/// gradient still FD-correct NEAR THE RAIL?
-///
-/// Motivation. `spatial_length_scale_optimization_monotone_*` never reaches its
-/// monotonicity assertion — the joint fit refuses to mint because the outer
-/// certificate finds the railed coordinates non-stationary. The declining
-/// certificate printed an 18-e-fold probe ladder in which
-/// `ĉ = −e^ρ·∂V/∂ρ` — the quantity that is CONSTANT on a genuine λ→∞ tail —
-/// instead tracks `e^ρ` across the whole box, i.e. `∂V/∂ρ ≈ const ≈ −0.3`, and
-/// then GROWS to −1.9 at the ρ=11.5 rail rather than decaying to zero.
-///
-/// Two readings are possible and they demand opposite fixes:
-///   1. the analytic gradient is right, the joint box `JOINT_RHO_BOUND = 12`
-///      simply stops 18 e-folds short of the `RHO_BOUND = 30` rail the
-///      asymptote certificate (#2348) was calibrated against, so the tail has
-///      not begun and the certificate correctly declines; or
-///   2. the analytic gradient is WRONG out there, and every railed joint fit
-///      has been judged against a gradient no gate has ever checked.
-///
-/// Every historical FD probe in this file sits at ‖ρ‖ ≤ 1. The rail is the only
-/// region the certificate consults and the only region never measured. This
-/// test measures it on both bases and both link classes.
-#[test]
-fn zz_measure_iso_kappa_rail_gradient_fd_2425() {
-    for (label, n, family) in [
-        ("duchon_gaussian", 80usize, LikelihoodSpec::gaussian_identity()),
-        ("matern_gaussian", 80, LikelihoodSpec::gaussian_identity()),
-        ("duchon_logit", 80, LikelihoodSpec::binomial_logit()),
-    ] {
-        let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } =
-            // #2444: probe BOTH faces. `+11.5` is the upper rail this gate was
-            // written for; `-11.5` is its mirror a half e-fold inside the LOWER
-            // bound, which is where every failing checkpoint in the kappa cluster
-            // actually rails. A derivative wrong at one bound is not automatically
-            // wrong at the other, and the rationale for measuring the rail at all
-            // -- "the one region the certificate consults is the one region no gate
-            // has ever measured" -- applied verbatim to the lower face until now.
-            iso_kappa_fd_variant_driver(label, n, family, false, false, &[11.5, -11.5]);
-        eprintln!(
-            "[zz-rail-2425] {label}: pass={pass} worst_psi_rel={worst:.3e} \
-             violations={}",
-            violations.len()
-        );
-        for v in &violations {
-            eprintln!("[zz-rail-2425] {label}: {v}");
-        }
-    }
-}
-
-/// #2444: the executable form of what the probe above measures.
+/// #2444: the executable form of the #2425 rail measurement.
 ///
 /// The analytic outer gradient must match a central finite difference **at the
-/// rails**, on both faces of the box. `zz_measure_iso_kappa_rail_gradient_fd_2425`
-/// has computed exactly this since #2425 and printed `pass=false` into a run the
-/// harness records as `ok`, so the violation has been visible and unenforced —
+/// rails**, on both faces of the box. The #2425 measurement computed exactly this
+/// and printed `pass=false` into a run the harness recorded as `ok`, so the
+/// violation was visible and unenforced —
 /// the same shape as every other false green in #2422. A measurement nobody is
 /// obliged to read does not constrain anything.
 ///
@@ -3479,60 +3429,6 @@ fn iso_kappa_rail_gradient_matches_fd_at_both_faces_2444() {
         summary.join("\n  "),
         failing.join("\n  ")
     );
-}
-
-/// #2425 MEASUREMENT (reports, never fails): does the iso-κ REML criterion
-/// SATURATE at a λ=∞ face, or is it asymptotically linear in ρ?
-///
-/// `zz_measure_iso_kappa_rail_gradient_fd_2425` establishes that the analytic
-/// gradient is FD-correct at ρ=11.5, so the monotone fixtures' refusal is not a
-/// derivative defect: the criterion really is descending at the rail with
-/// `∂V/∂ρ ≈ −0.3` and `ĉ = −e^ρ ∂V/∂ρ` growing like `e^ρ` instead of settling.
-/// Two explanations survive and they demand opposite fixes.
-///
-///   1. The λ=∞ tail exists but begins OUTSIDE `JOINT_RHO_BOUND = 12`. The
-///      asymptote certificate's own `ASYMPTOTE_PROBE_COUNT` comment says its
-///      window was sized against rails at `RHO_BOUND = 30`, so a box that stops
-///      at 12 can be 18 e-folds short of the region the certificate needs. Then
-///      `V` saturates somewhere past 12 and the box is the bug.
-///   2. There is no λ=∞ face at all, because the `½log|H| − ½log|S|₊`
-///      cancellation leaves a residual linear term `(r_H − r_S)/2 · ρ`. Then `V`
-///      keeps falling linearly forever and no box width can help; the rank
-///      bookkeeping is the bug.
-///
-/// The discriminator is simply `V` far outside the box, which nothing forbids —
-/// the evaluator is a function of θ and the ±12 clamp lives in the optimizer's
-/// bound vectors, not in the criterion. Walking ρ out to 30 separates the two:
-/// saturating `V` with `ĉ → const` is (1); `V` linear in ρ with `∂V/∂ρ → const`
-/// is (2). Reported per ρ coordinate, so a per-block rank defect is visible as
-/// a per-block slope.
-#[test]
-fn zz_measure_iso_kappa_face_saturation_ladder_2425() {
-    // Out to `RHO_BOUND = 30` — the bound the asymptote certificate was
-    // calibrated against — well past `JOINT_RHO_BOUND = 12`.
-    const LADDER: [f64; 9] = [6.0, 9.0, 12.0, 15.0, 18.0, 21.0, 24.0, 27.0, 30.0];
-    // `matern_gaussian_2d` vs `matern_gaussian_2d_dp` differ ONLY in
-    // `double_penalty` (the driver reads `label.contains("_dp")`), so the pair
-    // is a one-variable test of whether the double-penalty assembly is what
-    // carries the spurious λ-linear term measured in #2454
-    // (`∂V/∂ρ = −c·λ`, c = 2.87e-9, on the double-penalty monotone fixture).
-    for (label, n, family) in [
-        ("matern_gaussian", 80usize, LikelihoodSpec::gaussian_identity()),
-        ("duchon_gaussian", 80, LikelihoodSpec::gaussian_identity()),
-        ("matern_gaussian_2d", 120, LikelihoodSpec::gaussian_identity()),
-        ("matern_gaussian_2d_dp", 120, LikelihoodSpec::gaussian_identity()),
-    ] {
-        let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } =
-            iso_kappa_fd_variant_driver(label, n, family, false, false, &LADDER);
-        eprintln!(
-            "[zz-ladder-2425] {label}: fd_pass={pass} worst_psi_rel={worst:.3e} \
-             violations={}",
-            violations.len()
-        );
-        for v in &violations {
-            eprintln!("[zz-ladder-2425] {label}: {v}");
-        }
-    }
 }
 
 /// #2461 — the analytic iso-κ outer gradient is CERTIFIED six e-folds past the
@@ -3970,104 +3866,6 @@ fn iso_kappa_duchon_psi_gradient_is_certified_at_a_saturated_rho_2461() {
         "this rung must still DEFEAT a fixed step, or the gate above proves nothing: \
          fixed-step rel={fixed_rel:.3e} is now inside rel_tol={REL_TOL:.1e}"
     );
-}
-
-/// #2623/#2644 MEASUREMENT (reports, never fails): the SAME ρ-part ladder on a
-/// BINOMIAL-logit fixture, i.e. under `DispersionHandling::Fixed`, where the
-/// inner-KKT envelope correction `−½rᵀH⁻¹r` is live.
-///
-/// WHY THIS RUNG EXISTS. `crates/gam-solve/src/reml/reml_outer_engine/objective.rs`
-/// gates the whole correction — cost side AND the ρ-gradient block from
-/// `compute_kkt_residual_theta_corrections` — on
-/// `kkt_residual_correction_active = kkt_residual.is_some() && dispersion is
-/// Fixed`. A Gaussian fit is dispersion-PROFILED, so every existing #2454 rung
-/// runs with that gate CLOSED and its `kkt` column is identically zero on both
-/// the analytic and the FD side. The four-channel decomposition therefore had
-/// no evidence at all about channel (D); the #2454 gates certify (A), (B), (C)
-/// only. This arm opens the gate.
-///
-/// WHAT EACH OUTCOME MEANS (pre-registered, so the reading cannot be chosen
-/// after the numbers arrive):
-///   * `kkt an ≈ fd ≈ 0` at every rung — the residual is at the inner solve's
-///     noise floor on this fixture and the arm is UNINFORMATIVE, not a clean
-///     bill of health; it must then be re-run against a deliberately capped
-///     inner solve before channel (D) can be called clean.
-///   * `kkt an ≠ 0, fd ≈ 0` — the value and the gradient are reading DIFFERENT
-///     objectives: the analytic side differentiates `Ṽ = V − ½rᵀH⁻¹r` while the
-///     cost-only probe returns bare `V`. That is a bridge mismatch
-///     (`evaluate_unified` passes `populate_inner_kkt = false`,
-///     `build_design_moving_assembly` passes `true`), not an algebra error.
-///   * `kkt an` and `fd` both nonzero but disagreeing, with the gap growing in
-///     λ — the algebra in `outer_derivatives/kkt.rs` is wrong; the λ-SLOPE of
-///     the gap names how many stray λ factors.
-/// The `gap_over_lambda` column is printed for exactly that slope reading: a
-/// gap flat in `gap_over_lambda` is one stray λ, a gap flat in `gap` is none.
-///
-/// Deliberately a measurement and not a gate. A gate authored before the
-/// numbers exist would be a tolerance chosen to pass, which is what
-/// `outer_rho_gradient_error_does_not_scale_with_lambda_2454` avoided by
-/// asserting a SCALING law instead. The gate for channel (D) belongs in the
-/// commit that fixes it, expressed the same way.
-#[test]
-fn zz_measure_rho_gradient_part_decomposition_binomial_2623() {
-    let rows = rho_gradient_part_ladder_family_2454(
-        &[0.0, 3.0, 6.0, 9.0, 12.0, 15.0, 18.0, 21.0],
-        3e-4,
-        LikelihoodSpec::binomial_logit(),
-    );
-    for row in &rows {
-        if row.coordinate == 0 {
-            eprintln!(
-                "[zz-parts-2623] rho={:5.1} COST={:+.12e} penalized_rank={} null_dim={} \
-                 logdet_rank={} logdet_S={:+.6e} \
-                 beta_null_energy={:.4e} energy criterion={:+.12e} blocks={:+.12e} \
-                 ratio={:.10}",
-                row.rho,
-                row.cost,
-                row.penalized_rank,
-                row.declared_null_dim,
-                row.logdet_rank,
-                row.logdet_value,
-                row.beta_null_energy,
-                row.penalty_energy_criterion,
-                row.penalty_energy_blocks,
-                row.penalty_energy_criterion / row.penalty_energy_blocks,
-            );
-        }
-        eprintln!(
-            "[zz-parts-2623]  j={} lambda={:.6e} q_k={:+.10e} lambda_q={:+.10e}",
-            row.coordinate,
-            row.lambda,
-            row.block_quadratic,
-            row.lambda * row.block_quadratic,
-        );
-        for (name, analytic, fd) in [
-            ("total     ", row.analytic_total, row.finite_difference_total),
-            (
-                "fixed_beta",
-                row.analytic_fixed_beta,
-                row.finite_difference_fixed_beta,
-            ),
-            (
-                "logdet_h  ",
-                row.analytic_logdet_h,
-                row.finite_difference_logdet_h,
-            ),
-            (
-                "logdet_s  ",
-                row.analytic_logdet_s,
-                row.finite_difference_logdet_s,
-            ),
-            ("kkt       ", row.analytic_kkt, row.finite_difference_kkt),
-        ] {
-            eprintln!(
-                "[zz-parts-2623]    {name} an={analytic:+.10e} fd={fd:+.10e} \
-                 gap={:+.6e} gap_over_lambda={:+.6e}",
-                analytic - fd,
-                (analytic - fd) / row.lambda,
-            );
-        }
-    }
 }
 
 }
