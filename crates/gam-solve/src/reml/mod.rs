@@ -5071,13 +5071,8 @@ impl EvalShared {
         // other half carries the split-projected penalty, so this one must too.
         let applied = self.applied_canonical_penalties(canonical_penalties)?;
         let pld = Arc::new(
-            penalty_logdet::PenaltyPseudologdet::from_penalties(
-                &applied,
-                lambdas,
-                0.0,
-                p,
-            )
-            .map_err(EstimationError::InvalidInput)?,
+            penalty_logdet::PenaltyPseudologdet::from_penalties(&applied, lambdas, p)
+                .map_err(EstimationError::InvalidInput)?,
         );
         match self.penalty_pseudologdet.set(Arc::clone(&pld)) {
             Ok(()) => Ok(pld),

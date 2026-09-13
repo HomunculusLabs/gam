@@ -793,14 +793,13 @@ impl<'a> RemlState<'a> {
     /// SAME positive eigenspace, or the analytic gradient differentiates a
     /// different function than the cost reports (the objective↔gradient desync
     /// class). Sourcing both from one [`PenaltyPseudologdet`] is the structural
-    /// cure — the rank convention (eigenvalue-threshold over `Σ λ_k S_k +
-    /// ridge·I`) is identical on both sides by construction (#901: a separate
+    /// cure — the rank convention (eigenvalue-threshold over `Σ λ_k S_k`) is
+    /// identical on both sides by construction (#901: a separate
     /// structural-rank value path desynced the GLM ρ-gradient against FD).
     pub(super) fn structural_penalty_logdet_value_and_derivatives(
         &self,
         rs_transformed: &[Array2<f64>],
         lambdas: &Array1<f64>,
-        ridge: f64,
     ) -> Result<(f64, usize, Array1<f64>, Array2<f64>), EstimationError> {
         let k_count = lambdas.len();
         if rs_transformed.len() != k_count {
@@ -829,7 +828,7 @@ impl<'a> RemlState<'a> {
             .as_slice()
             .expect("owned Array1 is contiguous, so as_slice always succeeds");
 
-        let pld = PenaltyPseudologdet::from_components(&s_k_matrices, lambdas_slice, ridge)
+        let pld = PenaltyPseudologdet::from_components(&s_k_matrices, lambdas_slice, 0.0)
             .map_err(EstimationError::LayoutError)?;
 
         let value = pld.value();
@@ -872,7 +871,7 @@ impl<'a> RemlState<'a> {
             let lambdas_slice = lambdas
                 .as_slice()
                 .expect("owned Array1 is contiguous, so as_slice always succeeds");
-            let (logdet, rank, det1, det2) = kron.logdet_rank_and_derivatives(lambdas_slice, 0.0);
+            let (logdet, rank, det1, det2) = kron.logdet_rank_and_derivatives(lambdas_slice);
             return Ok((logdet, rank, det1, det2));
         }
 

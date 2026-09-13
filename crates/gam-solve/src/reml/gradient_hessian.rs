@@ -331,11 +331,7 @@ impl<'a> RemlState<'a> {
                     ))
                 })?;
             let (value, penalty_rank, det1, det2_full) = self
-                .structural_penalty_logdet_value_and_derivatives(
-                    &projected_roots,
-                    &lambdas,
-                    0.0,
-                )?;
+                .structural_penalty_logdet_value_and_derivatives(&projected_roots, &lambdas)?;
             log::info!(
                 "[STAGE] logdet S (Z-projected) rho_dim={} penalty_rank={} elapsed={:.3}s",
                 rho.len(),
@@ -363,7 +359,7 @@ impl<'a> RemlState<'a> {
         // `fixed_subspace_penalty_rank_and_logdet_from_subspace` (top-`rank`
         // eigenvalues) but derivatives from the eigenvalue-thresholded
         // `PenaltyPseudologdet` — let the two range over different eigenspaces
-        // whenever a penalty eigenvalue sat near the ridge/noise band, which
+        // whenever a penalty eigenvalue sat near the noise band, which
         // sign-/scale-corrupted the GLM ρ-gradient against FD while the cost
         // stayed FD-consistent (#901: the canonical-empty Gaussian path was
         // immune because there BOTH value and derivative use the same
@@ -379,7 +375,6 @@ impl<'a> RemlState<'a> {
                 lambdas
                     .as_slice()
                     .expect("lambdas is an owned contiguous Array1"),
-                0.0,
             );
             (rank, logdet, det1, det2)
         } else if !self.canonical_penalties.is_empty()
@@ -389,11 +384,8 @@ impl<'a> RemlState<'a> {
                 self.structural_penalty_logdet_value_and_derivatives_block_local(&lambdas, bundle)?;
             (rank, value, det1, det2)
         } else if !penalty_roots.is_empty() {
-            let (value, rank, det1, det2) = self.structural_penalty_logdet_value_and_derivatives(
-                penalty_roots,
-                &lambdas,
-                0.0,
-            )?;
+            let (value, rank, det1, det2) =
+                self.structural_penalty_logdet_value_and_derivatives(penalty_roots, &lambdas)?;
             (rank, value, det1, det2)
         } else {
             // No Kronecker system, no canonical penalties (or a length mismatch),
@@ -6626,7 +6618,6 @@ impl<'a> RemlState<'a> {
         let penalty_logdet = super::penalty_logdet::PenaltyPseudologdet::from_penalties(
             &applied_penalties,
             lambdas_slice,
-            0.0,
             self.p,
         )
         .map_err(EstimationError::InvalidInput)?;

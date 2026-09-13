@@ -6,13 +6,6 @@ pub use gam_linalg::RidgePolicy;
 
 pub use gam_spec::*;
 
-/// Storage form of the ridge penalty matrix.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum RidgeMatrixForm {
-    /// Ridge matrix is `delta * I`.
-    ScaledIdentity,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvalidStabilization {
     reason: String,
@@ -37,95 +30,6 @@ impl std::fmt::Display for InvalidStabilization {
 }
 
 impl std::error::Error for InvalidStabilization {}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-struct RidgePassportWire {
-    delta: f64,
-    matrix_form: RidgeMatrixForm,
-    policy: RidgePolicy,
-}
-
-/// Validated ridge metadata stamped into a fitted PIRLS result.
-///
-/// Construction and deserialization both reject non-finite or negative
-/// magnitudes; fields are private so invalid state cannot be assembled with a
-/// literal.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "RidgePassportWire", into = "RidgePassportWire")]
-pub struct RidgePassport {
-    delta: f64,
-    matrix_form: RidgeMatrixForm,
-    policy: RidgePolicy,
-}
-
-impl RidgePassport {
-    pub fn scaled_identity(delta: f64, policy: RidgePolicy) -> Result<Self, InvalidStabilization> {
-        if !(delta.is_finite() && delta >= 0.0) {
-            return Err(InvalidStabilization::new(format!(
-                "ridge delta must be finite and non-negative, got {delta:?}"
-            )));
-        }
-        Ok(Self {
-            delta: if delta == 0.0 { 0.0 } else { delta },
-            matrix_form: RidgeMatrixForm::ScaledIdentity,
-            policy,
-        })
-    }
-
-    /// Exact zero-ridge passport; this fixed sentinel has no unchecked input.
-    pub const fn zero(policy: RidgePolicy) -> Self {
-        Self {
-            delta: 0.0,
-            matrix_form: RidgeMatrixForm::ScaledIdentity,
-            policy,
-        }
-    }
-
-    #[inline]
-    pub const fn delta(self) -> f64 {
-        self.delta
-    }
-
-    #[inline]
-    pub const fn matrix_form(self) -> RidgeMatrixForm {
-        self.matrix_form
-    }
-
-    #[inline]
-    pub const fn policy(self) -> RidgePolicy {
-        self.policy
-    }
-
-    #[inline]
-    pub const fn penalty_logdet_ridge(self) -> f64 {
-        if self.policy.accounts_for_objective() {
-            self.delta
-        } else {
-            0.0
-        }
-    }
-
-}
-
-impl TryFrom<RidgePassportWire> for RidgePassport {
-    type Error = InvalidStabilization;
-
-    fn try_from(wire: RidgePassportWire) -> Result<Self, Self::Error> {
-        let mut passport = Self::scaled_identity(wire.delta, wire.policy)?;
-        passport.matrix_form = wire.matrix_form;
-        Ok(passport)
-    }
-}
-
-impl From<RidgePassport> for RidgePassportWire {
-    fn from(passport: RidgePassport) -> Self {
-        Self {
-            delta: passport.delta,
-            matrix_form: passport.matrix_form,
-            policy: passport.policy,
-        }
-    }
-}
 
 /// Inertia of a symmetric matrix (count of positive / zero / negative
 /// eigenvalues). Used by `bump_with_matrix` and other indefinite-aware
@@ -412,31 +316,4 @@ mod newtype_tests {
         assert_eq!(lp.len(), 4);
         assert!(lp.iter().all(|&v| v == 0.0));
     }
-}
-
-#[cfg(test)]
-mod ridge_policy_tests {
-    use super::{RidgePassport, RidgePolicy};
-    use serde_json::json;
-
-    #[test]
-    fn serde_cannot_bypass_passport_validation() {
-        let negative = json!({
-            "delta": -1.0,
-            "matrix_form": "ScaledIdentity",
-            "policy": "SolverOnly"
-        });
-        assert!(serde_json::from_value::<RidgePassport>(negative).is_err());
-
-        let passport = RidgePassport::scaled_identity(
-            2.5e-7,
-            RidgePolicy::exact_full_objective(),
-        )
-        .expect("valid ridge");
-        let roundtrip: RidgePassport =
-            serde_json::from_value(serde_json::to_value(passport).expect("serialize passport"))
-                .expect("deserialize validated passport");
-        assert_eq!(roundtrip, passport);
-    }
-
 }

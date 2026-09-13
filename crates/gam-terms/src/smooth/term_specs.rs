@@ -2462,7 +2462,6 @@ impl KroneckerPenaltySystem {
     pub fn logdet_rank_and_derivatives(
         &self,
         lambdas: &[f64],
-        objective_ridge: f64,
     ) -> (f64, usize, Array1<f64>, Array2<f64>) {
         let n_pen = self.num_penalties();
         assert_eq!(lambdas.len(), n_pen, "lambda count mismatch");
@@ -2497,9 +2496,6 @@ impl KroneckerPenaltySystem {
             let joint_null = structural_sigma <= structural_zero_band;
             if self.has_double_penalty && joint_null {
                 sigma += lambdas[d];
-            }
-            if structural_sigma > structural_zero_band {
-                sigma += objective_ridge;
             }
 
             if sigma > penalized_band {

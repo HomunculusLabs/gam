@@ -319,7 +319,6 @@ impl PenaltyPseudologdet {
     pub(crate) fn from_penalties(
         penalties: &[gam_terms::construction::CanonicalPenalty],
         lambdas: &[f64],
-        ridge: f64,
         p_total: usize,
     ) -> Result<Self, String> {
         if penalties.is_empty() {
@@ -338,7 +337,7 @@ impl PenaltyPseudologdet {
 
         if disjoint {
             // Block-factored path: assemble and eigendecompose per-block.
-            Self::from_penalties_block_factored(penalties, lambdas, ridge, p_total)
+            Self::from_penalties_block_factored(penalties, lambdas, p_total)
         } else {
             // Fallback: assemble full p×p combined penalty.
             let mut s_total = Array2::<f64>::zeros((p_total, p_total));
@@ -347,14 +346,8 @@ impl PenaltyPseudologdet {
                     cp.accumulate_weighted(&mut s_total, lambdas[k]);
                 }
             }
-            if ridge > 0.0 {
-                for i in 0..p_total {
-                    s_total[[i, i]] += ridge;
-                }
-            }
             let structural_rank =
                 structural_rank_from_canonical_penalties(penalties, lambdas, p_total)?;
-            let ridge_hint = if ridge > 0.0 { Some(ridge) } else { None };
             // #2299/#2316-adjacent: the hinted split must see the spectrum at
             // ROOT scale (stacked scaled square roots), not the assembled
             // matrix's squared conditioning — see
@@ -371,7 +364,7 @@ impl PenaltyPseudologdet {
             Self::from_scaled_components_with_rank_hint(
                 &s_total,
                 &components,
-                ridge_hint,
+                None,
                 Some(structural_rank),
             )
         }
@@ -384,7 +377,6 @@ impl PenaltyPseudologdet {
     pub(crate) fn from_penalties_block_factored(
         penalties: &[gam_terms::construction::CanonicalPenalty],
         lambdas: &[f64],
-        ridge: f64,
         p_total: usize,
     ) -> Result<Self, String> {
         use ndarray::s;
@@ -425,25 +417,12 @@ impl PenaltyPseudologdet {
             }
         }
 
-        // Add ridge to each block diagonal.
-        if ridge > 0.0 {
-            for bd in &mut blocks {
-                let bs = bd.end - bd.start;
-                for i in 0..bs {
-                    bd.local[[i, i]] += ridge;
-                }
-            }
-        }
-
         // Eigendecompose each block and collect results.
 
         // Coordinates no penalty block covers are in the structural null space
-        // of `Σ λ_k S_k`, ridge or no ridge. The ridge stabilises a factorization;
-        // it is not a penalty, and the hinted split INSIDE a block already
-        // treats a ridge-only direction as null (gam#2454: counting the
-        // uncovered intercept as a rank-1 "ridge block" reported `rank = 10`
-        // beside an `E` of 9 rows and a `log|S|₊` growing at exactly 9 per
-        // unit ρ, and put `1/ridge²` into the inverse spectrum).
+        // of `Σ λ_k S_k` (gam#2454: counting the uncovered intercept as a rank-1
+        // block reported `rank = 10` beside an `E` of 9 rows and a `log|S|₊`
+        // growing at exactly 9 per unit ρ).
         let mut covered = vec![false; p_total];
         for bd in &blocks {
             for i in bd.start..bd.end {
@@ -465,7 +444,6 @@ impl PenaltyPseudologdet {
             pub(crate) nullity: usize,
         }
 
-        let ridge_hint = if ridge > 0.0 { Some(ridge) } else { None };
         let process_block = |bd: &BlockData| -> Result<BlockResult, String> {
             let structural_rank = structural_rank_from_components(
                 bd.parts
@@ -487,7 +465,7 @@ impl PenaltyPseudologdet {
             let block_pld = Self::from_scaled_components_with_rank_hint(
                 &bd.local,
                 &components,
-                ridge_hint,
+                None,
                 Some(structural_rank),
             )?;
             let nullity = block_pld.u_null.as_ref().map_or(0, Array2::ncols);
@@ -543,7 +521,7 @@ impl PenaltyPseudologdet {
             }
         }
 
-        // Null space: the dimensions where eigenvalue == 0 (ridge == 0, no penalty).
+        // Null space: the dimensions where eigenvalue == 0 (no penalty).
         let block_nullity: usize = block_results.iter().map(|br| br.nullity).sum();
         let uncovered_nullity = covered.iter().filter(|&&c| !c).count();
         let total_nullity = block_nullity + uncovered_nullity;
@@ -2017,18 +1995,17 @@ mod tests {
     }
 
     #[test]
-    pub(crate) fn test_block_penalties_ridge_excludes_inactive_penalty_nullspace() {
+    pub(crate) fn test_block_penalties_exclude_inactive_penalty_nullspace() {
         let penalties = [
             gam_terms::construction::CanonicalPenalty::from_dense_root(array![[2.0, 0.0]], 2),
             gam_terms::construction::CanonicalPenalty::from_dense_root(array![[0.0, 3.0]], 2),
         ];
         let lambdas = [2.0_f64, 0.0_f64];
-        let ridge = 1e-4_f64;
 
-        let pld = PenaltyPseudologdet::from_penalties(&penalties, &lambdas, ridge, 2).unwrap();
+        let pld = PenaltyPseudologdet::from_penalties(&penalties, &lambdas, 2).unwrap();
 
         assert_eq!(pld.rank(), 1);
-        assert!((pld.value() - (8.0 + ridge).ln()).abs() < 1e-12);
+        assert!((pld.value() - 8.0_f64.ln()).abs() < 1e-12);
     }
 
     /// The first derivative of log|S(ψ)|₊ is zero when ψ only rotates the
@@ -2086,7 +2063,7 @@ mod tests {
 
         let root = crate::estimate::reml::reml_outer_engine::penalty_matrix_root(&s_mat).unwrap();
         let penalty = gam_terms::construction::CanonicalPenalty::from_dense_root(root, 3);
-        let block_factored = PenaltyPseudologdet::from_penalties(&[penalty], &[1.0], 0.0, 3)
+        let block_factored = PenaltyPseudologdet::from_penalties(&[penalty], &[1.0], 3)
             .expect("block-factored pseudo-logdet");
         let assembled =
             PenaltyPseudologdet::from_assembled(s_mat, None).expect("assembled pseudo-logdet");
@@ -2105,46 +2082,38 @@ mod tests {
     }
 
     #[test]
-    pub(crate) fn test_block_factored_ridge_preserves_structural_nullspace_value() {
+    pub(crate) fn test_block_factored_preserves_structural_nullspace_value() {
         let s = array![[4.0, 2.0], [2.0, 1.0]];
-        let ridge = 1e-4_f64;
 
         let root = crate::estimate::reml::reml_outer_engine::penalty_matrix_root(&s).unwrap();
         let penalty = gam_terms::construction::CanonicalPenalty::from_dense_root(root, 2);
-        let block_factored = PenaltyPseudologdet::from_penalties(&[penalty], &[1.0], ridge, 2)
+        let block_factored = PenaltyPseudologdet::from_penalties(&[penalty], &[1.0], 2)
             .expect("block-factored pseudo-logdet");
 
-        let mut s_ridged = s.clone();
-        for i in 0..2 {
-            s_ridged[[i, i]] += ridge;
-        }
-        let assembled = PenaltyPseudologdet::from_assembled(s_ridged, Some(ridge))
-            .expect("assembled pseudo-logdet");
+        let assembled =
+            PenaltyPseudologdet::from_assembled(s, None).expect("assembled pseudo-logdet");
 
         assert_eq!(block_factored.rank(), assembled.rank());
         assert!(
             (block_factored.value() - assembled.value()).abs() < 1e-12,
-            "block-factored ridge path leaked structural nullspace logdet: block={}, assembled={}",
+            "block-factored path leaked structural nullspace logdet: block={}, assembled={}",
             block_factored.value(),
             assembled.value()
         );
     }
 
     #[test]
-    pub(crate) fn test_block_factored_ridge_ignores_inactive_lambda_for_structural_nullity() {
-        let ridge = 1e-4_f64;
+    pub(crate) fn test_block_factored_ignores_inactive_lambda_for_structural_nullity() {
         let penalties = [
             gam_terms::construction::CanonicalPenalty::from_dense_root(array![[1.0, 0.0]], 2),
             gam_terms::construction::CanonicalPenalty::from_dense_root(array![[0.0, 1.0]], 2),
         ];
 
-        let block_factored = PenaltyPseudologdet::from_penalties(&penalties, &[1.0, 0.0], ridge, 2)
+        let block_factored = PenaltyPseudologdet::from_penalties(&penalties, &[1.0, 0.0], 2)
             .expect("block-factored pseudo-logdet");
-        let assembled = PenaltyPseudologdet::from_assembled(
-            array![[1.0 + ridge, 0.0], [0.0, ridge]],
-            Some(ridge),
-        )
-        .expect("assembled pseudo-logdet");
+        let assembled =
+            PenaltyPseudologdet::from_assembled(array![[1.0, 0.0], [0.0, 0.0]], None)
+                .expect("assembled pseudo-logdet");
 
         assert_eq!(block_factored.rank(), assembled.rank());
         assert!(
@@ -2156,8 +2125,7 @@ mod tests {
     }
 
     #[test]
-    pub(crate) fn test_overlapping_ridge_ignores_inactive_lambda_for_structural_nullity() {
-        let ridge = 1e-4_f64;
+    pub(crate) fn test_overlapping_ignores_inactive_lambda_for_structural_nullity() {
         let penalties = [
             gam_terms::construction::CanonicalPenalty {
                 root: array![[1.0, 0.0]],
@@ -2181,15 +2149,11 @@ mod tests {
             },
         ];
 
-        let overlapping = PenaltyPseudologdet::from_penalties(&penalties, &[1.0, 0.0], ridge, 3)
+        let overlapping = PenaltyPseudologdet::from_penalties(&penalties, &[1.0, 0.0], 3)
             .expect("overlapping pseudo-logdet");
         let assembled = PenaltyPseudologdet::from_assembled(
-            array![
-                [1.0 + ridge, 0.0, 0.0],
-                [0.0, ridge, 0.0],
-                [0.0, 0.0, ridge],
-            ],
-            Some(ridge),
+            array![[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+            None,
         )
         .expect("assembled pseudo-logdet");
 
@@ -2240,7 +2204,7 @@ mod tests {
         ];
 
         let block_factored =
-            PenaltyPseudologdet::from_penalties(&penalties, &lambdas, 0.0, p_total).unwrap();
+            PenaltyPseudologdet::from_penalties(&penalties, &lambdas, p_total).unwrap();
         assert_eq!(block_factored.block_spans.len(), 2);
 
         let mut dense_components = Vec::new();
@@ -2292,7 +2256,7 @@ mod tests {
             },
         ];
 
-        let pld = PenaltyPseudologdet::from_penalties(&penalties, &lambdas, 0.0, p_total)
+        let pld = PenaltyPseudologdet::from_penalties(&penalties, &lambdas, p_total)
             .expect("same-block double penalty pseudo-logdet");
         assert_eq!(
             pld.rank(),
@@ -2328,29 +2292,28 @@ mod tests {
     }
 
     #[test]
-    pub(crate) fn test_overlapping_penalties_ridge_preserve_structural_nullspace_value() {
-        let ridge = 1e-4_f64;
+    pub(crate) fn test_overlapping_penalties_preserve_structural_nullspace_value() {
         let lambdas = [2.0_f64, 3.0_f64];
         let penalties = [
             gam_terms::construction::CanonicalPenalty::from_dense_root(array![[1.0, 0.0, 0.0]], 3),
             gam_terms::construction::CanonicalPenalty::from_dense_root(array![[0.0, 1.0, 0.0]], 3),
         ];
 
-        let overlapping = PenaltyPseudologdet::from_penalties(&penalties, &lambdas, ridge, 3)
+        let overlapping = PenaltyPseudologdet::from_penalties(&penalties, &lambdas, 3)
             .expect("overlapping pseudo-logdet");
 
-        let s_ridged = array![
-            [lambdas[0] + ridge, 0.0, 0.0],
-            [0.0, lambdas[1] + ridge, 0.0],
-            [0.0, 0.0, ridge]
+        let s_total = array![
+            [lambdas[0], 0.0, 0.0],
+            [0.0, lambdas[1], 0.0],
+            [0.0, 0.0, 0.0]
         ];
-        let assembled = PenaltyPseudologdet::from_assembled(s_ridged, Some(ridge))
+        let assembled = PenaltyPseudologdet::from_assembled(s_total, None)
             .expect("assembled pseudo-logdet");
 
         assert_eq!(overlapping.rank(), assembled.rank());
         assert!(
             (overlapping.value() - assembled.value()).abs() < 1e-12,
-            "assembled ridge path leaked structural nullspace logdet: overlap={}, assembled={}",
+            "overlapping path leaked structural nullspace logdet: overlap={}, assembled={}",
             overlapping.value(),
             assembled.value()
         );

@@ -1,4 +1,4 @@
-//! LAML/REML spectral operators from a root of `H = XᵀWX + S_λ + δI`.
+//! LAML/REML spectral operators from a root of `H = XᵀWX + S_λ`.
 //! The root SVD supplies the value, inverse and derivative kernels together.
 //! Updating only the scalar log determinant leaves outer Newton derivatives
 //! with the assembled matrix's condition-dependent error (#2834).
@@ -28,7 +28,7 @@
 //! # Why the root has to come from the rows
 //!
 //! `G = XᵀWX` cannot be recovered from `H` by subtracting the (exactly known)
-//! penalty: `H` was already rounded when it was assembled, so `H − S_λ − δI`
+//! penalty: `H` was already rounded when it was assembled, so `H − S_λ`
 //! returns `G` with `O(ε‖H‖)` ABSOLUTE error — `1.4e-4` against a `‖G‖` of
 //! `105` on the fixture above, i.e. `1.3e-6` relative, which reproduces the
 //! same `O(ε·κ)` in the log-determinant. The information is destroyed at
@@ -45,7 +45,7 @@
 //!   `Σ log r_ε(σ)`, which is not a log-determinant of anything),
 //! * any negative weight (the observed information of a non-canonical link has
 //!   no real root),
-//! * a reconstruction `‖(G + S_λ + δI) − H‖` above roundoff (a Firth term, an
+//! * a reconstruction `‖(G + S_λ) − H‖` above roundoff (a Firth term, an
 //!   active-constraint projection, or a frame mismatch — anything that means
 //!   the caller's `H` is not the matrix assembled here),
 //! * a disagreement with the assembled log-determinant larger than the
@@ -65,14 +65,13 @@ use ndarray::{Array1, Array2, ArrayView1};
 use super::reml_outer_engine::{DenseSpectralOperator, PseudoLogdetMode};
 use gam_terms::construction::CanonicalPenalty;
 
-/// The ingredients of `H = XᵀWX + Σ_k λ_k S_k + δI`, in one frame.
+/// The ingredients of `H = XᵀWX + Σ_k λ_k S_k`, in one frame.
 /// Penalties must be the applied split-projected penalties used by the fit.
 pub(crate) struct HessianRootInputs<'a> {
     pub design: &'a DesignMatrix,
     pub weights: ArrayView1<'a, f64>,
     pub penalties: &'a [CanonicalPenalty],
     pub lambdas: &'a [f64],
-    pub delta: f64,
 }
 
 /// How far `Σ log σ_i` off the assembled spectrum can be from the truth.
@@ -181,9 +180,6 @@ fn root_scale_hessian_operator_inner(
             spectrum.len()
         ));
     }
-    if !(inputs.delta.is_finite() && inputs.delta >= 0.0) {
-        return Err(format!("stabilization ridge is {}", inputs.delta));
-    }
     if inputs.design.ncols() != p || inputs.design.nrows() != inputs.weights.len() {
         return Err(format!(
             "design is {}x{} against p={p} and {} weights",
@@ -268,15 +264,6 @@ fn root_scale_hessian_operator_inner(
         }
     }
 
-    // ── The stabilization ridge.
-    if inputs.delta > 0.0 {
-        let scale = inputs.delta.sqrt();
-        for i in 0..p {
-            let mut row = Array1::<f64>::zeros(p);
-            row[i] = scale;
-            rows.push(row);
-        }
-    }
     if rows.len() < p {
         // Fewer rows than columns: `BᵀB` is singular and `log|H|` is `-inf`
         // for this root, which disagrees with any finite assembled value.
@@ -313,7 +300,7 @@ fn root_scale_hessian_operator_inner(
         return Err(format!(
             "the root reproduces H only to {worst:.3e} against a roundoff tolerance of \
              {reconstruction_tolerance:.3e} (max|H|={scale:.3e}); the caller's Hessian is not \
-             XtWX + sum(lambda S) + delta I"
+             XtWX + sum(lambda S)"
         ));
     }
 
@@ -436,7 +423,6 @@ mod tests {
         let d_pen: [f64; 6] = [1.0, 0.7, 0.44, 0.0, 0.0, 0.0];
         let d_data: [f64; 6] = [105.0, 15.5, 8.1, 3.3, 1.03, 0.1627];
         let lambda = 6.193e11_f64;
-        let delta = 1.0e-8_f64;
 
         // The "design": `X = diag(√d_data)·Qᵀ` with unit weights reproduces
         // `XᵀWX = Q diag(d_data) Qᵀ` exactly, which is what a root-scale route
@@ -459,11 +445,8 @@ mod tests {
         }
         let penalty = CanonicalPenalty::from_dense_root(penalty_root.clone(), p);
 
-        let h =
-            rotate(&d_data) + rotate(&d_pen).mapv(|v| v * lambda) + Array2::<f64>::eye(p) * delta;
-        let spectrum: Vec<f64> = (0..p)
-            .map(|i| d_data[i] + lambda * d_pen[i] + delta)
-            .collect();
+        let h = rotate(&d_data) + rotate(&d_pen).mapv(|v| v * lambda);
+        let spectrum: Vec<f64> = (0..p).map(|i| d_data[i] + lambda * d_pen[i]).collect();
         let exact: f64 = spectrum.iter().map(|s| s.ln()).sum();
 
         // What the assembled route reports, from its own eigendecomposition of
@@ -480,7 +463,6 @@ mod tests {
             weights: weights.view(),
             penalties: std::slice::from_ref(&penalty),
             lambdas: &[lambda],
-            delta,
         };
         let sorted_spectrum = {
             let mut s = spectrum.clone();

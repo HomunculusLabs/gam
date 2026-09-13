@@ -2552,5 +2552,31 @@
     },
     "reason": "#2627 tip compile. 8305537ae narrowed refine_logdet_enclosure_to_margin, block_preconditioned_logdet_enclosure and MarginVerdict::is_decided to pub(crate). The only call of refine_logdet_enclosure_to_margin is its own recursion, which the narrow scan counted as a production caller, so the narrowing left the whole enclosure-refinement chain dead under warnings = deny: gam-solve (lib) and (lib test) each failed with 7 errors. Nothing outside the file ever called the chain. This change deletes refine_logdet_enclosure_to_margin, absorb_strongest_pair, block_preconditioned_logdet_enclosure, their whitened_off_block and frobenius_sq helpers, LogdetEnclosure::decide_within_margin, and MarginVerdict with is_decided, which only decide_within_margin constructed and read. LogdetEnclosure, gap and gap_resolves_margin stay for the Certificate impl and the per-atom EFS convergence gate.",
     "evidence": "At the base, git grep -n -w over crates, src, tests, examples, bench and benches finds refine_logdet_enclosure_to_margin, absorb_strongest_pair, block_preconditioned_logdet_enclosure, decide_within_margin, is_decided, MarginVerdict and whitened_off_block only in crates/gam-solve/src/logdet_bounds.rs, apart from three doc comments this change rewrites (gam-solve topology_selector.rs and inference/certificate_impls.rs, gam-problem topology_certificates.rs). frobenius_sq occurs elsewhere only as unrelated local variables (gam-sae eq4_description_length.rs, tests/glm gaussian_sparse_xtwx_cache_correctness.rs). The lead's tip check 575026 at 4011c103f (/scratch.global/sauer354/sw-status/tipcheck.575026.log) reads: could not compile gam-solve (lib) due to 7 previous errors."
+  },
+  {
+    "base": "90c86056d30f3b704b498803b52040563f307b46",
+    "removed": {
+      "crates/gam-solve/src/reml/gradient_hessian.rs::last_ridge_used": 1
+    },
+    "reason": "SPEC rules 5 and 23 (#2901 V22 slice 4a, commit 8b5f0fdb5). RemlState::last_ridge_used read the deleted PIRLS ridge passport's delta and has nothing left to report. This acknowledgement was missing from 8b5f0fdb5 itself and is recorded here.",
+    "evidence": "At 90c86056d, git grep -w last_ridge_used finds its definition in crates/gam-solve/src/reml/gradient_hessian.rs and callers only in estimate/evaluation.rs, estimate/binomial_reml_outer_cost_1575_tests.rs and estimate/ridge_continuity_tests.rs, all changed in 8b5f0fdb5."
+  },
+  {
+    "base": "c2dd78228b792186e8eeeafed5d873f95778e7e0",
+    "removed": {
+      "crates/gam-problem/src/types.rs::delta": 1,
+      "crates/gam-problem/src/types.rs::matrix_form": 1,
+      "crates/gam-problem/src/types.rs::penalty_logdet_ridge": 1,
+      "crates/gam-problem/src/types.rs::policy": 1,
+      "crates/gam-problem/src/types.rs::scaled_identity": 1,
+      "crates/gam-problem/src/types.rs::zero": 1,
+      "crates/gam-solve/src/reml/penalty_logdet.rs::test_block_factored_ridge_ignores_inactive_lambda_for_structural_nullity": 1,
+      "crates/gam-solve/src/reml/penalty_logdet.rs::test_block_factored_ridge_preserves_structural_nullspace_value": 1,
+      "crates/gam-solve/src/reml/penalty_logdet.rs::test_block_penalties_ridge_excludes_inactive_penalty_nullspace": 1,
+      "crates/gam-solve/src/reml/penalty_logdet.rs::test_overlapping_penalties_ridge_preserve_structural_nullspace_value": 1,
+      "crates/gam-solve/src/reml/penalty_logdet.rs::test_overlapping_ridge_ignores_inactive_lambda_for_structural_nullity": 1
+    },
+    "reason": "SPEC rules 5 and 23 (#2901 V22 slice 4b). gam_problem::RidgePassport has no constructor or reader after 8b5f0fdb5, so its methods (scaled_identity, zero, delta, matrix_form, policy, penalty_logdet_ridge) go with it; Inertia::zero keeps the other declaration of zero. The five penalty_logdet tests are renamed to drop 'ridge' because from_penalties no longer takes one; they are restated at zero ridge.",
+    "evidence": "At the base, git grep -n -w RidgePassport over crates, src, tests, bench, examples, python and docs finds only crates/gam-problem/src/types.rs and one unrelated prose line in docs/source-removal-changes.json. The renamed tests are test-module pub(crate) fns in crates/gam-solve/src/reml/penalty_logdet.rs with no callers."
   }
 ]

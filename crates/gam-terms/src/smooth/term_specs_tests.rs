@@ -121,7 +121,7 @@ mod kronecker_penalty_system_tests {
         let system = KroneckerPenaltySystem::new(penalties, vec![2usize, 2usize], true).unwrap();
         let lambdas = vec![5.0, 7.0, 11.0];
 
-        let (logdet, rank, grad, hess) = system.logdet_rank_and_derivatives(&lambdas, 0.0);
+        let (logdet, rank, grad, hess) = system.logdet_rank_and_derivatives(&lambdas);
 
         let expected_diag = [11.0_f64, 21.0, 10.0, 31.0];
         let expected_logdet: f64 = expected_diag.iter().map(|v| v.ln()).sum();
