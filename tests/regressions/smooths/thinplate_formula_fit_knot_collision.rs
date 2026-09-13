@@ -1,4 +1,4 @@
-//! Failing-ticket regression: a plain `thinplate(x1, x2)` smooth cannot be
+//! Regression: a plain `thinplate(x1, x2)` smooth cannot be
 //! fit through the formula entry point on ordinary 2-D data.
 //!
 //! `thinplate(...)` is advertised in the README ("radial smooths in arbitrary

@@ -1,4 +1,4 @@
-//! Failing-ticket regression: `matern(x, length_scale=L)` fits should be
+//! Regression: `matern(x, length_scale=L)` fits should be
 //! roughly stable across a wide band of explicit length scales for a smooth
 //! truth, because REML can pick its own smoothing parameter on top.
 //!

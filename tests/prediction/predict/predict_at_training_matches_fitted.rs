@@ -1,4 +1,4 @@
-//! Failing-ticket regression: predicting at the exact training input rows
+//! Regression: predicting at the exact training input rows
 //! should reproduce the in-sample fitted values to high precision. Any
 //! discrepancy indicates a bug in the predict-time design rebuild (it's
 //! constructing a different basis from the fit-time design).

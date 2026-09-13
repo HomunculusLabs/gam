@@ -1,4 +1,4 @@
-//! Failing-ticket regression: every standard 1D smooth family must recover
+//! Regression: every standard 1D smooth family must recover
 //! a low-degree polynomial truth to near noise-floor accuracy. A cubic
 //! polynomial is in the null space of most penalty terms (second derivative
 //! squared), so REML can drive the smoothing parameter to zero with no

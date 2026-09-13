@@ -1,4 +1,4 @@
-//! Failing-ticket regression: a two-bump truth
+//! Regression: a two-bump truth
 //! `f(x) = exp(-(x-0.3)²/0.01) - exp(-(x-0.75)²/0.01)`  — one positive
 //! bump and one negative bump well-separated — must be recovered with
 //! correct sign at both peaks.

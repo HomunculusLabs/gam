@@ -1,4 +1,4 @@
-//! Failing-ticket regression: when the training data and truth are exactly
+//! Regression: when the training data and truth are exactly
 //! symmetric about x = 0.5, the fitted smooth's predictions must also be
 //! symmetric. Any asymmetry indicates non-translation-equivariant basis
 //! construction, asymmetric center placement, or a biased smoothing-

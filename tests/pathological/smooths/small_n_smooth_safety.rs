@@ -1,4 +1,4 @@
-//! Failing-ticket regression: fitting any standard 1D smooth on a small
+//! Regression: fitting any standard 1D smooth on a small
 //! sample (n = 18) must not (a) panic, (b) return non-finite betas, or
 //! (c) collapse predictions to a constant when the truth is a clean linear
 //! trend.

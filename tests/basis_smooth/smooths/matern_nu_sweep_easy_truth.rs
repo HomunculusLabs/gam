@@ -1,4 +1,4 @@
-//! Failing-ticket regression: `matern(x, nu=ν)` should produce
+//! Regression: `matern(x, nu=ν)` should produce
 //! similar-quality fits across ν ∈ {1/2, 3/2, 5/2, 7/2, 9/2} for a smooth
 //! truth that all ν values can represent.
 //!

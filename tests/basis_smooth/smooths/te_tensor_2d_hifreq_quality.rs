@@ -1,4 +1,4 @@
-//! Failing-ticket regression: `te(x1, x2, k=K)` tensor-product smooth must
+//! Regression: `te(x1, x2, k=K)` tensor-product smooth must
 //! recover a high-frequency separable truth `sin(2π·4·x1)·cos(2π·4·x2)` to
 //! within a reasonable RMSE budget at moderate noise.
 //!

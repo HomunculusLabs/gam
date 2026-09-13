@@ -1,4 +1,4 @@
-//! Failing-ticket regression: a 1D smooth fit on sparse but well-spaced
+//! Regression: a 1D smooth fit on sparse but well-spaced
 //! data (n = 30 with uniform coverage) must recover a moderate-frequency
 //! truth without collapse.
 //!

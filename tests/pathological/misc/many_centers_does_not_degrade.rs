@@ -1,4 +1,4 @@
-//! Failing-ticket regression: increasing `centers` for `duchon(x, centers=K)`
+//! Regression: increasing `centers` for `duchon(x, centers=K)`
 //! must not dramatically degrade fit quality. More basis budget combined
 //! with REML smoothing should be at worst weakly worse, never wildly worse.
 //!

@@ -1,4 +1,4 @@
-//! Failing-ticket regression: `gam diagnose <model> <data>` cannot run on the
+//! Regression: `gam diagnose <model> <data>` cannot run on the
 //! very data the model was fit on — it always aborts with
 //!
 //!   error: response column 'y' not found in data. Available columns: [x]

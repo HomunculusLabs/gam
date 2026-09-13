@@ -1,4 +1,4 @@
-//! Failing-ticket regression: `te(x1, x2, k=K)` quality on an easy 2D truth
+//! Regression: `te(x1, x2, k=K)` quality on an easy 2D truth
 //! must be monotone-or-flat as K increases. With REML smoothing, more basis
 //! budget cannot hurt quality more than marginally.
 //!

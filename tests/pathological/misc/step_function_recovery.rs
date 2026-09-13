@@ -1,4 +1,4 @@
-//! Failing-ticket regression: no smooth family in `{matern, duchon, smooth}`
+//! Regression: no smooth family in `{matern, duchon, smooth}`
 //! recovers a sharp step truth `1[x > 0.5]` to within a generous 0.50 max-error
 //! envelope at moderate noise (σ=0.10, n=240, dense test grid).
 //!

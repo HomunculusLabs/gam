@@ -1,4 +1,4 @@
-//! Failing-ticket regression: when the response y is constant (no signal),
+//! Regression: when the response y is constant (no signal),
 //! a 1D smooth fit should produce predictions tightly clustered around
 //! that constant. Predicted span on a dense grid must be ≤ a few σ.
 //!

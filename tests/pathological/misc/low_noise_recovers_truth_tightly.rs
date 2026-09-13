@@ -1,4 +1,4 @@
-//! Failing-ticket regression: in the low-noise regime (σ = 0.01, n = 400),
+//! Regression: in the low-noise regime (σ = 0.01, n = 400),
 //! a smooth fit should recover its truth essentially exactly. REML should
 //! pick a very small smoothing parameter; the only error source is basis
 //! truncation. For a smooth truth like sin(2π·x), any reasonable smoother

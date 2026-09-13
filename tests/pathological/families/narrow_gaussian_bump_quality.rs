@@ -1,4 +1,4 @@
-//! Failing-ticket regression: narrow-Gaussian-bump truths (a localized,
+//! Regression: narrow-Gaussian-bump truths (a localized,
 //! high-curvature feature on an otherwise flat field) often cause smooth
 //! family fits to either oversmooth the peak or undersmooth the tails.
 //!

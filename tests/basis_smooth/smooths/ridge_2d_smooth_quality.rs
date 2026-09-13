@@ -1,4 +1,4 @@
-//! Failing-ticket regression: a 2D smooth on a diagonal ridge truth
+//! Regression: a 2D smooth on a diagonal ridge truth
 //! `f(x1, x2) = exp(-(x1 - x2)² / 0.01)` should recover the ridge profile
 //! to within a reasonable RMSE budget.
 //!

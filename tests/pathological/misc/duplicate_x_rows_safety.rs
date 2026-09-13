@@ -1,4 +1,4 @@
-//! Failing-ticket regression: a 1D smooth fit must succeed and produce
+//! Regression: a 1D smooth fit must succeed and produce
 //! finite predictions even when the input dataset contains many duplicate
 //! x values. This is common in real datasets (rounded measurements,
 //! categorical proxies). The fit should treat duplicates as repeated

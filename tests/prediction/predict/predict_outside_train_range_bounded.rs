@@ -1,4 +1,4 @@
-//! Failing-ticket regression: predicting at x just outside the training
+//! Regression: predicting at x just outside the training
 //! range must not produce wildly unbounded values. Smooth families differ
 //! in their extrapolation behavior — but for a `s(x)` fit on x ∈ [0, 1]
 //! with truth sin(2π x), predicting at x = 1.10 (10% past the boundary)

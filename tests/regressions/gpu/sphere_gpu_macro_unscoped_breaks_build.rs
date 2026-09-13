@@ -1,4 +1,4 @@
-//! Failing-ticket regression: the `gam` crate does not compile at HEAD on a
+//! Regression: the `gam` crate does not compile at HEAD on a
 //! Linux host, so nothing that links it — this whole `tests/` suite, the
 //! `gamfit` Python wheel, any downstream consumer — can be built.
 //!

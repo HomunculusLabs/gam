@@ -1,4 +1,4 @@
-//! Failing-ticket regression: `s(x, k=K)` quality must be robust to the
+//! Regression: `s(x, k=K)` quality must be robust to the
 //! choice of K on an easy truth. REML controls effective degrees of
 //! freedom; the basis budget K just provides headroom.
 //!
