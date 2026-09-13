@@ -6148,10 +6148,21 @@ impl SaeSupportSparseTerm {
             match system.solve_with_options(ridge, ridge, &options) {
                 Ok((delta_t, delta_beta, diagnostics)) => {
                     solve_iterations += diagnostics.iterations;
-                    let admissible = diagnostics.stopping_reason
-                        == gam_solve::arrow_schur::PcgStopReason::Converged
-                        && diagnostics.final_relative_residual.is_finite()
-                        && diagnostics.final_relative_residual <= stationarity_tolerance;
+                    // #2576: every CG iterate from zero lowers the majorizer's reduced
+                    // quadratic model, and eliminating Δt exactly only adds
+                    // −½·g_tᵀH_tt⁻¹g_t, so the full model is negative and gᵀd < 0.
+                    // An iterate that stopped at the iteration cap is therefore a
+                    // descent direction the line search below already guards.
+                    // Refusing it discarded the direction and re-ran the whole
+                    // preconditioner ladder at three more ridges. The derived
+                    // tolerance stays the CG's target and the certificate's bar. A
+                    // gauge-pinned solve that exhausts its iterations returns `Err`,
+                    // and stays refused.
+                    let admissible = matches!(
+                        diagnostics.stopping_reason,
+                        gam_solve::arrow_schur::PcgStopReason::Converged
+                            | gam_solve::arrow_schur::PcgStopReason::MaxIter
+                    ) && diagnostics.final_relative_residual.is_finite();
                     if admissible {
                         step_pair = Some((delta_t, delta_beta));
                         break;
