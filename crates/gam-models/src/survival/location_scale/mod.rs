@@ -141,6 +141,8 @@ mod wiggle_geometry;
 mod smoothing_corrected_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod sls_wiggle_hand_932_tests;
 
 // Flatten every concern submodule back into the module root so the historical
 // `crate::survival::location_scale::Name` paths (and the `gam::`
