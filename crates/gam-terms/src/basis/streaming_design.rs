@@ -93,7 +93,7 @@ impl RadialScalarKind {
                 let alpha = duchon_scaling_exponent(*p_order, *s_order, *dim);
                 let is_log = (*dim) % 2 == 0 && {
                     let half = (alpha / 2.0).round();
-                    half >= 0.0 && (half * 2.0 - alpha).abs() < 1e-12
+                    half >= 0.0 && half * 2.0 == alpha
                 };
                 !is_log && alpha >= 4.0
             }
@@ -122,7 +122,7 @@ impl RadialScalarKind {
                 block_order, dim, ..
             } => {
                 let phi = polyharmonic_kernel(r, (*block_order) as f64, *dim);
-                if r < 1e-14 {
+                if r == 0.0 {
                     // Collision: q = φ'/r and t = (φ'' − q)/r² generally
                     // diverge here. Only the non-log, α = 2m − d ≥ 4 case
                     // gives finite limits (both 0). Otherwise the design
@@ -159,7 +159,7 @@ impl RadialScalarKind {
                 // d ≥ 4) and the ratios s_a/r², s_b/r² are bounded. The
                 // closed-form ψ-derivative limit at the collision is
                 // therefore (0, 0, 0).
-                if r < 1e-14 {
+                if r == 0.0 {
                     return Ok((0.0, 0.0, 0.0));
                 }
                 let scaled_r = r / *length_scale;
