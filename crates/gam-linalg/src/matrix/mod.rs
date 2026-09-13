@@ -2004,11 +2004,6 @@ impl ReparamOperator {
         }
     }
 
-    /// Access the underlying original design matrix.
-    pub fn x_original(&self) -> &DesignMatrix {
-        &self.x_original
-    }
-
     /// Access the Qs orthogonal transform.
     pub fn qs(&self) -> &Array2<f64> {
         &self.qs

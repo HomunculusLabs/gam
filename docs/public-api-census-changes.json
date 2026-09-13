@@ -2786,5 +2786,13 @@
     },
     "reason": "#2829 no product user: these getters have no caller in crates, src, tests, benches, bench or examples, and every field they returned keeps another reader.",
     "evidence": "At e8c407afa2f4a9337a683ef5181f7c6f42b481fd, git grep -n for each name as a method call (.name( or ::name() over crates, src, tests and examples finds no call on the owning type; same-named items elsewhere are different types (checked by reading), and each returned field is still read inside its own impl."
+  },
+  {
+    "base": "f46ec2bb262464a3b77efc397d072520aae6c6d8",
+    "removed": {
+      "crates/gam-linalg/src/matrix/mod.rs::x_original": 1
+    },
+    "reason": "#2829 no product user: these getters have no caller in crates, src, tests, benches, bench or examples, and every field they returned keeps another reader.",
+    "evidence": "At f46ec2bb262464a3b77efc397d072520aae6c6d8, git grep -n for each name as a method call (.name( or ::name() over crates, src, tests and examples finds no call on the owning type; same-named items elsewhere are different types (checked by reading), and each returned field is still read inside its own impl."
   }
 ]
