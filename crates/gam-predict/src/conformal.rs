@@ -180,32 +180,14 @@ pub(crate) fn conformal_multiplier(
     Ok(order_statistic(&values, rank))
 }
 
-/// A fitted conformal calibrator: the single scalar `q̂` and the miscoverage
-/// `α` it was computed at. Built once from a fit + training data, then applied
-/// per prediction.
+/// A fitted conformal calibrator: the single conformal multiplier `q̂`. Built
+/// once from a held-out calibration fold, then applied per prediction.
 #[derive(Clone, Copy, Debug)]
 pub struct ConformalCalibrator {
     q_hat: f64,
-    alpha: f64,
-    n_calibration: usize,
 }
 
 impl ConformalCalibrator {
-    /// The conformal multiplier `q̂`.
-    pub fn q_hat(&self) -> f64 {
-        self.q_hat
-    }
-
-    /// The nominal miscoverage `α` (so the nominal coverage is `1 − α`).
-    pub fn alpha(&self) -> f64 {
-        self.alpha
-    }
-
-    /// The number of held-out calibration points behind `q̂`.
-    pub fn n_calibration(&self) -> usize {
-        self.n_calibration
-    }
-
     /// Build a calibrator directly from held-out residuals and per-point
     /// raw scales. This is the pure core both
     /// `ConformalCalibrator::from_held_out_fold` and the e2e tests route through.
@@ -216,11 +198,7 @@ impl ConformalCalibrator {
     ) -> Result<Self, EstimationError> {
         let scores = nonconformity_scores(residuals, scales)?;
         let q_hat = conformal_multiplier(scores.view(), alpha)?;
-        Ok(Self {
-            q_hat,
-            alpha,
-            n_calibration: scores.len(),
-        })
+        Ok(Self { q_hat })
     }
 
     /// Build a calibrator from a genuinely held-out calibration fold.

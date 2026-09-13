@@ -6407,5 +6407,15 @@
     ],
     "reason": "#2829 no product user: relative_cutoff, absolute_cutoff, max_eigenvalue and pseudoinverse on RankCertifiedPsdPseudoinverse have no caller, and products read only rank and into_pseudoinverse. The three fields only these getters read are deleted with them.",
     "evidence": "At 50a2a26d9a7d6d8bdb3c2c1f05e272114e7aa7df, git grep -n over crates, src, tests, benches, bench and examples finds no .relative_cutoff(, .absolute_cutoff(, .max_eigenvalue( or .pseudoinverse( call. The product reads are .rank() at crates/gam-models/src/bms/mod.rs:1643 and .into_pseudoinverse() in gam-models bms/mod.rs, gam-models marginal_slope_orthogonal.rs and gam-sae manifold/outer_objective.rs."
+  },
+  {
+    "base": "86d31a26b5e32003a3d2549c9ad02e77f57f5515",
+    "items": [
+      "crates/gam-predict/src/conformal.rs:fn:alpha",
+      "crates/gam-predict/src/conformal.rs:fn:n_calibration",
+      "crates/gam-predict/src/conformal.rs:fn:q_hat"
+    ],
+    "reason": "#2829 no product user: ConformalCalibrator::q_hat, alpha and n_calibration have no caller, and calibrated_interval reads the q_hat field directly. The alpha and n_calibration fields, read only by their getters, are deleted with them.",
+    "evidence": "At 86d31a26b5e32003a3d2549c9ad02e77f57f5515, git grep -n over crates, src, tests, benches, bench and examples finds no .q_hat() or .n_calibration() call, and the four .alpha() calls (gam-pyffi inference_instruments.rs:84 and 129, gam-pyffi sae_spectral_ffi.rs:364, gam-sae atlas_holonomy.rs:2983) are on other types. The only field reads besides the getters are self.q_hat in calibrated_interval."
   }
 ]

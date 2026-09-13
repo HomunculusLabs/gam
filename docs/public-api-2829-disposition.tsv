@@ -292,8 +292,8 @@ crates/gam-predict/src/affine_design.rs	eta_gradient_matrix	retired-by-later-del
 crates/gam-predict/src/conformal.rs	apply_to_uncertainty_result	retired-by-later-deletion:05b4f04286
 crates/gam-predict/src/conformal.rs	certifies_finite	retired-by-later-deletion:5d498d0e9d
 crates/gam-predict/src/conformal.rs	from_fit	retired-by-later-deletion:5d498d0e9d
-crates/gam-predict/src/conformal.rs	n_calibration	restored-in-place
-crates/gam-predict/src/conformal.rs	q_hat	restored-in-place
+crates/gam-predict/src/conformal.rs	n_calibration	retired-no-product-user
+crates/gam-predict/src/conformal.rs	q_hat	retired-no-product-user
 crates/gam-predict/src/lib.rs	coefficient_uncertainty	retired-by-later-deletion:05b4f04286
 crates/gam-predict/src/lib.rs	coefficient_uncertaintywith_mode	retired-by-later-deletion:5d498d0e9d
 crates/gam-predict/src/lib.rs	from_fit	retired-by-later-deletion:5d498d0e9d

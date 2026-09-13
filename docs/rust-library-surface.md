@@ -197,13 +197,13 @@ dropped, and restored items the table above retires were removed again.
 
 | Disposition | Identities |
 | --- | --- |
-| Restored in place | 104 |
+| Restored in place | 102 |
 | Defined elsewhere in the same crate | 13 |
 | Retired by the decisions above | 19 |
 | Retired: nothing that survived depends on it | 290 |
 | Retired by the owning work's own decision | 29 |
 | Retired by a later deletion commit named in the row | 513 |
-| Retired: no product uses it | 239 |
+| Retired: no product uses it | 241 |
 | Narrowed to crate visibility | 12 |
 
 Retired identities carry no compatibility obligation. Restoration is closed
