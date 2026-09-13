@@ -153,6 +153,9 @@ use ndarray::{Array1, Array2, ArrayView2, Zip};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+mod boundary_mode;
+pub use boundary_mode::{BoundaryModeApproximation, BoundaryModeCertificate};
+
 /// Relative accuracy demanded of the orthant-moment cubature, measured against
 /// the PRE-TRUNCATION scale `sd_i = sqrt(W_ii)` so the criterion is invariant
 /// to how the constraint rows happen to be scaled.
@@ -635,11 +638,44 @@ impl ConePosteriorMomentDecline {
     }
 }
 
+fn validate_decline(
+    decline: &ConePosteriorMomentDecline,
+    dimension: usize,
+    constraint_count: usize,
+) -> Result<(), String> {
+    if decline.ambient_precision_failure.trim().is_empty() {
+        return Err(
+            "constrained posterior moment decline has an empty ambient-precision reason"
+                .to_string(),
+        );
+    }
+    let mut unique_active = decline.active_rows.clone();
+    unique_active.sort_unstable();
+    unique_active.dedup();
+    if unique_active.len() != decline.active_rows.len()
+        || unique_active.iter().any(|&row| row >= constraint_count)
+    {
+        return Err(format!(
+            "constrained posterior moment decline names active rows {:?} that are not \
+             unique valid indices for {constraint_count} inequalities",
+            decline.active_rows
+        ));
+    }
+    decline.properness.validate(dimension, constraint_count)
+}
+
 /// Required wire discriminator for the formerly-overloaded `None` state.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ConstrainedPosteriorMomentStatus {
     Available,
     Declined(ConePosteriorMomentDecline),
+    /// The quadratic model is improper on the cone and the certified boundary-mode law
+    /// supplies the moments instead (#979, ruling (c)). `decline` keeps the evidence the
+    /// ambient route was abandoned on.
+    BoundaryApproximation {
+        decline: ConePosteriorMomentDecline,
+        approximation: BoundaryModeApproximation,
+    },
 }
 
 /// Persisted identity of an inequality-truncated Laplace posterior.
@@ -693,9 +729,34 @@ impl ConstrainedPosteriorGeometry {
         }
     }
 
+    /// The certified boundary-mode law (#979, ruling (c)). The ambient centre and the
+    /// truncation correction describe a cone-truncated Gaussian this fit does not have,
+    /// so neither is stored.
+    pub fn with_boundary_approximation(
+        constraints: LinearInequalityConstraints,
+        mode: Array1<f64>,
+        decline: ConePosteriorMomentDecline,
+        approximation: BoundaryModeApproximation,
+    ) -> Self {
+        Self {
+            constraints,
+            mode,
+            unconstrained_center: None,
+            correction: None,
+            moment_status: ConstrainedPosteriorMomentStatus::BoundaryApproximation {
+                decline,
+                approximation,
+            },
+        }
+    }
+
+    /// Why this fit reports no posterior moments, if it reports none. A certified
+    /// boundary-mode law is a reportable posterior, so it declines nothing here; its
+    /// improper-quadratic evidence stays on [`ConstrainedPosteriorMomentStatus`].
     pub fn decline(&self) -> Option<&ConePosteriorMomentDecline> {
         match &self.moment_status {
-            ConstrainedPosteriorMomentStatus::Available => None,
+            ConstrainedPosteriorMomentStatus::Available
+            | ConstrainedPosteriorMomentStatus::BoundaryApproximation { .. } => None,
             ConstrainedPosteriorMomentStatus::Declined(decline) => Some(decline),
         }
     }
@@ -712,6 +773,12 @@ impl ConstrainedPosteriorGeometry {
                 "constrained posterior has no ambient centre because its moments were declined: {}",
                 decline.summary(),
             )),
+            ConstrainedPosteriorMomentStatus::BoundaryApproximation { approximation, .. } => {
+                Err(format!(
+                    "constrained posterior has no ambient centre: its moments come from the {}",
+                    approximation.summary(),
+                ))
+            }
         }
     }
 
@@ -722,6 +789,13 @@ impl ConstrainedPosteriorGeometry {
                 "constrained posterior has no moment correction because its moments were declined: {}",
                 decline.summary(),
             )),
+            ConstrainedPosteriorMomentStatus::BoundaryApproximation { approximation, .. } => {
+                Err(format!(
+                    "constrained posterior has no truncation correction: its moments come from \
+                     the {}",
+                    approximation.summary(),
+                ))
+            }
         }
     }
 
@@ -733,11 +807,17 @@ impl ConstrainedPosteriorGeometry {
                 self.unconstrained_center.as_mut()?,
                 self.correction.as_mut(),
             )),
-            ConstrainedPosteriorMomentStatus::Declined(_) => None,
+            ConstrainedPosteriorMomentStatus::Declined(_)
+            | ConstrainedPosteriorMomentStatus::BoundaryApproximation { .. } => None,
         }
     }
 
     pub fn posterior_mean(&self) -> Result<Array1<f64>, String> {
+        if let ConstrainedPosteriorMomentStatus::BoundaryApproximation { approximation, .. } =
+            &self.moment_status
+        {
+            return Ok(approximation.mean.clone());
+        }
         let center = self.unconstrained_center()?;
         Ok(self
             .correction()?
@@ -792,26 +872,28 @@ impl ConstrainedPosteriorGeometry {
                             .to_string(),
                     );
                 }
-                if decline.ambient_precision_failure.trim().is_empty() {
+                validate_decline(decline, dimension, self.constraints.a.nrows())?;
+            }
+            ConstrainedPosteriorMomentStatus::BoundaryApproximation {
+                decline,
+                approximation,
+            } => {
+                if self.unconstrained_center.is_some() || self.correction.is_some() {
                     return Err(
-                        "constrained posterior moment decline has an empty ambient-precision reason"
+                        "a boundary-mode constrained posterior must not carry cone-truncated \
+                         ambient moments"
                             .to_string(),
                     );
                 }
                 let q = self.constraints.a.nrows();
-                let mut unique_active = decline.active_rows.clone();
-                unique_active.sort_unstable();
-                unique_active.dedup();
-                if unique_active.len() != decline.active_rows.len()
-                    || unique_active.iter().any(|&row| row >= q)
-                {
+                validate_decline(decline, dimension, q)?;
+                approximation.validate(dimension, q)?;
+                if approximation.active_rows != decline.active_rows {
                     return Err(format!(
-                        "constrained posterior moment decline names active rows {:?} that are not \
-                         unique valid indices for {q} inequalities",
-                        decline.active_rows
+                        "boundary-mode approximation binds rows {:?} but its decline records {:?}",
+                        approximation.active_rows, decline.active_rows
                     ));
                 }
-                decline.properness.validate(dimension, q)?;
             }
         }
         if let Some(correction) = self.correction.as_ref() {

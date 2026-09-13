@@ -1819,13 +1819,88 @@ pub(crate) fn compute_joint_posterior<F: CustomFamily + Clone + Send + Sync + 's
                             reason.to_string(),
                         )
                         .map_err(CustomFamilyError::trial_point)?;
-                    log::warn!(
-                        "[custom-family covariance] constrained fit converged, but its ambient \
-                         posterior precision is not positive definite ({reason}); retaining the \
-                         converged constrained MODE under a typed posterior-moment decline \
-                         (#2635, #979): {}",
-                        decline.summary()
-                    );
+                    // #979 ruling (c): at a boundary mode the constraint-normal
+                    // coordinates are held by the KKT multipliers, not by the
+                    // curvature the improper certificate reads, so a local law can
+                    // exist where the quadratic one does not. It is published only
+                    // under its own certificate, with the multipliers read off the
+                    // same terminal score the proper route centres on.
+                    //
+                    // Only a PROVED-improper quadratic is approximated. A proper
+                    // cone posterior (#2635: indefinite ambient, copositive cone)
+                    // is a truncated Gaussian whose moments exist and are this
+                    // route's to reach, and an undecided certificate is no proof
+                    // that they do not exist.
+                    let approximation = if decline.properness.is_proper() == Some(false) {
+                        terminal_likelihood_score(
+                            preferred_workspace,
+                            preferred_working_sets,
+                            preferred_likelihood_score,
+                            specs,
+                            states,
+                        )
+                        .map_err(|error| error.to_string())
+                        .and_then(|likelihood_score| {
+                            let penalized_gradient =
+                                &penalty_score - &likelihood_score - &jeffreys_gradient;
+                            gam_solve::constrained_posterior::BoundaryModeApproximation::at_converged_mode(
+                                precision.view(),
+                                &constraints,
+                                &mode,
+                                &penalized_gradient,
+                            )
+                        })
+                    } else {
+                        Err(
+                            "the cone-truncated posterior is not proved improper, so its \
+                             truncated Gaussian is the estimand"
+                                .to_string(),
+                        )
+                    };
+                    match approximation {
+                        Ok(approximation) => {
+                            log::warn!(
+                                "[custom-family covariance] constrained fit converged with an \
+                                 improper quadratic posterior on its cone ({}); publishing the \
+                                 certified {} (#979)",
+                                decline.summary(),
+                                approximation.summary()
+                            );
+                            let covariance = options
+                                .compute_covariance
+                                .then(|| approximation.covariance());
+                            let reported = approximation.mean.clone();
+                            let constrained = gam_solve::constrained_posterior::ConstrainedPosteriorGeometry::with_boundary_approximation(
+                                constraints,
+                                mode,
+                                decline,
+                                approximation,
+                            );
+                            constrained.validate_for_dimension(p)?;
+                            return Ok(JointPosteriorAssembly {
+                                covariance_conditional: covariance,
+                                geometry: FitGeometry {
+                                    coefficient_gauge: gam_problem::gauge::Gauge::identity(
+                                        &block_widths,
+                                    ),
+                                    penalized_hessian: precision.into(),
+                                    constrained_posterior: Some(constrained),
+                                    working,
+                                },
+                                reported_beta: Some(reported),
+                            });
+                        }
+                        Err(refusal) => {
+                            log::warn!(
+                                "[custom-family covariance] constrained fit converged, but its \
+                                 ambient posterior precision is not positive definite ({reason}); \
+                                 retaining the converged constrained MODE under a typed \
+                                 posterior-moment decline (#2635, #979): {}; no boundary-mode \
+                                 approximation: {refusal}",
+                                decline.summary()
+                            );
+                        }
+                    }
                     let constrained =
                         gam_solve::constrained_posterior::ConstrainedPosteriorGeometry::with_decline(
                             constraints,
@@ -2839,6 +2914,78 @@ mod required_covariance_tests {
                 "every moment consumer must refuse by the decline's summary, got: {reason}"
             );
         }
+    }
+
+    /// #979 ruling (c): where the quadratic is proved improper but the multiplier holds
+    /// the bound coordinate (`M = diag(−1, 2)` under `β₀ ≥ 0` at `(0, 0.5)`, score
+    /// `(−100, 0)` so `μ = 100`), the certified boundary-mode law is published. Its mean
+    /// and covariance must be what the assembly reports, so the fit saves a mean and
+    /// never the mode relabelled as one.
+    #[test]
+    fn a_certified_boundary_mode_reports_its_mean_and_covariance_not_the_mode() {
+        let (specs, states, per_block, unpenalized_indefinite_on_the_face) =
+            cone_improper_constrained_fixture();
+        assert_eq!(
+            unpenalized_indefinite_on_the_face[[1, 1]],
+            -2.0,
+            "the shared fixture is the face-indefinite one; this test swaps in its own curvature"
+        );
+        let unpenalized = array![[-1.0, 0.0], [0.0, 2.0]];
+        let retained = TerminalLikelihoodScore {
+            beta: array![0.0, 0.5],
+            score: array![-100.0, 0.0],
+        };
+        let options = BlockwiseFitOptions {
+            compute_covariance: true,
+            ..BlockwiseFitOptions::default()
+        };
+        let assembly = compute_joint_posterior(
+            &OneCoefficientLowerBoundedIndefinite,
+            &specs,
+            &states,
+            &per_block,
+            &options,
+            Some(&unpenalized),
+            None,
+            None,
+            Some(&retained),
+        )
+        .expect("a multiplier of 100 against a normal curvature of -1 certifies the boundary-mode law");
+        let constrained = assembly
+            .geometry
+            .constrained_posterior
+            .as_ref()
+            .expect("the fitted cone identity must survive");
+        assert!(
+            constrained.decline().is_none(),
+            "a certified boundary-mode law is a reportable posterior"
+        );
+        let mean = constrained
+            .posterior_mean()
+            .expect("the boundary-mode law has a mean");
+        assert_eq!(
+            assembly.reported_beta.as_ref(),
+            Some(&mean),
+            "the reported coefficients must be the approximation's mean, not the mode"
+        );
+        assert!(
+            (mean[0] - 0.01).abs() <= 1e-14 && (mean[1] - 0.5).abs() <= 1e-14,
+            "E[β] = β̂ + P/μ = (0.01, 0.5), got {mean:?}"
+        );
+        let covariance = assembly
+            .covariance_conditional
+            .as_ref()
+            .expect("compute_covariance publishes the boundary-mode covariance");
+        assert!(
+            (covariance[[0, 0]] - 1e-4).abs() <= 1e-16
+                && (covariance[[1, 1]] - 0.5).abs() <= 1e-14
+                && covariance[[0, 1]].abs() <= 1e-16,
+            "Cov[β] = diag(1/μ², 1/2), got {covariance:?}"
+        );
+        assert!(
+            constrained.unconstrained_center().is_err() && constrained.correction().is_err(),
+            "the boundary-mode law has no cone-truncated ambient centre or correction"
+        );
     }
 
     fn cone_improper_constrained_fixture() -> (
