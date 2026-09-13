@@ -564,7 +564,18 @@ impl SaeManifoldTerm {
             // observed information above (#2668).
             let quasi_laplace_complexity =
                 rank_adjusted_quasi_laplace_complexity(log_det, &d_eff, &n_eff)?;
-            loss.total() + extra_penalty_energy + quasi_laplace_complexity - occam
+            let value = loss.total() + extra_penalty_energy + quasi_laplace_complexity - occam;
+            // #2228 — the criterion's terms at the cache the `[SAE-ACCEPT]` line named, so
+            // a split between two lanes at one ρ says which term moved.
+            log::info!(
+                "[SAE-CRITERION] V={value:.10e}: loss={:.10e} \
+                 extra_penalty={extra_penalty_energy:.6e} ½log|A|={:.6e} rank_charge={:.6e} \
+                 occam={occam:.6e}",
+                loss.total(),
+                0.5 * log_det,
+                quasi_laplace_complexity - 0.5 * log_det,
+            );
+            value
         };
         Ok((v, loss, cache))
     }
