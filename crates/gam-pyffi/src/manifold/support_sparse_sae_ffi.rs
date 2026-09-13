@@ -239,13 +239,11 @@ impl SupportSparseManifoldSaeCore {
         // The frozen-decoder objective sums these rows' cells, so the tolerance is
         // derived from this term, not copied from the training fit's.
         let tolerance = term.fixed_point_tolerance();
-        // An out-of-sample solve has no outer search, so it runs on the engine's inner
-        // fixed-point budget, as the training fit's inner solve does, not on the
-        // caller's smoothing-search budget.
+        // An out-of-sample solve has no outer search: it sweeps until its certificate
+        // holds, and refuses once a sweep moves no coordinate short of it.
         let report = term.solve_coordinates_fixed_decoder(
             centered_target.view(),
             &self.ard_precisions,
-            SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER,
             tolerance,
             self.trust_radius,
         )?;

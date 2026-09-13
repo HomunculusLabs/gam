@@ -5502,6 +5502,11 @@ impl SaeSupportSparseTerm {
             1.0 + 0.5 * residual.iter().map(|value| value * value).sum::<f64>();
         let mut rhs_vector = jacobian.dot(&residual);
         let mut gram = jacobian.dot(&jacobian.t());
+        // Each raw gradient component's rounding band is γ over the terms it sums: the
+        // residual-weighted jet cells and the prior gradient (#2469).
+        let gradient_ops = p + 1;
+        let gradient_gamma = gam_linalg::roundoff::accumulation_growth(gradient_ops);
+        let mut raw_gradient_band = 0.0_f64;
         let mut prior_cursor = 0usize;
         for (slot, &atom) in support.iter().enumerate() {
             let atom = atom as usize;
@@ -5514,6 +5519,14 @@ impl SaeSupportSparseTerm {
                 );
                 row_objective_scale += prior.value.abs();
                 rhs_vector[prior_cursor] -= prior.grad;
+                let terms = jacobian
+                    .row(prior_cursor)
+                    .iter()
+                    .zip(residual.iter())
+                    .map(|(jet, residual_cell)| (jet * residual_cell).abs())
+                    .sum::<f64>()
+                    + prior.grad.abs();
+                raw_gradient_band = raw_gradient_band.max(gradient_gamma * terms);
                 gram[[prior_cursor, prior_cursor]] += prior.psd_majorizer_hess();
                 prior_cursor += 1;
             }
@@ -5617,10 +5630,8 @@ impl SaeSupportSparseTerm {
         old_coords.clear();
         old_coords.extend_from_slice(coords_row);
         let mut accepted = None;
-        let mut best_gap = f64::INFINITY;
         let mut best_step = 0.0_f64;
-        let mut best_objective_delta = f64::NAN;
-        let mut best_armijo_bound = f64::NAN;
+        let mut best_objective_delta = f64::INFINITY;
         let evaluation_ops = 1usize
             + p
             + q
@@ -5691,13 +5702,9 @@ impl SaeSupportSparseTerm {
                 }
             }
             let objective_delta = objective_delta.sum();
-            let armijo_bound = -1.0e-4 * step * directional;
-            let gap = objective_delta - armijo_bound;
-            if gap.is_finite() && gap < best_gap {
-                best_gap = gap;
-                best_step = step;
+            if objective_delta.is_finite() && objective_delta < best_objective_delta {
                 best_objective_delta = objective_delta;
-                best_armijo_bound = armijo_bound;
+                best_step = step;
             }
             trial_fitted.fill(0.0);
             for slot_trial in trial.iter() {
@@ -5706,27 +5713,39 @@ impl SaeSupportSparseTerm {
             trial_residual.assign(&target.row(row));
             *trial_residual -= &*trial_fitted;
             let mut trial_gradient_max = 0.0_f64;
+            let mut trial_gradient_band = 0.0_f64;
             for (slot, &atom) in support.iter().enumerate() {
                 let atom = atom as usize;
                 let periods = self.atom_axis_periods(atom);
                 for axis in 0..dims[slot].1 {
-                    let likelihood_gradient =
-                        -trial[slot].jacobian.row(axis).dot(&*trial_residual);
-                    let gradient = likelihood_gradient
-                        + ArdAxisPrior::eval(
-                            ard_precisions[atom][axis],
-                            coords_row[offsets[slot].start + axis],
-                            periods[axis],
-                        )
-                        .grad;
+                    let jacobian_row = trial[slot].jacobian.row(axis);
+                    let prior_gradient = ArdAxisPrior::eval(
+                        ard_precisions[atom][axis],
+                        coords_row[offsets[slot].start + axis],
+                        periods[axis],
+                    )
+                    .grad;
+                    let gradient = -jacobian_row.dot(&*trial_residual) + prior_gradient;
                     trial_gradient_max = trial_gradient_max.max(gradient.abs());
+                    let terms = jacobian_row
+                        .iter()
+                        .zip(trial_residual.iter())
+                        .map(|(jet, residual_cell)| (jet * residual_cell).abs())
+                        .sum::<f64>()
+                        + prior_gradient.abs();
+                    trial_gradient_band = trial_gradient_band.max(gradient_gamma * terms);
                 }
             }
-            let armijo_accept = objective_delta.is_finite() && objective_delta <= armijo_bound;
-            let roundoff_tie_accept = objective_delta.is_finite()
+            // A step is taken only on a resolved change: the row objective falls by more than
+            // its rounding band, or it ties inside that band while the gradient falls by more
+            // than the two gradients' rounding bands. No fraction of the predicted decrease is
+            // asked for (#2469).
+            let resolved_decrease =
+                objective_delta.is_finite() && objective_delta < -objective_resolution;
+            let resolved_gradient_tie = objective_delta.is_finite()
                 && objective_delta.abs() <= objective_resolution
-                && trial_gradient_max < raw_gradient_max;
-            if armijo_accept || roundoff_tie_accept {
+                && trial_gradient_max < raw_gradient_max - (raw_gradient_band + trial_gradient_band);
+            if resolved_decrease || resolved_gradient_tie {
                 accepted = Some(step);
                 break;
             }
@@ -5758,7 +5777,6 @@ impl SaeSupportSparseTerm {
                      (rhs_dot_delta={directional:.3e}, delta_max={delta_max:.3e}, \
                      objective resolution {objective_resolution:.3e}, best_step={best_step:.3e}, \
                      best_objective_delta={best_objective_delta:.3e}, \
-                     best_armijo_bound={best_armijo_bound:.3e}, gap={best_gap:.3e}, \
                      raw KKT max={raw_gradient_max:.3e}); taking no step"
                 );
                 return Ok(max_change);
@@ -5978,15 +5996,6 @@ impl SaeSupportSparseTerm {
         Ok((coordinate_sq.sqrt(), coordinate_max))
     }
 
-    fn frozen_decoder_coordinate_objective(
-        &self,
-        target: ArrayView2<'_, f64>,
-        ard_precisions: &[Vec<f64>],
-    ) -> Result<f64, String> {
-        let residual = self.raw_residual(target)?;
-        self.frozen_decoder_coordinate_objective_with_residual(&residual, ard_precisions)
-    }
-
     fn frozen_decoder_coordinate_objective_with_residual(
         &self,
         residual: &Array2<f64>,
@@ -6014,14 +6023,25 @@ impl SaeSupportSparseTerm {
         }
     }
 
-    /// Frozen-decoder OOS coordinate solve over active supports only. A
-    /// budget-exhausted or merely damped point is rejected; the returned state
-    /// has recurred for two full raw-stationary coordinate cycles.
+    /// Frozen-decoder OOS coordinate solve over active supports only.
+    ///
+    /// It sweeps until the certificate holds on two consecutive sweeps, with no
+    /// iteration budget (#2469, SPEC rule 23). It refuses only when no later sweep
+    /// can meet the certificate: once the objective has recurred, a sweep that moves
+    /// no coordinate while the raw coordinate KKT still exceeds its bar. With the
+    /// decoder frozen the sweep is deterministic, so a motionless sweep reproduces
+    /// itself forever.
+    ///
+    /// Termination needs no budget either. A row step is accepted only on a resolved
+    /// change. Either its row objective falls by more than its rounding band, which is at
+    /// least `γ` because a row objective's scale is at least one. Or the objective ties
+    /// inside that band while the row's gradient falls by more than its gradients' rounding
+    /// bands. The objective is bounded below, and a floating-point gradient cannot keep
+    /// falling by resolved amounts, so only finitely many steps are ever accepted.
     pub fn solve_coordinates_fixed_decoder(
         &mut self,
         target: ArrayView2<'_, f64>,
         ard_precisions: &[Vec<f64>],
-        max_iter: usize,
         tolerance: f64,
         trust_radius: f64,
     ) -> Result<SaeSupportCoordinateFixedPointReport, String> {
@@ -6033,12 +6053,12 @@ impl SaeSupportSparseTerm {
                 self.output_dim
             ));
         }
-        if max_iter == 0 || !(tolerance.is_finite() && tolerance > 0.0) {
-            return Err("SaeSupportSparseTerm::solve_coordinates_fixed_decoder requires positive max_iter and finite positive tolerance".into());
+        if !(tolerance.is_finite() && tolerance > 0.0) {
+            return Err("SaeSupportSparseTerm::solve_coordinates_fixed_decoder requires a finite positive tolerance".into());
         }
         let mut previous_candidate = false;
         let mut last_objective: Option<f64> = None;
-        // Sweeps 1, 2, 4, ... and the last, reported when the budget runs out: a slow
+        // Sweeps 1, 2, 4, ... and the motionless sweep, reported with a refusal: a slow
         // linear rate and a row that stopped moving leave different trajectories in the
         // raw coordinate KKT, the objective and the largest coordinate move (#2576, #2023).
         let mut trajectory: Vec<(usize, f64, f64, f64)> = Vec::new();
@@ -6047,7 +6067,9 @@ impl SaeSupportSparseTerm {
         // matrix stays exact (each changed row is recomputed from state, not
         // incremented), and no drift re-verification is needed to certify.
         let mut fitted_state = self.reconstruct()?;
-        for iteration in 1..=max_iter {
+        let mut iteration = 0usize;
+        loop {
+            iteration += 1;
             let max_change = self.coordinate_sweep(
                 target,
                 ard_precisions,
@@ -6068,9 +6090,6 @@ impl SaeSupportSparseTerm {
                 .map(|previous: f64| (objective - previous).abs() <= tolerance * kkt_scale)
                 .unwrap_or(false);
             last_objective = Some(objective);
-            if iteration.is_power_of_two() || iteration == max_iter {
-                trajectory.push((iteration, coordinate_max_abs, objective, max_change));
-            }
             let candidate =
                 objective_recurred && coordinate_max_abs <= tolerance * kkt_scale;
             if candidate && previous_candidate {
@@ -6083,23 +6102,32 @@ impl SaeSupportSparseTerm {
                     recurred: true,
                 });
             }
+            // No coordinate moved, so the next sweep starts from this sweep's state, takes
+            // the same decisions and again moves nothing: the KKT limb that failed here
+            // fails at every later sweep.
+            let stalled = max_change == 0.0
+                && objective_recurred
+                && coordinate_max_abs > tolerance * kkt_scale;
+            if iteration.is_power_of_two() || stalled {
+                trajectory.push((iteration, coordinate_max_abs, objective, max_change));
+            }
+            if stalled {
+                let trajectory = trajectory
+                    .iter()
+                    .map(|(sweep, kkt, sweep_objective, change)| {
+                        format!(
+                            "{sweep}: KKT {kkt:.3e}, objective {sweep_objective:.9e}, max change {change:.3e}"
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(format!(
+                    "SaeSupportSparseTerm::solve_coordinates_fixed_decoder stalled at sweep {iteration}: no coordinate moved while the raw coordinate KKT max={coordinate_max_abs:.6e} exceeded tolerance {tolerance:.6e} relative to objective {objective:.6e} ({:.6e}); sweeps [{trajectory}]",
+                    coordinate_max_abs / kkt_scale
+                ));
+            }
             previous_candidate = candidate;
         }
-        let (_, coordinate_max_abs) = self.raw_coordinate_stationarity(target, ard_precisions)?;
-        let objective = self.frozen_decoder_coordinate_objective(target, ard_precisions)?;
-        let trajectory = trajectory
-            .iter()
-            .map(|(sweep, kkt, sweep_objective, change)| {
-                format!(
-                    "{sweep}: KKT {kkt:.3e}, objective {sweep_objective:.9e}, max change {change:.3e}"
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("; ");
-        Err(format!(
-            "SaeSupportSparseTerm::solve_coordinates_fixed_decoder did not recur within {max_iter} cycles (raw coordinate KKT max={coordinate_max_abs:.6e}, relative to objective {objective:.6e}: {:.6e}); sweeps [{trajectory}]",
-            coordinate_max_abs / objective.abs().max(1.0)
-        ))
     }
 
     /// Alternate exact decoder blocks and direct active-row coordinate Newton
@@ -7185,7 +7213,6 @@ impl SaeSupportSparseTerm {
                         let polish = moved.solve_coordinates_fixed_decoder(
                             target,
                             ard_precisions,
-                            max_iter,
                             tolerance,
                             trust_radius,
                         );
@@ -7337,7 +7364,6 @@ impl SaeSupportSparseTerm {
                         let polish = moved.solve_coordinates_fixed_decoder(
                             target,
                             ard_precisions,
-                            max_iter,
                             tolerance,
                             trust_radius,
                         );
@@ -7803,6 +7829,90 @@ mod tests {
         )
         .expect("atom")
         .with_basis_second_jet(evaluator)
+    }
+
+    /// #2469: a frozen-decoder sweep that moves no coordinate while the certificate fails
+    /// repeats forever, so the solve refuses instead of sweeping on. One row on a linear
+    /// chart with slope `1.6e-8` sits at `t = 0` against target `1.3`, with no prior. Its
+    /// gradient, `1.3 · 1.6e-8 ≈ 2.1e-8`, is above the certificate's bar
+    /// `tol · max(1, |f|) = tol` (|f| = 0.845, tol ≈ 1.49e-8) and at or below the row skip's
+    /// `tol · (1 + |f|)`, so every sweep skips the row and the second sweep proves the stall.
+    #[test]
+    fn frozen_decoder_solve_refuses_a_motionless_sweep_2469() {
+        let evaluator: Arc<dyn SaeBasisSecondJet> =
+            Arc::new(EuclideanPatchEvaluator::new(1, 1).expect("patch"));
+        let atoms = vec![atom(
+            "motionless-line",
+            SaeAtomBasisKind::Linear,
+            1,
+            evaluator,
+            &[0.0],
+            array![[0.0], [1.6e-8]],
+        )];
+        let state = SaeAssignmentState::from_topk_support_heterogeneous(
+            1,
+            1,
+            1,
+            vec![SaeAssignmentAtomSpec::euclidean(1)],
+            vec![vec![0]],
+            vec![vec![1.0]],
+            vec![vec![0.0]],
+        )
+        .expect("state");
+        let mut term = SaeSupportSparseTerm::new(atoms, state).expect("term");
+        let target = array![[1.3_f64]];
+        let ard = vec![vec![0.0_f64]];
+        let tolerance = term.fixed_point_tolerance();
+        let error = term
+            .solve_coordinates_fixed_decoder(target.view(), &ard, tolerance, 1.0)
+            .expect_err("a row the sweep never moves cannot certify");
+        assert!(
+            error.contains("stalled at sweep 2"),
+            "the second motionless sweep proves the stall; got: {error}"
+        );
+    }
+
+    /// #2469 (SPEC rule 23): the frozen-decoder solve has no sweep budget. One row on a
+    /// linear chart, decode `f(t) = t`, starts at `t = 0` against target `4`, and a trust
+    /// radius of `1e-2` moves it at most `1e-2` per sweep. It cannot come near the
+    /// minimizer before sweep 400, so it must certify well past the 256 sweeps the engine
+    /// budget used to allow.
+    #[test]
+    fn frozen_decoder_solve_certifies_a_slow_row_past_256_sweeps_2469() {
+        let evaluator: Arc<dyn SaeBasisSecondJet> =
+            Arc::new(EuclideanPatchEvaluator::new(1, 1).expect("patch"));
+        let atoms = vec![atom(
+            "slow-line",
+            SaeAtomBasisKind::Linear,
+            1,
+            evaluator,
+            &[0.0],
+            array![[0.0], [1.0]],
+        )];
+        let state = SaeAssignmentState::from_topk_support_heterogeneous(
+            1,
+            1,
+            1,
+            vec![SaeAssignmentAtomSpec::euclidean(1)],
+            vec![vec![0]],
+            vec![vec![1.0]],
+            vec![vec![0.0]],
+        )
+        .expect("state");
+        let mut term = SaeSupportSparseTerm::new(atoms, state).expect("term");
+        let target = array![[4.0_f64]];
+        let ard = vec![vec![1.0e-6_f64]];
+        let tolerance = term.fixed_point_tolerance();
+        let report = term
+            .solve_coordinates_fixed_decoder(target.view(), &ard, tolerance, 1.0e-2)
+            .expect("a row that crawls without stalling must certify");
+        assert!(report.recurred, "the solve returns only a recurred state");
+        assert!(
+            report.iterations > 256,
+            "a row limited to 1e-2 per sweep needs over 400 sweeps to reach t near 4; \
+             certified at sweep {}",
+            report.iterations
+        );
     }
 
     /// #2634 second-order gate: a periodic chart can be first-order attracted

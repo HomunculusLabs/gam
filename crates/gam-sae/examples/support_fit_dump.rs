@@ -780,7 +780,6 @@ fn main() -> Result<(), String> {
                     match te_term.solve_coordinates_fixed_decoder(
                         centered_test.view(),
                         &ard,
-                        400,
                         tolerance,
                         1.0,
                     ) {
