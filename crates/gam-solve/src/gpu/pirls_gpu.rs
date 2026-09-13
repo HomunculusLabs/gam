@@ -4276,7 +4276,7 @@ mod stream_device_parity_tests {
         iterations: usize,
     ) -> ndarray::Array1<f64> {
         use crate::gpu_kernels::pirls_row::{
-            CurvatureMode, PirlsRowFamily, RowInput, row_reweight_cpu,
+            CurvatureMode, PirlsRowFamily, RowInput, row_reweight_cpu_at,
         };
         use gam_linalg::faer_ndarray::FaerCholesky;
         let (n, p) = x.dim();
@@ -4286,7 +4286,8 @@ mod stream_device_parity_tests {
             let mut w = ndarray::Array1::<f64>::zeros(n);
             let mut g = ndarray::Array1::<f64>::zeros(n);
             for i in 0..n {
-                let out = row_reweight_cpu(
+                let out = row_reweight_cpu_at(
+                    0,
                     PirlsRowFamily::BernoulliLogit,
                     CurvatureMode::Fisher,
                     RowInput {
@@ -4333,12 +4334,13 @@ mod stream_device_parity_tests {
         beta: ndarray::ArrayView1<'_, f64>,
     ) -> f64 {
         use crate::gpu_kernels::pirls_row::{
-            CurvatureMode, PirlsRowFamily, RowInput, row_reweight_cpu,
+            CurvatureMode, PirlsRowFamily, RowInput, row_reweight_cpu_at,
         };
         let eta: ndarray::Array1<f64> = x.dot(&beta);
         let mut g = ndarray::Array1::<f64>::zeros(x.nrows());
         for i in 0..x.nrows() {
-            g[i] = row_reweight_cpu(
+            g[i] = row_reweight_cpu_at(
+                0,
                 PirlsRowFamily::BernoulliLogit,
                 CurvatureMode::Fisher,
                 RowInput {
