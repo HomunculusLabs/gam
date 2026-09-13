@@ -526,6 +526,124 @@ fn penalized_row_loss(
     (residual_energy + f64::from(code_ridge) * penalty, rounding)
 }
 
+/// Penalized loss `Σ_i ‖x_i − D c_i‖² + ρ‖c_i‖²` of a whole state, with the band its
+/// f32 state and the reduction resolve. Each row contributes [`penalized_row_loss`]'s
+/// loss and band. The rows are reduced over fixed row chunks in ascending order, so the
+/// pair does not depend on the thread count, and the sum over `n` f64 terms adds `γ_n`
+/// of the loss to the band.
+fn penalized_objective(
+    x: ArrayView2<'_, f32>,
+    decoder: ArrayView2<'_, f32>,
+    codes: &[SparseCode],
+    code_ridge: f32,
+) -> (f64, f64) {
+    let partials: Vec<(f64, f64)> = codes
+        .par_chunks(RECONSTRUCTION_ROW_CHUNK)
+        .enumerate()
+        .map(|(chunk_idx, chunk)| {
+            let row0 = chunk_idx * RECONSTRUCTION_ROW_CHUNK;
+            chunk
+                .iter()
+                .enumerate()
+                .fold((0.0f64, 0.0f64), |(loss, band), (offset, code)| {
+                    let (row_loss, row_band) =
+                        penalized_row_loss(x.row(row0 + offset), decoder, code, code_ridge);
+                    (loss + row_loss, band + row_band)
+                })
+        })
+        .collect();
+    let (loss, band) = partials
+        .into_iter()
+        .fold((0.0f64, 0.0f64), |(loss, band), (part_loss, part_band)| {
+            (loss + part_loss, band + part_band)
+        });
+    let operations = codes.len() as f64 * f64::EPSILON;
+    let accumulation = if operations < 1.0 {
+        operations / (1.0 - operations) * loss
+    } else {
+        f64::INFINITY
+    };
+    (loss, band + accumulation)
+}
+
+/// Displacement between two decoders' live rows, compared as lines. The second row takes
+/// the sign that agrees with the first before the difference is formed, because
+/// [`unit_norm_rows`] orients each row on its own. Rows marked `frozen`, and rows that are
+/// zero in either decoder, contribute nothing. Per-atom squares are summed in atom order,
+/// so the norm does not depend on the thread count.
+fn aligned_displacement_norm(
+    certified: ArrayView2<'_, f32>,
+    refreshed: ArrayView2<'_, f32>,
+    frozen: &[bool],
+) -> f64 {
+    let squares: Vec<f64> = certified
+        .axis_iter(Axis(0))
+        .into_par_iter()
+        .zip(refreshed.axis_iter(Axis(0)).into_par_iter())
+        .zip(frozen.par_iter())
+        .map(|((old, new), &skip)| {
+            if skip
+                || old.iter().all(|&value| value == 0.0)
+                || new.iter().all(|&value| value == 0.0)
+            {
+                return 0.0;
+            }
+            let dot = old
+                .iter()
+                .zip(new.iter())
+                .map(|(&left, &right)| f64::from(left) * f64::from(right))
+                .sum::<f64>();
+            let sign = if dot < 0.0 { -1.0 } else { 1.0 };
+            old.iter()
+                .zip(new.iter())
+                .map(|(&left, &right)| {
+                    let difference = sign * f64::from(right) - f64::from(left);
+                    difference * difference
+                })
+                .sum::<f64>()
+        })
+        .collect();
+    squares.iter().sum::<f64>().sqrt()
+}
+
+/// The decoder one Aitken step reaches from an epoch of a linearly contracting map
+/// (#2283). When the map's error contracts by `r` per epoch, `x_{e+1} − x* ≈ r·(x_e − x*)`,
+/// so the limit sits at `x_{e+1} + r/(1 − r)·(x_{e+1} − x_e)`, and `step` is that
+/// `r/(1 − r)`. Rows are aligned as in [`aligned_displacement_norm`], frozen and zero rows
+/// are copied unchanged, and the caller re-norms the result.
+fn aitken_decoder_candidate(
+    certified: ArrayView2<'_, f32>,
+    refreshed: ArrayView2<'_, f32>,
+    frozen: &[bool],
+    step: f64,
+) -> Array2<f32> {
+    let mut candidate = refreshed.to_owned();
+    candidate
+        .axis_iter_mut(Axis(0))
+        .into_par_iter()
+        .zip(certified.axis_iter(Axis(0)).into_par_iter())
+        .zip(frozen.par_iter())
+        .for_each(|((mut row, old), &skip)| {
+            if skip
+                || old.iter().all(|&value| value == 0.0)
+                || row.iter().all(|&value| value == 0.0)
+            {
+                return;
+            }
+            let dot = old
+                .iter()
+                .zip(row.iter())
+                .map(|(&left, &right)| f64::from(left) * f64::from(right))
+                .sum::<f64>();
+            let sign = if dot < 0.0 { -1.0 } else { 1.0 };
+            for (slot, &left) in row.iter_mut().zip(old.iter()) {
+                let aligned = sign * f64::from(*slot);
+                *slot = (aligned + step * (aligned - f64::from(left))) as f32;
+            }
+        });
+    candidate
+}
+
 /// The loss `‖X − C D‖² − ‖X‖²` of two decoders at the codes that assembled `eq`,
 /// each paired with the band its f32 rows resolve. Per atom the loss is
 /// `A_aa‖d_a‖² − d_a·b_a − d_a·g_a`, with `g_a = b_a − Σ_{b≠a} A_ab d_b`, and its
@@ -752,6 +870,9 @@ fn run_from_decoder(
     // tightest achievable fixed point, which in floating point is the rounding
     // floor of the residual reductions, not literal zero.
     let fixed_point_tol = fixed_point_tolerance(config.tolerance, n, k, p);
+    // Norm of the preceding epoch's decoder displacement: the contraction rate the
+    // Aitken step reads is the ratio of successive displacements (#2283).
+    let mut previous_displacement_norm: Option<f64> = None;
 
     for epoch in 0..config.max_epochs {
         epochs_run = epoch + 1;
@@ -851,6 +972,38 @@ fn run_from_decoder(
             unit_norm_rows(&mut decoder)?;
         }
 
+        // (f) Aitken step along the epoch displacement (#2283). Where coherent atoms
+        // relax a tiling or rotate within a span, the epoch map converges linearly: its
+        // error contracts by `r` per epoch, and a budget can run out a few epochs short
+        // of a fixed point the map would reach (job 640872: the torus K=8 decoder
+        // residual falls at ~0.7 per epoch and is refused at 30 epochs). The measured rate
+        // `r = ‖Δ_e‖/‖Δ_{e−1}‖` gives the candidate `D + r/(1 − r)·Δ`. The candidate is
+        // routed below and adopted only on a lower penalized loss, so the map is unchanged
+        // at a fixed point, where `Δ = 0`. Revival proposals have no trajectory and stay put.
+        let mut frozen = vec![false; k];
+        for &atom in &revived_atoms {
+            frozen[atom] = true;
+        }
+        let displacement_norm =
+            aligned_displacement_norm(certified_decoder.view(), decoder.view(), &frozen);
+        let extrapolated = match previous_displacement_norm
+            .filter(|&previous| displacement_norm > 0.0 && displacement_norm < previous)
+        {
+            Some(previous) => {
+                let rate = displacement_norm / previous;
+                let mut candidate = aitken_decoder_candidate(
+                    certified_decoder.view(),
+                    decoder.view(),
+                    &frozen,
+                    rate / (1.0 - rate),
+                );
+                unit_norm_rows(&mut candidate)?;
+                Some(candidate)
+            }
+            None => None,
+        };
+        previous_displacement_norm = Some(displacement_norm);
+
         // (a)+(b) FRESH codes against the just-refreshed, unit-normed decoder.
         // These are the codes that define the post-epoch model, so they (i) feed
         // the NEXT epoch's refresh and (ii) score the convergence EV below. This
@@ -871,6 +1024,34 @@ fn run_from_decoder(
             Some(&mut score_route_stats),
             &certified_codes,
         )?;
+        // Adopt the Aitken candidate only when its routed state has the lower penalized
+        // loss beyond both states' rounding, so the step never raises the loss the plain
+        // map lowers (#2283).
+        if let Some(candidate) = extrapolated {
+            let candidate_codes = route_and_code_retaining_descent(
+                x,
+                candidate.view(),
+                &scorer,
+                s,
+                config.code_ridge,
+                config.minibatch,
+                config.score_mode,
+                Some(&mut score_route_stats),
+                &certified_codes,
+            )?;
+            let (plain_loss, plain_band) =
+                penalized_objective(x, decoder.view(), &next_codes, config.code_ridge);
+            let (candidate_loss, candidate_band) =
+                penalized_objective(x, candidate.view(), &candidate_codes, config.code_ridge);
+            if candidate_loss + candidate_band < plain_loss - plain_band {
+                log::warn!(
+                    "[SAE epoch {epochs_run}] Aitken step adopted: penalized loss \
+                     {plain_loss:.9e} -> {candidate_loss:.9e}"
+                );
+                decoder = candidate;
+                next_codes = candidate_codes;
+            }
+        }
 
         let route_secs = epoch_start.elapsed().as_secs_f64() - refresh_secs;
 
