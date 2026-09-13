@@ -100,7 +100,15 @@ impl GaussianFit2d {
         // harmless re-expression of an intrinsic coordinate chart.
         let spectral_gap = (sxx - syy).hypot(2.0 * sxy);
         let largest = (0.5 * (trace + spectral_gap)).max(f64::MIN_POSITIVE);
-        let floor = (64.0 * f64::EPSILON * largest).max(f64::MIN_POSITIVE);
+        // `sxx`, `syy` are means of `count` nonnegative squares of centered offsets,
+        // each formed with at most three rounded operations, so each is off by
+        // `γ_{count+4}` of itself; `sxy` is off by `γ_{count+4}·(sxx + syy)/2`
+        // (AM–GM). `trace` and the gap `hypot(sxx − syy, 2·sxy) ≤ trace` inherit
+        // those errors and a few more roundings, so the cancelling smallest
+        // eigenvalue `½·(trace − gap)` is resolved only to `γ_{3·count+17}·trace`.
+        // An exact smallest eigenvalue inside that band cannot be told from zero.
+        let floor = (gam_linalg::roundoff::accumulation_growth(3 * rows.len() + 17) * trace)
+            .max(f64::MIN_POSITIVE);
         let smallest = (0.5 * (trace - spectral_gap)).max(floor);
         let largest = largest.max(floor);
         if !smallest.is_finite() || !largest.is_finite() {
