@@ -21,18 +21,6 @@ pub use fit_request_document::{
     PrecisionHyperpriorDocument, SmoothDescriptorsDocument,
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CliFrailtyKind {
-    GaussianShift,
-    HazardMultiplier,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CliHazardLoading {
-    Full,
-    LoadedVsUnloaded,
-}
-
 const DEFAULT_LEARNED_FRAILTY_SCALE: FrailtyScale = FrailtyScale::Learned { initial_sigma: 0.5 };
 
 impl CtnStage1Document {
@@ -272,54 +260,6 @@ pub(crate) fn resolve_fit_request_config(
     )?;
     fit_config = fit_config.resolve()?;
     Ok(fit_config)
-}
-
-pub fn resolve_cli_frailty_spec(
-    frailty_kind: Option<CliFrailtyKind>,
-    frailty_sd: Option<f64>,
-    hazard_loading: Option<CliHazardLoading>,
-    context: &str,
-) -> Result<FrailtySpec, String> {
-    let resolve_scale = || -> Result<FrailtyScale, String> {
-        match frailty_sd {
-            None => Ok(DEFAULT_LEARNED_FRAILTY_SCALE),
-            Some(sigma) => {
-                if !sigma.is_finite() || sigma < 0.0 {
-                    return Err(format!(
-                        "{context} requires a finite --frailty-sd >= 0, got {sigma}"
-                    ));
-                }
-                Ok(FrailtyScale::Fixed { sigma })
-            }
-        }
-    };
-
-    match frailty_kind {
-        None => {
-            if frailty_sd.is_some() || hazard_loading.is_some() {
-                return Err(format!(
-                    "{context} requires --frailty-kind when --frailty-sd or --hazard-loading is provided"
-                ));
-            }
-            Ok(FrailtySpec::None)
-        }
-        Some(CliFrailtyKind::GaussianShift) => {
-            if hazard_loading.is_some() {
-                return Err(format!(
-                    "{context} does not accept --hazard-loading with --frailty-kind gaussian-shift"
-                ));
-            }
-            Ok(FrailtySpec::GaussianShift {
-                scale: resolve_scale()?,
-            })
-        }
-        Some(CliFrailtyKind::HazardMultiplier) => Ok(FrailtySpec::HazardMultiplier {
-            scale: resolve_scale()?,
-            loading: hazard_loading.map(cli_hazard_loading).ok_or_else(|| {
-                format!("{context} requires --hazard-loading with --frailty-kind hazard-multiplier")
-            })?,
-        }),
-    }
 }
 
 pub fn parse_survival_likelihood_cli(raw: &str) -> Result<String, String> {
@@ -595,13 +535,6 @@ fn parse_json_frailty_spec(
     }
 }
 
-fn cli_hazard_loading(loading: CliHazardLoading) -> HazardLoading {
-    match loading {
-        CliHazardLoading::Full => HazardLoading::Full,
-        CliHazardLoading::LoadedVsUnloaded => HazardLoading::LoadedVsUnloaded,
-    }
-}
-
 fn parse_precision_hyperpriors(
     precision_hyperpriors: Option<std::collections::BTreeMap<String, PrecisionHyperpriorDocument>>,
 ) -> Result<Vec<(String, f64, f64)>, String> {
@@ -738,15 +671,13 @@ mod tests {
     #[test]
     fn frailty_resolvers_preserve_fixed_vs_learned_scale_mode() {
         assert_eq!(
-            resolve_cli_frailty_spec(Some(CliFrailtyKind::GaussianShift), Some(0.3), None, "test",)
-                .unwrap(),
+            parse_json_frailty_spec(Some("gaussian-shift".to_string()), Some(0.3), None).unwrap(),
             FrailtySpec::GaussianShift {
                 scale: FrailtyScale::Fixed { sigma: 0.3 },
             }
         );
         assert_eq!(
-            resolve_cli_frailty_spec(Some(CliFrailtyKind::GaussianShift), None, None, "test",)
-                .unwrap(),
+            parse_json_frailty_spec(Some("gaussian-shift".to_string()), None, None).unwrap(),
             FrailtySpec::GaussianShift {
                 scale: DEFAULT_LEARNED_FRAILTY_SCALE,
             }

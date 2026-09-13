@@ -2682,5 +2682,13 @@
     "reason": "#2899 digamma dedupe: the duplicate jet_tower digamma, trigamma and tetragamma wrappers are deleted; gam_math::special::{digamma, trigamma, tetragamma} are the one public polygamma API over the same kernels.",
     "evidence": "public_api_census.py --base ef1e74ddd --head 3c10e63bd reports these three identities among the stack's removals; special.rs keeps its four public polygamma names (job 579772, /scratch.global/sauer354/pool/prune-api-a/stack4.check.579772.log).",
     "base": "f571be49344bce5cf13cfa258b762c260eceeda9"
+  },
+  {
+    "removed": {
+      "crates/gam-config/src/lib.rs::resolve_cli_frailty_spec": 1
+    },
+    "reason": "#2899 no product user: resolve_cli_frailty_spec is deleted; the CLI resolves frailty through the request document's parse_json_frailty_spec.",
+    "evidence": "public_api_census.py --base ef1e74ddd --head 3c10e63bd reports this identity among the stack's removals (job 579772, /scratch.global/sauer354/pool/prune-api-a/stack4.check.579772.log).",
+    "base": "d71363f3be707b537fbea13d2424630c042f12a5"
   }
 ]

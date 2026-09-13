@@ -6566,5 +6566,16 @@
     "reason": "#2899 digamma dedupe (lead ruling: special:: is canonical and delegates to the jet kernels): the jet_tower digamma, trigamma and tetragamma scalar wrappers are deleted and their callers read gam_math::special, whose polygammas now call digamma_positive and polygamma_positive::<1..=3>. special.rs's private POLYGAMMA_ASYMPTOTIC_THRESHOLD goes with the special.rs recurrence and Bernoulli series it bounded.",
     "evidence": "git grep over crates, src, tests, examples, bench and benches for jet_tower::(digamma|trigamma|tetragamma) finds 4 calls in gam-event-history joint/emission.rs, 20 lines in gam-models gamlss/dispersion_family.rs, 2 in gam-solve pirls/deviance.rs, 2 in gam-solve pirls/tests.rs and the mixture_link import; all now name gam_math::special. POLYGAMMA_ASYMPTOTIC_THRESHOLD is named only inside the replaced special.rs block. Item list from source_removal_guard.py --base ef1e74ddd --head 3c10e63bd (job 579772, /scratch.global/sauer354/pool/prune-api-a/stack4.check.579772.log).",
     "base": "f571be49344bce5cf13cfa258b762c260eceeda9"
+  },
+  {
+    "items": [
+      "crates/gam-config/src/lib.rs:enum:CliFrailtyKind",
+      "crates/gam-config/src/lib.rs:enum:CliHazardLoading",
+      "crates/gam-config/src/lib.rs:fn:cli_hazard_loading",
+      "crates/gam-config/src/lib.rs:fn:resolve_cli_frailty_spec"
+    ],
+    "reason": "#2899 no product user: the survival CLI routes take the frailty from the resolved request document (9cb3fd6ef, 1bb6e048f), built by parse_json_frailty_spec. resolve_cli_frailty_spec, its CliFrailtyKind and CliHazardLoading argument enums and the private cli_hazard_loading mapper were left with only gam-config's own unit test as a caller, which now checks the same scale mode through parse_json_frailty_spec.",
+    "evidence": "git grep -n -w over crates, src, tests, examples, bench, benches, python and gamfit finds resolve_cli_frailty_spec only in gam-config lib.rs (definition and the unit test) and a gam-cli test comment; CliFrailtyKind, CliHazardLoading and cli_hazard_loading appear only in gam-config lib.rs. Item list from source_removal_guard.py --base ef1e74ddd --head 3c10e63bd (job 579772, /scratch.global/sauer354/pool/prune-api-a/stack4.check.579772.log).",
+    "base": "d71363f3be707b537fbea13d2424630c042f12a5"
   }
 ]
