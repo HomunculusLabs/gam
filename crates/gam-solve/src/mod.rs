@@ -73,8 +73,8 @@ pub use evidence::{
     CircularGaussianFit2d, GaussianMixtureCertificate, GaussianMixtureCheckpoint,
     GaussianMixtureConfig, GaussianMixtureError, GaussianMixtureFit, RingGaussianMixtureFit,
     StackingCertificate, StackingCheckpoint, StackingConfig, StackingError, StackingWeights,
-    TopologyCandidate, TopologyKind, TopologyScoreScale, TopologySelectOptions, UnionComponentFit,
-    UnionComponentKind, UnionStructure, UnionStructureFit, solve_stacking_weights,
+    TopologyCandidate, TopologyKind, TopologyScoreScale, TopologySelectOptions, UnionStructure,
+    solve_stacking_weights,
 };
 pub use topology_selector::{
     AdaptiveRungError, AdaptiveRungFailureStage, AdaptiveRungKind, AdaptiveRungOrderFailure,
@@ -85,7 +85,7 @@ pub use topology_selector::{
     TopologyAutoSelectorResult, TopologyCandidateEvidence, TopologyCandidateFailure,
     TopologyCandidateFailureStage, TopologyCandidateOutcome, TopologyCandidateRanked,
     TopologyCandidateSelectionResult, TopologyRaceParallelCandidate, TopologySelectionScoreKind,
-    TopologySelectionScoreScale, UnionRungFit, UnionRungResult, adjudicate_predictive_race,
+    TopologySelectionScoreScale, adjudicate_predictive_race,
     deterministic_cv_folds_seeded, fit_free_cluster_rung,
     fit_ring_of_clusters_rung, run_topology_race_parallel,
     select_topology_candidate_lifecycle, select_topology_with_fit, tk_normalized_score,

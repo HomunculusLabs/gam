@@ -2667,20 +2667,6 @@ pub enum UnionStructure {
     LineCluster,
 }
 
-/// The per-component generative structure a union pins each responsibility group
-/// to. `Line` is a full-covariance Gaussian, while `PointCluster` is the nested
-/// isotropic Gaussian with `d + 1` parameters. The covariance constraint makes
-/// line+cluster a genuine structured alternative to a generic two-component
-/// full-covariance mixture instead of a duplicate candidate. `Circle` is the
-/// proper Cartesian density of a uniform latent circle convolved with isotropic
-/// Gaussian noise.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum UnionComponentKind {
-    Circle,
-    Line,
-    PointCluster,
-}
-
 impl UnionStructure {
     /// Stable display name, e.g. `"union_circle+circle"`.
     pub const fn as_str(self) -> &'static str {
@@ -2690,50 +2676,6 @@ impl UnionStructure {
             UnionStructure::LineCluster => "union_line+cluster",
         }
     }
-
-    /// The fixed ordered component structures of this union.
-    pub const fn components(self) -> &'static [UnionComponentKind] {
-        match self {
-            UnionStructure::CircleCircle => {
-                &[UnionComponentKind::Circle, UnionComponentKind::Circle]
-            }
-            UnionStructure::CirclePointCluster => {
-                &[UnionComponentKind::Circle, UnionComponentKind::PointCluster]
-            }
-            UnionStructure::LineCluster => {
-                &[UnionComponentKind::Line, UnionComponentKind::PointCluster]
-            }
-        }
-    }
-
-}
-
-/// One fitted component of a union: its pinned structure, the rows used to fit
-/// it after the hard responsibility split, its free-parameter count, and its
-/// normalized soft-mixture weight. A component has no standalone BIC inside a
-/// union: the likelihood is the indivisible `log Σ_c π_c p_c(y)` scored on
-/// every row.
-#[derive(Debug, Clone)]
-pub struct UnionComponentFit {
-    pub kind: UnionComponentKind,
-    pub row_count: usize,
-    pub num_parameters: usize,
-    pub mixing_weight: f64,
-}
-
-/// A fitted structured-union candidate: the composite kind, the per-component
-/// fits, its normalized soft-mixture training likelihood, the corresponding
-/// BIC-form negative-log-evidence, and the complete free-parameter count.
-#[derive(Debug, Clone)]
-pub struct UnionStructureFit {
-    pub structure: UnionStructure,
-    pub components: Vec<UnionComponentFit>,
-    /// `Σ_i log(Σ_c π_c p_c(y_i))` over all training rows.
-    pub log_likelihood: f64,
-    /// `-log_likelihood + ½ total_parameters log(n)` (lower wins).
-    pub bic: f64,
-    /// `Σ_c P_c + (m - 1)`, including the free mixing weights.
-    pub total_parameters: usize,
 }
 
 /// One fitted model in a REML/LAML evidence comparison.

@@ -37,7 +37,7 @@
 
 use crate::evidence::{
     GaussianMixtureConfig, StackingConfig, StackingWeights, TopologyScoreScale, UnionStructure,
-    UnionStructureFit, fit_gaussian_mixture, solve_stacking_weights,
+    fit_gaussian_mixture, solve_stacking_weights,
 };
 use crate::priority_selection::{PriorityCandidate, rank_priority_candidates};
 use crate::row_sampling_measure::CoresetCertificate;
@@ -1706,37 +1706,6 @@ pub fn fit_ring_of_clusters_rung(
         fits: ranked,
         winner_index: 0,
     })
-}
-
-// ===========================================================================
-// Structured-union rung (#907)
-// ===========================================================================
-
-/// One fitted entry of the structured-union rung: the composite structure, its
-/// normalized soft-mixture BIC/2, and the complete free-parameter count. Lower
-/// is better.
-#[derive(Debug, Clone)]
-pub struct UnionRungFit {
-    pub structure: UnionStructure,
-    pub fit: UnionStructureFit,
-    /// `Σ_c P_c + (m - 1)`, including free mixing weights.
-    pub total_parameters: usize,
-    /// BIC/2 of `Σ_c π_c p_c(y)` scored on all training rows.
-    pub bic: f64,
-}
-
-/// Result of fitting the whole fixed union ladder: every fitted composite plus
-/// the index of the in-class winner (lowest normalized soft-mixture BIC).
-#[derive(Debug, Clone)]
-pub struct UnionRungResult {
-    pub fits: Vec<UnionRungFit>,
-    pub winner_index: usize,
-}
-
-impl UnionRungResult {
-    pub fn winner(&self) -> &UnionRungFit {
-        &self.fits[self.winner_index]
-    }
 }
 
 /// A selection-time predictive-density provider: given the row indices to TRAIN
