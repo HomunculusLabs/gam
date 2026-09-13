@@ -66,14 +66,19 @@ where
 /// A + sqrt(eps) B generates the trial space so repeated A eigenvalues do not
 /// hide different metric directions. Only the projected physical A is inverted.
 /// Physical A residuals and unresolved B directions drive further expansion.
-fn solve_exact_stationarity_krylov<A, B>(
+/// `apply_b_raw` is the physical majorizer B conditions. The two agree off the
+/// evidence factor's pins; where they differ the positive band edge rises to the
+/// stiffness B substituted, as on the dense route (#2267).
+fn solve_exact_stationarity_krylov<A, B, R>(
     rhs: &SaeArrowVector,
     apply_a: &A,
     apply_b: &B,
+    apply_b_raw: &R,
 ) -> Result<SaeArrowVector, String>
 where
     A: Fn(&SaeArrowVector) -> Result<SaeArrowVector, String>,
     B: Fn(&SaeArrowVector) -> Result<SaeArrowVector, String>,
+    R: Fn(&SaeArrowVector) -> Result<SaeArrowVector, String>,
 {
     use gam_linalg::lanczos::{
         SymmetricLanczosOptions, symmetric_lanczos_eigenpairs,
@@ -107,6 +112,7 @@ where
     };
     let a_flat = |v: &Array1<f64>| checked(apply_a(&split(v))?);
     let b_flat = |v: &Array1<f64>| checked(apply_b(&split(v))?);
+    let b_raw_flat = |v: &Array1<f64>| checked(apply_b_raw(&split(v))?);
     let tolerance = f64::EPSILON.sqrt();
     let gamma = dim as f64 * f64::EPSILON / (1.0 - dim as f64 * f64::EPSILON);
     let a_slice = |input: &[f64], output: &mut [f64]| -> Result<(), String> {
@@ -232,8 +238,10 @@ where
                         "exact-stationarity Krylov solve: invalid v'Bv={metric}"
                     ));
                 }
+                let substituted = (metric - direction.dot(&b_raw_flat(&direction)?)).max(0.0);
                 let magnitude = values[index].abs();
-                let floor = sae_exact_a_direction_floor(dim, spectral_norm, metric);
+                let floor =
+                    sae_exact_a_band_edge(values[index], dim, spectral_norm, metric, substituted);
                 let gap = (magnitude - floor).abs();
                 let a_residual = a_image - values[index] * &direction;
                 let a_error = norm(&a_residual);
@@ -364,7 +372,13 @@ mod tests_null_space_policy_2828 {
     use super::*;
     use ndarray::array;
 
-    fn compare(a: &Array2<f64>, b: &Array2<f64>, rhs: &Array1<f64>, expected: &Array1<f64>) {
+    fn compare(
+        a: &Array2<f64>,
+        b: &Array2<f64>,
+        b_raw: &Array2<f64>,
+        rhs: &Array1<f64>,
+        expected: &Array1<f64>,
+    ) {
         let split = |v: &Array1<f64>| SaeArrowVector {
             t: v.slice(s![..v.len() - 1]).to_owned(),
             beta: v.slice(s![v.len() - 1..]).to_owned(),
@@ -387,19 +401,28 @@ mod tests_null_space_policy_2828 {
                 .into_iter()
                 .map(|v| v.dot(&b.dot(&v))),
         );
+        let substituted_stiffness = Array1::from_iter(
+            eigenvectors
+                .columns()
+                .into_iter()
+                .map(|v| (v.dot(&b.dot(&v)) - v.dot(&b_raw.dot(&v))).max(0.0)),
+        );
         let dense = ExactHessianSpectralBlock {
             operator: a.clone(),
             eigenvalues,
             eigenvectors,
             metric_scale,
+            substituted_stiffness,
             spectral_norm,
         }
         .solve_stationarity(&split(rhs))
         .expect("dense truncated pseudoinverse");
         let apply_a = |v: &SaeArrowVector| Ok(split(&a.dot(&flatten(v))));
         let apply_b = |v: &SaeArrowVector| Ok(split(&b.dot(&flatten(v))));
-        let matrix_free = solve_exact_stationarity_krylov(&split(rhs), &apply_a, &apply_b)
-            .expect("matrix-free truncated pseudoinverse");
+        let apply_b_raw = |v: &SaeArrowVector| Ok(split(&b_raw.dot(&flatten(v))));
+        let matrix_free =
+            solve_exact_stationarity_krylov(&split(rhs), &apply_a, &apply_b, &apply_b_raw)
+                .expect("matrix-free truncated pseudoinverse");
         for (label, actual) in [
             ("dense", flatten(&dense)),
             ("matrix-free", flatten(&matrix_free)),
@@ -429,7 +452,7 @@ mod tests_null_space_policy_2828 {
             array![floor, 1.0, 0.5],
         ] {
             let expected = array![0.0, rhs[1], -0.5 * rhs[2]];
-            compare(&a, &b, &rhs, &expected);
+            compare(&a, &b, &b, &rhs, &expected);
         }
         // The last RHS used to evade the aggregate-Rayleigh detector entirely.
         let unfiltered = array![2.0, 1.0, -0.25];
@@ -448,7 +471,7 @@ mod tests_null_space_policy_2828 {
             array![0.0, 2.0 * floor, -floor],
         ] {
             let expected = array![0.0, rhs[1] / (2.0 * floor), -rhs[2] / (2.0 * floor)];
-            compare(&a, &b, &rhs, &expected);
+            compare(&a, &b, &b, &rhs, &expected);
         }
     }
 
@@ -481,7 +504,7 @@ mod tests_null_space_policy_2828 {
             let rhs = rotation.dot(&coefficients);
             let mut response = &coefficients / &spectrum;
             response[0] = 0.0;
-            compare(&a, &b, &rhs, &rotation.dot(&response));
+            compare(&a, &b, &b, &rhs, &rotation.dot(&response));
         }
     }
 
@@ -491,7 +514,7 @@ mod tests_null_space_policy_2828 {
         // rank decisions in this eigenspace; metric directions must be present.
         let a = Array2::from_diag(&array![1.0e-8, 1.0e-8]);
         let b = Array2::from_diag(&array![0.1, 10.0]);
-        compare(&a, &b, &array![1.0, 1.0], &array![1.0e8, 0.0]);
+        compare(&a, &b, &b, &array![1.0, 1.0], &array![1.0e8, 0.0]);
     }
 
     #[test]
@@ -508,6 +531,7 @@ mod tests_null_space_policy_2828 {
             .dot(&rotation.t());
         compare(
             &a,
+            &b,
             &b,
             &rotation.dot(&Array1::ones(4)),
             &rotation.dot(&array![1.0e8, 1.0e8, 0.0, 0.0]),
@@ -537,6 +561,7 @@ mod tests_null_space_policy_2828 {
         compare(
             &a,
             &b,
+            &b,
             &array![1.0, 1.0, 1.0],
             &array![1.0 / 0.875, 0.0, 0.0],
         );
@@ -546,6 +571,24 @@ mod tests_null_space_policy_2828 {
     fn entirely_discarded_band_has_zero_minimum_norm_response_2828() {
         let floor = f64::EPSILON.sqrt();
         let a = Array2::from_diag(&array![0.5 * floor, -0.25 * floor]);
-        compare(&a, &Array2::eye(2), &array![1.0, -2.0], &Array1::zeros(2));
+        let b = Array2::eye(2);
+        compare(&a, &b, &b, &array![1.0, -2.0], &Array1::zeros(2));
+    }
+
+    #[test]
+    fn a_direction_only_substituted_stiffness_resolves_is_in_band_on_both_routes_2267() {
+        // `B` carries unit stiffness on directions 0 and 2 that `B_raw` does not: the
+        // evidence factor substituted it. Direction 0 sits at 2·√ε, above its bare
+        // floor √ε·1 but under the substituted stiffness 1, so both routes drop it.
+        // Direction 2 has the same curvature with the opposite sign and stays
+        // resolved, because the negative side keeps the bare floor.
+        let floor = f64::EPSILON.sqrt();
+        let a = Array2::from_diag(&array![2.0 * floor, 1.0, -2.0 * floor]);
+        let b = Array2::eye(3);
+        let b_raw = Array2::from_diag(&array![0.0, 1.0, 0.0]);
+        let rhs = array![floor, 1.0, floor];
+        compare(&a, &b, &b_raw, &rhs, &array![0.0, 1.0, -0.5]);
+        // Nothing substituted: the bare floor keeps direction 0.
+        compare(&a, &b, &b, &rhs, &array![0.5, 1.0, -0.5]);
     }
 }

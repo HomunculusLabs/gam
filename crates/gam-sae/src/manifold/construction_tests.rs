@@ -305,7 +305,7 @@ mod amortized_encoder_tests {
         // to build a `SaeArrowVector`, call `.eigh` (FaerEigh), and name `Side`.
         use super::{
             ArrowMetric, FaerEigh, SaeArrowVector, SaeCriterionError, Side,
-            sae_exact_a_direction_floor,
+            sae_exact_a_band_edge,
         };
         let (mut term, target, rho, _stationary_cache) =
             super::exact_hessian_fixture_tests::converged_state_with_residual();
@@ -388,10 +388,14 @@ mod amortized_encoder_tests {
         let joint_metric = ArrowMetric::Joint(&cache);
         let floors: Vec<f64> = (0..dim)
             .map(|index| {
+                let direction = vecs.column(index);
                 let vbv = joint_metric
-                    .quadratic_form(vecs.column(index))
+                    .quadratic_form(direction)
                     .expect("B quadratic form on the joint block");
-                sae_exact_a_direction_floor(dim, spectral_norm, vbv)
+                let substituted = joint_metric
+                    .substituted_stiffness(direction)
+                    .expect("substituted stiffness on the joint block");
+                sae_exact_a_band_edge(eigs[index], dim, spectral_norm, vbv, substituted)
             })
             .collect();
         let worst_floor = floors.iter().copied().fold(0.0_f64, f64::max);
@@ -753,6 +757,7 @@ mod exact_stationarity_solve_1418_tests {
                 dimension,
                 floor / super::sae_exact_a_identifiability_floor(),
             ),
+            substituted_stiffness: Array1::zeros(dimension),
             spectral_norm,
         };
         for index in 0..dimension {

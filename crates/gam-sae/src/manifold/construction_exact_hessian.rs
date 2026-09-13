@@ -96,6 +96,48 @@ pub(crate) fn sae_exact_a_direction_floor(
     gam_solve::arrow_schur::exact_a_direction_floor(spectral_dim, spectral_norm, b_quadratic_form)
 }
 
+/// The null-band edge on the side of one direction's curvature, for the dense and
+/// the matrix-free exact-`A` routes (#2267).
+///
+/// ```text
+///   λ ≤ 0:  floor
+///   λ > 0:  max( floor ,  s ),     s = vᵀ(Φ(B_raw) − B_raw)v
+/// ```
+///
+/// `floor` is [`sae_exact_a_direction_floor`], denominated in the CONDITIONED
+/// evidence metric `Φ(B_raw)`. Where the majorizer has no resolved curvature the
+/// evidence factor pins a direction at unit stiffness (`log 1 = 0`), so along it
+/// `Φ(B_raw)` carries a stiffness `s` that no term of the objective supplies, and
+/// `√ε·vᵀΦ(B_raw)v` compares `λ` against `√ε` in the pin's own units. A positive
+/// direction whose exact curvature does not exceed `s` is resolved by the
+/// substitution alone, so the value prices it the way the factor prices the pin.
+/// At a unit pin the edge is `λ ≈ 1`, where `½·ln λ ≈ 0`: the price is continuous
+/// across it, where the bare floor put a step of `½·ln √ε ≈ −9` per direction.
+///
+/// Pool job 598561 (`sae_manifold_euclidean_k2_fit_terminates`) read that step. At
+/// one ρ, two evaluations whose loss differed by 1.8e-6 priced `½log|A|` at
+/// −3.630e3 (all 996 directions retained, the smallest at 1.457× its floor) and at
+/// +5.859e2 (480 in band, the largest at 0.614×), and the outer search's halvings
+/// compared values from both strata.
+///
+/// The negative side keeps the bare floor. A resolved negative direction is a basin
+/// or saddle verdict (#2330/#2336) that the #2080 descent reads, and a pin does not
+/// turn it into a null.
+pub(crate) fn sae_exact_a_band_edge(
+    curvature: f64,
+    spectral_dim: usize,
+    spectral_norm: f64,
+    b_quadratic_form: f64,
+    substituted_stiffness: f64,
+) -> f64 {
+    let floor = sae_exact_a_direction_floor(spectral_dim, spectral_norm, b_quadratic_form);
+    if curvature > 0.0 {
+        floor.max(substituted_stiffness)
+    } else {
+        floor
+    }
+}
+
 /// One row's assembled `ΔC = A − B` blocks, in the arrow layout the streaming
 /// evidence system already uses (`ArrowRowBlock::{htt, htbeta}`).
 #[derive(Debug, Clone)]
@@ -125,6 +167,10 @@ struct ExactHessianSpectralBlock {
     /// positive and the ratio `λᵢ / metric_scale[i]` is the pencil curvature the
     /// gradient path classifies the same directions by.
     metric_scale: Array1<f64>,
+    /// `vᵢᵀ(Φ(B_raw) − B_raw)vᵢ` for every eigendirection: the part of
+    /// `metric_scale` the evidence factor substituted rather than measured. It sets
+    /// the positive band edge; see [`sae_exact_a_band_edge`] (#2267).
+    substituted_stiffness: Array1<f64>,
     /// `‖A‖₂ = maxᵢ|λᵢ|`, the scale the eigendecomposition's own backward error
     /// is proportional to.
     spectral_norm: f64,
@@ -153,6 +199,36 @@ pub(crate) enum ArrowMetric<'a> {
 impl ArrowMetric<'_> {
     pub(crate) fn quadratic_form(&self, v: ArrayView1<'_, f64>) -> Result<f64, String> {
         Ok(v.dot(&self.apply(v)?))
+    }
+
+    /// `vᵀ(Φ(B_raw) − B_raw)v`: the part of [`Self::quadratic_form`] the evidence
+    /// factor substituted rather than measured, read off the row spectra
+    /// `add_raw_row_deflation_correction` restores `B_raw` from (#2267). Zero on
+    /// every row the factor kept raw; the border block is raw in both applies, so
+    /// only `t` enters. A direction whose pins lower curvature more than they raise
+    /// it carries no substituted stiffness, so the total is clamped at zero.
+    pub(crate) fn substituted_stiffness(&self, v: ArrayView1<'_, f64>) -> Result<f64, String> {
+        match self {
+            Self::Joint(cache) => {
+                let total_t = cache.delta_t_len();
+                if v.len() != total_t + cache.k {
+                    return Err(format!(
+                        "ArrowMetric::Joint: direction length {} != joint dimension {}",
+                        v.len(),
+                        total_t + cache.k
+                    ));
+                }
+                let v_t = v.slice(s![..total_t]);
+                let mut raw_minus_conditioned = Array1::<f64>::zeros(total_t);
+                add_raw_row_deflation_correction(
+                    cache,
+                    v_t,
+                    raw_minus_conditioned.view_mut(),
+                    "ArrowMetric::substituted_stiffness",
+                )?;
+                Ok((-v_t.dot(&raw_minus_conditioned)).max(0.0))
+            }
+        }
     }
 
     fn apply(&self, v: ArrayView1<'_, f64>) -> Result<Array1<f64>, String> {
@@ -231,11 +307,18 @@ impl ExactHessianSpectralBlock {
     /// quantity. The matrix-free Ritz solve uses the same arithmetic floor.
     /// It is a floor under the identifiability term, never a ceiling, so it can
     /// only pin directions, never resurrect one the gradient has deflated.
+    ///
+    /// #2267 — on the positive side the edge rises to the stiffness the evidence
+    /// factor substituted along the direction, where that exceeds this floor; see
+    /// [`sae_exact_a_band_edge`]. The value, the differential, the polish and the
+    /// solves all read the band through this one function, so they move together.
     fn rank_floor(&self, index: usize) -> f64 {
-        sae_exact_a_direction_floor(
+        sae_exact_a_band_edge(
+            self.eigenvalues[index],
             self.eigenvalues.len(),
             self.spectral_norm,
             self.metric_scale[index],
+            self.substituted_stiffness[index],
         )
     }
 
@@ -1594,10 +1677,23 @@ impl SaeManifoldTerm {
                 rho, target, cache, system, vector, &prepared, &residual,
             )
         };
+        // #2267 — `B_raw`, the physical majorizer `Phi` conditions. Where they differ
+        // the Ritz band edge rises to the stiffness `Phi` substituted, as on the
+        // dense route.
+        let apply_b_raw = |vector: &SaeArrowVector| -> Result<SaeArrowVector, String> {
+            let mut raw = apply_b(vector)?;
+            add_raw_row_deflation_correction(
+                cache,
+                vector.t.view(),
+                raw.t.view_mut(),
+                "matrix-free raw evidence majorizer",
+            )?;
+            Ok(raw)
+        };
         // Classify ordinary A Ritz directions with the dense route's floor
         // and use Euclidean projections. B is only the classification metric;
         // its inverse and generalized eigenvectors do not define A's inverse.
-        solve_exact_stationarity_krylov(rhs, &apply_a, &apply_b)
+        solve_exact_stationarity_krylov(rhs, &apply_a, &apply_b, &apply_b_raw)
     }
 
     /// The raw per-flat-coordinate penalty curvature operators
@@ -3215,8 +3311,11 @@ impl SaeManifoldTerm {
         // and the inner objective moved continuously (−45.10, −38.46, −35.14 → −31.81).
         // A jump that size over a continuous state is a change in which directions
         // ½log|A| prices: an in-band direction adds nothing, a retained one adds ½·ln λ.
+        // `substituted` counts the in-band directions the bare floor would have kept,
+        // the ones only the evidence factor's substituted stiffness puts in the band.
         let mut retained = 0usize;
         let mut in_band = 0usize;
+        let mut substituted = 0usize;
         let mut min_retained_over_floor = f64::INFINITY;
         let mut max_band_over_floor = 0.0_f64;
         for index in 0..joint.eigenvalues.len() {
@@ -3225,6 +3324,14 @@ impl SaeManifoldTerm {
             if magnitude <= floor {
                 in_band += 1;
                 max_band_over_floor = max_band_over_floor.max(magnitude / floor);
+                let bare = sae_exact_a_direction_floor(
+                    joint.eigenvalues.len(),
+                    joint.spectral_norm,
+                    joint.metric_scale[index],
+                );
+                if magnitude > bare {
+                    substituted += 1;
+                }
             } else if joint.eigenvalues[index] > 0.0 {
                 retained += 1;
                 min_retained_over_floor = min_retained_over_floor.min(magnitude / floor);
@@ -3232,8 +3339,8 @@ impl SaeManifoldTerm {
         }
         log::info!(
             "[SAE-EXACT-DENSE] priced: dim={} retained={retained} in_band={in_band} \
-             negative={} ½log|A|={:.6e} min retained |λ|/floor={:.3e} \
-             max in-band |λ|/floor={:.3e}",
+             substituted={substituted} negative={} ½log|A|={:.6e} \
+             min retained |λ|/floor={:.3e} max in-band |λ|/floor={:.3e}",
             joint.eigenvalues.len(),
             joint_pricing.negative.len(),
             0.5 * joint_pricing.log_det,
@@ -3307,6 +3414,7 @@ impl SaeManifoldTerm {
             &|v| metric.apply(v.view()),
         )?;
         let mut metric_scale = Array1::<f64>::zeros(eigenvalues.len());
+        let mut substituted_stiffness = Array1::<f64>::zeros(eigenvalues.len());
         for index in 0..eigenvalues.len() {
             let value = metric.quadratic_form(eigenvectors.column(index))?;
             if !(value.is_finite() && value > 0.0) {
@@ -3317,12 +3425,15 @@ impl SaeManifoldTerm {
                 ));
             }
             metric_scale[index] = value;
+            substituted_stiffness[index] =
+                metric.substituted_stiffness(eigenvectors.column(index))?;
         }
         let block = ExactHessianSpectralBlock {
             operator,
             eigenvalues,
             eigenvectors,
             metric_scale,
+            substituted_stiffness,
             spectral_norm,
         };
         let crossings = block.arithmetic_band_crossings();
@@ -4736,6 +4847,7 @@ mod test_support {
             eigenvalues,
             eigenvectors,
             metric_scale: Array1::ones(a.nrows()),
+            substituted_stiffness: Array1::zeros(a.nrows()),
             spectral_norm,
         }
     }
@@ -5707,7 +5819,7 @@ mod tests_inverse_power_deflation_cost_2627 {
         };
 
         let solved =
-            solve_exact_stationarity_krylov(&rhs, &apply_a, &apply_b)
+            solve_exact_stationarity_krylov(&rhs, &apply_a, &apply_b, &apply_b)
                 .expect("a gapless near-null cluster must deflate, not exhaust the Krylov bound");
 
         for slot in 0..RESOLVED {
