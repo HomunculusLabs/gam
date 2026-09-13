@@ -8957,5 +8957,15 @@
     ],
     "reason": "#2899 moved tests: three root tests were the only users outside gam-inference of gam_inference::polya_gamma::PolyaGamma, which production uses only inside gam-inference (gpu_polya_gamma.rs). They move into polya_gamma.rs's unit-test module, and PolyaGamma narrows to pub(crate). The two mean tests call that module's identical theoretical_mean instead of their own pg_theoretical_mean copy. One of them drops a NutsResult placeholder that existed only to keep a symbol referenced.",
     "evidence": "At the base, git grep -n -w PolyaGamma over crates, src, tests, examples and bench finds it outside crates/gam-inference/src only in tests/glm/families/pg_moments_devroye_1521.rs (moments_match_devroye_sampler) and tests/regressions/families/sample_generative_polya_gamma.rs (bug_polya_gamma_pg11_mean_matches_theory_with_clt_bound and bug_polya_gamma_augmentation_marginal_identity_matches_documented_posterior, with their pg_theoretical_mean helper). Each moved test reappears in crates/gam-inference/src/polya_gamma.rs, and pg_theoretical_mean has the same formula as the module's theoretical_mean."
+  },
+  {
+    "base": "7461f357cb758f442ab49b2aecaf5545c08986f0",
+    "items": [
+      "crates/gam-models/src/transformation_normal/config.rs:const:CTN_INNER_MAX_CYCLES_BASE",
+      "crates/gam-models/src/transformation_normal/config.rs:const:CTN_INNER_MAX_CYCLES_CEILING",
+      "crates/gam-models/src/transformation_normal/config.rs:const:CTN_INNER_MAX_CYCLES_PER_DIM"
+    ],
+    "reason": "#2469 (SPEC rules 21 and 23; lead ruling 09-13, section 10 derived stop): fit_transformation_normal capped the custom-family inner cycle budget at 64 + 2·p_total, ceiling 400. These are three picked knobs standing in for a certificate. The inner solve now runs at the family's cycle budget and stops on its own KKT certificate or the joint-Newton loop's typed stall exits, the rule 67fb2fd4c applied to every custom-family trial. The κ FD gate's options() copy of the cap goes with it.",
+    "evidence": "At the base, git grep -n -w for each name finds its declaration in config.rs, the cap in transformation_normal/fit.rs and the same cap copied into kappa_exact_joint_fd_tests.rs options(), and nothing else. Guarded cargo check --workspace --all-targets --exclude gam-pyffi plus the gam-models transformation_normal suite as the CTN timing receipt: job 619965, /scratch.global/sauer354/pool/const2469b/rp89.619965.log."
   }
 ]

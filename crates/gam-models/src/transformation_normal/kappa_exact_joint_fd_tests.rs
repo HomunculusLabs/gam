@@ -267,22 +267,15 @@ impl CtnKappaFixture {
         .expect("transformation exact joint evaluation")
     }
 
-    /// The inner cycle budget `fit_transformation_normal` scopes to this
-    /// tensor width, so a probe converges under the same cap production does.
+    /// The options `fit_transformation_normal` solves a probe with, so a probe
+    /// stops on the same certificates production does.
     fn options(&self) -> BlockwiseFitOptions {
-        let geometry = self.geometry_at(&Array1::<f64>::zeros(self.rho_dim + 1));
-        let realized_p_total = geometry.family.p_total();
-        let ctn_inner_cap = CTN_INNER_MAX_CYCLES_BASE
-            .saturating_add(realized_p_total.saturating_mul(CTN_INNER_MAX_CYCLES_PER_DIM))
-            .min(CTN_INNER_MAX_CYCLES_CEILING);
-        let defaults = BlockwiseFitOptions::default();
         BlockwiseFitOptions {
             // Far tighter than any gradient gap the oracle resolves, so the
             // differenced criterion is the criterion.
             inner_tol: 1e-10,
-            inner_max_cycles: defaults.inner_max_cycles.min(ctn_inner_cap),
             compute_covariance: false,
-            ..defaults
+            ..BlockwiseFitOptions::default()
         }
     }
 }

@@ -151,7 +151,7 @@ pub(crate) fn fit_transformation_normal(
     options: &BlockwiseFitOptions,
     kappa_options: &SpatialLengthScaleOptimizationOptions,
 ) -> Result<TransformationNormalFitResult, String> {
-    let mut options = options.clone();
+    let options = options.clone();
     // CTN advertises profiled outer-Hessian HVP support and supplies the
     // callback derivative kernel consumed by the unified REML/LAML evaluator.
     // Keep analytic curvature enabled here: the evaluator routes CTN Hessians
@@ -216,19 +216,6 @@ pub(crate) fn fit_transformation_normal(
     // response complexity has been chosen.
     let (resp_val, resp_deriv, resp_penalties, resp_knots, resp_transform) =
         build_response_basis(response, &effective_config)?;
-
-    // Scope the custom-family inner exact-Newton cycle budget to CTN's
-    // bounded-dimension, strictly convex (double-penalty) coefficient block.
-    // The realized tensor width is `p_resp · p_cov`; the cap grows with it so a
-    // genuinely high-dimensional nonlinear transformation keeps headroom, but a
-    // near-Gaussian shift can no longer spin the production large-scale cap (#720).
-    // Only ever *lower* the caller's cap so a deliberately tightened budget
-    // (screening / CI overrides) is respected.
-    let realized_p_total = resp_val.ncols().saturating_mul(boot_design.design.ncols());
-    let ctn_inner_cap = CTN_INNER_MAX_CYCLES_BASE
-        .saturating_add(realized_p_total.saturating_mul(CTN_INNER_MAX_CYCLES_PER_DIM))
-        .min(CTN_INNER_MAX_CYCLES_CEILING);
-    options.inner_max_cycles = options.inner_max_cycles.min(ctn_inner_cap);
 
     // 3. Check whether spatial κ optimization is needed.
     let spatial_terms = spatial_length_scale_term_indices(&covariate_spec);
