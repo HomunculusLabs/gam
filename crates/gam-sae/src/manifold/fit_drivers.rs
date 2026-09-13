@@ -7464,6 +7464,18 @@ impl SaeManifoldTerm {
             self.seed_cold_start_disjoint_charts(target)?;
         }
         setup_marks.push(("cold_start_charts", joint_fit_entered.elapsed().as_secs_f64()));
+        // #2228 — the banks below, the entry sweep and the loop must price one
+        // objective. The collapse-prevention gates are installed only at the
+        // assembly chokepoint, and `SaeManifoldTerm::clone` resets them to `None`,
+        // so a cloned term banked an objective without the barrier energies its
+        // first assembly adds. Pool job 604252 (`g5.refine2681.604252.txt`) read the
+        // exit warranty compare 5.233943e1 against a 2.556672e0 bank and restore it.
+        // Install what that assembly would install, under its own streaming guard.
+        if !self.streaming_gates_frozen {
+            self.refresh_decoder_repulsion_gate();
+            self.refresh_barrier_coactivation_gate();
+            self.refresh_amplitude_barrier_gate();
+        }
         // #1026/#2230 — keep the best state found inside this bounded inner
         // solve, keyed on the PENALIZED OBJECTIVE (`prefer_candidate_state`):
         // the same scalar the Armijo lane descends and the outer penalized quasi-Laplace score
