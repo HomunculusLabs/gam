@@ -1137,6 +1137,12 @@ impl CustomFamilyWarmStart {
 }
 
 pub(crate) struct CustomOuterState {
+    /// Inner mode of the incumbent outer iterate, the seed of every search
+    /// evaluation. Only an accepted iterate replaces it (#2668). When every trial
+    /// wrote its own mode here, the next trial started from wherever the last one
+    /// converged. The objective then depended on search history, and two
+    /// converged inner modes at one ρ alternated under the line search without
+    /// end: on row 30 of #2668, probes 1e-4 apart priced 348.108 and 351.557.
     pub(crate) warm_cache: Option<ConstrainedWarmStart>,
     pub(crate) reset_warm_cache: Option<ConstrainedWarmStart>,
     /// Exact derivative-bearing coefficient mode installed by the most recent
@@ -1169,13 +1175,26 @@ pub(crate) struct CustomOuterState {
     /// [`Self::reset`] on purpose — the terminal certificate must be measured on
     /// the same cold surface the descent used (see `reset`).
     pub(crate) force_cold_latched: bool,
+    /// Accepted outer steps, advanced by the optimizer's accept observer through
+    /// the channel `OuterProblem::with_stuck_stall_cold_reeval_signal` wires.
+    pub(crate) accepted_step_signal: Arc<AtomicUsize>,
+    /// How many of those steps [`Self::adopt_accepted_steps`] has folded in.
+    pub(crate) accepted_steps_adopted: usize,
+    /// Whether `warm_cache` already holds an evaluated incumbent's mode rather
+    /// than the caller's seed.
+    pub(crate) incumbent_established: bool,
+    /// Mode of the latest converged first-order evaluation since the last
+    /// accepted step, held until the optimizer reports that step accepted.
+    pub(crate) pending_first_order_mode: Option<ConstrainedWarmStart>,
 }
 
 impl CustomOuterState {
     pub(crate) fn new_with_cold_signal(
         warm_start: Option<ConstrainedWarmStart>,
         force_cold_signal: Arc<AtomicBool>,
+        accepted_step_signal: Arc<AtomicUsize>,
     ) -> Self {
+        let accepted_steps_adopted = accepted_step_signal.load(Ordering::Relaxed);
         Self {
             warm_cache: warm_start.clone(),
             reset_warm_cache: warm_start,
@@ -1184,6 +1203,10 @@ impl CustomOuterState {
             outer_derivative_pilot: None,
             force_cold_signal,
             force_cold_latched: false,
+            accepted_step_signal,
+            accepted_steps_adopted,
+            incumbent_established: false,
+            pending_first_order_mode: None,
         }
     }
 
@@ -1197,6 +1220,39 @@ impl CustomOuterState {
             self.force_cold_latched = true;
         }
         self.force_cold_latched
+    }
+
+    /// Fold in every outer step the optimizer accepted since the previous
+    /// evaluation (#2668). Called at the head of each search evaluation.
+    ///
+    /// The accept observer fires once the accepted iterate's first-order
+    /// evaluation has run, so the pending mode is that iterate's, and it becomes
+    /// the seed. A move the observer never reports leaves the older incumbent
+    /// seeding, which still does not depend on any rejected trial.
+    pub(crate) fn adopt_accepted_steps(&mut self) {
+        let reported = self.accepted_step_signal.load(Ordering::Relaxed);
+        if reported == self.accepted_steps_adopted {
+            return;
+        }
+        self.accepted_steps_adopted = reported;
+        if let Some(mode) = self.pending_first_order_mode.take() {
+            self.warm_cache = Some(mode);
+        }
+    }
+
+    /// Record the inner mode of a converged first-order evaluation (#2668).
+    ///
+    /// The first one after a reset is the search's starting iterate and seeds at
+    /// once. Every later one waits until [`Self::adopt_accepted_steps`] sees its
+    /// step accepted, and a trial the optimizer rejects is replaced by the next
+    /// trial's mode without ever seeding. Value probes record nothing.
+    pub(crate) fn record_first_order_mode(&mut self, mode: ConstrainedWarmStart) {
+        if self.incumbent_established {
+            self.pending_first_order_mode = Some(mode);
+        } else {
+            self.warm_cache = Some(mode);
+            self.incumbent_established = true;
+        }
     }
 
     pub(crate) fn with_outer_derivative_pilot(
@@ -1226,6 +1282,11 @@ impl CustomOuterState {
     pub(crate) fn reset(&mut self) {
         self.warm_cache = self.reset_warm_cache.clone();
         self.terminal_mode = None;
+        // The reset seed is the caller's, not an evaluated incumbent, and steps
+        // accepted before the reset belong to the previous search (#2668).
+        self.incumbent_established = false;
+        self.pending_first_order_mode = None;
+        self.accepted_steps_adopted = self.accepted_step_signal.load(Ordering::Relaxed);
         // #2349: the cold-reeval latch deliberately SURVIVES reset. `reset` runs
         // between screened seeds/retries AND immediately before terminal
         // certification (run.rs finalize/certify); clearing it there would
@@ -1286,6 +1347,9 @@ impl CustomOuterState {
         let warm_start = constrained_warm_start_from_cached_beta(rho_dim, specs, beta)?;
         self.reset_warm_cache = Some(warm_start.clone());
         self.warm_cache = Some(warm_start);
+        // A caller's seed β is not an evaluated incumbent (#2668).
+        self.incumbent_established = false;
+        self.pending_first_order_mode = None;
         self.last_error = None;
         Ok(gam_solve::rho_optimizer::SeedOutcome::Installed)
     }
@@ -1444,15 +1508,19 @@ pub(crate) struct OwnedDenseHessianOperator {
 #[cfg(test)]
 mod test_support {
     use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     use super::{ConstrainedWarmStart, CustomOuterState};
 
     impl CustomOuterState {
-        /// Test-only constructor: a fresh private cold-reeval signal (#2349),
-        /// for tests that never exercise the stuck-stall pulse.
+        /// Test-only constructor: fresh private cold-reeval (#2349) and
+        /// accepted-step (#2668) signals, for tests that exercise neither.
         pub(crate) fn new(warm_start: Option<ConstrainedWarmStart>) -> Self {
-            Self::new_with_cold_signal(warm_start, Arc::new(AtomicBool::new(false)))
+            Self::new_with_cold_signal(
+                warm_start,
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicUsize::new(0)),
+            )
         }
     }
 }

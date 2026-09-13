@@ -2387,6 +2387,10 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     // objective surface instead of grinding to `max_iter` at a non-stationary
     // point.
     let outer_force_cold = Arc::new(AtomicBool::new(false));
+    // #2668 — accepted outer steps, advanced by the optimizer's accept observer.
+    // The outer-eval closures read it so that only an accepted iterate's inner
+    // mode seeds the search, and a rejected trial never does.
+    let outer_accepted_steps = Arc::new(AtomicUsize::new(0));
     let mut outer_options = options.clone();
     outer_options.screening_max_inner_iterations = Some(Arc::clone(&screening_cap));
 
@@ -2560,7 +2564,10 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     // fallback is the anchored mode: cold means CANONICAL, not arbitrary.
     let canonical_seed = initial_warm_cache.clone();
     let problem = OuterProblem::new(n_rho)
-        .with_stuck_stall_cold_reeval_signal(Arc::clone(&outer_force_cold))
+        .with_stuck_stall_cold_reeval_signal(
+            Arc::clone(&outer_force_cold),
+            Arc::clone(&outer_accepted_steps),
+        )
         .with_gradient(cap_gradient)
         .with_hessian(hessian)
         // #2359's optimize-3/certify-4 lifecycle (#2898). The exact Hessian stays
@@ -2725,12 +2732,15 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         // and runs cold so search descends a trajectory-independent objective
         // surface.
         let force_cold = outer.take_force_cold();
+        // #2668: a step the optimizer accepted since the previous evaluation
+        // promotes its iterate's mode to the seed before this evaluation reads it.
+        outer.adopt_accepted_steps();
         // Genuinely value-only fulfilment (#979). A `Value` request from an outer
         // cost, screening, or reactive-domain probe never consumes the outer
         // gradient. The inner solve in `EvalMode::ValueOnly` already produces the
-        // converged block β; surface it as `inner_beta_hint` (and into
-        // `outer.warm_cache`) with a zero-length gradient and skip the full
-        // k²·n·p² coupled-joint LAML gradient assembly.
+        // converged block β; surface it as `inner_beta_hint` with a zero-length
+        // gradient and skip the full k²·n·p² coupled-joint LAML gradient assembly.
+        // A value probe seeds nothing: only an accepted iterate's mode does (#2668).
         if matches!(order, OuterEvalOrder::Value) {
             let warm_ref = if force_cold {
                 canonical_seed.as_ref()
@@ -2755,7 +2765,6 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                             .iter()
                             .flat_map(|beta| beta.iter().copied()),
                     ));
-                    outer.warm_cache = Some(eval.warm_start);
                     outer.last_error = None;
                     Ok(OuterEval {
                         cost: eval.objective,
@@ -2773,10 +2782,8 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     } else {
                         inner_solve_not_converged_error(&eval.inner, rho.len(), 0)
                     };
-                    // An unconverged solve never seeds the next evaluation (#2902).
-                    if eval.inner_converged {
-                        outer.warm_cache = Some(eval.warm_start);
-                    }
+                    // A value probe never seeds the next evaluation (#2668), and an
+                    // unconverged solve never does either (#2902).
                     outer.last_error = Some(failure);
                     Ok(OuterEval::infeasible(rho.len()))
                 }
@@ -2864,7 +2871,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     } =>
             {
                 let warm_start = eval.warm_start.clone();
-                outer.warm_cache = Some(warm_start.clone());
+                outer.record_first_order_mode(warm_start.clone());
                 store_persistent_custom_family_warm_start(
                     persistent_warm_start_cache.as_ref(),
                     specs,
@@ -2937,19 +2944,23 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         CustomOuterState::new_with_cold_signal(
             initial_warm_cache,
             Arc::clone(&outer_force_cold),
+            Arc::clone(&outer_accepted_steps),
         )
         .with_outer_derivative_pilot(family.outer_derivative_pilot_schedule()),
         |outer: &mut CustomOuterState, rho: &Array1<f64>| {
-            // Always use warm cache when available — the previous inner solution
-            // gives a much better starting point. This was previously disabled for
-            // exact-Hessian families, forcing every inner solve to start from
-            // scratch (5-10 Newton steps instead of 1-2 with warm start).
+            // Start from the incumbent's inner mode when there is one — a converged
+            // inner solution gives a much better starting point. This was previously
+            // disabled for exact-Hessian families, forcing every inner solve to start
+            // from scratch (5-10 Newton steps instead of 1-2 with warm start).
             //
             // #2349: once the outer cost-stall guard has raised the cold-reeval
             // pulse (near-separating warm-start hysteresis), drop the warm cache
             // and run this probe cold so the profiled objective is a consistent
             // function of ρ.
             let force_cold = outer.take_force_cold();
+            // #2668: an accepted step promotes its iterate's mode before this probe
+            // reads the seed, and the probe itself never replaces it.
+            outer.adopt_accepted_steps();
             let warm_ref = if force_cold {
                 canonical_seed.as_ref()
             } else {
@@ -2967,7 +2978,6 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             ) {
                 Ok(eval) if eval.inner_converged && eval.objective.is_finite() => {
                     crate::warm_start::publish_outer_selected_evaluation(&eval);
-                    outer.warm_cache = Some(eval.warm_start);
                     outer.last_error = None;
                     Ok(eval.objective)
                 }
@@ -2980,10 +2990,8 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     } else {
                         inner_solve_not_converged_error(&eval.inner, rho.len(), 0)
                     };
-                    // An unconverged solve never seeds the next evaluation (#2902).
-                    if eval.inner_converged {
-                        outer.warm_cache = Some(eval.warm_start);
-                    }
+                    // A value probe never seeds the next evaluation (#2668), and an
+                    // unconverged solve never does either (#2902).
                     outer.last_error = Some(failure);
                     // Recoverable (data-driven): this value-only probe is the
                     // line-search cost the outer optimizer calls most often. A

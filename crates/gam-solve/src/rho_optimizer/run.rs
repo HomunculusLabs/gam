@@ -566,10 +566,20 @@ impl OuterProblem {
     /// scheduling (custom families hold their real inner cap separately).
     /// Objectives that do not warm-start, or never near-separate, simply never
     /// observe the flag raised.
-    pub fn with_stuck_stall_cold_reeval_signal(self, signal: Arc<AtomicBool>) -> Self {
+    ///
+    /// `accepted_steps` becomes the channel's accepted-step counter, which the
+    /// optimizer's accept observer advances once per accepted outer step. The
+    /// caller reads it in the same closure so that only an accepted iterate
+    /// seeds its warm start. A rejected trial that seeded the next trial with its
+    /// own inner mode made the objective depend on search history (#2668).
+    pub fn with_stuck_stall_cold_reeval_signal(
+        self,
+        signal: Arc<AtomicBool>,
+        accepted_steps: Arc<AtomicUsize>,
+    ) -> Self {
         self.with_outer_inner_cap(InnerProgressFeedback {
             cap: Arc::new(AtomicUsize::new(0)),
-            accepted_iter: Arc::new(AtomicUsize::new(0)),
+            accepted_iter: accepted_steps,
             // `last_iters == 0` ⇒ `snapshot()` returns `None` ⇒ no cap-schedule
             // adaptation is derived from this dummy; `last_converged == true`
             // matches the `None` default of `inner_solve_converged`, so

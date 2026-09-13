@@ -5915,6 +5915,101 @@ pub(crate) fn labeled_terminal_mode_keeps_one_outer_rho_for_two_physical_penalti
     assert_eq!(terminal.theta.len(), 1);
 }
 
+/// #2668 row 30: only an accepted outer iterate seeds the search. A trial the
+/// optimizer rejects must not leave its inner mode as the next trial's seed.
+/// That made the profiled objective depend on search history, and on row 30 two
+/// converged inner modes at one ρ (348.108 and 351.557) alternated under the line
+/// search for 360 s. Re-evaluating the incumbent after a rejected trial must
+/// reproduce the incumbent's cost bit for bit.
+#[test]
+pub(crate) fn rejected_outer_trial_never_displaces_the_incumbent_mode_2668() {
+    let family = OneBlockGaussianFamily {
+        y: array![0.3, -1.1, 0.8, 2.0, -0.4, 1.5],
+    };
+    let specs = vec![ParameterBlockSpec {
+        name: "incumbent_seed".to_string(),
+        design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(array![
+            [1.0, -1.0],
+            [1.0, -0.6],
+            [1.0, -0.2],
+            [1.0, 0.2],
+            [1.0, 0.6],
+            [1.0, 1.0],
+        ])),
+        offset: Array1::zeros(6),
+        penalties: vec![PenaltyMatrix::Dense(Array2::<f64>::eye(2))],
+        nullspace_dims: vec![0],
+        initial_log_lambdas: array![0.0],
+        initial_beta: Some(Array1::zeros(2)),
+        gauge_priority: 100,
+        jacobian_callback: None,
+        stacked_design: None,
+        stacked_offset: None,
+    }];
+    let options = BlockwiseFitOptions {
+        compute_covariance: false,
+        ..BlockwiseFitOptions::default()
+    };
+    let penalty_counts = validate_blockspecs(&specs).expect("valid incumbent-seed spec");
+    let layout = penalty_label_layout_with_joint(&specs, penalty_counts, Vec::new())
+        .expect("valid incumbent-seed layout");
+    let accepted_steps = Arc::new(AtomicUsize::new(0));
+    let mut state = CustomOuterState::new_with_cold_signal(
+        None,
+        Arc::new(AtomicBool::new(false)),
+        Arc::clone(&accepted_steps),
+    );
+    let evaluate = |state: &CustomOuterState, theta: &Array1<f64>| {
+        outerobjectivegradienthessian_labeled(
+            &family,
+            &specs,
+            &options,
+            &layout,
+            theta,
+            screened_outer_warm_start(state.warm_cache.as_ref(), theta),
+            &gam_problem::RhoPrior::Flat,
+            EvalMode::ValueAndGradient,
+        )
+        .expect("incumbent-seed outer evaluation")
+    };
+
+    let incumbent_theta = array![0.5];
+    let incumbent = evaluate(&state, &incumbent_theta);
+    state.adopt_accepted_steps();
+    state.record_first_order_mode(incumbent.warm_start.clone());
+
+    // A trial evaluated with its gradient (a Strong-Wolfe trial or an ARC trial)
+    // that the optimizer then rejects: no accepted step is reported.
+    let trial_theta = array![3.0];
+    let trial = evaluate(&state, &trial_theta);
+    state.record_first_order_mode(trial.warm_start.clone());
+    state.adopt_accepted_steps();
+    assert_eq!(
+        state.warm_cache.as_ref().map(|seed| seed.rho.clone()),
+        Some(incumbent_theta.clone()),
+        "a rejected trial's inner mode must not seed the search",
+    );
+    let reevaluated = evaluate(&state, &incumbent_theta);
+    assert_eq!(
+        reevaluated.objective.to_bits(),
+        incumbent.objective.to_bits(),
+        "re-evaluating the incumbent after a rejected trial must reproduce its cost bit for \
+         bit: {:.17e} against {:.17e}",
+        reevaluated.objective,
+        incumbent.objective,
+    );
+
+    // Once the optimizer accepts a trial's step, that trial's mode seeds the search.
+    state.record_first_order_mode(trial.warm_start.clone());
+    accepted_steps.fetch_add(1, Ordering::Relaxed);
+    state.adopt_accepted_steps();
+    assert_eq!(
+        state.warm_cache.as_ref().map(|seed| seed.rho.clone()),
+        Some(trial_theta),
+        "an accepted trial's inner mode seeds the search",
+    );
+}
+
 #[test]
 pub(crate) fn owned_joint_penalty_geometry_uses_terminal_workspace_without_family_replay() {
     #[derive(Clone)]
