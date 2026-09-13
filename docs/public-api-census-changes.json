@@ -3623,5 +3623,26 @@
     },
     "reason": "#2829 product-root rule: ResidualCascadeDesign::log_lambda_domain, restored in place from d484a091a, has no product caller. Its only caller was the root residual_cascade_certification test past_cap_point_criterion_is_solve_free_but_auto_reml_needs_exact_proof_2503_2513. That test gates two things: every representative point of the declared domain stays evaluable past the certified spectrum budget, and auto REML still refuses. The accessor is deleted, and the test moves into the gam-solve residual_cascade test module. There it reads the same domain through the crate-private REML profile, on the module's scattered 800-row fixture at level 8, with the same premise, the same point evaluations and the same typed refusal.",
     "evidence": "At 0eb9f3c96f62257fee5e35724135f6d5e51ef1a8, git grep -n -w log_lambda_domain over crates, src, tests, examples, bench and benches finds:\n- in crates/gam-solve/src/residual_cascade.rs: the ResidualCascadeDesign accessor with its delegation, and the crate-private CascadeRemlProfile::log_lambda_domain with one production call and three calls in the residual_cascade test module;\n- one call in tests/misc/misc/residual_cascade_certification.rs;\n- an unrelated private function in gam-models survival/marginal_slope/fit_setup.rs. Pool job 612031 on sw0k at b4753af5fe359ab3ad65afaa6ef90a42f10e13a4, the chain latentflat, linalg, runtime, solve, spec, terms, logit, cascade, kl on 07f9b8d88bcd5a060d5003a98298a977412467cf, whose Rust blobs this landing reproduces (log /scratch.global/sauer354/pool/api2829/check.612031.log): source_removal_guard.py and public_api_census.py exited 0 on all nine links, and cargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0. The same job's run of the moved residual_cascade past-cap test had not reported when these landed."
+  },
+  {
+    "base": "926f62efe32cdc39e1e2bbc4556b7e09a857a79e",
+    "removed": {
+      "crates/gam-solve/src/rho_optimizer/kl_certificate.rs::new": 1,
+      "crates/gam-solve/src/rho_optimizer/kl_certificate.rs::with_capacity": 1,
+      "crates/gam-solve/src/rho_optimizer/kl_certificate.rs::push": 1,
+      "crates/gam-solve/src/rho_optimizer/kl_certificate.rs::capacity": 1,
+      "crates/gam-solve/src/rho_optimizer/kl_certificate.rs::len": 1,
+      "crates/gam-solve/src/rho_optimizer/kl_certificate.rs::is_empty": 1,
+      "crates/gam-solve/src/rho_optimizer/kl_certificate.rs::entries": 1,
+      "crates/gam-solve/src/rho_optimizer/kl_certificate.rs::total_decrease": 1,
+      "crates/gam-solve/src/rho_optimizer/kl_certificate.rs::total_step_norm_sq": 1,
+      "crates/gam-solve/src/rho_optimizer/kl_certificate.rs::observed_count": 1,
+      "crates/gam-solve/src/rho_optimizer/kl_certificate.rs::resid": 1,
+      "crates/gam-solve/src/rho_optimizer/kl_certificate.rs::fit_rate": 1,
+      "crates/gam-solve/src/rho_optimizer/kl_certificate.rs::assess": 1,
+      "crates/gam-solve/src/rho_optimizer/kl_certificate.rs::monotonicity_defect": 1
+    },
+    "reason": "#2829 product-root rule, and the user's directive to delete code only tests reach: gam_solve::rho_optimizer::kl_certificate, the #2337 KL rate-certificate module, has no product caller. Its one entry point, assess, restored in place from d484a091a, is called nowhere, and nothing outside the file uses any of its types or functions. fit_rate and monotonicity_defect, narrowed to pub(crate) earlier, are called only by assess, and the module's one unit test exercises only the DecreaseWindow accumulators. The module is deleted with its mod declaration. Its verdicts are judged against an iteration budget, so it is not the stationarity certificate the #2817 ruling calls for.",
+    "evidence": "At 926f62efe32cdc39e1e2bbc4556b7e09a857a79e, git grep -n -w kl_certificate over crates, src, tests and examples finds only the pub mod line in crates/gam-solve/src/rho_optimizer.rs. git grep -n -w -E 'DecreaseWindow|DecreaseEntry|RateModel|forecast_iters' finds nothing outside the module, and every LoopVerdict occurrence outside it names gam_solve::loop_guard::LoopVerdict. Inside the module, assess has no caller, and fit_rate and monotonicity_defect are called only by assess. Pool job 612031 on sw0k at b4753af5fe359ab3ad65afaa6ef90a42f10e13a4, the chain latentflat, linalg, runtime, solve, spec, terms, logit, cascade, kl on 07f9b8d88bcd5a060d5003a98298a977412467cf, whose Rust blobs this landing reproduces (log /scratch.global/sauer354/pool/api2829/check.612031.log): source_removal_guard.py and public_api_census.py exited 0 on all nine links, and cargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0. The same job's run of the moved residual_cascade past-cap test had not reported when these landed."
   }
 ]

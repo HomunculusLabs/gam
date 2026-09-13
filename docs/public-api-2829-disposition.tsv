@@ -1002,10 +1002,10 @@ crates/gam-solve/src/residual_cascade.rs	logdet_slq	retired-no-product-user
 crates/gam-solve/src/residual_cascade.rs	num_coeffs	restored-in-place
 crates/gam-solve/src/residual_cascade.rs	num_nonzeros	retired-no-product-user
 crates/gam-solve/src/residual_cascade.rs	sample_coefficients	retired-no-product-user
-crates/gam-solve/src/rho_optimizer/kl_certificate.rs	assess	restored-in-place
+crates/gam-solve/src/rho_optimizer/kl_certificate.rs	assess	retired-no-product-user
 crates/gam-solve/src/rho_optimizer/kl_certificate.rs	energy_budget_defect	retired-no-product-user
-crates/gam-solve/src/rho_optimizer/kl_certificate.rs	fit_rate	narrowed-to-crate
-crates/gam-solve/src/rho_optimizer/kl_certificate.rs	monotonicity_defect	narrowed-to-crate
+crates/gam-solve/src/rho_optimizer/kl_certificate.rs	fit_rate	retired-no-product-user
+crates/gam-solve/src/rho_optimizer/kl_certificate.rs	monotonicity_defect	retired-no-product-user
 crates/gam-solve/src/rho_optimizer/objective.rs	with_fixed_point_certificate	retired-no-surviving-dependent
 crates/gam-solve/src/rho_optimizer/run.rs	with_arc_initial_regularization	retired-no-surviving-dependent
 crates/gam-solve/src/rho_optimizer/run.rs	with_operator_initial_trust_radius	retired-no-surviving-dependent

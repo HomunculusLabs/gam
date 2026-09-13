@@ -53,7 +53,6 @@ mod capability;
 #[path = "rho_optimizer/efs_fallback_routing_tests.rs"]
 mod efs_fallback_routing_tests;
 mod hessian_operator;
-pub mod kl_certificate;
 mod objective;
 pub mod rail_face;
 #[cfg(test)]
