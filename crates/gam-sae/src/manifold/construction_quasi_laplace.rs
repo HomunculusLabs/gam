@@ -3723,7 +3723,18 @@ impl SaeManifoldTerm {
         // so their Gram-Schmidt survivors occupy the FRONT of `gauge_span`;
         // `exact_basis_count` records that contiguous prefix.
         let mut exact_basis_count = 0usize;
+        // A candidate that lies in the span of the stored bases must come out of
+        // modified Gram–Schmidt as rounding, and nothing more. Each projection forms
+        // one length-`full_len` inner product and updates every entry with a product
+        // and a subtraction, leaking at most `γ_{full_len+4}·‖g₀‖`; it also leaks what
+        // the stored bases' own loss of orthogonality leaves behind, at most
+        // `Σ_j ω_j·‖g₀‖`. After `k` projections a dependent residual therefore stays
+        // inside `k·(γ_{full_len+4} + Σ_j ω_j)·‖g₀‖`, and a basis stored from a
+        // residual `r` of a candidate `g₀` carries `ω = band·‖g₀‖/‖r‖`.
+        let projection_growth = gam_linalg::roundoff::accumulation_growth(full_len + 4);
+        let mut orthogonality_defect = 0.0_f64;
         for (raw_idx, mut gauge) in raw_gauges.into_iter().enumerate() {
+            let initial_norm_sq = gauge.iter().map(|v| v * v).sum::<f64>();
             for basis in &gauge_span {
                 let coeff = gauge.dot(basis);
                 for i in 0..gauge.len() {
@@ -3731,9 +3742,11 @@ impl SaeManifoldTerm {
                 }
             }
             let norm_sq = gauge.iter().map(|v| v * v).sum::<f64>();
-            if !(norm_sq.is_finite() && norm_sq > 1.0e-24) {
+            let band = gauge_span.len() as f64 * (projection_growth + orthogonality_defect);
+            if !(norm_sq.is_finite() && norm_sq > band * band * initial_norm_sq) {
                 continue;
             }
+            orthogonality_defect += band * (initial_norm_sq / norm_sq).sqrt();
             let inv_norm = norm_sq.sqrt().recip();
             for value in gauge.iter_mut() {
                 *value *= inv_norm;
@@ -3832,10 +3845,25 @@ impl SaeManifoldTerm {
         // the scope note at the candidate site above); add any
         // of its directions the floor loop dropped, orthogonalized against what
         // was already kept, so the deflation dimension is ρ-stable. When the
-        // floor already kept a gauge, its residual here is ~0 and it is not
-        // double-counted.
+        // floor already kept a gauge, its residual here lies inside the band below
+        // and it is not double-counted.
+        //
+        // The band is the span construction's modified Gram–Schmidt band, taken
+        // against the kept directions. Each kept direction is a normalized
+        // combination `G·v` of the span bases with a computed eigenvector column `v`,
+        // so against another kept direction it is off orthogonality by at most
+        // `‖GᵀG − I‖₂ ≤ span_rank·Σ_j ω_j` (the span's own defect), plus the
+        // eigenvector columns' orthogonality (`O(span_rank·u)` for a Householder-based
+        // symmetric eigensolver, counted as `γ_{span_rank}`), plus the combination's
+        // formation, `γ_{span_rank}·√span_rank` per vector.
+        let kept_defect = span_rank as f64 * orthogonality_defect
+            + gam_linalg::roundoff::accumulation_growth(span_rank)
+                * (1.0 + 2.0 * (span_rank as f64).sqrt());
+        let mut kept_orthogonality_defect = orthonormal.len() as f64 * kept_defect;
         for exact_idx in 0..exact_basis_count {
             let mut direction = gauge_span[exact_idx].clone();
+            let initial_norm_sq = direction.iter().map(|v| v * v).sum::<f64>();
+            let band = orthonormal.len() as f64 * (projection_growth + kept_orthogonality_defect);
             for kept in &orthonormal {
                 let coeff = direction.dot(kept);
                 for row in 0..direction.len() {
@@ -3843,9 +3871,10 @@ impl SaeManifoldTerm {
                 }
             }
             let norm_sq = direction.iter().map(|v| v * v).sum::<f64>();
-            if !(norm_sq.is_finite() && norm_sq > 1.0e-24) {
+            if !(norm_sq.is_finite() && norm_sq > band * band * initial_norm_sq) {
                 continue;
             }
+            kept_orthogonality_defect += band * (initial_norm_sq / norm_sq).sqrt();
             let inv_norm = norm_sq.sqrt().recip();
             for value in direction.iter_mut() {
                 *value *= inv_norm;
