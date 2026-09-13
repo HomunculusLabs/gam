@@ -128,12 +128,6 @@ pub enum KappaEstimateSupport {
 }
 
 impl KappaEstimateSupport {
-    /// `true` when the box constraint was active at `κ̂`, i.e. the reported
-    /// curvature is a property of the search box and not only of the data.
-    pub fn is_railed(self) -> bool {
-        !matches!(self, Self::Interior)
-    }
-
     /// Serialized provenance label, for the report surfaces.
     pub fn label(self) -> &'static str {
         match self {
@@ -184,11 +178,6 @@ pub enum RangeEstimateSupport {
 }
 
 impl RangeEstimateSupport {
-    /// `true` when `ℓ̂` is an interior stationary point of the range criterion.
-    pub fn is_interior(self) -> bool {
-        matches!(self, Self::Interior)
-    }
-
     /// Serialized provenance label, for the report surfaces.
     pub fn label(self) -> &'static str {
         match self {

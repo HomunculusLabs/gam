@@ -18,8 +18,8 @@ crates/gam-geometry/src/closure_family.rs	design_jet	retired-by-later-deletion:f
 crates/gam-geometry/src/closure_family.rs	profile_ci_from_grid	retired-by-owner:spec-search
 crates/gam-geometry/src/closure_family.rs	row_jet	retired-no-product-user
 crates/gam-geometry/src/curvature_estimand.rs	design_coord_kappa_derivative	retired-no-product-user
-crates/gam-geometry/src/curvature_estimand.rs	is_interior	restored-in-place
-crates/gam-geometry/src/curvature_estimand.rs	is_railed	restored-in-place
+crates/gam-geometry/src/curvature_estimand.rs	is_interior	retired-no-product-user
+crates/gam-geometry/src/curvature_estimand.rs	is_railed	retired-no-product-user
 crates/gam-geometry/src/manifolds/constant_curvature.rs	distance_batch	retired-no-product-user
 crates/gam-geometry/src/manifolds/constant_curvature.rs	exp_map_kappa_jet	retired-by-later-deletion:df77c6fc2f
 crates/gam-geometry/src/manifolds/constant_curvature.rs	jacobian_radial	retired-by-later-deletion:f83e9aebaf
