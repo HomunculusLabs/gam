@@ -5207,7 +5207,11 @@ pub(crate) fn run_joint_fit_arrow_schur_escalates_ridge_on_non_pd_row_block() {
         // regularization on `t` comes from `ridge_ext_coord`.
         Array2::<f64>::zeros((3, 3)),
     )
-    .unwrap();
+    .unwrap()
+    // The joint fit prices its logdet theta-adjoint off the atom's second
+    // basis jet, so a periodic atom must carry the evaluator of its own basis,
+    // as every sibling periodic fixture does.
+    .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
     let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
         // Zero assignment mass → H_tt has zero data contribution.
         Array2::<f64>::zeros((3, 1)),
