@@ -149,8 +149,11 @@ fn poisson_draw(seed: u64) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
 }
 
 /// gam's `count ~ s(x1, k=6) + s(x2, k=6)` Poisson/log REML fit on one draw's
-/// TRAIN rows: the posterior-mean count at its TEST rows, and the total EDF.
+/// TRAIN rows: the posterior-mean count at its TEST rows, and the total EDF. A
+/// refused fit names the draw's `seed`, which regenerates its data through
+/// [`poisson_draw`].
 fn gam_test_mean_count(
+    seed: u64,
     x1: &[f64],
     x2: &[f64],
     y: &[f64],
@@ -175,7 +178,9 @@ fn gam_test_mean_count(
         ..FitConfig::default()
     };
     let result = fit_from_formula("count ~ s(x1, k=6) + s(x2, k=6)", &ds, &cfg)
-        .expect("gam poisson fit on train fold");
+        .unwrap_or_else(|err| {
+            panic!("gam poisson fit on the train fold of draw seed {seed}: {err:?}")
+        });
     let FitResult::Standard(fit) = result else {
         panic!("expected a standard GAM fit for the Poisson(log) family");
     };
@@ -229,7 +234,7 @@ fn gam_poisson_log_matches_interpretml_ebm() {
     for k in 0..K_SEEDS {
         let seed = SEED + k as u64;
         let (x1, x2, y) = poisson_draw(seed);
-        let (gam_mu, gam_edf) = gam_test_mean_count(&x1, &x2, &y, &train_idx, &test_idx);
+        let (gam_mu, gam_edf) = gam_test_mean_count(seed, &x1, &x2, &y, &train_idx, &test_idx);
         gam_edf_total += gam_edf;
 
         // The data were generated from a known log-mean, so the true mean at each
