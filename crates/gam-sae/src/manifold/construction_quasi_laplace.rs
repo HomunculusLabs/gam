@@ -5539,6 +5539,12 @@ impl SaeManifoldTerm {
         } else {
             None
         };
+        // #2915 — so does a reduced-Schur clamp-basin price, which the selected
+        // inverse does not see either.
+        let beta_price = match clamp.as_ref() {
+            Some(clamp) => Self::beta_schur_clamp_basin_price_weights(cache, clamp.view())?,
+            None => None,
+        };
         let assignment_dim = self.assignment.assignment_coord_dim();
         let row_loss_weights = self.row_loss_weights.as_deref();
         let mut trace = 0.0_f64;
@@ -5546,7 +5552,7 @@ impl SaeManifoldTerm {
             let q = cache.row_dims[row];
             // The DEFLATED row-block selected inverse from the shared bundle
             // (#2712). The `t–β` block is not contracted here, so it is not built.
-            let (inv_vv, _) = row_selected_inverse_from_probes(
+            let (mut inv_vv, _) = row_selected_inverse_from_probes(
                 cache,
                 row,
                 probes,
@@ -5554,6 +5560,9 @@ impl SaeManifoldTerm {
                 false,
                 "assignment_log_strength_hessian_trace_from_probes",
             )?;
+            if let Some(weights) = beta_price.as_ref() {
+                inv_vv += &weights[row].0;
+            }
             let inverse_diagonal = inv_vv.diag().to_owned();
             let dirs = cache
                 .deflated_row_directions
@@ -5690,6 +5699,17 @@ impl SaeManifoldTerm {
                     }
                     for slot in 0..q {
                         trace += response[[slot, slot]] * d_diag[slot];
+                    }
+                }
+                if let (Some(weights), Some(clamp)) = (beta_price.as_ref(), clamp.as_ref()) {
+                    // The reduced-Schur basin prices read the same logit clamp.
+                    let base = cache.row_offsets[row];
+                    let logit_slots = match self.last_row_layout {
+                        Some(ref layout) => layout.active_atoms[row].len().min(q),
+                        None => assignment_dim.min(q),
+                    };
+                    for slot in 0..logit_slots {
+                        trace += weights[row].1[slot] * clamp[base + slot];
                     }
                 }
             }
@@ -5922,6 +5942,153 @@ impl SaeManifoldTerm {
             }
         }
         Some((explicit, u.dot(&w).dot(&u.t())))
+    }
+
+    /// #2915 — contraction weights for the reduced-Schur clamp-basin prices, which
+    /// the selected inverse does not differentiate.
+    ///
+    /// The evidence factor classifies each eigendirection `w` of the raw reduced
+    /// Schur `S = H_ββ − Σ_i H_βt Φ_i⁻¹ H_tβ` (`Φ_i` the conditioned row blocks) and
+    /// prices a clamp basin at `λ̃_w = λ_w + c_w`, `c_w = wᵀ C w`,
+    /// `C = Σ_i G_iᵀ diag(E_i) G_i`, `G_i = −Φ_i⁻¹ H_tβ^(i)`
+    /// (`exact_a_reduced_classification`). Contracting the selected inverse against
+    /// `dΦ_i` moves `λ̃_w` only through `λ_w`, so a trace is short by `Σ_w dc_w/λ̃_w`.
+    /// For a ρ that moves neither `H_tβ` nor `H_ββ`, `dS = Σ_i G_iᵀ dΦ_i G_i`,
+    /// `dG_i = −Φ_i⁻¹ dΦ_i G_i` and
+    /// `dc_w = wᵀ dC w + 2 Σ_{v≠w} (QᵀCQ)_wv (QᵀdSQ)_vw / (λ_w − λ_v)`.
+    ///
+    /// Returns, per row, `(weight, explicit)`. `weight = (G_iQ) R (G_iQ)ᵀ −
+    /// (Φ_i⁻¹E_iN_i + N_iE_iΦ_i⁻¹)` adds to the row's selected inverse wherever it
+    /// contracts `dΦ_i`, with `R_wv = R_vw` accumulating `(QᵀCQ)_wv / (λ̃_w (λ_w − λ_v))`
+    /// over basins `w` and `N_i = Σ_w (G_i w)(G_i w)ᵀ / λ̃_w`. `explicit[s] = N_i[s, s]`
+    /// contracts a diagonal `dE_i`. A near-degenerate pair takes the gap convention
+    /// of [`Self::row_deflation_frechet_coefficients`]. The work is `O(n·q·K²)`, the
+    /// order of the classification's own clamp metric. `None` when the factor
+    /// records no reduced-Schur clamp basin.
+    pub(crate) fn beta_schur_clamp_basin_price_weights(
+        cache: &ArrowFactorCache,
+        clamp: ArrayView1<'_, f64>,
+    ) -> Result<Option<Vec<(Array2<f64>, Array1<f64>)>>, String> {
+        let Some(spec) = cache.beta_schur_conditioning.as_ref() else {
+            return Ok(None);
+        };
+        let k = cache.k;
+        if spec.evecs.dim() != (k, k)
+            || spec.raw_evals.len() != k
+            || spec.cond_evals.len() != k
+            || spec.conditioning.len() != k
+        {
+            return Err(format!(
+                "beta_schur_clamp_basin_price_weights: the recorded reduced-Schur spectrum does \
+                 not match border width {k}"
+            ));
+        }
+        let basins: Vec<usize> = (0..k)
+            .filter(|&w| {
+                spec.conditioning[w]
+                    == gam_solve::arrow_schur::BetaSchurSpectralConditioning::ClampBasin
+            })
+            .collect();
+        if basins.is_empty() {
+            return Ok(None);
+        }
+        if clamp.len() != cache.delta_t_len() {
+            return Err(format!(
+                "beta_schur_clamp_basin_price_weights: the clamp diagonal has {} entries for {} \
+                 latent coordinates",
+                clamp.len(),
+                cache.delta_t_len()
+            ));
+        }
+        let basis = &spec.evecs;
+        let raw = &spec.raw_evals;
+        let priced = &spec.cond_evals;
+        let eigen_scale = raw
+            .iter()
+            .chain(priced.iter())
+            .copied()
+            .fold(0.0_f64, |scale, value| scale.max(value.abs()));
+        let gap_threshold = eigen_gap_threshold(eigen_scale, k);
+        let n_rows = cache.row_dims.len();
+        // `G_i Q`, one q×K block per row.
+        let mut graphs: Vec<Array2<f64>> = Vec::with_capacity(n_rows);
+        for row in 0..n_rows {
+            let q = cache.row_dims[row];
+            let factor = cache.undamped_factor(row);
+            let mut graph = Array2::<f64>::zeros((q, k));
+            let mut coupled = Array1::<f64>::zeros(q);
+            for v in 0..k {
+                coupled.fill(0.0);
+                if !cache.apply_htbeta_row(row, basis.column(v), &mut coupled) {
+                    return Err(format!(
+                        "beta_schur_clamp_basin_price_weights: H_tβ^({row}) apply failed"
+                    ));
+                }
+                let solved = cholesky_solve_vector(factor, coupled.view());
+                for s in 0..q {
+                    graph[[s, v]] = -solved[s];
+                }
+            }
+            graphs.push(graph);
+        }
+        // `(QᵀCQ)_wv` for every basin `w`.
+        let mut clamp_rotated = Array2::<f64>::zeros((basins.len(), k));
+        for (row, graph) in graphs.iter().enumerate() {
+            let base = cache.row_offsets[row];
+            for (index, &w) in basins.iter().enumerate() {
+                for v in 0..k {
+                    let mut acc = 0.0_f64;
+                    for s in 0..graph.nrows() {
+                        acc += graph[[s, w]] * clamp[base + s] * graph[[s, v]];
+                    }
+                    clamp_rotated[[index, v]] += acc;
+                }
+            }
+        }
+        let mut response = Array2::<f64>::zeros((k, k));
+        for (index, &w) in basins.iter().enumerate() {
+            for v in 0..k {
+                let denom = raw[w] - raw[v];
+                if v == w || denom.abs() <= gap_threshold {
+                    continue;
+                }
+                let weight = clamp_rotated[[index, v]] / (priced[w] * denom);
+                response[[w, v]] += weight;
+                response[[v, w]] += weight;
+            }
+        }
+        let mut out = Vec::with_capacity(n_rows);
+        for (row, graph) in graphs.iter().enumerate() {
+            let q = cache.row_dims[row];
+            let base = cache.row_offsets[row];
+            let factor = cache.undamped_factor(row);
+            let mut weight = graph.dot(&response).dot(&graph.t());
+            let mut basin_gram = Array2::<f64>::zeros((q, q));
+            for &w in &basins {
+                let inv_price = 1.0 / priced[w];
+                for a in 0..q {
+                    for b in 0..q {
+                        basin_gram[[a, b]] += inv_price * graph[[a, w]] * graph[[b, w]];
+                    }
+                }
+            }
+            // `Φ_i⁻¹ E_i N_i`, one Cholesky solve per column.
+            let mut clamped_solve = Array2::<f64>::zeros((q, q));
+            let mut rhs = Array1::<f64>::zeros(q);
+            for col in 0..q {
+                for s in 0..q {
+                    rhs[s] = clamp[base + s] * basin_gram[[s, col]];
+                }
+                let solved = cholesky_solve_vector(factor, rhs.view());
+                for s in 0..q {
+                    clamped_solve[[s, col]] = solved[s];
+                }
+            }
+            weight -= &clamped_solve;
+            weight -= &clamped_solve.t();
+            out.push((weight, basin_gram.diag().to_owned()));
+        }
+        Ok(Some(out))
     }
 
     /// β-tier selected inverse `(H⁻¹)_ββ`, shared across rows (#932 FRONT C). On

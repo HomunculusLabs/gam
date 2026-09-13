@@ -1123,12 +1123,18 @@ impl SaeManifoldTerm {
         } else {
             None
         };
+        // #2915 — so does a reduced-Schur clamp-basin price.
+        let beta_price = match clamp.as_ref() {
+            Some(clamp) => Self::beta_schur_clamp_basin_price_weights(cache, clamp.view())
+                .map_err(|reason| ArrowSchurError::SchurFactorFailed { reason })?,
+            None => None,
+        };
         for row in 0..n {
             let w_row = row_w.map_or(1.0, |w| w[row]);
             let q = cache.row_dims[row];
             // The DEFLATED row-block selected inverse from the shared bundle
             // (#2712). The `t–β` block is not contracted here, so it is not built.
-            let (inv_vv, _) = row_selected_inverse_from_probes(
+            let (mut inv_vv, _) = row_selected_inverse_from_probes(
                 cache,
                 row,
                 probes,
@@ -1137,6 +1143,9 @@ impl SaeManifoldTerm {
                 "ard_log_precision_hessian_trace_from_probes",
             )
             .map_err(|reason| ArrowSchurError::SchurFactorFailed { reason })?;
+            if let Some(weights) = beta_price.as_ref() {
+                inv_vv += &weights[row].0;
+            }
             let inv_diag_local = inv_vv.diag().to_owned();
             let dirs = cache
                 .deflated_row_directions
@@ -1185,6 +1194,12 @@ impl SaeManifoldTerm {
                             // `∂E/∂ρ_ard` at slot `s` is the ARD clamp itself: degree one in `α`.
                             traces[k][axis] += 0.5
                                 * (explicit[s] * clamp[row_base + s] + response[[s, s]] * hess);
+                        }
+                    }
+                    if let (Some(weights), Some(clamp)) = (beta_price.as_ref(), clamp.as_ref()) {
+                        if s < q {
+                            // The reduced-Schur basin prices read the same ARD clamp.
+                            traces[k][axis] += 0.5 * weights[row].1[s] * clamp[row_base + s];
                         }
                     }
                 }
