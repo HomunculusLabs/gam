@@ -39,6 +39,7 @@ use gam_solve::structure_search::{MoveBudget, StructureMove};
 use gam_terms::analytic_penalties::AnalyticPenaltyRegistry;
 use gam_terms::inference::structure_evidence::StructureLedger;
 
+use crate::migration_ledger::{BirthSeed, MoveEvidence, MoveStage, SaeMigrationLedger};
 use crate::structure_harvest;
 use crate::tiered::Tier0Mean;
 
@@ -257,6 +258,11 @@ pub struct SaeFitReport {
     /// The anytime-valid structure certificate (#1058/#984), serialized JSON;
     /// absent when no genuine structure search ran.
     pub structure_certificate_json: Option<String>,
+    /// #2023 criterion 3: every birth, death and refusal this fit adjudicated, in
+    /// one account. It holds the residual-factor nursery's promotions (one curved
+    /// birth each, round = the structured-residual pass that made it) and, when the
+    /// structure search ran, its moves, with the `pc_reseed_events` invariant.
+    pub migration: SaeMigrationLedger,
     /// The reported `log_alpha` (ordered Beta--Bernoulli concentration or the caller's α fallback).
     pub reported_log_alpha: f64,
 }
@@ -1167,6 +1173,9 @@ struct SaeFinalizeRequest<'a> {
     entry_label: &'a str,
     /// Fold count for the optimism reference, or `None` to skip it.
     reconstruction_optimism_folds: Option<usize>,
+    /// The moves this fit made before finalization (the residual-factor nursery's
+    /// promotions); the structure search's moves are folded into it.
+    migration: SaeMigrationLedger,
 }
 
 fn finalize_sae_fit_report(
@@ -1195,6 +1204,7 @@ fn finalize_sae_fit_report(
         ridge_beta,
         entry_label,
         reconstruction_optimism_folds,
+        mut migration,
     } = request;
     let (n_obs, p_out) = z.dim();
     term.record_fit_data_collapse_if_needed(z.view(), &rho, max_iter)?;
@@ -1261,6 +1271,9 @@ fn finalize_sae_fit_report(
                 structure_changed = result.structure_changed();
                 term = result.term;
                 rho = result.rho;
+                for mv in &result.migration.moves {
+                    migration.record(mv.clone());
+                }
                 Some(structure_harvest::rounds_to_json(
                     &result.rounds,
                     &result.migration,
@@ -1552,6 +1565,7 @@ fn finalize_sae_fit_report(
         certificate_ledger,
         structure_search_json,
         structure_certificate_json,
+        migration,
         reported_log_alpha,
     })
 }
@@ -1659,6 +1673,9 @@ fn run_sae_manifold_fit_on_target(request: SaeFitRequest) -> Result<SaeFitOutcom
     // builds a genuine WhitenedStructured blend).
     let structured_passes = structured_residual_passes;
     let mut structured_residual_diagnostics: Vec<StructuredResidualPassDiagnostic> = Vec::new();
+    // #2023 criterion 3: the nursery's promotions, folded with the structure
+    // search's moves into the report's one migration account.
+    let mut migration = SaeMigrationLedger::new();
     if structured_passes > 0 && metric_provenance == "Euclidean" {
         let mut prev_model: Option<StructuredResidualModel> = None;
         // #2021 Λ nursery→promotion (evidence-gated). Accumulate residual-factor
@@ -1847,6 +1864,17 @@ fn run_sae_manifold_fit_on_target(request: SaeFitRequest) -> Result<SaeFitOutcom
                     )?;
                     term = grown_term;
                     rho = grown_rho;
+                    // #2023 criterion 3: one curved atom born from the residual-factor
+                    // pool. Its admission is the persistence and energy gate above,
+                    // not a priced criterion delta, so the move carries no evidence.
+                    migration.birth(
+                        MoveStage::Curved,
+                        BirthSeed::ResidualFactor,
+                        1,
+                        Some(pass + 1),
+                        MoveEvidence::none(),
+                        f64::NAN,
+                    );
                     // Drop the promoted lineage so it is not re-promoted; the next
                     // pass rebuilds the objective from the grown `term`/`rho` and
                     // `warm_flat.len()` picks up the enlarged ρ automatically.
@@ -1883,6 +1911,7 @@ fn run_sae_manifold_fit_on_target(request: SaeFitRequest) -> Result<SaeFitOutcom
             ridge_beta,
             reconstruction_optimism_folds,
             entry_label: "SAE fit",
+            migration,
         },
     )?;
     Ok(SaeFitOutcome::Manifold(report))
@@ -2041,6 +2070,7 @@ pub fn run_sae_manifold_certify(
             // discovering one, so there is no selection to price here.
             reconstruction_optimism_folds: None,
             entry_label: "SAE certify entry",
+            migration: SaeMigrationLedger::new(),
         },
     )?;
     Ok(SaeExternalCertificationOutcome::Certified(report))

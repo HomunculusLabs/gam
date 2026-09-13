@@ -1953,6 +1953,7 @@ fn sae_fit_report_into_dict<'py>(
         certificate_ledger,
         structure_search_json,
         structure_certificate_json,
+        migration,
         reported_log_alpha,
         chart_degeneracy,
     } = report;
@@ -2376,6 +2377,9 @@ fn sae_fit_report_into_dict<'py>(
         py_value_error(format!("failed to serialize collapse events: {error}"))
     })?;
     out.set_item("collapse_events", json_value_to_py(py, collapse_events)?)?;
+    // #2023 criterion 3: the fit's migration account on every fit, the nursery's
+    // promotions and the structure search's moves, with its `pc_reseed_events`.
+    out.set_item("migration", json_value_to_py(py, migration.to_json())?)?;
     match structure_search_json {
         Some(json) => out.set_item("structure_search", json)?,
         None => out.set_item("structure_search", py.None())?,
