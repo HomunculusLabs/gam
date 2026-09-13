@@ -1659,7 +1659,9 @@ impl WorkingModelSurvival {
     /// for the monotonicity rule: an event row needs a hazard the arithmetic
     /// resolves as positive (`ln(deriv)` and `1/deriv` enter its likelihood),
     /// a censored row only a derivative not negative beyond rounding. A
-    /// user-supplied monotonicity tolerance is honoured to within the band.
+    /// user-supplied monotonicity tolerance is honoured to within the band. The
+    /// floor is a `<` test, so an event row additionally needs a strictly positive
+    /// derivative: a zero band with a zero derivative clears a zero floor.
     fn derivative_floor(&self, event: bool, band: f64) -> f64 {
         let tolerance = self.derivative_guard();
         if event {
@@ -2309,7 +2311,11 @@ impl WorkingModelSurvival {
             // do not, so a value that is zero to within rounding is feasible
             // there. The floors are the row's own rounding band (#2469).
             let mono_floor = self.derivative_floor(d > 0.0, derivative_band[i]);
-            if !deriv.is_finite() || deriv < mono_floor {
+            // An event row takes `ln(deriv)` and `1/deriv`, so a derivative that
+            // is not strictly positive (a zero band with a zero derivative clears a
+            // zero floor) is an event of likelihood `−∞`, refused here rather than
+            // turned into `ln 0` and `0/0` below.
+            if !deriv.is_finite() || deriv < mono_floor || (d > 0.0 && !(deriv > 0.0)) {
                 return Err(EstimationError::ParameterConstraintViolation(format!(
                     "survival monotonicity violated at row {}: d_eta/dt={:.3e} <= tolerance={:.3e} \
                      (band {:.3e})",
@@ -2785,7 +2791,7 @@ impl WorkingModelSurvival {
                 .stabilized_structural_derivative(deriv_raw, derivative_band[i])
                 .unwrap_or((deriv_raw, 1.0));
             let mono_floor = self.derivative_floor(d > 0.0, derivative_band[i]);
-            if !deriv.is_finite() || deriv < mono_floor {
+            if !deriv.is_finite() || deriv < mono_floor || (d > 0.0 && !(deriv > 0.0)) {
                 return Err(EstimationError::ParameterConstraintViolation(format!(
                     "offset_channel_residuals: derivative ≤ numerical guard at row {i}: {deriv:.3e}"
                 )));
@@ -4304,6 +4310,62 @@ mod tests {
                 grad[idx]
             );
         }
+    }
+
+
+    /// An event at a time where the structural hazard derivative is exactly zero
+    /// has a likelihood of `−∞`: the row's derivative predictor is `0` with no
+    /// rounding accumulated, so its band is `0` and the band clamp reports a value
+    /// of `0`. `update_state` must refuse it as a typed constraint violation
+    /// instead of forming `ln 0` and `0/0`. A censored row with the same zero
+    /// derivative stays feasible, because its likelihood never takes the
+    /// derivative's logarithm.
+    #[test]
+    fn event_at_zero_structural_derivative_is_a_typed_refusal_not_nan() {
+        let age_entry = array![0.0_f64];
+        let age_exit = array![1.0_f64];
+        let event_competing = array![0u8];
+        let sampleweight = array![1.0_f64];
+        let x_entry = array![[1.0_f64, 0.0]];
+        let x_exit = array![[1.0_f64, 0.0]];
+        let x_derivative = array![[0.0_f64, 0.0]];
+        let beta = array![-0.2_f64, 0.4];
+        let build = |event_target: &Array1<u8>| {
+            survival_model_with_offsets(
+                survival_inputs(
+                    &age_entry,
+                    &age_exit,
+                    event_target,
+                    &event_competing,
+                    &sampleweight,
+                    &x_entry,
+                    &x_exit,
+                    &x_derivative,
+                ),
+                None,
+                PenaltyBlocks::new(Vec::new()),
+                SurvivalMonotonicityPenalty { tolerance: 0.0 },
+                SurvivalSpec::Net,
+            )
+            .expect("model build")
+        };
+        let event_model = build(&array![1u8]);
+        match event_model.update_state(&beta) {
+            Err(EstimationError::ParameterConstraintViolation(message)) => assert!(
+                message.contains("row 0"),
+                "the refusal must name the event row: {message}"
+            ),
+            other => assert!(
+                false,
+                "an event at a zero structural derivative must be a typed refusal, got {:?}",
+                other.map(|state| state.deviance)
+            ),
+        }
+        let censored_model = build(&array![0u8]);
+        let state = censored_model
+            .update_state(&beta)
+            .expect("a censored row at a zero structural derivative is feasible");
+        assert!(state.deviance.is_finite(), "deviance {}", state.deviance);
     }
 
     /// The delayed-entry objective's β-gradient and β-Hessian are the
