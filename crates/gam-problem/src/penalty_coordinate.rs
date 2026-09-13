@@ -186,12 +186,14 @@ impl PenaltyCoordinate {
                 dim_index,
                 ..
             } => {
-                // Rank = number of nonzero marginal eigenvalues for this dim,
-                // times the product of all other dims.
-                let nz = eigenvalues[*dim_index]
-                    .iter()
-                    .filter(|&&v| v.abs() > 1e-12)
-                    .count();
+                // Rank = number of marginal eigenvalues for this dim above the
+                // marginal eigensolver's rounding band `γ_{q_k}·max|μ_k|`, the
+                // resolution the Kronecker log-determinant reads the same spectrum
+                // at, times the product of all other dims.
+                let marginal = &eigenvalues[*dim_index];
+                let band = gam_linalg::roundoff::accumulation_growth(marginal.len())
+                    * marginal.iter().fold(0.0_f64, |acc, value| acc.max(value.abs()));
+                let nz = marginal.iter().filter(|&&v| v.abs() > band).count();
                 let other: usize = eigenvalues
                     .iter()
                     .enumerate()
