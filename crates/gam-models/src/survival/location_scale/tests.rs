@@ -948,6 +948,64 @@ fn survival_location_scale_outer_link_shape_gradient_matches_finite_difference_s
             }
         }
     }
+    // Discriminator: the rho 0 central difference with probes solved to a
+    // tolerance tight enough that no one-step KKT correction remains to price.
+    // With r → 0 the difference needs neither IFT correction term, so it is the
+    // profiled derivative the analytic gradient must equal.
+    {
+        use gam_solve::estimate::outer_eval_capture::{enable_rho_outer_audit, take_rho_outer_audit};
+        let tight_options = crate::custom_family::BlockwiseFitOptions {
+            inner_tol: 1e-12,
+            outer_tol: 1e-12,
+            ..options.clone()
+        };
+        let tight_at = |rho_probe: &Array1<f64>, mode: gam_problem::EvalMode| {
+            enable_rho_outer_audit();
+            let probe = crate::custom_family::evaluate_custom_family_joint_hyper_owned(
+                &family_at(epsilon0, log_delta0),
+                &specs,
+                &tight_options,
+                rho_probe,
+                &layout_at(epsilon0, log_delta0),
+                Some(&base.warm_start),
+                mode,
+            )
+            .expect("tight exact-joint LAML evaluation")
+            .result;
+            let kkt = take_rho_outer_audit()
+                .and_then(|probe_audit| probe_audit.criterion)
+                .map_or(f64::NAN, |(_, components)| components[3]);
+            (probe.objective, kkt, probe.inner_converged, probe.gradient)
+        };
+        let (tight_base_value, tight_base_kkt, tight_base_converged, tight_base_gradient) =
+            tight_at(&rho, gam_problem::EvalMode::ValueAndGradient);
+        for step in [1e-4, 1e-3] {
+            let mut plus = rho.clone();
+            plus[0] += step;
+            let mut minus = rho.clone();
+            minus[0] -= step;
+            let (plus_value, plus_kkt, plus_converged, plus_gradient) =
+                tight_at(&plus, gam_problem::EvalMode::ValueOnly);
+            let (minus_value, minus_kkt, minus_converged, minus_gradient) =
+                tight_at(&minus, gam_problem::EvalMode::ValueOnly);
+            eprintln!(
+                "[2695] tight rho 0 h={step:e}: fd={:.9e} (kkt plus={:.3e} minus={:.3e}, \
+                 converged {} {}, gradient lengths {} {}); tight base value={:.12e} kkt={:.3e} \
+                 converged {}, analytic rho 0={:.9e}",
+                (plus_value - minus_value) / (2.0 * step),
+                plus_kkt,
+                minus_kkt,
+                plus_converged,
+                minus_converged,
+                plus_gradient.len(),
+                minus_gradient.len(),
+                tight_base_value,
+                tight_base_kkt,
+                tight_base_converged,
+                tight_base_gradient.get(0).copied().unwrap_or(f64::NAN)
+            );
+        }
+    }
     let shape_difference = |axis: usize, h: f64| {
         let (plus, minus) = if axis == 0 {
             ((epsilon0 + h, log_delta0), (epsilon0 - h, log_delta0))
