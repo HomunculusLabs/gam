@@ -14,17 +14,14 @@ cumulative hazard to its last grid value. So a perfectly ordinary query time
 well inside the *fitted* data range is mistreated as "t = infinity" purely
 because the prediction frame happened to carry a small ``exit`` placeholder.
 
-Concretely: fitting on data with exit times up to ~20 and asking for the
-survival of a 60-year-old at t = 2, 5, 10 returns ``[0, 0, 0]`` when the
-prediction row's ``exit`` is 1.0, but a sensible decreasing curve when ``exit``
-is 18.0 — even though the covariates and query times are identical. The
-predicted survival surface must not depend on the ``exit`` placeholder column
-of the prediction frame.
-
-When the bug is fixed (the surface evaluated for ``survival_at`` must cover the
-requested query times regardless of the prediction frame's placeholder ``exit``
-values, rather than silently extrapolating interior times to the t->inf
-asymptote), this test passes without edits.
+Concretely: under the defect, fitting on data with exit times up to ~20 and
+asking for the survival of a 60-year-old at t = 2, 5, 10 returned ``[0, 0, 0]``
+when the prediction row's ``exit`` was 1.0, but a sensible decreasing curve when
+``exit`` was 18.0, even though the covariates and query times were identical.
+The predicted survival surface must not depend on the ``exit`` placeholder
+column of the prediction frame: the surface evaluated for ``survival_at`` must
+cover the requested query times rather than extrapolate interior times to the
+t->inf asymptote.
 """
 
 import importlib
