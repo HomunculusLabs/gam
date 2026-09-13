@@ -127,9 +127,10 @@ fn build(seed: u64) -> CrData {
 /// single-cause fits:
 ///   H_k(t | x) = (t / scale)^shape_k * exp(eta_k(x)),
 /// where `scale` is the shared fitted Weibull anchor (`baseline_cfg.scale`),
-/// `shape_k = beta_k[1]` (the slope on log-time of the anchor-centered linear
-/// `[1, log t]` time basis for cause k), and `eta_k(x)` is the centered
-/// covariate smooth `cov_design(x) · beta_k[time_base_ncols..]`.
+/// `shape_k = beta_k[0]` (the sole slope of the anchor-centered single-column
+/// `log t` time basis for cause k; #2301 dropped the constant column, whose
+/// location the covariate intercept carries), and `eta_k(x)` is the covariate
+/// smooth `cov_design(x) · beta_k[time_base_ncols..]`.
 ///
 /// Returns one `[grid_x, grid_t]` matrix per cause, in sorted block order
 /// (block index `c` ⇔ event code `c + 1`).
@@ -171,7 +172,7 @@ fn fit_and_cause_cumulative_hazards(
     );
 
     // Shared Weibull anchor (scale) recovered from the fit; per-cause shape is
-    // the log-time slope beta_k[1] of the anchor-centered linear time basis.
+    // the log-time slope beta_k[0] of the anchor-centered single-column time basis.
     let scale = fit
         .baseline_cfg
         .scale
@@ -181,9 +182,10 @@ fn fit_and_cause_cumulative_hazards(
         "fitted Weibull scale must be positive finite, got {scale}"
     );
     let time_base = fit.time_base_ncols;
-    assert!(
-        time_base >= 2,
-        "Weibull time basis must carry at least [1, log t] = 2 columns, got {time_base}"
+    assert_eq!(
+        time_base, 1,
+        "the Weibull linear time basis is the single anchor-centered column log t since #2301, \
+         and this reconstruction reads the shape from beta[0]"
     );
 
     // Build the centered covariate smooth design at every grid x value.
@@ -213,7 +215,7 @@ fn fit_and_cause_cumulative_hazards(
             time_base,
             cov_ncols
         );
-        let shape = beta[1];
+        let shape = beta[0];
         assert!(
             shape.is_finite() && shape > 0.0,
             "cause {} fitted Weibull shape must be positive finite, got {shape}",
