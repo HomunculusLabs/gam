@@ -109,6 +109,7 @@ pub use custom_family_blockwise::{
 };
 pub use custom_family_error::{
     CustomFamilyError,
+    DescendingRayExit,
     InnerConvergenceTerminalState,
     ConstrainedFixedPointCondition, JointNewtonTerminalReason, RayRestoration,
     relative_stationarity,

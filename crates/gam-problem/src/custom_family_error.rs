@@ -187,6 +187,18 @@ impl std::fmt::Display for RayRestoration {
     }
 }
 
+/// How an inner joint Newton that stopped while descending a direction with no
+/// finite minimizer in reach reports that direction, read off its typed terminal
+/// reason (see [`CustomFamilyError::descending_ray_exit`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DescendingRayExit<'a> {
+    /// A block's penalty opposes the ray, and raising that block's log
+    /// strengths by [`RayRestoration::log_strength_ratio`] closes it.
+    Closable(&'a RayRestoration),
+    /// No block's penalty opposes the accepted step, so no `rho` closes the ray.
+    Unpenalized,
+}
+
 impl std::fmt::Display for JointNewtonTerminalReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -700,6 +712,52 @@ impl CustomFamilyError {
             }
         }
     }
+
+    /// The ray the inner joint Newton was still descending when it stopped, or
+    /// `None` for every other refusal.
+    ///
+    /// A ray is a property of the accepted step, so every terminal reason that
+    /// can carry one is read here (gam#2695): the slow-rate exit, and the
+    /// residual-stall and divergence exits that used to drop it. The outer seed
+    /// loop restores a [`DescendingRayExit::Closable`] ray by raising the named
+    /// strengths. Either kind says the objective the solve minimized has no
+    /// finite minimizer in reach along that direction at this `rho` (#979).
+    ///
+    /// The match is exhaustive, so a new terminal reason must be classified when
+    /// it is added.
+    #[must_use]
+    pub fn descending_ray_exit(&self) -> Option<DescendingRayExit<'_>> {
+        let Self::InnerSolveNotConverged {
+            terminal:
+                Some(InnerConvergenceTerminalState::JointNewton {
+                    termination_reason,
+                    ..
+                }),
+            ..
+        } = self
+        else {
+            return None;
+        };
+        match termination_reason {
+            JointNewtonTerminalReason::SlowGeometricRate { ray: Some(ray), .. }
+            | JointNewtonTerminalReason::StalledOnDescendingRay { ray, .. } => {
+                Some(DescendingRayExit::Closable(ray))
+            }
+            JointNewtonTerminalReason::SlowGeometricRate { ray: None, .. } => {
+                Some(DescendingRayExit::Unpenalized)
+            }
+            JointNewtonTerminalReason::CycleBudget
+            | JointNewtonTerminalReason::FullyRejectedExactFixedPoint { .. }
+            | JointNewtonTerminalReason::FullyRejectedAtTrustRegionFloor { .. }
+            | JointNewtonTerminalReason::ResidualNotContracting { .. }
+            | JointNewtonTerminalReason::ConstrainedFixedPointDeclined { .. }
+            | JointNewtonTerminalReason::NonFiniteCurvature { .. }
+            | JointNewtonTerminalReason::NonFiniteInnerState { .. }
+            | JointNewtonTerminalReason::KktCertificateRefused { .. }
+            | JointNewtonTerminalReason::ResidualStall { .. }
+            | JointNewtonTerminalReason::FlatResidualStall { .. } => None,
+        }
+    }
 }
 
 impl From<String> for CustomFamilyError {
@@ -1159,6 +1217,102 @@ mod tests {
         );
         // Negative control: the exit that really exhausted the budget still says so.
         assert_eq!(JointNewtonTerminalReason::CycleBudget.to_string(), "cycle budget");
+    }
+
+    #[test]
+    fn descending_ray_exit_reads_every_ray_carrying_terminal_reason_979() {
+        let ray = RayRestoration {
+            block: 1,
+            rho_first: 2,
+            rho_count: 1,
+            log_strength_ratio: 0.75,
+            likelihood_slope: -3.0,
+            penalty_slope: 1.4,
+            block_step_inf: 0.2,
+        };
+        let refusal = |termination_reason| CustomFamilyError::InnerSolveNotConverged {
+            cycles: 9,
+            terminal: Some(InnerConvergenceTerminalState::JointNewton {
+                cycle: 8,
+                stationarity_residual: 1.0e-1,
+                residual_tol: 1.0e-6,
+                stationarity_scale: 1.0,
+                step_inf: 1.0e-2,
+                step_tol: 1.0e-8,
+                resolvable_negative_curvature: false,
+                best_stationarity_residual: 1.0e-1,
+                cycles_since_best_residual: 0,
+                termination_reason,
+            }),
+            kkt_residual: None,
+            kkt_tol: None,
+            theta_dim: 3,
+            rho_dim: 3,
+            psi_dim: 0,
+        };
+
+        let stalled = refusal(JointNewtonTerminalReason::StalledOnDescendingRay {
+            residual: 1.0e-1,
+            residual_tol: 1.0e-6,
+            cycles: 9,
+            ray,
+        });
+        assert_eq!(
+            stalled.descending_ray_exit(),
+            Some(DescendingRayExit::Closable(&ray))
+        );
+
+        let slow = |carried| {
+            refusal(JointNewtonTerminalReason::SlowGeometricRate {
+                rate_per_cycle: 0.9,
+                window_cycles: 4,
+                projected_cycles_to_tolerance: 120,
+                residual: 1.0e-1,
+                residual_tol: 1.0e-6,
+                ray: carried,
+            })
+        };
+        assert_eq!(
+            slow(Some(ray)).descending_ray_exit(),
+            Some(DescendingRayExit::Closable(&ray))
+        );
+        assert_eq!(
+            slow(None).descending_ray_exit(),
+            Some(DescendingRayExit::Unpenalized)
+        );
+
+        // Negative controls: a residual that did not contract along no ray, a
+        // blockwise terminal state, and a refusal that is not an inner exit carry
+        // no ray.
+        let not_contracting = refusal(JointNewtonTerminalReason::ResidualNotContracting {
+            rate_per_cycle: 1.2,
+            window_cycles: 4,
+            residual: 1.0e-1,
+            residual_tol: 1.0e-6,
+        });
+        assert_eq!(not_contracting.descending_ray_exit(), None);
+        let blockwise = CustomFamilyError::InnerSolveNotConverged {
+            cycles: 9,
+            terminal: Some(InnerConvergenceTerminalState::Blockwise {
+                cycle: 8,
+                max_accepted_step: 1.0e-2,
+                max_proposed_step: 1.0e-2,
+                step_tol: 1.0e-8,
+                objective_change: 1.0e-3,
+                objective_tol: 1.0e-9,
+                joint_stationarity_ok: false,
+            }),
+            kkt_residual: None,
+            kkt_tol: None,
+            theta_dim: 3,
+            rho_dim: 3,
+            psi_dim: 0,
+        };
+        assert_eq!(blockwise.descending_ray_exit(), None);
+        assert_eq!(
+            CustomFamilyError::trial_point("no Laplace mode at this rho").descending_ray_exit(),
+            None
+        );
     }
 }
 

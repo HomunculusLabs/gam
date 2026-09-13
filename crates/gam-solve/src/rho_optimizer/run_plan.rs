@@ -179,34 +179,18 @@ fn should_await_promoted_parsimony_seed(
         && !promoted_seed_is_redundant
 }
 
-/// Evaluate the literal outer seed against the true profiled objective.
-///
-/// Adaptive inner caps are search accelerators. A capped, nonconverged inner
-/// iterate is not a value or derivative of the profiled objective and therefore
-/// cannot reject a seed or initialize an optimizer. Lift the shared cap only for
-/// this sample, preserving any continuation/pilot warm state, then restore the
-/// scheduler before search begins.
 /// The typed ray a custom-family inner solve reported when it stopped
-/// descending a direction with no finite minimizer in reach at this ρ.
+/// descending a direction with no finite minimizer in reach at this ρ, when a
+/// block's penalty can close it.
 fn ray_restoration_in(err: &EstimationError) -> Option<&gam_problem::RayRestoration> {
-    match err {
-        EstimationError::CustomFamily(gam_problem::CustomFamilyError::InnerSolveNotConverged {
-            terminal:
-                Some(gam_problem::InnerConvergenceTerminalState::JointNewton {
-                    termination_reason,
-                    ..
-                }),
-            ..
-        }) => match termination_reason {
-            // A ray is a property of the accepted step, so every terminal
-            // reason that can carry one is read here (gam#2695): the
-            // slow-rate exit, and the residual-stall / divergence exits that
-            // used to drop it.
-            gam_problem::JointNewtonTerminalReason::SlowGeometricRate { ray, .. } => ray.as_ref(),
-            gam_problem::JointNewtonTerminalReason::StalledOnDescendingRay { ray, .. } => Some(ray),
-            _ => None,
-        },
-        _ => None,
+    let EstimationError::CustomFamily(error) = err else {
+        return None;
+    };
+    match error.descending_ray_exit()? {
+        gam_problem::DescendingRayExit::Closable(ray) => Some(ray),
+        // No block's penalty opposes an unpenalized ray, so no raised strength
+        // closes it.
+        gam_problem::DescendingRayExit::Unpenalized => None,
     }
 }
 
@@ -332,6 +316,13 @@ fn eval_seed_restoring_rays(
     }
 }
 
+/// Evaluate the literal outer seed against the true profiled objective.
+///
+/// Adaptive inner caps are search accelerators. A capped, nonconverged inner
+/// iterate is not a value or derivative of the profiled objective and therefore
+/// cannot reject a seed or initialize an optimizer. Lift the shared cap only for
+/// this sample, preserving any continuation/pilot warm state, then restore the
+/// scheduler before search begins.
 fn eval_seed_at_full_inner_fidelity(
     obj: &mut dyn OuterObjective,
     config: &OuterConfig,
