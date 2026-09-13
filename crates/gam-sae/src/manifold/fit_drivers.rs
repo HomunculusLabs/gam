@@ -7616,17 +7616,20 @@ impl SaeManifoldTerm {
         // descent with plateaus gets one block consultation per plateau rather
         // than an unbounded alternation.
         let mut gauge_block_armed = true;
-        // #2283/#2731 — gauge-orbit rounds committed so far in this call. Each of
-        // the three block sites below is bounded by the loop's own remaining
-        // budget, and what they commit is charged against that same budget, so
-        // the block's total over the call stays inside it. Bounding each visit by
-        // `max_iter − outer_iteration` alone charged nothing: a block that commits
-        // on every accepted iterate re-spent the whole remaining budget there,
-        // O(max_iter²) rounds per call. Job 578028 at 90c86056d (`n = 1024,
-        // p = 2048, charts = 32, max_iter = 8`) read `commit+gauge_hook` = 15.71,
-        // 13.82, 11.70, 9.80, 7.89, 6.28, 3.93, 2.03 s over iterations 0–7, i.e.
-        // ≈ 1.96 s × (max_iter − it), against a 1.6 s assembly.
-        let mut gauge_rounds_committed = 0usize;
+        // #2283/#2731 — rounds the PAIRED gauge block (after every accepted iterate,
+        // below) has committed in this call, charged against the loop's own
+        // remaining budget so that block's total over the call stays inside it.
+        // Bounding each visit by `max_iter − outer_iteration` alone charged nothing:
+        // a block that commits at every accepted iterate re-spent the whole
+        // remaining budget there, O(max_iter²) rounds per call. Job 578028 at
+        // 90c86056d (`n = 1024, p = 2048, charts = 32, max_iter = 8`) read
+        // `commit+gauge_hook` = 15.71, 13.82, 11.70, 9.80, 7.89, 6.28, 3.93, 2.03 s
+        // over iterations 0–7, i.e. ≈ 1.96 s × (max_iter − it), against a 1.6 s
+        // assembly. The objective-stall shortcut and the no-strict-decrease rescue
+        // are NOT charged: each precedes a fixed-point exit, and #2762 requires the
+        // block to reach its own stationarity before such a claim
+        // (`the_inner_fit_never_exits_with_material_decrease_left_in_the_removed_span_2762`).
+        let mut paired_gauge_rounds_committed = 0usize;
         let mut state_moved = false;
         // FIRST site to move state — `termination` is set only inside the Newton
         // loop, so without this the out-of-loop sites are unattributable.
@@ -8153,14 +8156,11 @@ impl SaeManifoldTerm {
                                 rho,
                                 analytic_penalties,
                                 &rho.lambda_smooth_vec()?,
-                                max_iter
-                                    .saturating_sub(outer_iteration + gauge_rounds_committed)
-                                    .max(1),
+                                max_iter.saturating_sub(outer_iteration).max(1),
                             )?
                         } else {
                             GaugeOrbitDescent::default()
                         };
-                        gauge_rounds_committed += orbit.rounds;
                         if orbit.moved() {
                             state_moved = true;
                             moved_at.get_or_insert(StateMoveSite::GaugeOrbitDescent);
@@ -8510,19 +8510,15 @@ impl SaeManifoldTerm {
                         // it. `descend_gauge_orbit` returns at the first round
                         // that cannot commit a material decrease, so this is a
                         // bound, not a schedule — and the bound is the outer
-                        // loop's OWN remaining budget, net of the rounds the block
-                        // has already committed in this call, so no second budget
-                        // and no constant enter. Measured on `zz2015` with a
+                        // loop's OWN remaining budget, so no second budget and
+                        // no constant enter. Measured on `zz2015` with a
                         // one-round schedule: each round cost a full Newton
                         // solve + line search + proximal correction to
                         // rediscover that the transverse block had nothing,
                         // which is the expensive half of an iteration spent to
                         // learn something the previous round already proved.
-                        max_iter
-                            .saturating_sub(outer_iteration + gauge_rounds_committed)
-                            .max(1),
+                        max_iter.saturating_sub(outer_iteration).max(1),
                     )?;
-                    gauge_rounds_committed += orbit.rounds;
                     if orbit.moved() {
                         state_moved = true;
                         moved_at.get_or_insert(StateMoveSite::GaugeOrbitDescent);
@@ -8561,10 +8557,10 @@ impl SaeManifoldTerm {
                     analytic_penalties,
                     &rho.lambda_smooth_vec()?,
                     max_iter
-                        .saturating_sub(outer_iteration + gauge_rounds_committed)
+                        .saturating_sub(outer_iteration + paired_gauge_rounds_committed)
                         .max(1),
                 )?;
-                gauge_rounds_committed += orbit.rounds;
+                paired_gauge_rounds_committed += orbit.rounds;
                 if orbit.moved() {
                     state_moved = true;
                     moved_at.get_or_insert(StateMoveSite::GaugeOrbitDescent);
