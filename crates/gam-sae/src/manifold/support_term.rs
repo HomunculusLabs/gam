@@ -3110,6 +3110,30 @@ impl SaeSupportSparseTerm {
             .collect::<Result<Vec<_>, String>>()
     }
 
+    /// One active slot's analytic second jet `∂²Φ/∂t∂t` at `coordinates`, shape
+    /// `(1, m, d, d)`: from the atom's dedicated second-jet evaluator, else its basis
+    /// evaluator's dynamic hook. `None` when the basis exposes neither. Every consumer of
+    /// a slot's exact curvature reads this one seam, so no two of them can disagree about
+    /// it.
+    fn slot_second_jet(
+        &self,
+        atom_index: usize,
+        coordinates: ArrayView2<'_, f64>,
+    ) -> Result<Option<ndarray::Array4<f64>>, String> {
+        let atom = &self.atoms[atom_index];
+        if let Some(evaluator) = atom.basis_second_jet.as_ref() {
+            return evaluator.second_jet(coordinates).map(Some);
+        }
+        match atom
+            .basis_evaluator
+            .as_ref()
+            .and_then(|evaluator| evaluator.second_jet_dyn(coordinates))
+        {
+            Some(second) => second.map(Some),
+            None => Ok(None),
+        }
+    }
+
     fn support_outer_differential_row(
         &self,
         target: ArrayView2<'_, f64>,
@@ -3149,24 +3173,14 @@ impl SaeSupportSparseTerm {
                         )
                     },
                 )?;
-                let second = if let Some(evaluator) = atom.basis_second_jet.as_ref() {
-                    evaluator.second_jet(coordinate_view)?
-                } else {
-                    let evaluator = atom.basis_evaluator.as_ref().ok_or_else(|| {
+                let second = self
+                    .slot_second_jet(atom_index, coordinate_view)?
+                    .ok_or_else(|| {
                         format!(
-                            "support outer differential: atom {atom_index} ('{}') has no analytic basis evaluator",
+                            "support outer differential: atom {atom_index} ('{}') does not expose an analytic second jet",
                             atom.name
                         )
                     })?;
-                    evaluator
-                        .second_jet_dyn(coordinate_view)
-                        .ok_or_else(|| {
-                            format!(
-                                "support outer differential: atom {atom_index} ('{}') does not expose an analytic second jet",
-                                atom.name
-                            )
-                        })??
-                };
                 if second.dim() != (1, m, d, d) {
                     return Err(format!(
                         "support outer differential: row {row}, atom {atom_index} second jet shape {:?} != (1, {m}, {d}, {d})",
