@@ -291,6 +291,25 @@ pub fn intrinsic_geodesic_embedding(
     z: ArrayView2<'_, f64>,
     d: usize,
 ) -> Result<Array2<f64>, String> {
+    intrinsic_geodesic_embedding_on_graph(z, d, &intrinsic_knn_graph(z, d))
+}
+
+/// The neighbourhood graph the intrinsic embedding measures geodesics on: the
+/// deterministic symmetric kNN graph at `intrinsic_seed_knn`'s degree, bridged to one
+/// component. A caller that needs the same graph for another purpose (the local atlas
+/// grows patch membership through it) builds it once here and hands it to
+/// `intrinsic_geodesic_embedding_on_graph`.
+pub(crate) fn intrinsic_knn_graph(z: ArrayView2<'_, f64>, d: usize) -> Vec<Vec<(usize, f64)>> {
+    deterministic_knn_graph(z, intrinsic_seed_knn(z.nrows(), d))
+}
+
+/// `intrinsic_geodesic_embedding` on a neighbourhood graph the caller already built
+/// with `intrinsic_knn_graph` from the same rows and dimension.
+pub(crate) fn intrinsic_geodesic_embedding_on_graph(
+    z: ArrayView2<'_, f64>,
+    d: usize,
+    adj: &[Vec<(usize, f64)>],
+) -> Result<Array2<f64>, String> {
     let n = z.nrows();
     if d == 0 {
         return Ok(Array2::<f64>::zeros((n, 0)));
@@ -326,15 +345,13 @@ pub fn intrinsic_geodesic_embedding(
         out[[1, 0]] = half_distance;
         return Ok(out);
     }
-    let k = intrinsic_seed_knn(n, d).min(n - 1);
-    let adj = deterministic_knn_graph(z, k);
     let l_count = intrinsic_landmark_count(n, d);
     let landmarks = farthest_point_landmarks(z, l_count);
     let l = landmarks.len();
     if l < 2 {
         return Ok(out);
     }
-    let geo = landmark_geodesics(&adj, &landmarks);
+    let geo = landmark_geodesics(adj, &landmarks);
 
     // Squared landmark-to-landmark geodesic matrix, symmetrized (independent
     // Dijkstra runs agree up to float noise; averaging makes it exactly symmetric

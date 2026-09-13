@@ -214,6 +214,74 @@ fn worst_column_heldout_residual(coords: &Array2<f64>, z: &Array2<f64>) -> f64 {
         .fold(f64::NEG_INFINITY, f64::max)
 }
 
+/// #2911 — taller planted rolls read as a sheet, and their developed chart unrolls.
+///
+/// At a fixed row count a taller sheet samples its height more coarsely, so a patch
+/// holding its budgeted rows reaches further in ambient space. Grown as a prefix of the
+/// ambient distance order, patches at the sparsely sampled outer windings reached across
+/// the winding gap, and the nerve gained 1-cycles a contractible sheet does not have
+/// (fe919657d, job 531104: nerve b₁ = 3, 2 and 9 on the three taller zoo rolls, 2 on the
+/// roll grid). Membership now joins a patch only through the atlas's neighbourhood graph,
+/// which has no edge across the gap. Every roll must read `disk`, and its developed chart
+/// must reconstruct held-out rows nearer the planted unrolled chart than the two-PC seed,
+/// the bar `developed_swiss_roll_chart_is_unrolled_2280` uses.
+#[test]
+fn taller_swiss_rolls_read_disk_2911() {
+    use super::tests_topology_fixtures::{swiss_roll, swiss_roll_with_height};
+    // The roll grid rolls `(t cos t, h, t sin t)`; the planted chart reads the roll off
+    // the first two columns and the height off the third.
+    let grid = swiss_roll_grid().select(ndarray::Axis(1), &[0, 2, 1]);
+    let rolls = [
+        ("zoo 80x16 h2", swiss_roll(80, 16)),
+        ("60x16 h10", swiss_roll_with_height(60, 16, 10.0)),
+        ("80x16 h10", swiss_roll_with_height(80, 16, 10.0)),
+        ("80x30 h20", swiss_roll_with_height(80, 30, 20.0)),
+        ("45x10 grid h10", grid),
+    ];
+    let mut failures: Vec<String> = Vec::new();
+    for (name, z) in &rolls {
+        let atlas = LocalAtlas::build(z.view(), LocalAtlasConfig::balanced(z.nrows(), 2))
+            .expect("a planted roll's atlas builds");
+        let readout = observe_atlas_topology(&atlas).expect("a planted roll's readout computes");
+        let oracle = worst_column_heldout_residual(&zoo_swiss_roll_unrolled_chart(z), z);
+        let linear = worst_column_heldout_residual(&leading_principal_chart(z), z);
+        let boundary = (oracle * linear).sqrt();
+        let developed = atlas
+            .developed_coordinates(z.view())
+            .map(|chart| worst_column_heldout_residual(&chart, z));
+        let developed_text = match &developed {
+            Ok(glued) => format!("{glued:.4e}"),
+            Err(refusal) => format!("refused ({refusal})"),
+        };
+        eprintln!(
+            "[2911] {name}: {readout} | worst-column held-out residual oracle={oracle:.4e} \
+             linear={linear:.4e} developed={developed_text} boundary={boundary:.4e}"
+        );
+        if readout.observed_manifold() != Some(GraphCompressionKind::Disk) {
+            failures.push(format!("{name} does not read disk: {readout}"));
+            continue;
+        }
+        if !(oracle < linear) {
+            failures.push(format!(
+                "{name}: the two-PC seed does not fold the roll (oracle {oracle:.4e} vs linear \
+                 {linear:.4e}), so the developed-chart bar measures nothing"
+            ));
+            continue;
+        }
+        if !matches!(developed, Ok(glued) if glued < boundary) {
+            failures.push(format!(
+                "{name}: developed {developed_text} is not below the geometric-mean boundary \
+                 {boundary:.4e} (oracle {oracle:.4e}, linear {linear:.4e})"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "taller planted rolls must read disk with an unrolled developed chart:\n{}",
+        failures.join("\n")
+    );
+}
+
 /// #2280 — the atlas's developing map unrolls the planted roll that the atlas names a
 /// disk, with no roll-specific code. The chart is glued from the local charts along
 /// the least-residual spanning tree of their transitions. It must reconstruct held-out

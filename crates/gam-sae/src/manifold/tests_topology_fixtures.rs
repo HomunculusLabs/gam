@@ -19,6 +19,13 @@ use ndarray::Array2;
 /// intrinsically flat, so the transition cocycle around a contractible triangle
 /// must close.
 pub(crate) fn swiss_roll(n_t: usize, n_h: usize) -> Array2<f64> {
+    swiss_roll_with_height(n_t, n_h, 2.0)
+}
+
+/// [`swiss_roll`] with the sheet `height` tall instead of 2. At a fixed row count a
+/// taller sheet samples its height more coarsely, so a neighborhood holding a fixed
+/// number of rows reaches further in ambient space (#2911).
+pub(crate) fn swiss_roll_with_height(n_t: usize, n_h: usize, height: f64) -> Array2<f64> {
     let n = n_t * n_h;
     let mut z = Array2::<f64>::zeros((n, 3));
     let mut r = 0usize;
@@ -26,7 +33,7 @@ pub(crate) fn swiss_roll(n_t: usize, n_h: usize) -> Array2<f64> {
         // t over ~1.5 turns.
         let t = 1.0 + 3.0 * std::f64::consts::PI * (it as f64) / (n_t as f64 - 1.0);
         for ih in 0..n_h {
-            let h = 2.0 * (ih as f64) / (n_h as f64 - 1.0);
+            let h = height * (ih as f64) / (n_h as f64 - 1.0);
             z[[r, 0]] = t * t.cos();
             z[[r, 1]] = t * t.sin();
             z[[r, 2]] = h;

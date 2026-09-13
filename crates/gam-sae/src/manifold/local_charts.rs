@@ -17,10 +17,12 @@
 //!      `occupancy_normalized_centers`), so the patches tile the manifold with
 //!      sublinearly many charts and each Voronoi cell holds about the mean
 //!      occupancy that the patch budget is a multiple of;
-//!   2. one PATCH per center — its nearest ambient rows, at most
-//!      `patch_size` of them — sized so neighboring patches OVERLAP (controlled by
-//!      [`LocalAtlasConfig`]). The neighborhood is the LARGEST prefix of the
-//!      distance order that yields a certified chart: a local-PCA frame is a
+//!   2. one PATCH per center — its nearest ambient rows that stay connected to the
+//!      center through the atlas's neighbourhood graph, at most `patch_size` of
+//!      them — sized so neighboring patches OVERLAP (controlled by
+//!      [`LocalAtlasConfig`]). The neighborhood is the LARGEST prefix of that
+//!      connected distance order (see `connected_distance_order`) that yields a
+//!      certified chart: a local-PCA frame is a
 //!      TANGENT plane only while the patch stays inside the local curvature scale,
 //!      so a patch that outgrows it is shrunk (dropping its farthest row) until it
 //!      certifies, rather than being handed a frame that is not tangent;
@@ -77,7 +79,7 @@ use std::fmt;
 use gam_linalg::faer_ndarray::FaerSvd;
 
 use super::AtlasOrientability;
-use super::intrinsic_seed::intrinsic_geodesic_embedding;
+use super::intrinsic_seed::{intrinsic_geodesic_embedding_on_graph, intrinsic_knn_graph};
 
 #[cfg(test)]
 #[path = "local_chart_recovery_tests.rs"]
@@ -119,6 +121,61 @@ fn distance_order(z: ArrayView2<'_, f64>, center: usize) -> Vec<usize> {
         .collect();
     scored.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     scored.into_iter().map(|(_, row)| row).collect()
+}
+
+/// Rows in the order they join the center's piece of the neighbourhood graph as the
+/// ambient ball around the center grows (#2911).
+///
+/// A plain prefix of the ambient distance order admits every row inside its radius,
+/// including rows of another part of the manifold that the embedding folds close by. On
+/// a taller swiss roll a patch at a sparsely sampled outer winding reached across the
+/// winding gap, and the rows it borrowed from the next winding gave the nerve 1-cycles
+/// the sheet does not have. So walk the ambient order and admit a row only once
+/// neighbourhood edges among rows already inside the ball join it to the center. A row
+/// that enters the ball unjoined waits; when a later row joins it, every waiting row it
+/// reaches joins too, in ambient order. Where each row entering the ball already has a
+/// neighbour on the center's side, as on a densely sampled patch that stays on one
+/// sheet, this is exactly the ambient order.
+///
+/// The neighbourhood graph is bridged to one component, so every row joins eventually
+/// and the order is a permutation of the rows. Deterministic: the ambient order breaks
+/// ties by row index, and a joining wave is sorted by ambient rank.
+fn connected_distance_order(
+    z: ArrayView2<'_, f64>,
+    neighbours: &[Vec<(usize, f64)>],
+    center: usize,
+) -> Vec<usize> {
+    let ambient = distance_order(z, center);
+    let n = ambient.len();
+    let mut rank = vec![0usize; n];
+    for (position, &row) in ambient.iter().enumerate() {
+        rank[row] = position;
+    }
+    let mut in_ball = vec![false; n];
+    let mut joined = vec![false; n];
+    let mut order = Vec::with_capacity(n);
+    for &row in &ambient {
+        in_ball[row] = true;
+        if !(row == center || neighbours[row].iter().any(|edge| joined[edge.0])) {
+            continue;
+        }
+        joined[row] = true;
+        let mut wave = vec![row];
+        let mut cursor = 0usize;
+        while cursor < wave.len() {
+            let current = wave[cursor];
+            cursor += 1;
+            for edge in &neighbours[current] {
+                if in_ball[edge.0] && !joined[edge.0] {
+                    joined[edge.0] = true;
+                    wave.push(edge.0);
+                }
+            }
+        }
+        wave.sort_unstable_by_key(|&member| rank[member]);
+        order.extend(wave);
+    }
+    order
 }
 
 /// The two frames' COMBINED angular resolution, as a sine: `sin(φ_a + φ_b)`.
@@ -680,7 +737,10 @@ impl LocalAtlas {
         }
         let min_overlap = config.min_overlap.max(d + 1);
 
-        let membership_coords = intrinsic_geodesic_embedding(z, d)
+        // One neighbourhood graph serves the intrinsic realization and patch membership,
+        // which grows only through it (see `connected_distance_order`).
+        let neighbours = intrinsic_knn_graph(z, d);
+        let membership_coords = intrinsic_geodesic_embedding_on_graph(z, d, &neighbours)
             .map_err(|detail| LocalChartError::IntrinsicMetricFailure { detail })?;
         // (1) deterministic farthest-point centers in the occupancy-normalized metric,
         // so every cell holds about the mean occupancy `patch_size` is a multiple of.
@@ -699,7 +759,7 @@ impl LocalAtlas {
         let mut charts: Vec<LocalChart> = Vec::with_capacity(centers.len());
         let mut rejected_centers: Vec<RejectedCenter> = Vec::new();
         for &center in &centers {
-            match certified_neighborhood_chart(z, center, patch_size, d) {
+            match certified_neighborhood_chart(z, &neighbours, center, patch_size, d) {
                 Ok((members, chart)) => {
                     patches.push(LocalPatch { center, members });
                     charts.push(chart);
@@ -1096,19 +1156,21 @@ impl LocalAtlas {
 /// across-roll direction is demoted out of the frame, and rows separated only across
 /// the roll project onto the SAME chart coordinate — the chart is not injective and
 /// the patch is honestly rejected. The cure is not to relax the certificate but to
-/// use a neighborhood the tangent plane actually fits: drop the farthest member and
-/// retry, down to the `2(d + 1)` over-determination floor. Prefixes of the distance
-/// order are nested, so this walks a deterministic chain of shrinking balls and
-/// returns the first — hence largest — one that certifies. If none does, the last
-/// (smallest-neighborhood) typed error is returned: genuinely `d`-degenerate data
-/// (a line charted at `d = 2`) still fails, at every size, with `DegeneratePatch`.
+/// use a neighborhood the tangent plane actually fits: drop the last member to join
+/// and retry, down to the `2(d + 1)` over-determination floor. Prefixes of the
+/// connected distance order are nested, so this walks a deterministic chain of
+/// shrinking neighborhoods and returns the first — hence largest — one that
+/// certifies. If none does, the last (smallest-neighborhood) typed error is returned:
+/// genuinely `d`-degenerate data (a line charted at `d = 2`) still fails, at every
+/// size, with `DegeneratePatch`.
 fn certified_neighborhood_chart(
     z: ArrayView2<'_, f64>,
+    neighbours: &[Vec<(usize, f64)>],
     center: usize,
     patch_size: usize,
     d: usize,
 ) -> Result<(Vec<usize>, LocalChart), LocalChartError> {
-    let order = distance_order(z, center);
+    let order = connected_distance_order(z, neighbours, center);
     // Over-determination floor: a `d`-frame and a `d`-dimensional Procrustes both
     // want at least `2(d + 1)` rows, but never demand more rows than the caller's
     // patch budget, and never fewer than the `d + 1` a `d`-chart strictly needs.
