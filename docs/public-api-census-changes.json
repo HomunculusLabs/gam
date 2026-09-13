@@ -2735,5 +2735,13 @@
     },
     "reason": "#2897, SPEC rule 25. The spatial driver evaluates only RowSet::All since 7fbdcd955, so the row-set argument is removed and exact_outer_options_for_row_set(options, row_set) is renamed exact_outer_options(options), keeping the All arm.",
     "evidence": "At the base, git grep -n -w exact_outer_options_for_row_set over crates, src, tests and examples finds its definition, two calls in its own test and 15 production calls in gam-models, each passing RowSet::All or the driver argument that its three call sites set to RowSet::All. All are rewritten in this commit."
+  },
+  {
+    "base": "be071687cb300ee6c6d90c4303de768433dad0c8",
+    "removed": {
+      "crates/gam-solve/src/rho_optimizer/run.rs::with_rho_bound": 1
+    },
+    "reason": "#2902 row 8: OuterProblem::rho_bound was the literal ±30 model-domain and search box of every outer problem that declared no domain, and the cap on every objective-declared face (SPEC rule 20). Every production route now declares its domain, and an undeclared domain is the supported log-strength domain, so the setter that retuned the literal has no subject.",
+    "evidence": "git grep -w with_rho_bound over crates, src, tests, bench, examples, gamfit and docs at the base finds its definition in crates/gam-solve/src/rho_optimizer/run.rs and two test callers, crates/gam-solve/src/estimate/mixture_sas_rho_guard_2629_tests.rs (now with_bounds at ±RHO_BOUND) and tests/regressions/optimization/gamlss_linesearch_failure.rs (now none), both changed in this commit, plus one comment in crates/gam-custom-family/src/tests.rs."
   }
 ]

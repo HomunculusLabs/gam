@@ -11,7 +11,7 @@
 //! small offset the model subtracts exactly) lies in the smooth's polynomial
 //! NULL SPACE `{1, x}`. The REML criterion is then asymptotically flat in `ρ` as
 //! `λ → ∞` (the range-space EDF → 0), so the bending-penalty coordinate rails at
-//! the `+rho_bound` infinite-smoothing ceiling — locus line checkpoint `ρ ≈
+//! the infinite-smoothing face of its domain — locus line checkpoint `ρ ≈
 //! [−7.73, 29.994]` at the `+30` rail, `hessian_psd=NO` — and the projected
 //! gradient plateaus at `|Pg| ≈ 1.1e-1`, far above the n-scaled stationarity
 //! bound, until the standard-REML general outer engine
@@ -92,8 +92,8 @@ fn fit_near_linear_with_offset(n: usize, seed: u64) -> Result<StandardFitResult,
 /// grinding the outer REML to its iteration cap.
 ///
 /// The bending penalty's REML optimum is at ρ→+∞ for a signal that lives in the
-/// smooth's polynomial null space `{1, x}`, so it rails at the +`rho_bound`
-/// infinite-smoothing ceiling. The asymptote-rail certificate
+/// smooth's polynomial null space `{1, x}`, so it rails at the upper face of its
+/// domain, the infinite-smoothing ceiling. The asymptote-rail certificate
 /// (`rho_optimizer/run.rs`, `asymptote_certificate.rs`, #2337 Thm 2.1)
 /// reconstructs the coordinate's exponential tail, confirms the pencil constant
 /// `ĉ = −e^{ρ}·∂V/∂ρ` is constant on a finite-difference-clean run, and proves
@@ -111,7 +111,7 @@ fn near_linear_offset_fit_converges_railed_off_the_infinite_smoothing_plateau_22
 
     let result = fit_near_linear_with_offset(160, 2299).expect(
         "#2299/#2348: the near-linear s(x)+offset fit must MINT a stationary-at-asymptote \
-         rail certificate — the bending penalty rails at the +rho_bound ceiling and the \
+         rail certificate — the bending penalty rails at its infinite-smoothing face and the \
          outer certificate positively certifies the confirmed exponential tail, instead \
          of grinding to the iteration cap",
     );

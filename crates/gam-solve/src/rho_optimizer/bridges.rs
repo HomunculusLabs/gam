@@ -3711,7 +3711,7 @@ pub(crate) fn projected_gradient_norm(
 /// The search box relaxed inward by [`CERTIFICATE_RAIL_MARGIN`] — the box a
 /// projected *stationarity residual* must be measured against.
 ///
-/// A penalty creeping toward the ±rho_bound infinite-smoothing ceiling never
+/// A penalty creeping toward its domain's infinite-smoothing face never
 /// reaches it exactly: each outer step only shrinks the gap, so it lands
 /// strictly inside the box (the #2299 checkpoint sat at ρ=29.9938, not 30).
 /// The rail detector flags such a coordinate railed by margin, but the exact

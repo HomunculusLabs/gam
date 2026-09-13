@@ -293,7 +293,10 @@ fn the_mixture_sas_objectives_railed_rho_certifies_once_it_publishes_its_barrier
     let problem = OuterProblem::new(K + SAS_DIM)
         .with_gradient(Derivative::Analytic)
         .with_psi_dim(SAS_DIM)
-        .with_rho_bound(crate::estimate::RHO_BOUND);
+        .with_bounds(
+            Array1::from_elem(K + SAS_DIM, -crate::estimate::RHO_BOUND),
+            Array1::from_elem(K + SAS_DIM, crate::estimate::RHO_BOUND),
+        );
     let mut obj = problem
         .build_objective(
             &mut state,

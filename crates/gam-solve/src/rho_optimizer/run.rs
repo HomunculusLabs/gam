@@ -129,7 +129,6 @@ pub(crate) struct OuterConfig {
     /// screening or mint is allowed to certify.
     pub(crate) search_bounds_override: Option<(Array1<f64>, Array1<f64>)>,
     pub(crate) seed_config: gam_problem::SeedConfig,
-    pub(crate) rho_bound: f64,
     pub(crate) heuristic_lambdas: Option<Vec<f64>>,
     pub(crate) initial_rho: Option<Array1<f64>>,
     /// Additional explicit, model-derived starts. Unlike the generic seed
@@ -294,7 +293,6 @@ impl Default for OuterConfig {
             model_domain_bounds: None,
             search_bounds_override: None,
             seed_config: gam_problem::SeedConfig::default(),
-            rho_bound: 30.0,
             heuristic_lambdas: None,
             initial_rho: None,
             initial_rho_candidates: Vec::new(),
@@ -346,7 +344,6 @@ pub struct OuterProblem {
     require_measured_psd: bool,
     max_iter: usize,
     bounds: Option<(Array1<f64>, Array1<f64>)>,
-    rho_bound: f64,
     seed_config: gam_problem::SeedConfig,
     heuristic_lambdas: Option<Vec<f64>>,
     initial_rho: Option<Array1<f64>>,
@@ -386,7 +383,6 @@ impl OuterProblem {
             require_measured_psd: false,
             max_iter: 200,
             bounds: None,
-            rho_bound: 30.0,
             seed_config: gam_problem::SeedConfig::default(),
             heuristic_lambdas: None,
             initial_rho: None,
@@ -482,10 +478,6 @@ impl OuterProblem {
     }
     pub fn with_bounds(mut self, lo: Array1<f64>, hi: Array1<f64>) -> Self {
         self.bounds = Some((lo, hi));
-        self
-    }
-    pub fn with_rho_bound(mut self, b: f64) -> Self {
-        self.rho_bound = b;
         self
     }
     pub fn with_seed_config(mut self, sc: gam_problem::SeedConfig) -> Self {
@@ -729,7 +721,6 @@ impl OuterProblem {
             model_domain_bounds: self.bounds.clone(),
             search_bounds_override: None,
             seed_config: self.seed_config,
-            rho_bound: self.rho_bound,
             heuristic_lambdas: self.heuristic_lambdas.clone(),
             initial_rho: self.initial_rho.clone(),
             initial_rho_candidates: self.initial_rho_candidates.clone(),
@@ -1701,13 +1692,38 @@ pub fn audit_stationary_point(
     rho: Array1<f64>,
     context: &str,
 ) -> Result<OuterResult, OuterStationaryPointRejection> {
-    let config = OuterConfig::default();
-    let selected_plan = plan(&obj.capability());
+    audit_stationary_point_in(obj, OuterConfig::default(), rho, context)
+}
+
+/// [`audit_stationary_point`] under a caller's configuration. The point is judged
+/// against the domain [`OuterProblem::run`] would search from that configuration:
+/// the objective's declared faces within the configured model domain.
+pub(crate) fn audit_stationary_point_in(
+    obj: &mut dyn OuterObjective,
+    mut config: OuterConfig,
+    rho: Array1<f64>,
+    context: &str,
+) -> Result<OuterResult, OuterStationaryPointRejection> {
+    let capability = obj.capability();
+    let selected_plan = plan(&capability);
     // There is intentionally no independent value-only probe. The analytic
     // sample is the authority being audited, and infinity records that no
     // optimizer-produced terminal value exists to compare against it.
     let mut result = OuterResult::new(rho, f64::INFINITY, 0, false, selected_plan);
     result.origin = OuterResultOrigin::StationaryPointAudit;
+    let installed = obj
+        .outer_domain_lower_bound()
+        .and_then(|lower| obj.outer_domain_upper_bound().map(|upper| (lower, upper)))
+        .and_then(|(lower, upper)| {
+            if lower.is_some() || upper.is_some() {
+                install_objective_domain(&mut config, capability.n_params, lower, upper)
+            } else {
+                Ok(())
+            }
+        });
+    if let Err(source) = installed {
+        return Err(OuterStationaryPointRejection { result, source });
+    }
     match certify_outer_optimality(obj, &config, context, &mut result) {
         Ok(certificate) => {
             result.criterion_certificate = Some(certificate);
@@ -1823,7 +1839,7 @@ pub(crate) fn certificate_hessian_is_psd_at_resolution(
 /// PSD verdict of the outer Hessian restricted to its UN-RAILED coordinates
 /// (#2299 box-KKT reduced-Hessian / critical-cone gate).
 ///
-/// A coordinate railed at ±`rho_bound` with an outward gradient is at the box-KKT
+/// A coordinate railed on its domain face with an outward gradient is at the box-KKT
 /// constrained optimum: its curvature direction is the flat/indefinite
 /// infinite-smoothing plateau of a fully-saturated penalty (λ ~ 1e13), carrying
 /// no feasible descent. Including it makes the FULL Hessian indefinite and used to
@@ -3046,7 +3062,7 @@ impl RailTest {
         let box_bounds = match config.model_domain_bounds.as_ref() {
             Some((lo, hi)) if k < lo.len() && k < hi.len() => Some((lo[k], hi[k])),
             Some(_) => None,
-            None => Some((-config.rho_bound, config.rho_bound)),
+            None => Some((gam_problem::LOG_STRENGTH_MIN, gam_problem::LOG_STRENGTH_MAX)),
         };
         Self {
             // Indexed, not `get`-ed: every caller scans an index range derived
@@ -4174,7 +4190,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
     }
 
     let bounds = outer_model_domain_bounds_template(config, layout.n_params);
-    // A penalty creeping toward the ±rho_bound infinite-smoothing ceiling never reaches
+    // A penalty creeping toward its domain's infinite-smoothing face never reaches
     // it EXACTLY — each outer step only shrinks the gap, so it lands strictly inside the
     // box (the #2299 checkpoint sits at ρ=29.9938, not 30). `certificate_railed_lambdas`
     // then flags it railed via `CERTIFICATE_RAIL_MARGIN`, but the exact `x >= upper` /
@@ -4755,7 +4771,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
     // noise in hand, and only probes coordinates whose curvature row is below the
     // roundoff floor — so a well-conditioned objective (every scripted mock at its
     // certification point) probes nothing and pays zero extra evaluations.
-    // The coordinates railed at ±rho_bound (the infinite-smoothing ceiling). Their
+    // The coordinates railed on their domain faces (the infinite-smoothing ceiling). Their
     // saturated curvature direction makes the FULL Hessian indefinite, so the
     // flatness certificate below — and the final curvature gate — judge PSD on the
     // interior (un-railed) sub-block instead, or a rail-caused indefiniteness would
@@ -8429,14 +8445,19 @@ pub(crate) fn outer_bounds(lo: &Array1<f64>, hi: &Array1<f64>) -> Result<Bounds,
     })
 }
 
+/// The model domain the runner reasons against: the caller's declared domain,
+/// else the supported log-strength domain `[LOG_STRENGTH_MIN, LOG_STRENGTH_MAX]`
+/// on which `exp(ρ)` is evaluated exactly (`gam_problem::log_strength`). Every
+/// production route declares a derived domain (#2812), so this default binds
+/// only a caller that states none (SPEC rule 20, #2902 row 8).
 pub(crate) fn outer_model_domain_bounds_template(
     config: &OuterConfig,
     n: usize,
 ) -> (Array1<f64>, Array1<f64>) {
     config.model_domain_bounds.clone().unwrap_or_else(|| {
         (
-            Array1::<f64>::from_elem(n, -config.rho_bound),
-            Array1::<f64>::from_elem(n, config.rho_bound),
+            Array1::<f64>::from_elem(n, gam_problem::LOG_STRENGTH_MIN),
+            Array1::<f64>::from_elem(n, gam_problem::LOG_STRENGTH_MAX),
         )
     })
 }

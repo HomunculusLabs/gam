@@ -341,7 +341,7 @@ fn certify_mints_saddle_escape_reseed_at_interior_saddle() {
 }
 
 // #2155 — the SAME double-well saddle in (ρ₀, ρ₁), plus a third coordinate ρ₂
-// pulled by a constant negative gradient onto the +rho_bound box rail. At the
+// pulled by a constant negative gradient onto its `RAILED_SADDLE_FACE` rail. At the
 // railed point the FULL Hessian is diag(1, −1, 0), but the load-bearing verdict
 // is on the REDUCED (off-railed) sub-block diag(1, −1) over {ρ₀, ρ₁}, which is
 // indefinite. This is the flexible-link binomial-wiggle failure genus (#2155):
@@ -361,7 +361,7 @@ fn railed_saddle_eval(rho: &Array1<f64>) -> OuterEval {
     let r1 = rho[1];
     OuterEval {
         cost: railed_saddle_cost(rho),
-        // ∂/∂ρ₂ = −0.3: a constant outward pull that drives ρ₂ to the +rho_bound
+        // ∂/∂ρ₂ = −0.3: a constant outward pull that drives ρ₂ to the upper face
         // rail and keeps it there. ρ₂ carries zero curvature, so the full Hessian
         // is only semidefinite; the indefinite direction lives entirely in the
         // un-railed {ρ₀, ρ₁} block.
@@ -375,12 +375,21 @@ fn railed_saddle_eval(rho: &Array1<f64>) -> OuterEval {
     }
 }
 
+/// The face ρ₂ is pulled onto. Stated by the fixture and handed to the audit with
+/// the problem's configuration, so the assertions are about the escape and not
+/// about the default domain.
+const RAILED_SADDLE_FACE: f64 = 30.0;
+
 fn railed_saddle_problem() -> OuterProblem {
-    // Default box is ±rho_bound = ±30, so ρ₂ = 30 sits exactly on the upper rail.
+    // ρ₂ = RAILED_SADDLE_FACE sits exactly on the upper rail.
     OuterProblem::new(3)
         .with_gradient(Derivative::Analytic)
         .with_hessian(DeclaredHessianForm::Dense)
-        .with_initial_rho(array![0.0, 0.0, 30.0])
+        .with_bounds(
+            Array1::from_elem(3, -RAILED_SADDLE_FACE),
+            Array1::from_elem(3, RAILED_SADDLE_FACE),
+        )
+        .with_initial_rho(array![0.0, 0.0, RAILED_SADDLE_FACE])
         .with_screen_initial_rho(false)
         .with_seed_config(gam_problem::SeedConfig {
             max_seeds: 1,
@@ -404,7 +413,12 @@ fn certify_mints_saddle_escape_reseed_at_railed_saddle_2155() {
         None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
     );
     let rejection =
-        audit_stationary_point(&mut obj, array![0.0, 0.0, 30.0], "railed-saddle-escape #2155")
+        audit_stationary_point_in(
+            &mut obj,
+            problem.config(),
+            array![0.0, 0.0, RAILED_SADDLE_FACE],
+            "railed-saddle-escape #2155",
+        )
             .expect_err("a railed strict saddle in the free directions must be refused");
     let result = &rejection.result;
     let cert = result
@@ -428,7 +442,7 @@ fn certify_mints_saddle_escape_reseed_at_railed_saddle_2155() {
     let reseed = result.saddle_escape_reseed.as_ref().expect(
         "a refused railed saddle with an indefinite reduced Hessian must mint a reseed (#2155)",
     );
-    let saddle_f = railed_saddle_cost(&array![0.0, 0.0, 30.0]);
+    let saddle_f = railed_saddle_cost(&array![0.0, 0.0, RAILED_SADDLE_FACE]);
     assert!(
         railed_saddle_cost(reseed) < saddle_f - 1e-9,
         "escape reseed {reseed:?} (f={}) must strictly descend below the saddle f={saddle_f}",
@@ -439,7 +453,7 @@ fn certify_mints_saddle_escape_reseed_at_railed_saddle_2155() {
         "escape must step along the free indefinite ρ₁ axis: {reseed:?}"
     );
     assert!(
-        (reseed[2] - 30.0).abs() < 1e-12,
+        (reseed[2] - RAILED_SADDLE_FACE).abs() < 1e-12,
         "escape must hold the railed ρ₂ fixed on its bound: {reseed:?}"
     );
 }
@@ -471,7 +485,7 @@ fn outer_search_escapes_railed_saddle_and_certifies_minimum_2155() {
         result.rho,
     );
     assert!(
-        (result.rho[2] - 30.0).abs() < 1e-4,
+        (result.rho[2] - RAILED_SADDLE_FACE).abs() < 1e-4,
         "ρ₂ must remain on its rail at the minimum: {:?}",
         result.rho,
     );
@@ -929,7 +943,7 @@ fn a_descent_below_the_criterion_resolution_is_not_an_escape_2612() {
 //   H     = diag(1, −ε)
 //
 // At ρ = (0, 0) the gradient vanishes and `H` is indefinite, exactly as in the
-// wells above; unlike them, `argmin` over the box is the FACE ρ₁ = ±rho_bound
+// wells above; unlike them, `argmin` over the box is the FACE ρ₁ = ±RIDGE_BOX_FACE
 // and the descent runs the whole width of the box. A reseed capped at α = 1
 // covers 1/30th of it, which on the real fixture cost one unit of the
 // interior-escape count (3, since deleted, #2817) per e-fold and refused the fit
@@ -952,9 +966,9 @@ fn ridge_eval(rho: &Array1<f64>) -> OuterEval {
     }
 }
 
-/// The face this ridge runs to. Stated by the fixture rather than inherited
-/// from the default box, so the assertions below are about the escape and not
-/// about `rho_bound`'s value.
+/// The face this ridge runs to. Stated by the fixture and handed to the audit
+/// with the problem's configuration, so the assertions below are about the
+/// escape and not about the default domain.
 const RIDGE_BOX_FACE: f64 = 30.0;
 
 fn ridge_problem() -> OuterProblem {
@@ -988,7 +1002,8 @@ fn saddle_escape_reseed_travels_to_the_box_face_on_a_monotone_ridge_2612() {
         None::<fn(&mut ())>,
         None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
     );
-    let rejection = audit_stationary_point(&mut obj, array![0.0, 0.0], "monotone-ridge #2612")
+    let rejection =
+        audit_stationary_point_in(&mut obj, problem.config(), array![0.0, 0.0], "monotone-ridge #2612")
         .expect_err("a stationary point on an indefinite ridge must be refused, not certified");
     let result = &rejection.result;
     let cert = result

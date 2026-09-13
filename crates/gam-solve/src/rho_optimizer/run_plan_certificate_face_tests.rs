@@ -27,7 +27,7 @@ use ndarray::array;
 // not, because the ψ coordinate never reached `certificate_railed`.
 fn psi_rail_cost(theta: &Array1<f64>) -> f64 {
     // ½ρ₀² + ½ρ₁² − 0.3ψ − ½ψ²: the ψ arm is concave and pushed outward, so the
-    // search rails it at +rho_bound and the curvature there is −1.
+    // search rails it at `PSI_RAIL_FACE` and the curvature there is −1.
     0.5 * theta[0] * theta[0] + 0.5 * theta[1] * theta[1] - 0.3 * theta[2]
         - 0.5 * theta[2] * theta[2]
 }
@@ -45,13 +45,28 @@ fn psi_rail_eval(theta: &Array1<f64>) -> OuterEval {
     }
 }
 
+/// The box face ψ is pushed onto. Stated by the fixture and handed to the audit
+/// with the problem's configuration, so the assertions are about the face and
+/// not about the default domain.
+const PSI_RAIL_FACE: f64 = 30.0;
+
+fn psi_rail_box() -> (Array1<f64>, Array1<f64>) {
+    (
+        Array1::from_elem(3, -PSI_RAIL_FACE),
+        Array1::from_elem(3, PSI_RAIL_FACE),
+    )
+}
+
 #[test]
 fn railed_psi_coordinate_is_on_the_certificate_face_not_only_the_lambda_report_2425() {
     // The two sets differ exactly as designed: the report stays λ-scoped, the
     // face covers the whole θ box. `rho_dim = n_params − psi_dim = 2`, so index
     // 2 is a ψ coordinate and can only appear in the θ-wide scan.
-    let config = OuterConfig::default();
-    let theta = array![0.0, 0.0, config.rho_bound];
+    let config = OuterConfig {
+        model_domain_bounds: Some(psi_rail_box()),
+        ..OuterConfig::default()
+    };
+    let theta = array![0.0, 0.0, PSI_RAIL_FACE];
     assert_eq!(
         certificate_railed_lambdas(&theta, 2, &config),
         Vec::<usize>::new(),
@@ -88,12 +103,13 @@ fn joint_rho_psi_optimum_certifies_when_only_the_psi_coordinate_rails_2425() {
     // `hessian_psd=NO` and `railed=[]`, which is the `gam-models` Matérn
     // signature and #979's "the projector removed 99.2% of |g| but nothing is
     // listed as railed".
-    let config = OuterConfig::default();
+    let (lower, upper) = psi_rail_box();
     let problem = OuterProblem::new(3)
         .with_psi_dim(1)
         .with_gradient(Derivative::Analytic)
         .with_hessian(DeclaredHessianForm::Dense)
-        .with_initial_rho(array![0.0, 0.0, config.rho_bound])
+        .with_bounds(lower, upper)
+        .with_initial_rho(array![0.0, 0.0, PSI_RAIL_FACE])
         .with_screen_initial_rho(false)
         .with_seed_config(gam_problem::SeedConfig {
             max_seeds: 1,
@@ -107,9 +123,10 @@ fn joint_rho_psi_optimum_certifies_when_only_the_psi_coordinate_rails_2425() {
         None::<fn(&mut ())>,
         None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
     );
-    let result = audit_stationary_point(
+    let result = audit_stationary_point_in(
         &mut obj,
-        array![0.0, 0.0, config.rho_bound],
+        problem.config(),
+        array![0.0, 0.0, PSI_RAIL_FACE],
         "railed-psi certificate face #2425",
     )
     .unwrap_or_else(|rejection| {
@@ -158,12 +175,13 @@ fn joint_rho_psi_optimum_certifies_when_only_the_psi_coordinate_rails_2425() {
 // here: this widens the evidence, it does not relabel the report.
 #[test]
 fn railed_psi_coordinate_is_in_the_certificates_evidence_not_only_on_its_face_2624() {
-    let config = OuterConfig::default();
+    let (lower, upper) = psi_rail_box();
     let problem = OuterProblem::new(3)
         .with_psi_dim(1)
         .with_gradient(Derivative::Analytic)
         .with_hessian(DeclaredHessianForm::Dense)
-        .with_initial_rho(array![0.0, 0.0, config.rho_bound])
+        .with_bounds(lower, upper)
+        .with_initial_rho(array![0.0, 0.0, PSI_RAIL_FACE])
         .with_screen_initial_rho(false)
         .with_seed_config(gam_problem::SeedConfig {
             max_seeds: 1,
@@ -177,9 +195,11 @@ fn railed_psi_coordinate_is_in_the_certificates_evidence_not_only_on_its_face_26
         None::<fn(&mut ())>,
         None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
     );
-    let result = audit_stationary_point(
+    let config = problem.config();
+    let result = audit_stationary_point_in(
         &mut obj,
-        array![0.0, 0.0, config.rho_bound],
+        config.clone(),
+        array![0.0, 0.0, PSI_RAIL_FACE],
         "railed-psi certificate evidence #2624",
     )
     .unwrap_or_else(|rejection| {
@@ -224,11 +244,11 @@ fn railed_psi_coordinate_is_in_the_certificates_evidence_not_only_on_its_face_26
             )
         });
     assert!(
-        (psi_fact.theta - config.rho_bound).abs() < 1e-9,
+        (psi_fact.theta - PSI_RAIL_FACE).abs() < 1e-9,
         "the evidence must report the psi coordinate at the value it was judged \
          at: theta={} bound={}",
         psi_fact.theta,
-        config.rho_bound
+        PSI_RAIL_FACE
     );
     assert!(
         psi_fact.lower < psi_fact.upper,

@@ -595,8 +595,8 @@ pub(crate) struct IteratePayload {
     /// Inner-solver iterate (PIRLS β) captured alongside ρ. The (ρ, β)
     /// pair lives on the implicit-function manifold β = β*(ρ); restoring
     /// ρ alone forces the next inner solve to reconstruct β from scratch.
-    /// For saturated ρ (|ρ_i| near `rho_bound`) the inner Hessian
-    /// `X'WX + Σ λ_i S_i` has condition number `≈ e^{2·rho_bound}` — Newton
+    /// For saturated ρ (|ρ_i| near a domain face `B`) the inner Hessian
+    /// `X'WX + Σ λ_i S_i` has condition number `≈ e^{2·B}` — Newton
     /// degrades to O(1/k) descent and the cycle budget exhausts before
     /// KKT. Caching β lets the resume start in Newton's quadratic basin
     /// regardless of where ρ lives. Empty when the family did not surface
@@ -699,7 +699,7 @@ pub(crate) fn decode_iterate(bytes: &[u8], expected_rho_dim: usize) -> Option<It
 /// ρ inward or discarded fully-saturated entries. Those were read-side
 /// band-aids over the real bug: the warm-start contract stored ρ but
 /// not β, so resuming at boundary ρ forced PIRLS to recompute β from
-/// cold-start against a Hessian with condition number `≈ e^{2·rho_bound}`,
+/// cold-start against a Hessian with condition number `≈ e^{2·B}` at a face `B`,
 /// and Newton degraded to O(1/k) descent that exhausted the cycle budget.
 ///
 /// The contract is now `(ρ, β)`: the current iterate payload carries

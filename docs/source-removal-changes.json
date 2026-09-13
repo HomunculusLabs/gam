@@ -6716,5 +6716,13 @@
     ],
     "reason": "#2897, SPEC rule 25. 7fbdcd955 removed the staged kappa pilot, the only producer of a sampled RowSet for optimize_spatial_length_scale_exact_joint, so its three call sites pass RowSet::All and every evaluator closure received a row set that could only be All. The argument is removed and exact_outer_options_for_row_set(options, row_set) becomes exact_outer_options(options), which keeps the All arm (clear automatic sampling and any inherited mask). The Subsample arm and its test assertions had no caller.",
     "evidence": "At the base, git grep -n -w exact_outer_options_for_row_set over crates, src, tests and examples finds its definition, two calls in its own test, and 15 production calls (bms/block_specs.rs x2, gamlss/builders.rs x3, survival/latent/survival/mod.rs x3, survival/location_scale/fit.rs x3, survival/marginal_slope/fit_entry.rs, survival/marginal_slope/fit_setup.rs, transformation_normal/fit.rs x2). Each passes RowSet::All or the driver argument, whose only producers are the three RowSet::All literals in spatial_optimization.rs. All are rewritten in this commit."
+  },
+  {
+    "base": "be071687cb300ee6c6d90c4303de768433dad0c8",
+    "items": [
+      "crates/gam-solve/src/rho_optimizer/run.rs:fn:with_rho_bound"
+    ],
+    "reason": "#2902 row 8: OuterProblem::rho_bound was the literal ±30 model-domain and search box of every outer problem that declared no domain, and the cap on every objective-declared face (SPEC rule 20). Every production route now declares its domain, and an undeclared domain is the supported log-strength domain, so the setter that retuned the literal has no subject.",
+    "evidence": "git grep -w with_rho_bound over crates, src, tests, bench, examples, gamfit and docs at the base finds its definition in crates/gam-solve/src/rho_optimizer/run.rs and two test callers, crates/gam-solve/src/estimate/mixture_sas_rho_guard_2629_tests.rs (now with_bounds at ±RHO_BOUND) and tests/regressions/optimization/gamlss_linesearch_failure.rs (now none), both changed in this commit, plus one comment in crates/gam-custom-family/src/tests.rs."
   }
 ]

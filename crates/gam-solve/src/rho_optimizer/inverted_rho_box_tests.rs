@@ -16,7 +16,7 @@
 //! * The guard reads the *effective* bounds template. A guard that wrongly
 //!   rejected valid boxes would be a far worse regression than the panic it
 //!   replaced, and nothing else asserts that ordinary problems still solve —
-//!   so both an explicit ordered box and the implicit `±rho_bound` fallback
+//!   so both an explicit ordered box and the implicit supported-domain fallback
 //!   need positive controls.
 
 use super::*;
@@ -155,8 +155,8 @@ fn an_ordered_box_still_solves_2370() {
 
 #[test]
 fn a_problem_with_no_explicit_box_still_solves_2370() {
-    // The guard validates the EFFECTIVE template, which falls back to
-    // `±config.rho_bound` when no explicit box is configured. That fallback is
+    // The guard validates the EFFECTIVE template, which falls back to the
+    // supported log-strength domain when no explicit box is configured. That fallback is
     // ordered by construction, but it is a different code path from an
     // explicitly configured box and nothing else exercises it against the
     // guard.
@@ -168,6 +168,6 @@ fn a_problem_with_no_explicit_box_still_solves_2370() {
         .expect("the default rho box must solve normally");
     assert!(
         objective.state.total_evals() > 0,
-        "the +/-rho_bound fallback must reach the objective, not be answered from the seed alone"
+        "the supported-domain fallback must reach the objective, not be answered from the seed alone"
     );
 }

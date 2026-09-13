@@ -448,7 +448,10 @@ fn newton_predicted_decrease_is_curvature_scaled() {
 
 #[test]
 fn certificate_rail_detection_uses_outer_box() {
-    let config = OuterConfig::default(); // rho_bound = 30
+    let config = OuterConfig {
+        model_domain_bounds: Some((array![-30.0, -30.0, -30.0], array![30.0, 30.0, 30.0])),
+        ..OuterConfig::default()
+    };
     let rho = array![29.8, 0.0, -29.6];
     assert_eq!(certificate_railed_lambdas(&rho, 3, &config), vec![0, 2]);
     // Only the leading rho_dim coordinates are λ axes.
@@ -459,6 +462,12 @@ fn certificate_rail_detection_uses_outer_box() {
     };
     let pinned = array![4.9, -4.7, 0.0];
     assert_eq!(certificate_railed_lambdas(&pinned, 3, &bounded), vec![0, 1]);
+    // With no declared domain the faces are the supported log-strength domain.
+    let at_faces = array![gam_problem::LOG_STRENGTH_MAX, 0.0, gam_problem::LOG_STRENGTH_MIN];
+    assert_eq!(
+        certificate_railed_lambdas(&at_faces, 3, &OuterConfig::default()),
+        vec![0, 2]
+    );
 }
 
 /// Helper: build an objective `0.5·ρ₀² + slope·ρ₁` (analytic gradient
@@ -4099,7 +4108,7 @@ fn outer_config_default() {
     let cfg = OuterConfig::default();
     assert_eq!(cfg.tolerance, 1e-5);
     assert_eq!(cfg.max_iter, 200);
-    assert_eq!(cfg.rho_bound, 30.0);
+    assert!(cfg.model_domain_bounds.is_none());
 }
 
 #[test]

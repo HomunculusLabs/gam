@@ -17,7 +17,6 @@ fn repro_outer_smoothing_linesearch_failure_via_run_outer() {
             screen_max_inner_iterations: 1,
             ..Default::default()
         })
-        .with_rho_bound(30.0)
         .with_initial_rho(Array1::zeros(3));
 
     let mut obj =
