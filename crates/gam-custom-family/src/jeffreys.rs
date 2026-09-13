@@ -1329,19 +1329,61 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
                     // Where the gate or the floor moves, the complete second drift also reads
                     // `H²[u,·]`, `H²[w,·]` and `H³[u,w,·]` (gam#2905).
                     let motion = base.hessian_motion_active();
+                    // An outer Hessian over `k` coordinates asks for `k(k+1)/2` pairs drawn from `k`
+                    // mode responses. `H[x]` and, under motion, the rotated `{H²[x, e_a]}` read one
+                    // direction each, so they are formed once per distinct direction (matched by
+                    // exact bit pattern) instead of twice per pair; the mixed objects stay per pair.
+                    let mut distinct: Vec<&Array1<f64>> = Vec::new();
+                    let pair_frames: Vec<(usize, usize)> = pairs
+                        .iter()
+                        .map(|(u, w)| {
+                            (
+                                distinct_direction_slot(&mut distinct, u),
+                                distinct_direction_slot(&mut distinct, w),
+                            )
+                        })
+                        .collect();
+                    let perturbations = distinct
+                        .iter()
+                        .map(|direction| {
+                            family
+                                .joint_jeffreys_information_directional_derivative_with_specs(
+                                    &states, &specs, direction,
+                                )?
+                                .ok_or_else(|| missing("first information derivatives"))
+                        })
+                        .collect::<Result<Vec<_>, CustomFamilyError>>()?;
+                    let rotated_seconds = if motion {
+                        let directions: Vec<Array1<f64>> =
+                            distinct.iter().map(|direction| (*direction).clone()).collect();
+                        let mut slots = Vec::with_capacity(directions.len());
+                        slots.resize_with(directions.len(), || None);
+                        let complete = family
+                            .joint_jeffreys_information_second_directional_rotated_all_axes_each_with_specs(
+                                &states,
+                                &specs,
+                                &directions,
+                                base.ambient_eigenbasis(),
+                                &mut |index, rows| {
+                                    slots[index] = Some(base.rotated_axes_from_rows(rows)?);
+                                    Ok(())
+                                },
+                            )
+                            .map_err(CustomFamilyError::trial_point)?;
+                        if !complete {
+                            return Err(missing("second information derivatives"));
+                        }
+                        slots
+                            .into_iter()
+                            .map(|slot| slot.ok_or_else(|| missing("second information derivatives")))
+                            .collect::<Result<Vec<_>, CustomFamilyError>>()?
+                    } else {
+                        Vec::new()
+                    };
                     pairs
                         .iter()
-                        .map(|(u, w)| -> Result<Array2<f64>, CustomFamilyError> {
-                            let information =
-                                |direction: &Array1<f64>| -> Result<Array2<f64>, CustomFamilyError> {
-                                    family
-                                        .joint_jeffreys_information_directional_derivative_with_specs(
-                                            &states, &specs, direction,
-                                        )?
-                                        .ok_or_else(|| missing("first information derivatives"))
-                                };
-                            let pert_u = information(u)?;
-                            let pert_w = information(w)?;
+                        .zip(&pair_frames)
+                        .map(|((u, w), &(frame_u, frame_w))| -> Result<Array2<f64>, CustomFamilyError> {
                             let pert_uw = family
                                 .joint_jeffreys_information_second_directional_derivative_with_specs(
                                     &states, &specs, u, w,
@@ -1385,18 +1427,7 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
                                             .to_string()
                                     })
                             };
-                            let rotated_second = |direction: &Array1<f64>| -> Result<
-                                gam_solve::estimate::reml::jeffreys_subspace::JeffreysRotatedAxes,
-                                CustomFamilyError,
-                            > {
-                                let axes = family
-                                    .joint_jeffreys_information_second_directional_all_axes_with_specs(
-                                        &states, &specs, direction,
-                                    )?
-                                    .ok_or_else(|| missing("second information derivatives"))?;
-                                Ok(base.rotate_axes(&axes)?)
-                            };
-                            let (second_u, second_w, third_uw) = if motion {
+                            let third_uw = if motion {
                                 let rows = family
                                     .joint_jeffreys_information_third_directional_rotated_all_axes_with_specs(
                                         &states,
@@ -1406,20 +1437,16 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
                                         base.ambient_eigenbasis(),
                                     )?
                                     .ok_or_else(|| missing("third information derivatives"))?;
-                                (
-                                    Some(rotated_second(u)?),
-                                    Some(rotated_second(w)?),
-                                    Some(base.rotated_axes_from_rows(rows)?),
-                                )
+                                Some(base.rotated_axes_from_rows(rows)?)
                             } else {
-                                (None, None, None)
+                                None
                             };
                             let mut drift = base.completion_second_drift_matrix(
-                                &pert_u,
-                                &pert_w,
+                                &perturbations[frame_u],
+                                &perturbations[frame_w],
                                 &pert_uw,
-                                second_u.as_ref(),
-                                second_w.as_ref(),
+                                rotated_seconds.get(frame_u),
+                                rotated_seconds.get(frame_w),
                                 third_uw.as_ref(),
                                 &contracted,
                                 &along_u,
