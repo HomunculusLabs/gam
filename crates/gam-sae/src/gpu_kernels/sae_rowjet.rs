@@ -2655,14 +2655,13 @@ mod device {
 mod tests {
     use super::*;
 
-    /// Off Linux there is no device module at all, so the production entry's
-    /// `Device` arm must refuse outright rather than compute the CPU answer
-    /// under a `Device` request (the #1551 silent-fallback class). The CPU arm
-    /// is asserted first so a fixture broken for an unrelated reason cannot
-    /// make the refusal pass for the wrong reason. This test only compiles
-    /// off Linux, which the Linux gates never see; the cross-compile gate is
-    /// what keeps it honest.
-    #[cfg(not(target_os = "linux"))]
+    /// Without an admitted CUDA device, the production entry's `Device` arm must
+    /// refuse outright rather than compute the CPU answer under a `Device`
+    /// request (the #1551 silent-fallback class); with one, it must run the
+    /// whole tile on the device. The CPU arm is asserted first so a fixture
+    /// broken for an unrelated reason cannot make the refusal pass for the
+    /// wrong reason. Off Linux there is no device module, so every such host
+    /// refuses; on Linux the refusal comes from the CUDA probe.
     #[test]
     fn device_path_declines_on_unsupported_host_2422() {
         let rows = complete_fixture(64);
@@ -2673,11 +2672,22 @@ mod tests {
             "the device-free half needs a CPU result over the whole fixture, or it \
              proves nothing about the seam"
         );
-        if let Ok(channels) = execute_softmax_row_jet_tile(&rows, 1.0, SaeRowJetPath::Device) {
-            panic!(
-                "no device module on this host, yet the Device row-jet path returned Ok with \
-                 n_rows={} -- the seam fell back to the host silently (#1551 class)",
-                channels.n_rows
+        #[cfg(target_os = "linux")]
+        let admitted = gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto)
+            .expect("GPU probe fault in the row-jet Device refusal test")
+            .is_some();
+        #[cfg(not(target_os = "linux"))]
+        let admitted = false;
+        let device = execute_softmax_row_jet_tile(&rows, 1.0, SaeRowJetPath::Device);
+        if admitted {
+            let channels = device
+                .expect("an admitted CUDA device must run the tile; no host retry is permitted");
+            assert_eq!(channels.n_rows, 64, "the device tile must cover the whole fixture");
+        } else {
+            assert!(
+                device.is_err(),
+                "no admitted CUDA device on this host, yet the Device row-jet path returned Ok \
+                 -- the seam fell back to the host silently (#1551 class)"
             );
         }
     }
