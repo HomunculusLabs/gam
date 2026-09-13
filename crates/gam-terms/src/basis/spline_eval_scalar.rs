@@ -713,6 +713,17 @@ pub(crate) fn create_ispline_dense(
     // log-Λ that must keep growing past the right-most observation time) must
     // clamp inputs and add their own extrapolation correction — the basis
     // evaluator's contract is the same on the scalar and dense paths.
+    //
+    // An entry is the difference of two right-cumulative sums of de Boor
+    // values, and it is set to exactly zero only when that difference is inside
+    // the sums' own rounding. Each de Boor value passes through `bs_degree`
+    // levels of the recurrence, and each level rounds two knot differences, a
+    // sum, a quotient, a product and a second sum. A value therefore carries at
+    // most `γ_{6·bs_degree}` relative error. Summing at most `support`
+    // non-negative values adds `support` operations, and the subtraction adds
+    // one (Higham, ASNA Lemma 3.1). A genuine small entry, like the
+    // `(δ/h)^bs_degree` mass just past a knot, is kept.
+    let offset_growth = gam_linalg::roundoff::accumulation_growth(6 * bs_degree + support + 1);
     for (row_i, &x) in data.iter().enumerate() {
         if x < left {
             // No cumulative mass yet — I_j(x) = 0 for every column.
@@ -721,7 +732,8 @@ pub(crate) fn create_ispline_dense(
         if x >= right {
             for j in 1..num_bspline_basis {
                 let value = 1.0 - left_offsets[j];
-                out[[row_i, j - 1]] = if value.abs() <= 1e-15 { 0.0 } else { value };
+                let band = offset_growth * left_offsets[j];
+                out[[row_i, j - 1]] = if value.abs() <= band { 0.0 } else { value };
             }
             continue;
         }
@@ -746,7 +758,8 @@ pub(crate) fn create_ispline_dense(
             running += local[offset];
             if j > 0 {
                 let value = running - left_offsets[j];
-                out[[row_i, j - 1]] = if value.abs() <= 1e-15 { 0.0 } else { value };
+                let band = offset_growth * (running + left_offsets[j]);
+                out[[row_i, j - 1]] = if value.abs() <= band { 0.0 } else { value };
             }
         }
     }
