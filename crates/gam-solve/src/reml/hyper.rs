@@ -201,6 +201,48 @@ pub(crate) enum TauDesignTerm {
     Implicit(HyperDesignDerivative),
 }
 
+impl TauDesignTerm {
+    /// Each direction's `X_τ` in `basis`: implicit storage stays implicit, and
+    /// stored values are carried into `basis` once.
+    pub(crate) fn for_directions_in_basis(
+        hyper_dirs: &[DirectionalHyperParam],
+        basis: &TauPairBasis,
+    ) -> Result<Vec<Self>, EstimationError> {
+        hyper_dirs
+            .iter()
+            .map(|dir| {
+                if dir.has_implicit_operator() {
+                    Ok(Self::Implicit(dir.x_tau_original.clone()))
+                } else {
+                    match basis {
+                        TauPairBasis::Original => Ok(Self::Dense(dir.x_tau_dense())),
+                        TauPairBasis::Transformed { qs, free_basis_opt } => Ok(Self::Dense(
+                            dir.transformed_x_tau(qs.as_ref(), free_basis_opt.as_ref().as_ref())?,
+                        )),
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// This term as a dense matrix in `basis`, for the consumers that need its
+    /// stored rows (the Firth partials).
+    pub(crate) fn dense_in_basis(
+        &self,
+        basis: &TauPairBasis,
+    ) -> Result<std::borrow::Cow<'_, Array2<f64>>, EstimationError> {
+        match (self, basis) {
+            (Self::Dense(dense), _) => Ok(std::borrow::Cow::Borrowed(dense)),
+            (Self::Implicit(deriv), TauPairBasis::Original) => {
+                Ok(std::borrow::Cow::Owned(deriv.materialize()))
+            }
+            (Self::Implicit(deriv), TauPairBasis::Transformed { qs, free_basis_opt }) => deriv
+                .transformed(qs.as_ref(), free_basis_opt.as_ref().as_ref())
+                .map(std::borrow::Cow::Owned),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) enum TauPairBasis {
     Original,
@@ -381,8 +423,11 @@ impl super::reml_outer_engine::HyperOperator for TauTauPairHyperOperator {
 
 #[derive(Clone)]
 pub(crate) struct TauBetaDriftDerivOperator {
-    pub(crate) x_tau: Array2<f64>,
-    pub(crate) x_design: DesignMatrix,
+    /// `X_τ` in `basis`, shared by every drift derivative taken at this
+    /// evaluation rather than copied into each one.
+    pub(crate) x_tau: std::sync::Arc<TauDesignTerm>,
+    pub(crate) basis: TauPairBasis,
+    pub(crate) x_design: std::sync::Arc<DesignMatrix>,
     pub(crate) c_x_u: Array1<f64>,
     pub(crate) c_x_tau_u_plus_d_cross: Array1<f64>,
     pub(crate) p: usize,
@@ -396,8 +441,14 @@ impl super::reml_outer_engine::HyperOperator for TauBetaDriftDerivOperator {
     fn mul_vec(&self, v: &Array1<f64>) -> Array1<f64> {
         assert_eq!(v.len(), self.p);
         let x_v = self.x_design.matrixvectormultiply(v);
-        let term1 = gam_linalg::faer_ndarray::fast_atv(&self.x_tau, &(&self.c_x_u * &x_v));
-        let x_tau_v = gam_linalg::faer_ndarray::fast_av(&self.x_tau, v);
+        let term1 = RemlState::tau_design_transpose_mul_in_basis(
+            &self.x_tau,
+            &self.basis,
+            &(&self.c_x_u * &x_v),
+        )
+        .expect("tau fixed-drift derivative transpose product should be shape-consistent");
+        let x_tau_v = RemlState::tau_design_forward_mul_in_basis(&self.x_tau, &self.basis, v)
+            .expect("tau fixed-drift derivative forward product should be shape-consistent");
         let term2 = self
             .x_design
             .transpose_vector_multiply(&(&self.c_x_u * &x_tau_v));
@@ -895,24 +946,7 @@ impl<'a> RemlState<'a> {
         EstimationError,
     > {
         let psi_dim = hyper_dirs.len();
-        let x_tau_terms: Vec<TauDesignTerm> = hyper_dirs
-            .iter()
-            .map(|dir| {
-                if dir.has_implicit_operator() {
-                    Ok(TauDesignTerm::Implicit(dir.x_tau_original.clone()))
-                } else {
-                    match basis {
-                        TauPairBasis::Original => Ok(TauDesignTerm::Dense(dir.x_tau_dense())),
-                        TauPairBasis::Transformed { qs, free_basis_opt } => {
-                            Ok(TauDesignTerm::Dense(dir.transformed_x_tau(
-                                qs.as_ref(),
-                                free_basis_opt.as_ref().as_ref(),
-                            )?))
-                        }
-                    }
-                }
-            })
-            .collect::<Result<Vec<_>, EstimationError>>()?;
+        let x_tau_terms = TauDesignTerm::for_directions_in_basis(hyper_dirs, basis)?;
         let x_tau_beta_list = x_tau_terms
             .iter()
             .map(|x_tau| Self::tau_design_forward_mul_in_basis(x_tau, basis, beta_eval))
@@ -2011,33 +2045,39 @@ impl<'a> RemlState<'a> {
         Ok(coords)
     }
 
-    pub(crate) fn build_tau_fixed_drift_deriv_from_dense_tau(
+    /// The fixed-β drift derivative over each direction's `X_τ` in `basis`.
+    /// Every derivative shares one term per direction and multiplies through
+    /// it, so an implicit `X_τ` is formed only for the Firth partial, which
+    /// needs its stored rows.
+    pub(crate) fn build_tau_fixed_drift_deriv_from_terms(
         x_design: DesignMatrix,
         beta_eval: Array1<f64>,
-        x_tau_dense_list: Vec<Array2<f64>>,
+        x_tau_terms: Vec<TauDesignTerm>,
+        basis: TauPairBasis,
         c_array: Array1<f64>,
         d_array: Array1<f64>,
         firth_op: Option<std::sync::Arc<super::FirthDenseOperator>>,
-    ) -> super::reml_outer_engine::FixedDriftDerivFn {
+    ) -> Result<super::reml_outer_engine::FixedDriftDerivFn, EstimationError> {
         let x_design = std::sync::Arc::new(x_design);
         let beta_eval = std::sync::Arc::new(beta_eval);
-        let x_tau_beta_list: Vec<Array1<f64>> = x_tau_dense_list
+        let x_tau_beta_list = x_tau_terms
             .iter()
-            .map(|x_tau| x_tau.dot(beta_eval.as_ref()))
-            .collect();
-        let x_tau_dense_list = std::sync::Arc::new(x_tau_dense_list);
+            .map(|x_tau| Self::tau_design_forward_mul_in_basis(x_tau, &basis, beta_eval.as_ref()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let x_tau_terms: std::sync::Arc<Vec<std::sync::Arc<TauDesignTerm>>> =
+            std::sync::Arc::new(x_tau_terms.into_iter().map(std::sync::Arc::new).collect());
         let x_tau_beta_list = std::sync::Arc::new(x_tau_beta_list);
         let c_array = std::sync::Arc::new(c_array);
         let d_array = std::sync::Arc::new(d_array);
 
-        Box::new(
+        Ok(Box::new(
             move |ext_idx: usize,
                   direction: &Array1<f64>|
                   -> Result<Option<super::reml_outer_engine::DriftDerivResult>, String> {
-                let x_tau = x_tau_dense_list.get(ext_idx).ok_or_else(|| {
+                let x_tau = x_tau_terms.get(ext_idx).ok_or_else(|| {
                     format!(
                         "tau fixed-drift derivative coordinate {ext_idx} is out of range for {} tau coordinates",
-                        x_tau_dense_list.len()
+                        x_tau_terms.len()
                     )
                 })?;
                 let x_tau_beta = x_tau_beta_list.get(ext_idx).ok_or_else(|| {
@@ -2045,18 +2085,18 @@ impl<'a> RemlState<'a> {
                         "tau fixed-drift derivative coordinate {ext_idx} has no cached X_tau beta value"
                     )
                 })?;
-                if x_tau.ncols() != direction.len() || x_tau_beta.len() != x_tau.nrows() {
-                    return Err(format!(
-                        "tau fixed-drift derivative shape mismatch for coordinate {ext_idx}: X_tau={}x{}, X_tau_beta={}, direction={}",
-                        x_tau.nrows(),
-                        x_tau.ncols(),
-                        x_tau_beta.len(),
-                        direction.len()
-                    ));
-                }
 
                 let x_u = x_design.matrixvectormultiply(direction);
-                let x_tau_u = x_tau.dot(direction);
+                let x_tau_u = RemlState::tau_design_forward_mul_in_basis(x_tau, &basis, direction)
+                    .map_err(|err| format!("tau fixed-drift derivative coordinate {ext_idx}: {err}"))?;
+                if x_tau_u.len() != x_tau_beta.len() || x_u.len() != x_tau_u.len() {
+                    return Err(format!(
+                        "tau fixed-drift derivative shape mismatch for coordinate {ext_idx}: X u={}, X_tau u={}, X_tau beta={}",
+                        x_u.len(),
+                        x_tau_u.len(),
+                        x_tau_beta.len()
+                    ));
+                }
 
                 let mut c_x_u = x_u.clone();
                 Zip::from(&mut c_x_u)
@@ -2074,13 +2114,19 @@ impl<'a> RemlState<'a> {
                     .and(x_tau_beta)
                     .par_for_each(|value, &d, &xu, &xtb| *value += d * xu * xtb);
 
-                let mut dense = firth_op.as_ref().and_then(|op| {
-                    op.d_beta_hphi_tau_partial_dense(x_tau, beta_eval.as_ref(), direction)
-                        .map(|mut matrix| {
-                            matrix.mapv_inplace(|value| -value);
-                            matrix
-                        })
-                });
+                let mut dense = match firth_op.as_ref() {
+                    Some(op) => {
+                        let x_tau_dense = x_tau.dense_in_basis(&basis).map_err(|err| {
+                            format!("tau fixed-drift derivative coordinate {ext_idx}: {err}")
+                        })?;
+                        op.d_beta_hphi_tau_partial_dense(&*x_tau_dense, beta_eval.as_ref(), direction)
+                            .map(|mut matrix| {
+                                matrix.mapv_inplace(|value| -value);
+                                matrix
+                            })
+                    }
+                    None => None,
+                };
 
                 let mut operators: Vec<
                     std::sync::Arc<dyn super::reml_outer_engine::HyperOperator>,
@@ -2089,8 +2135,9 @@ impl<'a> RemlState<'a> {
                     || c_x_tau_u_plus_d_cross.iter().any(|value| value.abs() > 0.0)
                 {
                     operators.push(std::sync::Arc::new(TauBetaDriftDerivOperator {
-                        x_tau: x_tau.clone(),
-                        x_design: x_design.as_ref().clone(),
+                        x_tau: std::sync::Arc::clone(x_tau),
+                        basis: basis.clone(),
+                        x_design: std::sync::Arc::clone(&x_design),
                         c_x_u,
                         c_x_tau_u_plus_d_cross,
                         p: direction.len(),
@@ -2103,7 +2150,7 @@ impl<'a> RemlState<'a> {
                     direction.len(),
                 ))
             },
-        )
+        ))
     }
 
     pub(crate) fn build_tau_fixed_drift_deriv(
@@ -2124,10 +2171,11 @@ impl<'a> RemlState<'a> {
         let x_design =
             build_active_design_matrix(&pirls_result.x_transformed, free_basis_opt.as_ref())
                 .map_err(EstimationError::InvalidInput)?;
-        let x_tau_dense_list = hyper_dirs
-            .iter()
-            .map(|dir| dir.transformed_x_tau(&reparam_result.qs, free_basis_opt.as_ref()))
-            .collect::<Result<Vec<_>, _>>()?;
+        let basis = TauPairBasis::Transformed {
+            qs: std::sync::Arc::new(reparam_result.qs.clone()),
+            free_basis_opt: std::sync::Arc::new(free_basis_opt.clone()),
+        };
+        let x_tau_terms = TauDesignTerm::for_directions_in_basis(hyper_dirs, &basis)?;
 
         let firth_jeffreys_link = super::outer_eval::reml_robust_jeffreys_link(&self.config);
         let firth_op = if let Some(jeffreys_link) = firth_jeffreys_link {
@@ -2167,14 +2215,15 @@ impl<'a> RemlState<'a> {
             None
         };
 
-        Ok(Self::build_tau_fixed_drift_deriv_from_dense_tau(
+        Self::build_tau_fixed_drift_deriv_from_terms(
             x_design,
             beta_eval,
-            x_tau_dense_list,
+            x_tau_terms,
+            basis,
             pirls_result.solve_c_array.to_owned(),
             pirls_result.solve_d_array.to_owned(),
             firth_op,
-        ))
+        )
     }
 
     /// Sparse-exact τ builder in the original sparse/native coefficient basis.
@@ -2437,10 +2486,8 @@ impl<'a> RemlState<'a> {
     ) -> Result<super::reml_outer_engine::FixedDriftDerivFn, EstimationError> {
         let pirls_result = bundle.pirls_result.as_ref();
         let beta_eval = self.sparse_exact_beta_original(pirls_result);
-        let x_tau_dense_list: Vec<Array2<f64>> = hyper_dirs
-            .iter()
-            .map(DirectionalHyperParam::x_tau_dense)
-            .collect();
+        let x_tau_terms =
+            TauDesignTerm::for_directions_in_basis(hyper_dirs, &TauPairBasis::Original)?;
 
         let firth_jeffreys_link = super::outer_eval::reml_robust_jeffreys_link(&self.config);
         let firth_op = if let Some(jeffreys_link) = firth_jeffreys_link {
@@ -2465,14 +2512,15 @@ impl<'a> RemlState<'a> {
             None
         };
 
-        Ok(Self::build_tau_fixed_drift_deriv_from_dense_tau(
+        Self::build_tau_fixed_drift_deriv_from_terms(
             self.x().clone(),
             beta_eval,
-            x_tau_dense_list,
+            x_tau_terms,
+            TauPairBasis::Original,
             pirls_result.solve_c_array.to_owned(),
             pirls_result.solve_d_array.to_owned(),
             firth_op,
-        ))
+        )
     }
 
     pub(crate) fn build_tau_hyper_coords_sparse_exact(
@@ -3870,6 +3918,101 @@ mod tests {
         matrix: Array2<f64>,
     ) -> Arc<dyn super::super::reml_outer_engine::HyperOperator> {
         Arc::new(super::super::reml_outer_engine::DenseMatrixHyperOperator { matrix })
+    }
+
+    /// Contract: `TauBetaDriftDerivOperator` multiplies an implicit `X_τ` through
+    /// the term products in either basis, and equals the same operator over the
+    /// derivative materialized in that basis (#2735). The term spans global
+    /// columns 1..4 of 5; the transformed basis uses a non-identity `Qs` and a
+    /// 5 × 4 constraint basis `Z`.
+    #[test]
+    pub(crate) fn tau_beta_drift_deriv_operator_multiplies_implicit_terms_like_their_dense_rows_2735()
+    {
+        use gam_terms::basis::ImplicitDesignPsiDerivative;
+
+        let n = 6usize;
+        let n_knots = 3usize;
+        let n_axes = 2usize;
+        let p_full = 5usize;
+        let pairs = n * n_knots;
+        let implicit = HyperDesignDerivative::from_implicit(
+            Arc::new(ImplicitDesignPsiDerivative::new(
+                Array1::from_shape_fn(pairs, |k| 0.45 + 0.25 * (k as f64 * 0.8).cos()),
+                Array1::from_shape_fn(pairs, |k| (k as f64 * 0.57).sin()),
+                Array1::zeros(pairs),
+                Array2::from_shape_fn((pairs, n_axes), |(k, a)| {
+                    0.25 + ((3 * k + a) as f64 * 0.33).cos()
+                }),
+                None,
+                None,
+                n,
+                n_knots,
+                0,
+                n_axes,
+            )),
+            crate::estimate::reml::ImplicitDerivLevel::First(1),
+            1..4,
+            p_full,
+        );
+        let x_tau_original = implicit.materialize();
+        let x_original =
+            Array2::from_shape_fn((n, p_full), |(i, j)| ((i * p_full + j) as f64 * 0.47).sin());
+        let qs = Array2::from_shape_fn((p_full, p_full), |(i, j)| {
+            if i == j {
+                1.0
+            } else {
+                0.25 * ((i + 3 * j) as f64 * 0.41).cos()
+            }
+        });
+        let z = Array2::from_shape_fn((p_full, 4), |(i, j)| ((2 * i + j) as f64 * 0.37).sin());
+        let transformed = TauPairBasis::Transformed {
+            qs: Arc::new(qs.clone()),
+            free_basis_opt: Arc::new(Some(z.clone())),
+        };
+        let cases = [
+            (
+                TauPairBasis::Original,
+                x_original.clone(),
+                x_tau_original.clone(),
+            ),
+            (
+                transformed,
+                x_original.dot(&qs).dot(&z),
+                x_tau_original.dot(&qs).dot(&z),
+            ),
+        ];
+        for (basis, x_active, x_tau_active) in cases {
+            let p = x_active.ncols();
+            let x_design = Arc::new(DesignMatrix::Dense(
+                gam_linalg::matrix::DenseDesignMatrix::from(x_active),
+            ));
+            let make = |term: TauDesignTerm| TauBetaDriftDerivOperator {
+                x_tau: Arc::new(term),
+                basis: basis.clone(),
+                x_design: Arc::clone(&x_design),
+                c_x_u: Array1::from_shape_fn(n, |i| 0.2 * (i as f64 * 0.9).cos()),
+                c_x_tau_u_plus_d_cross: Array1::from_shape_fn(n, |i| 0.1 + 0.05 * i as f64),
+                p,
+            };
+            let from_implicit = make(TauDesignTerm::Implicit(implicit.clone()));
+            let from_dense = make(TauDesignTerm::Dense(x_tau_active));
+            for probe in 0..p {
+                let v = Array1::from_shape_fn(p, |j| ((probe * p + j) as f64 * 0.53).sin());
+                let got = from_implicit.mul_vec(&v);
+                let want = from_dense.mul_vec(&v);
+                let scale = want.iter().fold(1.0_f64, |acc, value| acc.max(value.abs()));
+                // Both sides accumulate a few hundred rounded products.
+                let band = 1.0e3 * f64::EPSILON * scale;
+                for j in 0..p {
+                    assert!(
+                        (got[j] - want[j]).abs() <= band,
+                        "probe {probe} component {j}: implicit {:.15e} vs dense {:.15e}",
+                        got[j],
+                        want[j]
+                    );
+                }
+            }
+        }
     }
 
     /// Contract: `FirthAugmentedSingleHyperOperator::mul_vec(v)` reproduces
