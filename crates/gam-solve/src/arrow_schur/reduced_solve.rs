@@ -2680,6 +2680,22 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
     Ok((log_det_tt, log_det_schur, factorization))
 }
 
+/// #2731 — the host bytes a caller admits `dense_lane_reduced_schur_log_det` at, for
+/// a reduced Schur of dimension `k`. At most four `k × k` blocks are alive at once in
+/// either phase of the route. While it materializes and eigendecomposes, those are
+/// the applied operator, the eigendecomposition's working copy, its eigenvectors and
+/// their returned copy. While it emits, they are the eigenvectors, the derivative
+/// bundle, and the EFS probes with their inverse images. The eigendecomposition's
+/// own internal storage is not bounded here, so two more blocks are reserved for it:
+/// the same six-block eigensystem workspace the support lane's dense eigensystems
+/// are admitted at. `None` when the byte count overflows `usize`.
+pub fn dense_lane_reduced_schur_peak_bytes(k: usize) -> Option<usize> {
+    const DENSE_LANE_BLOCKS: usize = 6;
+    k.checked_mul(k)?
+        .checked_mul(std::mem::size_of::<f64>())?
+        .checked_mul(DENSE_LANE_BLOCKS)
+}
+
 /// #2731 — the lane's reduced-Schur `log|S|` when the caller's memory planner
 /// admits the dense `k × k` block. `k` applies materialize the operator the
 /// rational surrogate would otherwise walk by conjugate gradients, and one

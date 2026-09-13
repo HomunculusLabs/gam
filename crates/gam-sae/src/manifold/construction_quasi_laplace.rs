@@ -4880,7 +4880,7 @@ impl SaeManifoldTerm {
         // A gradient-bearing streaming evaluation always goes through the lane,
         // even when a chunked dense Schur would fit: only the lane emits the
         // derivative bundle whose contractions are the exact derivative of its
-        // value. Where this plan admits the dense k×k reduced Schur, the lane
+        // value. Where the host holds the dense lane's own k×k blocks, the lane
         // takes the exact log-det off one eigendecomposition; otherwise it
         // evaluates the frozen rational surrogate (#2731). Value-only SLQ callers
         // retain the historical memory-derived split.
@@ -4942,6 +4942,12 @@ impl SaeManifoldTerm {
             // retained verbatim for `lane = None` (bit-identical SLQ).
             let (log_det_tt, log_det_schur, exact_a_cache) = match lane.as_deref_mut() {
                 Some(lane) => {
+                    // #2731 — the dense lane allocates several k×k blocks (see
+                    // `dense_lane_reduced_schur_peak_bytes`), so it is admitted at
+                    // that size, not at the one block the chunked route above prices.
+                    let dense_lane_admitted =
+                        gam_solve::arrow_schur::dense_lane_reduced_schur_peak_bytes(a_sys.k)
+                            .is_some_and(|bytes| bytes <= plan.in_core_budget_bytes);
                     let evaluated = gam_solve::arrow_schur::matrix_free_arrow_evidence_evaluation(
                         &a_sys,
                         0.0,
@@ -4951,7 +4957,7 @@ impl SaeManifoldTerm {
                         SCHUR_SLQ_LOGDET_LANCZOS_STEPS,
                         SCHUR_SLQ_LOGDET_SEED,
                         lane,
-                        dense_reduced_schur_admitted,
+                        dense_lane_admitted,
                     )
                     .map_err(|err| {
                         format!(
