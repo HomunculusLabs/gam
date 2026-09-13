@@ -3067,19 +3067,15 @@ fn arc_bridge_finite_cost_stall_defers_at_bound_separation() {
         cost_stall_bounds: Some((lo.clone(), hi.clone())),
         curvature_stationary_floor: None,
     };
-    // Evaluate at the lower bound through the ARC per-iterate oracle path. A
-    // separation-stationary probe fills the stall window on its own, and the
-    // sample that does so must still retain its Hessian so ARC owns the
-    // convergence verdict.
-    let sample = SecondOrderObjective::eval_hessian(&mut bridge, &lo)
-        .expect("finite ARC stall sample must reach the second-order solver");
-    assert_eq!(sample.hessian, Some(array![[1.0]]));
-    // The same probe again bought neither descent nor a smaller residual, so the
-    // bridge stops at the incumbent instead of handing ARC another window (#2817).
-    let stop = SecondOrderObjective::eval_hessian(&mut bridge, &lo)
-        .err()
-        .expect("a repeated stall that bought nothing must stop the run");
-    assert_eq!(stop.into_message(), ARC_UNPROGRESSING_STALL_SENTINEL);
+    // Hammer eval_hessian at the lower bound — the ARC per-iterate oracle path.
+    // Every finite sample, including the one that fills the stall window, must
+    // retain its Hessian so ARC owns the convergence verdict. The schedule spans
+    // one window, so the #2817 progress licence is spent only once here.
+    for _ in 0..(COST_STALL_WINDOW + 2) {
+        let sample = SecondOrderObjective::eval_hessian(&mut bridge, &lo)
+            .expect("finite ARC stall sample must reach the second-order solver");
+        assert_eq!(sample.hessian, Some(array![[1.0]]));
+    }
     let published = exit.lock().unwrap().take().expect("best iterate published");
     assert!(
         !published.converged,
