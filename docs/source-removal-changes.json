@@ -8034,5 +8034,14 @@
     ],
     "reason": "Lead ruling 2026-09-12 (#2899, the user's 'delete all slop / code only used in tests'): delete gam_event_history::joint, joint.rs and the 30 files under src/joint/. The module has no product or production user: no crate, gam-cli, gam-pyffi, gamfit, example or root test names gam_event_history::joint or any path under it, and nothing outside the module imports from it. Its unit tests (tests.rs, reference_tests.rs, function_prior_tests.rs and the in-file test modules) exercised only the module and go with it.",
     "evidence": "At the base, git grep -E 'joint::|mod joint;|event_history::joint' over crates, src, tests, examples, bench, python and gamfit finds the module only in its own files, lib.rs's `pub mod joint;` and a historical test listing in bench/measurements/event_history_coefficient_evidence_20260910.txt. The crate helpers it imported (scalar jets, chain::log_sum_exp, marginal::pairwise_sum, EventHistoryError, MarkKind) keep production callers in family.rs, chain.rs, marginal.rs, static_state.rs and objective.rs. The item list (465 identities) follows source_removal_guard.py's predicates over the removed hunks. A guarded cargo check --workspace --all-targets --exclude gam-pyffi at this entry's base plus this change, and source_removal_guard.py / public_api_census.py on this commit, ran on MSI before the push (job id in the commit message)."
+  },
+  {
+    "base": "8e9e48c49961e2609aa82358f5217c9f5ef00a66",
+    "items": [
+      "crates/gam-solve/src/gaussian_reml.rs:fn:gaussian_reml_stationary_set",
+      "crates/gam-solve/src/gaussian_reml.rs:struct:GaussianRemlStationarySet"
+    ],
+    "reason": "#2234, SPEC rule 25. gaussian_reml_stationary_set re-ran the closed-form Gaussian REML stationary enumeration to publish a GaussianRemlStationarySet. Its only caller, layer_transport fit_penalized_1d, compared the selected rho bit for bit against gaussian_reml_closed_form_with_nullspace_dim, which runs the same enumeration and refuses an ambiguous structure. a905d68bf removed that comparison, which left the wrapper and its certificate type with no user.",
+    "evidence": "At the base, git grep -n -w for gaussian_reml_stationary_set and GaussianRemlStationarySet finds matches only in crates/gam-solve/src/gaussian_reml.rs: the struct declaration, its doc link, the function declaration and the function body constructing the struct. No crate, test, bench, example, pyffi or doc names either. Guarded pool job 602897 at a905d68bf with this deletion applied (HEAD equal to the pin, 0 dirty files; log /scratch.global/sauer354/pool/steer/drift2234.602897.log): cargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0."
   }
 ]
