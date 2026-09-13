@@ -2812,5 +2812,18 @@
     },
     "reason": "#2829 no product user: these getters have no caller in crates, src, tests, benches, bench or examples, and every field they returned keeps another reader.",
     "evidence": "At 5f03a97073020f195205fa0c6ca1508a7d0d8684, git grep -n for each name as a method call (.name( or ::name() over crates, src, tests and examples finds no call on the owning type; same-named items elsewhere are different types (checked by reading), and each returned field is still read inside its own impl."
+  },
+  {
+    "base": "8f2d0c6c37c0c0d2a716fe2e4c3d56c5cd4709f8",
+    "removed": {
+      "crates/gam-sae/src/atom_codes.rs::coactivation": 1,
+      "crates/gam-sae/src/atom_codes.rs::fusion_evidence": 1,
+      "crates/gam-sae/src/atom_codes.rs::weight_codependence": 1,
+      "crates/gam-sae/src/basis.rs::reduced_width": 1,
+      "crates/gam-sae/src/manifold/persistence.rs::atlas_nerve": 1,
+      "crates/gam-sae/src/sparse_dict/coordinate.rs::block_firing_coordinates": 1
+    },
+    "reason": "#2829 no product user: SparseAtomCodes::coactivation, CoactivationStats::fusion_evidence, SubspaceReducedEvaluator::reduced_width, persistence::atlas_nerve and sparse_dict::block_firing_coordinates have no caller; weight_codependence, AtlasNerveReport, farthest_point_subsample and gf2_column_rank were reached only through them.",
+    "evidence": "At 8f2d0c6c37c0c0d2a716fe2e4c3d56c5cd4709f8, git grep -n -w over crates, src and tests finds no call of these functions: coactive_pair_stats builds CoactivationStats with its own inline weight correlation, the atlas_nerve names elsewhere are the inference::atlas_nerve module and build_atlas_nerve, and the gam-pyffi block_firing_coordinates wrapper calls block_route_firing_coordinates. weight_codependence was called only by coactivation, and AtlasNerveReport was built only by persistence::atlas_nerve."
   }
 ]

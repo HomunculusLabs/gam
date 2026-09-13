@@ -230,46 +230,6 @@ impl SparseAtomCodes {
         self.codes.iter_mut()
     }
 
-    /// Co-activation statistics for one atom pair `(a, b)` — the #976
-    /// code-dependence trigger. Pure popcount ratios over the active masks:
-    /// `P(a|b) = #{rows: a∧b} / #{rows: b}` and symmetrically.
-    ///
-    /// Two derived readings drive the structure search:
-    ///
-    /// * [`CoactivationStats::dependence`] (symmetric, the FUSION trigger) —
-    ///   independent atoms with marginal activation rates `π_a, π_b` co-activate
-    ///   at rate `π_a·π_b`, so both conditionals stay near the marginals; a
-    ///   shattered curved family re-encoded as several near-duplicate atoms
-    ///   pushes *both* conditionals toward 1.
-    /// * [`CoactivationStats::absorption_asymmetry`] (the ABSORPTION-audit
-    ///   trigger) — an A⇒B hierarchy where sparsity folded B's content into A
-    ///   shows `P(parent|child) ≈ 1` without the converse, so a large asymmetry
-    ///   with one conditional near 1 flags the pair for the within-atom
-    ///   substructure audit (#907 race on the atom's own code distribution).
-    ///
-    /// These are *triggers*, not decisions: they rank move proposals
-    /// deterministically; acceptance is owned by the e-process gates in
-    /// [`gam_solve::structure_search`].
-    pub fn coactivation(&self, a: usize, b: usize) -> CoactivationStats {
-        assert!(
-            a < self.k_atoms && b < self.k_atoms,
-            "SparseAtomCodes::coactivation: atoms ({a}, {b}) out of range K={}",
-            self.k_atoms
-        );
-        let n_obs = self.n_obs();
-        let mut n_a = 0usize;
-        let mut n_b = 0usize;
-        let mut n_joint = 0usize;
-        for code in &self.codes {
-            let on_a = code.active_mask.get(a);
-            let on_b = code.active_mask.get(b);
-            n_a += usize::from(on_a);
-            n_b += usize::from(on_b);
-            n_joint += usize::from(on_a && on_b);
-        }
-        CoactivationStats::from_counts(n_obs, n_a, n_b, n_joint, self.weight_codependence(a, b))
-    }
-
     /// All atom pairs that co-fire at least once, with their support and
     /// amplitude-code statistics, computed in one sparse pass over row supports.
     ///
@@ -337,64 +297,6 @@ impl SparseAtomCodes {
                 (a, b, stats)
             })
             .collect()
-    }
-
-    /// #976 — the AMPLITUDE half of the fusion criterion: the Pearson
-    /// correlation of the two atoms' activation WEIGHTS over the rows where both
-    /// are active. Support co-activation ([`CoactivationStats::dependence`]) only
-    /// says the two atoms fire together; it cannot distinguish a single curved
-    /// family SHATTERED across two near-duplicate atoms (where moving along the
-    /// family smoothly trades amplitude between the pair, so their weights are
-    /// strongly — typically negatively — correlated on the joint support) from
-    /// two GENUINELY INDEPENDENT atoms that merely happen to co-fire on the same
-    /// input class (weights uncorrelated). The magnitude `|ρ|` of this
-    /// correlation is the interaction-evidence the issue's fusion trigger pairs
-    /// with code dependence: high support-overlap AND high `|weight_correlation|`
-    /// is the shattering signature ("dependent codes + joint interaction
-    /// evidence"), whereas high overlap with `|ρ|≈0` is two independent features
-    /// that should NOT be fused.
-    ///
-    /// Returns `0.0` when fewer than two rows are jointly active or when either
-    /// atom's weight is constant on the joint support (an undefined correlation
-    /// is, for the trigger, "no amplitude dependence detected").
-    pub(crate) fn weight_codependence(&self, a: usize, b: usize) -> f64 {
-        assert!(
-            a < self.k_atoms && b < self.k_atoms,
-            "SparseAtomCodes::weight_codependence: atoms ({a}, {b}) out of range K={}",
-            self.k_atoms
-        );
-        let mut wa = Vec::new();
-        let mut wb = Vec::new();
-        for code in &self.codes {
-            if code.active_mask.get(a) && code.active_mask.get(b) {
-                wa.push(code.weights[a]);
-                wb.push(code.weights[b]);
-            }
-        }
-        let m = wa.len();
-        if m < 2 {
-            return 0.0;
-        }
-        let inv = 1.0 / m as f64;
-        let mean_a: f64 = wa.iter().sum::<f64>() * inv;
-        let mean_b: f64 = wb.iter().sum::<f64>() * inv;
-        let mut cov = 0.0_f64;
-        let mut var_a = 0.0_f64;
-        let mut var_b = 0.0_f64;
-        for i in 0..m {
-            let da = wa[i] - mean_a;
-            let db = wb[i] - mean_b;
-            cov += da * db;
-            var_a += da * da;
-            var_b += db * db;
-        }
-        if !(var_a > 0.0 && var_b > 0.0) {
-            return 0.0;
-        }
-        let rho = cov / (var_a.sqrt() * var_b.sqrt());
-        // Numerical clamp: accumulation can nudge a perfect ±1 a hair past the
-        // bound.
-        rho.clamp(-1.0, 1.0)
     }
 
     /// Universal per-token code lengths for the binary support process, in bits.
@@ -647,7 +549,7 @@ pub struct CoactivationStats {
     /// marginal is empty.
     pub lift: f64,
     /// Pearson correlation of the two atoms' activation WEIGHTS over the
-    /// jointly-active rows (see `SparseAtomCodes::weight_codependence`) — the
+    /// jointly-active rows (accumulated in `SparseAtomCodes::coactive_pair_stats`) — the
     /// amplitude/interaction half of the fusion criterion. `0` when the joint
     /// support is too small or a weight is constant there.
     pub weight_correlation: f64,
@@ -702,18 +604,6 @@ impl CoactivationStats {
         (self.p_a_given_b - self.p_b_given_a).abs()
     }
 
-    /// #976 — the combined FUSION evidence: `dependence · |weight_correlation|`.
-    /// A fusion proposal needs BOTH halves — the atoms must co-activate (support
-    /// dependence) AND their amplitudes must be dependent on the joint support
-    /// (the interaction evidence that a single curved family was shattered). Two
-    /// independent atoms that happen to co-fire score near 0 on the second factor
-    /// and so are NOT proposed for fusion even at high support overlap; a genuine
-    /// shattered pair scores high on both. This is the scalar the canonical-order
-    /// fusion ranking ("fusions by code dependence descending") should sort on,
-    /// and the threshold the e-process acceptance gate guards.
-    pub fn fusion_evidence(&self) -> f64 {
-        self.dependence() * self.weight_correlation.abs()
-    }
 }
 
 #[cfg(test)]

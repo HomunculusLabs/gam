@@ -540,28 +540,6 @@ pub fn recover_measure_from_code(
     maybe_super_resolve(z, sigma)
 }
 
-/// Per-firing coordinate readout for a `b = 2` circle block: phase `t̂`,
-/// amplitude `‖z‖`, and their closed-form SEs, with `σ̂` estimated from the
-/// block's radial scatter. See the module doc for the derivation.
-pub fn block_firing_coordinates(
-    fit: &BlockSparseFit,
-    block: usize,
-) -> Result<BlockCoordinateReport, String> {
-    let block_size = fit.block_size;
-    if block_size == 0 || fit.decoder.nrows() % block_size != 0 {
-        return Err(format!(
-            "block_firing_coordinates: decoder rows {} not divisible by block_size {block_size}",
-            fit.decoder.nrows()
-        ));
-    }
-    block_route_firing_coordinates(
-        fit.blocks.view(),
-        fit.codes.view(),
-        fit.decoder.nrows() / block_size,
-        block,
-    )
-}
-
 /// Per-firing circle-coordinate readout directly from sparse block routing.
 ///
 /// `blocks` is `N×s` and `codes` is `N×s×2`; implicit dictionary zeros are

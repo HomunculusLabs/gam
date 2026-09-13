@@ -3606,11 +3606,6 @@ impl SubspaceReducedEvaluator {
         Ok(Self { inner, q })
     }
 
-    /// Retained (data-supported) width `r`.
-    pub fn reduced_width(&self) -> usize {
-        self.q.ncols()
-    }
-
     fn check_inner_width(&self, got: usize, what: &str) -> Result<(), String> {
         if got != self.q.nrows() {
             return Err(format!(

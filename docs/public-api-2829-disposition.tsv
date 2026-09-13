@@ -397,11 +397,11 @@ crates/gam-sae/src/assignment.rs	thaw_routing	retired-by-later-deletion:b66a7d04
 crates/gam-sae/src/assignment.rs	with_frozen_routing	restored-in-place
 crates/gam-sae/src/assignment.rs	with_ungated	retired-by-later-deletion:b66a7d04e2
 crates/gam-sae/src/atom_codes.rs	active_weight_sum	retired-by-later-deletion:10ac599e4c
-crates/gam-sae/src/atom_codes.rs	coactivation	restored-in-place
+crates/gam-sae/src/atom_codes.rs	coactivation	retired-no-product-user
 crates/gam-sae/src/atom_codes.rs	deactivate	retired-by-later-deletion:10ac599e4c
 crates/gam-sae/src/atom_codes.rs	effective_weights	restored-in-place
-crates/gam-sae/src/atom_codes.rs	fusion_evidence	restored-in-place
-crates/gam-sae/src/atom_codes.rs	weight_codependence	narrowed-to-crate
+crates/gam-sae/src/atom_codes.rs	fusion_evidence	retired-no-product-user
+crates/gam-sae/src/atom_codes.rs	weight_codependence	retired-no-product-user
 crates/gam-sae/src/atom_codes.rs	weights_matrix	retired-by-later-deletion:10ac599e4c
 crates/gam-sae/src/atom_schema.rs	coordinate_periods_for_basis	retired-no-surviving-dependent
 crates/gam-sae/src/atom_schema.rs	validated_n_harmonics	retired-no-surviving-dependent
@@ -413,7 +413,7 @@ crates/gam-sae/src/basis.rs	l2_gram_weights	retired-no-product-user
 crates/gam-sae/src/basis.rs	laplace_eigenvalues	retired-no-product-user
 crates/gam-sae/src/basis.rs	nullspace_dimension	retired-by-later-deletion:fb8fada8d2
 crates/gam-sae/src/basis.rs	quotient_name	retired-no-product-user
-crates/gam-sae/src/basis.rs	reduced_width	restored-in-place
+crates/gam-sae/src/basis.rs	reduced_width	retired-no-product-user
 crates/gam-sae/src/basis.rs	select_spherical_harmonic_degree	retired-by-later-deletion:fb8fada8d2
 crates/gam-sae/src/candidate_index.rs	auto_candidate_budget	retired-by-later-deletion:728caa9b19
 crates/gam-sae/src/candidate_index.rs	brute_force_best_atom	retired-by-later-deletion:728caa9b19
@@ -743,7 +743,7 @@ crates/gam-sae/src/manifold/pair_phase.rs	screen_all_pairs_phase	retired-by-late
 crates/gam-sae/src/manifold/pair_phase.rs	screen_pair_phase	retired-by-later-deletion:fea430c0c4
 crates/gam-sae/src/manifold/pair_phase.rs	screen_pairwise_phase_coupling	retired-by-later-deletion:fea430c0c4
 crates/gam-sae/src/manifold/penalties.rs	separation_barrier_value_and_grad_for_test	retired-no-surviving-dependent
-crates/gam-sae/src/manifold/persistence.rs	atlas_nerve	restored-in-place
+crates/gam-sae/src/manifold/persistence.rs	atlas_nerve	retired-no-product-user
 crates/gam-sae/src/manifold/persistence.rs	is_arc	retired-by-later-deletion:fea430c0c4
 crates/gam-sae/src/manifold/persistence.rs	is_circle	retired-no-product-user
 crates/gam-sae/src/manifold/persistence.rs	vietoris_rips_persistence	retired-by-later-deletion:fea430c0c4
@@ -809,7 +809,7 @@ crates/gam-sae/src/sparse_dict/block.rs	reconstruct_row	retired-no-surviving-dep
 crates/gam-sae/src/sparse_dict/block.rs	row_loss	retired-no-surviving-dependent
 crates/gam-sae/src/sparse_dict/block.rs	trivially_converged	retired-by-later-deletion:fb8fada8d2
 crates/gam-sae/src/sparse_dict/cofit.rs	cofit_block_and_curved	retired-by-decision
-crates/gam-sae/src/sparse_dict/coordinate.rs	block_firing_coordinates	restored-in-place
+crates/gam-sae/src/sparse_dict/coordinate.rs	block_firing_coordinates	retired-no-product-user
 crates/gam-sae/src/sparse_dict/coordinate.rs	block_measure_valued_codes	retired-no-product-user
 crates/gam-sae/src/sparse_dict/coordinate.rs	explained_variance_from_reconstruction	retired-no-product-user
 crates/gam-sae/src/sparse_dict/coordinate.rs	harmonic_firing_coordinates	retired-no-product-user

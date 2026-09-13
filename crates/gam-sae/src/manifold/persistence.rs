@@ -38,7 +38,7 @@
 use super::*;
 use crate::inference::atlas_nerve::AtlasCoveringSide;
 use crate::null_battery::ClaimNullCalibration;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 /// Compute ceiling on the number of points fed to the Vietoris–Rips filtration.
 ///
@@ -350,12 +350,6 @@ fn point_distance(points: ArrayView2<'_, f64>, i: usize, j: usize) -> f64 {
         acc += d * d;
     }
     acc.sqrt()
-}
-
-/// Deterministic farthest-point subsample to `target` landmarks (seeded at row
-/// `0`), returning the chosen row indices. Returns all rows when `n <= target`.
-fn farthest_point_subsample(points: ArrayView2<'_, f64>, target: usize) -> Vec<usize> {
-    farthest_point_subsample_weighted(points, None, target)
 }
 
 fn farthest_point_subsample_weighted(
@@ -1505,39 +1499,6 @@ pub(crate) fn atom_topology_persistence(
     )
 }
 
-/// The topology read off a typed-free local-chart atlas by its NERVE (reviewer
-/// F3, atlas-first inversion).
-///
-/// The default pipeline *assumes-then-races* — it picks a topology up front and
-/// fits it. The inversion *measures-then-imposes*: cover the atom's points with
-/// overlapping local charts (Duchon patches glued by the in-tree
-/// [`crate::chart_transfer`] pulled-back operators in production; here the
-/// overlap is read geometrically from the point cloud), then read the topology
-/// from the full nerve of the cover. Vertices are charts, edges are pairwise
-/// intersections, and a triangle is present only when one sampled point lies in
-/// all three charts. Homology is computed on that simplicial complex, so a
-/// three-chart common intersection is a filled triangle (`b1 = 0`), not the
-/// spurious graph cycle obtained from its 1-skeleton.
-#[derive(Clone, Debug)]
-pub struct AtlasNerveReport {
-    /// Number of local charts (landmark cover elements).
-    pub n_charts: usize,
-    /// Number of nerve edges (overlapping chart pairs).
-    pub n_edges: usize,
-    /// Number of filled 2-simplices (non-empty triple chart intersections).
-    pub n_triangles: usize,
-    /// Connected components of the nerve.
-    pub n_components: usize,
-    /// First Betti number `dim ker(d1) - rank(d2)` of the full nerve.
-    pub b1: i64,
-    /// Maximum degree in the nerve 1-skeleton. A connected acyclic nerve is an
-    /// arc only when this is at most two; a Y-junction is not an arc.
-    pub max_vertex_degree: usize,
-    /// Whether the sampled support is below or at/above the atlas covering
-    /// count. Below-covering reports are measurements, but marked under-resolved.
-    pub covering_side: AtlasCoveringSide,
-}
-
 fn nerve_find(parent: &mut [usize], x: usize) -> usize {
     let mut root = x;
     while parent[root] != root {
@@ -1550,180 +1511,6 @@ fn nerve_find(parent: &mut [usize], x: usize) -> usize {
         cur = next;
     }
     root
-}
-
-/// Build the witness complex of a landmark-chart cover over a point cloud and
-/// read its topology, through dimension two rather than substituting its graph.
-///
-/// A simplex is admitted when some sampled row WITNESSES it: every chart in the
-/// simplex is at least as close to that row as every chart outside it (the weak
-/// witness complex of de Silva–Carlsson). Equivalently, an edge `(c, c')` is
-/// admitted when some row's two nearest landmarks are exactly `c` and `c'`.
-///
-/// # Why not a ball cover (#2555)
-///
-/// This used to size each landmark's ball to cover its own Voronoi cell and
-/// admit a simplex when a row lay in every ball. That construction is minimal —
-/// the balls tile rather than overlap — so its nerve carried no topology and a
-/// circle read `b₁ = 0` with 8 charts, 3 edges and 5 components.
-///
-/// ⚠ Inflating the radii cannot repair it, and this is a geometric obstruction
-/// rather than an unfound constant. Farthest-point sampling bisects the largest
-/// gap, so the landmark spacing is uniform only when the chart count is a power
-/// of two and otherwise alternates in a 2:1 pattern. Under that pattern two
-/// landmarks one WIDE gap apart lie at *exactly* the same distance as two
-/// landmarks two NARROW gaps apart — a chord depends only on the arc it subtends
-/// — measured at 4 exact collisions for a 100-row circle and 60 for a 400-row
-/// one. Ball admission is a function of that distance, so no assignment of radii,
-/// global or per-chart, can admit the first pair and refuse the second. Five
-/// radius rules were measured across seven densities and none recovers `S¹`;
-/// three of them recover it at exactly 60 rows, where `⌈√60⌉ = 8` is a power of
-/// two and the landmarks happen to be uniform. A fixture at that density will
-/// green almost any rule, so do not calibrate against one.
-///
-/// The witness rule consults no distance threshold, so the collision cannot
-/// reach it: a row in a wide gap has the two flanking landmarks as its nearest
-/// pair, while two landmarks two hops apart can never be any row's nearest pair
-/// because the intervening landmark is strictly closer. Measured `S¹` on the
-/// circle at 30/60/100/150/200/400/900/2000 rows, with the arc staying a path at
-/// every density.
-pub fn atlas_nerve(points: ArrayView2<'_, f64>) -> AtlasNerveReport {
-    let n = points.nrows();
-    if n == 0 {
-        return AtlasNerveReport {
-            n_charts: 0,
-            n_edges: 0,
-            n_triangles: 0,
-            n_components: 0,
-            b1: 0,
-            max_vertex_degree: 0,
-            covering_side: AtlasCoveringSide::BelowCoveringNumber,
-        };
-    }
-    let n_charts = ((n as f64).sqrt().ceil() as usize).max(3).min(n);
-    let landmarks = farthest_point_subsample(points, n_charts);
-    let v = landmarks.len();
-    let mut distances = vec![vec![0.0_f64; v]; n];
-    for i in 0..n {
-        for (ci, &l) in landmarks.iter().enumerate() {
-            distances[i][ci] = point_distance(points, i, l);
-        }
-    }
-
-    // Weak-witness admission: a row witnesses the simplex formed by its own
-    // nearest landmarks. No radius and no tolerance participate, which is what
-    // makes this immune to the 1-hop/2-hop distance collision described above.
-    let mut edges = BTreeSet::<(usize, usize)>::new();
-    let mut witnessed_triples = BTreeSet::<(usize, usize, usize)>::new();
-    let mut order: Vec<usize> = Vec::with_capacity(v);
-    for row_distances in &distances {
-        order.clear();
-        order.extend(0..v);
-        order.sort_by(|&a, &b| {
-            row_distances[a]
-                .partial_cmp(&row_distances[b])
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        if v >= 2 {
-            edges.insert((order[0].min(order[1]), order[0].max(order[1])));
-        }
-        if v >= 3 {
-            let mut triple = [order[0], order[1], order[2]];
-            triple.sort_unstable();
-            witnessed_triples.insert((triple[0], triple[1], triple[2]));
-        }
-    }
-    // A simplicial complex holds a face only together with all of its subfaces,
-    // so a witnessed triple is a triangle only when all three of its edges were
-    // themselves witnessed. On a circle the long edge of each consecutive triple
-    // is never witnessed, so no triangle is admitted and the cycle survives.
-    let triangles: BTreeSet<(usize, usize, usize)> = witnessed_triples
-        .into_iter()
-        .filter(|&(a, b, c)| {
-            edges.contains(&(a, b)) && edges.contains(&(a, c)) && edges.contains(&(b, c))
-        })
-        .collect();
-
-    let n_edges = edges.len();
-    let mut parent: Vec<usize> = (0..v).collect();
-    let mut degree = vec![0usize; v];
-    for &(a, b) in &edges {
-        degree[a] += 1;
-        degree[b] += 1;
-        let ra = nerve_find(&mut parent, a);
-        let rb = nerve_find(&mut parent, b);
-        if ra != rb {
-            parent[ra] = rb;
-        }
-    }
-    let mut roots = std::collections::HashSet::new();
-    for x in 0..v {
-        let r = nerve_find(&mut parent, x);
-        roots.insert(r);
-    }
-    let n_components = roots.len();
-    let edge_index: HashMap<(usize, usize), usize> = edges
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(i, edge)| (edge, i))
-        .collect();
-    let mut boundary_columns = Vec::with_capacity(triangles.len());
-    for &(a, b, c) in &triangles {
-        boundary_columns.push(vec![
-            edge_index[&(a, b)],
-            edge_index[&(a, c)],
-            edge_index[&(b, c)],
-        ]);
-    }
-    let triangle_boundary_rank = gf2_column_rank(boundary_columns);
-    let b1 =
-        (n_edges as i64 - v as i64 + n_components as i64 - triangle_boundary_rank as i64).max(0);
-    // No population covering-number bound is supplied to this empirical API.
-    // `n >= n_charts` is true by construction and conveys no resolution
-    // guarantee, so never manufacture the above-covering certificate from it.
-    let covering_side = AtlasCoveringSide::BelowCoveringNumber;
-    AtlasNerveReport {
-        n_charts: v,
-        n_edges,
-        n_triangles: triangles.len(),
-        n_components,
-        b1,
-        max_vertex_degree: degree.into_iter().max().unwrap_or(0),
-        covering_side,
-    }
-}
-
-fn gf2_column_rank(columns: Vec<Vec<usize>>) -> usize {
-    let mut pivots: HashMap<usize, Vec<usize>> = HashMap::new();
-    let mut rank = 0usize;
-    for mut column in columns {
-        column.sort_unstable();
-        while let Some(&pivot) = column.last() {
-            if let Some(existing) = pivots.get(&pivot) {
-                let mut out = Vec::with_capacity(column.len() + existing.len());
-                let (mut i, mut j) = (0usize, 0usize);
-                while i < column.len() || j < existing.len() {
-                    if j == existing.len() || (i < column.len() && column[i] < existing[j]) {
-                        out.push(column[i]);
-                        i += 1;
-                    } else if i == column.len() || existing[j] < column[i] {
-                        out.push(existing[j]);
-                        j += 1;
-                    } else {
-                        i += 1;
-                        j += 1;
-                    }
-                }
-                column = out;
-            } else {
-                pivots.insert(pivot, column);
-                rank += 1;
-                break;
-            }
-        }
-    }
-    rank
 }
 
 #[cfg(test)]

@@ -6817,5 +6817,21 @@
     ],
     "reason": "#2818 retirement after a restoration. a5daa52e4 restored these #2638 tests from c0a21b554^, but their subject, gam_terms::basis::build_duchon_basis_log_kappa_derivatives(data, spec), the psi-jet entry point that resolves a cold spec's chart itself, was deleted by dc325f190 as unreferenced. The surviving build_duchon_basis_log_kappa_derivativeswith_collocationwithworkspace takes explicit centers and transform, so the cold-spec contract these tests pin has no production subject, and the gam-terms lib test target did not compile (E0425 x3, tip check e890e5d3e).",
     "evidence": "At 8d1a516bc9094d1f2162286593baa7ae618c03f8, git grep finds no declaration of build_duchon_basis_log_kappa_derivatives( in crates; git log -S shows dc325f190 removed it. The file is restored to its pre-a5daa52e4 module doc, whose blob is a5daa52e4^:crates/gam-terms/src/basis/zz_measure_2638_tests.rs."
+  },
+  {
+    "base": "8f2d0c6c37c0c0d2a716fe2e4c3d56c5cd4709f8",
+    "items": [
+      "crates/gam-sae/src/atom_codes.rs:fn:coactivation",
+      "crates/gam-sae/src/atom_codes.rs:fn:fusion_evidence",
+      "crates/gam-sae/src/atom_codes.rs:fn:weight_codependence",
+      "crates/gam-sae/src/basis.rs:fn:reduced_width",
+      "crates/gam-sae/src/manifold/persistence.rs:fn:atlas_nerve",
+      "crates/gam-sae/src/manifold/persistence.rs:fn:farthest_point_subsample",
+      "crates/gam-sae/src/manifold/persistence.rs:fn:gf2_column_rank",
+      "crates/gam-sae/src/manifold/persistence.rs:struct:AtlasNerveReport",
+      "crates/gam-sae/src/sparse_dict/coordinate.rs:fn:block_firing_coordinates"
+    ],
+    "reason": "#2829 no product user: SparseAtomCodes::coactivation, CoactivationStats::fusion_evidence, SubspaceReducedEvaluator::reduced_width, persistence::atlas_nerve and sparse_dict::block_firing_coordinates have no caller; weight_codependence, AtlasNerveReport, farthest_point_subsample and gf2_column_rank were reached only through them.",
+    "evidence": "At 8f2d0c6c37c0c0d2a716fe2e4c3d56c5cd4709f8, git grep -n -w over crates, src and tests finds no call of these functions: coactive_pair_stats builds CoactivationStats with its own inline weight correlation, the atlas_nerve names elsewhere are the inference::atlas_nerve module and build_atlas_nerve, and the gam-pyffi block_firing_coordinates wrapper calls block_route_firing_coordinates. weight_codependence was called only by coactivation, and AtlasNerveReport was built only by persistence::atlas_nerve."
   }
 ]
