@@ -1,6 +1,7 @@
 //! End-to-end CAPABILITY test: gam must FIT interval-censored survival data
-//! THROUGH THE USER-FACING FORMULA FIT PATH and RECOVER the known generating
-//! latent frailty spread, matching or beating `lifelines` on the same brackets.
+//! THROUGH THE USER-FACING FORMULA FIT PATH, SAVE the fitted model, and RECOVER
+//! the known generating marginal survival curve from that saved model, matching
+//! or beating `lifelines` on the same brackets.
 //!
 //! Interval censoring is a first-class survival capability in every mature tool
 //! (`lifelines.*Fitter.fit_interval_censoring`, flexsurv `Surv(L, R, type="interval2")`,
@@ -13,7 +14,8 @@
 //! contribution, and this test exercises it END-TO-END: a user writes the
 //! formula `SurvInterval(L, R, event) ~ 1`, gam parses the dedicated
 //! interval-censored response, materializes the time basis at BOTH boundaries
-//! `L` and `R`, and routes the fit through `fit_latent_survival_terms`.
+//! `L` and `R`, fits through `fit_latent_survival_terms`, and saves the model
+//! through `fit_formula_to_payload`, the one save path the CLI and Python share.
 //!
 //! DATA-GENERATING PROCESS (truth is known exactly).
 //!   Latent log-frailty  U ~ Normal(μ*, σ*).
@@ -26,36 +28,43 @@
 //!   inspection grid is retained — the exact T is discarded. This is exactly how
 //!   interval-censored data arises in practice.
 //!
-//! OBJECTIVE METRIC (truth recovery).
-//!   The latent-survival family integrates the lognormal frailty `exp(U)`,
-//!   `U ~ N(μ, σ²)`, over a flexible monotone (I-spline) baseline. The frailty
-//!   log-scale spread `σ` is the gauge-INVARIANT estimand: unlike the latent
-//!   mean `μ` (which is confounded with the learned baseline scale), `σ` is the
-//!   dispersion of the integrated frailty and is identified from the interval
-//!   brackets alone. gam's fitted `σ̂` (the `latent_sd` of the
-//!   `SurvInterval(L, R, event)` fit) must land within a principled finite-sample
-//!   tolerance of the TRUE `σ*`.
+//! OBJECTIVE METRIC (truth recovery of the identified estimand).
+//!   Interval brackets from an intercept-only model identify the MARGINAL
+//!   survival curve at the inspection times and nothing finer: the likelihood is
+//!   a function of S at the bracket endpoints alone. The frailty spread σ is not
+//!   separately identified against gam's flexible monotone (I-spline) baseline.
+//!   For any σ, S_σ(B) = E_U[exp(−B e^U)] is continuous and strictly decreasing
+//!   in B, so a monotone B_σ = S_σ⁻¹(S) reproduces the same marginal. The
+//!   spline's finite span only weakly separates the candidates. The primary claim
+//!   is therefore that gam's OWN fitted marginal curve, read from the saved model
+//!   by the production latent-window predictor, recovers the true marginal S(t):
+//!   relative L2 error on the inspection grid below a finite-sample tolerance.
+//!   The fitted spread σ̂ is printed as context, not asserted. At 113cf2d3a the
+//!   earlier σ bar read σ̂ = 0.1688 against σ* = 0.6000 (MSI job 604258).
 //!
-//! BASELINE TO MATCH-OR-BEAT (does not define pass/fail on its own):
+//! BASELINE TO MATCH-OR-BEAT:
 //!   `lifelines.WeibullFitter().fit_interval_censoring(L, R)` is fit on the
-//!   IDENTICAL (L, R] brackets. Its recovered marginal survival curve error
-//!   against the TRUE marginal is the bar; gam's recovered curve (from the
-//!   fitted σ̂ at the matched marginal mean) must be no worse by more than 10%.
+//!   IDENTICAL (L, R] brackets, and its fitted marginal survival curve is scored
+//!   against the SAME truth on the same grid. gam's fitted curve must be no worse
+//!   by more than 10%. Both engines are scored on their own fitted curves.
 //!
 //! There is no skip path: a missing `lifelines` is a real failure.
-
 use csv::StringRecord;
 use gam::families::survival::lognormal_kernel::{
     FrailtyScale, FrailtySpec, HazardLoading, LatentSurvivalRow, LatentSurvivalRowJet,
 };
 use gam::quadrature::QuadratureContext;
 use gam::test_support::reference::{Column, run_python};
-use gam::{
-    FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
+use gam::{FitConfig, encode_recordswith_inferred_schema, init_parallelism};
+use gam_models::inference::model::FittedModel;
+use gam_models::inference::model_payload_builders::fit_formula_to_payload;
+use gam_models::survival::predict::{
+    SurvivalPredictEstimand, SurvivalPredictRequest, predict_latent_window_survival,
 };
+use ndarray::{Array1, Array2};
 
 /// Marginal survival S(t) = K_{0, t}(μ, σ) through the gam kernel, used only to
-/// build the synthetic truth and to score recovered survival curves.
+/// build the synthetic truth.
 fn marginal_survival(ctx: &QuadratureContext, b_t: f64, mu: f64, sigma: f64) -> f64 {
     let row = LatentSurvivalRow::right_censored(0.0, b_t, 0.0, 0.0);
     let jet = LatentSurvivalRowJet::evaluate(ctx, &row, mu, sigma)
@@ -142,11 +151,11 @@ fn gam_recovers_interval_censored_latent_truth_match_or_beat_lifelines() {
         right_times.push(r);
     }
 
-    // ---- gam interval-censored fit THROUGH THE FORMULA FIT PATH -----------
+    // ---- gam interval-censored fit THROUGH THE FORMULA FIT PATH, saved -----
     // A user writes `SurvInterval(L, R, event) ~ 1`. `event = 1` marks every row
     // as bracketed (the exact time lies in (L, R]); the latent family integrates
-    // the lognormal frailty over a flexible monotone baseline and reports the
-    // frailty log-scale spread as `latent_sd`.
+    // the lognormal frailty over a flexible monotone baseline. The saved model
+    // persists the fitted spread as a fixed hazard multiplier.
     let headers = vec!["L".to_string(), "R".to_string(), "event".to_string()];
     let rows: Vec<StringRecord> = (0..n)
         .map(|i| {
@@ -170,19 +179,47 @@ fn gam_recovers_interval_censored_latent_truth_match_or_beat_lifelines() {
         },
         ..FitConfig::default()
     };
-    let result = fit_from_formula("SurvInterval(L, R, event) ~ 1", &data, &cfg)
-        .expect("gam interval-censored latent fit must route through the formula fit path");
-    let FitResult::LatentSurvival(fit) = result else {
-        panic!("expected a LatentSurvival fit result for survival_likelihood=latent");
+    let payload = fit_formula_to_payload("SurvInterval(L, R, event) ~ 1".to_string(), &data, &cfg)
+        .expect("gam interval-censored latent fit must route through the formula fit path and save");
+    let sigma_hat = match payload.family_state.frailty() {
+        Some(FrailtySpec::HazardMultiplier {
+            scale: FrailtyScale::Fixed { sigma },
+            ..
+        }) => *sigma,
+        _ => panic!("a saved latent survival fit must persist its fitted hazard-multiplier spread"),
     };
+    let model = FittedModel::from_payload(payload);
 
-    let sigma_hat = fit.latent_sd;
-    let sigma_err = (sigma_hat - sigma_true).abs();
+    // ---- gam's own fitted marginal survival curve, from the saved model -----
+    // A SurvInterval fit saves L as its exit column and no entry column, so the
+    // latent-window law over a row with L = t is P(T > t) = S(t). R and event are
+    // carried only because the saved schema names them; the window reads neither.
+    let eval_t: Vec<f64> = (1..=12).map(|k| 0.5 * k as f64).collect();
+    let columns = data.column_map();
+    let mut frame = Array2::<f64>::zeros((eval_t.len(), data.headers.len()));
+    for (row, &t) in eval_t.iter().enumerate() {
+        frame[[row, columns["L"]]] = t;
+        frame[[row, columns["R"]]] = t + 0.5;
+        frame[[row, columns["event"]]] = 1.0;
+    }
+    let offset = Array1::<f64>::zeros(eval_t.len());
+    let gam_curve = predict_latent_window_survival(SurvivalPredictRequest {
+        model: &model,
+        data: frame.view(),
+        col_map: &columns,
+        training_headers: Some(&data.headers),
+        primary_offset: &offset,
+        noise_offset: &offset,
+        time_grid: None,
+        with_uncertainty: false,
+        estimand: SurvivalPredictEstimand::Plugin,
+    })
+    .expect("the saved latent survival model predicts its marginal window survival")
+    .window_survival;
 
     // ---- lifelines baseline on the IDENTICAL brackets --------------------
-    // lifelines fits the same interval brackets; we read its recovered marginal
-    // survival curve and its implied log-scale spread proxy from the Weibull
-    // shape. The PRIMARY claim is gam's σ-recovery; lifelines is the bar.
+    // lifelines fits the same interval brackets; we read its fitted marginal
+    // survival curve on the same evaluation grid.
     let ref_res = run_python(
         &[
             Column::new("L", &left_times),
@@ -204,20 +241,19 @@ emit("S_ref", list(S))
 "#,
     );
     let s_ref = ref_res.vector("S_ref");
+    assert_eq!(
+        s_ref.len(),
+        eval_t.len(),
+        "lifelines survival curve length mismatch"
+    );
 
-    // gam's recovered marginal-survival curve vs truth. The latent mean μ is
-    // confounded with the learned baseline gauge, so we anchor gam's recovered
-    // curve at the MARGINAL mean that, paired with σ̂, reproduces the fitted
-    // overall event probability; concretely we recover the curve at (μ*, σ̂),
-    // isolating the σ-recovery contribution to the curve error.
-    let eval_t: Vec<f64> = (1..=12).map(|k| 0.5 * k as f64).collect();
+    // ---- both fitted curves against the true marginal ---------------------
     let mut gam_curve_sse = 0.0;
     let mut ref_curve_sse = 0.0;
     let mut truth_norm = 0.0;
     for (idx, &t) in eval_t.iter().enumerate() {
         let s_true = marginal_survival(&ctx, t, mu_true, sigma_true);
-        let s_hat = marginal_survival(&ctx, t, mu_true, sigma_hat);
-        gam_curve_sse += (s_hat - s_true).powi(2);
+        gam_curve_sse += (gam_curve[idx] - s_true).powi(2);
         ref_curve_sse += (s_ref[idx] - s_true).powi(2);
         truth_norm += s_true.powi(2);
     }
@@ -225,24 +261,20 @@ emit("S_ref", list(S))
     let ref_curve_rell2 = (ref_curve_sse / truth_norm).sqrt();
 
     eprintln!(
-        "interval-censored recovery (formula fit path): gam sigma_hat={:.4} truth sigma*={:.4} \
-         sigma_err={:.4} | curve relL2 gam={:.4} lifelines={:.4}",
-        sigma_hat, sigma_true, sigma_err, gam_curve_rell2, ref_curve_rell2
-    );
-
-    // ---- truth-recovery assertions ---------------------------------------
-    // Interval censoring discards the exact time, so the finite-sample bar on
-    // the frailty spread is looser than the exact-event case but still pins σ*.
-    assert!(
-        sigma_err < 0.20,
-        "gam interval-censored fit failed to recover sigma*: |{:.4}-{:.4}|={:.4}",
+        "interval-censored recovery (formula fit path, saved model): fitted marginal curve \
+         relL2 gam={:.4} lifelines={:.4} | context: gam sigma_hat={:.4} truth sigma*={:.4} \
+         (sigma is not separately identified from intercept-only brackets) | gam S={:?}",
+        gam_curve_rell2,
+        ref_curve_rell2,
         sigma_hat,
         sigma_true,
-        sigma_err
+        gam_curve.to_vec()
     );
+
+    // ---- truth-recovery assertion on the identified estimand -------------
     assert!(
         gam_curve_rell2 < 0.06,
-        "gam recovered survival curve (from fitted sigma) too far from truth: relL2={:.4}",
+        "gam's fitted marginal survival curve is too far from the truth: relL2={:.4}",
         gam_curve_rell2
     );
 
