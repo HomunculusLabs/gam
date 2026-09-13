@@ -554,12 +554,20 @@ impl ConePropernessEvidence {
                             .to_string(),
                     );
                 }
-                if certificate.is_proper() == Some(false) {
-                    return Err(
-                        "a proved-improper cone posterior cannot be stored as a moment decline"
-                            .to_string(),
-                    );
+                if certificate
+                    .copositive_minimizer
+                    .as_ref()
+                    .is_some_and(|point| {
+                        point.len() != constraint_count || point.iter().any(|value| !value.is_finite())
+                    })
+                {
+                    return Err(format!(
+                        "cone properness simplex minimizer must be a finite point of length {constraint_count}"
+                    ));
                 }
+                // A proved-improper certificate is storable (#979): it proves the QUADRATIC
+                // approximation improper on the cone, which says nothing against the true
+                // posterior or against the converged mode the decline keeps.
             }
         }
         Ok(())
@@ -571,14 +579,58 @@ impl ConePropernessEvidence {
 pub struct ConePosteriorMomentDecline {
     pub ambient_precision_failure: String,
     pub properness: ConePropernessEvidence,
+    /// Constraint rows the converged mode binds (#979). Absent from declines
+    /// persisted before it existed.
+    #[serde(default)]
+    pub active_rows: Vec<usize>,
 }
 
 impl ConePosteriorMomentDecline {
+    /// The decline for a converged constrained mode whose ambient precision admits
+    /// no covariance: the exact cone properness certificate at `precision`, and the
+    /// constraint rows `mode` binds.
+    ///
+    /// An unreachable proper posterior and a proved-improper quadratic approximation
+    /// both keep the mode under this decline (#979). The certificate says which one
+    /// it is, and every covariance consumer refuses by [`Self::summary`].
+    pub fn at_converged_mode(
+        precision: ndarray::ArrayView2<'_, f64>,
+        constraints: &LinearInequalityConstraints,
+        mode: &Array1<f64>,
+        ambient_precision_failure: String,
+    ) -> Result<Self, String> {
+        let active_rows = crate::active_set::active_face(mode, constraints)
+            .ok_or_else(|| {
+                format!(
+                    "posterior-moment decline: the converged mode has {} coordinates against {} \
+                     constraint columns",
+                    mode.len(),
+                    constraints.a.ncols()
+                )
+            })?
+            .active_idx;
+        let properness = match crate::cone_reduction::cone_properness_certificate(
+            precision,
+            constraints.a.view(),
+            f64::EPSILON.sqrt(),
+        ) {
+            Ok(certificate) => ConePropernessEvidence::Certificate(certificate),
+            Err(reason) => ConePropernessEvidence::CertificationFailed { reason },
+        };
+        Ok(Self {
+            ambient_precision_failure,
+            properness,
+            active_rows,
+        })
+    }
+
     pub fn summary(&self) -> String {
         format!(
-            "ambient covariance route declined ({}); {}",
+            "ambient covariance route declined ({}); {}; the converged mode binds constraint \
+             row(s) {:?}",
             self.ambient_precision_failure,
             self.properness.summary(),
+            self.active_rows,
         )
     }
 }
@@ -746,7 +798,20 @@ impl ConstrainedPosteriorGeometry {
                             .to_string(),
                     );
                 }
-                decline.properness.validate(dimension, self.constraints.a.nrows())?;
+                let q = self.constraints.a.nrows();
+                let mut unique_active = decline.active_rows.clone();
+                unique_active.sort_unstable();
+                unique_active.dedup();
+                if unique_active.len() != decline.active_rows.len()
+                    || unique_active.iter().any(|&row| row >= q)
+                {
+                    return Err(format!(
+                        "constrained posterior moment decline names active rows {:?} that are not \
+                         unique valid indices for {q} inequalities",
+                        decline.active_rows
+                    ));
+                }
+                decline.properness.validate(dimension, q)?;
             }
         }
         if let Some(correction) = self.correction.as_ref() {

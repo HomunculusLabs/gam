@@ -167,6 +167,12 @@ pub struct ConeProperness {
     /// proof that it is improper. `None` means the face is too wide for the
     /// exact `2^q` enumeration, so properness is undecided — never assumed.
     pub copositive_minimum: Option<f64>,
+    /// The simplex point attaining [`Self::copositive_minimum`]. Where that minimum
+    /// is non-positive, its support names the constraint rows whose normal
+    /// coordinates carry the feasible direction of non-positive curvature (#979).
+    /// Absent from certificates persisted before it existed.
+    #[serde(default)]
+    pub copositive_minimizer: Option<Array1<f64>>,
 }
 
 impl ConeProperness {
@@ -208,10 +214,19 @@ impl ConeProperness {
             Some(minimum) => format!("{minimum:.6e}"),
             None => "not enumerated".to_string(),
         };
+        // Where the simplex minimum proves impropriety, name the constraint rows the
+        // feasible direction of non-positive curvature moves along (#979).
+        let support = match (self.copositive_minimum, self.copositive_minimizer.as_ref()) {
+            (Some(minimum), Some(point)) if minimum <= 0.0 => {
+                let rows: Vec<usize> = (0..point.len()).filter(|&row| point[row] > 0.0).collect();
+                format!(", attained along constraint row(s) {rows:?}")
+            }
+            _ => String::new(),
+        };
         format!(
             "cone-truncated posterior is {verdict}: In(H) = ({}, {}, {}), \
              In(M) = ({}, {}, {}), In(ZᵀHZ) = ({}, {}, {}) on null(A), \
-             min wᵀMw over the simplex = {copositive}",
+             min wᵀMw over the simplex = {copositive}{support}",
             self.ambient_inertia.positive,
             self.ambient_inertia.zero,
             self.ambient_inertia.negative,
@@ -421,15 +436,21 @@ pub fn cone_properness_certificate(
     // Only enumerate when the answer would be exact. `copositive_simplex_minimum`
     // owns that range, and an out-of-range face reports UNDECIDED rather than
     // borrowing a cheaper sufficient condition and calling it a proof.
-    let copositive_minimum = copositive_simplex_minimum(reduced.view())
-        .ok()
-        .map(|(minimum, _)| minimum);
+    let (copositive_minimum, copositive_minimizer) =
+        match copositive_simplex_minimum(reduced.view()) {
+            Ok((minimum, point)) => (Some(minimum), Some(point)),
+            Err(out_of_range) => {
+                log::debug!("[cone properness] exact copositivity not enumerated: {out_of_range}");
+                (None, None)
+            }
+        };
     Ok(ConeProperness {
         reduced,
         ambient_inertia,
         reduced_inertia,
         lineality_inertia,
         copositive_minimum,
+        copositive_minimizer,
     })
 }
 

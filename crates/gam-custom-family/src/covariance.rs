@@ -1855,50 +1855,38 @@ pub(crate) fn compute_joint_posterior<F: CustomFamily + Clone + Send + Sync + 's
                     // against instead of only reporting the absence of a
                     // covariance. Two outcomes are genuinely different:
                     // an UNREACHABLE proper posterior (this route's limitation,
-                    // #2529's quadrature) and an IMPROPER one (no posterior to
-                    // report, whatever the route).
-                    let properness = match gam_solve::cone_reduction::cone_properness_certificate(
-                        precision.view(),
-                        constraints.a.view(),
-                        f64::EPSILON.sqrt(),
-                    ) {
-                        Ok(certificate) => {
-                            gam_solve::constrained_posterior::ConePropernessEvidence::Certificate(
-                                certificate,
-                            )
-                        }
-                        Err(error) => {
-                            gam_solve::constrained_posterior::ConePropernessEvidence::CertificationFailed {
-                                reason: error,
-                            }
-                        }
-                    };
-                    let cone_verdict = properness.summary();
-                    if properness.is_proper() == Some(false) {
-                        return Err(CustomFamilyError::trial_point(format!(
-                            "constrained fit converged at a point whose cone-truncated posterior \
-                             is provably IMPROPER, so no posterior covariance exists to report: \
-                             {cone_verdict}. The ambient gate saw only ({reason})"
-                        )));
-                    }
+                    // #2529's quadrature) and an IMPROPER one.
+                    //
+                    // #979: a proved-improper certificate is a statement about the
+                    // QUADRATIC approximation on the cone. It says nothing against
+                    // the true posterior or against the converged mode, so refusing
+                    // the fit threw away a certified stationary point (600×10:
+                    // In(H) = (32, 0, 1), copositive minimum -5.33). Both outcomes
+                    // keep the mode under one typed decline that carries the
+                    // certificate and the rows the mode binds; every covariance
+                    // consumer refuses by that decline's summary.
+                    let decline =
+                        gam_solve::constrained_posterior::ConePosteriorMomentDecline::at_converged_mode(
+                            precision.view(),
+                            &constraints,
+                            &mode,
+                            // Display boundary (gam#2689): gam-solve's decline
+                            // carries the reason as text.
+                            reason.to_string(),
+                        )
+                        .map_err(CustomFamilyError::trial_point)?;
                     log::warn!(
-                        "[custom-family covariance] constrained fit converged, but its \
-                         ambient posterior precision is not positive definite, so the \
-                         inequality-truncated covariance is unreachable by this route \
-                         ({reason}); the cone itself was certified separately and \
-                         {cone_verdict}; retaining the converged constrained MODE under a \
-                         typed posterior-moment decline (#2635)"
+                        "[custom-family covariance] constrained fit converged, but its ambient \
+                         posterior precision is not positive definite ({reason}); retaining the \
+                         converged constrained MODE under a typed posterior-moment decline \
+                         (#2635, #979): {}",
+                        decline.summary()
                     );
                     let constrained =
                         gam_solve::constrained_posterior::ConstrainedPosteriorGeometry::with_decline(
                             constraints,
                             mode,
-                            gam_solve::constrained_posterior::ConePosteriorMomentDecline {
-                                // Display boundary (gam#2689): gam-solve's
-                                // decline carries the reason as text.
-                                ambient_precision_failure: reason.to_string(),
-                                properness,
-                            },
+                            decline,
                         );
                     constrained.validate_for_dimension(p)?;
                     return Ok(JointPosteriorAssembly {
@@ -2755,9 +2743,10 @@ mod required_covariance_tests {
     /// posterior is IMPROPER — `d = (0, 1)` is feasible with `d'Hd = -2` — so the
     /// `expect` message below was asserting the opposite of what its own fixture
     /// exhibited, and the test passed only because a declined covariance channel
-    /// looked the same either way. That fixture now has its own test, asserting
-    /// the refusal, directly below. See
-    /// `a_cone_improper_posterior_is_refused_by_name_rather_than_declined`.
+    /// looked the same either way. That fixture now has its own test, directly
+    /// below, asserting that the fit keeps its mode under a decline naming the
+    /// impropriety (#979). See
+    /// `a_cone_improper_posterior_keeps_the_mode_under_a_named_decline`.
     #[test]
     fn indefinite_ambient_precision_declines_the_covariance_and_keeps_the_fit() {
         let (specs, states, per_block, unpenalized) = indefinite_ambient_constrained_fixture();
@@ -2828,23 +2817,22 @@ mod required_covariance_tests {
     ///
     /// It sat under an assertion that the posterior "is proper on the feasible
     /// cone and only this ROUTE to its moments is unavailable". That reading is
-    /// false here by one line of arithmetic, and nothing in the old code could
-    /// tell the two apart: both an unreachable proper law and a nonexistent one
-    /// came back as a declined covariance channel. So this fixture must produce
-    /// the OTHER answer, and it must produce it for a stated reason.
+    /// false here by one line of arithmetic, and the decline must say so: its
+    /// certificate proves the quadratic approximation IMPROPER.
     ///
-    /// Declining the channel here would report a fit whose uncertainty is
-    /// unbounded inside its own feasible set, which is the same class of
-    /// fabrication as the zero-variance active-face answer the decline exists to
-    /// avoid — in the opposite direction.
+    /// #979: that proof says nothing against the converged mode, so the fit keeps
+    /// the mode. What it may not do is publish covariance, and it may not be a
+    /// silent absence either: the decline carries the verdict, the inertia that
+    /// decided it, the ambient gate's reason and the rows the mode binds, and
+    /// every moment consumer refuses by that summary.
     #[test]
-    fn a_cone_improper_posterior_is_refused_by_name_rather_than_declined() {
+    fn a_cone_improper_posterior_keeps_the_mode_under_a_named_decline() {
         let (specs, states, per_block, unpenalized) = cone_improper_constrained_fixture();
         let options = BlockwiseFitOptions {
             compute_covariance: true,
             ..BlockwiseFitOptions::default()
         };
-        let message = compute_joint_posterior(
+        let assembly = compute_joint_posterior(
             &OneCoefficientLowerBoundedIndefinite,
             &specs,
             &states,
@@ -2855,22 +2843,58 @@ mod required_covariance_tests {
             None,
             None,
         )
-        .expect_err("a provably improper cone-truncated posterior has no covariance to decline");
+        .expect("a proved-improper cone keeps its converged mode under a typed decline");
         assert!(
-            message.to_string().contains("IMPROPER"),
-            "the refusal must carry the verdict, got: {message}"
+            assembly.covariance_conditional.is_none(),
+            "an improper quadratic approximation has no covariance to publish, got {:?}",
+            assembly.covariance_conditional,
         );
         assert!(
-            message.to_string().contains("In(ZᵀHZ)"),
-            "the refusal must name the quantity that decided it — the inertia on null(A),              which is where this fixture's negative direction lives — got: {message}"
+            assembly.reported_beta.is_none(),
+            "no posterior mean exists to report, so the caller keeps the converged mode",
         );
-        // The ambient gate's own numbers must survive into the message too: they
-        // are what triggered the branch, and a refusal that replaced them with
-        // the cone verdict would lose the reason the route was abandoned.
-        assert!(
-            message.to_string().contains("non-PD at the converged optimum"),
-            "got: {message}"
+        let constrained = assembly
+            .geometry
+            .constrained_posterior
+            .as_ref()
+            .expect("the fitted cone identity must survive the moment decline");
+        let decline = constrained
+            .decline()
+            .expect("a proved-improper cone must carry a typed moment decline");
+        assert_eq!(
+            decline.properness.is_proper(),
+            Some(false),
+            "the decline must preserve the proof that the quadratic approximation is improper",
         );
+        assert_eq!(
+            decline.active_rows,
+            vec![0],
+            "the mode binds the single lower bound beta_0 >= 0",
+        );
+        let summary = decline.summary();
+        for needle in [
+            "IMPROPER",
+            "In(ZᵀHZ)",
+            "non-PD at the converged optimum",
+            "binds constraint row(s) [0]",
+        ] {
+            assert!(
+                summary.contains(needle),
+                "the decline must name {needle:?}, got: {summary}"
+            );
+        }
+        let refusals = [
+            constrained.posterior_mean().err(),
+            constrained.unconstrained_center().err(),
+            constrained.correction().err(),
+        ];
+        for refusal in refusals {
+            let reason = refusal.expect("a declined posterior has no moments to hand out");
+            assert!(
+                reason.contains("IMPROPER"),
+                "every moment consumer must refuse by the decline's summary, got: {reason}"
+            );
+        }
     }
 
     fn cone_improper_constrained_fixture() -> (
