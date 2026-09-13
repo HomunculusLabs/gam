@@ -1,53 +1,38 @@
-//! Bug hunt: `DecoderIncoherencePenalty::hvp` returns the **Gauss-Newton**
-//! curvature, not the exact Hessian-vector product the trait contract
-//! promises. It drops the residual/cross term of the second derivative.
+//! Regression: `DecoderIncoherencePenalty::hvp` is the exact Hessian-vector
+//! product the `AnalyticPenalty` contract promises, not the Gauss-Newton
+//! curvature.
 //!
 //! The `AnalyticPenalty` trait draws a sharp line between two operators:
 //!
-//!   * `hvp` (src/terms/analytic_penalties/mod.rs:370-380) — "Hessian-vector
-//!     product `H v = (∂²P/∂target²) v`, in closed form." The **exact**
-//!     Hessian.
-//!   * `psd_majorizer_hvp` (src/terms/analytic_penalties/mod.rs:427-447) — the
-//!     **PSD surrogate** `B v` with `B ⪰ ∂²P`; nonconvex penalties override
-//!     this to return a positive-definite stand-in instead of the indefinite
-//!     true Hessian.
+//!   * `hvp` — "Hessian-vector product `H v = (∂²P/∂target²) v`, in closed
+//!     form." The **exact** Hessian.
+//!   * `psd_majorizer_hvp` — the **PSD surrogate** `B v` with `B ⪰ ∂²P`;
+//!     nonconvex penalties override this to return a positive-definite stand-in
+//!     instead of the indefinite true Hessian.
 //!
-//! `DecoderIncoherencePenalty`'s objective is
-//!     P = ½ · w · Σ_{j<k} w_{jk} ‖C_{jk}‖²_F ,   C_{jk}[a,b] = Σ_o B_j[a,o] B_k[b,o]
-//! (src/terms/analytic_penalties/mod.rs:7227-7256). This is *biquadratic* (quartic)
-//! in the decoder blocks `B`, hence **nonconvex**. Its exact gradient is
-//!     ∂P/∂B_j[a,o] = w Σ_b C[a,b] B_k[b,o]            (grad_target, :7258-7300)
-//! and the exact Hessian-vector product, differentiating that gradient along a
-//! direction `V`, has **two** terms:
-//!     (H v)_j[a,o] = w [ Σ_b dC[a,b] B_k[b,o]   +   Σ_b C[a,b] V_k[b,o] ]
-//! with `dC[a,b] = Σ_o (V_j[a,o] B_k[b,o] + B_j[a,o] V_k[b,o])` (and the
-//! symmetric `_k` block).
+//! `DecoderIncoherencePenalty`'s objective is built from the cross-Grams
+//! `C_{jk}[a,b] = Σ_o B_j[a,o] B_k[b,o]` and is quartic in the decoder blocks
+//! `B`, hence **nonconvex**. Differentiating its gradient along a direction `V`
+//! gives **two** terms: the Gauss-Newton piece `Σ_b dC[a,b] B_k[b,o]`, with
+//! `dC[a,b] = Σ_o (V_j[a,o] B_k[b,o] + B_j[a,o] V_k[b,o])`, and the residual
+//! piece `Σ_b C[a,b] V_k[b,o]` (and the symmetric `_k` block).
 //!
-//! The implementation's `hvp` (src/terms/analytic_penalties/mod.rs:7302-7363)
-//! computes only the **first** term — the Gauss-Newton / "directional Gram
-//! derivative" piece `Σ_b dC[a,b] B_k[b,o]` — and drops the second term
-//! `Σ_b C[a,b] V_k[b,o]` entirely (the inline comment at :7326 confirms it is
-//! the "Gauss-Newton directional Gram derivative"). So the returned vector is
-//! the GN approximation, not `∂²P/∂target² · v`.
-//!
-//! That GN piece is the natural PSD *surrogate* and belongs in
-//! `psd_majorizer_hvp`; but `DecoderIncoherencePenalty` leaves
-//! `psd_majorizer_hvp` at the trait default, which (since `hessian_diag`
-//! returns `None`) simply delegates back to `hvp`
-//! (src/terms/analytic_penalties/mod.rs:432-446). The net result is that both the
-//! exact-Hessian path and the surrogate path return GN: a consumer that asks
-//! `hvp` for the genuine penalized Hessian — an exact Newton step, or the
-//! penalized-Hessian log-det that feeds the REML/Laplace marginal likelihood —
-//! silently receives GN, which differs from the truth by the dropped cross
-//! term whenever the cross-Gram `C` is nonzero (i.e. whenever the atoms are
-//! actually incoherent, the regime the penalty targets).
+//! The defect this test was written for: `hvp` computed only the Gauss-Newton
+//! piece and dropped the residual piece, and `psd_majorizer_hvp` was left at the
+//! trait default, which delegated back to `hvp`. Both the exact path and the
+//! surrogate path returned GN, so a consumer asking `hvp` for the genuine
+//! penalized Hessian — an exact Newton step, or the penalized-Hessian log-det
+//! that feeds the REML/Laplace marginal likelihood — silently received GN
+//! whenever the cross-Gram `C` was nonzero (i.e. whenever the atoms are actually
+//! incoherent, the regime the penalty targets). `hvp` now carries both terms and
+//! `psd_majorizer_hvp` holds the Gauss-Newton block
+//! (`crates/gam-terms/src/analytic_penalties/orthogonality.rs`).
 //!
 //! Reproduction is closed-form and small: two atoms, two basis rows each,
 //! p_out = 2, unit pairwise coactivation. The reference is a central finite
 //! difference of the (independently correct) analytic gradient, which by
 //! definition is `H v`. The assertion encodes the documented `hvp == H v`
-//! contract; it fails today (max error ≈ 0.26 here) and will pass once `hvp`
-//! adds the dropped `Σ C·V` term (with GN moved to `psd_majorizer_hvp`).
+//! contract; the old Gauss-Newton-only `hvp` missed it by ≈ 0.26 here.
 //!
 //! Related: #809 (sibling: OrderedBetaBernoulliPenalty hvp drops the off-diagonal
 //! block). Both are `AnalyticPenalty` curvature-contract defects; #804, #805,
@@ -99,9 +84,9 @@ fn decoder_incoherence_hvp_equals_true_hessian_vector_product() {
 
     assert!(
         max_abs_diff < 1e-5,
-        "DecoderIncoherencePenalty::hvp is the Gauss-Newton approximation, not \
-         the exact Hessian-vector product: max|hvp - H·v| = {max_abs_diff:.6e}. \
-         It drops the residual/cross term `Σ_b C[a,b]·V_k[b,o]`.\n\
+        "DecoderIncoherencePenalty::hvp is not the exact Hessian-vector product: \
+         max|hvp - H·v| = {max_abs_diff:.6e}. A Gauss-Newton-only hvp misses the \
+         residual/cross term `Σ_b C[a,b]·V_k[b,o]`.\n\
          analytic hvp = {analytic_hv:?}\n\
          true   H·v   = {fd_hv:?}"
     );

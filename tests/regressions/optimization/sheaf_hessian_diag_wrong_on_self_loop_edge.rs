@@ -1,6 +1,6 @@
-//! Bug hunt: `SheafConsistencyPenalty::hessian_diag` is wrong for a self-loop
-//! edge `(v, v)` — it disagrees with the very operator its sibling `gradient`
-//! and `hvp` implement.
+//! Regression: `SheafConsistencyPenalty::hessian_diag` agrees with the operator
+//! its siblings `gradient` and `hvp` implement, including on a self-loop edge
+//! `(v, v)`.
 //!
 //! ## The contract
 //!
@@ -14,47 +14,41 @@
 //!   * `gradient(s)       = weight · L · s`
 //!   * `hvp(s, v)         = weight · L · v`
 //!   * `hessian_diag(s)   = diag(weight · L)`   ← documented contract
-//!     (`src/terms/sheaf.rs:335` "Hessian diagonal `diag(weight · L)`")
 //!
 //! So `hessian_diag(s)[j]` MUST equal the `j`-th diagonal entry of the same
 //! operator, i.e. `hvp(s, e_j)[j]` for the `j`-th standard basis vector `e_j`.
 //! `hvp`/`gradient` route through the matrix-free coboundary matvec
-//! (`delta` / `delta_transpose`, `src/terms/sheaf.rs:242-307`), which is the
-//! ground-truth operator.
+//! (`delta` / `delta_transpose`), which is the ground-truth operator.
 //!
-//! ## The defect
+//! ## The defect this test was written for
 //!
 //! For an edge `(u, v)` the coboundary is `δs[e] = R_uv·s_u − R_vu·s_v`, so the
 //! edge's contribution to `L` is `Cᵀ C` with `C = [R_uv | −R_vu]` acting on
 //! `(s_u, s_v)`. When `u ≠ v` the two stalk blocks are disjoint and the diagonal
 //! of `Cᵀ C` splits cleanly into `colnorm²(R_uv)` on the `u` indices and
-//! `colnorm²(R_vu)` on the `v` indices — which is exactly what
-//! `hessian_diag` accumulates (`src/terms/sheaf.rs:351-384`).
+//! `colnorm²(R_vu)` on the `v` indices, which is what `hessian_diag`
+//! accumulated.
 //!
-//! But `SheafConsistencyPenalty::new` does NOT forbid a self-loop `u == v`
-//! (`src/terms/sheaf.rs:135-142` only range-checks the indices). For a
+//! `SheafConsistencyPenalty::new` does not forbid a self-loop `u == v`. For a
 //! self-loop the coboundary collapses to `δs[e] = (R_uv − R_vu)·s_v`, so the
-//! true diagonal of that edge's `L` block is `colnorm²(R_uv − R_vu)` — which
-//! carries the `−2·R_uv·R_vu` cross term. `hessian_diag` instead lands BOTH the
+//! true diagonal of that edge's `L` block is `colnorm²(R_uv − R_vu)`, which
+//! carries the `−2·R_uv·R_vu` cross term. `hessian_diag` landed BOTH the
 //! `u`-side `colnorm²(R_uv)` and the `v`-side `colnorm²(R_vu)` on the *same*
-//! stalk indices and adds them, dropping the cross term entirely. The reported
-//! diagonal is then `colnorm²(R_uv) + colnorm²(R_vu)` instead of
-//! `colnorm²(R_uv − R_vu)` — a different, systematically too-large value
-//! (≈100× too large in the case below).
+//! stalk indices and added them, dropping the cross term, so the reported
+//! diagonal was `colnorm²(R_uv) + colnorm²(R_vu)` instead of
+//! `colnorm²(R_uv − R_vu)` (≈100× too large in the case below).
+//! `hessian_diag` (`crates/gam-terms/src/analytic_penalties/sheaf.rs`) now forms
+//! `colnorm²(R_uv − R_vu)` on the shared block.
 //!
 //! `hessian_diag` feeds the inner-Newton / PIRLS diagonal preconditioner and the
 //! PSD-curvature pipeline, so a sheaf carrying any self-loop consistency
 //! constraint (two linear readouts of one stalk required to agree — a perfectly
-//! ordinary cellular-sheaf edge) gets a corrupted curvature block while the
-//! gradient it is paired with is correct.
+//! ordinary cellular-sheaf edge) got a corrupted curvature block while the
+//! gradient it is paired with was correct.
 //!
 //! ## Expectation
 //!
 //! `hessian_diag(s)` must equal the diagonal of the operator that `hvp` exposes.
-//! This test fails today (the self-loop diagonal is dropped-cross-term wrong) and
-//! will pass once `hessian_diag` accounts for `u == v` edges (e.g. by forming
-//! `colnorm²(R_uv − R_vu)` on the shared block). No edits to this test are then
-//! needed.
 
 use gam::terms::{EdgeRestriction, SheafConsistencyPenalty};
 use ndarray::{Array1, array};
@@ -123,9 +117,7 @@ fn sheaf_hessian_diag_matches_operator_diagonal_on_self_loop_edge() {
         "SheafConsistencyPenalty::hessian_diag disagrees with its own Hessian \
          operator on a self-loop edge: reported {diag_reported:?} but the \
          operator diagonal (diag of weight·L, the same L that gradient/hvp use) \
-         is {diag_true:?} (max |err| = {max_err:.3e}). hessian_diag accumulates \
-         the u-side and v-side squared column norms separately, dropping the \
-         −2·R_uv·R_vu cross term that the coboundary (R_uv − R_vu) produces when \
-         u == v."
+         is {diag_true:?} (max |err| = {max_err:.3e}). A self-loop's diagonal is \
+         colnorm²(R_uv − R_vu), which carries the −2·R_uv·R_vu cross term."
     );
 }

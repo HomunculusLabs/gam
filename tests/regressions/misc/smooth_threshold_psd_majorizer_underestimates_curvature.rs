@@ -1,9 +1,9 @@
-//! Regression: `SmoothThresholdPenalty::psd_majorizer_diag` majorizes the
-//! exact Hessian for any coordinate below (or just at) its threshold, violating
-//! the `AnalyticPenalty::psd_majorizer_diag` contract.
+//! Regression: `SmoothThresholdPenalty::psd_majorizer_diag` dominates the exact
+//! Hessian at every coordinate, as the `AnalyticPenalty::psd_majorizer_diag`
+//! contract requires.
 //!
 //! The trait documents the majorizer as a PSD *upper bound* on the exact
-//! curvature (src/terms/analytic_penalties/mod.rs:410-418):
+//! curvature:
 //!
 //!     "Diagonal of a **PSD majorizer** of the Hessian — the positive
 //!      re-weighted-ℓ₂ / MM surrogate `diag(B)` with `B ⪰ ∂²P/∂target²`
@@ -14,35 +14,38 @@
 //! dominates the true Hessian, which is what guarantees the monotone-decrease
 //! of majorization-minimization.
 //!
-//! For the smooth threshold prior the two diagonal entries are
-//! 3060-3068), with `g = sigmoid((x - tau)/eps)` and `C = weight*tau/eps² > 0`:
+//! For the smooth threshold prior, with `g = sigmoid((x - tau)/eps)` and
+//! `C = weight*tau/eps² > 0`, the exact diagonal Hessian entry is
 //!
 //!     exact Hessian   h(g) = C · g(1-g)(1-2g)        (`true_hessian_diag_entry`)
+//!
+//! The defect this test was written for: the majorizer was the bare
+//! re-weighted-ℓ₂ square
+//!
 //!     majorizer       m(g) = C · [g(1-g)]²           (`psd_hessian_diag_entry`)
 //!
-//! The majorizer is always ≥ 0, so it correctly dominates the *concave* region
-//! `g > 1/2` (where `h < 0`). But in the *convex* region `g < 1/2` the exact
-//! curvature is positive, and
+//! which is always ≥ 0, so it dominates the *concave* region `g > 1/2` (where
+//! `h < 0`). But in the *convex* region `g < 1/2` the exact curvature is
+//! positive, and
 //!
 //!     m(g) ≥ h(g)  ⟺  [g(1-g)]² ≥ g(1-g)(1-2g)  ⟺  g(1-g) ≥ 1-2g
 //!                  ⟺  g² - 3g + 1 ≤ 0            ⟺  g ≥ (3-√5)/2 ≈ 0.3820.
 //!
 //! So for every coordinate with gate `g < 0.382` — i.e. `x < tau - 0.481·eps`,
-//! the entire "comfortably below threshold" region — the majorizer is strictly
-//! **less** than the positive exact Hessian (≈7× smaller at `g = 0.12`). There
-//! the MM surrogate *under*-estimates curvature, so it is not an upper bound and
-//! the majorization guarantee is lost for exactly the inactive latent
-//! coordinates the smooth threshold prior is meant to keep suppressed.
+//! the entire "comfortably below threshold" region — the majorizer was strictly
+//! **less** than the positive exact Hessian (≈7× smaller at `g = 0.12`), and the
+//! majorization guarantee was lost for exactly the inactive latent coordinates
+//! the smooth threshold prior is meant to keep suppressed.
+//! `psd_hessian_diag_entry` (`crates/gam-terms/src/analytic_penalties/sparsity.rs`)
+//! now takes the elementwise max of that square and `|h|`, a true PSD upper
+//! bound.
 //!
-//! Reproduction is closed-form: pick `tau = 1`, `eps = 0.5`, and `x = 0`
-//! (`g ≈ 0.119`). The exact Hessian diagonal is positive (`≈ 0.416·weight`) but
-//! the majorizer (`≈ 0.057·weight`) is far below it. The assertion below encodes
-//! the trait contract `majorizer ≥ exact` at that point; it fails today and will
-//! pass once `psd_majorizer_diag` returns a genuine upper bound on `h(g)` over
-//! the convex region.
+//! Reproduction is closed-form: pick `tau = 1`, `eps = 0.5`, `weight = 1.3` and
+//! `x = 0` (`g ≈ 0.119`). The exact Hessian diagonal is positive (`≈ 0.416`); the
+//! old majorizer was `≈ 0.057`. The assertion below encodes the trait contract
+//! `majorizer ≥ exact` at that point and at `x = 0.7`, `1.0` and `2.0`, just
+//! below, at and above the threshold.
 //!
-//! Root cause: `psd_hessian_diag_entry` (src/terms/analytic_penalties/mod.rs:3065)
-//! only guarantees non-negativity, not domination of the exact Hessian.
 //! Related: #794 (sibling SAE-penalty curvature defect: MonotonicityPenalty::hvp
 //! magnitude), #793.
 
