@@ -11,7 +11,7 @@ use ndarray::{Array2, ArrayView1};
 
 use crate::basis::{
     BSplineBasisSpec, BSplineBoundaryConditions, BSplineEndpointBoundaryCondition,
-    BSplineIdentifiability, BSplineKnotSpec, CenterCountRequest, CenterStrategy,
+    BSplineIdentifiability, BSplineKnotSpec, CenterStrategy,
     ConstantCurvatureBasisSpec, ConstantCurvatureIdentifiability, DuchonBasisSpec,
     DuchonNullspaceOrder, DuchonOperatorPenaltySpec, DuchonSpectralBasis, MaternBasisSpec,
     MaternIdentifiability, MaternLengthScale, MaternNu, MeasureJetBasisSpec,
@@ -19,7 +19,7 @@ use crate::basis::{
     SphereWahbaKernel, SphericalSplineBasisSpec, SphericalSplineIdentifiability,
     ThinPlateBasisSpec, auto_spatial_center_strategy, count_unique_coordinate_rows,
     default_num_centers, default_spatial_center_strategy, default_spherical_harmonic_degree,
-    plan_spatial_basis, select_r_uniform_subsample_centers, thin_plate_penalty_order,
+    select_r_uniform_subsample_centers, thin_plate_penalty_order,
 };
 use crate::inference::formula_dsl::{
     ParsedTerm, SmoothKind, option_bool, option_f64, option_f64_strict, option_usize,
@@ -2257,7 +2257,7 @@ pub fn resolve_smooth_type_name(
 /// center heuristic ([`crate::basis::default_num_centers`])?
 ///
 /// Only the radial spatial bases (thin-plate, Matérn/GP, Duchon) route their
-/// default basis dimension through `plan_spatial_basis(.., Default, ..)`. The
+/// default basis dimension through `default_num_centers`. The
 /// B-spline, cyclic, tensor, and factor-smooth bases use their own modest
 /// knot-based defaults, so they are unaffected by — and must not be perturbed
 /// by — secondary-predictor basis-parsimony adjustments (#501).
@@ -3002,15 +3002,6 @@ pub(crate) fn build_smooth_basis(
         }
         "tps" | "thinplate" | "thin-plate" => {
             validate_known_options("thinplate", options, THINPLATE_SMOOTH_OPTION_KEYS)?;
-            let plan = plan_spatial_basis(
-                sizing_rows,
-                cols.len(),
-                CenterCountRequest::Default,
-                DuchonNullspaceOrder::Linear,
-                option_bool(options, "scale_dims").unwrap_or(false),
-                policy,
-            )
-            .map_err(|e| e.to_string())?;
             // #1074: the mgcv-sized basis cap (`k = 10·3^(d-1)`) that used to live
             // here was DELETED. It masked the real defect — the n-scaling default
             // over-sizes a thin-plate field, producing a weakly-identified
@@ -3020,7 +3011,7 @@ pub(crate) fn build_smooth_basis(
             // it. The default now uses the generic spatial center heuristic; the
             // root fix (a well-identified ρ-surface / optimizer that doesn't stall)
             // is tracked separately. Explicit `k`/`centers` still take full effect.
-            let default_centers = plan.centers;
+            let default_centers = default_num_centers(sizing_rows, cols.len());
             let centers = parse_countwith_basis_alias(
                 options,
                 "centers",
@@ -3382,15 +3373,6 @@ pub(crate) fn build_smooth_basis(
             // option had no effect. The matern() term accepts exactly
             // these options.
             validate_known_options("matern", options, MATERN_SMOOTH_OPTION_KEYS)?;
-            let plan = plan_spatial_basis(
-                sizing_rows,
-                cols.len(),
-                CenterCountRequest::Default,
-                DuchonNullspaceOrder::Zero,
-                option_bool(options, "scale_dims").unwrap_or(false),
-                policy,
-            )
-            .map_err(|e| e.to_string())?;
             // #1867: spline-equivalent floor so a 1-D radial basis is not
             // dimensioned coarser than the competing `s(x)` on identical data.
             let univariate_floor = if cols.len() == 1 {
@@ -3407,7 +3389,7 @@ pub(crate) fn build_smooth_basis(
                     default_matern_center_count(
                         sizing_rows,
                         cols.len(),
-                        plan.centers,
+                        default_num_centers(sizing_rows, cols.len()),
                         univariate_floor,
                     ),
                 ),
@@ -3579,15 +3561,6 @@ pub(crate) fn build_smooth_basis(
                     }
                 }
             };
-            let plan = plan_spatial_basis(
-                sizing_rows,
-                cols.len(),
-                CenterCountRequest::Default,
-                nullspace_order,
-                option_bool(options, "scale_dims").unwrap_or(false),
-                policy,
-            )
-            .map_err(|e| e.to_string())?;
             let centers_explicit = has_explicit_countwith_basis_alias(options, "centers");
             let polynomial_cols = match nullspace_order {
                 DuchonNullspaceOrder::Zero => 1,
@@ -3607,7 +3580,7 @@ pub(crate) fn build_smooth_basis(
             let default_centers = default_duchon_center_count(
                 sizing_rows,
                 cols.len(),
-                plan.centers,
+                default_num_centers(sizing_rows, cols.len()),
                 polynomial_cols,
                 univariate_floor,
             );
@@ -5258,7 +5231,6 @@ pub(crate) const THINPLATE_SMOOTH_OPTION_KEYS: &[&str] = &[
     "period",
     "period_start",
     "period_end",
-    "scale_dims",
 ];
 
 pub(crate) const SPHERE_SMOOTH_OPTION_KEYS: &[&str] = &[

@@ -251,7 +251,6 @@ Radial-basis surface smooth with thin-plate kernel.
 | `centers` (`k`, `basis_dim`) | auto | Number of radial centres. |
 | `length_scale` | `1.0` | Global length-scale init. |
 | `double_penalty` | `true` | Ridge + main penalty. |
-| `scale_dims` | `false` | Derivative-planning hint; inputs are automatically standardized. |
 | `by`, `identifiability` | — | `identifiability` takes `none` or `orthogonal_to_parametric`; see [univariate smooths](#univariate-smooths). |
 
 `include_intercept` is a Matérn option and is rejected here: the thin-plate
@@ -517,8 +516,8 @@ There are two distinct mechanisms, matched to the kernel:
 - **Matérn**: kernel-metric ARD — learns per-axis log-scales (length scales) in
   the covariance kernel itself. This is the natural, well-conditioned ARD for a
   length-scale kernel, so Matérn keeps it.
-- Thin-plate: inputs are automatically standardized; `scale_dims` is
-  not a learned anisotropy knob for this family.
+- Thin-plate: inputs are automatically standardized, and the arm has no
+  `scale_dims` option.
 - Tensor-product formula terms are built as penalized tensor B-splines.
 
 ## Link function

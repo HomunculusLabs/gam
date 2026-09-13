@@ -2508,17 +2508,6 @@ fn no_whitelisted_smooth_option_is_accepted_and_inert() {
             ("curvature", "double_penalty") => {
                 Some("the curvature Gram is full-rank PD, so the ridge is identically zero")
             }
-            // Documented as a derivative-PLANNING hint for this family
-            // (docs/formulas.md: "Thin-plate: inputs are automatically
-            // standardized; scale_dims is not a learned anisotropy knob for
-            // this family"). It reaches `plan_spatial_basis`, where it only
-            // widens the dense-byte estimate that can trim the default center
-            // count under a memory budget — so it is genuinely modelling-inert
-            // by design, unlike the Matérn/Duchon anisotropy it shares a name
-            // with.
-            ("thinplate", "scale_dims") => {
-                Some("a derivative-planning hint for TPS, not an anisotropy knob")
-            }
             // `scale_dims=true` arms per-axis anisotropy for the Duchon arm as
             // `aniso_log_scales = Some(0, …, 0)`, which the spatial optimizer
             // then learns during the fit. Zero anisotropy is a literal model

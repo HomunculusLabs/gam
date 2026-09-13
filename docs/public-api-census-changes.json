@@ -3332,5 +3332,13 @@
     },
     "reason": "#2899 public API sweep of gam-sae (prune-api-d): the uncalled identifiability::residual_gauge wrapper is deleted with the Jacobian-block curvature route only it used.",
     "evidence": "At the base, git grep -w finds no call of the free function residual_gauge; production certifies through residual_gauge_exact_from_curvature and residual_gauge_exact_from_streamed. residual_gauge is the only pub fn this change removes (from_model and stacked_curvature_root are private), which is what public_functions() counts; the map was derived by reading the change, not by running the script. Guarded job 602680 at 5116880ca compiled the workspace and gam-pyffi with the change, log /scratch.global/sauer354/pool/prune-api-d/check.602680.log."
+  },
+  {
+    "base": "36d37e723c9d0d2cfb465a0be0c9059ea144ee8a",
+    "removed": {
+      "crates/gam-terms/src/basis/types.rs::plan_spatial_basis": 1
+    },
+    "reason": "#2899 slop: the pub(crate) spatial basis planner is deleted. Its three callers read only its center count, which is default_num_centers(n, d), and now call that directly.",
+    "evidence": "public_functions() counts pub(crate) fn declarations, so removing plan_spatial_basis takes one identity off basis/types.rs. At the base, git grep -n -w plan_spatial_basis finds its only calls at term_builder.rs 3005, 3385 and 3582, each reading only plan.centers."
   }
 ]
