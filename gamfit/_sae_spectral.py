@@ -394,7 +394,6 @@ def audit_sae(
     quantile_levels: tuple[float, ...] | None = (0.5, 0.9, 0.99),
     max_candidates: int = 16,
     coordinate_blocks: list[int] | tuple[int, ...] | None = None,
-    activation_threshold: float = 0.0,
     max_absorption_pairs: int = 32,
     transport: tuple[Any, Any] | None = None,
     transport_theta_in: Any | None = None,
@@ -483,7 +482,6 @@ def audit_sae(
             "quantile_levels": q_levels,
             "max_candidates": max_candidates,
             "coordinate_blocks": blocks,
-            "activation_threshold": activation_threshold,
             "max_absorption_pairs": max_absorption_pairs,
             "transport_theta_in": theta_in,
             "transport_theta_out": theta_out,
@@ -867,7 +865,6 @@ def atlas_nerve_diagram(
     n_units: int,
     block_size: int,
     *,
-    activation_threshold: float = 1.0e-6,
     blocks: Any | None = None,
     observations: Any | None = None,
     familywise_alpha: float | None = None,
@@ -877,7 +874,8 @@ def atlas_nerve_diagram(
     ``route`` is an ``(indices, values)`` pair (or equivalent mapping/object),
     with ``indices`` shaped ``N x s`` and values shaped
     ``N x s x block_size``. ``n_units`` preserves charts with no observed
-    firing; the logical ``N x K`` code matrix is never materialized.
+    firing; the logical ``N x K`` code matrix is never materialized. A chart
+    fires on the rows where its routed block gate is nonzero.
 
     Supplying ``observations`` (the ambient activation rows the charts were read
     from, one row per route row) together with ``familywise_alpha`` runs the
@@ -902,7 +900,6 @@ def atlas_nerve_diagram(
         values,
         int(n_units),
         int(block_size),
-        float(activation_threshold),
         block_list,
         ambient,
         None if familywise_alpha is None else float(familywise_alpha),

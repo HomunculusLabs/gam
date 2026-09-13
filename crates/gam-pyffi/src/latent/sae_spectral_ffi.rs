@@ -122,7 +122,6 @@ fn absorption_audit_dict<'py>(
 
     let out = PyDict::new(py);
     out.set_item("n_units", report.n_units)?;
-    out.set_item("activation_threshold", report.activation_threshold)?;
     out.set_item("pairs", pair_list)?;
     Ok(out)
 }
@@ -771,7 +770,6 @@ fn atlas_nerve_dict<'py>(
     values,
     n_units,
     block_size,
-    activation_threshold = 1.0e-6,
     blocks = None,
     observations = None,
     familywise_alpha = None
@@ -782,7 +780,6 @@ fn atlas_nerve_diagram<'py>(
     values: PyReadonlyArray3<'py, f32>,
     n_units: usize,
     block_size: usize,
-    activation_threshold: f32,
     blocks: Option<Vec<usize>>,
     observations: Option<PyReadonlyArray2<'py, f64>>,
     familywise_alpha: Option<f64>,
@@ -805,7 +802,6 @@ fn atlas_nerve_diagram<'py>(
     let report = detach_py_result(py, "atlas_nerve_diagram", move || {
         atlas_nerve_from_sparse_route(
             &route,
-            activation_threshold,
             blocks.as_deref(),
             observations.as_ref().map(|array| array.view()),
             familywise_alpha,
@@ -1089,7 +1085,6 @@ struct SaeAuditOptions {
     quantile_levels: Option<Vec<f64>>,
     max_candidates: usize,
     coordinate_blocks: Option<Vec<usize>>,
-    activation_threshold: f32,
     max_absorption_pairs: usize,
     transport_theta_in: Option<Vec<f64>>,
     transport_theta_out: Option<Vec<f64>>,
@@ -1105,13 +1100,12 @@ struct SaeAuditOptions {
 impl SaeAuditOptions {
     /// Every key `from_pydict` accepts, in documentation order; kept as a
     /// single list so the unknown-key error names the full valid vocabulary.
-    const KNOWN_KEYS: [&'static str; 16] = [
+    const KNOWN_KEYS: [&'static str; 15] = [
         "block_size",
         "delta",
         "quantile_levels",
         "max_candidates",
         "coordinate_blocks",
-        "activation_threshold",
         "max_absorption_pairs",
         "transport_theta_in",
         "transport_theta_out",
@@ -1132,7 +1126,6 @@ impl SaeAuditOptions {
             quantile_levels: None,
             max_candidates: 16,
             coordinate_blocks: None,
-            activation_threshold: 0.0,
             max_absorption_pairs: 32,
             transport_theta_in: None,
             transport_theta_out: None,
@@ -1216,11 +1209,6 @@ impl SaeAuditOptions {
                 "coordinate_blocks" => {
                     cfg.coordinate_blocks = Self::optional_usize_vec(&value, &key)?;
                 }
-                "activation_threshold" => {
-                    cfg.activation_threshold = value
-                        .extract::<f32>()
-                        .map_err(|err| Self::knob_error(&key, &err))?;
-                }
                 "max_absorption_pairs" => {
                     cfg.max_absorption_pairs = value
                         .extract::<usize>()
@@ -1294,7 +1282,6 @@ impl SaeAuditOptions {
 /// * `quantile_levels = None` — routability quantiles (default `[0.5, 0.9, 0.99]`).
 /// * `max_candidates = 16` — dual-certificate candidate budget.
 /// * `coordinate_blocks = None` — block indices for the harmonic coordinate readout.
-/// * `activation_threshold = 0.0` — firing threshold for topology/atlas/absorption.
 /// * `max_absorption_pairs = 32` — absorption-audit pair budget.
 /// * `transport_theta_in = None` / `transport_theta_out = None` — paired circle
 ///   coordinates (1-D float64 array or float sequence) for the transport class.
@@ -1327,7 +1314,6 @@ fn audit_sae<'py>(
         quantile_levels,
         max_candidates,
         coordinate_blocks,
-        activation_threshold,
         max_absorption_pairs,
         transport_theta_in: theta_in_values,
         transport_theta_out: theta_out_values,
@@ -1359,7 +1345,6 @@ fn audit_sae<'py>(
                 quantile_levels: quantile_levels.unwrap_or_else(|| vec![0.5, 0.9, 0.99]),
                 max_candidates,
                 coordinate_blocks,
-                activation_threshold,
                 max_absorption_pairs,
                 transport_theta_in: theta_in_values,
                 transport_theta_out: theta_out_values,
@@ -1467,7 +1452,7 @@ mod sae_spectral_ffi_tests {
             "atlas test route",
         )
         .unwrap();
-        let report = atlas_nerve_from_sparse_route(&route, 0.0, None, None, None)
+        let report = atlas_nerve_from_sparse_route(&route, None, None, None)
             .unwrap()
             .unwrap();
         assert_eq!(report.diagram.edges.len(), 1);
@@ -1554,10 +1539,9 @@ mod sae_spectral_ffi_tests {
         }
         let route =
             AuditSparseRoute::new(indices, values, 2, 2, "cross-fitted atlas route").unwrap();
-        let report =
-            atlas_nerve_from_sparse_route(&route, 0.0, None, Some(ambient.view()), Some(0.05))
-                .unwrap()
-                .unwrap();
+        let report = atlas_nerve_from_sparse_route(&route, None, Some(ambient.view()), Some(0.05))
+            .unwrap()
+            .unwrap();
         assert!(report.diagram.holonomy_certificate.is_some());
 
         Python::attach(|py| {
@@ -1735,7 +1719,6 @@ mod sae_spectral_ffi_tests {
                 values_py.readonly(),
                 2,
                 2,
-                0.0,
                 None,
                 Some(ambient_py.readonly()),
                 Some(0.05),
@@ -1781,7 +1764,6 @@ mod sae_spectral_ffi_tests {
                 values_py.readonly(),
                 2,
                 2,
-                0.0,
                 None,
                 None,
                 None,
@@ -1808,7 +1790,7 @@ mod sae_spectral_ffi_tests {
             "atlas uncertified route",
         )
         .unwrap();
-        let report = atlas_nerve_from_sparse_route(&route, 0.0, None, None, None)
+        let report = atlas_nerve_from_sparse_route(&route, None, None, None)
             .unwrap()
             .unwrap();
         assert_eq!(report.diagram.edges.len(), 1);

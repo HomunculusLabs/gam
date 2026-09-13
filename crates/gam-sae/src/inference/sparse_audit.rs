@@ -56,7 +56,6 @@ pub struct AbsorptionPairReport {
 
 pub struct AbsorptionAuditReport {
     pub n_units: usize,
-    pub activation_threshold: f32,
     pub pairs: Vec<AbsorptionPairReport>,
 }
 
@@ -156,7 +155,6 @@ pub struct SparseSaeAuditConfig {
     pub max_candidates: usize,
     /// Dictionary blocks promoted to atlas charts; `None` selects every block.
     pub coordinate_blocks: Option<Vec<usize>>,
-    pub activation_threshold: f32,
     pub max_absorption_pairs: usize,
     pub transport_theta_in: Option<Vec<f64>>,
     pub transport_theta_out: Option<Vec<f64>>,
@@ -198,9 +196,10 @@ pub struct SparseSaeAuditReport {
     pub calibration: Option<crate::null_battery::ClaimNullCalibration>,
 }
 
+/// A chart fires on the rows whose routed block gate is nonzero: the route's own
+/// support, with no firing cutoff to choose.
 pub fn atlas_nerve_from_sparse_route(
     route: &AuditSparseRoute,
-    activation_threshold: f32,
     requested_blocks: Option<&[usize]>,
     ambient_data: Option<ndarray::ArrayView2<'_, f64>>,
     familywise_alpha: Option<f64>,
@@ -238,7 +237,7 @@ pub fn atlas_nerve_from_sparse_route(
             let unit = route.indices[[row, slot]] as usize;
             if let Some(&chart_idx) = chart_positions.get(&unit) {
                 let gate = route.gate(row, slot);
-                if gate > activation_threshold as f64 {
+                if gate > 0.0 {
                     chart_rows[chart_idx].push(row);
                     chart_weights[chart_idx].push(gate);
                     live_charts.push(chart_idx);
@@ -358,7 +357,6 @@ pub fn run_sparse_sae_audit(
         quantile_levels: quantiles,
         max_candidates,
         coordinate_blocks,
-        activation_threshold,
         max_absorption_pairs,
         transport_theta_in: theta_in_values,
         transport_theta_out: theta_out_values,
@@ -409,9 +407,6 @@ pub fn run_sparse_sae_audit(
     }
     if !delta.is_finite() || delta <= 0.0 {
         return Err("audit_sae requires a finite delta > 0".to_string());
-    }
-    if activation_threshold < 0.0 || !activation_threshold.is_finite() {
-        return Err("audit_sae activation_threshold must be finite and non-negative".to_string());
     }
     if calibration_cfg.null_replicates == 0 {
         return Err("audit_sae null_replicates must be >= 1".to_string());
@@ -483,17 +478,15 @@ pub fn run_sparse_sae_audit(
         (report, coordinates)
     };
 
-    let topology_records =
-        topology_records_from_codes(&coordinate_reports, block_size, activation_threshold);
+    let topology_records = topology_records_from_codes(&coordinate_reports, block_size);
     let atlas_data = data_values.mapv(f64::from);
     let atlas_nerve = atlas_nerve_from_sparse_route(
         &route,
-        activation_threshold,
         coordinate_blocks.as_deref(),
         Some(atlas_data.view()),
         Some(delta),
     )?;
-    let absorption = absorption_audit(&route, activation_threshold, max_absorption_pairs);
+    let absorption = absorption_audit(&route, max_absorption_pairs);
 
     let transport = match (theta_in_values, theta_out_values) {
         (Some(theta_in), Some(theta_out)) => Some(
@@ -526,7 +519,6 @@ pub fn run_sparse_sae_audit(
                 &donor,
                 residuals_f64.view(),
                 &atlas.chart_blocks,
-                activation_threshold as f64,
                 &calibration_cfg,
             )?
         }
@@ -550,18 +542,14 @@ pub fn run_sparse_sae_audit(
     })
 }
 
-fn absorption_audit(
-    route: &AuditSparseRoute,
-    activation_threshold: f32,
-    max_pairs: usize,
-) -> AbsorptionAuditReport {
+fn absorption_audit(route: &AuditSparseRoute, max_pairs: usize) -> AbsorptionAuditReport {
     let mut marginals = vec![0usize; route.n_units];
     let mut accumulators = std::collections::BTreeMap::<(usize, usize), SparsePairAccum>::new();
     for row in 0..route.nrows() {
         let mut live = Vec::with_capacity(route.width());
         for slot in 0..route.width() {
             let weight = route.gate(row, slot);
-            if weight > activation_threshold as f64 {
+            if weight > 0.0 {
                 let unit = route.indices[[row, slot]] as usize;
                 marginals[unit] += 1;
                 live.push((unit, weight));
@@ -641,7 +629,6 @@ fn absorption_audit(
     pairs.truncate(max_pairs);
     AbsorptionAuditReport {
         n_units: route.n_units,
-        activation_threshold,
         pairs,
     }
 }
@@ -857,7 +844,6 @@ fn standing_sparse_null_calibration(
     donor: &AuditSparseRoute,
     residuals_f64: ndarray::ArrayView2<'_, f64>,
     chart_blocks: &[usize],
-    activation_threshold: f64,
     cfg: &StandingCalibrationConfig,
 ) -> Result<Option<crate::null_battery::ClaimNullCalibration>, String> {
     use crate::null_battery as nb;
@@ -872,17 +858,12 @@ fn standing_sparse_null_calibration(
         return Ok(None);
     }
     use rand::SeedableRng;
-    let observed =
-        sparse_atlas_nerve_richness_statistic(route, chart_blocks, activation_threshold)?;
+    let observed = sparse_atlas_nerve_richness_statistic(route, chart_blocks)?;
     let mut rng = rand::rngs::StdRng::seed_from_u64(cfg.null_seed);
     let mut samples = Vec::with_capacity(cfg.null_replicates);
     for _ in 0..cfg.null_replicates {
         let surrogate = resample_sparse_architecture_null(route, donor, &mut rng)?;
-        samples.push(sparse_atlas_nerve_richness_statistic(
-            &surrogate,
-            chart_blocks,
-            activation_threshold,
-        )?);
+        samples.push(sparse_atlas_nerve_richness_statistic(&surrogate, chart_blocks)?);
     }
     let null_summary = nb::summarize_null_distribution(
         nb::NullKind::ArchitectureMatchedRandomWeight,
@@ -919,9 +900,7 @@ fn standing_sparse_null_calibration(
 fn topology_records_from_codes(
     coordinate_reports: &[crate::sparse_dict::BlockCoordinateReport],
     block_size: usize,
-    activation_threshold: f32,
 ) -> Vec<AuditTopologyRecord> {
-    let threshold = activation_threshold as f64;
     if block_size == 1 {
         // A scalar external SAE feature is a point/line chart, not a manifold:
         // there is no circle/torus topology to audit. This mirrors the atlas
@@ -941,7 +920,7 @@ fn topology_records_from_codes(
         let live: Vec<_> = report
             .firings
             .iter()
-            .filter(|firing| firing.amplitude > threshold)
+            .filter(|firing| firing.amplitude > 0.0)
             .collect();
         if live.len() < 4 {
             let measured = crate::manifold::BettiSignature {
@@ -998,16 +977,9 @@ fn topology_records_from_codes(
 fn sparse_atlas_nerve_richness_statistic(
     route: &AuditSparseRoute,
     chart_blocks: &[usize],
-    activation_threshold: f64,
 ) -> Result<f64, String> {
-    let report = atlas_nerve_from_sparse_route(
-        route,
-        activation_threshold as f32,
-        Some(chart_blocks),
-        None,
-        None,
-    )?
-    .ok_or_else(|| "atlas null statistic requires at least two block charts".to_string())?;
+    let report = atlas_nerve_from_sparse_route(route, Some(chart_blocks), None, None)?
+        .ok_or_else(|| "atlas null statistic requires at least two block charts".to_string())?;
     let richness = report
         .diagram
         .simplex_counts
