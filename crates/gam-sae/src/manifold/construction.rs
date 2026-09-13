@@ -371,14 +371,15 @@ where
     (0..k_atoms).into_par_iter().map(certificate).collect()
 }
 
-/// Standard floating-point accumulation factor `γ_k = kε/(1-kε)`.
+/// Wilkinson's accumulation factor `γ_k = k·u/(1 − k·u)`, `u = ε/2`, as
+/// [`gam_linalg::roundoff::accumulation_growth`] states it.
 ///
 /// `None` means the first-order backward-error model is not informative for the
 /// requested operation count; callers surface proof-unavailable rather than
 /// widening a numerical-zero threshold.
 fn floating_point_accumulation_gamma(rounded_operations: usize) -> Option<f64> {
-    let k_epsilon = rounded_operations as f64 * f64::EPSILON;
-    (k_epsilon < 1.0).then(|| k_epsilon / (1.0 - k_epsilon))
+    let growth = gam_linalg::roundoff::accumulation_growth(rounded_operations);
+    growth.is_finite().then_some(growth)
 }
 
 /// Single source of truth for MP reconstruction rank versus production chargeability.
@@ -1539,7 +1540,7 @@ impl SaeManifoldTerm {
         let Some(residual_gamma) = floating_point_accumulation_gamma(residual_operations) else {
             return Ok(VanishedAtomsProof::Unavailable {
                 reason: format!(
-                    "residual reduction has {residual_operations} rounded operations, so k*epsilon >= 1"
+                    "residual reduction has {residual_operations} rounded operations, so k*u >= 1"
                 ),
             });
         };
@@ -1654,7 +1655,7 @@ impl SaeManifoldTerm {
             let Some(state_gamma) = floating_point_accumulation_gamma(state_operations) else {
                 return Ok(VanishedAtomsProof::Unavailable {
                     reason: format!(
-                        "atom {atom} signal bound has {state_operations} rounded operations, so k*epsilon >= 1"
+                        "atom {atom} signal bound has {state_operations} rounded operations, so k*u >= 1"
                     ),
                 });
             };

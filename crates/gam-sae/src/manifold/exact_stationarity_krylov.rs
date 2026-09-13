@@ -18,7 +18,7 @@ where
     B: Fn(&Array1<f64>) -> Result<Array1<f64>, String>,
 {
     let n = vectors.nrows();
-    let gamma = n as f64 * f64::EPSILON / (1.0 - n as f64 * f64::EPSILON);
+    let gamma = gam_linalg::roundoff::accumulation_growth(n);
     let envelope = 4.0 * gamma * spectral_norm;
     let mut start = 0;
     while start < values.len() {
@@ -114,7 +114,7 @@ where
     let b_flat = |v: &Array1<f64>| checked(apply_b(&split(v))?);
     let b_raw_flat = |v: &Array1<f64>| checked(apply_b_raw(&split(v))?);
     let tolerance = f64::EPSILON.sqrt();
-    let gamma = dim as f64 * f64::EPSILON / (1.0 - dim as f64 * f64::EPSILON);
+    let gamma = gam_linalg::roundoff::accumulation_growth(dim);
     let a_slice = |input: &[f64], output: &mut [f64]| -> Result<(), String> {
         let value = a_flat(&Array1::from_vec(input.to_vec()))?;
         for (slot, &value) in output.iter_mut().zip(value.iter()) {

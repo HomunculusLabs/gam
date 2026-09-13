@@ -5498,8 +5498,7 @@ impl SaeSupportSparseTerm {
             + p
             + q
             + dims.iter().map(|&(m, _)| m * p).sum::<usize>();
-        let gamma =
-            evaluation_ops as f64 * f64::EPSILON / (1.0 - evaluation_ops as f64 * f64::EPSILON);
+        let gamma = gam_linalg::roundoff::accumulation_growth(evaluation_ops);
         let objective_resolution = gamma * row_objective_scale;
         let mut step = 1.0_f64;
         loop {
