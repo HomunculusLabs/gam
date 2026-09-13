@@ -654,7 +654,7 @@ struct PreparedResidualCurvatureRow {
 impl SaeManifoldTerm {
     /// Contract the residual-curvature legs of `ΔC` at this state. The row
     /// residual and the row program's jets are read exactly as the per-apply
-    /// form read them — same row order, same jet window, same `sae_dot` — so an
+    /// form read them — the same one-row refill, the same `sae_dot` — so an
     /// apply against the plan is bit-identical to one that re-derived them.
     pub(crate) fn prepare_residual_curvature_rows(
         &self,
@@ -678,81 +678,87 @@ impl SaeManifoldTerm {
             .row_metric
             .as_ref()
             .is_some_and(|metric| metric.whitens_likelihood());
-        let mut decoded = vec![0.0_f64; p];
-        let mut fitted = Array1::<f64>::zeros(p);
-        let mut error = Array1::<f64>::zeros(p);
-        let mut assignments = Array1::<f64>::zeros(k_atoms);
-        // #932 complete schedule: non-softmax gates use their distinct dynamic
-        // row program through the bounded look-ahead window.
-        let mut jet_window: std::collections::VecDeque<SaeRowJets> =
-            std::collections::VecDeque::new();
-        let mut jet_window_next = 0usize;
-        let mut rows = Vec::with_capacity(n);
-        for row in 0..n {
-            let q = cache.row_dims[row];
-            let a_scratch = assignments.as_slice_mut().expect("contiguous scratch");
-            self.assignment.try_assignments_row_into(row, a_scratch)?;
-            if jet_window.is_empty() {
-                jet_window_next = self.refill_jet_window(
-                    jet_window_next,
-                    cache,
-                    &second_jets,
-                    &border,
-                    &mut jet_window,
-                )?;
-            }
-            let jets = jet_window
-                .pop_front()
-                .expect("jet window must be non-empty");
-            let sqrt_row_w = row_loss_w.map_or(1.0, |w| w[row].sqrt());
+        // #2731 — a row's plan reads only that row: its assignments, its row
+        // program's jets (a non-softmax refill builds exactly the row it is asked
+        // for), and its residual. The rows run on the rayon pool and are gathered in
+        // row order, so the plan is bit-identical to the serial loop and the first
+        // failing row's error is the one returned. A pool thread holds one row's
+        // jets at a time. The dense exact-A build and the materialization forecast
+        // each prepare this plan once per polish step.
+        use rayon::prelude::*;
+        let planned: Vec<Result<PreparedResidualCurvatureRow, String>> = (0..n)
+            .into_par_iter()
+            .map(|row| -> Result<PreparedResidualCurvatureRow, String> {
+                let q = cache.row_dims[row];
+                let mut assignments = Array1::<f64>::zeros(k_atoms);
+                let a_scratch = assignments.as_slice_mut().ok_or_else(|| {
+                    "prepare_residual_curvature_rows: assignment scratch is not contiguous"
+                        .to_string()
+                })?;
+                self.assignment.try_assignments_row_into(row, a_scratch)?;
+                // #932 complete schedule: non-softmax gates use their distinct
+                // dynamic row program, one row per refill.
+                let mut jet_window: std::collections::VecDeque<SaeRowJets> =
+                    std::collections::VecDeque::new();
+                self.refill_jet_window(row, cache, &second_jets, &border, &mut jet_window)?;
+                let jets = jet_window.pop_front().ok_or_else(|| {
+                    format!("prepare_residual_curvature_rows: the jet refill built no row {row}")
+                })?;
+                let sqrt_row_w = row_loss_w.map_or(1.0, |w| w[row].sqrt());
 
-            // √w-scaled metric-applied per-row residual `error_metric = √w·M_n r_n`
-            // (the SAME object the assembly's β-tier gradient contracts). The
-            // data-fit `½ r_nᵀ M_n r_n` has residual curvature `Σ (M_n r_n)·∂²f`,
-            // so this is exactly the residual contracted against the raw `∂²f`
-            // jets. `M_n = I` on the isotropic path ⇒ `error_metric = √w·r`.
-            fitted.fill(0.0);
-            let active_atoms = self
-                .last_row_layout
-                .as_ref()
-                .map(|layout| layout.active_atoms[row].as_slice());
-            for k in 0..k_atoms {
-                if active_atoms.is_some_and(|active| active.binary_search(&k).is_err()) {
-                    continue;
+                // √w-scaled metric-applied per-row residual `error_metric = √w·M_n r_n`
+                // (the SAME object the assembly's β-tier gradient contracts). The
+                // data-fit `½ r_nᵀ M_n r_n` has residual curvature `Σ (M_n r_n)·∂²f`,
+                // so this is exactly the residual contracted against the raw `∂²f`
+                // jets. `M_n = I` on the isotropic path ⇒ `error_metric = √w·r`.
+                let mut decoded = vec![0.0_f64; p];
+                let mut fitted = Array1::<f64>::zeros(p);
+                let mut error = Array1::<f64>::zeros(p);
+                let active_atoms = self
+                    .last_row_layout
+                    .as_ref()
+                    .map(|layout| layout.active_atoms[row].as_slice());
+                for k in 0..k_atoms {
+                    if active_atoms.is_some_and(|active| active.binary_search(&k).is_err()) {
+                        continue;
+                    }
+                    self.atoms[k].fill_decoded_row(row, &mut decoded);
+                    let a_k = assignments[k];
+                    for out_col in 0..p {
+                        fitted[out_col] += a_k * decoded[out_col];
+                    }
                 }
-                self.atoms[k].fill_decoded_row(row, &mut decoded);
-                let a_k = assignments[k];
                 for out_col in 0..p {
-                    fitted[out_col] += a_k * decoded[out_col];
+                    error[out_col] = sqrt_row_w * (fitted[out_col] - target[[row, out_col]]);
                 }
-            }
-            for out_col in 0..p {
-                error[out_col] = sqrt_row_w * (fitted[out_col] - target[[row, out_col]]);
-            }
-            let error_metric: Vec<f64> = match self.row_metric.as_ref() {
-                Some(metric) if whitens => metric.apply_metric_row(row, error.view()),
-                _ => error.to_vec(),
-            };
+                let error_metric: Vec<f64> = match self.row_metric.as_ref() {
+                    Some(metric) if whitens => metric.apply_metric_row(row, error.view()),
+                    _ => error.to_vec(),
+                };
 
-            let mut residual_tt = vec![0.0_f64; q * q];
-            for a in 0..q {
-                for b in 0..q {
-                    residual_tt[a * q + b] = sae_dot(&error_metric, jets.second(a, b));
+                let mut residual_tt = vec![0.0_f64; q * q];
+                for a in 0..q {
+                    for b in 0..q {
+                        residual_tt[a * q + b] = sae_dot(&error_metric, jets.second(a, b));
+                    }
                 }
-            }
-            let mut residual_tbeta = vec![0.0_f64; q * n_border];
-            for a in 0..q {
-                for beta_pos in 0..n_border {
-                    residual_tbeta[a * n_border + beta_pos] =
-                        sae_dot(&error_metric, jets.beta_deriv(a, beta_pos));
+                let mut residual_tbeta = vec![0.0_f64; q * n_border];
+                for a in 0..q {
+                    for beta_pos in 0..n_border {
+                        residual_tbeta[a * n_border + beta_pos] =
+                            sae_dot(&error_metric, jets.beta_deriv(a, beta_pos));
+                    }
                 }
-            }
-            rows.push(PreparedResidualCurvatureRow {
-                vars: jets.vars,
-                residual_tt,
-                residual_tbeta,
-            });
-        }
+                Ok(PreparedResidualCurvatureRow {
+                    vars: jets.vars,
+                    residual_tt,
+                    residual_tbeta,
+                })
+            })
+            .collect();
+        let rows = planned
+            .into_iter()
+            .collect::<Result<Vec<PreparedResidualCurvatureRow>, String>>()?;
         Ok(PreparedResidualCurvatureRows {
             rows,
             border_indices: border.iter().map(|channel| channel.index).collect(),
