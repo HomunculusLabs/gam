@@ -5833,14 +5833,6 @@ pub(crate) struct RemlState<'a> {
     /// and whenever a new H_pen replaces the cached one).
     pub(crate) ift_cached_factor: RwLock<Option<Arc<dyn gam_linalg::matrix::FactorizedSystem>>>,
 
-    /// When set, the penalties have Kronecker (tensor-product) structure and
-    /// the REML evaluator can use O(∏q_j) logdet instead of O(p³) eigendecomposition.
-    /// Populated via `set_kronecker_penalty_system` after construction.
-    pub(crate) kronecker_penalty_system: Option<gam_terms::smooth::KroneckerPenaltySystem>,
-    /// Full Kronecker factored basis (marginal designs + penalties + dims).
-    /// Used by P-IRLS for factored reparameterization.
-    pub(crate) kronecker_factored: Option<gam_terms::basis::KroneckerFactoredBasis>,
-
     /// Precomputed `(XᵀWX, XᵀW(y − offset))` for the Gaussian + Identity
     /// outer REML loop, populated once before the outer optimizer when the
     /// family / link / constraint preconditions hold and the design supports

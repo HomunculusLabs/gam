@@ -161,8 +161,6 @@ pub fn gaussian_identity_outer_response_conditioning(
 
 pub struct ExternalJointHyperEvaluator<'a> {
     pub(crate) conditioning: ParametricColumnConditioning,
-    pub(crate) kronecker_penalty_system: Option<gam_terms::smooth::KroneckerPenaltySystem>,
-    pub(crate) kronecker_factored: Option<gam_terms::basis::KroneckerFactoredBasis>,
     pub(crate) reml_state: RemlState<'a>,
     /// Cached design revision counter from the upstream
     /// `SingleBlockExactJointDesignCache` (or n-block analogue). When the
@@ -318,20 +316,12 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
             config.link_kind.mixture_state().cloned(),
             config.link_kind.sas_state().copied(),
         );
-        if let Some(kron) = opts.kronecker_penalty_system.clone() {
-            reml_state.set_kronecker_penalty_system(kron);
-        }
-        if let Some(kf) = opts.kronecker_factored.clone() {
-            reml_state.set_kronecker_factored(kf);
-        }
         if let Some(store) = opts.persistent_warm_start_store.clone() {
             reml_state.attach_persistent_warm_start_store(store);
         }
 
         Ok(Self {
             conditioning,
-            kronecker_penalty_system: opts.kronecker_penalty_system.clone(),
-            kronecker_factored: opts.kronecker_factored.clone(),
             reml_state,
             last_canonical_revision: None,
             last_reset_psi: None,
@@ -1124,8 +1114,6 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
             active_nullspace_dims,
             None,
             fit_linear_constraints,
-            self.kronecker_penalty_system.clone(),
-            self.kronecker_factored.clone(),
         )?;
         // #1033 instrumentation: this is the slow (n-row) reconditioning lane.
         self.slow_path_reset_count
@@ -1433,8 +1421,6 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
             active_nullspace_dims,
             None,
             fit_linear_constraints,
-            self.kronecker_penalty_system.clone(),
-            self.kronecker_factored.clone(),
         )?;
         // #1033 instrumentation: this is the slow (n-row) reconditioning lane.
         self.slow_path_reset_count

@@ -2,7 +2,6 @@
 //! under #1521). The enum is pure data; its operators use only gam-problem's own
 //! dense linalg helpers, so hosting it here lets the criterion/solver layers share
 //! one definition without an upward edge into the engine.
-use crate::reml_contract_panic;
 use gam_linalg::dense;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayViewMut1};
 
@@ -88,22 +87,6 @@ pub enum PenaltyCoordinate {
         total_dim: usize,
         prior_mean: Array1<f64>,
     },
-    /// Kronecker-factored penalty coordinate for tensor-product smooths.
-    ///
-    /// In the reparameterized (eigenbasis) representation, the penalty
-    /// `I ⊗ ... ⊗ S_k ⊗ ... ⊗ I` becomes `I ⊗ ... ⊗ Λ_k ⊗ ... ⊗ I`
-    /// where `Λ_k = diag(μ_{k,0}, ..., μ_{k,q_k-1})`.  This is diagonal
-    /// in each mode, so apply/quadratic/trace operations avoid O(p²).
-    KroneckerMarginal {
-        /// Marginal eigenvalues for ALL dimensions: `eigenvalues[j]` has length `q_j`.
-        eigenvalues: Vec<Array1<f64>>,
-        /// Which marginal dimension this penalty coordinate corresponds to.
-        dim_index: usize,
-        /// Marginal basis dimensions: `[q_0, ..., q_{d-1}]`.
-        marginal_dims: Vec<usize>,
-        /// Total joint dimension: `∏ q_j`.
-        total_dim: usize,
-    },
 }
 
 impl PenaltyCoordinate {
@@ -181,37 +164,15 @@ impl PenaltyCoordinate {
             | Self::DenseRootCentered { root, .. }
             | Self::BlockRoot { root, .. }
             | Self::BlockRootCentered { root, .. } => root.nrows(),
-            Self::KroneckerMarginal {
-                eigenvalues,
-                dim_index,
-                ..
-            } => {
-                // Rank = number of marginal eigenvalues for this dim above the
-                // marginal eigensolver's rounding band `γ_{q_k}·max|μ_k|`, the
-                // resolution the Kronecker log-determinant reads the same spectrum
-                // at, times the product of all other dims.
-                let marginal = &eigenvalues[*dim_index];
-                let band = gam_linalg::roundoff::accumulation_growth(marginal.len())
-                    * marginal.iter().fold(0.0_f64, |acc, value| acc.max(value.abs()));
-                let nz = marginal.iter().filter(|&&v| v.abs() > band).count();
-                let other: usize = eigenvalues
-                    .iter()
-                    .enumerate()
-                    .filter(|&(j, _)| j != *dim_index)
-                    .map(|(_, e)| e.len())
-                    .product::<usize>()
-                    .max(1);
-                nz * other
-            }
         }
     }
 
     pub fn dim(&self) -> usize {
         match self {
             Self::DenseRoot(root) | Self::DenseRootCentered { root, .. } => root.ncols(),
-            Self::BlockRoot { total_dim, .. }
-            | Self::BlockRootCentered { total_dim, .. }
-            | Self::KroneckerMarginal { total_dim, .. } => *total_dim,
+            Self::BlockRoot { total_dim, .. } | Self::BlockRootCentered { total_dim, .. } => {
+                *total_dim
+            }
         }
     }
 
@@ -220,7 +181,6 @@ impl PenaltyCoordinate {
             self,
             Self::BlockRoot { .. }
                 | Self::BlockRootCentered { .. }
-                | Self::KroneckerMarginal { .. }
         )
     }
 
@@ -240,7 +200,6 @@ impl PenaltyCoordinate {
             | Self::BlockRootCentered {
                 root, start, end, ..
             } => Some((root, *start, *end)),
-            Self::KroneckerMarginal { .. } => None,
         }
     }
 
@@ -295,10 +254,6 @@ impl PenaltyCoordinate {
         let total_dim = self.dim();
         let (root, start, end) = match self.block_local_root() {
             Some(parts) => parts,
-            // A Kronecker-factored coordinate has no single root; the Kronecker
-            // path builds its own marginal eigen-grid and never routes through
-            // the dense reparameterization's null split, so there is nothing to
-            // project against.
             None => return self.clone(),
         };
         // `R Π = R − (R N) Nᵀ`, through the shared primitive so this coordinate
@@ -337,7 +292,7 @@ impl PenaltyCoordinate {
         match self {
             Self::DenseRootCentered { prior_mean, .. }
             | Self::BlockRootCentered { prior_mean, .. } => Some(prior_mean.view()),
-            Self::DenseRoot(_) | Self::BlockRoot { .. } | Self::KroneckerMarginal { .. } => None,
+            Self::DenseRoot(_) | Self::BlockRoot { .. } => None,
         }
     }
 
@@ -393,11 +348,6 @@ impl PenaltyCoordinate {
                     z_block_owned.t().dot(prior_mean),
                 )
             }
-            Self::KroneckerMarginal { .. } => reml_contract_panic(
-                "PenaltyCoordinate::project_into_subspace: Kronecker-factored \
-                 coordinates do not co-occur with linear-inequality active sets \
-                 (box/monotone constraints lower to dense/block roots)",
-            ),
         }
     }
 
@@ -411,18 +361,6 @@ impl PenaltyCoordinate {
             | Self::BlockRootCentered {
                 root, start, end, ..
             } => root.dot(&beta.slice(ndarray::s![*start..*end])),
-            Self::KroneckerMarginal { .. } => {
-                // No single root for Kronecker — use apply_penalty instead.
-                // SAFETY: `has_root()` returns `false` for the
-                // KroneckerMarginal variant (see the `matches!` block
-                // above); callers of `apply_root` are required to gate on
-                // `has_root()`, so reaching this arm means a caller
-                // invoked the rooted-only API on a rootless variant.
-                // SAFETY: KroneckerMarginal has no root; callers must gate on has_root() before apply_root.
-                reml_contract_panic(
-                    "apply_root not supported for KroneckerMarginal; use apply_penalty directly",
-                );
-            }
         }
     }
 
@@ -495,48 +433,7 @@ impl PenaltyCoordinate {
                         out_block,
                     );
                 }
-                // Outer arm guarantees only the four root-bearing variants reach here.
-                Self::KroneckerMarginal { .. } => {}
             },
-            Self::KroneckerMarginal {
-                eigenvalues,
-                dim_index,
-                marginal_dims,
-                total_dim,
-            } => {
-                // Apply (I ⊗ ... ⊗ Λ_k ⊗ ... ⊗ I) β via mode-k scaling.
-                // In the eigenbasis, Λ_k is diagonal, so this is element-wise.
-                let k = *dim_index;
-                let q_k = marginal_dims[k];
-                let stride_k: usize = marginal_dims[k + 1..]
-                    .iter()
-                    .copied()
-                    .product::<usize>()
-                    .max(1);
-                let outer_size: usize =
-                    marginal_dims[..k].iter().copied().product::<usize>().max(1);
-                let inner_size = stride_k;
-                let eigs = &eigenvalues[k];
-                assert_eq!(
-                    outer_size * q_k * stride_k,
-                    *total_dim,
-                    "KroneckerMarginal dimension mismatch in apply"
-                );
-
-                for outer in 0..outer_size {
-                    for j in 0..q_k {
-                        let mu = eigs[j] * scale;
-                        if mu == 0.0 {
-                            continue;
-                        }
-                        let base = outer * q_k * stride_k + j * stride_k;
-                        for inner in 0..inner_size {
-                            let idx = base + inner;
-                            out[idx] += mu * beta[idx];
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -548,41 +445,6 @@ impl PenaltyCoordinate {
             | Self::BlockRootCentered { .. } => {
                 let root_beta = self.apply_root(beta);
                 scale * root_beta.dot(&root_beta)
-            }
-            Self::KroneckerMarginal {
-                eigenvalues,
-                dim_index,
-                marginal_dims,
-                ..
-            } => {
-                // β' (I ⊗ ... ⊗ Λ_k ⊗ ... ⊗ I) β = Σ μ_{k,j} β[...]²
-                let k = *dim_index;
-                let q_k = marginal_dims[k];
-                let stride_k: usize = marginal_dims[k + 1..]
-                    .iter()
-                    .copied()
-                    .product::<usize>()
-                    .max(1);
-                let outer_size: usize =
-                    marginal_dims[..k].iter().copied().product::<usize>().max(1);
-                let inner_size = stride_k;
-                let eigs = &eigenvalues[k];
-
-                let mut sum = 0.0;
-                for outer in 0..outer_size {
-                    for j in 0..q_k {
-                        let mu = eigs[j];
-                        if mu == 0.0 {
-                            continue;
-                        }
-                        let base = outer * q_k * stride_k + j * stride_k;
-                        for inner in 0..inner_size {
-                            let v = beta[base + inner];
-                            sum += mu * v * v;
-                        }
-                    }
-                }
-                sum * scale
             }
         }
     }
@@ -666,42 +528,6 @@ impl PenaltyCoordinate {
                     .assign(&block);
                 out
             }
-            Self::KroneckerMarginal {
-                eigenvalues,
-                dim_index,
-                marginal_dims,
-                total_dim,
-            } => {
-                // Materialize diagonal penalty in eigenbasis.
-                let k = *dim_index;
-                let q_k = marginal_dims[k];
-                let stride_k: usize = marginal_dims[k + 1..]
-                    .iter()
-                    .copied()
-                    .product::<usize>()
-                    .max(1);
-                let outer_size: usize =
-                    marginal_dims[..k].iter().copied().product::<usize>().max(1);
-                let eigs = &eigenvalues[k];
-                assert_eq!(
-                    outer_size * q_k * stride_k,
-                    *total_dim,
-                    "KroneckerMarginal dimension mismatch in to_dense"
-                );
-
-                let mut out = Array2::<f64>::zeros((*total_dim, *total_dim));
-                for outer in 0..outer_size {
-                    for j in 0..q_k {
-                        let mu = eigs[j] * scale;
-                        let base = outer * q_k * stride_k + j * stride_k;
-                        for inner in 0..stride_k {
-                            let idx = base + inner;
-                            out[[idx, idx]] = mu;
-                        }
-                    }
-                }
-                out
-            }
         }
     }
 
@@ -726,11 +552,6 @@ impl PenaltyCoordinate {
                 block *= scale;
                 (block, *start, *end)
             }
-            Self::KroneckerMarginal { total_dim, .. } => {
-                // Fallback: materialize full matrix.
-                let mat = self.scaled_dense_matrix(scale);
-                (mat, 0, *total_dim)
-            }
         }
     }
 
@@ -740,7 +561,6 @@ impl PenaltyCoordinate {
             self,
             Self::BlockRoot { .. }
                 | Self::BlockRootCentered { .. }
-                | Self::KroneckerMarginal { .. }
         )
     }
 
@@ -753,9 +573,8 @@ impl PenaltyCoordinate {
     /// `σ(S_λ)^{-1}`) carries `R_k`'s roundoff LINEARLY and divides it by the
     /// smallest eigenvalue, giving `O(ε·κ)` on traces the theory bounds by
     /// `rank(S_k)`. A consumer that keeps the root and forms a Gram instead
-    /// squares that residual (#2644). Every root-bearing variant returns
-    /// `Some`; `KroneckerMarginal` returns `None` because its penalty is stored
-    /// as a marginal eigenvalue grid rather than a root.
+    /// squares that residual (#2644). Every variant returns `Some` for a finite,
+    /// non-negative `scale`.
     pub fn scaled_block_root(&self, scale: f64) -> Option<(Array2<f64>, usize, usize)> {
         if !(scale.is_finite() && scale >= 0.0) {
             return None;
@@ -771,7 +590,6 @@ impl PenaltyCoordinate {
             | Self::BlockRootCentered {
                 root, start, end, ..
             } => Some((root * sqrt_scale, *start, *end)),
-            Self::KroneckerMarginal { .. } => None,
         }
     }
 
@@ -800,10 +618,6 @@ impl PenaltyCoordinate {
                     .assign(&block_result);
                 out
             }
-            Self::KroneckerMarginal { .. } => {
-                // Reuse apply_penalty which handles mode-k contraction.
-                self.apply_penalty(v, scale)
-            }
         }
     }
 
@@ -816,9 +630,8 @@ impl PenaltyCoordinate {
     /// coefficient vector they happen to occupy or which order the user typed
     /// the terms in. It is derived ENTIRELY from rotation/placement-invariant
     /// content (rank, block width, the spectrum of the block-local penalty
-    /// `Sₖ = RₖᵀRₖ`, or the marginal eigenvalue spectrum for a Kronecker
-    /// margin), and NEVER from a coordinate's position (`start`/`dim_index`)
-    /// in the joint layout. Swapping `s(x)+s(z)` ↔ `s(z)+s(x)` or
+    /// `Sₖ = RₖᵀRₖ`), and NEVER from a coordinate's position (`start`) in the
+    /// joint layout. Swapping `s(x)+s(z)` ↔ `s(z)+s(x)` or
     /// `te(x,z)` ↔ `te(z,x)` permutes the coordinates but leaves each
     /// coordinate's key fixed.
     ///
@@ -880,25 +693,6 @@ impl PenaltyCoordinate {
                 // guard against any future addition of non-symmetric summaries.
                 invariants.sort_unstable();
                 invariants.hash(&mut hasher);
-            }
-            Self::KroneckerMarginal {
-                eigenvalues,
-                dim_index,
-                marginal_dims,
-                ..
-            } => {
-                // A tensor margin's identity is its OWN marginal penalty
-                // spectrum plus the (sorted) set of marginal dimensions — both
-                // independent of which slot `dim_index` the margin occupies, so
-                // `te(x,z)` and `te(z,x)` give each margin the same key.
-                1u8.hash(&mut hasher);
-                let mut margin_spectrum: Vec<i64> =
-                    eigenvalues[*dim_index].iter().map(|&e| quant(e)).collect();
-                margin_spectrum.sort_unstable();
-                margin_spectrum.hash(&mut hasher);
-                let mut dims_sorted = marginal_dims.clone();
-                dims_sorted.sort_unstable();
-                dims_sorted.hash(&mut hasher);
             }
         }
 

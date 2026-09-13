@@ -295,8 +295,6 @@ fn duchon_gaussian_smooth_baseline_is_fast() {
             linear_constraints: None,
             firth_bias_reduction: false,
             rho_prior: Default::default(),
-            kronecker_penalty_system: None,
-            kronecker_factored: None,
             persistent_warm_start_store: None,
         },
     );

@@ -102,8 +102,6 @@ fn matern_fit_term_collection_gaussian_simulated_10d() {
             linear_constraints: None,
             firth_bias_reduction: false,
             rho_prior: Default::default(),
-            kronecker_penalty_system: None,
-            kronecker_factored: None,
             persistent_warm_start_store: None,
         },
     )
@@ -236,8 +234,6 @@ fn matern_3d_aniso_fits_successfully() {
                 linear_constraints: None,
                 firth_bias_reduction: false,
                 rho_prior: Default::default(),
-                kronecker_penalty_system: None,
-                kronecker_factored: None,
                 persistent_warm_start_store: None,
             },
             &kappa_options,

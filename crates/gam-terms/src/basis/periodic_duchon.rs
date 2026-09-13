@@ -1261,7 +1261,6 @@ pub(crate) fn build_periodic_duchon_basis_1d(
             radial_reparam: None,
             spectral_basis: None,
         },
-        kronecker_factored: None,
     })
 }
 
@@ -1507,7 +1506,6 @@ pub(crate) fn build_duchon_basis_mixed_periodicity(
             radial_reparam: None,
             spectral_basis: None,
         },
-        kronecker_factored: None,
     })
 }
 

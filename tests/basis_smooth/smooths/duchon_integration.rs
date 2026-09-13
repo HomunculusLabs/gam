@@ -119,8 +119,6 @@ fn assert_invalid_pure_duchon_simulated_10d(power: usize, nullspace_order: Ducho
             linear_constraints: None,
             firth_bias_reduction: false,
             rho_prior: Default::default(),
-            kronecker_penalty_system: None,
-            kronecker_factored: None,
             persistent_warm_start_store: None,
         },
     ) {
@@ -263,8 +261,6 @@ fn duchon_2d_aniso_binomial_fits_successfully() {
             linear_constraints: None,
             firth_bias_reduction: false,
             rho_prior: Default::default(),
-            kronecker_penalty_system: None,
-            kronecker_factored: None,
             persistent_warm_start_store: None,
         },
     )
@@ -419,8 +415,6 @@ fn duchon_2d_scale_dimensions_does_not_abort_on_clean_data_issue_382() {
             linear_constraints: None,
             firth_bias_reduction: false,
             rho_prior: Default::default(),
-            kronecker_penalty_system: None,
-            kronecker_factored: None,
             persistent_warm_start_store: None,
         },
     )

@@ -191,8 +191,6 @@ fn glm_opts(family: LikelihoodSpec, nullspace_dims: Vec<usize>) -> ExternalOptim
         linear_constraints: None,
         firth_bias_reduction: None,
         rho_prior: Default::default(),
-        kronecker_penalty_system: None,
-        kronecker_factored: None,
         persistent_warm_start_store: None,
     }
 }

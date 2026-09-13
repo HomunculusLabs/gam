@@ -1,7 +1,6 @@
 use faer::sparse::SparseRowMat;
 use gam_linalg::faer_ndarray::{fast_ab, fast_atb, fast_atv, fast_av};
 use gam_linalg::matrix::DesignMatrix;
-use gam_terms::construction::KroneckerReparamResult;
 use ndarray::{Array1, Array2};
 use std::sync::Arc;
 
@@ -20,28 +19,24 @@ pub(crate) enum WorkingCoordinateDesign {
 #[derive(Clone)]
 pub(crate) enum WorkingReparamTransform {
     Dense(Arc<Array2<f64>>),
-    Kronecker(Arc<KroneckerQsTransform>),
 }
 
 impl WorkingReparamTransform {
     pub(super) fn apply(&self, vector: &Array1<f64>) -> Array1<f64> {
         match self {
             Self::Dense(qs) => fast_av(qs.as_ref(), vector),
-            Self::Kronecker(transform) => transform.apply(vector),
         }
     }
 
     pub(super) fn apply_transpose(&self, vector: &Array1<f64>) -> Array1<f64> {
         match self {
             Self::Dense(qs) => fast_atv(qs, vector),
-            Self::Kronecker(transform) => transform.apply_transpose(vector),
         }
     }
 
     pub(super) fn materialize_dense(&self) -> Array2<f64> {
         match self {
             Self::Dense(qs) => qs.as_ref().clone(),
-            Self::Kronecker(transform) => transform.materialize(),
         }
     }
 
@@ -51,7 +46,6 @@ impl WorkingReparamTransform {
                 let tmp = fast_atb(qs, matrix);
                 symmetrize_dense_matrix(&fast_ab(&tmp, qs))
             }
-            Self::Kronecker(transform) => transform.conjugate_matrix(matrix),
         }
     }
 }
@@ -64,28 +58,18 @@ pub(crate) enum PirlsPenalty {
         linear_shift: Array1<f64>,
         constant_shift: f64,
     },
-    Diagonal {
-        diag: Array1<f64>,
-        positive_indices: Vec<usize>,
-        linear_shift: Array1<f64>,
-        constant_shift: f64,
-    },
 }
 
 impl PirlsPenalty {
     pub(super) fn dim(&self) -> usize {
         match self {
             Self::Dense { s_transformed, .. } => s_transformed.ncols(),
-            Self::Diagonal { diag, .. } => diag.len(),
         }
     }
 
     pub(super) fn rank(&self) -> usize {
         match self {
             Self::Dense { e_transformed, .. } => e_transformed.nrows(),
-            Self::Diagonal {
-                positive_indices, ..
-            } => positive_indices.len(),
         }
     }
 
@@ -96,12 +80,9 @@ impl PirlsPenalty {
     ///
     /// Reparameterized dense penalties store mutually orthogonal spectral-root
     /// rows, so their squared row norms are exactly the represented positive
-    /// eigenvalues.  Diagonal penalties never incur cancellation while being
-    /// assembled and therefore retain the direct diagonal/Gram solve.
+    /// eigenvalues.
     pub(super) fn requires_root_solve(&self, stabilizing_floor: f64) -> bool {
-        let Self::Dense { e_transformed, .. } = self else {
-            return false;
-        };
+        let Self::Dense { e_transformed, .. } = self;
         let mut min_positive = if stabilizing_floor.is_finite() && stabilizing_floor > 0.0 {
             stabilizing_floor
         } else {
@@ -131,15 +112,6 @@ impl PirlsPenalty {
                 let end = first_row + e_transformed.nrows();
                 out.slice_mut(ndarray::s![first_row..end, ..])
                     .assign(e_transformed);
-            }
-            Self::Diagonal {
-                diag,
-                positive_indices,
-                ..
-            } => {
-                for (local_row, &coefficient) in positive_indices.iter().enumerate() {
-                    out[[first_row + local_row, coefficient]] = diag[coefficient].sqrt();
-                }
             }
         }
     }
@@ -175,18 +147,6 @@ impl PirlsPenalty {
                     out[first_row + local_row] = e_beta[local_row] - affine_shift;
                 }
             }
-            Self::Diagonal {
-                diag,
-                positive_indices,
-                linear_shift,
-                ..
-            } => {
-                for (local_row, &coefficient) in positive_indices.iter().enumerate() {
-                    let root = diag[coefficient].sqrt();
-                    out[first_row + local_row] =
-                        root * beta[coefficient] - linear_shift[coefficient] / root;
-                }
-            }
         }
     }
 
@@ -194,11 +154,6 @@ impl PirlsPenalty {
         match self {
             Self::Dense { s_transformed, .. } => {
                 *hessian += s_transformed;
-            }
-            Self::Diagonal { diag, .. } => {
-                for i in 0..diag.len() {
-                    hessian[[i, i]] += diag[i];
-                }
             }
         }
     }
@@ -221,21 +176,18 @@ impl PirlsPenalty {
                 let e_beta = fast_av(e_transformed, beta);
                 fast_atv(e_transformed, &e_beta)
             }
-            Self::Diagonal { diag, .. } => diag * beta,
         }
     }
 
     pub(super) fn linear_shift(&self) -> &Array1<f64> {
         match self {
-            Self::Dense { linear_shift, .. } | Self::Diagonal { linear_shift, .. } => linear_shift,
+            Self::Dense { linear_shift, .. } => linear_shift,
         }
     }
 
     pub(super) fn constant_shift(&self) -> f64 {
         match self {
-            Self::Dense { constant_shift, .. } | Self::Diagonal { constant_shift, .. } => {
-                *constant_shift
-            }
+            Self::Dense { constant_shift, .. } => *constant_shift,
         }
     }
 
@@ -251,11 +203,6 @@ impl PirlsPenalty {
                 let e_beta = fast_av(e_transformed, beta);
                 e_beta.dot(&e_beta)
             }
-            Self::Diagonal { diag, .. } => beta
-                .iter()
-                .zip(diag.iter())
-                .map(|(&coefficient, &weight)| weight * coefficient * coefficient)
-                .sum(),
         };
         unshifted - 2.0 * beta.dot(self.linear_shift()) + self.constant_shift()
     }
@@ -335,118 +282,9 @@ mod tests {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct KroneckerQsTransform {
-    pub(super) marginal_qs: std::sync::Arc<Vec<Array2<f64>>>,
-    pub(super) dims: Vec<usize>,
-    pub(super) p: usize,
-}
-
-impl KroneckerQsTransform {
-    pub(super) fn new(result: &KroneckerReparamResult) -> Self {
-        let dims = result.marginal_dims.clone();
-        let p = dims.iter().product();
-        Self {
-            // Arc refcount bump — the U_k eigenvector matrices are λ-invariant
-            // and shared with the cache, not deep-copied each outer iterate.
-            marginal_qs: std::sync::Arc::clone(&result.marginal_qs),
-            dims,
-            p,
-        }
-    }
-
-    pub(super) fn apply(&self, vector: &Array1<f64>) -> Array1<f64> {
-        self.apply_internal(vector, false)
-    }
-
-    pub(super) fn apply_transpose(&self, vector: &Array1<f64>) -> Array1<f64> {
-        self.apply_internal(vector, true)
-    }
-
-    pub(crate) fn apply_internal(&self, vector: &Array1<f64>, transpose: bool) -> Array1<f64> {
-        assert_eq!(vector.len(), self.p);
-        // Ping-pong two thread-local scratch buffers across axes so we
-        // allocate at most twice per thread for the whole solver lifetime
-        // instead of once per `apply` call per axis.
-        kron_apply_scratch::with(|scratch| {
-            let (front, back) = scratch.pair_with_capacity(self.p);
-            front.clear();
-            front.extend_from_slice(vector.as_slice().expect("Array1 must be contiguous"));
-            for (axis, q) in self.marginal_qs.iter().enumerate() {
-                back.clear();
-                back.resize(front.len(), 0.0);
-                apply_kron_mode_into(front, &self.dims, axis, q, transpose, back);
-                std::mem::swap(front, back);
-            }
-            // Clone out the final result (one allocation per `apply`, vs. the
-            // previous N+1 allocations across N axes); the scratch retains
-            // its capacity for the next call on this thread.
-            Array1::from(front.clone())
-        })
-    }
-
-    pub(super) fn materialize(&self) -> Array2<f64> {
-        let mut qs = Array2::<f64>::zeros((self.p, self.p));
-        for j in 0..self.p {
-            let mut e = Array1::<f64>::zeros(self.p);
-            e[j] = 1.0;
-            let col = self.apply(&e);
-            qs.column_mut(j).assign(&col);
-        }
-        qs
-    }
-
-    pub(super) fn conjugate_matrix(&self, matrix: &Array2<f64>) -> Array2<f64> {
-        let p = self.p;
-        let mut right = Array2::<f64>::zeros((p, p));
-        for j in 0..p {
-            let col = fast_av(matrix, &self.column(j));
-            right.column_mut(j).assign(&col);
-        }
-        let mut out = Array2::<f64>::zeros((p, p));
-        for j in 0..p {
-            let transformed_col = self.apply_transpose(&right.column(j).to_owned());
-            out.column_mut(j).assign(&transformed_col);
-        }
-        symmetrize_dense_matrix(&out)
-    }
-
-    pub(crate) fn column(&self, j: usize) -> Array1<f64> {
-        let mut e = Array1::<f64>::zeros(self.p);
-        e[j] = 1.0;
-        self.apply(&e)
-    }
-}
-
 #[inline]
 pub(super) fn symmetrize_dense_matrix(matrix: &Array2<f64>) -> Array2<f64> {
     (matrix + &matrix.t().to_owned()) * 0.5
-}
-
-pub(super) fn apply_kron_mode_into(
-    data: &[f64],
-    dims: &[usize],
-    axis: usize,
-    q: &Array2<f64>,
-    transpose: bool,
-    out: &mut [f64],
-) {
-    let before: usize = dims[..axis].iter().product();
-    let dim = dims[axis];
-    let after: usize = dims[axis + 1..].iter().product();
-    assert_eq!(out.len(), data.len());
-    for b in 0..before {
-        for s in 0..after {
-            for i in 0..dim {
-                let mut acc = 0.0;
-                for a in 0..dim {
-                    let coeff = if transpose { q[[a, i]] } else { q[[i, a]] };
-                    acc += coeff * data[(b * dim + a) * after + s];
-                }
-                out[(b * dim + i) * after + s] = acc;
-            }
-        }
-    }
 }
 
 /// Attach a penalty shift (prior-mean correction) to an existing PirlsPenalty.
@@ -460,55 +298,9 @@ pub(super) fn attach_penalty_shift(
             linear_shift: target,
             constant_shift: constant,
             ..
-        }
-        | PirlsPenalty::Diagonal {
-            linear_shift: target,
-            constant_shift: constant,
-            ..
         } => {
             *target = linear_shift;
             *constant = constant_shift;
         }
-    }
-}
-
-/// Thread-local ping-pong scratch buffers for Kronecker mode application.
-/// Sized lazily to the largest p ever seen on this thread.
-pub(super) mod kron_apply_scratch {
-    use std::cell::RefCell;
-
-    thread_local! {
-        static SCRATCH: RefCell<Pair> = const { RefCell::new(Pair::new()) };
-    }
-
-    pub(super) struct Pair {
-        a: Vec<f64>,
-        b: Vec<f64>,
-    }
-
-    impl Pair {
-        pub(super) const fn new() -> Self {
-            Self {
-                a: Vec::new(),
-                b: Vec::new(),
-            }
-        }
-
-        pub(super) fn pair_with_capacity(
-            &mut self,
-            capacity: usize,
-        ) -> (&mut Vec<f64>, &mut Vec<f64>) {
-            if self.a.capacity() < capacity {
-                self.a.reserve(capacity - self.a.capacity());
-            }
-            if self.b.capacity() < capacity {
-                self.b.reserve(capacity - self.b.capacity());
-            }
-            (&mut self.a, &mut self.b)
-        }
-    }
-
-    pub(super) fn with<R>(f: impl FnOnce(&mut Pair) -> R) -> R {
-        SCRATCH.with(|cell| f(&mut cell.borrow_mut()))
     }
 }

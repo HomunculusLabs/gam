@@ -1686,10 +1686,6 @@ pub struct BasisBuildResult {
     /// active matrices.
     pub dropped_penalties: Vec<DroppedPenaltyInfo>,
     pub metadata: BasisMetadata,
-    /// Optional factored rowwise-Kronecker representation for tensor-product
-    /// bases. When present, downstream code can keep the design operator-backed
-    /// instead of forcing a fully materialized `n x prod(q_j)` block.
-    pub kronecker_factored: Option<KroneckerFactoredBasis>,
     /// Joint-null absorption rotation for this basis, when the basis carries
     /// any penalties with a non-trivial joint null space.
     ///
@@ -1757,99 +1753,8 @@ impl std::fmt::Debug for BasisBuildResult {
             .field("active_penalties", &self.active_penalties)
             .field("dropped_penalties", &self.dropped_penalties)
             .field("metadata", &self.metadata)
-            .field("kronecker_factored", &self.kronecker_factored)
             .field("joint_null_rotation", &self.joint_null_rotation)
             .finish()
-    }
-}
-
-/// Factored tensor-product basis metadata for operator-backed downstream use.
-#[derive(Debug)]
-pub struct KroneckerFactoredBasis {
-    /// Marginal design matrices: `marginal_designs[j]` is `(n, q_j)`.
-    pub marginal_designs: Vec<Array2<f64>>,
-    /// Marginal penalty matrices: `marginal_penalties[k]` is `(q_k, q_k)`.
-    pub marginal_penalties: Vec<Array2<f64>>,
-    /// Marginal basis dimensions: `[q_0, ..., q_{d-1}]`.
-    pub marginal_dims: Vec<usize>,
-    /// Whether the system includes a global ridge (double) penalty.
-    pub has_double_penalty: bool,
-    /// λ-invariant tensor structure (marginal eigensystems, reparameterized
-    /// marginals, shrinkage scale), memoized once per fit. The marginal
-    /// designs/penalties are fixed for the whole fit, so the expensive marginal
-    /// `eigh()` and `B_k·U_k` GEMMs only need to run once — every outer REML
-    /// iterate (50+ on the #1082 tensor cases) then reuses this. Filled lazily
-    /// on first use via [`Self::invariant_structure`]. NOT serialized and reset
-    /// to empty on `Clone` (it is purely a within-fit performance cache; a fresh
-    /// owner recomputes on first demand, keeping every result bit-identical).
-    invariant: std::sync::OnceLock<std::sync::Arc<crate::kronecker::KroneckerInvariantStructure>>,
-}
-
-impl Clone for KroneckerFactoredBasis {
-    fn clone(&self) -> Self {
-        Self {
-            marginal_designs: self.marginal_designs.clone(),
-            marginal_penalties: self.marginal_penalties.clone(),
-            marginal_dims: self.marginal_dims.clone(),
-            has_double_penalty: self.has_double_penalty,
-            // Propagate the memoized structure when present so a clone made
-            // mid-fit keeps the hoist; otherwise start empty (recomputed on
-            // first demand, identical result).
-            invariant: match self.invariant.get() {
-                Some(s) => {
-                    let cell = std::sync::OnceLock::new();
-                    cell.get_or_init(|| std::sync::Arc::clone(s));
-                    cell
-                }
-                None => std::sync::OnceLock::new(),
-            },
-        }
-    }
-}
-
-impl KroneckerFactoredBasis {
-    /// Construct from the fixed marginal data with an empty invariant cache.
-    pub fn new(
-        marginal_designs: Vec<Array2<f64>>,
-        marginal_penalties: Vec<Array2<f64>>,
-        marginal_dims: Vec<usize>,
-        has_double_penalty: bool,
-    ) -> Self {
-        Self {
-            marginal_designs,
-            marginal_penalties,
-            marginal_dims,
-            has_double_penalty,
-            invariant: std::sync::OnceLock::new(),
-        }
-    }
-
-    /// Lazily compute (once) and return the λ-invariant tensor structure
-    /// (marginal eigensystems, reparameterized marginals, shrinkage scale).
-    ///
-    /// Computed from the fixed marginal designs/penalties, so the result is the
-    /// same on every call within a fit; the first call pays the `eigh()` cost
-    /// and every later call is a pointer load. Because the cache is keyed on the
-    /// fixed marginal data and `marginal_penalties`/`marginal_designs` are
-    /// immutable for the fit's lifetime, no invalidation is needed.
-    pub fn invariant_structure(
-        &self,
-    ) -> Result<std::sync::Arc<crate::kronecker::KroneckerInvariantStructure>, gam_problem::EstimationError> {
-        // Fast path: already memoized.
-        if let Some(s) = self.invariant.get() {
-            return Ok(std::sync::Arc::clone(s));
-        }
-        // Compute outside the cell (fallible) and install via `get_or_init`. If a
-        // concurrent racer already won, `get_or_init` drops our `computed` and
-        // returns the stored one; either way the value is the unique function of
-        // the fixed marginal data, so the returned Arc is correct.
-        let computed = std::sync::Arc::new(crate::kronecker::KroneckerInvariantStructure::compute(
-            &self.marginal_designs,
-            &self.marginal_penalties,
-            &self.marginal_dims,
-        )?);
-        let installed = self.invariant.get_or_init(|| computed);
-        Ok(std::sync::Arc::clone(installed))
     }
 }
 

@@ -970,7 +970,6 @@ fn build_duchon_basis_uncached(
             radial_reparam: frozen_radial_reparam,
             spectral_basis: realized_spectral_basis,
         },
-        kronecker_factored: None,
     })
 }
 

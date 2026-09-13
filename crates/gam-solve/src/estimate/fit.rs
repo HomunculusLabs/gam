@@ -286,8 +286,6 @@ where
         // Propagate caller's rho_prior so inner outer-REML minimizes the
         // same objective as paths that build ExternalOptimOptions directly.
         rho_prior: opts.rho_prior.clone(),
-        kronecker_penalty_system: opts.kronecker_penalty_system.clone(),
-        kronecker_factored: opts.kronecker_factored.clone(),
         persistent_warm_start_store: opts.persistent_warm_start_store.clone(),
     };
 

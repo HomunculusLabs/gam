@@ -961,38 +961,8 @@ impl<'a> RemlState<'a> {
     //  Unified inner-solution assembly
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /// Build penalty coordinates from canonical penalties, with Kronecker
-    /// fast-path when available and active.
+    /// Build penalty coordinates from canonical penalties.
     pub(crate) fn build_penalty_coords(&self) -> Vec<super::reml_outer_engine::PenaltyCoordinate> {
-        if let Some(ref kron) = self.kronecker_penalty_system
-            && self.kronecker_factored.is_some()
-        {
-            let d = kron.ndim();
-            let total_dim = kron.p_total();
-            let eigenvalues: Vec<ndarray::Array1<f64>> = kron
-                .marginal_eigensystems
-                .iter()
-                .map(|(evals, _)| evals.clone())
-                .collect();
-            let mut coords = Vec::with_capacity(kron.num_penalties());
-            for k in 0..d {
-                coords.push(
-                    super::reml_outer_engine::PenaltyCoordinate::KroneckerMarginal {
-                        eigenvalues: eigenvalues.clone(),
-                        dim_index: k,
-                        marginal_dims: kron.marginal_dims.clone(),
-                        total_dim,
-                    },
-                );
-            }
-            if kron.has_double_penalty {
-                let identity_root = ndarray::Array2::<f64>::eye(total_dim);
-                coords.push(
-                    super::reml_outer_engine::PenaltyCoordinate::from_dense_root(identity_root),
-                );
-            }
-            return coords;
-        }
         self.canonical_penalties
             .iter()
             .map(|cp| cp.to_penalty_coordinate())
@@ -1355,18 +1325,11 @@ impl<'a> RemlState<'a> {
 
         let c_nontrivial = pirls_result.solve_c_nontrivial;
 
-        let uses_kron_penalty_logdet = self.kronecker_penalty_system.as_ref().is_some_and(|kron| {
-            self.kronecker_factored.is_some() && kron.num_penalties() == rho.len()
-        });
         // Only the penalty-side `log|S|₊` machinery consumes the penalty
         // subspace now; the Hessian-side kernel is intrinsic to H_pen (#901)
         // and no longer needs `range(S_+)`. Its rank bounds H's identified rank
         // below, so it is computed before the Hessian operator.
-        let penalty_subspace = if !uses_kron_penalty_logdet {
-            Some(self.compute_penalty_subspace(e_for_logdet.as_ref())?)
-        } else {
-            None
-        };
+        let penalty_subspace = Some(self.compute_penalty_subspace(e_for_logdet.as_ref())?);
         let (penalty_rank, penalty_logdet) = self.dense_penalty_logdet_derivs(
             rho,
             e_for_logdet.as_ref(),
@@ -1750,17 +1713,10 @@ impl<'a> RemlState<'a> {
             None
         };
         let e_for_logdet = &pirls_result.reparam_result.e_transformed;
-        let uses_kron_penalty_logdet = self.kronecker_penalty_system.as_ref().is_some_and(|kron| {
-            self.kronecker_factored.is_some() && kron.num_penalties() == rho.len()
-        });
         // Penalty-side `log|S|₊` machinery only; the Hessian-side kernel is
         // intrinsic to H_pen (#901) and no longer consumes `range(S_+)`. Its
         // rank bounds H's identified rank, so it is computed before the operator.
-        let penalty_subspace = if !uses_kron_penalty_logdet {
-            Some(self.compute_penalty_subspace(e_for_logdet)?)
-        } else {
-            None
-        };
+        let penalty_subspace = Some(self.compute_penalty_subspace(e_for_logdet)?);
         let (penalty_rank, penalty_logdet) = self.dense_penalty_logdet_derivs(
             rho,
             e_for_logdet,

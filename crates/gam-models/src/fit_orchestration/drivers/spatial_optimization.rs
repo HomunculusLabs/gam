@@ -4938,7 +4938,6 @@ fn wrap_local_build_as_realization(
                 penalty.op = None;
                 penalty.info.kronecker_factors = None;
             }
-            local.kronecker_factored = None;
             Some(rot)
         }
         (Some(_), _, _) => None,
@@ -4959,7 +4958,6 @@ fn wrap_local_build_as_realization(
         metadata: local.metadata.clone(),
         lower_bounds_local: lb_local,
         linear_constraints_local: local.linear_constraints.clone(),
-        kronecker_factored: local.kronecker_factored.take(),
         joint_null_rotation: applied_rotation,
         // Single-term realizations never run the global ownership pass, so
         // there is no overlap residualization to export here (#978).

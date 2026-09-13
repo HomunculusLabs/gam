@@ -87,8 +87,6 @@ fn reml_profile_1266_probe() {
             linear_constraints: std_fit.design.linear_constraints.clone(),
             firth_bias_reduction: Some(false),
             rho_prior: Default::default(),
-            kronecker_penalty_system: std_fit.design.kronecker_penalty_system(),
-            kronecker_factored: None,
             persistent_warm_start_store: None,
         };
         let rho_hat = std_fit.fit.log_lambdas.clone();

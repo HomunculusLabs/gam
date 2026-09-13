@@ -19,7 +19,6 @@ use super::{
     GaussianFrozenRows,
     HessianCurvatureKind,
     // penalty types
-    KroneckerQsTransform,
     LinearInequalityConstraints,
     PirlsCoordinateFrame,
     PirlsLinearSolvePath,
@@ -63,7 +62,7 @@ use gam_problem::{
     LogSmoothingParamsView, MixtureLinkState, ResolvedLikelihoodScale, ResponseFamily,
     SasLinkState, StandardLink,
 };
-use gam_terms::construction::{KroneckerReparamResult, ReparamResult};
+use gam_terms::construction::ReparamResult;
 use ndarray::{ArcArray1, Array1, Array2, ArrayView1, ArrayView2, s};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -706,69 +705,6 @@ pub(super) fn build_sparse_native_reparam_result(
     }
 }
 
-pub(super) fn build_diagonal_penalty_from_kronecker(
-    kron_result: &KroneckerReparamResult,
-    lambdas: &[f64],
-) -> PirlsPenalty {
-    let d = kron_result.marginal_dims.len();
-    let p: usize = kron_result.marginal_dims.iter().copied().product();
-    let mut diag = Array1::<f64>::zeros(p);
-    let mut positive_indices = Vec::new();
-
-    // A joint eigenvalue whose structural (λ-free) sum sits inside the marginal
-    // eigensolvers' rounding bands `Σ_k γ_{q_k}·max|σ_k|` is a joint null
-    // direction: no marginal spectrum can tell it from zero.
-    let structural_zero_band: f64 = (0..d)
-        .map(|k| {
-            let marginal = &kron_result.marginal_eigenvalues[k];
-            gam_linalg::roundoff::accumulation_growth(marginal.len())
-                * marginal.iter().fold(0.0_f64, |acc, value| acc.max(value.abs()))
-        })
-        .sum();
-    let mut multi_idx = vec![0usize; d];
-    let mut flat = 0usize;
-    loop {
-        let mut sigma = 0.0;
-        let mut structural_sigma = 0.0;
-        for k in 0..d {
-            let marginal_eigenvalue = kron_result.marginal_eigenvalues[k][multi_idx[k]];
-            structural_sigma += marginal_eigenvalue;
-            sigma += lambdas[k] * marginal_eigenvalue;
-        }
-        let joint_null = structural_sigma <= structural_zero_band;
-        if kron_result.has_double_penalty && lambdas.len() > d && joint_null {
-            sigma += lambdas[d];
-        }
-        diag[flat] = sigma;
-        if sigma > 0.0 {
-            positive_indices.push(flat);
-        }
-        flat += 1;
-
-        let mut carry = true;
-        for dim in (0..d).rev() {
-            if carry {
-                multi_idx[dim] += 1;
-                if multi_idx[dim] < kron_result.marginal_dims[dim] {
-                    carry = false;
-                } else {
-                    multi_idx[dim] = 0;
-                }
-            }
-        }
-        if carry {
-            break;
-        }
-    }
-
-    PirlsPenalty::Diagonal {
-        diag,
-        positive_indices,
-        linear_shift: Array1::zeros(p),
-        constant_shift: 0.0,
-    }
-}
-
 pub(super) fn canonical_prior_shift(
     penalties: &[gam_terms::construction::CanonicalPenalty],
     lambdas: &[f64],
@@ -832,10 +768,6 @@ pub struct PenaltyConfig<'a> {
     pub p: usize,
     pub coefficient_lower_bounds: Option<&'a Array1<f64>>,
     pub linear_constraints_original: Option<&'a LinearInequalityConstraints>,
-    /// When set, the penalties have Kronecker (tensor-product) structure.
-    /// The reparameterization engine will use factored Qs = U_1 ⊗ ... ⊗ U_d
-    /// instead of eigendecomposing the full p×p balanced penalty.
-    pub kronecker_factored: Option<&'a gam_terms::basis::KroneckerFactoredBasis>,
 }
 
 /// P-IRLS solver that follows mgcv's architecture exactly
@@ -937,56 +869,13 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
     // Build a cheap weighted penalty sum for the sparse-native decision
     // WITHOUT running the expensive eigendecomposition engine.
     // The full reparameterization is deferred until we know which path we need.
-    let cheap_s_lambda: Option<Array2<f64>> = if penalty.kronecker_factored.is_none() {
-        let mut s = Array2::<f64>::zeros((penalty.p, penalty.p));
-        for (k, cp) in penalty.canonical_penalties.iter().enumerate() {
-            let lam = lambdas_slice.get(k).copied().unwrap_or(0.0);
-            if lam != 0.0 {
-                cp.accumulate_weighted(&mut s, lam);
-            }
+    let mut cheap_s_lambda = Array2::<f64>::zeros((penalty.p, penalty.p));
+    for (k, cp) in penalty.canonical_penalties.iter().enumerate() {
+        let lam = lambdas_slice.get(k).copied().unwrap_or(0.0);
+        if lam != 0.0 {
+            cp.accumulate_weighted(&mut cheap_s_lambda, lam);
         }
-        Some(s)
-    } else {
-        None
-    };
-    let kronecker_runtime = if let Some(kron) = penalty.kronecker_factored {
-        // The marginal eigensystems and reparameterized marginals depend only on
-        // the fixed marginal designs/penalties, not on λ = exp(ρ). Memoize them
-        // once per fit so each outer REML iterate reuses the eigendecomposition
-        // instead of recomputing `eigh()` + `B_k·U_k` every call; only the cheap
-        // λ-grid logdet/derivative sweep is redone here. Bit-identical to the
-        // unmemoized engine.
-        let invariant = kron.invariant_structure()?;
-        let kron_result =
-            gam_terms::construction::kronecker_reparameterization_engine_with_invariant(
-                invariant.as_ref(),
-                &kron.marginal_dims,
-                lambdas_slice,
-                kron.has_double_penalty,
-            )?;
-        let transform = Arc::new(KroneckerQsTransform::new(&kron_result));
-        let penalty_diag = build_diagonal_penalty_from_kronecker(&kron_result, lambdas_slice);
-        Some((kron_result, transform, penalty_diag))
-    } else {
-        None
-    };
-    // Constraint transformation is deferred until after the sparse-native
-    // decision, because the dense reparameterization engine (which provides Qs)
-    // is now run lazily.  Kronecker constraints can be built eagerly since
-    // the Kronecker transform is already available.
-    let kronecker_constraints = if let Some((_, transform, _)) = kronecker_runtime.as_ref() {
-        let tb = build_transformed_lower_bound_constraints_with_transform(
-            &WorkingReparamTransform::Kronecker(Arc::clone(transform)),
-            penalty.coefficient_lower_bounds,
-        );
-        let tl = build_transformed_linear_constraints_with_transform(
-            &WorkingReparamTransform::Kronecker(Arc::clone(transform)),
-            penalty.linear_constraints_original,
-        );
-        Some(merge_linear_constraints(tb, tl))
-    } else {
-        None
-    };
+    }
 
     let x_original: DesignMatrix = x.into();
     // Auto-detect sparse structure in dense designs so the sparse-native path
@@ -1027,24 +916,11 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
             nnz_h_est: None,
             density_h_est: None,
         }
-    } else if let Some((_, _, _)) = kronecker_runtime.as_ref() {
-        SparsePirlsDecision {
-            path: PirlsLinearSolvePath::DenseTransformed,
-            reason: "kronecker_runtime",
-            p: x_original.ncols(),
-            nnz_x: 0,
-            nnz_xtwx_symbolic: None,
-            nnz_s_lambda: 0,
-            nnz_h_est: None,
-            density_h_est: None,
-        }
     } else {
         should_use_sparse_native_pirls(
             &mut workspace,
             &x_original,
-            cheap_s_lambda
-                .as_ref()
-                .expect("cheap_s_lambda should be present outside Kronecker path"),
+            &cheap_s_lambda,
             penalty.coefficient_lower_bounds,
             penalty.linear_constraints_original,
         )
@@ -1059,7 +935,7 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
     // sparse-native `reparam` below. The dense path keeps `qs ≠ I`; the
     // sparse-native path discards `qs` (identity coords) and reuses only the
     // declared `s_transformed`/`e_transformed`.
-    let dense_reparam_result = if !use_sparse_native && penalty.kronecker_factored.is_none() {
+    let dense_reparam_result = if !use_sparse_native {
         Some(stable_reparameterization_engine_canonical(
             penalty.canonical_penalties,
             lambdas_slice,
@@ -1072,7 +948,7 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
     // Sparse-native reparameterization in identity (original) coordinates.
     // Reusing the engine's declared penalty keeps all backends on the same
     // penalized objective.
-    let sparse_native_reparam = if use_sparse_native && penalty.kronecker_factored.is_none() {
+    let sparse_native_reparam = if use_sparse_native {
         let base = stable_reparameterization_engine_canonical(
             penalty.canonical_penalties,
             lambdas_slice,
@@ -1091,20 +967,16 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
     let qs_arc = dense_reparam_result
         .as_ref()
         .map(|reparam_result| Arc::new(reparam_result.qs.clone()));
-    let transform_active = if let Some((_, transform, _)) = kronecker_runtime.as_ref() {
-        Some(WorkingReparamTransform::Kronecker(Arc::clone(transform)))
-    } else if use_sparse_native {
+    let transform_active = if use_sparse_native {
         None
     } else {
         Some(WorkingReparamTransform::Dense(Arc::clone(
             qs_arc
                 .as_ref()
-                .expect("dense Qs should exist for non-Kronecker transformed path"),
+                .expect("dense Qs should exist for the transformed path"),
         )))
     };
-    let mut penalty_active = if let Some((_, _, penalty_diag)) = kronecker_runtime.as_ref() {
-        penalty_diag.clone()
-    } else if use_sparse_native {
+    let mut penalty_active = if use_sparse_native {
         // Sparse-native inner penalty in original (identity) coordinates. Use
         // the reparameterized declared root and Gram so `H = XᵀWX + S` matches
         // the penalty whose log-determinant REML reports.
@@ -1120,7 +992,7 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
     } else {
         let dense = dense_reparam_result
             .as_ref()
-            .expect("dense reparam result should be present outside Kronecker path");
+            .expect("dense reparam result should be present on the dense path");
         PirlsPenalty::Dense {
             s_transformed: dense.s_transformed.clone(),
             e_transformed: dense.e_transformed.clone(),
@@ -1136,9 +1008,7 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
         .unwrap_or(shift_original);
     attach_penalty_shift(&mut penalty_active, shift_active, shift_constant);
     // Build transformed constraints now that dense_reparam_result is available.
-    let linear_constraints = if let Some(kc) = kronecker_constraints {
-        kc
-    } else if let Some(reparam) = dense_reparam_result.as_ref() {
+    let linear_constraints = if let Some(reparam) = dense_reparam_result.as_ref() {
         let tb = build_transformed_lower_bound_constraints(
             &reparam.qs,
             penalty.coefficient_lower_bounds,
@@ -1166,14 +1036,7 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
         PirlsCoordinateFrame::TransformedQs
     };
     let materialize_final_reparam_result = || -> Result<ReparamResult, EstimationError> {
-        if let Some((kron_result, _, _)) = kronecker_runtime.as_ref() {
-            let rs_list: Vec<Array2<f64>> = penalty
-                .canonical_penalties
-                .iter()
-                .map(|cp| cp.full_width_root())
-                .collect();
-            kron_result.materialize_dense_artifact_result(&rs_list, lambdas_slice, penalty.p)
-        } else if use_sparse_native {
+        if use_sparse_native {
             // Sparse-native path: reuse the engine result already computed for
             // `penalty_active` (with the shrinkage floor folded in and mapped to
             // identity coordinates). This is both correct — the REML
@@ -1186,7 +1049,7 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
         } else {
             Ok(dense_reparam_result
                 .as_ref()
-                .expect("dense reparam result should be present outside Kronecker path")
+                .expect("dense reparam result should be present on the dense path")
                 .clone())
         }
     };
@@ -1782,7 +1645,6 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
     if let Some(result) = try_pirls_loop_gpu(
         config,
         &penalty_active,
-        kronecker_runtime.is_none(),
         use_sparse_native,
         &linear_constraints,
         &x_original,
@@ -2447,37 +2309,6 @@ pub(super) fn build_transformed_lower_bound_constraints(
     )
 }
 
-pub(super) fn build_transformed_lower_bound_constraints_with_transform(
-    transform: &WorkingReparamTransform,
-    coefficient_lower_bounds: Option<&Array1<f64>>,
-) -> Option<LinearInequalityConstraints> {
-    let lb = coefficient_lower_bounds?;
-    let p = match transform {
-        WorkingReparamTransform::Dense(qs) => qs.nrows(),
-        WorkingReparamTransform::Kronecker(kron) => kron.p,
-    };
-    if lb.len() != p {
-        return None;
-    }
-    let activerows: Vec<usize> = (0..lb.len()).filter(|&i| lb[i].is_finite()).collect();
-    if activerows.is_empty() {
-        return None;
-    }
-    let mut a = Array2::<f64>::zeros((activerows.len(), p));
-    let mut b = Array1::<f64>::zeros(activerows.len());
-    for (r, &idx) in activerows.iter().enumerate() {
-        let mut basis = Array1::<f64>::zeros(p);
-        basis[idx] = 1.0;
-        let row = transform.apply_transpose(&basis);
-        a.row_mut(r).assign(&row);
-        b[r] = lb[idx];
-    }
-    Some(
-        LinearInequalityConstraints::new(a, b)
-            .expect("transformed lower-bound constraint shape invariant"),
-    )
-}
-
 pub(super) fn build_transformed_linear_constraints(
     qs: &Array2<f64>,
     linear_constraints: Option<&LinearInequalityConstraints>,
@@ -2490,26 +2321,6 @@ pub(super) fn build_transformed_linear_constraints(
         LinearInequalityConstraints::new(lc.a.dot(qs), lc.b.clone())
             .expect("transformed linear constraint shape invariant"),
     )
-}
-
-pub(super) fn build_transformed_linear_constraints_with_transform(
-    transform: &WorkingReparamTransform,
-    linear_constraints: Option<&LinearInequalityConstraints>,
-) -> Option<LinearInequalityConstraints> {
-    let lc = linear_constraints?;
-    let p = match transform {
-        WorkingReparamTransform::Dense(qs) => qs.nrows(),
-        WorkingReparamTransform::Kronecker(kron) => kron.p,
-    };
-    if lc.a.ncols() != p {
-        return None;
-    }
-    let mut a = Array2::<f64>::zeros((lc.a.nrows(), p));
-    for row in 0..lc.a.nrows() {
-        let transformed = transform.apply_transpose(&lc.a.row(row).to_owned());
-        a.row_mut(row).assign(&transformed);
-    }
-    Some(LinearInequalityConstraints { a, b: lc.b.clone() })
 }
 
 pub(super) fn merge_linear_constraints(
@@ -2582,60 +2393,4 @@ pub(super) fn sparse_from_denseview(x: ArrayView2<f64>) -> Option<DesignMatrix> 
     SparseColMat::try_new_from_triplets(nrows, ncols, &triplets)
         .ok()
         .map(DesignMatrix::from)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{PirlsPenalty, build_diagonal_penalty_from_kronecker};
-    use gam_terms::construction::KroneckerReparamResult;
-    use ndarray::{Array1, Array2, array};
-
-    #[test]
-    fn kronecker_diagonal_double_penalty_hits_only_joint_null_space() {
-        let kron_result = KroneckerReparamResult {
-            reparameterized_marginals: std::sync::Arc::new(Vec::new()),
-            marginal_eigenvalues: std::sync::Arc::new(vec![array![0.0, 2.0], array![0.0, 3.0]]),
-            marginal_qs: std::sync::Arc::new(Vec::new()),
-            log_det: 0.0,
-            det1: Array1::zeros(3),
-            det2: Array2::zeros((3, 3)),
-            has_double_penalty: true,
-            marginal_dims: vec![2usize, 2usize],
-        };
-        let penalty = build_diagonal_penalty_from_kronecker(&kron_result, &[5.0, 7.0, 11.0]);
-
-        let PirlsPenalty::Diagonal {
-            diag,
-            positive_indices,
-            ..
-        } = penalty
-        else {
-            panic!("expected diagonal Kronecker PIRLS penalty");
-        };
-        // Pure `sum_d lambda_d * e_d[idx_d]`, plus `lambda_2` on the joint null
-        // and nowhere else — which is what this test's NAME asserts, and what it
-        // did not actually assert until `9c6c188b7` (#2623) deleted the hidden
-        // `penalty_shrinkage_ridge`:
-        //
-        //   (0,0)  e = (0, 0)  joint null  -> lambda_2       = 11
-        //   (0,1)  e = (0, 3)              -> 7*3            = 21
-        //   (1,0)  e = (2, 0)              -> 5*2            = 10
-        //   (1,1)  e = (2, 3)              -> 5*2 + 7*3      = 31
-        //
-        // The former `[11.0, 21.5, 10.5, 31.5]` is exactly this plus the `0.5`
-        // rho-independent ridge on every non-null direction — the term #2623
-        // removed as "a different model, not numerical conditioning", whose own
-        // commit message says it deleted "tests that institutionalized it". This
-        // one was missed, so it has been red on `main` since; the joint-null
-        // entry is unchanged because the ridge was never added there.
-        let expected = [11.0, 21.0, 10.0, 31.0];
-        for (idx, expected_diag) in expected.iter().copied().enumerate() {
-            assert!(
-                (diag[idx] - expected_diag).abs() <= 1e-12,
-                "diagonal {idx} got {}, expected {expected_diag}",
-                diag[idx]
-            );
-        }
-        assert_eq!(positive_indices, vec![0, 1, 2, 3]);
-    }
 }

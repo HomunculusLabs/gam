@@ -224,8 +224,6 @@ fn standard_fit_options(max_iter: usize) -> FitOptions {
         linear_constraints: None,
         firth_bias_reduction: false,
         rho_prior: Default::default(),
-        kronecker_penalty_system: None,
-        kronecker_factored: None,
         persistent_warm_start_store: None,
         resource_policy: gam_runtime::resource::ResourcePolicy::default_library(),
     }

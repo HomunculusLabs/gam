@@ -239,7 +239,6 @@ impl RemlState<'_> {
             p: pinned,
             coefficient_lower_bounds: None,
             linear_constraints_original: None,
-            kronecker_factored: None,
         };
         let reduced_rho = Array1::from(reduced_rho);
         let rho_view = gam_problem::LogSmoothingParamsView::new(reduced_rho.view())?;

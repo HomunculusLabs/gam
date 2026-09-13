@@ -190,8 +190,6 @@ fn production_probit_gradient_at_rho_six(oracle: &ProbitOracle) -> f64 {
         linear_constraints: None,
         firth_bias_reduction: None,
         rho_prior: RhoPrior::Flat,
-        kronecker_penalty_system: None,
-        kronecker_factored: None,
         persistent_warm_start_store: None,
     };
     let weights = Array1::<f64>::ones(oracle.y.len());

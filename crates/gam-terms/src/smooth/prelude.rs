@@ -2,7 +2,7 @@ use crate::basis::{
     BSplineBasisSpec, BSplineIdentifiability, BSplineKnotSpec, BasisBuildResult, BasisError,
     BasisMetadata, CenterStrategy, CenterStrategyKind, ConstantCurvatureBasisSpec,
     ConstructiveQuadratic, DuchonBasisSpec, ActivePenalty, ActivePenaltyInfo, DroppedPenaltyInfo,
-    KroneckerFactoredBasis, MaternBasisSpec, MeasureJetBasisSpec, PenaltyCandidate, PenaltySource,
+    MaternBasisSpec, MeasureJetBasisSpec, PenaltyCandidate, PenaltySource,
     SpatialIdentifiability,
     SphericalSplineBasisSpec, ThinPlateBasisSpec,
     apply_sum_to_zero_constraint, build_bspline_basis_1d, build_constant_curvature_basis,
@@ -14,7 +14,7 @@ use crate::basis::{
     pairwise_distance_bounds_sampled, points_in_aniso_y_space, select_centers_by_strategy,
 };
 
-use crate::construction::{kronecker_marginal_eigensystems, kronecker_product};
+use crate::construction::kronecker_product;
 
 use penalty_priors::realize_coefficient_groups;
 

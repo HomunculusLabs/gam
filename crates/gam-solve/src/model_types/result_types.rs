@@ -1784,12 +1784,6 @@ pub struct FitOptions {
     /// This prior is part of the sampled target itself, unlike `rho_mode`,
     /// which is only used to initialize chains near the REML solution.
     pub rho_prior: gam_problem::RhoPrior,
-    /// Kronecker-factored penalty system for tensor-product smooth terms.
-    /// When set, the REML evaluator uses O(∏q_j) logdet and KroneckerMarginal
-    /// penalty coordinates instead of O(p³) eigendecomposition.
-    pub kronecker_penalty_system: Option<gam_terms::smooth::KroneckerPenaltySystem>,
-    /// Full Kronecker factored basis for P-IRLS factored reparameterization.
-    pub kronecker_factored: Option<gam_terms::basis::KroneckerFactoredBasis>,
     /// Explicit cross-process warm-start capability. `None` is disk-silent;
     /// `Some` carries one lazy/opened caller-configured store through every
     /// standard REML owner.
@@ -1813,8 +1807,6 @@ impl Default for FitOptions {
             linear_constraints: None,
             firth_bias_reduction: false,
             rho_prior: gam_problem::RhoPrior::default(),
-            kronecker_penalty_system: None,
-            kronecker_factored: None,
             persistent_warm_start_store: None,
         }
     }

@@ -1144,8 +1144,6 @@ fn sas_beta_raw_epsilon_sensitivity_matchesfd_at_seed19() {
         linear_constraints: None,
         firth_bias_reduction: None,
         rho_prior: Default::default(),
-        kronecker_penalty_system: None,
-        kronecker_factored: None,
         persistent_warm_start_store: None,
     };
 
@@ -1394,8 +1392,6 @@ fn sas_true_score_beta_jacobian_matchesfd_at_seed19() {
         linear_constraints: None,
         firth_bias_reduction: None,
         rho_prior: Default::default(),
-        kronecker_penalty_system: None,
-        kronecker_factored: None,
         persistent_warm_start_store: None,
     };
 
@@ -1562,8 +1558,6 @@ fn sas_pirlshessian_matches_true_score_jacobian_at_seed19() {
         linear_constraints: None,
         firth_bias_reduction: None,
         rho_prior: Default::default(),
-        kronecker_penalty_system: None,
-        kronecker_factored: None,
         persistent_warm_start_store: None,
     };
 
@@ -1968,8 +1962,6 @@ fn cache_invariance_arm(
         linear_constraints: None,
         firth_bias_reduction: None,
         rho_prior: Default::default(),
-        kronecker_penalty_system: None,
-        kronecker_factored: None,
         persistent_warm_start_store: persistent_warm_start_store.clone(),
     };
     optimize_external_designwith_heuristic_lambdas_andwarm_start(

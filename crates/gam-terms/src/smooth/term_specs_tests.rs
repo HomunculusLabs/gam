@@ -108,35 +108,6 @@ mod joint_unpenalized_dim_tests {
 }
 
 #[cfg(test)]
-mod kronecker_penalty_system_tests {
-    use super::KroneckerPenaltySystem;
-    use ndarray::array;
-
-    #[test]
-    fn double_penalty_rank_derivatives_use_only_joint_null_space() {
-        let penalties = vec![
-            array![[0.0, 0.0], [0.0, 2.0]],
-            array![[0.0, 0.0], [0.0, 3.0]],
-        ];
-        let system = KroneckerPenaltySystem::new(penalties, vec![2usize, 2usize], true).unwrap();
-        let lambdas = vec![5.0, 7.0, 11.0];
-
-        let (logdet, rank, grad, hess) = system.logdet_rank_and_derivatives(&lambdas);
-
-        let expected_diag = [11.0_f64, 21.0, 10.0, 31.0];
-        let expected_logdet: f64 = expected_diag.iter().map(|v| v.ln()).sum();
-        assert_eq!(rank, 4);
-        assert!((logdet - expected_logdet).abs() <= 1e-12);
-        assert!(
-            (grad[2] - 1.0).abs() <= 1e-12,
-            "double-penalty rank derivative must count only the joint null mode, got {}",
-            grad[2]
-        );
-        assert!(hess[[2, 2]].abs() <= 1e-12);
-    }
-}
-
-#[cfg(test)]
 mod spatial_psi_bound_coordinate_tests {
     use super::*;
     use crate::basis::{MaternIdentifiability, MaternNu};
@@ -366,22 +337,11 @@ mod tensor_function_space_runtime_tests {
                 .iter()
                 .any(|penalty| { matches!(penalty.info.source, PenaltySource::TensorGlobalRidge) })
         );
-        assert!(
-            built.kronecker_factored.is_none(),
-            "the legacy factored runtime cannot represent a function-metric global ridge"
-        );
 
         spec.double_penalty = false;
         let singly_penalized = build_tensor_bspline_basis(data.view(), &[0, 1], &spec)
             .expect("single-penalty tensor basis");
         // Each margin block is `S_dim ⊗ G_other / 1ᵀ G_other 1` (#1561, SPEC rule 5).
-        // The legacy factored runtime diagonalizes each margin's `S` in its
-        // Euclidean eigenbasis, so it solves `S ⊗ I` and cannot carry these
-        // function-space blocks either.
-        assert!(
-            singly_penalized.kronecker_factored.is_none(),
-            "the factored runtime solves S ⊗ I, not the function-space margin blocks"
-        );
         let mut margin_blocks = 0usize;
         for penalty in &singly_penalized.active_penalties {
             let PenaltySource::TensorMarginal { dim } = &penalty.info.source else {

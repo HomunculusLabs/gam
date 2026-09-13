@@ -205,8 +205,6 @@ fn outer_criterion_has_no_jump_across_the_block_correction_threshold_2748() {
         linear_constraints: design.linear_constraints.clone(),
         firth_bias_reduction: Some(false),
         rho_prior: Default::default(),
-        kronecker_penalty_system: None,
-        kronecker_factored: None,
         persistent_warm_start_store: None,
     };
     let rho_dim = design.penalties.len();

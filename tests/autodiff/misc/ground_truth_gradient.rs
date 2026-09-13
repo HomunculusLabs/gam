@@ -197,8 +197,6 @@ fn test_lamlgradient_nonfirthwell_conditioned() {
         linear_constraints: None,
         firth_bias_reduction: None,
         rho_prior: Default::default(),
-        kronecker_penalty_system: None,
-        kronecker_factored: None,
         persistent_warm_start_store: None,
     };
     let rho = array![0.0];
@@ -272,8 +270,6 @@ fn test_lamlgradient_logitwith_firthwell_conditioned() {
         linear_constraints: None,
         firth_bias_reduction: None,
         rho_prior: Default::default(),
-        kronecker_penalty_system: None,
-        kronecker_factored: None,
         persistent_warm_start_store: None,
     };
     let rho = array![0.0];
@@ -348,8 +344,6 @@ fn stress_test_firthgradientvs_conditioning() {
             linear_constraints: None,
             firth_bias_reduction: None,
             rho_prior: Default::default(),
-            kronecker_penalty_system: None,
-            kronecker_factored: None,
             persistent_warm_start_store: None,
         };
         let rho = array![0.0];

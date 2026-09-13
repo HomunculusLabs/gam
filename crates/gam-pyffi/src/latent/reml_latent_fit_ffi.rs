@@ -612,8 +612,6 @@ fn glm_reml_fit_latent_impl(
         firth_bias_reduction: Some(false),
         rho_prior: RhoPrior::Flat,
         persistent_warm_start_store: None,
-        kronecker_penalty_system: None,
-        kronecker_factored: None,
     };
     let heuristic_lambda = init_lambda.map(|lambda| [lambda]);
     let mut fit = optimize_external_designwith_heuristic_lambdas(

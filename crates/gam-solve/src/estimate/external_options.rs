@@ -86,10 +86,6 @@ pub struct ExternalOptimOptions {
     /// Fixed prior on smoothing parameters for explicit joint HMC sampling
     /// flows. Standard fitting stays on the REML/Laplace path.
     pub rho_prior: gam_problem::RhoPrior,
-    /// Kronecker-factored penalty system for tensor-product smooth terms.
-    pub kronecker_penalty_system: Option<gam_terms::smooth::KroneckerPenaltySystem>,
-    /// Full Kronecker factored basis for P-IRLS factored reparameterization.
-    pub kronecker_factored: Option<gam_terms::basis::KroneckerFactoredBasis>,
     /// Explicit cross-process warm-start capability for this fit. `None` is
     /// disk-silent; clones share one caller-configured store handle.
     pub persistent_warm_start_store: Option<gam_runtime::warm_start::ConfiguredWarmStartStore>,

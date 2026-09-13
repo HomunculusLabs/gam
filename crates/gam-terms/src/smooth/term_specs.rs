@@ -975,9 +975,6 @@ pub struct SmoothTerm {
     /// Optional term-local inequality constraints in local coefficient coordinates.
     /// `A_local * beta_local >= b_local`.
     pub linear_constraints_local: Option<LinearInequalityConstraints>,
-    /// Optional factored tensor-product representation preserved for operator-backed
-    /// assembly in the main design builder.
-    pub kronecker_factored: Option<KroneckerFactoredBasis>,
     /// Joint-null absorption rotation. `Some(Q)` records the orthonormal
     /// `(p_local × p_local)` matrix that was applied to this term's design
     /// and per-block penalties at construction time:
@@ -2402,149 +2399,6 @@ pub fn weighted_blockwise_penalty_sum(
     out
 }
 
-// ---------------------------------------------------------------------------
-// KroneckerPenaltySystem — factored tensor-product penalty representation
-// ---------------------------------------------------------------------------
-
-/// Factored representation of tensor-product penalties with precomputed
-/// marginal eigensystems for O(∏q_j) logdet and penalty operations.
-#[derive(Debug, Clone)]
-pub struct KroneckerPenaltySystem {
-    /// Marginal penalty matrices: `marginal_penalties[k]` is `(q_k, q_k)`.
-    pub marginal_penalties: Vec<Array2<f64>>,
-    /// Precomputed eigensystems: `(eigenvalues, eigenvectors)` per marginal.
-    pub marginal_eigensystems: Vec<(Array1<f64>, Array2<f64>)>,
-    /// Marginal basis dimensions.
-    pub marginal_dims: Vec<usize>,
-    /// Whether a global ridge (double) penalty is present.
-    pub has_double_penalty: bool,
-}
-
-impl KroneckerPenaltySystem {
-    pub fn new(
-        marginal_penalties: Vec<Array2<f64>>,
-        marginal_dims: Vec<usize>,
-        has_double_penalty: bool,
-    ) -> Result<Self, BasisError> {
-        if marginal_penalties.len() != marginal_dims.len() {
-            crate::bail_dim_basis!(
-                "KroneckerPenaltySystem: {} penalties vs {} dims",
-                marginal_penalties.len(),
-                marginal_dims.len()
-            );
-        }
-        let eigensystems =
-            kronecker_marginal_eigensystems(&marginal_penalties, "KroneckerPenaltySystem")
-                .map_err(|e| BasisError::InvalidInput(e.to_string()))?;
-        Ok(Self {
-            marginal_penalties,
-            marginal_eigensystems: eigensystems,
-            marginal_dims,
-            has_double_penalty,
-        })
-    }
-
-    pub fn p_total(&self) -> usize {
-        self.marginal_dims.iter().copied().product()
-    }
-
-    pub fn ndim(&self) -> usize {
-        self.marginal_dims.len()
-    }
-
-    pub fn num_penalties(&self) -> usize {
-        self.marginal_dims.len() + if self.has_double_penalty { 1 } else { 0 }
-    }
-
-    pub fn logdet_rank_and_derivatives(
-        &self,
-        lambdas: &[f64],
-    ) -> (f64, usize, Array1<f64>, Array2<f64>) {
-        let n_pen = self.num_penalties();
-        assert_eq!(lambdas.len(), n_pen, "lambda count mismatch");
-        let d = self.marginal_dims.len();
-        let mut logdet = 0.0;
-        let mut rank = 0usize;
-        let mut grad = Array1::<f64>::zeros(n_pen);
-        let mut hess = Array2::<f64>::zeros((n_pen, n_pen));
-        // A joint eigenvalue is a sum over marginals of `λ_k·σ_k`, each `σ_k` off a
-        // marginal eigensolve that carries the band `γ_{q_k}·max|σ_k|`. The
-        // structural (λ-free) sum classifies the joint null space against the
-        // unweighted bands; the penalized sum counts toward the rank and the
-        // pseudo-log-determinant only above its λ-weighted band.
-        let marginal_bands: Vec<f64> = (0..d)
-            .map(|k| {
-                let marginal = &self.marginal_eigensystems[k].0;
-                gam_linalg::roundoff::accumulation_growth(marginal.len())
-                    * marginal.iter().fold(0.0_f64, |acc, value| acc.max(value.abs()))
-            })
-            .collect();
-        let structural_zero_band: f64 = marginal_bands.iter().sum();
-        let penalized_band: f64 = (0..d).map(|k| lambdas[k].abs() * marginal_bands[k]).sum();
-        let mut multi_idx = vec![0usize; d];
-        loop {
-            let mut sigma = 0.0;
-            let mut structural_sigma = 0.0;
-            for k in 0..d {
-                let marginal_eigenvalue = self.marginal_eigensystems[k].0[multi_idx[k]];
-                structural_sigma += marginal_eigenvalue;
-                sigma += lambdas[k] * marginal_eigenvalue;
-            }
-            let joint_null = structural_sigma <= structural_zero_band;
-            if self.has_double_penalty && joint_null {
-                sigma += lambdas[d];
-            }
-
-            if sigma > penalized_band {
-                rank += 1;
-                logdet += sigma.ln();
-                let inv_sigma = 1.0 / sigma;
-                let inv_sigma2 = inv_sigma * inv_sigma;
-                for k in 0..n_pen {
-                    let ck = if k < d {
-                        lambdas[k] * self.marginal_eigensystems[k].0[multi_idx[k]]
-                    } else if joint_null {
-                        lambdas[d]
-                    } else {
-                        0.0
-                    };
-                    grad[k] += ck * inv_sigma;
-                    hess[[k, k]] += ck * inv_sigma - ck * ck * inv_sigma2;
-                    for l in (k + 1)..n_pen {
-                        let cl = if l < d {
-                            lambdas[l] * self.marginal_eigensystems[l].0[multi_idx[l]]
-                        } else if joint_null {
-                            lambdas[d]
-                        } else {
-                            0.0
-                        };
-                        let off = -ck * cl * inv_sigma2;
-                        hess[[k, l]] += off;
-                        hess[[l, k]] += off;
-                    }
-                }
-            }
-
-            let mut carry = true;
-            for dim in (0..d).rev() {
-                if carry {
-                    multi_idx[dim] += 1;
-                    if multi_idx[dim] < self.marginal_dims[dim] {
-                        carry = false;
-                    } else {
-                        multi_idx[dim] = 0;
-                    }
-                }
-            }
-            if carry {
-                break;
-            }
-        }
-        (logdet, rank, grad, hess)
-    }
-}
-
-
 #[derive(Clone, Debug)]
 pub struct TermCollectionDesign {
     /// The full design matrix.
@@ -2741,40 +2595,6 @@ impl TermCollectionDesign {
         base_prior: &gam_spec::RhoPrior,
     ) -> Result<RealizedCoefficientGroups, BasisError> {
         realize_coefficient_groups(self, groups, base_prior)
-    }
-
-    /// Extract a `KroneckerPenaltySystem` when the model's *only* smooth term is
-    /// a single Kronecker-factored tensor.
-    ///
-    /// This is a deliberate single-tensor fast path, not a partial feature: any
-    /// other shape — zero Kronecker terms, several of them, or a tensor mixed
-    /// with non-tensor smooth terms — is served correctly by the standard
-    /// block-separable assembly, so this returns `None` and the caller falls
-    /// back to it. The two former conditions (`len != 1` and "a non-Kronecker
-    /// smooth term exists") are jointly equivalent to "the sole smooth term is
-    /// Kronecker", which the slice pattern below expresses directly in one pass.
-    pub fn kronecker_penalty_system(&self) -> Option<KroneckerPenaltySystem> {
-        let [only_term] = self.smooth.terms.as_slice() else {
-            return None;
-        };
-        let kron = only_term.kronecker_factored.as_ref()?;
-        // A genuine tensor product needs at least two margins, and the marginal
-        // design / penalty / dim collections must agree in length. A degenerate
-        // (single-margin) or internally inconsistent factored basis cannot feed
-        // the Kronecker fast path, so fall back to the standard assembly rather
-        // than construct a malformed `KroneckerPenaltySystem` from it.
-        if kron.marginal_dims.len() < 2
-            || kron.marginal_penalties.len() != kron.marginal_dims.len()
-            || kron.marginal_designs.len() != kron.marginal_dims.len()
-        {
-            return None;
-        }
-        KroneckerPenaltySystem::new(
-            kron.marginal_penalties.clone(),
-            kron.marginal_dims.clone(),
-            kron.has_double_penalty,
-        )
-        .ok()
     }
 }
 
@@ -6555,14 +6375,6 @@ pub(crate) fn build_tensor_bspline_basis(
             is_cr: marginal_is_cr_flags,
             identifiability_transform: z_opt,
         },
-        // The Kronecker runtime diagonalizes each margin's roughness operator in
-        // its Euclidean eigenbasis, so the penalty it solves is `S_dim ⊗ I`. The
-        // canonical blocks above are `S_dim ⊗ G_others`, which no orthonormal
-        // marginal eigenbasis diagonalizes; advertising them as factored would
-        // make PIRLS and REML solve a different objective. Keep the exact
-        // canonical matrices until that runtime carries the marginal function
-        // Grams (#1561).
-        kronecker_factored: None,
     })
 }
 
@@ -6787,7 +6599,6 @@ pub struct LocalSmoothTermBuild {
     pub metadata: BasisMetadata,
     pub linear_constraints: Option<LinearInequalityConstraints>,
     pub box_reparam: bool,
-    pub kronecker_factored: Option<KroneckerFactoredBasis>,
 }
 
 #[derive(Clone)]
@@ -7246,7 +7057,6 @@ pub fn build_pca_smooth_basis(
                 pca_basis_path: Some(path.clone()),
                 chunk_size: chunk_size.max(1),
             },
-            kronecker_factored: None,
         });
     }
     if basis_matrix.nrows() != feature_cols.len() {
@@ -7294,7 +7104,6 @@ pub fn build_pca_smooth_basis(
             pca_basis_path: None,
             chunk_size: chunk_size.max(1),
         },
-        kronecker_factored: None,
     })
 }
 
@@ -7390,7 +7199,6 @@ pub(crate) fn apply_by_variable_to_local_build(
         *offset *= &weights;
     }
     built.design = DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(dense));
-    built.kronecker_factored = None;
     Ok(built)
 }
 
@@ -7553,7 +7361,6 @@ pub(crate) fn build_by_smooth_local(
                 },
                 linear_constraints: None,
                 box_reparam: false,
-                kronecker_factored: None,
             })
         }
     }
@@ -8078,7 +7885,6 @@ pub(crate) fn build_factor_smooth(
         metadata,
         linear_constraints: None,
         box_reparam: false,
-        kronecker_factored: None,
     })
 }
 
@@ -8410,7 +8216,6 @@ pub fn build_single_local_smooth_term(
             inner_built.dropped_penalties = dropped_penalties;
             inner_built.joint_null_rotation =
                 crate::basis::compute_joint_null_rotation(&inner_built.active_penalties)?;
-            inner_built.kronecker_factored = None;
             return Ok(inner_built);
         }
         SmoothBasisSpec::BSpline1D { feature_col, spec } => {
@@ -8844,13 +8649,6 @@ pub fn build_single_local_smooth_term(
     let p_local = built.design.ncols();
     let affine_offset = built.affine_offset;
     let mut metadata = built.metadata.clone();
-    // Extract factored Kronecker representation before consuming fields.
-    // Invalidate it if shape transforms will be applied (they break structure).
-    let kron_factored = if term.shape == ShapeConstraint::None {
-        built.kronecker_factored
-    } else {
-        None
-    };
     let mut design_t = built.design;
     let mut penalties_t = built.active_penalties;
     let mut dropped_penalties_t = built.dropped_penalties;
@@ -9018,22 +8816,9 @@ pub fn build_single_local_smooth_term(
     // coefficient chart in their `FrozenTransform`; recomputing Q there would
     // rotate an already-frozen chart a second time and desynchronize value
     // rebuilds from derivative operators.
-    //
-    // Kronecker-factored smooths (tensor B-splines under `TensorBSplineIdentifiability::None`)
-    // carry their joint penalty as `Σ_d S_d` with `S_d = I ⊗ … ⊗ S_d^{1D} ⊗ … ⊗ I`.
-    // The joint null space is the tensor of marginal nulls and is handled directly
-    // by the REML runtime's `kronecker_penalty_system` path (see
-    // `runtime.rs:8334-8344`). Applying a dense (p × p) Q here would densify
-    // `X_raw = mx ⊗ my` into `X_raw · Q`, destroying the Kronecker product
-    // structure that the runtime relies on for fast log-det/derivative
-    // assembly — and the rotation block at the wrapper site also unconditionally
-    // wipes `kronecker_factored`, leaving the runtime to fall back to the
-    // dense per-block log-det. Skip the rotation for Kronecker-factored terms
-    // so the factored representation survives end-to-end.
     let joint_null_rotation = match term.joint_null_rotation.clone() {
         Some(persisted) => Some(persisted),
         None if smooth_has_frozen_identifiability(term) => None,
-        None if kron_factored.is_some() => None,
         None => crate::basis::compute_joint_null_rotation(&filtered.active)?,
     };
 
@@ -9047,7 +8832,6 @@ pub fn build_single_local_smooth_term(
         metadata,
         linear_constraints: None,
         box_reparam: use_box_reparam,
-        kronecker_factored: kron_factored,
     })
 }
 
@@ -9181,7 +8965,6 @@ pub(crate) fn build_smooth_design_from_planned_terms(
                     penalty.op = None;
                     penalty.info.kronecker_factors = None;
                 }
-                built.kronecker_factored = None;
                 Some(rot)
             }
             (Some(_), _, _) => None,
@@ -9246,7 +9029,6 @@ pub(crate) fn build_smooth_design_from_planned_terms(
             metadata: built.metadata,
             lower_bounds_local: lb_local,
             linear_constraints_local: built.linear_constraints,
-            kronecker_factored: built.kronecker_factored.take(),
             joint_null_rotation: applied_rotation,
             unabsorbed_global_orthogonality: None,
             // The RAW build precedes the global step, so it decides no gauge;

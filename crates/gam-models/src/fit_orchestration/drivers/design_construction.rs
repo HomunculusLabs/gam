@@ -594,12 +594,6 @@ fn adaptive_fit_options_base(options: &FitOptions, design: &TermCollectionDesign
         // Propagate user-supplied rho_prior so the baseline/refit and the
         // joint optimizer minimize the same REML objective.
         rho_prior: options.rho_prior.clone(),
-        kronecker_penalty_system: design.kronecker_penalty_system(),
-        kronecker_factored: design
-            .smooth
-            .terms
-            .iter()
-            .find_map(|t| t.kronecker_factored.clone()),
         persistent_warm_start_store: options.persistent_warm_start_store.clone(),
     }
 }
@@ -3750,14 +3744,6 @@ fn external_opts_for_design(
         linear_constraints: design.linear_constraints.clone(),
         firth_bias_reduction: Some(options.firth_bias_reduction),
         rho_prior: options.rho_prior.clone(),
-        // Propagate Kronecker structure so the joint optimizer minimizes the
-        // same REML surface as the baseline/refit (adaptive_fit_options_base).
-        kronecker_penalty_system: design.kronecker_penalty_system(),
-        kronecker_factored: design
-            .smooth
-            .terms
-            .iter()
-            .find_map(|t| t.kronecker_factored.clone()),
         persistent_warm_start_store: options.persistent_warm_start_store.clone(),
     }
 }

@@ -158,10 +158,6 @@ enum PenaltyTraceChart {
         /// `W Wᵀ = S_{λ,block}⁺`.
         whitening: Array2<f64>,
     },
-    Diagonal {
-        /// Diagonal of `S_λ⁺` in the Kronecker joint eigenbasis.
-        inverse: Array1<f64>,
-    },
 }
 
 impl StochasticTraceControlVariates {
@@ -203,119 +199,95 @@ impl StochasticTraceControlVariates {
             );
         }
 
-        let all_diagonal = coordinates
-            .iter()
-            .all(|coordinate| matches!(coordinate, PenaltyCoordinate::KroneckerMarginal { .. }));
         let mut coordinate_controls = Vec::with_capacity(coordinates.len());
-        if all_diagonal {
-            let ones = Array1::<f64>::ones(p);
-            let mut diagonal = Array1::<f64>::zeros(p);
-            for (coordinate, &lambda) in coordinates.iter().zip(lambdas) {
-                diagonal += &coordinate.apply_penalty(&ones, lambda);
-            }
-            let inverse = diagonal.mapv(|value| if value > 0.0 { value.recip() } else { 0.0 });
-            let chart = Arc::new(PenaltyTraceChart::Diagonal { inverse });
-            for (idx, (coordinate, &lambda)) in coordinates.iter().zip(lambdas).enumerate() {
-                let control = PenaltyTraceControl {
-                    coordinate: coordinate.clone(),
-                    lambda,
-                    chart: Arc::clone(&chart),
-                };
-                Self::verify_trace(&control, expected_traces[idx], p)?;
-                coordinate_controls.push(control);
-            }
-        } else {
-            let support = |coordinate: &PenaltyCoordinate| match coordinate {
-                PenaltyCoordinate::BlockRoot { start, end, .. }
-                | PenaltyCoordinate::BlockRootCentered { start, end, .. } => (*start, *end),
-                PenaltyCoordinate::DenseRoot(_)
-                | PenaltyCoordinate::DenseRootCentered { .. }
-                | PenaltyCoordinate::KroneckerMarginal { .. } => (0, p),
-            };
+        let support = |coordinate: &PenaltyCoordinate| match coordinate {
+            PenaltyCoordinate::BlockRoot { start, end, .. }
+            | PenaltyCoordinate::BlockRootCentered { start, end, .. } => (*start, *end),
+            PenaltyCoordinate::DenseRoot(_)
+            | PenaltyCoordinate::DenseRootCentered { .. } => (0, p),
+        };
 
-            let mut blocks: Vec<(usize, usize)> = coordinates.iter().map(support).collect();
-            blocks.sort_unstable();
-            let mut merged: Vec<(usize, usize)> = Vec::with_capacity(blocks.len());
-            for (start, end) in blocks {
-                match merged.last_mut() {
-                    Some(last) if start < last.1 => last.1 = last.1.max(end),
-                    _ => merged.push((start, end)),
-                }
+        let mut blocks: Vec<(usize, usize)> = coordinates.iter().map(support).collect();
+        blocks.sort_unstable();
+        let mut merged: Vec<(usize, usize)> = Vec::with_capacity(blocks.len());
+        for (start, end) in blocks {
+            match merged.last_mut() {
+                Some(last) if start < last.1 => last.1 = last.1.max(end),
+                _ => merged.push((start, end)),
             }
+        }
 
-            let mut charts = Vec::with_capacity(merged.len());
-            for &(block_start, block_end) in &merged {
-                let width = block_end - block_start;
-                let mut penalty = Array2::<f64>::zeros((width, width));
-                let mut components = Vec::new();
-                let mut expected_rank = 0.0;
-                for (idx, (coordinate, &lambda)) in coordinates.iter().zip(lambdas).enumerate() {
-                    let (start, end) = support(coordinate);
-                    if block_start <= start && end <= block_end {
-                        let (local, local_start, local_end) = coordinate.scaled_block_local(1.0);
-                        let offset_start = local_start - block_start;
-                        let offset_end = local_end - block_start;
-                        let mut destination = penalty.slice_mut(ndarray::s![
-                            offset_start..offset_end,
-                            offset_start..offset_end
-                        ]);
-                        destination.scaled_add(lambda, &local);
-                        components.push((lambda, local, offset_start..offset_end));
-                        expected_rank += expected_traces[idx];
-                    }
-                }
-                let rank_hint = expected_rank.round();
-                if !rank_hint.is_finite()
-                    || (expected_rank - rank_hint).abs() > 1e-6 * (1.0 + expected_rank.abs())
-                {
-                    return Err(format!(
-                        "stochastic penalty block [{block_start}, {block_end}) has non-integral total log|S| derivative {expected_rank:.16e}"
-                    ));
-                }
-                let component_views: Vec<_> = components
-                    .iter()
-                    .map(|(lambda, local, range)| (*lambda, local.view(), range.clone()))
-                    .collect();
-                let whitening =
-                    super::super::penalty_logdet::PenaltyPseudologdet::from_scaled_components_with_rank_hint(
-                        &penalty,
-                        &component_views,
-                        None,
-                        Some(rank_hint as usize),
-                    )?
-                    .w_factor;
-                charts.push(Arc::new(PenaltyTraceChart::Reduced {
-                    start: block_start,
-                    end: block_end,
-                    whitening,
-                }));
-            }
-
+        let mut charts = Vec::with_capacity(merged.len());
+        for &(block_start, block_end) in &merged {
+            let width = block_end - block_start;
+            let mut penalty = Array2::<f64>::zeros((width, width));
+            let mut components = Vec::new();
+            let mut expected_rank = 0.0;
             for (idx, (coordinate, &lambda)) in coordinates.iter().zip(lambdas).enumerate() {
                 let (start, end) = support(coordinate);
-                let chart = charts
-                    .iter()
-                    .find(|chart| match chart.as_ref() {
-                        PenaltyTraceChart::Reduced {
-                            start: block_start,
-                            end: block_end,
-                            ..
-                        } => *block_start <= start && end <= *block_end,
-                        PenaltyTraceChart::Diagonal { .. } => false,
-                    })
-                    .ok_or_else(|| {
-                        format!(
-                            "no stochastic penalty control chart contains coordinate {idx} support [{start}, {end})"
-                        )
-                    })?;
-                let control = PenaltyTraceControl {
-                    coordinate: coordinate.clone(),
-                    lambda,
-                    chart: Arc::clone(chart),
-                };
-                Self::verify_trace(&control, expected_traces[idx], p)?;
-                coordinate_controls.push(control);
+                if block_start <= start && end <= block_end {
+                    let (local, local_start, local_end) = coordinate.scaled_block_local(1.0);
+                    let offset_start = local_start - block_start;
+                    let offset_end = local_end - block_start;
+                    let mut destination = penalty.slice_mut(ndarray::s![
+                        offset_start..offset_end,
+                        offset_start..offset_end
+                    ]);
+                    destination.scaled_add(lambda, &local);
+                    components.push((lambda, local, offset_start..offset_end));
+                    expected_rank += expected_traces[idx];
+                }
             }
+            let rank_hint = expected_rank.round();
+            if !rank_hint.is_finite()
+                || (expected_rank - rank_hint).abs() > 1e-6 * (1.0 + expected_rank.abs())
+            {
+                return Err(format!(
+                    "stochastic penalty block [{block_start}, {block_end}) has non-integral total log|S| derivative {expected_rank:.16e}"
+                ));
+            }
+            let component_views: Vec<_> = components
+                .iter()
+                .map(|(lambda, local, range)| (*lambda, local.view(), range.clone()))
+                .collect();
+            let whitening =
+                super::super::penalty_logdet::PenaltyPseudologdet::from_scaled_components_with_rank_hint(
+                    &penalty,
+                    &component_views,
+                    None,
+                    Some(rank_hint as usize),
+                )?
+                .w_factor;
+            charts.push(Arc::new(PenaltyTraceChart::Reduced {
+                start: block_start,
+                end: block_end,
+                whitening,
+            }));
+        }
+
+        for (idx, (coordinate, &lambda)) in coordinates.iter().zip(lambdas).enumerate() {
+            let (start, end) = support(coordinate);
+            let chart = charts
+                .iter()
+                .find(|chart| match chart.as_ref() {
+                    PenaltyTraceChart::Reduced {
+                        start: block_start,
+                        end: block_end,
+                        ..
+                    } => *block_start <= start && end <= *block_end,
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "no stochastic penalty control chart contains coordinate {idx} support [{start}, {end})"
+                    )
+                })?;
+            let control = PenaltyTraceControl {
+                coordinate: coordinate.clone(),
+                lambda,
+                chart: Arc::clone(chart),
+            };
+            Self::verify_trace(&control, expected_traces[idx])?;
+            coordinate_controls.push(control);
         }
 
         let mut controls: Vec<Option<PenaltyTraceControl>> =
@@ -348,20 +320,10 @@ impl StochasticTraceControlVariates {
                 let a_reduced = whitening.t().dot(&a_z.slice(ndarray::s![*start..*end]));
                 z_reduced.dot(&a_reduced)
             }
-            PenaltyTraceChart::Diagonal { inverse } => z
-                .iter()
-                .zip(inverse)
-                .zip(a_z.iter())
-                .map(|((&z_i, &inverse_i), &a_i)| z_i * inverse_i * a_i)
-                .sum(),
         }
     }
 
-    fn verify_trace(
-        control: &PenaltyTraceControl,
-        expected: f64,
-        dimension: usize,
-    ) -> Result<(), String> {
+    fn verify_trace(control: &PenaltyTraceControl, expected: f64) -> Result<(), String> {
         let trace: f64 = match control.chart.as_ref() {
             PenaltyTraceChart::Reduced {
                 start,
@@ -376,15 +338,6 @@ impl StochasticTraceControlVariates {
                 w.iter()
                     .zip(a_w.iter())
                     .map(|(&left, &right)| left * right)
-                    .sum()
-            }
-            PenaltyTraceChart::Diagonal { inverse } => {
-                let ones = Array1::<f64>::ones(dimension);
-                let diagonal = control.coordinate.apply_penalty(&ones, control.lambda);
-                inverse
-                    .iter()
-                    .zip(diagonal)
-                    .map(|(&inverse_i, a_i)| inverse_i * a_i)
                     .sum()
             }
         };

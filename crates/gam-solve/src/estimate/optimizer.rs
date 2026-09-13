@@ -1145,12 +1145,6 @@ where
         fit_linear_constraints.clone(),
     )?;
     reml_state.set_rho_prior(opts.rho_prior.clone());
-    if let Some(kron) = opts.kronecker_penalty_system.clone() {
-        reml_state.set_kronecker_penalty_system(kron);
-    }
-    if let Some(kf) = opts.kronecker_factored.clone() {
-        reml_state.set_kronecker_factored(kf);
-    }
     let resolved_likelihood_scale = cfg
         .likelihood
         .resolved_scale()
@@ -2358,7 +2352,6 @@ where
                 p,
                 coefficient_lower_bounds: None,
                 linear_constraints_original: fit_linear_constraints.as_ref(),
-                kronecker_factored: None,
             },
             &pirls::PirlsConfig {
                 link_kind: if let Some(state) = final_mixture_state.clone() {

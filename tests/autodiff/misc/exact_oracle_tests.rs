@@ -55,8 +55,6 @@ fn logit_opts(firth: bool) -> ExternalOptimOptions {
         linear_constraints: None,
         firth_bias_reduction: Some(firth),
         rho_prior: Default::default(),
-        kronecker_penalty_system: None,
-        kronecker_factored: None,
         persistent_warm_start_store: None,
     }
 }

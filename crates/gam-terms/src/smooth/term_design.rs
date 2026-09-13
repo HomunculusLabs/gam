@@ -1948,8 +1948,6 @@ fn apply_global_smooth_identifiability(
                 .expect("local metadata must exist for every smooth term"),
             lower_bounds_local: smooth.terms[idx].lower_bounds_local.clone(),
             linear_constraints_local: local_linear_constraints[idx].clone(),
-            // Global orthogonality transforms break Kronecker structure.
-            kronecker_factored: None,
             // The final raw-basis → coefficient chart, including any
             // stage-2 joint-null Q and global orthogonality Z, is embedded in
             // `metadata` above. Keeping Q separately here would apply it twice

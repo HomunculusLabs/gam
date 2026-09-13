@@ -108,7 +108,6 @@ fn fit_beta_norm(
             p,
             coefficient_lower_bounds: None,
             linear_constraints_original: None,
-            kronecker_factored: None,
         },
         &cfg,
         None,
@@ -138,8 +137,6 @@ fn firthfd_step_size_sensitivity() {
         linear_constraints: None,
         firth_bias_reduction: None,
         rho_prior: Default::default(),
-        kronecker_penalty_system: None,
-        kronecker_factored: None,
         persistent_warm_start_store: None,
     };
     let base_rho = 12.0;
@@ -408,7 +405,6 @@ fn fit_deviance(
             p,
             coefficient_lower_bounds: None,
             linear_constraints_original: None,
-            kronecker_factored: None,
         },
         &cfg,
         None,

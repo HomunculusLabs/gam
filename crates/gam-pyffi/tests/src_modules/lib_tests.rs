@@ -854,8 +854,6 @@ fn gaussian_reml_fit_blocks_forward_native(
         linear_constraints: None,
         firth_bias_reduction: false,
         rho_prior: Default::default(),
-        kronecker_penalty_system: None,
-        kronecker_factored: None,
         persistent_warm_start_store: None,
     };
     let offset = Array1::<f64>::zeros(n_rows);

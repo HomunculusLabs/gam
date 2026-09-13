@@ -366,18 +366,7 @@ impl<'a> RemlState<'a> {
         // threshold). The penalty logdet is orthogonal-invariant, so the
         // original-basis canonical penalties give the same result as
         // transformed-basis roots.
-        let (penalty_rank, log_det_s, det1, det2_full) = if let Some(ref kron) =
-            self.kronecker_penalty_system
-            && self.kronecker_factored.is_some()
-            && kron.num_penalties() == rho.len()
-        {
-            let (logdet, rank, det1, det2) = kron.logdet_rank_and_derivatives(
-                lambdas
-                    .as_slice()
-                    .expect("lambdas is an owned contiguous Array1"),
-            );
-            (rank, logdet, det1, det2)
-        } else if !self.canonical_penalties.is_empty()
+        let (penalty_rank, log_det_s, det1, det2_full) = if !self.canonical_penalties.is_empty()
             && self.canonical_penalties.len() == rho.len()
         {
             let (value, rank, det1, det2) =
@@ -388,17 +377,17 @@ impl<'a> RemlState<'a> {
                 self.structural_penalty_logdet_value_and_derivatives(penalty_roots, &lambdas)?;
             (rank, value, det1, det2)
         } else {
-            // No Kronecker system, no canonical penalties (or a length mismatch),
+            // No canonical penalties (or a length mismatch),
             // and no penalty roots. This branch carries the combined penalty
             // `log|Σ λ_k S_k|₊` value+rank from the subspace eigensystem of the
             // assembled `E` (the eigenvalues of `EᵀE = Σ λ_k S_k`), but the
             // per-component matrices `S_k` are NOT available here, so the exact
             // ρ-derivatives `∂/∂ρ_k log|ΣλS|₊ = λ_k·tr((ΣλS)⁺ S_k)` (and the
             // second derivative) cannot be formed component-wise from this
-            // object. The three branches above each own a per-component
-            // representation (Kronecker marginal grid, `canonical_penalties`,
-            // explicit roots) and produce the exact `det1`/`det2` from the SAME
-            // positive eigenspace as the value.
+            // object. The two branches above each own a per-component
+            // representation (`canonical_penalties`, explicit roots) and produce
+            // the exact `det1`/`det2` from the SAME positive eigenspace as the
+            // value.
             //
             // REACHABILITY: the cost path keeps `rho.len()` in lockstep with
             // `canonical_penalties.len()` (the smoothing-parameter coordinate is
@@ -424,8 +413,8 @@ impl<'a> RemlState<'a> {
             let (rank, value) = self.fixed_subspace_penalty_rank_and_logdet_from_subspace(subspace);
             if !rho.is_empty() {
                 crate::bail_invalid_estim!(
-                    "penalty log|Σλ S|₊ ρ-derivatives unavailable: rho_dim={} but no Kronecker \
-                     system, no canonical penalties, and no penalty roots provide a per-component \
+                    "penalty log|Σλ S|₊ ρ-derivatives unavailable: rho_dim={} but no canonical \
+                     penalties and no penalty roots provide a per-component \
                      S_k representation. The combined EᵀE subspace eigensystem yields the value \
                      and rank but cannot form the exact ρ-gradient λ_k·tr((ΣλS)⁺ S_k) — refusing \
                      to feed the outer REML optimizer an identically-zero gradient for a \
@@ -4032,8 +4021,6 @@ impl<'a> RemlState<'a> {
             last_ift_prediction_residual: Arc::new(AtomicU64::new(IFT_RESIDUAL_NO_SIGNAL_BITS)),
             last_pirls_accept_rho: Arc::new(AtomicU64::new(IFT_RESIDUAL_NO_SIGNAL_BITS)),
             ift_cached_factor: RwLock::new(None),
-            kronecker_penalty_system: None,
-            kronecker_factored: None,
             gaussian_fixed_cache: RwLock::new(None),
             gaussian_cost_only_frozen_rows: RwLock::new(None),
             gaussian_psi_gram_deriv: RwLock::new(None),
@@ -4062,8 +4049,6 @@ impl<'a> RemlState<'a> {
         nullspace_dims: Vec<usize>,
         coefficient_lower_bounds: Option<Array1<f64>>,
         linear_constraints: Option<crate::pirls::LinearInequalityConstraints>,
-        kronecker_penalty_system: Option<gam_terms::smooth::KroneckerPenaltySystem>,
-        kronecker_factored: Option<gam_terms::basis::KroneckerFactoredBasis>,
     ) -> Result<(), EstimationError>
     where
         X: Into<DesignMatrix>,
@@ -4093,8 +4078,6 @@ impl<'a> RemlState<'a> {
         self.nullspace_dims = nullspace_dims;
         self.coefficient_lower_bounds = coefficient_lower_bounds;
         self.linear_constraints = linear_constraints;
-        self.kronecker_penalty_system = kronecker_penalty_system;
-        self.kronecker_factored = kronecker_factored;
         // The Gaussian-fixed cache is keyed to (X, y, w, offset); replacing the
         // design invalidates it. The new surface will repopulate it on demand.
         *self
@@ -4233,26 +4216,6 @@ impl<'a> RemlState<'a> {
             .expect("PIRLS result cache lock poisoned")
             .clear();
         Ok(())
-    }
-
-    /// Inject Kronecker penalty system metadata for tensor-product smooth terms.
-    ///
-    /// When set, the REML evaluator will use O(∏q_j) logdet instead of O(p³)
-    /// eigendecomposition.  Also stores the full factored basis so that P-IRLS
-    /// can use factored reparameterization (Qs = U_1 ⊗ ... ⊗ U_d).
-    pub(crate) fn set_kronecker_penalty_system(
-        &mut self,
-        system: gam_terms::smooth::KroneckerPenaltySystem,
-    ) {
-        self.kronecker_penalty_system = Some(system);
-    }
-
-    /// Inject the full Kronecker factored basis for P-IRLS factored reparameterization.
-    pub(crate) fn set_kronecker_factored(
-        &mut self,
-        factored: gam_terms::basis::KroneckerFactoredBasis,
-    ) {
-        self.kronecker_factored = Some(factored);
     }
 
     pub(crate) fn set_rho_prior(&mut self, prior: RhoPrior) {
@@ -5172,8 +5135,6 @@ impl<'a> RemlState<'a> {
             }
             None => hasher.write_bool(false),
         }
-        hasher.write_bool(self.kronecker_penalty_system.is_some());
-        hasher.write_bool(self.kronecker_factored.is_some());
         let key = hasher.finish_hex();
         self.persistent_warm_start_key
             .write()
@@ -7033,7 +6994,6 @@ impl<'a> RemlState<'a> {
                 p: self.p,
                 coefficient_lower_bounds: self.coefficient_lower_bounds.as_ref(),
                 linear_constraints_original: self.linear_constraints.as_ref(),
-                kronecker_factored: self.kronecker_factored.as_ref(),
             };
             let pirls_start = std::time::Instant::now();
             let result = pirls::fit_model_for_fixed_rho_with_adaptive_kkt(
@@ -7152,7 +7112,6 @@ impl<'a> RemlState<'a> {
                     p: self.p,
                     coefficient_lower_bounds: self.coefficient_lower_bounds.as_ref(),
                     linear_constraints_original: self.linear_constraints.as_ref(),
-                    kronecker_factored: self.kronecker_factored.as_ref(),
                 };
                 let cold = pirls::fit_model_for_fixed_rho_with_adaptive_kkt(
                     LogSmoothingParamsView::new(rho.view())?,
@@ -7833,7 +7792,6 @@ impl<'a> RemlState<'a> {
             p: self.p,
             coefficient_lower_bounds: self.coefficient_lower_bounds.as_ref(),
             linear_constraints_original: self.linear_constraints.as_ref(),
-            kronecker_factored: self.kronecker_factored.as_ref(),
         };
 
         let pirls_start = std::time::Instant::now();

@@ -1003,11 +1003,7 @@ impl<'a> GamWorkingModel<'a> {
                 "sparse-native PIRLS requires a sparse original design".to_string(),
             )
         })?;
-        let PirlsPenalty::Dense { s_transformed, .. } = &self.penalty else {
-            crate::bail_invalid_estim!(
-                "sparse-native PIRLS requires a dense transformed penalty matrix"
-            );
-        };
+        let PirlsPenalty::Dense { s_transformed, .. } = &self.penalty;
         self.workspace
             .assemble_sparse_penalized_hessian(x_sparse, weights, s_transformed, None)
     }

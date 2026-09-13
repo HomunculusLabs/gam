@@ -111,8 +111,6 @@ fn aniso_matern_recovers_signal_axis() {
             linear_constraints: None,
             firth_bias_reduction: false,
             rho_prior: Default::default(),
-            kronecker_penalty_system: None,
-            kronecker_factored: None,
             persistent_warm_start_store: None,
         },
         kappa_options,

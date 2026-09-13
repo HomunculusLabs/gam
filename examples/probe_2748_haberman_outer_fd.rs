@@ -151,8 +151,6 @@ fn main() {
         linear_constraints: design.linear_constraints.clone(),
         firth_bias_reduction: Some(false),
         rho_prior: Default::default(),
-        kronecker_penalty_system: None,
-        kronecker_factored: None,
         persistent_warm_start_store: None,
     };
 

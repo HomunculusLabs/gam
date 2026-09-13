@@ -9,8 +9,7 @@ use crate::estimate::smooth_floor_dp;
 /// bounds by `rank(S_k)` — see
 /// [`HessianFactorization::trace_logdet_block_root`] (#2644).
 ///
-/// `None` only for `KroneckerMarginal`, which stores a marginal eigenvalue grid
-/// rather than a root.
+/// `None` only when `lambda` is negative or not finite.
 fn penalty_logdet_trace_from_root_opt(
     hop: &dyn HessianFactorization,
     coord: &gam_problem::PenaltyCoordinate,
@@ -20,8 +19,8 @@ fn penalty_logdet_trace_from_root_opt(
     Some(hop.trace_logdet_block_root(root.view(), start, end))
 }
 
-/// [`penalty_logdet_trace_from_root_opt`] with the squared-block fallback for
-/// the one coordinate kind that exposes no root.
+/// [`penalty_logdet_trace_from_root_opt`] with the squared-block fallback for a
+/// scale that admits no real root.
 fn penalty_logdet_trace_from_root(
     hop: &dyn HessianFactorization,
     coord: &gam_problem::PenaltyCoordinate,
@@ -1414,8 +1413,7 @@ pub(crate) fn reml_laml_evaluate(
                     // penalty and the root form prices all of it (#2644).
                     trace
                 } else if coord.is_block_local() && rho_corrections[idx].is_none() {
-                    // Reached only by `KroneckerMarginal`, the one coordinate
-                    // kind with no root to price from.
+                    // Reached only when the scale admits no real root to price from.
                     let (block, start, end) = coord.scaled_block_local(1.0);
                     hop.trace_logdet_block_local(&block, curvature_lambdas[idx], start, end)
                 } else {

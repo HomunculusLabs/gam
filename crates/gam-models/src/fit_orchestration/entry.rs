@@ -77,8 +77,6 @@ pub fn canonical_standard_fit_options(
         linear_constraints: inputs.linear_constraints,
         firth_bias_reduction: inputs.firth_bias_reduction,
         rho_prior: Default::default(),
-        kronecker_penalty_system: None,
-        kronecker_factored: None,
         // Explicit opt-in only. Clones share the same lazy/opened store handle;
         // no formula fit consults ambient process state.
         persistent_warm_start_store: config.persistent_warm_start_store.clone(),
@@ -2257,8 +2255,7 @@ fn fit_expectile_laws(
 /// - family is Gaussian + identity link;
 /// - no link wiggle, no latent coordinates, no coefficient groups, no penalty
 ///   hyperpriors, no linear/box constraints, no Firth, no adaptive
-///   regularization, no Kronecker systems, no externally injected null-space
-///   dims;
+///   regularization, no externally injected null-space dims;
 /// - the term collection is exactly one smooth term — no linear terms, no
 ///   random effects, no by-variables / factor interactions;
 /// - that smooth is a plain 1-D B-spline whose penalty order is compatible
@@ -2308,8 +2305,6 @@ pub fn spline_scan_fast_path(request: &StandardFitRequest<'_>) -> Option<SplineS
         || options.mixture_link.is_some()
         || options.sas_link.is_some()
         || options.linear_constraints.is_some()
-        || options.kronecker_penalty_system.is_some()
-        || options.kronecker_factored.is_some()
         || options.firth_bias_reduction
         || !options.nullspace_dims.is_empty()
     {
@@ -2450,8 +2445,8 @@ fn cascade_sobolev_order(requested: f64, d: usize) -> f64 {
 /// when ALL of the following hold:
 /// - family is Gaussian + identity link (the scattered low-d smooth the
 ///   cascade solves);
-/// - none of the exotic-link / constraint / Firth / Kronecker / coefficient-
-///   group / hyperprior machinery is engaged;
+/// - none of the exotic-link / constraint / Firth / coefficient-group /
+///   hyperprior machinery is engaged;
 /// - the model is exactly one smooth term — no linear terms, no random
 ///   effects, no by-variables;
 /// - that smooth is a scattered radial spatial smooth (`Duchon` or `Matern`)
@@ -2485,8 +2480,6 @@ pub fn residual_cascade_fast_path(
         || options.mixture_link.is_some()
         || options.sas_link.is_some()
         || options.linear_constraints.is_some()
-        || options.kronecker_penalty_system.is_some()
-        || options.kronecker_factored.is_some()
         || options.firth_bias_reduction
         || !options.nullspace_dims.is_empty()
     {

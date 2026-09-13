@@ -248,11 +248,7 @@ pub(super) fn solve_penalized_least_squares_implicit(
     if transform.is_none()
         && let Some(x_sparse) = x_original.as_sparse()
     {
-        let PirlsPenalty::Dense { s_transformed, .. } = penalty else {
-            crate::bail_invalid_estim!(
-                "sparse-native PIRLS requires a dense transformed penalty matrix"
-            );
-        };
+        let PirlsPenalty::Dense { s_transformed, .. } = penalty;
         let weights_owned = weights.to_owned();
 
         // Gaussian-Identity fast path: the inner sparse `XᵀWX` is invariant
@@ -411,7 +407,6 @@ pub(super) fn solve_penalized_least_squares_implicit(
         let xtwx_asym = max_symmetric_asymmetry(&xtwx_transformed);
         let penalty_asym = match penalty {
             PirlsPenalty::Dense { s_transformed, .. } => max_symmetric_asymmetry(s_transformed),
-            PirlsPenalty::Diagonal { .. } => 0.0,
         };
         let total_asym = max_symmetric_asymmetry(&penalized_hessian);
         assert!(
@@ -505,14 +500,6 @@ fn minimum_norm_pls_solve(
                 let root_v = e_transformed.dot(&v);
                 root_v.dot(&root_v)
             }
-            PirlsPenalty::Diagonal {
-                diag,
-                positive_indices,
-                ..
-            } => positive_indices
-                .iter()
-                .map(|&idx| diag[idx] * v[idx] * v[idx])
-                .sum::<f64>(),
         };
         penalty_trace += penalty_energy / lambda;
     }

@@ -865,7 +865,6 @@ pub fn build_constant_curvature_basis(
             length_scale,
             constraint_transform: Some(z),
         },
-        kronecker_factored: None,
         joint_null_rotation: None,
     })
 }

@@ -423,7 +423,6 @@ pub(crate) fn build_thin_plate_basiswithworkspace(
             input_scale: crate::IsotropicScale::ONE,
             radial_reparam: radial_reparam_meta,
         },
-        kronecker_factored: None,
     })
 }
 

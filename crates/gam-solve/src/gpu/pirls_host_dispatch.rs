@@ -71,7 +71,7 @@ where
         log::trace!(
             "[PIRLS GPU Gaussian PLS] declined on non-linux \
              (link_bytes={}, max_iter={}, lower_bounds={}, original_constraints={}, \
-             fixed_cache={}, dense_penalty={}, qs={}, x_ptr={:p}, sparse_native={}, p={}, \
+             fixed_cache={}, penalty_ptr={:p}, qs={}, x_ptr={:p}, sparse_native={}, p={}, \
              callback_size={}, y_len={}, prior_len={}, offset_len={}, frame_bytes={}, constraints={}, \
              frozen_rows={})",
             std::mem::size_of_val(&link_function),
@@ -79,7 +79,7 @@ where
             penalty_coefficient_lower_bounds.is_some(),
             penalty_linear_constraints_original.is_some(),
             gaussian_fixed_cache.is_some(),
-            matches!(penalty_active, PirlsPenalty::Dense { .. }),
+            penalty_active,
             qs_arc.is_some(),
             x_original,
             use_sparse_native,
@@ -102,51 +102,49 @@ where
     {
         use crate::gpu::pirls_dispatch_wire::{GpuGaussianPlsInput, try_gpu_gaussian_pls_dispatch};
         if let Some(cache) = gaussian_fixed_cache {
-            if let PirlsPenalty::Dense {
+            let PirlsPenalty::Dense {
                 s_transformed,
                 linear_shift,
                 constant_shift,
                 ..
-            } = penalty_active
-            {
-                let qs_view = qs_arc.as_ref().map(|qs| qs.view());
-                let qs_arc_for_design = qs_arc
-                    .as_ref()
-                    .cloned()
-                    .unwrap_or_else(|| Arc::new(Array2::<f64>::eye(penalty_p)));
-                let x_transformed_design =
-                    make_reparam_operator(x_original, &qs_arc_for_design, use_sparse_native);
-                let reparam_for_gpu = match materialize_reparam() {
-                    Ok(r) => r,
-                    Err(e) => return Some(Err(e)),
-                };
-                let gpu_input = GpuGaussianPlsInput {
-                    xtwx_orig: cache.xtwx_orig.view(),
-                    xtwy_orig: cache.xtwy_orig.view(),
-                    s_transformed: s_transformed.view(),
-                    linear_shift: linear_shift.view(),
-                    constant_shift: *constant_shift,
-                    qs: qs_view,
-                    likelihood: &config.likelihood,
-                    inverse_link: &config.link_kind,
-                    x_original,
-                    y,
-                    priorweights,
-                    offset,
-                    reparam_result: reparam_for_gpu,
-                    x_transformed_design,
-                    coordinate_frame,
-                    linear_constraints: linear_constraints.clone(),
-                    centered_weighted_y_sq: cache.centered_weighted_y_sq,
-                    frozen_rows: cost_only_gaussian_rows.map(Arc::clone),
-                };
-                if let Some(result) = try_gpu_gaussian_pls_dispatch(gpu_input) {
-                    return Some(result.map_err(|message| {
-                        EstimationError::RemlOptimizationFailed(format!(
-                            "GPU Gaussian PLS runtime: {message}"
-                        ))
-                    }));
-                }
+            } = penalty_active;
+            let qs_view = qs_arc.as_ref().map(|qs| qs.view());
+            let qs_arc_for_design = qs_arc
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| Arc::new(Array2::<f64>::eye(penalty_p)));
+            let x_transformed_design =
+                make_reparam_operator(x_original, &qs_arc_for_design, use_sparse_native);
+            let reparam_for_gpu = match materialize_reparam() {
+                Ok(r) => r,
+                Err(e) => return Some(Err(e)),
+            };
+            let gpu_input = GpuGaussianPlsInput {
+                xtwx_orig: cache.xtwx_orig.view(),
+                xtwy_orig: cache.xtwy_orig.view(),
+                s_transformed: s_transformed.view(),
+                linear_shift: linear_shift.view(),
+                constant_shift: *constant_shift,
+                qs: qs_view,
+                likelihood: &config.likelihood,
+                inverse_link: &config.link_kind,
+                x_original,
+                y,
+                priorweights,
+                offset,
+                reparam_result: reparam_for_gpu,
+                x_transformed_design,
+                coordinate_frame,
+                linear_constraints: linear_constraints.clone(),
+                centered_weighted_y_sq: cache.centered_weighted_y_sq,
+                frozen_rows: cost_only_gaussian_rows.map(Arc::clone),
+            };
+            if let Some(result) = try_gpu_gaussian_pls_dispatch(gpu_input) {
+                return Some(result.map_err(|message| {
+                    EstimationError::RemlOptimizationFailed(format!(
+                        "GPU Gaussian PLS runtime: {message}"
+                    ))
+                }));
             }
         }
     }
@@ -157,7 +155,7 @@ where
 /// device-resident loop.
 ///
 /// Returns `None` when admission is denied (non-Linux, missing runtime, sparse
-/// or Kronecker design, Firth active, constraints present, or shape/family
+/// design, Firth active, constraints present, or shape/family
 /// outside the dispatch policy). Returns `Some(Ok(pair))` on success and
 /// `Some(Err(..))` on an admitted-device error; the typed error is propagated
 /// without retrying a different numerical implementation.
@@ -167,7 +165,6 @@ where
 pub(crate) fn try_pirls_loop_gpu<F>(
     config: &PirlsConfig,
     penalty_active: &PirlsPenalty,
-    kronecker_runtime_is_none: bool,
     use_sparse_native: bool,
     linear_constraints: &Option<LinearInequalityConstraints>,
     x_original: &DesignMatrix,
@@ -190,12 +187,11 @@ where
         let callback_size = std::mem::size_of_val(&materialize_reparam);
         log::trace!(
             "[PIRLS GPU dispatch] declined on non-linux \
-             (max_iter={}, dense_penalty={}, no_kronecker={}, sparse_native={}, constraints={}, \
+             (max_iter={}, penalty_ptr={:p}, sparse_native={}, constraints={}, \
              x_ptr={:p}, qs={}, p={}, result_x_ptr={:p}, callback_size={}, y_len={}, prior_len={}, \
              offset_len={}, beta_len={}, link_bytes={}, frame_bytes={})",
             config.max_iterations,
-            matches!(penalty_active, PirlsPenalty::Dense { .. }),
-            kronecker_runtime_is_none,
+            penalty_active,
             use_sparse_native,
             linear_constraints.is_some(),
             x_original,
@@ -219,14 +215,10 @@ where
             GpuPirlsDispatchInput, try_gpu_pirls_loop_admit, try_gpu_pirls_loop_dispatch,
         };
         let dense_x = x_original.as_dense().map(|d| d.view());
-        let dense_penalty = matches!(penalty_active, PirlsPenalty::Dense { .. });
-        let no_kronecker = kronecker_runtime_is_none;
         let no_sparse_native = !use_sparse_native;
         let no_firth = !config.firth_bias_reduction;
         let no_constraints = linear_constraints.is_none();
-        if let (true, true, true, true, true, Some(x_dense)) = (
-            dense_penalty,
-            no_kronecker,
+        if let (true, true, true, Some(x_dense)) = (
             no_sparse_native,
             no_firth,
             no_constraints,
@@ -256,16 +248,6 @@ where
                             constant_shift,
                             ..
                         } => (s_transformed.view(), linear_shift.view(), *constant_shift),
-                        PirlsPenalty::Diagonal { .. } => {
-                            // SAFETY: the enclosing dense_penalty admission
-                            // ABOVE (matches!(penalty_active, PirlsPenalty::Dense{..}))
-                            // restricts execution to the Dense variant; reaching
-                            // here means a mid-function mutation has changed
-                            // `penalty_active` out from under us, which is a
-                            // programming error in this single-threaded function
-                            // body. Falling back to None would silently mask the bug.
-                            panic!("GPU PIRLS dispatch gated on PirlsPenalty::Dense above")
-                        }
                     };
                 let qs_arc_for_design = qs_arc
                     .as_ref()

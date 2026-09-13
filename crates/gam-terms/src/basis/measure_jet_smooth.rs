@@ -2644,7 +2644,6 @@ pub fn build_measure_jet_basis(
             // centers' frame — the errors-in-variables input-noise scale (#2225).
             sigma_coord,
         },
-        kronecker_factored: None,
         joint_null_rotation: None,
     })
 }

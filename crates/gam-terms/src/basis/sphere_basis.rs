@@ -163,7 +163,6 @@ pub fn build_spherical_spline_basis(
             wahba_kernel: spec.wahba_kernel,
             constraint_transform: Some(z),
         },
-        kronecker_factored: None,
         joint_null_rotation: None,
     })
 }
@@ -813,7 +812,6 @@ pub(crate) fn build_spherical_harmonic_basis(
             wahba_kernel: spec.wahba_kernel,
             constraint_transform: Some(transform),
         },
-        kronecker_factored: None,
         joint_null_rotation: None,
     })
 }
@@ -1102,7 +1100,6 @@ pub(crate) fn build_matern_basis_seeded(
             input_scale: crate::IsotropicScale::ONE,
             aniso_log_scales: aniso,
         },
-        kronecker_factored: None,
         joint_null_rotation: None,
     })
 }

@@ -3,7 +3,7 @@ use gam_linalg::faer_ndarray::{FaerSymmetricFactor, array2_to_matmut};
 use gam_linalg::matrix::SymmetricMatrix;
 use gam_linalg::utils::{StableSolver, array_is_finite};
 use gam_problem::Coefficients;
-use ndarray::{Array1, Array2};
+use ndarray::Array2;
 
 use super::{PirlsPenalty, PirlsWorkspace};
 
@@ -60,35 +60,6 @@ pub(super) fn calculate_edfwithworkspace_from_factor(
                 condition_number: f64::INFINITY,
             })
         }
-        PirlsPenalty::Diagonal {
-            diag,
-            positive_indices,
-            ..
-        } => {
-            let p = factor.n();
-            let r = positive_indices.len();
-            let mp = (p as f64 - r as f64).max(0.0);
-            if r == 0 {
-                return Ok(p as f64);
-            }
-            if workspace.final_aug_matrix.nrows() != p || workspace.final_aug_matrix.ncols() != r {
-                workspace.final_aug_matrix = Array2::zeros((p, r));
-            } else {
-                workspace.final_aug_matrix.fill(0.0);
-            }
-            for (col, &idx) in positive_indices.iter().enumerate() {
-                workspace.final_aug_matrix[[idx, col]] = 1.0;
-            }
-            {
-                let mut rhsview = array2_to_matmut(&mut workspace.final_aug_matrix);
-                factor.solve_in_place(rhsview.as_mut());
-            }
-            let mut tr = 0.0;
-            for (col, &idx) in positive_indices.iter().enumerate() {
-                tr += diag[idx] * workspace.final_aug_matrix[[idx, col]];
-            }
-            Ok((p as f64 - tr).clamp(mp, p as f64))
-        }
     }
 }
 
@@ -97,16 +68,11 @@ pub(super) fn calculate_edfwithworkspace_from_factor(
 /// Mirrors `calculate_edf_with_penalty` but accepts the `SparseExactFactor`
 /// that PLS already produced, eliminating the redundant second sparse
 /// factorization inside every PIRLS outer iteration.
-///
-/// Only the `PirlsPenalty::Dense` variant is handled because the sparse-native
-/// path requires `PirlsPenalty::Dense` (enforced by the caller).
 pub(super) fn calculate_edf_from_sparse_factor(
     factor: &gam_linalg::sparse_exact::SparseExactFactor,
     penalty: &PirlsPenalty,
 ) -> Result<f64, EstimationError> {
-    let PirlsPenalty::Dense { e_transformed, .. } = penalty else {
-        crate::bail_invalid_estim!("calculate_edf_from_sparse_factor requires PirlsPenalty::Dense");
-    };
+    let PirlsPenalty::Dense { e_transformed, .. } = penalty;
     // e_transformed has shape (r, p) — cols give the coefficient dimension p.
     let p = e_transformed.ncols();
     let r = e_transformed.nrows();
@@ -173,11 +139,6 @@ pub(super) fn calculate_edf_with_penalty(
         PirlsPenalty::Dense { e_transformed, .. } => {
             calculate_edf(penalized_hessian, e_transformed)
         }
-        PirlsPenalty::Diagonal {
-            diag,
-            positive_indices,
-            ..
-        } => calculate_edf_from_diagonal_penalty(penalized_hessian, diag, positive_indices),
     }
 }
 
@@ -233,87 +194,7 @@ pub(super) fn calculate_edfwithworkspace_with_penalty(
         PirlsPenalty::Dense { e_transformed, .. } => {
             calculate_edfwithworkspace(penalized_hessian, e_transformed, workspace)
         }
-        PirlsPenalty::Diagonal {
-            diag,
-            positive_indices,
-            ..
-        } => calculate_edfwithworkspace_from_diagonal_penalty(
-            penalized_hessian,
-            diag,
-            positive_indices,
-            workspace,
-        ),
     }
-}
-
-pub(super) fn calculate_edf_from_diagonal_penalty(
-    penalized_hessian: &SymmetricMatrix,
-    diag: &Array1<f64>,
-    positive_indices: &[usize],
-) -> Result<f64, EstimationError> {
-    let p = penalized_hessian.ncols();
-    let r = positive_indices.len();
-    let mp = (p as f64 - r as f64).max(0.0);
-    if r == 0 {
-        return Ok(p as f64);
-    }
-    let mut rhs_arr = Array2::<f64>::zeros((p, r));
-    for (col, &idx) in positive_indices.iter().enumerate() {
-        rhs_arr[[idx, col]] = 1.0;
-    }
-    let factor =
-        penalized_hessian
-            .factorize()
-            .map_err(|_| EstimationError::ModelIsIllConditioned {
-                condition_number: f64::INFINITY,
-            })?;
-    let sol = factor
-        .solvemulti(&rhs_arr)
-        .map_err(|_| EstimationError::ModelIsIllConditioned {
-            condition_number: f64::INFINITY,
-        })?;
-    let mut tr = 0.0;
-    for (col, &idx) in positive_indices.iter().enumerate() {
-        tr += diag[idx] * sol[[idx, col]];
-    }
-    Ok((p as f64 - tr).clamp(mp, p as f64))
-}
-
-pub(super) fn calculate_edfwithworkspace_from_diagonal_penalty(
-    penalized_hessian: &Array2<f64>,
-    diag: &Array1<f64>,
-    positive_indices: &[usize],
-    workspace: &mut PirlsWorkspace,
-) -> Result<f64, EstimationError> {
-    let p = penalized_hessian.ncols();
-    let r = positive_indices.len();
-    let mp = (p as f64 - r as f64).max(0.0);
-    if r == 0 {
-        return Ok(p as f64);
-    }
-    if workspace.final_aug_matrix.nrows() != p || workspace.final_aug_matrix.ncols() != r {
-        workspace.final_aug_matrix = Array2::zeros((p, r));
-    } else {
-        workspace.final_aug_matrix.fill(0.0);
-    }
-    for (col, &idx) in positive_indices.iter().enumerate() {
-        workspace.final_aug_matrix[[idx, col]] = 1.0;
-    }
-
-    let factor = StableSolver::new()
-        .factorize(penalized_hessian)
-        .map_err(|_| EstimationError::ModelIsIllConditioned {
-            condition_number: f64::INFINITY,
-        })?;
-    {
-        let mut rhsview = array2_to_matmut(&mut workspace.final_aug_matrix);
-        factor.solve_in_place(rhsview.as_mut());
-    }
-    let mut tr = 0.0;
-    for (col, &idx) in positive_indices.iter().enumerate() {
-        tr += diag[idx] * workspace.final_aug_matrix[[idx, col]];
-    }
-    Ok((p as f64 - tr).clamp(mp, p as f64))
 }
 
 #[inline]

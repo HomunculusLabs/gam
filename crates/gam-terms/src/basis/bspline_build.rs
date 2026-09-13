@@ -333,7 +333,6 @@ pub fn build_bspline_basis_1d(
                 // Periodic B-splines wrap and carry no endpoint anchor.
                 anchor_offset_coeffs: None,
             },
-            kronecker_factored: None,
             joint_null_rotation: None,
         });
     }
@@ -445,7 +444,6 @@ pub fn build_bspline_basis_1d(
                 // conditions (see the `is_free()` gate above), so no anchor.
                 anchor_offset_coeffs: None,
             },
-            kronecker_factored: None,
             joint_null_rotation: None,
         });
     }
@@ -748,7 +746,6 @@ pub fn build_bspline_basis_1d(
             auto_shrink_note,
             anchor_offset_coeffs,
         },
-        kronecker_factored: None,
         joint_null_rotation: None,
     })
 }
@@ -863,7 +860,6 @@ pub(crate) fn build_cubic_regression_basis_1d(
             knots: knots.clone(),
             identifiability_transform,
         },
-        kronecker_factored: None,
         joint_null_rotation: None,
     })
 }
