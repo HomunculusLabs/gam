@@ -733,34 +733,50 @@ fn sphere_weighted_log_step(
     weights: ArrayView1<'_, f64>,
     base: ArrayView1<'_, f64>,
 ) -> Result<Array1<f64>, String> {
-    let mut step = Array1::<f64>::zeros(base.len());
+    let d = base.len();
+    let base_l1: f64 = base.iter().map(|b| b.abs()).sum();
+    // The tangent component `v − (v·base)·base` is formed by a d-term inner
+    // product and one subtraction per coordinate, so its rounding is at most
+    // `γ_{d+2}·(‖v‖₁ + |v·base|·‖base‖₁)` in ℓ1, which bounds it in ℓ2 too.
+    let growth = gam_linalg::roundoff::accumulation_growth(d + 2);
+    let mut step = Array1::<f64>::zeros(d);
+    let mut tangent = Array1::<f64>::zeros(d);
     for row in 0..values.nrows() {
         let mut dot_value = 0.0_f64;
         let mut chord_sq = 0.0_f64;
-        for col in 0..base.len() {
+        let mut row_l1 = 0.0_f64;
+        for col in 0..d {
             dot_value += values[[row, col]] * base[col];
-            let d = values[[row, col]] - base[col];
-            chord_sq += d * d;
+            let diff = values[[row, col]] - base[col];
+            chord_sq += diff * diff;
+            row_l1 += values[[row, col]].abs();
         }
         let dot_value = dot_value.clamp(-1.0, 1.0);
-        if dot_value <= -1.0 + 1.0e-12 {
-            return Err("spherical log map is undefined at antipodal points".to_string());
-        }
         // Chord form theta = 2·arcsin(|v-base|/2) avoids the acos(p·q)
-        // cancellation for nearby points (see SphereManifold::log_map); the
-        // dot product is still used for the tangent projection below.
+        // cancellation for nearby points (see SphereManifold::log_map).
         let theta = 2.0 * (0.5 * chord_sq.sqrt()).min(1.0).asin();
-        if theta < 1.0e-12 {
+        if theta == 0.0 {
             continue;
         }
-        let sin_theta = theta.sin();
-        let scale = if sin_theta > 1.0e-12 {
-            theta / sin_theta
-        } else {
-            1.0
-        };
-        for col in 0..base.len() {
-            step[col] += weights[row] * (values[[row, col]] - dot_value * base[col]) * scale;
+        for col in 0..d {
+            tangent[col] = values[[row, col]] - dot_value * base[col];
+        }
+        let tangent_norm = norm(tangent.view());
+        let resolution = growth * (row_l1 + dot_value.abs() * base_l1);
+        if !(tangent_norm > resolution) {
+            // The tangent direction is inside its own rounding band. Opposite
+            // `base` that is the antipode, where the log map has no direction;
+            // beside `base` the row coincides with it and its log is zero within
+            // that band.
+            if dot_value < 0.0 {
+                return Err("spherical log map is undefined at antipodal points".to_string());
+            }
+            continue;
+        }
+        // `θ·û` with `û = u/‖u‖`: the stable magnitude `‖u‖` stands in for `sin θ`.
+        let scale = theta / tangent_norm;
+        for col in 0..d {
+            step[col] += weights[row] * tangent[col] * scale;
         }
     }
     Ok(step)
