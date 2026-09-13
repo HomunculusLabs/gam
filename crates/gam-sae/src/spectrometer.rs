@@ -767,13 +767,14 @@ mod tests {
     }
 
     /// Shared per-rung fit template for the manifold tests: pinned to CPU, single
-    /// atom is forced by the spectrometer regardless.
+    /// atom is forced by the spectrometer regardless. The epoch budget is the one
+    /// `SpectrometerConfig::default` forwards, not a smaller hand-set count.
     fn dict_template() -> SparseDictConfig {
         SparseDictConfig {
             n_atoms: 1,
             active: 1,
             minibatch: 1024,
-            max_epochs: 25,
+            max_epochs: SparseDictConfig::default().max_epochs,
             score_tile: 256,
             code_ridge: 1.0e-6,
             decoder_ridge: 1.0e-6,
