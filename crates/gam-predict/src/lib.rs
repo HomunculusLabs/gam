@@ -1258,10 +1258,10 @@ pub struct PredictPosteriorMeanResult {
     /// `mean_upper` columns beside it instead of the link-scale `σ_η`.
     pub mean_standard_error: Option<Array1<f64>>,
     /// Response-scale lower confidence bound (set by
-    /// [`enrich_posterior_mean_bounds`]).
+    /// `enrich_posterior_mean_bounds`).
     pub mean_lower: Option<Array1<f64>>,
     /// Response-scale upper confidence bound (set by
-    /// [`enrich_posterior_mean_bounds`]).
+    /// `enrich_posterior_mean_bounds`).
     pub mean_upper: Option<Array1<f64>>,
     /// Response-scale observation (prediction) interval lower bound. `Some` only
     /// when the caller set [`PosteriorMeanOptions::include_observation_interval`]
@@ -1328,7 +1328,7 @@ impl PosteriorMeanOptions {
 /// Call this after [`PredictableModel::predict_posterior_mean`] whenever a
 /// confidence level is available so that `mean_lower` / `mean_upper` are
 /// always populated alongside `eta_standard_error`.
-pub fn enrich_posterior_mean_bounds(
+pub(crate) fn enrich_posterior_mean_bounds(
     result: &mut PredictPosteriorMeanResult,
     confidence_level: f64,
     family: gam_spec::LikelihoodSpec,
@@ -4901,3 +4901,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod predict_2_2_tests;

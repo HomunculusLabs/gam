@@ -7283,5 +7283,18 @@
     ],
     "reason": "#2902 row 8: the corrected coefficient covariance was reachable from production only through a trace-only validation block in compute_smoothing_correction_auto that ran it with no hyperparameters and read nothing back. Its theta option, the only route to the hardcoded ±RHO_BOUND rail scan, was supplied only by two tests, and no outer search has that box since 04726d916. The block, every corrected-covariance function and type, CorrectedCovarianceError with its OuterHessianIndefinite payload and root re-export, and the tests of the removed code are deleted; spectral_regularize and spectral_epsilon stay for dense_spectral.",
     "evidence": "At the base, git grep finds compute_corrected_covariance and compute_corrected_covariance_diagonal called in production only at crates/gam-solve/src/reml/eval.rs:1163 and :1180 (q = 0, results only logged), the _with_constraints entries and detect_active_theta_bounds called only inside corrected_covariance.rs and from crates/gam-solve/src/reml/reml_outer_engine/tests.rs, and CorrectedCovarianceError imported by no crate (gam-pyffi and gamfit name only the separate create_exception! Python class). The deletion is gated by pool job 598363 (log /scratch.global/sauer354/pool/outer2817/gate2.598363.log): this patch applied at 46d51b5d5 with every start blob unchanged; gam-solve lib tests in the touched modules 21 passed, 0 failed; the guarded workspace --all-targets check compiled every crate, and its only errors are 20 in two root test targets this patch does not touch (tests/inference/misc/conformal_coverage_quality.rs, tests/perf_scale/misc/row_metric_loud_vs_loadbearing.rs), naming no deleted item."
+  },
+  {
+    "base": "81e011f315e52e90617f8b4433a759182985a62b",
+    "items": [
+      "tests/regressions/predict/predict_2_2.rs:fn:competing_risks_cif_bounds_are_probabilities_and_total_mass_is_valid",
+      "tests/regressions/predict/predict_2_2.rs:fn:delta_method_variance_matches_posterior_simulation_for_small_logit_problem",
+      "tests/regressions/predict/predict_2_2.rs:fn:enrich_posterior_mean_bounds_clamps_domains_for_probability_and_count_families",
+      "tests/regressions/predict/predict_2_2.rs:fn:like",
+      "tests/regressions/predict/predict_2_2.rs:fn:predict_uncertainty_bounds_track_requested_alpha_level_for_logit",
+      "tests/regressions/predict/predict_2_2.rs:fn:survival_uncertainty_bounds_stay_in_unit_interval"
+    ],
+    "reason": "#2899 moved tests: tests/regressions/predict/predict_2_2.rs was the only user outside gam-predict of gam_predict::enrich_posterior_mean_bounds, which production calls only inside gam-predict (lib.rs, standard.rs). The file moves verbatim into the gam-predict unit-test module predict_2_2_tests.rs, importing the crate's own items through crate:: and the spec types through gam_spec::, so no test is lost and the function narrows to pub(crate).",
+    "evidence": "At the base, git grep -n -w enrich_posterior_mean_bounds over crates, src, tests, examples and bench finds it outside crates/gam-predict/src only in tests/regressions/predict/predict_2_2.rs (lines 2, 51, 78). Every removed identity is a declaration in that deleted root file, and each reappears unchanged in the new module file."
   }
 ]
