@@ -2716,5 +2716,53 @@ mod tests {
         let fused = AutoTopologyKind::fuse_constant_curvature_family(&input, true, FUSE_BOTH);
         assert_eq!(fused, input);
     }
+
+    /// Tight planted clusters: `per_cluster` points around each center on a
+    /// small modulated loop, the same micro-pattern as the pyffi ring fixture.
+    fn planted_clusters(centers: &[(f64, f64)], per_cluster: usize) -> Array2<f64> {
+        let mut coords = Array2::<f64>::zeros((centers.len() * per_cluster, 2));
+        for (cluster, &(center_x, center_y)) in centers.iter().enumerate() {
+            for sample in 0..per_cluster {
+                let phase = std::f64::consts::TAU * sample as f64 / per_cluster as f64;
+                let local_radius = 0.04 * (1.0 + 0.3 * (3.0 * phase).cos());
+                let row = cluster * per_cluster + sample;
+                coords[[row, 0]] = center_x + local_radius * phase.cos();
+                coords[[row, 1]] = center_y + local_radius * phase.sin();
+            }
+        }
+        coords
+    }
+
+    /// #2902 row 15: both rungs walk their order up from the class minimum until
+    /// the running BIC winner is bracketed, with no ladder of orders. The free
+    /// class reaches a planted four, an order the historical [1, 2, 3, 5, 7, 9]
+    /// ladder could not name, and the ring class reaches a planted seven from its
+    /// minimum of three.
+    #[test]
+    fn order_walks_recover_planted_cluster_orders_without_a_ladder_2902() {
+        let blobs = planted_clusters(&[(-3.0, -3.0), (3.0, -3.0), (-3.0, 3.0), (3.0, 3.0)], 30);
+        let free = fit_free_cluster_rung(blobs.view(), GaussianMixtureConfig::default())
+            .expect("the free-cluster walk certifies on four separated clusters");
+        assert_eq!(
+            free.winner().k,
+            4,
+            "the walk must bracket the planted four clusters"
+        );
+
+        let ring_centers: Vec<(f64, f64)> = (0..7)
+            .map(|cluster| {
+                let angle = std::f64::consts::TAU * cluster as f64 / 7.0;
+                (0.5 + 2.0 * angle.cos(), -0.25 + 2.0 * angle.sin())
+            })
+            .collect();
+        let ring = planted_clusters(&ring_centers, 40);
+        let ring_rung = fit_ring_of_clusters_rung(ring.view(), GaussianMixtureConfig::default())
+            .expect("the ring-of-clusters walk certifies on seven planted clusters");
+        assert_eq!(
+            ring_rung.winner().k,
+            7,
+            "the walk must bracket the planted seven ring clusters"
+        );
+    }
 }
 
