@@ -826,6 +826,55 @@ mod tests {
             "impropriety along the cone's lineality space outranks a copositive M"
         );
         assert!(certificate.summary().contains("IMPROPER"));
+        assert!(
+            !certificate.summary().contains("attained along"),
+            "a direction inside null(A) loads no constraint row, got: {}",
+            certificate.summary()
+        );
+    }
+
+    #[test]
+    fn a_nonpositive_simplex_minimum_names_the_constraint_rows_it_is_attained_along() {
+        // `A = I` on three coordinates leaves no lineality space, so `M = H` and
+        // copositivity alone decides. The leading block has eigenvalues 4 and −2,
+        // and its −2 eigenvector lies inside the orthant: `w = (½, ½, 0)` gives
+        // `wᵀMw = −1`, the simplex minimum. The third row carries only positive
+        // curvature, so the named support must leave it out (#979).
+        let hessian = array![[1.0, -3.0, 0.0], [-3.0, 1.0, 0.0], [0.0, 0.0, 2.0]];
+        let constraints = Array2::<f64>::eye(3);
+        let certificate = cone_properness_certificate(hessian.view(), constraints.view(), 1e-12)
+            .expect("a certificate on an orthant-improper ambient");
+        assert_eq!(
+            certificate.lineality_inertia,
+            Inertia { positive: 0, zero: 0, negative: 0 },
+            "A = I leaves no lineality space, so the lineality branch cannot decide"
+        );
+        assert_eq!(
+            certificate.ambient_inertia,
+            Inertia { positive: 2, zero: 0, negative: 1 }
+        );
+        let minimum = certificate
+            .copositive_minimum
+            .expect("q = 3 is inside the exact enumeration range");
+        assert!(
+            (minimum + 1.0).abs() < 1e-12,
+            "min wᵀMw over the simplex was {minimum:.15e}, expected −1"
+        );
+        let point = certificate
+            .copositive_minimizer
+            .as_ref()
+            .expect("the minimizer accompanies an enumerated minimum");
+        assert!(
+            (point[0] - 0.5).abs() < 1e-12 && (point[1] - 0.5).abs() < 1e-12 && point[2] == 0.0,
+            "the minimizer is (½, ½, 0), got {point:?}"
+        );
+        assert_eq!(certificate.is_proper(), Some(false));
+        let summary = certificate.summary();
+        assert!(
+            summary.contains("IMPROPER")
+                && summary.contains("attained along constraint row(s) [0, 1]"),
+            "got: {summary}"
+        );
     }
 
     #[test]
