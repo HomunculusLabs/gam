@@ -2787,6 +2787,8 @@ mod jet_tower_oracle_tests {
     /// independent #932 single-source witness (the jet composes `q(η)` directly
     /// on the η primary; the hand path differentiates in the q-index then chains
     /// `q1/q2`, a different FP order, so this is a tolerance not a bit check).
+    /// Every entry is measured and each channel's worst relative error is printed
+    /// before any assertion: a justified band needs that measurement.
     #[test]
     fn rigid_bernoulli_row_kernel_matches_hand_chain_witness() {
         let eta = [0.3_f64, -0.7, 0.05, 0.9, -1.2, 2.1, -2.4];
@@ -2794,13 +2796,7 @@ mod jet_tower_oracle_tests {
         let z = [0.4_f64, -1.1, 0.0, 0.7, -0.3, 1.6, -1.4];
         let y = [1.0_f64, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0];
         let w = [1.0_f64, 0.8, 1.3, 0.9, 1.1, 0.7, 1.4];
-        let close = |a: f64, b: f64, label: &str| {
-            let band = 1e-12 + 1e-9 * a.abs().max(b.abs());
-            assert!(
-                (a - b).abs() <= band,
-                "{label}: jet {a:+.15e} vs hand {b:+.15e} (band {band:.3e})"
-            );
-        };
+        let mut entries: Vec<(&str, f64, f64)> = Vec::new();
         for &probit_scale in &[1.0_f64, 0.8] {
             for r in 0..eta.len() {
                 let marginal = bernoulli_marginal_link_map(
@@ -2819,14 +2815,42 @@ mod jet_tower_oracle_tests {
                 .expect("jet kernel");
                 let (hv, hg, hh) = hand_rigid_vgh(marginal, g[r], z[r], y[r], w[r], probit_scale)
                     .expect("hand rigid row");
-                close(jv, hv, "value");
+                entries.push(("value", jv, hv));
                 for a in 0..2 {
-                    close(jg[a], hg[a], "grad");
+                    entries.push(("grad", jg[a], hg[a]));
                     for b in 0..2 {
-                        close(jh[a][b], hh[a][b], "hess");
+                        entries.push(("hess", jh[a][b], hh[a][b]));
                     }
                 }
             }
+        }
+        let worst = |channel: &str| {
+            entries
+                .iter()
+                .filter(|entry| entry.0 == channel)
+                .map(|entry| {
+                    let scale = entry.1.abs().max(entry.2.abs());
+                    if scale > 0.0 {
+                        (entry.1 - entry.2).abs() / scale
+                    } else {
+                        (entry.1 - entry.2).abs()
+                    }
+                })
+                .fold(0.0_f64, f64::max)
+        };
+        eprintln!(
+            "RIGID-HAND-CHAIN-932 worst_relative value={:.3e} grad={:.3e} hess={:.3e} entries={}",
+            worst("value"),
+            worst("grad"),
+            worst("hess"),
+            entries.len()
+        );
+        for &(label, a, b) in &entries {
+            let band = 1e-12 + 1e-9 * a.abs().max(b.abs());
+            assert!(
+                (a - b).abs() <= band,
+                "{label}: jet {a:+.15e} vs hand {b:+.15e} (band {band:.3e})"
+            );
         }
     }
 
