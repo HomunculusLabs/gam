@@ -2005,13 +2005,13 @@ impl LikelihoodScaleMetadata {
 
     /// Whether the Beta-regression precision `phi` is estimated from data.
     #[inline]
-    pub const fn beta_phi_is_estimated(self) -> bool {
+    pub(crate) const fn beta_phi_is_estimated(self) -> bool {
         matches!(self, Self::EstimatedBetaPhi { .. })
     }
 
     /// Whether the Tweedie exponential-dispersion `phi` is estimated from data.
     #[inline]
-    pub const fn tweedie_phi_is_estimated(self) -> bool {
+    pub(crate) const fn tweedie_phi_is_estimated(self) -> bool {
         matches!(self, Self::EstimatedTweediePhi { .. })
     }
 
@@ -2654,12 +2654,6 @@ impl GlmLikelihoodSpec {
         self
     }
 
-    /// Whether the Beta-regression precision `phi` is estimated from data.
-    #[inline]
-    pub fn beta_phi_is_estimated(&self) -> bool {
-        self.scale.beta_phi_is_estimated()
-    }
-
     /// Mutate the Beta precision `phi` in place, on BOTH the family variant
     /// (where every PIRLS weight / deviance / log-likelihood expression reads it
     /// via `ResponseFamily::Beta { phi }`) and the scale metadata (the
@@ -2675,12 +2669,6 @@ impl GlmLikelihoodSpec {
             self.scale = LikelihoodScaleMetadata::EstimatedBetaPhi { phi };
         }
         self
-    }
-
-    /// Whether the Tweedie exponential-dispersion `phi` is estimated from data.
-    #[inline]
-    pub fn tweedie_phi_is_estimated(&self) -> bool {
-        self.scale.tweedie_phi_is_estimated()
     }
 
     /// Mutate the Tweedie dispersion `phi` in place. Unlike Beta, the Tweedie

@@ -939,7 +939,7 @@ fn resolve_external_family_accepts_constant_precision_beta_regression() {
         "beta regression does not request Firth bias reduction"
     );
     assert!(
-        spec.scale.beta_phi_is_estimated(),
+        matches!(spec.scale, gam_problem::LikelihoodScaleMetadata::EstimatedBetaPhi { .. }),
         "beta φ must be flagged for joint estimation, got {:?}",
         spec.scale
     );

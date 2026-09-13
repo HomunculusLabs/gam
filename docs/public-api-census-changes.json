@@ -3340,5 +3340,14 @@
     },
     "reason": "#2899 slop: the pub(crate) spatial basis planner is deleted. Its three callers read only its center count, which is default_num_centers(n, d), and now call that directly.",
     "evidence": "public_functions() counts pub(crate) fn declarations, so removing plan_spatial_basis takes one identity off basis/types.rs. At the base, git grep -n -w plan_spatial_basis finds its only calls at term_builder.rs 3005, 3385 and 3582, each reading only plan.centers."
+  },
+  {
+    "base": "13bd8c5944196742fd444d5fd0088a75c85f6c35",
+    "removed": {
+      "crates/gam-spec/src/lib.rs::beta_phi_is_estimated": 1,
+      "crates/gam-spec/src/lib.rs::tweedie_phi_is_estimated": 1
+    },
+    "reason": "#2829 product-root rule: GlmLikelihoodSpec::beta_phi_is_estimated and GlmLikelihoodSpec::tweedie_phi_is_estimated, restored in place from d484a091a, have no caller anywhere in the tree; every reader asks the scale metadata. They are deleted. LikelihoodScaleMetadata::beta_phi_is_estimated and tweedie_phi_is_estimated are then called in production only by with_beta_phi_frozen_for_search and with_tweedie_phi_frozen_for_search in gam-spec, so they narrow to pub(crate), and the gam-solve external-family policy test matches the EstimatedBetaPhi variant directly.",
+    "evidence": "At 13bd8c5944196742fd444d5fd0088a75c85f6c35, git grep -n -w beta_phi_is_estimated over crates, src, tests, examples, bench and benches finds the two declarations in crates/gam-spec/src/lib.rs, the getter's delegating body, the call in with_beta_phi_frozen_for_search, two doc mentions, the assertion on spec.scale in crates/gam-solve/src/estimate/estimate_policy_tests.rs and a module-doc line in tests/regressions/predict/beta_phi_frozen_at_null_predictor.rs. tweedie_phi_is_estimated finds the two declarations, the getter's delegating body, the call in with_tweedie_phi_frozen_for_search and one doc mention. No call on a GlmLikelihoodSpec exists. Pool job 603659 on sw0l at 2c1cfd26874c2139583ed261ec4b56336f480f2b, the seven-commit chain spec, storage, chol, arrow, k1, duchon, sphere on 5315139343c853c8a79cd85c328ca903e38d5824, whose Rust blobs this landing reproduces (log /scratch.global/sauer354/pool/api2829/check.603659.log): source_removal_guard.py and public_api_census.py exited 0 on all seven links, and cargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0. Main had moved these files since the checked chain base, so the landed blobs are the checked blobs three-way merged with main's change: crates/gam-solve/src/estimate/estimate_policy_tests.rs (a88c62eee)."
   }
 ]
