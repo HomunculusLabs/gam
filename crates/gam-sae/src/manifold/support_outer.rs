@@ -421,6 +421,72 @@ fn penalty_spectrum(
     })
 }
 
+/// #2576: the evidence quotient for atoms no row selects. Such an atom's decoder
+/// block in the reduced Schur is exactly `λ S ⊗ I_p`, decoupled from every row and
+/// every other atom, so its penalty's null space is a border direction nothing
+/// identifies (job 631950: spectrum [-2.26e-13, 1.40e3], atom 10 selected by no row).
+/// The quotient pins those directions, where they add `log 1 = 0`. On its range the
+/// atom adds p times the log pseudo-determinant of `λS` to `log|S|`, and the penalty
+/// log pseudo-determinant adds the same amount, so it cancels. Null modes are counted on the rule
+/// `penalty_spectrum` counts rank on, so the returned count is exactly what
+/// `beta_nullity` has to drop.
+fn unused_atom_null_quotient(
+    term: &SaeSupportSparseTerm,
+) -> Result<Option<(gam_solve::arrow_schur::ArrowBetaGaugeQuotient, usize)>, String> {
+    let unused = term.atoms_without_rows();
+    if unused.is_empty() {
+        return Ok(None);
+    }
+    let (beta_offsets, beta_dim) = term.beta_layout()?;
+    let width = term.output_dim();
+    let mut null_modes: Vec<(usize, Array1<f64>)> = Vec::new();
+    for &atom in &unused {
+        let penalty = term.atoms[atom].smooth_penalty();
+        let symmetric = (penalty + &penalty.t()) * 0.5;
+        let (values, vectors) = symmetric
+            .eigh(Side::Lower)
+            .map_err(|error| format!("support unused-atom penalty eigendecomposition: {error}"))?;
+        let threshold =
+            gam_solve::estimate::reml::reml_outer_engine::positive_eigenvalue_threshold(
+                &values.to_vec(),
+            );
+        for (mode, &value) in values.iter().enumerate() {
+            if value <= threshold {
+                null_modes.push((atom, vectors.column(mode).to_owned()));
+            }
+        }
+    }
+    let pinned = null_modes.len() * width;
+    if pinned == 0 {
+        return Ok(None);
+    }
+    // One dense border-width vector per pinned direction: admitted against the
+    // in-core ledger before any of them is allocated.
+    let carrier_bytes = (pinned as u128)
+        .saturating_mul(beta_dim as u128)
+        .saturating_mul(std::mem::size_of::<f64>() as u128);
+    let budget = crate::manifold::sae_host_in_core_budget_bytes().0 as u128;
+    if carrier_bytes > budget {
+        return Err(format!(
+            "support LAML evidence: atoms {unused:?} select no row, and pinning their {pinned} \
+             unidentified penalty directions of border width {beta_dim} needs {carrier_bytes} \
+             bytes against an in-core budget of {budget} bytes"
+        ));
+    }
+    let mut directions = Vec::with_capacity(pinned);
+    for (atom, vector) in &null_modes {
+        for channel in 0..width {
+            let mut direction = Array1::<f64>::zeros(beta_dim);
+            for (basis, &value) in vector.iter().enumerate() {
+                direction[beta_offsets[*atom] + basis * width + channel] = value;
+            }
+            directions.push(direction);
+        }
+    }
+    gam_solve::arrow_schur::ArrowBetaGaugeQuotient::new(directions)
+        .map(|quotient| Some((quotient, pinned)))
+}
+
 impl SaeSupportOuterObjective {
     fn beta_layout(&self) -> Result<(Vec<usize>, usize), EstimationError> {
         self.term.beta_layout().map_err(outer_error)
@@ -712,10 +778,20 @@ impl SaeSupportOuterObjective {
                 self.trust_radius,
             )
             .map_err(outer_error)?;
-        let system = self
+        let mut system = self
             .term
             .assemble_arrow_schur(self.target.view(), &lambda_smooth, &self.ard_precisions)
             .map_err(outer_error)?;
+        // #2576: atoms no row selects leave border directions nothing identifies. The
+        // evidence prices the quotient without them (`unused_atom_null_quotient`),
+        // and `beta_nullity` below drops the same count.
+        let pinned_dims = match unused_atom_null_quotient(&self.term).map_err(outer_error)? {
+            Some((quotient, pinned)) => {
+                system.set_beta_gauge_quotient(quotient).map_err(outer_error)?;
+                pinned
+            }
+            None => 0,
+        };
         let (reduced_logdet, logdet_derivative) = self.evidence_log_det(&system)?;
         // Gaussian dispersion argument = the PENALIZED deviance
         //   D_p(ρ) = ‖y − ŷ‖² + β̂ᵀ S_ρ β̂ + (every other penalty the inner solve descends),
@@ -741,8 +817,11 @@ impl SaeSupportOuterObjective {
             )));
         }
         let (beta_offsets, beta_dim) = self.beta_layout()?;
+        // The pinned directions of atoms no row selects are not estimated, so they are
+        // not charged as fitted unpenalized coefficients.
         let beta_nullity = beta_dim
             .checked_sub(self.spectrum.total_rank)
+            .and_then(|nullity| nullity.checked_sub(pinned_dims))
             .ok_or_else(|| outer_error("support smooth penalty rank exceeds beta dimension"))?;
         let data_dim = self
             .term
