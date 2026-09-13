@@ -227,6 +227,7 @@ define_bms_flex_row_kernel_input_types! {
         y,
         w,
         e_obs,
+        crossing,
         cell_c0,
         cell_c1,
         cell_c2,
@@ -308,6 +309,8 @@ impl<'a> BmsFlexRowKernelInputs<'a> {
         check_len("y", self.y.len(), n)?;
         check_len("w", self.w.len(), n)?;
         check_len("e_obs", self.e_obs.len(), n)?;
+        let n3 = checked_shape_len("bms_flex_row validate [n,3]", &[n, 3])?;
+        check_len("crossing", self.crossing.len(), n3)?;
         check_len("chi_obs", self.chi_obs.len(), n)?;
         check_len("xi_obs", self.xi_obs.len(), n)?;
         let nr = checked_shape_len("bms_flex_row validate [n,r]", &[n, self.r])?;
@@ -469,6 +472,7 @@ extern "C" __global__ void bms_flex_row_kernel(
     const double * __restrict__ row_tau,      // [n_rows, r]
     const double * __restrict__ row_ruv,      // [n_rows, r*r]
     const double * __restrict__ row_e_obs,    // [n_rows] observed predictor VALUE
+    const double * __restrict__ row_crossing, // [n_rows, 3] crossing terms B[a,a], B[a,b], B[b,b]
     double       * __restrict__ row_f_au,      // [n_rows, r] general-width scratch
     double       * __restrict__ out_neglog,
     double       * __restrict__ out_grad,
@@ -605,6 +609,13 @@ extern "C" __global__ void bms_flex_row_kernel(
         F_uv[(size_t)v * (size_t)r] = 0.0;
     }
     F_uv[0] = -mu_2;
+
+    // Moving-boundary terms of the link-knot crossings over the intercept and
+    // the slope (u = 1), packed by the host with the CPU lowering's closed form.
+    size_t crossing_base = (size_t)row * 3;
+    F_aa += row_crossing[crossing_base];
+    F_au[1] += row_crossing[crossing_base + 1];
+    F_uv[(size_t)r + 1] += row_crossing[crossing_base + 2];
 
     // Guard: degenerate F_a ⇒ NaN-fill this row's outputs.
     if (!isfinite(F_a) || F_a <= 0.0) {
@@ -965,6 +976,7 @@ pub(crate) fn launch_linux(
     let d_tau = upload_f64(inputs.tau_u, "tau_u")?;
     let d_ruv = upload_f64(inputs.r_uv, "r_uv")?;
     let d_e_obs = upload_f64(inputs.e_obs, "e_obs")?;
+    let d_crossing = upload_f64(inputs.crossing, "crossing")?;
 
     let n = inputs.n_rows;
     let r = inputs.r;
@@ -1058,6 +1070,7 @@ pub(crate) fn launch_linux(
         .arg(&d_tau)
         .arg(&d_ruv)
         .arg(&d_e_obs)
+        .arg(&d_crossing)
         .arg(&mut d_f_au)
         .arg(&mut d_neglog)
         .arg(&mut d_grad)
@@ -2009,6 +2022,7 @@ pub(crate) fn launch_bms_flex_row_kernel_device_resident(
     let d_tau = upload_f64(inputs.tau_u, "tau_u")?;
     let d_ruv = upload_f64(inputs.r_uv, "r_uv")?;
     let d_e_obs = upload_f64(inputs.e_obs, "e_obs")?;
+    let d_crossing = upload_f64(inputs.crossing, "crossing")?;
 
     let d_marginal = upload_f64(marginal_design_row_major, "marginal_design")?;
     let d_slope = upload_f64(slope_design_row_major, "slope_design")?;
@@ -2107,6 +2121,7 @@ pub(crate) fn launch_bms_flex_row_kernel_device_resident(
         .arg(&d_tau)
         .arg(&d_ruv)
         .arg(&d_e_obs)
+        .arg(&d_crossing)
         .arg(&mut d_f_au)
         .arg(&mut d_neglog)
         .arg(&mut d_grad)

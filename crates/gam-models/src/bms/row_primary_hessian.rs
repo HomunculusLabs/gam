@@ -1366,6 +1366,7 @@ impl BernoulliMarginalSlopeFamily {
         let mut row_rho = vec![0.0_f64; n * r];
         let mut row_tau = vec![0.0_f64; n * r];
         let mut row_ruv = vec![0.0_f64; n * r * r];
+        let mut row_crossing = vec![0.0_f64; n * 3];
 
         // ── Per-cell SoA arrays sized once.
         let coeff4 = crate::bms::gpu::row::COEFF4;
@@ -1582,6 +1583,16 @@ impl BernoulliMarginalSlopeFamily {
                 }
             }
 
+            // Moving-boundary terms of the link-knot crossings (#2901), the same
+            // closed form `lower_bms_flex_row_order2_from_parts` adds.
+            let partition: Vec<exact::DenestedPartitionCell> =
+                row_cells.iter().map(|entry| entry.partition_cell).collect();
+            let crossing =
+                super::standard_normal_flex_fifth::standard_normal_flex_crossing_second_partials(
+                    &partition, a, b, scale,
+                );
+            row_crossing[row * 3..row * 3 + 3].copy_from_slice(&crossing);
+
             // ── Observed-point pre-evaluation (mirrors CPU lines 9265–9314).
             let z_obs = self.z[row];
             let u_obs = a + b * z_obs;
@@ -1761,6 +1772,7 @@ impl BernoulliMarginalSlopeFamily {
             y: row_y,
             w: row_w,
             e_obs: row_e_obs,
+            crossing: row_crossing,
             cell_offsets,
             cell_c0,
             cell_c1,
