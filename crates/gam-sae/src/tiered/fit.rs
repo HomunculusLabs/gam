@@ -38,7 +38,8 @@
 //! - Tier-1: the `G` blocks born at the data-row seed, each committed revival as
 //!   one death and one birth of its block, and the blocks still dead at the end,
 //!   so linear births minus linear deaths is the number of live blocks.
-//! - The code-space census's adjudicated promotions and refusals.
+//! - The code-space census's verdicts: accepted promotions as admitted moves (the
+//!   census installs nothing, so they add no atom) and refusals.
 //! - Tier-2's own account folded from its support fit: every curved atom born at
 //!   the support seed from projections of the Tier-1 residual rows (the
 //!   residual-factor pool), and the atoms that seed pruned for zero support mass.
@@ -96,8 +97,6 @@ pub struct Tier2SupportConfig {
     pub max_outer_iter: usize,
     /// Inner (fixed-point) iteration budget.
     pub max_inner_iter: usize,
-    /// Inner fixed-point stationarity tolerance.
-    pub inner_tolerance: f64,
     /// Inner coordinate trust radius.
     pub trust_radius: f64,
     /// Deterministic seed for the support routing and Hutchinson trace probes.
@@ -114,7 +113,6 @@ impl Default for Tier2SupportConfig {
             initial_smoothness: 1.0,
             max_outer_iter: 64,
             max_inner_iter: SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER,
-            inner_tolerance: 1.0e-8,
             trust_radius: 1.0,
             random_state: 0xC0FF_EE00_D15E_A5E5,
         }
@@ -423,10 +421,12 @@ pub fn fit_tiered(
             .iter()
             .map(|verdict| &verdict.proposal),
     );
+    // An accepted proposal is admitted, not born: the census adjudicates the
+    // replacement and mutates nothing, so no curved atom joins the model here.
     for proposal in census_proposals {
         let evidence = MoveEvidence::from_dl_bits(proposal.dl_old - proposal.dl_new);
         if proposal.accept {
-            ledger.birth(
+            ledger.admit(
                 MoveStage::Curved,
                 BirthSeed::LinearAtom,
                 1,
@@ -571,7 +571,6 @@ fn fit_tier2_support(
         initial_smoothness: config.initial_smoothness,
         max_outer_iter: config.max_outer_iter,
         max_inner_iter: config.max_inner_iter,
-        inner_tolerance: config.inner_tolerance,
         trust_radius: config.trust_radius,
         random_state: config.random_state,
     })?;
@@ -990,6 +989,7 @@ mod fit_tests {
         // Ledger provenance: the deferral is a recorded Curved REFUSAL, never a
         // curved birth, and the linear rung accounts for the one block.
         assert_eq!(stage_tally(&report.ledger, MoveStage::Curved).0, 0);
+        assert_eq!(report.ledger.n_admitted, 0, "a deferred promotion is not admitted");
         assert_linear_blocks_accounted(&report);
         assert!(
             report.ledger.n_refusals >= 1,
@@ -1165,9 +1165,10 @@ mod fit_tests {
     }
 
     /// #2023 criterion 3 on the public support-sparse entry: the fit's migration
-    /// ledger accounts for every requested atom — born at the support seed or
-    /// pruned there — records no principal-component reseed, and the payload
-    /// census record is exactly the typed census (its bulk, or its refusal).
+    /// ledger accounts for every requested atom — born at the support seed, pruned
+    /// there, or left with no row by a support move — records no principal-component
+    /// reseed, and the payload census record is exactly the typed census (its bulk,
+    /// or its refusal).
     #[test]
     fn public_support_fit_accounts_for_every_birth_and_death_2023() {
         use crate::manifold::{SaeSupportSparseFitRequest, fit_sae_support_sparse_with_census};
@@ -1181,7 +1182,6 @@ mod fit_tests {
             initial_smoothness: 1.0,
             max_outer_iter: 32,
             max_inner_iter: SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER,
-            inner_tolerance: 1.0e-8,
             trust_radius: 1.0,
             random_state: 0xC0FF_EE00_D15E_A5E5,
         })
@@ -1198,10 +1198,18 @@ mod fit_tests {
             fit.retained_atom_indices.len(),
             "every retained atom is one seed birth"
         );
+        let term = &fit.outer.term;
+        let live = (0..term.k_atoms())
+            .filter(|&atom| {
+                (0..term.n_obs())
+                    .any(|row| term.assignment.support_indices(row).contains(&(atom as u32)))
+            })
+            .count();
         assert_eq!(
-            migration.n_births + migration.n_deaths,
-            fit.requested_atoms,
-            "every requested atom is born or pruned at the seed"
+            migration.n_deaths,
+            fit.requested_atoms - live,
+            "every requested atom not live at the end is one death: pruned at the seed or \
+             left with no row by a support move"
         );
         assert_eq!(migration.n_refusals, 0);
         let record = censused.census_json();

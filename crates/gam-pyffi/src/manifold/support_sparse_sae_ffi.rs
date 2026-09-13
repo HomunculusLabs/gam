@@ -26,7 +26,6 @@ pub(crate) struct SupportSparseFitRequest<'a> {
     pub initial_smoothness: f64,
     pub max_iter: usize,
     pub trust_radius: f64,
-    pub tolerance: f64,
     pub random_state: u64,
 }
 
@@ -715,7 +714,6 @@ pub(crate) fn fit_support_sparse_manifold_sae(
         // `max_iter` is the caller's OUTER smoothing-search budget; the inner
         // fixed point gets the engine's own declaration.
         max_inner_iter: SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER,
-        inner_tolerance: request.tolerance,
         trust_radius: request.trust_radius,
         random_state: request.random_state,
     })
@@ -769,7 +767,8 @@ pub(crate) fn fit_support_sparse_manifold_sae(
         termination,
         max_iter: request.max_iter,
         trust_radius: request.trust_radius,
-        tolerance: request.tolerance,
+        // The tolerance the fit certified to, re-used for out-of-sample latents.
+        tolerance: outer.inner_tolerance,
         random_state: request.random_state,
     };
     Ok(Py::new(py, model)?.into_any())

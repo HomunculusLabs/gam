@@ -1218,6 +1218,23 @@ impl SaeSupportSparseTerm {
         cells.sqrt() * f64::EPSILON * objective.abs()
     }
 
+    /// The relative tolerance the support fixed point certifies to, derived from the
+    /// objective's arithmetic resolution rather than chosen (#2023, #2469).
+    ///
+    /// `penalized_objective` sums `n_obs · output_dim` residual cells plus the penalty
+    /// blocks, so it is known only to `r·|f|` with `r = √(n_obs · output_dim)·ε` (the
+    /// #2634 descent resolution). A stationary point is resolved no finer than `√r`:
+    /// near a minimum `f − f* ≈ ½·h·δ²`, so a displacement below `√(2·r·|f|/h)` moves
+    /// the objective by less than its resolution, and the curvature-scaled first-order
+    /// residual `g/h = δ` carries the same bound. Every limb of the certificate
+    /// (objective recurrence, first-order residual, state recurrence), the per-row
+    /// coordinate skip and the coupled step's linear solve are asked for `√r` and no
+    /// finer.
+    pub fn fixed_point_tolerance(&self) -> f64 {
+        let cells = (self.n_obs() * self.output_dim()).max(1) as f64;
+        (cells.sqrt() * f64::EPSILON).sqrt()
+    }
+
     /// Intensive iterate scale paired with the componentwise curvature-scaled
     /// stationarity residual. Every installed active coordinate and decoder
     /// coefficient participates; non-finite state is a typed refusal.

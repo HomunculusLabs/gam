@@ -14,8 +14,9 @@
 //! Both are the SAME accounting: an atom is born, dies, or a proposed move is
 //! refused, and the move pays evidence. [`SaeMigrationLedger`] is that one
 //! currency. A move is a [`SaeMove`] — `Birth` (residual → linear → curved),
-//! `Death` (the reverse fall back to the residual-factor pool), or `Refuse` (a
-//! proposed move the evidence did not buy) — and every move carries the single
+//! `Death` (the reverse fall back to the residual-factor pool), `Refuse` (a
+//! proposed move the evidence did not buy), or `Admit` (a proposed move the
+//! evidence bought that the fit reports without installing) — and every move carries the single
 //! [`MoveEvidence`] currency: a REML/LAML criterion delta, the rank/complexity
 //! charge it spends, and the net description-length change in **bits** (`dl_bits`)
 //! that unifies the tiered `curved_charge` and the e-process `log_e` (a log-e
@@ -181,6 +182,11 @@ pub enum SaeMove {
         stage: MoveStage,
         reason: MoveReason,
     },
+    /// A proposed move onto `stage` from `seed` that the evidence bought but this fit
+    /// reports without installing. The code-space census adjudicates each linear
+    /// community's curved replacement in bits and mutates nothing, so its accepted
+    /// proposals are admitted moves: no atom joined the model, and nothing was refused.
+    Admit { stage: MoveStage, seed: BirthSeed },
 }
 
 impl SaeMove {
@@ -190,7 +196,8 @@ impl SaeMove {
         match self {
             SaeMove::Birth { stage, .. }
             | SaeMove::Death { stage, .. }
-            | SaeMove::Refuse { stage, .. } => *stage,
+            | SaeMove::Refuse { stage, .. }
+            | SaeMove::Admit { stage, .. } => *stage,
         }
     }
 }
@@ -261,6 +268,8 @@ pub struct SaeMigrationLedger {
     pub n_deaths: usize,
     /// Total refusals (proposed move the evidence did not buy).
     pub n_refusals: usize,
+    /// Total admitted moves (the evidence bought them; the fit did not install them).
+    pub n_admitted: usize,
 }
 
 impl SaeMigrationLedger {
@@ -282,6 +291,7 @@ impl SaeMigrationLedger {
             }
             SaeMove::Death { .. } => self.n_deaths += mv.count,
             SaeMove::Refuse { .. } => self.n_refusals += mv.count,
+            SaeMove::Admit { .. } => self.n_admitted += mv.count,
         }
         self.moves.push(mv);
     }
@@ -346,6 +356,27 @@ impl SaeMigrationLedger {
         });
     }
 
+    /// Record a move onto `stage` from `seed` that the evidence bought but the fit
+    /// does not install.
+    pub fn admit(
+        &mut self,
+        stage: MoveStage,
+        seed: BirthSeed,
+        count: usize,
+        round: Option<usize>,
+        evidence: MoveEvidence,
+        objective: f64,
+    ) {
+        self.record(MigrationMove {
+            kind: SaeMove::Admit { stage, seed },
+            round,
+            count,
+            evidence,
+            objective,
+            predicted_dl_bits: None,
+        });
+    }
+
     /// The ledger as a JSON record for a fitted model's payload: the tallies, the
     /// `pc_reseed_events` invariant, and every move with its stage and seed or
     /// reason, count, round and evidence. Unscored evidence (`NaN`) is `null`.
@@ -359,6 +390,7 @@ impl SaeMigrationLedger {
                     SaeMove::Birth { stage, seed } => ("birth", stage, Some(*seed), None),
                     SaeMove::Death { stage, reason } => ("death", stage, None, Some(reason)),
                     SaeMove::Refuse { stage, reason } => ("refuse", stage, None, Some(reason)),
+                    SaeMove::Admit { stage, seed } => ("admitted", stage, Some(*seed), None),
                 };
                 serde_json::json!({
                     "kind": kind,
@@ -379,6 +411,7 @@ impl SaeMigrationLedger {
             "n_births": self.n_births,
             "n_deaths": self.n_deaths,
             "n_refusals": self.n_refusals,
+            "n_admitted": self.n_admitted,
             "pc_reseed_events": self.pc_reseed_events,
             "moves": moves,
         })
@@ -580,6 +613,34 @@ mod ledger_tests {
         assert_eq!(
             forbidden.pc_reseed_events, 2,
             "#2023: a later sanctioned birth cannot clear an earlier forbidden one"
+        );
+    }
+
+    /// #2023 criterion 3: an admitted move (a census verdict the fit does not install)
+    /// is counted apart from births and refusals, and the payload record names it.
+    #[test]
+    fn admitted_moves_are_counted_apart_from_births_and_refusals_2023() {
+        let mut ledger = SaeMigrationLedger::new();
+        ledger.admit(
+            MoveStage::Curved,
+            BirthSeed::LinearAtom,
+            2,
+            None,
+            MoveEvidence::from_dl_bits(5.0),
+            f64::NAN,
+        );
+        assert_eq!(ledger.n_admitted, 2);
+        assert_eq!(
+            (ledger.n_births, ledger.n_deaths, ledger.n_refusals, ledger.pc_reseed_events),
+            (0, 0, 0, 0),
+            "an admitted move adds no atom and refuses nothing"
+        );
+        let record = ledger.to_json();
+        assert_eq!(record["n_admitted"].as_u64(), Some(2));
+        assert_eq!(record["moves"][0]["kind"].as_str(), Some("admitted"));
+        assert_eq!(
+            record["moves"][0]["seed"].as_u64(),
+            Some(BirthSeed::LinearAtom.code())
         );
     }
 

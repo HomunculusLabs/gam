@@ -22,7 +22,6 @@ use ndarray::{Array2, Axis};
 struct Budget {
     max_outer: usize,
     max_inner: usize,
-    inner_tolerance: f64,
 }
 
 fn one_cell(target: &Array2<f64>, k_atoms: usize, top_k: usize, budget: &Budget) -> String {
@@ -84,7 +83,6 @@ fn one_cell(target: &Array2<f64>, k_atoms: usize, top_k: usize, budget: &Budget)
         ard_precisions,
         max_outer_iter: budget.max_outer,
         max_inner_iter: budget.max_inner,
-        inner_tolerance: budget.inner_tolerance,
         trust_radius: 1.0,
         random_state: 0,
     }) {
@@ -102,9 +100,9 @@ fn one_cell(target: &Array2<f64>, k_atoms: usize, top_k: usize, budget: &Budget)
 fn main() -> Result<(), String> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 8 {
+    if args.len() < 7 {
         return Err(
-            "usage: issue_2572_repro <f64-le.bin> <rows> <cols> <max_outer_iter> <max_inner_iter|0> <inner_tol> <k:s>..."
+            "usage: issue_2572_repro <f64-le.bin> <rows> <cols> <max_outer_iter> <max_inner_iter|0> <k:s>..."
                 .into(),
         );
     }
@@ -112,7 +110,6 @@ fn main() -> Result<(), String> {
     let cols: usize = args[3].parse().map_err(|e| format!("cols: {e}"))?;
     let max_outer: usize = args[4].parse().map_err(|e| format!("max_outer: {e}"))?;
     let max_inner: usize = args[5].parse().map_err(|e| format!("max_inner: {e}"))?;
-    let inner_tolerance: f64 = args[6].parse().map_err(|e| format!("inner_tol: {e}"))?;
     let budget = Budget {
         max_outer,
         max_inner: if max_inner == 0 {
@@ -120,7 +117,6 @@ fn main() -> Result<(), String> {
         } else {
             max_inner
         },
-        inner_tolerance,
     };
 
     let bytes = std::fs::read(&args[1]).map_err(|e| format!("{}: {e}", args[1]))?;
@@ -133,7 +129,7 @@ fn main() -> Result<(), String> {
         .collect();
     let target = Array2::from_shape_vec((rows, cols), data).map_err(|e| e.to_string())?;
 
-    for cell in &args[7..] {
+    for cell in &args[6..] {
         let (k_text, s_text) = cell.split_once(':').ok_or("cell must be <k>:<s>")?;
         let k_atoms: usize = k_text.parse().map_err(|e| format!("k: {e}"))?;
         let top_k: usize = s_text.parse().map_err(|e| format!("top_k: {e}"))?;

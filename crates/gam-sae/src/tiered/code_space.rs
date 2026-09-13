@@ -45,8 +45,7 @@ use crate::manifold::curve_promotion::{
 };
 use crate::manifold::{
     GraphCompressionKind, LocalAtlas, LocalAtlasConfig, SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER,
-    SAE_SUPPORT_INNER_TOLERANCE, SaeSupportSparseFitRequest, fit_sae_support_sparse,
-    observe_atlas_topology,
+    SaeSupportSparseFitRequest, fit_sae_support_sparse, observe_atlas_topology,
 };
 use crate::sparse_dict::BlockSparseFit;
 
@@ -817,7 +816,6 @@ fn fit_pair_chart_at_seed(
         initial_smoothness: 1.0,
         max_outer_iter: 32,
         max_inner_iter: SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER,
-        inner_tolerance: SAE_SUPPORT_INNER_TOLERANCE,
         trust_radius: 1.0,
         random_state,
     })?;

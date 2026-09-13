@@ -180,7 +180,6 @@ fn ring_curved_fit(target: ArrayView2<'_, f64>) -> Result<SaeSupportSparseFit, S
         initial_smoothness: 1.0,
         max_outer_iter: 32,
         max_inner_iter: SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER,
-        inner_tolerance: 1.0e-4,
         trust_radius: 1.0,
         random_state: 0xC0FF_EE00_D15E_A5E5,
     })

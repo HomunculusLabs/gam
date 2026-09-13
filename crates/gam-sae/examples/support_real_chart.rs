@@ -14,9 +14,9 @@
 
 use gam_sae::front_door::{SaeFitLane, admit_topk_manifold};
 use gam_sae::manifold::{
-    SAE_SUPPORT_INNER_TOLERANCE, SaeSupportOuterRequest, SaeSupportSeedRequest,
-    SaeSupportTermSeedRequest, build_sae_support_seed, build_sae_support_term_seed,
-    resolve_support_auto_atoms, run_sae_support_outer, sae_support_effective_atom_dims,
+    SaeSupportOuterRequest, SaeSupportSeedRequest, SaeSupportTermSeedRequest,
+    build_sae_support_seed, build_sae_support_term_seed, resolve_support_auto_atoms,
+    run_sae_support_outer, sae_support_effective_atom_dims,
 };
 use ndarray::{Array2, Axis};
 use std::time::Instant;
@@ -106,7 +106,6 @@ fn main() -> Result<(), String> {
         ard_precisions,
         max_outer_iter,
         max_inner_iter,
-        inner_tolerance: SAE_SUPPORT_INNER_TOLERANCE,
         trust_radius: 1.0,
         random_state: 0,
     })

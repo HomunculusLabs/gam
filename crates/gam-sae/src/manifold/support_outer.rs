@@ -272,17 +272,6 @@ impl SaeSupportSmoothingLayout {
 /// came to disagree 4:1.
 pub const SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER: usize = 256;
 
-/// Relative first-order tolerance of the support-sparse inner fixed point.
-///
-/// [`SaeSupportSparseTerm::solve_fixed_point`] certifies `|g|_inf <= tol·max(1, |f|)`
-/// on relative, gauge-invariant limbs and reports the value it achieved (#2517). This
-/// is the `ε^(1/4)` scale, rounded to `1e-4`: a relative `1e-6` is unreachable for an
-/// alternating inner solve on real irreducible-residual data.
-///
-/// The public support-sparse fit entry, through its FFI request, and the code-space
-/// census's pair chart read this one declaration.
-pub const SAE_SUPPORT_INNER_TOLERANCE: f64 = 1.0e-4;
-
 pub struct SaeSupportOuterRequest {
     pub term: SaeSupportSparseTerm,
     pub target: Array2<f64>,
@@ -290,7 +279,6 @@ pub struct SaeSupportOuterRequest {
     pub ard_precisions: Vec<Vec<f64>>,
     pub max_outer_iter: usize,
     pub max_inner_iter: usize,
-    pub inner_tolerance: f64,
     pub trust_radius: f64,
     pub random_state: u64,
 }
@@ -305,6 +293,10 @@ pub struct SaeSupportOuterReport {
     pub fixed_point: SaeSupportFixedPointReport,
     pub outer_iterations: usize,
     pub outer_certificate: OuterCriterionCertificate,
+    /// The relative tolerance the inner fixed point certified to:
+    /// [`SaeSupportSparseTerm::fixed_point_tolerance`] of the term the search started
+    /// from.
+    pub inner_tolerance: f64,
 }
 
 struct PenaltySpectrum {
@@ -951,6 +943,9 @@ pub fn run_sae_support_outer(
     // fixed point and rational evidence evaluation.
     let objective_scale = request.target.len() as f64;
     let initial_term = request.term.clone();
+    // The inner fixed point certifies to the resolution its own objective has, not to
+    // a caller's number, so every driver of this engine gets the same derived value.
+    let inner_tolerance = request.term.fixed_point_tolerance();
     let mut objective = SaeSupportOuterObjective {
         term: request.term,
         initial_term,
@@ -959,7 +954,7 @@ pub fn run_sae_support_outer(
         spectrum,
         ard_precisions: request.ard_precisions.clone(),
         max_inner_iter: request.max_inner_iter,
-        inner_tolerance: request.inner_tolerance,
+        inner_tolerance,
         trust_radius: request.trust_radius,
         random_state: request.random_state,
         last_evaluation: None,
@@ -1008,6 +1003,7 @@ pub fn run_sae_support_outer(
         fixed_point: terminal.fixed_point,
         outer_iterations: outer.iterations,
         outer_certificate: certificate,
+        inner_tolerance,
     })
 }
 
@@ -1029,8 +1025,6 @@ pub struct SaeSupportSparseFitRequest<'a> {
     pub max_outer_iter: usize,
     /// Inner fixed-point iteration budget.
     pub max_inner_iter: usize,
-    /// Inner fixed-point relative stationarity tolerance.
-    pub inner_tolerance: f64,
     /// Inner coordinate trust radius.
     pub trust_radius: f64,
     /// Deterministic seed for the support routing and the evidence probes.
@@ -1059,9 +1053,11 @@ pub struct SaeSupportSparseFit {
     pub reconstruction_r2: f64,
     /// Every birth and death of this fit. The support lane has no reseed: each
     /// atom is born once, at the support seed, from the centered rows' own
-    /// projections, and an atom no row selected is pruned at that boundary. So
-    /// the seed's births and prunings are the whole account, and
-    /// `pc_reseed_events` is `0`.
+    /// projections, and an atom no row selected is pruned at that boundary. A
+    /// support move re-routes rows among the retained atoms and can leave one with
+    /// no row; that atom stays in the term, reconstructs nothing, and is recorded
+    /// as a death at the end. So births are the retained atoms, deaths are every
+    /// requested atom not live at the end, and `pc_reseed_events` is `0`.
     pub migration: SaeMigrationLedger,
 }
 
@@ -1135,7 +1131,6 @@ pub fn fit_sae_support_sparse(
         ard_precisions,
         max_outer_iter: request.max_outer_iter,
         max_inner_iter: request.max_inner_iter,
-        inner_tolerance: request.inner_tolerance,
         trust_radius: request.trust_radius,
         random_state: request.random_state,
     })
@@ -1172,6 +1167,25 @@ pub fn fit_sae_support_sparse(
             MoveReason::DeadRouting,
             pruned,
             Some(0),
+            MoveEvidence::none(),
+            outer.criterion,
+        );
+    }
+    // A support move re-routes rows among the retained atoms and keeps every atom
+    // in the term, so one it left with no row is a death after the seed.
+    let mut occupied = vec![false; outer.term.k_atoms()];
+    for row in 0..outer.term.n_obs() {
+        for &atom in outer.term.assignment.support_indices(row) {
+            occupied[atom as usize] = true;
+        }
+    }
+    let emptied = occupied.iter().filter(|&&used| !used).count();
+    if emptied > 0 {
+        migration.death(
+            MoveStage::Curved,
+            MoveReason::DeadRouting,
+            emptied,
+            None,
             MoveEvidence::none(),
             outer.criterion,
         );
