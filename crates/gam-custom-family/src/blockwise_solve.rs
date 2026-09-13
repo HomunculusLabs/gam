@@ -2503,6 +2503,23 @@ pub(crate) struct ConstrainedHessianGeometry {
 /// resolution a mode's curvature is not a number and μ supplies gauge
 /// uniqueness; above it every mode keeps at least its exact magnitude, which the
 /// ambient shift only ever raises.
+///
+/// The decomposition runs on the equilibrated matrix `C = D⁻¹HD⁻¹`,
+/// `D = diag(√|H_jj|)`, and the result is mapped back as `D·C_stab·D`. `H` is
+/// assembled entry by entry, so an entry is resolved relative to its own size,
+/// and so is every entry of `C`. The eigensolver's floor `λ_max·√p·ε` on `H` is
+/// set by its stiffest column instead. On the #2695 witness one direction at
+/// `λ_max = 5.23e16` put that floor near 59 on a 26-wide Hessian whose other 25
+/// modes had curvature 0.16 to 0.5: every one was counted null and replaced by
+/// μ, so the QP crawled at about 1/116 of the Newton proposal. `C` is a
+/// congruence of `H`, so it has the same inertia and nullity, and among diagonal
+/// scalings its condition is within a factor `p` of the best (van der Sluis). A
+/// numerical-null mode `v` of `C` is given the curvature `μ·‖D⁻¹v‖²`, so the
+/// mapped direction `D⁻¹v` carries curvature μ in the frame of `H`, and the
+/// ambient shift raises every mode by that same Rayleigh quotient of `μ·D⁻²`.
+/// The reported condition and minimum eigenvalues are those of `C`. The ambient
+/// shift is still triggered on the condition of `H`, the matrix a family's
+/// request is about.
 pub(crate) fn symmetric_constrained_hessian_geometry(
     matrix: &Array2<f64>,
     levenberg_mu: f64,
@@ -2518,7 +2535,23 @@ pub(crate) fn symmetric_constrained_hessian_geometry(
     }
     let mut sym = matrix.clone();
     symmetrize_dense_in_place(&mut sym);
-    let (evals, evecs) = FaerEigh::eigh(&sym, Side::Lower)
+    // Column scales of the equilibration. A zero or non-finite diagonal carries
+    // no scale, and its column is left as it is.
+    let column_scale = Array1::from_shape_fn(p, |j| {
+        let magnitude = sym[[j, j]].abs();
+        if magnitude.is_finite() && magnitude > 0.0 {
+            magnitude.sqrt()
+        } else {
+            1.0
+        }
+    });
+    let mut equilibrated = sym.clone();
+    for i in 0..p {
+        for j in 0..p {
+            equilibrated[[i, j]] /= column_scale[i] * column_scale[j];
+        }
+    }
+    let (evals, evecs) = FaerEigh::eigh(&equilibrated, Side::Lower)
         .map_err(|error| CustomFamilyError::trial_point(format!("constrained Hessian eigendecomposition failed: {error:?}")))?;
     let lambda_max_abs = evals.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
     if !(lambda_max_abs.is_finite() && lambda_max_abs > 0.0) {
@@ -2538,29 +2571,67 @@ pub(crate) fn symmetric_constrained_hessian_geometry(
     };
     let ambient_levenberg = nullity == 0
         && damp_full_rank_ill_conditioned
-        && condition > LEVENBERG_ILL_CONDITIONING_THRESHOLD;
+        && assembled_hessian_condition(&sym)? > LEVENBERG_ILL_CONDITIONING_THRESHOLD;
     let mu = if levenberg_mu.is_finite() && levenberg_mu > 0.0 {
         levenberg_mu
     } else {
         0.0
     };
-    let stabilized = Array1::from_iter(evals.iter().map(|lambda| {
+    let stabilized = Array1::from_iter(evals.iter().enumerate().map(|(mode, lambda)| {
+        // Curvature μ along the mode's direction in the frame of H is μ·‖D⁻¹v‖² in C.
+        let mu_in_mode = mu
+            * evecs
+                .column(mode)
+                .iter()
+                .zip(column_scale.iter())
+                .map(|(component, scale)| (component / scale) * (component / scale))
+                .sum::<f64>();
         if nullity > 0 && lambda.abs() < cutoff {
-            mu.max(cutoff)
+            mu_in_mode.max(cutoff)
         } else if ambient_levenberg {
-            (lambda + mu).abs().max(cutoff)
+            (lambda + mu_in_mode).abs().max(cutoff)
         } else {
             lambda.abs().max(cutoff)
         }
     }));
     let stabilized_min_eigenvalue = stabilized.iter().copied().fold(f64::INFINITY, f64::min);
     let scaled = &evecs * &stabilized.view().insert_axis(ndarray::Axis(0));
+    let mut stabilized_matrix = scaled.dot(&evecs.t());
+    for i in 0..p {
+        for j in 0..p {
+            stabilized_matrix[[i, j]] *= column_scale[i] * column_scale[j];
+        }
+    }
     Ok(ConstrainedHessianGeometry {
-        matrix: scaled.dot(&evecs.t()),
+        matrix: stabilized_matrix,
         nullity,
         condition,
         raw_min_eigenvalue: evals.iter().copied().fold(f64::INFINITY, f64::min),
         stabilized_min_eigenvalue,
+    })
+}
+
+/// Condition of an assembled symmetric Hessian over its resolvable modes: the
+/// largest curvature magnitude over the smallest one at or above the
+/// eigensolver's floor `λ_max·√p·ε`.
+fn assembled_hessian_condition(sym: &Array2<f64>) -> Result<f64, CustomFamilyError> {
+    let (evals, _) = FaerEigh::eigh(sym, Side::Lower).map_err(|error| {
+        CustomFamilyError::trial_point(format!(
+            "constrained Hessian eigendecomposition failed: {error:?}"
+        ))
+    })?;
+    let lambda_max_abs = evals.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+    let cutoff =
+        crate::joint_newton::joint_hessian_numerical_eigenvalue_floor(lambda_max_abs, sym.nrows());
+    let min_range = evals
+        .iter()
+        .map(|value| value.abs())
+        .filter(|magnitude| *magnitude >= cutoff && *magnitude > 0.0)
+        .fold(f64::INFINITY, f64::min);
+    Ok(if min_range.is_finite() && min_range > 0.0 {
+        lambda_max_abs / min_range
+    } else {
+        f64::INFINITY
     })
 }
 
@@ -2679,6 +2750,33 @@ mod constrained_hessian_geometry_tests {
             damped_weak >= weak,
             "the ambient Levenberg shift must not flatten an identified mode: {damped_weak} < {weak}"
         );
+    }
+
+    /// #2695: one column 1e8 times stiffer than the others sets the raw
+    /// eigensolver floor `λ_max·√p·ε` near 3.9, above the O(1) curvature of the
+    /// two weaker modes of this positive-definite Hessian. Counted null, they
+    /// would take μ. Equilibrated, nothing is null, every mode keeps its exact
+    /// curvature, and the QP geometry is the Hessian itself.
+    #[test]
+    fn a_stiff_column_does_not_flatten_the_resolvable_modes_beside_it_2695() {
+        let correlation = array![[1.0, 0.3, 0.2], [0.3, 1.0, 0.4], [0.2, 0.4, 1.0]];
+        let scale = array![1.0e8, 1.0, 0.7];
+        let hessian =
+            Array2::from_shape_fn((3, 3), |(i, j)| scale[i] * correlation[[i, j]] * scale[j]);
+        let mu = 1.0e-2;
+        let geometry = symmetric_constrained_hessian_geometry(&hessian, mu, false)
+            .expect("stiff-column symmetric geometry");
+        assert_eq!(geometry.nullity, 0, "every mode of a positive-definite Hessian is resolvable");
+        for i in 0..3 {
+            for j in 0..3 {
+                let expected = hessian[[i, j]];
+                let actual = geometry.matrix[[i, j]];
+                assert!(
+                    (actual - expected).abs() <= 1e-9 * expected.abs().max(1.0),
+                    "entry ({i}, {j}): the QP geometry must be the Hessian, got {actual} vs {expected}"
+                );
+            }
+        }
     }
 }
 
