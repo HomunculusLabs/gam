@@ -2218,11 +2218,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             &per_block,
             options,
             persistent_warm_start.as_ref(),
-        )
-        .map_err(|error| CustomFamilyError::Optimization {
-            context: "fit_custom_family no-smoothing inner solve",
-            reason: format!("{error}; no fit was assembled"),
-        })?;
+        )?;
         let warm_start = constrained_warm_start_from_inner(&rho0, &inner);
         // An unconverged solve never seeds a later fit (#2902).
         if inner.converged {
@@ -2233,14 +2229,10 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             );
         }
         if !inner.converged {
-            return Err(CustomFamilyError::Optimization {
-                context: "fit_custom_family no-smoothing inner solve",
-                reason: format!(
-                    "coefficient optimization did not converge after {} cycles; no fit was \
-                     assembled",
-                    inner.cycles
-                ),
-            });
+            // The terminal verdict travels typed, as the fixed-log-lambda route
+            // returns it (#1561): the Jeffreys arming lifecycle reads its terminal
+            // reason as arming evidence, and text carries none (#979).
+            return Err(inner_solve_not_converged_error(&inner, 0, 0));
         }
         refresh_all_block_etas(family, specs, &mut inner.block_states)?;
         audit_converged_identifiability(family, raw_specs, &canonical, &inner.block_states, 0)?;
