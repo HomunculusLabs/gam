@@ -564,10 +564,7 @@ pub(crate) fn fit_transformation_normal(
             let geometry = cache_ref
                 .as_mut()
                 .ok_or_else(|| "missing transformation exact geometry cache".to_string())?;
-            let final_options = crate::outer_subsample::exact_outer_options_for_row_set(
-                &options,
-                &gam_problem::outer_subsample::RowSet::All,
-            );
+            let final_options = crate::outer_subsample::exact_outer_options(&options);
             let fit = match provenance {
                 SpatialFitProvenance::NoOuterOptimization => {
                     let warm_starts =
@@ -651,7 +648,6 @@ pub(crate) fn fit_transformation_normal(
          specs: &[TermCollectionSpec],
          designs: &[TermCollectionDesign],
          eval_mode,
-         row_set,
          owned_value_mode| {
             let rho = theta.slice(s![..joint_setup.rho_dim()]).to_owned();
             let hyper_values = theta.slice(s![joint_setup.rho_dim()..]).to_owned();
@@ -660,11 +656,9 @@ pub(crate) fn fit_transformation_normal(
             let geometry = cache_ref
                 .as_mut()
                 .ok_or_else(|| "missing transformation exact geometry cache".to_string())?;
-            // `row_set` is the outer driver's authoritative measure. Rebuild
-            // the family-facing option on every evaluation so a pilot mask
-            // cannot survive the driver's rotation back to full data.
-            let eval_options =
-                crate::outer_subsample::exact_outer_options_for_row_set(&options, row_set);
+            // Rebuild the family-facing options on every evaluation so no
+            // inherited pilot mask or automatic sample reaches the family.
+            let eval_options = crate::outer_subsample::exact_outer_options(&options);
             // When the driver asks for derivatives at the θ of a value-only
             // evaluation (a line search's accepted step), it hands over that
             // evaluation's converged mode. The mode already is the profile's
@@ -758,7 +752,7 @@ pub(crate) fn fit_transformation_normal(
                 mode: selection,
             })
         },
-        |_, _: &[TermCollectionSpec], _: &[TermCollectionDesign], _| {
+        |_, _: &[TermCollectionSpec], _: &[TermCollectionDesign]| {
             Err::<ExactJointEfsEvaluation<crate::custom_family::CustomFamilyJointHyperModeSelection>, String>("transformation-normal EFS callback invoked even though fixed-point optimization is disabled for beta-dependent exact curvature".to_string())
         },
         |_: &Array1<f64>| Ok(gam_solve::rho_optimizer::SeedOutcome::NoSlot),

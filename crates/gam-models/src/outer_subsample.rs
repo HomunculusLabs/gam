@@ -9,26 +9,19 @@
 
 pub use gam_problem::outer_subsample::*;
 
-/// Derive the exact family-facing outer options from the spatial optimizer's
-/// authoritative row measure.
+/// Derive the exact family-facing outer options for the spatial optimizer,
+/// which evaluates every row.
 ///
-/// This is the sole bridge from [`RowSet`] into custom-family options.  In
-/// particular, `All` must clear both an inherited pilot and automatic sampling;
-/// otherwise a pilot mask can survive the optimizer's full-data transition and
-/// make the inner mode, objective, gradient, and Hessian describe different
-/// measures.
-pub(crate) fn exact_outer_options_for_row_set(
+/// This is the sole bridge from the spatial driver into custom-family options.
+/// It clears both an inherited pilot mask and automatic sampling; otherwise a
+/// pilot mask could reach the family and make the inner mode, objective,
+/// gradient, and Hessian describe different measures.
+pub(crate) fn exact_outer_options(
     options: &crate::custom_family::BlockwiseFitOptions,
-    row_set: &RowSet,
 ) -> crate::custom_family::BlockwiseFitOptions {
     let mut effective = options.clone();
     effective.auto_outer_subsample = false;
-    effective.outer_score_subsample = match row_set {
-        RowSet::All => None,
-        RowSet::Subsample { rows, n_full } => Some(std::sync::Arc::new(
-            OuterScoreSubsample::from_weighted_rows(rows.as_ref().clone(), *n_full, 0),
-        )),
-    };
+    effective.outer_score_subsample = None;
     effective
 }
 
@@ -43,39 +36,8 @@ mod tests {
         options.outer_score_subsample = Some(std::sync::Arc::new(
             OuterScoreSubsample::from_uniform_inclusion_mask(vec![9], 10, 17),
         ));
-        let rows = std::sync::Arc::new(vec![
-            WeightedOuterRow {
-                index: 1,
-                weight: 2.5,
-                stratum: 3,
-            },
-            WeightedOuterRow {
-                index: 7,
-                weight: 4.0,
-                stratum: 8,
-            },
-        ]);
 
-        let sampled = exact_outer_options_for_row_set(
-            &options,
-            &RowSet::Subsample { rows, n_full: 11 },
-        );
-        assert!(!sampled.auto_outer_subsample);
-        let installed = sampled
-            .outer_score_subsample
-            .as_ref()
-            .expect("authoritative exact-outer row measure");
-        assert_eq!(installed.n_full, 11);
-        assert_eq!(installed.seed, 0);
-        assert_eq!(installed.rows.len(), 2);
-        assert_eq!(installed.rows[0].index, 1);
-        assert_eq!(installed.rows[0].weight.to_bits(), 2.5_f64.to_bits());
-        assert_eq!(installed.rows[0].stratum, 3);
-        assert_eq!(installed.rows[1].index, 7);
-        assert_eq!(installed.rows[1].weight.to_bits(), 4.0_f64.to_bits());
-        assert_eq!(installed.rows[1].stratum, 8);
-
-        let full = exact_outer_options_for_row_set(&options, &RowSet::All);
+        let full = exact_outer_options(&options);
         assert!(!full.auto_outer_subsample);
         assert!(
             full.outer_score_subsample.is_none(),

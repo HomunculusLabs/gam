@@ -1942,10 +1942,7 @@ fn inner_fit_from_certified_outer(
     theta: &Array1<f64>,
     outer: &gam_solve::rho_optimizer::CertifiedOuterResult,
 ) -> Result<UnifiedFitResult, String> {
-    let mut options = crate::outer_subsample::exact_outer_options_for_row_set(
-        options,
-        &crate::row_kernel::RowSet::All,
-    );
+    let mut options = crate::outer_subsample::exact_outer_options(options);
     options.use_outer_hessian = false;
     options.outer_tol = options.outer_tol.max(2.0e-5);
     fit_custom_family_fixed_log_lambdas_from_mode_selection(
@@ -2878,7 +2875,6 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
          specs: &[TermCollectionSpec],
          designs: &[TermCollectionDesign],
          eval_mode,
-         row_set: &crate::row_kernel::RowSet,
          owned_value_mode| {
             if let Some(err) = runaway_error.borrow().as_ref().cloned() {
                 return Err(err);
@@ -2892,12 +2888,9 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
             // marker per eval; this one records the row-measure exactly once.
             static BMS_OUTER_EVAL_ROWSET_LOGGED: std::sync::Once = std::sync::Once::new();
             BMS_OUTER_EVAL_ROWSET_LOGGED.call_once(|| {
-                let row_set_rows = match row_set {
-                    crate::row_kernel::RowSet::All => spec.y.len(),
-                    crate::row_kernel::RowSet::Subsample { rows, .. } => rows.len(),
-                };
                 log::debug!(
-                    "[BMS exact outer eval] mode={eval_mode:?} row_set_rows={row_set_rows}"
+                    "[BMS exact outer eval] mode={eval_mode:?} rows={}",
+                    spec.y.len()
                 );
             });
             let rho = theta.slice(s![..setup.rho_dim()]).to_owned();
@@ -2937,10 +2930,7 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
             };
             let tolerance_options =
                 joint_hyper_options_for_outer_tolerance(options, exact_spatial_outer_tol);
-            let eval_options = crate::outer_subsample::exact_outer_options_for_row_set(
-                &tolerance_options,
-                row_set,
-            );
+            let eval_options = crate::outer_subsample::exact_outer_options(&tolerance_options);
             // At the θ of a value-only evaluation (a line search's accepted
             // step) the driver hands over that evaluation's converged mode.
             // Derivatives are assembled on it: re-solving from the anchor
@@ -3015,7 +3005,7 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
                 mode: selection,
             })
         },
-        |_, _, _, _| {
+        |_, _, _| {
             Err::<ExactJointEfsEvaluation<CustomFamilyJointHyperModeSelection>, String>(
                 "bernoulli marginal-slope EFS callback invoked even though fixed-point optimization is disabled for beta-dependent exact curvature".to_string(),
             )

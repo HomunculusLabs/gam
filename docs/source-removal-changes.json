@@ -6708,5 +6708,13 @@
     ],
     "reason": "#2267 duplicate work. When exact_observed_information_log_dets refused a basin as indefinite, the evidence root called exact_a_saddle_directions at the same rho, target and cache. That call materialized the same dense exact A again (slots + k probe applies), ran the same symmetric eigendecomposition again, and reclassified the same basin only to collect the refused directions the first classification had discarded. The production pricing now classifies once with the directions collected (exact_observed_information_log_dets_with_saddle_directions), and the evidence root descends from those. The value-only exact_observed_information_log_dets is kept for its test callers in a #[cfg(test)] tests_* module, following the #2731 precedent.",
     "evidence": "At the base, git grep -n exact_a_saddle_directions over crates, src and tests finds its declaration, one doc link in construction_exact_hessian.rs, one call in construction_quasi_laplace.rs (the evidence root, right after the refused exact_observed_information_log_dets on the same cache) and one doc link on descend_exact_a_saddle. Both function bodies are identical up to classify_exact_hessian_basin's refused_directions argument (None vs Some). Every other caller of exact_observed_information_log_dets is a test module. Candidate checked with cargo check -p gam-sae --all-targets before landing; see the commit message for the job."
+  },
+  {
+    "base": "ae20f32b2d4049eecb46db9cccda4185634ce1a3",
+    "items": [
+      "crates/gam-models/src/outer_subsample.rs:fn:exact_outer_options_for_row_set"
+    ],
+    "reason": "#2897, SPEC rule 25. 7fbdcd955 removed the staged kappa pilot, the only producer of a sampled RowSet for optimize_spatial_length_scale_exact_joint, so its three call sites pass RowSet::All and every evaluator closure received a row set that could only be All. The argument is removed and exact_outer_options_for_row_set(options, row_set) becomes exact_outer_options(options), which keeps the All arm (clear automatic sampling and any inherited mask). The Subsample arm and its test assertions had no caller.",
+    "evidence": "At the base, git grep -n -w exact_outer_options_for_row_set over crates, src, tests and examples finds its definition, two calls in its own test, and 15 production calls (bms/block_specs.rs x2, gamlss/builders.rs x3, survival/latent/survival/mod.rs x3, survival/location_scale/fit.rs x3, survival/marginal_slope/fit_entry.rs, survival/marginal_slope/fit_setup.rs, transformation_normal/fit.rs x2). Each passes RowSet::All or the driver argument, whose only producers are the three RowSet::All literals in spatial_optimization.rs. All are rewritten in this commit."
   }
 ]

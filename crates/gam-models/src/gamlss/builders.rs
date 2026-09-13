@@ -3303,11 +3303,7 @@ pub(crate) fn fit_location_scale_terms<B: LocationScaleFamilyBuilder>(
                                     );
                                 }
                             };
-                            let exact_options =
-                                crate::outer_subsample::exact_outer_options_for_row_set(
-                                    options,
-                                    &crate::row_kernel::RowSet::All,
-                                );
+                            let exact_options = crate::outer_subsample::exact_outer_options(options);
                             fit_custom_family_fixed_log_lambdas_from_owned_mode(
                                 &family,
                                 &blocks,
@@ -3331,7 +3327,6 @@ pub(crate) fn fit_location_scale_terms<B: LocationScaleFamilyBuilder>(
                  specs: &[TermCollectionSpec],
                  designs: &[TermCollectionDesign],
                  eval_mode,
-                 row_set: &crate::row_kernel::RowSet,
                  _| {
                     use gam_problem::EvalMode;
                     if !analytic_joint_derivatives_available {
@@ -3372,14 +3367,9 @@ pub(crate) fn fit_location_scale_terms<B: LocationScaleFamilyBuilder>(
                         theta.slice(s![joint_setup.rho_dim()..]).to_owned(),
                     )?;
                     let warm_start = hyper_warm_start_cell.borrow().clone();
-                    // Forward the κ-staging row set to the family by installing it
-                    // on the canonical `outer_score_subsample` option. Inner-PIRLS
-                    // and final covariance still run on full data (the per-row
-                    // weight is consulted only by outer-only paths inside the
-                    // family). When the staging schedule is full-data the option
-                    // stays `None` and the call is equivalent to the prior path.
-                    let eval_options =
-                        crate::outer_subsample::exact_outer_options_for_row_set(options, row_set);
+                    // The spatial driver evaluates every row, so the family sees
+                    // no inherited pilot mask and no automatic sample.
+                    let eval_options = crate::outer_subsample::exact_outer_options(options);
                     let owned = evaluate_custom_family_joint_hyper_owned(
                         &family,
                         &blocks,
@@ -3414,8 +3404,7 @@ pub(crate) fn fit_location_scale_terms<B: LocationScaleFamilyBuilder>(
                 },
                 |theta,
                  specs: &[TermCollectionSpec],
-                 designs: &[TermCollectionDesign],
-                 row_set: &crate::row_kernel::RowSet| {
+                 designs: &[TermCollectionDesign]| {
                     if !analytic_joint_derivatives_available {
                         return Err(
                             "analytic spatial psi derivatives are unavailable for this exact two-block path"
@@ -3454,8 +3443,7 @@ pub(crate) fn fit_location_scale_terms<B: LocationScaleFamilyBuilder>(
                         theta.slice(s![joint_setup.rho_dim()..]).to_owned(),
                     )?;
                     let warm_start = hyper_warm_start_cell.borrow().clone();
-                    let eval_options =
-                        crate::outer_subsample::exact_outer_options_for_row_set(options, row_set);
+                    let eval_options = crate::outer_subsample::exact_outer_options(options);
                     let owned = evaluate_custom_family_joint_hyper_efs_owned(
                         &family,
                         &blocks,

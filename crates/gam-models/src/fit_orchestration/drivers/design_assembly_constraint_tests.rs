@@ -2260,7 +2260,7 @@ pub(super) fn run_two_block_exact_joint_optimize(
                 + designs[0].penalties.len() as f64
                 + designs[1].penalties.len() as f64)
         },
-        |theta, specs, designs, eval_mode, _, _| {
+        |theta, specs, designs, eval_mode, _| {
             assert_eq!(theta.len(), theta_dim);
             assert_eq!(specs.len(), 2);
             assert!(!designs.is_empty());
@@ -2280,7 +2280,7 @@ pub(super) fn run_two_block_exact_joint_optimize(
                 mode: (),
             })
         },
-        |theta, specs, designs, _| {
+        |theta, specs, designs| {
             assert_eq!(theta.len(), theta_dim);
             assert_eq!(specs.len(), 2);
             assert!(!designs.is_empty());

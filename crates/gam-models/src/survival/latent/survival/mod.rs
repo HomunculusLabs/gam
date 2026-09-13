@@ -1010,10 +1010,7 @@ fn fit_latent_survival_baseline_axes(
                     fit_custom_family(&family, &blocks, options).map_err(|error| error.to_string())?
                 }
                 SpatialFitProvenance::Certified { outer, mode } => {
-                    let exact_options = crate::outer_subsample::exact_outer_options_for_row_set(
-                        options,
-                        &crate::row_kernel::RowSet::All,
-                    );
+                    let exact_options = crate::outer_subsample::exact_outer_options(options);
                     crate::custom_family::fit_custom_family_fixed_log_lambdas_from_owned_mode(
                         &family,
                         &blocks,
@@ -1031,7 +1028,6 @@ fn fit_latent_survival_baseline_axes(
          specs: &[TermCollectionSpec],
          designs: &[TermCollectionDesign],
          eval_mode,
-         row_set: &crate::row_kernel::RowSet,
          _| {
             check_designs(specs, designs)?;
             let (family, blocks) = realize(theta)?;
@@ -1045,8 +1041,7 @@ fn fit_latent_survival_baseline_axes(
                 }
                 other => other,
             };
-            let eval_options =
-                crate::outer_subsample::exact_outer_options_for_row_set(options, row_set);
+            let eval_options = crate::outer_subsample::exact_outer_options(options);
             let owned = crate::custom_family::evaluate_custom_family_joint_hyper_owned(
                 &family,
                 &blocks,
@@ -1073,15 +1068,13 @@ fn fit_latent_survival_baseline_axes(
         },
         |theta,
          specs: &[TermCollectionSpec],
-         designs: &[TermCollectionDesign],
-         row_set: &crate::row_kernel::RowSet| {
+         designs: &[TermCollectionDesign]| {
             check_designs(specs, designs)?;
             let (family, blocks) = realize(theta)?;
             promote_pending_seed(&blocks);
             let rho = theta.slice(s![..rho_dim]).to_owned();
             let hyper_layout = family_hyper_layout(&blocks, theta)?;
-            let eval_options =
-                crate::outer_subsample::exact_outer_options_for_row_set(options, row_set);
+            let eval_options = crate::outer_subsample::exact_outer_options(options);
             let owned = crate::custom_family::evaluate_custom_family_joint_hyper_efs_owned(
                 &family,
                 &blocks,

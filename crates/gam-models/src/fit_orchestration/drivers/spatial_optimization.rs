@@ -7487,14 +7487,12 @@ where
         &[TermCollectionSpec],
         &[TermCollectionDesign],
         gam_solve::estimate::reml::reml_outer_engine::EvalMode,
-        &gam_problem::outer_subsample::RowSet,
         Option<Mode>,
     ) -> Result<ExactJointEvaluation<Mode>, String>,
     ExactEfsFn: FnMut(
         &Array1<f64>,
         &[TermCollectionSpec],
         &[TermCollectionDesign],
-        &gam_problem::outer_subsample::RowSet,
     ) -> Result<ExactJointEfsEvaluation<Mode>, String>,
     SeedFn: FnMut(&Array1<f64>) -> Result<gam_solve::rho_optimizer::SeedOutcome, EstimationError>,
 {
@@ -7868,7 +7866,6 @@ where
                 &specs,
                 &designs,
                 eval_mode,
-                &gam_problem::outer_subsample::RowSet::All,
                 owned_value_mode,
             );
             let elapsed_s = t0.elapsed().as_secs_f64();
@@ -7963,7 +7960,6 @@ where
                     &specs,
                     &designs,
                     gam_solve::estimate::reml::reml_outer_engine::EvalMode::ValueOnly,
-                    &gam_problem::outer_subsample::RowSet::All,
                     None,
                 );
                 let elapsed_s = t0.elapsed().as_secs_f64();
@@ -8022,7 +8018,6 @@ where
                         theta,
                         &specs,
                         &designs,
-                        &gam_problem::outer_subsample::RowSet::All,
                     );
                     let elapsed_s = t0.elapsed().as_secs_f64();
                     kphase_efs_calls.set(kphase_efs_calls.get() + 1);

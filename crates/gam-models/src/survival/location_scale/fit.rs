@@ -157,10 +157,7 @@ fn fit_survival_location_scale_with_geometry_authority(
         // only through the inverse-link shape axes (#2904): the certificate is
         // over those axes, and the fit replays the owned mode it was measured at.
         SurvivalLocationScaleFitAuthority::Certified { theta, outer, mode } => {
-            let exact_options = crate::outer_subsample::exact_outer_options_for_row_set(
-                &options,
-                &crate::row_kernel::RowSet::All,
-            );
+            let exact_options = crate::outer_subsample::exact_outer_options(&options);
             fit_custom_family_fixed_log_lambdas_from_owned_mode(
                 &prepared.family,
                 &prepared.blockspecs,
@@ -877,7 +874,6 @@ pub(crate) fn fit_survival_location_scale_terms(
          specs: &[TermCollectionSpec],
          designs: &[TermCollectionDesign],
          eval_mode,
-         row_set: &crate::row_kernel::RowSet,
          _| {
             use gam_problem::EvalMode;
             if !analytic_joint_gradient_available {
@@ -944,9 +940,8 @@ pub(crate) fn fit_survival_location_scale_terms(
                 }
                 other => other,
             };
-            let eval_options = crate::outer_subsample::exact_outer_options_for_row_set(
+            let eval_options = crate::outer_subsample::exact_outer_options(
                 &survival_blockwise_fit_options(&assembled),
-                row_set,
             );
             let owned = evaluate_custom_family_joint_hyper_owned(
                 &prepared.family,
@@ -976,8 +971,7 @@ pub(crate) fn fit_survival_location_scale_terms(
         },
         |theta,
          specs: &[TermCollectionSpec],
-         designs: &[TermCollectionDesign],
-         row_set: &crate::row_kernel::RowSet| {
+         designs: &[TermCollectionDesign]| {
             if !analytic_joint_gradient_available {
                 return Err(SurvivalLocationScaleError::InvalidConfiguration { reason: "analytic spatial psi derivatives are unavailable for survival exact two-block path"
                         .to_string(), }.into());
@@ -1032,9 +1026,8 @@ pub(crate) fn fit_survival_location_scale_terms(
                 (0..link_shape0.len()).collect(),
                 theta.slice(s![joint_setup.rho_dim()..]).to_owned(),
             )?;
-            let eval_options = crate::outer_subsample::exact_outer_options_for_row_set(
+            let eval_options = crate::outer_subsample::exact_outer_options(
                 &survival_blockwise_fit_options(&assembled),
-                row_set,
             );
             let owned = evaluate_custom_family_joint_hyper_efs_owned(
                 &prepared.family,

@@ -1635,19 +1635,14 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
          specs: &[TermCollectionSpec],
          designs: &[TermCollectionDesign],
          eval_mode,
-         row_set: &crate::row_kernel::RowSet,
          owned_value_mode| {
             use gam_problem::EvalMode;
-            let row_set_rows = match row_set {
-                crate::row_kernel::RowSet::All => outer_row_indices(options, n).len(),
-                crate::row_kernel::RowSet::Subsample { rows, .. } => rows.len(),
-            };
             let eval_started = std::time::Instant::now();
             log::info!(
-                "[survival-marginal-slope/outer-eval] start mode={:?} theta_dim={} row_set_rows={}",
+                "[survival-marginal-slope/outer-eval] start mode={:?} theta_dim={} rows={}",
                 eval_mode,
                 theta.len(),
-                row_set_rows,
+                n,
             );
             let rho = theta.slice(s![..setup.rho_dim()]).to_owned();
             let mut blocks = build_blocks(
@@ -1700,10 +1695,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             outer_eval_counter.set(eval_id.wrapping_add(1));
             let tolerance_options =
                 joint_hyper_options_for_outer_tolerance(options, exact_spatial_outer_tol);
-            let mut outer_options = crate::outer_subsample::exact_outer_options_for_row_set(
-                &tolerance_options,
-                row_set,
-            );
+            let mut outer_options = crate::outer_subsample::exact_outer_options(&tolerance_options);
             outer_options.outer_eval_context = Some(crate::custom_family::OuterEvalContext {
                 rho: std::sync::Arc::new(rho.clone()),
                 eval_id,
@@ -1817,7 +1809,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
                 mode: selection,
             })
         },
-        |_, _, _, _| {
+        |_, _, _| {
             Err::<ExactJointEfsEvaluation<CustomFamilyJointHyperModeSelection>, String>(
                 "survival marginal-slope EFS callback invoked even though fixed-point optimization is disabled for beta-dependent exact curvature".to_string(),
             )
