@@ -396,7 +396,23 @@ impl<'dp> InnerAssembly<'dp> {
         prior: Option<(f64, Array1<f64>, Option<Array2<f64>>)>,
     ) -> Result<RemlLamlResult, String> {
         let solution = self.build();
-        reml_laml_evaluate(&solution, rho, mode, prior)
+        // The rho outer audit is a thread-local and a no-op unless armed. This
+        // route gets the same fresh window and criterion record as the standard
+        // assemble-and-evaluate path. Without them the coupled custom-family route
+        // published its per-coordinate gradient parts but never the value
+        // components those parts differentiate (#2695).
+        crate::estimate::outer_eval_capture::begin_rho_outer_audit_eval();
+        let result = reml_laml_evaluate(&solution, rho, mode, prior)?;
+        crate::estimate::outer_eval_capture::record_rho_outer_criterion(
+            result.cost,
+            [
+                result.criterion_components.fixed_beta,
+                result.criterion_components.logdet_h,
+                result.criterion_components.logdet_s,
+                result.criterion_components.kkt,
+            ],
+        );
+        Ok(result)
     }
 }
 
