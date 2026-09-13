@@ -2071,8 +2071,7 @@ impl Core {
                 );
             }
             tail = norm;
-            let rounding_floor =
-                f64::EPSILON * alpha.len() as f64 * spectral_scale.max(f64::MIN_POSITIVE);
+            let rounding_floor = f64::EPSILON * alpha.len() as f64 * spectral_scale;
             if norm <= rounding_floor {
                 invariant = true;
                 break;
@@ -2176,7 +2175,7 @@ impl Core {
             .copied()
             .map(f64::abs)
             .fold(0.0, f64::max);
-        let roundoff = f64::EPSILON * rank.max(1) as f64 * scale.max(f64::MIN_POSITIVE);
+        let roundoff = f64::EPSILON * rank.max(1) as f64 * scale;
         // A mode inside the decomposition's OWN roundoff floor is a null
         // direction of the whitened design, not a small positive one. The floor
         // is the same quantity the semidefiniteness check below is stated in;
@@ -2318,7 +2317,7 @@ impl Core {
                 .copied()
                 .map(f64::abs)
                 .fold(0.0, f64::max);
-            let roundoff = f64::EPSILON * alpha.len().max(1) as f64 * scale.max(f64::MIN_POSITIVE);
+            let roundoff = f64::EPSILON * alpha.len().max(1) as f64 * scale;
             for (index, (&eigenvalue, &first)) in
                 eigenvalues.iter().zip(first_components.iter()).enumerate()
             {
@@ -2440,7 +2439,7 @@ impl Core {
         )?;
         let scale = ritz.iter().copied().map(f64::abs).fold(0.0, f64::max);
         let count = steps.max(1) as f64;
-        let eigenvalue_floor = f64::EPSILON * count * scale.max(f64::MIN_POSITIVE);
+        let eigenvalue_floor = f64::EPSILON * count * scale;
         let component_roundoff = f64::EPSILON * count;
         let mass_floor = component_roundoff * component_roundoff * measure_mass;
 
@@ -2457,7 +2456,7 @@ impl Core {
         // indistinguishable from the zero it is approximating, and is clamped to
         // the null direction it represents. Above it, the penalty-whitened Schur
         // complement is genuinely indefinite, which is a defect and not roundoff.
-        let indefinite = f64::EPSILON.sqrt() * scale.max(f64::MIN_POSITIVE);
+        let indefinite = f64::EPSILON.sqrt() * scale;
         for (index, (&theta, &first)) in ritz.iter().zip(first_components.iter()).enumerate() {
             if !theta.is_finite() || theta < -indefinite {
                 return Err(format!(
@@ -2634,7 +2633,8 @@ impl Core {
                 coarse_steps: if run.invariant { 0 } else { coarse_steps },
                 rank,
                 budget,
-                relative_tail: run.tail / run.spectral_scale.max(f64::MIN_POSITIVE),
+                // A zero tail has not moved relative to anything, including a zero scale.
+                relative_tail: if run.tail == 0.0 { 0.0 } else { run.tail / run.spectral_scale },
                 tail_estimate,
                 target,
                 invariant: run.invariant,
