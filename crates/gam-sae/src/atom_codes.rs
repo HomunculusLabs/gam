@@ -522,7 +522,7 @@ fn log2_binom(g: i64, k: i64) -> f64 {
 /// `SparseAtomCodes::coactivation`). All probabilities are empirical
 /// popcount ratios over the active-support masks.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct CoactivationStats {
+pub(crate) struct CoactivationStats {
     /// Total number of observations the codes cover.
     pub n_obs: usize,
     /// Rows where atom `a` is active.

@@ -859,7 +859,7 @@ fn cpu_contracted_tile(
 
 /// Exact byte accounting for one same-shape row-jet tile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SaeRowJetMemoryLedger {
+pub(crate) struct SaeRowJetMemoryLedger {
     pub fixed_device_bytes: usize,
     pub device_bytes_per_row: usize,
     pub fixed_host_bytes: usize,

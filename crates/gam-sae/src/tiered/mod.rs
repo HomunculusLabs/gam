@@ -102,7 +102,7 @@ impl Tier0Mean {
 /// across the SAE stack, and the copies had already drifted on exactly that
 /// degenerate case — two returned `0.0`, one returned `NaN`, for the same
 /// question about the same quantity.
-pub fn explained_variance_from_sums(rss: f64, tss: f64) -> f64 {
+pub(crate) fn explained_variance_from_sums(rss: f64, tss: f64) -> f64 {
     if tss > 0.0 { 1.0 - rss / tss } else { f64::NAN }
 }
 
