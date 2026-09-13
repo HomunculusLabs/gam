@@ -8152,5 +8152,21 @@
     ],
     "reason": "#2829 product-root rule: DeviceS2KernelMatrix::copy_to_host_col_major, restored in place from d484a091a as a Linux and a non-Linux variant, has no product caller. The Linux variant has no caller at all, because the Linux to_host_array stages its copy through a pinned buffer, so it is deleted. The non-Linux variant is called only by the non-Linux to_host_array in the same impl, so it becomes a private method, and its doc explains why a Linux call graph cannot see that caller.",
     "evidence": "At 7418f9f52a5a73fe164668c16d703c8ef2f19a36, git grep -n -w copy_to_host_col_major over crates, src, tests, examples, bench and benches finds only crates/gam-terms/src/basis/sphere_gpu.rs: the two cfg-alternative declarations, their two error strings, one comment and doc block, and the one call inside the #[cfg(not(target_os = \"linux\"))] to_host_array. Pool job 603659 on sw0l at 2c1cfd26874c2139583ed261ec4b56336f480f2b, the seven-commit chain spec, storage, chol, arrow, k1, duchon, sphere on 5315139343c853c8a79cd85c328ca903e38d5824, whose Rust blobs this landing reproduces (log /scratch.global/sauer354/pool/api2829/check.603659.log): source_removal_guard.py and public_api_census.py exited 0 on all seven links, and cargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0."
+  },
+  {
+    "base": "943ae7c9a8128d03614d87314a915b9b08b04f42",
+    "items": [
+      "crates/gam-models/src/survival/location_scale/truncated_moments.rs:const:TRUNCATED_RESPONSE_MOMENT_ABSOLUTE_TOLERANCE",
+      "crates/gam-models/src/survival/location_scale/truncated_moments.rs:const:TRUNCATED_RESPONSE_MOMENT_INITIAL_POINTS",
+      "crates/gam-models/src/survival/location_scale/truncated_moments.rs:const:TRUNCATED_RESPONSE_MOMENT_MAXIMUM_POINTS",
+      "crates/gam-models/src/survival/location_scale/truncated_moments.rs:fn:evaluate_truncated_rows",
+      "crates/gam-models/src/survival/location_scale/truncated_moments.rs:fn:truncated_survival_response_moments_row",
+      "crates/gam-solve/src/constrained_posterior.rs:fn:constrained_posterior_joint_cubature",
+      "crates/gam-solve/src/constrained_posterior.rs:fn:normalized",
+      "crates/gam-solve/src/constrained_posterior.rs:struct:ConstrainedPosteriorJointPoint",
+      "crates/gam-solve/src/constrained_posterior.rs:struct:JointCubatureAccumulator"
+    ],
+    "reason": "#2917: survival location-scale truncated response moments certify on the spread of the joint rule's replicate lattices instead of stopping when consecutive doublings of one lattice moved no moment by more than 1e-4, the rule gam-solve's orthant cubature retired because it cannot see bias. The three picked point-count and tolerance constants go. The replicate count, starting node count, maximum node count and relative accuracy are the orthant cubature's own, declared once in gam-solve and served by ConstrainedPosteriorJointRule; each row is certified against sqrt(E[S](1 - E[S])) less the integrand's f64 rounding, and retired once certified. The row evaluator splits into per-row setup (TruncatedResponseRow) and a per-node survival probability, which replaces truncated_survival_response_moments_row and evaluate_truncated_rows. gam-solve's constrained_posterior_joint_cubature, its point type and its accumulator are replaced by the replicate-indexed rule, and the #2679 joint-cubature test moves onto it.",
+    "evidence": "At the base, git grep -n -w finds constrained_posterior_joint_cubature and ConstrainedPosteriorJointPoint only in crates/gam-solve/src/constrained_posterior.rs (their definitions, JointCubatureAccumulator and the #2679 joint-cubature test) and crates/gam-models/src/survival/location_scale/truncated_moments.rs (the module doc link, the import, the law field and the law builder). JointCubatureAccumulator is found only in constrained_posterior.rs. TRUNCATED_RESPONSE_MOMENT_ABSOLUTE_TOLERANCE, TRUNCATED_RESPONSE_MOMENT_INITIAL_POINTS, TRUNCATED_RESPONSE_MOMENT_MAXIMUM_POINTS, truncated_survival_response_moments_row and evaluate_truncated_rows are found only in truncated_moments.rs, at their declarations and in truncated_survival_response_moments and evaluate_truncated_rows. The same commit moves the #2679 joint-cubature test onto ConstrainedPosteriorJointRule."
   }
 ]

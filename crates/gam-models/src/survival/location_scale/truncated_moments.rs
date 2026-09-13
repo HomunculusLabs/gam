@@ -37,47 +37,28 @@
 //! so a draw built this way is feasible for every `u` the cone admits.
 //!
 //! So the law needs one rule over `(u, ε)` jointly, which is what
-//! [`gam_solve::constrained_posterior::constrained_posterior_joint_cubature`]
-//! produces: `points` points of a single low-discrepancy rule whose first `q`
-//! coordinates run the separation-of-variables map into the cone and whose
-//! remaining coordinates carry the standardized tangent. The per-row cost is
-//! `points` evaluations, with no factor of the cubature's node count in it —
-//! the nested alternative costs `nodes × outer × inner`, up to `4096 × 3375 ×
-//! 21` on the shipped rules, which is why this was never simply cut over.
+//! [`gam_solve::constrained_posterior::ConstrainedPosteriorJointRule`] serves: a
+//! single low-discrepancy rule whose first `q` coordinates run the
+//! separation-of-variables map into the cone and whose remaining coordinates
+//! carry the standardized tangent. The per-row cost is one evaluation per node,
+//! with no factor of the cubature's node count in it — the nested alternative
+//! costs `nodes × outer × inner`, up to `4096 × 3375 × 21` on the shipped rules,
+//! which is why this was never simply cut over.
 //!
-//! # What this rule gives up, and where that is measured
+//! # What this rule gives up, and how its accuracy is certified
 //!
 //! A lattice rule on the smooth tangent block does not have the spectral
-//! accuracy of the Gauss-Hermite tensor rule it replaces. That is why the
-//! point count is chosen by refinement against the response moments' own
-//! resolution rather than fixed, and why the rule is gated against a reference
-//! built from the DENSITY rather than from the cubature
-//! (`truncated_response_moments_beat_the_moment_matched_normal_2679`).
+//! accuracy of the Gauss-Hermite tensor rule it replaces. So the node count is
+//! not fixed: every replicate lattice of the rule is extended until the
+//! replicate standard error of each row's response moments is within the law's
+//! own certified relative accuracy (#2917), and the rule is gated against a
+//! reference built from the DENSITY rather than from the cubature
+//! (`truncated_response_moments_beat_the_moment_matched_normal_2679`). The
+//! refinement this replaced compared consecutive doublings of ONE lattice, which
+//! cannot see bias.
 
 use super::*;
-use gam_solve::constrained_posterior::{
-    ConstrainedPosteriorJointPoint, constrained_posterior_joint_cubature,
-};
-
-/// Absolute agreement demanded of the response moments between successive
-/// point counts before the rule is accepted.
-///
-/// Denominated in the resolution of the quantity that produces the number, not
-/// in a machine epsilon: `E[S]` and `E[S²]` are PROBABILITIES, and the law they
-/// are taken against is itself certified only to
-/// `ORTHANT_MOMENT_RELATIVE_TOLERANCE = 1e-3` relative on the constraint-normal
-/// covariance the fit stored. A probability resolved to `1e-4` absolute is
-/// already an order finer than its own input law, and demanding more would be
-/// asserting against the lattice's arithmetic rather than against the posterior.
-pub(crate) const TRUNCATED_RESPONSE_MOMENT_ABSOLUTE_TOLERANCE: f64 = 1e-4;
-
-/// Point count of the first pass.
-pub(crate) const TRUNCATED_RESPONSE_MOMENT_INITIAL_POINTS: usize = 1 << 11;
-
-/// Point count past which the rule is declared non-convergent and the caller
-/// gets an error rather than an uncertified moment. Reporting the last iterate
-/// would ship an unmeasured number into `response_standard_error`.
-pub(crate) const TRUNCATED_RESPONSE_MOMENT_MAXIMUM_POINTS: usize = 1 << 15;
+use gam_solve::constrained_posterior::ConstrainedPosteriorJointRule;
 
 /// Slack allowed when checking the stored removed variance against the
 /// constraint-normal variance reconstructed here.
@@ -115,7 +96,7 @@ pub(crate) struct TruncatedCoefficientLaw {
     residual_covariance: Array2<f64>,
     /// Joint rule over `(u, tangent)`; the tangent block has
     /// [`Self::tangent_dimension`] coordinates.
-    points: Vec<ConstrainedPosteriorJointPoint>,
+    rule: ConstrainedPosteriorJointRule,
     tangent_dimension: usize,
 }
 
@@ -132,7 +113,6 @@ pub(crate) fn build_truncated_coefficient_law(
     fit: &UnifiedFitResult,
     covariance: &Array2<f64>,
     tangent_dimension: usize,
-    points: usize,
 ) -> Result<Option<TruncatedCoefficientLaw>, String> {
     let Some(geometry) = fit.geometry.as_ref() else {
         return Ok(None);
@@ -313,12 +293,11 @@ pub(crate) fn build_truncated_coefficient_law(
     }
 
     let upper_limits = correction.upper_limits();
-    let cubature = constrained_posterior_joint_cubature(
+    let rule = ConstrainedPosteriorJointRule::new(
         &normal_center,
         &normal_covariance,
         &upper_limits,
         tangent_dimension,
-        points,
     )?;
 
     Ok(Some(TruncatedCoefficientLaw {
@@ -326,12 +305,15 @@ pub(crate) fn build_truncated_coefficient_law(
         lift: lift_matrix,
         normal_center,
         residual_covariance,
-        points: cubature,
+        rule,
         tangent_dimension,
     }))
 }
 
-/// Per-row response moments under the truncated law.
+/// Everything one row's response moment reads that does not move with the node:
+/// the AMBIENT predictor centre of the three channels, how one unit of each
+/// constraint-normal coordinate and of each tangent coordinate moves them, and
+/// the link-wiggle block's affine conditional law.
 ///
 /// The structure mirrors the Gaussian rule exactly — the same projected
 /// covariance on `(h, threshold, log σ)`, the same affine conditional
@@ -339,249 +321,302 @@ pub(crate) fn build_truncated_coefficient_law(
 /// two: the covariance those blocks are read from is `Σ_res` rather than `Σ_π`,
 /// and the location is the node's `β_unc + G(u − E_untrunc[u])` rather than a
 /// single moment-matched centre.
-pub(crate) fn truncated_survival_response_moments_row(
-    input: &SurvivalLocationScalePredictInput,
-    fit: &UnifiedFitResult,
-    law: &TruncatedCoefficientLaw,
-    x_threshold_dense: &Array2<f64>,
-    x_log_sigma_dense: &Array2<f64>,
-    row: usize,
-) -> Result<(f64, f64), String> {
-    let beta_time = fit.beta_time();
-    let beta_threshold = fit.beta_threshold();
-    let beta_log_sigma = fit.beta_log_sigma();
-    let beta_link_wiggle = fit.beta_link_wiggle();
-    let p_time = beta_time.len();
-    let p_t = beta_threshold.len();
-    let p_ls = beta_log_sigma.len();
-    let pw = beta_link_wiggle.as_ref().map_or(0, |beta| beta.len());
-    let (time, threshold, log_sigma, wiggle) =
-        survival_response_moment_block_ranges(p_time, p_t, p_ls, pw);
+struct TruncatedResponseRow {
+    /// `(h, threshold, log σ)` at the ambient centre `β_unc`, offsets included.
+    mu: [f64; 3],
+    /// `C G`: how one unit of each constraint-normal coordinate moves each of
+    /// the three predictor channels.
+    channel_lift: Array2<f64>,
+    /// Factor of the channels' residual covariance: how one unit of each tangent
+    /// coordinate moves each channel.
+    htl_factor: Array2<f64>,
+    wiggle: Option<TruncatedWiggleRow>,
+}
 
-    let a_h = input.x_time_exit.row(row).to_owned();
-    let a_t = x_threshold_dense.row(row).to_owned();
-    let a_ls = x_log_sigma_dense.row(row).to_owned();
+/// One row's link-wiggle block, conditioned on the realized channels.
+struct TruncatedWiggleRow {
+    regression: Array2<f64>,
+    cov_cond: Array2<f64>,
+    knots: Array1<f64>,
+    degree: usize,
+    center: Array1<f64>,
+    lift: Array2<f64>,
+}
 
-    // The AMBIENT centre of the predictor blocks: `β_unc`, not `E_π[β]`. The
-    // node displacement below is measured from it, and adding it to the
-    // weighted node displacement reproduces `E_π[β]` by construction.
-    let center_time = law.center.slice(s![time.start..time.end]).to_owned();
-    let center_threshold = law
-        .center
-        .slice(s![threshold.start..threshold.end])
-        .to_owned();
-    let center_log_sigma = law
-        .center
-        .slice(s![log_sigma.start..log_sigma.end])
-        .to_owned();
-    let mu = [
-        a_h.dot(&center_time) + input.eta_time_offset_exit[row],
-        a_t.dot(&center_threshold) + input.eta_threshold_offset[row],
-        a_ls.dot(&center_log_sigma) + input.eta_log_sigma_offset[row],
-    ];
+impl TruncatedResponseRow {
+    fn new(
+        input: &SurvivalLocationScalePredictInput,
+        fit: &UnifiedFitResult,
+        law: &TruncatedCoefficientLaw,
+        x_threshold_dense: &Array2<f64>,
+        x_log_sigma_dense: &Array2<f64>,
+        row: usize,
+    ) -> Result<Self, String> {
+        let beta_time = fit.beta_time();
+        let beta_threshold = fit.beta_threshold();
+        let beta_log_sigma = fit.beta_log_sigma();
+        let beta_link_wiggle = fit.beta_link_wiggle();
+        let p_time = beta_time.len();
+        let p_t = beta_threshold.len();
+        let p_ls = beta_log_sigma.len();
+        let pw = beta_link_wiggle.as_ref().map_or(0, |beta| beta.len());
+        let (time, threshold, log_sigma, wiggle_range) =
+            survival_response_moment_block_ranges(p_time, p_t, p_ls, pw);
 
-    // `C G`: how one unit of each constraint-normal coordinate moves each of
-    // the three predictor channels.
-    let lift = &law.lift;
-    let retained = law.normal_center.len();
-    let mut channel_lift = Array2::<f64>::zeros((3, retained));
-    for k in 0..retained {
-        let mut h = 0.0;
-        for (j, &value) in a_h.iter().enumerate() {
-            h += value * lift[[time.start + j, k]];
-        }
-        let mut t = 0.0;
-        for (j, &value) in a_t.iter().enumerate() {
-            t += value * lift[[threshold.start + j, k]];
-        }
-        let mut l = 0.0;
-        for (j, &value) in a_ls.iter().enumerate() {
-            l += value * lift[[log_sigma.start + j, k]];
-        }
-        channel_lift[[0, k]] = h;
-        channel_lift[[1, k]] = t;
-        channel_lift[[2, k]] = l;
-    }
+        let a_h = input.x_time_exit.row(row).to_owned();
+        let a_t = x_threshold_dense.row(row).to_owned();
+        let a_ls = x_log_sigma_dense.row(row).to_owned();
 
-    let cov_htl = projected_survival_response_moment_covariance(
-        &law.residual_covariance,
-        &a_h,
-        &a_t,
-        &a_ls,
-        p_time,
-        p_t,
-        p_ls,
-    );
-    let htl_factor = factorize_psd_covariance(
-        &covariance3_to_array2(cov_htl),
-        "survival response-moment residual covariance",
-    )?;
-    let htl_rank = htl_factor.factor.ncols();
-    if htl_rank + usize::from(pw > 0) > law.tangent_dimension {
-        return Err(format!(
-            "survival location-scale truncated response moments: row {row} needs {} tangent \
-             coordinates but the joint rule carries {}",
-            htl_rank + usize::from(pw > 0),
-            law.tangent_dimension
-        ));
-    }
+        // The AMBIENT centre of the predictor blocks: `β_unc`, not `E_π[β]`. The
+        // node displacement is measured from it, and adding it to the weighted
+        // node displacement reproduces `E_π[β]` by construction.
+        let center_time = law.center.slice(s![time.start..time.end]).to_owned();
+        let center_threshold = law
+            .center
+            .slice(s![threshold.start..threshold.end])
+            .to_owned();
+        let center_log_sigma = law
+            .center
+            .slice(s![log_sigma.start..log_sigma.end])
+            .to_owned();
+        let mu = [
+            a_h.dot(&center_time) + input.eta_time_offset_exit[row],
+            a_t.dot(&center_threshold) + input.eta_threshold_offset[row],
+            a_ls.dot(&center_log_sigma) + input.eta_log_sigma_offset[row],
+        ];
 
-    // The link-wiggle block, when present, is conditioned on the realized
-    // `(h, threshold, log σ)` exactly as the Gaussian rule conditions it — the
-    // affine conditional mean of a joint Gaussian — because conditional on `u`
-    // the law IS a joint Gaussian with covariance `Σ_res`.
-    let wiggle_block = match (beta_link_wiggle.as_ref(), wiggle) {
-        (Some(_), Some(wiggle_range)) => {
-            let cov_wy = {
-                let mut out = Array2::<f64>::zeros((pw, 3));
-                let cov_wh = law
-                    .residual_covariance
-                    .slice(s![
-                        wiggle_range.start..wiggle_range.end,
-                        time.start..time.end
-                    ])
-                    .to_owned();
-                let cov_wt = law
-                    .residual_covariance
-                    .slice(s![
-                        wiggle_range.start..wiggle_range.end,
-                        threshold.start..threshold.end
-                    ])
-                    .to_owned();
-                let cov_wl = law
-                    .residual_covariance
-                    .slice(s![
-                        wiggle_range.start..wiggle_range.end,
-                        log_sigma.start..log_sigma.end
-                    ])
-                    .to_owned();
-                out.column_mut(0).assign(&cov_wh.dot(&a_h));
-                out.column_mut(1).assign(&cov_wt.dot(&a_t));
-                out.column_mut(2).assign(&cov_wl.dot(&a_ls));
-                out
-            };
-            let cov_ww = law
-                .residual_covariance
-                .slice(s![
-                    wiggle_range.start..wiggle_range.end,
-                    wiggle_range.start..wiggle_range.end
-                ])
-                .to_owned();
-            let mut regression = cov_wy.dot(&htl_factor.eigenvectors);
-            for column in 0..regression.ncols() {
-                let scale = htl_factor.inv_sqrt_eigenvalues[column];
-                regression
-                    .column_mut(column)
-                    .mapv_inplace(|value| value * scale);
-            }
-            let cov_cond = symmetrize_and_clip_covariance(
-                &(cov_ww - regression.dot(&regression.t().to_owned())),
-            );
-            let knots = input
-                .link_wiggle_knots
-                .as_ref()
-                .or(fit.artifacts.survival_link_wiggle_knots.as_ref())
-                .ok_or_else(|| {
-                    "predict_survival_location_scale: link-wiggle coefficients are missing knot \
-                     metadata"
-                        .to_string()
-                })?
-                .clone();
-            let degree = input
-                .link_wiggle_degree
-                .or(fit.artifacts.survival_link_wiggle_degree)
-                .ok_or_else(|| {
-                    "predict_survival_location_scale: link-wiggle coefficients are missing degree \
-                     metadata"
-                        .to_string()
-                })?;
-            let center_wiggle = law
-                .center
-                .slice(s![wiggle_range.start..wiggle_range.end])
-                .to_owned();
-            let mut wiggle_lift = Array2::<f64>::zeros((pw, retained));
-            for j in 0..pw {
-                for k in 0..retained {
-                    wiggle_lift[[j, k]] = lift[[wiggle_range.start + j, k]];
-                }
-            }
-            Some((
-                regression,
-                cov_cond,
-                knots,
-                degree,
-                center_wiggle,
-                wiggle_lift,
-            ))
-        }
-        _ => None,
-    };
-
-    let mut first = 0.0f64;
-    let mut second = 0.0f64;
-    let mut displacement = Array1::<f64>::zeros(retained);
-    for point in &law.points {
+        let lift = &law.lift;
+        let retained = law.normal_center.len();
+        let mut channel_lift = Array2::<f64>::zeros((3, retained));
         for k in 0..retained {
-            displacement[k] = point.normal_coordinates[k] - law.normal_center[k];
+            let mut h = 0.0;
+            for (j, &value) in a_h.iter().enumerate() {
+                h += value * lift[[time.start + j, k]];
+            }
+            let mut t = 0.0;
+            for (j, &value) in a_t.iter().enumerate() {
+                t += value * lift[[threshold.start + j, k]];
+            }
+            let mut l = 0.0;
+            for (j, &value) in a_ls.iter().enumerate() {
+                l += value * lift[[log_sigma.start + j, k]];
+            }
+            channel_lift[[0, k]] = h;
+            channel_lift[[1, k]] = t;
+            channel_lift[[2, k]] = l;
         }
-        let mut x = mu;
+
+        let cov_htl = projected_survival_response_moment_covariance(
+            &law.residual_covariance,
+            &a_h,
+            &a_t,
+            &a_ls,
+            p_time,
+            p_t,
+            p_ls,
+        );
+        let htl_factor = factorize_psd_covariance(
+            &covariance3_to_array2(cov_htl),
+            "survival response-moment residual covariance",
+        )?;
+        let htl_rank = htl_factor.factor.ncols();
+        if htl_rank + usize::from(pw > 0) > law.tangent_dimension {
+            return Err(format!(
+                "survival location-scale truncated response moments: row {row} needs {} tangent \
+                 coordinates but the joint rule carries {}",
+                htl_rank + usize::from(pw > 0),
+                law.tangent_dimension
+            ));
+        }
+
+        // The link-wiggle block, when present, is conditioned on the realized
+        // `(h, threshold, log σ)` exactly as the Gaussian rule conditions it — the
+        // affine conditional mean of a joint Gaussian — because conditional on `u`
+        // the law IS a joint Gaussian with covariance `Σ_res`.
+        let wiggle = match (beta_link_wiggle.as_ref(), wiggle_range) {
+            (Some(_), Some(wiggle_range)) => {
+                let cov_wy = {
+                    let mut out = Array2::<f64>::zeros((pw, 3));
+                    let cov_wh = law
+                        .residual_covariance
+                        .slice(s![
+                            wiggle_range.start..wiggle_range.end,
+                            time.start..time.end
+                        ])
+                        .to_owned();
+                    let cov_wt = law
+                        .residual_covariance
+                        .slice(s![
+                            wiggle_range.start..wiggle_range.end,
+                            threshold.start..threshold.end
+                        ])
+                        .to_owned();
+                    let cov_wl = law
+                        .residual_covariance
+                        .slice(s![
+                            wiggle_range.start..wiggle_range.end,
+                            log_sigma.start..log_sigma.end
+                        ])
+                        .to_owned();
+                    out.column_mut(0).assign(&cov_wh.dot(&a_h));
+                    out.column_mut(1).assign(&cov_wt.dot(&a_t));
+                    out.column_mut(2).assign(&cov_wl.dot(&a_ls));
+                    out
+                };
+                let cov_ww = law
+                    .residual_covariance
+                    .slice(s![
+                        wiggle_range.start..wiggle_range.end,
+                        wiggle_range.start..wiggle_range.end
+                    ])
+                    .to_owned();
+                let mut regression = cov_wy.dot(&htl_factor.eigenvectors);
+                for column in 0..regression.ncols() {
+                    let scale = htl_factor.inv_sqrt_eigenvalues[column];
+                    regression
+                        .column_mut(column)
+                        .mapv_inplace(|value| value * scale);
+                }
+                let cov_cond = symmetrize_and_clip_covariance(
+                    &(cov_ww - regression.dot(&regression.t().to_owned())),
+                );
+                let knots = input
+                    .link_wiggle_knots
+                    .as_ref()
+                    .or(fit.artifacts.survival_link_wiggle_knots.as_ref())
+                    .ok_or_else(|| {
+                        "predict_survival_location_scale: link-wiggle coefficients are missing \
+                         knot metadata"
+                            .to_string()
+                    })?
+                    .clone();
+                let degree = input
+                    .link_wiggle_degree
+                    .or(fit.artifacts.survival_link_wiggle_degree)
+                    .ok_or_else(|| {
+                        "predict_survival_location_scale: link-wiggle coefficients are missing \
+                         degree metadata"
+                            .to_string()
+                    })?;
+                let center = law
+                    .center
+                    .slice(s![wiggle_range.start..wiggle_range.end])
+                    .to_owned();
+                let mut wiggle_lift = Array2::<f64>::zeros((pw, retained));
+                for j in 0..pw {
+                    for k in 0..retained {
+                        wiggle_lift[[j, k]] = lift[[wiggle_range.start + j, k]];
+                    }
+                }
+                Some(TruncatedWiggleRow {
+                    regression,
+                    cov_cond,
+                    knots,
+                    degree,
+                    center,
+                    lift: wiggle_lift,
+                })
+            }
+            _ => None,
+        };
+        Ok(Self {
+            mu,
+            channel_lift,
+            htl_factor: htl_factor.factor,
+            wiggle,
+        })
+    }
+
+    /// The survival probability at one node, from the node's displacement
+    /// `u − E_untrunc[u]` and its tangent coordinates.
+    fn survival_probability(
+        &self,
+        input: &SurvivalLocationScalePredictInput,
+        law: &TruncatedCoefficientLaw,
+        displacement: &Array1<f64>,
+        tangent: &[f64],
+    ) -> Result<f64, String> {
+        let retained = displacement.len();
+        let htl_rank = self.htl_factor.ncols();
+        let mut x = self.mu;
         for (channel, value) in x.iter_mut().enumerate() {
             for k in 0..retained {
-                *value += channel_lift[[channel, k]] * displacement[k];
+                *value += self.channel_lift[[channel, k]] * displacement[k];
             }
             for column in 0..htl_rank {
-                *value += htl_factor.factor[[channel, column]] * point.tangent[column];
+                *value += self.htl_factor[[channel, column]] * tangent[column];
             }
         }
         let q0 = survival_q0_from_eta(x[1], x[2]);
-        let eta = match wiggle_block.as_ref() {
+        let eta = match self.wiggle.as_ref() {
             None => x[0] + q0,
-            Some((regression, cov_cond, knots, degree, center_wiggle, wiggle_lift)) => {
+            Some(wiggle) => {
                 let q0_arr = Array1::from_vec(vec![q0]);
                 let basis = survival_wiggle_basis_with_options(
                     q0_arr.view(),
-                    knots,
-                    *degree,
+                    &wiggle.knots,
+                    wiggle.degree,
                     BasisOptions::value(),
                 )?;
-                if basis.ncols() != center_wiggle.len() {
+                if basis.ncols() != wiggle.center.len() {
                     return Err(SurvivalLocationScaleError::DimensionMismatch {
                         reason: format!(
                             "predict_survival_location_scale: link-wiggle basis/beta mismatch: \
                              {} vs {}",
                             basis.ncols(),
-                            center_wiggle.len()
+                            wiggle.center.len()
                         ),
                     }
                     .into());
                 }
                 let b = basis.row(0).to_owned();
-                let mut conditional_mean = center_wiggle.clone();
+                let mut conditional_mean = wiggle.center.clone();
                 for j in 0..conditional_mean.len() {
                     let mut shift = 0.0;
                     for k in 0..retained {
-                        shift += wiggle_lift[[j, k]] * displacement[k];
+                        shift += wiggle.lift[[j, k]] * displacement[k];
                     }
                     for column in 0..htl_rank {
-                        shift += regression[[j, column]] * point.tangent[column];
+                        shift += wiggle.regression[[j, column]] * tangent[column];
                     }
                     conditional_mean[j] += shift;
                 }
                 let w_mean = b.dot(&conditional_mean);
-                let w_variance = b.dot(&cov_cond.dot(&b)).max(0.0);
-                let w = w_mean + w_variance.sqrt() * point.tangent[law.tangent_dimension - 1];
+                let w_variance = b.dot(&wiggle.cov_cond.dot(&b)).max(0.0);
+                let w = w_mean + w_variance.sqrt() * tangent[law.tangent_dimension - 1];
                 x[0] + q0 + w
             }
         };
         let probability = inverse_link_survival_prob_checked(&input.inverse_link, eta)?;
-        first += point.weight * probability;
-        second += point.weight * probability * probability;
+        Ok(probability)
     }
-    Ok((first.clamp(0.0, 1.0), second.clamp(0.0, 1.0)))
 }
 
-/// Response moments for every row under the truncated law, with the point count
-/// chosen by refinement.
+/// Response moments for every row under the truncated law, certified on the
+/// spread of the joint rule's replicate lattices (#2917).
+///
+/// Every replicate is extended from `N` to `2N` nodes, visiting only the new
+/// nodes. A row is read and retired once the replicate standard error of its
+/// `E[S]` and of its response standard error `sqrt(E[S²] − E[S]²)`, less the
+/// integrand's f64 rounding, is within the law's certified relative accuracy of
+/// `sqrt(E[S]·(1 − E[S]))`; the rows still uncertified are evaluated on the next
+/// doubling.
+///
+/// That scale is the largest standard deviation a probability with this mean can
+/// have (Bhatia–Davis on `[0, 1]`). It plays the role the pre-truncation standard
+/// deviation plays for the law's own moments: a bound the posterior spread only
+/// shrinks below, so the certificate is stated at a scale the row's moments are
+/// read at, not at a scale the posterior happens to reach. Measuring against the
+/// posterior spread itself does not terminate on a far-tail row: there `1 − S`
+/// varies over orders of magnitude across the posterior, and the replicate
+/// spread of its standard deviation falls at nearly the Monte Carlo rate with a
+/// constant set by that heavy tail.
+///
+/// The rule this replaced stopped when two consecutive doublings of ONE lattice
+/// moved no moment by more than an absolute tolerance, which cannot see bias: a
+/// proposal dominated by a handful of nodes moves slowly between doublings while
+/// being nowhere near the answer. Past the rule's maximum node count the moments
+/// are refused, not reported.
 pub(crate) fn truncated_survival_response_moments(
     input: &SurvivalLocationScalePredictInput,
     fit: &UnifiedFitResult,
@@ -591,104 +626,275 @@ pub(crate) fn truncated_survival_response_moments(
 ) -> Result<Option<(Array1<f64>, Array1<f64>)>, String> {
     let n = input.x_time_exit.nrows();
     let tangent_dimension = 3 + usize::from(fit.beta_link_wiggle().is_some());
-    let mut points = TRUNCATED_RESPONSE_MOMENT_INITIAL_POINTS;
-    let Some(law) = build_truncated_coefficient_law(fit, covariance, tangent_dimension, points)?
-    else {
+    let Some(law) = build_truncated_coefficient_law(fit, covariance, tangent_dimension)? else {
         return Ok(None);
     };
-    let mut previous = evaluate_truncated_rows(input, fit, &law, x_threshold_dense, x_log_sigma_dense, n)?;
-    loop {
-        points *= 2;
-        let law = build_truncated_coefficient_law(fit, covariance, tangent_dimension, points)?
-            .ok_or_else(|| {
-                "survival location-scale truncated response moments: the truncated law became \
-                 unavailable between refinement passes"
-                    .to_string()
+    let rows = (0..n)
+        .map(|row| {
+            TruncatedResponseRow::new(input, fit, &law, x_threshold_dense, x_log_sigma_dense, row)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let ambient_displacement = Array1::<f64>::zeros(law.normal_center.len());
+    let ambient_tangent = vec![0.0; tangent_dimension];
+    let ambient_probabilities = rows
+        .iter()
+        .map(|row| row.survival_probability(input, &law, &ambient_displacement, &ambient_tangent))
+        .collect::<Result<Vec<_>, String>>()?;
+    let integrand = ResponseMomentIntegrand {
+        input,
+        law: &law,
+        rows,
+        ambient_probabilities,
+    };
+    let replicates = law.rule.replicates();
+    if replicates < 2 {
+        return Err(format!(
+            "survival location-scale truncated response moments need at least two replicate \
+             lattices to certify on; the joint rule carries {replicates}"
+        ));
+    }
+    let tolerance = law.rule.relative_tolerance();
+    let mut accumulators: Vec<ResponseMomentAccumulator> =
+        std::iter::repeat_with(|| ResponseMomentAccumulator::new(n))
+            .take(replicates)
+            .collect();
+    let mut first = Array1::<f64>::zeros(n);
+    let mut second = Array1::<f64>::zeros(n);
+    let mut active: Vec<usize> = (0..n).collect();
+    let mut evaluated = 0usize;
+    while !active.is_empty() {
+        let target = if evaluated == 0 {
+            law.rule.initial_points()
+        } else {
+            2 * evaluated
+        };
+        accumulators
+            .as_mut_slice()
+            .into_par_iter()
+            .enumerate()
+            .try_for_each(|(replicate, accumulator)| {
+                law.rule.visit_nodes(
+                    replicate,
+                    evaluated,
+                    target,
+                    |log_weight, normal_coordinates, tangent| {
+                        accumulator.push(&integrand, &active, log_weight, normal_coordinates, tangent)
+                    },
+                )
             })?;
-        let current =
-            evaluate_truncated_rows(input, fit, &law, x_threshold_dense, x_log_sigma_dense, n)?;
-        let change = previous
-            .0
-            .iter()
-            .zip(current.0.iter())
-            .map(|(a, b)| (a - b).abs())
-            .chain(
-                previous
-                    .1
-                    .iter()
-                    .zip(current.1.iter())
-                    .map(|(a, b)| (a - b).abs()),
-            )
-            .fold(0.0f64, f64::max);
-        if change <= TRUNCATED_RESPONSE_MOMENT_ABSOLUTE_TOLERANCE {
-            return Ok(Some(current));
+        evaluated = target;
+        let mut worst: Option<RowCertificate> = None;
+        let mut uncertified = Vec::with_capacity(active.len());
+        for certificate in
+            certify_response_moments(&accumulators, &active, &integrand.ambient_probabilities)?
+        {
+            if certificate.error <= tolerance {
+                first[certificate.row] = certificate.first;
+                second[certificate.row] = certificate.second;
+            } else {
+                uncertified.push(certificate.row);
+                if worst
+                    .as_ref()
+                    .is_none_or(|current| certificate.error > current.error)
+                {
+                    worst = Some(certificate);
+                }
+            }
         }
-        if points >= TRUNCATED_RESPONSE_MOMENT_MAXIMUM_POINTS {
+        active = uncertified;
+        let nodes = evaluated * replicates;
+        if let Some(worst) = worst
+            && nodes >= law.rule.maximum_points()
+        {
             return Err(format!(
-                "survival location-scale truncated response moments did not converge: the \
-                 largest response-moment change between {} and {points} joint cubature points is \
-                 {change:.3e}, still above {TRUNCATED_RESPONSE_MOMENT_ABSOLUTE_TOLERANCE:.1e}",
-                points / 2
+                "survival location-scale truncated response moments did not certify: after \
+                 {nodes} joint cubature nodes over {replicates} replicate lattices, the replicate \
+                 standard error of row {}'s response moments, less the integrand's rounding, is \
+                 {:.3e} of sqrt(E[S](1 - E[S])), above the law's certified relative accuracy \
+                 {tolerance:.1e}",
+                worst.row, worst.error
             ));
         }
-        previous = current;
+    }
+    Ok(Some((first, second)))
+}
+
+/// What one node's response evaluation reads, shared by every replicate.
+struct ResponseMomentIntegrand<'a> {
+    input: &'a SurvivalLocationScalePredictInput,
+    law: &'a TruncatedCoefficientLaw,
+    rows: Vec<TruncatedResponseRow>,
+    /// Each row's survival probability at the ambient centre (zero displacement
+    /// and zero tangent coordinates): the reference its sums run about.
+    ambient_probabilities: Vec<f64>,
+}
+
+/// One replicate lattice's running sums `Σw`, and `Σw·d` and `Σw·d²` for every
+/// row, where `d = S − S_ambient` is the node's survival probability less the
+/// row's probability at the ambient centre, all on ONE log scale.
+///
+/// Every row sees the same node weights, so one rescale serves them all. The
+/// weights span hundreds of decades between a barely-truncated face and a deeply
+/// pinned one, so the sums carry an explicit log scale and are rescaled whenever
+/// a heavier node arrives; accumulating the weights directly would underflow the
+/// face to zero and leave the normalized moments as `0/0`.
+///
+/// The sums run about `S_ambient` rather than over `S` because the standard
+/// error is read by subtraction. Running sums of `w·S` and `w·S²` each carry
+/// rounding of order `ε·√N` relative to `S`, and on a row whose survival is
+/// nearly certain `E[S²] − E[S]²` is then that rounding rather than the variance:
+/// the replicate spread stops falling with `N` and the row cannot certify. About
+/// the ambient centre both sums are of the variance's own order, so their
+/// rounding is relative to it.
+struct ResponseMomentAccumulator {
+    log_scale: f64,
+    weight_sum: f64,
+    deviation_sum: Array1<f64>,
+    deviation_square_sum: Array1<f64>,
+}
+
+impl ResponseMomentAccumulator {
+    fn new(n: usize) -> Self {
+        Self {
+            log_scale: f64::NEG_INFINITY,
+            weight_sum: 0.0,
+            deviation_sum: Array1::zeros(n),
+            deviation_square_sum: Array1::zeros(n),
+        }
+    }
+
+    /// Fold one node into the sums of every row in `active`.
+    fn push(
+        &mut self,
+        integrand: &ResponseMomentIntegrand<'_>,
+        active: &[usize],
+        log_weight: f64,
+        normal_coordinates: &Array1<f64>,
+        tangent: &[f64],
+    ) -> Result<(), String> {
+        if log_weight > self.log_scale {
+            let rescale = (self.log_scale - log_weight).exp();
+            self.weight_sum *= rescale;
+            self.deviation_sum *= rescale;
+            self.deviation_square_sum *= rescale;
+            self.log_scale = log_weight;
+        }
+        let weight = (log_weight - self.log_scale).exp();
+        let displacement = normal_coordinates - &integrand.law.normal_center;
+        self.weight_sum += weight;
+        for &row in active {
+            let deviation = integrand.rows[row].survival_probability(
+                integrand.input,
+                integrand.law,
+                &displacement,
+                tangent,
+            )? - integrand.ambient_probabilities[row];
+            self.deviation_sum[row] += weight * deviation;
+            self.deviation_square_sum[row] += weight * deviation * deviation;
+        }
+        Ok(())
     }
 }
 
-fn evaluate_truncated_rows(
-    input: &SurvivalLocationScalePredictInput,
-    fit: &UnifiedFitResult,
-    law: &TruncatedCoefficientLaw,
-    x_threshold_dense: &Array2<f64>,
-    x_log_sigma_dense: &Array2<f64>,
-    n: usize,
-) -> Result<(Array1<f64>, Array1<f64>), String> {
-    let mut first = Array1::<f64>::zeros(n);
-    let mut second = Array1::<f64>::zeros(n);
-    if n >= SURVIVAL_ROW_PARALLEL_THRESHOLD {
-        let first_slice = first
-            .as_slice_mut()
-            .expect("fresh Array1 response moments are contiguous");
-        let second_slice = second
-            .as_slice_mut()
-            .expect("fresh Array1 response moments are contiguous");
-        first_slice
-            .par_chunks_mut(SURVIVAL_ROW_PARALLEL_CHUNK)
-            .zip(second_slice.par_chunks_mut(SURVIVAL_ROW_PARALLEL_CHUNK))
-            .enumerate()
-            .try_for_each(
-                |(chunk_idx, (first_chunk, second_chunk))| -> Result<(), String> {
-                    let row_start = chunk_idx * SURVIVAL_ROW_PARALLEL_CHUNK;
-                    for offset in 0..first_chunk.len() {
-                        let (m1, m2) = truncated_survival_response_moments_row(
-                            input,
-                            fit,
-                            law,
-                            x_threshold_dense,
-                            x_log_sigma_dense,
-                            row_start + offset,
-                        )?;
-                        first_chunk[offset] = m1;
-                        second_chunk[offset] = m2;
-                    }
-                    Ok(())
-                },
-            )?;
-    } else {
-        for row in 0..n {
-            let (m1, m2) = truncated_survival_response_moments_row(
-                input,
-                fit,
-                law,
-                x_threshold_dense,
-                x_log_sigma_dense,
-                row,
-            )?;
-            first[row] = m1;
-            second[row] = m2;
-        }
+/// One row's pooled response moments, and the replicate standard error they rest
+/// on.
+struct RowCertificate {
+    row: usize,
+    /// `E[S]`.
+    first: f64,
+    /// `E[S²]`.
+    second: f64,
+    /// The larger replicate standard error of `E[S]` and of the response standard
+    /// error, less the integrand's rounding, as a fraction of
+    /// `sqrt(E[S]·(1 − E[S]))`.
+    error: f64,
+}
+
+fn certify_response_moments(
+    accumulators: &[ResponseMomentAccumulator],
+    active: &[usize],
+    ambient_probabilities: &[f64],
+) -> Result<Vec<RowCertificate>, String> {
+    if let Some(accumulator) = accumulators
+        .iter()
+        .find(|accumulator| !(accumulator.weight_sum.is_finite() && accumulator.weight_sum > 0.0))
+    {
+        return Err(format!(
+            "survival location-scale truncated response moments: a replicate lattice \
+             accumulated no finite node weight (weight sum {})",
+            accumulator.weight_sum
+        ));
     }
-    Ok((first, second))
+    // Pool every replicate on the heaviest replicate's scale.
+    let top = accumulators
+        .iter()
+        .map(|accumulator| accumulator.log_scale)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let pooling_scales: Vec<f64> = accumulators
+        .iter()
+        .map(|accumulator| (accumulator.log_scale - top).exp())
+        .collect();
+    let pooled_weight = accumulators
+        .iter()
+        .zip(&pooling_scales)
+        .map(|(accumulator, scale)| scale * accumulator.weight_sum)
+        .sum::<f64>();
+    let mut means = vec![0.0; accumulators.len()];
+    let mut standard_errors = vec![0.0; accumulators.len()];
+    let mut certificates = Vec::with_capacity(active.len());
+    for &row in active {
+        let mut pooled_deviation = 0.0;
+        let mut pooled_square = 0.0;
+        for (replicate, (accumulator, scale)) in
+            accumulators.iter().zip(&pooling_scales).enumerate()
+        {
+            let mean = accumulator.deviation_sum[row] / accumulator.weight_sum;
+            let square = accumulator.deviation_square_sum[row] / accumulator.weight_sum;
+            means[replicate] = mean;
+            standard_errors[replicate] = (square - mean * mean).max(0.0).sqrt();
+            pooled_deviation += scale * accumulator.deviation_sum[row];
+            pooled_square += scale * accumulator.deviation_square_sum[row];
+        }
+        let mean_deviation = pooled_deviation / pooled_weight;
+        let variance = (pooled_square / pooled_weight - mean_deviation * mean_deviation).max(0.0);
+        // A weighted mean of probabilities lies in [0, 1]; the bound only removes
+        // the rounding of the division.
+        let first = (ambient_probabilities[row] + mean_deviation).clamp(0.0, 1.0);
+        let second = (variance + first * first).clamp(0.0, 1.0);
+        let spread =
+            replicate_standard_error(&means).max(replicate_standard_error(&standard_errors));
+        // `S = 1 − F(η)` is evaluated in f64, which resolves a probability to
+        // `f64::EPSILON` absolute: a spread within that is the integrand's own
+        // rounding, which no node count removes.
+        let excess = spread - f64::EPSILON;
+        let largest_spread = (first * (1.0 - first)).sqrt();
+        let error = if excess <= 0.0 {
+            0.0
+        } else if largest_spread > 0.0 {
+            excess / largest_spread
+        } else {
+            f64::INFINITY
+        };
+        certificates.push(RowCertificate {
+            row,
+            first,
+            second,
+            error,
+        });
+    }
+    Ok(certificates)
+}
+
+/// Standard error of the mean of independent replicate estimates of one quantity.
+fn replicate_standard_error(estimates: &[f64]) -> f64 {
+    let replicates = estimates.len() as f64;
+    let mean = estimates.iter().sum::<f64>() / replicates;
+    let spread = estimates
+        .iter()
+        .map(|value| (value - mean) * (value - mean))
+        .sum::<f64>()
+        / (replicates - 1.0);
+    (spread / replicates).sqrt()
 }
 
 #[cfg(test)]
@@ -802,11 +1008,15 @@ mod tests {
         );
 
         let a_h = array![1.0, 0.5];
-        let x_threshold_dense = array![[1.0, -0.2]];
-        let x_log_sigma_dense = array![[1.0, 0.3]];
-        let eta_time_offset_exit = array![0.2];
-        let eta_threshold_offset = array![0.7];
-        let eta_log_sigma_offset = array![0.4];
+        // Row 0 is the fixture. Rows 1-3 are row 0 with its exit predictor moved
+        // 2.7, 4.7 and 6.7 units into the survival tail, where `1 − S` is
+        // near-certain and varies over orders of magnitude across the posterior
+        // (#2917).
+        let x_threshold_dense = array![[1.0, -0.2], [1.0, -0.2], [1.0, -0.2], [1.0, -0.2]];
+        let x_log_sigma_dense = array![[1.0, 0.3], [1.0, 0.3], [1.0, 0.3], [1.0, 0.3]];
+        let eta_time_offset_exit = array![0.2, -2.5, -4.5, -6.5];
+        let eta_threshold_offset = array![0.7, 0.7, 0.7, 0.7];
+        let eta_log_sigma_offset = array![0.4, 0.4, 0.4, 0.4];
         let mu_t =
             x_threshold_dense.row(0).dot(&beta_pi.slice(s![2..4])) + eta_threshold_offset[0];
         let mu_ls =
@@ -832,7 +1042,7 @@ mod tests {
         );
 
         let input = SurvivalLocationScalePredictInput {
-            x_time_exit: array![[1.0, 0.5]],
+            x_time_exit: array![[1.0, 0.5], [1.0, 0.5], [1.0, 0.5], [1.0, 0.5]],
             eta_time_offset_exit,
             time_wiggle_knots: None,
             time_wiggle_degree: None,
@@ -846,7 +1056,10 @@ mod tests {
             )),
             eta_log_sigma_offset,
             x_link_wiggle: Some(DesignMatrix::Dense(
-                gam_linalg::matrix::DenseDesignMatrix::from(basis.clone()),
+                gam_linalg::matrix::DenseDesignMatrix::from(Array2::from_shape_fn(
+                    (4, basis.ncols()),
+                    |index| basis[[0, index.1]],
+                )),
             )),
             link_wiggle_knots: Some(knots.clone()),
             link_wiggle_degree: Some(degree),
@@ -1040,5 +1253,30 @@ mod tests {
              `response_standard_error` reports: {truncated_error_second:.3e} vs \
              {gaussian_error_second:.3e} against reference {reference_second:.12e}"
         );
+
+        // The tail rows certified rather than refused: the `expect` above is where
+        // a refusal would surface. Each is a probability that survives at least as
+        // surely as row 0, whose `1 − E[S]` is orders of magnitude larger than any
+        // integration error the certificate admits.
+        for row in 1..4 {
+            let response_standard_error = (truncated_second[row]
+                - truncated_mean[row] * truncated_mean[row])
+                .max(0.0)
+                .sqrt();
+            eprintln!(
+                "[2917] row {row}: truncated E[S]={:.15e} 1-E[S]={:.3e} sd={:.3e}; \
+                 moment-matched normal E[S]={:.15e}",
+                truncated_mean[row],
+                1.0 - truncated_mean[row],
+                response_standard_error,
+                gaussian_mean[row]
+            );
+            assert!(
+                truncated_mean[row] <= 1.0 && truncated_mean[row] > truncated_mean[0],
+                "row {row}: E[S]={:.15e} must lie in (E[S] of row 0 = {:.15e}, 1]",
+                truncated_mean[row],
+                truncated_mean[0]
+            );
+        }
     }
 }

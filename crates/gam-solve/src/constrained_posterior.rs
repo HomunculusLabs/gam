@@ -1090,28 +1090,9 @@ impl ConstrainedProjectionLaw {
     }
 }
 
-/// One point of the JOINT rule over an inequality-truncated Gaussian posterior:
-/// a feasible constraint-normal coordinate and the tangent coordinates drawn
-/// from the same low-discrepancy point.
-#[derive(Clone, Debug)]
-pub struct ConstrainedPosteriorJointPoint {
-    /// `u = Aβ − b` on the retained rows. Inside the retained region by
-    /// construction — the separation-of-variables map only ever produces points
-    /// of `[0, upper]`, so a consumer integrating against these points puts
-    /// exactly zero mass on coefficient vectors the fit excluded.
-    pub normal_coordinates: Array1<f64>,
-    /// Independent standard-normal coordinates for the tangent block, length
-    /// `tangent_dimension`. The tangent of an inequality-truncated Gaussian is
-    /// exactly Gaussian and exactly independent of `u`: conditioning on `Aβ`
-    /// leaves `N(β_unc + G(u − E_untrunc[u]), Σ − GAΣ)` whatever the truncation
-    /// does to `u`, which is what lets one rule carry both blocks.
-    pub tangent: Array1<f64>,
-    /// Normalized weight. The weights sum to one.
-    pub weight: f64,
-}
-
 /// A single low-discrepancy rule over the constraint-normal AND tangent
-/// coordinates of an inequality-truncated Gaussian.
+/// coordinates of an inequality-truncated Gaussian, served one replicate lattice
+/// at a time.
 ///
 /// Why this exists (#2679). A consumer that integrates a nonlinear functional
 /// of `β` over this posterior has, until now, had two options, and both are
@@ -1125,104 +1106,126 @@ pub struct ConstrainedPosteriorJointPoint {
 ///   That is exact, and it costs `nodes × outer × inner` evaluations per
 ///   evaluation point, which is not a production integration rule.
 ///
-/// This is the third option: `points` points of ONE rule in dimension
-/// `q + tangent_dimension`. The first `q` lattice coordinates run the same
-/// separation-of-variables map, tilt and weighting the module's own cubature
-/// uses — so the `u`-marginal is bit-identical to it at equal point counts —
-/// and the remaining coordinates carry standard normals for the tangent. The
-/// per-evaluation-point cost is `points`, with no factor of the cubature's node
-/// count in it.
+/// This is the third option: ONE rule in dimension `q + tangent_dimension`. The
+/// first `q` lattice coordinates run the same separation-of-variables map, tilt
+/// and weighting the module's own cubature uses — so the `u`-marginal of a
+/// replicate is bit-identical to that replicate of the certified moments at equal
+/// node counts — and the remaining coordinates carry standard normals for the
+/// tangent. The per-evaluation-point cost is the node count, with no factor of
+/// the cubature's node count in it.
 ///
 /// The price is real and is the caller's to gate: a lattice rule on the smooth
-/// tangent block does not have the spectral accuracy of the Gauss-Hermite
-/// tensor rule it replaces. A consumer must measure itself against a reference
-/// built from the DENSITY rather than from this rule before using it.
-pub fn constrained_posterior_joint_cubature(
-    normal_center: &Array1<f64>,
-    normal_covariance: &Array2<f64>,
-    upper_limits: &[f64],
-    tangent_dimension: usize,
-    points: usize,
-) -> Result<Vec<ConstrainedPosteriorJointPoint>, String> {
-    let q = normal_center.len();
-    if q == 0 {
-        return Err("joint constrained cubature needs at least one constraint normal".to_string());
-    }
-    if normal_covariance.dim() != (q, q) || upper_limits.len() != q {
-        return Err(format!(
-            "joint constrained cubature geometry mismatch: centre={q}, covariance={:?}, \
-             upper limits={}",
-            normal_covariance.dim(),
-            upper_limits.len()
-        ));
-    }
-    if points == 0 {
-        return Err("joint constrained cubature needs a positive point count".to_string());
-    }
-    if upper_limits.iter().any(|limit| !(*limit > 0.0)) {
-        return Err(format!(
-            "joint constrained cubature: every upper limit must sit strictly above its wall, \
-             got {upper_limits:?}"
-        ));
-    }
-    // The first replicate lattice of the module's own rule: same order, same
-    // tilt, same nodes as the certified moments' first replicate at equal
-    // point counts.
-    let rule = OrthantRule::new(normal_center, upper_limits, normal_covariance, tangent_dimension)?;
-    let mut accumulator = JointCubatureAccumulator {
-        points: Vec::with_capacity(points),
-    };
-    rule.accumulate(&mut accumulator, 0, 0, points)?;
-    accumulator.normalized()
+/// tangent block does not have the spectral accuracy of the Gauss-Hermite tensor
+/// rule it replaces, and a consumer must measure itself against a reference built
+/// from the DENSITY rather than from this rule. What the rule supplies for its
+/// consumer's own certificate is its replicates (#2917). Every replicate is the
+/// lattice under its own deterministic shift, and the Kronecker sequence is a
+/// prefix sequence, so a consumer extends each replicate from `N` to `2N` nodes by
+/// visiting `N..2N` alone and certifies its integrand on the spread of the
+/// replicate estimates at the node count it stopped at, as the module's own
+/// moments are certified. Comparing consecutive doublings of one lattice cannot
+/// see bias, which is why this module retired that rule.
+pub struct ConstrainedPosteriorJointRule {
+    rule: OrthantRule,
 }
 
-/// Sink that keeps whole joint points rather than accumulating their moments.
-struct JointCubatureAccumulator {
-    /// `weight` carries the UNNORMALIZED log weight until [`Self::normalized`]
-    /// rescales it: the log scale spans hundreds of decades on a deeply pinned
-    /// face, so no weight is exponentiated before the maximum is known.
-    points: Vec<ConstrainedPosteriorJointPoint>,
-}
-
-impl JointCubatureAccumulator {
-    fn normalized(self) -> Result<Vec<ConstrainedPosteriorJointPoint>, String> {
-        let max_log_weight = self
-            .points
-            .iter()
-            .map(|point| point.weight)
-            .fold(f64::NEG_INFINITY, f64::max);
-        if !max_log_weight.is_finite() {
-            return Err("joint constrained cubature accumulated no finite node weight".to_string());
+impl ConstrainedPosteriorJointRule {
+    pub fn new(
+        normal_center: &Array1<f64>,
+        normal_covariance: &Array2<f64>,
+        upper_limits: &[f64],
+        tangent_dimension: usize,
+    ) -> Result<Self, String> {
+        let q = normal_center.len();
+        if q == 0 {
+            return Err("joint constrained cubature needs at least one constraint normal".to_string());
         }
-        let weight_sum = self
-            .points
-            .iter()
-            .map(|point| (point.weight - max_log_weight).exp())
-            .sum::<f64>();
-        if !(weight_sum.is_finite() && weight_sum > 0.0) {
+        if normal_covariance.dim() != (q, q) || upper_limits.len() != q {
             return Err(format!(
-                "joint constrained cubature has invalid normalized weight sum {weight_sum:?}"
+                "joint constrained cubature geometry mismatch: centre={q}, covariance={:?}, \
+                 upper limits={}",
+                normal_covariance.dim(),
+                upper_limits.len()
             ));
         }
-        let mut points = self.points;
-        for point in points.iter_mut() {
-            point.weight = (point.weight - max_log_weight).exp() / weight_sum;
+        if upper_limits.iter().any(|limit| !(*limit > 0.0)) {
+            return Err(format!(
+                "joint constrained cubature: every upper limit must sit strictly above its wall, \
+                 got {upper_limits:?}"
+            ));
         }
-        Ok(points)
+        Ok(Self {
+            rule: OrthantRule::new(normal_center, upper_limits, normal_covariance, tangent_dimension)?,
+        })
+    }
+
+    /// Independently shifted replicate lattices the rule carries. A certificate
+    /// read from their spread has one degree of freedom fewer.
+    pub fn replicates(&self) -> usize {
+        ORTHANT_MOMENT_REPLICATES
+    }
+
+    /// Nodes per replicate at a certified consumer's first pass: a starting point,
+    /// not a budget.
+    pub fn initial_points(&self) -> usize {
+        ORTHANT_MOMENT_INITIAL_POINTS
+    }
+
+    /// Nodes over all replicates past which a certified consumer refuses rather
+    /// than keep doubling, as the module's own moments do.
+    pub fn maximum_points(&self) -> usize {
+        ORTHANT_MOMENT_MAXIMUM_POINTS
+    }
+
+    /// The relative accuracy the law's constraint-normal moments are certified to.
+    /// A functional integrated against this law resolves nothing finer than the law
+    /// itself, so this is the accuracy a consumer's own certificate states.
+    pub fn relative_tolerance(&self) -> f64 {
+        ORTHANT_MOMENT_RELATIVE_TOLERANCE
+    }
+
+    /// Visit nodes `first..last` of replicate lattice `replicate`.
+    ///
+    /// Each visit hands over the node's UNNORMALIZED log weight, its
+    /// constraint-normal coordinates `u = Aβ − b` on the retained rows — inside
+    /// `[0, upper]` by construction, so a consumer puts exactly zero mass on
+    /// coefficient vectors the fit excluded — and its `tangent_dimension`
+    /// independent standard-normal coordinates. A node whose feasible mass
+    /// underflowed is not visited. The first error `visit` returns is returned, and
+    /// no node after it is visited.
+    pub fn visit_nodes(
+        &self,
+        replicate: usize,
+        first: usize,
+        last: usize,
+        visit: impl FnMut(f64, &Array1<f64>, &[f64]) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let mut visitor = JointNodeVisitor { visit, error: None };
+        self.rule.accumulate(&mut visitor, replicate, first, last)?;
+        visitor.error.map_or(Ok(()), Err)
     }
 }
 
-impl OrthantNodeSink for JointCubatureAccumulator {
+/// Sink that hands each node of the joint rule to a caller's closure.
+struct JointNodeVisitor<F> {
+    visit: F,
+    /// The first error the closure returned. No node after it is visited.
+    error: Option<String>,
+}
+
+impl<F: FnMut(f64, &Array1<f64>, &[f64]) -> Result<(), String>> OrthantNodeSink
+    for JointNodeVisitor<F>
+{
     fn push(&mut self, log_weight: f64, point: &Array1<f64>) {
         self.push_joint(log_weight, point, &[]);
     }
 
     fn push_joint(&mut self, log_weight: f64, point: &Array1<f64>, tangent: &[f64]) {
-        self.points.push(ConstrainedPosteriorJointPoint {
-            normal_coordinates: point.clone(),
-            tangent: Array1::from_vec(tangent.to_vec()),
-            weight: log_weight,
-        });
+        if self.error.is_none()
+            && let Err(error) = (self.visit)(log_weight, point, tangent)
+        {
+            self.error = Some(error);
+        }
     }
 }
 
@@ -6656,25 +6659,38 @@ mod projection_law_2446_tests {
         );
 
         const POINTS: usize = 1 << 13;
-        let joint = constrained_posterior_joint_cubature(
-            &normal_center,
-            &normal_covariance,
-            &upper_limits,
-            1,
-            POINTS,
-        )
-        .expect("joint cubature on a retained two-row face");
+        let rule =
+            ConstrainedPosteriorJointRule::new(&normal_center, &normal_covariance, &upper_limits, 1)
+                .expect("joint rule on a retained two-row face");
+        // Replicate 0 as `(log weight, u, t)`, normalized below over the nodes visited.
+        let mut joint: Vec<(f64, Array1<f64>, f64)> = Vec::with_capacity(POINTS);
+        rule.visit_nodes(0, 0, POINTS, |log_weight, normal_coordinates, tangent| {
+            joint.push((log_weight, normal_coordinates.clone(), tangent[0]));
+            Ok(())
+        })
+        .expect("visit the joint rule's first replicate");
         assert_eq!(
             joint.len(),
             POINTS,
             "the joint rule's cost is the point count it was asked for and nothing else"
         );
+        let max_log_weight = joint
+            .iter()
+            .map(|node| node.0)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let weight_sum = joint
+            .iter()
+            .map(|node| (node.0 - max_log_weight).exp())
+            .sum::<f64>();
+        for node in joint.iter_mut() {
+            node.0 = (node.0 - max_log_weight).exp() / weight_sum;
+        }
 
         // (a) support. Exact, not to a tolerance: the SOV map cannot produce an
         // infeasible point, so any tolerance here would be hiding a bug.
         let infeasible_points = joint
             .iter()
-            .filter(|point| point.normal_coordinates.iter().any(|&value| value < 0.0))
+            .filter(|node| node.1.iter().any(|&value| value < 0.0))
             .count();
         assert_eq!(
             infeasible_points, 0,
@@ -6682,20 +6698,11 @@ mod projection_law_2446_tests {
              not"
         );
 
-        let weight_sum = joint.iter().map(|point| point.weight).sum::<f64>();
-        assert!(
-            (weight_sum - 1.0).abs() < 1e-9,
-            "joint weights must be normalized, got {weight_sum:.12e}"
-        );
-
         // (b) the tangent block is standard normal under the SAME weights.
-        let tangent_mean = joint
-            .iter()
-            .map(|point| point.weight * point.tangent[0])
-            .sum::<f64>();
+        let tangent_mean = joint.iter().map(|node| node.0 * node.2).sum::<f64>();
         let tangent_second = joint
             .iter()
-            .map(|point| point.weight * point.tangent[0] * point.tangent[0])
+            .map(|node| node.0 * node.2 * node.2)
             .sum::<f64>();
         eprintln!(
             "[2679] points={POINTS} tangent_mean={tangent_mean:.6e} \
@@ -6714,9 +6721,9 @@ mod projection_law_2446_tests {
 
         let joint_value = joint
             .iter()
-            .map(|point| {
-                let normal_part = lift_contrast.dot(&point.normal_coordinates);
-                point.weight * integrand(normal_part + tangent_sd * point.tangent[0])
+            .map(|node| {
+                let normal_part = lift_contrast.dot(&node.1);
+                node.0 * integrand(normal_part + tangent_sd * node.2)
             })
             .sum::<f64>();
 
