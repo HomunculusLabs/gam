@@ -3394,7 +3394,8 @@ impl SaeManifoldTerm {
             log::info!(
                 "[SAE-NEWTON] step {} phases: assemble={assemble_seconds:.2}s \
                  trials={trials} in {:.2}s (ν={:.6e}, ‖Δ‖={:.6e}, damped rank {}/{}, \
-                 model agreement {model_agreement:.3e}) total={:.2}s \
+                 ‖g_null‖={:.6e} of ‖g‖={grad_norm:.6e}, model agreement \
+                 {model_agreement:.3e}) total={:.2}s \
                  penalized_objective={committed_objective:.10e}",
                 step + 1,
                 backtrack_started.elapsed().as_secs_f64(),
@@ -3402,6 +3403,7 @@ impl SaeManifoldTerm {
                 accepted.step.step_norm_sq.sqrt(),
                 accepted.step.retained_rank,
                 geometry.eigenvalues.len(),
+                accepted.step.excluded_gradient_norm_sq.sqrt(),
                 step_started.elapsed().as_secs_f64(),
             );
             log::debug!(

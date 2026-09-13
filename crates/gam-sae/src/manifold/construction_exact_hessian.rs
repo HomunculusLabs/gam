@@ -202,6 +202,10 @@ pub(crate) struct DampedResidualStep {
     pub(crate) step_norm_sq: f64,
     /// Directions whose damped denominator cleared the null band.
     pub(crate) retained_rank: usize,
+    /// `‖g‖²` carried by the directions inside the null band. The step moves
+    /// nothing along them, so this is the part of the stationarity residual that
+    /// no step of this operator can reduce, at any damping.
+    pub(crate) excluded_gradient_norm_sq: f64,
 }
 
 impl ExactHessianSpectralBlock {
@@ -297,11 +301,14 @@ impl ExactHessianSpectralBlock {
         let coefficients = self.eigenvectors.t().dot(&flat);
         let mut step_coefficients = Array1::<f64>::zeros(dim);
         let mut retained_rank = 0;
+        let mut excluded_gradient_norm_sq = 0.0_f64;
         for index in 0..dim {
             let magnitude = self.eigenvalues[index].abs();
             if magnitude > self.rank_floor(index) {
                 step_coefficients[index] = -coefficients[index] / (magnitude + nu.sqrt());
                 retained_rank += 1;
+            } else {
+                excluded_gradient_norm_sq += coefficients[index] * coefficients[index];
             }
         }
         let solution = self.eigenvectors.dot(&step_coefficients);
@@ -312,6 +319,7 @@ impl ExactHessianSpectralBlock {
             },
             step_norm_sq: solution.dot(&solution),
             retained_rank,
+            excluded_gradient_norm_sq,
         })
     }
 
