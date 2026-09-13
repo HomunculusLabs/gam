@@ -3916,10 +3916,17 @@ pub fn fit_penalized_multinomial_formula(
             }
         }
         Err(err) => {
+            // Ruling (b) (#979): a refusal arms the proper prior only when it carries
+            // typed evidence that the unbiased objective has no finite stationary point
+            // with positive-definite information on the identified span. A search that
+            // ended on its budget, or on any other refusal, proves nothing about
+            // separation, and arming on it would ship the Firth-biased estimand for a
+            // solver outcome (#1082 #29).
+            let Some(typed) = err.jeffreys_arming_evidence() else {
+                return Err(EstimationError::CustomFamily(err));
+            };
             let evidence = format!(
-                "the unbiased criterion has no certified optimum on the caller's own outer \
-                 budget ({} iteration(s)): {err}",
-                options.outer_max_iter,
+                "the unbiased criterion refused with typed arming evidence {typed:?}: {err}"
             );
             // No certified mode, so no measured span: the derived
             // `ker(S_lambda)` route stands.
