@@ -8216,6 +8216,34 @@ pub(crate) fn run_outer_uncertified(
                     refuted_fixed_point_continuation = Some(result);
                     continue 'plan_attempts;
                 }
+                // The same collapse, on the gradient-only primary. A BFGS search keeps
+                // `solver_claimed_convergence` on a checkpoint the certificate refuted,
+                // because its termination was a gradient tolerance and not an exhausted
+                // budget. So the declared-curvature attempt that fbf0741ad added for this
+                // capability was reached only by searches that never claimed convergence.
+                // A positive-definite secant model that stops at negative curvature does
+                // claim it. Measured on the #2612 quasi-separated arm (pool job 577986,
+                // with the Firth refit seeded from the family's lattice): the refit
+                // reported `claimed_converged=true`, `hessian_psd=NO` and
+                // λ_min(H) = -2.2e-4, and produced no fit. The ARC attempt on the declared
+                // Hessian never ran.
+                let has_declared_curvature_fallback = attempts
+                    .get(attempt_idx + 1)
+                    .is_some_and(|next| matches!(plan(next).solver, Solver::Arc));
+                if matches!(the_plan.solver, Solver::Bfgs)
+                    && attempt_cap.prefer_gradient_only
+                    && has_declared_curvature_fallback
+                {
+                    log::info!(
+                        "[OUTER] {context}: the gradient-only search's claim was refuted by \
+                         the analytic certificate; searching again with the declared curvature"
+                    );
+                    last_error = Some(EstimationError::RemlOptimizationFailed(format!(
+                        "{context}: gradient-only search claim was refuted by analytic screening",
+                    )));
+                    spent_iterations = spent_iterations.saturating_add(result.iterations);
+                    continue 'plan_attempts;
+                }
                 Ok(result)
             }
             Err(e) => Err(e),
