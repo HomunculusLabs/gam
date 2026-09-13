@@ -94,10 +94,6 @@ const ISA_SUBSAMPLE_FLOOR: usize = 2500;
 /// interpolation of a known-degree function, not a tuned search grid.
 const ISA_ANGLE_SAMPLES: usize = 64;
 
-/// Relative improvement below which a Jacobi sweep is converged (machine-
-/// precision scale — a convergence tolerance, not a model threshold).
-const ISA_SWEEP_RTOL: f64 = 1.0e-12;
-
 /// Cost dials for the ISA producer (multistart width and a sweep safety bound —
 /// COST caps, not statistical thresholds; every accept/reject decision is made
 /// by the derived anchors and floors above).
@@ -107,9 +103,9 @@ pub struct IsaSeedConfig {
     /// default 6 is the prototype-validated multistart floor that reached the
     /// global basin on the equal-amplitude worst case (#2111).
     pub n_inits: usize,
-    /// Safety bound on cyclic Jacobi sweeps; convergence is the
-    /// `ISA_SWEEP_RTOL` relative-improvement stop, this only caps a
-    /// pathological cycle (mirrors the `max_births` bound-not-stop pattern).
+    /// Safety bound on cyclic Jacobi sweeps. A sweep converges once no pair
+    /// rotation's gain clears the rounding band of its moment sums; this only
+    /// caps a pathological cycle (mirrors the `max_births` bound-not-stop pattern).
     pub max_sweeps: usize,
 }
 
@@ -432,6 +428,10 @@ pub(crate) fn orthonormalize2(w: &mut Array2<f64>) -> bool {
 struct PlanePolys {
     d: [f64; 3],
     n: [f64; 5],
+    /// Formation band of each `d` coefficient (see [`pair_polys`]).
+    d_band: f64,
+    /// Formation band of each `n` coefficient (see [`pair_polys`]).
+    n_band: f64,
 }
 
 impl PlanePolys {
@@ -442,6 +442,29 @@ impl PlanePolys {
         }
         let num = self.n[0] + self.n[1] * c2 + self.n[2] * s2 + self.n[3] * c4 + self.n[4] * s4;
         num / (den * den)
+    }
+
+    /// Rounding band of [`Self::kappa`] at the same angle. `D` sums three
+    /// coefficients and `N` five, each off by its formation band, and the
+    /// evaluation adds `γ_5` and `γ_9` of their absolute terms; `κ = N/D²` carries
+    /// `δN/D² + 2|κ|·δD/D` plus `γ_2·|κ|` for the square and the quotient.
+    fn kappa_band(&self, c2: f64, s2: f64, c4: f64, s4: f64) -> f64 {
+        use gam_linalg::roundoff::accumulation_growth;
+        let den = self.d[0] + self.d[1] * c2 + self.d[2] * s2;
+        if !(den > 0.0) {
+            return 0.0;
+        }
+        let num = self.n[0] + self.n[1] * c2 + self.n[2] * s2 + self.n[3] * c4 + self.n[4] * s4;
+        let den_terms = self.d[0].abs() + (self.d[1] * c2).abs() + (self.d[2] * s2).abs();
+        let num_terms = self.n[0].abs()
+            + (self.n[1] * c2).abs()
+            + (self.n[2] * s2).abs()
+            + (self.n[3] * c4).abs()
+            + (self.n[4] * s4).abs();
+        let den_band = 3.0 * self.d_band + accumulation_growth(5) * den_terms;
+        let num_band = 5.0 * self.n_band + accumulation_growth(9) * num_terms;
+        let kappa = (num / (den * den)).abs();
+        num_band / (den * den) + 2.0 * kappa * den_band / den + accumulation_growth(2) * kappa
     }
 
     /// Hand-derived `dκ/dθ` at the same angle (quotient rule on the two
@@ -533,6 +556,16 @@ fn pair_polys(
     ] {
         *v *= inv_n;
     }
+    // Each scaled moment sums `n` terms formed with at most two products and then
+    // scales by `1/n`, so it is off by `γ_{n+3}` of its absolute sum. The signed
+    // moments' absolute sums are bounded by even ones (`|y_i·y_j| ≤ (y_i² + y_j²)/2`,
+    // and likewise for the quartic and partner-weighted cross terms). Every `d`
+    // coefficient below combines quadratic moments with absolute weights summing to
+    // at most 2, and every `n` coefficient combines quartic ones with weights summing
+    // to at most 5, through at most eight more rounded operations.
+    let coefficient_growth = gam_linalg::roundoff::accumulation_growth(n + 11);
+    let quadratic = m20.max(m02);
+    let quartic = m40.max(m22).max(m04);
     // Shared quartic combinations: per-row u = (y_i² + y_j²)/2, v = (y_i² − y_j²)/2,
     // w = y_i·y_j, so E[y(θ)⁴] = E[(u ± C·v ∓ S·w)²] expands over these.
     let euu = (m40 + 2.0 * m22 + m04) / 4.0;
@@ -559,6 +592,8 @@ fn pair_polys(
                 quart_c4,
                 -evw,
             ],
+            d_band: 2.0 * coefficient_growth * quadratic.max(a2),
+            n_band: 5.0 * coefficient_growth * quartic.max(a4).max(awi).max(awj),
         }
     });
     // Plane B: y_j(θ) = s·y_i + c·y_j ⇒ y_j(θ)² = h0 − C·h1 + S·h2.
@@ -574,6 +609,8 @@ fn pair_polys(
                 quart_c4,
                 -evw,
             ],
+            d_band: 2.0 * coefficient_growth * quadratic.max(b2),
+            n_band: 5.0 * coefficient_growth * quartic.max(b4).max(bwi).max(bwj),
         }
     });
     (plane_a, plane_b)
@@ -600,6 +637,24 @@ fn pair_objective(a: &Option<PlanePolys>, b: &Option<PlanePolys>, theta: f64) ->
         }
     }
     j
+}
+
+/// Rounding band of [`pair_objective`] at `theta`: each side's `κ` band carried
+/// through `(κ − 2)²`, plus `γ_2` of the squares for the square and the sum.
+fn pair_objective_band(a: &Option<PlanePolys>, b: &Option<PlanePolys>, theta: f64) -> f64 {
+    let (c2, s2) = ((2.0 * theta).cos(), (2.0 * theta).sin());
+    let (c4, s4) = ((4.0 * theta).cos(), (4.0 * theta).sin());
+    let mut band = 0.0;
+    for side in [a, b].into_iter().flatten() {
+        let k = side.kappa(c2, s2, c4, s4);
+        if k.is_finite() {
+            let dk = side.kappa_band(c2, s2, c4, s4);
+            band += 2.0 * (k - 2.0).abs() * dk
+                + dk * dk
+                + gam_linalg::roundoff::accumulation_growth(2) * (k - 2.0) * (k - 2.0);
+        }
+    }
+    band
 }
 
 fn pair_objective_deriv(a: &Option<PlanePolys>, b: &Option<PlanePolys>, theta: f64) -> f64 {
@@ -736,7 +791,6 @@ fn total_contrast(y: &Array2<f64>, n_planes: usize) -> f64 {
 fn jacobi_optimize(y: &mut Array2<f64>, q: &mut Array2<f64>, n_planes: usize, max_sweeps: usize) {
     let r = y.nrows();
     let partner = |c: usize| -> Option<usize> { if c < 2 * n_planes { Some(c ^ 1) } else { None } };
-    let mut total = total_contrast(y, n_planes);
     for _ in 0..max_sweeps {
         let mut improved = false;
         for i in 0..r {
@@ -757,7 +811,12 @@ fn jacobi_optimize(y: &mut Array2<f64>, q: &mut Array2<f64>, n_planes: usize, ma
                 // sign-change roots. The old single-cell polish missed maxima
                 // whose grid winner was not bracketed by `+ → -` derivatives.
                 let (best_theta, best_j) = best_pair_rotation(&pa, &pb);
-                if best_j > j0 * (1.0 + ISA_SWEEP_RTOL) {
+                // Rotate only when the gain clears both evaluations' rounding bands.
+                // Each accepted rotation then raises the contrast by a resolvable
+                // amount, so a sweep with no resolvable gain ends the ascent.
+                let resolvable_gain =
+                    pair_objective_band(&pa, &pb, best_theta) + pair_objective_band(&pa, &pb, 0.0);
+                if best_j - j0 > resolvable_gain {
                     let (c, s) = (best_theta.cos(), best_theta.sin());
                     for col in 0..y.ncols() {
                         let yi = y[[i, col]];
@@ -775,11 +834,9 @@ fn jacobi_optimize(y: &mut Array2<f64>, q: &mut Array2<f64>, n_planes: usize, ma
                 }
             }
         }
-        let new_total = total_contrast(y, n_planes);
-        if !improved || new_total - total <= ISA_SWEEP_RTOL * (1.0 + total.abs()) {
+        if !improved {
             break;
         }
-        total = new_total;
     }
 }
 
