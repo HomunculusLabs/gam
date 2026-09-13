@@ -21,20 +21,31 @@
 //! log link cannot recover exp(true_eta) and fails it.
 //!
 //! Setup (identical bytes fed to both engines):
-//!   * synthetic n=250, x1,x2 ~ U[0,10], seed 20260530, counts as above.
-//!   * a fixed 70/30 train/test split (indices computed identically Rust-side and
-//!     handed to EBM as a `fold` column: 1 = test, 0 = train).
-//!   * gam fits `count ~ s(x1, k=6) + s(x2, k=6)` (Poisson, log link, REML) on the
-//!     TRAIN rows, then predicts mu on the TEST rows.
-//!   * EBM fits on the TRAIN rows, predicts mu on the TEST rows.
+//!   * `K_SEEDS` synthetic draws of n=250, x1,x2 ~ U[0,10], counts as above, seeded
+//!     `SEED`, `SEED + 1`, ...; the first draw is the single draw this test used
+//!     before it was paired.
+//!   * a fixed 70/30 train/test split by row index (computed identically Rust-side
+//!     and handed to EBM as a `fold` column: 1 = test, 0 = train).
+//!   * gam fits `count ~ s(x1, k=6) + s(x2, k=6)` (Poisson, log link, REML) on each
+//!     draw's TRAIN rows, then predicts mu on its TEST rows.
+//!   * EBM fits on each draw's TRAIN rows and predicts mu on its TEST rows, every
+//!     draw in one Python session.
+//!
+//! PAIRED over draws, not one draw (#2395). Either learner's truth deviance
+//! depends on which counts it fit, so one draw's ratio conflates the draw with the
+//! learner. The single draw this test used read gam 1.1071 against EBM 0.9831
+//! (ratio 1.126, gam EDF 2.996) at fa0e33bb4 (CI run 34702231507).
 //!
 //! Assertions:
 //!   1. TRUTH RECOVERY (primary): gam's held-out RMSE against the TRUE mean
-//!      `mu_true` is a small fraction of the true-mean range — gam has recovered
-//!      the smooth count surface, not merely tracked the noisy realization.
-//!   2. MATCH-OR-BEAT (baseline): gam's held-out truth-deviance is no worse than
-//!      the EBM's truth-deviance times 1.10. The mature ML additive learner sets
-//!      the accuracy bar; gam must meet or beat it on recovering the SAME truth.
+//!      `mu_true`, averaged over draws, is a small fraction of the true-mean range
+//!      — gam has recovered the smooth count surface, not merely tracked the noisy
+//!      realization.
+//!   2. MATCH-OR-BEAT (baseline): `assert_paired_match_or_beat` on the held-out
+//!      truth deviance. gam's draw-averaged deviance is no worse than the EBM's
+//!      times 1.10, and gam is not RESOLVED worse draw by draw. The mature ML
+//!      additive learner sets the accuracy bar; gam must meet or beat it on
+//!      recovering the SAME truth.
 //! A genuine recovery shortfall failing is a real bug in gam's Poisson/PIRLS path,
 //! never a reason to weaken these bounds.
 
@@ -43,7 +54,9 @@ use gam::matrix::DesignMatrix;
 use gam::predict::standard::StandardPredictor;
 use gam::predict::{PosteriorMeanOptions, PredictInput, PredictableModel};
 use gam::smooth::build_term_collection_design;
-use gam::test_support::reference::{Column, QualityPair, run_python};
+use gam::test_support::reference::{
+    Column, PairedFoldComparison, QualityPair, assert_paired_match_or_beat, run_python,
+};
 use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
 use gam::{
     FitConfig, FitResult, StandardFitResult, encode_recordswith_inferred_schema, fit_from_formula,
@@ -105,12 +118,14 @@ fn gam_posterior_mean_count(fit: &StandardFitResult, design: DesignMatrix, rows:
     prediction.mean.to_vec()
 }
 
-#[test]
-fn gam_poisson_log_matches_interpretml_ebm() {
-    init_parallelism();
+/// Paired count draws per panel, seeded `SEED`, `SEED + 1`, ... See the "PAIRED
+/// over draws" note above.
+const K_SEEDS: usize = 25;
 
-    // ---- synthetic count data + fixed train/test fold (identical to both) ----
-    let mut rng = StdRng::seed_from_u64(SEED);
+/// One draw's covariates and counts: x1, x2 ~ U[0,10] and
+/// count ~ Poisson(exp(true_eta)), from `StdRng` seeded at `seed`.
+fn poisson_draw(seed: u64) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let mut rng = StdRng::seed_from_u64(seed);
     let ux = Uniform::new(0.0, 10.0).expect("uniform 0..10");
     let mut x1 = Vec::with_capacity(N);
     let mut x2 = Vec::with_capacity(N);
@@ -124,22 +139,18 @@ fn gam_poisson_log_matches_interpretml_ebm() {
         x2.push(b);
         y.push(count);
     }
+    (x1, x2, y)
+}
 
-    // Deterministic 70/30 split by row index: every 10th-and-beyond-7 row is
-    // test. fold[i] == 1.0 means TEST, 0.0 means TRAIN — handed verbatim to EBM.
-    let fold: Vec<f64> = (0..N)
-        .map(|i| if i % 10 >= 7 { 1.0 } else { 0.0 })
-        .collect();
-    let train_idx: Vec<usize> = (0..N).filter(|&i| fold[i] == 0.0).collect();
-    let test_idx: Vec<usize> = (0..N).filter(|&i| fold[i] == 1.0).collect();
-    assert!(
-        train_idx.len() > 100 && test_idx.len() > 50,
-        "split sanity: {} train / {} test",
-        train_idx.len(),
-        test_idx.len()
-    );
-
-    // ---- fit with gam on TRAIN rows: count ~ s(x1,k=6)+s(x2,k=6), Poisson -----
+/// gam's `count ~ s(x1, k=6) + s(x2, k=6)` Poisson/log REML fit on one draw's
+/// TRAIN rows: the posterior-mean count at its TEST rows, and the total EDF.
+fn gam_test_mean_count(
+    x1: &[f64],
+    x2: &[f64],
+    y: &[f64],
+    train_idx: &[usize],
+    test_idx: &[usize],
+) -> (Vec<f64>, f64) {
     let headers = ["x1", "x2", "count"]
         .into_iter()
         .map(String::from)
@@ -174,144 +185,196 @@ fn gam_poisson_log_matches_interpretml_ebm() {
     }
     let design = build_term_collection_design(grid.view(), &fit.resolvedspec)
         .expect("rebuild design at test points");
-    let gam_mu = gam_posterior_mean_count(&fit, design.design, n_test);
+    (gam_posterior_mean_count(&fit, design.design, n_test), gam_edf)
+}
 
-    // ---- fit the SAME data with InterpretML EBM (Poisson deviance) -----------
+#[test]
+fn gam_poisson_log_matches_interpretml_ebm() {
+    init_parallelism();
+
+    // ---- fixed train/test fold by row index, shared by every draw -----------
+    // Every 10th-and-beyond-7 row is test. fold[i] == 1.0 means TEST, 0.0 means
+    // TRAIN — handed verbatim to EBM.
+    let fold: Vec<f64> = (0..N)
+        .map(|i| if i % 10 >= 7 { 1.0 } else { 0.0 })
+        .collect();
+    let train_idx: Vec<usize> = (0..N).filter(|&i| fold[i] == 0.0).collect();
+    let test_idx: Vec<usize> = (0..N).filter(|&i| fold[i] == 1.0).collect();
+    assert!(
+        train_idx.len() > 100 && test_idx.len() > 50,
+        "split sanity: {} train / {} test",
+        train_idx.len(),
+        test_idx.len()
+    );
+    let n_test = test_idx.len();
+
+    // ---- gam on every draw, and the long-format data EBM replays ------------
+    let mut gam_truth_devs = Vec::with_capacity(K_SEEDS);
+    let mut rel_truth_rmses = Vec::with_capacity(K_SEEDS);
+    let mut mu_trues = Vec::with_capacity(K_SEEDS);
+    let mut gam_edf_total = 0.0;
+    let mut irreducible_total = 0.0;
+    let mut long_seed = Vec::with_capacity(K_SEEDS * N);
+    let mut long_x1 = Vec::with_capacity(K_SEEDS * N);
+    let mut long_x2 = Vec::with_capacity(K_SEEDS * N);
+    let mut long_y = Vec::with_capacity(K_SEEDS * N);
+    let mut long_fold = Vec::with_capacity(K_SEEDS * N);
+    for k in 0..K_SEEDS {
+        let seed = SEED + k as u64;
+        let (x1, x2, y) = poisson_draw(seed);
+        let (gam_mu, gam_edf) = gam_test_mean_count(&x1, &x2, &y, &train_idx, &test_idx);
+        gam_edf_total += gam_edf;
+
+        // The data were generated from a known log-mean, so the true mean at each
+        // test covariate is mu_true = exp(true_eta). Objective quality is recovery
+        // of THAT surface on held-out points, not agreement with a peer tool's fit.
+        let mu_true: Vec<f64> = test_idx
+            .iter()
+            .map(|&i| truth_eta(x1[i], x2[i]).exp())
+            .collect();
+        // Truth-recovery deviance: the fitted mean against the TRUE mean. (D_true
+        // uses mu_true in the y-slot of the Poisson deviance; the y=0 limit is never
+        // hit because exp(true_eta) > 0 everywhere.)
+        gam_truth_devs.push(
+            mu_true
+                .iter()
+                .zip(&gam_mu)
+                .map(|(&mt, &mh)| poisson_dev_unit(mt, mh))
+                .sum::<f64>(),
+        );
+        // Truth-recovery RMSE on the held-out mean surface, relative to the range
+        // of the true mean over the test fold.
+        let gam_truth_rmse = (gam_mu
+            .iter()
+            .zip(&mu_true)
+            .map(|(&mh, &mt)| (mh - mt).powi(2))
+            .sum::<f64>()
+            / n_test as f64)
+            .sqrt();
+        let mu_true_min = mu_true.iter().cloned().fold(f64::INFINITY, f64::min);
+        let mu_true_max = mu_true.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        rel_truth_rmses.push(gam_truth_rmse / (mu_true_max - mu_true_min).max(1e-12));
+        // Irreducible deviance the truth itself carries against the realized
+        // counts — a no-model-can-beat reference scale (context only).
+        irreducible_total += test_idx
+            .iter()
+            .zip(&mu_true)
+            .map(|(&i, &mt)| poisson_dev_unit(y[i], mt))
+            .sum::<f64>();
+        mu_trues.push(mu_true);
+
+        for i in 0..N {
+            long_seed.push(seed as f64);
+            long_x1.push(x1[i]);
+            long_x2.push(x2[i]);
+            long_y.push(y[i]);
+            long_fold.push(fold[i]);
+        }
+    }
+
+    // ---- the SAME draws through InterpretML EBM, in ONE Python session -------
     // ExplainableBoostingRegressor with the Poisson-deviance objective is the ML
     // analog of a PoissonGAM: additive shape functions of x1 and x2, log link.
-    // We pass the fold column so the Python side splits on the EXACT same rows.
+    // Each draw splits on the EXACT same rows through the fold column.
     let r = run_python(
         &[
-            Column::new("x1", &x1),
-            Column::new("x2", &x2),
-            Column::new("count", &y),
-            Column::new("fold", &fold),
+            Column::new("seed", &long_seed),
+            Column::new("x1", &long_x1),
+            Column::new("x2", &long_x2),
+            Column::new("count", &long_y),
+            Column::new("fold", &long_fold),
         ],
         r#"
 import numpy as np
 from interpret.glassbox import ExplainableBoostingRegressor
 
-x1   = np.asarray(df["x1"],    dtype=float)
-x2   = np.asarray(df["x2"],    dtype=float)
-y    = np.asarray(df["count"], dtype=float)
-fold = np.asarray(df["fold"],  dtype=float)
-
-train = fold == 0.0
-test  = fold == 1.0
+seeds = np.asarray(df["seed"],  dtype=float)
+x1    = np.asarray(df["x1"],    dtype=float)
+x2    = np.asarray(df["x2"],    dtype=float)
+y     = np.asarray(df["count"], dtype=float)
+fold  = np.asarray(df["fold"],  dtype=float)
 X = np.column_stack([x1, x2])
 
-# Poisson-deviance objective => log link, additive shape functions only
-# (interactions=0 keeps it a pure additive GAM, matching s(x1)+s(x2)).
-ebm = ExplainableBoostingRegressor(
-    objective="poisson_deviance",
-    interactions=0,
-    random_state=20260530,
-)
-ebm.fit(X[train], y[train])
-mu = np.asarray(ebm.predict(X[test]), dtype=float)
-# EBM's regression predictions are on the response (mean) scale already; guard
-# against any non-positive mean before it reaches a Poisson deviance.
-mu = np.clip(mu, 1e-8, None)
-emit("mu", mu)
+mu_all = []
+for seed in np.unique(seeds):
+    draw = seeds == seed
+    train = draw & (fold == 0.0)
+    test  = draw & (fold == 1.0)
+    # Poisson-deviance objective => log link, additive shape functions only
+    # (interactions=0 keeps it a pure additive GAM, matching s(x1)+s(x2)).
+    ebm = ExplainableBoostingRegressor(
+        objective="poisson_deviance",
+        interactions=0,
+        random_state=20260530,
+    )
+    ebm.fit(X[train], y[train])
+    mu = np.asarray(ebm.predict(X[test]), dtype=float)
+    # EBM's regression predictions are on the response (mean) scale already;
+    # guard against any non-positive mean before it reaches a Poisson deviance.
+    mu_all.extend(np.clip(mu, 1e-8, None).tolist())
+emit("mu", mu_all)
 "#,
     );
-    let ebm_mu = r.vector("mu");
-    assert_eq!(ebm_mu.len(), n_test, "EBM test-mu length mismatch");
-
-    // ---- OBJECTIVE evaluation on the TEST fold against the KNOWN truth --------
-    // The data were generated from a known log-mean, so the true mean at each test
-    // covariate is mu_true = exp(true_eta). Objective quality is recovery of THAT
-    // surface on held-out points, not agreement with a peer tool's noisy fit.
-    let mu_true: Vec<f64> = test_idx
-        .iter()
-        .map(|&i| truth_eta(x1[i], x2[i]).exp())
-        .collect();
-    let y_test: Vec<f64> = test_idx.iter().map(|&i| y[i]).collect();
-
-    // Truth-recovery deviance: each learner's fitted mean against the TRUE mean.
-    // (D_true uses mu_true in the y-slot of the Poisson deviance; the y=0 limit is
-    //  never hit because exp(true_eta) > 0 everywhere.)
-    let gam_truth_dev: f64 = mu_true
-        .iter()
-        .zip(&gam_mu)
-        .map(|(&mt, &mh)| poisson_dev_unit(mt, mh))
-        .sum();
-    let ebm_truth_dev: f64 = mu_true
-        .iter()
-        .zip(ebm_mu)
-        .map(|(&mt, &mh)| poisson_dev_unit(mt, mh))
-        .sum();
-
-    // (1) Truth-recovery RMSE on the held-out mean surface, reported relative to
-    //     the amplitude (range) of the true mean over the test fold. This is the
-    //     primary objective bar: a small fraction of the signal range.
-    let n_test_f = n_test as f64;
-    let gam_truth_rmse = (gam_mu
-        .iter()
-        .zip(&mu_true)
-        .map(|(&mh, &mt)| (mh - mt).powi(2))
-        .sum::<f64>()
-        / n_test_f)
-        .sqrt();
-    let mu_true_min = mu_true.iter().cloned().fold(f64::INFINITY, f64::min);
-    let mu_true_max = mu_true.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let mu_true_range = (mu_true_max - mu_true_min).max(1e-12);
-    let rel_truth_rmse = gam_truth_rmse / mu_true_range;
-
-    // Irreducible deviance the truth itself carries against the realized counts —
-    // a no-model-can-beat reference scale for the held-out deviance (context only).
-    let truth_vs_counts_dev: f64 = y_test
-        .iter()
-        .zip(&mu_true)
-        .map(|(&yi, &mt)| poisson_dev_unit(yi, mt))
-        .sum();
-
-    // Match-or-beat ratio on the SAME truth metric (gam vs the mature ML learner).
-    let truth_dev_ratio = gam_truth_dev / ebm_truth_dev.max(1e-12);
-
-    eprintln!(
-        "poisson truth-recovery: n_train={} n_test={} gam_edf={gam_edf:.3} \
-         gam_truth_dev={gam_truth_dev:.4} ebm_truth_dev={ebm_truth_dev:.4} (ratio={truth_dev_ratio:.4}) \
-         gam_truth_rmse={gam_truth_rmse:.4} mu_true_range={mu_true_range:.4} (rel={rel_truth_rmse:.4}) \
-         irreducible_dev(truth_vs_counts)={truth_vs_counts_dev:.4}",
-        train_idx.len(),
-        n_test
+    let ebm_mu_flat = r.vector("mu");
+    assert_eq!(
+        ebm_mu_flat.len(),
+        K_SEEDS * n_test,
+        "EBM test-mu panel length mismatch"
     );
+
+    // ---- OBJECTIVE evaluation per draw against the KNOWN truth ---------------
+    let ebm_truth_devs: Vec<f64> = (0..K_SEEDS)
+        .map(|k| {
+            mu_trues[k]
+                .iter()
+                .zip(&ebm_mu_flat[k * n_test..(k + 1) * n_test])
+                .map(|(&mt, &mh)| poisson_dev_unit(mt, mh))
+                .sum::<f64>()
+        })
+        .collect();
+    let rel_truth_rmse_mean = rel_truth_rmses.iter().sum::<f64>() / K_SEEDS as f64;
+
+    let panel = PairedFoldComparison::new(&gam_truth_devs, &ebm_truth_devs, true);
+    eprintln!(
+        "poisson truth-recovery K={K_SEEDS}-draw paired: n_train={} n_test={n_test} \
+         mean_gam_edf={:.3} fold-mean truth_dev gam={:.4} ebm={:.4} \
+         mean rel_truth_rmse={rel_truth_rmse_mean:.4} \
+         mean irreducible_dev(truth_vs_counts)={:.4}",
+        train_idx.len(),
+        gam_edf_total / K_SEEDS as f64,
+        panel.gam_mean,
+        panel.reference_mean,
+        irreducible_total / K_SEEDS as f64,
+    );
+    eprintln!("{}", panel.report("ebm_poisson::truth_deviance"));
     eprintln!(
         "{}",
-        QualityPair::error(
+        QualityPair::paired(
             "families",
             "quality_vs_interpretml_ebm_poisson_log::truth",
             "truth_deviance",
-            gam_truth_dev,
             "interpretml",
-            ebm_truth_dev,
+            &panel,
         )
         .line()
     );
 
-    // (1) PRIMARY — truth recovery: gam's held-out fitted mean tracks the TRUE
-    //     mean to well within a fifth of the true-mean amplitude. exp(true_eta)
-    //     ranges only mildly (the signal is gentle), so a learner that recovered
-    //     the smooth surface lands far inside this; a broken PIRLS loop or a
-    //     mis-inverted log link cannot.
+    // (1) PRIMARY — truth recovery, on the draw average: gam's held-out fitted
+    //     mean tracks the TRUE mean to well within a fifth of the true-mean
+    //     amplitude. exp(true_eta) ranges only mildly (the signal is gentle), so a
+    //     learner that recovered the smooth surface lands far inside this; a broken
+    //     PIRLS loop or a mis-inverted log link cannot.
     assert!(
-        rel_truth_rmse < 0.20,
-        "gam did not recover the true held-out mean surface: \
-         RMSE(mu_hat, mu_true)={gam_truth_rmse:.4} is {rel_truth_rmse:.4} of the \
-         true-mean range {mu_true_range:.4} (bar 0.20)"
+        rel_truth_rmse_mean < 0.20,
+        "gam did not recover the true held-out mean surface: draw-averaged \
+         RMSE(mu_hat, mu_true) is {rel_truth_rmse_mean:.4} of the true-mean range (bar 0.20)"
     );
 
-    // (2) MATCH-OR-BEAT — gam's truth-deviance must be no worse than the mature
-    //     EBM's by more than 10%. Both fit the identical training counts and are
-    //     scored against the identical known truth; gam must be at least as
-    //     accurate as the best-in-class ML additive learner at recovering it.
-    assert!(
-        truth_dev_ratio <= 1.10,
-        "gam is materially less accurate than InterpretML EBM at recovering the \
-         true mean: gam_truth_dev={gam_truth_dev:.4} ebm_truth_dev={ebm_truth_dev:.4} \
-         (ratio={truth_dev_ratio:.4}, bar 1.10)"
-    );
+    // (2) MATCH-OR-BEAT — gam's truth deviance, paired over the shared draws, may
+    //     be no worse than the mature EBM's by more than 10% on average, nor
+    //     resolved worse draw by draw. Both fit the identical training counts and
+    //     are scored against the identical known truth.
+    assert_paired_match_or_beat("ebm_poisson::truth_deviance", &panel, 1.10);
 }
 
 /// REAL-DATA arm of the SAME capability (penalized Poisson/log GAM): on the
