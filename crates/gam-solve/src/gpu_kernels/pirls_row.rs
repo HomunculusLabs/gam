@@ -205,7 +205,7 @@ pub mod status_codes {
 
 /// Per-row inputs in scalar form.
 #[derive(Clone, Copy, Debug)]
-pub struct RowInput {
+pub(crate) struct RowInput {
     pub eta: f64,
     pub y: f64,
     pub prior_weight: f64,

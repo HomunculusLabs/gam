@@ -706,7 +706,7 @@ impl CriterionAtom for ConfiguredRhoPriorAtom {
 /// dependence) and the gradient/Hessian are diagonal in ρ. `frozen_d1` reads
 /// the per-coordinate gradient the same emission produced, so the profiled
 /// total derivative of a fold over atoms is consistent by construction.
-pub struct SoftRhoGuardPriorAtom {
+pub(crate) struct SoftRhoGuardPriorAtom {
     /// Scalar cost `Σ_i w · log cosh(a (ρ_i − anchor))`.
     pub value: f64,
     /// Per-coordinate gradient `w · a · tanh(a (ρ_i − anchor))`.

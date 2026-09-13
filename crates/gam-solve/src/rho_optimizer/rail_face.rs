@@ -205,7 +205,7 @@ pub struct RailFaceLimit {
 
 /// A proven rail face: the analytic first-order data behind the mint.
 #[derive(Clone, Debug, PartialEq)]
-pub struct RailFaceProof {
+pub(crate) struct RailFaceProof {
     /// Smallest eigenvalue of `C`; the proof is `min_curvature > curvature_margin`.
     pub min_curvature: f64,
     /// The numerical-error floor `min_curvature` had to clear:

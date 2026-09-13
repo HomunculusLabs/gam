@@ -751,7 +751,7 @@ pub(crate) const IDENTITY_SHIFT_PRECONDITIONER: ShiftedDiagonalPreconditioner =
 /// the atom FIRING-COUNT distribution, orders of magnitude wide — and it is
 /// exactly the spread that stalls an unpreconditioned CG (#2576).
 #[derive(Debug, Clone)]
-pub struct ShiftedDiagonalPreconditioner {
+pub(crate) struct ShiftedDiagonalPreconditioner {
     diagonal: Option<Array1<f64>>,
 }
 

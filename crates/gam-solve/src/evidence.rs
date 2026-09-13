@@ -775,7 +775,7 @@ pub struct GaussianMixtureCheckpoint {
 /// Typed Gaussian-mixture optimization failure. Exhaustion and a broken EM
 /// monotonicity invariant both carry the last internally consistent state.
 #[derive(Debug, Clone)]
-pub enum GaussianMixtureError {
+pub(crate) enum GaussianMixtureError {
     InvalidInput {
         message: String,
     },

@@ -70,7 +70,7 @@ pub mod warm_start_transfer;
 
 pub use evidence::{
     CircularGaussianFit2d, GaussianMixtureCertificate, GaussianMixtureCheckpoint,
-    GaussianMixtureConfig, GaussianMixtureError, GaussianMixtureFit, RingGaussianMixtureFit,
+    GaussianMixtureConfig, GaussianMixtureFit, RingGaussianMixtureFit,
     StackingCertificate, StackingCheckpoint, StackingConfig, StackingError, StackingWeights,
     TopologyScoreScale, UnionStructure, solve_stacking_weights,
 };

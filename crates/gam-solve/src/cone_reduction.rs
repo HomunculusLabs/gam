@@ -392,7 +392,7 @@ pub(crate) fn reduced_cone_precision(
 ///
 /// `In(ZᵀHZ)` comes from Haynsworth additivity — `In(H) = In(ZᵀHZ) + In(M)` —
 /// so no null-space basis is ever formed.
-pub fn cone_properness_certificate(
+pub(crate) fn cone_properness_certificate(
     hessian: ArrayView2<'_, f64>,
     constraints: ArrayView2<'_, f64>,
     tolerance: f64,

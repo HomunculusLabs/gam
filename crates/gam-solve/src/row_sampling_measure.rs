@@ -190,7 +190,7 @@ impl RowSamplingMeasure {
 
     /// Construct from raw per-row masses, normalizing to a proper measure.
     /// Falls back to uniform if the masses carry no usable signal.
-    pub fn from_masses(metric_provenance: MetricProvenance, masses: Vec<f64>) -> Self {
+    pub(crate) fn from_masses(metric_provenance: MetricProvenance, masses: Vec<f64>) -> Self {
         let n = masses.len();
         if n == 0 {
             return Self::uniform(0);
@@ -316,7 +316,7 @@ const ENRICHMENT_SALT: u64 = 0x980E_1C45_F00D_AC70;
 /// `δ` never enters the measure — consistent with the `RowMetric` #747
 /// discipline, and irrelevant anyway because the measure feeds no criterion.
 /// Pure read; touches nothing.
-pub fn per_row_fisher_mass(metric: &RowMetric) -> Vec<f64> {
+pub(crate) fn per_row_fisher_mass(metric: &RowMetric) -> Vec<f64> {
     metric.row_traces().to_vec()
 }
 
