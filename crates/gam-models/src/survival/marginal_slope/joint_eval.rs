@@ -160,6 +160,19 @@ impl SurvivalMarginalSlopeFamily {
                             acc.1[joint_range.start + local] -= f_pi[primary_range.start + local];
                         }
                     }
+                    // The absorbed influence offset loads its coefficients through the row of
+                    // `Z̃_infl` (#461), as accumulate_dynamic_q_joint_row pulls them back.
+                    if flex_active
+                        && let (Some(infl_primary), Some(infl_joint), Some(z_tilde)) = (
+                            primary.infl,
+                            slices.influence.as_ref(),
+                            self.influence_absorber.as_ref(),
+                        )
+                    {
+                        for (local, &z) in z_tilde.row(row).iter().enumerate() {
+                            acc.1[infl_joint.start + local] -= f_pi[infl_primary] * z;
+                        }
+                    }
                 }
                 Ok(acc)
             },
@@ -362,6 +375,36 @@ impl SurvivalMarginalSlopeFamily {
                     }
                     acc[[slices.marginal.start + a, joint_idx]] += value;
                     acc[[joint_idx, slices.marginal.start + a]] += value;
+                }
+            }
+        }
+        // The absorbed influence offset crosses the moving time and marginal Jacobians like an
+        // identity primary, scaled by its row of `Z̃_infl` (#461).
+        if let (Some(infl_primary), Some(infl_joint), Some(z_tilde)) = (
+            flex_primary_slices(self).infl,
+            slices.influence.as_ref(),
+            self.influence_absorber.as_ref(),
+        ) {
+            for (local, &z) in z_tilde.row(row).iter().enumerate() {
+                if z == 0.0 {
+                    continue;
+                }
+                let joint_idx = infl_joint.start + local;
+                for a in 0..p_time {
+                    let mut value = 0.0;
+                    for qu in 0..3 {
+                        value += h_pi[[qu, infl_primary]] * djt[qu][a];
+                    }
+                    acc[[slices.time.start + a, joint_idx]] += value * z;
+                    acc[[joint_idx, slices.time.start + a]] += value * z;
+                }
+                for a in 0..p_marginal {
+                    let mut value = 0.0;
+                    for qu in 0..3 {
+                        value += h_pi[[qu, infl_primary]] * djm[qu][a];
+                    }
+                    acc[[slices.marginal.start + a, joint_idx]] += value * z;
+                    acc[[joint_idx, slices.marginal.start + a]] += value * z;
                 }
             }
         }
@@ -1094,6 +1137,36 @@ impl SurvivalMarginalSlopeFamily {
                                     }
                                 }
                             }
+                            // The absorbed influence offset crosses the moved Jacobians like an
+                            // identity primary, scaled by its row of `Z̃_infl` (#461).
+                            if let (Some(infl_primary), Some(infl_joint), Some(z_tilde)) = (
+                                flex_primary_slices(self).infl,
+                                slices.influence.as_ref(),
+                                self.influence_absorber.as_ref(),
+                            ) {
+                                for (local, &z) in z_tilde.row(row).iter().enumerate() {
+                                    if z == 0.0 {
+                                        continue;
+                                    }
+                                    let joint_idx = infl_joint.start + local;
+                                    for a in 0..p_time {
+                                        let mut w2 = 0.0;
+                                        for qu in 0..3 {
+                                            w2 += $w[[qu, infl_primary]] * $lt[qu][a];
+                                        }
+                                        acc[[slices.time.start + a, joint_idx]] += w2 * z;
+                                        acc[[joint_idx, slices.time.start + a]] += w2 * z;
+                                    }
+                                    for a in 0..p_marginal {
+                                        let mut w2 = 0.0;
+                                        for qu in 0..3 {
+                                            w2 += $w[[qu, infl_primary]] * $lm[qu][a];
+                                        }
+                                        acc[[slices.marginal.start + a, joint_idx]] += w2 * z;
+                                        acc[[joint_idx, slices.marginal.start + a]] += w2 * z;
+                                    }
+                                }
+                            }
                         };
                     }
 
@@ -1452,6 +1525,47 @@ impl SurvivalMarginalSlopeFamily {
                     rj,
                     primary_hessian.slice(s![lp.clone(), rp.clone()]),
                 );
+            }
+        }
+        // The absorbed influence offset (#461): one primary loading its coefficients through the
+        // row of `Z̃_infl`, crossed with the core blocks, with itself and with the identity blocks,
+        // as accumulate_dynamic_q_joint_row assembles the joint Hessian.
+        if let (Some(infl_primary), Some(infl_joint), Some(z_tilde)) = (
+            flex_primary_slices(self).infl,
+            slices.influence.as_ref(),
+            self.influence_absorber.as_ref(),
+        ) {
+            let z_row = z_tilde.row(row);
+            let core_col =
+                primary_hessian.slice(s![0..self.core_primary_dimension(), infl_primary]);
+            for (local, &z) in z_row.iter().enumerate() {
+                if z != 0.0 {
+                    self.accumulate_identity_primary_cross_hessian_scaled(
+                        row, slices, q_geom, core_col, z, infl_joint, local, acc,
+                    )?;
+                }
+            }
+            let ii_weight = primary_hessian[[infl_primary, infl_primary]];
+            if ii_weight != 0.0 {
+                for i in 0..z_row.len() {
+                    for j in 0..z_row.len() {
+                        acc[[infl_joint.start + i, infl_joint.start + j]] +=
+                            ii_weight * z_row[i] * z_row[j];
+                    }
+                }
+            }
+            for (flex_primary, flex_joint) in identity_blocks {
+                for f in 0..flex_primary.len() {
+                    let weight = primary_hessian[[flex_primary.start + f, infl_primary]];
+                    if weight == 0.0 {
+                        continue;
+                    }
+                    for (i, &z) in z_row.iter().enumerate() {
+                        let value = weight * z;
+                        acc[[flex_joint.start + f, infl_joint.start + i]] += value;
+                        acc[[infl_joint.start + i, flex_joint.start + f]] += value;
+                    }
+                }
             }
         }
         Ok(())
