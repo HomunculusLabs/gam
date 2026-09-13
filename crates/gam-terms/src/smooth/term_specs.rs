@@ -4075,7 +4075,7 @@ pub fn get_spatial_aniso_log_scales(
 /// correlation is ~0 on the *signal* axis, which would misdirect the seed. The
 /// total-variation-of-sorted-response score captures nonlinear association.
 ///
-/// Returns `score_a = −½·ln(tv_a + ε)` (larger ⇒ more signal on axis `a`),
+/// Returns `score_a = −½·ln(tv_a)` (larger ⇒ more signal on axis `a`),
 /// centered to sum to zero, or `None` when the data is degenerate (too few
 /// rows, non-finite, or all axes equally (un)structured). The caller adds a
 /// BOUNDED multiple of this to the geometry seed — it is a conservative nudge,
@@ -4106,17 +4106,28 @@ pub(crate) fn response_aware_axis_contrasts(
             let diff = y[w[1]] - y[w[0]];
             tv += diff * diff;
         }
-        // ε guards against ln(0) on a perfectly flat / constant response.
-        scores.push(-0.5 * (tv + 1e-12).ln());
+        // A constant response has tv = 0 on every axis, so its scores are +∞ and
+        // the non-finite check below returns None: no axis carries structure.
+        scores.push(-0.5 * tv.ln());
     }
     if scores.iter().any(|v| !v.is_finite()) {
         return None;
     }
     let mean = scores.iter().sum::<f64>() / d as f64;
     let centered: Vec<f64> = scores.iter().map(|&s| s - mean).collect();
-    // If every axis is equally structured the centered scores are ~0 and the
-    // nudge is a no-op — return None so the geometry seed is used unchanged.
-    if centered.iter().all(|&v| v.abs() < 1e-9) {
+    // If every axis is equally structured the centered scores are zero to the
+    // resolution they carry: each score's own rounding (tv accumulates about 3n
+    // rounded operations, and ln turns that relative band into an absolute one)
+    // plus the centering's `γ_{d+1}·(|s_a| + Σ|s|/d)`. The nudge is then a no-op,
+    // so return None and the geometry seed is used unchanged.
+    let score_band = gam_linalg::roundoff::accumulation_growth(3 * n);
+    let mean_abs = scores.iter().map(|s| s.abs()).sum::<f64>() / d as f64;
+    let centering_growth = gam_linalg::roundoff::accumulation_growth(d + 1);
+    if centered
+        .iter()
+        .zip(&scores)
+        .all(|(&v, &s)| v.abs() <= score_band + centering_growth * (s.abs() + mean_abs))
+    {
         return None;
     }
     Some(centered)
