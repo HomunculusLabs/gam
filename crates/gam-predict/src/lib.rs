@@ -336,7 +336,7 @@ fn selected_uncertainty_backend<'a>(
             // beta_covariance_corrected(); this branch covers the
             // storage-efficient factorized-Hessian representation. This is an
             // identity, not a fallback to a weaker uncertainty definition.
-            if fit.lambdas.is_empty() {
+            if !fit.has_smoothing_coordinate() {
                 return conditional_prediction_backend(fit, expected_dim, label)?
                     .map(|backend| (backend, InferenceCovarianceMode::SmoothingCorrected))
                     .ok_or_else(|| {

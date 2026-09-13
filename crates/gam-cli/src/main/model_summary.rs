@@ -285,7 +285,7 @@ pub(crate) fn covariance_from_model(
         // zero-dimensional zero matrix, so Vp = Vb EXACTLY. This is an identity
         // of the definition, not a fallback to a weaker uncertainty object, and
         // the library predict path already applies it (`gam-predict`'s
-        // `select_uncertainty_backend`, the `fit.lambdas.is_empty()` branch).
+        // `select_uncertainty_backend`, the `!fit.has_smoothing_coordinate()` branch).
         // The CLI never did, so every SAVED fit with an empty lambda vector —
         // a fully parametric survival fit is the common case — refused the
         // DEFAULT `gam predict` invocation (`--mode posterior-mean
@@ -293,7 +293,7 @@ pub(crate) fn covariance_from_model(
         // instruction no refit could satisfy because there is no correction to
         // compute. A fit that DOES carry smoothing coordinates keeps the hard
         // refusal: there the correction is a real, absent term.
-        if !fit.lambdas.is_empty() {
+        if fit.has_smoothing_coordinate() {
             return Err(SMOOTHING_CORRECTED_ABSENT.to_string());
         }
     }
@@ -333,7 +333,7 @@ pub(crate) fn prediction_backend_from_model<'a>(
         // above: Vp = Vb when there is no rho to integrate over. Falling
         // through to the conditional sources is the CORRECTED answer here, not
         // a substitution of a narrower band.
-        if !fit.lambdas.is_empty() {
+        if fit.has_smoothing_coordinate() {
             return Err(SMOOTHING_CORRECTED_ABSENT.to_string());
         }
     }

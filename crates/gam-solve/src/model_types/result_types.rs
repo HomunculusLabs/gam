@@ -4710,6 +4710,16 @@ impl UnifiedFitResult {
         }
     }
 
+    /// Whether this fit selected any smoothing coordinate, per-block or joint.
+    ///
+    /// `lambdas` holds only the per-block precisions. A joint-penalty family
+    /// carries its smoothing coordinates in `artifacts.joint_log_lambdas` and
+    /// leaves `lambdas` empty (the multinomial per-class carrier), so
+    /// `lambdas.is_empty()` does not answer this question (#2898).
+    pub fn has_smoothing_coordinate(&self) -> bool {
+        !has_no_smoothing_coordinate(&self.log_lambdas, &self.artifacts)
+    }
+
     /// Get the smoothing-parameter-corrected beta covariance (`Vp`) if available.
     ///
     /// Wood/mgcv name for the smoothing-parameter-corrected covariance `Vp`.
