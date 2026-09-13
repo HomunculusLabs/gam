@@ -14,7 +14,6 @@ use std::sync::{Arc, RwLock};
 
 pub mod assembly;
 pub mod atoms;
-pub mod boundary_laml;
 pub(crate) mod continuation;
 pub(crate) mod eval;
 mod firth;

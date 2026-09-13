@@ -5,7 +5,6 @@ mod basis_log_kappa_derivative_boundary_behavior;
 mod basis_matern_double_penalty_log_kappa_derivative_fd;
 mod basis_matern_log_kappa_penalty_derivative_fd;
 mod basis_workspace_and_nonworkspace_match;
-mod bspline_derivative_fd_oracle;
 mod bspline_derivative_identity_bug;
 mod bspline_knot_options_formula;
 mod bspline_partition_unity;

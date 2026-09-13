@@ -3,7 +3,6 @@
 //! Former top-level crates included as modules so they link as ONE binary.
 
 mod families;
-mod gpu;
 mod predict;
 mod smooths;
 mod survival;

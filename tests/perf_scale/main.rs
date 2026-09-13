@@ -5,5 +5,4 @@
 mod families;
 mod misc;
 mod optimization;
-mod sae;
 mod smooths;

@@ -985,16 +985,25 @@ issue suffix, so neither the census nor this record saw them. Restored so far:
   `tests/regressions` files for #682, #582, #584 and the two PIRLS convergence guards
 - `a5daa52e4`, `31fa35d5b` and `8a850262e`: `tests_joint_vs_cascade_2131.rs`,
   `latent_coord_design_jacobian_frame_fd_2643.rs`, `duchon_lazy_anisotropic_reparam_1818.rs`,
-  `owed_1448.rs`, `conformal_coverage_quality.rs` and `tests_deflation_traces_780.rs`
+  `owed_1448.rs`, `conformal_coverage_quality.rs` and `tests_deflation_traces_780.rs`.
+  `5d74ecb1b` (#2899) later deleted `tests_joint_vs_cascade_2131.rs` with the pairwise
+  energy screen and conditionality fit it exercised, and `docs/source-removal-changes.json`
+  records that deletion
 - `497f37257`: the Beta and Tweedie arms of the dispersion location-scale variance gate
 - `358e2a197`: `row_metric_loud_vs_loadbearing.rs` (`from_blocks_with_mode` is the
   `_and_manifolds` form on Euclidean blocks) and the #1124 negative-binomial seed-spec test
 
 `07a6cfb7e` deleted `gaussian_reml_weight_rescaling_changes_fit.rs` as an expected-red
-module under SPEC rule 16. The files below stay at their module doc. For each one, a
-production function its tests call is gone from origin/main, or the tests exercised a
-test-only harness that `c0a21b554` removed with them. The removing commit is the one
-that deleted the function's declaration.
+module under SPEC rule 16. `c0a21b554` left each file below at its module doc. For each
+one, a production function its tests call is gone from origin/main, or the tests exercised
+a test-only harness that `c0a21b554` removed with them. The removing commit is the one
+that deleted the function's declaration. The comment-only files are now deleted with their
+`mod` lines, together with `tests/regressions/misc/owed_1418.rs` (retired in the root-suite
+section above) and three doc-only modules that describe code moved or removed long before
+the sweep: `crates/gam-gpu/src/kernels/mod.rs`, `crates/gam-terms/src/smooth/tests.rs` and
+`tests/perf_scale/misc/large_scale_margslope_repro.rs`. When `tests/perf_scale/sae/` and
+`tests/prediction/gpu/` lose their only module, their `mod.rs` files and parent `mod` lines
+go too.
 
 | File | Tests | Why they stay absent |
 | --- | --- | --- |

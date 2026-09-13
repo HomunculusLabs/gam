@@ -33,9 +33,6 @@ pub mod policy;
 pub mod pool;
 pub mod solver;
 
-// Domain-specific GPU kernels are isolated from the infrastructure modules.
-pub mod kernels;
-
 pub use device::GpuDeviceInfo;
 pub use device_runtime::{GpuAbsence, GpuAvailability, GpuAvailabilityRef, GpuRuntime};
 pub use dictionary_score::{

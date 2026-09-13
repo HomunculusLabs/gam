@@ -5,7 +5,6 @@ mod residual_cascade_certification;
 mod residual_cascade_workflow_detection;
 mod synthbug_repro;
 mod bug_hunt_2301_diagnose_alo_multiclass_test;
-mod composed_config_depth3_layout_consistency_2315;
 mod constants_sweep_underived_numerics_guard;
 mod derived_index_vs_emitted_layout_sweep_2315;
 mod no_production_finite_differences;

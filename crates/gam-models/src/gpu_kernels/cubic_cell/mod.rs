@@ -27,7 +27,6 @@
 //! * `branch` — host-side branch classifier; mirrors
 //!   `cubic_cell_kernel::branch_cell` + the semi-infinite tail logic of
 //!   `evaluate_cell_state_dispatched`.
-//! * `tests_host_substrate` — test-only CPU oracle for device-kernel parity.
 //! * `kernel_src` — NVRTC-compilable CUDA C++ source as Rust string
 //!   constants (D9 / D15 / D21 specializations).
 //! * `device` — Linux+CUDA dispatcher that classifies each cell once,
@@ -41,12 +40,6 @@
 pub(crate) mod branch;
 #[cfg(target_os = "linux")]
 pub(crate) mod device;
-// The host oracle exercises the Linux-only substrate items, so it is gated with
-// them; stacked attributes read as AND.
-#[cfg(test)]
-#[cfg(target_os = "linux")]
-#[path = "host_substrate.rs"]
-mod tests_host_substrate;
 pub(crate) mod kernel_src;
 
 #[cfg(target_os = "linux")]

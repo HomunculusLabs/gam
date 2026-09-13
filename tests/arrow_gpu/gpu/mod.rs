@@ -1,5 +1,4 @@
 mod arrow_schur_gpu_v100_validation;
-mod gpu_numerical_stability;
 mod gpu_pirls_gating;
 mod gpu_runtime_global_init_is_deterministic_and_idempotent;
 mod gpu_solver_dimension_mismatch_returns_error;

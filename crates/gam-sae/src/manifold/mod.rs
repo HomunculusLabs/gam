@@ -342,12 +342,6 @@ mod tests_streamed_curvature_2757;
 #[cfg(test)]
 mod tests_persistence_engine_2757;
 
-/// #2757 — the phase-by-phase stopwatch on the post-fit certification. It runs
-/// at a committed small shape and prints its table; the sweep is a `const` a
-/// working tree raises to reach the production cell.
-#[cfg(test)]
-mod probe_report_cost_2757_tests;
-
 #[cfg(test)]
 mod tests_sure_dispersion_2133;
 
@@ -356,9 +350,6 @@ mod tests_behavioral_fisher_rung1;
 
 #[cfg(test)]
 mod tests_inner_budget_trajectory_2015;
-
-#[cfg(test)]
-mod tests_tier0_shared_mean_2023;
 
 #[cfg(test)]
 mod tests_tier0_primary_path_2023;
@@ -410,12 +401,6 @@ mod tests_device_engage_1783;
 
 #[cfg(test)]
 mod tests_frame_refresh_alpha_grad;
-
-#[cfg(test)]
-mod tests_graph_atom;
-
-#[cfg(test)]
-mod tests_graph_spectral_decode;
 
 #[cfg(test)]
 mod tests_cocollapse_disjoint_2027;
@@ -482,9 +467,6 @@ mod tests_channel_null_currency_2720;
 
 #[cfg(test)]
 mod tests_rho_structural_layout_2253;
-
-#[cfg(test)]
-mod tests_crosscoder_rho_2231;
 
 #[cfg(test)]
 mod tests_crosscoder_block_fd_2231;

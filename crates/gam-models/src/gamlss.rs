@@ -197,7 +197,4 @@ mod test_support;
 mod tests;
 
 #[cfg(test)]
-mod tests_outer_derivatives;
-
-#[cfg(test)]
 mod tests_dispersion_tower;
