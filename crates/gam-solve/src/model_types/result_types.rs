@@ -2173,68 +2173,16 @@ mod shipped_criterion_identity_tests {
     #[test]
     fn shipped_default_criterion_is_reml_not_map_in_rho_2450() {
         let prior = FitOptions::default().rho_prior;
-        for coordinate in 0..8 {
-            assert!(
-                prior.upper_tail_gradient_vanishes(coordinate),
-                "FitOptions::default() ships {prior:?}, whose rho-gradient survives into the \
-                 lambda -> infinity tail on coordinate {coordinate}. The shipped deterministic \
-                 criterion is then REML + a rho-prior (MAP in rho), which SPEC forbids, and no \
-                 lambda = infinity face exists for any rail certificate to prove. A caller that \
-                 wants a prior passes one explicitly; joint HMC gets a proper prior from \
-                 rho_prior_distribution_correction, which fills unset coordinates without touching the \
-                 criterion."
-            );
-        }
-    }
-
-    /// The three spellings of "no prior on this coordinate" must agree, because
-    /// consumers branch on the answer and a family-name test misclassifies two
-    /// of them.
-    #[test]
-    fn every_spelling_of_an_unset_coordinate_answers_the_same_2450() {
-        use gam_problem::RhoPrior;
-        assert!(RhoPrior::Flat.upper_tail_gradient_vanishes(0));
         assert!(
-            RhoPrior::GammaPrecision {
-                shape: 1.0,
-                rate: 0.0
-            }
-            .upper_tail_gradient_vanishes(0),
-            "Gamma(1, 0) is exactly flat in the MAP-in-lambda convention"
+            prior.upper_tail_gradient_vanishes_everywhere(8),
+            "FitOptions::default() ships {prior:?}, whose rho-gradient survives into the \
+             lambda -> infinity tail on one of the first 8 coordinates. The shipped deterministic \
+             criterion is then REML + a rho-prior (MAP in rho), which SPEC forbids, and no \
+             lambda = infinity face exists for any rail certificate to prove. A caller that \
+             wants a prior passes one explicitly; joint HMC gets a proper prior from \
+             rho_prior_distribution_correction, which fills unset coordinates without touching the \
+             criterion."
         );
-        // ...and every configured family is correctly excluded, each because
-        // its own gradient has a nonzero limit as rho -> +infinity.
-        assert!(
-            !RhoPrior::Normal { mean: 0.0, sd: 3.0 }.upper_tail_gradient_vanishes(0),
-            "Normal leaves (rho - mean)/sd^2, which diverges"
-        );
-        assert!(
-            !RhoPrior::PenalizedComplexity {
-                upper: 10.0,
-                tail_prob: 0.01
-            }
-            .upper_tail_gradient_vanishes(0),
-            "PC leaves its persistent +1/2 Occam pull"
-        );
-        assert!(
-            !RhoPrior::GammaPrecision {
-                shape: 1.0,
-                rate: 0.5
-            }
-            .upper_tail_gradient_vanishes(0),
-            "rate > 0 leaves rate*exp(rho), which diverges faster than the law's own scale"
-        );
-        // An Independent prior answers PER COORDINATE: a face can be
-        // certifiable on one coordinate and not on its neighbour.
-        let mixed = RhoPrior::Independent(vec![
-            RhoPrior::Flat,
-            RhoPrior::Normal { mean: 0.0, sd: 3.0 },
-        ]);
-        assert!(mixed.upper_tail_gradient_vanishes(0));
-        assert!(!mixed.upper_tail_gradient_vanishes(1));
-        assert!(!mixed.upper_tail_gradient_vanishes_everywhere(2));
-        // Out of range is malformed, not flat.
-        assert!(!mixed.upper_tail_gradient_vanishes(2));
     }
 }
 

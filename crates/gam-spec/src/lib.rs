@@ -505,7 +505,7 @@ impl RhoPrior {
     /// coordinate — a face can be certifiable on one coordinate and not on
     /// another. A nested `Independent` is structurally invalid and answers
     /// `false` rather than pretending to know.
-    pub fn upper_tail_gradient_vanishes(&self, coordinate: usize) -> bool {
+    pub(crate) fn upper_tail_gradient_vanishes(&self, coordinate: usize) -> bool {
         fn scalar_vanishes(prior: &RhoPrior) -> bool {
             match prior {
                 RhoPrior::Flat => true,
@@ -3785,4 +3785,52 @@ mod tests {
         assert!(!FamilySpecKind::BinomialLogit.is_royston_parmar());
     }
 
+    /// The three spellings of "no prior on this coordinate" must agree, because
+    /// consumers branch on the answer and a family-name test misclassifies two
+    /// of them.
+    #[test]
+    fn every_spelling_of_an_unset_coordinate_answers_the_same_2450() {
+        assert!(RhoPrior::Flat.upper_tail_gradient_vanishes(0));
+        assert!(
+            RhoPrior::GammaPrecision {
+                shape: 1.0,
+                rate: 0.0
+            }
+            .upper_tail_gradient_vanishes(0),
+            "Gamma(1, 0) is exactly flat in the MAP-in-lambda convention"
+        );
+        // ...and every configured family is correctly excluded, each because
+        // its own gradient has a nonzero limit as rho -> +infinity.
+        assert!(
+            !RhoPrior::Normal { mean: 0.0, sd: 3.0 }.upper_tail_gradient_vanishes(0),
+            "Normal leaves (rho - mean)/sd^2, which diverges"
+        );
+        assert!(
+            !RhoPrior::PenalizedComplexity {
+                upper: 10.0,
+                tail_prob: 0.01
+            }
+            .upper_tail_gradient_vanishes(0),
+            "PC leaves its persistent +1/2 Occam pull"
+        );
+        assert!(
+            !RhoPrior::GammaPrecision {
+                shape: 1.0,
+                rate: 0.5
+            }
+            .upper_tail_gradient_vanishes(0),
+            "rate > 0 leaves rate*exp(rho), which diverges faster than the law's own scale"
+        );
+        // An Independent prior answers PER COORDINATE: a face can be
+        // certifiable on one coordinate and not on its neighbour.
+        let mixed = RhoPrior::Independent(vec![
+            RhoPrior::Flat,
+            RhoPrior::Normal { mean: 0.0, sd: 3.0 },
+        ]);
+        assert!(mixed.upper_tail_gradient_vanishes(0));
+        assert!(!mixed.upper_tail_gradient_vanishes(1));
+        assert!(!mixed.upper_tail_gradient_vanishes_everywhere(2));
+        // Out of range is malformed, not flat.
+        assert!(!mixed.upper_tail_gradient_vanishes(2));
+    }
 }
