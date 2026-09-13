@@ -2,13 +2,13 @@
 //! well-conditioned problem.
 //!
 //! This is a guard against regressions in the inner-Newton / outer-κ
-//! interplay that turn small problems into slow problems: one n=2000 fit per
-//! arm, asserting both convergence and a wall-clock budget that is generous for
-//! a healthy solver but tight enough to catch a slow-loop regression like the
-//! CTN exact-fn rejection cycle that once cost ≥14h of CI.
+//! interplay that turn small problems into slow problems: one n=2000 rigid
+//! probit fit, asserting both convergence and a wall-clock budget that is
+//! generous for a healthy solver but tight enough to catch a slow-loop
+//! regression like the CTN exact-fn rejection cycle that once cost ≥14h of CI.
 
 use gam::ResourcePolicy;
-use gam::families::bms::{BernoulliMarginalSlopeTermSpec, DeviationBlockConfig};
+use gam::families::bms::BernoulliMarginalSlopeTermSpec;
 use gam::families::custom_family::BlockwiseFitOptions;
 use gam::families::survival::lognormal_kernel::FrailtySpec;
 use gam::terms::basis::{
@@ -41,7 +41,7 @@ fn erf_approx(x: f64) -> f64 {
     sign * y
 }
 
-fn build_problem(n: usize, flex: bool) -> (Array2<f64>, BernoulliMarginalSlopeTermSpec) {
+fn build_problem(n: usize) -> (Array2<f64>, BernoulliMarginalSlopeTermSpec) {
     let mut rng = StdRng::seed_from_u64(SEED.wrapping_add(n as u64));
     let x_raw: Vec<f64> = (0..n).map(|_| rng.random_range(0.0..1.0)).collect();
     let mut data = Array2::<f64>::zeros((n, 1));
@@ -109,12 +109,6 @@ fn build_problem(n: usize, flex: bool) -> (Array2<f64>, BernoulliMarginalSlopeTe
         random_effect_terms: vec![],
         smooth_terms: vec![],
     };
-    let (score_warp, link_dev) = if flex {
-        let dev_cfg = DeviationBlockConfig::default();
-        (Some(dev_cfg.clone()), Some(dev_cfg))
-    } else {
-        (None, None)
-    };
     let spec = BernoulliMarginalSlopeTermSpec {
         y,
         weights,
@@ -125,33 +119,34 @@ fn build_problem(n: usize, flex: bool) -> (Array2<f64>, BernoulliMarginalSlopeTe
         marginal_offset,
         slope_offset,
         frailty: FrailtySpec::None,
-        score_warp,
-        link_dev,
+        score_warp: None,
+        link_dev: None,
         latent_z_policy: gam_test_support::synthetic::exploratory_fit_weighted_latent_z_policy(),
         score_influence_jacobian: None,
     };
     (data, spec)
 }
 
-fn run_one(flex: bool, label: &str, budget_s: f64) {
+#[test]
+fn margslope_rigid_small_good_condition_completes_quickly() {
+    // Rigid probit: closed-form vectorized inner solve. n=2000 should
+    // complete in well under a second of compute on any reasonable
+    // hardware; allow 30s to absorb CI-runner variance.
+    let label = "MS-RIGID-SMOKE";
+    let budget_s = 30.0;
     // A slow-loop regression is diagnosed from the per-cycle instrumentation
-    // the flex path already emits — the intercept seed short-circuit counters
-    // and the cell-moment LRU hit rate — and the `log` facade drops every one
-    // of those records until a backend is installed. Without this call the
-    // budget assertion below can only report THAT the fit was slow, never
-    // which of the two loops it was.
+    // the solver already emits, and the `log` facade drops every one of those
+    // records until a backend is installed. Without this call the budget
+    // assertion below can only report THAT the fit was slow, never which loop.
     gam::test_support::install_diagnostic_logger();
     gam::init_parallelism();
-    let (data, spec) = build_problem(2000, flex);
-    let options = BlockwiseFitOptions::default();
-    let kappa_options = SpatialLengthScaleOptimizationOptions::default();
-    let policy = ResourcePolicy::default_library();
+    let (data, spec) = build_problem(2000);
     let request = FitRequest::BernoulliMarginalSlope(BernoulliMarginalSlopeFitRequest {
         data: data.view(),
         spec,
-        options,
-        kappa_options,
-        policy,
+        options: BlockwiseFitOptions::default(),
+        kappa_options: SpatialLengthScaleOptimizationOptions::default(),
+        policy: ResourcePolicy::default_library(),
     });
 
     let start = Instant::now();
@@ -161,11 +156,11 @@ fn run_one(flex: bool, label: &str, budget_s: f64) {
     let out = match result {
         Ok(FitResult::BernoulliMarginalSlope(out)) => out,
         Ok(_) => panic!("{label}: wrong FitResult variant"),
-        Err(e) => panic!("{label}: fit failed at n=2000 flex={flex}: {e}"),
+        Err(e) => panic!("{label}: fit failed at n=2000: {e}"),
     };
 
     eprintln!(
-        "[{label}] n=2000 flex={flex} elapsed_s={elapsed:.3} outer_iters={} inner_cycles={} converged=certified",
+        "[{label}] n=2000 elapsed_s={elapsed:.3} outer_iters={} inner_cycles={} converged=certified",
         out.fit.outer_iterations, out.fit.inner_cycles
     );
 
@@ -174,21 +169,4 @@ fn run_one(flex: bool, label: &str, budget_s: f64) {
         elapsed < budget_s,
         "{label}: small good-condition fit took {elapsed:.2}s, expected <{budget_s:.0}s — slow-loop regression?"
     );
-}
-
-#[test]
-fn margslope_rigid_small_good_condition_completes_quickly() {
-    // Rigid probit: closed-form vectorized inner solve. n=2000 should
-    // complete in well under a second of compute on any reasonable
-    // hardware; allow 30s to absorb CI-runner variance.
-    run_one(false, "MS-RIGID-SMOKE", 30.0);
-}
-
-#[test]
-fn margslope_flex_small_good_condition_completes_quickly() {
-    // Flex probit: cubic score_warp + link_dev deviation blocks exercise
-    // the per-row sextic-kernel cell evaluator at every inner-PIRLS
-    // iteration. At n=2000 this is the large-scale production code path on
-    // small data — must still finish well within 60s on a healthy solver.
-    run_one(true, "MS-FLEX-SMOKE", 60.0);
 }

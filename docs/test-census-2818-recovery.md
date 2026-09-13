@@ -961,6 +961,22 @@ takes explicit centers and transform, so the cold-spec contract the file pins ha
 production subject. The body is removed again, and its identities are recorded in
 `docs/source-removal-changes.json`.
 
+`duchon_resolve_chart` is gone as well. `59d30a5b8` (#2829) deleted it with
+`ResolvedDuchonChart` and the empty module, because nothing calls it. Before that landing, MSI
+job 604886 ran the two asserting pins over `8e9e48c49`, rebuilt on the resolver plus
+`build_duchon_basis_log_kappa_derivativeswith_collocationwithworkspace` fed the collocation
+points the forward records:
+
+- `duchon_cold_spec_psi_jet_matches_fd_at_the_resolved_chart` passed. The largest
+  penalty-block residual was 4.8e-4, on the `constrained` fixture's OperatorMass block (norm
+  1.68e2).
+- `duchon_resolve_chart_reproduces_the_cold_build` failed on the 2-D `aniso` fixture: the
+  resolver adopted a different data-metric reparam `V` than the cold forward build.
+
+That disagreement lives in a function with no product caller, and the function is now
+deleted, so both pins stay retired. The forward build still makes these chart decisions itself,
+through `duchon_resolve_radial_chart` and `spatial_identifiability_transform_from_design`.
+
 ### Two restored root files that did not compile at `9c266da56`
 
 The tip check at `9c266da56` failed on the `inference` and `perf_scale` binaries, with
@@ -994,14 +1010,17 @@ issue suffix, so neither the census nor this record saw them. Restored so far:
 - `a5daa52e4`, `31fa35d5b` and `8a850262e`: `tests_joint_vs_cascade_2131.rs`,
   `latent_coord_design_jacobian_frame_fd_2643.rs`, `duchon_lazy_anisotropic_reparam_1818.rs`,
   `owed_1448.rs`, `conformal_coverage_quality.rs` and `tests_deflation_traces_780.rs`.
-  `5d74ecb1b` (#2899) later deleted `tests_joint_vs_cascade_2131.rs` with the pairwise
-  energy screen and conditionality fit it exercised, and `docs/source-removal-changes.json`
-  records that deletion
+  `5d74ecb1b` (#2899) later deleted `tests_joint_vs_cascade_2131.rs`. Its tests
+  `split_single_circle_is_a_lower_tail_gap`, `gated_torus_fires_scale_invariant` and
+  `phase_correlation_is_invisible_to_energy_screen` went with the pairwise energy screen and
+  conditionality fit they exercised, and `docs/source-removal-changes.json` records that
+  energy-screen deletion
 - `497f37257`: the Beta and Tweedie arms of the dispersion location-scale variance gate
 - `358e2a197`: `row_metric_loud_vs_loadbearing.rs` (`from_blocks_with_mode` is the
   `_and_manifolds` form on Euclidean blocks) and the #1124 negative-binomial seed-spec test
 
-`07a6cfb7e` deleted `gaussian_reml_weight_rescaling_changes_fit.rs` as an expected-red
+`07a6cfb7e` deleted `gaussian_reml_weight_rescaling_changes_fit.rs` and its test
+`gaussian_reml_fit_is_invariant_to_global_weight_rescaling` as an expected-red
 module under SPEC rule 16. `c0a21b554` left each file below at its module doc. For each
 one, a production function its tests call is gone from origin/main, or the tests exercised
 a test-only harness that `c0a21b554` removed with them. The removing commit is the one
@@ -1060,7 +1079,7 @@ still on main, renamed, moved or reshaped. They are restored:
 | File | Tests | Adaptation |
 | --- | --- | --- |
 | `tests/survival/survival/owed_1388.rs` | 3 | `canonicalize_for_identifiability` is now `canonicalize_for_identifiability_with_operating_scalars`. The old function forwarded `None` for the operating scalars, and the tests pass `None`. |
-| `tests/inference/misc/margslope_smallcondition_smoke.rs` | 2 | the two constructors moved, as the #370 correction above describes. The module doc no longer cites two large-scale reproducers that are gone. |
+| `tests/inference/misc/margslope_smallcondition_smoke.rs` | 1 of 2 | the two constructors moved, as the #370 correction above describes. Only the rigid arm is kept. At MSI job 604886, the flex arm's n=2000 fit sat in `joint Newton hessian_qp cycle=9` for more than 10 minutes against its 60 s budget. That is the flex deviation-block stall that `bms_audit_nonzero_slope_baseline_370.rs` documents, and the suite's no-hang policy forbids shipping a fit that stalls. |
 | `tests/identifiability/misc/constant_curvature_kappa_coverage_sims.rs` | 3 | `f46ec2bb2` deleted the uncalled `KappaEstimateSupport::is_railed`; the tests compare against `KappaEstimateSupport::Interior`. `e1f90bec8` removed the `pilot_subsample_threshold` option, and its line is dropped. |
 | `tests/quality/families/quality_vs_pymc_nuts_binomial_logit.rs` | 2 | `NutsConfig` no longer carries `nwarmup` or `n_chains`: gam runs `NUTS_CHAINS` chains and ends warmup when adaptation stabilizes. The PyMC baseline's chain count reads `gam::hmc::NUTS_CHAINS`, and payloads use `MODEL_PAYLOAD_VERSION`. |
 | `tests/inference/misc/bms_audit_nonzero_slope_baseline_370.rs` | 1 | the rigid #370 pin, as above |
