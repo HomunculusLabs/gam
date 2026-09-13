@@ -2473,4 +2473,160 @@ mod tests {
             unordered.join("; ")
         );
     }
+
+    /// Fraction of rows whose loop coordinate lands within half a lattice step (`step / 2`) of
+    /// its planted loop fraction, after the best rotation and reflection of the loop. The
+    /// rotation is the circular mean of the phase differences for each reflection, as in
+    /// `worst_loop_residual`.
+    fn loop_recovery_rate(phase: ArrayView1<'_, f64>, planted: &[f64], step: f64) -> f64 {
+        let tau = std::f64::consts::TAU;
+        [1.0_f64, -1.0]
+            .into_iter()
+            .map(|orientation| {
+                let (mut sine, mut cosine) = (0.0_f64, 0.0_f64);
+                for (row, &truth) in planted.iter().enumerate() {
+                    let angle = tau * (phase[row] - orientation * truth);
+                    sine += angle.sin();
+                    cosine += angle.cos();
+                }
+                let shift = sine.atan2(cosine) / tau;
+                let recovered = planted
+                    .iter()
+                    .enumerate()
+                    .filter(|&(row, &truth)| {
+                        let offset = phase[row] - orientation * truth - shift;
+                        (offset - offset.round()).abs() < 0.5 * step
+                    })
+                    .count();
+                recovered as f64 / planted.len().max(1) as f64
+            })
+            .fold(0.0_f64, f64::max)
+    }
+
+    /// The leading `components` principal projections of the centered rows of `z`.
+    fn principal_projection(z: &Array2<f64>, components: usize) -> Array2<f64> {
+        let mean = z
+            .mean_axis(ndarray::Axis(0))
+            .expect("a planted fixture has rows");
+        let centered = z - &mean;
+        let (_, _, vt) = centered
+            .svd(false, true)
+            .expect("a planted fixture has a principal frame");
+        let vt = vt.expect("the SVD returns the right frame it was asked for");
+        centered.dot(&vt.slice(ndarray::s![0..components, ..]).t())
+    }
+
+    /// The phase of the leading principal pair as a fraction of the loop, the principal seed's
+    /// circle and cylinder angle.
+    fn principal_phase(projection: &Array2<f64>) -> Array1<f64> {
+        Array1::from_iter((0..projection.nrows()).map(|row| {
+            let fraction =
+                projection[[row, 1]].atan2(projection[[row, 0]]) / std::f64::consts::TAU;
+            fraction - fraction.floor()
+        }))
+    }
+
+    /// Fraction of neighbouring planted width levels whose recovered magnitudes stay apart in
+    /// order, over every loop column of an `n_u × n_v` lattice whose widths are symmetric
+    /// about zero.
+    fn width_level_recovery_rate(width: ArrayView1<'_, f64>, n_u: usize, n_v: usize) -> f64 {
+        let (mut kept, mut checked) = (0usize, 0usize);
+        for column in 0..n_u {
+            let magnitude = |iv: usize| width[column * n_v + iv].abs();
+            for level in 0..(n_v / 2 - 1) {
+                let inner = magnitude(n_v / 2 - 1 - level).max(magnitude(n_v / 2 + level));
+                let outer = magnitude(n_v / 2 - 2 - level).min(magnitude(n_v / 2 + 1 + level));
+                checked += 1;
+                if inner < outer {
+                    kept += 1;
+                }
+            }
+        }
+        kept as f64 / checked.max(1) as f64
+    }
+
+    /// #2906 acceptance — circle, cylinder and Möbius atoms seeded from the atlas's holonomy
+    /// recover their planted loop parameter at least as well as the principal-projection seed
+    /// on the same fixture. Recovery is the fraction of rows whose loop coordinate lands within
+    /// half a lattice step of its planted position after the best rotation and reflection. On
+    /// the band it is also the fraction of neighbouring width levels kept in order. The
+    /// principal seeds are the ones discovery races: the leading pair's phase, the cylinder's
+    /// phase with the third component as height, and the double-cover chart the Möbius
+    /// candidate reads off three principal components.
+    #[test]
+    fn holonomy_seeded_loops_recover_their_planted_parameter_2906() {
+        let mut shortfalls: Vec<String> = Vec::new();
+        let mut compare = |label: &str, atlas_rate: f64, principal_rate: f64| {
+            eprintln!(
+                "[2906-acceptance] {label}: holonomy seed {atlas_rate:.4}, principal seed {principal_rate:.4}"
+            );
+            if atlas_rate < principal_rate {
+                shortfalls.push(format!(
+                    "{label}: holonomy seed {atlas_rate:.4} below principal seed {principal_rate:.4}"
+                ));
+            }
+        };
+
+        let n = 400usize;
+        let points = crate::manifold::tests_topology_fixtures::circle(n, 2.0);
+        let planted: Vec<f64> = (0..n).map(|row| row as f64 / n as f64).collect();
+        let step = 1.0 / n as f64;
+        let holonomy = LocalAtlas::build(points.view(), LocalAtlasConfig::balanced(n, 1))
+            .expect("the planted circle's atlas builds")
+            .holonomy_quotient_coordinates(points.view(), GraphCompressionKind::Circle)
+            .expect("the planted circle's holonomy reads a period");
+        let principal = principal_phase(&principal_projection(&points, 2));
+        compare(
+            "circle(400, 2) loop",
+            loop_recovery_rate(holonomy.column(0), &planted, step),
+            loop_recovery_rate(principal.view(), &planted, step),
+        );
+
+        let (n_u, n_v) = (60usize, 14usize);
+        let planted: Vec<f64> = (0..n_u * n_v)
+            .map(|row| (row / n_v) as f64 / n_u as f64)
+            .collect();
+        let step = 1.0 / n_u as f64;
+
+        let cylinder = cylinder_strip(n_u, n_v);
+        let holonomy =
+            LocalAtlas::build(cylinder.view(), LocalAtlasConfig::balanced(cylinder.nrows(), 2))
+                .expect("the planted cylinder's atlas builds")
+                .holonomy_quotient_coordinates(cylinder.view(), GraphCompressionKind::Cylinder)
+                .expect("the planted cylinder's holonomy reads a loop translation");
+        let principal = principal_phase(&principal_projection(&cylinder, 3));
+        compare(
+            "cylinder_strip(60, 14) loop",
+            loop_recovery_rate(holonomy.column(0), &planted, step),
+            loop_recovery_rate(principal.view(), &planted, step),
+        );
+
+        let band = mobius_strip(n_u, n_v);
+        let holonomy = LocalAtlas::build(band.view(), LocalAtlasConfig::balanced(band.nrows(), 2))
+            .expect("the planted band's atlas builds")
+            .holonomy_quotient_coordinates(band.view(), GraphCompressionKind::MobiusStrip)
+            .expect("the planted band's holonomy reads a glide reflection");
+        let all_rows: Vec<usize> = (0..band.nrows()).collect();
+        let principal = crate::manifold::mobius_double_cover_coords_from_projection(
+            principal_projection(&band, 3).view(),
+            &all_rows,
+        )
+        .expect("the planted band's principal double cover reads");
+        compare(
+            "mobius_strip(60, 14) base",
+            loop_recovery_rate(holonomy.column(0), &planted, step),
+            loop_recovery_rate(principal.column(0), &planted, step),
+        );
+        compare(
+            "mobius_strip(60, 14) width levels",
+            width_level_recovery_rate(holonomy.column(1), n_u, n_v),
+            width_level_recovery_rate(principal.column(1), n_u, n_v),
+        );
+
+        assert!(
+            shortfalls.is_empty(),
+            "holonomy-seeded loops must recover their planted parameter at least as well as the principal seed:\n{}",
+            shortfalls.join("\n")
+        );
+    }
 }
