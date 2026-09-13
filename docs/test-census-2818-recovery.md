@@ -833,11 +833,19 @@ defining file.
 | `fit_pair_surface` in `gam-terms` `structure::anova_atom`, now named only in two root-test module docs | `843e0fc20` | `carve_classifies_bound_vs_separable_feature_pairs_975` (`tests/sae/sae/owed_975.rs`, whose module is no longer registered) |
 | `weighted_chi_square_sf` | `368528959` | `zz_measure_size_under_candidate_reference_shapes_2672` |
 
-### Two more pins whose fixture subject was deleted
+### A pin whose fixture subject was deleted
+
+This section first retired a second pin, `bms_rigid_nonzero_slope_offset_audit_fits_in_time_370`,
+because its fixture called `LatentZPolicy::exploratory_fit_weighted` and
+`DeviationBlockConfig::triple_penalty_default`. Neither was deleted outright. `7c185e2c5`
+replaced `triple_penalty_default`, which was `Self::default()`, with `Default`, and `f2156a78e`
+moved `exploratory_fit_weighted` into gam-test-support as
+`exploratory_fit_weighted_latent_z_policy`. The pin is restored. Its outer and inner budget
+bounds are now read from `BlockwiseFitOptions::default()`, the options the fit runs with,
+instead of a literal 60.
 
 | Deleted subject | Removing commit | Retired pin |
 | --- | --- | --- |
-| `LatentZPolicy::exploratory_fit_weighted` and `DeviationBlockConfig::triple_penalty_default`, the constructors the BMS audit fixture built its request from | `f2156a78e` and `7c185e2c5` | `bms_rigid_nonzero_slope_offset_audit_fits_in_time_370`. Its sibling `bms_callbacks_self_compute_nonzero_slope_baseline_at_beta_zero_370` survives in the same file. |
 | `amortized_encode_batch_fast`, `amortized_reconstruct_batch_fast` and `build_data_driven`, the fast encode/decode path that `oos_train_curved` trained through | `728caa9b1` | `curved_warm_start_matches_or_beats_linear_baseline_out_of_sample_2261` |
 
 ### Two pins already disposed of by other records
@@ -1044,4 +1052,17 @@ go too.
 | `tests/perf_scale/smooths/grid_spline_2d_streaming_bench.rs` | `n_10_000_000_streaming_acceptance_bench` | calls `GridSpline2dDesign`, the 2-D grid spline engine that `85abc4592` retired because no product used it |
 | `tests/identifiability/misc/ladder_cert_rate_measure.rs` | `report_non_affine_ladder_cert_distribution_on_flex_path` | a #979 measurement whose one assertion is that cells were evaluated. Its import `gam::families::cubic_cell_kernel` no longer resolves, because the kernel lives in gam-model-kernels and the facade does not re-export it |
 
-Three more files diverged from their base header after the sweep and are still being reconciled: `tests/autodiff/misc/contract_gradient_gates.rs`, `tests/identifiability/misc/constant_curvature_kappa_coverage_sims.rs` and `tests/survival/survival/owed_1388.rs`.
+### Shells whose callees survive under other names
+
+These files were cut to their module doc, but every production callee their tests need is
+still on main, renamed, moved or reshaped. They are restored:
+
+| File | Tests | Adaptation |
+| --- | --- | --- |
+| `tests/survival/survival/owed_1388.rs` | 3 | `canonicalize_for_identifiability` is now `canonicalize_for_identifiability_with_operating_scalars`. The old function forwarded `None` for the operating scalars, and the tests pass `None`. |
+| `tests/inference/misc/margslope_smallcondition_smoke.rs` | 2 | the two constructors moved, as the #370 correction above describes. The module doc no longer cites two large-scale reproducers that are gone. |
+| `tests/identifiability/misc/constant_curvature_kappa_coverage_sims.rs` | 3 | `f46ec2bb2` deleted the uncalled `KappaEstimateSupport::is_railed`; the tests compare against `KappaEstimateSupport::Interior`. `e1f90bec8` removed the `pilot_subsample_threshold` option, and its line is dropped. |
+| `tests/quality/families/quality_vs_pymc_nuts_binomial_logit.rs` | 2 | `NutsConfig` no longer carries `nwarmup` or `n_chains`: gam runs `NUTS_CHAINS` chains and ends warmup when adaptation stabilizes. The PyMC baseline's chain count reads `gam::hmc::NUTS_CHAINS`, and payloads use `MODEL_PAYLOAD_VERSION`. |
+| `tests/inference/misc/bms_audit_nonzero_slope_baseline_370.rs` | 1 | the rigid #370 pin, as above |
+
+`tests/autodiff/misc/contract_gradient_gates.rs` is still being reconciled.
