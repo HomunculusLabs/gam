@@ -23,38 +23,15 @@
 //!
 //! No `let _`, no `#[allow]`, no `#[ignore]`, no env vars.
 
-use ndarray::{Array1, Array2, Array3, array};
+use ndarray::{Array1, Array2, array};
+use std::sync::Arc;
 
 use gam::terms::{
-    latent::LatentManifold, sae::manifold::AssignmentMode, sae::manifold::SaeAssignment,
-    sae::manifold::SaeAtomBasisKind, sae::manifold::SaeManifoldAtom, sae::manifold::SaeManifoldRho,
-    sae::manifold::SaeManifoldTerm,
+    latent::LatentManifold, sae::manifold::AssignmentMode,
+    sae::manifold::PeriodicHarmonicEvaluator, sae::manifold::SaeAssignment,
+    sae::manifold::SaeAtomBasisKind, sae::manifold::SaeBasisEvaluator,
+    sae::manifold::SaeManifoldAtom, sae::manifold::SaeManifoldRho, sae::manifold::SaeManifoldTerm,
 };
-
-/// Build a tiny periodic-atom evaluator on a 3-row coordinate grid. The
-/// returned (Φ, jet) layout matches the fixture used by the unit tests in
-/// `src/terms/sae/manifold/mod.rs` so the integration test reproduces the exact
-/// degeneracy seen on the OOS predict path: zero assignment mass + zero
-/// smoothness penalty on the decoder means `H_tt` collapses to ridge·I.
-fn periodic_basis_tiny(coords: &Array2<f64>) -> (Array2<f64>, Array3<f64>) {
-    let n = coords.nrows();
-    // 3-harmonic periodic basis: [1, cos(t), sin(t)] — matches the in-tree
-    // analytic harmonic evaluator's smallest non-trivial layout.
-    let m = 3usize;
-    let latent_dim = 1usize;
-    let mut phi = Array2::<f64>::zeros((n, m));
-    let mut jet = Array3::<f64>::zeros((n, m, latent_dim));
-    for i in 0..n {
-        let t = coords[[i, 0]];
-        phi[[i, 0]] = 1.0;
-        phi[[i, 1]] = t.cos();
-        phi[[i, 2]] = t.sin();
-        jet[[i, 0, 0]] = 0.0;
-        jet[[i, 1, 0]] = -t.sin();
-        jet[[i, 2, 0]] = t.cos();
-    }
-    (phi, jet)
-}
 
 fn degenerate_oos_term() -> (SaeManifoldTerm, SaeManifoldRho, Array2<f64>) {
     // Mirrors the failing reproducer shape: a single periodic atom whose
@@ -63,8 +40,15 @@ fn degenerate_oos_term() -> (SaeManifoldTerm, SaeManifoldRho, Array2<f64>) {
     // Cholesky finite. With ridge_t this small the standard Cholesky finds
     // a tiny negative pivot from rounding — exactly the regime issues
     // #163 and #175 describe.
+    //
+    // The atom is built as the OOS entry builds one: the first-harmonic periodic
+    // evaluator supplies `Φ` and its Jacobian at the coordinates and stays
+    // installed, because the inner Newton step reads its analytic second jets.
     let coords = array![[0.1], [0.4], [0.7]];
-    let (phi, jet) = periodic_basis_tiny(&coords);
+    let evaluator = PeriodicHarmonicEvaluator::new(3).expect("first-harmonic periodic evaluator");
+    let (phi, jet) = evaluator
+        .evaluate(coords.view())
+        .expect("evaluate the periodic basis");
     let atom = SaeManifoldAtom::new_with_provided_function_gram(
         "periodic",
         SaeAtomBasisKind::Periodic,
@@ -74,7 +58,8 @@ fn degenerate_oos_term() -> (SaeManifoldTerm, SaeManifoldRho, Array2<f64>) {
         array![[0.05], [-0.05], [0.05]],
         Array2::<f64>::zeros((3, 3)),
     )
-    .expect("build periodic atom");
+    .expect("build periodic atom")
+    .with_basis_evaluator(Arc::new(evaluator));
     let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
         Array2::<f64>::zeros((3, 1)),
         vec![coords],
