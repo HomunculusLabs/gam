@@ -9192,5 +9192,13 @@
     ],
     "reason": "#2899, SPEC rule 25 (delete public API no product uses). gam-solve gpu::reml_gpu (evidence_derivatives_gpu, RemlGpuInput, RemlGpuEvidence) and gpu::arrow_schur_gpu (solve_arrow_newton_step_gpu) were called only by their own benches, and pirls_gpu::cholesky_solve_gpu only by reml_gpu. The benches, their [[bench]] entries and the docs describing these paths go with them.",
     "evidence": "At the check pin, git grep over crates, src, tests, bench, examples, docs, python and gamfit finds these names only in the deleted files, bench/cargo_benches/{reml_gpu,arrow_schur_gpu}_bench.rs, the reworded docs, and historical records. These identities are the guard's own refusal list at the checked pair. Guarded compile: pool job 648543."
+  },
+  {
+    "base": "1dddd3f5dd298eb60f89f284b783f9b977ce4adf",
+    "items": [
+      "tests/basis_smooth/smooths/owed_1378.rs:const:CRITERION_ULP_BUDGET"
+    ],
+    "reason": "#1378: the tp permutation gate now judges both arms on what the two outer certificates publish, the stationarity bound b. The log-λ ball is ‖V_ρ‖∞·(b_base + b_perm) and the criterion bar is ½·m·‖V_ρ‖∞·(b_base² + b_perm²). The 1024-ulp budget it replaces was borrowed from the warm-start contract on the premise that two certified fits differ only by reassociating O(n) reductions. Pool job 609264 measured that premise false for tp: one-ulp x nudges in the same row order move the tp criterion 1.2e8–6.3e8 ulps.",
+    "evidence": "At the base, git grep -n CRITERION_ULP_BUDGET finds its declaration and two uses in tests/basis_smooth/smooths/owed_1378.rs, and the warm-start contract's own separate constant in tests/pyffi/optimization/warm_start_invariance_contract.rs, which this commit does not touch. The owed_1378 uses are rewritten in this commit."
   }
 ]

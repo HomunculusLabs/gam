@@ -40,24 +40,29 @@
 //! `tests/pyffi/optimization/warm_start_invariance_contract.rs` documents for a
 //! donated seed. Bit-identity of λ̂ is therefore not the contract.
 //!
-//! What a lane-only diagnostic measured (pool jobs 599189 at `583577152` and
-//! 602711 at `0243a382d`): the base tp fit and six same-order fits with `y`
-//! nudged by one ulp land on one λ̂ with criteria within 8 ulps (curve drift
-//! 1.8e-11). The six permutations land on two other λ̂, up to 3e-6 away in
-//! relative terms, with criteria 1.3e8 to 1.7e8 ulps from the base (curve drift
-//! 1.2e-7 of a 2.4 signal range). ps and cr permutations move their criteria by
-//! at most 240 ulps. So a permuted tp fit is NOT the same criterion reassociated,
-//! and this gate reports it. The diagnostic does not establish why: nudging `y`
-//! leaves the design bit-identical, so it cannot separate rounding amplified
-//! through design-dependent terms from a computation that depends on row order.
+//! What lane-only diagnostics measured: the base tp fit and six same-order fits
+//! with `y` nudged by one ulp land on one λ̂ with criteria within 8 ulps (pool jobs
+//! 599189 at `583577152` and 602711 at `0243a382d`). The six permutations land on
+//! two other λ̂, up to 3e-6 away, with criteria 1.3e8 to 1.7e8 ulps from the base
+//! (curve drift 1.2e-7 of a 2.4 signal range), while ps and cr move their criteria
+//! by at most 240 ulps. Six one-ulp nudges of `x` in the SAME row order move the tp
+//! criterion 1.2e8 to 6.3e8 ulps (job 609264 at `2886c2803`). That arm reorders
+//! nothing, so the spread is rounding amplified through the tp design's
+//! conditioning rather than a row-order computation, and no ulp budget over O(n)
+//! reductions describes it.
 //!
-//! The tp gate asserts the two things a certificate controls, both DERIVED:
-//!   * the criterion agrees within the ulp budget of reassociating its O(n)
-//!     reductions, which a different basis misses by many orders;
-//!   * each permutation's log-λ̂ lies inside the ball both certificates publish,
-//!     `‖Δρ̂‖∞ ≤ ‖V_ρ‖∞·(‖Pg_base‖ + ‖Pg_perm‖)`.
-//! The curve is a function of the basis and λ̂, so its drift is reported rather
-//! than bounded a second time.
+//! The tp gate therefore judges both arms on what the two certificates publish: the
+//! stationarity bound `b` every certified point satisfies, and `V_ρ`.
+//!   * each permutation's log-λ̂ lies inside the ball both certificates license,
+//!     `‖Δρ̂‖∞ ≤ ‖V_ρ‖∞·(b_base + b_perm)`;
+//!   * the criteria agree within the quadratic-model value gap of two certified
+//!     points, `|ΔV| ≤ ½·m·‖V_ρ‖∞·(b_base² + b_perm²)` for `m` smoothing coordinates.
+//! Measured at `3ebdcf869` (job 644261): the tp permutations move the criterion
+//! 4.7e-7 to 6.1e-7 against a bar of 8.2e-6 and log-λ̂ 6.0e-8 to 3.1e-6 against a
+//! ball of 5.8e-3. Seeding the knot recursion at data row 0, the index-dependent
+//! defect class this issue names, moves them 4.5e-4 to 2.3e-3 and 8.9e-3 to 0.13, so
+//! both arms fail on it. The curve is a function of the basis and λ̂, so its drift
+//! is reported rather than bounded a second time.
 
 use csv::StringRecord;
 use gam::matrix::LinearOperator;
@@ -71,13 +76,6 @@ use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand_distr::{Distribution, Normal, Uniform};
 
-/// DERIVED. Ulp budget between the criteria of two fits of the same unordered
-/// data. At a certified stationary point the criterion is flat in ρ, so two fits
-/// that stop at different points inside the same tolerance ball can differ only
-/// by floating-point reassociation over the O(n) reductions plus a second-order
-/// term. This is the warm-start contract's `CRITERION_ULP_BUDGET`, for the same
-/// reason.
-const CRITERION_ULP_BUDGET: i128 = 1024;
 
 /// Signed ulp distance between two `f64`s, using the monotone ordering of their
 /// bit patterns so the count stays meaningful across zero.
@@ -124,6 +122,9 @@ struct CertifiedOptimum {
     log_lambdas: Vec<f64>,
     /// The KKT-projected outer gradient norm the certificate carries.
     projected_grad_norm: Option<f64>,
+    /// The stationarity bound the certificate was decided at: every point whose
+    /// projected gradient is within it is certified.
+    stationarity_bound: Option<f64>,
     /// `‖V_ρ‖∞`, the max absolute row sum of the published inverse outer Hessian.
     rho_covariance_inf_norm: Option<f64>,
 }
@@ -174,6 +175,11 @@ fn fit_predict(bs: &str, x: &[f64], y: &[f64], grid: &[f64]) -> FitOutcome {
                     .convergence_evidence()
                     .outer_certificate()
                     .map(|certificate| certificate.stationarity.projected_norm()),
+                stationarity_bound: fit
+                    .fit
+                    .convergence_evidence()
+                    .outer_certificate()
+                    .map(|certificate| certificate.stationarity.bound()),
                 rho_covariance_inf_norm: fit.fit.artifacts.rho_covariance.as_ref().map(
                     |covariance| {
                         covariance
@@ -213,16 +219,15 @@ fn fit_predict(bs: &str, x: &[f64], y: &[f64], grid: &[f64]) -> FitOutcome {
 }
 
 /// Every way `candidate` fails to be the certified optimum `reference` located again.
+///
+/// Both bars come from what the two certificates publish. A point is certified
+/// when its projected gradient is within the stationarity bound `b`, and near the
+/// optimum `ρ − ρ⋆ = V_ρ·g`, so a certified point lies within `‖V_ρ‖∞·b` of `ρ⋆` in
+/// log-λ and within `½·gᵀV_ρg ≤ ½·m·‖V_ρ‖∞·b²` of `V⋆` in criterion, where `m` is the
+/// number of smoothing coordinates (`‖g‖₂² ≤ m·‖g‖∞²`, `‖V_ρ‖₂ ≤ ‖V_ρ‖∞`). Two certified
+/// fits of the same unordered data therefore differ by at most the sum of the two.
 fn optimum_disagreements(reference: &CertifiedOptimum, candidate: &CertifiedOptimum) -> Vec<String> {
     let mut disagreements = Vec::new();
-    let criterion_ulps = ulp_distance(reference.criterion, candidate.criterion);
-    if criterion_ulps.abs() > CRITERION_ULP_BUDGET {
-        disagreements.push(format!(
-            "criterion {:.17e} vs {:.17e} is {criterion_ulps} ulps apart \
-             (budget {CRITERION_ULP_BUDGET})",
-            reference.criterion, candidate.criterion
-        ));
-    }
     if reference.log_lambdas.len() != candidate.log_lambdas.len() {
         disagreements.push(format!(
             "log-λ layout differs: {} vs {}",
@@ -231,41 +236,56 @@ fn optimum_disagreements(reference: &CertifiedOptimum, candidate: &CertifiedOpti
         ));
         return disagreements;
     }
+    let criterion_ulps = ulp_distance(reference.criterion, candidate.criterion);
+    let criterion_gap = (reference.criterion - candidate.criterion).abs();
     let displacement = reference
         .log_lambdas
         .iter()
         .zip(&candidate.log_lambdas)
         .fold(0.0_f64, |mx, (a, b)| mx.max((a - b).abs()));
     match (
-        reference.projected_grad_norm,
-        candidate.projected_grad_norm,
+        reference.stationarity_bound,
+        candidate.stationarity_bound,
         reference.rho_covariance_inf_norm,
         candidate.rho_covariance_inf_norm,
     ) {
         (
-            Some(reference_gradient),
-            Some(candidate_gradient),
+            Some(reference_bound),
+            Some(candidate_bound),
             Some(reference_covariance),
             Some(candidate_covariance),
         ) => {
             let covariance = reference_covariance.max(candidate_covariance);
-            let ball = covariance * (reference_gradient + candidate_gradient);
+            let dimension = reference.log_lambdas.len() as f64;
+            let ball = covariance * (reference_bound + candidate_bound);
+            let value_gap = 0.5
+                * dimension
+                * covariance
+                * (reference_bound * reference_bound + candidate_bound * candidate_bound);
             eprintln!(
-                "#1378 criterion ulps={criterion_ulps} log-λ displacement={displacement:.3e} \
-                 ball={ball:.3e} (‖V_ρ‖∞={covariance:.3e}, ‖Pg‖=({reference_gradient:.3e}, \
-                 {candidate_gradient:.3e}))"
+                "#1378 criterion gap={criterion_gap:.3e} ({criterion_ulps} ulps) bar={value_gap:.3e} \
+                 log-λ displacement={displacement:.3e} ball={ball:.3e} (‖V_ρ‖∞={covariance:.3e}, \
+                 bound=({reference_bound:.3e}, {candidate_bound:.3e}), ‖Pg‖=({:.3e}, {:.3e}))",
+                reference.projected_grad_norm.unwrap_or(f64::NAN),
+                candidate.projected_grad_norm.unwrap_or(f64::NAN)
             );
+            if !(criterion_gap <= value_gap) {
+                disagreements.push(format!(
+                    "criterion {:.17e} vs {:.17e} differs by {criterion_gap:.3e} ({criterion_ulps} ulps), \
+                     beyond the certified value gap {value_gap:.3e}",
+                    reference.criterion, candidate.criterion
+                ));
+            }
             if !(displacement <= ball) {
                 disagreements.push(format!(
                     "log-λ moved {displacement:.3e}, outside the certificate ball {ball:.3e} \
-                     (‖V_ρ‖∞={covariance:.3e}, ‖Pg‖=({reference_gradient:.3e}, \
-                     {candidate_gradient:.3e}))"
+                     (‖V_ρ‖∞={covariance:.3e}, bound=({reference_bound:.3e}, {candidate_bound:.3e}))"
                 ));
             }
         }
         _ => disagreements.push(format!(
-            "log-λ moved {displacement:.3e}, and a fit published no outer certificate or no V_ρ, \
-             so there is no certificate ball to judge it against"
+            "log-λ moved {displacement:.3e} and the criterion {criterion_gap:.3e}, and a fit published \
+             no outer certificate or no V_ρ, so there is no certified region to judge them against"
         )),
     }
     disagreements
