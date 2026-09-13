@@ -60,13 +60,9 @@ pub struct RealizedCoefficientGroups {
 }
 
 #[derive(Debug, Clone)]
-pub struct PenaltyBlockGammaPriorMetadata<'a> {
-    pub label: String,
-    pub global_index: usize,
-    pub termname: Option<&'a str>,
-    pub source: String,
-    pub effective_rank: usize,
-    pub nullity: usize,
+pub(crate) struct PenaltyBlockGammaPriorMetadata {
+    label: String,
+    global_index: usize,
 }
 
 fn penalty_block_label_candidates(info: &PenaltyBlockInfo) -> Vec<String> {
@@ -86,20 +82,13 @@ fn penalty_block_label_candidates(info: &PenaltyBlockInfo) -> Vec<String> {
     labels
 }
 
-fn penalty_block_metadata(
-    info: &PenaltyBlockInfo,
-    nullspace_dim: usize,
-) -> PenaltyBlockGammaPriorMetadata<'_> {
+fn penalty_block_metadata(info: &PenaltyBlockInfo) -> PenaltyBlockGammaPriorMetadata {
     PenaltyBlockGammaPriorMetadata {
         label: info
             .termname
             .clone()
             .unwrap_or_else(|| format!("penalty:{}", info.global_index)),
         global_index: info.global_index,
-        termname: info.termname.as_deref(),
-        source: format!("{:?}", info.penalty.source),
-        effective_rank: info.penalty.effective_rank,
-        nullity: nullspace_dim,
     }
 }
 
@@ -139,23 +128,16 @@ pub(super) fn validate_penalized_complexity_prior(
     Ok::<(), _>(())
 }
 
-pub fn realize_penalty_block_gamma_priors<F>(
+pub(crate) fn realize_penalty_block_gamma_priors<F>(
     design: &TermCollectionDesign,
     mut callback: F,
 ) -> Result<gam_spec::RhoPrior, BasisError>
 where
-    F: FnMut(&PenaltyBlockGammaPriorMetadata<'_>) -> Option<(f64, f64)>,
+    F: FnMut(&PenaltyBlockGammaPriorMetadata) -> Option<(f64, f64)>,
 {
-    if design.penaltyinfo.len() != design.nullspace_dims.len() {
-        crate::bail_invalid_basis!(
-            "penalty prior metadata/nullity mismatch: metadata={}, nullities={}",
-            design.penaltyinfo.len(),
-            design.nullspace_dims.len()
-        );
-    }
     let mut priors = Vec::<gam_spec::RhoPrior>::with_capacity(design.penaltyinfo.len());
-    for (info, &nullspace_dim) in design.penaltyinfo.iter().zip(&design.nullspace_dims) {
-        let metadata = penalty_block_metadata(info, nullspace_dim);
+    for info in &design.penaltyinfo {
+        let metadata = penalty_block_metadata(info);
         if let Some((shape, rate)) = callback(&metadata) {
             validate_gamma_precision_prior(&metadata.label, shape, rate)?;
             priors.push(gam_spec::RhoPrior::GammaPrecision { shape, rate });

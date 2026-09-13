@@ -10,10 +10,7 @@ pub mod input_standardization;
 pub mod shape_constraints;
 
 pub mod penalty_priors;
-pub use penalty_priors::{
-    CoefficientGroupSpec, CoefficientSelector, PenaltyBlockGammaPriorMetadata,
-    RealizedCoefficientGroups,
-};
+pub use penalty_priors::{CoefficientGroupSpec, CoefficientSelector, RealizedCoefficientGroups};
 
 include!("smooth/term_specs.rs");
 
