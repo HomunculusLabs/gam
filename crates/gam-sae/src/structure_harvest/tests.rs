@@ -2020,6 +2020,27 @@ fn birth_topology_race_d2_includes_and_selects_cylinder() {
         // The linear-axis structure: a magnitude ramp on a third channel.
         cyl_target[[row, 2]] = mag;
     }
+    // Observation noise, as every birth residual carries. The cylinder design reproduces the
+    // noiseless image exactly, so its profiled residual is rounding and Gaussian REML refuses
+    // it ("the design interpolates its response"), handing the race to whichever candidate
+    // fits only approximately. A deterministic Gaussian perturbation at a twentieth of the
+    // channel scale gives every candidate a finite dispersion, and the cylinder has to win on
+    // evidence.
+    let mut state = 0x2280_2027_u64;
+    let mut unit = || {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut mixed = state;
+        mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        mixed ^= mixed >> 31;
+        ((mixed >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+    };
+    for row in 0..n {
+        for column in 0..p {
+            let (u1, u2) = (unit(), unit());
+            cyl_target[[row, column]] += 0.05 * (-2.0 * u1.ln()).sqrt() * (TAU * u2).cos();
+        }
+    }
     let weights = Array1::<f64>::ones(n);
     let cyl_fit = race_birth_topology(coords.view(), cyl_target.view(), weights.view(), 2)
         .expect("cylinder race runs")
