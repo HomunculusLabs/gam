@@ -1056,7 +1056,13 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
                 // The slab gradient lane is live for this trial (off the certified
                 // gradient sub-window, non-Gaussian, multi-ψ, …) — condition the
                 // n×k `∂X/∂ψ` slab into the inner solver's frame as before.
+                let t_condition = std::time::Instant::now();
                 self.condition_hyper_dirs(&mut hyper_dirs);
+                log::info!(
+                    "[STAGE] joint hyper conditioning (design-revision fast path, {} directions): {:.3}s",
+                    hyper_dirs.len(),
+                    t_condition.elapsed().as_secs_f64(),
+                );
             }
             return Ok(hyper_dirs);
         }

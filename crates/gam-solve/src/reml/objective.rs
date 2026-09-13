@@ -2479,7 +2479,7 @@ impl<'a> RemlState<'a> {
         let result = self.assemble_and_evaluate(rho, &bundle, mode, assembly);
         let reml_eval_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
-        log::debug!(
+        log::info!(
             "[outer-timing] evaluate_unified_with_psi_ext: PIRLS={:.1}ms  tau_build={:.1}ms  reml_eval={:.1}ms  total={:.1}ms",
             pirls_ms,
             tau_build_ms,

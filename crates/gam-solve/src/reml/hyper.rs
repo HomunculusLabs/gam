@@ -1257,7 +1257,7 @@ impl<'a> RemlState<'a> {
             let grad = result
                 .gradient
                 .unwrap_or_else(|| Array1::zeros(theta.len()));
-            log::debug!(
+            log::info!(
                 "[outer-timing] compute_joint_hyper_eval (unified, rho_dim={}, psi_dim={}): {:.3}s  cost={:.6e}",
                 rho_dim,
                 hyper_dirs.len(),

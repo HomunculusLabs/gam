@@ -1441,6 +1441,7 @@ impl<'d> SingleBlockExactJointDesignCache<'d> {
         {
             return Ok(dirs.clone());
         }
+        let t_build = std::time::Instant::now();
         let dirs = try_build_spatial_log_kappa_hyper_dirs(
             data,
             self.realizer.spec(),
@@ -1454,6 +1455,15 @@ impl<'d> SingleBlockExactJointDesignCache<'d> {
                 kind.coord_name(),
             ))
         })?;
+        // Every accepted step realizes a new design revision, so this rebuild
+        // runs once per step inside the gradient call, where nothing clocked it
+        // (#2735).
+        log::info!(
+            "[STAGE] {} psi derivative rebuild (design revision {revision}, {} directions): {:.3}s",
+            kind.label(),
+            dirs.len(),
+            t_build.elapsed().as_secs_f64(),
+        );
         self.cached_hyper_dirs = Some((revision, dirs.clone()));
         Ok(dirs)
     }
