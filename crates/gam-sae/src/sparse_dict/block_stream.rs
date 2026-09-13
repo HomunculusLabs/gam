@@ -1009,10 +1009,14 @@ impl BlockSparseStreamState {
                 trial.baseline_gamma_num,
                 trial.baseline_gamma_den,
             );
-            // The two objectives were accumulated on identical rows.  Only a
-            // strict decrease may commit a rerouted proposal; equality has no
-            // directional information and is handled by backtracking.
-            if !(candidate_rss < baseline_rss) {
+            // The two objectives were accumulated on identical rows. Only a
+            // measured decrease may commit a rerouted proposal (#2634): each RSS
+            // sums `rows · p` cells, so two sums closer than `√cells · ε · RSS` are
+            // two roundings of one number, not a direction. A tie inside that band
+            // carries no directional information and is handled by backtracking.
+            let cells = (self.row_count * p).max(1) as f64;
+            let resolution = cells.sqrt() * f64::EPSILON * baseline_rss.abs();
+            if !(baseline_rss - candidate_rss > resolution) {
                 let midpoint =
                     bisect_frame_trial(&trial.baseline_decoder, &trial.proposed_decoder, b);
                 self.decoder = trial.baseline_decoder.clone();
