@@ -3312,6 +3312,50 @@ fn timewiggle_flex_joint_third_information_matches_differenced_second_directiona
     }
 }
 
+/// gam#2893: the build-once flex + time-wiggle sweep of `D²_β H[u, e_a]` through the ζ
+/// composition reproduces the single-direction second directional derivative on every
+/// coefficient axis.
+#[test]
+fn timewiggle_flex_all_axes_second_directional_derivative_matches_single_axis_2893() {
+    let family = timewiggle_marginal_slope_family(Some(test_deviation_runtime()));
+    let beta = timewiggle_marginal_slope_beta(&family);
+    let states = timewiggle_marginal_slope_states(&family, &beta);
+    let u = Array1::from_shape_fn(beta.len(), |i| ((i * 7 + 3) % 11) as f64 / 11.0 - 0.45);
+    let swept = family
+        .exact_newton_joint_hessian_second_directional_derivative_timewiggle_flex_all_axes(
+            &states, &u,
+        )
+        .expect("build-once all-axes second sweep");
+    assert_eq!(swept.len(), beta.len());
+    let single: Vec<Array2<f64>> = (0..beta.len())
+        .map(|index| {
+            let mut axis = Array1::<f64>::zeros(beta.len());
+            axis[index] = 1.0;
+            family
+                .exact_newton_joint_hessiansecond_directional_derivative(&states, &u, &axis)
+                .expect("single-axis D2_beta H")
+                .expect("a time wiggle publishes D2_beta H")
+        })
+        .collect();
+    let scale = single
+        .iter()
+        .flat_map(|matrix| matrix.iter())
+        .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+    assert!(
+        scale > 1e-8,
+        "D2_beta H[u, e_a] must be nonzero on this fixture"
+    );
+    for (index, (swept_axis, single_axis)) in swept.iter().zip(single.iter()).enumerate() {
+        let gap = (swept_axis - single_axis)
+            .iter()
+            .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+        assert!(
+            gap <= 1e-10 * scale,
+            "axis {index}: ζ sweep vs single axis: gap {gap:e}, scale {scale:e}"
+        );
+    }
+}
+
 
 #[test]
 fn link_flex_blockwise_exact_newton_matches_joint_principal_blocks() {

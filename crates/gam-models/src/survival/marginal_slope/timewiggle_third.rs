@@ -1,5 +1,6 @@
-//! Exact third coefficient-directional derivative `D³H[u, v, e_a]` of the joint Hessian for
-//! a time wiggle with a score warp or link deviation (gam#2893).
+//! Exact coefficient-directional derivatives of the joint Hessian along every coefficient axis
+//! for a time wiggle with a score warp or link deviation (gam#2893): the second `D²H[u, e_a]`
+//! and the third `D³H[u, v, e_a]`.
 //!
 //! A row's negative log-likelihood is `ℓ(G(ζ))`. The row coordinate ζ is affine in β. Its
 //! z block holds the entry index `h₀`, the exit index `h₁`, the raw derivative index `d`
@@ -7,15 +8,15 @@
 //! and the identity-mapped flex coordinates. `G` maps ζ to the primaries. Only three of them
 //! are nonlinear: `q₀ = h₀ + B(h₀)·γ`, `q₁ = h₁ + B(h₁)·γ` and `q̇₁ = (1 + B'(h₁)·γ)·d`,
 //! and each is at most linear in γ and in `d`. The row Hessian is `Ãᵀ ∇²_ζ(ℓ∘G) Ã`, so
-//! `D³H[u, v, w] = Ãᵀ ∇⁵_ζ(ℓ∘G)[Ãu, Ãv, Ãw] Ã`.
+//! `D²H[u, w] = Ãᵀ ∇⁴_ζ(ℓ∘G)[Ãu, Ãw] Ã` and `D³H[u, v, w] = Ãᵀ ∇⁵_ζ(ℓ∘G)[Ãu, Ãv, Ãw] Ã`.
 //!
-//! The fifth derivative of the composition is Faà di Bruno over the 52 set partitions of
-//! the two free axes and the three directions. When a partition puts both free axes in one
-//! block, the ℓ contraction of the other blocks weights a curvature of `G` over both axes.
-//! When it separates them, an ℓ derivative sits between two one-axis derivatives of `G`.
-//! Every derivative of `G` has a closed form in the wiggle basis derivatives. Every ℓ
-//! contraction is linear in the third direction. So each row contracts once per primary
-//! axis, assembles once per ζ axis, and pulls back once per coefficient axis.
+//! Each derivative of the composition is Faà di Bruno over the set partitions of the two free
+//! axes and the directions: 15 for the fourth, 52 for the fifth. When a partition puts both
+//! free axes in one block, the ℓ contraction of the other blocks weights a curvature of `G`
+//! over both axes. When it separates them, an ℓ derivative sits between two one-axis
+//! derivatives of `G`. Every derivative of `G` has a closed form in the wiggle basis
+//! derivatives. Every ℓ contraction is linear in the ζ-axis direction. So each row contracts
+//! once per primary axis, assembles once per ζ axis, and pulls back once per coefficient axis.
 
 use super::*;
 
@@ -358,6 +359,41 @@ impl ZetaLayout {
     }
 }
 
+/// The direction-independent ζ frame of a family: its block ranges, where the primaries sit
+/// in ζ, and the ζ coordinate of every linear coefficient.
+struct ZetaFrame<'a> {
+    knots: &'a Array1<f64>,
+    degree: usize,
+    slices: BlockSlices,
+    primary: FlexPrimarySlices,
+    layout: ZetaLayout,
+    time_tail: std::ops::Range<usize>,
+    slope_zeta: usize,
+    /// `(coefficient index, ζ index)` of every identity-mapped flex coefficient.
+    identity_images: Vec<(usize, usize)>,
+}
+
+/// One row's time-wiggle geometry and the ζ image `Ã` of every coefficient axis.
+struct ZetaRow {
+    geometry: WiggleRowGeometry,
+    images: Vec<ZetaImage>,
+}
+
+impl ZetaRow {
+    /// `Ã·direction`.
+    fn image_of(&self, direction: &Array1<f64>, width: usize) -> Array1<f64> {
+        let mut zeta = Array1::<f64>::zeros(width);
+        for (c, image) in self.images.iter().enumerate() {
+            if direction[c] != 0.0 {
+                for &(index, weight) in image.entries() {
+                    zeta[index] += weight * direction[c];
+                }
+            }
+        }
+        zeta
+    }
+}
+
 /// `Σ_k w_k·axes[k]` over the primary axes.
 fn combine_axes(axes: &[Array2<f64>], weights: &Array1<f64>, primary_total: usize) -> Array2<f64> {
     let mut out = Array2::<f64>::zeros((primary_total, primary_total));
@@ -392,7 +428,321 @@ fn add_zeta_pullback(
     }
 }
 
+/// `acc[c] += Ãᵀ (Σ_ζ Ã_{ζc}·Φ_ζ) Ã` for every coefficient axis `c` of one row, from the
+/// per-ζ-axis derivatives `phi_axes`; `right` and `phi_axis` are scratch.
+fn pull_back_axes(
+    phi_axes: &[Array2<f64>],
+    images: &[ZetaImage],
+    right: &mut Array2<f64>,
+    phi_axis: &mut Array2<f64>,
+    acc: &mut [Array2<f64>],
+) {
+    for (c, image) in images.iter().enumerate() {
+        if image.entries().is_empty() {
+            continue;
+        }
+        phi_axis.fill(0.0);
+        for &(zeta, weight) in image.entries() {
+            phi_axis.scaled_add(weight, &phi_axes[zeta]);
+        }
+        add_zeta_pullback(phi_axis, images, right, &mut acc[c]);
+    }
+}
+
 impl SurvivalMarginalSlopeFamily {
+    /// The ζ frame of this family. An influence absorber's primary has no ζ coordinate, and a
+    /// family without a time-wiggle basis has no z block, so both are refused.
+    fn timewiggle_zeta_frame(
+        &self,
+        block_states: &[ParameterBlockState],
+    ) -> Result<ZetaFrame<'_>, String> {
+        if self.influence_absorber.is_some() {
+            return Err(
+                "time-wiggle ζ composition: the influence absorber's primary has no ζ coordinate"
+                    .to_string(),
+            );
+        }
+        let (Some(knots), Some(degree)) =
+            (self.time_wiggle_knots.as_ref(), self.time_wiggle_degree)
+        else {
+            return Err(
+                "time-wiggle ζ composition: the family has no time-wiggle basis".to_string(),
+            );
+        };
+        let slices = block_slices(self, block_states);
+        let primary = flex_primary_slices(self);
+        let time_tail = self.time_wiggle_range();
+        let z_width = ZETA_GAMMA + time_tail.len();
+        let q = [primary.q0, primary.q1, primary.qd1];
+        let linear: Vec<(usize, usize)> = (0..primary.total)
+            .filter(|k| !q.contains(k))
+            .enumerate()
+            .map(|(position, k)| (k, z_width + position))
+            .collect();
+        let mut zeta_of_primary = vec![None; primary.total];
+        for &(k, zeta) in &linear {
+            zeta_of_primary[k] = Some(zeta);
+        }
+        let slope_zeta = zeta_of_primary[primary.g].ok_or_else(|| {
+            "time-wiggle ζ composition: the slope primary has no ζ coordinate".to_string()
+        })?;
+        let mut identity_images = Vec::new();
+        for (primary_range, joint_range) in flex_identity_block_pairs(&primary, &slices) {
+            if primary_range.len() != joint_range.len() {
+                return Err(format!(
+                    "time-wiggle ζ composition: flex primaries {primary_range:?} and \
+                     coefficients {joint_range:?} differ in width"
+                ));
+            }
+            for local in 0..primary_range.len() {
+                let zeta = zeta_of_primary[primary_range.start + local].ok_or_else(|| {
+                    "time-wiggle ζ composition: a flex primary has no ζ coordinate".to_string()
+                })?;
+                identity_images.push((joint_range.start + local, zeta));
+            }
+        }
+        let layout = ZetaLayout {
+            q,
+            width: z_width + linear.len(),
+            z_width,
+            linear,
+        };
+        Ok(ZetaFrame {
+            knots,
+            degree,
+            slices,
+            primary,
+            layout,
+            time_tail,
+            slope_zeta,
+            identity_images,
+        })
+    }
+
+    /// Row `row`'s design rows, indices and wiggle basis derivatives, and the ζ image of every
+    /// coefficient axis.
+    fn timewiggle_zeta_row(
+        &self,
+        frame: &ZetaFrame<'_>,
+        block_states: &[ParameterBlockState],
+        row: usize,
+    ) -> Result<ZetaRow, String> {
+        let slices = &frame.slices;
+        let p_base = frame.time_tail.start;
+        let gamma_width = frame.time_tail.len();
+        let beta_time = &block_states[0].beta;
+        let beta_base = beta_time.slice(s![..p_base]);
+        let gamma = beta_time.slice(s![frame.time_tail.clone()]);
+        let entry_chunk = self
+            .design_entry
+            .try_row_chunk(row..row + 1)
+            .map_err(|e| format!("design_entry try_row_chunk: {e}"))?;
+        let exit_chunk = self
+            .design_exit
+            .try_row_chunk(row..row + 1)
+            .map_err(|e| format!("design_exit try_row_chunk: {e}"))?;
+        let derivative_chunk = self
+            .design_derivative_exit
+            .try_row_chunk(row..row + 1)
+            .map_err(|e| format!("design_derivative_exit try_row_chunk: {e}"))?;
+        let marginal_chunk = self
+            .marginal_design
+            .try_row_chunk(row..row + 1)
+            .map_err(|e| format!("marginal_design try_row_chunk: {e}"))?;
+        let slope_chunk = self
+            .slope_layout
+            .coefficient_design()
+            .try_row_chunk(row..row + 1)
+            .map_err(|e| format!("slope_design try_row_chunk: {e}"))?;
+        let xe = entry_chunk.row(0).slice(s![..p_base]).to_owned();
+        let xx = exit_chunk.row(0).slice(s![..p_base]).to_owned();
+        let xd = derivative_chunk.row(0).slice(s![..p_base]).to_owned();
+        let mr = marginal_chunk.row(0);
+        let gr = slope_chunk.row(0);
+        let bm = block_states[1].eta[row];
+        let h0 = xe.dot(&beta_base) + self.offset_entry[row] + bm;
+        let h1 = xx.dot(&beta_base) + self.offset_exit[row] + bm;
+        let dr = xd.dot(&beta_base) + self.derivative_offset_exit[row];
+        let side = |h: f64| -> Result<SideBasis, String> {
+            let seed = Array1::from_vec(vec![h]);
+            let mut basis = Vec::with_capacity(WIGGLE_ORDERS);
+            for order in 0..WIGGLE_ORDERS {
+                let rows = monotone_wiggle_basis_with_derivative_order(
+                    seed.view(),
+                    frame.knots,
+                    frame.degree,
+                    order,
+                )?;
+                if rows.ncols() != gamma_width {
+                    return Err(format!(
+                        "time-wiggle ζ composition: basis derivative {order} has {} columns for \
+                         {gamma_width} wiggle coefficients",
+                        rows.ncols()
+                    ));
+                }
+                basis.push(rows.row(0).to_owned());
+            }
+            let mut m: [f64; WIGGLE_ORDERS] = std::array::from_fn(|k| basis[k].dot(&gamma));
+            m[1] += 1.0;
+            Ok((basis, m))
+        };
+        let (entry_basis, entry_m) = side(h0)?;
+        let (exit_basis, exit_m) = side(h1)?;
+
+        let mut images = vec![ZetaImage::default(); slices.total];
+        for a in 0..p_base {
+            let image = &mut images[slices.time.start + a];
+            image.push(ZETA_H0, xe[a]);
+            image.push(ZETA_H1, xx[a]);
+            image.push(ZETA_DR, xd[a]);
+        }
+        for l in 0..gamma_width {
+            images[slices.time.start + p_base + l].push(ZETA_GAMMA + l, 1.0);
+        }
+        for j in 0..slices.marginal.len() {
+            let image = &mut images[slices.marginal.start + j];
+            image.push(ZETA_H0, mr[j]);
+            image.push(ZETA_H1, mr[j]);
+        }
+        for b in 0..slices.slope.len() {
+            images[slices.slope.start + b].push(frame.slope_zeta, gr[b]);
+        }
+        for &(joint, zeta) in &frame.identity_images {
+            images[joint].push(zeta, 1.0);
+        }
+        Ok(ZetaRow {
+            geometry: WiggleRowGeometry {
+                dr,
+                entry_basis,
+                exit_basis,
+                entry_m,
+                exit_m,
+            },
+            images,
+        })
+    }
+
+    /// Second directional derivative `D²H[u, e_a]` of the joint Hessian along every coefficient
+    /// axis, for a time wiggle with a score warp or link deviation (gam#2893). One row pass
+    /// serves every axis, where the single-direction evaluator rebuilds each row's flex base
+    /// once per axis. The module documentation derives the ζ composition this evaluates.
+    pub(crate) fn exact_newton_joint_hessian_second_directional_derivative_timewiggle_flex_all_axes(
+        &self,
+        block_states: &[ParameterBlockState],
+        d_u: &Array1<f64>,
+    ) -> Result<Vec<Array2<f64>>, String> {
+        let frame = self.timewiggle_zeta_frame(block_states)?;
+        let layout = &frame.layout;
+        let p_total = frame.slices.total;
+        let p_primary = frame.primary.total;
+        let z_width = layout.z_width;
+        let zeros = || vec![Array2::<f64>::zeros((p_total, p_total)); p_total];
+        let result = gam_linalg::pairwise_reduce::par_deterministic_try_block_fold(
+            self.n,
+            |range| -> Result<Vec<Array2<f64>>, String> {
+                let mut acc = zeros();
+                let mut right = Array2::<f64>::zeros((layout.width, p_total));
+                let mut phi_axis = Array2::<f64>::zeros((layout.width, layout.width));
+                for row in range {
+                    let zeta_row = self.timewiggle_zeta_row(&frame, block_states, row)?;
+                    let geometry = &zeta_row.geometry;
+                    let u_zeta = zeta_row.image_of(d_u, layout.width);
+
+                    // ── Derivatives of G that do not read the ζ axis ──
+                    let dir_u = geometry.direction(u_zeta.slice(s![..z_width]));
+                    let fixed = [&dir_u, &ZetaDirection::ZERO, &ZetaDirection::ZERO];
+                    let jq = geometry.q_rows(fixed, 0);
+                    let ju = layout.primary_image(&jq, &u_zeta, p_primary);
+                    let ju1 = geometry.q_rows(fixed, U);
+                    let k0 = geometry.q_matrices(fixed, 0);
+                    let ku = geometry.q_matrices(fixed, U);
+
+                    // ── ℓ contractions, once per primary axis ──
+                    let q_geom = self.row_dynamic_q_geometry(row, block_states)?;
+                    let (_, gradient, hessian) = self
+                        .compute_row_flex_primary_gradient_hessian_exact(
+                            row,
+                            block_states,
+                            &q_geom,
+                            &frame.primary,
+                        )?;
+                    let base = self.build_row_flex_third_base_with_states(
+                        row,
+                        block_states,
+                        &frame.primary,
+                    )?;
+                    let mut third = Vec::with_capacity(p_primary);
+                    let mut fourth_u = Vec::with_capacity(p_primary);
+                    for k in 0..p_primary {
+                        let mut axis = Array1::<f64>::zeros(p_primary);
+                        axis[k] = 1.0;
+                        third.push(self.row_flex_third_contract_from_base(&base, &axis)?);
+                        fourth_u.push(self.row_flex_fourth_contract_from_base(&base, &ju, &axis)?);
+                    }
+                    let t_u = combine_axes(&third, &ju, p_primary);
+                    let c_z = hessian.dot(&ju);
+
+                    // ── ∇⁴_ζ(ℓ∘G)[Ãu, e_ζ], once per ζ axis ──
+                    let mut phi_axes = Vec::with_capacity(layout.width);
+                    for zeta_axis in 0..layout.width {
+                        let mut unit = Array1::<f64>::zeros(layout.width);
+                        unit[zeta_axis] = 1.0;
+                        let dir_z = geometry.direction(unit.slice(s![..z_width]));
+                        let dirs = [&dir_u, &ZetaDirection::ZERO, &dir_z];
+                        let jz = layout.primary_image(&jq, &unit, p_primary);
+                        let g2uz =
+                            layout.on_primaries(geometry.q_derivative(dirs, U | Z), p_primary);
+                        let jz1 = geometry.q_rows(dirs, Z);
+                        let juz2 = geometry.q_rows(dirs, U | Z);
+                        let t_z = combine_axes(&third, &jz, p_primary);
+                        let mut phi = Array2::<f64>::zeros((layout.width, layout.width));
+
+                        // Both free axes in one block: the ℓ contraction of the remaining
+                        // blocks weights the curvature of G over both axes.
+                        let c_empty = t_u.dot(&jz) + hessian.dot(&g2uz);
+                        let c_u = hessian.dot(&jz);
+                        layout.add_curvature(&mut phi, &c_empty, &k0);
+                        layout.add_curvature(&mut phi, &c_u, &ku);
+                        layout.add_curvature(&mut phi, &c_z, &geometry.q_matrices(dirs, Z));
+                        layout.add_curvature(
+                            &mut phi,
+                            &gradient,
+                            &geometry.q_matrices(dirs, U | Z),
+                        );
+
+                        // Free axes in separate blocks: an ℓ derivative between one-axis
+                        // derivatives of G.
+                        let m_empty = combine_axes(&fourth_u, &jz, p_primary)
+                            + combine_axes(&third, &g2uz, p_primary);
+                        layout.add_full_sandwich(&mut phi, &jq, &m_empty);
+                        layout.add_symmetric_half_sandwich(&mut phi, &ju1, &t_z, &jq);
+                        layout.add_symmetric_half_sandwich(&mut phi, &jz1, &t_u, &jq);
+                        layout.add_symmetric_row_sandwich(&mut phi, &ju1, &hessian, &jz1);
+                        layout.add_symmetric_half_sandwich(&mut phi, &juz2, &hessian, &jq);
+                        phi_axes.push(phi);
+                    }
+
+                    pull_back_axes(
+                        &phi_axes,
+                        &zeta_row.images,
+                        &mut right,
+                        &mut phi_axis,
+                        &mut acc,
+                    );
+                }
+                Ok(acc)
+            },
+            |mut a, b| -> Result<_, String> {
+                for (ai, bi) in a.iter_mut().zip(b.into_iter()) {
+                    *ai += &bi;
+                }
+                Ok(a)
+            },
+        )?
+        .unwrap_or_else(zeros);
+        Ok(result)
+    }
+
     /// Third directional derivative `D³H[u, v, e_a]` of the joint Hessian along every
     /// coefficient axis, for a time wiggle with a score warp or link deviation (gam#2893).
     /// The module documentation derives the ζ composition this evaluates.
@@ -402,69 +752,11 @@ impl SurvivalMarginalSlopeFamily {
         d_u: &Array1<f64>,
         d_v: &Array1<f64>,
     ) -> Result<Vec<Array2<f64>>, String> {
-        if self.influence_absorber.is_some() {
-            return Err(
-                "time-wiggle third information derivative: the influence absorber's primary has \
-                 no ζ coordinate"
-                    .to_string(),
-            );
-        }
-        let (Some(knots), Some(degree)) =
-            (self.time_wiggle_knots.as_ref(), self.time_wiggle_degree)
-        else {
-            return Err(
-                "time-wiggle third information derivative: the family has no time-wiggle basis"
-                    .to_string(),
-            );
-        };
-        let slices = block_slices(self, block_states);
-        let primary = flex_primary_slices(self);
-        let p_total = slices.total;
-        let p_primary = primary.total;
-        let p_marginal = slices.marginal.len();
-        let time_tail = self.time_wiggle_range();
-        let p_base = time_tail.start;
-        let gamma_width = time_tail.len();
-        let z_width = ZETA_GAMMA + gamma_width;
-        let q = [primary.q0, primary.q1, primary.qd1];
-        let linear: Vec<(usize, usize)> = (0..p_primary)
-            .filter(|k| !q.contains(k))
-            .enumerate()
-            .map(|(position, k)| (k, z_width + position))
-            .collect();
-        let mut zeta_of_primary = vec![None; p_primary];
-        for &(k, zeta) in &linear {
-            zeta_of_primary[k] = Some(zeta);
-        }
-        let layout = ZetaLayout {
-            q,
-            width: z_width + linear.len(),
-            z_width,
-            linear,
-        };
-        let slope_zeta = zeta_of_primary[primary.g].ok_or_else(|| {
-            "time-wiggle third information derivative: the slope primary has no ζ coordinate"
-                .to_string()
-        })?;
-        let mut identity_images = Vec::new();
-        for (primary_range, joint_range) in flex_identity_block_pairs(&primary, &slices) {
-            if primary_range.len() != joint_range.len() {
-                return Err(format!(
-                    "time-wiggle third information derivative: flex primaries {primary_range:?} \
-                     and coefficients {joint_range:?} differ in width"
-                ));
-            }
-            for local in 0..primary_range.len() {
-                let zeta = zeta_of_primary[primary_range.start + local].ok_or_else(|| {
-                    "time-wiggle third information derivative: a flex primary has no ζ coordinate"
-                        .to_string()
-                })?;
-                identity_images.push((joint_range.start + local, zeta));
-            }
-        }
-        let beta_time = &block_states[0].beta;
-        let beta_base = beta_time.slice(s![..p_base]);
-        let gamma = beta_time.slice(s![time_tail.clone()]);
+        let frame = self.timewiggle_zeta_frame(block_states)?;
+        let layout = &frame.layout;
+        let p_total = frame.slices.total;
+        let p_primary = frame.primary.total;
+        let z_width = layout.z_width;
         let zeros = || vec![Array2::<f64>::zeros((p_total, p_total)); p_total];
         let result = gam_linalg::pairwise_reduce::par_deterministic_try_block_fold(
             self.n,
@@ -473,106 +765,10 @@ impl SurvivalMarginalSlopeFamily {
                 let mut right = Array2::<f64>::zeros((layout.width, p_total));
                 let mut phi_axis = Array2::<f64>::zeros((layout.width, layout.width));
                 for row in range {
-                    // ── Row geometry: design rows, indices, wiggle basis derivatives ──
-                    let entry_chunk = self
-                        .design_entry
-                        .try_row_chunk(row..row + 1)
-                        .map_err(|e| format!("design_entry try_row_chunk: {e}"))?;
-                    let exit_chunk = self
-                        .design_exit
-                        .try_row_chunk(row..row + 1)
-                        .map_err(|e| format!("design_exit try_row_chunk: {e}"))?;
-                    let derivative_chunk = self
-                        .design_derivative_exit
-                        .try_row_chunk(row..row + 1)
-                        .map_err(|e| format!("design_derivative_exit try_row_chunk: {e}"))?;
-                    let marginal_chunk = self
-                        .marginal_design
-                        .try_row_chunk(row..row + 1)
-                        .map_err(|e| format!("marginal_design try_row_chunk: {e}"))?;
-                    let slope_chunk = self
-                        .slope_layout
-                        .coefficient_design()
-                        .try_row_chunk(row..row + 1)
-                        .map_err(|e| format!("slope_design try_row_chunk: {e}"))?;
-                    let xe = entry_chunk.row(0).slice(s![..p_base]).to_owned();
-                    let xx = exit_chunk.row(0).slice(s![..p_base]).to_owned();
-                    let xd = derivative_chunk.row(0).slice(s![..p_base]).to_owned();
-                    let mr = marginal_chunk.row(0);
-                    let gr = slope_chunk.row(0);
-                    let bm = block_states[1].eta[row];
-                    let h0 = xe.dot(&beta_base) + self.offset_entry[row] + bm;
-                    let h1 = xx.dot(&beta_base) + self.offset_exit[row] + bm;
-                    let dr = xd.dot(&beta_base) + self.derivative_offset_exit[row];
-                    let side = |h: f64| -> Result<SideBasis, String> {
-                        let seed = Array1::from_vec(vec![h]);
-                        let mut basis = Vec::with_capacity(WIGGLE_ORDERS);
-                        for order in 0..WIGGLE_ORDERS {
-                            let rows = monotone_wiggle_basis_with_derivative_order(
-                                seed.view(),
-                                knots,
-                                degree,
-                                order,
-                            )?;
-                            if rows.ncols() != gamma_width {
-                                return Err(format!(
-                                    "time-wiggle third information derivative: basis derivative \
-                                     {order} has {} columns for {gamma_width} wiggle coefficients",
-                                    rows.ncols()
-                                ));
-                            }
-                            basis.push(rows.row(0).to_owned());
-                        }
-                        let mut m: [f64; WIGGLE_ORDERS] =
-                            std::array::from_fn(|k| basis[k].dot(&gamma));
-                        m[1] += 1.0;
-                        Ok((basis, m))
-                    };
-                    let (entry_basis, entry_m) = side(h0)?;
-                    let (exit_basis, exit_m) = side(h1)?;
-                    let geometry = WiggleRowGeometry {
-                        dr,
-                        entry_basis,
-                        exit_basis,
-                        entry_m,
-                        exit_m,
-                    };
-
-                    // ── Ã: the ζ image of every coefficient axis ──
-                    let mut images = vec![ZetaImage::default(); p_total];
-                    for a in 0..p_base {
-                        let image = &mut images[slices.time.start + a];
-                        image.push(ZETA_H0, xe[a]);
-                        image.push(ZETA_H1, xx[a]);
-                        image.push(ZETA_DR, xd[a]);
-                    }
-                    for l in 0..gamma_width {
-                        images[slices.time.start + time_tail.start + l].push(ZETA_GAMMA + l, 1.0);
-                    }
-                    for j in 0..p_marginal {
-                        let image = &mut images[slices.marginal.start + j];
-                        image.push(ZETA_H0, mr[j]);
-                        image.push(ZETA_H1, mr[j]);
-                    }
-                    for b in 0..slices.slope.len() {
-                        images[slices.slope.start + b].push(slope_zeta, gr[b]);
-                    }
-                    for &(joint, zeta) in &identity_images {
-                        images[joint].push(zeta, 1.0);
-                    }
-                    let zeta_image = |direction: &Array1<f64>| -> Array1<f64> {
-                        let mut zeta = Array1::<f64>::zeros(layout.width);
-                        for (c, image) in images.iter().enumerate() {
-                            if direction[c] != 0.0 {
-                                for &(index, weight) in image.entries() {
-                                    zeta[index] += weight * direction[c];
-                                }
-                            }
-                        }
-                        zeta
-                    };
-                    let u_zeta = zeta_image(d_u);
-                    let v_zeta = zeta_image(d_v);
+                    let zeta_row = self.timewiggle_zeta_row(&frame, block_states, row)?;
+                    let geometry = &zeta_row.geometry;
+                    let u_zeta = zeta_row.image_of(d_u, layout.width);
+                    let v_zeta = zeta_row.image_of(d_v, layout.width);
 
                     // ── Derivatives of G that do not read the ζ axis ──
                     let dir_u = geometry.direction(u_zeta.slice(s![..z_width]));
@@ -597,10 +793,13 @@ impl SurvivalMarginalSlopeFamily {
                             row,
                             block_states,
                             &q_geom,
-                            &primary,
+                            &frame.primary,
                         )?;
-                    let base =
-                        self.build_row_flex_fifth_base_with_states(row, block_states, &primary)?;
+                    let base = self.build_row_flex_fifth_base_with_states(
+                        row,
+                        block_states,
+                        &frame.primary,
+                    )?;
                     let mut third = Vec::with_capacity(p_primary);
                     let mut fourth_u = Vec::with_capacity(p_primary);
                     let mut fourth_v = Vec::with_capacity(p_primary);
@@ -696,17 +895,13 @@ impl SurvivalMarginalSlopeFamily {
                         phi_axes.push(phi);
                     }
 
-                    // ── One pullback per coefficient axis ──
-                    for (c, image) in images.iter().enumerate() {
-                        if image.entries().is_empty() {
-                            continue;
-                        }
-                        phi_axis.fill(0.0);
-                        for &(zeta, weight) in image.entries() {
-                            phi_axis.scaled_add(weight, &phi_axes[zeta]);
-                        }
-                        add_zeta_pullback(&phi_axis, &images, &mut right, &mut acc[c]);
-                    }
+                    pull_back_axes(
+                        &phi_axes,
+                        &zeta_row.images,
+                        &mut right,
+                        &mut phi_axis,
+                        &mut acc,
+                    );
                 }
                 Ok(acc)
             },

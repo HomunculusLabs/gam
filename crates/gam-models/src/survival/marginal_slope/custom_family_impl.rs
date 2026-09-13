@@ -642,6 +642,23 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
             });
         }
 
+        // Flex with a time wiggle: one row pass of the ζ composition in `timewiggle_third`
+        // serves every axis, where the per-axis loop below rebuilds each row's flex base once
+        // per axis (gam#2893). An influence absorber's primary has no ζ coordinate, so it
+        // keeps that loop.
+        if !self.per_z_slope_active()
+            && self.effective_flex_active(block_states)?
+            && self.flex_timewiggle_active()
+            && self.influence_absorber.is_none()
+        {
+            let axes = self
+                .exact_newton_joint_hessian_second_directional_derivative_timewiggle_flex_all_axes(
+                    block_states,
+                    d_beta_u_flat,
+                )?;
+            return Ok(Some(axes));
+        }
+
         let p = specs.iter().map(|spec| spec.design.ncols()).sum::<usize>();
         use rayon::iter::{IntoParallelIterator, ParallelIterator};
         let results: Vec<Result<Option<Array2<f64>>, String>> = (0..p)
