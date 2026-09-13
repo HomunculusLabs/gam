@@ -6,6 +6,7 @@ use super::SaeAtomBasisKind;
 use faer::Side;
 use gam_linalg::faer_ndarray::{FaerEigh, FaerSvd};
 use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2};
+use rayon::prelude::*;
 
 /// Residual-norm floor below which the surplus atom's second phase axis is
 /// treated as collinear with the first (a degenerate 2-plane). Since both
@@ -147,8 +148,8 @@ fn topology_seed_subsample(n_obs: usize) -> Vec<usize> {
 
 fn squared_distance_rows(z: ArrayView2<'_, f64>, a: usize, b: usize) -> f64 {
     let mut acc = 0.0;
-    for c in 0..z.ncols() {
-        let d = z[[a, c]] - z[[b, c]];
+    for (&x, &y) in z.row(a).iter().zip(z.row(b).iter()) {
+        let d = x - y;
         acc += d * d;
     }
     acc
@@ -196,25 +197,43 @@ pub(crate) fn topology_curved_seed_initial_coords(
     // Neighborhood degree derived from intrinsic dimension + connectivity
     // (#2065), capped at the subsample size.
     let k = topology_seed_knn(m, intrinsic_d_max).min(m - 1);
-    let mut w = Array2::<f64>::zeros((m, m));
-    for (ia, &ra) in rows.iter().enumerate() {
-        let mut dists = Vec::with_capacity(m - 1);
-        for (ib, &rb) in rows.iter().enumerate() {
-            if ia != ib {
-                dists.push((squared_distance_rows(z, ra, rb), ib));
+    // #2283 — each subsample row's k nearest neighbours and heat-kernel weights
+    // read that row alone, so the O(m²·p) scan runs on the pool (job 578028's
+    // eu-stack samples at `n = 4096, p = 2048` sat in this scan on one core).
+    // The symmetric fill takes the larger weight per entry, which does not depend
+    // on the order rows arrive in, so `w` is bit-identical to the serial scan.
+    let neighbour_weights: Vec<Vec<(usize, f64)>> = rows
+        .par_iter()
+        .enumerate()
+        .map(|(ia, &ra)| {
+            let mut dists = Vec::with_capacity(m - 1);
+            for (ib, &rb) in rows.iter().enumerate() {
+                if ia != ib {
+                    dists.push((squared_distance_rows(z, ra, rb), ib));
+                }
             }
-        }
-        dists.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-        let scale = dists[k.saturating_sub(1)].0;
-        for &(dist2, ib) in dists.iter().take(k) {
-            // Every taken neighbour lies within the k-th distance `scale`, so its
-            // heat-kernel weight is at least `e⁻¹`. A zero `scale` means every
-            // taken neighbour coincides with the row, which is weight one.
-            let wij = if scale > 0.0 {
-                (-dist2 / scale).exp()
-            } else {
-                1.0
-            };
+            dists.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+            let scale = dists[k.saturating_sub(1)].0;
+            dists
+                .iter()
+                .take(k)
+                .map(|&(dist2, ib)| {
+                    // Every taken neighbour lies within the k-th distance `scale`, so
+                    // its heat-kernel weight is at least `e⁻¹`. A zero `scale` means
+                    // every taken neighbour coincides with the row, which is weight one.
+                    let wij = if scale > 0.0 {
+                        (-dist2 / scale).exp()
+                    } else {
+                        1.0
+                    };
+                    (ib, wij)
+                })
+                .collect::<Vec<(usize, f64)>>()
+        })
+        .collect();
+    let mut w = Array2::<f64>::zeros((m, m));
+    for (ia, neighbours) in neighbour_weights.iter().enumerate() {
+        for &(ib, wij) in neighbours {
             if wij > w[[ia, ib]] {
                 w[[ia, ib]] = wij;
             }
@@ -265,33 +284,39 @@ pub(crate) fn topology_curved_seed_initial_coords(
         pos_of_row[r] = pos;
     }
     let mut row_neighbors: Vec<Vec<(f64, usize)>> = vec![Vec::new(); z.nrows()];
-    for (row, neighbors) in row_neighbors.iter_mut().enumerate() {
-        if pos_of_row[row] != usize::MAX {
-            continue;
-        }
-        let mut best: Vec<(f64, usize)> = vec![(f64::INFINITY, 0usize); interp_k];
-        for (i, &r) in rows.iter().enumerate() {
-            let d = squared_distance_rows(z, row, r);
-            if d < best[interp_k - 1].0 {
-                best[interp_k - 1] = (d, i);
-                best.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // #2283 — one nearest-subsample scan per out-of-subsample row, `O(n·m·p)` in
+    // total at every `n > m`, and each row's scan reads that row alone: run on the
+    // pool. Per-row arithmetic is unchanged, so the neighbour sets are too.
+    row_neighbors
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(row, neighbors)| {
+            if pos_of_row[row] != usize::MAX {
+                return;
             }
-        }
-        // Store the inverse-distance weights directly; the normalizing sum is
-        // fn-independent too. A neighbour whose inverse distance is not finite
-        // coincides with the row: in the limit it carries all the weight, shared
-        // equally with any other coincident neighbour.
-        let coincident: Vec<(f64, usize)> = best
-            .iter()
-            .filter(|&&(d, _)| !(1.0 / d).is_finite())
-            .map(|&(_, i)| (1.0, i))
-            .collect();
-        *neighbors = if coincident.is_empty() {
-            best.into_iter().map(|(d, i)| (1.0 / d, i)).collect()
-        } else {
-            coincident
-        };
-    }
+            let mut best: Vec<(f64, usize)> = vec![(f64::INFINITY, 0usize); interp_k];
+            for (i, &r) in rows.iter().enumerate() {
+                let d = squared_distance_rows(z, row, r);
+                if d < best[interp_k - 1].0 {
+                    best[interp_k - 1] = (d, i);
+                    best.sort_by(|a, b| a.0.total_cmp(&b.0));
+                }
+            }
+            // Store the inverse-distance weights directly; the normalizing sum is
+            // fn-independent too. A neighbour whose inverse distance is not finite
+            // coincides with the row: in the limit it carries all the weight, shared
+            // equally with any other coincident neighbour.
+            let coincident: Vec<(f64, usize)> = best
+                .iter()
+                .filter(|&&(d, _)| !(1.0 / d).is_finite())
+                .map(|&(_, i)| (1.0, i))
+                .collect();
+            *neighbors = if coincident.is_empty() {
+                best.into_iter().map(|(d, i)| (1.0 / d, i)).collect()
+            } else {
+                coincident
+            };
+        });
     let interp = |sample_values: &Array1<f64>, row: usize| -> f64 {
         let pos = pos_of_row[row];
         if pos != usize::MAX {
