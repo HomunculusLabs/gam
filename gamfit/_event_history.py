@@ -398,15 +398,8 @@ class EventHistoryModel:
         cutoff, and records after it cannot change it; ``horizons`` and the
         forecast window then open at the cutoff. ``future`` is the covariate
         path over the window as in :meth:`forecast`."""
-        mark_index = {name: i for i, name in enumerate(self.mark_names)}
-        event_time = []
-        event_mark = []
-        for time, mark in events:
-            label = str(mark)
-            if label not in mark_index:
-                raise ValueError(f"unknown mark {label!r}; marks: {self.mark_names}")
-            event_time.append(float(time))
-            event_mark.append(mark_index[label])
+        event_time = [float(time) for time, _ in events]
+        event_marks = [str(mark) for _, mark in events]
         segments = self._future(covariates, float(entry))
         if not segments:
             raise ValueError("forecast_history needs the history's covariate values")
@@ -418,7 +411,7 @@ class EventHistoryModel:
             float(entry),
             float(exit),
             event_time,
-            event_mark,
+            event_marks,
             starts,
             records,
             None if cutoff is None else float(cutoff),
@@ -483,23 +476,18 @@ def fit_event_history(
     entry = _column(subjects, "entry").astype(float).tolist()
     exit_ = _column(subjects, "exit").astype(float).tolist()
     mark_values = _labels(_column(events, "mark"), "mark names")
+    # The native cohort resolver owns the default vocabulary (the observed marks,
+    # all recurrent) and refuses events whose mark is outside the vocabulary.
     if marks is None:
         if not mark_values:
             raise ValueError(
                 "the events table has no rows, so the mark vocabulary must be given: marks={name: kind}"
             )
-        mark_names = sorted(set(mark_values))
-        mark_kinds = ["recurrent"] * len(mark_names)
+        declared_marks = None
     elif isinstance(marks, Mapping):
-        mark_names = [str(k) for k in marks.keys()]
-        mark_kinds = [str(v) for v in marks.values()]
+        declared_marks = [(str(k), str(v)) for k, v in marks.items()]
     else:
-        mark_names = [str(m) for m in marks]
-        mark_kinds = ["recurrent"] * len(mark_names)
-    mark_index = {name: i for i, name in enumerate(mark_names)}
-    unknown = sorted(set(mark_values) - set(mark_names))
-    if unknown:
-        raise ValueError(f"events carry marks {unknown} that are not in the mark vocabulary {mark_names}")
+        declared_marks = [(str(m), "recurrent") for m in marks]
     event_subject = []
     for v in _column(events, id_column):
         label = str(v)
@@ -507,7 +495,6 @@ def fit_event_history(
             raise ValueError(f"event subject {label!r} is not in the subjects table")
         event_subject.append(index[label])
     event_time = _column(events, "time").astype(float).tolist()
-    event_mark = [mark_index[m] for m in mark_values]
     covariate_names = [
         c for c in _column_names(covariates) if c not in (id_column, "start")
     ]
@@ -561,8 +548,7 @@ def fit_event_history(
                 f"reference profile row {row} is outside the {n_segments} covariate rows"
             )
     native = rust.fit_event_history(
-        mark_names,
-        mark_kinds,
+        declared_marks,
         covariate_names,
         columns,
         subject_ids,
@@ -570,7 +556,7 @@ def fit_event_history(
         exit_,
         event_subject,
         event_time,
-        event_mark,
+        mark_values,
         segment_subject,
         segment_start,
         segment_row,

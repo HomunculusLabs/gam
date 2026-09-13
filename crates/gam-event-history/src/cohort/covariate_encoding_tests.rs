@@ -54,3 +54,34 @@ fn the_observed_mark_vocabulary_is_sorted_distinct_and_recurrent() {
     assert_eq!(names, vec!["death".to_string(), "relapse".to_string()]);
     assert_eq!(kinds, vec![MarkKind::Recurrent, MarkKind::Recurrent]);
 }
+
+#[test]
+fn a_declared_vocabulary_keeps_its_order_and_kinds_and_indexes_events() {
+    let declared = vec![
+        ("relapse".to_string(), MarkKind::Recurrent),
+        ("death".to_string(), MarkKind::Terminal),
+    ];
+    let (names, kinds, indices) =
+        resolve_mark_vocabulary(Some(declared), &["death", "relapse", "relapse"]).unwrap();
+    assert_eq!(names, vec!["relapse".to_string(), "death".to_string()]);
+    assert_eq!(kinds, vec![MarkKind::Recurrent, MarkKind::Terminal]);
+    assert_eq!(indices, vec![1, 0, 0]);
+}
+
+#[test]
+fn an_undeclared_vocabulary_is_the_observed_one() {
+    let (names, kinds, indices) = resolve_mark_vocabulary(None, &["b", "a", "b"]).unwrap();
+    assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
+    assert_eq!(kinds, vec![MarkKind::Recurrent, MarkKind::Recurrent]);
+    assert_eq!(indices, vec![1, 0, 1]);
+}
+
+#[test]
+fn an_event_outside_the_vocabulary_or_an_empty_default_is_refused() {
+    let declared = vec![("death".to_string(), MarkKind::Terminal)];
+    let unknown = resolve_mark_vocabulary(Some(declared), &["relapse"])
+        .expect_err("a mark outside the declared vocabulary is refused");
+    assert!(unknown.to_string().contains("\"relapse\""), "{unknown}");
+    assert!(resolve_mark_vocabulary(None, &[]).is_err());
+    assert_eq!(mark_index_of(&["a".to_string(), "b".to_string()], "b"), Ok(1));
+}

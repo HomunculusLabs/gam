@@ -25,7 +25,7 @@ mod static_state;
 pub use cohort::{
     CohortNodes, CovariateCells, CovariateSegment, CovariateValue, Event, EventHistoryCohort,
     EventHistoryError, MarkKind, SubjectHistory, SubjectNodes, code_covariate_value,
-    observed_mark_vocabulary,
+    mark_index_of, observed_mark_vocabulary, resolve_mark_vocabulary,
 };
 pub use covariance::{
     DirectionEvidence, DirectionProfile, RidgeProfile, effective_rank, temporal_covariance,

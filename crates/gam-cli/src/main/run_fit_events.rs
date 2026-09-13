@@ -6,8 +6,8 @@ use gam::families::custom_family::BlockwiseFitOptions;
 use gam::event_history::{
     CovariateCells, CovariateSegment, Event, EventHistoryCohort, ForecastRequest, FutureSegment,
     MarkKind, PopulationForecastRequest, ReferenceStrata, SubjectHistory,
-    fit_event_history_formulas, forecast, latent_state, observed_mark_vocabulary,
-    pit_uniform_distance, population_forecast, predictive_pit,
+    fit_event_history_formulas, forecast, latent_state, pit_uniform_distance, population_forecast,
+    predictive_pit, resolve_mark_vocabulary,
 };
 use ndarray::Array2;
 use serde_json::{Map, Value, json};
@@ -91,42 +91,38 @@ pub(crate) fn run_fit_events(args: FitEventsArgs) -> Result<(), String> {
     let event_times = column(&event_headers, &event_rows, "time", &args.events)?;
     let event_marks = column(&event_headers, &event_rows, "mark", &args.events)?;
     // The mark vocabulary: declared with kinds, or the observed marks, all
-    // recurrent.
-    let (mark_names, mark_kinds): (Vec<String>, Vec<MarkKind>) = if args.marks.is_empty() {
-        let (names, kinds) = observed_mark_vocabulary(event_marks.iter().copied());
-        if names.is_empty() {
-            return Err(
-                "the events table has no rows, so the marks must be declared with --marks name:kind,..."
-                    .to_string(),
-            );
-        }
-        (names, kinds)
+    // recurrent; the cohort resolver also indexes every event's mark.
+    if args.marks.is_empty() && event_marks.is_empty() {
+        return Err(
+            "the events table has no rows, so the marks must be declared with --marks name:kind,..."
+                .to_string(),
+        );
+    }
+    let declared = if args.marks.is_empty() {
+        None
     } else {
-        let mut names = Vec::with_capacity(args.marks.len());
-        let mut kinds = Vec::with_capacity(args.marks.len());
+        let mut pairs = Vec::with_capacity(args.marks.len());
         for spec in &args.marks {
             let (name, kind) = spec
                 .split_once(':')
                 .ok_or_else(|| format!("--marks entry {spec:?} is not name:kind"))?;
-            names.push(name.trim().to_string());
-            kinds.push(MarkKind::parse(kind).map_err(|e| e.to_string())?);
+            pairs.push((name.trim().to_string(), MarkKind::parse(kind).map_err(|e| e.to_string())?));
         }
-        (names, kinds)
+        Some(pairs)
     };
-    for ((id, time), mark) in event_ids
+    let (mark_names, mark_kinds, event_mark_indices) =
+        resolve_mark_vocabulary(declared, &event_marks).map_err(|e| e.to_string())?;
+    for ((id, time), mark_index) in event_ids
         .iter()
         .zip(event_times.iter())
-        .zip(event_marks.iter())
+        .zip(event_mark_indices.iter())
     {
         let subject = *index
             .get(*id)
             .ok_or_else(|| format!("event subject {id:?} is not in the subjects table"))?;
-        let mark_index = mark_names.iter().position(|m| m == mark).ok_or_else(|| {
-            format!("event mark {mark:?} is not in the mark vocabulary {mark_names:?}")
-        })?;
         subjects[subject].events.push(Event {
             time: parse_f64(time, "event time")?,
-            mark: mark_index,
+            mark: *mark_index,
         });
     }
     let (cov_headers, cov_rows) = read_csv(&args.covariates)?;

@@ -9,7 +9,8 @@ use gam::event_history::{
     CovariateCells, CovariateSegment, CovariateValue, Event, EventHistoryCohort, EventHistoryFit,
     ForecastRequest, FutureSegment, HistoryForecastRequest, MarkKind, PopulationForecastRequest,
     ReferenceStrata, SubjectHistory, code_covariate_value, fit_event_history_formulas, forecast,
-    forecast_history, latent_state, pit_uniform_distance, population_forecast, predictive_pit,
+    forecast_history, latent_state, mark_index_of, pit_uniform_distance, population_forecast,
+    predictive_pit, resolve_mark_vocabulary,
 };
 use ndarray::{Array2, Array3};
 use numpy::{PyArray1, PyArray2, PyArray3};
@@ -421,18 +422,18 @@ impl PyEventHistoryModel {
 
     /// Forecast a history that is not a training subject's — or a training
     /// subject's prefix — from its own records: entry and exit, events as
-    /// parallel time and mark-index vectors, covariate segments as parallel
+    /// parallel time and mark-label vectors, covariate segments as parallel
     /// start times and `covariates` records (one per segment, in the cohort's
     /// columns, coded here against its levels). With `cutoff`, the history is cut
     /// to what was known at the cutoff before forecasting.
-    #[pyo3(signature = (entry, exit, event_time, event_mark, segment_start, covariates, cutoff, horizons, future, stratum))]
+    #[pyo3(signature = (entry, exit, event_time, event_marks, segment_start, covariates, cutoff, horizons, future, stratum))]
     fn forecast_history<'py>(
         &self,
         py: Python<'py>,
         entry: f64,
         exit: f64,
         event_time: Vec<f64>,
-        event_mark: Vec<usize>,
+        event_marks: Vec<String>,
         segment_start: Vec<f64>,
         covariates: Vec<Vec<Bound<'py, PyAny>>>,
         cutoff: Option<f64>,
@@ -440,11 +441,17 @@ impl PyEventHistoryModel {
         future: Vec<(f64, Vec<Bound<'py, PyAny>>)>,
         stratum: usize,
     ) -> PyResult<Bound<'py, PyDict>> {
-        if event_time.len() != event_mark.len() {
+        if event_time.len() != event_marks.len() {
             return Err(py_value_error(
-                "event_time and event_mark must have equal length".to_string(),
+                "event_time and event_marks must have equal length".to_string(),
             ));
         }
+        let event_mark = event_marks
+            .iter()
+            .map(|label| {
+                mark_index_of(&self.cohort.mark_names, label).map_err(|e| py_value_error(e.to_string()))
+            })
+            .collect::<PyResult<Vec<usize>>>()?;
         let mut table = Array2::<f64>::zeros((covariates.len(), self.cohort.covariate_names.len()));
         for (row, record) in covariates.iter().enumerate() {
             for (j, code) in coded_record(&self.cohort, record)?.into_iter().enumerate() {
@@ -502,11 +509,10 @@ impl PyEventHistoryModel {
 
 /// Fit an event-history model from flat arrays.
 #[pyfunction]
-#[pyo3(signature = (mark_names, mark_kinds, covariate_names, covariate_columns, subject_ids, entry, exit, event_subject, event_time, event_mark, segment_subject, segment_start, segment_row, formulas, reference_rows, reference_stratum))]
+#[pyo3(signature = (declared_marks, covariate_names, covariate_columns, subject_ids, entry, exit, event_subject, event_time, event_marks, segment_subject, segment_start, segment_row, formulas, reference_rows, reference_stratum))]
 fn fit_event_history(
     py: Python<'_>,
-    mark_names: Vec<String>,
-    mark_kinds: Vec<String>,
+    declared_marks: Option<Vec<(String, String)>>,
     covariate_names: Vec<String>,
     covariate_columns: Vec<Bound<'_, PyAny>>,
     subject_ids: Vec<String>,
@@ -514,7 +520,7 @@ fn fit_event_history(
     exit: Vec<f64>,
     event_subject: Vec<usize>,
     event_time: Vec<f64>,
-    event_mark: Vec<usize>,
+    event_marks: Vec<String>,
     segment_subject: Vec<usize>,
     segment_start: Vec<f64>,
     segment_row: Vec<usize>,
@@ -528,9 +534,9 @@ fn fit_event_history(
             "subject_ids, entry and exit must have one entry per subject ({n})"
         )));
     }
-    if event_subject.len() != event_time.len() || event_subject.len() != event_mark.len() {
+    if event_subject.len() != event_time.len() || event_subject.len() != event_marks.len() {
         return Err(py_value_error(
-            "event_subject, event_time and event_mark must have equal length".to_string(),
+            "event_subject, event_time and event_marks must have equal length".to_string(),
         ));
     }
     if segment_subject.len() != segment_start.len() || segment_subject.len() != segment_row.len() {
@@ -538,10 +544,21 @@ fn fit_event_history(
             "segment_subject, segment_start and segment_row must have equal length".to_string(),
         ));
     }
-    let mark_kinds = mark_kinds
-        .iter()
-        .map(|k| MarkKind::parse(k).map_err(|e| py_value_error(e.to_string())))
-        .collect::<PyResult<Vec<_>>>()?;
+    let declared = declared_marks
+        .map(|pairs| {
+            pairs
+                .into_iter()
+                .map(|(name, kind)| {
+                    MarkKind::parse(&kind)
+                        .map(|kind| (name, kind))
+                        .map_err(|e| py_value_error(e.to_string()))
+                })
+                .collect::<PyResult<Vec<(String, MarkKind)>>>()
+        })
+        .transpose()?;
+    let event_mark_labels: Vec<&str> = event_marks.iter().map(String::as_str).collect();
+    let (mark_names, mark_kinds, event_mark) = resolve_mark_vocabulary(declared, &event_mark_labels)
+        .map_err(|e| py_value_error(e.to_string()))?;
     if covariate_columns.len() != covariate_names.len() {
         return Err(py_value_error(format!(
             "{} covariate columns for {} covariate names",

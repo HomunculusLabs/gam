@@ -191,6 +191,39 @@ pub fn observed_mark_vocabulary<'a>(
     (names, kinds)
 }
 
+/// A cohort's mark vocabulary and the index of every event's mark: the declared
+/// names and kinds, or when none are declared the observed names (see
+/// [`observed_mark_vocabulary`]). An event whose label is outside the vocabulary is
+/// refused, as is an undeclared vocabulary with no events to observe.
+pub fn resolve_mark_vocabulary(
+    declared: Option<Vec<(String, MarkKind)>>,
+    event_marks: &[&str],
+) -> Result<(Vec<String>, Vec<MarkKind>, Vec<usize>), EventHistoryError> {
+    let (names, kinds) = match declared {
+        Some(pairs) => pairs.into_iter().unzip(),
+        None => observed_mark_vocabulary(event_marks.iter().copied()),
+    };
+    if names.is_empty() {
+        return Err(invalid(
+            "no mark vocabulary: none was declared and there are no events to observe",
+        ));
+    }
+    let indices = event_marks
+        .iter()
+        .map(|label| mark_index_of(&names, label))
+        .collect::<Result<Vec<usize>, EventHistoryError>>()?;
+    Ok((names, kinds, indices))
+}
+
+/// The index of a mark label in a cohort's mark vocabulary.
+pub fn mark_index_of(names: &[String], label: &str) -> Result<usize, EventHistoryError> {
+    names.iter().position(|name| name == label).ok_or_else(|| {
+        invalid(format!(
+            "event mark {label:?} is not in the mark vocabulary {names:?}"
+        ))
+    })
+}
+
 /// One observed event: its time and its mark index.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Event {
