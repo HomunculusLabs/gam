@@ -878,7 +878,43 @@ pub(crate) fn run_outer_with_plan(
             seeds.len(),
         );
         if !should_start_next_seed(started_seeds, seed_budget, best.is_some()) {
-            break;
+            // A certified winner on a face of the declared outer domain is a
+            // stationary point of the criterion's flat asymptote. |Pg| is negligible
+            // there whatever the criterion scores, so its KKT pass is correct and
+            // says nothing about value. Such a winner ends the cascade only when no
+            // unrun seed starts below it beyond the criterion's resolution. A seed
+            // that does is run, and keep-best separates the two certified points by
+            // value. An interior winner keeps the budget rule unchanged, so only a
+            // railed winner pays for these start evaluations. #1082 q12: the seed on
+            // the upper faces certified at 286.23 after 0 iterations and ended the
+            // cascade before the rho = 2 seed, which starts at 247.25 and certified
+            // at 158.628 when it still ran.
+            let railed_winner_value = best
+                .as_ref()
+                .map(CertifiedOuterCandidate::result)
+                .filter(|winner| !certificate_railed_coordinates(&winner.rho, config).is_empty())
+                .map(|winner| winner.final_value);
+            let Some(winner_value) = railed_winner_value else {
+                break;
+            };
+            obj.reset();
+            install_matching_initial_inner_seed(obj, config, seed, context)?;
+            let start_value = match obj.eval_cost(seed) {
+                Ok(value) => value,
+                Err(error) if error.is_trial_point_infeasible() => f64::INFINITY,
+                Err(error) => return Err(error),
+            };
+            let starts_below_winner = start_value.is_finite()
+                && winner_value - start_value
+                    > crate::rho_optimizer::outer_value_agreement_bound(winner_value, start_value);
+            log::info!(
+                "[OUTER] {context}: certified winner (value={winner_value:.6e}) is railed on the \
+                 domain face; seed {seed_idx} starts at {start_value:.6e}, {}",
+                if starts_below_winner { "running it" } else { "skipping it" }
+            );
+            if !starts_below_winner {
+                continue 'seed_attempts;
+            }
         }
         // Domain entry is a property of this literal seed. A loop-local path
         // cannot leak its state or regime into another candidate.
@@ -3091,9 +3127,19 @@ pub(crate) fn run_outer_with_plan(
                         started_seeds,
                         promoted_seed_is_redundant,
                     );
+                // A railed certified winner does not end the cascade here. The start
+                // check at the head of the next attempt decides by that seed's start
+                // value (see the rail note there).
+                let certified_winner_is_railed = best
+                    .as_ref()
+                    .map(CertifiedOuterCandidate::result)
+                    .is_some_and(|winner| {
+                        !certificate_railed_coordinates(&winner.rho, config).is_empty()
+                    });
                 if best.is_some()
                     && !quality_compare_remaining_gaussian_seeds
                     && !non_gaussian_await_parsimony_seed
+                    && !certified_winner_is_railed
                 {
                     break;
                 }
