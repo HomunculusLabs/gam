@@ -2,7 +2,7 @@
 //! `src/gpu/*` and `src/solver/gpu/*`.
 //!
 //! Before this module existed, each device backend (`bms_flex`,
-//! `survival_flex`, `polya_gamma`, `reml_trace`, ...) carried its own
+//! `survival_flex`, `polya_gamma`, ...) carried its own
 //! near-identical `OnceLock<Result<{module: Arc<CudaModule>}, GpuError>>` that
 //! NVRTC-compiled one source string the first time the backend dispatched and
 //! cached the resulting module for the process lifetime. That cache is now

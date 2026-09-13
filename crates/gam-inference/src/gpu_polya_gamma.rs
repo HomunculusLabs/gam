@@ -124,8 +124,7 @@ impl<'a> PolyaGammaBatchInput<'a> {
 // ────────────────────────────────────────────────────────────────────────
 
 /// Two large odd constants used to mix `(seed, row, word)` into the
-/// SplitMix input. Disjoint from the `reml_trace` constants so different
-/// kernels with the same seed don’t share probe sequences.
+/// SplitMix input.
 const ROW_ZETA: u64 = 0xA1B2_C3D4_E5F6_7890;
 const WORD_GAMMA: u64 = 0x0F1E_2D3C_4B5A_6978;
 
