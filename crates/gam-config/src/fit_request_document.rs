@@ -312,8 +312,12 @@ impl SmoothDescriptorsDocument {
 pub struct CtnStage1Document {
     pub fold_column: Option<String>,
     pub group_column: Option<String>,
-    pub folds: usize,
-    pub seed: u64,
+    /// Generated group folds; absent takes the recipe's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folds: Option<usize>,
+    /// Seed of the group-fold assignment; absent takes the recipe's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
     pub response_column: String,
     pub covariate_formula_rhs: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

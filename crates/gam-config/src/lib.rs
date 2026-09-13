@@ -34,8 +34,12 @@ impl CtnStage1Document {
         )?;
         recipe.fold_column = self.fold_column;
         recipe.group_column = self.group_column;
-        recipe.folds = self.folds;
-        recipe.seed = self.seed;
+        if let Some(folds) = self.folds {
+            recipe.folds = folds;
+        }
+        if let Some(seed) = self.seed {
+            recipe.seed = seed;
+        }
         Ok(recipe)
     }
 }
