@@ -2,7 +2,7 @@ use gam_math::paired_timing::{SpeedGate, paired_interleaved};
 use gam_row_macros::row_atom;
 
 row_atom! {
-    fn generated_gaussian [order2_at_zero, third_at_zero, fourth_at_zero](
+    fn generated_gaussian [order2_at_zero, third_at_zero, fourth_at_zero, fourth, fifth, fifth_at_zero](
         delta_mu,
         delta_eta;
         obs_weight: f64,
@@ -283,4 +283,65 @@ fn generated_gaussian_matches_and_beats_strongest_hand_932() {
         );
     }
     gate.finish();
+}
+
+/// #2903: the fifth lowering is the derivative of the fourth. The generic
+/// `fifth_contracted` must equal a five-point difference of the generic
+/// `fourth_contracted` along `w`, and the at-zero form must equal the generic
+/// form at the zero expansion point, on rows reaching both the location and
+/// log-scale curvature.
+#[test]
+fn row_atom_fifth_lowering_matches_difference_of_fourth_2903() {
+    let rows = [
+        (1.0, 0.7, 1.3, 0.35),
+        (2.5, -1.4, 0.8, 0.6),
+        (0.6, 2.2, 2.0, 0.15),
+    ];
+    let u = [0.4, -0.9];
+    let v = [-0.3, 0.5];
+    let w = [0.8, 0.25];
+    let h = 1.0e-3;
+    for (weight, residual, inv_sigma, kappa) in rows {
+        let fourth_at = |t: f64| {
+            generated_gaussian_fourth_contracted(
+                t * w[0],
+                t * w[1],
+                weight,
+                residual,
+                inv_sigma,
+                kappa,
+                &u,
+                &v,
+            )
+        };
+        let fifth = generated_gaussian_fifth_contracted(
+            0.0, 0.0, weight, residual, inv_sigma, kappa, &u, &v, &w,
+        );
+        let at_zero = generated_gaussian_fifth_contracted_at_zero(
+            weight, residual, inv_sigma, kappa, &u, &v, &w,
+        );
+        let (p2, p1, m1, m2) = (fourth_at(2.0 * h), fourth_at(h), fourth_at(-h), fourth_at(-2.0 * h));
+        let mut largest = 0.0_f64;
+        for a in 0..2 {
+            for b in 0..2 {
+                let difference = (-p2[a][b] + 8.0 * p1[a][b] - 8.0 * m1[a][b] + m2[a][b]) / (12.0 * h);
+                largest = largest.max(fifth[a][b].abs());
+                assert!(
+                    (fifth[a][b] - difference).abs() <= 1.0e-6 * (1.0 + difference.abs()),
+                    "fifth[{a}][{b}] = {} against difference {difference}",
+                    fifth[a][b]
+                );
+                assert!(
+                    (at_zero[a][b] - fifth[a][b]).abs() <= 1.0e-12 * (1.0 + fifth[a][b].abs()),
+                    "at-zero fifth[{a}][{b}] = {} against generic {}",
+                    at_zero[a][b],
+                    fifth[a][b]
+                );
+            }
+        }
+        assert!(
+            largest > 1.0e-3,
+            "the contracted fifth is too small ({largest:.3e}) for the agreement to say anything"
+        );
+    }
 }

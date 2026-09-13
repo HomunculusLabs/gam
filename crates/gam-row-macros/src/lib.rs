@@ -32,9 +32,11 @@ enum Lowering {
     Order2,
     Third,
     Fourth,
+    Fifth,
     Order2AtZero,
     ThirdAtZero,
     FourthAtZero,
+    FifthAtZero,
 }
 
 struct RowAtomInput {
@@ -62,14 +64,16 @@ impl Parse for RowAtomInput {
                 "order2" => Lowering::Order2,
                 "third" => Lowering::Third,
                 "fourth" => Lowering::Fourth,
+                "fifth" => Lowering::Fifth,
                 "order2_at_zero" => Lowering::Order2AtZero,
                 "third_at_zero" => Lowering::ThirdAtZero,
                 "fourth_at_zero" => Lowering::FourthAtZero,
+                "fifth_at_zero" => Lowering::FifthAtZero,
                 _ => {
                     return Err(syn::Error::new_spanned(
                         lowering,
-                        "row_atom lowerings are generic, order2, third, fourth, \
-                         order2_at_zero, third_at_zero, and fourth_at_zero",
+                        "row_atom lowerings are generic, order2, third, fourth, fifth, \
+                         order2_at_zero, third_at_zero, fourth_at_zero, and fifth_at_zero",
                     ));
                 }
             };
@@ -2354,6 +2358,143 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
                 #(#constant_parameters,)*
                 direction_u: &[f64; #dimension],
                 direction_v: &[f64; #dimension],
+            ) -> [[f64; #dimension]; #dimension] {
+                #body
+            }
+        });
+    }
+
+    // The contracted fifth `Σ_{cde} ℓ_{abcde} u_c v_d w_e`: the fourth lowering's
+    // derivative graph taken one axis further and contracted with a third
+    // direction (#2903).
+    for (lowering, suffix, at_zero) in [
+        (Lowering::Fifth, "fifth_contracted", false),
+        (Lowering::FifthAtZero, "fifth_contracted_at_zero", true),
+    ] {
+        if !lowerings.contains(&lowering) {
+            continue;
+        }
+        let fifth_name = format_ident!("{name}_{suffix}");
+        let mut channels = vec![vec![Vec::<Vec<Vec<usize>>>::new(); dimension]; dimension];
+        let mut memo = HashMap::new();
+        for row in 0..dimension {
+            for column in row..dimension {
+                let third = (0..dimension)
+                    .map(|axis| {
+                        let derivative = graph.derivative(hessian[row][column], axis);
+                        graph.normalize_ring(derivative)
+                    })
+                    .collect::<Vec<_>>();
+                let fourth = third
+                    .iter()
+                    .map(|&id| {
+                        (0..dimension)
+                            .map(|axis| {
+                                let derivative = graph.derivative(id, axis);
+                                graph.normalize_ring(derivative)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                let mut fifth = fourth
+                    .iter()
+                    .map(|ids| {
+                        ids.iter()
+                            .map(|&id| {
+                                (0..dimension)
+                                    .map(|axis| {
+                                        let derivative = graph.derivative(id, axis);
+                                        graph.normalize_ring(derivative)
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                if at_zero {
+                    for derivative in fifth.iter_mut().flatten().flatten() {
+                        *derivative = graph.substitute_zero_primaries(*derivative, &mut memo);
+                    }
+                }
+                channels[row][column] = fifth;
+            }
+        }
+        if at_zero {
+            let flat = channels
+                .iter()
+                .flatten()
+                .flatten()
+                .flatten()
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>();
+            let normalized = graph.normalize_polynomials(&flat, constants.len());
+            let mut next = normalized.into_iter();
+            for derivative in channels.iter_mut().flatten().flatten().flatten().flatten() {
+                *derivative = next.next().expect("one normalized channel per derivative");
+            }
+        }
+        let mut roots = Vec::new();
+        let mut assignments = Vec::new();
+        let mut entries = vec![vec![quote!(0.0); dimension]; dimension];
+        for (row, columns) in channels.iter().enumerate() {
+            for (column, derivatives) in columns.iter().enumerate().skip(row) {
+                roots.extend(derivatives.iter().flatten().flatten().copied());
+                let terms = derivatives
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(axis_u, by_v)| {
+                        by_v.iter()
+                            .enumerate()
+                            .flat_map(|(axis_v, by_w)| {
+                                by_w.iter()
+                                    .enumerate()
+                                    .filter(|(_, id)| !graph.is_zero(**id))
+                                    .map(|(axis_w, &id)| {
+                                        let derivative =
+                                            node_reference(id, &graph, &primaries, &constants);
+                                        quote!(
+                                            #derivative
+                                                * direction_u[#axis_u]
+                                                * direction_v[#axis_v]
+                                                * direction_w[#axis_w]
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                let sum = match terms.split_first() {
+                    None => continue,
+                    Some((first, rest)) => quote!(#first #(+ #rest)*),
+                };
+                let temporary = format_ident!("__row_atom_fifth_{row}_{column}");
+                assignments.push(quote!(let #temporary = #sum;));
+                entries[row][column] = quote!(#temporary);
+                entries[column][row] = quote!(#temporary);
+            }
+        }
+        let definitions = schedule_definitions(roots, &graph, &primaries, &constants)?;
+        let primary_parameters = if at_zero {
+            quote!()
+        } else {
+            quote!(#(#primaries: f64,)*)
+        };
+        let rows = entries.iter().map(|row| quote!([#(#row),*]));
+        let body = quote! {
+            #(#definitions)*
+            #(#assignments)*
+            [#(#rows),*]
+        };
+        output.push(quote! {
+            #[inline(always)]
+            #visibility fn #fifth_name(
+                #primary_parameters
+                #(#constant_parameters,)*
+                direction_u: &[f64; #dimension],
+                direction_v: &[f64; #dimension],
+                direction_w: &[f64; #dimension],
             ) -> [[f64; #dimension]; #dimension] {
                 #body
             }
