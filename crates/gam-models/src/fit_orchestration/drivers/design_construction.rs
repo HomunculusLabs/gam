@@ -3417,6 +3417,10 @@ fn fit_bounded_term_collection_with_design(
                 constraint_kkt: None,
                 artifacts: gam_solve::estimate::FitArtifacts {
                     pirls: None,
+                    // Assembly accepts selected smoothing only with the outer
+                    // search's stationarity certificate, which the custom-family
+                    // fit already carries; it is threaded through, not dropped.
+                    criterion_certificate: fit.artifacts.criterion_certificate.clone(),
                     ..Default::default()
                 },
                 inner_cycles: 0,
