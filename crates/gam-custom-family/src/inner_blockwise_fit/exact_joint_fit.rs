@@ -6635,9 +6635,12 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         //
         // Distinct from the flat-residual exit above (residual NOT improving
         // for the no-improve window) and the Newton-decrement certificate
-        // (decrement ≤ objective_tol). Here the residual IS descending, just
-        // geometrically and far too slowly to reach tol in a practical cycle
-        // count — the survival marginal-slope oversmoothed-ρ endgame (stiff
+        // (decrement ≤ objective_tol). The window's measured rate decides what
+        // this exit reports (#2902). When the residual contracted, it is the slow
+        // endgame below. When it did not contract (rate ≥ 1 once the merit veto
+        // has lapsed), the solve is not converging at all, and the exit says so:
+        // a descending ray, or a residual that is not contracting. The slow
+        // endgame is the survival marginal-slope oversmoothed-ρ case (stiff
         // penalized Hessian → ~1e-5 Newton steps far inside a large trust
         // radius → residual ~0.99×/cycle). Project, from the trailing
         // window's geometric rate, the additional cycles to reach
@@ -6706,16 +6709,29 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     );
                     continue 'joint_newton_cycles;
                 }
-                log::warn!(
-                    "[PIRLS/joint-Newton convergence] cycle {:>3} | slow-geometric-rate stall early-exit (gam#979): residual={:.3e} (tol={:.3e}) descending at ~{:.4}×/cycle over the last {} cycles — projected >{} more cycles to reach tol; the residual is converging but far too slowly to finish in a practical budget (the survival marginal-slope oversmoothed-ρ endgame), so returning unconverged with finite β instead of grinding to inner_max_cycles={}.",
-                    cycle,
-                    residual,
-                    residual_tol,
-                    (residual / oldest).powf(1.0 / (LINEAR_RATE_WINDOW as f64)),
-                    LINEAR_RATE_WINDOW,
-                    effective_projection_cap,
-                    inner_max_cycles,
-                );
+                let rate_per_cycle = (residual / oldest).powf(1.0 / (LINEAR_RATE_WINDOW as f64));
+                let contracting = rate_per_cycle < 1.0;
+                if contracting {
+                    log::warn!(
+                        "[PIRLS/joint-Newton convergence] cycle {:>3} | slow-geometric-rate stall early-exit (gam#979): residual={:.3e} (tol={:.3e}) contracting at ~{:.4}×/cycle over the last {} cycles — projected >{} more cycles to reach tol; returning unconverged with finite β instead of grinding to inner_max_cycles={}.",
+                        cycle,
+                        residual,
+                        residual_tol,
+                        rate_per_cycle,
+                        LINEAR_RATE_WINDOW,
+                        effective_projection_cap,
+                        inner_max_cycles,
+                    );
+                } else {
+                    log::warn!(
+                        "[PIRLS/joint-Newton convergence] cycle {:>3} | non-contracting residual exit (#2902): residual={:.3e} (tol={:.3e}) did not contract over the last {} cycles (~{:.4}×/cycle); returning unconverged with finite β.",
+                        cycle,
+                        residual,
+                        residual_tol,
+                        LINEAR_RATE_WINDOW,
+                        rate_per_cycle,
+                    );
+                }
                 // A typed outcome, so the outer's seed statistics can tell a
                 // descending ray from a stuck solve (gam#2695).
                 // Which block's penalty is too weak to close the ray, read off
@@ -6740,13 +6756,31 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     ..
                 }) = terminal_convergence_state.as_mut()
                 {
-                    *termination_reason = gam_problem::JointNewtonTerminalReason::SlowGeometricRate {
-                        rate_per_cycle: (residual / oldest).powf(1.0 / (LINEAR_RATE_WINDOW as f64)),
-                        window_cycles: LINEAR_RATE_WINDOW,
-                        projected_cycles_to_tolerance: effective_projection_cap,
-                        residual,
-                        residual_tol,
-                        ray,
+                    *termination_reason = match (contracting, ray) {
+                        (true, ray) => gam_problem::JointNewtonTerminalReason::SlowGeometricRate {
+                            rate_per_cycle,
+                            window_cycles: LINEAR_RATE_WINDOW,
+                            projected_cycles_to_tolerance: effective_projection_cap,
+                            residual,
+                            residual_tol,
+                            ray,
+                        },
+                        (false, Some(ray)) => {
+                            gam_problem::JointNewtonTerminalReason::StalledOnDescendingRay {
+                                residual,
+                                residual_tol,
+                                cycles: cycle + 1,
+                                ray,
+                            }
+                        }
+                        (false, None) => {
+                            gam_problem::JointNewtonTerminalReason::ResidualNotContracting {
+                                rate_per_cycle,
+                                window_cycles: LINEAR_RATE_WINDOW,
+                                residual,
+                                residual_tol,
+                            }
+                        }
                     };
                 }
                 cycles_done = cycle + 1;

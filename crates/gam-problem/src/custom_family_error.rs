@@ -18,13 +18,11 @@ pub enum JointNewtonTerminalReason {
         joint_trust_radius: f64,
         rejection_counts: [usize; 4],
     },
-    /// The residual was still contracting — every step accepted, the model
-    /// trusted — but at a geometric rate too slow to reach tolerance within
-    /// the projection cap. The solve was descending, not stuck: on the #2695
-    /// 1569 pair this is the scale coefficient walking the σ→0 ray, an
-    /// objective with no finite minimizer along that direction at that ρ, and
-    /// the outer needs to read it as under-penalization rather than as a
-    /// failed seed.
+    /// The residual was still contracting (`rate_per_cycle < 1` over the
+    /// window), but at a geometric rate too slow to reach tolerance within the
+    /// projection cap. A window whose residual did not contract is not this
+    /// reason: it is [`Self::StalledOnDescendingRay`] when the accepted step
+    /// descends a ray and [`Self::ResidualNotContracting`] otherwise (#2902).
     SlowGeometricRate {
         rate_per_cycle: f64,
         window_cycles: usize,
@@ -35,6 +33,16 @@ pub enum JointNewtonTerminalReason {
         /// strength at which it would: `None` when no block's penalty opposes
         /// the accepted step (an unpenalized ray, which no ρ can close).
         ray: Option<RayRestoration>,
+    },
+    /// Over the projection window the residual did not contract
+    /// (`rate_per_cycle >= 1`, or no positive starting residual), and the
+    /// accepted step descended no ray a penalty strength could close. The
+    /// solve is not converging slowly. It is not converging (#2902).
+    ResidualNotContracting {
+        rate_per_cycle: f64,
+        window_cycles: usize,
+        residual: f64,
+        residual_tol: f64,
     },
     /// The solve left on a residual-stall or divergence guard while its last
     /// accepted step was still descending a direction no block's penalty
@@ -211,24 +219,14 @@ impl std::fmt::Display for JointNewtonTerminalReason {
                 residual_tol,
                 ray,
             } => {
-                if *rate_per_cycle < 1.0 {
-                    write!(
-                        f,
-                        "residual {residual:.6e} still contracting at {rate_per_cycle:.4}x per \
-                         cycle over the last {window_cycles} cycles, projected more than \
-                         {projected_cycles_to_tolerance} further cycles to reach \
-                         {residual_tol:.6e}: the solve was descending along a direction with \
-                         no finite minimizer in reach, not stuck"
-                    )?;
-                } else {
-                    write!(
-                        f,
-                        "residual {residual:.6e} is not contracting ({rate_per_cycle:.4}x per \
-                         cycle over the last {window_cycles} cycles, every step accepted) and \
-                         cannot reach {residual_tol:.6e}: the solve was descending along a \
-                         direction with no finite minimizer in reach, not stuck"
-                    )?;
-                }
+                write!(
+                    f,
+                    "residual {residual:.6e} still contracting at {rate_per_cycle:.4}x per \
+                     cycle over the last {window_cycles} cycles, projected more than \
+                     {projected_cycles_to_tolerance} further cycles to reach \
+                     {residual_tol:.6e}: the solve was descending along a direction with \
+                     no finite minimizer in reach, not stuck"
+                )?;
                 match ray {
                     Some(ray) => write!(f, "; {ray}"),
                     None => write!(
@@ -238,6 +236,18 @@ impl std::fmt::Display for JointNewtonTerminalReason {
                     ),
                 }
             }
+            Self::ResidualNotContracting {
+                rate_per_cycle,
+                window_cycles,
+                residual,
+                residual_tol,
+            } => write!(
+                f,
+                "residual {residual:.6e} did not contract over the last {window_cycles} cycles \
+                 ({rate_per_cycle:.4}x per cycle) and cannot reach {residual_tol:.6e}, and the \
+                 accepted step descends no ray a penalty strength could close: the solve is not \
+                 converging"
+            ),
             Self::StalledOnDescendingRay {
                 residual,
                 residual_tol,
@@ -1120,6 +1130,15 @@ mod tests {
                     cycles_without_improvement: 22,
                 },
                 "stayed flat for 22 cycles with every step inside the trust region",
+            ),
+            (
+                JointNewtonTerminalReason::ResidualNotContracting {
+                    rate_per_cycle: 1.1096,
+                    window_cycles: 16,
+                    residual: 3.252e1,
+                    residual_tol: 6.525e-7,
+                },
+                "did not contract over the last 16 cycles (1.1096x per cycle)",
             ),
         ];
         for (reason, label) in labelled {
