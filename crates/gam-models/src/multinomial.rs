@@ -3317,9 +3317,14 @@ pub(crate) fn penalized_multinomial_formula_parts(
                     let mean = column.sum() / n_rows;
                     let var = column.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n_rows;
                     let scale = var.sqrt();
-                    // Skip near-constant or degenerate columns: no conditioning to
-                    // be gained and the back-map would divide by ~0.
-                    if !(scale.is_finite() && scale > 1e-8 * (mean.abs() + 1.0)) {
+                    // Skip numerically constant columns. A spread inside the column
+                    // mean's own rounding band `γ_{n+1}·max|x|` is arithmetic, not
+                    // variation: there is no conditioning to gain, and the back-map
+                    // would divide by rounding.
+                    let magnitude = column.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
+                    let spread_resolution =
+                        gam_linalg::roundoff::accumulation_growth(x_dense.nrows() + 1) * magnitude;
+                    if !(scale.is_finite() && scale > spread_resolution) {
                         continue;
                     }
                     // Centering shifts mass onto the intercept; without one the
