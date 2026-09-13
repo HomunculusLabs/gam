@@ -4402,7 +4402,11 @@ pub(crate) fn polish_joint_newton_step<F: CustomFamily + Clone + Send + Sync + '
                 Some(specs),
             );
             let trial_obj = -trial_ll + trial_penalty;
-            if trial_obj.is_finite() && trial_obj <= old_obj + 1e-12 {
+            // Not worse beyond the objective's own rounding, the band every other
+            // accept test in the inner solve reads.
+            if trial_obj.is_finite()
+                && trial_obj <= old_obj + joint_objective_roundoff_slack(old_obj, trial_obj, 0.0)
+            {
                 *current_penalty = trial_penalty;
                 *cached_eval = family.evaluate(states)?;
                 accepted_polish = true;
