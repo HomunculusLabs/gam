@@ -6724,5 +6724,16 @@
     ],
     "reason": "#2902 row 8: OuterProblem::rho_bound was the literal ±30 model-domain and search box of every outer problem that declared no domain, and the cap on every objective-declared face (SPEC rule 20). Every production route now declares its domain, and an undeclared domain is the supported log-strength domain, so the setter that retuned the literal has no subject.",
     "evidence": "git grep -w with_rho_bound over crates, src, tests, bench, examples, gamfit and docs at the base finds its definition in crates/gam-solve/src/rho_optimizer/run.rs and two test callers, crates/gam-solve/src/estimate/mixture_sas_rho_guard_2629_tests.rs (now with_bounds at ±RHO_BOUND) and tests/regressions/optimization/gamlss_linesearch_failure.rs (now none), both changed in this commit, plus one comment in crates/gam-custom-family/src/tests.rs."
+  },
+  {
+    "base": "129ba1a92054531b85b9f8946a0bdebf8a4b7d98",
+    "items": [
+      "crates/gam-runtime/src/resource.rs:fn:budget_bytes",
+      "crates/gam-runtime/src/resource.rs:fn:cgroup",
+      "crates/gam-runtime/src/resource.rs:fn:host_available_bytes",
+      "crates/gam-runtime/src/warm_start/session.rs:fn:run_id"
+    ],
+    "reason": "#2829 no product user: these getters have no caller in crates, src, tests, benches, bench or examples, and every field they returned keeps another reader.",
+    "evidence": "At 129ba1a92054531b85b9f8946a0bdebf8a4b7d98, git grep -n for each name as a method call (.name( or ::name() over crates, src, tests and examples finds no call on the owning type; same-named items elsewhere are different types (checked by reading), and each returned field is still read inside its own impl."
   }
 ]

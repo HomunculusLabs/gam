@@ -87,10 +87,6 @@ impl Session {
         &self.key
     }
 
-    pub fn run_id(&self) -> &str {
-        &self.run_id
-    }
-
     /// Read the best entry currently on disk for this session's key, with its
     /// source. Lookup is read-only against the store and may return entries
     /// from other runs (the whole point of cross-run resume).

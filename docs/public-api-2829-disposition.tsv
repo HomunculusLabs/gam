@@ -352,9 +352,9 @@ crates/gam-runtime/src/cgroup_memory.rs	working_set_bytes	retired-no-product-use
 crates/gam-runtime/src/process_monitor.rs	inc	retired-by-later-deletion:1beaa2893d
 crates/gam-runtime/src/process_monitor.rs	track_scope_with_progress	retired-by-later-deletion:1beaa2893d
 crates/gam-runtime/src/resource.rs	availability	restored-in-place
-crates/gam-runtime/src/resource.rs	budget_bytes	restored-in-place
-crates/gam-runtime/src/resource.rs	cgroup	restored-in-place
-crates/gam-runtime/src/resource.rs	host_available_bytes	restored-in-place
+crates/gam-runtime/src/resource.rs	budget_bytes	retired-no-product-user
+crates/gam-runtime/src/resource.rs	cgroup	retired-no-product-user
+crates/gam-runtime/src/resource.rs	host_available_bytes	retired-no-product-user
 crates/gam-runtime/src/resource.rs	host_total_bytes	retired-no-product-user
 crates/gam-runtime/src/resource.rs	limiting_source	retired-no-product-user
 crates/gam-runtime/src/resource.rs	memory_availability_probe_count	retired-by-later-deletion:1beaa2893d
@@ -364,7 +364,7 @@ crates/gam-runtime/src/warm_start/key.rs	absorb_f64	retired-by-later-deletion:1b
 crates/gam-runtime/src/warm_start/key.rs	absorb_f64_2d	retired-by-later-deletion:1beaa2893d
 crates/gam-runtime/src/warm_start/key.rs	absorb_f64_slice	retired-by-later-deletion:1beaa2893d
 crates/gam-runtime/src/warm_start/session.rs	preload	retired-by-later-deletion:1beaa2893d
-crates/gam-runtime/src/warm_start/session.rs	run_id	restored-in-place
+crates/gam-runtime/src/warm_start/session.rs	run_id	retired-no-product-user
 crates/gam-runtime/src/warm_start/session.rs	try_load	retired-by-later-deletion:1beaa2893d
 crates/gam-sae/src/amortized_encoder.rs	error_stats	retired-by-later-deletion:2f844874ea
 crates/gam-sae/src/amortized_encoder.rs	error_stats_wrapped	retired-by-later-deletion:368563f7f4

@@ -190,10 +190,6 @@ impl MemoryAvailability {
         }
     }
 
-    pub const fn host_available_bytes(&self) -> u64 {
-        self.host_available_bytes
-    }
-
     /// The stationary ceiling on memory this process could ever address:
     /// `min(host total, binding cgroup hard limit)`, or zero when the cgroup
     /// probe failed closed. Unlike [`Self::available_bytes`] this does not move
@@ -203,10 +199,6 @@ impl MemoryAvailability {
         self.capacity_bytes
     }
 
-
-    pub const fn cgroup(&self) -> &CgroupMemoryObservation {
-        &self.cgroup
-    }
 
     pub const fn available_bytes(&self) -> u64 {
         self.available_bytes
@@ -427,13 +419,6 @@ impl MemoryGovernor {
                 reserved_bytes: std::sync::atomic::AtomicUsize::new(0),
             }),
         }
-    }
-
-    /// Total bytes this process's ledger may ever have reserved at once: 3/4 of
-    /// its stationary capacity. Two processes launched the same way on the same
-    /// box derive the same number, whatever else is resident (#2702).
-    pub fn budget_bytes(&self) -> usize {
-        self.ledger.budget_bytes
     }
 
     pub fn availability(&self) -> MemoryAvailability {
