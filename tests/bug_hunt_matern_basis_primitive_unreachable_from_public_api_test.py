@@ -34,16 +34,9 @@ Root cause: a one-line omission in the ``from ._api import (...)`` block of
 ``duchon_basis`` (and, for full parity, ``sphere_basis_jet`` next to
 ``sphere_basis``).
 
-This test fails today with ``AttributeError`` (the symbol is not on the public
-namespace). Once the export is added it passes: the assertions below check both
-that ``gamfit.matern_basis`` is reachable AND that the public entry point
-computes the correct closed-form Matérn kernel — so the test pins a real
-primitive, not merely the presence of a name.
-
-NOTE: this test can only run once the workspace builds — the `gamfit` wheel does
-not compile at the current `main` HEAD because of the gam-sae Arrow-Schur build
-break (Related: #2119). Fixing that build break is a prerequisite for this test
-to execute and reach its own (export-gap) assertion.
+The assertions below check both that ``gamfit.matern_basis`` is reachable AND
+that the public entry point computes the correct closed-form Matérn kernel, so
+the test pins a real primitive, not merely the presence of a name.
 """
 
 import numpy as np

@@ -45,10 +45,8 @@ is a genuine expectile family (strictly monotone in tau: the 0.9-expectile sits
 above the median fit and the 0.1-expectile below it, at every grid point). The
 monotonicity is the defining property of expectiles, so this is not a tautology;
 it pins that the family, once routed, behaves as the engine already computes it.
-It fails today at the first expectile ``fit`` call. When the FFI/CLI route the
-expectile family the way ``fit_from_formula`` does (e.g. share the
-``expectile_tau_for_config`` shortcut, or have ``materialize`` recognize it),
-the test passes without edits.
+Under the defect the first expectile ``fit`` call failed, because the FFI/CLI
+did not route the expectile family the way ``fit_from_formula`` does.
 """
 
 from __future__ import annotations

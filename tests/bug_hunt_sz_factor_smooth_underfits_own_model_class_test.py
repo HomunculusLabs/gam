@@ -41,8 +41,8 @@ systematic structure in the residual.
 
 This test fits a deterministic dataset drawn from the ``sz`` model class and
 asserts that the ``sz`` fit reaches the noise floor (as the ``fs`` control
-provably does). It fails today at the residual-magnitude assertion. When the
-``sz`` construction recovers its own model class, the test passes without edits.
+provably does). Under the defect the fit failed the residual-magnitude
+assertion: the ``sz`` construction must recover its own model class.
 """
 
 from __future__ import annotations

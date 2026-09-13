@@ -234,7 +234,7 @@ def test_link_wiggle_affine_design_covariance_and_identity_red_gate() -> None:
 
 
 def test_link_wiggle_affine_design_offset_separation_red_gate() -> None:
-    """RED GATE (#2358 link-wiggle + offset joint-Newton non-convergence).
+    """Gate (#2358 link-wiggle + offset joint-Newton convergence).
 
     The #2299 offset-SEPARATION contract for the link-wiggle joint frame: a
     fitted link-wiggle predictor with a known per-row model offset must expose
@@ -243,14 +243,12 @@ def test_link_wiggle_affine_design_offset_separation_red_gate() -> None:
     link-wiggle analogue of the green ordinary-frame offset assertion in
     ``test_ordinary_affine_design_exposes_model_offset_and_full_frame``.
 
-    It fails today for a convergence-lane reason ORTHOGONAL to the design-matrix
+    It failed for a convergence-lane reason ORTHOGONAL to the design-matrix
     contract: adding a model offset to the converging flexible-link fit above
-    drives the binomial mean link-wiggle joint solve non-stationary (outer
-    smoothing does not certify; |Pg| ~ 2.8e-2 vs bound ~ 6.3e-3), so no fit is
-    minted and the affine design cannot be built. See #2358 (the offset is a
-    manifestation; the same non-convergence reproduces with no offset for an
-    explicit ``linkwiggle(...)`` spec). When that lane converges this gate passes
-    unchanged -- the assertion is NOT weakened to match the broken path.
+    drove the binomial mean link-wiggle joint solve non-stationary (outer
+    smoothing did not certify; |Pg| ~ 2.8e-2 vs bound ~ 6.3e-3), so no fit was
+    minted and the affine design could not be built (#2358). The assertion was
+    never weakened to match the broken path.
     """
     rng = np.random.default_rng(11)
     n = 2500

@@ -38,10 +38,9 @@ lowered to a numeric line the symmetric V collapses to a near-flat fit
 explains essentially none of the between-group variance.
 
 The test fits ``y ~ g`` from a **dict** and asserts each level's prediction
-recovers its true mean. It fails today because the dict's string column is
-lowered to a numeric covariate. When ``categorical_dtype_columns`` also marks
-all-string columns from dict / record / numpy inputs (the fix), ``g`` is a
-factor and the assertions hold without edits.
+recovers its true mean. Under the defect the dict's string column was lowered to
+a numeric covariate; ``categorical_dtype_columns`` must also mark all-string
+columns from dict / record / numpy inputs, so ``g`` is a factor.
 """
 
 from __future__ import annotations

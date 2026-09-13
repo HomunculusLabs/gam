@@ -37,10 +37,10 @@ This is the multinomial-response sibling of #1467 (``by=`` factor smooth) and
 refuses the fit outright rather than a silent misfit.
 
 The test fits a 3-class multinomial from a **dict** with numeric-string labels
-and asserts the fit succeeds and returns valid probability rows. It fails today
-(the fit raises ``InvalidInputError``). When ``categorical_dtype_columns`` also
-marks all-string columns from dict / record / numpy inputs (the fix), the
-response is categorical and the fit succeeds — no edits needed.
+and asserts the fit succeeds and returns valid probability rows. Under the
+defect the fit raised ``InvalidInputError``; ``categorical_dtype_columns`` must
+also mark all-string columns from dict / record / numpy inputs, so the response
+is categorical.
 """
 
 from __future__ import annotations

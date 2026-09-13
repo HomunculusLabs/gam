@@ -39,9 +39,9 @@ instead of degrading gracefully.)
 
 This test fits the deterministic dataset (and asserts two well-posed controls
 fit it) and requires the NB location-scale fit to succeed and predict finite
-per-row means. It fails today at the NB ``fit`` call. When the two-block NB
-inner solve converges (or its non-convergence is handled without aborting the
-fit), the test passes without edits.
+per-row means. Under the defect the NB ``fit`` call aborted: the two-block NB
+inner solve must converge, or handle its non-convergence without aborting the
+fit.
 """
 
 from __future__ import annotations
