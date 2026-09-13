@@ -2427,9 +2427,9 @@ impl SaeManifoldOuterObjective {
                     self.probe_converged_handoff = None;
                     self.basin_bundle.clear();
                     self.current_rho = rho;
-                    return Ok(infeasible_evaluation(
-                        "infeasible penalized quasi-Laplace basin envelope",
-                    ));
+                    return Ok(infeasible_evaluation(&format!(
+                        "infeasible penalized quasi-Laplace basin envelope: {err}"
+                    )));
                 }
                 Err(err) => return Err(err),
             }
