@@ -1721,19 +1721,6 @@ impl SmoothLrSelectionReplay {
             }
         }
     }
-    /// `E[W | λ̂]` — the conditional law's mean over its own draws.
-    pub fn conditional_mean(&self) -> f64 {
-        Self::mean(&self.conditional_sample)
-    }
-
-
-    fn mean(sample: &[f64]) -> f64 {
-        if sample.is_empty() {
-            return f64::NAN;
-        }
-        sample.iter().sum::<f64>() / sample.len() as f64
-    }
-
     /// `(shift, standard_error)`: how much the selection moves the tail at
     /// `statistic`, and the Monte-Carlo standard error of that shift.
     ///

@@ -2264,16 +2264,6 @@ impl SavedCompiledFlexBlock {
         Ok(self.breakpoints.clone())
     }
 
-    pub fn span_count(&self) -> Result<usize, FittedModelError> {
-        Ok(self.breakpoints()?.windows(2).count())
-    }
-
-    pub fn span_index_for(&self, value: f64) -> Result<usize, FittedModelError> {
-        let points = self.breakpoints()?;
-        span_index_for_breakpoints(&points, value, "saved anchored deviation span lookup")
-            .map_err(|reason| FittedModelError::PayloadCorrupt { reason })
-    }
-
     fn left_biased_span_index_for(&self, value: f64) -> Result<usize, FittedModelError> {
         let mut span_idx = span_index_for_breakpoints(
             &self.breakpoints,
@@ -2287,24 +2277,6 @@ impl SavedCompiledFlexBlock {
             span_idx -= 1;
         }
         Ok(span_idx)
-    }
-
-    pub fn local_cubic_on_span(
-        &self,
-        beta: ArrayView1<'_, f64>,
-        span_idx: usize,
-    ) -> Result<crate::cubic_cell_kernel::LocalSpanCubic, FittedModelError> {
-        self.validate_exact_replay_contract()?;
-        if beta.len() != self.basis_dim {
-            return Err(FittedModelError::SchemaMismatch {
-                reason: format!(
-                    "saved anchored deviation coefficient length mismatch: got {}, expected {}",
-                    beta.len(),
-                    self.basis_dim
-                ),
-            });
-        }
-        self.local_cubic_on_span_validated(beta, span_idx)
     }
 
     fn local_cubic_on_span_validated(
@@ -2348,23 +2320,6 @@ impl SavedCompiledFlexBlock {
                 .map(|(coeff, weight)| coeff * weight)
                 .sum(),
         })
-    }
-
-    pub fn basis_span_cubic(
-        &self,
-        span_idx: usize,
-        basis_idx: usize,
-    ) -> Result<crate::cubic_cell_kernel::LocalSpanCubic, FittedModelError> {
-        self.validate_exact_replay_contract()?;
-        if basis_idx >= self.basis_dim {
-            return Err(FittedModelError::SchemaMismatch {
-                reason: format!(
-                    "saved anchored deviation basis index {} out of range for {} coefficients",
-                    basis_idx, self.basis_dim
-                ),
-            });
-        }
-        self.basis_span_cubic_validated(span_idx, basis_idx)
     }
 
     fn basis_span_cubic_validated(

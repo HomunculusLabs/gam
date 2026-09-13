@@ -214,7 +214,7 @@ crates/gam-models/src/bms/gradient_paths.rs	marginal_slope_preserving_scale	reti
 crates/gam-models/src/bms/gradient_paths.rs	marginal_slope_probit_eta	retired-no-surviving-dependent
 crates/gam-models/src/bms/mod.rs	triple_penalty_default	retired-by-later-deletion:7c185e2c51
 crates/gam-models/src/fit_orchestration/drivers/mod.rs	trial_total_s	retired-by-later-deletion:418c732d2f
-crates/gam-models/src/fit_orchestration/drivers/smooth_term_lr.rs	conditional_mean	restored-in-place
+crates/gam-models/src/fit_orchestration/drivers/smooth_term_lr.rs	conditional_mean	retired-no-product-user
 crates/gam-models/src/fit_orchestration/drivers/smooth_term_lr.rs	selection_mean	retired-by-later-deletion:418c732d2f
 crates/gam-models/src/fit_orchestration/drivers/smooth_term_lr.rs	tail_probability	retired-by-later-deletion:418c732d2f
 crates/gam-models/src/fit_orchestration/request.rs	inverse_link_outer	retired-no-surviving-dependent
@@ -240,12 +240,12 @@ crates/gam-models/src/inference/full_conformal.rs	penalized_laml_criterion	retir
 crates/gam-models/src/inference/full_conformal.rs	rank_s	retired-no-product-user
 crates/gam-models/src/inference/generative.rs	sampleobservation_replicate_chunks	retired-no-surviving-dependent
 crates/gam-models/src/inference/generative.rs	sampleobservation_replicates	retired-no-surviving-dependent
-crates/gam-models/src/inference/model.rs	basis_span_cubic	restored-in-place
-crates/gam-models/src/inference/model.rs	local_cubic_on_span	restored-in-place
+crates/gam-models/src/inference/model.rs	basis_span_cubic	retired-no-product-user
+crates/gam-models/src/inference/model.rs	local_cubic_on_span	retired-no-product-user
 crates/gam-models/src/inference/model.rs	measure_jet_extrapolation_variance	restored-in-place
 crates/gam-models/src/inference/model.rs	second_derivative_design	retired-by-later-deletion:418c732d2f
-crates/gam-models/src/inference/model.rs	span_count	restored-in-place
-crates/gam-models/src/inference/model.rs	span_index_for	restored-in-place
+crates/gam-models/src/inference/model.rs	span_count	retired-no-product-user
+crates/gam-models/src/inference/model.rs	span_index_for	retired-no-product-user
 crates/gam-models/src/latent_coordinate.rs	axis_domains	retired-by-later-deletion:5e967c2045
 crates/gam-models/src/latent_coordinate.rs	certifies_stationarity	retired-by-later-deletion:5e967c2045
 crates/gam-models/src/latent_coordinate.rs	new	retired-by-later-deletion:5e967c2045

@@ -6988,5 +6988,18 @@
     ],
     "reason": "#2899 public API sweep of gam-sae (prune-api-d): three surfaces only tests used. corpus/torus_merge_audit.rs (audit_torus_merges, MergeCandidate and their unit tests) is called only by its own tests, so the module goes with its corpus/mod.rs declaration and re-export. pair_kappa::screen_pair was a zero-context wrapper over screen_pair_with_contexts used only by two pair_kappa unit tests, which now call screen_pair_with_contexts with zero context labels; its doc moves onto screen_pair_with_contexts. SaeAssignment::with_frozen_routing was called only by assignment.rs unit tests, while the amortized fit driver sets frozen_logits directly (manifold/fit_drivers.rs). Those tests now freeze and thaw through the field, and frozen_routing_rejects_softmax_1033, which exercised only the builder's refusal, is deleted. The disposition TSV rows for audit_torus_merges, screen_pair and with_frozen_routing move to retired-no-product-user.",
     "evidence": "At 463d1cd39, git grep -n -w audit_torus_merges and MergeCandidate find only torus_merge_audit.rs and the corpus/mod.rs re-export, outside generated JSON artifacts. screen_pair appears only in pair_kappa.rs (the definition and two tests) and in a doc link in manifold/tests_joint_vs_cascade_2131.rs. with_frozen_routing appears only in assignment.rs (the definition and its unit tests), and frozen_logits is written in production by fit_drivers.rs and structure_harvest.rs."
+  },
+  {
+    "base": "2750e1744266ae0b741ffa8ce2bad3bda8c09b2a",
+    "items": [
+      "crates/gam-models/src/fit_orchestration/drivers/smooth_term_lr.rs:fn:conditional_mean",
+      "crates/gam-models/src/fit_orchestration/drivers/smooth_term_lr.rs:fn:mean",
+      "crates/gam-models/src/inference/model.rs:fn:basis_span_cubic",
+      "crates/gam-models/src/inference/model.rs:fn:local_cubic_on_span",
+      "crates/gam-models/src/inference/model.rs:fn:span_count",
+      "crates/gam-models/src/inference/model.rs:fn:span_index_for"
+    ],
+    "reason": "#2899 public API sweep of gam-models (prune-api-d): SavedCompiledFlexBlock::span_count, span_index_for, local_cubic_on_span and basis_span_cubic (inference/model.rs) have no caller; every .local_cubic_on_span( and .basis_span_cubic( call, including the included bms rigid tests, is on the bms DeviationRuntime, which defines its own methods. local_cubic_on_span_validated and basis_span_cubic_validated stay because local_cubic_at and basis_cubic_at call them. SmoothLrSelectionReplay::conditional_mean (fit_orchestration/drivers/smooth_term_lr.rs) has no caller, and its private mean helper was used only by it. The disposition TSV rows for the five public functions move to retired-no-product-user.",
+    "evidence": "At ae4dca244, git grep -n -E '\\.(span_count|span_index_for|local_cubic_on_span|basis_span_cubic)\\(' finds calls only in bms/deviation_runtime.rs and tests/src_modules/misc/families_bms_identifiability_rigid_tests.rs, all on DeviationRuntime receivers (prepared.runtime). git grep -n -E '\\.conditional_mean\\(' finds no call, and Self::mean( appears only inside conditional_mean."
   }
 ]

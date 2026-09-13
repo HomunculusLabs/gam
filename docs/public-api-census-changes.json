@@ -2916,5 +2916,17 @@
     },
     "reason": "#2899 public API sweep of gam-sae (prune-api-d): audit_torus_merges, screen_pair and SaeAssignment::with_frozen_routing have no product caller, so they are deleted.",
     "evidence": "At 463d1cd39, git grep -n -w finds these functions called only by unit tests. The removed map is public_api_census.py's census difference over this change, computed on MSI."
+  },
+  {
+    "base": "2750e1744266ae0b741ffa8ce2bad3bda8c09b2a",
+    "removed": {
+      "crates/gam-models/src/fit_orchestration/drivers/smooth_term_lr.rs::conditional_mean": 1,
+      "crates/gam-models/src/inference/model.rs::basis_span_cubic": 1,
+      "crates/gam-models/src/inference/model.rs::local_cubic_on_span": 1,
+      "crates/gam-models/src/inference/model.rs::span_count": 1,
+      "crates/gam-models/src/inference/model.rs::span_index_for": 1
+    },
+    "reason": "#2899 public API sweep of gam-models (prune-api-d): four uncalled SavedCompiledFlexBlock span accessors and SmoothLrSelectionReplay::conditional_mean are deleted.",
+    "evidence": "At ae4dca244, git grep finds no call to these public functions on their own types. The removed map is public_api_census.py's census difference over this change, computed on MSI."
   }
 ]
