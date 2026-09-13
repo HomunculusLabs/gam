@@ -11,10 +11,12 @@
 //! Horvitz–Thompson estimator that replaces the full row sum with an
 //! unbiased sample, gated by
 //! [`crate::custom_family::BlockwiseFitOptions::auto_outer_subsample`]
-//! and enabled by default for large marginal-slope fits.
+//! and enabled by default. The Bernoulli marginal-slope family installs it
+//! from its outer gradient kernel; `crate::outer_subsample::exact_outer_options`
+//! turns it off for an exact outer evaluation.
 //!
-//! `maybe_install_auto_outer_subsample` is the entry point family
-//! impls call: it consults the per-family phase counter and the
+//! `maybe_install_auto_outer_subsample` is that family's entry point: it
+//! consults the per-family phase counter and the
 //! per-family last-ρ mutex (used to detect distinct outer steps),
 //! installs a stratified mask for the first `AUTO_OUTER_PHASE1_BUDGET`
 //! outer evaluations, and reverts to full data afterward so the BFGS/ARC
@@ -832,10 +834,9 @@ const AUTO_OUTER_TARGET_FRACTION: f64 = 0.10;
 /// a given `n`, so common random numbers hold across outer iterations.
 const AUTO_OUTER_SUBSAMPLE_SEED: u64 = 0xA075_8A8B_1ED5_5B5C;
 
-/// Half-billion outer-derivative work units per evaluation. Picked so the
-/// rigid survival marginal-slope pilot Newton cycle (which previously ran
-/// ~57 min at n≈2e5 with `K=19_661`) finishes in a minute or two on
-/// commodity hardware once `K` is capped by this budget.
+/// Half-billion outer-derivative work units per evaluation. The cap
+/// `K_work = AUTO_OUTER_WORK_BUDGET / outer_work_per_k_unit` keeps one sampled
+/// outer evaluation within this much work, whatever `K` the noise rule asks for.
 pub const AUTO_OUTER_WORK_BUDGET: u64 = 500_000_000;
 
 /// Absolute floor on `K` chosen by the auto schedule. Even when the work
@@ -901,10 +902,8 @@ pub struct AutoOuterKChoice {
 ///
 /// Calibration recipe: from a profiled run,
 ///     outer_work_per_k_unit = predicted outer-gradient work / K.
-/// For the large-scale survival marginal-slope reference
-/// (predicted outer-gradient work ≈ 4.33×10⁹ at K=19_661), this gives
-/// ~220_000; that family uses 250_000 as a conservative upper bound. With
-/// `AUTO_OUTER_WORK_BUDGET = 5×10⁸` that caps K at ~2_000.
+/// The Bernoulli marginal-slope kernel costs about 50_000 units per K unit at
+/// large scale, which with `AUTO_OUTER_WORK_BUDGET = 5×10⁸` caps K at 10_000.
 ///
 /// Returns `None` when the combined noise, work and floor rule would keep
 /// every row (the caller should not subsample).

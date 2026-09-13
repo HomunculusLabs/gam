@@ -811,14 +811,6 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     // runs, so we stash the flat β here and the eval closures promote it
     // into the deterministic coefficient-mode branch on the first invocation.
     let pending_beta_seed = RefCell::new(None::<Array1<f64>>);
-    // Monotonic per-outer-eval counter used to populate
-    // `BlockwiseFitOptions::outer_eval_context` so downstream
-    // auto-subsample install paths key on (rho, eval_id) instead of
-    // the inner β. Distinct outer derivative evaluations always get a
-    // distinct eval_id; the contained `EvalScope` distinguishes the
-    // outer derivative call from inner trial line-search calls (which
-    // copy this id but flip the scope to `InnerCoefficient`).
-    let outer_eval_counter = std::cell::Cell::new(0usize);
 
     let event = Arc::new(spec.event_target.clone());
     let weights = Arc::new(spec.weights.clone());
@@ -991,8 +983,6 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             time_wiggle_degree: spec.timewiggle_block.as_ref().map(|w| w.degree),
             time_wiggle_ncols: derived_time_wiggle_ncols.unwrap_or(0),
             intercept_warm_starts: Some(Arc::clone(&intercept_warm_starts)),
-            auto_subsample_phase_counter: Arc::new(AtomicUsize::new(0)),
-            auto_subsample_last_rho: Arc::new(Mutex::new(None)),
         })
     };
 
@@ -1696,16 +1686,9 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             family.retreat_seed_into_follow_up_domain(&mut blocks)?;
             let blocks = blocks;
             let hyper_layout = get_hyper_layout(theta, specs, designs)?;
-            let eval_id = outer_eval_counter.get();
-            outer_eval_counter.set(eval_id.wrapping_add(1));
             let tolerance_options =
                 joint_hyper_options_for_outer_tolerance(options, exact_spatial_outer_tol);
-            let mut outer_options = crate::outer_subsample::exact_outer_options(&tolerance_options);
-            outer_options.outer_eval_context = Some(crate::custom_family::OuterEvalContext {
-                rho: std::sync::Arc::new(rho.clone()),
-                eval_id,
-                scope: crate::custom_family::EvalScope::OuterDerivative,
-            });
+            let outer_options = crate::outer_subsample::exact_outer_options(&tolerance_options);
             let cycle_budget_evidence = || {
                 let load_cap = |cap: &Option<Arc<AtomicUsize>>| {
                     cap.as_ref().map(|value| value.load(std::sync::atomic::Ordering::Relaxed))

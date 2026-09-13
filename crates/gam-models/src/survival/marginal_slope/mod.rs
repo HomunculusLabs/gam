@@ -114,7 +114,7 @@ pub(crate) use std::cell::RefCell;
 
 pub(crate) use std::sync::atomic::AtomicUsize;
 
-pub(crate) use std::sync::{Arc, Mutex};
+pub(crate) use std::sync::Arc;
 
 mod accumulate;
 mod alo_replay;

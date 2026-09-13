@@ -418,7 +418,6 @@ fn double_well_options() -> BlockwiseFitOptions {
         early_exit_threshold: None,
         outer_score_subsample: None,
         auto_outer_subsample: false,
-        outer_eval_context: None,
         cache_session: None,
         persistent_warm_start_store: None,
         cache_mirror_sessions: Vec::new(),

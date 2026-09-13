@@ -7410,5 +7410,18 @@
     ],
     "reason": "#2900 (SPEC rules 10 and 23). EXACT_JOINT_HESSIAN_DENSE_MAX_BYTES (512 MiB) refused a dense joint Hessian materialization while the inner PCG attempt decides that no dense route exists from the memory governor's single-materialization cap. With the row-kernel workspace serving its operator to every inner solve, an unconverged Budgeted attempt at p > 8192 would have been refused a fallback the dense source preference had built. ensure_exact_joint_hessian_dense_budget now admits against MemoryGovernor::global().single_materialization_cap_bytes(), the same cap.",
     "evidence": "At the base, git grep -n -w EXACT_JOINT_HESSIAN_DENSE_MAX_BYTES over the repository finds three lines in crates/gam-custom-family/src/joint_newton.rs: the declaration and the comparison and message inside ensure_exact_joint_hessian_dense_budget, rewritten in this commit. No test names it. Guarded compile: pool job 599347."
+  },
+  {
+    "base": "b815bc5299e08e3f9fd41e56d6132a50e8b84a5c",
+    "items": [
+      "crates/gam-model-api/src/families/custom_family/family_trait.rs:enum:EvalScope",
+      "crates/gam-model-api/src/families/custom_family/family_trait.rs:struct:OuterEvalContext",
+      "crates/gam-models/src/survival/marginal_slope/custom_family_impl.rs:fn:outer_derivative_pilot_schedule",
+      "crates/gam-models/src/survival/marginal_slope/eval_rigid.rs:fn:install_auto_outer_subsample_options",
+      "crates/gam-models/src/survival/marginal_slope/eval_score.rs:fn:z_subsample_key",
+      "crates/gam-models/src/survival/marginal_slope/tests.rs:fn:survival_auto_subsample_phase_counter_field_initializes_to_zero"
+    ],
+    "reason": "#979 (folded #2897), SPEC rule 25 (dead code). SurvivalMarginalSlopeFamily::install_auto_outer_subsample_options installed a stratified outer subsample only when options.outer_eval_context carried EvalScope::OuterDerivative. The one production producer of that context was the survival kappa/psi evaluator in fit_entry.rs, whose options came from exact_outer_options, which sets auto_outer_subsample = false, so maybe_install_auto_outer_subsample returned None there; every other route left the context None. The installer never sampled, so its counters never moved and the survival pilot schedule could never enter an exact phase. Removed with it: the survival outer_derivative_pilot_schedule override, z_subsample_key, the auto_subsample_phase_counter and auto_subsample_last_rho fields and the test that only checked they start empty, and OuterEvalContext, EvalScope and BlockwiseFitOptions::outer_eval_context, whose only reader was the installer (joint_newton.rs only re-tagged an existing context). BMS keeps its own counters and installer, which it calls directly.",
+    "evidence": "At the base, git grep -n -w outer_eval_context over crates, src, tests and examples finds the field and its Default in gam-model-api options.rs, the re-tag in gam-custom-family joint_newton.rs, the producer in survival fit_entry.rs, the reader in survival eval_rigid.rs, and four None literals in gam-custom-family tests. git grep -n -w EvalScope finds only family_trait.rs, joint_newton.rs, eval_rigid.rs, fit_entry.rs and one doc mention in options.rs. install_auto_outer_subsample_options is called only by the two survival custom_family_impl.rs wrappers, which now pass their options through; z_subsample_key is called only by the installer."
   }
 ]

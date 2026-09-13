@@ -130,15 +130,6 @@ impl crate::custom_family::JeffreysCompletionOuterDerivatives for SurvivalMargin
 }
 
 impl CustomFamily for SurvivalMarginalSlopeFamily {
-    fn outer_derivative_pilot_schedule(
-        &self,
-    ) -> Option<crate::custom_family::OuterDerivativePilotSchedule> {
-        Some(crate::custom_family::OuterDerivativePilotSchedule::new(
-            Arc::clone(&self.auto_subsample_phase_counter),
-            crate::marginal_slope_shared::AUTO_OUTER_PHASE1_BUDGET,
-        ))
-    }
-
     // Survival marginal-slope fits have a genuine under-identification regime
     // (near-collinear clustered-PC trends), so opt into the self-limiting
     // Jeffreys/Firth curvature. The trait default flipped to OFF in gam#1395
@@ -312,15 +303,6 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
         block_states: &[ParameterBlockState],
         options: &BlockwiseFitOptions,
     ) -> Result<f64, String> {
-        let owned;
-        let options: &BlockwiseFitOptions = match self.install_auto_outer_subsample_options(options)
-        {
-            Some(cloned) => {
-                owned = cloned;
-                &owned
-            }
-            None => options,
-        };
         SurvivalMarginalSlopeFamily::log_likelihood_only_with_options(self, block_states, options)
     }
 
@@ -1131,15 +1113,6 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
         hyper_layout: &crate::custom_family::CustomFamilyHyperLayout,
         options: &BlockwiseFitOptions,
     ) -> Result<Option<Arc<dyn ExactNewtonJointPsiWorkspace>>, String> {
-        let owned;
-        let options: &BlockwiseFitOptions = match self.install_auto_outer_subsample_options(options)
-        {
-            Some(cloned) => {
-                owned = cloned;
-                &owned
-            }
-            None => options,
-        };
         Ok(Some(Arc::new(SurvivalMarginalSlopePsiWorkspace::new(
             self.clone(),
             block_states.to_vec(),

@@ -1,6 +1,5 @@
 //! Rigid (no-flex) per-row evaluation: the rigid closed-form primary kernel
-//! wrapper, scalar-flex score-geometry guard, the rigid vector NLL value,
-//! and installation of the automatic outer-subsampling options.
+//! wrapper, scalar-flex score-geometry guard, and the rigid vector NLL value.
 
 use super::*;
 
@@ -47,71 +46,6 @@ impl SurvivalMarginalSlopeFamily {
             self.event[row],
             self.derivative_guard,
             probit_scale,
-        )
-    }
-
-    /// Two-phase auto-subsample entry: when `options.auto_outer_subsample` is
-    /// enabled, an outer-derivative-scoped `OuterEvalContext` is present, and
-    /// Phase 1 still has budget, this returns a cloned `BlockwiseFitOptions`
-    /// carrying a freshly built stratified Horvitz-Thompson mask. Otherwise
-    /// returns `None` and the caller uses the original options unchanged.
-    ///
-    /// Keying is on the outer ρ published by the smoothing optimizer through
-    /// `options.outer_eval_context` — never on the inner β. During inner
-    /// trust-region / joint-Newton trial steps β changes between calls at the
-    /// same outer ρ, so β-keying would re-fire phase prints and rebuild the
-    /// row mask inside one outer eval, which makes the trust-region ratio
-    /// compare objectives evaluated on different row measures (invalid).
-    /// Inner-scope contexts (set by `coefficient_line_search_options`) make
-    /// this entry return `None` immediately.
-    ///
-    /// CONTRACT: MUST NOT be called from inner-coefficient paths (line-search,
-    /// trust-region globalization). The InnerCoefficient scope guard below is
-    /// the enforcement mechanism; this comment makes the contract obvious.
-    /// Cf. `src/solver/row_measure.rs` and the TR row-measure invariant in
-    /// `inner_blockwise_fit`.
-    pub(crate) fn install_auto_outer_subsample_options(
-        &self,
-        options: &BlockwiseFitOptions,
-    ) -> Option<BlockwiseFitOptions> {
-        let ctx = options.outer_eval_context.as_ref()?;
-        if !matches!(ctx.scope, crate::custom_family::EvalScope::OuterDerivative) {
-            return None;
-        }
-        let event_secondary: Vec<u8> = self
-            .event
-            .iter()
-            .map(|v| if *v > 0.5 { 1u8 } else { 0u8 })
-            .collect();
-        let z_key = self.z_subsample_key();
-        // `OuterEvalContext` owns an `Array1`, so its ρ storage is a contiguous
-        // construction invariant. Violating that contract is a programming
-        // error; silently changing the row measure would hide it.
-        let rho_slice = ctx
-            .rho
-            .as_slice()
-            .expect("outer-evaluation rho must be contiguous");
-        crate::marginal_slope_shared::maybe_install_auto_outer_subsample(
-            options,
-            z_key.as_slice().expect("z key must be contiguous"),
-            Some(event_secondary.as_slice()),
-            rho_slice,
-            &self.auto_subsample_phase_counter,
-            &self.auto_subsample_last_rho,
-            "survival-mgs",
-            // Per-K work-unit cost for the survival marginal-slope outer
-            // gradient kernel. Calibrated from the large-scale repro
-            // (n=195_780, K=19_661, predicted outer-gradient work ≈ 4.33×10⁹):
-            //   per_K-unit cost ≈ 4.33e9 / 19_661 ≈ 220_000 units.
-            // With `AUTO_OUTER_WORK_BUDGET = 5×10⁸`, this caps
-            //   K_work ≈ 5e8 / 250_000 ≈ 2_000,
-            // bounding outer gradient work below ~5×10⁸ units even
-            // when the noise-only rule would request K ≈ 0.1n. Without
-            // this cap the rigid pilot and outer line search spend
-            // ~57 minutes per evaluation on large-scale joint designs
-            // before the identifiability gate even gets a chance to
-            // veto rank-deficient configurations.
-            250_000,
         )
     }
 }

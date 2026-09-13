@@ -297,8 +297,6 @@ fn family_at(axis: PsiAxis, frame: SlopeFrame, t: f64) -> SurvivalMarginalSlopeF
         time_wiggle_degree: None,
         time_wiggle_ncols: 0,
         intercept_warm_starts: None,
-        auto_subsample_phase_counter: Arc::new(AtomicUsize::new(0)),
-        auto_subsample_last_rho: Arc::new(std::sync::Mutex::new(None)),
     }
 }
 

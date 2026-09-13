@@ -25,7 +25,6 @@ use crate::custom_family::CustomFamily;
 use gam_linalg::matrix::DenseDesignMatrix;
 use ndarray::{Array1, Array2, Axis};
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
 
 const N_ROWS: usize = 16;
 
@@ -134,8 +133,6 @@ fn family(frame_is_follow_up_varying: bool) -> SurvivalMarginalSlopeFamily {
         time_wiggle_degree: None,
         time_wiggle_ncols: 0,
         intercept_warm_starts: None,
-        auto_subsample_phase_counter: Arc::new(AtomicUsize::new(0)),
-        auto_subsample_last_rho: Arc::new(std::sync::Mutex::new(None)),
     }
 }
 

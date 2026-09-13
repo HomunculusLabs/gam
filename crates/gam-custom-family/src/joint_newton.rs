@@ -5624,19 +5624,8 @@ pub(crate) fn coefficient_line_search_options(
     // Hessian/gradient share a row measure: the trust-region ratio
     // ρ = [F(β) − F(β + δ)] / [−g·δ − ½·δᵀHδ] is only valid when
     // numerator and denominator evaluate the same measure. Disable
-    // *auto*-install so no mid-iteration mask rebuild can occur, and
-    // tag scope=InnerCoefficient so any sibling auto-install path that
-    // somehow gets reached bails out (cf. `install_auto_outer_subsample_options`).
+    // *auto*-install so no mid-iteration mask rebuild can occur.
     line_search_options.auto_outer_subsample = false;
-    line_search_options.outer_eval_context =
-        options
-            .outer_eval_context
-            .as_ref()
-            .map(|ctx| OuterEvalContext {
-                rho: ctx.rho.clone(),
-                eval_id: ctx.eval_id,
-                scope: EvalScope::InnerCoefficient,
-            });
     line_search_options.early_exit_threshold = Some(early_exit_threshold);
     line_search_options
 }

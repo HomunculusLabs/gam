@@ -2688,35 +2688,3 @@ pub trait CustomFamily {
         PseudoLogdetMode::Smooth
     }
 }
-
-/// Scope of an outer-evaluation context — distinguishes a real outer
-/// derivative evaluation (where auto-subsample is allowed to install a
-/// fresh stratified mask and emit phase prints) from an inner
-/// coefficient line-search trial (where the family must reuse the outer
-/// row measure, so auto-subsample must stay disabled).
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub enum EvalScope {
-    /// Real outer derivative evaluation: ρ has advanced; auto-subsample
-    /// install paths may build/refresh a mask keyed on this ρ.
-    OuterDerivative,
-    /// Inner coefficient trial (joint-Newton / line-search) at fixed
-    /// outer ρ: row measure must remain identical to the surrounding
-    /// outer eval, so auto-subsample must not install a fresh mask.
-    InnerCoefficient,
-}
-
-/// Context published by the outer smoothing optimizer for every
-/// downstream family evaluation. Carries the current outer ρ and a
-/// monotonic per-outer-eval id alongside the [`EvalScope`] tag used to
-/// gate auto-subsample installation. See the
-/// [`BlockwiseFitOptions::outer_eval_context`] field doc for the bug
-/// this prevents.
-#[derive(Clone, Debug)]
-pub struct OuterEvalContext {
-    /// Current log smoothing parameters in penalty order.
-    pub rho: Arc<Array1<f64>>,
-    /// Monotonically increasing identifier for the outer evaluation.
-    pub eval_id: usize,
-    /// Whether this evaluation is an outer derivative or inner coefficient trial.
-    pub scope: EvalScope,
-}

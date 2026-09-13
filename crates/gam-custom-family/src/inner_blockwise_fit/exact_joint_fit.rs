@@ -4045,8 +4045,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                      0x{:016x} (cycle {}, attempt {}); the line-search trial \
                      likelihood evaluated against a different row mask than the \
                      Hessian/gradient/old-objective build. Cf. \
-                     `coefficient_line_search_options` and \
-                     `install_auto_outer_subsample_options`.",
+                     `coefficient_line_search_options`.",
                     tr_row_measure_trial.id, top_id, cycle, trust_attempt
                 )));
             }

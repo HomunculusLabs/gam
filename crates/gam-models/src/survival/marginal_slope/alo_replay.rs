@@ -377,8 +377,6 @@ pub fn replay_saved_survival_marginal_slope_alo(
         time_wiggle_degree: input.time_wiggle_degree,
         time_wiggle_ncols: input.time_wiggle_ncols,
         intercept_warm_starts: None,
-        auto_subsample_phase_counter: Arc::new(AtomicUsize::new(0)),
-        auto_subsample_last_rho: Arc::new(Mutex::new(None)),
     };
     let mut block_states = vec![
         ParameterBlockState {

@@ -32,8 +32,6 @@ fn timewiggle_scorewarp_family_supports_second_order_exact_outer_path() {
         time_wiggle_degree: Some(time_wiggle_degree),
         time_wiggle_ncols,
         intercept_warm_starts: None,
-        auto_subsample_phase_counter: Arc::new(AtomicUsize::new(0)),
-        auto_subsample_last_rho: Arc::new(Mutex::new(None)),
     };
     let specs = vec![
         dummy_blockspec(5),
@@ -178,8 +176,6 @@ fn exact_outer_row_work_gate_keeps_large_timewiggle_link_models_under_linear_fle
         time_wiggle_degree: Some(time_wiggle_degree),
         time_wiggle_ncols,
         intercept_warm_starts: None,
-        auto_subsample_phase_counter: Arc::new(AtomicUsize::new(0)),
-        auto_subsample_last_rho: Arc::new(Mutex::new(None)),
     };
     let specs = vec![
         dummy_penalized_blockspec(12, 2),
@@ -223,8 +219,6 @@ fn timewiggle_scorewarp_beta_hessian_directional_derivative_returns_finite_matri
         time_wiggle_degree: Some(time_wiggle_degree),
         time_wiggle_ncols,
         intercept_warm_starts: None,
-        auto_subsample_phase_counter: Arc::new(AtomicUsize::new(0)),
-        auto_subsample_last_rho: Arc::new(Mutex::new(None)),
     };
     let block_states = vec![
         ParameterBlockState {
@@ -294,8 +288,6 @@ fn timewiggle_scorewarp_beta_hessian_second_directional_derivative_returns_finit
         time_wiggle_degree: Some(time_wiggle_degree),
         time_wiggle_ncols,
         intercept_warm_starts: None,
-        auto_subsample_phase_counter: Arc::new(AtomicUsize::new(0)),
-        auto_subsample_last_rho: Arc::new(Mutex::new(None)),
     };
     let block_states = vec![
         ParameterBlockState {
@@ -371,8 +363,6 @@ fn timewiggle_marginal_slope_family(score_warp: Option<DeviationRuntime>) -> Sur
         time_wiggle_degree: Some(time_wiggle_degree),
         time_wiggle_ncols,
         intercept_warm_starts: None,
-        auto_subsample_phase_counter: Arc::new(AtomicUsize::new(0)),
-        auto_subsample_last_rho: Arc::new(Mutex::new(None)),
     }
 }
 
@@ -1100,8 +1090,6 @@ fn link_flex_blockwise_exact_newton_matches_joint_principal_blocks() {
         time_wiggle_degree: None,
         time_wiggle_ncols: 0,
         intercept_warm_starts: None,
-        auto_subsample_phase_counter: Arc::new(AtomicUsize::new(0)),
-        auto_subsample_last_rho: Arc::new(Mutex::new(None)),
     };
     let marginal_beta = array![0.35, -0.1];
     let slope_beta = array![0.2];
@@ -1163,8 +1151,6 @@ fn link_flex_marginal_psi_terms_return_finite_joint_terms() {
         time_wiggle_degree: None,
         time_wiggle_ncols: 0,
         intercept_warm_starts: None,
-        auto_subsample_phase_counter: Arc::new(AtomicUsize::new(0)),
-        auto_subsample_last_rho: Arc::new(Mutex::new(None)),
     };
     let block_states = vec![
         ParameterBlockState {
@@ -1246,8 +1232,6 @@ fn link_flex_marginal_psi_second_order_returns_finite_joint_terms() {
         time_wiggle_degree: None,
         time_wiggle_ncols: 0,
         intercept_warm_starts: None,
-        auto_subsample_phase_counter: Arc::new(AtomicUsize::new(0)),
-        auto_subsample_last_rho: Arc::new(Mutex::new(None)),
     };
     let block_states = vec![
         ParameterBlockState {
@@ -1336,8 +1320,6 @@ fn link_flex_marginal_psi_hessian_directional_returns_finite_matrix() {
         time_wiggle_degree: None,
         time_wiggle_ncols: 0,
         intercept_warm_starts: None,
-        auto_subsample_phase_counter: Arc::new(AtomicUsize::new(0)),
-        auto_subsample_last_rho: Arc::new(Mutex::new(None)),
     };
     let block_states = vec![
         ParameterBlockState {
@@ -1426,8 +1408,6 @@ fn timewiggle_marginal_psi_terms_return_finite_joint_terms() {
         time_wiggle_degree: Some(time_wiggle_degree),
         time_wiggle_ncols,
         intercept_warm_starts: None,
-        auto_subsample_phase_counter: Arc::new(AtomicUsize::new(0)),
-        auto_subsample_last_rho: Arc::new(Mutex::new(None)),
     };
     let block_states = vec![
         ParameterBlockState {
@@ -1513,8 +1493,6 @@ fn timewiggle_blockwise_exact_newton_matches_joint_principal_blocks() {
         time_wiggle_degree: Some(time_wiggle_degree),
         time_wiggle_ncols,
         intercept_warm_starts: None,
-        auto_subsample_phase_counter: Arc::new(AtomicUsize::new(0)),
-        auto_subsample_last_rho: Arc::new(Mutex::new(None)),
     };
     let block_states = vec![
         ParameterBlockState {
@@ -1572,8 +1550,6 @@ fn flex_timewiggle_fast_gradient_matches_dense_joint_gradient() {
         time_wiggle_degree: Some(time_wiggle_degree),
         time_wiggle_ncols,
         intercept_warm_starts: None,
-        auto_subsample_phase_counter: Arc::new(AtomicUsize::new(0)),
-        auto_subsample_last_rho: Arc::new(Mutex::new(None)),
     };
     let block_states = vec![
         ParameterBlockState {
@@ -1666,8 +1642,6 @@ fn timewiggle_joint_hessian_matches_central_fd_of_joint_gradient() {
         time_wiggle_degree: Some(time_wiggle_degree),
         time_wiggle_ncols,
         intercept_warm_starts: None,
-        auto_subsample_phase_counter: Arc::new(AtomicUsize::new(0)),
-        auto_subsample_last_rho: Arc::new(Mutex::new(None)),
     };
     assert!(
         family.flex_timewiggle_active(),
@@ -1868,8 +1842,6 @@ fn row_dynamic_q_geometry_into_pooled_matches_fresh_allocation_bitwise() {
         time_wiggle_degree: Some(time_wiggle_degree),
         time_wiggle_ncols,
         intercept_warm_starts: None,
-        auto_subsample_phase_counter: Arc::new(AtomicUsize::new(0)),
-        auto_subsample_last_rho: Arc::new(Mutex::new(None)),
     };
     let block_states = vec![
         ParameterBlockState {
@@ -2048,8 +2020,6 @@ fn flex_timewiggle_operator_to_dense_matches_evaluate_dense_joint_hessian() {
         time_wiggle_degree: Some(time_wiggle_degree),
         time_wiggle_ncols,
         intercept_warm_starts: None,
-        auto_subsample_phase_counter: Arc::new(AtomicUsize::new(0)),
-        auto_subsample_last_rho: Arc::new(Mutex::new(None)),
     };
     let block_states = vec![
         ParameterBlockState {
@@ -2123,8 +2093,6 @@ fn timewiggle_marginal_slope_psi_second_order_returns_finite_joint_terms() {
         time_wiggle_degree: Some(time_wiggle_degree),
         time_wiggle_ncols,
         intercept_warm_starts: None,
-        auto_subsample_phase_counter: Arc::new(AtomicUsize::new(0)),
-        auto_subsample_last_rho: Arc::new(Mutex::new(None)),
     };
     let block_states = vec![
         ParameterBlockState {
@@ -2209,8 +2177,6 @@ fn timewiggle_marginal_psi_hessian_directional_returns_finite_matrix() {
         time_wiggle_degree: Some(time_wiggle_degree),
         time_wiggle_ncols,
         intercept_warm_starts: None,
-        auto_subsample_phase_counter: Arc::new(AtomicUsize::new(0)),
-        auto_subsample_last_rho: Arc::new(Mutex::new(None)),
     };
     let block_states = vec![
         ParameterBlockState {

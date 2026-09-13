@@ -182,25 +182,6 @@ pub(crate) struct SurvivalMarginalSlopeFamily {
     /// the cache to length-`n`. When `None`, the solver behaves exactly as it
     /// did before the warm-start machinery was added (closed-form rigid seed).
     pub(crate) intercept_warm_starts: Option<Arc<SurvivalInterceptWarmStartCache>>,
-    /// Per-fit counter of outer evaluations. Increments on each distinct
-    /// outer step (detected via the concatenated-beta proxy stored in
-    /// `auto_subsample_last_rho`). Drives the same two-phase
-    /// auto-subsample schedule used by `BernoulliMarginalSlopeFamily`:
-    /// the first `AUTO_OUTER_PHASE1_BUDGET` evaluations
-    /// install a stratified Horvitz-Thompson mask (Phase 1, ≈ 1 %
-    /// gradient noise); subsequent evaluations revert to full data
-    /// (Phase 2). The counter resets per fit because each fit
-    /// constructs a fresh family.
-    pub(crate) auto_subsample_phase_counter: Arc<AtomicUsize>,
-    /// Companion to `auto_subsample_phase_counter`. Stores the
-    /// concatenated-beta vector seen at the most recent counter bump.
-    /// Survival entry points (`*_workspace_with_options`) do not receive
-    /// the outer ρ directly, so we use the joint coefficient vector as
-    /// a stable per-outer-eval key. Within a single outer eval all
-    /// downstream calls share the same betas, so retries don't bump the
-    /// counter; across outer evals the betas change so the counter
-    /// increments cleanly.
-    pub(crate) auto_subsample_last_rho: Arc<Mutex<Option<Array1<f64>>>>,
 }
 
 impl SurvivalMarginalSlopeFamily {

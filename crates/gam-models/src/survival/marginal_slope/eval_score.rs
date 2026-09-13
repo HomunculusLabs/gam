@@ -11,10 +11,6 @@ impl SurvivalMarginalSlopeFamily {
         probit_frailty_scale(self.gaussian_frailty_sd)
     }
 
-    pub(crate) fn z_subsample_key(&self) -> Array1<f64> {
-        self.z.column(0).to_owned()
-    }
-
     #[inline]
     pub(crate) fn score_dim(&self) -> usize {
         assert_eq!(self.score_covariance.dim(), self.z.ncols());

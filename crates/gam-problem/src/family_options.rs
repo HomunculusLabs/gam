@@ -6,7 +6,7 @@
 //! crate graph. The cost/assert helpers and `BlockwiseFitOptions` /
 //! `OuterDerivativePolicy` remain in the root crate because they depend on
 //! root-crate types (`OuterScoreSubsample`, `JointPenaltyBundle`,
-//! `OuterEvalContext`, `crate::solver::rho_optimizer::OuterEvalOrder`,
+//! `crate::solver::rho_optimizer::OuterEvalOrder`,
 //! `gam_runtime::warm_start::Session`) and on the parameter-block-spec types
 //! still being relocated into this crate.
 

@@ -2,7 +2,6 @@
 //! outer-derivative policy + order selection, coefficient cost models, and the
 //! argument-validation asserts shared by the solver entry points.
 
-use crate::families::custom_family::family_trait::OuterEvalContext;
 use crate::families::custom_family::psi_design::{
     CustomFamilyHyperLayout, ExactNewtonJointHessianWorkspace,
 };
@@ -520,21 +519,6 @@ pub struct BlockwiseFitOptions {
     /// When `outer_score_subsample` is already `Some(...)` the auto
     /// path is bypassed entirely (caller-provided masks always win).
     pub auto_outer_subsample: bool,
-    /// Outer-evaluation context populated by the smoothing optimizer at
-    /// the top of each real outer derivative evaluation. Used by
-    /// auto-subsample install paths to key the stratified mask on the
-    /// outer ρ rather than the inner β proxy: during the inner trust-
-    /// region / coefficient line search β changes on every trial step,
-    /// so keying on β re-fires phase prints (and re-shuffles the mask)
-    /// inside a single outer eval. Keying on (rho, eval_id) instead
-    /// keeps the mask stable across the inner Newton at one ρ, and
-    /// suppresses auto-subsample entirely on inner trial evaluations via
-    /// the `EvalScope::InnerCoefficient` tag set by
-    /// `coefficient_line_search_options`.
-    ///
-    /// `None` preserves legacy behavior (no context — install paths fall
-    /// back to "no auto-subsample"). Default `None`.
-    pub outer_eval_context: Option<OuterEvalContext>,
     /// Optional persistent warm-start cache session. When `Some`, the
     /// outer smoothing optimizer consults the on-disk cache before
     /// starting (to seed θ from the last accepted iterate) and writes
@@ -657,7 +641,6 @@ impl Default for BlockwiseFitOptions {
             early_exit_threshold: None,
             outer_score_subsample: None,
             auto_outer_subsample: true,
-            outer_eval_context: None,
             cache_session: None,
             persistent_warm_start_store: None,
             cache_mirror_sessions: Vec::new(),

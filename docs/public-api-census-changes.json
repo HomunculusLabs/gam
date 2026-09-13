@@ -3041,5 +3041,14 @@
     },
     "reason": "#2899 slop: the gam-inference splitmix64_mix wrapper over gam_linalg::utils::splitmix64_hash is deleted, and its one caller calls splitmix64_hash directly.",
     "evidence": "public_functions() counts pub(crate) fn declarations, so removing the wrapper takes one identity off gpu_polya_gamma.rs. At the base, git grep -n -w splitmix64_mix finds no Rust caller of the wrapper other than XorwowState::new."
+  },
+  {
+    "base": "b815bc5299e08e3f9fd41e56d6132a50e8b84a5c",
+    "removed": {
+      "crates/gam-models/src/survival/marginal_slope/eval_rigid.rs::install_auto_outer_subsample_options": 1,
+      "crates/gam-models/src/survival/marginal_slope/eval_score.rs::z_subsample_key": 1
+    },
+    "reason": "#979 (folded #2897), SPEC rule 25. The survival auto-subsample installer could never sample: its only production context producer disabled automatic sampling first. It is removed with its z_subsample_key helper.",
+    "evidence": "At the base, install_auto_outer_subsample_options is called only by two survival custom_family_impl.rs wrappers, and z_subsample_key only by the installer. The one EvalScope::OuterDerivative producer, the survival fit_entry.rs evaluator, built its options through exact_outer_options (auto_outer_subsample = false)."
   }
 ]
