@@ -1714,8 +1714,7 @@ pub(crate) fn compute_ainv_host(
 }
 
 /// Reference dense back-end used by tests and as the fallback when the
-/// GPU declines. Kept here (not in `arrow_schur_gpu.rs`) so the validation
-/// suite has one canonical baseline.
+/// GPU declines, so the validation suite has one canonical baseline.
 pub fn solve_arrow_newton_step_dense_reference(
     sys: &ArrowSchurSystem,
     ridge_t: f64,

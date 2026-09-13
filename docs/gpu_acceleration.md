@@ -40,9 +40,7 @@ import gamfit; CUDA probing happens lazily at runtime.
 
 `crates/gam-solve/src/gpu/pirls_gpu.rs` owns the dense PIRLS Newton step. It uploads the dense design and working weights through pinned host buffers, scales rows with cuBLAS `Ddgmm`, forms `X'WX` with cuBLAS `Dgemm`, adds the penalty Hessian with cuBLAS `Dgeam`, and factors the penalized Hessian with cuSOLVER `Dpotrf`. Newton directions use cuSOLVER `Dpotrs`; the log determinant is read from the Cholesky diagonal.
 
-`crates/gam-solve/src/gpu/reml_gpu.rs` owns dense REML evidence derivatives. It computes `log|H|` from the same cuSOLVER Cholesky path and evaluates score terms as `0.5 * tr(H^-1 dH/drho)` by solving multi-RHS systems on the device.
-
-`crates/gam-solve/src/gpu/arrow_schur_gpu.rs` owns the arrow-Schur latent-coordinate CUDA helpers. Dense Direct/SqrtBA solves use CUDA row-block Cholesky, Schur accumulation into the shared beta block, cuSOLVER for the reduced beta step, and row-local GPU back-substitution. Large matrix-free systems use the GPU Schur matvec hook instead of forming a dense shared beta factor.
+`crates/gam-solve/src/gpu_kernels/arrow_schur.rs` owns the arrow-Schur latent-coordinate CUDA helpers. Dense Direct/SqrtBA solves use CUDA row-block Cholesky, Schur accumulation into the shared beta block, cuSOLVER for the reduced beta step, and row-local GPU back-substitution. Large matrix-free systems use the GPU Schur matvec hook instead of forming a dense shared beta factor.
 
 `crates/gam-models/src/bms/gpu/` owns the Bernoulli marginal-slope FLEX
 row-primary Hessian assembly. When
@@ -94,8 +92,6 @@ The CUDA comparison harnesses live under `bench/cargo_benches/`:
 
 ```text
 pirls_gpu_bench.rs
-reml_gpu_bench.rs
-arrow_schur_gpu_bench.rs
 ```
 
 Each benchmark builds deterministic large-scale-shaped synthetic inputs and reports CPU reference timings next to the CUDA path.

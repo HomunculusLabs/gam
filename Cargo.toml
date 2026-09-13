@@ -209,16 +209,6 @@ path = "bench/cargo_benches/pirls_gpu_bench.rs"
 harness = false
 
 [[bench]]
-name = "reml_gpu_bench"
-path = "bench/cargo_benches/reml_gpu_bench.rs"
-harness = false
-
-[[bench]]
-name = "arrow_schur_gpu_bench"
-path = "bench/cargo_benches/arrow_schur_gpu_bench.rs"
-harness = false
-
-[[bench]]
 name = "sae_arrow_schur_bench"
 path = "bench/cargo_benches/sae_arrow_schur_bench.rs"
 harness = false

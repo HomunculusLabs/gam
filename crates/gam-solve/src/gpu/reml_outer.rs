@@ -96,8 +96,8 @@ pub(crate) struct RemlOuterGpuOutcome {
 pub(crate) struct RemlOuterDeviceEval {
     /// Penalised REML objective at the trial ρ. Single scalar download.
     pub objective: f64,
-    /// Per-ρ gradient assembled from `evidence_derivatives_gpu` on the
-    /// cached Cholesky factor of the penalised Hessian.
+    /// Per-ρ gradient at the trial ρ, returned by the same evaluator call as
+    /// `objective`.
     pub gradient: Array1<f64>,
 }
 
@@ -110,10 +110,8 @@ pub(crate) struct RemlOuterDeviceEval {
 ///    leaving the penalised Hessian factor resident on the device stream.
 /// 2. Hutchinson trace estimator for `tr(H_λ⁻¹ ∂H/∂ρⱼ)` via the existing
 ///    on-device probes, batched across `num_rho` derivatives.
-/// 3. Arrow-Schur batched Cholesky / log-determinant on the device through
-///    `evidence_derivatives_gpu`, which keeps `H_λ` factored exactly once
-///    per outer step and back-solves the per-ρ derivative slabs in one
-///    `potrs` of width `p · num_rho`.
+/// 3. The host-supplied `evaluator` returns the objective and the per-ρ
+///    gradient as one fused sample.
 /// 4. Shared `opt::Bfgs` policy consumes the fused sample and chooses the next
 ///    bounded trial.
 ///

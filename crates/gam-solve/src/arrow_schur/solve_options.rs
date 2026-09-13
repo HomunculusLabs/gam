@@ -103,9 +103,8 @@ pub(crate) fn classify_exact_a_direction(
 ///   **GPU support: CPU only** until the row-procedural H_tβ GPU PCG path
 ///   (issue #288 Part B) is wired. The topology selector must not request
 ///   `InexactPCG` via the GPU entry point; `solve_arrow_newton_step` returns
-///   `GpuRequiresDenseSystem` for matrix-free systems, and the wrapper in
-///   `solver/gpu/arrow_schur_gpu.rs` routes those to CPU InexactPCG
-///   automatically. At K ≥ 5000 the GPU PCG path will supersede the CPU path
+///   `GpuRequiresDenseSystem` for matrix-free systems, which the dense GPU
+///   Schur path cannot consume. At K ≥ 5000 the GPU PCG path will supersede the CPU path
 ///   once the row-procedural H_tβ kernel and boxed GPU matvec backend in
 ///   `run_pcg_with_preconditioner` are wired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

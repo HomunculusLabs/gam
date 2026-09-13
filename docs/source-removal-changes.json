@@ -9179,5 +9179,18 @@
     ],
     "reason": "#2469, SPEC rule 23, and the lead's order of 09-13: the frozen-decoder out-of-sample solve stops on its own certificate, or refuses when a motionless sweep proves it cannot reach it, never after a picked sweep budget. solve_coordinates_fixed_decoder therefore has no budget, and the refusal it returned once the budget ran out is gone. That refusal was the only caller of frozen_decoder_coordinate_objective, the wrapper that computes the raw residual from the target and then evaluates the objective, so the wrapper is deleted. frozen_decoder_coordinate_objective_with_residual, which the sweep loop calls, stays.",
     "evidence": "At the base, git grep -n -w frozen_decoder_coordinate_objective over *.rs finds: crates/gam-sae/src/manifold/support_term.rs:5981:    fn frozen_decoder_coordinate_objective(; crates/gam-sae/src/manifold/support_term.rs:6013:            Err(\"SaeSupportSparseTerm::frozen_decoder_coordinate_objective is non-finite\".into()); crates/gam-sae/src/manifold/support_term.rs:6089:        let objective = self.frozen_decoder_coordinate_objective(target, ard_precisions)?;. These are the declaration; its one call, in solve_coordinates_fixed_decoder's budget-exhausted refusal, which this change deletes with the budget; and the error literal inside frozen_decoder_coordinate_objective_with_residual, which stays. Guarded pool job 645809, HEAD == PIN d0dd1224f on a clean tree, applied the support evidence policy switch, the exact per-row Newton change and this change. `cargo check --workspace --all-targets --exclude gam-pyffi` and `cargo check -p gam-pyffi --all-targets` both finished rc 0 (log /scratch.global/sauer354/pool/sae2023/g2023w.645809.log). Job 637986 at f0af6dbc1 had kept the wrapper and refused to compile with \"method `frozen_decoder_coordinate_objective` is never used\"."
+  },
+  {
+    "base": "edf74e32d06ab47c8fc1b8d12b5c0da5ed0d809f",
+    "items": [
+      "crates/gam-solve/src/gpu/arrow_schur_gpu.rs:fn:solve_arrow_newton_step_gpu",
+      "crates/gam-solve/src/gpu/pirls_gpu.rs:fn:cholesky_solve_gpu",
+      "crates/gam-solve/src/gpu/reml_gpu.rs:fn:evidence_derivatives",
+      "crates/gam-solve/src/gpu/reml_gpu.rs:fn:evidence_derivatives_gpu",
+      "crates/gam-solve/src/gpu/reml_gpu.rs:struct:RemlGpuEvidence",
+      "crates/gam-solve/src/gpu/reml_gpu.rs:struct:RemlGpuInput"
+    ],
+    "reason": "#2899, SPEC rule 25 (delete public API no product uses). gam-solve gpu::reml_gpu (evidence_derivatives_gpu, RemlGpuInput, RemlGpuEvidence) and gpu::arrow_schur_gpu (solve_arrow_newton_step_gpu) were called only by their own benches, and pirls_gpu::cholesky_solve_gpu only by reml_gpu. The benches, their [[bench]] entries and the docs describing these paths go with them.",
+    "evidence": "At the check pin, git grep over crates, src, tests, bench, examples, docs, python and gamfit finds these names only in the deleted files, bench/cargo_benches/{reml_gpu,arrow_schur_gpu}_bench.rs, the reworded docs, and historical records. These identities are the guard's own refusal list at the checked pair. Guarded compile: pool job 648543."
   }
 ]

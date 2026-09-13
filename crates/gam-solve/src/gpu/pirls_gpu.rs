@@ -3546,13 +3546,6 @@ mod cpu_fallback {
     }
 }
 
-pub fn cholesky_solve_gpu(
-    hessian: ArrayView2<'_, f64>,
-    rhs: ArrayView2<'_, f64>,
-) -> Result<(Array2<f64>, f64), String> {
-    gam_gpu::solver::cholesky_solve_gpu(hessian, rhs)
-}
-
 /// Solution-only mixed-precision solve (logdet discarded). Skips the redundant
 /// fp64 POTRF so the PIRLS Newton direction solve gets the full fp32-factor
 /// speedup; the solution is fp64-accurate via iterative refinement.
