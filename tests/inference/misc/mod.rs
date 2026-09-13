@@ -2,7 +2,6 @@ mod bms_audit_nonzero_slope_baseline_370;
 mod bms_probit_confound_orthogonalization_cure;
 mod coefficient_groups;
 mod coefficient_groups_hierarchical_hard;
-mod conformal_coverage_quality;
 mod marginal_slope_neyman_orthogonal_reference;
 mod margslope_flex_large_scale_repro;
 mod margslope_smallcondition_smoke;

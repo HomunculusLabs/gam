@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! End-to-end OBJECTIVE-quality test for distribution-free conformal
 //! calibration of prediction intervals (`gam::conformal`).
 //!
@@ -22,11 +23,11 @@
 //! set, are pinned by `gam_predict::conformal`'s own unit tests, because the
 //! calibrator's constructor and interval are crate-private.
 
-use gam::estimate::{FitOptions, fit_gamwith_heuristic_lambdas};
-use gam::matrix::DesignMatrix;
-use gam::smooth::BlockwisePenalty;
-use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
-use gam_predict::{
+use gam_solve::estimate::{FitOptions, fit_gamwith_heuristic_lambdas};
+use gam_linalg::matrix::DesignMatrix;
+use gam_terms::smooth::BlockwisePenalty;
+use gam_spec::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
+use crate::{
     ConformalCalibrationFold, PredictInput, PredictUncertaintyOptions, StandardPredictor,
     predict_full_uncertainty_conformal,
 };
@@ -111,7 +112,7 @@ fn gaussian_spec() -> LikelihoodSpec {
 
 /// Fit a Gaussian-identity GAM over the cubic design with a light ridge
 /// penalty on the non-intercept columns.
-fn fit_cubic(x: &Array1<f64>, y: &Array1<f64>) -> (gam::estimate::UnifiedFitResult, Array2<f64>) {
+fn fit_cubic(x: &Array1<f64>, y: &Array1<f64>) -> (gam_solve::estimate::UnifiedFitResult, Array2<f64>) {
     let design = poly_design(x);
     let weights = Array1::<f64>::ones(design.nrows());
     let offset = Array1::<f64>::zeros(design.nrows());
@@ -148,12 +149,12 @@ fn predict_input_for(design: &Array2<f64>) -> PredictInput {
 /// calibration uses a genuinely HELD-OUT fold (`cal_design`, `cal_y`) that is
 /// distinct from the training data and may be of a DIFFERENT size.
 fn predict_with_conformal(
-    fit: &gam::estimate::UnifiedFitResult,
+    fit: &gam_solve::estimate::UnifiedFitResult,
     cal_design: &Array2<f64>,
     cal_y: &Array1<f64>,
     test_design: &Array2<f64>,
     conformal_level: Option<f64>,
-) -> gam_predict::PredictUncertaintyResult {
+) -> crate::PredictUncertaintyResult {
     let predictor = StandardPredictor {
         beta: fit.blocks[0].beta.clone(),
         family: gaussian_spec(),

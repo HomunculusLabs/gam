@@ -32,6 +32,12 @@ serde = { version = "1.0.228", features = ["derive"] }
 faer = "0.24.4"
 rand = "0.10.1"
 serde_json = { version = "1.0.149", features = ["float_roundtrip"] }
+# The conformal, reference-quality and large-scale tests moved from the root and
+# gam-models test binaries under #2899 read CSV fixtures, draw from rand_distr and
+# drive gam-test-support's reference harness.
+csv = "1.4.0"
+gam-test-support = { path = "../gam-test-support" }
+rand_distr = "0.6.0"
 
 [lints.rust]
 warnings = "deny"

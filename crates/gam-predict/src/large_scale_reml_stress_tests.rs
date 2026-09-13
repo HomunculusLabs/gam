@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! End-to-end stress test for the closed-form Duchon pipeline at
 //! large-scale-relevant scale.
 //!
@@ -29,7 +30,7 @@
 use gam_models::fit_orchestration::drivers::{
     fit_term_collection_forspec, fit_term_collectionwith_spatial_length_scale_optimization,
 };
-use gam_predict::{
+use crate::{
     InferenceCovarianceMode, PosteriorMeanOptions, PredictInput, PredictPosteriorMeanResult,
     PredictableModel, StandardPredictor,
 };

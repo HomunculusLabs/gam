@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Regression test for issue #682: distribution-free split-conformal
 //! calibration must consume a genuinely held-out calibration fold whose size
 //! differs from the training set.
@@ -25,11 +26,11 @@
 //!   2. the resulting conformal interval achieves at least nominal coverage on
 //!      a fresh draw from the same DGP (within small finite-sample slack).
 
-use gam::estimate::{FitOptions, fit_gamwith_heuristic_lambdas};
-use gam::matrix::DesignMatrix;
-use gam::smooth::BlockwisePenalty;
-use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
-use gam_predict::{
+use gam_solve::estimate::{FitOptions, fit_gamwith_heuristic_lambdas};
+use gam_linalg::matrix::DesignMatrix;
+use gam_terms::smooth::BlockwisePenalty;
+use gam_spec::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
+use crate::{
     ConformalCalibrationFold, PredictInput, PredictUncertaintyOptions, StandardPredictor,
     predict_full_uncertainty_conformal,
 };
@@ -97,7 +98,7 @@ fn fit_options() -> FitOptions {
     }
 }
 
-fn fit_cubic(x: &Array1<f64>, y: &Array1<f64>) -> gam::estimate::UnifiedFitResult {
+fn fit_cubic(x: &Array1<f64>, y: &Array1<f64>) -> gam_solve::estimate::UnifiedFitResult {
     let design = poly_design(x);
     let weights = Array1::<f64>::ones(design.nrows());
     let offset = Array1::<f64>::zeros(design.nrows());

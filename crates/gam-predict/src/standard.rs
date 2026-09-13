@@ -1,7 +1,7 @@
 use super::*;
 
 /// Standard (single-block) GAM predictor.
-pub struct StandardPredictor {
+pub(crate) struct StandardPredictor {
     pub beta: Array1<f64>,
     pub family: gam_spec::LikelihoodSpec,
     pub link_kind: Option<InverseLink>,

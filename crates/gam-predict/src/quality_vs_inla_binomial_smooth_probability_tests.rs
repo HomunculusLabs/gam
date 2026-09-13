@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! End-to-end OBJECTIVE quality: gam's REML/Laplace penalized smooth under the
 //! **binomial** family (logit link) must RECOVER THE TRUE latent probability
 //! function that generated the data — on the original (0,1) response scale —
@@ -56,27 +57,26 @@
 //! `f(age, model="rw2", scale.model=TRUE)`, the canonical INLA penalized smooth),
 //! binomial/logit.
 
-use gam::matrix::{DesignMatrix, LinearOperator};
-use gam::predict::standard::StandardPredictor;
-use gam::predict::{PosteriorMeanOptions, PredictInput, PredictableModel};
-use gam::smooth::build_term_collection_design;
-use gam::test_support::reference::{
+use gam_linalg::matrix::{DesignMatrix, LinearOperator};
+use crate::standard::StandardPredictor;
+use crate::{PosteriorMeanOptions, PredictInput, PredictableModel};
+use gam_terms::smooth::build_term_collection_design;
+use gam_test_support::reference::{
     Column, PairedFoldComparison, QualityPair, assert_paired_match_or_beat, auc_no_skill_floor,
     r_package_available, relative_l2, rmse, run_r,
 };
-use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
-use gam::{
-    FitConfig, FitResult, StandardFitResult, encode_recordswith_inferred_schema, fit_from_formula,
-    init_parallelism, load_csvwith_inferred_schema,
-};
+use gam_spec::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
+use crate::test_support::init_parallelism;
+use gam_data::{encode_recordswith_inferred_schema, load_csvwith_inferred_schema};
+use gam_models::fit_orchestration::{FitConfig, FitResult, StandardFitResult, fit_from_formula};
 use ndarray::{Array1, Array2};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand_distr::{Distribution, Uniform};
 use std::path::Path;
 
-const HABERMAN_CSV: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/bench/datasets/haberman.csv");
-const PROSTATE_CSV: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/bench/datasets/prostate.csv");
+const HABERMAN_CSV: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../bench/datasets/haberman.csv");
+const PROSTATE_CSV: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../bench/datasets/prostate.csv");
 
 fn invlogit(eta: f64) -> f64 {
     1.0 / (1.0 + (-eta).exp())

@@ -24,8 +24,8 @@ pub use posterior_predict::*;
 use crate::binomial_location_scale::BinomialLocationScalePredictor;
 // Surface the per-family predictors at the crate root so callers (integration
 // tests and downstream users) can name `gam_predict::DispersionLocationScalePredictor`
-// / `gam_predict::StandardPredictor` directly, matching the flat predict API
-// these types had before the engine was peeled into this crate.
+// directly, matching the flat predict API these types had before the engine was
+// peeled into this crate.
 pub use crate::dispersion_location_scale::DispersionLocationScalePredictor;
 use crate::gaussian_location_scale::GaussianLocationScalePredictor;
 use crate::interval_policy::{
@@ -37,7 +37,7 @@ use crate::interval_policy::{
 use crate::linalg::{
     PredictionCovarianceBackend, design_row_chunk, rowwise_local_covariances_parallel,
 };
-pub use crate::standard::StandardPredictor;
+pub(crate) use crate::standard::StandardPredictor;
 use crate::survival::SurvivalPredictor;
 use crate::transformation_normal::TransformationNormalPredictor;
 use gam_inference::probability::{
@@ -4909,3 +4909,21 @@ mod tests {
 
 #[cfg(test)]
 mod predict_2_2_tests;
+
+#[cfg(test)]
+mod test_support;
+
+#[cfg(test)]
+mod conformal_coverage_quality_tests;
+
+#[cfg(test)]
+mod conformal_held_out_calibration_fold_size_mismatch_tests;
+
+#[cfg(test)]
+mod large_scale_reml_stress_tests;
+
+#[cfg(test)]
+mod quality_vs_inla_binomial_smooth_probability_tests;
+
+#[cfg(test)]
+mod quality_vs_interpretml_ebm_poisson_log_tests;

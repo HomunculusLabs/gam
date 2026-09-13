@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! End-to-end OBJECTIVE quality: gam's penalized PoissonGAM must RECOVER THE
 //! KNOWN MEAN SURFACE `mu_true(x) = exp(true_eta(x))` on held-out data, and do so
 //! at least as accurately as **InterpretML's `ExplainableBoostingRegressor`**
@@ -56,18 +57,17 @@
 //! never a reason to weaken these bounds.
 
 use csv::StringRecord;
-use gam::matrix::DesignMatrix;
-use gam::predict::standard::StandardPredictor;
-use gam::predict::{PosteriorMeanOptions, PredictInput, PredictableModel};
-use gam::smooth::build_term_collection_design;
-use gam::test_support::reference::{
+use gam_linalg::matrix::DesignMatrix;
+use crate::standard::StandardPredictor;
+use crate::{PosteriorMeanOptions, PredictInput, PredictableModel};
+use gam_terms::smooth::build_term_collection_design;
+use gam_test_support::reference::{
     Column, PairedFoldComparison, QualityPair, assert_paired_match_or_beat, run_python,
 };
-use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
-use gam::{
-    FitConfig, FitResult, StandardFitResult, encode_recordswith_inferred_schema, fit_from_formula,
-    init_parallelism, load_csvwith_inferred_schema,
-};
+use gam_spec::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
+use crate::test_support::init_parallelism;
+use gam_data::{encode_recordswith_inferred_schema, load_csvwith_inferred_schema};
+use gam_models::fit_orchestration::{FitConfig, FitResult, StandardFitResult, fit_from_formula};
 use ndarray::{Array1, Array2};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -78,7 +78,7 @@ use std::path::Path;
 /// (Rigby & Stasinopoulos), bundled at bench/datasets/badhealth.csv. Columns:
 /// `numvisit` (count of doctor visits, the Poisson response), `badh` (1 if the
 /// subject self-reports bad health, else 0), `age` (years).
-const BADHEALTH_CSV: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/bench/datasets/badhealth.csv");
+const BADHEALTH_CSV: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../bench/datasets/badhealth.csv");
 
 const N: usize = 250;
 const SEED: u64 = 20260530;
