@@ -933,7 +933,7 @@ impl SaeManifoldTerm {
             // the ridge-0 factor below, which is non-PD BY CONSTRUCTION on an
             // over-parametrized chart (a rank-1 radial null per row). Per-row
             // spectral deflation only fires when `row_gauge_deflation.is_some()`, and
-            // the decoded-derivative gauge floor (`tangent·tangent > 1e-24`) can
+            // the decoded-derivative gauge predicate (`decoded_motion_is_rounding_zero`) can
             // leave it None on exactly the flat axis that carries the null — so
             // force the evidence system to opt into per-row spectral discovery: the
             // null is unit-stiffness deflated (`log 1 = 0`, ρ-independent) and the
@@ -1187,8 +1187,8 @@ impl SaeManifoldTerm {
                             // force-enabled above (`row_gauge_deflation` installed),
                             // `factor_spectral_deflated_criterion_row` discovers the
                             // negative/flat eigen-direction — including the #1095/#2228
-                            // radial null the decoded-derivative gauge floor
-                            // (`tangent·tangent > 1e-24`) would otherwise have excluded
+                            // radial null the decoded-derivative gauge predicate
+                            // (`decoded_motion_is_rounding_zero`) would otherwise have excluded
                             // from the gauge list — and stiffens it to UNIT curvature
                             // (eigenvalue → +1), a ρ-INDEPENDENT log 1 = 0 evidence
                             // contribution (the quotient pseudo-determinant convention

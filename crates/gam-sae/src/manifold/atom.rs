@@ -1847,6 +1847,53 @@ impl SaeManifoldAtom {
         }
     }
 
+    /// Whether moving row `row`'s latent coordinate along `direction` (latent axis,
+    /// weight pairs) leaves the decoded output unchanged, to the resolution of the
+    /// derivative's own arithmetic. `motion` and `absolute` are caller-supplied
+    /// length-`p` scratch buffers; on return `motion` holds the decoded motion
+    /// `Σ_axis weight·∂g_k/∂t_{ik,axis}`.
+    ///
+    /// Output entry `c` of that motion is a sum of `T` terms `weight·∂φ_b/∂t·B_bc`,
+    /// each formed with two rounded products, so a motion whose exact value is zero
+    /// computes to within `γ_{T+1}·Σ|terms|` of zero in every entry, and an entry
+    /// outside that band is a genuine motion.
+    pub(crate) fn decoded_motion_is_rounding_zero(
+        &self,
+        row: usize,
+        direction: impl IntoIterator<Item = (usize, f64)>,
+        motion: &mut [f64],
+        absolute: &mut [f64],
+    ) -> bool {
+        let p = self.output_dim();
+        let m = self.basis_size();
+        assert_eq!(motion.len(), p);
+        assert_eq!(absolute.len(), p);
+        motion.fill(0.0);
+        absolute.fill(0.0);
+        let mut terms = 0usize;
+        for (latent_axis, weight) in direction {
+            for basis_col in 0..m {
+                let scaled = weight * self.basis_jacobian[[row, basis_col, latent_axis]];
+                if scaled == 0.0 {
+                    continue;
+                }
+                terms += 1;
+                let dec = self.decoder_coefficients.row(basis_col);
+                let entries = motion.iter_mut().zip(absolute.iter_mut()).zip(dec.iter());
+                for ((total, bound), &d) in entries {
+                    let term = scaled * d;
+                    *total += term;
+                    *bound += term.abs();
+                }
+            }
+        }
+        let growth = gam_linalg::roundoff::accumulation_growth(terms + 1);
+        motion
+            .iter()
+            .zip(absolute.iter())
+            .all(|(total, bound)| total.abs() <= growth * bound)
+    }
+
     /// #2133 — the pure second coordinate derivative `∂²g_k/∂t_{ik,axis}²`
     /// contracted through the decoder, for one row/axis, given the atom's second
     /// jet `(n, M, d, d)` (from [`SaeManifoldTerm::atom_second_jets`]). This is the
