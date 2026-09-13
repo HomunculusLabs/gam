@@ -219,8 +219,8 @@ fn gam_gaussian_survival_location_scale_matches_gamlss() {
                     data = df, control = gamlss.control(trace = FALSE, n.cyc = 200))
         gx <- as.numeric(strsplit("{grid_csv}", ",")[[1]])
         nd <- data.frame(x = gx)
-        mu <- predict(m, what = "mu", newdata = nd, type = "response")
-        sigma <- predict(m, what = "sigma", newdata = nd, type = "response")
+        mu <- predict(m, what = "mu", newdata = nd, type = "response", data = df)
+        sigma <- predict(m, what = "sigma", newdata = nd, type = "response", data = df)
         emit("mu", as.numeric(mu))
         emit("sigma", as.numeric(sigma))
         "#
@@ -563,7 +563,7 @@ fn gam_gaussian_survival_location_scale_matches_gamlss_on_real_data() {
                          ejection_fraction = df$test_ef[1:k],
                          serum_creatinine = df$test_screat[1:k],
                          serum_sodium = df$test_ssod[1:k])
-        mu <- predict(m, what = "mu", newdata = nd, type = "response")
+        mu <- predict(m, what = "mu", newdata = nd, type = "response", data = df)
         emit("mu", as.numeric(mu))
         "#,
     );
