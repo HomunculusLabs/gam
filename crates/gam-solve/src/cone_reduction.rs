@@ -158,7 +158,9 @@ pub struct ConeProperness {
     /// `In(ZᵀHZ)` for `Z` a basis of `null(A)`, obtained from Haynsworth
     /// additivity `In(H) = In(ZᵀHZ) + In(M)` rather than by forming `Z`.
     /// `null(A)` is the recession cone's LINEALITY space — both `±d` are
-    /// feasible there — so anything but all-positive here is impropriety.
+    /// feasible there — so a negative direction here is impropriety. A zero is a
+    /// pivot at or below the inertia tolerance, which cannot separate a true null
+    /// from small positive curvature, so it leaves properness undecided.
     pub lineality_inertia: Inertia,
     /// `min wᵀMw` over the unit simplex. `Some(v)` with `v > 0` is a proof that
     /// the cone-truncated posterior is proper; `Some(v)` with `v <= 0` is a
@@ -169,11 +171,19 @@ pub struct ConeProperness {
 
 impl ConeProperness {
     /// `Some(true)`/`Some(false)` when properness is PROVED either way, `None`
-    /// when it is undecided. Undecided is deliberately not folded into either
-    /// answer.
+    /// when it is undecided: the face is too wide for the exact enumeration, or
+    /// `In(ZᵀHZ)` has a direction at or below the inertia tolerance and no
+    /// feasible direction already proves the posterior improper. Undecided is
+    /// deliberately not folded into either answer.
     pub fn is_proper(&self) -> Option<bool> {
-        if self.lineality_inertia.negative > 0 || self.lineality_inertia.zero > 0 {
+        if self.lineality_inertia.negative > 0 {
             return Some(false);
+        }
+        if self.copositive_minimum.is_some_and(|minimum| minimum <= 0.0) {
+            return Some(false);
+        }
+        if self.lineality_inertia.zero > 0 {
+            return None;
         }
         self.copositive_minimum.map(|minimum| minimum > 0.0)
     }
@@ -184,6 +194,11 @@ impl ConeProperness {
         let verdict = match self.is_proper() {
             Some(true) => "PROPER".to_string(),
             Some(false) => "IMPROPER".to_string(),
+            None if self.lineality_inertia.zero > 0 => format!(
+                "UNDECIDED ({} direction(s) of null(A) sit at or below the inertia tolerance, \
+                 which cannot separate a true null from small positive curvature)",
+                self.lineality_inertia.zero
+            ),
             None => format!(
                 "UNDECIDED (the exact enumeration is out of range at q = {})",
                 self.reduced.nrows()
@@ -790,6 +805,56 @@ mod tests {
             "impropriety along the cone's lineality space outranks a copositive M"
         );
         assert!(certificate.summary().contains("IMPROPER"));
+    }
+
+    #[test]
+    fn a_lineality_direction_below_the_inertia_tolerance_leaves_properness_undecided() {
+        // `symmetric_inertia` counts a pivot at or below `tolerance · max|entry|` as zero, which
+        // cannot separate a true null of `ZᵀHZ` from small positive curvature. Here `H` is PD
+        // with its smallest lineality direction at 1e-10 of the largest entry, so the truncated
+        // posterior is proper. At a √EPS tolerance the certificate cannot resolve that direction
+        // and must decline to answer; a tolerance that resolves it proves PROPER.
+        let hessian = array![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1e-10]];
+        let constraints = array![[1.0, 0.0, 0.0]];
+        let coarse =
+            cone_properness_certificate(hessian.view(), constraints.view(), f64::EPSILON.sqrt())
+                .expect("a certificate on an ill-conditioned proper cone");
+        assert_eq!(
+            coarse.lineality_inertia,
+            Inertia {
+                positive: 1,
+                zero: 1,
+                negative: 0
+            },
+            "the 1e-10 direction sits below the √EPS inertia floor"
+        );
+        assert_eq!(coarse.copositive_minimum, Some(1.0), "M is the 1x1 block [1]");
+        assert_eq!(
+            coarse.is_proper(),
+            None,
+            "a sub-tolerance lineality direction is not a proof of impropriety"
+        );
+        assert!(
+            coarse.summary().contains("UNDECIDED") && coarse.summary().contains("inertia tolerance"),
+            "got: {}",
+            coarse.summary()
+        );
+        let resolved = cone_properness_certificate(hessian.view(), constraints.view(), 1e-12)
+            .expect("a certificate that resolves the small direction");
+        assert_eq!(
+            resolved.lineality_inertia,
+            Inertia {
+                positive: 2,
+                zero: 0,
+                negative: 0
+            },
+            "resolved, the small direction is positive curvature"
+        );
+        assert_eq!(
+            resolved.is_proper(),
+            Some(true),
+            "the same cone is provably proper once the direction is resolved"
+        );
     }
 
     #[test]
