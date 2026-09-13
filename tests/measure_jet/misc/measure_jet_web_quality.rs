@@ -28,15 +28,21 @@
 //!    compose with PIRLS/REML for a non-gaussian family and recover the
 //!    log-intensity off-gap.
 //! 5. **Interval honesty**: 95% pointwise bands built from the fit's
-//!    smoothing-corrected coefficient
-//!    covariance must approximately cover the true mean at held-out
-//!    on-web points.
+//!    smoothing-corrected coefficient covariance plus the finite-support and
+//!    input-measurement-error variance the saved model prices must
+//!    approximately cover the true mean at held-out on-web points, and through
+//!    the predict surfaces' shared request a row far off the web must get the
+//!    wider band.
 
 use csv::StringRecord;
-use gam::basis::{
-    CenterStrategy, MeasureJetExtrapolationSpectrum, MeasureJetIdentifiability, PenaltySource,
-};
+use gam::basis::{CenterStrategy, MeasureJetIdentifiability};
+use gam::families::survival::predict::fit_result_from_saved_model_for_prediction;
+use gam::inference::model::{FittedModel, FittedModelPayload};
+use gam::inference::model_payload_builders::{StandardPayloadInputs, assemble_standard_payload};
 use gam::matrix::LinearOperator;
+use gam::predict::input::build_predict_input_for_model;
+use gam::predict::interval_policy::{PredictionRequest, resolve_prediction_request};
+use gam::predict::{FittedModelPredictExt, InferenceCovarianceMode};
 use gam::smooth::{SmoothBasisSpec, build_term_collection_design};
 use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
@@ -202,21 +208,44 @@ fn encode_poisson_training(points: &[WebPoint], seed: u64) -> gam::data::Encoded
 // Fit + readout: formula fits, frozen-spec design replay, error metrics.
 // ---------------------------------------------------------------------------
 
+fn web_fit_config(family: &str) -> FitConfig {
+    FitConfig {
+        family: Some(family.to_string()),
+        outer_max_iter: Some(35),
+        ..FitConfig::default()
+    }
+}
+
 fn fit_web(
     formula: &str,
     data: &gam::data::EncodedDataset,
     family: &str,
 ) -> gam::StandardFitResult {
-    let cfg = FitConfig {
-        family: Some(family.to_string()),
-        outer_max_iter: Some(35),
-        ..FitConfig::default()
-    };
-    let result = fit_from_formula(formula, data, &cfg).expect("web fit succeeded");
+    let result =
+        fit_from_formula(formula, data, &web_fit_config(family)).expect("web fit succeeded");
     let FitResult::Standard(fit) = result else {
         panic!("expected standard fit")
     };
     fit
+}
+
+/// The payload `gam fit` persists for a web fit. Its `FittedModel` is what
+/// `gam predict` and the Python `predict` load, and its
+/// `measure_jet_extrapolation_variance` is what they put into their interval
+/// request.
+fn web_payload(
+    formula: &str,
+    data: &gam::data::EncodedDataset,
+    family: &str,
+    fit: gam::StandardFitResult,
+) -> FittedModelPayload {
+    assemble_standard_payload(StandardPayloadInputs {
+        formula: formula.to_string(),
+        dataset: data,
+        fit_config: &web_fit_config(family),
+        result: fit,
+    })
+    .expect("standard web payload assembles")
 }
 
 /// Raw ambient-coordinate matrix for the test points, laid out on the
@@ -289,209 +318,6 @@ fn pointwise_se(design: ArrayView2<'_, f64>, cov: &Array2<f64>) -> Vec<f64> {
             acc.max(0.0).sqrt()
         })
         .collect()
-}
-
-/// Test-local mirror of the production measure-jet INPUT-MEASUREMENT-ERROR
-/// variance producer (#2225): `Var_input(x*) = σ_coord² · ‖∇f̂(x*)‖²`, the
-/// delta-method propagation of the ambient sampling-noise scale the fit
-/// estimated and froze.
-///
-/// This is the THIRD additive term of the honest predictive variance, and the
-/// module header for contract 6 already states it as such. It is a producer
-/// rather than a block inside one contract because BOTH the interval contract
-/// and the EIV contract need the same number, and a band that omits it is
-/// incomplete for exactly the data this fixture generates: the training rows
-/// sit at `embed(z) + ε` with `COORD_NOISE_SIGMA` per ambient axis, so the
-/// fitted surface is a consistent estimator of `E[y | x_observed]` and is
-/// displaced from `f` at an exactly-known location by `O(σ_coord·‖∇f‖)`.
-///
-/// Measured on this fixture: refitting on training rows whose coordinates are
-/// CLEAN (same latents, same `y` draw, everything else identical) moves the
-/// held-out bias `0.0301 → 0.0097` against an unchanged `rms_se ≈ 0.010`, and
-/// the shipped covariance then covers at `0.9843`. So the band is honest and
-/// the missing term is this one — `σ_coord·‖∇f̂‖ = 0.02 × 1.5 = 0.030`
-/// reproduces the displacement to two digits.
-fn measure_jet_input_variance_for_fit(
-    fit: &gam::StandardFitResult,
-    data: &gam::data::EncodedDataset,
-    test: &[WebPoint],
-) -> Array1<f64> {
-    let raw = ambient_matrix(data, test);
-    let mut total = Array1::<f64>::zeros(test.len());
-    for term in &fit.resolvedspec.smooth_terms {
-        let SmoothBasisSpec::MeasureJet {
-            feature_cols,
-            spec,
-            input_scale,
-        } = &term.basis
-        else {
-            continue;
-        };
-        let (Some(frozen), CenterStrategy::UserProvided(centers)) =
-            (spec.frozen_quadrature.as_ref(), &spec.center_strategy)
-        else {
-            panic!("input-variance producer needs frozen measure-jet geometry");
-        };
-        let Some(sigma_coord) = frozen.sigma_coord else {
-            // No estimated ambient noise scale means no input error to price.
-            continue;
-        };
-        let MeasureJetIdentifiability::FrozenTransform { transform } = &spec.identifiability else {
-            panic!("input-variance producer needs the frozen identifiability transform");
-        };
-        // Lift this term's fitted reduced coefficients to raw representer+head
-        // space, exactly as contract 6 does.
-        let full_cols = fit.design.design.ncols();
-        let smooth_start = full_cols - fit.design.smooth.total_smooth_cols();
-        let term_cols = transform.ncols();
-        let beta_term = fit
-            .fit
-            .beta
-            .slice(ndarray::s![smooth_start..smooth_start + term_cols])
-            .to_owned();
-        let z_full = transform.dot(&beta_term);
-        let m = centers.nrows();
-        let head_width = transform.nrows() - m;
-        let rep = z_full.slice(ndarray::s![..m]).to_owned();
-        let head_coeffs = z_full.slice(ndarray::s![m..]).to_owned();
-        let head_t = (head_width > 0)
-            .then(|| gam::basis::measure_jet_affine_head_lift(centers.view(), frozen.masses.view()));
-        for (i, _) in test.iter().enumerate() {
-            let mut q_std = Array1::<f64>::zeros(feature_cols.len());
-            for (a, &col) in feature_cols.iter().enumerate() {
-                let scale = (*input_scale).map_or(1.0, |scale| scale.get());
-                q_std[a] = raw[[i, col]] / scale;
-            }
-            let grad = gam::basis::measure_jet_ambient_gradient(
-                q_std.view(),
-                centers.view(),
-                rep.view(),
-                spec.length_scale,
-                head_t.as_ref().map(|t| t.view()),
-                head_coeffs.view(),
-            )
-            .expect("analytic ambient gradient");
-            let norm_sq: f64 = grad.iter().map(|g| g * g).sum();
-            total[i] += sigma_coord * sigma_coord * norm_sq;
-        }
-    }
-    total
-}
-
-/// Test-local mirror of the production measure-jet extrapolation variance
-/// producer. The interval contract is total variance = posterior variance + extrapolation variance, where
-/// `Var_extrap` prices finite-support uncertainty from the frozen measure-jet
-/// spectrum; a posterior-covariance-only band is intentionally incomplete for this smooth.
-fn measure_jet_extrapolation_variance_for_fit(
-    fit: &gam::StandardFitResult,
-    data: &gam::data::EncodedDataset,
-    test: &[WebPoint],
-) -> Array1<f64> {
-    let raw = ambient_matrix(data, test);
-    let mut total = Array1::<f64>::zeros(test.len());
-    let covariance_scale = fit
-        .fit
-        .coefficient_covariance_scale()
-        .expect("converged Gaussian measure-jet fixture must resolve its covariance scale");
-    for term in &fit.resolvedspec.smooth_terms {
-        let SmoothBasisSpec::MeasureJet {
-            feature_cols,
-            spec,
-            input_scale,
-        } = &term.basis
-        else {
-            continue;
-        };
-        let (Some(frozen), CenterStrategy::UserProvided(centers)) =
-            (spec.frozen_quadrature.as_ref(), &spec.center_strategy)
-        else {
-            panic!("interval gate needs frozen measure-jet geometry");
-        };
-        let n_levels = frozen.eps_band.len();
-        let mut per_scale: Vec<(usize, f64)> = Vec::new();
-        let mut fused = None;
-        for info in &fit.design.penaltyinfo {
-            if info.termname.as_deref() != Some(term.name.as_str()) {
-                continue;
-            }
-            let lambda = fit.fit.lambdas[info.global_index];
-            match &info.penalty.source {
-                PenaltySource::Other(label) => {
-                    if let Some(level_txt) = label.strip_prefix("measure_jet_scale_") {
-                        let level: usize = level_txt.parse().expect("measure-jet scale label");
-                        per_scale.push((level, lambda));
-                    }
-                }
-                PenaltySource::Primary => {
-                    fused = Some(lambda);
-                }
-                // The measure-jet term carries only its own scale penalties and
-                // the fused primary; no other penalty source contributes to the
-                // scale spectrum this gate reads.
-                PenaltySource::DoublePenaltyNullspace
-                | PenaltySource::OperatorMass
-                | PenaltySource::OperatorTension
-                | PenaltySource::OperatorStiffness
-                | PenaltySource::OperatorThirdOrder
-                | PenaltySource::OperatorRelevance { .. }
-                | PenaltySource::TensorMarginal { .. }
-                | PenaltySource::TensorSeparable { .. }
-                | PenaltySource::TensorGlobalRidge => {}
-            }
-        }
-        let mut lambda_phys = Vec::with_capacity(n_levels);
-        let spectrum = if per_scale.is_empty() {
-            let lambda = fused.expect("fused measure-jet penalty lambda");
-            let c = frozen
-                .fused_penalty_normalization_scale
-                .expect("fused measure-jet penalty normalization scale");
-            MeasureJetExtrapolationSpectrum::Fused(lambda / c)
-        } else {
-            per_scale.sort_by_key(|&(level, _)| level);
-            assert_eq!(
-                per_scale.len(),
-                n_levels,
-                "measure-jet per-scale lambda count"
-            );
-            assert_eq!(
-                frozen.penalty_normalization_scales.len(),
-                n_levels,
-                "measure-jet per-scale normalization count"
-            );
-            lambda_phys.extend(
-                per_scale
-                    .iter()
-                    .map(|&(level, lambda)| lambda / frozen.penalty_normalization_scales[level]),
-            );
-            MeasureJetExtrapolationSpectrum::PerLevel(&lambda_phys)
-        };
-        let mut queries = Array2::<f64>::zeros((test.len(), feature_cols.len()));
-        for (j, &col) in feature_cols.iter().enumerate() {
-            queries.column_mut(j).assign(&raw.column(col));
-        }
-        if let Some(scale) = input_scale {
-            scale.standardize(&mut queries);
-        }
-        let support = gam::basis::measure_jet_support_curve(
-            queries.view(),
-            centers.view(),
-            frozen.masses.view(),
-            &frozen.eps_band,
-        )
-        .expect("measure-jet support curve for interval gate");
-        for i in 0..test.len() {
-            let v = gam::basis::measure_jet_extrapolation_variance(
-                support.row(i),
-                &frozen.eps_band,
-                &frozen.support_means,
-                spectrum,
-                0.05,
-            )
-            .expect("measure-jet extrapolation variance for interval gate");
-            total[i] += covariance_scale * v;
-        }
-    }
-    total
 }
 
 /// Integrated quality gate: one predictive gaussian measure-jet fit feeds the
@@ -713,8 +539,22 @@ fn measure_jet_web_quality_contracts() {
         .beta_covariance_corrected()
         .expect("standard gaussian fit exposes the smoothing-corrected covariance");
     let mut se = pointwise_se(dense.view(), vp);
-    let extrap = measure_jet_extrapolation_variance_for_fit(&interval_fit, &data, &coverage_test);
-    // The THIRD term, which contract 6 of this same file already states is part
+    // The finite-support and input-measurement-error terms come from the saved
+    // model: the producer `gam predict --uncertainty` and the Python
+    // `predict(interval=…)` put into their interval request, priced over the RAW
+    // query rows.
+    let model = FittedModel::from_payload(web_payload(
+        MJS_INTERVAL_FORMULA,
+        &data,
+        "gaussian",
+        interval_fit,
+    ));
+    let col_map = data.column_map();
+    let priced = model
+        .measure_jet_extrapolation_variance(m.view(), &col_map)
+        .expect("measure-jet extrapolation variance")
+        .expect("the frozen measure-jet term prices every query");
+    // The input term is the THIRD term, which contract 6 of this same file already states is part
     // of the honest predictive variance and which this gate used to omit. It is
     // not a widening: with it the band is `posterior + finite-support + input`,
     // which is what the module header says the honest variance is, and the
@@ -739,9 +579,8 @@ fn measure_jet_web_quality_contracts() {
     // symmetric. Moving the QUERY rows to clean locations (done above, and
     // correct) removes the query half; the TRAINING half is what remained, and
     // pricing it is what `Var_input` is for.
-    let input = measure_jet_input_variance_for_fit(&interval_fit, &data, &coverage_test);
-    for ((s, v), w) in se.iter_mut().zip(extrap.iter()).zip(input.iter()) {
-        *s = (*s * *s + *v + *w).sqrt();
+    for (s, v) in se.iter_mut().zip(priced.iter()) {
+        *s = (*s * *s + *v).sqrt();
     }
 
     let mut hits = 0usize;
@@ -768,6 +607,94 @@ fn measure_jet_web_quality_contracts() {
         "measure-jet 95% interval coverage {coverage:.4} outside the honest window [0.85, 1.0] \
          ({hits}/{} held-out on-web points)",
         coverage_test.len()
+    );
+
+    // Contract 5b — the predict surfaces carry this producer. `gam predict
+    // --uncertainty` and the Python `predict(interval=…)` both put
+    // `measure_jet_extrapolation_variance` over the RAW rows into the shared
+    // `PredictionRequest`, and `resolve_prediction_request` adds it to the band.
+    // The design input is clipped to the training ranges, so without the term a
+    // row far off the web gets the hull's posterior band. With it that row's band
+    // must widen by exactly the priced variance and come back wider than the
+    // on-web row's.
+    let mid_web = embed_latent(&e_web, latent_point(0, 0.5).0);
+    let mut rows = Array2::<f64>::zeros((2, data.headers.len()));
+    for k in 0..AMBIENT_D {
+        let col = col_map[format!("x{k}").as_str()];
+        rows[[0, col]] = mid_web[k];
+        rows[[1, col]] = 5.0;
+    }
+    let offsets = Array1::<f64>::zeros(2);
+    let input = build_predict_input_for_model(
+        &model,
+        rows.view(),
+        &col_map,
+        model.training_headers.as_ref(),
+        &offsets,
+        &offsets,
+        false,
+    )
+    .expect("predict input for the on-web and off-web rows");
+    let predictor = model
+        .predictor()
+        .expect("the saved web model builds its predictor");
+    let predict_fit =
+        fit_result_from_saved_model_for_prediction(&model).expect("saved fit for prediction");
+    let off_support = model
+        .measure_jet_extrapolation_variance(rows.view(), &col_map)
+        .expect("measure-jet extrapolation variance")
+        .expect("the frozen measure-jet term prices both rows");
+    let band_se = |extrapolation_variance: Option<Array1<f64>>| -> Array1<f64> {
+        resolve_prediction_request(
+            &*predictor,
+            &input,
+            &predict_fit,
+            model.prediction_uses_posterior_mean(),
+            &PredictionRequest {
+                interval: Some(0.95),
+                covariance_mode: InferenceCovarianceMode::SmoothingCorrected,
+                observation_interval: false,
+                observation_prior_weights: None,
+                extrapolation_variance,
+            },
+        )
+        .expect("interval prediction through the shared request")
+        .posterior_mean_standard_error
+        .expect("an interval request reports the response-scale standard error")
+    };
+    let with_term = band_se(Some(off_support.clone()));
+    let without_term = band_se(None);
+    eprintln!(
+        "[measure-jet 5b] priced on-web {:.4e} off-web {:.4e}; SE on-web {:.4e} -> {:.4e}, \
+         off-web {:.4e} -> {:.4e}",
+        off_support[0],
+        off_support[1],
+        without_term[0],
+        with_term[0],
+        without_term[1],
+        with_term[1]
+    );
+    for row in 0..2 {
+        let widened = with_term[row] * with_term[row];
+        let expected = without_term[row] * without_term[row] + off_support[row];
+        assert!(
+            (widened - expected).abs() <= 1e-9 * expected,
+            "row {row}: the band must widen by exactly the priced variance: SE² {widened:.6e} \
+             vs posterior SE² plus priced variance {expected:.6e}"
+        );
+    }
+    assert!(
+        off_support[1] > off_support[0],
+        "the far off-web row must be priced more extrapolation variance than the on-web row: \
+         {:.4e} vs {:.4e}",
+        off_support[1],
+        off_support[0]
+    );
+    assert!(
+        with_term[1] > with_term[0],
+        "the far off-web row must get the wider band: SE {:.4e} vs on-web {:.4e}",
+        with_term[1],
+        with_term[0]
     );
 }
 
@@ -877,7 +804,7 @@ fn measure_jet_eiv_input_variance_matches_fitted_surface_2225() {
     };
 
     let h = 1e-5;
-    let mut max_input_var = 0.0_f64;
+    let mut reconstructed = Vec::with_capacity(test.len());
     for qi in 0..test.len() {
         // Standardized query for the term axes (frozen input scales).
         let mut q_std = Array1::<f64>::zeros(feature_cols.len());
@@ -910,8 +837,9 @@ fn measure_jet_eiv_input_variance_matches_fitted_surface_2225() {
 
         let norm_sq: f64 = grad.iter().map(|g| g * g).sum();
         assert!(norm_sq.is_finite(), "gradient norm must be finite");
-        max_input_var = max_input_var.max(sigma_coord * sigma_coord * norm_sq);
+        reconstructed.push(sigma_coord * sigma_coord * norm_sq);
     }
+    let max_input_var = reconstructed.iter().copied().fold(0.0_f64, f64::max);
 
     // (2) The term is non-vacuous: at least one on-web query has genuine slope,
     // so `Var_input = σ_coord²·‖∇f̂‖²` prices a strictly positive input-noise
@@ -922,19 +850,46 @@ fn measure_jet_eiv_input_variance_matches_fitted_surface_2225() {
     );
 
     // (3) And the number the INTERVAL contract adds to its band is this same
-    // number. The two contracts consume one producer; asserting that here is
-    // what stops them from drifting into two definitions of `Var_input`, which
-    // is the shape that let the band ship without the term at all.
-    let produced = measure_jet_input_variance_for_fit(&fit, &data, &test);
+    // number. Contract 5 and the predict surfaces consume one producer, the saved
+    // model's `measure_jet_extrapolation_variance`, which prices the
+    // finite-support and input terms together. Clearing the frozen σ_coord
+    // isolates its input term; asserting that term here is what stops the two
+    // contracts from drifting into two definitions of `Var_input`, which is the
+    // shape that let the band ship without the term at all.
+    let payload = web_payload(MJS_INTERVAL_FORMULA, &data, "gaussian", fit);
+    let mut without_input = payload.clone();
+    for term in &mut without_input
+        .resolved_termspec
+        .as_mut()
+        .expect("the standard payload carries its resolved term specification")
+        .smooth_terms
+    {
+        if let SmoothBasisSpec::MeasureJet { spec, .. } = &mut term.basis
+            && let Some(frozen) = spec.frozen_quadrature.as_mut()
+        {
+            frozen.sigma_coord = None;
+        }
+    }
+    let col_map = data.column_map();
+    let priced = FittedModel::from_payload(payload)
+        .measure_jet_extrapolation_variance(raw.view(), &col_map)
+        .expect("measure-jet extrapolation variance")
+        .expect("the frozen measure-jet term prices every query");
+    let finite_support_only = FittedModel::from_payload(without_input)
+        .measure_jet_extrapolation_variance(raw.view(), &col_map)
+        .expect("measure-jet extrapolation variance without σ_coord")
+        .expect("the frozen measure-jet term still prices its finite-support term");
     assert_eq!(
-        produced.len(),
+        priced.len(),
         test.len(),
-        "the input-variance producer must price every query"
+        "the saved model must price every query"
     );
-    let produced_max = produced.iter().copied().fold(0.0_f64, f64::max);
-    assert!(
-        (produced_max - max_input_var).abs() <= 1e-12 * (1.0 + max_input_var),
-        "the interval band's Var_input producer disagrees with this contract's own \
-         reconstruction: {produced_max} vs {max_input_var}"
-    );
+    for (qi, &expected) in reconstructed.iter().enumerate() {
+        let produced = priced[qi] - finite_support_only[qi];
+        assert!(
+            (produced - expected).abs() <= 1e-12 * (1.0 + priced[qi].abs()),
+            "query {qi}: the saved model's Var_input {produced} disagrees with this \
+             contract's own reconstruction {expected}"
+        );
+    }
 }
