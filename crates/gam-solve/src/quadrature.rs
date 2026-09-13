@@ -803,7 +803,7 @@ pub(crate) fn probit_posterior_meanwith_deriv_exact(mu: f64, sigma: f64) -> Inte
     //
     // So this path is genuinely exact: no node count, no truncation, and no
     // approximation regime split.
-    if !(mu.is_finite() && sigma.is_finite()) || sigma <= 1e-12 {
+    if !(mu.is_finite() && sigma.is_finite()) {
         let mean = gam_math::probability::normal_cdf(mu);
         let dmean_dmu = gam_math::probability::normal_pdf(mu);
         return IntegratedMeanDerivative {
@@ -2088,7 +2088,10 @@ fn adaptive_simpson_refine(
 /// standard-normal density kills the tails (`φ(15) ~ 1e-49`), so the finite
 /// window `K = 15` captures the whole integral with no analytic tail term.
 fn integrate_normal_adaptive(mu: f64, sigma: f64, f: impl Fn(f64) -> f64) -> f64 {
-    if !(sigma.is_finite()) || sigma < 1e-10 {
+    // A Gaussian collapses to a point mass only at `sigma <= 0`. Any positive
+    // `sigma` is integrated in standardized coordinates, where the panels resolve
+    // `f(mu + sigma u)` to tolerance however narrow the density (#2469).
+    if !(sigma.is_finite()) || sigma <= 0.0 {
         return f(mu);
     }
     const K: f64 = 15.0;
@@ -2115,7 +2118,7 @@ fn integrate_normal_adaptive(mu: f64, sigma: f64, f: impl Fn(f64) -> f64) -> f64
 }
 
 fn cloglog_posterior_meanwith_deriv_quadrature(mu: f64, sigma: f64) -> IntegratedMeanDerivative {
-    if sigma < 1e-10 {
+    if sigma <= 0.0 {
         return IntegratedMeanDerivative {
             mean: cloglog_mean_exact(mu),
             dmean_dmu: cloglog_mean_d1_exact(mu),
@@ -3111,7 +3114,7 @@ pub fn integrated_inverse_link_mean_and_derivative(
             Ok(IntegratedMeanDerivative {
                 mean,
                 dmean_dmu,
-                mode: if sigma <= 1e-10 {
+                mode: if sigma <= 0.0 {
                     IntegratedExpectationMode::ExactClosedForm
                 } else {
                     IntegratedExpectationMode::QuadratureFallback
@@ -3169,7 +3172,7 @@ pub(crate) fn integrated_inverse_link_jet(
             let (mean, d1, d2, d3) = integrate_normal_ghq_adaptive(quadctx, mu, sigma, |x| {
                 component_point_jet(LinkComponent::Logit, x)
             });
-            let mode = if sigma <= 1e-10 {
+            let mode = if sigma <= 0.0 {
                 IntegratedExpectationMode::ExactClosedForm
             } else {
                 // Mirror the scalar controlled-path mode when it accepts the
@@ -3209,7 +3212,7 @@ pub(crate) fn integrated_inverse_link_jet(
                 d1,
                 d2,
                 d3,
-                mode: if sigma <= 1e-10 {
+                mode: if sigma <= 0.0 {
                     IntegratedExpectationMode::ExactClosedForm
                 } else {
                     IntegratedExpectationMode::QuadratureFallback
@@ -3350,7 +3353,7 @@ fn integrated_mixture_component_jet(
                 d1: d1.max(0.0),
                 d2,
                 d3,
-                mode: if sigma <= 1e-10 {
+                mode: if sigma <= 0.0 {
                     IntegratedExpectationMode::ExactClosedForm
                 } else {
                     IntegratedExpectationMode::QuadratureFallback
@@ -3439,7 +3442,7 @@ fn integrated_sas_jet_ghq(
         d1: d1.max(0.0),
         d2,
         d3,
-        mode: if sigma <= 1e-10 {
+        mode: if sigma <= 0.0 {
             IntegratedExpectationMode::ExactClosedForm
         } else {
             IntegratedExpectationMode::QuadratureFallback
@@ -3462,7 +3465,7 @@ fn integrated_beta_logistic_jet_ghq(
         d1: d1.max(0.0),
         d2,
         d3,
-        mode: if sigma <= 1e-10 {
+        mode: if sigma <= 0.0 {
             IntegratedExpectationMode::ExactClosedForm
         } else {
             IntegratedExpectationMode::QuadratureFallback
@@ -3851,7 +3854,10 @@ where
     F: Fn(f64) -> R,
     R: GhqValue,
 {
-    if se_eta < 1e-10 {
+    // Only `sigma <= 0` is a point mass for every integrand. A positive `sigma`
+    // keeps the node sum, which carries the `sigma^2 f'' / 2` term the point mass
+    // drops (#2469).
+    if se_eta <= 0.0 {
         return f(eta);
     }
     let n = adaptive_point_count_from_sd(se_eta.abs());
@@ -3908,7 +3914,7 @@ fn integrated_logit_jet_ghq(
         d1: d1.max(0.0),
         d2,
         d3,
-        mode: if sigma <= 1e-10 {
+        mode: if sigma <= 0.0 {
             IntegratedExpectationMode::ExactClosedForm
         } else {
             IntegratedExpectationMode::QuadratureFallback
@@ -4377,9 +4383,6 @@ where
 /// which is exactly the integrated derivative IRLS would need.
 #[inline]
 pub(crate) fn probit_posterior_mean(eta: f64, se_eta: f64) -> f64 {
-    if se_eta < 1e-10 {
-        return gam_math::probability::normal_cdf(eta);
-    }
     let denom = (1.0 + se_eta * se_eta).sqrt();
     gam_math::probability::normal_cdf(eta / denom)
 }
