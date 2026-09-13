@@ -707,6 +707,28 @@ fn run_from_decoder(
         fit_start.elapsed().as_secs_f64(),
     );
     let mut current_ev = explained_variance(x, &codes, decoder.view());
+    // #2822 — dormant capacity is a zero row. The map below nulls every rejected
+    // revival, so each of its fixed points holds a zero row for every atom no row
+    // routes to, and `decoder_fixed_point_residual` scores an active-to-dormant
+    // transition as one. An atom the entry routing never fires is in neither state:
+    // its first rejected revival nulls it and scores that one, and revival reaches
+    // only as many dead atoms per epoch as rows still carry residual, so at
+    // `K ≫ N·s` the certificate could not close while seed rows remained. Project
+    // the entry onto dormant capacity. An atom no code fires contributes nothing to
+    // the reconstruction, so the entry explained variance above is unchanged.
+    let mut entry_alive = vec![false; k];
+    for code in &codes {
+        for (slot, &atom) in code.indices.iter().enumerate() {
+            if code.codes[slot] != 0.0 {
+                entry_alive[atom as usize] = true;
+            }
+        }
+    }
+    for (atom, alive) in entry_alive.into_iter().enumerate() {
+        if !alive {
+            decoder.row_mut(atom).fill(0.0);
+        }
+    }
     // Effective fixed-point tolerance: never demand tighter closure than the
     // arithmetic can express (#2396). A `config.tolerance` of `0.0` asks for the
     // tightest achievable fixed point, which in floating point is the rounding
