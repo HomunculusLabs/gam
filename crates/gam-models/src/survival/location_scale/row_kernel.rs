@@ -4676,36 +4676,12 @@ impl SurvivalLocationScaleFamily {
             let Some((primary, row_kernel)) = kernel.row_nll_inputs_opt(row)? else {
                 continue;
             };
-            let (entry_survival_first, entry_survival_second, _, _) =
-                self.link_param_stack_partials(dynamic.h_entry[row] + dynamic.q_entry[row], axis)?;
-            let (exit_survival_first, exit_survival_second, exit_log_pdf_first, exit_log_pdf_second) =
-                self.link_param_stack_partials(dynamic.h_exit[row] + dynamic.q_exit[row], axis)?;
-            let partial_kernel = SurvivalExactRowKernel {
-                w: row_kernel.w,
-                d: row_kernel.d,
-                log_s0: 0.0,
-                r0: entry_survival_first,
-                dr0: entry_survival_second,
-                ddr0: 0.0,
-                dddr0: 0.0,
-                log_s1: 0.0,
-                r1: exit_survival_first,
-                dr1: exit_survival_second,
-                ddr1: 0.0,
-                dddr1: 0.0,
-                logphi1: 0.0,
-                dlogphi1: exit_log_pdf_first,
-                d2logphi1: exit_log_pdf_second,
-                d3logphi1: 0.0,
-                d4logphi1: 0.0,
-                log_pdf1_minus_log_s0: 0.0,
-                log_s1_minus_log_s0: 0.0,
-                log_g: 0.0,
-                d_log_g: 0.0,
-                d2_log_g: 0.0,
-                d3_log_g: 0.0,
-                d4_log_g: 0.0,
-            };
+            let partial_kernel = self.link_param_partial_row_kernel(
+                &row_kernel,
+                dynamic.h_entry[row] + dynamic.q_entry[row],
+                dynamic.h_exit[row] + dynamic.q_exit[row],
+                axis,
+            )?;
             let (_, gradient, hessian) = sls_row_vgh_generated(&primary, &partial_kernel);
             crate::row_kernel::RowKernel::<SLS_ROW_K>::jacobian_transpose_action(
                 &kernel,
@@ -4730,18 +4706,159 @@ impl SurvivalLocationScaleFamily {
         }))
     }
 
-    /// θ-partials of the first two derivative entries of the survival stack
-    /// (`r = −(ln S)′`, `dr = −(ln S)″`) and the log-density stack (`(ln f)′`,
-    /// `(ln f)″`) at index `u`, for one inverse-link shape axis (#2904), in that
-    /// order. Both stacks are `ln` composed on a jet `(v, x′, x″)`: `(S, −f, −f′)`
-    /// and `(f, f′, f″)` with `f = F′`, whose θ-partials `(dv, dx′, dx″)` are
-    /// `(−∂θF, −∂θf, −∂θf′)` and `(∂θf, ∂θf′, ∂θf″)`. `S` is the stable complement
-    /// the kernel's generic arm uses.
+    /// Mixed coefficient drift `D_β H_θ[u]` of the observed information along
+    /// inverse-link shape axis `axis` over `rows` (#2904): the β-directional
+    /// derivative of `link_param_joint_psi_terms`' `hessian_psi`, which the
+    /// explicit-ψ Jeffreys score correction and curvature drift read along every
+    /// coefficient axis. The row program's contracted third derivative on the
+    /// θ-partial row kernel is pulled back through the same row Jacobian that
+    /// `row_kernel_directional_derivative` uses. `None` when the link has no free
+    /// parameters.
+    pub(crate) fn link_param_joint_psihessian_directional_derivative(
+        &self,
+        block_states: &[ParameterBlockState],
+        axis: usize,
+        d_beta_flat: &[f64],
+        rows: &crate::row_kernel::RowSet,
+    ) -> Result<Option<Array2<f64>>, String> {
+        use gam_solve::mixture_link::{InverseLinkKernel, LinkParamPartials};
+        let axis_count = match self
+            .inverse_link
+            .param_partials(0.0)
+            .map_err(|e| format!("inverse-link param partials probe failed: {e}"))?
+        {
+            None => return Ok(None),
+            Some(LinkParamPartials::Sas(_)) => 2,
+            Some(LinkParamPartials::Mixture(partials)) => partials.djet_drho.len(),
+        };
+        if axis_count == 0 {
+            return Ok(None);
+        }
+        if axis >= axis_count {
+            return Err(SurvivalLocationScaleError::DimensionMismatch {
+                reason: format!(
+                    "inverse-link shape axis {axis} is out of range for a link with {axis_count} \
+                     free parameters"
+                ),
+            }
+            .into());
+        }
+        if self.x_link_wiggle.is_some() {
+            return Err(SurvivalLocationScaleError::InvalidConfiguration {
+                reason: "inverse-link shape hyper axes are not available with a link wiggle block"
+                    .to_string(),
+            }
+            .into());
+        }
+        let dynamic = self.build_dynamic_geometry(block_states)?;
+        let kernel = self.survival_ls_row_kernel_rescaled(&dynamic, 0.0);
+        let p_total = *kernel
+            .offsets
+            .last()
+            .ok_or_else(|| "missing joint block offsets".to_string())?;
+        if d_beta_flat.len() != p_total {
+            return Err(SurvivalLocationScaleError::DimensionMismatch {
+                reason: format!(
+                    "inverse-link shape drift direction has length {}, expected {p_total}",
+                    d_beta_flat.len()
+                ),
+            }
+            .into());
+        }
+        let drift = rows.par_try_reduce_fold(
+            self.n,
+            || Array2::<f64>::zeros((p_total, p_total)),
+            |mut acc, row, weight| -> Result<Array2<f64>, String> {
+                let Some((primary, row_kernel)) = kernel.row_nll_inputs_opt(row)? else {
+                    return Ok(acc);
+                };
+                let partial_kernel = self.link_param_partial_row_kernel(
+                    &row_kernel,
+                    dynamic.h_entry[row] + dynamic.q_entry[row],
+                    dynamic.h_exit[row] + dynamic.q_exit[row],
+                    axis,
+                )?;
+                let direction = crate::row_kernel::RowKernel::<SLS_ROW_K>::jacobian_action(
+                    &kernel,
+                    row,
+                    d_beta_flat,
+                );
+                let mut third = sls_row_third_generated(&primary, &partial_kernel, &direction);
+                if weight != 1.0 {
+                    for entry in third.iter_mut().flatten() {
+                        *entry *= weight;
+                    }
+                }
+                crate::row_kernel::RowKernel::<SLS_ROW_K>::add_pullback_hessian(
+                    &kernel,
+                    row,
+                    &third,
+                    &mut acc,
+                );
+                Ok(acc)
+            },
+            |left, right| Ok(left + right),
+        )?;
+        Ok(Some(drift))
+    }
+
+    /// The θ-partial of one row's residual-distribution stacks along shape axis
+    /// `axis`, as a row kernel carrying that row's weight and event target
+    /// (#2904). A supplied compose is linear in its stack at every order, so the
+    /// row program run on this kernel returns the θ-partials of the row gradient,
+    /// Hessian and contracted third derivative. The value slots, the stable pair
+    /// values and the link-independent `log g` stack are zero, and no program
+    /// below fourth order reads the fourth entries.
+    fn link_param_partial_row_kernel(
+        &self,
+        row_kernel: &SurvivalExactRowKernel,
+        entry_index: f64,
+        exit_index: f64,
+        axis: usize,
+    ) -> Result<SurvivalExactRowKernel, String> {
+        let (entry_survival, _) = self.link_param_stack_partials(entry_index, axis)?;
+        let (exit_survival, exit_log_pdf) = self.link_param_stack_partials(exit_index, axis)?;
+        Ok(SurvivalExactRowKernel {
+            w: row_kernel.w,
+            d: row_kernel.d,
+            log_s0: 0.0,
+            r0: entry_survival[0],
+            dr0: entry_survival[1],
+            ddr0: entry_survival[2],
+            dddr0: 0.0,
+            log_s1: 0.0,
+            r1: exit_survival[0],
+            dr1: exit_survival[1],
+            ddr1: exit_survival[2],
+            dddr1: 0.0,
+            logphi1: 0.0,
+            dlogphi1: exit_log_pdf[0],
+            d2logphi1: exit_log_pdf[1],
+            d3logphi1: exit_log_pdf[2],
+            d4logphi1: 0.0,
+            log_pdf1_minus_log_s0: 0.0,
+            log_s1_minus_log_s0: 0.0,
+            log_g: 0.0,
+            d_log_g: 0.0,
+            d2_log_g: 0.0,
+            d3_log_g: 0.0,
+            d4_log_g: 0.0,
+        })
+    }
+
+    /// θ-partials of the first three derivative entries of the survival stack
+    /// (`r = −(ln S)′`, `dr = −(ln S)″`, `ddr = −(ln S)‴`) and of the log-density
+    /// stack (`(ln f)′`, `(ln f)″`, `(ln f)‴`) at index `u`, for one inverse-link
+    /// shape axis (#2904), in that order. Both stacks are `ln` composed on a jet
+    /// `(v, x′, x″, x‴)`: `(S, −f, −f′, −f″)` and `(f, f′, f″, f‴)` with `f = F′`,
+    /// whose θ-partials `(dv, dx′, dx″, dx‴)` are `(−∂θF, −∂θf, −∂θf′, −∂θf″)` and
+    /// `(∂θf, ∂θf′, ∂θf″, ∂θf‴)`. `S` is the stable complement the kernel's generic
+    /// arm uses.
     fn link_param_stack_partials(
         &self,
         u: f64,
         axis: usize,
-    ) -> Result<(f64, f64, f64, f64), String> {
+    ) -> Result<([f64; 3], [f64; 3]), String> {
         use gam_solve::mixture_link::{InverseLinkKernel, LinkParamPartials};
         let jet = inverse_link_jet_for_inverse_link(&self.inverse_link, u)
             .map_err(|e| format!("inverse link evaluation failed at eta={u}: {e}"))?;
@@ -4783,29 +4900,53 @@ impl SurvivalLocationScaleFamily {
                 )
             })?,
         };
-        let (survival_first, survival_second) = Self::log_jet_first_two_theta_partials(
-            survival, -pdf, -jet.d2, -djet.mu, -djet.d1, -djet.d2,
+        let pdf_third = inverse_link_pdfthird_derivative_for_inverse_link(&self.inverse_link, u)
+            .map_err(|e| format!("inverse-link pdf third derivative failed at eta={u}: {e}"))?;
+        let pdf_third_partial =
+            gam_solve::mixture_link::inverse_link_pdfthird_derivative_param_partials(
+                &self.inverse_link,
+                u,
+            )
+            .map_err(|e| {
+                format!("inverse-link pdf third derivative partials failed at eta={u}: {e}")
+            })?
+            .and_then(|third_partials| third_partials.get(axis).copied())
+            .ok_or_else(|| {
+                format!("inverse link has no pdf third derivative partial on shape axis {axis}")
+            })?;
+        let survival_partials = Self::log_jet_theta_partials(
+            survival,
+            [-pdf, -jet.d2, -jet.d3],
+            -djet.mu,
+            [-djet.d1, -djet.d2, -djet.d3],
         );
-        let (log_pdf_first, log_pdf_second) =
-            Self::log_jet_first_two_theta_partials(pdf, jet.d2, jet.d3, djet.d1, djet.d2, djet.d3);
-        Ok((-survival_first, -survival_second, log_pdf_first, log_pdf_second))
+        let log_pdf_partials = Self::log_jet_theta_partials(
+            pdf,
+            [jet.d2, jet.d3, pdf_third],
+            djet.d1,
+            [djet.d2, djet.d3, pdf_third_partial],
+        );
+        Ok((survival_partials.map(|value| -value), log_pdf_partials))
     }
 
-    /// `(∂θ(x′/v), ∂θ(x″/v − (x′/v)²))`: the θ-partials of the first two entries
-    /// of `ln x` for a one-variable jet `(v, x′, x″)` whose θ-partial jet is
-    /// `(dv, dx′, dx″)` (#2904).
+    /// θ-partials of the first three entries of `ln x` for a one-variable jet
+    /// `(v, x′, x″, x‴)` whose θ-partial jet is `(dv, dx′, dx″, dx‴)` (#2904). With
+    /// `ρₖ = xₖ/v`: `(ln x)′ = ρ₁`, `(ln x)″ = ρ₂ − ρ₁²`, `(ln x)‴ = ρ₃ − 3ρ₁ρ₂ + 2ρ₁³`,
+    /// and `∂θρₖ = (dxₖ − ρₖ·dv)/v`.
     #[inline]
-    fn log_jet_first_two_theta_partials(
-        v: f64,
-        x1: f64,
-        x2: f64,
-        dv: f64,
-        dx1: f64,
-        dx2: f64,
-    ) -> (f64, f64) {
-        let ratio = x1 / v;
-        let d_ratio = dx1 / v - x1 * dv / (v * v);
-        (d_ratio, dx2 / v - x2 * dv / (v * v) - 2.0 * ratio * d_ratio)
+    fn log_jet_theta_partials(v: f64, x: [f64; 3], dv: f64, dx: [f64; 3]) -> [f64; 3] {
+        let ratio = x.map(|value| value / v);
+        let d_ratio = [
+            (dx[0] - ratio[0] * dv) / v,
+            (dx[1] - ratio[1] * dv) / v,
+            (dx[2] - ratio[2] * dv) / v,
+        ];
+        [
+            d_ratio[0],
+            d_ratio[1] - 2.0 * ratio[0] * d_ratio[0],
+            d_ratio[2] - 3.0 * (d_ratio[0] * ratio[1] + ratio[0] * d_ratio[1])
+                + 6.0 * ratio[0] * ratio[0] * d_ratio[0],
+        ]
     }
 
     pub(crate) fn exact_newton_joint_psi_direction(

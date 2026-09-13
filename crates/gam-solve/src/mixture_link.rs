@@ -2000,6 +2000,53 @@ pub fn inverse_link_pdffourth_derivative_for_inverse_link(
     inverse_link_pdf_derivative_for_inverse_link(link, eta, PdfDerivativeOrder::Fourth)
 }
 
+/// θ-partials of the inverse-link density's third derivative `f‴ = ∂⁴μ/∂η⁴`,
+/// the quantity [`inverse_link_pdfthird_derivative_for_inverse_link`] returns,
+/// one per free shape parameter in [`LinkParamPartials`] order: `(ε, log δ)` for
+/// SAS and Beta-Logistic, the free logits for a mixture. `None` for a link with
+/// no shape parameters. The jet partials stop at `f″`; a survival row program
+/// needs this one order further for the mixed information drift of a shape axis
+/// (#2904).
+pub fn inverse_link_pdfthird_derivative_param_partials(
+    link: &InverseLink,
+    eta: f64,
+) -> Result<Option<Vec<f64>>, EstimationError> {
+    match link {
+        InverseLink::Standard(_) | InverseLink::LatentCLogLog(_) => Ok(None),
+        InverseLink::Sas(state) => Ok(Some(
+            sas_inverse_link_pdfthird_derivative_param_partials(eta, state.epsilon, state.log_delta)?
+                .to_vec(),
+        )),
+        InverseLink::BetaLogistic(state) => Ok(Some(
+            beta_logistic_inverse_link_pdfthird_derivative_param_partials(
+                eta,
+                state.log_delta,
+                state.epsilon,
+            )
+            .to_vec(),
+        )),
+        InverseLink::Mixture(state) => {
+            // `f‴ = Σ_j π_j f_j‴` with softmax weights, so a free logit moves it as
+            // `∂f‴/∂ρ_j = π_j (f_j‴ − f‴)`, the rule the jet partials use.
+            let k = state.components.len().min(state.pi.len());
+            let component_third: Vec<f64> = state.components[..k]
+                .iter()
+                .map(|&component| component_inverse_link_pdfthird_derivative(component, eta))
+                .collect();
+            let mixed_third: f64 = component_third
+                .iter()
+                .zip(state.pi.iter())
+                .map(|(&third, &weight)| weight * third)
+                .sum();
+            Ok(Some(
+                (0..k.saturating_sub(1))
+                    .map(|j| state.pi[j] * (component_third[j] - mixed_third))
+                    .collect(),
+            ))
+        }
+    }
+}
+
 #[inline]
 /// Exact Royston-Parmar survival jet `S(eta) = exp(-exp(eta))` for every finite
 /// `f64` eta. Scaled polynomial tails preserve representable derivatives after
@@ -2812,6 +2859,37 @@ pub fn beta_logistic_inverse_link_jetwith_param_partials(
     }
 }
 
+/// `(∂f‴/∂ε, ∂f‴/∂log_shape_center)` of the Beta-Logistic density's third
+/// derivative `f‴ = d1·P₄`, `P₄ = t³ − 3c·t·u′ − c·u″` (see
+/// `beta_logistic_inverse_link_pdfthird_derivative`), in the parameter order of
+/// [`beta_logistic_inverse_link_jetwith_param_partials`] (#2904). `u′` and `u″`
+/// do not depend on the shapes; a shape motion `(a_θ, b_θ)` moves
+/// `log d1` by `a_θ·l_a + b_θ·l_b`, `t` by `a_θ(1−u) − b_θ·u` and `c` by `a_θ + b_θ`.
+pub(crate) fn beta_logistic_inverse_link_pdfthird_derivative_param_partials(
+    eta: f64,
+    log_shape_center: f64,
+    epsilon: f64,
+) -> [f64; 2] {
+    let logistic = logistic_uwith_derivatives(eta);
+    let (a, b, da, db, ..) = beta_logistic_shape_jets(log_shape_center, epsilon);
+    let d1 = beta_logistic_log_d1(a, b, logistic).exp();
+    let c = a + b;
+    let t = a * logistic.one_minus_u - b * logistic.u;
+    let u2 = logistic.du * (logistic.one_minus_u - logistic.u);
+    let p4 = t * t * t - 3.0 * c * t * logistic.du - c * u2;
+    let psi_ab = digamma(a + b);
+    let la = logistic.ln_u - digamma(a) + psi_ab;
+    let lb = logistic.ln_one_minus_u - digamma(b) + psi_ab;
+    let partial = |a_t: f64, b_t: f64| -> f64 {
+        let d1_t = d1 * (a_t * la + b_t * lb);
+        let t_t = a_t * logistic.one_minus_u - b_t * logistic.u;
+        let c_t = a_t + b_t;
+        let p4_t = 3.0 * t * t * t_t - 3.0 * (c_t * t + c * t_t) * logistic.du - c_t * u2;
+        d1_t * p4 + d1 * p4_t
+    };
+    [partial(-da, db), partial(da, db)]
+}
+
 /// SAS inverse-link jet for:
 ///   mu(eta) = Phi(sinh(smooth_bound(delta * asinh(eta) + epsilon, SAS_U_CLAMP))),
 ///   delta = exp(smooth_bound(log_delta, SAS_LOG_DELTA_BOUND)).
@@ -3029,6 +3107,99 @@ pub(crate) fn sas_inverse_link_pdffourth_derivative(
         + 5.0 * base.d2 * z1 * z4
         + base.d1 * z5;
     Ok(canonicalzero(out))
+}
+
+/// `(∂f‴/∂ε, ∂f‴/∂log δ)` of the SAS density's third derivative `f‴ = μ⁗`
+/// (#2904): the chain `sas_inverse_link_pdfthird_derivative` evaluates,
+/// differentiated term by term in one parameter. The parameter enters the raw
+/// latent `u_raw = δ·asinh(η) + ε` with partial `rt` and its η-derivatives
+/// `r_k = δ·asinh⁽ᵏ⁾` with partials `r_k,t`; `δ` moves through the bounded
+/// effective log-delta exactly as in [`sas_inverse_link_jetwith_param_partials`].
+pub(crate) fn sas_inverse_link_pdfthird_derivative_param_partials(
+    eta: f64,
+    epsilon: f64,
+    log_delta: f64,
+) -> Result<[f64; 2], EstimationError> {
+    let eta = finite_inverse_link_eta("SAS inverse link", eta)?;
+    let asinh = asinh_jet5(eta);
+    let (ld_eff, dld_eff_draw) = sas_effective_log_delta(log_delta);
+    let delta = ld_eff.exp();
+    let ddelta_draw = delta * dld_eff_draw;
+    let sb = smooth_bound_jet(delta * asinh.value + epsilon, SAS_U_CLAMP);
+    let (g1, g2, g3, g4, g5) = (sb.d1, sb.d2, sb.d3, sb.d4, sb.d5);
+    let s = sb.g.sinh();
+    let c = sb.g.cosh();
+    let base = probit_jet(s);
+    let phi4 = probit_pdfthird_derivative(s);
+    let phi5 = probit_pdffourth_derivative(s);
+    let r1 = delta * asinh.d1;
+    let r2 = delta * asinh.d2;
+    let r3 = delta * asinh.d3;
+    let r4 = delta * asinh.d4;
+    let u1 = g1 * r1;
+    let u2 = g2 * r1 * r1 + g1 * r2;
+    let u3 = g3 * r1 * r1 * r1 + 3.0 * g2 * r1 * r2 + g1 * r3;
+    let u4 = g4 * r1.powi(4)
+        + 6.0 * g3 * r1 * r1 * r2
+        + 3.0 * g2 * r2 * r2
+        + 4.0 * g2 * r1 * r3
+        + g1 * r4;
+    let z1 = c * u1;
+    let z2 = s * u1 * u1 + c * u2;
+    let z3 = c * u1 * u1 * u1 + 3.0 * s * u1 * u2 + c * u3;
+    let z4 =
+        s * u1.powi(4) + 6.0 * c * u1 * u1 * u2 + 3.0 * s * u2 * u2 + 4.0 * s * u1 * u3 + c * u4;
+    let partial = |rt: f64, r1t: f64, r2t: f64, r3t: f64, r4t: f64| -> f64 {
+        let u_t = g1 * rt;
+        let u1_t = g2 * rt * r1 + g1 * r1t;
+        let u2_t = g3 * rt * r1 * r1 + 2.0 * g2 * r1 * r1t + g2 * rt * r2 + g1 * r2t;
+        let u3_t = g4 * rt * r1 * r1 * r1
+            + 3.0 * g3 * r1 * r1 * r1t
+            + 3.0 * g3 * rt * r1 * r2
+            + 3.0 * g2 * (r1t * r2 + r1 * r2t)
+            + g2 * rt * r3
+            + g1 * r3t;
+        let u4_t = g5 * rt * r1.powi(4)
+            + 4.0 * g4 * r1 * r1 * r1 * r1t
+            + 6.0 * (g4 * rt * r1 * r1 * r2 + g3 * (2.0 * r1 * r1t * r2 + r1 * r1 * r2t))
+            + 3.0 * (g3 * rt * r2 * r2 + 2.0 * g2 * r2 * r2t)
+            + 4.0 * (g3 * rt * r1 * r3 + g2 * (r1t * r3 + r1 * r3t))
+            + g2 * rt * r4
+            + g1 * r4t;
+        let z_t = c * u_t;
+        let z1_t = s * u_t * u1 + c * u1_t;
+        let z2_t = c * u_t * u1 * u1 + 2.0 * s * u1 * u1_t + s * u_t * u2 + c * u2_t;
+        let z3_t = s * u_t * u1 * u1 * u1
+            + 3.0 * c * u1 * u1 * u1_t
+            + 3.0 * c * u_t * u1 * u2
+            + 3.0 * s * (u1_t * u2 + u1 * u2_t)
+            + s * u_t * u3
+            + c * u3_t;
+        let z4_t = c * u_t * u1.powi(4)
+            + 4.0 * s * u1 * u1 * u1 * u1_t
+            + 6.0 * (s * u_t * u1 * u1 * u2 + c * (2.0 * u1 * u1_t * u2 + u1 * u1 * u2_t))
+            + 3.0 * (c * u_t * u2 * u2 + 2.0 * s * u2 * u2_t)
+            + 4.0 * (c * u_t * u1 * u3 + s * (u1_t * u3 + u1 * u3_t))
+            + s * u_t * u4
+            + c * u4_t;
+        phi5 * z_t * z1.powi(4)
+            + 4.0 * phi4 * z1 * z1 * z1 * z1_t
+            + 6.0 * (phi4 * z_t * z1 * z1 * z2 + base.d3 * (2.0 * z1 * z1_t * z2 + z1 * z1 * z2_t))
+            + 3.0 * (base.d3 * z_t * z2 * z2 + 2.0 * base.d2 * z2 * z2_t)
+            + 4.0 * (base.d3 * z_t * z1 * z3 + base.d2 * (z1_t * z3 + z1 * z3_t))
+            + base.d2 * z_t * z4
+            + base.d1 * z4_t
+    };
+    Ok([
+        partial(1.0, 0.0, 0.0, 0.0, 0.0),
+        partial(
+            ddelta_draw * asinh.value,
+            ddelta_draw * asinh.d1,
+            ddelta_draw * asinh.d2,
+            ddelta_draw * asinh.d3,
+            ddelta_draw * asinh.d4,
+        ),
+    ])
 }
 
 /// SAS eta jet plus epsilon/log-delta partial jets. This is fallible for the
@@ -4533,6 +4704,106 @@ mod tests {
         assert!((out.djet_depsilon.d1 - fd_epsilon.d1).abs() < 5e-5);
         assert!((out.djet_depsilon.d2 - fd_epsilon.d2).abs() < 1.2e-4);
         assert!((out.djet_depsilon.d3 - fd_epsilon.d3).abs() < 4e-4);
+    }
+
+    /// Central differences of `f‴` over each shape parameter of `link`, at a
+    /// spread of η, against [`inverse_link_pdfthird_derivative_param_partials`].
+    fn assert_pdfthird_param_partials_match_fd_2904(
+        label: &str,
+        link: &InverseLink,
+        perturbed: impl Fn(usize, f64) -> InverseLink,
+    ) {
+        let h = 1e-6;
+        for eta in [-1.3, -0.2, 0.45, 2.1] {
+            let analytic = inverse_link_pdfthird_derivative_param_partials(link, eta)
+                .expect("finite eta")
+                .expect("a shape-parameterized link has partials");
+            assert!(!analytic.is_empty(), "{label}: no shape axes");
+            for (axis, &value) in analytic.iter().enumerate() {
+                let plus = inverse_link_pdfthird_derivative_for_inverse_link(&perturbed(axis, h), eta)
+                    .expect("finite eta");
+                let minus =
+                    inverse_link_pdfthird_derivative_for_inverse_link(&perturbed(axis, -h), eta)
+                        .expect("finite eta");
+                let finite_difference = (plus - minus) / (2.0 * h);
+                assert!(
+                    (value - finite_difference).abs() <= 1e-5 * finite_difference.abs().max(1.0),
+                    "{label} eta={eta} axis {axis}: analytic={value}, finite difference={finite_difference}"
+                );
+            }
+        }
+    }
+
+    /// #2904: the θ-partials of the density's third derivative match central
+    /// differences for SAS, Beta-Logistic and a mixture, and a link without shape
+    /// parameters has none.
+    #[test]
+    fn pdfthird_derivative_param_partials_match_fd_2904() {
+        let sas = |epsilon: f64, log_delta: f64| {
+            InverseLink::Sas(
+                state_from_sasspec(gam_problem::SasLinkSpec {
+                    initial_epsilon: epsilon,
+                    initial_log_delta: log_delta,
+                })
+                .expect("sas state"),
+            )
+        };
+        let (epsilon, log_delta) = (-0.12, 0.21);
+        assert_pdfthird_param_partials_match_fd_2904("sas", &sas(epsilon, log_delta), |axis, step| {
+            if axis == 0 {
+                sas(epsilon + step, log_delta)
+            } else {
+                sas(epsilon, log_delta + step)
+            }
+        });
+
+        let beta_logistic = |epsilon: f64, log_delta: f64| {
+            InverseLink::BetaLogistic(
+                state_from_beta_logisticspec(gam_problem::SasLinkSpec {
+                    initial_epsilon: epsilon,
+                    initial_log_delta: log_delta,
+                })
+                .expect("beta-logistic state"),
+            )
+        };
+        let (b_epsilon, b_log_delta) = (-0.17, 0.23);
+        assert_pdfthird_param_partials_match_fd_2904(
+            "beta-logistic",
+            &beta_logistic(b_epsilon, b_log_delta),
+            |axis, step| {
+                if axis == 0 {
+                    beta_logistic(b_epsilon + step, b_log_delta)
+                } else {
+                    beta_logistic(b_epsilon, b_log_delta + step)
+                }
+            },
+        );
+
+        let components = vec![LinkComponent::Probit, LinkComponent::Logit, LinkComponent::CLogLog];
+        let rho0 = Array1::from_vec(vec![0.3, -0.6]);
+        let mixture = |rho: Array1<f64>| {
+            InverseLink::Mixture(
+                state_fromspec(&MixtureLinkSpec {
+                    components: components.clone(),
+                    initial_rho: rho,
+                })
+                .expect("mixture state"),
+            )
+        };
+        assert_pdfthird_param_partials_match_fd_2904("mixture", &mixture(rho0.clone()), |axis, step| {
+            let mut rho = rho0.clone();
+            rho[axis] += step;
+            mixture(rho)
+        });
+
+        assert!(
+            inverse_link_pdfthird_derivative_param_partials(
+                &InverseLink::Standard(gam_problem::StandardLink::Probit),
+                0.3,
+            )
+            .expect("finite eta")
+            .is_none()
+        );
     }
 
     #[test]

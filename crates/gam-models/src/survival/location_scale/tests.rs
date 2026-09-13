@@ -649,6 +649,141 @@ fn link_param_joint_psi_terms_match_finite_difference_sas_2904() {
     }
 }
 
+/// FD check for
+/// `SurvivalLocationScaleFamily::link_param_joint_psihessian_directional_derivative`
+/// (#2904): along a coefficient direction `u`, each SAS shape axis's mixed drift
+/// `D_β H_θ[u]` must match a central difference over that parameter of the
+/// observed-information drift `D_β H[u]` at fixed β.
+#[test]
+fn link_param_joint_psihessian_directional_derivative_matches_finite_difference_sas_2904() {
+    let mut family = survival_exact_newton_test_family();
+    let (epsilon0, log_delta0) = (0.15, -0.25);
+    let sas = |epsilon: f64, log_delta: f64| {
+        InverseLink::Sas(
+            state_from_sasspec(SasLinkSpec {
+                initial_epsilon: epsilon,
+                initial_log_delta: log_delta,
+            })
+            .expect("sas state"),
+        )
+    };
+    family.inverse_link = sas(epsilon0, log_delta0);
+    let states = survival_exact_newton_test_states(&family, 0.35, 0.3, -0.1);
+    let direction = array![0.4, -0.7, 0.25];
+    let drift_at = |link: InverseLink| {
+        let mut probe = family.clone();
+        probe.inverse_link = link;
+        probe
+            .exact_newton_joint_hessian_directional_derivative_rescaled(&states, &direction, 0.0)
+            .expect("observed-information drift")
+            .expect("survival location-scale serves the observed-information drift")
+    };
+    let h = 1e-6;
+    let probes = [
+        (sas(epsilon0 + h, log_delta0), sas(epsilon0 - h, log_delta0)),
+        (sas(epsilon0, log_delta0 + h), sas(epsilon0, log_delta0 - h)),
+    ];
+    for (axis, (plus, minus)) in probes.into_iter().enumerate() {
+        let analytic = family
+            .link_param_joint_psihessian_directional_derivative(
+                &states,
+                axis,
+                direction.as_slice().expect("contiguous direction"),
+                &crate::row_kernel::RowSet::All,
+            )
+            .expect("link-shape mixed drift")
+            .expect("SAS link has free parameters");
+        let finite_difference = (&drift_at(plus) - &drift_at(minus)) / (2.0 * h);
+        let scale = finite_difference
+            .iter()
+            .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+        assert!(
+            scale > 1e-8,
+            "axis {axis}: the mixed drift is not exercised (max {scale:e})"
+        );
+        for (analytic, fd) in analytic.iter().zip(finite_difference.iter()) {
+            assert!(
+                (analytic - fd).abs() <= 1e-5 * fd.abs().max(1.0),
+                "axis {axis} mixed drift mismatch: analytic={analytic}, fd={fd}"
+            );
+        }
+    }
+}
+
+/// #2904: the exact-joint LAML gradient along the SAS shape axes is the
+/// derivative of the LAML value. The family serves the shape as family-owned
+/// hyper coordinates evaluated gradient-only, and a central difference of the
+/// profiled objective over each parameter, at the same ρ and warm-started from
+/// the base mode, reproduces the analytic component.
+#[test]
+fn survival_location_scale_outer_link_shape_gradient_matches_finite_difference_sas_2904() {
+    let (epsilon0, log_delta0) = (0.15, -0.25);
+    let family_at = |epsilon: f64, log_delta: f64| {
+        survival_exact_newton_test_familywith_inverse_link(InverseLink::Sas(
+            state_from_sasspec(SasLinkSpec {
+                initial_epsilon: epsilon,
+                initial_log_delta: log_delta,
+            })
+            .expect("sas state"),
+        ))
+    };
+    let layout_at = |epsilon: f64, log_delta: f64| {
+        crate::custom_family::CustomFamilyHyperLayout::new(
+            vec![Vec::new(), Vec::new(), Vec::new()],
+            vec![0, 1],
+            array![epsilon, log_delta],
+        )
+        .expect("shape-axis hyper layout")
+    };
+    let specs = survival_outergradient_testspecs();
+    let rho = array![0.0];
+    let options = crate::custom_family::BlockwiseFitOptions {
+        use_remlobjective: true,
+        compute_covariance: false,
+        ..crate::custom_family::BlockwiseFitOptions::default()
+    };
+    let base = crate::custom_family::evaluate_custom_family_joint_hyper_owned(
+        &family_at(epsilon0, log_delta0),
+        &specs,
+        &options,
+        &rho,
+        &layout_at(epsilon0, log_delta0),
+        None,
+        gam_problem::EvalMode::ValueAndGradient,
+    )
+    .expect("exact-joint LAML value and gradient over the shape axes")
+    .result;
+    assert!(base.inner_converged, "the base inner solve did not converge");
+    assert_eq!(base.gradient.len(), rho.len() + 2);
+    let value_at = |epsilon: f64, log_delta: f64| {
+        let probe = crate::custom_family::evaluate_custom_family_joint_hyper_owned(
+            &family_at(epsilon, log_delta),
+            &specs,
+            &options,
+            &rho,
+            &layout_at(epsilon, log_delta),
+            Some(&base.warm_start),
+            gam_problem::EvalMode::ValueOnly,
+        )
+        .expect("exact-joint LAML value over the shape axes")
+        .result;
+        assert!(probe.inner_converged, "a probe inner solve did not converge");
+        probe.objective
+    };
+    let h = 1e-4;
+    let finite_differences = [
+        (value_at(epsilon0 + h, log_delta0) - value_at(epsilon0 - h, log_delta0)) / (2.0 * h),
+        (value_at(epsilon0, log_delta0 + h) - value_at(epsilon0, log_delta0 - h)) / (2.0 * h),
+    ];
+    for (axis, finite_difference) in finite_differences.into_iter().enumerate() {
+        let analytic = base.gradient[rho.len() + axis];
+        assert!(
+            (analytic - finite_difference).abs() <= 1e-4 * finite_difference.abs().max(1.0),
+            "shape axis {axis}: outer gradient={analytic}, finite difference={finite_difference}"
+        );
+    }
+}
+
 /// Build a single-row survival LS family with the production default
 /// derivative guard (1e-6) for monotonicity-floor probes.
 fn survival_ls_default_guard_unit_family() -> SurvivalLocationScaleFamily {

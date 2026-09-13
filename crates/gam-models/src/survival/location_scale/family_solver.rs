@@ -1746,7 +1746,9 @@ impl CustomFamily for SurvivalLocationScaleFamily {
     ) -> Result<Option<ExactNewtonJointPsiSecondOrderTerms>, String> {
         if hyper_layout.family_axis_count() != 0 {
             return Err(
-                "SurvivalLocationScaleFamily does not declare family-owned hyper axes".to_string(),
+                "SurvivalLocationScaleFamily serves no second-order hyper terms while its \
+                 inverse-link shape axes are present"
+                    .to_string(),
             );
         }
         let derivative_blocks = hyper_layout.design_derivative_blocks();
@@ -1779,7 +1781,9 @@ impl CustomFamily for SurvivalLocationScaleFamily {
     ) -> Result<Option<Arc<dyn ExactNewtonJointPsiWorkspace>>, String> {
         if hyper_layout.family_axis_count() != 0 {
             return Err(
-                "SurvivalLocationScaleFamily does not declare family-owned hyper axes".to_string(),
+                "SurvivalLocationScaleFamily has no exact-psi workspace over its inverse-link \
+                 shape axes"
+                    .to_string(),
             );
         }
         let derivative_blocks = hyper_layout.design_derivative_blocks();
@@ -1812,7 +1816,9 @@ impl CustomFamily for SurvivalLocationScaleFamily {
     ) -> Result<Option<Arc<dyn ExactNewtonJointPsiWorkspace>>, String> {
         if hyper_layout.family_axis_count() != 0 {
             return Err(
-                "SurvivalLocationScaleFamily does not declare family-owned hyper axes".to_string(),
+                "SurvivalLocationScaleFamily has no exact-psi workspace over its inverse-link \
+                 shape axes"
+                    .to_string(),
             );
         }
         let derivative_blocks = hyper_layout.design_derivative_blocks();
@@ -2193,9 +2199,16 @@ impl SurvivalLocationScaleFamily {
         d_beta_flat: &Array1<f64>,
         row_mask: Option<&Array1<f64>>,
     ) -> Result<Option<Array2<f64>>, String> {
-        if hyper_layout.family_axis_count() != 0 {
-            return Err(
-                "SurvivalLocationScaleFamily does not declare family-owned hyper axes".to_string(),
+        if let Some(axis) = hyper_layout.family_axis(psi_index) {
+            // The family-owned axes are the inverse-link shape parameters, in the
+            // link's own parameter order (#2904).
+            return self.link_param_joint_psihessian_directional_derivative(
+                block_states,
+                axis,
+                d_beta_flat
+                    .as_slice()
+                    .ok_or_else(|| "joint psi Hessian direction must be contiguous".to_string())?,
+                &row_set_from_survival_mask(row_mask, self.n),
             );
         }
         let derivative_blocks = hyper_layout.design_derivative_blocks();
