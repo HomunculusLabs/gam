@@ -63,15 +63,6 @@ struct PyPredictOptions {
     /// preserves the prior behaviour (no observation interval).
     #[serde(default)]
     observation_interval: Option<bool>,
-    /// Opt-in distribution-free conformal calibration of the response-scale
-    /// interval (issue #310 family path). When `Some(level)` with
-    /// `level ∈ (0, 1)`, the model-based `mean_lower` / `mean_upper` are
-    /// REPLACED by the split-conformal interval `μ̂(x) ± q̂·s(x)` calibrated
-    /// from a held-out fold supplied via the `*_conformal` predict pyfunction.
-    /// `None` (default) leaves the interval untouched. Only the conformal
-    /// predict path reads this field.
-    #[serde(default)]
-    conformal_level: Option<f64>,
 }
 
 /// Validated, typed fitted model retained by the Python `Model` shell.
@@ -106,8 +97,6 @@ struct PyPredictOptionsPayload {
     covariance_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     observation_interval: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    conformal_level: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -1998,7 +1987,6 @@ fn build_predict_payload_json(
         time_grid,
         covariance_mode,
         observation_interval,
-        conformal_level: None,
     };
     serde_json::to_string(&payload)
         .map_err(|err| py_value_error(format!("failed to serialize predict payload: {err}")))

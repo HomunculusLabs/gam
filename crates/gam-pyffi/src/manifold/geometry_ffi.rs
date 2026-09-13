@@ -7657,178 +7657,6 @@ fn predict_columns(
     Ok((columns, provenance))
 }
 
-/// Build the held-out calibration fold needed by the conformal calibrator: a
-/// `PredictInput` over the calibration design (so the model's own predict
-/// engine produces `μ̂(x_cal)` and `s(x_cal)` at exactly those points,
-/// identically to the test path) and the calibration response `y_cal`. The
-/// response column is resolved from the saved formula and must be present in
-/// the calibration dataset (calibration is *labeled* held-out data, unlike a
-/// predict batch). The fold carries its own design and may be of ANY size,
-/// independent of the training set — it is never bound to the training rows.
-fn conformal_calibration_fold(
-    model: &FittedModel,
-    fit: &gam::solver::estimate::UnifiedFitResult,
-    calibration: EncodedDataset,
-) -> Result<(gam_predict::PredictInput, Array1<f64>), String> {
-    if !matches!(model.predict_model_class(), PredictModelClass::Standard) {
-        return Err(format!(
-            "conformal calibration currently supports only standard GAM models; got '{}'",
-            prediction_model_class_label(model)
-        ));
-    }
-    let col_map = calibration.column_map();
-    let offset = resolve_offset_column(&calibration, &col_map, model.offset_column.as_deref())?;
-    let offset_noise =
-        resolve_offset_column(&calibration, &col_map, model.noise_offset_column.as_deref())?;
-    let response_name = response_column_name(&model.payload().formula).ok_or_else(|| {
-        "conformal calibration: could not resolve the response column from the saved formula"
-            .to_string()
-    })?;
-    let response_col = *col_map.get(&response_name).ok_or_else(|| {
-        format!(
-            "conformal calibration data must contain the response column '{response_name}' \
-             (calibration is held-out labeled data)"
-        )
-    })?;
-    let y = calibration.values.column(response_col).to_owned();
-    // Build the calibration-fold predict input the same way the test batch is
-    // built, so the predict engine yields μ̂(x_cal) and s(x_cal) from exactly
-    // the same source used at test time.
-    let cal_input = build_predict_input_for_model(
-        model,
-        calibration.values.view(),
-        &col_map,
-        model.training_headers.as_ref(),
-        &offset,
-        &offset_noise,
-        false,
-    )?;
-    let design_cols = cal_input.design.ncols();
-    if design_cols != fit.beta.len() {
-        return Err(format!(
-            "conformal calibration design has {} columns but the fit has {} coefficients",
-            design_cols,
-            fit.beta.len()
-        ));
-    }
-    Ok((cal_input, y))
-}
-
-/// Conformal-calibrated prediction columns. Runs the model-based full-
-/// uncertainty predictor on the test `dataset` (honouring `covariance_mode` /
-/// `observation_interval`), then replaces the response-scale `mean_lower` /
-/// `mean_upper` with the split-conformal interval calibrated from the supplied
-/// held-out `calibration` fold at the level in `options.conformal_level`.
-fn predict_columns_conformal(
-    model: &FittedModel,
-    dataset: EncodedDataset,
-    calibration: EncodedDataset,
-    options: &PyPredictOptions,
-) -> Result<BTreeMap<String, Vec<f64>>, String> {
-    let Some(level) = options.conformal_level else {
-        return Err("conformal prediction requires conformal_level in (0, 1)".to_string());
-    };
-    if !matches!(model.predict_model_class(), PredictModelClass::Standard) {
-        return Err(format!(
-            "conformal prediction currently supports only standard GAM models; got '{}'",
-            prediction_model_class_label(model)
-        ));
-    }
-    let col_map = dataset.column_map();
-    let offset = resolve_offset_column(&dataset, &col_map, model.offset_column.as_deref())?;
-    let offset_noise =
-        resolve_offset_column(&dataset, &col_map, model.noise_offset_column.as_deref())?;
-    let predict_input = build_predict_input_for_model(
-        model,
-        dataset.values.view(),
-        &col_map,
-        model.training_headers.as_ref(),
-        &offset,
-        &offset_noise,
-        false,
-    )?;
-    let predictor = model
-        .predictor()
-        .ok_or_else(|| "saved model could not construct a predictor".to_string())?;
-    let fit = fit_result_from_saved_model_for_prediction(model)?;
-    let family = model_likelihood_spec(model);
-
-    let covariance_mode = parse_covariance_mode(options.covariance_mode.as_deref())?
-        .unwrap_or_else(|| fit.published_covariance_mode());
-    let uncertainty_options = gam_predict::PredictUncertaintyOptions {
-        confidence_level: level,
-        covariance_mode,
-        mean_interval_method: gam_predict::MeanIntervalMethod::TransformEta,
-        includeobservation_interval: options.observation_interval.unwrap_or(false),
-        conformal_level: Some(level),
-        ..gam_predict::PredictUncertaintyOptions::default()
-    };
-
-    let (cal_input, cal_y) = conformal_calibration_fold(model, &fit, calibration)?;
-    let calibration_fold = gam_predict::ConformalCalibrationFold {
-        input: cal_input,
-        y: cal_y.view(),
-    };
-    let prediction = gam_predict::predict_full_uncertainty_conformal(
-        predictor.as_ref(),
-        &predict_input,
-        &fit,
-        &family,
-        &uncertainty_options,
-        &calibration_fold,
-    )
-    .map_err(|err| format!("conformal prediction failed: {err}"))?;
-
-    // The conformal interval changes only the band. Its point remains the same
-    // posterior response mean as ordinary prediction (#398, SPEC), while the
-    // complete plug-in pair is exposed alongside it under explicit names.
-    let point = gam_predict::interval_policy::resolve_prediction_request(
-        predictor.as_ref(),
-        &predict_input,
-        &fit,
-        model.prediction_uses_posterior_mean(),
-        &gam_predict::interval_policy::PredictionRequest {
-            interval: None,
-            covariance_mode,
-            observation_interval: false,
-            observation_prior_weights: None,
-        },
-    )
-    .map_err(|err| format!("conformal point prediction failed: {err}"))?;
-    let posterior_mean = point.posterior_mean.ok_or_else(|| {
-        "conformal prediction did not produce the required posterior mean".to_string()
-    })?;
-
-    let mut columns = BTreeMap::<String, Vec<f64>>::new();
-    columns.insert(
-        "linear_predictor_plugin".to_string(),
-        point.linear_predictor_plugin.to_vec(),
-    );
-    columns.insert("mean_plugin".to_string(), point.mean_plugin.to_vec());
-    columns.insert("posterior_mean".to_string(), posterior_mean.to_vec());
-    // Response-scale SE beside the response-scale mean/band (#1536): emit
-    // `mean_standard_error`, not the link-scale `eta_standard_error`.
-    columns.insert(
-        "posterior_mean_standard_error".to_string(),
-        prediction.mean_standard_error.to_vec(),
-    );
-    columns.insert(
-        "posterior_mean_lower".to_string(),
-        prediction.mean_lower.to_vec(),
-    );
-    columns.insert(
-        "posterior_mean_upper".to_string(),
-        prediction.mean_upper.to_vec(),
-    );
-    if let (Some(obs_lower), Some(obs_upper)) =
-        (prediction.observation_lower, prediction.observation_upper)
-    {
-        columns.insert("observation_lower".to_string(), obs_lower.to_vec());
-        columns.insert("observation_upper".to_string(), obs_upper.to_vec());
-    }
-    Ok(columns)
-}
-
 fn predict_encoded_table_conformal_impl(
     model_bytes: &[u8],
     source: EncodedDataset,
@@ -7837,30 +7665,39 @@ fn predict_encoded_table_conformal_impl(
     options_json: Option<&str>,
 ) -> Result<String, String> {
     let model = load_model_impl(model_bytes)?;
-    // Split-conformal calibration is built on the dense predictor + fit_result,
-    // neither of which a scan-routed model carries. Point and posterior-interval
-    // prediction (the scan-aware predict path) work for these models, so direct
-    // users there rather than failing with the cryptic missing-resolved_termspec
-    // error (#1046).
-    if let Some(scan) = scan_introspection(&model)? {
-        return Err(format!(
-            "{} is fit by the exact O(n) state-space spline scan, which does not \
-             carry the dense predictor split-conformal calibration needs. Use \
-             predict(..., interval=<level>) for posterior intervals (scan-aware), \
-             or refit with double_penalty=true for conformal intervals.",
-            scan_smooth_label(&scan)
-        ));
-    }
-    let mut options = parse_predict_options(options_json)?;
-    if !(conformal_level.is_finite() && conformal_level > 0.0 && conformal_level < 1.0) {
-        return Err(format!(
-            "conformal_level must be in (0, 1), got {conformal_level}"
-        ));
-    }
-    options.conformal_level = Some(conformal_level);
+    let options = parse_predict_options(options_json)?;
     let dataset = dataset_with_model_schema_from_encoded(&model, &source)?;
     let calibration = dataset_with_model_schema_from_encoded(&model, &calibration_source)?;
-    let columns = predict_columns_conformal(&model, dataset, calibration, &options)?;
+    let test_col_map = dataset.column_map();
+    let test_offset = resolve_offset_column(&dataset, &test_col_map, model.offset_column.as_deref())?;
+    let test_noise_offset =
+        resolve_offset_column(&dataset, &test_col_map, model.noise_offset_column.as_deref())?;
+    let calibration_col_map = calibration.column_map();
+    let calibration_offset =
+        resolve_offset_column(&calibration, &calibration_col_map, model.offset_column.as_deref())?;
+    let calibration_noise_offset = resolve_offset_column(
+        &calibration,
+        &calibration_col_map,
+        model.noise_offset_column.as_deref(),
+    )?;
+    let columns = gam_predict::conformal_routes::split_conformal_prediction_columns(
+        &model,
+        &gam_predict::conformal_routes::ConformalRows {
+            data: dataset.values.view(),
+            col_map: &test_col_map,
+            offset: &test_offset,
+            noise_offset: &test_noise_offset,
+        },
+        &gam_predict::conformal_routes::ConformalRows {
+            data: calibration.values.view(),
+            col_map: &calibration_col_map,
+            offset: &calibration_offset,
+            noise_offset: &calibration_noise_offset,
+        },
+        conformal_level,
+        parse_covariance_mode(options.covariance_mode.as_deref())?,
+        options.observation_interval.unwrap_or(false),
+    )?;
     serde_json::to_string(&PredictionPayload {
         columns,
         model_class: prediction_model_class_label(&model),
@@ -8003,121 +7840,21 @@ fn predict_encoded_table_jackknife_plus_impl(
 /// #1098 Gaussian full-conformal prediction set at frozen `Sλ` — no
 /// calibration fold.
 ///
-/// Reads the `ExactFullConformalSubstrate` precomputed at fit time (only
-/// available for Gaussian-identity, unit-weight, offset-free models without a
-/// link wiggle), rebuilds the test design from the saved `resolved_termspec`,
-/// and calls `substrate.interval(x_*, alpha)` per test row — one Cholesky each,
-/// zero refits. The set is exact *given the frozen penalty*; because the fitted
-/// λ̂ was selected from all training responses, the frozen-λ score construction
-/// is not permutation symmetric in the n+1 augmented points, so the
-/// distribution-free finite-sample coverage theorem applies only where the
-/// per-row frozen-ρ certificate accepts (`frozen_rho_certified` = 1.0, on the
-/// REML branch through the augmented optimum); a 0.0 row is the frozen-λ
-/// approximation with no finite-sample guarantee. The exact set is a union of
-/// intervals; the returned `mean_lower`/`mean_upper` are its outer envelope (a
-/// superset).
-///
-/// `alpha = 1 − conformal_level` (the full-conformal set `C_α` has marginal
-/// coverage `≥ 1 − α`, so `conformal_level = 1 − α` directly; unlike jackknife+
-/// there is no factor of two).
-///
-/// Falls back with a clear error when the model is ineligible (non-Gaussian
-/// family, scan-routed model, link wiggle, weighted training data, or an older
-/// serialised payload that pre-dates the substrate).
+/// Evaluated by `gam_predict::conformal_routes::full_conformal_prediction_columns`
+/// on the prediction rows projected onto the model schema.
 fn predict_encoded_table_full_conformal_impl(
     model_bytes: &[u8],
     source: EncodedDataset,
     conformal_level: f64,
 ) -> Result<String, String> {
-    if !(conformal_level > 0.0 && conformal_level < 1.0) {
-        return Err(format!(
-            "conformal_level must be in (0, 1), got {conformal_level}"
-        ));
-    }
     let model = load_model_impl(model_bytes)?;
-    if scan_introspection(&model).map_err(String::from)?.is_some() {
-        return Err(
-            "exact full-conformal intervals require a penalised-spline (B-spline) model; \
-             this model was fit by the exact O(n) state-space scan. Refit with \
-             double_penalty=true to obtain the standard model that carries the substrate."
-                .to_string(),
-        );
-    }
-    let substrate = model.full_conformal.as_ref().ok_or_else(|| {
-        "exact full-conformal intervals require a Gaussian-identity GLM trained without \
-         prior weights, offsets, or a link wiggle, AND a fit that precomputed the \
-         substrate. This model carries none (non-Gaussian family, weighted data, offset, \
-         link wiggle, an older serialised payload, or precompute_conformal=false at fit \
-         time). Use Model.predict_conformal(calibration=...) for split-conformal intervals \
-         on arbitrary families."
-            .to_string()
-    })?;
-    if !matches!(model.predict_model_class(), PredictModelClass::Standard) {
-        return Err(format!(
-            "exact full-conformal prediction supports only standard GAM models; got '{}'",
-            prediction_model_class_label(&model)
-        ));
-    }
     let dataset = dataset_with_model_schema_from_encoded(&model, &source)?;
-    let col_map = dataset.column_map();
-    let spec = gam::families::survival::predict::resolve_termspec_for_prediction(
-        &model.resolved_termspec,
-        model.training_headers.as_ref(),
-        &col_map,
-        "resolved_termspec",
+    let columns = gam_predict::conformal_routes::full_conformal_prediction_columns(
+        &model,
+        dataset.values.view(),
+        &dataset.column_map(),
+        conformal_level,
     )?;
-    let design = gam::terms::smooth::build_term_collection_design(dataset.values.view(), &spec)
-        .map_err(|err| format!("full conformal: failed to build test design: {err}"))?;
-    let x_test = design
-        .design
-        .try_to_dense_by_chunks("full conformal test design")?;
-    let n_test = x_test.nrows();
-    if x_test.ncols() != substrate.p() {
-        return Err(format!(
-            "full conformal: test design has {} columns but the stored substrate has p={}; \
-             the model may need to be refit",
-            x_test.ncols(),
-            substrate.p()
-        ));
-    }
-    // A symmetric full-conformal set C_α covers Y_* with marginal probability
-    // ≥ 1 − α, so the user's conformal_level maps directly to
-    // α = 1 − conformal_level (no factor-of-two as in the jackknife+
-    // ≥ 1 − 2α guarantee). At frozen λ̂ that theorem is conditional on the
-    // per-row frozen-ρ certificate — see the function doc.
-    let alpha = 1.0 - conformal_level;
-    let fit = fit_result_from_saved_model_for_prediction(&model)?;
-    if fit.beta.len() != x_test.ncols() {
-        return Err(format!(
-            "full conformal: fit has {} coefficients but test design has {} columns",
-            fit.beta.len(),
-            x_test.ncols()
-        ));
-    }
-    let mut mean_vec = Vec::with_capacity(n_test);
-    let mut lower_vec = Vec::with_capacity(n_test);
-    let mut upper_vec = Vec::with_capacity(n_test);
-    let mut certified_vec = Vec::with_capacity(n_test);
-    for i in 0..n_test {
-        let x_star = x_test.row(i).to_owned();
-        let iv = substrate
-            .interval(&x_star, alpha)
-            .map_err(|e| format!("full conformal at row {i}: {e}"))?;
-        // The conformal set changes only the interval. The point is the fitted
-        // Gaussian-identity posterior mean, which equals the plug-in X beta;
-        // using the envelope centre made the point depend on interval shape.
-        mean_vec.push(x_star.dot(&fit.beta));
-        lower_vec.push(iv.lo);
-        upper_vec.push(iv.hi);
-        certified_vec.push(if iv.frozen_rho_certified { 1.0 } else { 0.0 });
-    }
-    let mut columns = BTreeMap::<String, Vec<f64>>::new();
-    columns.insert("linear_predictor_plugin".to_string(), mean_vec.clone());
-    columns.insert("mean_plugin".to_string(), mean_vec.clone());
-    columns.insert("posterior_mean".to_string(), mean_vec);
-    columns.insert("posterior_mean_lower".to_string(), lower_vec);
-    columns.insert("posterior_mean_upper".to_string(), upper_vec);
-    columns.insert("frozen_rho_certified".to_string(), certified_vec);
     serde_json::to_string(&PredictionPayload {
         columns,
         model_class: prediction_model_class_label(&model),

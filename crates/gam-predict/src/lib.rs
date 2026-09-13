@@ -1,6 +1,7 @@
 pub mod affine_design;
 pub mod alo;
 pub mod conformal;
+pub mod conformal_routes;
 pub mod generative;
 pub mod input;
 pub mod interval_policy;
