@@ -4355,8 +4355,8 @@ fn radial_promoted_specs(
     Ok(Some(promoted))
 }
 
-/// #2280 — build the local-chart atlas on a birth's ambient residual image and read
-/// the topology its charts and transition holonomy determine, as a PROPOSAL PRIOR.
+/// #2280 — the local-chart atlas of a birth image at chart rank `intrinsic_dim`, whose
+/// `atlas_readout` is a race's PROPOSAL PRIOR and whose holonomy seeds its quotient arm.
 ///
 /// Fail-open: any build refusal (coverage below the floor, degenerate charts,
 /// non-finite rows) or a too-small image returns `None` and the race runs UNPRIMED
@@ -4368,16 +4368,6 @@ fn radial_promoted_specs(
 /// `intrinsic_dim` is the birth's own `d`, not a fixed 2: the classification
 /// dispatches on chart rank first (a circle and a cylinder have identical nerve
 /// invariants), so passing the wrong `d` would ask the table the wrong question.
-fn atlas_prior_for_coords(
-    target: ArrayView2<'_, f64>,
-    intrinsic_dim: usize,
-) -> Option<AtlasTopologyReadout> {
-    atlas_readout(&birth_atlas(target, intrinsic_dim)?)
-}
-
-/// The local-chart atlas of a birth image at chart rank `intrinsic_dim`, or `None` when
-/// `LocalAtlas::build` refuses it. This is the build half of `atlas_prior_for_coords`,
-/// kept separate so discovery can develop the same atlas it read its prior from.
 fn birth_atlas(
     target: ArrayView2<'_, f64>,
     intrinsic_dim: usize,
@@ -4552,7 +4542,8 @@ fn race_birth_topology(
     // nothing to say. The prior only ever REORDERS the candidate menu; the REML
     // race — still the sole arbiter — breaks an exact evidence tie toward the
     // measured manifold. It never selects a winner and never drops a candidate.
-    let atlas = atlas_prior_for_coords(target, d_k);
+    let local_atlas = birth_atlas(target, d_k);
+    let atlas = local_atlas.as_ref().and_then(atlas_readout);
     // The PCA/template-coordinate race is the cheaper DEFAULT: the born atom
     // inherits the template atom's coordinate block, and the topology candidates
     // are adjudicated on those linear-seed coordinates.
@@ -4582,20 +4573,36 @@ fn race_birth_topology(
     } else {
         None
     };
-    // Lower TK/REML cost wins (issue #396 sign convention); the template keeps
-    // ties, so PCA stays default and intrinsic only supplants it by evidence.
-    let winner = match (template_winner, intrinsic_winner) {
-        (Some(template), Some(intrinsic)) => {
-            if intrinsic.tk_score < template.tk_score {
-                Some(intrinsic)
-            } else {
-                Some(template)
-            }
-        }
-        (Some(template), None) => Some(template),
-        (None, Some(intrinsic)) => Some(intrinsic),
-        (None, None) => None,
+    // #2906 — the atlas's holonomy as a second challenger. When the readout names a circle
+    // at chart rank 1, or a cylinder or Möbius band at rank 2, that kind races on the
+    // quotient coordinates the non-tree holonomies dictate. Fail-open like the intrinsic
+    // arm: a quotient that does not read, or does not race, leaves the other arms' verdict
+    // untouched.
+    let all_rows: Vec<usize> = (0..target.nrows()).collect();
+    let quotient_winner = match quotient_loop_specs(
+        local_atlas.as_ref(),
+        atlas.as_ref(),
+        target,
+        target,
+        weights,
+        &all_rows,
+    ) {
+        Ok(Some(specs)) => race_spec_set(specs, target, weights, atlas.as_ref()).unwrap_or(None),
+        _ => None,
     };
+    // Lower TK/REML cost wins (issue #396 sign convention). The arms are read in a fixed
+    // order, template first, and a later arm replaces the incumbent only with a strictly
+    // better score, so PCA stays default and a challenger supplants it only by evidence.
+    let winner = [template_winner, intrinsic_winner, quotient_winner]
+        .into_iter()
+        .flatten()
+        .reduce(|incumbent, challenger| {
+            if challenger.tk_score < incumbent.tk_score {
+                challenger
+            } else {
+                incumbent
+            }
+        });
     Ok(winner.map(|outcome| outcome.fit))
 }
 
@@ -5563,20 +5570,29 @@ pub(crate) fn discover_primary_atom_topologies(
             // circle at chart rank 1 or a Möbius band at rank 2, that kind races on the
             // quotient coordinates the non-tree holonomies dictate, instead of on phases of
             // a principal projection. It races under the same REML evidence, and a named
-            // loop whose holonomy does not read is returned as an error.
-            let quotient_challenger = match quotient_loop_specs(
-                local_atlas.as_ref(),
-                atlas.as_ref(),
-                local.view(),
-                target,
-                weights.view(),
-                &rows,
-            )
-            .map_err(|error| {
-                format!(
-                    "discover_primary_atom_topologies: holonomy quotient failed for auto atom {atom_idx}: {error}"
+            // loop whose holonomy does not read is returned as an error. A primary atom cannot
+            // be installed as a cylinder (`sae_build_atom_plans` refuses the kind; cylinders
+            // are born), so a cylinder verdict offers no primary challenger.
+            let names_cylinder = atlas.as_ref().and_then(|readout| readout.observed_manifold())
+                == Some(GraphCompressionKind::Cylinder);
+            let quotient_specs = if names_cylinder {
+                None
+            } else {
+                quotient_loop_specs(
+                    local_atlas.as_ref(),
+                    atlas.as_ref(),
+                    local.view(),
+                    target,
+                    weights.view(),
+                    &rows,
                 )
-            })? {
+                .map_err(|error| {
+                    format!(
+                        "discover_primary_atom_topologies: holonomy quotient failed for auto atom {atom_idx}: {error}"
+                    )
+                })?
+            };
+            let quotient_challenger = match quotient_specs {
                 Some(quotient_specs) => {
                     race_spec_set(quotient_specs, target, weights.view(), atlas.as_ref()).map_err(
                         |error| {
@@ -5779,14 +5795,14 @@ fn developed_sheet_specs(
 }
 
 /// The atlas's holonomy quotient as a loop challenger (#2906), or `None` unless the readout
-/// names a circle at chart rank 1 or a Möbius band at chart rank 2. The candidate is the kind
-/// the readout names, on the coordinates `LocalAtlas::holonomy_quotient_coordinates` reads
-/// off the non-tree holonomies, so a loop is seeded from the deck transformation the atlas
-/// measured rather than from phases of a principal projection. A circle races at its own
-/// quotient chart's periodogram bandwidth, and a chart carrying no angular energy offers
-/// none. `local_target` is the cluster-local image the atlas was built on, its row `i` being
-/// cluster row `rows[i]`; rows outside the cluster carry zero coordinates, and the race gives
-/// them zero weight.
+/// names a circle at chart rank 1, or a cylinder or Möbius band at chart rank 2. The candidate
+/// is the kind the readout names, on the coordinates `LocalAtlas::holonomy_quotient_coordinates`
+/// reads off the non-tree holonomies, so a loop is seeded from the deck transformation the
+/// atlas measured rather than from phases of a principal projection. A circle or cylinder
+/// races at the order its own quotient chart's periodogram selects
+/// (`realize_birth_harmonic_orders`), and a chart carrying no angular energy offers none.
+/// `local_target` is the image the atlas was built on, its row `i` being `rows[i]`; rows it
+/// does not cover carry zero coordinates, and the race gives them zero weight.
 fn quotient_loop_specs(
     atlas: Option<&crate::manifold::LocalAtlas>,
     readout: Option<&AtlasTopologyReadout>,
@@ -5800,9 +5816,10 @@ fn quotient_loop_specs(
         (Some(atlas), Some(GraphCompressionKind::Circle)) if atlas.intrinsic_dim() == 1 => {
             (atlas, GraphCompressionKind::Circle)
         }
-        (Some(atlas), Some(GraphCompressionKind::MobiusStrip)) if atlas.intrinsic_dim() == 2 => {
-            (atlas, GraphCompressionKind::MobiusStrip)
-        }
+        (
+            Some(atlas),
+            Some(kind @ (GraphCompressionKind::Cylinder | GraphCompressionKind::MobiusStrip)),
+        ) if atlas.intrinsic_dim() == 2 => (atlas, kind),
         _ => return Ok(None),
     };
     let local = atlas.holonomy_quotient_coordinates(local_target, manifold)?;
@@ -5812,24 +5829,39 @@ fn quotient_loop_specs(
             coords[[global_row, col]] = local[[local_row, col]];
         }
     }
-    let spec = if manifold == GraphCompressionKind::Circle {
-        let Some(order) = select_periodic_resolution(coords.view(), target, weights, rows.len())
-        else {
-            return Ok(None);
-        };
-        TopologyCandidateSpec::new(
+    // The circle and cylinder orders written here are replaced by the ones their chart's
+    // periodogram selects, just below.
+    let spec = match manifold {
+        GraphCompressionKind::Circle => TopologyCandidateSpec::new(
             AutoTopologyKind::Circle,
             SaeAtomGeometryPlan::new(
                 SaeAtomBasisKind::Periodic,
                 1,
-                SaeBasisResolution::PeriodicHarmonics { order },
+                SaeBasisResolution::PeriodicHarmonics { order: 1 },
                 SaeReferenceMetricPlan::UnitCircle,
             )?,
             LatentManifold::Circle { period: 1.0 },
             coords,
-        )?
-    } else {
-        TopologyCandidateSpec::new(
+        )?,
+        GraphCompressionKind::Cylinder => TopologyCandidateSpec::new(
+            AutoTopologyKind::Cylinder,
+            SaeAtomGeometryPlan::new(
+                SaeAtomBasisKind::Cylinder,
+                2,
+                SaeBasisResolution::CylinderHarmonics {
+                    circle_order: 1,
+                    line_degree: crate::manifold::SAE_CYLINDER_LINE_DEGREE,
+                },
+                SaeReferenceMetricPlan::CylinderProduct,
+            )?,
+            LatentManifold::Product(vec![
+                LatentManifold::Circle { period: 1.0 },
+                LatentManifold::Euclidean,
+            ]),
+            coords,
+        )?,
+        // The match above admits only a circle, a cylinder or a Möbius band.
+        _ => TopologyCandidateSpec::new(
             AutoTopologyKind::Mobius,
             SaeAtomGeometryPlan::new(
                 SaeAtomBasisKind::Mobius,
@@ -5845,9 +5877,10 @@ fn quotient_loop_specs(
                 LatentManifold::Interval { lo: -1.0, hi: 1.0 },
             ]),
             coords,
-        )?
+        )?,
     };
-    Ok(Some(vec![spec]))
+    let realized = realize_birth_harmonic_orders(vec![spec], target, weights)?;
+    Ok((!realized.is_empty()).then_some(realized))
 }
 
 /// The two FOLD-SENSITIVE `d = 2` candidates, a flat patch and a thin-plate sheet, on
@@ -8225,6 +8258,16 @@ mod tests_atlas_prior_2280 {
         circle, cylinder_strip, mobius_strip, trefoil_knot,
     };
     use ndarray::Array2;
+
+    /// A birth race's atlas prior at chart rank `intrinsic_dim`: the readout of `birth_atlas`.
+    fn atlas_prior_for_coords(
+        target: ArrayView2<'_, f64>,
+        intrinsic_dim: usize,
+    ) -> Option<AtlasTopologyReadout> {
+        birth_atlas(target, intrinsic_dim)
+            .as_ref()
+            .and_then(atlas_readout)
+    }
 
     /// A Möbius strip in R³ (a half-twist over one revolution): the canonical
     /// NON-orientable residual, returned with a matched 2-D parameter seed

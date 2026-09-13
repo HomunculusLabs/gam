@@ -29,7 +29,7 @@
 //! Isotropic noise filling `ℝ^p` is not a `d`-manifold only while `d < p`: noise in
 //! `ℝ²` read at `d = 2` IS locally a solid patch of the plane, and an atlas calling
 //! that a disk would be right. Every null arm below therefore keeps `d < p`, which
-//! is also the regime the production consumer runs in — `atlas_prior_for_coords`
+//! is also the regime the production consumer runs in — `birth_atlas`
 //! builds at the birth's chart rank on a wider ambient residual.
 //!
 //! The cloud's scale is irrelevant by construction: `LocalAtlasConfig` sizes a

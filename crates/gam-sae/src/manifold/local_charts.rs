@@ -979,6 +979,10 @@ impl LocalAtlas {
     ///   multiple of the loop length, and a transition crossing the seam once carries one
     ///   length. The period is the largest orientation-preserving translation, and the
     ///   coordinate is the fraction of that period in `[0, 1)`, the periodic seed's convention.
+    /// * a cylinder (chart rank 2): the largest orientation-preserving translation is the loop's
+    ///   axis and length. The coordinates are the fraction of the loop along that axis and the
+    ///   height across it, centered and scaled to unit spread, the convention the cylinder seed
+    ///   uses.
     /// * a Möbius band (chart rank 2): every orientation-reversing holonomy is an odd power of
     ///   the band's glide reflection, so the one with the smallest glide is the generator. Its
     ///   `M` is a reflection with axis `a` and normal `n`, and `v = α a + β n` puts the glide
@@ -1015,6 +1019,56 @@ impl LocalAtlas {
                 for row in 0..n {
                     let fraction = developed[[row, 0]] / period;
                     coords[[row, 0]] = fraction - fraction.floor();
+                }
+                Ok(coords)
+            }
+            (GraphCompressionKind::Cylinder, 2) => {
+                let generator = holonomies
+                    .iter()
+                    .filter(|holonomy| !holonomy.reversing)
+                    .max_by(|left, right| {
+                        let left_sq = left.translation.dot(&left.translation);
+                        let right_sq = right.translation.dot(&right.translation);
+                        left_sq.total_cmp(&right_sq)
+                    })
+                    .ok_or_else(|| {
+                        "holonomy_quotient_coordinates: no orientation-preserving non-tree transition, so no loop translation to read"
+                            .to_string()
+                    })?;
+                let period = generator.translation.dot(&generator.translation).sqrt();
+                if !(period > 0.0 && period.is_finite()) {
+                    return Err(format!(
+                        "holonomy_quotient_coordinates: the loop translation has no length ({period:.3e})"
+                    ));
+                }
+                let axis = [
+                    generator.translation[0] / period,
+                    generator.translation[1] / period,
+                ];
+                let normal = [-axis[1], axis[0]];
+                let mut coords = Array2::<f64>::zeros((n, 2));
+                for row in 0..n {
+                    let (x0, x1) = (developed[[row, 0]], developed[[row, 1]]);
+                    let fraction = (x0 * axis[0] + x1 * axis[1]) / period;
+                    coords[[row, 0]] = fraction - fraction.floor();
+                    coords[[row, 1]] = x0 * normal[0] + x1 * normal[1];
+                }
+                let count = n.max(1) as f64;
+                let mean = coords.column(1).sum() / count;
+                let spread = (coords
+                    .column(1)
+                    .iter()
+                    .map(|height| (height - mean) * (height - mean))
+                    .sum::<f64>()
+                    / count)
+                    .sqrt();
+                if !(spread > 0.0 && spread.is_finite()) {
+                    return Err(format!(
+                        "holonomy_quotient_coordinates: the cylinder height is degenerate (spread {spread:.3e})"
+                    ));
+                }
+                for row in 0..n {
+                    coords[[row, 1]] = (coords[[row, 1]] - mean) / spread;
                 }
                 Ok(coords)
             }
@@ -2383,6 +2437,40 @@ mod tests {
             misordered.is_empty(),
             "the band's width magnitudes must recover the planted levels: {}",
             misordered.join("; ")
+        );
+
+        let cylinder = cylinder_strip(n_u, n_v);
+        let atlas =
+            LocalAtlas::build(cylinder.view(), LocalAtlasConfig::balanced(cylinder.nrows(), 2))
+                .expect("the planted cylinder's atlas builds");
+        let quotient = atlas
+            .holonomy_quotient_coordinates(cylinder.view(), GraphCompressionKind::Cylinder)
+            .expect("the planted cylinder's holonomy reads a loop translation");
+        let worst = worst_loop_residual(quotient.column(0), &planted);
+        assert!(
+            worst < 0.5 / n_u as f64,
+            "every cylinder row must land within half a loop step of its planted angle: worst {worst:.3e}"
+        );
+        // The cylinder's width axis is fixed, so within every loop column its height must be
+        // monotone in the planted width, in one direction for the whole cylinder.
+        let rising = quotient[[n_v - 1, 1]] > quotient[[0, 1]];
+        let mut unordered = Vec::new();
+        for column in 0..n_u {
+            for iv in 1..n_v {
+                let below = quotient[[column * n_v + iv - 1, 1]];
+                let above = quotient[[column * n_v + iv, 1]];
+                if (above > below) != rising {
+                    unordered.push(format!(
+                        "column {column} rows {} and {iv}: {below:.3e} then {above:.3e}",
+                        iv - 1
+                    ));
+                }
+            }
+        }
+        assert!(
+            unordered.is_empty(),
+            "the cylinder's height must recover the planted width order: {}",
+            unordered.join("; ")
         );
     }
 }
