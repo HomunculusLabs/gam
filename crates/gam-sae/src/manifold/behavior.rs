@@ -169,48 +169,6 @@ impl SphereTangentEmbedding {
         self.tangent_basis.ncols()
     }
 
-    /// Embed further behavioral summaries onto this (already-fitted) chart,
-    /// returning their nats-unit tangent coordinates (`m × (V-1)`). Uses the
-    /// chart's fixed basepoint/basis, so out-of-sample rows are placed
-    /// consistently with the training rows.
-    pub fn embed(&self, prob_rows: ArrayView2<'_, f64>) -> Result<Array2<f64>, String> {
-        let v = self.vocab();
-        let (m, v_in) = prob_rows.dim();
-        if v_in != v {
-            return Err(format!(
-                "SphereTangentEmbedding::embed: rows have {v_in} tokens; chart is over {v}"
-            ));
-        }
-        let mut q = Array2::<f64>::zeros((m, v));
-        for i in 0..m {
-            let row = prob_rows.row(i);
-            let mut sum = 0.0_f64;
-            for &value in row.iter() {
-                if !(value.is_finite() && value >= 0.0) {
-                    return Err(format!(
-                        "SphereTangentEmbedding::embed: row {i} has a non-finite or negative entry \
-                         ({value})"
-                    ));
-                }
-                sum += value;
-            }
-            if !(sum > 0.0) {
-                return Err(format!(
-                    "SphereTangentEmbedding::embed: row {i} sums to {sum}"
-                ));
-            }
-            let inv_sqrt_sum = 1.0 / sum.sqrt();
-            let mut q_row = q.row_mut(i);
-            for j in 0..v {
-                q_row[j] = prob_rows[[i, j]].sqrt() * inv_sqrt_sum;
-            }
-        }
-        let root_two = std::f64::consts::SQRT_2;
-        let mut coords = q.dot(&self.tangent_basis);
-        coords.mapv_inplace(|value| root_two * value);
-        Ok(coords)
-    }
-
     /// Decode a nats-unit tangent coordinate `y` (length `V-1`) back to the
     /// half-density `q` on the sphere:
     /// `q = √(1 − ‖c‖²) q̄ + E c` with `c = y/√2`. Exact inverse of the

@@ -2939,5 +2939,16 @@
     },
     "reason": "#2899 public API sweep of gam-sae (prune-api-d): the test-only pairwise energy screen and the conditionality fit only it reached are deleted; the coupling certificate and influence values gam-pyffi uses stay.",
     "evidence": "At 2788ad226, the guarded check 579283 reports the screen and the conditionality fit as never used once the test-only wrapper is gone. The removed map is public_api_census.py's census difference over this change, computed on MSI."
+  },
+  {
+    "base": "5d74ecb1b4093cd09dcd3347d7e934e2930f8ba0",
+    "removed": {
+      "crates/gam-models/src/inference/full_conformal.rs::gaussian_jackknife_plus": 1,
+      "crates/gam-sae/src/atom_codes.rs::effective_weights": 1,
+      "crates/gam-sae/src/manifold/behavior.rs::embed": 1,
+      "crates/gam-sae/src/manifold/geometry_plan.rs::reference_metric": 1
+    },
+    "reason": "#2899 public API sweep of gam-models and gam-sae (prune-api-d): eleven restored-in-place public functions with no caller are deleted.",
+    "evidence": "At 1fb6297f5, git grep finds no caller of these public functions. The removed map is public_api_census.py's census difference over this change, computed on MSI."
   }
 ]

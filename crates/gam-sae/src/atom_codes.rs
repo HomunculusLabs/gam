@@ -43,7 +43,6 @@
 
 use std::collections::BTreeMap;
 
-use ndarray::Array1;
 
 /// Minimal bit-vector. Backing storage is `Vec<u64>` words.
 ///
@@ -176,15 +175,6 @@ impl SparseAtomCode {
         self.weights[k] = w;
     }
 
-    /// Materialize the *effective* weight vector (zeros at inactive indices)
-    /// as an owned `Array1`. Useful for matmul-shaped downstream code.
-    pub fn effective_weights(&self) -> Array1<f64> {
-        let mut out = Array1::<f64>::zeros(self.k_atoms());
-        for k in self.active_mask.iter_ones() {
-            out[k] = self.weights[k];
-        }
-        out
-    }
 }
 
 /// Storage for the per-row codes of all `N` observations.

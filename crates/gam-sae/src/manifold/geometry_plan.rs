@@ -443,10 +443,6 @@ impl SaeAtomGeometryPlan {
         &self.resolution
     }
 
-    pub fn reference_metric(&self) -> &SaeReferenceMetricPlan {
-        &self.reference_metric
-    }
-
     /// Sectional curvature carried by a constant-curvature reference metric.
     #[must_use]
     pub fn constant_curvature(&self) -> Option<f64> {

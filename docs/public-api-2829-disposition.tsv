@@ -234,7 +234,7 @@ crates/gam-models/src/inference/full_conformal.rs	bernoulli_full_conformal	retir
 crates/gam-models/src/inference/full_conformal.rs	certifies_finite	retired-no-product-user
 crates/gam-models/src/inference/full_conformal.rs	discrete_full_conformal_exhaustive	retired-by-later-deletion:418c732d2f
 crates/gam-models/src/inference/full_conformal.rs	discrete_full_conformal_window	retired-by-later-deletion:418c732d2f
-crates/gam-models/src/inference/full_conformal.rs	gaussian_jackknife_plus	restored-in-place
+crates/gam-models/src/inference/full_conformal.rs	gaussian_jackknife_plus	retired-no-product-user
 crates/gam-models/src/inference/full_conformal.rs	honest_membership	retired-by-later-deletion:418c732d2f
 crates/gam-models/src/inference/full_conformal.rs	penalized_laml_criterion	retired-by-later-deletion:418c732d2f
 crates/gam-models/src/inference/full_conformal.rs	rank_s	retired-no-product-user
@@ -399,7 +399,7 @@ crates/gam-sae/src/assignment.rs	with_ungated	retired-by-later-deletion:b66a7d04
 crates/gam-sae/src/atom_codes.rs	active_weight_sum	retired-by-later-deletion:10ac599e4c
 crates/gam-sae/src/atom_codes.rs	coactivation	retired-no-product-user
 crates/gam-sae/src/atom_codes.rs	deactivate	retired-by-later-deletion:10ac599e4c
-crates/gam-sae/src/atom_codes.rs	effective_weights	restored-in-place
+crates/gam-sae/src/atom_codes.rs	effective_weights	retired-no-product-user
 crates/gam-sae/src/atom_codes.rs	fusion_evidence	retired-no-product-user
 crates/gam-sae/src/atom_codes.rs	weight_codependence	retired-no-product-user
 crates/gam-sae/src/atom_codes.rs	weights_matrix	retired-by-later-deletion:10ac599e4c
@@ -580,7 +580,7 @@ crates/gam-sae/src/manifold/atom.rs	reconstruct_decoder_coefficients	retired-no-
 crates/gam-sae/src/manifold/atom.rs	reference_roughness_kind	restored-in-place
 crates/gam-sae/src/manifold/atom.rs	set_factored_coordinates	retired-by-later-deletion:e6fd4251e5
 crates/gam-sae/src/manifold/behavior.rs	basepoint	retired-no-product-user
-crates/gam-sae/src/manifold/behavior.rs	embed	restored-in-place
+crates/gam-sae/src/manifold/behavior.rs	embed	retired-no-product-user
 crates/gam-sae/src/manifold/behavior.rs	fisher_rao_distance	retired-by-later-deletion:e6fd4251e5
 crates/gam-sae/src/manifold/behavior.rs	ln_sphere_project	retired-by-later-deletion:e6fd4251e5
 crates/gam-sae/src/manifold/behavior.rs	profiled_penalized_quasi_laplace_block_log_lambda_gradient	retired-by-later-deletion:e6fd4251e5
@@ -677,7 +677,7 @@ crates/gam-sae/src/manifold/gauge.rs	same_manifold	retired-by-later-deletion:fea
 crates/gam-sae/src/manifold/gauge.rs	sample_decoded_curve	retired-by-later-deletion:fea430c0c4
 crates/gam-sae/src/manifold/geometry_plan.rs	duchon_centers	retired-by-later-deletion:e6fd4251e5
 crates/gam-sae/src/manifold/geometry_plan.rs	embedded_donut_laplacian_block_eigenvalues	retired-by-later-deletion:e6fd4251e5
-crates/gam-sae/src/manifold/geometry_plan.rs	reference_metric	restored-in-place
+crates/gam-sae/src/manifold/geometry_plan.rs	reference_metric	retired-no-product-user
 crates/gam-sae/src/manifold/graph_atom.rs	candidate_edges	retired-by-later-deletion:fea430c0c4
 crates/gam-sae/src/manifold/graph_atom.rs	certified_compression	retired-by-later-deletion:fea430c0c4
 crates/gam-sae/src/manifold/graph_atom.rs	coactivation_edge_evidence	retired-by-later-deletion:fea430c0c4
