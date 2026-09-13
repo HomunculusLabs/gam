@@ -1615,7 +1615,7 @@ impl DenseDesignMatrix {
     /// `CoefficientTransformOperator::MATERIALIZE_MAX_BYTES`) can call this
     /// method to consume the inner under their own threshold without forcing
     /// the conservative default on every consumer.
-    pub fn try_to_dense_arc_with_policy(
+    pub(crate) fn try_to_dense_arc_with_policy(
         &self,
         context: &str,
         policy: &ResourcePolicy,

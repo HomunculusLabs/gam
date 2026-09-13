@@ -117,7 +117,7 @@ crates/gam-linalg/src/matrix/mod.rs	quadratic_form_diag	restored-in-place
 crates/gam-linalg/src/matrix/mod.rs	should_use_matrix_free_pcg	retired-by-later-deletion:b66b773539
 crates/gam-linalg/src/matrix/mod.rs	solve_system_matrix_free_pcg	retired-by-later-deletion:b66b773539
 crates/gam-linalg/src/matrix/mod.rs	solve_system_matrix_free_pcg_with_info	retired-by-later-deletion:b66b773539
-crates/gam-linalg/src/matrix/mod.rs	try_to_dense_arc_with_policy	restored-in-place
+crates/gam-linalg/src/matrix/mod.rs	try_to_dense_arc_with_policy	narrowed-to-crate
 crates/gam-linalg/src/matrix/mod.rs	x_original	retired-no-product-user
 crates/gam-linalg/src/matrix/symmetric.rs	addridge	retired-no-product-user
 crates/gam-linalg/src/matrix/symmetric.rs	max_abs_diag	retired-no-product-user
@@ -359,7 +359,7 @@ crates/gam-runtime/src/resource.rs	host_total_bytes	retired-no-product-user
 crates/gam-runtime/src/resource.rs	limiting_source	retired-no-product-user
 crates/gam-runtime/src/resource.rs	memory_availability_probe_count	retired-by-later-deletion:1beaa2893d
 crates/gam-runtime/src/resource.rs	permissive_small_data	retired-by-later-deletion:1beaa2893d
-crates/gam-runtime/src/resource.rs	reserved_bytes	restored-in-place
+crates/gam-runtime/src/resource.rs	reserved_bytes	narrowed-to-crate
 crates/gam-runtime/src/warm_start/key.rs	absorb_f64	retired-by-later-deletion:1beaa2893d
 crates/gam-runtime/src/warm_start/key.rs	absorb_f64_2d	retired-by-later-deletion:1beaa2893d
 crates/gam-runtime/src/warm_start/key.rs	absorb_f64_slice	retired-by-later-deletion:1beaa2893d

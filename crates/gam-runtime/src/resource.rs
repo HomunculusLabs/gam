@@ -425,7 +425,7 @@ impl MemoryGovernor {
         self.ledger.availability.clone()
     }
 
-    pub fn reserved_bytes(&self) -> usize {
+    pub(crate) fn reserved_bytes(&self) -> usize {
         self.ledger
             .reserved_bytes
             .load(std::sync::atomic::Ordering::Acquire)
