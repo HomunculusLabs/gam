@@ -237,7 +237,7 @@ crates/gam-models/src/inference/full_conformal.rs	discrete_full_conformal_window
 crates/gam-models/src/inference/full_conformal.rs	gaussian_jackknife_plus	restored-in-place
 crates/gam-models/src/inference/full_conformal.rs	honest_membership	retired-by-later-deletion:418c732d2f
 crates/gam-models/src/inference/full_conformal.rs	penalized_laml_criterion	retired-by-later-deletion:418c732d2f
-crates/gam-models/src/inference/full_conformal.rs	rank_s	restored-in-place
+crates/gam-models/src/inference/full_conformal.rs	rank_s	retired-no-product-user
 crates/gam-models/src/inference/generative.rs	sampleobservation_replicate_chunks	retired-no-surviving-dependent
 crates/gam-models/src/inference/generative.rs	sampleobservation_replicates	retired-no-surviving-dependent
 crates/gam-models/src/inference/model.rs	basis_span_cubic	restored-in-place
@@ -254,8 +254,8 @@ crates/gam-models/src/latent_coordinate.rs	stationarity_evidence	retired-by-late
 crates/gam-models/src/multinomial.rs	coefficient_covariance_corrected	retired-by-later-deletion:418c732d2f
 crates/gam-models/src/multinomial.rs	logistic_normal_softmax_moments	retired-by-later-deletion:418c732d2f
 crates/gam-models/src/multinomial.rs	logistic_normal_softmax_moments_with_control	retired-by-later-deletion:418c732d2f
-crates/gam-models/src/multinomial.rs	n_active_classes	restored-in-place
-crates/gam-models/src/multinomial.rs	p_per_class	restored-in-place
+crates/gam-models/src/multinomial.rs	n_active_classes	retired-no-product-user
+crates/gam-models/src/multinomial.rs	p_per_class	retired-no-product-user
 crates/gam-models/src/multinomial.rs	predict_multinomial_formula_with_se_in_mode	retired-by-later-deletion:418c732d2f
 crates/gam-models/src/response_geometry.rs	column_end	retired-no-surviving-dependent
 crates/gam-models/src/response_geometry.rs	from_bytes	retired-no-surviving-dependent

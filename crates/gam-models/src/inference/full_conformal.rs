@@ -951,11 +951,6 @@ impl<'a> GaussianRemlRhoResponse<'a> {
         })
     }
 
-    /// `rank(S)` as detected at construction.
-    pub fn rank_s(&self) -> usize {
-        self.rank_s
-    }
-
     /// Closed-form REML evaluation at `ρ`. `z = Some(_)` augments with the
     /// test row; `z = None` is the original-data criterion (used for ρ̂₀).
     fn eval(&self, rho: f64, z: Option<f64>) -> Result<RemlEval, String> {

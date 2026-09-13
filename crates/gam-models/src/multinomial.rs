@@ -807,17 +807,6 @@ pub struct MultinomialFitOutputs {
 }
 
 impl MultinomialFitOutputs {
-    /// Number of active classes `M = K − 1` (columns of
-    /// [`Self::coefficients_active`]).
-    pub fn n_active_classes(&self) -> usize {
-        self.coefficients_active.ncols()
-    }
-
-    /// Per-class coefficient dimension `P` (rows of
-    /// [`Self::coefficients_active`]).
-    pub fn p_per_class(&self) -> usize {
-        self.coefficients_active.nrows()
-    }
 }
 
 #[derive(Clone, Copy)]
