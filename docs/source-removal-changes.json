@@ -7101,5 +7101,13 @@
     ],
     "reason": "#2829 no product user: SparseExactFactor::factor_nnz, pirls_row::row_reweight_cpu and ResidualCascadeDesign::coarse_space_cols and logdet_slq have no caller on their own types.",
     "evidence": "At e86e693908649bdca1f7f9d7a528db2a05436597, reading every call-shaped occurrence over crates, src and tests: SparseExactFactor::factor_nnz only delegates to SimplicialFactor::factor_nnz, which keeps its callers; coarse_space_cols and logdet_slq are only called on the cascade Core that these design methods delegate to; row_reweight_cpu has no call, and row_reweight_cpu_at keeps its production callers in pirls_gpu.rs and pirls_row.rs."
+  },
+  {
+    "base": "17be0077a55ceb2a9ba928b0c6254bffe0d5a6f6",
+    "items": [
+      "crates/gam-terms/src/basis/closed_form_penalty.rs:const:LOG_EPS"
+    ],
+    "reason": "SPEC rule 23 (#2469). riesz_block_radial_derivatives took the log (finite-part) branch whenever 2j − d lay within LOG_EPS = 1e-12 of a non-negative even integer. Every caller passes j as an integer or as a + 2s. A pole needs 4s to be an integer, and every such s is a multiple of 1/4, which f64 holds exactly, as it does 2j − d. The exact test offset >= 0 && 2·round(offset/2) == offset is bit-identical for every order that reaches a pole, so the function-local LOG_EPS was deleted in 61d8ce843; this entry records that removal.",
+    "evidence": "At the base, git grep -n -w LOG_EPS finds only crates/gam-terms/src/basis/closed_form_penalty.rs, where it is declared and read in the log-case detector. The callers at closed_form_penalty.rs:556, :1317, :1325, :1383, :1835 and :1911 pass (base + n) as f64, a as f64, a as f64 + 2.0 * s, and (j) as f64. The deletion landed as 61d8ce843; job 579526 (/scratch.global/sauer354/pool/const2469d/g5bc.579526.log, HEAD=5bc7e284f) ran gam-terms lib closed_form with 187 passed and 0 failed."
   }
 ]
