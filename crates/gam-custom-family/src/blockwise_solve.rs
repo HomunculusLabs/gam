@@ -638,7 +638,6 @@ fn stabilizing_shift_core(
     gershgorin_src: &Array2<f64>,
     ridge_floor: f64,
 ) -> Option<f64> {
-    let floor = effective_solverridge(ridge_floor);
     // Fast path: already PD at zero shift ⇒ no stabilization needed. One Cholesky
     // (O(p³/3)), the common case on a well-conditioned cycle.
     if cholesky_test.cholesky(Side::Lower).is_ok() {
@@ -695,9 +694,21 @@ fn stabilizing_shift_core(
     if !gershgorin_min.is_finite() {
         return None;
     }
+    // The margin a positive-definiteness certificate can carry is the smallest
+    // pivot a computed Cholesky resolves. Pivot `k` subtracts at most `p` squares
+    // whose sum is `A_kk`, so its rounding is at most `γ_{p+1}·max_k A_kk` for the
+    // matrix `A` being factored. A caller's `ridge_floor` can only raise it.
+    let factored_dim = cholesky_test.nrows();
+    if (0..factored_dim).any(|d| !cholesky_test[[d, d]].is_finite()) {
+        return None;
+    }
+    let max_diagonal = (0..factored_dim)
+        .fold(0.0_f64, |largest, d| largest.max(cholesky_test[[d, d]].abs()));
+    let floor = ridge_floor
+        .max(gam_linalg::roundoff::accumulation_growth(factored_dim + 1) * max_diagonal);
     if gershgorin_min >= floor {
         // Gershgorin certifies PD-at-floor but the no-shift Cholesky failed
-        // (round-off on a barely-PD matrix): a floor-sized shift suffices.
+        // (round-off on a barely-PD matrix): a pivot-band shift suffices.
         return Some(floor);
     }
     // Guaranteed-PD upper bracket: `λ_min(cholesky_test + (floor − g)·I) ≥ floor`.
