@@ -902,6 +902,161 @@ fn standard_normal_flex_canonical_derivative_ladder_matches_vgh_t3_t4_932() {
     );
 }
 
+/// #932 census residual: the flex arm's coefficient-space directional surfaces were
+/// covered only by operator, batched and cache identity tests, which compare one
+/// lowering with another. The coefficient map is linear (the marginal and slope
+/// designs, with the warp coefficients as primaries), so `D_β H[v] = Jᵀ T3[J v] J`,
+/// but nothing checked that surface against the Hessian it differentiates. The dense
+/// Hessian pulls each row's primary Hessian back through the designs, while the
+/// directional surfaces contract the cached third tensors, so the two are separate
+/// code paths. This applies the resolving gate of
+/// `flex_no_wiggle_beta_hessian_directional_derivatives_match_finite_difference_932`:
+/// `D_β H[v]` against a Richardson central difference of the dense joint Hessian, and
+/// `D²_β H[u, v]` against one of `D_β H[v]` along `u`. The fixture has six rows and
+/// two-column marginal and slope designs, so the pullback carries more than an
+/// intercept. Every entry is measured and the worst error over its bar is printed
+/// before any assertion.
+#[test]
+fn standard_normal_flex_beta_hessian_directional_derivatives_match_finite_difference_932() {
+    let (mut family, one_row_states) = standard_normal_flex_fixture();
+    let n = 6usize;
+    let covariate = Array1::linspace(-0.9, 1.1, n);
+    let marginal_x =
+        Array2::from_shape_fn((n, 2), |(i, j)| if j == 0 { 1.0 } else { covariate[i] });
+    let slope_x = Array2::from_shape_fn((n, 2), |(i, j)| {
+        if j == 0 {
+            1.0
+        } else {
+            0.5 * covariate[n - 1 - i]
+        }
+    });
+    family.y = Arc::new(Array1::from_vec(vec![1.0, 0.0, 1.0, 1.0, 0.0, 0.0]));
+    family.weights = Arc::new(Array1::from_vec(vec![0.9, 1.1, 0.8, 1.0, 1.2, 0.7]));
+    family.z = Arc::new(Array1::linspace(-1.2, 1.4, n));
+    family.marginal_design = DesignMatrix::Dense(DenseDesignMatrix::from(marginal_x.clone()));
+    family.slope_design = DesignMatrix::Dense(DenseDesignMatrix::from(slope_x.clone()));
+    let score_dim = one_row_states[2].beta.len();
+    let link_dim = one_row_states[3].beta.len();
+    let mut beta = Array1::<f64>::zeros(4 + score_dim + link_dim);
+    beta[0] = 0.18;
+    beta[1] = -0.12;
+    beta[2] = 0.32;
+    beta[3] = 0.08;
+    for index in 0..score_dim {
+        beta[4 + index] = one_row_states[2].beta[index];
+    }
+    for index in 0..link_dim {
+        beta[4 + score_dim + index] = one_row_states[3].beta[index];
+    }
+    let states_at = |beta: &Array1<f64>| -> Vec<ParameterBlockState> {
+        let marginal_beta = Array1::from_iter(beta.iter().take(2).copied());
+        let slope_beta = Array1::from_iter(beta.iter().skip(2).take(2).copied());
+        vec![
+            ParameterBlockState {
+                eta: marginal_x.dot(&marginal_beta),
+                beta: marginal_beta,
+            },
+            ParameterBlockState {
+                eta: slope_x.dot(&slope_beta),
+                beta: slope_beta,
+            },
+            ParameterBlockState {
+                eta: Array1::zeros(n),
+                beta: Array1::from_iter(beta.iter().skip(4).take(score_dim).copied()),
+            },
+            ParameterBlockState {
+                eta: Array1::zeros(n),
+                beta: Array1::from_iter(beta.iter().skip(4 + score_dim).copied()),
+            },
+        ]
+    };
+    let states = states_at(&beta);
+    assert!(family.effective_flex_active(&states).expect("flex activity"));
+    let p = beta.len();
+    let u = Array1::from_shape_fn(p, |i| ((i * 7 + 3) % 11) as f64 / 11.0 - 0.45);
+    let v = Array1::from_shape_fn(p, |i| ((i * 5 + 1) % 13) as f64 / 13.0 - 0.5);
+    let h = 1e-3;
+    let mut report = Vec::new();
+    let mut failures = Vec::new();
+    let mut gate = |what: &str, analytic: &Array2<f64>, at: &dyn Fn(f64) -> Array2<f64>| {
+        let coarse = (at(h) - at(-h)) / (2.0 * h);
+        let fine = (at(0.5 * h) - at(-0.5 * h)) / h;
+        let scale = analytic
+            .iter()
+            .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+        let mut worst_over_bar = 0.0_f64;
+        let mut worst_uncertainty_ratio = 0.0_f64;
+        for (((row, col), &want), (&c, &f)) in analytic
+            .indexed_iter()
+            .zip(coarse.iter().zip(fine.iter()))
+        {
+            let value = (4.0 * f - c) / 3.0;
+            let uncertainty = (f - c).abs() / 3.0;
+            let denominator = scale.max(want.abs()).max(value.abs());
+            let over_bar = (want - value).abs() / (1e-5 * denominator + 4.0 * uncertainty);
+            let uncertainty_ratio = uncertainty / denominator;
+            if !(over_bar <= worst_over_bar) {
+                worst_over_bar = over_bar;
+            }
+            if !(uncertainty_ratio <= worst_uncertainty_ratio) {
+                worst_uncertainty_ratio = uncertainty_ratio;
+            }
+            if !(uncertainty_ratio <= 0.05) {
+                failures.push(format!(
+                    "{what}[{row}, {col}]: the difference oracle did not resolve \
+                     (value={value:.6e}, uncertainty={uncertainty:.3e})"
+                ));
+            }
+            if !(over_bar <= 1.0) {
+                failures.push(format!(
+                    "{what}[{row}, {col}]: analytic={want:.9e} fd={value:.9e} \
+                     uncertainty={uncertainty:.3e} scale={scale:.3e}"
+                ));
+            }
+        }
+        if !(scale > 1e-6) {
+            failures.push(format!(
+                "{what} carries no curvature on this fixture ({scale:.3e}), so the \
+                 comparison would pass on zeros"
+            ));
+        }
+        report.push(format!(
+            "{what}: scale={scale:.3e} worst_over_bar={worst_over_bar:.3e} \
+             worst_uncertainty_ratio={worst_uncertainty_ratio:.3e}"
+        ));
+    };
+    let first = family
+        .exact_newton_joint_hessian_directional_derivative(&states, &v)
+        .expect("D_beta H[v]")
+        .expect("the flex arm publishes D_beta H");
+    gate("D_beta H[v]", &first, &|t| {
+        family
+            .exact_newton_joint_hessian(&states_at(&(&beta + &(&v * t))))
+            .expect("joint Hessian")
+            .expect("the flex arm publishes an explicit joint Hessian")
+    });
+    let second = family
+        .exact_newton_joint_hessiansecond_directional_derivative(&states, &u, &v)
+        .expect("D2_beta H[u, v]")
+        .expect("the flex arm publishes D2_beta H");
+    gate("D2_beta H[u, v]", &second, &|t| {
+        family
+            .exact_newton_joint_hessian_directional_derivative(&states_at(&(&beta + &(&u * t))), &v)
+            .expect("displaced D_beta H[v]")
+            .expect("the flex arm publishes D_beta H")
+    });
+    eprintln!(
+        "#932 BMS FLEX coefficient directional surfaces: {}",
+        report.join("; ")
+    );
+    assert!(
+        failures.is_empty(),
+        "{} entries miss their bar:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
 /// The standard-normal FLEX fifth slabs are the primary-axis derivatives of the
 /// canonical fourth contraction: `T_c[k][l] = Σ_{d,e} ℓ_{klcde}·u_d·v_e` must
 /// match a Richardson difference of `row_primary_fourth_contracted_ordered(u, v)`
