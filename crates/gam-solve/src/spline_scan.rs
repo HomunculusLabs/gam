@@ -3565,6 +3565,11 @@ struct CertifiedCriterionJet {
     /// so a certificate that fell back to a global constant names itself.
     curvature_source: BoundSource,
     third_source: BoundSource,
+    /// Upper bound on `|V‴|` at every `ρ` at or below this endpoint: the global
+    /// `½(r/4 + 6ν)`, or the untied tail bound `½(r + 24ν)·s̄(ρ)` where that is
+    /// smaller (see [`tail_mode_response_bound`]). `s̄` grows with `ρ`, so the
+    /// enclosure's secant curvature theorem reads it at the cell's right end.
+    third_bound: f64,
 }
 
 impl CertifiedCriterionJet {
@@ -3622,6 +3627,86 @@ fn curvature_global_bound(proper_modes: f64, residual_dof: f64) -> f64 {
 
 fn third_derivative_global_bound(proper_modes: f64, residual_dof: f64) -> f64 {
     0.5 * (0.25 * proper_modes + 6.0 * residual_dof)
+}
+
+/// Certified upper bound `min(1, e^ρ·Ḡ)` on the largest mode response
+/// `s_j = λ/(λ + κ_j)` at `ρ = log λ`.
+///
+/// Why the responses govern every derivative of order two and above once the
+/// diffuse null space is profiled out: `dV/dρ = −(V − R)` and
+/// `dP/dρ = P − PRP` (see [`intersect_first_order_accumulator_exact_ranges`])
+/// give `dT/dρ = T − T²` for `T = PR`. That flow keeps the eigenvectors of `T`
+/// fixed, and its eigenvalues are exactly the `s_j`, so `Σ v²/F̃ = Q =
+/// Σ_j z_j² s_j` with fixed weights and `(Σ log F̃)′ = −Σ_j (1 − s_j)`. Every
+/// `s^(k)` for `k ≤ 5` is `s` times a polynomial of magnitude at most one on
+/// `[0, 1]`, so `|(Σ log F̃)^(k)| ≤ r·s̄` for `k ≥ 2`. With the probability
+/// weights `π_j = z_j² s_j/Q`, `(log Q)′ = 1 − ⟨s⟩_π` and
+/// `d⟨f(s)⟩_π/dρ = ⟨f′(s)s(1−s)⟩ + ⟨f(s)(⟨s⟩ − s)⟩`, which give
+/// `|(log Q)″| ≤ 4s̄` and `|(log Q)‴| ≤ 24s̄`. Hence, for untied data,
+///
+/// ```text
+///   |V″| ≤ ½(r + 4ν)·s̄,     |V‴| ≤ ½(r + 24ν)·s̄.
+/// ```
+///
+/// Within-tie energy adds a λ-independent term to the residual sum, and the
+/// ratio `Q/(ssr + Q)` then crosses over at O(1), so callers apply this only
+/// when that energy is exactly zero (#2902 row 3).
+///
+/// `s_j ≤ e^ρ/κ_j ≤ e^ρ·Ḡ`, because `κ_min ≥ 1/Ḡ` for the Gershgorin bound that
+/// [`scan_log_lambda_domain`] derives the lower domain edge from. Here that
+/// bound is evaluated with directed rounding: the level entries are
+/// `c_m·δ^{−(2m−1)}` with the exact unit precisions `c_m = [Q̄(1)⁻¹]₀₀ ∈
+/// {1, 12, 720}`, and `1/√(w_{t−1}w_t)` is replaced by its AM-GM upper bound
+/// `(1/w_{t−1} + 1/w_t)/2`. An increment whose power cannot be enclosed, or an
+/// exponential that leaves the finite range, returns the trivial bound `1`.
+fn tail_mode_response_bound(
+    nodes: &[PooledNode],
+    order: usize,
+    log_lambda: f64,
+) -> Result<f64, SplineScoreProofError> {
+    let unit_precision = match order {
+        1 => 1.0,
+        2 => 12.0,
+        3 => 720.0,
+        other => {
+            return Err(SplineScoreProofError::InvalidInput(format!(
+                "spline scan: order must be in 1..={MAX_ORDER}, got {other}"
+            )));
+        }
+    };
+    let mut rows = vec![Ball::ZERO; nodes.len()];
+    for k in 1..nodes.len() {
+        let delta = Ball::exact(nodes[k].x).sub(Ball::exact(nodes[k - 1].x));
+        let power = match order {
+            1 => delta,
+            2 => delta.square().mul(delta),
+            _ => delta.square().square().mul(delta),
+        };
+        if !(power.is_finite() && power.lo > 0.0) {
+            return Ok(1.0);
+        }
+        let precision = Ball::exact(unit_precision).div_positive(power);
+        let inverse_left = Ball::exact(1.0).div_positive(Ball::exact(nodes[k - 1].w));
+        let inverse_right = Ball::exact(1.0).div_positive(Ball::exact(nodes[k].w));
+        let off_diagonal = precision.mul(inverse_left.add(inverse_right).scale(0.5));
+        rows[k - 1] = rows[k - 1].add(precision.mul(inverse_left)).add(off_diagonal);
+        rows[k] = rows[k].add(precision.mul(inverse_right)).add(off_diagonal);
+    }
+    let gershgorin = rows.iter().fold(0.0_f64, |bound, row| bound.max(row.hi));
+    let (Ok(growth), Some(growth_enclosure)) = (
+        gam_problem::checked_exp_log_strength(log_lambda),
+        gam_math::score_opt::certified_exp(log_lambda),
+    ) else {
+        return Ok(1.0);
+    };
+    let response = Ball::certified(growth, growth_enclosure)
+        .mul(Ball::exact(gershgorin))
+        .hi;
+    Ok(if response.is_finite() {
+        response.min(1.0)
+    } else {
+        1.0
+    })
 }
 
 /// Conservative closed-form bound on the concentrated criterion's fifth
@@ -3767,14 +3852,28 @@ fn certified_concentrated_criterion_jet(
     // order-3 rho below -6.
     let proper_modes = (nodes.len() - order) as f64;
     let residual_dof = (n_obs - order) as f64;
+    // On untied data every derivative of order two and above scales with the
+    // largest mode response, which vanishes toward the lower domain edge where
+    // the global constants are O(ν) and sized the tail cells (#2902 row 3).
+    let tail_response = if ssr_within == 0.0 {
+        tail_mode_response_bound(nodes, order, log_lambda)?
+    } else {
+        1.0
+    };
+    let tail_bound = |residual_coefficient: f64| {
+        Ball::exact(proper_modes)
+            .add(Ball::exact(residual_dof).scale(residual_coefficient))
+            .scale(0.5)
+            .mul(Ball::exact(tail_response))
+            .hi
+    };
+    let third_bound =
+        third_derivative_global_bound(proper_modes, residual_dof).min(tail_bound(24.0));
     let (curvature, curvature_source) = intersect_with_global_bound(
         curvature,
-        curvature_global_bound(proper_modes, residual_dof),
+        curvature_global_bound(proper_modes, residual_dof).min(tail_bound(4.0)),
     );
-    let (third, third_source) = intersect_with_global_bound(
-        third,
-        third_derivative_global_bound(proper_modes, residual_dof),
-    );
+    let (third, third_source) = intersect_with_global_bound(third, third_bound);
     Ok(CertifiedCriterionJet {
         jet: ScoreJet {
             value: value.value,
@@ -3788,6 +3887,7 @@ fn certified_concentrated_criterion_jet(
         third,
         curvature_source,
         third_source,
+        third_bound,
     })
 }
 
@@ -3917,10 +4017,18 @@ fn concentrated_criterion_enclosure(
     let proper_modes = Ball::exact((n_nodes - order) as f64);
     let residual_dof = Ball::exact((n_obs - order) as f64);
     let fifth_abs_bound = fifth_derivative_global_bound(proper_modes, residual_dof);
-    let third_abs_bound = proper_modes
-        .scale(0.25)
-        .add(residual_dof.scale(6.0))
-        .scale(0.5);
+    // `|V‴|` over the cell: the global constant, or the untied tail bound the
+    // endpoint certificates carry where that is smaller. The mode responses grow
+    // with `ρ`, so the right endpoint's bound covers the whole cell; the larger of
+    // the two is taken rather than assumed.
+    let third_abs_bound = Ball::exact(
+        proper_modes
+            .scale(0.25)
+            .add(residual_dof.scale(6.0))
+            .scale(0.5)
+            .hi
+            .min(left_certificate.third_bound.max(right_certificate.third_bound)),
+    );
     // Announce a weakened anchor at the point it anchors.
     //
     // Both endpoints feed their nearest half-cell, so either one falling back
@@ -6951,5 +7059,70 @@ mod tests {
         let error = serde_json::from_value::<SplineScanState>(incomplete)
             .expect_err("log_likelihood is a required wire field");
         assert!(error.to_string().contains("missing field `log_likelihood`"));
+    }
+
+    /// #2902 row 3: the exact unit increment precisions `tail_mode_response_bound`
+    /// uses are the inverse IWP process noise at unit spacing.
+    #[test]
+    fn unit_increment_precisions_are_the_inverse_iwp_noise_2902() {
+        for (order, expected) in [(1usize, 1.0_f64), (2, 12.0), (3, 720.0)] {
+            let inverse = mat_inv(&process_noise(1.0, 1.0, order), order, "unit IWP process noise")
+                .expect("unit IWP process noise is invertible");
+            assert!(
+                (inverse[0][0] - expected).abs() <= 1.0e-9 * expected,
+                "order {order}: [Q(1)^-1]_00 = {}, expected {expected}",
+                inverse[0][0]
+            );
+        }
+    }
+
+    /// #2902 row 3: on the 40-point payload fixture the tail response bound is a
+    /// response (at most one) that grows with log lambda, so a cell's right
+    /// endpoint covers the cell. At the lower domain edge it shrinks the
+    /// third-derivative bound far below the global constant that sized the
+    /// near-interpolation tail cells, and the scan certifies orders 1 and 2 on
+    /// the derived domain, where it refused at 8193/8192 subdivisions.
+    #[test]
+    fn untied_tail_bounds_shrink_the_near_interpolation_band_and_the_scan_certifies_2902() {
+        let x: Vec<f64> = (0..40).map(|i| i as f64 / 39.0).collect();
+        let y: Vec<f64> = x.iter().map(|&v| (4.0 * v).sin() + 0.1 * v).collect();
+        let w = vec![1.0_f64; x.len()];
+        for order in 1..=MAX_ORDER {
+            let (nodes, ssr_within, n_obs, _response_origin) =
+                pool_nodes(&x, &y, &w, order).expect("pooled data");
+            assert_eq!(
+                ssr_within, 0.0,
+                "fixture premise: untied abscissae carry no within-tie energy"
+            );
+            let (lo, hi) = scan_log_lambda_domain(&nodes, order).expect("derived domain");
+            let mut previous = 0.0_f64;
+            for offset in [0.0_f64, 0.5, 2.0, 8.0, 32.0] {
+                let log_lambda = (lo + offset).min(hi);
+                let response =
+                    tail_mode_response_bound(&nodes, order, log_lambda).expect("tail response");
+                assert!(
+                    response.is_finite() && response >= previous && response <= 1.0,
+                    "order {order}: the response bound must be a nondecreasing response in \
+                     log lambda: {response} after {previous}"
+                );
+                previous = response;
+            }
+            let certificate =
+                certified_concentrated_criterion_jet(&nodes, ssr_within, n_obs, lo, order)
+                    .expect("certified jet at the lower edge");
+            let proper = (nodes.len() - order) as f64;
+            let dof = (n_obs - order) as f64;
+            let global = third_derivative_global_bound(proper, dof);
+            assert!(
+                certificate.third_bound <= 1.0e-3 * global,
+                "order {order}: at the lower edge the tail third-derivative bound {} must be \
+                 far below the global {global}",
+                certificate.third_bound
+            );
+        }
+        for order in 1..=2 {
+            fit_spline_scan(&x, &y, &w, order)
+                .expect("the scan must certify the payload fixture on its derived domain");
+        }
     }
 }
