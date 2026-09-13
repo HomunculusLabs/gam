@@ -2439,13 +2439,19 @@ pub fn gaussian_jackknife_plus(
     let minv_xt = chol.solve_mat(&xt);
     let mut loo_preds = Array1::<f64>::zeros(n);
     let mut loo_resids = Array1::<f64>::zeros(n);
+    // A leverage is resolved only above the rounding of the Cholesky solve and
+    // product that form it, so `1 − hᵢ` has to clear that band before the
+    // downdate divides by it.
+    let leverage_growth = response_solve_growth(x.ncols());
     for i in 0..n {
         let h_i = x.row(i).dot(&minv_xt.column(i));
         let one_minus_h = 1.0 - h_i;
-        if !(one_minus_h > 1e-10) {
+        let leverage_band = leverage_growth * h_i.abs();
+        if !(one_minus_h > leverage_band) {
             return Err(format!(
                 "gaussian jackknife+: leverage hᵢ = {h_i} at row {i} leaves no leave-one-out \
-                 information (1 − hᵢ ≤ 1e-10); the rank-one downdate is exact only for hᵢ < 1"
+                 information (1 − hᵢ ≤ {leverage_band:.3e}, the band hᵢ is resolved to); the \
+                 rank-one downdate is exact only for hᵢ < 1"
             ));
         }
         let r_i = y[i] - mu[i];
@@ -2576,14 +2582,18 @@ impl GaussianJackknifePlusStats {
         let minv_xt = chol.solve_mat(&xt);
         let mut signed_loo = Array1::<f64>::zeros(n);
         let mut abs_loo = Array1::<f64>::zeros(n);
+        // `1 − hᵢ` has to clear the band the leverage is resolved to; see
+        // `gaussian_jackknife_plus`.
+        let leverage_growth = response_solve_growth(p);
         for i in 0..n {
             let h_i = x.row(i).dot(&minv_xt.column(i));
             let one_minus_h = 1.0 - h_i;
-            if !(one_minus_h > 1e-10) {
+            let leverage_band = leverage_growth * h_i.abs();
+            if !(one_minus_h > leverage_band) {
                 return Err(format!(
                     "gaussian jackknife+ stats: leverage hᵢ = {h_i} at row {i} leaves no \
-                     leave-one-out information (1 − hᵢ ≤ 1e-10); the rank-one downdate is \
-                     exact only for hᵢ < 1"
+                     leave-one-out information (1 − hᵢ ≤ {leverage_band:.3e}, the band hᵢ is \
+                     resolved to); the rank-one downdate is exact only for hᵢ < 1"
                 ));
             }
             let c_i = (y[i] - mu[i]) / one_minus_h;
