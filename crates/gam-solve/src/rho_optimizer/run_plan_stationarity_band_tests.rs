@@ -32,6 +32,10 @@ fn outer_stationarity_band_at(config: &OuterConfig, cost_at_point: f64) -> f64 {
 fn zz_measure_2613_gradient_only_stiff_ridge_trajectory() {
     const AMPLITUDE: f64 = 1.0e4;
     const RHO_STAR: f64 = 12.0;
+    // The #2392 fixture's face, stated for the audit and the recovery alike: an
+    // undeclared outer domain is the supported log-strength domain (04726d916),
+    // where 29.9 is interior.
+    const WRONG_RAIL_FACE: f64 = 30.0;
 
     // A second `try_init` in one process is an `Err`, and that is the expected
     // state whenever another test installed the logger first. Either way trace
@@ -74,7 +78,11 @@ fn zz_measure_2613_gradient_only_stiff_ridge_trajectory() {
 
     let audit_problem = OuterProblem::new(1)
         .with_gradient(Derivative::Analytic)
-        .with_hessian(DeclaredHessianForm::Unavailable);
+        .with_hessian(DeclaredHessianForm::Unavailable)
+        .with_bounds(
+            Array1::from_elem(1, -WRONG_RAIL_FACE),
+            Array1::from_elem(1, WRONG_RAIL_FACE),
+        );
     let audit_cost = cost.clone();
     let audit_eval = eval.clone();
     let mut audit_obj = audit_problem.build_objective(
@@ -84,8 +92,9 @@ fn zz_measure_2613_gradient_only_stiff_ridge_trajectory() {
         None::<fn(&mut ())>,
         None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
     );
-    let refusal = audit_stationary_point(
+    let refusal = audit_stationary_point_in(
         &mut audit_obj,
+        audit_problem.config(),
         array![29.9],
         "gradient-only wrong-rail audit #2613",
     )
@@ -100,6 +109,10 @@ fn zz_measure_2613_gradient_only_stiff_ridge_trajectory() {
     let recovery_problem = OuterProblem::new(1)
         .with_gradient(Derivative::Analytic)
         .with_hessian(DeclaredHessianForm::Unavailable)
+        .with_bounds(
+            Array1::from_elem(1, -WRONG_RAIL_FACE),
+            Array1::from_elem(1, WRONG_RAIL_FACE),
+        )
         .with_initial_rho(reseed)
         .with_screen_initial_rho(false)
         .with_seed_config(gam_problem::SeedConfig {
