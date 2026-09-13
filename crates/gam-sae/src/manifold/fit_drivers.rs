@@ -6650,21 +6650,13 @@ impl SaeManifoldTerm {
             let pre_step_total =
                 self.penalized_objective_total(target, rho, analytic_penalties, 1.0)?;
             let delta_ext_coord = Self::fixed_decoder_step_from_rows(&sys, ridge_ext_coord)?;
-            let directional_decrease = sae_manifold_newton_directional_decrease(
+            let decrease = sae_manifold_newton_directional_decrease(
                 &sys,
                 delta_ext_coord.view(),
                 beta_zero.view(),
             );
-            let grad_norm_sq: f64 = sys
-                .rows
-                .iter()
-                .flat_map(|row| row.gt.iter())
-                .map(|&v| v * v)
-                .sum();
-            let step_norm_sq: f64 = delta_ext_coord.iter().map(|&v| v * v).sum();
-            let directional_decrease_floor = SAE_MANIFOLD_DIRECTIONAL_DECREASE_REL_FLOOR
-                * grad_norm_sq.sqrt()
-                * step_norm_sq.sqrt();
+            let directional_decrease = decrease.value;
+            let directional_decrease_floor = decrease.rounding_band;
             let snapshot = self.snapshot_mutable_state();
             if !(pre_step_total.is_finite()
                 && directional_decrease.is_finite()
@@ -7937,16 +7929,15 @@ impl SaeManifoldTerm {
                     }
                 }
             }
-            // Relative-scale floor on the directional decrease. When the
-            // gradient is nearly orthogonal to the Newton step (ill-conditioned
-            // near-convergence), `directional_decrease` collapses to O(machine
-            // epsilon · ‖g‖ · ‖Δ‖). At that scale the Armijo bound
-            // `pre_step_total − c1·step·directional_decrease` is numerically
-            // indistinguishable from `pre_step_total`, so the line search would
-            // "accept" on rounding noise. Treat that as converged and stop. The
-            // norms are the natural scale of the inner product; the relative
-            // constant keeps the reduction term distinguishable from rounding at
-            // full step size given SAE_MANIFOLD_ARMIJO_C1 = 1e-4.
+            // Rounding floor on the directional decrease. When the gradient is
+            // nearly orthogonal to the Newton step (ill-conditioned
+            // near-convergence), `directional_decrease` collapses into the
+            // rounding of its own contraction, where its sign carries no
+            // information and the Armijo bound
+            // `pre_step_total − c1·step·directional_decrease` would "accept" on
+            // rounding noise. The floor below is that contraction's accumulation
+            // band `γ_terms·Σ|gᵢΔᵢ|` (`NewtonDirectionalDecrease::rounding_band`);
+            // a decrease at or inside it is no resolved descent.
             let mut grad_norm_sq = 0.0;
             for (row_idx, row) in sys.rows.iter().enumerate() {
                 let di = sys.row_dims[row_idx];
@@ -8057,14 +8048,13 @@ impl SaeManifoldTerm {
                     quotient_grad_norm
                 );
             }
-            let directional_decrease = sae_manifold_newton_directional_decrease(
+            let decrease = sae_manifold_newton_directional_decrease(
                 &sys,
                 delta_ext_coord.view(),
                 delta_beta.view(),
             );
-            let directional_decrease_floor = SAE_MANIFOLD_DIRECTIONAL_DECREASE_REL_FLOOR
-                * grad_norm_sq.sqrt()
-                * step_norm_sq.sqrt();
+            let directional_decrease = decrease.value;
+            let directional_decrease_floor = decrease.rounding_band;
             // Capture the exact state whose assembled gradient/Hessian produced
             // `sys`, then evaluate the Armijo baseline from that same state.
             // Assembly installs compact active-set layout in `last_row_layout`;

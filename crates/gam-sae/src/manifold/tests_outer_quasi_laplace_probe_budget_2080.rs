@@ -1854,7 +1854,7 @@ fn zz_measure_k2_wide_p_gradient_is_the_objectives_2080() {
         // layout mistake here cannot be read as a desync: for `d = −g` the
         // directional decrease `−gᵀd` must be exactly `‖g‖²`.
         let contracted =
-            sae_manifold_newton_directional_decrease(&sys, dir_t.view(), dir_b.view());
+            sae_manifold_newton_directional_decrease(&sys, dir_t.view(), dir_b.view()).value;
         let base_objective = term
             .penalized_objective_total(z.view(), &rho_fixed, None, 1.0)
             .expect("objective at the warmed iterate");

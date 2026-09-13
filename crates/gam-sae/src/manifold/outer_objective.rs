@@ -4098,26 +4098,47 @@ impl OuterObjective for SaeManifoldOuterObjective {
     }
 }
 
+/// The Newton directional decrease `−gᵀΔ` over an arrow system's gradient
+/// blocks, with the rounding band of that contraction.
+pub(crate) struct NewtonDirectionalDecrease {
+    /// `−gᵀΔ = −(Σ_rows gtᵀΔt + gbᵀΔβ)`.
+    pub(crate) value: f64,
+    /// `accumulation_band(terms, Σ|gᵢΔᵢ|)` over the contraction's terms: a
+    /// computed `value` no larger in magnitude is indistinguishable from zero.
+    pub(crate) rounding_band: f64,
+}
+
 pub(crate) fn sae_manifold_newton_directional_decrease(
     sys: &ArrowSchurSystem,
     delta_ext_coord: ArrayView1<'_, f64>,
     delta_beta: ArrayView1<'_, f64>,
-) -> f64 {
+) -> NewtonDirectionalDecrease {
     // delta_ext_coord has variable-stride layout for heterogeneous systems.
     assert_eq!(delta_ext_coord.len(), sys.row_offsets[sys.rows.len()]);
     assert_eq!(delta_beta.len(), sys.k);
-    let mut gradient_dot_step = 0.0;
+    let mut gradient_dot_step = 0.0_f64;
+    let mut absolute_sum = 0.0_f64;
     for (row_idx, row) in sys.rows.iter().enumerate() {
         let row_base = sys.row_offsets[row_idx];
         let di = sys.row_dims[row_idx];
         for axis in 0..di {
-            gradient_dot_step += row.gt[axis] * delta_ext_coord[row_base + axis];
+            let term = row.gt[axis] * delta_ext_coord[row_base + axis];
+            gradient_dot_step += term;
+            absolute_sum += term.abs();
         }
     }
     for idx in 0..sys.k {
-        gradient_dot_step += sys.gb[idx] * delta_beta[idx];
+        let term = sys.gb[idx] * delta_beta[idx];
+        gradient_dot_step += term;
+        absolute_sum += term.abs();
     }
-    -gradient_dot_step
+    NewtonDirectionalDecrease {
+        value: -gradient_dot_step,
+        rounding_band: gam_linalg::roundoff::accumulation_band(
+            delta_ext_coord.len() + delta_beta.len(),
+            absolute_sum,
+        ),
+    }
 }
 
 /// Per-atom decoder-smoothness GEMM `S_k · B_k`, batched across ALL GPUs.

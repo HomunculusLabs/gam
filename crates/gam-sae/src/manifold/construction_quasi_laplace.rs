@@ -2788,26 +2788,24 @@ impl SaeManifoldTerm {
     /// operand, so the former `.max(0.0)` priced a NaN decrement as 0, and a
     /// materially negative one as 0 too, and 0 certifies. A negative decrement
     /// means the factor's step is not a descent direction, where no quadratic-model
-    /// certificate exists. A negative value inside the rounding floor the Armijo
-    /// lane uses, `SAE_MANIFOLD_DIRECTIONAL_DECREASE_REL_FLOOR·‖g‖·‖Δ‖`, reads as 0;
-    /// any other value that is not a finite non-negative number reads as NaN, which
-    /// [`Self::inner_decrement_certifies`] refuses.
+    /// certificate exists. A negative value within the contraction's own rounding
+    /// band, `accumulation_band(terms, Σ|gᵢΔᵢ|)` (the band the Armijo lane reads),
+    /// reads as 0; any other value that is not a finite non-negative number reads
+    /// as NaN, which [`Self::inner_decrement_certifies`] refuses.
     pub(crate) fn inner_certificate_decrement_sq(
         sys: &ArrowSchurSystem,
         delta_t: ndarray::ArrayView1<'_, f64>,
         delta_beta: ndarray::ArrayView1<'_, f64>,
     ) -> f64 {
-        let raw = sae_manifold_newton_directional_decrease(sys, delta_t, delta_beta);
+        let decrease = sae_manifold_newton_directional_decrease(sys, delta_t, delta_beta);
+        let raw = decrease.value;
         if !raw.is_finite() {
             return f64::NAN;
         }
         if raw >= 0.0 {
             return raw;
         }
-        let grad_norm = Self::system_grad_norm_sq(sys).sqrt();
-        let step_norm = (delta_t.dot(&delta_t) + delta_beta.dot(&delta_beta)).sqrt();
-        let rounding = SAE_MANIFOLD_DIRECTIONAL_DECREASE_REL_FLOOR * grad_norm * step_norm;
-        if rounding.is_finite() && -raw <= rounding {
+        if decrease.rounding_band.is_finite() && -raw <= decrease.rounding_band {
             0.0
         } else {
             f64::NAN

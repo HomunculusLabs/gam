@@ -25,13 +25,6 @@ pub(crate) const SAE_OUTER_GRADIENT_GAUGE_RAYLEIGH_FACTOR: f64 = 1.0e-8;
 /// Matches the `1e-9` relative rank cutoff used across the codebase.
 pub(crate) const SAE_DECODER_BETA_NULL_RELATIVE_FLOOR: f64 = 1.0e-9;
 
-/// Relative floor on the Newton directional decrease, expressed as a tiny
-/// multiple of `‖g‖·‖Δ‖`. A predicted decrease below this is at the level of
-/// f64 round-off in the quadratic model and is treated as no progress (the step
-/// is rejected). Scaling by the gradient/step norms makes the floor invariant
-/// to the problem's overall magnitude.
-pub(crate) const SAE_MANIFOLD_DIRECTIONAL_DECREASE_REL_FLOOR: f64 = 1.0e-14;
-
 /// Row count at or above which the fused SAE reconstruction data-fit
 /// (`loss_scaled`) fans its per-row decode + residual reduction out over
 /// rayon. Below this the single-threaded fused pass is cheaper than the

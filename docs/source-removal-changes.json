@@ -6448,5 +6448,13 @@
     ],
     "reason": "SPEC rules 5, 23 and 25 (#2901 V22, slice 4c). Since 8b5f0fdb5 the second element of evaluate_externalcost_andridge's (cost, ridge) tuple was identically 0.0, so the function is renamed evaluate_externalcost and returns the cost alone. reml_unified_2_3.rs's external_cost_and_ridge helper only projected that tuple, and bug_stabilization_ledger_missing_ridge_entries asserted properties of the recorded ridge. The test is restated as score_is_deterministic_and_gradient_consistent_under_extreme_smoothing over the same fixture and rho grid, keeping its determinism and cost/gradient finite-difference assertions.",
     "evidence": "At the base, git grep -n evaluate_externalcost_andridge finds its definition and pub use in crates/gam-solve (estimate/evaluation.rs, estimate/mod.rs) and 25 call sites in crates/gam-models (spatial_realizer_chart_2760_tests.rs), tests/, examples/ and bench/. Every call projects the cost with .0 or .map(|(c, _)| c); the only reader of the ridge was reml_unified_2_3.rs's ledger test, via external_cost_and_ridge. All are rewritten in this commit. Not compiled locally; a guarded job follows."
+  },
+  {
+    "base": "463d1cd390e4ba7e88d702d386906dd96065053f",
+    "items": [
+      "crates/gam-sae/src/manifold/term.rs:const:SAE_MANIFOLD_DIRECTIONAL_DECREASE_REL_FLOOR"
+    ],
+    "reason": "SPEC rule 23 (#2469). The SAE inner Newton lanes treated a directional decrease −gᵀΔ as unresolved when it fell at or below SAE_MANIFOLD_DIRECTIONAL_DECREASE_REL_FLOOR·‖g‖·‖Δ‖, with the floor fixed at 1e-14. The quantity it stood for is the rounding band of the contraction itself. sae_manifold_newton_directional_decrease now accumulates Σ|gᵢΔᵢ| alongside −gᵀΔ and returns accumulation_band(terms, Σ|gᵢΔᵢ|) (gam_linalg::roundoff), which every reader takes: the fixed-decoder and joint Armijo gates in fit_drivers.rs and the negative-decrement read in inner_certificate_decrement_sq. By Cauchy–Schwarz the band is at most γ_terms·‖g‖·‖Δ‖, so on a system of more than about 100 terms the fixed 1e-14 sat below the contraction's own rounding. Nothing is left for the constant to scale.",
+    "evidence": "At the base, git grep -n -w SAE_MANIFOLD_DIRECTIONAL_DECREASE_REL_FLOOR finds only crates/gam-sae/src/manifold/term.rs:33 (the declaration), construction_quasi_laplace.rs:2792 (doc) and :2809, and fit_drivers.rs:6665 and :8065. sae_manifold_newton_directional_decrease has three production callers (construction_quasi_laplace.rs:2800, fit_drivers.rs:6653 and :8060) and one test caller (tests_outer_quasi_laplace_probe_budget_2080.rs:1857, which now reads .value). Not compiled or run locally."
   }
 ]
