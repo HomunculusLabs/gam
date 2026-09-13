@@ -561,7 +561,7 @@ pub enum EstimationError {
     #[error(
         "Pre-fit perfect separation detected in the realized binomial inverse-link design: column {column_index} \
         has a threshold {threshold:.6e} that separates the binary outcomes \
-        (positive_above_threshold={positive_above_threshold}). The unpenalized MLE is not finite; \
+        (positive_above_threshold={positive_above_threshold}). The likelihood has no finite maximizer along that column; \
         enable Firth/Jeffreys bias reduction or remove/reparameterize the separating column."
     )]
     PrefitPerfectSeparationDetected {
@@ -572,10 +572,10 @@ pub enum EstimationError {
 
     #[error(
         "Pre-fit linear separation detected in the realized binomial inverse-link design: \
-        {num_unpenalized_columns} effectively unpenalized columns admit a separating direction \
+        {num_unpenalized_columns} parametric columns (unpenalized, or penalized only by a one-column ridge) admit a separating direction \
         with minimum signed margin {min_signed_margin:.6e} (columns {column_indices:?}). \
-        The unpenalized MLE is not finite; enable Firth/Jeffreys bias reduction or \
-        remove/reparameterize/penalize the separating columns."
+        The likelihood has no finite maximizer along that direction; enable Firth/Jeffreys bias reduction or \
+        remove/reparameterize the separating columns."
     )]
     PrefitLinearSeparationDetected {
         min_signed_margin: f64,

@@ -77,7 +77,10 @@ fn prefit_binary_response_classes(
     Some(class)
 }
 
-fn canonical_unpenalized_column_mask(penalties: &[CanonicalPenalty], p: usize) -> Vec<bool> {
+fn canonical_unpenalized_column_mask<'a>(
+    penalties: impl IntoIterator<Item = &'a CanonicalPenalty>,
+    p: usize,
+) -> Vec<bool> {
     let mut unpenalized = vec![true; p];
     for penalty in penalties {
         let scale = penalty
@@ -545,12 +548,22 @@ pub(crate) fn reject_prefit_binomial_separation(
     {
         return Ok(());
     }
-    let unpenalized_columns = canonical_unpenalized_column_mask(penalties, x_fit.ncols());
+    // The certificate reads every parametric scalar column whatever its ridge. A
+    // one-column penalty block is a parametric effect's null-recovery ridge
+    // (b7b874a2a): along a separating direction REML sends its λ toward zero, so it
+    // bounds nothing there. Multi-column blocks are basis expansions, and enough
+    // basis columns separate any response, so their columns stay out (#2898).
+    let certified_columns = canonical_unpenalized_column_mask(
+        penalties
+            .iter()
+            .filter(|penalty| penalty.col_range.len() > 1),
+        x_fit.ncols(),
+    );
     if let Some(diagnostic) = detect_prefit_binomial_single_column_separation_in_design(
         y,
         w,
         x_fit,
-        &unpenalized_columns,
+        &certified_columns,
     )? {
         return Err(EstimationError::PrefitPerfectSeparationDetected {
             column_index: diagnostic.column_index,
@@ -562,7 +575,7 @@ pub(crate) fn reject_prefit_binomial_separation(
         y,
         w,
         x_fit,
-        &unpenalized_columns,
+        &certified_columns,
     )? {
         return Err(EstimationError::PrefitLinearSeparationDetected {
             min_signed_margin: diagnostic.min_signed_margin,

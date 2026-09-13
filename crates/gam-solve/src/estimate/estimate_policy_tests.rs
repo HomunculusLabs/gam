@@ -461,6 +461,64 @@ fn prefit_binomial_rejects_linear_combination_separator() {
     ));
 }
 
+/// #2627, #2898: the separation certificate reads every parametric scalar column
+/// whatever its ridge. A one-column null-recovery ridge on the separating column
+/// (b7b874a2a) still certifies, and a multi-column basis penalty over the same
+/// column keeps it out.
+#[test]
+fn prefit_binomial_separation_reads_through_a_scalar_ridge_but_not_a_basis_penalty() {
+    let x = array![
+        [1.0, -2.0, 0.5],
+        [1.0, -1.0, -0.5],
+        [1.0, 1.0, 0.25],
+        [1.0, 2.0, -0.25]
+    ];
+    let y = array![0.0, 0.0, 1.0, 1.0];
+    let w = Array1::ones(y.len());
+    let design = DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(x));
+    let cfg = RemlConfig::external(
+        GlmLikelihoodSpec::canonical(LikelihoodSpec::new(
+            ResponseFamily::Binomial,
+            InverseLink::Standard(StandardLink::Logit),
+        )),
+        1e-7,
+        false,
+    );
+    let canonical_block = |col_range: std::ops::Range<usize>| {
+        let spec = PenaltySpec::Block {
+            local: Array2::<f64>::eye(col_range.len()),
+            col_range,
+            prior_mean: gam_problem::CoefficientPriorMean::Zero,
+            structure_hint: None,
+            op: None,
+        };
+        gam_terms::construction::canonicalize_penalty_specs(
+            &[spec],
+            &[0],
+            3,
+            "prefit separation ridge pin",
+        )
+        .expect("canonicalize the block penalty")
+        .0
+    };
+
+    let ridge = canonical_block(1..2);
+    let err = reject_prefit_binomial_separation(&cfg, y.view(), w.view(), &design, &ridge)
+        .expect_err("a scalar ridge on the separating column must not hide the separation");
+    assert!(matches!(
+        err,
+        EstimationError::PrefitPerfectSeparationDetected {
+            column_index: 1,
+            positive_above_threshold: true,
+            ..
+        }
+    ));
+
+    let basis = canonical_block(1..3);
+    reject_prefit_binomial_separation(&cfg, y.view(), w.view(), &design, &basis)
+        .expect("a multi-column basis penalty keeps its columns out of the certificate");
+}
+
 #[test]
 fn prefit_rank_check_detects_unpenalized_duplicate_column() {
     let x = array![
