@@ -6388,5 +6388,13 @@
     ],
     "reason": "#2899 dead code: ImplicitDesignPsiDerivative::is_duchon_family has no caller. The two gam-terms call sites that ask whether a radial kernel is Duchon-family call RadialScalarKind::is_duchon_family (streaming_design.rs), and no other crate, test, example or benchmark names the method. Narrowing it made rustc report it never used.",
     "evidence": "Guarded job 558165 (probe cbbda5a12, HEAD==probe, dirty=0): `implicit_psi_derivative.rs:1373:19: error: method is_duchon_family is never used`. At the base, git grep -n -w is_duchon_family over crates, src, tests, examples, bench and python finds this definition, the two radial_kind.is_duchon_family() calls in implicit_psi_derivative.rs, the RadialScalarKind definition in streaming_design.rs, and one quoting comment in tests/regressions/smooths/thinplate_formula_fit_knot_collision.rs."
+  },
+  {
+    "base": "80ec75aa4154fb94a617ad6c7566f0bb7e4d228b",
+    "items": [
+      "crates/gam-sae/src/manifold/behavior_isometry.rs:const:BEHAVIOR_SPEED_REL_FLOOR"
+    ],
+    "reason": "SPEC rule 23 (#2469). assemble counted a supported row as a behavioral-metric collapse when s_y fell at or below BEHAVIOR_SPEED_REL_FLOOR = 1e-9 of the atom's largest behavior speed, a picked ratio. The chart's Fisher metric G(y) = I + y yᵀ/(2 − ‖y‖²) satisfies G ⪰ I, so s_y = 0 exactly when the velocity is 0. behavior_curve_speeds now reports exactly 0 for a velocity whose every component lies within the rounding band of its m-term accumulation (gam_linalg::roundoff::accumulation_band), and assemble counts s_y == 0. That is the documented contract of behavior_metric_collapse_rows (s_y numerically zero), with nothing left for the constant to scale.",
+    "evidence": "At the base, git grep -n -w BEHAVIOR_SPEED_REL_FLOOR finds only crates/gam-sae/src/manifold/behavior_isometry.rs:145 (the declaration) and :485 (its one read, in assemble). The in-file tests pass exact 0.0 speeds for the collapsed and inert rows, so their verdicts are unchanged. Not compiled or run locally."
   }
 ]

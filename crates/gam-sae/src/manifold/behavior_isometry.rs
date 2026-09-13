@@ -62,8 +62,8 @@ pub struct AtomBehaviorIsometry {
     pub n_rows: usize,
     /// Total occupancy mass `Σ_i w_i` from the shared atom support measure.
     pub support_mass: f64,
-    /// `true` iff the behavior image actually moves along the latent (behavior
-    /// speed RMS above the numerical floor). A behaviorally inert atom (`C_k ≈ 0`,
+    /// `true` iff the behavior image actually moves along the latent (some
+    /// supported row has a resolved behavior speed). A behaviorally inert atom (`C_k ≈ 0`,
     /// constant behavior) has `false` here and a `NaN` defect/scale — there is no
     /// correspondence to certify, reported honestly rather than as a defect.
     pub behavior_engaged: bool,
@@ -137,12 +137,6 @@ pub struct BehaviorPinnedChart {
     /// `2.0` by construction, not an empirical average.
     pub nats_per_unit_coordinate: f64,
 }
-
-/// Numerical floor below which a behavior induced speed is treated as zero (the
-/// atom does not move behavior at that row). Relative to the atom's own maximum
-/// behavior speed so it is scale-free; a small absolute companion floor guards
-/// the all-zero (inert) atom.
-const BEHAVIOR_SPEED_REL_FLOOR: f64 = 1.0e-9;
 
 /// Build the representation–behavior isometry certificate for one fitted atom, or
 /// `None` when the atom has no `d = 1` chart (the induced-speed construction is
@@ -251,18 +245,35 @@ fn behavior_curve_speeds(
         ));
     }
     let mut velocity = Array1::<f64>::zeros(decoder.ncols());
+    let mut velocity_absolute_sum = Array1::<f64>::zeros(decoder.ncols());
     let mut speeds = Vec::with_capacity(rows);
     for row in 0..rows {
         velocity.fill(0.0);
+        velocity_absolute_sum.fill(0.0);
         for basis in 0..m {
             let dphi = jet[[row, basis, 0]];
-            for (slot, &coefficient) in velocity.iter_mut().zip(decoder.row(basis)) {
-                *slot += dphi * coefficient;
+            for ((slot, absolute), &coefficient) in velocity
+                .iter_mut()
+                .zip(velocity_absolute_sum.iter_mut())
+                .zip(decoder.row(basis))
+            {
+                let term = dphi * coefficient;
+                *slot += term;
+                *absolute += term.abs();
             }
         }
         let dose = super::SphereTangentEmbedding::predicted_nats(points.row(row), velocity.view())
             .map_err(|error| format!("behavior_curve_speeds: row {row}: {error}"))?;
-        speeds.push(dose.sqrt());
+        // `G(y) ⪰ I`, so `s_y = 0` exactly when `ẏ = 0`. A velocity whose every
+        // component lies within the rounding band of its `m`-term accumulation is
+        // indistinguishable from zero, and its speed is reported as exactly 0.
+        let resolved = velocity
+            .iter()
+            .zip(velocity_absolute_sum.iter())
+            .any(|(&component, &absolute)| {
+                component.abs() > gam_linalg::roundoff::accumulation_band(m, absolute)
+            });
+        speeds.push(if resolved { dose.sqrt() } else { 0.0 });
     }
     Ok(speeds)
 }
@@ -340,22 +351,28 @@ fn behavior_pinned_chart(
     // pinned origin.  If the exact anchor is stationary, use the nearest grid
     // point with a resolved tangent; a globally stationary image was rejected
     // by the positive-length gate above.
-    let tangent_floor = speeds.iter().copied().fold(0.0_f64, f64::max) * 1.0e-12;
+    // A component's sign is read only once it clears the rounding band of its
+    // accumulation, the same resolution rule `behavior_curve_speeds` applies.
     let mut orientation = 0_i8;
     for radius in 0..=cells {
         for idx in [
             anchor_grid.saturating_sub(radius),
             (anchor_grid + radius).min(cells),
         ] {
-            if speeds[idx] <= tangent_floor {
+            if speeds[idx] == 0.0 {
                 continue;
             }
             for out in 0..behavior_decoder.ncols() {
                 let mut derivative = 0.0_f64;
+                let mut absolute = 0.0_f64;
                 for basis in 0..behavior_decoder.nrows() {
-                    derivative += jet[[idx, basis, 0]] * behavior_decoder[[basis, out]];
+                    let term = jet[[idx, basis, 0]] * behavior_decoder[[basis, out]];
+                    derivative += term;
+                    absolute += term.abs();
                 }
-                if derivative.abs() > tangent_floor {
+                if derivative.abs()
+                    > gam_linalg::roundoff::accumulation_band(behavior_decoder.nrows(), absolute)
+                {
                     orientation = if derivative > 0.0 { 1 } else { -1 };
                     break;
                 }
@@ -482,7 +499,6 @@ fn assemble(
     let nats_per_unit_t = if mass > 0.0 { sy_sq / mass } else { f64::NAN };
 
     // A behaviorally inert atom (C_k ≈ 0) has no behavior geometry to match.
-    let floor = BEHAVIOR_SPEED_REL_FLOOR * sy_max;
     let behavior_engaged = mass > 0.0 && sy_max > 0.0;
     if !behavior_engaged {
         return AtomBehaviorIsometry {
@@ -503,11 +519,12 @@ fn assemble(
     }
 
     // A scaled isometry is a pointwise statement on the whole support. Do not
-    // condition the statistic on `s_y > floor`: doing so dropped precisely the
+    // condition the statistic on `s_y > 0`: doing so dropped precisely the
     // rows where the behavioral metric collapsed and could turn `[1,0]` into a
-    // perfect match for `[1,1]`.
+    // perfect match for `[1,1]`. `behavior_curve_speeds` reports an unresolved
+    // velocity as exactly 0, so exact zero is the collapse test.
     let collapse_rows = (0..s_y.len())
-        .filter(|&i| weights[i] > 0.0 && s_y[i] <= floor)
+        .filter(|&i| weights[i] > 0.0 && s_y[i] == 0.0)
         .count();
     if collapse_rows > 0 {
         return AtomBehaviorIsometry {
