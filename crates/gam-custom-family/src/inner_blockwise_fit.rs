@@ -2603,7 +2603,10 @@ fn resolve_constrained_converged_mode_on_face<F: CustomFamily + Clone + Send + S
     }
     let beta = flatten_state_betas(states, specs);
     let beta_norm = beta.dot(&beta).sqrt();
-    let decrease_floor = (2.0 * objective_tol.max(1e-8) / gamma_min).sqrt();
+    // The noise this length has to clear is the solve's own "has not moved"
+    // contract, `objective_tol`. An absolute floor under it would claim that an
+    // objective carrying units can never resolve a change below `1e-8`.
+    let decrease_floor = (2.0 * objective_tol / gamma_min).sqrt();
     // A failed escape carries exactly one piece of information: the length it
     // used was inside the basin the solve then fell back into. Recomputed from
     // the returned saddle with the same inputs, the next escape would be
