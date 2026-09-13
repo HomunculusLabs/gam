@@ -173,6 +173,26 @@ const TURNING_QUADRATURE_CELLS: usize = 256;
 /// `O(Δu⁴)`, far below the recomposition tolerance.
 pub(crate) const ARC_LENGTH_GRID_CELLS: usize = 2048;
 
+/// Whether the arc-length grid over the interval chart `[lo, hi]` resolves
+/// distinct abscissae.
+///
+/// The composite-Simpson grid samples `lo + j·h` and `lo + (j + ½)·h` with
+/// `h = (hi − lo)/ARC_LENGTH_GRID_CELLS`. Each abscissa is formed with at most
+/// four rounded operations (the span, the step, the product, the sum), so it lies
+/// within `γ_4·(|lo| + |hi|)` of its exact value, while consecutive exact
+/// abscissae are `h/2` apart. The grid is strictly increasing, and the quadrature
+/// and the recomposition audit sample distinct points, whenever
+/// `hi − lo > 4·ARC_LENGTH_GRID_CELLS·γ_4·(|lo| + |hi|)`. Rows at one point give
+/// `hi = lo` and fail it exactly. The unit-speed defect and the arc-length reading
+/// take the same domain, so all three refuse the same charts.
+fn arc_length_grid_resolves(lo: f64, hi: f64) -> bool {
+    let band = 4.0
+        * ARC_LENGTH_GRID_CELLS as f64
+        * gam_linalg::roundoff::accumulation_growth(4)
+        * (lo.abs() + hi.abs());
+    hi - lo > band
+}
+
 /// Relative image-recomposition tolerance: the canonicalization is refused
 /// (honest fallback to the fitted chart) when the max-abs difference between
 /// the original decoded curve and its recomposition through the new chart
@@ -340,10 +360,9 @@ pub fn unit_speed_reparameterization(
                 t_min = t_min.min(t);
                 t_max = t_max.max(t);
             }
-            let scale = t_min.abs().max(t_max.abs()).max(1.0);
-            if !(t_max - t_min > 1.0e-12 * scale) {
-                // Collapsed chart: every row at one point — arc length cannot
-                // define a chart there.
+            if !arc_length_grid_resolves(t_min, t_max) {
+                // Collapsed chart: the rows span no interval the arc-length grid
+                // can resolve, so arc length cannot define a chart there.
                 return Ok(None);
             }
             (t_min, t_max, 1.0)
@@ -1007,8 +1026,7 @@ pub fn chart_unit_speed_defect(
                 t_min = t_min.min(t);
                 t_max = t_max.max(t);
             }
-            let scale = t_min.abs().max(t_max.abs()).max(1.0);
-            if !(t_max - t_min > 1.0e-12 * scale) {
+            if !arc_length_grid_resolves(t_min, t_max) {
                 return Ok(None);
             }
             (t_min, t_max)
@@ -1133,8 +1151,7 @@ pub fn chart_arclength_coordinates(
                 t_min = t_min.min(t);
                 t_max = t_max.max(t);
             }
-            let scale = t_min.abs().max(t_max.abs()).max(1.0);
-            if !(t_max - t_min > 1.0e-12 * scale) {
+            if !arc_length_grid_resolves(t_min, t_max) {
                 return Ok(None);
             }
             (t_min, t_max)
