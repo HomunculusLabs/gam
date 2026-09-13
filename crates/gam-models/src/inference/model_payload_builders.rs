@@ -2944,10 +2944,12 @@ mod standard_payload_penalty_topology_tests {
             .fit_result
             .expect("standard payload must retain its canonical fit result");
         assert_eq!(fit.likelihood_family.as_ref(), Some(&expected_family));
+        // x0..x4 each carry the default null-recovery ridge (b7b874a2a), so beside the
+        // full-rank LinkWiggle penalty only the intercept stays unpenalized.
         assert_eq!(
             fit.artifacts.null_space_dim,
-            Some(mean_dim),
-            "the full-rank LinkWiggle penalty leaves exactly the six unpenalized mean coordinates",
+            Some(1),
+            "the five linear ridges and the full-rank LinkWiggle penalty leave only the intercept unpenalized",
         );
         assert!(
             fit.artifacts
