@@ -361,32 +361,13 @@ pub(crate) fn stationarity_residual_reachability(
         }
     }
 
-    // Orthonormal basis of the active ROW space by modified Gram–Schmidt. The
-    // basis is at most `p`-dimensional, so the scan stops as soon as it is
-    // complete no matter how many rows are active.
-    let mut basis: Vec<Array1<f64>> = Vec::new();
-    let drop_tol = 1e-12;
-    for r in 0..face.a_active.nrows() {
-        if basis.len() == p {
-            break;
-        }
-        let mut v = face.a_active.row(r).to_owned();
-        for q in &basis {
-            let projection = q.dot(&v);
-            v.scaled_add(-projection, q);
-        }
-        let norm = v.dot(&v).sqrt();
-        if norm > drop_tol {
-            v.mapv_inplace(|value| value / norm);
-            basis.push(v);
-        }
-    }
-
-    let mut orthogonal = residual.clone();
-    for q in &basis {
-        let projection = q.dot(&residual);
-        orthogonal.scaled_add(-projection, q);
-    }
+    // The unreachable part is the residual's component orthogonal to the active
+    // ROW space. The face rows' thin SVD gives that row space at its own rounding
+    // band, and `null_space_of_rows` completes the orthonormal complement `Z`, so
+    // the component is `Z Zᵀ r` with no cutoff on how short a reduced row may be
+    // (#2469).
+    let (_, complement) = null_space_of_rows(&face.a_active)?;
+    let orthogonal = complement.dot(&complement.t().dot(&residual));
     let unreachable = gradient_inf_norm(&orthogonal);
     let in_row_space = &residual - &orthogonal;
     Some((unreachable, gradient_inf_norm(&in_row_space)))
