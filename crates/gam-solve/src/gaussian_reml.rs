@@ -2983,9 +2983,9 @@ pub fn gaussian_reml_multi_closed_form_backward_from_fit(
     // depend on X, y, W at the selected λ — so only the λ̂-root channel is
     // suppressed below. (The old gate zeroed the WHOLE backward here, silently
     // dropping real coefficient gradients on unpenalized/flat-penalty fits.)
-    let rho_hat = lambda.ln();
-    let rho_at_bound = (rho_hat - fit.rho_domain.1).abs() <= 1.0e-9
-        || (rho_hat - fit.rho_domain.0).abs() <= 1.0e-9;
+    // The closed-form selector evaluates both walls exactly, from the same domain
+    // it reports in `rho_domain`, so a railed rho-hat is the wall value itself (#2469).
+    let rho_at_bound = fit.rho == fit.rho_domain.0 || fit.rho == fit.rho_domain.1;
     let implicit_rho_usable =
         fit.reml_hess_rho.is_finite() && fit.reml_hess_rho.abs() > 1.0e-14 && !rho_at_bound;
     let weight = gaussian_reml_weights(n, weights)?;
@@ -3192,9 +3192,8 @@ pub fn gaussian_reml_multi_closed_form_backward_batch<'a>(
             // the implicit λ̂-root channel is usable only for an INTERIOR
             // stationary root with usable ρ-curvature (a ρ̂ railed at a box
             // endpoint is locally the constant projection — its channel is 0).
-            let rho_hat = problem.fit.lambda.ln();
-            let rho_at_bound = (rho_hat - problem.fit.rho_domain.1).abs() <= 1.0e-9
-                || (rho_hat - problem.fit.rho_domain.0).abs() <= 1.0e-9;
+            let rho_at_bound = problem.fit.rho == problem.fit.rho_domain.0
+                || problem.fit.rho == problem.fit.rho_domain.1;
             let implicit_rho_usable = problem.fit.reml_hess_rho.is_finite()
                 && problem.fit.reml_hess_rho.abs() > 1.0e-14
                 && !rho_at_bound;
