@@ -1998,6 +1998,16 @@ impl ZerothOrderObjective for OuterFirstOrderBridge<'_> {
                                 guard.stuck_escapes,
                                 guard.best_value,
                             );
+                            // An escape is a continuation, and continuing needs
+                            // evidence it buys something (#2817).
+                            if let Some(stop) = guard.unprogressing_stop() {
+                                if let Ok(mut slot) = guard.exit.lock() {
+                                    *slot = Some(stop);
+                                }
+                                return Err(ObjectiveEvalError::fatal(
+                                    COST_STALL_CONVERGED_SENTINEL.to_string(),
+                                ));
+                            }
                         }
                         CostStallVerdict::Converged => {
                             log::info!(
@@ -2396,6 +2406,18 @@ impl OuterFirstOrderBridge<'_> {
                         guard.stuck_escapes,
                         guard.best_value,
                     );
+                    // An escape is a continuation, and continuing needs evidence
+                    // it buys something: without resolved descent or a smaller
+                    // residual since the last licensed window, the walk stops at
+                    // its incumbent, reported non-converged (#2817).
+                    if let Some(stop) = guard.unprogressing_stop() {
+                        if let Ok(mut slot) = guard.exit.lock() {
+                            *slot = Some(stop);
+                        }
+                        return Err(ObjectiveEvalError::fatal(
+                            COST_STALL_CONVERGED_SENTINEL.to_string(),
+                        ));
+                    }
                 }
                 CostStallVerdict::Converged => {
                     // Report the band that ACTUALLY certified: absolute
