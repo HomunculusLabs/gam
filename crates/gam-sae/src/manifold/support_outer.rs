@@ -578,15 +578,12 @@ impl SaeSupportOuterObjective {
         // #2731: where the dense `k × k` reduced Schur's complete eigensystem fits the
         // cgroup-aware in-core ledger, the lane takes the exact `log|S|` off one
         // eigendecomposition and its derivative bundle is the exact `tr(S⁻¹·D)`;
-        // otherwise it walks the frozen rational surrogate. The workspace is priced as
-        // this term's other dense eigensystems are (the profile adjoint's pseudoinverse
-        // and the saddle classifier): `k²` doubles, six times over.
-        let dense_workspace = (system.k as u128)
-            .saturating_mul(system.k as u128)
-            .saturating_mul(std::mem::size_of::<f64>() as u128)
-            .saturating_mul(6);
+        // otherwise it walks the frozen rational surrogate. The route prices its own peak
+        // with `dense_lane_reduced_schur_peak_bytes`, the one admission rule the criterion
+        // lane uses as well.
         let dense_reduced_schur_admitted =
-            dense_workspace <= crate::manifold::sae_host_in_core_budget_bytes().0 as u128;
+            gam_solve::arrow_schur::dense_lane_reduced_schur_peak_bytes(system.k)
+                .is_some_and(|bytes| bytes <= crate::manifold::sae_host_in_core_budget_bytes().0);
         let evaluated = gam_solve::arrow_schur::matrix_free_arrow_evidence_evaluation(
             system,
             0.0,
@@ -613,22 +610,33 @@ impl SaeSupportOuterObjective {
                  so no smoothing gradient can be minted from it",
             )
         })?;
-        let metrics = bundle.evaluation_metrics();
         // The expensive half of one outer evaluation lives in this call, and
         // before #2576 it emitted nothing at all — six minutes of fourteen busy
         // cores between two log lines is what kept the cost invisible.
-        log::info!(
-            "support LAML evidence: border {}, row log|H_tt| = {:.6e}, {} log|S| = {:.6e}; \
-             {} total shifted-CG iterations, {} rational nodes, deflation rank {}, {:.1}s",
-            system.k,
-            row_log_det,
-            if dense_reduced_schur_admitted { "dense exact" } else { "surrogate" },
-            schur_log_det,
-            metrics.cg_iterations,
-            metrics.node_count,
-            metrics.deflation_rank,
-            timer.elapsed().as_secs_f64(),
-        );
+        if dense_reduced_schur_admitted {
+            log::info!(
+                "support LAML evidence: border {}, row log|H_tt| = {:.6e}, dense exact log|S| = \
+                 {:.6e} from one eigendecomposition, {:.1}s",
+                system.k,
+                row_log_det,
+                schur_log_det,
+                timer.elapsed().as_secs_f64(),
+            );
+        } else {
+            let metrics = bundle.evaluation_metrics();
+            log::info!(
+                "support LAML evidence: border {}, row log|H_tt| = {:.6e}, surrogate log|S| = \
+                 {:.6e}; {} total shifted-CG iterations, {} rational nodes, deflation rank {}, \
+                 {:.1}s",
+                system.k,
+                row_log_det,
+                schur_log_det,
+                metrics.cg_iterations,
+                metrics.node_count,
+                metrics.deflation_rank,
+                timer.elapsed().as_secs_f64(),
+            );
+        }
         // Coordinates are nuisance parameters profiled by the inner solve. As
         // in `rank_adjusted_quasi_laplace_complexity`, their row-block
         // determinant is removed from the criterion; retaining it here would
