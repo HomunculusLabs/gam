@@ -63,6 +63,7 @@ mod edf_accounting;
 mod evaluation;
 mod external_options;
 mod fit;
+mod identified_hessian;
 mod joint_hyper;
 mod optimizer;
 pub mod outer_eval_capture;

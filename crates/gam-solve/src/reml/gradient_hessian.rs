@@ -4830,7 +4830,7 @@ impl<'a> RemlState<'a> {
     /// was installed, #2644); re-decomposing the assembled matrix here would
     /// price `log|H_pen|₊` and every trace this kernel serves at that matrix's
     /// `O(ε·κ(H))` error instead.
-    pub(super) fn intrinsic_hessian_pseudo_logdet_parts_from_eigensystem(
+    pub(crate) fn intrinsic_hessian_pseudo_logdet_parts_from_eigensystem(
         h_evals: &[f64],
         h_evecs: &Array2<f64>,
         penalty_rank: usize,

@@ -1571,20 +1571,43 @@ pub(crate) fn compute_smoothing_correction(
         };
     }
 
-    // Factor the Hessian for solving
-    let h_chol = match h_trans.cholesky(faer::Side::Lower) {
-        Ok(c) => c,
-        Err(_) => {
-            log::warn!("Cholesky decomposition failed for smoothing correction; skipping.");
-            return SmoothingCorrectionComputation {
-                correction: None,
-                rho_covariance: None,
-                active_rank: None,
-                spectrum: None,
-                status: SmoothingCorrectionStatus::Unavailable(
-                    SmoothingCorrectionUnavailable::InnerHessianNotPositiveDefinite,
-                ),
-            };
+    // Factor the Hessian for solving. When its strict Cholesky refuses, the IFT
+    // solve is taken on the identified subspace post-fit inference uses: each
+    // column of G_ρ is λ_k·S_k(β − μ_k), which lies in range(S_k) and so is
+    // orthogonal to null(H), where the min-norm solve is exact (#2901 V22).
+    let h_chol;
+    let identified_inverse;
+    let sensitivity = match h_trans.cholesky(faer::Side::Lower) {
+        Ok(factor) => {
+            h_chol = factor;
+            crate::sensitivity::FitSensitivity::from_faer_cholesky(&h_chol, n_coeffs_trans)
+        }
+        Err(cholesky_error) => {
+            match super::identified_hessian::IdentifiedHessianInverse::from_dense(
+                &h_trans,
+                final_fit.reparam_result.e_transformed.nrows(),
+            ) {
+                Ok(inverse) => {
+                    identified_inverse = inverse;
+                    identified_inverse.sensitivity()
+                }
+                Err(identified_error) => {
+                    log::warn!(
+                        "smoothing-correction inner Hessian refused its strict Cholesky \
+                         ({cholesky_error:?}) and its identified subspace ({identified_error}); \
+                         skipping."
+                    );
+                    return SmoothingCorrectionComputation {
+                        correction: None,
+                        rho_covariance: None,
+                        active_rank: None,
+                        spectrum: None,
+                        status: SmoothingCorrectionStatus::Unavailable(
+                            SmoothingCorrectionUnavailable::InnerHessianNotPositiveDefinite,
+                        ),
+                    };
+                }
+            }
         }
     };
 
@@ -1625,9 +1648,7 @@ pub(crate) fn compute_smoothing_correction(
     // block-decoupled Hessian (entries outside the cone are identically zero)
     // and identical to the full joint solve on a fully coupled Hessian.
     let jacobian_trans =
-        match crate::sensitivity::FitSensitivity::from_faer_cholesky(&h_chol, n_coeffs_trans)
-            .mode_response_coned(h_trans.view(), dg_drho_trans.view(), &col_supports)
-        {
+        match sensitivity.mode_response_coned(h_trans.view(), dg_drho_trans.view(), &col_supports) {
             Some(jacobian) => jacobian,
             None => {
                 log::warn!(

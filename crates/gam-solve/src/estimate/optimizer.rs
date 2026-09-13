@@ -51,6 +51,152 @@ fn certify_factorized_inference_vector_solve(
     certify_factorized_inference_solve(hessian, &rhs_matrix, &solution_matrix, label)
 }
 
+/// The accepted inference factor of the transformed penalized Hessian: its
+/// strict Cholesky, or, when that refuses, its inverse on the identified
+/// subspace PIRLS solved it on and the criterion scored (#2901 V22).
+enum InferenceHessianFactor {
+    Strict(Box<dyn FactorizedSystem>),
+    Identified(super::identified_hessian::IdentifiedHessianInverse),
+}
+
+impl InferenceHessianFactor {
+    /// Solve `H·X = B` and certify it: against `B` for the strict factor, and
+    /// against its identified part `U·Uᵀ·B` for the identified inverse, whose
+    /// solution is the min-norm one.
+    fn certified_solve(
+        &self,
+        hessian: &gam_linalg::matrix::SymmetricMatrix,
+        rhs: &Array2<f64>,
+        label: &str,
+    ) -> Result<Array2<f64>, EstimationError> {
+        match self {
+            Self::Strict(factor) => {
+                let solution = factor.solvemulti(rhs).map_err(|reason| {
+                    EstimationError::RemlOptimizationFailed(format!(
+                        "{label}: exact factorized solve failed: {reason}"
+                    ))
+                })?;
+                certify_factorized_inference_solve(hessian, rhs, &solution, label)?;
+                Ok(solution)
+            }
+            Self::Identified(inverse) => {
+                let solution = inverse.apply(rhs);
+                certify_factorized_inference_solve(
+                    hessian,
+                    &inverse.project(rhs),
+                    &solution,
+                    label,
+                )?;
+                Ok(solution)
+            }
+        }
+    }
+
+    fn certified_vector_solve(
+        &self,
+        hessian: &gam_linalg::matrix::SymmetricMatrix,
+        rhs: &Array1<f64>,
+        label: &str,
+    ) -> Result<Array1<f64>, EstimationError> {
+        match self {
+            Self::Strict(factor) => {
+                let solution = factor.solve(rhs).map_err(|reason| {
+                    EstimationError::RemlOptimizationFailed(format!(
+                        "{label}: exact factorized solve failed: {reason}"
+                    ))
+                })?;
+                certify_factorized_inference_vector_solve(hessian, rhs, &solution, label)?;
+                Ok(solution)
+            }
+            Self::Identified(_) => {
+                let rhs_matrix = rhs.view().insert_axis(Axis(1)).to_owned();
+                let solution = self.certified_solve(hessian, &rhs_matrix, label)?;
+                Ok(solution.column(0).to_owned())
+            }
+        }
+    }
+
+    /// `(coefficients, penalty nullity)` for the EDF bundle. An identified
+    /// inverse counts only its identified directions, and every unidentified
+    /// direction lies in the penalty's null space, so it leaves that nullity too.
+    fn edf_dimensions(&self, coefficients: usize, penalty_nullity: f64) -> (usize, f64) {
+        match self {
+            Self::Strict(_) => (coefficients, penalty_nullity),
+            Self::Identified(inverse) => {
+                let unidentified = coefficients.saturating_sub(inverse.rank());
+                (
+                    inverse.rank(),
+                    (penalty_nullity - unidentified as f64).max(0.0),
+                )
+            }
+        }
+    }
+
+    fn identified(&self) -> Option<&super::identified_hessian::IdentifiedHessianInverse> {
+        match self {
+            Self::Strict(_) => None,
+            Self::Identified(inverse) => Some(inverse),
+        }
+    }
+}
+
+/// The original-basis penalized Hessian's factor for the dense inference
+/// bundle: a certified strict Cholesky, or, when the transformed factor was
+/// identified, the same identified inverse rotated through `Qs`.
+enum OriginalBasisHessianFactor<'a> {
+    Strict(gam_linalg::utils::CertifiedSpdFactor<'a>),
+    Identified {
+        hessian: &'a Array2<f64>,
+        inverse: super::identified_hessian::IdentifiedHessianInverse,
+        label: &'static str,
+    },
+}
+
+impl<'a> OriginalBasisHessianFactor<'a> {
+    fn new(
+        hessian: &'a Array2<f64>,
+        transformed: Option<&InferenceHessianFactor>,
+        qs: &Array2<f64>,
+        label: &'static str,
+    ) -> Result<Self, gam_linalg::utils::CertifiedSymmetricSolveError> {
+        match transformed.and_then(InferenceHessianFactor::identified) {
+            Some(inverse) => Ok(Self::Identified {
+                hessian,
+                inverse: inverse.rotated(qs),
+                label,
+            }),
+            None => gam_linalg::utils::certified_spd_factorize(hessian, label).map(Self::Strict),
+        }
+    }
+
+    fn solve_matrix(
+        &self,
+        rhs: &Array2<f64>,
+    ) -> Result<Array2<f64>, gam_linalg::utils::CertifiedSymmetricSolveError> {
+        match self {
+            Self::Strict(factor) => factor.solve_matrix(rhs).map(|solved| solved.0),
+            Self::Identified {
+                hessian,
+                inverse,
+                label,
+            } => inverse.certified_solve(hessian, rhs, label),
+        }
+    }
+
+    fn inverse(&self) -> Result<Array2<f64>, gam_linalg::utils::CertifiedSymmetricSolveError> {
+        match self {
+            Self::Strict(factor) => factor
+                .inverse()
+                .map(gam_linalg::utils::CertifiedSpdInverse::into_inverse),
+            Self::Identified {
+                hessian,
+                inverse,
+                label,
+            } => inverse.certified_inverse(hessian, label),
+        }
+    }
+}
+
 /// Scale-free stationarity residual for the Negative-Binomial conditional ML
 /// problem in `tau = log(theta)`. The score is `d log L / d theta`, so the
 /// minimization gradient in `tau` is `-theta * score`. A score inside its own
@@ -2381,7 +2527,7 @@ where
     let mut weighted_gram = None;
     // Factorization of stabilized Hessian in transformed basis, reused for
     // SE computation via solve-on-demand after dispersion is determined.
-    let mut edf_factor: Option<Box<dyn FactorizedSystem>> = None;
+    let mut edf_factor: Option<InferenceHessianFactor> = None;
     let mut rho_posterior_certificate = None;
     let mut rho_posterior_escalation = None;
     // Hold the governor charge across every dense inference allocation in this
@@ -2404,12 +2550,33 @@ where
         let h = &pirls_res.stabilizedhessian_transformed;
         let p_dim = h.nrows();
         // Factor the exact Hessian already minted by PIRLS. This inference layer
-        // is not allowed to add an unaccounted diagonal to it.
-        let factor = h.factorize_spd().map_err(|reason| {
-            EstimationError::RemlOptimizationFailed(format!(
-                "exact inference Hessian factorization failed: {reason}"
-            ))
-        })?;
+        // is not allowed to add an unaccounted diagonal to it. When the strict
+        // factor refuses, a dense H is taken on its identified subspace, the one
+        // PIRLS solved it min-norm on and the criterion scored (#2901 V22).
+        let factor = match h.factorize_spd() {
+            Ok(factor) => InferenceHessianFactor::Strict(factor),
+            Err(reason) => match h {
+                gam_linalg::matrix::SymmetricMatrix::Dense(dense) => {
+                    let inverse = super::identified_hessian::IdentifiedHessianInverse::from_dense(
+                        dense,
+                        penalty_rank_total,
+                    )?;
+                    log::info!(
+                        "[#2901 V22] the penalized Hessian is singular on {} of {p_dim} \
+                         coefficient directions (strict factorization: {reason}); inference is \
+                         taken on its identified {}-dimensional subspace",
+                        p_dim.saturating_sub(inverse.rank()),
+                        inverse.rank(),
+                    );
+                    InferenceHessianFactor::Identified(inverse)
+                }
+                gam_linalg::matrix::SymmetricMatrix::Sparse(_) => {
+                    return Err(EstimationError::RemlOptimizationFailed(format!(
+                        "exact inference Hessian factorization failed: {reason}"
+                    )));
+                }
+            },
+        };
         let mut traces = vec![0.0f64; k];
         for (kk, cp) in pirls_res
             .reparam_result
@@ -2426,13 +2593,7 @@ where
                     rhs[[r.start + row, col]] = cp.root[[col, row]];
                 }
             }
-            let sol =
-                factor
-                    .solvemulti(&rhs)
-                    .map_err(|_| EstimationError::ModelIsIllConditioned {
-                        condition_number: f64::INFINITY,
-                    })?;
-            certify_factorized_inference_solve(h, &rhs, &sol, "penalty-block EDF trace")?;
+            let sol = factor.certified_solve(h, &rhs, "penalty-block EDF trace")?;
             // Frobenius inner product: only the block rows of rhs are nonzero.
             let mut frob = 0.0f64;
             for col in 0..rank {
@@ -2473,7 +2634,9 @@ where
             .iter()
             .map(|cp| cp.rank())
             .collect();
-        let bundle = penalized_edf_bundle(&traces, &block_ranks, p_dim, mp);
+        let (edf_coefficients, edf_penalty_nullity) = factor.edf_dimensions(p_dim, mp);
+        let bundle =
+            penalized_edf_bundle(&traces, &block_ranks, edf_coefficients, edf_penalty_nullity);
         edf_total = bundle.edf_total;
         penalty_block_trace.clone_from(&bundle.penalty_block_trace);
         edf_by_block.clone_from(&bundle.edf_by_block);
@@ -2518,8 +2681,10 @@ where
                 // from the influence matrix, so moving only one would make them
                 // disagree. Failure is not a request to silently change rank or
                 // add a diagonal perturbation.
-                let h_factor = gam_linalg::utils::certified_spd_factorize(
+                let h_factor = OriginalBasisHessianFactor::new(
                     &h_orig,
+                    Some(&factor),
+                    &pirls_res.reparam_result.qs,
                     "edf reconciliation",
                 )
                 .map_err(|error| {
@@ -2550,12 +2715,11 @@ where
                         }
                         // S_kk = Rᵀ R; λ_kk·tr(H⁻¹ S_kk) = λ_kk·Σ_col (R_col)ᵀ H⁻¹ R_col.
                         let root_orig = qs.dot(&root_t); // p_orig × rank
-                        let (sol, _certificate) =
-                            h_factor.solve_matrix(&root_orig).map_err(|error| {
-                                EstimationError::RemlOptimizationFailed(format!(
-                                    "EDF reconciliation block solve did not certify: {error}"
-                                ))
-                            })?; // H⁻¹ R
+                        let sol = h_factor.solve_matrix(&root_orig).map_err(|error| {
+                            EstimationError::RemlOptimizationFailed(format!(
+                                "EDF reconciliation block solve did not certify: {error}"
+                            ))
+                        })?; // H⁻¹ R
                         let mut frob = 0.0f64;
                         for col in 0..rank {
                             for row in 0..p_orig {
@@ -2580,8 +2744,14 @@ where
                         .iter()
                         .map(|cp| cp.rank())
                         .collect();
-                    let bundle_f =
-                        penalized_edf_bundle(&traces_f, &block_ranks_f, p_orig, mp);
+                    let (edf_coefficients_f, edf_penalty_nullity_f) =
+                        factor.edf_dimensions(p_orig, mp);
+                    let bundle_f = penalized_edf_bundle(
+                        &traces_f,
+                        &block_ranks_f,
+                        edf_coefficients_f,
+                        edf_penalty_nullity_f,
+                    );
                     edf_total = bundle_f.edf_total;
                     penalty_block_trace.clone_from(&bundle_f.penalty_block_trace);
                     edf_by_block.clone_from(&bundle_f.edf_by_block);
@@ -2705,29 +2875,17 @@ where
             })?;
             let h = &pirls_res.stabilizedhessian_transformed;
             let constraint_rhs = constraints.a.t().to_owned();
-            let sigma_at_unscaled = factor.solvemulti(&constraint_rhs).map_err(|reason| {
-                EstimationError::RemlOptimizationFailed(format!(
-                    "constrained posterior normal solve failed: {reason}"
-                ))
-            })?;
-            certify_factorized_inference_solve(
+            let sigma_at_unscaled = factor.certified_solve(
                 h,
                 &constraint_rhs,
-                &sigma_at_unscaled,
                 "constrained posterior normal geometry",
             )?;
             let sigma_at = sigma_at_unscaled * cov_scale;
 
             let score_t = &pirls_res.penalized_gradient_transformed;
-            let center_step_unscaled = factor.solve(score_t).map_err(|reason| {
-                EstimationError::RemlOptimizationFailed(format!(
-                    "constrained posterior score solve failed: {reason}"
-                ))
-            })?;
-            certify_factorized_inference_vector_solve(
+            let center_step_unscaled = factor.certified_vector_solve(
                 h,
                 score_t,
-                &center_step_unscaled,
                 "constrained posterior unconstrained centre",
             )?;
             // `penalized_gradient_transformed` and H share the solver's
@@ -2915,8 +3073,10 @@ where
         // it is definitionally equal to.
         let posterior_factor = if dense_covariance_reservation.is_some() {
             Some(
-                gam_linalg::utils::certified_spd_factorize(
+                OriginalBasisHessianFactor::new(
                     &penalized_hessian,
+                    edf_factor.as_ref(),
+                    qs,
                     "posterior covariance",
                 )
                 .map_err(|error| {
@@ -2929,16 +3089,11 @@ where
             None
         };
         let beta_covariance_unscaled: Option<Array2<f64>> = match posterior_factor.as_ref() {
-            Some(factor) => Some(
-                factor
-                    .inverse()
-                    .map(gam_linalg::utils::CertifiedSpdInverse::into_inverse)
-                    .map_err(|error| {
-                        EstimationError::RemlOptimizationFailed(format!(
-                            "posterior covariance requires an exact SPD Hessian inverse: {error}"
-                        ))
-                    })?,
-            ),
+            Some(factor) => Some(factor.inverse().map_err(|error| {
+                EstimationError::RemlOptimizationFailed(format!(
+                    "posterior covariance requires an exact SPD Hessian inverse: {error}"
+                ))
+            })?),
             None => None,
         };
 
@@ -3084,7 +3239,7 @@ where
             // Wood-corrected reference d.f. `tr(F_jj)² / tr(F_jj²)` consumed
             // by `smooth_test::reference_df` (tr(F²) ≠ tr(F_sym²) in general).
             // See issue #1027.
-            let (f_mat, _f_certificate) = posterior_factor.solve_matrix(&xwx).map_err(|error| {
+            let f_mat = posterior_factor.solve_matrix(&xwx).map_err(|error| {
                 EstimationError::RemlOptimizationFailed(format!(
                     "influence matrix solve H·F = X'WX did not certify: {error}"
                 ))
@@ -3098,14 +3253,13 @@ where
             // `cond(H)` amplification as `F` did, with no identity anywhere
             // that looked at it.
             let f_transpose = f_mat.t().to_owned();
-            let (mut ve, _ve_certificate) =
-                posterior_factor
-                    .solve_matrix(&f_transpose)
-                    .map_err(|error| {
-                        EstimationError::RemlOptimizationFailed(format!(
-                            "frequentist covariance solve H·Ve/φ = Fᵀ did not certify: {error}"
-                        ))
-                    })?;
+            let mut ve = posterior_factor
+                .solve_matrix(&f_transpose)
+                .map_err(|error| {
+                    EstimationError::RemlOptimizationFailed(format!(
+                        "frequentist covariance solve H·Ve/φ = Fᵀ did not certify: {error}"
+                    ))
+                })?;
             ve *= cov_scale;
             gam_linalg::matrix::symmetrize_in_place(&mut ve);
 
@@ -3450,16 +3604,12 @@ where
                 // (both are dropped together at the end of this iteration).
                 let rhs = chunk_reservation
                     .bind(qs.t().slice(ndarray::s![.., col_start..col_end]).to_owned());
-                let z_chunk = factor_t.solvemulti(&rhs).map_err(|reason| {
-                    EstimationError::RemlOptimizationFailed(format!(
-                        "exact coefficient-SE solve failed at columns {col_start}..{col_end}: {reason}"
-                    ))
-                })?;
-                certify_factorized_inference_solve(
+                let z_chunk = factor_t.certified_solve(
                     &pirls_res.stabilizedhessian_transformed,
                     &rhs,
-                    &z_chunk,
-                    "factorized coefficient standard errors",
+                    &format!(
+                        "factorized coefficient standard errors at columns {col_start}..{col_end}"
+                    ),
                 )?;
                 // z_chunk is (p_t × chunk).
                 // (H_orig⁻¹)_{ii} = qs.row(i) · z_chunk.column(i - col_start)
