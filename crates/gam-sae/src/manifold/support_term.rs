@@ -1374,6 +1374,17 @@ impl SaeSupportSparseTerm {
         (cells.sqrt() * f64::EPSILON).sqrt()
     }
 
+    /// Atoms no row selects. A support move can leave some, and each one's decoder
+    /// block then carries only its penalty, so that penalty's null space is a
+    /// direction the data do not identify (#2576).
+    pub(crate) fn atoms_without_rows(&self) -> Vec<usize> {
+        self.atom_rows
+            .iter()
+            .enumerate()
+            .filter_map(|(atom, rows)| rows.is_empty().then_some(atom))
+            .collect()
+    }
+
     /// Intensive iterate scale paired with the componentwise curvature-scaled
     /// stationarity residual. Every installed active coordinate and decoder
     /// coefficient participates; non-finite state is a typed refusal.

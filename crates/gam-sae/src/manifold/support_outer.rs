@@ -599,8 +599,16 @@ impl SaeSupportOuterObjective {
             Ok(evaluation) => (evaluation.log_det_tt, evaluation.log_det_schur),
             Err(error) => {
                 drop(lane.take_logdet_derivative_bundle());
+                // #2576: job 627150 refused here after an adopted support move, on a
+                // reduced Schur with a null eigenvalue at roundoff. An atom no row
+                // selects leaves a decoder block that holds only its penalty, whose
+                // null space the data cannot identify, so the refusal names them.
+                let unused = self.term.atoms_without_rows();
                 return Err(outer_error(format!(
-                    "support LAML matrix-free evidence log-determinant: {error}"
+                    "support LAML matrix-free evidence log-determinant: {error}; atoms no row \
+                     selects: {} {:?}",
+                    unused.len(),
+                    unused,
                 )));
             }
         };
