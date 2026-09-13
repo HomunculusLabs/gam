@@ -996,7 +996,7 @@ crates/gam-solve/src/reml/reml_outer_engine/penalty_coordinate.rs	free_rank	reti
 crates/gam-solve/src/reml/reml_outer_engine/sparse_cholesky_backends.rs	compute_block_penalty_logdet_derivs	restored-in-place
 crates/gam-solve/src/residual_cascade.rs	assess_next_level	retired-no-product-user
 crates/gam-solve/src/residual_cascade.rs	coarse_space_cols	retired-no-product-user
-crates/gam-solve/src/residual_cascade.rs	log_lambda_domain	restored-in-place
+crates/gam-solve/src/residual_cascade.rs	log_lambda_domain	retired-no-product-user
 crates/gam-solve/src/residual_cascade.rs	logdet_exact	retired-no-product-user
 crates/gam-solve/src/residual_cascade.rs	logdet_slq	retired-no-product-user
 crates/gam-solve/src/residual_cascade.rs	num_coeffs	restored-in-place

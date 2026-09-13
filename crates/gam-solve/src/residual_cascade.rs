@@ -4012,26 +4012,6 @@ impl ResidualCascadeDesign {
             .sum())
     }
 
-    /// The bounded `log λ` domain used by the exact dense REML search and by
-    /// iterative-route diagnostic point evaluation — every determinant
-    /// transition `λ ≈ θ`, padded by `ln(1/√ε)` past the extreme Schur modes.
-    ///
-    /// Exposed because the ENDPOINTS are where a criterion evaluation is hardest:
-    /// `maximize_score_1d` evaluates the lower boundary before anything else, and
-    /// on the iterative route that is the λ at which `X'WX + λD` is numerically
-    /// singular (#2503). A gate on "the criterion is evaluable everywhere the
-    /// profile may look" needs to know where that is, rather than hard-coding a
-    /// λ read out of one failure's message. This does not authorize automatic
-    /// iterative REML; [`Self::fit_reml`] returns a typed proof refusal there.
-    ///
-    /// Rebuilds the whole REML profile, exactly as [`Self::criterion`] does — both
-    /// are single-shot oracles, not loop bodies. Past the dense cap that includes
-    /// the determinant sweep and the residual quadrature, so calling either in a λ
-    /// loop pays the profile per λ; [`Self::fit_reml`] builds it once.
-    pub fn log_lambda_domain(&self) -> Result<(f64, f64), String> {
-        self.core.reml_profile()?.log_lambda_domain()
-    }
-
     /// Profiled-σ² REML criterion at `log λ` (differences across λ are
     /// exact-real certifiable on the dense route; one fixed numerical spectral
     /// quadrature is used for diagnostic evaluation past the cap).
@@ -7637,6 +7617,60 @@ mod refinement_decision_tests {
             y.push(truth + 0.1 * rng.next_normal());
         }
         (x1, x2, y)
+    }
+
+    /// #2503/#2513: past the certified spectrum budget, every representative point
+    /// of the profile's declared `log λ` domain stays evaluable, because the
+    /// β-seeded quadrature removed the per-λ PCG solves. The same design still
+    /// returns the typed proof refusal rather than promoting point accuracy into
+    /// an automatic fit, because a converged residual quadrature does not enclose
+    /// the separate fixed-probe SLQ log-determinant.
+    ///
+    /// Level 8 is where this shape's `4^level` column growth crosses
+    /// `CERTIFIED_SPECTRUM_MAX`. The width is not asserted against a literal: the
+    /// refusal carries the budget it was compared against.
+    #[test]
+    fn past_cap_point_criterion_is_solve_free_but_auto_reml_needs_exact_proof_2503_2513() {
+        let (x1, x2, y) = scattered_fixture(800, 0x1032_0043);
+        let weights = vec![1.0; y.len()];
+        let axes: [&[f64]; 2] = [&x1, &x2];
+        let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, 8)
+            .expect("cascade design");
+        let (lo, hi) = design
+            .core
+            .reml_profile()
+            .expect("REML profile")
+            .log_lambda_domain()
+            .expect("spectrum-derived domain");
+        assert!(
+            lo < -25.0,
+            "premise: the domain must reach the ill-conditioned end this issue is about (lo = {lo})"
+        );
+        for log_lambda in [lo, lo + 1e-9, 0.5 * (lo + hi), hi] {
+            let value = design
+                .criterion(log_lambda)
+                .map_err(|error| format!("criterion at log lambda {log_lambda}: {error}"))
+                .expect("the criterion must evaluate at every representative domain point");
+            assert!(
+                value.is_finite(),
+                "non-finite criterion at log lambda {log_lambda}"
+            );
+        }
+
+        let refusal = design
+            .fit_reml()
+            .err()
+            .expect("point-evaluable SLQ must not escape as an exact-real REML fit");
+        assert!(
+            matches!(
+                refusal,
+                ResidualCascadeError::RemlScoreProofUnavailable {
+                    columns,
+                    certified_spectrum_max,
+                } if columns == design.num_coeffs() && columns > certified_spectrum_max
+            ),
+            "the wrong refusal for a design past the certified spectrum budget: {refusal}"
+        );
     }
 
     #[test]
