@@ -855,6 +855,107 @@ fn standard_normal_flex_canonical_derivative_ladder_matches_vgh_t3_t4_932() {
     );
 }
 
+/// The standard-normal FLEX fifth slabs are the primary-axis derivatives of the
+/// canonical fourth contraction: `T_c[k][l] = Σ_{d,e} ℓ_{klcde}·u_d·v_e` must
+/// match a Richardson difference of `row_primary_fourth_contracted_ordered(u, v)`
+/// along primary `c`, with the calibrated intercept re-solved at every shifted
+/// state (#2901 rule 4). Both directions mix q, slope, score-warp and
+/// link-deviation components, and the row's partition crosses every interior
+/// link knot, so the moving-boundary fluxes at orders four and five both act.
+#[test]
+fn standard_normal_flex_fifth_slabs_differentiate_the_fourth_contraction_2901() {
+    let row = 0usize;
+    let (family, states) = standard_normal_flex_fixture();
+    let cache = family
+        .build_exact_eval_cache(&states)
+        .expect("base StandardNormal FLEX exact cache");
+    let primary = cache.primary.clone();
+    let h_range = primary.h.clone().expect("active score-warp range");
+    let w_range = primary.w.clone().expect("active link-deviation range");
+    let r = primary.total;
+    let mut dir_u = Array1::<f64>::zeros(r);
+    dir_u[primary.q] = 0.55;
+    dir_u[primary.slope] = -0.35;
+    dir_u[h_range.start] = 0.45;
+    dir_u[w_range.start] = -0.40;
+    let mut dir_v = Array1::<f64>::zeros(r);
+    dir_v[primary.q] = -0.30;
+    dir_v[primary.slope] = 0.50;
+    dir_v[h_range.end - 1] = 0.25;
+    dir_v[w_range.end - 1] = 0.60;
+
+    let point = family
+        .primary_point_from_block_states(row, &states, &primary)
+        .expect("StandardNormal FLEX primary point");
+    let (q, b, beta_h, beta_w) = family.primary_point_components(&point, &primary);
+    let slabs = family
+        .standard_normal_flex_row_fifth_axis_slabs(
+            row,
+            &primary,
+            q,
+            b,
+            beta_h.as_ref(),
+            beta_w.as_ref(),
+            BernoulliMarginalSlopeFamily::row_ctx(&cache, row),
+            &dir_u,
+            &dir_v,
+        )
+        .expect("StandardNormal FLEX fifth slabs");
+    assert_eq!(slabs.len(), r);
+
+    let fourth_along = |axis: usize, step: f64| -> Array2<f64> {
+        let mut e_axis = Array1::<f64>::zeros(r);
+        e_axis[axis] = 1.0;
+        let shifted = perturb_standard_normal_flex_states(&states, &primary, row, &e_axis, step);
+        let shifted_cache = family
+            .build_exact_eval_cache(&shifted)
+            .expect("shifted StandardNormal FLEX exact cache");
+        family
+            .row_primary_fourth_contracted_ordered(
+                row,
+                &shifted,
+                &shifted_cache,
+                BernoulliMarginalSlopeFamily::row_ctx(&shifted_cache, row),
+                &dir_u,
+                &dir_v,
+            )
+            .expect("shifted StandardNormal t4 lowering")
+    };
+    let mut max_error = 0.0_f64;
+    let mut signal = 0.0_f64;
+    for axis in 0..r {
+        let central = |step: f64| (fourth_along(axis, step) - fourth_along(axis, -step)) / (2.0 * step);
+        let coarse = central(4.0e-4);
+        let fine = central(2.0e-4);
+        let richardson = (&fine * 4.0 - &coarse) / 3.0;
+        for k in 0..r {
+            for l in 0..r {
+                let analytic = slabs[axis][[k, l]];
+                let witness = richardson[[k, l]];
+                assert!(
+                    analytic.is_finite(),
+                    "axis={axis} k={k} l={l}: non-finite fifth slab {analytic}"
+                );
+                signal = signal.max(analytic.abs());
+                let error = derivative_ladder_relative_error(analytic, witness);
+                max_error = max_error.max(error);
+                assert!(
+                    error <= 1e-5,
+                    "axis={axis} k={k} l={l}: fifth={analytic:+.6e} richardson={witness:+.6e} coarse={:+.6e} rel={error:.3e}",
+                    coarse[[k, l]]
+                );
+            }
+        }
+    }
+    assert!(
+        signal > 1e-8,
+        "StandardNormal FLEX fifth slabs must carry nonzero signal, max |T|={signal:.3e}"
+    );
+    eprintln!(
+        "#2901 StandardNormal FLEX fifth slabs vs Richardson t4: max relative error {max_error:.3e}, max |T|={signal:.3e}"
+    );
+}
+
 /// #2347 t3→t4 diagnostic: dump the top t3→t4 gaps and Richardson-check the
 /// worst entry at two FD steps. If the gap scales like O(step²) it is FD
 /// truncation of the (correct) analytic fourth; if it plateaus it is a genuine

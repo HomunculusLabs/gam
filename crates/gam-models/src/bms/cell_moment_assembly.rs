@@ -1438,15 +1438,16 @@ impl BernoulliMarginalSlopeFamily {
         })
     }
 
-    /// `{D³H[u, v, e_k]}` over every coefficient axis `k` of an empirical-latent
-    /// FLEX family.
+    /// `{D³H[u, v, e_k]}` over every coefficient axis `k` of a FLEX family. A row
+    /// under an empirical latent measure reads its slabs from the frozen row
+    /// program; a standard-normal row reads them from the hand cell-moment kernel.
     ///
     /// A coefficient enters a row only through its primary direction: a marginal
     /// or slope column scales the q or slope slab by its design entry, and a
     /// score-warp or link-deviation coefficient selects its own primary slab.
     /// Each scaled slab is pulled back through the accumulator the Hessian paths
     /// use, one accumulator per output axis.
-    pub(super) fn empirical_flex_third_information_all_axes(
+    pub(super) fn flex_third_information_all_axes(
         &self,
         block_states: &[ParameterBlockState],
         d_beta_u_flat: &Array1<f64>,
@@ -1468,31 +1469,37 @@ impl BernoulliMarginalSlopeFamily {
                     .map(|_| BernoulliBlockHessianAccumulator::new(slices))
                     .collect();
                 for row in rows {
-                    let grid = self
-                        .latent_measure
-                        .empirical_grid_for_training_row(row)?
-                        .ok_or_else(|| {
-                            "BMS FLEX third information derivative needs an empirical latent measure"
-                                .to_string()
-                        })?;
                     let point = self.primary_point_from_block_states(row, block_states, primary)?;
                     let (q, b, beta_h, beta_w) = self.primary_point_components(&point, primary);
                     let row_u =
                         self.row_primary_direction_from_flat(row, slices, primary, d_beta_u_flat)?;
                     let row_v =
                         self.row_primary_direction_from_flat(row, slices, primary, d_beta_v_flat)?;
-                    let slabs = self.empirical_flex_row_fifth_axis_slabs(
-                        row,
-                        primary,
-                        q,
-                        b,
-                        beta_h.as_ref(),
-                        beta_w.as_ref(),
-                        Self::row_ctx(&cache, row),
-                        &row_u,
-                        &row_v,
-                        &grid,
-                    )?;
+                    let slabs = match self.latent_measure.empirical_grid_for_training_row(row)? {
+                        Some(grid) => self.empirical_flex_row_fifth_axis_slabs(
+                            row,
+                            primary,
+                            q,
+                            b,
+                            beta_h.as_ref(),
+                            beta_w.as_ref(),
+                            Self::row_ctx(&cache, row),
+                            &row_u,
+                            &row_v,
+                            &grid,
+                        )?,
+                        None => self.standard_normal_flex_row_fifth_axis_slabs(
+                            row,
+                            primary,
+                            q,
+                            b,
+                            beta_h.as_ref(),
+                            beta_w.as_ref(),
+                            Self::row_ctx(&cache, row),
+                            &row_u,
+                            &row_v,
+                        )?,
+                    };
                     let marginal_row = self
                         .marginal_design
                         .try_row_chunk(row..row + 1)

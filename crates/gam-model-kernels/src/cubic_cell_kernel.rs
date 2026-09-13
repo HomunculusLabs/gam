@@ -2145,6 +2145,145 @@ pub fn cell_fourth_derivative_from_moments(
     Ok((fourth_term - eta_linear_term + quad_coeff_term + quartic_coeff_term) * INV_TWO_PI)
 }
 
+/// One cell integral `∫_cell φ(z)·Φ(η(z)) dz` prepared for contracted
+/// derivatives of any order through five, by Faà di Bruno over set partitions.
+///
+/// A partition of the derivative slots into `b` blocks contributes
+/// `⟨W_b ⊗ Π_blocks c_block, moments⟩/2π`, where `c_block` is the z-polynomial of
+/// the index coefficients' mixed partial over that block's slots and
+/// `W_b = Φ⁽ᵇ⁾(η)/φ(η)` is `1, −η, η² − 1, 3η − η³, η⁴ − 6η² + 3` through the
+/// cell's cubic `η(z)`. Every block polynomial is cubic, so `b` blocks read
+/// moments through degree `6b − 3`: degree 21 for order four, 27 for order five.
+/// The weights are folded into the moments once per cell, leaving one dot per
+/// partition term.
+#[derive(Clone, Debug)]
+pub struct CellPartitionMoments {
+    /// `weighted[b − 1][s] = Σ_t W_b[t]·moments[s + t] / 2π` for `s ≤ 3b`.
+    weighted: [[f64; 16]; 5],
+    max_blocks: usize,
+}
+
+impl CellPartitionMoments {
+    pub fn new(
+        cell: DenestedCubicCell,
+        moments: &[f64],
+        max_blocks: usize,
+    ) -> Result<Self, String> {
+        if !(1..=5).contains(&max_blocks) {
+            return Err(CubicCellKernelError::insufficient_moments(format!(
+                "cell partition moments cover one to five blocks, got {max_blocks}"
+            ))
+            .into());
+        }
+        require_moments_degree(6 * max_blocks - 3, moments, "cell partition moments")?;
+        let eta = [cell.c0, cell.c1, cell.c2, cell.c3];
+        let mut eta_sq = [0.0_f64; 7];
+        poly_conv_into(&eta, &eta, &mut eta_sq);
+        let mut eta_cube = [0.0_f64; 10];
+        poly_conv_into(&eta_sq, &eta, &mut eta_cube);
+        let mut eta_fourth = [0.0_f64; 13];
+        poly_conv_into(&eta_sq, &eta_sq, &mut eta_fourth);
+        let mut hermite = [[0.0_f64; 13]; 5];
+        hermite[0][0] = 1.0;
+        for (slot, &coefficient) in eta.iter().enumerate() {
+            hermite[1][slot] = -coefficient;
+            hermite[3][slot] = 3.0 * coefficient;
+        }
+        hermite[2][..7].copy_from_slice(&eta_sq);
+        hermite[2][0] -= 1.0;
+        for (slot, &coefficient) in eta_cube.iter().enumerate() {
+            hermite[3][slot] -= coefficient;
+        }
+        hermite[4] = eta_fourth;
+        for (slot, &coefficient) in eta_sq.iter().enumerate() {
+            hermite[4][slot] -= 6.0 * coefficient;
+        }
+        hermite[4][0] += 3.0;
+        let mut weighted = [[0.0_f64; 16]; 5];
+        for blocks in 1..=max_blocks {
+            let weight = &hermite[blocks - 1][..3 * (blocks - 1) + 1];
+            for (shift, target) in weighted[blocks - 1][..=3 * blocks].iter_mut().enumerate() {
+                let folded = moment_dot_with_coefficients_unchecked(weight, &moments[shift..]);
+                *target = folded * INV_TWO_PI;
+            }
+        }
+        Ok(Self {
+            weighted,
+            max_blocks,
+        })
+    }
+
+    /// Contracted derivative over `order` slots. `subset_coefficients[S]` is the
+    /// z-polynomial of the index coefficients' mixed partial over the slot subset
+    /// `S`, a bitmask over the slots (index 0 is unused). Each set partition is
+    /// visited once, as a restricted growth string, and a block whose polynomial
+    /// vanishes drops its whole term.
+    pub fn derivative(
+        &self,
+        order: usize,
+        subset_coefficients: &[[f64; 4]; 32],
+    ) -> Result<f64, String> {
+        if order == 0 || order > self.max_blocks {
+            return Err(CubicCellKernelError::insufficient_moments(format!(
+                "cell partition derivative of order {order} needs moments folded through {order} blocks, have {}",
+                self.max_blocks
+            ))
+            .into());
+        }
+        let mut block = [0_usize; 5];
+        let mut total = 0.0;
+        loop {
+            let mut masks = [0_usize; 5];
+            let mut blocks = 0_usize;
+            for (slot, &index) in block[..order].iter().enumerate() {
+                masks[index] |= 1 << slot;
+                blocks = blocks.max(index + 1);
+            }
+            total += self.partition_term(&masks[..blocks], subset_coefficients);
+            let mut position = order;
+            loop {
+                if position <= 1 {
+                    return Ok(total);
+                }
+                position -= 1;
+                let ceiling = 1 + block[..position].iter().copied().max().unwrap_or(0);
+                if block[position] < ceiling {
+                    block[position] += 1;
+                    for later in block[position + 1..order].iter_mut() {
+                        *later = 0;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    fn partition_term(&self, masks: &[usize], subset_coefficients: &[[f64; 4]; 32]) -> f64 {
+        let mut product = [0.0_f64; 16];
+        let mut len = 0_usize;
+        for &mask in masks {
+            let factor = &subset_coefficients[mask];
+            if factor.iter().all(|&value| value == 0.0) {
+                return 0.0;
+            }
+            if len == 0 {
+                product[..4].copy_from_slice(factor);
+                len = 4;
+            } else {
+                let mut next = [0.0_f64; 16];
+                for (i, &left) in product[..len].iter().enumerate() {
+                    for (j, &right) in factor.iter().enumerate() {
+                        next[i + j] += left * right;
+                    }
+                }
+                product = next;
+                len += 3;
+            }
+        }
+        moment_dot_with_coefficients_unchecked(&product[..len], &self.weighted[masks.len() - 1])
+    }
+}
+
 #[inline]
 pub fn global_cubic_from_local(span: LocalSpanCubic) -> (f64, f64, f64, f64) {
     let left = span.left;
@@ -6966,4 +7105,71 @@ mod tests {
     //       `velocity·(F_rs^L − F_rs^R)` telescopes to ZERO, and the tower's
     //       third-order self-flux is a genuine no-op. The real residual lives in
     //       the interior implicit-intercept assembly, not at the boundary.
+
+    /// The set-partition kernel is the enumerated first-through-fourth order
+    /// kernels, summed in a different order: every slot subset carries its own
+    /// polynomial so no term can hide behind a repeated slice.
+    #[test]
+    fn cell_partition_moments_match_the_enumerated_kernels_through_fourth_order() {
+        let cell = DenestedCubicCell {
+            left: -0.7,
+            right: 0.9,
+            c0: 0.2,
+            c1: 0.8,
+            c2: -0.15,
+            c3: 0.07,
+        };
+        let state = evaluate_cell_derivative_moments_uncached(cell, 21)
+            .expect("degree-21 moments of a non-affine cell");
+        let partition = CellPartitionMoments::new(cell, &state.moments, 4)
+            .expect("four-block partition moments");
+        let mut subsets = [[0.0_f64; 4]; 32];
+        for (mask, polynomial) in subsets.iter_mut().enumerate().take(16).skip(1) {
+            let seed = mask as f64;
+            *polynomial = [
+                0.31 - 0.07 * seed,
+                0.12 + 0.05 * seed,
+                -0.09 + 0.02 * seed,
+                0.04 - 0.01 * seed,
+            ];
+        }
+        let s = &subsets;
+        let moments = &state.moments;
+        assert_close_rel(
+            "first",
+            partition.derivative(1, s).expect("partition first"),
+            cell_first_derivative_from_moments(&s[1], moments).expect("enumerated first"),
+            1e-12,
+        );
+        assert_close_rel(
+            "second",
+            partition.derivative(2, s).expect("partition second"),
+            cell_second_derivative_from_moments(cell, &s[1], &s[2], &s[3], moments)
+                .expect("enumerated second"),
+            1e-12,
+        );
+        assert_close_rel(
+            "third",
+            partition.derivative(3, s).expect("partition third"),
+            cell_third_derivative_from_moments(
+                cell, &s[1], &s[2], &s[4], &s[3], &s[5], &s[6], &s[7], moments,
+            )
+            .expect("enumerated third"),
+            1e-12,
+        );
+        assert_close_rel(
+            "fourth",
+            partition.derivative(4, s).expect("partition fourth"),
+            cell_fourth_derivative_from_moments(
+                cell, &s[1], &s[2], &s[4], &s[8], &s[3], &s[5], &s[9], &s[6], &s[10], &s[12],
+                &s[7], &s[11], &s[13], &s[14], &s[15], moments,
+            )
+            .expect("enumerated fourth"),
+            1e-12,
+        );
+        assert!(
+            partition.derivative(5, s).is_err(),
+            "a four-block fold must refuse a fifth-order contraction"
+        );
+    }
 }

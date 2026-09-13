@@ -2825,6 +2825,7 @@ pub(crate) mod axis_direction_search;
 pub(crate) mod cell_moment_assembly;
 #[cfg(test)]
 mod empirical_measure_2484_tests;
+mod standard_normal_flex_fifth;
 pub(crate) mod empirical_measure_sensitivity;
 // #932 BMS flex single-source jet substrate (runtime-dimension `Jet2` + IFT
 // lift + cell base-moment jets). A bare `#[cfg(test)] mod` with an allowed name
