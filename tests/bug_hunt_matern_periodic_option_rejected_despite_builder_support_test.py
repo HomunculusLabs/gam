@@ -1,47 +1,31 @@
-"""Bug hunt: ``matern(..., periodic=...)`` is rejected as an unknown option even
-though the Matern builder fully supports periodicity — the squash-merge that
-advertised the feature wired the spec but forgot the option whitelist.
+"""Contract: ``matern(x, periodic=true, period=...)`` fits a periodic Matern smooth
+that tracks a periodic signal.
 
-Commit c8c3192fa ("feat(#580): periodic period derivation for radial builders —
-boolean periodic= (scalar + per-axis list) on duchon/tps/matern") added periodic
-support to the radial builders. In ``crates/gam-terms/src/term_builder.rs`` the
-``matern`` arm DOES thread it into the basis spec:
-
-    Ok(SmoothBasisSpec::Matern {
-        feature_cols: cols.to_vec(),
-        spec: MaternBasisSpec {
-            center_strategy,
-            periodic: parse_periodic_axes_option(options, cols.len())?,   // <- wired
-            ...
-
-and the Matern kernel builder consumes it (``expand_periodic_centers`` in
-``crates/gam-terms/src/basis/matern_kernel.rs``). But the matern arm's
-``validate_known_options("matern", options, &[...])` whitelist (term_builder.rs
-~2718-2742) lists only ``nu``/``length_scale``/``centers``/``k``/``knots``/... —
-it omits ``periodic``/``cyclic``/``period``/``period_start``/``period_end``. The
-sibling ``duchon`` arm's whitelist (~2826-2858) DOES include all of them, which
-is why ``duchon(x, periodic=true)`` fits and ``matern(x, periodic=true)`` does
-not.
-
-So the option is rejected before the (working) builder ever runs:
+The defect this test was written for: commit c8c3192fa ("feat(#580): periodic
+period derivation for radial builders — boolean periodic= (scalar + per-axis
+list) on duchon/tps/matern") threaded ``periodic`` into the Matern basis spec,
+and the Matern builder consumed it through ``expand_periodic_centers``. But the
+``matern`` arm's option whitelist in ``crates/gam-terms/src/term_builder.rs``
+omitted ``periodic``/``cyclic``/``period``/``period_start``/``period_end``, while
+the sibling ``duchon`` arm accepted them. Every spelling was rejected before the
+builder ran:
 
     InvalidConfigurationError: matern() does not accept option `periodic`.
-    Valid options: [__by_col, __secondary_center_cap, basis-dim, basis_dim, ...]
 
-Observed: every spelling — ``matern(x, periodic=true)``,
-``matern(x, z, periodic=c(1,1))``, with or without an explicit ``period=`` — is
-rejected as an unknown option, in 1-D and 2-D alike. Expected: the same periodic
-Matern smooth the engine already builds when called through
-``gam::fit_from_formula`` with the option accepted (verified directly in Rust:
-adding the five keys to the whitelist makes ``matern(x, periodic=true,
-period=2*pi)`` fit a finite 150-coefficient periodic Matern smooth).
+``MATERN_SMOOTH_OPTION_KEYS`` now lists all five keys.
+
+With the option accepted, the fit did not return. Python Contracts run
+34670725591 censored this test at its 300 s per-test bound while it was inside
+``gamfit.fit``. Run alone without xdist (MSI job 602008), the spatial
+length-scale search ran for 490 s: its REML criterion jumped where a Matern
+operator penalty eigenvalue crossed the spectral rank cutoff, and the fit ended
+with "incremental realizer lost cached penalty 1" at a trial far out in the
+length scale.
 
 This test fits a clean periodic signal on ``[0, 2*pi)`` with a periodic Matern
-smooth and asserts (a) the call is accepted (the bug raises here), (b) the
-predictions are finite, and (c) the fit is non-degenerate — it tracks the
-periodic signal rather than collapsing to a flat line. It fails today at the
-``fit`` call. Adding the missing keys to the matern whitelist makes it pass with
-no further edits.
+smooth and asserts that (a) the call is accepted, (b) the predictions are finite,
+and (c) the fit is non-degenerate: it tracks the periodic signal rather than
+collapsing to a flat line.
 """
 
 from __future__ import annotations
@@ -67,9 +51,7 @@ def test_matern_periodic_smooth_is_accepted_and_fits() -> None:
     y = f + rng.normal(0.0, 0.15, n)
     df = pd.DataFrame({"x": x, "y": y})
 
-    # The bug: this raises InvalidConfigurationError("matern() does not accept
-    # option `periodic`") today, even though the Matern builder threads and uses
-    # `periodic` and the sibling duchon() accepts the very same options.
+    # The periodic options must be accepted and the fit must complete.
     model = gamfit.fit(
         df,
         "y ~ matern(x, periodic=true, period=6.283185307179586)",
