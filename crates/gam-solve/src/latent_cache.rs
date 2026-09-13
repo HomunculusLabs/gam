@@ -117,7 +117,6 @@ pub enum LatentBasisKind {
         basis_matrix: Array2<f64>,
         centered: bool,
         center_mean_fingerprint: Option<u64>,
-        smooth_penalty: f64,
         pca_basis_path: Option<PathBuf>,
         chunk_size: usize,
     },
@@ -254,7 +253,6 @@ impl LatentBasisKind {
                 basis_matrix,
                 centered,
                 center_mean_fingerprint,
-                smooth_penalty,
                 pca_basis_path,
                 chunk_size,
             } => {
@@ -263,7 +261,6 @@ impl LatentBasisKind {
                 if let Some(fp) = center_mean_fingerprint {
                     hasher.write_u64(*fp);
                 }
-                hasher.write_u64(smooth_penalty.to_bits());
                 if let Some(path) = pca_basis_path {
                     hasher.write_u8(1);
                     hasher.write_bytes(path.to_string_lossy().as_bytes());

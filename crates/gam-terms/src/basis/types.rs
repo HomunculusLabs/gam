@@ -1611,7 +1611,6 @@ pub enum BasisMetadata {
         feature_cols: Vec<usize>,
         basis_matrix: Array2<f64>,
         centered: bool,
-        smooth_penalty: f64,
         center_mean: Option<Array1<f64>>,
         pca_basis_path: Option<std::path::PathBuf>,
         chunk_size: usize,

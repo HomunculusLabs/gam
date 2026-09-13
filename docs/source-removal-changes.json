@@ -6430,5 +6430,13 @@
     ],
     "reason": "#2829 no product user: SaeAssignmentState::active_state_bytes has no caller, and index_cells, gate_cells, coord_cells, active_state_cells and STATE_CELL_BYTES were reached only through it.",
     "evidence": "At d6daf8081204715c9e238a76f16841a6a3e8cc96, git grep -n -w over crates, src and tests finds active_state_cells, index_cells, gate_cells, coord_cells and STATE_CELL_BYTES only inside crates/gam-sae/src/assignment_state.rs, called only by each other and by active_state_bytes. Every other active_state_bytes occurrence (front_door.rs:209, manifold/streaming_plan.rs) is the SaeTopKCurvedBudget field. No test named sparse_topk_state_memory_shape_matches_budget_formula exists; only the module doc named it."
+  },
+  {
+    "base": "8a9b08b2800d60497cab663a6a7932e0aee4194b",
+    "items": [
+      "crates/gam-terms/src/smooth/term_specs.rs:fn:default_pca_smooth_penalty"
+    ],
+    "reason": "SPEC rules 14, 23 and 25 (#2899 row O16). The Pca smooth penalizes the fitted function's empirical mass, beta^T S beta = mean_i((Z beta)_i^2), and smooth_penalty multiplied that matrix. The REML smoothing coordinate multiplying the same penalty selects its strength, so a positive value only moved where the search started and 0 switched the penalty off. The option is deleted from SmoothBasisSpec::Pca, BasisMetadata::Pca, the pca() formula option keys, the smooths descriptor, the latent design cache key and gamfit Pca, and default_pca_smooth_penalty, its serde default, goes with it.",
+    "evidence": "At the base, git grep -n -w default_pca_smooth_penalty finds only crates/gam-terms/src/smooth/term_specs.rs:394 (the serde default attribute on SmoothBasisSpec::Pca) and :1342 (the definition)."
   }
 ]

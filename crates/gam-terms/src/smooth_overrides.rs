@@ -840,7 +840,6 @@ fn apply_pca(
         feature_cols,
         basis_matrix,
         centered,
-        smooth_penalty,
         pca_basis_path,
         chunk_size,
         ..
@@ -894,13 +893,10 @@ fn apply_pca(
         *centered = c;
     }
 
-    if let Some(sp) = descriptor.get("smooth_penalty").and_then(JsonValue::as_f64) {
-        if !sp.is_finite() || sp < 0.0 {
-            return Err(format!(
-                "smooths[{symbol:?}].smooth_penalty must be a non-negative finite value, got {sp}"
-            ));
-        }
-        *smooth_penalty = sp;
+    if descriptor.contains_key("smooth_penalty") {
+        return Err(format!(
+            "smooths[{symbol:?}].smooth_penalty is not a Pca option: REML selects the strength of the function-mass penalty"
+        ));
     }
 
     if let Some(cs) = descriptor.get("chunk_size").and_then(JsonValue::as_u64) {
@@ -1478,7 +1474,6 @@ mod tests {
             feature_cols: vec![0, 1],
             basis_matrix: Array2::<f64>::zeros((2, 1)),
             centered: true,
-            smooth_penalty: 1.0,
             center_mean: None,
             pca_basis_path: Some(PathBuf::from("/tmp/scores.npy")),
             chunk_size: 4096,
@@ -1488,7 +1483,6 @@ mod tests {
             "basis": [[1.0, 0.0, 2.0], [0.0, 1.0, 3.0]],
             "K": 3,
             "centered": false,
-            "smooth_penalty": 2.5,
             "chunk_size": 0,
         }));
         apply_pca(&mut basis, &descriptor, "x").unwrap();
@@ -1496,14 +1490,12 @@ mod tests {
             SmoothBasisSpec::Pca {
                 basis_matrix,
                 centered,
-                smooth_penalty,
                 pca_basis_path,
                 chunk_size,
                 ..
             } => {
                 assert_eq!(basis_matrix.shape(), &[2, 3]);
                 assert!(!centered);
-                assert_eq!(smooth_penalty, 2.5);
                 assert!(
                     pca_basis_path.is_none(),
                     "explicit basis must clear lazy path"
@@ -1520,7 +1512,6 @@ mod tests {
             feature_cols: vec![0, 1, 2],
             basis_matrix: Array2::<f64>::zeros((3, 1)),
             centered: true,
-            smooth_penalty: 1.0,
             center_mean: None,
             pca_basis_path: None,
             chunk_size: 4096,
@@ -1538,7 +1529,6 @@ mod tests {
             feature_cols: vec![0, 1],
             basis_matrix: Array2::<f64>::zeros((2, 4)),
             centered: true,
-            smooth_penalty: 1.0,
             center_mean: None,
             pca_basis_path: None,
             chunk_size: 4096,

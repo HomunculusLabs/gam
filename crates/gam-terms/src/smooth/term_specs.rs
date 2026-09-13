@@ -391,8 +391,6 @@ pub enum SmoothBasisSpec {
         feature_cols: Vec<usize>,
         basis_matrix: Array2<f64>,
         centered: bool,
-        #[serde(default = "default_pca_smooth_penalty")]
-        smooth_penalty: f64,
         #[serde(default)]
         center_mean: Option<Array1<f64>>,
         #[serde(default)]
@@ -1337,10 +1335,6 @@ impl LinearTermSpec {
 
 pub(crate) const fn default_linear_term_double_penalty() -> bool {
     false
-}
-
-pub(crate) const fn default_pca_smooth_penalty() -> f64 {
-    1.0
 }
 
 pub(crate) const fn default_pca_chunk_size() -> usize {
@@ -7123,16 +7117,15 @@ pub(crate) fn pca_center_mean(x: ArrayView2<'_, f64>) -> Result<Array1<f64>, Bas
 ///
 /// For the realized PCA score design `Z`, the quadratic form is
 ///
-/// `beta^T S beta = smooth_penalty * mean_i((Z beta)_i^2)`.
+/// `beta^T S beta = mean_i((Z beta)_i^2)`.
 ///
-/// Thus `smooth_penalty` chooses the reference-measure scale only; the existing
-/// REML smoothing coordinate multiplying this penalty learns the shrinkage
-/// strength.  In particular, this is not an identity ridge on whichever
-/// coefficient chart happened to encode the score columns.
+/// The REML smoothing coordinate multiplying this penalty learns the shrinkage
+/// strength, so the penalty carries no scale of its own.  In particular, this
+/// is not an identity ridge on whichever coefficient chart happened to encode
+/// the score columns.
 fn pca_function_mass_penalty(
     mut raw_score_gram: Array2<f64>,
     n_rows: usize,
-    smooth_penalty: f64,
 ) -> Result<Array2<f64>, BasisError> {
     let k = raw_score_gram.ncols();
     if raw_score_gram.nrows() != k {
@@ -7179,7 +7172,7 @@ fn pca_function_mass_penalty(
         );
     }
 
-    raw_score_gram.mapv_inplace(|value| value * smooth_penalty / n_rows as f64);
+    raw_score_gram.mapv_inplace(|value| value / n_rows as f64);
     Ok(raw_score_gram)
 }
 
@@ -7188,17 +7181,10 @@ pub fn build_pca_smooth_basis(
     feature_cols: &[usize],
     basis_matrix: &Array2<f64>,
     centered: bool,
-    smooth_penalty: f64,
     center_mean: Option<&Array1<f64>>,
     pca_basis_path: Option<&PathBuf>,
     chunk_size: usize,
 ) -> Result<BasisBuildResult, BasisError> {
-    if !smooth_penalty.is_finite() || smooth_penalty < 0.0 {
-        crate::bail_invalid_basis!(
-            "Pca smooth_penalty must be finite and non-negative, got {}",
-            smooth_penalty
-        );
-    }
     if data.nrows() == 0 {
         crate::bail_invalid_basis!("Pca basis requires at least one data row");
     }
@@ -7221,7 +7207,7 @@ pub fn build_pca_smooth_basis(
                     "lazy Pca function-mass Gram construction failed: {err}"
                 ))
             })?;
-        let penalty = pca_function_mass_penalty(raw_score_gram, op.nrows, smooth_penalty)?;
+        let penalty = pca_function_mass_penalty(raw_score_gram, op.nrows)?;
         let filtered = filter_penalty_candidates(vec![PenaltyCandidate {
             matrix: ConstructiveQuadratic::try_from_dense_psd(
                 penalty,
@@ -7242,7 +7228,6 @@ pub fn build_pca_smooth_basis(
                 feature_cols: feature_cols.to_vec(),
                 basis_matrix: basis_matrix.clone(),
                 centered,
-                smooth_penalty,
                 center_mean: center_mean.cloned(),
                 pca_basis_path: Some(path.clone()),
                 chunk_size: chunk_size.max(1),
@@ -7273,7 +7258,7 @@ pub fn build_pca_smooth_basis(
     }
     let design = fast_ab(&x, basis_matrix);
     let raw_score_gram = gam_linalg::faer_ndarray::fast_ata(&design);
-    let penalty = pca_function_mass_penalty(raw_score_gram, design.nrows(), smooth_penalty)?;
+    let penalty = pca_function_mass_penalty(raw_score_gram, design.nrows())?;
     let filtered = filter_penalty_candidates(vec![PenaltyCandidate {
         matrix: ConstructiveQuadratic::try_from_dense_psd(penalty, "PCA function-mass penalty")?,
         source: PenaltySource::OperatorMass,
@@ -7291,7 +7276,6 @@ pub fn build_pca_smooth_basis(
             feature_cols: feature_cols.to_vec(),
             basis_matrix: basis_matrix.clone(),
             centered,
-            smooth_penalty,
             center_mean: centered.then_some(mean),
             pca_basis_path: None,
             chunk_size: chunk_size.max(1),
@@ -8770,7 +8754,6 @@ pub fn build_single_local_smooth_term(
             feature_cols,
             basis_matrix,
             centered,
-            smooth_penalty,
             center_mean,
             pca_basis_path,
             chunk_size,
@@ -8787,7 +8770,6 @@ pub fn build_single_local_smooth_term(
                 feature_cols,
                 basis_matrix,
                 *centered,
-                *smooth_penalty,
                 center_mean.as_ref(),
                 pca_basis_path.as_ref(),
                 *chunk_size,

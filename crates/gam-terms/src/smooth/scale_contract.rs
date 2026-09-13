@@ -968,7 +968,6 @@ mod tests {
                 feature_cols: vec![0, 1],
                 basis_matrix: array![[1.0], [0.0]],
                 centered: true,
-                smooth_penalty: 1.0,
                 center_mean: Some(array![0.0, 0.0]),
                 pca_basis_path: None,
                 chunk_size: 32,

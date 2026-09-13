@@ -626,7 +626,6 @@ class Pca(Smooth):
     mean : optional array-like of shape ``(D,)``. Explicit training feature
         mean for ``centered=True``; auto-resolved and cached on first
         evaluation when omitted.
-    smooth_penalty : ridge multiplier for PCA coefficients.
     """
 
     K: int | None = None
@@ -635,7 +634,6 @@ class Pca(Smooth):
     chunk_size: int = 4096
     centered: bool = True
     mean: Any | None = None
-    smooth_penalty: float = 1.0
 
     def __init__(
         self,
@@ -646,7 +644,6 @@ class Pca(Smooth):
         centered: bool = True,
         mean: Any | None = None,
         name: str | None = None,
-        smooth_penalty: float = 1.0,
         by: Any | None = None,
         double_penalty: bool = False,
         shape_constraint: ShapeConstraintLiteral | None = None,
@@ -661,7 +658,6 @@ class Pca(Smooth):
         self.chunk_size = int(chunk_size)
         self.centered = centered
         self.mean = mean
-        self.smooth_penalty = smooth_penalty
 
     @property
     def intrinsic_dim(self) -> int:
@@ -724,7 +720,6 @@ class Pca(Smooth):
             out["lazy_path"] = str(self.lazy_path)
         out["chunk_size"] = int(self.chunk_size)
         out["centered"] = bool(self.centered)
-        out["smooth_penalty"] = float(self.smooth_penalty)
         return out
 
     SUPPORTED_BACKENDS: ClassVar[frozenset[str]] = frozenset({"torch", "numpy", "jax"})

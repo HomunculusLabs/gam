@@ -2606,7 +2606,6 @@ fn no_whitelisted_smooth_option_is_accepted_and_inert() {
             (_, "multiscale") => &["true"],
             (_, "learn_length_scale") => &["false"],
             (_, "centered") => &["false"],
-            (_, "smooth_penalty") => &["false"],
             (_, "lazy_path") => &["true"],
             (_, "radians") => &["true"],
             (_, "units") => &["radians"],

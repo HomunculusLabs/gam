@@ -1908,7 +1908,6 @@ impl SingleBlockLatentCoordDesignCache {
                 BasisMetadata::Pca {
                     basis_matrix,
                     centered,
-                    smooth_penalty,
                     center_mean,
                     pca_basis_path,
                     chunk_size,
@@ -1929,7 +1928,6 @@ impl SingleBlockLatentCoordDesignCache {
                     basis_matrix: basis_matrix.clone(),
                     centered: *centered,
                     center_mean_fingerprint,
-                    smooth_penalty: *smooth_penalty,
                     pca_basis_path: pca_basis_path.clone(),
                     chunk_size: *chunk_size,
                 })

@@ -433,9 +433,7 @@ def _build_design_penalty(
                 f"Pca: points d={points.shape[1]} but basis has {basis.shape[0]} rows"
             )
         design = design_points @ basis
-        penalty = torch.eye(
-            basis.shape[1], dtype=torch.float64, device=points.device
-        ) * float(pca.smooth_penalty)
+        penalty = torch.eye(basis.shape[1], dtype=torch.float64, device=points.device)
         return design, penalty
 
     if entry == "tensor_bspline" and isinstance(smooth, TensorBSpline):

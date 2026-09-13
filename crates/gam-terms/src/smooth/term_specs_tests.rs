@@ -757,22 +757,12 @@ mod pca_function_mass_tests {
     fn pca_penalty_quadratic_equals_empirical_fitted_function_norm() {
         let data = array![[1.0, 2.0], [-1.0, 0.5], [2.0, -0.5], [0.25, -1.5]];
         let basis = array![[1.0, 0.5], [-0.25, 2.0]];
-        let smooth_penalty = 2.5;
-        let built = build_pca_smooth_basis(
-            data.view(),
-            &[0, 1],
-            &basis,
-            false,
-            smooth_penalty,
-            None,
-            None,
-            2,
-        )
-        .expect("full-rank PCA basis");
+        let built = build_pca_smooth_basis(data.view(), &[0, 1], &basis, false, None, None, 2)
+            .expect("full-rank PCA basis");
         let coefficients = array![0.7, -1.2];
         let design = built.design.to_dense();
         let fitted = design.dot(&coefficients);
-        let expected = smooth_penalty * fitted.dot(&fitted) / fitted.len() as f64;
+        let expected = fitted.dot(&fitted) / fitted.len() as f64;
         let actual = quadratic_form(&built.active_penalties[0].matrix, &coefficients);
 
         assert_close(actual, expected);
@@ -792,30 +782,12 @@ mod pca_function_mass_tests {
         let base_coefficients = array![0.8, -1.1];
         // transform * transformed_coefficients == base_coefficients.
         let transformed_coefficients = array![1.5, -4.4];
-        let smooth_penalty = 1.7;
 
-        let base = build_pca_smooth_basis(
-            scores.view(),
-            &[0, 1],
-            &identity,
-            false,
-            smooth_penalty,
-            None,
-            None,
-            2,
-        )
-        .expect("base PCA chart");
-        let transformed = build_pca_smooth_basis(
-            scores.view(),
-            &[0, 1],
-            &transform,
-            false,
-            smooth_penalty,
-            None,
-            None,
-            2,
-        )
-        .expect("reparameterized PCA chart");
+        let base = build_pca_smooth_basis(scores.view(), &[0, 1], &identity, false, None, None, 2)
+            .expect("base PCA chart");
+        let transformed =
+            build_pca_smooth_basis(scores.view(), &[0, 1], &transform, false, None, None, 2)
+                .expect("reparameterized PCA chart");
 
         let fitted_base = base.design.to_dense().dot(&base_coefficients);
         let fitted_transformed = transformed.design.to_dense().dot(&transformed_coefficients);
@@ -839,7 +811,6 @@ mod pca_function_mass_tests {
             &[0, 1],
             &Array2::<f64>::eye(2),
             false,
-            1.0,
             None,
             None,
             2,
@@ -859,14 +830,12 @@ mod pca_function_mass_tests {
     #[test]
     fn lazy_and_dense_pca_function_mass_penalties_match() {
         let scores = array![[1.0, 2.0], [-1.0, 0.5], [2.0, -0.5], [0.25, -1.5]];
-        let smooth_penalty = 2.25;
         let path = write_f64_npy(&scores);
         let dense = build_pca_smooth_basis(
             scores.view(),
             &[0, 1],
             &Array2::<f64>::eye(2),
             false,
-            smooth_penalty,
             None,
             None,
             2,
@@ -878,7 +847,6 @@ mod pca_function_mass_tests {
             &[],
             &Array2::<f64>::zeros((0, scores.ncols())),
             false,
-            smooth_penalty,
             None,
             Some(&path),
             2,
