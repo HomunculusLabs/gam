@@ -1185,7 +1185,7 @@ pub(crate) fn compress_terms(mut terms: Vec<(f64, f64, i32)>) -> Vec<(f64, f64, 
     for (c, a, b) in terms {
         if let Some(last) = out.last_mut()
             && last.2 == b
-            && (last.1 - a).abs() < 1e-15
+            && last.1 == a
         {
             last.0 += c;
             continue;
