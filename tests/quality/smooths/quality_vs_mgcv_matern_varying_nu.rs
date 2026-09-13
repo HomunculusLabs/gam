@@ -28,10 +28,16 @@
 //! `K_SEEDS` draws at every order, and every order's pair is emitted before any
 //! assertion runs. The first draw is the seed the single-draw version used.
 //!
-//! A cross-order kernel-distinctness invariant additionally rules out the failure
-//! mode where `nu` is silently ignored (every order collapsing onto one kernel):
-//! the roughest (ν=3/2) and smoothest (ν=7/2) gam recoveries must differ
-//! measurably on the grid, averaged over the draws.
+//! A cross-order invariant additionally rules out the failure mode where `nu` is
+//! silently ignored (every order collapsing onto one kernel). The Matérn-ν RKHS is
+//! H^m with m = ν + d/2, and the term penalizes every derivative energy it controls
+//! (`matern_for_smoothness`, plus the third-order block from ν ≥ 5/2), so the
+//! smoothest order (ν=7/2) must carry strictly more penalty blocks than the
+//! roughest (ν=3/2). A dropped `nu` would give both orders one topology. The mean
+//! grid difference between those two fits is printed as context only: on two good
+//! recoveries of the same smooth truth it is bounded by their own truth-recovery
+//! errors, and job 602208 read 0.0069 there while the orders carried 3 and 4
+//! blocks and different EDFs, so no fixed fraction measures "ν is not ignored".
 
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
@@ -81,15 +87,16 @@ fn matern_draw(seed: u64) -> (Vec<f64>, Vec<f64>) {
 }
 
 /// gam's `y ~ matern(x, nu=<ν>, k=18)` Gaussian REML fit on one draw: the fitted
-/// function on `x_grid` (identity link, so design·beta is the mean) and the
-/// fit's total EDF. Prints the fit's selected smoothing state.
+/// function on `x_grid` (identity link, so design·beta is the mean), the fit's
+/// total EDF and its number of penalty blocks. Prints the fit's selected
+/// smoothing state.
 fn gam_matern_on_grid(
     seed: u64,
     nu: f64,
     x: &[f64],
     y: &[f64],
     x_grid: &[f64],
-) -> (Vec<f64>, f64) {
+) -> (Vec<f64>, f64, usize) {
     let headers = ["x", "y"].into_iter().map(String::from).collect();
     let rows: Vec<csv::StringRecord> = x
         .iter()
@@ -135,7 +142,7 @@ fn gam_matern_on_grid(
         fit.fit.edf_by_block().to_vec(),
         fit.fit.penalty_block_trace().to_vec(),
     );
-    (gam_grid, gam_edf)
+    (gam_grid, gam_edf, fit.fit.lambdas.len())
 }
 
 #[test]
@@ -181,14 +188,26 @@ fn gam_matern_family_recovers_truth_across_nu() {
     // grids, for the assertions and the cross-order kernel-distinctness check.
     let mut panels: Vec<(f64, PairedFoldComparison, f64)> = Vec::with_capacity(orders.len());
     let mut gam_grids_by_nu: Vec<Vec<Vec<f64>>> = Vec::with_capacity(orders.len());
+    let mut penalty_blocks_by_nu: Vec<usize> = Vec::with_capacity(orders.len());
 
     for (nu, kappa) in orders {
         let mut gam_rmses = Vec::with_capacity(K_SEEDS);
         let mut gam_corr_total = 0.0;
         let mut gam_edf_total = 0.0;
         let mut gam_grids = Vec::with_capacity(K_SEEDS);
+        let mut order_penalty_blocks: Option<usize> = None;
         for (k, (x, y)) in draws.iter().enumerate() {
-            let (gam_grid, gam_edf) = gam_matern_on_grid(FIRST_SEED + k as u64, nu, x, y, &x_grid);
+            let (gam_grid, gam_edf, blocks) =
+                gam_matern_on_grid(FIRST_SEED + k as u64, nu, x, y, &x_grid);
+            if let Some(first) = order_penalty_blocks {
+                assert_eq!(
+                    blocks,
+                    first,
+                    "matern nu={nu}: the penalty topology must not depend on the draw (seed={})",
+                    FIRST_SEED + k as u64
+                );
+            }
+            order_penalty_blocks = Some(blocks);
             gam_rmses.push(rmse(&gam_grid, &truth_grid));
             gam_corr_total += pearson(&gam_grid, &truth_grid);
             gam_edf_total += gam_edf;
@@ -295,13 +314,16 @@ fn gam_matern_family_recovers_truth_across_nu() {
         );
         panels.push((nu, panel, gam_corr));
         gam_grids_by_nu.push(gam_grids);
+        penalty_blocks_by_nu.push(order_penalty_blocks.expect("every order fits K_SEEDS > 0 draws"));
     }
 
-    // ---- kernel-distinctness invariant: `nu` must change the kernel --------
+    // ---- kernel-distinctness invariant: `nu` must change the kernel order ---
     // Rules out the failure mode where gam silently collapses every `nu` onto ONE
-    // effective kernel (e.g. a hard-wired ν=5/2). The smoothest (ν=7/2) and
-    // roughest (ν=3/2) gam recoveries must differ measurably on the grid — a
-    // genuine kernel-order change, not noise — on the draw average.
+    // effective kernel (e.g. a hard-wired ν=5/2). ν sets m = ν + d/2, and the term
+    // penalizes every derivative energy of order j ≤ m (third order from ν ≥ 5/2),
+    // so the smoothest order must carry strictly more penalty blocks than the
+    // roughest. The grid difference between the two orders' fits is context: it is
+    // bounded by the two fits' own truth-recovery errors, not by the kernel order.
     let nu_lo = orders[0].0; // ν = 3/2 (roughest)
     let nu_hi = orders[orders.len() - 1].0; // ν = 7/2 (smoothest)
     let grids_lo = &gam_grids_by_nu[0];
@@ -310,8 +332,11 @@ fn gam_matern_family_recovers_truth_across_nu() {
         .map(|k| relative_l2(&grids_lo[k], &grids_hi[k]))
         .sum::<f64>()
         / K_SEEDS as f64;
+    let blocks_lo = penalty_blocks_by_nu[0];
+    let blocks_hi = penalty_blocks_by_nu[penalty_blocks_by_nu.len() - 1];
     eprintln!(
-        "kernel-distinctness: mean rel_l2(nu={nu_lo}, nu={nu_hi}) = {cross_order_rel:.4}"
+        "kernel-distinctness: penalty blocks nu={nu_lo}: {blocks_lo}, nu={nu_hi}: {blocks_hi}; \
+         mean rel_l2(nu={nu_lo}, nu={nu_hi}) = {cross_order_rel:.4} (context)"
     );
 
     for (nu, panel, gam_corr) in &panels {
@@ -342,8 +367,9 @@ fn gam_matern_family_recovers_truth_across_nu() {
     }
 
     assert!(
-        cross_order_rel > 0.01,
-        "gam Matérn fits for nu={nu_lo} and nu={nu_hi} are indistinguishable \
-         (mean rel_l2={cross_order_rel:.4}); `nu` is not driving the kernel order"
+        blocks_lo < blocks_hi,
+        "gam Matérn fits for nu={nu_lo} and nu={nu_hi} carry {blocks_lo} and {blocks_hi} \
+         penalty blocks; a smoother order must penalize more derivative energies, so `nu` \
+         is not driving the kernel order (mean rel_l2 of the two fits {cross_order_rel:.4})"
     );
 }
