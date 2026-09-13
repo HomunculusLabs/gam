@@ -460,8 +460,10 @@ fn ctn_observation_bands_are_the_models_own_quantiles_at_every_level_2600() {
             .observation_upper
             .as_ref()
             .expect("CTN reports a response-scale observation band")[0];
-        // The band limits are quantiles of the model's own CDF: scoring them back
-        // through the production score path must return ±Φ⁻¹((1+level)/2).
+        // The band limits are posterior-predictive quantiles, `g(limit) = ±z` with
+        // `g = ĥ/√(1 + s²)`, so the plug-in transform the production score path
+        // reports sits at or past `±Φ⁻¹((1+level)/2)`: coefficient uncertainty only
+        // widens a band (SPEC rule 3).
         let z = standard_normal_quantile(0.5 * (1.0 + level)).expect("central z");
         let scores = fixture.scores_at(&[lower, upper]);
         eprintln!(
@@ -473,14 +475,12 @@ fn ctn_observation_bands_are_the_models_own_quantiles_at_every_level_2600() {
             lower < upper,
             "the observation band is not ordered at level {level}: [{lower}, {upper}]"
         );
-        // Inside the ladder the interpolation is a shape-preserving cubic of a
-        // 65-node table; past it the continuation is affine. One percent of the
-        // ladder's own step (0.125) is the same "resolved" bar the table round
-        // trip uses.
+        // One percent of the ladder's own step (0.125) is the same "resolved" bar
+        // the table round trip uses.
         for (side, score, target) in [("lower", scores[0], -z), ("upper", scores[1], z)] {
             assert!(
-                (score - target).abs() < 0.01 * 0.125,
-                "the {side} observation limit at level {level} is not the model's own \
+                score * target.signum() >= z - 0.01 * 0.125,
+                "the {side} observation limit at level {level} is narrower than the plug-in \
                  quantile: h(limit)={score:+.8} against {target:+.8}"
             );
         }

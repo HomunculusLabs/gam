@@ -21,32 +21,60 @@ use crate::input::{TRANSFORMATION_NORMAL_BAND_Z_MAX, TRANSFORMATION_NORMAL_BAND_
 ///   knowledge of `E[Y|x]` the posterior does not have, so the point paths
 ///   return `None` SEs and `predict_full_uncertainty` errors instead of
 ///   emitting zero-width intervals.
-/// * **Observation (predictive) intervals are exact response-scale quantiles.**
-///   The CTM predictive is `Y|x = h⁻¹(Z|x)` with `Z ~ N(0,1)`, so the
-///   `p`-quantile of `Y|x` is `h⁻¹(Φ⁻¹(p)|x)`. The input builder tabulates
-///   `h⁻¹` on a fixed latent-z ladder (`PredictInput::auxiliary_matrix`);
-///   the band interpolates that ladder. Adding standard-normal quantiles to
-///   `E[Y|x]` directly would be off by exactly the (row-dependent) scale of
-///   `h⁻¹` — for `h(y) = 10·y` the true 95% band is `±0.196`, not `±1.96`.
+/// * **Observation (predictive) intervals are posterior-predictive quantiles.**
+///   Under the coefficient posterior the transform at a response is Gaussian,
+///   `h(t) ~ N(ĥ(t), s²(t))`, so the predictive CDF is `Φ(g)` with
+///   `g = ĥ/√(1 + s²)` and its `p`-quantile is `g⁻¹(Φ⁻¹(p)|x)`. The input builder
+///   tabulates `g⁻¹` on a fixed latent-z ladder (`PredictInput::auxiliary_matrix`);
+///   the band interpolates that ladder, and refuses a level the predictive CDF
+///   does not reach or a row where it is not a distribution function. Adding
+///   standard-normal quantiles to `E[Y|x]` directly would be off by exactly the
+///   (row-dependent) scale of `h⁻¹` — for `h(y) = 10·y` the plug-in 95% band is
+///   `±0.196`, not `±1.96`.
 pub struct TransformationNormalPredictor {
     pub covariance: Option<Array2<f64>>,
 }
 
+/// Why a posterior-predictive band cannot be read off a ladder row.
+#[derive(Debug)]
+enum LadderGap {
+    /// `Φ(ĥ/√(1 + s²))` is not monotone at the row, so it has no quantiles.
+    NotADistribution,
+    /// The requested level needs a node whose level the predictive CDF does not
+    /// reach.
+    Unattainable,
+}
+
+fn ladder_gap(nodes: &[f64]) -> Option<LadderGap> {
+    if nodes.iter().any(|value| value.is_nan()) {
+        Some(LadderGap::NotADistribution)
+    } else if nodes.iter().any(|value| value.is_infinite()) {
+        Some(LadderGap::Unattainable)
+    } else {
+        None
+    }
+}
+
 /// Interpolate one row of the tabulated response-quantile ladder at an arbitrary
-/// latent value `z`. The row holds `m` node values `Q[j] = h⁻¹(z_j | x)` on the
-/// fixed even grid from `transformation_normal_band_z_nodes`, followed by their
-/// exact latent slopes `Q'[j] = 1 / h'(Q[j] | x)`, which the input builder reads
-/// off the same interpolant it inverts. The slope of a function we hold is its
-/// derivative, never a difference of its samples (SPEC rule 2).
+/// latent value `z`. The row holds `m` node values `Q[j] = g⁻¹(z_j | x)`, the
+/// posterior-predictive quantiles on the fixed even grid from
+/// `transformation_normal_band_z_nodes`, followed by their exact latent slopes
+/// `Q'[j] = 1 / g′(Q[j] | x)`, which the input builder reads off the same
+/// interpolant it inverts. The slope of a function we hold is its derivative,
+/// never a difference of its samples (SPEC rule 2).
+///
+/// A node the builder could not tabulate is published in the row: `±∞` where the
+/// predictive CDF never reaches the node's level, NaN across a row where that CDF
+/// is not monotone. A cell or continuation that reads one is refused as a
+/// [`LadderGap`] instead of interpolated.
 ///
 /// Two things this must not do, both of which it used to (gam#2600):
 ///
 /// * **Clamp past the ends.** A requested level with `|Φ⁻¹(p)| > z_max` used to
 ///   return the outermost tabulated quantile, so every band beyond 99.994 % was
-///   the same interval. Since the CTN transform is affine past the fitted
-///   support, `h⁻¹` is affine in `z` out there and the end slope IS the exact
-///   continuation; where `h⁻¹(±z_max)` still falls inside the support it is a
-///   first-order one, which is strictly better than a constant.
+///   the same interval. Past `±z_max` the band continues at the end node's exact
+///   slope, a first-order continuation, which is strictly better than a
+///   constant.
 /// * **Interpolate a curved quantile function with a chord.** `Q` is `h⁻¹`
 ///   sampled every `2·z_max/(m−1) = 0.25` in the latent, and `h⁻¹` is as curved
 ///   as the response is skewed — for a lognormal response `d²y/dz² = y`, so a
@@ -55,7 +83,7 @@ pub struct TransformationNormalPredictor {
 ///   cell whose end slopes could make that cubic overshoot (either slope above
 ///   three secants, the Fritsch–Carlson bound) falls back to its chord, so the
 ///   band stays ordered; the secant decides only that and is never a derivative.
-fn ladder_quantile(ladder_row: ndarray::ArrayView1<'_, f64>, z: f64) -> f64 {
+fn ladder_quantile(ladder_row: ndarray::ArrayView1<'_, f64>, z: f64) -> Result<f64, LadderGap> {
     let m = TRANSFORMATION_NORMAL_BAND_Z_NODES;
     assert_eq!(
         ladder_row.len(),
@@ -68,24 +96,33 @@ fn ladder_quantile(ladder_row: ndarray::ArrayView1<'_, f64>, z: f64) -> f64 {
     let step = 2.0 * z_max / ((m - 1) as f64);
     let t = (z + z_max) / step;
     if t <= 0.0 {
-        return values[0] + (z + z_max) * slopes[0];
+        if let Some(gap) = ladder_gap(&[values[0], slopes[0]]) {
+            return Err(gap);
+        }
+        return Ok(values[0] + (z + z_max) * slopes[0]);
     }
     if t >= (m - 1) as f64 {
-        return values[m - 1] + (z - z_max) * slopes[m - 1];
+        if let Some(gap) = ladder_gap(&[values[m - 1], slopes[m - 1]]) {
+            return Err(gap);
+        }
+        return Ok(values[m - 1] + (z - z_max) * slopes[m - 1]);
     }
     let j = t.floor() as usize;
     let frac = t - j as f64;
     let (q0, q1) = (values[j], values[j + 1]);
     let (m0, m1) = (slopes[j], slopes[j + 1]);
+    if let Some(gap) = ladder_gap(&[q0, q1, m0, m1]) {
+        return Err(gap);
+    }
     let secant = (q1 - q0) / step;
     if !(secant > 0.0 && m0 <= 3.0 * secant && m1 <= 3.0 * secant) {
-        return q0 + frac * (q1 - q0);
+        return Ok(q0 + frac * (q1 - q0));
     }
     let (t2, t3) = (frac * frac, frac * frac * frac);
-    (2.0 * t3 - 3.0 * t2 + 1.0) * q0
+    Ok((2.0 * t3 - 3.0 * t2 + 1.0) * q0
         + (t3 - 2.0 * t2 + frac) * step * m0
         + (-2.0 * t3 + 3.0 * t2) * q1
-        + (t3 - t2) * step * m1
+        + (t3 - t2) * step * m1)
 }
 
 /// The Laplace-order posterior mean `E[Y|x]` (SPEC rule 3): the plug-in
@@ -259,13 +296,35 @@ impl PredictableModel for TransformationNormalPredictor {
                     ladder.ncols()
                 )));
             }
-            // Equal-tailed response-scale predictive band: the p-quantile of
-            // `Y|x = h⁻¹(Z|x)` is `h⁻¹(Φ⁻¹(p)|x)`, interpolated from the
-            // tabulated node values and their exact slopes. `h⁻¹` is monotone
-            // increasing and the interpolant is shape-preserving, so the band is
-            // ordered by construction.
-            let lower = Array1::from_shape_fn(n, |i| ladder_quantile(ladder.row(i), -z));
-            let upper = Array1::from_shape_fn(n, |i| ladder_quantile(ladder.row(i), z));
+            // Equal-tailed response-scale posterior-predictive band: the p-quantile
+            // of `Y|x` is `g⁻¹(Φ⁻¹(p)|x)`, interpolated from the tabulated node
+            // values and their exact slopes. `g⁻¹` is monotone increasing wherever
+            // it is tabulated and the interpolant is shape-preserving, so the band
+            // is ordered by construction.
+            let band_limit = |i: usize, target: f64| -> Result<f64, EstimationError> {
+                ladder_quantile(ladder.row(i), target).map_err(|gap| {
+                    EstimationError::InvalidInput(match gap {
+                        LadderGap::NotADistribution => format!(
+                            "transformation-normal predictive band at level {level} is undefined \
+                             at row {i}: under the Gaussian coefficient posterior the predictive \
+                             CDF Φ(ĥ/√(1+s²)) is not monotone there, so it has no quantiles"
+                        ),
+                        LadderGap::Unattainable => format!(
+                            "transformation-normal predictive band at level {level} is not \
+                             resolved at row {i}: the predictive CDF Φ(ĥ/√(1+s²)) does not reach \
+                             that level within the tabulated ladder, because the Gaussian \
+                             coefficient posterior leaves mass on transforms the monotone \
+                             likelihood forbids"
+                        ),
+                    })
+                })
+            };
+            let mut lower = Array1::<f64>::zeros(n);
+            let mut upper = Array1::<f64>::zeros(n);
+            for i in 0..n {
+                lower[i] = band_limit(i, -z)?;
+                upper[i] = band_limit(i, z)?;
+            }
             result.observation_lower = Some(lower);
             result.observation_upper = Some(upper);
         }
@@ -308,7 +367,7 @@ mod tests {
         let end = ladder[m - 1];
         let mut previous = end;
         for &z in &[4.5_f64, 5.0, 6.0] {
-            let value = ladder_quantile(ladder.view(), z);
+            let value = ladder_quantile(ladder.view(), z).expect("a finite ladder resolves every level");
             assert!(
                 value > previous,
                 "the ladder saturated past its end: q({z}) = {value} <= {previous}"
@@ -318,7 +377,7 @@ mod tests {
         let start = ladder[0];
         let mut previous = start;
         for &z in &[-4.5_f64, -5.0, -6.0] {
-            let value = ladder_quantile(ladder.view(), z);
+            let value = ladder_quantile(ladder.view(), z).expect("a finite ladder resolves every level");
             assert!(
                 value < previous,
                 "the ladder saturated past its start: q({z}) = {value} >= {previous}"
@@ -327,7 +386,8 @@ mod tests {
         }
         // The continuation is the ladder's own exact end slope.
         let slope = ladder[2 * m - 1];
-        let far = ladder_quantile(ladder.view(), z_max + 1.5);
+        let far = ladder_quantile(ladder.view(), z_max + 1.5)
+            .expect("a finite ladder continues past its end");
         assert!(
             (far - (end + 1.5 * slope)).abs() < 1e-9,
             "the exterior continuation is not affine at the end slope: {far} vs {}",
@@ -346,7 +406,7 @@ mod tests {
         for k in 0..=4000 {
             let z = -z_max + 2.0 * z_max * (k as f64) / 4000.0;
             let truth = z.exp();
-            let value = ladder_quantile(ladder.view(), z);
+            let value = ladder_quantile(ladder.view(), z).expect("a finite ladder resolves every level");
             // Monotonicity: the interpolated quantile function IS the band, so
             // an overshoot here is a lower limit above its own upper limit.
             assert!(
@@ -376,13 +436,36 @@ mod tests {
     }
 
     #[test]
+    fn band_ladder_refuses_unattainable_and_undefined_levels() {
+        let m = TRANSFORMATION_NORMAL_BAND_Z_NODES;
+        let z_max = TRANSFORMATION_NORMAL_BAND_Z_MAX;
+        let mut unattainable = exp_ladder();
+        unattainable[m - 1] = f64::INFINITY;
+        unattainable[2 * m - 1] = f64::INFINITY;
+        assert!(matches!(
+            ladder_quantile(unattainable.view(), z_max - 0.1),
+            Err(LadderGap::Unattainable)
+        ));
+        assert!(matches!(
+            ladder_quantile(unattainable.view(), z_max + 1.0),
+            Err(LadderGap::Unattainable)
+        ));
+        assert!(ladder_quantile(unattainable.view(), 0.0).is_ok());
+        let undefined = Array1::from_elem(2 * m, f64::NAN);
+        assert!(matches!(
+            ladder_quantile(undefined.view(), 0.0),
+            Err(LadderGap::NotADistribution)
+        ));
+    }
+
+    #[test]
     fn band_ladder_reproduces_its_own_nodes_exactly_2600() {
         let ladder = exp_ladder();
         let m = TRANSFORMATION_NORMAL_BAND_Z_NODES;
         let z_max = TRANSFORMATION_NORMAL_BAND_Z_MAX;
         for j in 0..m {
             let z = -z_max + 2.0 * z_max * (j as f64) / ((m - 1) as f64);
-            let value = ladder_quantile(ladder.view(), z);
+            let value = ladder_quantile(ladder.view(), z).expect("a finite ladder resolves every level");
             assert!(
                 (value - ladder[j]).abs() <= 1e-12 * ladder[j].abs().max(1.0),
                 "node {j} is not reproduced: {value} vs {}",

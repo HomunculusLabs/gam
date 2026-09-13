@@ -770,25 +770,8 @@ fn transformation_normal_posterior_mean_correction(
     let saved = SavedCtnChart::from_model(model)?;
     let p_cov = design.design.ncols();
     let coefficients = saved.coefficient_matrix(model, p_cov)?;
-    let covariance = model
-        .unified()
-        .and_then(|fit| fit.beta_covariance())
-        .ok_or_else(|| PredictInputError::MissingMetadata {
-            reason: "transformation-normal posterior mean requires the saved coefficient \
-                     posterior covariance; refit the model with this runtime"
-                .to_string(),
-        })?;
     let p_resp = saved.p_resp;
-    let p_total = p_resp * p_cov;
-    if covariance.dim() != (p_total, p_total) {
-        return Err(PredictInputError::DimensionMismatch {
-            reason: format!(
-                "transformation-normal coefficient covariance is {:?}, the saved layout requires \
-                 {p_total}x{p_total}",
-                covariance.dim()
-            ),
-        });
-    }
+    let covariance = ctn_coefficient_covariance(model, p_resp * p_cov, "posterior mean")?;
     let cov_mat = design
         .design
         .try_row_chunk(0..n)
@@ -806,25 +789,7 @@ fn transformation_normal_posterior_mean_correction(
         .map(|i| {
             let cov_row = cov_mat_ref.row(i);
             let alpha = saved_ref.alpha_row(coefficients_ref, cov_row);
-            // Σ_α = (I ⊗ ψᵀ) V (I ⊗ ψ) in the row-major layout of `vec(A)`.
-            let mut alpha_covariance = Array2::<f64>::zeros((p_resp, p_resp));
-            for k in 0..p_resp {
-                for l in k..p_resp {
-                    let mut acc = 0.0_f64;
-                    for c in 0..p_cov {
-                        let psi_c = cov_row[c];
-                        if psi_c == 0.0 {
-                            continue;
-                        }
-                        let row_index = k * p_cov + c;
-                        for d in 0..p_cov {
-                            acc += psi_c * covariance[[row_index, l * p_cov + d]] * cov_row[d];
-                        }
-                    }
-                    alpha_covariance[[k, l]] = acc;
-                    alpha_covariance[[l, k]] = acc;
-                }
-            }
+            let alpha_covariance = ctn_alpha_covariance(covariance, cov_row, p_resp);
             let quantiles = Array1::from_iter(z_nodes_ref.iter().map(|&z| table.invert(i, z)));
             let (value, derivative) = saved_ref.bases_at(&quantiles).map_err(String::from)?;
             let second = saved_ref
@@ -870,6 +835,305 @@ fn transformation_normal_posterior_mean_correction(
         })?;
     }
     Ok(correction)
+}
+
+/// The saved coefficient posterior covariance, checked against the CTN layout.
+/// A model saved without one is refused rather than silently reporting the
+/// plug-in.
+fn ctn_coefficient_covariance<'a>(
+    model: &'a FittedModel,
+    p_total: usize,
+    purpose: &str,
+) -> Result<&'a Array2<f64>, PredictInputError> {
+    let covariance = model
+        .unified()
+        .and_then(|fit| fit.beta_covariance())
+        .ok_or_else(|| PredictInputError::MissingMetadata {
+            reason: format!(
+                "transformation-normal {purpose} requires the saved coefficient posterior \
+                 covariance; refit the model with this runtime"
+            ),
+        })?;
+    if covariance.dim() != (p_total, p_total) {
+        return Err(PredictInputError::DimensionMismatch {
+            reason: format!(
+                "transformation-normal coefficient covariance is {:?}, the saved layout requires \
+                 {p_total}x{p_total}",
+                covariance.dim()
+            ),
+        });
+    }
+    Ok(covariance)
+}
+
+/// `Σ_α = (I ⊗ ψᵀ) V (I ⊗ ψ)`: the posterior covariance of one row's
+/// covariate-side coordinates `α = ψ(x)ᵀA` under `vec(A) ~ N(Â, V)`, in the
+/// row-major layout of `vec(A)`.
+fn ctn_alpha_covariance(
+    covariance: &Array2<f64>,
+    covariate_row: ndarray::ArrayView1<'_, f64>,
+    p_resp: usize,
+) -> Array2<f64> {
+    let p_cov = covariate_row.len();
+    let mut alpha_covariance = Array2::<f64>::zeros((p_resp, p_resp));
+    for k in 0..p_resp {
+        for l in k..p_resp {
+            let mut acc = 0.0_f64;
+            for c in 0..p_cov {
+                let psi_c = covariate_row[c];
+                if psi_c == 0.0 {
+                    continue;
+                }
+                let row_index = k * p_cov + c;
+                for d in 0..p_cov {
+                    acc += psi_c * covariance[[row_index, l * p_cov + d]] * covariate_row[d];
+                }
+            }
+            alpha_covariance[[k, l]] = acc;
+            alpha_covariance[[l, k]] = acc;
+        }
+    }
+    alpha_covariance
+}
+
+/// One affine exterior of the posterior-predictive latent
+/// `g(t) = ĥ(t)/√(1 + s²(t))`, `s²(t) = a(t)ᵀΣ_α a(t)`.
+///
+/// Past a boundary knot `y_b` the response basis continues affinely, so with
+/// `d = t − y_b` the plug-in transform is `ĥ_b + γ·d` and the transform's
+/// posterior variance is the exact quadratic `s_b² + 2c·d + v·d²`, with
+/// `γ = h′(y_b)`, `c = a′ᵀΣ_α a` and `v = a′ᵀΣ_α a′` read at the knot.
+#[derive(Debug)]
+struct CtnPredictiveTail {
+    level: f64,
+    slope: f64,
+    variance: f64,
+    cross: f64,
+    slope_variance: f64,
+}
+
+impl CtnPredictiveTail {
+    fn scale(&self, d: f64) -> f64 {
+        1.0 + self.variance + d * (2.0 * self.cross + d * self.slope_variance)
+    }
+
+    /// `g′(d) = N(d)/(1 + s²(d))^{3/2}`, whose numerator is linear:
+    /// `N(d) = γ(1 + s_b²) − ĥ_b·c + d·(γ·c − ĥ_b·v)`.
+    fn latent_slope(&self, d: f64) -> f64 {
+        let scale = self.scale(d);
+        self.numerator(d) / (scale * scale.sqrt())
+    }
+
+    fn numerator(&self, d: f64) -> f64 {
+        self.slope * (1.0 + self.variance) - self.level * self.cross
+            + d * (self.slope * self.cross - self.level * self.slope_variance)
+    }
+
+    /// Whether `g` increases strictly on the half-line `d·direction ≥ 0`. The
+    /// numerator is linear, so it stays positive there exactly when it is
+    /// positive at the knot and does not decrease towards the far end.
+    fn increases_towards(&self, direction: f64) -> bool {
+        let rate = self.slope * self.cross - self.level * self.slope_variance;
+        self.numerator(0.0) > 0.0 && rate * direction >= 0.0
+    }
+
+    /// `lim g(d)` as `d → direction·∞`: `direction·γ/√v`, and unbounded when the
+    /// tail slope carries no posterior variance (then `c = 0` as well, by
+    /// Cauchy–Schwarz, and `g` is affine).
+    fn limit(&self, direction: f64) -> f64 {
+        if self.slope_variance > 0.0 {
+            direction * self.slope / self.slope_variance.sqrt()
+        } else {
+            direction * f64::INFINITY
+        }
+    }
+
+    /// The `d` on the half-line `d·direction ≥ 0` with `g(d) = z`, on a tail where
+    /// `g` is strictly increasing. Squaring `ĥ_b + γd = z·√(1 + s²(d))` gives
+    /// `A·d² + 2B·d + C = 0` with `A = γ² − z²v`, `B = ĥ_b·γ − z²c` and
+    /// `C = ĥ_b² − z²(1 + s_b²)`; of its real roots, the crossing is the one on the
+    /// half-line whose transform has the sign of `z`.
+    fn root(&self, z: f64, direction: f64) -> Option<f64> {
+        let z2 = z * z;
+        let a = self.slope * self.slope - z2 * self.slope_variance;
+        let b = self.level * self.slope - z2 * self.cross;
+        let c = self.level * self.level - z2 * (1.0 + self.variance);
+        let candidates = if a == 0.0 {
+            if b == 0.0 {
+                Vec::new()
+            } else {
+                vec![-c / (2.0 * b)]
+            }
+        } else {
+            let discriminant = b * b - a * c;
+            if discriminant < 0.0 {
+                Vec::new()
+            } else {
+                // Stable pair: q = −(B + sign(B)·√D), roots q/A and C/q.
+                let q = -(b + b.signum() * discriminant.sqrt());
+                if q == 0.0 {
+                    vec![-b / a]
+                } else {
+                    vec![q / a, c / q]
+                }
+            }
+        };
+        candidates
+            .into_iter()
+            .find(|&d| d * direction >= 0.0 && (self.level + self.slope * d) * z >= 0.0)
+    }
+}
+
+/// The response-scale posterior-predictive quantile ladder (SPEC rule 3).
+///
+/// Under the coefficient posterior `α ~ N(α̂, Σ_α)` the transform at a fixed
+/// response is Gaussian, `h(t; α) ~ N(ĥ(t), s²(t))`, so the predictive CDF of
+/// `Y | x` has the closed form `F(t|x) = E_α Φ(h(t; α)) = Φ(g(t))` with
+/// `g(t) = ĥ(t)/√(1 + s²(t))`. Its `p`-quantile is `g⁻¹(Φ⁻¹(p)|x)`; at `s² = 0` it
+/// is the plug-in quantile, and coefficient uncertainty only widens a band.
+///
+/// Each row holds `g⁻¹(z_j|x)` on the fixed latent ladder followed by the exact
+/// latent slopes `1/g′`. Inside the fitted support `g` is tabulated on the
+/// transform table's grid and inverted on its Hermite interpolant; past each
+/// boundary knot the exterior is closed form ([`CtnPredictiveTail`]).
+///
+/// The Gaussian puts mass on transform slopes the monotone likelihood forbids, so
+/// two things can fail to exist, and each is published in the row rather than
+/// papered over:
+/// * `g` saturates at `±γ/√v` in each exterior, so a latent level at or past that
+///   limit is never reached. Its quantile is `±∞`, stored as such.
+/// * If `g` is not strictly increasing, `Φ(g)` is not a distribution function and
+///   the row has no quantiles. The whole row is stored as NaN.
+///
+/// The predictor refuses a band that reads either, naming which.
+fn transformation_normal_predictive_ladder(
+    model: &FittedModel,
+    design: &gam_terms::smooth::TermCollectionDesign,
+    n: usize,
+    offset: &Array1<f64>,
+    table: &CtnTransformTable,
+) -> Result<Array2<f64>, PredictInputError> {
+    if table.nrows() != n {
+        return Err(PredictInputError::DimensionMismatch {
+            reason: format!(
+                "transformation-normal predictive band: the transform table has {} rows, \
+                 expected {n}",
+                table.nrows()
+            ),
+        });
+    }
+    let offset = design
+        .compose_offset(offset.view(), "transformation-normal predictive band")
+        .map_err(|error| PredictInputError::InvalidInput {
+            reason: error.to_string(),
+        })?;
+    let saved = SavedCtnChart::from_model(model)?;
+    let p_cov = design.design.ncols();
+    let coefficients = saved.coefficient_matrix(model, p_cov)?;
+    let p_resp = saved.p_resp;
+    let covariance = ctn_coefficient_covariance(model, p_resp * p_cov, "predictive band")?;
+    let cov_mat = design
+        .design
+        .try_row_chunk(0..n)
+        .map_err(|error| PredictInputError::InvalidInput {
+            reason: error.to_string(),
+        })?;
+    let grid_y = table.grid_y().to_owned();
+    let (grid_value, grid_derivative) = saved.bases_at(&grid_y)?;
+    let z_nodes = transformation_normal_band_z_nodes();
+    let m = z_nodes.len();
+    let saved_ref = &saved;
+    let coefficients_ref = &coefficients;
+    let cov_mat_ref = &cov_mat;
+    let offset_ref = &offset;
+    let grid_y_ref = &grid_y;
+    let grid_value_ref = &grid_value;
+    let grid_derivative_ref = &grid_derivative;
+    let z_nodes_ref = &z_nodes;
+    let rows: Vec<Vec<f64>> = (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let g = grid_y_ref.len();
+            let cov_row = cov_mat_ref.row(i);
+            let alpha = saved_ref.alpha_row(coefficients_ref, cov_row);
+            let alpha_covariance = ctn_alpha_covariance(covariance, cov_row, p_resp);
+            let mut latent = Array2::<f64>::zeros((1, g));
+            let mut latent_slope = Array2::<f64>::zeros((1, g));
+            let mut tails = Vec::with_capacity(2);
+            for k in 0..g {
+                let value = grid_value_ref.row(k);
+                let derivative = grid_derivative_ref.row(k);
+                let geometry = ctn_row_geometry(
+                    saved_ref.chart,
+                    alpha.view(),
+                    CtnRowBases {
+                        value,
+                        derivative,
+                        lower: saved_ref.lower_basis.view(),
+                        upper: saved_ref.upper_basis.view(),
+                    },
+                    saved_ref.floors(grid_y_ref[k], offset_ref[i]),
+                );
+                let sigma_value = alpha_covariance.dot(&value);
+                let variance = value.dot(&sigma_value);
+                let cross = derivative.dot(&sigma_value);
+                let scale = 1.0 + variance;
+                latent[[0, k]] = geometry.h / scale.sqrt();
+                latent_slope[[0, k]] =
+                    geometry.h_prime / scale.sqrt() - geometry.h * cross / (scale * scale.sqrt());
+                if k == 0 || k == g - 1 {
+                    tails.push(CtnPredictiveTail {
+                        level: geometry.h,
+                        slope: geometry.h_prime,
+                        variance,
+                        cross,
+                        slope_variance: derivative.dot(&alpha_covariance.dot(&derivative)),
+                    });
+                }
+            }
+            let mut ladder = vec![f64::NAN; 2 * m];
+            let (lower_tail, upper_tail) = (&tails[0], &tails[1]);
+            let interior = match CtnTransformTable::new(grid_y_ref.clone(), latent, latent_slope) {
+                Ok(interior)
+                    if lower_tail.increases_towards(-1.0) && upper_tail.increases_towards(1.0) =>
+                {
+                    interior
+                }
+                _ => return ladder,
+            };
+            let latent_view = interior.latent();
+            let (g_lo, g_hi) = (latent_view[[0, 0]], latent_view[[0, g - 1]]);
+            for (j, &z) in z_nodes_ref.iter().enumerate() {
+                let (value, slope) = if z < g_lo {
+                    match lower_tail.root(z, -1.0) {
+                        Some(d) if z > lower_tail.limit(-1.0) => {
+                            (grid_y_ref[0] + d, 1.0 / lower_tail.latent_slope(d))
+                        }
+                        _ => (f64::NEG_INFINITY, f64::INFINITY),
+                    }
+                } else if z > g_hi {
+                    match upper_tail.root(z, 1.0) {
+                        Some(d) if z < upper_tail.limit(1.0) => {
+                            (grid_y_ref[g - 1] + d, 1.0 / upper_tail.latent_slope(d))
+                        }
+                        _ => (f64::INFINITY, f64::INFINITY),
+                    }
+                } else {
+                    interior.invert_with_slope(0, z)
+                };
+                ladder[j] = value;
+                ladder[m + j] = slope;
+            }
+            ladder
+        })
+        .collect();
+    let mut quantile_ladder = Array2::<f64>::zeros((n, 2 * m));
+    for (i, row) in rows.into_iter().enumerate() {
+        for (j, value) in row.into_iter().enumerate() {
+            quantile_ladder[[i, j]] = value;
+        }
+    }
+    Ok(quantile_ladder)
 }
 
 /// The plug-in response-scale conditional mean `E[Y|x] = E_{Z~N(0,1)}[h⁻¹(Z|x)]`
@@ -1224,26 +1488,16 @@ fn build_predict_input_for_model_inner(
             // not the Gaussian predictive integral, is the posterior mean).
             let posterior_mean_correction =
                 transformation_normal_posterior_mean_correction(model, &design, n, offset, &table)?;
-            // Response-scale predictive quantile ladder: `Y|x = h⁻¹(Z|x)` with
-            // `Z ~ N(0,1)`, so the p-quantile of `Y|x` is `h⁻¹(Φ⁻¹(p)|x)`.
-            // Tabulating `h⁻¹` on the fixed z ladder lets the predictor build
-            // genuine response-scale observation bands by interpolating this
-            // matrix — instead of adding standard-normal quantiles to `E[Y|x]`
-            // in latent-normal units, which is wrong by exactly the (unknown to
-            // the predictor) scale of `h⁻¹`. Each row holds the node values
-            // `h⁻¹(z_j|x)` followed by their exact latent slopes `1/h'(h⁻¹(z_j|x)|x)`,
-            // read off the same interpolant `invert` inverts, so the predictor
-            // interpolates with derivatives instead of differencing the samples.
-            let z_nodes = transformation_normal_band_z_nodes();
-            let m = z_nodes.len();
-            let mut quantile_ladder = Array2::<f64>::zeros((n, 2 * m));
-            for i in 0..n {
-                for (j, &z) in z_nodes.iter().enumerate() {
-                    let (value, slope) = table.invert_with_slope(i, z);
-                    quantile_ladder[[i, j]] = value;
-                    quantile_ladder[[i, m + j]] = slope;
-                }
-            }
+            // Response-scale posterior-predictive quantile ladder (SPEC rule 3):
+            // under the coefficient posterior the p-quantile of `Y|x` is
+            // `g⁻¹(Φ⁻¹(p)|x)` with `g = ĥ/√(1 + s²)`, tabulated on the fixed z
+            // ladder with its exact latent slopes, so the predictor builds genuine
+            // response-scale observation bands by interpolating this matrix rather
+            // than adding standard-normal quantiles to `E[Y|x]` in latent units.
+            // See the builder for the closed form and for the two ways a band can
+            // fail to exist.
+            let quantile_ladder =
+                transformation_normal_predictive_ladder(model, &design, n, offset, &table)?;
             // `offset` carries the plug-in conditional mean and `auxiliary_scalar`
             // its posterior-mean correction, so the predictor's default
             // posterior-mean pass reports their sum and the explicit plug-in pass
@@ -1284,4 +1538,76 @@ pub fn build_predict_input_for_model(
         noise_offset_supplied,
     )
     .map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `g(d) = (ĥ_b + γd)/√(1 + s²(d))`, the latent the tail's root and slope
+    /// describe.
+    fn latent(tail: &CtnPredictiveTail, d: f64) -> f64 {
+        (tail.level + tail.slope * d) / tail.scale(d).sqrt()
+    }
+
+    /// A tail whose `g` increases towards `+∞` and saturates at `γ/√v = 5.657`,
+    /// while its numerator turns negative towards `−∞`.
+    fn saturating_tail() -> CtnPredictiveTail {
+        CtnPredictiveTail {
+            level: 1.2,
+            slope: 0.8,
+            variance: 0.3,
+            cross: 0.05,
+            slope_variance: 0.02,
+        }
+    }
+
+    #[test]
+    fn predictive_tail_root_solves_the_closed_form_latent() {
+        let tail = saturating_tail();
+        assert!(tail.increases_towards(1.0));
+        assert!(!tail.increases_towards(-1.0));
+        let limit = tail.limit(1.0);
+        assert!((limit - 0.8 / 0.02_f64.sqrt()).abs() < 1e-12);
+        for &z in &[1.5_f64, 3.0, 5.0] {
+            let d = tail.root(z, 1.0).expect("a level below the limit is attained");
+            assert!(d >= 0.0, "z={z}: root {d} left the half-line");
+            assert!(
+                (latent(&tail, d) - z).abs() <= 1e-12 * (1.0 + z),
+                "z={z}: g({d}) = {} is not the level",
+                latent(&tail, d)
+            );
+            let h = 1e-5;
+            let central = (latent(&tail, d + h) - latent(&tail, d - h)) / (2.0 * h);
+            assert!(
+                (tail.latent_slope(d) - central).abs() <= 1e-6 * central.abs().max(1.0),
+                "z={z}: g' = {} against the central difference {central}",
+                tail.latent_slope(d)
+            );
+        }
+        assert!(
+            tail.root(6.0, 1.0).is_none(),
+            "a level past the saturation limit has no crossing"
+        );
+    }
+
+    #[test]
+    fn predictive_tail_without_slope_variance_is_affine_and_unbounded() {
+        let tail = CtnPredictiveTail {
+            level: -0.4,
+            slope: 1.5,
+            variance: 0.25,
+            cross: 0.0,
+            slope_variance: 0.0,
+        };
+        assert!(tail.limit(1.0).is_infinite() && tail.limit(-1.0).is_infinite());
+        for &(z, direction) in &[(2.0_f64, 1.0_f64), (-3.0, -1.0)] {
+            let d = tail.root(z, direction).expect("an affine latent reaches every level");
+            let expected = (z * 1.25_f64.sqrt() + 0.4) / 1.5;
+            assert!(
+                (d - expected).abs() <= 1e-12 * expected.abs().max(1.0),
+                "z={z}: root {d} against {expected}"
+            );
+        }
+    }
 }
