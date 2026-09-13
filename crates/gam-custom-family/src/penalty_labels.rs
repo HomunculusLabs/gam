@@ -147,7 +147,7 @@ pub(crate) fn penalty_label_layout_with_joint(
             })?;
             let outer = if let Some(&outer) = label_to_outer.get(&label) {
                 let first = initial[outer];
-                if (first - rho0).abs() > 1e-10 {
+                if first != rho0 {
                     return Err(CustomFamilyError::ConstraintViolation { reason: format!(
                         "precision label '{label}' has inconsistent initial log-precisions: {first} and {rho0}"
                     ) });
@@ -184,7 +184,7 @@ pub(crate) fn penalty_label_layout_with_joint(
         let rho0 = spec.initial_log_lambda;
         let outer = if let Some(&outer) = label_to_outer.get(&label) {
             let first = initial[outer];
-            if first.is_finite() && rho0.is_finite() && (first - rho0).abs() > 1e-10 {
+            if first.is_finite() && rho0.is_finite() && first != rho0 {
                 return Err(CustomFamilyError::ConstraintViolation {
                     reason: format!(
                         "joint penalty label '{label}' has inconsistent initial log-precisions: {first} and {rho0}"
@@ -365,5 +365,40 @@ mod tests {
         assert_eq!(with_joint.joint_to_outer, vec![0]);
         assert!(!with_joint.physical_rho_requires_remap());
         assert!(!with_joint.supports_direct_physical_efs());
+    }
+
+    #[test]
+    fn a_shared_label_takes_one_initial_log_precision_2469() {
+        // A precision label names one outer coordinate, and a coordinate has one
+        // initial value. Producers that copy the value agree bit for bit; two that
+        // disagree even in the last bit are inconsistent, and the layout refuses
+        // them instead of silently keeping the first.
+        let rho0 = -1.0_f64;
+        let next = f64::from_bits(rho0.to_bits() + 1);
+        assert!(next != rho0 && (next - rho0).abs() <= f64::EPSILON);
+        let shared = |seeds: Vec<f64>| {
+            vec![one_block(
+                vec![
+                    PenaltyMatrix::Dense(Array2::<f64>::eye(2)).with_precision_label("shared"),
+                    PenaltyMatrix::Dense(Array2::<f64>::eye(2)).with_precision_label("shared"),
+                ],
+                seeds,
+            )]
+        };
+        let copied =
+            penalty_label_layout_with_joint(&shared(vec![rho0, rho0]), vec![2], Vec::new())
+                .expect("two penalties sharing a label and one initial value form a valid layout");
+        assert_eq!(copied.physical_to_outer, vec![Some(0), Some(0)]);
+        assert!(
+            penalty_label_layout_with_joint(&shared(vec![rho0, next]), vec![2], Vec::new()).is_err()
+        );
+        let physical = vec![one_block(
+            vec![PenaltyMatrix::Dense(Array2::<f64>::eye(2)).with_precision_label("shared")],
+            vec![rho0],
+        )];
+        assert!(
+            penalty_label_layout_with_joint(&physical, vec![1], vec![joint_penalty("shared", next)])
+                .is_err()
+        );
     }
 }
