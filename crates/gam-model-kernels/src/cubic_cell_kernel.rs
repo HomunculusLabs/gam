@@ -4478,6 +4478,102 @@ mod tests {
         }
     }
 
+    /// #932: `affine_cell_moments` keeps the anchor on semi-infinite and whole-line
+    /// cells. There `T_n` either grows at the `(n−1)!!` rate the upward recurrence
+    /// amplifies roundoff by, or is dominated by the boundary term
+    /// `a^{n−1}e^{−a²/2}`, so no precision should be lost.
+    /// `affine_anchor_moments_match_quadrature_through_degree_34_932` measures only
+    /// finite cells. This measures the cells the anchor still serves, through
+    /// degree 34: a right tail from inside the bulk, a far right tail at 8, a left
+    /// tail and the whole line. The Simpson reference integrates the cell clipped to
+    /// `[−40, 40]`: past `|z| = 40` the integrand is below `40^34·e^{−800}`, which
+    /// underflows to zero, so the clip drops nothing representable. On the far tail
+    /// the integrand decays on a scale near 1/9, and 80 000 panels put the Simpson
+    /// error near 1e-12 relative, under the 1e-8 bar. Every cell is measured and
+    /// printed before any assertion.
+    #[test]
+    fn affine_anchor_tail_moments_match_quadrature_through_degree_34_932() {
+        let cells = [
+            (
+                "right_tail_bulk",
+                DenestedCubicCell {
+                    left: -0.3,
+                    right: f64::INFINITY,
+                    c0: 0.4,
+                    c1: -0.7,
+                    c2: 0.0,
+                    c3: 0.0,
+                },
+            ),
+            (
+                "right_tail_far",
+                DenestedCubicCell {
+                    left: 8.0,
+                    right: f64::INFINITY,
+                    c0: -0.2,
+                    c1: 0.5,
+                    c2: 0.0,
+                    c3: 0.0,
+                },
+            ),
+            (
+                "left_tail_bulk",
+                DenestedCubicCell {
+                    left: f64::NEG_INFINITY,
+                    right: 0.2,
+                    c0: 0.1,
+                    c1: 1.3,
+                    c2: 0.0,
+                    c3: 0.0,
+                },
+            ),
+            (
+                "whole_line",
+                DenestedCubicCell {
+                    left: f64::NEG_INFINITY,
+                    right: f64::INFINITY,
+                    c0: 0.3,
+                    c1: -0.4,
+                    c2: 0.0,
+                    c3: 0.0,
+                },
+            ),
+        ];
+        let measured: Vec<(&str, Vec<f64>)> = cells
+            .into_iter()
+            .map(|(label, cell)| {
+                let state = evaluate_affine_cell_state(cell, 34).expect("affine tail cell");
+                let lower = cell.left.max(-40.0);
+                let upper = cell.right.min(40.0);
+                let relative_errors: Vec<f64> = (0..=34)
+                    .map(|degree| {
+                        let target = simpson_integral(lower, upper, 80_000, |z| {
+                            z.powi(degree as i32) * (-cell.q(z)).exp()
+                        });
+                        (state.moments[degree] - target).abs() / target.abs()
+                    })
+                    .collect();
+                eprintln!(
+                    "AFFINE-TAIL-932 {label} relative_error_by_degree={}",
+                    relative_errors
+                        .iter()
+                        .map(|error| format!("{error:.1e}"))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
+                (label, relative_errors)
+            })
+            .collect();
+        for (label, relative_errors) in &measured {
+            for (degree, error) in relative_errors.iter().enumerate() {
+                assert!(
+                    *error <= 1e-8,
+                    "{label}: affine tail moment {degree} is off by {error:.3e} relative"
+                );
+            }
+        }
+    }
+
     /// #2293 regression at the exact failure boundary: the affine primitive
     /// must propagate a BVN-domain error instead of substituting the plausible
     /// probability `0.0`. This calls the private primitive directly so the
