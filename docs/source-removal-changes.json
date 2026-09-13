@@ -7156,5 +7156,42 @@
     ],
     "reason": "#2469: MAX_AUTOCORRELATION_LAG (1000) capped the Geyer positive-pair sum in compute_split_rhat_and_ess, truncating the integrated autocorrelation time on slowly mixing chains and overstating the ESS that decides open-warmup termination. The ESS now comes from general-mcmc split_rhat_mean_ess (Stan multi-chain estimator: FFT autocovariance over every lag, Geyer initial positive sequence with monotone repair), which has no lag cap and costs O(n log n) per dimension.",
     "evidence": "git grep -n -w MAX_AUTOCORRELATION_LAG over the base finds two lines in crates/gam-inference/src/hmc_io.rs: the declaration and its single use in ess_from_split_dimension. No test names it. general-mcmc rev adc78bb src/stats.rs defines split_rhat_mean_ess, ess and autocov_fft (read via the GitHub API this session). Not compiled or run locally (user directive); compile is covered by the lead shared tip check."
+  },
+  {
+    "base": "08fbec7ced6b03aed30c587f91f07e0b93075b3b",
+    "items": [
+      "crates/gam-custom-family/src/tests.rs:fn:joint_jeffreys_completion_outer_derivatives_available",
+      "crates/gam-custom-family/src/tests.rs:fn:joint_jeffreys_information_contracted_trace_hessian_directional_with_specs",
+      "crates/gam-custom-family/src/tests.rs:fn:joint_jeffreys_information_contracted_trace_hessian_second_directional_with_specs",
+      "crates/gam-custom-family/src/tests.rs:fn:joint_jeffreys_information_third_directional_all_axes_with_specs",
+      "crates/gam-custom-family/src/tests.rs:fn:joint_jeffreys_information_third_directional_available",
+      "crates/gam-model-api/src/families/custom_family/family_trait.rs:fn:joint_jeffreys_completion_outer_derivatives_available",
+      "crates/gam-model-api/src/families/custom_family/family_trait.rs:fn:joint_jeffreys_information_contracted_trace_hessian_directional_with_specs",
+      "crates/gam-model-api/src/families/custom_family/family_trait.rs:fn:joint_jeffreys_information_contracted_trace_hessian_second_directional_with_specs",
+      "crates/gam-model-api/src/families/custom_family/family_trait.rs:fn:joint_jeffreys_information_directional_derivative_rotated_all_axes_with_specs",
+      "crates/gam-model-api/src/families/custom_family/family_trait.rs:fn:joint_jeffreys_information_third_directional_all_axes_with_specs",
+      "crates/gam-model-api/src/families/custom_family/family_trait.rs:fn:joint_jeffreys_information_third_directional_available",
+      "crates/gam-model-api/src/families/custom_family/family_trait.rs:fn:joint_jeffreys_information_third_directional_rotated_all_axes_with_specs",
+      "crates/gam-models/src/bms/custom_family_impl.rs:fn:joint_jeffreys_information_third_directional_all_axes_with_specs",
+      "crates/gam-models/src/bms/custom_family_impl.rs:fn:joint_jeffreys_information_third_directional_available",
+      "crates/gam-models/src/fit_orchestration/drivers/design_construction.rs:fn:joint_jeffreys_information_third_directional_all_axes_with_specs",
+      "crates/gam-models/src/fit_orchestration/drivers/design_construction.rs:fn:joint_jeffreys_information_third_directional_available",
+      "crates/gam-models/src/multinomial_reml.rs:fn:joint_jeffreys_information_directional_derivative_rotated_all_axes_with_specs",
+      "crates/gam-models/src/multinomial_reml.rs:fn:joint_jeffreys_information_third_directional_all_axes_with_specs",
+      "crates/gam-models/src/multinomial_reml.rs:fn:joint_jeffreys_information_third_directional_available",
+      "crates/gam-models/src/multinomial_reml.rs:fn:joint_jeffreys_information_third_directional_rotated_all_axes_with_specs",
+      "crates/gam-models/src/survival/base.rs:fn:joint_jeffreys_information_third_directional_all_axes_with_specs",
+      "crates/gam-models/src/survival/base.rs:fn:joint_jeffreys_information_third_directional_available",
+      "crates/gam-models/src/survival/location_scale/family_solver.rs:fn:joint_jeffreys_information_directional_derivative_rotated_all_axes_with_specs",
+      "crates/gam-models/src/survival/location_scale/family_solver.rs:fn:joint_jeffreys_information_third_directional_all_axes_with_specs",
+      "crates/gam-models/src/survival/location_scale/family_solver.rs:fn:joint_jeffreys_information_third_directional_available",
+      "crates/gam-models/src/survival/marginal_slope/custom_family_impl.rs:fn:joint_jeffreys_completion_outer_derivatives_available",
+      "crates/gam-models/src/survival/marginal_slope/custom_family_impl.rs:fn:joint_jeffreys_information_contracted_trace_hessian_directional_with_specs",
+      "crates/gam-models/src/survival/marginal_slope/custom_family_impl.rs:fn:joint_jeffreys_information_contracted_trace_hessian_second_directional_with_specs",
+      "crates/gam-models/src/survival/marginal_slope/custom_family_impl.rs:fn:joint_jeffreys_information_third_directional_all_axes_with_specs",
+      "crates/gam-models/src/survival/marginal_slope/custom_family_impl.rs:fn:joint_jeffreys_information_third_directional_available"
+    ],
+    "reason": "#1082 lead ruling 09-12: a trait hook that can decline is a capability. JeffreysThirdInformationDerivative and JeffreysCompletionOuterDerivatives replace the flags joint_jeffreys_information_third_directional_available and joint_jeffreys_completion_outer_derivatives_available together with their declining defaults (the third directional all-axes and rotated all-axes hooks, and the directional and second directional contracted trace Hessian hooks). Each implementor keeps its bodies under the capability methods and returns Some(self) exactly where its flag returned true. joint_jeffreys_information_directional_derivative_rotated_all_axes_with_specs, which JeffreysRotatedFirstDerivative replaced in 69e55b3fe, is deleted with the multinomial and survival location-scale overrides nothing read.",
+    "evidence": "At the landing tree git grep -n -w finds none of the seven removed names. Pool job 585882 at 31fa35d5b plus this patch (log /scratch.global/sauer354/pool/perf1082b/cap2chk.585882.log): scripts/source_removal_guard.py verified 30 guarded removals; cargo check --workspace --all-targets --exclude gam-pyffi --keep-going reported errors only in gam-terms zz_measure_2638_tests.rs and gam-sae tests_deflation_traces_780.rs, files and items this change does not touch; gam-custom-family lib pins jeffreys 20 passed and 2905 1 passed."
   }
 ]

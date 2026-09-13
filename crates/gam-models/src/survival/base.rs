@@ -700,6 +700,39 @@ fn time_block_linear_constraint_system(
     LinearInequalityConstraints { a, b }
 }
 
+impl crate::custom_family::JeffreysThirdInformationDerivative for CauseSpecificRoystonParmarFamily {
+    fn third_directional_all_axes(
+        &self,
+        states: &[ParameterBlockState],
+        specs: &[crate::custom_family::ParameterBlockSpec],
+        u: &Array1<f64>,
+        v: &Array1<f64>,
+    ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        let p: usize = self.blocks.iter().map(|block| block.x_exit.ncols()).sum();
+        if states.len() != self.blocks.len() || specs.len() != self.blocks.len()
+            || u.len() != p || v.len() != p
+        {
+            return Err("cause-specific third information derivative dimension mismatch".to_string());
+        }
+        let mut axes = vec![Array2::zeros((p, p)); p];
+        let mut offset = 0;
+        for (block, state) in self.blocks.iter().zip(states) {
+            let width = block.x_exit.ncols();
+            let local_u = u.slice(ndarray::s![offset..offset + width]).to_owned();
+            let local_v = v.slice(ndarray::s![offset..offset + width]).to_owned();
+            let local = cause_specific_hessian_third_directional_all_axes(
+                block, &state.beta, &local_u, &local_v,
+            ).map_err(|e| e.to_string())?;
+            for (axis, matrix) in local.into_iter().enumerate() {
+                axes[offset + axis].slice_mut(ndarray::s![offset..offset + width, offset..offset + width])
+                    .assign(&matrix);
+            }
+            offset += width;
+        }
+        Ok(Some(axes))
+    }
+}
+
 impl CustomFamily for CauseSpecificRoystonParmarFamily {
     // Preserve the pre-gam#1395 behavior: the trait default flipped to OFF (the
     // flat-prior exact-Newton objective carries no Jeffreys term), so families
@@ -929,39 +962,10 @@ impl CustomFamily for CauseSpecificRoystonParmarFamily {
         )?))
     }
 
-    fn joint_jeffreys_information_third_directional_available(&self) -> bool {
-        true
-    }
-
-    fn joint_jeffreys_information_third_directional_all_axes_with_specs(
+    fn jeffreys_third_information_derivative(
         &self,
-        states: &[ParameterBlockState],
-        specs: &[crate::custom_family::ParameterBlockSpec],
-        u: &Array1<f64>,
-        v: &Array1<f64>,
-    ) -> Result<Option<Vec<Array2<f64>>>, String> {
-        let p: usize = self.blocks.iter().map(|block| block.x_exit.ncols()).sum();
-        if states.len() != self.blocks.len() || specs.len() != self.blocks.len()
-            || u.len() != p || v.len() != p
-        {
-            return Err("cause-specific third information derivative dimension mismatch".to_string());
-        }
-        let mut axes = vec![Array2::zeros((p, p)); p];
-        let mut offset = 0;
-        for (block, state) in self.blocks.iter().zip(states) {
-            let width = block.x_exit.ncols();
-            let local_u = u.slice(ndarray::s![offset..offset + width]).to_owned();
-            let local_v = v.slice(ndarray::s![offset..offset + width]).to_owned();
-            let local = cause_specific_hessian_third_directional_all_axes(
-                block, &state.beta, &local_u, &local_v,
-            ).map_err(|e| e.to_string())?;
-            for (axis, matrix) in local.into_iter().enumerate() {
-                axes[offset + axis].slice_mut(ndarray::s![offset..offset + width, offset..offset + width])
-                    .assign(&matrix);
-            }
-            offset += width;
-        }
-        Ok(Some(axes))
+    ) -> Option<&dyn crate::custom_family::JeffreysThirdInformationDerivative> {
+        Some(self)
     }
 }
 

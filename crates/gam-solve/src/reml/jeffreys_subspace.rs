@@ -3456,7 +3456,7 @@ impl JeffreysHphiDriftBase {
 
     /// The drift basis `U = Z_J V` that axis derivatives are rotated into; a family
     /// that forms the rotation itself receives it (see
-    /// `CustomFamily::joint_jeffreys_information_third_directional_rotated_all_axes_with_specs`).
+    /// `JeffreysThirdInformationDerivative::third_directional_rotated_all_axes`).
     pub fn ambient_eigenbasis(&self) -> ArrayView2<'_, f64> {
         self.ambient_eigenbasis.view()
     }

@@ -2178,6 +2178,28 @@ fn add_symmetric_weighted_cross(
     }
 }
 
+impl crate::custom_family::JeffreysThirdInformationDerivative for BoundedLinearFamily {
+    fn third_directional_all_axes(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        d_beta_u_flat: &Array1<f64>,
+        d_beta_v_flat: &Array1<f64>,
+    ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        let latent_beta = &expect_single_block_state(block_states, "bounded linear family")?.beta;
+        if specs.len() != 1 || specs[0].design.ncols() != latent_beta.len() {
+            return Err(SmoothError::dimension_mismatch(format!(
+                "bounded linear family third information derivative expects one block spec of width {}, got {} spec(s)",
+                latent_beta.len(),
+                specs.len()
+            ))
+            .into());
+        }
+        self.joint_hessian_third_directional_all_axes(latent_beta, d_beta_u_flat, d_beta_v_flat)
+            .map(Some)
+    }
+}
+
 impl CustomFamily for BoundedLinearFamily {
     // Preserve the pre-gam#1395 behavior: the trait default flipped to OFF (the
     // flat-prior exact-Newton objective carries no Jeffreys term), so families
@@ -2368,31 +2390,17 @@ impl CustomFamily for BoundedLinearFamily {
     /// `W'''`: the standard GLM rows directly, and every binomial link through the
     /// Bernoulli tail kernels or the inverse-link density's fourth derivative
     /// (#2903).
-    fn joint_jeffreys_information_third_directional_available(&self) -> bool {
-        !matches!(
+    fn jeffreys_third_information_derivative(
+        &self,
+    ) -> Option<&dyn crate::custom_family::JeffreysThirdInformationDerivative> {
+        if matches!(
             self.likelihood.spec.response,
             ResponseFamily::Beta { .. } | ResponseFamily::RoystonParmar
-        )
-    }
-
-    fn joint_jeffreys_information_third_directional_all_axes_with_specs(
-        &self,
-        block_states: &[ParameterBlockState],
-        specs: &[ParameterBlockSpec],
-        d_beta_u_flat: &Array1<f64>,
-        d_beta_v_flat: &Array1<f64>,
-    ) -> Result<Option<Vec<Array2<f64>>>, String> {
-        let latent_beta = &expect_single_block_state(block_states, "bounded linear family")?.beta;
-        if specs.len() != 1 || specs[0].design.ncols() != latent_beta.len() {
-            return Err(SmoothError::dimension_mismatch(format!(
-                "bounded linear family third information derivative expects one block spec of width {}, got {} spec(s)",
-                latent_beta.len(),
-                specs.len()
-            ))
-            .into());
+        ) {
+            None
+        } else {
+            Some(self)
         }
-        self.joint_hessian_third_directional_all_axes(latent_beta, d_beta_u_flat, d_beta_v_flat)
-            .map(Some)
     }
 
     fn block_geometry(

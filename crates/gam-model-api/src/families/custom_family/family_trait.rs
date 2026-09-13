@@ -249,6 +249,73 @@ pub trait JeffreysRotatedFirstDerivative {
     ) -> Result<Array2<f64>, String>;
 }
 
+/// A family's third β-directional Jeffreys information derivative, the fifth likelihood
+/// derivative. An armed Jeffreys objective's exact outer Hessian consumes it twice: in the ρ-ρ
+/// mode-response completion and in the mixed `D²H_Φ` drift. A family exposes it through
+/// [`CustomFamily::jeffreys_third_information_derivative`].
+pub trait JeffreysThirdInformationDerivative {
+    /// `{D³H[u, v, e_a]}`: two fixed directions and every coefficient axis as the third. `None`
+    /// declares that the exact derivative is unavailable at this point.
+    fn third_directional_all_axes(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        d_beta_u_flat: &Array1<f64>,
+        d_beta_v_flat: &Array1<f64>,
+    ) -> Result<Option<Vec<Array2<f64>>>, String>;
+
+    /// [`Self::third_directional_all_axes`] in a Jeffreys drift basis `U` (`p × r`): row `a` is
+    /// `vec(sym(Uᵀ D³H[u, v, e_a] U))`, the only form the outer-Hessian drift reads (#1082). The
+    /// default rotates the `p` dense axis derivatives with [`jeffreys_rotated_axis_rows`]. A
+    /// family whose information is a per-row kernel contracted with design rows can form the rows
+    /// without the `p × p` axis matrices and overrides this.
+    fn third_directional_rotated_all_axes(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        d_beta_u_flat: &Array1<f64>,
+        d_beta_v_flat: &Array1<f64>,
+        basis: ndarray::ArrayView2<'_, f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        match self.third_directional_all_axes(block_states, specs, d_beta_u_flat, d_beta_v_flat)? {
+            Some(axes) => jeffreys_rotated_axis_rows(&axes, basis).map(Some),
+            None => Ok(None),
+        }
+    }
+}
+
+/// The β-derivatives of a family's contracted trace Hessian `⟨W, D²I_J[e_a, e_b]⟩`. A criterion
+/// priced on the complete Jeffreys curvature (`H_Φ` plus its second-order completion) reads the
+/// completion's first β-drift in its outer gradient and its second in its outer Hessian, and both
+/// contract these derivatives (gam#2894). A family exposes them through
+/// [`CustomFamily::jeffreys_completion_outer_derivatives`].
+pub trait JeffreysCompletionOuterDerivatives {
+    /// `⟨W, D³I_J[u, e_a, e_b]⟩` for every axis pair: the contracted trace Hessian of
+    /// [`CustomFamily::joint_jeffreys_information_contracted_trace_hessian_with_specs`]
+    /// differentiated along one coefficient direction. Linear in the symmetric weight `W`, which
+    /// need not be PSD. `None` declares the exact contraction unavailable at this point.
+    fn contracted_trace_hessian_directional(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        weight: &Array2<f64>,
+        d_beta_u_flat: &Array1<f64>,
+    ) -> Result<Option<Array2<f64>>, String>;
+
+    /// `⟨W, D⁴I_J[u, w, e_a, e_b]⟩` for every axis pair: the contracted trace Hessian
+    /// differentiated along two coefficient directions, which for an observed-information family
+    /// reads the sixth likelihood derivative. `None` declares the exact contraction unavailable
+    /// at this point.
+    fn contracted_trace_hessian_second_directional(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        weight: &Array2<f64>,
+        d_beta_u_flat: &Array1<f64>,
+        d_beta_w_flat: &Array1<f64>,
+    ) -> Result<Option<Array2<f64>>, String>;
+}
+
 /// User-defined family contract for multi-block generalized models.
 pub trait CustomFamily {
     /// Optional sampled-derivative pilot owned by this family.
@@ -1735,33 +1802,6 @@ pub trait CustomFamily {
         Ok(Some(axes))
     }
 
-    /// [`Self::joint_jeffreys_information_directional_derivative_all_axes_with_specs`]
-    /// rotated into a Jeffreys basis `U` (`p × r`): row `a` is `vec(sym(Uᵀ Hdot[e_a] U))`,
-    /// the only form in which the Jeffreys term and its drift base read the axes (#1082).
-    /// A family whose information is a per-row kernel contracted with design rows can form
-    /// the rows without the `p × p` axis matrices and overrides this. `Ok(None)` declines
-    /// and the caller reduces the dense axes itself, so a family that does not override it
-    /// keeps its arithmetic; the default declines.
-    fn joint_jeffreys_information_directional_derivative_rotated_all_axes_with_specs(
-        &self,
-        block_states: &[ParameterBlockState],
-        specs: &[ParameterBlockSpec],
-        basis: ndarray::ArrayView2<'_, f64>,
-    ) -> Result<Option<Array2<f64>>, String> {
-        assert_blockstates_are_a_point(
-            block_states,
-            "rotated all-axes Jeffreys information derivative",
-        );
-        let width = specs.iter().map(|spec| spec.design.ncols()).sum::<usize>();
-        assert_eq!(
-            basis.nrows(),
-            width,
-            "rotated all-axes Jeffreys information derivative: the Jeffreys basis has {} rows for {width} joint coefficients",
-            basis.nrows()
-        );
-        Ok(None)
-    }
-
     /// The first information derivatives this family forms directly in a Jeffreys basis, if
     /// any (see [`JeffreysRotatedFirstDerivative`]). `None` means the Jeffreys term, its gate
     /// and floor motion, and its drift base reduce the dense axes of
@@ -1889,126 +1929,23 @@ pub trait CustomFamily {
         None
     }
 
-    /// Whether this family implements
-    /// [`Self::joint_jeffreys_information_third_directional_all_axes_with_specs`]
-    /// exactly, i.e. returns `Some` from it.
-    ///
-    /// An armed Jeffreys objective's exact outer Hessian consumes that fifth
-    /// likelihood derivative twice: in the rho-rho mode-response completion and
-    /// in the mixed `D²H_Φ` drift. A family that cannot supply it cannot claim
-    /// exact outer curvature, so the outer planner must not declare an analytic
-    /// Hessian for it (the evaluator would refuse every trial point that asks
-    /// for one). Override to `true` exactly when the hook is implemented.
-    fn joint_jeffreys_information_third_directional_available(&self) -> bool {
-        false
-    }
-
-    /// Third beta-directional derivative of the Jeffreys information, with
-    /// two fixed directions and every coefficient axis as the third:
-    /// `{D³H[u, v, e_a]}`. This is the fifth likelihood derivative needed to
-    /// differentiate the Jeffreys curvature twice in the outer objective.
-    /// `None` declares that the exact derivative is unavailable.
-    fn joint_jeffreys_information_third_directional_all_axes_with_specs(
+    /// The third information derivative this family provides, if any (see
+    /// [`JeffreysThirdInformationDerivative`]). A family without it cannot claim exact outer
+    /// curvature for an armed Jeffreys objective, so the outer planner must not declare an
+    /// analytic Hessian for it (the evaluator would refuse every trial point that asks for one).
+    fn jeffreys_third_information_derivative(
         &self,
-        block_states: &[ParameterBlockState],
-        specs: &[ParameterBlockSpec],
-        d_beta_u_flat: &Array1<f64>,
-        d_beta_v_flat: &Array1<f64>,
-    ) -> Result<Option<Vec<Array2<f64>>>, String> {
-        let context = "third Jeffreys information derivative";
-        assert_valid_blockspecs(specs, context);
-        assert_states_match_specs(block_states, specs, context);
-        let total = block_states.iter().map(|state| state.beta.len()).sum::<usize>();
-        for direction in [d_beta_u_flat, d_beta_v_flat] {
-            assert_eq!(direction.len(), total, "{context}: joint direction width");
-            assert!(direction.iter().all(|value| value.is_finite()), "{context}: non-finite direction");
-        }
-        Ok(None)
+    ) -> Option<&dyn JeffreysThirdInformationDerivative> {
+        None
     }
 
-    /// Whether this family implements both
-    /// [`Self::joint_jeffreys_information_contracted_trace_hessian_directional_with_specs`]
-    /// and [`Self::joint_jeffreys_information_contracted_trace_hessian_second_directional_with_specs`]
-    /// exactly, i.e. returns `Some` from them.
-    ///
-    /// A criterion priced on the complete Jeffreys curvature (`H_Φ` plus its second-order
-    /// completion) reads the completion's first β-drift in its outer gradient and its second
-    /// in its outer Hessian, and both contract these derivatives (gam#2894). Override to
-    /// `true` exactly when both hooks are implemented.
-    fn joint_jeffreys_completion_outer_derivatives_available(&self) -> bool {
-        false
-    }
-
-    /// `⟨W, D³I_J[u, e_a, e_b]⟩` for every axis pair: the contracted trace Hessian of
-    /// [`Self::joint_jeffreys_information_contracted_trace_hessian_with_specs`] differentiated
-    /// along one coefficient direction. Linear in the symmetric weight `W`, which need not be
-    /// PSD. `None` declares the exact contraction unavailable.
-    fn joint_jeffreys_information_contracted_trace_hessian_directional_with_specs(
+    /// The contracted trace Hessian derivatives this family provides, if any (see
+    /// [`JeffreysCompletionOuterDerivatives`]). `None` keeps the criterion on `H + S_λ + H_Φ`,
+    /// whose drift the wrapper supplies.
+    fn jeffreys_completion_outer_derivatives(
         &self,
-        block_states: &[ParameterBlockState],
-        specs: &[ParameterBlockSpec],
-        weight: &Array2<f64>,
-        d_beta_u_flat: &Array1<f64>,
-    ) -> Result<Option<Array2<f64>>, String> {
-        let context = "contracted trace Hessian directional derivative";
-        assert_valid_blockspecs(specs, context);
-        assert_states_match_specs(block_states, specs, context);
-        let total = block_states.iter().map(|state| state.beta.len()).sum::<usize>();
-        assert_eq!(weight.dim(), (total, total), "{context}: trace weight shape");
-        assert_eq!(d_beta_u_flat.len(), total, "{context}: joint direction width");
-        assert!(d_beta_u_flat.iter().all(|value| value.is_finite()), "{context}: non-finite direction");
-        Ok(None)
-    }
-
-    /// `⟨W, D⁴I_J[u, w, e_a, e_b]⟩` for every axis pair: the contracted trace Hessian
-    /// differentiated along two coefficient directions, which for an observed-information
-    /// family reads the sixth likelihood derivative. `None` declares the exact contraction
-    /// unavailable.
-    fn joint_jeffreys_information_contracted_trace_hessian_second_directional_with_specs(
-        &self,
-        block_states: &[ParameterBlockState],
-        specs: &[ParameterBlockSpec],
-        weight: &Array2<f64>,
-        d_beta_u_flat: &Array1<f64>,
-        d_beta_w_flat: &Array1<f64>,
-    ) -> Result<Option<Array2<f64>>, String> {
-        let context = "contracted trace Hessian second directional derivative";
-        assert_valid_blockspecs(specs, context);
-        assert_states_match_specs(block_states, specs, context);
-        let total = block_states.iter().map(|state| state.beta.len()).sum::<usize>();
-        assert_eq!(weight.dim(), (total, total), "{context}: trace weight shape");
-        for direction in [d_beta_u_flat, d_beta_w_flat] {
-            assert_eq!(direction.len(), total, "{context}: joint direction width");
-            assert!(direction.iter().all(|value| value.is_finite()), "{context}: non-finite direction");
-        }
-        Ok(None)
-    }
-
-    /// [`Self::joint_jeffreys_information_third_directional_all_axes_with_specs`]
-    /// in a Jeffreys drift basis `U` (`p × r`): row `a` is
-    /// `vec(sym(Uᵀ D³H[u, v, e_a] U))`, the only form the outer-Hessian drift reads
-    /// (#1082). The default rotates the `p` dense axis derivatives with
-    /// [`jeffreys_rotated_axis_rows`]. A family whose information is a per-row kernel
-    /// contracted with design rows can form the rows without the `p × p` axis
-    /// matrices and overrides this. `None` declares that the exact derivative is
-    /// unavailable.
-    fn joint_jeffreys_information_third_directional_rotated_all_axes_with_specs(
-        &self,
-        block_states: &[ParameterBlockState],
-        specs: &[ParameterBlockSpec],
-        d_beta_u_flat: &Array1<f64>,
-        d_beta_v_flat: &Array1<f64>,
-        basis: ndarray::ArrayView2<'_, f64>,
-    ) -> Result<Option<Array2<f64>>, String> {
-        match self.joint_jeffreys_information_third_directional_all_axes_with_specs(
-            block_states,
-            specs,
-            d_beta_u_flat,
-            d_beta_v_flat,
-        )? {
-            Some(axes) => jeffreys_rotated_axis_rows(&axes, basis).map(Some),
-            None => Ok(None),
-        }
+    ) -> Option<&dyn JeffreysCompletionOuterDerivatives> {
+        None
     }
 
     /// Optional contracted second beta-derivative of the observed joint

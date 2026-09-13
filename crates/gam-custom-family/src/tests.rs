@@ -6748,6 +6748,28 @@ impl BetaDependentJeffreysInformationFamily {
     }
 }
 
+impl JeffreysThirdInformationDerivative for BetaDependentJeffreysInformationFamily {
+    fn third_directional_all_axes(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        d_beta_u_flat: &Array1<f64>,
+        d_beta_v_flat: &Array1<f64>,
+    ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        assert_states_finite(block_states, "beta-dependent Jeffreys third drift");
+        assert_specs_consistent(specs, "beta-dependent Jeffreys third drift");
+        assert!(
+            d_beta_u_flat
+                .iter()
+                .chain(d_beta_v_flat.iter())
+                .all(|value| value.is_finite()),
+            "beta-dependent Jeffreys third drift: directions must be finite"
+        );
+        // `H` is quadratic in beta, so every third derivative vanishes.
+        Ok(Some(vec![Array2::zeros((2, 2)); 2]))
+    }
+}
+
 impl CustomFamily for BetaDependentJeffreysInformationFamily {
     fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
         let n = block_states[0].eta.len();
@@ -6824,24 +6846,10 @@ impl CustomFamily for BetaDependentJeffreysInformationFamily {
         Ok(Some(&axis0 * d_beta_v_flat[0] + &axis1 * d_beta_v_flat[1]))
     }
 
-    fn joint_jeffreys_information_third_directional_all_axes_with_specs(
+    fn jeffreys_third_information_derivative(
         &self,
-        block_states: &[ParameterBlockState],
-        specs: &[ParameterBlockSpec],
-        d_beta_u_flat: &Array1<f64>,
-        d_beta_v_flat: &Array1<f64>,
-    ) -> Result<Option<Vec<Array2<f64>>>, String> {
-        assert_states_finite(block_states, "beta-dependent Jeffreys third drift");
-        assert_specs_consistent(specs, "beta-dependent Jeffreys third drift");
-        assert!(
-            d_beta_u_flat
-                .iter()
-                .chain(d_beta_v_flat.iter())
-                .all(|value| value.is_finite()),
-            "beta-dependent Jeffreys third drift: directions must be finite"
-        );
-        // `H` is quadratic in beta, so every third derivative vanishes.
-        Ok(Some(vec![Array2::zeros((2, 2)); 2]))
+    ) -> Option<&dyn JeffreysThirdInformationDerivative> {
+        Some(self)
     }
 }
 
@@ -7101,6 +7109,64 @@ impl GateBandCompletionFamily {
     }
 }
 
+impl JeffreysThirdInformationDerivative for GateBandCompletionFamily {
+    fn third_directional_all_axes(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        d_beta_u_flat: &Array1<f64>,
+        d_beta_v_flat: &Array1<f64>,
+    ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        assert_states_finite(block_states, "gate-band completion third drift");
+        assert_specs_consistent(specs, "gate-band completion third drift");
+        assert!(
+            d_beta_u_flat.iter().chain(d_beta_v_flat.iter()).all(|value| value.is_finite()),
+            "gate-band completion third drift: directions must be finite"
+        );
+        // The working weight `2 + η²` has no third derivative.
+        Ok(Some(vec![Array2::zeros((2, 2)); 2]))
+    }
+}
+
+impl JeffreysCompletionOuterDerivatives for GateBandCompletionFamily {
+    fn contracted_trace_hessian_directional(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        weight: &Array2<f64>,
+        d_beta_u_flat: &Array1<f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        assert_states_finite(block_states, "gate-band completion directional contracted trace");
+        assert_specs_consistent(specs, "gate-band completion directional contracted trace");
+        assert!(
+            weight.iter().chain(d_beta_u_flat.iter()).all(|value| value.is_finite()),
+            "gate-band completion directional contracted trace: inputs must be finite"
+        );
+        Ok(Some(Array2::zeros((2, 2))))
+    }
+
+    fn contracted_trace_hessian_second_directional(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        weight: &Array2<f64>,
+        d_beta_u_flat: &Array1<f64>,
+        d_beta_w_flat: &Array1<f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        assert_states_finite(block_states, "gate-band completion second contracted trace");
+        assert_specs_consistent(specs, "gate-band completion second contracted trace");
+        assert!(
+            weight
+                .iter()
+                .chain(d_beta_u_flat.iter())
+                .chain(d_beta_w_flat.iter())
+                .all(|value| value.is_finite()),
+            "gate-band completion second contracted trace: inputs must be finite"
+        );
+        Ok(Some(Array2::zeros((2, 2))))
+    }
+}
+
 impl CustomFamily for GateBandCompletionFamily {
     fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
         DefaultDiagonalExactHookFamily.evaluate(block_states)
@@ -7137,27 +7203,6 @@ impl CustomFamily for GateBandCompletionFamily {
         true
     }
 
-    fn joint_jeffreys_information_third_directional_available(&self) -> bool {
-        true
-    }
-
-    fn joint_jeffreys_information_third_directional_all_axes_with_specs(
-        &self,
-        block_states: &[ParameterBlockState],
-        specs: &[ParameterBlockSpec],
-        d_beta_u_flat: &Array1<f64>,
-        d_beta_v_flat: &Array1<f64>,
-    ) -> Result<Option<Vec<Array2<f64>>>, String> {
-        assert_states_finite(block_states, "gate-band completion third drift");
-        assert_specs_consistent(specs, "gate-band completion third drift");
-        assert!(
-            d_beta_u_flat.iter().chain(d_beta_v_flat.iter()).all(|value| value.is_finite()),
-            "gate-band completion third drift: directions must be finite"
-        );
-        // The working weight `2 + η²` has no third derivative.
-        Ok(Some(vec![Array2::zeros((2, 2)); 2]))
-    }
-
     fn joint_jeffreys_information_contracted_trace_hessian_available(&self) -> bool {
         true
     }
@@ -7184,45 +7229,16 @@ impl CustomFamily for GateBandCompletionFamily {
         Ok(Some(out))
     }
 
-    fn joint_jeffreys_completion_outer_derivatives_available(&self) -> bool {
-        true
+    fn jeffreys_third_information_derivative(
+        &self,
+    ) -> Option<&dyn JeffreysThirdInformationDerivative> {
+        Some(self)
     }
 
-    fn joint_jeffreys_information_contracted_trace_hessian_directional_with_specs(
+    fn jeffreys_completion_outer_derivatives(
         &self,
-        block_states: &[ParameterBlockState],
-        specs: &[ParameterBlockSpec],
-        weight: &Array2<f64>,
-        d_beta_u_flat: &Array1<f64>,
-    ) -> Result<Option<Array2<f64>>, String> {
-        assert_states_finite(block_states, "gate-band completion directional contracted trace");
-        assert_specs_consistent(specs, "gate-band completion directional contracted trace");
-        assert!(
-            weight.iter().chain(d_beta_u_flat.iter()).all(|value| value.is_finite()),
-            "gate-band completion directional contracted trace: inputs must be finite"
-        );
-        Ok(Some(Array2::zeros((2, 2))))
-    }
-
-    fn joint_jeffreys_information_contracted_trace_hessian_second_directional_with_specs(
-        &self,
-        block_states: &[ParameterBlockState],
-        specs: &[ParameterBlockSpec],
-        weight: &Array2<f64>,
-        d_beta_u_flat: &Array1<f64>,
-        d_beta_w_flat: &Array1<f64>,
-    ) -> Result<Option<Array2<f64>>, String> {
-        assert_states_finite(block_states, "gate-band completion second contracted trace");
-        assert_specs_consistent(specs, "gate-band completion second contracted trace");
-        assert!(
-            weight
-                .iter()
-                .chain(d_beta_u_flat.iter())
-                .chain(d_beta_w_flat.iter())
-                .all(|value| value.is_finite()),
-            "gate-band completion second contracted trace: inputs must be finite"
-        );
-        Ok(Some(Array2::zeros((2, 2))))
+    ) -> Option<&dyn JeffreysCompletionOuterDerivatives> {
+        Some(self)
     }
 }
 

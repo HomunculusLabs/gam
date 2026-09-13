@@ -2020,7 +2020,7 @@ fn survival_ls_third_directional_all_axes_matches_difference_of_second_2677() {
     ] {
         let family = survival_exact_newton_test_familywith_inverse_link(distribution.clone());
         assert!(
-            family.joint_jeffreys_information_third_directional_available(),
+            family.jeffreys_third_information_derivative().is_some(),
             "{distribution:?}: a closed-form link must declare the third information derivative"
         );
         let states = survival_exact_newton_test_states(&family, beta[0], beta[1], beta[2]);

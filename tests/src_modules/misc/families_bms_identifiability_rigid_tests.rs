@@ -3554,7 +3554,7 @@ fn flexible_family_routes_outer_derivatives_by_scale() {
             .exact_outer_derivative_order(&large_flex_specs, &BlockwiseFitOptions::default()),
         ExactOuterDerivativeOrder::Second
     );
-    assert!(large_flex_family.joint_jeffreys_information_third_directional_available());
+    assert!(large_flex_family.jeffreys_third_information_derivative().is_some());
     let (large_flex_gradient, large_flex_hessian) = custom_family_outer_derivatives(
         &large_flex_family,
         &large_flex_specs,
@@ -3661,7 +3661,7 @@ fn bms_advertises_exact_outer_hvp_and_plans_arc_outer_newton() {
         flex_family.exact_outer_derivative_order(&flex_specs, &BlockwiseFitOptions::default()),
         ExactOuterDerivativeOrder::Second
     );
-    assert!(flex_family.joint_jeffreys_information_third_directional_available());
+    assert!(flex_family.jeffreys_third_information_derivative().is_some());
     let (flex_gradient, flex_hessian) =
         custom_family_outer_derivatives(&flex_family, &flex_specs, &BlockwiseFitOptions::default());
     assert_eq!(flex_gradient, Derivative::Analytic);

@@ -2921,6 +2921,41 @@ impl MultinomialFamily {
     }
 }
 
+impl crate::custom_family::JeffreysThirdInformationDerivative for MultinomialFamily {
+    fn third_directional_all_axes(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        u: &Array1<f64>,
+        v: &Array1<f64>,
+    ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        let eta = self.collect_eta_matrix(block_states)?;
+        let axes = self.assemble_all_axis_third_directional_derivatives(eta.view(), u, v)?;
+        let p: usize = specs.iter().map(|spec| spec.design.ncols()).sum();
+        if axes.len() != p {
+            return Err(format!("multinomial third information has {} axes, expected {p}", axes.len()));
+        }
+        Ok(Some(axes))
+    }
+
+    fn third_directional_rotated_all_axes(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        u: &Array1<f64>,
+        v: &Array1<f64>,
+        basis: ArrayView2<'_, f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        let eta = self.collect_eta_matrix(block_states)?;
+        let rows = self.assemble_rotated_all_axis_third_directional_derivatives(eta.view(), u, v, basis)?;
+        let p: usize = specs.iter().map(|spec| spec.design.ncols()).sum();
+        if rows.nrows() != p {
+            return Err(format!("multinomial rotated third information has {} axes, expected {p}", rows.nrows()));
+        }
+        Ok(Some(rows))
+    }
+}
+
 impl crate::custom_family::JeffreysRotatedFirstDerivative for MultinomialFamily {
     /// #1082: the Jeffreys term reads only `vec(sym(Uᵀ Hdot[e_a] U))`, so the rows are formed
     /// through the row kernel instead of from `p` dense axis matrices.
@@ -3262,27 +3297,6 @@ impl CustomFamily for MultinomialFamily {
         Ok(Some(axes))
     }
 
-    fn joint_jeffreys_information_directional_derivative_rotated_all_axes_with_specs(
-        &self,
-        block_states: &[ParameterBlockState],
-        specs: &[ParameterBlockSpec],
-        basis: ArrayView2<'_, f64>,
-    ) -> Result<Option<Array2<f64>>, String> {
-        // #1082: the Jeffreys term reads only `vec(sym(Uᵀ Hdot[e_a] U))`, so the rows are
-        // formed through the row kernel instead of from `p` dense axis matrices.
-        let eta = self.collect_eta_matrix(block_states)?;
-        let probs = self.row_probabilities(eta.view());
-        let rows = self.assemble_rotated_all_axis_directional_derivatives(&probs, basis)?;
-        let p: usize = specs.iter().map(|spec| spec.design.ncols()).sum();
-        if rows.nrows() != p {
-            return Err(format!(
-                "multinomial rotated first information has {} axes, expected {p}",
-                rows.nrows()
-            ));
-        }
-        Ok(Some(rows))
-    }
-
     fn jeffreys_rotated_first_derivative(
         &self,
     ) -> Option<&dyn crate::custom_family::JeffreysRotatedFirstDerivative> {
@@ -3347,41 +3361,10 @@ impl CustomFamily for MultinomialFamily {
         Ok(true)
     }
 
-    fn joint_jeffreys_information_third_directional_available(&self) -> bool {
-        true
-    }
-
-    fn joint_jeffreys_information_third_directional_all_axes_with_specs(
+    fn jeffreys_third_information_derivative(
         &self,
-        block_states: &[ParameterBlockState],
-        specs: &[ParameterBlockSpec],
-        u: &Array1<f64>,
-        v: &Array1<f64>,
-    ) -> Result<Option<Vec<Array2<f64>>>, String> {
-        let eta = self.collect_eta_matrix(block_states)?;
-        let axes = self.assemble_all_axis_third_directional_derivatives(eta.view(), u, v)?;
-        let p: usize = specs.iter().map(|spec| spec.design.ncols()).sum();
-        if axes.len() != p {
-            return Err(format!("multinomial third information has {} axes, expected {p}", axes.len()));
-        }
-        Ok(Some(axes))
-    }
-
-    fn joint_jeffreys_information_third_directional_rotated_all_axes_with_specs(
-        &self,
-        block_states: &[ParameterBlockState],
-        specs: &[ParameterBlockSpec],
-        u: &Array1<f64>,
-        v: &Array1<f64>,
-        basis: ArrayView2<'_, f64>,
-    ) -> Result<Option<Array2<f64>>, String> {
-        let eta = self.collect_eta_matrix(block_states)?;
-        let rows = self.assemble_rotated_all_axis_third_directional_derivatives(eta.view(), u, v, basis)?;
-        let p: usize = specs.iter().map(|spec| spec.design.ncols()).sum();
-        if rows.nrows() != p {
-            return Err(format!("multinomial rotated third information has {} axes, expected {p}", rows.nrows()));
-        }
-        Ok(Some(rows))
+    ) -> Option<&dyn crate::custom_family::JeffreysThirdInformationDerivative> {
+        Some(self)
     }
 
     fn joint_jeffreys_information_contracted_trace_hessian_with_specs(

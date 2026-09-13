@@ -1147,7 +1147,7 @@
 
         let survival = learnable_sigma_test_family();
         assert!(survival.joint_jeffreys_term_required());
-        assert!(!survival.joint_jeffreys_information_third_directional_available());
+        assert!(survival.jeffreys_third_information_derivative().is_none());
         let survival_specs =
             latent_test_specs(large_n, &[("time", 2), ("mean", 2), ("log_sigma", 1)]);
         let (surv_grad, surv_hess) =
@@ -1157,7 +1157,7 @@
 
         let binary = fixed_sigma_binary_test_family();
         assert!(binary.joint_jeffreys_term_required());
-        assert!(!binary.joint_jeffreys_information_third_directional_available());
+        assert!(binary.jeffreys_third_information_derivative().is_none());
         let binary_specs = latent_test_specs(large_n, &[("time", 2), ("mean", 2)]);
         let (bin_grad, bin_hess) =
             custom_family_outer_derivatives(&binary, &binary_specs, &options);

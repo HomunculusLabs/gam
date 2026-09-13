@@ -5345,11 +5345,13 @@ fn survival_flex_joint_third_information_matches_differenced_second_directional_
         dummy_blockspec(1),
         dummy_blockspec(score_dim),
     ];
-    assert!(family.joint_jeffreys_information_third_directional_available());
+    assert!(family.jeffreys_third_information_derivative().is_some());
     let u = Array1::from_shape_fn(beta.len(), |i| ((i * 7 + 3) % 11) as f64 / 11.0 - 0.45);
     let v = Array1::from_shape_fn(beta.len(), |i| ((i * 5 + 1) % 13) as f64 / 13.0 - 0.5);
     let axes = family
-        .joint_jeffreys_information_third_directional_all_axes_with_specs(&states, &specs, &u, &v)
+        .jeffreys_third_information_derivative()
+        .expect("the family exposes its third information derivative")
+        .third_directional_all_axes(&states, &specs, &u, &v)
         .expect("third information derivative")
         .expect("flex without a time wiggle publishes the third information derivative");
     assert_eq!(axes.len(), beta.len());
@@ -6421,7 +6423,7 @@ fn survival_contracted_trace_hessian_directional_derivatives_match_fd_2894() {
     family
         .slope_layout
         .replace_coefficient_design(DesignMatrix::from(slope_design.clone()));
-    assert!(family.joint_jeffreys_completion_outer_derivatives_available());
+    assert!(family.jeffreys_completion_outer_derivatives().is_some());
 
     let total = 1 + p_m + p_g;
     let specs = vec![
@@ -6475,7 +6477,9 @@ fn survival_contracted_trace_hessian_directional_derivatives_match_fd_2894() {
     };
     let directional_at = |beta_flat: &Array1<f64>| {
         family
-            .joint_jeffreys_information_contracted_trace_hessian_directional_with_specs(
+            .jeffreys_completion_outer_derivatives()
+            .expect("the rigid static path exposes the completion outer derivatives")
+            .contracted_trace_hessian_directional(
                 &states_at(beta_flat),
                 &specs,
                 &trace_weight,
@@ -6485,7 +6489,9 @@ fn survival_contracted_trace_hessian_directional_derivatives_match_fd_2894() {
             .expect("the rigid static path must supply the directional contraction")
     };
     let second = family
-        .joint_jeffreys_information_contracted_trace_hessian_second_directional_with_specs(
+        .jeffreys_completion_outer_derivatives()
+        .expect("the rigid static path exposes the completion outer derivatives")
+        .contracted_trace_hessian_second_directional(
             &states_at(&beta0),
             &specs,
             &trace_weight,

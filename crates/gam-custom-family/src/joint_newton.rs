@@ -1179,7 +1179,7 @@ pub fn custom_family_outer_derivatives<F: CustomFamily + ?Sized>(
     // Without it no exact curvature exists, and declaring one made every seed
     // evaluation refuse at the completion instead of searching first-order.
     let jeffreys_curvature_exact = !family.joint_jeffreys_term_required()
-        || family.joint_jeffreys_information_third_directional_available();
+        || family.jeffreys_third_information_derivative().is_some();
     let hessian = if options.use_outer_hessian
         && include_exact_newton_logdet_h(family, options)
         && policy.capability.has_hessian()

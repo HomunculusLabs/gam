@@ -802,8 +802,8 @@ pub(crate) fn custom_family_outer_jeffreys_hphi<F: CustomFamily + Clone + Send +
     // is `M_true = H + S_λ + H_Φ + completion`, and the Laplace normalizer is
     // `½log|M_true|`. The chain rule fixes where each piece belongs:
     //   * the logdet VALUE and its trace kernel must share ONE object, and that
-    //     object's β-drift must be supplied exactly. A family declaring
-    //     `joint_jeffreys_completion_outer_derivatives_available` supplies the
+    //     object's β-drift must be supplied exactly. A family exposing
+    //     `jeffreys_completion_outer_derivatives` supplies the
     //     completion's β-drifts, so the projected criterion prices `M_true`
     //     (gam#2894). Every other family keeps `M_DD = H + S_λ + H_Φ`, whose drift
     //     `D_β H_Φ[v]` the wrapper supplies (folding the completion without its
@@ -973,7 +973,8 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
     // gam#2894: a family that exposes the completion's contracted-trace derivatives can
     // have its criterion priced on the complete curvature. The drifts read this snapshot.
     let completion_derivatives = family
-        .joint_jeffreys_completion_outer_derivatives_available()
+        .jeffreys_completion_outer_derivatives()
+        .is_some()
         .then(|| {
             (
                 Arc::clone(&prepare_base),
@@ -1031,7 +1032,9 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
             let axes_u = if base.hessian_motion_active() { Some(rotated(u)?) } else { None };
             // Only the rotation of `H³[u, v, ·]` is read, so the family forms it (#1082).
             let moving = family
-                .joint_jeffreys_information_third_directional_rotated_all_axes_with_specs(&states, &specs, u, v, base.ambient_eigenbasis())?
+                .jeffreys_third_information_derivative()
+                .ok_or_else(missing)?
+                .third_directional_rotated_all_axes(&states, &specs, u, v, base.ambient_eigenbasis())?
                 .ok_or_else(missing)?;
             let moving = base.rotated_axes_from_rows(moving)?;
             Ok(base.completion_drift_action_from_rotated(v, &h, &axes_v, axes_u.as_deref(), &moving)? * strength)
@@ -1206,7 +1209,11 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
                     )?
                     .ok_or_else(|| missing("second information derivative"))?;
                 let axes_uv = family_second
-                    .joint_jeffreys_information_third_directional_rotated_all_axes_with_specs(
+                    .jeffreys_third_information_derivative()
+                    .ok_or_else(|| {
+                        missing("third information derivatives (fifth likelihood derivatives)")
+                    })?
+                    .third_directional_rotated_all_axes(
                         &states_second,
                         &specs_second,
                         u,
@@ -1308,7 +1315,12 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
                                 };
                             let along = |weight: &Array2<f64>| -> Result<Array2<f64>, String> {
                                 family
-                                    .joint_jeffreys_information_contracted_trace_hessian_directional_with_specs(
+                                    .jeffreys_completion_outer_derivatives()
+                                    .ok_or_else(|| {
+                                        "priced Jeffreys completion requires the completion outer derivatives"
+                                            .to_string()
+                                    })?
+                                    .contracted_trace_hessian_directional(
                                         &states, &specs, weight, delta,
                                     )?
                                     .ok_or_else(|| {
@@ -1413,7 +1425,12 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
                                          direction: &Array1<f64>|
                              -> Result<Array2<f64>, String> {
                                 family
-                                    .joint_jeffreys_information_contracted_trace_hessian_directional_with_specs(
+                                    .jeffreys_completion_outer_derivatives()
+                                    .ok_or_else(|| {
+                                        "priced Jeffreys completion requires the completion outer derivatives"
+                                            .to_string()
+                                    })?
+                                    .contracted_trace_hessian_directional(
                                         &states, &specs, weight, direction,
                                     )?
                                     .ok_or_else(|| {
@@ -1426,7 +1443,12 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
                             let along_w = |weight: &Array2<f64>| along(weight, w);
                             let along_uw = |weight: &Array2<f64>| -> Result<Array2<f64>, String> {
                                 family
-                                    .joint_jeffreys_information_contracted_trace_hessian_second_directional_with_specs(
+                                    .jeffreys_completion_outer_derivatives()
+                                    .ok_or_else(|| {
+                                        "priced Jeffreys completion requires the completion outer derivatives"
+                                            .to_string()
+                                    })?
+                                    .contracted_trace_hessian_second_directional(
                                         &states, &specs, weight, u, w,
                                     )?
                                     .ok_or_else(|| {
@@ -1437,7 +1459,9 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
                             };
                             let third_uw = if motion {
                                 let rows = family
-                                    .joint_jeffreys_information_third_directional_rotated_all_axes_with_specs(
+                                    .jeffreys_third_information_derivative()
+                                    .ok_or_else(|| missing("third information derivatives"))?
+                                    .third_directional_rotated_all_axes(
                                         &states,
                                         &specs,
                                         u,

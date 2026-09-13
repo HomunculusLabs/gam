@@ -1204,7 +1204,7 @@ mod adaptive_bounded_duchon_tests {
             let rows = y.len();
             let family = family_for(spec, y, prior);
             assert!(
-                family.joint_jeffreys_information_third_directional_available(),
+                family.jeffreys_third_information_derivative().is_some(),
                 "case {case}: a closed-form W''' must declare the third information derivative"
             );
             let axes = family

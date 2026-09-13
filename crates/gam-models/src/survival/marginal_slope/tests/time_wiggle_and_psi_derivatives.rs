@@ -685,11 +685,13 @@ fn timewiggle_flex_joint_third_information_matches_differenced_second_directiona
         dummy_blockspec(1),
         dummy_blockspec(beta.len() - 8),
     ];
-    assert!(family.joint_jeffreys_information_third_directional_available());
+    assert!(family.jeffreys_third_information_derivative().is_some());
     let u = Array1::from_shape_fn(beta.len(), |i| ((i * 7 + 3) % 11) as f64 / 11.0 - 0.45);
     let v = Array1::from_shape_fn(beta.len(), |i| ((i * 5 + 1) % 13) as f64 / 13.0 - 0.5);
     let axes = family
-        .joint_jeffreys_information_third_directional_all_axes_with_specs(&states, &specs, &u, &v)
+        .jeffreys_third_information_derivative()
+        .expect("the family exposes its third information derivative")
+        .third_directional_all_axes(&states, &specs, &u, &v)
         .expect("third information derivative")
         .expect("flex with a time wiggle publishes the third information derivative");
     assert_eq!(axes.len(), beta.len());

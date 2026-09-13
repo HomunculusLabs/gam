@@ -1057,35 +1057,6 @@ impl CustomFamily for SurvivalLocationScaleFamily {
         Ok(Some(axes))
     }
 
-    /// The rows `vec(sym(Uᵀ I'[e_a] U))` the Jeffreys term, its drift base and the gate
-    /// motion read. On the non-wiggle row kernel they come from each row's nine third
-    /// contractions and its channel rows projected onto `U`, so the `p` dense axis matrices of
-    /// [`Self::joint_jeffreys_information_directional_derivative_all_axes_with_specs`] are
-    /// never formed (#2668). The link-wiggle lowering has no fixed-width row kernel and
-    /// declines.
-    fn joint_jeffreys_information_directional_derivative_rotated_all_axes_with_specs(
-        &self,
-        block_states: &[ParameterBlockState],
-        specs: &[ParameterBlockSpec],
-        basis: ndarray::ArrayView2<'_, f64>,
-    ) -> Result<Option<Array2<f64>>, String> {
-        self.validate_joint_specs(
-            specs,
-            "SurvivalLocationScaleFamily joint Jeffreys rotated first directional derivative",
-        )?;
-        if !self.row_kernel_directional_supported() {
-            return Ok(None);
-        }
-        crate::block_layout::block_count::validate_block_count::<SurvivalLocationScaleError>(
-            "SurvivalLocationScaleFamily joint Jeffreys rotated first directional derivative",
-            self.expected_blocks(),
-            block_states.len(),
-        )?;
-        let dynamic = self.build_dynamic_geometry(block_states)?;
-        let kernel = self.survival_ls_row_kernel_rescaled(&dynamic, 0.0);
-        kernel.directional_derivative_rotated_all_axes(basis).map(Some)
-    }
-
     fn joint_jeffreys_information_second_directional_derivative_with_specs(
         &self,
         block_states: &[ParameterBlockState],
@@ -1242,42 +1213,16 @@ impl CustomFamily for SurvivalLocationScaleFamily {
     /// stack has a closed-form fifth derivative. The link-wiggle runtime
     /// lowering carries no fifth order, and neither do the parameterized links
     /// served by the generic pdf-jet dispatch.
-    fn joint_jeffreys_information_third_directional_available(&self) -> bool {
-        self.row_kernel_directional_supported()
-            && Self::inverse_link_has_fifth_derivative_stacks(&self.inverse_link)
-    }
-
-    /// Third beta-directional derivative of the same unscaled observed
-    /// information returned by `joint_jeffreys_information_with_specs`, along
-    /// every canonical axis: `{I'''[u, v, e_a]}`. Each row's fifth-order
-    /// contraction with `(u, v)` is built once and pulled back per axis (#2677).
-    fn joint_jeffreys_information_third_directional_all_axes_with_specs(
+    fn jeffreys_third_information_derivative(
         &self,
-        block_states: &[ParameterBlockState],
-        specs: &[ParameterBlockSpec],
-        d_beta_u_flat: &Array1<f64>,
-        d_beta_v_flat: &Array1<f64>,
-    ) -> Result<Option<Vec<Array2<f64>>>, String> {
-        self.validate_joint_specs(
-            specs,
-            "SurvivalLocationScaleFamily joint Jeffreys third directional derivative",
-        )?;
-        if !self.joint_jeffreys_information_third_directional_available() {
-            return Ok(None);
+    ) -> Option<&dyn crate::custom_family::JeffreysThirdInformationDerivative> {
+        if self.row_kernel_directional_supported()
+            && Self::inverse_link_has_fifth_derivative_stacks(&self.inverse_link)
+        {
+            Some(self)
+        } else {
+            None
         }
-        let dynamic = self.build_dynamic_geometry(block_states)?;
-        let kernel = self.survival_ls_row_kernel_rescaled(&dynamic, 0.0);
-        crate::row_kernel::row_kernel_third_directional_derivative_all_axes(
-            &kernel,
-            &crate::row_kernel::RowSet::All,
-            d_beta_u_flat.as_slice().ok_or_else(|| {
-                "joint Jeffreys third directional u must be contiguous".to_string()
-            })?,
-            d_beta_v_flat.as_slice().ok_or_else(|| {
-                "joint Jeffreys third directional v must be contiguous".to_string()
-            })?,
-        )
-        .map(Some)
     }
 
     fn exact_newton_joint_hessian_beta_dependent(&self) -> bool {
@@ -2062,6 +2007,38 @@ impl CustomFamily for SurvivalLocationScaleFamily {
     // by both this trait method and the ψ workspace's `first_order_terms`
     // override to thread the Horvitz-Thompson row mask through the staged
     // outer-score subsample.
+}
+
+impl crate::custom_family::JeffreysThirdInformationDerivative for SurvivalLocationScaleFamily {
+    /// Third beta-directional derivative of the same unscaled observed
+    /// information returned by `joint_jeffreys_information_with_specs`, along
+    /// every canonical axis: `{I'''[u, v, e_a]}`. Each row's fifth-order
+    /// contraction with `(u, v)` is built once and pulled back per axis (#2677).
+    fn third_directional_all_axes(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        d_beta_u_flat: &Array1<f64>,
+        d_beta_v_flat: &Array1<f64>,
+    ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        self.validate_joint_specs(
+            specs,
+            "SurvivalLocationScaleFamily joint Jeffreys third directional derivative",
+        )?;
+        let dynamic = self.build_dynamic_geometry(block_states)?;
+        let kernel = self.survival_ls_row_kernel_rescaled(&dynamic, 0.0);
+        crate::row_kernel::row_kernel_third_directional_derivative_all_axes(
+            &kernel,
+            &crate::row_kernel::RowSet::All,
+            d_beta_u_flat.as_slice().ok_or_else(|| {
+                "joint Jeffreys third directional u must be contiguous".to_string()
+            })?,
+            d_beta_v_flat.as_slice().ok_or_else(|| {
+                "joint Jeffreys third directional v must be contiguous".to_string()
+            })?,
+        )
+        .map(Some)
+    }
 }
 
 impl crate::custom_family::JeffreysRotatedFirstDerivative for SurvivalLocationScaleFamily {

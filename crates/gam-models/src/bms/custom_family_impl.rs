@@ -651,6 +651,29 @@ impl BernoulliMarginalSlopeFamily {
     }
 }
 
+impl crate::custom_family::JeffreysThirdInformationDerivative for BernoulliMarginalSlopeFamily {
+    fn third_directional_all_axes(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        d_beta_u_flat: &Array1<f64>,
+        d_beta_v_flat: &Array1<f64>,
+    ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        if !self.outer_default_trustworthy_for_joint_hessian(specs)
+            && !self.joint_hessian_is_structurally_coupled(block_states)?
+        {
+            return Ok(None);
+        }
+        if self.effective_flex_active(block_states)? {
+            return self
+                .flex_third_information_all_axes(block_states, d_beta_u_flat, d_beta_v_flat)
+                .map(Some);
+        }
+        rigid_third_information_all_axes(self, block_states, d_beta_u_flat, d_beta_v_flat)
+            .map(Some)
+    }
+}
+
 impl CustomFamily for BernoulliMarginalSlopeFamily {
     fn outer_derivative_pilot_schedule(
         &self,
@@ -1727,33 +1750,14 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
         .map(Some)
     }
 
-    fn joint_jeffreys_information_third_directional_available(&self) -> bool {
-        // Every row has its order-five contraction: the rigid two-primary path in
-        // closed form, a FLEX row under an empirical latent measure through the
-        // frozen row program's laned traversal, and a FLEX row under the
-        // standard-normal measure through the hand cell-moment kernel.
-        true
-    }
-
-    fn joint_jeffreys_information_third_directional_all_axes_with_specs(
+    /// Every row has its order-five contraction: the rigid two-primary path in closed form, a
+    /// FLEX row under an empirical latent measure through the frozen row program's laned
+    /// traversal, and a FLEX row under the standard-normal measure through the hand cell-moment
+    /// kernel.
+    fn jeffreys_third_information_derivative(
         &self,
-        block_states: &[ParameterBlockState],
-        specs: &[ParameterBlockSpec],
-        d_beta_u_flat: &Array1<f64>,
-        d_beta_v_flat: &Array1<f64>,
-    ) -> Result<Option<Vec<Array2<f64>>>, String> {
-        if !self.outer_default_trustworthy_for_joint_hessian(specs)
-            && !self.joint_hessian_is_structurally_coupled(block_states)?
-        {
-            return Ok(None);
-        }
-        if self.effective_flex_active(block_states)? {
-            return self
-                .flex_third_information_all_axes(block_states, d_beta_u_flat, d_beta_v_flat)
-                .map(Some);
-        }
-        rigid_third_information_all_axes(self, block_states, d_beta_u_flat, d_beta_v_flat)
-            .map(Some)
+    ) -> Option<&dyn crate::custom_family::JeffreysThirdInformationDerivative> {
+        Some(self)
     }
 
     /// gam#979 wide-p Jeffreys completion: `∇²_β tr(W · H(β))` for a

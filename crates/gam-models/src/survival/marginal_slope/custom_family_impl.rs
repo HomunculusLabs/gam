@@ -6,6 +6,129 @@
 use super::*;
 use gam_problem::ConstraintSet;
 
+impl crate::custom_family::JeffreysThirdInformationDerivative for SurvivalMarginalSlopeFamily {
+    fn third_directional_all_axes(
+        &self,
+        states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        u: &Array1<f64>,
+        v: &Array1<f64>,
+    ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        if specs.len() != states.len() {
+            return Err("survival third information derivative block count mismatch".into());
+        }
+        if self.per_z_slope_active()
+            || (self.flex_timewiggle_active() && !self.flex_active())
+            || self.influence_absorber.is_some()
+        {
+            return Ok(None);
+        }
+        if self.effective_flex_active(states)? {
+            return if self.flex_timewiggle_active() {
+                self.exact_newton_joint_hessian_third_directional_derivative_timewiggle_flex_all_axes(
+                    states, u, v,
+                )
+            } else {
+                self.exact_newton_joint_hessian_third_directional_derivative_flex_no_wiggle_all_axes(
+                    states, u, v,
+                )
+            }
+            .map(Some);
+        }
+        in_slope_frame!(self, P, Frame, {
+            let kernel =
+                SurvivalMarginalSlopeRowKernel::<P, Frame>::new(self.clone(), states.to_vec());
+            kernel
+                .third_information_all_axes(
+                    u.as_slice()
+                        .ok_or("non-contiguous third information direction u")?,
+                    v.as_slice()
+                        .ok_or("non-contiguous third information direction v")?,
+                )
+                .map(Some)
+        })
+    }
+}
+
+impl crate::custom_family::JeffreysCompletionOuterDerivatives for SurvivalMarginalSlopeFamily {
+    fn contracted_trace_hessian_directional(
+        &self,
+        states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        weight: &Array2<f64>,
+        u: &Array1<f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        if specs.len() != states.len() {
+            return Err("survival contracted trace Hessian derivative block count mismatch".into());
+        }
+        if !self.outer_default_trustworthy_for_joint_hessian(specs)
+            && !self.joint_hessian_is_structurally_coupled(states)?
+        {
+            return Ok(None);
+        }
+        if self.per_z_slope_active()
+            || self.effective_flex_active(states)?
+            || self.flex_timewiggle_active()
+            || self.slope_is_follow_up_varying()
+        {
+            return Ok(None);
+        }
+        let kernel =
+            SurvivalMarginalSlopeRowKernel::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>::new(
+                self.clone(),
+                states.to_vec(),
+            );
+        kernel
+            .contracted_trace_hessian_directional(
+                weight,
+                u.as_slice()
+                    .ok_or("non-contiguous contracted trace Hessian direction u")?,
+            )
+            .map(Some)
+    }
+
+    fn contracted_trace_hessian_second_directional(
+        &self,
+        states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        weight: &Array2<f64>,
+        u: &Array1<f64>,
+        w: &Array1<f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        if specs.len() != states.len() {
+            return Err(
+                "survival contracted trace Hessian second derivative block count mismatch".into(),
+            );
+        }
+        if !self.outer_default_trustworthy_for_joint_hessian(specs)
+            && !self.joint_hessian_is_structurally_coupled(states)?
+        {
+            return Ok(None);
+        }
+        if self.per_z_slope_active()
+            || self.effective_flex_active(states)?
+            || self.flex_timewiggle_active()
+            || self.slope_is_follow_up_varying()
+        {
+            return Ok(None);
+        }
+        let kernel =
+            SurvivalMarginalSlopeRowKernel::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>::new(
+                self.clone(),
+                states.to_vec(),
+            );
+        kernel
+            .contracted_trace_hessian_second_directional(
+                weight,
+                u.as_slice()
+                    .ok_or("non-contiguous contracted trace Hessian direction u")?,
+                w.as_slice()
+                    .ok_or("non-contiguous contracted trace Hessian direction w")?,
+            )
+            .map(Some)
+    }
+}
+
 impl CustomFamily for SurvivalMarginalSlopeFamily {
     fn outer_derivative_pilot_schedule(
         &self,
@@ -732,146 +855,39 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
         Ok(true)
     }
 
-    fn joint_jeffreys_information_third_directional_available(&self) -> bool {
-        // The rigid single-slope row kernel has a closed-form third information
-        // derivative. A score warp or link deviation has the order-five flex contraction,
-        // pulled back linearly without a time wiggle and through the ζ composition of
-        // `timewiggle_third` with one. The hook below returns `None` for a per-score slope,
-        // a time wiggle without a score warp or link deviation, and an influence absorber;
-        // declaring the capability on those would plan an outer Hessian with no derivative
-        // to consume.
-        !(self.per_z_slope_active()
-            || (self.flex_timewiggle_active() && !self.flex_active())
-            || self.influence_absorber.is_some())
-    }
-
-    fn joint_jeffreys_information_third_directional_all_axes_with_specs(
+    /// The rigid single-slope row kernel has a closed-form third information derivative. A score
+    /// warp or link deviation has the order-five flex contraction, pulled back linearly without a
+    /// time wiggle and through the ζ composition of `timewiggle_third` with one. A per-score
+    /// slope, a time wiggle without a score warp or link deviation, and an influence absorber have
+    /// none, and exposing it on those would plan an outer Hessian with no derivative to consume.
+    fn jeffreys_third_information_derivative(
         &self,
-        states: &[ParameterBlockState],
-        specs: &[ParameterBlockSpec],
-        u: &Array1<f64>,
-        v: &Array1<f64>,
-    ) -> Result<Option<Vec<Array2<f64>>>, String> {
-        if specs.len() != states.len() {
-            return Err("survival third information derivative block count mismatch".into());
-        }
+    ) -> Option<&dyn crate::custom_family::JeffreysThirdInformationDerivative> {
         if self.per_z_slope_active()
             || (self.flex_timewiggle_active() && !self.flex_active())
             || self.influence_absorber.is_some()
         {
-            return Ok(None);
+            None
+        } else {
+            Some(self)
         }
-        if self.effective_flex_active(states)? {
-            return if self.flex_timewiggle_active() {
-                self.exact_newton_joint_hessian_third_directional_derivative_timewiggle_flex_all_axes(
-                    states, u, v,
-                )
-            } else {
-                self.exact_newton_joint_hessian_third_directional_derivative_flex_no_wiggle_all_axes(
-                    states, u, v,
-                )
-            }
-            .map(Some);
-        }
-        in_slope_frame!(self, P, Frame, {
-            let kernel =
-                SurvivalMarginalSlopeRowKernel::<P, Frame>::new(self.clone(), states.to_vec());
-            kernel
-                .third_information_all_axes(
-                    u.as_slice()
-                        .ok_or("non-contiguous third information direction u")?,
-                    v.as_slice()
-                        .ok_or("non-contiguous third information direction v")?,
-                )
-                .map(Some)
-        })
     }
 
-    fn joint_jeffreys_completion_outer_derivatives_available(&self) -> bool {
-        // The closed-form fifth and sixth likelihood derivatives cover the rigid,
-        // time-constant slope frame only; every configuration the third hook
-        // refuses, and a follow-up-varying slope, has neither contraction.
-        !(self.per_z_slope_active()
+    /// The closed-form fifth and sixth likelihood derivatives cover the rigid, time-constant
+    /// slope frame only. Every configuration without the third information derivative, and a
+    /// follow-up-varying slope, has neither contraction.
+    fn jeffreys_completion_outer_derivatives(
+        &self,
+    ) -> Option<&dyn crate::custom_family::JeffreysCompletionOuterDerivatives> {
+        if self.per_z_slope_active()
             || self.flex_active()
             || self.flex_timewiggle_active()
-            || self.slope_is_follow_up_varying())
-    }
-
-    fn joint_jeffreys_information_contracted_trace_hessian_directional_with_specs(
-        &self,
-        states: &[ParameterBlockState],
-        specs: &[ParameterBlockSpec],
-        weight: &Array2<f64>,
-        u: &Array1<f64>,
-    ) -> Result<Option<Array2<f64>>, String> {
-        if specs.len() != states.len() {
-            return Err("survival contracted trace Hessian derivative block count mismatch".into());
-        }
-        if !self.outer_default_trustworthy_for_joint_hessian(specs)
-            && !self.joint_hessian_is_structurally_coupled(states)?
-        {
-            return Ok(None);
-        }
-        if self.per_z_slope_active()
-            || self.effective_flex_active(states)?
-            || self.flex_timewiggle_active()
             || self.slope_is_follow_up_varying()
         {
-            return Ok(None);
+            None
+        } else {
+            Some(self)
         }
-        let kernel =
-            SurvivalMarginalSlopeRowKernel::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>::new(
-                self.clone(),
-                states.to_vec(),
-            );
-        kernel
-            .contracted_trace_hessian_directional(
-                weight,
-                u.as_slice()
-                    .ok_or("non-contiguous contracted trace Hessian direction u")?,
-            )
-            .map(Some)
-    }
-
-    fn joint_jeffreys_information_contracted_trace_hessian_second_directional_with_specs(
-        &self,
-        states: &[ParameterBlockState],
-        specs: &[ParameterBlockSpec],
-        weight: &Array2<f64>,
-        u: &Array1<f64>,
-        w: &Array1<f64>,
-    ) -> Result<Option<Array2<f64>>, String> {
-        if specs.len() != states.len() {
-            return Err(
-                "survival contracted trace Hessian second derivative block count mismatch".into(),
-            );
-        }
-        if !self.outer_default_trustworthy_for_joint_hessian(specs)
-            && !self.joint_hessian_is_structurally_coupled(states)?
-        {
-            return Ok(None);
-        }
-        if self.per_z_slope_active()
-            || self.effective_flex_active(states)?
-            || self.flex_timewiggle_active()
-            || self.slope_is_follow_up_varying()
-        {
-            return Ok(None);
-        }
-        let kernel =
-            SurvivalMarginalSlopeRowKernel::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>::new(
-                self.clone(),
-                states.to_vec(),
-            );
-        kernel
-            .contracted_trace_hessian_second_directional(
-                weight,
-                u.as_slice()
-                    .ok_or("non-contiguous contracted trace Hessian direction u")?,
-                w.as_slice()
-                    .ok_or("non-contiguous contracted trace Hessian direction w")?,
-            )
-            .map(Some)
     }
 
     /// gam#979 wide-p Jeffreys completion: `∇²_β tr(W · H(β))` for a
