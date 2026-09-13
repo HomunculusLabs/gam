@@ -3209,6 +3209,7 @@ impl Core {
             let mut alpha = Vec::with_capacity(steps);
             let mut beta: Vec<f64> = Vec::with_capacity(steps);
             let mut q_prev: Option<Vec<f64>> = None;
+            let mut spectral_scale = 0.0_f64;
             for _step in 0..steps {
                 // v = R⁻¹ A R⁻ᵀ q.
                 prec.apply_r_inv_t(&q, &mut scratch_in);
@@ -3217,6 +3218,7 @@ impl Core {
                 let mut v: Vec<f64> = vbuf.clone();
                 let a: f64 = v.iter().zip(q.iter()).map(|(&x, &y)| x * y).sum();
                 alpha.push(a);
+                spectral_scale = spectral_scale.max(a.abs());
                 for j in 0..m {
                     v[j] -= a * q[j];
                 }
@@ -3238,7 +3240,9 @@ impl Core {
                 if !(b.is_finite()) {
                     return Err("residual cascade: Lanczos breakdown (non-finite norm)".into());
                 }
-                if b < 1e-13 {
+                // The Schur-spectrum Lanczos's invariance floor: a residual inside
+                // `eps * steps * max|alpha|` is rounding, not a new Krylov direction (#2469).
+                if b <= f64::EPSILON * alpha.len() as f64 * spectral_scale {
                     break;
                 }
                 beta.push(b);
