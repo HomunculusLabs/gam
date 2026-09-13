@@ -1181,13 +1181,14 @@ impl CostStallGuard {
         // `opt::Arc`'s own gradient-tolerance check never trips here because it
         // tests the RAW gradient, which points out of the box forever.
         let kkt_stationary_at_bound = grad_norm.is_finite() && grad_norm <= self.grad_threshold;
-        // With no incumbent yet the floor is `rel_tol·(1 + ∞) = ∞` and the
-        // comparison `∞ ≤ ∞` held, so the very first observation counted as a
-        // step that bought nothing and every window filled one evaluation early.
-        // The first observation IS an improvement: it is the first incumbent.
-        // Once windows carry a progress licence (#2817) that off-by-one decides
-        // when a run stops, so it is fixed here rather than tolerated.
-        if (floor.is_finite() && improvement <= floor) || kkt_stationary_at_bound {
+        // With no incumbent yet the floor is `rel_tol·(1 + ∞) = ∞`. The first
+        // observation IS an improvement: it is the first incumbent, whatever its
+        // gradient, so it never counts toward a window. Counting it (through
+        // `∞ ≤ ∞`, or through the at-bound test when its gradient is already
+        // inside the band) filled every window one evaluation early. Once windows
+        // carry a progress licence (#2817), that off-by-one decides when a run
+        // stops.
+        if floor.is_finite() && (improvement <= floor || kkt_stationary_at_bound) {
             self.no_improve_streak = self.no_improve_streak.saturating_add(1);
         } else {
             self.no_improve_streak = 0;
