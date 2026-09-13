@@ -35,18 +35,23 @@
 //!
 //! ## Why the tp contract is a certified optimum, not bit-identity
 //!
-//! A permutation reorders every O(n) reduction, so the outer search runs on the
-//! same criterion under different rounding and stops at a different point inside
-//! its certificate's tolerance ball. Pool job 599189 at `583577152` measured this
-//! with a lane-only diagnostic: the base tp fit and six same-order fits with `y`
-//! nudged by one ulp all land on one λ̂ (curve drift 1.8e-11), while the six
-//! permutations land on two other λ̂ up to 3e-6 away in relative terms (curve
-//! drift 1.2e-7 of a 2.4 signal range). That is one optimum located twice, the
-//! same situation `tests/pyffi/optimization/warm_start_invariance_contract.rs`
-//! documents for a donated seed. The #1378 defects looked different: a different
-//! tied knot built a different basis, and a stalled ARC left λ̂ uncertified.
+//! A permutation reorders every O(n) reduction, so even a correct pipeline stops
+//! at a different point inside its certificate's tolerance ball, which
+//! `tests/pyffi/optimization/warm_start_invariance_contract.rs` documents for a
+//! donated seed. Bit-identity of λ̂ is therefore not the contract.
 //!
-//! So the tp gate asserts the two things a certificate controls, both DERIVED:
+//! What a lane-only diagnostic measured (pool jobs 599189 at `583577152` and
+//! 602711 at `0243a382d`): the base tp fit and six same-order fits with `y`
+//! nudged by one ulp land on one λ̂ with criteria within 8 ulps (curve drift
+//! 1.8e-11). The six permutations land on two other λ̂, up to 3e-6 away in
+//! relative terms, with criteria 1.3e8 to 1.7e8 ulps from the base (curve drift
+//! 1.2e-7 of a 2.4 signal range). ps and cr permutations move their criteria by
+//! at most 240 ulps. So a permuted tp fit is NOT the same criterion reassociated,
+//! and this gate reports it. The diagnostic does not establish why: nudging `y`
+//! leaves the design bit-identical, so it cannot separate rounding amplified
+//! through design-dependent terms from a computation that depends on row order.
+//!
+//! The tp gate asserts the two things a certificate controls, both DERIVED:
 //!   * the criterion agrees within the ulp budget of reassociating its O(n)
 //!     reductions, which a different basis misses by many orders;
 //!   * each permutation's log-λ̂ lies inside the ball both certificates publish,
