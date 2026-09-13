@@ -16,23 +16,12 @@ fn floor_third(x: f64, floor: f64) -> f64 {
     }
 }
 
+/// `(G₁₁₁, G₁₁₂, G₁₂₂, G₂₂₂)` of the conditioning gate, read from the gate's own third
+/// partials. A local copy that picks the absolute branch by `∂G/∂λ_max == 0` goes wrong
+/// once the floor-collapse factor gives the absolute branch a `λ_max` motion (gam#2765).
 fn gate_third(lo: f64, hi: f64) -> [f64; 4] {
-    let (gm, gx) = conditioning_gate_weight_grad(lo, hi);
-    if gm == 0.0 && gx == 0.0 { return [0.0; 4]; }
-    if gx == 0.0 {
-        return [12.0 / (CONDITIONING_GATE_ABSOLUTE_CLEAR - CONDITIONING_GATE_ABSOLUTE).powi(3), 0.0, 0.0, 0.0];
-    }
-    let span = CONDITIONING_GATE_RELATIVE_CLEAR.log10() - CONDITIONING_GATE_RELATIVE.log10();
-    let t = ((lo / hi).log10() - CONDITIONING_GATE_RELATIVE.log10()) / span;
-    let w1 = -6.0 * t * (1.0 - t) / span;
-    let w2 = -6.0 * (1.0 - 2.0 * t) / span.powi(2);
-    let w3 = 12.0 / span.powi(3);
-    let ln = std::f64::consts::LN_10;
-    let (a, b) = (1.0 / (lo * ln), -1.0 / (hi * ln));
-    let (aa, bb) = (-1.0 / (lo * lo * ln), 1.0 / (hi * hi * ln));
-    [w3*a*a*a + 3.0*w2*a*aa + 2.0*w1/(lo.powi(3)*ln),
-     w3*a*a*b + w2*aa*b, w3*a*b*b + w2*a*bb,
-     w3*b*b*b + 3.0*w2*b*bb - 2.0*w1/(hi.powi(3)*ln)]
+    let (mmm, mmx, mxx, xxx) = conditioning_gate_weight_third(lo, hi);
+    [mmm, mmx, mxx, xxx]
 }
 
 impl JeffreysHphiDriftBase {

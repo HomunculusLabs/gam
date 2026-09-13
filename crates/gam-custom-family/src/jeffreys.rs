@@ -493,7 +493,7 @@ pub(crate) fn custom_family_jeffreys_conditioning_gate_weight(
     lambda_min: f64,
     lambda_max: f64,
 ) -> f64 {
-    if lambda_max <= 0.0 || !lambda_min.is_finite() {
+    if !(lambda_max > 0.0) {
         return 1.0;
     }
     #[inline]
@@ -507,6 +507,18 @@ pub(crate) fn custom_family_jeffreys_conditioning_gate_weight(
         let t = (x - under) / (clear - under);
         1.0 - t * t * (3.0 - 2.0 * t)
     }
+    // The same floor-collapse factor as gam-solve's `conditioning_gate_weight`: once the
+    // relative floor crosses the absolute gate band the log window is empty and the term
+    // is ramped off, so the completion's contract weight gates exactly as the value does
+    // (gam#2765).
+    let floor_collapse = ramp_down(
+        JEFFREYS_REDUCED_INFO_RELATIVE_FLOOR * lambda_max,
+        JEFFREYS_CONDITIONING_GATE_ABSOLUTE,
+        JEFFREYS_CONDITIONING_GATE_ABSOLUTE_CLEAR,
+    );
+    if !lambda_min.is_finite() {
+        return floor_collapse;
+    }
     let w_abs = ramp_down(
         lambda_min,
         JEFFREYS_CONDITIONING_GATE_ABSOLUTE,
@@ -518,7 +530,7 @@ pub(crate) fn custom_family_jeffreys_conditioning_gate_weight(
         JEFFREYS_CONDITIONING_GATE_RELATIVE.log10(),
         JEFFREYS_CONDITIONING_GATE_RELATIVE_CLEAR.log10(),
     );
-    w_abs.max(w_rel)
+    w_abs.max(w_rel) * floor_collapse
 }
 
 pub(crate) fn custom_family_joint_jeffreys_contract_weight(

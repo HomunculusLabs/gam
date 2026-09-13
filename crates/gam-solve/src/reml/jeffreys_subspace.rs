@@ -105,6 +105,9 @@ pub(crate) const REDUCED_INFO_ABSOLUTE_FLOOR: f64 = 1e-12;
 /// `max(·, floor)` keeps the branch order well-defined in the (extreme-scale)
 /// regime where the relative floor exceeds the gate scale; the joins remain
 /// C¹ automatically there because the log window simply collapses to empty.
+/// In that regime the conditioning gate is zero (its floor-collapse factor,
+/// [`floor_collapse_weight_derivatives`]), so these branches shape no value the
+/// objective reads (gam#2765).
 #[inline]
 pub(crate) fn jeffreys_cap(floor: f64) -> f64 {
     CONDITIONING_GATE_ABSOLUTE_CLEAR.max(floor)
@@ -145,8 +148,13 @@ pub(crate) fn jeffreys_cap(floor: f64) -> f64 {
 /// is the per-eigenvalue, smooth realisation of the same self-limitation the
 /// binary conditioning gate states globally: exact `ln λ` inside the
 /// under-identified window `[floor, Λ)`, flat outside it. `g` spans the
-/// bounded range `(ln floor − 2, ln Λ + 1]`, so `Φ` can never out-pay a
-/// data-likelihood term.
+/// range `(ln floor − 2, ln Λ + 1]`. That range is bounded only while the floor
+/// is: the relative floor tracks `λ_max`, which a likelihood-domain face drives
+/// without limit, and past `floor = Λ` every eigenvalue's `g` is `ln floor ± 1`.
+/// The conditioning gate's floor-collapse factor
+/// ([`floor_collapse_weight_derivatives`]) ramps the term off as the floor crosses
+/// the gate band, which is what keeps `Φ` from out-paying a data-likelihood term
+/// there (gam#2765).
 #[inline]
 pub(crate) fn floored_inverse(lam: f64, floor: f64) -> f64 {
     let cap = jeffreys_cap(floor);
@@ -531,7 +539,7 @@ pub(crate) const CONDITIONING_GATE_RELATIVE_CLEAR: f64 = 1e-6;
 /// parameters. The term fires when EITHER criterion reports under-identification,
 /// so the weight is the MAX of the absolute and relative sub-weights.
 #[inline]
-pub(crate) fn conditioning_gate_weight(lambda_min: f64, lambda_max: f64) -> f64 {
+fn spectral_gate_weight(lambda_min: f64, lambda_max: f64) -> f64 {
     if lambda_max <= 0.0 {
         // Degenerate / non-positive spectrum: not well-conditioned, fully active.
         return 1.0;
@@ -578,9 +586,9 @@ pub(crate) fn conditioning_gate_weight(lambda_min: f64, lambda_max: f64) -> f64 
 /// mismatch in gam#854, even when no eigenvalue is floored. Returns `(0, 0)` on the
 /// saturated / degenerate branches where `G` is locally constant (so the outer
 /// drift is byte-unchanged on every fully-active or well-conditioned fit).
-pub(crate) fn conditioning_gate_weight_grad(lambda_min: f64, lambda_max: f64) -> (f64, f64) {
+fn spectral_gate_weight_grad(lambda_min: f64, lambda_max: f64) -> (f64, f64) {
     if lambda_max <= 0.0 || !lambda_min.is_finite() {
-        // Matches `conditioning_gate_weight`'s constant-`1.0` early returns.
+        // Matches `spectral_gate_weight`'s constant-`1.0` early returns.
         return (0.0, 0.0);
     }
     // `ramp_down`'s value and derivative: `d/dx [1 − (3t² − 2t³)] = −6 t (1−t) / (clear − under)`
@@ -638,7 +646,7 @@ pub(crate) fn conditioning_gate_weight_grad(lambda_min: f64, lambda_max: f64) ->
 /// exactly inside that band. Returns `(0, 0, 0)` on the saturated / degenerate
 /// branches where `G` is locally affine (so the outer drift stays byte-unchanged on
 /// every fully-active or well-conditioned fit, matching the `_grad` early returns).
-pub(crate) fn conditioning_gate_weight_hess(lambda_min: f64, lambda_max: f64) -> (f64, f64, f64) {
+fn spectral_gate_weight_hess(lambda_min: f64, lambda_max: f64) -> (f64, f64, f64) {
     if lambda_max <= 0.0 || !lambda_min.is_finite() {
         return (0.0, 0.0, 0.0);
     }
@@ -699,7 +707,7 @@ pub(crate) fn conditioning_gate_weight_hess(lambda_min: f64, lambda_max: f64) ->
 /// β-drift of the gate motion inside the Jeffreys mode-response curvature needs
 /// (gam#1082). Same active-branch selection; zero on the saturated and degenerate
 /// branches, where `G` is locally constant.
-pub(crate) fn conditioning_gate_weight_third(
+fn spectral_gate_weight_third(
     lambda_min: f64,
     lambda_max: f64,
 ) -> (f64, f64, f64, f64) {
@@ -744,7 +752,7 @@ pub(crate) fn conditioning_gate_weight_third(
 /// selection. The cubic ramp has no fourth derivative, so the absolute branch and
 /// the saturated and degenerate branches are zero; the relative branch composes the
 /// ramp with `r = log₁₀(λ_min/λ_max)`.
-pub(crate) fn conditioning_gate_weight_fourth(
+fn spectral_gate_weight_fourth(
     lambda_min: f64,
     lambda_max: f64,
 ) -> (f64, f64, f64, f64, f64) {
@@ -821,6 +829,112 @@ fn conditioning_log10_ratio(lambda_min: f64, lambda_max: f64) -> f64 {
     } else {
         f64::NEG_INFINITY
     }
+}
+
+/// The floor-collapse factor `F` of the conditioning gate and its first three
+/// derivatives in `λ_max`: `F = ramp_down(REDUCED_INFO_RELATIVE_FLOOR·λ_max,
+/// CONDITIONING_GATE_ABSOLUTE, CONDITIONING_GATE_ABSOLUTE_CLEAR)`.
+///
+/// The Jeffreys value takes `ln λ` only on the window `[floor, Λ)` with
+/// `Λ = CONDITIONING_GATE_ABSOLUTE_CLEAR`, and the relative floor tracks `λ_max`.
+/// Once that floor reaches `Λ` the window is empty: every reduced eigenvalue is
+/// either below the resolution floor or identified, so the term bounds nothing,
+/// and what is left of its value is `½·m·ln floor`, a reward for growing `λ_max`.
+/// A likelihood with a domain face drives `λ_max` without limit (an event row's
+/// `−ln η′₁` curvature on the survival marginal-slope follow-up face), and that
+/// reward outgrows the one barrier term, so `−ℓ + ½βᵀSβ − Φ` has no lower bound
+/// there (gam#2765). `F` ramps the term off over the same one-to-sixteen
+/// observation-equivalent band the absolute gate reads `λ_min` on, as the floor
+/// crosses it, so `Φ` is bounded everywhere and exactly zero past the band.
+/// Below the band `F = 1` and every derivative is zero, so a fit whose
+/// `λ_max ≤ 1/REDUCED_INFO_RELATIVE_FLOOR` is byte-unchanged.
+#[inline]
+fn floor_collapse_weight_derivatives(lambda_max: f64) -> (f64, f64, f64, f64) {
+    if !(lambda_max > 0.0) {
+        return (1.0, 0.0, 0.0, 0.0);
+    }
+    let (value, d1, d2, d3) = conditioning_ramp_down_derivatives(
+        REDUCED_INFO_RELATIVE_FLOOR * lambda_max,
+        CONDITIONING_GATE_ABSOLUTE,
+        CONDITIONING_GATE_ABSOLUTE_CLEAR,
+    );
+    let rate = REDUCED_INFO_RELATIVE_FLOOR;
+    (value, d1 * rate, d2 * rate * rate, d3 * rate * rate * rate)
+}
+
+/// The conditioning gate weight `G = max(w_abs, w_rel)·F`: the spectral gate
+/// [`spectral_gate_weight`] times the floor-collapse factor of
+/// [`floor_collapse_weight_derivatives`]. Every consumer of the gate and of its
+/// partials reads it through these five functions, so the value and all of its
+/// derivatives carry the same factor.
+#[inline]
+pub(crate) fn conditioning_gate_weight(lambda_min: f64, lambda_max: f64) -> f64 {
+    spectral_gate_weight(lambda_min, lambda_max) * floor_collapse_weight_derivatives(lambda_max).0
+}
+
+/// `(∂G/∂λ_min, ∂G/∂λ_max)` of [`conditioning_gate_weight`], by the product rule over
+/// [`spectral_gate_weight_grad`] and the floor-collapse factor, which reads `λ_max`
+/// only.
+pub(crate) fn conditioning_gate_weight_grad(lambda_min: f64, lambda_max: f64) -> (f64, f64) {
+    let (f, f1, _, _) = floor_collapse_weight_derivatives(lambda_max);
+    let w = spectral_gate_weight(lambda_min, lambda_max);
+    let (w_min, w_max) = spectral_gate_weight_grad(lambda_min, lambda_max);
+    (w_min * f, w_max * f + w * f1)
+}
+
+/// `(G₁₁, G₁₂, G₂₂)` of [`conditioning_gate_weight`] in `(λ_min, λ_max)`, by the
+/// product rule over [`spectral_gate_weight_hess`] and the floor-collapse factor.
+pub(crate) fn conditioning_gate_weight_hess(lambda_min: f64, lambda_max: f64) -> (f64, f64, f64) {
+    let (f, f1, f2, _) = floor_collapse_weight_derivatives(lambda_max);
+    let w = spectral_gate_weight(lambda_min, lambda_max);
+    let (w_min, w_max) = spectral_gate_weight_grad(lambda_min, lambda_max);
+    let (w_mm, w_mx, w_xx) = spectral_gate_weight_hess(lambda_min, lambda_max);
+    (
+        w_mm * f,
+        w_mx * f + w_min * f1,
+        w_xx * f + 2.0 * w_max * f1 + w * f2,
+    )
+}
+
+/// `(G₁₁₁, G₁₁₂, G₁₂₂, G₂₂₂)` of [`conditioning_gate_weight`], by the product rule
+/// over [`spectral_gate_weight_third`] and the floor-collapse factor.
+pub(crate) fn conditioning_gate_weight_third(
+    lambda_min: f64,
+    lambda_max: f64,
+) -> (f64, f64, f64, f64) {
+    let (f, f1, f2, f3) = floor_collapse_weight_derivatives(lambda_max);
+    let w = spectral_gate_weight(lambda_min, lambda_max);
+    let (w_min, w_max) = spectral_gate_weight_grad(lambda_min, lambda_max);
+    let (w_mm, w_mx, w_xx) = spectral_gate_weight_hess(lambda_min, lambda_max);
+    let (w_mmm, w_mmx, w_mxx, w_xxx) = spectral_gate_weight_third(lambda_min, lambda_max);
+    (
+        w_mmm * f,
+        w_mmx * f + w_mm * f1,
+        w_mxx * f + 2.0 * w_mx * f1 + w_min * f2,
+        w_xxx * f + 3.0 * w_xx * f1 + 3.0 * w_max * f2 + w * f3,
+    )
+}
+
+/// `(G₁₁₁₁, G₁₁₁₂, G₁₁₂₂, G₁₂₂₂, G₂₂₂₂)` of [`conditioning_gate_weight`], by the
+/// product rule over [`spectral_gate_weight_fourth`] and the floor-collapse factor.
+/// The cubic ramp has no fourth derivative, so no `W·F''''` term appears.
+pub(crate) fn conditioning_gate_weight_fourth(
+    lambda_min: f64,
+    lambda_max: f64,
+) -> (f64, f64, f64, f64, f64) {
+    let (f, f1, f2, f3) = floor_collapse_weight_derivatives(lambda_max);
+    let (w_min, w_max) = spectral_gate_weight_grad(lambda_min, lambda_max);
+    let (w_mm, w_mx, w_xx) = spectral_gate_weight_hess(lambda_min, lambda_max);
+    let (w_mmm, w_mmx, w_mxx, w_xxx) = spectral_gate_weight_third(lambda_min, lambda_max);
+    let (w_mmmm, w_mmmx, w_mmxx, w_mxxx, w_xxxx) =
+        spectral_gate_weight_fourth(lambda_min, lambda_max);
+    (
+        w_mmmm * f,
+        w_mmmx * f + w_mmm * f1,
+        w_mmxx * f + 2.0 * w_mmx * f1 + w_mm * f2,
+        w_mxxx * f + 3.0 * w_mxx * f1 + 3.0 * w_mx * f2 + w_min * f3,
+        w_xxxx * f + 4.0 * w_xxx * f1 + 6.0 * w_xx * f2 + 4.0 * w_max * f3,
+    )
 }
 
 /// Safety factor by which the CONSERVATIVE spectral bounds must clear each
@@ -2203,6 +2317,18 @@ impl JointJeffreysPlan {
                 return Err(format!(
                     "joint Jeffreys explicit mixed trace weights reached an absolute-gate stratum at λ_min={:e}, knot={knot:e}, tolerance={branch_tol:e}",
                     self.lambda_min
+                ));
+            }
+        }
+        // The floor-collapse factor ramps on `REDUCED_INFO_RELATIVE_FLOOR·λ_max` over the
+        // same knots, so `λ_max` at `knot / REDUCED_INFO_RELATIVE_FLOOR` is a stratum too
+        // (gam#2765).
+        for knot in [CONDITIONING_GATE_ABSOLUTE, CONDITIONING_GATE_ABSOLUTE_CLEAR] {
+            let lambda_max_knot = knot / REDUCED_INFO_RELATIVE_FLOOR;
+            if (self.lambda_max - lambda_max_knot).abs() <= branch_tol {
+                return Err(format!(
+                    "joint Jeffreys explicit mixed trace weights reached a floor-collapse stratum at λ_max={:e}, knot={lambda_max_knot:e}, tolerance={branch_tol:e}",
+                    self.lambda_max
                 ));
             }
         }
@@ -6828,6 +6954,149 @@ mod tests {
             nonzero_configs >= 2,
             "only {nonzero_configs} configs reach the relative transition band"
         );
+    }
+
+    /// gam#2765: the floor-collapse factor reads `λ_max`, so inside
+    /// `REDUCED_INFO_RELATIVE_FLOOR·λ_max ∈ (1, 16)` every partial of the gate gains a
+    /// `λ_max` motion. Each order is graded against a central difference of the order
+    /// below, in the dimensionless coordinates `λ_min^a·λ_max^b·∂^{a+b}G`: at
+    /// `λ_max ≈ 1e10` a `λ_max` partial is about `1e-11`, so an absolute bar would pass
+    /// on any value. The spectral gate is held saturated on, inside its relative band,
+    /// and off.
+    #[test]
+    pub(crate) fn conditioning_gate_partials_match_finite_difference_on_the_floor_collapse_band_2765()
+    {
+        let configs: [(f64, f64); 4] = [
+            (0.05, 5.0e10),  // spectral gate saturated on; only the floor factor moves
+            (8.0, 3.0e10),   // absolute band under a saturated relative ramp: G's max is 1
+            (5.0e3, 5.0e10), // relative band mid (ratio 1e-7) inside the floor band
+            (1.0e6, 5.0e10), // spectral gate off: every partial is zero
+        ];
+        let mut moving_configs = 0usize;
+        for &(lmin, lmax) in &configs {
+            let (hmin, hmax) = (1e-6 * lmin, 1e-6 * lmax);
+            let grade = |label: &str, scale: f64, analytic: f64, fd: f64| {
+                let (scaled_analytic, scaled_fd) = (scale * analytic, scale * fd);
+                assert!(
+                    (scaled_analytic - scaled_fd).abs()
+                        <= 1e-5 * scaled_analytic.abs().max(scaled_fd.abs()).max(1e-6),
+                    "{label} desync at (λ_min={lmin:e}, λ_max={lmax:e}): \
+                     scaled analytic={scaled_analytic:e} scaled fd={scaled_fd:e}"
+                );
+            };
+            let d_min = |f: &dyn Fn(f64, f64) -> f64| {
+                (f(lmin + hmin, lmax) - f(lmin - hmin, lmax)) / (2.0 * hmin)
+            };
+            let d_max = |f: &dyn Fn(f64, f64) -> f64| {
+                (f(lmin, lmax + hmax) - f(lmin, lmax - hmax)) / (2.0 * hmax)
+            };
+
+            let (g_min, g_max) = conditioning_gate_weight_grad(lmin, lmax);
+            grade("G_min", lmin, g_min, d_min(&|a, b| conditioning_gate_weight(a, b)));
+            grade("G_max", lmax, g_max, d_max(&|a, b| conditioning_gate_weight(a, b)));
+
+            let (g_mm, g_mx, g_xx) = conditioning_gate_weight_hess(lmin, lmax);
+            grade("G_mm", lmin * lmin, g_mm, d_min(&|a, b| conditioning_gate_weight_grad(a, b).0));
+            grade("G_mx", lmin * lmax, g_mx, d_max(&|a, b| conditioning_gate_weight_grad(a, b).0));
+            grade("G_xx", lmax * lmax, g_xx, d_max(&|a, b| conditioning_gate_weight_grad(a, b).1));
+
+            let (g_mmm, g_mmx, g_mxx, g_xxx) = conditioning_gate_weight_third(lmin, lmax);
+            grade("G_mmm", lmin.powi(3), g_mmm, d_min(&|a, b| conditioning_gate_weight_hess(a, b).0));
+            grade(
+                "G_mmx",
+                lmin * lmin * lmax,
+                g_mmx,
+                d_max(&|a, b| conditioning_gate_weight_hess(a, b).0),
+            );
+            grade(
+                "G_mxx",
+                lmin * lmax * lmax,
+                g_mxx,
+                d_max(&|a, b| conditioning_gate_weight_hess(a, b).1),
+            );
+            grade("G_xxx", lmax.powi(3), g_xxx, d_max(&|a, b| conditioning_gate_weight_hess(a, b).2));
+
+            let (q_mmmm, q_mmmx, q_mmxx, q_mxxx, q_xxxx) =
+                conditioning_gate_weight_fourth(lmin, lmax);
+            grade(
+                "G_mmmm",
+                lmin.powi(4),
+                q_mmmm,
+                d_min(&|a, b| conditioning_gate_weight_third(a, b).0),
+            );
+            grade(
+                "G_mmmx",
+                lmin.powi(3) * lmax,
+                q_mmmx,
+                d_max(&|a, b| conditioning_gate_weight_third(a, b).0),
+            );
+            grade(
+                "G_mmxx",
+                lmin * lmin * lmax * lmax,
+                q_mmxx,
+                d_max(&|a, b| conditioning_gate_weight_third(a, b).1),
+            );
+            grade(
+                "G_mxxx",
+                lmin * lmax.powi(3),
+                q_mxxx,
+                d_max(&|a, b| conditioning_gate_weight_third(a, b).2),
+            );
+            grade(
+                "G_xxxx",
+                lmax.powi(4),
+                q_xxxx,
+                d_max(&|a, b| conditioning_gate_weight_third(a, b).3),
+            );
+
+            if (lmax * g_max).abs() > 1e-2 {
+                moving_configs += 1;
+            }
+        }
+        // Without the floor factor the two saturated configs have no λ_max motion at all.
+        assert!(
+            moving_configs >= 3,
+            "only {moving_configs} configs carry a λ_max motion on the floor band"
+        );
+    }
+
+    /// gam#2765: an event row approaching the survival marginal-slope follow-up face sends
+    /// `λ_max` without limit through its `−ln η′₁` curvature, and the relative floor tracks
+    /// it. Without the floor-collapse factor every eigenvalue's `g` became `ln floor ± 1`,
+    /// so `Φ ≈ ½·m·ln(1e-10·λ_max)`. Lane sw4 job 406719 (log
+    /// `sw4-logs/margin1.406719.log`) measured Φ rising 286.76 over the step that put
+    /// min η′₁ at 1.1e-16, against a 20.90 rise in the plain objective. The value must
+    /// stay below `½·m·(ln Λ + 1)` at every `λ_max` and be exactly zero once the floor
+    /// has crossed the gate band.
+    #[test]
+    pub(crate) fn jeffreys_value_is_bounded_as_the_largest_reduced_eigenvalue_diverges_2765() {
+        let z = Array2::<f64>::eye(3);
+        let ceiling = 0.5 * 3.0 * (CONDITIONING_GATE_ABSOLUTE_CLEAR.ln() + 1.0);
+        let collapsed_from = CONDITIONING_GATE_ABSOLUTE_CLEAR / REDUCED_INFO_RELATIVE_FLOOR;
+        let mut active_values = 0usize;
+        for lambda_max in [1.0e6, 1.0e9, 3.0e10, 1.0e12, 1.0e16, 1.0e32] {
+            let h = Array2::from_diag(&Array1::from(vec![0.5, 3.0, lambda_max]));
+            let plan = JointJeffreysPlan::prepare(h.view(), z.view()).expect("diagonal plan");
+            let value = plan.value();
+            assert!(value.is_finite(), "Φ at λ_max={lambda_max:e} is {value}");
+            assert!(
+                value <= ceiling,
+                "Φ={value:e} at λ_max={lambda_max:e} out-pays the ceiling {ceiling:e}"
+            );
+            if lambda_max >= collapsed_from {
+                assert!(
+                    !plan.is_active() && value == 0.0 && plan.value_roundoff_bound() == 0.0,
+                    "the floor has crossed the gate band at λ_max={lambda_max:e}, so the term \
+                     must be off: value={value:e} weight={:e}",
+                    plan.conditioning_gate_weight()
+                );
+            } else if value != 0.0 {
+                active_values += 1;
+            }
+        }
+        // Below the band the under-identified direction keeps the term on, so the bound is
+        // not met by switching the term off everywhere.
+        assert!(active_values >= 3, "only {active_values} spectra kept the term on");
     }
 
     #[test]
