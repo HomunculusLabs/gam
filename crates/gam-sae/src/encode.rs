@@ -85,15 +85,6 @@ pub(crate) const KANTOROVICH_THRESHOLD: f64 = 0.5;
 /// and per-row encodes share this rule, so they stay bit-identical.
 pub(crate) const NEWTON_REFINE_CONVERGED_EPS: f64 = 1.0e-12;
 
-/// Global-minimum short-circuit floor for top-K certified routing. The
-/// reconstruction error `‖x − z·m(t)‖` is bounded below by 0, so a certified
-/// candidate whose residual already sits at the ambient noise floor
-/// (`≤ this · (1 + ‖x‖)`) is provably the global optimum over the charts — no
-/// competing chart can reach a strictly lower residual. The remaining candidates'
-/// refinement is then skipped. Conservative (a genuine second basin of the same
-/// target reconstructs the SAME point, so returning the first is a valid encode).
-pub(crate) const CERTIFIED_GLOBAL_MIN_RECON_FLOOR: f64 = 1.0e-11;
-
 /// A chart region on an atom's latent coordinate: a center `t_c` plus a
 /// certified in-chart radius. Over the ball `‖t − t_c‖ ≤ radius` the jet sup
 /// bounds returned by [`BasisHessianLipschitz`] hold, so the Kantorovich
@@ -2312,14 +2303,14 @@ impl EncodeAtlas {
                     amplitude,
                     objective,
                 );
-                if best.as_ref().map(|(_, _, e)| err < *e).unwrap_or(true) {
-                    best = Some((coord, cert, err));
-                }
-                // Global-minimum short-circuit: reconstruction error ≥ 0, so a
-                // certified candidate already at the ambient noise floor is provably
-                // the global optimum over the remaining charts — stop refining them.
-                if let Some((_, _, e)) = best.as_ref() {
-                    if *e <= CERTIFIED_GLOBAL_MIN_RECON_FLOOR * (1.0 + x.dot(&x).sqrt()) {
+                if best.as_ref().map(|(_, _, e)| err.value < *e).unwrap_or(true) {
+                    best = Some((coord, cert, err.value));
+                    // Global-minimum short-circuit: reconstruction error ≥ 0, so a
+                    // certified candidate whose error lies inside the rounding band of
+                    // its own evaluation cannot be beaten by more than rounding over
+                    // the remaining charts — stop refining them. Only a new best can
+                    // newly pass this test.
+                    if err.value <= err.rounding_band {
                         break;
                     }
                 }
@@ -2378,8 +2369,8 @@ impl EncodeAtlas {
                                 amplitude,
                                 objective,
                             );
-                            if best.as_ref().map(|(_, _, e)| err < *e).unwrap_or(true) {
-                                best = Some((coord, cert, err));
+                            if best.as_ref().map(|(_, _, e)| err.value < *e).unwrap_or(true) {
+                                best = Some((coord, cert, err.value));
                             }
                         }
                     }
@@ -2904,6 +2895,17 @@ pub(crate) fn certified_encode_candidates(
     .collect()
 }
 
+/// A candidate's objective-aware reconstruction error, with the rounding band of
+/// its evaluation.
+pub(crate) struct EncodeReconstructionError {
+    /// `‖Uᵀr‖` under a metric, `‖r‖₂` without one.
+    pub(crate) value: f64,
+    /// Bound on how far `value` can sit from the error of the same coordinate
+    /// computed exactly, through the rounding of `r = x − z·Φ(t)B` and, under a
+    /// metric, of `Uᵀr`. An error at or inside it is indistinguishable from zero.
+    pub(crate) rounding_band: f64,
+}
+
 /// Objective-aware reconstruction error (F3): the WHITENED residual norm
 /// `‖M^{1/2} r‖ = ‖Uᵀ r‖` when a metric is active, so the candidate-ranking /
 /// warm-start SSE guard measures error in the SAME metric the certified objective
@@ -2917,45 +2919,76 @@ pub(crate) fn encode_reconstruction_error_core(
     x: ArrayView1<'_, f64>,
     amplitude: f64,
     objective: &EncodeObjective<'_>,
-) -> f64 {
+) -> EncodeReconstructionError {
+    let unavailable = EncodeReconstructionError {
+        value: f64::INFINITY,
+        rounding_band: 0.0,
+    };
     let d = atom.latent_dim();
     let p = atom.output_dim();
     let m = atom.basis_size();
     let coords = match coord.to_shape((1, d)) {
         Ok(c) => c.to_owned(),
-        Err(_) => return f64::INFINITY,
+        Err(_) => return unavailable,
     };
     let Ok((phi, _jet)) = evaluator.evaluate(coords.view()) else {
-        return f64::INFINITY;
+        return unavailable;
     };
+    // Each residual component is `m` products and additions, the amplitude scaling
+    // and the subtraction from `x`, so it carries `γ_{m+2}` of its terms' magnitude.
+    let residual_growth = gam_linalg::roundoff::accumulation_growth(m + 2);
     let mut residual = Array1::<f64>::zeros(p);
+    let mut residual_band = Array1::<f64>::zeros(p);
     for out in 0..p {
         let mut recon = 0.0;
+        let mut recon_absolute = 0.0_f64;
         for basis_col in 0..m {
-            recon += phi[[0, basis_col]] * atom.decoder_coefficients()[[basis_col, out]];
+            let term = phi[[0, basis_col]] * atom.decoder_coefficients()[[basis_col, out]];
+            recon += term;
+            recon_absolute += term.abs();
         }
         residual[out] = x[out] - amplitude * recon;
+        residual_band[out] = residual_growth * (x[out].abs() + amplitude.abs() * recon_absolute);
     }
     // `½ rᵀ M r = ½‖Uᵀr‖²` under `M = U Uᵀ`; the guard reports the metric norm
     // `‖Uᵀr‖`. Euclidean (`None`) accumulates `Σ r²` in the SAME element order as
     // the historical loop, so the metric-free guard is bit-for-bit unchanged.
-    let err2 = match objective.metric_factor {
+    let (err2, rounding_band) = match objective.metric_factor {
         Some(u) => {
             let utr = u.t().dot(&residual);
-            utr.dot(&utr)
+            // Component `k` of `Uᵀr` is a `p`-term accumulation over residual
+            // entries that each carry their own band.
+            let projection_growth = gam_linalg::roundoff::accumulation_growth(p);
+            let band_sq: f64 = (0..u.ncols())
+                .map(|k| {
+                    let band: f64 = u
+                        .column(k)
+                        .iter()
+                        .zip(residual.iter().zip(residual_band.iter()))
+                        .map(|(&weight, (&entry, &entry_band))| {
+                            weight.abs() * (entry_band + projection_growth * entry.abs())
+                        })
+                        .sum();
+                    band * band
+                })
+                .sum();
+            (utr.dot(&utr), band_sq.sqrt())
         }
         None => {
             let mut e = 0.0;
             for out in 0..p {
                 e += residual[out] * residual[out];
             }
-            e
+            (e, residual_band.dot(&residual_band).sqrt())
         }
     };
     if err2.is_finite() {
-        err2.sqrt()
+        EncodeReconstructionError {
+            value: err2.sqrt(),
+            rounding_band,
+        }
     } else {
-        f64::INFINITY
+        unavailable
     }
 }
 

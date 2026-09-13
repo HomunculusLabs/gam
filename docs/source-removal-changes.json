@@ -6502,5 +6502,13 @@
     ],
     "reason": "#2818 retirement of three print-only measurements. 05d39b8be restored these #2425 and #2623 probes from d484a091a^, but each one's own doc says 'MEASUREMENT (reports, never fails)': it prints an FD or rho-part ladder and asserts nothing about its subject, so it cannot go red, which SPEC rule 16 rules out as a passing gate. The #2425 rail question stays gated by iso_kappa_rail_gradient_matches_fd_at_both_faces_2444 and outer_gradient_at_large_rho_has_a_lambda_infinity_face_2450. The #2623 probe's own doc says the channel (D) gate belongs in the commit that fixes it.",
     "evidence": "At 0c86c760a03bd07ad8bb9fb6094f4092074a6ff2, each body between `fn NAME() {` and its closing brace contains no assert, and each doc comment contains 'reports, never fails'; the landing script checks both before it deletes. iso_kappa_fd_variant_driver keeps 16 other call sites in the file, rho_gradient_part_ladder_family_2454 keeps its Gaussian wrapper caller, and every RhoGradientLadderRow2454 field is still read outside the #2623 probe, so nothing else becomes dead."
+  },
+  {
+    "base": "d830a50c3f82922482a387f1c6c612c62b57b42f",
+    "items": [
+      "crates/gam-sae/src/encode.rs:const:CERTIFIED_GLOBAL_MIN_RECON_FLOOR"
+    ],
+    "reason": "SPEC rule 23 (#2469). The certified top-K encode stopped refining further charts once the best reconstruction error fell at or below CERTIFIED_GLOBAL_MIN_RECON_FLOOR·(1 + ‖x‖), with the floor at 1e-11: a picked ratio plus an absolute unit, and no proof of the 'provably the global optimum' claim it documented, since a later chart could still reach 1e-15. encode_reconstruction_error_core now returns the error with the rounding band of its evaluation: γ_{m+2}·(|x_c| + |z|·Σ_b|φ_b·B_bc|) per residual component (gam_linalg::roundoff::accumulation_growth), propagated through Uᵀr under a metric. The short-circuit fires when a new best error lies within that band, where no chart can beat it by more than rounding. Nothing is left for the constant to scale.",
+    "evidence": "At the base, git grep -n -w CERTIFIED_GLOBAL_MIN_RECON_FLOOR finds only crates/gam-sae/src/encode.rs:95 (the declaration) and :2322 (its one read, the short-circuit). encode_reconstruction_error_core has two callers, both in encode.rs (the chart scan and the periodic-fiber start), which now read .value. The Euclidean error keeps its accumulation order, so its value is bit-identical. Not compiled or run locally."
   }
 ]
