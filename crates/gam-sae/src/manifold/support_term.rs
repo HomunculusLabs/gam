@@ -6460,12 +6460,14 @@ impl SaeSupportSparseTerm {
         // 1.13e6 at cycle 56), yet the proposal only fired when the
         // certificate happened to -- an arm that never certifies at its
         // requested tolerance never re-routes at all. A plateau trigger
-        // (>= 25 cycles since the last proposal AND < 0.5% relative
-        // improvement since it) proposes the same guarded move on a schedule
-        // the objective itself sets. The guard is unchanged -- accept only a
-        // strict decrease -- so monotonicity survives by construction.
-        let mut last_reroute_cycle = 0usize;
-        let mut objective_at_last_reroute = f64::INFINITY;
+        // (< 0.5% relative improvement over a window of >= 25 cycles) proposes
+        // the same guarded move on a schedule the objective itself sets. The
+        // window restarts at every proposal and at every test that finds
+        // progress, so it measures the recent rate, not the whole descent since
+        // the last proposal. The guard is unchanged -- accept only a strict
+        // decrease -- so monotonicity survives by construction.
+        let mut plateau_window_start = 0usize;
+        let mut objective_at_window_start = f64::INFINITY;
         // #2575 joint-step bookkeeping. The joint step is attempted on every
         // cycle it is not skipping; a refusal doubles the skip so a lane where
         // the coupled model does not help pays a logarithmic number of extra
@@ -6812,8 +6814,8 @@ impl SaeSupportSparseTerm {
                                     );
                                     *self = moved;
                                     self.reconstruct_into(&mut fitted_state)?;
-                                    last_reroute_cycle = iteration;
-                                    objective_at_last_reroute = after;
+                                    plateau_window_start = iteration;
+                                    objective_at_window_start = after;
                                     // The map itself changed, so every difference the
                                     // accelerator holds describes a map that no longer
                                     // exists, and the two-cycle recurrence has to be
@@ -6858,7 +6860,7 @@ impl SaeSupportSparseTerm {
                             previous_candidate = false;
                             joint_skip_remaining = 0;
                             joint_skip_width = 1;
-                            objective_at_last_reroute = escaped_objective;
+                            objective_at_window_start = escaped_objective;
                             continue;
                         }
                         None => {
@@ -6896,18 +6898,31 @@ impl SaeSupportSparseTerm {
             if iteration == 1 {
                 // The baseline the first plateau test compares against; an
                 // infinite sentinel here would make the trigger unsatisfiable.
-                objective_at_last_reroute = objective;
+                objective_at_window_start = objective;
             }
-            let plateau = iteration >= last_reroute_cycle + 25
-                && objective > objective_at_last_reroute * (1.0 - 5.0e-3);
+            let window_elapsed = iteration >= plateau_window_start + 25;
+            let plateau = window_elapsed && objective > objective_at_window_start * (1.0 - 5.0e-3);
+            if window_elapsed && !plateau {
+                // #2576: the window made progress, so the next test starts here.
+                // Held at the last proposal instead, the baseline stays at the
+                // cycle-1 objective until a proposal is made, and the scheme is
+                // monotone: once the opening cycles lower the objective by more
+                // than 0.5% this test can never pass again, and no plateau move
+                // is proposed for the rest of the solve. Job 557966 (zoo_micro
+                // 3000x48, K=60, s=4) logged none in 266 cycles; its first
+                // support move, at the coupled phase's certificate (cycle 239),
+                // took the objective from 1.632347e3 to 1.405881e3.
+                plateau_window_start = iteration;
+                objective_at_window_start = objective;
+            }
             if plateau {
                 let support_k = match self.assignment.mode() {
                     AssignmentMode::TopK { k } => k,
                     _ => 0,
                 };
                 if support_k > 0 {
-                    last_reroute_cycle = iteration;
-                    objective_at_last_reroute = objective;
+                    plateau_window_start = iteration;
+                    objective_at_window_start = objective;
                     // A proposal that cannot be polished is a REJECTED proposal,
                     // never a dead fit: the incumbent is untouched, so erroring
                     // out here would discard a healthy model over a speculative
