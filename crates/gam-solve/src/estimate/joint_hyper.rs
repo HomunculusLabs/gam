@@ -294,6 +294,24 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
         validate_penalty_specs(&specs, p, context)?;
         let frozen_penalty_ranks =
             gam_terms::construction::penalty_structural_ranks_at_rounding_band(&specs, p, context)?;
+        for (idx, (spec, &rank)) in specs.iter().zip(frozen_penalty_ranks.iter()).enumerate() {
+            let block_dim = match spec {
+                PenaltySpec::Block { local, .. } => local.nrows(),
+                PenaltySpec::Dense(matrix) | PenaltySpec::DenseWithMean { matrix, .. } => {
+                    matrix.nrows()
+                }
+            };
+            if let Some(&declared_nullity) = opts.nullspace_dims.get(idx)
+                && block_dim.saturating_sub(declared_nullity) != rank
+            {
+                log::info!(
+                    "[FROZEN-RANK] {context}: penalty {idx} is frozen at structural rank {rank} \
+                     from its rounding band, but the design declares nullity {declared_nullity} of \
+                     {block_dim} (rank {})",
+                    block_dim.saturating_sub(declared_nullity)
+                );
+            }
+        }
         let (canonical, active_nullspace_dims) =
             gam_terms::construction::canonicalize_penalty_specs_at_frozen_ranks(
                 &specs,

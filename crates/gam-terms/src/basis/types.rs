@@ -1901,6 +1901,92 @@ impl ConstructiveQuadratic {
         Self::from_energy_factor(factor, context)
     }
 
+    /// The rounding band of an assembled symmetric Gram,
+    /// `dim·ε·(max|Sᵢⱼ| + assembly_magnitude)`.
+    ///
+    /// `max|Sᵢⱼ|` bounds the eigensolver's backward error in the Gram's own
+    /// entries. `assembly_magnitude` is the largest entry of the absolute-summand
+    /// Gram the caller accumulated (`|D|ᵀ|D|` for `DᵀD`, `Σ|term|` for a Gram
+    /// summed in closed form), which bounds the rounding the assembly left in
+    /// those entries when its terms cancel. Both are absolute scales, never
+    /// relative to the Gram's spectrum: a near-underflow Gram carries rounding
+    /// that is large against its own eigenvalues.
+    pub fn gram_rounding_band(sym: &Array2<f64>, assembly_magnitude: f64) -> f64 {
+        let entrywise = sym.iter().fold(0.0_f64, |acc, value| acc.max(value.abs()));
+        sym.nrows() as f64 * f64::EPSILON * (entrywise + assembly_magnitude.abs())
+    }
+
+    /// A Gram as a unit-Frobenius constructive quadratic that is a continuous
+    /// function of the Gram, with its normalization scale `c = ‖S₊‖_F`.
+    ///
+    /// Every positive eigenvalue is kept, and a negative eigenvalue is clamped to
+    /// zero only inside [`Self::gram_rounding_band`]. Beyond the band the Gram is
+    /// refused as [`BasisError::IndefinitePenalty`].
+    ///
+    /// [`Self::try_from_dense_psd`] instead keeps only eigenvalues above
+    /// `dim·1e-10·max|ev|`, and refuses below minus that cutoff. That is a
+    /// topology decision relative to the spectrum. On a penalty rebuilt while a
+    /// length scale moves it changed between two nearby trials, so the block lost
+    /// a rank-one piece and the REML criterion jumped. Its refusal cutoff also
+    /// followed the spectrum down: a near-underflow tension Gram whose largest
+    /// eigenvalue was ≈1.8e-12 made a −5.585e-16 residual fatal (MSI job 608882,
+    /// periodic Matérn bug-hunt fixture, ψ = 5.577).
+    pub fn unit_frobenius_from_gram_within_rounding_band(
+        gram: &Array2<f64>,
+        assembly_magnitude: f64,
+        context: &str,
+    ) -> Result<(Self, f64), BasisError> {
+        if gram.nrows() != gram.ncols() {
+            crate::bail_dim_basis!(
+                "{context}: Gram must be square, got {}x{}",
+                gram.nrows(),
+                gram.ncols()
+            );
+        }
+        if gram.iter().any(|value| !value.is_finite()) || !assembly_magnitude.is_finite() {
+            crate::bail_invalid_basis!("{context}: Gram or its assembly magnitude is not finite");
+        }
+        let dim = gram.nrows();
+        if dim == 0 {
+            return Ok((Self::from_energy_factor(Array2::zeros((0, 0)), context)?, 1.0));
+        }
+        let sym = symmetrize_penalty(gram);
+        let rounding_band = Self::gram_rounding_band(&sym, assembly_magnitude);
+        let (evals, evecs) = FaerEigh::eigh(&sym, Side::Lower).map_err(BasisError::LinalgError)?;
+        if let Some(&negative) = evals.iter().find(|&&value| value < -rounding_band) {
+            return Err(BasisError::IndefinitePenalty {
+                context: context.to_string(),
+                min_eigenvalue: negative,
+                tolerance: rounding_band,
+                guidance: format!(
+                    "the eigenvalue lies beyond the Gram's rounding band dim·ε·(max|S|={:e} + \
+                     assembly={assembly_magnitude:e})",
+                    sym.iter().fold(0.0_f64, |acc, value| acc.max(value.abs()))
+                ),
+            });
+        }
+        let positive: Vec<usize> = evals
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &value)| (value > 0.0).then_some(index))
+            .collect();
+        let frobenius = positive
+            .iter()
+            .map(|&index| evals[index] * evals[index])
+            .sum::<f64>()
+            .sqrt();
+        let normalization_scale = if frobenius > 0.0 { frobenius } else { 1.0 };
+        let root_scale = normalization_scale.sqrt();
+        let mut factor = Array2::<f64>::zeros((positive.len(), dim));
+        for (row, &index) in positive.iter().enumerate() {
+            let scale = evals[index].sqrt() / root_scale;
+            for column in 0..dim {
+                factor[[row, column]] = scale * evecs[[column, index]];
+            }
+        }
+        Ok((Self::from_energy_factor(factor, context)?, normalization_scale))
+    }
+
     /// The authoritative rectangular energy factor.
     pub fn factor(&self) -> &Array2<f64> {
         &self.factor
@@ -3469,5 +3555,120 @@ mod containment_tests {
             / (realized.iter().map(|v| v * v).sum::<f64>().sqrt()
                 * intercept.iter().map(|v| v * v).sum::<f64>().sqrt());
         assert!(relative < 1.0e-14, "got {relative:e}");
+    }
+}
+
+#[cfg(test)]
+mod rounding_band_tests {
+    use super::*;
+
+    /// `H·diag(eigenvalues)·Hᵀ` with the Householder reflection
+    /// `H = I − 2vvᵀ/(vᵀv)`, `v = (1, …, 1)`, so every entry mixes every eigenvalue.
+    fn mixed_gram(eigenvalues: &[f64]) -> Array2<f64> {
+        let n = eigenvalues.len();
+        let householder =
+            Array2::<f64>::eye(n) - &Array2::<f64>::from_elem((n, n), 2.0 / n as f64);
+        let diagonal = Array2::from_diag(&ndarray::arr1(eigenvalues));
+        householder.dot(&diagonal).dot(&householder.t())
+    }
+
+    fn max_abs_difference(left: &Array2<f64>, right: &Array2<f64>) -> f64 {
+        left.iter()
+            .zip(right.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max)
+    }
+
+    /// The periodic Matérn trial at ψ = 5.577 (MSI job 608882) refused a tension
+    /// Gram whose largest eigenvalue was ≈1.8e-12 over a −5.585e-16 residual. A
+    /// residual inside the Gram's assembly band is rounding: it is clamped, and
+    /// only the positive spectrum enters the factor. The spectrum-relative cutoff
+    /// refuses the same Gram.
+    #[test]
+    fn a_negative_residual_inside_the_assembly_band_is_clamped_not_refused() {
+        let gram = mixed_gram(&[1.8e-12, 4.0e-13, -5.6e-16]);
+        let assembly_magnitude = 1.0;
+        let band = ConstructiveQuadratic::gram_rounding_band(&gram, assembly_magnitude);
+        assert!(band > 5.6e-16, "assembly band {band:e} must cover the residual");
+        let (quadratic, scale) = ConstructiveQuadratic::unit_frobenius_from_gram_within_rounding_band(
+            &gram,
+            assembly_magnitude,
+            "clamp pin",
+        )
+        .expect("a residual inside the assembly band is clamped, not refused");
+        assert_eq!(quadratic.factor().nrows(), 2, "only the positive spectrum enters the factor");
+        let expected_scale = (1.8e-12_f64.powi(2) + 4.0e-13_f64.powi(2)).sqrt();
+        assert!(
+            (scale - expected_scale).abs() <= 1e-6 * expected_scale,
+            "normalization scale {scale:e} must be the clamped Gram's Frobenius norm {expected_scale:e}"
+        );
+        assert!(
+            ConstructiveQuadratic::try_from_dense_psd(gram, "relative cutoff contrast").is_err(),
+            "the spectrum-relative cutoff refuses the same rounding residual"
+        );
+    }
+
+    #[test]
+    fn a_negative_eigenvalue_beyond_the_band_is_refused() {
+        let gram = mixed_gram(&[1.8e-12, 4.0e-13, -5.6e-16]);
+        let refused = ConstructiveQuadratic::unit_frobenius_from_gram_within_rounding_band(
+            &gram,
+            0.0,
+            "refusal pin",
+        );
+        assert!(
+            matches!(refused, Err(BasisError::IndefinitePenalty { .. })),
+            "without an assembly magnitude the residual lies beyond the entrywise band"
+        );
+    }
+
+    /// The criterion jump the rule removes: a positive eigenvalue crossing the old
+    /// relative cutoff `dim·1e-10·max|ev|` changed the dense block's rank between
+    /// two nearby Grams. Under the rounding band the block moves by the size of the
+    /// perturbation, never by a dropped rank-one piece.
+    #[test]
+    fn the_block_is_continuous_across_the_old_relative_cutoff() {
+        let below = mixed_gram(&[1.0, 1.9e-10]);
+        let above = mixed_gram(&[1.0, 2.1e-10]);
+        assert_eq!(
+            ConstructiveQuadratic::try_from_dense_psd(below.clone(), "cutoff below")
+                .expect("below")
+                .factor()
+                .nrows(),
+            1,
+            "the relative cutoff drops the small eigenvalue below it"
+        );
+        assert_eq!(
+            ConstructiveQuadratic::try_from_dense_psd(above.clone(), "cutoff above")
+                .expect("above")
+                .factor()
+                .nrows(),
+            2,
+            "and keeps it just above"
+        );
+        let (below_quadratic, _) =
+            ConstructiveQuadratic::unit_frobenius_from_gram_within_rounding_band(&below, 0.0, "below")
+                .expect("below");
+        let (above_quadratic, _) =
+            ConstructiveQuadratic::unit_frobenius_from_gram_within_rounding_band(&above, 0.0, "above")
+                .expect("above");
+        assert_eq!(below_quadratic.factor().nrows(), 2);
+        assert_eq!(above_quadratic.factor().nrows(), 2);
+        let gap = max_abs_difference(below_quadratic.dense(), above_quadratic.dense());
+        assert!(
+            gap < 1e-10,
+            "the normalized blocks must differ by the perturbation, got {gap:e}"
+        );
+    }
+
+    #[test]
+    fn the_block_is_normalized_to_unit_frobenius_with_its_scale() {
+        let gram = Array2::from_diag(&ndarray::arr1(&[3.0, 4.0]));
+        let (quadratic, scale) =
+            ConstructiveQuadratic::unit_frobenius_from_gram_within_rounding_band(&gram, 0.0, "scale pin")
+                .expect("a PSD Gram is accepted");
+        assert!((scale - 5.0).abs() < 1e-12, "scale {scale} must be ‖S‖_F = 5");
+        let frobenius = quadratic.dense().iter().map(|v| v * v).sum::<f64>().sqrt();
+        assert!((frobenius - 1.0).abs() < 1e-12, "normalized block has ‖S‖_F = {frobenius}");
     }
 }

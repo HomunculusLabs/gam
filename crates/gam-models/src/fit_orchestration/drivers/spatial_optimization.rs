@@ -6239,9 +6239,18 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
             &mut self.basisworkspace,
         )
         .map_err(|e| {
-            EstimationError::InvalidInput(format!(
-                "failed to rebuild smooth term '{termname}' during incremental κ realization: {e}"
-            ))
+            // A penalty Gram with an eigenvalue below its own rounding band is not
+            // PSD at this psi, so the model does not exist at the trial: the search
+            // retreats instead of aborting the fit.
+            if matches!(e, gam_terms::basis::BasisError::IndefinitePenalty { .. }) {
+                EstimationError::TrialPointRefused {
+                    reason: format!("smooth term '{termname}' has no PSD penalty at this psi: {e}"),
+                }
+            } else {
+                EstimationError::InvalidInput(format!(
+                    "failed to rebuild smooth term '{termname}' during incremental κ realization: {e}"
+                ))
+            }
         })?;
 
         // Populate the geometry cache from the realized metadata on first use.

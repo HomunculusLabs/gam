@@ -1552,9 +1552,12 @@ pub fn canonicalize_penalty_specs(
 /// Structural rank of each penalty block at its own rounding band, for a fit
 /// that re-realizes its penalties while ψ moves.
 ///
-/// A generic block counts the eigenvalues above `dim·ε·‖S‖₂`, the band a
-/// symmetric eigensolver resolves `S` at (the rule `H` uses for its identified
-/// rank, #2901 V22). A hinted block (ridge, Kronecker) keeps the rank of its
+/// A generic block counts the eigenvalues above its own rounding band,
+/// `dim·ε·max|Sᵢⱼ|` ([`crate::basis::ConstructiveQuadratic::gram_rounding_band`],
+/// the rounding rule of
+/// [`crate::basis::ConstructiveQuadratic::unit_frobenius_from_gram_within_rounding_band`]).
+/// A canonicalization spec carries no assembly magnitude, so only the entrywise
+/// term applies. A hinted block (ridge, Kronecker) keeps the rank of its
 /// closed-form root. A joint ρ+ψ fit computes these once at the build ψ and
 /// canonicalizes every later realization at them through
 /// [`canonicalize_penalty_specs_at_frozen_ranks`].
@@ -1578,11 +1581,8 @@ pub fn penalty_structural_ranks_at_rounding_band(
                 "{context}: structural rank analysis failed at penalty {idx}: {err}"
             ))
         })?;
-        let spectral_radius = analysis
-            .eigenvalues
-            .iter()
-            .fold(0.0_f64, |acc, value| acc.max(value.abs()));
-        let rounding_band = analysis.eigenvalues.len() as f64 * f64::EPSILON * spectral_radius;
+        let rounding_band =
+            crate::basis::ConstructiveQuadratic::gram_rounding_band(&analysis.sym_penalty, 0.0);
         ranks.push(
             analysis
                 .eigenvalues
