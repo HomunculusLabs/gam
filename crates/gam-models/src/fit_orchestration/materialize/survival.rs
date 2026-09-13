@@ -475,16 +475,37 @@ pub(crate) fn materialize_survival<'a>(
     }
 
     // `survmodel(distribution=...)` in the formula names the residual law, as
-    // `survival_distribution` does in the configuration; the formula wins.
-    let residual_dist = parse_survival_distribution(
-        parsed
-            .survivalspec
-            .as_ref()
-            .and_then(|s| s.survival_distribution.as_deref())
-            .unwrap_or(config.survival_distribution.as_str()),
+    // `survival_distribution` does in the configuration, and the formula's
+    // `link(...)` with its initialization options names the inverse link, as
+    // `link` does; the formula wins in both. A fit without a link takes its
+    // inverse link from the residual law.
+    let formula_link = parsed.linkspec.as_ref();
+    let link_name = formula_link
+        .map(|spec| spec.link.as_str())
+        .or(config.link.as_deref());
+    let survival_inverse_link = crate::survival::construction::parse_survival_inverse_link(
+        crate::survival::construction::SurvivalInverseLinkInput {
+            link: link_name,
+            mixture_rho: formula_link.and_then(|spec| spec.mixture_rho.as_deref()),
+            sas_init: formula_link.and_then(|spec| spec.sas_init.as_deref()),
+            beta_logistic_init: formula_link.and_then(|spec| spec.beta_logistic_init.as_deref()),
+            survival_distribution: parsed
+                .survivalspec
+                .as_ref()
+                .and_then(|s| s.survival_distribution.as_deref())
+                .unwrap_or(config.survival_distribution.as_str()),
+        },
     )?;
-    let survival_inverse_link = residual_distribution_inverse_link(residual_dist);
-    let link_choice = parse_link_choice(config.link.as_deref(), config.flexible_link)?;
+    // `loglog` and `cauchit` are single-component mixtures, not link choices a
+    // link deviation can flex.
+    let link_choice = if link_name.is_some_and(|name| {
+        let name = name.trim();
+        name.eq_ignore_ascii_case("loglog") || name.eq_ignore_ascii_case("cauchit")
+    }) {
+        None
+    } else {
+        parse_link_choice(link_name, config.flexible_link)?
+    };
     // Only the location-scale likelihood fits the anchored link deviation a
     // `flexible(...)` link asks for; another likelihood would drop it.
     if link_choice.as_ref().is_some_and(|choice| {

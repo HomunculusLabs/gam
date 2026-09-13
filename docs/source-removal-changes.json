@@ -8196,5 +8196,17 @@
     "reason": "#2899, SPEC rule 25. TwoSeedLane re-typed the two-seed contracted-fourth scalar onto Order2Lane so one wide::f64x4 instance carried four rows. No product builds it: production row kernels evaluate through TwoSeed and the runtime-width DynamicTwoSeedBatch, and the lane-batched one-seed scalar OneSeedLane (used by the survival location-scale row kernel) does not depend on it. The struct, its TwoSeedBatch alias and lane() extractor, and its own lane-identity oracle (check_twoseed, twoseed_lanes_contracted_fourth_bit_identical, the TwoSeed and TwoSeedLane RowAlg impls) are removed together.",
     "evidence": "git grep at the base finds TwoSeedLane and TwoSeedBatch only in crates/gam-math/src/jet_scalar.rs (and in one past ledger reason string): the definition, its impls, batch_tests and two extreme_unary_tests arms. extreme_unary_tests keeps the contracted-fourth channel on the production TwoSeed (powf channel by channel, and sqrt at expected[4]). Guarded job 603697 at 90f405d0d on a905d68bf: cargo check --workspace --all-targets --exclude gam-pyffi exited 0, and cargo test -p gam-math --lib jet_scalar::extreme_unary_tests jet_scalar::batch_tests passed 4 of 4. The item list is the guard's refusal list from that job (/scratch.global/sauer354/pool/prune-api-a/check41.603697.log).",
     "base": "2886c28035eb803a87b5c29efe66cb808921c587"
+  },
+  {
+    "base": "55bfc8f817dad253148155e49426e1197d586958",
+    "items": [
+      "crates/gam-config/src/lib.rs:fn:effective_link_to_standard",
+      "crates/gam-config/src/lib.rs:fn:parse_comma_f64",
+      "crates/gam-config/src/lib.rs:fn:parse_survival_inverse_link",
+      "crates/gam-config/src/lib.rs:fn:survival_link_usage",
+      "crates/gam-config/src/lib.rs:struct:SurvivalInverseLinkInput"
+    ],
+    "reason": "SPEC rules 9 and 18 (#2899, #2631). The survival inverse-link parser moves from gam-config into gam_models::survival::construction so materialize_survival, which fit_formula_to_payload and the Python bindings run, resolves link(...) and the configuration's link the way gam fit already did. Before this, the library took a location-scale fit's inverse link from survival_distribution alone. parse_survival_inverse_link, SurvivalInverseLinkInput, parse_comma_f64, effective_link_to_standard and the private survival_link_usage are moved unchanged; gam-config re-exports the four public names from gam_models::survival.",
+    "evidence": "At the base, git grep -n -w finds parse_survival_inverse_link and SurvivalInverseLinkInput in crates/gam-config/src/lib.rs, crates/gam-cli/src/main/run_survival.rs and tests/src_modules/misc/cli_tests.rs; parse_comma_f64 and effective_link_to_standard in crates/gam-config/src/lib.rs and crates/gam-cli/src/main/run_fit.rs; survival_link_usage only inside the parser. All of those callers reach the names through gam::config_resolve, which keeps them through gam-config's pub use of gam_models::survival. Job 604534 phase S1B ran cargo check --keep-going --workspace --all-targets --exclude gam-pyffi at candidate 6f94dcefe with exit 0 and 0 errors (/scratch.global/sauer354/pool/prune-cli/gate10.604534.log)."
   }
 ]

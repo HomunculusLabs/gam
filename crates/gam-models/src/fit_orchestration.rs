@@ -111,7 +111,7 @@ use crate::survival::construction::{
     fitted_weibull_baseline_from_linear_time_beta, initial_survival_baseline_config_for_fit,
     location_scale_uses_probit_survival_baseline, marginal_slope_baseline_chain_rule_gradient,
     normalize_survival_time_pair, optimize_survival_baseline_config_with_gradient_only,
-    parse_survival_distribution, parse_survival_likelihood_mode, parse_survival_time_basis_config,
+    parse_survival_likelihood_mode, parse_survival_time_basis_config,
     positive_survival_time_seed, require_structural_survival_time_basis,
     resolve_survival_time_anchor_for_mode, resolved_survival_time_basis_config_from_build,
     survival_derivative_guard_for_likelihood, survival_marginal_slope_offset_baseline_config,
@@ -119,7 +119,6 @@ use crate::survival::construction::{
 
 use crate::survival::location_scale::{
     SurvivalCovariateTermBlockTemplate, TimeBlockInput, TimeWiggleBlockInput,
-    residual_distribution_inverse_link,
 };
 
 use gam_data::EncodedDataset as Dataset;

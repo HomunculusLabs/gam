@@ -3433,5 +3433,15 @@
     "reason": "#2899, SPEC rule 25. TwoSeedLane re-typed the two-seed contracted-fourth scalar onto Order2Lane so one wide::f64x4 instance carried four rows. No product builds it: production row kernels evaluate through TwoSeed and the runtime-width DynamicTwoSeedBatch, and the lane-batched one-seed scalar OneSeedLane (used by the survival location-scale row kernel) does not depend on it. The struct, its TwoSeedBatch alias and lane() extractor, and its own lane-identity oracle (check_twoseed, twoseed_lanes_contracted_fourth_bit_identical, the TwoSeed and TwoSeedLane RowAlg impls) are removed together.",
     "evidence": "git grep at the base finds TwoSeedLane and TwoSeedBatch only in crates/gam-math/src/jet_scalar.rs (and in one past ledger reason string): the definition, its impls, batch_tests and two extreme_unary_tests arms. extreme_unary_tests keeps the contracted-fourth channel on the production TwoSeed (powf channel by channel, and sqrt at expected[4]). Guarded job 603697 at 90f405d0d on a905d68bf: cargo check --workspace --all-targets --exclude gam-pyffi exited 0, and cargo test -p gam-math --lib jet_scalar::extreme_unary_tests jet_scalar::batch_tests passed 4 of 4. The removed map is public_api_census.py's CENSUS_REMOVED line, and the source-removal item list is the guard's refusal list from that job (/scratch.global/sauer354/pool/prune-api-a/check41.603697.log).",
     "base": "2886c28035eb803a87b5c29efe66cb808921c587"
+  },
+  {
+    "base": "55bfc8f817dad253148155e49426e1197d586958",
+    "removed": {
+      "crates/gam-config/src/lib.rs::effective_link_to_standard": 1,
+      "crates/gam-config/src/lib.rs::parse_comma_f64": 1,
+      "crates/gam-config/src/lib.rs::parse_survival_inverse_link": 1
+    },
+    "reason": "#2899 (SPEC rules 9 and 18): the survival inverse-link parser and its two helpers move unchanged into gam_models::survival::construction, where materialize_survival calls them. gam-config keeps the same public names as a pub use of gam_models::survival, so the total public-function count is unchanged (11951 before and after in job 604534).",
+    "evidence": "Job 604534 phase S1B: public_api_census.py reported 11951 public function declarations in 1343 files at both the parent 3e5c03f34 and candidate 6f94dcefe, and flagged only these three gam-config declarations as removed. The same three names are declared in crates/gam-models/src/survival/construction.rs at the candidate, and cargo check --workspace --all-targets --exclude gam-pyffi exited 0 there (/scratch.global/sauer354/pool/prune-cli/gate10.604534.log)."
   }
 ]

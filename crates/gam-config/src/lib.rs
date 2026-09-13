@@ -1,17 +1,9 @@
-use gam_inference::formula_dsl::parse_link_choice;
 use gam_inference::model::GroupMetadata;
 use gam_models::fit_orchestration::descriptors::build_analytic_penalty_registry_from_descriptors;
 use gam_models::fit_orchestration::{CtnStage1Recipe, FitConfig};
-use gam_models::survival::location_scale::residual_distribution_inverse_link;
 use gam_models::survival::lognormal_kernel::{FrailtyScale, FrailtySpec, HazardLoading};
-use gam_models::survival::parse_survival_distribution;
 use gam_models::survival::parse_survival_likelihood_mode;
 use gam_models::transformation_normal::TransformationNormalConfig;
-use gam_problem::types::{
-    InverseLink, LinkComponent, LinkFunction, MixtureLinkSpec, SasLinkSpec, StandardLink,
-};
-use gam_solve::mixture_link::{state_from_beta_logisticspec, state_from_sasspec, state_fromspec};
-use ndarray::Array1;
 
 mod fit_request_document;
 
@@ -19,6 +11,11 @@ pub use fit_request_document::{
     AnalyticPenaltiesDocument, CtnStage1ConfigDocument, CtnStage1Document, FitRequestConfigDocument,
     FitRequestDocument, LatentCoordinateDocument, LatentCoordinatesDocument,
     PrecisionHyperpriorDocument, SmoothDescriptorsDocument,
+};
+
+pub use gam_models::survival::{
+    SurvivalInverseLinkInput, effective_link_to_standard, parse_comma_f64,
+    parse_survival_inverse_link,
 };
 
 const DEFAULT_LEARNED_FRAILTY_SCALE: FrailtyScale = FrailtyScale::Learned { initial_sigma: 0.5 };
@@ -86,14 +83,6 @@ fn resolve_ctn_config(
 pub struct ResolvedFitRequest {
     pub formula: String,
     pub fit_config: FitConfig,
-}
-
-pub struct SurvivalInverseLinkInput<'a> {
-    pub link: Option<&'a str>,
-    pub mixture_rho: Option<&'a str>,
-    pub sas_init: Option<&'a str>,
-    pub beta_logistic_init: Option<&'a str>,
-    pub survival_distribution: &'a str,
 }
 
 pub fn parse_fit_request_json(request_json: &str) -> Result<ResolvedFitRequest, String> {
@@ -282,204 +271,6 @@ pub fn parse_baseline_target_cli(raw: &str) -> Result<String, String> {
     }
 }
 
-pub fn parse_comma_f64(v: &str, label: &str) -> Result<Vec<f64>, String> {
-    let mut out = Vec::new();
-    for part in v.split(',') {
-        let t = part.trim();
-        if t.is_empty() {
-            continue;
-        }
-        let parsed = t
-            .parse::<f64>()
-            .map_err(|err| format!("{label} contains non-numeric value '{t}': {err}"))?;
-        if !parsed.is_finite() {
-            return Err(format!("{label} contains non-finite value '{t}'"));
-        }
-        out.push(parsed);
-    }
-    Ok(out)
-}
-
-pub fn effective_link_to_standard(
-    link: LinkFunction,
-    context: &str,
-) -> Result<StandardLink, String> {
-    StandardLink::try_from(link).map_err(|_| {
-        format!(
-            "{context}: state-bearing link `{}` must be routed through `InverseLink::Sas` / `InverseLink::BetaLogistic`, not `Standard(_)`",
-            link.name()
-        )
-    })
-}
-
-pub fn parse_survival_inverse_link(
-    input: SurvivalInverseLinkInput<'_>,
-) -> Result<InverseLink, String> {
-    if let Some(raw) = input.link {
-        let name = raw.trim().to_ascii_lowercase();
-        if name == "loglog" || name == "cauchit" {
-            // `loglog` and `cauchit` have no scalar `LinkFunction`/`StandardLink`
-            // representative, but the blended-link kernels implement their inverse
-            // link and derivative jets exactly (`LinkComponent::LogLog` /
-            // `LinkComponent::Cauchit`). Represent a survival `--link loglog` /
-            // `--link cauchit` as a single-component mixture: it carries weight 1.0
-            // with no free mixing logits, so it evaluates as exactly that link and
-            // flows end-to-end through the fully-wired `InverseLink::Mixture` survival
-            // path (prepare/construct/row-kernel/predict).
-            if input.sas_init.is_some() {
-                return Err("--sas-init requires --link sas".to_string());
-            }
-            if input.beta_logistic_init.is_some() {
-                return Err("--beta-logistic-init requires --link beta-logistic".to_string());
-            }
-            if input.mixture_rho.is_some() {
-                return Err(
-                    "--mixture-rho requires survival --link blended(...)/mixture(...)".to_string(),
-                );
-            }
-            let component = if name == "loglog" {
-                LinkComponent::LogLog
-            } else {
-                LinkComponent::Cauchit
-            };
-            return state_fromspec(&MixtureLinkSpec {
-                components: vec![component],
-                initial_rho: Array1::zeros(0),
-            })
-            .map(InverseLink::Mixture)
-            .map_err(|e| format!("invalid survival {name} link state: {e}"));
-        }
-    }
-    let choice = parse_link_choice(input.link, false).map_err(|err| {
-        let err = err.to_string();
-        if let Some(raw) = input.link {
-            let name = raw.trim().to_ascii_lowercase();
-            if err.starts_with("unsupported --link ") || err.starts_with("unsupported link type ") {
-                return format!(
-                    "unsupported survival --link '{name}'; {}",
-                    survival_link_usage()
-                );
-            }
-        }
-        err
-    })?;
-    if let Some(choice) = choice {
-        if let Some(components) = choice.mixture_components {
-            if input.sas_init.is_some() || input.beta_logistic_init.is_some() {
-                return Err(
-                    "survival blended(...) link does not accept --sas-init/--beta-logistic-init"
-                        .to_string(),
-                );
-            }
-            let expected = components.len().saturating_sub(1);
-            let initial_rho = if let Some(raw) = input.mixture_rho {
-                let vals = parse_comma_f64(raw, "--mixture-rho")?;
-                if vals.len() != expected {
-                    return Err(format!(
-                        "--mixture-rho expects {expected} values for blended({})",
-                        components
-                            .iter()
-                            .map(|component| component.name())
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    ));
-                }
-                Array1::from_vec(vals)
-            } else {
-                Array1::zeros(expected)
-            };
-            return state_fromspec(&MixtureLinkSpec {
-                components,
-                initial_rho,
-            })
-            .map(InverseLink::Mixture)
-            .map_err(|e| format!("invalid survival blended link state: {e}"));
-        }
-
-        if input.mixture_rho.is_some() {
-            return Err(
-                "--mixture-rho requires survival --link blended(...)/mixture(...)".to_string(),
-            );
-        }
-        match choice.link {
-            LinkFunction::Sas => {
-                if input.beta_logistic_init.is_some() {
-                    return Err("--beta-logistic-init requires --link beta-logistic".to_string());
-                }
-                let (epsilon, log_delta) = if let Some(raw) = input.sas_init {
-                    let vals = parse_comma_f64(raw, "--sas-init")?;
-                    if vals.len() != 2 {
-                        return Err(format!(
-                            "--sas-init expects two values: epsilon,log_delta (got {})",
-                            vals.len()
-                        ));
-                    }
-                    (vals[0], vals[1])
-                } else {
-                    (0.0, 0.0)
-                };
-                state_from_sasspec(SasLinkSpec {
-                    initial_epsilon: epsilon,
-                    initial_log_delta: log_delta,
-                })
-                .map(InverseLink::Sas)
-                .map_err(|e| format!("invalid survival SAS link state: {e}"))
-            }
-            LinkFunction::BetaLogistic => {
-                if input.sas_init.is_some() {
-                    return Err("--sas-init requires --link sas".to_string());
-                }
-                let (epsilon, delta) = if let Some(raw) = input.beta_logistic_init {
-                    let vals = parse_comma_f64(raw, "--beta-logistic-init")?;
-                    if vals.len() != 2 {
-                        return Err(format!(
-                            "--beta-logistic-init expects two values: epsilon,delta (got {})",
-                            vals.len()
-                        ));
-                    }
-                    (vals[0], vals[1])
-                } else {
-                    (0.0, 0.0)
-                };
-                state_from_beta_logisticspec(SasLinkSpec {
-                    initial_epsilon: epsilon,
-                    initial_log_delta: delta,
-                })
-                .map(InverseLink::BetaLogistic)
-                .map_err(|e| format!("invalid survival Beta-Logistic link state: {e}"))
-            }
-            LinkFunction::Log => Err(format!(
-                "unsupported survival --link 'log'; {}",
-                survival_link_usage()
-            )),
-            other => {
-                if input.sas_init.is_some() {
-                    return Err("--sas-init requires --link sas".to_string());
-                }
-                if input.beta_logistic_init.is_some() {
-                    return Err("--beta-logistic-init requires --link beta-logistic".to_string());
-                }
-                Ok(InverseLink::Standard(effective_link_to_standard(
-                    other,
-                    "survival inverse link",
-                )?))
-            }
-        }
-    } else {
-        if input.mixture_rho.is_some() {
-            return Err("--mixture-rho requires --link blended(...)/mixture(...)".to_string());
-        }
-        if input.sas_init.is_some() {
-            return Err("--sas-init requires --link sas".to_string());
-        }
-        if input.beta_logistic_init.is_some() {
-            return Err("--beta-logistic-init requires --link beta-logistic".to_string());
-        }
-        let dist = parse_survival_distribution(input.survival_distribution)?;
-        Ok(residual_distribution_inverse_link(dist))
-    }
-}
-
 fn parse_json_frailty_spec(
     frailty_kind: Option<String>,
     frailty_sd: Option<f64>,
@@ -577,10 +368,6 @@ fn parse_gpu_policy(raw_gpu: &str) -> Result<gam_gpu::GpuPolicy, String> {
             raw_gpu
         )
     })
-}
-
-fn survival_link_usage() -> &'static str {
-    "use identity|logit|probit|cloglog|loglog|cauchit|sas|beta-logistic|blended(...)/mixture(...) or flexible(...)"
 }
 
 #[cfg(test)]
