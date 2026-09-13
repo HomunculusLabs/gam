@@ -1569,37 +1569,14 @@ fn solve_upper_triangular_transpose(
 
 /// Modified Gram-Schmidt, twice, so the returned columns are orthonormal to
 /// working precision even when the input is ill-conditioned. Columns that
-/// collapse are dropped rather than kept as noise: a span is what this returns,
-/// and a numerically dependent column is not part of it.
+/// collapse to round-off are dropped rather than kept as noise: a span is what
+/// this returns, and a numerically dependent column is not part of it. The one
+/// implementation is [`crate::penalty_invariance::orthonormalize_columns`],
+/// whose drop tolerance is the projections' own rounding bound; an input with
+/// nothing surviving returns the empty basis.
 fn orthonormalize_columns(columns: &Array2<f64>) -> Result<Array2<f64>, String> {
-    let rows = columns.nrows();
-    let mut kept: Vec<Array1<f64>> = Vec::with_capacity(columns.ncols());
-    for column in 0..columns.ncols() {
-        let mut v = columns.column(column).to_owned();
-        let initial = v.dot(&v).sqrt();
-        if !(initial > 0.0) || !initial.is_finite() {
-            continue;
-        }
-        for _pass in 0..2 {
-            for basis in kept.iter() {
-                let projection = basis.dot(&v);
-                v.scaled_add(-projection, basis);
-            }
-        }
-        let norm = v.dot(&v).sqrt();
-        // `1e-8` of the column's own entering length is the standard
-        // reorthogonalization cutoff: below it the column is a rounding artefact
-        // of the ones already kept, not a direction.
-        if !(norm > 1e-8 * initial) || !norm.is_finite() {
-            continue;
-        }
-        kept.push(v.mapv(|value| value / norm));
-    }
-    let mut basis = Array2::<f64>::zeros((rows, kept.len()));
-    for (index, column) in kept.iter().enumerate() {
-        basis.column_mut(index).assign(column);
-    }
-    Ok(basis)
+    Ok(crate::penalty_invariance::orthonormalize_columns(columns)
+        .unwrap_or_else(|| Array2::<f64>::zeros((columns.nrows(), 0))))
 }
 
 /// One authoritative reduced-information artifact for a joint Jeffreys term.
