@@ -7348,5 +7348,13 @@
     ],
     "reason": "#2899 moved tests: five root test files were the only users outside gam-terms of three gam-terms functions that production calls only inside gam-terms: basis::build_thin_plate_basiswithworkspace (thin_plate_workspace_equivalence_regression.rs), basis::compute_greville_abscissae (owed_bughunt_splines.rs), and basis::spherical_wahba_kernel_matrix_with_kind (sphere_wahba_kernels_are_distinct.rs, spherical_wahba_spectrum.rs, wahba_kernel_spectral_truth.rs). Each file moves verbatim into a gam-terms unit-test module beside its function, importing through crate::basis:: and gam_linalg::faer_ndarray::, so no test is lost and the three functions narrow to pub(crate).",
     "evidence": "At the base, git grep -n -w over crates, src, tests, examples and bench finds build_thin_plate_basiswithworkspace, compute_greville_abscissae and spherical_wahba_kernel_matrix_with_kind outside crates/gam-terms/src only in those five root files and the in-crate tests/src_modules/smooths fixture that gam-terms' own tests include. Every removed identity is a declaration in those five deleted root files, and each reappears unchanged in its new module file."
+  },
+  {
+    "base": "9c122b580a12905d3e1241e31d99c51d7b460c4c",
+    "items": [
+      "crates/gam-inference/src/gpu_polya_gamma.rs:fn:splitmix64_mix"
+    ],
+    "reason": "#2899 slop: gam_inference::gpu_polya_gamma::splitmix64_mix was a one-line wrapper over gam_linalg::utils::splitmix64_hash. Its one Rust caller, XorwowState::new, now calls splitmix64_hash directly, so the per-row seeding is bit-identical. The CUDA source string keeps its own C splitmix64_mix, which this does not touch.",
+    "evidence": "At the base, git grep -n -w splitmix64_mix over crates/gam-inference finds the wrapper (gpu_polya_gamma.rs:126-131), its one call in XorwowState::new (line 159), and two lines of the embedded CUDA C source (472, 494). No other crate, test, example or benchmark names the gam-inference wrapper. gam-solve's reml_trace::splitmix64_mix is a separate function and stays."
   }
 ]

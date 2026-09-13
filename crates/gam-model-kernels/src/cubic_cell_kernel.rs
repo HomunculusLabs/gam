@@ -1026,7 +1026,7 @@ impl TailCellMomentCacheStats {
 /// marginal-slope exact-cache build — the same contention class the sharded
 /// per-family cell-moment LRU fix removed.
 #[derive(Debug)]
-pub struct TailCellMomentCache {
+pub(crate) struct TailCellMomentCache {
     moments: ByteLruCache<TailCellMomentCacheKey, CellMomentState>,
     in_flight: std::sync::Mutex<
         std::collections::HashMap<

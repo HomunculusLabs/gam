@@ -144,7 +144,7 @@ pub use finite_validation::{
 };
 pub use serde_finite::{NonFiniteFloat, ensure_serialized_floats_are_finite};
 pub use fisher_rao::normalize_fisher_rao_blocks;
-pub use roundoff::{roundoff_growth_factor, weighted_residual_is_at_roundoff_floor};
+pub use roundoff::weighted_residual_is_at_roundoff_floor;
 use gam_linalg::dense;
 pub use gam_linalg::faer_ndarray::{in_nested_parallel_region, with_nested_parallel};
 pub use gauge::Gauge;

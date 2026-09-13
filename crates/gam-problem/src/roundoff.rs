@@ -27,7 +27,7 @@
 /// `None` when `k·ε ≥ 1` — a model so wide that the accumulated bound exceeds
 /// the operands themselves, where no residual can be certified as roundoff and
 /// the caller must not treat any fit as exact.
-pub fn roundoff_growth_factor(operations: usize) -> Option<f64> {
+pub(crate) fn roundoff_growth_factor(operations: usize) -> Option<f64> {
     let relative = (operations as f64) * f64::EPSILON;
     (relative < 1.0).then(|| relative / (1.0 - relative))
 }

@@ -123,13 +123,6 @@ impl<'a> PolyaGammaBatchInput<'a> {
 // SplitMix64 finalizer + per-row XORWOW seeding
 // ────────────────────────────────────────────────────────────────────────
 
-/// SplitMix64 finalizer (matches `reml_trace::splitmix64_mix`). Thin wrapper
-/// over the canonical implementation in [`gam_linalg::utils::splitmix64_hash`].
-#[inline]
-pub(crate) fn splitmix64_mix(z: u64) -> u64 {
-    gam_linalg::utils::splitmix64_hash(z)
-}
-
 /// Two large odd constants used to mix `(seed, row, word)` into the
 /// SplitMix input. Disjoint from the `reml_trace` constants so different
 /// kernels with the same seed don’t share probe sequences.
@@ -156,7 +149,7 @@ impl XorwowState {
         for (word_idx, slot) in words.iter_mut().enumerate() {
             let composite =
                 seed ^ row.wrapping_mul(ROW_ZETA) ^ (word_idx as u64).wrapping_mul(WORD_GAMMA);
-            let h = splitmix64_mix(composite);
+            let h = gam_linalg::utils::splitmix64_hash(composite);
             *slot = (h >> 32) as u32;
         }
         // XORWOW absorbs at all-zeros; flip the low bit of s[0] if it ever

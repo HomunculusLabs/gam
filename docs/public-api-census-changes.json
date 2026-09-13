@@ -3033,5 +3033,13 @@
     },
     "reason": "#2902 row 8: the corrected coefficient covariance was reachable from production only through a trace-only validation block in compute_smoothing_correction_auto that ran it with no hyperparameters and read nothing back. Its theta option, the only route to the hardcoded ±RHO_BOUND rail scan, was supplied only by two tests, and no outer search has that box since 04726d916. The block, every corrected-covariance function and type, CorrectedCovarianceError with its OuterHessianIndefinite payload and root re-export, and the tests of the removed code are deleted; spectral_regularize and spectral_epsilon stay for dense_spectral.",
     "evidence": "At the base, git grep finds compute_corrected_covariance and compute_corrected_covariance_diagonal called in production only at crates/gam-solve/src/reml/eval.rs:1163 and :1180 (q = 0, results only logged), the _with_constraints entries and detect_active_theta_bounds called only inside corrected_covariance.rs and from crates/gam-solve/src/reml/reml_outer_engine/tests.rs, and CorrectedCovarianceError imported by no crate (gam-pyffi and gamfit name only the separate create_exception! Python class). The deletion is gated by pool job 598363 (log /scratch.global/sauer354/pool/outer2817/gate2.598363.log): this patch applied at 46d51b5d5 with every start blob unchanged; gam-solve lib tests in the touched modules 21 passed, 0 failed; the guarded workspace --all-targets check compiled every crate, and its only errors are 20 in two root test targets this patch does not touch (tests/inference/misc/conformal_coverage_quality.rs, tests/perf_scale/misc/row_metric_loud_vs_loadbearing.rs), naming no deleted item."
+  },
+  {
+    "base": "9c122b580a12905d3e1241e31d99c51d7b460c4c",
+    "removed": {
+      "crates/gam-inference/src/gpu_polya_gamma.rs::splitmix64_mix": 1
+    },
+    "reason": "#2899 slop: the gam-inference splitmix64_mix wrapper over gam_linalg::utils::splitmix64_hash is deleted, and its one caller calls splitmix64_hash directly.",
+    "evidence": "public_functions() counts pub(crate) fn declarations, so removing the wrapper takes one identity off gpu_polya_gamma.rs. At the base, git grep -n -w splitmix64_mix finds no Rust caller of the wrapper other than XorwowState::new."
   }
 ]
