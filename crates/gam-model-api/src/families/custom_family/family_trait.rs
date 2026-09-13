@@ -232,6 +232,23 @@ pub trait JeffreysAxisContractions {
     ) -> Result<(), String>;
 }
 
+/// A family's first information derivative along every coefficient axis, formed directly in a
+/// Jeffreys basis without any `p × p` axis matrix. A family exposes it through
+/// [`CustomFamily::jeffreys_rotated_first_derivative`].
+pub trait JeffreysRotatedFirstDerivative {
+    /// Row `a` is `vec(sym(Uᵀ Hdot[e_a] U))` in row-major order for the Jeffreys basis `U`
+    /// (`p × r`), with `Hdot[e_a]` the derivative
+    /// [`CustomFamily::joint_jeffreys_information_directional_derivative_with_specs`] along axis
+    /// `e_a`. The Jeffreys term, its gate and floor motion, and its drift base read the axes
+    /// only in this form (#1082).
+    fn first_directional_rotated_all_axes(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        basis: ndarray::ArrayView2<'_, f64>,
+    ) -> Result<Array2<f64>, String>;
+}
+
 /// User-defined family contract for multi-block generalized models.
 pub trait CustomFamily {
     /// Optional sampled-derivative pilot owned by this family.
@@ -1743,6 +1760,14 @@ pub trait CustomFamily {
             basis.nrows()
         );
         Ok(None)
+    }
+
+    /// The first information derivatives this family forms directly in a Jeffreys basis, if
+    /// any (see [`JeffreysRotatedFirstDerivative`]). `None` means the Jeffreys term, its gate
+    /// and floor motion, and its drift base reduce the dense axes of
+    /// [`Self::joint_jeffreys_information_directional_derivative_all_axes_with_specs`].
+    fn jeffreys_rotated_first_derivative(&self) -> Option<&dyn JeffreysRotatedFirstDerivative> {
+        None
     }
 
     /// Second beta-directional derivative of

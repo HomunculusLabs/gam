@@ -367,9 +367,10 @@ fn custom_family_joint_jeffreys_term_from_information<
         h_joint.view(),
         z_joint.view(),
         |basis| {
-            family.joint_jeffreys_information_directional_derivative_rotated_all_axes_with_specs(
-                states, specs, basis,
-            )
+            family
+                .jeffreys_rotated_first_derivative()
+                .map(|rotated| rotated.first_directional_rotated_all_axes(states, specs, basis))
+                .transpose()
         },
         || {
             family.joint_jeffreys_information_directional_derivative_all_axes_with_specs(
@@ -664,14 +665,15 @@ pub(crate) fn custom_family_joint_jeffreys_second_order_completion<
         if plan.hessian_motion_active() {
             // A family that forms the rotated rows hands them over, and no `p × p` axis
             // matrix is built (#1082).
-            let rotated = family
-                .joint_jeffreys_information_directional_derivative_rotated_all_axes_with_specs(
-                    states,
-                    specs,
-                    plan.ambient_eigenbasis().view(),
-                )?;
-            match rotated {
-                Some(rows) => Some(plan.hessian_motion_from_rotated_rows(&rows)?),
+            match family.jeffreys_rotated_first_derivative() {
+                Some(rotated) => {
+                    let rows = rotated.first_directional_rotated_all_axes(
+                        states,
+                        specs,
+                        plan.ambient_eigenbasis().view(),
+                    )?;
+                    Some(plan.hessian_motion_from_rotated_rows(&rows)?)
+                }
                 None => {
                     let axes = family
                         .joint_jeffreys_information_directional_derivative_all_axes_with_specs(
@@ -950,16 +952,17 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
         // derivative.
         // A family that forms the rotated rows hands them over, and no `p × p` axis
         // matrix is built (#1082).
-        let rotated = family
-            .joint_jeffreys_information_directional_derivative_rotated_all_axes_with_specs(
-                &states,
-                &specs,
-                plan.ambient_eigenbasis().view(),
-            )?;
-        let base = match rotated {
-            Some(rows) => gam_solve::estimate::reml::jeffreys_subspace::JeffreysHphiDriftBase::prepare_with_plan_rotated_rows(
-                plan.clone(), rows,
-            )?,
+        let base = match family.jeffreys_rotated_first_derivative() {
+            Some(rotated) => {
+                let rows = rotated.first_directional_rotated_all_axes(
+                    &states,
+                    &specs,
+                    plan.ambient_eigenbasis().view(),
+                )?;
+                gam_solve::estimate::reml::jeffreys_subspace::JeffreysHphiDriftBase::prepare_with_plan_rotated_rows(
+                    plan.clone(), rows,
+                )?
+            }
             None => {
                 let all_axes = family
                     .joint_jeffreys_information_directional_derivative_all_axes_with_specs(

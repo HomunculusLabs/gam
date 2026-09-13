@@ -2921,6 +2921,29 @@ impl MultinomialFamily {
     }
 }
 
+impl crate::custom_family::JeffreysRotatedFirstDerivative for MultinomialFamily {
+    /// #1082: the Jeffreys term reads only `vec(sym(Uᵀ Hdot[e_a] U))`, so the rows are formed
+    /// through the row kernel instead of from `p` dense axis matrices.
+    fn first_directional_rotated_all_axes(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        basis: ArrayView2<'_, f64>,
+    ) -> Result<Array2<f64>, String> {
+        let eta = self.collect_eta_matrix(block_states)?;
+        let probs = self.row_probabilities(eta.view());
+        let rows = self.assemble_rotated_all_axis_directional_derivatives(&probs, basis)?;
+        let p: usize = specs.iter().map(|spec| spec.design.ncols()).sum();
+        if rows.nrows() != p {
+            return Err(format!(
+                "multinomial rotated first information has {} axes, expected {p}",
+                rows.nrows()
+            ));
+        }
+        Ok(rows)
+    }
+}
+
 impl CustomFamily for MultinomialFamily {
     fn joint_jeffreys_term_required(&self) -> bool {
         self.joint_jeffreys_term_strength > 0.0
@@ -3258,6 +3281,12 @@ impl CustomFamily for MultinomialFamily {
             ));
         }
         Ok(Some(rows))
+    }
+
+    fn jeffreys_rotated_first_derivative(
+        &self,
+    ) -> Option<&dyn crate::custom_family::JeffreysRotatedFirstDerivative> {
+        Some(self)
     }
 
     fn joint_jeffreys_information_second_directional_all_axes_with_specs(
