@@ -1147,7 +1147,7 @@ crates/gam-terms/src/basis/sphere_basis.rs	prepare_periodic_duchon_centers_1d	re
 crates/gam-terms/src/basis/sphere_gpu.rs	build_center_kernel_device	retired-by-later-deletion:dc325f1909
 crates/gam-terms/src/basis/sphere_gpu.rs	build_householder_constrained_design_device	retired-by-later-deletion:dc325f1909
 crates/gam-terms/src/basis/sphere_gpu.rs	constrained_penalty_host	retired-by-later-deletion:dc325f1909
-crates/gam-terms/src/basis/sphere_gpu.rs	copy_to_host_col_major	restored-in-place
+crates/gam-terms/src/basis/sphere_gpu.rs	copy_to_host_col_major	retired-no-product-user
 crates/gam-terms/src/basis/sphere_gpu.rs	householder_reflector_from_weights	retired-no-product-user
 crates/gam-terms/src/basis/sphere_gpu.rs	solve_penalised_ls_device	retired-no-product-user
 crates/gam-terms/src/basis/spline_eval_scalar.rs	evaluate_bsplinesecond_derivative_scalar	retired-no-surviving-dependent
