@@ -3,7 +3,9 @@
 //!
 //! On a penalty's range each direction carries data curvature `γ_j` (a
 //! generalized eigenvalue of the block's design Gram against the penalty,
-//! quotiented by the penalty's null space) and penalty curvature `λ = e^ρ` in
+//! quotiented by the penalty's null space, and also by only the null space it
+//! shares with the other penalties on its columns when it has companions) and
+//! penalty curvature `λ = e^ρ` in
 //! the same units. What the outer search consumes is the criterion's gradient
 //! in `ρ`, and in each direction that gradient is the direction's effective
 //! degrees of freedom `γ_j / (γ_j + λ)` carried through an inverse of the
@@ -169,10 +171,63 @@ pub fn coordinate_domain(interval: Option<(f64, f64)>, family_floor: Option<f64>
     (lo, hi)
 }
 
+/// The sum of every penalty on exactly `range`, or `None` when only one penalty
+/// sits there. A double penalty ships its bending block and its null-space ridge
+/// as two coordinates on one column range.
+fn shared_columns_aggregate<'a>(
+    penalties: impl IntoIterator<Item = (&'a std::ops::Range<usize>, &'a Array2<f64>)>,
+    range: &std::ops::Range<usize>,
+    dim: (usize, usize),
+) -> Option<Array2<f64>> {
+    let mut aggregate = Array2::<f64>::zeros(dim);
+    let mut count = 0usize;
+    for (other_range, other) in penalties {
+        if other_range == range && other.dim() == dim {
+            aggregate += other;
+            count += 1;
+        }
+    }
+    (count > 1).then_some(aggregate)
+}
+
+/// The resolvability interval of one penalty among the penalties on its columns.
+///
+/// Alone on its columns, a penalty's null space is quotiented out as
+/// unpenalized. Beside companions that null space is penalized by them: a double
+/// penalty's ridge has the whole bending range as its kernel. Profiling that
+/// kernel out as free reads only the curvature left once the companion's
+/// directions have absorbed the data, which is small whenever they can
+/// represent the null function closely, and then the upper edge sits below the
+/// strengths that switch the term off. So the curvature is also read quotiented
+/// only by the null space every penalty on the columns shares
+/// ([`penalty_range_gammas_with_shared_nullspace`]), and the coordinate's domain
+/// spans both intervals: it stays free wherever the term is resolvable at some
+/// strength of its companions. A lone penalty keeps its own interval.
+fn shared_columns_resolvability_interval(
+    gram: &Array2<f64>,
+    local: &Array2<f64>,
+    aggregate: Option<&Array2<f64>>,
+) -> Option<(f64, f64)> {
+    let own = penalty_range_gammas_from_gram(gram, local)
+        .as_deref()
+        .and_then(resolvability_interval);
+    let Some(aggregate) = aggregate else {
+        return own;
+    };
+    let shared = penalty_range_gammas_with_shared_nullspace(gram, local, aggregate)
+        .as_deref()
+        .and_then(resolvability_interval);
+    match (own, shared) {
+        (Some(own), Some(shared)) => Some((own.0.min(shared.0), own.1.max(shared.1))),
+        (own, shared) => own.or(shared),
+    }
+}
+
 /// The per-coordinate domain of a penalized design given as one Gram over
 /// ALL columns and one penalty block per ρ coordinate, each a local matrix on
-/// a contiguous column range. A coordinate whose block cannot be projected
-/// keeps the precision box.
+/// a contiguous column range. Blocks on the same range are read together
+/// (`shared_columns_resolvability_interval`). A coordinate whose block cannot
+/// be projected keeps the precision box.
 pub fn resolvability_domain_from_gram_blocks<'a>(
     gram: &Array2<f64>,
     blocks: impl IntoIterator<Item = (std::ops::Range<usize>, &'a Array2<f64>)>,
@@ -181,16 +236,22 @@ pub fn resolvability_domain_from_gram_blocks<'a>(
     let (box_lo, box_hi) = coordinate_domain(None, None);
     let mut lower = Array1::<f64>::from_elem(rho_dim, box_lo);
     let mut upper = Array1::<f64>::from_elem(rho_dim, box_hi);
-    for (k, (range, local)) in blocks.into_iter().take(rho_dim).enumerate() {
+    let blocks: Vec<(std::ops::Range<usize>, &'a Array2<f64>)> =
+        blocks.into_iter().take(rho_dim).collect();
+    for (k, (range, local)) in blocks.iter().enumerate() {
         if range.end > gram.nrows() || range.start >= range.end {
             continue;
         }
         let block_gram = gram
             .slice(ndarray::s![range.start..range.end, range.start..range.end])
             .to_owned();
-        let interval = penalty_range_gammas_from_gram(&block_gram, local)
-            .as_deref()
-            .and_then(resolvability_interval);
+        let aggregate = shared_columns_aggregate(
+            blocks.iter().map(|(other_range, other)| (other_range, *other)),
+            range,
+            local.dim(),
+        );
+        let interval =
+            shared_columns_resolvability_interval(&block_gram, local, aggregate.as_ref());
         if let Some(interval) = interval {
             let (lo, hi) = coordinate_domain(Some(interval), None);
             lower[k] = lo;
@@ -252,9 +313,15 @@ pub(crate) fn resolvability_domain_from_design(
         let Some(index) = ranges.iter().position(|range| *range == penalty.col_range) else {
             continue;
         };
-        let interval = penalty_range_gammas_from_gram(&grams[index], &penalty.local)
-            .as_deref()
-            .and_then(resolvability_interval);
+        let aggregate = shared_columns_aggregate(
+            penalties
+                .iter()
+                .map(|other| (&other.col_range, &other.local)),
+            &penalty.col_range,
+            penalty.local.dim(),
+        );
+        let interval =
+            shared_columns_resolvability_interval(&grams[index], &penalty.local, aggregate.as_ref());
         if let Some(interval) = interval {
             let (lo, hi) = coordinate_domain(Some(interval), None);
             lower[k] = lo;
