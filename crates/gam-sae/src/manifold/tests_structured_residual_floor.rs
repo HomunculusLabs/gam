@@ -199,20 +199,12 @@ mod tests {
         // guard's frame, where this circle's floor admits a raw residual energy of
         // 1e-10 · n·p · σ_c² = 8e-10.
         //
-        // Shrinkage. A single atom takes the full seed dispersion shift,
-        // log λ_smooth = ln(smoothness) + ln φ_seed, and `periodic_reference_penalty` weighs
-        // the fundamental at 1/2 against a per-column Gram Σcos²θ_i = 4. The fitted
-        // amplitude therefore shrinks by δ = (λ/2)/(4 + λ/2), and moving the coordinates
-        // only rotates the points, so the guard reads δ². At smoothness 1 (guarded sw0k job
-        // 543027 at 96b42e9e8, log λ_smooth = −5.658) that is about 2e-7, a radial residual
-        // the guard correctly mines: the premise failed there with a raw-energy fraction of
-        // 2.02e-9, which is 8δ²/792. Smoothness 1e-3 cuts the shrinkage term to about 2e-13.
-        //
-        // Perturbation. After the fit absorbs the column means, coefficients and
-        // coordinates, about three residual degrees of freedom remain. A uniform ±σ
-        // perturbation then leaves raw residual energy of about σ², so the former
-        // σ = 3e-5 sat at the floor. σ = 5e-6 leaves about 2.5e-11, a guard fraction near
-        // 3e-12, and each output's residual stays far above REML arithmetic resolution.
+        // Neither knob sets the residual that fails the premise. Guarded job 543027 at
+        // 96b42e9e8 read a guard fraction of 2.02e-9 at smoothness 1 and σ = 3e-5. Guarded
+        // job 558087 at 3aab85774 read 2.040e-9 at smoothness 1e-3 and σ = 5e-6, which is
+        // 1000× less smoothing and 36× less perturbation energy. So the residual is neither
+        // penalty shrinkage nor the perturbation. The premise message splits it into the
+        // radial part (amplitude) and the tangential part (coordinates) in the guard's frame.
         const SMOOTHNESS: f64 = 1.0e-3;
         let target = with_noise(circle_target(7.0), 5.0e-6);
         let floor = crate::manifold::fit_entry::STRUCTURED_RESIDUAL_MIN_REL_ENERGY;
@@ -220,13 +212,44 @@ mod tests {
         // pass-0 fit whose residual is already inside the guard's floor, in the guard's frame.
         let pass0 = run_primary(target.clone(), SMOOTHNESS, 0);
         let pass0_fraction = guard_frame_residual_fraction(&target, &pass0.fitted);
+        let (n, p) = target.dim();
+        let mut radial_energy = 0.0_f64;
+        let mut total_energy = 0.0_f64;
+        let mut worst_cell = 0.0_f64;
+        for i in 0..n {
+            let mut along = 0.0_f64;
+            let mut radius_sq = 0.0_f64;
+            for c in 0..p {
+                let column = target.column(c);
+                let mean = column.sum() / n as f64;
+                let sigma = (column.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>()
+                    / n as f64)
+                    .sqrt();
+                let standardized = (target[[i, c]] - mean) / sigma;
+                let residual = (target[[i, c]] - pass0.fitted[[i, c]]) / sigma;
+                along += residual * standardized;
+                radius_sq += standardized * standardized;
+                total_energy += residual * residual;
+                worst_cell = worst_cell.max(residual.abs());
+            }
+            radial_energy += along * along / radius_sq;
+        }
+        let cells = (n * p) as f64;
         assert!(
             pass0_fraction <= floor,
             "premise: the pass-0 fit leaves residual energy fraction {:e} above the \
              structured-residual floor {:e}, so this fixture is not in the near-exact regime \
-             the skip guard exists for, and the skip assertion below would measure nothing",
+             the skip guard exists for, and the skip assertion below would measure nothing. \
+             Guard-frame split: radial {:e}, tangential {:e}, worst standardized cell {:e}; \
+             pass-0 log_lambda_sparse {}, log_lambda_smooth {:?}, R² {}",
             pass0_fraction,
-            floor
+            floor,
+            radial_energy / cells,
+            (total_energy - radial_energy) / cells,
+            worst_cell,
+            pass0.rho.log_lambda_sparse,
+            pass0.rho.log_lambda_smooth,
+            pass0.reconstruction_r2
         );
         let report = run_primary(target.clone(), SMOOTHNESS, 2);
         // Reaching here means run_sae_manifold_fit returned Ok — before the floor

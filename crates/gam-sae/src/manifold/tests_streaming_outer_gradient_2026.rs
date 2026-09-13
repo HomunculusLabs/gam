@@ -177,6 +177,8 @@ fn wide_border_routes_to_streaming_with_complete_analytic_gradient_certificate()
 /// lower-level parity test remains green.
 #[test]
 fn production_objective_forced_streaming_value_gradient_matches_dense() {
+    // Each route converges its own inner solve; the log names which acceptance each took.
+    gam_runtime::test_support::install_diagnostic_logger();
     let target = planted_circle_embedded(32, 4, 0.02);
     let mut term = planted_circle_seed_term(target.view(), PlantedCircleAssignmentMode::Softmax).0;
     term.atoms[0].basis_second_jet = Some(Arc::new(
