@@ -3748,5 +3748,13 @@
     },
     "reason": "#2469 under the V22 ruling: the δ-ridge escalation ladder of the exact-Newton block step is deleted. strict_spd_lm_engine and its remaining wrapper become strict_solve_spd_or_spectral_step: a strict Cholesky solve; otherwise the positive-eigenspace pseudoinverse for a singular positive-semidefinite H, and the minimal positive-definite shift for an indefinite one. The negative-definite regression test is replaced by two fixtures.",
     "evidence": "At the base, git grep -n -w for each removed name finds its declaration, the single ExactNewtonBlockUpdater call site and the replaced test in inner_solver_numerics.rs. Guarded cargo check with public_api_census.py on a temporary commit: job 615497, /scratch.global/sauer354/pool/const2469b/rp47.615497.log."
+  },
+  {
+    "base": "6a5b38ce9d85e663eaa5711676377ccdd1944dcd",
+    "removed": {
+      "crates/gam-problem/src/laplace_sampler_contract.rs::BLOCK_GH_MAX_DIM": 1
+    },
+    "reason": "#2623 ruling A: the #784 block Gauss–Hermite correction selects each axis's order once at admission and reserves its product rule's working memory on the memory governor, so the node ceiling is the budget. BLOCK_GH_MAX_DIM encoded the hand-set 4096-node ceiling of the fixed five-node rule; its hmc_io and block_quadrature_correction declines are replaced by the governor refusal and a typed unrepresentable-order refusal.",
+    "evidence": "At 6a5b38ce9d85e663eaa5711676377ccdd1944dcd, git grep BLOCK_GH_MAX_DIM finds only its definition in crates/gam-problem/src/laplace_sampler_contract.rs, the gam-inference hmc_io re-export and dimension check, and the gam-solve block_quadrature_correction decline, all removed by this landing. Pool job 619037 on sw0o at 0f8d063d186bff4c591252a68ed83495ec9e78f5 with this landing's patch (log /scratch.global/sauer354/pool/t2627core/j5.619037.log): cargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0 with no error or warning lines."
   }
 ]

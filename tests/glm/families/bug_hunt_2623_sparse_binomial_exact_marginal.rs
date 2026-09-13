@@ -132,10 +132,16 @@ fn higher_order_laml_tracks_exact_sparse_binomial_marginal_2623() {
         eprintln!(
             "#2623 exact sparse binomial: rho={rho_scalar:+.2} exact={exact_cost:.10e} \
              corrected={corrected_cost:.10e} plain={plain_laplace_cost:.10e} \
-             Delta_b={:.4e} quadrature_error={:.3e} nodes={}",
+             Delta_b={:.4e} quadrature_error={:.3e} nodes={} axis_orders={}",
             correction.delta_b,
             correction.quadrature_error,
             correction.node_count,
+            correction
+                .axis_orders
+                .iter()
+                .map(|order| order.to_string())
+                .collect::<Vec<_>>()
+                .join("x"),
         );
         rows.push((
             rho_scalar,

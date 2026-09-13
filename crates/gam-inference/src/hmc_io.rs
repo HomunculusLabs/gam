@@ -2570,15 +2570,85 @@ mod tests {
             lambdas: array![2.0, 0.5],
             a: 0.0,
         };
-        let out = super::block_quadrature_marginal_correction(&target).expect("correction");
+        let out = super::block_quadrature_marginal_correction(&target, &[5, 5]).expect("correction");
         assert!(
             out.value.abs() < 1e-12,
             "Gaussian block value {}",
             out.value
         );
         assert!(out.rho_gradient.iter().all(|&g| g.abs() < 1e-12));
-        assert!(out.node_count > 0);
+        assert_eq!(out.node_count, 25);
+        assert_eq!(out.axis_orders, vec![5, 5]);
         assert_eq!(out.quadrature_error, 0.0);
+    }
+
+    #[test]
+    fn generated_standard_normal_rule_integrates_its_polynomial_degree() {
+        // Golub–Welsch replaces the tabulated 3/5-node rules (#2623). A five-node
+        // standard-normal rule carries unit mass and integrates z⁸ exactly
+        // (E[z⁸] = 105), which is the degree-nine exactness the correction's
+        // five-node arm always had.
+        let rule = crate::rho_posterior::standard_normal_gh_rule(5).expect("five-node rule");
+        let mass: f64 = rule.iter().map(|&(_, weight)| weight).sum();
+        let eighth: f64 = rule.iter().map(|&(node, weight)| weight * node.powi(8)).sum();
+        assert!((mass - 1.0).abs() < 1e-14, "rule mass {mass}");
+        assert!((eighth - 105.0).abs() < 1e-11, "E[z^8] by the rule {eighth}");
+    }
+
+    #[test]
+    fn near_gaussian_block_latches_the_lowest_order() {
+        // ΔF = a t⁴ at λ = 1 with a tiny: the order-two rule reads E[t⁴] as 1
+        // instead of 3, so the paired difference at order three is ≈ 2a, below
+        // min(|Δ_b| ≈ 3a, remainder). The admission must stop at the first order
+        // it tries rather than escalate an axis that is already resolved.
+        let target = AnharmonicBlock {
+            lambdas: array![1.0],
+            a: 1e-6,
+        };
+        let marginal = gam_problem::laplace_sampler_contract::select_block_quadrature_orders(
+            &super::HmcIoLaplaceMarginalCorrector,
+            &target,
+            1e-4,
+        )
+        .expect("a near-Gaussian block resolves");
+        assert_eq!(marginal.axis_orders, vec![3]);
+        let resolution_target = marginal.value.abs().min(1e-4);
+        assert!(
+            marginal.axis_quadrature_errors[0] < resolution_target,
+            "latched paired difference {} does not resolve {resolution_target}",
+            marginal.axis_quadrature_errors[0]
+        );
+    }
+
+    #[test]
+    fn strongly_non_gaussian_block_escalates_to_the_first_resolving_order() {
+        // The quartic oracle's own strength: the order-three rule cannot resolve
+        // a 1e-6 remainder, so the admission raises the axis, and the order it
+        // latches is the first that resolves: one order lower does not.
+        let remainder = 1e-6;
+        let target = AnharmonicBlock {
+            lambdas: array![3.0],
+            a: 0.05,
+        };
+        let marginal = gam_problem::laplace_sampler_contract::select_block_quadrature_orders(
+            &super::HmcIoLaplaceMarginalCorrector,
+            &target,
+            remainder,
+        )
+        .expect("the quartic block resolves within the memory budget");
+        let order = marginal.axis_orders[0];
+        assert!(order > 3, "a strongly quartic block must escalate, latched {order}");
+        let resolution_target = marginal.value.abs().min(remainder);
+        assert!(marginal.axis_quadrature_errors[0] < resolution_target);
+        let lower = super::block_quadrature_marginal_correction(&target, &[order - 1])
+            .expect("one order lower");
+        let lower_target = lower.value.abs().min(remainder);
+        assert!(
+            !(lower.axis_quadrature_errors[0] < lower_target),
+            "order {} already resolved ({} < {lower_target}), so {order} is not the first",
+            order - 1,
+            lower.axis_quadrature_errors[0]
+        );
     }
 
     #[test]
@@ -2595,7 +2665,7 @@ mod tests {
             lambdas: array![lambda],
             a,
         };
-        let out = super::block_quadrature_marginal_correction(&target).expect("correction");
+        let out = super::block_quadrature_marginal_correction(&target, &[5]).expect("correction");
 
         // Deterministic reference: Δ_b = log E_{t~N(0,1/λ)}[exp(−a t⁴)] via a
         // fine trapezoid rule over the Gaussian density.
@@ -2730,21 +2800,27 @@ mod tests {
         let y: Array1<f64> = (0..n).map(|i| ((i % 5) as f64) * 0.2).collect();
         let lambdas = array![2.0, 1.0, 0.5];
 
-        let serial = super::block_quadrature_marginal_correction(&MatvecBlock {
-            lambdas: lambdas.clone(),
-            x: x.clone(),
-            v_b: v_b.clone(),
-            y: y.clone(),
-            batched: false,
-        })
+        let serial = super::block_quadrature_marginal_correction(
+            &MatvecBlock {
+                lambdas: lambdas.clone(),
+                x: x.clone(),
+                v_b: v_b.clone(),
+                y: y.clone(),
+                batched: false,
+            },
+            &[5, 5, 5],
+        )
         .expect("serial");
-        let batched = super::block_quadrature_marginal_correction(&MatvecBlock {
-            lambdas,
-            x,
-            v_b,
-            y,
-            batched: true,
-        })
+        let batched = super::block_quadrature_marginal_correction(
+            &MatvecBlock {
+                lambdas,
+                x,
+                v_b,
+                y,
+                batched: true,
+            },
+            &[5, 5, 5],
+        )
         .expect("batched");
 
         assert_eq!(serial.node_count, batched.node_count);
@@ -5088,7 +5164,7 @@ fn cubic_power_iteration_refinement(
 // the directional-cubic eigen diagnostic) stays UP in this module and
 // constructs these types under their original names via this re-export.
 pub use gam_problem::laplace_sampler_contract::{
-    BLOCK_GH_MAX_DIM, BlockExcessTarget, BlockQuadratureMarginal, BlockQuadratureMoments,
+    BlockExcessTarget, BlockQuadratureMarginal, BlockQuadratureMoments, BlockQuadratureRefusal,
     LaplaceTrustworthiness, laplace_skewness_threshold,
     laplace_trustworthiness_from_skewness,
 };
@@ -5115,38 +5191,12 @@ impl gam_problem::laplace_sampler_contract::LaplaceMarginalCorrector
     fn block_quadrature_marginal_correction(
         &self,
         target: &dyn BlockExcessTarget,
-    ) -> Result<BlockQuadratureMarginal, String> {
-        block_quadrature_marginal_correction(target)
+        axis_orders: &[usize],
+    ) -> Result<BlockQuadratureMarginal, BlockQuadratureRefusal> {
+        block_quadrature_marginal_correction(target, axis_orders)
     }
 }
 
-/// Evaluate the block-local marginal correction `Δ_b` and its ρ-gradient by
-/// deterministic Gauss-Hermite quadrature against the local Laplace Gaussian
-/// (issue #784).
-///
-/// # Math
-///
-/// Integrate `t ~ q = N(0, diag(1/λ_r))` (the local Laplace Gaussian in the
-/// block subspace; standard-normal nodes `z_s` give `t_{s,r}=z_{s,r}/√λ_r`).
-/// With the non-Gaussian remainder `ΔF` defined on [`BlockExcessTarget`],
-///
-///   exp(Δ_b) = E_q[ exp(−ΔF(t)) ],
-///
-/// computed via a numerically-stable weighted log-sum-exp. The ρ-gradient follows
-/// from differentiating `Δ_b = log E_q[e^{−ΔF}]` (the `q`-Gaussian normalizer
-/// `½Σ log(2π/λ_r)` cancels against `A_Lap`, leaving only the `ΔF` channel):
-///
-///   ∂Δ_b/∂ρ_k = E_p[ −∂ΔF/∂ρ_k ],   p ∝ q·e^{−ΔF},
-///
-/// i.e. the normalized quadrature average of `−∂ΔF/∂ρ_k`. Because value,
-/// gradient, and all envelope moments come from the same nodes and target, they
-/// are mutually consistent — the contract the outer REML needs.
-///
-/// The five-node rule is exact for standard-normal polynomials through degree
-/// nine. A separate three-node rule (degree five) supplies a deterministic
-/// rule-difference estimate for the realized non-polynomial integrand; the
-/// caller admits the correction only when that difference resolves both `Δ_b`
-/// and the `O(1/n_eff)` Laplace floor.
 /// Streaming log-sum-exp of `log_terms` in the order given, accumulated
 /// against a running maximum exactly as the block-quadrature loop below
 /// accumulates its scalar weight (`sum_w *= exp(max_old − max_new)` on a new
@@ -5174,15 +5224,59 @@ fn streaming_log_sum_exp(log_terms: impl IntoIterator<Item = f64>) -> f64 {
     max_lw + sum_w.ln()
 }
 
+/// Evaluate the block-local marginal correction `Δ_b` and its ρ-gradient by
+/// deterministic product Gauss–Hermite quadrature against the local Laplace
+/// Gaussian (issue #784).
+///
+/// # Math
+///
+/// Integrate `t ~ q = N(0, diag(1/λ_r))` (the local Laplace Gaussian in the
+/// block subspace; standard-normal nodes `z_s` give `t_{s,r}=z_{s,r}/√λ_r`).
+/// With the non-Gaussian remainder `ΔF` defined on [`BlockExcessTarget`],
+///
+///   exp(Δ_b) = E_q[ exp(−ΔF(t)) ],
+///
+/// computed via a numerically-stable weighted log-sum-exp. The ρ-gradient follows
+/// from differentiating `Δ_b = log E_q[e^{−ΔF}]` (the `q`-Gaussian normalizer
+/// `½Σ log(2π/λ_r)` cancels against `A_Lap`, leaving only the `ΔF` channel):
+///
+///   ∂Δ_b/∂ρ_k = E_p[ −∂ΔF/∂ρ_k ],   p ∝ q·e^{−ΔF},
+///
+/// i.e. the normalized quadrature average of `−∂ΔF/∂ρ_k`. Because value,
+/// gradient, and all envelope moments come from the same nodes and target, they
+/// are mutually consistent — the contract the outer REML needs.
+///
+/// Axis `r` uses order `axis_orders[r]`, generated by Golub–Welsch and exact for
+/// standard-normal polynomials through degree `2·axis_orders[r] − 1`. For each
+/// axis the scalar integral is repeated with that axis one order lower and every
+/// other axis unchanged, which gives that axis's deterministic paired-rule
+/// difference for the realized non-polynomial integrand. The admission selects
+/// the orders so every axis's difference resolves `min(|Δ_b|, 1/n_eff²)`
+/// ([`gam_problem::laplace_sampler_contract::select_block_quadrature_orders`]).
+///
+/// The product rule's working memory is reserved on the process memory governor
+/// before any node is evaluated, so the node ceiling is the budget. A rule with a
+/// weight that underflows to zero has passed the largest representable order and
+/// is refused rather than evaluated with nodes that carry no mass.
 pub fn block_quadrature_marginal_correction<T: BlockExcessTarget + ?Sized>(
     target: &T,
-) -> Result<BlockQuadratureMarginal, String> {
+    axis_orders: &[usize],
+) -> Result<BlockQuadratureMarginal, BlockQuadratureRefusal> {
+    use BlockQuadratureRefusal::Integration;
     let m = target.block_dim();
     let k = target.rho_dim();
+    if axis_orders.len() != m {
+        return Err(Integration(format!(
+            "block_quadrature_marginal_correction: {} axis orders for a {m}-direction block",
+            axis_orders.len()
+        )));
+    }
     if m == 0 {
         return Ok(BlockQuadratureMarginal {
             value: 0.0,
             rho_gradient: Array1::zeros(k),
+            axis_orders: Vec::new(),
+            axis_quadrature_errors: Vec::new(),
             quadrature_error: 0.0,
             node_count: 0,
             moments: None,
@@ -5190,10 +5284,10 @@ pub fn block_quadrature_marginal_correction<T: BlockExcessTarget + ?Sized>(
     }
     let lambdas = target.block_curvatures();
     if lambdas.len() != m {
-        return Err(format!(
+        return Err(Integration(format!(
             "block_quadrature_marginal_correction: block_curvatures len {} != block_dim {m}",
             lambdas.len()
-        ));
+        )));
     }
     let inv_sqrt_lambda: Array1<f64> = lambdas.mapv(|l| {
         if l > 0.0 {
@@ -5206,31 +5300,50 @@ pub fn block_quadrature_marginal_correction<T: BlockExcessTarget + ?Sized>(
         }
     });
     if inv_sqrt_lambda.iter().any(|v| !v.is_finite()) {
-        return Err(
+        return Err(Integration(
             "block_quadrature_marginal_correction: non-positive block curvature (mode is not a \
              strict local minimum in an integrated direction)"
                 .to_string(),
-        );
-    }
-    if m > BLOCK_GH_MAX_DIM {
-        return Err(format!(
-            "block-local Gauss-Hermite correction supports at most {BLOCK_GH_MAX_DIM} \
-             curvature-heavy directions, got {m}"
         ));
     }
 
-    let fine_rule = crate::rho_posterior::standard_normal_gh_rule(5)
-        .expect("the five-node standard-normal Gauss-Hermite rule is built in");
+    let mut rules: Vec<Vec<(f64, f64)>> = Vec::with_capacity(m);
+    for (axis, &order) in axis_orders.iter().enumerate() {
+        let rule = crate::rho_posterior::standard_normal_gh_rule(order).map_err(Integration)?;
+        if rule.iter().any(|&(_, weight)| !(weight > 0.0)) {
+            return Err(BlockQuadratureRefusal::UnrepresentableOrder { axis, order });
+        }
+        rules.push(rule);
+    }
+    let Some(node_count) = axis_orders
+        .iter()
+        .try_fold(1usize, |nodes, &order| nodes.checked_mul(order))
+    else {
+        return Err(BlockQuadratureRefusal::WorkingMemory {
+            axis_orders: axis_orders.to_vec(),
+            node_count: None,
+            reason: "the product of the axis orders overflows usize".to_string(),
+        });
+    };
+    let n_obs = target.base_neg_score().map_err(Integration)?.len();
+    // The fine rule holds every node's displaced per-row score and its whitened
+    // displacement at once: `node_count × (n_obs + m)` doubles.
+    let working_memory = gam_runtime::resource::MemoryGovernor::global()
+        .try_reserve_dense_f64(node_count, n_obs + m, "#784 block Gauss–Hermite product rule")
+        .map_err(|error| BlockQuadratureRefusal::WorkingMemory {
+            axis_orders: axis_orders.to_vec(),
+            node_count: Some(node_count),
+            reason: error.to_string(),
+        })?;
+
     let mut fine_nodes = Vec::new();
     crate::rho_posterior::enumerate_gh_product(
-        m,
-        fine_rule,
+        &rules,
         0,
         &mut Array1::zeros(m),
         0.0,
         &mut fine_nodes,
     );
-    let node_count = fine_nodes.len();
 
     // Streaming, numerically-stable accumulation of the weighted log-sum-exp value,
     // the explicit gradient channel `E_p[−∂ΔF/∂ρ]`, AND the gradient-channel
@@ -5241,7 +5354,6 @@ pub fn block_quadrature_marginal_correction<T: BlockExcessTarget + ?Sized>(
     // `exp(max_old − max_new) ≤ 1`, so each per-draw relative weight is ≤ 1
     // and the sums never overflow. Infeasible / divergent draws contribute
     // zero weight rather than poisoning the estimate.
-    let n_obs = target.base_neg_score()?.len();
     let mut max_lw = f64::NEG_INFINITY;
     let mut sum_w = 0.0_f64;
     let mut grad_acc = Array1::<f64>::zeros(k);
@@ -5291,10 +5403,10 @@ pub fn block_quadrature_marginal_correction<T: BlockExcessTarget + ?Sized>(
         grad_acc.scaled_add(-w, &target.excess_rho_gradient(&t));
         // Moment channels (score already computed in the fused call above).
         if ngs.len() != n_obs {
-            return Err(format!(
+            return Err(Integration(format!(
                 "block_quadrature_marginal_correction: displaced_neg_score len {} != {n_obs}",
                 ngs.len()
-            ));
+            )));
         }
         e_t_acc.scaled_add(w, &t);
         e_ngs_acc.scaled_add(w, &ngs);
@@ -5307,10 +5419,10 @@ pub fn block_quadrature_marginal_correction<T: BlockExcessTarget + ?Sized>(
         }
     }
     if !max_lw.is_finite() {
-        return Err(
+        return Err(Integration(
             "block_quadrature_marginal_correction: all fine quadrature nodes were infeasible"
                 .to_string(),
-        );
+        ));
     }
     // Self-normalised value `log Σ wᵢe^{−ΔFᵢ} − log Σ wᵢ`: the normaliser is
     // the same streaming reduction over the same product log-weights, so the
@@ -5332,52 +5444,66 @@ pub fn block_quadrature_marginal_correction<T: BlockExcessTarget + ?Sized>(
     } else {
         (Array1::zeros(k), None)
     };
-    // Paired-rule error estimate: repeat only the scalar integral with the
-    // three-node (degree-five) product rule. The fine/coarse difference is in
-    // the same log-marginal units as Δ_b and is deterministic across rho.
-    let coarse_rule = crate::rho_posterior::standard_normal_gh_rule(3)
-        .expect("the three-node standard-normal Gauss-Hermite rule is built in");
-    let mut coarse_nodes = Vec::new();
-    crate::rho_posterior::enumerate_gh_product(
-        m,
-        coarse_rule,
-        0,
-        &mut Array1::zeros(m),
-        0.0,
-        &mut coarse_nodes,
-    );
-    let mut coarse_draws = Array2::<f64>::zeros((m, coarse_nodes.len()));
-    for (s, (z, _)) in coarse_nodes.iter().enumerate() {
-        for r in 0..m {
-            coarse_draws[(r, s)] = z[r] * inv_sqrt_lambda[r];
+    // Paired-rule difference per axis: repeat only the scalar integral with that
+    // axis one order lower and every other axis unchanged. Each difference is in
+    // the same log-marginal units as Δ_b and is deterministic across rho. An axis
+    // at order one has no lower rule, so nothing certifies it.
+    let mut axis_quadrature_errors = Vec::with_capacity(m);
+    for axis in 0..m {
+        let order = axis_orders[axis];
+        if order < 2 {
+            axis_quadrature_errors.push(f64::INFINITY);
+            continue;
         }
-    }
-    let coarse_values = target.excess_batch(&coarse_draws);
-    // The coarse estimate is the same self-normalised reduction as the fine
-    // one (infeasible nodes contribute zero weight to the numerator and keep
-    // their weight in the normaliser, exactly as in the fine loop).
-    let coarse_log_numerator = streaming_log_sum_exp(
-        coarse_values
-            .iter()
-            .zip(&coarse_nodes)
-            .filter(|(excess, _)| excess.is_finite())
-            .map(|(excess, (_, log_w))| log_w - excess),
-    );
-    if !coarse_log_numerator.is_finite() {
-        return Err(
-            "block_quadrature_marginal_correction: every coarse quadrature node was infeasible"
-                .to_string(),
+        let mut coarse_rules = rules.clone();
+        coarse_rules[axis] =
+            crate::rho_posterior::standard_normal_gh_rule(order - 1).map_err(Integration)?;
+        let mut coarse_nodes = Vec::new();
+        crate::rho_posterior::enumerate_gh_product(
+            &coarse_rules,
+            0,
+            &mut Array1::zeros(m),
+            0.0,
+            &mut coarse_nodes,
         );
+        let mut coarse_draws = Array2::<f64>::zeros((m, coarse_nodes.len()));
+        for (s, (z, _)) in coarse_nodes.iter().enumerate() {
+            for r in 0..m {
+                coarse_draws[(r, s)] = z[r] * inv_sqrt_lambda[r];
+            }
+        }
+        let coarse_values = target.excess_batch(&coarse_draws);
+        // The coarse estimate is the same self-normalised reduction as the fine
+        // one (infeasible nodes contribute zero weight to the numerator and keep
+        // their weight in the normaliser, exactly as in the fine loop).
+        let coarse_log_numerator = streaming_log_sum_exp(
+            coarse_values
+                .iter()
+                .zip(&coarse_nodes)
+                .filter(|(excess, _)| excess.is_finite())
+                .map(|(excess, (_, log_w))| log_w - excess),
+        );
+        if !coarse_log_numerator.is_finite() {
+            return Err(Integration(format!(
+                "block_quadrature_marginal_correction: every node of the rule with axis {axis} \
+                 at order {} was infeasible",
+                order - 1
+            )));
+        }
+        let coarse_log_norm =
+            streaming_log_sum_exp(coarse_nodes.iter().map(|(_, log_w)| *log_w));
+        axis_quadrature_errors.push((value - (coarse_log_numerator - coarse_log_norm)).abs());
     }
-    let coarse_log_norm = streaming_log_sum_exp(coarse_nodes.iter().map(|(_, log_w)| *log_w));
-    let coarse_value = coarse_log_numerator - coarse_log_norm;
-    let quadrature_error = (value - coarse_value).abs();
+    let quadrature_error = axis_quadrature_errors
+        .iter()
+        .copied()
+        .fold(0.0_f64, f64::max);
 
     if !value.is_finite() || rho_gradient.iter().any(|v| !v.is_finite()) {
-        return Err(
+        return Err(Integration(
             "block_quadrature_marginal_correction: produced a non-finite correction or gradient"
                 .to_string(),
-        );
+        ));
     }
     if let Some(mo) = moments.as_ref()
         && (mo.e_t.iter().any(|v| !v.is_finite())
@@ -5385,15 +5511,18 @@ pub fn block_quadrature_marginal_correction<T: BlockExcessTarget + ?Sized>(
             || mo.e_neg_score.iter().any(|v| !v.is_finite())
             || mo.e_t_neg_score.iter().any(|v| !v.is_finite()))
     {
-        return Err(
+        return Err(Integration(
             "block_quadrature_marginal_correction: produced non-finite gradient-channel moments"
                 .to_string(),
-        );
+        ));
     }
 
+    drop(working_memory);
     Ok(BlockQuadratureMarginal {
         value,
         rho_gradient,
+        axis_orders: axis_orders.to_vec(),
+        axis_quadrature_errors,
         quadrature_error,
         node_count,
         moments,

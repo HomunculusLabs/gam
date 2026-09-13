@@ -316,16 +316,6 @@ impl<'a> RemlState<'a> {
             return Ok(zero());
         }
         let m = block_cols.len();
-        if m > gam_problem::laplace_sampler_contract::BLOCK_GH_MAX_DIM {
-            // Only reachable before the latch: a latched `m` is one that was
-            // already admitted, and admission required clearing this cap.
-            log::info!(
-                "[#784] block-local correction declined: {m} curvature-heavy directions exceed \
-                 the deterministic Gauss-Hermite product cap {}",
-                gam_problem::laplace_sampler_contract::BLOCK_GH_MAX_DIM,
-            );
-            return Ok(zero());
-        }
         let mut block_vecs = Array2::<f64>::zeros((p, m));
         let mut block_lambdas = Array1::<f64>::zeros(m);
         for (j, &r) in block_cols.iter().enumerate() {
@@ -418,9 +408,47 @@ impl<'a> RemlState<'a> {
             base_neg_score_at_mode,
         };
 
-        let quadrature = corrector
-            .block_quadrature_marginal_correction(&target)
-            .map_err(EstimationError::InvalidInput)?;
+        // The correction exists to remove the O(1/n_eff) Laplace term, so its
+        // quadrature error must sit below the next-order remainder 1/n_eff²
+        // (#2623). Each axis's Gauss–Hermite order is selected ONCE, at
+        // admission, as the smallest order whose paired difference with the next
+        // lower rule resolves min(|Δ_b|, 1/n_eff²), and latched beside the block
+        // dimension. Under a latched admission the orders are the model's, so
+        // every ρ integrates against the same nodes and the value, gradient and
+        // moments share one measure.
+        let laplace_floor = if n_eff > 0.0 {
+            1.0 / n_eff
+        } else {
+            f64::INFINITY
+        };
+        let next_order_remainder = laplace_floor * laplace_floor;
+        let latched_axis_orders = self
+            .block_correction_axis_orders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .filter(|orders| orders.len() == m);
+        let quadrature = match latched_axis_orders {
+            Some(axis_orders) => corrector
+                .block_quadrature_marginal_correction(&target, &axis_orders)
+                .map_err(|refusal| EstimationError::InvalidInput(refusal.to_string()))?,
+            None => match gam_problem::laplace_sampler_contract::select_block_quadrature_orders(
+                corrector,
+                &target,
+                next_order_remainder,
+            ) {
+                Ok(quadrature) => quadrature,
+                Err(refusal) => {
+                    log::info!(
+                        "[#784] block-local correction declined: {refusal} (m={m}, \
+                         max|γ|={:.3}, τ={:.3}, 1/n_eff={laplace_floor:.3e})",
+                        verdict.max_abs_skewness,
+                        verdict.threshold,
+                    );
+                    return Ok(zero());
+                }
+            },
+        };
 
         let abs_value = quadrature.value.abs();
         let relative_error = if abs_value > 0.0 {
@@ -428,17 +456,13 @@ impl<'a> RemlState<'a> {
         } else {
             f64::INFINITY
         };
-        let laplace_floor = if n_eff > 0.0 {
-            1.0 / n_eff
-        } else {
-            f64::INFINITY
-        };
 
-        // Trust gate: splice `Δ_b` only when the independent degree-nine and
-        // degree-five product rules agree finely enough to resolve both the
-        // correction itself and the O(1/n_eff) Laplace error it is meant to
-        // remove. This makes admission a deterministic accuracy certificate,
-        // not a Monte-Carlo efficiency heuristic.
+        // Trust gate: splice `Δ_b` only when every axis's paired rules agree
+        // finely enough to resolve both the correction itself and the next-order
+        // remainder the correction leaves behind. This makes admission a
+        // deterministic accuracy certificate, not a Monte-Carlo efficiency
+        // heuristic, and the order selection above only returns orders that pass
+        // it.
         //
         // It decides ADMISSION and nothing else (#2748). Once the fit has
         // latched an admission, this test is reported and no longer switches:
@@ -449,13 +473,17 @@ impl<'a> RemlState<'a> {
         // varies with ρ perturbs the criterion CONTINUOUSLY, which the outer
         // loop's noise-floor machinery is built for; a criterion that drops a
         // 3e-2 term and picks it up again is not a function.
-        let resolution_target = abs_value.min(laplace_floor);
-        let resolved = quadrature.quadrature_error < resolution_target;
+        let resolution_target = abs_value.min(next_order_remainder);
+        let resolved = quadrature
+            .axis_quadrature_errors
+            .iter()
+            .all(|&error| error == 0.0 || error < resolution_target);
         if !resolved {
             log::info!(
                 "[#784] block-local correction {}: paired Gauss-Hermite error \
-                 {:.4e} does not resolve min(|Δ_b|, 1/n_eff)={resolution_target:.4e} \
-                 (|Δ_b|={abs_value:.4e}, m={m}, max|γ|={:.3}, τ={:.3}, nodes={}, 1/n_eff={:.3e})",
+                 {:.4e} does not resolve min(|Δ_b|, 1/n_eff²)={resolution_target:.4e} \
+                 (|Δ_b|={abs_value:.4e}, m={m}, max|γ|={:.3}, τ={:.3}, axis orders={:?}, \
+                 nodes={}, 1/n_eff={:.3e})",
                 if latched_block_dim.is_some() {
                     "spliced UNRESOLVED (admission already latched, #2748)"
                 } else {
@@ -464,6 +492,7 @@ impl<'a> RemlState<'a> {
                 quadrature.quadrature_error,
                 verdict.max_abs_skewness,
                 verdict.threshold,
+                quadrature.axis_orders,
                 quadrature.node_count,
                 laplace_floor,
             );
@@ -478,21 +507,28 @@ impl<'a> RemlState<'a> {
         if latched_block_dim.is_none() {
             self.block_correction_admission
                 .store(m + 1, std::sync::atomic::Ordering::Relaxed);
+            *self
+                .block_correction_axis_orders
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(quadrature.axis_orders.clone());
             log::info!(
-                "[#784] block-local correction ADMITTED for this fit: block dimension m={m} is \
-                 now the model's, and the tau={:.3} activation no longer switches the criterion \
-                 on and off along the outer search (#2748)",
+                "[#784] block-local correction ADMITTED for this fit: block dimension m={m} and \
+                 axis orders {:?} are now the model's, and the tau={:.3} activation no longer \
+                 switches the criterion on and off along the outer search (#2748, #2623)",
+                quadrature.axis_orders,
                 verdict.threshold,
             );
         }
 
         log::info!(
             "[#784] deterministic block-local Gauss-Hermite correction ENGAGED: \
-             m={m}, max|γ|={:.3}, τ={:.3}, Δ_b={:.4e}, nodes={} \
+             m={m}, max|γ|={:.3}, τ={:.3}, Δ_b={:.4e}, axis orders={:?}, nodes={} \
              [paired-rule error={:.4e}, error/|Δ_b|={:.3e}, 1/n_eff={:.3e}]",
             verdict.max_abs_skewness,
             verdict.threshold,
             quadrature.value,
+            quadrature.axis_orders,
             quadrature.node_count,
             quadrature.quadrature_error,
             relative_error,
@@ -793,6 +829,8 @@ impl<'a> RemlState<'a> {
                     delta_b: quadrature.value,
                     quadrature_error: quadrature.quadrature_error,
                     node_count: quadrature.node_count,
+                    axis_orders: quadrature.axis_orders.clone(),
+                    axis_quadrature_errors: quadrature.axis_quadrature_errors.clone(),
                     max_abs_skewness: verdict.max_abs_skewness,
                     skewness_threshold: verdict.threshold,
                     block_cols: block_cols.clone(),

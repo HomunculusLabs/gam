@@ -21,7 +21,9 @@
 //!
 //! The pure threshold math ([`laplace_skewness_threshold`],
 //! [`laplace_trustworthiness_from_skewness`]) has no sampler dependency, so it is
-//! moved down outright (gam-solve calls it directly).
+//! moved down outright (gam-solve calls it directly), and so does the admission's
+//! order selection ([`select_block_quadrature_orders`]), which only calls the
+//! corrector.
 //!
 //! When no impl is registered (e.g. a build that never links the sampler tier)
 //! the sampler getters return `None` and gam-solve degrades to its existing
@@ -92,20 +94,97 @@ pub struct BlockQuadratureMarginal {
     pub value: f64,
     /// `∂Δ_b/∂ρ`, length `rho_dim()` — explicit channel (a) ONLY.
     pub rho_gradient: Array1<f64>,
-    /// Absolute difference between the five-node and three-node product rules,
-    /// in the same log-likelihood units as `value`.
+    /// Per-axis Gauss–Hermite orders of the product rule that produced `value`.
+    pub axis_orders: Vec<usize>,
+    /// For each axis `r`, `|Δ_b − Δ_b⁽ʳ⁾|`, where `Δ_b⁽ʳ⁾` repeats the scalar
+    /// integral with axis `r` one order lower, in the same log-likelihood units
+    /// as `value`. `+∞` on an axis at order one, which has no lower rule.
+    pub axis_quadrature_errors: Vec<f64>,
+    /// The largest entry of `axis_quadrature_errors`, `0` for an empty block.
     pub quadrature_error: f64,
-    /// Number of nodes in the fine product rule.
+    /// Number of nodes in the product rule, `Π_r axis_orders[r]`.
     pub node_count: usize,
     /// Gradient-channel moments for the exact (b)–(d) assembly; `None` only when
     /// the block is empty (`m == 0`, where the correction is zero).
     pub moments: Option<BlockQuadratureMoments>,
 }
 
-/// Maximum curvature-heavy block dimension for deterministic product
-/// Gauss–Hermite quadrature. The fine rule has five nodes per axis, so the cap
-/// follows from the 4096-node work ceiling: `5^5 = 3125`, while `5^6 = 15625`.
-pub const BLOCK_GH_MAX_DIM: usize = 5;
+/// Why the deterministic block quadrature could not be evaluated at the orders
+/// it was asked for.
+#[derive(Clone, Debug)]
+pub enum BlockQuadratureRefusal {
+    /// The process memory governor did not admit the product rule's working
+    /// memory. This is the node ceiling: it is the budget, not a hand-set count.
+    WorkingMemory {
+        axis_orders: Vec<usize>,
+        /// `None` when the node count itself overflows `usize`.
+        node_count: Option<usize>,
+        reason: String,
+    },
+    /// Axis `axis` asked for an order whose Gauss–Hermite rule carries a weight
+    /// that underflows to zero, so the rule has passed the largest order whose
+    /// nodes all carry representable mass.
+    UnrepresentableOrder { axis: usize, order: usize },
+    /// Any other failure of the integration itself (non-positive curvature,
+    /// infeasible nodes, non-finite output, a malformed order list).
+    Integration(String),
+}
+
+impl std::fmt::Display for BlockQuadratureRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WorkingMemory {
+                axis_orders,
+                node_count,
+                reason,
+            } => match node_count {
+                Some(nodes) => write!(
+                    f,
+                    "the {nodes}-node product rule at axis orders {axis_orders:?} is not admitted by \
+                     the memory budget: {reason}"
+                ),
+                None => write!(
+                    f,
+                    "the product rule at axis orders {axis_orders:?} has a node count that \
+                     overflows usize: {reason}"
+                ),
+            },
+            Self::UnrepresentableOrder { axis, order } => write!(
+                f,
+                "axis {axis} at Gauss–Hermite order {order} carries a weight that underflows to \
+                 zero"
+            ),
+            Self::Integration(reason) => f.write_str(reason),
+        }
+    }
+}
+
+/// An admission whose order search stopped with an axis still unresolved.
+#[derive(Clone, Debug)]
+pub struct BlockQuadratureOrderRefusal {
+    /// The unresolved axis the search was raising when it stopped.
+    pub axis: usize,
+    /// The orders in force when the search stopped.
+    pub axis_orders: Vec<usize>,
+    /// That axis's paired difference at `axis_orders` (`+∞` when no rule was
+    /// ever evaluated).
+    pub paired_error: f64,
+    /// `min(|Δ_b|, next-order remainder)` at `axis_orders`.
+    pub resolution_target: f64,
+    /// Why the next orders could not be evaluated.
+    pub cause: BlockQuadratureRefusal,
+}
+
+impl std::fmt::Display for BlockQuadratureOrderRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "axis {} stayed unresolved at axis orders {:?} (paired difference {:.4e} against \
+             resolution target {:.4e}): {}",
+            self.axis, self.axis_orders, self.paired_error, self.resolution_target, self.cause
+        )
+    }
+}
 
 // ───────────────────────── pure threshold math (moved down) ──────────────────
 
@@ -142,6 +221,73 @@ pub fn laplace_trustworthiness_from_skewness(
         untrustworthy_directions,
         threshold,
         max_abs_skewness,
+    }
+}
+
+/// Whether one axis's paired difference resolves `resolution_target`. An exactly
+/// zero difference is an exact rule on that axis, which resolves any target.
+fn axis_resolved(paired_error: f64, resolution_target: f64) -> bool {
+    paired_error == 0.0 || paired_error < resolution_target
+}
+
+/// Select each axis's Gauss–Hermite order once, at admission (#2623 ruling A).
+///
+/// The correction exists to remove the `O(1/n_eff)` Laplace term, so its
+/// quadrature error must sit below the next-order remainder: an axis is resolved
+/// when its paired difference with the next lower rule is below
+/// `min(|Δ_b|, next_order_remainder)`, with `next_order_remainder = 1/n_eff²`.
+///
+/// Every axis starts at order three. At order two the lower rule is the single
+/// node at the mode, where `ΔF = 0`, so that axis's paired difference is `|Δ_b|`
+/// itself and cannot resolve `min(|Δ_b|, ·)`. Each unresolved axis is raised by
+/// one order at a time, so an axis stops at the first order that resolves it.
+/// The search ends when every axis is resolved, or when the corrector refuses
+/// the next orders (the memory budget, or a rule past the representable order),
+/// which is reported with the unresolved axis named.
+pub fn select_block_quadrature_orders(
+    corrector: &dyn LaplaceMarginalCorrector,
+    target: &dyn BlockExcessTarget,
+    next_order_remainder: f64,
+) -> Result<BlockQuadratureMarginal, BlockQuadratureOrderRefusal> {
+    let m = target.block_dim();
+    let mut axis_orders = vec![3usize; m];
+    // The unresolved axis raised on the last step, with its paired difference and
+    // target, so a refusal of the raised rule names what it was raising.
+    let mut raising: Option<(usize, f64, f64)> = None;
+    loop {
+        let marginal = match corrector.block_quadrature_marginal_correction(target, &axis_orders)
+        {
+            Ok(marginal) => marginal,
+            Err(cause) => {
+                let (axis, paired_error, resolution_target) =
+                    raising.unwrap_or((0, f64::INFINITY, next_order_remainder));
+                return Err(BlockQuadratureOrderRefusal {
+                    axis,
+                    axis_orders,
+                    paired_error,
+                    resolution_target,
+                    cause,
+                });
+            }
+        };
+        let resolution_target = marginal.value.abs().min(next_order_remainder);
+        let unresolved: Vec<usize> = marginal
+            .axis_quadrature_errors
+            .iter()
+            .enumerate()
+            .filter_map(|(axis, &error)| (!axis_resolved(error, resolution_target)).then_some(axis))
+            .collect();
+        let Some(&first) = unresolved.first() else {
+            return Ok(marginal);
+        };
+        raising = Some((
+            first,
+            marginal.axis_quadrature_errors[first],
+            resolution_target,
+        ));
+        for &axis in &unresolved {
+            axis_orders[axis] += 1;
+        }
     }
 }
 
@@ -247,12 +393,14 @@ pub trait LaplaceMarginalCorrector: Send + Sync {
         refine_supremum: bool,
     ) -> Result<(f64, Array1<f64>), String>;
 
-    /// Integrate `Δ_b` and its ρ-gradient against the local Laplace Gaussian,
-    /// contracting the caller-supplied [`BlockExcessTarget`].
+    /// Integrate `Δ_b` and its ρ-gradient against the local Laplace Gaussian with
+    /// a product Gauss–Hermite rule of the given per-axis orders, contracting the
+    /// caller-supplied [`BlockExcessTarget`].
     fn block_quadrature_marginal_correction(
         &self,
         target: &dyn BlockExcessTarget,
-    ) -> Result<BlockQuadratureMarginal, String>;
+        axis_orders: &[usize],
+    ) -> Result<BlockQuadratureMarginal, BlockQuadratureRefusal>;
 }
 
 // ───────────────────────── process-level injection registry ──────────────────

@@ -8780,5 +8780,13 @@
     ],
     "reason": "#2469 under the V22 ruling (no ridge; the minimum-norm solve on the identified subspace): the vector-GLM Laplace covariance no longer adds τ·I, starting from BASE_RIDGE_FRACTION_OF_MAX_DIAG = 1e-10 times the largest diagonal entry and doubling up to MAX_RIDGE_ESCALATIONS = 30 times, when the raw solve of a rank-deficient penalized Hessian is non-finite. A positive-definite H is inverted exactly by Cholesky. Otherwise the covariance is the Moore–Penrose inverse on H's resolved positive eigenspace, the subspace the minimum-norm Newton step already descends on. Both constants fed only that ladder. A negative eigenvalue beyond the band at the certified mode now returns the typed decline EstimationError::LaplacePrecisionIndefinite with the inertia, not a matrix.",
     "evidence": "At the base, git grep -n -w for each name finds its declaration, the doc comments and the ladder inside invert_symmetric_penalized_hessian, and nothing else. Guarded cargo check --workspace --all-targets --exclude gam-pyffi and gam-models penalized_vector_glm / multinomial tests: job 615497, /scratch.global/sauer354/pool/const2469b/rp47.615497.log."
+  },
+  {
+    "base": "6a5b38ce9d85e663eaa5711676377ccdd1944dcd",
+    "items": [
+      "crates/gam-problem/src/laplace_sampler_contract.rs:const:BLOCK_GH_MAX_DIM"
+    ],
+    "reason": "#2623 ruling A: the #784 block Gauss–Hermite correction selects each axis's order once at admission and reserves its product rule's working memory on the memory governor, so the node ceiling is the budget. BLOCK_GH_MAX_DIM encoded the hand-set 4096-node ceiling of the fixed five-node rule; its hmc_io and block_quadrature_correction declines are replaced by the governor refusal and a typed unrepresentable-order refusal.",
+    "evidence": "At 6a5b38ce9d85e663eaa5711676377ccdd1944dcd, git grep BLOCK_GH_MAX_DIM finds only its definition in crates/gam-problem/src/laplace_sampler_contract.rs, the gam-inference hmc_io re-export and dimension check, and the gam-solve block_quadrature_correction decline, all removed by this landing. Pool job 619037 on sw0o at 0f8d063d186bff4c591252a68ed83495ec9e78f5 with this landing's patch (log /scratch.global/sauer354/pool/t2627core/j5.619037.log): cargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0 with no error or warning lines."
   }
 ]

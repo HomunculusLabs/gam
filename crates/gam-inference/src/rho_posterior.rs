@@ -183,45 +183,40 @@ fn whitening_factor_from_outer_hessian(outer_hessian: &Array2<f64>) -> Result<Ar
     Ok(l_inv)
 }
 
-/// Gauss-Hermite rules for the STANDARD NORMAL weight (probabilists'
-/// convention: nodes are `√2·x_i`, weights `w_i/√π` of the physicists' rule, so
-/// the weights sum to 1 and the rule integrates polynomials of degree
-/// `2n−1` exactly against `N(0,1)`).
-pub(crate) fn standard_normal_gh_rule(
-    nodes_per_axis: usize,
-) -> Option<&'static [(f64, f64)]> {
-    match nodes_per_axis {
-        3 => Some(&[
-            (-1.732_050_807_568_877_2, 1.0 / 6.0),
-            (0.0, 2.0 / 3.0),
-            (1.732_050_807_568_877_2, 1.0 / 6.0),
-        ]),
-        5 => Some(&[
-            (-2.856_970_013_872_805_6, 1.125_741_132_772_071_8e-2),
-            (-1.355_626_179_974_265_9, 2.220_759_220_056_126_4e-1),
-            (0.0, 5.333_333_333_333_333e-1),
-            (1.355_626_179_974_265_9, 2.220_759_220_056_126_4e-1),
-            (2.856_970_013_872_805_6, 1.125_741_132_772_071_8e-2),
-        ]),
-        _ => None,
-    }
+/// Gauss–Hermite rule of any order for the STANDARD NORMAL weight, by
+/// Golub–Welsch (`gam_math::quadrature::gauss_hermite_rule`). Probabilists'
+/// convention: the nodes are `√2·x_i` and the weights `w_i/√π` of the
+/// physicists' rule, so the weights sum to one and the rule integrates
+/// polynomials of degree `2n−1` exactly against `N(0,1)`.
+pub(crate) fn standard_normal_gh_rule(nodes_per_axis: usize) -> Result<Vec<(f64, f64)>, String> {
+    let rule = gam_math::quadrature::gauss_hermite_rule(nodes_per_axis).map_err(|error| {
+        format!("standard-normal Gauss–Hermite rule of order {nodes_per_axis}: {error}")
+    })?;
+    let sqrt_pi = std::f64::consts::PI.sqrt();
+    Ok(rule
+        .nodes
+        .iter()
+        .zip(rule.weights.iter())
+        .map(|(&node, &weight)| (std::f64::consts::SQRT_2 * node, weight / sqrt_pi))
+        .collect())
 }
 
+/// Enumerate the product rule over `rules`, one rule per axis, appending every
+/// node with the log of its product weight.
 pub(crate) fn enumerate_gh_product(
-    dim: usize,
-    rule: &[(f64, f64)],
+    rules: &[Vec<(f64, f64)>],
     axis: usize,
     z: &mut Array1<f64>,
     log_w: f64,
     out: &mut Vec<(Array1<f64>, f64)>,
 ) {
-    if axis == dim {
+    if axis == rules.len() {
         out.push((z.clone(), log_w));
         return;
     }
-    for &(node, weight) in rule {
+    for &(node, weight) in &rules[axis] {
         z[axis] = node;
-        enumerate_gh_product(dim, rule, axis + 1, z, log_w + weight.ln(), out);
+        enumerate_gh_product(rules, axis + 1, z, log_w + weight.ln(), out);
     }
 }
 
@@ -259,10 +254,8 @@ where
             "rho_posterior_quadrature: product quadrature is capped at K<={TIER1_MAX_DIM}, got {k}"
         )));
     }
-    let rule = standard_normal_gh_rule(nodes_per_axis).ok_or_else(|| {
-        EstimationError::RemlOptimizationFailed(format!(
-            "rho_posterior_quadrature: unsupported nodes_per_axis {nodes_per_axis}"
-        ))
+    let rule = standard_normal_gh_rule(nodes_per_axis).map_err(|reason| {
+        EstimationError::RemlOptimizationFailed(format!("rho_posterior_quadrature: {reason}"))
     })?;
     let l_inv = whitening_factor_from_outer_hessian(outer_hessian).map_err(|reason| {
         EstimationError::RemlOptimizationFailed(format!("rho_posterior_quadrature: {reason}"))
@@ -275,8 +268,7 @@ where
 
     let mut product_nodes = Vec::new();
     enumerate_gh_product(
-        k,
-        rule,
+        &vec![rule; k],
         0,
         &mut Array1::<f64>::zeros(k),
         0.0,

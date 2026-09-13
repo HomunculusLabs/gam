@@ -336,10 +336,14 @@ pub struct QuadratureMarginalAudit {
     /// `Δ_b` as the corrector reports it: added to the block marginal
     /// log-likelihood, SUBTRACTED from the criterion.
     pub delta_b: f64,
-    /// Absolute fine/coarse quadrature-rule difference on `delta_b`.
+    /// The largest per-axis paired-rule difference on `delta_b`.
     pub quadrature_error: f64,
-    /// Number of nodes in the fine rule.
+    /// Number of nodes in the product rule.
     pub node_count: usize,
+    /// Per-axis Gauss–Hermite orders of that rule, as latched at admission.
+    pub axis_orders: Vec<usize>,
+    /// Per-axis paired differences with that axis one order lower.
+    pub axis_quadrature_errors: Vec<f64>,
     /// The activation evidence: `max|γ_r|` over curvature directions and the
     /// threshold `τ(n_eff)` it had to exceed.
     pub max_abs_skewness: f64,

@@ -5627,6 +5627,12 @@ pub(crate) struct RemlState<'a> {
     /// a fit that engaged consistently keeps the same block it always had; only
     /// the fits that were toggling change.
     pub(crate) block_correction_admission: AtomicUsize,
+    /// The per-axis Gauss–Hermite orders latched beside
+    /// [`Self::block_correction_admission`] (#2623). They are selected once, at
+    /// admission, as the smallest orders whose paired differences resolve
+    /// `min(|Δ_b|, 1/n_eff²)`, and held for the fit, so the nodes, and with them
+    /// the value, gradient and moments, are one measure at every ρ.
+    pub(crate) block_correction_axis_orders: std::sync::Mutex<Option<Vec<usize>>>,
     /// Adaptive IFT step-cap controller, the hypergradient budget controller,
     /// and the two mode-response caches.
     ///
