@@ -569,7 +569,7 @@ pub trait JetScalar<const K: usize>: crate::nested_dual::JetField + Copy {
 
     /// `ln Γ(self)`. Caller guarantees a positive argument. Uses the SAME
     /// hand-certified derivative stack [`crate::jet_tower::Tower4::ln_gamma`]
-    /// consumes ([`crate::jet_tower::ln_gamma_derivative_stack`]), so any
+    /// consumes (`crate::jet_tower::ln_gamma_derivative_stack`), so any
     /// program written over both matches term-for-term.
     fn ln_gamma(&self) -> Self {
         self.compose_unary(crate::jet_tower::ln_gamma_derivative_stack(self.value()))

@@ -145,18 +145,13 @@ pub(crate) fn dispersion_tweedie_nll_generic<S: JetScalar<2>>(
     }
 }
 
-/// `ln Γ` lifted onto an `Order2<K>` jet through its derivative stack, shared by
-/// the dispersion-family tower oracles.
+/// `ln Γ` lifted onto an `Order2<K>` jet by the production `JetScalar::ln_gamma`,
+/// shared by the dispersion-family tower oracles.
 #[inline]
 pub(crate) fn order2_ln_gamma<const K: usize>(
     x: &gam_math::jet_scalar::Order2<K>,
 ) -> gam_math::jet_scalar::Order2<K> {
-    gam_math::jet_scalar::Order2(
-        x.0.compose_unary({
-            let stack = gam_math::jet_tower::ln_gamma_derivative_stack(x.0.v);
-            [stack[0], stack[1], stack[2]]
-        }),
-    )
+    gam_math::jet_scalar::JetScalar::ln_gamma(x)
 }
 
 /// Observed η-space row NLL tower, both predictors as jet variables (`η_μ` axis 0,
@@ -275,10 +270,7 @@ fn o3_powf(x: &O3, a: f64) -> O3 {
 }
 
 fn o3_ln_gamma(x: &O3) -> O3 {
-    x.compose_unary_with(|v| {
-        let stack = gam_math::jet_tower::ln_gamma_derivative_stack(v);
-        [stack[0], stack[1], stack[2], stack[3]]
-    })
+    gam_math::jet_scalar::JetScalar::ln_gamma(x)
 }
 
 /// Observed η-space row NLL tower to third order, the order-3 sibling of

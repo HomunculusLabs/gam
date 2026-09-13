@@ -1030,7 +1030,7 @@ pub(crate) fn sqrt_derivative_stack<const N: usize>(u: f64) -> [f64; N] {
     derivatives
 }
 
-pub fn ln_gamma_derivative_stack(x: f64) -> [f64; 5] {
+pub(crate) fn ln_gamma_derivative_stack(x: f64) -> [f64; 5] {
     [
         statrs::function::gamma::ln_gamma(x),
         digamma_positive(x),
