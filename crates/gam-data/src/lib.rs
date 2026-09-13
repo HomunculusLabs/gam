@@ -992,7 +992,7 @@ impl DelimitedInferenceState {
                         reason: format!("non-finite value at row {row}, column '{header}'"),
                     });
                 }
-                if (value - 0.0).abs() >= 1e-12 && (value - 1.0).abs() >= 1e-12 {
+                if value != 0.0 && value != 1.0 {
                     self.all_binary = false;
                 }
             }
@@ -1507,7 +1507,7 @@ fn parse_cell_with_schema(
                         col_name, row, raw, err
                     ),
                 })?;
-            if (v - 0.0).abs() >= 1e-12 && (v - 1.0).abs() >= 1e-12 {
+            if v != 0.0 && v != 1.0 {
                 return Err(DataError::SchemaMismatch {
                     reason: format!(
                         "column '{}' is binary in schema but row {} has value {}; expected 0 or 1",
@@ -1600,7 +1600,7 @@ fn write_arrow_numeric_values(
                     continue;
                 };
                 *saw_numeric = true;
-                if (value - 0.0).abs() >= 1e-12 && (value - 1.0).abs() >= 1e-12 {
+                if value != 0.0 && value != 1.0 {
                     *all_binary = false;
                 }
                 output[batch_row] = value;
@@ -2310,8 +2310,8 @@ fn load_parquet_with_schema(
                     // NaN marks a missing cell (#2495), not a 0/1 violation.
                     if let Some(row) = values.column(j).iter().position(|value| {
                         value.is_finite()
-                            && (*value - 0.0).abs() >= 1e-12
-                            && (*value - 1.0).abs() >= 1e-12
+                            && *value != 0.0
+                            && *value != 1.0
                     }) {
                         return Err(DataError::SchemaMismatch {
                             reason: format!(
@@ -2573,7 +2573,7 @@ fn encode_one_column(
                         ),
                     })
                 })?;
-                if (v - 0.0).abs() >= 1e-12 && (v - 1.0).abs() >= 1e-12 {
+                if v != 0.0 && v != 1.0 {
                     return Err(DataError::SchemaMismatch {
                         reason: format!(
                             "column '{}' is binary in schema but row {} has value {}; expected 0 or 1",
@@ -2659,7 +2659,7 @@ fn infer_schema_column(
                     reason: format!("non-finite value at row {}, column '{}'", i + 1, name),
                 });
             }
-            if (v - 0.0).abs() >= 1e-12 && (v - 1.0).abs() >= 1e-12 {
+            if v != 0.0 && v != 1.0 {
                 all_binary = false;
             }
         } else {
