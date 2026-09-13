@@ -8119,5 +8119,21 @@
     ],
     "reason": "#2829 product-root rule: ResidentBaseArrowFrameHandle::refactor_and_solve_with_gradient and its CUDA counterpart, restored in place from d484a091a, have no product caller. The handle method has no caller, and the CUDA method is called only by the handle method. Both are deleted. refactor_and_solve_from then served only refactor_and_solve, always with gradient None, so that choice is folded into refactor_and_solve as factor_at followed by solve_with_factors(None), and the docs that named the deleted functions now describe the behaviour directly.",
     "evidence": "At 278cc71b662b73f86c712408dc83791d78740e77, git grep -n -w refactor_and_solve_with_gradient over crates, src, tests, examples, bench and benches finds only crates/gam-solve/src/gpu_kernels/arrow_schur.rs: the two declarations, the handle's delegation to the CUDA method, and doc mentions in factor_at and solve_with_gradient_checked. refactor_and_solve_from finds its declaration, the calls in refactor_and_solve (None) and in the CUDA refactor_and_solve_with_gradient (Some), and one doc mention in solve_with_factors. Pool job 603659 on sw0l at 2c1cfd26874c2139583ed261ec4b56336f480f2b, the seven-commit chain spec, storage, chol, arrow, k1, duchon, sphere on 5315139343c853c8a79cd85c328ca903e38d5824, whose Rust blobs this landing reproduces (log /scratch.global/sauer354/pool/api2829/check.603659.log): source_removal_guard.py and public_api_census.py exited 0 on all seven links, and cargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0."
+  },
+  {
+    "base": "b74f9e0d43f4bb290d79cd6881e63884b0e400c2",
+    "items": [
+      "crates/gam-solve/src/gpu_kernels/batched_k1.rs:fn:assert_solution_eq",
+      "crates/gam-solve/src/gpu_kernels/batched_k1.rs:fn:class_results_are_positional_and_independent",
+      "crates/gam-solve/src/gpu_kernels/batched_k1.rs:fn:cpu_reference_k1",
+      "crates/gam-solve/src/gpu_kernels/batched_k1.rs:fn:empty_class_returns_empty",
+      "crates/gam-solve/src/gpu_kernels/batched_k1.rs:fn:indefinite_k1_system",
+      "crates/gam-solve/src/gpu_kernels/batched_k1.rs:fn:pd_k1_system",
+      "crates/gam-solve/src/gpu_kernels/batched_k1.rs:fn:per_atom_decline_is_isolated_never_fatal",
+      "crates/gam-solve/src/gpu_kernels/batched_k1.rs:fn:single_atom_matches_dense_reference",
+      "crates/gam-solve/src/gpu_kernels/batched_k1.rs:fn:solve_batched_k1_border"
+    ],
+    "reason": "#2829 product-root rule: gam_solve::gpu_kernels::batched_k1::solve_batched_k1_border, restored in place from d484a091a, has no product caller. Its module doc names the SAC stagewise backfitting sweep as the caller, but nothing outside the module calls it, and it has no device path, only a loop over solve_arrow_newton_step_dense_reference. The module is deleted with its CPU reference helper and the four unit tests that exercised only this dispatch. solve_arrow_newton_step_dense_reference keeps its production callers in sae_resident.rs.",
+    "evidence": "At b74f9e0d43f4bb290d79cd6881e63884b0e400c2, git grep -n -w solve_batched_k1_border over crates, src, tests, examples, bench and benches finds only crates/gam-solve/src/gpu_kernels/batched_k1.rs: the module doc, the declaration and four calls in its own #[cfg(test)] mod tests. git grep -n -w batched_k1 finds only the pub mod line in crates/gam-solve/src/gpu_kernels/mod.rs. The BATCHED_K1_DESIGN.md that the module doc cites does not exist in the tree. Pool job 603659 on sw0l at 2c1cfd26874c2139583ed261ec4b56336f480f2b, the seven-commit chain spec, storage, chol, arrow, k1, duchon, sphere on 5315139343c853c8a79cd85c328ca903e38d5824, whose Rust blobs this landing reproduces (log /scratch.global/sauer354/pool/api2829/check.603659.log): source_removal_guard.py and public_api_census.py exited 0 on all seven links, and cargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0."
   }
 ]

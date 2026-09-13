@@ -918,7 +918,7 @@ crates/gam-solve/src/gpu_kernels/arrow_schur.rs	framed_schur_matvec_once_on_devi
 crates/gam-solve/src/gpu_kernels/arrow_schur.rs	refactor_and_solve_with_gradient	retired-no-product-user
 crates/gam-solve/src/gpu_kernels/arrow_schur.rs	sae_framed_schur_matvec_cpu	retired-no-product-user
 crates/gam-solve/src/gpu_kernels/arrow_schur.rs	solve_reduced_beta_pcg	retired-no-product-user
-crates/gam-solve/src/gpu_kernels/batched_k1.rs	solve_batched_k1_border	restored-in-place
+crates/gam-solve/src/gpu_kernels/batched_k1.rs	solve_batched_k1_border	retired-no-product-user
 crates/gam-solve/src/gpu_kernels/pirls_row.rs	cuda_source	retired-no-product-user
 crates/gam-solve/src/gpu_kernels/pirls_row.rs	kernel_name	retired-no-product-user
 crates/gam-solve/src/gpu_kernels/pirls_row.rs	row_reweight_cpu	retired-no-product-user
