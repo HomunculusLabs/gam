@@ -125,9 +125,8 @@ fn stream_design_into(
 
 /// Reconstruct the `LinkWiggleFormulaSpec` from a saved model's
 /// baseline-time-wiggle runtime, returning `None` when the model has no
-/// time-wiggle component. Re-exported because the survival fitter's tests
-/// exercise the spec independently of running NUTS.
-pub fn saved_baseline_timewiggle_spec(
+/// time-wiggle component.
+pub(crate) fn saved_baseline_timewiggle_spec(
     model: &SavedModel,
 ) -> Result<Option<LinkWiggleFormulaSpec>, String> {
     model

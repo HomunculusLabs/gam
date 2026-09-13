@@ -6541,8 +6541,9 @@ fn saved_baseline_timewiggle_reconstruction_keeps_requested_order_one_penalty() 
     payload.resolved_termspec = Some(empty_termspec());
     let model = SavedModel::from_payload(payload);
 
-    let saved_cfg = gam::sample::saved_baseline_timewiggle_spec(&model)
-        .unwrap_or_else(|e| panic!("{} failed: {:?}", "saved baseline-timewiggle spec", e))
+    let saved_cfg = model
+        .saved_baseline_time_wiggle()
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "saved baseline-timewiggle runtime", e))
         .expect("timewiggle metadata");
     let wiggle_knots = Array1::from_vec(
         model

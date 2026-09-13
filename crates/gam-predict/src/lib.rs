@@ -951,12 +951,10 @@ impl FittedModelPredictExt for FittedModel {
                 .bernoulli_marginal_slope_predictor()
                 .ok()
                 .map(|p| Box::new(p) as Box<dyn PredictableModel>),
-            PredictModelClass::TransformationNormal => {
-                let fit = self.fit_result.as_ref()?;
-                Some(Box::new(TransformationNormalPredictor {
-                    covariance: fit.beta_covariance().cloned(),
-                }) as Box<dyn PredictableModel>)
-            }
+            PredictModelClass::TransformationNormal => self
+                .fit_result
+                .is_some()
+                .then_some(Box::new(TransformationNormalPredictor) as Box<dyn PredictableModel>),
         }
     }
 
