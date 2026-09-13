@@ -261,6 +261,8 @@ pub fn wald_half_width(v_pp: f64, level: f64) -> Option<f64> {
 /// * `(kappa_min, kappa_max)` — chart-validity bounds on κ; the walk refuses to
 ///   step outside them and flags the corresponding endpoint as `*_at_bound`.
 /// * `level` — two-sided coverage, e.g. `0.95`.
+/// * `tol` — the κ resolution the bisection stops at; it must be finite and
+///   positive, and anything else is refused.
 ///
 /// The walk does geometric step-growth to bracket each crossing, then bisects to
 /// `tol` in κ. The threshold uses the full χ²₁ quantile (interior point).
@@ -285,7 +287,9 @@ where
     if !(kappa_hat.is_finite()) || kappa_hat < kappa_min || kappa_hat > kappa_max {
         return Err("kappa_hat must be finite and inside [kappa_min, kappa_max]".into());
     }
-    let tol = if tol > 0.0 { tol } else { 1e-6 };
+    if !(tol.is_finite() && tol > 0.0) {
+        return Err("profile CI tolerance must be finite and positive".into());
+    }
     let half_thresh = 0.5 * chi2_1_quantile(level);
     let v_hat = v_p(kappa_hat)?;
     if !v_hat.is_finite() {
