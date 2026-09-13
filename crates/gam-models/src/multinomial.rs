@@ -1272,59 +1272,39 @@ fn fit_penalized_multinomial_firth_fallback(
         info
     };
 
-    // Factor a symmetric matrix (with escalating ridge only if it is not SPD) and
-    // return its inverse and log-determinant.
-    //
-    // The ridge ladder is a standard relative-jitter Cholesky recovery, not a
-    // tuned knob: (a) the base jitter is scaled to the matrix by `max_diag`
-    // (`max_diag · ε` with ε at the double-precision Cholesky floor ~1e-10) so it
-    // is invariant to the overall scale of the Fisher information, falling back
-    // to an absolute floor only when the diagonal is degenerate; (b) it is tried
-    // first at ridge 0 so an already-SPD matrix is factored unperturbed; (c) it
-    // grows geometrically (×4) to span the ~120 dB from the base jitter to O(1)
-    // in a bounded number of steps; (d) the attempt count is capped so a
-    // genuinely singular information (e.g. an exactly rank-deficient Fisher block)
-    // surfaces as an explicit error rather than an unbounded loop.
+    // Factor a symmetric matrix and return its inverse and log-determinant, or
+    // refuse. Every matrix inverted here is positive definite wherever the solve
+    // can reach it: the backtracking line search accepts a candidate only when
+    // `spd_logdet` factors its information with this same factorization, and the
+    // penalized Hessian adds a PSD penalty to that information. A matrix that does
+    // not factor is therefore the boundary where log|I| → −∞. Jittering its
+    // diagonal would invent a finite Firth term and a finite covariance for a
+    // point that has neither.
     let invert_spd = |mat: &Array2<f64>,
                       context: &str|
      -> Result<(Array2<f64>, f64), EstimationError> {
-        let max_diag = (0..d).fold(0.0_f64, |acc, i| acc.max(mat[[i, i]].abs()));
-        let base = if max_diag.is_finite() && max_diag > 0.0 {
-            max_diag * 1e-10
-        } else {
-            1e-10
-        };
-        let mut ridge = 0.0_f64;
-        for _ in 0..=60 {
-            let mut ridged = mat.clone();
-            if ridge > 0.0 {
-                for i in 0..d {
-                    ridged[[i, i]] += ridge;
+        if let Ok(factor) =
+            factorize_symmetricwith_fallback(FaerArrayView::new(mat).as_ref(), Side::Lower)
+        {
+            let logdet = factor.logdet();
+            if logdet.is_finite() {
+                let mut rhs = Array2::<f64>::eye(d);
+                {
+                    let v = array2_to_matmut(&mut rhs);
+                    factor.solve_in_place(v);
                 }
-            }
-            if let Ok(factor) =
-                factorize_symmetricwith_fallback(FaerArrayView::new(&ridged).as_ref(), Side::Lower)
-            {
-                let logdet = factor.logdet();
-                if logdet.is_finite() {
-                    let mut rhs = Array2::<f64>::eye(d);
-                    {
-                        let v = array2_to_matmut(&mut rhs);
-                        factor.solve_in_place(v);
-                    }
-                    if rhs.iter().all(|x| x.is_finite()) {
-                        let mut inv = Array2::<f64>::zeros((d, d));
-                        for i in 0..d {
-                            for j in 0..d {
-                                inv[[i, j]] = 0.5 * (rhs[[i, j]] + rhs[[j, i]]);
-                            }
+                if rhs.iter().all(|x| x.is_finite()) {
+                    let mut inv = Array2::<f64>::zeros((d, d));
+                    for i in 0..d {
+                        for j in 0..d {
+                            inv[[i, j]] = 0.5 * (rhs[[i, j]] + rhs[[j, i]]);
                         }
-                        return Ok((inv, logdet));
                     }
+                    return Ok((inv, logdet));
                 }
             }
-            ridge = if ridge > 0.0 { ridge * 4.0 } else { base };
         }
+        let max_diag = (0..d).fold(0.0_f64, |acc, i| acc.max(mat[[i, i]].abs()));
         Err(EstimationError::InvalidInput(format!(
             "multinomial Firth fallback: {context} not invertible (max_diag={max_diag:.3e})"
         )))
@@ -1481,42 +1461,23 @@ fn fit_penalized_multinomial_firth_fallback(
         h
     };
 
-    // Solve H Δ = U* for the SPD penalized Hessian, ridge-escalating only on
-    // factorization failure. Same relative-jitter Cholesky-recovery ladder as
-    // `invert_spd` above (see its comment for the rationale); the base jitter is
-    // one decade tighter (`max_diag · 1e-12`) because the penalized Hessian
-    // solved here is better conditioned than the Fisher information inverted
-    // there, so a smaller perturbation suffices before escalating.
+    // Solve H Δ = U* for the penalized Hessian, or refuse. H is positive definite
+    // wherever the solve reaches it, for the reason given at `invert_spd`, so a
+    // failed factorization is refused rather than jittered.
     let solve_spd = |mat: &Array2<f64>,
                      rhs: &Array1<f64>|
      -> Result<Array1<f64>, EstimationError> {
-        let max_diag = (0..d).fold(0.0_f64, |acc, i| acc.max(mat[[i, i]].abs()));
-        let base = if max_diag.is_finite() && max_diag > 0.0 {
-            max_diag * 1e-12
-        } else {
-            1e-12
-        };
-        let mut ridge = 0.0_f64;
-        for _ in 0..=60 {
-            let mut ridged = mat.clone();
-            if ridge > 0.0 {
-                for i in 0..d {
-                    ridged[[i, i]] += ridge;
-                }
-            }
-            if let Ok(factor) =
-                factorize_symmetricwith_fallback(FaerArrayView::new(&ridged).as_ref(), Side::Lower)
+        if let Ok(factor) =
+            factorize_symmetricwith_fallback(FaerArrayView::new(mat).as_ref(), Side::Lower)
+        {
+            let mut sol = rhs.clone();
             {
-                let mut sol = rhs.clone();
-                {
-                    let v = array1_to_col_matmut(&mut sol);
-                    factor.solve_in_place(v);
-                }
-                if sol.iter().all(|x| x.is_finite()) {
-                    return Ok(sol);
-                }
+                let v = array1_to_col_matmut(&mut sol);
+                factor.solve_in_place(v);
             }
-            ridge = if ridge > 0.0 { ridge * 4.0 } else { base };
+            if sol.iter().all(|x| x.is_finite()) {
+                return Ok(sol);
+            }
         }
         Err(EstimationError::InvalidInput(
             "multinomial Firth fallback: penalized Hessian solve failed".to_string(),
