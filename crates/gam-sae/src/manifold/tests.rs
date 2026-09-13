@@ -2886,6 +2886,9 @@ pub(crate) fn planted_circle_focus_1744() {
 /// the flexible seed. Uses the same 0.95 threshold as the full sweep.
 #[test]
 pub(crate) fn planted_circle_ordered_beta_bernoulli_n40_sigma018_reaches_high_ev_1744() {
+    // Guarded job 558089 at 3aab85774 read seed EV 0.9647 and a certified final ρ of
+    // (-30.000, [19.12], [[-11.77]]) with EV -0.0002. The log shows the outer path there.
+    gam_runtime::test_support::install_diagnostic_logger();
     let assignment_mode = PlantedCircleAssignmentMode::OrderedBetaBernoulli;
     let n = 40usize;
     let sigma = 0.18_f64;
