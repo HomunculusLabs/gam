@@ -780,11 +780,28 @@ fn timewiggle_flex_all_axes_second_directional_derivative_matches_single_axis_28
 /// slope length scale, each with its diagonal second design derivative.
 fn timewiggle_design_psi_blocks() -> Vec<Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>>
 {
-    let axis = |x_psi: Array2<f64>, x_psi_psi: Array2<f64>| {
+    timewiggle_design_psi_blocks_at([0.0, 0.0])
+}
+
+/// The first and second design derivatives `(X_ψ, X_ψψ)` of the marginal and the slope design ψ
+/// axis of the #2893 gates.
+fn timewiggle_design_psi_rows() -> [(Array2<f64>, Array2<f64>); 2] {
+    [
+        (array![[0.3, -0.25]], array![[0.12, 0.07]]),
+        (array![[0.4]], array![[-0.15]]),
+    ]
+}
+
+/// `timewiggle_design_psi_blocks` at the design ψ `t = [marginal, slope]`: each axis's first
+/// design derivative moves to `X_ψ + ψ·X_ψψ`.
+fn timewiggle_design_psi_blocks_at(
+    t: [f64; 2],
+) -> Vec<Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>> {
+    let axis = |(x_psi, x_psi_psi): (Array2<f64>, Array2<f64>), t: f64| {
         let width = x_psi.ncols();
         crate::custom_family::CustomFamilyBlockPsiDerivative::new(
             None,
-            x_psi,
+            &x_psi + &(&x_psi_psi * t),
             Array2::zeros((width, width)),
             None,
             Some(vec![x_psi_psi]),
@@ -792,12 +809,38 @@ fn timewiggle_design_psi_blocks() -> Vec<Vec<crate::custom_family::CustomFamilyB
             None,
         )
     };
+    let [marginal, slope] = timewiggle_design_psi_rows();
     vec![
         Vec::new(),
-        vec![axis(array![[0.3, -0.25]], array![[0.12, 0.07]])],
-        vec![axis(array![[0.4]], array![[-0.15]])],
+        vec![axis(marginal, t[0])],
+        vec![axis(slope, t[1])],
         Vec::new(),
     ]
+}
+
+/// `timewiggle_marginal_slope_family` with its marginal and slope designs moved to the design ψ
+/// `t = [marginal, slope]` of `timewiggle_design_psi_blocks_at`, `X(ψ) = X + ψ·X_ψ + ½ψ²·X_ψψ`,
+/// and its block states at `beta` with every `η` rebuilt from the moved designs.
+fn timewiggle_design_psi_displaced(
+    t: [f64; 2],
+    beta: &Array1<f64>,
+) -> (SurvivalMarginalSlopeFamily, Vec<ParameterBlockState>) {
+    let moved = |design: Array2<f64>, (x_psi, x_psi_psi): (Array2<f64>, Array2<f64>), t: f64| {
+        design + &(&x_psi * t) + &(&x_psi_psi * (0.5 * t * t))
+    };
+    let [marginal_rows, slope_rows] = timewiggle_design_psi_rows();
+    let mut family = timewiggle_marginal_slope_family(Some(test_deviation_runtime()));
+    let marginal = moved(family.marginal_design.to_dense(), marginal_rows, t[0]);
+    let slope = moved(
+        family.slope_layout.coefficient_design().to_dense(),
+        slope_rows,
+        t[1],
+    );
+    family.marginal_design = DesignMatrix::from(marginal);
+    family.slope_layout = DesignMatrix::from(slope.clone()).into();
+    let mut states = timewiggle_marginal_slope_states(&family, beta);
+    states[2].eta = slope.dot(&states[2].beta);
+    (family, states)
 }
 
 /// gam#2893: the flex + time-wiggle `{D_β_a D_β ∂_ψ H[v]}` served through the ζ composition
@@ -2218,4 +2261,118 @@ fn timewiggle_marginal_psi_hessian_directional_returns_finite_matrix() {
     assert_eq!(hess_dir.nrows(), slices.total);
     assert_eq!(hess_dir.ncols(), slices.total);
     assert!(hess_dir.iter().all(|value| value.is_finite()));
+}
+
+/// gam#2893: the flex + time-wiggle ψ Hessian sweep `{D_β_a ∂_ψ H}` served through the ζ
+/// composition matches a Ridders difference of the joint `D_β H[e_a]` along the design motion of
+/// a marginal and a slope design ψ. Mixed partials commute, so this grades the ζ sweep from the
+/// joint Hessian calculus alone, without the ψ calculus of `psi_terms`.
+#[test]
+fn timewiggle_flex_design_psi_hessian_sweep_matches_design_difference_2893() {
+    let family = timewiggle_marginal_slope_family(Some(test_deviation_runtime()));
+    let beta = timewiggle_marginal_slope_beta(&family);
+    let states = timewiggle_marginal_slope_states(&family, &beta);
+    let blocks = timewiggle_design_psi_blocks();
+    let options = BlockwiseFitOptions::default();
+    for psi in 0..2 {
+        let swept = family
+            .psi_hessian_directional_derivatives_all_beta_axes_with_options(
+                &states, &blocks, psi, &options,
+            )
+            .expect("design ψ Hessian sweep")
+            .expect("a time wiggle with a score warp publishes the ψ Hessian sweep");
+        assert_eq!(swept.len(), beta.len());
+        for (axis_idx, matrix) in swept.iter().enumerate() {
+            let mut axis = Array1::<f64>::zeros(beta.len());
+            axis[axis_idx] = 1.0;
+            assert_matches_ridders_2893(&format!("ψ {psi} axis {axis_idx}"), matrix, &|t| {
+                let mut moved_t = [0.0; 2];
+                moved_t[psi] = t;
+                let (moved, moved_states) = timewiggle_design_psi_displaced(moved_t, &beta);
+                moved
+                    .exact_newton_joint_hessian_directional_derivative(&moved_states, &axis)
+                    .expect("displaced D_β H[e_a]")
+                    .expect("a time wiggle publishes D_β H")
+            });
+        }
+    }
+}
+
+/// gam#2893: the flex + time-wiggle `{D_β_a D_β ∂_ψ H[v]}` served through the ζ composition
+/// matches a Ridders difference of the ζ `D²_β H[v, e_a]` sweep along the design motion of a
+/// marginal and a slope design ψ, without the ψ calculus of `psi_terms`.
+#[test]
+fn timewiggle_flex_design_psi_by_beta_third_matches_design_difference_2893() {
+    let family = timewiggle_marginal_slope_family(Some(test_deviation_runtime()));
+    let beta = timewiggle_marginal_slope_beta(&family);
+    let states = timewiggle_marginal_slope_states(&family, &beta);
+    let blocks = timewiggle_design_psi_blocks();
+    let options = BlockwiseFitOptions::default();
+    let v = Array1::from_shape_fn(beta.len(), |i| ((i * 5 + 1) % 13) as f64 / 13.0 - 0.5);
+    for psi in 0..2 {
+        let analytic = family
+            .design_psi_hessian_second_directional_derivative_all_beta_axes_with_options(
+                &states, &blocks, psi, &v, &options,
+            )
+            .expect("design-by-coefficient third information derivative")
+            .expect("a design ψ axis publishes its third information derivative");
+        assert_eq!(analytic.len(), beta.len());
+        for (axis_idx, matrix) in analytic.iter().enumerate() {
+            assert_matches_ridders_2893(&format!("ψ {psi} axis {axis_idx}"), matrix, &|t| {
+                let mut moved_t = [0.0; 2];
+                moved_t[psi] = t;
+                let (moved, moved_states) = timewiggle_design_psi_displaced(moved_t, &beta);
+                moved
+                    .exact_newton_joint_hessian_second_directional_derivative_timewiggle_flex_all_axes(
+                        &moved_states,
+                        &v,
+                    )
+                    .expect("displaced D²_β H[v, e_a] sweep")
+                    .swap_remove(axis_idx)
+            });
+        }
+    }
+}
+
+/// gam#2893: the flex + time-wiggle `{D_β_a ∂²_ψiψj H}` served through the ζ composition matches
+/// a Ridders difference of the ζ ψ Hessian sweep `{D_β_a ∂_ψi H}` along the design motion of ψ_j,
+/// for the marginal diagonal, the cross-block and the slope diagonal pairs. On a diagonal pair the
+/// ψ_i design derivative itself moves to `X_ψ + ψ·X_ψψ`.
+#[test]
+fn timewiggle_flex_design_psi_pair_third_matches_design_difference_2893() {
+    let family = timewiggle_marginal_slope_family(Some(test_deviation_runtime()));
+    let beta = timewiggle_marginal_slope_beta(&family);
+    let states = timewiggle_marginal_slope_states(&family, &beta);
+    let blocks = timewiggle_design_psi_blocks();
+    let options = BlockwiseFitOptions::default();
+    for (psi_i, psi_j) in [(0, 0), (0, 1), (1, 1)] {
+        let analytic = family
+            .design_psi_pair_hessian_directional_derivative_all_beta_axes_with_options(
+                &states, &blocks, psi_i, psi_j, &options,
+            )
+            .expect("design-pair third information derivative")
+            .expect("a design pair publishes its third information derivative");
+        assert_eq!(analytic.len(), beta.len());
+        for (axis_idx, matrix) in analytic.iter().enumerate() {
+            assert_matches_ridders_2893(
+                &format!("ψ pair ({psi_i},{psi_j}) axis {axis_idx}"),
+                matrix,
+                &|t| {
+                    let mut moved_t = [0.0; 2];
+                    moved_t[psi_j] = t;
+                    let (moved, moved_states) = timewiggle_design_psi_displaced(moved_t, &beta);
+                    moved
+                        .psi_hessian_directional_derivatives_all_beta_axes_with_options(
+                            &moved_states,
+                            &timewiggle_design_psi_blocks_at(moved_t),
+                            psi_i,
+                            &options,
+                        )
+                        .expect("displaced design ψ Hessian sweep")
+                        .expect("a time wiggle with a score warp publishes the ψ Hessian sweep")
+                        .swap_remove(axis_idx)
+                },
+            );
+        }
+    }
 }
