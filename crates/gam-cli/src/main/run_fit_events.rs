@@ -4,9 +4,10 @@
 use crate::cli_args::FitEventsArgs;
 use gam::families::custom_family::BlockwiseFitOptions;
 use gam::event_history::{
-    CovariateSegment, Event, EventHistoryCohort, ForecastRequest, FutureSegment, MarkKind,
-    PopulationForecastRequest, ReferenceStrata, SubjectHistory, fit_event_history_formulas,
-    forecast, latent_state, pit_uniform_distance, population_forecast, predictive_pit,
+    CovariateCells, CovariateSegment, Event, EventHistoryCohort, ForecastRequest, FutureSegment,
+    MarkKind, PopulationForecastRequest, ReferenceStrata, SubjectHistory,
+    fit_event_history_formulas, forecast, latent_state, observed_mark_vocabulary,
+    pit_uniform_distance, population_forecast, predictive_pit,
 };
 use ndarray::Array2;
 use serde_json::{Map, Value, json};
@@ -55,26 +56,6 @@ fn parse_f64(value: &str, what: &str) -> Result<f64, String> {
         .map_err(|_| format!("{what}: {value:?} is not a number"))
 }
 
-/// A covariate column: continuous when every value parses as a number,
-/// categorical (coded by its sorted distinct labels) otherwise.
-fn encode_column(values: &[&str], name: &str) -> (Vec<f64>, Vec<String>) {
-    if let Ok(numbers) = values
-        .iter()
-        .map(|v| parse_f64(v, name))
-        .collect::<Result<Vec<f64>, String>>()
-    {
-        return (numbers, Vec::new());
-    }
-    let mut levels: Vec<String> = values.iter().map(|v| (*v).to_string()).collect();
-    levels.sort();
-    levels.dedup();
-    let codes = values
-        .iter()
-        .map(|v| levels.iter().position(|l| l == v).expect("level present") as f64)
-        .collect();
-    (codes, levels)
-}
-
 fn forecast_json(f: &gam::event_history::Forecast) -> Value {
     json!({
         "horizons": f.horizons,
@@ -112,16 +93,13 @@ pub(crate) fn run_fit_events(args: FitEventsArgs) -> Result<(), String> {
     // The mark vocabulary: declared with kinds, or the observed marks, all
     // recurrent.
     let (mark_names, mark_kinds): (Vec<String>, Vec<MarkKind>) = if args.marks.is_empty() {
-        let mut names: Vec<String> = event_marks.iter().map(|m| (*m).to_string()).collect();
-        names.sort();
-        names.dedup();
+        let (names, kinds) = observed_mark_vocabulary(event_marks.iter().copied());
         if names.is_empty() {
             return Err(
                 "the events table has no rows, so the marks must be declared with --marks name:kind,..."
                     .to_string(),
             );
         }
-        let kinds = vec![MarkKind::Recurrent; names.len()];
         (names, kinds)
     } else {
         let mut names = Vec::with_capacity(args.marks.len());
@@ -163,7 +141,7 @@ pub(crate) fn run_fit_events(args: FitEventsArgs) -> Result<(), String> {
     let mut covariate_levels = Vec::with_capacity(covariate_names.len());
     for (j, name) in covariate_names.iter().enumerate() {
         let values = column(&cov_headers, &cov_rows, name, &args.covariates)?;
-        let (codes, levels) = encode_column(&values, name);
+        let (codes, levels) = CovariateCells::from_text(&values).encode();
         for (i, code) in codes.iter().enumerate() {
             table[[i, j]] = *code;
         }

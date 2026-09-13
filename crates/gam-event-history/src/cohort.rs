@@ -100,6 +100,97 @@ impl MarkKind {
     }
 }
 
+/// One covariate column as an input surface read it: numbers for a continuous
+/// covariate, labels for a categorical one.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CovariateCells {
+    Numbers(Vec<f64>),
+    Labels(Vec<String>),
+}
+
+impl CovariateCells {
+    /// Type a column read as text, as from a CSV table: continuous when every
+    /// cell parses as a number, categorical otherwise.
+    pub fn from_text(cells: &[&str]) -> Self {
+        match cells
+            .iter()
+            .map(|cell| cell.parse::<f64>())
+            .collect::<Result<Vec<f64>, _>>()
+        {
+            Ok(numbers) => Self::Numbers(numbers),
+            Err(_) => Self::Labels(cells.iter().map(|cell| (*cell).to_string()).collect()),
+        }
+    }
+
+    /// Encode the column for the covariate table: continuous values pass
+    /// through with no levels; a categorical column is coded `0, 1, …` by its
+    /// distinct labels in sorted order, which are its levels.
+    pub fn encode(self) -> (Vec<f64>, Vec<String>) {
+        match self {
+            Self::Numbers(numbers) => (numbers, Vec::new()),
+            Self::Labels(labels) => {
+                let mut levels = labels.clone();
+                levels.sort();
+                levels.dedup();
+                let codes = labels
+                    .iter()
+                    .map(|label| match levels.binary_search(label) {
+                        Ok(index) | Err(index) => index as f64,
+                    })
+                    .collect();
+                (codes, levels)
+            }
+        }
+    }
+}
+
+/// One value of a covariate record, as a forecast supplies it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CovariateValue {
+    Number(f64),
+    Label(String),
+}
+
+/// Code one record value against a fitted covariate's levels: a continuous
+/// covariate (no levels) takes a number, a categorical one takes one of its
+/// levels.
+pub fn code_covariate_value(
+    name: &str,
+    levels: &[String],
+    value: CovariateValue,
+) -> Result<f64, EventHistoryError> {
+    match value {
+        CovariateValue::Number(number) if levels.is_empty() => Ok(number),
+        CovariateValue::Number(number) => Err(invalid(format!(
+            "categorical covariate {name:?} takes one of its levels {levels:?}, not the number {number}"
+        ))),
+        CovariateValue::Label(label) if levels.is_empty() => Err(invalid(format!(
+            "continuous covariate {name:?} takes a number, not the label {label:?}"
+        ))),
+        CovariateValue::Label(label) => levels
+            .iter()
+            .position(|level| *level == label)
+            .map(|index| index as f64)
+            .ok_or_else(|| {
+                invalid(format!(
+                    "unknown level {label:?} for categorical covariate {name:?}; levels: {levels:?}"
+                ))
+            }),
+    }
+}
+
+/// The mark vocabulary a cohort takes when none is declared: the observed mark
+/// names, sorted and distinct, every one recurrent.
+pub fn observed_mark_vocabulary<'a>(
+    observed: impl IntoIterator<Item = &'a str>,
+) -> (Vec<String>, Vec<MarkKind>) {
+    let mut names: Vec<String> = observed.into_iter().map(str::to_string).collect();
+    names.sort();
+    names.dedup();
+    let kinds = vec![MarkKind::Recurrent; names.len()];
+    (names, kinds)
+}
+
 /// One observed event: its time and its mark index.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Event {
@@ -797,3 +888,6 @@ pub(crate) fn design_rows(
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod covariate_encoding_tests;

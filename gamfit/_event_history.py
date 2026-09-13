@@ -16,9 +16,6 @@ import numpy as np
 
 from ._binding import rust_module
 
-MARK_KINDS = ("recurrent", "once", "terminal")
-
-
 def _positional_index(value: Any, name: str) -> int:
     if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
         raise ValueError(f"{name} must contain integer indices, got {value!r}")
@@ -266,36 +263,22 @@ class EventHistoryModel:
             _positional_index(stratum, "stratum"),
         ))
 
-    def _covariate_values(self, covariates: Mapping[str, Any] | Sequence[Any]) -> list[float]:
-        names = self.covariate_names
-        levels = self.covariate_levels
+    def _covariate_values(self, covariates: Mapping[str, Any] | Sequence[Any]) -> list[Any]:
+        """One covariate record in the fitted column order; the native model codes
+        categorical labels against the fitted levels and refuses unknown ones."""
         if isinstance(covariates, Mapping):
+            names = self.covariate_names
             missing = [c for c in names if c not in covariates]
             if missing:
                 raise KeyError(f"missing covariates {missing}")
-            raw = [covariates[c] for c in names]
-        else:
-            raw = list(covariates)
-            if len(raw) != len(names):
-                raise ValueError(f"expected {len(names)} covariate values, got {len(raw)}")
-        values = []
-        for name, value in zip(names, raw):
-            if levels[name]:
-                label = str(value)
-                if label not in levels[name]:
-                    raise ValueError(
-                        f"unknown level {label!r} for categorical covariate {name!r}; levels: {levels[name]}"
-                    )
-                values.append(float(levels[name].index(label)))
-            else:
-                values.append(float(value))
-        return values
+            return [covariates[c] for c in names]
+        return list(covariates)
 
     def _future(
         self,
         future: Mapping[str, Any] | Sequence[Any] | Sequence[tuple[float, Any]] | None,
         start: float,
-    ) -> list[tuple[float, list[float]]]:
+    ) -> list[tuple[float, list[Any]]]:
         """A covariate path over a window opening at ``start``: ``None`` (the
         current row holds), one covariate record (constant over the window),
         or a sequence of ``(start, record)`` pairs."""
@@ -427,9 +410,7 @@ class EventHistoryModel:
         segments = self._future(covariates, float(entry))
         if not segments:
             raise ValueError("forecast_history needs the history's covariate values")
-        table = np.ascontiguousarray(
-            np.asarray([values for _, values in segments], dtype=float).reshape(len(segments), -1)
-        )
+        records = [values for _, values in segments]
         starts = [start for start, _ in segments]
         window_start = float(exit) if cutoff is None else float(cutoff)
         path = self._future(future, window_start)
@@ -439,7 +420,7 @@ class EventHistoryModel:
             event_time,
             event_mark,
             starts,
-            table,
+            records,
             None if cutoff is None else float(cutoff),
             [float(h) for h in horizons],
             path,
@@ -511,13 +492,10 @@ def fit_event_history(
         mark_kinds = ["recurrent"] * len(mark_names)
     elif isinstance(marks, Mapping):
         mark_names = [str(k) for k in marks.keys()]
-        mark_kinds = [str(v).lower() for v in marks.values()]
+        mark_kinds = [str(v) for v in marks.values()]
     else:
         mark_names = [str(m) for m in marks]
         mark_kinds = ["recurrent"] * len(mark_names)
-    for kind in mark_kinds:
-        if kind not in MARK_KINDS:
-            raise ValueError(f"unknown mark kind {kind!r}; expected one of {MARK_KINDS}")
     mark_index = {name: i for i, name in enumerate(mark_names)}
     unknown = sorted(set(mark_values) - set(mark_names))
     if unknown:
@@ -533,25 +511,13 @@ def fit_event_history(
     covariate_names = [
         c for c in _column_names(covariates) if c not in (id_column, "start")
     ]
-    columns = []
-    covariate_levels: list[list[str]] = []
+    # A string, boolean or categorical column crosses as its labels and any
+    # other column as numbers; the native cohort encoder codes both, as the CLI's does.
+    columns: list[list[Any]] = []
     for name in covariate_names:
         values = _column(covariates, name)
-        if _is_categorical(values):
-            labels = [str(v) for v in values]
-            levels = sorted(set(labels))
-            covariate_levels.append(levels)
-            code = {level: float(i) for i, level in enumerate(levels)}
-            columns.append(np.asarray([code[v] for v in labels], dtype=float))
-        else:
-            covariate_levels.append([])
-            columns.append(values.astype(float))
+        columns.append([str(v) for v in values] if _is_categorical(values) else values.astype(float).tolist())
     n_segments = len(_column(covariates, "start"))
-    table = (
-        np.column_stack(columns)
-        if columns
-        else np.zeros((n_segments, 0), dtype=float)
-    )
     segment_subject = []
     for v in _column(covariates, id_column):
         label = str(v)
@@ -590,16 +556,15 @@ def fit_event_history(
                 f"reference_stratum indices must be in 0..{len(reference_rows) - 1}"
             )
     for row in reference_rows:
-        if not 0 <= row < table.shape[0]:
+        if not 0 <= row < n_segments:
             raise ValueError(
-                f"reference profile row {row} is outside the {table.shape[0]} covariate rows"
+                f"reference profile row {row} is outside the {n_segments} covariate rows"
             )
     native = rust.fit_event_history(
         mark_names,
         mark_kinds,
         covariate_names,
-        covariate_levels,
-        np.ascontiguousarray(table, dtype=np.float64),
+        columns,
         subject_ids,
         entry,
         exit_,

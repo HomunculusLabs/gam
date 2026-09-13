@@ -14,7 +14,7 @@ def frontend(monkeypatch):
 
     def fit(*args):
         calls.append(args)
-        return SimpleNamespace(subject_ids=lambda: args[5])
+        return SimpleNamespace(subject_ids=lambda: args[4])
 
     package = ModuleType("event_history_input_contract")
     package.__path__ = []

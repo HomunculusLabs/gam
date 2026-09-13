@@ -6,13 +6,13 @@
 use crate::ffi::ffi_errors::{detach_py_result, py_value_error};
 use gam::families::custom_family::BlockwiseFitOptions;
 use gam::event_history::{
-    CovariateSegment, Event, EventHistoryCohort, EventHistoryFit, ForecastRequest, FutureSegment,
-    HistoryForecastRequest, MarkKind, PopulationForecastRequest, ReferenceStrata, SubjectHistory,
-    fit_event_history_formulas, forecast, forecast_history, latent_state, pit_uniform_distance,
-    population_forecast, predictive_pit,
+    CovariateCells, CovariateSegment, CovariateValue, Event, EventHistoryCohort, EventHistoryFit,
+    ForecastRequest, FutureSegment, HistoryForecastRequest, MarkKind, PopulationForecastRequest,
+    ReferenceStrata, SubjectHistory, code_covariate_value, fit_event_history_formulas, forecast,
+    forecast_history, latent_state, pit_uniform_distance, population_forecast, predictive_pit,
 };
 use ndarray::{Array2, Array3};
-use numpy::{PyArray1, PyArray2, PyArray3, PyReadonlyArray2};
+use numpy::{PyArray1, PyArray2, PyArray3};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyModule};
 use std::sync::Arc;
@@ -27,10 +27,45 @@ pub(crate) struct PyEventHistoryModel {
     strata: Vec<usize>,
 }
 
-fn future_segments(future: Vec<(f64, Vec<f64>)>) -> Vec<FutureSegment> {
+/// Code one Python covariate record against the fitted schema: a continuous
+/// covariate takes a number, a categorical one the `str` of its value, and the
+/// cohort's levels decide the code.
+fn coded_record(cohort: &EventHistoryCohort, values: &[Bound<'_, PyAny>]) -> PyResult<Vec<f64>> {
+    if values.len() != cohort.covariate_names.len() {
+        return Err(py_value_error(format!(
+            "a covariate record has {} values for {} covariates",
+            values.len(),
+            cohort.covariate_names.len()
+        )));
+    }
+    cohort
+        .covariate_names
+        .iter()
+        .zip(&cohort.covariate_levels)
+        .zip(values)
+        .map(|((name, levels), value)| {
+            let value = if levels.is_empty() {
+                CovariateValue::Number(value.extract::<f64>()?)
+            } else {
+                CovariateValue::Label(value.str()?.to_string())
+            };
+            code_covariate_value(name, levels, value).map_err(|e| py_value_error(e.to_string()))
+        })
+        .collect()
+}
+
+fn future_segments(
+    cohort: &EventHistoryCohort,
+    future: Vec<(f64, Vec<Bound<'_, PyAny>>)>,
+) -> PyResult<Vec<FutureSegment>> {
     future
         .into_iter()
-        .map(|(start, covariates)| FutureSegment { start, covariates })
+        .map(|(start, record)| {
+            Ok(FutureSegment {
+                start,
+                covariates: coded_record(cohort, &record)?,
+            })
+        })
         .collect()
 }
 
@@ -218,10 +253,8 @@ impl PyEventHistoryModel {
         Ok(self.fit.mark_coefficients(mark).to_vec())
     }
 
-    fn baseline_rates<'py>(&self, py: Python<'py>, values: Vec<f64>, times: Vec<f64>, stratum: usize) -> PyResult<Bound<'py, PyArray2<f64>>> {
-        if values.len() != self.cohort.covariate_names.len() {
-            return Err(py_value_error("baseline covariate width differs from the fitted schema".to_string()));
-        }
+    fn baseline_rates<'py>(&self, py: Python<'py>, values: Vec<Bound<'py, PyAny>>, times: Vec<f64>, stratum: usize) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        let values = coded_record(&self.cohort, &values)?;
         let mut rows = Array2::zeros((times.len(), values.len() + 1));
         for (n, &time) in times.iter().enumerate() {
             self.fit.risk_set_normaliser_at(stratum, time).map_err(|e| py_value_error(e.to_string()))?;
@@ -262,7 +295,7 @@ impl PyEventHistoryModel {
         py: Python<'py>,
         subject: usize,
         horizons: Vec<f64>,
-        future: Vec<(f64, Vec<f64>)>,
+        future: Vec<(f64, Vec<Bound<'py, PyAny>>)>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let stratum = self.strata.get(subject).copied().unwrap_or(0);
         let history = self
@@ -273,7 +306,7 @@ impl PyEventHistoryModel {
             .clone();
         let fit = Arc::clone(&self.fit);
         let cohort = Arc::clone(&self.cohort);
-        let future = future_segments(future);
+        let future = future_segments(&self.cohort, future)?;
         let result = detach_py_result(py, "event-history forecast", move || {
             forecast(
                 &fit,
@@ -297,12 +330,12 @@ impl PyEventHistoryModel {
         py: Python<'py>,
         start: f64,
         horizons: Vec<f64>,
-        future: Vec<(f64, Vec<f64>)>,
+        future: Vec<(f64, Vec<Bound<'py, PyAny>>)>,
         stratum: usize,
     ) -> PyResult<Bound<'py, PyDict>> {
         let fit = Arc::clone(&self.fit);
         let cohort = Arc::clone(&self.cohort);
-        let future = future_segments(future);
+        let future = future_segments(&self.cohort, future)?;
         let result = detach_py_result(py, "event-history population forecast", move || {
             population_forecast(
                 &fit,
@@ -389,8 +422,8 @@ impl PyEventHistoryModel {
     /// Forecast a history that is not a training subject's — or a training
     /// subject's prefix — from its own records: entry and exit, events as
     /// parallel time and mark-index vectors, covariate segments as parallel
-    /// start times and rows of `covariates` (one row per segment, in the
-    /// cohort's columns and level codes). With `cutoff`, the history is cut
+    /// start times and `covariates` records (one per segment, in the cohort's
+    /// columns, coded here against its levels). With `cutoff`, the history is cut
     /// to what was known at the cutoff before forecasting.
     #[pyo3(signature = (entry, exit, event_time, event_mark, segment_start, covariates, cutoff, horizons, future, stratum))]
     fn forecast_history<'py>(
@@ -401,10 +434,10 @@ impl PyEventHistoryModel {
         event_time: Vec<f64>,
         event_mark: Vec<usize>,
         segment_start: Vec<f64>,
-        covariates: PyReadonlyArray2<'_, f64>,
+        covariates: Vec<Vec<Bound<'py, PyAny>>>,
         cutoff: Option<f64>,
         horizons: Vec<f64>,
-        future: Vec<(f64, Vec<f64>)>,
+        future: Vec<(f64, Vec<Bound<'py, PyAny>>)>,
         stratum: usize,
     ) -> PyResult<Bound<'py, PyDict>> {
         if event_time.len() != event_mark.len() {
@@ -412,7 +445,12 @@ impl PyEventHistoryModel {
                 "event_time and event_mark must have equal length".to_string(),
             ));
         }
-        let table: Array2<f64> = covariates.as_array().to_owned();
+        let mut table = Array2::<f64>::zeros((covariates.len(), self.cohort.covariate_names.len()));
+        for (row, record) in covariates.iter().enumerate() {
+            for (j, code) in coded_record(&self.cohort, record)?.into_iter().enumerate() {
+                table[[row, j]] = code;
+            }
+        }
         if segment_start.len() != table.nrows() {
             return Err(py_value_error(format!(
                 "{} segment starts for {} covariate rows",
@@ -437,7 +475,7 @@ impl PyEventHistoryModel {
         };
         let fit = Arc::clone(&self.fit);
         let cohort = Arc::clone(&self.cohort);
-        let future = future_segments(future);
+        let future = future_segments(&self.cohort, future)?;
         let result = detach_py_result(py, "event-history forecast", move || {
             let history = match cutoff {
                 Some(cutoff) => history
@@ -464,14 +502,13 @@ impl PyEventHistoryModel {
 
 /// Fit an event-history model from flat arrays.
 #[pyfunction]
-#[pyo3(signature = (mark_names, mark_kinds, covariate_names, covariate_levels, covariates, subject_ids, entry, exit, event_subject, event_time, event_mark, segment_subject, segment_start, segment_row, formulas, reference_rows, reference_stratum))]
+#[pyo3(signature = (mark_names, mark_kinds, covariate_names, covariate_columns, subject_ids, entry, exit, event_subject, event_time, event_mark, segment_subject, segment_start, segment_row, formulas, reference_rows, reference_stratum))]
 fn fit_event_history(
     py: Python<'_>,
     mark_names: Vec<String>,
     mark_kinds: Vec<String>,
     covariate_names: Vec<String>,
-    covariate_levels: Vec<Vec<String>>,
-    covariates: PyReadonlyArray2<'_, f64>,
+    covariate_columns: Vec<Bound<'_, PyAny>>,
     subject_ids: Vec<String>,
     entry: Vec<f64>,
     exit: Vec<f64>,
@@ -505,7 +542,40 @@ fn fit_event_history(
         .iter()
         .map(|k| MarkKind::parse(k).map_err(|e| py_value_error(e.to_string())))
         .collect::<PyResult<Vec<_>>>()?;
-    let covariates: Array2<f64> = covariates.as_array().to_owned();
+    if covariate_columns.len() != covariate_names.len() {
+        return Err(py_value_error(format!(
+            "{} covariate columns for {} covariate names",
+            covariate_columns.len(),
+            covariate_names.len()
+        )));
+    }
+    // A column of labels is categorical; any other column is continuous. The
+    // shared cohort encoder codes both, as the CLI's does.
+    let mut encoded = Vec::with_capacity(covariate_columns.len());
+    for column in &covariate_columns {
+        let cells = match column.extract::<Vec<String>>() {
+            Ok(labels) => CovariateCells::Labels(labels),
+            Err(_) => CovariateCells::Numbers(column.extract::<Vec<f64>>()?),
+        };
+        encoded.push(cells.encode());
+    }
+    let rows = segment_row.iter().copied().max().map_or(0, |row| row + 1);
+    let rows = encoded.first().map_or(rows, |(codes, _)| codes.len());
+    let mut covariates = Array2::<f64>::zeros((rows, encoded.len()));
+    let mut covariate_levels = Vec::with_capacity(encoded.len());
+    for (j, (codes, levels)) in encoded.into_iter().enumerate() {
+        if codes.len() != rows {
+            return Err(py_value_error(format!(
+                "covariate {:?} has {} values for {rows} rows",
+                covariate_names[j],
+                codes.len()
+            )));
+        }
+        for (i, code) in codes.into_iter().enumerate() {
+            covariates[[i, j]] = code;
+        }
+        covariate_levels.push(levels);
+    }
     let mut subjects: Vec<SubjectHistory> = subject_ids
         .iter()
         .zip(entry.iter().zip(exit.iter()))
