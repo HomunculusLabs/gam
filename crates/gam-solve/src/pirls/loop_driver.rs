@@ -50,10 +50,7 @@ use super::{
     solve_penalized_least_squares_implicit,
     standard_inverse_link_jet,
 };
-use super::{
-    ArrowSchurInnerConfig, GamModelFinalState, effective_kkt_tolerance,
-    project_coefficients_to_lower_bounds,
-};
+use super::{ArrowSchurInnerConfig, GamModelFinalState, project_coefficients_to_lower_bounds};
 use crate::active_set;
 use crate::estimate::EstimationError;
 use crate::gpu::pirls_host_dispatch::{try_gaussian_pls_gpu, try_pirls_loop_gpu};
@@ -1763,7 +1760,6 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
         // max_iterations is intentionally capped low), turning recoverable
         // damping into spurious failures.
         max_step_halving: base_max_step_halving,
-        min_step_size: if firth_active { 1e-12 } else { 1e-10 },
         firth_bias_reduction: firth_active,
         coefficient_lower_bounds: None,
         linear_constraints: linear_constraints.clone(),
@@ -2297,55 +2293,13 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
         edf = (p - r).max(0.0);
     }
 
-    // Outer rescue: a fit that hit max-iterations may still be a usable
-    // minimum if progress has effectively stopped (deviance plateaued or
-    // step size collapsed to the floor) AND the projected gradient is in
-    // the near-stationary band under the scale-invariant certificate.
-    // Same logic for non-Firth and Firth paths; firth_active just gates
-    // the second pass.
-    let stalled_at_valid_minimum = |summary: &WorkingModelPirlsResult| -> bool {
-        // Scale-equivariant deviance plateau band (issue #1127). The
-        // `last_deviance_change` compared below and the deviance both scale as
-        // `O(a²)` under a response rescaling `y → a·y` (the penalized normal
-        // equations are linear in `y`, so `β → a·β` and the RSS-deviance
-        // scales by `a²`). Keying the plateau band to the deviance's own
-        // magnitude `+ |penalty|` makes the ratio `Δdev / dev_scale`
-        // scale-invariant. The previous `.max(1.0)` absolute floor broke this:
-        // for a micro-unit response (`a = 1e-6`) the deviance is `O(1e-12)`, so
-        // the floor pinned the band at `1.0` — ~1e9× too loose — and this
-        // max-iteration rescue declared `progress_stopped` at an over-smoothed
-        // iterate, propagating an inflated `λ̂` to the outer REML loop. For a
-        // well-scaled (`a ≳ 1`) or up-scaled (`a = 1e6`) objective the floor was
-        // already a no-op, so those directions are byte-identical. A perfect
-        // interpolating fit gives a `0` band, so the relative `Δdev` test cannot
-        // fire spuriously and the scale-invariant `near_stationary_kkt`
-        // certificate then governs acceptance.
-        let dev_scale = summary.state.deviance.abs() + summary.state.penalty_term.abs();
-        // Progress plateau uses the fixed solver tolerance; only the KKT band below adapts.
-        let dev_tol = options.convergence_tolerance * dev_scale;
-        let step_floor = options.min_step_size * 2.0;
-        let progress_stopped =
-            summary.last_deviance_change.abs() <= dev_tol || summary.last_step_size <= step_floor;
-        let near_stationary = summary
-            .state
-            .near_stationary_kkt(summary.lastgradient_norm, effective_kkt_tolerance(&options));
-        progress_stopped && near_stationary
-    };
-
+    // An exhausted iteration budget stays an exhausted budget. The loop's own
+    // post-loop soft acceptance (`pirls_soft_acceptance`) has already decided
+    // whether this state is a near-stationary plateau. There is no second rescue
+    // here that relabels a max-iteration stop as `StalledAtValidMinimum` because
+    // the step collapsed to a floor, which certifies nothing about stationarity
+    // (SPEC rule 21, #2902).
     let mut status = working_summary.status;
-    if status.is_failed_max_iterations() && stalled_at_valid_minimum(&working_summary) {
-        status = PirlsStatus::StalledAtValidMinimum;
-        working_summary.status = status;
-    }
-    if status.is_failed_max_iterations()
-        && firth_active
-        && stalled_at_valid_minimum(&working_summary)
-    {
-        // Firth-adjusted fits can stall; accept under the same dual-criterion
-        // near-stationary band.
-        status = PirlsStatus::StalledAtValidMinimum;
-        working_summary.status = status;
-    }
     let has_penalty = penalty_active.rank() > 0;
     let firth_active = options.firth_bias_reduction;
     if detect_logit_instability(

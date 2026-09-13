@@ -7323,7 +7323,6 @@ fn structural_survival_fit_is_time_unit_invariant() {
                 max_iterations: 400,
                 convergence_tolerance: 1e-6,
                 max_step_halving: 40,
-                min_step_size: 1e-12,
                 firth_bias_reduction: false,
                 coefficient_lower_bounds: Some(lb),
                 linear_constraints: None,

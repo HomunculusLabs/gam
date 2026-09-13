@@ -172,7 +172,6 @@ pub struct WorkingModelPirlsOptions {
     pub convergence_tolerance: f64,
     pub adaptive_kkt_tolerance: Option<AdaptiveKktTolerance>,
     pub max_step_halving: usize,
-    pub min_step_size: f64,
     pub firth_bias_reduction: bool,
     /// Optional lower bounds on coefficients (same coordinate system as `beta`).
     /// Use `-inf` for unconstrained entries.

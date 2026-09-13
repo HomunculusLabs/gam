@@ -14,8 +14,6 @@ const SURVIVAL_TRANSFORMATION_PIRLS_CONVERGENCE_TOL: f64 =
 
 const SURVIVAL_TRANSFORMATION_PIRLS_MAX_STEP_HALVING: usize = 40;
 
-const SURVIVAL_TRANSFORMATION_PIRLS_MIN_STEP_SIZE: f64 = 1e-12;
-
 struct SurvivalLocationScaleProfile {
     fit: SurvivalLocationScaleTermFitResult,
     inverse_link: InverseLink,
@@ -1693,7 +1691,6 @@ fn optimize_survival_transformation_smoothing(
             convergence_tolerance: SURVIVAL_TRANSFORMATION_PIRLS_CONVERGENCE_TOL,
             adaptive_kkt_tolerance: None,
             max_step_halving: SURVIVAL_TRANSFORMATION_PIRLS_MAX_STEP_HALVING,
-            min_step_size: SURVIVAL_TRANSFORMATION_PIRLS_MIN_STEP_SIZE,
             firth_bias_reduction: false,
             coefficient_lower_bounds: structural_lower_bounds.cloned(),
             linear_constraints: None,
@@ -2782,7 +2779,6 @@ fn persistent_survival_transformation_key(
     hasher.write_usize(opts.max_iterations);
     hasher.write_f64(opts.convergence_tolerance);
     hasher.write_usize(opts.max_step_halving);
-    hasher.write_f64(opts.min_step_size);
     hasher.write_bool(opts.firth_bias_reduction);
     hasher.write_bool(opts.coefficient_lower_bounds.is_some());
     if let Some(bounds) = opts.coefficient_lower_bounds.as_ref() {
@@ -3097,7 +3093,6 @@ pub(crate) fn fit_survival_transformation_model(
                     convergence_tolerance: SURVIVAL_TRANSFORMATION_PIRLS_CONVERGENCE_TOL,
                     adaptive_kkt_tolerance: None,
                     max_step_halving: SURVIVAL_TRANSFORMATION_PIRLS_MAX_STEP_HALVING,
-                    min_step_size: SURVIVAL_TRANSFORMATION_PIRLS_MIN_STEP_SIZE,
                     firth_bias_reduction: false,
                     coefficient_lower_bounds: structural_lower_bounds,
                     linear_constraints: None,
@@ -3223,7 +3218,6 @@ pub(crate) fn fit_survival_transformation_model(
         convergence_tolerance: SURVIVAL_TRANSFORMATION_PIRLS_CONVERGENCE_TOL,
         adaptive_kkt_tolerance: None,
         max_step_halving: SURVIVAL_TRANSFORMATION_PIRLS_MAX_STEP_HALVING,
-        min_step_size: SURVIVAL_TRANSFORMATION_PIRLS_MIN_STEP_SIZE,
         firth_bias_reduction: false,
         coefficient_lower_bounds: structural_lower_bounds,
         linear_constraints: None,
