@@ -1,4 +1,4 @@
-use gam_math::paired_timing::{SpeedGate, paired_interleaved};
+use gam_math::paired_timing::{PairedTiming, SpeedGate, paired_interleaved};
 use gam_math::probability::normal_logcdf_derivatives;
 use gam_row_macros::row_program;
 
@@ -560,21 +560,33 @@ fn generated_rigid_bms_matches_strongest_hand_932() {
 
     // Parity above runs in every build; the speed contract opens only in the
     // release profile (`SpeedGate::open` documents why) and takes one paired,
-    // interleaved, order-randomised measurement per channel. Every channel
-    // is `faster`: the generated lowering must beat the strongest direct
-    // analytic schedule of the same row. (This gate once carried its own
-    // seven-round harness and asserted in the dev lane as well, where the
-    // codegen it measured is not the shipped one; it is now one of the
-    // derived population and measured by the one instrument.)
+    // interleaved, order-randomised measurement per channel. `order2`,
+    // `fourth` and `fourth_full` are `faster`: the generated lowering must
+    // beat the strongest direct analytic schedule of the same row. `third`
+    // and `third_full` are `not_slower`, a contract decision taken on 09-12:
+    // the two programs are within 3% of each other in instructions (pool job
+    // 539972), the generated arm wins on EPYC 7763 and physical EPYC 9534 and
+    // loses on EPYC 9V74, and the one code-shape margin left, absorbing the
+    // outcome sign, was measured and lost on three hosts (`row_program.rs`,
+    // dense compose arm). No speed claim is made there, and the cell fails
+    // only when the generated arm is slower beyond the paired ratios' own
+    // resolution. (This gate once carried its own seven-round harness and
+    // asserted in the dev lane as well, where the codegen it measured is not
+    // the shipped one; it is now one of the derived population and measured
+    // by the one instrument.)
     if cfg!(debug_assertions) {
         return;
     }
     let mut gate = SpeedGate::open("RIGID-BMS-HAND-932");
     let reps = 15usize;
     let passes = 128usize;
-    for (channel, timing) in [
+    type Contract = fn(&mut SpeedGate, &str, &PairedTiming, &str, &str);
+    let faster: Contract = SpeedGate::faster;
+    let not_slower: Contract = SpeedGate::not_slower;
+    for (channel, contract, timing) in [
         (
             "order2",
+            faster,
             paired_interleaved(
                 reps,
                 passes,
@@ -585,6 +597,7 @@ fn generated_rigid_bms_matches_strongest_hand_932() {
         ),
         (
             "third",
+            not_slower,
             paired_interleaved(
                 reps,
                 passes,
@@ -595,6 +608,7 @@ fn generated_rigid_bms_matches_strongest_hand_932() {
         ),
         (
             "fourth",
+            faster,
             paired_interleaved(
                 reps,
                 passes,
@@ -605,6 +619,7 @@ fn generated_rigid_bms_matches_strongest_hand_932() {
         ),
         (
             "third_full",
+            not_slower,
             paired_interleaved(
                 reps,
                 passes,
@@ -615,6 +630,7 @@ fn generated_rigid_bms_matches_strongest_hand_932() {
         ),
         (
             "fourth_full",
+            faster,
             paired_interleaved(
                 reps,
                 passes,
@@ -627,7 +643,8 @@ fn generated_rigid_bms_matches_strongest_hand_932() {
         // `ns/iter` is nanoseconds per PASS over `rows.len()` rows; the ratio
         // the verdict rests on is unit-free. `median_ratio` is hand /
         // generated, so above 1 means the generated kernel is faster.
-        gate.faster(
+        contract(
+            &mut gate,
             &format!("channel={channel} rows={}", rows.len()),
             &timing,
             "generated",

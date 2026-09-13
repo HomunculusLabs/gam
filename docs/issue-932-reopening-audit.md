@@ -522,7 +522,16 @@ same rule emitted the same arithmetic minus the sign multiplies, yet lost 10–3
 three hosts: LLVM scheduled the observed-scale inverse-power chain and its spills
 ahead of the probit call. The order-2 emitter keeps the absorption because there it
 wins on every host. Code shape therefore leaves no robust margin for the third cells
-at parity. Whether they keep a strict `faster` contract is an open decision.
+at parity.
+
+**Decision (09-12, lead ruling).** `third` and `third_full` are now `not_slower`;
+`order2`, `fourth` and `fourth_full` stay `faster`. A `not_slower` cell fails when
+`median_ratio + ratio_resolution < 1`, where the resolution is half the central 90%
+span of the paired ratios. This changes the contract only. It does not turn the
+9V74 run above green: `third` gives 0.988054 + 0.0048 = 0.9929 and `third_full`
+0.958507 + 0.0063 = 0.9648, both below 1, with wins 0.07 and 0.00. On that host the
+generated arm is measurably slower than the strongest hand, so those two cells stay
+red there until the generated program changes.
 
 ### Live-family derivative census, continued: the coefficient-space pullbacks
 
