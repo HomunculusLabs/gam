@@ -2979,35 +2979,9 @@ pub(crate) fn run_outer_with_plan(
                         started_seeds,
                         promoted_seed_is_redundant,
                     );
-                // A certificate says a point is stationary, not that it is the best
-                // point the search has seen. A seed started on the domain's upper
-                // faces sits on the criterion's exponential tail, where |Pg| is
-                // negligible whatever the criterion scores, so it can certify with
-                // zero iterations. Ending the multistart on it discards the lower
-                // basin that exhausted seeds already measured. So a certified winner
-                // ends the multistart only when no evaluated point scores lower than
-                // it beyond the criterion's resolution. #1082 q12: seed 2 on the
-                // derived upper faces certified at 286.23 and stopped the cascade
-                // while seeds 0/1 had exhausted at 158.66. Seed 3, when it still ran,
-                // certified at 158.628.
-                let certified_best_is_dominated =
-                    match (best.as_ref(), best_checkpoint.as_ref()) {
-                        (Some(certified), Some(visited)) => {
-                            let winner = certified.result().final_value;
-                            winner.is_finite()
-                                && visited.final_value.is_finite()
-                                && winner - visited.final_value
-                                    > crate::rho_optimizer::outer_value_agreement_bound(
-                                        winner,
-                                        visited.final_value,
-                                    )
-                        }
-                        _ => false,
-                    };
                 if best.is_some()
                     && !quality_compare_remaining_gaussian_seeds
                     && !non_gaussian_await_parsimony_seed
-                    && !certified_best_is_dominated
                 {
                     break;
                 }
