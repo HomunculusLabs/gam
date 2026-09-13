@@ -290,16 +290,23 @@ pub struct SurvivalPredictResult {
 /// `1 - window_survival` without reconstructing a censoring or inspection law.
 pub struct LatentWindowSurvivalResult {
     pub window_survival: Array1<f64>,
+    /// `P(T > t | T > entry, x)` for every row at every requested grid time `t`,
+    /// one column per time, when the request carries a time grid; `None`
+    /// otherwise.
+    pub grid_survival: Option<Array2<f64>>,
     pub likelihood_mode: SurvivalLikelihoodMode,
 }
 
-/// Evaluate the saved latent hazard-multiplier law over the rows' own windows.
+/// Evaluate the saved latent hazard-multiplier law over the rows' own windows,
+/// and over every requested grid time.
 ///
 /// This is the library authority for both `latent` and `latent-binary` saved
 /// models. It replays the persisted covariate design, anchored time basis,
 /// loaded/unloaded baseline decomposition, fitted mean/time coefficients, and
 /// fixed lognormal hazard multiplier. No response column, refit, or surrogate
-/// family participates in the calculation.
+/// family participates in the calculation. A grid time `t` closes each row's
+/// window at `t` instead of at its exit, so a row with no entry column gives the
+/// fitted survival curve `S(t | x)`.
 pub fn predict_latent_window_survival(
     req: SurvivalPredictRequest<'_>,
 ) -> Result<LatentWindowSurvivalResult, SurvivalPredictError> {
@@ -314,10 +321,19 @@ pub fn predict_latent_window_survival(
         with_uncertainty,
         estimand,
     } = req;
-    if time_grid.is_some() {
-        return Err(SurvivalPredictError::InvalidInput {
-            reason: "latent-window prediction consumes each row's saved entry/exit columns; an independent time_grid is not a window law".to_string(),
-        });
+    if let Some(grid) = time_grid {
+        if grid.is_empty() {
+            return Err(SurvivalPredictError::InvalidInput {
+                reason: "latent-window time_grid must contain at least one time".to_string(),
+            });
+        }
+        if let Some(index) = grid.iter().position(|time| !(time.is_finite() && *time >= 0.0)) {
+            return Err(SurvivalPredictError::InvalidInput {
+                reason: format!(
+                    "latent-window time_grid requires finite non-negative times (index {index})"
+                ),
+            });
+        }
     }
     if with_uncertainty || estimand != SurvivalPredictEstimand::Plugin {
         return Err(SurvivalPredictError::UnsupportedConfiguration {
@@ -376,11 +392,13 @@ pub fn predict_latent_window_survival(
         .map_err(|error| error.to_string())?;
 
     let time_columns = resolve_saved_survival_time_columns(model, col_map)?;
+    let mut raw_entry = Array1::<f64>::zeros(n);
     let mut age_entry = Array1::<f64>::zeros(n);
     let mut age_exit = Array1::<f64>::zeros(n);
     for row in 0..n {
+        raw_entry[row] = time_columns.row_entry_time(data, row);
         let (entry, exit) = normalize_survival_time_pair(
-            time_columns.row_entry_time(data, row),
+            raw_entry[row],
             data[[row, time_columns.exit_col]],
             row,
         )?;
@@ -389,30 +407,12 @@ pub fn predict_latent_window_survival(
     }
 
     let time_config = load_survival_time_basis_config_from_model(model)?;
-    let mut time_build = build_survival_time_basis(&age_entry, &age_exit, time_config, None)?;
-    let resolved_time_config = resolved_survival_time_basis_config_from_build(
-        &time_build.basisname,
-        time_build.degree,
-        time_build.knots.as_ref(),
-        time_build.keep_cols.as_ref(),
-    )?;
     let time_anchor =
         model
             .survival_time_anchor
             .ok_or_else(|| SurvivalPredictError::MissingFitMetadata {
                 reason: "saved latent-window model is missing survival_time_anchor".to_string(),
             })?;
-    let anchor_row = evaluate_survival_time_basis_row(time_anchor, &resolved_time_config)?;
-    center_survival_time_designs_at_anchor(
-        &mut time_build.x_entry_time,
-        &mut time_build.x_exit_time,
-        &anchor_row,
-    )?;
-    require_structural_survival_time_basis(
-        &time_build.basisname,
-        "saved latent-window prediction",
-    )?;
-
     let frailty =
         model
             .family_state
@@ -424,18 +424,6 @@ pub fn predict_latent_window_survival(
     let (sigma, loading) = fixed_latent_hazard_frailty(frailty, "saved latent-window prediction")
         .map_err(|reason| SurvivalPredictError::MissingFitMetadata { reason })?;
     let baseline_config = saved_survival_runtime_baseline_config(model)?;
-    let prepared = prepare_survival_time_stack(
-        &age_entry,
-        &age_exit,
-        &baseline_config,
-        likelihood_mode,
-        None,
-        time_anchor,
-        survival_derivative_guard_for_likelihood(likelihood_mode),
-        &time_build,
-        None,
-        Some(loading),
-    )?;
 
     let fit = fit_result_from_saved_model_for_prediction(model)?;
     let mean_block = fit.block_by_role(BlockRole::Mean).ok_or_else(|| {
@@ -457,54 +445,122 @@ pub fn predict_latent_window_survival(
             ),
         });
     }
-    if time_block.beta.len() != prepared.time_design_exit.ncols() {
-        let hint = stale_weibull_time_basis_hint(
-            &time_build.basisname,
-            time_block.beta.len() == prepared.time_design_exit.ncols() + 1,
-        );
-        return Err(SurvivalPredictError::IncompatibleSchema {
-            reason: format!(
-                "latent-window time/design mismatch: beta has {} coefficients but design has {} columns{hint}",
-                time_block.beta.len(),
-                prepared.time_design_exit.ncols()
-            ),
-        });
-    }
 
     let eta = covariate_design.design.dot(&mean_block.beta) + &effective_primary_offset;
-    let q_entry = prepared.time_design_entry.dot(&time_block.beta) + &prepared.eta_offset_entry;
-    let q_exit = prepared.time_design_exit.dot(&time_block.beta) + &prepared.eta_offset_exit;
     let quadrature = gam_solve::quadrature::QuadratureContext::new();
-    let mut window_survival = Array1::<f64>::zeros(n);
-    for row in 0..n {
-        let latent_row = crate::survival::lognormal_kernel::LatentSurvivalRow::right_censored(
-            q_entry[row].exp(),
-            q_exit[row].exp(),
-            prepared.unloaded_mass_entry[row],
-            prepared.unloaded_mass_exit[row],
-        );
-        let jet = crate::survival::lognormal_kernel::LatentSurvivalRowJet::evaluate(
-            &quadrature,
-            &latent_row,
-            eta[row],
-            sigma,
-        )
-        .map_err(|error| SurvivalPredictError::NumericalFailure {
-            reason: format!("latent-window row {row} evaluation failed: {error}"),
-        })?;
-        let survival = jet.log_lik.exp();
-        if !(survival.is_finite() && (0.0..=1.0).contains(&survival)) {
-            return Err(SurvivalPredictError::NumericalFailure {
+    // The saved law over one window per row: the anchored time basis and the
+    // loaded/unloaded offsets realized at `(entry_i, exit_i)`, then each row's
+    // exact conditional survival.
+    let windows = |entry: &Array1<f64>,
+                   exit: &Array1<f64>|
+     -> Result<Array1<f64>, SurvivalPredictError> {
+        let mut time_build = build_survival_time_basis(entry, exit, time_config.clone(), None)?;
+        let resolved_time_config = resolved_survival_time_basis_config_from_build(
+            &time_build.basisname,
+            time_build.degree,
+            time_build.knots.as_ref(),
+            time_build.keep_cols.as_ref(),
+        )?;
+        let anchor_row = evaluate_survival_time_basis_row(time_anchor, &resolved_time_config)?;
+        center_survival_time_designs_at_anchor(
+            &mut time_build.x_entry_time,
+            &mut time_build.x_exit_time,
+            &anchor_row,
+        )?;
+        require_structural_survival_time_basis(
+            &time_build.basisname,
+            "saved latent-window prediction",
+        )?;
+        let prepared = prepare_survival_time_stack(
+            entry,
+            exit,
+            &baseline_config,
+            likelihood_mode,
+            None,
+            time_anchor,
+            survival_derivative_guard_for_likelihood(likelihood_mode),
+            &time_build,
+            None,
+            Some(loading),
+        )?;
+        if time_block.beta.len() != prepared.time_design_exit.ncols() {
+            let hint = stale_weibull_time_basis_hint(
+                &time_build.basisname,
+                time_block.beta.len() == prepared.time_design_exit.ncols() + 1,
+            );
+            return Err(SurvivalPredictError::IncompatibleSchema {
                 reason: format!(
-                    "latent-window row {row} produced invalid conditional survival {survival}"
+                    "latent-window time/design mismatch: beta has {} coefficients but design has {} columns{hint}",
+                    time_block.beta.len(),
+                    prepared.time_design_exit.ncols()
                 ),
             });
         }
-        window_survival[row] = survival;
-    }
+        let q_entry =
+            prepared.time_design_entry.dot(&time_block.beta) + &prepared.eta_offset_entry;
+        let q_exit = prepared.time_design_exit.dot(&time_block.beta) + &prepared.eta_offset_exit;
+        let mut survival = Array1::<f64>::zeros(entry.len());
+        for row in 0..entry.len() {
+            let latent_row = crate::survival::lognormal_kernel::LatentSurvivalRow::right_censored(
+                q_entry[row].exp(),
+                q_exit[row].exp(),
+                prepared.unloaded_mass_entry[row],
+                prepared.unloaded_mass_exit[row],
+            );
+            let jet = crate::survival::lognormal_kernel::LatentSurvivalRowJet::evaluate(
+                &quadrature,
+                &latent_row,
+                eta[row],
+                sigma,
+            )
+            .map_err(|error| SurvivalPredictError::NumericalFailure {
+                reason: format!("latent-window row {row} evaluation failed: {error}"),
+            })?;
+            let value = jet.log_lik.exp();
+            if !(value.is_finite() && (0.0..=1.0).contains(&value)) {
+                return Err(SurvivalPredictError::NumericalFailure {
+                    reason: format!(
+                        "latent-window row {row} produced invalid conditional survival {value}"
+                    ),
+                });
+            }
+            survival[row] = value;
+        }
+        Ok(survival)
+    };
+    let window_survival = windows(&age_entry, &age_exit)?;
+    // One grid column at a time: each row's window closes at the grid time, so
+    // memory stays at one window per row however long the grid.
+    let grid_survival = time_grid
+        .map(|grid| -> Result<Array2<f64>, SurvivalPredictError> {
+            let mut grid_survival = Array2::<f64>::zeros((n, grid.len()));
+            let mut grid_entry = Array1::<f64>::zeros(n);
+            let mut grid_exit = Array1::<f64>::zeros(n);
+            for (column, &time) in grid.iter().enumerate() {
+                for row in 0..n {
+                    if time < age_entry[row] {
+                        return Err(SurvivalPredictError::InvalidInput {
+                            reason: format!(
+                                "latent-window grid time {time} precedes row {row}'s entry {}; P(T > t | T > entry) needs t >= entry",
+                                age_entry[row]
+                            ),
+                        });
+                    }
+                    let (entry, exit) = normalize_survival_time_pair(raw_entry[row], time, row)?;
+                    grid_entry[row] = entry;
+                    grid_exit[row] = exit;
+                }
+                grid_survival
+                    .column_mut(column)
+                    .assign(&windows(&grid_entry, &grid_exit)?);
+            }
+            Ok(grid_survival)
+        })
+        .transpose()?;
 
     Ok(LatentWindowSurvivalResult {
         window_survival,
+        grid_survival,
         likelihood_mode,
     })
 }

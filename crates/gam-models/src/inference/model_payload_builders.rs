@@ -3185,6 +3185,63 @@ mod latent_saved_baseline_tests {
             saved_window_log_survival(&FittedModel::from_payload(payload.clone()), &data);
         let agreement_gap = max_abs_gap(&saved_log_survival, &in_memory_log_survival);
 
+        // The same saved law over a time grid: a grid time equal to a row's own exit
+        // closes that row's window exactly where its own window closes, and no row's
+        // fitted survival rises along the sorted grid.
+        let saved_model = FittedModel::from_payload(payload.clone());
+        let columns = data.column_map();
+        let rows = data.values.nrows();
+        let zeros = Array1::<f64>::zeros(rows);
+        let mut grid: Vec<f64> = (0..4).map(|row| data.values[[row, columns["time"]]]).collect();
+        grid.sort_by(f64::total_cmp);
+        let grid_prediction = predict_latent_window_survival(SurvivalPredictRequest {
+            model: &saved_model,
+            data: data.values.view(),
+            col_map: &columns,
+            training_headers: Some(&data.headers),
+            primary_offset: &zeros,
+            noise_offset: &zeros,
+            time_grid: Some(&grid),
+            with_uncertainty: false,
+            estimand: SurvivalPredictEstimand::Plugin,
+        })
+        .expect("a saved latent survival model must predict over a time grid");
+        let grid_survival = grid_prediction
+            .grid_survival
+            .expect("a time-grid request must return the grid survival surface");
+        assert_eq!(grid_survival.dim(), (rows, grid.len()));
+        let mut matched_windows = 0usize;
+        for (column, &time) in grid.iter().enumerate() {
+            for row in 0..rows {
+                if data.values[[row, columns["time"]]].to_bits() == time.to_bits() {
+                    matched_windows += 1;
+                    let own = grid_prediction.window_survival[row];
+                    assert!(
+                        (grid_survival[[row, column]] - own).abs() <= 1e-12,
+                        "row {row}: the grid survival at its own exit {time} is {} but its window survival is {own}",
+                        grid_survival[[row, column]]
+                    );
+                }
+            }
+        }
+        assert!(
+            matched_windows >= grid.len(),
+            "precondition: every grid time is some row's own exit, matched {matched_windows} windows for {} times",
+            grid.len()
+        );
+        for row in 0..rows {
+            for column in 1..grid.len() {
+                assert!(
+                    grid_survival[[row, column]] <= grid_survival[[row, column - 1]],
+                    "row {row}: fitted survival rises from {} at t={} to {} at t={}",
+                    grid_survival[[row, column - 1]],
+                    grid[column - 1],
+                    grid_survival[[row, column]],
+                    grid[column]
+                );
+            }
+        }
+
         let mut seed_payload = payload;
         seed_payload.survival_baseline_shape = Some(1.0);
         let seed_log_survival =
