@@ -6539,9 +6539,10 @@ impl BernoulliMarginalSlopeFamily {
             let dv_b = dir_v[lg];
             for window in cells.windows(2) {
                 let z_star = window[0].partition_cell.cell.right;
-                if !z_star.is_finite()
-                    || (window[1].partition_cell.cell.left - z_star).abs() > 1.0e-12
-                {
+                // Adjacent partition cells share a bit-identical edge copied from
+                // one split-point list, so a differing left edge means the builder
+                // dropped a degenerate window between them.
+                if !z_star.is_finite() || window[1].partition_cell.cell.left != z_star {
                     continue;
                 }
                 let delta_c3 =
