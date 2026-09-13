@@ -28,9 +28,8 @@ draws ``N(h(y|x), residual_sd)`` on the latent scale, so:
 
 Reproduction (this test): fit a CTM with ``E[Y|x] = 2 + 0.9x`` (strictly
 increasing), then generate many draws at ``x ∈ {-1, 0, 1}`` and check that the
-per-row mean of the draws increases with ``x``. It currently fails (the means
-strictly *decrease*); once generation produces response-scale draws it passes,
-with no further edits.
+per-row mean of the draws increases with ``x``. When the test was written the
+means strictly *decreased*: generation must produce response-scale draws.
 
 Related to the prediction-side report (CTM ``predict`` returns ``h(y|x)`` as the
 mean) — same root cause, different command/path. Driven through the ``gam`` CLI,
@@ -67,14 +66,20 @@ def _write_csv(path: str, cols: dict[str, np.ndarray]) -> None:
             w.writerow([cols[k][i] for k in keys])
 
 
-def _read_matrix(path: str) -> np.ndarray:
-    rows = []
+def _read_draws(path: str) -> np.ndarray:
+    """Pivot the CLI's long ``draw,row,value`` output to ``(n_rows, n_draws)``."""
     with open(path) as f:
         r = csv.reader(f)
-        next(r)
-        for row in r:
-            rows.append([float(v) for v in row])
-    return np.array(rows)
+        header = next(r)
+        assert header == ["draw", "row", "value"], f"unexpected generate header {header}"
+        records = [(int(d), int(i), float(v)) for d, i, v in r]
+    n_draws = 1 + max(d for d, _, _ in records)
+    n_rows = 1 + max(i for _, i, _ in records)
+    draws = np.full((n_rows, n_draws), np.nan)
+    for d, i, v in records:
+        draws[i, d] = v
+    assert np.isfinite(draws).all(), "generate output leaves some (row, draw) cells empty"
+    return draws
 
 
 def test_ctm_generate_conditional_mean_increases_with_covariate() -> None:
@@ -119,8 +124,8 @@ def test_ctm_generate_conditional_mean_increases_with_covariate() -> None:
         )
         assert out.returncode == 0, f"generate failed: {out.stderr[-2000:]}"
 
-        draws = _read_matrix(gen)  # shape (n_rows, n_draws)
-        assert draws.shape[0] == grid_x.size
+        draws = _read_draws(gen)  # shape (n_rows, n_draws)
+        assert draws.shape == (grid_x.size, 3000)
         row_means = draws.mean(axis=1)
 
         # E[Y|x] = 2 + 0.9x is strictly increasing, so the synthetic draws'
