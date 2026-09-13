@@ -1961,31 +1961,25 @@ pub enum Headline {
 ///
 /// * [`Exact`] — the evidence is a genuine point value (dense logdet, full
 ///   corpus); no margin floor.
-/// * [`Enclosure`] — the log-determinant half came from a certified
-///   `LogdetEnclosure`; the race lead Δ must exceed the enclosure gap
-///   (#1011 contract) before the winner is trustworthy.
 /// * [`Coreset`] — the evidence was raced on a certified row coreset; the lead
 ///   must exceed the certificate's [`CoresetCertificate::race_transfer_margin`]
-///   (#1012 contract — the SAME margin seam as the enclosure).
+///   (#1012 contract).
 ///
 /// [`Exact`]: EvidenceCertification::Exact
-/// [`Enclosure`]: EvidenceCertification::Enclosure
 /// [`Coreset`]: EvidenceCertification::Coreset
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum EvidenceCertification {
     Exact,
-    Enclosure { gap: f64 },
     Coreset { certificate: CoresetCertificate },
 }
 
 impl EvidenceCertification {
     /// The smallest race lead Δ for which this candidate's evidence is
-    /// trustworthy. Exact evidence transfers at any positive lead; an enclosure
-    /// needs its gap; a coreset needs its certified transfer margin.
+    /// trustworthy. Exact evidence transfers at any positive lead; a coreset
+    /// needs its certified transfer margin.
     pub(crate) fn required_margin(&self) -> f64 {
         match self {
             EvidenceCertification::Exact => 0.0,
-            EvidenceCertification::Enclosure { gap } => *gap,
             EvidenceCertification::Coreset { certificate } => certificate.race_transfer_margin(),
         }
     }
@@ -2006,9 +2000,9 @@ pub struct PredictiveRaceCandidate<'a> {
 
 /// Why a same-class race could not transfer its approximate-evidence verdict to
 /// the full corpus: the winner's lead Δ over the runner-up did not clear the
-/// required decision margin (the enclosure gap or the coreset transfer margin).
-/// The consumer must refine (more moments / pair absorption / a larger coreset)
-/// or re-run the top contenders on the exact dense path.
+/// required decision margin (the coreset transfer margin). The consumer must
+/// refine (a larger coreset) or re-run the top contenders on the exact dense
+/// path.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InsufficientRaceMargin {
     /// Index of the provisional (below-margin) winner.
@@ -2383,77 +2377,7 @@ mod tests {
         Box::new(|_: &[usize], eval: &[usize]| Ok(vec![0.0; eval.len()]))
     }
 
-    /// #1011/#1012 decision-margin contract on the same-class evidence race:
-    /// when the winner's lead over the runner-up is inside the enclosure gap,
-    /// the verdict is provisional (`insufficient_margin` set) so the caller must
-    /// refine or escalate; a lead that clears the gap transfers cleanly.
-    #[test]
-    fn same_class_race_respects_enclosure_decision_margin() {
-        // Two smooth candidates (same class) whose evidence came from a logdet
-        // enclosure with gap 1.0. Lead of 0.5 < gap ⇒ provisional.
-        let near = vec![
-            PredictiveRaceCandidate {
-                kind: PredictiveCandidateKind::Fixed(AutoTopologyKind::Circle),
-                negative_log_evidence: 100.0,
-                certification: EvidenceCertification::Enclosure { gap: 1.0 },
-                density_provider: trivial_provider(),
-            },
-            PredictiveRaceCandidate {
-                kind: PredictiveCandidateKind::Fixed(AutoTopologyKind::Euclidean),
-                negative_log_evidence: 100.5,
-                certification: EvidenceCertification::Enclosure { gap: 1.0 },
-                density_provider: trivial_provider(),
-            },
-        ];
-        let verdict = adjudicate_predictive_race(
-            8,
-            near,
-            STACKING_CV_FOLDS,
-            STACKING_CV_SEED,
-            StackingConfig::default(),
-        )
-        .expect("same-class race");
-        assert!(!verdict.is_cross_class);
-        assert_eq!(verdict.winner_index, 0);
-        let escalation = verdict
-            .insufficient_margin
-            .expect("lead inside the enclosure gap must be flagged provisional");
-        assert_eq!(escalation.provisional_winner, 0);
-        assert_eq!(escalation.contender, 1);
-        assert!((escalation.lead - 0.5).abs() < 1e-12);
-        assert!((escalation.required_margin - 1.0).abs() < 1e-12);
-
-        // A lead that clears the gap transfers the verdict cleanly.
-        let far = vec![
-            PredictiveRaceCandidate {
-                kind: PredictiveCandidateKind::Fixed(AutoTopologyKind::Circle),
-                negative_log_evidence: 100.0,
-                certification: EvidenceCertification::Enclosure { gap: 1.0 },
-                density_provider: trivial_provider(),
-            },
-            PredictiveRaceCandidate {
-                kind: PredictiveCandidateKind::Fixed(AutoTopologyKind::Euclidean),
-                negative_log_evidence: 105.0,
-                certification: EvidenceCertification::Enclosure { gap: 1.0 },
-                density_provider: trivial_provider(),
-            },
-        ];
-        let verdict_far = adjudicate_predictive_race(
-            8,
-            far,
-            STACKING_CV_FOLDS,
-            STACKING_CV_SEED,
-            StackingConfig::default(),
-        )
-        .expect("same-class race");
-        assert_eq!(verdict_far.winner_index, 0);
-        assert!(
-            verdict_far.insufficient_margin.is_none(),
-            "a lead clearing the enclosure gap must transfer the verdict"
-        );
-    }
-
-    /// The coreset transfer margin (#1012) flows through the SAME race seam: a
+    /// The coreset transfer margin (#1012) flows through the race seam: a
     /// lead inside `CoresetCertificate::race_transfer_margin` is provisional.
     #[test]
     fn same_class_race_respects_coreset_transfer_margin() {
@@ -2596,7 +2520,14 @@ mod tests {
                 PredictiveRaceCandidate {
                     kind: PredictiveCandidateKind::Fixed(AutoTopologyKind::Circle),
                     negative_log_evidence: 1.0,
-                    certification: EvidenceCertification::Enclosure { gap: invalid },
+                    certification: EvidenceCertification::Coreset {
+                        certificate: CoresetCertificate {
+                            eps_spectral: 0.0,
+                            eps_likelihood: invalid,
+                            dim_effective: 0,
+                            n_selected: 1,
+                        },
+                    },
                     density_provider: trivial_provider(),
                 },
                 PredictiveRaceCandidate {
