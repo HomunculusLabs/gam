@@ -482,9 +482,10 @@ third/fourth surface) to the expression it differentiates, reading main at
     checked only against one another.
     `ctn_scop_curvature_producers_match_exact_derivatives_of_the_likelihood_932`
     now checks all six against nested num-dual derivatives of that one expression,
-    at 1e-11 relative. **It has not run yet.** At `5e8436c44` gam-models did not
-    build (gam-model-kernels, fixed by `d519f0c24`), and at `3693c2c2c` gam-terms did
-    not build (fixed by `a8fbb3fa2`).
+    at 1e-11 relative. It first ran in pool job 578401 at `94de1340d` (EPYC 9534,
+    HEAD guard clean) and passed. Before that it could not build: at `5e8436c44`
+    gam-model-kernels failed (fixed by `d519f0c24`), at `3693c2c2c` gam-terms
+    (fixed by `a8fbb3fa2`), and at `c74fbc04b` gam-solve (job 559612).
 
 Not traced here: `GaussianLocationScaleWiggleFamily` and `SurvivalMarginalSlopeFamily`
 past their `_for_specs` / flex dispatchers.
@@ -565,7 +566,7 @@ space.
     Taylor polynomial about the base index.
   - Reading the first-directional blocks against the chain rule (`h_mm`, `h_ml`,
     `h_mw`, `h_lw`, `h_ww = a_ww + a_wwᵀ + Bᵀ diag(H′_qq) B`) finds them consistent.
-    **The test has not run yet.**
+    The test first ran in pool job 578401 at `94de1340d` and passed.
 - **`SurvivalMarginalSlopeFamily`.**
   - Rigid rows go through `SurvivalMarginalSlopeRowKernel`.
   - Flex rows read their primary tower from the flex jet evaluators
@@ -580,7 +581,7 @@ space.
   - The flex no-wiggle arm had only build-once versus per-axis and
     subsample-operator identity checks. `63ad6877f` adds the same resolving gate,
     `flex_no_wiggle_beta_hessian_directional_derivatives_match_finite_difference_932`.
-    **It has not run yet.**
+    It first ran in pool job 578401 at `94de1340d` and passed.
 - **`BernoulliMarginalSlopeFamily` flex.**
   - The coefficient-to-primary map is linear: the marginal and slope designs, plus
     the score-warp and link-deviation coefficients as primaries (see
