@@ -5041,11 +5041,6 @@ impl UnifiedFitResult {
         self.blocks.len()
     }
 
-    /// Block roles.
-    pub fn block_roles(&self) -> Vec<BlockRole> {
-        self.blocks.iter().map(|b| b.role.clone()).collect()
-    }
-
     /// Resolve the fitted link state for a given family.
     ///
     /// For standard (non-adaptive) link families, no extra state is fitted, so

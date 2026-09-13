@@ -948,7 +948,7 @@ crates/gam-solve/src/measure_jet_gram_cache.rs	penalized_rss	retired-no-survivin
 crates/gam-solve/src/measure_jet_gram_cache.rs	xtwz	retired-no-surviving-dependent
 crates/gam-solve/src/mixture_link.rs	inverse_link_jet_for_family	retired-no-product-user
 crates/gam-solve/src/mixture_link.rs	softmaxwith_jacobian_last_fixedzero	retired-no-product-user
-crates/gam-solve/src/model_types/result_types.rs	block_roles	restored-in-place
+crates/gam-solve/src/model_types/result_types.rs	block_roles	retired-no-product-user
 crates/gam-solve/src/model_types/result_types.rs	lambdas_linkwiggle	retired-no-product-user
 crates/gam-solve/src/model_types/result_types.rs	lambdas_time	retired-no-product-user
 crates/gam-solve/src/model_types/result_types.rs	penalized_hessian_unscaled	retired-no-product-user
