@@ -1229,11 +1229,13 @@ pub(crate) fn materialize_survival<'a>(
             Err(e) => return Err(e.into()),
         }
     } else if baseline_cfg.target != SurvivalBaselineTarget::Linear
-        // A fully loaded latent survival fit selects its baseline chart together
-        // with ρ on the one LAML criterion (#2714); only the loaded/unloaded split
-        // and the binary deployment still search θ here.
-        && !(survival_mode == SurvivalLikelihoodMode::Latent
-            && matches!(
+        // A fully loaded latent survival or binary fit selects its baseline chart
+        // together with ρ on the one LAML criterion (#2714); only the
+        // loaded/unloaded split still searches θ here.
+        && !(matches!(
+            survival_mode,
+            SurvivalLikelihoodMode::Latent | SurvivalLikelihoodMode::LatentBinary
+        ) && matches!(
                 latent_loading,
                 Some(crate::survival::lognormal_kernel::HazardLoading::Full)
             ))

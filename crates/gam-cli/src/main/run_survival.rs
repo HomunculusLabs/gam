@@ -1215,15 +1215,14 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
             frailty: frailty.clone(),
             options: options.clone(),
         };
-        // A fully loaded latent survival fit selects its baseline chart together
-        // with ρ on the one LAML criterion (#2714); only the loaded/unloaded split
-        // and the binary deployment still search θ here.
+        // A fully loaded latent survival or binary fit selects its baseline chart
+        // together with ρ on the one LAML criterion (#2714); only the
+        // loaded/unloaded split still searches θ here.
         if baseline_cfg.target != SurvivalBaselineTarget::Linear
-            && !(likelihood_mode == SurvivalLikelihoodMode::Latent
-                && matches!(
-                    latent_loading,
-                    gam::families::survival::lognormal_kernel::HazardLoading::Full
-                ))
+            && !matches!(
+                latent_loading,
+                gam::families::survival::lognormal_kernel::HazardLoading::Full
+            )
         {
             // Analytic-gradient BFGS over the latent baseline shape params
             // (weibull scale/shape; gompertz rate/shape; gompertz-makeham

@@ -855,9 +855,16 @@ pub(crate) fn fit_latent_survival_terms(
         HazardLoading::LoadedVsUnloaded => None,
     };
     let (fit, family, baseline_config) = match chart {
-        Some(chart) => {
-            fit_latent_survival_baseline_axes(data, &family, &blocks, &spec, &chart, options)?
-        }
+        Some(chart) => fit_latent_baseline_axes(
+            data,
+            &family,
+            &blocks,
+            &spec.meanspec,
+            &spec.time_block,
+            spec.derivative_guard,
+            &chart,
+            options,
+        )?,
         None => {
             let fit = fit_custom_family(&family, &blocks, options).map_err(|e| e.to_string())?;
             (fit, family, spec.baseline_config.clone())
@@ -875,24 +882,90 @@ pub(crate) fn fit_latent_survival_terms(
     })
 }
 
-/// Fit a latent survival model with its nonlinear baseline chart as family-owned
-/// outer coordinates of the one LAML problem (#2714).
+/// A latent family whose time offsets follow a nonlinear baseline chart (#2714).
+trait LatentBaselineChartFamily: CustomFamily + Clone + Send + Sync + 'static {
+    /// The time block's index among the family's parameter blocks.
+    const TIME_BLOCK: usize;
+
+    /// This family realized at `geometry`, with the derivative-guard constraints
+    /// the moved `o_D` realizes.
+    fn at_chart_point(
+        &self,
+        geometry: Arc<crate::survival::construction::LatentSurvivalOffsetGeometry>,
+        time_linear_constraints: Option<LinearInequalityConstraints>,
+    ) -> Self;
+
+    /// The chart point this family was realized at.
+    fn chart_point(
+        &self,
+    ) -> Option<&Arc<crate::survival::construction::LatentSurvivalOffsetGeometry>>;
+}
+
+impl LatentBaselineChartFamily for LatentSurvivalFamily {
+    const TIME_BLOCK: usize = Self::BLOCK_TIME;
+
+    fn at_chart_point(
+        &self,
+        geometry: Arc<crate::survival::construction::LatentSurvivalOffsetGeometry>,
+        time_linear_constraints: Option<LinearInequalityConstraints>,
+    ) -> Self {
+        let mut family = self.clone();
+        family.time_linear_constraints = time_linear_constraints;
+        family.time_offset_right = geometry.offset_right.clone();
+        family.baseline_theta_rows = Some(geometry);
+        family
+    }
+
+    fn chart_point(
+        &self,
+    ) -> Option<&Arc<crate::survival::construction::LatentSurvivalOffsetGeometry>> {
+        self.baseline_theta_rows.as_ref()
+    }
+}
+
+impl LatentBaselineChartFamily for LatentBinaryFamily {
+    const TIME_BLOCK: usize = Self::BLOCK_TIME;
+
+    /// The binary deployment reads no interval bound, so only the constraints and
+    /// the chart point move.
+    fn at_chart_point(
+        &self,
+        geometry: Arc<crate::survival::construction::LatentSurvivalOffsetGeometry>,
+        time_linear_constraints: Option<LinearInequalityConstraints>,
+    ) -> Self {
+        let mut family = self.clone();
+        family.time_linear_constraints = time_linear_constraints;
+        family.baseline_theta_rows = Some(geometry);
+        family
+    }
+
+    fn chart_point(
+        &self,
+    ) -> Option<&Arc<crate::survival::construction::LatentSurvivalOffsetGeometry>> {
+        self.baseline_theta_rows.as_ref()
+    }
+}
+
+/// Fit a latent model with its nonlinear baseline chart as family-owned outer
+/// coordinates of the one LAML problem (#2714).
 ///
 /// The workflow used to search θ in a nested BFGS whose every probe was a complete
 /// REML fit, against the profile-NLL envelope gradient, which omits the Jeffreys
 /// term's mode response and the response of ρ̂ to θ. Here ρ and θ are selected
-/// together on the exact criterion. A θ moves the four additive time offsets and
-/// the derivative-guard constraints built from the moved `o_D`; no design, knot or
+/// together on the exact criterion. A θ moves the additive time offsets and the
+/// derivative-guard constraints built from the moved `o_D`; no design, knot or
 /// penalty moves. Working precision is the chart's only domain: a θ whose offsets
 /// leave the likelihood's domain is refused at evaluation.
-fn fit_latent_survival_baseline_axes(
+fn fit_latent_baseline_axes<F: LatentBaselineChartFamily>(
     data: ArrayView2<'_, f64>,
-    seed_family: &LatentSurvivalFamily,
+    seed_family: &F,
     seed_blocks: &[ParameterBlockSpec],
-    spec: &LatentSurvivalTermSpec,
+    meanspec: &TermCollectionSpec,
+    time_block_input: &TimeBlockInput,
+    derivative_guard: f64,
     chart: &crate::survival::construction::LatentSurvivalFrozenOffsetChart,
     options: &BlockwiseFitOptions,
-) -> Result<(UnifiedFitResult, LatentSurvivalFamily, SurvivalBaselineConfig), String> {
+) -> Result<(UnifiedFitResult, F, SurvivalBaselineConfig), String> {
     use crate::fit_orchestration::drivers::{
         ExactJointEfsEvaluation, ExactJointEvaluation, ExactJointHyperSetup, SpatialFitProvenance,
         optimize_spatial_length_scale_exact_joint,
@@ -919,35 +992,33 @@ fn fit_latent_survival_baseline_axes(
             Array1::from_elem(axis_count, precision_upper),
         );
 
-    let realize = |theta: &Array1<f64>| -> Result<(LatentSurvivalFamily, Vec<ParameterBlockSpec>), String> {
+    let realize = |theta: &Array1<f64>| -> Result<(F, Vec<ParameterBlockSpec>), String> {
         if theta.len() != rho_dim + axis_count {
             return Err(format!(
-                "latent survival outer point has {} coordinates, expected {rho_dim} smoothing and {axis_count} baseline",
+                "latent outer point has {} coordinates, expected {rho_dim} smoothing and {axis_count} baseline",
                 theta.len()
             ));
         }
         let geometry = chart.evaluate(&theta.slice(s![rho_dim..]).to_owned())?;
-        let mut family = seed_family.clone();
-        family.time_linear_constraints = structural_time_coefficient_constraints(
-            &spec.time_block.design_derivative_exit,
+        let time_linear_constraints = structural_time_coefficient_constraints(
+            &time_block_input.design_derivative_exit,
             &geometry.derivative_offset_exit,
-            spec.derivative_guard,
+            derivative_guard,
         )?;
-        family.time_offset_right = geometry.offset_right.clone();
         let mut blocks = seed_blocks.to_vec();
         let mut cursor = 0usize;
         for (block, &count) in blocks.iter_mut().zip(penalty_counts.iter()) {
             block.initial_log_lambdas = theta.slice(s![cursor..cursor + count]).to_owned();
             cursor += count;
         }
-        let time_block = &mut blocks[LatentSurvivalFamily::BLOCK_TIME];
+        let time_block = &mut blocks[F::TIME_BLOCK];
         time_block.offset = geometry.offset_exit.clone();
         time_block.stacked_offset = Some(gam_linalg::utils::stack_offsets(&[
             &geometry.offset_entry,
             &geometry.offset_exit,
             &geometry.derivative_offset_exit,
         ]));
-        family.baseline_theta_rows = Some(Arc::new(geometry));
+        let family = seed_family.at_chart_point(Arc::new(geometry), time_linear_constraints);
         Ok((family, blocks))
     };
     let check_designs = |specs: &[TermCollectionSpec], designs: &[TermCollectionDesign]| {
@@ -955,7 +1026,7 @@ fn fit_latent_survival_baseline_axes(
             Ok(())
         } else {
             Err(format!(
-                "latent survival outer driver handed {} term specs and {} designs for its one mean term collection",
+                "latent outer driver handed {} term specs and {} designs for its one mean term collection",
                 specs.len(),
                 designs.len()
             ))
@@ -983,7 +1054,7 @@ fn fit_latent_survival_baseline_axes(
                 }
                 Err(error) => {
                     log::warn!(
-                        "[latent-survival] outer ρ-cache β warm start rejected: {error}; the next solve starts cold"
+                        "[latent] outer ρ-cache β warm start rejected: {error}; the next solve starts cold"
                     );
                 }
             }
@@ -996,7 +1067,7 @@ fn fit_latent_survival_baseline_axes(
     };
     let solved = optimize_spatial_length_scale_exact_joint(
         data,
-        std::slice::from_ref(&spec.meanspec),
+        std::slice::from_ref(meanspec),
         &[Vec::new()],
         &kappa_options,
         &setup,
@@ -1058,9 +1129,7 @@ fn fit_latent_survival_baseline_axes(
             .map_err(|error| error.to_string())?;
             // An unconverged inner state is neither a fit nor a seed (#2902).
             if !owned.result.inner_converged {
-                return Err(
-                    "latent survival exact joint inner solve did not converge".to_string(),
-                );
+                return Err("latent exact joint inner solve did not converge".to_string());
             }
             exact_warm_start.replace(Some(owned.result.warm_start.clone()));
             Ok(ExactJointEvaluation {
@@ -1089,9 +1158,7 @@ fn fit_latent_survival_baseline_axes(
             )
             .map_err(|error| error.to_string())?;
             if !owned.result.inner_converged {
-                return Err(
-                    "latent survival exact joint EFS inner solve did not converge".to_string(),
-                );
+                return Err("latent exact joint EFS inner solve did not converge".to_string());
             }
             exact_warm_start.replace(Some(owned.result.warm_start.clone()));
             Ok(ExactJointEfsEvaluation {
@@ -1103,10 +1170,9 @@ fn fit_latent_survival_baseline_axes(
     )?;
     let (fit, family) = solved.fit;
     let baseline_config = family
-        .baseline_theta_rows
-        .as_ref()
+        .chart_point()
         .map(|geometry| geometry.baseline_config.clone())
-        .ok_or_else(|| "latent survival baseline-axes fit lost its chart point".to_string())?;
+        .ok_or_else(|| "latent baseline-axes fit lost its chart point".to_string())?;
     Ok((fit, family, baseline_config))
 }
 
@@ -1146,13 +1212,43 @@ pub(crate) fn fit_latent_binary_terms(
         build_time_blockspec(&time_prepared, &spec.time_block),
         build_mean_blockspec(&mean_design, mean_offset, None),
     ];
-    let fit = fit_custom_family(&family, &blocks, options).map_err(|e| e.to_string())?;
+    // The binary deployment selects a fully loaded baseline chart together with ρ,
+    // as the survival family does (#2714).
+    let chart = match hazard_loading {
+        HazardLoading::Full => crate::survival::construction::LatentSurvivalFrozenOffsetChart::new(
+            &spec.age_entry,
+            &spec.age_exit,
+            None,
+            &spec.baseline_config,
+            &spec.time_block.offset_entry,
+            &spec.time_block.offset_exit,
+            &spec.time_block.derivative_offset_exit,
+            &Array1::zeros(spec.event_target.len()),
+        )?,
+        HazardLoading::LoadedVsUnloaded => None,
+    };
+    let (fit, family, baseline_config) = match chart {
+        Some(chart) => fit_latent_baseline_axes(
+            data,
+            &family,
+            &blocks,
+            &spec.meanspec,
+            &spec.time_block,
+            spec.derivative_guard,
+            &chart,
+            options,
+        )?,
+        None => {
+            let fit = fit_custom_family(&family, &blocks, options).map_err(|e| e.to_string())?;
+            (fit, family, spec.baseline_config.clone())
+        }
+    };
     let baseline_offset_residuals = family.offset_channel_residuals(&fit.block_states)?;
     Ok(LatentBinaryTermFitResult {
         fit,
         design: mean_design,
         resolvedspec,
-        baseline_config: spec.baseline_config,
+        baseline_config,
         baseline_offset_residuals,
     })
 }
