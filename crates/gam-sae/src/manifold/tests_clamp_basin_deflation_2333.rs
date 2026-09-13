@@ -92,6 +92,18 @@ fn clamp_basin_rows(cache: &ArrowFactorCache) -> Vec<usize> {
         .collect()
 }
 
+/// A factor's discrete stratum: the rows pricing a clamp basin, the deflated
+/// direction count, and the reduced-Schur conditioning pattern. A central
+/// difference arbitrates only between endpoints on the anchor's stratum.
+fn factor_stratum(cache: &ArrowFactorCache) -> (Vec<usize>, usize, String) {
+    let directions: usize = cache.deflated_row_directions.iter().map(Vec::len).sum();
+    let schur = cache
+        .beta_schur_conditioning
+        .as_ref()
+        .map_or_else(String::new, |spectrum| format!("{:?}", spectrum.conditioning));
+    (clamp_basin_rows(cache), directions, schur)
+}
+
 /// Walk a declared ARD-precision ladder and return the first state whose factor
 /// records a clamp-basin row. The rung is selected on the cache's own
 /// classification, never on agreement with any producer. Both clamp producers
@@ -399,24 +411,25 @@ fn independent_gate_trace_theta_adjoint_whitens_like_from_probes_2333() {
 }
 
 /// #2915 — on the matrix-free lane a threshold gate's sparse log-det trace must
-/// differentiate the exact observed information the lane's value prices.
+/// differentiate the exact observed information the lane's value prices, on every
+/// rung of a declared ladder that factors.
 ///
-/// The value is `½ arrow_log_det` of the exact-A evidence factor. Its central
-/// difference in `log_lambda_sparse` over frozen θ̂, on one discrete stratum with
-/// no clamp-basin row, is the arbiter; the clamp price's own derivative is a
-/// separate leg this gate does not cover. The majorizer-operator trace on the
-/// same factor differentiates `B` and is the positive control, because a
-/// straddling gate carries a nonzero remainder `ΔC` on every switched-on logit.
+/// The value is `½ arrow_log_det` of the exact-A evidence factor, and its central
+/// difference in `log_lambda_sparse` over frozen θ̂, on the rung's own discrete
+/// stratum, is the arbiter. Since b5bf5a390 the arrow rows carry the gate's concave
+/// remainder, so a row with a switched-on logit prices a clamp basin, and no rung of
+/// this straddling gate is basin-free (job 603114: all ten rows on every rung). The
+/// rungs differ instead in how many reduced-Schur directions they price as basins
+/// (job 603114: 3, 1, 1, 1, 3, 2 and 4), which is what this ladder adds over the
+/// single rung of `clamp_basin_price_derivative_matches_the_lane_value_2915`. The
+/// majorizer-operator trace on the same factor differentiates `B` and is the
+/// positive control, because a straddling gate carries a nonzero remainder `ΔC` on
+/// every switched-on logit.
 #[test]
 fn threshold_gate_exact_sparse_logdet_trace_matches_the_lane_value_2915() {
     let (term, target, fixture_rho) = threshold_gate_tiny_fixture(true);
     let mut census = Vec::new();
-    let mut selected = None;
-    // Job 558166: at log_ard = -1 rows [1, 4, 6] price a clamp basin, and every
-    // rung from log_ard = 0 up refused to factor. The periodic prior's concave
-    // half scales with the precision, so the ladder lowers the precision, then
-    // the gate strength. The remainder is live on every rung, since each row
-    // carries a switched-on logit and λ_sparse > 0.
+    let mut measured = 0usize;
     let base_sparse = fixture_rho.log_lambda_sparse;
     for (log_ard, log_lambda_sparse) in [
         (-1.0_f64, base_sparse),
@@ -432,105 +445,80 @@ fn threshold_gate_exact_sparse_logdet_trace_matches_the_lane_value_2915() {
         for axes in rho.log_ard.iter_mut() {
             axes.fill(log_ard);
         }
-        match exact_a_evidence_cache(&term, &target, &rho) {
-            Ok((anchor, cache)) => {
-                let rows = clamp_basin_rows(&cache);
+        let (anchor, cache) = match exact_a_evidence_cache(&term, &target, &rho) {
+            Ok(factored) => factored,
+            Err(err) => {
                 census.push(format!(
-                    "log_ard={log_ard} log_lambda_sparse={log_lambda_sparse}: \
-                     clamp_basin_rows={rows:?}"
+                    "log_ard={log_ard} log_lambda_sparse={log_lambda_sparse}: no factor: {err}"
                 ));
-                if rows.is_empty() {
-                    selected = Some((anchor, cache, rho));
-                    break;
-                }
+                continue;
             }
-            Err(err) => census.push(format!(
-                "log_ard={log_ard} log_lambda_sparse={log_lambda_sparse}: no factor: {err}"
-            )),
-        }
-    }
-    eprintln!("#2915 LANE_SPARSE_TRACE census\n{}", census.join("\n"));
-    let (anchor, cache, rho) = selected.unwrap_or_else(|| {
-        panic!(
-            "#2915 premise: no rung of the declared ladder gave an exact-A factor without \
-             clamp-basin rows:\n{}",
-            census.join("\n")
-        )
-    });
-    let remainder = crate::assignment::threshold_gate_negative_hessian_remainder_weighted(
-        &anchor.assignment,
-        &rho,
-        anchor.row_loss_weights.as_deref(),
-    )
-    .expect("#2915 threshold-gate remainder");
-    assert!(
-        remainder.iter().any(|value| *value != 0.0),
-        "#2915 premise: a straddling gate must carry a live remainder"
-    );
-    let (probes, sinv) = full_basis_bundle(&cache);
-    let exact = anchor
-        .assignment_log_strength_hessian_trace_from_probes(
-            &rho,
-            &cache,
-            &probes,
-            &sinv,
-            EvidenceOperator::ExactObservedInformation,
-        )
-        .expect("#2915 exact-operator sparse trace");
-    let majorizer = anchor
-        .assignment_log_strength_hessian_trace_from_probes(
-            &rho,
-            &cache,
-            &probes,
-            &sinv,
-            EvidenceOperator::Majorizer,
-        )
-        .expect("#2915 majorizer-operator sparse trace");
-    let stratum = |c: &ArrowFactorCache| -> (usize, usize) {
-        let spectral = c
-            .deflation_row_spectra
-            .iter()
-            .filter(|spectrum| spectrum.is_some())
-            .count();
-        let directions: usize = c.deflated_row_directions.iter().map(Vec::len).sum();
-        (spectral, directions)
-    };
-    let anchor_stratum = stratum(&cache);
-    let half_log_det = |log_lambda_sparse: f64| -> f64 {
-        let mut moved = rho.clone();
-        moved.log_lambda_sparse = log_lambda_sparse;
-        let (_, endpoint) = exact_a_evidence_cache(&anchor, &target, &moved)
-            .expect("#2915 exact-A factor at a finite-difference endpoint");
-        assert_eq!(
-            stratum(&endpoint),
-            anchor_stratum,
-            "#2915: both endpoints must sit on the anchor's discrete stratum"
+        };
+        let (probes, sinv) = full_basis_bundle(&cache);
+        let exact = anchor
+            .assignment_log_strength_hessian_trace_from_probes(
+                &rho,
+                &cache,
+                &probes,
+                &sinv,
+                EvidenceOperator::ExactObservedInformation,
+            )
+            .expect("#2915 exact-operator sparse trace");
+        let majorizer = anchor
+            .assignment_log_strength_hessian_trace_from_probes(
+                &rho,
+                &cache,
+                &probes,
+                &sinv,
+                EvidenceOperator::Majorizer,
+            )
+            .expect("#2915 majorizer-operator sparse trace");
+        let anchor_stratum = factor_stratum(&cache);
+        let half_log_det = |log_lambda_sparse: f64| -> f64 {
+            let mut moved = rho.clone();
+            moved.log_lambda_sparse = log_lambda_sparse;
+            let (_, endpoint) = exact_a_evidence_cache(&anchor, &target, &moved)
+                .expect("#2915 exact-A factor at a finite-difference endpoint");
+            assert_eq!(
+                factor_stratum(&endpoint),
+                anchor_stratum,
+                "#2915: both endpoints must sit on the rung's discrete stratum"
+            );
+            0.5 * endpoint
+                .arrow_log_det()
+                .expect("#2915 authoritative joint log-det of the exact-A factor")
+        };
+        let h = 1.0e-5;
+        let fd = (half_log_det(rho.log_lambda_sparse + h) - half_log_det(rho.log_lambda_sparse - h))
+            / (2.0 * h);
+        let bar = 1.0e-6 * (1.0 + fd.abs());
+        eprintln!(
+            "#2915 LANE_SPARSE_TRACE log_ard={log_ard} log_lambda_sparse={log_lambda_sparse} \
+             stratum={anchor_stratum:?} fd={fd:.12e} exact={exact:.12e} \
+             majorizer={majorizer:.12e} bar={bar:.3e}"
+        );
+        census.push(format!(
+            "log_ard={log_ard} log_lambda_sparse={log_lambda_sparse}: fd={fd:e} exact={exact:e} \
+             majorizer={majorizer:e}"
+        ));
+        assert!(
+            (exact - fd).abs() <= bar,
+            "#2915: the exact-operator sparse log-det trace must be the central difference of \
+             the lane value at log_ard={log_ard} log_lambda_sparse={log_lambda_sparse}: \
+             exact={exact:e} fd={fd:e} bar={bar:e}"
         );
         assert!(
-            clamp_basin_rows(&endpoint).is_empty(),
-            "#2915: an endpoint must not price a clamp basin"
+            (majorizer - fd).abs() > 1.0e3 * bar,
+            "#2915 positive control: the majorizer-operator trace must miss the remainder on a \
+             straddling gate: majorizer={majorizer:e} fd={fd:e} bar={bar:e}"
         );
-        0.5 * endpoint
-            .arrow_log_det()
-            .expect("#2915 authoritative joint log-det of the exact-A factor")
-    };
-    let h = 1.0e-5;
-    let fd = (half_log_det(rho.log_lambda_sparse + h) - half_log_det(rho.log_lambda_sparse - h))
-        / (2.0 * h);
-    let bar = 1.0e-6 * (1.0 + fd.abs());
-    eprintln!(
-        "#2915 LANE_SPARSE_TRACE stratum={anchor_stratum:?} fd={fd:.12e} exact={exact:.12e} \
-         majorizer={majorizer:.12e} bar={bar:.3e}"
-    );
+        measured += 1;
+    }
+    eprintln!("#2915 LANE_SPARSE_TRACE census\n{}", census.join("\n"));
     assert!(
-        (exact - fd).abs() <= bar,
-        "#2915: the exact-operator sparse log-det trace must be the central difference of \
-         the lane value: exact={exact:e} fd={fd:e} bar={bar:e}"
-    );
-    assert!(
-        (majorizer - fd).abs() > 1.0e3 * bar,
-        "#2915 positive control: the majorizer-operator trace must miss the remainder on a \
-         straddling gate: majorizer={majorizer:e} fd={fd:e} bar={bar:e}"
+        measured > 0,
+        "#2915 premise: no rung of the declared ladder factored:\n{}",
+        census.join("\n")
     );
 }
 
@@ -573,16 +561,12 @@ fn clamp_basin_price_derivative_matches_the_lane_value_2915() {
     );
     let (probes, sinv) = full_basis_bundle(&state.cache);
     let operator = EvidenceOperator::ExactObservedInformation;
-    let stratum = |c: &ArrowFactorCache| -> (Vec<usize>, usize) {
-        let directions: usize = c.deflated_row_directions.iter().map(Vec::len).sum();
-        (clamp_basin_rows(c), directions)
-    };
-    let anchor_stratum = stratum(&state.cache);
+    let anchor_stratum = factor_stratum(&state.cache);
     let log_det_at = |moved_term: &SaeManifoldTerm, moved_rho: &SaeManifoldRho| -> f64 {
         let (_, endpoint) = exact_a_evidence_cache(moved_term, &target, moved_rho)
             .expect("#2915 exact-A factor at a finite-difference endpoint");
         assert_eq!(
-            stratum(&endpoint),
+            factor_stratum(&endpoint),
             anchor_stratum,
             "#2915: both endpoints must sit on the anchor's clamp-basin stratum"
         );
