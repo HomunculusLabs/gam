@@ -512,7 +512,7 @@ def main() -> int:
     revision, model_sha256 = snapshot_identity(args.snapshot)
     tokenizer = AutoTokenizer.from_pretrained(args.snapshot)
     model = AutoModelForCausalLM.from_pretrained(
-        args.snapshot, dtype=torch.bfloat16, attn_implementation="eager"
+        args.snapshot, dtype=torch.bfloat16, attn_implementation="eager", experts_implementation="eager"
     ).to("cuda:0")
     model.eval()
     model.requires_grad_(False)
