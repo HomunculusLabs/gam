@@ -823,7 +823,7 @@ fn decompose_kronecker_factors(
             'outer: for r in 0..q_j {
                 for c in 0..q_j {
                     let expected = if r == c { 1.0 } else { 0.0 };
-                    if (factor[[r, c]] - expected).abs() > 1e-12 {
+                    if factor[[r, c]] != expected {
                         is_id = false;
                         break 'outer;
                     }
@@ -1840,7 +1840,7 @@ where
     let mut balanced = Array2::<f64>::zeros((p_total, p_total));
     for (local, range) in components {
         let frob_norm = local.iter().map(|&x| x * x).sum::<f64>().sqrt();
-        if !(frob_norm > 1e-12) {
+        if !(frob_norm > 0.0) {
             continue;
         }
         let scale = 1.0 / frob_norm;
@@ -2005,7 +2005,7 @@ pub fn precompute_reparam_invariant_from_canonical(
         }
         let local = cp.local_ref();
         let frob_norm = local.iter().map(|&x| x * x).sum::<f64>().sqrt();
-        if frob_norm > 1e-12 {
+        if frob_norm > 0.0 {
             has_nonzero = true;
         }
         let key = (cp.col_range.start, cp.col_range.end);
@@ -3004,7 +3004,7 @@ impl KroneckerReparamResult {
         let mut u_truncated = Array2::<f64>::zeros((p, null_count));
         let mut col = 0;
         for (j, &v) in diag_vals.iter().enumerate() {
-            if v <= 1e-12 {
+            if v == 0.0 {
                 u_truncated[[j, col]] = 1.0; // standard basis vector in eigenbasis
                 col += 1;
             }
