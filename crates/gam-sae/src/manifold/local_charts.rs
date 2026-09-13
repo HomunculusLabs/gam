@@ -978,10 +978,14 @@ impl LocalAtlas {
     ///   multiple of the loop length, and a transition crossing the seam once carries one
     ///   length. The period is the largest orientation-preserving translation, and the
     ///   coordinate is the fraction of that period in `[0, 1)`, the periodic seed's convention.
-    /// * a cylinder (chart rank 2): the largest orientation-preserving translation is the loop's
-    ///   axis and length. The coordinates are the fraction of the loop along that axis and the
-    ///   height across it, centered and scaled to unit spread, the convention the cylinder seed
-    ///   uses.
+    /// * a cylinder (chart rank 2): every orientation-preserving non-tree transition moves its
+    ///   shared rows, developed through its two charts, by a whole number of loops, counted
+    ///   against the longest such displacement. The loop's axis and length are the mean of those
+    ///   displacements, each divided by its count. A displacement is measured where the two
+    ///   sheets of the development meet, so a holonomy carrying a small rotation about a far
+    ///   pivot cannot tilt the axis as its translation at the root chart would. The coordinates
+    ///   are the fraction of the loop along that axis and the height across it, centered and
+    ///   scaled to unit spread, the convention the cylinder seed uses.
     ///
     /// Both reads project onto a straight line, so they need the loop to develop straight: a
     /// 1-manifold always does, and a cylinder does when its loop is a geodesic of the surface.
@@ -1024,28 +1028,42 @@ impl LocalAtlas {
                 Ok(coords)
             }
             (GraphCompressionKind::Cylinder, 2) => {
-                let generator = holonomies
+                let displacements = self.seam_displacements(z, &map);
+                let reference = displacements
                     .iter()
-                    .filter(|holonomy| !holonomy.reversing)
-                    .max_by(|left, right| {
-                        let left_sq = left.translation.dot(&left.translation);
-                        let right_sq = right.translation.dot(&right.translation);
-                        left_sq.total_cmp(&right_sq)
-                    })
+                    .max_by(|left, right| left.dot(*left).total_cmp(&right.dot(*right)))
                     .ok_or_else(|| {
                         "holonomy_quotient_coordinates: no orientation-preserving non-tree transition, so no loop translation to read"
                             .to_string()
                     })?;
-                let period = generator.translation.dot(&generator.translation).sqrt();
+                let longest_sq = reference.dot(reference);
+                if !(longest_sq > 0.0 && longest_sq.is_finite()) {
+                    return Err(format!(
+                        "holonomy_quotient_coordinates: the loop translation has no length (squared {longest_sq:.3e})"
+                    ));
+                }
+                let mut loop_sum = [0.0_f64; 2];
+                let mut crossings = 0usize;
+                for displacement in &displacements {
+                    let windings = (displacement.dot(reference) / longest_sq).round();
+                    if windings == 0.0 {
+                        continue;
+                    }
+                    loop_sum[0] += displacement[0] / windings;
+                    loop_sum[1] += displacement[1] / windings;
+                    crossings += 1;
+                }
+                let generator = [
+                    loop_sum[0] / crossings as f64,
+                    loop_sum[1] / crossings as f64,
+                ];
+                let period = generator[0].hypot(generator[1]);
                 if !(period > 0.0 && period.is_finite()) {
                     return Err(format!(
                         "holonomy_quotient_coordinates: the loop translation has no length ({period:.3e})"
                     ));
                 }
-                let axis = [
-                    generator.translation[0] / period,
-                    generator.translation[1] / period,
-                ];
+                let axis = [generator[0] / period, generator[1] / period];
                 let normal = [-axis[1], axis[0]];
                 let mut coords = Array2::<f64>::zeros((n, 2));
                 for row in 0..n {
@@ -1261,6 +1279,47 @@ impl LocalAtlas {
             });
         }
         holonomies
+    }
+
+    /// For every well-conditioned, orientation-preserving transition the spanning tree did not
+    /// use, the mean over its shared rows of a row's image through the `to` chart's placement
+    /// minus its image through the `from` chart's placement: the holonomy's translation where
+    /// the two sheets of the development meet (see `holonomy_quotient_coordinates`).
+    fn seam_displacements(&self, z: ArrayView2<'_, f64>, map: &DevelopingMap) -> Vec<Array1<f64>> {
+        let mut displacements = Vec::new();
+        for (index, transition) in self.transitions.iter().enumerate() {
+            if map.in_tree[index]
+                || !matches!(
+                    transition.conditioning,
+                    TransitionConditioning::WellConditioned
+                )
+            {
+                continue;
+            }
+            let (from, to) = (transition.from_patch, transition.to_patch);
+            let linear = map.rotation[to]
+                .dot(&transition.rotation)
+                .dot(&map.rotation[from].t());
+            if determinant(&linear) < 0.0 {
+                continue;
+            }
+            let shared =
+                sorted_intersection(&self.patches[from].members, &self.patches[to].members);
+            if shared.is_empty() {
+                continue;
+            }
+            let mut displacement = Array1::<f64>::zeros(self.intrinsic_dim);
+            for &row in &shared {
+                let through_from = map.rotation[from].dot(&self.charts[from].project(z.row(row)))
+                    + &map.offset[from];
+                let through_to =
+                    map.rotation[to].dot(&self.charts[to].project(z.row(row))) + &map.offset[to];
+                displacement += &(through_to - through_from);
+            }
+            displacement /= shared.len() as f64;
+            displacements.push(displacement);
+        }
+        displacements
     }
 
     /// Numerically well-conditioned observed transition signs as
