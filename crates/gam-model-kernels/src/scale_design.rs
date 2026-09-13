@@ -42,21 +42,6 @@ impl_reason_error_boilerplate! {
     }
 }
 
-// Floor on a centred weighted sum of squares below which the noise-replay
-// rescale factor `sqrt(orig_css / resid_css)` is not formed and the column is
-// left at unit scale.
-//
-// This is a DECLARED, UNMEASURED policy and not a derived bound, stated here
-// rather than left implicit. Unlike the intercept-detection test in
-// `infer_non_intercept_start_impl` (which compares a cancelling difference and
-// so has a roundoff band to compare against), both operands here are
-// already-centred sums of non-negative terms: they cancel nothing, so their
-// roundoff band is a fixed fraction of themselves and a band-based test
-// degenerates to `> 0.0`. What this floor actually guards is the AMPLIFICATION
-// of the ratio as `resid_css` shrinks, and the amplification a replay solve can
-// absorb has not been measured. Retuning it without that measurement would move
-// published column scales, so the value is left where it was found.
-const RESCALE_CENTERED_SS_FLOOR: f64 = 1e-12;
 // Imported, not transcribed (#2704): the same streamed working-set budget,
 // used for a row chunk in `scale_design_row_chunk_size` and a column chunk in
 // the replay solve.
@@ -732,6 +717,31 @@ fn build_scale_deviation_transform_impl(
         let noise_mean = w_noise_sum.mapv(|sum| sum / w_sum);
         let mut orig_css = Array1::<f64>::zeros(active_cols);
         let mut resid_css = Array1::<f64>::zeros(active_cols);
+        // The rescale `sqrt(orig_css / resid_css)` is formed only for a column
+        // whose two centred sums of squares are both distinguishable from the
+        // zero column. A column in the primary span has a residual that is
+        // computed as rounding noise, not as zero; rescaling that noise up to
+        // the column's original spread would publish rounding as signal.
+        //
+        // Each weighted row's residual `noise − X·coef` comes from a
+        // `p_primary`-term inner product and one subtraction. Centring it adds
+        // a second subtraction. Its rounding is therefore at most
+        // `γ_{p_primary+2}·(|noise| + Σ_k |x_k|·|coef_k|)` (Higham, ASNA
+        // Lemma 3.1). The deviation `noise − mean` rounds within
+        // `γ_{n+2}·(|noise| + |mean|)`, where the `n` accounts for the weighted
+        // mean's accumulation. Centring rounding noise `b` at its own weighted
+        // mean at most doubles each row's deviation, because
+        // `w_sum·mean(b)² ≤ Σ w·b²` for non-negative weights. A computed sum at
+        // or below `4·Σ w·b²` is thus indistinguishable from zero. Both bands
+        // scale with the data, so the rescale does not depend on the columns'
+        // units.
+        let abs_coef = projection_coef
+            .slice(s![.., first_active..])
+            .mapv(f64::abs);
+        let residual_growth = gam_linalg::roundoff::accumulation_growth(p_primary + 2);
+        let deviation_growth = gam_linalg::roundoff::accumulation_growth(n + 2);
+        let mut orig_band = Array1::<f64>::zeros(active_cols);
+        let mut resid_band = Array1::<f64>::zeros(active_cols);
 
         for start in (0..n).step_by(chunk_rows) {
             let end = (start + chunk_rows).min(n);
@@ -742,6 +752,7 @@ fn build_scale_deviation_transform_impl(
                 &noise_chunk,
                 &projection_only_transform,
             );
+            let abs_fitted = fast_ab(&x_chunk.mapv(f64::abs), &abs_coef);
             for local in 0..(end - start) {
                 let w = weights[start + local];
                 if w == 0.0 {
@@ -751,8 +762,12 @@ fn build_scale_deviation_transform_impl(
                     let nij = noise_chunk[[local, first_active + jj]];
                     let d_orig = nij - noise_mean[jj];
                     orig_css[jj] += w * d_orig * d_orig;
+                    let orig_rounding = deviation_growth * (nij.abs() + noise_mean[jj].abs());
+                    orig_band[jj] += w * orig_rounding * orig_rounding;
                     let d_resid = resid_chunk[[local, first_active + jj]] - resid_center[jj];
                     resid_css[jj] += w * d_resid * d_resid;
+                    let resid_rounding = residual_growth * (nij.abs() + abs_fitted[[local, jj]]);
+                    resid_band[jj] += w * resid_rounding * resid_rounding;
                 }
             }
         }
@@ -760,9 +775,9 @@ fn build_scale_deviation_transform_impl(
         for jj in 0..active_cols {
             let j = first_active + jj;
             let scale = if resid_css[jj].is_finite()
-                && resid_css[jj] > RESCALE_CENTERED_SS_FLOOR
+                && resid_css[jj] > 4.0 * resid_band[jj]
                 && orig_css[jj].is_finite()
-                && orig_css[jj] > RESCALE_CENTERED_SS_FLOOR
+                && orig_css[jj] > 4.0 * orig_band[jj]
             {
                 (orig_css[jj] / resid_css[jj]).sqrt()
             } else {
@@ -1064,6 +1079,42 @@ mod tests {
         assert_eq!(
             restored.projection_ridge_alpha, transform.projection_ridge_alpha,
             "alpha must round-trip exactly through payload serialization"
+        );
+    }
+
+    /// The rescale restores a noise column's spread after its primary-span
+    /// part is projected out. It is a ratio of two sums of squares in that
+    /// column's own units, so changing the units must not move it. An absolute
+    /// 1e-12 floor on both sums had left a column recorded in small units
+    /// unscaled.
+    #[test]
+    fn rescale_is_invariant_to_the_noise_columns_units() {
+        let n = 64;
+        let mut primary = Array2::<f64>::zeros((n, 2));
+        let mut noise = Array2::<f64>::zeros((n, 2));
+        let weights = Array1::<f64>::ones(n);
+        for i in 0..n {
+            let t = i as f64 / n as f64;
+            primary[[i, 0]] = 1.0;
+            primary[[i, 1]] = t;
+            noise[[i, 0]] = 1.0;
+            noise[[i, 1]] = (2.0 * t).sin();
+        }
+        let unit = build_scale_deviation_transform(&primary, &noise, &weights, 1)
+            .expect("unit-scale transform");
+        let mut small = noise.clone();
+        small.column_mut(1).mapv_inplace(|v| v * 1.0e-7);
+        let scaled = build_scale_deviation_transform(&primary, &small, &weights, 1)
+            .expect("small-unit transform");
+        assert!(
+            unit.rescale[1] > 1.0,
+            "projecting out [1, t] must shrink the column's spread"
+        );
+        assert!(
+            (scaled.rescale[1] / unit.rescale[1] - 1.0).abs() < 1.0e-9,
+            "rescale moved with the column's units: {} vs {}",
+            scaled.rescale[1],
+            unit.rescale[1]
         );
     }
 }

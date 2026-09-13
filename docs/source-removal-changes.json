@@ -8484,5 +8484,13 @@
     ],
     "reason": "#2469. EFS_NEGLIGIBLE_STEP = 1e-12 treated an EFS raw step below 1e-12 in theta as a fixed point, passing the step through without cost backtracking, and let the hybrid psi-zeroed retry skip a rho-only step below that size. The number was picked. The fixed-point sampler now passes a step through exactly when x + s rounds back to x in every coordinate, which is when every backtracking trial would evaluate x itself. The hybrid retry now runs whenever the rho-only step still moves x. Without a barrier, steps between the representable movement and 1e-12 still take the small-step fast path unchanged. With a barrier they now reach the barrier-aware cost backtracking.",
     "evidence": "At the base, git grep -n -w EFS_NEGLIGIBLE_STEP finds its declaration in crates/gam-solve/src/rho_optimizer/bridges.rs and its two uses in the same file, both in the fixed-point sample: the negligible-step pass-through and the hybrid rho-only retry guard. Both are rewritten in this commit, and no test names the constant. Guarded pool job 611529 (sw0c, acn19, HEAD verified at 2f49564f1, /scratch.global/sauer354/pool/const2469a/w19.611529.log) ran this change at that base: scripts/source_removal_guard.py rc=0 with 1 guarded removal, cargo check --workspace --all-targets --exclude gam-pyffi rc=0, gam-solve lib filters efs active_set:: residual_factor cholesky_static orthonormal_range_basis hutchpp model_rail 105 passed 0 failed."
+  },
+  {
+    "base": "3a52f5feb61a823ce30fdfadfe0ecdce10feb3bb",
+    "items": [
+      "crates/gam-model-kernels/src/scale_design.rs:const:RESCALE_CENTERED_SS_FLOOR"
+    ],
+    "reason": "SPEC rule 23 (#2469). RESCALE_CENTERED_SS_FLOOR (1e-12) was an absolute floor on the centred weighted sums of squares that gate the noise-column rescale sqrt(orig_css / resid_css), in the column units squared, so the transform depended on the units of the covariate. Each sum is now compared with four times its own accumulated rounding band (gamma_{p_primary+2} for the projection residual, gamma_{n+2} for the deviation from the weighted mean), which scales with the data.",
+    "evidence": "At the base, git grep -n -w RESCALE_CENTERED_SS_FLOOR finds only crates/gam-model-kernels/src/scale_design.rs: the declaration and the two comparisons in build_scale_deviation_transform_impl. The candidate file has no reference to it."
   }
 ]
