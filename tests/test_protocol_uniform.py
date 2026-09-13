@@ -108,7 +108,7 @@ def test_periodic_harmonic_evaluate_width_and_callable_surface() -> None:
 
 def test_penalty_composition_hvp_is_sum_of_parts() -> None:
     pa = gamfit.ARDPenalty(weight=0.1)
-    pb = gamfit.OrderedBetaBernoulliPenalty(alpha=1.0, tau=1.0)
+    pb = gamfit.OrderedBetaBernoulliPenalty(k_max=3, alpha=1.0, tau=1.0)
     composite = pa + pb
     from gamfit._composite_penalty import CompositePenalty
     assert isinstance(composite, CompositePenalty)

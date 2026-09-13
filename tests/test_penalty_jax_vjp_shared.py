@@ -1,9 +1,8 @@
-"""Parity test for the shared JAX value/grad custom-VJP wrapper.
+"""Contract test for the shared JAX value/grad custom-VJP wrapper.
 
 Issue #417: ``gamfit._penalty_jax_vjp.jax_value_grad_from_rust`` is the
-single marshalling contract behind both the penalty-descriptor JAX path
-(``gamfit._penalty_descriptors._jax_value_grad_via_rust``) and the
-dataclass-frame JAX path (``gamfit._penalty_frames.jax_penalty_value_grad``).
+single marshalling contract behind the penalty-wrapper JAX path
+(``gamfit._penalty_frames.jax_penalty_value_grad``).
 
 Two things are asserted here:
 
@@ -11,8 +10,8 @@ Two things are asserted here:
    backward pass recovers the kernel's analytic gradient, verified by
    :func:`jax.test_util.check_grads` (first- and second-order, both ``fwd``
    and ``rev``) against finite differences.
-2. The two adapters that consume the wrapper agree bit-for-bit on identical
-   inputs, i.e. there is genuinely *one* VJP contract, not two that drifted.
+2. A real penalty routed through that wrapper returns, in the JAX frame, the
+   NumPy-frame value and gradient of the same Rust kernel.
 """
 
 from __future__ import annotations
@@ -72,32 +71,20 @@ def test_shared_wrapper_check_grads_anisotropic_quadratic() -> None:
     check_grads(_scalar, (x0,), order=2, modes=("fwd", "rev"), atol=1e-5, rtol=1e-5)
 
 
-def test_descriptor_and_frame_adapters_share_one_contract() -> None:
-    """Both real adapters must obey the *same* wrapper contract — the issue's
-    "one JAX VJP marshalling contract" outcome.
-
-    For each adapter independently we require:
+def test_penalty_wrapper_jax_frame_matches_its_numpy_frame() -> None:
+    """A real penalty obeys the shared wrapper contract in the JAX frame.
 
     * the JAX-frame ``(value, grad)`` equals the NumPy-frame ground truth from
-      the very same wrapper/descriptor (no dtype/shape drift across frames),
+      the very same penalty (no dtype/shape drift across frames),
     * ``jax.grad`` of the scalar value recovers that analytic gradient
       (the ``custom_vjp`` backward is wired through the shared engine).
-
-    Both paths feed the identical Rust kernel via
-    :func:`jax_value_grad_from_rust`; proving each matches its own NumPy
-    baseline through that single seam is what guarantees they cannot diverge.
-    ``MechanismSparsityPenalty`` (dataclass/frame path) and
-    ``MechanismSparsityDescriptor`` (descriptor path) live on the same decoder
-    weight matrix, so they also share a numeric ground truth here.
     """
     from gamfit._penalties import MechanismSparsityPenalty
-    from gamfit._penalty_descriptors import MechanismSparsityDescriptor
 
     rng = np.random.default_rng(2417)
     d_latent, p_features = 3, 4
-    feature_groups = [[0, 1], [2, 3]]
-    kwargs = dict(
-        feature_groups=feature_groups,
+    penalty = MechanismSparsityPenalty(
+        feature_groups=[[0, 1], [2, 3]],
         weight=0.7,
         n_eff=50.0,
         smoothing_eps=1.0e-6,
@@ -105,27 +92,17 @@ def test_descriptor_and_frame_adapters_share_one_contract() -> None:
     w_np = rng.standard_normal((d_latent, p_features))
     w_j = jnp.asarray(w_np)
 
-    frame_wrapper = MechanismSparsityPenalty(**kwargs)
-    descriptor = MechanismSparsityDescriptor(**kwargs)
+    # NumPy-frame ground truth (same Rust kernel, no JAX).
+    base_value, base_grad = penalty.value_grad(w_np)
 
-    # NumPy-frame ground truth from each path (same Rust kernel, no JAX).
-    base_value_frame, base_grad_frame = frame_wrapper.value_grad(w_np)
-    base_value_desc, base_grad_desc = descriptor.value_grad(w_np)
-
-    for value_grad, base_value, base_grad in (
-        (frame_wrapper.value_grad, base_value_frame, base_grad_frame),
-        (descriptor.value_grad, base_value_desc, base_grad_desc),
-    ):
-        # JAX-frame value/grad must match the NumPy-frame baseline exactly.
-        value_j, grad_j = value_grad(w_j)
-        np.testing.assert_allclose(
-            float(value_j), float(base_value), rtol=1e-12, atol=1e-12
-        )
-        np.testing.assert_allclose(
-            np.asarray(grad_j), np.asarray(base_grad), rtol=1e-12, atol=1e-12
-        )
-        # jax.grad through the shared custom_vjp recovers that analytic grad.
-        grad_autodiff = jax.grad(lambda x: value_grad(x)[0])(w_j)
-        np.testing.assert_allclose(
-            np.asarray(grad_autodiff), np.asarray(base_grad), rtol=1e-6, atol=1e-9
-        )
+    # JAX-frame value/grad must match the NumPy-frame baseline exactly.
+    value_j, grad_j = penalty.value_grad(w_j)
+    np.testing.assert_allclose(float(value_j), float(base_value), rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(
+        np.asarray(grad_j), np.asarray(base_grad), rtol=1e-12, atol=1e-12
+    )
+    # jax.grad through the shared custom_vjp recovers that analytic grad.
+    grad_autodiff = jax.grad(lambda x: penalty.value_grad(x)[0])(w_j)
+    np.testing.assert_allclose(
+        np.asarray(grad_autodiff), np.asarray(base_grad), rtol=1e-6, atol=1e-9
+    )

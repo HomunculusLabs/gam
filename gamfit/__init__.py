@@ -245,20 +245,6 @@ from ._smooth import (
     Smooth,
     SmoothSum,
 )  # compositional Smooth(latent=..., basis=..., penalty=...)
-from ._penalty_descriptors import (
-    ARDPenalty as _ARDPenaltyDescriptor,
-    BlockOrthogonalityDescriptor,
-    OrderedBetaBernoulliPenalty,
-    MechanismSparsityDescriptor,
-)
-
-# Promote the torch-aware descriptor classes to the top-level penalty names so
-# `gamfit.ARDPenalty(0.1) + gamfit.OrderedBetaBernoulliPenalty(1.0)` works uniformly through
-# the new BasisDescriptor/PenaltyDescriptor protocol. The original
-# Rust-pyclass descriptors used by the formula pipeline remain reachable as
-# `gamfit._penalties.ARDPenalty`, `gamfit._penalties.BlockOrthogonalityPenalty`,
-# etc., and continue to drive the REML core.
-ARDPenalty = _ARDPenaltyDescriptor
 from . import examples, topology
 from .examples import (
     PartialSupervisionExample,

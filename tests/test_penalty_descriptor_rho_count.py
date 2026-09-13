@@ -1,7 +1,7 @@
 """Contract tests for issue #226: penalty descriptors must not pass empty rho.
 
-#226 was the descriptors in ``gamfit/_penalty_descriptors.py`` calling the
-Rust FFI ``analytic_penalty_value_grad`` / ``analytic_penalty_hvp`` with
+#226 was the penalty descriptors calling the Rust FFI
+``analytic_penalty_value_grad`` / ``analytic_penalty_hvp`` with
 ``rho = np.zeros(0)``. The FFI rejects any rho whose length disagrees with
 ``registry.total_rho_count()``, and ARD declares ``rho_count == latent_dim``,
 so ``ARDPenalty(...).value_grad(t)`` raised:
@@ -22,11 +22,11 @@ import numpy as np
 import pytest
 
 import gamfit
-from gamfit._penalty_descriptors import (
+from gamfit import (
     ARDPenalty,
-    BlockOrthogonalityDescriptor,
+    BlockOrthogonalityPenalty,
+    MechanismSparsityPenalty,
     OrderedBetaBernoulliPenalty,
-    MechanismSparsityDescriptor,
 )
 
 
@@ -103,7 +103,7 @@ def test_ard_value_grad_vector_target() -> None:
 def test_ordered_beta_bernoulli_value_grad_numpy_runs() -> None:
     rng = np.random.default_rng(2)
     t = rng.standard_normal((8, 4))
-    v, g = OrderedBetaBernoulliPenalty(alpha=1.0, tau=1.0).value_grad(t)
+    v, g = OrderedBetaBernoulliPenalty(k_max=4, alpha=1.0, tau=1.0).value_grad(t)
     assert np.isfinite(float(v))
     assert g.shape == t.shape and np.all(np.isfinite(g))
 
@@ -111,7 +111,7 @@ def test_ordered_beta_bernoulli_value_grad_numpy_runs() -> None:
 def test_block_orthogonality_value_grad_numpy_runs() -> None:
     rng = np.random.default_rng(3)
     t = rng.standard_normal((8, 4))
-    pen = BlockOrthogonalityDescriptor(groups=[[0, 1], [2, 3]], weight=0.5, n_eff=8)
+    pen = BlockOrthogonalityPenalty(groups=[[0, 1], [2, 3]], weight=0.5, n_eff=8)
     v, g = pen.value_grad(t)
     assert np.isfinite(float(v))
     assert g.shape == t.shape and np.all(np.isfinite(g))
@@ -120,7 +120,7 @@ def test_block_orthogonality_value_grad_numpy_runs() -> None:
 def test_mechanism_sparsity_value_grad_numpy_runs() -> None:
     rng = np.random.default_rng(4)
     t = rng.standard_normal((6, 4))
-    pen = MechanismSparsityDescriptor(
+    pen = MechanismSparsityPenalty(
         feature_groups=[[0, 1], [2, 3]], weight=0.4, n_eff=6
     )
     v, g = pen.value_grad(t)

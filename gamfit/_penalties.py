@@ -84,6 +84,7 @@ import numpy as np
 
 from ._penalties_manifest import PENALTY_MANIFEST
 from ._binding import rust_module as _rust_module
+from ._protocol import PenaltyDescriptor
 
 __all__ = [
     "PENALTY_MANIFEST",
@@ -146,10 +147,12 @@ def _build_penalty_wrapper(name: str, rust_cls: type[Any]) -> type[Any]:
     The wrapper holds an inner Rust descriptor and proxies every attribute
     access through `__getattr__` so callers see no behavioral difference for
     the existing surface. The wrapper exposes `value_grad` and `hvp` which
-    forward into the polymorphic Rust evaluators.
+    forward into the polymorphic Rust evaluators, and it is a
+    :class:`PenaltyDescriptor`: ``P(t)`` is its value and ``P1 + P2`` composes
+    into a :class:`~gamfit._composite_penalty.CompositePenalty`.
     """
 
-    class _PenaltyWrapper:
+    class _PenaltyWrapper(PenaltyDescriptor):
         __slots__ = ("_inner",)
         _rust_cls = rust_cls
         _penalty_name = name
@@ -167,6 +170,10 @@ def _build_penalty_wrapper(name: str, rust_cls: type[Any]) -> type[Any]:
         def set_weight_schedule(self, schedule: Any) -> "_PenaltyWrapper":
             self._inner.set_weight_schedule(schedule)
             return self
+
+        def value(self, t: Any) -> Any:
+            """Penalty value ``P(t)`` in the frame of ``t``; see :meth:`value_grad`."""
+            return self.value_grad(t)[0]
 
         def value_grad(self, t: Any) -> tuple[Any, Any]:
             """Compute ``(P(t), ∂P/∂t)`` in the frame of ``t``.

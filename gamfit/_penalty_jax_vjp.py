@@ -1,15 +1,12 @@
 """Shared JAX value/gradient custom-VJP marshalling for penalties.
 
-Both the :class:`~gamfit._penalty_descriptors._RustPenaltyDescriptor` JAX
-path and the dataclass-wrapper JAX path in :mod:`gamfit._penalty_frames`
-need the same plumbing: run a Rust penalty kernel through
-:func:`jax.pure_callback`, expose the scalar value as a
-:class:`jax.custom_vjp` whose backward consults the kernel's analytic
-gradient, and hand back the analytic gradient alongside.
+The penalty-wrapper JAX path in :mod:`gamfit._penalty_frames` runs a Rust
+penalty kernel through :func:`jax.pure_callback`, exposes the scalar value as
+a :class:`jax.custom_vjp` whose backward consults the kernel's analytic
+gradient, and hands back the analytic gradient alongside.
 
-That marshalling contract lives here once. The only thing that differs
-between the two call sites is *which* Rust kernel runs and how its
-``(value, grad)`` is produced — captured by the ``callback`` argument.
+That marshalling contract lives here once. *Which* Rust kernel runs and how
+its ``(value, grad)`` is produced is captured by the ``callback`` argument.
 No penalty math is reimplemented in JAX; the callback is the single seam
 to the Rust core (via ``analytic_penalty_value_grad``).
 """

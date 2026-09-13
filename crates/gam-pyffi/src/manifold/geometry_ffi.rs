@@ -1910,6 +1910,8 @@ fn py_repr(value: &Bound<'_, PyAny>) -> PyResult<String> {
 struct ARDPenalty {
     #[pyo3(get, set)]
     target: PyObject,
+    #[pyo3(get, set)]
+    weight: f64,
     #[pyo3(get)]
     weight_schedule: Option<PyObject>,
 }
@@ -1917,15 +1919,17 @@ struct ARDPenalty {
 #[pymethods]
 impl ARDPenalty {
     #[new]
-    #[pyo3(signature = (*, target = None, weight_schedule = None))]
+    #[pyo3(signature = (weight = 1.0, *, target = None, weight_schedule = None))]
     fn new(
         py: Python<'_>,
+        weight: f64,
         target: Option<&Bound<'_, PyAny>>,
         weight_schedule: Option<PyObject>,
     ) -> PyResult<Self> {
         validate_target_eager(py, "ARDPenalty", target)?;
         Ok(Self {
             target: py_object_or_string_default(py, target, "t"),
+            weight,
             weight_schedule,
         })
     }
@@ -1937,6 +1941,7 @@ impl ARDPenalty {
         let payload = PyDict::new(py);
         payload.set_item("kind", Self::KIND_TAG)?;
         payload.set_item("target", target_descriptor(py, self.target.bind(py))?)?;
+        payload.set_item("weight", self.weight)?;
         if let Some(schedule) = topk_weight_schedule_descriptor(py, &self.weight_schedule)? {
             payload.set_item("weight_schedule", schedule)?;
         }
@@ -1953,7 +1958,8 @@ impl ARDPenalty {
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         Ok(format!(
-            "ARDPenalty(target={}, weight_schedule={})",
+            "ARDPenalty(weight={}, target={}, weight_schedule={})",
+            self.weight,
             py_repr(self.target.bind(py))?,
             match &self.weight_schedule {
                 Some(schedule) => py_repr(schedule.bind(py))?,

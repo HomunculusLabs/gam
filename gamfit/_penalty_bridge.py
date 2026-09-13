@@ -1,16 +1,14 @@
 """Single source of truth for the Python ↔ Rust analytic-penalty bridge.
 
-Every penalty surface in gamfit — the composable frame-aware descriptors in
-:mod:`gamfit._penalty_descriptors`, the ``nn.Module`` autograd shells in
-:mod:`gamfit.torch.penalties`, the dataclass-wrapper adapters in
+Every penalty surface in gamfit — the ``nn.Module`` autograd shells in
+:mod:`gamfit.torch.penalties`, the penalty-wrapper adapters in
 :mod:`gamfit._penalty_frames`, and the SAE regularizer payload in
 :mod:`gamfit._sae_manifold` — shares the same plumbing:
 
 * build the latent / penalty JSON the Rust registry consumes
   (:func:`latent_json`, :func:`penalty_json`),
-* run ``analytic_penalty_value_grad`` / ``analytic_penalty_hvp`` once
-  (:func:`call_value_grad`, :func:`call_hvp`, :func:`call_rust_value_grad`
-  for the isometry-Jacobian variant),
+* run ``analytic_penalty_value_grad`` once at an explicit rho
+  (:func:`call_rust_value_grad`, including the isometry-Jacobian variant),
 * wrap the result for the active backend (the JAX ``custom_vjp`` core lives
   in :func:`jax_value_grad_from_rust`, re-exported here),
 * construct the per-kind descriptor dict (:func:`*_descriptor`),
@@ -27,16 +25,12 @@ from __future__ import annotations
 import json
 from typing import Any, Literal, Sequence
 
-import numpy as np
-
 from ._binding import rust_module as _rust_module
 from ._penalty_jax_vjp import jax_value_grad_from_rust
 
 __all__ = [
     "latent_json",
     "penalty_json",
-    "call_value_grad",
-    "call_hvp",
     "torch_value_grad_from_rust",
     "call_rust_value_grad",
     "jax_value_grad_from_rust",
@@ -72,50 +66,6 @@ def _torch() -> Any:
     from ._protocol import _require_torch
 
     return _require_torch()
-
-
-def call_value_grad(
-    t_flat: np.ndarray,
-    n: int,
-    d: int,
-    target_name: str,
-    descriptor: dict[str, Any],
-) -> tuple[float, np.ndarray, np.ndarray]:
-    """``(value, ∂value/∂t, ∂value/∂rho)`` for one descriptor at ``t_flat``.
-
-    ``rho=None`` lets the FFI fill a default zero rho sized to the registry's
-    total rho count; the descriptor-frame callers never manage rho themselves.
-    """
-    value, grad, grad_rho, _grad_jac = _rust_module().analytic_penalty_value_grad(
-        latent_json(n, d, name=target_name),
-        penalty_json(descriptor),
-        np.ascontiguousarray(t_flat, dtype=np.float64),
-        None,
-    )
-    return (
-        float(value),
-        np.asarray(grad, dtype=np.float64),
-        np.asarray(grad_rho, dtype=np.float64),
-    )
-
-
-def call_hvp(
-    t_flat: np.ndarray,
-    v_flat: np.ndarray,
-    n: int,
-    d: int,
-    target_name: str,
-    descriptor: dict[str, Any],
-) -> np.ndarray:
-    """Hessian-vector product ``H · v`` for one descriptor at ``t_flat``."""
-    out = _rust_module().analytic_penalty_hvp(
-        latent_json(n, d, name=target_name),
-        penalty_json(descriptor),
-        np.ascontiguousarray(t_flat, dtype=np.float64),
-        np.ascontiguousarray(v_flat, dtype=np.float64),
-        None,
-    )
-    return np.asarray(out, dtype=np.float64)
 
 
 def torch_value_grad_from_rust(

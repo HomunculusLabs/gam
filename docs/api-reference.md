@@ -638,16 +638,6 @@ topical guides for narrative explanations.
       show_root_heading: true
       heading_level: 3
 
-::: gamfit.BlockOrthogonalityDescriptor
-    options:
-      show_root_heading: true
-      heading_level: 3
-
-::: gamfit.MechanismSparsityDescriptor
-    options:
-      show_root_heading: true
-      heading_level: 3
-
 ## scikit-learn integration
 
 ::: gamfit.sklearn.GAMRegressor
