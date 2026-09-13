@@ -811,50 +811,11 @@ impl ResidentBaseArrowFrameHandle {
         }
     }
 
-    /// As [`Self::refactor_and_solve`], but solves for a FRESH gradient instead
-    /// of the one captured at construction (#2539).
-    ///
-    /// [`Self::refactor_and_solve`] was built for the LM ridge ladder, whose
-    /// trials re-solve the SAME system at escalating ridges, so it reads the
-    /// resident `g_t`/`g_β`. An inner Newton moves the gradient every iterate
-    /// while the Hessian blocks stay fixed, so it needs this variant: `g_t`
-    /// (`n·d` doubles) and `g_β` (`k`) cross to the device in place of the
-    /// device-to-device copy of the resident gradient, and the `D`/`B`/`H_ββ`
-    /// blocks stay resident exactly as they do there. Everything after the
-    /// gradient sourcing — POTRF/TRSM/Schur/back-substitution and their order —
-    /// is the same code, so a solve here is bit-identical to a
-    /// [`ResidentArrowFrameHandle`] rebuild at the same ridge and gradient.
-    pub fn refactor_and_solve_with_gradient(
-        &self,
-        ridge_t: f64,
-        ridge_beta: f64,
-        g_t: &[f64],
-        g_beta: &[f64],
-    ) -> Result<ArrowSchurGpuSolution, ArrowSchurGpuFailure> {
-        #[cfg(not(target_os = "linux"))]
-        {
-            if ridge_t.is_nan()
-                || ridge_beta.is_nan()
-                || g_t.iter().chain(g_beta).any(|v| !v.is_finite())
-            {
-                return Err(ArrowSchurGpuFailure::SchurFactorFailed {
-                    reason: "ridge or gradient entry is not finite".to_string(),
-                });
-            }
-            Err(ArrowSchurGpuFailure::Unavailable)
-        }
-        #[cfg(target_os = "linux")]
-        {
-            self.inner
-                .refactor_and_solve_with_gradient(ridge_t, ridge_beta, g_t, g_beta)
-        }
-    }
-
     /// Run only the ridge-dependent FACTOR work and hand the factors back, so a
     /// caller whose ridge does not move on the next iterate can re-solve without
     /// re-factoring (#2539).
     ///
-    /// `Self::refactor_and_solve_with_gradient` is exactly this followed by
+    /// A refactor-and-solve at a fresh gradient is exactly this followed by
     /// [`Self::solve_with_factors`]. An inner Newton needs them separately: its
     /// ridge changes only on an LM accept/reject, while its gradient changes
     /// every iterate, so factoring per iterate would pay a POTRF/TRSM/Schur
@@ -4934,30 +4895,15 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
             ridge_t: f64,
             ridge_beta: f64,
         ) -> Result<ArrowSchurGpuSolution, ArrowSchurGpuFailure> {
-            self.refactor_and_solve_from(ridge_t, ridge_beta, None)
-        }
-
-        /// #2539: as [`Self::refactor_and_solve`] but against a caller-supplied
-        /// gradient. The inner Newton this serves moves the gradient every
-        /// iterate while `D`/`B`/`H_ββ` stay fixed, so the resident gradient the
-        /// LM ladder solves is stale for it.
-        pub(super) fn refactor_and_solve_with_gradient(
-            &self,
-            ridge_t: f64,
-            ridge_beta: f64,
-            g_t: &[f64],
-            g_beta: &[f64],
-        ) -> Result<ArrowSchurGpuSolution, ArrowSchurGpuFailure> {
-            self.check_gradient_lens(g_t, g_beta)?;
-            self.refactor_and_solve_from(ridge_t, ridge_beta, Some((g_t, g_beta)))
+            let factors = self.factor_at(ridge_t, ridge_beta)?;
+            self.solve_with_factors(&factors, None)
         }
 
         /// #2539: solve against ALREADY-BUILT factors for a fresh gradient. The
         /// checked entry point behind
-        /// [`super::ResidentBaseArrowFrameHandle::solve_with_factors`]; the
-        /// length contract is the same one
-        /// [`Self::refactor_and_solve_with_gradient`] enforces, so a caller that
-        /// caches factors cannot smuggle a differently shaped gradient past it.
+        /// [`super::ResidentBaseArrowFrameHandle::solve_with_factors`]: it checks
+        /// the gradient lengths against the frame, so a caller that caches
+        /// factors cannot smuggle a differently shaped gradient past it.
         pub(super) fn solve_with_gradient_checked(
             &self,
             factors: &BaseRidgeFactors,
@@ -4992,27 +4938,6 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
                 });
             }
             Ok(())
-        }
-
-        /// The shared ridge-dependent factor+solve. `gradient` selects where the
-        /// right-hand side comes from: `None` reads the resident `g_t_dev` /
-        /// `gb_host` captured at construction (the LM ridge ladder), `Some`
-        /// uploads a fresh one (an inner Newton iterate). Every step after the
-        /// gradient sourcing is common, so the two callers are bit-identical at
-        /// equal ridge and equal gradient.
-        ///
-        /// It is the composition `factor_at` ∘ `solve_with_factors` and holds no
-        /// arithmetic of its own, so a caller that keeps the factors (an inner
-        /// Newton at an unchanged ridge) gets numbers identical to a caller that
-        /// re-derives them here.
-        fn refactor_and_solve_from(
-            &self,
-            ridge_t: f64,
-            ridge_beta: f64,
-            gradient: Option<(&[f64], &[f64])>,
-        ) -> Result<ArrowSchurGpuSolution, ArrowSchurGpuFailure> {
-            let factors = self.factor_at(ridge_t, ridge_beta)?;
-            self.solve_with_factors(&factors, gradient)
         }
 
         /// The GRADIENT-INDEPENDENT ridge-dependent factor work: `POTRF(D +
@@ -5162,9 +5087,9 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
         /// host→device traffic is the gradient (`n·d + k` doubles) and the only
         /// readback is `δ`.
         ///
-        /// `gradient` sources the right-hand side exactly as
-        /// [`Self::refactor_and_solve_from`] documents: `None` is the resident
-        /// gradient captured at construction, `Some` a fresh per-iterate one.
+        /// `gradient` sources the right-hand side: `None` reads the resident
+        /// `g_t_dev` / `gb_host` captured at construction (the LM ridge ladder),
+        /// `Some` uploads a fresh per-iterate one (an inner Newton iterate).
         pub(super) fn solve_with_factors(
             &self,
             factors: &BaseRidgeFactors,

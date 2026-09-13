@@ -915,7 +915,7 @@ crates/gam-solve/src/glm_sufficient_lane.rs	frozen_weights	retired-no-surviving-
 crates/gam-solve/src/glm_sufficient_lane.rs	rhs_at	defined-elsewhere-in-crate
 crates/gam-solve/src/gpu_kernels/arrow_schur.rs	framed_reduced_schur_det_once_on_device	retired-no-product-user
 crates/gam-solve/src/gpu_kernels/arrow_schur.rs	framed_schur_matvec_once_on_device	retired-no-product-user
-crates/gam-solve/src/gpu_kernels/arrow_schur.rs	refactor_and_solve_with_gradient	restored-in-place
+crates/gam-solve/src/gpu_kernels/arrow_schur.rs	refactor_and_solve_with_gradient	retired-no-product-user
 crates/gam-solve/src/gpu_kernels/arrow_schur.rs	sae_framed_schur_matvec_cpu	retired-no-product-user
 crates/gam-solve/src/gpu_kernels/arrow_schur.rs	solve_reduced_beta_pcg	retired-no-product-user
 crates/gam-solve/src/gpu_kernels/batched_k1.rs	solve_batched_k1_border	restored-in-place
