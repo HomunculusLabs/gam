@@ -36,13 +36,6 @@ pub enum SaeReferenceRoughness {
     },
 }
 
-/// Provenance of the frozen reference-function Gram retained by an atom.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SaeReferenceRoughnessKind {
-    ProvidedFunctionGram,
-    ConstantCurvatureDirichlet,
-}
-
 /// Basis/topology tag for one SAE manifold atom.
 ///
 /// The evaluated basis and input-location jet live on [`SaeManifoldAtom`].
@@ -525,8 +518,6 @@ pub struct SaeManifoldAtom {
     /// `lambda * S_ref * B` and Hessian `lambda * (S_ref tensor I)`. It is not
     /// the moving intrinsic bending energy of the current decoder.
     smooth_penalty: Array2<f64>,
-    /// Which explicit declaration produced [`Self::smooth_penalty`].
-    reference_roughness_kind: SaeReferenceRoughnessKind,
     /// #2604 — `∂S/∂κ` for a constant-curvature atom, materialised beside `S`
     /// because both `κ` and the reference coordinates are fixed at construction.
     /// `None` for every other roughness declaration, which is what makes
@@ -677,10 +668,6 @@ impl SaeManifoldAtom {
         self.smooth_penalty_kappa_derivative.as_ref()
     }
 
-    pub fn reference_roughness_kind(&self) -> SaeReferenceRoughnessKind {
-        self.reference_roughness_kind
-    }
-
     pub fn geometry_plan(&self) -> Option<&SaeAtomGeometryPlan> {
         self.geometry_plan.as_ref()
     }
@@ -757,7 +744,6 @@ impl SaeManifoldAtom {
         self.smooth_penalty = prepared.smooth_penalty;
         self.smooth_penalty_kappa_derivative =
             Some(prepared.smooth_penalty_kappa_derivative);
-        self.reference_roughness_kind = SaeReferenceRoughnessKind::ConstantCurvatureDirichlet;
         self.geometry_plan = Some(prepared.geometry_plan);
     }
 
@@ -917,7 +903,7 @@ impl SaeManifoldAtom {
         decoder_coefficients: Array2<f64>,
         reference_roughness: SaeReferenceRoughness,
     ) -> Result<Self, String> {
-        let (smooth_penalty, reference_roughness_kind, smooth_penalty_kappa_derivative) =
+        let (smooth_penalty, smooth_penalty_kappa_derivative) =
             Self::materialize_reference_roughness(
             &basis_kind,
             latent_dim,
@@ -931,7 +917,6 @@ impl SaeManifoldAtom {
             basis_values,
             decoder_coefficients,
             smooth_penalty,
-            reference_roughness_kind,
             smooth_penalty_kappa_derivative,
             basis_jacobian,
             geometry_plan: None,
@@ -982,7 +967,7 @@ impl SaeManifoldAtom {
         latent_dim: usize,
         basis_jacobian: ArrayView3<'_, f64>,
         reference_roughness: SaeReferenceRoughness,
-    ) -> Result<(Array2<f64>, SaeReferenceRoughnessKind, Option<Array2<f64>>), String> {
+    ) -> Result<(Array2<f64>, Option<Array2<f64>>), String> {
         let (n, m, d) = basis_jacobian.dim();
         if d != latent_dim {
             return Err(format!(
@@ -992,7 +977,6 @@ impl SaeManifoldAtom {
         match reference_roughness {
             SaeReferenceRoughness::ProvidedFunctionGram(gram) => Ok((
                 Self::validate_reference_function_gram(gram, m, false)?,
-                SaeReferenceRoughnessKind::ProvidedFunctionGram,
                 None,
             )),
             SaeReferenceRoughness::ConstantCurvatureDirichlet {
@@ -1048,7 +1032,6 @@ impl SaeManifoldAtom {
                     })?;
                 Ok((
                     Self::validate_reference_function_gram(gram, m, true)?,
-                    SaeReferenceRoughnessKind::ConstantCurvatureDirichlet,
                     Some(gram_kappa_derivative),
                 ))
             }
@@ -1179,7 +1162,6 @@ impl SaeManifoldAtom {
         // silently absent until some later mutation happens to rebuild it.
         self.smooth_penalty_kappa_derivative =
             plan.build_reference_penalty_kappa_derivative()?;
-        self.reference_roughness_kind = plan.reference_roughness_kind();
         self.geometry_plan = Some(plan);
         Ok(self)
     }
@@ -2391,10 +2373,6 @@ mod tests {
                 );
             }
         }
-        assert_eq!(
-            poincare.reference_roughness_kind,
-            SaeReferenceRoughnessKind::ConstantCurvatureDirichlet
-        );
         assert!(
             poincare.smooth_penalty[[1, 1]] > 1e-6,
             "Dirichlet roughness must charge the linear column; got {}",

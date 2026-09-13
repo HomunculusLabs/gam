@@ -577,7 +577,7 @@ crates/gam-sae/src/manifold/atom_build.rs	duchon_centers	retired-by-later-deleti
 crates/gam-sae/src/manifold/atom.rs	fill_decoded_curved_derivative_row	retired-by-later-deletion:e6fd4251e5
 crates/gam-sae/src/manifold/atom.rs	finite_set_rank_charge	retired-no-product-user
 crates/gam-sae/src/manifold/atom.rs	reconstruct_decoder_coefficients	retired-no-product-user
-crates/gam-sae/src/manifold/atom.rs	reference_roughness_kind	restored-in-place
+crates/gam-sae/src/manifold/atom.rs	reference_roughness_kind	retired-no-product-user
 crates/gam-sae/src/manifold/atom.rs	set_factored_coordinates	retired-by-later-deletion:e6fd4251e5
 crates/gam-sae/src/manifold/behavior.rs	basepoint	retired-no-product-user
 crates/gam-sae/src/manifold/behavior.rs	embed	retired-no-product-user

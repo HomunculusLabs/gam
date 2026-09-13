@@ -521,15 +521,6 @@ impl SaeAtomGeometryPlan {
         )))
     }
 
-    pub(crate) fn reference_roughness_kind(&self) -> SaeReferenceRoughnessKind {
-        match &self.reference_metric {
-            SaeReferenceMetricPlan::ConstantCurvatureChart { .. } => {
-                SaeReferenceRoughnessKind::ConstantCurvatureDirichlet
-            }
-            _ => SaeReferenceRoughnessKind::ProvidedFunctionGram,
-        }
-    }
-
     /// Width derived from the tagged resolution.
     pub fn basis_size(&self) -> Result<usize, String> {
         match &self.resolution {

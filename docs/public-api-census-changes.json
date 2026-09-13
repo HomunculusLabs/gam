@@ -2958,5 +2958,14 @@
     },
     "reason": "#2899 public API sweep of gam-models (prune-api-d): buildwiggle_block_input_from_knots is used only by a test-support builder, so it is deleted and the test support calls buildwiggle_block_input_from_orders.",
     "evidence": "At 85953d1be, git grep -n -w finds its only caller inside #[cfg(test)] mod test_support. The removed map is public_api_census.py's census difference over this change, computed on MSI."
+  },
+  {
+    "base": "caf4051d4cdfdc382d2ec713ea39deef2744def4",
+    "removed": {
+      "crates/gam-sae/src/manifold/atom.rs::reference_roughness_kind": 1,
+      "crates/gam-sae/src/manifold/geometry_plan.rs::reference_roughness_kind": 1
+    },
+    "reason": "#2899 public API sweep of gam-sae (prune-api-d): SaeManifoldAtom::reference_roughness_kind has no caller, so it is deleted with the provenance field only it read.",
+    "evidence": "At e890e5d3e, git grep -n -w finds no call to the getter. The removed map is public_api_census.py's census difference over this change, computed on MSI."
   }
 ]

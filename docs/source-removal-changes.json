@@ -7080,5 +7080,15 @@
     ],
     "reason": "#2899 public API sweep of gam-models (prune-api-d): wiggle::buildwiggle_block_input_from_knots was a one-order wrapper over buildwiggle_block_input_from_orders, and its only caller was BinomialLocationScaleWiggleFamily::buildwiggle_block_input in gamlss/binomial/wiggle.rs's #[cfg(test)] test_support module (guarded check 580229 reports it never used once it is narrowed to pub(crate)). The wrapper is deleted, test_support calls buildwiggle_block_input_from_orders with the single order, and the wiggle.rs test section header names the surviving builder. The disposition TSV row moves to retired-no-product-user.",
     "evidence": "At 85953d1be, git grep -n -w buildwiggle_block_input_from_knots finds the definition, the test_support call and a test section comment in wiggle.rs. Pool job 580229 (log /scratch.global/sauer354/pool/prune-api-d/check.580229.log) failed only with 'function buildwiggle_block_input_from_knots is never used' at wiggle.rs:380 after narrowing it."
+  },
+  {
+    "base": "caf4051d4cdfdc382d2ec713ea39deef2744def4",
+    "items": [
+      "crates/gam-sae/src/manifold/atom.rs:enum:SaeReferenceRoughnessKind",
+      "crates/gam-sae/src/manifold/atom.rs:fn:reference_roughness_kind",
+      "crates/gam-sae/src/manifold/geometry_plan.rs:fn:reference_roughness_kind"
+    ],
+    "reason": "#2899 public API sweep of gam-sae (prune-api-d): SaeManifoldAtom::reference_roughness_kind has no caller, and it was the only production reader of the atom's reference_roughness_kind field. The getter, the field, its three writes (construction, commit_prepared_constant_curvature and the geometry-plan install), the kind element of materialize_reference_roughness's result, SaeAtomGeometryPlan::reference_roughness_kind (crate-private, called only by that install) and the SaeReferenceRoughnessKind enum are deleted, along with the one unit-test assert that read the field. The smooth penalty and its kappa derivative are materialised exactly as before. The disposition TSV row moves to retired-no-product-user.",
+    "evidence": "At e890e5d3e, git grep -n -w reference_roughness_kind finds, outside atom.rs and geometry_plan.rs, only the disposition TSV row; inside them the getter, the field with its three writes and one test assert, and the plan method called only at atom.rs's plan install. SaeReferenceRoughnessKind appears only in atom.rs and geometry_plan.rs. SaeManifoldAtom derives only Debug and Clone, so no serialized format carries the field."
   }
 ]
