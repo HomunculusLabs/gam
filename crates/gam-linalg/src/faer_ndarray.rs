@@ -2492,48 +2492,23 @@ impl<S: Data<Elem = f64>> FaerEigh for ArrayBase<S, Ix2> {
             return Ok((Array1::zeros(n), Array2::eye(n)));
         }
         let scaled = repaired.mapv(|value| value / scale);
-        // Relative diagonal-jitter ladder for the eigendecomposition repair: the
-        // matrix is pre-scaled to unit max-abs, so these are fractions of its
-        // scale. We try the unperturbed matrix first, then escalate the ridge by
-        // two decades per attempt until the factorization yields all-finite
-        // eigenpairs, accepting the smallest jitter that succeeds.
-        const JITTER_SCHEDULE: [f64; 6] = [0.0, 1e-12, 1e-10, 1e-8, 1e-6, 1e-4];
-        let jitter_schedule = JITTER_SCHEDULE;
-        let mut last_error = FaerLinalgError::FactorizationFailed {
-            context: "self-adjoint eigendecomposition repair attempts",
-        };
-
-        for &jitter in &jitter_schedule {
-            let mut candidate = scaled.clone();
-            if jitter > 0.0 {
-                let n = candidate.nrows();
-                for i in 0..n {
-                    candidate[[i, i]] += jitter;
-                }
-            }
-
-            match try_eigh(&candidate, side) {
-                Ok((mut evals, evecs))
-                    if evals.iter().all(|value| value.is_finite())
-                        && evecs.iter().all(|value| value.is_finite()) =>
-                {
-                    for value in &mut evals {
-                        *value = (*value - jitter) * scale;
-                    }
-                    return Ok((evals, evecs));
-                }
-                Ok((_, _)) => {
-                    last_error = FaerLinalgError::SelfAdjointEigenNonFiniteInput {
-                        context: "self-adjoint eigendecomposition repaired output validation",
-                    };
-                }
-                Err(err) => {
-                    last_error = err;
-                }
-            }
+        // The repair is exact preconditioning and nothing else: the symmetrized
+        // matrix divided by its own magnitude, decomposed once. A decomposition
+        // that still fails or returns non-finite pairs is refused. It is never
+        // retried on a diagonally shifted matrix until some shift happens to
+        // succeed (SPEC rule 21, #2902).
+        let (mut evals, evecs) = try_eigh(&scaled, side)?;
+        if evals.iter().any(|value| !value.is_finite())
+            || evecs.iter().any(|value| !value.is_finite())
+        {
+            return Err(FaerLinalgError::SelfAdjointEigenNonFiniteInput {
+                context: "self-adjoint eigendecomposition repaired output validation",
+            });
         }
-
-        Err(last_error)
+        for value in &mut evals {
+            *value *= scale;
+        }
+        Ok((evals, evecs))
     }
 }
 
