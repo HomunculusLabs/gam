@@ -45,7 +45,6 @@
 //! pieces in on its side of the seam.
 
 pub mod shard_reader;
-pub mod torus_merge_audit;
 pub mod warm_state;
 
 // ---------------------------------------------------------------------------
@@ -59,9 +58,4 @@ pub use shard_reader::{
 
 /// Per-row inner-solve warm-state cache (seam half 2).
 pub use warm_state::{DiskRowWarmCache, RowWarmCache, RowWarmState};
-
-/// ISA post-fit torus-merge audit: flag pairs of accepted atoms that are really
-/// one curved structure, by the fourth-moment `(κ − 2)²` contrast on their
-/// co-assigned rows.
-pub use torus_merge_audit::{MergeCandidate, audit_torus_merges};
 

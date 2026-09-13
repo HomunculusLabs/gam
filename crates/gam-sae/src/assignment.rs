@@ -474,41 +474,6 @@ impl SaeAssignment {
         })
     }
 
-    /// #1033 — install a ρ-INVARIANT FROZEN routing (the amortized predicted
-    /// logits; see [`SaeAssignment::frozen_logits`]). `predicted` must be
-    /// `(n, K)`. With routing frozen, the gates are computed from `predicted` and
-    /// the logits are excluded from the inner Newton (their gradient/curvature are
-    /// inert, like an ungated atom's). Passing `None` restores the free-logit
-    /// path.
-    #[must_use = "build error must be handled"]
-    pub fn with_frozen_routing(mut self, predicted: Option<Array2<f64>>) -> Result<Self, String> {
-        if let Some(ref p) = predicted {
-            if p.dim() != (self.n_obs(), self.k_atoms()) {
-                return Err(format!(
-                    "SaeAssignment::with_frozen_routing: predicted shape {:?} must be ({}, {})",
-                    p.dim(),
-                    self.n_obs(),
-                    self.k_atoms()
-                ));
-            }
-            if matches!(self.mode, AssignmentMode::Softmax { .. }) {
-                return Err(
-                    "SaeAssignment::with_frozen_routing: frozen routing under Softmax is rejected \
-                     — the coupled simplex's entropy majorizer is assembled over the logits, which \
-                     a frozen (non-optimized) routing would leave inconsistent; this separable-mode \
-                     contract supports ordered Beta--Bernoulli and threshold gate, whose per-atom gates have no \
-                     simplex-coupled curvature to skip"
-                        .to_string(),
-                );
-            }
-            for row in 0..p.nrows() {
-                validate_finite_logits(p.row(row), row)?;
-            }
-        }
-        self.frozen_logits = predicted;
-        Ok(self)
-    }
-
     /// Whether the per-row routing is FROZEN (amortized) rather than free-logit.
     pub(crate) fn routing_is_frozen(&self) -> bool {
         self.frozen_logits.is_some()
@@ -2274,12 +2239,10 @@ mod frozen_routing_1033_tests {
         .unwrap()
     }
 
-    /// Freeze the free logits as the routing through `with_frozen_routing`.
-    fn frozen(assignment: SaeAssignment) -> SaeAssignment {
-        let snapshot = assignment.logits.clone();
+    /// Freeze the free logits as the routing, as the amortized fit driver does.
+    fn frozen(mut assignment: SaeAssignment) -> SaeAssignment {
+        assignment.frozen_logits = Some(assignment.logits.clone());
         assignment
-            .with_frozen_routing(Some(snapshot))
-            .expect("an ordered Beta--Bernoulli assignment admits frozen routing")
     }
 
     #[test]
@@ -2331,7 +2294,7 @@ mod frozen_routing_1033_tests {
     #[test]
     fn frozen_routing_fixes_all_logits_and_thaw_restores_free_path_1033() {
         let (n, k) = (4usize, 3usize);
-        let a = frozen(ordered_beta_bernoulli_assignment(n, k));
+        let mut a = frozen(ordered_beta_bernoulli_assignment(n, k));
         // Under frozen routing EVERY logit is fixed (not a free Newton coord).
         let mask = a.fixed_logit_mask();
         assert_eq!(mask.len(), k);
@@ -2346,36 +2309,11 @@ mod frozen_routing_1033_tests {
             );
         }
         // Thawing restores the free-logit path (no fixed logits, no ungated).
-        let a = a
-            .with_frozen_routing(None)
-            .expect("passing None restores the free-logit path");
+        a.frozen_logits = None;
         assert!(!a.routing_is_frozen());
         assert!(
             a.fixed_logit_mask().iter().all(|&f| !f),
             "thaw must restore the free-logit path"
-        );
-    }
-
-    #[test]
-    fn frozen_routing_rejects_softmax_1033() {
-        let (n, k) = (4usize, 3usize);
-        let logits = Array2::from_shape_fn((n, k), |(i, kk)| 0.1 * (i as f64) - 0.05 * (kk as f64));
-        let coords: Vec<Array2<f64>> = (0..k)
-            .map(|_| Array2::from_shape_fn((n, 1), |(i, _)| (i as f64) * 0.1))
-            .collect();
-        let a = SaeAssignment::from_blocks_with_mode_and_manifolds(
-            logits,
-            coords,
-            vec![LatentManifold::Euclidean; k],
-            AssignmentMode::softmax(1.0),
-        )
-        .unwrap();
-        // Softmax + frozen routing is rejected (the coupled-simplex entropy
-        // majorizer would be inconsistent with a frozen, non-optimized routing).
-        let snapshot = a.logits.clone();
-        assert!(
-            a.with_frozen_routing(Some(snapshot)).is_err(),
-            "frozen routing under Softmax must be rejected (simplex entropy-majorizer coupling)"
         );
     }
 }

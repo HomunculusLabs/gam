@@ -2906,5 +2906,15 @@
     },
     "reason": "#2899 public API sweep of gam-models and gam-sae (prune-api-d): the uncalled GAMLSS family metadata and block-Jacobian wrappers, the layout method only they called, the full-conformal rank_s accessor and GrassmannCrossMoment::accumulate are deleted.",
     "evidence": "At 463d1cd39, git grep -n -w finds no caller of these public functions outside the deleted code. The removed map is public_api_census.py's census difference over this change, computed on MSI."
+  },
+  {
+    "base": "06f5dbc8ddb88f1e79dfdd6cf491ba29262aedfc",
+    "removed": {
+      "crates/gam-sae/src/assignment.rs::with_frozen_routing": 1,
+      "crates/gam-sae/src/corpus/torus_merge_audit.rs::audit_torus_merges": 1,
+      "crates/gam-sae/src/corpus/torus_merge_audit.rs::evidence": 1
+    },
+    "reason": "#2899 public API sweep of gam-sae (prune-api-d): audit_torus_merges, screen_pair and SaeAssignment::with_frozen_routing have no product caller, so they are deleted.",
+    "evidence": "At 463d1cd39, git grep -n -w finds these functions called only by unit tests. The removed map is public_api_census.py's census difference over this change, computed on MSI."
   }
 ]

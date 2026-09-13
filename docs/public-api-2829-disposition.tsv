@@ -394,7 +394,7 @@ crates/gam-sae/src/assignment.rs	ordered_beta_bernoulli_psd_majorizer_third_chan
 crates/gam-sae/src/assignment.rs	select_hybrid_atom_parameterization	retired-by-later-deletion:b66a7d04e2
 crates/gam-sae/src/assignment.rs	set_frozen_routing_in_place	retired-by-later-deletion:b66a7d04e2
 crates/gam-sae/src/assignment.rs	thaw_routing	retired-by-later-deletion:b66a7d04e2
-crates/gam-sae/src/assignment.rs	with_frozen_routing	restored-in-place
+crates/gam-sae/src/assignment.rs	with_frozen_routing	retired-no-product-user
 crates/gam-sae/src/assignment.rs	with_ungated	retired-by-later-deletion:b66a7d04e2
 crates/gam-sae/src/atom_codes.rs	active_weight_sum	retired-by-later-deletion:10ac599e4c
 crates/gam-sae/src/atom_codes.rs	coactivation	retired-no-product-user
@@ -457,7 +457,7 @@ crates/gam-sae/src/corpus/rho_cascade.rs	expected_rows	retired-no-surviving-depe
 crates/gam-sae/src/corpus/rho_cascade.rs	step_plan	retired-no-surviving-dependent
 crates/gam-sae/src/corpus/shard_reader.rs	encode_shard_bytes	retired-no-surviving-dependent
 crates/gam-sae/src/corpus/shard_reader.rs	open_dir	retired-no-surviving-dependent
-crates/gam-sae/src/corpus/torus_merge_audit.rs	audit_torus_merges	restored-in-place
+crates/gam-sae/src/corpus/torus_merge_audit.rs	audit_torus_merges	retired-no-product-user
 crates/gam-sae/src/description_length.rs	bar_birth_threshold_nats	retired-by-later-deletion:380e9c1f47
 crates/gam-sae/src/description_length.rs	bar_supports_birth	retired-by-later-deletion:380e9c1f47
 crates/gam-sae/src/description_length.rs	circle_chart_columns	retired-by-later-deletion:380e9c1f47
