@@ -801,11 +801,12 @@ mod test_support {
 }
 
 #[cfg(test)]
-// See `test_support`: linux-gated test bodies are the only consumers, so on
-// non-linux these imports are unused under `-D warnings`.
-#[cfg_attr(not(target_os = "linux"), allow(unused_imports))]
 mod tests {
     use super::test_support::*;
+    // Only the linux-gated tests below read the parent's items, and each of those
+    // items is `#[cfg(target_os = "linux")]` itself, so off linux this glob would
+    // import nothing any test uses.
+    #[cfg(target_os = "linux")]
     use super::*;
 
     #[cfg(target_os = "linux")] // exercises `ceil_to_template_r`, gated to its linux home (CI tests run on linux)

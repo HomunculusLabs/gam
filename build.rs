@@ -3499,11 +3499,7 @@ fn scan_for_banned_allow(
     dir: &Path,
     offenders: &mut Vec<(PathBuf, usize, String, String)>,
 ) {
-    // Attribute prefixes that silence a lint. Both `allow` and `expect`
-    // defeat the lint's signal — `expect` is the promotion form ("error if
-    // the lint does NOT fire") which is just as load-bearing as `allow` for
-    // hiding lint output. Treat them identically.
-    const SILENCERS: &[&str] = &["allow(", "expect("];
+    enforce_attribute_silencer_matcher_invariants();
     visit_files(root, dir, &mut |rel, content| {
         let rel_str = rel.to_string_lossy().replace('\\', "/");
         if rel_str == "build.rs" {
@@ -3512,7 +3508,7 @@ fn scan_for_banned_allow(
         if rel.extension().and_then(OsStr::to_str) != Some("rs") {
             return;
         }
-        if !SILENCERS.iter().any(|s| content.contains(s)) {
+        if !ATTRIBUTE_SILENCERS.iter().any(|s| content.contains(s)) {
             return;
         }
         let stripped_lines = strip_file_lines(content);
@@ -3536,70 +3532,151 @@ fn scan_for_banned_allow(
             // testing, so the split form is caught too (#2364). Offenders
             // still attribute to the marker's line below.
             let spliced = spliced_attribute_line(&stripped_lines, idx);
-            let code = spliced.as_str();
-            for silencer in SILENCERS {
-                let mut search_from = 0usize;
-                while let Some(rel_idx) = code[search_from..].find(silencer) {
-                    let abs_match = search_from + rel_idx;
-                    // Require an attribute context: the silencer must be
-                    // preceded (after optional whitespace) by `#[` or `#![`.
-                    // Scan backwards over whitespace, then check the prefix
-                    // ending — `#[` or `#![` — at that point.
-                    let mut k = abs_match;
-                    while k > 0 && code.as_bytes()[k - 1].is_ascii_whitespace() {
-                        k -= 1;
-                    }
-                    let prefix = &code[..k];
-                    let is_attr = prefix.ends_with("#[") || prefix.ends_with("#![");
-                    let start = abs_match + silencer.len();
-                    if !is_attr {
-                        search_from = start;
-                        continue;
-                    }
-                    let Some(end_rel) = code[start..].find(')') else {
-                        break;
-                    };
-                    let inside = &code[start..start + end_rel];
-                    // Collect lint tokens (split on `,`), respecting that
-                    // nested parentheses won't appear at this level (a lint
-                    // path like `clippy::foo` carries no parens; tool-lint
-                    // configs that DO nest, e.g. `reason = "..."`, are not
-                    // valid inside allow/expect anyway). Strip the known
-                    // tool prefixes (`clippy::`, `rustc::`, `rustdoc::`) when
-                    // labelling so the report shows the bare lint name.
-                    let mut first_label: Option<String> = None;
-                    let mut any_lint = false;
-                    for tok in inside.split(',') {
-                        let trimmed = tok.trim();
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        any_lint = true;
-                        if first_label.is_none() {
-                            let bare = trimmed
-                                .trim_start_matches("rustc::")
-                                .trim_start_matches("rustdoc::");
-                            first_label = Some(bare.to_string());
-                        }
-                    }
-                    if any_lint {
-                        let attr = silencer.trim_end_matches('(');
-                        let label = first_label.unwrap_or_else(|| "<empty>".to_string());
-                        offenders.push((
-                            rel.to_path_buf(),
-                            idx + 1,
-                            format!("{attr}({label})"),
-                            line.to_string(),
-                        ));
-                    }
-                    search_from = start + end_rel + 1;
-                    if search_from >= code.len() {
-                        break;
-                    }
-                }
+            for label in attribute_silencer_labels(spliced.as_str()) {
+                offenders.push((rel.to_path_buf(), idx + 1, label, line.to_string()));
             }
         }
     });
+}
+
+/// Attribute prefixes that silence a lint. Both `allow` and `expect`
+/// defeat the lint's signal — `expect` is the promotion form ("error if
+/// the lint does NOT fire") which is just as load-bearing as `allow` for
+/// hiding lint output. Treat them identically.
+const ATTRIBUTE_SILENCERS: &[&str] = &["allow(", "expect("];
+
+/// The lint silencers one stripped, spliced attribute line carries, each
+/// labelled `allow(lint)` / `expect(lint)` by its first lint. A silencer counts
+/// when it IS the attribute (`#[allow(..)]`, `#![expect(..)]`) and when it is
+/// an arm of a `cfg_attr` (`#[cfg_attr(not(test), allow(dead_code))]`): gating
+/// a silencer on a predicate still hides the lint in every configuration the
+/// predicate selects, so the arm form is banned identically. Before arms were
+/// matched, `gam-sae` carried a `not(test)` dead_code allow on a function
+/// production calls, and no scan reported it (#2731).
+fn attribute_silencer_labels(code: &str) -> Vec<String> {
+    let mut labels = Vec::new();
+    for silencer in ATTRIBUTE_SILENCERS {
+        let mut search_from = 0usize;
+        while let Some(rel_idx) = code[search_from..].find(silencer) {
+            let abs_match = search_from + rel_idx;
+            // Require an attribute context: the silencer must be preceded
+            // (after optional whitespace) by `#[` or `#![`, or be a `cfg_attr`
+            // arm. Scan backwards over whitespace, then test the prefix ending
+            // at that point.
+            let mut k = abs_match;
+            while k > 0 && code.as_bytes()[k - 1].is_ascii_whitespace() {
+                k -= 1;
+            }
+            let prefix = &code[..k];
+            let is_attr = prefix.ends_with("#[")
+                || prefix.ends_with("#![")
+                || silencer_is_cfg_attr_arm(prefix);
+            let start = abs_match + silencer.len();
+            if !is_attr {
+                search_from = start;
+                continue;
+            }
+            let Some(end_rel) = code[start..].find(')') else {
+                break;
+            };
+            let inside = &code[start..start + end_rel];
+            // Collect lint tokens (split on `,`), respecting that
+            // nested parentheses won't appear at this level (a lint
+            // path like `clippy::foo` carries no parens; tool-lint
+            // configs that DO nest, e.g. `reason = "..."`, are not
+            // valid inside allow/expect anyway). Strip the known
+            // tool prefixes (`clippy::`, `rustc::`, `rustdoc::`) when
+            // labelling so the report shows the bare lint name.
+            let mut first_label: Option<String> = None;
+            let mut any_lint = false;
+            for tok in inside.split(',') {
+                let trimmed = tok.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                any_lint = true;
+                if first_label.is_none() {
+                    let bare = trimmed
+                        .trim_start_matches("rustc::")
+                        .trim_start_matches("rustdoc::");
+                    first_label = Some(bare.to_string());
+                }
+            }
+            if any_lint {
+                let attr = silencer.trim_end_matches('(');
+                let label = first_label.unwrap_or_else(|| "<empty>".to_string());
+                labels.push(format!("{attr}({label})"));
+            }
+            search_from = start + end_rel + 1;
+            if search_from >= code.len() {
+                break;
+            }
+        }
+    }
+    labels
+}
+
+/// Whether a silencer whose preceding text, trailing whitespace removed, is
+/// `prefix` is an arm of a `cfg_attr`: the prefix ends in the arm separator
+/// `,`, and the innermost `(` still open there is the one `cfg_attr` opened.
+/// A call argument (`gate(x, allow(y))`) also ends in `,`, and fails the name
+/// test.
+fn silencer_is_cfg_attr_arm(prefix: &str) -> bool {
+    let Some(head) = prefix.strip_suffix(',') else {
+        return false;
+    };
+    let bytes = head.as_bytes();
+    let mut depth = 0usize;
+    let mut open: Option<usize> = None;
+    for index in (0..bytes.len()).rev() {
+        match bytes[index] {
+            b')' => depth += 1,
+            b'(' if depth == 0 => {
+                open = Some(index);
+                break;
+            }
+            b'(' => depth -= 1,
+            _ => {}
+        }
+    }
+    let Some(open) = open else {
+        return false;
+    };
+    head[..open]
+        .trim_end()
+        .strip_suffix("cfg_attr")
+        .is_some_and(|before| !before.bytes().next_back().is_some_and(is_ident_byte))
+}
+
+/// Positive and negative controls for the silencer matcher, asserted before
+/// every scan: a matcher that stops recognising a form fails the build here
+/// instead of reporting every file clean.
+fn enforce_attribute_silencer_matcher_invariants() {
+    assert_eq!(
+        attribute_silencer_labels("    #[cfg_attr(not(test), allow(dead_code))]"),
+        ["allow(dead_code)"]
+    );
+    assert_eq!(
+        attribute_silencer_labels(
+            "#![cfg_attr(not(target_os = \"linux\"), expect(unused_imports))]"
+        ),
+        ["expect(unused_imports)"]
+    );
+    assert_eq!(
+        attribute_silencer_labels("#[cfg_attr(windows, deny(missing_docs), allow(unused))]"),
+        ["allow(unused)"]
+    );
+    assert_eq!(
+        attribute_silencer_labels("#[allow(dead_code)] fn f() {}"),
+        ["allow(dead_code)"]
+    );
+    assert_eq!(
+        attribute_silencer_labels("#![expect(unused_imports)]"),
+        ["expect(unused_imports)"]
+    );
+    assert!(attribute_silencer_labels("#[inline] fn allow(x: u8) {}").is_empty());
+    assert!(attribute_silencer_labels("#[inline] fn run(a: u8) { gate(a, allow(b)) }").is_empty());
+    assert!(attribute_silencer_labels("#[cfg_attr(test, derive(Debug))]").is_empty());
 }
 
 /// Scan for any `let _...` binding (bare `_`, `_name`, `mut _`, `mut _name`,
