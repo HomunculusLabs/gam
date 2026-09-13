@@ -762,12 +762,12 @@ fn survival_location_scale_outer_link_shape_gradient_matches_finite_difference_s
     .result;
     assert!(base.inner_converged, "the base inner solve did not converge");
     assert_eq!(base.gradient.len(), rho.len() + 2);
-    let value_at = |epsilon: f64, log_delta: f64| {
+    let value_at = |epsilon: f64, log_delta: f64, rho: &Array1<f64>| {
         let probe = crate::custom_family::evaluate_custom_family_joint_hyper_owned(
             &family_at(epsilon, log_delta),
             &specs,
             &options,
-            &rho,
+            rho,
             &layout_at(epsilon, log_delta),
             Some(&base.warm_start),
             gam_problem::EvalMode::ValueOnly,
@@ -777,18 +777,47 @@ fn survival_location_scale_outer_link_shape_gradient_matches_finite_difference_s
         assert!(probe.inner_converged, "a probe inner solve did not converge");
         probe.objective
     };
+    let shape_difference = |axis: usize, h: f64| {
+        let (plus, minus) = if axis == 0 {
+            ((epsilon0 + h, log_delta0), (epsilon0 - h, log_delta0))
+        } else {
+            ((epsilon0, log_delta0 + h), (epsilon0, log_delta0 - h))
+        };
+        (value_at(plus.0, plus.1, &rho) - value_at(minus.0, minus.1, &rho)) / (2.0 * h)
+    };
+    let rho_difference = |k: usize, h: f64| {
+        let mut plus = rho.clone();
+        plus[k] += h;
+        let mut minus = rho.clone();
+        minus[k] -= h;
+        (value_at(epsilon0, log_delta0, &plus) - value_at(epsilon0, log_delta0, &minus)) / (2.0 * h)
+    };
+    // Every component is printed before anything is asserted. The ρ components go
+    // through the same evaluation path as the shape components, so they separate a
+    // shape-axis defect from an evaluation-path defect. Each difference is taken at
+    // two steps, so a step-size artefact shows as disagreement between them.
     let h = 1e-4;
-    let finite_differences = [
-        (value_at(epsilon0 + h, log_delta0) - value_at(epsilon0 - h, log_delta0)) / (2.0 * h),
-        (value_at(epsilon0, log_delta0 + h) - value_at(epsilon0, log_delta0 - h)) / (2.0 * h),
-    ];
-    for (axis, finite_difference) in finite_differences.into_iter().enumerate() {
-        let analytic = base.gradient[rho.len() + axis];
-        assert!(
-            (analytic - finite_difference).abs() <= 1e-4 * finite_difference.abs().max(1.0),
-            "shape axis {axis}: outer gradient={analytic}, finite difference={finite_difference}"
+    let mut mismatches = Vec::new();
+    for k in 0..rho.len() + 2 {
+        let (label, finite_difference, coarse) = if k < rho.len() {
+            ("rho", rho_difference(k, h), rho_difference(k, 10.0 * h))
+        } else {
+            let axis = k - rho.len();
+            ("shape", shape_difference(axis, h), shape_difference(axis, 10.0 * h))
+        };
+        let analytic = base.gradient[k];
+        eprintln!(
+            "[2904] {label} component {k}: outer gradient={analytic:.9e}, finite difference \
+             h={h:e} {finite_difference:.9e}, h={:e} {coarse:.9e}",
+            10.0 * h
         );
+        if (analytic - finite_difference).abs() > 1e-4 * finite_difference.abs().max(1.0) {
+            mismatches.push(format!(
+                "{label} component {k}: outer gradient={analytic}, finite difference={finite_difference}"
+            ));
+        }
     }
+    assert!(mismatches.is_empty(), "outer gradient mismatches: {mismatches:?}");
 }
 
 /// Build a single-row survival LS family with the production default
