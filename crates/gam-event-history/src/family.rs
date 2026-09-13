@@ -1102,7 +1102,7 @@ impl CustomFamily for EventHistoryFamily {
 
 /// Fit specification for an event-history model.
 #[derive(Clone)]
-pub struct EventHistorySpec {
+pub(crate) struct EventHistorySpec {
     /// One covariate/time term collection per mark, or a single one shared by
     /// every mark. Feature columns index the node data matrix: the covariate
     /// table's columns followed by the node time.

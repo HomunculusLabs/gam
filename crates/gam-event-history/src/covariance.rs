@@ -312,7 +312,7 @@ pub(crate) fn quartic_moments(mu: f64, information: f64, lambda: f64) -> (f64, f
 /// The likelihood is even in `t` (an atom's sign is a gauge), so the
 /// profile is stored on `t ≥ 0` and reflected.
 #[derive(Clone, Debug)]
-pub struct DirectionProfile {
+pub(crate) struct DirectionProfile {
     /// Sample points, `0 = t_0 < t_1 < …`.
     pub points: Vec<f64>,
     /// `g(t_i)`.
@@ -394,7 +394,7 @@ impl DirectionProfile {
 /// The evidence one direction of the loading space carries, in the form the
 /// marginal likelihood integral needs.
 #[derive(Clone, Debug)]
-pub enum DirectionEvidence {
+pub(crate) enum DirectionEvidence {
     /// The score's quartic model `g(t) = ½μt² − ¼Jt⁴`.
     Quartic { eigenvalue: f64, information: f64 },
     /// A finite sampled profile; used for proposing a loading prior.
@@ -442,7 +442,7 @@ impl DirectionEvidence {
 /// The empirical-Bayes prior of a new atom's loadings and the decision it
 /// carries.
 #[derive(Clone, Debug)]
-pub struct RidgeProfile {
+pub(crate) struct RidgeProfile {
     /// `ln λ̂`: the precision of the isotropic Gaussian prior that maximises
     /// the marginal likelihood under the quartic model; `+∞` when no finite
     /// prior raises it.
