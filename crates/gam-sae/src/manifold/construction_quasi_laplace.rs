@@ -2986,6 +2986,12 @@ impl SaeManifoldTerm {
         // #2283 — the warm-carried shift of the arrow exact-A step, the damping's
         // counterpart on states whose dense geometry the ledger does not admit.
         let mut shift = 0.0_f64;
+        // #2731 — the largest damping (and shift) at which a committed step of this
+        // call bought less than its own model predicted. The carry never walks back
+        // to a rung at or below it: that rung has already been refuted at a nearby
+        // iterate, and returning to it every other step is a 2-cycle, not a descent.
+        let mut refuted_damping: Option<f64> = None;
+        let mut refuted_shift: Option<f64> = None;
         for step in 0..max_steps {
             let step_started = std::time::Instant::now();
             // #2267 — name each step to the process monitor; the guard ends with the
@@ -3114,17 +3120,29 @@ impl SaeManifoldTerm {
                 // there, so it IS the undamped step and is carried as exactly that.
                 let model_agreement = (committed.pre_objective - committed.committed_objective)
                     / (0.5 * committed.predicted_objective_decrease);
+                // The same refuted-rung memory as the dense carry below (#2731).
                 shift = if model_agreement >= 1.0 {
                     let walked_back = committed.shift / opt::constants::RIDGE_GROWTH;
-                    if walked_back <= f64::EPSILON * committed.curvature_along_step {
-                        0.0
+                    let walked_back =
+                        if walked_back <= f64::EPSILON * committed.curvature_along_step {
+                            0.0
+                        } else {
+                            walked_back
+                        };
+                    if refuted_shift.is_some_and(|refuted| walked_back <= refuted) {
+                        committed.shift
                     } else {
                         walked_back
                     }
-                } else if committed.shift > 0.0 {
-                    committed.shift * opt::constants::RIDGE_GROWTH
                 } else {
-                    committed.curvature_along_step
+                    refuted_shift = Some(
+                        refuted_shift.map_or(committed.shift, |refuted| refuted.max(committed.shift)),
+                    );
+                    if committed.shift > 0.0 {
+                        committed.shift * opt::constants::RIDGE_GROWTH
+                    } else {
+                        committed.curvature_along_step
+                    }
                 };
                 log::info!(
                     "[SAE-NEWTON] step {} arrow exact-A phases: assemble={assemble_seconds:.2}s \
@@ -3378,6 +3396,12 @@ impl SaeManifoldTerm {
             // the gate norm contract 3.21× and 4.08× on the two steps taken at
             // ν = 4.4e-5, and go from 2.964212e0 to 1.187672e1 across the eleven
             // taken at ν ≤ 4.4e-6, the rungs the unconditional walk-back returned to.
+            // Job 578261 (`d40a922e0`, same cell) read the plain walk-back settle into
+            // a 2-cycle over polish steps 59–64: ν = 7.68e-7 (agreement 1.09–1.14)
+            // took ‖g‖ 1.18 → 0.044, and the walked-back ν = 7.68e-8 (agreement
+            // 0.44–0.81) took it back to 1.18, until `max_steps` ended the call at a
+            // refine entry ‖g‖ of 3.49e-2 against tol 2.501e-3. So a rung that bought
+            // less than its model is remembered, and the walk-back stops above it.
             let model_agreement = (pre_objective - committed_objective)
                 / (0.5 * accepted.predicted_objective_decrease);
             damping = if model_agreement >= 1.0 {
@@ -3385,11 +3409,21 @@ impl SaeManifoldTerm {
                 // direction, so it IS the undamped step and is carried as exactly
                 // that.
                 let walked_back = accepted.damping / opt::constants::RIDGE_GROWTH;
-                if walked_back < smallest_damping { 0.0 } else { walked_back }
-            } else if accepted.damping > 0.0 {
-                accepted.damping * opt::constants::RIDGE_GROWTH
+                let walked_back = if walked_back < smallest_damping { 0.0 } else { walked_back };
+                if refuted_damping.is_some_and(|refuted| walked_back <= refuted) {
+                    accepted.damping
+                } else {
+                    walked_back
+                }
             } else {
-                smallest_damping
+                refuted_damping = Some(
+                    refuted_damping.map_or(accepted.damping, |refuted| refuted.max(accepted.damping)),
+                );
+                if accepted.damping > 0.0 {
+                    accepted.damping * opt::constants::RIDGE_GROWTH
+                } else {
+                    smallest_damping
+                }
             };
             log::info!(
                 "[SAE-NEWTON] step {} phases: assemble={assemble_seconds:.2}s \
