@@ -1,29 +1,23 @@
-//! Single preconditioned conjugate-gradient (PCG) core.
+//! Preconditioned conjugate-gradient (PCG) recurrences.
 //!
-//! Both the CPU SPD solver (`linalg::utils::solve_spd_pcg_with_info`, parallel,
-//! residual-refresh, diagnostics) and the GPU REML trace solver
-//! (`gpu::kernels::reml_trace::cg_solve`, serial, no refresh, no diagnostics)
-//! historically carried their own hand-rolled CG loop. They drifted: the GPU
-//! copy accepted a partial solution on lost SPD, while the CPU copy rejected
-//! non-positive preconditioner diagonals and refreshed the residual every 32
-//! iterations. The shared inner
-//! recurrence — `alpha = rz/pᵀAp`, `x += alpha p`, `r -= alpha Ap`,
-//! `beta = rz'/rz`, `p = z + beta p` — is identical.
-//!
-//! `pcg_core` is that one recurrence. The two callers are thin wrappers that
-//! pick a refresh period, opt into diagnostics, and decide what a breakdown
-//! means (the CPU rejects it as `None`; the GPU keeps the partial iterate).
+//! `pcg_core` solves one right-hand side. Its production caller is the CPU SPD
+//! solver `linalg::utils::solve_spd_pcg_with_info_into`, which refreshes the
+//! residual every 32 iterations, records diagnostics, and rejects every stop
+//! other than `Converged`. `pcg_multi_core` drives the same recurrence over a
+//! block backend (`PcgBlockBackend`), advancing independently preconditioned
+//! columns in one pass; gam-sae's sparse-dictionary decoder solves call it. Both
+//! run `alpha = rz/pᵀAp`, `x += alpha p`, `r -= alpha Ap`, `beta = rz'/rz`,
+//! `p = z + beta p`, and a test in this module checks every `pcg_multi_core`
+//! column bit for bit against `pcg_core` on the same system.
 //!
 //! ## Numerics
 //!
 //! The inner products `rᵀz` and `pᵀAp` are accumulated **serially** (a plain
 //! sequential fold). This is deliberate: it makes every iterate bit-identical
-//! regardless of the host's thread count, which is what lets the GPU wrapper
-//! reproduce the byte-for-byte iterates of the old serial `cg_solve`. The
-//! *elementwise* O(p) vector updates (preconditioner apply and the fused
-//! `p`-axpy) are reduction-free and therefore parallelized over the coefficient
-//! dimension without perturbing the result, preserving the CPU solver's
-//! large-`p` parallelism.
+//! regardless of the host's thread count. The *elementwise* O(p) vector updates
+//! (preconditioner apply and the fused `p`-axpy) are reduction-free and therefore
+//! parallelized over the coefficient dimension without perturbing the result,
+//! preserving the CPU solver's large-`p` parallelism.
 
 use ndarray::{Array1, ArrayView1, ArrayViewMut1, Zip};
 use rayon::prelude::*;
@@ -136,8 +130,8 @@ pub enum PcgStop {
     MaxIters,
     /// Lost SPD or hit a non-finite scalar (e.g. `pᵀAp ≤ 0`, non-finite
     /// `alpha`/`beta`, a non-positive `rᵀz`, or a mismatched matvec length).
-    /// The iterate written so far is the last numerically valid one; callers
-    /// decide whether to keep it (GPU) or reject the whole solve (CPU).
+    /// The iterate written so far is the last numerically valid one; the caller
+    /// decides what a breakdown means for its solve.
     Breakdown,
     /// The preconditioner diagonal contained a non-positive or non-finite entry,
     /// violating the SPD-PCG contract (`M ≻ 0`). Detected before any iteration;
@@ -188,8 +182,7 @@ fn serial_dot(a: &ArrayView1<f64>, b: &ArrayView1<f64>) -> f64 {
 ///   reciprocal overflows, is a contract violation reported as
 ///   [`PcgStop::BadPreconditioner`].
 /// * `refresh_period` — recompute `r ← rhs − A x` every `refresh_period`
-///   iterations to shed accumulated round-off; `0` disables refresh entirely
-///   (matching the GPU serial path).
+///   iterations to shed accumulated round-off; `0` disables refresh entirely.
 /// * `record_diagnostics` — when `true`, populate [`PcgCoreResult::diagnostics`]
 ///   with the per-iteration `alpha`/`beta`/residual trace.
 ///
@@ -1221,8 +1214,7 @@ mod tests {
 
     #[test]
     fn pcg_core_unpreconditioned_diagonal_one_iteration() {
-        // Unpreconditioned (precond=1) on diagonal A converges in one step,
-        // exactly as the GPU serial cg_solve did.
+        // Unpreconditioned (precond=1) on diagonal A converges in one step.
         let p = 8;
         let diag: Vec<f64> = (0..p).map(|i| 1.0 + i as f64).collect();
         let b: Vec<f64> = (0..p).map(|i| (i as f64) + 0.5).collect();
