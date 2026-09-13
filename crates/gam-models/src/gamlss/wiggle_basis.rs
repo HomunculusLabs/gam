@@ -3,7 +3,7 @@
 //! wiggle basis on the family's knots.
 //!
 //! A family declares only where its knots and degree live; the basis value
-//! and the first- to fifth-derivative contractions with the wiggle
+//! and the first- to fourth-derivative contractions with the wiggle
 //! coefficients are provided here once. Three families used to carry private
 //! copies of these seven methods (#2470).
 
@@ -93,35 +93,6 @@ pub(crate) trait MonotoneWiggleFamily {
         )?;
         wiggle_contraction_columns_match("fourth-derivative", d4.ncols(), beta_link_wiggle.len())?;
         Ok(d4.dot(&beta_link_wiggle))
-    }
-
-    /// The fourth-derivative basis `B⁽⁴⁾(q0)`.
-    fn wiggle_d4basis_constrained(
-        &self,
-        q0: ArrayView1<'_, f64>,
-    ) -> Result<Array2<f64>, String> {
-        monotone_wiggle_basis_with_derivative_order(
-            q0,
-            self.wiggle_knots(),
-            self.wiggle_degree(),
-            4,
-        )
-    }
-
-    /// `d⁵q/dq0⁵ = B⁽⁵⁾(q0)·β`.
-    fn wiggle_d5q_dq05(
-        &self,
-        q0: ArrayView1<'_, f64>,
-        beta_link_wiggle: ArrayView1<'_, f64>,
-    ) -> Result<Array1<f64>, String> {
-        let d5 = monotone_wiggle_basis_with_derivative_order(
-            q0,
-            self.wiggle_knots(),
-            self.wiggle_degree(),
-            5,
-        )?;
-        wiggle_contraction_columns_match("fifth-derivative", d5.ncols(), beta_link_wiggle.len())?;
-        Ok(d5.dot(&beta_link_wiggle))
     }
 }
 
