@@ -763,6 +763,20 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
             return Ok(Some(axes));
         }
 
+        // Flex without a time wiggle: the build-once sweep contracts each row's base once per
+        // primary axis instead of rebuilding it once per coefficient axis (gam#2893).
+        if !self.per_z_slope_active()
+            && self.effective_flex_active(block_states)?
+            && !self.flex_timewiggle_active()
+        {
+            let axes = self
+                .exact_newton_joint_hessian_second_directional_derivative_flex_no_wiggle_all_axes(
+                    block_states,
+                    d_beta_u_flat,
+                )?;
+            return Ok(Some(axes));
+        }
+
         let p = specs.iter().map(|spec| spec.design.ncols()).sum::<usize>();
         use rayon::iter::{IntoParallelIterator, ParallelIterator};
         let results: Vec<Result<Option<Array2<f64>>, String>> = (0..p)
