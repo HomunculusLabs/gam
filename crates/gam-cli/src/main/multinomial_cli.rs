@@ -2,8 +2,8 @@ use super::*;
 
 use gam::families::multinomial::{
     MULTINOMIAL_MODEL_CLASS, MultinomialFitRequest, MultinomialModelEnvelope,
-    MultinomialSavedModel, fit_penalized_multinomial_formula, predict_multinomial_formula,
-    predict_multinomial_formula_with_se,
+    MultinomialSavedModel, MultinomialSpreadDecline, fit_penalized_multinomial_formula,
+    predict_multinomial_formula, predict_multinomial_formula_with_se,
 };
 
 /// Peek a model file's JSON discriminator to detect a persisted multinomial
@@ -193,7 +193,9 @@ pub(crate) fn run_fit_multinomial(
 /// CSV with one `prob_<class>` column per training class (columns aligned to the
 /// saved `class_levels` order); with `--uncertainty`, appends per-class
 /// delta-method standard-error columns `prob_se_<class>` when the saved model
-/// carries the joint coefficient covariance.
+/// carries the joint coefficient covariance, and a `prob_se_decline` column. A
+/// row with no publishable standard error leaves its `prob_se_<class>` cells
+/// empty and names why in `prob_se_decline`; every other row publishes (#1082).
 pub(crate) fn run_predict_multinomial(args: &PredictArgs) -> Result<(), String> {
     let saved = load_multinomial_model(&args.model)?;
     let parsed = parse_formula(&saved.formula)?;
@@ -244,7 +246,7 @@ pub(crate) fn run_predict_multinomial(args: &PredictArgs) -> Result<(), String> 
         (probs, None)
     };
 
-    write_multinomial_prediction_csv(&args.out, &saved.class_levels, &probs, prob_se.as_ref())?;
+    write_multinomial_prediction_csv(&args.out, &saved.class_levels, &probs, prob_se.as_deref())?;
     if let Some((id_column, values)) = id_values.as_ref() {
         prepend_id_column_to_prediction_csv(&args.out, id_column, values)?;
     }
@@ -266,7 +268,7 @@ fn write_multinomial_prediction_csv(
     path: &Path,
     class_levels: &[String],
     probs: &Array2<f64>,
-    prob_se: Option<&Array2<f64>>,
+    prob_se: Option<&[Result<Array1<f64>, MultinomialSpreadDecline>]>,
 ) -> Result<(), String> {
     let mut wtr = WriterBuilder::new()
         .has_headers(true)
@@ -278,6 +280,7 @@ fn write_multinomial_prediction_csv(
         .collect();
     if prob_se.is_some() {
         headers.extend(class_levels.iter().map(|level| format!("prob_se_{level}")));
+        headers.push("prob_se_decline".to_string());
     }
     wtr.write_record(&headers)
         .map_err(|e| format!("failed to write csv header: {e}"))?;
@@ -286,7 +289,16 @@ fn write_multinomial_prediction_csv(
             .map(|j| format!("{:.12}", probs[[i, j]]))
             .collect();
         if let Some(se) = prob_se {
-            row.extend((0..se.ncols()).map(|j| format!("{:.12}", se[[i, j]])));
+            match &se[i] {
+                Ok(values) => {
+                    row.extend(values.iter().map(|value| format!("{value:.12}")));
+                    row.push(String::new());
+                }
+                Err(decline) => {
+                    row.extend(std::iter::repeat_n(String::new(), probs.ncols()));
+                    row.push(decline.to_string());
+                }
+            }
         }
         wtr.write_record(&row)
             .map_err(|e| format!("failed to write csv row {i}: {e}"))?;
@@ -294,4 +306,50 @@ fn write_multinomial_prediction_csv(
     wtr.flush()
         .map_err(|e| format!("failed to flush csv writer: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #1082: one row with no publishable standard error leaves the other rows'
+    /// standard errors in place, blanks only its own cells, and names why.
+    #[test]
+    fn a_declined_row_blanks_only_its_own_standard_errors_1082() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("predictions.csv");
+        let class_levels = vec!["a".to_string(), "b".to_string()];
+        let probs = ndarray::array![[0.3, 0.7], [0.5, 0.5], [0.9, 0.1]];
+        let prob_se = vec![
+            Ok(ndarray::array![0.1, 0.1]),
+            Err(MultinomialSpreadDecline {
+                class: 0,
+                variance: -0.02,
+                envelope: 2.5e-4,
+            }),
+            Ok(ndarray::array![0.02, 0.02]),
+        ];
+        write_multinomial_prediction_csv(&path, &class_levels, &probs, Some(prob_se.as_slice()))
+            .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 4, "{text}");
+        assert_eq!(lines[0], "prob_a,prob_b,prob_se_a,prob_se_b,prob_se_decline");
+        assert_eq!(
+            lines[1],
+            "0.300000000000,0.700000000000,0.100000000000,0.100000000000,"
+        );
+        let declined: Vec<&str> = lines[2].split(',').collect();
+        assert_eq!(declined.len(), 5, "{}", lines[2]);
+        assert_eq!(&declined[..4], &["0.500000000000", "0.500000000000", "", ""]);
+        assert!(
+            declined[4].contains("negative probability variance"),
+            "{}",
+            lines[2]
+        );
+        assert_eq!(
+            lines[3],
+            "0.900000000000,0.100000000000,0.020000000000,0.020000000000,"
+        );
+    }
 }

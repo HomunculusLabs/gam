@@ -2238,7 +2238,8 @@ impl MultinomialSavedModel {
     pub fn predict_probabilities_with_se(
         &self,
         x_new: ArrayView2<'_, f64>,
-    ) -> Result<(Array2<f64>, Array2<f64>), EstimationError> {
+    ) -> Result<(Array2<f64>, Vec<Result<Array1<f64>, MultinomialSpreadDecline>>), EstimationError>
+    {
         let (mean, standard_error, _) = self.predict_probabilities_with_se_and_source(x_new)?;
         Ok((mean, standard_error))
     }
@@ -2250,7 +2251,14 @@ impl MultinomialSavedModel {
     pub fn predict_probabilities_with_se_and_source(
         &self,
         x_new: ArrayView2<'_, f64>,
-    ) -> Result<(Array2<f64>, Array2<f64>, InferenceCovarianceMode), EstimationError> {
+    ) -> Result<
+        (
+            Array2<f64>,
+            Vec<Result<Array1<f64>, MultinomialSpreadDecline>>,
+            InferenceCovarianceMode,
+        ),
+        EstimationError,
+    > {
         let source = if self.smoothing_correction_flat.is_some() {
             InferenceCovarianceMode::SmoothingCorrected
         } else {
@@ -2309,15 +2317,31 @@ impl MultinomialSavedModel {
     /// positive definite has no second-order spread to publish, and declines with
     /// `EstimationError::PredictiveIntervalsDeclined`, carrying the quadratic's
     /// inertia. `predict_multinomial_formula` still publishes the means (#1082).
+    ///
+    /// Each row's standard errors come back on their own: `Ok` over the `K`
+    /// classes, or `Err` carrying why that row has none. One declined row never
+    /// withholds another row's standard errors (#1082).
     pub fn predict_probabilities_with_se_in_mode(
         &self,
         x_new: ArrayView2<'_, f64>,
         mode: InferenceCovarianceMode,
-    ) -> Result<(Array2<f64>, Array2<f64>), EstimationError> {
+    ) -> Result<(Array2<f64>, Vec<Result<Array1<f64>, MultinomialSpreadDecline>>), EstimationError>
+    {
+        let spread = self.predictive_spread_in_mode(x_new, mode)?;
+        Ok((spread.mean, spread.standard_error))
+    }
+
+    /// The posterior spread at fresh design rows under `mode`, with the typed
+    /// reason at each row that has none (#1082).
+    fn predictive_spread_in_mode(
+        &self,
+        x_new: ArrayView2<'_, f64>,
+        mode: InferenceCovarianceMode,
+    ) -> Result<PredictiveSpread, EstimationError> {
         let moments = self.predictive_moments(x_new, true)?;
         let conditional = crate::multinomial_predictive::predictive_standard_deviation(&moments)?;
-        match mode {
-            InferenceCovarianceMode::Conditional => Ok((moments.class_mean, conditional)),
+        let standard_error = match mode {
+            InferenceCovarianceMode::Conditional => conditional,
             InferenceCovarianceMode::SmoothingCorrected => {
                 let correction = self.smoothing_correction().ok_or_else(|| {
                     EstimationError::InvalidInput(
@@ -2330,13 +2354,25 @@ impl MultinomialSavedModel {
                 })?;
                 let smoothing_variance =
                     self.smoothing_variance_of_class_probability(x_new, correction.view())?;
-                let mut total = conditional;
-                for ((row, class), value) in total.indexed_iter_mut() {
-                    *value = (*value * *value + smoothing_variance[[row, class]]).sqrt();
-                }
-                Ok((moments.class_mean, total))
+                conditional
+                    .into_iter()
+                    .enumerate()
+                    .map(|(row, spread)| {
+                        spread.map(|mut deviation| {
+                            for (class, value) in deviation.iter_mut().enumerate() {
+                                *value = (*value * *value + smoothing_variance[[row, class]]).sqrt();
+                            }
+                            deviation
+                        })
+                    })
+                    .collect()
             }
-        }
+        };
+        Ok(PredictiveSpread {
+            mean: moments.class_mean,
+            standard_error,
+            mass_defect: moments.mass_defect,
+        })
     }
 
     /// `gᵀ C g` per (row, class): the response-scale variance the smoothing
@@ -2450,9 +2486,9 @@ impl MultinomialSavedModel {
     /// amount of extra work changes. What replaces it is a per-row exactness
     /// check the caller does not have to configure: `Σ_c E[p_c] = 1` is an
     /// identity of the estimand, so the deviation of the computed sum from one
-    /// IS the approximation's error at that row, and a row past
-    /// [`crate::multinomial_predictive::PREDICTIVE_MASS_DEFECT_TOLERANCE`] is
-    /// refused rather than published. See [`crate::multinomial_predictive`] for
+    /// IS the approximation's error at that row. Each row publishes it beside its
+    /// mean, and the interval surface declines a row whose missing mass exceeds
+    /// the interval's `α` (#1082). See [`crate::multinomial_predictive`] for
     /// why integrating `softmax` over `N(β̂, H⁻¹)` is not an approximation of
     /// this estimand at all.
     fn predictive_moments(
@@ -4556,14 +4592,74 @@ pub fn posterior_predict_multinomial_formula(
 /// Predict posterior-mean class probabilities and integrated marginal
 /// standard deviations for a saved multinomial model on fresh data, under the
 /// best covariance definition the model can support (see
-/// [`MultinomialSavedModel::predict_probabilities_with_se`]).
+/// [`MultinomialSavedModel::predict_probabilities_with_se`]). Each row's standard
+/// errors are `Ok`, or `Err` carrying why that row has none (#1082).
 pub fn predict_multinomial_formula_with_se(
     model: &MultinomialSavedModel,
     data: &EncodedDataset,
-) -> Result<(Array2<f64>, Array2<f64>), EstimationError> {
+) -> Result<(Array2<f64>, Vec<Result<Array1<f64>, MultinomialSpreadDecline>>), EstimationError> {
     model.validate()?;
     let x_dense = build_multinomial_predict_design(model, data)?;
     model.predict_probabilities_with_se(x_dense.view())
+}
+
+/// Why one prediction row has no publishable posterior standard deviation (#1082).
+///
+/// `E[p_c²] − E[p_c]²` at `class` is more negative than the row's own
+/// backward-error envelope: the two expansions disagree by more than the spread
+/// being reported, so a clamped `sd = 0` would be a lie. The decision is the
+/// row's own, and every other row publishes its standard errors.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MultinomialSpreadDecline {
+    pub class: usize,
+    pub variance: f64,
+    pub envelope: f64,
+}
+
+impl std::fmt::Display for MultinomialSpreadDecline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "class {} has negative probability variance {:e} beyond the row's backward-error \
+             envelope {:e}",
+            self.class, self.variance, self.envelope
+        )
+    }
+}
+
+/// Why one prediction row's `(1 − α)` interval was not published (#1082).
+///
+/// Decisions about the predictive's accuracy are per row: a row that declines
+/// costs only its own interval, and its mean is published either way.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MultinomialIntervalDecline {
+    /// The row's missing predictive mass `|Σ_c E[p_c(x)] − 1|` exceeds `α`. That
+    /// much of the row's posterior is unaccounted for by the expansion, so no
+    /// `(1 − α)` statement about where its probabilities lie can be certified.
+    MassDefectExceedsAlpha { mass_defect: f64, alpha: f64 },
+    /// The row has no publishable standard deviation to build an interval on.
+    SpreadDeclined(MultinomialSpreadDecline),
+}
+
+impl std::fmt::Display for MultinomialIntervalDecline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MassDefectExceedsAlpha { mass_defect, alpha } => write!(
+                f,
+                "its missing predictive mass {mass_defect:e} exceeds α = {alpha:e}, so no \
+                 (1 − α) interval can be certified"
+            ),
+            Self::SpreadDeclined(spread) => write!(f, "{spread}"),
+        }
+    }
+}
+
+/// The posterior spread at a block of rows: each row's standard errors, or the
+/// typed reason that row has none.
+struct PredictiveSpread {
+    mean: Array2<f64>,
+    standard_error: Vec<Result<Array1<f64>, MultinomialSpreadDecline>>,
+    mass_defect: Array1<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -4578,6 +4674,14 @@ pub struct MultinomialPredictionIntervals {
     /// `PredictUncertaintyResult::covariance_source`; see
     /// [`MultinomialSavedModel::predict_probabilities_with_se_in_mode`].
     pub covariance_source: InferenceCovarianceMode,
+    /// Per-row `|Σ_c E[p_c(x)] − 1|` before renormalisation, the predictive's
+    /// measured error at that row (see
+    /// [`crate::multinomial_predictive::MultinomialPredictiveMoments::mass_defect`]).
+    pub mass_defect: Array1<f64>,
+    /// `Some` exactly at the rows whose interval is not published, carrying the
+    /// reason. `standard_error`, `mean_lower` and `mean_upper` are NaN on those
+    /// rows; `mean` is published on every row.
+    pub declined: Vec<Option<MultinomialIntervalDecline>>,
 }
 
 /// Build a central posterior interval around the integrated logistic-normal
@@ -4633,24 +4737,47 @@ pub fn predict_multinomial_formula_with_intervals_in_mode(
     }
     model.validate()?;
     let x_dense = build_multinomial_predict_design(model, data)?;
-    let (mean, standard_error) =
-        model.predict_probabilities_with_se_in_mode(x_dense.view(), covariance_source)?;
+    let spread = model.predictive_spread_in_mode(x_dense.view(), covariance_source)?;
     let z = gam_math::probability::standard_normal_quantile(0.5 + 0.5 * level)
         .map_err(EstimationError::InvalidInput)?;
-    let mut mean_lower = mean.clone();
-    let mut mean_upper = mean.clone();
-    for ((row, class), &se) in standard_error.indexed_iter() {
-        let (lower, upper) = log_odds_interval(mean[[row, class]], se, z);
-        mean_lower[[row, class]] = lower;
-        mean_upper[[row, class]] = upper;
+    // A `(1 − α)` interval cannot be certified on a row whose missing predictive
+    // mass exceeds `α`; that row declines alone, and every other row publishes.
+    let alpha = 1.0 - level;
+    let (rows, k) = spread.mean.dim();
+    let mut standard_error = Array2::<f64>::from_elem((rows, k), f64::NAN);
+    let mut mean_lower = Array2::<f64>::from_elem((rows, k), f64::NAN);
+    let mut mean_upper = Array2::<f64>::from_elem((rows, k), f64::NAN);
+    let mut declined = Vec::with_capacity(rows);
+    for (row, spread_row) in spread.standard_error.iter().enumerate() {
+        let mass_defect = spread.mass_defect[row];
+        let decline = match spread_row {
+            Err(spread_decline) => Some(MultinomialIntervalDecline::SpreadDeclined(*spread_decline)),
+            Ok(deviation) => {
+                if mass_defect > alpha {
+                    Some(MultinomialIntervalDecline::MassDefectExceedsAlpha { mass_defect, alpha })
+                } else {
+                    for class in 0..k {
+                        standard_error[[row, class]] = deviation[class];
+                        let (lower, upper) =
+                            log_odds_interval(spread.mean[[row, class]], deviation[class], z);
+                        mean_lower[[row, class]] = lower;
+                        mean_upper[[row, class]] = upper;
+                    }
+                    None
+                }
+            }
+        };
+        declined.push(decline);
     }
     Ok(MultinomialPredictionIntervals {
-        mean,
+        mean: spread.mean,
         standard_error,
         mean_lower,
         mean_upper,
         level,
         covariance_source,
+        mass_defect: spread.mass_defect,
+        declined,
     })
 }
 

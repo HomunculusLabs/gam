@@ -1060,10 +1060,17 @@ fn multinomial_per_class_probability_se_intervals_are_calibrated_over_refits() {
             tol: 1e-9,
         })
         .expect("multinomial refit");
-        let (pp, pse) =
+        let (pp, pse_rows) =
             predict_multinomial_formula_with_se(&rmodel, &pt_data).expect("predict probs + SE");
         assert_eq!(pp.dim(), (fixed_pts.len(), 3), "predicted prob shape");
-        assert_eq!(pse.dim(), (fixed_pts.len(), 3), "predicted prob-SE shape");
+        assert_eq!(pse_rows.len(), fixed_pts.len(), "one prob-SE row per point");
+        let pse: Vec<ndarray::Array1<f64>> = pse_rows
+            .into_iter()
+            .enumerate()
+            .map(|(pi, spread)| {
+                spread.unwrap_or_else(|decline| panic!("pt {pi} published no prob-SE: {decline}"))
+            })
+            .collect();
 
         let rcol: Vec<usize> = (0..3)
             .map(|c| {
@@ -1081,7 +1088,7 @@ fn multinomial_per_class_probability_se_intervals_are_calibrated_over_refits() {
             for c_true in 0..3 {
                 let col = rcol[c_true];
                 let phat = pp[[pi, col]];
-                let se = pse[[pi, col]];
+                let se = pse[pi][col];
                 assert!(
                     se.is_finite() && se >= 0.0,
                     "prob-SE must be finite & non-negative (pt {pi} class {c_true} = {se})"

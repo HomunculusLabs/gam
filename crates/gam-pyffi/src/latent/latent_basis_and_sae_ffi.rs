@@ -1128,7 +1128,10 @@ fn predict_multinomial_formula_pyfunc<'py>(
 /// `class_levels`) plus the `level` used. Center and spread both come from the
 /// same deterministic logistic-normal posterior integral (SPEC 3: the estimand
 /// is `E[softmax(η) | data]`, never the plug-in `softmax(E[η])`); a model
-/// without stored posterior covariance is a typed error.
+/// without stored posterior covariance is a typed error. Every row also carries
+/// its measured `mass_defect`, and `declined[row]` is `None` where the row's
+/// interval published, or a dict naming why it did not (#1082); a declined row's
+/// `prob_se`, `mean_lower` and `mean_upper` are NaN.
 #[pyfunction(signature = (model_bytes, headers, rows, level = 0.95))]
 fn predict_multinomial_intervals_pyfunc<'py>(
     py: Python<'py>,
@@ -1163,6 +1166,32 @@ fn predict_multinomial_intervals_pyfunc<'py>(
     // own measured provenance rather than a constant that was true when it was
     // written.
     out.set_item("covariance_source", intervals.covariance_source.as_str())?;
+    out.set_item("mass_defect", intervals.mass_defect.into_pyarray(py))?;
+    let declined = PyList::empty(py);
+    for decline in &intervals.declined {
+        match decline {
+            None => declined.append(py.None())?,
+            Some(gam::families::multinomial::MultinomialIntervalDecline::MassDefectExceedsAlpha {
+                mass_defect,
+                alpha,
+            }) => {
+                let item = PyDict::new(py);
+                item.set_item("reason", "mass_defect_exceeds_alpha")?;
+                item.set_item("mass_defect", *mass_defect)?;
+                item.set_item("alpha", *alpha)?;
+                declined.append(item)?;
+            }
+            Some(gam::families::multinomial::MultinomialIntervalDecline::SpreadDeclined(spread)) => {
+                let item = PyDict::new(py);
+                item.set_item("reason", "negative_variance")?;
+                item.set_item("class", spread.class)?;
+                item.set_item("variance", spread.variance)?;
+                item.set_item("envelope", spread.envelope)?;
+                declined.append(item)?;
+            }
+        }
+    }
+    out.set_item("declined", declined)?;
     Ok(out.unbind())
 }
 

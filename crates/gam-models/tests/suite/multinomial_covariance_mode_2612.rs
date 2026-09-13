@@ -22,8 +22,9 @@ use csv::StringRecord;
 use gam_data::encode_recordswith_inferred_schema;
 use gam_models::fit_orchestration::FitConfig;
 use gam_models::multinomial::{
-    InferenceCovarianceMode, MultinomialFitRequest, MultinomialSavedModel,
-    fit_penalized_multinomial_formula,
+    InferenceCovarianceMode, MultinomialFitRequest, MultinomialIntervalDecline,
+    MultinomialSavedModel, MultinomialSpreadDecline, fit_penalized_multinomial_formula,
+    predict_multinomial_formula, predict_multinomial_formula_with_intervals,
 };
 
 const N: usize = 220;
@@ -104,6 +105,26 @@ fn softmax_with_reference(eta: &[f64]) -> Vec<f64> {
     out
 }
 
+/// The per-row standard errors as one `(R, K)` array. Every row of this fixture
+/// publishes its spread, so a declined row is a failure here, named with its reason.
+fn published_standard_errors(
+    rows: Vec<Result<ndarray::Array1<f64>, MultinomialSpreadDecline>>,
+) -> ndarray::Array2<f64> {
+    let published: Vec<ndarray::Array1<f64>> = rows
+        .into_iter()
+        .enumerate()
+        .map(|(row, spread)| {
+            spread.unwrap_or_else(|decline| {
+                panic!("row {row} published no standard error on this fixture: {decline}")
+            })
+        })
+        .collect();
+    let classes = published.first().map_or(0, |spread| spread.len());
+    ndarray::Array2::from_shape_fn((published.len(), classes), |(row, class)| {
+        published[row][class]
+    })
+}
+
 #[test]
 fn the_correction_reaches_the_response_scale_and_widens_the_band_2612() {
     let model = fit_smooth_three_class(11);
@@ -113,12 +134,14 @@ fn the_correction_reaches_the_response_scale_and_widens_the_band_2612() {
     let (mean_conditional, se_conditional) = model
         .predict_probabilities_with_se_in_mode(x.view(), InferenceCovarianceMode::Conditional)
         .expect("conditional band");
+    let se_conditional = published_standard_errors(se_conditional);
     let (mean_corrected, se_corrected) = model
         .predict_probabilities_with_se_in_mode(
             x.view(),
             InferenceCovarianceMode::SmoothingCorrected,
         )
         .expect("corrected band");
+    let se_corrected = published_standard_errors(se_corrected);
 
     // The CENTRE is the same estimand under both modes — only the spread carries
     // the smoothing uncertainty. A mode that also moved the mean would be a
@@ -285,5 +308,117 @@ fn a_requested_correction_a_model_does_not_carry_is_an_error_2612() {
         InferenceCovarianceMode::Conditional,
         "a model without a correction must report the definition it actually used"
     );
+}
+
+/// #1082: decisions about the predictive's missing mass are per row. Every row
+/// publishes its renormalized mean and its measured defect `d_row`, and a
+/// `(1 − α)` interval declines, typed, exactly on the rows with `d_row > α`,
+/// because that much of the row's posterior is unaccounted for. The worst row
+/// declines at `α = d_max/2` and publishes at `α = 2·d_max`, and every other row
+/// follows the same rule at both levels.
+#[test]
+fn a_row_whose_missing_mass_exceeds_alpha_declines_only_its_own_interval_1082() {
+    let model = fit_smooth_three_class(11);
+    let data = encode_recordswith_inferred_schema(
+        vec!["x".to_string(), "y".to_string()],
+        smooth_three_class(11),
+    )
+    .expect("encode three-class dataset");
+    let means =
+        predict_multinomial_formula(&model, &data).expect("point means publish for every row");
+    let measured = predict_multinomial_formula_with_intervals(&model, &data, 0.95)
+        .expect("the interval surface publishes on this fixture");
+    assert_eq!(
+        measured.mass_defect.len(),
+        means.nrows(),
+        "one measured defect per row"
+    );
+    let mut worst_row = 0usize;
+    let mut worst = 0.0_f64;
+    for (row, &defect) in measured.mass_defect.iter().enumerate() {
+        if defect > worst {
+            worst = defect;
+            worst_row = row;
+        }
+    }
+    assert!(
+        worst > 0.0 && worst < 0.5,
+        "premise: the fixture's worst row has a resolvable defect below one half, got {worst:e}"
+    );
+
+    for requested_alpha in [0.5 * worst, 2.0 * worst] {
+        let intervals =
+            predict_multinomial_formula_with_intervals(&model, &data, 1.0 - requested_alpha)
+                .expect("per-row intervals");
+        assert_eq!(
+            intervals.mean, means,
+            "the interval route must publish the point route's means on every row"
+        );
+        // The α production judges at is `1 − level`, which is `requested_alpha` only
+        // to rounding.
+        let alpha = 1.0 - intervals.level;
+        let mut published = 0usize;
+        for (row, decline) in intervals.declined.iter().enumerate() {
+            let defect = intervals.mass_defect[row];
+            match decline {
+                Some(MultinomialIntervalDecline::MassDefectExceedsAlpha {
+                    mass_defect,
+                    alpha: carried,
+                }) => {
+                    assert!(
+                        defect > alpha,
+                        "row {row} declined with defect {defect:e} ≤ α = {alpha:e}"
+                    );
+                    assert_eq!(
+                        (*mass_defect, *carried),
+                        (defect, alpha),
+                        "row {row}'s decline must carry its own defect and the α it was judged at"
+                    );
+                    for values in [
+                        &intervals.mean_lower,
+                        &intervals.mean_upper,
+                        &intervals.standard_error,
+                    ] {
+                        assert!(
+                            values.row(row).iter().all(|value| value.is_nan()),
+                            "declined row {row} must publish no interval numbers"
+                        );
+                    }
+                }
+                Some(other) => panic!(
+                    "row {row} declined for a reason other than its missing mass: {other:?}"
+                ),
+                None => {
+                    assert!(
+                        defect <= alpha,
+                        "row {row} published with defect {defect:e} > α = {alpha:e}"
+                    );
+                    for values in [&intervals.mean_lower, &intervals.mean_upper] {
+                        assert!(
+                            values.row(row).iter().all(|value| value.is_finite()),
+                            "published row {row} must carry a finite interval"
+                        );
+                    }
+                    published += 1;
+                }
+            }
+        }
+        if requested_alpha < worst {
+            assert!(
+                intervals.declined[worst_row].is_some(),
+                "the worst row (defect {worst:e}) must decline at α = {alpha:e}"
+            );
+            assert!(
+                published > 0,
+                "premise: some row's defect is at most half the worst, so the decline is per row"
+            );
+        } else {
+            assert_eq!(
+                published,
+                means.nrows(),
+                "no row's defect exceeds twice the worst, so every interval publishes at α = {alpha:e}"
+            );
+        }
+    }
 }
 

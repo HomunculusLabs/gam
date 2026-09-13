@@ -46,8 +46,10 @@
 //! The identity `Σ_c E[p_c(x)] = 1` is exact for the true integrals, so the
 //! deviation of the computed `Σ_c` from one is a MEASURED accuracy statement
 //! about this approximation, available at every prediction row and requiring no
-//! reference. [`MultinomialPredictiveModel`] refuses rather than publishing a
-//! row whose mass defect exceeds [`PREDICTIVE_MASS_DEFECT_TOLERANCE`].
+//! reference. Every row publishes its renormalised mean together with that
+//! defect (see [`MultinomialPredictiveMoments::mass_defect`]), and the decisions
+//! it drives are per row: a `(1 − α)` interval is declined exactly on the rows
+//! whose missing mass exceeds `α`.
 //!
 //! The same machinery supplies the second moments the standard-error surface
 //! consumes, with two extra rows instead of one:
@@ -88,34 +90,6 @@
 use crate::model_types::EstimationError;
 use gam_linalg::faer_ndarray::{FaerCholesky, FaerEigh};
 use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2};
-
-/// Largest tolerated deviation of `Σ_c E[p_c(x)]` from one before a prediction
-/// row is refused.
-///
-/// This is not a fudge factor on the answer: the sum is an EXACT identity of the
-/// estimand, so its deviation is the approximation's own error, measured at the
-/// row being published.
-///
-/// The value is set from what the defect is worth as a predictor of the error
-/// that survives renormalisation, which is measured rather than assumed. Two
-/// independent fixtures:
-///
-/// ```text
-///   K = 3, p = 10, asymmetric quasi-separated, MCMC truth
-///       worst-row defect 1.37e-2   worst-row error after normalising 4.4e-3   (3.1x)
-///   K = 2, p = 2,  quasi-separated, exact 2-D quadrature truth
-///       worst-row defect 4.93e-3   worst-row error after normalising 5.2e-4   (9.5x)
-/// ```
-///
-/// So the defect OVER-states the published error by roughly 3-10x, and a bar at
-/// `5e-2` refuses where the published probability would be wrong by more than
-/// about `1e-2` — the second decimal of a probability, which is the right place
-/// to stop publishing one. A tighter bar would refuse rows whose answers are
-/// good to four decimals; a looser one would publish a probability wrong in its
-/// first. A refusal here is a real statement — the posterior at that row is not
-/// described by either Laplace expansion well enough — and it is louder and more
-/// useful than a number nobody can bound.
-pub const PREDICTIVE_MASS_DEFECT_TOLERANCE: f64 = 5.0e-2;
 
 /// The training data and penalty a saved multinomial model needs in order to
 /// evaluate its own log-posterior away from the mode.
@@ -179,7 +153,21 @@ pub struct MultinomialPredictiveMoments {
     /// moments were requested.
     pub class_second_moment: Option<Array3<f64>>,
     /// Per-row `|Σ_c E[p_c] − 1|` BEFORE renormalisation — the approximation's
-    /// own measured error at that row.
+    /// own measured error at that row, published beside the renormalised mean.
+    ///
+    /// It over-states the error that survives renormalisation. Two independent
+    /// fixtures measured by how much:
+    ///
+    /// ```text
+    ///   K = 3, p = 10, asymmetric quasi-separated, MCMC truth
+    ///       worst-row defect 1.37e-2   worst-row error after normalising 4.4e-3   (3.1x)
+    ///   K = 2, p = 2,  quasi-separated, exact 2-D quadrature truth
+    ///       worst-row defect 4.93e-3   worst-row error after normalising 5.2e-4   (9.5x)
+    /// ```
+    ///
+    /// No block of rows is refused on it. A `(1 − α)` interval cannot be certified
+    /// on a row whose missing mass exceeds `α`, so that row's interval is declined
+    /// and every other row's is published (#1082).
     pub mass_defect: Array1<f64>,
 }
 
@@ -796,13 +784,6 @@ impl<'a> MultinomialPredictiveModel<'a> {
         } else {
             None
         };
-        // `(row, mass, defect)` of the worst row over tolerance, and how many
-        // rows are over it. The refusal below is raised from these rather than
-        // from the first row that trips, so it states the estimand's accuracy
-        // over the whole block instead of naming one witness.
-        let mut worst_defect: Option<(usize, f64, f64)> = None;
-        let mut over_tolerance_rows = 0usize;
-
         for row in 0..rows {
             let design_row = x_new.row(row);
             let mut raw = vec![0.0_f64; k];
@@ -823,18 +804,6 @@ impl<'a> MultinomialPredictiveModel<'a> {
                 );
             }
             mass_defect[row] = (total - 1.0).abs();
-            if mass_defect[row] > PREDICTIVE_MASS_DEFECT_TOLERANCE {
-                // Recorded, not raised — see the refusal after the loop. Stopping
-                // here would report an EXAMPLE where the estimand's own accuracy
-                // statement is a MEASUREMENT: "row 46 is bad" and "3 of 86 rows
-                // are bad, the worst at 7.2e-2, the 90th percentile at 4e-3" are
-                // different findings, and the first cannot be told from the
-                // second by a caller who only ever sees the first bad row.
-                if worst_defect.is_none_or(|(_, _, defect)| defect < mass_defect[row]) {
-                    worst_defect = Some((row, total, mass_defect[row]));
-                }
-                over_tolerance_rows += 1;
-            }
             for class in 0..k {
                 class_mean[[row, class]] = raw[class] / total;
             }
@@ -877,31 +846,6 @@ impl<'a> MultinomialPredictiveModel<'a> {
             }
         }
 
-        if let Some((row, mass, defect)) = worst_defect {
-            // The distribution, not just the extreme: a block where one row in
-            // eighty-six is over and the rest are at `1e-4` is a statement about
-            // that row, while a block where a third of the rows are over is a
-            // statement about the fit. Those need different repairs and used to
-            // print identically.
-            let mut sorted: Vec<f64> = mass_defect.iter().copied().collect();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let quantile = |q: f64| -> f64 {
-                let index = ((sorted.len() - 1) as f64 * q).round() as usize;
-                sorted[index]
-            };
-            crate::bail_invalid_estim!(
-                "multinomial predictive: {over_tolerance_rows} of {rows} row(s) exceed the \
-                 predictive mass-defect tolerance {tol:e}; the posterior at those rows is not \
-                 described by either Laplace expansion well enough to publish a probability. \
-                 Worst row {row} has predictive mass {mass} (|Σ_c E[p_c] − 1| = {defect:e}). \
-                 Defect over the block: median {median:e}, 90th percentile {p90:e}, max {max:e}",
-                tol = PREDICTIVE_MASS_DEFECT_TOLERANCE,
-                median = quantile(0.5),
-                p90 = quantile(0.9),
-                max = quantile(1.0),
-            );
-        }
-
         Ok(MultinomialPredictiveMoments {
             class_mean,
             class_second_moment: second,
@@ -911,23 +855,29 @@ impl<'a> MultinomialPredictiveModel<'a> {
 }
 
 /// Per-class posterior standard deviation of the probability, from the moments
-/// above: `sd(p_c) = sqrt(E[p_c²] − E[p_c]²)`.
+/// above: `sd(p_c) = sqrt(E[p_c²] − E[p_c]²)`, with the typed reason at each row
+/// that has none.
 ///
-/// A materially negative variance is refused rather than clamped: `E[p_c²]` and
+/// A materially negative variance is declined rather than clamped: `E[p_c²]` and
 /// `E[p_c]` come from two different ratios, so a negative difference means the
 /// two expansions disagree by more than the quantity being reported, which is
-/// exactly the situation in which a clamped `sd = 0` would be a lie.
+/// exactly the situation in which a clamped `sd = 0` would be a lie. The decision
+/// is the row's own: that row returns its decline, and every other row returns
+/// its standard deviations.
 pub(crate) fn predictive_standard_deviation(
     moments: &MultinomialPredictiveMoments,
-) -> Result<Array2<f64>, EstimationError> {
+) -> Result<Vec<Result<Array1<f64>, crate::multinomial::MultinomialSpreadDecline>>, EstimationError>
+{
     let second = moments.class_second_moment.as_ref().ok_or_else(|| {
         EstimationError::InvalidInput(
             "multinomial predictive standard deviation requires second moments".to_string(),
         )
     })?;
     let (rows, k) = moments.class_mean.dim();
-    let mut sd = Array2::<f64>::zeros((rows, k));
+    let mut out = Vec::with_capacity(rows);
     for row in 0..rows {
+        let mut deviation = Array1::<f64>::zeros(k);
+        let mut declined = None;
         for class in 0..k {
             let mean = moments.class_mean[[row, class]];
             let variance = second[[row, class, class]] - mean * mean;
@@ -944,13 +894,54 @@ pub(crate) fn predictive_standard_deviation(
             let envelope =
                 bound * moments.mass_defect[row].max(16.0 * f64::EPSILON);
             if variance < -envelope {
-                crate::bail_invalid_estim!(
-                    "multinomial predictive: row {row} class {class} has negative probability \
-                     variance {variance:e} (mean {mean}, backward-error envelope {envelope:e})"
-                );
+                declined = Some(crate::multinomial::MultinomialSpreadDecline {
+                    class,
+                    variance,
+                    envelope,
+                });
+                break;
             }
-            sd[[row, class]] = variance.max(0.0).sqrt();
+            deviation[class] = variance.max(0.0).sqrt();
         }
+        out.push(match declined {
+            Some(decline) => Err(decline),
+            None => Ok(deviation),
+        });
     }
-    Ok(sd)
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #1082: a row whose second moments disagree with its mean beyond its own
+    /// envelope declines alone, and the rows around it publish their standard
+    /// deviations.
+    #[test]
+    fn a_negative_variance_row_declines_only_its_own_spread_1082() {
+        let class_mean = ndarray::array![[0.3, 0.7], [0.5, 0.5], [0.9, 0.1]];
+        let mut second = Array3::<f64>::zeros((3, 2, 2));
+        second[[0, 0, 0]] = 0.3 * 0.3 + 0.01;
+        second[[0, 1, 1]] = 0.7 * 0.7 + 0.01;
+        second[[1, 0, 0]] = 0.5 * 0.5 - 0.02;
+        second[[1, 1, 1]] = 0.5 * 0.5 + 0.01;
+        second[[2, 0, 0]] = 0.9 * 0.9 + 4.0e-4;
+        second[[2, 1, 1]] = 0.1 * 0.1 + 4.0e-4;
+        let moments = MultinomialPredictiveMoments {
+            class_mean,
+            class_second_moment: Some(second),
+            mass_defect: ndarray::array![1.0e-4, 1.0e-3, 1.0e-4],
+        };
+        let rows = predictive_standard_deviation(&moments).unwrap();
+        assert_eq!(rows.len(), 3);
+        let first = rows[0].as_ref().unwrap();
+        assert!((first[0] - 0.1).abs() < 1e-12 && (first[1] - 0.1).abs() < 1e-12, "{first}");
+        let decline = rows[1].as_ref().unwrap_err();
+        assert_eq!(decline.class, 0);
+        assert!((decline.variance + 0.02).abs() < 1e-12, "{decline}");
+        assert!((decline.envelope - 0.25 * 1.0e-3).abs() < 1e-18, "{decline}");
+        let third = rows[2].as_ref().unwrap();
+        assert!((third[0] - 0.02).abs() < 1e-12 && (third[1] - 0.02).abs() < 1e-12, "{third}");
+    }
 }

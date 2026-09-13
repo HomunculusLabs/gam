@@ -416,6 +416,8 @@ fn multinomial_payload_field_audits(payload: &MultinomialPredictionIntervals) ->
         mean_upper,
         level,
         covariance_source,
+        mass_defect,
+        declined,
     } = payload;
     std::hint::black_box((
         mean,
@@ -424,6 +426,8 @@ fn multinomial_payload_field_audits(payload: &MultinomialPredictionIntervals) ->
         mean_upper,
         level,
         covariance_source,
+        mass_defect,
+        declined,
     ));
     vec![
         FieldAudit::point("mean"),
@@ -434,6 +438,10 @@ fn multinomial_payload_field_audits(payload: &MultinomialPredictionIntervals) ->
         // Provenance of the band, not a band: the same disposition
         // `SurvivalPredictResult::covariance_source` carries (gam#2612).
         FieldAudit::point("covariance_source"),
+        // The predictive's measured per-row error and the per-row declines it
+        // drives: statements about where a band exists, not a band (#1082).
+        FieldAudit::point("mass_defect"),
+        FieldAudit::point("declined"),
     ]
 }
 
@@ -551,6 +559,8 @@ fn multinomial_probe() -> MultinomialPredictionIntervals {
         mean_upper: one,
         level: 0.95,
         covariance_source: InferenceCovarianceMode::SmoothingCorrected,
+        mass_defect: ndarray::Array1::<f64>::zeros(1),
+        declined: vec![None],
     }
 }
 
