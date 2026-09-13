@@ -2489,13 +2489,46 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
     // inside its quadrature.  Build the low-rank Ritz correction once per
     // evaluation on the raw reduced operator, then install it on an
     // evaluation-local system clone consumed by every power/CG/value/derivative
-    // apply.  Majorizer and plain-SPD lanes retain the original system exactly.
+    // apply.  Plain-SPD lanes retain the original system exactly.
     let rational_exact_a = lane.is_some()
         && matches!(
             options.evidence_policy,
             ArrowEvidencePolicy::UnitDeflationRefusingIndefinite { .. }
         );
-    let mut classified_system = if rational_exact_a {
+    // #2731 — a majorizer lane headed for the rational ladder under `UnitDeflation`
+    // pins its numerically null Ritz directions at unit stiffness the same way, with the
+    // floor `slq_logdet_unit_deflated` applies. A lane the caller admits dense
+    // unit-deflates off the raw operator's own eigendecomposition, so it keeps the
+    // original system.
+    let rational_unit_deflation = match options.evidence_policy {
+        ArrowEvidencePolicy::UnitDeflation { relative_floor }
+            if lane.is_some() && !dense_reduced_schur_admitted =>
+        {
+            Some(relative_floor)
+        }
+        _ => None,
+    };
+    let mut classified_system = if let Some(relative_floor) = rational_unit_deflation {
+        let raw_op = ReducedSchurOperator::new(
+            sys,
+            &htt_factors,
+            ridge_beta,
+            &backend,
+            resident.as_ref(),
+        )
+        .with_gpu_matvec(gpu_matvec);
+        let conditioning = unit_deflation_ritz_conditioning(
+            sys.k,
+            |direction| raw_op.apply(direction),
+            relative_floor,
+            slq_lanczos_steps,
+            slq_seed,
+        )
+        .map_err(|reason| ArrowSchurError::SchurFactorFailed { reason })?;
+        let mut classified = sys.clone();
+        classified.exact_a_reduced_conditioning = Some(conditioning);
+        Some(classified)
+    } else if rational_exact_a {
         if sys.exact_a_classification.is_none() {
             return Err(ArrowSchurError::SchurFactorFailed {
                 reason: "rational exact-A evidence policy requires the raw B/delta/clamp \
@@ -2606,6 +2639,7 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
                                 cfg.rel_tol,
                                 dim,
                                 slq_seed,
+                                options.evidence_policy,
                             )?
                         }
                         _ => false,
@@ -2911,6 +2945,7 @@ fn dense_lane_reduced_schur_log_det<B: BatchedBlockSolver + Sync>(
                 rel_tol,
                 dim,
                 seed,
+                evidence_policy,
             )?,
             _ => false,
         };
@@ -2991,6 +3026,7 @@ fn price_certified_bottom_mode<B: BatchedBlockSolver + Sync>(
     rel_tol: f64,
     max_steps: usize,
     seed: u64,
+    evidence_policy: ArrowEvidencePolicy,
 ) -> Result<bool, ArrowSchurError> {
     let Some(lambda_max) = reduced_schur_lambda_max(
         classified,
@@ -3051,45 +3087,59 @@ fn price_certified_bottom_mode<B: BatchedBlockSolver + Sync>(
             .with_gpu_matvec(gpu_matvec)
             .apply(direction.view()),
     );
-    let (majorizer, clamp) =
-        exact_a_reduced_direction_metrics(sys, htt_factors, ridge_beta, direction.view())?;
-    let priced = match classify_exact_a_direction(
-        raw,
-        sys.k,
-        lambda_max.max(raw.abs()),
-        majorizer,
-        clamp,
-    ) {
-        ExactADirectionClassification::NumericalNull => 1.0,
-        ExactADirectionClassification::ClampBasin { curvature } => curvature,
-        ExactADirectionClassification::Saddle { curvature, basin } => {
-            return Err(ArrowSchurError::SchurFactorFailed {
-                reason: format!(
-                    "matrix-free reduced-Schur {}: the rational ladder's bottom mode, missed by \
-                     its fixed-step conditioning, has raw exact-A curvature {curvature:.6e} and \
-                     clamp basin {basin:.6e}; the shared majorizer-metric classifier declares a \
-                     genuine saddle (#2731/#2515)",
-                    ArrowSchurError::indefinite_evidence_marker(),
-                ),
-            });
-        }
-        ExactADirectionClassification::ResolvedPositive { curvature } => {
-            return Err(ArrowSchurError::SchurFactorFailed {
-                reason: format!(
-                    "rational exact-A conditioning: the conditioned operator certifies curvature \
-                     {:.6e} along a direction whose raw exact-A curvature {curvature:.6e} \
-                     resolves positive, so the carrier and the operator disagree",
-                    mode.curvature
-                ),
-            });
-        }
+    let priced = if let ArrowEvidencePolicy::UnitDeflation { .. } = evidence_policy {
+        // #2731 — under `UnitDeflation` the evidence operator is a PSD majorizer, so a
+        // certified negative mode is a numerically null direction: unit stiffness, as
+        // `unit_deflation_ritz_conditioning` pins the modes it resolves.
+        log::info!(
+            "[rational unit deflation] pinned a bottom mode its fixed-step conditioning \
+             missed at unit stiffness: raw curvature {raw:.6e} ({} directions pinned)",
+            directions.len() + 1
+        );
+        1.0
+    } else {
+        let (majorizer, clamp) =
+            exact_a_reduced_direction_metrics(sys, htt_factors, ridge_beta, direction.view())?;
+        let priced = match classify_exact_a_direction(
+            raw,
+            sys.k,
+            lambda_max.max(raw.abs()),
+            majorizer,
+            clamp,
+        ) {
+            ExactADirectionClassification::NumericalNull => 1.0,
+            ExactADirectionClassification::ClampBasin { curvature } => curvature,
+            ExactADirectionClassification::Saddle { curvature, basin } => {
+                return Err(ArrowSchurError::SchurFactorFailed {
+                    reason: format!(
+                        "matrix-free reduced-Schur {}: the rational ladder's bottom mode, missed \
+                         by its fixed-step conditioning, has raw exact-A curvature \
+                         {curvature:.6e} and clamp basin {basin:.6e}; the shared \
+                         majorizer-metric classifier declares a genuine saddle (#2731/#2515)",
+                        ArrowSchurError::indefinite_evidence_marker(),
+                    ),
+                });
+            }
+            ExactADirectionClassification::ResolvedPositive { curvature } => {
+                return Err(ArrowSchurError::SchurFactorFailed {
+                    reason: format!(
+                        "rational exact-A conditioning: the conditioned operator certifies \
+                         curvature {:.6e} along a direction whose raw exact-A curvature \
+                         {curvature:.6e} resolves positive, so the carrier and the operator \
+                         disagree",
+                        mode.curvature
+                    ),
+                });
+            }
+        };
+        log::info!(
+            "[rational exact-A] priced a bottom mode its fixed-step conditioning missed: raw \
+             curvature {raw:.6e}, majorizer {majorizer:.6e}, clamp {clamp:.6e}, priced \
+             {priced:.6e} ({} directions priced)",
+            directions.len() + 1
+        );
+        priced
     };
-    log::info!(
-        "[rational exact-A] priced a bottom mode its fixed-step conditioning missed: raw \
-         curvature {raw:.6e}, majorizer {majorizer:.6e}, clamp {clamp:.6e}, priced \
-         {priced:.6e} ({} directions priced)",
-        directions.len() + 1
-    );
     directions.push(direction);
     shifts.push(priced - raw);
     classified.exact_a_reduced_conditioning = Some(ExactAReducedRitzConditioning {

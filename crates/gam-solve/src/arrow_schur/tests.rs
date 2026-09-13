@@ -4653,6 +4653,59 @@ fn a_unit_deflated_dense_lane_pins_a_null_reduced_schur_direction_2731() {
     );
 }
 
+/// #2731 — a lane headed for the rational ladder under `UnitDeflation` pins a numerically
+/// null reduced-Schur Ritz direction at unit stiffness before the ladder solves, as SLQ
+/// and the dense route do. Negative control: without that policy the same null direction
+/// does not price `log 1 = 0`.
+#[test]
+fn a_unit_deflated_rational_lane_pins_a_null_reduced_schur_direction_2731() {
+    // One row, d = 1, k = 2: `H_tt = 1`, `H_tβ = [1, 0]`, `H_ββ = diag(1, 3)`, so the
+    // reduced Schur is `diag(0, 3)`, with one exactly null direction. Two Lanczos steps
+    // resolve both Ritz pairs of this operator.
+    let mut sys = ArrowSchurSystem::new(1, 1, 2);
+    sys.rows[0].htt[[0, 0]] = 1.0;
+    sys.rows[0].htbeta[[0, 0]] = 1.0;
+    sys.hbb[[0, 0]] = 1.0;
+    sys.hbb[[1, 1]] = 3.0;
+    let config = SurrogateLaneConfig {
+        num_probes: 4,
+        seed: 0x2731,
+        rel_tol: 1.0e-10,
+        cg_rel_tol: 1.0e-12,
+        deflation_subspace_iters: 1,
+        deflation_target_std_err_rel: 1.0,
+    };
+
+    let deflated =
+        ArrowSolveOptions::direct().with_evidence_unit_deflation(SPECTRAL_DEFLATION_REL_FLOOR);
+    let mut lane = SurrogateLaneState::new(config.clone());
+    let evaluated = matrix_free_arrow_evidence_evaluation(
+        &sys, 0.0, 0.0, &deflated, 4, 2, 0x2731, &mut lane, false,
+    )
+    .expect("a unit-deflated rational lane must price the null direction at log 1 = 0");
+    assert!(
+        lane.plan().is_some(),
+        "the unadmitted lane must have frozen a rational plan"
+    );
+    assert!(
+        (evaluated.log_det_schur - 3.0_f64.ln()).abs() <= 1.0e-6,
+        "log|S| with the null direction pinned must be ln 3, got {}",
+        evaluated.log_det_schur
+    );
+
+    let strict = ArrowSolveOptions::direct().with_positive_definite_evidence();
+    let mut strict_lane = SurrogateLaneState::new(config);
+    let unconditioned = matrix_free_arrow_evidence_evaluation(
+        &sys, 0.0, 0.0, &strict, 4, 2, 0x2731, &mut strict_lane, false,
+    );
+    assert!(
+        unconditioned
+            .as_ref()
+            .map_or(true, |evaluation| (evaluation.log_det_schur - 3.0_f64.ln()).abs() > 1.0e-3),
+        "without unit deflation the null direction must not price log 1 = 0"
+    );
+}
+
 /// Dense reference `tr(S⁻¹)` from the lower-Cholesky factor `S = L Lᵀ`:
 /// `tr(S⁻¹) = tr(L⁻ᵀ L⁻¹) = ‖L⁻¹‖_F²`, with each `L⁻¹` column solved by forward
 /// substitution (`L y = e_c`). Self-contained oracle for the matrix-free

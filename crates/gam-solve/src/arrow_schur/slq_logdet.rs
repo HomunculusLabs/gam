@@ -592,6 +592,70 @@ pub(crate) fn exact_a_ritz_conditioning(
     })
 }
 
+/// #2731 — the low-rank operator correction a rational lane under
+/// `ArrowEvidencePolicy::UnitDeflation` consumes, from the same deterministic Lanczos
+/// eigensystem [`exact_a_ritz_conditioning`] builds. That policy carries no classifier:
+/// its evidence operator is a PSD majorizer, so every Ritz value under
+/// `relative_floor · max|θ| · (1 − SPECTRAL_DEFLATION_HYSTERESIS_FRACTION)`, negative ones
+/// included, is a numerically null direction. Each such direction is shifted from its
+/// Ritz curvature to unit stiffness with the floor and the one-sided rule
+/// `slq_logdet_unit_deflated` and the dense evidence unit deflation apply, so the
+/// rational ladder solves a positive-definite operator whose null directions price
+/// `log 1 = 0`.
+pub(crate) fn unit_deflation_ritz_conditioning(
+    dim: usize,
+    matvec: impl Fn(ArrayView1<f64>) -> Array1<f64> + Sync,
+    relative_floor: f64,
+    lanczos_steps: usize,
+    seed: u64,
+) -> Result<ExactAReducedRitzConditioning, String> {
+    if dim == 0 {
+        return Ok(ExactAReducedRitzConditioning {
+            directions: Arc::from([] as [Array1<f64>; 0]),
+            shifts: Arc::from([] as [f64; 0]),
+        });
+    }
+    if !(relative_floor.is_finite() && relative_floor > 0.0) {
+        return Err(format!(
+            "unit-deflation rational conditioning needs a finite positive relative floor, got \
+             {relative_floor:.3e}"
+        ));
+    }
+    let options = slq_lanczos_options(lanczos_steps.max(1).min(dim));
+    let mut pairs = probe_lanczos_eigenpairs(dim, seed, options, &matvec, true)
+        .ok_or_else(|| "unit-deflation rational conditioning Lanczos run declined".to_string())?;
+    let original = pairs.original_eigenvectors.take().ok_or_else(|| {
+        "unit-deflation rational conditioning requested lifted Ritz vectors, but Lanczos \
+         returned none"
+            .to_string()
+    })?;
+    let spectral_norm = pairs
+        .eigenvalues
+        .iter()
+        .filter(|value| value.is_finite())
+        .fold(0.0_f64, |scale, &value| scale.max(value.abs()));
+    if !(spectral_norm.is_finite() && spectral_norm > 0.0) {
+        return Err(
+            "unit-deflation rational conditioning produced no usable Ritz spectrum".to_string(),
+        );
+    }
+    let deflate_floor =
+        relative_floor * spectral_norm * (1.0 - SPECTRAL_DEFLATION_HYSTERESIS_FRACTION);
+    let mut directions = Vec::new();
+    let mut shifts = Vec::new();
+    for ritz in 0..pairs.eigenvalues.len() {
+        let raw = pairs.eigenvalues[ritz];
+        if raw.is_finite() && raw < deflate_floor {
+            directions.push(original.column(ritz).to_owned());
+            shifts.push(1.0 - raw);
+        }
+    }
+    Ok(ExactAReducedRitzConditioning {
+        directions: directions.into(),
+        shifts: shifts.into(),
+    })
+}
+
 /// Gauss quadrature `e₁ᵀ ln(T) e₁ = Σ_i (τ_{i,0})² ln(θ_i)` over the Lanczos
 /// tridiagonal eigenpairs, with `θ_i` floored to the Lanczos rounding band `γ_m·max|θ|` so a
 /// round-off-negative Ritz value (the SPD operator forbids genuine ones) cannot
