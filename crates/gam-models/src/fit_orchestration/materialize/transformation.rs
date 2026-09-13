@@ -60,6 +60,9 @@ pub(crate) fn materialize_transformation_normal<'a>(
             config: config.transformation_normal_config.clone().unwrap_or_default(),
             options: BlockwiseFitOptions {
                 persistent_warm_start_store: config.persistent_warm_start_store.clone(),
+                // The default posterior-mean prediction reads this covariance
+                // (SPEC rule 3), so `None` means yes here as on every other route.
+                compute_covariance: config.compute_covariance.unwrap_or(true),
                 ..BlockwiseFitOptions::default()
             },
             kappa_options: config.spatial_optimization.clone(),
