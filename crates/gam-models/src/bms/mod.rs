@@ -1338,9 +1338,12 @@ impl LatentZConditionalCalibration {
 ///
 /// `weighted_ridge_sandwich_cov` deliberately keeps its own inlined copy of this
 /// arithmetic: extracting it there would regroup its floating-point operations
-/// and move numbers on a currently-passing path for no benefit.
+/// and move numbers on a currently-passing path for no benefit. Both truncate
+/// at `jacobi_scaled_normal_relative_cutoff`, with `rows` the number of
+/// observation rows `M` was accumulated over.
 pub(crate) fn preconditioned_normal_pseudoinverse(
     normal_matrix: &Array2<f64>,
+    rows: usize,
 ) -> Result<Array2<f64>, String> {
     let p = normal_matrix.nrows();
     if normal_matrix.ncols() != p {
@@ -1361,15 +1364,32 @@ pub(crate) fn preconditioned_normal_pseudoinverse(
             m_scaled[[i, j]] *= scale[i] * scale[j];
         }
     }
-    let mut pinv = gam_linalg::utils::rank_certified_psd_pseudoinverse(&m_scaled, 1.0e-10)
-        .map_err(|e| format!("stacked first-stage sandwich pseudo-inverse failed: {e}"))?
-        .into_pseudoinverse();
+    let mut pinv = gam_linalg::utils::rank_certified_psd_pseudoinverse(
+        &m_scaled,
+        jacobi_scaled_normal_relative_cutoff(rows, p),
+    )
+    .map_err(|e| format!("stacked first-stage sandwich pseudo-inverse failed: {e}"))?
+    .into_pseudoinverse();
     for i in 0..p {
         for j in 0..p {
             pinv[[i, j]] *= scale[i] * scale[j];
         }
     }
     Ok(pinv)
+}
+
+/// Relative eigenvalue cutoff for the Jacobi-scaled weighted-ridge normal matrix
+/// `M̃ = S·(AᵀWA + λR)·S`, `S = diag(1/√M_jj)`: its formation band against
+/// `λ_max(M̃)`.
+///
+/// Each entry of `M` sums `rows` products `a_ij·(w_i·a_ik)`, two roundings each,
+/// and the scaling adds four more. With non-negative weights that gives
+/// `|E_jk| ≤ γ_{rows+6}·√(M̃_jj·M̃_kk) ≤ γ_{rows+6}` and
+/// `‖E‖₂ ≤ ‖E‖_F ≤ p·γ_{rows+6}`, while `λ_max(M̃) ≥ max_j M̃_jj = 1`. The
+/// `p·ε` term is the eigensolver's backward error. An eigenvalue at or below
+/// the cutoff is not resolved from rounding, so its direction is not identified.
+fn jacobi_scaled_normal_relative_cutoff(rows: usize, p: usize) -> f64 {
+    gam_linalg::roundoff::accumulation_growth(rows + 6) * p as f64 + p as f64 * f64::EPSILON
 }
 
 /// Weighted Gram `Σ_i s_i · A_i A_iᵀ` for SIGNED per-row scalars `s`.
@@ -1426,7 +1446,7 @@ pub(crate) fn stacked_first_stage_sandwich_cov(
             weights.len()
         ));
     }
-    let m_pinv = preconditioned_normal_pseudoinverse(normal_matrix)?;
+    let m_pinv = preconditioned_normal_pseudoinverse(normal_matrix, n)?;
     if m_pinv.nrows() != p {
         return Err(format!(
             "stacked first-stage sandwich normal-matrix shape mismatch: basis cols={p}, normal {}",
@@ -1535,9 +1555,10 @@ pub(crate) fn weighted_ridge_sandwich_cov(
     // (`penalty_jj = Σ_i w_i a_ij² = (AᵀWA)_jj`), `M_jj = (1+ρ)(AᵀWA)_jj`, so
     // `M̃ = D⁻¹ M D⁻¹` has EXACT unit diagonal and `M̃ = C + (ρ/(1+ρ))·I` with
     // `C` the basis correlation matrix (PSD). Hence `λ_min(M̃) ≥ ρ/(1+ρ) ≈ 1e-8`
-    // even for a fully collinear basis, which clears the pseudo-inverse's
-    // relative tolerance `≈ 1e-10·λ_max(M̃)` for the conditioning widths that
-    // occur here: no direction is spuriously dropped, so `M̃⁺ = M̃⁻¹ = D M⁻¹ D`
+    // even for a fully collinear basis. That clears the pseudo-inverse's cutoff,
+    // the formation band `p·γ_{n+6} + p·ε` from
+    // `jacobi_scaled_normal_relative_cutoff`, whenever `n·p` stays below about
+    // `ρ/u`. So no direction is spuriously dropped, `M̃⁺ = M̃⁻¹ = D M⁻¹ D`,
     // and `cov = D⁻¹ (M̃⁻¹ meat̃ M̃⁻¹) D⁻¹ = M⁻¹ meat M⁻¹` EXACTLY — the scaling
     // cancels, this is the same sandwich, only computed on a well-conditioned
     // matrix. (Should a pure-ridge direction ever fall under tolerance at very
@@ -1556,9 +1577,12 @@ pub(crate) fn weighted_ridge_sandwich_cov(
             meat_scaled[[i, j]] *= s;
         }
     }
-    let m_pinv = gam_linalg::utils::rank_certified_psd_pseudoinverse(&m_scaled, 1.0e-10)
-        .map_err(|e| format!("conditional latent calibration sandwich pseudo-inverse failed: {e}"))?
-        .into_pseudoinverse();
+    let m_pinv = gam_linalg::utils::rank_certified_psd_pseudoinverse(
+        &m_scaled,
+        jacobi_scaled_normal_relative_cutoff(n, p),
+    )
+    .map_err(|e| format!("conditional latent calibration sandwich pseudo-inverse failed: {e}"))?
+    .into_pseudoinverse();
     let mut cov = m_pinv.dot(&meat_scaled).dot(&m_pinv);
     // Undo the symmetric scaling: cov_raw = D⁻¹ cov_scaled D⁻¹.
     for i in 0..p {
@@ -1638,7 +1662,20 @@ pub(crate) fn robust_conditional_score_pvalue(
     if !s.iter().all(|v| v.is_finite()) || !omega.iter().all(|v| v.is_finite()) {
         return Ok(None);
     }
-    let omega_geometry = gam_linalg::utils::rank_certified_psd_pseudoinverse(&omega, 1.0e-10)
+    // Rank cutoff: `Ω̂`'s formation band against `λ_max(Ω̂)`. Each entry sums `n`
+    // products `b_ij·b_ik` with `b_ij = (w_i·u_i)·ã_ij`, three roundings each, so
+    // `|E_jk| ≤ γ_{n+3}·√(Ω̂_jj·Ω̂_kk)` and `‖E‖₂ ≤ γ_{n+3}·tr Ω̂`, against
+    // `λ_max(Ω̂) ≥ max_j Ω̂_jj`. The `r·ε` term is the eigensolver's backward
+    // error. A PSD Gram with a zero largest diagonal is the zero matrix, which
+    // has no usable direction.
+    let omega_max_diagonal = omega.diag().iter().copied().fold(0.0_f64, f64::max);
+    if omega_max_diagonal == 0.0 {
+        return Ok(None);
+    }
+    let relative_cutoff = gam_linalg::roundoff::accumulation_growth(n + 3) * omega.diag().sum()
+        / omega_max_diagonal
+        + r as f64 * f64::EPSILON;
+    let omega_geometry = gam_linalg::utils::rank_certified_psd_pseudoinverse(&omega, relative_cutoff)
         .map_err(|e| format!("conditional score test pseudo-inverse failed: {e}"))?;
     let rank = omega_geometry.rank();
     let omega_pinv = omega_geometry.into_pseudoinverse();
