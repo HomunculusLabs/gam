@@ -3878,6 +3878,7 @@ impl SaeManifoldTerm {
         if border_dim != self.factored_border_dim() {
             return Ok(Vec::new());
         }
+        let mut orthogonality_defect = 0.0_f64;
         for dense in self.dense_step_gauge_vectors()? {
             let mut gauge = self.dense_joint_vector_in_arrow_layout(
                 dense.view(),
@@ -3890,8 +3891,8 @@ impl SaeManifoldTerm {
                 continue;
             }
             // Two-pass MGS gives the same stable quotient basis to the dense and
-            // matrix-free paths.  The numerical-rank decision is relative to
-            // the candidate's own norm and derived from machine precision.
+            // matrix-free paths. A dependent candidate leaves only rounding: two
+            // passes over `k` bases stay inside `2k·(γ_{N+4} + Σω)·‖g₀‖` (as in 10347d95e).
             for _ in 0..2 {
                 for kept in &basis {
                     let coefficient = gauge.dot(kept);
@@ -3899,11 +3900,14 @@ impl SaeManifoldTerm {
                 }
             }
             let residual_norm = gauge.dot(&gauge).max(0.0).sqrt();
+            let growth = gam_linalg::roundoff::accumulation_growth(gauge.len() + 4);
+            let band = 2.0 * basis.len() as f64 * (growth + orthogonality_defect);
             if !(residual_norm.is_finite()
-                && residual_norm > f64::EPSILON.sqrt() * original_norm)
+                && residual_norm > band * original_norm)
             {
                 continue;
             }
+            orthogonality_defect += band * original_norm / residual_norm;
             gauge.mapv_inplace(|value| value / residual_norm);
             basis.push(gauge);
         }
