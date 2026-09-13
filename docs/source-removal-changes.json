@@ -7148,5 +7148,13 @@
     ],
     "reason": "SPEC rule 23 (#2469) and production code that only verified another production formula. The det1 guardrail recomputed each tr((S+δI)⁻¹ S_k) through a full orthogonal similarity transform and asserted agreement with the primary Rayleigh-quotient contraction within a picked 1e-7·max(scale, 1), at an extra O(p³) per penalty on every reparameterization. orthogonal_similarity_transform_faer and symmetrize_faer_matrix_in_place had no other caller.",
     "evidence": "At the base, git grep -n -w orthogonal_similarity_transform_faer finds only its declaration and the guardrail call in crates/gam-terms/src/construction.rs, and symmetrize_faer_matrix_in_place only its declaration and its use inside orthogonal_similarity_transform_faer. construction.rs tests pin det1 against closed forms. Candidate job 585690 (/scratch.global/sauer354/pool/const2469d/g4.585690.log): gam-terms lib reparam det1 construction kronecker 29 passed, 0 failed."
+  },
+  {
+    "base": "ea655be36fe489e9050bf323f3a54e6fc52143ab",
+    "items": [
+      "crates/gam-inference/src/hmc_io.rs:const:MAX_AUTOCORRELATION_LAG"
+    ],
+    "reason": "#2469: MAX_AUTOCORRELATION_LAG (1000) capped the Geyer positive-pair sum in compute_split_rhat_and_ess, truncating the integrated autocorrelation time on slowly mixing chains and overstating the ESS that decides open-warmup termination. The ESS now comes from general-mcmc split_rhat_mean_ess (Stan multi-chain estimator: FFT autocovariance over every lag, Geyer initial positive sequence with monotone repair), which has no lag cap and costs O(n log n) per dimension.",
+    "evidence": "git grep -n -w MAX_AUTOCORRELATION_LAG over the base finds two lines in crates/gam-inference/src/hmc_io.rs: the declaration and its single use in ess_from_split_dimension. No test names it. general-mcmc rev adc78bb src/stats.rs defines split_rhat_mean_ess, ess and autocov_fft (read via the GitHub API this session). Not compiled or run locally (user directive); compile is covered by the lead shared tip check."
   }
 ]

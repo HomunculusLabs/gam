@@ -117,12 +117,6 @@ impl From<HmcError> for String {
     }
 }
 
-/// Upper bound on the autocorrelation lag summed in the effective-sample-size
-/// estimate. The Geyer initial-positive-sequence sum normally self-truncates
-/// long before this, but a hard cap bounds the `O(n·lag)` work for very long
-/// chains where the autocorrelation tail is numerical noise.
-const MAX_AUTOCORRELATION_LAG: usize = 1000;
-
 /// Compute split-chain R-hat and ESS using the Gelman-Rubin diagnostic.
 ///
 /// This is the standard split-chain formulation (no rank normalization).
@@ -166,6 +160,7 @@ pub(crate) fn compute_split_rhat_and_ess(samples: &Array3<f64>) -> (f64, f64) {
         n_chains: usize,
         half: usize,
         dim: usize,
+        library_ess: f64,
     ) -> f64 {
         let m = n_chains * 2;
         let n = half;
@@ -202,44 +197,20 @@ pub(crate) fn compute_split_rhat_and_ess(samples: &Array3<f64>) -> (f64, f64) {
             return (m * n) as f64;
         }
 
-        let max_lag = (n - 1).min(MAX_AUTOCORRELATION_LAG);
-        let mut tau = 1.0_f64;
-        let mut lag = 1usize;
-        while lag < max_lag {
-            let mut pair = 0.0_f64;
-            for l in [lag, lag + 1] {
-                if l > max_lag {
-                    continue;
-                }
-                let mut rho_l = 0.0;
-                for sc in (0..m).filter(|&sc| informative[sc]) {
-                    let mu = means[sc];
-                    let mut cov = 0.0;
-                    let denom = (n - l) as f64;
-                    for t in 0..(n - l) {
-                        let x0 = splitvalue(samples, n_chains, half, dim, sc, t);
-                        let x1 = splitvalue(samples, n_chains, half, dim, sc, t + l);
-                        cov += (x0 - mu) * (x1 - mu);
-                    }
-                    cov /= denom;
-                    rho_l += cov / gamma0[sc];
-                }
-                rho_l /= m as f64;
-                pair += rho_l;
-            }
-            if !pair.is_finite() || pair <= 0.0 {
-                break;
-            }
-            tau += 2.0 * pair;
-            lag += 2;
-        }
-        if !tau.is_finite() || tau <= 0.0 {
-            return 1.0;
-        }
+        // Stan's multi-chain estimator (general-mcmc `split_rhat_mean_ess`): the FFT
+        // autocovariance over every lag and Geyer's initial positive sequence with its
+        // monotone repair. There is no lag cap to truncate tau and overstate the ESS
+        // (#2469); a non-finite estimate reads as the conservative 1.
         let total = (m * n) as f64;
-        (total / tau).clamp(1.0, total)
+        if library_ess.is_finite() {
+            library_ess.clamp(1.0, total)
+        } else {
+            1.0
+        }
     }
 
+    // One library pass gives every dimension's Stan ESS.
+    let (_, library_ess) = split_rhat_mean_ess(samples.view());
     let mut chain_means = vec![0.0_f64; n_split_chains];
     let mut chainvars = vec![0.0_f64; n_split_chains];
     for d in 0..dim {
@@ -319,7 +290,7 @@ pub(crate) fn compute_split_rhat_and_ess(samples: &Array3<f64>) -> (f64, f64) {
         max_rhat = max_rhat.max(rhat_d);
 
         // Real ESS via split-chain autocorrelation with Geyer IPS truncation.
-        let ess_d = ess_from_split_dimension(samples, n_chains, half, d);
+        let ess_d = ess_from_split_dimension(samples, n_chains, half, d, library_ess[d]);
         min_ess = min_ess.min(ess_d);
     }
 
