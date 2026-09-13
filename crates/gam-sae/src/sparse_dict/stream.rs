@@ -42,7 +42,7 @@ use super::scoring::TileScorer;
 use super::residual_reservoir::{ResidualReservoir, residual_rounding_energy};
 use super::update::{
     DecoderNormalEq, DecoderRecycleSpace, DecoderSolveStats, decoder_fixed_point_residual,
-    fixed_point_tolerance, route_and_code_all, seed_decoder,
+    fixed_point_tolerance, polish_unit_rows_against_normal_eq, route_and_code_all, seed_decoder,
     solve_decoder_with_routability_gate_recycled, unit_norm_rows,
 };
 use super::{ScoreRouteStats, SparseDictConfig};
@@ -334,6 +334,10 @@ impl SparseDictStreamState {
             self.config.score_mode,
             &mut self.decoder_recycle,
         )?;
+        // Polish before the refreshed evidence is cleared, so streaming and one-shot
+        // run the same unit-constrained map (#2822).
+        let refresh: Vec<bool> = gate.iter().map(|decision| decision.refresh).collect();
+        polish_unit_rows_against_normal_eq(&mut self.decoder, &self.eq, &refresh)?;
         self.eq.clear_refreshed_atoms(&gate);
         unit_norm_rows(&mut self.decoder)?;
 
