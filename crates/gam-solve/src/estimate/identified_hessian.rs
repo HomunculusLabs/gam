@@ -12,6 +12,7 @@
 
 use super::EstimationError;
 use super::reml::RemlState;
+use super::reml::reml_outer_engine::DenseSpectralOperator;
 use faer::Side;
 use gam_linalg::faer_ndarray::FaerEigh;
 use gam_linalg::utils::{CertifiedSymmetricSolveError, certify_linear_system_residual};
@@ -40,10 +41,7 @@ impl IdentifiedHessianInverse {
             .eigh(Side::Lower)
             .map_err(EstimationError::EigendecompositionFailed)?;
         let eigenvalues = eigenvalues.to_vec();
-        let spectral_radius = eigenvalues
-            .iter()
-            .fold(0.0_f64, |acc, value| acc.max(value.abs()));
-        let rounding_band = f64::EPSILON * eigenvalues.len() as f64 * spectral_radius;
+        let rounding_band = DenseSpectralOperator::rounding_band(&eigenvalues);
         let min_eigenvalue = eigenvalues.iter().copied().fold(f64::INFINITY, f64::min);
         if !(min_eigenvalue >= -rounding_band) {
             return Err(EstimationError::HessianNotPositiveDefinite { min_eigenvalue });

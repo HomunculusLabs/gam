@@ -97,6 +97,15 @@ impl DenseSpectralOperator {
         Self::from_symmetric_with_rank_policy(h, PseudoLogdetMode::PositiveDefinite, Some(rank))
     }
 
+    /// `H`'s rounding band `p·ε·‖H‖₂`, read off its eigenvalues: the band the
+    /// PIRLS minimum-norm solve identifies coefficients at (#2901 V22).
+    pub(crate) fn rounding_band(eigenvalues: &[f64]) -> f64 {
+        let spectral_radius = eigenvalues
+            .iter()
+            .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+        eigenvalues.len() as f64 * f64::EPSILON * spectral_radius
+    }
+
     /// Rank of `H`'s numerically identified subspace (#2901 V22).
     ///
     /// An eigenvalue is resolved when it exceeds `H`'s rounding band
@@ -106,10 +115,7 @@ impl DenseSpectralOperator {
     /// the band claims more nullity than the penalty has, the largest positive
     /// eigenvalues count too (#2748).
     pub(crate) fn identified_rank(eigenvalues: &[f64], penalty_rank: usize) -> usize {
-        let spectral_radius = eigenvalues
-            .iter()
-            .fold(0.0_f64, |acc, value| acc.max(value.abs()));
-        let rounding_band = eigenvalues.len() as f64 * f64::EPSILON * spectral_radius;
+        let rounding_band = Self::rounding_band(eigenvalues);
         let resolved = eigenvalues
             .iter()
             .filter(|&&sigma| sigma > rounding_band)
