@@ -453,16 +453,17 @@ impl SaeManifoldTerm {
             // the material floor, so the walk strictly descends one objective and
             // ends. A saddle no refused direction can descend keeps the typed refusal,
             // which the outer search reads as an infeasible ρ.
-            match self.exact_observed_information_log_dets(rho, target, &cache) {
+            let mut saddle_directions = Vec::new();
+            match self.exact_observed_information_log_dets_with_saddle_directions(
+                rho,
+                target,
+                &cache,
+                &mut saddle_directions,
+            ) {
                 Ok(log_det) => break Ok((cache, log_det)),
                 Err(err @ SaeCriterionError::IndefiniteObservedInformation { .. })
                     if inner_max_iter > 0 =>
                 {
-                    let saddle_directions =
-                        match self.exact_a_saddle_directions(rho, target, &cache) {
-                            Ok(directions) => directions,
-                            Err(direction_err) => break Err(direction_err),
-                        };
                     match self.descend_exact_a_saddle(
                         target,
                         rho,
@@ -832,7 +833,9 @@ impl SaeManifoldTerm {
 
     /// #2080 — descend one refused exact-A saddle at the evidence root.
     ///
-    /// `directions` are [`Self::exact_a_saddle_directions`]: unit vectors in the
+    /// `directions` are what
+    /// [`Self::exact_observed_information_log_dets_with_saddle_directions`] collects:
+    /// unit vectors in the
     /// joint `(t, β)` cache layout, each with its basin curvature `μ < −floor`.
     /// Each is turned downhill (`gᵀd ≤ 0`) and the penalized objective is minimized
     /// along it by [`Self::minimize_objective_along`] with the curvature term `−μ`,

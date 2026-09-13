@@ -6700,5 +6700,13 @@
     ],
     "reason": "#2899 slop: gam_problem::row_measure carried a private splitmix64(x) that only forwarded to gam_linalg::utils::splitmix64_hash. hash_full and hash_subsample now call splitmix64_hash directly, so every row-measure id is bit-identical.",
     "evidence": "At the base, row_measure.rs:68-72 defines splitmix64(x) as gam_linalg::utils::splitmix64_hash(x), and its six calls are in hash_full and hash_subsample. The name stays declared elsewhere (for example gam_linalg::utils::splitmix64), which is why the guard counts it."
+  },
+  {
+    "base": "31fa35d5bb3142ab54c1c7bc49616507d0fcf8e8",
+    "items": [
+      "crates/gam-sae/src/manifold/construction_exact_hessian.rs:fn:exact_a_saddle_directions"
+    ],
+    "reason": "#2267 duplicate work. When exact_observed_information_log_dets refused a basin as indefinite, the evidence root called exact_a_saddle_directions at the same rho, target and cache. That call materialized the same dense exact A again (slots + k probe applies), ran the same symmetric eigendecomposition again, and reclassified the same basin only to collect the refused directions the first classification had discarded. The production pricing now classifies once with the directions collected (exact_observed_information_log_dets_with_saddle_directions), and the evidence root descends from those. The value-only exact_observed_information_log_dets is kept for its test callers in a #[cfg(test)] tests_* module, following the #2731 precedent.",
+    "evidence": "At the base, git grep -n exact_a_saddle_directions over crates, src and tests finds its declaration, one doc link in construction_exact_hessian.rs, one call in construction_quasi_laplace.rs (the evidence root, right after the refused exact_observed_information_log_dets on the same cache) and one doc link on descend_exact_a_saddle. Both function bodies are identical up to classify_exact_hessian_basin's refused_directions argument (None vs Some). Every other caller of exact_observed_information_log_dets is a test module. Candidate checked with cargo check -p gam-sae --all-targets before landing; see the commit message for the job."
   }
 ]

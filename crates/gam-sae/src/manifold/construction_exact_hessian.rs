@@ -3175,11 +3175,12 @@ impl SaeManifoldTerm {
     /// Exact-A evidence value, with one coherent basin matrix on each resolved
     /// negative spectral subspace. The same owner supplies the differential
     /// consumed by the outer gradient.
-    pub(crate) fn exact_observed_information_log_dets(
+    pub(crate) fn exact_observed_information_log_dets_with_saddle_directions(
         &self,
         rho: &SaeManifoldRho,
         target: ArrayView2<'_, f64>,
         cache: &ArrowFactorCache,
+        saddle_directions: &mut Vec<(Array1<f64>, f64)>,
     ) -> Result<f64, SaeCriterionError> {
         let total_t = cache.delta_t_len();
         // #2828 — the border half of `E = B − A`, read off the same border probes
@@ -3194,6 +3195,11 @@ impl SaeManifoldTerm {
             total_t,
             ArrowMetric::Joint(cache),
         )?;
+        // #2080/#2267 — a refused basin pushes its refused directions here: unit
+        // vectors in the joint `(t, β)` cache layout, each with its basin curvature,
+        // most negative first. The evidence root descends them before it concludes
+        // the state has no Laplace normaliser, off this same eigensystem, so a
+        // refusal pays one dense materialization and eigendecomposition, not two.
         let joint_pricing = Self::classify_exact_hessian_basin(
             &joint,
             &e_diag,
@@ -3201,48 +3207,9 @@ impl SaeManifoldTerm {
             total_t,
             |v| ArrowMetric::Joint(cache).quadratic_form(v),
             "joint",
-            None,
+            Some(saddle_directions),
         )?;
         Ok(joint_pricing.log_det)
-    }
-
-    /// #2080 — the refused basin directions of the pricing
-    /// [`Self::exact_observed_information_log_dets`] performs: unit vectors in the
-    /// joint `(t, β)` cache layout, each with its basin curvature, most negative
-    /// first, and empty when the basin prices. The evidence root reads them only
-    /// after a refusal, to descend the saddle before it concludes the state has no
-    /// Laplace normaliser.
-    pub(crate) fn exact_a_saddle_directions(
-        &self,
-        rho: &SaeManifoldRho,
-        target: ArrayView2<'_, f64>,
-        cache: &ArrowFactorCache,
-    ) -> Result<Vec<(Array1<f64>, f64)>, SaeCriterionError> {
-        let total_t = cache.delta_t_len();
-        let (a, e_beta) =
-            self.materialize_exact_hessian_dense_with_gap_border(rho, target, cache)?;
-        let e_diag = self.materialize_ard_concave_clamp_diagonal(rho, cache)?;
-        let joint = Self::exact_hessian_spectral_block(
-            a,
-            &e_diag,
-            e_beta.as_ref(),
-            total_t,
-            ArrowMetric::Joint(cache),
-        )?;
-        let mut directions = Vec::new();
-        let verdict = Self::classify_exact_hessian_basin(
-            &joint,
-            &e_diag,
-            e_beta.as_ref(),
-            total_t,
-            |v| ArrowMetric::Joint(cache).quadratic_form(v),
-            "joint",
-            Some(&mut directions),
-        );
-        match verdict {
-            Ok(_) | Err(SaeCriterionError::IndefiniteObservedInformation { .. }) => Ok(directions),
-            Err(err) => Err(err),
-        }
     }
 
     /// Build a cluster-stable eigensystem and the shared absolute null floor for
@@ -3685,8 +3652,8 @@ impl SaeManifoldTerm {
     /// column by column via [`Self::apply_exact_hessian`] and symmetrized, at the
     /// small-dense (circle-mint) scale; shared by the observed-information
     /// log-determinant (VALUE) and its `A⁻¹` selected inverse (GRADIENT) so both
-    /// factor one identical operator. `test_support`-scoped until Phase 2 wiring
-    /// (see [`Self::exact_observed_information_log_dets`]).
+    /// factor one identical operator
+    /// ([`Self::exact_observed_information_log_dets_with_saddle_directions`]).
     /// The exact stationarity Hessian as a dense `dim × dim` matrix, assembled
     /// from `slots + k` Hessian-vector applies instead of `dim` (gam#2267).
     ///
@@ -6254,6 +6221,30 @@ mod tests_dense_exact_a_names_2731 {
                 }
             }
             Ok(Some(gap))
+        }
+    }
+}
+
+/// #2267 — the priced `log|A|` alone, for the tests that read the value or the
+/// refusal without the refused directions production descends.
+#[cfg(test)]
+mod tests_exact_observed_information_names_2267 {
+    use super::*;
+
+    impl SaeManifoldTerm {
+        pub(crate) fn exact_observed_information_log_dets(
+            &self,
+            rho: &SaeManifoldRho,
+            target: ArrayView2<'_, f64>,
+            cache: &ArrowFactorCache,
+        ) -> Result<f64, SaeCriterionError> {
+            let mut saddle_directions = Vec::new();
+            self.exact_observed_information_log_dets_with_saddle_directions(
+                rho,
+                target,
+                cache,
+                &mut saddle_directions,
+            )
         }
     }
 }
