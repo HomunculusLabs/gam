@@ -8,7 +8,18 @@
 
 use ndarray::{Array2, array};
 
-use gam::geometry::poincare::{BOUNDARY_EPS, tangent_decode_backward, tangent_decode_forward};
+use gam::geometry::poincare::{project_into_ball, tangent_decode_backward, tangent_decode_forward};
+
+/// Radius of the open-ball boundary the decoder clamps to at `curvature`, read
+/// from the production projection: a point far outside the ball projects onto it.
+fn boundary_radius(curvature: f64) -> f64 {
+    project_into_ball(array![1.0e6, 0.0].view(), curvature)
+        .expect("project")
+        .iter()
+        .map(|v| v * v)
+        .sum::<f64>()
+        .sqrt()
+}
 
 /// Bug-hunt finding: the Poincaré tangent decoder's forward radial coefficient
 /// `exp_coeff(s) = min(tanh(s), 1 - BOUNDARY_EPS)/s` CLAMPS once the tangent
@@ -40,18 +51,18 @@ fn poincare_tangent_backward_matches_fd_in_saturated_regime() {
         tangent_decode_forward(atoms.view(), gates.view(), curvature).expect("forward");
 
     // Confirm we are genuinely in the clamped boundary regime: the decoded norm
-    // must equal the pinned boundary radius (1 - BOUNDARY_EPS)/sqrt(k), not the
+    // must equal the boundary radius `project_into_ball` clamps to, not the
     // unclamped tanh image (which would be strictly smaller for this s only by
     // ~BOUNDARY_EPS, so we assert it is AT the boundary).
+    let boundary = boundary_radius(curvature);
     let out_norm: f64 = (0..x_hat.ncols())
         .map(|j| x_hat[[0, j]] * x_hat[[0, j]])
         .sum::<f64>()
         .sqrt();
     assert!(
-        (out_norm - (1.0 - BOUNDARY_EPS)).abs() < 1e-9,
+        (out_norm - boundary).abs() < 1e-9,
         "decode must be radially pinned to the ball boundary in saturation: \
-         |x_hat|={out_norm}, expected {}",
-        1.0 - BOUNDARY_EPS
+         |x_hat|={out_norm}, expected {boundary}"
     );
 
     // Loss = sum(x_hat^2); grad_x = 2 x_hat.
@@ -104,7 +115,7 @@ fn poincare_tangent_backward_matches_fd_below_saturation() {
         .sqrt();
     // Strictly interior (not clamped).
     assert!(
-        out_norm < 1.0 - BOUNDARY_EPS - 1e-6,
+        out_norm < boundary_radius(curvature) - 1e-6,
         "this arm must be below saturation: |x_hat|={out_norm}"
     );
 

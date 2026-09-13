@@ -61,7 +61,7 @@ use crate::manifold::{GeometryError, GeometryResult};
 /// Numerical floor for denominators that vanish only when a point sits on
 /// the ball boundary. Anything inside the ball satisfies
 /// `1 - k |y|^2 >= BOUNDARY_EPS` after [`project_into_ball`].
-pub const BOUNDARY_EPS: f64 = 1.0e-5;
+pub(crate) const BOUNDARY_EPS: f64 = 1.0e-5;
 
 /// Largest radial exp-map argument `s = sqrt(k)|v|` worth evaluating
 /// hyperbolic functions at. Above this, `tanh(s)` is already
