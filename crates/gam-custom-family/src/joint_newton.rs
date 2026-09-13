@@ -1307,7 +1307,6 @@ pub(crate) fn active_face_penalty_logdet(
     ranges: &[(usize, usize)],
     block_log_lambdas: &[Array1<f64>],
     active_constraints: &ActiveLinearConstraintBlock,
-    ridge: f64,
 ) -> Result<Option<f64>, CustomFamilyError> {
     let ActiveConstraintTangentGeometry::Tangent(z) =
         active_constraint_tangent_geometry(&active_constraints.a)?
@@ -1331,7 +1330,7 @@ pub(crate) fn active_face_penalty_logdet(
     if tangent_components.is_empty() {
         return Ok(Some(0.0));
     }
-    let penalty = PenaltyPseudologdet::from_components(&tangent_components, &lambdas, ridge)
+    let penalty = PenaltyPseudologdet::from_components(&tangent_components, &lambdas, 0.0)
         .map_err(|error| CustomFamilyError::trial_point(format!("active-face penalty pseudo-logdet failed: {error}")))?;
     Ok(Some(penalty.value()))
 }
@@ -1555,7 +1554,6 @@ pub(crate) fn blockwise_logdet_terms_with_workspace<
             &ranges,
             block_log_lambdas,
             active,
-            0.0,
         )?
     {
         penalty_logdet_s_total = tangent_logdet;

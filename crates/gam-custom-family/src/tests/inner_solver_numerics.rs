@@ -2601,7 +2601,7 @@ pub(crate) fn active_face_logdet_ignores_constraint_normal_indefiniteness() {
         stacked_offset: None,
     };
     let penalty_logdet =
-        active_face_penalty_logdet(&[spec], &[(0, 2)], &[array![0.0]], &active, 0.0)
+        active_face_penalty_logdet(&[spec], &[(0, 2)], &[array![0.0]], &active)
             .expect("active-face penalty determinant should decompose")
             .expect("the tangent is non-empty");
     assert!(

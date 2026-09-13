@@ -25,7 +25,6 @@ fn joint_stationarity_rounding_band(
     s_lambdas: &[Array2<f64>],
     block_betas: &[&Array1<f64>],
     joint_bundle: Option<&gam_problem::JointPenaltyBundle>,
-    diagonal_ridge: f64,
     data_gradient_inf: f64,
     total_n: usize,
 ) -> f64 {
@@ -43,7 +42,6 @@ fn joint_stationarity_rounding_band(
             for l in 0..p_k {
                 magnitude += (s_lambda[[j, l]] * beta[l]).abs();
             }
-            magnitude += (diagonal_ridge * beta[j]).abs();
             penalty_band = penalty_band.max(growth * magnitude);
         }
     }
@@ -93,16 +91,16 @@ mod rounding_tests {
         ).expect("rank-one difference penalty is valid");
         // S beta vanishes, but the dense product subtracts two large terms.
         let local = joint_stationarity_rounding_band(
-            &[matrix * log_lambda.exp()], &[&beta], None, 0.0, 0.0, 1,
+            &[matrix * log_lambda.exp()], &[&beta], None, 0.0, 1,
         );
         let joint = joint_stationarity_rounding_band(
-            &[Array2::zeros((2, 2))], &[&beta], Some(&bundle), 0.0, 0.0, 1,
+            &[Array2::zeros((2, 2))], &[&beta], Some(&bundle), 0.0, 1,
         );
         assert!(local > 0.0);
         assert!(joint >= local, "full-width representation lost the local rounding budget");
         let zero_beta = array![0.0, 0.0];
         assert_eq!(joint_stationarity_rounding_band(
-            &[Array2::zeros((2, 2))], &[&zero_beta], Some(&bundle), 0.0, 0.0, 1,
+            &[Array2::zeros((2, 2))], &[&zero_beta], Some(&bundle), 0.0, 1,
         ), 0.0, "matrix norm alone must not certify a nonstationary mode");
     }
 }
@@ -400,8 +398,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
     // (the binomial location-scale coupled non-convergence). SIGN: Firth ADDS
     // ½log|I| to the log-likelihood ⇒ the NLL objective SUBTRACTS Φ, matching
     // the Newton step rhs / KKT residual which ADD `∇Φ` to `∇L − Sβ`.
-
-    let joint_mode_diagonal_ridge = 0.0;
 
     // Exact joint Newton steps are guarded by two independent mechanisms:
     // family-owned feasibility (`max_feasible_step_size`) and the adaptive
@@ -904,7 +900,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 options,
                 &ranges,
                 &s_lambdas,
-                joint_mode_diagonal_ridge,
                 joint_bundle,
                 total_p,
                 &escape_block_constraints,
@@ -1282,7 +1277,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             break;
         }
 
-        let trace_diagonal_ridge = joint_mode_diagonal_ridge + JOINT_TRACE_STABILITY_RIDGE;
+        let trace_diagonal_ridge = JOINT_TRACE_STABILITY_RIDGE;
         let joint_hessian_is_dense = matches!(&joint_hessian_source, JointHessianSource::Dense(_));
         let joint_solver_diagonal_ridge = stabilized_joint_solver_diagonal_ridge(
             family,
@@ -1577,7 +1572,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     lhs.clone(),
                     &ranges,
                     &s_lambdas,
-                    joint_mode_diagonal_ridge,
                     joint_bundle,
                     head_jeffreys_term.as_ref().map(|(_, hphi)| hphi),
                     head_jeffreys_completion.as_ref(),
@@ -1589,7 +1583,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     &mut matrix,
                     &ranges,
                     &s_lambdas,
-                    joint_mode_diagonal_ridge,
+                    0.0,
                     joint_bundle,
                 );
                 if let Some(curvature) = head_jeffreys_curvature.as_ref() {
@@ -1635,7 +1629,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 &ranges,
                 &s_lambdas,
                 &beta_joint,
-                joint_mode_diagonal_ridge,
+                0.0,
                 joint_bundle,
             );
             let mut rhs_step = &grad_joint - &penalty_beta_joint;
@@ -1892,7 +1886,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 &ranges,
                 &s_lambdas,
                 &beta_joint,
-                joint_mode_diagonal_ridge,
+                0.0,
                 joint_bundle,
             );
             let mut rhs = &grad_joint - &penalty_beta;
@@ -2106,7 +2100,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                         &mut matrix,
                         &ranges,
                         &s_lambdas,
-                        joint_mode_diagonal_ridge,
+                        0.0,
                         joint_bundle,
                     );
                     if let Some((_gradient, hphi)) = inner_jeffreys_term.as_ref() {
@@ -2122,7 +2116,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                         likelihood_hessian,
                         &ranges,
                         &s_lambdas,
-                        joint_mode_diagonal_ridge,
                         joint_bundle,
                         inner_jeffreys_term.as_ref().map(|(_, hphi)| hphi),
                         head_jeffreys_completion.as_ref(),
@@ -2134,7 +2127,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                         &mut matrix,
                         &ranges,
                         &s_lambdas,
-                        joint_mode_diagonal_ridge,
+                        0.0,
                         joint_bundle,
                     );
                     if let Some((_gradient, hphi)) = inner_jeffreys_term.as_ref() {
@@ -2485,7 +2478,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             &ranges,
             &s_lambdas,
             &beta_joint,
-            joint_mode_diagonal_ridge,
+            0.0,
             joint_bundle,
         );
         // Stationarity RHS for the trust-region quadratic model. When the
@@ -2542,7 +2535,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 &s_lambdas,
                 &block_betas,
                 joint_bundle,
-                joint_mode_diagonal_ridge,
                 grad_inf,
                 total_joint_n,
             )
@@ -2823,7 +2815,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     effective_hessian_source,
                     &ranges,
                     &s_lambdas,
-                    joint_mode_diagonal_ridge,
+                    0.0,
                     &p_sd,
                     &mut h_psd,
                     &mut cauchy_penalty_scratch,
@@ -3498,7 +3490,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                         source: effective_hessian_source,
                         ranges: &ranges,
                         s_lambdas: &s_lambdas,
-                        diagonal_ridge: joint_mode_diagonal_ridge,
                         joint_bundle,
                         jeffreys_curvature: head_jeffreys_curvature.as_ref(),
                     };
@@ -3583,7 +3574,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     |(step_norm, radius)| joint_block_step_hit_trust_boundary(*step_norm, *radius),
                 );
             // Predicted reduction must use the TRUE penalized Hessian
-            // (the one that appears in `f(β) = -ℓ + ½βᵀSβ + ½·joint_mode_diagonal_ridge·‖β‖²`),
+            // (the one that appears in `f(β) = -ℓ + ½βᵀSβ`),
             // NOT the SPD-stabilized version. The stabilizing shift
             // in `joint_solver_diagonal_ridge` is purely a solver-side
             // tool to make the Newton system invertible when H_NLL
@@ -3610,7 +3601,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 effective_hessian_source,
                 &ranges,
                 &s_lambdas,
-                joint_mode_diagonal_ridge,
+                0.0,
                 &trial_delta,
                 &mut hpen_delta,
                 &mut tr_penalty_scratch,
@@ -4208,7 +4199,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     source: effective_hessian_source,
                     ranges: &ranges,
                     s_lambdas: &s_lambdas,
-                    diagonal_ridge: joint_mode_diagonal_ridge,
                     joint_bundle,
                     jeffreys_curvature: head_jeffreys_curvature.as_ref(),
                 }
@@ -5114,7 +5104,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 &s_lambdas,
                 &block_betas,
                 joint_bundle,
-                0.0,
                 grad_inf,
                 total_joint_n,
             )
@@ -6812,7 +6801,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 options,
                 &ranges,
                 &s_lambdas,
-                joint_mode_diagonal_ridge,
                 joint_bundle,
                 total_p,
                 mode_active_block.as_ref(),

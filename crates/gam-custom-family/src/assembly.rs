@@ -756,7 +756,6 @@ fn assembled_operator_fingerprint(
     robust_jeffreys_hphi_for_operator: Option<&Array2<f64>>,
     ranges: &[(usize, usize)],
     total: usize,
-    scaled_joint_trace_diagonal_ridge: f64,
     rho_curvature_scale: f64,
     pseudo_logdet_mode: PseudoLogdetMode,
 ) -> u64 {
@@ -766,7 +765,6 @@ fn assembled_operator_fingerprint(
     total.hash(&mut hasher);
     ranges.hash(&mut hasher);
     (pseudo_logdet_mode == PseudoLogdetMode::Smooth).hash(&mut hasher);
-    hash_f64(scaled_joint_trace_diagonal_ridge, &mut hasher);
     hash_f64(rho_curvature_scale, &mut hasher);
     // ρ and β̂ together pin the family/data state at this evaluation: for a fixed
     // family/data the operator is `H(β̂, ρ) + S_λ(ρ) + H_Φ(β̂, ρ)`, so identical
@@ -859,13 +857,10 @@ pub(crate) fn joint_outer_evaluate(
     h_joint_unpen: JointHessianSource,
     ranges: &[(usize, usize)],
     total: usize,
-    moderidge: f64,
-    extra_logdet_ridge: f64,
     rho_curvature_scale: f64,
     hessian_logdet_correction: f64,
     include_logdet_h: bool,
     include_logdet_s: bool,
-    strict_spd: bool,
     project_hessian_logdet: bool,
     eval_mode: EvalMode,
     options: &BlockwiseFitOptions,
@@ -928,9 +923,6 @@ pub(crate) fn joint_outer_evaluate(
     // provider is used unwrapped.
     jeffreys_hphi_drift: Option<JeffreysHphiDriftBatchFn>,
 ) -> Result<OuterObjectiveEvalResult, CustomFamilyError> {
-    let joint_trace_diagonal_ridge = moderidge + if !strict_spd { extra_logdet_ridge } else { 0.0 };
-    let scaled_joint_trace_diagonal_ridge = rho_curvature_scale * joint_trace_diagonal_ridge;
-
     let (robust_jeffreys_phi, robust_jeffreys_hphi, robust_jeffreys_completion): (
         Option<f64>,
         Option<Array2<f64>>,
@@ -1125,7 +1117,6 @@ pub(crate) fn joint_outer_evaluate(
             jeffreys_for_operator,
             ranges,
             total,
-            scaled_joint_trace_diagonal_ridge,
             rho_curvature_scale,
             pseudo_logdet_mode,
         );
@@ -1150,7 +1141,7 @@ pub(crate) fn joint_outer_evaluate(
                     &mut j_for_traces,
                     ranges,
                     &scaled_s_lambdas,
-                    scaled_joint_trace_diagonal_ridge,
+                    0.0,
                     None,
                 );
                 if let Some(joint) = scaled_joint_penalty.as_ref() {
@@ -1279,7 +1270,7 @@ pub(crate) fn joint_outer_evaluate(
                 &mut ground_truth,
                 ranges,
                 &scaled_s_lambdas,
-                scaled_joint_trace_diagonal_ridge,
+                0.0,
                 None,
             );
             // gam#1587: the assembled operator includes the full-width joint
@@ -1349,7 +1340,7 @@ pub(crate) fn joint_outer_evaluate(
             ranges,
             &scaled_s_lambdas,
             total,
-            scaled_joint_trace_diagonal_ridge,
+            0.0,
             scaled_criterion_jeffreys.as_ref(),
             scaled_joint_penalty.as_ref(),
             face_tangent.as_ref(),
@@ -1533,13 +1524,10 @@ pub(crate) fn joint_outer_evaluate_efs(
     h_joint_unpen: JointHessianSource,
     ranges: &[(usize, usize)],
     total: usize,
-    moderidge: f64,
-    extra_logdet_ridge: f64,
     rho_curvature_scale: f64,
     hessian_logdet_correction: f64,
     include_logdet_h: bool,
     include_logdet_s: bool,
-    strict_spd: bool,
     project_hessian_logdet: bool,
     options: &BlockwiseFitOptions,
     rho_prior: gam_problem::RhoPrior,
@@ -1570,9 +1558,6 @@ pub(crate) fn joint_outer_evaluate_efs(
     >,
     ext_bundle: Option<ExtCoordBundle>,
 ) -> Result<gam_problem::EfsEval, CustomFamilyError> {
-    let joint_trace_diagonal_ridge = moderidge + if !strict_spd { extra_logdet_ridge } else { 0.0 };
-    let scaled_joint_trace_diagonal_ridge = rho_curvature_scale * joint_trace_diagonal_ridge;
-
     let provider_box: Box<dyn HessianDerivativeProvider + '_> =
         if let (Some(owned_dh), Some(owned_d2h)) = (owned_compute_dh, owned_compute_d2h) {
             Box::new(OwnedJointDerivProvider {
@@ -1632,7 +1617,7 @@ pub(crate) fn joint_outer_evaluate_efs(
             &mut j_for_traces,
             ranges,
             &scaled_s_lambdas,
-            scaled_joint_trace_diagonal_ridge,
+            0.0,
             None,
         );
         if let Some(joint) = scaled_joint_penalty.as_ref() {
@@ -1656,7 +1641,7 @@ pub(crate) fn joint_outer_evaluate_efs(
             ranges,
             &scaled_s_lambdas,
             total,
-            scaled_joint_trace_diagonal_ridge,
+            0.0,
             None,
             scaled_joint_penalty.as_ref(),
             criterion_face_tangent(inner)?.as_ref(),
@@ -1763,7 +1748,6 @@ pub(crate) fn outerobjectiveefs<F: CustomFamily + Clone + Send + Sync + 'static>
 > {
     let include_logdet_h = include_exact_newton_logdet_h(family, options);
     let include_logdet_s = include_exact_newton_logdet_s(family, options);
-    let strict_spd = use_exact_newton_strict_spd(family);
     let per_block = split_log_lambdas(rho, penalty_counts)?;
     let mut inner = inner_blockwise_fit(family, specs, &per_block, options, warm_start)?;
     if !inner.converged {
@@ -1781,8 +1765,6 @@ pub(crate) fn outerobjectiveefs<F: CustomFamily + Clone + Send + Sync + 'static>
         )?;
         return Ok((eval, warm, converged, inner));
     }
-    let moderidge = 0.0;
-    let extra_logdet_ridge = 0.0;
 
     refresh_all_block_etas(family, specs, &mut inner.block_states)?;
     let ranges = block_param_ranges(specs);
@@ -1824,13 +1806,10 @@ pub(crate) fn outerobjectiveefs<F: CustomFamily + Clone + Send + Sync + 'static>
                 h_joint_unpen,
                 &ranges,
                 total,
-                moderidge,
-                extra_logdet_ridge,
                 rho_curvature_scale,
                 hessian_logdet_correction,
                 include_logdet_h,
                 include_logdet_s,
-                strict_spd,
                 family.use_projected_penalty_logdet(),
                 options,
                 rho_prior.clone(),
@@ -2113,13 +2092,10 @@ pub(crate) fn outerobjectiveefs<F: CustomFamily + Clone + Send + Sync + 'static>
                 JointHessianSource::Dense(h_joint_unpen),
                 &ranges,
                 total,
-                moderidge,
-                extra_logdet_ridge,
                 1.0,
                 0.0,
                 include_logdet_h,
                 include_logdet_s,
-                strict_spd,
                 family.use_projected_penalty_logdet(),
                 options,
                 rho_prior.clone(),

@@ -2283,7 +2283,6 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
     // ── Common setup: inner solve, ridge, refresh, ranges ──
     let include_logdet_h = include_exact_newton_logdet_h(family, options);
     let include_logdet_s = include_exact_newton_logdet_s(family, options);
-    let strict_spd = use_exact_newton_strict_spd(family);
     let per_block = split_log_lambdas(rho_current, penalty_counts)?;
     let psi_safe_warm_start =
         warm_start_without_cached_inner_for_psi_derivatives(warm_start, psi_dim > 0);
@@ -2376,8 +2375,6 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
             psi_dim,
         });
     }
-    let moderidge = 0.0;
-    let extra_logdet_ridge = 0.0;
 
     refresh_all_block_etas(family, specs, &mut inner.block_states)?;
     let ranges = block_param_ranges(specs);
@@ -2595,13 +2592,10 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                         h_joint_unpen,
                         &ranges,
                         total,
-                        moderidge,
-                        extra_logdet_ridge,
                         rho_curvature_scale,
                         hessian_logdet_correction,
                         include_logdet_h,
                         include_logdet_s,
-                        strict_spd,
                         // The batched BMS gradient contracts traces through the
                         // family's smooth pseudo-logdet operator. Pair it with the
                         // same scalar value convention; the projected-subspace
@@ -2859,13 +2853,10 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
             h_joint_unpen,
             &ranges,
             total,
-            moderidge,
-            extra_logdet_ridge,
             rho_curvature_scale,
             hessian_logdet_correction,
             include_logdet_h,
             include_logdet_s,
-            strict_spd,
             // ψ-bearing generic path (matern/duchon marginal-slope kernel
             // length-scales): use the projected #752 generalized determinant when
             // this call owns all derivatives. If a batched first-order override
@@ -3032,13 +3023,10 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                         h_joint_unpen,
                         &ranges,
                         total,
-                        moderidge,
-                        extra_logdet_ridge,
                         rho_curvature_scale,
                         hessian_logdet_correction,
                         include_logdet_h,
                         include_logdet_s,
-                        strict_spd,
                         // VALUE/GRADIENT CONSISTENCY: this `value_only` is paired
                         // with the family's BATCHED gradient (computed just above),
                         // which evaluates the logdet derivative through the
@@ -3129,13 +3117,10 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
             h_joint_unpen,
             &ranges,
             total,
-            moderidge,
-            extra_logdet_ridge,
             rho_curvature_scale,
             hessian_logdet_correction,
             include_logdet_h,
             include_logdet_s,
-            strict_spd,
             // VALUE/GRADIENT CONSISTENCY: when a batched (Smooth-mode) gradient
             // override is pending, it will replace `eval_result.gradient` below,
             // so the value (and outer Hessian) here must use the SAME spectral
@@ -3473,13 +3458,10 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
         JointHessianSource::Dense(h_joint_unpen),
         &ranges,
         total,
-        moderidge,
-        extra_logdet_ridge,
         1.0,
         0.0,
         include_logdet_h,
         include_logdet_s,
-        strict_spd,
         family.use_projected_penalty_logdet(),
         eval_mode,
         options,
@@ -4149,7 +4131,6 @@ pub(crate) fn evaluate_custom_family_joint_hyper_efs_internal_shared<
 
     let include_logdet_h = include_exact_newton_logdet_h(family, options);
     let include_logdet_s = include_exact_newton_logdet_s(family, options);
-    let strict_spd = use_exact_newton_strict_spd(family);
     let per_block = split_log_lambdas(rho_current, penalty_counts)?;
     let psi_safe_warm_start = warm_start_without_cached_inner_for_psi_derivatives(warm_start, true);
     let mut inner = inner_blockwise_fit(
@@ -4178,8 +4159,6 @@ pub(crate) fn evaluate_custom_family_joint_hyper_efs_internal_shared<
         .map_err(CustomFamilyError::from)?;
         return Ok((eval, warm, converged, inner));
     }
-    let moderidge = 0.0;
-    let extra_logdet_ridge = 0.0;
 
     refresh_all_block_etas(family, specs, &mut inner.block_states)?;
     let ranges = block_param_ranges(specs);
@@ -4400,13 +4379,10 @@ pub(crate) fn evaluate_custom_family_joint_hyper_efs_internal_shared<
         h_joint_unpen,
         &ranges,
         total,
-        moderidge,
-        extra_logdet_ridge,
         rho_curvature_scale,
         hessian_logdet_correction,
         include_logdet_h,
         include_logdet_s,
-        strict_spd,
         // ψ-bearing EFS path: projected #752 generalized determinant for value
         // and gradient (matched in this single _efs call). Same root-cause fix as
         // the VGH ψ path (gam#808/#787); no batched override here.
