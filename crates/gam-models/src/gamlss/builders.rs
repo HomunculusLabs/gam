@@ -3026,6 +3026,18 @@ pub(crate) trait LocationScaleFamilyBuilder {
         fit: &UnifiedFitResult,
     ) -> Result<(Array1<f64>, Array1<f64>), String>;
 
+    /// Fit this builder's family over `blocks` at the caller's options. A family
+    /// whose Jeffreys/Firth prior arms on evidence overrides this with
+    /// `fit_custom_family_arming_on_evidence` (#979).
+    fn fit_blocks(
+        &self,
+        family: &Self::Family,
+        blocks: &[ParameterBlockSpec],
+        options: &BlockwiseFitOptions,
+    ) -> Result<UnifiedFitResult, String> {
+        fit_custom_family(family, blocks, options).map_err(|error| error.to_string())
+    }
+
     fn mean_penalty_count(&self, mean_design: &TermCollectionDesign) -> usize {
         mean_design.penalties.len()
     }
@@ -3313,7 +3325,7 @@ pub(crate) fn fit_location_scale_terms<B: LocationScaleFamilyBuilder>(
                                 certified_outer,
                             ).map_err(|error| error.to_string())?
                         } else {
-                            fit_custom_family(&family, &blocks, options).map_err(|error| error.to_string())?
+                            builder.fit_blocks(&family, &blocks, options)?
                         }
                     };
                     let (mean_beta, noise_beta) = builder.extract_primary_betas(&fit)?;
@@ -3622,6 +3634,16 @@ pub(crate) struct GaussianLocationScaleWiggleTermBuilder {
 impl LocationScaleFamilyBuilder for GaussianLocationScaleWiggleTermBuilder {
     type Family = GaussianLocationScaleWiggleFamily;
 
+    fn fit_blocks(
+        &self,
+        family: &Self::Family,
+        blocks: &[ParameterBlockSpec],
+        options: &BlockwiseFitOptions,
+    ) -> Result<UnifiedFitResult, String> {
+        crate::custom_family::fit_custom_family_arming_on_evidence(family, blocks, options)
+            .map_err(|error| error.to_string())
+    }
+
     fn meanspec(&self) -> &TermCollectionSpec {
         &self.meanspec
     }
@@ -3712,6 +3734,7 @@ impl LocationScaleFamilyBuilder for GaussianLocationScaleWiggleTermBuilder {
             wiggle_degree: self.wiggle_degree,
             policy: gam_runtime::resource::ResourcePolicy::default_library(),
             cached_row_scalars: std::sync::RwLock::new(None),
+            jeffreys_armed: true,
         }
     }
 

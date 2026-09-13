@@ -1261,6 +1261,10 @@ pub(crate) struct DispersionGlmLocationScaleFamily {
     pub(crate) kind: DispersionFamilyKind,
     pub(crate) y: Array1<f64>,
     pub(crate) weights: Array1<f64>,
+    /// Whether this member's Jeffreys/Firth prior is armed. A fit arms it only
+    /// on the unarmed fit's own evidence, through
+    /// `fit_custom_family_arming_on_evidence` (#979).
+    pub(crate) jeffreys_armed: bool,
 }
 
 impl DispersionGlmLocationScaleFamily {
@@ -1268,12 +1272,20 @@ impl DispersionGlmLocationScaleFamily {
     pub(crate) const BLOCK_DISP: usize = 1;
 }
 
+impl crate::custom_family::JeffreysArming for DispersionGlmLocationScaleFamily {
+    fn with_jeffreys_armed(&self, armed: bool) -> Self {
+        Self {
+            jeffreys_armed: armed,
+            ..self.clone()
+        }
+    }
+}
+
 impl CustomFamily for DispersionGlmLocationScaleFamily {
-    // Preserve the pre-gam#1395 behavior: the trait default flipped to OFF (the
-    // flat-prior exact-Newton objective carries no Jeffreys term), so families
-    // that historically armed the term by default opt back in explicitly.
+    // The self-limiting Jeffreys/Firth curvature bounds a coefficient the data do
+    // not, but it is armed only when the unarmed fit proves it is needed (#979).
     fn joint_jeffreys_term_required(&self) -> bool {
-        true
+        self.jeffreys_armed
     }
 
     /// The unscaled family deviance `2·Σ wᵢ d(yᵢ, μ̂ᵢ; θ̂ᵢ)` evaluated row by row
@@ -2067,6 +2079,16 @@ pub(crate) fn dispersion_location_scale_warm_start(
 impl LocationScaleFamilyBuilder for DispersionGlmLocationScaleTermBuilder {
     type Family = DispersionGlmLocationScaleFamily;
 
+    fn fit_blocks(
+        &self,
+        family: &Self::Family,
+        blocks: &[crate::custom_family::ParameterBlockSpec],
+        options: &crate::custom_family::BlockwiseFitOptions,
+    ) -> Result<UnifiedFitResult, String> {
+        crate::custom_family::fit_custom_family_arming_on_evidence(family, blocks, options)
+            .map_err(|error| error.to_string())
+    }
+
     fn meanspec(&self) -> &TermCollectionSpec {
         &self.meanspec
     }
@@ -2183,6 +2205,7 @@ impl LocationScaleFamilyBuilder for DispersionGlmLocationScaleTermBuilder {
             kind: self.kind,
             y: self.y.clone(),
             weights: self.weights.clone(),
+            jeffreys_armed: true,
         }
     }
 
@@ -2976,6 +2999,7 @@ mod tests {
                 kind,
                 y: y.clone(),
                 weights: weights.clone(),
+                jeffreys_armed: true,
             };
             let states = vec![
                 ParameterBlockState {

@@ -181,6 +181,7 @@ fn dispersion_joint_hessian_directional_matches_finite_difference() {
             kind,
             y: Array1::from_shape_fn(n, y_fn),
             weights: Array1::from_elem(n, 1.0),
+            jeffreys_armed: true,
         };
         let specs = make_specs();
         let analytic = family

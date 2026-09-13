@@ -106,6 +106,10 @@ pub struct GaussianLocationScaleWiggleFamily {
     pub policy: gam_runtime::resource::ResourcePolicy,
     pub(crate) cached_row_scalars:
         std::sync::RwLock<Option<(f64, f64, f64, f64, f64, f64, Arc<GaussianJointRowScalars>)>>,
+    /// Whether this member's Jeffreys/Firth prior is armed. A fit arms it only
+    /// on the unarmed fit's own evidence, through
+    /// `fit_custom_family_arming_on_evidence` (#979).
+    pub(crate) jeffreys_armed: bool,
 }
 
 impl MonotoneWiggleFamily for GaussianLocationScaleWiggleFamily {
@@ -128,12 +132,22 @@ impl Clone for GaussianLocationScaleWiggleFamily {
             wiggle_knots: self.wiggle_knots.clone(),
             wiggle_degree: self.wiggle_degree,
             policy: self.policy.clone(),
+            jeffreys_armed: self.jeffreys_armed,
             cached_row_scalars: std::sync::RwLock::new(
                 self.cached_row_scalars
                     .read()
                     .expect("lock poisoned")
                     .clone(),
             ),
+        }
+    }
+}
+
+impl crate::custom_family::JeffreysArming for GaussianLocationScaleWiggleFamily {
+    fn with_jeffreys_armed(&self, armed: bool) -> Self {
+        Self {
+            jeffreys_armed: armed,
+            ..self.clone()
         }
     }
 }
@@ -2137,11 +2151,10 @@ impl crate::custom_family::JeffreysThirdInformationDerivative
 }
 
 impl CustomFamily for GaussianLocationScaleWiggleFamily {
-    // Preserve the pre-gam#1395 behavior: the trait default flipped to OFF (the
-    // flat-prior exact-Newton objective carries no Jeffreys term), so families
-    // that historically armed the term by default opt back in explicitly.
+    // The self-limiting Jeffreys/Firth curvature bounds a coefficient the data do
+    // not, but it is armed only when the unarmed fit proves it is needed (#979).
     fn joint_jeffreys_term_required(&self) -> bool {
-        true
+        self.jeffreys_armed
     }
 
     fn exact_newton_joint_hessian_beta_dependent(&self) -> bool {
