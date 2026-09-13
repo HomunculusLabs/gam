@@ -8,8 +8,10 @@
 //! are no penalty components at all *and* when the joint posterior covariance is
 //! the wrong shape. Neither is a statement about the penalty:
 //!
-//! * a wholly parametric multinomial (`y ~ x1 + x2`) has no penalty component,
-//!   so `S_λ` is the **zero operator** — a value, not an absence;
+//! * a wholly parametric multinomial whose effects opt out of the default ridge
+//!   (`y ~ linear(x1, double_penalty=false) + linear(x2, double_penalty=false)`)
+//!   has no penalty component, so `S_λ` is the **zero operator** — a value, not
+//!   an absence;
 //! * `H⁻¹` is a different measurement of a different object.
 //!
 //! With `S_λ` derived from that chain, every parametric multinomial fit was
@@ -118,7 +120,9 @@ fn square(flat: &[f64], d: usize, what: &str) -> Array2<f64> {
 /// its influence matrix is the identity that zero penalty implies.
 #[test]
 fn parametric_multinomial_publishes_the_zero_penalty_it_has_2612() {
-    let model = fit("y ~ x1 + x2");
+    // Both effects opt out of the default null-recovery ridge (b7b874a2a), so the
+    // fit has no penalized term at all.
+    let model = fit("y ~ linear(x1, double_penalty=false) + linear(x2, double_penalty=false)");
     let d = model.p_per_class * model.n_active_classes;
     assert_eq!(
         (model.p_per_class, model.n_active_classes),
