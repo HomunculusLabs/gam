@@ -3927,10 +3927,6 @@ pub fn cholesky_solve_only_gpu(
     gam_gpu::solver::cholesky_solve_only_gpu(hessian, rhs)
 }
 
-pub fn cholesky_lower_gpu(hessian: ArrayView2<'_, f64>) -> Result<Array2<f64>, String> {
-    gam_gpu::solver::cholesky_lower_gpu(hessian)
-}
-
 #[cfg(all(test, target_os = "linux"))]
 mod pirls_loop_likelihood_scale_tests {
     use super::PirlsLoopLikelihoodScale;

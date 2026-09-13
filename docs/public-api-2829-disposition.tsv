@@ -56,8 +56,8 @@ crates/gam-gpu/src/policy.rs	row_batch_target_is_gpu	retired-by-later-deletion:5
 crates/gam-gpu/src/policy.rs	should_run_reml_outer_on_device	retired-by-later-deletion:5d498d0e9d
 crates/gam-gpu/src/policy.rs	surrogate_justified	retired-by-later-deletion:5d498d0e9d
 crates/gam-gpu/src/policy.rs	surrogate_unneeded	retired-by-later-deletion:5d498d0e9d
-crates/gam-gpu/src/solver.rs	cholesky_lower	restored-in-place
-crates/gam-gpu/src/solver.rs	cholesky_lower_gpu	restored-in-place
+crates/gam-gpu/src/solver.rs	cholesky_lower	retired-no-product-user
+crates/gam-gpu/src/solver.rs	cholesky_lower_gpu	retired-no-product-user
 crates/gam-gpu/src/solver.rs	solver_backend_status	retired-by-later-deletion:5d498d0e9d
 crates/gam-gpu/src/test_gate.rs	assert_absent_device_was_counted	retired-by-later-deletion:57409ec77f
 crates/gam-gpu/src/test_gate.rs	gpu_for_test	retired-by-later-deletion:57409ec77f
@@ -925,7 +925,7 @@ crates/gam-solve/src/gpu_kernels/pirls_row.rs	row_reweight_cpu	retired-no-produc
 crates/gam-solve/src/gpu_kernels/reml_trace.rs	should_use_gpu_hutchinson	retired-no-product-user
 crates/gam-solve/src/gpu_kernels/sae_resident.rs	cpu_reference_outer_sequence	retired-no-product-user
 crates/gam-solve/src/gpu_kernels/sae_resident.rs	device_fit_outer_sequence	retired-no-product-user
-crates/gam-solve/src/gpu/pirls_gpu.rs	cholesky_lower_gpu	restored-in-place
+crates/gam-solve/src/gpu/pirls_gpu.rs	cholesky_lower_gpu	retired-no-product-user
 crates/gam-solve/src/gpu/pirls_gpu.rs	solve_pirls_step_on_stream	restored-in-place
 crates/gam-solve/src/gpu/pirls_gpu.rs	solve_pirls_step_on_stream_device	restored-in-place
 crates/gam-solve/src/gpu/pirls_gpu.rs	solve_step_on_stream_device	restored-in-place

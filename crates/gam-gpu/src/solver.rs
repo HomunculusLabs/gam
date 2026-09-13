@@ -83,11 +83,6 @@ mod cuda {
         Ok(cholesky_logdet_from_col_major(&factor_col, p))
     }
 
-    pub(super) fn cholesky_lower(hessian: ArrayView2<'_, f64>) -> Result<Array2<f64>, String> {
-        let (_, stream) = context_and_stream()?;
-        cholesky_lower_on_stream(hessian, &stream)
-    }
-
     pub(super) fn cholesky_lower_on_ordinal(
         ordinal: usize,
         hessian: ArrayView2<'_, f64>,
@@ -1019,28 +1014,6 @@ pub fn cholesky_solve_only_gpu(
 ) -> Result<Array2<f64>, String> {
     let result = iterative_refinement_cholesky_solve(hessian, rhs, /*need_logdet=*/ false)?;
     Ok(result.0)
-}
-
-pub fn cholesky_lower_gpu(hessian: ArrayView2<'_, f64>) -> Result<Array2<f64>, String> {
-    #[cfg(not(target_os = "linux"))]
-    {
-        let (rows, cols) = hessian.dim();
-        return Err(format!(
-            "CUDA support not compiled for Cholesky factorization; hessian={rows}x{cols}"
-        ));
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        super::device_runtime::GpuRuntime::require().map_err(|error| {
-            let (rows, cols) = hessian.dim();
-            format!(
-                "CUDA runtime unavailable for Cholesky factorization; \
-                 hessian={rows}x{cols}: {error}"
-            )
-        })?;
-        cuda::cholesky_lower(hessian)
-    }
 }
 
 #[cfg(target_os = "linux")]
