@@ -3089,6 +3089,23 @@ impl BernoulliMarginalSlopeFamily {
             &mut f_aau,
             &mut f_auv,
         )?;
+        self.add_standard_normal_flex_third_calibration_crossings(
+            primary,
+            a,
+            b,
+            cells,
+            row_dirs,
+            &mut f_aa,
+            &mut f_au,
+            &mut f_uv,
+            &mut f_a_dir,
+            &mut f_aa_dir,
+            &mut f_au_dir,
+            &mut f_uv_dir,
+            &mut f_aaa,
+            &mut f_aau,
+            &mut f_auv,
+        )?;
 
         f_u[0] = -marginal.mu1;
         f_uv[[0, 0]] = -marginal.mu2;

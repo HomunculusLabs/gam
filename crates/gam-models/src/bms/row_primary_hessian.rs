@@ -4004,6 +4004,23 @@ impl BernoulliMarginalSlopeFamily {
             &mut f_aau,
             &mut f_auv,
         )?;
+        self.add_standard_normal_flex_third_calibration_crossings(
+            primary,
+            a,
+            b,
+            cells,
+            std::slice::from_ref(dir),
+            &mut f_aa,
+            &mut f_au,
+            &mut f_uv,
+            &mut f_a_dirs,
+            &mut f_aa_dirs,
+            &mut f_au_dirs,
+            &mut f_uv_dirs,
+            &mut f_aaa,
+            &mut f_aau,
+            &mut f_auv,
+        )?;
         let f_a_dir = f_a_dirs[0];
         let f_aa_dir = f_aa_dirs[0];
         let f_au_dir = Array1::from_vec(f_au_dirs);
