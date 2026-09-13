@@ -150,6 +150,9 @@ fn reconstruction_r2(fitted: &Array2<f64>, z: &Array2<f64>) -> f64 {
 
 #[test]
 fn sae_manifold_euclidean_k2_fit_terminates() {
+    // #2267 — surface the solver's own phase and progress lines; a timeout of this
+    // fixture otherwise records nothing about where the time went.
+    gam_runtime::test_support::install_diagnostic_logger();
     let (z, s_true, owner) = planted_two_lines();
     let term = build_cold_k2_term(&s_true, &owner, &z);
     let init_rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(1); K]);
