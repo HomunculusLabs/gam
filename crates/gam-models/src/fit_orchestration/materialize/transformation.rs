@@ -36,14 +36,12 @@ pub(crate) fn materialize_transformation_normal<'a>(
     let y = resolve_continuous_column(data, col_map, &parsed.response, "response")?;
     let mut inference_notes = Vec::new();
 
-    let policy = resolved_resource_policy(config, marginal_slope_hints(config));
     let covariate_spec = build_termspec_with_geometry_and_overrides(
         &parsed.terms,
         data,
         col_map,
         &mut inference_notes,
         config.scale_dimensions,
-        &policy,
         config.smooth_overrides.as_ref(),
         None,
     )?;

@@ -15,11 +15,10 @@ pub(crate) fn build_termspec_with_geometry_and_overrides(
     col_map: &HashMap<String, usize>,
     inference_notes: &mut Vec<String>,
     scale_dimensions: bool,
-    policy: &gam_runtime::resource::ResourcePolicy,
     smooth_overrides: Option<&JsonValue>,
     spatial_center_counts: Option<&[Option<usize>]>,
 ) -> Result<TermCollectionSpec, WorkflowError> {
-    let mut spec = build_termspec(terms, data, col_map, inference_notes, policy)?;
+    let mut spec = build_termspec(terms, data, col_map, inference_notes)?;
     if scale_dimensions {
         enable_scale_dimensions(&mut spec);
     }

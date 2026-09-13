@@ -93,7 +93,6 @@ fn termspec_for(formula: &str, frame: &Array2<f64>) -> gam::smooth::TermCollecti
         &ds,
         &col_map,
         &mut notes,
-        &gam::ResourcePolicy::default_library(),
     )
     .expect("term spec")
 }

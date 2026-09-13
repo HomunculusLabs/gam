@@ -775,14 +775,12 @@ pub(crate) fn run_fit_bernoulli_marginal_slope(
         ds,
         col_map_for_termspec,
         inference_notes,
-        &gam::ResourcePolicy::default_library(),
     )?;
     let mut slopespec = build_termspec(
         &parsed_slope.terms,
         ds,
         col_map_for_termspec,
         inference_notes,
-        &gam::ResourcePolicy::default_library(),
     )?;
     if fit_config.scale_dimensions {
         enable_scale_dimensions(&mut marginalspec);
@@ -1002,7 +1000,6 @@ pub(crate) fn run_fit_transformation_normal(
         ds,
         col_map,
         inference_notes,
-        &gam::ResourcePolicy::default_library(),
     )?;
     if fit_config.scale_dimensions {
         enable_scale_dimensions(&mut covariate_spec);
@@ -1109,14 +1106,12 @@ pub(crate) fn run_fitwith_predict_noise(
         ds,
         col_map,
         inference_notes,
-        &gam::ResourcePolicy::default_library(),
     )?;
     let mut meanspec = build_termspec(
         &parsed.terms,
         ds,
         col_map,
         inference_notes,
-        &gam::ResourcePolicy::default_library(),
     )?;
     if fit_config.scale_dimensions {
         enable_scale_dimensions(&mut meanspec);

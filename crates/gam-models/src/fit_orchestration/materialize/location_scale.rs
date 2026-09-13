@@ -51,14 +51,12 @@ pub(crate) fn materialize_location_scale<'a>(
     let effective_linkwiggle =
         effectivelinkwiggle_formulaspec(parsed.linkwiggle.as_ref(), link_choice.as_ref());
 
-    let policy = resolved_resource_policy(config, gam_runtime::resource::ProblemHints::default());
     let meanspec = build_termspec_with_geometry_and_overrides(
         &parsed.terms,
         data,
         col_map,
         &mut inference_notes,
         config.scale_dimensions,
-        &policy,
         config.smooth_overrides.as_ref(),
         None,
     )?;
@@ -68,7 +66,6 @@ pub(crate) fn materialize_location_scale<'a>(
         col_map,
         &mut inference_notes,
         config.scale_dimensions,
-        &policy,
         config.smooth_overrides.as_ref(),
         None,
     )?;

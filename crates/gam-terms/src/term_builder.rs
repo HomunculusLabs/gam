@@ -34,7 +34,6 @@ use crate::smooth::{
 };
 use gam_data::{ColumnKindTag, DataError, EncodedDataset as Dataset};
 use gam_problem::types::ColIdx;
-use gam_runtime::resource::ResourcePolicy;
 
 /// Default B-spline degree when a smooth's `degree=` option is absent. Cubic
 /// (degree 3) is the standard GAM convention: C² continuity with a low knot
@@ -381,7 +380,6 @@ pub fn build_termspec(
     ds: &Dataset,
     col_map: &HashMap<String, usize>,
     inference_notes: &mut Vec<String>,
-    policy: &ResourcePolicy,
 ) -> Result<TermCollectionSpec, TermBuilderError> {
     // Generic ingestion deliberately preserves missing cells because it runs
     // before a formula exists. This is the first layer that knows the complete
@@ -594,7 +592,6 @@ pub fn build_termspec(
                     &inner_options,
                     ds,
                     inference_notes,
-                    policy,
                     smooth_coordinate_count,
                 )?;
                 // `bs="sz"` deliberately stays typed as `SmoothBasisSpec::FactorSmooth
@@ -2272,7 +2269,6 @@ pub(crate) fn build_smooth_basis(
     options: &BTreeMap<String, String>,
     ds: &Dataset,
     inference_notes: &mut Vec<String>,
-    policy: &ResourcePolicy,
     smooth_coordinate_count: usize,
 ) -> Result<SmoothBasisSpec, String> {
     // Strip the internal by-level sizing carrier before any per-kind option
@@ -2419,7 +2415,6 @@ pub(crate) fn build_smooth_basis(
             &inner_options,
             ds,
             inference_notes,
-            policy,
             smooth_coordinate_count,
         )?;
         // Same rule as the formula path: a continuous by-variable's constant

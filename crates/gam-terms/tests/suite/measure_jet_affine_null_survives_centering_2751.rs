@@ -367,7 +367,6 @@ fn collection_centering_leaves_every_linear_direction_free() {
             &ds,
             &col_map,
             &mut Vec::new(),
-            &gam_runtime::resource::ResourcePolicy::default_library(),
         )
         .expect("term spec");
         let feature = ds.values.clone();

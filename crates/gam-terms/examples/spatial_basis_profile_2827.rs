@@ -6,7 +6,6 @@
 //! No likelihood optimization or interpolation tensor is constructed.
 
 use gam_data::load_csvwith_inferred_schema;
-use gam_runtime::resource::ResourcePolicy;
 use gam_terms::basis::BasisWorkspace;
 use gam_terms::inference::formula_dsl::parse_formula;
 use gam_terms::smooth::{
@@ -50,7 +49,6 @@ fn run() -> Result<(), String> {
         &data,
         &data.column_map(),
         &mut Vec::new(),
-        &ResourcePolicy::default_library(),
     )
     .map_err(|error| error.to_string())?;
     eprintln!("[2827-basis] rows={rows} cold collection begins");

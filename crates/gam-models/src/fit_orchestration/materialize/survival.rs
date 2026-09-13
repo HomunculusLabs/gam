@@ -430,16 +430,6 @@ pub(crate) fn materialize_survival<'a>(
         );
     }
 
-    let policy = resolved_resource_policy(
-        config,
-        gam_runtime::resource::ProblemHints {
-            // Survival marginal-slope shares the operator-only invariant with
-            // the Bernoulli path; flag it as such so strict mode is selected
-            // even at small n.
-            marginal_slope_large_scale_active: survival_mode
-                == SurvivalLikelihoodMode::MarginalSlope,
-        },
-    );
     // CTN composition supplies its generated score before materialization.
     let marginal_slope_aliased_col_map = if survival_mode == SurvivalLikelihoodMode::MarginalSlope {
         match config.z_column.as_deref() {
@@ -461,7 +451,6 @@ pub(crate) fn materialize_survival<'a>(
         termspec_col_map,
         &mut inference_notes,
         config.scale_dimensions,
-        &policy,
         config.smooth_overrides.as_ref(),
         None,
     )?;
@@ -587,7 +576,6 @@ pub(crate) fn materialize_survival<'a>(
             termspec_col_map,
             &mut inference_notes,
             config.scale_dimensions,
-            &policy,
             config.smooth_overrides.as_ref(),
             None,
         )?
@@ -684,7 +672,6 @@ pub(crate) fn materialize_survival<'a>(
                     &aliased_col_map,
                     &mut inference_notes,
                     config.scale_dimensions,
-                    &policy,
                     config.smooth_overrides.as_ref(),
                     None,
                 )?;

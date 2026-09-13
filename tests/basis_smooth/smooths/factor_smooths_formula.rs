@@ -1,4 +1,3 @@
-use gam::ResourcePolicy;
 use gam::inference::data::EncodedDataset;
 use gam::inference::formula_dsl::{ParsedTerm, parse_formula};
 use gam::inference::model::{ColumnKindTag, DataSchema, SchemaColumn};
@@ -75,7 +74,6 @@ fn factor_smooth_aliases_parse_to_options() {
 fn by_fs_sz_and_random_slope_build_termspec() {
     let data = ds();
     let col_map = data.column_map();
-    let policy = ResourcePolicy::default_library();
     for formula in [
         "y ~ s(x, by=z)",
         "y ~ s(x, by=fac) + fac",
@@ -92,7 +90,7 @@ fn by_fs_sz_and_random_slope_build_termspec() {
     ] {
         let parsed = parse_formula(formula).unwrap_or_else(|e| panic!("parse {formula}: {e}"));
         let mut notes = Vec::new();
-        let spec = build_termspec(&parsed.terms, &data, &col_map, &mut notes, &policy)
+        let spec = build_termspec(&parsed.terms, &data, &col_map, &mut notes)
             .unwrap_or_else(|e| panic!("build {formula}: {e}"));
         let design = build_term_collection_design(data.values.view(), &spec)
             .unwrap_or_else(|e| panic!("design {formula}: {e}"));
@@ -104,12 +102,11 @@ fn by_fs_sz_and_random_slope_build_termspec() {
 fn termspec_routes_new_constructs_to_new_variants() {
     let data = ds();
     let col_map = data.column_map();
-    let policy = ResourcePolicy::default_library();
 
     // A numeric `by=` gates the smooth by covariate value: `ByVariable::Numeric`
     // (#1981, resolving #1887).
     let parsed = parse_formula("y ~ s(x, by=z)").unwrap();
-    let spec = build_termspec(&parsed.terms, &data, &col_map, &mut vec![], &policy).unwrap();
+    let spec = build_termspec(&parsed.terms, &data, &col_map, &mut vec![]).unwrap();
     assert!(matches!(
         spec.smooth_terms[0].basis,
         SmoothBasisSpec::ByVariable {
@@ -122,7 +119,7 @@ fn termspec_routes_new_constructs_to_new_variants() {
     // `ByVariable::Level` smooth per training level (#1981) — `fac` here has
     // three levels {0, 1, 2}.
     let parsed = parse_formula("y ~ s(x, by=fac)").unwrap();
-    let spec = build_termspec(&parsed.terms, &data, &col_map, &mut vec![], &policy).unwrap();
+    let spec = build_termspec(&parsed.terms, &data, &col_map, &mut vec![]).unwrap();
     assert_eq!(spec.smooth_terms.len(), 3);
     assert!(spec.smooth_terms.iter().all(|term| matches!(
         term.basis,
@@ -133,7 +130,7 @@ fn termspec_routes_new_constructs_to_new_variants() {
     )));
 
     let parsed = parse_formula("y ~ fs(x, fac)").unwrap();
-    let spec = build_termspec(&parsed.terms, &data, &col_map, &mut vec![], &policy).unwrap();
+    let spec = build_termspec(&parsed.terms, &data, &col_map, &mut vec![]).unwrap();
     assert!(
         matches!(spec.smooth_terms[0].basis, SmoothBasisSpec::FactorSmooth { ref spec } if matches!(spec.flavour, FactorSmoothFlavour::Fs { .. }))
     );
@@ -143,10 +140,9 @@ fn termspec_routes_new_constructs_to_new_variants() {
 fn factor_by_smooth_defers_level_offsets_to_explicit_random_intercept() {
     let data = ds();
     let col_map = data.column_map();
-    let policy = ResourcePolicy::default_library();
 
     let parsed = parse_formula("y ~ s(x, by=fac) + group(fac)").unwrap();
-    let spec = build_termspec(&parsed.terms, &data, &col_map, &mut vec![], &policy).unwrap();
+    let spec = build_termspec(&parsed.terms, &data, &col_map, &mut vec![]).unwrap();
 
     assert_eq!(
         spec.random_effect_terms

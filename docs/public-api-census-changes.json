@@ -3722,5 +3722,13 @@
     "reason": "#2899, SPEC rule 25. FamilySpecKind::supports_firth duplicated the link-resolved LikelihoodSpec::supports_firth as a kind-level approximation, and nothing calls it.",
     "evidence": "At the base, every .supports_firth() call site takes a LikelihoodSpec receiver: gam-cli cli_args.rs:633 (ctx.family), gam-inference hmc_io.rs:57 (spec: &LikelihoodSpec), gam-models fit.rs:458 (request.family), gam-solve external_options.rs:139 (family, whose pretty_name is LikelihoodSpec's) and mixture_link.rs:5149 (LikelihoodSpec::new(..)), plus two root regression tests on spec.spec. No call goes through .kind(). The item list is the guard's refusal list from the guarded check job named in the commit message.",
     "base": "96b83bf8d671401454373fa6d345e70dac304b5a"
+  },
+  {
+    "base": "15890d934c6615de8d660a263a6c449802ec39db",
+    "removed": {
+      "crates/gam-models/src/fit_orchestration/entry.rs::marginal_slope_hints": 1
+    },
+    "reason": "#2899 slop: the pub(crate) marginal_slope_hints helper is deleted; its one caller built a resource policy only for the deleted build_termspec policy parameter.",
+    "evidence": "public_functions() counts pub(crate) fn declarations. Pool job 615871 (r17.615871.log) ran public_api_census.py on this change without the record and it refused exactly {entry.rs::marginal_slope_hints: 1}, 11653 -> 11652 declarations. At the base, git grep -n -w marginal_slope_hints finds only that declaration and the call at materialize/transformation.rs:39."
   }
 ]

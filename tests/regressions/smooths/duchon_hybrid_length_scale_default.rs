@@ -98,7 +98,6 @@ fn resolve_hybrid_default_spec(n: usize, d: usize) -> TermCollectionSpec {
         &ds,
         &cmap,
         &mut notes,
-        &ResourcePolicy::default_library(),
     )
     .unwrap_or_else(|e| panic!("{formula}: build_termspec failed: {e:?}"))
 }
@@ -176,7 +175,6 @@ fn hybrid_duchon_4d_default_builds_and_fits_via_formula() {
         &ds,
         &cmap,
         &mut notes,
-        &ResourcePolicy::default_library(),
     )
     .expect("4D hybrid Duchon default termspec must resolve");
 

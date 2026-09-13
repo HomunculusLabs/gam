@@ -55,7 +55,6 @@ fn probe_term_collection_topology_versus_range() {
         &ds,
         &col_map,
         &mut Vec::new(),
-        &gam_runtime::resource::ResourcePolicy::default_library(),
     )
     .expect("term spec");
     let feature = ds.values.clone();
@@ -147,7 +146,6 @@ fn probe_frozen_chart_local_topology_versus_range() {
         &ds,
         &col_map,
         &mut Vec::new(),
-        &gam_runtime::resource::ResourcePolicy::default_library(),
     )
     .expect("term spec");
     let feature = ds.values.clone();

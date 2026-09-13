@@ -1,4 +1,3 @@
-use gam::ResourcePolicy;
 use gam::inference::data::EncodedDataset;
 use gam::inference::formula_dsl::parse_formula;
 use gam::inference::model::{ColumnKindTag, DataSchema, SchemaColumn};
@@ -60,7 +59,6 @@ fn unordered_by_factor_expands_to_level_smooths_and_fixed_main_effect() {
         &ds,
         &ds.column_map(),
         &mut notes,
-        &ResourcePolicy::default_library(),
     )
     .expect("termspec");
     assert_eq!(spec.smooth_terms.len(), 2);
@@ -88,7 +86,6 @@ fn binary_by_and_sz_parse_to_specialized_basis_specs() {
         &ds,
         &ds.column_map(),
         &mut notes,
-        &ResourcePolicy::default_library(),
     )
     .expect("binary termspec");
     assert!(matches!(
@@ -105,7 +102,6 @@ fn binary_by_and_sz_parse_to_specialized_basis_specs() {
         &ds,
         &ds.column_map(),
         &mut notes,
-        &ResourcePolicy::default_library(),
     )
     .expect("sz termspec");
     // `bs="sz"` types as `FactorSmooth { flavour: Sz }`, NOT the legacy

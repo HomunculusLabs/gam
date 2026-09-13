@@ -193,7 +193,6 @@ fn bounded_cli_termspec() -> TermCollectionSpec {
         &ds,
         &col_map,
         &mut inference_notes,
-        &gam::ResourcePolicy::default_library(),
     )
     .unwrap_or_else(|e| panic!("{} failed: {:?}", "bounded term spec", e))
 }
@@ -3887,7 +3886,6 @@ fn build_termspec_gives_parametric_linear_terms_the_null_recovery_ridge_by_defau
         &ds,
         &col_map,
         &mut inference_notes,
-        &gam::ResourcePolicy::default_library(),
     )
     .unwrap_or_else(|e| panic!("{} failed: {:?}", "term spec", e));
 
@@ -3984,7 +3982,6 @@ fn build_termspec_accepts_joint_thinplate_above_three_dimensions() {
         &ds,
         &col_map,
         &mut inference_notes,
-        &gam::ResourcePolicy::default_library(),
     )
     .unwrap_or_else(|e| panic!("{} failed: {:?}", "4-d TPS should be accepted", e));
     assert_eq!(spec.smooth_terms.len(), 1, "should have one smooth term");
@@ -4686,7 +4683,6 @@ fn build_termspec_rejects_duchon_double_penalty_option() {
         &ds,
         &col_map,
         &mut inference_notes,
-        &gam::ResourcePolicy::default_library(),
     )
     .expect_err("Duchon double_penalty should be rejected");
     assert!(err.to_string().contains("does not support double_penalty"));
@@ -4784,7 +4780,6 @@ fn build_termspec_honors_explicit_duchon_power_and_builds_well_posed() {
         &ds,
         &col_map,
         &mut inference_notes,
-        &gam::ResourcePolicy::default_library(),
     )
     .unwrap_or_else(|e| {
         panic!(

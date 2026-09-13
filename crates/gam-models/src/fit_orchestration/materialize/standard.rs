@@ -74,7 +74,6 @@ pub(crate) fn materialize_standard<'a>(
         &term_col_map,
         &mut inference_notes,
         config.scale_dimensions,
-        &policy,
         config.smooth_overrides.as_ref(),
         config.spatial_center_counts.as_deref(),
     )?;

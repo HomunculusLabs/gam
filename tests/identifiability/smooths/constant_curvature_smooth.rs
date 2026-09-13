@@ -322,7 +322,6 @@ fn termspec_for(formula: &str) -> gam::terms::smooth::TermCollectionSpec {
         &ds,
         &col_map,
         &mut notes,
-        &gam::ResourcePolicy::default_library(),
     )
     .expect("term spec")
 }

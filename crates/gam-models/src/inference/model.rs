@@ -6641,7 +6641,6 @@ mod tests {
     fn bare_categorical_fixed_factor_unseen_level_rejected_by_predict_encode() {
         use csv::StringRecord;
         use gam_data::{EncodedDataset, UnseenCategoryPolicy, encode_recordswith_schema};
-        use gam_runtime::resource::ResourcePolicy;
         use gam_terms::inference::formula_dsl::parse_formula;
         use gam_terms::term_builder::build_termspec;
 
@@ -6680,7 +6679,6 @@ mod tests {
                 &train,
                 &build_col_map,
                 &mut notes,
-                &ResourcePolicy::default_library(),
             )
             .unwrap_or_else(|err| panic!("`{formula}` must build a term spec, got: {err:?}"));
             let mut payload = standard_gaussian_payload();

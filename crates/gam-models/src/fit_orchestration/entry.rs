@@ -154,11 +154,6 @@ pub(crate) fn resolved_resource_policy(
     gam_runtime::resource::ResourcePolicy::for_problem(hints)
 }
 
-pub(crate) fn marginal_slope_hints(config: &FitConfig) -> gam_runtime::resource::ProblemHints {
-    gam_runtime::resource::ProblemHints {
-        marginal_slope_large_scale_active: requests_bernoulli_marginal_slope(config),
-    }
-}
 /// Parse, materialize, and fit a model in one call.
 /// Resolve the expectile asymmetry `τ` requested by `config`, if any.
 ///

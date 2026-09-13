@@ -69,7 +69,7 @@ use crate::custom_family::{
 };
 use crate::fit_orchestration::drivers::freeze_term_collection_from_design;
 use crate::fit_orchestration::{
-    FitConfig, build_termspec_with_geometry_and_overrides, resolved_resource_policy,
+    FitConfig, build_termspec_with_geometry_and_overrides,
 };
 use crate::model_types::EstimationError;
 use crate::multinomial_posterior::softmax_with_reference;
@@ -84,7 +84,6 @@ use gam_problem::{
     FixedLambdaCheckpoint, FixedLambdaResidualKind, FixedLambdaSolverStage, FixedLambdaStallReason,
     FixedLambdaStationarityEvidence, ResponseColumnKind,
 };
-use gam_runtime::resource::ProblemHints;
 /// The covariance-definition axis, re-exported so a caller of this module's
 /// predict surface names the same enum `gam-predict` and the CLI do rather than
 /// reaching across crates for it.
@@ -2992,7 +2991,6 @@ fn build_formula_design_for_multinomial(
     let y_col = resolve_role_col(&col_map, &parsed.response, "response")
         .map_err(|err| EstimationError::InvalidInput(format!("multinomial fit: {err}")))?;
     let y_kind = crate::fit_orchestration::response_column_kind(data, y_col);
-    let policy = resolved_resource_policy(config, ProblemHints::default());
     let mut inference_notes: Vec<String> = Vec::new();
     let spec = build_termspec_with_geometry_and_overrides(
         &parsed.terms,
@@ -3000,7 +2998,6 @@ fn build_formula_design_for_multinomial(
         &col_map,
         &mut inference_notes,
         config.scale_dimensions,
-        &policy,
         config.smooth_overrides.as_ref(),
         None,
     )

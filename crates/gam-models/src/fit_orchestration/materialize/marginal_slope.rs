@@ -138,7 +138,6 @@ pub(crate) fn materialize_bernoulli_marginal_slope<'a>(
         &aliased_col_map,
         &mut inference_notes,
         config.scale_dimensions,
-        &policy,
         config.smooth_overrides.as_ref(),
         None,
     )?;
@@ -154,7 +153,6 @@ pub(crate) fn materialize_bernoulli_marginal_slope<'a>(
         &aliased_col_map,
         &mut inference_notes,
         config.scale_dimensions,
-        &policy,
         config.smooth_overrides.as_ref(),
         None,
     )?;

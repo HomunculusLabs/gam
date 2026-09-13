@@ -10,7 +10,6 @@
 //! Back-compat: a *scalar* `knots=<int>` keeps its historical meaning as an
 //! internal-knot count and still produces `BSplineKnotSpec::Generate`.
 
-use gam::ResourcePolicy;
 use gam::basis::{BSplineKnotPlacement, BSplineKnotSpec};
 use gam::inference::data::EncodedDataset;
 use gam::inference::formula_dsl::parse_formula;
@@ -69,7 +68,6 @@ fn build(formula: &str) -> gam::smooth::TermCollectionSpec {
         &ds,
         &ds.column_map(),
         &mut notes,
-        &ResourcePolicy::default_library(),
     )
     .expect("termspec")
 }
@@ -206,7 +204,6 @@ fn explicit_knot_list_conflicts_with_k() {
         &ds,
         &ds.column_map(),
         &mut notes,
-        &ResourcePolicy::default_library(),
     )
     .expect_err("knots=[...] together with k= must be rejected");
     let err = err.to_string();
@@ -226,7 +223,6 @@ fn out_of_range_explicit_knot_is_rejected() {
         &ds,
         &ds.column_map(),
         &mut notes,
-        &ResourcePolicy::default_library(),
     )
     .expect_err("interior knot outside the data range must be rejected");
     let err = err.to_string();

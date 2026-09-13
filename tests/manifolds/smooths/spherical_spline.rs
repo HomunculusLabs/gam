@@ -128,7 +128,6 @@ fn sphere_formula_and_mgcv_sos_alias_resolve_to_sphere_basis() {
         &ds,
         &col_map,
         &mut notes,
-        &gam::ResourcePolicy::default_library(),
     )
     .expect("term spec");
     assert_eq!(spec.smooth_terms.len(), 2);
@@ -186,7 +185,6 @@ fn sphere_m4_wahba_formula_enforces_stable_center_floor_only_for_m4() {
         &ds,
         &col_map,
         &mut notes,
-        &gam::ResourcePolicy::default_library(),
     )
     .expect("term spec");
     let SmoothBasisSpec::Sphere { spec: m4_spec, .. } = &spec.smooth_terms[0].basis else {

@@ -81,7 +81,6 @@ pub(crate) fn covariate_spec_from_formula(
         &dataset,
         &col_map,
         &mut notes,
-        &gam_runtime::resource::ResourcePolicy::default_library(),
     )
     .map_err(|error| EventHistoryError::InvalidInput {
         reason: format!("event-history formula {right_hand_side:?}: {}", String::from(error)),

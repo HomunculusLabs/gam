@@ -305,7 +305,6 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
         &ds,
         col_map_for_termspec,
         &mut inference_notes,
-        &gam::ResourcePolicy::default_library(),
     )?;
     if effective_config.scale_dimensions {
         enable_scale_dimensions(&mut termspec);
@@ -316,7 +315,6 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
             &ds,
             col_map_for_termspec,
             &mut inference_notes,
-            &gam::ResourcePolicy::default_library(),
         )?;
         if effective_config.scale_dimensions {
             enable_scale_dimensions(&mut spec);
@@ -861,7 +859,6 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
             &ds,
             col_map_for_termspec,
             &mut inference_notes,
-            &gam::ResourcePolicy::default_library(),
         )?;
         if effective_config.scale_dimensions {
             enable_scale_dimensions(&mut slopespec);

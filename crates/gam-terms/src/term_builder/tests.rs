@@ -158,7 +158,6 @@ fn measure_jet_reml_selects_the_representer_range_by_default_2761() {
             &ds,
             &col_map,
             &mut Vec::new(),
-            &gam_runtime::resource::ResourcePolicy::default_library(),
         )
         .expect("build mjs term");
         let SmoothBasisSpec::MeasureJet { spec, .. } = &terms.smooth_terms[0].basis else {
@@ -247,7 +246,6 @@ fn term_completeness_is_scoped_to_formula_columns() {
         &data,
         &data.column_map(),
         &mut Vec::new(),
-        &gam_runtime::resource::ResourcePolicy::default_library(),
     )
     .expect("a missing cell in an unreferenced column must be irrelevant");
 
@@ -257,7 +255,6 @@ fn term_completeness_is_scoped_to_formula_columns() {
         &data,
         &data.column_map(),
         &mut Vec::new(),
-        &gam_runtime::resource::ResourcePolicy::default_library(),
     )
     .expect_err("a missing cell in a model term must fail before design construction");
     assert!(
@@ -327,7 +324,6 @@ fn build_two_dimensional_spatial_basis(
         &options,
         ds,
         &mut notes,
-        &ResourcePolicy::default_library(),
         1,
     )
     .unwrap_or_else(|error| {
@@ -357,7 +353,6 @@ fn build_sphere_over_lat_lon(ds: &Dataset) -> Result<SmoothBasisSpec, String> {
         &options,
         ds,
         &mut notes,
-        &ResourcePolicy::default_library(),
         1,
     )
 }
@@ -498,7 +493,6 @@ fn default_univariate_thinplate_basis_dim_is_modest() {
         &options,
         &ds,
         &mut notes,
-        &ResourcePolicy::default_library(),
         1,
     )
     .expect("build default univariate tp smooth");
@@ -564,7 +558,6 @@ fn default_matern_2d_seeds_resolving_length_scale_not_overscaled_diameter() {
         &options,
         &ds,
         &mut notes,
-        &ResourcePolicy::default_library(),
         1,
     )
     .expect("build default 2-D matern smooth");
@@ -660,7 +653,6 @@ fn matern_length_scale_provenance_drives_prebuild_kappa_locking() {
             &options,
             &ds,
             &mut notes,
-            &ResourcePolicy::default_library(),
             1,
         )
         .expect("build Matérn provenance fixture")
@@ -759,7 +751,6 @@ fn matern_and_thinplate_accept_periodic_option() {
         &matern_opts,
         &ds,
         &mut notes,
-        &ResourcePolicy::default_library(),
         1,
     )
     .expect("matern(x, periodic=true) must be accepted");
@@ -783,7 +774,6 @@ fn matern_and_thinplate_accept_periodic_option() {
         &tps_opts,
         &ds,
         &mut notes,
-        &ResourcePolicy::default_library(),
         1,
     )
     .expect("thinplate(x, periodic=true) must be accepted");
@@ -827,7 +817,6 @@ fn scalar_periodic_false_builds_non_periodic_radial_smooth() {
             &opts,
             &ds,
             &mut notes,
-            &ResourcePolicy::default_library(),
             1,
         )
         .unwrap_or_else(|e| panic!("s(x, bs={bs}, periodic=false) must be accepted: {e}"))
@@ -869,7 +858,6 @@ fn inferred_tensor_basis_product(ds: &Dataset) -> usize {
         ds,
         &col_map,
         &mut notes,
-        &ResourcePolicy::default_library(),
     )
     .expect("build tensor termspec");
     let SmoothBasisSpec::TensorBSpline { spec, .. } = &terms.smooth_terms[0].basis else {
@@ -906,7 +894,6 @@ fn tensor_margin_basis_sizes(ds: &Dataset, formula: &str) -> Vec<usize> {
         ds,
         &col_map,
         &mut notes,
-        &ResourcePolicy::default_library(),
     )
     .expect("build tensor termspec");
     let SmoothBasisSpec::TensorBSpline { spec, .. } = &terms.smooth_terms[0].basis else {
@@ -1046,7 +1033,6 @@ fn bare_doubly_cyclic_tensor_derives_period_from_data_range_1776() {
         &ds,
         &col_map,
         &mut notes,
-        &ResourcePolicy::default_library(),
     )
     .expect(
         "bare cc-cc tensor must build via the data-range period fallback (#1776/#1752), \
@@ -1188,7 +1174,6 @@ fn one_dimensional_bspline_accepts_boundary_periodic() {
         &ds,
         &col_map,
         &mut notes,
-        &gam_runtime::resource::ResourcePolicy::default_library(),
     )
     .expect("periodic boundary should build");
     let SmoothBasisSpec::BSpline1D { spec, .. } = &terms.smooth_terms[0].basis else {
@@ -1225,7 +1210,6 @@ fn univariate_smooth_accepts_mgcv_cubic_regression_aliases() {
             &ds,
             &col_map,
             &mut notes,
-            &gam_runtime::resource::ResourcePolicy::default_library(),
         )
         .unwrap_or_else(|err| panic!("bs='{selector}' must build a 1-D smooth, got: {err:?}"));
         let SmoothBasisSpec::BSpline1D { spec, .. } = &terms.smooth_terms[0].basis else {
@@ -1247,7 +1231,6 @@ fn univariate_smooth_accepts_mgcv_cubic_regression_aliases() {
             &ds,
             &col_map,
             &mut notes,
-            &gam_runtime::resource::ResourcePolicy::default_library(),
         )
         .expect("explicit cr/cs opt-out should build");
         let SmoothBasisSpec::BSpline1D { spec, .. } = &terms.smooth_terms[0].basis else {
@@ -1278,7 +1261,6 @@ fn non_intercept_linear_effects_default_to_null_recovery_with_explicit_opt_out()
             &ds,
             &ds.column_map(),
             &mut notes,
-            &gam_runtime::resource::ResourcePolicy::default_library(),
         )
         .unwrap_or_else(|error| panic!("{formula} must build: {error}"))
     };
@@ -1321,7 +1303,6 @@ fn non_intercept_linear_effects_default_to_null_recovery_with_explicit_opt_out()
         &ds,
         &ds.column_map(),
         &mut bounded_notes,
-        &gam_runtime::resource::ResourcePolicy::default_library(),
     )
     .expect("build bounded defaults");
     assert_eq!(bounded_terms.linear_terms.len(), 1);
@@ -1372,7 +1353,6 @@ fn tensor_smooths_default_to_joint_null_recovery_with_explicit_opt_out() {
                 &ds,
                 &col_map,
                 &mut notes,
-                &gam_runtime::resource::ResourcePolicy::default_library(),
             )
             .unwrap_or_else(|error| panic!("{formula} must build: {error}"));
             let SmoothBasisSpec::TensorBSpline { spec, .. } = &terms.smooth_terms[0].basis else {
@@ -1412,7 +1392,6 @@ fn univariate_ps_small_k_degree_reduces_through_build(/* gam#1130 */) {
             &ds,
             &col_map,
             &mut notes,
-            &gam_runtime::resource::ResourcePolicy::default_library(),
         )
         .unwrap_or_else(|err| panic!("`{formula}` must degree-reduce, not error; got: {err:?}"));
         let SmoothBasisSpec::BSpline1D { spec, .. } = &terms.smooth_terms[0].basis else {
@@ -1470,7 +1449,6 @@ fn formula_shape_constraint_round_trips_and_rejects_bogus() {
         &ds,
         &col_map,
         &mut notes,
-        &gam_runtime::resource::ResourcePolicy::default_library(),
     )
     .expect("monotone smooth should build");
     assert_eq!(
@@ -1485,7 +1463,6 @@ fn formula_shape_constraint_round_trips_and_rejects_bogus() {
         &ds,
         &col_map,
         &mut notes_bad,
-        &gam_runtime::resource::ResourcePolicy::default_library(),
     )
     .expect_err("bogus shape must error");
     assert!(
@@ -1515,7 +1492,6 @@ fn default_sphere_smooth_uses_spherical_farthest_point_centers() {
         &ds,
         &col_map,
         &mut notes,
-        &gam_runtime::resource::ResourcePolicy::default_library(),
     )
     .expect("build sphere termspec");
     let SmoothBasisSpec::Sphere { spec, .. } = &terms.smooth_terms[0].basis else {
@@ -1546,7 +1522,6 @@ fn one_dimensional_duchon_defaults_to_scale_free_length_scale() {
         &ds,
         &col_map,
         &mut notes,
-        &gam_runtime::resource::ResourcePolicy::default_library(),
     )
     .expect("build default duchon termspec");
     let SmoothBasisSpec::Duchon { spec, .. } = &terms.smooth_terms[0].basis else {
@@ -1583,7 +1558,6 @@ fn formula_duchon_default_does_not_enable_collocation_operators() {
         &ds,
         &col_map,
         &mut notes,
-        &gam_runtime::resource::ResourcePolicy::default_library(),
     )
     .expect("build default 2D duchon termspec");
     let SmoothBasisSpec::Duchon { spec, .. } = &terms.smooth_terms[0].basis else {
@@ -1622,7 +1596,6 @@ fn one_dimensional_duchon_length_scale_opts_into_hybrid_mode() {
         &ds,
         &col_map,
         &mut notes,
-        &gam_runtime::resource::ResourcePolicy::default_library(),
     )
     .expect("build hybrid duchon termspec");
     let SmoothBasisSpec::Duchon { spec, .. } = &terms.smooth_terms[0].basis else {
@@ -1651,7 +1624,6 @@ fn multidimensional_duchon_default_uses_low_rank_mgcv_sized_basis() {
         &ds,
         &col_map,
         &mut notes,
-        &gam_runtime::resource::ResourcePolicy::default_library(),
     )
     .expect("build default 2D duchon termspec");
     let SmoothBasisSpec::Duchon { spec, .. } = &terms.smooth_terms[0].basis else {
@@ -1691,7 +1663,6 @@ fn spectral_duchon_reproduces_fixed_seed_uniform_landmarks() {
         &ds,
         &col_map,
         &mut notes,
-        &gam_runtime::resource::ResourcePolicy::default_library(),
     )
     .expect("build spectral Duchon termspec");
     let SmoothBasisSpec::Duchon { spec, .. } = &terms.smooth_terms[0].basis else {
@@ -1853,7 +1824,6 @@ fn factor_smooth_marginal_degree_reduces_for_small_k() {
             &ds,
             &col_map,
             &mut notes,
-            &gam_runtime::resource::ResourcePolicy::default_library(),
         )
         .unwrap_or_else(|err| panic!("fs k={k} should degree-reduce, got: {err:?}"));
         let SmoothBasisSpec::FactorSmooth { spec } = &terms.smooth_terms[0].basis else {
@@ -1948,7 +1918,6 @@ fn univariate_cr_smooth_caps_knots_to_data_support() {
         &ds,
         &col_map,
         &mut notes,
-        &gam_runtime::resource::ResourcePolicy::default_library(),
     )
     .expect("cr k=10 must cap to data support instead of erroring");
     let SmoothBasisSpec::BSpline1D { spec, .. } = &terms.smooth_terms[0].basis else {
@@ -1986,7 +1955,6 @@ fn univariate_cr_smooth_binary_covariate_degrades_to_bspline() {
         &ds,
         &col_map,
         &mut notes,
-        &gam_runtime::resource::ResourcePolicy::default_library(),
     )
     .expect("binary cr must degrade to B-spline instead of erroring");
     let SmoothBasisSpec::BSpline1D { spec, .. } = &terms.smooth_terms[0].basis else {
@@ -2186,12 +2154,11 @@ fn one_dimensional_identifiability_option_reaches_the_built_spec() {
             .collect(),
     );
     let col_map = ds.column_map();
-    let policy = gam_runtime::resource::ResourcePolicy::default_library();
 
     let built = |formula: &str| -> BSplineIdentifiability {
         let parsed = parse_formula(formula).expect("parse");
         let mut notes = Vec::new();
-        let terms = build_termspec(&parsed.terms, &ds, &col_map, &mut notes, &policy)
+        let terms = build_termspec(&parsed.terms, &ds, &col_map, &mut notes)
             .unwrap_or_else(|e| panic!("{formula} should build: {e}"));
         let SmoothBasisSpec::BSpline1D { spec, .. } = &terms.smooth_terms[0].basis else {
             panic!("expected BSpline1D for {formula}");
@@ -2228,7 +2195,7 @@ fn one_dimensional_identifiability_option_reaches_the_built_spec() {
     ] {
         let parsed = parse_formula(formula).expect("parse");
         let mut notes = Vec::new();
-        build_termspec(&parsed.terms, &ds, &col_map, &mut notes, &policy)
+        build_termspec(&parsed.terms, &ds, &col_map, &mut notes)
             .expect_err(&format!("{formula} must be refused, not silently accepted"));
     }
 }
@@ -2389,11 +2356,10 @@ fn tensor_margin_leaves_cr_only_when_the_request_needs_a_bspline() {
             .collect(),
     );
     let col_map = ds.column_map();
-    let policy = gam_runtime::resource::ResourcePolicy::default_library();
     let margins = |formula: &str| -> Vec<BSplineKnotSpec> {
         let parsed = parse_formula(formula).expect("parse");
         let mut notes = Vec::new();
-        let terms = build_termspec(&parsed.terms, &ds, &col_map, &mut notes, &policy)
+        let terms = build_termspec(&parsed.terms, &ds, &col_map, &mut notes)
             .unwrap_or_else(|e| panic!("{formula} should build: {e}"));
         let SmoothBasisSpec::TensorBSpline { spec, .. } = &terms.smooth_terms[0].basis else {
             panic!("expected a tensor spec for {formula}");
@@ -2646,11 +2612,10 @@ fn no_whitelisted_smooth_option_is_accepted_and_inert() {
         ds
     };
     let col_map = ds.column_map();
-    let policy = gam_runtime::resource::ResourcePolicy::default_library();
     let build = |formula: &str| -> Result<String, String> {
         let parsed = parse_formula(formula)?;
         let mut notes = Vec::new();
-        let spec = build_termspec(&parsed.terms, &ds, &col_map, &mut notes, &policy)
+        let spec = build_termspec(&parsed.terms, &ds, &col_map, &mut notes)
             .map_err(|err| err.to_string())?;
         // Fingerprint the BUILT DESIGN, not the spec. #2782 is exactly the
         // case a spec comparison misses: `degree=` was stored on the pushed
@@ -2829,7 +2794,6 @@ fn sz_factor_smooth_low_cardinality_uses_bspline_marginal() {
         &ds,
         &col_map,
         &mut notes,
-        &gam_runtime::resource::ResourcePolicy::default_library(),
     )
     .expect("sz on a ternary covariate must build (B-spline marginal), not hard-fail");
     let SmoothBasisSpec::FactorSmooth { spec } = &terms.smooth_terms[0].basis else {
@@ -2902,7 +2866,6 @@ fn factor_smooth_spec_for(formula: &str, ds: &Dataset) -> FactorSmoothSpec {
         ds,
         &col_map,
         &mut notes,
-        &gam_runtime::resource::ResourcePolicy::default_library(),
     )
     .expect("build factor smooth term");
     let SmoothBasisSpec::FactorSmooth { spec } = &terms.smooth_terms[0].basis else {
@@ -3131,11 +3094,10 @@ fn factor_dataset_l3() -> Dataset {
 fn random_effect_flavour_refuses_the_basis_options_it_cannot_honour_2791() {
     let ds = factor_dataset_l3();
     let col_map = ds.column_map();
-    let policy = ResourcePolicy::default_library();
     let build = |formula: &str| -> Result<(), String> {
         let parsed = parse_formula(formula)?;
         let mut notes = Vec::new();
-        build_termspec(&parsed.terms, &ds, &col_map, &mut notes, &policy)
+        build_termspec(&parsed.terms, &ds, &col_map, &mut notes)
             .map(|_| ())
             .map_err(|err| err.to_string())
     };
@@ -3206,7 +3168,6 @@ fn factor_by_smooth_plus_bare_categorical_does_not_duplicate_factor_block() {
             &ds,
             &col_map,
             &mut notes,
-            &ResourcePolicy::default_library(),
         )
         .unwrap_or_else(|err| panic!("`{formula}` must build, got: {err:?}"));
         terms
@@ -3259,7 +3220,6 @@ fn factor_by_penalties_carry_full_expanded_null_geometry_2293() {
         &ds,
         &col_map,
         &mut notes,
-        &ResourcePolicy::default_library(),
     )
     .expect("build by smooth spec");
     assert_eq!(terms.smooth_terms.len(), 3, "one smooth per factor level");
@@ -3343,7 +3303,6 @@ fn tensor_smooth_honors_per_margin_k_list() {
         &ds,
         &col_map,
         &mut notes,
-        &gam_runtime::resource::ResourcePolicy::default_library(),
     )
     .expect("build tensor terms");
     let SmoothBasisSpec::TensorBSpline { spec, .. } = &terms.smooth_terms[0].basis else {
@@ -3410,7 +3369,6 @@ fn tensor_smooth_low_cardinality_axis_falls_back_to_lower_degree_basis() {
         &ds,
         &col_map,
         &mut notes,
-        &gam_runtime::resource::ResourcePolicy::default_library(),
     )
     .expect("build tensor with binary margin");
     let SmoothBasisSpec::TensorBSpline { spec, .. } = &terms.smooth_terms[0].basis else {
@@ -3474,7 +3432,6 @@ fn tensor_smooth_uniform_k_is_capped_to_a_low_cardinality_margins_distinct_value
         &ds,
         &col_map,
         &mut notes,
-        &gam_runtime::resource::ResourcePolicy::default_library(),
     )
     .expect("uniform k=5 must auto-cap the binary margin instead of erroring");
     let SmoothBasisSpec::TensorBSpline { spec, .. } = &terms.smooth_terms[0].basis else {
@@ -3528,7 +3485,6 @@ fn tensor_all_tp_margins_with_per_margin_k_routes_to_bspline_tensor() {
         &ds,
         &col_map,
         &mut notes,
-        &gam_runtime::resource::ResourcePolicy::default_library(),
     )
     .expect("build tensor terms with per-margin k");
     let SmoothBasisSpec::TensorBSpline { spec, .. } = &terms.smooth_terms[0].basis else {
@@ -3595,7 +3551,6 @@ fn tensor_all_tp_margins_without_per_margin_k_builds_anisotropic_tensor() {
         &ds,
         &col_map,
         &mut notes,
-        &gam_runtime::resource::ResourcePolicy::default_library(),
     )
     .expect("build tensor terms without per-margin k");
     let SmoothBasisSpec::TensorBSpline { spec, .. } = &terms.smooth_terms[0].basis else {
@@ -3632,7 +3587,6 @@ fn explicit_basis_sizes_are_not_small_n_clamped() {
         &ds,
         &col_map,
         &mut notes,
-        &gam_runtime::resource::ResourcePolicy::default_library(),
     )
     .expect("build multi-smooth terms");
     let SmoothBasisSpec::BSpline1D { spec, .. } = &terms.smooth_terms[0].basis else {
@@ -3673,7 +3627,6 @@ fn explicit_duchon_centers_are_not_small_n_bumped() {
         &ds,
         &col_map,
         &mut notes,
-        &gam_runtime::resource::ResourcePolicy::default_library(),
     )
     .expect("build multi-smooth terms");
     let SmoothBasisSpec::Duchon { spec, .. } = &terms.smooth_terms[0].basis else {
@@ -3737,7 +3690,6 @@ fn inferred_three_dim_tensor_basis_stays_bounded_for_reml_selection() {
             &ds,
             &col_map,
             &mut notes,
-            &ResourcePolicy::default_library(),
         )
         .expect("build 3-D tensor termspec");
         let SmoothBasisSpec::TensorBSpline { spec, .. } = &terms.smooth_terms[0].basis else {
@@ -3849,7 +3801,6 @@ fn one_sided_anchor_owns_level_without_sum_to_zero_constraint_1867() {
             &ds,
             &col_map,
             &mut notes,
-            &ResourcePolicy::default_library(),
         )
         .expect("build anchored smooth")
     };
@@ -3946,7 +3897,6 @@ fn categorical_by_categorical_interaction_expands_full_cross_cells() {
         &ds,
         &col_map,
         &mut notes,
-        &ResourcePolicy::default_library(),
     )
     .expect("factor-by-factor `f:g` interaction must build, not error");
 
@@ -4088,7 +4038,6 @@ fn by_level_thin_plate_sizes_default_centers_from_the_smallest_level() {
             &options,
             &ds,
             &mut notes,
-            &ResourcePolicy::default_library(),
             1,
         )
         .expect("thin-plate basis builds")
@@ -4135,7 +4084,6 @@ fn by_level_thin_plate_sizes_default_centers_from_the_smallest_level() {
         &small_options,
         &ds_small,
         &mut notes,
-        &ResourcePolicy::default_library(),
         1,
     )
     .expect("small-level thin-plate basis builds");
@@ -4170,7 +4118,6 @@ fn a_continuous_by_smooth_keeps_its_constant_in_the_penalised_block() {
             &ds,
             &col_map,
             &mut Vec::new(),
-            &gam_runtime::resource::ResourcePolicy::default_library(),
         )
         .expect("build by-smooth");
         let SmoothBasisSpec::ByVariable { inner, .. } = &terms.smooth_terms[0].basis else {

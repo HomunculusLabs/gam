@@ -1,4 +1,3 @@
-use gam::ResourcePolicy;
 use gam::inference::data::EncodedDataset;
 use gam::inference::model::{ColumnKindTag, DataSchema, SchemaColumn};
 use gam::terms::basis::{BSplineBasisSpec, BSplineIdentifiability, BSplineKnotSpec, OneDimensionalBoundary, PeriodicBSplineBasisSpec, build_bspline_basis_1d, build_periodic_bspline_basis_1d, cyclic_bspline_derivative_penalty_matrix, periodic_bspline_first_derivative_nd};
@@ -244,7 +243,6 @@ fn periodic_bspline_terms_build_with_cyclic_penalty_and_formula_alias() {
         &ds,
         &cmap,
         &mut notes,
-        &ResourcePolicy::default_library(),
     )
     .unwrap();
     match &terms.smooth_terms[0].basis {
@@ -264,7 +262,6 @@ fn periodic_bspline_terms_build_with_cyclic_penalty_and_formula_alias() {
         &ds,
         &cmap,
         &mut notes,
-        &ResourcePolicy::default_library(),
     )
     .unwrap();
     match &cyclic_terms.smooth_terms[0].basis {
@@ -328,7 +325,6 @@ fn cyclic_alias_default_basis_size_matches_periodic_s_smooth() {
             &ds,
             &cmap,
             &mut notes,
-            &ResourcePolicy::default_library(),
         )
         .unwrap();
         match &terms.smooth_terms[0].basis {
@@ -390,7 +386,6 @@ fn cylinder_formula_builds_tensor_with_periodic_margin() {
         &data,
         &cmap,
         &mut notes,
-        &ResourcePolicy::default_library(),
     )
     .unwrap();
     match &terms.smooth_terms[0].basis {

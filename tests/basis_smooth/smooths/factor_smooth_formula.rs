@@ -1,6 +1,5 @@
 use ndarray::Array2;
 
-use gam::ResourcePolicy;
 use gam::basis::BSplineKnotSpec;
 use gam::inference::data::EncodedDataset;
 use gam::inference::formula_dsl::{ParsedTerm, parse_formula};
@@ -148,7 +147,6 @@ fn factor_smooth_forms_route_to_new_termspec_variants() {
         &ds,
         &cmap,
         &mut notes,
-        &ResourcePolicy::default_library(),
     )
     .unwrap();
     assert_eq!(spec.smooth_terms.len(), 2);
@@ -171,7 +169,6 @@ fn factor_smooth_forms_route_to_new_termspec_variants() {
         &ds,
         &cmap,
         &mut notes,
-        &ResourcePolicy::default_library(),
     )
     .unwrap();
     assert!(matches!(
@@ -188,7 +185,6 @@ fn factor_smooth_forms_route_to_new_termspec_variants() {
         &ds,
         &cmap,
         &mut notes,
-        &ResourcePolicy::default_library(),
     )
     .unwrap();
     assert!(matches!(
@@ -207,7 +203,6 @@ fn factor_smooth_forms_route_to_new_termspec_variants() {
         &ds,
         &cmap,
         &mut notes,
-        &ResourcePolicy::default_library(),
     )
     .unwrap();
     assert!(matches!(
@@ -228,7 +223,6 @@ fn factor_smooth_forms_route_to_new_termspec_variants() {
         &ds,
         &cmap,
         &mut notes,
-        &ResourcePolicy::default_library(),
     )
     .unwrap();
     assert!(matches!(
@@ -252,7 +246,6 @@ fn fs_default_basis_is_capped_by_least_resolved_group() {
         &ds,
         &ds.column_map(),
         &mut notes,
-        &ResourcePolicy::default_library(),
     )
     .unwrap();
 
@@ -293,7 +286,6 @@ fn new_factor_smooth_terms_build_designs() {
             &ds,
             &cmap,
             &mut notes,
-            &ResourcePolicy::default_library(),
         )
         .unwrap_or_else(|e| panic!("{formula}: {e}"));
         let design = gam::smooth::build_term_collection_design(ds.values.view(), &spec)
