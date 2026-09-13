@@ -74,7 +74,7 @@ fn vruntime() -> DeviationRuntime {
     DeviationRuntime::try_new(knots, 0.0, 3).expect("deviation runtime")
 }
 
-fn vfixture(is_score_warp: bool) -> VFixture {
+fn vfixture(is_score_warp: bool, amplitude: f64) -> VFixture {
     let grid = vgrid();
     let runtime = vruntime();
     let basis_dim = runtime.basis_dim();
@@ -128,7 +128,7 @@ fn vfixture(is_score_warp: bool) -> VFixture {
     let beta_dev = Array1::from_shape_fn(basis_dim, |i| {
         let center = 0.5 * (basis_dim.saturating_sub(1) as f64);
         let radius = center.max(1.0);
-        0.06 * ((i as f64) - center) / radius
+        amplitude * ((i as f64) - center) / radius
     });
     VFixture {
         family,
@@ -416,11 +416,11 @@ fn fd_hess(fx: &VFixture, p0: &[f64], i: usize, j: usize, h: f64) -> f64 {
 // value, both deviation branches, death (y = 1).
 // ==================================================================
 fn run_production_gate(is_score_warp: bool) {
-    run_production_gate_at(is_score_warp, 0.2, 0.35);
+    run_production_gate_at(is_score_warp, 0.2, 0.35, 0.06);
 }
 
-fn run_production_gate_at(is_score_warp: bool, q0: f64, b0: f64) {
-    let fx = vfixture(is_score_warp);
+fn run_production_gate_at(is_score_warp: bool, q0: f64, b0: f64, amplitude: f64) {
+    let fx = vfixture(is_score_warp, amplitude);
     let r = fx.primary.total;
     let label = if is_score_warp {
         "score-warp"
@@ -475,32 +475,65 @@ fn run_production_gate_at(is_score_warp: bool, q0: f64, b0: f64) {
         (v_gh - v_production).abs() <= 1e-9 * v_production.abs().max(1.0),
         "{label} analytic-call value {v_gh:+.12e} != value-call {v_production:+.12e}"
     );
+    // Every channel is measured before any is asserted, so a failing arm still
+    // prints how far its worst channel sits from the bar. `!(x <= worst)` keeps
+    // a NaN, which `f64::max` would drop.
     let h = 1.0e-3_f64;
     let mut max_g = 0.0_f64;
     let mut max_hd = 0.0_f64;
+    let mut worst_gradient_over_bar = 0.0_f64;
+    let mut worst_hessian_over_bar = 0.0_f64;
+    let mut failures = Vec::new();
     for i in 0..r {
         let fdg = fd_grad(&fx, &p0, i, h);
         let e = (grad[i] - fdg).abs();
-        max_g = max_g.max(e);
-        assert!(
-            e <= 1e-7 * fdg.abs().max(1.0) + 1e-9,
-            "{label} grad[{i}] analytic {:+.12e} != fd {fdg:+.12e} (err {e:.2e})",
-            grad[i]
-        );
+        let over_bar = e / (1e-7 * fdg.abs().max(1.0) + 1e-9);
+        if !(e <= max_g) {
+            max_g = e;
+        }
+        if !(over_bar <= worst_gradient_over_bar) {
+            worst_gradient_over_bar = over_bar;
+        }
+        if !(over_bar <= 1.0) {
+            failures.push(format!(
+                "grad[{i}] analytic {:+.12e} != fd {fdg:+.12e} (err {e:.2e})",
+                grad[i]
+            ));
+        }
         for j in i..r {
             let fdh = fd_hess(&fx, &p0, i, j, h);
             let e = (hess[i * r + j] - fdh).abs();
-            max_hd = max_hd.max(e);
-            assert!(
-                e <= 1e-5 * fdh.abs().max(1.0) + 1e-7,
-                "{label} hess[{i},{j}] analytic {:+.12e} != fd {fdh:+.12e} (err {e:.2e})",
-                hess[i * r + j]
-            );
-            // symmetry
-            assert!((hess[i * r + j] - hess[j * r + i]).abs() <= 1e-12);
+            let over_bar = e / (1e-5 * fdh.abs().max(1.0) + 1e-7);
+            if !(e <= max_hd) {
+                max_hd = e;
+            }
+            if !(over_bar <= worst_hessian_over_bar) {
+                worst_hessian_over_bar = over_bar;
+            }
+            if !(over_bar <= 1.0) {
+                failures.push(format!(
+                    "hess[{i},{j}] analytic {:+.12e} != fd {fdh:+.12e} (err {e:.2e})",
+                    hess[i * r + j]
+                ));
+            }
+            if !((hess[i * r + j] - hess[j * r + i]).abs() <= 1e-12) {
+                failures.push(format!(
+                    "hess[{i},{j}] {:+.12e} is not symmetric with hess[{j},{i}] {:+.12e}",
+                    hess[i * r + j],
+                    hess[j * r + i]
+                ));
+            }
         }
     }
-    eprintln!("#932 verify {label}: r={r}  max|grad−fd|={max_g:.2e}  max|hess−fd|={max_hd:.2e}");
+    eprintln!(
+        "#932 verify {label} amplitude={amplitude}: r={r}  max|grad−fd|={max_g:.2e}  max|hess−fd|={max_hd:.2e}  worst_grad_over_bar={worst_gradient_over_bar:.2e}  worst_hess_over_bar={worst_hessian_over_bar:.2e}"
+    );
+    assert!(
+        failures.is_empty(),
+        "{label} amplitude {amplitude}: {} channel(s) miss their bar:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }
 
 #[test]
@@ -511,6 +544,20 @@ fn production_flex_grad_hess_matches_independent_fd_score_warp_932() {
 #[test]
 fn production_flex_grad_hess_matches_independent_fd_link_dev_932() {
     run_production_gate(false);
+}
+
+/// #932 narrowed-fixture row: this gate's deviation ramp is 0.06, and the #932
+/// audit lists the deviation fixtures narrowed for conditioning. These arms run
+/// the same independent value, intercept and Richardson checks with a 0.25 ramp,
+/// so the warp's curvature, not only a small first-order shift, reaches the bars.
+#[test]
+fn production_flex_grad_hess_matches_independent_fd_score_warp_wide_deviation_932() {
+    run_production_gate_at(true, 0.2, 0.35, 0.25);
+}
+
+#[test]
+fn production_flex_grad_hess_matches_independent_fd_link_dev_wide_deviation_932() {
+    run_production_gate_at(false, 0.2, 0.35, 0.25);
 }
 
 /// #2341 closing gate: the same GATE-1 link-deviation FD check with a slope
@@ -527,7 +574,7 @@ fn production_flex_grad_hess_matches_independent_fd_link_dev_932() {
 /// tolerances (the June measurement of the gap was ~4e-7 relative).
 #[test]
 fn production_flex_grad_hess_matches_independent_fd_link_dev_constant_tail_2341() {
-    run_production_gate_at(false, 0.2, 2.2);
+    run_production_gate_at(false, 0.2, 2.2, 0.06);
 }
 
 // ==================================================================
