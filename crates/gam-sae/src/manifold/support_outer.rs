@@ -871,6 +871,40 @@ impl OuterObjective for SaeSupportOuterObjective {
     }
 }
 
+/// The grouped smoothing coordinates' domain (#2812) at the entry state. Each
+/// atom's decoder data Gram against its native smooth penalty gives generalized
+/// eigenvalues `γ_j` on the penalty range. A group's eigenvalues are the union
+/// over its atoms, and its domain is `[ln(√ε·γ_min), ln(γ_max/√ε)]`: past either
+/// face every direction's share of the ρ-gradient is under its own round-off,
+/// so a railed strength is a structural result. A group whose penalized
+/// directions carry no data curvature keeps the precision box. This replaces
+/// the outer engine's ±30 fallback on this lane (SPEC rule 20, #2902 row 8).
+fn support_smoothing_domain(
+    term: &SaeSupportSparseTerm,
+    layout: &SaeSupportSmoothingLayout,
+) -> Result<(Array1<f64>, Array1<f64>), String> {
+    use gam_solve::estimate::rho_domain;
+    let groups = layout.group_keys.len();
+    let mut gammas_by_group = vec![Vec::<f64>::new(); groups];
+    for atom_idx in 0..term.k_atoms() {
+        let gram = term.atom_decoder_gram(atom_idx)?;
+        if let Some(gammas) =
+            rho_domain::penalty_range_gammas_from_gram(&gram, term.atoms[atom_idx].smooth_penalty())
+        {
+            gammas_by_group[layout.atom_group[atom_idx]].extend(gammas);
+        }
+    }
+    let mut lower = Array1::<f64>::zeros(groups);
+    let mut upper = Array1::<f64>::zeros(groups);
+    for (group, gammas) in gammas_by_group.iter().enumerate() {
+        let (lo, hi) =
+            rho_domain::coordinate_domain(rho_domain::resolvability_interval(gammas), None);
+        lower[group] = lo;
+        upper[group] = hi;
+    }
+    Ok((lower, upper))
+}
+
 /// Select topology-grouped smoothing strengths through the shared generic
 /// outer optimizer. Only a terminal point with an analytic stationarity
 /// certificate and a recurring raw inner fixed point is returned.
@@ -890,6 +924,8 @@ pub fn run_sae_support_outer(
         ));
     }
     let spectrum = penalty_spectrum(&request.term, &layout).map_err(outer_error)?;
+    let (rho_lower, rho_upper) =
+        support_smoothing_domain(&request.term, &layout).map_err(outer_error)?;
     // This Gaussian LAML criterion is a sum over response cells, not a
     // unit-scale scalar.  Declare that natural scale to the shared outer
     // engine so its projected-gradient stopping band has the same units as
@@ -917,13 +953,18 @@ pub fn run_sae_support_outer(
         uncached_evaluations: 0,
         logdet_surrogate: None,
     };
-    let initial_rho = Array1::from_elem(layout.group_keys.len(), request.initial_smoothness.ln());
+    // The caller's smoothness, placed in the domain the search has.
+    let initial_log_smoothness = request.initial_smoothness.ln();
+    let initial_rho = Array1::from_shape_fn(layout.group_keys.len(), |group| {
+        initial_log_smoothness.max(rho_lower[group]).min(rho_upper[group])
+    });
     let problem = OuterProblem::new(layout.group_keys.len())
         .with_gradient(Derivative::Analytic)
         .with_hessian(DeclaredHessianForm::Unavailable)
         .with_prefer_gradient_only(true)
         .with_disable_fixed_point(true)
         .with_objective_scale(Some(objective_scale))
+        .with_bounds(rho_lower, rho_upper)
         .with_initial_rho(initial_rho)
         .with_max_iter(request.max_outer_iter.max(1));
     let outer = problem.run(&mut objective, SUPPORT_LAML_CONTEXT)?;

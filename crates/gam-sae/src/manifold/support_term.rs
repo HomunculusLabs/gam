@@ -4400,6 +4400,25 @@ impl SaeSupportSparseTerm {
         Ok(updated)
     }
 
+    /// One atom's decoder data Gram `Σ_i φ_k(t_i) φ_k(t_i)ᵀ` over the rows routed
+    /// to it, at the current coordinates. The curvature census and the grouped
+    /// LAML ρ domain read this one matrix.
+    pub(crate) fn atom_decoder_gram(&self, atom_idx: usize) -> Result<Array2<f64>, String> {
+        let m = self.atoms[atom_idx].basis_size();
+        let mut gram = Array2::<f64>::zeros((m, m));
+        let mut scratch = ActiveAtomScratch::default();
+        for &(row, slot) in &self.atom_rows[atom_idx] {
+            self.fill_active(row, slot, &mut scratch)?;
+            let phi = scratch.phi_row();
+            for left in 0..m {
+                for right in 0..m {
+                    gram[[left, right]] += phi[left] * phi[right];
+                }
+            }
+        }
+        Ok(gram)
+    }
+
     /// Per-atom effective degrees of freedom `tau_k` beyond the penalty null
     /// space, the statistically meaningful "is this atom's bend supported?"
     /// census. Reported alongside usage so a dictionary can be judged by the
@@ -4428,19 +4447,8 @@ impl SaeSupportSparseTerm {
             if self.atom_rows[atom_idx].is_empty() {
                 return Ok(0.0);
             }
-            let m = self.atoms[atom_idx].basis_size();
             let penalty = self.atoms[atom_idx].smooth_penalty().clone();
-            let mut gram = Array2::<f64>::zeros((m, m));
-            let mut scratch = ActiveAtomScratch::default();
-            for &(row, slot) in &self.atom_rows[atom_idx] {
-                self.fill_active(row, slot, &mut scratch)?;
-                let phi = scratch.phi_row();
-                for left in 0..m {
-                    for right in 0..m {
-                        gram[[left, right]] += phi[left] * phi[right];
-                    }
-                }
-            }
+            let gram = self.atom_decoder_gram(atom_idx)?;
             let (trace, null_dim) = penalized_trace_and_null_dim(
                 &gram,
                 &penalty,
