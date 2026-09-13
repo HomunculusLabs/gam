@@ -1449,7 +1449,13 @@ fn timewiggle_marginal_psi_terms_return_finite_joint_terms() {
     assert!(terms.objective_psi.is_finite());
     assert_eq!(terms.score_psi.len(), slices.total);
     assert!(terms.score_psi.iter().all(|value| value.is_finite()));
-    assert!(terms.hessian_psi_operator.is_some());
+    // A time wiggle takes the ζ composition, which publishes a dense Hessian-ψ (gam#2893).
+    let hessian_psi = match terms.hessian_psi_operator.as_ref() {
+        Some(operator) => operator.mul_mat(&Array2::<f64>::eye(slices.total)),
+        None => terms.hessian_psi.clone(),
+    };
+    assert_eq!(hessian_psi.dim(), (slices.total, slices.total));
+    assert!(hessian_psi.iter().all(|value| value.is_finite()));
 }
 
 #[test]
@@ -2149,7 +2155,13 @@ fn timewiggle_marginal_slope_psi_second_order_returns_finite_joint_terms() {
     assert!(terms.objective_psi_psi.is_finite());
     assert_eq!(terms.score_psi_psi.len(), slices.total);
     assert!(terms.score_psi_psi.iter().all(|value| value.is_finite()));
-    assert!(terms.hessian_psi_psi_operator.is_some());
+    // A time wiggle takes the ζ composition, which publishes a dense Hessian-ψψ (gam#2893).
+    let hessian_psi_psi = match terms.hessian_psi_psi_operator.as_ref() {
+        Some(operator) => operator.mul_mat(&Array2::<f64>::eye(slices.total)),
+        None => terms.hessian_psi_psi.clone(),
+    };
+    assert_eq!(hessian_psi_psi.dim(), (slices.total, slices.total));
+    assert!(hessian_psi_psi.iter().all(|value| value.is_finite()));
 }
 
 #[test]
