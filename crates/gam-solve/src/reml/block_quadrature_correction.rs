@@ -644,13 +644,13 @@ impl<'a> RemlState<'a> {
                 }
                 let gap = lam_r - evals[q];
                 // Each eigenvalue carries its own uncertainty, so the gap's is
-                // the sum of the two.
-                let degeneracy_tol =
-                    (pair_resolution[col_r] + pair_resolution[q]).max(f64::MIN_POSITIVE);
-                if gap.abs() < degeneracy_tol {
+                // the sum of the two. `<=` declines an exactly degenerate pair at zero
+                // resolution, whose eigenframe derivative would divide by zero (#2469).
+                let degeneracy_tol = pair_resolution[col_r] + pair_resolution[q];
+                if gap.abs() <= degeneracy_tol {
                     log::info!(
                         "[#784] block-local fallback declined: eigenvalue near-degeneracy \
-                         |λ_r − σ_q| = {:.3e} < {degeneracy_tol:.3e} (λ_r={lam_r:.6e} res_r={:.3e}, \
+                         |λ_r − σ_q| = {:.3e} <= {degeneracy_tol:.3e} (λ_r={lam_r:.6e} res_r={:.3e}, \
                          σ_q={:.6e} res_q={:.3e}, max|H|={:.3e}) — the eigenframe is not \
                          differentiable on this stratum",
                         gap.abs(),
