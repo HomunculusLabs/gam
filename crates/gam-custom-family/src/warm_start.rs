@@ -45,7 +45,7 @@ pub(crate) fn inner_solve_not_converged_error(
 ) -> CustomFamilyError {
     CustomFamilyError::InnerSolveNotConverged {
         cycles: inner.cycles,
-        terminal: inner.terminal_convergence_state,
+        terminal: inner.terminal_convergence_state.clone(),
         kkt_residual: inner
             .kkt_residual
             .as_ref()

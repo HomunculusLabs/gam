@@ -16,9 +16,11 @@ use gam_solve::model_types::UnifiedFitResult;
 /// implements this trait so the lifecycle can build both members, and routes its
 /// fit through [`fit_custom_family_arming_on_evidence`].
 pub trait JeffreysArming: CustomFamily + Clone {
-    /// This family with its Jeffreys/Firth prior armed (`true`) or disarmed
-    /// (`false`).
-    fn with_jeffreys_armed(&self, armed: bool) -> Self;
+    /// This family with its Jeffreys/Firth prior disarmed (`None`), or armed on
+    /// the typed evidence the unarmed fit refused or declined with. A family whose
+    /// measured span depends on why it armed, such as the ray it was descending,
+    /// reads that evidence here.
+    fn with_jeffreys_armed(&self, evidence: Option<&JeffreysArmingEvidence>) -> Self;
 }
 
 /// Fit `family` unarmed, and refit it armed once, only when that fit's own
@@ -42,7 +44,7 @@ pub fn fit_custom_family_arming_on_evidence<F: JeffreysArming + Send + Sync + 's
     options: &BlockwiseFitOptions,
 ) -> Result<UnifiedFitResult, CustomFamilyError> {
     let (evidence, warm_specs) =
-        match fit_custom_family(&family.with_jeffreys_armed(false), specs, options) {
+        match fit_custom_family(&family.with_jeffreys_armed(None), specs, options) {
             Ok(fit) => match improper_cone_posterior_evidence(&fit) {
                 None => return Ok(fit),
                 Some(evidence) => (evidence, Some(warm_started_specs(specs, &fit)?)),
@@ -58,7 +60,7 @@ pub fn fit_custom_family_arming_on_evidence<F: JeffreysArming + Send + Sync + 's
         warm_specs.is_some(),
     );
     let mut armed = fit_custom_family(
-        &family.with_jeffreys_armed(true),
+        &family.with_jeffreys_armed(Some(&evidence)),
         warm_specs.as_deref().unwrap_or(specs),
         options,
     )?;

@@ -946,7 +946,7 @@ mod tests {
         let source =
             EstimationError::CustomFamily(gam_problem::CustomFamilyError::InnerSolveNotConverged {
                 cycles: 48,
-                terminal: Some(terminal),
+                terminal: Some(terminal.clone()),
                 kkt_residual: Some(6.950377e-1),
                 kkt_tol: Some(1.677281e-11),
                 theta_dim: 7,

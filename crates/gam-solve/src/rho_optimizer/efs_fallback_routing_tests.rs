@@ -135,6 +135,7 @@ fn post_seed_custom_family_refusal_retains_typed_terminal_state_2658() {
         None::<fn(&mut ())>,
         {
             let efs_calls = Arc::clone(&efs_calls);
+            let terminal = terminal.clone();
             Some(move |_: &mut (), theta: &Array1<f64>| {
                 if efs_calls.fetch_add(1, Ordering::Relaxed) == 0 {
                     return Ok(EfsEval {
@@ -150,7 +151,7 @@ fn post_seed_custom_family_refusal_retains_typed_terminal_state_2658() {
                 Err(EstimationError::CustomFamily(
                     CustomFamilyError::InnerSolveNotConverged {
                         cycles: 12,
-                        terminal: Some(terminal),
+                        terminal: Some(terminal.clone()),
                         kkt_residual: Some(2.5e-3),
                         kkt_tol: Some(1.0e-8),
                         theta_dim: 3,

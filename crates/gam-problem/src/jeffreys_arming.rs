@@ -31,6 +31,10 @@ pub enum JeffreysArmingEvidence {
         likelihood_slope: f64,
         /// `(λ_b S_b β)·δ` along the accepted step.
         penalty_slope: f64,
+        /// The accepted step `δ` the solve was still descending, in raw joint
+        /// coefficient order: the direction a family's measured Jeffreys span can
+        /// state (#979).
+        direction: Vec<f64>,
     },
     /// The inner joint Newton was descending a direction no block's penalty
     /// opposes, so no `rho` bounds it.
@@ -99,6 +103,7 @@ impl CustomFamilyError {
                     log_strength_ratio: ray.log_strength_ratio,
                     likelihood_slope: ray.likelihood_slope,
                     penalty_slope: ray.penalty_slope,
+                    direction: ray.direction.to_vec(),
                 })
             }
             JointNewtonTerminalReason::SlowGeometricRate {
@@ -155,6 +160,36 @@ impl CustomFamilyError {
             })
         })
     }
+
+    /// Replace the direction of the descending ray this refusal carries with
+    /// `lift(direction)`, reading a whole-search refusal through its last
+    /// objective refusal. A refusal that carries no ray is unchanged.
+    ///
+    /// The inner solve raises its ray in reduced coordinates. The fit calls this
+    /// where the refusal leaves it, with the identifiability gauge's linear
+    /// lift, so arming evidence reads the direction in raw joint order (#979).
+    pub fn map_descending_ray_direction(&mut self, lift: &dyn Fn(&[f64]) -> std::sync::Arc<[f64]>) {
+        if let Self::OuterSmoothingFailed {
+            last_refusal: Some(refusal),
+            ..
+        } = self
+        {
+            refusal.map_descending_ray_direction(lift);
+        }
+        if let Self::InnerSolveNotConverged {
+            terminal:
+                Some(InnerConvergenceTerminalState::JointNewton {
+                    termination_reason:
+                        JointNewtonTerminalReason::SlowGeometricRate { ray: Some(ray), .. }
+                        | JointNewtonTerminalReason::StalledOnDescendingRay { ray, .. },
+                    ..
+                }),
+            ..
+        } = self
+        {
+            ray.direction = lift(&ray.direction);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -198,6 +233,7 @@ mod tests {
             likelihood_slope: -3.0,
             penalty_slope: 1.4,
             block_step_inf: 0.2,
+            direction: std::sync::Arc::from(vec![0.1, -0.2, 0.3]),
         };
         let stalled = joint_newton_refusal(
             JointNewtonTerminalReason::StalledOnDescendingRay {
@@ -213,6 +249,7 @@ mod tests {
             log_strength_ratio: 0.75,
             likelihood_slope: -3.0,
             penalty_slope: 1.4,
+            direction: vec![0.1, -0.2, 0.3],
         };
         assert_eq!(stalled.jeffreys_arming_evidence(), Some(ray_evidence.clone()));
 
@@ -288,6 +325,44 @@ mod tests {
             Some(ray_evidence.clone())
         );
         assert_eq!(search(None).jeffreys_arming_evidence(), None);
+
+        // The fit lifts the ray's direction where the refusal leaves it, through the
+        // last refusal of a whole search, and a refusal without a ray is unchanged.
+        let double = |direction: &[f64]| -> std::sync::Arc<[f64]> {
+            direction.iter().map(|value| 2.0 * value).collect()
+        };
+        let mut lifted = search(Some(joint_newton_refusal(
+            JointNewtonTerminalReason::StalledOnDescendingRay {
+                residual: 1.0e-1,
+                residual_tol: 1.0e-6,
+                cycles: 9,
+                ray: RayRestoration {
+                    block: 1,
+                    rho_first: 2,
+                    rho_count: 1,
+                    log_strength_ratio: 0.75,
+                    likelihood_slope: -3.0,
+                    penalty_slope: 1.4,
+                    block_step_inf: 0.2,
+                    direction: std::sync::Arc::from(vec![0.1, -0.2, 0.3]),
+                },
+            },
+            false,
+        )));
+        lifted.map_descending_ray_direction(&double);
+        assert_eq!(
+            lifted.jeffreys_arming_evidence(),
+            Some(JeffreysArmingEvidence::DescendingRay {
+                block: 1,
+                log_strength_ratio: 0.75,
+                likelihood_slope: -3.0,
+                penalty_slope: 1.4,
+                direction: vec![0.2, -0.4, 0.6],
+            })
+        );
+        let mut budget_only = joint_newton_refusal(JointNewtonTerminalReason::CycleBudget, false);
+        budget_only.map_descending_ray_direction(&double);
+        assert_eq!(budget_only.jeffreys_arming_evidence(), None);
 
         // Negative controls: an unfinished solve is not evidence, whichever exit
         // reported it.

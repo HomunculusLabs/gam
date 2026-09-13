@@ -134,9 +134,12 @@ impl crate::custom_family::JeffreysCompletionOuterDerivatives for SurvivalMargin
 }
 
 impl crate::custom_family::JeffreysArming for SurvivalMarginalSlopeFamily {
-    fn with_jeffreys_armed(&self, armed: bool) -> Self {
+    fn with_jeffreys_armed(
+        &self,
+        evidence: Option<&gam_problem::jeffreys_arming::JeffreysArmingEvidence>,
+    ) -> Self {
         Self {
-            jeffreys_armed: armed,
+            jeffreys_armed: evidence.is_some(),
             ..self.clone()
         }
     }

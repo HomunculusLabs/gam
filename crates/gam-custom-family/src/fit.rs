@@ -5,6 +5,21 @@
 
 use super::*;
 
+/// A descending ray's direction lifted from the inner solve's reduced coordinates
+/// to raw joint order through the identifiability gauge: `d = T·δ`, with no affine
+/// shift, because a direction is a difference of coefficients (#979).
+pub(crate) fn lift_direction_to_raw(
+    gauge: &gam_problem::gauge::Gauge,
+    reduced: &[f64],
+) -> std::sync::Arc<[f64]> {
+    gauge
+        .t_full
+        .dot(&ndarray::ArrayView1::from(reduced))
+        .iter()
+        .copied()
+        .collect()
+}
+
 pub fn fit_custom_family<F: CustomFamily + Clone + Send + Sync + 'static>(
     family: &F,
     specs: &[ParameterBlockSpec],
@@ -2218,7 +2233,13 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             &per_block,
             options,
             persistent_warm_start.as_ref(),
-        )?;
+        )
+        .map_err(|mut refusal| {
+            refusal.map_descending_ray_direction(&|reduced| {
+                lift_direction_to_raw(&canonical.gauge, reduced)
+            });
+            refusal
+        })?;
         let warm_start = constrained_warm_start_from_inner(&rho0, &inner);
         // An unconverged solve never seeds a later fit (#2902).
         if inner.converged {
@@ -2232,7 +2253,11 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             // The terminal verdict travels typed, as the fixed-log-lambda route
             // returns it (#1561): the Jeffreys arming lifecycle reads its terminal
             // reason as arming evidence, and text carries none (#979).
-            return Err(inner_solve_not_converged_error(&inner, 0, 0));
+            let mut refusal = inner_solve_not_converged_error(&inner, 0, 0);
+            refusal.map_descending_ray_direction(&|reduced| {
+                lift_direction_to_raw(&canonical.gauge, reduced)
+            });
+            return Err(refusal);
         }
         refresh_all_block_etas(family, specs, &mut inner.block_states)?;
         audit_converged_identifiability(family, raw_specs, &canonical, &inner.block_states, 0)?;
@@ -3156,7 +3181,12 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                      {e}; last_evaluated_rho={last_evaluated_rho:?}; no fit was assembled.\
                      {last_error_detail}"
                 ),
-                last_refusal: obj.state.last_error.take().map(Box::new),
+                last_refusal: obj.state.last_error.take().map(|mut refusal| {
+                    refusal.map_descending_ray_direction(&|reduced| {
+                        lift_direction_to_raw(&canonical.gauge, reduced)
+                    });
+                    Box::new(refusal)
+                }),
             });
         }
     };

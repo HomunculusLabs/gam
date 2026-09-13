@@ -20,6 +20,7 @@ fn ray() -> gam_problem::RayRestoration {
         likelihood_slope: -4.473e-3,
         penalty_slope: 1.317e-5,
         block_step_inf: 7.5e-2,
+        direction: std::sync::Arc::from(vec![0.0, 0.0, 0.0, 7.5e-2]),
     }
 }
 

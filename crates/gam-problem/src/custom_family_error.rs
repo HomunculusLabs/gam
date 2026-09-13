@@ -5,7 +5,7 @@ use thiserror::Error;
 use crate::{IdentifiabilityAudit, MapUniquenessError};
 
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum JointNewtonTerminalReason {
     CycleBudget,
     FullyRejectedExactFixedPoint {
@@ -143,7 +143,7 @@ pub enum ConstrainedFixedPointCondition {
 /// strength of that block by `log_strength_ratio = ln r` closes the ray at
 /// the iterate the solve stopped on. The ratio is read off the two slopes the
 /// solve already had; nothing here is a step size.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RayRestoration {
     /// Index of the parameter block carrying the ray.
     pub block: usize,
@@ -159,6 +159,12 @@ pub struct RayRestoration {
     pub penalty_slope: f64,
     /// `‖δ_b‖∞`, the block's share of the accepted step.
     pub block_step_inf: f64,
+    /// The accepted step `δ = β_new − β_old` over the joint coefficients: the
+    /// direction the solve was still descending. It is in the inner solve's
+    /// reduced coordinates where the refusal is raised, and in raw joint order
+    /// once the refusal leaves the fit, which lifts it through the
+    /// identifiability gauge (#979).
+    pub direction: std::sync::Arc<[f64]>,
 }
 
 impl RayRestoration {
@@ -415,7 +421,7 @@ pub fn relative_stationarity(stationarity_residual: f64, stationarity_scale: f64
     stationarity_residual / (1.0 + stationarity_scale)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum InnerConvergenceTerminalState {
     /// The blockwise Gauss-Seidel route's terminal cycle.
     Blockwise {
@@ -1244,6 +1250,7 @@ mod tests {
             likelihood_slope: -3.0,
             penalty_slope: 1.4,
             block_step_inf: 0.2,
+            direction: std::sync::Arc::from(vec![0.1, -0.2, 0.3]),
         };
         let refusal = |termination_reason| CustomFamilyError::InnerSolveNotConverged {
             cycles: 9,
@@ -1270,7 +1277,7 @@ mod tests {
             residual: 1.0e-1,
             residual_tol: 1.0e-6,
             cycles: 9,
-            ray,
+            ray: ray.clone(),
         });
         assert_eq!(
             stalled.descending_ray_exit(),
@@ -1288,7 +1295,7 @@ mod tests {
             })
         };
         assert_eq!(
-            slow(Some(ray)).descending_ray_exit(),
+            slow(Some(ray.clone())).descending_ray_exit(),
             Some(DescendingRayExit::Closable(&ray))
         );
         assert_eq!(

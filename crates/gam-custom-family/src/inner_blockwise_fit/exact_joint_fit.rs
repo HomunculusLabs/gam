@@ -272,6 +272,7 @@ fn descending_ray_restoration(
         return None;
     }
     let delta = &beta_new_joint - &beta_old_joint;
+    let direction: std::sync::Arc<[f64]> = delta.iter().copied().collect();
     let s_beta =
         apply_joint_block_penalty(ranges, s_lambdas, &beta_old_joint, 0.0, joint_bundle);
     let mut best: Option<gam_problem::RayRestoration> = None;
@@ -302,6 +303,7 @@ fn descending_ray_restoration(
             likelihood_slope,
             penalty_slope,
             block_step_inf,
+            direction: std::sync::Arc::clone(&direction),
         };
         if best
             .as_ref()

@@ -2368,7 +2368,7 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
             // variables the loop's verdict was actually taken on can be
             // reported, and they are what separates "needs more cycles" from
             // "the exact joint stationarity gate is the blocker".
-            terminal: inner.terminal_convergence_state,
+            terminal: inner.terminal_convergence_state.clone(),
             theta_dim,
             rho_dim,
             psi_dim,
