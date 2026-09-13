@@ -1186,6 +1186,9 @@ pub(crate) struct CustomOuterState {
     /// Mode of the latest converged first-order evaluation since the last
     /// accepted step, held until the optimizer reports that step accepted.
     pub(crate) pending_first_order_mode: Option<ConstrainedWarmStart>,
+    /// Kept rank of the criterion the most recent successful evaluation priced (#2765),
+    /// published to the outer search through `OuterObjective::criterion_rank`.
+    pub(crate) last_criterion_rank: Option<usize>,
 }
 
 impl CustomOuterState {
@@ -1207,6 +1210,7 @@ impl CustomOuterState {
             accepted_steps_adopted,
             incumbent_established: false,
             pending_first_order_mode: None,
+            last_criterion_rank: None,
         }
     }
 
@@ -1430,6 +1434,10 @@ pub(crate) struct OuterObjectiveEvalResult {
     pub(crate) inner_converged: bool,
     pub(crate) hyper_values: Array1<f64>,
     pub(crate) ext_mode_response_cols: Option<Array2<f64>>,
+    /// Kept rank of the pseudo-log-determinant this evaluation priced; `None` when the
+    /// criterion is not projected. Two evaluations whose kept ranks differ price two
+    /// different criteria (#2765).
+    pub(crate) criterion_rank: Option<usize>,
     /// The exact coefficient mode used to assemble this objective payload.
     ///
     /// Keeping the owned result here lets an atomic multi-start evaluation

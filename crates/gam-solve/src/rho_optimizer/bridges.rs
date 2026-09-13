@@ -139,6 +139,14 @@ pub(crate) struct OuterFirstOrderBridge<'a> {
     /// each accepted step. The reference point for reconciling
     /// [`AcceptedOuterStep`] against [`Self::pending_first_order`].
     pub(crate) incumbent: Option<(Array1<f64>, f64)>,
+    /// Kept rank of the criterion at this run's start (#2765), read from
+    /// [`OuterObjective::criterion_rank`]. A trial whose criterion keeps a different
+    /// rank prices a different function, so it is refused as a trial point and the line
+    /// search shortens its step. `None` keeps no rank.
+    pub(crate) stratum_rank: Option<usize>,
+    /// The lowest-criterion trial refused for leaving [`Self::stratum_rank`], read by the
+    /// seed loop, which restarts the search there when the run ends above it.
+    pub(crate) stratum_probe: Option<Arc<Mutex<Option<StratumProbe>>>>,
 }
 
 pub(crate) const VALUE_PROBE_CACHE_CAPACITY: usize = 256;
@@ -1959,7 +1967,11 @@ impl ZerothOrderObjective for OuterFirstOrderBridge<'_> {
             .map_err(|err| {
                 into_line_search_value_probe_error("outer eval_cost failed", err)
             })
-            .and_then(|eval| finite_cost_or_error("outer eval_cost failed", eval.cost));
+            .and_then(|eval| finite_cost_or_error("outer eval_cost failed", eval.cost))
+            .and_then(|cost| match self.refuse_off_stratum_trial(x, cost) {
+                Some(refusal) => Err(into_objective_error("outer eval_cost failed", refusal)),
+                None => Ok(cost),
+            });
         let cached_outcome = cache_value_probe_result(&result);
         remember_value_probe(&mut self.value_probe_cache, x, cached_outcome);
         match &result {
@@ -2167,6 +2179,9 @@ impl FirstOrderObjective for OuterFirstOrderBridge<'_> {
             .eval_with_order(x, OuterEvalOrder::ValueAndGradient)
             .map_err(|err| into_objective_error("outer eval failed", err))?;
         let eval = finite_outer_first_order_eval_or_error("outer eval failed", self.layout, eval)?;
+        if let Some(refusal) = self.refuse_off_stratum_trial(x, eval.cost) {
+            return Err(into_objective_error("outer eval failed", refusal));
+        }
         let g_norm = eval.gradient.iter().map(|v| v * v).sum::<f64>().sqrt();
         let gradient = eval.gradient;
         if self.g_norm_initial.is_none() && g_norm.is_finite() && g_norm > 0.0 {
@@ -2254,6 +2269,36 @@ impl FirstOrderObjective for OuterFirstOrderBridge<'_> {
 }
 
 impl OuterFirstOrderBridge<'_> {
+    /// Refuse a trial whose criterion keeps a different rank than this run's start (#2765).
+    ///
+    /// Called once an evaluation has validated, with the criterion value it returned. The
+    /// refusal is a trial-point refusal, so the line search shortens its step as it does
+    /// at any infeasible trial. The trial is kept when it is the lowest refused so far: a
+    /// run that ends above it has a lower criterion to restart from.
+    fn refuse_off_stratum_trial(&self, x: &Array1<f64>, cost: f64) -> Option<EstimationError> {
+        let stratum_rank = self.stratum_rank?;
+        let rank = self.obj.criterion_rank()?;
+        if rank == stratum_rank {
+            return None;
+        }
+        if let Some(cell) = self.stratum_probe.as_ref()
+            && let Ok(mut slot) = cell.lock()
+            && slot.as_ref().is_none_or(|probe| cost < probe.cost)
+        {
+            *slot = Some(StratumProbe {
+                rho: x.clone(),
+                cost,
+                rank,
+            });
+        }
+        Some(EstimationError::TrialPointRefused {
+            reason: format!(
+                "the criterion at this trial keeps rank {rank}, not the rank {stratum_rank} this \
+                 search started on; two ranks price two criteria"
+            ),
+        })
+    }
+
     /// Consume every accepted outer step `opt` has reported since the last
     /// evaluation and fold the corresponding iterate into the cost-stall guard
     /// (#2613).
@@ -3636,6 +3681,15 @@ pub(crate) struct PendingOuterEval {
     pub(crate) cost: f64,
     pub(crate) projected_grad_norm: f64,
     pub(crate) inner_converged: bool,
+}
+
+/// A trial the first-order bridge refused because its criterion keeps a different rank
+/// than the run's start (#2765): the point, its criterion value, and the rank it kept.
+#[derive(Debug, Clone)]
+pub(crate) struct StratumProbe {
+    pub(crate) rho: Array1<f64>,
+    pub(crate) cost: f64,
+    pub(crate) rank: usize,
 }
 
 /// Cap on [`OuterFirstOrderBridge::pending_first_order`]. One BFGS iteration

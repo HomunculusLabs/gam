@@ -2627,6 +2627,7 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                         inner_converged: inner.converged,
                         hyper_values: hyper_layout.values().clone(),
                         ext_mode_response_cols: None,
+                        criterion_rank: value_only.criterion_rank,
                         inner: inner.clone(),
                     });
                 }
@@ -3070,6 +3071,7 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                         inner_converged: inner.converged,
                         hyper_values: hyper_layout.values().clone(),
                         ext_mode_response_cols: None,
+                        criterion_rank: value_only.criterion_rank,
                         inner: inner.clone(),
                     });
                 }

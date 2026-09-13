@@ -1350,6 +1350,12 @@ pub(crate) fn joint_outer_evaluate(
             .map(|bundle| bundle.coords.len())
             .unwrap_or(0);
     let has_penalty_subspace_trace = penalty_subspace_trace.is_some();
+    // A projected criterion that yields no kernel keeps rank zero (#2765).
+    let criterion_rank = projected_criterion.then(|| {
+        penalty_subspace_trace
+            .as_ref()
+            .map_or(0, |kernel| kernel.h_proj_inverse.nrows())
+    });
 
     // Option C: when the caller already has the batched first-order
     // logdet traces, let the unified VGH path keep all mode-response,
@@ -1480,6 +1486,7 @@ pub(crate) fn joint_outer_evaluate(
         inner_converged: inner.converged,
         hyper_values: Array1::zeros(0),
         ext_mode_response_cols,
+        criterion_rank,
         inner: inner.clone(),
     })
 }

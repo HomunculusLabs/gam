@@ -311,6 +311,18 @@ pub trait OuterObjective {
         None
     }
 
+    /// Kept rank of the criterion the most recent evaluation priced (#2765).
+    ///
+    /// A criterion built on a pseudo-log-determinant `½·log|ZᵀMZ|₊` keeps only the
+    /// eigenpairs its rank rule admits, and the kept rank moves where the inner mode
+    /// changes face. Two evaluations with different kept ranks price two different
+    /// functions, so a line search comparing them compares nothing. The first-order
+    /// bridge reads this after each evaluation and refuses a trial whose rank differs
+    /// from its run's start. `None` means one criterion everywhere: no rank to keep.
+    fn criterion_rank(&self) -> Option<usize> {
+        None
+    }
+
     /// Restore to a clean baseline for the next multi-start candidate.
     fn reset(&mut self);
 
@@ -1015,6 +1027,10 @@ impl<'a> OuterObjective for CheckpointingObjective<'a> {
         self.inner.criterion_invariant_directions(theta)
     }
 
+    fn criterion_rank(&self) -> Option<usize> {
+        self.inner.criterion_rank()
+    }
+
     fn seed_inner_state(&mut self, beta: &Array1<f64>) -> Result<SeedOutcome, EstimationError> {
         // Forward to the wrapped objective, then prime our last-inner-beta
         // cache so a subsequent finalize-write encodes the seeded β if no
@@ -1144,6 +1160,10 @@ pub struct ClosureObjective<
     /// behaviour, bit for bit.
     pub(crate) criterion_invariance_fn:
         Option<Box<dyn FnMut(&mut S, &Array1<f64>) -> Option<Array2<f64>>>>,
+    /// Optional kept-rank hook (#2765). Installed by objectives whose criterion is a
+    /// pseudo-log-determinant over a rank that moves with the inner mode; `None` means
+    /// one criterion everywhere.
+    pub(crate) criterion_rank_fn: Option<Box<dyn Fn(&S) -> Option<usize>>>,
     /// Optional seed-screening ranking proxy closure. When `None`,
     /// `eval_screening_proxy()` falls back to `eval_cost()` (the trait
     /// default), preserving legacy behavior for non-REML objectives.
@@ -1351,6 +1371,10 @@ where
         Some(published)
     }
 
+    fn criterion_rank(&self) -> Option<usize> {
+        self.criterion_rank_fn.as_ref()?(&self.state)
+    }
+
     fn seed_inner_state(&mut self, beta: &Array1<f64>) -> Result<SeedOutcome, EstimationError> {
         // Empty β: by convention, "no warm-start available" — treat as a
         // no-op install. Distinct from `NoSlot` because the objective may
@@ -1476,6 +1500,18 @@ impl<S, Fc, Fe, Fr, Fefs, Feo, Fsp, Fseed> ClosureObjective<S, Fc, Fe, Fr, Fefs,
         self.criterion_invariance_fn = Some(Box::new(invariance));
         self
     }
+
+    /// Publish the kept rank of the criterion the most recent evaluation priced (#2765).
+    ///
+    /// The closure reads the state the evaluation closures just wrote. An objective
+    /// whose criterion is one function at every point must not install this hook.
+    pub fn with_criterion_rank<Frank>(mut self, rank: Frank) -> Self
+    where
+        Frank: Fn(&S) -> Option<usize> + 'static,
+    {
+        self.criterion_rank_fn = Some(Box::new(rank));
+        self
+    }
 }
 
 impl<S, Fc, Fe, Fr, Fefs, Feo, Fsp> ClosureObjective<S, Fc, Fe, Fr, Fefs, Feo, Fsp>
@@ -1508,6 +1544,7 @@ where
             rail_face_limit_fn: self.rail_face_limit_fn,
             soft_rho_guard_gradient_fn: self.soft_rho_guard_gradient_fn,
             criterion_invariance_fn: self.criterion_invariance_fn,
+            criterion_rank_fn: self.criterion_rank_fn,
             screening_proxy_fn: self.screening_proxy_fn,
             seed_fn: Some(seed_fn),
             terminal_eval_order: self.terminal_eval_order,
@@ -2088,6 +2125,11 @@ impl<'a> OuterObjective for CanonicalizedObjective<'a> {
         let native = self.to_native(rho);
         let guard = self.inner.soft_rho_guard_gradient(&native)?;
         (guard.len() == self.perm.len()).then(|| permute_to_canonical(&guard, &self.perm))
+    }
+
+    fn criterion_rank(&self) -> Option<usize> {
+        // A rank is a property of the criterion, not of its coordinate order.
+        self.inner.criterion_rank()
     }
 
     fn criterion_invariant_directions(&mut self, rho: &Array1<f64>) -> Option<Array2<f64>> {

@@ -1851,6 +1851,7 @@ fn closure_objective_delegates() {
         rail_face_limit_fn: None,
         soft_rho_guard_gradient_fn: None,
         criterion_invariance_fn: None,
+        criterion_rank_fn: None,
         screening_proxy_fn: None::<fn(&mut i32, &Array1<f64>) -> Result<f64, EstimationError>>,
         seed_fn: None::<fn(&mut i32, &Array1<f64>) -> Result<SeedOutcome, EstimationError>>,
         terminal_eval_order: None,
@@ -1952,6 +1953,7 @@ fn closure_objective_seed_inner_state_delegates_when_hook_present() {
         rail_face_limit_fn: None,
         soft_rho_guard_gradient_fn: None,
         criterion_invariance_fn: None,
+        criterion_rank_fn: None,
         screening_proxy_fn: None::<fn(&mut Vec<f64>, &Array1<f64>) -> Result<f64, EstimationError>>,
         seed_fn: None::<fn(&mut Vec<f64>, &Array1<f64>) -> Result<SeedOutcome, EstimationError>>,
         terminal_eval_order: None,
@@ -2162,6 +2164,7 @@ fn hybrid_efs_backtracking_uses_half_step_after_first_rejection() {
         rail_face_limit_fn: None,
         soft_rho_guard_gradient_fn: None,
         criterion_invariance_fn: None,
+        criterion_rank_fn: None,
         screening_proxy_fn: None::<fn(&mut (), &Array1<f64>) -> Result<f64, EstimationError>>,
         seed_fn: None::<fn(&mut (), &Array1<f64>) -> Result<SeedOutcome, EstimationError>>,
         terminal_eval_order: None,
@@ -2243,6 +2246,7 @@ fn hybrid_efs_backtracking_propagates_fatal_cost_failure() {
         rail_face_limit_fn: None,
         soft_rho_guard_gradient_fn: None,
         criterion_invariance_fn: None,
+        criterion_rank_fn: None,
         screening_proxy_fn: None::<fn(&mut (), &Array1<f64>) -> Result<f64, EstimationError>>,
         seed_fn: None::<fn(&mut (), &Array1<f64>) -> Result<SeedOutcome, EstimationError>>,
         terminal_eval_order: None,
@@ -2324,6 +2328,7 @@ fn fixed_point_stops_on_second_consecutive_restored_incumbent_2241() {
         rail_face_limit_fn: None,
         soft_rho_guard_gradient_fn: None,
         criterion_invariance_fn: None,
+        criterion_rank_fn: None,
         screening_proxy_fn: None::<fn(&mut usize, &Array1<f64>) -> Result<f64, EstimationError>>,
         seed_fn: None::<fn(&mut usize, &Array1<f64>) -> Result<SeedOutcome, EstimationError>>,
         terminal_eval_order: None,
@@ -2650,6 +2655,8 @@ fn first_order_bridge_keeps_true_gradient_on_repeated_flat_cost() {
         accepted_steps: None,
         pending_first_order: Vec::new(),
         incumbent: None,
+        stratum_rank: None,
+        stratum_probe: None,
     };
 
     let first = FirstOrderObjective::eval_grad(&mut bridge, &array![0.0])
@@ -3453,6 +3460,8 @@ fn bfgs_bridge_halts_infeasible_probe_run_back_to_cached_seed() {
         accepted_steps: None,
         pending_first_order: Vec::new(),
         incumbent: None,
+        stratum_rank: None,
+        stratum_probe: None,
     };
 
     // A real BFGS line search probes a *sequence of distinct* trial ρ along its

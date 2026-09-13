@@ -2735,6 +2735,8 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         // #2668: a step the optimizer accepted since the previous evaluation
         // promotes its iterate's mode to the seed before this evaluation reads it.
         outer.adopt_accepted_steps();
+        // A failed evaluation prices no criterion, so it publishes no rank (#2765).
+        outer.last_criterion_rank = None;
         // Genuinely value-only fulfilment (#979). A `Value` request from an outer
         // cost, screening, or reactive-domain probe never consumes the outer
         // gradient. The inner solve in `EvalMode::ValueOnly` already produces the
@@ -2759,6 +2761,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             ) {
                 Ok(eval) if eval.inner_converged && eval.objective.is_finite() => {
                     crate::warm_start::publish_outer_selected_evaluation(&eval);
+                    outer.last_criterion_rank = eval.criterion_rank;
                     let inner_beta_hint = Some(Array1::from_iter(
                         eval.warm_start
                             .block_beta
@@ -2878,6 +2881,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     &warm_start,
                 );
                 outer.last_error = None;
+                outer.last_criterion_rank = eval.criterion_rank;
                 eval
             }
             Ok(eval) => {
@@ -2961,6 +2965,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             // #2668: an accepted step promotes its iterate's mode before this probe
             // reads the seed, and the probe itself never replaces it.
             outer.adopt_accepted_steps();
+            outer.last_criterion_rank = None;
             let warm_ref = if force_cold {
                 canonical_seed.as_ref()
             } else {
@@ -2978,6 +2983,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             ) {
                 Ok(eval) if eval.inner_converged && eval.objective.is_finite() => {
                     crate::warm_start::publish_outer_selected_evaluation(&eval);
+                    outer.last_criterion_rank = eval.criterion_rank;
                     outer.last_error = None;
                     Ok(eval.objective)
                 }
@@ -3126,6 +3132,9 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         outer.seed_cached_beta(n_rho, specs, beta)
     })
     .with_exact_polish(CustomOuterState::begin_exact_polish)
+    // #2765: the projected criterion prices `½·log|ZᵀMZ|₊` over a kept rank that moves
+    // with the inner mode's face, so the outer search keeps each run on one rank.
+    .with_criterion_rank(|outer: &CustomOuterState| outer.last_criterion_rank)
     // EFS may discover the optimum, but only the labeled analytic evaluator
     // owns the exact objective/gradient/coefficient-mode identity consumed by
     // fit assembly. Force the runner's final full-fidelity installation

@@ -226,6 +226,8 @@ fn drive_first_order_bridge_2613(
         accepted_steps: ledger,
         pending_first_order: Vec::new(),
         incumbent: Some((seed_rho, seed_cost)),
+        stratum_rank: None,
+        stratum_probe: None,
     };
     let mut outcomes = Vec::new();
     for (idx, (cost, rho, _)) in schedule.iter().enumerate() {

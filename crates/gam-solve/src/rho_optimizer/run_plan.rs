@@ -9,6 +9,35 @@ fn should_start_next_seed(
     started_seeds < seed_budget || !has_certified_candidate
 }
 
+/// The criterion value and iteration count a first-order run ended at, when it ended by
+/// converging or stalling: the ends at which the search may cross into the stratum of a
+/// trial it refused for keeping a different rank (#2765). A budget verdict or a failure
+/// crosses nothing. A run whose every probe was refused stalled where it started.
+fn stratum_run_end(
+    outcome: &Result<Solution, BfgsError>,
+    cost_stall_exit: &Mutex<Option<CostStallExit>>,
+    start_cost: f64,
+) -> Option<(f64, usize)> {
+    match outcome {
+        Ok(solution) => Some((solution.final_value, solution.iterations)),
+        Err(BfgsError::LineSearchFailed { last_solution, .. }) => {
+            Some((last_solution.final_value, last_solution.iterations))
+        }
+        Err(BfgsError::ObjectiveFailed { message }) if message == COST_STALL_CONVERGED_SENTINEL => {
+            cost_stall_exit
+                .lock()
+                .ok()
+                .and_then(|slot| slot.as_ref().map(|exit| (exit.value, exit.iterations)))
+        }
+        Err(BfgsError::ObjectiveFailed { message })
+            if message.starts_with(PROBE_REFUSAL_FATAL_SENTINEL) =>
+        {
+            Some((start_cost, 0))
+        }
+        Err(_) => None,
+    }
+}
+
 /// Drop from `seeds` every point an earlier certify-resume round already
 /// STARTED and already had REFUSED (#2569).
 ///
@@ -2306,214 +2335,292 @@ pub(crate) fn run_outer_with_plan(
                         seed_eval.gradient.iter().map(|g| g * g).sum::<f64>().sqrt(),
                         seed.iter().map(|r| (r * 1e6).round() / 1e6).collect::<Vec<_>>(),
                     );
-                    let (lo, hi) = &bounds_template;
-                    let bounds = outer_bounds(lo, hi)?;
-                    let grad_tol = outer_gradient_tolerance(config);
-                    let max_iter = outer_max_iterations(config.max_iter)?;
-                    // Cost-stall convergence shared cell (#1089). The bridge is
-                    // moved into `opt::Bfgs`, so the best iterate it captures on
-                    // a flat-valley stall is handed back through this `Arc`.
-                    // Relative score-change floor is derived from the outer
-                    // tolerance but has a numerical floor so very tight user
-                    // tolerances do not disable the mgcv-style flat-valley stop.
-                    let cost_stall_exit: Arc<Mutex<Option<CostStallExit>>> =
-                        Arc::new(Mutex::new(None));
-                    // Accepted-outer-step channel from the observer back into
-                    // the bridge's cost-stall guard (#2613). Same shape as the
-                    // exit cell above and for the same reason: the observer and
-                    // the objective are two values both moved into `opt::Bfgs`.
-                    let accepted_steps: Arc<AcceptedStepLedger> = Arc::default();
-                    let cost_stall_rel_tol = config
-                        .rel_cost_tolerance
-                        .unwrap_or(config.tolerance * 1.0e-2)
-                        .max(COST_STALL_REL_TOL_FLOOR);
-                    // Stationarity gate for the cost-stall exit. Convergence must
-                    // mean stationarity, not cost-flatness: a cost stall only
-                    // counts as a converged optimum when the projected gradient
-                    // norm at the best iterate clears the SAME outer gradient
-                    // tolerance the genuine BFGS convergence path uses, with
-                    // the same practical floor the ARC guard uses for
-                    // bound-pinned separation fits.
-                    let seed_grad_norm =
-                        seed_eval.gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
-                    // `grad_tol.abs` IS the whole band since #2613: the
-                    // cost-relative component is no longer anchored on a
-                    // trajectory point, so there is nothing left for
-                    // `threshold(seed_cost, ‖g₀‖)` to resolve. Using the field
-                    // directly keeps this site from reading as if the seed
-                    // still decided the guard's stationarity gate.
-                    let cost_stall_grad_threshold =
-                        grad_tol.abs.max(COST_STALL_PROJECTED_GRAD_FLOOR);
-                    let mut cost_stall_guard = CostStallGuard::new(
-                        cost_stall_rel_tol,
-                        COST_STALL_WINDOW,
-                        cost_stall_grad_threshold,
-                        cost_stall_exit.clone(),
-                    );
-                    cost_stall_guard.observe_seed(seed, seed_eval.cost, seed_grad_norm);
-                    let last_objective_error: Arc<Mutex<Option<ObjectiveEvalError>>> =
-                        Arc::new(Mutex::new(None));
-                    let objective = RetainingObjective::new(
-                        OuterFirstOrderBridge {
-                            obj,
-                            layout,
-                            outer_inner_cap: config.outer_inner_cap.clone(),
-                            first_order_evals: 0,
-                            g_norm_initial: None,
-                            last_g_norm: None,
-                            last_value_grad_rho: None,
-                            value_probe_cache: Vec::new(),
-                            cost_stall: Some(cost_stall_guard),
-                            cost_stall_bounds: Some((lo.clone(), hi.clone())),
-                            consecutive_probe_refusals: 0,
-                            accepted_steps: Some(Arc::clone(&accepted_steps)),
-                            pending_first_order: Vec::new(),
-                            incumbent: Some((seed.clone(), seed_eval.cost)),
-                        },
-                        Arc::clone(&last_objective_error),
-                    );
-                    // Hand the precomputed (cost, gradient) seed eval to
-                    // `opt::Bfgs` so its first internal `eval_grad` call is
-                    // served from cache instead of re-running the outer
-                    // objective. Inner P-IRLS solves dominate outer cost
-                    // at large scale; skipping one re-eval at the seed
-                    // is one of the cheapest wins available. (opt 0.3.0
-                    // API; before that this was implemented via a
-                    // gam-side cache on the bridge.)
-                    let initial_sample = FirstOrderSample {
-                        value: seed_eval.cost,
-                        gradient: seed_eval.gradient.clone(),
-                    };
-                    let mut optimizer = Bfgs::new(seed.clone(), objective)
-                        .with_initial_sample(seed.clone(), initial_sample)
-                        .with_bounds(bounds)
-                        .with_gradient_tolerance(grad_tol)
-                        .with_max_iterations(max_iter)
-                        // GAM owns the authoritative six-iterate cost-stall
-                        // guard in `OuterFirstOrderBridge` and independently
-                        // certifies the terminal KKT residual. `opt`'s generic
-                        // three-iterate relative-stall gate multiplies the
-                        // gradient tolerance by `(1 + ||rho||_inf)`; a railed
-                        // smoothing parameter can therefore make that duplicate
-                        // gate claim convergence while a different interior
-                        // coordinate still has measurable descent (#2524).
-                        .without_relative_stall();
-                    // First-step scaling. `opt::Bfgs` begins with an
-                    // UNSCALED identity inverse-Hessian (`B_inv = I`) on iter 0:
-                    // the search direction is the raw `d = -g`, so the unit
-                    // line-search step (`α = 1`) is `-g` in ρ-space. The
-                    // optimizer's Barzilai-Borwein self-scaling (`γ = sᵀy/yᵀy`)
-                    // only fires AFTER the first line search completes. When a
-                    // seed's residual gradient has a large component along a
-                    // weakly-curved (heavily penalized) log-lambda direction, the
-                    // raw `-g` step overshoots and the StrongWolfe search has to
-                    // bracket/zoom; in the SAE manifold objective each bracketing
-                    // probe is a full inner joint-Newton re-solve. K=1 circle
-                    // fits hit this especially hard because the saturated single
-                    // assignment gate leaves the outer objective nearly flat in
-                    // one direction but still returns a large scale gradient at
-                    // the seed.
-                    //
-                    // Seed the iter-0 metric with the one-point magnitude estimate
-                    // the `InitialMetric::Scalar` API is designed for ("a previous
-                    // run's gradient norm"): `H₀⁻¹ = (1/‖g₀‖)·I` makes the first
-                    // direction `d = -g₀/‖g₀‖` a unit-ℓ²-norm ρ step — bounded,
-                    // still exactly steepest-descent (so still a descent
-                    // direction), and almost always Wolfe-acceptable at `α = 1`.
-                    // This changes only the LINE-SEARCH PATH, never the accepted
-                    // optimum: BFGS converges to the same stationary point
-                    // `∇_ρ V(ρ*) = 0` under any symmetric-positive-definite initial
-                    // metric, and the gradient/KKT convergence tests are unchanged.
-                    // This scalar normalization is safe for every finite seed:
-                    // it changes only the line-search path, not the stationary
-                    // point. Dense transferred curvature stays gated on true warm
-                    // starts, because it is local to the parent fit. Every
-                    // warm-start mechanism pins `initial_rho`, so seed identity
-                    // is the complete authority for transferred curvature. The
-                    // scalar scale is clamped
-                    // to the same `[1e-3, 1e3]` band the optimizer applies to its
-                    // own BB estimate so a pathological seed gradient cannot
-                    // produce a degenerate metric.
-                    let is_warm_seed = config
-                        .initial_rho
-                        .as_ref()
-                        .is_some_and(|initial| outer_theta_bitwise_eq(initial, seed));
-                    let mut installed_initial_metric = false;
-                    if is_warm_seed {
-                        // Prefer the converged outer curvature transferred from
-                        // the prior structurally-matching fit (`H(θ̂)_parent`):
-                        // its inverse is the ideal BFGS iter-0 metric, making the
-                        // first outer direction a quasi-Newton step `d = -H⁻¹g₀`
-                        // rather than the unscaled `-g₀`. Across LOSO folds the
-                        // curvature differs by one held-out row, so the parent's
-                        // anisotropic Hessian is a far better local model than the
-                        // single-magnitude scalar — it eliminates most of the
-                        // StrongWolfe bracketing whose every probe is a full inner
-                        // joint-Newton re-solve. Only an exact certified SPD
-                        // transferred Hessian can seed this metric; an indefinite
-                        // or singular parent curvature is rejected without
-                        // perturbing it and the scalar metric is selected. Either
-                        // way the converged
-                        // optimum is unchanged: BFGS reaches ∇V=0 under any SPD
-                        // initial metric, and the gradient/KKT tests are identical.
-                        let dense_metric = eligible_transferred_outer_hessian(
-                            config.warm_start_outer_hessian.as_ref(),
-                            cap.hessian,
-                            layout.n_params,
-                        )
-                            .and_then(|h| {
-                                match gam_linalg::utils::certified_spd_inverse(
-                                    h,
-                                    "transferred outer-Hessian BFGS metric",
-                                ) {
-                                    Ok(inverse) => Some(inverse.into_inverse()),
-                                    Err(error) => {
-                                        log::info!(
-                                            "[OUTER] {context}: rejected transferred BFGS metric: {error}"
-                                        );
-                                        None
-                                    }
-                                }
-                            });
-                        if let Some(h_inv) = dense_metric {
-                            log::info!(
-                                "[OUTER] {context}: warm-start BFGS metric = transferred \
-                                 H(θ̂)⁻¹ (dim={}); quasi-Newton first step",
-                                layout.n_params,
-                            );
-                            optimizer = optimizer
-                                .with_initial_metric(InitialMetric::DenseInverseHessian(h_inv));
-                            installed_initial_metric = true;
-                        }
-                    }
-                    if !installed_initial_metric {
-                        let g0_norm = seed_eval.gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
-                        // `H_0^{-1} = I/‖g₀‖` makes the first trial step unit length in
-                        // ρ; a norm with no finite positive reciprocal keeps opt's default.
-                        let scale = 1.0 / g0_norm;
-                        if scale.is_finite() && scale > 0.0 {
-                            optimizer = optimizer.with_initial_metric(InitialMetric::Scalar(scale));
-                        }
-                    }
-                    if let Some(caps) = bfgs_axis_step_caps(config, layout) {
-                        optimizer = optimizer.with_axis_step_caps(caps);
-                    }
-                    // The observer is installed UNCONDITIONALLY on this route
-                    // (#2613). It used to be gated on `outer_inner_cap`, the
-                    // only consumer at the time; the cost-stall guard now
-                    // depends on the same accepted-step signal to tell an
-                    // accepted outer iterate from a line-search trial, and that
-                    // guard is present on every BFGS seed.
-                    optimizer = optimizer.with_observer(OuterAcceptObserver {
-                        feedback: config.outer_inner_cap.clone(),
-                        accepted_steps: Some(Arc::clone(&accepted_steps)),
-                        // BFGS reports no trust radius, so a region census would
-                        // be a column of `None`s; its own non-convergence
-                        // reporting is the line-search failure path.
-                        census: None,
-                    });
+                    // #2765: the criterion prices `½·log|ZᵀMZ|₊` over a kept rank that moves
+                    // where the inner mode changes face, and two ranks price two criteria. So
+                    // one BFGS run searches one stratum: the bridge refuses a trial whose kept
+                    // rank differs from the run's start and keeps the lowest trial it refused.
+                    // A run that converges or stalls above that trial by more than the
+                    // criterion's roundoff restarts there, on that trial's rank, and logs the
+                    // crossing. Every crossing lowers the criterion by more than its roundoff,
+                    // so crossings cannot cycle.
                     let bfgs_start = std::time::Instant::now();
-                    let outcome = optimizer.run();
+                    let mut stratum_start = seed.clone();
+                    let mut stratum_eval = seed_eval;
+                    let mut crossed_iterations = 0usize;
+                    let (outcome, cost_stall_exit, last_objective_error) = loop {
+                        let stratum_rank = obj.criterion_rank();
+                        let stratum_probe: Arc<Mutex<Option<StratumProbe>>> = Arc::default();
+                        let (lo, hi) = &bounds_template;
+                        let bounds = outer_bounds(lo, hi)?;
+                        let grad_tol = outer_gradient_tolerance(config);
+                        let max_iter = outer_max_iterations(config.max_iter)?;
+                        // Cost-stall convergence shared cell (#1089). The bridge is
+                        // moved into `opt::Bfgs`, so the best iterate it captures on
+                        // a flat-valley stall is handed back through this `Arc`.
+                        // Relative score-change floor is derived from the outer
+                        // tolerance but has a numerical floor so very tight user
+                        // tolerances do not disable the mgcv-style flat-valley stop.
+                        let cost_stall_exit: Arc<Mutex<Option<CostStallExit>>> =
+                            Arc::new(Mutex::new(None));
+                        // Accepted-outer-step channel from the observer back into
+                        // the bridge's cost-stall guard (#2613). Same shape as the
+                        // exit cell above and for the same reason: the observer and
+                        // the objective are two values both moved into `opt::Bfgs`.
+                        let accepted_steps: Arc<AcceptedStepLedger> = Arc::default();
+                        let cost_stall_rel_tol = config
+                            .rel_cost_tolerance
+                            .unwrap_or(config.tolerance * 1.0e-2)
+                            .max(COST_STALL_REL_TOL_FLOOR);
+                        // Stationarity gate for the cost-stall exit. Convergence must
+                        // mean stationarity, not cost-flatness: a cost stall only
+                        // counts as a converged optimum when the projected gradient
+                        // norm at the best iterate clears the SAME outer gradient
+                        // tolerance the genuine BFGS convergence path uses, with
+                        // the same practical floor the ARC guard uses for
+                        // bound-pinned separation fits.
+                        let seed_grad_norm =
+                            stratum_eval.gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
+                        // `grad_tol.abs` IS the whole band since #2613: the
+                        // cost-relative component is no longer anchored on a
+                        // trajectory point, so there is nothing left for
+                        // `threshold(seed_cost, ‖g₀‖)` to resolve. Using the field
+                        // directly keeps this site from reading as if the seed
+                        // still decided the guard's stationarity gate.
+                        let cost_stall_grad_threshold =
+                            grad_tol.abs.max(COST_STALL_PROJECTED_GRAD_FLOOR);
+                        let mut cost_stall_guard = CostStallGuard::new(
+                            cost_stall_rel_tol,
+                            COST_STALL_WINDOW,
+                            cost_stall_grad_threshold,
+                            cost_stall_exit.clone(),
+                        );
+                        cost_stall_guard.observe_seed(&stratum_start, stratum_eval.cost, seed_grad_norm);
+                        let last_objective_error: Arc<Mutex<Option<ObjectiveEvalError>>> =
+                            Arc::new(Mutex::new(None));
+                        let objective = RetainingObjective::new(
+                            OuterFirstOrderBridge {
+                                obj,
+                                layout,
+                                outer_inner_cap: config.outer_inner_cap.clone(),
+                                first_order_evals: 0,
+                                g_norm_initial: None,
+                                last_g_norm: None,
+                                last_value_grad_rho: None,
+                                value_probe_cache: Vec::new(),
+                                cost_stall: Some(cost_stall_guard),
+                                cost_stall_bounds: Some((lo.clone(), hi.clone())),
+                                consecutive_probe_refusals: 0,
+                                accepted_steps: Some(Arc::clone(&accepted_steps)),
+                                pending_first_order: Vec::new(),
+                                incumbent: Some((stratum_start.clone(), stratum_eval.cost)),
+                                stratum_rank,
+                                stratum_probe: Some(Arc::clone(&stratum_probe)),
+                            },
+                            Arc::clone(&last_objective_error),
+                        );
+                        // Hand the precomputed (cost, gradient) seed eval to
+                        // `opt::Bfgs` so its first internal `eval_grad` call is
+                        // served from cache instead of re-running the outer
+                        // objective. Inner P-IRLS solves dominate outer cost
+                        // at large scale; skipping one re-eval at the seed
+                        // is one of the cheapest wins available. (opt 0.3.0
+                        // API; before that this was implemented via a
+                        // gam-side cache on the bridge.)
+                        let initial_sample = FirstOrderSample {
+                            value: stratum_eval.cost,
+                            gradient: stratum_eval.gradient.clone(),
+                        };
+                        let mut optimizer = Bfgs::new(stratum_start.clone(), objective)
+                            .with_initial_sample(stratum_start.clone(), initial_sample)
+                            .with_bounds(bounds)
+                            .with_gradient_tolerance(grad_tol)
+                            .with_max_iterations(max_iter)
+                            // GAM owns the authoritative six-iterate cost-stall
+                            // guard in `OuterFirstOrderBridge` and independently
+                            // certifies the terminal KKT residual. `opt`'s generic
+                            // three-iterate relative-stall gate multiplies the
+                            // gradient tolerance by `(1 + ||rho||_inf)`; a railed
+                            // smoothing parameter can therefore make that duplicate
+                            // gate claim convergence while a different interior
+                            // coordinate still has measurable descent (#2524).
+                            .without_relative_stall();
+                        // First-step scaling. `opt::Bfgs` begins with an
+                        // UNSCALED identity inverse-Hessian (`B_inv = I`) on iter 0:
+                        // the search direction is the raw `d = -g`, so the unit
+                        // line-search step (`α = 1`) is `-g` in ρ-space. The
+                        // optimizer's Barzilai-Borwein self-scaling (`γ = sᵀy/yᵀy`)
+                        // only fires AFTER the first line search completes. When a
+                        // seed's residual gradient has a large component along a
+                        // weakly-curved (heavily penalized) log-lambda direction, the
+                        // raw `-g` step overshoots and the StrongWolfe search has to
+                        // bracket/zoom; in the SAE manifold objective each bracketing
+                        // probe is a full inner joint-Newton re-solve. K=1 circle
+                        // fits hit this especially hard because the saturated single
+                        // assignment gate leaves the outer objective nearly flat in
+                        // one direction but still returns a large scale gradient at
+                        // the seed.
+                        //
+                        // Seed the iter-0 metric with the one-point magnitude estimate
+                        // the `InitialMetric::Scalar` API is designed for ("a previous
+                        // run's gradient norm"): `H₀⁻¹ = (1/‖g₀‖)·I` makes the first
+                        // direction `d = -g₀/‖g₀‖` a unit-ℓ²-norm ρ step — bounded,
+                        // still exactly steepest-descent (so still a descent
+                        // direction), and almost always Wolfe-acceptable at `α = 1`.
+                        // This changes only the LINE-SEARCH PATH, never the accepted
+                        // optimum: BFGS converges to the same stationary point
+                        // `∇_ρ V(ρ*) = 0` under any symmetric-positive-definite initial
+                        // metric, and the gradient/KKT convergence tests are unchanged.
+                        // This scalar normalization is safe for every finite seed:
+                        // it changes only the line-search path, not the stationary
+                        // point. Dense transferred curvature stays gated on true warm
+                        // starts, because it is local to the parent fit. Every
+                        // warm-start mechanism pins `initial_rho`, so seed identity
+                        // is the complete authority for transferred curvature. The
+                        // scalar scale is clamped
+                        // to the same `[1e-3, 1e3]` band the optimizer applies to its
+                        // own BB estimate so a pathological seed gradient cannot
+                        // produce a degenerate metric.
+                        let is_warm_seed = config
+                            .initial_rho
+                            .as_ref()
+                            .is_some_and(|initial| outer_theta_bitwise_eq(initial, &stratum_start));
+                        let mut installed_initial_metric = false;
+                        if is_warm_seed {
+                            // Prefer the converged outer curvature transferred from
+                            // the prior structurally-matching fit (`H(θ̂)_parent`):
+                            // its inverse is the ideal BFGS iter-0 metric, making the
+                            // first outer direction a quasi-Newton step `d = -H⁻¹g₀`
+                            // rather than the unscaled `-g₀`. Across LOSO folds the
+                            // curvature differs by one held-out row, so the parent's
+                            // anisotropic Hessian is a far better local model than the
+                            // single-magnitude scalar — it eliminates most of the
+                            // StrongWolfe bracketing whose every probe is a full inner
+                            // joint-Newton re-solve. Only an exact certified SPD
+                            // transferred Hessian can seed this metric; an indefinite
+                            // or singular parent curvature is rejected without
+                            // perturbing it and the scalar metric is selected. Either
+                            // way the converged
+                            // optimum is unchanged: BFGS reaches ∇V=0 under any SPD
+                            // initial metric, and the gradient/KKT tests are identical.
+                            let dense_metric = eligible_transferred_outer_hessian(
+                                config.warm_start_outer_hessian.as_ref(),
+                                cap.hessian,
+                                layout.n_params,
+                            )
+                                .and_then(|h| {
+                                    match gam_linalg::utils::certified_spd_inverse(
+                                        h,
+                                        "transferred outer-Hessian BFGS metric",
+                                    ) {
+                                        Ok(inverse) => Some(inverse.into_inverse()),
+                                        Err(error) => {
+                                            log::info!(
+                                                "[OUTER] {context}: rejected transferred BFGS metric: {error}"
+                                            );
+                                            None
+                                        }
+                                    }
+                                });
+                            if let Some(h_inv) = dense_metric {
+                                log::info!(
+                                    "[OUTER] {context}: warm-start BFGS metric = transferred \
+                                     H(θ̂)⁻¹ (dim={}); quasi-Newton first step",
+                                    layout.n_params,
+                                );
+                                optimizer = optimizer
+                                    .with_initial_metric(InitialMetric::DenseInverseHessian(h_inv));
+                                installed_initial_metric = true;
+                            }
+                        }
+                        if !installed_initial_metric {
+                            let g0_norm = stratum_eval.gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
+                            // `H_0^{-1} = I/‖g₀‖` makes the first trial step unit length in
+                            // ρ; a norm with no finite positive reciprocal keeps opt's default.
+                            let scale = 1.0 / g0_norm;
+                            if scale.is_finite() && scale > 0.0 {
+                                optimizer = optimizer.with_initial_metric(InitialMetric::Scalar(scale));
+                            }
+                        }
+                        if let Some(caps) = bfgs_axis_step_caps(config, layout) {
+                            optimizer = optimizer.with_axis_step_caps(caps);
+                        }
+                        // The observer is installed UNCONDITIONALLY on this route
+                        // (#2613). It used to be gated on `outer_inner_cap`, the
+                        // only consumer at the time; the cost-stall guard now
+                        // depends on the same accepted-step signal to tell an
+                        // accepted outer iterate from a line-search trial, and that
+                        // guard is present on every BFGS seed.
+                        optimizer = optimizer.with_observer(OuterAcceptObserver {
+                            feedback: config.outer_inner_cap.clone(),
+                            accepted_steps: Some(Arc::clone(&accepted_steps)),
+                            // BFGS reports no trust radius, so a region census would
+                            // be a column of `None`s; its own non-convergence
+                            // reporting is the line-search failure path.
+                            census: None,
+                        });
+                        let outcome = optimizer.run();
+                        drop(optimizer);
+                        let probe = stratum_probe.lock().ok().and_then(|mut slot| slot.take());
+                        let run_end = stratum_run_end(&outcome, &cost_stall_exit, stratum_eval.cost);
+                        let (Some(from_rank), Some(probe), Some((final_value, run_iterations))) =
+                            (stratum_rank, probe, run_end)
+                        else {
+                            break (outcome, cost_stall_exit, last_objective_error);
+                        };
+                        // The criterion value's own roundoff: a value lower by no more than
+                        // this is not a lower criterion.
+                        let resolution = f64::EPSILON * (1.0 + final_value.abs());
+                        if !(probe.cost < final_value - resolution) {
+                            break (outcome, cost_stall_exit, last_objective_error);
+                        }
+                        let crossing_eval = eval_seed_at_full_inner_fidelity(
+                            obj,
+                            config,
+                            &probe.rho,
+                            OuterEvalOrder::ValueAndGradient,
+                        )
+                        .map_err(|err| into_objective_error("outer eval failed", err))
+                        .and_then(|eval| {
+                            finite_outer_first_order_eval_or_error("outer eval failed", layout, eval)
+                        });
+                        match crossing_eval {
+                            Ok(eval) if eval.cost < final_value - resolution => {
+                                log::info!(
+                                    "[OUTER] {context}: seed {seed_idx} crosses from kept rank \
+                                     {from_rank} to {} at criterion {:.6e} -> {:.6e} (delta {:.3e}) \
+                                     and restarts BFGS there (#2765)",
+                                    obj.criterion_rank()
+                                        .map_or_else(|| "none".to_string(), |rank| rank.to_string()),
+                                    final_value,
+                                    eval.cost,
+                                    eval.cost - final_value,
+                                );
+                                crossed_iterations = crossed_iterations.saturating_add(run_iterations);
+                                stratum_start = probe.rho;
+                                stratum_eval = eval;
+                            }
+                            Ok(eval) => {
+                                log::info!(
+                                    "[OUTER] {context}: seed {seed_idx} stays on kept rank {from_rank}: \
+                                     the refused rank-{} trial re-evaluates at {:.6e}, not below the \
+                                     run's {:.6e} by more than {:.3e} (#2765)",
+                                    probe.rank,
+                                    eval.cost,
+                                    final_value,
+                                    resolution,
+                                );
+                                break (outcome, cost_stall_exit, last_objective_error);
+                            }
+                            Err(err) => {
+                                log::info!(
+                                    "[OUTER] {context}: seed {seed_idx} stays on kept rank {from_rank}: \
+                                     the refused rank-{} trial did not re-evaluate: {err} (#2765)",
+                                    probe.rank,
+                                );
+                                break (outcome, cost_stall_exit, last_objective_error);
+                            }
+                        }
+                    };
                     let bfgs_elapsed = bfgs_start.elapsed().as_secs_f64();
                     match &outcome {
                         Ok(sol) => log::info!(
@@ -2562,7 +2669,7 @@ pub(crate) fn run_outer_with_plan(
                             e
                         ),
                     }
-                    match outcome {
+                    let stratum_result = match outcome {
                         Ok(sol) => Ok(solution_into_outer_result(sol, true, *the_plan)),
                         Err(BfgsError::MaxIterationsReached { last_solution }) => {
                             Ok(solution_into_outer_result(*last_solution, false, *the_plan))
@@ -2704,7 +2811,12 @@ pub(crate) fn run_outer_with_plan(
                         Err(e) => Err(EstimationError::RemlOptimizationFailed(format!(
                             "BFGS solver failed: {e:?}"
                         ))),
-                    }
+                    };
+                    // A crossing ends one run and starts another; the seed spent both (#2817).
+                    stratum_result.map(|mut result| {
+                        result.iterations = result.iterations.saturating_add(crossed_iterations);
+                        result
+                    })
                 }
             }
             Solver::Efs => {
