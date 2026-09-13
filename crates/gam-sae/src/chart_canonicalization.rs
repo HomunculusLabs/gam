@@ -2593,11 +2593,11 @@ fn sphere_whitened_boost_row(theta: &[f64], t: [f64; 2]) -> Option<([f64; 4], [[
     }
 
     let (sin_lat_new, cos_lat_new) = moved_lat.sin_cos();
-    // Pole floor: at smaller `|cos(lat̃)|`, the longitudinal whitening row has
-    // no reliable metric content and the chart is honestly outside this
-    // coordinate patch.
-    const SPHERE_EVAL_COS_FLOOR: f64 = 1.0e-6;
-    if !(cos_lat_new.is_finite() && cos_lat_new > SPHERE_EVAL_COS_FLOOR) {
+    // `L(lat̃) = diag(1, cos lat̃)` whitens by the round metric only inside the
+    // coordinate patch `|lat̃| < π/2`, where `cos lat̃ > 0`; a moved latitude at
+    // or past a pole has left the chart. Nothing below divides by `cos lat̃`,
+    // and the finiteness check on `a` and `da` still refuses an overflowed row.
+    if !(cos_lat_new.is_finite() && cos_lat_new > 0.0) {
         return None;
     }
 
