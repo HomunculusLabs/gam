@@ -660,26 +660,6 @@ impl BinomialLocationScaleWiggleFamily {
     pub const BLOCK_LOG_SIGMA: usize = 1;
     pub const BLOCK_WIGGLE: usize = 2;
 
-    pub fn parameternames() -> &'static [&'static str] {
-        &["threshold", "log_sigma", "wiggle"]
-    }
-
-    pub fn parameter_links() -> &'static [ParameterLink] {
-        &[
-            ParameterLink::InverseLink,
-            ParameterLink::Log,
-            ParameterLink::Wiggle,
-        ]
-    }
-
-    pub fn metadata() -> FamilyMetadata {
-        FamilyMetadata {
-            name: "binomial_location_scalewiggle",
-            parameternames: Self::parameternames(),
-            parameter_links: Self::parameter_links(),
-        }
-    }
-
     pub(crate) fn exact_joint_supported(&self) -> bool {
         self.threshold_design.is_some() && self.log_sigma_design.is_some()
     }
@@ -3020,30 +3000,6 @@ impl BinomialWiggleSecondDirectionalRows {
         out.slice_mut(s![pt + pls.., pt + pls..]).assign(&h_ww);
         mirror_upper_to_lower(&mut out);
         Ok(out)
-    }
-}
-
-impl BinomialLocationScaleWiggleFamily {
-    /// Build the [`BlockEffectiveJacobian`](gam_problem::block_spec::BlockEffectiveJacobian) for block `block_idx`.
-    ///
-    /// The two-output map is (η_threshold, η_log_sigma).
-    /// The wiggle block operates on the combined linear predictor through the
-    /// nonlinear inverse link and has a zero effective linear Jacobian.
-    ///
-    /// - block 0 (threshold):  output 0 = design rows, output 1 = zeros
-    /// - block 1 (log_sigma):  output 0 = zeros, output 1 = design rows
-    /// - block 2 (wiggle):     all zeros (nonlinear link modulation)
-    pub fn block_effective_jacobian(
-        specs: &[ParameterBlockSpec],
-        block_idx: usize,
-    ) -> Result<Box<dyn gam_problem::block_spec::BlockEffectiveJacobian>, String> {
-        crate::block_layout::block_jacobian::AdditiveWiggleBlockLayout {
-            family: "BinomialLocationScaleWiggleFamily",
-            n_outputs: 2,
-            additive_blocks: &[Self::BLOCK_T, Self::BLOCK_LOG_SIGMA],
-            wiggle_block: Some(Self::BLOCK_WIGGLE),
-        }
-        .block_effective_jacobian(specs, block_idx)
     }
 }
 

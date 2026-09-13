@@ -582,24 +582,6 @@ impl BinomialMeanWiggleFamily {
             n,
         ))))
     }
-
-    /// Build the [`BlockEffectiveJacobian`](gam_problem::block_spec::BlockEffectiveJacobian) for block `block_idx`.
-    ///
-    /// `BinomialMeanWiggle` has a single location output (n_outputs = 1):
-    /// - block 0 (eta):    output 0 = design rows
-    /// - block 1 (wiggle): all zeros (nonlinear link modulation)
-    pub fn block_effective_jacobian(
-        specs: &[ParameterBlockSpec],
-        block_idx: usize,
-    ) -> Result<Box<dyn gam_problem::block_spec::BlockEffectiveJacobian>, String> {
-        crate::block_layout::block_jacobian::AdditiveWiggleBlockLayout {
-            family: "BinomialMeanWiggleFamily",
-            n_outputs: 1,
-            additive_blocks: &[Self::BLOCK_ETA],
-            wiggle_block: Some(Self::BLOCK_WIGGLE),
-        }
-        .block_effective_jacobian(specs, block_idx)
-    }
 }
 
 impl CustomFamily for BinomialMeanWiggleFamily {

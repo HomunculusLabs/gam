@@ -194,7 +194,7 @@ crates/gam-model-kernels/src/sigma_link.rs	logb_sigma_derivs_up_to_third_scalar	
 crates/gam-model-kernels/src/sigma_link.rs	logb_sigma_eta_for_sigma_scalar	retired-no-surviving-dependent
 crates/gam-model-kernels/src/sigma_link.rs	logb_sigma_jet3_scalar	retired-no-surviving-dependent
 crates/gam-model-kernels/src/sigma_link.rs	logb_sigma_jet4_scalar	retired-no-surviving-dependent
-crates/gam-models/src/block_layout/block_jacobian.rs	block_effective_jacobian	restored-in-place
+crates/gam-models/src/block_layout/block_jacobian.rs	block_effective_jacobian	retired-no-product-user
 crates/gam-models/src/bms/alo_replay.rs	bernoulli_marginal_slope_alo_row_geometry	retired-no-surviving-dependent
 crates/gam-models/src/bms/conditional_score_covariance.rs	dense_at	retired-no-surviving-dependent
 crates/gam-models/src/bms/deviation_runtime.rs	second_derivative_design	retired-by-later-deletion:418c732d2f
@@ -218,13 +218,13 @@ crates/gam-models/src/fit_orchestration/drivers/smooth_term_lr.rs	conditional_me
 crates/gam-models/src/fit_orchestration/drivers/smooth_term_lr.rs	selection_mean	retired-by-later-deletion:418c732d2f
 crates/gam-models/src/fit_orchestration/drivers/smooth_term_lr.rs	tail_probability	retired-by-later-deletion:418c732d2f
 crates/gam-models/src/fit_orchestration/request.rs	inverse_link_outer	retired-no-surviving-dependent
-crates/gam-models/src/gamlss/binomial/location_scale.rs	block_effective_jacobian	restored-in-place
-crates/gam-models/src/gamlss/binomial/wiggle.rs	block_effective_jacobian	restored-in-place
+crates/gam-models/src/gamlss/binomial/location_scale.rs	block_effective_jacobian	retired-no-product-user
+crates/gam-models/src/gamlss/binomial/wiggle.rs	block_effective_jacobian	retired-no-product-user
 crates/gam-models/src/gamlss/binomial/wiggle.rs	buildwiggle_block_input	retired-by-later-deletion:7c185e2c51
 crates/gam-models/src/gamlss/binomial/wiggle.rs	initializewiggle_knots_from_q	retired-by-later-deletion:7c185e2c51
-crates/gam-models/src/gamlss/gaussian/binomial_mean_wiggle.rs	block_effective_jacobian	restored-in-place
-crates/gam-models/src/gamlss/gaussian/location_scale.rs	block_effective_jacobian	restored-in-place
-crates/gam-models/src/gamlss/gaussian/wiggle.rs	block_effective_jacobian	restored-in-place
+crates/gam-models/src/gamlss/gaussian/binomial_mean_wiggle.rs	block_effective_jacobian	retired-no-product-user
+crates/gam-models/src/gamlss/gaussian/location_scale.rs	block_effective_jacobian	retired-no-product-user
+crates/gam-models/src/gamlss/gaussian/wiggle.rs	block_effective_jacobian	retired-no-product-user
 crates/gam-models/src/gpu_kernels/cubic_bspline_moments.rs	build_axis_tables_cpu	retired-by-later-deletion:418c732d2f
 crates/gam-models/src/gpu_kernels/cubic_bspline_moments.rs	moment_1d_about	retired-by-later-deletion:418c732d2f
 crates/gam-models/src/gpu_kernels/cubic_bspline_moments.rs	moment_1d_gauss_legendre	retired-by-later-deletion:418c732d2f

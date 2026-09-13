@@ -1292,8 +1292,7 @@ impl CustomFamily for SurvivalLocationScaleFamily {
     /// output channels:
     ///   - channel 0 — `η_time` (time-transform predictor shift), and the
     ///     link-wiggle correction anchors here (it perturbs the inverse link
-    ///     applied on the time/location side; cf. `AdditiveWiggleBlockLayout`
-    ///     in `block_effective_jacobian`, which anchors the wiggle at output 0),
+    ///     applied on the time/location side),
     ///   - channel 1 — `η_thr` (threshold / **location** predictor),
     ///   - channel 2 — `η_ls`  (log-σ / **scale** predictor, entering the
     ///     inverse link multiplicatively).
@@ -1329,8 +1328,7 @@ impl CustomFamily for SurvivalLocationScaleFamily {
                     "log_sigma" => 2,
                     // The link-wiggle / time-wiggle corrections perturb the
                     // time/location-side inverse link; anchor them on the time
-                    // channel exactly as `block_effective_jacobian` does
-                    // (`AdditiveWiggleBlockLayout::wiggle_block` → output 0).
+                    // channel.
                     _ => 0,
                 })
                 .collect(),

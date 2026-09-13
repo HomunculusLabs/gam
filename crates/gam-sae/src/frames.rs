@@ -949,39 +949,7 @@ impl GrassmannCrossMoment {
         }
     }
 
-    /// Accumulate the full-batch cross-moment `Targetᵀ · Coords` where
-    /// `targets` is `(N × p)` ambient decoder targets and `coords` is `(N × r)`
-    /// in-span coordinates. `fast_atb` forms `Targetᵀ Coords` (`p × r`) directly.
-    pub fn accumulate(
-        &mut self,
-        targets: ArrayView2<'_, f64>,
-        coords: ArrayView2<'_, f64>,
-    ) -> Result<(), String> {
-        if targets.ncols() != self.moment.nrows() || coords.ncols() != self.moment.ncols() {
-            return Err(format!(
-                "GrassmannCrossMoment::accumulate: expected targets (·,{}) and coords (·,{}); \
-                 got (·,{}) and (·,{})",
-                self.moment.nrows(),
-                self.moment.ncols(),
-                targets.ncols(),
-                coords.ncols()
-            ));
-        }
-        if targets.nrows() != coords.nrows() {
-            return Err(format!(
-                "GrassmannCrossMoment::accumulate: targets rows {} must equal coords rows {}",
-                targets.nrows(),
-                coords.nrows()
-            ));
-        }
-        let block = fast_atb(&targets.to_owned(), &coords.to_owned());
-        self.moment += &block;
-        Ok(())
-    }
-
-    /// Read the accumulated `p × r` cross-moment.
-    /// Add a precomputed `targetsᵀ·coords` block (p × r), the per-chunk form
-    /// of [`Self::accumulate`] (#2731).
+    /// Add a precomputed `targetsᵀ·coords` block (p × r) to the moment (#2731).
     pub fn add_block(&mut self, block: ArrayView2<'_, f64>) -> Result<(), String> {
         if block.nrows() != self.moment.nrows() || block.ncols() != self.moment.ncols() {
             return Err(format!(
@@ -996,6 +964,7 @@ impl GrassmannCrossMoment {
         Ok(())
     }
 
+    /// Read the accumulated `p × r` cross-moment.
     pub fn moment(&self) -> ArrayView2<'_, f64> {
         self.moment.view()
     }

@@ -2886,5 +2886,25 @@
     },
     "reason": "#2899 (prune-api-d), under the lead's gamma-prior ruling: fit_term_collection_with_penalty_block_gamma_prior_callback has no product caller, so the wrapper is deleted and the keyed product route stays.",
     "evidence": "At 67607d851, git grep -n -w shows the callback wrapper called only by one root integration test and re-exported only from src/lib.rs. The removed map is public_api_census.py's census difference over this change, computed on MSI."
+  },
+  {
+    "base": "0bf157e45f521b653b0c1adad2679e119cf17d6d",
+    "removed": {
+      "crates/gam-models/src/block_layout/block_jacobian.rs::block_effective_jacobian": 1,
+      "crates/gam-models/src/gamlss/binomial/location_scale.rs::block_effective_jacobian": 1,
+      "crates/gam-models/src/gamlss/binomial/wiggle.rs::block_effective_jacobian": 1,
+      "crates/gam-models/src/gamlss/binomial/wiggle.rs::metadata": 1,
+      "crates/gam-models/src/gamlss/binomial/wiggle.rs::parameter_links": 1,
+      "crates/gam-models/src/gamlss/binomial/wiggle.rs::parameternames": 1,
+      "crates/gam-models/src/gamlss/gaussian/binomial_mean_wiggle.rs::block_effective_jacobian": 1,
+      "crates/gam-models/src/gamlss/gaussian/location_scale.rs::block_effective_jacobian": 1,
+      "crates/gam-models/src/gamlss/gaussian/wiggle.rs::block_effective_jacobian": 1,
+      "crates/gam-models/src/gamlss/gaussian/wiggle.rs::metadata": 1,
+      "crates/gam-models/src/gamlss/gaussian/wiggle.rs::parameter_links": 1,
+      "crates/gam-models/src/gamlss/gaussian/wiggle.rs::parameternames": 1,
+      "crates/gam-sae/src/frames.rs::accumulate": 1
+    },
+    "reason": "#2899 public API sweep of gam-models and gam-sae (prune-api-d): the uncalled GAMLSS family metadata and block-Jacobian wrappers, the layout method only they called, the full-conformal rank_s accessor and GrassmannCrossMoment::accumulate are deleted.",
+    "evidence": "At 463d1cd39, git grep -n -w finds no caller of these public functions outside the deleted code. The removed map is public_api_census.py's census difference over this change, computed on MSI."
   }
 ]

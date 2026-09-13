@@ -80,12 +80,6 @@ pub enum CrosscoderLayer {
 /// the drift statistics.
 #[derive(Clone, Debug)]
 pub struct AtomTransportReport {
-    /// The atom index this report is for.
-    pub atom: usize,
-    /// The source and target layers the transport was measured between.
-    pub source: CrosscoderLayer,
-    /// The target layer (its image is the projection target).
-    pub target: CrosscoderLayer,
     /// Number of source chart samples reported over `[0, 1)`.  Target
     /// coordinates are solved continuously and do not inherit this resolution.
     pub grid_resolution: usize,
@@ -255,9 +249,6 @@ pub fn measure_atom_transport_between(
     let principal_angles = principal_angles_between_images(&b_src, &b_tgt)?;
 
     Ok(AtomTransportReport {
-        atom,
-        source,
-        target,
         grid_resolution,
         n_harmonics,
         phase_shift,

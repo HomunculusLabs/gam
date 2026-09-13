@@ -143,26 +143,6 @@ impl GaussianLocationScaleWiggleFamily {
     pub const BLOCK_LOG_SIGMA: usize = 1;
     pub const BLOCK_WIGGLE: usize = 2;
 
-    pub fn parameternames() -> &'static [&'static str] {
-        &["mu", "log_sigma", "wiggle"]
-    }
-
-    pub fn parameter_links() -> &'static [ParameterLink] {
-        &[
-            ParameterLink::Identity,
-            ParameterLink::Log,
-            ParameterLink::Wiggle,
-        ]
-    }
-
-    pub fn metadata() -> FamilyMetadata {
-        FamilyMetadata {
-            name: "gaussian_location_scalewiggle",
-            parameternames: Self::parameternames(),
-            parameter_links: Self::parameter_links(),
-        }
-    }
-
     pub(crate) fn exact_joint_supported(&self) -> bool {
         self.mu_design.is_some() && self.log_sigma_design.is_some()
     }
@@ -244,28 +224,6 @@ impl GaussianLocationScaleWiggleFamily {
             return self.dense_block_designs_fromspecs(specs).map(Some);
         }
         Ok(None)
-    }
-
-    /// Build the [`BlockEffectiveJacobian`](gam_problem::block_spec::BlockEffectiveJacobian) for block `block_idx`.
-    ///
-    /// The wiggle block (block 2) modulates the inverse link nonlinearly and
-    /// does not contribute a linear additive term to any output η; its
-    /// Jacobian is an `(2 * n, p_wiggle)` zero matrix.
-    ///
-    /// - block 0 (mu):        output 0 = design rows, output 1 = zeros
-    /// - block 1 (log_sigma): output 0 = zeros, output 1 = design rows
-    /// - block 2 (wiggle):    all zeros (nonlinear link modulation)
-    pub fn block_effective_jacobian(
-        specs: &[ParameterBlockSpec],
-        block_idx: usize,
-    ) -> Result<Box<dyn gam_problem::block_spec::BlockEffectiveJacobian>, String> {
-        crate::block_layout::block_jacobian::AdditiveWiggleBlockLayout {
-            family: "GaussianLocationScaleWiggleFamily",
-            n_outputs: 2,
-            additive_blocks: &[Self::BLOCK_MU, Self::BLOCK_LOG_SIGMA],
-            wiggle_block: Some(Self::BLOCK_WIGGLE),
-        }
-        .block_effective_jacobian(specs, block_idx)
     }
 }
 

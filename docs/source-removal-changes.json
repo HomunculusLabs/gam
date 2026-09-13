@@ -6944,5 +6944,26 @@
     ],
     "reason": "#2899 (prune-api-d), under the lead's gamma-prior ruling, case 1: the Python precision_hyperpriors request does reach gam-terms. gam-config's parse_precision_hyperpriors feeds fit_orchestration/fit.rs, which calls fit_term_collection_with_coefficient_groups_and_penalty_block_gamma_priors; with no coefficient groups that calls fit_term_collection_with_penalty_block_gamma_priors, which calls realize_keyed_penalty_block_gamma_priors. The keyed wrapper is therefore product-live and stays. fit_term_collection_with_penalty_block_gamma_prior_callback has no product caller. It is deleted together with its src/lib.rs re-export, the explicit realize_penalty_block_gamma_priors import in drivers/mod.rs that it alone used, and the test gamma_precision_prior_callback_is_invoked_once_per_penalty_block, which exercised only the callback wrapper. every_documented_alias_selects_the_same_penalty_block still pins label agreement through the keyed product route.",
     "evidence": "At 67607d851, git grep -n -w fit_term_collection_with_penalty_block_gamma_prior_callback finds three sites: its definition (design_construction.rs:4309), the src/lib.rs:301 re-export, and one test in tests/basis_smooth/families/precision_gamma_hyperprior.rs. The product chain is gamfit/_api.py:320 → gam-config lib.rs:143-144 → materialize/standard.rs:341 → fit.rs:158-167 → design_construction.rs:146 → :115 realize_keyed_penalty_block_gamma_priors. Pool overlay check 557881 applied this change at 7ae739779 before landing (log /scratch.global/sauer354/pool/prune-api-d/check.557881.log). Not compiled locally (user directive)."
+  },
+  {
+    "base": "0bf157e45f521b653b0c1adad2679e119cf17d6d",
+    "items": [
+      "crates/gam-models/src/block_layout/block_jacobian.rs:fn:block_effective_jacobian",
+      "crates/gam-models/src/block_layout/block_jacobian.rs:struct:AdditiveWiggleBlockLayout",
+      "crates/gam-models/src/gamlss/binomial/location_scale.rs:fn:block_effective_jacobian",
+      "crates/gam-models/src/gamlss/binomial/wiggle.rs:fn:block_effective_jacobian",
+      "crates/gam-models/src/gamlss/binomial/wiggle.rs:fn:metadata",
+      "crates/gam-models/src/gamlss/binomial/wiggle.rs:fn:parameter_links",
+      "crates/gam-models/src/gamlss/binomial/wiggle.rs:fn:parameternames",
+      "crates/gam-models/src/gamlss/gaussian/binomial_mean_wiggle.rs:fn:block_effective_jacobian",
+      "crates/gam-models/src/gamlss/gaussian/location_scale.rs:fn:block_effective_jacobian",
+      "crates/gam-models/src/gamlss/gaussian/wiggle.rs:fn:block_effective_jacobian",
+      "crates/gam-models/src/gamlss/gaussian/wiggle.rs:fn:metadata",
+      "crates/gam-models/src/gamlss/gaussian/wiggle.rs:fn:parameter_links",
+      "crates/gam-models/src/gamlss/gaussian/wiggle.rs:fn:parameternames",
+      "crates/gam-sae/src/frames.rs:fn:accumulate"
+    ],
+    "reason": "#2899 public API sweep of gam-models and gam-sae (prune-api-d): uncalled GAMLSS family wrappers and unread SAE members. BinomialLocationScaleWiggleFamily and GaussianLocationScaleWiggleFamily lose parameternames, parameter_links and metadata: nothing calls metadata, and the other two are called only inside it. The block_effective_jacobian wrappers on BinomialLocationScaleFamily, BinomialLocationScaleWiggleFamily, GaussianLocationScaleFamily, GaussianLocationScaleWiggleFamily and BinomialMeanWiggleFamily have no caller, so AdditiveWiggleBlockLayout, which only they built, goes with its block_layout/block_jacobian.rs module; two family_solver.rs comments that named it are reworded. The rank_s accessor in inference/full_conformal.rs has no caller (its field is still read by the REML evaluation). GrassmannCrossMoment::accumulate in frames.rs has no caller; new, add_block and moment stay. AtomTransportReport's atom, source and target fields are never read. The disposition TSV rows for the six block_effective_jacobian items and rank_s move to retired-no-product-user.",
+    "evidence": "At 463d1cd39, git grep -n -w block_effective_jacobian finds only the five wrapper definitions with their calls on AdditiveWiggleBlockLayout and block_jacobian.rs itself, and AdditiveWiggleBlockLayout appears only in those files and two family_solver.rs comments. git grep -E 'WiggleFamily::(parameternames|parameter_links|metadata)\\(' finds nothing, and Self::parameternames() and Self::parameter_links() occur in those two files only inside metadata(). git grep -w rank_s finds the accessor, its field reads and unrelated local variables, but no .rank_s() call. GrassmannCrossMoment is used only by manifold/construction.rs, which calls new and add_block; the .accumulate( calls in gam-sae are on other types. No crate reads report.atom, report.source or report.target."
   }
 ]
