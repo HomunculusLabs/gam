@@ -8419,8 +8419,11 @@ fn survival_location_scale_sas_link_shape_is_selected_by_the_outer_2904() {
     })
     .unwrap_or_else(|e| panic!("SAS survival location-scale fit failed: {e}"));
     let saved = SavedModel::load_from_path(&out_path).expect("load saved SAS survival model");
-    let fitted = match saved.resolved_inverse_link().expect("saved inverse link") {
-        Some(InverseLink::Sas(state)) => state,
+    // A survival fit persists its fitted link in the payload's `link`, the field
+    // survival predict resolves; `resolved_inverse_link` answers `None` for every
+    // survival family.
+    let fitted = match saved.link.as_ref() {
+        Some(InverseLink::Sas(state)) => *state,
         _ => panic!("a survival --link sas fit saved a non-SAS inverse link"),
     };
     assert!(
