@@ -3172,7 +3172,7 @@ fn saddle_point_tilt(
                 break;
             }
             if let Some((trial_f, _, trial_derivative)) = residual(&trial)
-                && infinity_norm(&trial_f) <= (1.0 - 1e-4 * alpha) * norm
+                && infinity_norm(&trial_f) <= (1.0 - opt::constants::ARMIJO_C1 * alpha) * norm
             {
                 v = trial;
                 f = trial_f;
