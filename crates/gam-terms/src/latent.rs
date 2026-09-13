@@ -1174,19 +1174,6 @@ impl LatentCoordValues {
         }
     }
 
-    /// Apply this latent block back to a `TermCollectionSpec`-style covariate
-    /// table: returns the `(N, d)` materialized matrix that downstream basis
-    /// evaluators (Duchon, Matérn, ...) take as their feature input.
-    ///
-    /// This mirrors [`crate::smooth::SpatialLogKappaCoords::apply_tospec`],
-    /// but the carrier on the spec side is the data-row covariate block rather
-    /// than the per-term `length_scale`. The spec-mutation is handled at the
-    /// call site (the consuming term needs to know which columns of its
-    /// feature view to overwrite).
-    pub fn apply_tospec(&self) -> Array2<f64> {
-        self.as_matrix()
-    }
-
     /// Compute `∂Φ/∂t` for a radial-kernel design Φ — the original
     /// Duchon/Matérn path. See [`Self::design_gradient_wrt_t_dispatch`] for
     /// the basis-agnostic dispatch entry point.

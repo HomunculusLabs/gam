@@ -1198,7 +1198,7 @@ crates/gam-terms/src/inference/lawley.rs	known_scale_expected_jets	retired-by-la
 crates/gam-terms/src/inference/lawley.rs	lawley_lr_bartlett_factor_with_rho_variation	retired-by-later-deletion:843e0fc200
 crates/gam-terms/src/inference/structure_evidence.rs	confirmed	retired-no-product-user
 crates/gam-terms/src/inference/structure_evidence.rs	contested	retired-no-product-user
-crates/gam-terms/src/latent.rs	apply_tospec	restored-in-place
+crates/gam-terms/src/latent.rs	apply_tospec	retired-no-product-user
 crates/gam-terms/src/latent.rs	from_flat	restored-in-place
 crates/gam-terms/src/latent.rs	from_flat_with_manifold	narrowed-to-crate
 crates/gam-terms/src/latent.rs	project_matrix_columns_to_tangent	retired-by-later-deletion:dc325f1909
