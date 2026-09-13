@@ -23,20 +23,62 @@
 //! rank check directly on each `D_k`, never materialising the (mis-specified)
 //! `(n·p, M_k·p)` channel-replicated block that previously broadcast-panicked
 //! when routed through the cross-block flat audit.
+//!
+//! # How the atoms are built
+//!
+//! Every atom is built the way production builds one: `Φ_k` and its Jacobian
+//! are the basis evaluator's output at the atom's coordinates, and the evaluator
+//! stays installed. The inner Newton step majorizes the data term's residual
+//! curvature with the basis second jets, so the joint fit refuses an atom that
+//! carries hand-supplied arrays and no evaluator. The live atoms carry the
+//! degree-2 monomial patch `{1, t, t²}`; a rank-0 atom carries the zero
+//! function, whose jets are exactly zero.
 
 use gam::terms::latent::LatentManifold;
 use gam::terms::sae::manifold::{
-    AssignmentMode, SaeAssignment, SaeAtomBasisKind, SaeManifoldAtom, SaeManifoldRho,
-    SaeManifoldTerm,
+    AssignmentMode, EuclideanPatchEvaluator, SaeAssignment, SaeAtomBasisKind, SaeBasisEvaluator,
+    SaeManifoldAtom, SaeManifoldRho, SaeManifoldTerm,
 };
-use ndarray::{Array1, Array2, Array3};
+use ndarray::{Array1, Array2, Array3, Array4, Array5, ArrayView2};
+use std::sync::Arc;
 
 const N: usize = 20;
 const M: usize = 3;
 const P: usize = 2;
 const LATENT_DIM: usize = 1;
 
-fn make_atom(name: &str, phi: Array2<f64>) -> SaeManifoldAtom {
+/// The zero function on the latent: `M` identically zero basis columns with
+/// exactly zero first, second and third jets. An atom on this basis has a rank-0
+/// weighted design at every coordinate.
+#[derive(Debug)]
+struct ZeroBasis;
+
+impl SaeBasisEvaluator for ZeroBasis {
+    fn evaluate(&self, coords: ArrayView2<'_, f64>) -> Result<(Array2<f64>, Array3<f64>), String> {
+        let (n, d) = coords.dim();
+        Ok((Array2::<f64>::zeros((n, M)), Array3::<f64>::zeros((n, M, d))))
+    }
+
+    fn second_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array4<f64>, String>> {
+        let (n, d) = coords.dim();
+        Some(Ok(Array4::<f64>::zeros((n, M, d, d))))
+    }
+
+    fn third_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array5<f64>, String>> {
+        let (n, d) = coords.dim();
+        Some(Ok(Array5::<f64>::zeros((n, M, d, d, d))))
+    }
+}
+
+/// Build an atom the way production does: `Φ` and its Jacobian are the
+/// evaluator's output at the atom's coordinates, and the evaluator stays
+/// installed for the second jets the inner Newton step reads.
+fn make_atom(
+    name: &str,
+    evaluator: Arc<dyn SaeBasisEvaluator>,
+    coords: &Array2<f64>,
+) -> SaeManifoldAtom {
+    let (phi, jet) = evaluator.evaluate(coords.view()).unwrap();
     let m = phi.ncols();
     let mut b = Array2::<f64>::zeros((m, P));
     // Give each atom a distinct, non-zero decoder so the Jacobian columns
@@ -47,7 +89,6 @@ fn make_atom(name: &str, phi: Array2<f64>) -> SaeManifoldAtom {
         }
     }
     let penalty = Array2::<f64>::eye(m);
-    let jet = Array3::<f64>::zeros((N, m, LATENT_DIM));
     SaeManifoldAtom::new_with_provided_function_gram(
         name,
         SaeAtomBasisKind::EuclideanPatch,
@@ -58,14 +99,13 @@ fn make_atom(name: &str, phi: Array2<f64>) -> SaeManifoldAtom {
         penalty,
     )
     .unwrap()
+    .with_basis_evaluator(evaluator)
 }
 
-/// Build uniform-weight assignment (softmax logits = 0) for K atoms.
-fn make_assignment(k_atoms: usize) -> SaeAssignment {
+/// Build uniform-weight assignment (softmax logits = 0) over the atoms' coordinates.
+fn make_assignment(coords: Vec<Array2<f64>>) -> SaeAssignment {
+    let k_atoms = coords.len();
     let logits = Array2::<f64>::zeros((N, k_atoms));
-    let coords: Vec<Array2<f64>> = (0..k_atoms)
-        .map(|_| Array2::<f64>::zeros((N, LATENT_DIM)))
-        .collect();
     SaeAssignment::from_blocks_with_mode_and_manifolds(
         logits,
         coords,
@@ -82,22 +122,19 @@ fn make_rho(k_atoms: usize) -> SaeManifoldRho {
     SaeManifoldRho::new(-2.0_f64.ln(), -2.0_f64.ln(), log_ard)
 }
 
-/// Distinct polynomial-like basis: atom 0 uses {1, t, t²}, atom 1 uses {1, 1-t, (1-t)²}.
-/// These are each full column rank over N=20 generic points, so the per-atom
-/// audit passes for both atoms.
-fn distinct_phi(atom_idx: usize) -> Array2<f64> {
-    let mut phi = Array2::<f64>::zeros((N, M));
-    for i in 0..N {
-        let t = if atom_idx == 0 {
-            (i as f64 + 1.0) / (N as f64)
-        } else {
-            1.0 - (i as f64 + 1.0) / (N as f64)
-        };
-        phi[[i, 0]] = 1.0;
-        phi[[i, 1]] = t;
-        phi[[i, 2]] = t * t;
-    }
-    phi
+/// Distinct coordinates for the degree-2 monomial patch: atom 0 sits at
+/// `t = (i + 1)/N`, atom 1 at `t = 1 − (i + 1)/N`. `{1, t, t²}` is full column
+/// rank over these N = 20 distinct points, so the per-atom audit passes for both.
+fn distinct_coords(atom_idx: usize) -> Array2<f64> {
+    Array2::from_shape_fn((N, LATENT_DIM), |(i, _)| {
+        let t = (i as f64 + 1.0) / (N as f64);
+        if atom_idx == 0 { t } else { 1.0 - t }
+    })
+}
+
+/// The degree-2 monomial patch `{1, t, t²}` (`M = 3` columns).
+fn quadratic_patch() -> Arc<dyn SaeBasisEvaluator> {
+    Arc::new(EuclideanPatchEvaluator::new(LATENT_DIM, 2).unwrap())
 }
 
 /// A trivial target matrix (all zeros). The audit runs before any Newton step,
@@ -110,11 +147,11 @@ fn zero_target() -> Array2<f64> {
 fn run_joint_fit_passes_with_full_rank_atoms() {
     // Two atoms with distinct, full-column-rank weighted designs — the per-atom
     // audit passes cleanly and the fit returns Ok.
-    let phi0 = distinct_phi(0);
-    let phi1 = distinct_phi(1);
-    let atom0 = make_atom("atom_a", phi0);
-    let atom1 = make_atom("atom_b", phi1);
-    let assignment = make_assignment(2);
+    let coords_a = distinct_coords(0);
+    let coords_b = distinct_coords(1);
+    let atom0 = make_atom("atom_a", quadratic_patch(), &coords_a);
+    let atom1 = make_atom("atom_b", quadratic_patch(), &coords_b);
+    let assignment = make_assignment(vec![coords_a, coords_b]);
     let mut term = SaeManifoldTerm::new(vec![atom0, atom1], assignment).unwrap();
     let mut rho = make_rho(2);
     let target = zero_target();
@@ -144,11 +181,11 @@ fn run_joint_fit_parks_single_rank_zero_atom_among_live() {
     // block (β_k → 0) exactly as it regularises any rank-deficient block. The
     // pre-fit audit must therefore NOT reject the fit — a single dead atom among
     // identifiable ones is the intended over-complete outcome, not a fatal error.
-    let phi0 = distinct_phi(0);
-    let phi_zero = Array2::<f64>::zeros((N, M));
-    let atom0 = make_atom("atom_ok", phi0);
-    let atom1 = make_atom("atom_degenerate", phi_zero);
-    let assignment = make_assignment(2);
+    let coords_ok = distinct_coords(0);
+    let coords_degenerate = distinct_coords(1);
+    let atom0 = make_atom("atom_ok", quadratic_patch(), &coords_ok);
+    let atom1 = make_atom("atom_degenerate", Arc::new(ZeroBasis), &coords_degenerate);
+    let assignment = make_assignment(vec![coords_ok, coords_degenerate]);
     let mut term = SaeManifoldTerm::new(vec![atom0, atom1], assignment).unwrap();
     let mut rho = make_rho(2);
     let target = zero_target();
@@ -168,11 +205,11 @@ fn run_joint_fit_fails_when_all_atoms_rank_zero() {
     // rank-0 weighted design, so the whole dictionary is unidentifiable and the
     // joint Newton system has no ridge-recoverable signal anywhere. This must
     // error before any Newton step, mentioning identifiability.
-    let phi_zero_a = Array2::<f64>::zeros((N, M));
-    let phi_zero_b = Array2::<f64>::zeros((N, M));
-    let atom0 = make_atom("atom_dead_a", phi_zero_a);
-    let atom1 = make_atom("atom_dead_b", phi_zero_b);
-    let assignment = make_assignment(2);
+    let coords_a = distinct_coords(0);
+    let coords_b = distinct_coords(1);
+    let atom0 = make_atom("atom_dead_a", Arc::new(ZeroBasis), &coords_a);
+    let atom1 = make_atom("atom_dead_b", Arc::new(ZeroBasis), &coords_b);
+    let assignment = make_assignment(vec![coords_a, coords_b]);
     let mut term = SaeManifoldTerm::new(vec![atom0, atom1], assignment).unwrap();
     let mut rho = make_rho(2);
     let target = zero_target();
