@@ -5743,6 +5743,10 @@ impl SaeSupportSparseTerm {
         }
         let mut previous_candidate = false;
         let mut last_objective: Option<f64> = None;
+        // Sweeps 1, 2, 4, ... and the last, reported when the budget runs out: a slow
+        // linear rate and a row that stopped moving leave different trajectories in the
+        // raw coordinate KKT, the objective and the largest coordinate move (#2576, #2023).
+        let mut trajectory: Vec<(usize, f64, f64, f64)> = Vec::new();
         // Decoders are frozen here, so the coordinate sweep's per-changed-row
         // refresh is the ONLY thing that moves the decode: the maintained
         // matrix stays exact (each changed row is recomputed from state, not
@@ -5769,6 +5773,9 @@ impl SaeSupportSparseTerm {
                 .map(|previous: f64| (objective - previous).abs() <= tolerance * kkt_scale)
                 .unwrap_or(false);
             last_objective = Some(objective);
+            if iteration.is_power_of_two() || iteration == max_iter {
+                trajectory.push((iteration, coordinate_max_abs, objective, max_change));
+            }
             let candidate =
                 objective_recurred && coordinate_max_abs <= tolerance * kkt_scale;
             if candidate && previous_candidate {
@@ -5785,8 +5792,17 @@ impl SaeSupportSparseTerm {
         }
         let (_, coordinate_max_abs) = self.raw_coordinate_stationarity(target, ard_precisions)?;
         let objective = self.frozen_decoder_coordinate_objective(target, ard_precisions)?;
+        let trajectory = trajectory
+            .iter()
+            .map(|(sweep, kkt, sweep_objective, change)| {
+                format!(
+                    "{sweep}: KKT {kkt:.3e}, objective {sweep_objective:.9e}, max change {change:.3e}"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
         Err(format!(
-            "SaeSupportSparseTerm::solve_coordinates_fixed_decoder did not recur within {max_iter} cycles (raw coordinate KKT max={coordinate_max_abs:.6e}, relative to objective {objective:.6e}: {:.6e})",
+            "SaeSupportSparseTerm::solve_coordinates_fixed_decoder did not recur within {max_iter} cycles (raw coordinate KKT max={coordinate_max_abs:.6e}, relative to objective {objective:.6e}: {:.6e}); sweeps [{trajectory}]",
             coordinate_max_abs / objective.abs().max(1.0)
         ))
     }
