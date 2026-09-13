@@ -1485,7 +1485,16 @@ impl<'a> WorkingModel for GamWorkingModel<'a> {
             (Array2::zeros((0, 0)), Some(h_sparse))
         } else {
             let penalized_hessian = self.penalized_hessian(&solver_weights)?;
-            assert_symmetric_tol(&penalized_hessian, "PIRLS penalized Hessian", 1e-8);
+            // Asymmetry within the assembly's rounding is arithmetic: `n` row
+            // products and `p²` penalty and conjugation products at the matrix's
+            // own scale, the objective band's accounting. An absolute `1e-8`
+            // panicked on a large-scale Hessian's rounding alone (#2469).
+            let symmetry_band = gam_linalg::roundoff::accumulation_growth(
+                self.x_original.nrows() + penalized_hessian.nrows() * penalized_hessian.nrows(),
+            ) * penalized_hessian
+                .iter()
+                .fold(0.0_f64, |largest, value| largest.max(value.abs()));
+            assert_symmetric_tol(&penalized_hessian, "PIRLS penalized Hessian", symmetry_band);
             certify_positive_semidefinite_hessian(&penalized_hessian, "PIRLS penalized Hessian")?;
             (penalized_hessian, None)
         };

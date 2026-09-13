@@ -402,16 +402,24 @@ pub(super) fn solve_penalized_least_squares_implicit(
     {
         // The penalized Hessian is assembled from symmetric pieces (XᵀWX and
         // the penalty), so any asymmetry is pure floating-point accumulation
-        // error; anything above this floor signals a genuine assembly bug.
-        const PENALIZED_HESSIAN_ASYMMETRY_TOL: f64 = 1e-8;
+        // error; anything above that accumulation's band signals a genuine
+        // assembly bug. The band is `n` row products and `p²` penalty and
+        // conjugation products at the matrix's own scale, the objective band's
+        // accounting, not an absolute `1e-8` that a large-scale Hessian exceeds
+        // on arithmetic alone (#2469).
+        let asymmetry_band = gam_linalg::roundoff::accumulation_growth(
+            x_original.nrows() + p_dim * p_dim,
+        ) * penalized_hessian
+            .iter()
+            .fold(0.0_f64, |largest, value| largest.max(value.abs()));
         let xtwx_asym = max_symmetric_asymmetry(&xtwx_transformed);
         let penalty_asym = match penalty {
             PirlsPenalty::Dense { s_transformed, .. } => max_symmetric_asymmetry(s_transformed),
         };
         let total_asym = max_symmetric_asymmetry(&penalized_hessian);
         assert!(
-            total_asym <= PENALIZED_HESSIAN_ASYMMETRY_TOL,
-            "implicit PLS penalized Hessian asymmetry too large: total={total_asym:.3e}, xtwx_orig={xtwx_orig_asym:.3e}, xtwx={xtwx_asym:.3e}, penalty={penalty_asym:.3e}, tol={PENALIZED_HESSIAN_ASYMMETRY_TOL:.3e}",
+            total_asym <= asymmetry_band,
+            "implicit PLS penalized Hessian asymmetry too large: total={total_asym:.3e}, xtwx_orig={xtwx_orig_asym:.3e}, xtwx={xtwx_asym:.3e}, penalty={penalty_asym:.3e}, band={asymmetry_band:.3e}",
         );
     }
 
