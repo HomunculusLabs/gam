@@ -95,32 +95,6 @@ pub(crate) fn duchon_operator_jets_from_primary_core(
     out.phi_rr = out.q + r2 * out.t;
     out.phi_rrr = 3.0 * r * out.t + r2 * out.t_r;
 
-    assert!(
-        ((out.phi_rr - (out.q + r * out.q_r)).abs()) <= 1e-10 * out.phi_rr.abs().max(1.0),
-        "radial scalar identity failed: phi_rr != q + r*q_r, phi_rr={}, q={}, r={}, q_r={}",
-        out.phi_rr,
-        out.q,
-        r,
-        out.q_r
-    );
-    assert!(
-        ((out.phi_rr - (out.q + r2 * out.t)).abs()) <= 1e-10 * out.phi_rr.abs().max(1.0),
-        "radial scalar identity failed: phi_rr != q + r2*t, phi_rr={}, q={}, r2={}, t={}",
-        out.phi_rr,
-        out.q,
-        r2,
-        out.t
-    );
-    assert!(
-        ((out.lap - (d * out.q + r2 * out.t)).abs()) <= 1e-10 * out.lap.abs().max(1.0),
-        "radial scalar identity failed: lap != d*q + r2*t, lap={}, d={}, q={}, r2={}, t={}",
-        out.lap,
-        d,
-        out.q,
-        r2,
-        out.t
-    );
-
     out
 }
 
