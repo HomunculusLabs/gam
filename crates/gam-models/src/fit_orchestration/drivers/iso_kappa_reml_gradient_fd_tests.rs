@@ -196,6 +196,9 @@ struct IsoKappaFdReport {
     worst_psi_rel: f64,
     violations: Vec<String>,
     unresolved: Vec<String>,
+    /// Each probe's analytic outer gradient, by probe name, for gates that
+    /// read the gradient itself rather than its agreement (#2450).
+    analytic_by_probe: Vec<(String, Array1<f64>)>,
 }
 
 fn iso_kappa_fd_variant_driver(
@@ -689,6 +692,7 @@ fn iso_kappa_fd_variant_driver_on(
     let mut violations: Vec<String> = Vec::new();
     let mut worst_psi_rel = 0.0_f64;
     let mut unresolved: Vec<String> = Vec::new();
+    let mut analytic_by_probe: Vec<(String, Array1<f64>)> = Vec::new();
     // Components the oracle resolved and judged (agree or disagree): the gate
     // is vacuous unless at least one component was actually measured.
     let mut judged = 0usize;
@@ -706,6 +710,7 @@ fn iso_kappa_fd_variant_driver_on(
     for (probe, theta) in all_probes {
         let (cost_an, grad_an) = analytic_at(theta, &mut cache, &mut evaluator);
         assert!(cost_an.is_finite(), "{label} {probe}: cost not finite");
+        analytic_by_probe.push((probe.to_string(), grad_an.clone()));
         // Objective↔gradient desync probe: the analytic gradient path
         // (evaluate_joint_reml_outer_eval_at_theta) and the cost-only FD
         // path (evaluate_cost_only) must agree on the COST itself at the
@@ -814,6 +819,7 @@ fn iso_kappa_fd_variant_driver_on(
         worst_psi_rel,
         violations,
         unresolved,
+        analytic_by_probe,
     }
 }
 
@@ -3297,7 +3303,6 @@ fn production_kappa_route_psi_gradient_matches_its_value_2895() {
         data.view(),
         &resolvedspec,
         &best,
-        &kappa_options,
         &spatial_terms,
     )
     .unwrap_or_else(|e| panic!("seed failed: {e:?}"));
