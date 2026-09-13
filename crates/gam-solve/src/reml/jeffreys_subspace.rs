@@ -823,16 +823,6 @@ fn conditioning_log10_ratio(lambda_min: f64, lambda_max: f64) -> f64 {
     }
 }
 
-/// Below this joint dimension the dense reduced eigendecomposition in
-/// [`joint_jeffreys_term`] is itself cheap (`O(p³)` with `p` in the tens — e.g.
-/// the BMS-probit `p≈51` fit), so the matrix-free pre-check below would only add
-/// `O(p·k)` matvecs for no asymptotic win and a (tiny) chance of a conservative
-/// false-fall-through. We therefore run the exact path directly for small joint
-/// systems and reserve the cheap pre-check for the wide systems whose `O(p³)`
-/// eigendecomposition (and the dense `H_id` it needs) is the cost we want to
-/// avoid on a well-conditioned fit.
-pub const CHEAP_CONDITIONING_PRECHECK_MIN_DIM: usize = 128;
-
 /// Safety factor by which the CONSERVATIVE spectral bounds must clear each
 /// conditioning gate before the cheap pre-check is allowed to declare the term
 /// skippable. The Lanczos bounds below are already one-sided-conservative
@@ -852,8 +842,9 @@ pub(crate) const CHEAP_PRECHECK_SAFETY_MARGIN: f64 = 8.0;
 /// well-conditioned joint information whose `λ_min` we only need to certify is
 /// `≳ 8` and whose ratio we only need to certify is `≳ 8e-8`), while keeping the
 /// pre-check at `O(p·k)` matvecs — negligible against the `O(p³)`/dense-`H_id`
-/// path it guards. Capped at `p` for tiny systems (which the size gate already
-/// routes to the exact path anyway).
+/// path it guards. [`jeffreys_term_skippable`] runs the bounds only when `p`
+/// exceeds this count: at or below it the Krylov space is the whole space, and
+/// the bounds would cost what the exact spectrum does.
 pub(crate) const CHEAP_PRECHECK_LANCZOS_STEPS: usize = 12;
 
 /// Relative residual below which an extreme Ritz pair counts as "converged" and
@@ -1075,10 +1066,6 @@ pub fn jeffreys_term_skippable_via_matvec<HvFn>(hv: HvFn, p: usize) -> Result<bo
 where
     HvFn: FnMut(&Array1<f64>) -> Result<Array1<f64>, String>,
 {
-    if p < CHEAP_CONDITIONING_PRECHECK_MIN_DIM {
-        // Small systems: the exact dense eigh is already cheap; do not pre-check.
-        return Ok(false);
-    }
     let (lambda_min_lb, lambda_max_ub) = match cheap_conditioning_bounds(hv, p)? {
         Some(bounds) => bounds,
         None => return Ok(false),
@@ -1102,10 +1089,9 @@ where
     Ok(absolute_clears && relative_clears)
 }
 
-/// EXACT dense counterpart to [`jeffreys_term_skippable_via_matvec`] for SMALL
-/// joint systems (`p < CHEAP_CONDITIONING_PRECHECK_MIN_DIM`), where forming the
-/// `p × p` reduced information and eigendecomposing it is itself `O(p³)`-cheap (`p`
-/// in the tens). On the full span (`Z_J = I`, so `H_id = H`) the conditioning gate
+/// EXACT dense counterpart to [`jeffreys_term_skippable_via_matvec`], which
+/// [`jeffreys_term_skippable`] consults when the bounds do not certify. On the
+/// full span (`Z_J = I`, so `H_id = H`) the conditioning gate
 /// depends only on `H`'s extreme eigenvalues, so this eigendecomposes `H` EXACTLY
 /// and returns whether `conditioning_gate_weight` is exactly `0` — i.e. whether
 /// the term [`joint_jeffreys_term`] would form is exactly the zero term. A `true`
@@ -1119,15 +1105,15 @@ where
 /// certifies that the reduced gate is off. The direction that would be unsound —
 /// skipping when the REDUCED spectrum is worse than the full one — cannot occur.
 ///
-/// This is what lets a small fit SKIP the always-on Jeffreys term on its
+/// This is what lets a fit SKIP the always-on Jeffreys term on its
 /// well-conditioned cycles instead of paying the full `O(p·n·special-fn)` all-axes
 /// directional-derivative sweep (and its per-row allocations) — the per-cycle /
 /// per-outer-eval cost behind the constant-scale survival location-scale #1389
 /// non-termination, where a bounded `n=300` fit ran past the 600s per-test CI cap.
 /// On a genuinely near-separating cycle the gate weight is non-zero and this
 /// returns `false`, so the exact term still fires exactly where the curvature is
-/// needed. The previous behaviour — an unconditional "never skip" below the size
-/// threshold — assumed the exact dense path was cheap, which is true for the
+/// needed. The behaviour before #1389 — an unconditional "never skip" on small
+/// systems — assumed the exact dense path was cheap, which is true for the
 /// eigendecomposition but NOT for the family's all-axes directional-derivative
 /// sweep that the un-skipped term forces on every cycle.
 pub fn jeffreys_term_skippable_dense(h: ArrayView2<'_, f64>) -> Result<bool, String> {
@@ -1152,6 +1138,54 @@ pub fn jeffreys_term_skippable_dense(h: ArrayView2<'_, f64>) -> Result<bool, Str
     // Skip iff the term's OWN conditioning gate is exactly off at this spectrum —
     // the same predicate `joint_jeffreys_term` applies, so skipping is exact.
     Ok(conditioning_gate_weight(lambda_min, lambda_max) == 0.0)
+}
+
+/// Whether the Jeffreys term is provably the zero term at this Hessian.
+///
+/// Two certificates run cheapest first, and a `true` from either is
+/// byte-identical to forming the gated-off term:
+///
+/// - When `p` exceeds `CHEAP_PRECHECK_LANCZOS_STEPS`,
+///   [`jeffreys_term_skippable_via_matvec`] bounds the spectrum from that many
+///   products `hv`. At or below it the Krylov space is the whole space, so the
+///   bounds would cost what the exact spectrum does, and they do not run.
+/// - When the bounds do not certify, `dense` forms `H` (or declines with `None`)
+///   and [`jeffreys_term_skippable_dense`] decides from its exact spectrum. The
+///   two `p × p` copies are charged on the memory ledger, and a refused charge
+///   certifies nothing.
+///
+/// No joint dimension selects between them (#2900). A cycle neither certifies
+/// forms the term, whose own gate forms and eigendecomposes the same
+/// information, so the exact spectrum costs that cycle at most one more
+/// formation, while a well-conditioned cycle the bounds' margin refuses skips
+/// the formation and the all-axes derivatives it would build.
+pub fn jeffreys_term_skippable<HvFn, DenseFn>(
+    hv: HvFn,
+    p: usize,
+    dense: DenseFn,
+) -> Result<bool, String>
+where
+    HvFn: FnMut(&Array1<f64>) -> Result<Array1<f64>, String>,
+    DenseFn: FnOnce() -> Result<Option<Array2<f64>>, String>,
+{
+    if p > CHEAP_PRECHECK_LANCZOS_STEPS && jeffreys_term_skippable_via_matvec(hv, p)? {
+        return Ok(true);
+    }
+    let reservation = match gam_runtime::resource::MemoryGovernor::global()
+        .try_reserve_dense_f64_copies(p, p, 2, "Jeffreys exact conditioning pre-check")
+    {
+        Ok(reservation) => reservation,
+        Err(refusal) => {
+            log::debug!("[Jeffreys pre-check] exact spectrum not formed: {refusal}");
+            return Ok(false);
+        }
+    };
+    let skippable = match dense()? {
+        Some(h) => jeffreys_term_skippable_dense(h.view())?,
+        None => false,
+    };
+    drop(reservation);
+    Ok(skippable)
 }
 
 /// Orthonormal basis of one block's Jeffreys span.
@@ -7050,7 +7084,7 @@ mod tests {
 
     #[test]
     pub(crate) fn cheap_precheck_skips_clearly_well_conditioned_large_p() {
-        // A wide (p ≥ threshold) well-conditioned spectrum: every eigenvalue in
+        // A wide well-conditioned spectrum: every eigenvalue in
         // [200, 250], so λ_min = 200 clears the 8x margin on the smooth absolute
         // clear knot (16) and the ratio 0.8 clears the relative margin. The
         // conservative Lanczos bounds must still clear both gates ⇒ skippable.
@@ -7083,17 +7117,55 @@ mod tests {
     }
 
     #[test]
-    pub(crate) fn cheap_precheck_does_not_skip_below_size_threshold() {
-        // Small p: even a perfectly-conditioned spectrum is never pre-checked
-        // (the exact dense eigh is already cheap there). Guarantees the small-p
-        // BMS-style fits keep running the exact dense path unchanged.
-        let p = CHEAP_CONDITIONING_PRECHECK_MIN_DIM - 1;
-        let diag = vec![100.0; p];
-        let skippable = jeffreys_term_skippable_via_matvec(diag_hv(diag), p).unwrap();
-        assert!(
-            !skippable,
-            "below the size threshold the pre-check never skips"
-        );
+    pub(crate) fn skippable_runs_the_bounds_only_above_the_lanczos_steps() {
+        // At p ≤ CHEAP_PRECHECK_LANCZOS_STEPS the Krylov space is the whole space,
+        // so the bounds would cost what the exact spectrum does: no product runs
+        // and the exact spectrum decides.
+        let p = CHEAP_PRECHECK_LANCZOS_STEPS;
+        let products = std::cell::Cell::new(0usize);
+        let counting_hv = |v: &Array1<f64>| -> Result<Array1<f64>, String> {
+            products.set(products.get() + 1);
+            Ok(v * 100.0)
+        };
+        let h = Array2::<f64>::eye(p) * 100.0;
+        assert!(jeffreys_term_skippable(counting_hv, p, move || Ok(Some(h))).unwrap());
+        assert_eq!(products.get(), 0, "the bounds must not run at p = {p}");
+
+        // One coordinate wider, the bounds run and certify a clearly
+        // well-conditioned spectrum without forming H.
+        let wide = p + 1;
+        let mut wide_diag = vec![220.0; wide];
+        wide_diag[0] = 200.0; // λ_min
+        wide_diag[1] = 250.0; // λ_max
+        let wide_products = std::cell::Cell::new(0usize);
+        let mut wide_spectrum = diag_hv(wide_diag.clone());
+        let wide_hv = |v: &Array1<f64>| -> Result<Array1<f64>, String> {
+            wide_products.set(wide_products.get() + 1);
+            wide_spectrum(v)
+        };
+        let formations = std::cell::Cell::new(0usize);
+        let wide_dense = || -> Result<Option<Array2<f64>>, String> {
+            formations.set(formations.get() + 1);
+            Ok(Some(Array2::from_diag(&Array1::from_vec(wide_diag.clone()))))
+        };
+        assert!(jeffreys_term_skippable(wide_hv, wide, wide_dense).unwrap());
+        assert!(wide_products.get() > 0, "the bounds must run at p = {wide}");
+        assert_eq!(formations.get(), 0, "certified bounds must not form H");
+    }
+
+    #[test]
+    pub(crate) fn skippable_certifies_a_margin_refused_spectrum_through_the_exact_spectrum() {
+        // λ_min = 20 clears the absolute knot (16) but not the bounds' 8× margin
+        // on it (128), at a width where the bounds run. The bounds refuse, the
+        // exact spectrum certifies, and a declined formation certifies nothing.
+        let p = 200usize;
+        let mut diag = vec![50.0; p];
+        diag[3] = 20.0;
+        assert!(!jeffreys_term_skippable_via_matvec(diag_hv(diag.clone()), p).unwrap());
+        let h = Array2::from_diag(&Array1::from_vec(diag.clone()));
+        assert!(jeffreys_term_skippable(diag_hv(diag.clone()), p, move || Ok(Some(h))).unwrap());
+        let declined = || -> Result<Option<Array2<f64>>, String> { Ok(None) };
+        assert!(!jeffreys_term_skippable(diag_hv(diag), p, declined).unwrap());
     }
 
     #[test]
@@ -7145,15 +7217,15 @@ mod tests {
     }
 
     #[test]
-    pub(crate) fn dense_skip_below_size_threshold_matches_exact_gate() {
-        // #1389: below the size threshold the EXACT dense gate replaces the old
-        // unconditional "never skip". A well-conditioned SMALL spectrum must be
+    pub(crate) fn dense_skip_matches_exact_gate() {
+        // #1389: the EXACT dense gate replaces the old unconditional "never skip"
+        // on small systems. A well-conditioned SMALL spectrum must be
         // declared skippable AND be byte-identical to forming the gated-off term —
         // the per-cycle / per-outer-eval Jeffreys all-axes sweep the constant-scale
         // survival location-scale fit was paying on a system this size — while a
         // near-separating small spectrum must NOT skip so the exact term still fires
         // where the curvature is needed.
-        let p = CHEAP_CONDITIONING_PRECHECK_MIN_DIM - 1; // a small joint system
+        let p = 51; // a small joint system (the BMS-probit width)
         let z = Array2::<f64>::eye(p);
         let hdir = |_: &Array1<f64>| -> Result<Option<Array2<f64>>, String> {
             Ok(Some(Array2::<f64>::zeros((p, p))))

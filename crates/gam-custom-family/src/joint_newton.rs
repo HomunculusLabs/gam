@@ -1393,46 +1393,32 @@ pub(crate) fn blockwise_logdet_terms_with_workspace<
                     _ => Ok(Array1::from_elem(total, f64::NAN)),
                 }
             };
-            if total
-                >= gam_solve::estimate::reml::jeffreys_subspace::CHEAP_CONDITIONING_PRECHECK_MIN_DIM
-            {
-                // Wide joint system: bound the spectrum from a few matvecs (no dense
-                // H, no O(p³) eigh).
-                gam_solve::estimate::reml::jeffreys_subspace::jeffreys_term_skippable_via_matvec(
-                    hv, total,
-                )
-                .unwrap_or(false)
-            } else {
-                // Small joint system: the dense p×p eigh is itself cheap, so form H
-                // once via `total` matvecs and run the EXACT conditioning gate — the
-                // same #1389 fix as the inner-Newton skip, applied to the OUTER LAML
-                // logdet H_Φ so the per-outer-eval Jeffreys all-axes sweep is also
-                // skipped on a well-conditioned small fit (the constant-scale
-                // survival location-scale non-termination paid this term on every
-                // outer eval as well as every inner cycle). A non-finite matvec (the
-                // declined-apply sentinel) is treated as "cannot certify ⇒ run the
-                // exact term", preserving the conservative never-skip-on-unresolved
-                // contract.
-                (|| -> Result<bool, String> {
-                    let mut h = Array2::<f64>::zeros((total, total));
-                    let mut e_a = Array1::<f64>::zeros(total);
-                    for a in 0..total {
-                        e_a[a] = 1.0;
-                        let col = hv(&e_a)?;
-                        e_a[a] = 0.0;
-                        if col.len() != total || col.iter().any(|v| !v.is_finite()) {
-                            return Ok(false);
+            // When the bounds cannot certify, form H once from `total` matvecs and
+            // run the EXACT conditioning gate — the same #1389 fix as the
+            // inner-Newton skip, applied to the OUTER LAML logdet H_Φ so the
+            // per-outer-eval Jeffreys all-axes sweep is also skipped on a
+            // well-conditioned fit (the constant-scale survival location-scale
+            // non-termination paid this term on every outer eval as well as every
+            // inner cycle). A declined or non-finite column cannot certify, so the
+            // exact term runs: the conservative never-skip-on-unresolved contract.
+            let dense = || -> Result<Option<Array2<f64>>, String> {
+                let mut h = Array2::<f64>::zeros((total, total));
+                let mut e_a = Array1::<f64>::zeros(total);
+                for a in 0..total {
+                    e_a[a] = 1.0;
+                    let column = ws.hessian_matvec(&e_a)?;
+                    e_a[a] = 0.0;
+                    match column {
+                        Some(col) if col.len() == total && col.iter().all(|v| v.is_finite()) => {
+                            h.column_mut(a).assign(&col);
                         }
-                        for r in 0..total {
-                            h[[r, a]] = col[r];
-                        }
+                        _ => return Ok(None),
                     }
-                    gam_solve::estimate::reml::jeffreys_subspace::jeffreys_term_skippable_dense(
-                        h.view(),
-                    )
-                })()
+                }
+                Ok(Some(h))
+            };
+            gam_solve::estimate::reml::jeffreys_subspace::jeffreys_term_skippable(hv, total, dense)
                 .unwrap_or(false)
-            }
         }
         _ => false,
     };

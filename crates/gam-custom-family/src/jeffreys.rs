@@ -140,76 +140,35 @@ pub(crate) fn build_joint_jeffreys_subspace<F: CustomFamily + ?Sized>(
     Ok(Some(z_joint))
 }
 
-/// CHEAP, matrix-free conditioning pre-check: can the always-on Jeffreys term be
-/// PROVABLY skipped at this working point WITHOUT forming the dense joint Hessian
-/// `H` or running the `O(p³)` reduced eigendecomposition?
+/// Conditioning pre-check: can the always-on Jeffreys term be PROVABLY skipped
+/// at this working point, before the `custom_family_joint_jeffreys_*` formation?
 ///
-/// This is the perf gate in front of the expensive `custom_family_joint_jeffreys_*`
-/// formation. On the FULL span (`Z_J = I`) the reduced information is `H_id = H`,
-/// so the conditioning gate only needs `H`'s extreme eigenvalues — and those can
-/// be bounded conservatively from a few Hessian-vector products against the SAME
+/// On the FULL span (`Z_J = I`) the reduced information is `H_id = H`, so the
+/// conditioning gate only needs `H`'s extreme eigenvalues. They are first bounded
+/// conservatively from a few Hessian-vector products against the SAME
 /// `joint_hessian_source` operator the inner Newton already built (matrix-free on
-/// the large-`p` path, dense otherwise). When the conservative bounds clear both
-/// gates with a safe margin (see `jeffreys_term_skippable_via_matvec`), the exact
-/// gate is CERTAIN to return the zero term, so the caller skips the dense `H`
+/// the large-`p` path, dense otherwise). When the bounds clear both gates with a
+/// safe margin (see `jeffreys_term_skippable_via_matvec`), the exact gate is
+/// CERTAIN to return the zero term, so the caller skips the dense `H`
 /// materialization, the `Z_JᵀHZ_J` build, the eigendecomposition, the `∇Φ`/`H_Φ`
 /// assembly, and the Q1 outer drift entirely — returning the EXACT-ZERO term,
-/// byte-identical to the gated-off dense path. Returns `false` (never skip)
-/// whenever the cheap bounds are unresolved or merely near the gate, so any fit
-/// where the term might bite still flows to the exact formation.
+/// byte-identical to the gated-off dense path.
 ///
-/// Matrix-free preservation: the pre-check issues only `O(p·k)` (`k≤12`) matvecs
-/// through `source` and forms nothing dense at `p`-scale; on a well-conditioned
-/// large-`p` matrix-free fit (the common case) it returns `true` and NOTHING
-/// dense is ever built — preserving the matrix-free path the dense `H_id`
-/// formation was defeating. Only on a genuinely near-separating large-`p` fit
-/// (rare) does it return `false` and fall through to the inherent `O(p²)` dense
-/// `H_id`/`H_Φ` formation, where that cost is justified.
+/// When the bounds do not certify, `H` is formed once (a clone for the dense
+/// source, `total_p` products for the operator) and its exact spectrum decides,
+/// so a well-conditioned cycle the bounds' margin refuses still skips the
+/// formation and all-axes sweep a non-skipped cycle pays (#1389). No joint
+/// dimension selects between the two (#2900): a `false` from both flows to the
+/// exact formation, which forms and eigendecomposes the same information anyway.
+///
+/// Matrix-free preservation: the bounds issue only `O(p·k)` (`k≤12`) matvecs
+/// through `source` and form nothing dense at `p`-scale; on a well-conditioned
+/// large-`p` matrix-free fit (the common case) they certify and NOTHING dense is
+/// ever built.
 pub(crate) fn jeffreys_term_skippable_for_source(
     source: &JointHessianSource,
     total_p: usize,
 ) -> Result<bool, CustomFamilyError> {
-    // Small joint system: the dense reduced eigendecomposition is itself cheap
-    // (`O(p³)` with `p` in the tens), so run the EXACT conditioning gate directly
-    // instead of forcing the always-on Jeffreys term on every cycle. The previous
-    // unconditional `false` here meant a small fit ALWAYS paid the full
-    // `O(p·n·special-fn)` all-axes Jeffreys directional-derivative sweep (and its
-    // per-row allocations) on EVERY inner-Newton cycle and EVERY outer LAML eval —
-    // the constant-scale survival location-scale #1389 non-termination, where a
-    // bounded `n=300` fit ran past the 600s per-test CI cap. Form the
-    // `total_p × total_p` H once (a clone for the dense source, `total_p` matvecs
-    // for the operator — both cheap below the threshold) and apply the SAME
-    // `conditioning_gate_weight` the term assembly uses, so a well-conditioned
-    // cycle skips a provably-zero term (byte-identical to forming it) while a
-    // near-separating cycle still falls through to the exact term and keeps the
-    // Firth bound exactly where the ridge needs it.
-    if total_p < gam_solve::estimate::reml::jeffreys_subspace::CHEAP_CONDITIONING_PRECHECK_MIN_DIM {
-        let h_dense = match source {
-            JointHessianSource::Dense(matrix) => matrix.clone(),
-            JointHessianSource::Operator { apply, .. } => {
-                let mut h = Array2::<f64>::zeros((total_p, total_p));
-                let mut e_a = Array1::<f64>::zeros(total_p);
-                for a in 0..total_p {
-                    e_a[a] = 1.0;
-                    let col = apply(&e_a)?;
-                    e_a[a] = 0.0;
-                    if col.len() != total_p {
-                        // Operator returned an unexpected shape: fall through to the
-                        // exact term rather than risk a wrong skip.
-                        return Ok(false);
-                    }
-                    for r in 0..total_p {
-                        h[[r, a]] = col[r];
-                    }
-                }
-                h
-            }
-        };
-        return gam_solve::estimate::reml::jeffreys_subspace::jeffreys_term_skippable_dense(
-            h_dense.view(),
-        )
-        .map_err(CustomFamilyError::trial_point);
-    }
     // Matrix-free Hessian-vector product against the OBSERVED joint information.
     // For families whose Jeffreys information IS the observed Hessian (the trait
     // default), `joint_jeffreys_term`'s reduced information is `Z_JᵀHZ_J` with
@@ -228,9 +187,9 @@ pub(crate) fn jeffreys_term_skippable_for_source(
     // on saturated misclassified rows where the expected information decays).
     // Callers must gate this pre-check on
     // `family.joint_jeffreys_information_matches_observed_hessian()`.
-    // Display boundary (gam#2689): `jeffreys_term_skippable_via_matvec` is a
-    // gam-solve entry point declared over `Result<_, String>`, so the typed
-    // operator error is rendered here rather than by a silent blanket `From`.
+    // Display boundary (gam#2689): the gam-solve pre-check is declared over
+    // `Result<_, String>`, so the typed operator error is rendered here rather
+    // than by a silent blanket `From`.
     let hv = |v: &Array1<f64>| -> Result<Array1<f64>, String> {
         match source {
             JointHessianSource::Dense(matrix) => Ok(matrix.dot(v)),
@@ -239,7 +198,29 @@ pub(crate) fn jeffreys_term_skippable_for_source(
             }
         }
     };
-    gam_solve::estimate::reml::jeffreys_subspace::jeffreys_term_skippable_via_matvec(hv, total_p)
+    // The exact spectrum's `H`: a clone for the dense source, `total_p` products
+    // for the operator. An operator column of the wrong shape cannot certify, so
+    // the exact term runs rather than risk a wrong skip.
+    let dense = || -> Result<Option<Array2<f64>>, String> {
+        match source {
+            JointHessianSource::Dense(matrix) => Ok(Some(matrix.clone())),
+            JointHessianSource::Operator { apply, .. } => {
+                let mut h = Array2::<f64>::zeros((total_p, total_p));
+                let mut e_a = Array1::<f64>::zeros(total_p);
+                for a in 0..total_p {
+                    e_a[a] = 1.0;
+                    let col = apply(&e_a).map_err(|error| error.to_string())?;
+                    e_a[a] = 0.0;
+                    if col.len() != total_p {
+                        return Ok(None);
+                    }
+                    h.column_mut(a).assign(&col);
+                }
+                Ok(Some(h))
+            }
+        }
+    };
+    gam_solve::estimate::reml::jeffreys_subspace::jeffreys_term_skippable(hv, total_p, dense)
         .map_err(CustomFamilyError::trial_point)
 }
 

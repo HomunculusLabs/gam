@@ -6464,5 +6464,15 @@
     ],
     "reason": "#2267 slop removal. exact_stationarity_materialization_forecast existed only to print the [SAE-NEWTON] FORECAST info line in terminal_exact_newton_polish, and every polish step paid for it whatever the log level. It built prepare_decoder_prior_beta_curvature and prepare_residual_curvature_rows, which materialize_exact_hessian_dense_with_gap_border builds again moments later in the same step, and it ran one exact Hessian-vector apply. The materialization already logs the measured build time per probe ([SAE-EXACT-DENSE] operator BUILT) and the eigendecomposition time ([SAE-EXACT-DENSE] eigendecomposition DONE). So the forecast repeated work to predict a number the same step then measures. Its doc says it is not a bar, and nothing reads its value.",
     "evidence": "At the base, git grep -n exact_stationarity_materialization_forecast finds only construction_exact_hessian.rs (the declaration and its own error string) and construction_quasi_laplace.rs (the one call, in terminal_exact_newton_polish). Outside construction_quasi_laplace.rs, git grep -n FORECAST finds only this function's doc comment and two unrelated comments in tests/quality/misc. The polish-local polish_started clock fed only the forecast line and is removed with it. Not compiled or run locally."
+  },
+  {
+    "base": "5d5e30ac238eda78d65077bbb1a1260e59070be9",
+    "items": [
+      "crates/gam-solve/src/reml/jeffreys_subspace.rs:const:CHEAP_CONDITIONING_PRECHECK_MIN_DIM",
+      "crates/gam-solve/src/reml/jeffreys_subspace.rs:fn:cheap_precheck_does_not_skip_below_size_threshold",
+      "crates/gam-solve/src/reml/jeffreys_subspace.rs:fn:dense_skip_below_size_threshold_matches_exact_gate"
+    ],
+    "reason": "#2900 (SPEC rule 6). CHEAP_CONDITIONING_PRECHECK_MIN_DIM = 128 chose the Jeffreys conditioning pre-check by joint dimension: the exact spectrum below it, only the 12-step Lanczos bounds with their 8x margin at or above it, so which well-conditioned cycles skip the term (and keep the inner PCG route) changed at the window. gam-solve jeffreys_term_skippable now runs the bounds when p exceeds CHEAP_PRECHECK_LANCZOS_STEPS and the exact spectrum when they do not certify, at every p, and both custom-family callers use it. cheap_precheck_does_not_skip_below_size_threshold pinned the window and is replaced by skippable_runs_the_bounds_only_above_the_lanczos_steps and skippable_certifies_a_margin_refused_spectrum_through_the_exact_spectrum. dense_skip_below_size_threshold_matches_exact_gate is restated as dense_skip_matches_exact_gate at p = 51.",
+    "evidence": "At the base, git grep -l CHEAP_CONDITIONING_PRECHECK_MIN_DIM finds only crates/gam-solve/src/reml/jeffreys_subspace.rs (definition, via_matvec gate, two tests) and its two production readers, gam-custom-family jeffreys.rs (jeffreys_term_skippable_for_source) and joint_newton.rs (the outer logdet pre-check), all rewritten in this commit. git grep -w finds each removed test name once, at its definition. The landing script refuses the push otherwise."
   }
 ]
