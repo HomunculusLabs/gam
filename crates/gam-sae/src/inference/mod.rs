@@ -10,6 +10,7 @@
 pub mod atlas_holonomy;
 pub mod atlas_nerve;
 pub mod atom_lens;
+pub mod atom_shape_race;
 pub mod checkpoint_dynamics;
 pub mod contracts;
 pub mod cross_model_transport;
