@@ -170,13 +170,47 @@ pub struct RationalLogdetEvaluationMetrics {
 /// selected-inverse contractions from probe pairs can use `(vectors, vectors)`
 /// without pretending that the vectors are raw probes or unshifted `S^-1`
 /// solves.  This representation is the derivative of the rational SURROGATE,
-/// not an estimator of the derivative of the exact log determinant.
+/// not an estimator of the derivative of the exact log determinant, except when
+/// `from_positive_spectrum` builds it: that one carries the exact derivative of
+/// an exact dense log determinant (#2731).
 pub struct RationalLogdetDerivativeBundle {
     pub vectors: Vec<Array1<f64>>,
     metrics: RationalLogdetEvaluationMetrics,
 }
 
 impl RationalLogdetDerivativeBundle {
+    /// #2731 — the exact `log|S|` derivative off a dense spectrum `S = V Λ Vᵀ`:
+    /// `tr(S⁻¹·D) = Σ_i v_iᵀ D v_i / λ_i`, carried as `x_i = √(k/λ_i)·v_i` so the
+    /// `(1/r) Σ_a x_aᵀ D x_a` contraction reproduces it with `r = k`. No shifted
+    /// solve and no quadrature node enter. `None` unless every eigenvalue is
+    /// positive and `eigenvectors` holds the `k × k` columns of `V`.
+    pub(crate) fn from_positive_spectrum(
+        eigenvalues: &Array1<f64>,
+        eigenvectors: &Array2<f64>,
+    ) -> Option<Self> {
+        let dim = eigenvalues.len();
+        if dim == 0 || eigenvectors.dim() != (dim, dim) {
+            return None;
+        }
+        let rank = dim as f64;
+        let mut vectors = Vec::with_capacity(dim);
+        for (index, &lambda) in eigenvalues.iter().enumerate() {
+            let scale = (rank / lambda).sqrt();
+            if !(lambda > 0.0 && scale.is_finite()) {
+                return None;
+            }
+            vectors.push(eigenvectors.column(index).mapv(|value| value * scale));
+        }
+        Some(Self {
+            vectors,
+            metrics: RationalLogdetEvaluationMetrics {
+                cg_iterations: 0,
+                node_count: 0,
+                deflation_rank: dim,
+            },
+        })
+    }
+
     /// Diagnostics for the evaluation that produced this derivative bundle.
     /// Keeping them on the bundle makes it impossible to report work from one
     /// operator alongside the derivative of another.

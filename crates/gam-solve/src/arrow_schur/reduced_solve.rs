@@ -2090,7 +2090,9 @@ pub struct SurrogateLaneConfig {
 /// the FROZEN derived-rank plan — probes, bracket-centred quadrature, and Hutch++
 /// `Q`, all fixed once at the entry ρ so value and gradient stay a single
 /// functional across the ρ sweep — plus the config to (re)build it when the
-/// reduced-Schur dimension changes (a basin mutation between outer solves).
+/// reduced-Schur dimension changes (a basin mutation between outer solves). An
+/// evaluation whose caller admits the dense reduced Schur takes the exact
+/// log-determinant instead and freezes nothing (#2731).
 /// Threaded as `Option<&mut _>` through the streaming criterion; `None` keeps the
 /// bit-identical SLQ path.
 pub struct SurrogateLaneState {
@@ -2207,6 +2209,7 @@ pub fn matrix_free_arrow_evidence_log_det_surrogate(
         slq_lanczos_steps,
         slq_seed,
         lane,
+        false,
     )?;
     Ok((log_det_tt, log_det_schur))
 }
@@ -2234,6 +2237,12 @@ impl MatrixFreeArrowEvidenceEvaluation {
 /// and row factors are emitted by one factorization; consumers therefore cannot
 /// pair the derivative of one reduced operator with another operator's row
 /// elimination geometry.
+///
+/// `dense_reduced_schur_admitted` is the caller's memory planner's verdict on the
+/// dense `k × k` reduced Schur. When it admits the block, the lane takes the exact
+/// log-determinant off one eigendecomposition of the operator, and the derivative
+/// bundle is the exact `tr(S⁻¹·D)` representation; otherwise the frozen rational
+/// surrogate runs (#2731).
 pub fn matrix_free_arrow_evidence_evaluation(
     sys: &ArrowSchurSystem,
     ridge_t: f64,
@@ -2243,6 +2252,7 @@ pub fn matrix_free_arrow_evidence_evaluation(
     slq_lanczos_steps: usize,
     slq_seed: u64,
     lane: &mut SurrogateLaneState,
+    dense_reduced_schur_admitted: bool,
 ) -> Result<MatrixFreeArrowEvidenceEvaluation, ArrowSchurError> {
     if ridge_t != 0.0 || ridge_beta != 0.0 {
         return Err(ArrowSchurError::SchurFactorFailed {
@@ -2262,6 +2272,7 @@ pub fn matrix_free_arrow_evidence_evaluation(
             slq_lanczos_steps,
             slq_seed,
             Some(lane),
+            dense_reduced_schur_admitted,
         )?;
     let factor_cache = ArrowFactorCache {
         htt_factors: factorization.factors,
@@ -2302,6 +2313,7 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
     slq_lanczos_steps: usize,
     slq_seed: u64,
     lane: Option<&mut SurrogateLaneState>,
+    dense_reduced_schur_admitted: bool,
 ) -> Result<(f64, f64, ArrowBlockFactorization), ArrowSchurError> {
     let backend = CpuBatchedBlockSolver;
     let factorization = factor_blocks_for_system(
@@ -2402,6 +2414,17 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
             );
             slq?.estimate
         }
+        Some(state) if dense_reduced_schur_admitted => dense_lane_reduced_schur_log_det(
+            sys,
+            classified_system.as_mut(),
+            &htt_factors,
+            ridge_beta,
+            &backend,
+            resident.as_ref(),
+            gpu_matvec,
+            slq_seed,
+            state,
+        )?,
         Some(state) => {
             let dim = sys.k;
             // (Re)build the frozen plan when absent or dimension-mismatched (a
@@ -2617,6 +2640,147 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
         }
     };
     Ok((log_det_tt, log_det_schur, factorization))
+}
+
+/// #2731 — the lane's reduced-Schur `log|S|` when the caller's memory planner
+/// admits the dense `k × k` block. `k` applies materialize the operator the
+/// rational surrogate would otherwise walk by conjugate gradients, and one
+/// symmetric eigendecomposition `S = V Λ Vᵀ` gives the exact value `Σ ln λ_i`.
+/// Its derivative representation is exact as well, `tr(S⁻¹·D) = (1/k) Σ_i x_iᵀ D
+/// x_i` with `x_i = √(k/λ_i)·v_i`, and the requested EFS pairs
+/// `(√k·v_i, √k·v_i/λ_i)` average to the exact `tr(S⁻¹·M)`. No plan is frozen:
+/// the value is one exact function of ρ, with no probe or quadrature error to
+/// hold fixed across the search.
+///
+/// An operator that is not positive definite reaches the shared bottom-mode
+/// classifier exactly as a refused rational build does: a saddle is refused with
+/// the typed marker, a clamp basin or numerical null is priced into the
+/// conditioning and the block rebuilt, and an operator with no certified mode is
+/// refused with its spectrum. Jobs 578261 and 581909 (`p = 2048, charts = 32`,
+/// reduced Schur dim 288, a 0.63 MiB block) refused the criterion at the rational
+/// ladder's former rank ceiling 128.
+fn dense_lane_reduced_schur_log_det<B: BatchedBlockSolver + Sync>(
+    sys: &ArrowSchurSystem,
+    mut classified: Option<&mut ArrowSchurSystem>,
+    htt_factors: &ArrowFactorSlab,
+    ridge_beta: f64,
+    backend: &B,
+    resident: Option<&SaeResidentReducedSchur>,
+    gpu_matvec: Option<&GpuSchurMatvec>,
+    seed: u64,
+    state: &mut SurrogateLaneState,
+) -> Result<f64, ArrowSchurError> {
+    let dim = sys.k;
+    let rel_tol = state.cfg.rel_tol;
+    let mut priced_missed_modes = 0usize;
+    let (eigenvalues, eigenvectors) = loop {
+        let mut schur = {
+            let op = ReducedSchurOperator::new(
+                classified.as_deref().unwrap_or(sys),
+                htt_factors,
+                ridge_beta,
+                backend,
+                resident,
+            )
+            .with_gpu_matvec(gpu_matvec);
+            let mut applied = Array2::<f64>::zeros((dim, dim));
+            let mut unit = Array1::<f64>::zeros(dim);
+            let mut image = Array1::<f64>::zeros(dim);
+            for column in 0..dim {
+                unit[column] = 1.0;
+                op.apply_into(&unit, &mut image);
+                unit[column] = 0.0;
+                applied.column_mut(column).assign(&image);
+            }
+            applied
+        };
+        for row in 0..dim {
+            for column in row + 1..dim {
+                let mean = 0.5 * (schur[[row, column]] + schur[[column, row]]);
+                schur[[row, column]] = mean;
+                schur[[column, row]] = mean;
+            }
+        }
+        if schur.iter().any(|value| !value.is_finite()) {
+            return Err(ArrowSchurError::SchurFactorFailed {
+                reason: format!("the dense lane reduced Schur (dim {dim}) has a non-finite entry"),
+            });
+        }
+        let (eigenvalues, eigenvectors) = match schur.eigh(Side::Lower) {
+            Ok(decomposition) => decomposition,
+            Err(error) => {
+                return Err(ArrowSchurError::SchurFactorFailed {
+                    reason: format!(
+                        "the dense lane reduced Schur (dim {dim}) did not eigendecompose: {error}"
+                    ),
+                });
+            }
+        };
+        if eigenvalues.iter().all(|&lambda| lambda > 0.0) {
+            break (eigenvalues, eigenvectors);
+        }
+        let priced = match classified.as_deref_mut() {
+            Some(conditioned) if priced_missed_modes < dim => price_certified_bottom_mode(
+                sys,
+                conditioned,
+                htt_factors,
+                ridge_beta,
+                backend,
+                resident,
+                gpu_matvec,
+                rel_tol,
+                dim,
+                seed,
+            )?,
+            _ => false,
+        };
+        if !priced {
+            let (lambda_min, lambda_max) = eigenvalues.iter().fold(
+                (f64::INFINITY, f64::NEG_INFINITY),
+                |(low, high), &lambda| (low.min(lambda), high.max(lambda)),
+            );
+            return Err(ArrowSchurError::SchurFactorFailed {
+                reason: format!(
+                    "the dense lane reduced Schur is not positive definite, so log|S| is not \
+                     defined at this iterate: spectrum [{lambda_min:.6e}, {lambda_max:.6e}] \
+                     (dim {dim}), and no certified bottom mode was priced"
+                ),
+            });
+        }
+        priced_missed_modes += 1;
+    };
+    let log_det = eigenvalues.iter().map(|&lambda| lambda.ln()).sum::<f64>();
+    if !log_det.is_finite() {
+        return Err(ArrowSchurError::SchurFactorFailed {
+            reason: format!("the dense lane reduced Schur log|S| is non-finite (dim {dim})"),
+        });
+    }
+    if state.request_logdet_derivative_bundle {
+        let bundle =
+            RationalLogdetDerivativeBundle::from_positive_spectrum(&eigenvalues, &eigenvectors)
+                .ok_or_else(|| ArrowSchurError::SchurFactorFailed {
+                    reason: format!(
+                        "the dense lane log|S| derivative bundle is not representable: an \
+                         eigenvalue's inverse square root is non-finite (dim {dim})"
+                    ),
+                })?;
+        state.logdet_derivative_bundle = Some(bundle);
+        state.request_logdet_derivative_bundle = false;
+    }
+    if state.request_inverse_probes {
+        let scale = (dim as f64).sqrt();
+        let probes: Vec<Array1<f64>> = (0..dim)
+            .map(|index| eigenvectors.column(index).mapv(|value| value * scale))
+            .collect();
+        let inverse_probes = probes
+            .iter()
+            .zip(eigenvalues.iter())
+            .map(|(probe, &lambda)| probe.mapv(|value| value / lambda))
+            .collect();
+        state.inverse_probes = Some((probes, inverse_probes));
+        state.request_inverse_probes = false;
+    }
+    Ok(log_det)
 }
 
 /// #2731 — find and price ONE bottom mode of the conditioned rational exact-A

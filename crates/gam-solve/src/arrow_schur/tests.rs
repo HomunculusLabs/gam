@@ -4493,6 +4493,106 @@ fn rational_reduced_schur_plan_derived_deflates_to_target() {
     );
 }
 
+/// #2731 — a lane whose caller's planner admits the dense reduced Schur takes the
+/// exact log-determinant off one eigendecomposition: its value is the Cholesky
+/// log-det, its derivative bundle contracts to the exact `tr(S⁻¹·D)`, and its EFS
+/// pairs average to the same exact trace. Without that verdict the same lane
+/// freezes the rational plan it always built.
+#[test]
+fn a_dense_admitted_lane_takes_the_exact_log_det_2731() {
+    let (n, d, k) = (40usize, 3usize, 80usize);
+    let sys = dense_direct_system(n, d, k);
+    let backend = CpuBatchedBlockSolver;
+    let htt_factors = backend
+        .factor_blocks(&sys.rows, 0.0, d, false)
+        .expect("SPD per-row blocks must factor");
+    let schur =
+        build_dense_schur_direct(&sys, &htt_factors, 0.0, &backend, gam_gpu::GpuPolicy::Auto)
+            .expect("dense reduced Schur must build");
+    let l = cholesky_lower(&schur).expect("reduced Schur must be SPD");
+    let exact_logdet: f64 = (0..k).map(|i| 2.0 * l[[i, i]].ln()).sum();
+    let exact_trace_inverse = dense_trace_inverse(&l);
+    let config = SurrogateLaneConfig {
+        num_probes: 8,
+        seed: 0x2731,
+        rel_tol: 1.0e-10,
+        cg_rel_tol: 1.0e-12,
+        deflation_subspace_iters: 2,
+        deflation_target_std_err_rel: 1.0,
+    };
+    let options = ArrowSolveOptions::direct();
+    let identity = |v: ArrayView1<f64>| v.to_owned();
+
+    let mut dense_lane = SurrogateLaneState::new(config.clone());
+    dense_lane.request_logdet_derivative_bundle();
+    dense_lane.request_inverse_probes();
+    let dense = matrix_free_arrow_evidence_evaluation(
+        &sys,
+        0.0,
+        0.0,
+        &options,
+        8,
+        8,
+        0x2731,
+        &mut dense_lane,
+        true,
+    )
+    .expect("the admitted dense lane must evaluate");
+    assert!(
+        (dense.log_det_schur - exact_logdet).abs() <= 1.0e-9 * (exact_logdet.abs() + 1.0),
+        "dense lane log|S| {} against the Cholesky log-det {exact_logdet}",
+        dense.log_det_schur
+    );
+    assert!(
+        dense_lane.plan().is_none(),
+        "the exact route must not freeze a rational plan"
+    );
+    // D = I: the derivative of log|S + εI| at ε = 0 is tr(S⁻¹).
+    let derivative = dense_lane
+        .take_logdet_derivative_bundle()
+        .expect("the requested derivative bundle")
+        .directional_derivative(&identity)
+        .expect("a finite derivative");
+    assert!(
+        (derivative - exact_trace_inverse).abs() <= 1.0e-9 * exact_trace_inverse,
+        "dense lane tr(S⁻¹) {derivative} against the Cholesky oracle {exact_trace_inverse}"
+    );
+    let (probes, sinv) = dense_lane
+        .take_inverse_probes()
+        .expect("the requested EFS pairs");
+    let efs_trace = hutchinson_reduced_schur_inverse_trace(&probes, &sinv, &identity)
+        .expect("an EFS trace");
+    assert!(
+        (efs_trace - exact_trace_inverse).abs() <= 1.0e-9 * exact_trace_inverse,
+        "dense lane EFS tr(S⁻¹) {efs_trace} against the Cholesky oracle {exact_trace_inverse}"
+    );
+
+    // Negative control: the same lane without the planner's verdict freezes the
+    // rational plan, so the assertions above are about the dense route.
+    let mut rational_lane = SurrogateLaneState::new(config);
+    let rational = matrix_free_arrow_evidence_evaluation(
+        &sys,
+        0.0,
+        0.0,
+        &options,
+        8,
+        8,
+        0x2731,
+        &mut rational_lane,
+        false,
+    )
+    .expect("the unadmitted lane must evaluate");
+    assert!(
+        rational_lane.plan().is_some(),
+        "an unadmitted lane must freeze its rational plan"
+    );
+    assert!(
+        (rational.log_det_schur - exact_logdet).abs() / exact_logdet.abs() < 0.05,
+        "rational lane log|S| {} against the Cholesky log-det {exact_logdet}",
+        rational.log_det_schur
+    );
+}
+
 /// Dense reference `tr(S⁻¹)` from the lower-Cholesky factor `S = L Lᵀ`:
 /// `tr(S⁻¹) = tr(L⁻ᵀ L⁻¹) = ‖L⁻¹‖_F²`, with each `L⁻¹` column solved by forward
 /// substitution (`L y = e_c`). Self-contained oracle for the matrix-free

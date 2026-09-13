@@ -4762,12 +4762,16 @@ impl SaeManifoldTerm {
             self.output_dim(),
             self.k_atoms(),
         )?;
-        // A gradient-bearing streaming evaluation always uses the rational
-        // matrix-free value, even when a chunked dense Schur would barely fit:
-        // only the rational lane emits the frozen selected-inverse bundle whose
-        // contractions are the exact derivative of that value. Value-only SLQ
-        // callers retain the historical memory-derived split.
-        if plan.estimated_dense_schur_bytes > plan.in_core_budget_bytes || lane.is_some() {
+        // A gradient-bearing streaming evaluation always goes through the lane,
+        // even when a chunked dense Schur would fit: only the lane emits the
+        // derivative bundle whose contractions are the exact derivative of its
+        // value. Where this plan admits the dense k×k reduced Schur, the lane
+        // takes the exact log-det off one eigendecomposition; otherwise it
+        // evaluates the frozen rational surrogate (#2731). Value-only SLQ callers
+        // retain the historical memory-derived split.
+        let dense_reduced_schur_admitted =
+            plan.estimated_dense_schur_bytes <= plan.in_core_budget_bytes;
+        if !dense_reduced_schur_admitted || lane.is_some() {
             // #988 memory-matrix-free evidence route. The dense k×k reduced Schur
             // (≈8 GB at the K=32k manifold border) does NOT fit the in-core
             // budget, so estimate log|S| via Stochastic Lanczos Quadrature on the
@@ -4832,6 +4836,7 @@ impl SaeManifoldTerm {
                         SCHUR_SLQ_LOGDET_LANCZOS_STEPS,
                         SCHUR_SLQ_LOGDET_SEED,
                         lane,
+                        dense_reduced_schur_admitted,
                     )
                     .map_err(|err| {
                         format!(
