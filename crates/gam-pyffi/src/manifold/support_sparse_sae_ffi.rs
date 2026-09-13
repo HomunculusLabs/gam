@@ -143,7 +143,6 @@ pub(crate) struct SupportSparseManifoldSaeCore {
     criterion: f64,
     certificates: serde_json::Value,
     termination: serde_json::Value,
-    max_iter: usize,
     trust_radius: f64,
     random_state: u64,
 }
@@ -240,10 +239,13 @@ impl SupportSparseManifoldSaeCore {
         // The frozen-decoder objective sums these rows' cells, so the tolerance is
         // derived from this term, not copied from the training fit's.
         let tolerance = term.fixed_point_tolerance();
+        // An out-of-sample solve has no outer search, so it runs on the engine's inner
+        // fixed-point budget, as the training fit's inner solve does, not on the
+        // caller's smoothing-search budget.
         let report = term.solve_coordinates_fixed_decoder(
             centered_target.view(),
             &self.ard_precisions,
-            self.max_iter,
+            SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER,
             tolerance,
             self.trust_radius,
         )?;
@@ -440,11 +442,11 @@ impl SupportSparseManifoldSaeCore {
         )?;
         // Without these the payload cannot rebuild the model it came from:
         // `reconstruction_r2` is not recoverable from `fitted` alone (the
-        // training target is not stored), and the three fit knobs are model
+        // training target is not stored), and the two fit knobs are model
         // state that `from_dict` must restore rather than invent. The inner
-        // tolerance is not one of them: it is derived from each solve's term.
+        // tolerance and the iteration budget are not among them: the tolerance is
+        // derived from each solve's term, and the budget is the engine's.
         out.set_item("reconstruction_r2", self.reconstruction_r2)?;
-        out.set_item("max_iter", self.max_iter)?;
         out.set_item("trust_radius", self.trust_radius)?;
         out.set_item("random_state", self.random_state)?;
         Ok(out.unbind().into_any())
@@ -506,7 +508,6 @@ impl SupportSparseManifoldSaeCore {
             required_field(payload, "ard_precisions")?.extract()?;
         let criterion: f64 = required_field(payload, "criterion")?.extract()?;
         let reconstruction_r2: f64 = required_field(payload, "reconstruction_r2")?.extract()?;
-        let max_iter: usize = required_field(payload, "max_iter")?.extract()?;
         let trust_radius: f64 = required_field(payload, "trust_radius")?.extract()?;
         let random_state: u64 = required_field(payload, "random_state")?.extract()?;
         let certificates = crate::manifold::manifold_sae_coercion::py_any_to_json_value(
@@ -547,7 +548,6 @@ impl SupportSparseManifoldSaeCore {
             criterion,
             certificates,
             termination,
-            max_iter,
             trust_radius,
             random_state,
         })
@@ -613,7 +613,6 @@ impl SupportSparseManifoldSaeCore {
                 "reconstruction_r2",
                 self.reconstruction_r2,
             )?,
-            "max_iter": self.max_iter,
             "trust_radius": require_finite_for_json("trust_radius", self.trust_radius)?,
             "random_state": self.random_state,
         });
@@ -769,7 +768,6 @@ pub(crate) fn fit_support_sparse_manifold_sae(
         criterion: outer.criterion,
         certificates,
         termination,
-        max_iter: request.max_iter,
         trust_radius: request.trust_radius,
         random_state: request.random_state,
     };
