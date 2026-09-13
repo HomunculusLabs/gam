@@ -7139,5 +7139,14 @@
     ],
     "reason": "SPEC rules 6 and 25 (#2899 row O17). Since 13df3ae51 gamfit's one conformal route runs the exact full-conformal set or split conformal, the same routes `gam predict --conformal` runs (baf308726), so the jackknife+ route had no caller, yet every eligible Gaussian-identity fit still factored and persisted GaussianJackknifePlusStats. The stats type with new, from_design_unit_weight_normal_matrix, from_design_and_normal_matrix, n, p, beta and interval, jackknife_plus_interval, JackknifePlusInterval, FittedModelPayload::gaussian_jackknife_plus, its producer arm and the pyffi predict_table_jackknife_plus route are deleted. The same-named n, p, interval, new and from_design_unit_weight_normal_matrix declarations on ExactFullConformalSubstrate and the other full_conformal.rs types survive. The #2633 opt-out test is restated for the one remaining substrate as precompute_conformal_false_drops_the_full_conformal_substrate_2633.",
     "evidence": "At the base (after 35e4866d2 deleted gaussian_jackknife_plus), git grep -n -w GaussianJackknifePlusStats, jackknife_plus_interval, JackknifePlusInterval, predict_encoded_table_jackknife_plus_impl and predict_table_jackknife_plus over the repository finds them only in crates/gam-models/src/inference/{full_conformal.rs, model.rs, model_payload_builders.rs}, crates/gam-models/src/fit_orchestration/materialize/tests.rs and crates/gam-pyffi/src/manifold/geometry_ffi.rs, and gamfit no longer calls predict_table_jackknife_plus after 13df3ae51."
+  },
+  {
+    "base": "35593a0147f1450a2db3ce7a4b494a000f033ec0",
+    "items": [
+      "crates/gam-terms/src/construction.rs:fn:orthogonal_similarity_transform_faer",
+      "crates/gam-terms/src/construction.rs:fn:symmetrize_faer_matrix_in_place"
+    ],
+    "reason": "SPEC rule 23 (#2469) and production code that only verified another production formula. The det1 guardrail recomputed each tr((S+δI)⁻¹ S_k) through a full orthogonal similarity transform and asserted agreement with the primary Rayleigh-quotient contraction within a picked 1e-7·max(scale, 1), at an extra O(p³) per penalty on every reparameterization. orthogonal_similarity_transform_faer and symmetrize_faer_matrix_in_place had no other caller.",
+    "evidence": "At the base, git grep -n -w orthogonal_similarity_transform_faer finds only its declaration and the guardrail call in crates/gam-terms/src/construction.rs, and symmetrize_faer_matrix_in_place only its declaration and its use inside orthogonal_similarity_transform_faer. construction.rs tests pin det1 against closed forms. Candidate job 585690 (/scratch.global/sauer354/pool/const2469d/g4.585690.log): gam-terms lib reparam det1 construction kronecker 29 passed, 0 failed."
   }
 ]

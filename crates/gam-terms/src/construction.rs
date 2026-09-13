@@ -205,46 +205,6 @@ fn penalty_from_root_faer(root: &Mat<f64>) -> Mat<f64> {
     sanitize_symmetric_faer(&full)
 }
 
-fn symmetrize_faer_matrix_in_place(matrix: &mut Mat<f64>) {
-    let n = matrix.nrows().min(matrix.ncols());
-    for i in 0..n {
-        for j in 0..i {
-            let avg = 0.5 * (matrix[(i, j)] + matrix[(j, i)]);
-            matrix[(i, j)] = avg;
-            matrix[(j, i)] = avg;
-        }
-    }
-}
-
-fn orthogonal_similarity_transform_faer(
-    matrix: &Mat<f64>,
-    block_dim: usize,
-    orthogonal: &Mat<f64>,
-) -> Mat<f64> {
-    let matrix_block = matrix.as_ref().submatrix(0, 0, block_dim, block_dim);
-    let cols = orthogonal.ncols();
-    let mut temp = Mat::<f64>::zeros(block_dim, cols);
-    matmul(
-        temp.as_mut(),
-        Accum::Replace,
-        matrix_block,
-        orthogonal.as_ref(),
-        1.0,
-        Par::Seq,
-    );
-    let mut rotated = Mat::<f64>::zeros(cols, cols);
-    matmul(
-        rotated.as_mut(),
-        Accum::Replace,
-        orthogonal.transpose(),
-        temp.as_ref(),
-        1.0,
-        Par::Seq,
-    );
-    symmetrize_faer_matrix_in_place(&mut rotated);
-    rotated
-}
-
 fn trace_penalty_in_orthogonal_basis(
     matrix: &Mat<f64>,
     block_dim: usize,
@@ -2684,8 +2644,7 @@ pub fn stable_reparameterizationwith_invariant(
         .map(|k| {
             let s_k = &s_k_penalized_cache[k];
             // Compute tr((S+δI)⁻¹ S_k) in the range eigenbasis without ever
-            // materializing (S+δI)⁻¹. Using faer's matmul keeps this contraction
-            // aligned with the orthogonal-similarity debug reference path.
+            // materializing (S+δI)⁻¹.
             let trace = trace_penalty_in_orthogonal_basis(
                 s_k,
                 penalized_rank,
@@ -2696,34 +2655,6 @@ pub fn stable_reparameterizationwith_invariant(
             lambdas[k] * trace
         })
         .collect();
-
-    {
-        // Guardrail: cross-check the primary Rayleigh-quotient contraction
-        // against a full orthogonal similarity transform, while staying in
-        // the same numerically stable eigenbasis coordinates.
-        let mut maxdet1_mismatch = 0.0_f64;
-        let mut det1_scale = 0.0_f64;
-        for (k, lambda) in lambdas.iter().enumerate() {
-            let s_k_penalized = &s_k_penalized_cache[k];
-            let s_k_eigenbasis = orthogonal_similarity_transform_faer(
-                s_k_penalized,
-                penalized_rank,
-                &range_rotation,
-            );
-            let mut trace = KahanSum::default();
-            for l in 0..penalized_rank {
-                trace.add(s_k_eigenbasis[(l, l)] / (floored_eigs[l] + delta));
-            }
-            let reference = *lambda * trace.sum();
-            maxdet1_mismatch = maxdet1_mismatch.max((reference - det1vec[k]).abs());
-            det1_scale = det1_scale.max(reference.abs()).max(det1vec[k].abs());
-        }
-        let det1_tolerance = 1e-7 * det1_scale.max(1.0);
-        assert!(
-            maxdet1_mismatch <= det1_tolerance,
-            "det1 mismatch between optimized and reference formulas: max_abs={maxdet1_mismatch:.3e}, tol={det1_tolerance:.3e}"
-        );
-    }
 
     // Rebuild s_transformed from e_transformed to ensure rank consistency.
     //
