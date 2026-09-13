@@ -2091,7 +2091,7 @@ fn materialize_bernoulli_marginal_slope_rejects_constrained_redundant_scalar_ter
 }
 
 #[test]
-fn bernoulli_marginal_slope_prune_rejects_penalized_redundant_scalar_term() {
+fn bernoulli_marginal_slope_prune_drops_penalized_redundant_scalar_term() {
     let data = Dataset {
         headers: vec!["event".to_string(), "constant_spline_col".to_string()],
         values: Array2::from_shape_vec((4, 2), vec![0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0])
@@ -2128,21 +2128,25 @@ fn bernoulli_marginal_slope_prune_rejects_penalized_redundant_scalar_term() {
         smooth_terms: vec![],
     };
     let mut notes = Vec::new();
-    let err = prune_unidentified_linear_terms_for_marginal_slope(
+    prune_unidentified_linear_terms_for_marginal_slope(
         &mut spec,
         &data,
         "test BMS formula",
         &mut notes,
     )
-    .err()
-    .expect("explicitly penalized duplicate scalar term must be rejected");
-    let msg = err.to_string();
+    .expect("a ridge-carrying duplicate scalar term is pruned like an unpenalized one");
     assert!(
-        msg.contains("explicitly penalized linear term 'constant_spline_col' is redundant"),
-        "error should reject ridge-identification of duplicate scalar directions: {msg}"
+        spec.linear_terms.is_empty(),
+        "the duplicate scalar direction must be pruned, not left for its ridge to identify: {:?}",
+        spec.linear_terms
+            .iter()
+            .map(|term| term.name.as_str())
+            .collect::<Vec<_>>()
     );
-    assert_eq!(spec.linear_terms.len(), 1);
-    assert!(notes.is_empty());
+    assert!(
+        notes.iter().any(|note| note.contains("constant_spline_col")),
+        "materialization should report the pruned ridge-carrying term; notes={notes:?}"
+    );
 }
 
 #[test]

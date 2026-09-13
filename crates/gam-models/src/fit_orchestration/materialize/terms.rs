@@ -305,16 +305,9 @@ pub(crate) fn prune_unidentified_linear_terms_for_marginal_slope(
                     ),
                 });
             }
-            if term.double_penalty {
-                return Err(WorkflowError::InvalidConfig {
-                    reason: format!(
-                        "{label}: explicitly penalized linear term '{}' is redundant with the \
-                         implicit intercept or earlier scalar terms; remove the redundant term \
-                         instead of relying on a ridge to identify a duplicate data direction",
-                        term.name
-                    ),
-                });
-            }
+            // Every formula linear effect carries the null-recovery ridge by default
+            // (b7b874a2a). A ridge adds no identifiable data direction, so a
+            // redundant column is pruned whether or not it carries one.
             dropped.push(format!(
                 "{} (residual_norm={:.3e}, tol={:.3e})",
                 term.name, residual_norm, tol
