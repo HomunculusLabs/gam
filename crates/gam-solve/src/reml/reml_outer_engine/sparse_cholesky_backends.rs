@@ -52,14 +52,16 @@ impl SparseCholeskyOperator {
     ) -> f64 {
         assert_eq!(block.nrows(), block.ncols());
         let mut trace = 0.0;
+        // An exactly zero entry contributes nothing, and skipping it spares the
+        // column solve `TakahashiInverse::get` falls back to off the stored pattern.
         for i in 0..block.nrows() {
             let diag = block[[i, i]];
-            if diag.abs() > 1e-30 {
+            if diag != 0.0 {
                 trace += taka.get(start + i, start + i) * diag;
             }
             for j in (i + 1)..block.ncols() {
                 let pair = block[[i, j]] + block[[j, i]];
-                if pair.abs() > 1e-30 {
+                if pair != 0.0 {
                     trace += taka.get(start + i, start + j) * pair;
                 }
             }
@@ -76,14 +78,14 @@ impl SparseCholeskyOperator {
         let mut out = Array2::<f64>::zeros((dim, dim));
         for i in 0..dim {
             let z_diag = taka.get(start + i, start + i);
-            if z_diag.abs() > 1e-30 {
+            if z_diag != 0.0 {
                 for k in 0..dim {
                     out[[i, k]] += z_diag * block[[i, k]];
                 }
             }
             for j in (i + 1)..dim {
                 let z = taka.get(start + i, start + j);
-                if z.abs() <= 1e-30 {
+                if z == 0.0 {
                     continue;
                 }
                 for k in 0..dim {
@@ -419,12 +421,12 @@ impl HessianFactorization for SparseCholeskyOperator {
             let mut trace = 0.0;
             for i in 0..a.nrows() {
                 let a_ii = a[[i, i]];
-                if a_ii.abs() > 1e-30 {
+                if a_ii != 0.0 {
                     trace += taka.get(i, i) * a_ii;
                 }
                 for j in (i + 1)..a.ncols() {
                     let pair = a[[i, j]] + a[[j, i]];
-                    if pair.abs() > 1e-30 {
+                    if pair != 0.0 {
                         trace += taka.get(i, j) * pair;
                     }
                 }
