@@ -8967,5 +8967,13 @@
     ],
     "reason": "#2469 (SPEC rules 21 and 23; lead ruling 09-13, section 10 derived stop): fit_transformation_normal capped the custom-family inner cycle budget at 64 + 2·p_total, ceiling 400. These are three picked knobs standing in for a certificate. The inner solve now runs at the family's cycle budget and stops on its own KKT certificate or the joint-Newton loop's typed stall exits, the rule 67fb2fd4c applied to every custom-family trial. The κ FD gate's options() copy of the cap goes with it.",
     "evidence": "At the base, git grep -n -w for each name finds its declaration in config.rs, the cap in transformation_normal/fit.rs and the same cap copied into kappa_exact_joint_fd_tests.rs options(), and nothing else. Guarded cargo check --workspace --all-targets --exclude gam-pyffi plus the gam-models transformation_normal suite as the CTN timing receipt: job 619965, /scratch.global/sauer354/pool/const2469b/rp89.619965.log."
+  },
+  {
+    "base": "77d579266d0a55a559b8b9b4bbc4c16283fccda0",
+    "items": [
+      "crates/gam-geometry/src/manifolds/spd.rs:fn:affine_inner"
+    ],
+    "reason": "SPEC rule 23 (#2469). SpdManifold::sectional_curvature refused its plane when the Gram determinant under the affine-invariant metric was at most an absolute 1e-14, which is scale-dependent. The Gram entries now come from the whitened tangents the commutator already uses, and the plane is refused only inside the determinant rounding band gamma_{n^2+3}(uu vv + uv^2). That left the private SpdManifold::affine_inner with test callers only; it is deleted and the two test modules each keep a local tr(P^-1 U P^-1 V) helper.",
+    "evidence": "At the base, git grep -n -w affine_inner finds 7 occurrences, all in crates/gam-geometry/src/manifolds/spd.rs: the declaration, three calls in sectional_curvature, and three calls in the parallel_transport_tests and christoffel_tests modules. The candidate file has no production caller and no declaration."
   }
 ]

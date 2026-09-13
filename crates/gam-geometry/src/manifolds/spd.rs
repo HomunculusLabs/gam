@@ -43,25 +43,6 @@ impl SpdManifold {
         cholesky_spd(&p)?;
         Ok(p)
     }
-
-    fn affine_inner(
-        &self,
-        p: &Array2<f64>,
-        u: &Array2<f64>,
-        v: &Array2<f64>,
-    ) -> GeometryResult<f64> {
-        use gam_linalg::faer_ndarray::fast_ab;
-        let pinv = inverse(p)?;
-        // Affine-invariant inner product tr(P⁻¹U P⁻¹V): a chain of dense n×n
-        // products that the auto-dispatch fast_ab shim offloads to the GPU for
-        // large ambient dimension (and runs on faer otherwise).
-        let a = fast_ab(&fast_ab(&fast_ab(&pinv, u), &pinv), v);
-        let mut trace = 0.0;
-        for i in 0..self.n {
-            trace += a[[i, i]];
-        }
-        Ok(trace)
-    }
 }
 
 impl RiemannianManifold for SpdManifold {
@@ -208,11 +189,21 @@ impl RiemannianManifold for SpdManifold {
         let b = fast_ab(&fast_ab(&inv_sqrt_p, &v), &inv_sqrt_p);
         let comm = &fast_ab(&a, &b) - &fast_ab(&b, &a);
         let comm_norm = dot(flatten(&comm).view(), flatten(&comm).view());
-        let uu = self.affine_inner(&p, &u, &u)?;
-        let vv = self.affine_inner(&p, &v, &v)?;
-        let uv = self.affine_inner(&p, &u, &v)?;
+        // `⟨U,V⟩_P = tr(P⁻¹UP⁻¹V) = ⟨Ã,B̃⟩_F` for the symmetric whitened tangents,
+        // so the Gram entries come from the same `Ã`, `B̃` as the commutator.
+        let a_flat = flatten(&a);
+        let b_flat = flatten(&b);
+        let uu = dot(a_flat.view(), a_flat.view());
+        let vv = dot(b_flat.view(), b_flat.view());
+        let uv = dot(a_flat.view(), b_flat.view());
         let denom = uu * vv - uv * uv;
-        if denom.abs() <= 1.0e-14 {
+        // Each entry is an n²-term inner product, and the Gram determinant
+        // subtracts two products of them, so its rounding is at most
+        // `γ_{n²+3}·(uu·vv + uv²)`. A determinant inside that band does not
+        // resolve a plane.
+        let band =
+            gam_linalg::roundoff::accumulation_growth(self.n * self.n + 3) * (uu * vv + uv * uv);
+        if !(denom > band) {
             return Err(GeometryError::Singular(
                 "SPD sectional curvature plane is degenerate",
             ));
@@ -641,8 +632,14 @@ mod exp_map_vjp_tests {
 #[cfg(test)]
 mod parallel_transport_tests {
     use super::SpdManifold;
-    use crate::manifold::{RiemannianManifold, from_flat, sym};
+    use crate::manifold::{RiemannianManifold, from_flat, inverse, sym};
     use ndarray::{Array1, Array2};
+
+    /// The affine-invariant inner product `⟨U, V⟩_P = tr(P⁻¹ U P⁻¹ V)`.
+    fn affine_inner(p: &Array2<f64>, u: &Array2<f64>, v: &Array2<f64>) -> f64 {
+        let pinv = inverse(p).expect("P⁻¹");
+        pinv.dot(u).dot(&pinv).dot(v).diag().sum()
+    }
 
     /// `R(θ) diag(a,b) R(θ)ᵀ` as a flat row-major 2×2 SPD point.
     fn rotated_diag(theta: f64, a: f64, b: f64) -> Array1<f64> {
@@ -702,8 +699,8 @@ mod parallel_transport_tests {
         let tum = sym(&from_flat(tu.view(), 2, 2).expect("ΓU"));
         let tvm = sym(&from_flat(tv.view(), 2, 2).expect("ΓV"));
 
-        let before = spd.affine_inner(&pm, &um, &vm).expect("⟨U,V⟩_P");
-        let after = spd.affine_inner(&qm, &tum, &tvm).expect("⟨ΓU,ΓV⟩_Q");
+        let before = affine_inner(&pm, &um, &vm);
+        let after = affine_inner(&qm, &tum, &tvm);
         assert!(
             (before - after).abs() <= 1e-10 * before.abs().max(1.0),
             "parallel transport is not an isometry: ⟨U,V⟩_P={before:.12e}, ⟨ΓU,ΓV⟩_Q={after:.12e}"
@@ -765,8 +762,14 @@ mod parallel_transport_tests {
 #[cfg(test)]
 mod christoffel_tests {
     use super::SpdManifold;
-    use crate::manifold::{RiemannianManifold, flatten, from_flat};
+    use crate::manifold::{RiemannianManifold, flatten, from_flat, inverse};
     use ndarray::{Array1, Array2};
+
+    /// The affine-invariant inner product `⟨U, V⟩_P = tr(P⁻¹ U P⁻¹ V)`.
+    fn affine_inner(p: &Array2<f64>, u: &Array2<f64>, v: &Array2<f64>) -> f64 {
+        let pinv = inverse(p).expect("P⁻¹");
+        pinv.dot(u).dot(&pinv).dot(v).diag().sum()
+    }
 
     /// Symmetric basis of `n×n` symmetric matrices, dimension `n(n+1)/2`:
     /// `E_ii = e_i e_iᵀ`, `E_ij (i<j) = e_i e_jᵀ + e_j e_iᵀ`. Perturbing the
@@ -892,9 +895,7 @@ mod christoffel_tests {
             for b in 0..d {
                 let gamma_mat = connection_matrix(a, b);
                 for c in 0..d {
-                    let lhs = m
-                        .affine_inner(&p0, &gamma_mat, &basis[c])
-                        .expect("⟨Γ(E_a,E_b), E_c⟩");
+                    let lhs = affine_inner(&p0, &gamma_mat, &basis[c]);
                     let rhs = 0.5 * (dg[a][b][c] + dg[b][a][c] - dg[c][a][b]);
                     assert!(
                         (lhs - rhs).abs() <= 1e-6 * rhs.abs().max(1.0),
