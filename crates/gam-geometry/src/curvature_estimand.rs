@@ -23,7 +23,16 @@
 //! routines here re-enter the inner fit; they only evaluate the `V_p` the caller
 //! provides.
 
-use super::closure_family::inv_std_normal;
+/// Inverse standard-normal CDF using the shared tail-stable implementation.
+fn inv_std_normal(p: f64) -> f64 {
+    if p == 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    if p == 1.0 {
+        return f64::INFINITY;
+    }
+    gam_math::probability::standard_normal_quantile(p).unwrap_or(f64::NAN)
+}
 
 /// χ²₁ survival function `P(χ²₁ > t)` for `t ≥ 0` — the p-value of an
 /// interior-point likelihood-ratio statistic on one degree of freedom.
@@ -447,6 +456,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inverse_normal_remains_finite_for_subnormal_probability() {
+        let quantile = inv_std_normal(f64::from_bits(1));
+        assert!(quantile.is_finite() && quantile < -38.0 && quantile > -39.0);
+        assert!(inv_std_normal(-0.1).is_nan());
+        assert!(inv_std_normal(1.1).is_nan());
+    }
 
     // A synthetic profiled criterion with a known minimiser and curvature:
     //   V_p(κ) = v0 + 0.5 * a * (κ − κ⋆)²   (a > 0, minimiser at κ⋆).

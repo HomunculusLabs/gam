@@ -2690,5 +2690,17 @@
     "reason": "#2899 no product user: resolve_cli_frailty_spec is deleted; the CLI resolves frailty through the request document's parse_json_frailty_spec.",
     "evidence": "public_api_census.py --base ef1e74ddd --head 3c10e63bd reports this identity among the stack's removals (job 579772, /scratch.global/sauer354/pool/prune-api-a/stack4.check.579772.log).",
     "base": "d71363f3be707b537fbea13d2424630c042f12a5"
+  },
+  {
+    "removed": {
+      "crates/gam-geometry/src/closure_family.rs::design": 1,
+      "crates/gam-geometry/src/closure_family.rs::inv_std_normal": 1,
+      "crates/gam-geometry/src/closure_family.rs::new": 1,
+      "crates/gam-geometry/src/closure_family.rs::raw_dim": 1,
+      "crates/gam-geometry/src/closure_family.rs::row_jet": 1
+    },
+    "reason": "#2899 no product user: ClosureFamily's public methods are deleted with the struct; inv_std_normal moves to curvature_estimand.rs as a private helper of its one consumer.",
+    "evidence": "public_api_census.py --base ef1e74ddd --head 3c10e63bd reports these five identities among the stack's removals (job 579772, /scratch.global/sauer354/pool/prune-api-a/stack4.check.579772.log).",
+    "base": "3250f2aa1f71221352bf322e4c9d939c947e12b5"
   }
 ]

@@ -3683,7 +3683,6 @@ dependencies = [
  "libm",
  "ndarray 0.17.2",
  "opt",
- "wide 1.5.0",
 ]
 
 [[package]]

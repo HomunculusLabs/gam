@@ -17,4 +17,3 @@ gam-linalg = { path = "../gam-linalg", version = "=0.3.157" }
 gam-math = { path = "../gam-math", version = "=0.3.157" }
 opt.workspace = true
 ndarray = { version = "0.17.2", features = ["serde", "rayon"] }
-wide = "1.5"

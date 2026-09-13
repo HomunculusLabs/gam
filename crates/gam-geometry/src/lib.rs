@@ -1,4 +1,3 @@
-pub mod closure_family;
 pub mod curvature_estimand;
 mod latent_seed;
 pub mod manifold;
@@ -15,7 +14,6 @@ pub use manifolds::{
     sphere, stiefel, torus,
 };
 
-pub use closure_family::{ClosureFamily, ClosureProfileCi};
 pub use curvature_estimand::{
     CurvatureVerdict, FlatnessTest, KappaEstimateSupport, KappaProfileCi, flatness_lr_test,
     profile_ci_walk, wald_half_width,

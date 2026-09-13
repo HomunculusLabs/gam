@@ -6577,5 +6577,41 @@
     "reason": "#2899 no product user: the survival CLI routes take the frailty from the resolved request document (9cb3fd6ef, 1bb6e048f), built by parse_json_frailty_spec. resolve_cli_frailty_spec, its CliFrailtyKind and CliHazardLoading argument enums and the private cli_hazard_loading mapper were left with only gam-config's own unit test as a caller, which now checks the same scale mode through parse_json_frailty_spec.",
     "evidence": "git grep -n -w over crates, src, tests, examples, bench, benches, python and gamfit finds resolve_cli_frailty_spec only in gam-config lib.rs (definition and the unit test) and a gam-cli test comment; CliFrailtyKind, CliHazardLoading and cli_hazard_loading appear only in gam-config lib.rs. Item list from source_removal_guard.py --base ef1e74ddd --head 3c10e63bd (job 579772, /scratch.global/sauer354/pool/prune-api-a/stack4.check.579772.log).",
     "base": "d71363f3be707b537fbea13d2424630c042f12a5"
+  },
+  {
+    "items": [
+      "crates/gam-geometry/src/closure_family.rs:const:DD_PIO2",
+      "crates/gam-geometry/src/closure_family.rs:const:DD_TWO_OVER_PI",
+      "crates/gam-geometry/src/closure_family.rs:fn:add",
+      "crates/gam-geometry/src/closure_family.rs:fn:closure_coordinate",
+      "crates/gam-geometry/src/closure_family.rs:fn:dd_reference_matches_libm_at_small_args",
+      "crates/gam-geometry/src/closure_family.rs:fn:dd_sincos",
+      "crates/gam-geometry/src/closure_family.rs:fn:dd_sincos_small",
+      "crates/gam-geometry/src/closure_family.rs:fn:design",
+      "crates/gam-geometry/src/closure_family.rs:fn:inv_std_normal",
+      "crates/gam-geometry/src/closure_family.rs:fn:inverse_normal_remains_finite_for_subnormal_probability",
+      "crates/gam-geometry/src/closure_family.rs:fn:mul",
+      "crates/gam-geometry/src/closure_family.rs:fn:mul_f",
+      "crates/gam-geometry/src/closure_family.rs:fn:neg",
+      "crates/gam-geometry/src/closure_family.rs:fn:new",
+      "crates/gam-geometry/src/closure_family.rs:fn:nonpositive_or_nonfinite_window_is_rejected",
+      "crates/gam-geometry/src/closure_family.rs:fn:quick_two_sum",
+      "crates/gam-geometry/src/closure_family.rs:fn:raw_dim",
+      "crates/gam-geometry/src/closure_family.rs:fn:recurrence_seed",
+      "crates/gam-geometry/src/closure_family.rs:fn:row_jet",
+      "crates/gam-geometry/src/closure_family.rs:fn:seed_lanes",
+      "crates/gam-geometry/src/closure_family.rs:fn:sub",
+      "crates/gam-geometry/src/closure_family.rs:fn:to_f64",
+      "crates/gam-geometry/src/closure_family.rs:fn:two_prod",
+      "crates/gam-geometry/src/closure_family.rs:fn:two_sum",
+      "crates/gam-geometry/src/closure_family.rs:fn:write_row_jet",
+      "crates/gam-geometry/src/closure_family.rs:fn:write_row_value",
+      "crates/gam-geometry/src/closure_family.rs:struct:ClosureFamily",
+      "crates/gam-geometry/src/closure_family.rs:struct:ClosureProfileCi",
+      "crates/gam-geometry/src/closure_family.rs:struct:Dd"
+    ],
+    "reason": "#2899 no product user: gam_geometry::ClosureFamily (new, raw_dim, row_jet, design, the private row writers and SIMD lane helpers) and ClosureProfileCi have no user outside their own module and its tests. closure_family.rs is deleted with its tests, including the double-double trig reference that only certified the deleted recurrence. inv_std_normal moves unchanged, with its test, into curvature_estimand.rs, its only consumer.",
+    "evidence": "git grep -n -w over crates, src, tests, examples, bench, benches, python and gamfit finds ClosureFamily and ClosureProfileCi only in closure_family.rs and the gam-geometry crate-root re-export, and inv_std_normal only in closure_family.rs and curvature_estimand.rs (plus an unrelated private copy in a root regression test). Item list from source_removal_guard.py --base ef1e74ddd --head 3c10e63bd (job 579772, /scratch.global/sauer354/pool/prune-api-a/stack4.check.579772.log).",
+    "base": "3250f2aa1f71221352bf322e4c9d939c947e12b5"
   }
 ]
