@@ -135,9 +135,11 @@ pub fn aux_richness_metrics(aux: ArrayView2<f64>, latents: ArrayView2<f64>) -> A
         // condition number and lose identifiable near-collinear directions.
         // A rank the decomposition cannot deliver is
         // reported as "not estimated" — the state this struct already models —
-        // rather than as a number read off an unconverged sweep.
+        // rather than as a number read off an unconverged sweep. The rank is
+        // counted above the decomposition's own backward-error band, the band
+        // `pinv_solve` truncates at, so a direction the solve resolved is rank.
         if let Ok(b_hat) = pinv_solve(a_c.view(), z_c.view())
-            && let Ok(rank) = matrix_rank(b_hat.view(), 1.0e-8)
+            && let Ok(rank) = resolvable_matrix_rank(b_hat.view())
         {
             jacobian_rank = rank;
             jacobian_rank_estimated = true;
@@ -209,6 +211,19 @@ fn matrix_rank(m: ArrayView2<f64>, tol: f64) -> Result<usize, String> {
         .svd(false, false)
         .map_err(|error| format!("identifiability singular values: {error}"))?;
     Ok(singular_values.iter().filter(|&&value| value > tol).count())
+}
+
+/// Numeric rank of `m` above its decomposition's backward-error band
+/// `max(rows, cols)·ε·σ_max`, the band `pinv_solve` truncates at. A singular
+/// value inside that band is indistinguishable from zero; every other one is a
+/// resolved direction, whatever its absolute size.
+fn resolvable_matrix_rank(m: ArrayView2<f64>) -> Result<usize, String> {
+    let (_, singular_values, _) = m
+        .svd(false, false)
+        .map_err(|error| format!("identifiability singular values: {error}"))?;
+    let max_singular = singular_values.iter().copied().fold(0.0_f64, f64::max);
+    let band = f64::EPSILON * m.nrows().max(m.ncols()) as f64 * max_singular;
+    Ok(singular_values.iter().filter(|&&value| value > band).count())
 }
 
 /// Scalar facts about decoder Jacobian sparsity.
@@ -624,6 +639,23 @@ mod tests {
     fn matrix_rank_preserves_directions_lost_by_normal_equations() {
         let matrix = array![[1.0, 1.0], [1.0, 1.0 + 1e-9]];
         assert_eq!(matrix_rank(matrix.view(), 1e-12).expect("SVD rank"), 2);
+    }
+
+    /// The aux regression's rank is counted above the SVD's own backward-error
+    /// band, the band `pinv_solve` truncates at, not above an absolute `1e-8`.
+    /// A resolved direction with singular value `1e-9` is rank; only a direction
+    /// inside the band is not.
+    #[test]
+    fn resolvable_rank_is_denominated_in_the_decompositions_own_band() {
+        let resolved = array![[1.0, 0.0], [0.0, 1.0e-9]];
+        assert_eq!(resolvable_matrix_rank(resolved.view()).expect("SVD rank"), 2);
+        assert_eq!(
+            matrix_rank(resolved.view(), 1.0e-8).expect("SVD rank"),
+            1,
+            "the absolute 1e-8 cutoff the aux regression used to apply drops it"
+        );
+        let unresolved = array![[1.0, 0.0], [0.0, 1.0e-17]];
+        assert_eq!(resolvable_matrix_rank(unresolved.view()).expect("SVD rank"), 1);
     }
 
     #[test]
