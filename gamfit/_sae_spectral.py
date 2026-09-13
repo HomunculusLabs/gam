@@ -399,7 +399,6 @@ def audit_sae(
     transport_layer_from: int = 0,
     transport_layer_to: int = 1,
     score_tile: int = 4096,
-    code_ridge: float = 1.0e-6,
     score_mode: str = "required",
 ) -> dict[str, Any]:
     """Run GAM diagnostics on a frozen external SAE dictionary.
@@ -431,12 +430,14 @@ def audit_sae(
                 "block audit requires sparse external codes=(block_indices, block_values)"
             )
         route_active = 1 if active is None else int(active)
+        # An external dictionary carries no fitted prior, so its codes are the
+        # minimum-norm least-squares projection onto the routed atoms: ridge zero.
         routed = rust_module().sparse_dictionary_transform_ffi(
             acts,
             dec,
             route_active,
             int(score_tile),
-            float(code_ridge),
+            0.0,
             score_mode,
         )
         route_indices, route_values = _sparse_route_arrays(
