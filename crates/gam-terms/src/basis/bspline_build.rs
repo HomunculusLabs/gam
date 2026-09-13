@@ -1324,7 +1324,7 @@ pub(crate) fn bspline_sum_to_zero_transform_from_cross(
         return Err(BasisError::InsufficientColumnsForConstraint { found: k });
     }
     let pivot_abs = c.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-    if pivot_abs <= 1e-12 {
+    if pivot_abs == 0.0 {
         return Ok(Array2::eye(k));
     }
     let mut c_mat = Array2::<f64>::zeros((k, 1));
