@@ -891,11 +891,13 @@ fn kronecker_eigenvalues(decomps: &[KroneckerFactorDecomp], block_dim: usize) ->
         }
         kron_eigs = new_eigs;
     }
-    let max_ev = kron_eigs.iter().copied().fold(0.0_f64, f64::max);
-    let tol = max_ev * 1e-10 * (block_dim as f64);
-    let positive: Vec<f64> = kron_eigs.into_iter().filter(|&ev| ev > tol).collect();
-    let nullity = block_dim - positive.len();
-    (positive, nullity)
+    // Every factor eigenvalue was classified positive against its own factor's
+    // spectrum, and a product of positives is positive, resolved to the sum of its
+    // factors' relative resolutions. Each product is one row of the assembled
+    // Kronecker root, so every one is kept: a cut against the joint maximum would
+    // drop eigenvalues whose root rows the penalty still carries.
+    let nullity = block_dim - kron_eigs.len();
+    (kron_eigs, nullity)
 }
 
 // ---------------------------------------------------------------------------
