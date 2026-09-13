@@ -226,8 +226,9 @@ fn universality_verdict(
         }
     }
 
-    let roundoff_scale = f64::EPSILON.sqrt();
-    let isometry_noise_scale = fit.isometry_defect_se.max(roundoff_scale);
+    // The defect's own evaluation band floors the noise scale: a defect inside it is
+    // roundoff, whatever the delta-method SE says.
+    let isometry_noise_scale = fit.isometry_defect_se.max(fit.isometry_defect_band());
     let isometry_distinguished = fit.isometry_defect > isometry_noise_scale;
     let gauge_distinguished = circle
         .map(|report| report.defect > gauge_defect_scale)

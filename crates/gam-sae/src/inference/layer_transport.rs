@@ -578,6 +578,9 @@ pub struct FittedTransport {
     pub isometry_defect: f64,
     /// Delta-method standard error of the isometry defect.
     pub isometry_defect_se: f64,
+    /// Rounding band of `isometry_defect` as evaluated: the derivative sums, the
+    /// speed gaps and their mean. A defect inside it cannot be told from zero.
+    isometry_defect_band: f64,
     /// Whether `h` is compatible with both chart topologies: a degree-±1
     /// circle cover without folds, or a fold-free interval homeomorphism.
     pub topology_preserved: bool,
@@ -591,6 +594,11 @@ pub struct FittedTransport {
 }
 
 impl FittedTransport {
+    /// Rounding band of [`Self::isometry_defect`].
+    pub(crate) fn isometry_defect_band(&self) -> f64 {
+        self.isometry_defect_band
+    }
+
     fn linear_slope(&self) -> f64 {
         self.degree.map_or(0.0, f64::from)
     }
@@ -1098,18 +1106,31 @@ pub fn fit_transport_map(
     let deriv_rows = basis.derivative_rows(coords_from)?;
     let deriv = deriv_rows.dot(&fit.beta).mapv(|v| v + slope);
     let m = basis.num_basis();
+    // Each `h′(tᵢ) = Σ_j D_ij·β_j + slope` sums `m` products and one more term, so it is
+    // off by at most `γ_{m+1}·(Σ_j |D_ij·β_j| + |slope|)`. The gap `|h′| − 1` adds
+    // `γ_1·(|h′| + 1)`, and the mean of squared gaps carries
+    // `Σ_i (2|gap|·δgap + δgap²)/n` plus `γ_{n+1}` of itself.
+    let absolute_terms = deriv_rows.mapv(f64::abs).dot(&fit.beta.mapv(f64::abs));
+    let derivative_growth = gam_linalg::roundoff::accumulation_growth(m + 1);
+    let gap_growth = gam_linalg::roundoff::accumulation_growth(1);
     let mut defect = 0.0_f64;
+    let mut defect_band = 0.0_f64;
     let mut grad = Array1::<f64>::zeros(m);
     for i in 0..n {
         let speed = deriv[i].abs();
         let gap = speed - 1.0;
         defect += gap * gap;
+        let gap_band = derivative_growth * (absolute_terms[i] + slope.abs())
+            + gap_growth * (speed + 1.0);
+        defect_band += 2.0 * gap.abs() * gap_band + gap_band * gap_band;
         let sgn = if deriv[i] >= 0.0 { 1.0 } else { -1.0 };
         for j in 0..m {
             grad[j] += 2.0 * gap * sgn * deriv_rows[[i, j]];
         }
     }
     defect /= n as f64;
+    let isometry_defect_band =
+        defect_band / n as f64 + gam_linalg::roundoff::accumulation_growth(n + 1) * defect;
     grad.mapv_inplace(|v| v / n as f64);
     let isometry_defect_se = grad.dot(&fit.covariance.dot(&grad)).max(0.0).sqrt();
 
@@ -1132,6 +1153,7 @@ pub fn fit_transport_map(
         n_obs: n,
         isometry_defect: defect,
         isometry_defect_se,
+        isometry_defect_band,
         topology_preserved: false,
         min_directional_derivative: f64::NAN,
         residual_rms: fit.residual_rms,
@@ -1766,6 +1788,7 @@ mod invert_tests {
             n_obs: from.len(),
             isometry_defect: 0.0,
             isometry_defect_se: 0.0,
+            isometry_defect_band: 0.0,
             topology_preserved: false,
             min_directional_derivative: f64::NAN,
             residual_rms: 0.0,
