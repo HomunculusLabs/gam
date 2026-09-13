@@ -565,32 +565,12 @@ pub fn run_per_atom_efs(
             }
         }
 
-        // Convergence on the applied (pre-line-search) step ∞-norm, gated by the
-        // #1011 decision-margin contract. When the objective produced the cost's
-        // ½log|H| term as a certified enclosure (rather than an exact logdet),
-        // declaring convergence is only honest if that enclosure is tighter than
-        // the step tolerance — the margin this decision is allowed to resolve.
-        // An enclosure gap at or above the tolerance means the cost we would
-        // converge on is not actually pinned down, so we must NOT stop on it: the
-        // objective must refine the bound (more moments / pair absorption) or fall
-        // back to the exact logdet before the EFS step can be called converged.
+        // Convergence on the applied (pre-line-search) step ∞-norm.
         let step_inf = full_step.iter().map(|s| s.abs()).fold(0.0_f64, f64::max);
         final_step_inf = step_inf;
-        let margin = cfg.tolerance;
-        let cost_resolved_below_margin = match efs.logdet_enclosure_gap {
-            Some(gap) => crate::logdet_bounds::LogdetEnclosure::gap_resolves_margin(gap, margin),
-            None => true,
-        };
-        if step_inf < margin {
-            if cost_resolved_below_margin {
-                converged = true;
-                break;
-            }
-            log::info!(
-                "[PER-ATOM-EFS] step within tolerance {margin:.3e} but cost logdet enclosure gap \
-                 {:.3e} exceeds it; refining the bound before declaring convergence",
-                efs.logdet_enclosure_gap.unwrap_or(0.0)
-            );
+        if step_inf < cfg.tolerance {
+            converged = true;
+            break;
         }
 
         // ── Layer 3: whole-vector cost line search, then apply ──
@@ -716,7 +696,6 @@ mod tests {
                 psi_gradient: None,
                 psi_indices: None,
                 inner_hessian_scale: None,
-                logdet_enclosure_gap: None,
                 consecutive_restored_incumbents: None,
             })
         }
@@ -872,97 +851,5 @@ mod tests {
         // A dimension mismatch is a hard error, not a silent zero.
         let wrong = array![1.0, 2.0];
         assert!(theta_hvp_matrix_free(&op, &wrong).is_err());
-    }
-
-    /// Wraps a quadratic objective but reports its `½log|H|` term as a certified
-    /// enclosure with a fixed gap, so the #1011 EFS margin gate can be exercised.
-    pub(crate) struct EnclosureGapObjective {
-        pub(crate) inner: QuadraticObjective,
-        pub(crate) gap: f64,
-    }
-
-    impl OuterObjective for EnclosureGapObjective {
-        fn capability(&self) -> OuterCapability {
-            self.inner.capability()
-        }
-        fn eval_cost(&mut self, rho: &Array1<f64>) -> Result<f64, EstimationError> {
-            self.inner.eval_cost(rho)
-        }
-        fn eval(&mut self, rho: &Array1<f64>) -> Result<OuterEval, EstimationError> {
-            self.inner.eval(rho)
-        }
-        fn eval_efs(&mut self, rho: &Array1<f64>) -> Result<EfsEval, EstimationError> {
-            let mut eval = self.inner.eval_efs(rho)?;
-            eval.logdet_enclosure_gap = Some(self.gap);
-            Ok(eval)
-        }
-        fn reset(&mut self) {
-            self.inner.reset()
-        }
-        fn seed_inner_state(&mut self, beta: &Array1<f64>) -> Result<SeedOutcome, EstimationError> {
-            self.inner.seed_inner_state(beta)
-        }
-    }
-
-    /// #1011 EFS margin contract: a step that lands within the step tolerance
-    /// must NOT be allowed to declare convergence while the cost's certified
-    /// logdet enclosure is wider than that tolerance — the bound does not pin
-    /// the cost down at the decision's resolution. The run instead exhausts its
-    /// iteration budget without a premature `converged = true`.
-    #[test]
-    pub(crate) fn efs_refuses_to_converge_below_the_logdet_enclosure_margin() {
-        let dim = 96; // frontier-shaped K so the per-atom path is taken
-        let a = Array2::from_shape_fn(
-            (dim, dim),
-            |(i, j)| if i == j { 1.0 + (i % 5) as f64 } else { 0.0 },
-        );
-        let target = Array1::from_shape_fn(dim, |i| ((i as f64) * 0.37).sin() * 2.0);
-        let mut cfg = wide_bounds(dim);
-        cfg.tolerance = 1e-6;
-        let topology = SharedBorderTopology::disjoint(dim);
-        let seed = Array1::zeros(dim);
-
-        // Gap far wider than the step tolerance ⇒ the margin gate blocks
-        // convergence even though the separable step reaches the target.
-        let mut wide = EnclosureGapObjective {
-            inner: QuadraticObjective {
-                a: a.clone(),
-                target: target.clone(),
-            },
-            gap: 10.0 * cfg.tolerance,
-        };
-        let wide_result = run_per_atom_efs(&mut wide, &seed, &cfg, &topology).expect("wide run");
-        assert!(
-            !wide_result.converged,
-            "an enclosure gap wider than the step tolerance must block convergence"
-        );
-
-        // The same objective with a gap below the tolerance converges exactly
-        // as the exact-logdet path does — the margin contract is transparent
-        // once the bound is tight enough to resolve the decision.
-        let mut tight = EnclosureGapObjective {
-            inner: QuadraticObjective {
-                a,
-                target: target.clone(),
-            },
-            gap: 0.1 * cfg.tolerance,
-        };
-        let tight_result = run_per_atom_efs(&mut tight, &seed, &cfg, &topology).expect("tight run");
-        assert!(
-            tight_result.converged,
-            "an enclosure gap below the step tolerance must not obstruct convergence"
-        );
-        for (label, result) in [("wide", &wide_result), ("tight", &tight_result)] {
-            assert!(
-                result.final_step_inf_norm < cfg.tolerance,
-                "{label}: the step criterion itself must be satisfied"
-            );
-            for (actual, expected) in result.rho.iter().zip(target.iter()) {
-                assert!(
-                    (actual - expected).abs() < cfg.tolerance,
-                    "{label}: the mock must reach its known optimum"
-                );
-            }
-        }
     }
 }

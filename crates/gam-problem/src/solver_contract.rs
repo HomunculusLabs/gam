@@ -181,9 +181,6 @@ pub struct EfsEval {
     /// Inner-Hessian curvature scale captured during the EFS eval, used to
     /// condition the ψ preconditioner across outer iterations.
     pub inner_hessian_scale: Option<f64>,
-    /// Logdet enclosure gap diagnostic (lower/upper bound spread) captured at
-    /// this EFS evaluation when the bounded-logdet path is active.
-    pub logdet_enclosure_gap: Option<f64>,
     /// Number of consecutive successful inner solves that returned to the same
     /// banked incumbent after a non-monotone boundary mutation.
     ///

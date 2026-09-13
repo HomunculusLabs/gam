@@ -65,7 +65,6 @@ fn typed_efs_fallback_raised_after_the_seed_degrades_to_bfgs_2253_2658() {
                         psi_gradient: None,
                         psi_indices: None,
                         inner_hessian_scale: None,
-                        logdet_enclosure_gap: None,
                         consecutive_restored_incumbents: None,
                     })
                 } else {
@@ -145,7 +144,6 @@ fn post_seed_custom_family_refusal_retains_typed_terminal_state_2658() {
                         psi_gradient: None,
                         psi_indices: None,
                         inner_hessian_scale: None,
-                        logdet_enclosure_gap: None,
                         consecutive_restored_incumbents: None,
                     });
                 }
@@ -253,7 +251,6 @@ fn non_finite_efs_seed_cost_is_a_typed_seed_rejection_2653() {
                 psi_gradient: None,
                 psi_indices: None,
                 inner_hessian_scale: None,
-                logdet_enclosure_gap: None,
                 consecutive_restored_incumbents: None,
             })
         }),
@@ -330,7 +327,6 @@ fn non_finite_post_seed_efs_cost_is_a_typed_iteration_rejection_2653() {
                     psi_gradient: None,
                     psi_indices: None,
                     inner_hessian_scale: None,
-                    logdet_enclosure_gap: None,
                     consecutive_restored_incumbents: None,
                 })
             })
@@ -460,7 +456,6 @@ fn rho_local_efs_refusal_resumes_bfgs_from_last_finite_incumbent_once_2653() {
                     psi_gradient: None,
                     psi_indices: None,
                     inner_hessian_scale: None,
-                    logdet_enclosure_gap: None,
                     consecutive_restored_incumbents: None,
                 })
             })
@@ -523,7 +518,6 @@ fn a_step_norm_stop_at_a_non_stationary_point_continues_the_incumbent_2817() {
                     psi_gradient: None,
                     psi_indices: None,
                     inner_hessian_scale: None,
-                    logdet_enclosure_gap: None,
                     consecutive_restored_incumbents: None,
                 })
             })
@@ -600,7 +594,6 @@ fn a_step_norm_stop_at_a_stationary_point_is_certified_2817() {
                 psi_gradient: None,
                 psi_indices: None,
                 inner_hessian_scale: None,
-                logdet_enclosure_gap: None,
                 consecutive_restored_incumbents: None,
             })
         }),
@@ -684,7 +677,6 @@ fn a_budget_exhausted_efs_walk_publishes_its_best_iterate_2817() {
                     psi_gradient: None,
                     psi_indices: None,
                     inner_hessian_scale: None,
-                    logdet_enclosure_gap: None,
                     consecutive_restored_incumbents: None,
                 })
             })
@@ -779,7 +771,6 @@ fn post_seed_objective_failure_without_a_request_stays_fatal_2253_2658() {
                         psi_gradient: None,
                         psi_indices: None,
                         inner_hessian_scale: None,
-                        logdet_enclosure_gap: None,
                         consecutive_restored_incumbents: None,
                     })
                 } else {

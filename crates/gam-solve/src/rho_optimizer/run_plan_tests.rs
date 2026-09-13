@@ -1876,7 +1876,6 @@ fn closure_terminal_order_overrides_efs_finalization() {
                         psi_gradient: None,
                         psi_indices: None,
                         inner_hessian_scale: None,
-                        logdet_enclosure_gap: None,
                         consecutive_restored_incumbents: None,
                     })
                 },
@@ -2133,7 +2132,6 @@ fn hybrid_efs_backtracking_uses_half_step_after_first_rejection() {
                 psi_gradient: Some(array![1.0]),
                 psi_indices: Some(vec![11]),
                 inner_hessian_scale: None,
-                logdet_enclosure_gap: None,
                 consecutive_restored_incumbents: None,
             })
         }),
@@ -2213,7 +2211,6 @@ fn hybrid_efs_backtracking_propagates_fatal_cost_failure() {
                 psi_gradient: None,
                 psi_indices: None,
                 inner_hessian_scale: None,
-                logdet_enclosure_gap: None,
                 consecutive_restored_incumbents: None,
             })
         }),
@@ -2293,7 +2290,6 @@ fn fixed_point_stops_on_second_consecutive_restored_incumbent_2241() {
                 psi_gradient: None,
                 psi_indices: None,
                 inner_hessian_scale: None,
-                logdet_enclosure_gap: None,
                 consecutive_restored_incumbents: Some(*restores),
             })
         }),

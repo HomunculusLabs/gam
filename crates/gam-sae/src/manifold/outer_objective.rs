@@ -2390,7 +2390,6 @@ impl SaeManifoldOuterObjective {
                     psi_gradient: None,
                     psi_indices: None,
                     inner_hessian_scale: None,
-                    logdet_enclosure_gap: None,
                     consecutive_restored_incumbents: None,
                 },
                 (0..n_params)
@@ -2742,7 +2741,6 @@ impl SaeManifoldOuterObjective {
                 psi_gradient: (!psi_gradient.is_empty()).then(|| Array1::from_vec(psi_gradient)),
                 psi_indices: (!psi_indices.is_empty()).then_some(psi_indices),
                 inner_hessian_scale: None,
-                logdet_enclosure_gap: None,
                 consecutive_restored_incumbents,
             },
             fixed_point_coordinates,

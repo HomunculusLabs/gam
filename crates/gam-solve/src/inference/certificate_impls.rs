@@ -179,7 +179,7 @@ impl Certificate for LogdetEnclosure {
 
     fn verdict(&self) -> Verdict {
         // An enclosure on its own does not certify a decision — only a consumer
-        // margin does (via `LogdetEnclosure::gap_resolves_margin`). The standalone verdict is
+        // margin does. The standalone verdict is
         // `Insufficient` when the enclosure is finite (evidence present, no
         // decision yet) and `Unavailable` when the bounds are non-finite.
         if self.lower.is_finite() && self.upper.is_finite() && self.gap().is_finite() {

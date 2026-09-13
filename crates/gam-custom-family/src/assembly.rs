@@ -662,7 +662,6 @@ pub(crate) fn unified_joint_efs_eval(
                 Some(hybrid.psi_indices)
             },
             inner_hessian_scale,
-            logdet_enclosure_gap: None,
             consecutive_restored_incumbents: None,
         })
     } else {
@@ -675,7 +674,6 @@ pub(crate) fn unified_joint_efs_eval(
             psi_gradient: None,
             psi_indices: None,
             inner_hessian_scale,
-            logdet_enclosure_gap: None,
             consecutive_restored_incumbents: None,
         })
     }

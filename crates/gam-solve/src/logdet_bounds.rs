@@ -29,14 +29,4 @@ impl LogdetEnclosure {
     pub fn gap(&self) -> f64 {
         self.upper - self.lower
     }
-
-    /// Whether an enclosure `gap` is resolved more tightly than a consumer's
-    /// `decision_margin`, for consumers that hold only the gap (e.g. the EFS
-    /// engine, which receives the cost's enclosure width through `EfsEval`).
-    pub(crate) fn gap_resolves_margin(gap: f64, decision_margin: f64) -> bool {
-        decision_margin.is_finite()
-            && decision_margin > 0.0
-            && gap.is_finite()
-            && gap < decision_margin
-    }
 }

@@ -2644,5 +2644,14 @@
     },
     "reason": "#2829 no product user: SaeAssignmentState::materialize_dense has no caller, and is_full_support was reached only through it. The state and metadata fields only materialize_dense read are deleted with it.",
     "evidence": "At 1ca8c5df70b8f2860a2b4a4972ce4ef9a9af3e4b, git grep -n over crates, src and tests finds no call of SaeAssignmentState::materialize_dense: gam-sae names it only inside assignment_state.rs, and every other materialize_dense( call is on a Hessian, penalty or operator type. is_full_support is called only by materialize_dense. The ungated, frozen_logits and ordered_beta_bernoulli_alpha_override state fields and the AtomCoordMeta id_mode and latent_id fields were read only by materialize_dense, and SaeAssignmentAtomSpec id_mode and latent_id were only copied into that metadata."
+  },
+  {
+    "base": "2dcfb25d18e3fa97d44619f0894bcd5462b5acf0",
+    "removed": {
+      "crates/gam-solve/src/logdet_bounds.rs::gap_resolves_margin": 1,
+      "crates/gam-solve/src/reml/per_atom_efs.rs::efs_refuses_to_converge_below_the_logdet_enclosure_margin": 1
+    },
+    "reason": "#2829 test-only code: EfsEval::logdet_enclosure_gap is None in every production objective, so the per-atom EFS enclosure margin gate, LogdetEnclosure::gap_resolves_margin and the EnclosureGapObjective test fixture that alone set Some were reachable only from tests.",
+    "evidence": "At 2dcfb25d18e3fa97d44619f0894bcd5462b5acf0, git grep -n -w logdet_enclosure_gap over crates, src and tests finds 23 None initializers, the field declaration in crates/gam-problem/src/solver_contract.rs, the two gate reads in crates/gam-solve/src/reml/per_atom_efs.rs and one Some assignment inside that file test module (EnclosureGapObjective::eval_efs). gap_resolves_margin is called only by the gate; the six OuterObjective method identities fall by one because the test objective impl is deleted."
   }
 ]

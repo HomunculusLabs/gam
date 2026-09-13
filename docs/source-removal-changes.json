@@ -6518,5 +6518,21 @@
     ],
     "reason": "#2829 test-only code: EvidenceCertification::Enclosure has no production producer, and same_class_race_respects_enclosure_decision_margin existed only to exercise it; the coreset race test pins the same margin seam.",
     "evidence": "At cbe89574a88e8e17da75b33b75bfa7aec7be10c8, git grep -n EvidenceCertification::Enclosure over crates, src and tests finds only crates/gam-solve/src/topology_selector.rs: the required_margin arm and five constructions inside its test module. gam-pyffi inference_instruments.rs and tests/identifiability/misc/topology_mixture_rung.rs construct only EvidenceCertification::Exact."
+  },
+  {
+    "base": "2dcfb25d18e3fa97d44619f0894bcd5462b5acf0",
+    "items": [
+      "crates/gam-solve/src/logdet_bounds.rs:fn:gap_resolves_margin",
+      "crates/gam-solve/src/reml/per_atom_efs.rs:fn:capability",
+      "crates/gam-solve/src/reml/per_atom_efs.rs:fn:efs_refuses_to_converge_below_the_logdet_enclosure_margin",
+      "crates/gam-solve/src/reml/per_atom_efs.rs:fn:eval",
+      "crates/gam-solve/src/reml/per_atom_efs.rs:fn:eval_cost",
+      "crates/gam-solve/src/reml/per_atom_efs.rs:fn:eval_efs",
+      "crates/gam-solve/src/reml/per_atom_efs.rs:fn:reset",
+      "crates/gam-solve/src/reml/per_atom_efs.rs:fn:seed_inner_state",
+      "crates/gam-solve/src/reml/per_atom_efs.rs:struct:EnclosureGapObjective"
+    ],
+    "reason": "#2829 test-only code: EfsEval::logdet_enclosure_gap is None in every production objective, so the per-atom EFS enclosure margin gate, LogdetEnclosure::gap_resolves_margin and the EnclosureGapObjective test fixture that alone set Some were reachable only from tests.",
+    "evidence": "At 2dcfb25d18e3fa97d44619f0894bcd5462b5acf0, git grep -n -w logdet_enclosure_gap over crates, src and tests finds 23 None initializers, the field declaration in crates/gam-problem/src/solver_contract.rs, the two gate reads in crates/gam-solve/src/reml/per_atom_efs.rs and one Some assignment inside that file test module (EnclosureGapObjective::eval_efs). gap_resolves_margin is called only by the gate; the six OuterObjective method identities fall by one because the test objective impl is deleted."
   }
 ]

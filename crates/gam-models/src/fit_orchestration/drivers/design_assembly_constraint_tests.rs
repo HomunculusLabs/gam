@@ -2292,7 +2292,6 @@ pub(super) fn run_two_block_exact_joint_optimize(
                     psi_gradient: None,
                     psi_indices: None,
                     inner_hessian_scale: None,
-                    logdet_enclosure_gap: None,
                     consecutive_restored_incumbents: None,
                 },
                 mode: (),

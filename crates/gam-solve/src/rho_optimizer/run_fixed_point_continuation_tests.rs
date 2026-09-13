@@ -97,7 +97,6 @@ fn run_fixture(continuation_is_stationary: bool) -> (OuterResult, usize) {
                         psi_gradient: None,
                         psi_indices: None,
                         inner_hessian_scale: None,
-                        logdet_enclosure_gap: None,
                         consecutive_restored_incumbents: None,
                     });
                 }

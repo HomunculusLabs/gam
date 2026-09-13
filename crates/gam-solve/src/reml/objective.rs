@@ -2410,7 +2410,6 @@ impl<'a> RemlState<'a> {
                 psi_gradient,
                 psi_indices,
                 inner_hessian_scale,
-                logdet_enclosure_gap: None,
                 consecutive_restored_incumbents: None,
             }
         } else {
@@ -2430,7 +2429,6 @@ impl<'a> RemlState<'a> {
                 psi_gradient: None,
                 psi_indices: None,
                 inner_hessian_scale,
-                logdet_enclosure_gap: None,
                 consecutive_restored_incumbents: None,
             }
         };
