@@ -2747,20 +2747,27 @@ impl ImplicitDesignPsiDerivative {
             let scale = self.chart_scale;
             let g = self.effective_share(axis);
             let mut raw = Array2::<f64>::zeros((n, k));
-            for i in 0..n {
-                let base = i * k;
-                for j in 0..k {
-                    let idx = base + j;
-                    let s_combo = self.transformed_combo_axis_value_materialized(idx, combo);
-                    raw[[i, j]] = Self::first_kernel_value(
-                        scale,
-                        self.phi_values[idx],
-                        self.q_values[idx],
-                        s_combo,
-                        g,
-                    );
-                }
-            }
+            // Each row reads only its own pairs, so rows fill in parallel with
+            // the entries a sequential sweep produces. An n × 0 matrix has an
+            // empty slice, so its unit chunk size fills nothing.
+            raw.as_slice_mut()
+                .expect("a freshly allocated n × k matrix is contiguous")
+                .par_chunks_mut(k.max(1))
+                .enumerate()
+                .for_each(|(i, row)| {
+                    let base = i * k;
+                    for (j, value) in row.iter_mut().enumerate() {
+                        let idx = base + j;
+                        let s_combo = self.transformed_combo_axis_value_materialized(idx, combo);
+                        *value = Self::first_kernel_value(
+                            scale,
+                            self.phi_values[idx],
+                            self.q_values[idx],
+                            s_combo,
+                            g,
+                        );
+                    }
+                });
             return Ok(self.project_matrix(raw));
         }
         if self.is_streaming() {
@@ -2775,18 +2782,23 @@ impl ImplicitDesignPsiDerivative {
         let scale = self.chart_scale;
         let g = self.effective_share(axis);
         let mut raw = Array2::<f64>::zeros((n, k));
-        for i in 0..n {
-            let base = i * k;
-            for j in 0..k {
-                raw[[i, j]] = Self::first_kernel_value(
-                    scale,
-                    self.phi_values[base + j],
-                    self.q_values[base + j],
-                    self.axis_components[[base + j, axis]],
-                    g,
-                );
-            }
-        }
+        // Rows fill in parallel exactly as in the combination arm above.
+        raw.as_slice_mut()
+            .expect("a freshly allocated n × k matrix is contiguous")
+            .par_chunks_mut(k.max(1))
+            .enumerate()
+            .for_each(|(i, row)| {
+                let base = i * k;
+                for (j, value) in row.iter_mut().enumerate() {
+                    *value = Self::first_kernel_value(
+                        scale,
+                        self.phi_values[base + j],
+                        self.q_values[base + j],
+                        self.axis_components[[base + j, axis]],
+                        g,
+                    );
+                }
+            });
         Ok(self.project_matrix(raw))
     }
 
