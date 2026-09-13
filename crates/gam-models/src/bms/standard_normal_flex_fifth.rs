@@ -906,6 +906,64 @@ impl BernoulliMarginalSlopeFamily {
         Ok(CalibrationCrossings { crossings })
     }
 
+    /// Every link-knot crossing's moving-boundary terms of orders two and three
+    /// over the intercept and the primary coordinates: the terms
+    /// `accumulate_primary_third_cell_moments` misses when it sums cell by cell.
+    pub(super) fn standard_normal_flex_third_calibration_crossings(
+        &self,
+        primary: &PrimarySlices,
+        a: f64,
+        b: f64,
+        cells: &[CachedDenestedCellMoments],
+    ) -> Result<ThirdCalibrationCrossings, String> {
+        use ExplicitSlot::{Coordinate, Intercept};
+        let r = primary.total;
+        let still = Array1::<f64>::zeros(r);
+        let partition: Vec<exact_kernel::DenestedPartitionCell> =
+            cells.iter().map(|entry| entry.partition_cell).collect();
+        let crossings = self.standard_normal_flex_calibration_crossings(
+            primary,
+            a,
+            b,
+            &partition,
+            [&still, &still],
+        )?;
+        let mut terms = ThirdCalibrationCrossings {
+            r,
+            aa: crossings.partial(&[Intercept, Intercept]),
+            aaa: crossings.partial(&[Intercept, Intercept, Intercept]),
+            au: vec![0.0; r],
+            aau: vec![0.0; r],
+            uv: vec![0.0; r * r],
+            auv: vec![0.0; r * r],
+            uvw: vec![0.0; r * r * r],
+        };
+        for p in 1..r {
+            let pc = Coordinate(p);
+            terms.au[p] = crossings.partial(&[Intercept, pc]);
+            terms.aau[p] = crossings.partial(&[Intercept, Intercept, pc]);
+            for q in p..r {
+                let qc = Coordinate(q);
+                let second = crossings.partial(&[pc, qc]);
+                let third = crossings.partial(&[Intercept, pc, qc]);
+                for (k, l) in [(p, q), (q, p)] {
+                    terms.uv[k * r + l] = second;
+                    terms.auv[k * r + l] = third;
+                }
+                for s in q..r {
+                    let value = crossings.partial(&[pc, qc, Coordinate(s)]);
+                    let labels = [p, q, s];
+                    for ordering in &ORDERINGS {
+                        let flat = (labels[ordering[0]] * r + labels[ordering[1]]) * r
+                            + labels[ordering[2]];
+                        terms.uvw[flat] = value;
+                    }
+                }
+            }
+        }
+        Ok(terms)
+    }
+
     /// Adds every link-knot crossing's moving-boundary terms to the explicit
     /// calibration partials of orders two and three that
     /// `accumulate_primary_third_cell_moments` sums cell by cell. A directional
@@ -928,74 +986,93 @@ impl BernoulliMarginalSlopeFamily {
         f_aau: &mut Array1<f64>,
         f_auv: &mut Array2<f64>,
     ) -> Result<(), String> {
-        use ExplicitSlot::{Coordinate, Intercept};
-        let r = primary.total;
-        let still = Array1::<f64>::zeros(r);
-        let partition: Vec<exact_kernel::DenestedPartitionCell> =
-            cells.iter().map(|entry| entry.partition_cell).collect();
-        let crossings = self.standard_normal_flex_calibration_crossings(
-            primary,
-            a,
-            b,
-            &partition,
-            [&still, &still],
-        )?;
-        *f_aa += crossings.partial(&[Intercept, Intercept]);
-        *f_aaa += crossings.partial(&[Intercept, Intercept, Intercept]);
-        let mut boundary_au = vec![0.0; r];
-        let mut boundary_aau = vec![0.0; r];
-        let mut boundary_uv = vec![0.0; r * r];
-        let mut boundary_auv = vec![0.0; r * r];
-        let mut boundary_uvw = vec![0.0; r * r * r];
-        for p in 1..r {
-            let pc = Coordinate(p);
-            boundary_au[p] = crossings.partial(&[Intercept, pc]);
-            boundary_aau[p] = crossings.partial(&[Intercept, Intercept, pc]);
-            for q in p..r {
-                let qc = Coordinate(q);
-                let second = crossings.partial(&[pc, qc]);
-                let third = crossings.partial(&[Intercept, pc, qc]);
-                for (k, l) in [(p, q), (q, p)] {
-                    boundary_uv[k * r + l] = second;
-                    boundary_auv[k * r + l] = third;
-                }
-                for s in q..r {
-                    let value = crossings.partial(&[pc, qc, Coordinate(s)]);
-                    let labels = [p, q, s];
-                    for ordering in &ORDERINGS {
-                        let flat = (labels[ordering[0]] * r + labels[ordering[1]]) * r
-                            + labels[ordering[2]];
-                        boundary_uvw[flat] = value;
-                    }
-                }
-            }
-        }
-        for p in 1..r {
-            f_au[p] += boundary_au[p];
-            f_aau[p] += boundary_aau[p];
-            for q in 1..r {
-                f_uv[[p, q]] += boundary_uv[p * r + q];
-                f_auv[[p, q]] += boundary_auv[p * r + q];
-            }
-        }
+        let terms = self.standard_normal_flex_third_calibration_crossings(primary, a, b, cells)?;
+        terms.add_base(f_aa, f_au, f_uv, f_aaa, f_aau, f_auv);
+        let r = terms.r;
         for (direction, dir) in row_dirs.iter().enumerate() {
             for s in 1..r {
                 let weight = dir[s];
                 if weight == 0.0 {
                     continue;
                 }
-                f_a_dir[direction] += weight * boundary_au[s];
-                f_aa_dir[direction] += weight * boundary_aau[s];
+                f_a_dir[direction] += weight * terms.au[s];
+                f_aa_dir[direction] += weight * terms.aau[s];
                 for p in 1..r {
-                    f_au_dir[direction * r + p] += weight * boundary_auv[p * r + s];
+                    f_au_dir[direction * r + p] += weight * terms.auv[p * r + s];
                     for q in 1..r {
                         f_uv_dir[(direction * r + p) * r + q] +=
-                            weight * boundary_uvw[(p * r + q) * r + s];
+                            weight * terms.uvw[(p * r + q) * r + s];
                     }
                 }
             }
         }
         Ok(())
+    }
+}
+
+/// The link-knot crossings' moving-boundary terms of orders two and three over
+/// the intercept `a` and the primary coordinates, dense and symmetric:
+/// `aa = B[a,a]`, `au[p] = B[a,p]`, `uv[p·r + q] = B[p,q]`, `aaa = B[a,a,a]`,
+/// `aau[p] = B[a,a,p]`, `auv[p·r + q] = B[a,p,q]` and `uvw[(p·r + q)·r + s] = B[p,q,s]`.
+/// The marginal coordinate moves no crossing, so its entries stay zero.
+pub(super) struct ThirdCalibrationCrossings {
+    r: usize,
+    aa: f64,
+    aaa: f64,
+    au: Vec<f64>,
+    aau: Vec<f64>,
+    uv: Vec<f64>,
+    auv: Vec<f64>,
+    uvw: Vec<f64>,
+}
+
+impl ThirdCalibrationCrossings {
+    /// Adds the direction-free terms to the accumulated partials.
+    pub(super) fn add_base(
+        &self,
+        f_aa: &mut f64,
+        f_au: &mut Array1<f64>,
+        f_uv: &mut Array2<f64>,
+        f_aaa: &mut f64,
+        f_aau: &mut Array1<f64>,
+        f_auv: &mut Array2<f64>,
+    ) {
+        let r = self.r;
+        *f_aa += self.aa;
+        *f_aaa += self.aaa;
+        for p in 1..r {
+            f_au[p] += self.au[p];
+            f_aau[p] += self.aau[p];
+            for q in 1..r {
+                f_uv[[p, q]] += self.uv[p * r + q];
+                f_auv[[p, q]] += self.auv[p * r + q];
+            }
+        }
+    }
+
+    /// The reverse of the directional terms. A directional partial is
+    /// `Σ_s dir_s·B[…, s]`, so its adjoint adds `adjoint·B[…, s]` to
+    /// `direction_adjoint[s]`. `adj_f_uv_dir` holds the upper triangle the
+    /// forward pass reads.
+    pub(super) fn add_direction_adjoint(
+        &self,
+        adj_f_a_dir: f64,
+        adj_f_aa_dir: f64,
+        adj_f_au_dir: &[f64],
+        adj_f_uv_dir: &Array2<f64>,
+        direction_adjoint: &mut [f64],
+    ) {
+        let r = self.r;
+        for s in 1..r {
+            let mut total = adj_f_a_dir * self.au[s] + adj_f_aa_dir * self.aau[s];
+            for p in 1..r {
+                total += adj_f_au_dir[p] * self.auv[p * r + s];
+                for q in p..r {
+                    total += adj_f_uv_dir[[p, q]] * self.uvw[(p * r + q) * r + s];
+                }
+            }
+            direction_adjoint[s] += total;
+        }
     }
 }
 

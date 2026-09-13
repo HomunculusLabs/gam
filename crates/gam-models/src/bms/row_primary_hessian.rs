@@ -4751,6 +4751,16 @@ impl BernoulliMarginalSlopeFamily {
             }
         }
 
+        let crossings = self.standard_normal_flex_third_calibration_crossings(primary, a, b, cells)?;
+        crossings.add_base(
+            &mut f_aa,
+            &mut f_au,
+            &mut f_uv,
+            &mut f_aaa,
+            &mut f_aau,
+            &mut f_auv,
+        );
+
         f_u[0] = -marginal.mu1;
         f_uv[[0, 0]] = -marginal.mu2;
 
@@ -5280,6 +5290,13 @@ impl BernoulliMarginalSlopeFamily {
             }
         }
 
+        crossings.add_direction_adjoint(
+            adj_f_a_dir,
+            adj_f_aa_dir,
+            &adj_f_au_dir,
+            &adj_f_uv_dir,
+            &mut direction_adjoint,
+        );
         Ok(Array1::from_vec(direction_adjoint))
     }
 
