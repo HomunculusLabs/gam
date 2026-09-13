@@ -7306,5 +7306,13 @@
     ],
     "reason": "#2899 slop: two private splitmix64 functions in gam-inference were one-line wrappers over gam_linalg::utils::splitmix64_hash, and sample.rs carried a private copy of hmc_io's chain_stream_seed with the same formula. The callers now call splitmix64_hash directly, and sample.rs imports the hmc_io chain_stream_seed, now pub(crate) const. Every seed is bit-identical.",
     "evidence": "At the base, hmc_io.rs:3225-3228 and sample.rs:225-228 each define splitmix64(x) as gam_linalg::utils::splitmix64_hash(x). sample.rs:231-233 and hmc_io.rs:3231-3233 define chain_stream_seed with the identical body splitmix64(seed ^ stream ^ ((chain as u64).wrapping_mul(0xD1B5_4A32_D192_ED03))). The removed names stay declared elsewhere, gam_linalg::utils::splitmix64 among them, which is why the guard counts them."
+  },
+  {
+    "base": "1e4b361a71c27b59fcbf14fb2d957f4e8df2f87f",
+    "items": [
+      "crates/gam-sae/src/sparse_dict/block_stream.rs:fn:block_motion"
+    ],
+    "reason": "#2502, #2825. db2f4cbd3 weighted the streaming block majorizer by each admitted block's expected motion, read off the previous frame step, and the #2825 certification pin coupled_stream_certifies_the_returned_frames_gamma_and_fresh_ev_2825 went red under it. This commit restores the k-bound surrogate that stood before db2f4cbd3 and deletes block_motion, the motion-weight helper that only the weighting called.",
+    "evidence": "At the base, git grep -n -w block_motion finds only crates/gam-sae/src/sparse_dict/block_stream.rs: the declaration (line 165) and its two calls in partial_fit (lines 731 and 845), both removed here. search_motion, normal_second and majorizer_weight appear only in block_stream.rs and block_stream_tests.rs. Job 585946 (/scratch.global/sauer354/pool/sae-overcomplete/diag0912l_tests.585946.log), HEAD f39a9bb56 plus this patch: cargo test -p gam-sae --lib -- sparse_dict:: spectrometer:: 124 passed and 5 failed, none of them in block_stream. Guarded check job 598209 (/scratch.global/sauer354/pool/sae-overcomplete/chk0913a_check.598209.log), HEAD 08fbec7ce plus this patch: cargo check --workspace --all-targets --exclude gam-pyffi errors only in the root tests conformal_coverage_quality.rs and row_metric_loud_vs_loadbearing.rs, which ffac510db fixed."
   }
 ]
