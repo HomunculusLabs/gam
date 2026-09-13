@@ -401,7 +401,9 @@ fn profiled_gaussian_reml_psi_jet(
     let rho_at_bound = rho == fit.rho_domain.0 || rho == fit.rho_domain.1;
     let schur = if rho_at_bound {
         0.0
-    } else if hess_rho.is_finite() && hess_rho.abs() > 1.0e-14 {
+    } else if hess_rho.is_finite() && hess_rho != 0.0 {
+        // Any finite nonzero curvature inverts. A Schur term that overflows is
+        // refused by the non-finite check on the assembled Hessian below.
         1.0 / hess_rho
     } else {
         crate::bail_invalid_estim!(
