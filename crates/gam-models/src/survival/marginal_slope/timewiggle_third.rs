@@ -370,9 +370,13 @@ struct ZetaFrame<'a> {
     primary: FlexPrimarySlices,
     layout: ZetaLayout,
     time_tail: std::ops::Range<usize>,
-    slope_zeta: usize,
+    /// The ζ index of every slope channel, in the order of `SlopeLayout::primary_channels`: one
+    /// for a time-constant slope, three for a follow-up-varying one.
+    slope_channels: Vec<usize>,
     /// `(coefficient index, ζ index)` of every identity-mapped flex coefficient.
     identity_images: Vec<(usize, usize)>,
+    /// The ζ index of the absorbed influence offset, whose coefficients load through `Z̃_infl`.
+    influence_zeta: Option<usize>,
 }
 
 /// One row's time-wiggle geometry and the ζ image `Ã` of every coefficient axis.
@@ -469,38 +473,61 @@ fn pull_back_axes(
 }
 
 /// The ζ image `Ã_ψ` of every coefficient axis under a design ψ that moves block `block_idx`
-/// through the design-derivative row `x_psi`: a marginal row moves both indices, and a slope
-/// row moves the slope coordinate.
+/// through the design-derivative row `x_psi` of row `row`: a marginal row moves both indices, and
+/// a slope row moves every slope channel. A follow-up-varying slope lifts a covariate row onto its
+/// three channels through the layout's time margin.
 fn psi_zeta_images(
+    family: &SurvivalMarginalSlopeFamily,
     frame: &ZetaFrame<'_>,
+    row: usize,
     block_idx: usize,
     x_psi: &Array1<f64>,
 ) -> Result<Vec<ZetaImage>, String> {
     let slices = &frame.slices;
     let mut images = vec![ZetaImage::default(); slices.total];
-    let range = match block_idx {
-        1 => slices.marginal.clone(),
-        2 => slices.slope.clone(),
-        _ => {
+    let (range, channel_rows): (std::ops::Range<usize>, Vec<(usize, Array1<f64>)>) =
+        match block_idx {
+            1 => (
+                slices.marginal.clone(),
+                vec![(ZETA_H0, x_psi.clone()), (ZETA_H1, x_psi.clone())],
+            ),
+            2 => {
+                let channel_rows = match (
+                    family.slope_layout.time_margin(),
+                    frame.slope_channels.as_slice(),
+                ) {
+                    (Some(margin), channels) => channels
+                        .iter()
+                        .copied()
+                        .zip(margin.lift_row(row, x_psi))
+                        .collect(),
+                    (None, &[zeta]) => vec![(zeta, x_psi.clone())],
+                    (None, channels) => {
+                        return Err(format!(
+                            "time-wiggle ζ composition: a slope with {} channels records no time \
+                             margin to lift a covariate design ψ onto them",
+                            channels.len()
+                        ));
+                    }
+                };
+                (slices.slope.clone(), channel_rows)
+            }
+            _ => {
+                return Err(format!(
+                    "time-wiggle ζ composition: a design ψ on block {block_idx} has no ζ image"
+                ));
+            }
+        };
+    for (zeta, design_row) in &channel_rows {
+        if design_row.len() != range.len() {
             return Err(format!(
-                "time-wiggle ζ composition: a design ψ on block {block_idx} has no ζ image"
+                "time-wiggle ζ composition: a design ψ row has {} entries for a block of width {}",
+                design_row.len(),
+                range.len()
             ));
         }
-    };
-    if x_psi.len() != range.len() {
-        return Err(format!(
-            "time-wiggle ζ composition: a design ψ row has {} entries for a block of width {}",
-            x_psi.len(),
-            range.len()
-        ));
-    }
-    for (local, &value) in x_psi.iter().enumerate() {
-        let image = &mut images[range.start + local];
-        if block_idx == 1 {
-            image.push(ZETA_H0, value);
-            image.push(ZETA_H1, value);
-        } else {
-            image.push(frame.slope_zeta, value);
+        for (local, &value) in design_row.iter().enumerate() {
+            images[range.start + local].push(*zeta, value);
         }
     }
     Ok(images)
@@ -693,25 +720,28 @@ fn flat_beta(block_states: &[ParameterBlockState]) -> Result<Array1<f64>, String
 
 impl SurvivalMarginalSlopeFamily {
     /// Whether the ζ composition serves this family's design-ψ third information derivatives:
-    /// a time wiggle with a score warp or link deviation, no influence absorber, a single score
-    /// slope, and a slope design without a follow-up margin.
+    /// a time wiggle on the FLEX row program (a score warp, link deviation or influence absorber),
+    /// a single score slope, and a time-constant slope, the one slope primary the FLEX program
+    /// carries.
     pub(crate) fn timewiggle_flex_design_psi_third_available(&self) -> bool {
         self.flex_timewiggle_active()
-            && (self.score_warp.is_some() || self.link_dev.is_some())
-            && self.influence_absorber.is_none()
+            && self.flex_active()
             && !self.per_z_slope_active()
-            && self.slope_layout.time_margin().is_none()
+            && !self.slope_is_follow_up_varying()
     }
 
-    /// The ζ frame of this family. An influence absorber's primary has no ζ coordinate, and a
-    /// family without a time-wiggle basis has no z block, so both are refused.
+    /// The ζ frame of this family. A family without a time-wiggle basis has no z block, and the
+    /// FLEX row program carries one slope primary, so a follow-up-varying slope beside it has no ζ
+    /// frame; both are refused.
     fn timewiggle_zeta_frame(
         &self,
         block_states: &[ParameterBlockState],
     ) -> Result<ZetaFrame<'_>, String> {
-        if self.influence_absorber.is_some() {
+        let flex = self.flex_active();
+        if flex && self.slope_is_follow_up_varying() {
             return Err(
-                "time-wiggle ζ composition: the influence absorber's primary has no ζ coordinate"
+                "time-wiggle ζ composition: the FLEX row program carries one slope primary, so a \
+                 follow-up-varying slope has no ζ frame"
                     .to_string(),
             );
         }
@@ -723,7 +753,12 @@ impl SurvivalMarginalSlopeFamily {
             );
         };
         let slices = block_slices(self, block_states);
-        let primary = flex_primary_slices(self);
+        let mut primary = flex_primary_slices(self);
+        if !flex {
+            // The rigid row program's own frame: four primaries, or six beside a follow-up-varying
+            // slope.
+            primary.total = self.core_primary_dimension();
+        }
         let time_tail = self.time_wiggle_range();
         let z_width = ZETA_GAMMA + time_tail.len();
         let q = [primary.q0, primary.q1, primary.qd1];
@@ -736,9 +771,21 @@ impl SurvivalMarginalSlopeFamily {
         for &(k, zeta) in &linear {
             zeta_of_primary[k] = Some(zeta);
         }
-        let slope_zeta = zeta_of_primary[primary.g].ok_or_else(|| {
-            "time-wiggle ζ composition: the slope primary has no ζ coordinate".to_string()
-        })?;
+        let slope_channels = self
+            .slope_layout
+            .primary_channels()
+            .as_slice()
+            .iter()
+            .map(|&(slope_primary, design)| {
+                zeta_of_primary[slope_primary].ok_or_else(|| {
+                    format!(
+                        "time-wiggle ζ composition: the slope primary {slope_primary} of a \
+                         {}-column channel has no ζ coordinate",
+                        design.ncols()
+                    )
+                })
+            })
+            .collect::<Result<Vec<usize>, String>>()?;
         let mut identity_images = Vec::new();
         for (primary_range, joint_range) in flex_identity_block_pairs(&primary, &slices) {
             if primary_range.len() != joint_range.len() {
@@ -754,6 +801,14 @@ impl SurvivalMarginalSlopeFamily {
                 identity_images.push((joint_range.start + local, zeta));
             }
         }
+        let influence_zeta = primary
+            .infl
+            .map(|k| {
+                zeta_of_primary[k].ok_or_else(|| {
+                    "time-wiggle ζ composition: the influence primary has no ζ coordinate".to_string()
+                })
+            })
+            .transpose()?;
         let layout = ZetaLayout {
             q,
             width: z_width + linear.len(),
@@ -767,8 +822,9 @@ impl SurvivalMarginalSlopeFamily {
             primary,
             layout,
             time_tail,
-            slope_zeta,
+            slope_channels,
             identity_images,
+            influence_zeta,
         })
     }
 
@@ -802,16 +858,10 @@ impl SurvivalMarginalSlopeFamily {
             .marginal_design
             .try_row_chunk(row..row + 1)
             .map_err(|e| format!("marginal_design try_row_chunk: {e}"))?;
-        let slope_chunk = self
-            .slope_layout
-            .coefficient_design()
-            .try_row_chunk(row..row + 1)
-            .map_err(|e| format!("slope_design try_row_chunk: {e}"))?;
         let xe = entry_chunk.row(0).slice(s![..p_base]).to_owned();
         let xx = exit_chunk.row(0).slice(s![..p_base]).to_owned();
         let xd = derivative_chunk.row(0).slice(s![..p_base]).to_owned();
         let mr = marginal_chunk.row(0);
-        let gr = slope_chunk.row(0);
         let bm = block_states[1].eta[row];
         let h0 = xe.dot(&beta_base) + self.offset_entry[row] + bm;
         let h1 = xx.dot(&beta_base) + self.offset_exit[row] + bm;
@@ -857,11 +907,27 @@ impl SurvivalMarginalSlopeFamily {
             image.push(ZETA_H0, mr[j]);
             image.push(ZETA_H1, mr[j]);
         }
-        for b in 0..slices.slope.len() {
-            images[slices.slope.start + b].push(frame.slope_zeta, gr[b]);
+        let slope_designs = self.slope_layout.primary_channels();
+        for (channel, &zeta) in frame.slope_channels.iter().enumerate() {
+            let chunk = slope_designs.as_slice()[channel]
+                .1
+                .try_row_chunk(row..row + 1)
+                .map_err(|e| format!("slope channel design try_row_chunk: {e}"))?;
+            for (b, &value) in chunk.row(0).iter().enumerate() {
+                images[slices.slope.start + b].push(zeta, value);
+            }
         }
         for &(joint, zeta) in &frame.identity_images {
             images[joint].push(zeta, 1.0);
+        }
+        if let (Some(zeta), Some(range), Some(z_tilde)) = (
+            frame.influence_zeta,
+            slices.influence.as_ref(),
+            self.influence_absorber.as_ref(),
+        ) {
+            for (local, &value) in z_tilde.row(row).iter().enumerate() {
+                images[range.start + local].push(zeta, value);
+            }
         }
         Ok(ZetaRow {
             geometry: WiggleRowGeometry {
@@ -1233,7 +1299,7 @@ impl SurvivalMarginalSlopeFamily {
                     let x_psi = psi_map.row_vector(row).map_err(|error| {
                         format!("time-wiggle design ψ third information row: {error}")
                     })?;
-                    let psi_images = psi_zeta_images(&frame, block_idx, &x_psi)?;
+                    let psi_images = psi_zeta_images(self, &frame, row, block_idx, &x_psi)?;
                     let w = zeta_image_of(&psi_images, &beta, width);
                     let v_zeta = zeta_image_of(images, d_beta, width);
                     let psi_v_zeta = zeta_image_of(&psi_images, d_beta, width);
@@ -1328,7 +1394,7 @@ impl SurvivalMarginalSlopeFamily {
                     let x_psi = psi_map
                         .row_vector(row)
                         .map_err(|error| format!("time-wiggle design ψ Hessian sweep row: {error}"))?;
-                    let psi_images = psi_zeta_images(&frame, block_idx, &x_psi)?;
+                    let psi_images = psi_zeta_images(self, &frame, row, block_idx, &x_psi)?;
                     let w = zeta_image_of(&psi_images, &beta, width);
                     let third_axes = order_three_axes(&frame, &calc)?;
                     let fourth_w = self.timewiggle_order_four_axes(&frame, &calc, &w)?;
@@ -1453,13 +1519,13 @@ impl SurvivalMarginalSlopeFamily {
                     let calc = self.timewiggle_zeta_row_calculus(&frame, block_states, row, base)?;
                     let images = &calc.zeta_row.images;
                     let images_i =
-                        psi_zeta_images(&frame, block_i, &map_i.row_vector(row).map_err(row_error)?)?;
+                        psi_zeta_images(self, &frame, row, block_i, &map_i.row_vector(row).map_err(row_error)?)?;
                     let images_j =
-                        psi_zeta_images(&frame, block_j, &map_j.row_vector(row).map_err(row_error)?)?;
+                        psi_zeta_images(self, &frame, row, block_j, &map_j.row_vector(row).map_err(row_error)?)?;
                     let images_ij = map_ij
                         .as_ref()
                         .map(|map| -> Result<Vec<ZetaImage>, String> {
-                            psi_zeta_images(&frame, block_i, &map.row_vector(row).map_err(row_error)?)
+                            psi_zeta_images(self, &frame, row, block_i, &map.row_vector(row).map_err(row_error)?)
                         })
                         .transpose()?;
                     let w_i = zeta_image_of(&images_i, &beta, width);
@@ -1539,14 +1605,13 @@ impl SurvivalMarginalSlopeFamily {
 
 impl SurvivalMarginalSlopeFamily {
     /// Whether the ζ composition serves this family's design-ψ terms, their Hessian drift and the
-    /// pair terms (gam#2893): a time wiggle without an influence absorber, per-score slopes or a
-    /// follow-up-varying slope. Without a score warp or link deviation the rigid row program
-    /// supplies the ℓ derivatives on the same four primaries.
+    /// pair terms (gam#2893): a time wiggle with a single score slope. The FLEX row program serves a
+    /// time-constant slope; the rigid row program serves a time-constant or follow-up-varying slope
+    /// on its own four or six primaries.
     pub(crate) fn timewiggle_design_psi_terms_available(&self) -> bool {
         self.flex_timewiggle_active()
-            && self.influence_absorber.is_none()
             && !self.per_z_slope_active()
-            && !self.slope_is_follow_up_varying()
+            && !(self.flex_active() && self.slope_is_follow_up_varying())
     }
 
     /// Row `row`'s ζ value calculus for the design-ψ terms, from the FLEX row program when `flex`
@@ -1693,7 +1758,7 @@ impl SurvivalMarginalSlopeFamily {
                         let x_psi = psi_map
                             .row_vector(row)
                             .map_err(|error| format!("time-wiggle design ψ terms row: {error}"))?;
-                        let psi_images = psi_zeta_images(&frame, block_idx, &x_psi)?;
+                        let psi_images = psi_zeta_images(self, &frame, row, block_idx, &x_psi)?;
                         let w = zeta_image_of(&psi_images, &beta, width);
                         let third = |direction: &Array1<f64>| -> Result<Array2<f64>, String> {
                             self.zeta_row_third(&psi_row.program, block_states, row, direction)
@@ -1771,7 +1836,7 @@ impl SurvivalMarginalSlopeFamily {
                     let x_psi = psi_map
                         .row_vector(row)
                         .map_err(|error| format!("time-wiggle design ψ Hessian drift row: {error}"))?;
-                    let psi_images = psi_zeta_images(&frame, block_idx, &x_psi)?;
+                    let psi_images = psi_zeta_images(self, &frame, row, block_idx, &x_psi)?;
                     let w = zeta_image_of(&psi_images, &beta, width);
                     let v_zeta = zeta_image_of(images, d_beta, width);
                     let psi_v_zeta = zeta_image_of(&psi_images, d_beta, width);
@@ -1892,14 +1957,14 @@ impl SurvivalMarginalSlopeFamily {
                         let x_j = map_j
                             .row_vector(row)
                             .map_err(|error| format!("time-wiggle design ψ pair terms row: {error}"))?;
-                        let images_i = psi_zeta_images(&frame, block_i, &x_i)?;
-                        let images_j = psi_zeta_images(&frame, block_j, &x_j)?;
+                        let images_i = psi_zeta_images(self, &frame, row, block_i, &x_i)?;
+                        let images_j = psi_zeta_images(self, &frame, row, block_j, &x_j)?;
                         let images_ij = match map_ij.as_ref() {
                             Some(map) => {
                                 let x_ij = map.row_vector(row).map_err(|error| {
                                     format!("time-wiggle design ψ pair terms row: {error}")
                                 })?;
-                                Some(psi_zeta_images(&frame, block_i, &x_ij)?)
+                                Some(psi_zeta_images(self, &frame, row, block_i, &x_ij)?)
                             }
                             None => None,
                         };
