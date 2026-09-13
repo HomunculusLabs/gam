@@ -93,7 +93,7 @@ impl DenseSpectralOperator {
     /// `null(H) ⊆ null(S_λ)`, so the rank never falls below `rank(S_λ)`: where
     /// the band claims more nullity than the penalty has, the largest positive
     /// eigenvalues count too (#2748).
-    pub(crate) fn identified_rank(eigenvalues: &[f64], penalty_rank: usize) -> usize {
+    pub fn identified_rank(eigenvalues: &[f64], penalty_rank: usize) -> usize {
         let rounding_band = gam_linalg::roundoff::symmetric_spectrum_rounding_band(eigenvalues);
         let resolved = eigenvalues
             .iter()

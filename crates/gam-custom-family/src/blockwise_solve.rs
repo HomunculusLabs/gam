@@ -2222,37 +2222,50 @@ pub(crate) fn strict_solve_spd_or_spectral_step(
 }
 
 /// Eigenpairs of a Laplace precision `M = H + S_λ (+ H_Φ)` that its generalized
-/// log-determinant `log|M|₊` sums and its pseudo-inverse `M⁺` spans.
+/// log-determinant `log|M|₊` sums and its pseudo-inverse `M⁺` spans: the top
+/// [`DenseSpectralOperator::identified_rank`] eigenpairs, the rule standard REML
+/// prices `log|H|₊` on (#2901 V22), returned in index order.
 ///
-/// `log|M|₊` may drop only `ker(M) = ker(H) ∩ ker(S_λ)`. A precision that a
-/// strict, unjittered Cholesky certifies positive definite has no such
-/// direction, so every eigenpair is kept and `log|M|₊` is the ordinary `log|M|`
-/// (the certificate #2888 uses for posterior inverses). The relative cutoff
-/// `positive_eigenvalue_threshold` is `100·p·ε·max σ`, so one stiff direction
-/// lifts it above genuine curvature. On the #1569 survival location-scale
-/// fixture (job 445401) `max σ = 7.788e16` put it at `4.5e4`: the
-/// pseudo-determinant kept between 1 and 15 of 26 eigenvalues while the
-/// smallest was `0.013`–`0.5`, and each eigenvalue crossing the cutoff moves
-/// `½·log|M|₊` by `½·ln 4.5e4 ≈ 5.4` with no counterpart in the trace gradient
-/// (#2695). Only a precision the certificate refuses, singular or indefinite,
-/// falls back to that cutoff.
+/// An eigenvalue is resolved when it exceeds `M`'s rounding band `p·ε·‖M‖₂`.
+/// `M ⪰ S_λ` puts `M`'s `k`-th largest eigenvalue at or above `S_λ`'s, so while
+/// that many eigenvalues are positive the kept rank never falls below
+/// `penalty_rank`, the rank of `S_λ` on `M`'s geometry
+/// ([`penalty_rank_at_rounding_band`]). This replaces two rules standard REML
+/// does not use: a Cholesky that certified `M` positive definite kept every
+/// eigenpair however deep inside the band, and otherwise the cutoff
+/// `100·p·ε·max σ` had a picked factor of 100 and no penalty floor (#2695). On
+/// the #1569 survival location-scale fixture (job 445401) `max σ = 7.788e16`
+/// put that cutoff at `4.5e4` beside eigenvalues of `0.013`–`0.5`. The band
+/// there is `450`, and the eigensolver's backward error bounds each computed
+/// eigenvalue only to within it.
 pub(crate) fn laplace_precision_kept_eigenpairs(
-    precision: &Array2<f64>,
     eigenvalues: &[f64],
+    penalty_rank: usize,
 ) -> Vec<usize> {
-    let certified_positive_definite = eigenvalues.iter().all(|&eigenvalue| eigenvalue > 0.0)
-        && gam_linalg::utils::certified_spd_factorize(
-            precision,
-            "Laplace precision log-determinant",
-        )
-        .is_ok();
-    if certified_positive_definite {
-        return (0..eigenvalues.len()).collect();
+    let rank = DenseSpectralOperator::identified_rank(eigenvalues, penalty_rank);
+    let mut kept: Vec<usize> = (0..eigenvalues.len()).collect();
+    kept.sort_by(|&a, &b| eigenvalues[b].total_cmp(&eigenvalues[a]));
+    kept.truncate(rank);
+    kept.sort_unstable();
+    kept
+}
+
+/// Rank of a penalty `S_λ` at its own rounding band `p·ε·‖S_λ‖₂`: the
+/// `penalty_rank` that [`laplace_precision_kept_eigenpairs`] floors the kept
+/// rank of a precision `M ⪰ S_λ` at, taken on `M`'s geometry (#2901 V22).
+pub(crate) fn penalty_rank_at_rounding_band(penalty: &Array2<f64>) -> Result<usize, String> {
+    if penalty.nrows() == 0 {
+        return Ok(0);
     }
-    let threshold = positive_eigenvalue_threshold(eigenvalues);
-    (0..eigenvalues.len())
-        .filter(|&index| eigenvalues[index] > threshold)
-        .collect()
+    let mut sym = penalty.clone();
+    symmetrize_dense_in_place(&mut sym);
+    let (spectrum, _) = FaerEigh::eigh(&sym, Side::Lower)
+        .map_err(|e| format!("penalty rank eigendecomposition failed: {e}"))?;
+    let eigenvalues = spectrum
+        .as_slice()
+        .ok_or_else(|| "penalty rank: the eigenvalue array is not contiguous".to_string())?;
+    let band = gam_linalg::roundoff::symmetric_spectrum_rounding_band(eigenvalues);
+    Ok(eigenvalues.iter().filter(|&&sigma| sigma > band).count())
 }
 
 /// Exact pseudo-Laplace log-determinant `log|H + S_λ|` of the REML/LAML
@@ -2275,13 +2288,13 @@ pub(crate) fn laplace_precision_kept_eigenpairs(
 ///   tells the outer optimizer to step back, instead of masking it with a
 ///   biased finite number;
 /// - sum `log λ` over the eigenpairs [`laplace_precision_kept_eigenpairs`]
-///   keeps: all of them when a strict Cholesky certifies the matrix positive
-///   definite, otherwise those above the relative cutoff. A structural null
-///   space contributes no term, matching the projected `tr` derivative; a
-///   near-singular-but-positive curvature is accepted exactly as the
-///   historical Cholesky strict path did.
+///   keeps for `penalty_rank`, the rank of `S_λ` on this matrix's geometry:
+///   the top identified rank, the rule standard REML prices `log|H|₊` on. A
+///   structural null space contributes no term, matching the projected `tr`
+///   derivative.
 pub(crate) fn strict_exact_pseudo_logdet(
     matrix: &Array2<f64>,
+    penalty_rank: usize,
     accumulation_depth: usize,
 ) -> Result<f64, CustomFamilyError> {
     let mut sym = matrix.clone();
@@ -2334,7 +2347,7 @@ pub(crate) fn strict_exact_pseudo_logdet(
             ),
         });
     }
-    Ok(laplace_precision_kept_eigenpairs(&sym, evals_slice)
+    Ok(laplace_precision_kept_eigenpairs(evals_slice, penalty_rank)
         .into_iter()
         .map(|index| evals[index].ln())
         .sum())
@@ -2701,7 +2714,7 @@ mod penalty_logdet_unify_tests {
         // Active eigenvalues 1.5 and 2.5 ⇒ pseudo-logdet = ln 1.5 + ln 2.5.
         let s_rank_deficient = array![[2.0, 0.5, 0.0], [0.5, 2.0, 0.0], [0.0, 0.0, 0.0],];
         let expected_deficient = 1.5_f64.ln() + 2.5_f64.ln();
-        let strict = strict_exact_pseudo_logdet(&s_rank_deficient, 3).expect("strict logdet");
+        let strict = strict_exact_pseudo_logdet(&s_rank_deficient, 0, 3).expect("strict logdet");
         let canonical =
             PenaltyPseudologdet::from_components(&[s_rank_deficient.clone()], &[1.0], 0.0)
                 .expect("canonical pseudo-logdet")
@@ -2718,7 +2731,7 @@ mod penalty_logdet_unify_tests {
         // Full-rank SPD penalty: pseudo-logdet = log|S| = ln(det).
         let s_spd = array![[2.0, 0.5], [0.5, 3.0]];
         let expected_spd = (2.0_f64 * 3.0 - 0.5 * 0.5).ln();
-        let strict_spd = strict_exact_pseudo_logdet(&s_spd, 2).expect("strict spd logdet");
+        let strict_spd = strict_exact_pseudo_logdet(&s_spd, 0, 2).expect("strict spd logdet");
         let canonical_spd = PenaltyPseudologdet::from_components(&[s_spd.clone()], &[1.0], 0.0)
             .expect("canonical spd pseudo-logdet")
             .value();

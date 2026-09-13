@@ -1220,12 +1220,14 @@ pub(crate) fn use_exact_newton_strict_spd<F: CustomFamily + ?Sized>(family: &F) 
 /// by `try_tangent_projected_evaluate`.
 pub(crate) fn active_face_logdet(
     matrix: &Array2<f64>,
+    penalty_ranges: &[(usize, usize)],
+    s_lambdas: &[Array2<f64>],
     active_constraints: Option<&ActiveLinearConstraintBlock>,
     strict_spd: bool,
     n_observations: usize,
     full_space_logdet_correction: f64,
 ) -> Result<f64, CustomFamilyError> {
-    let mut projected = None;
+    let mut tangent = None;
     let mut logdet_correction = full_space_logdet_correction;
     if let Some(active) = active_constraints {
         if active.a.ncols() != matrix.nrows() || matrix.nrows() != matrix.ncols() {
@@ -1240,19 +1242,31 @@ pub(crate) fn active_face_logdet(
         match active_constraint_tangent_geometry(&active.a)? {
             ActiveConstraintTangentGeometry::Tangent(z) => {
                 let tangent_dim = z.ncols();
-                projected = Some(z.t().dot(matrix).dot(&z));
                 logdet_correction = if matrix.nrows() == 0 {
                     0.0
                 } else {
                     full_space_logdet_correction * tangent_dim as f64 / matrix.nrows() as f64
                 };
+                tangent = Some(z);
             }
             ActiveConstraintTangentGeometry::FullyPinned => {}
         }
     }
+    let projected = tangent.as_ref().map(|z| z.t().dot(matrix).dot(z));
     let determinant_matrix = projected.as_ref().unwrap_or(matrix);
     let logdet = if strict_spd {
-        strict_exact_pseudo_logdet(determinant_matrix, n_observations)?
+        // The kept rank's penalty floor is `S_λ`'s rank on the determinant's geometry.
+        let mut penalty = Array2::<f64>::zeros(matrix.raw_dim());
+        add_joint_penalty_to_matrix(&mut penalty, penalty_ranges, s_lambdas, 0.0, None);
+        if let Some(z) = tangent.as_ref() {
+            penalty = z.t().dot(&penalty).dot(z);
+        }
+        let penalty_rank = penalty_rank_at_rounding_band(&penalty).map_err(|e| {
+            CustomFamilyError::NumericalFailure {
+                reason: format!("active-face logdet: {e}"),
+            }
+        })?;
+        strict_exact_pseudo_logdet(determinant_matrix, penalty_rank, n_observations)?
     } else {
         match stable_logdet(determinant_matrix) {
             Ok(value) => value,
@@ -1501,16 +1515,16 @@ pub(crate) fn blockwise_logdet_terms_with_workspace<
                     // eigendecomposition fails, which for a PSD penalty is purely
                     // numerical. Route the fallback through the SAME canonical
                     // strict pseudo-logdet the joint-Hessian path uses
-                    // (`strict_exact_pseudo_logdet`): the exact positive-eigenspace
-                    // sum `Σ_{σ>tol} log σ` with NO δ-ridge escalation, on the same
-                    // `positive_eigenvalue_threshold` the analytic REML gradient's
-                    // trace kernel uses. A ridge-escalated Cholesky logdet would
+                    // (`strict_exact_pseudo_logdet`): the exact sum `Σ log σ` over
+                    // `S_λ`'s own identified subspace, at its rounding band with no
+                    // penalty floor, and NO δ-ridge escalation. A ridge-escalated
+                    // Cholesky logdet would
                     // instead carry a ρ-dependent, discontinuous `δ(ρ)` the
                     // derivatives ignore — the "approximate determinant + exact
                     // traces = a Hessian for a different objective" trap (gam#748).
                     // A genuinely un-decomposable penalty now surfaces as a hard
                     // error instead of a masked, biased number.
-                    strict_exact_pseudo_logdet(&s_lambda, p).map_err(|strict_err| {
+                    strict_exact_pseudo_logdet(&s_lambda, 0, p).map_err(|strict_err| {
                         format!(
                             "penalty logdet: canonical PenaltyPseudologdet eigendecomposition \
                              failed for block {b} ({eigh_err_msg}); strict pseudo-logdet fallback \
@@ -1579,6 +1593,8 @@ pub(crate) fn blockwise_logdet_terms_with_workspace<
         }
         let logdet_h_total = active_face_logdet(
             &h_joint,
+            &ranges,
+            &s_lambdas,
             active_constraints,
             strict_spd,
             joint_observation_count(states),
@@ -1622,6 +1638,8 @@ pub(crate) fn blockwise_logdet_terms_with_workspace<
         }
         let logdet_h_total = active_face_logdet(
             &h_joint,
+            &ranges,
+            &s_lambdas,
             active_constraints,
             strict_spd,
             joint_observation_count(states),
@@ -1657,6 +1675,8 @@ pub(crate) fn blockwise_logdet_terms_with_workspace<
         }
         let logdet_h_total = active_face_logdet(
             &h_joint,
+            &ranges,
+            &s_lambdas,
             active_constraints,
             strict_spd,
             joint_observation_count(states),
@@ -1725,6 +1745,8 @@ pub(crate) fn blockwise_logdet_terms_with_workspace<
         } else {
             logdet_h_total += active_face_logdet(
                 &h,
+                &[(0, p)],
+                std::slice::from_ref(s_lambda),
                 None,
                 strict_spd,
                 joint_observation_count(states),
@@ -1735,6 +1757,8 @@ pub(crate) fn blockwise_logdet_terms_with_workspace<
     if let Some(h_joint) = active_face_hessian {
         logdet_h_total = active_face_logdet(
             &h_joint,
+            &ranges,
+            &s_lambdas,
             active_constraints,
             strict_spd,
             joint_observation_count(states),

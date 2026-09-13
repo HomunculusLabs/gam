@@ -2027,16 +2027,8 @@ pub(crate) fn joint_penalty_subspace_trace_parts(
     if let Some(joint) = joint_penalty {
         s_lambda += joint;
     }
-    let s_evals = s_lambda
-        .eigh(Side::Lower)
-        .map_err(|e| CustomFamilyError::trial_point(format!("joint penalty subspace eigendecomposition failed: {e}")))?
-        .0;
-    let s_threshold = positive_eigenvalue_threshold(
-        s_evals
-            .as_slice()
-            .expect("eigh returns an owned standard-layout eigenvalue vector"),
-    );
-    let rank = (0..total).filter(|&j| s_evals[j] > s_threshold).count();
+    let rank = penalty_rank_at_rounding_band(&s_lambda)
+        .map_err(|e| CustomFamilyError::trial_point(format!("joint penalty subspace: {e}")))?;
     if rank == 0 {
         return Ok((0.0, None));
     }
@@ -2114,7 +2106,9 @@ pub(crate) fn joint_penalty_subspace_trace_parts(
     // full-space pseudo-determinant silently drops an eigenvalue that crosses zero off the
     // face, and its gradient never vanishes there. With `Z = I` every object below is the
     // full-space one bit for bit.
-    let precision = match face_tangent {
+    // The kept rank's penalty floor is `S_λ`'s rank on the same geometry: on a face,
+    // `Zᵀ M Z ⪰ Zᵀ S_λ Z` bounds the face precision's spectrum by the face penalty's.
+    let (precision, penalty_rank) = match face_tangent {
         Some(z) => {
             if z.nrows() != total {
                 return Err(CustomFamilyError::DimensionMismatch {
@@ -2126,9 +2120,13 @@ pub(crate) fn joint_penalty_subspace_trace_parts(
             }
             let mut face = z.t().dot(&m).dot(z);
             symmetrize_dense_in_place(&mut face);
-            face
+            let face_penalty_rank = penalty_rank_at_rounding_band(&z.t().dot(&s_lambda).dot(z))
+                .map_err(|e| {
+                    CustomFamilyError::trial_point(format!("joint penalty subspace face: {e}"))
+                })?;
+            (face, face_penalty_rank)
         }
-        None => m,
+        None => (m, rank),
     };
     let (m_evals, m_evecs) = precision.eigh(Side::Lower).map_err(|e| {
         format!("joint penalty subspace full Hessian eigendecomposition failed: {e}")
@@ -2136,7 +2134,7 @@ pub(crate) fn joint_penalty_subspace_trace_parts(
     let m_slice = m_evals
         .as_slice()
         .expect("eigh returns an owned standard-layout eigenvalue vector");
-    let kept = laplace_precision_kept_eigenpairs(&precision, m_slice);
+    let kept = laplace_precision_kept_eigenpairs(m_slice, penalty_rank);
     let logdet: f64 = kept.iter().map(|&eig_idx| m_evals[eig_idx].ln()).sum();
     // Full Moore–Penrose pseudo-inverse `M⁺` (drop ker(H+Sλ)) in spectral
     // form: kept eigenvectors as the kernel basis, diag(1/σ) as the reduced

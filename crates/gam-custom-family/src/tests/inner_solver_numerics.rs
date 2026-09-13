@@ -2574,6 +2574,8 @@ pub(crate) fn active_face_logdet_ignores_constraint_normal_indefiniteness() {
     let full_correction = 2.0 * 5.0_f64.ln();
     let logdet = active_face_logdet(
         &h,
+        &[],
+        &[],
         Some(&active),
         false,
         10,
@@ -2625,6 +2627,8 @@ pub(crate) fn active_face_logdet_indefinite_tangent_is_infeasible_not_fatal() {
     };
     let logdet = active_face_logdet(
         &h,
+        &[],
+        &[],
         Some(&active),
         false,
         10,

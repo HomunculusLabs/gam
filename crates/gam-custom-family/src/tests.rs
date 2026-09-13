@@ -475,30 +475,51 @@ pub(crate) fn joint_penalty_subspace_trace_matches_projected_logdet_derivative()
 }
 
 #[test]
-pub(crate) fn joint_penalty_subspace_logdet_keeps_weak_curvature_beside_a_stiff_direction_2695() {
-    // One stiff direction lifts the relative cutoff `100·p·ε·max σ` to 6.7e3,
-    // far above the two weak but genuine curvatures beside it. `M` is positive
-    // definite, so `log|M|₊` is the ordinary log-determinant, the kernel spans
-    // all of it, and the strict value route prices the same number (#2695).
-    let ranges = vec![(0, 3)];
-    let penalties = vec![array![[0.0, 0.0, 0.0], [0.0, 0.5, 0.0], [0.0, 0.0, 0.0]]];
-    let h = array![[1.0e17, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.25]];
+pub(crate) fn joint_penalty_subspace_logdet_keeps_the_identified_rank_2901() {
+    // #2901 V22: the criterion keeps standard REML's identified rank. The stiff
+    // curvature `1e17` puts the rounding band `p·ε·‖M‖₂` at `88.8`, so `1e3` is
+    // resolved and `0.5` and `0.25` are not. `S_λ` has rank 3 and `M ⪰ S_λ`, so
+    // `M`'s top three eigenvalues count: `0.5` is kept and `0.25` is not. The band
+    // alone keeps two; the rules this replaced keep four (a Cholesky-certified
+    // positive-definite `M`) or one (the cutoff `100·p·ε·max σ = 8.9e3`).
+    let ranges = vec![(0, 4)];
+    let penalties = vec![array![
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 0.5, 0.0],
+        [0.0, 0.0, 0.0, 0.0]
+    ]];
+    let h = array![
+        [1.0e17, 0.0, 0.0, 0.0],
+        [0.0, 999.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.25]
+    ];
+    let precision = &h + &penalties[0];
+    let (eigenvalues, _) = precision.eigh(faer::Side::Lower).expect("M eigendecomposition");
+    let eigenvalues = eigenvalues.as_slice().expect("contiguous eigenvalues");
+    assert_eq!(DenseSpectralOperator::identified_rank(eigenvalues, 0), 2);
+    assert_eq!(
+        penalty_rank_at_rounding_band(&penalties[0]).expect("penalty rank"),
+        3
+    );
+    assert_eq!(laplace_precision_kept_eigenpairs(eigenvalues, 3).len(), 3);
     let (logdet, kernel) = joint_penalty_subspace_trace_parts(
         &JointHessianSource::Dense(h.clone()),
         &ranges,
         &penalties,
-        3,
+        4,
         0.0,
         None,
         None,
         None,
     )
     .expect("projection parts build");
-    let kernel = kernel.expect("a positive-definite precision has a kernel");
+    let kernel = kernel.expect("a penalized precision has a kernel");
     assert_eq!(kernel.u_s.ncols(), 3);
-    let expected = 1.0e17_f64.ln() + 0.5_f64.ln() + 0.25_f64.ln();
+    let expected = 1.0e17_f64.ln() + 1.0e3_f64.ln() + 0.5_f64.ln();
     assert_relative_eq!(logdet, expected, epsilon = 1e-10);
-    let strict = strict_exact_pseudo_logdet(&(&h + &penalties[0]), 3).expect("strict logdet");
+    let strict = strict_exact_pseudo_logdet(&precision, 3, 4).expect("strict logdet");
     assert_relative_eq!(strict, expected, epsilon = 1e-10);
 }
 
