@@ -431,7 +431,9 @@ fn run_cyclic_location_scale_arm(truth: Truth) {
     // PRIMARY: gam recovers the true cyclic mean. The mean's signal SD is ~1/sqrt(2)
     // and per-point noise sigma runs 0.04..0.26, so 0.06 RMSE means the recovered
     // mean tracks the truth to a small fraction of the signal range. Measured
-    // fold-mean: 0.0342 (fundamental) / 0.0376 (above-fundamental).
+    // fold-mean at `7ebbacd3d`: 0.0210 (fundamental) / 0.0363 (above-fundamental),
+    // against gamlss's 0.0210 / 0.0355; before the harmonic cyclic roughness it
+    // was 0.0342 / 0.0376.
     assert!(
         mu_panel.gam_mean <= 0.06,
         "cyclic mu [{label}] does not recover the truth: fold-mean RMSE={:.4} (bound 0.06)",
@@ -440,7 +442,8 @@ fn run_cyclic_location_scale_arm(truth: Truth) {
     // PRIMARY: gam recovers the true cyclic log-scale. The log-scale block is
     // identified one likelihood-derivative removed from the data, so its absolute
     // bar is looser, yet 0.30 still requires the recovered curve to track the true
-    // log sigma. Measured fold-mean: 0.129 / 0.146.
+    // log sigma. Measured fold-mean at `7ebbacd3d`: 0.136 / 0.148, against gamlss's
+    // 0.146 / 0.158.
     assert!(
         ls_panel.gam_mean <= 0.30,
         "cyclic log-sigma [{label}] does not recover the truth: fold-mean RMSE={:.4} (bound 0.30)",
@@ -451,7 +454,8 @@ fn run_cyclic_location_scale_arm(truth: Truth) {
     // noise draws. See the header: the two engines trade error between the mean and
     // the log-scale block. Measured paired effect before the harmonic cyclic
     // roughness (`7ebbacd3d`): -0.118 (fundamental) / -0.066 (above-fundamental),
-    // both resolved in gam's favour.
+    // both resolved in gam's favour. Joint fold-mean at `7ebbacd3d`: gam 0.1384 vs
+    // gamlss 0.1480 (fundamental), gam 0.1534 vs gamlss 0.1627 (above-fundamental).
     assert_paired_match_or_beat(&format!("cyclic_ls::{label}::joint"), &joint_panel, 1.10);
 }
 
