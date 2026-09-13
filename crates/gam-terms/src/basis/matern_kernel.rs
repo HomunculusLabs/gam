@@ -1616,17 +1616,17 @@ pub(crate) fn build_matern_operator_penalty_aniso_derivatives(
 
     // Build penalty candidates and determine which are active (using axis-0
     // normalized Gram, which is axis-independent).
-    let (s0_norm, c0) = if op0_info.c > 1e-12 {
+    let (s0_norm, c0) = if op0_info.c.is_finite() && op0_info.c > 0.0 {
         (op0_info.s_raw.mapv(|v| v / op0_info.c), op0_info.c)
     } else {
         (op0_info.s_raw.clone(), 1.0)
     };
-    let (s1_norm, c1) = if op1_info.c > 1e-12 {
+    let (s1_norm, c1) = if op1_info.c.is_finite() && op1_info.c > 0.0 {
         (op1_info.s_raw.mapv(|v| v / op1_info.c), op1_info.c)
     } else {
         (op1_info.s_raw.clone(), 1.0)
     };
-    let (s2_norm, c2) = if op2_info.c > 1e-12 {
+    let (s2_norm, c2) = if op2_info.c.is_finite() && op2_info.c > 0.0 {
         (op2_info.s_raw.mapv(|v| v / op2_info.c), op2_info.c)
     } else {
         (op2_info.s_raw.clone(), 1.0)
@@ -2473,7 +2473,7 @@ pub(crate) fn operator_penalty_candidates_closed_form(
         // so `op.as_dense()` matches the candidate's dense matrix.
         // The raw operator is the un-amplified closed form; the dense matrix
         // it stands in for is `amp2 · raw / c`.
-        let scale = if c > 1e-12 { amp2 / c } else { amp2 };
+        let scale = if c.is_finite() && c > 0.0 { amp2 / c } else { amp2 };
         let scaled: std::sync::Arc<dyn PenaltyOp> =
             std::sync::Arc::new(ScaledPenaltyOp::new(raw_op, scale));
         Some(scaled)

@@ -2962,12 +2962,12 @@ pub fn build_measure_jet_basis_psi_derivatives(
         // alone: c anchors the value and every derivative of this candidate.
         // `normalize_penaltywith_psi_derivatives` recomputes the identical c
         // per coordinate (same trace_of_product + sqrt on the same `s_raw`),
-        // and its degenerate convention is mirrored here: ‖S‖_F ≤ 1e-12 (or
+        // and its degenerate convention is mirrored here: ‖S‖_F = 0 (or
         // non-finite) reports scale 1.0 — the value passes through unscaled,
         // and the cross helper receives that same 1.0, never a collapsed
         // near-zero scale.
         let fro = trace_of_product(s_raw, s_raw).sqrt();
-        let c = if fro.is_finite() && fro > 1e-12 {
+        let c = if fro.is_finite() && fro > 0.0 {
             fro
         } else {
             1.0

@@ -1433,7 +1433,7 @@ pub(crate) fn normalize_penalty_cross_psi_derivative(
     s_ab: &Array2<f64>,
     c: f64,
 ) -> Array2<f64> {
-    if !c.is_finite() || c <= 1e-12 {
+    if !(c.is_finite() && c > 0.0) {
         return Array2::<f64>::zeros(s.raw_dim());
     }
 
@@ -2920,8 +2920,8 @@ pub(crate) fn build_duchon_native_penalty_psi_derivatives_in_directions(
     //
     // The value path decides "is there a penalty here?" from the block's RANK
     // (`filter_penalty_candidates`), which is scale-free, and then normalizes
-    // to unit Frobenius norm. `normalize_penaltywith_psi_derivatives` instead
-    // treats an ABSOLUTE norm below 1e-12 as "no penalty" and returns ZERO
+    // to unit Frobenius norm. `normalize_penaltywith_psi_derivatives` used to
+    // treat an ABSOLUTE norm below 1e-12 as "no penalty" and return ZERO
     // derivatives. A trend ridge whose physical magnitude is small — the center
     // function metric restricted to the trend frame carries no normalization of
     // its own — therefore shipped a full-rank normalized block with an
