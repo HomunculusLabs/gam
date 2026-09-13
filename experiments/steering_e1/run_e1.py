@@ -222,17 +222,16 @@ def load_model_and_tokenizer(model_name: str, cache_dir: str, dtype_name: str):
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[dtype_name]
-    kwargs: dict[str, Any] = {"torch_dtype": dtype, "trust_remote_code": True}
-    if torch.cuda.is_available():
-        kwargs["device_map"] = "auto"
+    kwargs: dict[str, Any] = {"dtype": dtype, "trust_remote_code": True}
     if cache_dir:
         kwargs["cache_dir"] = cache_dir
     tok = AutoTokenizer.from_pretrained(
         model_name, trust_remote_code=True, cache_dir=cache_dir or None)
     model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
     model.eval()
-    if not torch.cuda.is_available():
-        model.to("cpu")
+    # One device, placed after loading: a `device_map` needs `accelerate`, which
+    # the harness does not depend on.
+    model.to("cuda" if torch.cuda.is_available() else "cpu")
     return model, tok
 
 
