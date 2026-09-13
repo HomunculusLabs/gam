@@ -11,14 +11,12 @@
 /// and `gam-problem` — all at or below the gam-solve tier.
 pub mod alo;
 
-/// Margin-resolved [`Verdict`](gam_problem::topology_certificates::Verdict)
-/// mappings for the two gam-solve-tier certificates consumed by
-/// [`crate::topology_selector`]. Descended from the monolith
-/// `inference::certificate_impls` (#1521): the two helpers here depend only on
-/// gam-solve-tier types (`logdet_bounds`, `row_sampling_measure`) plus the
-/// contracted-down certificate ladder — they do NOT pull `gam_sae`, so no
-/// trait inversion is needed (the gam-sae `impl Certificate for …` blocks stay
-/// in the monolith).
+/// `Certificate` implementations for the gam-solve-owned certificate types
+/// (`OuterCriterionCertificate`, `CoresetCertificate`, `CollapseEvent`).
+/// Descended from the monolith `inference::certificate_impls` (#1521): the impls
+/// depend only on gam-solve-tier types plus the contracted-down certificate
+/// ladder, so they do not pull `gam_sae` (the gam-sae-owned impls live in
+/// `gam_sae::certificate_impls`).
 pub mod certificate_impls;
 
 /// Structured residual-covariance estimator (#974) and the single producer of

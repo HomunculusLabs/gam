@@ -2,8 +2,8 @@
 //!
 //! Across the program a dozen independent analyses each emit a "certificate":
 //! the outer-optimum first-order self-audit (`OuterCriterionCertificate`), the
-//! sensitivity-coreset error budget (`CoresetCertificate`), the log-det
-//! enclosure (`LogdetEnclosure`), the exact-orbit residual-gauge report, the dictionary
+//! sensitivity-coreset error budget (`CoresetCertificate`), the exact-orbit
+//! residual-gauge report, the dictionary
 //! incoherence / global-optimality report, the structure-search collapse
 //! events, and the topology evidence certification. Each grew its own struct,
 //! its own verdict enum, and its own scattered payload key.

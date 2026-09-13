@@ -7238,5 +7238,18 @@
     ],
     "reason": "SPEC rule 23 (#2469). SPHERE_SEED_POWER_ITERS = 64 and SPHERE_DOMINANT_AXIS_POWER_ITERS = 128 were fixed power-iteration pass counts for the dominant axis of the spherical-mean second-moment matrix. A pass count certifies nothing: power iteration contracts at lambda2/lambda1 and never reaches an axis orthogonal to its start vector. The seed, the dominant axis and the eigenbasis now read one symmetric eigendecomposition through gam_linalg FaerEigh, so both counts are deleted.",
     "evidence": "At the base, git grep -n -w finds each constant only in crates/gam-geometry/src/manifolds/sphere.rs: its declaration and its one loop bound (lines 565/589 and 570/714). Guarded check job 598199 (/scratch.global/sauer354/pool/const2469d/cand5.check.598199.log): cargo check --workspace --all-targets --exclude gam-pyffi --keep-going errors only in the root tests conformal_coverage_quality.rs and row_metric_loud_vs_loadbearing.rs, which ffac510db fixed. gam-geometry lib sphere 14 passed, 0 failed (/scratch.global/sauer354/pool/const2469d/g5.598199.log)."
+  },
+  {
+    "base": "2528c06a06fb843d55016d9367d94a3e651a2b1b",
+    "items": [
+      "crates/gam-solve/src/inference/certificate_impls.rs:fn:a_standalone_enclosure_is_insufficient",
+      "crates/gam-solve/src/inference/certificate_impls.rs:fn:claim",
+      "crates/gam-solve/src/inference/certificate_impls.rs:fn:evidence",
+      "crates/gam-solve/src/inference/certificate_impls.rs:fn:verdict",
+      "crates/gam-solve/src/logdet_bounds.rs:fn:gap",
+      "crates/gam-solve/src/logdet_bounds.rs:struct:LogdetEnclosure"
+    ],
+    "reason": "#2829 lead ruling of 09-13: LogdetEnclosure has no producer. ac732f9ef deleted the enclosure refinement chain that built it and aeb8606c0 deleted the per-atom EFS enclosure margin gate, so the struct survived only as a value two tests assemble by hand and a Certificate impl that no ledger records. The struct, its gap method, its Certificate impl (claim, evidence, verdict), the logdet_bounds module, both test arms and the doc mentions are deleted.",
+    "evidence": "At 2528c06a06fb843d55016d9367d94a3e651a2b1b, git grep -n -w LogdetEnclosure over crates, src and tests finds only crates/gam-solve/src/logdet_bounds.rs (the declaration and its gap impl), crates/gam-solve/src/inference/certificate_impls.rs (the import, the Certificate impl and the a_standalone_enclosure_is_insufficient unit test) and tests/identifiability/misc/certificate_ledger_unified.rs (the import and one arm of every_certificate_states_claim_evidence_and_conservative_verdict). No production code constructs or records it. gap is called only by that impl's evidence and verdict, and claim, evidence and verdict are the removed impl's trait methods; the three surviving Certificate impls in the file keep theirs. git grep -n logdet_bounds finds only the pub mod line, the module doc in inference/mod.rs and the two imports. Pool job 599208 at 46e5841f0cf1bad55887ef01e0b242550052f67a (this patch on 2fd3de328426f668a56b2c33226c08a03589fb80, whose seven touched source blobs equal those at 2528c06a06fb843d55016d9367d94a3e651a2b1b; log /scratch.global/sauer354/pool/api2829/check.599208.log): source_removal_guard.py and public_api_census.py exited 0, and cargo check --workspace --all-targets --exclude gam-pyffi --keep-going reported errors only in tests/inference/misc/conformal_coverage_quality.rs, the restoration red that ffac510db fixed."
   }
 ]

@@ -3,7 +3,7 @@
 //! This module holds the `impl Certificate for …` blocks for the gam-solve-owned
 //! certificate types (`OuterCriterionCertificate`,
 //! [`CoresetCertificate`](crate::row_sampling_measure::CoresetCertificate),
-//! `LogdetEnclosure`, [`CollapseEvent`](crate::structure_search::CollapseEvent)).
+//! [`CollapseEvent`](crate::structure_search::CollapseEvent)).
 //! They were relocated out of the
 //! monolith root (`gam::inference::certificate_impls`) to satisfy the coherence
 //! orphan rule: the `Certificate` trait now lives in the neutral `gam-problem`
@@ -13,7 +13,6 @@
 //! (The gam-sae-owned certificate types — `ResidualGaugeReport`, `CertificateInputs`
 //! — carry their own impls in `gam_sae::certificate_impls`.)
 
-use crate::logdet_bounds::LogdetEnclosure;
 use crate::model_types::OuterCriterionCertificate;
 use crate::row_sampling_measure::CoresetCertificate;
 use crate::structure_search::{CollapseAction, CollapseEvent};
@@ -148,49 +147,7 @@ impl Certificate for CoresetCertificate {
     }
 }
 
-// ── 3. Log-det enclosure ─────────────────────────────────────────────────────
-
-impl Certificate for LogdetEnclosure {
-    fn claim(&self) -> Claim {
-        Claim::new(
-            "logdet-enclosure",
-            "the log-determinant is enclosed in a certified [lower, upper] \
-             interval whose midpoint is interchangeable with the exact value for \
-             any decision whose margin exceeds the enclosure gap",
-        )
-    }
-
-    fn evidence(&self) -> Evidence {
-        let mut e = Evidence::new();
-        put_finite(&mut e, "block_diag_logdet", self.block_diag_logdet);
-        put_finite(&mut e, "lower", self.lower);
-        put_finite(&mut e, "upper", self.upper);
-        put_finite(&mut e, "gap", self.gap());
-        put_finite(&mut e, "rho", self.rho);
-        put_finite(&mut e, "p2", self.p2);
-        match self.p3 {
-            Some(p3) => put_finite(&mut e, "p3", p3),
-            None => {
-                e.insert("p3", "n/a".into());
-            }
-        }
-        e
-    }
-
-    fn verdict(&self) -> Verdict {
-        // An enclosure on its own does not certify a decision — only a consumer
-        // margin does. The standalone verdict is
-        // `Insufficient` when the enclosure is finite (evidence present, no
-        // decision yet) and `Unavailable` when the bounds are non-finite.
-        if self.lower.is_finite() && self.upper.is_finite() && self.gap().is_finite() {
-            Verdict::Insufficient
-        } else {
-            Verdict::Unavailable
-        }
-    }
-}
-
-// ── 7. Structure-search collapse event ───────────────────────────────────────
+// ── 3. Structure-search collapse event ───────────────────────────────────────
 
 impl Certificate for CollapseEvent {
     fn claim(&self) -> Claim {
@@ -276,19 +233,6 @@ mod tests {
         // The claim id is stable and the summary rides the evidence.
         assert_eq!(nonstationary.claim().id, "outer-optimality");
         assert!(nonstationary.evidence().contains_key("summary"));
-    }
-
-    #[test]
-    fn a_standalone_enclosure_is_insufficient() {
-        let enc = LogdetEnclosure {
-            block_diag_logdet: 10.0,
-            lower: 9.9,
-            upper: 10.1,
-            rho: 0.3,
-            p2: 0.01,
-            p3: None,
-        };
-        assert_eq!(enc.verdict(), Verdict::Insufficient);
     }
 
     #[test]

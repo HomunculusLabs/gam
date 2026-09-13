@@ -5,8 +5,8 @@
 //! the [`Certificate`](crate::certificates::Certificate) trait now
 //! lives in the neutral `gam-problem` crate, so each impl must be defined where
 //! the implemented type is owned. The gam-solve-owned certificates
-//! (`OuterCriterionCertificate`, `CoresetCertificate`, `LogdetEnclosure`,
-//! `CollapseEvent`) carry their impls in
+//! (`OuterCriterionCertificate`, `CoresetCertificate`, `CollapseEvent`) carry
+//! their impls in
 //! [`gam_solve::inference::certificate_impls`]; the gam-sae-owned certificates
 //! (`ResidualGaugeReport`, `CertificateInputs`) carry theirs in
 //! `gam_sae::certificate_impls`. The bodies moved byte-identically, so there

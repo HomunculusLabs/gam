@@ -5,7 +5,6 @@
 use gam::inference::certificates::{Certificate, CertificateLedger, Verdict};
 
 use gam::inference::row_measure::CoresetCertificate;
-use gam::solver::logdet_bounds::LogdetEnclosure;
 use gam::solver::rho_optimizer::{OuterCriterionCertificate, OuterStationarityCertificate};
 use gam::solver::structure_search::{CollapseAction, CollapseEvent};
 
@@ -40,17 +39,6 @@ fn every_certificate_states_claim_evidence_and_conservative_verdict() {
     assert_eq!(coreset.claim().id, "coreset-budget");
     // A budget alone certifies nothing — it is Insufficient until raced.
     assert_eq!(coreset.verdict(), Verdict::Insufficient);
-
-    let enclosure = LogdetEnclosure {
-        block_diag_logdet: 5.0,
-        lower: 4.95,
-        upper: 5.05,
-        rho: 0.2,
-        p2: 0.001,
-        p3: None,
-    };
-    assert_eq!(enclosure.claim().id, "logdet-enclosure");
-    assert_eq!(enclosure.verdict(), Verdict::Insufficient);
 }
 
 #[test]
