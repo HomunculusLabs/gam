@@ -567,7 +567,6 @@ def survival_lifted_metrics(
     grid: np.ndarray,
     survival_matrix: np.ndarray,
     null_survival_matrix: np.ndarray | None = None,
-    eps: float = 1e-12,
 ) -> dict[str, float | None]:
     null_matrix = None
     if null_survival_matrix is not None:
@@ -581,7 +580,6 @@ def survival_lifted_metrics(
             _flat_float_list(grid),
             np.asarray(survival_matrix, dtype=float),
             null_matrix,
-            float(eps),
         )
     )
 

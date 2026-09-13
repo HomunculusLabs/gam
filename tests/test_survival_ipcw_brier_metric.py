@@ -162,7 +162,7 @@ def test_brier_field_is_integrated_ipcw_brier_not_hazard_quadratic() -> None:
     surv = _valid_curves(col, len(grid))
 
     out = _rust.survival_lifted_metrics_from_predictions(
-        time, event, grid, surv, None, 1e-12
+        time, event, grid, surv, None
     )
 
     # The field exists and is honest about what it is.
@@ -197,7 +197,7 @@ def test_brier_no_censoring_reduces_to_integrated_plain_brier() -> None:
     surv = _valid_curves(col, len(grid))
 
     out = _rust.survival_lifted_metrics_from_predictions(
-        time, event, grid, surv, None, 1e-12
+        time, event, grid, surv, None
     )
 
     # Plain integrated Brier with G ≡ 1.
@@ -232,7 +232,7 @@ def test_lifted_brier_is_relative_ipcw_brier_skill() -> None:
     null_surv = _valid_curves(null_col, len(grid))
 
     out = _rust.survival_lifted_metrics_from_predictions(
-        time, event, grid, surv, null_surv, 1e-12
+        time, event, grid, surv, null_surv
     )
 
     g = _km_censoring(time, event)

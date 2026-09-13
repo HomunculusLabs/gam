@@ -4920,7 +4920,7 @@ fn survival_matrix_from_risk_calibration<'py>(
     .unbind())
 }
 
-#[pyfunction(signature = (event_times, events, grid, survival_matrix, null_survival_matrix = None, eps = 1e-12))]
+#[pyfunction(signature = (event_times, events, grid, survival_matrix, null_survival_matrix = None))]
 fn survival_lifted_metrics_from_predictions<'py>(
     py: Python<'py>,
     event_times: Vec<f64>,
@@ -4928,7 +4928,6 @@ fn survival_lifted_metrics_from_predictions<'py>(
     grid: Vec<f64>,
     survival_matrix: PyReadonlyArray2<'py, f64>,
     null_survival_matrix: Option<PyReadonlyArray2<'py, f64>>,
-    eps: f64,
 ) -> PyResult<Py<PyDict>> {
     let out = PyDict::new(py);
     let none_result = |out: &Bound<'_, PyDict>| -> PyResult<Py<PyDict>> {
@@ -4965,7 +4964,6 @@ fn survival_lifted_metrics_from_predictions<'py>(
         &event_times,
         &obs,
         &grid,
-        eps,
     );
     let log_losses = scores.log_losses;
     let hazard_quadratic_losses = scores.hazard_quadratic_losses;
@@ -5017,7 +5015,6 @@ fn survival_lifted_metrics_from_predictions<'py>(
                     &event_times,
                     &obs,
                     &grid,
-                    eps,
                 );
             let null_log_losses = null_scores.log_losses;
             let null_hazard_quadratic_losses = null_scores.hazard_quadratic_losses;
@@ -5036,20 +5033,20 @@ fn survival_lifted_metrics_from_predictions<'py>(
                 horizon,
                 |t| censoring_km.at(t),
             );
+            // A relative skill over a null score of exactly zero, or over an infinite
+            // null score, has no value: the field is reported as None rather than
+            // divided by a clipped denominator.
+            let relative_skill = |null: f64, model: f64| -> Option<f64> {
+                (null != 0.0 && null.is_finite()).then(|| (null - model) / null.abs())
+            };
             if let (Some(model_ibs), Some(null_ibs)) = (ibs, null_ibs) {
-                out.set_item(
-                    "lifted_brier",
-                    (null_ibs - model_ibs) / null_ibs.abs().max(eps),
-                )?;
+                out.set_item("lifted_brier", relative_skill(null_ibs, model_ibs))?;
             }
             out.set_item(
                 "lifted_hazard_quadratic_score",
-                (null_hazard_quadratic - hazard_quadratic) / null_hazard_quadratic.abs().max(eps),
+                relative_skill(null_hazard_quadratic, hazard_quadratic),
             )?;
-            out.set_item(
-                "lifted_logloss",
-                (null_logloss - logloss) / null_logloss.abs().max(eps),
-            )?;
+            out.set_item("lifted_logloss", relative_skill(null_logloss, logloss))?;
             let ll_model = -log_losses.iter().sum::<f64>();
             let ll_null = -null_log_losses.iter().sum::<f64>();
             nagelkerke = gam::inference::diagnostics::nagelkerke_r_squared_from_log_likelihoods(

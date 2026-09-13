@@ -1654,12 +1654,17 @@ pub struct HazardPathScores {
 /// Repair a predicted survival matrix into a valid survival path, then read the
 /// per-subject hazard scores off it.
 ///
-/// Each row of `raw` is clamped into `[eps, 1]`, forced non-increasing, and
+/// Each row of `raw` is clamped into `[0, 1]`, forced non-increasing, and
 /// pinned to `1.0` in the first grid column. The piecewise-constant hazard on
 /// interval `k` is then `(H(t_{k+1}) − H(t_k)) / Δt_k` with `H = −ln S`, and
 /// each subject is scored at its own event time `T_i` — exactly on a grid point
 /// when one coincides, otherwise by linear accumulation inside the containing
 /// interval.
+///
+/// A prediction the observation contradicts with certainty scores `+∞`, not a
+/// clipped finite number: a subject whose repaired survival reaches `0` by its
+/// time `T_i` has infinite cumulative hazard there, and an event at a time of
+/// zero predicted hazard has an infinite log-loss.
 ///
 /// Returns the repaired matrix alongside the scores, because callers need the
 /// same repaired matrix for [`integrated_ipcw_brier_score`]; scoring a
@@ -1674,23 +1679,28 @@ pub fn monotone_survival_and_hazard_scores(
     event_times: &[f64],
     observed: &[bool],
     grid: &[f64],
-    eps: f64,
 ) -> (Array2<f64>, HazardPathScores) {
     let mut surv = raw.to_owned();
     for mut row in surv.rows_mut() {
         row[0] = 1.0;
         let mut prev = 1.0;
         for value in row.iter_mut() {
-            *value = value.clamp(eps, 1.0).min(prev);
+            *value = value.clamp(0.0, 1.0).min(prev);
             prev = *value;
         }
     }
     let dt: Vec<f64> = grid.windows(2).map(|pair| pair[1] - pair[0]).collect();
-    let cumhaz = surv.mapv(|value| -value.clamp(eps, 1.0).ln());
+    let cumhaz = surv.mapv(|value| -value.ln());
     let mut haz = Array2::<f64>::zeros((surv.nrows(), surv.ncols() - 1));
     for row in 0..surv.nrows() {
         for col in 0..surv.ncols() - 1 {
-            haz[[row, col]] = ((cumhaz[[row, col + 1]] - cumhaz[[row, col]]) / dt[col]).max(0.0);
+            // Once the repaired survival has reached zero the cumulative hazard is
+            // infinite, and so is every later hazard; `∞ − ∞` has no other value.
+            haz[[row, col]] = if cumhaz[[row, col]].is_infinite() {
+                f64::INFINITY
+            } else {
+                ((cumhaz[[row, col + 1]] - cumhaz[[row, col]]) / dt[col]).max(0.0)
+            };
         }
     }
     let mut haz_sq_prefix = Array2::<f64>::zeros((surv.nrows(), surv.ncols()));
@@ -1725,7 +1735,15 @@ pub fn monotone_survival_and_hazard_scores(
                 cumhaz[[row, interval_idx]] + h * elapsed,
             )
         };
-        log_losses[row] = hcum_z - if observed[row] { h_z.max(eps).ln() } else { 0.0 };
+        // A subject whose predicted survival is already zero at its own time is
+        // contradicted with certainty by being observed there: both scores are
+        // `+∞`, and the event terms `ln h` and `h` would otherwise form `∞ − ∞`.
+        if hcum_z.is_infinite() {
+            log_losses[row] = f64::INFINITY;
+            hazard_quadratic_losses[row] = f64::INFINITY;
+            continue;
+        }
+        log_losses[row] = hcum_z - if observed[row] { h_z.ln() } else { 0.0 };
         hazard_quadratic_losses[row] = 0.5 * h2_int - if observed[row] { h_z } else { 0.0 };
     }
     (
