@@ -85,6 +85,38 @@ struct ShiftedTerminalStep {
     system: Option<ArrowSchurSystem>,
 }
 
+/// #2731/#2228 — what one terminal-polish call learned from its committed steps
+/// that bought less than their own quadratic model: the largest rung (damping or
+/// shift) such a step was taken at, and the shortest such step.
+#[derive(Clone, Copy)]
+struct RefutedRung {
+    rung: f64,
+    radius: f64,
+}
+
+impl RefutedRung {
+    fn record(previous: Option<Self>, rung: f64, step_norm: f64) -> Self {
+        previous.map_or(
+            Self {
+                rung,
+                radius: step_norm,
+            },
+            |refuted| Self {
+                rung: refuted.rung.max(rung),
+                radius: refuted.radius.min(step_norm),
+            },
+        )
+    }
+
+    /// Whether walking back to `walked_back` stays refuted: it lands at or below the
+    /// refuted rung, and the walked-back step can still be as long as a refuted step.
+    /// `growth` bounds how much longer than the committed step, `step_norm` long,
+    /// the walked-back step can be.
+    fn holds(&self, walked_back: f64, growth: f64, step_norm: f64) -> bool {
+        walked_back <= self.rung && growth * step_norm >= self.radius
+    }
+}
+
 impl SaeManifoldTerm {
     /// Custom penalized quasi-Laplace score for the SAE term at a fixed `ρ`.
     ///
@@ -2876,12 +2908,25 @@ impl SaeManifoldTerm {
         // #2283 — the warm-carried shift of the arrow exact-A step, the damping's
         // counterpart on states whose dense geometry the ledger does not admit.
         let mut shift = 0.0_f64;
-        // #2731 — the largest damping (and shift) at which a committed step of this
-        // call bought less than its own model predicted. The carry never walks back
-        // to a rung at or below it: that rung has already been refuted at a nearby
-        // iterate, and returning to it every other step is a 2-cycle, not a descent.
-        let mut refuted_damping: Option<f64> = None;
-        let mut refuted_shift: Option<f64> = None;
+        // #2731 — what this call learned from committed steps that bought less than
+        // their own model predicted: the largest damping (and shift) such a step was
+        // taken at, and the shortest such step. The carry does not walk back to a rung
+        // at or below it while the walked-back step could be as long as a refuted
+        // step, because returning there from a comparable state is a 2-cycle, not a
+        // descent.
+        //
+        // #2228 — the rung alone is not a nearby iterate. Pool job 585774 at
+        // `9544f0703` (`/scratch.global/sauer354/pool/sae2228/g4.seed2132.585774.txt`,
+        // C=4 K=4 softmax, second polish call) committed step 6 at σ = 5.915e-1 with
+        // ‖Δ‖ = 4.709 and agreement 0.158. The memory then held σ = 5.915 for steps
+        // 7–64 at agreement 1.93–2.06 while ‖Δ‖ fell from 3.85e-2 to 1.07e-2 and ‖g‖
+        // from 2.23e-1 to 6.37e-2 against tol 2.347e-3. At step 64 the measured
+        // decrease, 6.811e-4, matched the quadratic model with `A` itself,
+        // `½(−gᵀΔ) + ½σ‖Δ‖² = 6.812e-4`, to the printed digits, and the shift was
+        // 99.4% of the curvature along the step. Those steps were 120–440× shorter
+        // than the refuted one, and the memory never let the shift down.
+        let mut refuted_damping: Option<RefutedRung> = None;
+        let mut refuted_shift: Option<RefutedRung> = None;
         for step in 0..max_steps {
             let step_started = std::time::Instant::now();
             // #2267 — name each step to the process monitor; the guard ends with the
@@ -3020,7 +3065,10 @@ impl SaeManifoldTerm {
                 // there, so it IS the undamped step and is carried as exactly that.
                 let model_agreement = (committed.pre_objective - committed.committed_objective)
                     / (0.5 * committed.predicted_objective_decrease);
-                // The same refuted-rung memory as the dense carry below (#2731).
+                // The same refuted-rung memory as the dense carry below (#2731, #2228).
+                // Walking σ back to σ′ lengthens each positive-curvature component of the
+                // step, `uᵀg/(λ + σ)`, by `(λ + σ)/(λ + σ′) ≤ σ/σ′`.
+                let step_norm = committed.step_norm_sq.sqrt();
                 shift = if model_agreement >= 1.0 {
                     let walked_back = committed.shift / opt::constants::RIDGE_GROWTH;
                     let walked_back =
@@ -3029,15 +3077,20 @@ impl SaeManifoldTerm {
                         } else {
                             walked_back
                         };
-                    if refuted_shift.is_some_and(|refuted| walked_back <= refuted) {
+                    let growth = committed.shift / walked_back;
+                    if refuted_shift
+                        .is_some_and(|refuted| refuted.holds(walked_back, growth, step_norm))
+                    {
                         committed.shift
                     } else {
                         walked_back
                     }
                 } else {
-                    refuted_shift = Some(
-                        refuted_shift.map_or(committed.shift, |refuted| refuted.max(committed.shift)),
-                    );
+                    refuted_shift = Some(RefutedRung::record(
+                        refuted_shift,
+                        committed.shift,
+                        step_norm,
+                    ));
                     if committed.shift > 0.0 {
                         committed.shift * opt::constants::RIDGE_GROWTH
                     } else {
@@ -3301,24 +3354,37 @@ impl SaeManifoldTerm {
             // took ‖g‖ 1.18 → 0.044, and the walked-back ν = 7.68e-8 (agreement
             // 0.44–0.81) took it back to 1.18, until `max_steps` ended the call at a
             // refine entry ‖g‖ of 3.49e-2 against tol 2.501e-3. So a rung that bought
-            // less than its model is remembered, and the walk-back stops above it.
+            // less than its model is remembered, and the walk-back stops above it while
+            // the walked-back step could be as long as the shortest refuted step. The
+            // two steps of such a 2-cycle undo each other, so they are about equally
+            // long, and the memory holds there. It lets go once the committed steps
+            // are shorter than a refuted one by more than a rung's growth (#2228).
             let model_agreement = (pre_objective - committed_objective)
                 / (0.5 * accepted.predicted_objective_decrease);
+            let step_norm = accepted.step.step_norm_sq.sqrt();
             damping = if model_agreement >= 1.0 {
                 // A damping under `λ_min²` cannot move the flattest resolved
                 // direction, so it IS the undamped step and is carried as exactly
                 // that.
                 let walked_back = accepted.damping / opt::constants::RIDGE_GROWTH;
                 let walked_back = if walked_back < smallest_damping { 0.0 } else { walked_back };
-                if refuted_damping.is_some_and(|refuted| walked_back <= refuted) {
+                // Each retained component of the step is `uᵢᵀg/(|λᵢ| + √ν)`, so walking
+                // ν back to ν′ lengthens it by at most `(λ_min + √ν)/(λ_min + √ν′)`.
+                let growth = (curvature_min + accepted.damping.sqrt())
+                    / (curvature_min + walked_back.sqrt());
+                if refuted_damping
+                    .is_some_and(|refuted| refuted.holds(walked_back, growth, step_norm))
+                {
                     accepted.damping
                 } else {
                     walked_back
                 }
             } else {
-                refuted_damping = Some(
-                    refuted_damping.map_or(accepted.damping, |refuted| refuted.max(accepted.damping)),
-                );
+                refuted_damping = Some(RefutedRung::record(
+                    refuted_damping,
+                    accepted.damping,
+                    step_norm,
+                ));
                 if accepted.damping > 0.0 {
                     accepted.damping * opt::constants::RIDGE_GROWTH
                 } else {
