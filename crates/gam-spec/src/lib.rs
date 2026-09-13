@@ -647,17 +647,16 @@ impl ResponseFamily {
 
     /// Closed-interval bounds for the mean (response-scale) of this family.
     ///
-    /// Used by predict-side CI clamps that need to keep transformed bounds
-    /// within the support of the response. Beta uses strict-open `(1e-10, 1 − 1e-10)`
-    /// to avoid logit singularities; Binomial / Royston-Parmar use the closed
-    /// `[0, 1]` since they are evaluated post-transformation. Unbounded
-    /// (continuous-real or non-negative-real) families return `None` — the
-    /// caller should not clamp.
+    /// Used by predict-side CI clamps that keep transformed interval endpoints
+    /// within the support of the response. The clamp bounds reported endpoints
+    /// only (no logit is taken of a clamped value), so every probability-valued
+    /// family, Beta included, uses the closed `[0, 1]` its mean reaches as a
+    /// limit. Unbounded (continuous-real or non-negative-real) families return
+    /// `None` — the caller should not clamp.
     #[inline]
     pub fn mean_clamp_bounds(&self) -> Option<(f64, f64)> {
         match self {
-            Self::Binomial | Self::RoystonParmar => Some((0.0, 1.0)),
-            Self::Beta { .. } => Some((1e-10, 1.0 - 1e-10)),
+            Self::Binomial | Self::RoystonParmar | Self::Beta { .. } => Some((0.0, 1.0)),
             Self::Gaussian
             | Self::Poisson
             | Self::Tweedie { .. }
@@ -3624,6 +3623,16 @@ mod tests {
     fn mean_clamp_bounds_binomial_unit_interval() {
         assert_eq!(
             ResponseFamily::Binomial.mean_clamp_bounds(),
+            Some((0.0, 1.0))
+        );
+    }
+
+    /// A Beta mean interval is clamped to the same closed unit interval as a
+    /// Binomial one: the clamp bounds reported endpoints and takes no logit.
+    #[test]
+    fn mean_clamp_bounds_beta_is_the_closed_unit_interval() {
+        assert_eq!(
+            ResponseFamily::Beta { phi: 2.0 }.mean_clamp_bounds(),
             Some((0.0, 1.0))
         );
     }
