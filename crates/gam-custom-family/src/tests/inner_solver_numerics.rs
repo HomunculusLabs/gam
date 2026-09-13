@@ -1182,7 +1182,7 @@ pub(crate) fn innerfit_uses_joint_exact_path_for_multiblock_constraints() {
     let options = BlockwiseFitOptions {
         inner_max_cycles: 1,
         inner_tol: 1e-10,
-        ridge_floor: CUSTOM_FAMILY_RIDGE_FLOOR,
+        ridge_floor: 0.0,
         ..BlockwiseFitOptions::default()
     };
     let per_block = vec![Array1::zeros(0), Array1::zeros(0)];
@@ -1237,7 +1237,7 @@ pub(crate) fn joint_newton_budget_exhaustion_refuses_coupled_exact_inner() {
     let options = BlockwiseFitOptions {
         inner_max_cycles: 1,
         inner_tol: 1e-12,
-        ridge_floor: CUSTOM_FAMILY_RIDGE_FLOOR,
+        ridge_floor: 0.0,
         ..BlockwiseFitOptions::default()
     };
     let per_block = vec![Array1::zeros(0), Array1::zeros(0)];
@@ -1337,7 +1337,7 @@ pub(crate) fn bms_flex_marginal_slope_coupled_exact_inner_stall_is_deterministic
     let options = BlockwiseFitOptions {
         inner_max_cycles: DEFAULT_CUSTOM_FAMILY_INNER_MAX_CYCLES,
         inner_tol: 1e-12,
-        ridge_floor: CUSTOM_FAMILY_RIDGE_FLOOR,
+        ridge_floor: 0.0,
         ..BlockwiseFitOptions::default()
     };
     let per_block = vec![Array1::zeros(0), Array1::zeros(0)];
@@ -1422,7 +1422,7 @@ pub(crate) fn persistent_merit_descent_stall_exits_at_veto_bound_not_hard_ceilin
     let options = BlockwiseFitOptions {
         inner_max_cycles: DEFAULT_CUSTOM_FAMILY_INNER_MAX_CYCLES,
         inner_tol: 1e-12,
-        ridge_floor: CUSTOM_FAMILY_RIDGE_FLOOR,
+        ridge_floor: 0.0,
         ..BlockwiseFitOptions::default()
     };
     let per_block = vec![Array1::zeros(0), Array1::zeros(0)];
@@ -1516,7 +1516,7 @@ pub(crate) fn non_finite_curvature_exits_joint_newton_far_below_budget() {
     let options = BlockwiseFitOptions {
         inner_max_cycles: DEFAULT_CUSTOM_FAMILY_INNER_MAX_CYCLES,
         inner_tol: 1e-12,
-        ridge_floor: CUSTOM_FAMILY_RIDGE_FLOOR,
+        ridge_floor: 0.0,
         ..BlockwiseFitOptions::default()
     };
     let per_block = vec![Array1::zeros(0), Array1::zeros(0)];
@@ -2441,7 +2441,7 @@ pub(crate) fn exact_newton_pseudo_laplace_objective_uses_logdet_h_without_logdet
     };
     let options = BlockwiseFitOptions {
         use_remlobjective: true,
-        ridge_floor: CUSTOM_FAMILY_RIDGE_FLOOR,
+        ridge_floor: 0.0,
         compute_covariance: false,
         ..BlockwiseFitOptions::default()
     };
@@ -3834,55 +3834,41 @@ pub(crate) fn pseudo_laplace_path_skips_eigendecomposition_avoiding_nan_crash() 
     }
 }
 
-/// Regression check: when `strict_solve_spd_with_lm_continuation` is given a
-/// strongly negative-definite matrix whose `|λ_min|` exceeds the LM δ-ridge
-/// schedule's terminal δ (≈ ε · trace_scale · 10¹⁶), the bare schedule can't
-/// rescue Cholesky and the terminal eigendecomposition fallback must return
-/// the positive-part Moore–Penrose solution. Negative eigendirections are
-/// outside its range and must contribute exactly zero.
-///
-/// We also exercise the schedule-success path with a milder matrix to lock
-/// in that the eigen-floor doesn't perturb the LM-δ output for cases the
-/// schedule can already handle.
+/// A singular positive-semidefinite matrix that a strict Cholesky refuses takes the
+/// Moore–Penrose step on its resolved positive eigenspace: the null direction
+/// `(1, −1)/√2` takes no step.
 #[test]
-pub(crate) fn strict_solve_spd_falls_back_to_positive_pseudoinverse_on_indefinite_matrix() {
-    // δ schedule from `delta0 = max(ε·tr/p, 1e-12)`, growth 10×, 16 steps.
-    // With `tr = 4·1e30` we get `delta0 ≈ ε·1e30 ≈ 2.2e14`; terminal δ at
-    // escalation 16 is `2.2e14 · 1e16 = 2.2e30`. Set `λ_min ≈ -1e32` to
-    // outpace the schedule and force the eigen-floor branch.
-    let p = 4usize;
-    let mut h = Array2::<f64>::zeros((p, p));
-    for i in 0..p {
-        h[[i, i]] = -1e32 - (i as f64) * 1e30;
-    }
-    h[[0, 1]] = 5e29;
-    h[[1, 0]] = 5e29;
-    let rhs = Array1::from_vec(vec![1e30, -5e29, 2.5e29, 7.5e29]);
-
-    let (x, stats) = strict_solve_spd_with_lm_continuation(&h, &rhs)
-        .expect("eigendecomposition fallback must succeed on the negative-definite matrix");
+pub(crate) fn strict_block_solve_takes_the_positive_pseudoinverse_on_a_singular_psd_matrix() {
+    // Eigenvalues 2 along (1, 1)/√2 and 0 along (1, −1)/√2. The right-hand side
+    // projects to 2√2 on the range direction, so the step is √2·(1, 1)/√2.
+    let h = array![[1.0, 1.0], [1.0, 1.0]];
+    let rhs = array![3.0, 1.0];
+    let x = strict_solve_spd_or_spectral_step(&h, &rhs)
+        .expect("a singular positive-semidefinite system has a pseudoinverse step");
     assert!(
-        stats.escalations > 16,
-        "expected eigendecomposition terminal fallback (escalations > MAX_ESCALATIONS), got {}",
-        stats.escalations,
+        (x[0] - 1.0).abs() <= 1e-12 && (x[1] - 1.0).abs() <= 1e-12,
+        "the null direction must take no step: {x:?}"
     );
-    for &v in x.iter() {
-        assert!(
-            v.is_finite(),
-            "pseudo-inverse solve returned non-finite component {v}"
-        );
-    }
+}
 
-    // A negative eigenspace is outside the range of the positive-part
-    // Moore–Penrose inverse. It contributes zero rather than an arbitrary
-    // fabricated step.
-    for (i, &value) in x.iter().enumerate() {
-        assert_eq!(
-            value.to_bits(),
-            0.0_f64.to_bits(),
-            "negative eigendirection {i} contributed {value} to the pseudo-inverse solve",
-        );
-    }
+/// An indefinite matrix takes the minimally shifted step, not the projection: its
+/// negative-curvature direction receives a descent step instead of none, so the
+/// block update cannot stall at a saddle.
+#[test]
+pub(crate) fn strict_block_solve_moves_along_negative_curvature_on_an_indefinite_matrix() {
+    let h = array![[3.0, 0.0], [0.0, -2.0]];
+    let rhs = array![3.0, 2.0];
+    let x = strict_solve_spd_or_spectral_step(&h, &rhs)
+        .expect("an indefinite system has a shifted step");
+    assert!(x.iter().all(|value| value.is_finite()), "{x:?}");
+    assert!(
+        x[1] > 0.0,
+        "the negative-curvature direction must take a step: {x:?}"
+    );
+    assert!(
+        rhs.dot(&x) > 0.0,
+        "the shifted step must ascend the maximize-direction right-hand side: {x:?}"
+    );
 }
 
 // ---------- eta_backup heterogeneous-shape regression tests ----------

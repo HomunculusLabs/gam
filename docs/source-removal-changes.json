@@ -8757,5 +8757,19 @@
     "reason": "#2899, SPEC rule 25. ln_gamma_derivative_stack_order2 returned the first three entries of ln_gamma_derivative_stack, and only tests called it. The dispersion-family tower oracle now reads the full stack's prefix, and the prefix test that compared the two functions is removed with it (the order-3 twin went the same way in 3d572744b).",
     "evidence": "At the base, git grep -w ln_gamma_derivative_stack_order2 finds the declaration and derivative_stack_tests::ln_gamma_derivative_stack_order2_is_prefix in crates/gam-math/src/jet_tower.rs, and one call in crates/gam-models/src/gamlss/test_support.rs (order2_ln_gamma, the dispersion-family oracle). Both functions build their entries from the same statrs::function::gamma::ln_gamma, digamma_positive and polygamma_positive::<1> calls. The item list is the guard's refusal list from the guarded check job named in the commit message.",
     "base": "cbd289aca39a808caeeb37f4692c2c54a3d3c775"
+  },
+  {
+    "base": "d51b8e07bd2441fe5f3c92f5837e867922226c9d",
+    "items": [
+      "crates/gam-custom-family/src/blockwise_solve.rs:const:STRICT_SPD_LM_MAX_ESCALATIONS",
+      "crates/gam-custom-family/src/blockwise_solve.rs:const:STRICT_SPD_LM_RIDGE_GROWTH",
+      "crates/gam-custom-family/src/blockwise_solve.rs:fn:strict_solve_spd_with_lm_continuation",
+      "crates/gam-custom-family/src/blockwise_solve.rs:fn:strict_spd_lm_engine",
+      "crates/gam-custom-family/src/blockwise_solve.rs:struct:StrictSpdLmStats",
+      "crates/gam-custom-family/src/tests/inner_solver_numerics.rs:fn:strict_solve_spd_falls_back_to_positive_pseudoinverse_on_indefinite_matrix",
+      "crates/gam-problem/src/custom_family_blockwise.rs:const:CUSTOM_FAMILY_RIDGE_FLOOR"
+    ],
+    "reason": "#2469 under the V22 ruling (no ridge; the minimum-norm solve on the identified subspace), with negative curvature kept per the lead's follow-up: after a strict Cholesky refusal, the exact-Newton block step no longer escalates a δ-ridge Cholesky from CUSTOM_FAMILY_RIDGE_FLOOR = 1e-12 with growth 10 and a budget of 16. strict_solve_spd_or_spectral_step reads the spectrum. A positive-semidefinite singular H takes the positive-eigenspace pseudoinverse. An H with an eigenvalue below −band takes the minimal positive-definite shift band − λ_min, so negative directions still receive a descent step. strict_spd_lm_engine (one caller), StrictSpdLmStats (a debug log only) and CUSTOM_FAMILY_RIDGE_FLOOR (the ladder's starting δ) go with it. The negative-definite regression test that asserted a zero step is replaced by a singular-PSD and an indefinite fixture.",
+    "evidence": "At the base, git grep -n -w for each removed name finds only blockwise_solve.rs, the gam-problem declaration and lib.rs re-export, and in tests inner_solver_numerics.rs (six ridge_floor option literals, now 0.0, and the replaced regression test). Guarded cargo check --workspace --all-targets --exclude gam-pyffi plus the gam-custom-family and transformation-normal tests: job 615497, /scratch.global/sauer354/pool/const2469b/rp47.615497.log."
   }
 ]

@@ -1,7 +1,7 @@
 //! Neutral blockwise custom-family contract primitives shared by the
 //! `CustomFamily` trait layer (`gam-model-api`) and the solver
-//! (`gam-solve`): the ridge floor, the block-spec consistency
-//! validator, and the exact-Newton outer-curvature payload.
+//! (`gam-solve`): the block-spec consistency validator and the
+//! exact-Newton outer-curvature payload.
 //!
 //! These carry no dependency on the `CustomFamily` trait itself, so they live
 //! in the neutral `gam-problem` crate and are re-exported upward, keeping a
@@ -10,10 +10,6 @@
 use crate::{CustomFamilyError, ParameterBlockSpec};
 use ndarray::Array2;
 use std::collections::BTreeMap;
-
-/// Floor on the initial δ of the δ-ridge Cholesky continuation in the custom-family
-/// strict SPD helpers (`strict_spd_lm_engine`).
-pub const CUSTOM_FAMILY_RIDGE_FLOOR: f64 = 1e-12;
 
 /// # Why this returns the typed error and not a rendered `String`
 ///

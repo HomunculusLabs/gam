@@ -104,7 +104,6 @@ pub use constraint_set::{
     feasibility_quantities_are_finite,
 };
 pub use custom_family_blockwise::{
-    CUSTOM_FAMILY_RIDGE_FLOOR,
     ExactNewtonOuterCurvature,
     validate_blockspec_consistency,
 };

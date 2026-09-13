@@ -5,7 +5,6 @@
 //! labeled-rho aggregation/pullback helpers that drive the outer eval.
 
 use super::*;
-use opt::{RidgeSchedule, escalate_ridge};
 
 /// Convert one already-semantic log-smoothing vector to physical strengths.
 /// This is the only custom-family conversion seam: it rejects the first bad
@@ -1663,38 +1662,22 @@ impl ParameterBlockUpdater for ExactNewtonBlockUpdater<'_> {
             //
             //   hess_Q * delta = -grad_Q = gradient - S beta.
             //
-            // This form stays correct even when the linear solver adds a
-            // numerical ridge to the left-hand side to stabilize an indefinite
-            // or nearly singular block. Solving directly for `beta_new` with a
-            // ridged matrix would require an extra `ridge * beta` term on the
-            // right-hand side; without it the step is distorted, which can trap
-            // exact-Newton block updates on nonconvex blocks such as survival
-            // `log_sigma`.
-            // Every family takes the Newton step through the LM δ-ridge
-            // continuation. A near-zero eigenvalue from numerical noise in H_β
-            // must not bounce the seed evaluation, and for a nonconvex block
-            // whose likelihood Hessian is indefinite away from the optimum (the
-            // squared-coefficient SCOP transformation-normal tensor over a
-            // smooth covariate, whose I(y)⊗b(x) columns are strongly collinear)
-            // the continuation gives a well-scaled Newton step where a
-            // ridge-retry solve crawls to the inner cycle cap. On an SPD,
-            // well-conditioned H_β + S it is the plain Cholesky step with zero
-            // escalations. It ends in the Moore–Penrose solve on the resolved
-            // positive eigenspace, so it fails only when that eigendecomposition
-            // fails on a non-finite system; the failure is returned, not traded
-            // for a diagonally scaled steepest-descent step. β is recovered in
-            // the raw basis, so dimensionality and identifiability are untouched.
-            let (delta, lm_stats) = strict_solve_spd_with_lm_continuation(&lhs_dense, &rhs_step)?;
-            if lm_stats.escalations > 0 {
-                log::debug!(
-                    "[block-newton/lm] block={} ({}): δ-ridge continuation succeeded \
-                     after {} escalation(s) at δ={:.3e}",
-                    ctx.block_idx,
-                    ctx.spec.name,
-                    lm_stats.escalations,
-                    lm_stats.delta_used,
-                );
-            }
+            // Solving for the step rather than `beta_new` keeps the right-hand side
+            // exact when the solver acts on a projected or shifted system: solving
+            // directly for `beta_new` would carry β's own component through that
+            // modification, which distorts the step and can trap exact-Newton block
+            // updates on nonconvex blocks such as survival `log_sigma`.
+            // Every family takes the Newton step through
+            // `strict_solve_spd_or_spectral_step`: the plain Cholesky step on an SPD
+            // H_β + S; the Moore–Penrose step on the resolved positive eigenspace
+            // when H_β + S is singular positive semidefinite; and the minimally
+            // shifted step when it carries negative curvature beyond its rounding
+            // band, so a saddle direction still receives a descent step. It fails
+            // only when that eigendecomposition fails or the step is non-finite, and
+            // the failure is returned, not traded for a diagonally scaled
+            // steepest-descent step. β is recovered in the raw basis, so
+            // dimensionality and identifiability are untouched.
+            let delta = strict_solve_spd_or_spectral_step(&lhs_dense, &rhs_step)?;
             let beta = &ctx.states[ctx.block_idx].beta + &delta;
             Ok(BlockUpdateResult {
                 beta_new_raw: beta,
@@ -2160,164 +2143,82 @@ pub(crate) fn strict_solve_spd(
     Ok(chol.solvevec(rhs))
 }
 
-/// Statistics about a Levenberg-Marquardt-style δ-ridge SPD continuation.
-/// Recorded by `strict_solve_spd_with_lm_continuation` and surfaced for
-/// diagnostics — a recurring need for nontrivial ridges signals fragile
-/// curvature that the controller may need to escalate.
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct StrictSpdLmStats {
-    /// δ value finally used (0.0 means the bare strict solve succeeded).
-    pub(crate) delta_used: f64,
-    /// Number of escalations performed before Cholesky succeeded.
-    pub(crate) escalations: usize,
-}
-
-/// Strict-mode SPD solve with internal Levenberg-Marquardt δ-ridge
-/// continuation: solves `(H + δI) x = b` with δ escalated geometrically
-/// until the Cholesky succeeds.  The bare `strict_solve_spd` is unchanged —
-/// callers that need strict semantics keep them.  Callers that want
-/// fail-soft Newton on a fragile geometry (e.g. spatial-adaptive seed
-/// evaluation) use this wrapper to avoid bouncing the entire seed on a
-/// numerically-indefinite block.
-///
-/// Schedule: δ₀ = max(ε · ‖H‖₁ / p, 1e-12); growth ×10 per step; capped
-/// at MAX_ESCALATIONS escalations.  The cap prevents runaway curvature
-/// from producing arbitrary ridges; if the cap is hit, the bare strict
-/// error propagates so the caller can route to a different optimization
-/// path (e.g. sparse/gradient-only standard REML at full data).
-/// Shared escalation/ridge-growth schedule used by the three
-/// `strict_*_spd_with_lm_continuation` helpers. Hoisted here so a single
-/// change updates the solve / inverse / logdet paths in lockstep.
-pub(crate) const STRICT_SPD_LM_MAX_ESCALATIONS: usize = 16;
-
-pub(crate) const STRICT_SPD_LM_RIDGE_GROWTH: f64 = 10.0;
-
-// `CUSTOM_FAMILY_RIDGE_FLOOR` (the initial Cholesky-escalation ridge δ) is
-// single-sourced in `gam-problem` (`custom_family_blockwise`). Re-exported here
-// so existing crate-local paths keep resolving after the #1521 carve instead of
-// holding a second definition.
-pub(crate) use gam_problem::CUSTOM_FAMILY_RIDGE_FLOOR;
-
 /// Relative condition guard for rejecting genuinely negative spectrum in the
 /// penalty-direction projection.
 pub(crate) const CUSTOM_FAMILY_CONDITION_RELATIVE_FLOOR: f64 = 1e-14;
 
-/// Shared engine: try the bare strict path, fall through to an escalating
-/// LM δ-ridge Cholesky, and finally an eigendecomposition fallback. Each caller
-/// (solve / inverse / logdet) supplies the three operation-specific closures.
+/// The exact-Newton block step: solve `H x = b`.
 ///
-/// Centralizing the LM/eigen scaffolding here both removes ~180 lines of
-/// near-duplicated code and guarantees the three sibling helpers stay in
-/// lockstep — any future change to the schedule, the trace_scale heuristic,
-/// or the eigenspectrum fallback now lives in exactly one place.
-pub(crate) fn strict_spd_lm_engine<R>(
+/// A strict Cholesky factorization that certifies `H` positive definite gives the
+/// plain Newton step. Otherwise the symmetrized `H` is eigendecomposed and its
+/// spectrum decides, against `band = positive_eigenvalue_threshold` of that
+/// spectrum:
+///
+/// - no eigenvalue below `−band`: `H` is positive semidefinite to its resolution
+///   and singular, so the step is the Moore–Penrose solve on the resolved positive
+///   eigenspace, and a direction the data and penalty do not identify takes no
+///   step;
+/// - an eigenvalue below `−band`: `H` has genuine negative curvature, and
+///   projecting those directions away would leave the step blind to them and
+///   stall at a saddle. The step uses the minimal positive-definite shift
+///   `δ = band − λ_min`, the shift `stabilize_exact_newton_penalized_lhs_in_place`
+///   approaches by bisection, so every negative direction takes a descent step
+///   that the trust region then truncates.
+///
+/// No picked ridge enters either branch.
+pub(crate) fn strict_solve_spd_or_spectral_step(
     matrix: &Array2<f64>,
-    op_label: &'static str,
-    empty: R,
-    bare_path: impl FnOnce(&Array2<f64>) -> Result<R, CustomFamilyError>,
-    process_chol: impl FnOnce(&gam_linalg::faer_ndarray::FaerCholeskyFactor) -> R,
-    process_eigen: impl FnOnce(&Array1<f64>, &Array2<f64>) -> R,
-) -> Result<(R, StrictSpdLmStats), CustomFamilyError> {
-    if let Ok(r) = bare_path(matrix) {
-        return Ok((r, StrictSpdLmStats::default()));
+    rhs: &Array1<f64>,
+) -> Result<Array1<f64>, CustomFamilyError> {
+    if let Ok(x) = strict_solve_spd(matrix, rhs)
+        && x.iter().all(|value| value.is_finite())
+    {
+        return Ok(x);
     }
-
     let p = matrix.nrows();
     if p == 0 {
-        return Ok((empty, StrictSpdLmStats::default()));
+        return Ok(Array1::<f64>::zeros(0));
     }
     let mut sym = matrix.clone();
     symmetrize_dense_in_place(&mut sym);
-    let trace_scale = (0..p).map(|i| sym[[i, i]].abs()).sum::<f64>() / (p as f64);
-    let delta0 = (f64::EPSILON * trace_scale.max(1.0)).max(CUSTOM_FAMILY_RIDGE_FLOOR);
-
-    let exhausted = match escalate_ridge(
-        RidgeSchedule {
-            initial: delta0,
-            growth: STRICT_SPD_LM_RIDGE_GROWTH,
-            max_escalations: STRICT_SPD_LM_MAX_ESCALATIONS,
-        },
-        |delta| {
-            let mut ridged = sym.clone();
-            for i in 0..p {
-                ridged[[i, i]] += delta;
-            }
-            ridged.cholesky(Side::Lower).ok()
-        },
-    ) {
-        Ok(success) => {
-            return Ok((
-                process_chol(&success.value),
-                StrictSpdLmStats {
-                    delta_used: success.ridge,
-                    escalations: success.escalations,
-                },
-            ));
-        }
-        Err(exhausted) => exhausted,
-    };
-
-    // δ-ridge schedule exhausted; expose the exact spectrum to the operation.
-    // The solve consumer applies Moore–Penrose semantics on the resolved positive
-    // eigenspace rather than inventing curvature for null and negative modes.
-    let max_esc = STRICT_SPD_LM_MAX_ESCALATIONS;
-    let delta = exhausted.next_ridge;
     let (evals, evecs) = FaerEigh::eigh(&sym, Side::Lower).map_err(|e| {
         format!(
-            "{op_label} failed even with LM δ-ridge continuation \
-             (escalated {max_esc} times to δ={delta:.3e}, trace_scale={trace_scale:.3e}); \
+            "strict pseudo-laplace SPD solve: Cholesky refused the system and the \
              eigendecomposition fallback also failed: {e}"
         )
     })?;
-    Ok((
-        process_eigen(&evals, &evecs),
-        StrictSpdLmStats {
-            delta_used: delta,
-            escalations: STRICT_SPD_LM_MAX_ESCALATIONS + 1,
-        },
-    ))
-}
-
-pub(crate) fn strict_solve_spd_with_lm_continuation(
-    matrix: &Array2<f64>,
-    rhs: &Array1<f64>,
-) -> Result<(Array1<f64>, StrictSpdLmStats), CustomFamilyError> {
-    let p = matrix.nrows();
-    strict_spd_lm_engine(
-        matrix,
-        "strict pseudo-laplace SPD solve",
-        Array1::<f64>::zeros(0),
-        |m| strict_solve_spd(m, rhs),
-        |chol| chol.solvevec(rhs),
-        |evals, evecs| {
-            // The terminal fallback is the Moore–Penrose inverse on the
-            // resolved positive eigenspace. A null or negative direction
-            // contributes zero; inventing an absolute eigenvalue for it
-            // changes both the equation and its physical units.
-            let threshold = positive_eigenvalue_threshold(
-                evals.as_slice().expect("eigh returns contiguous eigenvalues"),
-            );
-            let mut q_t_rhs = Array1::<f64>::zeros(p);
-            for k in 0..p {
-                let mut acc = 0.0;
-                for i in 0..p {
-                    acc += evecs[[i, k]] * rhs[i];
-                }
-                if evals[k] > threshold {
-                    q_t_rhs[k] = acc / evals[k];
-                }
-            }
-            let mut x = Array1::<f64>::zeros(p);
-            for i in 0..p {
-                let mut acc = 0.0;
-                for k in 0..p {
-                    acc += evecs[[i, k]] * q_t_rhs[k];
-                }
-                x[i] = acc;
-            }
-            x
-        },
-    )
+    let band =
+        positive_eigenvalue_threshold(evals.as_slice().expect("eigh returns contiguous eigenvalues"));
+    let min_eigenvalue = evals.iter().copied().fold(f64::INFINITY, f64::min);
+    let shift = if min_eigenvalue < -band { band - min_eigenvalue } else { 0.0 };
+    let mut q_t_rhs = Array1::<f64>::zeros(p);
+    for k in 0..p {
+        if shift == 0.0 && !(evals[k] > band) {
+            continue;
+        }
+        let mut acc = 0.0;
+        for i in 0..p {
+            acc += evecs[[i, k]] * rhs[i];
+        }
+        q_t_rhs[k] = acc / (evals[k] + shift);
+    }
+    let mut x = Array1::<f64>::zeros(p);
+    for i in 0..p {
+        let mut acc = 0.0;
+        for k in 0..p {
+            acc += evecs[[i, k]] * q_t_rhs[k];
+        }
+        x[i] = acc;
+    }
+    if !x.iter().all(|value| value.is_finite()) {
+        return Err(CustomFamilyError::NumericalFailure {
+            reason: format!(
+                "strict pseudo-laplace SPD solve: the spectral step is non-finite \
+                 (min eigenvalue {min_eigenvalue:.3e}, band {band:.3e})"
+            ),
+        });
+    }
+    Ok(x)
 }
 
 /// Eigenpairs of a Laplace precision `M = H + S_λ (+ H_Φ)` that its generalized
