@@ -1176,7 +1176,7 @@ where
 /// A skip certified from `H`'s bounds therefore certifies the reduced gate on
 /// ANY span, and a family that scopes `Z_J` to the directions its penalty does
 /// not reach keeps this pre-check exactly as safe as it was on the full span.
-pub fn jeffreys_term_skippable_via_matvec<HvFn>(hv: HvFn, p: usize) -> Result<bool, String>
+pub(crate) fn jeffreys_term_skippable_via_matvec<HvFn>(hv: HvFn, p: usize) -> Result<bool, String>
 where
     HvFn: FnMut(&Array1<f64>) -> Result<Array1<f64>, String>,
 {
@@ -1203,7 +1203,7 @@ where
     Ok(absolute_clears && relative_clears)
 }
 
-/// EXACT dense counterpart to [`jeffreys_term_skippable_via_matvec`], which
+/// EXACT dense counterpart to `jeffreys_term_skippable_via_matvec`, which
 /// [`jeffreys_term_skippable`] consults when the bounds do not certify. On the
 /// full span (`Z_J = I`, so `H_id = H`) the conditioning gate
 /// depends only on `H`'s extreme eigenvalues, so this eigendecomposes `H` EXACTLY
@@ -1230,7 +1230,7 @@ where
 /// systems — assumed the exact dense path was cheap, which is true for the
 /// eigendecomposition but NOT for the family's all-axes directional-derivative
 /// sweep that the un-skipped term forces on every cycle.
-pub fn jeffreys_term_skippable_dense(h: ArrayView2<'_, f64>) -> Result<bool, String> {
+pub(crate) fn jeffreys_term_skippable_dense(h: ArrayView2<'_, f64>) -> Result<bool, String> {
     let p = h.nrows();
     if p == 0 || h.ncols() != p {
         // No system / non-square: nothing to certify, fall through to the exact path.
@@ -1260,11 +1260,11 @@ pub fn jeffreys_term_skippable_dense(h: ArrayView2<'_, f64>) -> Result<bool, Str
 /// byte-identical to forming the gated-off term:
 ///
 /// - When `p` exceeds `CHEAP_PRECHECK_LANCZOS_STEPS`,
-///   [`jeffreys_term_skippable_via_matvec`] bounds the spectrum from that many
+///   `jeffreys_term_skippable_via_matvec` bounds the spectrum from that many
 ///   products `hv`. At or below it the Krylov space is the whole space, so the
 ///   bounds would cost what the exact spectrum does, and they do not run.
 /// - When the bounds do not certify, `dense` forms `H` (or declines with `None`)
-///   and [`jeffreys_term_skippable_dense`] decides from its exact spectrum. The
+///   and `jeffreys_term_skippable_dense` decides from its exact spectrum. The
 ///   two `p × p` copies are charged on the memory ledger, and a refused charge
 ///   certifies nothing.
 ///
