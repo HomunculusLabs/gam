@@ -18,8 +18,8 @@ use crate::basis::{
     constant_curvature_kernel_matrix,
 };
 use crate::smooth::{
-    CONSTANT_CURVATURE_MIN_CHART_RADIUS2, ShapeConstraint, SmoothBasisSpec, SmoothTermSpec,
-    TermCollectionSpec, constant_curvature_kappa_bounds, constant_curvature_kappa_chart_fraction,
+    ShapeConstraint, SmoothBasisSpec, SmoothTermSpec, TermCollectionSpec,
+    constant_curvature_kappa_bounds, constant_curvature_kappa_chart_fraction,
 };
 use gam_geometry::manifolds::constant_curvature::ConstantCurvature;
 use ndarray::{Array2, array};
@@ -72,7 +72,7 @@ fn data_driven_center_strategies_keep_the_pre_2716_box_bit_for_bit() {
     let max_r2 = data
         .outer_iter()
         .map(|row| row.dot(&row))
-        .fold(CONSTANT_CURVATURE_MIN_CHART_RADIUS2, f64::max);
+        .fold(0.0, f64::max);
     let expected = constant_curvature_kappa_chart_fraction() / max_r2;
     for strategy in [
         CenterStrategy::FarthestPoint { num_centers: 8 },
@@ -259,14 +259,14 @@ fn uniform_grid_corner_centers_leave_the_hull_and_move_the_box_2716() {
     );
 }
 
-/// A degenerate cloud (every point at the origin) still has to produce a finite,
-/// usable bracket rather than an unbounded one — on both radii now, since either
-/// one can be the degenerate side.
+/// A degenerate configuration (every point and every center at the origin)
+/// gives every κ the same design, so κ is not identified and the window is
+/// unbounded, on both radii since either one can be the degenerate side. The κ
+/// profile refuses the non-finite bracket instead of searching a flat
+/// criterion. A floor on `R²` had manufactured a finite window here.
 #[test]
-fn degenerate_radii_still_yield_a_finite_bracket() {
+fn degenerate_radii_leave_the_window_unbounded() {
     let data = Array2::<f64>::zeros((8, 2));
-    let floor_bound =
-        constant_curvature_kappa_chart_fraction() / CONSTANT_CURVATURE_MIN_CHART_RADIUS2;
     for strategy in [
         CenterStrategy::FarthestPoint { num_centers: 4 },
         CenterStrategy::UserProvided(Array2::<f64>::zeros((3, 2))),
@@ -274,13 +274,29 @@ fn degenerate_radii_still_yield_a_finite_bracket() {
     ] {
         let spec = spec_with(strategy.clone(), 2);
         let (lo, hi) = constant_curvature_kappa_bounds(data.view(), &spec, 0);
-        assert!(
-            lo.is_finite() && hi.is_finite() && hi > lo,
-            "{strategy:?}: degenerate geometry must still bracket, got [{lo}, {hi}]"
+        assert_eq!(
+            (lo, hi),
+            (f64::NEG_INFINITY, f64::INFINITY),
+            "{strategy:?}: an all-origin configuration has no radius to bound κ by"
         );
+    }
+}
+
+/// κ has units of 1/length², so the window is `±F/R²` at every radius. A cloud
+/// recorded in units 1e-5 of another has a window 1e10 times wider, not one
+/// clipped at a floor on `R²`.
+#[test]
+fn the_window_scales_as_the_inverse_squared_radius() {
+    let f = constant_curvature_kappa_chart_fraction();
+    let feature_cols = [0usize, 1usize];
+    for radius in [1.0e-5_f64, 1.0e-3, 1.0, 1.0e3] {
+        let data = ring(32, radius, 2);
+        let spec = spec_with(CenterStrategy::FarthestPoint { num_centers: 6 }, 2);
+        let (lo, hi) = constant_curvature_kappa_bounds(data.view(), &spec, 0);
+        let r2 = constant_curvature_data_chart_radius2(data.view(), &feature_cols);
         assert!(
-            (hi - floor_bound).abs() <= 1e-9 && (lo + floor_bound).abs() <= 1e-9,
-            "{strategy:?}: the degenerate bracket is the radius floor's, got [{lo}, {hi}]"
+            (hi * r2 / f - 1.0).abs() <= 1.0e-12 && (lo * r2 / f + 1.0).abs() <= 1.0e-12,
+            "radius {radius}: the window must be ±F/R², got [{lo}, {hi}] for R² = {r2}"
         );
     }
 }
@@ -346,13 +362,9 @@ fn each_wall_retreats_by_f_from_its_own_branchs_gauge_never_the_others_2687() {
         let spec = spec_with(strategy.clone(), 2);
         let (lo, hi) = constant_curvature_kappa_bounds(data.view(), &spec, 0);
         let feature_cols = [0usize, 1usize];
-        let r2 = constant_curvature_data_chart_radius2(data.view(), &feature_cols)
-            .max(constant_curvature_center_chart_radius2(
-                data.view(),
-                &feature_cols,
-                &strategy,
-            ))
-            .max(CONSTANT_CURVATURE_MIN_CHART_RADIUS2);
+        let r2 = constant_curvature_data_chart_radius2(data.view(), &feature_cols).max(
+            constant_curvature_center_chart_radius2(data.view(), &feature_cols, &strategy),
+        );
 
         // κ < 0: the per-POINT gauge at the lower wall.
         let lambda = 1.0 + lo * r2;

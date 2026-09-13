@@ -8492,5 +8492,13 @@
     ],
     "reason": "SPEC rule 23 (#2469). RESCALE_CENTERED_SS_FLOOR (1e-12) was an absolute floor on the centred weighted sums of squares that gate the noise-column rescale sqrt(orig_css / resid_css), in the column units squared, so the transform depended on the units of the covariate. Each sum is now compared with four times its own accumulated rounding band (gamma_{p_primary+2} for the projection residual, gamma_{n+2} for the deviation from the weighted mean), which scales with the data.",
     "evidence": "At the base, git grep -n -w RESCALE_CENTERED_SS_FLOOR finds only crates/gam-model-kernels/src/scale_design.rs: the declaration and the two comparisons in build_scale_deviation_transform_impl. The candidate file has no reference to it."
+  },
+  {
+    "base": "0df0f80617138d83c8ba7c6d5e0013db3eb58abc",
+    "items": [
+      "crates/gam-terms/src/smooth/term_specs.rs:const:CONSTANT_CURVATURE_MIN_CHART_RADIUS2"
+    ],
+    "reason": "SPEC rule 23 (#2469). CONSTANT_CURVATURE_MIN_CHART_RADIUS2 (1e-8) floored the squared chart radius that denominates the constant-curvature kappa window F/R2. kappa has units of 1/length2, so the absolute floor tied the window to coordinate units and narrowed it for any cloud with R2 below 1e-8. The window is now F/R2 at every radius; an all-origin configuration has an unbounded window, which the kappa profile already refuses as non-finite bounds.",
+    "evidence": "At the base, git grep -n -w CONSTANT_CURVATURE_MIN_CHART_RADIUS2 finds only crates/gam-terms/src/smooth/term_specs.rs (the declaration and its use in constant_curvature_kappa_bounds) and crates/gam-terms/src/smooth/constant_curvature_kappa_box_tests.rs (the import and three test uses). The candidate files have no reference to it."
   }
 ]

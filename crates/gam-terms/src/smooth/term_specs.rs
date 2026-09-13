@@ -3424,11 +3424,6 @@ pub fn constant_curvature_kappa_chart_fraction() -> f64 {
     1.0 - f64::EPSILON.powf(1.0 / 6.0)
 }
 
-/// Floor on the data's squared chart radius used to scale the κ window, so a
-/// degenerate (near-origin) point cloud still yields a finite, usable bracket
-/// rather than an unbounded one.
-pub(crate) const CONSTANT_CURVATURE_MIN_CHART_RADIUS2: f64 = 1e-8;
-
 /// `(κ_min, κ_max)` outer-optimization window for a constant-curvature term,
 /// derived over the configuration the basis actually EVALUATES.
 ///
@@ -3503,9 +3498,11 @@ pub fn constant_curvature_kappa_bounds(
         feature_cols,
         &cc.center_strategy,
     );
-    let max_r2 = data_r2
-        .max(center_r2)
-        .max(CONSTANT_CURVATURE_MIN_CHART_RADIUS2);
+    let max_r2 = data_r2.max(center_r2);
+    // No floor on `R²`: κ has units of 1/length², so the window is `±F/R²` at
+    // every radius. In an all-origin configuration (`R = 0`) every κ gives the
+    // same design, so κ is not identified and the window is unbounded; the κ
+    // profile refuses non-finite bounds instead of searching a flat criterion.
     let half = constant_curvature_kappa_chart_fraction() / max_r2;
     (-half, half)
 }
