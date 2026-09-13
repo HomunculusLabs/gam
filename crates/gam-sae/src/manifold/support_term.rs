@@ -430,6 +430,145 @@ impl SupportBetaOperator {
     }
 }
 
+/// #2576: the support `H_ββ` states its own blocks and diagonal. Behind the
+/// closure adapter the block-Jacobi build probed it one column at a time, a full
+/// `apply` over every row per column: k = 7680 applies per coupled step on the
+/// 3000x48 chart (profile job 609002). Every method adds the same terms in the
+/// order `apply` accumulates them, so the preconditioner it builds is unchanged.
+impl gam_solve::arrow_schur::BetaPenaltyOp for SupportBetaOperator {
+    fn dim(&self) -> usize {
+        self.beta_dim
+    }
+
+    fn matvec(&self, x: &[f64], y: &mut [f64]) {
+        let mut applied = Array1::<f64>::zeros(self.beta_dim);
+        self.apply(ndarray::ArrayView1::from(x), &mut applied);
+        for (target, value) in y.iter_mut().zip(applied.iter()) {
+            *target += value;
+        }
+    }
+
+    fn gradient(&self, beta: &[f64], out: &mut [f64]) {
+        self.matvec(beta, out);
+    }
+
+    fn diagonal(&self, diag: &mut [f64]) {
+        let width = self.output_dim;
+        for row in &self.rows {
+            for block in &row.blocks {
+                for basis in 0..block.phi.len() {
+                    let base = block.beta_offset + basis * width;
+                    for channel in 0..width {
+                        diag[base + channel] += block.phi[basis] * block.phi[basis];
+                    }
+                }
+            }
+        }
+        for atom in 0..self.penalties.len() {
+            let lambda = self.lambda_smooth[atom];
+            let offset = self.beta_offsets[atom];
+            for basis in 0..self.basis_sizes[atom] {
+                for channel in 0..width {
+                    diag[offset + basis * width + channel] +=
+                        lambda * self.penalties[atom][[basis, basis]];
+                }
+            }
+        }
+    }
+
+    fn block(
+        &self,
+        id: gam_solve::arrow_schur::BetaBlockId,
+        offsets: &[Range<usize>],
+        out: &mut Array2<f64>,
+    ) {
+        let range = &offsets[id.0];
+        let width = self.output_dim;
+        let overlaps = |start: usize, len: usize| start < range.end && start + len > range.start;
+        let local =
+            |index: usize| (range.start <= index && index < range.end).then(|| index - range.start);
+        for row in &self.rows {
+            for left in &row.blocks {
+                if !overlaps(left.beta_offset, left.phi.len() * width) {
+                    continue;
+                }
+                for right in &row.blocks {
+                    if !overlaps(right.beta_offset, right.phi.len() * width) {
+                        continue;
+                    }
+                    for li in 0..left.phi.len() {
+                        for lj in 0..right.phi.len() {
+                            let weight = left.phi[li] * right.phi[lj];
+                            for channel in 0..width {
+                                if let (Some(bi), Some(bj)) = (
+                                    local(left.beta_offset + li * width + channel),
+                                    local(right.beta_offset + lj * width + channel),
+                                ) {
+                                    out[[bi, bj]] += weight;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for atom in 0..self.penalties.len() {
+            let offset = self.beta_offsets[atom];
+            let m = self.basis_sizes[atom];
+            if !overlaps(offset, m * width) {
+                continue;
+            }
+            let lambda = self.lambda_smooth[atom];
+            for left in 0..m {
+                for right in 0..m {
+                    let weight = lambda * self.penalties[atom][[left, right]];
+                    for channel in 0..width {
+                        if let (Some(bi), Some(bj)) = (
+                            local(offset + left * width + channel),
+                            local(offset + right * width + channel),
+                        ) {
+                            out[[bi, bj]] += weight;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn to_dense(&self) -> Array2<f64> {
+        let mut dense = Array2::<f64>::zeros((self.beta_dim, self.beta_dim));
+        self.block(
+            gam_solve::arrow_schur::BetaBlockId(0),
+            &[0..self.beta_dim],
+            &mut dense,
+        );
+        dense
+    }
+
+    fn fingerprint(&self, hasher: &mut gam_runtime::warm_start::Fingerprinter) {
+        hasher.write_str("sae-support-beta-operator-v1");
+        hasher.write_usize(self.beta_dim);
+        hasher.write_usize(self.output_dim);
+        for row in &self.rows {
+            hasher.write_usize(row.blocks.len());
+            for block in &row.blocks {
+                hasher.write_usize(block.beta_offset);
+                for &value in block.phi.iter() {
+                    hasher.write_f64(value);
+                }
+            }
+        }
+        for atom in 0..self.penalties.len() {
+            hasher.write_usize(self.beta_offsets[atom]);
+            hasher.write_usize(self.basis_sizes[atom]);
+            hasher.write_f64(self.lambda_smooth[atom]);
+            for &value in self.penalties[atom].iter() {
+                hasher.write_f64(value);
+            }
+        }
+    }
+}
+
 /// Reusable storage for ONE row's coordinate solve (#2575).
 ///
 /// Held per rayon worker and reused across every row that worker takes. The
@@ -2918,6 +3057,11 @@ impl SaeSupportSparseTerm {
         });
         let shared = Arc::clone(&operator);
         system.set_shared_beta_operator(move |vector, out| shared.apply(vector, out), hbb_diag);
+        // #2576: every hot path (the reduced-Schur matvec, the Jacobi diagonal and
+        // blocks) routes through `penalty_op`. Installing the operator itself gives
+        // them its exact blocks; the closure adapter above could only probe
+        // columns. `hbb_matvec`/`hbb_diag` stay for the helpers that read them.
+        system.set_penalty_op(Arc::clone(&operator) as Arc<dyn gam_solve::arrow_schur::BetaPenaltyOp>);
         let forward = Arc::clone(&operator);
         let transpose = Arc::clone(&operator);
         system.set_row_htbeta_operator(
@@ -7358,6 +7502,58 @@ mod tests {
                 assert_eq!(again[index].to_bits(), first[index].to_bits());
             }
         }
+    }
+
+    #[test]
+    fn beta_operator_blocks_diagonal_and_dense_match_column_probes() {
+        // #2576: the block-Jacobi build reads these instead of probing `apply`, so
+        // they must equal the probed columns. They add the same terms in the same
+        // order, so the comparison is exact.
+        use gam_solve::arrow_schur::{BetaBlockId, BetaPenaltyOp};
+        let op = beta_operator_fixture();
+        let k = op.beta_dim;
+        let mut probed = Array2::<f64>::zeros((k, k));
+        for column in 0..k {
+            let mut unit = Array1::<f64>::zeros(k);
+            unit[column] = 1.0;
+            let mut applied = Array1::<f64>::zeros(k);
+            op.apply(unit.view(), &mut applied);
+            probed.column_mut(column).assign(&applied);
+        }
+        let mut diagonal = vec![0.0_f64; k];
+        op.diagonal(&mut diagonal);
+        for index in 0..k {
+            assert_eq!(diagonal[index], probed[[index, index]], "diagonal entry {index}");
+        }
+        // Each atom's own range, then one range that spans atoms 0, 1 and 2.
+        let ranges = vec![0..4, 4..8, 8..12, 2..10];
+        for id in 0..ranges.len() {
+            let range = ranges[id].clone();
+            let width = range.end - range.start;
+            let mut block = Array2::<f64>::zeros((width, width));
+            op.block(BetaBlockId(id), &ranges, &mut block);
+            for bi in 0..width {
+                for bj in 0..width {
+                    assert_eq!(
+                        block[[bi, bj]],
+                        probed[[range.start + bi, range.start + bj]],
+                        "range {range:?} entry ({bi}, {bj})"
+                    );
+                }
+            }
+        }
+        let dense = op.to_dense();
+        for i in 0..k {
+            for j in 0..k {
+                assert_eq!(dense[[i, j]], probed[[i, j]], "dense entry ({i}, {j})");
+            }
+        }
+        // The spanning range has to hold a cross-atom coupling, or it checks
+        // nothing the per-atom ranges do not.
+        assert!(
+            (2..4).any(|i| (4..10).any(|j| probed[[i, j]] != 0.0)),
+            "fixture has no cross-atom coupling inside the spanning range"
+        );
     }
 
     /// `S` is rank 2 with null direction `e3`; `G` is full rank.
