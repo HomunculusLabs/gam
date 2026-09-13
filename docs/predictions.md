@@ -12,6 +12,7 @@ model.predict(
     *,
     interval: float | str | None = None,
     conformal_level: float = 0.9,
+    calibration: Any | None = None,
     covariance_mode: str | None = None,
     observation_interval: bool = False,
     return_type: str | None = None,
@@ -22,8 +23,9 @@ model.predict(
 | Argument | Default | Meaning |
 | --- | --- | --- |
 | `data` | required | Table-like input matching the training schema. |
-| `interval` | `None` | Single uncertainty knob. `None` returns point predictions only; a float in `(0, 1)` (e.g. `0.95`) requests the full uncertainty decomposition at that pointwise coverage. `"conformal"` requests exact jackknife+ intervals for eligible Gaussian-identity fits; `"full_conformal"` requests the exact full-conformal set. On standard GLMs and the location-scale families this populates `posterior_mean_standard_error`, `posterior_mean_lower`, and `posterior_mean_upper`; the transformation-normal and Bernoulli marginal-slope classes retain their class-specific `std_error` / `mean_lower` / `mean_upper` names. On supported single-event survival modes it populates `survival_se` and `eta_se`. On competing-risks survival it populates SE/lower/upper arrays for every cause-specific hazard, survival, cumulative hazard, CIF, overall survival, and eta surface. |
-| `conformal_level` | `0.9` | Marginal coverage for `interval="conformal"` or `"full_conformal"`. Ignored for numeric Wald intervals. |
+| `interval` | `None` | Single uncertainty knob. `None` returns point predictions only; a float in `(0, 1)` (e.g. `0.95`) requests the full uncertainty decomposition at that pointwise coverage. `"conformal"` requests a distribution-free conformal band: the exact full-conformal set for an eligible Gaussian-identity fit, or with `calibration` the split-conformal band. On standard GLMs and the location-scale families this populates `posterior_mean_standard_error`, `posterior_mean_lower`, and `posterior_mean_upper`; the transformation-normal and Bernoulli marginal-slope classes retain their class-specific `std_error` / `mean_lower` / `mean_upper` names. On supported single-event survival modes it populates `survival_se` and `eta_se`. On competing-risks survival it populates SE/lower/upper arrays for every cause-specific hazard, survival, cumulative hazard, CIF, overall survival, and eta surface. |
+| `conformal_level` | `0.9` | Marginal coverage for `interval="conformal"`. Ignored for numeric Wald intervals. |
+| `calibration` | `None` | Held-out labeled calibration table for the split-conformal band; `interval="conformal"` only. It must include the response column. |
 | `covariance_mode` | `None` | Python accepts `"conditional"` or `"smoothing"` for interval covariance. `None` uses the covariance the fit *publishes* — the definition `summary()` prices its standard errors from: smoothing-corrected whenever the fit carries that matrix, otherwise conditional (a fit certified at an infinite-smoothing rail, for example) — and the result names the resolved definition in `covariance_source`. Naming a mode is a requirement: `"smoothing"` errors when the fit cannot supply the corrected matrix. Competing-risks predictions expose the resolved source as `covariance_source`; current cause-specific fits provide the full joint conditional covariance, so callers must request `"conditional"` until the fitter produces a smoothing correction. The CLI uses the equivalent `--covariance-mode conditional|corrected` names. |
 | `observation_interval` | `False` | When `True` and `interval` is numeric, adds response-scale prediction interval columns for families with an observation variance. |
 | `return_type` | `None` | One of `"dict"`, `"numpy"`, `"pandas"`, `"polars"`, `"pyarrow"` for table-shaped outputs. Defaults to the input table kind, falling back to the training table kind. |
@@ -119,27 +121,32 @@ limit:
   (`log y` for a positive response); the transformation then extrapolates on that
   scale and the bound is structural.
 
-For eligible Gaussian-identity models, use conformal intervals:
+## Conformal intervals
+
+`interval="conformal"` replaces the response-scale `posterior_mean_lower` /
+`posterior_mean_upper` columns with a distribution-free conformal band at
+`conformal_level`. `gam predict --conformal [--calibration FILE] --level L` runs
+the same routes.
+
+Without `calibration` it is the exact full-conformal set at the fitted (frozen)
+smoothing parameters, for a Gaussian-identity model fitted without prior
+weights, offsets, or a link wiggle that precomputed its substrate at fit time.
+The output adds `frozen_rho_certified`: the finite-sample coverage theorem holds
+on rows where it is 1.
 
 ```python
-preds = model.predict(test_df, interval="conformal", conformal_level=0.95)
-full = model.predict(test_df, interval="full_conformal", conformal_level=0.95)
+full = model.predict(test_df, interval="conformal", conformal_level=0.95)
 ```
 
-## Split-conformal intervals
-
-`Model.predict_conformal(...)` runs the standard predictor on `data`, then
-replaces the response-scale `posterior_mean_lower` /
-`posterior_mean_upper` columns with the
-split-conformal interval `mu_hat(x) ± q_hat · s(x)` calibrated from a
-held-out labeled `calibration` fold. The interval carries finite-sample
-marginal coverage `≥ conformal_level` regardless of model misspecification,
-and applies to standard GAM models (not only the Gaussian-identity fits the
-jackknife+ `interval="conformal"` path requires).
+With `calibration` it is the split-conformal band `mu_hat(x) ± q_hat · s(x)`
+calibrated from a held-out labeled fold. It carries finite-sample marginal
+coverage `≥ conformal_level` regardless of model misspecification, and applies
+to any standard GAM family.
 
 ```python
-preds = model.predict_conformal(
+preds = model.predict(
     test_df,
+    interval="conformal",
     calibration=cal_df,        # held-out fold; MUST include the response column
     conformal_level=0.9,
 )
@@ -151,7 +158,7 @@ preds = model.predict_conformal(
 (the conformal multiplier `q_hat` is computed from its held-out residuals).
 It may be any size and is independent of the training set. `covariance_mode`,
 `observation_interval`, `return_type`, and `id_column` behave as in
-`predict`. `conformal_level` is required (no default).
+`predict`.
 
 ## Predicting from a numeric array
 

@@ -22,12 +22,12 @@ every DEFAULT uncertainty surface refuses with the same string:
 
     predict(interval=0.95)                    GamError: ... does not contain smoothing-corrected covariance
     predict(interval=0.95, observation_interval=True)   same
-    predict_conformal(..., conformal_level=0.9)         same
+    predict(interval="conformal", calibration=...)      same
     diagnose(data)                                      same
 
 ``Model.diagnose(data, *, y=None, interval=0.95)`` takes no ``covariance_mode``,
 so the only workaround is ``interval=None``, i.e. giving up the intervals
-entirely. ``predict_conformal`` is worse in kind: its documented guarantee is
+entirely. The split-conformal band is worse in kind: its documented guarantee is
 distribution-free -- "finite-sample marginal coverage >= conformal_level
 regardless of model misspecification ... applies to standard GAM models"
 (``docs/predictions.md:117-125``) -- yet it is unobtainable by default because a
@@ -127,10 +127,14 @@ def test_split_conformal_guarantee_is_available(railed: tuple[Any, dict[str, Any
     """The split-conformal band is distribution-free; it must not need Vp."""
     model, data = railed
     _assert_usable_band(
-        model.predict_conformal(
-            _levels(), calibration=data, conformal_level=0.9, return_type="dict"
+        model.predict(
+            _levels(),
+            interval="conformal",
+            calibration=data,
+            conformal_level=0.9,
+            return_type="dict",
         ),
-        "predict_conformal",
+        'predict(interval="conformal", calibration=...)',
     )
 
 

@@ -3,7 +3,7 @@
 Each capability is implemented in the Rust engine but was previously
 unreachable from the ``gamfit`` Python API:
 
-1. Conformal prediction intervals (``Model.predict_conformal``).
+1. Conformal prediction intervals (``Model.predict(interval="conformal", calibration=...)``).
 2. Predict covariance mode + observation intervals (``covariance_mode=`` /
    ``observation_interval=`` on ``Model.predict`` / ``Model.predict_array``).
 3. Wood per-smooth p-values in the model summary
@@ -39,7 +39,8 @@ def _smooth_training_frame(seed: int = 7, n: int = 200) -> dict[str, list[float]
 # Exposure 1: conformal prediction intervals
 # --------------------------------------------------------------------------- #
 def test_predict_conformal_is_reachable_and_covers() -> None:
-    """``Model.predict_conformal`` returns a sane conformal interval table."""
+    """``predict(interval="conformal", calibration=...)`` returns a sane
+    split-conformal interval table."""
     data = _smooth_training_frame(seed=11, n=240)
     n = len(data["x"])
     # Train / calibrate / test split — calibration is held-out labeled data.
@@ -75,8 +76,9 @@ def test_predict_conformal_is_reachable_and_covers() -> None:
     test = _fold(index % 4 == 3)
 
     model = gamfit.fit(train, "y ~ s(x)")
-    out = model.predict_conformal(
+    out = model.predict(
         test,
+        interval="conformal",
         calibration=calib,
         conformal_level=0.9,
         return_type="dict",
@@ -108,7 +110,7 @@ def test_predict_conformal_requires_response_column_in_calibration() -> None:
     # Calibration without the response column must error (it is labeled data).
     bad_calib = {"x": test["x"]}
     with pytest.raises(Exception):
-        model.predict_conformal(test, calibration=bad_calib, conformal_level=0.9)
+        model.predict(test, interval="conformal", calibration=bad_calib, conformal_level=0.9)
 
 
 # --------------------------------------------------------------------------- #

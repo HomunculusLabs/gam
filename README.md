@@ -284,12 +284,14 @@ variance for Gamma, Beta, negative-binomial, and Tweedie:
 gamfit.fit(df, "y ~ s(x)", family="gamma", noise_formula="s(x)")
 ```
 
-Conformal prediction intervals. `interval="conformal"` gives
-distribution-free jackknife+ bands (Gaussian-identity); other families
-use split conformal via `predict_conformal`:
+Conformal prediction intervals. `interval="conformal"` gives the exact
+full-conformal set (Gaussian-identity); with a held-out `calibration` table it
+gives the split-conformal band for any standard family, like
+`gam predict --conformal --calibration`:
 
 ```python
 model.predict(test, interval="conformal", conformal_level=0.9)
+model.predict(test, interval="conformal", calibration=held_out, conformal_level=0.9)
 ```
 
 Competing-risks survival. `competing_risks_cif(...)` and

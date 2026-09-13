@@ -154,14 +154,17 @@ def test_scan_design_matrix_gives_actionable_error():
 
 def test_scan_predict_conformal_gives_actionable_error():
     """Split-conformal needs the dense predictor a scan model does not carry, so
-    predict_conformal() must fail with a precise message pointing to the
-    scan-aware posterior-interval path, not the cryptic resolved_termspec one."""
+    predict(interval="conformal", calibration=...) must fail with a precise
+    message pointing to the scan-aware posterior-interval path, not the cryptic
+    resolved_termspec one."""
     df = _dataset(n=200)
     model = _fit_scan(df, degree=3, penalty_order=2)
     tr, cal, te = df.iloc[:120], df.iloc[120:160], df.iloc[160:]
     del tr
     with pytest.raises(Exception) as exc:
-        model.predict_conformal(te, calibration=cal, conformal_level=0.9, return_type="dict")
+        model.predict(
+            te, interval="conformal", calibration=cal, conformal_level=0.9, return_type="dict"
+        )
     msg = str(exc.value).lower()
     assert "spline scan" in msg
     assert "interval" in msg or "double_penalty" in msg

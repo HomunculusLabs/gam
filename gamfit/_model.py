@@ -132,6 +132,7 @@ class Model:
         *,
         interval: float | str | None = None,
         conformal_level: float = 0.9,
+        calibration: Any | None = None,
         covariance_mode: str | None = None,
         observation_interval: bool = False,
         return_type: str | None = None,
@@ -146,7 +147,7 @@ class Model:
             (``pandas.DataFrame``, ``pyarrow.Table``, ``polars.DataFrame``,
             ``dict`` of columns, ``list`` of record dicts, ...). Columns must
             cover every predictor referenced by the fitted formula.
-        interval : float, "conformal", "full_conformal", or None, default None
+        interval : float, "conformal", or None, default None
             Single uncertainty knob. ``None`` returns the point prediction(s)
             only. A float in ``(0, 1)`` (e.g. ``0.95``) requests the full
             uncertainty decomposition at that pointwise coverage; the output
@@ -159,36 +160,37 @@ class Model:
             into this single flag (use ``interval=0.95`` for the SE-only
             case).
 
-            Pass ``interval="conformal"`` to use distribution-free jackknife+
-            prediction intervals (Barber et al. 2021) — no held-out
-            calibration fold is required. The interval *targets*
-            ``conformal_level`` (default ``0.9``) marginal coverage; the
-            finite-sample guarantee the theorem certifies at this setting is
-            the weaker ``2 * conformal_level - 1`` (coverage >= 1 - 2*alpha at
-            alpha = 1 - level). This path requires a Gaussian-identity model
-            fitted without prior weights, offsets, or a link wiggle; use
-            :meth:`predict_conformal` for split-conformal intervals on other
-            families.
-
-            Pass ``interval="full_conformal"`` for the full-conformal set at
-            the fitted (frozen) smoothing parameters (#942 Layer 1): every
-            observation is used for both fitting and calibration, and the set
-            is exact *given* the frozen penalty, computed from one Cholesky per
-            test point with zero refits. Because the smoothing parameters were
-            selected from all training responses, the distribution-free
+            Pass ``interval="conformal"`` for a distribution-free conformal
+            band at ``conformal_level`` coverage in ``posterior_mean_lower`` /
+            ``posterior_mean_upper`` — the same routes as ``gam predict
+            --conformal``. Without ``calibration`` it is the exact
+            full-conformal set at the fitted (frozen) smoothing parameters
+            (#942 Layer 1): every observation is used for both fitting and
+            calibration, the set is exact *given* the frozen penalty, and it
+            costs one Cholesky per test point with zero refits. It needs a
+            Gaussian-identity model fitted without prior weights, offsets, or a
+            link wiggle, that precomputed its substrate at fit time. Because the
+            smoothing parameters were selected from all training responses, the
             finite-sample ``conformal_level`` coverage theorem applies only
-            where the per-row ``frozen_rho_certified`` output column is 1.0
-            (the Layer-3 certificate that freezing the global smoothing
-            parameter matches the honest ρ-re-selecting set, under a
-            grid-checked Lipschitz assumption); rows with 0.0 carry no
-            finite-sample guarantee. Same eligibility as ``"conformal"``;
-            ``posterior_mean_lower`` / ``posterior_mean_upper`` report the outer envelope of the
-            (possibly multi-interval) set.
+            where the per-row ``frozen_rho_certified`` output column is 1.0 (the
+            Layer-3 certificate that freezing the global smoothing parameter
+            matches the honest ρ-re-selecting set, under a grid-checked
+            Lipschitz assumption); rows with 0.0 carry no finite-sample
+            guarantee, and the bounds report the outer envelope of the
+            (possibly multi-interval) set. With ``calibration`` it is the
+            split-conformal band ``mu_hat(x) +/- q_hat * s(x)`` calibrated on
+            that held-out fold, with finite-sample marginal coverage
+            ``>= conformal_level`` regardless of model misspecification, for
+            any standard GAM family.
         conformal_level : float, default 0.9
             Target marginal coverage in ``(0, 1)`` when ``interval="conformal"``
-            or ``interval="full_conformal"``
             (e.g. ``0.95`` for a 95% interval). Ignored when ``interval`` is a
             float or ``None``.
+        calibration : table-like, optional
+            Held-out *labeled* calibration fold (not used in fitting) for the
+            split-conformal band; ``interval="conformal"`` only. It must contain
+            the response column in addition to the predictors, and may be of
+            any size independent of the training set.
         covariance_mode : {"conditional", "smoothing"}, optional
             Posterior covariance source for the interval (CLI<->Python parity
             with ``gam predict --covariance-mode``). ``"conditional"`` uses the
@@ -275,17 +277,36 @@ class Model:
             required = sorted(set(required) | {id_column})
         headers, rows, table_kind = normalize_table(data, required_columns=required)
         row_ids = extract_row_ids(headers, rows, id_column)
-        # #1054: interval='conformal' routes to the exact Gaussian jackknife+
-        # path (no held-out fold needed; targets conformal_level coverage with
-        # the finite-sample floor 2*level-1 — see the Rust route for the
-        # calibration decision, #1546). The returned JSON has the same column
-        # schema as the model-based predict path so shape_predict_response is
-        # unchanged.
+        # interval='conformal' runs the gam_predict::conformal_routes column
+        # builders `gam predict --conformal` uses: the exact full-conformal set
+        # without a calibration fold, the split-conformal band with one. The
+        # returned JSON has the model-based predict column schema, so
+        # shape_predict_response is unchanged.
         if interval == "conformal":
             try:
-                raw = rust_module().predict_table_jackknife_plus(
-                    self._model_bytes, headers, rows, conformal_level
-                )
+                if calibration is None:
+                    raw = rust_module().predict_table_full_conformal(
+                        self._model_bytes, headers, rows, conformal_level
+                    )
+                else:
+                    cal_headers, cal_rows, _ = normalize_table(calibration)
+                    opts_json = rust_module().build_model_predict_payload_json(
+                        self._model_bytes,
+                        headers,
+                        rows,
+                        conformal_level,
+                        covariance_mode,
+                        observation_interval,
+                    )
+                    raw = rust_module().predict_table_conformal(
+                        self._model_bytes,
+                        headers,
+                        rows,
+                        cal_headers,
+                        cal_rows,
+                        conformal_level,
+                        opts_json,
+                    )
             except Exception as exc:
                 raise map_exception(exc) from exc
             return shape_predict_response(
@@ -300,31 +321,8 @@ class Model:
                 row_ids=row_ids,
                 restore=restore_output_table,
             )
-        # #1098: interval='full_conformal' routes to the Gaussian
-        # full-conformal set at frozen smoothing parameters (no held-out fold;
-        # exact given Sλ; the finite-sample ≥conformal_level theorem holds per
-        # row only where frozen_rho_certified=1 — see the docstring; #942
-        # Layer 1). One Cholesky per test point, zero refits. The returned
-        # JSON carries the same column schema plus that certificate column.
-        if interval == "full_conformal":
-            try:
-                raw = rust_module().predict_table_full_conformal(
-                    self._model_bytes, headers, rows, conformal_level
-                )
-            except Exception as exc:
-                raise map_exception(exc) from exc
-            return shape_predict_response(
-                raw,
-                headers=headers,
-                rows=rows,
-                table_kind=table_kind,
-                training_table_kind=self._training_table_kind,
-                interval=conformal_level,
-                return_type=return_type,
-                id_column=id_column,
-                row_ids=row_ids,
-                restore=restore_output_table,
-            )
+        if calibration is not None:
+            raise ValueError('calibration= applies only to interval="conformal"')
         try:
             raw = rust_module().predict_table(
                 self._prediction_model,
@@ -441,94 +439,6 @@ class Model:
 
             return np.asarray(result).reshape(-1)
         return result
-
-    def predict_conformal(
-        self,
-        data: Any,
-        *,
-        calibration: Any,
-        conformal_level: float,
-        covariance_mode: str | None = None,
-        observation_interval: bool = False,
-        return_type: str | None = None,
-        id_column: str | None = None,
-    ) -> Any:
-        """Predict with distribution-free conformal prediction intervals.
-
-        Runs the standard predictor on ``data``, then REPLACES the
-        response-scale ``posterior_mean_lower`` / ``posterior_mean_upper`` columns with the
-        split-conformal interval ``mu_hat(x) +/- q_hat * s(x)`` calibrated at
-        ``conformal_level`` from the held-out ``calibration`` fold. The
-        resulting interval carries finite-sample marginal coverage
-        ``>= conformal_level`` regardless of model misspecification.
-
-        Parameters
-        ----------
-        data : table-like
-            Test inputs to predict, in any format accepted by
-            :meth:`predict`. Must cover every predictor in the formula.
-        calibration : table-like
-            Held-out *labeled* calibration fold (not used in fitting). Must
-            contain the response column in addition to the predictors; the
-            conformal multiplier ``q_hat`` is computed from this fold's plain
-            held-out residuals ``y_cal - mu_hat(x_cal)`` (normalized by the
-            response-scale SE). The fold may be of any size, independent of the
-            training set — no leave-one-out correction is applied because a
-            held-out fold is already independent of the fitted model.
-        conformal_level : float
-            Target marginal coverage in ``(0, 1)`` (e.g. ``0.9``).
-        covariance_mode : {"conditional", "smoothing"}, optional
-            Covariance source for the per-point scale ``s(x)``; see
-            :meth:`predict`.
-        observation_interval : bool, default False
-            Also emit ``observation_lower`` / ``observation_upper`` columns;
-            see :meth:`predict`.
-        return_type, id_column
-            As in :meth:`predict`.
-
-        Returns
-        -------
-        table
-            A table with ``linear_predictor_plugin``, ``mean_plugin``,
-            ``posterior_mean``, ``posterior_mean_standard_error``, and the
-            conformal ``posterior_mean_lower`` / ``posterior_mean_upper``
-            columns. Currently supported for standard GAM models only.
-        """
-        headers, rows, table_kind = normalize_table(data)
-        cal_headers, cal_rows, _ = normalize_table(calibration)
-        row_ids = extract_row_ids(headers, rows, id_column)
-        opts_json = rust_module().build_model_predict_payload_json(
-            self._model_bytes,
-            headers,
-            rows,
-            conformal_level,
-            covariance_mode,
-            observation_interval,
-        )
-        try:
-            raw = rust_module().predict_table_conformal(
-                self._model_bytes,
-                headers,
-                rows,
-                cal_headers,
-                cal_rows,
-                conformal_level,
-                opts_json,
-            )
-        except Exception as exc:
-            raise map_exception(exc) from exc
-        return shape_predict_response(
-            raw,
-            headers=headers,
-            rows=rows,
-            table_kind=table_kind,
-            training_table_kind=self._training_table_kind,
-            interval=conformal_level,
-            return_type=return_type,
-            id_column=id_column,
-            row_ids=row_ids,
-            restore=restore_output_table,
-        )
 
     def summary(self) -> Summary:
         """Return the model summary (coefficients, family, deviance, REML score)."""

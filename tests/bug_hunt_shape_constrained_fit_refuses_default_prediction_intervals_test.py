@@ -1,5 +1,5 @@
 """Bug hunt: every shape-constrained smooth refuses ``predict(interval=...)``,
-``observation_interval``, ``predict_conformal`` and ``diagnose(data)`` at their
+``observation_interval``, the split-conformal band and ``diagnose(data)`` at their
 DEFAULTS -- and ``diagnose`` has no switch to ask for anything else.
 
     m = gamfit.fit(d, "y ~ s(x, shape='monotone-increasing')")
@@ -10,7 +10,8 @@ DEFAULTS -- and ``diagnose`` has no switch to ask for anything else.
     #   covariance does not define a truncated law
 
 The same message comes back for ``covariance_mode='smoothing'``,
-``observation_interval=True``, ``predict_conformal(...)`` and ``diagnose(data)``.
+``observation_interval=True``, ``predict(interval="conformal", calibration=...)``
+and ``diagnose(data)``.
 Only ``covariance_mode='conditional'`` works. It reproduces for
 ``monotone-increasing``, ``monotone-decreasing``, ``convex`` and ``concave``.
 
@@ -56,7 +57,7 @@ the result IS a truncated law:
 
 ``Model.diagnose(data, *, y=None, interval=0.95)`` exposes no ``covariance_mode``
 at all, so its only escape is ``interval=None`` -- giving up the intervals.
-``predict_conformal``'s guarantee is distribution-free by construction
+The split-conformal band's guarantee is distribution-free by construction
 (``docs/predictions.md:117-125``), so losing it to a Bayesian-covariance gate is
 the sharpest instance.
 
@@ -111,10 +112,10 @@ def test_unconstrained_control_supports_every_default_surface() -> None:
         "observation_interval",
     )
     _assert_usable_band(
-        model.predict_conformal(
-            _GRID, calibration=data, conformal_level=0.9, return_type="dict"
+        model.predict(
+            _GRID, interval="conformal", calibration=data, conformal_level=0.9, return_type="dict"
         ),
-        "predict_conformal",
+        "split conformal",
     )
     assert model.diagnose(data) is not None
 
@@ -142,10 +143,10 @@ def test_shape_constrained_split_conformal(shape: str) -> None:
     """Split conformal is distribution-free; it must not need a Bayesian Vp."""
     model = _fit(shape)
     _assert_usable_band(
-        model.predict_conformal(
-            _GRID, calibration=_data(), conformal_level=0.9, return_type="dict"
+        model.predict(
+            _GRID, interval="conformal", calibration=_data(), conformal_level=0.9, return_type="dict"
         ),
-        f"{shape}: predict_conformal",
+        f"{shape}: split conformal",
     )
 
 

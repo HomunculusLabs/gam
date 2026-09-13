@@ -25,7 +25,7 @@ APIs such as a matrix kernel.
 | Latent coordinates, analytic penalties, smooth descriptors, precision hyperpriors | request document and term builders | complete request (`--request`) | `latents=`, `penalties=`, `smooths=`, `precision_hyperpriors=` | Parity |
 | Fit-time conformal substrate and inference retention | request document | `--precompute-conformal`, `--inference` | `config=` request fields | Parity through shared request |
 | Prediction and posterior-mean uncertainty | `gam::predict` saved-model machinery | `predict`, `--uncertainty`, `--level`, `--covariance-mode`, offsets and IDs | `Model.predict`, `predict_array`; interval, observation interval, covariance mode, IDs | Parity; Python exposes richer typed return objects |
-| Conformal prediction bands | `gam_predict::conformal_routes` | `predict --conformal`, `--calibration`, `--level` | `Model.predict(interval="full_conformal")`, `Model.predict_conformal(calibration=...)` | Same Rust routes; the jackknife+ `interval="conformal"` route is Python-only |
+| Conformal prediction bands | `gam_predict::conformal_routes` | `predict --conformal`, `--calibration`, `--level` | `Model.predict(interval="conformal", calibration=...)` | Same Rust routes |
 | CTN observed-response score | saved-model prediction machinery | `transformation-score` | `Model.transformation_score` | Parity |
 | Diagnostics / ALO | `gam::inference::alo`, saved-model ALO | `diagnose`; report may include diagnostics | `Model.diagnose`, `check`, `basis_check`, `curvature`, `smooth_significance` | Core diagnostics shared; Python methods are programmatic views |
 | Posterior coefficient sampling | `gam::inference::sample` / `gam::hmc` | `sample --samples --seed` | `Model.sample` with the same controls | Same Rust sampler |
@@ -70,7 +70,7 @@ The formula front doors are `fit`, `fit_array`, `validate_formula`, and
 `config`.
 
 The fitted `Model` public workflow methods/properties are `predict`,
-`predict_array`, `predict_conformal`, `transformation_score`, `summary`,
+`predict_array`, `transformation_score`, `summary`,
 `smoothing_parameters`, `check`, `curvature`, `smooth_significance`,
 `basis_check`, `debiased_functional`, `report`, `sample`, `sample_replicates`,
 `iter_replicates`, `design_matrix`, `design_matrix_array`, `difference_smooth`,
