@@ -426,10 +426,17 @@ answer the loosened-tolerance row differently.
   (gradient 1e-7, Hessian 1e-5 relative), plus the exact rigid and empirical-rigid
   oracles recorded above.
 - The substrate's `e^{−Δq}` expansion mirrors the survival flex
-  `survival/marginal_slope/timepoint_exact/flex_jet.rs::base_moment_jets`, which is
-  guarded by `base_moment_jets_{first,second}_derivative_matches_fd_932`. Those
-  bars are percent-level too. Replacing them with an exact oracle remains an open
-  item under the loosened-tolerance row.
+  `survival/marginal_slope/timepoint_exact/flex_jet.rs::base_moment_jets`. Its
+  percent-level finite-difference bars (`base_moment_jets_{first,second}_derivative_matches_fd_932`:
+  1e-5 and 2e-4 relative, first and second order only, one cell) are replaced by
+  `base_moment_jets_match_exact_theta_derivatives_through_order_five_932`. The new
+  test checks every order the builder supports, one through five, at
+  `1e-10·(1 + |oracle|)` on sextic, quartic, narrow and semi-infinite cells. Its
+  oracle substitutes `z = z_L(θ) + t·(z_R(θ) − z_L(θ))`, carries a truncated Taylor
+  series in θ through `(z_R − z_L)·zⁿ·e^{−q}` and integrates on a test-local
+  Gauss–Legendre rule, so it shares neither the jet algebra, the `e^{−Δq}` closure
+  nor the edge sliver with production. A one-part-per-million velocity corruption
+  must fail every order.
 
 ### Live-family derivative census: where each joint Hessian derivative comes from
 

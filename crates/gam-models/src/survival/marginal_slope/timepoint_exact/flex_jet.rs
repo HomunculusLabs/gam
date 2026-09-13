@@ -2306,10 +2306,10 @@ impl<J: FlexJet> MomentTerm for J {}
 /// This single-sources the hand `survival_flex_base_d_u`/`_d_uv`/`f_au`/`f_aa`
 /// base normalization derivatives over a generic `FlexJet` order — exact to ALL
 /// jet orders (Jet2/Jet3/Jet4), not just first. The value channel is
-/// bit-identical to `numeric_moments[n]`; the derivative channels are
-/// finite-difference-pinned against `evaluate_cell_moments` on perturbed cells
-/// (`base_moment_jets_first_derivative_matches_fd_932`,
-/// `base_moment_jets_second_derivative_matches_fd_932`).
+/// bit-identical to `numeric_moments[n]`; the derivative channels of orders one
+/// through five are pinned against an independent exact θ-Taylor quadrature of
+/// the moving-limit integral
+/// (`base_moment_jets_match_exact_theta_derivatives_through_order_five_932`).
 ///
 /// EXACTNESS to all orders (the self-consistent closure): write
 /// `M_n(θ) = ∫ zⁿ e^{−q(z,θ)} dz = ∫ zⁿ e^{−q(z,θ₀)}·e^{−Δq(z)} dz`,
@@ -4890,163 +4890,307 @@ mod moment_engine_tests {
         gate.finish();
     }
 
-    /// #932 item-2 Phase B-base: the base-moment jet builder `base_moment_jets`
-    /// must reproduce the FIRST θ-derivatives of the normalization base moments
-    /// `M_0..M_4` (interior `Σ_m S_m M_{n+m}` + moving-edge sliver flux) against a
-    /// central finite difference of `evaluate_cell_moments` on a smooth one-
-    /// parameter cell family `c_k(θ)=c_k0+θ·dc_k`, `z_{L,R}(θ)=z0+θ·v`. The
-    /// gradient channel of the order-exact `Jet1` (seeded with `dc`/`v` in primary slot 0) is
-    /// the analytic `dM_n/dθ`; the value channel is the numeric `M_n`.
+    /// #932 item-2 Phase B-base: `base_moment_jets` must carry the exact
+    /// θ-derivatives of the normalization base moments `M_0..M_4`, interior
+    /// `e^{−Δq}` closure and moving-edge sliver together, at every order it
+    /// supports (one through five), on smooth one-parameter cell families
+    /// `c_k(θ) = c_k0 + θ·dc_k`, `z_{L,R}(θ) = z0 + θ·v`.
+    ///
+    /// The oracle shares neither the jet algebra, the `e^{−Δq}` closure nor the
+    /// edge sliver with production. Substituting `z = z_L(θ) + t·(z_R(θ) − z_L(θ))`
+    /// fixes the limits, so no boundary term exists:
+    /// `M_n(θ) = ∫₀¹ (z_R − z_L)·zⁿ·e^{−q(z(t,θ),θ)} dt`. At each node the integrand
+    /// is the exponential of a polynomial in θ, so a truncated Taylor series in θ
+    /// (Cauchy products and the `exp` recurrence) carries it exactly through the
+    /// fifth coefficient, and `d^k M_n/dθ^k = k!·[θ^k] M_n`. A test-local
+    /// Gauss–Legendre rule integrates each coefficient, and a rule of twice the
+    /// nodes must agree with it to a thousandth of the comparison bar.
+    ///
+    /// The semi-infinite tail cell is affine, as production requires of every
+    /// tail, and passes `right_finite = false`; the oracle integrates it to
+    /// `z = 14`, where `z⁴e^{−z²/2}` is below 1e-37. The bar is
+    /// `1e-10·(1 + |oracle|)`. It replaced finite-difference bars of 1e-5 and 2e-4
+    /// that covered only the first two orders of one cell. Every run prints each
+    /// order's worst error over the bar before asserting. Corrupting the left
+    /// edge's velocity by one part per million must break the bar at every
+    /// derivative order.
     #[test]
-    fn base_moment_jets_first_derivative_matches_fd_932() {
+    fn base_moment_jets_match_exact_theta_derivatives_through_order_five_932() {
         use crate::cubic_cell_kernel::evaluate_cell_moments;
 
-        // Smooth one-parameter family (θ scalar). Edges move; coefficients move.
-        let c0 = [0.25_f64, -0.35, 0.4, 0.15];
-        let zl0 = -1.2_f64;
-        let zr0 = 1.7_f64;
-        let dc = [0.13_f64, 0.21, -0.17, 0.09];
-        let v_l = -0.23_f64;
-        let v_r = 0.31_f64;
-        let cell_at = |theta: f64| DenestedCubicCell {
-            left: zl0 + theta * v_l,
-            right: zr0 + theta * v_r,
-            c0: c0[0] + theta * dc[0],
-            c1: c0[1] + theta * dc[1],
-            c2: c0[2] + theta * dc[2],
-            c3: c0[3] + theta * dc[3],
-        };
-        let max_degree = 10usize;
-        let moments_at = |theta: f64| -> Vec<f64> {
-            evaluate_cell_moments(cell_at(theta), max_degree)
-                .expect("numeric cell moments")
-                .moments
-                .into_vec()
-        };
-        let numeric0 = moments_at(0.0);
-
-        // Seed the jets in primary slot 0 of a width-1 primary space: each
-        // coefficient/edge jet carries its θ-velocity as its slot-0 gradient.
-        let p = 1usize;
-        let seeded = |x: f64, vel: f64| {
-            let mut g = vec![0.0; p];
-            g[0] = vel;
-            Jet1 { v: x, g }
-        };
-        let c_jets = [
-            seeded(c0[0], dc[0]),
-            seeded(c0[1], dc[1]),
-            seeded(c0[2], dc[2]),
-            seeded(c0[3], dc[3]),
-        ];
-        let zl_jet = seeded(zl0, v_l);
-        let zr_jet = seeded(zr0, v_r);
-        let m_jets = base_moment_jets(&c_jets, &zl_jet, true, &zr_jet, true, &numeric0);
-
-        // Central finite difference of each M_n.
-        let h = 1e-6_f64;
-        let mp = moments_at(h);
-        let mm = moments_at(-h);
-        for n in 0..5 {
-            let fd = (mp[n] - mm[n]) / (2.0 * h);
-            let jet = &m_jets[n];
-            assert!(
-                (jet.value() - numeric0[n]).abs() <= 1e-12 * (1.0 + numeric0[n].abs()),
-                "M_{n} value {} != numeric {}",
-                jet.value(),
-                numeric0[n]
-            );
-            assert!(
-                (jet.g[0] - fd).abs() <= 1e-5 * (1.0 + fd.abs()),
-                "M_{n} dθ analytic {} != FD {}",
-                jet.g[0],
-                fd
-            );
+        struct MomentFixture {
+            label: &'static str,
+            c: [f64; 4],
+            dc: [f64; 4],
+            left: f64,
+            left_velocity: f64,
+            right: f64,
+            right_velocity: f64,
+            right_finite: bool,
         }
-    }
 
-    /// #932 item-2 Phase B-base closure: the SECOND θ-derivative (the self-
-    /// consistent `e^{−Δq}` interior `(∂q)²` cross-term + the second-order moving-
-    /// edge sliver) must match a central finite difference of the analytic FIRST
-    /// derivative. Probes the `Jet2` Hessian channel `h[0]` (= `d²M_n/dθ²`) of
-    /// `base_moment_jets`, the all-orders exactness the Jet3/Jet4 contractions
-    /// depend on.
-    #[test]
-    fn base_moment_jets_second_derivative_matches_fd_932() {
-        use crate::cubic_cell_kernel::evaluate_cell_moments;
+        // A truncated Taylor series in θ through the fifth coefficient.
+        #[derive(Clone, Copy)]
+        struct ThetaSeries([f64; 6]);
 
-        let c0 = [0.25_f64, -0.35, 0.4, 0.15];
-        let zl0 = -1.2_f64;
-        let zr0 = 1.7_f64;
-        let dc = [0.13_f64, 0.21, -0.17, 0.09];
-        let v_l = -0.23_f64;
-        let v_r = 0.31_f64;
-        let cell_at = |theta: f64| DenestedCubicCell {
-            left: zl0 + theta * v_l,
-            right: zr0 + theta * v_r,
-            c0: c0[0] + theta * dc[0],
-            c1: c0[1] + theta * dc[1],
-            c2: c0[2] + theta * dc[2],
-            c3: c0[3] + theta * dc[3],
-        };
-        // The order-two `e^{−Δq}` interior closure retains
-        // `S(z)=Σ_{k≤2}(−Δq)^k/k!`. Its `(−Δq)²` term is degree 12 in z (η is
-        // cubic, hence Δq degree 6) and reaches `M_{n+12}`, up to `M_16` for
-        // n≤4. Production builds cached moments beyond that; match the complete
-        // budget so every Jet2 Hessian channel is exact.
-        let max_degree = 27usize;
-        let moments_at = |theta: f64| -> Vec<f64> {
-            evaluate_cell_moments(cell_at(theta), max_degree)
+        impl ThetaSeries {
+            fn linear(value: f64, velocity: f64) -> Self {
+                ThetaSeries([value, velocity, 0.0, 0.0, 0.0, 0.0])
+            }
+
+            fn add(self, other: Self) -> Self {
+                ThetaSeries(std::array::from_fn(|k| self.0[k] + other.0[k]))
+            }
+
+            fn scale(self, factor: f64) -> Self {
+                ThetaSeries(self.0.map(|coefficient| factor * coefficient))
+            }
+
+            fn mul(self, other: Self) -> Self {
+                ThetaSeries(std::array::from_fn(|k| {
+                    (0..=k).map(|j| self.0[j] * other.0[k - j]).sum::<f64>()
+                }))
+            }
+
+            // `b = e^a` through `k·b_k = Σ_{j=1..k} j·a_j·b_{k−j}`.
+            fn exp(self) -> Self {
+                let mut out = [self.0[0].exp(), 0.0, 0.0, 0.0, 0.0, 0.0];
+                for k in 1..6 {
+                    let next = (1..=k)
+                        .map(|j| j as f64 * self.0[j] * out[k - j])
+                        .sum::<f64>()
+                        / k as f64;
+                    out[k] = next;
+                }
+                ThetaSeries(out)
+            }
+        }
+
+        // The `nodes`-point Gauss–Legendre rule on `[0, 1]`, by Newton iteration
+        // on `P_nodes` from the Tricomi starting points.
+        fn unit_gauss_legendre(nodes: usize) -> Vec<(f64, f64)> {
+            let legendre = |x: f64| {
+                let (mut previous, mut current) = (1.0_f64, x);
+                for k in 2..=nodes {
+                    let next = ((2 * k - 1) as f64 * x * current - (k - 1) as f64 * previous)
+                        / k as f64;
+                    previous = current;
+                    current = next;
+                }
+                (current, nodes as f64 * (x * current - previous) / (x * x - 1.0))
+            };
+            (0..nodes)
+                .map(|i| {
+                    let mut x = (std::f64::consts::PI * (i as f64 + 0.75) / (nodes as f64 + 0.5))
+                        .cos();
+                    for _ in 0..12 {
+                        let (value, slope) = legendre(x);
+                        x -= value / slope;
+                    }
+                    let slope = legendre(x).1;
+                    (0.5 * (1.0 + x), 1.0 / ((1.0 - x * x) * slope * slope))
+                })
+                .collect()
+        }
+
+        // `[θ^k] M_n(θ)` for `n = 0..=4` and `k = 0..=5` on one rule.
+        fn oracle_coefficients(fixture: &MomentFixture, rule: &[(f64, f64)]) -> [[f64; 6]; 5] {
+            let left = ThetaSeries::linear(fixture.left, fixture.left_velocity);
+            let right = ThetaSeries::linear(fixture.right, fixture.right_velocity);
+            let width = right.add(left.scale(-1.0));
+            let c: [ThetaSeries; 4] =
+                std::array::from_fn(|k| ThetaSeries::linear(fixture.c[k], fixture.dc[k]));
+            let mut sums = [[0.0_f64; 6]; 5];
+            for &(t, weight) in rule {
+                let z = left.add(width.scale(t));
+                let eta = c[3].mul(z).add(c[2]).mul(z).add(c[1]).mul(z).add(c[0]);
+                let mut integrand = z.mul(z).add(eta.mul(eta)).scale(-0.5).exp().mul(width);
+                for moment in &mut sums {
+                    for (sum, coefficient) in moment.iter_mut().zip(integrand.0) {
+                        *sum += weight * coefficient;
+                    }
+                    integrand = integrand.mul(z);
+                }
+            }
+            sums
+        }
+
+        // `M_0..M_4` from `base_moment_jets` in one algebra seeded along θ.
+        fn production_moments<J: FlexJet>(
+            theta: &J,
+            fixture: &MomentFixture,
+            numeric: &[f64],
+            left_velocity: f64,
+        ) -> [J; 5] {
+            let linear = |value: f64, velocity: f64| {
+                const_jet_like(theta, value).add(&theta.scale(velocity))
+            };
+            let c: [J; 4] = std::array::from_fn(|k| linear(fixture.c[k], fixture.dc[k]));
+            base_moment_jets(
+                &c,
+                &linear(fixture.left, left_velocity),
+                true,
+                &linear(fixture.right, fixture.right_velocity),
+                fixture.right_finite,
+                numeric,
+            )
+        }
+
+        // `d^k M_n/dθ^k` for `k = 0..=5`, one row per order.
+        fn production_derivatives(
+            fixture: &MomentFixture,
+            numeric: &[f64],
+            left_velocity: f64,
+        ) -> [[f64; 5]; 6] {
+            let first =
+                production_moments(&Jet1::primary(0.0, 0, 1), fixture, numeric, left_velocity);
+            let second =
+                production_moments(&Jet2::primary(0.0, 0, 1), fixture, numeric, left_velocity);
+            let third = production_moments(
+                &Jet3::primary(0.0, 0, 1, 1.0),
+                fixture,
+                numeric,
+                left_velocity,
+            );
+            let fourth = production_moments(
+                &Jet4::primary(0.0, 0, 1, 1.0, 1.0),
+                fixture,
+                numeric,
+                left_velocity,
+            );
+            let fifth = production_moments(
+                &Jet5::primary(0.0, 0, 1, 1.0, 1.0, 1.0),
+                fixture,
+                numeric,
+                left_velocity,
+            );
+            [
+                std::array::from_fn(|n| first[n].value()),
+                std::array::from_fn(|n| first[n].g[0]),
+                std::array::from_fn(|n| second[n].h[0]),
+                std::array::from_fn(|n| third[n].contracted_third()[0]),
+                std::array::from_fn(|n| fourth[n].contracted_fourth()[0]),
+                std::array::from_fn(|n| fifth[n].contracted_fifth()[0]),
+            ]
+        }
+
+        // `f64::max` would drop a NaN ratio; this keeps it, so the bar refuses it.
+        fn raise(slot: &mut f64, ratio: f64) {
+            if !(ratio <= *slot) {
+                *slot = ratio;
+            }
+        }
+
+        let fixtures = [
+            MomentFixture {
+                label: "sextic_wide",
+                c: [0.25, -0.35, 0.4, 0.15],
+                dc: [0.13, 0.21, -0.17, 0.09],
+                left: -1.2,
+                left_velocity: -0.23,
+                right: 1.7,
+                right_velocity: 0.31,
+                right_finite: true,
+            },
+            MomentFixture {
+                label: "quartic_knot",
+                c: [-0.6, 0.8, -0.3, 0.0],
+                dc: [0.4, -0.25, 0.11, 0.0],
+                left: 0.35,
+                left_velocity: 0.05,
+                right: 0.9,
+                right_velocity: -0.08,
+                right_finite: true,
+            },
+            MomentFixture {
+                label: "sextic_narrow_steep",
+                c: [1.1, -1.4, 0.9, -0.7],
+                dc: [-0.3, 0.5, 0.2, 0.35],
+                left: -0.45,
+                left_velocity: 0.12,
+                right: -0.1,
+                right_velocity: 0.02,
+                right_finite: true,
+            },
+            MomentFixture {
+                label: "affine_right_tail",
+                c: [0.2, 0.6, 0.0, 0.0],
+                dc: [0.21, 0.18, 0.05, -0.03],
+                left: 0.8,
+                left_velocity: -0.15,
+                right: 14.0,
+                right_velocity: 0.0,
+                right_finite: false,
+            },
+        ];
+        let coarse_rule = unit_gauss_legendre(96);
+        let fine_rule = unit_gauss_legendre(192);
+        let factorials = [1.0_f64, 1.0, 2.0, 6.0, 24.0, 120.0];
+        for fixture in &fixtures {
+            let cell = DenestedCubicCell {
+                left: fixture.left,
+                right: if fixture.right_finite {
+                    fixture.right
+                } else {
+                    f64::INFINITY
+                },
+                c0: fixture.c[0],
+                c1: fixture.c[1],
+                c2: fixture.c[2],
+                c3: fixture.c[3],
+            };
+            // An order-five jet of `M_4` reads the numeric moments through `M_34`.
+            let numeric = evaluate_cell_moments(cell, 34)
                 .expect("numeric cell moments")
                 .moments
-                .into_vec()
-        };
-        // Analytic first derivative dM_n/dθ from base_moment_jets at parameter θ.
-        let analytic_first = |theta: f64, n: usize| -> f64 {
-            let numeric = moments_at(theta);
-            let seeded = |x: f64, vel: f64| {
-                let g = vec![vel];
-                Jet2::from_parts(x, &g, &[])
-            };
-            let cell = cell_at(theta);
-            let c_jets = [
-                seeded(cell.c0, dc[0]),
-                seeded(cell.c1, dc[1]),
-                seeded(cell.c2, dc[2]),
-                seeded(cell.c3, dc[3]),
-            ];
-            let zl_jet = seeded(cell.left, v_l);
-            let zr_jet = seeded(cell.right, v_r);
-            let m = base_moment_jets(&c_jets, &zl_jet, true, &zr_jet, true, &numeric);
-            m[n].g[0]
-        };
-
-        // Analytic second derivative from the Jet2 Hessian channel at θ=0.
-        let numeric0 = moments_at(0.0);
-        let seeded = |x: f64, vel: f64| {
-            let g = vec![vel];
-            Jet2::from_parts(x, &g, &[])
-        };
-        let c_jets = [
-            seeded(c0[0], dc[0]),
-            seeded(c0[1], dc[1]),
-            seeded(c0[2], dc[2]),
-            seeded(c0[3], dc[3]),
-        ];
-        let zl_jet = seeded(zl0, v_l);
-        let zr_jet = seeded(zr0, v_r);
-        let m_jets = base_moment_jets(&c_jets, &zl_jet, true, &zr_jet, true, &numeric0);
-
-        let h = 1e-5_f64;
-        for n in 0..5 {
-            let fd2 = (analytic_first(h, n) - analytic_first(-h, n)) / (2.0 * h);
-            let hess = m_jets[n].h[0];
-            assert!(
-                (hess - fd2).abs() <= 2e-4 * (1.0 + fd2.abs()),
-                "M_{n} d²θ analytic {} != FD-of-analytic {}",
-                hess,
-                fd2
-            );
+                .into_vec();
+            let coarse = oracle_coefficients(fixture, &coarse_rule);
+            let fine = oracle_coefficients(fixture, &fine_rule);
+            let production = production_derivatives(fixture, &numeric, fixture.left_velocity);
+            let corrupted =
+                production_derivatives(fixture, &numeric, fixture.left_velocity * (1.0 + 1e-6));
+            let mut worst = [0.0_f64; 6];
+            let mut corrupted_worst = [0.0_f64; 6];
+            let mut quadrature_gap = [0.0_f64; 6];
+            for order in 0..6 {
+                for n in 0..5 {
+                    let oracle = factorials[order] * fine[n][order];
+                    let bar = 1e-10 * (1.0 + oracle.abs());
+                    raise(
+                        &mut quadrature_gap[order],
+                        (factorials[order] * coarse[n][order] - oracle).abs() / (1e-3 * bar),
+                    );
+                    raise(&mut worst[order], (production[order][n] - oracle).abs() / bar);
+                    raise(
+                        &mut corrupted_worst[order],
+                        (corrupted[order][n] - oracle).abs() / bar,
+                    );
+                }
+                eprintln!(
+                    "BASE-MOMENT-JETS-932 {} order={order} worst_error_over_bar={:.3e} corrupted_velocity_over_bar={:.3e} quadrature_gap_over_certificate={:.3e}",
+                    fixture.label, worst[order], corrupted_worst[order], quadrature_gap[order]
+                );
+            }
+            for order in 0..6 {
+                assert!(
+                    quadrature_gap[order] <= 1.0,
+                    "{}: order {order} oracle quadrature has not converged ({:.3e} certificates)",
+                    fixture.label,
+                    quadrature_gap[order]
+                );
+                assert!(
+                    worst[order] <= 1.0,
+                    "{}: order {order} base-moment jet misses the exact θ-derivative by {:.3e} bars",
+                    fixture.label,
+                    worst[order]
+                );
+                assert!(
+                    order == 0 || corrupted_worst[order] > 1.0,
+                    "{}: order {order} bar does not detect a one-ppm edge-velocity corruption ({:.3e} bars)",
+                    fixture.label,
+                    corrupted_worst[order]
+                );
+            }
         }
     }
 
