@@ -1106,10 +1106,10 @@ pub struct MeasureJetRangeBracket {
 /// reason: it is the point past which a direction cannot survive being squared
 /// into a Gram and inverted back out.
 ///
-/// ONE definition, used by the outer search's window
-/// ([`measure_jet_ln_range_window`], which the response screen searches too) and
-/// read by the response screen's walk, so the two cannot
-/// drift into disagreeing about where the model ends (#2761).
+/// ONE definition, read through the outer search's window
+/// ([`measure_jet_ln_range_window`]), which the response screen searches too, so
+/// the fit and the screen cannot drift into disagreeing about where the model
+/// ends (#2761).
 pub fn measure_jet_range_feasibility_ceiling(spacing: f64) -> f64 {
     spacing / (2.0 * f64::EPSILON.sqrt()).sqrt()
 }
