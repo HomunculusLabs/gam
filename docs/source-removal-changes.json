@@ -7521,5 +7521,34 @@
     ],
     "reason": "Lead ruling 2026-09-12 (#2899): delete the Kronecker PIRLS/REML runtime in one cascade. Since 0e10ecbc7 (#1561) no basis builder constructs a KroneckerFactoredBasis, because the factored runtime solves S ⊗ I while the function-space margin blocks are S ⊗ G, so every consumer of it was dead code: KroneckerFactoredBasis and KroneckerInvariantStructure, KroneckerPenaltySystem and its extraction, the construction.rs Kronecker reparameterization engine and logdet sweep, RemlState's Kronecker setters, loop_driver's PIRLS Kronecker branch with KroneckerQsTransform and its scratch buffers, the two _with_transform constraint builders, the diagonal Kronecker penalty builder, PenaltyCoordinate::KroneckerMarginal, and the diagonal-penalty EDF helpers of PirlsPenalty::Diagonal, whose only producer was that branch. The tests that exercised only the deleted pieces go with them.",
     "evidence": "At the base, git grep finds no KroneckerFactoredBasis::new anywhere and no Some assignment to kronecker_factored except RemlState::set_kronecker_factored, which only ever received None-valued options. The item list (47 identities) follows source_removal_guard.py's predicates over the removed hunks. A guarded cargo check --workspace --all-targets --exclude gam-pyffi at this entry's base plus this change, and source_removal_guard.py / public_api_census.py on this commit, ran on MSI before the push (job id in the commit message)."
+  },
+  {
+    "base": "a88c62eeeff857bd0fea64719e631c3767e328fc",
+    "items": [
+      "crates/gam-solve/src/latent_inner.rs:fn:assemble",
+      "crates/gam-solve/src/latent_inner.rs:fn:default",
+      "crates/gam-solve/src/latent_inner.rs:fn:iterate_norm",
+      "crates/gam-solve/src/latent_inner.rs:fn:latent_arrow_solve_options",
+      "crates/gam-solve/src/latent_inner.rs:fn:limit_delta_to_riemannian_trust_region",
+      "crates/gam-solve/src/latent_inner.rs:fn:new",
+      "crates/gam-solve/src/latent_inner.rs:fn:objective",
+      "crates/gam-solve/src/latent_inner.rs:fn:solve",
+      "crates/gam-solve/src/latent_inner.rs:fn:system_gradient_norm_sq",
+      "crates/gam-solve/src/latent_inner.rs:fn:zero_assembler_converges_immediately",
+      "crates/gam-solve/src/latent_inner.rs:struct:LatentInnerOptions",
+      "crates/gam-solve/src/latent_inner.rs:struct:LatentInnerOutcome",
+      "crates/gam-solve/src/latent_inner.rs:struct:LatentInnerSolver",
+      "crates/gam-solve/src/latent_inner.rs:struct:ZeroAssembler",
+      "crates/gam-solve/src/latent_inner.rs:trait:ArrowSystemAssembler",
+      "tests/regressions/misc/latent_cache_inner_bug_hunt.rs:fn:assemble",
+      "tests/regressions/misc/latent_cache_inner_bug_hunt.rs:fn:latent_cache_hit_for_same_beta_rho_inputs_matches_freshly_computed_entry",
+      "tests/regressions/misc/latent_cache_inner_bug_hunt.rs:fn:latent_cache_invalidation_when_beta_or_rho_changes_slightly",
+      "tests/regressions/misc/latent_cache_inner_bug_hunt.rs:fn:latent_coord_enabled_vs_disabled_beta_is_predictably_different_not_identical_or_wildly_different",
+      "tests/regressions/misc/latent_cache_inner_bug_hunt.rs:fn:latent_inner_solver_converges_from_documented_initial_point_toy_problem",
+      "tests/regressions/misc/latent_cache_inner_bug_hunt.rs:fn:objective",
+      "tests/regressions/misc/latent_cache_inner_bug_hunt.rs:struct:QuadraticAssembler"
+    ],
+    "reason": "#2899 (delete code only tests use). gam-solve's latent_inner module (LatentInnerSolver, LatentInnerOptions, LatentInnerOutcome, the ArrowSystemAssembler trait and their private helpers) has no production user: no crate, gam-cli, gam-pyffi, gamfit or example constructs LatentInnerSolver or implements ArrowSystemAssembler. Its only callers were its own unit test and tests/regressions/misc/latent_cache_inner_bug_hunt.rs. That root file goes whole: its fourth test drove the deleted solver, and the other three call no gam code at all (two compare x.dot(beta)*rho with a second evaluation of the same product, one compares two literal arrays), so no product change could make them fail (SPEC rule 16).",
+    "evidence": "At the base, git grep -w over crates, src, tests, examples, bench, python and gamfit finds LatentInnerSolver, LatentInnerOptions and ArrowSystemAssembler only in latent_inner.rs, that root test and two gam-solve comments (reworded here). The arrow-Schur helpers latent_inner.rs imported keep production callers elsewhere. The item list (22 identities) follows source_removal_guard.py's predicates over the removed hunks. A guarded cargo check --workspace --all-targets --exclude gam-pyffi at this entry's base plus this change, and source_removal_guard.py / public_api_census.py on this commit, ran on MSI before the push (job id in the commit message)."
   }
 ]

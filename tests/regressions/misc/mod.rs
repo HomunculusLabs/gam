@@ -22,7 +22,6 @@ mod gamlss_joint_derivatives_fd_bug_hunt;
 mod inference_bug_hunt;
 mod inference_model;
 mod large_scale_dense_regression_guard;
-mod latent_cache_inner_bug_hunt;
 mod linalg_low_rank_utils;
 mod linear_box_constraint_violated_by_internal_scaling;
 mod location_scale_noise_floor_not_response_scale_equivariant;

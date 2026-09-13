@@ -21,7 +21,6 @@ pub mod gpu_kernels;
 pub mod inference;
 pub mod inner_status;
 pub mod latent_cache;
-pub mod latent_inner;
 pub mod loop_guard;
 pub mod mixture_link;
 // #1521 carve: promoted for `gam-custom-family` (consumes

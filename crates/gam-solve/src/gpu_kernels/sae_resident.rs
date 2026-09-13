@@ -450,9 +450,9 @@ impl DeviceResidentArrowWorkspace {
     // where `H` is the arrow-structured Hessian (per-row `H_tt`/`H_tβ` blocks
     // plus the shared `H_ββ` border) and `g₀` is the base gradient assembled
     // once at upload. This is the quadratic the SAE joint inner Newton actually
-    // minimises at a frozen gate/basis evaluation; the production driver
-    // (`LatentInnerSolver::solve`) re-linearises per outer evaluation, so a
-    // single resident frame is one such inner solve.
+    // minimises at a frozen gate/basis evaluation; a joint inner driver
+    // re-linearises per outer evaluation, so a single resident frame is one
+    // such inner solve.
     //
     // The loop mirrors the production LM trust-region accept/reject exactly:
     // at iterate `z` it forms the residual gradient `r(z) = H z − g₀`, takes
@@ -637,8 +637,7 @@ impl DeviceResidentArrowWorkspace {
                 Err(DeviceResidentArrowError::Solve { .. })
                 | Err(DeviceResidentArrowError::Unavailable { .. }) => {
                     // LM escalation: grow ridge, retry without consuming an
-                    // iteration. Mirrors the production per-row/Schur PD-failure
-                    // arm in `LatentInnerSolver::solve`.
+                    // iteration.
                     ridge_t = grow_ridge(ridge_t, opts.lm_grow);
                     ridge_beta = grow_ridge(ridge_beta, opts.lm_grow);
                     if ridge_t > opts.max_ridge || ridge_beta > opts.max_ridge {
@@ -687,7 +686,7 @@ impl DeviceResidentArrowWorkspace {
             );
 
             // Trust-region gain-ratio noise floor keyed to the objective's own
-            // magnitude, mirroring the production `LatentInnerSolver` (#1127): the
+            // magnitude (#1127): the
             // floor must be equivariant under a response rescaling `y → a·y` (the
             // penalized objective and both reductions scale as `O(a²)`). The
             // previous `.max(1.0)` absolute floor broke this — near a converged
@@ -1386,9 +1385,8 @@ impl ResidencyReport {
 
 }
 
-/// Options for the device-resident inner Newton loop. Defaults mirror the
-/// production [`crate::latent_inner::LatentInnerOptions`] trust-region
-/// schedule so device and CPU paths run identical host-side control flow.
+/// Options for the device-resident inner Newton loop's Levenberg–Marquardt
+/// trust-region schedule.
 #[derive(Clone, Copy, Debug)]
 pub struct DeviceResidentInnerOptions {
     pub max_iterations: usize,

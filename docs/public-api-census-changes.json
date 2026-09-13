@@ -3090,5 +3090,14 @@
     },
     "reason": "Lead ruling 2026-09-12 (#2899): delete the Kronecker PIRLS/REML runtime in one cascade. Since 0e10ecbc7 (#1561) no basis builder constructs a KroneckerFactoredBasis, because the factored runtime solves S ⊗ I while the function-space margin blocks are S ⊗ G, so every consumer of it was dead code: KroneckerFactoredBasis and KroneckerInvariantStructure, KroneckerPenaltySystem and its extraction, the construction.rs Kronecker reparameterization engine and logdet sweep, RemlState's Kronecker setters, loop_driver's PIRLS Kronecker branch with KroneckerQsTransform and its scratch buffers, the two _with_transform constraint builders, the diagonal Kronecker penalty builder, PenaltyCoordinate::KroneckerMarginal, and the diagonal-penalty EDF helpers of PirlsPenalty::Diagonal, whose only producer was that branch. The tests that exercised only the deleted pieces go with them.",
     "evidence": "public_api_census.py's pub fn declarations removed by this change: 34. A guarded cargo check --workspace --all-targets --exclude gam-pyffi at this entry's base plus this change, and source_removal_guard.py / public_api_census.py on this commit, ran on MSI before the push (job id in the commit message)."
+  },
+  {
+    "base": "a88c62eeeff857bd0fea64719e631c3767e328fc",
+    "removed": {
+      "crates/gam-solve/src/latent_inner.rs::new": 1,
+      "crates/gam-solve/src/latent_inner.rs::solve": 1
+    },
+    "reason": "#2899 (delete code only tests use). gam-solve's latent_inner module (LatentInnerSolver, LatentInnerOptions, LatentInnerOutcome, the ArrowSystemAssembler trait and their private helpers) has no production user: no crate, gam-cli, gam-pyffi, gamfit or example constructs LatentInnerSolver or implements ArrowSystemAssembler. Its only callers were its own unit test and tests/regressions/misc/latent_cache_inner_bug_hunt.rs. That root file goes whole: its fourth test drove the deleted solver, and the other three call no gam code at all (two compare x.dot(beta)*rho with a second evaluation of the same product, one compares two literal arrays), so no product change could make them fail (SPEC rule 16).",
+    "evidence": "public_api_census.py's pub fn declarations removed by this change: 2. A guarded cargo check --workspace --all-targets --exclude gam-pyffi at this entry's base plus this change, and source_removal_guard.py / public_api_census.py on this commit, ran on MSI before the push (job id in the commit message)."
   }
 ]
