@@ -808,10 +808,12 @@ fn timewiggle_design_psi_blocks_at(
     ]
 }
 
-/// `timewiggle_marginal_slope_family` with its marginal and slope designs moved to the design ψ
-/// `t = [marginal, slope]` of `timewiggle_design_psi_blocks_at`, `X(ψ) = X + ψ·X_ψ + ½ψ²·X_ψψ`,
-/// and its block states at `beta` with every `η` rebuilt from the moved designs.
+/// `timewiggle_marginal_slope_family`, with a score warp when `score_warp` holds, with its marginal
+/// and slope designs moved to the design ψ `t = [marginal, slope]` of
+/// `timewiggle_design_psi_blocks_at`, `X(ψ) = X + ψ·X_ψ + ½ψ²·X_ψψ`, and its block states at `beta`
+/// with every `η` rebuilt from the moved designs.
 fn timewiggle_design_psi_displaced(
+    score_warp: bool,
     t: [f64; 2],
     beta: &Array1<f64>,
 ) -> (SurvivalMarginalSlopeFamily, Vec<ParameterBlockState>) {
@@ -819,7 +821,7 @@ fn timewiggle_design_psi_displaced(
         design + &(&x_psi * t) + &(&x_psi_psi * (0.5 * t * t))
     };
     let [marginal_rows, slope_rows] = timewiggle_design_psi_rows();
-    let mut family = timewiggle_marginal_slope_family(Some(test_deviation_runtime()));
+    let mut family = timewiggle_marginal_slope_family(score_warp.then(test_deviation_runtime));
     let marginal = moved(family.marginal_design.to_dense(), marginal_rows, t[0]);
     let slope = moved(
         family.slope_layout.coefficient_design().to_dense(),
@@ -968,96 +970,6 @@ fn timewiggle_flex_design_psi_hessian_all_beta_axes_matches_single_axis_2893() {
         }
     }
 }
-
-/// gam#2893: the time-wiggle flex ψ Hessian drift `D_β ∂_ψ H[v]` served by the ψ calculus
-/// matches a Ridders difference of `D_β H[v]` along the design motion `X(ψ) = X + ψ·X_ψ` of a
-/// marginal design ψ. Mixed partials commute, so this grades the drift that the ζ design-ψ gates
-/// difference along β without reading the ζ composition.
-#[test]
-fn timewiggle_flex_marginal_psi_drift_matches_design_difference_2893() {
-    let blocks = timewiggle_design_psi_blocks();
-    let options = BlockwiseFitOptions::default();
-    let base = timewiggle_marginal_slope_family(Some(test_deviation_runtime()));
-    let beta = timewiggle_marginal_slope_beta(&base);
-    let states = timewiggle_marginal_slope_states(&base, &beta);
-    let x_psi = blocks[1][0].x_psi.clone();
-    let base_design = base.marginal_design.to_dense().to_owned();
-    let family_at = |t: f64| {
-        let mut family = timewiggle_marginal_slope_family(Some(test_deviation_runtime()));
-        family.marginal_design = DesignMatrix::from(&base_design + &(&x_psi * t));
-        family
-    };
-    let v = Array1::from_shape_fn(beta.len(), |i| ((i * 5 + 1) % 13) as f64 / 13.0 - 0.5);
-    let drift = base
-        .psi_hessian_directional_derivative_with_options(&states, &blocks, 0, &v, &options)
-        .expect("design ψ Hessian drift")
-        .expect("a marginal design ψ publishes its Hessian drift");
-    assert_matches_ridders_2893("marginal ψ drift", &drift, &|t| {
-        let family = family_at(t);
-        family
-            .exact_newton_joint_hessian_directional_derivative(
-                &timewiggle_marginal_slope_states(&family, &beta),
-                &v,
-            )
-            .expect("displaced D_beta H[v]")
-            .expect("a time wiggle publishes D_beta H")
-    });
-}
-
-/// gam#2893: the time-wiggle flex ψ terms `∂_ψ ℓ̄`, `∂_ψ ∇_β ℓ̄` and `∂_ψ H` served by
-/// `psi_terms` match Ridders differences of the joint objective, gradient and Hessian along the
-/// design motion `X(ψ) = X + ψ·X_ψ` of a marginal design ψ. They are the arm's outer ψ gradient
-/// inputs, which a time wiggle had graded only for finiteness.
-#[test]
-fn timewiggle_flex_marginal_psi_terms_match_design_difference_2893() {
-    let blocks = timewiggle_design_psi_blocks();
-    let base = timewiggle_marginal_slope_family(Some(test_deviation_runtime()));
-    let beta = timewiggle_marginal_slope_beta(&base);
-    let states = timewiggle_marginal_slope_states(&base, &beta);
-    let specs = vec![
-        dummy_blockspec(5),
-        dummy_blockspec(2),
-        dummy_blockspec(1),
-        dummy_blockspec(beta.len() - 8),
-    ];
-    let x_psi = blocks[1][0].x_psi.clone();
-    let base_design = base.marginal_design.to_dense().to_owned();
-    let evaluate_at = |t: f64| {
-        let mut family = timewiggle_marginal_slope_family(Some(test_deviation_runtime()));
-        family.marginal_design = DesignMatrix::from(&base_design + &(&x_psi * t));
-        let displaced = timewiggle_marginal_slope_states(&family, &beta);
-        let evaluation = family
-            .exact_newton_joint_gradient_evaluation(&displaced, &specs)
-            .expect("joint gradient evaluation")
-            .expect("survival marginal-slope publishes a joint gradient evaluation");
-        let hessian = family
-            .exact_newton_joint_hessian(&displaced)
-            .expect("joint hessian")
-            .expect("survival marginal-slope publishes an explicit joint hessian");
-        (-evaluation.log_likelihood, -evaluation.gradient, hessian)
-    };
-    let terms = base
-        .psi_terms(&states, &blocks, 0)
-        .expect("design ψ terms")
-        .expect("a marginal design ψ publishes its terms");
-    let total = beta.len();
-    let hessian_psi = match terms.hessian_psi_operator.as_ref() {
-        Some(operator) => operator.mul_mat(&Array2::<f64>::eye(total)),
-        None => terms.hessian_psi.clone(),
-    };
-    assert_matches_ridders_2893(
-        "marginal ψ objective",
-        &Array2::from_elem((1, 1), terms.objective_psi),
-        &|t| Array2::from_elem((1, 1), evaluate_at(t).0),
-    );
-    assert_matches_ridders_2893(
-        "marginal ψ score",
-        &terms.score_psi.clone().insert_axis(Axis(1)),
-        &|t| evaluate_at(t).1.insert_axis(Axis(1)),
-    );
-    assert_matches_ridders_2893("marginal ψ Hessian", &hessian_psi, &|t| evaluate_at(t).2);
-}
-
 
 #[test]
 fn link_flex_blockwise_exact_newton_matches_joint_principal_blocks() {
@@ -2254,7 +2166,7 @@ fn timewiggle_flex_design_psi_hessian_sweep_matches_design_difference_2893() {
             assert_matches_ridders_2893(&format!("ψ {psi} axis {axis_idx}"), matrix, &|t| {
                 let mut moved_t = [0.0; 2];
                 moved_t[psi] = t;
-                let (moved, moved_states) = timewiggle_design_psi_displaced(moved_t, &beta);
+                let (moved, moved_states) = timewiggle_design_psi_displaced(true, moved_t, &beta);
                 moved
                     .exact_newton_joint_hessian_directional_derivative(&moved_states, &axis)
                     .expect("displaced D_β H[e_a]")
@@ -2287,7 +2199,7 @@ fn timewiggle_flex_design_psi_by_beta_third_matches_design_difference_2893() {
             assert_matches_ridders_2893(&format!("ψ {psi} axis {axis_idx}"), matrix, &|t| {
                 let mut moved_t = [0.0; 2];
                 moved_t[psi] = t;
-                let (moved, moved_states) = timewiggle_design_psi_displaced(moved_t, &beta);
+                let (moved, moved_states) = timewiggle_design_psi_displaced(true, moved_t, &beta);
                 moved
                     .exact_newton_joint_hessian_second_directional_derivative_timewiggle_flex_all_axes(
                         &moved_states,
@@ -2326,7 +2238,7 @@ fn timewiggle_flex_design_psi_pair_third_matches_design_difference_2893() {
                 &|t| {
                     let mut moved_t = [0.0; 2];
                     moved_t[psi_j] = t;
-                    let (moved, moved_states) = timewiggle_design_psi_displaced(moved_t, &beta);
+                    let (moved, moved_states) = timewiggle_design_psi_displaced(true, moved_t, &beta);
                     moved
                         .psi_hessian_directional_derivatives_all_beta_axes_with_options(
                             &moved_states,
@@ -2339,6 +2251,138 @@ fn timewiggle_flex_design_psi_pair_third_matches_design_difference_2893() {
                         .swap_remove(axis_idx)
                 },
             );
+        }
+    }
+}
+
+/// gam#2893: the time-wiggle design ψ terms `∂_ψ ℓ̄`, `∂_ψ ∇_β ℓ̄` and `∂_ψ H` and the ψ Hessian
+/// drift `D_β ∂_ψ H[v]`, served through the ζ composition, match Ridders differences of the joint
+/// objective, gradient, Hessian and `D_β H[v]` along the design motion of a marginal and a slope
+/// design ψ. They are the outer ψ gradient and Hessian inputs. Both row programs are graded: the
+/// FLEX program with a score warp and the rigid program without one.
+#[test]
+fn timewiggle_design_psi_terms_and_drift_match_design_difference_2893() {
+    let blocks = timewiggle_design_psi_blocks();
+    let options = BlockwiseFitOptions::default();
+    for score_warp in [false, true] {
+        let base = timewiggle_marginal_slope_family(score_warp.then(test_deviation_runtime));
+        assert!(base.timewiggle_design_psi_terms_available());
+        let beta = timewiggle_marginal_slope_beta(&base);
+        let states = timewiggle_marginal_slope_states(&base, &beta);
+        let total = beta.len();
+        let mut specs = vec![dummy_blockspec(5), dummy_blockspec(2), dummy_blockspec(1)];
+        if score_warp {
+            specs.push(dummy_blockspec(total - 8));
+        }
+        let v = Array1::from_shape_fn(total, |i| ((i * 5 + 1) % 13) as f64 / 13.0 - 0.5);
+        for psi in 0..2 {
+            let label = format!("score_warp={score_warp} ψ {psi}");
+            let displaced_at = |t: f64| {
+                let mut motion = [0.0; 2];
+                motion[psi] = t;
+                timewiggle_design_psi_displaced(score_warp, motion, &beta)
+            };
+            let joint_at = |t: f64| {
+                let (family, displaced) = displaced_at(t);
+                let evaluation = family
+                    .exact_newton_joint_gradient_evaluation(&displaced, &specs)
+                    .expect("joint gradient evaluation")
+                    .expect("survival marginal-slope publishes a joint gradient evaluation");
+                let hessian = family
+                    .exact_newton_joint_hessian(&displaced)
+                    .expect("joint hessian")
+                    .expect("survival marginal-slope publishes an explicit joint hessian");
+                (-evaluation.log_likelihood, -evaluation.gradient, hessian)
+            };
+            let terms = base
+                .psi_terms(&states, &blocks, psi)
+                .expect("design ψ terms")
+                .expect("a design ψ publishes its terms");
+            let hessian_psi = match terms.hessian_psi_operator.as_ref() {
+                Some(operator) => operator.mul_mat(&Array2::<f64>::eye(total)),
+                None => terms.hessian_psi.clone(),
+            };
+            assert_matches_ridders_2893(
+                &format!("{label} objective"),
+                &Array2::from_elem((1, 1), terms.objective_psi),
+                &|t| Array2::from_elem((1, 1), joint_at(t).0),
+            );
+            assert_matches_ridders_2893(
+                &format!("{label} score"),
+                &terms.score_psi.clone().insert_axis(Axis(1)),
+                &|t| joint_at(t).1.insert_axis(Axis(1)),
+            );
+            assert_matches_ridders_2893(&format!("{label} Hessian"), &hessian_psi, &|t| {
+                joint_at(t).2
+            });
+            let drift = base
+                .psi_hessian_directional_derivative_with_options(&states, &blocks, psi, &v, &options)
+                .expect("design ψ Hessian drift")
+                .expect("a design ψ publishes its Hessian drift");
+            assert_matches_ridders_2893(&format!("{label} drift"), &drift, &|t| {
+                let (family, displaced) = displaced_at(t);
+                family
+                    .exact_newton_joint_hessian_directional_derivative(&displaced, &v)
+                    .expect("displaced D_beta H[v]")
+                    .expect("a time wiggle publishes D_beta H")
+            });
+        }
+    }
+}
+
+/// gam#2893: the time-wiggle design ψ pair terms `∂²_ψiψj ℓ̄`, `∂²_ψiψj ∇_β ℓ̄` and `∂²_ψiψj H`,
+/// served through the ζ composition, match Ridders differences of the ψ_i terms along the design
+/// motion of ψ_j. The pairs are the marginal diagonal, the cross-block pair and the slope diagonal,
+/// each with a score warp and without one. On a diagonal pair the ψ_i design derivative itself
+/// moves to `X_ψ + ψ·X_ψψ`.
+#[test]
+fn timewiggle_design_psi_pair_terms_match_design_difference_2893() {
+    let blocks = timewiggle_design_psi_blocks();
+    let options = BlockwiseFitOptions::default();
+    for score_warp in [false, true] {
+        let base = timewiggle_marginal_slope_family(score_warp.then(test_deviation_runtime));
+        let beta = timewiggle_marginal_slope_beta(&base);
+        let states = timewiggle_marginal_slope_states(&base, &beta);
+        let total = beta.len();
+        for (psi_i, psi_j) in [(0usize, 0usize), (0, 1), (1, 1)] {
+            let label = format!("score_warp={score_warp} ψ pair ({psi_i},{psi_j})");
+            let terms = base
+                .psi_second_order_terms_inner_with_options(
+                    &states, &blocks, psi_i, psi_j, None, &options,
+                )
+                .expect("design pair terms")
+                .expect("a design pair publishes its terms");
+            let hessian_psi_psi = match terms.hessian_psi_psi_operator.as_ref() {
+                Some(operator) => operator.mul_mat(&Array2::<f64>::eye(total)),
+                None => terms.hessian_psi_psi.clone(),
+            };
+            let first_at = |t: f64| {
+                let mut motion = [0.0; 2];
+                motion[psi_j] = t;
+                let (family, displaced) = timewiggle_design_psi_displaced(score_warp, motion, &beta);
+                let first = family
+                    .psi_terms(&displaced, &timewiggle_design_psi_blocks_at(motion), psi_i)
+                    .expect("displaced design ψ terms")
+                    .expect("a design ψ publishes its terms");
+                let hessian = match first.hessian_psi_operator.as_ref() {
+                    Some(operator) => operator.mul_mat(&Array2::<f64>::eye(total)),
+                    None => first.hessian_psi.clone(),
+                };
+                (first.objective_psi, first.score_psi, hessian)
+            };
+            assert_matches_ridders_2893(
+                &format!("{label} objective"),
+                &Array2::from_elem((1, 1), terms.objective_psi_psi),
+                &|t| Array2::from_elem((1, 1), first_at(t).0),
+            );
+            assert_matches_ridders_2893(
+                &format!("{label} score"),
+                &terms.score_psi_psi.clone().insert_axis(Axis(1)),
+                &|t| first_at(t).1.insert_axis(Axis(1)),
+            );
+            assert_matches_ridders_2893(&format!("{label} Hessian"), &hessian_psi_psi, &|t| {
+                first_at(t).2
+            });
         }
     }
 }
