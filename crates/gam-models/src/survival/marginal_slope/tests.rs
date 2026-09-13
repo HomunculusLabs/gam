@@ -3551,6 +3551,60 @@ fn timewiggle_flex_marginal_psi_drift_matches_design_difference_2893() {
     });
 }
 
+/// gam#2893: the time-wiggle flex ψ terms `∂_ψ ℓ̄`, `∂_ψ ∇_β ℓ̄` and `∂_ψ H` served by
+/// `psi_terms` match Ridders differences of the joint objective, gradient and Hessian along the
+/// design motion `X(ψ) = X + ψ·X_ψ` of a marginal design ψ. They are the arm's outer ψ gradient
+/// inputs, which a time wiggle had graded only for finiteness.
+#[test]
+fn timewiggle_flex_marginal_psi_terms_match_design_difference_2893() {
+    let blocks = timewiggle_design_psi_blocks();
+    let base = timewiggle_marginal_slope_family(Some(test_deviation_runtime()));
+    let beta = timewiggle_marginal_slope_beta(&base);
+    let states = timewiggle_marginal_slope_states(&base, &beta);
+    let specs = vec![
+        dummy_blockspec(5),
+        dummy_blockspec(2),
+        dummy_blockspec(1),
+        dummy_blockspec(beta.len() - 8),
+    ];
+    let x_psi = blocks[1][0].x_psi.clone();
+    let base_design = base.marginal_design.to_dense().to_owned();
+    let evaluate_at = |t: f64| {
+        let mut family = timewiggle_marginal_slope_family(Some(test_deviation_runtime()));
+        family.marginal_design = DesignMatrix::from(&base_design + &(&x_psi * t));
+        let displaced = timewiggle_marginal_slope_states(&family, &beta);
+        let evaluation = family
+            .exact_newton_joint_gradient_evaluation(&displaced, &specs)
+            .expect("joint gradient evaluation")
+            .expect("survival marginal-slope publishes a joint gradient evaluation");
+        let hessian = family
+            .exact_newton_joint_hessian(&displaced)
+            .expect("joint hessian")
+            .expect("survival marginal-slope publishes an explicit joint hessian");
+        (-evaluation.log_likelihood, -evaluation.gradient, hessian)
+    };
+    let terms = base
+        .psi_terms(&states, &blocks, 0)
+        .expect("design ψ terms")
+        .expect("a marginal design ψ publishes its terms");
+    let total = beta.len();
+    let hessian_psi = match terms.hessian_psi_operator.as_ref() {
+        Some(operator) => operator.mul_mat(&Array2::<f64>::eye(total)),
+        None => terms.hessian_psi.clone(),
+    };
+    assert_matches_ridders_2893(
+        "marginal ψ objective",
+        &Array2::from_elem((1, 1), terms.objective_psi),
+        &|t| Array2::from_elem((1, 1), evaluate_at(t).0),
+    );
+    assert_matches_ridders_2893(
+        "marginal ψ score",
+        &terms.score_psi.clone().insert_axis(Axis(1)),
+        &|t| evaluate_at(t).1.insert_axis(Axis(1)),
+    );
+    assert_matches_ridders_2893("marginal ψ Hessian", &hessian_psi, &|t| evaluate_at(t).2);
+}
+
 
 #[test]
 fn link_flex_blockwise_exact_newton_matches_joint_principal_blocks() {
