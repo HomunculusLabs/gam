@@ -2705,8 +2705,12 @@ mod tests {
     /// #2902 row 15: both rungs walk their order up from the class minimum until
     /// the running BIC winner is bracketed, with no ladder of orders. The free
     /// class reaches a planted four, an order the historical [1, 2, 3, 5, 7, 9]
-    /// ladder could not name, and the ring class reaches a planted seven from its
-    /// minimum of three.
+    /// ladder could not name. The ring class reaches a planted seven from its
+    /// minimum of three: the walk only proposes an order next to the running
+    /// winner, so asking for k = 8 means the certified orders 3 to 7 ranked seven
+    /// first. Bracketing seven needs that over-fitted eighth order, and when its
+    /// generalized EM does not certify, the class is refused rather than returned
+    /// without its upper neighbour.
     #[test]
     fn order_walks_recover_planted_cluster_orders_without_a_ladder_2902() {
         let blobs = planted_clusters(&[(-3.0, -3.0), (3.0, -3.0), (-3.0, 3.0), (3.0, 3.0)], 30);
@@ -2725,13 +2729,31 @@ mod tests {
             })
             .collect();
         let ring = planted_clusters(&ring_centers, 40);
-        let ring_rung = fit_ring_of_clusters_rung(ring.view(), GaussianMixtureConfig::default())
-            .expect("the ring-of-clusters walk certifies on seven planted clusters");
-        assert_eq!(
-            ring_rung.winner().k,
-            7,
-            "the walk must bracket the planted seven ring clusters"
-        );
+        match fit_ring_of_clusters_rung(ring.view(), GaussianMixtureConfig::default()) {
+            Ok(ring_rung) => assert_eq!(
+                ring_rung.winner().k,
+                7,
+                "the walk must bracket the planted seven ring clusters"
+            ),
+            Err(AdaptiveRungError::OrderFailures {
+                kind: AdaptiveRungKind::RingOfClusters,
+                failures,
+            }) => assert!(
+                matches!(
+                    failures.as_slice(),
+                    [AdaptiveRungOrderFailure {
+                        k: 8,
+                        stage: AdaptiveRungFailureStage::Fit,
+                        ..
+                    }]
+                ),
+                "the walk must reach seven as its running winner before it asks for the \
+                 order above it: {failures:?}"
+            ),
+            Err(error) => {
+                panic!("the ring-of-clusters walk refused on seven planted clusters: {error}")
+            }
+        }
     }
 }
 
