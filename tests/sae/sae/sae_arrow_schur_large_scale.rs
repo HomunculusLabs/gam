@@ -20,12 +20,14 @@
 //! No `let _`, no `#[allow(...)]`, no env vars, no `#[cfg(feature=...)]`.
 
 use ndarray::{Array1, Array2, Array3};
+use std::sync::Arc;
 
 use gam::solver::arrow_schur::ArrowSolveOptions;
 use gam::terms::{
-    latent::LatentManifold, sae::manifold::AssignmentMode, sae::manifold::SaeAssignment,
-    sae::manifold::SaeAtomBasisKind,
-    sae::manifold::SaeManifoldAtom, sae::manifold::SaeManifoldRho, sae::manifold::SaeManifoldTerm,
+    latent::LatentManifold, sae::manifold::AssignmentMode, sae::manifold::EuclideanPatchEvaluator,
+    sae::manifold::SaeAssignment, sae::manifold::SaeAtomBasisKind,
+    sae::manifold::SaeBasisEvaluator, sae::manifold::SaeManifoldAtom,
+    sae::manifold::SaeManifoldRho, sae::manifold::SaeManifoldTerm,
 };
 
 /// Deterministic pseudo-random f64 ∈ (-1, 1) via LCG.
@@ -279,9 +281,68 @@ fn k32_softmax_pcg_solve_is_finite() {
 // Full Newton step test at K=16 (assemble + solve in one call)
 // ---------------------------------------------------------------------------
 
+/// A K-atom fixture built the way production builds atoms, for the full joint fit:
+/// each atom's `Φ` and Jacobian are the degree-`degree` monomial patch evaluated at
+/// its drawn coordinates, and the evaluator stays installed. The inner Newton step
+/// majorizes the data term's residual curvature with the basis second jets, and the
+/// hand-drawn arrays of [`build_fixture`] carry none, so that fixture serves only
+/// the assembly and solve gates.
+fn build_evaluated_fixture(
+    k_atoms: usize,
+    degree: usize,
+    n_obs: usize,
+    p_out: usize,
+    mode: AssignmentMode,
+) -> Fixture {
+    let evaluator = EuclideanPatchEvaluator::new(1, degree)
+        .unwrap_or_else(|e| panic!("EuclideanPatchEvaluator::new failed: {e}"));
+    let m = evaluator.basis_size();
+    let mut rng: u64 = 0x1234_5678_9abc_def0u64
+        .wrapping_add(k_atoms as u64 * 97)
+        .wrapping_add(n_obs as u64 * 7);
+    let logits = Array2::from_shape_fn((n_obs, k_atoms), |_| lcg_f64(&mut rng) * 0.5);
+    let target = Array2::from_shape_fn((n_obs, p_out), |_| lcg_f64(&mut rng));
+    let mut atoms: Vec<SaeManifoldAtom> = Vec::with_capacity(k_atoms);
+    let mut coord_blocks: Vec<Array2<f64>> = Vec::with_capacity(k_atoms);
+    for atom_idx in 0..k_atoms {
+        let coords = Array2::from_shape_fn((n_obs, 1), |_| lcg_f64(&mut rng) * 0.5);
+        let (phi, jet) = evaluator
+            .evaluate(coords.view())
+            .unwrap_or_else(|e| panic!("EuclideanPatchEvaluator::evaluate failed: {e}"));
+        let decoder = Array2::from_shape_fn((m, p_out), |_| lcg_f64(&mut rng) * 0.3);
+        let mut smooth = Array2::<f64>::zeros((m, m));
+        for i in 0..m {
+            // Diagonal-dominant → PD.
+            smooth[[i, i]] = 0.1 + 0.01 * lcg_f64(&mut rng).abs();
+        }
+        let atom = SaeManifoldAtom::new_with_provided_function_gram(
+            format!("atom_{atom_idx}"),
+            SaeAtomBasisKind::EuclideanPatch,
+            1,
+            phi,
+            jet,
+            decoder,
+            smooth,
+        )
+        .unwrap_or_else(|e| panic!("SaeManifoldAtom::new failed: {e}"))
+        .with_basis_evaluator(Arc::new(evaluator.clone()));
+        atoms.push(atom);
+        coord_blocks.push(coords);
+    }
+    let manifolds = vec![LatentManifold::Euclidean; k_atoms];
+    let assignment =
+        SaeAssignment::from_blocks_with_mode_and_manifolds(logits, coord_blocks, manifolds, mode)
+            .unwrap_or_else(|e| panic!("SaeAssignment construction failed: {e}"));
+    let term = SaeManifoldTerm::new(atoms, assignment)
+        .unwrap_or_else(|e| panic!("SaeManifoldTerm::new failed: {e}"));
+    let rho = SaeManifoldRho::new(0.0, -4.0, vec![Array1::<f64>::zeros(1); k_atoms]);
+    Fixture { term, target, rho }
+}
+
 #[test]
 fn k16_full_newton_step_is_finite() {
-    let f = build_fixture(16, 4, 1, 500, 2, AssignmentMode::softmax(1.0));
+    // Degree 3 on a one-dimensional latent: M = 4 columns, as the sizing table states.
+    let f = build_evaluated_fixture(16, 3, 500, 2, AssignmentMode::softmax(1.0));
     let mut term = f.term;
     let mut rho = f.rho;
     let target = f.target;
