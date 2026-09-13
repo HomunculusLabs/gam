@@ -261,9 +261,6 @@ def simplex_exp_map(
 def sphere_frechet_mean(
     values: torch.Tensor,
     weights: torch.Tensor | None = None,
-    *,
-    tol: float = 1e-12,
-    max_iter: int = 256,
 ) -> torch.Tensor:
     """Intrinsic Fréchet/Karcher mean on the unit sphere.
 
@@ -276,7 +273,7 @@ def sphere_frechet_mean(
         if not isinstance(weights, torch.Tensor):
             raise TypeError("weights must be a torch.Tensor or None")
         w = to_numpy_f64(weights).reshape(-1)
-    out = _rust().sphere_frechet_mean(to_numpy_f64(v), w, float(tol), int(max_iter))
+    out = _rust().sphere_frechet_mean(to_numpy_f64(v), w)
     return from_numpy_like(out, v)
 
 

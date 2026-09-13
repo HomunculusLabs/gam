@@ -1615,23 +1615,16 @@ fn response_geometry_normalize_fisher_rao<'py>(
     Ok(out.into_pyarray(py).unbind())
 }
 
-#[pyfunction(signature = (values, weights = None, tol = 1.0e-12, max_iter = 256))]
+#[pyfunction(signature = (values, weights = None))]
 fn sphere_frechet_mean<'py>(
     py: Python<'py>,
     values: PyReadonlyArray2<'py, f64>,
     weights: Option<PyReadonlyArray1<'py, f64>>,
-    tol: f64,
-    max_iter: usize,
 ) -> PyResult<Py<PyArray1<f64>>> {
     let arr = values.as_array().to_owned();
     let w_owned = weights.as_ref().map(|w| w.as_array().to_owned());
     let mean = detach_py_result(py, "sphere_frechet_mean", move || {
-        gam::geometry::sphere::sphere_frechet_mean(
-            arr.view(),
-            w_owned.as_ref().map(|w| w.view()),
-            tol,
-            max_iter,
-        )
+        gam::geometry::sphere::sphere_frechet_mean(arr.view(), w_owned.as_ref().map(|w| w.view()))
     })?;
     Ok(Array1::from(mean).into_pyarray(py).unbind())
 }

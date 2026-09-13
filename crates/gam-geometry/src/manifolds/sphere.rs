@@ -728,20 +728,32 @@ fn sphere_equatorial_minimizer(
     None
 }
 
+/// The weighted spherical log step `Σ w·θ·u/‖u‖` at `base`, together with its
+/// rounding band: an ℓ1 bound, hence an ℓ2 bound, on how far the computed step
+/// can sit from the exact one.
+///
+/// A contributing row adds its direction's rounding `resolution/‖u‖` scaled by
+/// `w·θ`, plus `γ_{n+2d+8}·√d·w·θ` for forming `θ`, `‖u‖`, the scale and the row
+/// sum (`‖û‖₁ ≤ √d`). A row skipped because it coincides with `base` adds `w·θ`,
+/// which bounds the contribution it leaves out.
 fn sphere_weighted_log_step(
     values: ArrayView2<'_, f64>,
     weights: ArrayView1<'_, f64>,
     base: ArrayView1<'_, f64>,
-) -> Result<Array1<f64>, String> {
+) -> Result<(Array1<f64>, f64), String> {
     let d = base.len();
+    let n = values.nrows();
     let base_l1: f64 = base.iter().map(|b| b.abs()).sum();
     // The tangent component `v − (v·base)·base` is formed by a d-term inner
     // product and one subtraction per coordinate, so its rounding is at most
     // `γ_{d+2}·(‖v‖₁ + |v·base|·‖base‖₁)` in ℓ1, which bounds it in ℓ2 too.
     let growth = gam_linalg::roundoff::accumulation_growth(d + 2);
+    let formation =
+        gam_linalg::roundoff::accumulation_growth(n + 2 * d + 8) * (d as f64).sqrt();
     let mut step = Array1::<f64>::zeros(d);
+    let mut band = 0.0_f64;
     let mut tangent = Array1::<f64>::zeros(d);
-    for row in 0..values.nrows() {
+    for row in 0..n {
         let mut dot_value = 0.0_f64;
         let mut chord_sq = 0.0_f64;
         let mut row_l1 = 0.0_f64;
@@ -771,6 +783,7 @@ fn sphere_weighted_log_step(
             if dot_value < 0.0 {
                 return Err("spherical log map is undefined at antipodal points".to_string());
             }
+            band += weights[row].abs() * theta;
             continue;
         }
         // `θ·û` with `û = u/‖u‖`: the stable magnitude `‖u‖` stands in for `sin θ`.
@@ -778,8 +791,9 @@ fn sphere_weighted_log_step(
         for col in 0..d {
             step[col] += weights[row] * tangent[col] * scale;
         }
+        band += weights[row].abs() * theta * (resolution / tangent_norm + formation);
     }
-    Ok(step)
+    Ok((step, band))
 }
 
 fn sphere_exp_single(
@@ -838,12 +852,7 @@ fn sphere_frechet_objective(
 pub fn sphere_frechet_mean(
     points: ArrayView2<'_, f64>,
     weights: Option<ArrayView1<'_, f64>>,
-    tol: f64,
-    max_iter: usize,
 ) -> Result<Vec<f64>, String> {
-    if !(tol.is_finite() && tol >= 0.0) {
-        return Err("spherical Fréchet mean tolerance must be finite and non-negative".to_string());
-    }
     let y = normalize_sphere_matrix(points)?;
     let w = normalize_weights(y.nrows(), weights)?;
     let mut candidates = sphere_mean_candidates(y.view(), w.view())?;
@@ -852,24 +861,33 @@ pub fn sphere_frechet_mean(
     }
     let mut best_mu: Option<Array1<f64>> = None;
     let mut best_obj = f64::INFINITY;
+    let mut antipodal_refusal = false;
     for candidate in candidates {
         let mut mu = candidate;
-        let mut failed = false;
-        for _ in 0..max_iter {
-            let step = match sphere_weighted_log_step(y.view(), w.view(), mu.view()) {
-                Ok(step) => step,
+        // From each seed, step until the step is inside its own rounding band,
+        // which certifies that `mu` is stationary. A step that stops shrinking
+        // above that band means rounding ended the iteration before
+        // stationarity, and the seed is refused.
+        let mut previous_norm = f64::INFINITY;
+        let certified = loop {
+            let (step, band) = match sphere_weighted_log_step(y.view(), w.view(), mu.view()) {
+                Ok(pair) => pair,
                 Err(_) => {
-                    failed = true;
-                    break;
+                    antipodal_refusal = true;
+                    break false;
                 }
             };
             let step_norm = norm(step.view());
-            if step_norm < tol {
-                break;
+            if step_norm <= band {
+                break true;
             }
+            if !(step_norm < previous_norm) {
+                break false;
+            }
+            previous_norm = step_norm;
             mu = sphere_exp_single(step.view(), mu.view())?;
-        }
-        if failed {
+        };
+        if !certified {
             continue;
         }
         let obj = sphere_frechet_objective(y.view(), w.view(), mu.view());
@@ -881,11 +899,18 @@ pub fn sphere_frechet_mean(
     if let Some(mu) = best_mu {
         return Ok(mu.to_vec());
     }
-    // No log-map iteration converged: the problem is non-identifiable because the
-    // data has a degenerate/antipodal structure (e.g. equal-weight {e1, −e1},
-    // whose minimizer set is the entire orthogonal equator). Honor the documented
-    // contract by returning ONE deterministic equatorial minimizer rather than an
-    // endpoint surrogate or a "not identifiable" error.
+    if !antipodal_refusal {
+        return Err(
+            "spherical Fréchet mean: no seed reached a step inside its own rounding band"
+                .to_string(),
+        );
+    }
+    // Every certified route was blocked by an antipode: the problem is
+    // non-identifiable because the data has a degenerate/antipodal structure
+    // (e.g. equal-weight {e1, −e1}, whose minimizer set is the entire
+    // orthogonal equator). Honor the documented contract by returning ONE
+    // deterministic equatorial minimizer rather than an endpoint surrogate or a
+    // "not identifiable" error.
     if let Some(mu) = sphere_equatorial_minimizer(y.view(), w.view()) {
         return Ok(mu.to_vec());
     }
@@ -910,7 +935,7 @@ mod tests {
         // tie-breaker must return one deterministic minimizer on that equator
         // rather than the "not identifiable" error.
         let values = array![[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]];
-        let mean = sphere_frechet_mean(values.view(), None, 1.0e-12, 256)
+        let mean = sphere_frechet_mean(values.view(), None)
             .expect("antipodal pair must return a deterministic minimizer");
         assert_eq!(mean.len(), 3);
 
@@ -955,8 +980,8 @@ mod tests {
     #[test]
     fn antipodal_minimizer_is_deterministic_across_calls() {
         let values = array![[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]];
-        let a = sphere_frechet_mean(values.view(), None, 1.0e-12, 256).unwrap();
-        let b = sphere_frechet_mean(values.view(), None, 1.0e-12, 256).unwrap();
+        let a = sphere_frechet_mean(values.view(), None).unwrap();
+        let b = sphere_frechet_mean(values.view(), None).unwrap();
         assert_eq!(a, b, "tie-breaker must be deterministic across calls");
     }
 
@@ -965,7 +990,7 @@ mod tests {
         // Zero-weight / empty input has no minimizer; the genuine error must remain.
         let values = array![[1.0, 0.0, 0.0]];
         let zero = array![0.0_f64];
-        let err = sphere_frechet_mean(values.view(), Some(zero.view()), 1.0e-12, 256);
+        let err = sphere_frechet_mean(values.view(), Some(zero.view()));
         assert!(err.is_err(), "zero-weight input must still error");
     }
 
@@ -974,7 +999,7 @@ mod tests {
         // A clearly identifiable cluster must still converge to the ordinary
         // Karcher mean, not the equatorial fallback.
         let values = array![[1.0, 0.0, 0.0], [0.9, 0.1, 0.0], [0.9, 0.0, 0.1]];
-        let mean = sphere_frechet_mean(values.view(), None, 1.0e-12, 256).unwrap();
+        let mean = sphere_frechet_mean(values.view(), None).unwrap();
         // Mean should be close to e1 (dominant direction), not on the equator.
         assert!(mean[0] > 0.9, "expected near-e1 mean, got {mean:?}");
     }

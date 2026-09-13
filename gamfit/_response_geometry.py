@@ -139,23 +139,11 @@ def simplex_exp_map(
     )
 
 
-def sphere_frechet_mean(
-    values: Any,
-    weights: Any | None = None,
-    *,
-    tol: float = 1e-12,
-    max_iter: int = 256,
-) -> Any:
+def sphere_frechet_mean(values: Any, weights: Any | None = None) -> Any:
     """Intrinsic Fréchet/Karcher mean on the unit sphere."""
     np = _np()
     w = None if weights is None else np.asarray(weights, dtype=float)
-    return _ffi(
-        "sphere_frechet_mean",
-        np.asarray(values, dtype=float),
-        w,
-        float(tol),
-        int(max_iter),
-    )
+    return _ffi("sphere_frechet_mean", np.asarray(values, dtype=float), w)
 
 
 def sphere_log_map(values: Any, base: Any) -> Any:

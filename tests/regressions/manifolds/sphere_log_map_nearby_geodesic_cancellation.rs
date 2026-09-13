@@ -105,7 +105,7 @@ fn sphere_frechet_mean_accurate_on_nearby_cluster() {
         [theta.cos(), theta.sin(), 0.0],
         [theta.cos(), -theta.sin(), 0.0],
     ];
-    let mean = sphere_frechet_mean(points.view(), None, 1e-14, 200).expect("frechet mean");
+    let mean = sphere_frechet_mean(points.view(), None).expect("frechet mean");
     let axis = [1.0_f64, 0.0, 0.0];
     let mut dot = 0.0;
     for i in 0..3 {

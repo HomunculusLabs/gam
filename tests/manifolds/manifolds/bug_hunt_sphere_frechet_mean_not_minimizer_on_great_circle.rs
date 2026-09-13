@@ -52,7 +52,7 @@ fn sphere_frechet_mean_is_a_genuine_minimizer_on_an_equatorial_triangle() {
     let s = (3.0_f64).sqrt() / 2.0; // sin(2π/3) = √3/2
     let points = array![[1.0, 0.0, 0.0], [-0.5, s, 0.0], [-0.5, -s, 0.0],];
 
-    let mu = sphere_frechet_mean(points.view(), None, 1.0e-12, 256)
+    let mu = sphere_frechet_mean(points.view(), None)
         .expect("spherical Fréchet mean should be identifiable for a triangle on the equator");
     let mu = ndarray::Array1::from(mu);
 

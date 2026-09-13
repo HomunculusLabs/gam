@@ -5541,9 +5541,7 @@ fn rg_log_map_dispatch(
     match kind.as_str() {
         "spherical" | "sphere" => {
             let base_point = match base {
-                None => Array1::from(gam::geometry::sphere::sphere_frechet_mean(
-                    values, weights, 1.0e-12, 256,
-                )?),
+                None => Array1::from(gam::geometry::sphere::sphere_frechet_mean(values, weights)?),
                 Some(b) => rg_normalize_sphere_base(b)?,
             };
             let tangent =
