@@ -170,20 +170,16 @@ fn armed_fit_certifies_on_the_exact_jeffreys_outer_hessian_2898() {
     };
     let fit = fit_custom_family_with_rho_prior(&family, &specs, &options, RhoPrior::Flat)
         .expect("the armed quasi-separated multinomial fit must certify");
-    let certificate = fit
-        .artifacts
-        .criterion_certificate
-        .as_ref()
-        .expect("a certified outer optimum carries its criterion certificate");
-    let rho_hat = fit
-        .artifacts
-        .joint_log_lambdas
-        .clone()
-        .expect("a joint-penalty fit publishes its selected joint rho");
+    // Printed before the assertions below, so a refused premise is still readable.
+    let outer_iterations = fit.outer_iterations;
+    let rho_hat = fit.artifacts.joint_log_lambdas.clone();
+    let certificate = fit.artifacts.criterion_certificate.as_ref();
     eprintln!(
-        "armed fit: outer_iterations={} rho_hat={rho_hat:?} certificate={certificate:?}",
-        fit.outer_iterations
+        "armed fit: outer_iterations={outer_iterations} rho_hat={rho_hat:?} certificate={certificate:?}"
     );
+    let certificate =
+        certificate.expect("a certified outer optimum carries its criterion certificate");
+    let rho_hat = rho_hat.expect("a joint-penalty fit publishes its selected joint rho");
     assert!(
         matches!(
             certificate.curvature_verdict(),
