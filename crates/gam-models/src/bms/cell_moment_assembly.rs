@@ -821,26 +821,19 @@ impl BernoulliMarginalSlopeFamily {
             ));
         }
 
-        // The derivative lift requires a genuine scalar root. Refine in the
-        // model's scalar calibration kernel, then freeze the primal Jacobian;
-        // derivative channels below come only from the canonical jet expression.
+        // The derivative lift requires a genuine scalar root. Polish the seed
+        // with Newton in the model's scalar calibration kernel for as long as a
+        // step still shrinks the residual: the evaluator's rounding floor ends
+        // it, because a strictly decreasing sequence of doubles is finite. The
+        // polished root is then held to the #1607 contract the row solve and a
+        // saved prediction accept at. The residual is a probability, so that
+        // contract is the one owner's μ band, not a multiple of the probit-scale
+        // `1 + |a|`. Freeze the primal Jacobian there; derivative channels below
+        // come only from the canonical jet expression.
+        let marginal = self.marginal_link_map(q)?;
+        let root_tol = super::row_primary_hessian::bernoulli_intercept_residual_tolerance(marginal.mu);
         let mut intercept_root = intercept_seed;
-        let scalar_tol = 1e-12 * (1.0 + intercept_root.abs());
-        for _ in 0..4 {
-            let (residual, f_a, _) = self.evaluate_empirical_grid_calibration_newton(
-                intercept_root,
-                q,
-                slope,
-                beta_h,
-                beta_w,
-                grid,
-            )?;
-            intercept_root -= residual / f_a;
-            if residual.abs() <= scalar_tol {
-                break;
-            }
-        }
-        let (root_residual, f_a, _) = self.evaluate_empirical_grid_calibration_newton(
+        let (mut root_residual, mut f_a, _) = self.evaluate_empirical_grid_calibration_newton(
             intercept_root,
             q,
             slope,
@@ -848,7 +841,19 @@ impl BernoulliMarginalSlopeFamily {
             beta_w,
             grid,
         )?;
-        let root_tol = 1e-9 * (1.0 + intercept_root.abs());
+        while root_residual != 0.0 {
+            let candidate = intercept_root - root_residual / f_a;
+            let (candidate_residual, candidate_f_a, _) = self
+                .evaluate_empirical_grid_calibration_newton(
+                    candidate, q, slope, beta_h, beta_w, grid,
+                )?;
+            if !(candidate_residual.abs() < root_residual.abs()) {
+                break;
+            }
+            intercept_root = candidate;
+            root_residual = candidate_residual;
+            f_a = candidate_f_a;
+        }
         if root_residual.abs() > root_tol {
             return Err(format!(
                 "empirical BMS intercept is not a calibration root at row {row}: \
@@ -861,7 +866,6 @@ impl BernoulliMarginalSlopeFamily {
             ));
         }
 
-        let marginal = self.marginal_link_map(q)?;
         let mut calibration = Vec::with_capacity(grid.nodes.len());
         for (node, weight) in grid.pairs() {
             let index =
