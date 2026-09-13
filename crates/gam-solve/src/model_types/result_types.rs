@@ -3099,7 +3099,9 @@ impl FitConvergenceEvidence {
             ));
         }
 
-        let (outer_iterations, outer) = if parts.log_lambdas.is_empty() {
+        let no_smoothing_coordinate =
+            has_no_smoothing_coordinate(&parts.log_lambdas, &parts.artifacts);
+        let (outer_iterations, outer) = if no_smoothing_coordinate {
             // A zero-dimensional analytic certificate (|g|=|Pg|=bound=0)
             // proves no equation: there was no smoothing coordinate to
             // optimize. Some orchestration paths still report one
@@ -3136,6 +3138,22 @@ impl FitConvergenceEvidence {
             outer,
         })
     }
+}
+
+/// Whether a fit had no smoothing coordinate to select: no per-block
+/// log-precision and no joint-penalty log-precision.
+///
+/// A joint-penalty family attaches every smoothing coordinate to
+/// `FitArtifacts::joint_log_lambdas` and leaves the per-block vector empty (the
+/// multinomial per-class carrier, gam#1587), so an empty `log_lambdas` alone is
+/// not a zero-dimensional outer problem. Reading it as one erased the certified
+/// outer evidence of every such fit (#2898).
+fn has_no_smoothing_coordinate(log_lambdas: &Array1<f64>, artifacts: &FitArtifacts) -> bool {
+    log_lambdas.is_empty()
+        && artifacts
+            .joint_log_lambdas
+            .as_ref()
+            .is_none_or(|joint| joint.is_empty())
 }
 
 #[cfg(test)]
@@ -3237,6 +3255,56 @@ mod assembly_inner_status_gate_tests {
                 "expected a non-convergence assembly error for {status:?}, got {err:?}"
             );
         }
+    }
+
+    /// #2898: a joint-penalty fit keeps its outer evidence. The multinomial
+    /// per-class carrier attaches every smoothing coordinate to
+    /// `joint_log_lambdas` and none to the per-block vector, so its empty
+    /// `log_lambdas` is not a zero-dimensional outer problem: the certificate,
+    /// the iteration count and the gradient norm of the certified outer search
+    /// must survive assembly.
+    #[test]
+    fn joint_penalty_outer_artifacts_keep_their_certificate_2898() {
+        let mut parts = parts_with_inner_status(PirlsStatus::Converged);
+        parts.blocks[0].lambdas = Array1::zeros(0);
+        parts.log_lambdas = Array1::zeros(0);
+        parts.lambdas = Array1::zeros(0);
+        if let Some(inference) = parts.inference.as_mut() {
+            inference.edf_by_block.clear();
+            inference.penalty_block_trace.clear();
+        }
+        parts.artifacts.joint_log_lambdas = Some(Array1::from_vec(vec![0.4, -1.3]));
+        parts.artifacts.criterion_certificate = Some(OuterCriterionCertificate {
+            stationarity: OuterStationarityCertificate::AnalyticGradient {
+                grad_norm: 2e-7,
+                projected_grad_norm: 2e-7,
+                bound: 1e-5,
+                rung: CertifiedRung {
+                    label: "solver-band".to_string(),
+                    derived_standard: false,
+                },
+            },
+            curvature: CurvatureEvidence::Measured { psd: true },
+            lambdas_railed: Vec::new(),
+            railed_facts: Vec::new(),
+            curvature_floor: None,
+        });
+        parts.outer_gradient_norm = Some(2e-7);
+        parts.outer_iterations = 7;
+
+        let fit = UnifiedFitResult::try_from_parts(parts)
+            .expect("a certified joint-penalty fit must mint");
+        assert!(
+            fit.convergence_evidence().outer_certificate().is_some(),
+            "joint smoothing coordinates are an outer stationarity equation"
+        );
+        assert!(
+            fit.artifacts.criterion_certificate.is_some(),
+            "the certificate of a joint-coordinate outer search must survive as an artifact"
+        );
+        assert_eq!(fit.outer_iterations, 7);
+        assert_eq!(fit.convergence_evidence().outer_iterations(), 7);
+        assert_eq!(fit.outer_gradient_norm, Some(2e-7));
     }
 
     #[test]
@@ -4012,12 +4080,13 @@ impl UnifiedFitResult {
             inner_cycles,
         } = parts;
         let mut artifacts = artifacts;
-        let outer_iterations = if log_lambdas.is_empty() {
+        let no_smoothing_coordinate = has_no_smoothing_coordinate(&log_lambdas, &artifacts);
+        let outer_iterations = if no_smoothing_coordinate {
             0
         } else {
             outer_iterations
         };
-        let outer_gradient_norm = if log_lambdas.is_empty() {
+        let outer_gradient_norm = if no_smoothing_coordinate {
             // Keep the stored artifacts in the same semantic frame as the
             // sealed evidence. A zero-length gradient/certificate is vacuous,
             // not a measured stationary outer equation.
