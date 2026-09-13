@@ -30,6 +30,7 @@ struct ClampBasinState {
     rho: SaeManifoldRho,
     cache: ArrowFactorCache,
     rows: Vec<usize>,
+    target: Array2<f64>,
 }
 
 /// A clone of `anchor` that keeps its three per-assembly gates and its freeze
@@ -143,6 +144,7 @@ fn first_clamp_basin_state(mode: AssignmentMode, straddle: bool) -> ClampBasinSt
                         rho,
                         cache,
                         rows,
+                        target: target.clone(),
                     };
                 }
             }
@@ -153,6 +155,81 @@ fn first_clamp_basin_state(mode: AssignmentMode, straddle: bool) -> ClampBasinSt
         "#2333 premise: no rung of the declared ladder produced a clamp-basin row \
          (spectrum recorded and repriced, no deflated direction), so this gate \
          would compare producers where the two conventions coincide:\n{}",
+        census.join("\n")
+    );
+}
+
+/// The first rung of a declared `(log_ard, log_lambda_sparse shift)` ladder whose
+/// exact-A factor records a clamp-basin row, for a mode that does not factor on the
+/// ARD-only ladder of [`first_clamp_basin_state`]. The census of every rung prints
+/// unconditionally.
+fn first_clamp_basin_state_on_ladder(
+    mode: AssignmentMode,
+    straddle: bool,
+    redraw_target: bool,
+    ladder: &[(f64, f64)],
+) -> ClampBasinState {
+    let (mut term, logistic_target, fixture_rho) = threshold_gate_tiny_fixture(straddle);
+    term.assignment.mode = mode;
+    let base_rho = fixture_rho.for_assignment(mode);
+    // The fixture draws its target under independent logistic gates. `redraw_target`
+    // re-draws it under `mode`'s own assignments at the fixture state, so the
+    // residual curvature of the exact-A rows vanishes there.
+    let target = if redraw_target {
+        let (n, p, k_atoms) = (term.n_obs(), term.output_dim(), term.k_atoms());
+        let mut redrawn = Array2::<f64>::zeros((n, p));
+        let mut assignments = vec![0.0_f64; k_atoms];
+        let mut decoded = vec![0.0_f64; p];
+        for row in 0..n {
+            term.assignment
+                .try_assignments_row_into(row, &mut assignments)
+                .expect("#2333 assignments at the fixture state");
+            for atom in 0..k_atoms {
+                term.atoms[atom].fill_decoded_row(row, &mut decoded);
+                for col in 0..p {
+                    redrawn[[row, col]] += assignments[atom] * decoded[col];
+                }
+            }
+        }
+        redrawn
+    } else {
+        logistic_target
+    };
+    let mut census = Vec::new();
+    for &(log_ard, sparse_shift) in ladder {
+        let mut rho = base_rho.clone();
+        rho.log_lambda_sparse += sparse_shift;
+        for axes in rho.log_ard.iter_mut() {
+            axes.fill(log_ard);
+        }
+        match exact_a_evidence_cache(&term, &target, &rho) {
+            Ok((anchor, cache)) => {
+                let rows = clamp_basin_rows(&cache);
+                census.push(format!(
+                    "log_ard={log_ard} sparse_shift={sparse_shift}: stratum={:?}",
+                    factor_stratum(&cache)
+                ));
+                if !rows.is_empty() {
+                    eprintln!(
+                        "#2333 CLAMP_BASIN_CENSUS mode={mode:?} straddle={straddle}\n{}",
+                        census.join("\n")
+                    );
+                    return ClampBasinState {
+                        term: anchor,
+                        rho,
+                        cache,
+                        rows,
+                        target: target.clone(),
+                    };
+                }
+            }
+            Err(err) => census.push(format!(
+                "log_ard={log_ard} sparse_shift={sparse_shift}: no factor: {err}"
+            )),
+        }
+    }
+    panic!(
+        "#2333 premise: no rung of the declared ladder produced a clamp-basin row:\n{}",
         census.join("\n")
     );
 }
@@ -772,8 +849,25 @@ fn ard_trace_dense_and_probes_agree_on_clamp_basin_rows_2914() {
 /// prints before the assertion.
 #[test]
 fn softmax_lane_channels_match_the_lane_value_on_clamp_basin_rows_2913() {
-    let state = first_clamp_basin_state(AssignmentMode::softmax(1.0), true);
-    let (_, target, _) = threshold_gate_tiny_fixture(true);
+    // Job 609221: in Softmax mode no rung of the fixture's logistic-target state
+    // factors (PerRowFactorFailed on row 3). Census job 629295: once the target is
+    // re-drawn under the Softmax assignments, the residual curvature vanishes, and at a
+    // lower assignment strength the rungs price clamp-basin rows (log_ard = −3 at
+    // sparse shift −4: rows [1, 4, 6] with 3 reduced-Schur basins).
+    let state = first_clamp_basin_state_on_ladder(
+        AssignmentMode::softmax(1.0),
+        true,
+        true,
+        &[
+            (-3.0, -4.0),
+            (-2.0, -4.0),
+            (-1.0, -4.0),
+            (0.0, -4.0),
+            (-1.0, -2.0),
+            (0.0, -2.0),
+        ],
+    );
+    let target = state.target.clone();
     let (probes, sinv) = full_basis_bundle(&state.cache);
     let operator = EvidenceOperator::ExactObservedInformation;
     let anchor_stratum = factor_stratum(&state.cache);
