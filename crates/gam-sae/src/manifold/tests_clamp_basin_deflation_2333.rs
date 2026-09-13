@@ -972,6 +972,12 @@ fn softmax_lane_channels_match_the_lane_value_on_clamp_basin_rows_2913() {
                     let mut flat = term.assignment.coords[atom].as_flat().clone();
                     flat[index] += sign * h;
                     term.assignment.coords[atom].set_flat(flat.view());
+                    // The atoms cache their basis at the coordinates they were last
+                    // refreshed at, and the arrow assembly reads that cache, so a moved
+                    // coordinate must refresh it or the endpoint moves only the ARD
+                    // prior (production refreshes after every coordinate write).
+                    term.refresh_basis_from_current_coords()
+                        .expect("#2913 basis refresh at a coordinate endpoint");
                 }
             }
             term
