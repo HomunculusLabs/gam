@@ -1115,10 +1115,12 @@ fn topology_tk_normalizer(
     let null_dim = null_dim.ok_or_else(|| {
         "topology evidence requires null-dimension metadata for TK normalization".to_string()
     })?;
-    if !null_dim.is_finite() || null_dim < -1.0e-9 {
+    // A null dimension is a count carried as f64 (`null_space_dim as f64` on every
+    // producer), so it is exact: refuse a negative one and read zero as zero (#2469).
+    if !null_dim.is_finite() || null_dim < 0.0 {
         return Err("topology evidence null dimension must be finite and non-negative".to_string());
     }
-    if null_dim.max(0.0) == 0.0 {
+    if null_dim == 0.0 {
         return Ok(0.0);
     }
     let logdet = null_space_logdet.ok_or_else(|| {
