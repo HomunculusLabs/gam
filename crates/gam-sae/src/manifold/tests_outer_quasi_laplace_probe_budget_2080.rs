@@ -3186,3 +3186,50 @@ fn value_lane_prices_at_shared_fixed_point_2228() {
         (value_lane - analytic).abs()
     );
 }
+
+/// #2228 measurement — does the `imi = 16` root descend further when the SAME term is
+/// driven again? `value_lane_prices_at_shared_fixed_point_2228` compares fresh clones
+/// at 16 and 32, and their roots sit about 1 apart in loss. A continuation from the
+/// 16-root separates what that comparison cannot: a 16-root the 32-budget drive
+/// descends from was a state its movers could not leave, and a 16-root it recurs at
+/// is a different basin. Prints only; nothing asserts.
+#[test]
+fn zz_measure_value_lane_root_continuation_2228() {
+    gam_runtime::test_support::install_diagnostic_logger();
+    let n = 96usize;
+    let p = 48usize;
+    let z = one_circle_wide_target(n, p, 0.05);
+    let (term, seed_dispersion) = two_circle_periodic_term(z.view(), 1, 2);
+    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
+    let (lr, re, rb) = (0.04_f64, 1.0e-6_f64, 1.0e-6_f64);
+    let rho = SaeManifoldRho::new(0.02_f64.ln(), 4.0_f64, vec![array![0.0]])
+        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+        .expect("seed dispersion is finite and strictly positive");
+    let mut continued = term.clone();
+    let root16 = continued
+        .penalized_quasi_laplace_criterion_with_cache(z.view(), &rho, None, 16, lr, re, rb)
+        .expect("imi=16 criterion evaluates");
+    let again16 = continued
+        .penalized_quasi_laplace_criterion_with_cache(z.view(), &rho, None, 16, lr, re, rb)
+        .expect("imi=16 re-entry evaluates");
+    let then32 = continued
+        .penalized_quasi_laplace_criterion_with_cache(z.view(), &rho, None, 32, lr, re, rb)
+        .expect("imi=32 continuation evaluates");
+    let mut fresh = term.clone();
+    let root32 = fresh
+        .penalized_quasi_laplace_criterion_with_cache(z.view(), &rho, None, 32, lr, re, rb)
+        .expect("fresh imi=32 criterion evaluates");
+    eprintln!(
+        "[#2228 continuation] v16={:.16e} loss16={:.16e} | v16again={:.16e} \
+         loss16again={:.16e} | v16then32={:.16e} loss16then32={:.16e} | v32fresh={:.16e} \
+         loss32fresh={:.16e}",
+        root16.0,
+        root16.1.total(),
+        again16.0,
+        again16.1.total(),
+        then32.0,
+        then32.1.total(),
+        root32.0,
+        root32.1.total(),
+    );
+}
