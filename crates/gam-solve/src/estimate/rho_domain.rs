@@ -171,23 +171,43 @@ pub fn coordinate_domain(interval: Option<(f64, f64)>, family_floor: Option<f64>
     (lo, hi)
 }
 
-/// The sum of every penalty on exactly `range`, or `None` when only one penalty
-/// sits there. A double penalty ships its bending block and its null-space ridge
-/// as two coordinates on one column range.
-fn shared_columns_aggregate<'a>(
+/// The sum of every OTHER penalty on exactly `range`, skipping the penalty at
+/// index `skip`, or `None` when that penalty sits alone there. A double penalty
+/// ships its bending block and its null-space ridge as two coordinates on one
+/// column range.
+fn shared_columns_companions<'a>(
     penalties: impl IntoIterator<Item = (&'a std::ops::Range<usize>, &'a Array2<f64>)>,
+    skip: usize,
     range: &std::ops::Range<usize>,
     dim: (usize, usize),
 ) -> Option<Array2<f64>> {
-    let mut aggregate = Array2::<f64>::zeros(dim);
+    let mut companions = Array2::<f64>::zeros(dim);
     let mut count = 0usize;
-    for (other_range, other) in penalties {
-        if other_range == range && other.dim() == dim {
-            aggregate += other;
+    for (index, (other_range, other)) in penalties.into_iter().enumerate() {
+        if index != skip && other_range == range && other.dim() == dim {
+            companions += other;
             count += 1;
         }
     }
-    (count > 1).then_some(aggregate)
+    (count > 0).then_some(companions)
+}
+
+/// Orthonormal frame of the null space of a symmetric PSD matrix, classified at
+/// the pseudo-determinant's positive-eigenvalue threshold. `None` when the
+/// eigendecomposition fails.
+fn psd_null_frame(matrix: &Array2<f64>) -> Option<Array2<f64>> {
+    let (evals, evecs) = matrix.eigh(Side::Lower).ok()?;
+    let threshold = positive_eigenvalue_threshold(evals.as_slice()?);
+    let null_cols: Vec<usize> = evals
+        .iter()
+        .enumerate()
+        .filter_map(|(j, &value)| (value <= threshold).then_some(j))
+        .collect();
+    let mut frame = Array2::<f64>::zeros((matrix.nrows(), null_cols.len()));
+    for (col, &src) in null_cols.iter().enumerate() {
+        frame.column_mut(col).assign(&evecs.column(src));
+    }
+    Some(frame)
 }
 
 /// The resolvability interval of one penalty among the penalties on its columns.
@@ -200,27 +220,47 @@ fn shared_columns_aggregate<'a>(
 /// represent the null function closely, and then the upper edge sits below the
 /// strengths that switch the term off. So the curvature is also read quotiented
 /// only by the null space every penalty on the columns shares
-/// ([`penalty_range_gammas_with_shared_nullspace`]), and the coordinate's domain
-/// spans both intervals: it stays free wherever the term is resolvable at some
-/// strength of its companions. A lone penalty keeps its own interval.
+/// ([`penalty_range_gammas_with_shared_nullspace`]).
+///
+/// Neither read sees the strengths at which the companions dominate. There the
+/// directions they penalize are pinned, the free directions are `N = null(C)`
+/// for the companions' sum `C`, and the coordinate switches the term off along
+/// `N` at the curvature of `NᵀGN` against `NᵀSN`. When `range(S) = null(C)`
+/// (the complementary ridge `N M Nᵀ`, #2372) that is the shared read. A ridge
+/// charged along another direction (the mean end-slope ridge `m vvᵀ`, #2668
+/// row 23) charges the null function `n̂` only `(vᵀn̂)²` of its strength, so its
+/// switch-off curvature is `n̂ᵀGn̂ / (vᵀn̂)²`, far above `vᵀGv` along its own
+/// range. The coordinate's domain spans all three intervals: it stays free
+/// wherever the term is resolvable at some strength of its companions. A lone
+/// penalty keeps its own interval.
 fn shared_columns_resolvability_interval(
     gram: &Array2<f64>,
     local: &Array2<f64>,
-    aggregate: Option<&Array2<f64>>,
+    companions: Option<&Array2<f64>>,
 ) -> Option<(f64, f64)> {
     let own = penalty_range_gammas_from_gram(gram, local)
         .as_deref()
         .and_then(resolvability_interval);
-    let Some(aggregate) = aggregate else {
+    let Some(companions) = companions else {
         return own;
     };
-    let shared = penalty_range_gammas_with_shared_nullspace(gram, local, aggregate)
+    let aggregate = companions + local;
+    let shared = penalty_range_gammas_with_shared_nullspace(gram, local, &aggregate)
         .as_deref()
         .and_then(resolvability_interval);
-    match (own, shared) {
-        (Some(own), Some(shared)) => Some((own.0.min(shared.0), own.1.max(shared.1))),
-        (own, shared) => own.or(shared),
-    }
+    let companions_off = psd_null_frame(companions)
+        .filter(|frame| frame.ncols() > 0)
+        .and_then(|frame| {
+            let free_gram = frame.t().dot(gram).dot(&frame);
+            let free_penalty = frame.t().dot(local).dot(&frame);
+            penalty_range_gammas_from_gram(&free_gram, &free_penalty)
+        })
+        .as_deref()
+        .and_then(resolvability_interval);
+    [own, shared, companions_off]
+        .into_iter()
+        .flatten()
+        .reduce(|left, right| (left.0.min(right.0), left.1.max(right.1)))
 }
 
 /// The per-coordinate domain of a penalized design given as one Gram over
@@ -245,13 +285,14 @@ pub fn resolvability_domain_from_gram_blocks<'a>(
         let block_gram = gram
             .slice(ndarray::s![range.start..range.end, range.start..range.end])
             .to_owned();
-        let aggregate = shared_columns_aggregate(
+        let companions = shared_columns_companions(
             blocks.iter().map(|(other_range, other)| (other_range, *other)),
+            k,
             range,
             local.dim(),
         );
         let interval =
-            shared_columns_resolvability_interval(&block_gram, local, aggregate.as_ref());
+            shared_columns_resolvability_interval(&block_gram, local, companions.as_ref());
         if let Some(interval) = interval {
             let (lo, hi) = coordinate_domain(Some(interval), None);
             lower[k] = lo;
@@ -313,15 +354,19 @@ pub(crate) fn resolvability_domain_from_design(
         let Some(index) = ranges.iter().position(|range| *range == penalty.col_range) else {
             continue;
         };
-        let aggregate = shared_columns_aggregate(
+        let companions = shared_columns_companions(
             penalties
                 .iter()
                 .map(|other| (&other.col_range, &other.local)),
+            k,
             &penalty.col_range,
             penalty.local.dim(),
         );
-        let interval =
-            shared_columns_resolvability_interval(&grams[index], &penalty.local, aggregate.as_ref());
+        let interval = shared_columns_resolvability_interval(
+            &grams[index],
+            &penalty.local,
+            companions.as_ref(),
+        );
         if let Some(interval) = interval {
             let (lo, hi) = coordinate_domain(Some(interval), None);
             lower[k] = lo;
@@ -329,4 +374,64 @@ pub(crate) fn resolvability_domain_from_design(
         }
     }
     Ok((lower, upper))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ndarray::{Array2, array};
+
+    /// A rank-one ridge charged along `v` rather than along `null(S)` (#2668 row
+    /// 23). With the bending companion dominant only `n = e₃` is free, and the
+    /// ridge charges it `(vᵀn)²` of its strength, so the strength that switches
+    /// the term off is `nᵀGn / (vᵀn)²`. The ridge coordinate's upper edge must
+    /// reach it; the shared read along `range(R)` alone must not, or this
+    /// fixture would not exercise the companions-off read.
+    #[test]
+    fn oblique_null_ridge_upper_edge_reaches_the_companions_off_curvature() {
+        let bend = array![[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 0.0]];
+        let v = array![6.0, 0.0, 1.0] / 37.0_f64.sqrt();
+        let ridge = Array2::from_shape_fn((3, 3), |(i, j)| v[i] * v[j]);
+        let gram = array![[4.0, 0.5, 0.2], [0.5, 3.0, 0.1], [0.2, 0.1, 5.0]];
+        let switch_off = (gram[[2, 2]] / (v[2] * v[2])).ln() - log_gradient_resolution();
+
+        let (lower, upper) =
+            resolvability_domain_from_gram_blocks(&gram, [(0..3, &bend), (0..3, &ridge)], 2);
+        assert!(
+            upper[1] >= switch_off * (1.0 - 64.0 * f64::EPSILON),
+            "ridge upper edge {} must reach the companions-off switch-off strength {switch_off}",
+            upper[1]
+        );
+        assert!(lower[1] < upper[1]);
+
+        let aggregate = &bend + &ridge;
+        let shared_only = penalty_range_gammas_with_shared_nullspace(&gram, &ridge, &aggregate)
+            .as_deref()
+            .and_then(resolvability_interval)
+            .expect("the shared read resolves the ridge");
+        assert!(
+            shared_only.1 < switch_off,
+            "positive control: the shared read's edge {} must fall short of {switch_off}",
+            shared_only.1
+        );
+    }
+
+    /// A complementary ridge, `range(R) = null(S)`: the companions-off read is
+    /// the shared read `nᵀGn`, so the edge is what a1fadc5d1 derived.
+    #[test]
+    fn complementary_null_ridge_keeps_the_shared_upper_edge() {
+        let bend = array![[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 0.0]];
+        let ridge = array![[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+        let gram = array![[4.0, 0.5, 0.2], [0.5, 3.0, 0.1], [0.2, 0.1, 5.0]];
+        let expected = gram[[2, 2]].ln() - log_gradient_resolution();
+
+        let (lower, upper) =
+            resolvability_domain_from_gram_blocks(&gram, [(0..3, &bend), (0..3, &ridge)], 2);
+        assert!(lower[1] < upper[1]);
+        assert!(
+            (upper[1] - expected).abs() <= 64.0 * f64::EPSILON * expected.abs(),
+            "complementary ridge upper edge {} must stay the shared edge {expected}",
+            upper[1]
+        );
+    }
 }
