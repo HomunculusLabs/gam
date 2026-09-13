@@ -7090,5 +7090,16 @@
     ],
     "reason": "#2899 public API sweep of gam-sae (prune-api-d): SaeManifoldAtom::reference_roughness_kind has no caller, and it was the only production reader of the atom's reference_roughness_kind field. The getter, the field, its three writes (construction, commit_prepared_constant_curvature and the geometry-plan install), the kind element of materialize_reference_roughness's result, SaeAtomGeometryPlan::reference_roughness_kind (crate-private, called only by that install) and the SaeReferenceRoughnessKind enum are deleted, along with the one unit-test assert that read the field. The smooth penalty and its kappa derivative are materialised exactly as before. The disposition TSV row moves to retired-no-product-user.",
     "evidence": "At e890e5d3e, git grep -n -w reference_roughness_kind finds, outside atom.rs and geometry_plan.rs, only the disposition TSV row; inside them the getter, the field with its three writes and one test assert, and the plan method called only at atom.rs's plan install. SaeReferenceRoughnessKind appears only in atom.rs and geometry_plan.rs. SaeManifoldAtom derives only Debug and Clone, so no serialized format carries the field."
+  },
+  {
+    "base": "e86e693908649bdca1f7f9d7a528db2a05436597",
+    "items": [
+      "crates/gam-linalg/src/sparse_exact.rs:fn:factor_nnz",
+      "crates/gam-solve/src/gpu_kernels/pirls_row.rs:fn:row_reweight_cpu",
+      "crates/gam-solve/src/residual_cascade.rs:fn:coarse_space_cols",
+      "crates/gam-solve/src/residual_cascade.rs:fn:logdet_slq"
+    ],
+    "reason": "#2829 no product user: SparseExactFactor::factor_nnz, pirls_row::row_reweight_cpu and ResidualCascadeDesign::coarse_space_cols and logdet_slq have no caller on their own types.",
+    "evidence": "At e86e693908649bdca1f7f9d7a528db2a05436597, reading every call-shaped occurrence over crates, src and tests: SparseExactFactor::factor_nnz only delegates to SimplicialFactor::factor_nnz, which keeps its callers; coarse_space_cols and logdet_slq are only called on the cascade Core that these design methods delegate to; row_reweight_cpu has no call, and row_reweight_cpu_at keeps its production callers in pirls_gpu.rs and pirls_row.rs."
   }
 ]

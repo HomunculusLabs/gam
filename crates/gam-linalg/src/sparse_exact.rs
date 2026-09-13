@@ -40,11 +40,6 @@ impl crate::matrix::FactorizedSystem for SparseExactFactor {
 }
 
 impl SparseExactFactor {
-    /// Nonzeros in the Cholesky factor `L` (see
-    /// [`SimplicialFactor::factor_nnz`]).
-    pub fn factor_nnz(&self) -> usize {
-        self.simplicial.factor_nnz()
-    }
 }
 
 /// Convert a dense symmetric matrix to sparse CSC storing only the upper triangle.

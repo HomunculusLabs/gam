@@ -2967,5 +2967,16 @@
     },
     "reason": "#2899 public API sweep of gam-sae (prune-api-d): SaeManifoldAtom::reference_roughness_kind has no caller, so it is deleted with the provenance field only it read.",
     "evidence": "At e890e5d3e, git grep -n -w finds no call to the getter. The removed map is public_api_census.py's census difference over this change, computed on MSI."
+  },
+  {
+    "base": "e86e693908649bdca1f7f9d7a528db2a05436597",
+    "removed": {
+      "crates/gam-linalg/src/sparse_exact.rs::factor_nnz": 1,
+      "crates/gam-solve/src/gpu_kernels/pirls_row.rs::row_reweight_cpu": 1,
+      "crates/gam-solve/src/residual_cascade.rs::coarse_space_cols": 1,
+      "crates/gam-solve/src/residual_cascade.rs::logdet_slq": 1
+    },
+    "reason": "#2829 no product user: SparseExactFactor::factor_nnz, pirls_row::row_reweight_cpu and ResidualCascadeDesign::coarse_space_cols and logdet_slq have no caller on their own types.",
+    "evidence": "At e86e693908649bdca1f7f9d7a528db2a05436597, reading every call-shaped occurrence over crates, src and tests: SparseExactFactor::factor_nnz only delegates to SimplicialFactor::factor_nnz, which keeps its callers; coarse_space_cols and logdet_slq are only called on the cascade Core that these design methods delegate to; row_reweight_cpu has no call, and row_reweight_cpu_at keeps its production callers in pirls_gpu.rs and pirls_row.rs."
   }
 ]

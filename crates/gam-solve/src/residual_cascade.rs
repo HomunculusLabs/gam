@@ -3955,19 +3955,6 @@ impl ResidualCascadeDesign {
         self.metric_scaled_aspect_ratio() <= QUASI_UNIFORMITY_MAX_ASPECT
     }
 
-    /// Number of columns `ncoarse` in the additive-Schwarz coarse space at `log
-    /// λ` (the polynomial layer plus the data-dominated coarsest levels). The
-    /// iterative-route preconditioner solves the principal `[0, ncoarse)` block
-    /// of `A = X'WX + λD` exactly and Jacobi-preconditions the fine tail; exposed
-    /// so the conditioning oracle can reconstruct that block-arrow preconditioner
-    /// from the public dense system and certify it is uniformly conditioned in
-    /// depth. See `COARSE_DOMINANCE`.
-    pub fn coarse_space_cols(&self, log_lambda: f64) -> Result<usize, String> {
-        let lambda = gam_problem::checked_exp_log_strength(log_lambda)
-            .map_err(|error| format!("residual cascade: {error}"))?;
-        Ok(self.core.coarse_space_cols(lambda))
-    }
-
     /// Total coefficient count (`dim + 1` polynomial + all centers).
     pub fn num_coeffs(&self) -> usize {
         self.core.m
@@ -4023,14 +4010,6 @@ impl ResidualCascadeDesign {
             .zip(self.core.pen_diag.iter())
             .map(|(&c, &d)| d * c * c)
             .sum())
-    }
-
-    /// SLQ log-determinant estimate on the fixed deterministic probes —
-    /// exposed for the in-test SLQ-vs-exact oracle.
-    pub fn logdet_slq(&self, log_lambda: f64) -> Result<f64, String> {
-        let lambda = gam_problem::checked_exp_log_strength(log_lambda)
-            .map_err(|error| format!("residual cascade: {error}"))?;
-        self.core.logdet_slq(lambda)
     }
 
     /// The bounded `log λ` domain used by the exact dense REML search and by

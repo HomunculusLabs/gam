@@ -222,22 +222,9 @@ pub struct RowOutput {
     pub deviance: f64,
 }
 
-/// Reference CPU evaluator for one row. `mode` selects `w_hessian` curvature.
-///
-/// `gamma_shape` is the Gamma dispersion shape parameter (α > 0). It is only
-/// used when `family == GammaLog`; all other families ignore it. Pass `1.0`
-/// for non-Gamma fits.
-pub fn row_reweight_cpu(
-    family: PirlsRowFamily,
-    mode: CurvatureMode,
-    input: RowInput,
-    gamma_shape: f64,
-) -> Result<RowOutput, EstimationError> {
-    row_reweight_cpu_at(0, family, mode, input, gamma_shape)
-}
-
-/// Indexed form of [`row_reweight_cpu`], used to reproduce a device refusal
-/// with the correct row in its typed error.
+/// Reference CPU evaluator for one row, indexed so a device refusal reports the
+/// correct row in its typed error. `mode` selects `w_hessian` curvature, and
+/// `gamma_shape` (α > 0) is read only when `family == GammaLog`.
 pub(crate) fn row_reweight_cpu_at(
     row: usize,
     family: PirlsRowFamily,
