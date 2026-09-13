@@ -6633,5 +6633,13 @@
     ],
     "reason": "SPEC rule 23 (#2469). refine_certified_start stopped once the pending Newton step fell to NEWTON_REFINE_CONVERGED_EPS·(1 + ‖t‖), a picked ratio of 1e-12 plus an absolute unit. The certificate in hand already fixes the stopping rule. From a certified iterate (h_k ≤ ½), the exact next step obeys η_{k+1} ≤ β_{k+1}·(L/2)·η_k², with β_{k+1} ≤ β_k/(1 − h_k) by the Banach perturbation lemma, so η_{k+1} ≤ h_k/(2(1 − h_k))·η_k. A computed step that fails that contraction is round-off in the field rather than Newton progress, and refinement stops at that iterate. An exactly zero step stops at once. Nothing is left for the constant to scale.",
     "evidence": "At the base, git grep -n -w NEWTON_REFINE_CONVERGED_EPS finds only crates/gam-sae/src/encode.rs:86 (the declaration) and :1584 (its one read, the refine early exit). refine_certified_start has one caller, certify_with_basin_warmup, which both the batched and the per-row encodes reach. Not compiled or run locally."
+  },
+  {
+    "items": [
+      "crates/gam-math/src/jet_tower.rs:fn:ln_gamma_derivative_stack_order3"
+    ],
+    "reason": "#2899 test-only API: gam_math::jet_tower::ln_gamma_derivative_stack_order3 had no production caller. Its one outside user was the gam-models GAMLSS order-3 oracle helper o3_ln_gamma in the cfg(test) test_support module, which now reads the first four entries of ln_gamma_derivative_stack, the same four kernel calls, so the oracle values are bit-identical.",
+    "evidence": "git grep -n -w ln_gamma_derivative_stack_order3 over crates, src, tests, examples, bench, benches, python and gamfit finds its definition, the tetragamma doc line, the jet_tower derivative_stack_tests prefix test, and crates/gam-models/src/gamlss/test_support.rs (mod test_support is cfg(test) in gamlss.rs). Item list from source_removal_guard.py --base ef1e74ddd --head 3c10e63bd (job 579772, /scratch.global/sauer354/pool/prune-api-a/stack4.check.579772.log).",
+    "base": "edf3bcfa77d74d2599a9ea477ac8d4d8e48a515a"
   }
 ]

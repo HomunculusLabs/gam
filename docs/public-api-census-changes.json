@@ -2711,5 +2711,13 @@
     },
     "reason": "SPEC rules 5 and 23 (#2901 V22 slice 5b). The value-only LLT certificate no longer compares against a smooth spectral floor that no standard lane prices, so from_spd_with_smooth_logdet_agreement is renamed from_spd_with_logdet_agreement, and the floor helper spectral_epsilon_for_dim, which only that certificate called besides spectral_epsilon, is inlined into spectral_epsilon.",
     "evidence": "At the base, git grep -n finds from_spd_with_smooth_logdet_agreement called only from crates/gam-solve/src/reml/objective.rs and logdet_lane_agreement_2457_tests.rs, and spectral_epsilon_for_dim only from spectral_epsilon, the certificate and that test file. All are rewritten in this commit."
+  },
+  {
+    "removed": {
+      "crates/gam-math/src/jet_tower.rs::ln_gamma_derivative_stack_order3": 1
+    },
+    "reason": "#2899 test-only API: ln_gamma_derivative_stack_order3 is deleted; its only outside user, gam-models' cfg(test) order-3 oracle, reads ln_gamma_derivative_stack()[..4] instead, which is bit-identical.",
+    "evidence": "public_api_census.py --base ef1e74ddd --head 3c10e63bd reports this identity among the stack's removals (job 579772, /scratch.global/sauer354/pool/prune-api-a/stack4.check.579772.log).",
+    "base": "edf3bcfa77d74d2599a9ea477ac8d4d8e48a515a"
   }
 ]

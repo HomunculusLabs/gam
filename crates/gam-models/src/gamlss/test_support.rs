@@ -272,7 +272,10 @@ fn o3_powf(x: &O3, a: f64) -> O3 {
 }
 
 fn o3_ln_gamma(x: &O3) -> O3 {
-    x.compose_unary_with(gam_math::jet_tower::ln_gamma_derivative_stack_order3)
+    x.compose_unary_with(|v| {
+        let stack = gam_math::jet_tower::ln_gamma_derivative_stack(v);
+        [stack[0], stack[1], stack[2], stack[3]]
+    })
 }
 
 /// Observed η-space row NLL tower to third order, the order-3 sibling of

@@ -1048,15 +1048,6 @@ pub fn ln_gamma_derivative_stack_order2(x: f64) -> [f64; 3] {
     ]
 }
 
-pub fn ln_gamma_derivative_stack_order3(x: f64) -> [f64; 4] {
-    [
-        statrs::function::gamma::ln_gamma(x),
-        digamma_positive(x),
-        polygamma_positive::<1>(x),
-        polygamma_positive::<2>(x),
-    ]
-}
-
 pub(crate) fn digamma_derivative_stack(x: f64) -> [f64; 5] {
     [
         digamma_positive(x),
@@ -2276,11 +2267,9 @@ mod derivative_stack_tests {
         for &x in &[1.0e-8_f64, 0.5, 1.0, 2.0, 5.0, 20.0, 1.0e8] {
             let full = ln_gamma_derivative_stack(x);
             let ord2 = ln_gamma_derivative_stack_order2(x);
-            let ord3 = ln_gamma_derivative_stack_order3(x);
             assert_eq!(ord2[0], full[0], "order2[0] != full[0] at x={x}");
             assert_eq!(ord2[1], full[1], "order2[1] != full[1] at x={x}");
             assert_eq!(ord2[2], full[2], "order2[2] != full[2] at x={x}");
-            assert_eq!(&ord3, &full[..4], "order3 prefix differs at x={x}");
         }
     }
 
