@@ -885,8 +885,11 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_full_rank_whitening_2144
     let rho = anchor.rho;
     let cache = anchor.cache;
     let solver = DeflatedArrowSolver::plain(&cache);
+    let inv = term
+        .materialize_joint_inverse(&cache, &solver)
+        .expect("dense joint inverse");
     let gamma = term
-        .logdet_theta_adjoint(&rho, &cache, &solver)
+        .logdet_theta_adjoint_dense(&rho, &cache, &inv, false, false, None)
         .expect("Gamma");
     let h = 1.0e-5;
     let fd_stratum = anchor.stratum;
@@ -982,8 +985,11 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_ordered_beta_bernoulli_l
     let rho = anchor.rho;
     let cache = anchor.cache;
     let solver = DeflatedArrowSolver::plain(&cache);
+    let inv = term
+        .materialize_joint_inverse(&cache, &solver)
+        .expect("dense joint inverse");
     let gamma = term
-        .logdet_theta_adjoint(&rho, &cache, &solver)
+        .logdet_theta_adjoint_dense(&rho, &cache, &inv, false, false, None)
         .expect("Gamma");
     let h = 1.0e-5;
     let fd_stratum = anchor.stratum;
@@ -1072,8 +1078,11 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_ordered_beta_bernoulli_l
     let rho = anchor.rho;
     let cache = anchor.cache;
     let solver = DeflatedArrowSolver::plain(&cache);
+    let inv = term
+        .materialize_joint_inverse(&cache, &solver)
+        .expect("dense joint inverse");
     let gamma = term
-        .logdet_theta_adjoint(&rho, &cache, &solver)
+        .logdet_theta_adjoint_dense(&rho, &cache, &inv, false, false, None)
         .expect("Gamma");
     let h = 1.0e-5;
     let fd_stratum = anchor.stratum;
@@ -1206,8 +1215,11 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_fd_on_deflated_fixture_2330() {
     let rho = anchor.rho;
     let cache = anchor.cache;
     let solver = DeflatedArrowSolver::plain(&cache);
+    let inv = term
+        .materialize_joint_inverse(&cache, &solver)
+        .expect("dense joint inverse");
     let gamma = term
-        .logdet_theta_adjoint(&rho, &cache, &solver)
+        .logdet_theta_adjoint_dense(&rho, &cache, &inv, false, false, None)
         .expect("Gamma_joint");
 
     let h = 1.0e-5;
