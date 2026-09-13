@@ -6003,6 +6003,17 @@ impl SaeManifoldTerm {
         cache: &ArrowFactorCache,
         clamp: ArrayView1<'_, f64>,
     ) -> Result<Option<Vec<(Array2<f64>, Array1<f64>)>>, String> {
+        Ok(Self::beta_schur_clamp_basin_operands(cache, clamp)?
+            .map(|operands| Self::beta_schur_basin_row_weights(cache, clamp, &operands)))
+    }
+
+    /// The operands every reduced-Schur clamp-basin weight is built from: `G_i Q`
+    /// per row, `R` in the reduced-Schur eigenbasis, and each basin's eigen-index
+    /// with `1/λ̃_w`. `None` when the factor records no reduced-Schur clamp basin.
+    fn beta_schur_clamp_basin_operands(
+        cache: &ArrowFactorCache,
+        clamp: ArrayView1<'_, f64>,
+    ) -> Result<Option<(Vec<Array2<f64>>, Array2<f64>, Vec<(usize, f64)>)>, String> {
         let Some(spec) = cache.beta_schur_conditioning.as_ref() else {
             return Ok(None);
         };
@@ -6013,33 +6024,33 @@ impl SaeManifoldTerm {
             || spec.conditioning.len() != k
         {
             return Err(format!(
-                "beta_schur_clamp_basin_price_weights: the recorded reduced-Schur spectrum does \
-                 not match border width {k}"
+                "beta_schur_clamp_basin_operands: the recorded reduced-Schur spectrum does not \
+                 match border width {k}"
             ));
         }
-        let basins: Vec<usize> = (0..k)
+        let basins: Vec<(usize, f64)> = (0..k)
             .filter(|&w| {
                 spec.conditioning[w]
                     == gam_solve::arrow_schur::BetaSchurSpectralConditioning::ClampBasin
             })
+            .map(|w| (w, 1.0 / spec.cond_evals[w]))
             .collect();
         if basins.is_empty() {
             return Ok(None);
         }
         if clamp.len() != cache.delta_t_len() {
             return Err(format!(
-                "beta_schur_clamp_basin_price_weights: the clamp diagonal has {} entries for {} \
-                 latent coordinates",
+                "beta_schur_clamp_basin_operands: the clamp diagonal has {} entries for {} latent \
+                 coordinates",
                 clamp.len(),
                 cache.delta_t_len()
             ));
         }
         let basis = &spec.evecs;
         let raw = &spec.raw_evals;
-        let priced = &spec.cond_evals;
         let eigen_scale = raw
             .iter()
-            .chain(priced.iter())
+            .chain(spec.cond_evals.iter())
             .copied()
             .fold(0.0_f64, |scale, value| scale.max(value.abs()));
         let gap_threshold = eigen_gap_threshold(eigen_scale, k);
@@ -6055,7 +6066,7 @@ impl SaeManifoldTerm {
                 coupled.fill(0.0);
                 if !cache.apply_htbeta_row(row, basis.column(v), &mut coupled) {
                     return Err(format!(
-                        "beta_schur_clamp_basin_price_weights: H_tβ^({row}) apply failed"
+                        "beta_schur_clamp_basin_operands: H_tβ^({row}) apply failed"
                     ));
                 }
                 let solved = cholesky_solve_vector(factor, coupled.view());
@@ -6069,7 +6080,7 @@ impl SaeManifoldTerm {
         let mut clamp_rotated = Array2::<f64>::zeros((basins.len(), k));
         for (row, graph) in graphs.iter().enumerate() {
             let base = cache.row_offsets[row];
-            for (index, &w) in basins.iter().enumerate() {
+            for (index, &(w, _)) in basins.iter().enumerate() {
                 for v in 0..k {
                     let mut acc = 0.0_f64;
                     for s in 0..graph.nrows() {
@@ -6080,26 +6091,36 @@ impl SaeManifoldTerm {
             }
         }
         let mut response = Array2::<f64>::zeros((k, k));
-        for (index, &w) in basins.iter().enumerate() {
+        for (index, &(w, inv_price)) in basins.iter().enumerate() {
             for v in 0..k {
                 let denom = raw[w] - raw[v];
                 if v == w || denom.abs() <= gap_threshold {
                     continue;
                 }
-                let weight = clamp_rotated[[index, v]] / (priced[w] * denom);
+                let weight = clamp_rotated[[index, v]] * inv_price / denom;
                 response[[w, v]] += weight;
                 response[[v, w]] += weight;
             }
         }
-        let mut out = Vec::with_capacity(n_rows);
+        Ok(Some((graphs, response, basins)))
+    }
+
+    /// Per row `(weight, explicit)` from [`Self::beta_schur_clamp_basin_operands`],
+    /// as documented on [`Self::beta_schur_clamp_basin_price_weights`].
+    fn beta_schur_basin_row_weights(
+        cache: &ArrowFactorCache,
+        clamp: ArrayView1<'_, f64>,
+        operands: &(Vec<Array2<f64>>, Array2<f64>, Vec<(usize, f64)>),
+    ) -> Vec<(Array2<f64>, Array1<f64>)> {
+        let (graphs, response, basins) = operands;
+        let mut out = Vec::with_capacity(graphs.len());
         for (row, graph) in graphs.iter().enumerate() {
             let q = cache.row_dims[row];
             let base = cache.row_offsets[row];
             let factor = cache.undamped_factor(row);
-            let mut weight = graph.dot(&response).dot(&graph.t());
+            let mut weight = graph.dot(response).dot(&graph.t());
             let mut basin_gram = Array2::<f64>::zeros((q, q));
-            for &w in &basins {
-                let inv_price = 1.0 / priced[w];
+            for &(w, inv_price) in basins {
                 for a in 0..q {
                     for b in 0..q {
                         basin_gram[[a, b]] += inv_price * graph[[a, w]] * graph[[b, w]];
@@ -6122,7 +6143,49 @@ impl SaeManifoldTerm {
             weight -= &clamped_solve.t();
             out.push((weight, basin_gram.diag().to_owned()));
         }
-        Ok(Some(out))
+        out
+    }
+
+    /// #2915 — the θ-adjoint's border weights for the reduced-Schur clamp-basin
+    /// prices, from [`Self::beta_schur_clamp_basin_operands`].
+    ///
+    /// A θ also moves `H_tβ^(i)` and `H_ββ`, so `dS` gains
+    /// `dH_ββ + dH_βt,i G_i + G_iᵀ dH_tβ,i` and `dG_i` gains `−Φ_i⁻¹ dH_tβ,i`. Returns
+    /// per row `X_i = G_i Q R Qᵀ − Φ_i⁻¹ E_i G_i Ω` with `Ω = Σ_w w wᵀ / λ̃_w`, which
+    /// adds to the row's `(H⁻¹)_tβ` block wherever it contracts `dH_tβ,i`, and
+    /// `Q R Qᵀ`, which contracts a direct `dH_ββ`.
+    fn beta_schur_basin_border_weights(
+        cache: &ArrowFactorCache,
+        clamp: ArrayView1<'_, f64>,
+        operands: &(Vec<Array2<f64>>, Array2<f64>, Vec<(usize, f64)>),
+    ) -> Result<(Vec<Array2<f64>>, Array2<f64>), String> {
+        let Some(spec) = cache.beta_schur_conditioning.as_ref() else {
+            return Err(
+                "beta_schur_basin_border_weights: the factor records no reduced-Schur spectrum"
+                    .to_string(),
+            );
+        };
+        let (graphs, response, basins) = operands;
+        let basis = &spec.evecs;
+        let mut borders = Vec::with_capacity(graphs.len());
+        for (row, graph) in graphs.iter().enumerate() {
+            let q = cache.row_dims[row];
+            let base = cache.row_offsets[row];
+            let factor = cache.undamped_factor(row);
+            let mut rotated = graph.dot(response);
+            let mut rhs = Array1::<f64>::zeros(q);
+            for &(w, inv_price) in basins {
+                for s in 0..q {
+                    rhs[s] = clamp[base + s] * graph[[s, w]];
+                }
+                let solved = cholesky_solve_vector(factor, rhs.view());
+                for s in 0..q {
+                    rotated[[s, w]] -= inv_price * solved[s];
+                }
+            }
+            borders.push(rotated.dot(&basis.t()));
+        }
+        Ok((borders, basis.dot(response).dot(&basis.t())))
     }
 
     /// β-tier selected inverse `(H⁻¹)_ββ`, shared across rows (#932 FRONT C). On
@@ -7023,6 +7086,20 @@ impl SaeManifoldTerm {
         } else {
             None
         };
+        // #2915 — so does a reduced-Schur clamp-basin price, which also moves with the
+        // border and `H_ββ`; the selected inverse sees none of that motion.
+        let beta_basin = match clamp_price_inputs.as_ref() {
+            Some((clamp, _)) => {
+                match Self::beta_schur_clamp_basin_operands(cache, clamp.view())? {
+                    Some(operands) => Some((
+                        Self::beta_schur_basin_row_weights(cache, clamp.view(), &operands),
+                        Self::beta_schur_basin_border_weights(cache, clamp.view(), &operands)?,
+                    )),
+                    None => None,
+                }
+            }
+            None => None,
+        };
         // Threshold-gate sparsity strength for the assignment-prior H-diagonal
         // derivative (#1006/#1556): the ThresholdGate penalty differentiates
         // `λ_sparse`, every other assignment mode contributes zero. Same binding
@@ -7152,7 +7229,7 @@ impl SaeManifoldTerm {
             // the SPECTRALLY CONDITIONED row block, so these are the same objects the
             // dense `selected_inverse_row_blocks` returns — including on a deflated row
             // (#2712; see `row_selected_inverse_from_probes`).
-            let (inv_vv, inv_vbeta) = row_selected_inverse_from_probes(
+            let (mut inv_vv, mut inv_vbeta) = row_selected_inverse_from_probes(
                 cache,
                 row,
                 probes,
@@ -7160,6 +7237,10 @@ impl SaeManifoldTerm {
                 true,
                 "logdet_theta_adjoint_from_probes",
             )?;
+            if let Some((row_weights, (border_weights, _))) = beta_basin.as_ref() {
+                inv_vv += &row_weights[row].0;
+                inv_vbeta += &border_weights[row];
+            }
 
             // Per-row UNIT-stiffness deflated directions. `inv_vv` above is the
             // DEFLATED inverse (it assigns `1/λ̃ = 1` to each `vᵢ`), so every
@@ -7268,6 +7349,22 @@ impl SaeManifoldTerm {
                     r_probe.push(r_l);
                 }
             }
+            // The direct `H_ββ` leg of the reduced-Schur basin prices contracts `QRQᵀ`
+            // against `∂H_ββ/∂θ_w = Σ_c (∂b_c/∂θ_w b_cᵀ + b_c ∂b_cᵀ/∂θ_w)`, so the row's
+            // border jets `b_c` are folded through `QRQᵀ` once.
+            let beta_fold = match beta_basin.as_ref() {
+                Some((_, (_, beta_weight))) if bjet_len > 0 => {
+                    let mut coefficients = Array2::<f64>::zeros((bjet_len, k_border));
+                    for (beta_pos, channel) in border.iter().enumerate() {
+                        let bj = jets.beta(beta_pos);
+                        for c in 0..bjet_len {
+                            coefficients[[c, channel.index]] += bj[c];
+                        }
+                    }
+                    Some(coefficients.dot(beta_weight))
+                }
+                _ => None,
+            };
 
             let softmax_adjoint_row: Option<(&[f64], f64, f64, f64)> =
                 match (softmax_dense_adjoint, self.assignment.mode) {
@@ -7424,6 +7521,12 @@ impl SaeManifoldTerm {
                     gamma += explicit[w] * clamp_dt[base + w]
                         + (response * &deflated_base_dh_mat).sum();
                 }
+                if let (Some((row_weights, _)), Some((_, clamp_dt))) =
+                    (beta_basin.as_ref(), clamp_price_inputs.as_ref())
+                {
+                    // The reduced-Schur basin prices read the same clamp θ-diagonal.
+                    gamma += row_weights[row].1[w] * clamp_dt[base + w];
+                }
                 // t–β block: reuse the dense contraction with the reconstructed inv_vβ.
                 for a in 0..q {
                     for (beta_pos, channel) in border.iter().enumerate() {
@@ -7462,6 +7565,14 @@ impl SaeManifoldTerm {
                             }
                         }
                         gamma += inv_m * (sae_dot(&rd_l, &p_probe[l]) + sae_dot(&r_probe[l], &q_l));
+                    }
+                }
+                if let Some(fold) = beta_fold.as_ref() {
+                    for (beta_pos, channel) in border.iter().enumerate() {
+                        let bd = jets.beta_deriv(w, beta_pos);
+                        for c in 0..bjet_len {
+                            gamma += 2.0 * bd[c] * fold[[c, channel.index]];
+                        }
                     }
                 }
                 gamma_t[base + w] = gamma;
@@ -7526,6 +7637,23 @@ impl SaeManifoldTerm {
                 self.exact_decoder_prior_theta_pair_add(
                     cache, &prepared, solved.view(), probe.view(), inv_m, &mut gamma_beta,
                 )?;
+            }
+            if let Some((_, (_, beta_weight))) = beta_basin.as_ref() {
+                // The reduced-Schur basin prices contract `QRQᵀ` against the decoder
+                // prior's own `∂H_ββ/∂β`.
+                let mut unit = Array1::<f64>::zeros(k_border);
+                for col in 0..k_border {
+                    unit[col] = 1.0;
+                    self.exact_decoder_prior_theta_pair_add(
+                        cache,
+                        &prepared,
+                        beta_weight.column(col),
+                        unit.view(),
+                        1.0,
+                        &mut gamma_beta,
+                    )?;
+                    unit[col] = 0.0;
+                }
             }
         }
         if let Some(channels) = ordered_beta_bernoulli_channels.as_ref() {
