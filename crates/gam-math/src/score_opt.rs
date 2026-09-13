@@ -4705,10 +4705,13 @@ mod tests {
     #[test]
     fn strict_concavity_certifies_the_quintic_scan_optimum_at_score_resolution() {
         // The terminal certificate from #2790, seed 0 at n=100. Its score
-        // range is deliberately wider than pairwise evaluator error, so a
-        // value-flat test cannot close this cell. Strict concavity says much
+        // range is deliberately wider than pairwise evaluator error, so the
+        // value diameter cannot close this cell. Strict concavity says much
         // more: despite cancellation in the derivative enclosure, the maximum
-        // can improve on the represented point by only g^2/(2 mu).
+        // can improve on the represented point by only g^2/(2 mu). The
+        // derivative range also bounds the motion across the 6.1e-4-wide cell
+        // below the pairwise error, so resolution_flat_region retires it by
+        // that bound rather than by the diameter (#2902 row 3).
         let left = SearchSample {
             sample: ScoreSample {
                 x: -12.105_374_438_144_967,
@@ -4750,9 +4753,19 @@ mod tests {
             curvature: ClosedInterval::new(-2.2666, -0.2358),
         };
 
+        let diameter = next_up(enclosure.score.value.hi - enclosure.score.value.lo);
+        let pairwise_error = next_up(2.0 * evaluation_error);
         assert!(
-            resolution_flat_region(SearchNode { left, right }, enclosure).is_none(),
+            diameter > pairwise_error,
             "fixture premise: the full score diameter exceeds pairwise evaluation error"
+        );
+        let flat_by_derivative = resolution_flat_region(SearchNode { left, right }, enclosure)
+            .expect("the derivative range bounds the motion across the cell inside 2*rho");
+        assert!(
+            flat_by_derivative.max_score_gap <= flat_by_derivative.score_resolution
+                && flat_by_derivative.max_score_gap < diameter,
+            "the flat verdict must come from the derivative bound, not the diameter: \
+             {flat_by_derivative:?}"
         );
         let (flat, maximum) = score_resolved_concave_maximum(
             SearchNode { left, right },
