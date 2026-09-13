@@ -255,6 +255,85 @@ fn multinomial_recovers_decision_boundary_on_held_out_split() {
     let gam_acc = accuracy(&probs_test, &test_idx);
     let gam_ll = log_loss(&probs_test, &test_idx);
 
+    // ---- structural identity on TRAIN rows (internal consistency only) ------
+    // The stored unpenalized deviance must equal an independent softmax
+    // recompute `-2·Σ log p̂` over the training rows — no penalty leakage, no
+    // permuted/dropped reference class. This is a bookkeeping invariant, not a
+    // peer-tool comparison.
+    //
+    // `p̂` is the MODE's own `softmax(η̂)`, the probability `−2 · log L(β̂)` is
+    // defined against, rebuilt from the payload's training design and active
+    // coefficients with the reference class's `η = 0` last.
+    // `predict_multinomial_formula` publishes the posterior mean `E[softmax(η)]`
+    // (gam#2612), a different estimand, so its log-likelihood is not the stored
+    // deviance's to within any roundoff bar.
+    let probs_train = {
+        let design = model.training_design().expect("training design");
+        let beta = model.coefficients_active().expect("active coefficients");
+        let eta = design.dot(&beta);
+        let active = eta.ncols();
+        let mut probs = Array2::<f64>::zeros((eta.nrows(), active + 1));
+        for (row, mut out) in eta.rows().into_iter().zip(probs.rows_mut()) {
+            let shift = row.iter().copied().fold(0.0_f64, f64::max);
+            let partition =
+                (-shift).exp() + row.iter().map(|&value| (value - shift).exp()).sum::<f64>();
+            for (class, &value) in row.iter().enumerate() {
+                out[class] = (value - shift).exp() / partition;
+            }
+            out[active] = (-shift).exp() / partition;
+        }
+        probs
+    };
+    assert_eq!(probs_train.nrows(), train.len(), "saved training design rows");
+    let mut loglik_train = 0.0_f64;
+    for (i, o) in train.iter().enumerate() {
+        let c = class_index(&o.label);
+        let p = probs_train[[i, c]];
+        assert!(
+            p.is_finite() && p > 0.0,
+            "train row {i}: realized-class probability {p} non-positive/non-finite"
+        );
+        loglik_train += p.ln();
+    }
+    let deviance_recompute = -2.0 * loglik_train;
+    let dev_abs = (model.deviance - deviance_recompute).abs();
+    let dev_rel = dev_abs / deviance_recompute.abs().max(1.0);
+
+    // gam's own held-out quality and bookkeeping are printed and judged BEFORE
+    // anything that needs another tool. A comparator that is missing, or cannot
+    // fit this fixture at all, costs the COMPARISON, not the tool-independent
+    // metrics: on these completely separated hard-argmax labels mgcv's
+    // `gam.fit5` stops with "non finite values in Hessian" (pool job 646273),
+    // and that used to take gam's numbers down with it (#1082).
+    eprintln!(
+        "[multinomial-quality] n_train={} n_test={} K={}\n  \
+         gam:  acc={gam_acc:.4} logloss={gam_ll:.4}\n  \
+         stored-deviance identity: abs={dev_abs:.3e} rel={dev_rel:.3e}",
+        train.len(),
+        test.len(),
+        model.class_levels.len(),
+    );
+
+    // ── OBJECTIVE PASS/FAIL ────────────────────────────────────────────────
+    // 1. Absolute truth-recovery bars on the held-out split.
+    assert!(
+        gam_acc >= 0.90,
+        "held-out accuracy {gam_acc:.4} below the 0.90 truth-recovery bar \
+         (the Bayes-optimal boundary is learnable to ~1.0)"
+    );
+    assert!(
+        gam_ll <= 0.45,
+        "held-out multinomial log-loss {gam_ll:.4} nats/row above the 0.45 bar \
+         (model is mis-calibrated even if argmax accuracy is acceptable)"
+    );
+
+    // 2. Structural bookkeeping invariant (internal consistency).
+    assert!(
+        dev_abs < 1e-8 && dev_rel < 1e-10,
+        "stored deviance disagrees with independent softmax recompute: \
+         abs={dev_abs:.3e} rel={dev_rel:.3e} (penalty leak / permuted reference class?)"
+    );
+
     // ---- mature baseline: mgcv multinom on the SAME train/test rows ---------
     // Score mgcv on the identical held-out rows. mgcv returns, for each row, the
     // probability of class index 1..K-1 (reference = first level); we rebuild
@@ -357,75 +436,11 @@ emit("mgcv_logloss", ll)
     let reference = run_r(&columns, r_body);
     let mgcv_acc = reference.scalar("mgcv_acc");
     let mgcv_ll = reference.scalar("mgcv_logloss");
-
-    // ---- structural identity on TRAIN rows (internal consistency only) ------
-    // The stored unpenalized deviance must equal an independent softmax
-    // recompute `-2·Σ log p̂` over the training rows — no penalty leakage, no
-    // permuted/dropped reference class. This is a bookkeeping invariant, not a
-    // peer-tool comparison.
-    //
-    // `p̂` is the MODE's own `softmax(η̂)`, the probability `−2 · log L(β̂)` is
-    // defined against, rebuilt from the payload's training design and active
-    // coefficients with the reference class's `η = 0` last.
-    // `predict_multinomial_formula` publishes the posterior mean `E[softmax(η)]`
-    // (gam#2612), a different estimand, so its log-likelihood is not the stored
-    // deviance's to within any roundoff bar.
-    let probs_train = {
-        let design = model.training_design().expect("training design");
-        let beta = model.coefficients_active().expect("active coefficients");
-        let eta = design.dot(&beta);
-        let active = eta.ncols();
-        let mut probs = Array2::<f64>::zeros((eta.nrows(), active + 1));
-        for (row, mut out) in eta.rows().into_iter().zip(probs.rows_mut()) {
-            let shift = row.iter().copied().fold(0.0_f64, f64::max);
-            let partition =
-                (-shift).exp() + row.iter().map(|&value| (value - shift).exp()).sum::<f64>();
-            for (class, &value) in row.iter().enumerate() {
-                out[class] = (value - shift).exp() / partition;
-            }
-            out[active] = (-shift).exp() / partition;
-        }
-        probs
-    };
-    assert_eq!(probs_train.nrows(), train.len(), "saved training design rows");
-    let mut loglik_train = 0.0_f64;
-    for (i, o) in train.iter().enumerate() {
-        let c = class_index(&o.label);
-        let p = probs_train[[i, c]];
-        assert!(
-            p.is_finite() && p > 0.0,
-            "train row {i}: realized-class probability {p} non-positive/non-finite"
-        );
-        loglik_train += p.ln();
-    }
-    let deviance_recompute = -2.0 * loglik_train;
-    let dev_abs = (model.deviance - deviance_recompute).abs();
-    let dev_rel = dev_abs / deviance_recompute.abs().max(1.0);
-
     eprintln!(
-        "[multinomial-quality] n_train={} n_test={} K={}\n  \
-         gam:  acc={gam_acc:.4} logloss={gam_ll:.4}\n  \
-         mgcv: acc={mgcv_acc:.4} logloss={mgcv_ll:.4}\n  \
-         stored-deviance identity: abs={dev_abs:.3e} rel={dev_rel:.3e}",
-        n_train,
-        test.len(),
-        model.class_levels.len(),
+        "[multinomial-quality] n_train={n_train} mgcv: acc={mgcv_acc:.4} logloss={mgcv_ll:.4}"
     );
 
-    // ── OBJECTIVE PASS/FAIL ────────────────────────────────────────────────
-    // 1. Absolute truth-recovery bars on the held-out split.
-    assert!(
-        gam_acc >= 0.90,
-        "held-out accuracy {gam_acc:.4} below the 0.90 truth-recovery bar \
-         (the Bayes-optimal boundary is learnable to ~1.0)"
-    );
-    assert!(
-        gam_ll <= 0.45,
-        "held-out multinomial log-loss {gam_ll:.4} nats/row above the 0.45 bar \
-         (model is mis-calibrated even if argmax accuracy is acceptable)"
-    );
-
-    // 2. Match-or-beat the mature baseline on the SAME objective metric.
+    // 3. Match-or-beat the mature baseline on the SAME objective metric.
     assert!(
         gam_acc >= mgcv_acc - 0.02,
         "gam held-out accuracy {gam_acc:.4} trails mgcv {mgcv_acc:.4} by more than 0.02"
@@ -433,12 +448,5 @@ emit("mgcv_logloss", ll)
     assert!(
         gam_ll <= mgcv_ll * 1.10,
         "gam held-out log-loss {gam_ll:.4} exceeds mgcv {mgcv_ll:.4} × 1.10"
-    );
-
-    // 3. Structural bookkeeping invariant (internal consistency).
-    assert!(
-        dev_abs < 1e-8 && dev_rel < 1e-10,
-        "stored deviance disagrees with independent softmax recompute: \
-         abs={dev_abs:.3e} rel={dev_rel:.3e} (penalty leak / permuted reference class?)"
     );
 }
