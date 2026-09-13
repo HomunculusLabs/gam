@@ -1,0 +1,125 @@
+//! The Jeffreys/Firth arming lifecycle (#979, Jeffreys ruling (b)): fit a
+//! family's unarmed objective first, and arm its prior once, only on typed
+//! evidence from that fit.
+
+use super::*;
+
+use gam_problem::jeffreys_arming::JeffreysArmingEvidence;
+use gam_solve::constrained_posterior::ConePropernessEvidence;
+use gam_solve::model_types::UnifiedFitResult;
+
+/// A family whose Jeffreys/Firth prior arms on evidence rather than by
+/// declaration.
+///
+/// [`CustomFamily::joint_jeffreys_term_required`] reports whether THIS instance
+/// is armed. A family with a separation or under-identification regime
+/// implements this trait so the lifecycle can build both members, and routes its
+/// fit through [`fit_custom_family_arming_on_evidence`].
+pub trait JeffreysArming: CustomFamily + Clone {
+    /// This family with its Jeffreys/Firth prior armed (`true`) or disarmed
+    /// (`false`).
+    fn with_jeffreys_armed(&self, armed: bool) -> Self;
+}
+
+/// Fit `family` unarmed, and refit it armed once, only when that fit's own
+/// evidence says the unarmed objective has no finite stationary point with
+/// positive-definite information on the identified span.
+///
+/// - An unarmed fit that certifies with no evidence is returned as it is, so a
+///   clean fit IS the unarmed objective's fit.
+/// - A refusal carrying [`CustomFamilyError::jeffreys_arming_evidence`] arms the
+///   refit from the caller's specs. There is no certified mode to start from. A
+///   refusal without evidence is returned unchanged.
+/// - A certified fit whose cone-truncated posterior is proved improper arms the
+///   refit, warm-started from the unarmed fit's coefficients and smoothing
+///   strengths.
+///
+/// The armed fit publishes its evidence on
+/// `FitArtifacts::jeffreys_arming_evidence`.
+pub fn fit_custom_family_arming_on_evidence<F: JeffreysArming + Send + Sync + 'static>(
+    family: &F,
+    specs: &[ParameterBlockSpec],
+    options: &BlockwiseFitOptions,
+) -> Result<UnifiedFitResult, CustomFamilyError> {
+    let (evidence, warm_specs) =
+        match fit_custom_family(&family.with_jeffreys_armed(false), specs, options) {
+            Ok(fit) => match improper_cone_posterior_evidence(&fit) {
+                None => return Ok(fit),
+                Some(evidence) => (evidence, Some(warm_started_specs(specs, &fit)?)),
+            },
+            Err(refusal) => match refusal.jeffreys_arming_evidence() {
+                None => return Err(refusal),
+                Some(evidence) => (evidence, None),
+            },
+        };
+    log::info!(
+        "[custom-family] arming the Jeffreys/Firth prior on the unarmed fit's evidence: \
+         {evidence:?}; warm start from the unarmed mode: {}",
+        warm_specs.is_some(),
+    );
+    let mut armed = fit_custom_family(
+        &family.with_jeffreys_armed(true),
+        warm_specs.as_deref().unwrap_or(specs),
+        options,
+    )?;
+    armed.artifacts.jeffreys_arming_evidence = Some(evidence);
+    Ok(armed)
+}
+
+/// The face evidence a certified fit carries: its constrained mode's
+/// cone-truncated posterior proved improper (#979).
+fn improper_cone_posterior_evidence(fit: &UnifiedFitResult) -> Option<JeffreysArmingEvidence> {
+    let ConePropernessEvidence::Certificate(certificate) = &fit.posterior_moment_decline()?.properness
+    else {
+        return None;
+    };
+    (certificate.is_proper() == Some(false)).then(|| {
+        JeffreysArmingEvidence::ImproperConePosterior {
+            ambient_negative: certificate.ambient_inertia.negative,
+            reduced_negative: certificate.reduced_inertia.negative,
+            lineality_negative: certificate.lineality_inertia.negative,
+            copositive_minimum: certificate.copositive_minimum,
+        }
+    })
+}
+
+/// The caller's specs, seeded with a certified fit's raw-coordinate coefficients
+/// and per-penalty smoothing strengths.
+fn warm_started_specs(
+    specs: &[ParameterBlockSpec],
+    fit: &UnifiedFitResult,
+) -> Result<Vec<ParameterBlockSpec>, CustomFamilyError> {
+    if fit.blocks.len() != specs.len() {
+        return Err(CustomFamilyError::DimensionMismatch {
+            reason: format!(
+                "Jeffreys arming warm start: the unarmed fit has {} blocks, the specs {}",
+                fit.blocks.len(),
+                specs.len()
+            ),
+        });
+    }
+    specs
+        .iter()
+        .zip(&fit.blocks)
+        .map(|(spec, block)| {
+            if block.beta.len() != spec.design.ncols() || block.lambdas.len() != spec.penalties.len()
+            {
+                return Err(CustomFamilyError::DimensionMismatch {
+                    reason: format!(
+                        "Jeffreys arming warm start: block '{}' fitted {} coefficients and {} \
+                         strengths, its spec has {} columns and {} penalties",
+                        spec.name,
+                        block.beta.len(),
+                        block.lambdas.len(),
+                        spec.design.ncols(),
+                        spec.penalties.len()
+                    ),
+                });
+            }
+            let mut warm = spec.clone();
+            warm.initial_beta = Some(block.beta.clone());
+            warm.initial_log_lambdas = block.lambdas.mapv(f64::ln);
+            Ok(warm)
+        })
+        .collect()
+}

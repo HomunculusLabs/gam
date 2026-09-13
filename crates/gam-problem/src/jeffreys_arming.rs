@@ -49,6 +49,18 @@ pub enum JeffreysArmingEvidence {
     /// A first-order stationary point whose exact penalized Hessian has
     /// resolvable negative curvature.
     StrictSaddle { stationarity_residual: f64 },
+    /// The fit certified a constrained mode whose cone-truncated posterior is
+    /// proved improper: the precision curves down along a feasible direction
+    /// that leaves the active face. The counts are the negative inertia of the
+    /// ambient precision `H`, of the reduced precision `M` on the constraint
+    /// normals, and of `ZᵀHZ` on the lineality space. `copositive_minimum` is
+    /// `min wᵀMw` over the simplex when the certificate computed it.
+    ImproperConePosterior {
+        ambient_negative: usize,
+        reduced_negative: usize,
+        lineality_negative: usize,
+        copositive_minimum: Option<f64>,
+    },
 }
 
 impl CustomFamilyError {

@@ -6190,6 +6190,7 @@ mod tests {
                 joint_log_lambdas: None,
                 firth_bias_reduction: false,
                 covariance_declined: None,
+                jeffreys_arming_evidence: None,
             },
             inner_cycles: 0,
         })

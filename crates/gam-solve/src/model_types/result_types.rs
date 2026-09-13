@@ -2415,6 +2415,13 @@ pub struct FitArtifacts {
     /// (#2245 finding 16). `false` for fits that never engaged Firth.
     #[serde(default)]
     pub firth_bias_reduction: bool,
+    /// The typed evidence on which the custom-family arming lifecycle armed this
+    /// fit's Jeffreys/Firth prior (#979). `None` when the lifecycle did not arm
+    /// it, either because the unarmed objective certified or because the fit
+    /// did not run through the lifecycle. Serialized, so a saved model says
+    /// which objective its coefficients are the mode of, and why.
+    #[serde(default)]
+    pub jeffreys_arming_evidence: Option<gam_problem::jeffreys_arming::JeffreysArmingEvidence>,
     /// Set when this fit could have published a coefficient covariance and
     /// deliberately did not (gam#2718). `None` is the ordinary case and carries
     /// NO claim either way: a covariance may be present, or absent because it
@@ -2562,6 +2569,7 @@ impl std::fmt::Debug for FitArtifacts {
                 &self.joint_log_lambdas.as_ref().map(|v| v.len()),
             )
             .field("covariance_declined", &self.covariance_declined)
+            .field("jeffreys_arming_evidence", &self.jeffreys_arming_evidence)
             .finish()
     }
 }

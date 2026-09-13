@@ -19,7 +19,8 @@ use gam_terms::basis::{
 use gam_custom_family::{
     BlockEffectiveJacobian, BlockGeometryDirectionalDerivative, BlockWorkingSet,
     BlockwiseFitOptions, CustomFamily, FamilyEvaluation, FamilyLinearizationState,
-    ParameterBlockSpec, ParameterBlockState, PenaltyMatrix, fit_custom_family,
+    JeffreysArming, ParameterBlockSpec, ParameterBlockState, PenaltyMatrix,
+    fit_custom_family_arming_on_evidence,
 };
 
 use gam_model_kernels::bernoulli_link::{

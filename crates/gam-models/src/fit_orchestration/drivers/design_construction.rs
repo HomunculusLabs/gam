@@ -705,6 +705,10 @@ struct BoundedLinearFamily {
     designzeroed: Array2<f64>,
     offset: Array1<f64>,
     bounded_terms: Vec<BoundedLinearTermMeta>,
+    /// Whether this member's Jeffreys/Firth prior is armed. A fit arms it only
+    /// on the unarmed fit's own evidence, through
+    /// `fit_custom_family_arming_on_evidence` (#979).
+    jeffreys_armed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -2194,12 +2198,21 @@ impl crate::custom_family::JeffreysThirdInformationDerivative for BoundedLinearF
     }
 }
 
+impl JeffreysArming for BoundedLinearFamily {
+    fn with_jeffreys_armed(&self, armed: bool) -> Self {
+        Self {
+            jeffreys_armed: armed,
+            ..self.clone()
+        }
+    }
+}
+
 impl CustomFamily for BoundedLinearFamily {
-    // Preserve the pre-gam#1395 behavior: the trait default flipped to OFF (the
-    // flat-prior exact-Newton objective carries no Jeffreys term), so families
-    // that historically armed the term by default opt back in explicitly.
+    // A bounded coefficient can run to its bound on separated data. The
+    // self-limiting Jeffreys/Firth curvature bounds it there, but it is armed
+    // only when the unarmed fit proves it is needed (#979).
     fn joint_jeffreys_term_required(&self) -> bool {
-        true
+        self.jeffreys_armed
     }
 
     fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
@@ -3076,6 +3089,7 @@ fn fit_bounded_term_collection_with_design(
         designzeroed: designzeroed.clone(),
         offset: offset.to_owned(),
         bounded_terms: bounded_terms.clone(),
+        jeffreys_armed: true,
     };
     let blockspec = ParameterBlockSpec {
         name: "eta".to_string(),
@@ -3112,7 +3126,7 @@ fn fit_bounded_term_collection_with_design(
         stacked_design: None,
         stacked_offset: None,
     };
-    let fit = fit_custom_family(
+    let fit = fit_custom_family_arming_on_evidence(
         &family_adapter,
         &[blockspec],
         &BlockwiseFitOptions {

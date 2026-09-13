@@ -862,6 +862,7 @@ pub fn survival_fit_from_parts(
             // Survival location-scale never reaches the BMS generated-regressor
             // seam, so it never withholds a covariance it could have published.
             covariance_declined: None,
+            jeffreys_arming_evidence: None,
         },
         inner_cycles: 0,
     })

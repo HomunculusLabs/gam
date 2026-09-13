@@ -147,6 +147,7 @@ mod covariance;
 mod fit;
 mod inner_blockwise_fit;
 mod jeffreys;
+mod jeffreys_arming;
 mod joint_derivatives;
 mod joint_newton;
 mod outer_objective;
@@ -172,6 +173,7 @@ pub use covariance::{
 };
 pub use fit::*;
 pub(crate) use inner_blockwise_fit::*;
+pub use jeffreys_arming::{JeffreysArming, fit_custom_family_arming_on_evidence};
 pub(crate) use jeffreys::*;
 pub(crate) use joint_derivatives::*;
 pub use joint_newton::*;
