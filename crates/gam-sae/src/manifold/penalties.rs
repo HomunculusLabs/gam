@@ -212,6 +212,15 @@ pub(crate) struct DecoderPriorBorderRemainderOp {
     prepared: PreparedDecoderPriorBetaCurvature,
     projection: Option<crate::frames::FrameProjection>,
     diagonal: std::sync::OnceLock<Array1<f64>>,
+    /// #2731 — the operator's dense `border_dim × border_dim` form, built once per
+    /// operator. Each column is a lifted exact-and-majorizer decoder-prior hvp pair at
+    /// the full β width, and the plan and projection those read never change after
+    /// construction. `shifted_exact_newton_polish_trials` builds one exact-A system per
+    /// polish step and every trial's Direct solve densifies its penalty operator, so
+    /// the trials of one step share this block. Job 623163 (`9908828ca`, the #2731
+    /// cell, border 288) spent 16.1–17.5 s in each polish trial, against 0.86–1.12 s
+    /// in job 605564 at `b7945fab1`, before this remainder was composed.
+    dense: std::sync::OnceLock<Array2<f64>>,
 }
 
 impl DecoderPriorBorderRemainderOp {
@@ -281,11 +290,23 @@ impl gam_solve::arrow_schur::BetaPenaltyOp for DecoderPriorBorderRemainderOp {
     }
 
     fn to_dense(&self) -> Array2<f64> {
-        let mut dense = Array2::<f64>::zeros((self.border_dim, self.border_dim));
-        for col in 0..self.border_dim {
-            dense.column_mut(col).assign(&self.column(col));
-        }
-        dense
+        self.dense
+            .get_or_init(|| {
+                use rayon::prelude::*;
+                // The columns are independent applies of one immutable plan, so they
+                // fan across the pool and are written back in column order, the same
+                // block the serial loop built.
+                let columns: Vec<Array1<f64>> = (0..self.border_dim)
+                    .into_par_iter()
+                    .map(|col| self.column(col))
+                    .collect();
+                let mut dense = Array2::<f64>::zeros((self.border_dim, self.border_dim));
+                for (col, column) in columns.iter().enumerate() {
+                    dense.column_mut(col).assign(column);
+                }
+                dense
+            })
+            .clone()
     }
 
     fn fingerprint(&self, hasher: &mut gam_runtime::warm_start::Fingerprinter) {
@@ -2352,6 +2373,7 @@ impl SaeManifoldTerm {
             prepared,
             projection,
             diagonal: std::sync::OnceLock::new(),
+            dense: std::sync::OnceLock::new(),
         }))
     }
 
