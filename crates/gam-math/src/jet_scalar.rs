@@ -4690,7 +4690,7 @@ pub struct Order2Lane<L: Lane, const K: usize> {
 }
 
 /// The 4-rows-per-pass batched order-≤2 scalar (`wide::f64x4` lanes).
-pub type Order2Batch<const K: usize> = Order2Lane<wide::f64x4, K>;
+pub(crate) type Order2Batch<const K: usize> = Order2Lane<wide::f64x4, K>;
 
 impl<L: Lane, const K: usize> Order2Lane<L, K> {
     /// A constant: value `c` in every channel-zero slot.
