@@ -817,6 +817,74 @@ fn survival_location_scale_outer_link_shape_gradient_matches_finite_difference_s
             base.gradient[k], warm.gradient[k]
         );
     }
+    // Component by component. The base point is evaluated again with the rho outer
+    // audit armed, which records every rho coordinate's gradient split into the
+    // criterion's parts; each ± value probe is armed for the criterion's four value
+    // components. Each part is printed beside the central difference of its own
+    // component before anything is asserted, so the misdifferentiated component is
+    // named. The part count is printed first: an audit that records nothing shows.
+    {
+        use gam_solve::estimate::outer_eval_capture::{enable_rho_outer_audit, take_rho_outer_audit};
+        enable_rho_outer_audit();
+        crate::custom_family::evaluate_custom_family_joint_hyper_owned(
+            &family_at(epsilon0, log_delta0),
+            &specs,
+            &options,
+            &rho,
+            &layout_at(epsilon0, log_delta0),
+            Some(&base.warm_start),
+            gam_problem::EvalMode::ValueAndGradient,
+        )
+        .expect("audited exact-joint LAML value and gradient at the base point");
+        let audit = take_rho_outer_audit().expect("rho outer audit armed");
+        eprintln!(
+            "[2695] audit: {} rho gradient parts recorded, criterion recorded: {}",
+            audit.parts.len(),
+            audit.criterion.is_some()
+        );
+        let components_at = |rho_probe: &Array1<f64>| {
+            enable_rho_outer_audit();
+            value_at(epsilon0, log_delta0, rho_probe);
+            take_rho_outer_audit()
+                .and_then(|probe_audit| probe_audit.criterion)
+                .map(|(cost, components)| (cost, components))
+        };
+        let step = 1e-4;
+        for part in &audit.parts {
+            let k = part.index;
+            if k >= rho.len() {
+                continue;
+            }
+            let mut plus = rho.clone();
+            plus[k] += step;
+            let mut minus = rho.clone();
+            minus[k] -= step;
+            match (components_at(&plus), components_at(&minus)) {
+                (Some((cost_plus, plus_components)), Some((cost_minus, minus_components))) => {
+                    let fd = |idx: usize| (plus_components[idx] - minus_components[idx]) / (2.0 * step);
+                    let analytic_kkt = part.total - (part.fixed_beta + part.logdet_h + part.logdet_s);
+                    eprintln!(
+                        "[2695] rho {k}: total analytic={:.9e} fd={:.9e}; fixed_beta analytic={:.9e} \
+                         fd={:.9e}; logdet_h analytic={:.9e} (frozen {:.9e}, mode response {:.9e}) \
+                         fd={:.9e}; logdet_s analytic={:.9e} fd={:.9e}; kkt analytic={:.9e} fd={:.9e}",
+                        part.total,
+                        (cost_plus - cost_minus) / (2.0 * step),
+                        part.fixed_beta,
+                        fd(0),
+                        part.logdet_h,
+                        part.frozen_logdet_h,
+                        part.mode_response_logdet_h,
+                        fd(1),
+                        part.logdet_s,
+                        fd(2),
+                        analytic_kkt,
+                        fd(3)
+                    );
+                }
+                _ => eprintln!("[2695] rho {k}: a probe recorded no criterion components"),
+            }
+        }
+    }
     let shape_difference = |axis: usize, h: f64| {
         let (plus, minus) = if axis == 0 {
             ((epsilon0 + h, log_delta0), (epsilon0 - h, log_delta0))
