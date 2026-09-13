@@ -113,7 +113,7 @@ crates/gam-linalg/src/matrix/mod.rs	as_dense_cow	restored-in-place
 crates/gam-linalg/src/matrix/mod.rs	compute_xtwy	restored-in-place
 crates/gam-linalg/src/matrix/mod.rs	is_materialized_dense	retired-no-product-user
 crates/gam-linalg/src/matrix/mod.rs	is_operator_backed	retired-no-product-user
-crates/gam-linalg/src/matrix/mod.rs	quadratic_form_diag	restored-in-place
+crates/gam-linalg/src/matrix/mod.rs	quadratic_form_diag	retired-no-product-user
 crates/gam-linalg/src/matrix/mod.rs	should_use_matrix_free_pcg	retired-by-later-deletion:b66b773539
 crates/gam-linalg/src/matrix/mod.rs	solve_system_matrix_free_pcg	retired-by-later-deletion:b66b773539
 crates/gam-linalg/src/matrix/mod.rs	solve_system_matrix_free_pcg_with_info	retired-by-later-deletion:b66b773539

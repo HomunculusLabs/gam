@@ -4563,11 +4563,6 @@ impl DenseRightProductView<'_> {
         }
         Ok(out)
     }
-
-    pub fn quadratic_form_diag(&self, middle: &Array2<f64>) -> Result<Array1<f64>, String> {
-        let dense = self.materialize();
-        DesignMatrix::Dense(DenseDesignMatrix::from(dense)).quadratic_form_diag(middle)
-    }
 }
 
 impl LinearOperator for EmbeddedColumnBlock<'_> {
@@ -4645,17 +4640,6 @@ impl EmbeddedColumnBlock<'_> {
         out.slice_mut(ndarray::s![self.global_range.clone()])
             .assign(&local);
         Ok(out)
-    }
-
-    pub fn quadratic_form_diag(&self, middle: &Array2<f64>) -> Result<Array1<f64>, String> {
-        let middle_local = middle
-            .slice(ndarray::s![
-                self.global_range.clone(),
-                self.global_range.clone()
-            ])
-            .to_owned();
-        DesignMatrix::Dense(DenseDesignMatrix::from(self.local.clone()))
-            .quadratic_form_diag(&middle_local)
     }
 }
 
@@ -5827,7 +5811,7 @@ impl DesignMatrix {
         <Self as LinearOperator>::diag_gram(self, weights)
     }
 
-    pub fn quadratic_form_diag(&self, middle: &Array2<f64>) -> Result<Array1<f64>, String> {
+    pub(crate) fn quadratic_form_diag(&self, middle: &Array2<f64>) -> Result<Array1<f64>, String> {
         <Self as DenseDesignOperator>::quadratic_form_diag(self, middle)
     }
 
