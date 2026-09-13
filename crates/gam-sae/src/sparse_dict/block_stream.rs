@@ -32,7 +32,8 @@
 //! and overlap moments let the frame step use the newly fitted γ without
 //! replaying the corpus. With supports held fixed, a per-block Rayleigh surrogate
 //! majorizes the simultaneous tied-code reconstruction loss, differentiating both
-//! the frame and its projection code. Each pass accumulates the surrogate's
+//! the frame and its projection code, through the Cauchy–Schwarz bound over the
+//! blocks each row admits. Each pass accumulates the surrogate's
 //! operator on the frame and on the two search directions the previous step
 //! left, and the frame step takes each block's top Ritz vectors on their span:
 //! block LOBPCG with its residual one pass behind, with no spectral shift and no
@@ -159,25 +160,26 @@ fn same_admitted_blocks(left: &RowBlockCode, right: &RowBlockCode) -> bool {
 }
 
 /// One selected row's contribution to its block's tied projector moments over
-/// `W = [U, D]`: `coupling += v (Wᵀx)ᵀ + x (Wᵀv)ᵀ` and `data_cross += x (Wᵀx)ᵀ`,
-/// where `v = k P_g x - Σ_h P_h x` is formed from the row's code `w = Uᵀx` and its
-/// gamma-free reconstruction `sum`.
+/// `W = [U, D]`: `coupling += v (Wᵀx)ᵀ + x (Wᵀv)ᵀ − m x (Wᵀx)ᵀ` and
+/// `data_cross += x (Wᵀx)ᵀ`, where `v = m P_g x − Σ_h P_h x` is formed from the
+/// row's code `w = Uᵀx`, its gamma-free reconstruction `sum`, and `m`, the number
+/// of blocks the row admits this pass (see `end_epoch`).
 ///
 /// `frame` holds the block's `b` directions and `directions` its `d` search rows,
 /// both f64 and row-major (`frame[axis * p + c]`); `d` may be zero. `coupling` and
-/// `data_cross` are the block's `P×m` moments, row-major (`[c * m + column]`) with
-/// `m ≥ b + d`, and only their first `b + d` columns are written. `v` (length `P`)
+/// `data_cross` are the block's `P×n` moments, row-major (`[c * n + column]`) with
+/// `n ≥ b + d`, and only their first `b + d` columns are written. `v` (length `P`)
 /// and `coordinates` (length `b + 2d`) are caller-owned scratch. The frame columns
 /// receive the same floating-point operations in the same order as the
-/// per-element `[[c, axis]]` loop this kernel replaced, so they are bit-identical
-/// to it (#2826).
+/// per-element `[[c, axis]]` loop, extended by the weighted data term, so they are
+/// bit-identical to that loop (#2826).
 fn accumulate_tied_row_moments(
     frame: &[f64],
     directions: &[f64],
     w: &[f64],
     xi: ArrayView1<'_, f32>,
     sum: &[f64],
-    k: f64,
+    majorizer_weight: f64,
     v: &mut [f64],
     coordinates: &mut [f64],
     coupling: &mut [f64],
@@ -196,7 +198,7 @@ fn accumulate_tied_row_moments(
         for (axis, &weight) in w.iter().enumerate() {
             own += weight * frame[axis * p + c];
         }
-        *value = k * own - total;
+        *value = majorizer_weight * own - total;
         for (axis, coordinate) in v_coordinates[..b].iter_mut().enumerate() {
             *coordinate += frame[axis * p + c] * *value;
         }
@@ -224,12 +226,14 @@ fn accumulate_tied_row_moments(
             coupling_row[axis] += value * weight;
             data_row[axis] += x * weight;
             coupling_row[axis] += x * v_coordinates[axis];
+            coupling_row[axis] -= majorizer_weight * x * weight;
         }
         for (row, &projection) in x_coordinates.iter().enumerate() {
             let column = b + row;
             coupling_row[column] += value * projection;
             data_row[column] += x * projection;
             coupling_row[column] += x * v_coordinates[column];
+            coupling_row[column] -= majorizer_weight * x * projection;
         }
     }
 }
@@ -321,8 +325,8 @@ pub struct BlockEpochStats {
     /// adjudicated no frame trial. The frame step holds supports fixed, so these
     /// rows are the support change it cannot see (#2502).
     pub rerouted_rows: Option<usize>,
-    /// Mean admitted blocks per row this pass, at most `k`: the per-row count
-    /// the simultaneous-update majorizer bounds by `k`.
+    /// Mean admitted blocks per row this pass, at most `k`: the per-row
+    /// multiplier the frame step's simultaneous-update majorizer charges.
     pub mean_admitted_blocks: f64,
     /// Whether EV, gamma and frame-projector residuals meet the tolerance,
     /// with no accepted or pending block birth.
@@ -385,6 +389,7 @@ pub struct BlockSparseStreamState {
 
     // ---- accumulators reset at each end_epoch (frozen frames/γ used to fill) ----
     second: Vec<Array2<f64>>,   // gamma-free projection second moment (b×b)
+    normal_second: Vec<Array2<f64>>, // Σ (m − 1) w wᵀ, the majorizer's normal term (b×b)
     coupling: Vec<Array2<f64>>, // (XᵀV + VᵀX)W, V = k X P_g - total projection (P×3b)
     data_cross: Vec<Array2<f64>>, // XᵀX W, W = [U, R, P] (P×3b)
     usage: Vec<usize>,
@@ -497,6 +502,7 @@ impl BlockSparseStreamState {
             decoder,
             gamma: 1.0,
             second: (0..g).map(|_| Array2::<f64>::zeros((b, b))).collect(),
+            normal_second: (0..g).map(|_| Array2::<f64>::zeros((b, b))).collect(),
             coupling: (0..g).map(|_| Array2::<f64>::zeros((p, 3 * b))).collect(),
             data_cross: (0..g).map(|_| Array2::<f64>::zeros((p, 3 * b))).collect(),
             usage: vec![0; g],
@@ -573,6 +579,7 @@ impl BlockSparseStreamState {
             decoder,
             gamma: 1.0,
             second: (0..g).map(|_| Array2::<f64>::zeros((b, b))).collect(),
+            normal_second: (0..g).map(|_| Array2::<f64>::zeros((b, b))).collect(),
             coupling: (0..g).map(|_| Array2::<f64>::zeros((p, 3 * b))).collect(),
             data_cross: (0..g).map(|_| Array2::<f64>::zeros((p, 3 * b))).collect(),
             usage: vec![0; g],
@@ -696,6 +703,12 @@ impl BlockSparseStreamState {
             let projected = project_coded_rows(rows, self.decoder.view(), &codes, b, gamma);
             let postings = block_row_postings(&codes, self.g);
             self.admitted_slots += postings.iter().map(Vec::len).sum::<usize>();
+            // Each row's admitted-block count: the multiplier of the simultaneous
+            // update bound over the blocks that row's reconstruction holds.
+            let admitted_counts: Vec<usize> = codes
+                .par_iter()
+                .map(|code| code.gates.iter().filter(|&&gate| gate != 0.0).count())
+                .collect();
 
             let columns_per_worker = p.div_ceil(rayon::current_num_threads()).max(1);
             self.col_sum
@@ -756,11 +769,12 @@ impl BlockSparseStreamState {
                 .par_iter_mut()
                 .zip(self.data_cross.par_iter_mut())
                 .zip(self.second.par_iter_mut())
+                .zip(self.normal_second.par_iter_mut())
                 .zip(self.usage.par_iter_mut())
                 .zip(postings.par_iter())
                 .enumerate()
                 .for_each(
-                    |(block, ((((coupling, data_cross), second), usage), entries))| {
+                    |(block, (((((coupling, data_cross), second), normal_second), usage), entries))| {
                         // An unselected block has nothing to accumulate, and its
                         // usage below adds zero.
                         if entries.is_empty() {
@@ -796,13 +810,14 @@ impl BlockSparseStreamState {
                         let mut coordinates = vec![0.0; b + 2 * (directions.len() / p)];
                         for &(row, slot) in entries {
                             let w = &codes[row].projections[slot * b..(slot + 1) * b];
+                            let majorizer_weight = admitted_counts[row] as f64;
                             accumulate_tied_row_moments(
                                 &frame,
                                 &directions,
                                 w,
                                 rows.row(row),
                                 &projected[row].sum,
-                                self.k as f64,
+                                majorizer_weight,
                                 &mut v,
                                 &mut coordinates,
                                 coupling,
@@ -811,6 +826,8 @@ impl BlockSparseStreamState {
                             for left in 0..b {
                                 for right in 0..b {
                                     second[[left, right]] += w[left] * w[right];
+                                    normal_second[[left, right]] +=
+                                        (majorizer_weight - 1.0) * w[left] * w[right];
                                 }
                             }
                         }
@@ -1092,6 +1109,7 @@ impl BlockSparseStreamState {
                 self.coupling
                     .par_iter_mut()
                     .zip(self.second.par_iter_mut())
+                    .zip(self.normal_second.par_iter_mut())
                     .zip(
                         candidate_decoder
                             .axis_chunks_iter_mut(Axis(0), b)
@@ -1103,29 +1121,33 @@ impl BlockSparseStreamState {
                             .into_par_iter(),
                     )
                     .enumerate()
-                    .map(|(gg, (((moment, second), mut proposal), mut directions))| {
+                    .map(|(gg, ((((moment, second), normal), mut proposal), mut directions))| {
                         second.mapv_inplace(|value| value * gamma * gamma);
+                        normal.mapv_inplace(|value| value * gamma * gamma);
                         if self.usage[gg] == 0 {
                             return Ok(0.0);
                         }
-                        // For U = Dᵀ, P = UUᵀ and fixed supports, the bound
-                        // ||Σ ΔP_g x||² <= k Σ ||ΔP_g x||² gives the surrogate
-                        // -tr(U_newᵀ H U_new), where
-                        // H = (2γ-kγ²)XᵀX + γ²(XᵀV+VᵀX), tight at the stored
-                        // frame. The pass accumulated H·[U, R, P] without γ, and
-                        // the top Ritz vectors of H on that span lower the actual
-                        // tied loss at fixed supports whenever they move.
-                        let data_scale = 2.0 * gamma - self.k as f64 * gamma * gamma;
+                        // For U = Dᵀ, P = UUᵀ and fixed supports, only a row's
+                        // admitted blocks S enter its reconstruction, so the bound
+                        // ||Σ_{h∈S} ΔP_h x||² <= m Σ_{h∈S} ||ΔP_h x||² with m = |S|
+                        // gives the surrogate -tr(U_newᵀ H U_new) with
+                        // H = Σ_x (2γ - mγ²) x xᵀ + γ²(x vᵀ + v xᵀ) and
+                        // v = m P x - Σ_h P_h x, tight at the stored frame. m is
+                        // this pass's admitted count, never k and never a quantity
+                        // read off the previous step. The pass accumulated
+                        // H·[U, R, P] without γ, and the top Ritz vectors of H on
+                        // that span lower the actual tied loss at fixed supports
+                        // whenever they move.
                         moment.zip_mut_with(&self.data_cross[gg], |coupling, &data| {
-                            *coupling = data_scale * data + gamma * gamma * *coupling;
+                            *coupling = 2.0 * gamma * data + gamma * gamma * *coupling;
                         });
                         ritz_tied_frame_step(
                             self.decoder.slice(ndarray::s![gg * b..(gg + 1) * b, ..]),
                             self.search_directions
                                 .slice(ndarray::s![gg * 2 * b..(gg + 1) * 2 * b, ..]),
                             moment.view(),
-                            second.view(),
-                            (self.k - 1) as f64,
+                            normal.view(),
+                            1.0,
                             proposal.view_mut(),
                             directions.view_mut(),
                         )
@@ -1336,6 +1358,9 @@ impl BlockSparseStreamState {
     fn reset_epoch(&mut self) {
         for sg in self.second.iter_mut() {
             sg.fill(0.0);
+        }
+        for normal in self.normal_second.iter_mut() {
+            normal.fill(0.0);
         }
         for mg in self.coupling.iter_mut() {
             mg.fill(0.0);

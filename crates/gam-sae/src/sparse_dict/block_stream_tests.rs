@@ -199,8 +199,22 @@ fn parallel_stream_moments_match_dense_reference_across_batches_and_shards() {
                                 .slice(ndarray::s![block * 2..(block + 1) * 2, ..])
                                 .mapv(f64::from),
                         );
-                        let v = &own * 3.0 - &total;
                         let x64 = x.mapv(f64::from);
+                        // A row's majorizer weight for each block it admits is its
+                        // admitted count. Every nonzero row here admits all three
+                        // blocks, so the weight is 3 on those rows.
+                        let code_norm = |row: usize, h: usize| {
+                            let code = weights.slice(ndarray::s![row, h * 2..(h + 1) * 2]);
+                            code.dot(&code).sqrt()
+                        };
+                        let majorizer = ndarray::Array1::from_shape_fn(x.nrows(), |row| {
+                            if code_norm(row, block) == 0.0 {
+                                return 0.0;
+                            }
+                            (0..3).filter(|&h| code_norm(row, h) != 0.0).count() as f64
+                        });
+                        let weighted = majorizer.view().insert_axis(ndarray::Axis(1));
+                        let v = &own * &weighted - &total;
                         let subspace = ndarray::concatenate(
                             ndarray::Axis(0),
                             &[
@@ -215,14 +229,17 @@ fn parallel_stream_moments_match_dense_reference_across_batches_and_shards() {
                             ],
                         )
                         .unwrap();
-                        let expected_coupling =
-                            (x64.t().dot(&v) + v.t().dot(&x64)).dot(&subspace.t());
+                        let expected_coupling = (x64.t().dot(&v) + v.t().dot(&x64)
+                            - x64.t().dot(&(&x64 * &weighted)))
+                        .dot(&subspace.t());
                         let expected_data = x64.t().dot(&x64).dot(&subspace.t());
                         let expected_second = w.t().dot(&w);
+                        let expected_normal = w.t().dot(&(&w * &(&weighted - 1.0)));
                         for (got, expected) in [
                             (&state.coupling[block], expected_coupling),
                             (&state.data_cross[block], expected_data),
                             (&state.second[block], expected_second.clone()),
+                            (&state.normal_second[block], expected_normal),
                             (
                                 &pending.baseline_second[block],
                                 expected_second * (baseline_gamma as f64).powi(2),
@@ -403,7 +420,7 @@ fn tied_projector_moments_match_actual_loss_directional_derivatives() {
     for gamma in [0.3, 1.4] {
         let mut state = BlockSparseStreamState::new_with_decoder(decoder.clone(), &config).unwrap();
         state.partial_fit(x.view()).unwrap();
-        let data_scale = 2.0 * gamma - 2.0 * gamma * gamma;
+        let data_scale = 2.0 * gamma;
         for block in 0..2 {
             let d = decoder.mapv(f64::from);
             let frame = d.slice(ndarray::s![block * 2..(block + 1) * 2, ..]);
@@ -838,6 +855,11 @@ fn tied_row_moment_kernel_is_bit_identical_to_the_indexed_loop_2826() {
                     reference_coupling[[c, axis]] += xi[c] as f64 * reference_v_coordinates[axis];
                 }
             }
+            for c in 0..p {
+                for axis in 0..b {
+                    reference_coupling[[c, axis]] -= k as f64 * xi[c] as f64 * w[axis];
+                }
+            }
             // Positive control: the same two coupling terms added as ONE sum per
             // element. A fixture that cannot tell this association from the
             // original order would make the bit equality below vacuous.
@@ -850,6 +872,11 @@ fn tied_row_moment_kernel_is_bit_identical_to_the_indexed_loop_2826() {
                 for (axis, &weight) in w.iter().enumerate() {
                     merged_coupling[[c, axis]] +=
                         value * weight + xi[c] as f64 * reference_v_coordinates[axis];
+                }
+            }
+            for c in 0..p {
+                for axis in 0..b {
+                    merged_coupling[[c, axis]] -= k as f64 * xi[c] as f64 * w[axis];
                 }
             }
         }
