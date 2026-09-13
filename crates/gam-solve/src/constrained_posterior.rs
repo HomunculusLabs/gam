@@ -1113,65 +1113,6 @@ fn decompose_projection(
     })
 }
 
-/// The LAW of one scalar projection `cᵀβ` of an inequality-truncated Gaussian
-/// posterior — not two of its quantiles, and not a normal fitted to its first
-/// two moments.
-///
-/// This is what the module's own decomposition produces:
-///
-/// ```text
-/// cᵀβ = cᵀβ_unc + (Gᵀc)ᵀ(u - E_untrunc[u]) + cᵀt,
-/// ```
-///
-/// a discrete mixture over the retained orthant's cubature nodes convolved with
-/// one independent Gaussian. Two properties a normal cannot have, and both are
-/// why this exists (#2446):
-///
-/// * **Every node is feasible.** The nodes are points of the retained orthant,
-///   so the law puts no mass on coefficient vectors the fit excluded. The
-///   normal with the same first two moments does — measurably, a few percent of
-///   its mass — because the pushforward of a cone-truncated joint through `cᵀ`
-///   is not a normal for `q > 1`.
-/// * **Its error is a RATE, not a floor.** Matching two moments is exact for a
-///   normal and wrong by a fixed amount for this law, so no extra work reduces
-///   it. The node sum converges with the cubature.
-///
-/// A consumer that integrates a SMOOTH functional barely notices the first
-/// property. One that integrates an indicator — any quantile, any exceedance
-/// probability — reads the location of mass at first order, and for it the
-/// moment-matched normal is not admissible at all.
-pub struct ConstrainedProjectionLaw {
-    /// `(location, weight)` per cubature node, weights summing to one. A
-    /// geometry with no correction is one node of weight one at the ambient
-    /// mean.
-    pub nodes: Vec<(f64, f64)>,
-    /// Variance of the independent Gaussian each node is convolved with. Zero
-    /// when the contrast is carried entirely by the retained constraint
-    /// normals, and then the mixture IS the whole law.
-    pub residual_variance: f64,
-}
-
-impl ConstrainedProjectionLaw {
-    /// `E[cᵀβ]` under this law.
-    pub fn mean(&self) -> f64 {
-        self.nodes
-            .iter()
-            .map(|(location, weight)| location * weight)
-            .sum()
-    }
-
-    /// `Var(cᵀβ)` under this law: the mixture's own spread plus the tangent.
-    pub fn variance(&self) -> f64 {
-        let mean = self.mean();
-        let spread = self
-            .nodes
-            .iter()
-            .map(|(location, weight)| weight * (location - mean) * (location - mean))
-            .sum::<f64>();
-        spread + self.residual_variance
-    }
-}
-
 /// A single low-discrepancy rule over the constraint-normal AND tangent
 /// coordinates of an inequality-truncated Gaussian, served one replicate lattice
 /// at a time.

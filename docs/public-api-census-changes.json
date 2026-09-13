@@ -3862,5 +3862,14 @@
     },
     "reason": "#2899 slop: the uncalled accessor HyperCoordDrift::operator_ref is deleted; its one test caller reads the public operator field directly.",
     "evidence": "public_functions() counts the pub fn operator_ref declaration at gam-problem/src/lib.rs:912. At the base, git grep -n -w operator_ref finds only that declaration and one call in a gam-models unit test, rewritten to coord.drift.operator.as_deref()."
+  },
+  {
+    "base": "41c765d3d30c7a3a9af6d017f8d0d7264ec79f1b",
+    "removed": {
+      "crates/gam-solve/src/constrained_posterior.rs::mean": 1,
+      "crates/gam-solve/src/constrained_posterior.rs::variance": 1
+    },
+    "reason": "#2899, SPEC rule 25 (delete public API no product uses). gam-solve's ConstrainedProjectionLaw is never constructed, so it and its mean() and variance() are deleted. The live constrained-projection path passes the cubature nodes and the residual variance loose into constrained_projection_equal_tailed_interval. The module is pub, so the dead-code lint could not see the type. Found by surv2894; verified by prune-api-c.",
+    "evidence": "Removes the two pub fn declarations of the never-constructed ConstrainedProjectionLaw's impl in crates/gam-solve/src/constrained_posterior.rs. No caller exists anywhere in the tree at base 41c765d3d. Guarded compile: pool job 609573."
   }
 ]

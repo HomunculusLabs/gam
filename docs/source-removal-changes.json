@@ -8983,5 +8983,15 @@
     ],
     "reason": "#2899 slop: HyperCoordDrift::operator_ref lost its one production caller when 3c870be95 deleted dense.rs's stochastic cross-trace block. It only returned the public operator field through Arc::as_ref, and the one remaining caller, the BMS joint-Hessian HVP correction unit test that gam-models includes, now reads coord.drift.operator.as_deref() directly.",
     "evidence": "At the base, git grep -n -w operator_ref over crates, src, tests, examples, bench and python finds only its declaration at crates/gam-problem/src/lib.rs:912 and the call at tests/src_modules/optimization/families_bms_joint_hessian_hvp_correction_tests.rs:2406, included by crates/gam-models/src/bms/mod.rs. HyperCoordDrift.operator is a pub field of type Option<Arc<dyn HyperOperator>>, so as_deref() yields the same Option<&dyn HyperOperator>."
+  },
+  {
+    "base": "41c765d3d30c7a3a9af6d017f8d0d7264ec79f1b",
+    "items": [
+      "crates/gam-solve/src/constrained_posterior.rs:fn:mean",
+      "crates/gam-solve/src/constrained_posterior.rs:fn:variance",
+      "crates/gam-solve/src/constrained_posterior.rs:struct:ConstrainedProjectionLaw"
+    ],
+    "reason": "#2899, SPEC rule 25 (delete public API no product uses). gam-solve's ConstrainedProjectionLaw is never constructed, so it and its mean() and variance() are deleted. The live constrained-projection path passes the cubature nodes and the residual variance loose into constrained_projection_equal_tailed_interval. The module is pub, so the dead-code lint could not see the type. Found by surv2894; verified by prune-api-c.",
+    "evidence": "At base 41c765d3d, git grep -w ConstrainedProjectionLaw over the whole tree finds only constrained_posterior.rs:1061 (the struct) and :1072 (its impl header). No struct literal exists in production code, tests, benches or examples. mean and variance have no other declaration in the file, and variance() was mean()'s only caller. Guarded compile: pool job 609573."
   }
 ]
