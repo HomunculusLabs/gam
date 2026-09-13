@@ -94,7 +94,7 @@ pub(crate) struct InstalledFlexBlock {
 }
 
 #[derive(Clone, Debug)]
-pub enum AnchorComponentTag {
+pub(crate) enum AnchorComponentTag {
     /// Parametric anchor — at predict time the parent predictor reconstructs
     /// the per-row vector from the saved marginal/slope blocks; the
     /// runtime only needs to know which block and how many columns. The
