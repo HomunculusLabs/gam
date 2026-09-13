@@ -3409,6 +3409,139 @@
         }
     }
 
+    /// #2714: a baseline-chart hyper axis serves the exact θ-derivatives of the
+    /// latent survival objective, score, information and mixed information at
+    /// fixed β. The family is realized at `θ ± h` by moving its time offsets
+    /// through the chart the fit uses, and every term must match the central
+    /// difference of the production hook it differentiates. Dropping the `q̇`
+    /// channel's partial, or the sign of any term, fails the shape axis.
+    #[test]
+    fn baseline_chart_psi_terms_match_central_differences_2714() {
+        let family = full_loading_learned_sigma_family();
+        let n = family.event_target.len();
+        let age_entry = array![0.4, 0.7, 1.1, 0.5];
+        let age_exit = array![1.9, 2.6, 3.4, 4.2];
+        let seed = SurvivalBaselineConfig {
+            target: crate::survival::construction::SurvivalBaselineTarget::Weibull,
+            scale: Some(2.0),
+            shape: Some(1.3),
+            rate: None,
+            makeham: None,
+        };
+        let (seed_entry, seed_exit, seed_derivative) =
+            crate::survival::construction::build_survival_baseline_offsets(
+                &age_entry, &age_exit, &seed,
+            )
+            .expect("seed baseline offsets");
+        let chart = crate::survival::construction::LatentSurvivalFrozenOffsetChart::new(
+            &age_entry,
+            &age_exit,
+            None,
+            &seed,
+            &seed_entry,
+            &seed_exit,
+            &seed_derivative,
+            &Array1::zeros(n),
+        )
+        .expect("chart construction")
+        .expect("a Weibull baseline has chart coordinates");
+        let beta = array![-0.60, 0.85, -0.25, 0.40, -0.3_f64];
+        let realized = |point: &Array1<f64>| {
+            let geometry = chart.evaluate(point).expect("chart evaluation");
+            let mut states = latent_survival_states_from_joint_beta(&family, &beta);
+            let eta = &mut states[LatentSurvivalFamily::BLOCK_TIME].eta;
+            eta.slice_mut(s![0..n]).scaled_add(1.0, &geometry.offset_entry);
+            eta.slice_mut(s![n..2 * n]).scaled_add(1.0, &geometry.offset_exit);
+            eta.slice_mut(s![2 * n..3 * n])
+                .scaled_add(1.0, &geometry.derivative_offset_exit);
+            (geometry, states)
+        };
+        let theta = chart.initial_theta().clone();
+        let (geometry, states) = realized(&theta);
+        let rows = Arc::new(geometry);
+        let mut at_theta = family.clone();
+        at_theta.baseline_theta_rows = Some(Arc::clone(&rows));
+        let h = 1e-5_f64;
+        let close = |analytic: f64, central: f64| {
+            (analytic - central).abs() <= 1e-6 * analytic.abs().max(central.abs()).max(1.0)
+        };
+        let direction = array![0.3, -0.2, 0.5, 0.1, -0.4_f64];
+        for axis in 0..theta.len() {
+            let terms = at_theta
+                .baseline_theta_psi_terms_dense(&states, &rows, axis)
+                .expect("baseline psi terms");
+            let mixed = at_theta
+                .baseline_theta_hessian_directional_derivative_dense(
+                    &states, &rows, axis, &direction,
+                )
+                .expect("baseline mixed information derivative");
+            let mut plus = theta.clone();
+            plus[axis] += h;
+            let mut minus = theta.clone();
+            minus[axis] -= h;
+            let states_plus = realized(&plus).1;
+            let states_minus = realized(&minus).1;
+
+            let log_likelihood = |states: &[ParameterBlockState]| {
+                family.log_likelihood_only(states).expect("log likelihood")
+            };
+            let central_objective =
+                -(log_likelihood(&states_plus) - log_likelihood(&states_minus)) / (2.0 * h);
+            assert!(
+                close(terms.objective_psi, central_objective),
+                "axis {axis}: V_θ {} against central difference {central_objective}",
+                terms.objective_psi
+            );
+
+            let gradient = |states: &[ParameterBlockState]| {
+                family
+                    .evaluate_exact_newton_joint_gradient_dense(states)
+                    .expect("joint gradient")
+                    .1
+            };
+            let central_score = (gradient(&states_minus) - gradient(&states_plus)) / (2.0 * h);
+            for (a, (&analytic, &central)) in
+                terms.score_psi.iter().zip(central_score.iter()).enumerate()
+            {
+                assert!(
+                    close(analytic, central),
+                    "axis {axis}: g_θ[{a}] {analytic} against central difference {central}"
+                );
+            }
+
+            let information = |states: &[ParameterBlockState]| {
+                family
+                    .evaluate_exact_newton_joint_dense(states)
+                    .expect("joint Hessian")
+                    .2
+            };
+            let central_information =
+                (information(&states_plus) - information(&states_minus)) / (2.0 * h);
+            for ((a, b), &analytic) in terms.hessian_psi.indexed_iter() {
+                let central = central_information[[a, b]];
+                assert!(
+                    close(analytic, central),
+                    "axis {axis}: H_θ[{a},{b}] {analytic} against central difference {central}"
+                );
+            }
+
+            let information_drift = |states: &[ParameterBlockState]| {
+                family
+                    .exact_newton_joint_hessian_directional_derivative_dense(states, &direction)
+                    .expect("joint Hessian directional derivative")
+            };
+            let central_mixed =
+                (information_drift(&states_plus) - information_drift(&states_minus)) / (2.0 * h);
+            for ((a, b), &analytic) in mixed.indexed_iter() {
+                let central = central_mixed[[a, b]];
+                assert!(
+                    close(analytic, central),
+                    "axis {axis}: D_β H_θ[u][{a},{b}] {analytic} against central difference {central}"
+                );
+            }
+        }
+    }
+
     /// The three log-likelihoods a latent-survival family exposes, at one β.
     ///
     /// `accept_test` is [`CustomFamily::log_likelihood_only`] — what the
