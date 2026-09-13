@@ -1738,10 +1738,10 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
     /// so this contracts the OBSERVED joint Newton Hessian rather than a
     /// separate expected-information object. Only the rigid two-primary
     /// `(marginal, slope)` path has the closed-form fourth-order tensor
-    /// this needs (`rigid_row_fourth_full` / `fourth_full_cache`); the flex
+    /// (`rigid_row_fourth_full` / `fourth_full_cache`). The flex
     /// score-warp/link-deviation extension widens the primary space beyond
-    /// what that tensor covers, so flex-active fits fall back to `None` (the
-    /// generic pairwise `H''` completion).
+    /// what that tensor covers, so a flex-active fit contracts through its row
+    /// fourth-order kernel along the eigendirections of `W`, from one exact cache.
     fn joint_jeffreys_information_contracted_trace_hessian_with_specs(
         &self,
         block_states: &[ParameterBlockState],
@@ -1754,7 +1754,48 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
             return Ok(None);
         }
         if self.effective_flex_active(block_states)? {
-            return Ok(None);
+            let total = block_slices(self).total;
+            if weight.dim() != (total, total) {
+                return Err(format!(
+                    "BMS joint_jeffreys_information_contracted_trace_hessian_with_specs: flex weight shape {:?} != ({total}, {total})",
+                    weight.dim()
+                ));
+            }
+            // The observed Hessian's fourth derivative is symmetric in all four
+            // slots, so with `W = Σ_k s_k v_k v_kᵀ`,
+            // `∇²_β tr(W·H)_ab = Σ_cd W_cd ∂⁴f[c, d, a, b] = Σ_k s_k·H''[v_k, v_k]_ab`.
+            // The exact cache and its degree-21 cell-moment bundle depend on β only,
+            // so one build serves every direction. The generic completion builds one
+            // per span direction: 33 builds and 671.8 s inside one joint-Newton cycle
+            // of the n=2000 flex smoke fit (#979).
+            let mut symmetric = weight + &weight.t();
+            symmetric.mapv_inplace(|value| 0.5 * value);
+            let (scales, directions) =
+                gam_linalg::faer_ndarray::FaerEigh::eigh(&symmetric, faer::Side::Lower).map_err(
+                    |error| {
+                        format!(
+                            "BMS flex jeffreys contracted-trace: weight eigendecomposition failed: {error}"
+                        )
+                    },
+                )?;
+            let cache = self.build_exact_eval_cache(block_states)?;
+            let mut out = Array2::<f64>::zeros((total, total));
+            for (index, &scale) in scales.iter().enumerate() {
+                if scale == 0.0 {
+                    continue;
+                }
+                let direction = directions.column(index).to_owned();
+                match self.exact_newton_joint_hessiansecond_directional_derivative_from_cache(
+                    block_states,
+                    &direction,
+                    &direction,
+                    &cache,
+                )? {
+                    Some(second) => out.scaled_add(scale, &second),
+                    None => return Ok(None),
+                }
+            }
+            return Ok(Some(out));
         }
         let slices = block_slices(self);
         let pt = slices.marginal.len();
@@ -1907,8 +1948,9 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
     }
 
     /// See [`Self::joint_jeffreys_information_contracted_trace_hessian_with_specs`]:
-    /// available whenever the rigid (non-flex) path is taken; the flex path
-    /// returns `Ok(None)` from that method and callers fall back correctly.
+    /// available on both paths. The rigid path contracts its closed-form fourth
+    /// tensor, and the flex path contracts its row fourth-order kernel from one
+    /// exact cache.
     fn joint_jeffreys_information_contracted_trace_hessian_available(&self) -> bool {
         true
     }
