@@ -4903,15 +4903,53 @@ impl SaeManifoldTerm {
         // derivative bundle whose contractions are the exact derivative of its
         // value. Where the host holds the dense lane's own k×k blocks, the lane
         // takes the exact log-det off one eigendecomposition; otherwise it
-        // evaluates the frozen rational surrogate (#2731). Value-only SLQ callers
-        // retain the historical memory-derived split.
-        // The chunked branch below builds this block through `build_dense_schur_direct`,
-        // which refuses above the memory governor's single-materialization cap, so the
-        // admission reads the same cap and an admitted build is never refused.
+        // evaluates the frozen rational surrogate (#2731). A value-only call takes the
+        // chunked dense route only where it is cheaper than SLQ, as priced below.
+        // #972 / #977 T1: the reduced β-Schur is over the FACTORED border when
+        // frames are active (each chunk inherits the frames via
+        // `materialize_chunk`, so every `chunk_schur` is `border_dim²`), matching
+        // the dense path's factored log-det. Full-`B` ⇒ `border_dim == beta_dim`.
+        let border_dim = if self.frames_active() {
+            self.factored_border_dim()
+        } else {
+            self.beta_dim()
+        };
+        // #2731/#2900 — the chunked branch pulls every row's elimination term back into
+        // a dense `border_dim²` reduced Schur, `n·q·k²` flops for `q = K·(1 + d_max)`, and
+        // holds about six such blocks. The matrix-free branch prices `log|S|` by SLQ at a
+        // fixed `(probes + 1)·steps` products, each about `2·p·(support + q)` flops per
+        // row, with every atom's basis in the support (exact for an OBB assignment, an
+        // upper bound under top-k routing). The chunked branch is taken only where the
+        // plan's in-core budget holds the block and the dense route costs fewer products
+        // than SLQ. Census job 599567 (`sae_manifold_k_ladder_recovery_k64`, n = 4000,
+        // q = 128, k = 30720) spent its time in that pullback, about 4.8e14 flops against
+        // SLQ's 2112 products of about 4.1e8.
+        let rows = self.n_obs() as u64;
+        let total_basis: u64 = self.atoms.iter().map(|atom| atom.basis_size() as u64).sum();
+        let d_max = self.atoms.iter().map(|atom| atom.latent_dim()).max().unwrap_or(0) as u64;
+        let row_block_dim = (self.k_atoms() as u64).saturating_mul(1 + d_max);
+        let apply_flops = rows
+            .saturating_mul(2)
+            .saturating_mul(self.output_dim() as u64)
+            .saturating_mul(total_basis.saturating_add(row_block_dim));
+        let border = border_dim as u64;
+        let pullback_flops = rows
+            .saturating_mul(row_block_dim)
+            .saturating_mul(border)
+            .saturating_mul(border);
+        let slq_products = (SCHUR_SLQ_LOGDET_PROBES + 1) * SCHUR_SLQ_LOGDET_LANCZOS_STEPS;
         let dense_reduced_schur_admitted = plan.estimated_dense_schur_bytes
             <= plan.in_core_budget_bytes
-            && plan.estimated_dense_schur_bytes
-                <= gam_runtime::resource::MemoryGovernor::global().single_materialization_cap_bytes();
+            && matches!(
+                gam_solve::arrow_schur::dense_reduced_schur_route(
+                    gam_solve::arrow_schur::DenseReducedSchurRoute::ChunkedEvidence {
+                        pullback_flops,
+                    },
+                    border_dim,
+                    apply_flops,
+                ),
+                gam_linalg::pcg::PcgAttempt::Budgeted { products } if products < slq_products
+            );
         if !dense_reduced_schur_admitted || lane.is_some() {
             // #988 memory-matrix-free evidence route. The dense k×k reduced Schur
             // (≈8 GB at the K=32k manifold border) does NOT fit the in-core
@@ -5031,15 +5069,6 @@ impl SaeManifoldTerm {
         }
         let n_total = self.n_obs();
         let chunk_size = plan.chunk_size.min(n_total.max(1));
-        // #972 / #977 T1: the reduced β-Schur is over the FACTORED border when
-        // frames are active (each chunk inherits the frames via
-        // `materialize_chunk`, so every `chunk_schur` is `border_dim²`), matching
-        // the dense path's factored log-det. Full-`B` ⇒ `border_dim == beta_dim`.
-        let border_dim = if self.frames_active() {
-            self.factored_border_dim()
-        } else {
-            self.beta_dim()
-        };
         let mut schur_acc = Array2::<f64>::zeros((border_dim, border_dim));
         let mut majorizer_acc = Array2::<f64>::zeros((border_dim, border_dim));
         let mut clamp_acc = Array2::<f64>::zeros((border_dim, border_dim));
