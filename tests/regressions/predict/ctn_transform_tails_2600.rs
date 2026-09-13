@@ -161,7 +161,11 @@ fn ctn_predictive_quantiles_invert_the_models_own_transform_2600() {
     let latent = grid.table.latent();
     let (lower, upper) = (latent[[0, 0]], latent[[0, g - 1]]);
     let clamped_mass = normal_cdf(lower) + (1.0 - normal_cdf(upper));
-    let (tail_lo, tail_hi) = grid.table.tail_slopes(0);
+    // The table's exterior is affine at its end slopes (`CtnTransformTable::evaluate`),
+    // so the secant one support width past each end is that end's slope.
+    let width = y_hi - y_lo;
+    let tail_lo = (lower - grid.table.evaluate(0, y_lo - width)) / width;
+    let tail_hi = (grid.table.evaluate(0, y_hi + width) - upper) / width;
     eprintln!(
         "#2600 tails: support [{y_lo:.6e}, {y_hi:.6e}] L={lower:+.6} U={upper:+.6} \
          Phi(L)+1-Phi(U)={clamped_mass:.6e} tail_slopes=({tail_lo:.6e}, {tail_hi:.6e})"
