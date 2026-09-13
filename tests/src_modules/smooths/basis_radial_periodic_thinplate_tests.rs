@@ -4636,7 +4636,7 @@ fn duchon_nullspace_from_test_m(m: usize) -> DuchonNullspaceOrder {
 fn filter_penalty_candidates_preserves_matching_kronecker_factors() {
     let s = array![[1.0, -1.0], [-1.0, 1.0]];
     let identity = Array2::<f64>::eye(2);
-    let kron = crate::construction::kronecker_product(&s, &identity);
+    let kron = gam_problem::penalty_matrix::kronecker_product(&s, &identity);
     let filtered = filter_penalty_candidates(vec![PenaltyCandidate {
         matrix: ConstructiveQuadratic::try_from_dense_psd(
             kron,
@@ -4664,7 +4664,7 @@ fn filter_penalty_candidates_preserves_matching_kronecker_factors() {
 fn filter_penalty_candidates_drops_stale_kronecker_factors_after_projection() {
     let s = array![[1.0, -1.0], [-1.0, 1.0]];
     let identity = Array2::<f64>::eye(2);
-    let kron = crate::construction::kronecker_product(&s, &identity);
+    let kron = gam_problem::penalty_matrix::kronecker_product(&s, &identity);
     let z = array![
         [1.0, 0.0, 0.0],
         [0.0, 1.0, 0.0],

@@ -1069,7 +1069,7 @@ pub(crate) fn tensorize_slope_design_over_time(
     let mut penalties = Vec::with_capacity(design.penalties.len() + time_penalties.len());
     let mut nullspace_dims = Vec::with_capacity(penalties.capacity());
     for (index, penalty) in design.penalties.iter().enumerate() {
-        let local = gam_terms::kronecker::kronecker_product(&penalty.local, &identity_time);
+        let local = gam_problem::penalty_matrix::kronecker_product(&penalty.local, &identity_time);
         let start = penalty.col_range.start * p_time;
         let end = penalty.col_range.end * p_time;
         penalties.push(BlockwisePenalty {
@@ -1100,7 +1100,7 @@ pub(crate) fn tensorize_slope_design_over_time(
         }
         penalties.push(BlockwisePenalty {
             col_range: 0..p_cov * p_time,
-            local: gam_terms::kronecker::kronecker_product(&identity_cov, time_penalty),
+            local: gam_problem::penalty_matrix::kronecker_product(&identity_cov, time_penalty),
             prior_mean: gam_problem::CoefficientPriorMean::Zero,
             structure_hint: None,
             op: None,
@@ -1152,7 +1152,7 @@ pub(crate) struct SlopeTimeMarginPsiTransform {
 
 impl crate::spatial_psi_bridge::SpatialPsiBlockTransform for SlopeTimeMarginPsiTransform {
     fn transform_penalty(&self, penalty: Array2<f64>) -> Array2<f64> {
-        gam_terms::kronecker::kronecker_product(&penalty, &Array2::<f64>::eye(self.time_width))
+        gam_problem::penalty_matrix::kronecker_product(&penalty, &Array2::<f64>::eye(self.time_width))
     }
 }
 

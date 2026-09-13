@@ -543,7 +543,6 @@ fn compose_qs_from_split(q_pen: &Mat<f64>, q_null: &Mat<f64>, p: usize) -> Mat<f
     qs
 }
 
-pub use crate::kronecker::kronecker_product;
 
 /// Result of the stable reparameterization algorithm from Wood (2011) Appendix B
 #[derive(Clone)]

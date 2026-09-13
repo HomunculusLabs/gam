@@ -14,7 +14,7 @@ use crate::basis::{
     pairwise_distance_bounds_sampled, points_in_aniso_y_space, select_centers_by_strategy,
 };
 
-use crate::construction::kronecker_product;
+use gam_problem::penalty_matrix::kronecker_product;
 
 use penalty_priors::realize_coefficient_groups;
 

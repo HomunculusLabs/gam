@@ -46,7 +46,6 @@ pub mod dictionary;
 pub mod grid_spline_2d;
 pub mod inference;
 mod isotropic_scale;
-pub mod kronecker;
 pub mod latent;
 pub mod penalty_spec;
 pub mod smooth;

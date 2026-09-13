@@ -2448,7 +2448,7 @@ pub(crate) fn validated_kronecker_factors(
     };
     let mut kron = first.clone();
     for factor in rest {
-        kron = crate::kronecker::kronecker_product(&kron, factor);
+        kron = gam_problem::penalty_matrix::kronecker_product(&kron, factor);
     }
     if kron.dim() != matrix.dim() {
         return None;
