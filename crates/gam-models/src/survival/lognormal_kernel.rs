@@ -220,8 +220,6 @@ fn probit_frailty_scale_components(sigma: f64) -> (f64, f64) {
 pub struct ProbitFrailtyScaleJet {
     /// s = 1/√(1+σ²)
     pub s: f64,
-    /// α = σ²/(1+σ²)  — shared auxiliary for all derivative levels.
-    pub alpha: f64,
     /// ∂_t s = -α·s
     pub ds: f64,
     /// ∂_{tt} s = α(3α−2)·s
@@ -237,7 +235,6 @@ impl ProbitFrailtyScaleJet {
         let (s, alpha) = probit_frailty_scale_components(sigma);
         Self {
             s,
-            alpha,
             ds: -alpha * s,
             d2s: alpha * (3.0 * alpha - 2.0) * s,
         }
@@ -335,11 +332,6 @@ impl LogLognormalKernelBundle {
     #[inline]
     pub fn get(&self, k: usize) -> f64 {
         self.log_values[k]
-    }
-
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.log_values.len()
     }
 
     /// `K_{k+2}/K_k − (K_{k+1}/K_k)²`, formed without the cancelling

@@ -230,8 +230,6 @@ pub enum ResponseGeometryModelError {
     InvalidMetadata(String),
     #[error("invalid response-geometry template model: {0}")]
     InvalidTemplate(String),
-    #[error("response-geometry archive serialization failed: {0}")]
-    Serialization(String),
 }
 
 impl ResponseGeometryModel {

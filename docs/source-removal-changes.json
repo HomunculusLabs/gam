@@ -9337,5 +9337,13 @@
     ],
     "reason": "SPEC rules 18 and 25 (#2899, #2631). validate_fit_args_preflight refused conflicting settings twice, once from the resolved FitConfig and once from FitArgs, so a request document setting the same conflict skipped the flag copy. Every family route now fits through the library, which refuses those conflicts for both entry points, so preflight reads the resolved configuration once. required_columns_for_fit re-derived auxiliary-formula columns from FitArgs and family_arg_name named the family flag; required_columns_for_resolved_fit covers the first and nothing calls the second. merge_required_columns served only required_columns_for_fit and is deleted with it.",
     "evidence": "Job 627938 (gate13, lane sw0, node acn82) stacked this slice on 0bbba5310 as phase S4. source_removal_guard.py reported exactly these identities, and cargo check --keep-going --workspace --all-targets --exclude gam-pyffi at that phase exited 0 with 0 errors, so no code still names a deleted item (/scratch.global/sauer354/pool/prune-cli/gate13.627938.log)."
+  },
+  {
+    "base": "41c22ffae132ae29205806201242421d74574718",
+    "items": [
+      "crates/gam-models/src/survival/lognormal_kernel.rs:fn:len"
+    ],
+    "reason": "#2899 public API sweep of gam-models (prune-api-d): LogLognormalKernelBundle::len had no caller and is deleted, together with the unconstructed ResponseGeometryModelError::Serialization variant and the unread ProbitFrailtyScaleJet::alpha field, which are not guarded items.",
+    "evidence": "At the base, only gam-models calls log_kernel_bundle, and no LogLognormalKernelBundle value calls len(); it is the file's one fn len declaration. Receipt: guarded job 657442 (agsmall, lane sw0m, node acn04) at 814808c53 with\nHEAD==PIN, dirty=0 and the 13 files of the s36 and s37 slices overlaid:\ncargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0\n(75 s) and cargo check -p gam-pyffi --lib exited 0 (40 s), with no error line.\nLog /scratch.global/sauer354/pool/prune-api-d/s36s37.657442.log. The first pass\non the s36 overlay (655090) stopped at the gam_custom_family import in\ngenerative.rs that only the deleted trait read, which this change removes."
   }
 ]
