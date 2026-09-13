@@ -73,7 +73,9 @@ def _shuffled_parabola(seed, n=N):
     rng = np.random.default_rng(seed)
     base = np.linspace(0.0, 1.0, n, endpoint=False)
     u = 2.0 * base - 1.0
-    y = np.c_[u, u**2 - 0.33]
+    # Small observation noise: an exactly interpolated response leaves Gaussian
+    # REML no finite profiled scale, so the fit is refused, not recovered.
+    y = np.c_[u, u**2 - 0.33] + 0.01 * rng.standard_normal((n, 2))
     perm = rng.permutation(n)
     return y[perm], base[perm]
 
