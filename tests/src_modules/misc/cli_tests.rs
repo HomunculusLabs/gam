@@ -1,15 +1,15 @@
 use super::{
-    BlockRole, BoundedCoefficientPriorSpec, CliError, CliFirthValidation, DataSchema,
+    BlockRole, BoundedCoefficientPriorSpec, CliError, CliFirthValidation,
     FAMILY_GAUSSIAN_LOCATION_SCALE, FamilyArg, FittedFamily, LikelihoodSpec, LinkChoice, LinkMode,
     ResponseFamily, SavedFitSummary, SavedModel, SurvivalBaselineTarget,
     SurvivalLikelihoodMode, build_survival_time_basis,
-    collect_smooth_structure_warnings, compact_fit_result_for_batch,
+    compact_fit_result_for_batch,
     compact_saved_multiblock_fit_result, compute_probit_q0_from_eta, core_saved_fit_result,
-    covariance_from_model, effectivelinkwiggle_formulaspec, family_arg_canonical_name,
-    load_dataset_projected, parse_formula, parse_link_choice, parse_matching_auxiliary_formula,
+    covariance_from_model, family_arg_canonical_name,
+    load_dataset_projected, parse_formula, parse_matching_auxiliary_formula,
     parse_surv_response, parse_survival_time_basis_config, predict_gam,
     prepend_id_column_to_prediction_csv, required_columns_for_fit, required_columns_for_formula,
-    route_marginal_slope_deviation_blocks, summarizewiggle_domain,
+    summarizewiggle_domain,
     validate_cli_firth_configuration, validate_fit_args_preflight,
     write_estimand_explicit_prediction_csv, write_prediction_csv,
     write_survival_binary_prediction_csv, write_survival_prediction_csv,
@@ -22,6 +22,9 @@ use crate::config_resolve::{
     SurvivalInverseLinkInput, parse_survival_inverse_link as parse_config_survival_inverse_link,
 };
 use clap::Parser;
+use gam::families::fit_orchestration::route_marginal_slope_deviation_blocks;
+use gam::smooth::collect_smooth_structure_warnings;
+use gam_data::DataSchema;
 
 /// Delete a test's temporary output file, reporting rather than swallowing a
 /// failure. Cleanup runs after the assertions, so a failure cannot invalidate
@@ -58,7 +61,9 @@ use gam::generative::sampleobservation_seeded_replicates;
 use gam::inference::data::{
     EncodedDataset as Dataset, UnseenCategoryPolicy, encode_recordswith_schema,
 };
-use gam::inference::formula_dsl::{ParsedTerm, parse_linkwiggle_formulaspec};
+use gam::inference::formula_dsl::{
+    ParsedTerm, effectivelinkwiggle_formulaspec, parse_link_choice, parse_linkwiggle_formulaspec,
+};
 use gam::inference::model::{
     ColumnKindTag, FittedModelPayload, MODEL_PAYLOAD_VERSION, ModelKind, SavedCompiledFlexBlock,
     SavedLatentZNormalization, SavedSurvivalLocationScaleStructure, SchemaColumn,
@@ -625,7 +630,6 @@ fn location_scale_fit_args(
     noise_formula: &str,
 ) -> FitArgs {
     FitArgs {
-        inference: true,
         expectile_tau: None,
         data,
         request: None,
@@ -1028,7 +1032,6 @@ fn issue_2116_cli_standard_fit_gates_duchon_operator_penalties_for_poisson() {
     fs::write(&train_path, csv).unwrap_or_else(|e| panic!("{} failed: {:?}", "write csv", e));
 
     run_fit(FitArgs {
-        inference: true,
         expectile_tau: None,
         data: train_path,
         request: None,
@@ -1163,7 +1166,6 @@ fn cli_and_engine_agree_on_the_left_truncated_survival_anchor_2631() {
 
     // ── CLI arm: the same request through `run_fit`, which fits `Surv(...)` through that service.
     run_fit(FitArgs {
-        inference: true,
         expectile_tau: None,
         data: train_path.clone(),
         request: None,
@@ -1251,7 +1253,6 @@ fn cli_weibull_route_anchors_left_truncated_data_at_the_median_exit_2631() {
 
     let model_path = td.path().join("weibull_default.model.json");
     run_fit(FitArgs {
-        inference: true,
         expectile_tau: None,
         data: train_path.clone(),
         request: None,
@@ -1692,7 +1693,6 @@ fn cli_surv_predict_noise_routes_to_survival_location_scale() {
     .unwrap_or_else(|e| panic!("{} failed: {:?}", "write survival training csv", e));
 
     run_fit(FitArgs {
-        inference: true,
         expectile_tau: None,
         data: train_path.clone(),
         request: None,
@@ -1929,7 +1929,6 @@ fn cli_bernoulli_marginal_slope_fit_saves_covariance_so_default_predict_succeeds
     write_bernoulli_marginal_slope_train_csv(&train_path);
 
     run_fit(FitArgs {
-        inference: true,
         expectile_tau: None,
         data: train_path.clone(),
         request: None,
@@ -2043,7 +2042,6 @@ fn cli_bernoulli_marginal_slope_rejects_z_column_in_main_formula() {
     write_bernoulli_marginal_slope_train_csv(&train_path);
 
     let err = run_fit(FitArgs {
-        inference: true,
         expectile_tau: None,
         data: train_path,
         request: None,
@@ -2061,7 +2059,7 @@ fn cli_bernoulli_marginal_slope_rejects_z_column_in_main_formula() {
         firth: false,
         family: FamilyArg::Auto,
         negative_binomial_theta: None,
-        survival_likelihood: Some("transformation".to_string()),
+        survival_likelihood: None,
         baseline_target: "linear".to_string(),
         baseline_scale: None,
         baseline_shape: None,
@@ -2078,7 +2076,7 @@ fn cli_bernoulli_marginal_slope_rejects_z_column_in_main_formula() {
     })
     .expect_err("main formula should reject z-column reuse");
 
-    assert!(err.contains("bernoulli marginal-slope reserves z column 'z'"));
+    assert!(err.contains("reserves z column 'z'"));
     assert!(err.contains("main formula"));
 }
 
@@ -2089,7 +2087,6 @@ fn cli_bernoulli_marginal_slope_rejects_z_column_in_slope_formula() {
     write_bernoulli_marginal_slope_train_csv(&train_path);
 
     let err = run_fit(FitArgs {
-        inference: true,
         expectile_tau: None,
         data: train_path,
         request: None,
@@ -2107,7 +2104,7 @@ fn cli_bernoulli_marginal_slope_rejects_z_column_in_slope_formula() {
         firth: false,
         family: FamilyArg::Auto,
         negative_binomial_theta: None,
-        survival_likelihood: Some("transformation".to_string()),
+        survival_likelihood: None,
         baseline_target: "linear".to_string(),
         baseline_scale: None,
         baseline_shape: None,
@@ -2124,8 +2121,8 @@ fn cli_bernoulli_marginal_slope_rejects_z_column_in_slope_formula() {
     })
     .expect_err("slope formula should reject z-column reuse");
 
-    assert!(err.contains("bernoulli marginal-slope reserves z column 'z'"));
-    assert!(err.contains("--slope-formula"));
+    assert!(err.contains("reserves z column 'z'"));
+    assert!(err.contains("slope_formula"));
 }
 
 #[test]
@@ -2555,7 +2552,6 @@ fn cli_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "write training csv", e));
 
     let fit_args = FitArgs {
-        inference: true,
         expectile_tau: None,
         data: train_path.clone(),
         request: None,
@@ -2692,7 +2688,6 @@ fn cli_fit_saves_covariance_so_default_binomial_predict_succeeds() {
 /// cap-guard regression tests below.
 fn binomial_link_fit_args(data: PathBuf, out: PathBuf, formula: &str) -> FitArgs {
     FitArgs {
-        inference: true,
         expectile_tau: None,
         data,
         request: None,
@@ -2840,7 +2835,6 @@ fn cli_firth_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "write training csv", e));
 
     let fit_args = FitArgs {
-        inference: true,
         expectile_tau: None,
         data: train_path.clone(),
         // Firth bias-reduction is only implemented for the binomial logit
@@ -4077,7 +4071,7 @@ fn marginal_slope_deviation_routing_splits_main_and_slope_linkwiggles() {
         "--slope-formula",
     )
     .unwrap_or_else(|e| panic!("{} failed: {:?}", "slope formula", e));
-    let routed = super::route_marginal_slope_deviation_blocks(
+    let routed = route_marginal_slope_deviation_blocks(
         parsed_main.linkwiggle.as_ref(),
         parsed_slope.linkwiggle.as_ref(),
     )
@@ -4106,7 +4100,7 @@ fn marginal_slope_routing_rejects_non_cubic_in_either_slot() {
     // or slope (score-warp) slot, since both feed the cubic runtime.
     let parsed_main = parse_formula("y ~ x + linkwiggle(degree=4, internal_knots=9)")
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "main formula parses", e));
-    let err = super::route_marginal_slope_deviation_blocks(parsed_main.linkwiggle.as_ref(), None)
+    let err = route_marginal_slope_deviation_blocks(parsed_main.linkwiggle.as_ref(), None)
         .expect_err("non-cubic main linkwiggle must be rejected at routing");
     assert!(err.contains("degree must be 3"), "got: {err}");
 
@@ -4117,61 +4111,9 @@ fn marginal_slope_routing_rejects_non_cubic_in_either_slot() {
     )
     .unwrap_or_else(|e| panic!("{} failed: {:?}", "slope formula parses", e));
     let err =
-        super::route_marginal_slope_deviation_blocks(None, parsed_slope.linkwiggle.as_ref())
+        route_marginal_slope_deviation_blocks(None, parsed_slope.linkwiggle.as_ref())
             .expect_err("non-cubic slope linkwiggle must be rejected at routing");
     assert!(err.contains("degree must be 3"), "got: {err}");
-}
-
-#[test]
-fn bernoulli_marginal_slope_accepts_only_probit_base_link() {
-    let parsed = parse_formula("y ~ x + link(type=probit)")
-        .unwrap_or_else(|e| panic!("{} failed: {:?}", "main formula", e));
-    let resolved = super::resolve_bernoulli_marginal_slope_base_link(
-        parsed.linkspec.as_ref(),
-        "bernoulli marginal-slope",
-    )
-    .unwrap_or_else(|e| panic!("{} failed: {:?}", "explicit probit base link", e));
-    assert_eq!(resolved, InverseLink::Standard(StandardLink::Probit));
-
-    for formula in [
-        "y ~ x + link(type=logit)",
-        "y ~ x + link(type=sas, sas_init=\"0.1,-0.2\")",
-        "y ~ x + link(type=beta-logistic, beta_logistic_init=\"0.3,0.7\")",
-        "y ~ x + link(type=blended(logit,probit,cloglog), rho=\"0.4,-0.1\")",
-    ] {
-        let parsed =
-            parse_formula(formula).unwrap_or_else(|e| panic!("{} failed: {:?}", "main formula", e));
-        let err = super::resolve_bernoulli_marginal_slope_base_link(
-            parsed.linkspec.as_ref(),
-            "bernoulli marginal-slope",
-        )
-        .expect_err("non-probit marginal-slope link should be rejected");
-        assert!(
-            err.contains("requires link(type=probit)"),
-            "unexpected error for {formula}: {err}"
-        );
-    }
-}
-
-#[test]
-fn bernoulli_marginal_slope_rejects_flexible_and_unbounded_base_links() {
-    let parsed = parse_formula("y ~ x + link(type=flexible(logit))")
-        .unwrap_or_else(|e| panic!("{} failed: {:?}", "main formula", e));
-    let err = super::resolve_bernoulli_marginal_slope_base_link(
-        parsed.linkspec.as_ref(),
-        "bernoulli marginal-slope",
-    )
-    .expect_err("flexible link should be rejected");
-    assert!(err.contains("does not accept flexible"));
-
-    let parsed = parse_formula("y ~ x + link(type=log)")
-        .unwrap_or_else(|e| panic!("{} failed: {:?}", "main formula", e));
-    let err = super::resolve_bernoulli_marginal_slope_base_link(
-        parsed.linkspec.as_ref(),
-        "bernoulli marginal-slope",
-    )
-    .expect_err("log link should be rejected");
-    assert!(err.contains("requires link(type=probit)"));
 }
 
 #[test]
@@ -4197,9 +4139,64 @@ fn parse_timewiggle_rejects_unknown_options() {
     );
 }
 
+/// Build a saved bernoulli marginal-slope model from resolved parts through the
+/// shared payload assembler, with the per-feature training ranges a fit saves.
+fn bernoulli_marginal_slope_saved_model_fixture(
+    formula: String,
+    data_schema: DataSchema,
+    slope_formula: String,
+    z_column: String,
+    training_headers: Vec<String>,
+    training_feature_ranges: Vec<(f64, f64)>,
+    resolved_marginalspec: TermCollectionSpec,
+    resolved_slopespec: TermCollectionSpec,
+    fit_result: gam::estimate::UnifiedFitResult,
+    p_marginal: usize,
+    baseline_marginal: f64,
+    baseline_slope: f64,
+    latent_z_normalization: SavedLatentZNormalization,
+    latent_measure: LatentMeasureKind,
+    latent_z_rank_int_calibration: Option<gam::families::bms::LatentZRankIntCalibration>,
+    latent_z_conditional_calibration: Option<gam::families::bms::LatentZConditionalCalibration>,
+    score_warp_runtime: Option<&gam::families::bms::DeviationRuntime>,
+    link_dev_runtime: Option<&gam::families::bms::DeviationRuntime>,
+    base_link: InverseLink,
+    frailty: gam::families::survival::lognormal_kernel::FrailtySpec,
+) -> Result<SavedModel, String> {
+    let payload = assemble_bernoulli_marginal_slope_payload(
+        BernoulliMarginalSlopeInputs {
+            formula,
+            data_schema,
+            slope_formula,
+            z_column,
+            resolved_marginalspec,
+            resolved_slopespec,
+            fit_result,
+            p_marginal,
+            baseline_marginal,
+            baseline_slope,
+            latent_z_normalization,
+            latent_measure,
+            latent_z_rank_int_calibration,
+            latent_z_conditional_calibration,
+            score_warp_runtime,
+            link_dev_runtime,
+            base_link,
+            frailty,
+        },
+        SavedModelSourceMetadata {
+            training_headers,
+            training_feature_ranges: Some(training_feature_ranges),
+            offset_column: None,
+            noise_offset_column: None,
+        },
+    )?;
+    Ok(SavedModel::from_payload(payload))
+}
+
 #[test]
 fn bernoulli_marginal_slope_saved_model_persists_exact_kernel_metadata_only() {
-    let model = super::build_bernoulli_marginal_slope_saved_model(
+    let model = bernoulli_marginal_slope_saved_model_fixture(
         "y ~ 1".to_string(),
         DataSchema { columns: vec![] },
         "y ~ 1".to_string(),
@@ -4424,7 +4421,7 @@ fn saved_bernoulli_marginal_slope_prediction_replays_latent_z_normalization() {
             ..saved_fit_summary_fixture()
         },
     ).expect("saved fit reconstruction");
-    let model = super::build_bernoulli_marginal_slope_saved_model(
+    let model = bernoulli_marginal_slope_saved_model_fixture(
         "y ~ 1".to_string(),
         DataSchema {
             columns: vec![SchemaColumn {
@@ -4509,7 +4506,7 @@ fn saved_bernoulli_marginal_slope_prediction_replays_latent_z_normalization() {
 
 #[test]
 fn saved_marginal_slope_models_require_latent_z_normalization() {
-    let mut bernoulli = super::build_bernoulli_marginal_slope_saved_model(
+    let mut bernoulli = bernoulli_marginal_slope_saved_model_fixture(
         "y ~ 1".to_string(),
         DataSchema { columns: vec![] },
         "y ~ 1".to_string(),

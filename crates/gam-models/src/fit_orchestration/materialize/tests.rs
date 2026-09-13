@@ -3721,3 +3721,56 @@ fn gaussian_location_scale_wiggle_face_criterion_gradient_matches_central_differ
         "no coordinate was graded on a stable active face: {grades:?}"
     );
 }
+
+#[test]
+fn marginal_slope_base_link_accepts_only_probit() {
+    let parsed = gam_terms::inference::formula_dsl::parse_formula("y ~ x + link(type=probit)")
+        .expect("main formula");
+    let resolved = super::marginal_slope::resolve_marginal_slope_base_link(
+        parsed.linkspec.as_ref(),
+        "bernoulli marginal-slope",
+    )
+    .expect("explicit probit base link");
+    assert_eq!(resolved, InverseLink::Standard(StandardLink::Probit));
+
+    for formula in [
+        "y ~ x + link(type=logit)",
+        "y ~ x + link(type=sas, sas_init=\"0.1,-0.2\")",
+        "y ~ x + link(type=beta-logistic, beta_logistic_init=\"0.3,0.7\")",
+        "y ~ x + link(type=blended(logit,probit,cloglog), rho=\"0.4,-0.1\")",
+    ] {
+        let parsed =
+            gam_terms::inference::formula_dsl::parse_formula(formula).expect("main formula");
+        let err = super::marginal_slope::resolve_marginal_slope_base_link(
+            parsed.linkspec.as_ref(),
+            "bernoulli marginal-slope",
+        )
+        .expect_err("non-probit marginal-slope link should be rejected");
+        assert!(
+            err.contains("requires link(type=probit)"),
+            "unexpected error for {formula}: {err}"
+        );
+    }
+}
+
+#[test]
+fn marginal_slope_base_link_rejects_flexible_and_unbounded_links() {
+    let parsed =
+        gam_terms::inference::formula_dsl::parse_formula("y ~ x + link(type=flexible(logit))")
+            .expect("main formula");
+    let err = super::marginal_slope::resolve_marginal_slope_base_link(
+        parsed.linkspec.as_ref(),
+        "bernoulli marginal-slope",
+    )
+    .expect_err("flexible link should be rejected");
+    assert!(err.contains("does not accept flexible"));
+
+    let parsed = gam_terms::inference::formula_dsl::parse_formula("y ~ x + link(type=log)")
+        .expect("main formula");
+    let err = super::marginal_slope::resolve_marginal_slope_base_link(
+        parsed.linkspec.as_ref(),
+        "bernoulli marginal-slope",
+    )
+    .expect_err("log link should be rejected");
+    assert!(err.contains("requires link(type=probit)"));
+}

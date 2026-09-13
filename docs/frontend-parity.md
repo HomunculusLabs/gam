@@ -23,7 +23,7 @@ APIs such as a matrix kernel.
 | CTN and calibrated marginal slope | typed requests / `CtnStage1Recipe` | `--transformation-normal`, `--slope-formula`, `--z-column` | same concepts as keywords | Parity |
 | Survival (transformation, Weibull, location-scale, marginal-slope, latent) and baseline/frailty controls | typed survival requests | `Surv(...)` plus survival, time-basis, baseline, frailty flags | `survival_likelihood=`, anchor/baseline/frailty keywords; formula/config for time basis | Parity through shared request |
 | Latent coordinates, analytic penalties, smooth descriptors, precision hyperpriors | request document and term builders | complete request (`--request`) | `latents=`, `penalties=`, `smooths=`, `precision_hyperpriors=` | Parity |
-| Fit-time conformal substrate and inference retention | request document | `--precompute-conformal`, `--inference` | `config=` request fields | Parity through shared request |
+| Fit-time conformal substrate | request document | `--precompute-conformal` | `config=` request fields | Parity through shared request |
 | Prediction and posterior-mean uncertainty | `gam::predict` saved-model machinery | `predict`, `--uncertainty`, `--level`, `--covariance-mode`, offsets and IDs | `Model.predict`, `predict_array`; interval, observation interval, covariance mode, IDs | Parity; Python exposes richer typed return objects |
 | Conformal prediction bands | `gam_predict::conformal_routes` | `predict --conformal`, `--calibration`, `--level` | `Model.predict(interval="conformal", calibration=...)` | Same Rust routes |
 | CTN observed-response score | saved-model prediction machinery | `transformation-score` | `Model.transformation_score` | Parity |
@@ -43,7 +43,7 @@ The one global flag is `--log-level`.
 
 | Command | Arguments and flags |
 |---|---|
-| `fit` | `DATA`, `FORMULA`; `--request`, `--predict-noise`, `--slope-formula`, `--z-column`, `--weights-column`, `--offset-column`, `--noise-offset-column`, `--frailty-kind`, `--frailty-sd`, `--hazard-loading`, `--transformation-normal`, `--firth`, `--family`, `--negative-binomial-theta`, `--expectile-tau`, `--survival-likelihood`, baseline and time-basis controls, `--scale-dimensions`, `--precompute-conformal`, `--inference`, `--persistent-warm-start-root`, `--out` |
+| `fit` | `DATA`, `FORMULA`; `--request`, `--predict-noise`, `--slope-formula`, `--z-column`, `--weights-column`, `--offset-column`, `--noise-offset-column`, `--frailty-kind`, `--frailty-sd`, `--hazard-loading`, `--transformation-normal`, `--firth`, `--family`, `--negative-binomial-theta`, `--expectile-tau`, `--survival-likelihood`, baseline and time-basis controls, `--scale-dimensions`, `--precompute-conformal`, `--persistent-warm-start-root`, `--out` |
 | `predict` | `MODEL NEW_DATA --out`; offset/noise-offset/ID, `--uncertainty`, `--level`, `--covariance-mode`, `--conformal`, `--calibration` |
 | `transformation-score` | `MODEL LABELLED_DATA --out`; offset and ID columns |
 | `diagnose` | `MODEL DATA` |

@@ -9284,5 +9284,19 @@
     ],
     "reason": "SPEC rules 9, 18 and 25 (#2899, #2631). gam fit --transformation-normal ran run_fit_transformation_normal, a CLI copy of the library transformation-normal materializer with its own saved-model assembly. The fit now goes through fit_formula_to_payload; run_fit_transformation_normal, build_transformation_normal_saved_model and FAMILY_TRANSFORMATION_NORMAL, which only that route read, are deleted.",
     "evidence": "Job 627938 (gate13, lane sw0, node acn82) stacked this slice on 0bbba5310 as phase S3A. source_removal_guard.py reported exactly these identities, and cargo check --keep-going --workspace --all-targets --exclude gam-pyffi at that phase exited 0 with 0 errors, so no code still names a deleted item (/scratch.global/sauer354/pool/prune-cli/gate13.627938.log)."
+  },
+  {
+    "base": "60017490034d1aa23c0cb0d9219569425efe0006",
+    "items": [
+      "crates/gam-cli/src/main/cli_args.rs:const:FAMILY_BERNOULLI_MARGINAL_SLOPE",
+      "crates/gam-cli/src/main/model_build.rs:fn:build_bernoulli_marginal_slope_saved_model",
+      "crates/gam-cli/src/main/model_build.rs:fn:resolve_bernoulli_marginal_slope_base_link",
+      "crates/gam-cli/src/main/run_fit.rs:fn:run_fit_bernoulli_marginal_slope",
+      "crates/gam-models/src/fit_orchestration/materialize/survival.rs:fn:resolve_survival_marginal_slope_base_link",
+      "tests/src_modules/misc/cli_tests.rs:fn:bernoulli_marginal_slope_accepts_only_probit_base_link",
+      "tests/src_modules/misc/cli_tests.rs:fn:bernoulli_marginal_slope_rejects_flexible_and_unbounded_base_links"
+    ],
+    "reason": "SPEC rules 9, 18 and 25 (#2899, #2631). gam fit --slope-formula/--z-column ran run_fit_bernoulli_marginal_slope, a CLI copy of the library marginal-slope materializer, while the library fitted any main-formula link as probit without a word. The base-link resolver moves into gam-models as resolve_marginal_slope_base_link, called by the Bernoulli and survival marginal-slope materializers, replacing resolve_survival_marginal_slope_base_link; the fit goes through fit_formula_to_payload and --inference, read only by that route, is deleted. run_fit_bernoulli_marginal_slope, build_bernoulli_marginal_slope_saved_model, the CLI resolve_bernoulli_marginal_slope_base_link and FAMILY_BERNOULLI_MARGINAL_SLOPE are deleted; the two CLI base-link tests move to gam-models materialize/tests.rs as marginal_slope_base_link_accepts_only_probit and marginal_slope_base_link_rejects_flexible_and_unbounded_links.",
+    "evidence": "Job 627938 (gate13, lane sw0, node acn82) stacked this slice on 0bbba5310 as phase S3B. source_removal_guard.py reported exactly these identities, and cargo check --keep-going --workspace --all-targets --exclude gam-pyffi at that phase exited 0 with 0 errors, so no code still names a deleted item (/scratch.global/sauer354/pool/prune-cli/gate13.627938.log)."
   }
 ]

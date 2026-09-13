@@ -211,7 +211,6 @@ pub(crate) struct FitArgs {
             "slope_time_k",
             "scale_dimensions",
             "precompute_conformal",
-            "inference",
             "persistent_warm_start_root"
         ]
     )]
@@ -353,16 +352,6 @@ pub(crate) struct FitArgs {
     /// its training data, fits in batch, or never asks for conformal intervals.
     #[arg(long = "precompute-conformal", action = ArgAction::Set, default_value_t = true)]
     pub(crate) precompute_conformal: bool,
-    /// Whether to compute the coefficient covariance and the standard errors
-    /// derived from it. `--inference false` fits point estimates only.
-    ///
-    /// Added because the bernoulli marginal-slope path used to tell callers to
-    /// "fit without inference if only point estimates are needed" while forcing
-    /// inference on unconditionally (gam#2718). Turning it off skips work whose
-    /// result is never read; it does NOT make an unavailable covariance
-    /// available, and a fit that withholds its covariance still says so.
-    #[arg(long = "inference", action = ArgAction::Set, default_value_t = true)]
-    pub(crate) inference: bool,
     /// Opt in to cross-process warm starts at this exact root. Omit to keep the
     /// fit disk-silent; no ambient temp/cache path is used.
     #[arg(long = "persistent-warm-start-root", value_name = "DIR")]
@@ -607,8 +596,6 @@ pub(crate) fn validate_cli_firth_configuration(
 pub(crate) const FAMILY_GAUSSIAN_LOCATION_SCALE: &str = "gaussian-location-scale";
 
 pub(crate) const FAMILY_BINOMIAL_LOCATION_SCALE: &str = "binomial-location-scale";
-
-pub(crate) const FAMILY_BERNOULLI_MARGINAL_SLOPE: &str = "bernoulli-marginal-slope";
 
 pub(crate) fn parse_positive_usize_cli(raw: &str) -> Result<usize, String> {
     let value = raw

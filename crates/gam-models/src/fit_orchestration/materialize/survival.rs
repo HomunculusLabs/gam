@@ -1,30 +1,5 @@
 use super::*;
 
-fn resolve_survival_marginal_slope_base_link(
-    linkspec: Option<&gam_terms::inference::formula_dsl::LinkFormulaSpec>,
-) -> Result<InverseLink, String> {
-    let Some(linkspec) = linkspec else {
-        return Ok(InverseLink::Standard(StandardLink::Probit));
-    };
-    let choice = parse_link_choice(Some(&linkspec.link), false)?
-        .ok_or_else(|| "invalid survival marginal-slope link".to_string())?;
-    if choice.mixture_components.is_some() {
-        return Err(WorkflowError::InvalidConfig {
-            reason: "survival marginal-slope currently supports only link(type=probit)".to_string(),
-        }
-        .into());
-    }
-    match choice.link {
-        LinkFunction::Probit => Ok(InverseLink::Standard(StandardLink::Probit)),
-        other => Err(WorkflowError::InvalidConfig {
-            reason: format!(
-                "survival marginal-slope currently supports only link(type=probit), got {other:?}"
-            ),
-        }
-        .into()),
-    }
-}
-
 pub(crate) fn materialize_survival<'a>(
     parsed: &ParsedFormula,
     data: &'a Dataset,
@@ -627,7 +602,10 @@ pub(crate) fn materialize_survival<'a>(
         marginal_slope_deviation_routing,
         marginal_slope_base_link,
     ) = if survival_mode == SurvivalLikelihoodMode::MarginalSlope {
-        let base_link = resolve_survival_marginal_slope_base_link(parsed.linkspec.as_ref())?;
+        let base_link = super::marginal_slope::resolve_marginal_slope_base_link(
+            parsed.linkspec.as_ref(),
+            "survival marginal-slope",
+        )?;
         if let Some(ls_formula) = config.slope_formula.as_deref() {
             let default_z_column = marginal_z_column_name.expect("z column present when no recipe");
             let (_, ls_parsed) =

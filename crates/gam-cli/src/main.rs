@@ -14,10 +14,6 @@ pub(crate) use gam::estimate::{
     ParametricTermSummary, UnifiedFitResult, smooth_term_summary_rows,
 };
 
-pub(crate) use gam::families::bms::{
-    BernoulliMarginalSlopeTermSpec, DeviationRuntime, LatentMeasureKind, LatentZPolicy,
-};
-
 pub(crate) use gam::families::survival::latent::fixed_latent_hazard_frailty;
 
 pub(crate) use gam::families::scale_design::build_scale_deviation_transform_design;
@@ -36,7 +32,7 @@ pub(crate) use gam::data::{
 };
 
 pub(crate) use gam::inference::formula_dsl::{
-    LinkChoice, LinkFormulaSpec, LinkMode, LinkWiggleFormulaSpec, ParsedFormula, ParsedTerm,
+    LinkChoice, LinkMode, LinkWiggleFormulaSpec, ParsedFormula, ParsedTerm,
     effectivelinkwiggle_formulaspec, parse_formula, parse_link_choice,
     parse_matching_auxiliary_formula, parse_surv_interval_response, parse_surv_response,
     parsed_term_column_names, require_inverse_link_supports_joint_wiggle,
@@ -46,14 +42,14 @@ pub(crate) use gam::inference::formula_dsl::{
 
 pub(crate) use gam::inference::model::{
     FittedFamily, FittedModel as SavedModel, FittedModelPayload, PredictModelClass,
-    SavedLatentZNormalization, load_survival_time_basis_config_from_model,
+    load_survival_time_basis_config_from_model,
 };
-pub(crate) use gam_data::{ColumnKindTag, DataSchema};
+pub(crate) use gam_data::ColumnKindTag;
 
 pub(crate) use gam::inference::model_payload_builders::{
-    BernoulliMarginalSlopeInputs, LocationScaleInputs, LocationScaleResponse,
+    LocationScaleInputs, LocationScaleResponse,
     LocationScaleWiggle, SavedModelSourceMetadata, StandardPayloadInputs,
-    apply_request_metadata, assemble_bernoulli_marginal_slope_payload,
+    apply_request_metadata,
     assemble_location_scale_payload,
     assemble_residual_cascade_payload, assemble_spline_scan_payload, assemble_standard_payload,
     };
@@ -117,7 +113,7 @@ pub(crate) use gam::families::survival::predict::{
 };
 
 pub(crate) use gam::term_builder::{
-    build_termspec, column_map_with_alias, enable_scale_dimensions, resolve_role_col,
+    build_termspec, enable_scale_dimensions, resolve_role_col,
 };
 
 pub(crate) use gam::types::{
@@ -126,12 +122,11 @@ pub(crate) use gam::types::{
 };
 
 pub(crate) use gam::families::fit_orchestration::{
-    BernoulliMarginalSlopeFitRequest, BinomialLocationScaleFitRequest,
+    BinomialLocationScaleFitRequest,
     DispersionLocationScaleFitRequest, FitConfig, FitRequest, FitResult,
     GaussianLocationScaleFitRequest, LinkWiggleConfig, PreparedSurvivalTimeStack, WorkflowError,
     fit_from_formula_with_notes, fit_model, is_binary_response, prepare_survival_time_stack,
     resolve_offset_column, resolve_weight_column, response_column_kind,
-    route_marginal_slope_deviation_blocks,
 };
 
 pub(crate) use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};

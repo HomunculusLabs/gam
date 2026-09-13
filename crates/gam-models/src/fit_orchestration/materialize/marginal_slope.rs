@@ -65,6 +65,51 @@ fn validate_bernoulli_marginal_slope_z_column_variance(
     })
 }
 
+/// Resolve a marginal-slope fit's base link from the main formula's `link(...)`.
+/// The calibrated de-nested kernel is probit-only, so another link, a
+/// `flexible(...)` wrapper, or link parameters that only another link reads are
+/// refused rather than fitted as probit without a word.
+pub(super) fn resolve_marginal_slope_base_link(
+    linkspec: Option<&gam_terms::inference::formula_dsl::LinkFormulaSpec>,
+    context: &str,
+) -> Result<InverseLink, String> {
+    let Some(linkspec) = linkspec else {
+        return Ok(InverseLink::Standard(StandardLink::Probit));
+    };
+    let Some(choice) = parse_link_choice(Some(&linkspec.link), false)? else {
+        return Ok(InverseLink::Standard(StandardLink::Probit));
+    };
+    if matches!(
+        choice.mode,
+        gam_terms::inference::formula_dsl::LinkMode::Flexible
+    ) {
+        return Err(format!(
+            "{context} does not accept flexible(...) inside link(); use link(type=<base-link>) plus linkwiggle(...) to learn anchored link deviations"
+        ));
+    }
+    if choice.mixture_components.is_some() || choice.link != LinkFunction::Probit {
+        return Err(format!(
+            "{context} requires link(type=probit); non-probit marginal-slope links are not supported by the calibrated de-nested probit kernel"
+        ));
+    }
+    if linkspec.sas_init.is_some() {
+        return Err(format!(
+            "link(sas_init=...) requires link(type=sas), which {context} does not support"
+        ));
+    }
+    if linkspec.beta_logistic_init.is_some() {
+        return Err(format!(
+            "link(beta_logistic_init=...) requires link(type=beta-logistic), which {context} does not support"
+        ));
+    }
+    if linkspec.mixture_rho.is_some() {
+        return Err(format!(
+            "link(rho=...) requires link(type=blended(...)/mixture(...)), which {context} does not support"
+        ));
+    }
+    Ok(InverseLink::Standard(StandardLink::Probit))
+}
+
 pub(crate) fn materialize_bernoulli_marginal_slope<'a>(
     parsed: &ParsedFormula,
     data: &'a Dataset,
@@ -104,6 +149,8 @@ pub(crate) fn materialize_bernoulli_marginal_slope<'a>(
         }
         .into());
     }
+    let base_link =
+        resolve_marginal_slope_base_link(parsed.linkspec.as_ref(), "bernoulli marginal-slope")?;
     validate_marginal_slope_z_column_exclusion(
         parsed,
         &parsed_slope,
@@ -182,7 +229,7 @@ pub(crate) fn materialize_bernoulli_marginal_slope<'a>(
         y,
         weights,
         z,
-        base_link: InverseLink::Standard(StandardLink::Probit),
+        base_link,
         marginalspec,
         slopespec,
         marginal_offset,

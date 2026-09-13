@@ -3966,5 +3966,15 @@
     },
     "reason": "SPEC rules 9, 18 and 25 (#2899, #2631). gam fit --transformation-normal ran run_fit_transformation_normal, a CLI copy of the library transformation-normal materializer with its own saved-model assembly. The fit now goes through fit_formula_to_payload; run_fit_transformation_normal, build_transformation_normal_saved_model and FAMILY_TRANSFORMATION_NORMAL, which only that route read, are deleted.",
     "evidence": "Job 627938 phase S3A: public_api_census.py counted 11590 -> 11588 public function declarations and reported exactly these as removed; the all-targets workspace check at that phase exited 0 with 0 errors (/scratch.global/sauer354/pool/prune-cli/gate13.627938.log)."
+  },
+  {
+    "base": "60017490034d1aa23c0cb0d9219569425efe0006",
+    "removed": {
+      "crates/gam-cli/src/main/model_build.rs::build_bernoulli_marginal_slope_saved_model": 1,
+      "crates/gam-cli/src/main/model_build.rs::resolve_bernoulli_marginal_slope_base_link": 1,
+      "crates/gam-cli/src/main/run_fit.rs::run_fit_bernoulli_marginal_slope": 1
+    },
+    "reason": "SPEC rules 9, 18 and 25 (#2899, #2631). gam fit --slope-formula/--z-column ran run_fit_bernoulli_marginal_slope, a CLI copy of the library marginal-slope materializer, while the library fitted any main-formula link as probit without a word. The base-link resolver moves into gam-models as resolve_marginal_slope_base_link, called by the Bernoulli and survival marginal-slope materializers, replacing resolve_survival_marginal_slope_base_link; the fit goes through fit_formula_to_payload and --inference, read only by that route, is deleted. run_fit_bernoulli_marginal_slope, build_bernoulli_marginal_slope_saved_model, the CLI resolve_bernoulli_marginal_slope_base_link and FAMILY_BERNOULLI_MARGINAL_SLOPE are deleted; the two CLI base-link tests move to gam-models materialize/tests.rs as marginal_slope_base_link_accepts_only_probit and marginal_slope_base_link_rejects_flexible_and_unbounded_links.",
+    "evidence": "Job 627938 phase S3B: public_api_census.py counted 11588 -> 11586 public function declarations and reported exactly these as removed; the all-targets workspace check at that phase exited 0 with 0 errors (/scratch.global/sauer354/pool/prune-cli/gate13.627938.log)."
   }
 ]
