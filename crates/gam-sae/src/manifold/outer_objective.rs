@@ -2767,6 +2767,48 @@ fn root_equivalent_log_step(gradient: f64, energy: f64) -> Option<f64> {
     (energy > 0.0 && ratio > 0.0 && ratio.is_finite()).then(|| ratio.ln())
 }
 
+/// The gated decoder data Gram of one atom at `assignments`,
+/// `Σ_row w_row·g_row²·φ(t_row)φ(t_row)ᵀ`, where `w_row` is the honesty weight
+/// times the row metric's trace when that metric whitens the likelihood. The
+/// reactive entry face and the resolvability domain read this one matrix.
+fn gated_decoder_gram(
+    term: &SaeManifoldTerm,
+    assignments: &Array2<f64>,
+    atom_idx: usize,
+) -> Result<Array2<f64>, String> {
+    let atom = &term.atoms[atom_idx];
+    let m = atom.basis_values.ncols();
+    let whitens = term
+        .row_metric
+        .as_ref()
+        .is_some_and(gam_problem::RowMetric::whitens_likelihood);
+    let mut data_gram = Array2::<f64>::zeros((m, m));
+    for row in 0..term.n_obs() {
+        let honesty_weight = term
+            .row_loss_weights
+            .as_ref()
+            .map_or(1.0, |weights| weights[row]);
+        let metric_norm_bound = match term.row_metric.as_ref() {
+            Some(metric) if whitens => metric.row_traces()[row],
+            _ => 1.0,
+        };
+        let gate = assignments[[row, atom_idx]];
+        let weight = honesty_weight * metric_norm_bound * gate * gate;
+        if !(weight.is_finite() && weight >= 0.0) {
+            return Err(format!(
+                "reactive rho domain: atom {atom_idx} row {row} has invalid data-curvature weight {weight}"
+            ));
+        }
+        for left in 0..m {
+            let weighted_left = weight * atom.basis_values[[row, left]];
+            for right in 0..m {
+                data_gram[[left, right]] += weighted_left * atom.basis_values[[row, right]];
+            }
+        }
+    }
+    Ok(data_gram)
+}
+
 /// Exact scale of the decoder data curvature relative to one unit of an atom's
 /// native smoothing penalty. This is the largest generalized eigenvalue of
 /// `(G, P)` on `range(P)`, computed as
@@ -2799,34 +2841,7 @@ fn reactive_smooth_curvature_scale(
         return Ok(None);
     }
 
-    let whitens = term
-        .row_metric
-        .as_ref()
-        .is_some_and(gam_problem::RowMetric::whitens_likelihood);
-    let mut data_gram = Array2::<f64>::zeros((m, m));
-    for row in 0..term.n_obs() {
-        let honesty_weight = term
-            .row_loss_weights
-            .as_ref()
-            .map_or(1.0, |weights| weights[row]);
-        let metric_norm_bound = match term.row_metric.as_ref() {
-            Some(metric) if whitens => metric.row_traces()[row],
-            _ => 1.0,
-        };
-        let gate = assignments[[row, atom_idx]];
-        let weight = honesty_weight * metric_norm_bound * gate * gate;
-        if !(weight.is_finite() && weight >= 0.0) {
-            return Err(format!(
-                "reactive rho domain: atom {atom_idx} row {row} has invalid data-curvature weight {weight}"
-            ));
-        }
-        for left in 0..m {
-            let weighted_left = weight * atom.basis_values[[row, left]];
-            for right in 0..m {
-                data_gram[[left, right]] += weighted_left * atom.basis_values[[row, right]];
-            }
-        }
-    }
+    let data_gram = gated_decoder_gram(term, assignments, atom_idx)?;
 
     // Form the PSD square root of P⁺ on exactly the retained penalty range.
     // The declared penalty pseudoinverse cutoff owns the rank decision;
@@ -2935,6 +2950,18 @@ fn observed_ard_curvature_scale(
     atom_idx: usize,
     axis: usize,
 ) -> Result<f64, String> {
+    observed_ard_curvature_range(term, assignments, atom_idx, axis).map(|(_, largest)| largest)
+}
+
+/// The smallest positive and the largest row value of the observed latent
+/// Gauss--Newton curvature of one ARD axis (see [`observed_ard_curvature_scale`]).
+/// The smallest is `+∞` when no row carries curvature on the axis.
+fn observed_ard_curvature_range(
+    term: &SaeManifoldTerm,
+    assignments: &Array2<f64>,
+    atom_idx: usize,
+    axis: usize,
+) -> Result<(f64, f64), String> {
     let atom = &term.atoms[atom_idx];
     let p = atom.decoder_coefficients().ncols();
     let m = atom.decoder_coefficients().nrows();
@@ -2950,6 +2977,7 @@ fn observed_ard_curvature_scale(
         .as_ref()
         .is_some_and(gam_problem::RowMetric::whitens_likelihood);
     let mut tangent = vec![0.0_f64; p];
+    let mut minimum_positive = f64::INFINITY;
     let mut maximum = 0.0_f64;
     for row in 0..term.n_obs() {
         tangent.fill(0.0);
@@ -2978,9 +3006,61 @@ fn observed_ard_curvature_scale(
                 "reactive rho domain: atom {atom_idx} axis {axis} row {row} has invalid latent data curvature {curvature}"
             ));
         }
+        if curvature > 0.0 {
+            minimum_positive = minimum_positive.min(curvature);
+        }
         maximum = maximum.max(curvature);
     }
-    Ok(maximum)
+    Ok((minimum_positive, maximum))
+}
+
+/// Per-coordinate resolvability faces (#2812) for the decoder-smoothness and ARD
+/// log strengths, read off the baseline term's gated operators.
+///
+/// A smoothing coordinate's generalized eigenvalues `γ_j` are those of its atom's
+/// gated decoder Gram against the native smooth penalty on the penalty range. An
+/// ARD coordinate's are the per-row observed Gauss--Newton curvatures of its
+/// axis, because native Gaussian ARD curvature has unit coefficient before
+/// `alpha`. Either way the domain is `[ln(√ε·γ_min), ln(γ_max/√ε)]`: past either
+/// face every direction's share of the ρ-gradient is under its own round-off, so
+/// a railed strength is a structural result. A coordinate several atoms alias
+/// (`ArdSharing::Shared`) takes the union of their eigenvalues, and a coordinate
+/// with no curved direction declares no face here. These faces replace the outer
+/// engine's ±30 fallback, which capped every declared face (SPEC rule 20,
+/// #2902 row 8).
+fn resolvability_domain_faces(
+    term: &SaeManifoldTerm,
+    rho: &SaeManifoldRho,
+    assignments: &Array2<f64>,
+) -> Result<Vec<(usize, f64, f64)>, String> {
+    use gam_solve::estimate::rho_domain;
+    let mut gammas = std::collections::BTreeMap::<usize, Vec<f64>>::new();
+    for atom_idx in 0..rho.k_atoms() {
+        let gram = gated_decoder_gram(term, assignments, atom_idx)?;
+        if let Some(values) =
+            rho_domain::penalty_range_gammas_from_gram(&gram, term.atoms[atom_idx].smooth_penalty())
+        {
+            gammas
+                .entry(rho.smooth_flat_index(atom_idx))
+                .or_default()
+                .extend(values);
+        }
+        for axis in 0..rho.log_ard[atom_idx].len() {
+            let (smallest, largest) =
+                observed_ard_curvature_range(term, assignments, atom_idx, axis)?;
+            let values = gammas.entry(rho.ard_flat_index(atom_idx, axis)).or_default();
+            if largest > 0.0 {
+                values.push(smallest);
+                values.push(largest);
+            }
+        }
+    }
+    Ok(gammas
+        .into_iter()
+        .filter_map(|(index, values)| {
+            rho_domain::resolvability_interval(&values).map(|(lower, upper)| (index, lower, upper))
+        })
+        .collect())
 }
 
 /// Objective-owned legal rho upper face for dense reactive SAE fits.
@@ -3738,6 +3818,12 @@ impl OuterObjective for SaeManifoldOuterObjective {
             &baseline_assignments,
         )
         .map_err(EstimationError::RemlOptimizationFailed)?;
+        let resolvability_faces = resolvability_domain_faces(
+            &self.baseline_term,
+            &self.baseline_rho,
+            &baseline_assignments,
+        )
+        .map_err(EstimationError::RemlOptimizationFailed)?;
         // Every other face in this function keeps the literal target strength
         // inside the box (`target_strength.max(scale)`); this one does the same,
         // so a caller-installed ARD entry can never be made infeasible by a
@@ -3745,6 +3831,9 @@ impl OuterObjective for SaeManifoldOuterObjective {
         let target = self.baseline_rho.to_flat();
         let Some(contract) = self.reactive_domain_scalar_contract()? else {
             if let Some(bounds) = log_strength_upper.as_mut() {
+                for &(index, _, upper) in &resolvability_faces {
+                    bounds[index] = bounds[index].min(upper.max(target[index]));
+                }
                 for &(index, face) in &chart_faces {
                     bounds[index] = bounds[index].min(face.max(target[index]));
                 }
@@ -3791,6 +3880,9 @@ impl OuterObjective for SaeManifoldOuterObjective {
         for &(index, face) in &chart_faces {
             reactive_upper[index] = reactive_upper[index].min(face.max(target[index]));
         }
+        for &(index, _, upper) in &resolvability_faces {
+            reactive_upper[index] = reactive_upper[index].min(upper.max(target[index]));
+        }
         // Reactive-domain construction knows only log-strength coordinates.
         // Curvature is a raw, scale-dependent coordinate, so its typed geometry
         // rail replaces (rather than intersects) that generic placeholder.
@@ -3817,6 +3909,18 @@ impl OuterObjective for SaeManifoldOuterObjective {
             bounds[index] = bounds[index].max(alpha_lower);
         }
         if let Some(bounds) = lower.as_mut() {
+            let assignments = self
+                .baseline_term
+                .assignment
+                .try_assignments()
+                .map_err(EstimationError::RemlOptimizationFailed)?;
+            let target = self.baseline_rho.to_flat();
+            for (index, face, _) in
+                resolvability_domain_faces(&self.baseline_term, &self.baseline_rho, &assignments)
+                    .map_err(EstimationError::RemlOptimizationFailed)?
+            {
+                bounds[index] = bounds[index].max(face.min(target[index]));
+            }
             for (index, curvature_lower, _) in self.curvature_domain_bounds()? {
                 bounds[index] = curvature_lower;
             }
