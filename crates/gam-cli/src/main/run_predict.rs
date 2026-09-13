@@ -169,7 +169,7 @@ fn build_saved_cause_specific_survival_alo_input(
         .map_err(|error| error.to_string())?;
 
     let weibull_baseline_in_beta = likelihood_mode == SurvivalLikelihoodMode::Weibull
-        && !baseline_timewiggle_is_present(model);
+        && !model.has_baseline_time_wiggle();
     let time_config = load_survival_time_basis_config_from_model(model)?;
     let mut time_build =
         build_survival_time_basis(&age_entry, &age_exit, time_config.clone(), None)?;
@@ -196,7 +196,7 @@ fn build_saved_cause_specific_survival_alo_input(
             &anchor_row,
         )?;
     }
-    if likelihood_mode != SurvivalLikelihoodMode::Weibull && !baseline_timewiggle_is_present(model)
+    if likelihood_mode != SurvivalLikelihoodMode::Weibull && !model.has_baseline_time_wiggle()
     {
         require_structural_survival_time_basis(
             &time_build.basisname,
@@ -263,7 +263,7 @@ fn build_saved_cause_specific_survival_alo_input(
     }
     let p_timewiggle = p_timewiggle.unwrap_or(0);
     let timewiggle_components = if p_timewiggle == 0 {
-        if baseline_timewiggle_is_present(model) {
+        if model.has_baseline_time_wiggle() {
             return Err(
                 "saved survival ALO carries baseline-timewiggle metadata but its fitted endpoint blocks contain no timewiggle coefficients"
                     .to_string(),
@@ -2238,7 +2238,7 @@ pub(crate) fn run_predict_survival(
     // parametric offset IS the baseline and beta carries only the wiggle
     // deviation), so it is excluded.
     let weibull_baseline_in_beta = saved_likelihood_mode == SurvivalLikelihoodMode::Weibull
-        && !baseline_timewiggle_is_present(model);
+        && !model.has_baseline_time_wiggle();
     let time_cfg = load_survival_time_basis_config_from_model(model)?;
     let mut time_build = build_survival_time_basis(&age_entry, &age_exit, time_cfg.clone(), None)?;
     let resolved_time_cfg = resolved_survival_time_basis_config_from_build(
@@ -2264,7 +2264,7 @@ pub(crate) fn run_predict_survival(
         )?;
     }
     if saved_likelihood_mode != SurvivalLikelihoodMode::Weibull
-        && !baseline_timewiggle_is_present(model)
+        && !model.has_baseline_time_wiggle()
     {
         require_structural_survival_time_basis(&time_build.basisname, "saved survival sampling")?;
     }

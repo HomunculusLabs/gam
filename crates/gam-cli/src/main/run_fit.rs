@@ -94,46 +94,6 @@ pub(crate) fn resolve_fit_invocation(
     }
 }
 
-pub(crate) fn fit_config_from_survival_args(args: &SurvivalArgs) -> Result<FitConfig, String> {
-    FitConfig {
-        link: args.link.clone(),
-        offset_column: args.offset_column.clone(),
-        weight_column: args.weights_column.clone(),
-        noise_offset_column: args.noise_offset_column.clone(),
-        baseline_target: args.baseline_target.clone(),
-        baseline_scale: args.baseline_scale,
-        baseline_shape: args.baseline_shape,
-        baseline_rate: args.baseline_rate,
-        baseline_makeham: args.baseline_makeham,
-        time_basis: args.time_basis.clone(),
-        time_degree: args.time_degree,
-        time_num_internal_knots: args.time_num_internal_knots,
-        // `SurvivalArgs` already carries a resolved concrete mode; this is a
-        // survival fit, so the explicit `Some` is correct.
-        survival_likelihood: Some(args.survival_likelihood.clone()),
-        // The baseline time-basis anchor is model configuration, not front-end
-        // transport (#2631) — `run_survival` reads it from here, so this is the
-        // seam that carries it into the CLI's own materialization.
-        survival_time_anchor: args.survival_time_anchor,
-        survival_distribution: args.survival_distribution.clone(),
-        threshold_time_k: args.threshold_time_k,
-        threshold_time_degree: args.threshold_time_degree,
-        sigma_time_k: args.sigma_time_k,
-        sigma_time_degree: args.sigma_time_degree,
-        slope_time_k: args.slope_time_k,
-        slope_time_degree: args.slope_time_degree,
-        noise_formula: args.predict_noise.clone(),
-        slope_formula: args.slope_formula.clone(),
-        z_column: args.z_column.clone(),
-        scale_dimensions: args.scale_dimensions,
-        spatial_optimization: SpatialLengthScaleOptimizationOptions::default(),
-        frailty: args.frailty.clone(),
-        persistent_warm_start_store: args.persistent_warm_start_store.clone(),
-        ..FitConfig::default()
-    }
-    .resolve()
-}
-
 fn required_columns_for_resolved_fit(
     args: &FitArgs,
     parsed: &ParsedFormula,
@@ -219,7 +179,7 @@ pub(crate) fn run_fit(args: FitArgs) -> Result<(), String> {
     let effective_beta_logistic_init = formula_link
         .as_ref()
         .and_then(|s| s.beta_logistic_init.clone());
-    if let Some((entry, exit, event)) = parse_surv_response(&parsed.response)? {
+    if parse_surv_response(&parsed.response)?.is_some() {
         validate_cli_firth_configuration(CliFirthValidation {
             enabled: fit_config.firth,
             family: LikelihoodSpec::royston_parmar(),
@@ -227,56 +187,7 @@ pub(crate) fn run_fit(args: FitArgs) -> Result<(), String> {
             is_survival: true,
             link_choice: None,
         })?;
-        let rhs = formula_rhs_text(&formula_text)?;
-        let formula_surv = parsed.survivalspec.clone();
-        let surv_args = SurvivalArgs {
-            data: args.data.clone(),
-            entry,
-            exit,
-            event,
-            // `entry == None` = right-censored shorthand `Surv(time, event)`;
-            // entry times are synthesized as zero at materialization time.
-            formula: rhs,
-            predict_noise: fit_config.noise_formula.clone(),
-            survival_likelihood: fit_config.resolved_survival_likelihood().to_string(),
-            survival_distribution: formula_surv
-                .as_ref()
-                .and_then(|s| s.survival_distribution.clone())
-                .unwrap_or_else(|| "gaussian".to_string()),
-            link: effective_link_arg.clone(),
-            mixture_rho: effective_mixture_rho.clone(),
-            sas_init: effective_sas_init.clone(),
-            beta_logistic_init: effective_beta_logistic_init.clone(),
-            // From the RESOLVED config, like every other survival knob in this
-            // literal: the anchor exists only in a `--request` document (#2631).
-            survival_time_anchor: fit_config.survival_time_anchor,
-            baseline_target: fit_config.baseline_target.clone(),
-            baseline_scale: fit_config.baseline_scale,
-            baseline_shape: fit_config.baseline_shape,
-            baseline_rate: fit_config.baseline_rate,
-            baseline_makeham: fit_config.baseline_makeham,
-            time_basis: fit_config.time_basis.clone(),
-            time_degree: fit_config.time_degree,
-            time_num_internal_knots: fit_config.time_num_internal_knots,
-            threshold_time_k: fit_config.threshold_time_k,
-            threshold_time_degree: fit_config.threshold_time_degree,
-            sigma_time_k: fit_config.sigma_time_k,
-            sigma_time_degree: fit_config.sigma_time_degree,
-            slope_time_k: fit_config.slope_time_k,
-            slope_time_degree: fit_config.slope_time_degree,
-            scale_dimensions: fit_config.scale_dimensions,
-            out: args.out.clone(),
-            slope_formula: fit_config.slope_formula.clone(),
-            z_column: fit_config.z_column.clone(),
-            weights_column: fit_config.weight_column.clone(),
-            offset_column: fit_config.offset_column.clone(),
-            noise_offset_column: fit_config.noise_offset_column.clone(),
-            // The resolved frailty, not the `--frailty-*` flags: they conflict with
-            // `--request`, so reading `args` here would drop a document's frailty.
-            frailty: fit_config.frailty.clone(),
-            persistent_warm_start_store: fit_config.persistent_warm_start_store.clone(),
-        };
-        return run_survival(surv_args);
+        return run_library_formula_fit(&args, &parsed, formula_text, &fit_config);
     }
     // Multinomial is a softmax multi-output family (categorical response, K-1
     // active-class linear predictors): it owns its own dataset load (with the
@@ -707,6 +618,49 @@ fn run_canonical_standard_fit(
         ),
     }
 }
+
+/// Fit a formula through the library's formula-to-payload service, the one the
+/// Python bindings use, and save the model. The CLI owns only loading the data
+/// and writing the file, so a `--request` document reaches the fit whole.
+fn run_library_formula_fit(
+    args: &FitArgs,
+    parsed: &ParsedFormula,
+    formula: String,
+    fit_config: &FitConfig,
+) -> Result<(), String> {
+    let out = args
+        .out
+        .as_ref()
+        .ok_or("fit requires --out; refusing to run a training job that writes no model")?;
+    let requested_columns = required_columns_for_resolved_fit(args, parsed, fit_config)?;
+    let dataset = load_fit_dataset_with_roles(&args.data, &requested_columns, parsed, false)?;
+    require_dataset_rows("fit", &args.data, dataset.values.nrows())?;
+    let phase_start = std::time::Instant::now();
+    log::info!("[PHASE] formula fit start n={}", dataset.values.nrows());
+    let payload = gam::inference::model_payload_builders::fit_formula_to_payload(
+        formula,
+        &dataset,
+        fit_config,
+    )
+    .map_err(|error| format!("formula fit failed: {error}"))?;
+    log::info!(
+        "[PHASE] formula fit end elapsed={:.3}s",
+        phase_start.elapsed().as_secs_f64()
+    );
+    print_inference_summary(&payload.inference_notes);
+    if let Some(fit) = payload.fit_result.as_ref() {
+        cli_out!(
+            "{} fit | status={} | iterations={} | loglik={:.6e} | objective={}",
+            payload.family,
+            fit.convergence_evidence().inner_status().label(),
+            fit.outer_iterations,
+            fit.log_likelihood,
+            gam::estimate::criterion_display(fit.reml_score()),
+        );
+    }
+    write_payload_json(out, payload)
+}
+
 pub(crate) fn run_fit_bernoulli_marginal_slope(
     args: &FitArgs,
     fit_config: &FitConfig,

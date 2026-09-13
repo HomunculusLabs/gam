@@ -1,21 +1,5 @@
 use super::*;
 
-pub(crate) trait CliCauseCountResult {
-    fn into_cli_result(self) -> Result<usize, String>;
-}
-
-impl CliCauseCountResult for usize {
-    fn into_cli_result(self) -> Result<usize, String> {
-        Ok(self)
-    }
-}
-
-impl<E: ToString> CliCauseCountResult for Result<usize, E> {
-    fn into_cli_result(self) -> Result<usize, String> {
-        self.map_err(|err| err.to_string())
-    }
-}
-
 pub(crate) type CliResult<T> = Result<T, CliError>;
 
 #[derive(Debug, Error)]

@@ -1,8 +1,8 @@
 use super::{
     BlockRole, BoundedCoefficientPriorSpec, CliError, CliFirthValidation, DataSchema,
     FAMILY_GAUSSIAN_LOCATION_SCALE, FamilyArg, FittedFamily, LikelihoodSpec, LinkChoice, LinkMode,
-    ResponseFamily, SavedFitSummary, SavedModel, SurvivalArgs, SurvivalBaselineTarget,
-    SurvivalLikelihoodMode, SurvivalTimeBasisConfig, build_survival_time_basis,
+    ResponseFamily, SavedFitSummary, SavedModel, SurvivalBaselineTarget,
+    SurvivalLikelihoodMode, build_survival_time_basis,
     collect_smooth_structure_warnings, compact_fit_result_for_batch,
     compact_saved_multiblock_fit_result, compute_probit_q0_from_eta, core_saved_fit_result,
     covariance_from_model, effectivelinkwiggle_formulaspec, family_arg_canonical_name,
@@ -47,6 +47,7 @@ use gam::families::survival::construction::build_survival_baseline_offsets;
 use gam::families::survival::construction::build_survival_timewiggle_from_baseline;
 use gam::families::survival::construction::parse_survival_baseline_config;
 use gam::families::survival::construction::{SurvivalBaselineConfig, evaluate_survival_baseline};
+use gam::families::survival::construction::SurvivalTimeBasisConfig;
 use gam::families::survival::location_scale::{
     ResidualDistribution, SurvivalLocationScaleTimeParameterization,
     project_onto_linear_constraints,
@@ -1160,7 +1161,7 @@ fn cli_and_engine_agree_on_the_left_truncated_survival_anchor_2631() {
         .expect("a survival materialization must carry its realised time basis")
         .anchor;
 
-    // ── CLI arm: the same request through `run_fit` -> `run_survival`.
+    // ── CLI arm: the same request through `run_fit`, which fits `Surv(...)` through that service.
     run_fit(FitArgs {
         inference: true,
         expectile_tau: None,
@@ -1225,8 +1226,8 @@ fn cli_and_engine_agree_on_the_left_truncated_survival_anchor_2631() {
     remove_temp_file(&model_path);
 }
 
-/// #2631, the left-truncated half of the default route: `Weibull` takes the same
-/// `run_canonical_survival_transformation` short-circuit as `Transformation`, and
+/// #2631, the left-truncated half of the default route: `Weibull` fits through the
+/// same library service as `Transformation`, and
 /// converges on a thin left-truncated fixture where the Royston-Parmar
 /// transformation fit does not.
 ///
@@ -1308,8 +1309,7 @@ fn cli_weibull_route_anchors_left_truncated_data_at_the_median_exit_2631() {
 /// document. A survival route that took its settings from `FitArgs` rather
 /// than the resolved `FitConfig` would drop a document-supplied anchor without
 /// a word.
-/// This exercises the location-scale route, which `run_survival` materializes
-/// itself rather than delegating to the engine.
+/// This exercises the location-scale route.
 #[test]
 fn cli_request_document_survival_time_anchor_reaches_the_fit_2631() {
     const EXPLICIT_ANCHOR: f64 = 25.0;
@@ -5281,110 +5281,21 @@ fn gaussian_location_scale_generate_restores_sigma_to_response_units() {
 
 #[test]
 fn parse_survival_time_basis_accepts_ispline() {
-    let args = SurvivalArgs {
-        data: std::path::PathBuf::from("dummy.csv"),
-        entry: Some("entry".to_string()),
-        exit: "exit".to_string(),
-        event: "event".to_string(),
-        formula: "1".to_string(),
-        predict_noise: None,
-        survival_likelihood: "transformation".to_string(),
-        survival_distribution: "gaussian".to_string(),
-        link: None,
-        mixture_rho: None,
-        sas_init: None,
-        beta_logistic_init: None,
-        survival_time_anchor: None,
-        baseline_target: "linear".to_string(),
-        baseline_scale: None,
-        baseline_shape: None,
-        baseline_rate: None,
-        baseline_makeham: None,
-        time_basis: "ispline".to_string(),
-        time_degree: 2,
-        time_num_internal_knots: 6,
-        threshold_time_k: None,
-        threshold_time_degree: 3,
-        sigma_time_k: None,
-        sigma_time_degree: 3,
-        slope_time_k: None,
-        slope_time_degree: 3,
-        scale_dimensions: false,
-        out: None,
-        slope_formula: None,
-        z_column: None,
-        weights_column: None,
-        offset_column: None,
-        noise_offset_column: None,
-        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
-        persistent_warm_start_store: None,
-    };
-    let cfg = parse_survival_time_basis_config(
-        &args.time_basis,
-        args.time_degree,
-        args.time_num_internal_knots,
-    )
-    .unwrap_or_else(|e| panic!("{} failed: {:?}", "parse ispline time basis", e));
+    let cfg = parse_survival_time_basis_config("ispline", 2, 6)
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "parse ispline time basis", e));
     assert!(matches!(cfg, SurvivalTimeBasisConfig::ISpline { .. }));
 }
 
 #[test]
 fn parse_survival_time_basis_rejects_nonstructural_bases() {
-    let mut args = SurvivalArgs {
-        data: std::path::PathBuf::from("dummy.csv"),
-        entry: Some("entry".to_string()),
-        exit: "exit".to_string(),
-        event: "event".to_string(),
-        formula: "1".to_string(),
-        predict_noise: None,
-        survival_likelihood: "transformation".to_string(),
-        survival_distribution: "gaussian".to_string(),
-        link: None,
-        mixture_rho: None,
-        sas_init: None,
-        beta_logistic_init: None,
-        survival_time_anchor: None,
-        baseline_target: "linear".to_string(),
-        baseline_scale: None,
-        baseline_shape: None,
-        baseline_rate: None,
-        baseline_makeham: None,
-        time_basis: "linear".to_string(),
-        time_degree: 2,
-        time_num_internal_knots: 6,
-        threshold_time_k: None,
-        threshold_time_degree: 3,
-        sigma_time_k: None,
-        sigma_time_degree: 3,
-        slope_time_k: None,
-        slope_time_degree: 3,
-        scale_dimensions: false,
-        out: None,
-        slope_formula: None,
-        z_column: None,
-        weights_column: None,
-        offset_column: None,
-        noise_offset_column: None,
-        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
-        persistent_warm_start_store: None,
-    };
-    let err = parse_survival_time_basis_config(
-        &args.time_basis,
-        args.time_degree,
-        args.time_num_internal_knots,
-    )
-    .expect_err("linear survival time basis should be rejected");
+    let err = parse_survival_time_basis_config("linear", 2, 6)
+        .expect_err("linear survival time basis should be rejected");
     assert!(err.contains("structural"));
     assert!(err.contains("ispline"));
     assert!(err.contains("survival semantics"));
 
-    args.time_basis = "bspline".to_string();
-    let err = parse_survival_time_basis_config(
-        &args.time_basis,
-        args.time_degree,
-        args.time_num_internal_knots,
-    )
-    .expect_err("bspline survival time basis should be rejected");
+    let err = parse_survival_time_basis_config("bspline", 2, 6)
+        .expect_err("bspline survival time basis should be rejected");
     assert!(err.contains("structural"));
     assert!(err.contains("ispline"));
     assert!(err.contains("non-monotone"));
@@ -6723,59 +6634,24 @@ fn parse_link_choice_flexible_shorthand_defaults_to_probit() {
     assert!(choice.mixture_components.is_none());
 }
 
-fn parse_survival_inverse_link(args: &SurvivalArgs) -> Result<InverseLink, String> {
+fn parse_survival_inverse_link(
+    link: &str,
+    mixture_rho: Option<&str>,
+    sas_init: Option<&str>,
+    beta_logistic_init: Option<&str>,
+) -> Result<InverseLink, String> {
     parse_config_survival_inverse_link(SurvivalInverseLinkInput {
-        link: args.link.as_deref(),
-        mixture_rho: args.mixture_rho.as_deref(),
-        sas_init: args.sas_init.as_deref(),
-        beta_logistic_init: args.beta_logistic_init.as_deref(),
-        survival_distribution: &args.survival_distribution,
+        link: Some(link),
+        mixture_rho,
+        sas_init,
+        beta_logistic_init,
+        survival_distribution: "gaussian",
     })
 }
 
 #[test]
 fn parse_survival_inverse_link_accepts_sas_init() {
-    let mut args = SurvivalArgs {
-        data: std::path::PathBuf::from("dummy.csv"),
-        entry: Some("entry".to_string()),
-        exit: "exit".to_string(),
-        event: "event".to_string(),
-        formula: "1".to_string(),
-        predict_noise: None,
-        survival_likelihood: "location-scale".to_string(),
-        survival_distribution: "gaussian".to_string(),
-        link: Some("logit".to_string()),
-        mixture_rho: None,
-        sas_init: None,
-        beta_logistic_init: None,
-        survival_time_anchor: None,
-        baseline_target: "linear".to_string(),
-        baseline_scale: None,
-        baseline_shape: None,
-        baseline_rate: None,
-        baseline_makeham: None,
-        time_basis: "linear".to_string(),
-        time_degree: 3,
-        time_num_internal_knots: 8,
-        threshold_time_k: None,
-        threshold_time_degree: 3,
-        sigma_time_k: None,
-        sigma_time_degree: 3,
-        slope_time_k: None,
-        slope_time_degree: 3,
-        scale_dimensions: false,
-        out: None,
-        slope_formula: None,
-        z_column: None,
-        weights_column: None,
-        offset_column: None,
-        noise_offset_column: None,
-        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
-        persistent_warm_start_store: None,
-    };
-    args.link = Some("sas".to_string());
-    args.sas_init = Some("0.15,-0.70".to_string());
-    let link = parse_survival_inverse_link(&args)
+    let link = parse_survival_inverse_link("sas", None, Some("0.15,-0.70"), None)
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "sas survival link", e));
     match link {
         InverseLink::Sas(state) => {
@@ -6786,68 +6662,17 @@ fn parse_survival_inverse_link_accepts_sas_init() {
     }
 }
 
-/// Default `SurvivalArgs` shape shared by the
-/// `parse_survival_inverse_link_*` test set. Real fields are picked so
-/// the inverse-link validator path is the only thing being tested:
-/// `formula = "1"`, single-knot time basis, no frailty, no extra
-/// columns. Tests override `link` / `sas_init` / `beta_logistic_init`
-/// (and occasionally one more) to exercise the validation branches.
-fn survival_args_for_inverse_link_test() -> SurvivalArgs {
-    SurvivalArgs {
-        data: std::path::PathBuf::from("dummy.csv"),
-        entry: Some("entry".to_string()),
-        exit: "exit".to_string(),
-        event: "event".to_string(),
-        formula: "1".to_string(),
-        predict_noise: None,
-        survival_likelihood: "location-scale".to_string(),
-        survival_distribution: "gaussian".to_string(),
-        link: Some("logit".to_string()),
-        mixture_rho: None,
-        sas_init: None,
-        beta_logistic_init: None,
-        survival_time_anchor: None,
-        baseline_target: "linear".to_string(),
-        baseline_scale: None,
-        baseline_shape: None,
-        baseline_rate: None,
-        baseline_makeham: None,
-        time_basis: "linear".to_string(),
-        time_degree: 3,
-        time_num_internal_knots: 8,
-        threshold_time_k: None,
-        threshold_time_degree: 3,
-        sigma_time_k: None,
-        sigma_time_degree: 3,
-        slope_time_k: None,
-        slope_time_degree: 3,
-        scale_dimensions: false,
-        out: None,
-        slope_formula: None,
-        z_column: None,
-        weights_column: None,
-        offset_column: None,
-        noise_offset_column: None,
-        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
-        persistent_warm_start_store: None,
-    }
-}
-
 /// Shared test driver for the four "init-flag rejected when link does
-/// not match" guards. Builds the default args, overrides
-/// (`link`, `sas_init`, `beta_logistic_init`), runs the validator, and
-/// pins the per-case expected error substring.
+/// not match" guards. Runs the validator on (`link`, `sas_init`,
+/// `beta_logistic_init`) and pins the per-case expected error substring.
 fn assert_inverse_link_init_rejected(
     link: &str,
     sas_init: Option<&str>,
     beta_logistic_init: Option<&str>,
     expected_error_substr: &str,
 ) {
-    let mut args = survival_args_for_inverse_link_test();
-    args.link = Some(link.to_string());
-    args.sas_init = sas_init.map(String::from);
-    args.beta_logistic_init = beta_logistic_init.map(String::from);
-    let err = parse_survival_inverse_link(&args).expect_err("expected arg validation error");
+    let err = parse_survival_inverse_link(link, None, sas_init, beta_logistic_init)
+        .expect_err("expected arg validation error");
     assert!(
         err.contains(expected_error_substr),
         "validation error '{err}' does not contain '{expected_error_substr}'"
@@ -6876,10 +6701,7 @@ fn parse_survival_inverse_link_rejects_sas_init_for_logit() {
 
 #[test]
 fn parse_survival_inverse_link_accepts_beta_logistic_init() {
-    let mut args = survival_args_for_inverse_link_test();
-    args.link = Some("beta-logistic".to_string());
-    args.beta_logistic_init = Some("0.25,0.80".to_string());
-    let link = parse_survival_inverse_link(&args)
+    let link = parse_survival_inverse_link("beta-logistic", None, None, Some("0.25,0.80"))
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "beta-logistic survival link", e));
     match link {
         InverseLink::BetaLogistic(state) => {
@@ -6912,50 +6734,12 @@ fn parse_survival_inverse_link_rejects_beta_logistic_init_for_logit() {
 
 #[test]
 fn parse_survival_inverse_link_supports_loglog_and_cauchit() {
-    let mut args = SurvivalArgs {
-        data: std::path::PathBuf::from("dummy.csv"),
-        entry: Some("entry".to_string()),
-        exit: "exit".to_string(),
-        event: "event".to_string(),
-        formula: "1".to_string(),
-        predict_noise: None,
-        survival_likelihood: "location-scale".to_string(),
-        survival_distribution: "gaussian".to_string(),
-        link: Some("loglog".to_string()),
-        mixture_rho: None,
-        sas_init: None,
-        beta_logistic_init: None,
-        survival_time_anchor: None,
-        baseline_target: "linear".to_string(),
-        baseline_scale: None,
-        baseline_shape: None,
-        baseline_rate: None,
-        baseline_makeham: None,
-        time_basis: "linear".to_string(),
-        time_degree: 3,
-        time_num_internal_knots: 8,
-        threshold_time_k: None,
-        threshold_time_degree: 3,
-        sigma_time_k: None,
-        sigma_time_degree: 3,
-        slope_time_k: None,
-        slope_time_degree: 3,
-        scale_dimensions: false,
-        out: None,
-        slope_formula: None,
-        z_column: None,
-        weights_column: None,
-        offset_column: None,
-        noise_offset_column: None,
-        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
-        persistent_warm_start_store: None,
-    };
     // `loglog` and `cauchit` are supported survival --link values (issue #1829). Each
     // routes through a single-component MixtureLinkSpec (weight 1.0) — a pure link, not
     // an under-identified blend — so `validate_mixturespec` accepts it (the anchor
     // requirement only applies to genuine multi-component blends). Numeric mu checks
     // live in `parse_survival_inverse_link_accepts_loglog_and_cauchit`.
-    let loglog = parse_survival_inverse_link(&args)
+    let loglog = parse_survival_inverse_link("loglog", None, None, None)
         .expect("loglog survival link parses to a single-component mixture");
     match &loglog {
         InverseLink::Mixture(state) => {
@@ -6965,8 +6749,7 @@ fn parse_survival_inverse_link_supports_loglog_and_cauchit() {
         other => panic!("expected loglog to route through a mixture, got {other:?}"),
     }
 
-    args.link = Some("cauchit".to_string());
-    let cauchit = parse_survival_inverse_link(&args)
+    let cauchit = parse_survival_inverse_link("cauchit", None, None, None)
         .expect("cauchit survival link parses to a single-component mixture");
     match &cauchit {
         InverseLink::Mixture(state) => {
@@ -6992,139 +6775,27 @@ fn flexible_link_injects_default_linkwiggle_config() {
 
 #[test]
 fn parse_survival_inverse_link_accepts_flexible_standard_links() {
-    let mut args = SurvivalArgs {
-        data: std::path::PathBuf::from("dummy.csv"),
-        entry: Some("entry".to_string()),
-        exit: "exit".to_string(),
-        event: "event".to_string(),
-        formula: "1".to_string(),
-        predict_noise: None,
-        survival_likelihood: "location-scale".to_string(),
-        survival_distribution: "gaussian".to_string(),
-        link: Some("logit".to_string()),
-        mixture_rho: None,
-        sas_init: None,
-        beta_logistic_init: None,
-        survival_time_anchor: None,
-        baseline_target: "linear".to_string(),
-        baseline_scale: None,
-        baseline_shape: None,
-        baseline_rate: None,
-        baseline_makeham: None,
-        time_basis: "linear".to_string(),
-        time_degree: 3,
-        time_num_internal_knots: 8,
-        threshold_time_k: None,
-        threshold_time_degree: 3,
-        sigma_time_k: None,
-        sigma_time_degree: 3,
-        slope_time_k: None,
-        slope_time_degree: 3,
-        scale_dimensions: false,
-        out: None,
-        slope_formula: None,
-        z_column: None,
-        weights_column: None,
-        offset_column: None,
-        noise_offset_column: None,
-        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
-        persistent_warm_start_store: None,
-    };
-    args.link = Some("flexible(logit)".to_string());
-    let link = parse_survival_inverse_link(&args)
+    let link = parse_survival_inverse_link("flexible(logit)", None, None, None)
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "flexible survival link", e));
     assert!(matches!(link, InverseLink::Standard(StandardLink::Logit)));
 }
 
 #[test]
 fn parse_survival_inverse_link_rejects_flexible_blended_links() {
-    let mut args = SurvivalArgs {
-        data: std::path::PathBuf::from("dummy.csv"),
-        entry: Some("entry".to_string()),
-        exit: "exit".to_string(),
-        event: "event".to_string(),
-        formula: "1".to_string(),
-        predict_noise: None,
-        survival_likelihood: "location-scale".to_string(),
-        survival_distribution: "gaussian".to_string(),
-        link: Some("logit".to_string()),
-        mixture_rho: None,
-        sas_init: None,
-        beta_logistic_init: None,
-        survival_time_anchor: None,
-        baseline_target: "linear".to_string(),
-        baseline_scale: None,
-        baseline_shape: None,
-        baseline_rate: None,
-        baseline_makeham: None,
-        time_basis: "linear".to_string(),
-        time_degree: 3,
-        time_num_internal_knots: 8,
-        threshold_time_k: None,
-        threshold_time_degree: 3,
-        sigma_time_k: None,
-        sigma_time_degree: 3,
-        slope_time_k: None,
-        slope_time_degree: 3,
-        scale_dimensions: false,
-        out: None,
-        slope_formula: None,
-        z_column: None,
-        weights_column: None,
-        offset_column: None,
-        noise_offset_column: None,
-        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
-        persistent_warm_start_store: None,
-    };
-    args.link = Some("flexible(blended(logit,probit))".to_string());
-    args.mixture_rho = Some("0.2".to_string());
-    let err = parse_survival_inverse_link(&args)
-        .expect_err("flexible blended survival link should be rejected");
+    let err = parse_survival_inverse_link(
+        "flexible(blended(logit,probit))",
+        Some("0.2"),
+        None,
+        None,
+    )
+    .expect_err("flexible blended survival link should be rejected");
     assert!(err.contains("does not support blended(...)/mixture(...)"));
 }
 
 #[test]
 fn parse_survival_inverse_link_reports_survival_specific_supported_links() {
-    let mut args = SurvivalArgs {
-        data: std::path::PathBuf::from("dummy.csv"),
-        entry: Some("entry".to_string()),
-        exit: "exit".to_string(),
-        event: "event".to_string(),
-        formula: "1".to_string(),
-        predict_noise: None,
-        survival_likelihood: "location-scale".to_string(),
-        survival_distribution: "gaussian".to_string(),
-        link: Some("logit".to_string()),
-        mixture_rho: None,
-        sas_init: None,
-        beta_logistic_init: None,
-        survival_time_anchor: None,
-        baseline_target: "linear".to_string(),
-        baseline_scale: None,
-        baseline_shape: None,
-        baseline_rate: None,
-        baseline_makeham: None,
-        time_basis: "linear".to_string(),
-        time_degree: 3,
-        time_num_internal_knots: 8,
-        threshold_time_k: None,
-        threshold_time_degree: 3,
-        sigma_time_k: None,
-        sigma_time_degree: 3,
-        slope_time_k: None,
-        slope_time_degree: 3,
-        scale_dimensions: false,
-        out: None,
-        slope_formula: None,
-        z_column: None,
-        weights_column: None,
-        offset_column: None,
-        noise_offset_column: None,
-        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
-        persistent_warm_start_store: None,
-    };
-    args.link = Some("bogus".to_string());
-    let err = parse_survival_inverse_link(&args).expect_err("expected unsupported survival link");
+    let err = parse_survival_inverse_link("bogus", None, None, None)
+        .expect_err("expected unsupported survival link");
     assert!(err.contains("unsupported survival --link 'bogus'"));
     // `loglog` and `cauchit` are now genuinely implemented survival links (routed
     // through the single-component mixture kernels), so the usage line must advertise
@@ -7134,49 +6805,10 @@ fn parse_survival_inverse_link_reports_survival_specific_supported_links() {
 
 #[test]
 fn parse_survival_inverse_link_accepts_loglog_and_cauchit() {
-    let mut args = SurvivalArgs {
-        data: std::path::PathBuf::from("dummy.csv"),
-        entry: Some("entry".to_string()),
-        exit: "exit".to_string(),
-        event: "event".to_string(),
-        formula: "1".to_string(),
-        predict_noise: None,
-        survival_likelihood: "location-scale".to_string(),
-        survival_distribution: "gaussian".to_string(),
-        link: Some("loglog".to_string()),
-        mixture_rho: None,
-        sas_init: None,
-        beta_logistic_init: None,
-        survival_time_anchor: None,
-        baseline_target: "linear".to_string(),
-        baseline_scale: None,
-        baseline_shape: None,
-        baseline_rate: None,
-        baseline_makeham: None,
-        time_basis: "linear".to_string(),
-        time_degree: 3,
-        time_num_internal_knots: 8,
-        threshold_time_k: None,
-        threshold_time_degree: 3,
-        sigma_time_k: None,
-        sigma_time_degree: 3,
-        slope_time_k: None,
-        slope_time_degree: 3,
-        scale_dimensions: false,
-        out: None,
-        slope_formula: None,
-        z_column: None,
-        weights_column: None,
-        offset_column: None,
-        noise_offset_column: None,
-        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
-        persistent_warm_start_store: None,
-    };
-
     // `--link loglog` parses to a single-component LogLog mixture (weight 1.0), which
     // evaluates as the exact loglog inverse link mu = exp(-exp(-eta)).
-    args.link = Some("loglog".to_string());
-    let loglog = parse_survival_inverse_link(&args).expect("loglog survival link parses");
+    let loglog =
+        parse_survival_inverse_link("loglog", None, None, None).expect("loglog survival link parses");
     let loglog_state = match &loglog {
         InverseLink::Mixture(state) => state,
         other => panic!("expected loglog to route through a mixture, got {other:?}"),
@@ -7195,8 +6827,8 @@ fn parse_survival_inverse_link_accepts_loglog_and_cauchit() {
 
     // `--link cauchit` parses to a single-component Cauchit mixture, evaluating as the
     // exact cauchit inverse link mu = 0.5 + atan(eta)/pi.
-    args.link = Some("cauchit".to_string());
-    let cauchit = parse_survival_inverse_link(&args).expect("cauchit survival link parses");
+    let cauchit = parse_survival_inverse_link("cauchit", None, None, None)
+        .expect("cauchit survival link parses");
     let cauchit_state = match &cauchit {
         InverseLink::Mixture(state) => state,
         other => panic!("expected cauchit to route through a mixture, got {other:?}"),
@@ -7369,8 +7001,24 @@ fn structural_survival_fit_is_time_unit_invariant() {
     );
 }
 
+/// Fit `document`, a `gam.fit-request` JSON object, on `data` through `run_fit`
+/// as `gam fit --request` does, saving the model at `out`.
+fn run_fit_request_document(data: PathBuf, out: PathBuf, document: &str) -> Result<(), String> {
+    let request_path = out.with_extension("request.json");
+    fs::write(&request_path, document)
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "write fit-request document", e));
+    let mut args = location_scale_fit_args(data, out, "unused ~ when --request is supplied", "1");
+    // `--request` carries the formula and the whole model configuration; the CLI
+    // rejects the conflicting flags, so they must be cleared here too.
+    args.request = Some(request_path);
+    args.formula_positional = None;
+    args.predict_noise = None;
+    args.survival_likelihood = None;
+    run_fit(args)
+}
+
 /// Integration test: a small survival dataset (6 rows, intercept-only
-/// formula) run through the full `run_survival` pipeline must converge.
+/// formula) fitted through `gam fit` must converge.
 /// This exercises the entire path a real user hits: CSV loading, I-spline
 /// time basis construction, REML smoothing parameter selection, and
 /// constrained PIRLS fitting.  The user never specifies a penalty — REML
@@ -7394,45 +7042,13 @@ fn survival_integration_small_dataset_converges() {
              160,220,1\n",
     )
     .unwrap_or_else(|e| panic!("{} failed: {:?}", "write csv", e));
-    let args = SurvivalArgs {
-        data: csv_path,
-        entry: Some("entry".to_string()),
-        exit: "exit".to_string(),
-        event: "event".to_string(),
-        formula: "1".to_string(),
-        predict_noise: None,
-        survival_likelihood: "transformation".to_string(),
-        survival_distribution: "gaussian".to_string(),
-        link: None,
-        mixture_rho: None,
-        sas_init: None,
-        beta_logistic_init: None,
-        survival_time_anchor: None,
-        baseline_target: "linear".to_string(),
-        baseline_scale: None,
-        baseline_shape: None,
-        baseline_rate: None,
-        baseline_makeham: None,
-        time_basis: "ispline".to_string(),
-        time_degree: 2,
-        time_num_internal_knots: 4,
-        threshold_time_k: None,
-        threshold_time_degree: 3,
-        sigma_time_k: None,
-        sigma_time_degree: 3,
-        slope_time_k: None,
-        slope_time_degree: 3,
-        scale_dimensions: false,
-        out: Some(out_path.clone()),
-        slope_formula: None,
-        z_column: None,
-        weights_column: None,
-        offset_column: None,
-        noise_offset_column: None,
-        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
-        persistent_warm_start_store: None,
-    };
-    let result = super::run_survival(args);
+    let result = run_fit_request_document(
+        csv_path,
+        out_path.clone(),
+        r#"{"schema":"gam.fit-request","schema_version":1,
+            "formula":"Surv(entry, exit, event) ~ 1",
+            "config":{"survival_likelihood":"transformation","time_degree":2,"time_num_internal_knots":4}}"#,
+    );
     assert!(
         result.is_ok(),
         "survival integration fit failed on 6-row dataset: {}",
@@ -7457,45 +7073,15 @@ fn survival_timewiggle_with_parametric_baseline_skips_base_basis_requirement() {
              160,220,1\n",
     )
     .unwrap_or_else(|e| panic!("{} failed: {:?}", "write csv", e));
-    let args = SurvivalArgs {
-        data: csv_path,
-        entry: Some("entry".to_string()),
-        exit: "exit".to_string(),
-        event: "event".to_string(),
-        formula: "timewiggle(degree=3, internal_knots=4)".to_string(),
-        predict_noise: None,
-        survival_likelihood: "transformation".to_string(),
-        survival_distribution: "gaussian".to_string(),
-        link: None,
-        mixture_rho: None,
-        sas_init: None,
-        beta_logistic_init: None,
-        survival_time_anchor: None,
-        baseline_target: "gompertz-makeham".to_string(),
-        baseline_scale: None,
-        baseline_shape: None,
-        baseline_rate: None,
-        baseline_makeham: None,
-        time_basis: "ispline".to_string(),
-        time_degree: 2,
-        time_num_internal_knots: 4,
-        threshold_time_k: None,
-        threshold_time_degree: 3,
-        sigma_time_k: None,
-        sigma_time_degree: 3,
-        slope_time_k: None,
-        slope_time_degree: 3,
-        scale_dimensions: false,
-        out: Some(out_path.clone()),
-        slope_formula: None,
-        z_column: None,
-        weights_column: None,
-        offset_column: None,
-        noise_offset_column: None,
-        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
-        persistent_warm_start_store: None,
-    };
-    super::run_survival(args).unwrap_or_else(|e| {
+    run_fit_request_document(
+        csv_path,
+        out_path.clone(),
+        r#"{"schema":"gam.fit-request","schema_version":1,
+            "formula":"Surv(entry, exit, event) ~ timewiggle(degree=3, internal_knots=4)",
+            "config":{"survival_likelihood":"transformation","baseline_target":"gompertz-makeham",
+                      "time_degree":2,"time_num_internal_knots":4}}"#,
+    )
+    .unwrap_or_else(|e| {
         panic!(
             "{} failed: {:?}",
             "survival timewiggle fit should succeed", e
@@ -7513,6 +7099,7 @@ fn survival_timewiggle_with_parametric_baseline_skips_base_basis_requirement() {
 fn survival_location_scale_rejects_linkwiggle_for_mixture_inverse_link() {
     let dir = tempdir().unwrap_or_else(|e| panic!("{} failed: {:?}", "tempdir", e));
     let csv_path = dir.path().join("small_surv_linkwiggle_reject.csv");
+    let out_path = dir.path().join("small_surv_linkwiggle_reject.model.json");
     std::fs::write(
         &csv_path,
         "entry,exit,event\n\
@@ -7524,49 +7111,17 @@ fn survival_location_scale_rejects_linkwiggle_for_mixture_inverse_link() {
              160,220,1\n",
     )
     .unwrap_or_else(|e| panic!("{} failed: {:?}", "write csv", e));
-    let err = super::run_survival(SurvivalArgs {
-        data: csv_path,
-        entry: Some("entry".to_string()),
-        exit: "exit".to_string(),
-        event: "event".to_string(),
-        formula: "1 + linkwiggle(degree=2, internal_knots=2)".to_string(),
-        predict_noise: None,
-        survival_likelihood: "location-scale".to_string(),
-        survival_distribution: "gaussian".to_string(),
-        link: Some("loglog".to_string()),
-        mixture_rho: None,
-        sas_init: None,
-        beta_logistic_init: None,
-        survival_time_anchor: None,
-        baseline_target: "linear".to_string(),
-        baseline_scale: None,
-        baseline_shape: None,
-        baseline_rate: None,
-        baseline_makeham: None,
-        time_basis: "ispline".to_string(),
-        time_degree: 2,
-        time_num_internal_knots: 4,
-        threshold_time_k: None,
-        threshold_time_degree: 3,
-        sigma_time_k: None,
-        sigma_time_degree: 3,
-        slope_time_k: None,
-        slope_time_degree: 3,
-        scale_dimensions: false,
-        out: None,
-        slope_formula: None,
-        z_column: None,
-        weights_column: None,
-        offset_column: None,
-        noise_offset_column: None,
-        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
-        persistent_warm_start_store: None,
-    })
+    let err = run_fit_request_document(
+        csv_path,
+        out_path,
+        r#"{"schema":"gam.fit-request","schema_version":1,
+            "formula":"Surv(entry, exit, event) ~ 1 + linkwiggle(degree=2, internal_knots=2)",
+            "config":{"survival_likelihood":"location-scale","link":"loglog",
+                      "time_degree":2,"time_num_internal_knots":4}}"#,
+    )
     .expect_err("mixture-backed survival linkwiggle should be rejected before fitting");
     assert!(
-        err.contains(
-            "linkwiggle(...) does not support latent-cloglog, SAS, BetaLogistic, or Mixture links"
-        ),
+        err.contains("does not support latent-cloglog, SAS, BetaLogistic, or Mixture links"),
         "unexpected error: {err}",
     );
 }
@@ -7587,44 +7142,13 @@ fn survival_location_scale_saved_fit_preserves_linkwiggle_metadata() {
              160,220,1\n",
     )
     .unwrap_or_else(|e| panic!("{} failed: {:?}", "write csv", e));
-    super::run_survival(SurvivalArgs {
-        data: csv_path,
-        entry: Some("entry".to_string()),
-        exit: "exit".to_string(),
-        event: "event".to_string(),
-        formula: "1 + linkwiggle(degree=2, internal_knots=2)".to_string(),
-        predict_noise: None,
-        survival_likelihood: "location-scale".to_string(),
-        survival_distribution: "gaussian".to_string(),
-        link: None,
-        mixture_rho: None,
-        sas_init: None,
-        beta_logistic_init: None,
-        survival_time_anchor: None,
-        baseline_target: "linear".to_string(),
-        baseline_scale: None,
-        baseline_shape: None,
-        baseline_rate: None,
-        baseline_makeham: None,
-        time_basis: "ispline".to_string(),
-        time_degree: 2,
-        time_num_internal_knots: 4,
-        threshold_time_k: None,
-        threshold_time_degree: 3,
-        sigma_time_k: None,
-        sigma_time_degree: 3,
-        slope_time_k: None,
-        slope_time_degree: 3,
-        scale_dimensions: false,
-        out: Some(out_path.clone()),
-        slope_formula: None,
-        z_column: None,
-        weights_column: None,
-        offset_column: None,
-        noise_offset_column: None,
-        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
-        persistent_warm_start_store: None,
-    })
+    run_fit_request_document(
+        csv_path,
+        out_path.clone(),
+        r#"{"schema":"gam.fit-request","schema_version":1,
+            "formula":"Surv(entry, exit, event) ~ 1 + linkwiggle(degree=2, internal_knots=2)",
+            "config":{"survival_likelihood":"location-scale","time_degree":2,"time_num_internal_knots":4}}"#,
+    )
     .unwrap_or_else(|e| {
         panic!(
             "{} failed: {:?}",
@@ -8212,48 +7736,20 @@ fn fit_survival_location_scale_live_warp_2695(degree: usize, internal_knots: usi
     }
     std::fs::write(&csv_path, rows).unwrap_or_else(|e| panic!("{} failed: {:?}", "write csv", e));
     let out_path = dir.path().join(format!("live_warp_{degree}.model.json"));
-    super::run_survival(SurvivalArgs {
-        data: csv_path.clone(),
-        entry: Some("entry".to_string()),
-        exit: "exit".to_string(),
-        event: "event".to_string(),
-        formula: if degree == 0 {
-            "1 + x".to_string()
-        } else {
-            format!("1 + x + linkwiggle(degree={degree}, internal_knots={internal_knots})")
-        },
-        predict_noise: None,
-        survival_likelihood: "location-scale".to_string(),
-        survival_distribution: "gaussian".to_string(),
-        link: None,
-        mixture_rho: None,
-        sas_init: None,
-        beta_logistic_init: None,
-        survival_time_anchor: None,
-        baseline_target: "linear".to_string(),
-        baseline_scale: None,
-        baseline_shape: None,
-        baseline_rate: None,
-        baseline_makeham: None,
-        time_basis: "ispline".to_string(),
-        time_degree: 3,
-        time_num_internal_knots: 6,
-        threshold_time_k: None,
-        threshold_time_degree: 3,
-        sigma_time_k: None,
-        sigma_time_degree: 3,
-        slope_time_k: None,
-        slope_time_degree: 3,
-        scale_dimensions: false,
-        out: Some(out_path.clone()),
-        slope_formula: None,
-        z_column: None,
-        weights_column: None,
-        offset_column: None,
-        noise_offset_column: None,
-        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
-        persistent_warm_start_store: None,
-    })
+    let rhs = if degree == 0 {
+        "1 + x".to_string()
+    } else {
+        format!("1 + x + linkwiggle(degree={degree}, internal_knots={internal_knots})")
+    };
+    run_fit_request_document(
+        csv_path,
+        out_path.clone(),
+        &format!(
+            r#"{{"schema":"gam.fit-request","schema_version":1,
+                 "formula":"Surv(entry, exit, event) ~ {rhs}",
+                 "config":{{"survival_likelihood":"location-scale","time_degree":3,"time_num_internal_knots":6}}}}"#
+        ),
+    )
     .unwrap_or_else(|e| panic!("degree={degree} survival location-scale fit failed: {e}"));
     let saved = SavedModel::load_from_path(&out_path).expect("load saved live-warp model");
     let warp_width = saved.beta_link_wiggle.as_ref().map_or(0, |beta| beta.len());
@@ -8320,44 +7816,14 @@ fn survival_location_scale_sas_link_shape_is_selected_by_the_outer_2904() {
         _ => panic!("survival --link sas did not parse to an SAS link"),
     };
     let out_path = dir.path().join("sas_shape.model.json");
-    super::run_survival(SurvivalArgs {
-        data: csv_path.clone(),
-        entry: Some("entry".to_string()),
-        exit: "exit".to_string(),
-        event: "event".to_string(),
-        formula: "1 + x".to_string(),
-        predict_noise: None,
-        survival_likelihood: "location-scale".to_string(),
-        survival_distribution: "gaussian".to_string(),
-        link: Some("sas".to_string()),
-        mixture_rho: None,
-        sas_init: None,
-        beta_logistic_init: None,
-        survival_time_anchor: None,
-        baseline_target: "linear".to_string(),
-        baseline_scale: None,
-        baseline_shape: None,
-        baseline_rate: None,
-        baseline_makeham: None,
-        time_basis: "ispline".to_string(),
-        time_degree: 3,
-        time_num_internal_knots: 6,
-        threshold_time_k: None,
-        threshold_time_degree: 3,
-        sigma_time_k: None,
-        sigma_time_degree: 3,
-        slope_time_k: None,
-        slope_time_degree: 3,
-        scale_dimensions: false,
-        out: Some(out_path.clone()),
-        slope_formula: None,
-        z_column: None,
-        weights_column: None,
-        offset_column: None,
-        noise_offset_column: None,
-        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
-        persistent_warm_start_store: None,
-    })
+    run_fit_request_document(
+        csv_path,
+        out_path.clone(),
+        r#"{"schema":"gam.fit-request","schema_version":1,
+            "formula":"Surv(entry, exit, event) ~ 1 + x",
+            "config":{"survival_likelihood":"location-scale","link":"sas",
+                      "time_degree":3,"time_num_internal_knots":6}}"#,
+    )
     .unwrap_or_else(|e| panic!("SAS survival location-scale fit failed: {e}"));
     let saved = SavedModel::load_from_path(&out_path).expect("load saved SAS survival model");
     // A survival fit persists its fitted link in the payload's `link`, the field

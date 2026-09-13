@@ -417,26 +417,6 @@ pub(crate) fn compact_saved_multiblock_fit_result(
     Ok(fit_result)
 }
 
-pub(crate) fn compact_saved_survival_location_scale_fit_result(
-    fit: &UnifiedFitResult,
-    inverse_link: &InverseLink,
-) -> Result<UnifiedFitResult, String> {
-    let mut fit_result = compact_saved_multiblock_fit_result(
-        fit.blocks.clone(),
-        fit.lambdas.clone(),
-        1.0,
-        fit.covariance_conditional.clone(),
-        fit.covariance_corrected.clone(),
-        fit.geometry.clone(),
-        SavedFitSummary::from_blockwise_fit(fit)?,
-    )?;
-    apply_inverse_link_state_to_fit_result(&mut fit_result, inverse_link);
-    fit_result.artifacts.survival_link_wiggle_knots =
-        fit.artifacts.survival_link_wiggle_knots.clone();
-    fit_result.artifacts.survival_link_wiggle_degree = fit.artifacts.survival_link_wiggle_degree;
-    Ok(fit_result)
-}
-
 pub(crate) fn write_model_json(path: &Path, model: &SavedModel) -> Result<(), String> {
     model.save_to_path(path)?;
     cli_out!("saved model: {}", path.display());
@@ -456,22 +436,6 @@ pub(crate) fn print_inference_summary(notes: &[String]) {
     for note in notes {
         cli_err!("  - {}", note);
     }
-}
-
-/// Persist the fit's case-weight column name on the saved model.
-///
-/// Offset columns are set directly by the fit routes; the weight column was
-/// silently dropped, so
-/// `gam diagnose` (which reloads the prior weights by name to reconstruct the
-/// IRLS working weights for the ALO geometry path) could not recover the case
-/// weights of a `--weights-column` fit and fell back to unit weights. Persist it
-/// alongside the offset so every post-fit diagnostic sees the weights the model
-/// was actually fit with.
-pub(crate) fn set_saved_weight_column(
-    payload: &mut FittedModelPayload,
-    weight_column: Option<String>,
-) {
-    payload.weight_column = weight_column;
 }
 
 #[cfg(test)]

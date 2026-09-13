@@ -78,49 +78,6 @@ pub(crate) fn required_columns_for_fit(
     Ok(required.into_iter().collect())
 }
 
-/// Format a `Surv(...)` response expression, omitting the entry argument
-/// when the right-censored shorthand `Surv(time, event)` is in use.
-pub(crate) fn surv_response_expr(entry: Option<&str>, exit: &str, event: &str) -> String {
-    match entry {
-        Some(entry) => format!("Surv({entry}, {exit}, {event})"),
-        None => format!("Surv({exit}, {event})"),
-    }
-}
-
-pub(crate) fn required_columns_for_survival(
-    args: &SurvivalArgs,
-    parsed: &ParsedFormula,
-) -> Result<Vec<String>, String> {
-    let mut required = BTreeSet::<String>::new();
-    if let Some(entry) = args.entry.as_deref() {
-        required.insert(entry.to_string());
-    }
-    required.insert(args.exit.clone());
-    required.insert(args.event.clone());
-    merge_required_columns(&mut required, required_columns_for_formula(parsed)?);
-
-    if let Some(noise_formula_raw) = args.predict_noise.as_deref() {
-        let response_expr = surv_response_expr(args.entry.as_deref(), &args.exit, &args.event);
-        let (_, parsed_noise) =
-            parse_matching_auxiliary_formula(noise_formula_raw, &response_expr, "--predict-noise")?;
-        merge_required_columns(&mut required, required_columns_for_formula(&parsed_noise)?);
-    }
-
-    if let Some(z_column) = args.z_column.as_ref() {
-        required.insert(z_column.clone());
-    }
-    if let Some(weights_column) = args.weights_column.as_ref() {
-        required.insert(weights_column.clone());
-    }
-    if let Some(offset_column) = args.offset_column.as_ref() {
-        required.insert(offset_column.clone());
-    }
-    if let Some(noise_offset_column) = args.noise_offset_column.as_ref() {
-        required.insert(noise_offset_column.clone());
-    }
-    Ok(required.into_iter().collect())
-}
-
 pub(crate) fn load_dataset_projected(
     path: &Path,
     requested_columns: &[String],

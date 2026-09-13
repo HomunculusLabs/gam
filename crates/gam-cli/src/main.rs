@@ -18,9 +18,7 @@ pub(crate) use gam::families::bms::{
     BernoulliMarginalSlopeTermSpec, DeviationRuntime, LatentMeasureKind, LatentZPolicy,
 };
 
-pub(crate) use gam::families::survival::latent::{
-    fixed_latent_hazard_frailty, latent_hazard_loading,
-};
+pub(crate) use gam::families::survival::latent::fixed_latent_hazard_frailty;
 
 pub(crate) use gam::families::scale_design::build_scale_deviation_transform_design;
 
@@ -39,7 +37,7 @@ pub(crate) use gam::data::{
 
 pub(crate) use gam::inference::formula_dsl::{
     LinkChoice, LinkFormulaSpec, LinkMode, LinkWiggleFormulaSpec, ParsedFormula, ParsedTerm,
-    effectivelinkwiggle_formulaspec, formula_rhs_text, parse_formula, parse_link_choice,
+    effectivelinkwiggle_formulaspec, parse_formula, parse_link_choice,
     parse_matching_auxiliary_formula, parse_surv_interval_response, parse_surv_response,
     parsed_term_column_names, require_inverse_link_supports_joint_wiggle,
     require_likelihood_spec_supports_joint_wiggle, require_linkchoice_supports_joint_wiggle,
@@ -53,15 +51,13 @@ pub(crate) use gam::inference::model::{
 pub(crate) use gam_data::{ColumnKindTag, DataSchema};
 
 pub(crate) use gam::inference::model_payload_builders::{
-    BernoulliMarginalSlopeInputs, LatentWindowInputs, LocationScaleInputs, LocationScaleResponse,
+    BernoulliMarginalSlopeInputs, LocationScaleInputs, LocationScaleResponse,
     LocationScaleWiggle, SavedModelSourceMetadata, StandardPayloadInputs,
-    SurvivalLocationScaleInputs, SurvivalMarginalSlopeInputs, SurvivalTimewiggle,
-    SurvivalTimewiggleBeta, SurvivalTransformationInputs, TransformationNormalInputs,
+    TransformationNormalInputs,
     apply_request_metadata, assemble_bernoulli_marginal_slope_payload,
-    assemble_latent_window_payload, assemble_location_scale_payload,
+    assemble_location_scale_payload,
     assemble_residual_cascade_payload, assemble_spline_scan_payload, assemble_standard_payload,
-    assemble_survival_location_scale_payload, assemble_survival_marginal_slope_payload,
-    assemble_survival_transformation_payload, assemble_transformation_normal_payload,
+    assemble_transformation_normal_payload,
 };
 
 pub(crate) use gam_predict::input::{
@@ -98,36 +94,24 @@ pub(crate) use gam::terms::smooth::build_term_collection_design;
 pub(crate) use gam::families::survival::survival_event_code_from_value;
 
 pub(crate) use gam::families::survival::{
-    SavedSurvivalTimeBasis, SurvivalBaselineConfig, SurvivalBaselineTarget, SurvivalLikelihoodMode,
-    SurvivalMarginalSlopeFrozenOffsetChart, SurvivalTimeBasisConfig,
-    add_survival_time_derivative_guard_offset, baseline_chain_rule_gradient,
-    build_survival_time_basis, build_survival_time_offsets_for_likelihood,
-    build_survival_timewiggle_derivative_design, build_time_varying_survival_covariate_template,
-    center_survival_time_designs_at_anchor, evaluate_survival_time_basis_row,
-    initial_survival_baseline_config_for_fit, location_scale_uses_probit_survival_baseline,
-    marginal_slope_baseline_chain_rule_gradient, normalize_survival_time_pair,
-    optimize_survival_baseline_config_with_gradient_only, parse_survival_distribution,
+    SurvivalBaselineConfig, SurvivalBaselineTarget, SurvivalLikelihoodMode,
+    add_survival_time_derivative_guard_offset, build_survival_time_basis, build_survival_time_offsets_for_likelihood,
+    build_survival_timewiggle_derivative_design, center_survival_time_designs_at_anchor, evaluate_survival_time_basis_row,
+    normalize_survival_time_pair,
     parse_survival_likelihood_mode, parse_survival_time_basis_config,
-    require_structural_survival_time_basis, resolve_survival_time_anchor_for_mode,
-    resolved_survival_time_basis_config_from_build, survival_derivative_guard_for_likelihood,
-    survival_likelihood_modename, survival_marginal_slope_offset_baseline_config,
+    require_structural_survival_time_basis, resolved_survival_time_basis_config_from_build, survival_derivative_guard_for_likelihood,
 };
 
 pub(crate) use gam::families::wiggle::monotone_wiggle_basis_with_derivative_order;
 
 pub(crate) use gam::families::survival::location_scale::{
-    SurvivalCovariateTermBlockTemplate, SurvivalLocationScalePredictInput,
-    SurvivalLocationScaleTermSpec, SurvivalLocationScaleTimeParameterization, TimeBlockInput,
-    predict_survival_location_scale, project_onto_linear_constraints,
+    SurvivalLocationScalePredictInput,
+    SurvivalLocationScaleTimeParameterization, predict_survival_location_scale,
     replay_survival_covariate_channels,
 };
 
-pub(crate) use gam::families::survival::marginal_slope::{
-    SurvivalMarginalSlopeBaselineHyperSpec, SurvivalMarginalSlopeTermSpec,
-};
-
 pub(crate) use gam::families::survival::predict::{
-    apply_inverse_link_state_to_fit_result, build_saved_survival_marginal_slope_predictor,
+    build_saved_survival_marginal_slope_predictor,
     fit_result_from_saved_model_for_prediction, require_saved_survival_likelihood_mode,
     resolve_saved_survival_time_columns, resolve_survival_inverse_link_from_saved,
     resolve_termspec_for_prediction, saved_baseline_timewiggle_components,
@@ -148,15 +132,13 @@ pub(crate) use gam::types::{
 pub(crate) use gam::families::fit_orchestration::{
     BernoulliMarginalSlopeFitRequest, BinomialLocationScaleFitRequest,
     DispersionLocationScaleFitRequest, FitConfig, FitRequest, FitResult,
-    GaussianLocationScaleFitRequest, LatentBinaryFitRequest, LatentSurvivalFitRequest,
-    LinkWiggleConfig, PreparedSurvivalTimeStack, SurvivalLocationScaleFitRequest,
-    SurvivalMarginalSlopeFitRequest, TransformationNormalFitRequest, WorkflowError,
+    GaussianLocationScaleFitRequest, LinkWiggleConfig, PreparedSurvivalTimeStack, TransformationNormalFitRequest, WorkflowError,
     fit_from_formula_with_notes, fit_model, is_binary_response, prepare_survival_time_stack,
     resolve_offset_column, resolve_weight_column, response_column_kind,
     route_marginal_slope_deviation_blocks,
 };
 
-pub(crate) use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, s};
+pub(crate) use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 
 pub(crate) use rand::{SeedableRng, rngs::StdRng};
 
@@ -215,8 +197,6 @@ mod run_predict;
 mod run_sample_generate_report;
 #[path = "main/run_fit_events.rs"]
 mod run_fit_events;
-#[path = "main/run_survival.rs"]
-mod run_survival;
 #[path = "main/smooth_warnings.rs"]
 mod smooth_warnings;
 
@@ -234,7 +214,6 @@ pub(crate) use run_fit::*;
 pub(crate) use run_predict::*;
 pub(crate) use run_sample_generate_report::*;
 pub(crate) use run_fit_events::*;
-pub(crate) use run_survival::*;
 pub(crate) use smooth_warnings::*;
 
 /// Bypass-drop process exit, routed through a fn-pointer indirection so

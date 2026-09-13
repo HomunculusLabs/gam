@@ -434,49 +434,6 @@ pub(crate) struct TransformationScoreArgs {
     pub(crate) id_column: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct SurvivalArgs {
-    pub(crate) data: PathBuf,
-    /// `None` for the right-censored shorthand `Surv(time, event)`; the
-    /// entry vector is synthesized as zeros at materialization time.
-    pub(crate) entry: Option<String>,
-    pub(crate) exit: String,
-    pub(crate) event: String,
-    pub(crate) formula: String,
-    pub(crate) predict_noise: Option<String>,
-    pub(crate) survival_likelihood: String,
-    pub(crate) survival_distribution: String,
-    pub(crate) link: Option<String>,
-    pub(crate) mixture_rho: Option<String>,
-    pub(crate) sas_init: Option<String>,
-    pub(crate) beta_logistic_init: Option<String>,
-    pub(crate) survival_time_anchor: Option<f64>,
-    pub(crate) baseline_target: String,
-    pub(crate) baseline_scale: Option<f64>,
-    pub(crate) baseline_shape: Option<f64>,
-    pub(crate) baseline_rate: Option<f64>,
-    pub(crate) baseline_makeham: Option<f64>,
-    pub(crate) time_basis: String,
-    pub(crate) time_degree: usize,
-    pub(crate) time_num_internal_knots: usize,
-    pub(crate) threshold_time_k: Option<usize>,
-    pub(crate) threshold_time_degree: usize,
-    pub(crate) sigma_time_k: Option<usize>,
-    pub(crate) sigma_time_degree: usize,
-    pub(crate) slope_time_k: Option<usize>,
-    pub(crate) slope_time_degree: usize,
-    pub(crate) scale_dimensions: bool,
-    pub(crate) out: Option<PathBuf>,
-    pub(crate) slope_formula: Option<String>,
-    pub(crate) z_column: Option<String>,
-    pub(crate) weights_column: Option<String>,
-    pub(crate) offset_column: Option<String>,
-    pub(crate) noise_offset_column: Option<String>,
-    pub(crate) frailty: gam::families::survival::lognormal_kernel::FrailtySpec,
-    pub(crate) persistent_warm_start_store:
-        Option<gam_runtime::warm_start::ConfiguredWarmStartStore>,
-}
-
 #[derive(Args, Debug)]
 pub(crate) struct DiagnoseArgs {
     #[arg(value_name = "MODEL", help = "Fitted model file produced by `gam fit`")]

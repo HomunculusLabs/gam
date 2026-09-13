@@ -3790,5 +3790,20 @@
     },
     "reason": "#2829 product-root rule: DesignedRowSample, the carrier RowSamplingMeasure::designed_subsample produced, has had no producer since designed_subsample was retired (docs/public-api-2829-disposition.tsv, retired-no-product-user). Nothing constructs it, and nothing reads it or its len and is_empty. It is deleted with its impl, including the doc that still named the retired producer. CertifiedRowSample keeps its own len and is_empty.",
     "evidence": "At 23418428a5ea8ada49655e9110439eb546a82188, git grep -n -w DesignedRowSample over crates, src, tests and examples finds only its declaration and its impl block in crates/gam-solve/src/row_sampling_measure.rs: no struct literal, no re-export, no reader. git grep -n -w designed_subsample finds no declaration, only that struct's doc and one gam-sae doc link. Pool job 618618 on sw0m at 6f1447d84dad49e3a74665ee8de1bfa4017f2dc0, the chain firth, plan, numcoeffs, union, designed, prose on d0e26faca98de0b1b27ad7de194b62920e36d831, whose Rust blobs this landing reproduces (log /scratch.global/sauer354/pool/api2829/check.618618.log). source_removal_guard.py and public_api_census.py exited 0 on all six links, and cargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0. cargo test -p gam-solve --lib passed injected_shifted_solver_preserves_value_and_derivative_authority_2515, rank_boundary_is_not_an_empty_column_loose_bound_or_dyadic_artifact_2628 and past_cap_point_criterion_is_solve_free_but_auto_reml_needs_exact_proof_2503_2513 (3 passed in 152.34s). The #2829 acceptance targets public_library_surface_2829 (2), measured_span_2612 (4) and structural_coordinates_2748 (4) all passed."
+  },
+  {
+    "base": "fd860fa2d467c2f9e12efc2e243f5e289115da3e",
+    "removed": {
+      "crates/gam-cli/src/main/dataset_io.rs::required_columns_for_survival": 1,
+      "crates/gam-cli/src/main/dataset_io.rs::surv_response_expr": 1,
+      "crates/gam-cli/src/main/model_build.rs::compact_saved_survival_location_scale_fit_result": 1,
+      "crates/gam-cli/src/main/model_build.rs::set_saved_weight_column": 1,
+      "crates/gam-cli/src/main/run_fit.rs::fit_config_from_survival_args": 1,
+      "crates/gam-cli/src/main/run_survival.rs::baseline_timewiggle_is_present": 1,
+      "crates/gam-cli/src/main/run_survival.rs::build_survival_time_initial_beta": 1,
+      "crates/gam-cli/src/main/run_survival.rs::run_survival": 1
+    },
+    "reason": "SPEC rules 9, 18 and 25 (#2899, #2631). gam fit sent every Surv(...) response to run_survival, a CLI copy of the library survival materialization that rebuilt a FitConfig from SurvivalArgs and dropped any setting SurvivalArgs did not carry. Surv(...) fits now go through fit_formula_to_payload, as gamfit does; run_survival.rs with run_survival, run_canonical_survival_transformation and build_survival_time_initial_beta, SurvivalArgs, fit_config_from_survival_args, required_columns_for_survival, surv_response_expr, compact_saved_survival_location_scale_fit_result, set_saved_weight_column, baseline_timewiggle_is_present (its callers call SavedModel::has_baseline_time_wiggle) and the SurvivalArgs test helper survival_args_for_inverse_link_test are deleted.",
+    "evidence": "Job 612253 phase S2: public_api_census.py reported exactly these eight public function declarations as removed, and the all-targets workspace check at that phase exited 0 with 0 errors (/scratch.global/sauer354/pool/prune-cli/gate12.612253.log)."
   }
 ]
