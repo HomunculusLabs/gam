@@ -162,7 +162,7 @@ pub(crate) fn end_outer_seed_capture() -> OuterSeedCapture {
 /// Emitters consult this before building the evidence they would hand to
 /// [`record_outer_selected_mode`], so an ordinary fit pays a thread-local read
 /// rather than a coefficient-vector clone on every outer evaluation.
-pub(crate) fn outer_seed_capture_armed() -> bool {
+pub fn outer_seed_capture_armed() -> bool {
     SEED_CAPTURE.with(|capture| capture.borrow().is_some())
 }
 

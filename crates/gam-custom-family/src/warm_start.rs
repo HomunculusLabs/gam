@@ -1382,6 +1382,11 @@ pub(crate) struct OuterObjectiveEvalResult {
 /// this, so a probe lent at a seed sees the mode the evaluation priced whichever
 /// route (ρ-only or joint-hyper) the fit took.
 pub(crate) fn publish_outer_selected_evaluation(result: &OuterObjectiveEvalResult) {
+    // An ordinary fit pays a thread-local read here, not a coefficient copy per
+    // outer evaluation (#2460).
+    if !gam_solve::estimate::outer_eval_capture::outer_seed_capture_armed() {
+        return;
+    }
     gam_solve::estimate::outer_eval_capture::record_outer_criterion_components(
         result.objective,
         result.criterion_components,
