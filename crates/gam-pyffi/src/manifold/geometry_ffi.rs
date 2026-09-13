@@ -7292,7 +7292,6 @@ fn predict_encoded_table_configured_impl(
         time_grid,
         covariance_mode,
         observation_interval,
-        conformal_level: None,
     };
     let expected_names = required_prediction_columns(model).map_err(PredictError::Other)?;
     let present_names = source.headers.iter().cloned().collect::<BTreeSet<_>>();
