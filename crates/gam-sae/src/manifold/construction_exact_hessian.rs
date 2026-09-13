@@ -5264,8 +5264,18 @@ mod test_support {
                     .iter()
                     .enumerate()
                 {
+                    // A clone drops the three frozen gates, and
+                    // `barrier_coactivation_pairs` then recomputes the barrier
+                    // coactivation from the moved logits, so the border gap would
+                    // move with theta. Production holds the gates fixed across a step.
                     let mut plus = term.clone();
                     let mut minus = term.clone();
+                    for endpoint in [&mut plus, &mut minus] {
+                        endpoint.decoder_repulsion_gate = term.decoder_repulsion_gate.clone();
+                        endpoint.barrier_coactivation_gate = term.barrier_coactivation_gate.clone();
+                        endpoint.amplitude_barrier_gate = term.amplitude_barrier_gate;
+                        endpoint.streaming_gates_frozen = true;
+                    }
                     match *variable {
                         super::SaeLocalRowVar::Logit { atom } => {
                             plus.assignment.logits[[row, atom]] += h;
