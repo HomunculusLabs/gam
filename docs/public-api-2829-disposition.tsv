@@ -325,7 +325,7 @@ crates/gam-problem/src/joint_penalty.rs	rho_objective_gradient	retired-no-surviv
 crates/gam-problem/src/outer_subsample.rs	has_variable_weights	retired-no-surviving-dependent
 crates/gam-problem/src/penalty_matrix.rs	add_scaled_diag_to	retired-no-surviving-dependent
 crates/gam-problem/src/penalty_matrix.rs	quadratic_form	defined-elsewhere-in-crate
-crates/gam-problem/src/psi_design_contract.rs	family_axes	restored-in-place
+crates/gam-problem/src/psi_design_contract.rs	family_axes	retired-no-product-user
 crates/gam-problem/src/row_measure.rs	indices_and_weights	retired-by-later-deletion:b74e2559ed
 crates/gam-problem/src/row_metric.rs	is_output_fisher_like	retired-by-later-deletion:47c2319015
 crates/gam-problem/src/row_metric.rs	output_fisher_with_solver_floor	retired-by-later-deletion:47c2319015

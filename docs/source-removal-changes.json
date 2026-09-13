@@ -6785,5 +6785,13 @@
     ],
     "reason": "#2829 no product user: these getters have no caller in crates, src, tests, benches, bench or examples, and every field they returned keeps another reader.",
     "evidence": "At ea4c52c80bc9cb01d53fca9d58ddedae7b9edd31, git grep -n for each name as a method call (.name( or ::name() over crates, src, tests and examples finds no call on the owning type; same-named items elsewhere are different types (checked by reading), and each returned field is still read inside its own impl."
+  },
+  {
+    "base": "5f03a97073020f195205fa0c6ca1508a7d0d8684",
+    "items": [
+      "crates/gam-problem/src/psi_design_contract.rs:fn:family_axes"
+    ],
+    "reason": "#2829 no product user: these getters have no caller in crates, src, tests, benches, bench or examples, and every field they returned keeps another reader.",
+    "evidence": "At 5f03a97073020f195205fa0c6ca1508a7d0d8684, git grep -n for each name as a method call (.name( or ::name() over crates, src, tests and examples finds no call on the owning type; same-named items elsewhere are different types (checked by reading), and each returned field is still read inside its own impl."
   }
 ]
