@@ -5402,6 +5402,115 @@ mod test_support {
         }
     }
 
+    /// #2915 — channel (3b), the ThresholdGate concave remainder on logit slots,
+    /// through both readers of `ΔC`.
+    ///
+    /// The #2509 pin below runs a softmax fixture and never reaches (3b). The
+    /// applier carried (3b) from #2520 on while the assembler did not, so the arrow
+    /// exact-A system priced the majorizer `B` on every switched-on logit: in job
+    /// 580711 the central difference of the assembled row block in
+    /// `log_lambda_sparse` read `0` on each switched-on logit, where the remainder
+    /// is `−2.74e-2` or `−3.19e-2`. The straddling fixture switches a logit on in
+    /// every row, so the remainder is live on every row. The positive control
+    /// removes (3b) from the assembled contraction and requires the comparison to
+    /// see it.
+    #[test]
+    fn assembled_exact_hessian_delta_carries_the_threshold_gate_remainder_2915() {
+        let (mut term, target, rho) =
+            crate::manifold::tests_sparse_curvature_operator_2500::threshold_gate_tiny_fixture(
+                true,
+            );
+        let system = term
+            .assemble_arrow_schur(target.view(), &rho, None)
+            .expect("#2915 threshold-gate arrow assembly");
+        let cache = gam_solve::arrow_schur::solve_arrow_newton_step_with_options(
+            &system,
+            1.0e-6,
+            1.0e-6,
+            &gam_solve::arrow_schur::ArrowSolveOptions::direct(),
+        )
+        .expect("#2915 positive Newton metric")
+        .2;
+        let remainder = crate::assignment::threshold_gate_negative_hessian_remainder_weighted(
+            &term.assignment,
+            &rho,
+            term.row_loss_weights.as_deref(),
+        )
+        .expect("#2915 threshold-gate remainder");
+        let n = term.n_obs();
+        let k_atoms = term.k_atoms();
+        let live_rows = (0..n)
+            .filter(|&row| (0..k_atoms).any(|atom| remainder[row * k_atoms + atom] < 0.0))
+            .count();
+        assert_eq!(
+            live_rows, n,
+            "#2915 premise: the straddling gate must switch a logit on in every row"
+        );
+        let blocks = term
+            .assemble_exact_hessian_minus_b_rows(&rho, target.view(), &cache.row_dims, cache.k)
+            .expect("#2915 assembled delta rows");
+        assert_eq!(blocks.len(), n);
+        let row_vars: Vec<Vec<super::SaeLocalRowVar>> = (0..n)
+            .map(|row| {
+                term.row_vars_for_cache_row(row, &cache)
+                    .expect("#2915 row variables")
+            })
+            .collect();
+        let total_t = cache.delta_t_len();
+        let mut control_separated = false;
+        for probe in 0..=total_t {
+            let mut v = SaeArrowVector {
+                t: Array1::<f64>::zeros(total_t),
+                beta: Array1::<f64>::zeros(cache.k),
+            };
+            if probe < total_t {
+                v.t[probe] = 1.0;
+            } else {
+                for (idx, value) in v.t.iter_mut().enumerate() {
+                    *value = 1.0 + 0.25 * (idx as f64);
+                }
+            }
+            let applied = term
+                .apply_exact_hessian_minus_b(&rho, target.view(), &cache, &v)
+                .expect("#2915 matrix-free delta apply");
+            // `v.beta = 0`, so the t components see only the assembled t–t blocks.
+            let scale = applied
+                .t
+                .iter()
+                .fold(1.0_f64, |acc, value| acc.max(value.abs()));
+            let tolerance = 4096.0 * f64::EPSILON * scale;
+            for (row, block) in blocks.iter().enumerate() {
+                let base = cache.row_offsets[row];
+                let q = cache.row_dims[row];
+                assert_eq!(row_vars[row].len(), q);
+                for a in 0..q {
+                    let mut assembled = 0.0_f64;
+                    for b in 0..q {
+                        assembled += block.tt[[a, b]] * v.t[base + b];
+                    }
+                    assert!(
+                        (applied.t[base + a] - assembled).abs() <= tolerance,
+                        "probe {probe}: assembled ΔC t[{}] = {assembled} but the applier says {} \
+                         (tolerance {tolerance:.3e})",
+                        base + a,
+                        applied.t[base + a]
+                    );
+                    if let super::SaeLocalRowVar::Logit { atom } = row_vars[row][a] {
+                        let without_gate =
+                            assembled - remainder[row * k_atoms + atom] * v.t[base + a];
+                        control_separated |=
+                            (applied.t[base + a] - without_gate).abs() > tolerance;
+                    }
+                }
+            }
+        }
+        assert!(
+            control_separated,
+            "#2915 positive control: removing (3b) from the assembled contraction must break \
+             the agreement, else this comparison cannot see the channel"
+        );
+    }
+
     /// #2509 — the assembled `ΔC = A − B` row blocks and the matrix-free applier
     /// are ONE derivation with two readers, and this is the executable link.
     ///
