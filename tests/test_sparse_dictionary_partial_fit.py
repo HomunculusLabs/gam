@@ -69,7 +69,6 @@ def test_streaming_over_shards_matches_one_shot_on_concatenation():
         minibatch=32,
         max_epochs=40,
         score_tile=16,
-        code_ridge=1.0e-6,
         tolerance=1.0e-9,
     )
 

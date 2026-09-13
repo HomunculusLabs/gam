@@ -5955,7 +5955,6 @@ const SPARSE_DICT_DUAL_CERT_MAX_BIRTHS: usize = 16;
     minibatch = 512,
     max_epochs = 30,
     score_tile = 4096,
-    code_ridge = 1.0e-6,
     tolerance = 1.0e-6,
     score_mode = "auto"
 ))]
@@ -5967,7 +5966,6 @@ fn sparse_dictionary_fit<'py>(
     minibatch: usize,
     max_epochs: usize,
     score_tile: usize,
-    code_ridge: f32,
     tolerance: f64,
     score_mode: &str,
 ) -> PyResult<Py<PyDict>> {
@@ -5976,17 +5974,16 @@ fn sparse_dictionary_fit<'py>(
     let admission =
         gam::terms::sae::front_door::admit_sae_fit(x_values.nrows(), x_values.ncols(), k)
             .map_err(py_value_error)?;
-    // The fit selects one shared REML ridge, so the decoder starts at the code ridge.
+    // The fit selects one shared REML ridge from the library's starting ridge.
     let config = SparseDictConfig {
         n_atoms: k,
         active,
         minibatch,
         max_epochs,
         score_tile,
-        code_ridge,
-        decoder_ridge: code_ridge,
         tolerance,
         score_mode,
+        ..SparseDictConfig::default()
     };
     let (fit, dual_cert) = detach_py_result(py, "sparse_dictionary_fit", move || {
         let fit = fit_sparse_dictionary(x_values.view(), &config)?;
@@ -6672,7 +6669,6 @@ impl SparseDictStream {
         minibatch = 512,
         max_epochs = 30,
         score_tile = 4096,
-        code_ridge = 1.0e-6,
         tolerance = 1.0e-6,
         score_mode = "auto"
     ))]
@@ -6684,7 +6680,6 @@ impl SparseDictStream {
         minibatch: usize,
         max_epochs: usize,
         score_tile: usize,
-        code_ridge: f32,
         tolerance: f64,
         score_mode: &str,
     ) -> PyResult<Self> {
@@ -6696,10 +6691,9 @@ impl SparseDictStream {
             minibatch,
             max_epochs,
             score_tile,
-            code_ridge,
-            decoder_ridge: code_ridge,
             tolerance,
             score_mode,
+            ..SparseDictConfig::default()
         };
         let inner = py
             .detach(|| SparseDictStreamState::new(seed_values.view(), &config))

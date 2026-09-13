@@ -821,7 +821,7 @@ fn atlas_nerve_diagram<'py>(
 /// intrinsic-dimension estimate `d̂ = −2/m` with delta-method standard errors.
 /// The forwarded dictionary template mirrors `sparse_dictionary_fit`'s fit
 /// knobs; `active` is forced to 1 per rung by the engine regardless. The fit owns
-/// one shared REML ridge, so the decoder starts at the code ridge.
+/// one shared REML ridge from the library's starting ridge.
 #[pyfunction(signature = (
     data,
     k_min = 4,
@@ -830,7 +830,6 @@ fn atlas_nerve_diagram<'py>(
     minibatch = 512,
     max_epochs = 30,
     score_tile = 4096,
-    code_ridge = 1.0e-6,
     tolerance = 1.0e-6,
     score_mode = "auto"
 ))]
@@ -843,7 +842,6 @@ fn dimension_spectrometer<'py>(
     minibatch: usize,
     max_epochs: usize,
     score_tile: usize,
-    code_ridge: f32,
     tolerance: f64,
     score_mode: &str,
 ) -> PyResult<Py<PyDict>> {
@@ -858,10 +856,9 @@ fn dimension_spectrometer<'py>(
             minibatch,
             max_epochs,
             score_tile,
-            code_ridge,
-            decoder_ridge: code_ridge,
             tolerance,
             score_mode,
+            ..SparseDictConfig::default()
         },
     };
     let report = detach_py_result(py, "dimension_spectrometer", move || {
