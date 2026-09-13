@@ -711,6 +711,10 @@ whether the arrow route returns as production code.
 - `arrow_routed_linear_tier_matches_or_beats_block_reconstruction_2023`
 - `composed_arrow_matches_or_beats_block_cofit_2023`
 - `composed_arrow_second_pass_is_a_noop_on_curved_and_framed_tiers_2397`
+- `insufficient_iterations_return_error_instead_of_open_arrow_cofit_2023`, which calls
+  `cofit_composed_via_arrow`
+- `insufficient_rounds_return_error_instead_of_an_open_cofit_2023`, which calls
+  `cofit_block_and_curved`
 
 ### #932 pins counted by file in the September 11 section
 
@@ -813,6 +817,8 @@ September 11 section.
 - `contracted_trace_device_matches_cpu_reduction_when_admitted_2304`
 - `device_direct_applies_beta_gauge_quotient_at_composed_cofit_shape_2660`
 - `moving_ridge_takes_no_host_rebuild_and_matches_independent_2539`
+- `sae_direct_mode_device_engages_on_gpu_1551`, whose skip helper
+  `device_present_or_record_skip` `c0a21b554` also deleted
 
 ### Root-suite pins whose production subject is gone
 
@@ -844,10 +850,11 @@ defining file.
   marks its producer, `latent_survival_log_sigma_curvature_certified`, as
   `retired-by-owner:survival`. The survival owner judged the producer superseded
   rather than restoring it.
-- `zz_measure_bernoulli_wide_basis_size_versus_n_2672`: its size-count helper
-  `ingest` calls `tail_probability`, which `418c732d2` deleted with
-  `selection_mean` from `smooth_term_lr.rs`. The measurement cannot return
-  without that production API.
+- `zz_measure_bernoulli_wide_basis_size_versus_n_2672`: it prints the
+  `bernoulli/logit, k = 12` size sweep across `n`, and its body asserts nothing.
+  This record first retired it because `ingest` calls the deleted
+  `tail_probability`. That reason no longer holds: `d06055079` restores `ingest`
+  through `tail_probability_with_bound(..).0`, the call the deleted method made.
 
 ### A restored pin whose subject was deleted after landing
 
@@ -883,3 +890,39 @@ finite-difference pins and the #2712 row-selected inverse gate. They run on the
 finite-difference anchor harness in `tests_recovery_split_780.rs`, rebuilt without the
 deleted derivative oracle. `deea7ad64` restores the three #2515 route-parity pins in a
 recreated `tests_exact_a_bundle_2515.rs`.
+
+### Eleven census names a strict recount found undispositioned
+
+The section above says the census's last undispositioned rows are restored or
+retired. They were not the last. A recount of
+`docs/test-census-2818-inventory.json` at origin/main treated a name as disposed of
+only when some `.rs` file declares `fn NAME(`, this record names it, or
+`docs/source-removal-changes.json` records its deletion. Sixteen more names
+failed all three tests. Five are restored:
+
+- `5e2877f1a`: `nested_response_moment_rule_reproduces_the_scalar_gaussian_law_2446`,
+  `value_lane_prices_at_shared_fixed_point_2228` and
+  `a_redundant_penalty_map_still_fits_and_certifies_2676`
+- `70a0289d4`: `truncated_response_moments_beat_the_moment_matched_normal_2679`,
+  with its wiggle metadata built through the production knot and block builders
+- `d06055079`: `gaussian_null_size_is_calibrated_where_the_expansion_is_exact_2672`,
+  with the two #939 size contracts that share its scaffold
+
+The two #2023 pins join the arrow-routed co-fit section above, and
+`sae_direct_mode_device_engages_on_gpu_1551` joins the device-gated section. The
+other eight are retired here. Each missing callee was read from the pin's own
+body at `c0a21b554^`, and its removing commit comes from `git log -S` on origin/main.
+
+| Retired pin | Why |
+| --- | --- |
+| `criterion_lane_gap_is_exactly_the_evidence_logdet_gap_2509` | calls `penalized_quasi_laplace_criterion_streaming_exact` and `streaming_exact_arrow_log_det`, deleted by `d484a091a` |
+| `exact_a_route_parity_holds_on_a_deflated_cache_2515`, `exact_a_route_parity_holds_across_a_deflating_rho_ladder_2515` | call `analytic_outer_rho_gradient_components`, last deleted by `e6fd4251e` (`d484a091a` deleted it and `cb8dd972c` restored it), and the harness `full_basis_probe_bundle`, deleted by `c0a21b554` |
+| `laplace_value_and_gradient_are_route_invariant_2515` | the same two, plus `coordinate_block_log_det` (`d484a091a`) and the witness builder `exact_a_witness_2515_at_alpha` (`c0a21b554`) |
+| `zz_attribute_the_broken_ladder_rung_2515` | calls `analytic_outer_rho_gradient_components`, and its body asserts nothing |
+| `zz_attribute_deflated_route_classification_2515` | prints both routes' classifications and asserts nothing |
+| `zz_measure_k2_wide_p_inner_trajectory_2080` | a probe that installs a process-wide `log` logger at debug level for every test in its binary. Its one assertion is that the sweep printed a reading. The #2080 gate it localized, `wide_p_outer_reml_terminates_within_probe_budget_2080`, is on main |
+| `inner_kkt_gate_is_extensive_while_the_intensive_certificate_exists_2681` | returns as a pass once its fixture converges. Otherwise it asserts that the refused state stays more than ten times over both convergence bounds, which pins a non-convergence: the inverted expected failure that SPEC rule 16 bans. Its accessor `numerical_message` was deleted by `d484a091a` |
+
+The witness builders named in the section above had one more historical caller,
+`laplace_value_and_gradient_are_route_invariant_2515`. It is retired here, so they
+stay deleted.
