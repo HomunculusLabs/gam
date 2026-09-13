@@ -483,6 +483,7 @@ fn run() -> Result<(), String> {
 }
 
 fn main() -> ExitCode {
+    env_logger::init();
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
