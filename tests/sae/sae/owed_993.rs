@@ -21,9 +21,9 @@
 //! 2. A BOUND decoder (a genuine `θ₁·θ₂` interaction) carves to KEEP — binding
 //!    is proven and the fission is blocked.
 //! 3. The producer's decoder-coefficient covariance (`fit_tensor_surface`'s
-//!    `coeff_covariance`) equals an INDEPENDENT dense ridge-regression `Vb`
-//!    reference at the same λ — so the covariance the binding test consumes is
-//!    a real, verifiable posterior, not a placeholder.
+//!    `coeff_covariance`) equals an INDEPENDENT dense function-mass posterior
+//!    `σ̂²·((1 + λ)·XᵀX)⁻¹` at the same λ — so the covariance the binding test
+//!    consumes is a real, verifiable posterior, not a placeholder.
 //!
 //! No CUDA, no optimizer dependence: the decoder coefficients ARE what the
 //! carve reads, so planting them directly exercises the exact instrument the
@@ -173,81 +173,100 @@ fn bound_torus_atom_carves_to_keep() {
     );
 }
 
-/// The producer's decoder-coefficient covariance must equal an INDEPENDENT
-/// dense ridge-regression posterior `Vb = σ̂² (XᵀX + λI)⁻¹` at the same λ — the
-/// covariance the binding Wald test reads is a real posterior, byte-comparable
-/// to a from-scratch reference built without the production eigenbasis path.
+/// The producer's decoder-coefficient covariance is the function-mass posterior
+/// `fit_tensor_surface` publishes (SPEC rule 5). Each response carries the penalty
+/// `λ‖X vec(C_d)‖²/σ_d²`, so the penalized Gram is `(1 + λ)·XᵀX` and
+/// `Vb_d = σ̂²_d·((1 + λ)·XᵀX)⁻¹` with `σ̂²_d = RSS_d/(n − rank X/(1 + λ))`. The
+/// reference rebuilds that posterior without the production eigenbasis path: a
+/// dense Cholesky inverse, its own coefficients, residuals and EDF.
+///
+/// - Producer arm: the carve re-fits the atom's own reconstruction, which lies in
+///   the design's range, so its RSS is rounding and σ̂² carries no digits. This arm
+///   compares the scale-free covariance and the EDF at the producer's λ.
+/// - Noisy arm: the same factor bases and the same bound surface plus deterministic
+///   noise, so the REML weight is interior and the residual scale resolvable. This
+///   arm compares the scale-included `Vb`. Its λ must sit above the relative bar, so
+///   the arm separates `((1 + λ)·XᵀX)⁻¹` from a coefficient ridge `(XᵀX + λI)⁻¹`
+///   whenever the design's eigenvalues are far from 1.
 #[test]
 fn producer_decoder_covariance_matches_dense_reference() {
-    use ndarray::s;
-
+    const REL_BAR: f64 = 1e-6;
     let coords = torus_coords();
     let (phi, m) = torus_basis(&coords);
     let p = 2usize;
     let decoder = bound_decoder(m, p);
-    let reconstruction = phi.dot(&decoder); // n × p, the carve responses
+    let rank = (m * m) as f64;
+    // The fused torus basis IS the design: column (j, k) = φ¹_j·φ²_k. On this
+    // interleaved sample it is full column rank; `dense_spd_inverse` asserts a
+    // positive pivot at every step, so a rank-deficient design fails there.
+    let x = &phi;
+    let n = x.nrows() as f64;
+    let xtx = x.t().dot(x);
+    let posterior_unit = |lambda: f64| dense_spd_inverse(&xtx.mapv(|v| (1.0 + lambda) * v));
+    let max_rel = |observed: &Array2<f64>, reference: &Array2<f64>| -> f64 {
+        let scale = reference.iter().fold(0.0_f64, |mx, &v| mx.max(v.abs()));
+        observed
+            .iter()
+            .zip(reference.iter())
+            .fold(0.0_f64, |mx, (&u, &v)| mx.max((u - v).abs()))
+            / scale
+    };
 
-    // Producer's REML re-fit (the path the carve consumes).
+    // Producer arm: the path the carve consumes.
     let bundle = carve_input_from_fitted_atom(phi.view(), decoder.view(), m, m).expect("producer");
     let surface = &bundle.surface;
-    let lambda = surface.lambda;
-    let mm = m * m;
+    assert!(
+        surface.lambda.is_finite(),
+        "a bound surface is not the null, so the producer's weight must be finite; got λ={:e}",
+        surface.lambda
+    );
+    let unit_rel = max_rel(&surface.unit_covariance, &posterior_unit(surface.lambda));
+    assert!(
+        unit_rel < REL_BAR,
+        "producer scale-free covariance must equal ((1 + λ)·XᵀX)⁻¹ at λ={:e}; max rel {unit_rel:e}",
+        surface.lambda
+    );
+    let producer_edf_ref = rank / (1.0 + surface.lambda);
+    assert!(
+        (surface.edf - producer_edf_ref).abs() < REL_BAR * producer_edf_ref,
+        "producer EDF {} must equal rank/(1 + λ) = {producer_edf_ref}",
+        surface.edf
+    );
 
-    // Independent dense reference: design X with column (j,k) = φ¹_j·φ²_k =
-    // φ_a[:,j]·φ_b[:,k], i.e. exactly the fused torus basis columns. The fused
-    // basis IS that product, so X = phi.
-    let x = &phi;
-    let n = x.nrows();
-
-    // Vb_unit = (XᵀX + λI)⁻¹ (scale-free); scale by per-dim σ̂².
-    let mut xtx = x.t().dot(x);
-    for i in 0..mm {
-        xtx[[i, i]] += lambda;
+    // Noisy arm: the bound surface plus deterministic uniform noise of half-width 0.1.
+    let mut noisy = phi.dot(&decoder);
+    let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+    for value in noisy.iter_mut() {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *value += 0.1 * ((state >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0);
     }
-    let xtx_inv = dense_spd_inverse(&xtx);
-
-    // Per-dimension residual scale σ̂²_d = RSS_d / (n − edf), edf = Σ dᵢ/(dᵢ+λ).
-    let beta_ref = xtx_inv.dot(&x.t()).dot(&reconstruction); // mm × p
-    let fitted_ref = x.dot(&beta_ref);
-    let edf = surface.edf;
-    let residual_df = n as f64 - edf;
-
+    let fit = fit_tensor_surface(bundle.phi_a.view(), bundle.phi_b.view(), noisy.view())
+        .expect("tensor surface fit of the noisy bound surface");
+    assert!(
+        fit.lambda.is_finite() && fit.lambda > REL_BAR,
+        "the noisy arm must select an interior weight the {REL_BAR:e} bar resolves; got λ={:e}",
+        fit.lambda
+    );
+    let unit_ref = posterior_unit(fit.lambda);
+    let edf_ref = rank / (1.0 + fit.lambda);
     for d in 0..p {
-        let mut rss = 0.0_f64;
-        for r in 0..n {
-            let e = reconstruction[[r, d]] - fitted_ref[[r, d]];
-            rss += e * e;
-        }
-        let sigma2 = rss / residual_df;
-        let vb_ref = &xtx_inv * sigma2;
-
-        let vb_prod = &surface.coeff_covariance[d];
-        assert_eq!(vb_prod.dim(), (mm, mm));
-
-        // Compare the two posteriors entrywise, relative to the reference scale.
-        let scale = vb_ref.iter().fold(1e-30_f64, |mx, &v| mx.max(v.abs()));
-        let mut max_rel = 0.0_f64;
-        for i in 0..mm {
-            for j in 0..mm {
-                let rel = (vb_prod[[i, j]] - vb_ref[[i, j]]).abs() / scale;
-                max_rel = max_rel.max(rel);
-            }
-        }
+        let response = noisy.column(d);
+        let beta_ref = unit_ref.dot(&x.t().dot(&response));
+        let fitted_ref = x.dot(&beta_ref);
+        let rss_ref: f64 = response
+            .iter()
+            .zip(fitted_ref.iter())
+            .map(|(&y, &f)| (y - f) * (y - f))
+            .sum();
+        let vb_ref = &unit_ref * (rss_ref / (n - edf_ref));
+        let vb_rel = max_rel(&fit.coeff_covariance[d], &vb_ref);
         assert!(
-            max_rel < 1e-6,
-            "producer decoder-coefficient covariance (dim {d}) must equal the dense ridge \
-             reference at λ={lambda:e}; max rel {max_rel:e}"
-        );
-
-        // Spot-check the diagonal slice the band would read is positive.
-        let diag0 = vb_prod[[0, 0]];
-        assert!(
-            diag0 > 0.0,
-            "covariance diagonal must be positive; got {diag0}"
-        );
-        assert!(
-            beta_ref.slice(s![.., d]).iter().all(|v| v.is_finite()),
-            "reference coefficient column {d} must be finite"
+            vb_rel < REL_BAR,
+            "decoder-coefficient covariance (dim {d}) must equal the function-mass posterior \
+             σ̂²·((1 + λ)·XᵀX)⁻¹ at λ={:e}; max rel {vb_rel:e}",
+            fit.lambda
         );
     }
 }
