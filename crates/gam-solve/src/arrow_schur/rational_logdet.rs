@@ -686,39 +686,6 @@ impl RationalLogdetPlan {
         })
     }
 
-    /// Exact derivative of the surrogate along a Hessian direction: given
-    /// `dmatvec(v) = (∂S)·v`, returns `∂L̃ = (1/m)·Σ_{j,ℓ} w_ℓ · y_{jℓ}ᵀ(∂S)y_{jℓ}`.
-    ///
-    /// This is the true gradient of the SAME function [`Self::evaluate`]
-    /// returned — value and gradient can never desync.
-    pub fn directional_derivative(
-        &self,
-        eval: &RationalLogdetEval,
-        dmatvec: &(impl Fn(ArrayView1<f64>) -> Array1<f64> + Sync),
-    ) -> Option<f64> {
-        let m = self.probes.len() as f64;
-        // Projected-probe block (Hutchinson, averaged over m) and the
-        // deterministic deflation block (Σ over the r basis columns, NOT
-        // averaged) — the exact derivative of `term2` and `term1` respectively.
-        // The `k·ln c` term is ρ-independent and contributes nothing.
-        let mut acc_probe = 0.0;
-        let mut acc_defl = 0.0;
-        for (ell, &(_, w)) in self.nodes.iter().enumerate() {
-            for y in &eval.shifted_solves[ell] {
-                let dy = dmatvec(y.view());
-                acc_probe += w * y.dot(&dy);
-            }
-            if let Some(defl) = eval.deflation_solves.get(ell) {
-                for y in defl {
-                    let dy = dmatvec(y.view());
-                    acc_defl += w * y.dot(&dy);
-                }
-            }
-        }
-        let acc = acc_defl + acc_probe / m;
-        acc.is_finite().then_some(acc)
-    }
-
     /// Collapse [`RationalLogdetEval`]'s complete shifted-solve ladder into a
     /// lossless weighted low-rank derivative representation.
     ///
@@ -1747,10 +1714,14 @@ mod tests {
         let direction = array![0.2, -0.3, 0.7];
         let dmatvec = |v: ArrayView1<f64>| &direction * &v;
         let cg_derivative = plan
-            .directional_derivative(&cg, &dmatvec)
+            .into_directional_derivative_bundle(cg)
+            .expect("CG derivative bundle")
+            .directional_derivative(&dmatvec)
             .expect("CG derivative");
         let injected_derivative = plan
-            .directional_derivative(&injected, &dmatvec)
+            .into_directional_derivative_bundle(injected)
+            .expect("injected derivative bundle")
+            .directional_derivative(&dmatvec)
             .expect("injected derivative");
         let derivative_scale = cg_derivative
             .abs()
