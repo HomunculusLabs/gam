@@ -264,7 +264,7 @@ pub fn wald_half_width(v_pp: f64, level: f64) -> Option<f64> {
 ///
 /// The walk does geometric step-growth to bracket each crossing, then bisects to
 /// `tol` in κ. The threshold uses the full χ²₁ quantile (interior point).
-pub fn profile_ci_walk<F>(
+pub(crate) fn profile_ci_walk<F>(
     mut v_p: F,
     kappa_hat: f64,
     v_pp: f64,
@@ -642,5 +642,92 @@ mod tests {
             assert!(p > 0.0, "chi2_1_sf({t}) underflowed to zero");
             previous = p;
         }
+    }
+
+    // #2818 recovery: curvature point estimates retain the #2687 box provenance.
+    #[test]
+    fn a_monotone_criterion_rails_kappa_hat_and_the_walk_declares_it_2687() {
+        for upper in [1.389_f64, 2.78, 40.0] {
+            let ci = profile_ci_walk(|kappa| Ok(-kappa), upper, -1.0, -upper, upper, 0.95, 1e-8)
+                .expect("a monotone profile must report its constrained optimum");
+            assert_eq!(ci.kappa_hat, upper);
+            assert_eq!(
+                ci.kappa_hat_support,
+                KappaEstimateSupport::RailedAtUpperBound
+            );
+            assert_eq!(ci.kappa_hat_support.label(), "railed_at_upper_bound");
+            assert!(ci.hi_at_bound);
+            assert_eq!(ci.ci_hi, upper);
+        }
+        let ci = profile_ci_walk(|kappa| Ok(kappa), -2.0, -1.0, -2.0, 2.0, 0.95, 1e-8)
+            .expect("the mirrored monotone profile must report the lower rail");
+        assert_eq!(
+            ci.kappa_hat_support,
+            KappaEstimateSupport::RailedAtLowerBound
+        );
+        assert_eq!(ci.kappa_hat_support.label(), "railed_at_lower_bound");
+        assert!(ci.lo_at_bound);
+        assert_eq!(ci.ci_lo, -2.0);
+    }
+
+    #[test]
+    fn an_interior_optimum_is_not_declared_railed_2687() {
+        let optimum = -0.37_f64;
+        let curvature = 16.0_f64;
+        let quadratic = |kappa: f64| Ok(7.0 + 0.5 * curvature * (kappa - optimum) * (kappa - optimum));
+        let ci = profile_ci_walk(quadratic, optimum, curvature, -3.0, 3.0, 0.95, 1e-8)
+            .expect("the interior quadratic has a closed confidence interval");
+        assert_eq!(ci.kappa_hat_support, KappaEstimateSupport::Interior);
+        assert!(!ci.lo_at_bound && !ci.hi_at_bound);
+        assert!(ci.ci_lo < optimum && ci.ci_hi > optimum);
+        assert!((ci.ci_lo + ci.ci_hi - 2.0 * optimum).abs() < 2e-8);
+        // Only the chart box moves: the profile and its optimum are unchanged.
+        // Provenance must reflect that the point is now on the lower endpoint.
+        let squeezed = profile_ci_walk(quadratic, optimum, curvature, optimum, 3.0, 0.95, 1e-8)
+            .expect("a box touching the optimum remains a supported profile");
+        assert_eq!(
+            squeezed.kappa_hat_support,
+            KappaEstimateSupport::RailedAtLowerBound
+        );
+        assert!(squeezed.lo_at_bound);
+        assert_eq!(squeezed.ci_lo, optimum);
+        assert!((squeezed.ci_hi - ci.ci_hi).abs() < 1e-8);
+    }
+
+    /// The κ = 0 flatness test has correct size: on a quadratic profile centred at
+    /// κ̂ = 0 the LR statistic is zero and the p-value is the full interior χ²₁
+    /// tail (here p = 1), NOT the half-χ² boundary mixture — a flat latent space is
+    /// not spuriously rejected, and the profile CI straddles 0 (verdict Flat).
+    #[test]
+    fn kappa_zero_flatness_test_has_correct_size() {
+        // A profiled criterion (negative log-evidence) whose minimiser is exactly
+        // flat: V_p(κ) = 0.5·a·κ². κ̂ = 0 ⇒ LR = 0 ⇒ p = 1 (not 0.5).
+        let a = 4.0;
+        let v_p = |k: f64| -> Result<f64, String> { Ok(0.5 * a * k * k) };
+
+        let test = flatness_lr_test(v_p, 0.0).expect("flatness LR");
+        assert!(
+            test.lr_stat.abs() < 1e-12,
+            "flat κ̂ ⇒ zero LR, got {}",
+            test.lr_stat
+        );
+        assert!(
+            (test.p_value - 1.0).abs() < 1e-12,
+            "interior χ²₁ p-value at LR=0 is 1.0, not the half-χ² 0.5; got {}",
+            test.p_value
+        );
+
+        // And the profile CI must straddle 0 (geometry verdict Flat) for flat data.
+        let ci = profile_ci_walk(v_p, 0.0, a, -10.0, 10.0, 0.95, 1e-9).expect("CI walk");
+        assert!(
+            ci.ci_lo < 0.0 && ci.ci_hi > 0.0,
+            "flat profile CI must straddle 0: [{}, {}]",
+            ci.ci_lo,
+            ci.ci_hi
+        );
+        assert_eq!(
+            ci.verdict,
+            CurvatureVerdict::Flat
+        );
     }
 }

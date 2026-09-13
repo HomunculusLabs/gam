@@ -1202,7 +1202,7 @@ fn response_curvature_criterion_jet(
 /// every `V_p` evaluation scores the SAME geometry without re-entangling κ with the
 /// chart scale (the #1104 fix). The exact outer
 /// curvature `V_p''(κ̂)` is evaluated by the same hand-derived criterion jet
-/// and handed to [`profile_ci_walk`](crate::profile_ci_walk)
+/// and handed to `profile_ci_walk`
 /// to size the initial Wald step; the CI itself is the exact χ²₁ profile crossing.
 /// Flatness is the interior-point χ²₁ LR test
 /// [`flatness_lr_test`](crate::flatness_lr_test). κ = 0 is an interior

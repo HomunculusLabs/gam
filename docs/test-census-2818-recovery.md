@@ -181,9 +181,11 @@ They do not execute unrelated stale local term-collection gauge tests.
 
 ## Curvature estimate support: #2687
 
-`crates/gam-geometry/tests/curvature_support_recovery.rs` restores both historical
-pins through public `profile_ci_walk`, without reinstating the removed
-`is_railed` convenience accessor:
+The unit tests in `crates/gam-geometry/src/curvature_estimand.rs` restore both
+historical pins through `profile_ci_walk`, without reinstating the removed
+`is_railed` convenience accessor. They moved there verbatim from
+`crates/gam-geometry/tests/curvature_support_recovery.rs` when #2899 narrowed
+`profile_ci_walk` to `pub(crate)`:
 
 | Historical identity | Current asserted contract |
 | --- | --- |

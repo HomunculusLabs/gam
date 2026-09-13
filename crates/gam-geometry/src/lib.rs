@@ -16,7 +16,7 @@ pub use manifolds::{
 
 pub use curvature_estimand::{
     CurvatureVerdict, FlatnessTest, KappaEstimateSupport, KappaProfileCi, flatness_lr_test,
-    profile_ci_walk, wald_half_width,
+    wald_half_width,
 };
 pub use latent_seed::laplacian_eigenmap_coords;
 pub use manifold::{GeometryError, GeometryResult, ManifoldSpec, RiemannianManifold};

@@ -3,7 +3,6 @@ mod certificate_ledger_unified;
 mod channel_aware_identifiability_audit;
 mod constant_curvature_kappa_coverage_sims;
 mod constant_curvature_kappa_inference_e2e;
-mod constant_curvature_kappa_outer_gradient_fd;
 mod identifiability_audit_hard_halt_gate;
 mod identifiability_audit_leverage_thresholds;
 mod ladder_cert_rate_measure;
