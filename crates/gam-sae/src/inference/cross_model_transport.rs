@@ -170,9 +170,20 @@ pub fn fit_cross_model_transport(
         0,
         1,
     );
+    // The circle defect `1 − best` is read off resultants of `n` angle differences.
+    // Each cosine or sine sum is off by at most `γ_{n+2}·n`, so the resultant length
+    // `best = √(c² + s²)/n` is off by at most `√2·γ_{n+2} + γ_4·best`, and the defect
+    // by one more rounding of `1 + best`. A defect inside that band is roundoff,
+    // whatever the influence SE says.
     let gauge_defect_scale = circle
         .as_ref()
-        .map(|r| r.defect_se.max(f64::EPSILON.sqrt()))
+        .map(|r| {
+            let best = r.resultant_shift.max(r.resultant_reflect);
+            let evaluation_band = std::f64::consts::SQRT_2
+                * gam_linalg::roundoff::accumulation_growth(r.n_samples + 2)
+                + gam_linalg::roundoff::accumulation_growth(5) * (1.0 + best);
+            r.defect_se.max(evaluation_band)
+        })
         .unwrap_or(0.0);
     let verdict = universality_verdict(&fit, circle.as_ref(), gauge_defect_scale);
 
