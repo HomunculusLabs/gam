@@ -47,8 +47,9 @@
 //!
 //! Bounds (principled, un-weakened — all relative to the GENERATIVE TRUTH).
 //!   PRIMARY — truth recovery:
-//!     1. Log-HR accuracy: `|gam.β_x − TRUE_BETA| ≤ 0.20`. With n = 120 events,
-//!        the sampling SE of a PH log-HR is ≈ 1/√n_events ≈ 0.13; 0.20 is a tight,
+//!     1. Log-HR accuracy: `|gam.β_x − TRUE_BETA| ≤ 0.20`. The fixture carries 120 subjects and
+//!        80 events (MSI job 604258 printed `n=120 m_groups=12 events=80`), so the
+//!        sampling SE of a PH log-HR is ≈ 1/√n_events ≈ 0.11; 0.20 is a tight,
 //!        signal-appropriate bar (a genuinely broken slope misses by far more).
 //!     2. Frailty multiplier-variance recovery:
 //!        `|gam.Var(exp(U)) − true_mult_var| / true_mult_var ≤ 0.60`. Variance
