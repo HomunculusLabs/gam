@@ -248,6 +248,26 @@ fn web_payload(
     .expect("standard web payload assembles")
 }
 
+/// The saved model with its frozen σ_coord cleared. It prices the finite-support
+/// term alone, so the full model's excess over it is the #2225
+/// input-measurement-error term.
+fn without_input_measurement_error(payload: &FittedModelPayload) -> FittedModel {
+    let mut payload = payload.clone();
+    for term in &mut payload
+        .resolved_termspec
+        .as_mut()
+        .expect("the standard payload carries its resolved term specification")
+        .smooth_terms
+    {
+        if let SmoothBasisSpec::MeasureJet { spec, .. } = &mut term.basis
+            && let Some(frozen) = spec.frozen_quadrature.as_mut()
+        {
+            frozen.sigma_coord = None;
+        }
+    }
+    FittedModel::from_payload(payload)
+}
+
 /// Raw ambient-coordinate matrix for the test points, laid out on the
 /// training dataset's column map (the shape `build_term_collection_design`
 /// replays the frozen spec against).
@@ -543,12 +563,8 @@ fn measure_jet_web_quality_contracts() {
     // model: the producer `gam predict --uncertainty` and the Python
     // `predict(interval=…)` put into their interval request, priced over the RAW
     // query rows.
-    let model = FittedModel::from_payload(web_payload(
-        MJS_INTERVAL_FORMULA,
-        &data,
-        "gaussian",
-        interval_fit,
-    ));
+    let payload = web_payload(MJS_INTERVAL_FORMULA, &data, "gaussian", interval_fit);
+    let model = FittedModel::from_payload(payload.clone());
     let col_map = data.column_map();
     let priced = model
         .measure_jet_extrapolation_variance(m.view(), &col_map)
@@ -613,10 +629,13 @@ fn measure_jet_web_quality_contracts() {
     // --uncertainty` and the Python `predict(interval=…)` both put
     // `measure_jet_extrapolation_variance` over the RAW rows into the shared
     // `PredictionRequest`, and `resolve_prediction_request` adds it to the band.
-    // The design input is clipped to the training ranges, so without the term a
-    // row far off the web gets the hull's posterior band. With it that row's band
-    // must widen by exactly the priced variance and come back wider than the
-    // on-web row's.
+    // Every row's band must widen by exactly the priced variance. The priced
+    // variance is the finite-support term plus the #2225 input term, so the row
+    // far off the web must be priced more FINITE-SUPPORT ignorance than the
+    // on-web row, and its band must be the wider one. The design input is
+    // clipped to the training ranges, and at job 606294 most of that last margin
+    // was the clipped hull's posterior band (SE 3.8251 vs 1.0101e-2 before the
+    // term), so the finite-support ordering is the assertion about the pricing.
     let mid_web = embed_latent(&e_web, latent_point(0, 0.5).0);
     let mut rows = Array2::<f64>::zeros((2, data.headers.len()));
     for k in 0..AMBIENT_D {
@@ -644,6 +663,10 @@ fn measure_jet_web_quality_contracts() {
         .measure_jet_extrapolation_variance(rows.view(), &col_map)
         .expect("measure-jet extrapolation variance")
         .expect("the frozen measure-jet term prices both rows");
+    let finite_support = without_input_measurement_error(&payload)
+        .measure_jet_extrapolation_variance(rows.view(), &col_map)
+        .expect("measure-jet extrapolation variance without σ_coord")
+        .expect("the frozen measure-jet term prices its finite-support term at both rows");
     let band_se = |extrapolation_variance: Option<Array1<f64>>| -> Array1<f64> {
         resolve_prediction_request(
             &*predictor,
@@ -665,10 +688,12 @@ fn measure_jet_web_quality_contracts() {
     let with_term = band_se(Some(off_support.clone()));
     let without_term = band_se(None);
     eprintln!(
-        "[measure-jet 5b] priced on-web {:.4e} off-web {:.4e}; SE on-web {:.4e} -> {:.4e}, \
-         off-web {:.4e} -> {:.4e}",
+        "[measure-jet 5b] priced on-web {:.4e} off-web {:.4e}; finite-support on-web {:.4e} \
+         off-web {:.4e}; SE on-web {:.4e} -> {:.4e}, off-web {:.4e} -> {:.4e}",
         off_support[0],
         off_support[1],
+        finite_support[0],
+        finite_support[1],
         without_term[0],
         with_term[0],
         without_term[1],
@@ -684,11 +709,11 @@ fn measure_jet_web_quality_contracts() {
         );
     }
     assert!(
-        off_support[1] > off_support[0],
-        "the far off-web row must be priced more extrapolation variance than the on-web row: \
+        finite_support[1] > finite_support[0],
+        "the far off-web row must be priced more finite-support ignorance than the on-web row: \
          {:.4e} vs {:.4e}",
-        off_support[1],
-        off_support[0]
+        finite_support[1],
+        finite_support[0]
     );
     assert!(
         with_term[1] > with_term[0],
@@ -857,28 +882,15 @@ fn measure_jet_eiv_input_variance_matches_fitted_surface_2225() {
     // contracts from drifting into two definitions of `Var_input`, which is the
     // shape that let the band ship without the term at all.
     let payload = web_payload(MJS_INTERVAL_FORMULA, &data, "gaussian", fit);
-    let mut without_input = payload.clone();
-    for term in &mut without_input
-        .resolved_termspec
-        .as_mut()
-        .expect("the standard payload carries its resolved term specification")
-        .smooth_terms
-    {
-        if let SmoothBasisSpec::MeasureJet { spec, .. } = &mut term.basis
-            && let Some(frozen) = spec.frozen_quadrature.as_mut()
-        {
-            frozen.sigma_coord = None;
-        }
-    }
     let col_map = data.column_map();
+    let finite_support_only = without_input_measurement_error(&payload)
+        .measure_jet_extrapolation_variance(raw.view(), &col_map)
+        .expect("measure-jet extrapolation variance without σ_coord")
+        .expect("the frozen measure-jet term still prices its finite-support term");
     let priced = FittedModel::from_payload(payload)
         .measure_jet_extrapolation_variance(raw.view(), &col_map)
         .expect("measure-jet extrapolation variance")
         .expect("the frozen measure-jet term prices every query");
-    let finite_support_only = FittedModel::from_payload(without_input)
-        .measure_jet_extrapolation_variance(raw.view(), &col_map)
-        .expect("measure-jet extrapolation variance without σ_coord")
-        .expect("the frozen measure-jet term still prices its finite-support term");
     assert_eq!(
         priced.len(),
         test.len(),
