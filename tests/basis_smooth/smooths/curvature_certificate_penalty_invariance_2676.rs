@@ -41,7 +41,9 @@
 //!   the fit certifies there and NOTHING is deflated — so the false premise
 //!   cannot come back by inheritance.
 
+use faer::Side;
 use gam::estimate::FitOptions;
+use gam::faer_ndarray::FaerEigh;
 use gam::smooth::{
     ShapeConstraint, SmoothBasisSpec, SmoothTermSpec, SpatialLengthScaleOptimizationOptions,
     TermCollectionDesign, TermCollectionSpec,
@@ -330,7 +332,33 @@ fn a_redundant_penalty_map_still_fits_and_certifies_2676() {
 
     // Non-vacuity, checked WITHOUT the machinery that made the call: the
     // combination the invariance names must assemble to zero.
-    let w = invariance.lambda_basis().column(0).to_owned();
+    // The smallest-eigenvalue direction of the penalties' Frobenius Gram
+    // <S_i, S_j> is the combination the map annihilates.
+    let k = canonical.len();
+    let mut embedded = Vec::with_capacity(k);
+    for penalty in &canonical {
+        let mut full = Array2::<f64>::zeros((p, p));
+        let start = penalty.col_range.start;
+        for row in 0..penalty.local.nrows() {
+            for col in 0..penalty.local.ncols() {
+                full[[start + row, start + col]] = penalty.local[[row, col]];
+            }
+        }
+        embedded.push(full);
+    }
+    let mut gram = Array2::<f64>::zeros((k, k));
+    for i in 0..k {
+        for j in 0..k {
+            gram[[i, j]] = embedded[i].iter().zip(embedded[j].iter()).map(|(a, b)| a * b).sum();
+        }
+    }
+    let (eigenvalues, eigenvectors) = gram
+        .eigh(Side::Lower)
+        .expect("the penalties' Frobenius Gram must decompose");
+    let smallest = (0..k)
+        .min_by(|&a, &b| eigenvalues[a].total_cmp(&eigenvalues[b]))
+        .expect("at least one canonical penalty");
+    let w = eigenvectors.column(smallest).to_owned();
     let (residual, penalty_scale) = assembled_null_residual(&canonical, &w, p);
     assert!(
         residual <= 1.0e-10 * penalty_scale.max(1.0),
