@@ -1084,7 +1084,7 @@ fn factor_coordinates(
     // fully-explained-target abort (Cholesky NonPositivePivot) that killed
     // stagewise runs on targets the dictionary explains exactly. Dropping the
     // channel is the pseudo-inverse limit; with every channel degenerate the
-    // ridged normal matrix stays PD and the coordinates are the least-norm 0.
+    // normal matrix is zero and every coordinate is the least-norm 0.
     let d_inv: Vec<f64> = (0..p)
         .map(|i| {
             let d = diagonal[i];
@@ -1100,7 +1100,7 @@ fn factor_coordinates(
             if w.is_finite() { w } else { 0.0 }
         })
         .collect();
-    // Normal matrix ΛᵀD^{-1}Λ (+ tiny ridge for invertibility).
+    // Normal matrix ΛᵀD^{-1}Λ.
     let mut normal = Array2::<f64>::zeros((rank, rank));
     for a in 0..rank {
         for b in 0..rank {
@@ -1111,27 +1111,38 @@ fn factor_coordinates(
             normal[[a, b]] = acc;
         }
     }
-    let trace = (0..rank).map(|k| normal[[k, k]]).sum::<f64>().max(1.0);
-    let ridge = 1e-10 * trace / rank.max(1) as f64;
-    for k in 0..rank {
-        normal[[k, k]] += ridge;
+    // A factor column with no weight in the D^{-1} metric has a zero diagonal,
+    // and hence a zero row and column, in the normal matrix (a zero-energy
+    // column, or every channel dropped). It adds nothing to Λγ, so its
+    // least-norm coordinate is exactly 0. The remaining columns are scaled
+    // distinct eigenvectors of the second moment, weighted by strictly positive
+    // channel weights, so their block is factored strictly with no ridge (#2469).
+    let kept: Vec<usize> = (0..rank).filter(|&a| normal[[a, a]] > 0.0).collect();
+    let mut coords = Array2::<f64>::zeros((n, rank));
+    if kept.is_empty() {
+        return Ok(coords);
     }
-    let chol = normal
+    let mut block = Array2::<f64>::zeros((kept.len(), kept.len()));
+    for (x, &a) in kept.iter().enumerate() {
+        for (y, &b) in kept.iter().enumerate() {
+            block[[x, y]] = normal[[a, b]];
+        }
+    }
+    let chol = block
         .cholesky(Side::Lower)
         .map_err(|e| format!("factor_coordinates normal solve: {e:?}"))?;
-    let mut coords = Array2::<f64>::zeros((n, rank));
-    let mut rhs = Array1::<f64>::zeros(rank);
+    let mut rhs = Array1::<f64>::zeros(kept.len());
     for i in 0..n {
-        for a in 0..rank {
+        for (x, &a) in kept.iter().enumerate() {
             let mut acc = 0.0_f64;
             for j in 0..p {
                 acc += lambda[[j, a]] * d_inv[j] * r[[i, j]];
             }
-            rhs[a] = acc;
+            rhs[x] = acc;
         }
         let gamma = chol.solvevec(&rhs);
-        for a in 0..rank {
-            coords[[i, a]] = gamma[a];
+        for (x, &a) in kept.iter().enumerate() {
+            coords[[i, a]] = gamma[x];
         }
     }
     Ok(coords)
@@ -1590,23 +1601,28 @@ mod tests {
                     normal[[a, b]] = acc;
                 }
             }
-            let trace = (0..rank).map(|k| normal[[k, k]]).sum::<f64>().max(1.0);
-            let ridge = 1e-10 * trace / rank.max(1) as f64;
-            for k in 0..rank {
-                normal[[k, k]] += ridge;
+            let kept: Vec<usize> = (0..rank).filter(|&a| normal[[a, a]] > 0.0).collect();
+            if kept.is_empty() {
+                continue;
             }
-            let chol = normal.cholesky(Side::Lower).expect("naive normal solve");
-            let mut rhs = Array1::<f64>::zeros(rank);
-            for a in 0..rank {
+            let mut block = Array2::<f64>::zeros((kept.len(), kept.len()));
+            for (x, &a) in kept.iter().enumerate() {
+                for (y, &b) in kept.iter().enumerate() {
+                    block[[x, y]] = normal[[a, b]];
+                }
+            }
+            let chol = block.cholesky(Side::Lower).expect("naive normal solve");
+            let mut rhs = Array1::<f64>::zeros(kept.len());
+            for (x, &a) in kept.iter().enumerate() {
                 let mut acc = 0.0_f64;
                 for j in 0..p {
                     acc += lambda[[j, a]] * d_inv[j] * r[[i, j]];
                 }
-                rhs[a] = acc;
+                rhs[x] = acc;
             }
             let gamma = chol.solvevec(&rhs);
-            for a in 0..rank {
-                coords[[i, a]] = gamma[a];
+            for (x, &a) in kept.iter().enumerate() {
+                coords[[i, a]] = gamma[x];
             }
         }
         coords
