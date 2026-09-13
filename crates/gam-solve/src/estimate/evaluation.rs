@@ -173,6 +173,9 @@ where
     let fit_linear_constraints =
         conditioning.transform_linear_constraints_to_internal(opts.linear_constraints.clone());
 
+    // Certify binomial separation before any inner solve, as the fitting entry
+    // does: a separated unpenalized design has no finite mode (#2469).
+    crate::estimate::prefit::reject_prefit_binomial_separation(&cfg, y, w, &x_fit, &canonical)?;
     let mut reml_state = RemlState::newwith_offset(
         y_o.view(),
         x_fit,
@@ -239,6 +242,9 @@ where
     let fit_linear_constraints =
         conditioning.transform_linear_constraints_to_internal(opts.linear_constraints.clone());
 
+    // Certify binomial separation before any inner solve, as the fitting entry
+    // does: a separated unpenalized design has no finite mode (#2469).
+    crate::estimate::prefit::reject_prefit_binomial_separation(&cfg, y, w, &x_fit, &canonical)?;
     let mut reml_state = RemlState::newwith_offset(
         y_o.view(),
         x_fit,

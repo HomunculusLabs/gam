@@ -297,6 +297,13 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
         let fit_linear_constraints =
             conditioning.transform_linear_constraints_to_internal(opts.linear_constraints.clone());
         let (config, _) = resolved_external_config(opts)?;
+        // Every entry that builds a REML state certifies binomial separation up
+        // front, as the scalar-rho route does: a separated unpenalized design has
+        // no finite mode, and the post-solve heuristic that used to guess it is
+        // gone (#2469).
+        crate::estimate::prefit::reject_prefit_binomial_separation(
+            &config, y, w, &x_fit, &canonical,
+        )?;
         let config = Arc::new(config);
 
         let mut reml_state = RemlState::newwith_offset_shared(
