@@ -35,8 +35,7 @@ Two concrete failures:
 This test asserts the documented contract: ``predict_array(X)`` with no interval
 is 1-D and equals the response-scale ``mean`` from the named ``predict`` path.
 It uses a Poisson (log-link) model so the response mean is unambiguously
-distinct from the link-scale linear predictor.  When ``predict_array`` returns
-the 1-D response prediction, the test passes without edits.
+distinct from the link-scale linear predictor.
 """
 
 import os

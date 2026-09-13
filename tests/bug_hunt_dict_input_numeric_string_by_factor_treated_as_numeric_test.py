@@ -40,11 +40,10 @@ This is a silent, container-dependent corruption that violates the same
 invariance #1317 was filed to protect: a model must not depend on the spelling
 of categorical levels — nor on whether the caller used a DataFrame or a dict.
 
-The test asserts that the **dict** path recovers BOTH levels' shape. It fails
-today because level ``"0"`` is annihilated by the ``x0`` numeric scaling. When
-``categorical_dtype_columns`` also marks all-string columns from dict / record /
-numpy inputs (the fix), every level gets its own smooth and the assertions hold
-without edits.
+The test asserts that the **dict** path recovers BOTH levels' shape. Under the
+defect level ``"0"`` was annihilated by the ``x0`` numeric scaling;
+``categorical_dtype_columns`` must also mark all-string columns from dict /
+record / numpy inputs, so every level gets its own smooth.
 """
 
 from __future__ import annotations

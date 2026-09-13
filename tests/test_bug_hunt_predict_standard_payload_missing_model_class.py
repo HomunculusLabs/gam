@@ -38,8 +38,7 @@ only the Python binding boundary is broken.
 
 The fix is to make the standard ``PredictionPayload`` carry ``model_class`` and
 ``family`` (the survival payload already does), or to restore the defensive
-``.get(...)`` access. Either way these tests, which only ask that a plain
-``predict`` round-trips, must start passing without edits.
+``.get(...)`` access. These tests only ask that a plain ``predict`` round-trips.
 """
 from __future__ import annotations
 

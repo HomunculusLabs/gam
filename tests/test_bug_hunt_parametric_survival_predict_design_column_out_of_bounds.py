@@ -36,8 +36,8 @@ well-calibrated (the Weibull surface degeneracy is tracked separately).
 
 Related: #896, #897
 
-When the parametric survival predict design is built consistently with the
-runtime column layout, this test passes without edits.
+The parametric survival predict design must be built consistently with the
+runtime column layout.
 """
 
 import importlib

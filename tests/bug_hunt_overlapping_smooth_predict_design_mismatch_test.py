@@ -30,9 +30,8 @@ fs(x, g)`) form is silently un-predictable. The standalone factor smooth
 (`y ~ s(g, x, bs=sz)`, no overlapping `s(x)`) predicts fine, which is what
 isolates the residualization-replay gap as the cause.
 
-When predict replays the same hierarchical-ownership transform the fit applied
-(so the prediction design matches the fitted coefficient count), these fits
-predict normally and this test passes without edits.
+Predict must replay the same hierarchical-ownership transform the fit applied,
+so the prediction design matches the fitted coefficient count.
 """
 
 from __future__ import annotations

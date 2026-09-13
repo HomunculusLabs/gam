@@ -30,8 +30,7 @@ With an ``[x, y]`` training frame the offset is 0 and the bug is masked.
 The plug-in value of the ``"point"`` functional for a Gaussian/identity model is
 exactly ``m(x0) = predict(x0)``; for ``"contrast"`` it is
 ``m(x0) - m(x1) = predict(x0) - predict(x1)``. This test asserts both arms
-return that value (and do not raise) for the response-first column order. When
-the design builder is fixed it passes without edits.
+return that value (and do not raise) for the response-first column order.
 """
 
 from __future__ import annotations

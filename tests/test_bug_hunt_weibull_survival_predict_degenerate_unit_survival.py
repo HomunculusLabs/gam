@@ -32,8 +32,7 @@ A large ``exit`` placeholder is used in the prediction frame so the requested
 query times are inside the surface grid (isolating this from the separate
 "surface truncated at the prediction row's exit" defect, Related: #896).
 
-When the Weibull predicted survival reflects the fitted baseline, this test
-passes without edits.
+The Weibull predicted survival must reflect the fitted baseline.
 """
 
 import importlib

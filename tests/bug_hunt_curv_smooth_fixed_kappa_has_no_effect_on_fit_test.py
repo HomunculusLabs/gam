@@ -35,9 +35,9 @@ independent tell: ``curv(x, z, kappa=-8)`` was accepted on data with
 would have to be rejected by ``validate_chart_points`` if that κ were actually
 used to build the design.)
 
-When the fixed ``kappa=`` is honoured, the spherical and hyperbolic fits below
-diverge and the test passes with no edits. The data lives strictly inside the
-``κ = ±3`` chart (``‖x‖² < 1/3``) so both fixed-curvature fits are well posed.
+With the fixed ``kappa=`` honoured, the spherical and hyperbolic fits below
+diverge. The data lives strictly inside the ``κ = ±3`` chart (``‖x‖² < 1/3``) so
+both fixed-curvature fits are well posed.
 
 Related: #2151 (the workspace does not build at HEAD; this test — like every
 test target — can only run once that build break is cleared).

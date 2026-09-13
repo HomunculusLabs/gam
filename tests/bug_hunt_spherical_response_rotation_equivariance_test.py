@@ -31,10 +31,9 @@ predictions to the bit — yet the rotated fit disagrees with the rotated
 predictions by ~1e-2 (a ~1° geodesic angle), orders of magnitude above the
 zero determinism floor.
 
-When the tangent fit is made frame-equivariant (e.g. a single shared smoothing
-parameter / isotropic penalty across the tangent coordinates, or an intrinsic
-tangent-basis fit), the equivariance residual collapses to the float floor and
-this test passes without edits.
+A frame-equivariant tangent fit (e.g. a single shared smoothing parameter /
+isotropic penalty across the tangent coordinates, or an intrinsic tangent-basis
+fit) leaves an equivariance residual at the float floor.
 """
 
 from __future__ import annotations

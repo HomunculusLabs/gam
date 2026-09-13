@@ -38,10 +38,7 @@ every survival model.
 This test fits an ordinary right-censored survival model, predicts to obtain a
 ``SurvivalPrediction``, verifies ``survival_at`` works (the sanity anchor), then
 asserts that ``write_survival_at_csv`` writes a valid CSV whose ``survival``
-column matches ``survival_at`` for the same query times. When both defects are
-fixed (unpack three values; align the Python call with the Rust signature — or
-extend the Rust signature to honour the extrapolation law), the CSV is emitted
-and this test passes without edits.
+column matches ``survival_at`` for the same query times.
 
 Related: #965 (survival ``inf_value`` extrapolation field), #1595 (survival
 extrapolation past the grid).

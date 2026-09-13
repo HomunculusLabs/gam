@@ -35,8 +35,8 @@ predicted count ``3.6 ± 0.05`` is given an uncertainty 3.6× too tight; for a
 This test asserts the documented response-scale contract: ``std_error`` must be
 consistent with the response-scale Wald band.  The identity-link Gaussian arm
 is the passing control (response == link), pinning that the band itself is
-correct and the discrepancy is link-specific.  When the FFI populates
-``std_error`` from the response-scale SE, this test passes without edits.
+correct and the discrepancy is link-specific. The FFI must populate
+``std_error`` from the response-scale SE.
 """
 
 import os

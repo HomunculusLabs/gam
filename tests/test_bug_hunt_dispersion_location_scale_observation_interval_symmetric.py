@@ -32,9 +32,8 @@ through the standard Gamma path produces a strongly right-skewed (ratio ~2.2)
 band. The lower edge is clamped at the support floor 0 and over-covers, hiding
 the defect in the two-sided number — the location-scale sibling of #817.
 
-When the equal-tailed fix is propagated to the dispersion location-scale path,
-this test starts passing without edits: the band becomes right-skewed
-(``ratio >> 1``) and the upper tail covers near nominal.
+With the equal-tailed construction on the dispersion location-scale path, the
+band is right-skewed (``ratio >> 1``) and the upper tail covers near nominal.
 """
 
 import numpy as np
