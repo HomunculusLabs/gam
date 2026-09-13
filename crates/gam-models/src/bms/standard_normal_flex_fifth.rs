@@ -927,6 +927,35 @@ impl BernoulliMarginalSlopeFamily {
             return Err("non-finite standard-normal flexible row context in fifth contraction".into());
         }
         let a = row_ctx.intercept;
+        let directions = [dir_u, dir_v];
+        let calibration = self
+            .standard_normal_flex_calibration_partials(primary, q, a, b, beta_h, beta_w, directions)?;
+        self.standard_normal_flex_row_totals_from_calibration(
+            row,
+            primary,
+            a,
+            b,
+            beta_h,
+            beta_w,
+            directions,
+            calibration,
+        )
+    }
+
+    /// Explicit partials of the calibration map `M(a, θ) = Σ_cells ∫φΦ(η) − μ(q)`
+    /// at an arbitrary intercept `a`, the link-knot fluxes included.
+    fn standard_normal_flex_calibration_partials(
+        &self,
+        primary: &PrimarySlices,
+        q: f64,
+        a: f64,
+        b: f64,
+        beta_h: Option<&Array1<f64>>,
+        beta_w: Option<&Array1<f64>>,
+        directions: [&Array1<f64>; 2],
+    ) -> Result<ExplicitTensors, String> {
+        let r = primary.total;
+        let [dir_u, dir_v] = directions;
         let scale = self.probit_frailty_scale();
         let marginal = self.marginal_link_map(q)?;
         let directions = [dir_u, dir_v];
@@ -1044,7 +1073,23 @@ impl BernoulliMarginalSlopeFamily {
             }
         }
         calibration.seal();
+        Ok(calibration)
+    }
 
+    /// The observed-index totals and loss stack of one row, from the explicit
+    /// calibration partials at the row's intercept root `a`.
+    fn standard_normal_flex_row_totals_from_calibration(
+        &self,
+        row: usize,
+        primary: &PrimarySlices,
+        a: f64,
+        b: f64,
+        beta_h: Option<&Array1<f64>>,
+        beta_w: Option<&Array1<f64>>,
+        directions: [&Array1<f64>; 2],
+        calibration: ExplicitTensors,
+    ) -> Result<StandardNormalFlexRowTotals, String> {
+        let r = primary.total;
         let z_obs = self.z[row];
         let observed = self.observed_denested_cell_partials(row, a, b, beta_h, beta_w)?;
         let observed_atoms = IndexAtoms::new(
@@ -1093,5 +1138,105 @@ impl BernoulliMarginalSlopeFamily {
             loss,
             r,
         })
+    }
+}
+
+#[cfg(test)]
+mod explicit_calibration_tests {
+    use super::*;
+
+    /// At a fixed row state, with no root solve, each explicit calibration partial
+    /// is the intercept or slope derivative of the one below it. Order five against
+    /// a Richardson difference of order four exercises the degree-27 cell fold and
+    /// the order-five link-knot flux, deviation jumps included. Order four against
+    /// order three exercises the order-four flux. The implicit chain rule and the
+    /// loss composition take no part.
+    #[test]
+    fn standard_normal_flex_calibration_partials_differentiate_along_intercept_and_slope() {
+        let row = 0usize;
+        let (family, states) = super::super::flex_verify_932_tests::standard_normal_flex_fixture();
+        let cache = family
+            .build_exact_eval_cache(&states)
+            .expect("StandardNormal FLEX exact cache");
+        let primary = cache.primary.clone();
+        let point = family
+            .primary_point_from_block_states(row, &states, &primary)
+            .expect("StandardNormal FLEX primary point");
+        let (q, b, beta_h, beta_w) = family.primary_point_components(&point, &primary);
+        let a = BernoulliMarginalSlopeFamily::row_ctx(&cache, row).intercept;
+        let r = primary.total;
+        let h_range = primary.h.clone().expect("active score-warp range");
+        let w_range = primary.w.clone().expect("active link-deviation range");
+        let mut dir_u = Array1::<f64>::zeros(r);
+        dir_u[primary.q] = 0.55;
+        dir_u[primary.slope] = -0.35;
+        dir_u[h_range.start] = 0.45;
+        dir_u[w_range.start] = -0.40;
+        let mut dir_v = Array1::<f64>::zeros(r);
+        dir_v[primary.q] = -0.30;
+        dir_v[primary.slope] = 0.50;
+        dir_v[h_range.end - 1] = 0.25;
+        dir_v[w_range.end - 1] = 0.60;
+        let partials = |intercept: f64, slope: f64| {
+            family
+                .standard_normal_flex_calibration_partials(
+                    &primary,
+                    q,
+                    intercept,
+                    slope,
+                    beta_h.as_ref(),
+                    beta_w.as_ref(),
+                    [&dir_u, &dir_v],
+                )
+                .expect("explicit calibration partials")
+        };
+        let flat = |coordinates: &[usize]| coordinates.iter().rev().fold(0, |acc, &p| acc * r + p);
+        let slope = primary.slope;
+        let (w, h, w_last) = (w_range.start, h_range.start, w_range.end - 1);
+        // (label, m_u, m_v, j, lower coordinates, along the slope instead of the intercept)
+        let cases: Vec<(&str, usize, usize, usize, Vec<usize>, bool)> = vec![
+            ("aaaa->a", 0, 0, 4, vec![], false),
+            ("aaaa->b", 0, 0, 4, vec![], true),
+            ("aaab->a", 0, 0, 3, vec![slope], false),
+            ("aaa->a (order four)", 0, 0, 3, vec![], false),
+            ("aab->b (order four)", 0, 0, 2, vec![slope], true),
+            ("uvaa->a", 1, 1, 2, vec![], false),
+            ("uaab->b", 1, 0, 2, vec![slope], true),
+            ("aaaw->a", 0, 0, 3, vec![w], false),
+            ("aabw->b", 0, 0, 2, vec![slope, w], true),
+            ("aaah->a", 0, 0, 3, vec![h], false),
+            ("vaaw->a", 0, 1, 2, vec![w_last], false),
+        ];
+        let base = partials(a, b);
+        let mut worst = 0.0_f64;
+        for (label, m_u, m_v, j, lower, along_slope) in &cases {
+            let (j_higher, higher) = if *along_slope {
+                let mut higher = lower.clone();
+                higher.push(slope);
+                (*j, higher)
+            } else {
+                (*j + 1, lower.clone())
+            };
+            let analytic = base.get(*m_u, *m_v, j_higher, higher.len(), flat(&higher[..]));
+            let lower_at = |step: f64| {
+                let shifted = if *along_slope {
+                    partials(a, b + step)
+                } else {
+                    partials(a + step, b)
+                };
+                shifted.get(*m_u, *m_v, *j, lower.len(), flat(&lower[..]))
+            };
+            let central = |step: f64| (lower_at(step) - lower_at(-step)) / (2.0 * step);
+            let witness = (4.0 * central(1.0e-4) - central(2.0e-4)) / 3.0;
+            let error = (analytic - witness).abs() / analytic.abs().max(witness.abs()).max(1.0);
+            worst = worst.max(error);
+            eprintln!(
+                "#2901 calibration {label}: analytic={analytic:+.12e} richardson={witness:+.12e} rel={error:.3e}"
+            );
+        }
+        assert!(
+            worst <= 1e-7,
+            "explicit calibration partials do not differentiate each other: worst relative gap {worst:.3e}"
+        );
     }
 }

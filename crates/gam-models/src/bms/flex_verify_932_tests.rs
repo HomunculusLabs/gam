@@ -596,7 +596,7 @@ fn production_flex_grad_hess_matches_independent_fd_link_dev_constant_tail_2341(
 // algebra could agree with itself; this derivative ladder cannot.
 // ==================================================================
 
-fn standard_normal_flex_fixture() -> (BernoulliMarginalSlopeFamily, Vec<ParameterBlockState>) {
+pub(super) fn standard_normal_flex_fixture() -> (BernoulliMarginalSlopeFamily, Vec<ParameterBlockState>) {
     let score_seed = Array1::linspace(-2.0, 2.0, 8);
     let link_seed = Array1::linspace(-1.8, 1.8, 8);
     let config = DeviationBlockConfig {
