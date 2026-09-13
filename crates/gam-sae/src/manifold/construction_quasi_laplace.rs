@@ -1532,6 +1532,54 @@ impl SaeManifoldTerm {
                          {escalation_window} iterations"
                     );
                 } else if gradient_stationary {
+                    // #2228 — the exact-A polish before refusing a non-idempotent band
+                    // state. None of the three polish sites runs inside the band: the
+                    // limit-boundary one needs a non-stationary gate, the stall branch
+                    // needs an idempotent round, and the budget branch is this arm's
+                    // `else`. So a state whose re-entries keep committing material
+                    // decreases refused here without taking one exact step. Pool job
+                    // 604252 at `5e8f45d7d`
+                    // (`/scratch.global/sauer354/pool/sae2228/g5.seed2132.604252.txt`,
+                    // C=4 K=4 softmax, refine rounds 77–80) read ‖g‖ ≈ 9.4e-4 against
+                    // tol 2.9e-3 while every inner iteration took a logit-only step
+                    // (‖Δ_logit‖ 6.6e-3 → 1.48, gᵀΔ 5e-7 → 5e-5, many of them rejected
+                    // and routed to the proximal correction), and the penalized
+                    // objective crept from −23.1902692 to −23.1904910 before this
+                    // refusal. The softmax entropy prior's infimum lies at saturated
+                    // gates. Tolerance 0 removes the phase's band exit, so it steps until
+                    // its own ladder can buy no verifiable Armijo decrease. It mints
+                    // nothing: acceptance still needs the next evidence re-entry to
+                    // recur exactly.
+                    if terminal_newton_polish_armed
+                        && polish_escalations < POLISH_ESCALATION_ANTI_RUNAWAY_CAP
+                    {
+                        terminal_newton_polish_armed = false;
+                        if self.terminal_exact_newton_polish(
+                            target,
+                            rho_fixed,
+                            registry,
+                            &lambda_smooth,
+                            0.0,
+                            previous_loss_total.abs() + 1.0,
+                            options,
+                            64,
+                            &mut best_seen,
+                        )? {
+                            polish_escalations += 1;
+                            *criterion_fixed_point = false;
+                            consecutive_objective_stalls = 0;
+                            budget_escalation_extra = total_inner_iter
+                                .saturating_sub(refine_limit)
+                                .saturating_add(refine_limit.max(1));
+                            log::debug!(
+                                "SaeManifoldTerm::penalized_quasi_laplace_criterion: polish-paid \
+                                 window {polish_escalations}/\
+                                 {POLISH_ESCALATION_ANTI_RUNAWAY_CAP} inside the KKT band after \
+                                 {total_inner_iter} inner iterations"
+                            );
+                            continue;
+                        }
+                    }
                     let intensive = self.intensive_kkt_diagnostic(target, rho, registry);
                     return Err(format!(
                         "SaeManifoldTerm::penalized_quasi_laplace_criterion: {}; \
