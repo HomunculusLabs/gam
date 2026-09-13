@@ -3443,8 +3443,7 @@ impl SaeSupportSparseTerm {
             - &(minimum_vector.to_owned() * minimum_curvature);
         let eigensystem_scale = curvatures
             .iter()
-            .fold(0.0_f64, |current, &value| current.max(value.abs()))
-            .max(1.0);
+            .fold(0.0_f64, |current, &value| current.max(value.abs()));
         let minimum_backward_error = minimum_residual.dot(&minimum_residual).sqrt()
             + f64::EPSILON * dim.max(1) as f64 * eigensystem_scale;
         if !(minimum_backward_error.is_finite() && minimum_backward_error >= 0.0) {
@@ -3577,7 +3576,7 @@ impl SaeSupportSparseTerm {
         let solution_norm = solution.dot(&solution).sqrt();
         let backward_error_bound = dim.max(1) as f64
             * f64::EPSILON
-            * (exact_scale * solution_norm + range_norm).max(1.0);
+            * (exact_scale * solution_norm + range_norm);
         if !(residual_norm.is_finite() && residual_norm <= backward_error_bound) {
             return Err(format!(
                 "support outer adjoint pseudoinverse residual {residual_norm:.6e} exceeds its \
