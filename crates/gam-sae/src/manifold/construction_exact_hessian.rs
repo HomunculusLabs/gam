@@ -1421,36 +1421,57 @@ impl SaeManifoldTerm {
             ))
         }
     }
-    /// #2828 — `Σ_{r,c} e_beta[r,c]·left[total_t+r]·right[total_t+c]`, the border
-    /// block's contribution to a quadratic form in the `(t, β)` layout. `0` when
-    /// the block is absent or the vectors carry no border rows (the
-    /// coordinate-only spectral block).
-    fn dropped_curvature_border_form(
+    /// #2828 — every entry `Σ_{r,c} e_beta[r,c]·left[total_t+r, a]·right[total_t+c, b]`,
+    /// the border block's contribution to the quadratic forms between the columns of two
+    /// bases in the `(t, β)` layout. All zero when the block is absent or the vectors
+    /// carry no border rows (the coordinate-only spectral block).
+    ///
+    /// The block is applied once to each right column, `k²` work per column, and each
+    /// entry contracts one left column against that image, `k` work per entry. A scalar
+    /// form per entry paid `k²` for each of `left × right` entries: on the high-p
+    /// gauge-deflated K=1 circle at p = 512, a repeated eigenvalue run of ~1530 border
+    /// directions against k = 1536 put every eu-stack sample after the operator build in
+    /// this form (pool job 614715). The image keeps the scalar form's per-row inner sum
+    /// and the contraction keeps its row order and its skip of zero left rows, so every
+    /// entry is bit-identical to the scalar form.
+    fn dropped_curvature_border_forms(
         e_beta: Option<&Array2<f64>>,
         total_t: usize,
-        left: ArrayView1<'_, f64>,
-        right: ArrayView1<'_, f64>,
-    ) -> f64 {
+        left: ndarray::ArrayView2<'_, f64>,
+        right: ndarray::ArrayView2<'_, f64>,
+    ) -> Array2<f64> {
+        let mut forms = Array2::<f64>::zeros((left.ncols(), right.ncols()));
         let Some(block) = e_beta else {
-            return 0.0;
+            return forms;
         };
         let k = block.nrows();
-        if left.len() < total_t + k || right.len() < total_t + k {
-            return 0.0;
+        if left.nrows() < total_t + k || right.nrows() < total_t + k {
+            return forms;
         }
-        let mut acc = 0.0_f64;
-        for row in 0..k {
-            let scale = left[total_t + row];
-            if scale == 0.0 {
-                continue;
+        let mut image = Array2::<f64>::zeros((k, right.ncols()));
+        for b in 0..right.ncols() {
+            for row in 0..k {
+                let mut inner = 0.0_f64;
+                for col in 0..k {
+                    inner += block[[row, col]] * right[[total_t + col, b]];
+                }
+                image[[row, b]] = inner;
             }
-            let mut inner = 0.0_f64;
-            for col in 0..k {
-                inner += block[[row, col]] * right[total_t + col];
-            }
-            acc += scale * inner;
         }
-        acc
+        for a in 0..left.ncols() {
+            for b in 0..right.ncols() {
+                let mut acc = 0.0_f64;
+                for row in 0..k {
+                    let scale = left[[total_t + row, a]];
+                    if scale == 0.0 {
+                        continue;
+                    }
+                    acc += scale * image[[row, b]];
+                }
+                forms[[a, b]] = acc;
+            }
+        }
+        forms
     }
 
     /// #2336 — the diagonal of `E = B − A` restricted to the ARD periodic
@@ -3533,14 +3554,15 @@ impl SaeManifoldTerm {
             // #2828 — the β-tier decoder priors' majorization gap. Dense on the
             // border block, so unlike the coordinate clamps it cannot be folded
             // in as a diagonal weight.
+            let border = Self::dropped_curvature_border_forms(
+                e_beta,
+                total_t,
+                basis.view(),
+                basis.view(),
+            );
             for i in 0..q {
                 for j in 0..q {
-                    basin[[i, j]] += Self::dropped_curvature_border_form(
-                        e_beta,
-                        total_t,
-                        basis.column(i),
-                        basis.column(j),
-                    );
+                    basin[[i, j]] += border[[i, j]];
                 }
             }
         }
@@ -3701,14 +3723,15 @@ impl SaeManifoldTerm {
                 // projector's first-order response to it is part of `∂value/∂A`
                 // too. Omitting it here would leave the value consistent and the
                 // gradient not.
+                let border = Self::dropped_curvature_border_forms(
+                    e_beta,
+                    total_t,
+                    basis.view(),
+                    other.view(),
+                );
                 for i in 0..q {
                     for j in 0..complement.len() {
-                        e_cross[[i, j]] += Self::dropped_curvature_border_form(
-                            e_beta,
-                            total_t,
-                            basis.column(i),
-                            other.column(j),
-                        );
+                        e_cross[[i, j]] += border[[i, j]];
                     }
                 }
             }
@@ -4132,14 +4155,11 @@ impl SaeManifoldTerm {
                     }
                 }
                 if e_beta.is_some() {
+                    let run = vecs.slice(s![.., i..j]);
+                    let border = Self::dropped_curvature_border_forms(e_beta, total_t, run, run);
                     for a in 0..width {
                         for b in 0..width {
-                            ec[[a, b]] += Self::dropped_curvature_border_form(
-                                e_beta,
-                                total_t,
-                                vecs.column(i + a),
-                                vecs.column(i + b),
-                            );
+                            ec[[a, b]] += border[[a, b]];
                         }
                     }
                 }
