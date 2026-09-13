@@ -601,6 +601,12 @@ fn estimation_error_to_pyerr_with_message(err: &EstimationError, message: String
             HessianNotPositiveDefiniteError::new_err(message)
         }
         EstimationError::RemlOptimizationFailed(_) => RemlConvergenceError::new_err(message),
+        // The outer certificate at the fitted point describes a criterion whose
+        // identified rank can change inside its own Newton step, so what the
+        // caller holds is an uncertified outer optimum.
+        EstimationError::IdentifiedRankNotLocallyConstant { .. } => {
+            RemlConvergenceError::new_err(message)
+        }
         // A trial-point refusal only reaches Python when the outer smoothing
         // search never found a rho it could evaluate — so what the caller is
         // holding is an outer non-convergence, and the remedy (reseed, widen

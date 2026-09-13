@@ -3031,6 +3031,96 @@ where
     outer_result.final_grad_norm = Some(finalgrad_norm);
     let outer_converged = true;
 
+    // #2901 V22: the criterion priced `½log|H|₊` on H's identified subspace, and
+    // `½log|H|₊` jumps by `½ln σ` where a direction crosses the rounding band.
+    // The derivative certificate at ρ̂ describes a smooth criterion only if that
+    // rank is the same over the certificate's own Newton step. A Firth fit
+    // prices a structural rank and a sparse Hessian a strict factorization, so
+    // neither has a band to cross.
+    if !final_rho.is_empty() && !cfg.firth_bias_reduction {
+        if let gam_linalg::matrix::SymmetricMatrix::Dense(dense) =
+            &pirls_res.stabilizedhessian_transformed
+        {
+            let rows = reml_state.x().nrows();
+            let unevaluated = if !final_link_coords.is_empty() {
+                Some(
+                    "the outer search also moved link coordinates, whose Hessian drift this \
+                     bound does not model",
+                )
+            } else if reml_state.active_constraint_free_basis(&pirls_res).is_some() {
+                Some("the criterion priced the Hessian on an active linear-constraint face")
+            } else if pirls_res.finalweights.len() != rows
+                || (pirls_res.solve_c_nontrivial
+                    && (pirls_res.derivatives_unsupported
+                        || pirls_res.solve_c_array.len() != rows))
+            {
+                Some("the fit carries no row curvature derivative to bound the weight motion by")
+            } else {
+                None
+            };
+            match (
+                unevaluated,
+                outer_result.final_hessian.as_ref(),
+                outer_result.final_gradient.as_ref(),
+            ) {
+                (None, Some(hessian_rho), Some(gradient))
+                    if hessian_rho.dim() == (gradient.len(), gradient.len()) =>
+                {
+                    let railed: Vec<usize> = outer_result
+                        .criterion_certificate
+                        .as_ref()
+                        .map(|certificate| {
+                            certificate
+                                .lambdas_railed
+                                .iter()
+                                .copied()
+                                .chain(
+                                    certificate
+                                        .stationarity
+                                        .rails()
+                                        .iter()
+                                        .map(|rail| rail.index),
+                                )
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let (certificate, step_radius) =
+                        super::identified_hessian::certify_fitted_identified_rank(
+                            &pirls_res,
+                            dense,
+                            &lambdas,
+                            reml_state.x(),
+                            hessian_rho,
+                            gradient,
+                            &railed,
+                        )?;
+                    let largest_unidentified = match certificate.largest_unidentified {
+                        Some(sigma) => format!("{sigma:.3e}"),
+                        None => "none at full rank".to_string(),
+                    };
+                    log::info!(
+                        "[#2901 V22] identified rank {} of {} is certified constant over the \
+                         certificate's Newton step {step_radius:.3e}: smallest identified \
+                         eigenvalue {:.3e}, largest unidentified {largest_unidentified}, rounding \
+                         band {:.3e}",
+                        certificate.rank,
+                        dense.nrows(),
+                        certificate.smallest_identified,
+                        certificate.band,
+                    );
+                }
+                (reason, ..) => log::info!(
+                    "[#2901 V22] identified-rank constancy not evaluated at the fitted smoothing \
+                     parameters: {}",
+                    reason.unwrap_or(
+                        "the outer search tracked no Hessian over the certified coordinates, so \
+                         its certificate has no Newton step"
+                    )
+                ),
+            }
+        }
+    }
+
     if opts.compute_inference || needs_constrained_posterior {
         penalized_hessian = map_hessian_to_original_basis(&pirls_res)?;
     }

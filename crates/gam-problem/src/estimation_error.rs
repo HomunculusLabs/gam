@@ -629,6 +629,37 @@ pub enum EstimationError {
     #[error("{}", hessian_not_positive_definite_message(*min_eigenvalue))]
     HessianNotPositiveDefinite { min_eigenvalue: f64 },
 
+    /// The penalized Hessian's identified rank at the fitted smoothing
+    /// parameters is not certified constant over the outer certificate's own
+    /// Newton step (#2901 V22).
+    ///
+    /// The criterion prices `½log|H|₊` over the eigenvalues above the rounding
+    /// band `p·ε·‖H‖₂`, so a direction crossing the band moves it by `½ln σ`.
+    /// When the smallest identified eigenvalue can fall under the band, or the
+    /// largest unidentified one can rise over it, somewhere the step reaches,
+    /// the derivative certificate at the fitted point describes a criterion
+    /// that jumps inside its own neighbourhood.
+    #[error(
+        "the penalized Hessian's identified rank {rank} of {coefficients} coefficient directions \
+         is not certified constant over the outer certificate's Newton step, so log|H|+ can jump \
+         inside the neighbourhood the certificate vouches for: the smallest identified eigenvalue \
+         {smallest_identified:.4e} can fall to {reachable_smallest_identified:.4e}{}, against a \
+         rounding band {band:.4e} that can move within [{:.4e}, {:.4e}]",
+        unidentified_eigenvalue_motion(*largest_unidentified, *reachable_largest_unidentified),
+        reachable_band.0,
+        reachable_band.1
+    )]
+    IdentifiedRankNotLocallyConstant {
+        rank: usize,
+        coefficients: usize,
+        smallest_identified: f64,
+        largest_unidentified: Option<f64>,
+        band: f64,
+        reachable_smallest_identified: f64,
+        reachable_largest_unidentified: Option<f64>,
+        reachable_band: (f64, f64),
+    },
+
     #[error("REML smoothing optimization failed to converge: {0}")]
     RemlOptimizationFailed(String),
 
@@ -934,6 +965,7 @@ impl EstimationError {
             | Self::PrefitRankDeficientDesignDetected { .. }
             | Self::PrefitNearDegenerateDesignDetected { .. }
             | Self::HessianNotPositiveDefinite { .. }
+            | Self::IdentifiedRankNotLocallyConstant { .. }
             | Self::RemlOptimizationFailed { .. }
             | Self::OuterObjectiveEvaluationFailed { .. }
             | Self::RemlDidNotConverge { .. }
@@ -1519,5 +1551,17 @@ fn hessian_not_positive_definite_message(min_eigenvalue: f64) -> String {
             "Hessian matrix is not positive definite (minimum eigenvalue: {min_eigenvalue:.4e}). \
              This indicates a numerical instability."
         )
+    }
+}
+
+/// The unidentified half of
+/// [`EstimationError::IdentifiedRankNotLocallyConstant`]'s text. A full-rank
+/// Hessian has no unidentified eigenvalue to report.
+fn unidentified_eigenvalue_motion(largest: Option<f64>, reachable: Option<f64>) -> String {
+    match (largest, reachable) {
+        (Some(sigma), Some(reachable)) => {
+            format!("; the largest unidentified eigenvalue {sigma:.4e} can rise to {reachable:.4e}")
+        }
+        _ => String::new(),
     }
 }
