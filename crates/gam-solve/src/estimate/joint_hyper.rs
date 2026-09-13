@@ -1159,20 +1159,37 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
     /// Carry each direction's design derivatives into the conditioned frame the
     /// inner solve works in.
     ///
-    /// A second derivative whose support excludes every column the
-    /// conditioning rewrites is already in that frame, so it keeps its storage.
-    /// The ψ-ψ entries are read only by the outer-Hessian pair builders, which
-    /// multiply implicit storage in place; densifying them cost one `n × p`
-    /// materialization per ψ pair on every evaluation, gradient-only ones
-    /// included (#2735). First derivatives stay dense: the original-basis
-    /// builder's `SparseDirectionalHyperOperator` traces an implicit `X_τ` by
-    /// one matvec per factor column.
+    /// A derivative whose support excludes every column the conditioning
+    /// rewrites is already in that frame. A second derivative then keeps its
+    /// storage: the ψ-ψ entries are read only by the outer-Hessian pair
+    /// builders, which multiply implicit storage in place, and densifying them
+    /// cost one `n × p` materialization per ψ pair on every evaluation,
+    /// gradient-only ones included (#2735). A first derivative keeps its storage
+    /// only when dense copies of the directions would not fit the resource
+    /// policy, the test `build_tau_hyper_coords` applies before it builds
+    /// implicit drift operators; below that, dense rows are the cheaper product.
     fn condition_hyper_dirs(&self, hyper_dirs: &mut [DirectionalHyperParam]) {
+        let keep_implicit_first = hyper_dirs.iter().find_map(|dir| {
+            dir.implicit_axis_count_hint().map(|axes| {
+                gam_terms::basis::should_use_implicit_operators_with_policy(
+                    dir.x_tau_original.nrows(),
+                    dir.x_tau_original.ncols(),
+                    axes,
+                    &gam_runtime::resource::ResourcePolicy::default_library(),
+                )
+            })
+        }) == Some(true);
         for dir in hyper_dirs.iter_mut() {
-            let mut x_tau = dir.x_tau_dense();
-            self.conditioning
-                .transform_matrix_columnswith_a_inplace(&mut x_tau);
-            dir.x_tau_original = crate::estimate::reml::HyperDesignDerivative::from(x_tau);
+            let first_in_frame = keep_implicit_first
+                && dir.x_tau_original.column_support().is_some_and(|support| {
+                    self.conditioning.leaves_matrix_supported_on(&support)
+                });
+            if !first_in_frame {
+                let mut x_tau = dir.x_tau_dense();
+                self.conditioning
+                    .transform_matrix_columnswith_a_inplace(&mut x_tau);
+                dir.x_tau_original = crate::estimate::reml::HyperDesignDerivative::from(x_tau);
+            }
             if let Some(rows) = dir.x_tau_tau_original.as_mut() {
                 for mat in rows.iter_mut().flatten() {
                     if mat.column_support().is_some_and(|support| {

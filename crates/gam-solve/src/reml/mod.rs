@@ -4220,8 +4220,10 @@ impl HyperDesignDerivative {
         }
     }
 
-    /// `X_τ[rows, ·] · factor` for a derivative that stores its values, or `None`
-    /// for an operator-backed one, whose rows exist only through its matvecs.
+    /// `X_τ[rows, ·] · factor`. Stored values multiply directly, and an implicit
+    /// derivative forms its rows one chunk at a time from the term's radial
+    /// jets. `None` only for a latent-coordinate derivative, whose rows exist
+    /// only through its matvecs.
     pub(crate) fn dense_rows_times(
         &self,
         rows: Range<usize>,
@@ -4239,7 +4241,23 @@ impl HyperDesignDerivative {
                 &backend.local.slice(s![rows, ..]),
                 &factor.slice(s![backend.global_range.clone(), ..]),
             )),
-            DerivativeMatrixStorage::Implicit(_) | DerivativeMatrixStorage::LatentCoord(_) => None,
+            DerivativeMatrixStorage::Implicit(backend) => {
+                let local = match backend.level {
+                    ImplicitDerivLevel::First(axis) => backend.operator.row_chunk_first(axis, rows),
+                    ImplicitDerivLevel::SecondDiag(axis) => {
+                        backend.operator.row_chunk_second_diag(axis, rows)
+                    }
+                    ImplicitDerivLevel::SecondCross(d, e) => {
+                        backend.operator.row_chunk_second_cross(d, e, rows)
+                    }
+                }
+                .expect("radial scalar evaluation failed during implicit derivative row chunk");
+                Some(gam_linalg::faer_ndarray::fast_ab(
+                    &local,
+                    &factor.slice(s![backend.global_range.clone(), ..]),
+                ))
+            }
+            DerivativeMatrixStorage::LatentCoord(_) => None,
         }
     }
 

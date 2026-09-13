@@ -6771,6 +6771,69 @@ pub(crate) fn sparse_directional_trace_projected_factor_matches_column_matvecs()
     );
 }
 
+/// Contract: an implicit `X_τ` for a term spanning global columns 1..4 of 5
+/// contracts by row chunks in `SparseDirectionalHyperOperator::trace_projected_factor`,
+/// and equals `Σ_c f_cᵀ (B_τ f_c)` taken through `mul_vec` (#2735).
+#[test]
+pub(crate) fn sparse_directional_trace_projected_factor_reads_implicit_rows_2735() {
+    use gam_terms::basis::ImplicitDesignPsiDerivative;
+    use std::sync::Arc;
+
+    let n = 7usize;
+    let n_knots = 3usize;
+    let n_axes = 2usize;
+    let p = 5usize;
+    let rank = 3usize;
+    let pairs = n * n_knots;
+    let implicit = Arc::new(ImplicitDesignPsiDerivative::new(
+        Array1::from_shape_fn(pairs, |k| 0.5 + 0.2 * (k as f64 * 0.9).sin()),
+        Array1::from_shape_fn(pairs, |k| (k as f64 * 0.61).cos()),
+        Array1::zeros(pairs),
+        Array2::from_shape_fn((pairs, n_axes), |(k, a)| {
+            0.3 + ((2 * k + a) as f64 * 0.37).sin()
+        }),
+        None,
+        None,
+        n,
+        n_knots,
+        0,
+        n_axes,
+    ));
+    let x_data = Array2::from_shape_fn((n, p), |(i, j)| {
+        ((i * p + j) as f64 * 0.43).cos() + 0.05 * j as f64
+    });
+    let op = SparseDirectionalHyperOperator {
+        x_tau: crate::estimate::reml::HyperDesignDerivative::from_implicit(
+            implicit,
+            crate::estimate::reml::ImplicitDerivLevel::First(1),
+            1..4,
+            p,
+        ),
+        x_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(x_data)),
+        w_diag: gam_linalg::matrix::SignedWeightsArc::from_array(Array1::from_shape_fn(n, |i| {
+            0.8 + 0.05 * i as f64
+        })),
+        s_tau: Array2::from_shape_fn((p, p), |(i, j)| if i == j { 0.2 } else { 0.03 }),
+        c_x_tau_beta: Some(Array1::from_shape_fn(n, |i| 0.1 * (i as f64 * 0.7).cos())),
+        firth_hphi_tau_partial: None,
+        p,
+    };
+    let factor = Array2::from_shape_fn((p, rank), |(i, k)| ((i * rank + k) as f64 * 0.31).sin());
+    let column_products = op.mul_mat(&factor);
+    let want: f64 = factor
+        .iter()
+        .zip(column_products.iter())
+        .map(|(&f, &bf)| f * bf)
+        .sum();
+    let got = op.trace_projected_factor(&factor);
+    // Both sides accumulate `n · p · rank` rounded products.
+    let band = (n * p * rank) as f64 * f64::EPSILON * want.abs().max(1.0);
+    assert!(
+        (got - want).abs() <= band,
+        "row-chunk trace {got:.15e} vs column matvecs {want:.15e} (band {band:.3e})"
+    );
+}
+
 /// Contract: `ImplicitHyperOperator::mul_vec(v)` reproduces the analytic
 /// first-order spatial drift
 ///   `B_d v = (∂X/∂ψ_d)ᵀ W X v + Xᵀ W (∂X/∂ψ_d) v + Xᵀ diag(c·X_{ψ_d}β̂) X v + S_{ψ_d} v`.

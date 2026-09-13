@@ -1433,7 +1433,7 @@ impl HyperOperator for SparseDirectionalHyperOperator {
         while start < n_obs {
             let end = (start + chunk_rows).min(n_obs);
             let Some(x_tau_f_chunk) = self.x_tau.dense_rows_times(start..end, factor) else {
-                // An operator-backed `X_τ` has no stored rows: keep the per-column
+                // A latent-coordinate `X_τ` has no row chunks: keep the per-column
                 // products its matvec streams.
                 let op_factor = self.mul_mat(factor);
                 return factor
