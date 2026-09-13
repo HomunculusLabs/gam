@@ -25,7 +25,7 @@
 //!
 //! Migration rule (task #16): the existing certificate types KEEP their math
 //! unchanged; they merely implement [`Certificate`]. Their bespoke methods
-//! (`passes`, `decide_within_margin`, `is_certified`, …) stay
+//! (`passes`, `gap_resolves_margin`, `is_certified`, …) stay
 //! as-is and the trait's [`Certificate::verdict`] is defined in terms of them,
 //! so there is exactly one source of truth for each verdict.
 

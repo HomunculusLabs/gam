@@ -935,10 +935,10 @@ crates/gam-solve/src/inference/alo.rs	compute_case_deletion_from_pirls	retired-n
 crates/gam-solve/src/inference/pg_gate_evidence.rs	pg_gate_evidence_moment_matched	retired-no-surviving-dependent
 crates/gam-solve/src/inference/residual_factor.rs	fit_row_metric	retired-no-surviving-dependent
 crates/gam-solve/src/inference/residual_factor.rs	row_scale	defined-elsewhere-in-crate
-crates/gam-solve/src/logdet_bounds.rs	block_preconditioned_logdet_enclosure	narrowed-to-crate
+crates/gam-solve/src/logdet_bounds.rs	block_preconditioned_logdet_enclosure	retired-no-product-user
 crates/gam-solve/src/logdet_bounds.rs	decided_value	retired-no-product-user
-crates/gam-solve/src/logdet_bounds.rs	is_decided	narrowed-to-crate
-crates/gam-solve/src/logdet_bounds.rs	refine_logdet_enclosure_to_margin	narrowed-to-crate
+crates/gam-solve/src/logdet_bounds.rs	is_decided	retired-no-product-user
+crates/gam-solve/src/logdet_bounds.rs	refine_logdet_enclosure_to_margin	retired-no-product-user
 crates/gam-solve/src/loop_guard.rs	verdict_at	retired-no-surviving-dependent
 crates/gam-solve/src/measure_jet_glm_sufficient.rs	assert_design_unchanged	retired-no-product-user
 crates/gam-solve/src/measure_jet_glm_sufficient.rs	weighted_gram	retired-no-product-user

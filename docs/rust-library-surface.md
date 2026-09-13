@@ -203,8 +203,8 @@ dropped, and restored items the table above retires were removed again.
 | Retired: nothing that survived depends on it | 290 |
 | Retired by the owning work's own decision | 29 |
 | Retired by a later deletion commit named in the row | 513 |
-| Retired: no product uses it | 232 |
-| Narrowed to crate visibility | 15 |
+| Retired: no product uses it | 235 |
+| Narrowed to crate visibility | 12 |
 
 Retired identities carry no compatibility obligation. Restoration is closed
 under calls: after the merges, no restored body calls a function the sweep

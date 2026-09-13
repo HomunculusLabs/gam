@@ -6324,5 +6324,20 @@
     ],
     "reason": "SPEC rules 5 and 23 (#2901 V22, lead ruling (a), slice 4a). Since e5d94eb33 no PIRLS path adds a stabilization ridge, so the ridge passport is deleted from PirlsResult and EvalShared. RemlState::last_ridge_used read that passport and has nothing left to report. ridge_continuity_tests measured the passport's δ along ρ (ridge_sweep, stabilization_ridge_is_constant_along_rho_2519). It is restated as hessian_identity_sweep and penalized_hessian_carries_no_stabilization_ridge_along_rho_2519. Those rebuild XₜᵀWXₜ + S_t from each fit and require the criterion's penalized Hessian to match it within the assembly band, which is the property the old value pin stood in for.",
     "evidence": "At the base, git grep -w over the repository finds these callers. last_ridge_used: estimate/evaluation.rs (evaluate_externalcost_andridge), estimate/binomial_reml_outer_cost_1575_tests.rs (the probe table) and estimate/ridge_continuity_tests.rs. ridge_sweep and stabilization_ridge_is_constant_along_rho_2519: only estimate/ridge_continuity_tests.rs itself. This change returns 0.0 from evaluate_externalcost_andridge, drops the #1575 table's ridge columns, and replaces the ridge_continuity scan with the Hessian-identity scan over the same fixture, degrees and ρ grid. The guarded job covers compile and the restated test."
+  },
+  {
+    "base": "2b4560632d65b827505ceaddad962a743bf21292",
+    "items": [
+      "crates/gam-solve/src/logdet_bounds.rs:enum:MarginVerdict",
+      "crates/gam-solve/src/logdet_bounds.rs:fn:absorb_strongest_pair",
+      "crates/gam-solve/src/logdet_bounds.rs:fn:block_preconditioned_logdet_enclosure",
+      "crates/gam-solve/src/logdet_bounds.rs:fn:decide_within_margin",
+      "crates/gam-solve/src/logdet_bounds.rs:fn:frobenius_sq",
+      "crates/gam-solve/src/logdet_bounds.rs:fn:is_decided",
+      "crates/gam-solve/src/logdet_bounds.rs:fn:refine_logdet_enclosure_to_margin",
+      "crates/gam-solve/src/logdet_bounds.rs:fn:whitened_off_block"
+    ],
+    "reason": "#2627 tip compile. 8305537ae narrowed refine_logdet_enclosure_to_margin, block_preconditioned_logdet_enclosure and MarginVerdict::is_decided to pub(crate). The only call of refine_logdet_enclosure_to_margin is its own recursion, which the narrow scan counted as a production caller, so the narrowing left the whole enclosure-refinement chain dead under warnings = deny: gam-solve (lib) and (lib test) each failed with 7 errors. Nothing outside the file ever called the chain. This change deletes refine_logdet_enclosure_to_margin, absorb_strongest_pair, block_preconditioned_logdet_enclosure, their whitened_off_block and frobenius_sq helpers, LogdetEnclosure::decide_within_margin, and MarginVerdict with is_decided, which only decide_within_margin constructed and read. LogdetEnclosure, gap and gap_resolves_margin stay for the Certificate impl and the per-atom EFS convergence gate.",
+    "evidence": "At the base, git grep -n -w over crates, src, tests, examples, bench and benches finds refine_logdet_enclosure_to_margin, absorb_strongest_pair, block_preconditioned_logdet_enclosure, decide_within_margin, is_decided, MarginVerdict and whitened_off_block only in crates/gam-solve/src/logdet_bounds.rs, apart from three doc comments this change rewrites (gam-solve topology_selector.rs and inference/certificate_impls.rs, gam-problem topology_certificates.rs). frobenius_sq occurs elsewhere only as unrelated local variables (gam-sae eq4_description_length.rs, tests/glm gaussian_sparse_xtwx_cache_correctness.rs). The lead's tip check 575026 at 4011c103f (/scratch.global/sauer354/sw-status/tipcheck.575026.log) reads: could not compile gam-solve (lib) due to 7 previous errors."
   }
 ]

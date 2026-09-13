@@ -1961,9 +1961,9 @@ pub enum Headline {
 ///
 /// * [`Exact`] — the evidence is a genuine point value (dense logdet, full
 ///   corpus); no margin floor.
-/// * [`Enclosure`] — the log-determinant half came from a
-///   `block_preconditioned_logdet_enclosure`; the race lead Δ must exceed the
-///   enclosure gap (#1011 contract) before the winner is trustworthy.
+/// * [`Enclosure`] — the log-determinant half came from a certified
+///   `LogdetEnclosure`; the race lead Δ must exceed the enclosure gap
+///   (#1011 contract) before the winner is trustworthy.
 /// * [`Coreset`] — the evidence was raced on a certified row coreset; the lead
 ///   must exceed the certificate's [`CoresetCertificate::race_transfer_margin`]
 ///   (#1012 contract — the SAME margin seam as the enclosure).

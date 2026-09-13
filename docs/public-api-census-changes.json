@@ -2541,5 +2541,16 @@
     },
     "reason": "#2899 dead code: DynamicOrder1::g is the public inherent method of the deleted DynamicOrder1, which nothing instantiates.",
     "evidence": "public_api_census.py --base 6d11cc207 --head 0c093d47f reports exactly this identity (12035 -> 12034) (/scratch.global/sauer354/pool/prune-api-a/slice26.census.json)."
+  },
+  {
+    "base": "2b4560632d65b827505ceaddad962a743bf21292",
+    "removed": {
+      "crates/gam-solve/src/logdet_bounds.rs::block_preconditioned_logdet_enclosure": 1,
+      "crates/gam-solve/src/logdet_bounds.rs::decide_within_margin": 1,
+      "crates/gam-solve/src/logdet_bounds.rs::is_decided": 1,
+      "crates/gam-solve/src/logdet_bounds.rs::refine_logdet_enclosure_to_margin": 1
+    },
+    "reason": "#2627 tip compile. 8305537ae narrowed refine_logdet_enclosure_to_margin, block_preconditioned_logdet_enclosure and MarginVerdict::is_decided to pub(crate). The only call of refine_logdet_enclosure_to_margin is its own recursion, which the narrow scan counted as a production caller, so the narrowing left the whole enclosure-refinement chain dead under warnings = deny: gam-solve (lib) and (lib test) each failed with 7 errors. Nothing outside the file ever called the chain. This change deletes refine_logdet_enclosure_to_margin, absorb_strongest_pair, block_preconditioned_logdet_enclosure, their whitened_off_block and frobenius_sq helpers, LogdetEnclosure::decide_within_margin, and MarginVerdict with is_decided, which only decide_within_margin constructed and read. LogdetEnclosure, gap and gap_resolves_margin stay for the Certificate impl and the per-atom EFS convergence gate.",
+    "evidence": "At the base, git grep -n -w over crates, src, tests, examples, bench and benches finds refine_logdet_enclosure_to_margin, absorb_strongest_pair, block_preconditioned_logdet_enclosure, decide_within_margin, is_decided, MarginVerdict and whitened_off_block only in crates/gam-solve/src/logdet_bounds.rs, apart from three doc comments this change rewrites (gam-solve topology_selector.rs and inference/certificate_impls.rs, gam-problem topology_certificates.rs). frobenius_sq occurs elsewhere only as unrelated local variables (gam-sae eq4_description_length.rs, tests/glm gaussian_sparse_xtwx_cache_correctness.rs). The lead's tip check 575026 at 4011c103f (/scratch.global/sauer354/sw-status/tipcheck.575026.log) reads: could not compile gam-solve (lib) due to 7 previous errors."
   }
 ]
