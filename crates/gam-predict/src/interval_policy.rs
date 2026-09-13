@@ -189,7 +189,7 @@ pub(crate) fn delta_mean_interval(
 /// survival families transform the η endpoints through their response map
 /// (well-behaved for nonlinear links), Gaussian-identity families reuse the
 /// η interval directly, and dispersion families take the delta-method route.
-pub enum MeanBoundMethod<'a> {
+pub(crate) enum MeanBoundMethod<'a> {
     /// Transform `η ± z·SE(η)` through the supplied monotone response map and
     /// clamp to `bounds`. Non-finite transformed values are errors; this path
     /// never substitutes a delta-method interval.
@@ -234,7 +234,7 @@ pub(crate) fn mean_bounds(
 /// directly meaningful on the response scale, so they collapse the η interval
 /// onto the point predictor and carry all uncertainty through the delta-method
 /// response interval instead.
-pub enum EtaInterval {
+pub(crate) enum EtaInterval {
     /// Central interval `η ± z·SE(η)`.
     Symmetric,
     /// η interval collapsed to the point predictor (`η_lower = η_upper = η`);
@@ -260,7 +260,7 @@ impl EtaInterval {
 /// Keeping the analytic override as its own variant matters for families such
 /// as Royston–Parmar: their fresh-response law has an exact discrete predictive
 /// set but no additive response-noise standard deviation.
-pub enum ObservationInterval<'a> {
+pub(crate) enum ObservationInterval<'a> {
     /// Symmetric `μ ± z·√(SE(μ̂)² + σ²)` band from a per-row
     /// response-scale noise standard deviation.
     Symmetric {
@@ -282,7 +282,7 @@ pub enum ObservationInterval<'a> {
 /// This field is pure provenance: the exact covariance definition consumed by
 /// the uncertainty calculation. It is copied verbatim into the result so the
 /// engine, not each predictor, owns the struct shape.
-pub struct UncertaintyProvenance {
+pub(crate) struct UncertaintyProvenance {
     pub covariance_source: InferenceCovarianceMode,
 }
 
@@ -597,7 +597,7 @@ pub trait PredictionTransform {
     }
 }
 
-/// Build the [`MeanBoundMethod`] selected by a transform's [`ResponseInterval`]
+/// Build the `MeanBoundMethod` selected by a transform's [`ResponseInterval`]
 /// policy, borrowing the response closure / mean SE as needed.
 fn mean_bound_method_for<'a, T: PredictionTransform>(
     transform: &'a T,

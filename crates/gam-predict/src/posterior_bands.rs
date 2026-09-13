@@ -7,7 +7,7 @@ use gam_model_kernels::inverse_link::{apply_inverse_link_spec_vec, apply_inverse
 use gam_spec::InverseLink;
 
 type MatrixBands = (Vec<f64>, Vec<f64>, Vec<f64>);
-pub type PosteriorBands = (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>);
+pub(crate) type PosteriorBands = (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>);
 
 /// Inverse-link selector for the posterior-band engine.
 ///
