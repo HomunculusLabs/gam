@@ -39,8 +39,12 @@
 //! row z_j = 1{Y = j}; we share the covariate effects g(x) + β·x2 across cut-
 //! points and let cutpoint-specific intercepts (threshold dummies thr2, thr3,
 //! with j=1 the baseline) realize θ_2, θ_3. gam fits this stacked frame with
-//!     z ~ s(x, bs='cc') + x2 + thr2 + thr3
-//! and mgcv fits the identical stacked frame and cyclic smooth by REML. The data
+//!     z ~ s(x, bs='cc') + x2 + linear(thr2, double_penalty=false)
+//!         + linear(thr3, double_penalty=false)
+//! and mgcv fits the identical stacked frame and cyclic smooth by REML. The
+//! threshold dummies are intercepts, so they opt out of the null-recovery ridge
+//! every formula linear effect carries by default (b7b874a2a); mgcv leaves them
+//! unpenalized too. x2 is a covariate effect and keeps the default. The data
 //! are synthesized from an exact stopping-ratio generative model, so both engines
 //! are correctly specified, and identical rows (a fixed-seed synthetic ordinal
 //! sample, stacked once) are handed to both.
@@ -177,8 +181,13 @@ fn gam_continuation_ratio_matches_vgam_sratio() {
         family: Some("binomial".to_string()),
         ..FitConfig::default()
     };
-    let result = fit_from_formula("z ~ s(x, bs='cc') + x2 + thr2 + thr3", &ds, &cfg)
-        .expect("gam stopping-ratio (stacked binomial) fit");
+    let result = fit_from_formula(
+        "z ~ s(x, bs='cc') + x2 + linear(thr2, double_penalty=false) \
+         + linear(thr3, double_penalty=false)",
+        &ds,
+        &cfg,
+    )
+    .expect("gam stopping-ratio (stacked binomial) fit");
     let FitResult::Standard(fit) = result else {
         panic!("expected a standard binomial GAM fit");
     };
@@ -633,8 +642,12 @@ fn gam_continuation_ratio_matches_vgam_sratio_on_real_data() {
         family: Some("binomial".to_string()),
         ..FitConfig::default()
     };
-    let result = fit_from_formula("z ~ s_temp + h_temp + thr2", &ds, &cfg)
-        .expect("gam stopping-ratio (stacked binomial) fit on wine train");
+    let result = fit_from_formula(
+        "z ~ s_temp + h_temp + linear(thr2, double_penalty=false)",
+        &ds,
+        &cfg,
+    )
+    .expect("gam stopping-ratio (stacked binomial) fit on wine train");
     let FitResult::Standard(fit) = result else {
         panic!("expected a standard binomial GAM fit");
     };
@@ -781,7 +794,7 @@ fn gam_continuation_ratio_matches_vgam_sratio_on_real_data() {
     // model that carries real information must predict the held-out tiers better
     // than it does. The held-out majority class is NOT such a floor: it reads the
     // TEST labels, which no train-fitted model can know.
-    let null_result = fit_from_formula("z ~ thr2", &ds, &cfg)
+    let null_result = fit_from_formula("z ~ linear(thr2, double_penalty=false)", &ds, &cfg)
         .expect("gam cutpoint-only null stopping-ratio fit on wine train");
     let FitResult::Standard(null_fit) = null_result else {
         panic!("expected a standard binomial GAM fit for the cutpoint-only null model");
