@@ -482,7 +482,8 @@ fn scales_to_large_k_without_dense_n_by_k() {
     let config = SparseDictConfig {
         n_atoms: k,
         active: 1,
-        max_epochs: 6,
+        // The production epoch budget: a hand-set budget below the settling
+        // horizon measures the budget, not the trainer (#2822).
         score_tile: 256,
         score_mode: gam_gpu::GpuPolicy::Off,
         ..SparseDictConfig::new(k)
@@ -511,7 +512,7 @@ fn large_k_fit_reports_admitted_route_stats_and_is_reproducible() {
         n_atoms: k,
         active: 2,
         minibatch: 512,
-        max_epochs: 4,
+        // The production epoch budget (#2822), as above.
         score_tile: 1024,
         score_mode: gam_gpu::GpuPolicy::Off,
         ..SparseDictConfig::new(k)
