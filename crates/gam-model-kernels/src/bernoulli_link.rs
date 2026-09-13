@@ -9,7 +9,8 @@
 
 use gam_problem::EstimationError;
 use gam_solve::mixture_link::{
-    inverse_link_jet_for_inverse_link, inverse_link_pdfthird_derivative_for_inverse_link,
+    inverse_link_jet_for_inverse_link, inverse_link_pdffourth_derivative_for_inverse_link,
+    inverse_link_pdfthird_derivative_for_inverse_link,
 };
 use gam_spec::{InverseLink, StandardLink};
 
@@ -534,8 +535,8 @@ fn cauchit_natural_fifth(eta: f64) -> [f64; 2] {
 }
 
 /// Fifth η-derivatives `(d⁵ log μ, d⁵ log(1 − μ))`, continuing each dedicated
-/// tail kernel one step. `None` for the parameterized links, whose generic
-/// inverse-link jet has no fifth derivative.
+/// tail kernel one step. `None` for the parameterized links, which have no
+/// dedicated tail kernel.
 pub fn bernoulli_natural_log_fifth_derivatives(
     eta: f64,
     link: &InverseLink,
@@ -562,23 +563,71 @@ pub fn bernoulli_natural_log_fifth_derivatives(
     }
 }
 
+/// Fifth η-derivatives `(d⁵ log μ, d⁵ log(1 − μ))` of a parameterized bounded link
+/// from the central inverse-link jet and the density's fourth derivative `μ⁽⁵⁾`:
+/// the fifth cumulants of the ratios `μ⁽ᵏ⁾/μ` and `−μ⁽ᵏ⁾/(1 − μ)`, under the
+/// interior-probability contract of `generic_natural_jet`.
+#[inline]
+fn generic_natural_fifth(
+    row: usize,
+    eta: f64,
+    link: &InverseLink,
+) -> Result<[f64; 2], EstimationError> {
+    let jet = inverse_link_jet_for_inverse_link(link, eta)?;
+    let d4 = inverse_link_pdfthird_derivative_for_inverse_link(link, eta)?;
+    let d5 = inverse_link_pdffourth_derivative_for_inverse_link(link, eta)?;
+    if !(jet.mu.is_finite()
+        && jet.mu > 0.0
+        && jet.mu < 1.0
+        && jet.d1.is_finite()
+        && jet.d1 > 0.0
+        && jet.d2.is_finite()
+        && jet.d3.is_finite()
+        && d4.is_finite()
+        && d5.is_finite())
+    {
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(
+            row,
+            "bounded-family inverse-link fifth-order jet",
+            eta,
+            jet.mu,
+        ));
+    }
+    let mu = jet.mu;
+    let q = 1.0 - mu;
+    let (r1, r2, r3, r4, r5) = (jet.d1 / mu, jet.d2 / mu, jet.d3 / mu, d4 / mu, d5 / mu);
+    let (s1, s2, s3, s4, s5) = (jet.d1 / q, jet.d2 / q, jet.d3 / q, d4 / q, d5 / q);
+    Ok([
+        r5 - 5.0 * r1 * r4 - 10.0 * r2 * r3 + 20.0 * r1 * r1 * r3 + 30.0 * r1 * r2 * r2
+            - 60.0 * r1.powi(3) * r2
+            + 24.0 * r1.powi(5),
+        -s5 - 5.0 * s1 * s4 - 10.0 * s2 * s3 - 20.0 * s1 * s1 * s3 - 30.0 * s1 * s2 * s2
+            - 60.0 * s1.powi(3) * s2
+            - 24.0 * s1.powi(5),
+    ])
+}
+
 /// Third η-derivative of one unweighted Bernoulli observation's negative
 /// Hessian, `−d⁵ℓ/dη⁵`, one order past [`bernoulli_natural_observation`]. Hard
-/// `0/1` outcomes select one tower as there. `None` for the parameterized links,
-/// whose generic inverse-link jet has no fifth derivative (#2903).
+/// `0/1` outcomes select one tower as there. The dedicated tail kernels continue
+/// one step; the parameterized links read the inverse-link density's fourth
+/// derivative (#2903).
 pub fn bernoulli_natural_negative_hessian_third_derivative(
     row: usize,
     y: f64,
     eta: f64,
     link: &InverseLink,
-) -> Result<Option<f64>, EstimationError> {
+) -> Result<f64, EstimationError> {
     if !(y.is_finite() && (0.0..=1.0).contains(&y)) {
         return Err(EstimationError::InvalidInput(format!(
             "Bernoulli response at row {row} must be finite and in [0,1], got {y}"
         )));
     }
-    Ok(bernoulli_natural_log_fifth_derivatives(eta, link)?
-        .map(|[log_mu, log_one_minus_mu]| -response_mixture(y, log_mu, log_one_minus_mu)))
+    let [log_mu, log_one_minus_mu] = match bernoulli_natural_log_fifth_derivatives(eta, link)? {
+        Some(fifth) => fifth,
+        None => generic_natural_fifth(row, eta, link)?,
+    };
+    Ok(-response_mixture(y, log_mu, log_one_minus_mu))
 }
 
 #[cfg(test)]
@@ -586,26 +635,37 @@ mod tests {
     use super::*;
 
     /// #2903: `W'''` must equal a central difference of the analytic `W''` on every
-    /// dedicated tail kernel. η = −5 reaches the small-x cloglog series, −2.5 and
-    /// −0.25 its recurrence, 0.7 and 2.5 its geometric tail, and the mirrored
-    /// values do the same for loglog.
+    /// dedicated tail kernel and on the generic parameterized-link jet. η = −5
+    /// reaches the small-x cloglog series, −2.5 and −0.25 its recurrence, 0.7 and
+    /// 2.5 its geometric tail, and the mirrored values do the same for loglog.
     #[test]
     fn negative_hessian_third_derivative_matches_difference_of_second_2903() {
-        for link in [
-            StandardLink::Logit,
-            StandardLink::Probit,
-            StandardLink::CLogLog,
-            StandardLink::LogLog,
-            StandardLink::Cauchit,
+        let sas = gam_solve::mixture_link::state_from_sasspec(gam_problem::SasLinkSpec {
+            initial_epsilon: 0.3,
+            initial_log_delta: -0.2,
+        })
+        .expect("valid SAS state");
+        let beta_logistic =
+            gam_solve::mixture_link::state_from_beta_logisticspec(gam_problem::SasLinkSpec {
+                initial_epsilon: 0.4,
+                initial_log_delta: 0.25,
+            })
+            .expect("valid beta-logistic state");
+        for (label, link) in [
+            ("logit", InverseLink::Standard(StandardLink::Logit)),
+            ("probit", InverseLink::Standard(StandardLink::Probit)),
+            ("cloglog", InverseLink::Standard(StandardLink::CLogLog)),
+            ("loglog", InverseLink::Standard(StandardLink::LogLog)),
+            ("cauchit", InverseLink::Standard(StandardLink::Cauchit)),
+            ("sas", InverseLink::Sas(sas)),
+            ("beta-logistic", InverseLink::BetaLogistic(beta_logistic)),
         ] {
-            let link = InverseLink::Standard(link);
             for (row, eta) in [-5.0, -2.5, -0.25, 0.7, 2.5, 5.0].into_iter().enumerate() {
                 for y in [0.0, 0.3, 1.0] {
                     let h = 2.0e-5;
                     let center =
                         bernoulli_natural_negative_hessian_third_derivative(row, y, eta, &link)
-                            .expect("third derivative")
-                            .expect("a dedicated tail kernel carries the fifth derivative");
+                            .expect("third derivative");
                     let plus = bernoulli_natural_observation(row, y, eta + h, &link)
                         .expect("plus observation");
                     let minus = bernoulli_natural_observation(row, y, eta - h, &link)
@@ -615,8 +675,7 @@ mod tests {
                         / (2.0 * h);
                     assert!(
                         (center - fd).abs() <= 2.0e-4 * (1.0 + fd.abs()),
-                        "{} curvature third derivative at eta={eta}, y={y}: analytic={center} FD={fd}",
-                        link.link_function().name(),
+                        "{label} curvature third derivative at eta={eta}, y={y}: analytic={center} FD={fd}",
                     );
                 }
             }

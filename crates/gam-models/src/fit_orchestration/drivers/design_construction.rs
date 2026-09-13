@@ -721,8 +721,8 @@ struct StandardFamilyObservationState {
     neghessian_eta: Array1<f64>,
     neghessian_eta_derivative: Array1<f64>,
     neghessian_eta_second_derivative: Array1<f64>,
-    /// `W'''` on every row, or `None` when some branch has no closed form (#2903).
-    neghessian_eta_third_derivative: Option<Array1<f64>>,
+    /// `W'''` on every row (#2903).
+    neghessian_eta_third_derivative: Array1<f64>,
     log_likelihood: f64,
 }
 
@@ -1078,8 +1078,8 @@ struct ExactStandardObservationRow {
     neghessian_eta: f64,
     neghessian_eta_derivative: f64,
     neghessian_eta_second_derivative: f64,
-    /// `W'''`, when the branch has a closed form for it (#2903).
-    neghessian_eta_third_derivative: Option<f64>,
+    /// `W'''`, the third η-derivative of the observed negative Hessian (#2903).
+    neghessian_eta_third_derivative: f64,
     log_likelihood: f64,
 }
 
@@ -1093,7 +1093,7 @@ impl ExactStandardObservationRow {
             neghessian_eta: 0.0,
             neghessian_eta_derivative: 0.0,
             neghessian_eta_second_derivative: 0.0,
-            neghessian_eta_third_derivative: Some(0.0),
+            neghessian_eta_third_derivative: 0.0,
             log_likelihood: 0.0,
         }
     }
@@ -1125,14 +1125,12 @@ fn certify_bounded_row(
             return Err(EstimationError::pirls_row_geometry_unrepresentable(row, quantity, eta, value));
         }
     }
-    if let Some(value) = state.neghessian_eta_third_derivative
-        && !value.is_finite()
-    {
+    if !state.neghessian_eta_third_derivative.is_finite() {
         return Err(EstimationError::pirls_row_geometry_unrepresentable(
             row,
             "bounded-family observed Hessian third derivative",
             eta,
-            value,
+            state.neghessian_eta_third_derivative,
         ));
     }
     if state.fisherweight < 0.0 {
@@ -1239,9 +1237,9 @@ fn exact_logit_observation_row(
             neghessian_eta_derivative: fisherweight * (one_minus_mu - mu),
             neghessian_eta_second_derivative: fisherweight * (1.0 - 6.0 * mu * one_minus_mu),
             // d/dη of W·(1 − 6μ(1−μ)), with dμ(1−μ)/dη = μ(1−μ)(1−2μ).
-            neghessian_eta_third_derivative: Some(
-                fisherweight * (one_minus_mu - mu) * (1.0 - 12.0 * mu * one_minus_mu),
-            ),
+            neghessian_eta_third_derivative: fisherweight
+                * (one_minus_mu - mu)
+                * (1.0 - 12.0 * mu * one_minus_mu),
             log_likelihood: weight * log_likelihood_unit,
         },
     )
@@ -1279,9 +1277,7 @@ fn exact_noncanonical_binomial_observation_row(
             neghessian_eta_derivative: weight * observation.negative_hessian_derivative,
             neghessian_eta_second_derivative: weight
                 * observation.negative_hessian_second_derivative,
-            // `W'''` continues each dedicated Bernoulli tail kernel one step; the
-            // parameterized links have no fifth derivative (#2903).
-            neghessian_eta_third_derivative: third_derivative.map(|value| weight * value),
+            neghessian_eta_third_derivative: weight * third_derivative,
             log_likelihood: weight * observation.log_likelihood,
         },
     )
@@ -1437,7 +1433,7 @@ fn exact_standard_observation_row(
                     neghessian_eta: scaled_weight,
                     neghessian_eta_derivative: 0.0,
                     neghessian_eta_second_derivative: 0.0,
-                    neghessian_eta_third_derivative: Some(0.0),
+                    neghessian_eta_third_derivative: 0.0,
                     log_likelihood: -loss,
                 },
             )
@@ -1478,7 +1474,7 @@ fn exact_standard_observation_row(
                     neghessian_eta: fisherweight,
                     neghessian_eta_derivative: fisherweight,
                     neghessian_eta_second_derivative: fisherweight,
-                    neghessian_eta_third_derivative: Some(fisherweight),
+                    neghessian_eta_third_derivative: fisherweight,
                     log_likelihood,
                 },
             )
@@ -1517,7 +1513,7 @@ fn exact_standard_observation_row(
                     neghessian_eta: weighted_ratio,
                     neghessian_eta_derivative: -weighted_ratio,
                     neghessian_eta_second_derivative: weighted_ratio,
-                    neghessian_eta_third_derivative: Some(-weighted_ratio),
+                    neghessian_eta_third_derivative: -weighted_ratio,
                     log_likelihood: -weighted_ratio - weighted_shape * eta,
                 },
             )
@@ -1603,7 +1599,7 @@ fn exact_standard_observation_row(
                     neghessian_eta,
                     neghessian_eta_derivative,
                     neghessian_eta_second_derivative,
-                    neghessian_eta_third_derivative: Some(neghessian_eta_third_derivative),
+                    neghessian_eta_third_derivative,
                     log_likelihood,
                 },
             )
@@ -1673,7 +1669,7 @@ fn exact_standard_observation_row(
                     neghessian_eta,
                     neghessian_eta_derivative,
                     neghessian_eta_second_derivative,
-                    neghessian_eta_third_derivative: Some(neghessian_eta_third_derivative),
+                    neghessian_eta_third_derivative,
                     log_likelihood,
                 },
             )
@@ -1713,7 +1709,7 @@ fn evaluate_resolved_standard_family_observations(
     let mut neghessian_eta = Array1::<f64>::zeros(n);
     let mut neghessian_eta_derivative = Array1::<f64>::zeros(n);
     let mut neghessian_eta_second_derivative = Array1::<f64>::zeros(n);
-    let mut neghessian_eta_third_derivative = Some(Array1::<f64>::zeros(n));
+    let mut neghessian_eta_third_derivative = Array1::<f64>::zeros(n);
     let mut log_likelihood = 0.0;
     let mut log_likelihood_compensation = 0.0;
 
@@ -1732,13 +1728,7 @@ fn evaluate_resolved_standard_family_observations(
         neghessian_eta[i] = row.neghessian_eta;
         neghessian_eta_derivative[i] = row.neghessian_eta_derivative;
         neghessian_eta_second_derivative[i] = row.neghessian_eta_second_derivative;
-        if let Some(value) = row.neghessian_eta_third_derivative {
-            if let Some(third) = neghessian_eta_third_derivative.as_mut() {
-                third[i] = value;
-            }
-        } else {
-            neghessian_eta_third_derivative = None;
-        }
+        neghessian_eta_third_derivative[i] = row.neghessian_eta_third_derivative;
         let adjusted = row.log_likelihood - log_likelihood_compensation;
         let updated = log_likelihood + adjusted;
         log_likelihood_compensation = (updated - log_likelihood) - adjusted;
@@ -2024,14 +2014,13 @@ impl BoundedLinearFamily {
     /// Hessian `H = Eᵀ·diag(W)·E − diag_b(x_bᵀ·score·b'') + diag_b(P'')` (#2903).
     /// It is the Leibniz expansion of `Eᵀ·diag(W)·E` through the moving bounded
     /// columns of `E` and the likelihood curvature `W(η)` up to `W'''`, plus the
-    /// bounded diagonal through `b⁽⁵⁾` and the prior's fifth derivative. `None`
-    /// when the observation kernel has no closed-form `W'''`.
+    /// bounded diagonal through `b⁽⁵⁾` and the prior's fifth derivative.
     fn joint_hessian_third_directional_all_axes(
         &self,
         latent_beta: &Array1<f64>,
         d_beta_u_flat: &Array1<f64>,
         d_beta_v_flat: &Array1<f64>,
-    ) -> Result<Option<Vec<Array2<f64>>>, String> {
+    ) -> Result<Vec<Array2<f64>>, String> {
         let p = latent_beta.len();
         if d_beta_u_flat.len() != p || d_beta_v_flat.len() != p {
             return Err(SmoothError::dimension_mismatch(format!(
@@ -2043,9 +2032,7 @@ impl BoundedLinearFamily {
         }
         let (obs, _, _, _, second_diag, third_diag, _) =
             self.exacthessian_andgradient(latent_beta)?;
-        let Some(w3) = obs.neghessian_eta_third_derivative.as_ref() else {
-            return Ok(None);
-        };
+        let w3 = &obs.neghessian_eta_third_derivative;
         let (_, jac_diag, _, _, _) = self.bounded_term_derivative_data(latent_beta)?;
         let x_eff = self.effective_design_for_latent(&jac_diag);
         let mut fourth_diag = Array1::<f64>::zeros(p);
@@ -2164,7 +2151,7 @@ impl BoundedLinearFamily {
             }
             axes.push(d3h);
         }
-        Ok(Some(axes))
+        Ok(axes)
     }
 }
 
@@ -2377,33 +2364,15 @@ impl CustomFamily for BoundedLinearFamily {
         Ok(Some(d2h))
     }
 
-    /// `W'''` has a closed form in every observation branch except the
-    /// parameterized binomial links, whose generic inverse-link jet has no fifth
-    /// derivative (#2903).
+    /// Every observation branch the bounded family admits carries a closed-form
+    /// `W'''`: the standard GLM rows directly, and every binomial link through the
+    /// Bernoulli tail kernels or the inverse-link density's fourth derivative
+    /// (#2903).
     fn joint_jeffreys_information_third_directional_available(&self) -> bool {
-        match &self.likelihood.spec.response {
-            ResponseFamily::Gaussian
-            | ResponseFamily::Poisson
-            | ResponseFamily::Gamma
-            | ResponseFamily::Tweedie { .. }
-            | ResponseFamily::NegativeBinomial { .. } => true,
-            ResponseFamily::Binomial => matches!(
-                resolved_bounded_binomial_link(
-                    &self.likelihood.spec,
-                    self.latent_cloglog_state.as_ref(),
-                    self.mixture_link_state.as_ref(),
-                    self.sas_link_state.as_ref(),
-                ),
-                InverseLink::Standard(
-                    StandardLink::Logit
-                        | StandardLink::Probit
-                        | StandardLink::CLogLog
-                        | StandardLink::LogLog
-                        | StandardLink::Cauchit
-                )
-            ),
-            _ => false,
-        }
+        !matches!(
+            self.likelihood.spec.response,
+            ResponseFamily::Beta { .. } | ResponseFamily::RoystonParmar
+        )
     }
 
     fn joint_jeffreys_information_third_directional_all_axes_with_specs(
@@ -2423,6 +2392,7 @@ impl CustomFamily for BoundedLinearFamily {
             .into());
         }
         self.joint_hessian_third_directional_all_axes(latent_beta, d_beta_u_flat, d_beta_v_flat)
+            .map(Some)
     }
 
     fn block_geometry(

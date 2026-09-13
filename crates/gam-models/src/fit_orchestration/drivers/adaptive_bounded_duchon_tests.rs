@@ -1209,8 +1209,7 @@ mod adaptive_bounded_duchon_tests {
             );
             let axes = family
                 .joint_hessian_third_directional_all_axes(&beta, &u, &v)
-                .expect("analytic third derivative")
-                .expect("a closed-form W''' reaches the third derivative");
+                .expect("analytic third derivative");
             assert_eq!(axes.len(), beta.len(), "case {case}: one matrix per axis");
             let second_at = |axis: usize, t: f64| {
                 let mut moved = beta.clone();
