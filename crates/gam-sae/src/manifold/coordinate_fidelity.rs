@@ -390,20 +390,16 @@ pub(crate) fn watson_u2_uniform_weighted(
 //     not by a p-value cut, so a circle-vs-clusters contest is raced per atom.
 //
 // The occupancy adjudication is a BIC (rank-aware Laplace-evidence) comparison
-// across a small FIXED model-class enumeration — the SAME "discrete structure
-// choice" pattern the topology / `K` / mixture ladders already use, not a grid
-// search: the uniform density (0 free location parameters), a single wrapped
-// Gaussian (the continuous unimodal / von-Mises-like alternative), and a
-// `k`-anchor wrapped-Gaussian mixture for `k` on the anchor ladder. The winning
-// class is the occupancy law; when a `k ≥ 2` anchor model wins, the atom carries
-// a discrete measure of `k` anchors (`d_eff = k − 1`).
+// across three model classes: the uniform density (0 free location parameters),
+// a single wrapped Gaussian (the continuous unimodal / von-Mises-like
+// alternative), and a `k`-anchor wrapped-Gaussian mixture. The anchor count is
+// walked upward from `k = 2` one order at a time, and the walk ends at the first
+// order whose evidence does not improve on the order below it, so every count
+// the data can carry is reachable and no hand-picked ladder of counts is
+// consulted (SPEC rule 18, #2902). The winning class is the occupancy law; when a
+// `k ≥ 2` anchor model wins, the atom carries a discrete measure of `k` anchors
+// (`d_eff = k − 1`).
 // ===========================================================================
-
-/// The fixed anchor ladder swept for the discrete-occupancy rung. A discrete
-/// structure choice (like [`MIXTURE_K_LADDER`](crate) / the topology ladder),
-/// not a grid search — each `k` is priced by its own free-parameter count and
-/// ranked by evidence. Includes `7` (weekday-cyclic) and `12` (month-cyclic).
-pub(crate) const OCCUPANCY_ANCHOR_LADDER: &[usize] = &[2, 3, 4, 5, 6, 7, 9, 12];
 
 /// The occupancy law of a fitted `d = 1` coordinate ON its honest chart: which
 /// measure the data draws from. Adjudicated by evidence (`classify_occupancy_weighted`),
@@ -580,17 +576,24 @@ fn classify_occupancy_weighted_impl(
             best_law = OccupancyLaw::Continuous;
         }
     }
-    for &k in OCCUPANCY_ANCHOR_LADDER {
-        if k >= pairs.len() {
+    // Walk the anchor count up from two and stop at the first order that does not
+    // improve on the order below it (or whose evidence is not computable). The
+    // walk is bounded by the rows themselves: a mixture needs fewer anchors than
+    // points.
+    let mut previous_order_bic = f64::INFINITY;
+    for k in 2..pairs.len() {
+        let Some(bic) =
+            wrapped_gaussian_mixture_bic_weighted(&pts, &w, k, sigma_floor, ln_n, circular, mass)
+        else {
+            break;
+        };
+        if !(bic < previous_order_bic) {
             break;
         }
-        if let Some(bic) =
-            wrapped_gaussian_mixture_bic_weighted(&pts, &w, k, sigma_floor, ln_n, circular, mass)
-        {
-            if bic < best_bic {
-                best_bic = bic;
-                best_law = OccupancyLaw::Discrete { anchors: k };
-            }
+        previous_order_bic = bic;
+        if bic < best_bic {
+            best_bic = bic;
+            best_law = OccupancyLaw::Discrete { anchors: k };
         }
     }
     best_law

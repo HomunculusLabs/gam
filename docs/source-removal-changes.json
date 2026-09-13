@@ -6347,5 +6347,13 @@
     ],
     "reason": "SPEC rule 23 (#2469). build_local_chart refused a chart when the smallest projected squared distance over all neighbourhood pairs fell below 1e-6 of the smallest ambient squared distance. Those two minima can come from different pairs, so a near-duplicate pair lowered the bar for a collapsed one, and an exactly duplicated row (ambient distance 0) switched the check off. The chart is now refused when some pair the ambient separates beyond its rounding band projects inside its own band: (γ₂·s)² ambient and d·(γ_{p+1}·s)² projected, with s = ‖x_a‖ + ‖x_b‖ over the centered rows (gam_linalg::roundoff::accumulation_growth). Nothing is left for the constant to scale.",
     "evidence": "At 53063e989efaccddd7e55c245ad31f8872496665, git grep -n -w CHART_INJECTIVITY_FLOOR_FRAC over crates, src, tests, examples, bench, benches, python and docs finds only crates/gam-sae/src/manifold/local_charts.rs:96 (the definition) and :1291 (its one use, in build_local_chart)."
+  },
+  {
+    "base": "1e15e6ee6a01a8f2d0e6bfab1b04bf712464cc1f",
+    "items": [
+      "crates/gam-sae/src/manifold/coordinate_fidelity.rs:const:OCCUPANCY_ANCHOR_LADDER"
+    ],
+    "reason": "SPEC rule 18 (#2902 row 15). classify_occupancy_weighted took the discrete-occupancy anchor count only from the hand-picked ladder [2, 3, 4, 5, 6, 7, 9, 12]. The count is now walked upward from k = 2 until the BIC stops improving on the order below, bounded by k < pairs.len(). The ladder constant has no other reader.",
+    "evidence": "At the base, git grep -n -w OCCUPANCY_ANCHOR_LADDER over *.rs finds only crates/gam-sae/src/manifold/coordinate_fidelity.rs: its declaration and the one loop in classify_occupancy_weighted_impl that this change replaces. The [`MIXTURE_K_LADDER`](crate) doc link on the deleted constant goes with it. The coordinate_fidelity_recovery_tests assert Collapsed, anchors() == 0 or class membership, and none pins a specific anchor count."
   }
 ]
