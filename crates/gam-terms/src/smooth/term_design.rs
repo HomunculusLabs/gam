@@ -1267,7 +1267,25 @@ fn penalties_in_collection_chart(
     }
     let candidates =
         penalty_candidates_under_collection_gauge(active_penalties, coefficient_gauge, term_name)?;
-    let filtered = filter_penalty_candidates(candidates)?;
+    let mut filtered = filter_penalty_candidates(candidates)?;
+    // `filter_penalty_candidates` numbers its input from zero, but that input is
+    // the term-local build's ACTIVE penalties, one candidate each and in order.
+    // Carry each block's local original index, so the numbering stays the local
+    // build's, whose dropped blocks travel alongside in `local_dropped`. The
+    // renumbering had a trial whose odd-order Matérn collocation Grams underflowed
+    // hand back its survivors as [Mass 0, Stiffness 1] while the drops said
+    // Tension 1 and ThirdOrder 3. The incremental realizer then read a dropped
+    // block as lost, and aborted the fit instead of refusing the trial (#2817).
+    for active in &mut filtered.active {
+        if let Some(local) = active_penalties.get(active.info.original_index) {
+            active.info.original_index = local.info.original_index;
+        }
+    }
+    for dropped in &mut filtered.dropped {
+        if let Some(local) = active_penalties.get(dropped.original_index) {
+            dropped.original_index = local.info.original_index;
+        }
+    }
     let mut dropped = local_dropped;
     dropped.extend(filtered.dropped);
     Ok((filtered.active, dropped))
