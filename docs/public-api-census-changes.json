@@ -3099,5 +3099,15 @@
     },
     "reason": "#2899 (delete code only tests use). gam-solve's latent_inner module (LatentInnerSolver, LatentInnerOptions, LatentInnerOutcome, the ArrowSystemAssembler trait and their private helpers) has no production user: no crate, gam-cli, gam-pyffi, gamfit or example constructs LatentInnerSolver or implements ArrowSystemAssembler. Its only callers were its own unit test and tests/regressions/misc/latent_cache_inner_bug_hunt.rs. That root file goes whole: its fourth test drove the deleted solver, and the other three call no gam code at all (two compare x.dot(beta)*rho with a second evaluation of the same product, one compares two literal arrays), so no product change could make them fail (SPEC rule 16).",
     "evidence": "public_api_census.py's pub fn declarations removed by this change: 2. A guarded cargo check --workspace --all-targets --exclude gam-pyffi at this entry's base plus this change, and source_removal_guard.py / public_api_census.py on this commit, ran on MSI before the push (job id in the commit message)."
+  },
+  {
+    "base": "e30fff2d9cd732a6d7d74538f3cadfa2dc4a8dd7",
+    "removed": {
+      "crates/gam-solve/src/pirls/workspace.rs::commit_pending_arrow_latent": 1,
+      "crates/gam-solve/src/pirls/workspace.rs::restore_arrow_latent_if_needed": 1,
+      "crates/gam-solve/src/pirls/workspace.rs::restore_pending_arrow_latent_if_needed": 1
+    },
+    "reason": "SPEC rule 25 and #2899 (delete options nothing uses). The PIRLS `arrow_schur: Option<ArrowSchurInnerConfig>` option on PirlsConfig and WorkingModelPirlsOptions is never Some: nothing constructs an ArrowSchurInnerConfig and every struct literal passes `arrow_schur: None`. The reweight loop's arrow-Schur inner-solve branch, its pending latent snapshot/restore helpers, the arrow predicted-reduction arm, the accepted-state cache key's latent bits and the always-true `arrow_schur.is_none()` gates could never run, so they are deleted.",
+    "evidence": "public_api_census.py's pub fn declarations removed by this change: 3. A guarded cargo check --workspace --all-targets --exclude gam-pyffi at this entry's base plus this change, and source_removal_guard.py / public_api_census.py on this commit, ran on MSI before the push (job id in the commit message)."
   }
 ]

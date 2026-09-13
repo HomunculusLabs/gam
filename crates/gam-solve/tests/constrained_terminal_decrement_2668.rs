@@ -71,7 +71,6 @@ fn terminal_face_decrement_certifies_a_representable_quadratic_minimum() {
             coefficient_lower_bounds: lower_bounds,
             linear_constraints,
             initial_lm_lambda: None,
-            arrow_schur: None,
         };
         let result = runworking_model_pirls(
             &mut RoundedQuadratic,

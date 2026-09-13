@@ -4521,7 +4521,6 @@ mod tests {
             coefficient_lower_bounds: None,
             linear_constraints: None,
             initial_lm_lambda: None,
-            arrow_schur: None,
         };
         let laml = |rho: &Array1<f64>, mode: gam_problem::EvalMode| {
             let mut candidate = model.clone();

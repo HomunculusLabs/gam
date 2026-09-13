@@ -13,13 +13,12 @@ use super::{
     ExportedLaplaceCurvature, HessianCurvatureKind, PirlsAcceptedStateCacheKey,
     PirlsStatus, SoftAcceptProgress, WorkingModel, WorkingModelIterationInfo,
     WorkingModelPirlsOptions, WorkingModelPirlsResult, WorkingState,
-    add_scaled_diagonal_to_upper_sparse, commit_pending_arrow_latent,
+    add_scaled_diagonal_to_upper_sparse,
     compute_constraint_kkt_diagnostics, compute_lm_d2, constraint_geometry_is_certified,
     constrained_stationarity_norm,
     effective_kkt_tolerance, linear_constraints_from_lower_bounds, pirls_soft_acceptance,
-    project_coefficients_to_lower_bounds, restore_pending_arrow_latent_if_needed,
+    project_coefficients_to_lower_bounds,
     objective_curvature_for_direction, solve_direction_with_dense_factor,
-    solve_newton_direction_dense,
     solve_newton_directionwith_linear_constraints, solve_newton_directionwith_lower_bounds,
     update_scaled_diagonal_in_place,
 };
@@ -716,7 +715,6 @@ where
     //
     // The active set is a property of the ITERATE, so it is asked per use rather
     // than once up front.
-    let undamped_polish_allowed = options.arrow_schur.is_none();
     if let Some(adaptive) = options.adaptive_kkt_tolerance {
         log::info!(
             "[ADAPTIVE-KKT] outer_g_norm={:.3e} effective_tol={:.3e} floor={:.3e} ceiling={:.3e}",
@@ -991,8 +989,6 @@ where
         // (#968) so no reject branch can apply the damping bump without
         // advancing the schedule.
         let mut madsen_escalator = RejectEscalator::new();
-        let mut pending_arrow_latent_restore: Option<Array1<f64>> = None;
-        let mut pending_arrow_predicted_reduction: Option<f64>;
 
         // Copy the hessian into the reusable buffer (avoids allocation after first iteration).
         let mut regularized =
@@ -1013,8 +1009,6 @@ where
         // with very different column scales.
         let mut lm_d2 = compute_lm_d2(&state.hessian);
         loop {
-            restore_pending_arrow_latent_if_needed(options, &mut pending_arrow_latent_restore);
-            pending_arrow_predicted_reduction = None;
             lm_bound.tick();
             lm_attempts_done += 1;
             let attempt_solve_start = std::time::Instant::now();
@@ -1131,108 +1125,6 @@ where
                         &mut newton_direction,
                         bound_active_hint.as_mut(),
                     )
-                } else if let Some(arrow_cfg) = options.arrow_schur.as_ref() {
-                    // Arrow-Schur structured-inner-solve path. The
-                    // driver-supplied closure assembles
-                    // the bordered (t, β) system at the current β and
-                    // current latent t; we solve via per-row d×d
-                    // Cholesky + one K×K Schur factor, write the
-                    // β-direction into `newton_direction` so the
-                    // existing LM gain test / line search evaluates the
-                    // same joint candidate `(t + Δt, β + Δβ)`, and push
-                    // the latent increment back into the driver via the
-                    // `apply_delta_t` callback. Rejected trials are
-                    // restored through the driver-owned snapshot/restore
-                    // callbacks before the next LM attempt.
-                    //
-                    // NOTE: this branch exploits the inner-GN
-                    // block-diagonality of `H_tt`. The REML outer
-                    // gradient w.r.t. `t` carries a shared `Schur⁻¹`
-                    // factor — that's a separate plumbing change
-                    // handled at the REML driver level, NOT here.
-                    assert_eq!(arrow_cfg.n_beta, beta.as_ref().len());
-                    match arrow_cfg.build.as_ref()(beta.as_ref()) {
-                        None => {
-                            // Driver opted out (e.g. latent not yet
-                            // initialized). Fall through to β-only path.
-                            solve_newton_direction_dense(
-                                dense_reg,
-                                &state.gradient,
-                                &mut newton_direction,
-                            )
-                        }
-                        Some(mut arrow_system) => {
-                            // Apply spec-derived block offsets for block-Jacobi
-                            // preconditioner — a single call here covers every
-                            // family that supplies block_offsets via the config
-                            // rather than baking the call into each `build`
-                            // closure (issue #287).
-                            if let Some(offsets) = arrow_cfg.block_offsets.as_ref() {
-                                arrow_system.set_block_offsets(offsets.clone());
-                            }
-                            let mut solve_options =
-                                crate::arrow_schur::ArrowSolveOptions::automatic(arrow_system.k);
-                            if let Some(mode) = arrow_cfg.solver_mode {
-                                solve_options.mode = mode;
-                            } else if arrow_cfg.streaming_chunk_size.is_some() {
-                                solve_options.mode = crate::arrow_schur::ArrowSolverMode::Direct;
-                            }
-                            solve_options.streaming_chunk_size = arrow_cfg.streaming_chunk_size;
-                            solve_options.trust_region.radius = arrow_cfg.trust_region_radius;
-                            let latent_snapshot = arrow_cfg.snapshot_t.as_ref()();
-                            let arrow_solve_result =
-                                arrow_system.solve_with_options(0.0, loop_lambda, &solve_options);
-                            match arrow_solve_result {
-                                Ok((delta_t, delta_beta, pcg_diag)) => {
-                                    log::debug!(
-                                        "[arrow-Schur] iter {:>3} | k={} | pcg_iters={} | \
-                                         precond_calls={} | ridge_escalations={} | \
-                                         final_residual={:.3e} | stop={:?}",
-                                        iter,
-                                        arrow_system.k,
-                                        pcg_diag.iterations,
-                                        pcg_diag.precond_apply_calls,
-                                        pcg_diag.ridge_escalations,
-                                        pcg_diag.final_relative_residual,
-                                        pcg_diag.stopping_reason,
-                                    );
-                                    let arrow_predicted_reduction =
-                                        match crate::arrow_schur::arrow_bare_quadratic_model_reduction(
-                                            &arrow_system,
-                                            delta_t.view(),
-                                            delta_beta.view(),
-                                            0.0,
-                                            loop_lambda,
-                                        ) {
-                                            Ok(value) => value,
-                                            Err(e) => {
-                                                crate::bail_invalid_estim!(
-                                                    "arrow-Schur predicted reduction failed at iter {iter} \
-                                                     (loop_lambda={loop_lambda:.3e}): {e}"
-                                                );
-                                            }
-                                        };
-                                    // Apply the latent half of the joint
-                                    // trial before screening β + Δβ so the
-                                    // merit test evaluates the same pair
-                                    // that will be committed on acceptance.
-                                    arrow_cfg.apply_delta_t.as_ref()(&delta_t);
-                                    pending_arrow_latent_restore = Some(latent_snapshot);
-                                    pending_arrow_predicted_reduction =
-                                        Some(arrow_predicted_reduction);
-                                    // Write β-step into the existing
-                                    // direction buffer so the rest of
-                                    // the LM loop proceeds unchanged.
-                                    newton_direction.assign(&delta_beta);
-                                    Ok(())
-                                }
-                                Err(e) => Err(EstimationError::InvalidInput(format!(
-                                    "arrow-Schur inner solve failed at iter {iter} \
-                                     (loop_lambda={loop_lambda:.3e}): {e}"
-                                ))),
-                            }
-                        }
-                    }
                 } else {
                     model.solve_unconstrained_direction(
                         &beta,
@@ -1316,7 +1208,6 @@ where
                 } else {
                     "PIRLS produced non-finite step direction"
                 };
-                restore_pending_arrow_latent_if_needed(options, &mut pending_arrow_latent_restore);
                 crate::bail_invalid_estim!(
                     "{detail} at iteration {iter} with damping λ={loop_lambda:.3e}"
                 );
@@ -1345,29 +1236,26 @@ where
             // (Arrow-Schur predicted reduction) needs the same generalisation.
             let predred_start = std::time::Instant::now();
             let lin = state.gradient.dot(direction);
-            let predicted_reduction =
-                if let Some(arrow_reduction) = pending_arrow_predicted_reduction {
-                    arrow_reduction
+            let predicted_reduction = {
+                let q_term = if let Some(sparse_reg) = cached_sparse_regularized.as_ref() {
+                    sparse_symmetric_upper_matvec_public(sparse_reg, direction)
                 } else {
-                    let q_term = if let Some(sparse_reg) = cached_sparse_regularized.as_ref() {
-                        sparse_symmetric_upper_matvec_public(sparse_reg, direction)
-                    } else {
-                        regularized.dot(direction)
-                    };
-                    // Σᵢ D²[i]·δᵢ²  (D²-weighted squared norm of the step)
-                    let d2_weighted_sq: f64 = direction
-                        .iter()
-                        .zip(lm_d2.iter())
-                        .map(|(di, d2i)| d2i * di * di)
-                        .sum();
-                    let model_curvature_correction =
-                        model.objective_hessian_quadratic_correction(direction)?;
-                    // Stored curvature plus the model-specific omitted block.
-                    let quad = 0.5
-                        * (direction.dot(&q_term) - loop_lambda * d2_weighted_sq
-                            + model_curvature_correction);
-                    -(lin + quad)
+                    regularized.dot(direction)
                 };
+                // Σᵢ D²[i]·δᵢ²  (D²-weighted squared norm of the step)
+                let d2_weighted_sq: f64 = direction
+                    .iter()
+                    .zip(lm_d2.iter())
+                    .map(|(di, d2i)| d2i * di * di)
+                    .sum();
+                let model_curvature_correction =
+                    model.objective_hessian_quadratic_correction(direction)?;
+                // Stored curvature plus the model-specific omitted block.
+                let quad = 0.5
+                    * (direction.dot(&q_term) - loop_lambda * d2_weighted_sq
+                        + model_curvature_correction);
+                -(lin + quad)
+            };
             lm_predred_total += predred_start.elapsed();
 
             // 3. Compute Actual Reduction
@@ -1473,17 +1361,9 @@ where
                                 Ok(state) => state,
                                 Err(err) => {
                                     if !is_lm_retriable_candidate_error(&err) {
-                                        restore_pending_arrow_latent_if_needed(
-                                            options,
-                                            &mut pending_arrow_latent_restore,
-                                        );
                                         return Err(err);
                                     }
                                     if lm_bound.exhausted_at(loop_lambda) {
-                                        restore_pending_arrow_latent_if_needed(
-                                            options,
-                                            &mut pending_arrow_latent_restore,
-                                        );
                                         return Err(lm_nonconvergence_error(
                                             options,
                                             iter,
@@ -1587,10 +1467,6 @@ where
                                 last_step_size = 0.0;
                                 last_step_halving = lm_bound.used();
                                 max_abs_eta = inf_norm(state.eta.iter().copied());
-                                restore_pending_arrow_latent_if_needed(
-                                    options,
-                                    &mut pending_arrow_latent_restore,
-                                );
                                 final_state = Some(state);
                                 status = PirlsStatus::StalledAtValidMinimum;
                                 break 'pirls_loop;
@@ -1602,10 +1478,6 @@ where
                                 } else {
                                     status = PirlsStatus::LmStepSearchExhausted;
                                 }
-                                restore_pending_arrow_latent_if_needed(
-                                    options,
-                                    &mut pending_arrow_latent_restore,
-                                );
                                 final_state = Some(state);
                                 break 'pirls_loop;
                             }
@@ -1640,9 +1512,6 @@ where
                         // for the textbook derivation and canonical values.
                         lambda =
                             (loop_lambda * madsen_lm_accept_factor(rho)).max(MADSEN_DAMPING_FLOOR);
-                        // Accepting commits the latent trial together with β,
-                        // so there is no rejected snapshot left to restore.
-                        commit_pending_arrow_latent(&mut pending_arrow_latent_restore);
 
                         // Updates for next iteration. Recycle the previous beta
                         // allocation as the next candidate buffer instead of
@@ -1695,7 +1564,6 @@ where
                         final_state_cache_key = Some(PirlsAcceptedStateCacheKey::accepted(
                             &beta,
                             &accepted_state,
-                            options,
                         ));
                         final_state = Some(accepted_state);
                         let final_state_ref = final_state
@@ -1728,7 +1596,6 @@ where
                         // `lm_lambda = 1e-9` with `Δdev ∈ {0, −8.9e-16}`.
                         let exact_decrement_sq = if should_check_exact_nd
                             && has_explicit_constraints
-                            && options.arrow_schur.is_none()
                         {
                             let curvature_correction =
                                 model.objective_hessian_matrix_correction().cloned();
@@ -1740,7 +1607,6 @@ where
                             )
                         } else if should_check_exact_nd
                             && !has_explicit_constraints
-                            && options.arrow_schur.is_none()
                         {
                             // Certify the accepted state itself.  The root
                             // solve used to produce this LM step described the
@@ -1769,8 +1635,7 @@ where
                             .is_some_and(|decrement_sq| decrement_sq <= exact_nd_threshold);
                         if should_check_exact_nd {
                             log::info!(
-                                "[PIRLS exact-decrement] applicable={} decrement_sq={:.6e} threshold={:.6e} pass={} gradient_norm={:.6e} relative_gradient={:.6e} dimension_scale={:.6e} natural_scale={:.6e} objective={:.6e} actual_reduction={:.6e} predicted_reduction={:.6e} linear_model_term={:.6e} direction_norm={:.6e} data_reduction={:.6e} penalty_reduction={:.6e}",
-                                options.arrow_schur.is_none(),
+                                "[PIRLS exact-decrement] decrement_sq={:.6e} threshold={:.6e} pass={} gradient_norm={:.6e} relative_gradient={:.6e} dimension_scale={:.6e} natural_scale={:.6e} objective={:.6e} actual_reduction={:.6e} predicted_reduction={:.6e} linear_model_term={:.6e} direction_norm={:.6e} data_reduction={:.6e} penalty_reduction={:.6e}",
                                 exact_decrement_sq.unwrap_or(f64::NAN),
                                 exact_nd_threshold,
                                 exact_nd_pass,
@@ -1846,7 +1711,6 @@ where
                         // over regardless of the active set.
                         if numerical_plateau
                             && exact_decrement_sq.is_some()
-                            && undamped_polish_allowed
                         {
                             log::debug!(
                                 "[PIRLS] objective resolution exhausted at iter {iter}; \
@@ -1975,10 +1839,6 @@ where
                                 "[PIRLS] mid-iter Fisher fallback iter={} reason=gain_rejection",
                                 iter,
                             );
-                            restore_pending_arrow_latent_if_needed(
-                                options,
-                                &mut pending_arrow_latent_restore,
-                            );
                             let fisher_fallback_start = std::time::Instant::now();
                             state =
                                 model.update_with_curvature(&beta, HessianCurvatureKind::Fisher)?;
@@ -2036,10 +1896,6 @@ where
                             max_abs_eta = inf_norm(state.eta.iter().copied());
                             // `state` is unused after `break 'pirls_loop` — move it
                             // instead of cloning to avoid an n+p² full-state copy.
-                            restore_pending_arrow_latent_if_needed(
-                                options,
-                                &mut pending_arrow_latent_restore,
-                            );
                             final_state = Some(state);
                             status = PirlsStatus::StalledAtValidMinimum;
                             break 'pirls_loop;
@@ -2088,10 +1944,6 @@ where
                             // Preserve the structural ridge from the model state.
                             // `state` is unused after `break 'pirls_loop` — move it
                             // instead of cloning to avoid an n+p² full-state copy.
-                            restore_pending_arrow_latent_if_needed(
-                                options,
-                                &mut pending_arrow_latent_restore,
-                            );
                             final_state = Some(state);
                             break 'pirls_loop;
                         }
@@ -2125,10 +1977,6 @@ where
                             "[PIRLS] mid-iter Fisher fallback iter={} reason=candidate_err",
                             iter,
                         );
-                        restore_pending_arrow_latent_if_needed(
-                            options,
-                            &mut pending_arrow_latent_restore,
-                        );
                         let fisher_err_start = std::time::Instant::now();
                         state = model.update_with_curvature(&beta, HessianCurvatureKind::Fisher)?;
                         curvature_total += fisher_err_start.elapsed();
@@ -2145,17 +1993,9 @@ where
                         continue;
                     }
                     if !is_lm_retriable_candidate_error(&err) {
-                        restore_pending_arrow_latent_if_needed(
-                            options,
-                            &mut pending_arrow_latent_restore,
-                        );
                         return Err(err);
                     }
                     if lm_bound.exhausted_at(loop_lambda) {
-                        restore_pending_arrow_latent_if_needed(
-                            options,
-                            &mut pending_arrow_latent_restore,
-                        );
                         return Err(lm_nonconvergence_error(
                             options,
                             iter,
@@ -2343,7 +2183,7 @@ where
     // Condition (3) makes the polish Pareto-safe: a fit that is already
     // machine-stationary (residual at round-off) sees no accepted step, so
     // existing golden values are untouched; only LM-ridge-biased iterates move.
-    if undamped_polish_allowed {
+    {
         // #2273 state locality. The polish inverts the OBJECTIVE's curvature,
         // and the omitted part of it (`HΦ`) is read off the model, which holds
         // whatever point it evaluated LAST — after an LM rejection that is a
@@ -2585,7 +2425,7 @@ where
     // contract: only a genuinely certified inner mode is recorded as
     // `Converged`.
     let can_still_certify = !status.is_converged() && status != PirlsStatus::Unstable;
-    let final_exact_decrement_sq = if can_still_certify && undamped_polish_allowed {
+    let final_exact_decrement_sq = if can_still_certify {
         let curvature_correction = model.objective_hessian_matrix_correction().cloned();
         if has_explicit_constraints {
             // Recompute on the final binding face, just as the in-loop

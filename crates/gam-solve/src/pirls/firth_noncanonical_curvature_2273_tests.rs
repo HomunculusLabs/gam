@@ -95,7 +95,6 @@ fn firth_inner_solve(link: StandardLink) -> PirlsResult {
         convergence_tolerance: 1e-12,
         firth_bias_reduction: true,
         initial_lm_lambda: None,
-        arrow_schur: None,
     };
     let problem = PirlsProblem {
         x: x.clone(),

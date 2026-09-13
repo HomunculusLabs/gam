@@ -56,7 +56,6 @@ fn gaussian_identity_config() -> PirlsConfig {
         convergence_tolerance: 1e-12,
         firth_bias_reduction: false,
         initial_lm_lambda: None,
-        arrow_schur: None,
     }
 }
 
@@ -71,7 +70,6 @@ fn binomial_logit_config() -> PirlsConfig {
         convergence_tolerance: 1e-12,
         firth_bias_reduction: false,
         initial_lm_lambda: None,
-        arrow_schur: None,
     }
 }
 

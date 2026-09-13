@@ -1695,7 +1695,6 @@ fn optimize_survival_transformation_smoothing(
             coefficient_lower_bounds: structural_lower_bounds.cloned(),
             linear_constraints: None,
             initial_lm_lambda: None,
-            arrow_schur: None,
         };
         let summary = gam_solve::pirls::runworking_model_pirls(
             &mut candidate,
@@ -3097,7 +3096,6 @@ pub(crate) fn fit_survival_transformation_model(
                     coefficient_lower_bounds: structural_lower_bounds,
                     linear_constraints: None,
                     initial_lm_lambda: None,
-                    arrow_schur: None,
                 };
                 let parameter_checkpoint = survival_baseline_parameter_checkpoint(candidate)?;
                 let summary = gam_solve::pirls::runworking_model_pirls(
@@ -3222,7 +3220,6 @@ pub(crate) fn fit_survival_transformation_model(
         coefficient_lower_bounds: structural_lower_bounds,
         linear_constraints: None,
         initial_lm_lambda: None,
-        arrow_schur: None,
     };
     let rho_for_cache = survival_transformation_log_lambdas(&penalty_blocks)?;
     let expected_beta_len = beta0.len();

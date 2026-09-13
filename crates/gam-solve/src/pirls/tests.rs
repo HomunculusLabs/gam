@@ -1283,7 +1283,6 @@ mod tests {
             convergence_tolerance: 1e-8,
             firth_bias_reduction: false,
             initial_lm_lambda: None,
-            arrow_schur: None,
         };
 
         let (fit, _) = fit_model_for_fixed_rho(
@@ -1422,7 +1421,6 @@ mod tests {
             convergence_tolerance: 1e-8,
             firth_bias_reduction: false,
             initial_lm_lambda: None,
-            arrow_schur: None,
         };
 
         let (fit, _) = fit_model_for_fixed_rho(
@@ -1564,7 +1562,6 @@ mod tests {
                 convergence_tolerance: tolerance,
                 firth_bias_reduction: false,
                 initial_lm_lambda: None,
-                arrow_schur: None,
             };
             let (fit, _) = fit_model_for_fixed_rho(
                 LogSmoothingParamsView::new(rho.view())
@@ -2617,7 +2614,6 @@ mod tests {
             convergence_tolerance: 1e-8,
             firth_bias_reduction: false,
             initial_lm_lambda: None,
-            arrow_schur: None,
         };
 
         let (result, _) = fit_model_for_fixed_rho(
@@ -2696,7 +2692,6 @@ mod tests {
             convergence_tolerance: 1e-8,
             firth_bias_reduction: false,
             initial_lm_lambda: None,
-            arrow_schur: None,
         };
 
         let (fit, _) = fit_model_for_fixed_rho(
@@ -3544,7 +3539,6 @@ mod root_cause_tests {
                 b: array![0.0],
             }),
             initial_lm_lambda: None,
-            arrow_schur: None,
         };
 
         let summary =
@@ -3757,7 +3751,6 @@ mod root_cause_tests {
             coefficient_lower_bounds: None,
             linear_constraints: None,
             initial_lm_lambda: None,
-            arrow_schur: None,
         };
 
         let err = match runworking_model_pirls(
@@ -3824,7 +3817,6 @@ mod root_cause_tests {
             coefficient_lower_bounds: None,
             linear_constraints: None,
             initial_lm_lambda: None,
-            arrow_schur: None,
         };
 
         let err = match runworking_model_pirls(
@@ -3865,7 +3857,6 @@ mod root_cause_tests {
             coefficient_lower_bounds: None,
             linear_constraints: None,
             initial_lm_lambda: None,
-            arrow_schur: None,
         };
 
         let err = match runworking_model_pirls(
@@ -3926,7 +3917,6 @@ mod root_cause_tests {
             coefficient_lower_bounds: None,
             linear_constraints: None,
             initial_lm_lambda: None,
-            arrow_schur: None,
         };
 
         let err = match runworking_model_pirls(
@@ -3977,7 +3967,6 @@ mod root_cause_tests {
             coefficient_lower_bounds: None,
             linear_constraints: None,
             initial_lm_lambda: None,
-            arrow_schur: None,
         };
 
         let result =
@@ -4015,7 +4004,6 @@ mod root_cause_tests {
             coefficient_lower_bounds: None,
             linear_constraints: None,
             initial_lm_lambda: None,
-            arrow_schur: None,
         };
 
         let result =
@@ -4045,7 +4033,6 @@ mod root_cause_tests {
             coefficient_lower_bounds: None,
             linear_constraints: None,
             initial_lm_lambda: None,
-            arrow_schur: None,
         };
 
         let result =
@@ -4077,7 +4064,6 @@ mod root_cause_tests {
                 b: array![-100.0],
             }),
             initial_lm_lambda: None,
-            arrow_schur: None,
         };
 
         let result =
@@ -4112,7 +4098,6 @@ mod root_cause_tests {
             coefficient_lower_bounds: None,
             linear_constraints: None,
             initial_lm_lambda: None,
-            arrow_schur: None,
         };
 
         let result =
@@ -4222,7 +4207,6 @@ mod root_cause_tests {
             convergence_tolerance: 1e-8,
             firth_bias_reduction: false,
             initial_lm_lambda: None,
-            arrow_schur: None,
         };
 
         let (result, trace) = capture_pirls_penalized_deviance(|| {
@@ -4326,7 +4310,6 @@ mod root_cause_tests {
                 convergence_tolerance: 1e-8,
                 firth_bias_reduction: false,
                 initial_lm_lambda: None,
-                arrow_schur: None,
             };
 
             let (result, trace) = capture_pirls_penalized_deviance(|| {
@@ -4530,7 +4513,6 @@ mod root_cause_tests {
             coefficient_lower_bounds: None,
             linear_constraints: None,
             initial_lm_lambda: None,
-            arrow_schur: None,
         };
         let summary =
             runworking_model_pirls(&mut model, Coefficients::new(array![0.0]), &options, None)
@@ -4589,7 +4571,6 @@ mod root_cause_tests {
             coefficient_lower_bounds: None,
             linear_constraints: None,
             initial_lm_lambda: None,
-            arrow_schur: None,
         };
         let summary =
             runworking_model_pirls(&mut model, Coefficients::new(array![0.0]), &options, None)

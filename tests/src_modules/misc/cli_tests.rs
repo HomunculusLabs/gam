@@ -7332,7 +7332,6 @@ fn structural_survival_fit_is_time_unit_invariant() {
                 linear_constraints: None,
                 initial_lm_lambda: None,
                 adaptive_kkt_tolerance: None,
-                arrow_schur: None,
             },
             None,
         )

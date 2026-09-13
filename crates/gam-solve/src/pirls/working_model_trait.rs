@@ -217,7 +217,6 @@ pub(super) struct PirlsAcceptedStateCacheKey {
     curvature: HessianCurvatureKind,
     firth_active: bool,
     beta_bits: Vec<u64>,
-    arrow_latent_bits: Option<Vec<u64>>,
 }
 
 impl PirlsAcceptedStateCacheKey {
@@ -226,19 +225,14 @@ impl PirlsAcceptedStateCacheKey {
         curvature: HessianCurvatureKind,
         options: &WorkingModelPirlsOptions,
     ) -> Self {
-        Self::new(beta, curvature, options.firth_bias_reduction, options)
+        Self::new(beta, curvature, options.firth_bias_reduction)
     }
 
-    pub(crate) fn accepted(
-        beta: &Coefficients,
-        state: &WorkingState,
-        options: &WorkingModelPirlsOptions,
-    ) -> Self {
+    pub(crate) fn accepted(beta: &Coefficients, state: &WorkingState) -> Self {
         Self::new(
             beta,
             state.hessian_curvature,
             matches!(state.firth, FirthDiagnostics::Active { .. }),
-            options,
         )
     }
 
@@ -246,19 +240,11 @@ impl PirlsAcceptedStateCacheKey {
         beta: &Coefficients,
         curvature: HessianCurvatureKind,
         firth_active: bool,
-        options: &WorkingModelPirlsOptions,
     ) -> Self {
-        let arrow_latent_bits = options.arrow_schur.as_ref().map(|arrow_cfg| {
-            arrow_cfg.snapshot_t.as_ref()()
-                .iter()
-                .map(|value| value.to_bits())
-                .collect()
-        });
         Self {
             curvature,
             firth_active,
             beta_bits: beta.as_ref().iter().map(|value| value.to_bits()).collect(),
-            arrow_latent_bits,
         }
     }
 }

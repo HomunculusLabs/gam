@@ -121,7 +121,6 @@ fn fit_at_rho_full(
         convergence_tolerance: 1e-10,
         firth_bias_reduction: false,
         initial_lm_lambda,
-        arrow_schur: None,
     };
     let (result, _working) = fit_model_for_fixed_rho(
         LogSmoothingParamsView::new(array![rho].view())
@@ -317,7 +316,6 @@ fn pirls_result_exposes_final_accept_rho_in_unit_interval() {
         convergence_tolerance: 1e-10,
         firth_bias_reduction: false,
         initial_lm_lambda: None,
-        arrow_schur: None,
     };
     let (result, _) = fit_model_for_fixed_rho(
         LogSmoothingParamsView::new(array![0.0].view())

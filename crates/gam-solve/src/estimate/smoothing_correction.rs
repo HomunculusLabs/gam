@@ -69,9 +69,6 @@ impl RemlConfig {
             // each `execute_pirls_if_needed` call from the cached final
             // λ of the previous successful PIRLS solve.
             initial_lm_lambda: None,
-            // Arrow-Schur structured-inner-solve descriptor. The standard
-            // REML→PIRLS path (β-only) leaves it unset.
-            arrow_schur: None,
         }
     }
 }

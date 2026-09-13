@@ -49,7 +49,7 @@ use super::{
     solve_penalized_least_squares_implicit,
     standard_inverse_link_jet,
 };
-use super::{ArrowSchurInnerConfig, GamModelFinalState, project_coefficients_to_lower_bounds};
+use super::{GamModelFinalState, project_coefficients_to_lower_bounds};
 use crate::active_set;
 use crate::estimate::EstimationError;
 use crate::gpu::pirls_host_dispatch::{try_gaussian_pls_gpu, try_pirls_loop_gpu};
@@ -1627,7 +1627,6 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
         coefficient_lower_bounds: None,
         linear_constraints: linear_constraints.clone(),
         initial_lm_lambda: config.initial_lm_lambda,
-        arrow_schur: config.arrow_schur.clone(),
     };
 
     let mut iteration_logger = |info: &WorkingModelIterationInfo| {
@@ -2223,15 +2222,6 @@ pub struct PirlsConfig {
     /// internal options. See the field doc on `WorkingModelPirlsOptions`
     /// for the seeding semantics.
     pub initial_lm_lambda: Option<f64>,
-    /// Optional arrow-Schur structured-inner-solve descriptor. When
-    /// `Some`, forwarded to `WorkingModelPirlsOptions::arrow_schur` so
-    /// each accepted LM step is solved by the per-observation
-    /// arrow-Schur path
-    /// ([`crate::arrow_schur::ArrowSchurSystem`]). When `None`
-    /// (the default), the existing β-only path is used unchanged.
-    ///
-    /// See [`ArrowSchurInnerConfig`] for the closure contract.
-    pub arrow_schur: Option<ArrowSchurInnerConfig>,
 }
 
 impl PirlsConfig {
