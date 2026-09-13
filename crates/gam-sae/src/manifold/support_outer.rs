@@ -16,11 +16,13 @@
 //! `Σ_i log|H_tt^(ⁱ)|` is removed rather than charging a decoder-scale-
 //! dependent quantity for nuisance coordinates.
 //!
-//! The normalizer comes from the #2080 frozen rational surrogate
-//! ([`SurrogateLaneState`]), which the dense manifold criterion also runs. Its
-//! value and fixed-state directional derivative share probes and quadrature;
-//! the profiled derivative additionally carries the exact implicit response of
-//! the converged inner state.
+//! The normalizer comes from the evidence lane ([`SurrogateLaneState`]) the dense
+//! manifold criterion also runs. Where the dense `k × k` reduced Schur's complete
+//! eigensystem fits the in-core ledger, it takes the exact `log|S|` off one
+//! eigendecomposition; otherwise it evaluates the #2080 frozen rational surrogate
+//! (#2731). Either way the value and its fixed-state directional derivative are one
+//! representation; the profiled derivative additionally carries the exact implicit
+//! response of the converged inner state.
 //!
 //! This lane previously took its factor cache from a Newton STEP it discarded
 //! and estimated that trace with a SECOND, independent Hutchinson family — its
@@ -511,11 +513,13 @@ impl SaeSupportOuterObjective {
     /// What a criterion needs instead is the evidence factorization:
     /// `Σ_i log|H_tt^(i)|` from the undamped per-row Cholesky, and `log|S|` by a
     /// route it can also DIFFERENTIATE. That route already exists and is already
-    /// production on the dense manifold lane — the #2080 frozen rational
-    /// surrogate ([`matrix_free_arrow_evidence_log_det_surrogate`] driven by a
-    /// [`SurrogateLaneState`]). It never forms a dense border, it runs on CPU
-    /// and device alike, and its value and gradient are one functional by
-    /// construction. The support lane joins it rather than growing a second
+    /// production on the dense manifold lane:
+    /// [`gam_solve::arrow_schur::matrix_free_arrow_evidence_evaluation`] driven by a
+    /// [`SurrogateLaneState`]. It takes the exact `log|S|` off one eigendecomposition
+    /// where the dense `k × k` block fits in core, and the #2080 frozen rational
+    /// surrogate otherwise (#2731). It runs on CPU and device alike, and its value
+    /// and gradient are one functional by construction. The support lane joins it
+    /// rather than growing a second
     /// evidence policy beside it; [`Self::schur_derivative_matvec`] supplies the
     /// explicit-ρ half and the support-term adjoint supplies the fitted-state
     /// half.
@@ -571,7 +575,19 @@ impl SaeSupportOuterObjective {
         lane.request_logdet_derivative_bundle();
         let timer = std::time::Instant::now();
         let options = ArrowSolveOptions::inexact_pcg().with_positive_definite_evidence();
-        let evaluated = matrix_free_arrow_evidence_log_det_surrogate(
+        // #2731: where the dense `k × k` reduced Schur's complete eigensystem fits the
+        // cgroup-aware in-core ledger, the lane takes the exact `log|S|` off one
+        // eigendecomposition and its derivative bundle is the exact `tr(S⁻¹·D)`;
+        // otherwise it walks the frozen rational surrogate. The workspace is priced as
+        // this term's other dense eigensystems are (the profile adjoint's pseudoinverse
+        // and the saddle classifier): `k²` doubles, six times over.
+        let dense_workspace = (system.k as u128)
+            .saturating_mul(system.k as u128)
+            .saturating_mul(std::mem::size_of::<f64>() as u128)
+            .saturating_mul(6);
+        let dense_reduced_schur_admitted =
+            dense_workspace <= crate::manifold::sae_host_in_core_budget_bytes().0 as u128;
+        let evaluated = gam_solve::arrow_schur::matrix_free_arrow_evidence_evaluation(
             system,
             0.0,
             0.0,
@@ -579,10 +595,11 @@ impl SaeSupportOuterObjective {
             SCHUR_SLQ_LOGDET_PROBES,
             SCHUR_SLQ_LOGDET_LANCZOS_STEPS,
             SCHUR_SLQ_LOGDET_SEED,
-            Some(lane),
+            lane,
+            dense_reduced_schur_admitted,
         );
         let (row_log_det, schur_log_det) = match evaluated {
-            Ok(split) => split,
+            Ok(evaluation) => (evaluation.log_det_tt, evaluation.log_det_schur),
             Err(error) => {
                 drop(lane.take_logdet_derivative_bundle());
                 return Err(outer_error(format!(
@@ -592,8 +609,8 @@ impl SaeSupportOuterObjective {
         };
         let bundle = lane.take_logdet_derivative_bundle().ok_or_else(|| {
             outer_error(
-                "support LAML evidence evaluation did not emit the rational value's derivative \
-                 bundle, so no smoothing gradient can be minted from it",
+                "support LAML evidence evaluation did not emit its value's derivative bundle, \
+                 so no smoothing gradient can be minted from it",
             )
         })?;
         let metrics = bundle.evaluation_metrics();
@@ -601,11 +618,11 @@ impl SaeSupportOuterObjective {
         // before #2576 it emitted nothing at all — six minutes of fourteen busy
         // cores between two log lines is what kept the cost invisible.
         log::info!(
-            "support LAML evidence: border {}, row log|H_tt| = {:.6e}, surrogate log|S| = \
-             {:.6e}; {} total shifted-CG iterations, {} rational nodes, deflation rank {}, \
-             {:.1}s",
+            "support LAML evidence: border {}, row log|H_tt| = {:.6e}, {} log|S| = {:.6e}; \
+             {} total shifted-CG iterations, {} rational nodes, deflation rank {}, {:.1}s",
             system.k,
             row_log_det,
+            if dense_reduced_schur_admitted { "dense exact" } else { "surrogate" },
             schur_log_det,
             metrics.cg_iterations,
             metrics.node_count,
