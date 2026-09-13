@@ -83,18 +83,6 @@ use super::intrinsic_seed::intrinsic_geodesic_embedding;
 #[path = "local_chart_recovery_tests.rs"]
 mod recovered_transition_tests;
 
-/// A chart is injective on its neighborhood iff no two distinct rows project to
-/// the same coordinate. The orthogonal split
-/// `‖x_p − x_q‖² = ‖c_p − c_q‖² + ‖r_p − r_q‖²` makes the projected squared
-/// distance exact, so injectivity is `min_{p≠q} ‖c_p − c_q‖² > 0`. To reject a
-/// chart that all but collapses a pair (the off-frame residual erasing almost the
-/// whole ambient separation), require the smallest projected squared distance to
-/// retain at least this fraction of the smallest ambient squared distance. `1e-6`
-/// is a numerical "did not collapse" floor, not a quality bar — the realized
-/// stretch is surfaced on [`ChartCertificate::min_projection_stretch`] for
-/// consumers that want a sharper geometric threshold.
-const CHART_INJECTIVITY_FLOOR_FRAC: f64 = 1.0e-6;
-
 /// The angular resolution of one chart frame, returned as a SINE, derived from the
 /// patch's own captured-variance certificate. Not a tolerance and not a knob.
 ///
@@ -361,13 +349,14 @@ pub enum LocalChartError {
         smallest_captured_singular: f64,
         leading_singular: f64,
     },
-    /// The chart projection collapses two distinct neighborhood rows onto (nearly)
-    /// the same coordinate — it is not injective on its own support — and stayed
-    /// non-injective down to the smallest admissible neighborhood.
+    /// The chart projection maps two neighborhood rows the ambient separates to
+    /// coordinates inside their rounding band of each other — it is not injective on
+    /// its own support — and stayed non-injective down to the smallest admissible
+    /// neighborhood. The distances are the collapsed pair's.
     NonInjectiveChart {
         center: usize,
-        min_projected_sq_distance: f64,
-        min_ambient_sq_distance: f64,
+        projected_sq_distance: f64,
+        ambient_sq_distance: f64,
     },
     /// The SVD backing a chart or a transition failed to converge.
     SvdFailure { center: usize, detail: String },
@@ -423,13 +412,13 @@ impl fmt::Display for LocalChartError {
             ),
             Self::NonInjectiveChart {
                 center,
-                min_projected_sq_distance,
-                min_ambient_sq_distance,
+                projected_sq_distance,
+                ambient_sq_distance,
             } => write!(
                 f,
                 "local_charts: chart at row {center} is not injective on its neighborhood \
-                 (min projected sq distance {min_projected_sq_distance:.3e} vs min ambient \
-                 {min_ambient_sq_distance:.3e})"
+                 (a pair at ambient sq distance {ambient_sq_distance:.3e} projects to sq \
+                 distance {projected_sq_distance:.3e}, inside its rounding band)"
             ),
             Self::SvdFailure { center, detail } => {
                 write!(
@@ -470,10 +459,11 @@ pub struct ChartCertificate {
     /// Fraction of the neighborhood's total variance captured by the `d`-frame,
     /// `Σ_{i≤d} σ_i² / Σ_i σ_i²` — the extrinsic flatness of the patch.
     pub captured_variance_fraction: f64,
-    /// The smallest bi-Lipschitz LOWER stretch of the chart map over neighborhood
-    /// pairs, `min_{p≠q} ‖c_p − c_q‖ / ‖x_p − x_q‖ ∈ (0, 1]`. Strictly positive
-    /// certifies injectivity on the support; near `1` certifies a near-isometric
-    /// chart.
+    /// The smallest bi-Lipschitz LOWER stretch of the chart map over the neighborhood
+    /// pairs the ambient separates beyond their rounding band,
+    /// `min ‖c_p − c_q‖ / ‖x_p − x_q‖ ∈ (0, 1]`, and `1` when no pair is separated.
+    /// Every such pair keeps its projected distance above its own band, so the chart
+    /// is injective on the support; near `1` certifies a near-isometric chart.
     pub min_projection_stretch: f64,
 }
 
@@ -1250,10 +1240,34 @@ fn build_local_chart(
     // Chart coordinates of every member: centered · frame  (m × d).
     let coords = centered.dot(&frame);
 
-    // Injectivity certificate: smallest projected pairwise sq distance vs smallest
-    // ambient pairwise sq distance, and the smallest bi-Lipschitz lower stretch.
-    let mut min_proj_sq = f64::INFINITY;
-    let mut min_amb_sq = f64::INFINITY;
+    // Injectivity certificate. The orthogonal split
+    // `‖x_a − x_b‖² = ‖c_a − c_b‖² + ‖r_a − r_b‖²` makes the projected squared
+    // distance exact, so the chart is injective on its neighborhood iff every pair the
+    // ambient separates stays separated in the chart. Each pair is decided at the
+    // computation's own resolution, with `s = ‖x_a‖ + ‖x_b‖` over the centered rows:
+    // - an ambient coordinate difference takes two roundings of centered entries, so
+    //   coincident rows read an ambient squared distance of at most `(γ₂·s)²`;
+    // - a chart coordinate is a `p`-term inner product against a unit frame axis, whose
+    //   summand absolute sum is at most the row norm (Cauchy–Schwarz), so a coordinate
+    //   difference rounds within `γ_{p+1}·s` and a collapsed pair reads a projected
+    //   squared distance of at most `d·(γ_{p+1}·s)²`.
+    // A pair whose ambient distance clears its band while its projected distance does
+    // not is a collapse the chart cannot tell from a coincidence, so the chart is
+    // refused. Deciding pair by pair keeps a near-duplicate pair from masking a
+    // collapsed one, which comparing the smallest projected distance against the
+    // smallest ambient distance (two different pairs) does not. The smallest lower
+    // stretch over the separated pairs goes on the certificate for consumers that want
+    // a geometric bar.
+    let row_norms: Vec<f64> = (0..m)
+        .map(|r| {
+            (0..p)
+                .map(|c| centered[[r, c]] * centered[[r, c]])
+                .sum::<f64>()
+                .sqrt()
+        })
+        .collect();
+    let ambient_growth = gam_linalg::roundoff::accumulation_growth(2);
+    let projected_growth = gam_linalg::roundoff::accumulation_growth(p + 1);
     let mut min_stretch = f64::INFINITY;
     for a in 0..m {
         for b in (a + 1)..m {
@@ -1262,38 +1276,27 @@ fn build_local_chart(
                 let diff = centered[[a, c]] - centered[[b, c]];
                 amb += diff * diff;
             }
+            let scale = row_norms[a] + row_norms[b];
+            if !(amb > (ambient_growth * scale).powi(2)) {
+                continue;
+            }
             let mut proj = 0.0;
             for ax in 0..d {
                 let diff = coords[[a, ax]] - coords[[b, ax]];
                 proj += diff * diff;
             }
-            if amb < min_amb_sq {
-                min_amb_sq = amb;
+            if proj <= d as f64 * (projected_growth * scale).powi(2) {
+                return Err(LocalChartError::NonInjectiveChart {
+                    center,
+                    projected_sq_distance: proj,
+                    ambient_sq_distance: amb,
+                });
             }
-            if proj < min_proj_sq {
-                min_proj_sq = proj;
-            }
-            if amb > 0.0 {
-                let stretch = (proj / amb).sqrt();
-                if stretch < min_stretch {
-                    min_stretch = stretch;
-                }
+            let stretch = (proj / amb).sqrt();
+            if stretch < min_stretch {
+                min_stretch = stretch;
             }
         }
-    }
-    if !min_amb_sq.is_finite() {
-        // A single-row patch cannot certify injectivity; the patch-size floor
-        // (≥ d + 1) prevents this, but guard defensively.
-        min_amb_sq = 0.0;
-        min_proj_sq = 0.0;
-        min_stretch = 1.0;
-    }
-    if min_proj_sq <= CHART_INJECTIVITY_FLOOR_FRAC * min_amb_sq && min_amb_sq > 0.0 {
-        return Err(LocalChartError::NonInjectiveChart {
-            center,
-            min_projected_sq_distance: min_proj_sq,
-            min_ambient_sq_distance: min_amb_sq,
-        });
     }
 
     let total_variance: f64 = svals.iter().map(|s| s * s).sum();
