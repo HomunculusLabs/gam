@@ -198,27 +198,19 @@ pub(crate) fn jeffreys_term_skippable_for_source(
             }
         }
     };
-    // The exact spectrum's `H`: a clone for the dense source, `total_p` products
-    // for the operator. An operator column of the wrong shape cannot certify, so
-    // the exact term runs rather than risk a wrong skip.
+    // The exact spectrum's `H`, built as the dense Newton step builds it: a clone
+    // for the dense source, and for the operator the workspace's structural dense
+    // build or one batched multi-RHS sweep, never `total_p` single products that
+    // each re-walk every row. A formation the dense budget or a non-finite entry
+    // refuses cannot certify, so the exact term runs.
     let dense = || -> Result<Option<Array2<f64>>, String> {
-        match source {
-            JointHessianSource::Dense(matrix) => Ok(Some(matrix.clone())),
-            JointHessianSource::Operator { apply, .. } => {
-                let mut h = Array2::<f64>::zeros((total_p, total_p));
-                let mut e_a = Array1::<f64>::zeros(total_p);
-                for a in 0..total_p {
-                    e_a[a] = 1.0;
-                    let col = apply(&e_a).map_err(|error| error.to_string())?;
-                    e_a[a] = 0.0;
-                    if col.len() != total_p {
-                        return Ok(None);
-                    }
-                    h.column_mut(a).assign(&col);
-                }
-                Ok(Some(h))
-            }
-        }
+        crate::joint_newton::materialize_joint_hessian_source(
+            source,
+            total_p,
+            "Jeffreys exact conditioning pre-check",
+        )
+        .map(Some)
+        .map_err(|error| error.to_string())
     };
     gam_solve::estimate::reml::jeffreys_subspace::jeffreys_term_skippable(hv, total_p, dense)
         .map_err(CustomFamilyError::trial_point)

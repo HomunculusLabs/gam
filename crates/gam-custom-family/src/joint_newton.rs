@@ -1393,29 +1393,30 @@ pub(crate) fn blockwise_logdet_terms_with_workspace<
                     _ => Ok(Array1::from_elem(total, f64::NAN)),
                 }
             };
-            // When the bounds cannot certify, form H once from `total` matvecs and
-            // run the EXACT conditioning gate — the same #1389 fix as the
-            // inner-Newton skip, applied to the OUTER LAML logdet H_Φ so the
-            // per-outer-eval Jeffreys all-axes sweep is also skipped on a
-            // well-conditioned fit (the constant-scale survival location-scale
-            // non-termination paid this term on every outer eval as well as every
-            // inner cycle). A declined or non-finite column cannot certify, so the
-            // exact term runs: the conservative never-skip-on-unresolved contract.
+            // When the bounds cannot certify, form H once and run the EXACT
+            // conditioning gate — the same #1389 fix as the inner-Newton skip,
+            // applied to the OUTER LAML logdet H_Φ so the per-outer-eval Jeffreys
+            // all-axes sweep is also skipped on a well-conditioned fit (the
+            // constant-scale survival location-scale non-termination paid this term
+            // on every outer eval as well as every inner cycle). H comes from the
+            // workspace's structural dense build, else from one batched multi-RHS
+            // sweep `H · I`, never `total` single products that each re-walk every
+            // row. A declined, misshapen or non-finite formation cannot certify, so
+            // the exact term runs: the conservative never-skip-on-unresolved contract.
             let dense = || -> Result<Option<Array2<f64>>, String> {
-                let mut h = Array2::<f64>::zeros((total, total));
-                let mut e_a = Array1::<f64>::zeros(total);
-                for a in 0..total {
-                    e_a[a] = 1.0;
-                    let column = ws.hessian_matvec(&e_a)?;
-                    e_a[a] = 0.0;
-                    match column {
-                        Some(col) if col.len() == total && col.iter().all(|v| v.is_finite()) => {
-                            h.column_mut(a).assign(&col);
+                let h = match ws.hessian_dense_forced()? {
+                    Some(h) => h,
+                    None => {
+                        let mut h = Array2::<f64>::zeros((total, total));
+                        if !ws.hessian_apply_mat(&Array2::<f64>::eye(total), &mut h)? {
+                            return Ok(None);
                         }
-                        _ => return Ok(None),
+                        h
                     }
-                }
-                Ok(Some(h))
+                };
+                let certifiable =
+                    h.dim() == (total, total) && h.iter().all(|value| value.is_finite());
+                Ok(certifiable.then_some(h))
             };
             gam_solve::estimate::reml::jeffreys_subspace::jeffreys_term_skippable(hv, total, dense)
                 .unwrap_or(false)
