@@ -74,10 +74,14 @@ pub(super) fn madsen_lm_accept_factor(rho: f64) -> f64 {
 /// [`super::convergence::objective_rounding_band`]. The magnitude is the sum of
 /// the two accumulated pieces' absolute values, not `|F|`, so a penalty that
 /// nearly cancels a deviance does not shrink the band below what either piece
-/// carries.
+/// carries. The deviance piece is the family's pre-cancellation magnitude
+/// ([`WorkingState::deviance_magnitude`]): a survival deviance that sums
+/// `exp(η) ≈ 9.5e3` cumulative-hazard pieces down to 36 rounds at the pieces'
+/// scale, and a band priced from `|D|` rejected its neutral LM steps as increases
+/// until the damping climbed past 1e11 (#2627).
 fn penalized_objective_rounding_band(state: &WorkingState, dev_scale: f64) -> f64 {
     let magnitude =
-        0.5 * (dev_scale * state.deviance).abs() + 0.5 * state.penalty_term.abs();
+        0.5 * (dev_scale * state.deviance_magnitude).abs() + 0.5 * state.penalty_term.abs();
     super::convergence::objective_rounding_band(state.eta.len(), state.gradient.len(), magnitude)
 }
 

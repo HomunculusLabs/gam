@@ -1529,6 +1529,7 @@ impl<'a> WorkingModel for GamWorkingModel<'a> {
 
             log_likelihood,
             deviance,
+            deviance_magnitude: deviance.abs(),
             penalty_term,
             firth,
             hessian_curvature,

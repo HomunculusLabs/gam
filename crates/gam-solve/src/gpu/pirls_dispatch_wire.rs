@@ -579,6 +579,7 @@ mod linux_impl {
                 deviance,
             )?,
             deviance,
+            deviance_magnitude: deviance.abs(),
             penalty_term,
             firth: firth.clone(),
             hessian_curvature: match curvature {
@@ -943,6 +944,7 @@ mod linux_impl {
             hessian: penalized_hessian_sym.clone(),
             log_likelihood,
             deviance,
+            deviance_magnitude: deviance.abs(),
             penalty_term,
             firth: FirthDiagnostics::Inactive,
             hessian_curvature: HessianCurvatureKind::Fisher,

@@ -30,6 +30,7 @@ impl WorkingModel for RoundedQuadratic {
             hessian: SymmetricMatrix::Dense(array![[1.0, 0.0], [0.0, 2.0 * weight]]),
             log_likelihood: -objective,
             deviance: 2.0 * objective,
+            deviance_magnitude: (2.0 * objective).abs(),
             penalty_term: 0.0,
             firth: FirthDiagnostics::Inactive,
             hessian_curvature: HessianCurvatureKind::Fisher,

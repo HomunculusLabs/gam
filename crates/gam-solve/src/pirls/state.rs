@@ -90,6 +90,12 @@ pub struct WorkingState {
     /// store the strict eta-space log-likelihood omitting response constants.
     pub log_likelihood: f64,
     pub deviance: f64,
+    /// The magnitude `deviance` accumulates before any cancellation: the sum of
+    /// its per-row pieces' absolute values. A family whose unit deviances share a
+    /// sign stores `|deviance|`. A likelihood whose per-row pieces cancel (a
+    /// survival cumulative hazard against its event log terms) stores the pieces'
+    /// absolute sum, which is what the deviance's rounding scales with (#2627).
+    pub deviance_magnitude: f64,
     pub penalty_term: f64,
     pub firth: FirthDiagnostics,
     pub hessian_curvature: HessianCurvatureKind,

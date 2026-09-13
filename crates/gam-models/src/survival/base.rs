@@ -2254,6 +2254,9 @@ impl WorkingModelSurvival {
         let derivative_raw = self.derivative_dot(beta) + &self.offset_derivative_exit;
 
         let mut nll = 0.0;
+        // The absolute sum of the NLL's per-row pieces before they cancel: the
+        // `w·exp(η)` cumulative-hazard pieces and each event row's log terms.
+        let mut nll_magnitude = 0.0_f64;
         let derivative_guard = self.derivative_guard();
         let (exit_band, entry_band, derivative_band) = self.predictor_bands(beta);
         let mut workspace = self
@@ -2357,6 +2360,7 @@ impl WorkingModelSurvival {
             }
             w_hess_exit[i] = w_exit_i;
             w_hess_entry[i] = w_entry_i;
+            nll_magnitude += w_exit_i + w_entry_i;
 
             if d > 0.0 {
                 // `deriv_slope` is the derivative of the structural clamp: on
@@ -2364,6 +2368,7 @@ impl WorkingModelSurvival {
                 // constant in β, so its score and curvature channels vanish.
                 let inv_deriv = deriv_slope / deriv;
                 nll += -w * (eta_exit[i] + deriv.ln());
+                nll_magnitude += w * (eta_exit[i].abs() + deriv.ln().abs());
                 w_event[i] = w;
                 w_event_inv_deriv[i] = w * inv_deriv;
                 w_event_outer[i] = w * inv_deriv * inv_deriv;
@@ -2453,6 +2458,7 @@ impl WorkingModelSurvival {
             hessian: gam_linalg::matrix::SymmetricMatrix::Dense(h),
             log_likelihood,
             deviance,
+            deviance_magnitude: 2.0 * nll_magnitude,
             penalty_term: penalty_quadratic_form,
             firth: gam_solve::pirls::FirthDiagnostics::Inactive,
             hessian_curvature: gam_solve::pirls::HessianCurvatureKind::Observed,

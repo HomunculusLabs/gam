@@ -1376,6 +1376,7 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
 
             log_likelihood,
             deviance,
+            deviance_magnitude: deviance.abs(),
             penalty_term,
             firth: FirthDiagnostics::Inactive,
             hessian_curvature: HessianCurvatureKind::Fisher,
