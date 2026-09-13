@@ -494,12 +494,12 @@ fn gam_survival_surface(data: &ArmData, t_grid: &[f64]) -> (Vec<f64>, f64, f64) 
     // time-basis coefficients — reported for context only.
     //
     // The SCALE is not an estimate of either stratum's 0.8/1.5 and should not be
-    // read as one: it saturates at its 1e-9 floor on every seed, because
-    // `log H0(t) = shape·(log t − log scale)` and the covariate block carries an
-    // intercept, so the scale and that intercept are a single identified
-    // combination and the fit is free to park the split anywhere. Only `shape`
-    // (the `log t` slope) is separately identified by the baseline, and it is
-    // what the survival surface's time profile depends on.
+    // read as one: it is the time anchor. The time basis is the single `log t`
+    // column (#2301 dropped the constant column, which the covariate intercept
+    // carries), so `fitted_weibull_baseline_from_linear_time_beta` reports
+    // `scale = anchor` and `shape = beta[0]`. Only `shape` (the `log t` slope) is
+    // identified by the baseline, and it is what the survival surface's time
+    // profile depends on.
     let gam_scale = fit
         .baseline_cfg
         .scale
@@ -509,7 +509,7 @@ fn gam_survival_surface(data: &ArmData, t_grid: &[f64]) -> (Vec<f64>, f64, f64) 
         .shape
         .expect("gam recovers a Weibull baseline shape");
 
-    // Covariate coefficient slice: beta = [time(2 cols), covariate...]; the
+    // Covariate coefficient slice: beta = [time (1 col), covariate...]; the
     // covariate block begins at `time_base_ncols`.
     let cov_start = fit.time_base_ncols;
     let beta = &fit.fit.beta;
