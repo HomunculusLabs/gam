@@ -1246,16 +1246,14 @@ fn test_build_bspline_basis_1d_double_penalty() {
     let bend_rank = result.active_penalties[0].info.effective_rank;
     let null_rank = result.active_penalties[1].info.effective_rank;
 
-    // #1476/#1477: the double-penalty null-space shrinkage ridge `P` must be the
-    // orthogonal projector onto `null(S_c)` built in the CONSTRAINED coordinate
-    // chart — NOT the raw projector `U Uᵀ` congruence-transformed by the
-    // sum-to-zero `Z` (which is no longer a projector onto `null(ZᵀSZ)`). The
-    // raw-chart construction smeared a spurious second "null" direction
-    // (`δ=dist²(ĉ,null(S))≈0.148` for this k=10 order-2 P-spline) that lies in
-    // the RANGE of the bend penalty, so the "shrinkage" block penalized genuine
-    // curvature (concurvity collapse / Tweedie boundary bias). The real contract
-    // is a CLEAN rank partition with spectral complementarity, not merely a
-    // full-rank sum.
+    // #1476/#1477: the double-penalty null-space shrinkage ridge `P` is built in
+    // the CONSTRAINED coordinate chart, not as the raw projector `U Uᵀ`
+    // congruence-transformed by the sum-to-zero `Z`. The raw-chart construction
+    // smeared a spurious second "null" direction (`δ=dist²(ĉ,null(S))≈0.148` for
+    // this k=10 order-2 P-spline) that lies in the RANGE of the bend penalty, so
+    // the "shrinkage" block penalized a second direction (concurvity collapse /
+    // Tweedie boundary bias). The contract is one penalized direction per null
+    // direction, not merely a full-rank sum.
     //
     // Raw k=10 basis, sum-to-zero centering removes the constant direction:
     //   p_constrained = 9, nullity(S_c) = 1  ⇒  rank(S_c)=8, rank(P)=1.
@@ -1266,33 +1264,23 @@ fn test_build_bspline_basis_1d_double_penalty() {
     );
     assert_eq!(
         null_rank, 1,
-        "shrinkage ridge must be the rank-1 projector onto null(S_c), not the \
-         rank-2 congruence of the raw projector"
+        "shrinkage ridge must penalize exactly one direction, not the rank-2 \
+         congruence of the raw projector"
     );
 
     let s_c = &result.active_penalties[0].matrix;
     let p_null = &result.active_penalties[1].matrix;
-    // Spectral complementarity: P projects onto null(S_c), so S_c·P = P·S_c = 0
-    // exactly (the ridge penalizes ONLY the unpenalized polynomial direction and
-    // never touches a curvature mode). The pre-fix raw-chart ridge failed this:
-    // its second eigendirection lived in range(S_c), giving ‖S_c P‖_F ≈ 0.15.
-    let sp = s_c.dot(p_null);
-    let ps = p_null.dot(s_c);
-    let sp_norm = sp.iter().map(|v| v * v).sum::<f64>().sqrt();
-    let ps_norm = ps.iter().map(|v| v * v).sum::<f64>().sqrt();
-    assert!(
-        sp_norm < 1e-9,
-        "S_c·P must vanish (spectral complementarity); got ‖S_c P‖_F = {sp_norm:e}"
-    );
-    assert!(
-        ps_norm < 1e-9,
-        "P·S_c must vanish (spectral complementarity); got ‖P S_c‖_F = {ps_norm:e}"
-    );
+    // #2668 row 23: P charges the null function along the mean end slope, so what
+    // it leaves unpenalized is {f : ½(f'(a) + f'(b)) = 0}, the natural-spline
+    // complement, not the Euclidean complement of null(S_c) in this chart. A
+    // curvature mode with a nonzero mean end slope is charged, so S_c·P is not
+    // zero and is not asserted.
+    assert_ridge_range_is_mean_end_slope(&result, "k=10 order-2 centered");
 
     // Together the two blocks still leave NO unpenalized direction: the assembled
     // double penalty `S_bend + P` has full structural rank, so REML can shrink
-    // (never inflate) the null space (#1266). With the clean partition this is
-    // exactly rank(S_c)+rank(P) = 8+1 = 9.
+    // (never inflate) the null space (#1266), and with rank(S_c)+rank(P) = 8+1 = 9
+    // every direction is penalized once.
     let summed = s_c + p_null;
     let joint_rank = analyze_penalty_block_with_op(&summed, None)
         .unwrap_or_else(|e| panic!("assembled double penalty analyzes failed: {e:?}"))
@@ -1302,25 +1290,83 @@ fn test_build_bspline_basis_1d_double_penalty() {
     assert_eq!(result.design.nrows(), x.len());
 }
 
-/// Shared spectral-contract probe for the double-penalty null-space shrinkage
-/// ridge `P` produced by `build_bspline_basis_1d` (#1476/#1477).
+/// The range the double-penalty null-space ridge `P` ships with.
+enum RidgeRange {
+    /// `range(P) = null(S_c)`: `S_c·P = P·S_c = 0` (#1476, #2372).
+    NullSpace,
+    /// `range(P) = span(φ_c)`, the mean end slope over the constrained chart
+    /// (#2668 row 23).
+    MeanEndSlope,
+}
+
+/// `P = c·φ_cφ_cᵀ` with `c > 0`, where `φ_c = Zᵀφ` is the mean end slope
+/// `½(f'(a) + f'(b))` as a row over the constrained coefficients. So `P` charges
+/// the null function, which carries a nonzero end slope, and leaves
+/// `{f : ½(f'(a) + f'(b)) = 0}` unpenalized (#2668 row 23). `φ` is read from
+/// `create_basis`'s first-derivative design at the modeling interval's ends.
+fn assert_ridge_range_is_mean_end_slope(result: &BasisBuildResult, label: &str) {
+    let BasisMetadata::BSpline1D {
+        knots,
+        identifiability_transform: Some(transform),
+        degree: Some(degree),
+        ..
+    } = &result.metadata
+    else {
+        panic!("{label}: a centered B-spline must carry its knots, degree and transform");
+    };
+    let n_basis = knots.len() - degree - 1;
+    let endpoints = array![knots[*degree], knots[n_basis]];
+    let (slopes, _) = create_basis::<Dense>(
+        endpoints.view(),
+        KnotSource::Provided(knots.view()),
+        *degree,
+        BasisOptions::first_derivative(),
+    )
+    .unwrap_or_else(|e| panic!("{label}: endpoint derivative design failed: {e:?}"));
+    let slopes = slopes.as_ref();
+    let raw_mean_end_slope: Array1<f64> = (&slopes.row(0) + &slopes.row(1)) * 0.5;
+    let phi = transform.t().dot(&raw_mean_end_slope);
+    let p_null = &result.active_penalties[1].matrix;
+    let p = phi.len();
+    let phi_sq = phi.dot(&phi);
+    let charge = phi.dot(&p_null.dot(&phi)) / (phi_sq * phi_sq);
+    assert!(
+        charge > 0.0,
+        "{label}: P must charge the mean end slope; got φᵀPφ/‖φ‖⁴ = {charge:e}"
+    );
+    let rank_one = Array2::from_shape_fn((p, p), |(i, j)| charge * phi[i] * phi[j]);
+    let residual = (p_null - &rank_one)
+        .iter()
+        .map(|v| v * v)
+        .sum::<f64>()
+        .sqrt();
+    let p_norm = p_null.iter().map(|v| v * v).sum::<f64>().sqrt();
+    assert!(
+        residual <= 1e-9 * p_norm,
+        "{label}: P must be c·φ_cφ_cᵀ along the mean end slope; got ‖P − c·φ_cφ_cᵀ‖_F = \
+         {residual:e} against ‖P‖_F = {p_norm:e}"
+    );
+}
+
+/// Shared contract probe for the double-penalty null-space shrinkage ridge `P`
+/// produced by `build_bspline_basis_1d` (#1476/#1477).
 ///
-/// Asserts the projector contract directly from the SHIPPED constrained-chart
-/// penalties rather than re-deriving anything:
-///   * `rank(P) == nullity(S_c)`            (P spans exactly the null space)
-///   * `‖S_c · P‖_F ≈ 0` and `‖P · S_c‖_F ≈ 0`  (spectral complementarity:
-///     the ridge penalizes ONLY the unpenalized polynomial direction and never
-///     touches a curvature mode)
+/// Asserts the ridge contract directly from the SHIPPED constrained-chart
+/// penalties:
+///   * `rank(P) == nullity(S_c)` (one penalized direction per null direction)
+///   * the ridge's range, `ridge_range`: `null(S_c)` with `‖S_c · P‖_F ≈ 0` and
+///     `‖P · S_c‖_F ≈ 0`, or the mean end slope
 ///   * `rank(S_c) + rank(P) == p_constrained` (no unpenalized direction left,
 ///     so REML can shrink — never inflate — the null space, #1266)
 ///
 /// `expected_nullity` pins the adapt-to-actual-null behavior: centered smooths
 /// have `nullity(S_c)=1` (constant removed); an uncentered / constraint-free
-/// smooth keeps its genuine polynomial null space, so the rebuilt projector
-/// must follow and produce `rank(P)=2` for an order-2 penalty.
+/// smooth keeps its genuine polynomial null space, so the rebuilt ridge must
+/// follow and produce `rank(P)=2` for an order-2 penalty.
 fn assert_double_penalty_projector_contract(
     result: &BasisBuildResult,
     expected_nullity: usize,
+    ridge_range: RidgeRange,
     label: &str,
 ) {
     assert_eq!(
@@ -1357,9 +1403,9 @@ fn assert_double_penalty_projector_contract(
         s_c_block.nullity, expected_nullity,
         "{label}: nullity(S_c) must be {expected_nullity}"
     );
-    // The projector spans EXACTLY the constrained null space of S_c — this is
-    // the adapt-to-actual-null property: rank(P) tracks nullity(S_c), 1 when
-    // centered, 2 for an uncentered order-2 smooth.
+    // The ridge penalizes one direction per constrained null direction of S_c —
+    // this is the adapt-to-actual-null property: rank(P) tracks nullity(S_c), 1
+    // when centered, 2 for an uncentered order-2 smooth.
     assert_eq!(
         p_block.rank, expected_nullity,
         "{label}: rank(P) must equal nullity(S_c) = {expected_nullity}"
@@ -1369,19 +1415,24 @@ fn assert_double_penalty_projector_contract(
         "{label}: reported ridge effective_rank must equal nullity(S_c)"
     );
 
-    // Spectral complementarity: S_c·P = P·S_c = 0 exactly. The pre-fix raw-chart
-    // ridge (congruence of U Uᵀ) failed this — its spurious second eigendirection
-    // lived in range(S_c), giving ‖S_c P‖_F ≈ 0.15 and penalizing real curvature.
-    let sp_norm = s_c.dot(p_null).iter().map(|v| v * v).sum::<f64>().sqrt();
-    let ps_norm = p_null.dot(s_c).iter().map(|v| v * v).sum::<f64>().sqrt();
-    assert!(
-        sp_norm < 1e-9,
-        "{label}: ‖S_c·P‖_F must vanish (spectral complementarity); got {sp_norm:e}"
-    );
-    assert!(
-        ps_norm < 1e-9,
-        "{label}: ‖P·S_c‖_F must vanish (spectral complementarity); got {ps_norm:e}"
-    );
+    match ridge_range {
+        // Spectral complementarity: S_c·P = P·S_c = 0 exactly. The pre-fix
+        // raw-chart ridge (congruence of U Uᵀ) failed this — its spurious second
+        // eigendirection lived in range(S_c), giving ‖S_c P‖_F ≈ 0.15.
+        RidgeRange::NullSpace => {
+            let sp_norm = s_c.dot(p_null).iter().map(|v| v * v).sum::<f64>().sqrt();
+            let ps_norm = p_null.dot(s_c).iter().map(|v| v * v).sum::<f64>().sqrt();
+            assert!(
+                sp_norm < 1e-9,
+                "{label}: ‖S_c·P‖_F must vanish (spectral complementarity); got {sp_norm:e}"
+            );
+            assert!(
+                ps_norm < 1e-9,
+                "{label}: ‖P·S_c‖_F must vanish (spectral complementarity); got {ps_norm:e}"
+            );
+        }
+        RidgeRange::MeanEndSlope => assert_ridge_range_is_mean_end_slope(result, label),
+    }
 
     // The two blocks together leave NO unpenalized direction: rank(S_c)+rank(P)
     // = p_constrained, the clean partition that lets REML shrink (#1266).
@@ -1420,12 +1471,12 @@ fn double_penalty_spec(
     }
 }
 
-/// #1476/#1477: the constrained-chart projector contract must hold across MANY
+/// #1476/#1477: the constrained-chart ridge contract must hold across MANY
 /// basis sizes (k), not just the single k=10 case. For a sum-to-zero-centered
 /// order-2 P-spline the constant direction is removed by centering but the
 /// residual linear trend survives, so the constrained wiggliness penalty keeps a
-/// single null direction at every k — `nullity(S_c)=1` and a rank-1 projector
-/// spectrally complementary to the bend penalty. Order-1 is exercised uncentered
+/// single null direction at every k — `nullity(S_c)=1` and a rank-1 ridge along
+/// the mean end slope (#2668 row 23). Order-1 is exercised uncentered
 /// below, where its constant null direction is unambiguously kept; under
 /// sum-to-zero centering an order-1 null space can vanish entirely (a different,
 /// correct, single-penalty outcome covered by the non-free / cyclic tests).
@@ -1447,7 +1498,7 @@ fn double_penalty_projector_contract_across_k() {
         let label = format!("centered k={k} order=2");
         // After sum-to-zero centering the order-2 P-spline keeps nullity(S_c)=1
         // (constant removed, residual linear trend survives) at every k.
-        assert_double_penalty_projector_contract(&result, 1, &label);
+        assert_double_penalty_projector_contract(&result, 1, RidgeRange::MeanEndSlope, &label);
     }
 }
 
@@ -1469,7 +1520,12 @@ fn double_penalty_projector_adapts_to_uncentered_two_dim_nullspace() {
     );
     let result2 = build_bspline_basis_1d(x.view(), &spec2)
         .unwrap_or_else(|e| panic!("uncentered order-2 build failed: {e:?}"));
-    assert_double_penalty_projector_contract(&result2, 2, "uncentered order-2");
+    assert_double_penalty_projector_contract(
+        &result2,
+        2,
+        RidgeRange::NullSpace,
+        "uncentered order-2",
+    );
 
     // Order-1, uncentered: 1-D (constant) null space ⇒ rank(P) == 1.
     let spec1 = double_penalty_spec(
@@ -1480,7 +1536,12 @@ fn double_penalty_projector_adapts_to_uncentered_two_dim_nullspace() {
     );
     let result1 = build_bspline_basis_1d(x.view(), &spec1)
         .unwrap_or_else(|e| panic!("uncentered order-1 build failed: {e:?}"));
-    assert_double_penalty_projector_contract(&result1, 1, "uncentered order-1");
+    assert_double_penalty_projector_contract(
+        &result1,
+        1,
+        RidgeRange::NullSpace,
+        "uncentered order-1",
+    );
 }
 
 /// #1476/#1477: on a NON-free basis (clamped endpoint boundary condition) the

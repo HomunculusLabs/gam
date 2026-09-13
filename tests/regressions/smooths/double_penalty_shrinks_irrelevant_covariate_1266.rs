@@ -27,8 +27,9 @@
 // coefficient chart. Thin-plate's chart penalizes the mean end slope
 // `½(f'(a) + f'(b))`; the same functional swapped into the `bs` basis meets the
 // bar in mgcv (mean 0.27), and on gam's exact matrices it gives mean 0.27.
-// Since `8bee1c631` gam's default B-spline composes the chart in which its ridge
-// penalizes that end slope. Under the null, REML's variance-component estimate is
+// Since `8bee1c631` gam's default B-spline ridge penalizes that end slope, now as
+// `m·vvᵀ` with `v = φ/(φᵀn̂)` in the basis's own chart rather than through a
+// composed coefficient chart. Under the null, REML's variance-component estimate is
 // still positive on some draws, so a term's optimum can keep a little wiggle,
 // which is why the reference-free deletion-face statement below is kept beside
 // the bar. (The old helper also indexed the per-term edf with the block-LOCAL

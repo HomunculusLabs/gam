@@ -7441,5 +7441,15 @@
     ],
     "reason": "#2627, after b7b874a2a (#2901, SPEC rules 12 and 14) made every formula linear effect carry the null-recovery ridge by default. prune_unidentified_linear_terms_for_marginal_slope refused a data-redundant scalar term that carried a ridge (\"explicitly penalized ... remove the redundant term\"), which after the default change fired for every bare redundant column. A ridge adds no identifiable data direction, so the refusal branch is deleted and such a term is pruned like an unpenalized one. The unit test that pinned the refusal now pins the pruning, under a name that states it.",
     "evidence": "The removed identity is a #[test] fn in crates/gam-models/src/fit_orchestration/materialize/tests.rs. Its replacement in the same file, bernoulli_marginal_slope_prune_drops_penalized_redundant_scalar_term, keeps the fixture (a four-row constant column with double_penalty = true) and asserts that the term is pruned and named in the inference notes. The production branch the old test pinned, the explicitly-penalized refusal in materialize/terms.rs, is deleted in the same commit. At the base, git grep -n -w finds the old name only at its declaration, and the refusal text only in terms.rs and this test. Census job 597798 at 9c266da56 (HEAD verified, dirty=0, /scratch.global/sauer354/pool/t2627models/census_9c266da56.597798.log) shows materialize_bernoulli_marginal_slope_prunes_redundant_scalar_term and materialize_bernoulli_marginal_slope_prunes_binary_outcome_style_scalar_alias failing on that refusal."
+  },
+  {
+    "base": "f9d54b9d9ede684390fd85c4402057037f92f3ac",
+    "items": [
+      "crates/gam-terms/src/basis/bspline_build.rs:fn:apply_natural_tail_null_chart",
+      "crates/gam-terms/src/basis/bspline_build.rs:fn:natural_tail_null_chart",
+      "crates/gam-terms/src/basis/bspline_build.rs:fn:uses_natural_tail_null_chart"
+    ],
+    "reason": "#2668 row 23, lead ruling 09-12 on q28 and 8bee1c631, option B: keep the end-slope double-penalty model and drop its coefficient chart. charge_null_ridge_along_mean_end_slope builds the null ridge as m*v*v^T with v = phi/(phi^T n) in the basis's own chart, so natural_tail_null_chart and apply_natural_tail_null_chart, which composed the chart M (cond about 65) into Z, the design and every penalty, have no caller. uses_natural_tail_null_chart is renamed uses_mean_end_slope_ridge and also admits FrozenTransform, so a frozen replay rebuilds the fit-time ridge.",
+    "evidence": "At the landing tree git grep -n -w over crates, src and tests finds none of the three removed names. Guarded pool job 603362 (sw0j, acn105) at 03e0cac32 plus this patch, /scratch.global/sauer354/pool/regress2668/optb.603362.log: scripts/source_removal_guard.py rc=0 with 3 guarded removals; cargo check --workspace --all-targets --exclude gam-pyffi rc=0 in 140 s; gam-terms lib pins bspline 51 passed, double_penalty 20 passed, ridge 13 passed, nullspace 16 passed, streaming 3 passed, 0 failed. The #1266 module and owed_1477_factorial were still building when this landed."
   }
 ]

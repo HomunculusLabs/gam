@@ -14,8 +14,10 @@
 //! right-boundary blow-up (#1477).
 //!
 //! The fix rebuilds the ridge from `null(S_c)` of the TRANSFORMED primary
-//! wiggliness penalty in the final coefficient chart, so the projector contract
-//! `rank(P) = nullity(S_c)` and `S_c·P = P·S_c ≈ 0` holds exactly.
+//! wiggliness penalty in the final coefficient chart, so the ridge contract
+//! `rank(P) = nullity(S_c)` with `S_c + P` full rank holds exactly. Since #2668
+//! row 23 the default ridge charges the null function along the mean end slope,
+//! which a curvature mode can carry, so `S_c·P` is not zero and is not asserted.
 //!
 //! WHY A FACTORIAL. The bug was MASKED because no single test isolated the
 //! interacting factors. The defect only surfaced in the
@@ -55,9 +57,10 @@
 //!     noise-scaled bar (the primary unbiasedness gate);
 //!   * NO right-boundary blow-up — the fitted mean at x=1.0 within a tight
 //!     factor of truth (the literal #1477 symptom);
-//!   * (double_penalty on) the projector contract DIRECTLY on the public
+//!   * (double_penalty on) the ridge contract DIRECTLY on the public
 //!     constrained-chart penalty matrices: `rank(P) = nullity(S_c)` and
-//!     `‖S_c·P‖_F ≈ ‖P·S_c‖_F ≈ 0` (the #1476 spectral complementarity);
+//!     `rank(S_c + P) = p` (the #1476 contract: one penalized direction per
+//!     null direction, and P charges the null function);
 //!   * (double_penalty on) no genuine smooth collapses to EDF≈0 — a real,
 //!     high-curvature truth must spend real degrees of freedom.
 //!
@@ -290,7 +293,7 @@ fn eval_grid() -> Vec<f64> {
 
 // ---------------------------------------------------------------------------
 // Fit + extract: fitted mean on grid, total EDF, and (dp=on) the constrained
-// penalty matrices for the spectral-complementarity contract.
+// penalty matrices for the ridge contract.
 // ---------------------------------------------------------------------------
 
 struct CellFit {
@@ -396,8 +399,7 @@ fn fit_cell(
 /// emits two penalty blocks over the SAME coefficient `col_range`: the primary
 /// wiggliness penalty (`PenaltySource::Primary`) and the null-space shrinkage
 /// ridge (`PenaltySource::DoublePenaltyNullspace`). Their `.local` matrices are
-/// the constrained-chart matrices whose spectral complementarity is the #1476
-/// contract.
+/// the constrained-chart matrices the #1476 ridge contract is stated on.
 fn extract_constrained_penalties(
     data: &gam::data::EncodedDataset,
     spec: &gam::smooth::TermCollectionSpec,
@@ -592,7 +594,7 @@ fn double_penalty_projector_holds_across_family_dp_prior_factorial_1477_1476() {
                          {boundary_ratio:.3}); a blown-up boundary is the #1477 defect."
                     );
 
-                    // The #1476 spectral-complementarity contract — asserted
+                    // The #1476 ridge contract — asserted
                     // DIRECTLY on the public constrained-chart penalty matrices
                     // for every dp=on cell, on every seed (it is data-driven only
                     // through the fixed centering transform, but we re-check each
@@ -602,10 +604,10 @@ fn double_penalty_projector_holds_across_family_dp_prior_factorial_1477_1476() {
                         let rank_p = symmetric_rank(p_null.view());
                         let nullity_s = s_c.nrows() - rank_s;
 
-                        // rank(P) == nullity(S_c): the ridge is EXACTLY the
-                        // projector onto null(S_c) (rank-1 after sum-to-zero
-                        // centering for this k=10 order-2 P-spline), not the
-                        // rank-2 congruence of the raw projector.
+                        // rank(P) == nullity(S_c): the ridge penalizes exactly
+                        // one direction per null direction (rank-1 after
+                        // sum-to-zero centering for this k=10 order-2 P-spline),
+                        // not the rank-2 congruence of the raw projector.
                         assert_eq!(
                             rank_p,
                             nullity_s,
@@ -620,26 +622,28 @@ fn double_penalty_projector_holds_across_family_dp_prior_factorial_1477_1476() {
                              leave a non-trivial polynomial null space (got nullity 0)."
                         );
 
-                        // S_c·P = P·S_c = 0: spectral complementarity. The ridge
-                        // penalizes ONLY the unpenalized polynomial direction and
-                        // never a curvature mode. The pre-fix ridge failed this
-                        // with ‖S_c P‖_F ≈ 0.15.
-                        let sp = s_c.dot(p_null);
-                        let ps = p_null.dot(s_c);
-                        // Scale-free: penalties are unit-Frobenius-normalized in
-                        // the constrained chart, so an absolute 1e-7 floor is a
-                        // tight zero (the fix gives ~1e-15; the bug ~1.5e-1).
-                        let sp_norm = frobenius(sp.view());
-                        let ps_norm = frobenius(ps.view());
+                        // rank(S_c + P) == p: P charges the null function S_c
+                        // leaves unpenalized, so with the rank equality above the
+                        // pair penalizes every direction once and log|λ₁S_c + λ₂P|
+                        // separates in ρ. P is not spectrally complementary to
+                        // S_c: the default ridge penalizes the mean end slope
+                        // (#2668 row 23), which a curvature mode can carry, so
+                        // ‖S_c·P‖_F is printed and not asserted. The #1476 defect
+                        // was a SECOND penalized direction, which the rank
+                        // equality refuses.
+                        let rank_joint = symmetric_rank((s_c + p_null).view());
+                        let sp_norm = frobenius(s_c.dot(p_null).view());
                         eprintln!(
                             "[#1476] cell={cell} seed={seed} rank(S_c)={rank_s} rank(P)={rank_p} \
-                             nullity(S_c)={nullity_s} ‖S_c·P‖_F={sp_norm:e} ‖P·S_c‖_F={ps_norm:e}"
+                             nullity(S_c)={nullity_s} rank(S_c+P)={rank_joint} ‖S_c·P‖_F={sp_norm:e}"
                         );
-                        assert!(
-                            sp_norm < 1e-7 && ps_norm < 1e-7,
-                            "cell {cell} seed {seed}: spectral complementarity violated — \
-                             ‖S_c·P‖_F={sp_norm:e}, ‖P·S_c‖_F={ps_norm:e} (must be ≈0); the \
-                             null-space ridge is penalizing a genuine curvature mode (#1476)."
+                        assert_eq!(
+                            rank_joint,
+                            s_c.nrows(),
+                            "cell {cell} seed {seed}: rank(S_c + P)={rank_joint} must be the full \
+                             chart dimension {}; the null-space ridge does not charge the null \
+                             function S_c leaves unpenalized (#1476).",
+                            s_c.nrows()
                         );
                     }
                 }

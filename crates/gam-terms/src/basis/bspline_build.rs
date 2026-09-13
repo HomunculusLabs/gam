@@ -291,7 +291,6 @@ pub fn build_bspline_basis_1d(
                     &spec.identifiability,
                     penalties_raw,
                     Some(chunk),
-                    None,
                 )?
             } else {
                 let (basis, _) =
@@ -408,7 +407,7 @@ pub fn build_bspline_basis_1d(
             p_raw,
             chunk,
         );
-        let natural_tail_end_slope = if uses_natural_tail_null_chart(spec) {
+        let mean_end_slope = if uses_mean_end_slope_ridge(spec) {
             Some(bspline_mean_end_slope_row(&knots, spec.degree)?)
         } else {
             None
@@ -422,10 +421,12 @@ pub fn build_bspline_basis_1d(
                 &spec.identifiability,
                 penalties_raw,
                 Some(chunk),
-                natural_tail_end_slope.as_ref(),
             )?;
-        let transformed_candidates =
-            rebuild_double_penalty_nullspace_in_constrained_chart(transformed_candidates)?;
+        let transformed_candidates = charge_null_ridge_along_mean_end_slope(
+            rebuild_double_penalty_nullspace_in_constrained_chart(transformed_candidates)?,
+            identifiability_transform.as_ref(),
+            mean_end_slope.as_ref(),
+        )?;
         let filtered = filter_penalty_candidates(renormalize_constrained_penalty_candidates(
             transformed_candidates,
         )?)?;
@@ -616,7 +617,7 @@ pub fn build_bspline_basis_1d(
         "B-spline roughness",
     )?;
     let penalties_raw = bspline_penalty_candidates(&s_bend_raw, spec, &knots)?;
-    let natural_tail_end_slope = if uses_natural_tail_null_chart(spec) {
+    let mean_end_slope = if uses_mean_end_slope_ridge(spec) {
         Some(bspline_mean_end_slope_row(&knots, spec.degree)?)
     } else {
         None
@@ -651,14 +652,6 @@ pub fn build_bspline_basis_1d(
                             })
                         })
                         .collect::<Result<Vec<_>, _>>()?;
-                    let (constrained_basis, transformed_candidates, z) =
-                        apply_natural_tail_null_chart(
-                            constrained_basis,
-                            transformed_candidates,
-                            z,
-                            natural_tail_end_slope.as_ref(),
-                            "sparse B-spline natural-tail null chart",
-                        )?;
                     // `apply_sum_to_zero_constraint_sparse` now returns a dense
                     // constrained basis `B_c = B Z` with orthonormal `Z`. The
                     // densification is the honest cost of using an orthonormal
@@ -722,28 +715,17 @@ pub fn build_bspline_basis_1d(
                 identifiability_transform.as_ref(),
                 "B-spline boundary and identifiability restriction",
             )?;
-            let (design, transformed_candidates, identifiability_transform) =
-                match identifiability_transform {
-                    Some(transform) => {
-                        let (design, candidates, transform) = apply_natural_tail_null_chart(
-                            design,
-                            transformed_candidates,
-                            transform,
-                            natural_tail_end_slope.as_ref(),
-                            "B-spline natural-tail null chart",
-                        )?;
-                        (design, candidates, Some(transform))
-                    }
-                    None => (design, transformed_candidates, None),
-                };
             (
                 DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(design)),
                 transformed_candidates,
                 identifiability_transform,
             )
         };
-    let transformed_candidates =
-        rebuild_double_penalty_nullspace_in_constrained_chart(transformed_candidates)?;
+    let transformed_candidates = charge_null_ridge_along_mean_end_slope(
+        rebuild_double_penalty_nullspace_in_constrained_chart(transformed_candidates)?,
+        identifiability_transform.as_ref(),
+        mean_end_slope.as_ref(),
+    )?;
     let filtered = filter_penalty_candidates(renormalize_constrained_penalty_candidates(
         transformed_candidates,
     )?)?;
@@ -960,17 +942,19 @@ fn bspline_endpoint_derivative_row(
     Ok(Array1::from_vec(row))
 }
 
-/// The natural-tail null chart applies to an open double-penalty smooth whose
-/// order-2 roughness is centered by the weighted sum-to-zero constraint: its
-/// constrained null space is the single centered linear function, on which the
-/// mean end slope is nondegenerate.
-fn uses_natural_tail_null_chart(spec: &BSplineBasisSpec) -> bool {
+/// The double-penalty ridge is charged along the mean end slope for an open
+/// smooth whose order-2 roughness is centered by the weighted sum-to-zero
+/// constraint, and for its frozen replay: the constrained null space is the
+/// single centered linear function, on which the mean end slope is
+/// nondegenerate.
+fn uses_mean_end_slope_ridge(spec: &BSplineBasisSpec) -> bool {
     spec.double_penalty
         && spec.penalty_order == 2
         && spec.boundary_conditions.is_free()
         && matches!(
             spec.identifiability,
             BSplineIdentifiability::WeightedSumToZero { .. }
+                | BSplineIdentifiability::FrozenTransform { .. }
         )
 }
 
@@ -993,110 +977,74 @@ fn bspline_mean_end_slope_row(
     Ok((&left + &right) * 0.5)
 }
 
-/// Coefficient chart in which the complementary null-space ridge penalizes the
-/// mean end slope (#2668 row 23, #1266).
+/// Charge the double-penalty ridge along the mean end slope (#2668 row 23,
+/// #1266).
 ///
-/// `rebuild_double_penalty_nullspace_in_constrained_chart` ships the ridge
-/// `N M Nᵀ` with range `null(S_c)` (#2372). A rank-one ridge of that form
-/// penalizes `(n̂ᵀβ)²`, so what it leaves unpenalized is `{β : n̂ᵀβ = 0}`: the
-/// Euclidean complement of the null vector in whatever coefficient chart the
-/// basis happens to use, not a property of `f` (SPEC rule 5). This chart makes
-/// that complement the natural-spline one, `H = {f : ½(f'(a) + f'(b)) = 0}`. A
-/// natural spline is linear beyond its ends, and `½(f'(a) + f'(b))` is the slope
-/// of its mean tail line, which is the thin-plate null coordinate.
+/// `rebuild_double_penalty_nullspace_in_constrained_chart` ships `R = m n̂n̂ᵀ`
+/// (#2372), with `n̂` the unit null vector of `S_c` and `m` the null function's
+/// `L²` energy. It penalizes `(n̂ᵀβ)²`, so what it leaves unpenalized is
+/// `{β : n̂ᵀβ = 0}`: the Euclidean complement of `n̂` in whatever coefficient
+/// chart the basis happens to use, not a property of `f` (SPEC rule 5). With `φ`
+/// the mean end slope `½(f'(a) + f'(b))` as a row over the constrained
+/// coefficients, this ships `m vvᵀ` with `v = φ/(φᵀn̂)`. `vᵀn̂ = 1`, so the null
+/// function keeps its charge `m`, and what is left unpenalized is
+/// `H = {f : ½(f'(a) + f'(b)) = 0}`. A natural spline is linear beyond its ends,
+/// and `½(f'(a) + f'(b))` is the slope of its mean tail line, which is the
+/// thin-plate null coordinate.
 ///
-/// Let `φ̂` be the unit end-slope row and `n̂` the unit null vector in the
-/// constrained chart, oriented so `c = φ̂ᵀn̂ < 0`. With `Q` the reflection along
-/// `a = n̂ − φ̂` (so `Q n̂ = φ̂`), `M = Q + a n̂ᵀ` fixes `n̂` and maps `n̂⊥`
-/// isometrically onto `Q(n̂⊥) = φ̂⊥ = H`. So `null(MᵀS_cM) = span(n̂)`, the
-/// rebuilt ridge still charges `n̂` its function `L²` energy, and in the new
-/// coordinates it penalizes `φ̂ᵀβ / c`, the end slope. The represented functions
-/// and the roughness functional are unchanged. `cond(M) = (1 + √(1 − c²))/|c|`,
-/// about 65 for the default cubic smooth (`|c| ≈ 0.031`). The projection chart
-/// `I − φ̂φ̂ᵀ + c φ̂n̂ᵀ` realizes the same model with `cond ≈ 1/c²`.
+/// `R` has rank one on a one-dimensional null space, so `log|λ₁S_c + λ₂R|` stays
+/// `(p − 1)ρ₁ + ρ₂ + const`. It is no longer spectrally complementary to `S_c`:
+/// a curvature mode with a nonzero mean end slope is charged. `8bee1c631` built
+/// the same model by composing into `Z` the chart `M` in which this ridge is
+/// `m n̂n̂ᵀ`, with `cond(M) = (1 + √(1 − c²))/|c| ≈ 65`. Here `Z`, `S_c` and the
+/// design are untouched.
 ///
 /// On the #1266 fixture (`y ~ s(x) + s(z)`, `z` pure noise, seeds 200..240) the
 /// irrelevant term reaches the switched-off face on 27 of 41 seeds instead of 16
 /// and its RMSE halves. A weak linear trend in `z` is never annihilated (+2.5%
 /// RMSE) and a smooth bump in `z` costs +11% RMSE.
-fn natural_tail_null_chart(
-    candidates: &[PenaltyCandidate],
-    transform: &Array2<f64>,
-    raw_end_slope: &Array1<f64>,
-) -> Result<Array2<f64>, BasisError> {
+fn charge_null_ridge_along_mean_end_slope(
+    mut candidates: Vec<PenaltyCandidate>,
+    transform: Option<&Array2<f64>>,
+    raw_end_slope: Option<&Array1<f64>>,
+) -> Result<Vec<PenaltyCandidate>, BasisError> {
+    let (Some(transform), Some(raw_end_slope)) = (transform, raw_end_slope) else {
+        return Ok(candidates);
+    };
     if transform.nrows() != raw_end_slope.len() {
         crate::bail_dim_basis!(
-            "natural-tail null chart: transform is {}x{} but the end-slope row has length {}",
+            "mean end-slope ridge: transform is {}x{} but the end-slope row has length {}",
             transform.nrows(),
             transform.ncols(),
             raw_end_slope.len()
         );
     }
-    let primary = candidates
-        .iter()
-        .find(|candidate| matches!(candidate.source, PenaltySource::Primary))
-        .ok_or_else(|| {
-            BasisError::InvalidInput(
-                "natural-tail null chart requires the primary roughness penalty".to_string(),
-            )
-        })?;
-    let null = constructive_nullspace_basis(&primary.matrix)?.ok_or_else(|| {
-        BasisError::InvalidInput(
-            "natural-tail null chart: the constrained roughness has no null space".to_string(),
-        )
-    })?;
-    let p = transform.ncols();
-    if null.nrows() != p || null.ncols() != 1 {
-        crate::bail_dim_basis!(
-            "natural-tail null chart expects one centered linear null direction in {} coefficients, got a {}x{} frame",
-            p,
-            null.nrows(),
-            null.ncols()
-        );
-    }
     let slope = transform.t().dot(raw_end_slope);
-    let null_direction = null.column(0);
-    let slope_norm = slope.dot(&slope).sqrt();
-    let null_norm = null_direction.dot(&null_direction).sqrt();
-    let cosine = slope.dot(&null_direction) / (slope_norm * null_norm);
-    if !cosine.is_finite() || cosine.abs() <= p as f64 * f64::EPSILON {
-        return Err(BasisError::InvalidInput(format!(
-            "natural-tail null chart: the end slope vanishes on the constrained null function (cosine {cosine:e})"
-        )));
-    }
-    let slope_hat = slope.mapv(|value| value / slope_norm);
-    // Orienting `n̂` against the slope row keeps the reflection axis long:
-    // `‖n̂ − φ̂‖² = 2(1 + |c|) ≥ 2`.
-    let orientation = if cosine > 0.0 { -1.0 } else { 1.0 };
-    let null_hat = null_direction.mapv(|value| orientation * value / null_norm);
-    let axis = &null_hat - &slope_hat;
-    let axis_sq = axis.dot(&axis);
-    let mut chart = Array2::<f64>::eye(p);
-    for i in 0..p {
-        for j in 0..p {
-            chart[[i, j]] += axis[i] * (null_hat[j] - 2.0 * axis[j] / axis_sq);
+    for candidate in &mut candidates {
+        // The rebuilt ridge's energy factor is the single row `±√m n̂ᵀ`. A frozen
+        // transform that removed the linear function leaves no row to charge.
+        if !matches!(candidate.source, PenaltySource::DoublePenaltyNullspace)
+            || candidate.matrix.factor().nrows() != 1
+        {
+            continue;
         }
+        let null_row = candidate.matrix.factor().row(0).to_owned();
+        let null_energy = null_row.dot(&null_row);
+        let slope_on_null = slope.dot(&null_row);
+        let cosine = slope_on_null / (slope.dot(&slope) * null_energy).sqrt();
+        if !cosine.is_finite() || cosine.abs() <= slope.len() as f64 * f64::EPSILON {
+            return Err(BasisError::InvalidInput(format!(
+                "mean end-slope ridge: the end slope vanishes on the constrained null function (cosine {cosine:e})"
+            )));
+        }
+        // `√m vᵀ = (‖row‖² / φᵀrow) φᵀ`, whichever sign the row carries.
+        let scale = null_energy / slope_on_null;
+        candidate.matrix = ConstructiveQuadratic::from_energy_factor(
+            slope.mapv(|value| scale * value).insert_axis(Axis(0)),
+            "mean end-slope null ridge",
+        )?;
     }
-    Ok(chart)
-}
-
-/// Compose the natural-tail null chart into a constrained design, its penalty
-/// candidates and the stored identifiability transform, when the spec uses it.
-fn apply_natural_tail_null_chart(
-    design: Array2<f64>,
-    candidates: Vec<PenaltyCandidate>,
-    transform: Array2<f64>,
-    raw_end_slope: Option<&Array1<f64>>,
-    context: &str,
-) -> Result<(Array2<f64>, Vec<PenaltyCandidate>, Array2<f64>), BasisError> {
-    let Some(raw_end_slope) = raw_end_slope else {
-        return Ok((design, candidates, transform));
-    };
-    let chart = natural_tail_null_chart(&candidates, &transform, raw_end_slope)?;
-    let candidates = restrict_penalty_candidates(candidates, Some(&chart), context)?;
-    let design = fast_ab(&design, &chart);
-    let transform = compose_bspline_transform(Some(transform), chart)?;
-    Ok((design, candidates, transform))
+    Ok(candidates)
 }
 
 fn push_bspline_boundary_rows_for_endpoint(
@@ -1453,7 +1401,6 @@ pub(crate) fn build_streaming_bspline_design_and_candidates(
     identifiability: &BSplineIdentifiability,
     penalties_raw: Vec<PenaltyCandidate>,
     chunk_size: Option<usize>,
-    natural_tail_end_slope: Option<&Array1<f64>>,
 ) -> Result<(DesignMatrix, Vec<PenaltyCandidate>, Option<Array2<f64>>), BasisError> {
     let chunk = chunk_size.unwrap_or(DEFAULT_STREAMING_CHUNK_ROWS).max(1);
     // Streaming is selected only for free endpoint boundary conditions. Non-free
@@ -1516,21 +1463,6 @@ pub(crate) fn build_streaming_bspline_design_and_candidates(
         transform_opt.as_ref(),
         "streaming B-spline identifiability restriction",
     )?;
-    let (transformed_candidates, transform_opt) = match (natural_tail_end_slope, transform_opt) {
-        (Some(raw_end_slope), Some(transform)) => {
-            let chart = natural_tail_null_chart(&transformed_candidates, &transform, raw_end_slope)?;
-            let candidates = restrict_penalty_candidates(
-                transformed_candidates,
-                Some(&chart),
-                "streaming B-spline natural-tail null chart",
-            )?;
-            (
-                candidates,
-                Some(compose_bspline_transform(Some(transform), chart)?),
-            )
-        }
-        (_, transform_opt) => (transformed_candidates, transform_opt),
-    };
     let op = StreamingBSplineEvaluator::new(
         Arc::new(data.to_owned()),
         Arc::new(knots.clone()),
