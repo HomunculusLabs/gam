@@ -14,9 +14,10 @@ pub struct PreparedSurvivalTimeStack {
     pub time_nullspace_dims: Vec<usize>,
     pub timewiggle_build: Option<crate::survival::construction::SurvivalTimeWiggleBuild>,
     pub timewiggle_block: Option<TimeWiggleBlockInput>,
-    /// Each time penalty's natural `log λ` REML seed: the log ratio of the exit
-    /// design's mean Gram diagonal to the penalty's mean diagonal. `None` when the
-    /// time basis carries no penalty.
+    /// Each time penalty's natural `log λ` REML seed: the log ratio of the mean Gram
+    /// diagonal of the columns it penalizes (the exit time basis, or for a time
+    /// wiggle the warp's Jacobian at the baseline predictor) to the penalty's mean
+    /// diagonal. `None` when the time basis carries no penalty.
     pub time_initial_log_lambdas: Option<Array1<f64>>,
 }
 
@@ -157,15 +158,35 @@ pub fn prepare_survival_time_stack(
             ncols: wiggle.ncols,
         });
     }
+    // Each penalty is seeded against the columns it acts on. The time design's
+    // wiggle tail is a zero placeholder, because the family evaluates the warp
+    // dynamically, so a wiggle penalty is seeded against the warp's Jacobian at
+    // the baseline predictor, B(h₀(t_exit)).
     let time_initial_log_lambdas = if time_penalties.is_empty() {
         None
     } else {
-        Some(Array1::from_vec(
+        let mut seeds = if time_build.penalties.is_empty() {
+            Vec::new()
+        } else {
             crate::survival::marginal_slope::block_log_lambda_seeds(
-                &time_design_exit,
-                time_penalties.iter(),
-            )?,
-        ))
+                &time_build.x_exit_time,
+                time_build.penalties.iter(),
+            )?
+        };
+        if let Some(wiggle) = timewiggle_build.as_ref() {
+            let warp_jacobian_exit = gam_linalg::matrix::DesignMatrix::from(
+                crate::wiggle::monotone_wiggle_basis_from_knots(
+                    eta_offset_exit.view(),
+                    &wiggle.knots,
+                    wiggle.degree,
+                )?,
+            );
+            seeds.extend(crate::survival::marginal_slope::block_log_lambda_seeds(
+                &warp_jacobian_exit,
+                wiggle.penalties.iter(),
+            )?);
+        }
+        Some(Array1::from_vec(seeds))
     };
     Ok(PreparedSurvivalTimeStack {
         eta_offset_entry,
