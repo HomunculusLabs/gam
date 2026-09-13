@@ -367,7 +367,8 @@ fn timewiggle_marginal_slope_family(score_warp: Option<DeviationRuntime>) -> Sur
 }
 
 /// Block states of `timewiggle_marginal_slope_family` at a flat β: time (5), marginal (2),
-/// slope (1), then the score warp when present, with every `η` rebuilt from β.
+/// slope (1), then the score warp and the influence absorber when present, with every `η` rebuilt
+/// from β.
 fn timewiggle_marginal_slope_states(
     family: &SurvivalMarginalSlopeFamily,
     beta: &Array1<f64>,
@@ -388,9 +389,19 @@ fn timewiggle_marginal_slope_states(
             eta: array![beta[7]],
         },
     ];
+    let score_width = family
+        .score_warp
+        .as_ref()
+        .map_or(0, |runtime| runtime.basis_dim());
     if family.score_warp.is_some() {
         states.push(ParameterBlockState {
-            beta: beta.slice(s![8..]).to_owned(),
+            beta: beta.slice(s![8..8 + score_width]).to_owned(),
+            eta: Array1::zeros(1),
+        });
+    }
+    if family.influence_absorber.is_some() {
+        states.push(ParameterBlockState {
+            beta: beta.slice(s![8 + score_width..]).to_owned(),
             eta: Array1::zeros(1),
         });
     }
@@ -398,16 +409,22 @@ fn timewiggle_marginal_slope_states(
 }
 
 /// A flat β for `timewiggle_marginal_slope_family`, with small alternating score-warp
-/// coefficients when the warp is present.
+/// coefficients when the warp is present and small influence coefficients when an absorber is.
 fn timewiggle_marginal_slope_beta(family: &SurvivalMarginalSlopeFamily) -> Array1<f64> {
     let base = [0.0, 0.08, -0.03, 0.02, -0.01, 0.35, -0.1, 0.2];
     let score_width = family
         .score_warp
         .as_ref()
         .map_or(0, |runtime| runtime.basis_dim());
-    Array1::from_shape_fn(base.len() + score_width, |i| {
+    let influence_width = family
+        .influence_absorber
+        .as_ref()
+        .map_or(0, |z_tilde| z_tilde.ncols());
+    Array1::from_shape_fn(base.len() + score_width + influence_width, |i| {
         if i < base.len() {
             base[i]
+        } else if i >= base.len() + score_width {
+            0.05 * (i + 1 - base.len() - score_width) as f64
         } else if i % 2 == 0 {
             0.02
         } else {
@@ -766,6 +783,57 @@ fn timewiggle_flex_all_axes_second_directional_derivative_matches_single_axis_28
     }
 }
 
+/// The ζ frames of the #2893 design-difference gates: the rigid row program beside a time-constant
+/// and a follow-up-varying slope, and the FLEX program with a score warp, alone and beside an
+/// influence absorber.
+#[derive(Clone, Copy, Debug)]
+enum TimewiggleDesignPsiFrame {
+    Rigid,
+    RigidFollowUpSlope,
+    ScoreWarp,
+    ScoreWarpInfluence,
+}
+
+impl TimewiggleDesignPsiFrame {
+    const ALL: [Self; 4] = [
+        Self::Rigid,
+        Self::RigidFollowUpSlope,
+        Self::ScoreWarp,
+        Self::ScoreWarpInfluence,
+    ];
+
+    /// The frame's family.
+    fn family(self) -> SurvivalMarginalSlopeFamily {
+        match self {
+            Self::Rigid => timewiggle_marginal_slope_family(None),
+            Self::RigidFollowUpSlope => timewiggle_follow_up_slope_family(),
+            Self::ScoreWarp => timewiggle_marginal_slope_family(Some(test_deviation_runtime())),
+            Self::ScoreWarpInfluence => {
+                let mut family = timewiggle_marginal_slope_family(Some(test_deviation_runtime()));
+                family.influence_absorber = Some(array![[0.6, -0.3]]);
+                family
+            }
+        }
+    }
+
+    /// The design ψ axes of `timewiggle_design_psi_blocks` this frame serves. The follow-up-varying
+    /// slope records no time margin, so its slope ψ is refused and only the marginal ψ is graded.
+    fn psi_axes(self) -> std::ops::Range<usize> {
+        match self {
+            Self::RigidFollowUpSlope => 0..1,
+            Self::Rigid | Self::ScoreWarp | Self::ScoreWarpInfluence => 0..2,
+        }
+    }
+
+    /// The design ψ pairs this frame serves.
+    fn psi_pairs(self) -> &'static [(usize, usize)] {
+        match self {
+            Self::RigidFollowUpSlope => &[(0, 0)],
+            Self::Rigid | Self::ScoreWarp | Self::ScoreWarpInfluence => &[(0, 0), (0, 1), (1, 1)],
+        }
+    }
+}
+
 /// Two design ψ axes for `timewiggle_marginal_slope_family`: a marginal length scale, then a
 /// slope length scale, each with its diagonal second design derivative.
 fn timewiggle_design_psi_blocks() -> Vec<Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>>
@@ -808,12 +876,12 @@ fn timewiggle_design_psi_blocks_at(
     ]
 }
 
-/// `timewiggle_marginal_slope_family`, with a score warp when `score_warp` holds, with its marginal
-/// and slope designs moved to the design ψ `t = [marginal, slope]` of
-/// `timewiggle_design_psi_blocks_at`, `X(ψ) = X + ψ·X_ψ + ½ψ²·X_ψψ`, and its block states at `beta`
-/// with every `η` rebuilt from the moved designs.
+/// The family of `frame` with its marginal and slope designs moved to the design ψ
+/// `t = [marginal, slope]` of `timewiggle_design_psi_blocks_at`, `X(ψ) = X + ψ·X_ψ + ½ψ²·X_ψψ`, and
+/// its block states at `beta` with every `η` rebuilt from the moved designs. Only a nonzero slope ψ
+/// replaces the slope layout, so a follow-up-varying layout keeps its channels.
 fn timewiggle_design_psi_displaced(
-    score_warp: bool,
+    frame: TimewiggleDesignPsiFrame,
     t: [f64; 2],
     beta: &Array1<f64>,
 ) -> (SurvivalMarginalSlopeFamily, Vec<ParameterBlockState>) {
@@ -821,17 +889,23 @@ fn timewiggle_design_psi_displaced(
         design + &(&x_psi * t) + &(&x_psi_psi * (0.5 * t * t))
     };
     let [marginal_rows, slope_rows] = timewiggle_design_psi_rows();
-    let mut family = timewiggle_marginal_slope_family(score_warp.then(test_deviation_runtime));
+    let mut family = frame.family();
     let marginal = moved(family.marginal_design.to_dense(), marginal_rows, t[0]);
-    let slope = moved(
-        family.slope_layout.coefficient_design().to_dense(),
-        slope_rows,
-        t[1],
-    );
     family.marginal_design = DesignMatrix::from(marginal);
-    family.slope_layout = DesignMatrix::from(slope.clone()).into();
+    if t[1] != 0.0 {
+        let slope = moved(
+            family.slope_layout.coefficient_design().to_dense(),
+            slope_rows,
+            t[1],
+        );
+        family.slope_layout = DesignMatrix::from(slope).into();
+    }
     let mut states = timewiggle_marginal_slope_states(&family, beta);
-    states[2].eta = slope.dot(&states[2].beta);
+    states[2].eta = family
+        .slope_layout
+        .coefficient_design()
+        .to_dense()
+        .dot(&states[2].beta);
     (family, states)
 }
 
@@ -2166,7 +2240,7 @@ fn timewiggle_flex_design_psi_hessian_sweep_matches_design_difference_2893() {
             assert_matches_ridders_2893(&format!("ψ {psi} axis {axis_idx}"), matrix, &|t| {
                 let mut moved_t = [0.0; 2];
                 moved_t[psi] = t;
-                let (moved, moved_states) = timewiggle_design_psi_displaced(true, moved_t, &beta);
+                let (moved, moved_states) = timewiggle_design_psi_displaced(TimewiggleDesignPsiFrame::ScoreWarp, moved_t, &beta);
                 moved
                     .exact_newton_joint_hessian_directional_derivative(&moved_states, &axis)
                     .expect("displaced D_β H[e_a]")
@@ -2199,7 +2273,7 @@ fn timewiggle_flex_design_psi_by_beta_third_matches_design_difference_2893() {
             assert_matches_ridders_2893(&format!("ψ {psi} axis {axis_idx}"), matrix, &|t| {
                 let mut moved_t = [0.0; 2];
                 moved_t[psi] = t;
-                let (moved, moved_states) = timewiggle_design_psi_displaced(true, moved_t, &beta);
+                let (moved, moved_states) = timewiggle_design_psi_displaced(TimewiggleDesignPsiFrame::ScoreWarp, moved_t, &beta);
                 moved
                     .exact_newton_joint_hessian_second_directional_derivative_timewiggle_flex_all_axes(
                         &moved_states,
@@ -2238,7 +2312,7 @@ fn timewiggle_flex_design_psi_pair_third_matches_design_difference_2893() {
                 &|t| {
                     let mut moved_t = [0.0; 2];
                     moved_t[psi_j] = t;
-                    let (moved, moved_states) = timewiggle_design_psi_displaced(true, moved_t, &beta);
+                    let (moved, moved_states) = timewiggle_design_psi_displaced(TimewiggleDesignPsiFrame::ScoreWarp, moved_t, &beta);
                     moved
                         .psi_hessian_directional_derivatives_all_beta_axes_with_options(
                             &moved_states,
@@ -2258,29 +2332,30 @@ fn timewiggle_flex_design_psi_pair_third_matches_design_difference_2893() {
 /// gam#2893: the time-wiggle design ψ terms `∂_ψ ℓ̄`, `∂_ψ ∇_β ℓ̄` and `∂_ψ H` and the ψ Hessian
 /// drift `D_β ∂_ψ H[v]`, served through the ζ composition, match Ridders differences of the joint
 /// objective, gradient, Hessian and `D_β H[v]` along the design motion of a marginal and a slope
-/// design ψ. They are the outer ψ gradient and Hessian inputs. Both row programs are graded: the
-/// FLEX program with a score warp and the rigid program without one.
+/// design ψ a frame serves. They are the outer ψ gradient and Hessian inputs. Every ζ frame is
+/// graded: the rigid program beside a time-constant and a follow-up-varying slope, and the FLEX
+/// program with a score warp, alone and beside an influence absorber.
 #[test]
 fn timewiggle_design_psi_terms_and_drift_match_design_difference_2893() {
     let blocks = timewiggle_design_psi_blocks();
     let options = BlockwiseFitOptions::default();
-    for score_warp in [false, true] {
-        let base = timewiggle_marginal_slope_family(score_warp.then(test_deviation_runtime));
+    for frame in TimewiggleDesignPsiFrame::ALL {
+        let base = frame.family();
         assert!(base.timewiggle_design_psi_terms_available());
         let beta = timewiggle_marginal_slope_beta(&base);
         let states = timewiggle_marginal_slope_states(&base, &beta);
         let total = beta.len();
-        let mut specs = vec![dummy_blockspec(5), dummy_blockspec(2), dummy_blockspec(1)];
-        if score_warp {
-            specs.push(dummy_blockspec(total - 8));
-        }
+        let specs: Vec<_> = states
+            .iter()
+            .map(|state| dummy_blockspec(state.beta.len()))
+            .collect();
         let v = Array1::from_shape_fn(total, |i| ((i * 5 + 1) % 13) as f64 / 13.0 - 0.5);
-        for psi in 0..2 {
-            let label = format!("score_warp={score_warp} ψ {psi}");
+        for psi in frame.psi_axes() {
+            let label = format!("{frame:?} ψ {psi}");
             let displaced_at = |t: f64| {
                 let mut motion = [0.0; 2];
                 motion[psi] = t;
-                timewiggle_design_psi_displaced(score_warp, motion, &beta)
+                timewiggle_design_psi_displaced(frame, motion, &beta)
             };
             let joint_at = |t: f64| {
                 let (family, displaced) = displaced_at(t);
@@ -2332,20 +2407,20 @@ fn timewiggle_design_psi_terms_and_drift_match_design_difference_2893() {
 
 /// gam#2893: the time-wiggle design ψ pair terms `∂²_ψiψj ℓ̄`, `∂²_ψiψj ∇_β ℓ̄` and `∂²_ψiψj H`,
 /// served through the ζ composition, match Ridders differences of the ψ_i terms along the design
-/// motion of ψ_j. The pairs are the marginal diagonal, the cross-block pair and the slope diagonal,
-/// each with a score warp and without one. On a diagonal pair the ψ_i design derivative itself
-/// moves to `X_ψ + ψ·X_ψψ`.
+/// motion of ψ_j, for the marginal diagonal, the cross-block pair and the slope diagonal on every ζ
+/// frame that serves them. On a diagonal pair the ψ_i design derivative itself moves to
+/// `X_ψ + ψ·X_ψψ`.
 #[test]
 fn timewiggle_design_psi_pair_terms_match_design_difference_2893() {
     let blocks = timewiggle_design_psi_blocks();
     let options = BlockwiseFitOptions::default();
-    for score_warp in [false, true] {
-        let base = timewiggle_marginal_slope_family(score_warp.then(test_deviation_runtime));
+    for frame in TimewiggleDesignPsiFrame::ALL {
+        let base = frame.family();
         let beta = timewiggle_marginal_slope_beta(&base);
         let states = timewiggle_marginal_slope_states(&base, &beta);
         let total = beta.len();
-        for (psi_i, psi_j) in [(0usize, 0usize), (0, 1), (1, 1)] {
-            let label = format!("score_warp={score_warp} ψ pair ({psi_i},{psi_j})");
+        for &(psi_i, psi_j) in frame.psi_pairs() {
+            let label = format!("{frame:?} ψ pair ({psi_i},{psi_j})");
             let terms = base
                 .psi_second_order_terms_inner_with_options(
                     &states, &blocks, psi_i, psi_j, None, &options,
@@ -2359,7 +2434,7 @@ fn timewiggle_design_psi_pair_terms_match_design_difference_2893() {
             let first_at = |t: f64| {
                 let mut motion = [0.0; 2];
                 motion[psi_j] = t;
-                let (family, displaced) = timewiggle_design_psi_displaced(score_warp, motion, &beta);
+                let (family, displaced) = timewiggle_design_psi_displaced(frame, motion, &beta);
                 let first = family
                     .psi_terms(&displaced, &timewiggle_design_psi_blocks_at(motion), psi_i)
                     .expect("displaced design ψ terms")
