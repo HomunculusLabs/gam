@@ -6396,5 +6396,16 @@
     ],
     "reason": "SPEC rule 23 (#2469). assemble counted a supported row as a behavioral-metric collapse when s_y fell at or below BEHAVIOR_SPEED_REL_FLOOR = 1e-9 of the atom's largest behavior speed, a picked ratio. The chart's Fisher metric G(y) = I + y yᵀ/(2 − ‖y‖²) satisfies G ⪰ I, so s_y = 0 exactly when the velocity is 0. behavior_curve_speeds now reports exactly 0 for a velocity whose every component lies within the rounding band of its m-term accumulation (gam_linalg::roundoff::accumulation_band), and assemble counts s_y == 0. That is the documented contract of behavior_metric_collapse_rows (s_y numerically zero), with nothing left for the constant to scale.",
     "evidence": "At the base, git grep -n -w BEHAVIOR_SPEED_REL_FLOOR finds only crates/gam-sae/src/manifold/behavior_isometry.rs:145 (the declaration) and :485 (its one read, in assemble). The in-file tests pass exact 0.0 speeds for the collapsed and inert rows, so their verdicts are unchanged. Not compiled or run locally."
+  },
+  {
+    "base": "50a2a26d9a7d6d8bdb3c2c1f05e272114e7aa7df",
+    "items": [
+      "crates/gam-linalg/src/utils.rs:fn:absolute_cutoff",
+      "crates/gam-linalg/src/utils.rs:fn:max_eigenvalue",
+      "crates/gam-linalg/src/utils.rs:fn:pseudoinverse",
+      "crates/gam-linalg/src/utils.rs:fn:relative_cutoff"
+    ],
+    "reason": "#2829 no product user: relative_cutoff, absolute_cutoff, max_eigenvalue and pseudoinverse on RankCertifiedPsdPseudoinverse have no caller, and products read only rank and into_pseudoinverse. The three fields only these getters read are deleted with them.",
+    "evidence": "At 50a2a26d9a7d6d8bdb3c2c1f05e272114e7aa7df, git grep -n over crates, src, tests, benches, bench and examples finds no .relative_cutoff(, .absolute_cutoff(, .max_eigenvalue( or .pseudoinverse( call. The product reads are .rank() at crates/gam-models/src/bms/mod.rs:1643 and .into_pseudoinverse() in gam-models bms/mod.rs, gam-models marginal_slope_orthogonal.rs and gam-sae manifold/outer_objective.rs."
   }
 ]

@@ -2586,5 +2586,16 @@
     },
     "reason": "#2899 dead code: ImplicitDesignPsiDerivative::is_duchon_family has no caller. The gam-terms call sites use RadialScalarKind::is_duchon_family, which stays.",
     "evidence": "Guarded job 558165 (probe cbbda5a12) reported the method never used once narrowed. At the base, git grep -n -w is_duchon_family over crates, src, tests, examples, bench and python finds no call on an ImplicitDesignPsiDerivative."
+  },
+  {
+    "base": "50a2a26d9a7d6d8bdb3c2c1f05e272114e7aa7df",
+    "removed": {
+      "crates/gam-linalg/src/utils.rs::absolute_cutoff": 1,
+      "crates/gam-linalg/src/utils.rs::max_eigenvalue": 1,
+      "crates/gam-linalg/src/utils.rs::pseudoinverse": 1,
+      "crates/gam-linalg/src/utils.rs::relative_cutoff": 1
+    },
+    "reason": "#2829 no product user: relative_cutoff, absolute_cutoff, max_eigenvalue and pseudoinverse on RankCertifiedPsdPseudoinverse have no caller, and products read only rank and into_pseudoinverse. The three fields only these getters read are deleted with them.",
+    "evidence": "At 50a2a26d9a7d6d8bdb3c2c1f05e272114e7aa7df, git grep -n over crates, src, tests, benches, bench and examples finds no .relative_cutoff(, .absolute_cutoff(, .max_eigenvalue( or .pseudoinverse( call. The product reads are .rank() at crates/gam-models/src/bms/mod.rs:1643 and .into_pseudoinverse() in gam-models bms/mod.rs, gam-models marginal_slope_orthogonal.rs and gam-sae manifold/outer_objective.rs."
   }
 ]
