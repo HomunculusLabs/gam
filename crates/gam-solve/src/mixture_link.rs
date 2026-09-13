@@ -1698,7 +1698,8 @@ pub(crate) fn sas_link_complement(eta: f64, epsilon: f64, log_delta: f64, mu: f6
         Err(_) => return 1.0 - mu,
     };
     let delta = sas_delta_from_raw_log_delta(log_delta);
-    if epsilon.abs() < 1e-12 && (delta - 1.0).abs() < 1e-12 {
+    // The identity parameters are exact: the bound map fixes 0 and exp(0) = 1 (#2469).
+    if epsilon == 0.0 && delta == 1.0 {
         return standard_link_complement(StandardLink::Probit, eta, mu);
     }
     let u_raw = delta * asinh_jet5(eta).value + epsilon;
@@ -1736,7 +1737,8 @@ pub(crate) fn sas_latent_probit_argument(
 ) -> Result<(f64, f64), EstimationError> {
     let eta = finite_inverse_link_eta("SAS inverse link", eta)?;
     let delta = sas_delta_from_raw_log_delta(log_delta);
-    if epsilon.abs() < 1e-12 && (delta - 1.0).abs() < 1e-12 {
+    // The identity parameters are exact: the bound map fixes 0 and exp(0) = 1 (#2469).
+    if epsilon == 0.0 && delta == 1.0 {
         return Ok((eta, 1.0));
     }
     let asinh = asinh_jet5(eta);
@@ -1838,7 +1840,8 @@ fn sas_inverse_link_mu_d1(
 ) -> Result<(f64, f64), EstimationError> {
     let eta = finite_inverse_link_eta("SAS inverse link", eta)?;
     let delta_id = sas_delta_from_raw_log_delta(log_delta);
-    if epsilon.abs() < 1e-12 && (delta_id - 1.0).abs() < 1e-12 {
+    // The identity parameters are exact: the bound map fixes 0 and exp(0) = 1 (#2469).
+    if epsilon == 0.0 && delta_id == 1.0 {
         return Ok(component_inverse_link_mu_d1(LinkComponent::Probit, eta));
     }
     let asinh = asinh_jet5(eta);
@@ -2908,7 +2911,8 @@ pub fn sas_inverse_link_jet(
 ) -> Result<InverseLinkJet, EstimationError> {
     let eta = finite_inverse_link_eta("SAS inverse link", eta)?;
     let delta_id = sas_delta_from_raw_log_delta(log_delta);
-    if epsilon.abs() < 1e-12 && (delta_id - 1.0).abs() < 1e-12 {
+    // The identity parameters are exact: the bound map fixes 0 and exp(0) = 1 (#2469).
+    if epsilon == 0.0 && delta_id == 1.0 {
         return Ok(component_inverse_link_jet(LinkComponent::Probit, eta));
     }
     let asinh = asinh_jet5(eta);
