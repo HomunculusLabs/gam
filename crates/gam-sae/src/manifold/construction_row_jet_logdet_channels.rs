@@ -741,14 +741,19 @@ impl SaeManifoldTerm {
     /// evaluated through the contracted row-jet seam with the (metric-applied,
     /// √w-scaled) residual as the probe. `v_beta_row` is the border-ordered
     /// gather of the direction's β block, identical for every row. The same
-    /// tile plan, CPU/device dispatch, and shape checks as
+    /// CPU/device dispatch and shape checks as
     /// [`Self::contracted_softmax_linear_rhs`] apply.
+    ///
+    /// #2822 — every tile's row-program inputs and residual probe rows come from
+    /// `prepared` ([`Self::prepare_softmax_row_jets`]), built once per state, so an
+    /// apply gathers only the direction and contracts it. Re-deriving them per apply
+    /// cost the high-p gauge-deflated circle's dense exact-A build (p = 512, 1537
+    /// probes) 125–228 ms per probe: the busy eu-stack samples of pool job 614715 sat
+    /// in `SaeSoftmaxRowJetInput::from_source`, the zeroed row-jet schedule and the
+    /// border outputs' copies.
     fn contracted_softmax_bilinear_hvp(
         &self,
-        cache: &ArrowFactorCache,
-        second_jets: &[Array4<f64>],
-        border: &[SaeBorderChannel],
-        mut probe_for_row: impl FnMut(usize) -> Result<Vec<f64>, String>,
+        prepared: &PreparedSoftmaxRowJets,
         mut v_t_for_row: impl FnMut(usize, usize) -> Result<Vec<f64>, String>,
         v_beta_row: &[f64],
         mut emit: impl FnMut(usize, usize, &[f64], &[f64]) -> Result<(), String>,
@@ -756,82 +761,20 @@ impl SaeManifoldTerm {
         let AssignmentMode::Softmax { temperature, .. } = self.assignment.mode else {
             return Err("contracted softmax row-jet HVP called on a non-softmax gate".to_string());
         };
-        let n = self.n_obs();
-        let p = self.output_dim();
-        let n_beta = border.len();
+        let n_beta = prepared.border.len();
         if v_beta_row.len() != n_beta {
             return Err(format!(
                 "contracted SAE row-jet v_beta has length {}; expected {n_beta}",
                 v_beta_row.len()
             ));
         }
-        let mut assignments = Array1::<f64>::zeros(self.k_atoms());
-        // #2560 — the cgroup-aware budget is a property of the host, not of the
-        // row chunk, so read it once here rather than once per loop turn.
-        let host_budget = crate::manifold::sae_host_in_core_budget_bytes().0;
-        let mut start = 0usize;
-        while start < n {
-            let q = cache.row_dims[start];
-            let same_shape_rows = cache.row_dims[start..]
-                .iter()
-                .take_while(|&&candidate| candidate == q)
-                .count();
-            let plan = crate::gpu_kernels::sae_rowjet::plan_softmax_row_jets_contracted(
-                same_shape_rows,
-                self.k_atoms(),
-                q,
-                p,
-                n_beta,
-                self.gpu_policy,
-                host_budget,
-            )?;
-            let tile_rows = plan.tile_rows;
-            if tile_rows == 0 {
-                return Err(format!(
-                    "contracted SAE row-jet planner returned an empty tile at nonempty row {start}"
-                ));
-            }
-            let mut inputs = Vec::with_capacity(tile_rows);
-            let mut probe = Vec::with_capacity(tile_rows * p);
+        for tile_plan in &prepared.tiles {
+            let start = tile_plan.start;
+            let q = tile_plan.q;
+            let tile_rows = tile_plan.inputs.len();
             let mut v_t = Vec::with_capacity(tile_rows * q);
             let mut v_beta = Vec::with_capacity(tile_rows * n_beta);
-            let mut shared_beta_layout = None;
             for row in start..start + tile_rows {
-                let vars = self.row_vars_for_cache_row(row, cache)?;
-                self.assignment.try_assignments_row_into(
-                    row,
-                    assignments.as_slice_mut().ok_or_else(|| {
-                        "contracted SAE row-jet assignment scratch is not contiguous".to_string()
-                    })?,
-                )?;
-                let source = ProductionRowProgram {
-                    term: self,
-                    row,
-                    vars: &vars,
-                    assignments: assignments.view(),
-                    second_jets,
-                    border,
-                };
-                let sqrt_row_weight = self
-                    .row_loss_weights
-                    .as_deref()
-                    .map_or(1.0, |weights| weights[row].sqrt());
-                let input = crate::gpu_kernels::sae_rowjet::SaeSoftmaxRowJetInput::from_source(
-                    &source,
-                    crate::gpu_kernels::sae_rowjet::SaeRowGateProgram::Softmax,
-                    sqrt_row_weight,
-                    shared_beta_layout.clone(),
-                )?;
-                shared_beta_layout = Some((input.beta_atoms.clone(), input.beta_outputs.clone()));
-                inputs.push(input);
-                let probe_row = probe_for_row(row)?;
-                if probe_row.len() != p {
-                    return Err(format!(
-                        "contracted SAE row-jet probe for row {row} has length {}; expected {p}",
-                        probe_row.len()
-                    ));
-                }
-                probe.extend_from_slice(&probe_row);
                 let v_t_row = v_t_for_row(row, q)?;
                 if v_t_row.len() != q {
                     return Err(format!(
@@ -843,11 +786,11 @@ impl SaeManifoldTerm {
                 v_beta.extend_from_slice(v_beta_row);
             }
             let tile = crate::gpu_kernels::sae_rowjet::execute_softmax_row_jet_tile_contracted(
-                &inputs,
+                &tile_plan.inputs,
                 1.0 / temperature,
-                plan.path,
+                tile_plan.path,
                 crate::gpu_kernels::sae_rowjet::SaeRowJetContraction::Bilinear {
-                    probe: &probe,
+                    probe: &tile_plan.probe,
                     v_t: &v_t,
                     v_beta: &v_beta,
                 },
@@ -866,9 +809,142 @@ impl SaeManifoldTerm {
                     &tile.beta[local * n_beta..(local + 1) * n_beta],
                 )?;
             }
-            start += tile_rows;
         }
         Ok(())
+    }
+
+    /// #2822 — the state-only half of [`Self::contracted_softmax_bilinear_hvp`]: the
+    /// border channels and, per tile, the planner's path, the row-program inputs and the
+    /// √w-scaled metric-applied residual probe rows. Tiles, rows and every value are built
+    /// as the per-apply form built them, in the same order, so an apply against the plan is
+    /// bit-identical to one that re-derived them. A plan is valid for exactly the state it
+    /// was built from.
+    pub(crate) fn prepare_softmax_row_jets(
+        &self,
+        target: ArrayView2<'_, f64>,
+        cache: &ArrowFactorCache,
+    ) -> Result<PreparedSoftmaxRowJets, String> {
+        if !matches!(self.assignment.mode, AssignmentMode::Softmax { .. }) {
+            return Err("softmax row-jet plan requested for a non-softmax gate".to_string());
+        }
+        let n = self.n_obs();
+        let p = self.output_dim();
+        let k_atoms = self.k_atoms();
+        let second_jets = self.atom_second_jets()?;
+        let border = self.border_channels_for_cache(cache)?;
+        let n_beta = border.len();
+        let row_loss_w = self.row_loss_weights.as_deref();
+        let whitens = self
+            .row_metric
+            .as_ref()
+            .is_some_and(|metric| metric.whitens_likelihood());
+        let mut assignments = Array1::<f64>::zeros(k_atoms);
+        let mut probe_assignments = Array1::<f64>::zeros(k_atoms);
+        let mut decoded = vec![0.0_f64; p];
+        let mut fitted = Array1::<f64>::zeros(p);
+        let mut error = Array1::<f64>::zeros(p);
+        // #2560 — the cgroup-aware budget is a property of the host, not of the
+        // row chunk, so read it once here rather than once per loop turn.
+        let host_budget = crate::manifold::sae_host_in_core_budget_bytes().0;
+        let mut tiles = Vec::new();
+        let mut start = 0usize;
+        while start < n {
+            let q = cache.row_dims[start];
+            let same_shape_rows = cache.row_dims[start..]
+                .iter()
+                .take_while(|&&candidate| candidate == q)
+                .count();
+            let plan = crate::gpu_kernels::sae_rowjet::plan_softmax_row_jets_contracted(
+                same_shape_rows,
+                k_atoms,
+                q,
+                p,
+                n_beta,
+                self.gpu_policy,
+                host_budget,
+            )?;
+            let tile_rows = plan.tile_rows;
+            if tile_rows == 0 {
+                return Err(format!(
+                    "contracted SAE row-jet planner returned an empty tile at nonempty row {start}"
+                ));
+            }
+            let mut inputs = Vec::with_capacity(tile_rows);
+            let mut probe = Vec::with_capacity(tile_rows * p);
+            let mut shared_beta_layout = None;
+            for row in start..start + tile_rows {
+                let vars = self.row_vars_for_cache_row(row, cache)?;
+                self.assignment.try_assignments_row_into(
+                    row,
+                    assignments.as_slice_mut().ok_or_else(|| {
+                        "contracted SAE row-jet assignment scratch is not contiguous".to_string()
+                    })?,
+                )?;
+                let source = ProductionRowProgram {
+                    term: self,
+                    row,
+                    vars: &vars,
+                    assignments: assignments.view(),
+                    second_jets: &second_jets,
+                    border: &border,
+                };
+                let sqrt_row_weight = row_loss_w.map_or(1.0, |weights| weights[row].sqrt());
+                let input = crate::gpu_kernels::sae_rowjet::SaeSoftmaxRowJetInput::from_source(
+                    &source,
+                    crate::gpu_kernels::sae_rowjet::SaeRowGateProgram::Softmax,
+                    sqrt_row_weight,
+                    shared_beta_layout.clone(),
+                )?;
+                shared_beta_layout = Some((input.beta_atoms.clone(), input.beta_outputs.clone()));
+                inputs.push(input);
+                self.assignment.try_assignments_row_into(
+                    row,
+                    probe_assignments.as_slice_mut().ok_or_else(|| {
+                        "apply_exact_hessian_minus_b: assignment scratch is not contiguous"
+                            .to_string()
+                    })?,
+                )?;
+                fitted.fill(0.0);
+                let active_atoms = self
+                    .last_row_layout
+                    .as_ref()
+                    .map(|layout| layout.active_atoms[row].as_slice());
+                for k in 0..k_atoms {
+                    if active_atoms.is_some_and(|active| active.binary_search(&k).is_err()) {
+                        continue;
+                    }
+                    self.atoms[k].fill_decoded_row(row, &mut decoded);
+                    let a_k = probe_assignments[k];
+                    for out_col in 0..p {
+                        fitted[out_col] += a_k * decoded[out_col];
+                    }
+                }
+                let sqrt_row_w = row_loss_w.map_or(1.0, |w| w[row].sqrt());
+                for out_col in 0..p {
+                    error[out_col] = sqrt_row_w * (fitted[out_col] - target[[row, out_col]]);
+                }
+                let probe_row = match self.row_metric.as_ref() {
+                    Some(metric) if whitens => metric.apply_metric_row(row, error.view()),
+                    _ => error.to_vec(),
+                };
+                if probe_row.len() != p {
+                    return Err(format!(
+                        "contracted SAE row-jet probe for row {row} has length {}; expected {p}",
+                        probe_row.len()
+                    ));
+                }
+                probe.extend_from_slice(&probe_row);
+            }
+            tiles.push(PreparedSoftmaxRowJetTile {
+                start,
+                q,
+                path: plan.path,
+                inputs,
+                probe,
+            });
+            start += tile_rows;
+        }
+        Ok(PreparedSoftmaxRowJets { border, tiles })
     }
 
     /// Resident `Γ = tr(H⁻¹ ∂H/∂θ)` majorizer θ-adjoint of a threshold-gate fit

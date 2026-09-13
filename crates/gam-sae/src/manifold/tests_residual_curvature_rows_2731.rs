@@ -295,7 +295,7 @@ fn check_plan_against_per_apply(
         .expect("per-apply form");
     for pass in ["first", "reused"] {
         let planned = term
-            .apply_exact_hessian_minus_b_prepared(rho, target, cache, &v, &prepared, &residual)
+            .apply_exact_hessian_minus_b_prepared(rho, cache, &v, &prepared, &residual)
             .expect("planned form");
         let (count, worst) = differing_entries(&planned, &oracle);
         assert_eq!(
@@ -321,7 +321,7 @@ fn check_plan_against_per_apply(
         };
         values[index] *= 1.0 + 1.0e-6;
         let perturbed = term
-            .apply_exact_hessian_minus_b_prepared(rho, target, cache, &v, &prepared, &mutated)
+            .apply_exact_hessian_minus_b_prepared(rho, cache, &v, &prepared, &mutated)
             .expect("planned form against a perturbed plan");
         let (count, _) = differing_entries(&perturbed, &oracle);
         assert!(
