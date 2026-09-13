@@ -4440,7 +4440,18 @@ impl SaeManifoldTerm {
             // already-certified live state.
             let quasi_laplace_complexity =
                 rank_adjusted_quasi_laplace_complexity(log_det, &d_eff, &ri.n_eff)?;
-            loss.total() + extra_penalty_energy + quasi_laplace_complexity - occam
+            let value = loss.total() + extra_penalty_energy + quasi_laplace_complexity - occam;
+            // #2515 — the dense lane's `[SAE-CRITERION]` terms, on this lane, so a split
+            // between the two routes at one ρ says which term moved.
+            log::info!(
+                "[SAE-CRITERION streaming] V={value:.10e}: loss={:.10e} \
+                 extra_penalty={extra_penalty_energy:.6e} ½log|A|={:.6e} rank_charge={:.6e} \
+                 occam={occam:.6e}",
+                loss.total(),
+                0.5 * log_det,
+                quasi_laplace_complexity - 0.5 * log_det,
+            );
+            value
         };
         Ok((v, loss, converged_cache, evidence_artifacts))
     }
