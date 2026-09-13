@@ -158,14 +158,22 @@ fn qwen_behavior_nats_calibration_matches_exact_kl_2015() {
         if norm_sq < norm_sq_floor {
             continue;
         }
-        let y_near: Array1<f64> = &y * (1.0 - eps);
+        // With `s = ‖y‖²/2` and radial overlap `r² = 1 − s`, a radial step `ε` moves the
+        // decoded radial component `r` by the relative amount `ε·s/r²`. The endpoint
+        // price differs from the chart's dose by about that much and the midpoint price
+        // by about its square over four, a finite-step curvature, not a calibration
+        // defect. At a fixed ε it grows without bound as a row's overlap with the
+        // basepoint vanishes: guarded job 558087 at 3aab85774 read the chart-dose
+        // defect as median 4.704e-7, p95 1.154e-3, max 5.827e-2 (s/r² ≈ 480 on the
+        // worst row), and the few edge rows carrying it took the correlation to
+        // 0.999700. Stepping each row in its own radial scale, `ε·min(1, r²/s)`, leaves
+        // at most `ε²/4` on every row. The KL defect of tokens the row barely covers is
+        // independent of the step, so the KL median cannot improve by this.
+        let s = 0.5 * norm_sq;
+        let row_eps = eps * ((1.0 - s) / s).min(1.0);
+        let y_near: Array1<f64> = &y * (1.0 - row_eps);
         let delta: Array1<f64> = &y - &y_near;
-        // Price the step at its midpoint. With `s = ‖y‖²/2` and radial overlap
-        // `r² = 1 − s`, the endpoint price differs from the chart's dose by about
-        // `ε·s/r²`, a finite-step curvature that grows without bound as a row's
-        // overlap with the basepoint vanishes. The symmetric price leaves about
-        // `(ε·s/r²)²/4`.
-        let y_mid: Array1<f64> = &y * (1.0 - 0.5 * eps);
+        let y_mid: Array1<f64> = &y * (1.0 - 0.5 * row_eps);
         let predicted = SphereTangentEmbedding::predicted_nats(y_mid.view(), delta.view())
             .expect("every embedded row lies inside the chart's hemisphere");
         // decode(y) round-trips to the real distribution; decode(y_near) is a
