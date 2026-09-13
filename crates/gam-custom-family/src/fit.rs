@@ -2723,6 +2723,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                 EvalMode::ValueOnly,
             ) {
                 Ok(eval) if eval.inner_converged && eval.objective.is_finite() => {
+                    crate::warm_start::publish_outer_selected_evaluation(&eval);
                     let inner_beta_hint = Some(Array1::from_iter(
                         eval.warm_start
                             .block_beta
@@ -2870,6 +2871,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                 return Err(EstimationError::CustomFamily(failure));
             }
         };
+        crate::warm_start::publish_outer_selected_evaluation(&eval_result);
         let inner_beta_hint = Some(Array1::from_iter(
             eval_result
                 .warm_start
@@ -2939,6 +2941,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                 EvalMode::ValueOnly,
             ) {
                 Ok(eval) if eval.inner_converged && eval.objective.is_finite() => {
+                    crate::warm_start::publish_outer_selected_evaluation(&eval);
                     outer.warm_cache = Some(eval.warm_start);
                     outer.last_error = None;
                     Ok(eval.objective)

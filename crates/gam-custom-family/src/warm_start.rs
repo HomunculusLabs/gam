@@ -1375,34 +1375,44 @@ pub(crate) struct OuterObjectiveEvalResult {
     pub(crate) inner: BlockwiseInnerResult,
 }
 
-pub(crate) fn outer_eval_result_into_joint_hyper_owned_result(
-    result: OuterObjectiveEvalResult,
-) -> CustomFamilyJointHyperOwnedResult {
-    let OuterObjectiveEvalResult {
-        objective,
-        criterion_components,
-        gradient,
-        outer_hessian,
-        warm_start,
-        inner_converged,
-        hyper_values,
-        ext_mode_response_cols,
-        inner,
-    } = result;
+/// Publish an evaluation's criterion decomposition and its selected coefficient
+/// mode to an in-flight outer-seed probe. A no-op outside a probe evaluation.
+///
+/// Every custom-family outer evaluator that owns a converged inner mode calls
+/// this, so a probe lent at a seed sees the mode the evaluation priced whichever
+/// route (ρ-only or joint-hyper) the fit took.
+pub(crate) fn publish_outer_selected_evaluation(result: &OuterObjectiveEvalResult) {
     gam_solve::estimate::outer_eval_capture::record_outer_criterion_components(
-        objective,
-        criterion_components,
+        result.objective,
+        result.criterion_components,
     );
     let selected_beta = Array1::from_iter(
-        inner
+        result
+            .inner
             .block_states
             .iter()
             .flat_map(|state| state.beta.iter().copied()),
     );
     gam_solve::estimate::outer_eval_capture::record_outer_selected_mode(
         selected_beta,
-        ext_mode_response_cols,
+        result.ext_mode_response_cols.clone(),
     );
+}
+
+pub(crate) fn outer_eval_result_into_joint_hyper_owned_result(
+    result: OuterObjectiveEvalResult,
+) -> CustomFamilyJointHyperOwnedResult {
+    publish_outer_selected_evaluation(&result);
+    let OuterObjectiveEvalResult {
+        objective,
+        gradient,
+        outer_hessian,
+        warm_start,
+        inner_converged,
+        hyper_values,
+        inner,
+        ..
+    } = result;
     let rho = warm_start.rho.clone();
     CustomFamilyJointHyperOwnedResult {
         result: CustomFamilyJointHyperResult {
