@@ -34,6 +34,7 @@ pub mod fisher_rao;
 pub mod gauge;
 pub mod identifiability_audit;
 pub mod indexed_response;
+pub mod jeffreys_arming;
 pub mod joint_penalty;
 mod linear_constraints;
 pub mod log_strength;
