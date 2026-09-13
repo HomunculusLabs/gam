@@ -133,8 +133,11 @@ pub(crate) fn integrate_polynomial_product(left: &[f64], right: &[f64], width: f
 ///
 /// Raw coefficients are monotone I-spline coefficients. The deviation
 /// derivative `w'(x)` is a nonnegative quadratic B-spline combination, so
-/// `w(x)` is a cubic I-spline combination with `C2` continuity at knots and
-/// constant tails. Zero coefficients still mean the identity map. The fitted
+/// `w(x)` is a cubic I-spline combination with `C2` continuity at interior
+/// knots and constant tails. The knot vector is clamped, and at a support
+/// endpoint `w'` keeps its one-sided interior value while the tail is flat, so
+/// `w` is only `C0` there: `w'`, `w''` and `w'''` all jump at the two support
+/// endpoints. Zero coefficients still mean the identity map. The fitted
 /// coefficients live in the configured moment-anchor nullspace and are mapped
 /// back to these raw coefficients for monotonicity.
 ///

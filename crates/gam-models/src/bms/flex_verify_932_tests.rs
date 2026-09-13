@@ -565,13 +565,16 @@ fn production_flex_grad_hess_matches_independent_fd_link_dev_wide_deviation_932(
 /// CONSTANT TAILS (u = a + b·z beyond the knot span [-2.45, 2.55] on both
 /// sides). The issue conjectured the fixed-domain `(a,b)×(a,b)` calibration
 /// second derivatives drop a moving-boundary (Leibniz) flux at the
-/// link-support edges; under the C2 constant-tail I-spline basis (w, w', w''
-/// all continuous through the support knots, tails exactly constant) every
-/// interior flux cancels across the shared edge and the support-edge flux is
-/// identically zero — so the fixed-domain assembly is exact, and production
-/// grad/Hessian must match the independent FD with tail-resident nodes too.
-/// A missing flux term would fail this at the ~1e-7 gradient / ~1e-5 Hessian
-/// tolerances (the June measurement of the gap was ~4e-7 relative).
+/// link-support edges. This fixture's latent measure is empirical: the
+/// calibration sums the index at fixed grid nodes, no cell edge moves, and the
+/// fixed-domain assembly is exact, so production grad/Hessian must match the
+/// independent FD with tail-resident nodes too. The link deviation is only C0
+/// at its support edges (clamped knots, constant tails), so under the
+/// standard-normal measure the moving edge does carry a term:
+/// `standard_normal_flex_crossing_second_partials` adds it, and
+/// `standard_normal_flex_calibration_partials_differentiate_along_intercept_and_slope`
+/// checks it. A missing term here would fail at the ~1e-7 gradient / ~1e-5
+/// Hessian tolerances (the June measurement of the gap was ~4e-7 relative).
 #[test]
 fn production_flex_grad_hess_matches_independent_fd_link_dev_constant_tail_2341() {
     run_production_gate_at(false, 0.2, 2.2, 0.06);
