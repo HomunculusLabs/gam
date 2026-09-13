@@ -3283,7 +3283,8 @@ mod survival_payload_decline_tests {
             None,
             FrailtySpec::None,
         )
-        .expect_err("a declined fit stores a mode, not a posterior mean, and must not be saved");
+        .err()
+        .expect("a declined fit stores a mode, not a posterior mean, and must not be saved");
         for needle in [
             "survival saved-model assembly",
             "posterior-mean",
