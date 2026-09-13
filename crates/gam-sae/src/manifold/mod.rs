@@ -173,6 +173,7 @@ mod behavior_isometry;
 mod certificate;
 mod chart_atlas;
 mod chart_degeneracy;
+mod chart_gauges;
 mod construction;
 mod construction_ard;
 mod construction_arrow_schur_assembly;
