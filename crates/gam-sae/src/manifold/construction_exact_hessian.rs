@@ -3209,6 +3209,37 @@ impl SaeManifoldTerm {
             "joint",
             Some(saddle_directions),
         )?;
+        // #2267 — the priced rank stratum, once per evaluation. Trace job 578389 read
+        // sae_manifold_euclidean_k2_terminates price its incumbent at −3.591e3 while trial
+        // points 0.125, 0.0625 and 0.03125 away priced +5.468e2, +5.536e2 and +5.570e2,
+        // and the inner objective moved continuously (−45.10, −38.46, −35.14 → −31.81).
+        // A jump that size over a continuous state is a change in which directions
+        // ½log|A| prices: an in-band direction adds nothing, a retained one adds ½·ln λ.
+        let mut retained = 0usize;
+        let mut in_band = 0usize;
+        let mut min_retained_over_floor = f64::INFINITY;
+        let mut max_band_over_floor = 0.0_f64;
+        for index in 0..joint.eigenvalues.len() {
+            let magnitude = joint.eigenvalues[index].abs();
+            let floor = joint.rank_floor(index);
+            if magnitude <= floor {
+                in_band += 1;
+                max_band_over_floor = max_band_over_floor.max(magnitude / floor);
+            } else if joint.eigenvalues[index] > 0.0 {
+                retained += 1;
+                min_retained_over_floor = min_retained_over_floor.min(magnitude / floor);
+            }
+        }
+        log::info!(
+            "[SAE-EXACT-DENSE] priced: dim={} retained={retained} in_band={in_band} \
+             negative={} ½log|A|={:.6e} min retained |λ|/floor={:.3e} \
+             max in-band |λ|/floor={:.3e}",
+            joint.eigenvalues.len(),
+            joint_pricing.negative.len(),
+            0.5 * joint_pricing.log_det,
+            min_retained_over_floor,
+            max_band_over_floor,
+        );
         Ok(joint_pricing.log_det)
     }
 
