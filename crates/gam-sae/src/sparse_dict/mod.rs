@@ -76,9 +76,8 @@ pub use block_stream::{
 };
 pub use codes::SparseCode;
 pub use coordinate::{
-    BlockCoordinateReport, BlockMeasureCoordinateReport, FiringCoordinate, MeasureSpikeCoordinate,
-    MeasureValuedCode, block_route_firing_coordinates,
-    harmonic_measure_coordinates, harmonic_route_firing_coordinates, recover_measure_from_code,
+    BlockCoordinateReport, FiringCoordinate, MeasureSpikeCoordinate, block_route_firing_coordinates,
+    harmonic_route_firing_coordinates, recover_measure_from_code,
 };
 pub use scoring::{ScoreRoutePath, ScoreRouteResult, ScoreRouteStats, TileScorer, top_s_online};
 #[cfg(target_os = "linux")]

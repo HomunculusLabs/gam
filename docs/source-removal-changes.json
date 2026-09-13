@@ -9221,5 +9221,17 @@
     ],
     "reason": "#1082, lead ruling (B). PREDICTIVE_MASS_DEFECT_TOLERANCE was a hand-set 5e-2 bar that refused a whole prediction block when one row's missing predictive mass exceeded it (on #29's penguins fit, 1 of 114 rows at 5.81e-2 refused every mean). Decisions are now per row and derived from the request: every row publishes its renormalized mean with its measured mass_defect, and a (1 − α) interval declines, typed as MultinomialIntervalDecline::MassDefectExceedsAlpha, exactly where that row's defect exceeds α. The constant has no remaining use.",
     "evidence": "At bfb09a938, git grep -n PREDICTIVE_MASS_DEFECT_TOLERANCE finds it only in crates/gam-models/src/multinomial_predictive.rs (the declaration, the module doc and the block refusal) and one doc link in crates/gam-models/src/multinomial.rs, all removed in the same commit. Pin a_row_whose_missing_mass_exceeds_alpha_declines_only_its_own_interval_1082 exercises the per-row replacement. Guarded check job 646273 (lane sw0c, 0b19d487f plus l2.patch): cargo check --keep-going --workspace --all-targets and cargo check -p gam-pyffi --all-targets passed, and the gam-models mixed-block pin a_negative_variance_row_declines_only_its_own_spread_1082 passed (/scratch.global/sauer354/pool/perf1082/check13.646273.log)."
+  },
+  {
+    "base": "8c00ee3bb2a8bf517255e9673fe7cface5919ece",
+    "items": [
+      "crates/gam-sae/src/identifiability.rs:struct:AtomTransportLadderReport",
+      "crates/gam-sae/src/sparse_dict/coordinate.rs:fn:collect_firings",
+      "crates/gam-sae/src/sparse_dict/coordinate.rs:fn:harmonic_measure_coordinates",
+      "crates/gam-sae/src/sparse_dict/coordinate.rs:struct:BlockMeasureCoordinateReport",
+      "crates/gam-sae/src/sparse_dict/coordinate.rs:struct:MeasureValuedCode"
+    ],
+    "reason": "#2899 public API sweep of gam-sae (prune-api-d): harmonic_measure_coordinates had no caller, and it was the only producer of BlockMeasureCoordinateReport, whose firings were the only use of MeasureValuedCode, and the only caller of the private collect_firings; AtomTransportLadderReport was never constructed. All five are deleted, with the sparse_dict re-export narrowed, the TransportLadderReport import only the deleted struct read, and the doc text that named the deleted readout.",
+    "evidence": "At the base, git grep -w names harmonic_measure_coordinates only in its declaration, its error strings, the sparse_dict re-export, the recover_measure_from_code doc link and the binding_multiplicity example module doc; BlockMeasureCoordinateReport and MeasureValuedCode only in their declarations, that function, each other and the re-export; AtomTransportLadderReport only in its declaration and a docs/source-removal-changes.json evidence string. Receipt: guarded job 651939 (agsmall, lane sw0f, node acn77) at 5582f1706 with\nHEAD==PIN, dirty=0 and the 13 files of the d1, n12c and s35 slices overlaid:\ncargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0\n(130 s) and cargo check -p gam-pyffi --lib exited 0 (86 s), with no error line.\nLog /scratch.global/sauer354/pool/prune-api-d/combo17b.651939.log. The first\npass on this overlay (649104) stopped at one unused BlockSparseFit import in\ncoordinate.rs, which the d1 slice removes."
   }
 ]

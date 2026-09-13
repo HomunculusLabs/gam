@@ -3931,5 +3931,13 @@
     },
     "reason": "#2714, SPEC rule 25: the latent survival and latent binary offset_channel_residuals fed only the nested per-probe baseline BFGS this commit deletes, now that both hazard loadings select the baseline chart together with rho on the one LAML criterion.",
     "evidence": "At the base, the two latent declarations are called only at the fit_latent_survival_terms and fit_latent_binary_terms result assemblies, whose baseline_offset_residuals field only the nested latent baseline closure in materialize/survival.rs reads; the closure and the field are deleted in this commit."
+  },
+  {
+    "base": "8c00ee3bb2a8bf517255e9673fe7cface5919ece",
+    "removed": {
+      "crates/gam-sae/src/sparse_dict/coordinate.rs::harmonic_measure_coordinates": 1
+    },
+    "reason": "#2899 public API sweep of gam-sae (prune-api-d): the uncalled sparse_dict::harmonic_measure_coordinates readout is deleted with the report types only it built.",
+    "evidence": "At the base, git grep -w finds no call of harmonic_measure_coordinates in crates, src, tests, examples, bench or gamfit. It is the only pub fn this change removes; the removed map was derived by reading the change, not by running the script. Receipt: guarded job 651939 (agsmall, lane sw0f, node acn77) at 5582f1706 with\nHEAD==PIN, dirty=0 and the 13 files of the d1, n12c and s35 slices overlaid:\ncargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0\n(130 s) and cargo check -p gam-pyffi --lib exited 0 (86 s), with no error line.\nLog /scratch.global/sauer354/pool/prune-api-d/combo17b.651939.log. The first\npass on this overlay (649104) stopped at one unused BlockSparseFit import in\ncoordinate.rs, which the d1 slice removes."
   }
 ]

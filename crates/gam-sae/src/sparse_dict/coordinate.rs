@@ -3,7 +3,7 @@
 //!
 //! # What this reads
 //!
-//! A [`BlockSparseFit`] stores, per firing, the signed within-block code
+//! A [`BlockSparseFit`](super::block::BlockSparseFit) stores, per firing, the signed within-block code
 //! `z_g ∈ ℝᵇ` (the `codes[N,k,b]` field) alongside the block it fired on
 //! (`blocks[N,k]`) and its group ℓ₂ gate `‖z_g‖₂` (`gates[N,k]`). When a block's
 //! `b`-dimensional subspace hosts a *circle* feature, that code is the read-out
@@ -128,7 +128,6 @@
 //! For `H = 1` this collapses to the `b = 2` formula: at the peak
 //! `f''(t̂) = −(2π)² ‖z‖`, so `Var(t̂) = σ²(2π)² / (2π)⁴‖z‖² = σ²/(2π‖z‖)²`.
 
-use super::block::BlockSparseFit;
 use crate::dual_certificate::harmonic_dual_birth_eta;
 use crate::super_resolution::{recover_spikes, separation_limit};
 use ndarray::{ArrayView2, ArrayView3};
@@ -181,35 +180,6 @@ pub struct MeasureSpikeCoordinate {
     pub coordinate: f64,
     /// Delta-method standard error of [`Self::coordinate`].
     pub coordinate_se: f64,
-}
-
-/// Variable-length code for one fired harmonic block in one row.
-#[derive(Clone, Debug)]
-pub struct MeasureValuedCode {
-    /// Block this measure lives on.
-    pub block: usize,
-    /// Row (token) index.
-    pub row: usize,
-    /// Point masses on the block's circle. A live firing always has at least one.
-    pub spikes: Vec<MeasureSpikeCoordinate>,
-    /// Dual-polynomial birth ratio for the single-spike residual. Values above
-    /// one are the threshold-free BLASSO multiplicity trigger.
-    pub dual_eta: f64,
-    /// Whether matrix-pencil super-resolution supplied the returned support.
-    pub used_super_resolution: bool,
-}
-
-/// Measure-valued readout for a block: one variable-length code per firing.
-#[derive(Clone, Debug)]
-pub struct BlockMeasureCoordinateReport {
-    /// Estimated isotropic per-component coefficient noise.
-    pub sigma_hat: f64,
-    /// Mean firing radius in the stored block-code coordinates.
-    pub mean_radius: f64,
-    /// Number of firings on this block.
-    pub n_firings: usize,
-    /// One measure-valued code per firing, in ascending row order.
-    pub firings: Vec<MeasureValuedCode>,
 }
 
 /// SD of the uniform distribution on the unit-circumference phase `t ∈ [0,1)`:
@@ -283,26 +253,6 @@ fn collect_route_firings(
         }
     }
     Ok(out)
-}
-
-fn collect_firings(
-    fit: &BlockSparseFit,
-    block: usize,
-    block_size: usize,
-) -> Result<Vec<(usize, Vec<f64>)>, String> {
-    if block_size == 0 || fit.decoder.nrows() % block_size != 0 {
-        return Err(format!(
-            "coordinate fit decoder rows {} not divisible by block_size {block_size}",
-            fit.decoder.nrows()
-        ));
-    }
-    collect_route_firings(
-        fit.blocks.view(),
-        fit.codes.view(),
-        fit.decoder.nrows() / block_size,
-        block,
-        block_size,
-    )
 }
 
 /// Mean radius `r̄` and unbiased radial-scatter noise `σ̂` from the firing codes.
@@ -521,11 +471,10 @@ fn maybe_super_resolve(z: &[f64], sigma: f64) -> (Vec<MeasureSpikeCoordinate>, f
 
 /// Gated multi-spike recovery for one within-block harmonic code `z ∈ ℝ^{2H}`.
 ///
-/// This is the per-firing decision that [`harmonic_measure_coordinates`] applies
-/// to every live block/row, exposed for a *single* code so a caller holding raw
+/// This is the per-firing decision for a *single* code, so a caller holding raw
 /// harmonic coefficients (e.g. an activation projected onto a fitted circle
 /// atom's `2H`-frame, or a controlled planted fixture) can recover the point
-/// masses without assembling a whole [`BlockSparseFit`]. It runs the single-spike
+/// masses without assembling a whole [`BlockSparseFit`](super::block::BlockSparseFit). It runs the single-spike
 /// matched-filter path, and only escalates to matrix-pencil super-resolution when
 /// the BLASSO dual birth ratio `η > 1` or the profile/residual is multi-modal —
 /// accepting the multi-spike support only when it reduces the coefficient
@@ -953,52 +902,6 @@ pub fn harmonic_route_firing_coordinates(
         mean_radius,
         n_firings: firings.len(),
         firings: coords,
-    })
-}
-
-/// Measure-valued readout for a harmonic block (`b = 2H`). Each live
-/// `(row, block)` firing returns one or more point masses
-/// `(amplitude, coordinate, coordinate_se)`. The single-spike path is retained
-/// unless the single-spike residual has a BLASSO dual birth ratio `η > 1` or the
-/// harmonic profile/residual has multiple separated modes; a matrix-pencil
-/// recovery is accepted only when it reduces the harmonic coefficient residual.
-pub fn harmonic_measure_coordinates(
-    fit: &BlockSparseFit,
-    block: usize,
-) -> Result<BlockMeasureCoordinateReport, String> {
-    let b = fit.block_size;
-    if b < 2 || b % 2 != 0 {
-        return Err(format!(
-            "harmonic_measure_coordinates: harmonic readout requires block_size b = 2H (even, \
-             >= 2), got b = {b}"
-        ));
-    }
-    let g_total = fit.decoder.nrows() / b;
-    if block >= g_total {
-        return Err(format!(
-            "harmonic_measure_coordinates: block {block} out of range 0..{g_total}"
-        ));
-    }
-
-    let firings = collect_firings(fit, block, b)?;
-    let (mean_radius, sigma_hat) = radius_and_sigma(&firings);
-    let mut measures = Vec::with_capacity(firings.len());
-    for (row, z) in &firings {
-        let (spikes, dual_eta, used_super_resolution) = maybe_super_resolve(z, sigma_hat);
-        measures.push(MeasureValuedCode {
-            block,
-            row: *row,
-            spikes,
-            dual_eta,
-            used_super_resolution,
-        });
-    }
-
-    Ok(BlockMeasureCoordinateReport {
-        sigma_hat,
-        mean_radius,
-        n_firings: firings.len(),
-        firings: measures,
     })
 }
 

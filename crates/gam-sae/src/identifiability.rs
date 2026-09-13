@@ -86,7 +86,6 @@ pub use frame_curvature::{
     StreamedLambdaMax, TriangularRootAccumulator, streamed_lambda_max,
 };
 
-use crate::inference::layer_transport::TransportLadderReport;
 use crate::inference::riesz::{RieszInput, SmoothFunctional, debias_with_dense_hessian};
 use faer::Side;
 use gam_linalg::faer_ndarray::{FaerCholesky, FaerEigh, FaerSvd, default_rrqr_rank_alpha};
@@ -3360,14 +3359,6 @@ fn residual_gauge_inner(
         frame_inner_rotation: None,
         summary,
     })
-}
-
-/// One atom's fitted inter-layer transport ladder.
-#[derive(Debug, Clone)]
-pub struct AtomTransportLadderReport {
-    pub atom_index: usize,
-    pub atom_name: String,
-    pub report: TransportLadderReport,
 }
 
 /// #1097 penalty-debiased smooth-functional POINT summaries for one atom's

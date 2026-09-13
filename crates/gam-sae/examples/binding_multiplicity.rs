@@ -5,8 +5,7 @@
 //! is a sum of `m` point masses on one harmonic-circle atom. This example
 //! validates, end-to-end and against known ground truth, that the matrix-pencil
 //! recovery ([`gam_sae::super_resolution::recover_spikes`]) plus the production
-//! gated readout ([`gam_sae::sparse_dict::recover_measure_from_code`], the same
-//! decision [`harmonic_measure_coordinates`] applies per firing) recover the
+//! gated readout ([`gam_sae::sparse_dict::recover_measure_from_code`]) recover the
 //! *number* of spikes — the multiplicity — from the superposed Fourier
 //! coefficients the block stores.
 //!
