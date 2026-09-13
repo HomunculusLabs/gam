@@ -120,7 +120,7 @@ impl WitnessCover {
                 }
             }
         }
-        enumerate_full_nerve(count, &|simplex| self.co_fires(simplex), &adjacency, None)
+        enumerate_full_nerve(count, &|simplex| self.co_fires(simplex), &adjacency)
             .expect("witness nerve must enumerate")
     }
 
@@ -160,7 +160,6 @@ fn membership_nerve(atlas: &LocalAtlas) -> SimplexInventory {
             !shared.is_empty()
         },
         &adjacency,
-        None,
     )
     .expect("membership nerve must enumerate")
 }

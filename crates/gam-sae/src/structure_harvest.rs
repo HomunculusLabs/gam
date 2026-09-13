@@ -9924,7 +9924,7 @@ mod tests_atlas_prior_2280 {
             }
             !shared.is_empty()
         };
-        let inventory = enumerate_full_nerve(chart_count, &nonempty, &adjacency, None)
+        let inventory = enumerate_full_nerve(chart_count, &nonempty, &adjacency)
             .expect("nerve enumeration");
         let betti = compute_betti(
             &inventory.vertices,

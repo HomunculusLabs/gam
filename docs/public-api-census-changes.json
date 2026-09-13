@@ -2858,5 +2858,16 @@
     },
     "reason": "#2899 public API sweep of gam-models and gam-sae (prune-api-d): SurvivalLocationScaleChannelHessian is never constructed and CoordinateMapFit::harmonic_content has no caller, so their public functions are deleted.",
     "evidence": "At e83486847, git grep -n -w names SurvivalLocationScaleChannelHessian only in its own file, and no code calls CoordinateMapFit::harmonic_content. The removed map is public_api_census.py's census difference over this change, computed on MSI."
+  },
+  {
+    "base": "5fda3ce8ba8df2183e68adb0d79dead114cbc09f",
+    "removed": {
+      "crates/gam-sae/src/inference/atlas_nerve.rs::charts": 1,
+      "crates/gam-sae/src/inference/atlas_nerve.rs::new": 2,
+      "crates/gam-sae/src/inference/atlas_nerve.rs::witness_chart": 1,
+      "crates/gam-sae/src/manifold/graph_atom.rs::certified": 1
+    },
+    "reason": "#2899 public API sweep of gam-sae (prune-api-d): under the lead's good-cover ruling, the test-only good-cover certificate types and the named-compression constructor only their branch used are deleted, along with the good_cover parameter.",
+    "evidence": "At 349c8c056, git grep -n -w finds ConvexIntersectionProof::new and AtlasGoodCoverCertificate::new constructed only in the atlas_nerve.rs unit test, every production build_atlas_nerve call passing None for good_cover, and GraphCompressionReport::certified called only by that dead branch. The removed map is public_api_census.py's census difference over this change, computed on MSI."
   }
 ]

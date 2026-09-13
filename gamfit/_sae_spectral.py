@@ -849,7 +849,6 @@ class AtlasNerveDiagram:
     n_tetrahedra: int | None = None
     nerve_euler_characteristic: int | None = None
     certified_euler_characteristic: int | None = None
-    good_cover_certified: bool | None = None
     holonomy_status: str | None = None
     holonomy_provenance: str | None = None
     holonomy_refusal_codes: list[str] | None = None
@@ -929,7 +928,6 @@ def atlas_nerve_diagram(
             if payload["certified_euler_characteristic"] is None
             else int(payload["certified_euler_characteristic"])
         ),
-        good_cover_certified=bool(payload["good_cover_certified"]),
         holonomy_status=str(payload["holonomy_status"]),
         holonomy_provenance=(
             None

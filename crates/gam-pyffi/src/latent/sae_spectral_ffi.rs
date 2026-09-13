@@ -648,7 +648,6 @@ fn atlas_nerve_dict<'py>(
         Some(value) => out.set_item("certified_euler_characteristic", value.value())?,
         None => out.set_item("certified_euler_characteristic", py.None())?,
     }
-    out.set_item("good_cover_certified", diagram.good_cover_certified)?;
     match diagram.holonomy_certificate.as_ref() {
         Some(certificate) => out.set_item("holonomy_provenance", certificate.provenance_label())?,
         None => out.set_item("holonomy_provenance", py.None())?,

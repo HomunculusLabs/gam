@@ -577,7 +577,7 @@ pub fn observe_atlas_topology(atlas: &LocalAtlas) -> Result<AtlasTopologyReadout
         !shared.is_empty()
     };
 
-    let inventory = enumerate_full_nerve(chart_count, &nonempty, &adjacency, None)?;
+    let inventory = enumerate_full_nerve(chart_count, &nonempty, &adjacency)?;
     let betti = compute_betti(
         &inventory.vertices,
         &inventory.edges,

@@ -34,21 +34,6 @@ pub struct GraphCompressionReport {
 }
 
 impl GraphCompressionReport {
-    pub fn certified(
-        kind: GraphCompressionKind,
-        name: &'static str,
-        generic_edge_bits: f64,
-        named_bits: f64,
-    ) -> Self {
-        Self {
-            kind,
-            name,
-            generic_edge_bits,
-            named_bits,
-            bits_saved: generic_edge_bits - named_bits,
-        }
-    }
-
     pub fn unnamed(generic_edge_bits: f64) -> Self {
         Self {
             kind: GraphCompressionKind::Graph,

@@ -25,8 +25,7 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
 ///
 /// This says only whether the observed support count is at least the number of
 /// charts.  It is useful for spotting an obviously under-sampled atlas, but is
-/// neither a contractibility test nor a Nerve-theorem premise.  Only an
-/// [`AtlasGoodCoverCertificate`] establishes the good-cover precondition.
+/// neither a contractibility test nor a Nerve-theorem premise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AtlasCoveringSide {
     BelowCoveringNumber,
@@ -179,92 +178,6 @@ pub struct AtlasNerveEdge {
     pub filtration: f64,
 }
 
-/// A structural proof that one non-empty chart intersection is contractible.
-///
-/// The proof says that the complete intersection named by `charts` is a convex
-/// subset of `witness_chart`'s fitted local coordinate domain.  Convexity gives
-/// an explicit straight-line contraction, so this is a theorem witness rather
-/// than a sample-count heuristic.  The atlas builder that owns the local patch
-/// geometry is responsible for emitting these proofs; the nerve verifies that
-/// there is exactly one proof for every non-empty finite intersection it finds.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConvexIntersectionProof {
-    charts: Vec<usize>,
-    witness_chart: usize,
-}
-
-impl ConvexIntersectionProof {
-    #[must_use = "intersection proof construction errors must be handled"]
-    pub fn new(charts: Vec<usize>, witness_chart: usize) -> Result<Self, String> {
-        if charts.is_empty() {
-            return Err("a contractible-intersection proof cannot name an empty simplex".into());
-        }
-        if charts.windows(2).any(|pair| pair[0] >= pair[1]) {
-            return Err(
-                "contractible-intersection chart indices must be strictly increasing".into(),
-            );
-        }
-        if charts.binary_search(&witness_chart).is_err() {
-            return Err(format!(
-                "convexity witness chart {witness_chart} is not in intersection {charts:?}"
-            ));
-        }
-        Ok(Self {
-            charts,
-            witness_chart,
-        })
-    }
-
-    #[must_use]
-    pub fn charts(&self) -> &[usize] {
-        &self.charts
-    }
-
-    #[must_use]
-    pub fn witness_chart(&self) -> usize {
-        self.witness_chart
-    }
-}
-
-/// Explicit good-cover proof for one fixed atlas.
-///
-/// A good cover requires *every* non-empty finite intersection to be
-/// contractible.  Consequently this object is deliberately exhaustive: its
-/// proof keys must equal the full nerve, not merely its graph or its
-/// intersections through some chosen dimension.  [`build_atlas_nerve`] rejects
-/// both missing and surplus keys.  Merely observing at least as many rows as
-/// charts can never construct this certificate.
-#[derive(Clone, Debug)]
-pub struct AtlasGoodCoverCertificate {
-    chart_count: usize,
-    proofs: BTreeMap<Vec<usize>, ConvexIntersectionProof>,
-}
-
-impl AtlasGoodCoverCertificate {
-    #[must_use = "good-cover certificate construction errors must be handled"]
-    pub fn new(chart_count: usize, proofs: Vec<ConvexIntersectionProof>) -> Result<Self, String> {
-        let mut indexed = BTreeMap::new();
-        for proof in proofs {
-            if proof.charts.iter().any(|&chart| chart >= chart_count) {
-                return Err(format!(
-                    "good-cover proof {:?} is outside the {chart_count}-chart atlas",
-                    proof.charts
-                ));
-            }
-            let key = proof.charts.clone();
-            if indexed.insert(key.clone(), proof).is_some() {
-                return Err(format!(
-                    "duplicate contractibility proof for chart intersection {key:?}"
-                ));
-            }
-        }
-        Ok(Self {
-            chart_count,
-            proofs: indexed,
-        })
-    }
-}
-
 /// Filtered nerve diagram and its exact Betti readout.
 #[derive(Clone, Debug)]
 pub struct AtlasNerveDiagram {
@@ -279,9 +192,6 @@ pub struct AtlasNerveDiagram {
     pub simplex_counts: Vec<usize>,
     /// Full alternating simplex sum `N1 - N2 + N3 - ...`.
     pub euler_characteristic: i128,
-    /// Whether every non-empty intersection was matched to an explicit
-    /// contractibility proof.
-    pub good_cover_certified: bool,
     /// The authoritative holonomy proof, including statistical refusals and
     /// every scalar needed to audit a noisy decision.
     pub holonomy_certificate: Option<AtlasHolonomyCertificate>,
@@ -313,8 +223,9 @@ impl AtlasNerveDiagram {
             .and_then(AtlasHolonomyCertificate::certified_euler_characteristic)
     }
 
-    /// Certified named compression of the atlas nerve. The name is a codebook
-    /// compression of the exact nerve homology, never an input topology choice.
+    /// Graph compression of the atlas nerve: the generic codebook cost of its
+    /// admitted simplices. Naming a surface needs the Nerve theorem's good-cover
+    /// premise, which this diagram does not carry, so the report is unnamed.
     pub fn certified_compression(&self) -> GraphCompressionReport {
         let generic = self
             .simplex_counts
@@ -324,50 +235,7 @@ impl AtlasNerveDiagram {
                 simplex_selection_bits(self.n_vertices, dimension + 1, present)
             })
             .sum();
-        let curvature_agrees = match self.holonomy_certificate.as_ref() {
-            // The nerve theorem makes the combinatorial Euler characteristic
-            // exact once the exhaustive good-cover proof is present. An exact
-            // transition cocycle therefore needs no statistical curvature
-            // surrogate.
-            Some(AtlasHolonomyCertificate::ExactAnalytic(_)) => true,
-            // A fitted PCA cocycle is a statistical path: promotion additionally
-            // requires its independently certified Gauss--Bonnet integer to
-            // agree with the exact nerve count. Missing/refused/mismatched
-            // curvature evidence is not a negative result and cannot promote.
-            Some(AtlasHolonomyCertificate::GaussianPcaPlugin(_)) => self
-                .certified_gauss_bonnet_euler_characteristic()
-                .is_some_and(|chi| i128::from(chi.value()) == self.euler_characteristic),
-            None => false,
-        };
-        let Some(orientability) = self.certified_orientability() else {
-            return GraphCompressionReport::unnamed(generic);
-        };
-        if !self.good_cover_certified || !curvature_agrees {
-            return GraphCompressionReport::unnamed(generic);
-        }
-        let log_vertices = (self.n_vertices.max(2) as f64).log2();
-        let named = surface_from_invariants(self.betti, self.euler_characteristic, orientability);
-        if let Some((kind, name)) = named {
-            let named_bits = surface_name_bits(kind, log_vertices);
-            let report = GraphCompressionReport::certified(kind, name, generic, named_bits);
-            if report.bits_saved > 0.0 {
-                return report;
-            }
-        }
         GraphCompressionReport::unnamed(generic)
-    }
-}
-
-/// MDL cost of naming a certified surface: one vertex address per independent
-/// generator of its fundamental group (two for the handle/twist pairs, one for
-/// the simply-connected forms).
-fn surface_name_bits(kind: GraphCompressionKind, log_vertices: f64) -> f64 {
-    match kind {
-        GraphCompressionKind::Torus
-        | GraphCompressionKind::Cylinder
-        | GraphCompressionKind::MobiusStrip
-        | GraphCompressionKind::KleinBottle => 2.0 * log_vertices,
-        _ => log_vertices,
     }
 }
 
@@ -376,11 +244,8 @@ fn surface_name_bits(kind: GraphCompressionKind, log_vertices: f64) -> f64 {
 ///
 /// `(χ, orientability, boundary)` is a COMPLETE invariant of a compact surface,
 /// so this is a table lookup on measured invariants — not a search over a
-/// candidate menu. It is the single surface table in the crate: the certified
-/// nerve stack reaches it through [`AtlasNerveDiagram::certified_compression`],
-/// and the observed local-chart stack reaches it through
-/// `manifold::atlas_topology`, so the two can never drift apart on what a given
-/// invariant signature is called.
+/// candidate menu. It is the single surface table in the crate; the observed
+/// local-chart stack reaches it through `manifold::atlas_topology`.
 ///
 /// It deliberately does NOT cover the one-manifolds. A circle and a cylinder are
 /// homotopy equivalent, hence share `(b₀, b₁, b₂, χ) = (1, 1, 0, 0)` with a
@@ -772,7 +637,6 @@ pub(crate) struct SimplexInventory {
 fn record_simplex(
     simplex: &[usize],
     inventory: &mut SimplexInventory,
-    unmatched_proofs: &mut Option<BTreeSet<Vec<usize>>>,
 ) -> Result<(), String> {
     let cardinality = simplex.len();
     inventory.counts[cardinality - 1] = inventory.counts[cardinality - 1]
@@ -788,13 +652,6 @@ fn record_simplex(
     }
     .ok_or_else(|| "atlas nerve Euler characteristic overflowed i128".to_string())?;
 
-    if let Some(unmatched) = unmatched_proofs {
-        if !unmatched.remove(simplex) {
-            return Err(format!(
-                "good-cover certificate has no contractibility proof for non-empty intersection {simplex:?}"
-            ));
-        }
-    }
     let roster = match cardinality {
         1 => Some(&mut inventory.vertices),
         2 => Some(&mut inventory.edges),
@@ -817,13 +674,12 @@ fn enumerate_simplices_from(
     prefix: &mut Vec<usize>,
     candidates: &[usize],
     inventory: &mut SimplexInventory,
-    unmatched_proofs: &mut Option<BTreeSet<Vec<usize>>>,
 ) -> Result<(), String> {
     for (position, &vertex) in candidates.iter().enumerate() {
         prefix.push(vertex);
         let nonempty = prefix.len() == 1 || nonempty_intersection(prefix);
         if nonempty {
-            record_simplex(prefix, inventory, unmatched_proofs)?;
+            record_simplex(prefix, inventory)?;
             let next: Vec<usize> = candidates[(position + 1)..]
                 .iter()
                 .copied()
@@ -835,7 +691,6 @@ fn enumerate_simplices_from(
                 prefix,
                 &next,
                 inventory,
-                unmatched_proofs,
             )?;
         }
         prefix.pop();
@@ -863,18 +718,7 @@ pub(crate) fn enumerate_full_nerve(
     chart_count: usize,
     nonempty_intersection: &dyn Fn(&[usize]) -> bool,
     adjacency: &[BTreeSet<usize>],
-    certificate: Option<&AtlasGoodCoverCertificate>,
 ) -> Result<SimplexInventory, String> {
-    if let Some(certificate) = certificate {
-        if certificate.chart_count != chart_count {
-            return Err(format!(
-                "good-cover certificate is for {} charts but the atlas has {chart_count}",
-                certificate.chart_count,
-            ));
-        }
-    }
-    let mut unmatched_proofs =
-        certificate.map(|certificate| certificate.proofs.keys().cloned().collect::<BTreeSet<_>>());
     let mut inventory = SimplexInventory {
         counts: vec![0; chart_count],
         vertices: Vec::with_capacity(chart_count),
@@ -890,15 +734,7 @@ pub(crate) fn enumerate_full_nerve(
         &mut Vec::new(),
         &candidates,
         &mut inventory,
-        &mut unmatched_proofs,
     )?;
-    if let Some(unmatched) = unmatched_proofs {
-        if !unmatched.is_empty() {
-            return Err(format!(
-                "good-cover certificate names intersections absent from the nerve: {unmatched:?}"
-            ));
-        }
-    }
     Ok(inventory)
 }
 
@@ -942,19 +778,11 @@ fn validate_holonomy_certificate(
 pub fn build_atlas_nerve(
     charts: &[AtlasChart],
     transfer_gates: &[AtlasTransferGate],
-    good_cover: Option<&AtlasGoodCoverCertificate>,
     holonomy_certificate: Option<AtlasHolonomyCertificate>,
 ) -> Result<AtlasNerveDiagram, String> {
     let row_count = validate_charts(charts)?;
     let n = charts.len();
     if n == 0 {
-        if good_cover.is_some_and(|certificate| {
-            certificate.chart_count != 0 || !certificate.proofs.is_empty()
-        }) {
-            return Err(
-                "non-empty good-cover certificate cannot certify an empty nerve".to_string(),
-            );
-        }
         validate_holonomy_certificate(0, &BTreeSet::new(), holonomy_certificate.as_ref())?;
         return Ok(AtlasNerveDiagram {
             betti: BettiSignature {
@@ -969,7 +797,6 @@ pub fn build_atlas_nerve(
             n_tetrahedra: 0,
             simplex_counts: Vec::new(),
             euler_characteristic: 0,
-            good_cover_certified: good_cover.is_some(),
             holonomy_certificate,
             sampled_support_size: 0,
             covering_side: AtlasCoveringSide::BelowCoveringNumber,
@@ -1057,7 +884,6 @@ pub fn build_atlas_nerve(
             mass.is_finite() && mass > 0.0
         },
         &adjacency,
-        good_cover,
     )?;
     let admitted_edge_inventory: BTreeSet<AtlasHolonomyEdgeId> = edge_reports
         .iter()
@@ -1081,9 +907,8 @@ pub fn build_atlas_nerve(
         &inventory.tetrahedra,
     );
     let note = format!(
-        "atlas nerve over {n} charts and {row_count} rows: sampled_support_size={sampled}, covering_side={}, good_cover_certified={}, certified_orientability={certified_orientability:?}, Euler={}, Betti=({}, {}, {:?})",
+        "atlas nerve over {n} charts and {row_count} rows: sampled_support_size={sampled}, covering_side={}, certified_orientability={certified_orientability:?}, Euler={}, Betti=({}, {}, {:?})",
         covering_side.as_str(),
-        good_cover.is_some(),
         inventory.euler_characteristic,
         betti.b0,
         betti.b1,
@@ -1099,7 +924,6 @@ pub fn build_atlas_nerve(
         n_tetrahedra: inventory.tetrahedra.len(),
         simplex_counts: inventory.counts,
         euler_characteristic: inventory.euler_characteristic,
-        good_cover_certified: good_cover.is_some(),
         holonomy_certificate,
         sampled_support_size: sampled,
         covering_side,
@@ -1111,7 +935,7 @@ pub fn build_atlas_nerve(
 
 #[cfg(test)]
 mod tests {
-    use super::{AtlasChart, AtlasGoodCoverCertificate, AtlasTransferGate, ConvexIntersectionProof, build_atlas_nerve};
+    use super::{AtlasChart, AtlasTransferGate, build_atlas_nerve};
     use crate::chart_transfer::certify_square_transfer;
     use crate::inference::atlas_holonomy::AtlasHolonomyEdgeId;
     use crate::manifold::{AtlasOrientability, GraphCompressionKind};
@@ -1158,33 +982,13 @@ mod tests {
         let maximal = vec![vec![0, 1, 2, 3, 4]];
         let charts = charts_from_faces(5, &maximal);
         let gates = all_valid_pair_gates(5);
-        let diagram = build_atlas_nerve(&charts, &gates, None, None).unwrap();
+        let diagram = build_atlas_nerve(&charts, &gates, None).unwrap();
         assert_eq!(diagram.simplex_counts, vec![5, 10, 10, 5, 1]);
         assert_eq!(diagram.euler_characteristic, 1);
         assert_eq!(
             diagram.n_vertices as i128 - diagram.n_edges as i128 + diagram.n_triangles as i128,
             5,
             "the old V-E+F truncation is deliberately wrong on this overlap"
-        );
-    }
-
-    #[test]
-    fn good_cover_certificate_must_match_every_nonempty_intersection() {
-        let faces = vec![vec![0, 1]];
-        let charts = charts_from_faces(2, &faces);
-        let gates = all_valid_pair_gates(2);
-        let incomplete = AtlasGoodCoverCertificate::new(
-            2,
-            vec![
-                ConvexIntersectionProof::new(vec![0], 0).unwrap(),
-                ConvexIntersectionProof::new(vec![1], 1).unwrap(),
-            ],
-        )
-        .unwrap();
-        let error = build_atlas_nerve(&charts, &gates, Some(&incomplete), None).unwrap_err();
-        assert!(
-            error.contains("no contractibility proof for non-empty intersection [0, 1]"),
-            "unexpected certificate error: {error}"
         );
     }
 
@@ -1305,7 +1109,7 @@ mod tests {
                 2,
             ),
         ];
-        let diagram = build_atlas_nerve(&charts, &gates, None, None).unwrap();
+        let diagram = build_atlas_nerve(&charts, &gates, None).unwrap();
         assert_eq!(diagram.betti.b0, 2);
         assert_eq!(diagram.betti.b1, 0);
         let rejected = diagram

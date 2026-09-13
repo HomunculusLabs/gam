@@ -43,7 +43,6 @@ fn inventory(atlas: &LocalAtlas, transition_edges_only: bool) -> SimplexInventor
             !shared.is_empty()
         },
         &adjacency,
-        None,
     )
     .expect("fixture membership nerve must enumerate")
 }
