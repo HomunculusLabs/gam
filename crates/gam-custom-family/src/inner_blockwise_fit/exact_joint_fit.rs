@@ -2647,7 +2647,28 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             let returned_decrement = returned_spectrum.newton_decrement();
             let returned_weak_decrement = returned_spectrum.weakly_identified_decrement();
             let returned_null_stationarity = returned_spectrum.numerical_null_stationarity_inf();
-            let exact_first_order_certified = current_stationarity_residual <= residual_tol
+            // A residual under the caller's relative target certifies only once
+            // the returned mode's Newton decrement is at the objective's own
+            // resolution (#2695). While the local model can still lower the
+            // objective by more than one evaluation resolves, the pending
+            // correction moves every criterion built on this mode, and the outer
+            // evaluator's one-step profile correction of such a state is not the
+            // partner of its derivative. Measured on the #2904 FD pin (pool jobs
+            // 642073 and 646303): warm-started probes certified at a residual near
+            // 1e-3 priced the rho 0 LAML slope at 6.954 (0.083 before the
+            // correction). Solved to r -> 0, the same probes give 0.7519732223,
+            // the analytic gradient to nine digits.
+            let decrement_resolution = joint_objective_roundoff_slack(
+                lastobjective,
+                lastobjective,
+                objective_resolution_witness.measured(),
+            );
+            let decrement_at_resolution = returned_decrement.is_finite()
+                && returned_decrement <= decrement_resolution
+                && returned_weak_decrement.is_finite()
+                && returned_weak_decrement <= decrement_resolution;
+            let exact_first_order_certified = (current_stationarity_residual <= residual_tol
+                && decrement_at_resolution)
                 || (joint_proposal_at_step_floor(step_inf, step_tol)
                     && joint_newton_decrement_certifies(
                         returned_decrement,
