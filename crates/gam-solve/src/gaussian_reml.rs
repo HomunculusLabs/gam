@@ -2113,7 +2113,7 @@ fn block_orthogonal_profile_spectrum(
         .copied()
         .map(f64::abs)
         .fold(0.0_f64, f64::max);
-    let roundoff = f64::EPSILON * blocks.max(1) as f64 * spectral_scale.max(f64::MIN_POSITIVE);
+    let roundoff = f64::EPSILON * blocks.max(1) as f64 * spectral_scale;
     Ok(BlockOrthogonalProfileSpectrum {
         curvature: BlockOrthogonalProfileCurvature {
             min_eigenvalue,
@@ -4832,8 +4832,7 @@ fn conservative_interval(lo: f64, hi: f64, magnitude: f64, operations: usize) ->
     if n_eps >= 1.0 {
         return Interval::entire();
     }
-    let pad =
-        (n_eps / (1.0 - n_eps)) * magnitude.max(lo.abs()).max(hi.abs()).max(f64::MIN_POSITIVE);
+    let pad = (n_eps / (1.0 - n_eps)) * magnitude.max(lo.abs()).max(hi.abs());
     Interval {
         lo: round_down(lo - pad),
         hi: round_up(hi + pad),

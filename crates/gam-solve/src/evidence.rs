@@ -562,7 +562,7 @@ fn stacking_newton_step(
     if !(spectral_scale.is_finite() && spectral_scale > 0.0) {
         return None;
     }
-    let rank_tolerance = f64::EPSILON * (dimension as f64) * spectral_scale.max(f64::MIN_POSITIVE);
+    let rank_tolerance = f64::EPSILON * (dimension as f64) * spectral_scale;
     let projected = eigenvectors.t().dot(&reduced_gradient);
     let mut spectral_step = Array1::<f64>::zeros(dimension);
     for index in 0..dimension {

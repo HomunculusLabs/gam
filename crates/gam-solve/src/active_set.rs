@@ -1362,7 +1362,7 @@ fn certify_active_equalities(
     let mut worst = ActiveEqualityResidualCertificate {
         worst_row: 0,
         residual: 0.0,
-        allowed: f64::MIN_POSITIVE,
+        allowed: 0.0,
     };
     let mut worst_ratio = 0.0_f64;
     for active_row in 0..m {
@@ -1378,8 +1378,9 @@ fn certify_active_equalities(
         }
         let residual = (rhs[active_row] - dot.sum()).abs();
         let solve_scale = row_magnitude.sum() * direction_scale;
-        let allowed = (gamma * (magnitude.sum() + rhs[active_row].abs() + solve_scale))
-            .max(f64::MIN_POSITIVE);
+        // An all-zero row, direction and rhs has no rounding to allow and a zero
+        // residual, which `residual <= allowed` certifies exactly (#2469).
+        let allowed = gamma * (magnitude.sum() + rhs[active_row].abs() + solve_scale);
         if !residual.is_finite() || !allowed.is_finite() {
             return ActiveEqualityResidualCertificate {
                 worst_row: active_row,
@@ -1387,7 +1388,7 @@ fn certify_active_equalities(
                 allowed,
             };
         }
-        let ratio = residual / allowed;
+        let ratio = if residual == 0.0 { 0.0 } else { residual / allowed };
         if ratio > worst_ratio {
             worst_ratio = ratio;
             worst = ActiveEqualityResidualCertificate {
