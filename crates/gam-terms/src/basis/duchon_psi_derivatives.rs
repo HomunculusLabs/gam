@@ -920,7 +920,7 @@ pub(crate) fn duchon_matern_block_taylor_r2j_triplet(
                 / (gamma_lanczos((i + 1) as f64) * gamma_lanczos((l - i + 1) as f64));
             let p_f64 = nu - 0.5 - i as f64;
             let p_round = p_f64.round() as i64;
-            if (p_f64 - p_round as f64).abs() > 1e-12 {
+            if p_f64 != p_round as f64 {
                 continue;
             }
             let q_needed = target as i64 - p_round;
@@ -1070,7 +1070,7 @@ pub(crate) fn duchon_matern_block_taylor_r2j_half_integer_nu(
         // r-power of this polynomial term.
         let p_f64 = nu - 0.5 - i as f64;
         let p_round = p_f64.round() as i64;
-        if (p_f64 - p_round as f64).abs() > 1e-12 {
+        if p_f64 != p_round as f64 {
             // Not integer/half-integer aligned — should not happen for half-integer ν.
             continue;
         }
