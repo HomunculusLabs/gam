@@ -88,12 +88,6 @@ impl<'a> SignedWeightsView<'a> {
         Self(view)
     }
 
-    /// Borrow an `&Array1<f64>` as a sign-honest weight view.
-    #[inline]
-    pub fn from_array(array: &'a Array1<f64>) -> Self {
-        Self(array.view())
-    }
-
     /// Borrow a contiguous slice as a sign-honest weight view.
     #[inline]
     pub fn from_slice(slice: &'a [f64]) -> Self {

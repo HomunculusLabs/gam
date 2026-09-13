@@ -4538,33 +4538,6 @@ impl LinearOperator for DenseRightProductView<'_> {
     }
 }
 
-impl DenseRightProductView<'_> {
-    pub fn compute_xtwy(
-        &self,
-        weights: &Array1<f64>,
-        y: &Array1<f64>,
-    ) -> Result<Array1<f64>, String> {
-        if weights.len() != self.nrows() || y.len() != self.nrows() {
-            return Err(format!(
-                "compute_xtwy dimension mismatch: weights={}, y={}, nrows={}",
-                weights.len(),
-                y.len(),
-                self.nrows()
-            ));
-        }
-        certify_signed_weights("DenseRightProductView::compute_xtwy", weights, self.nrows())?;
-        let weighted_xty = dense_transpose_weighted_response(self.base, weights, y, None);
-        let mut out = weighted_xty;
-        if let Some(factor) = self.first {
-            out = fast_atv(factor, &out);
-        }
-        if let Some(factor) = self.second {
-            out = fast_atv(factor, &out);
-        }
-        Ok(out)
-    }
-}
-
 impl LinearOperator for EmbeddedColumnBlock<'_> {
     fn nrows(&self) -> usize {
         self.local.nrows()
@@ -4614,29 +4587,6 @@ impl LinearOperator for EmbeddedColumnBlock<'_> {
         let mut out = Array1::<f64>::zeros(self.total_cols);
         let local =
             DesignMatrix::Dense(DenseDesignMatrix::from(self.local.clone())).diag_gram(weights)?;
-        out.slice_mut(ndarray::s![self.global_range.clone()])
-            .assign(&local);
-        Ok(out)
-    }
-}
-
-impl EmbeddedColumnBlock<'_> {
-    pub fn compute_xtwy(
-        &self,
-        weights: &Array1<f64>,
-        y: &Array1<f64>,
-    ) -> Result<Array1<f64>, String> {
-        if weights.len() != self.nrows() || y.len() != self.nrows() {
-            return Err(format!(
-                "compute_xtwy dimension mismatch: weights={}, y={}, nrows={}",
-                weights.len(),
-                y.len(),
-                self.nrows()
-            ));
-        }
-        certify_signed_weights("EmbeddedColumnBlock::compute_xtwy", weights, self.nrows())?;
-        let local = dense_transpose_weighted_response(self.local, weights, y, None);
-        let mut out = Array1::<f64>::zeros(self.total_cols);
         out.slice_mut(ndarray::s![self.global_range.clone()])
             .assign(&local);
         Ok(out)
@@ -5517,43 +5467,6 @@ impl DesignMatrix {
     /// keep the generic sparse-aware per-row pullback).
     pub const fn is_sparse(&self) -> bool {
         matches!(self, Self::Sparse(_))
-    }
-
-    /// Zero-copy borrow when `Dense`, materialized conversion when `Sparse`.
-    ///
-    /// This avoids the unconditional clone that `to_dense()` performs on dense
-    /// matrices.  Callers that only need a `&Array2<f64>` should use this and
-    /// then call `Cow::as_ref()` or `&*cow`.
-    pub fn as_dense_cow(&self) -> Cow<'_, Array2<f64>> {
-        match self {
-            Self::Dense(DenseDesignMatrix::Materialized(matrix)) => Cow::Borrowed(matrix.as_ref()),
-            Self::Dense(DenseDesignMatrix::Lazy(op)) => match op.as_dense_ref() {
-                Some(dense) => Cow::Borrowed(dense),
-                // SAFETY: `as_dense_cow` is the zero-copy view accessor; its
-                // contract forbids operator-backed designs that cannot expose
-                // a pre-materialized dense view. A caller that reached this
-                // arm used the borrow API on an operator representation it
-                // should have streamed through row chunks instead.
-                // SAFETY: as_dense_cow's zero-copy contract forbids operator-backed designs without a materialized view.
-                None => std::panic::panic_any(format!(
-                    "DesignMatrix::as_dense_cow called on operator-backed design ({}x{}); use row chunks or matrix-vector products",
-                    op.nrows(),
-                    op.ncols()
-                )),
-            },
-            Self::Sparse(matrix) => Cow::Owned(
-                matrix
-                    .try_to_dense_arc("DesignMatrix::as_dense_cow")
-                    // SAFETY: callers of `as_dense_cow` have accepted dense
-                    // materialization; densification failure here means the
-                    // sparse matrix exceeds the byte-cap that this accessor
-                    // contractually forbids.
-                    // SAFETY: caller of as_dense_cow has accepted dense materialization budget.
-                    .unwrap_or_else(|msg| std::panic::panic_any(msg))
-                    .as_ref()
-                    .clone(),
-            ),
-        }
     }
 
     /// Borrow when already-materialized dense, otherwise materialize via

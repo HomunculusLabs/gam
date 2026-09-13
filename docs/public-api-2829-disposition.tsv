@@ -109,8 +109,8 @@ crates/gam-linalg/src/low_rank_weight.rs	project_u	retired-no-surviving-dependen
 crates/gam-linalg/src/low_rank_weight.rs	project_v	retired-no-surviving-dependent
 crates/gam-linalg/src/low_rank_weight.rs	row_capacitance	retired-no-surviving-dependent
 crates/gam-linalg/src/low_rank_weight.rs	xtw_y	retired-no-surviving-dependent
-crates/gam-linalg/src/matrix/mod.rs	as_dense_cow	restored-in-place
-crates/gam-linalg/src/matrix/mod.rs	compute_xtwy	restored-in-place
+crates/gam-linalg/src/matrix/mod.rs	as_dense_cow	retired-no-product-user
+crates/gam-linalg/src/matrix/mod.rs	compute_xtwy	retired-no-product-user
 crates/gam-linalg/src/matrix/mod.rs	is_materialized_dense	retired-no-product-user
 crates/gam-linalg/src/matrix/mod.rs	is_operator_backed	retired-no-product-user
 crates/gam-linalg/src/matrix/mod.rs	quadratic_form_diag	retired-no-product-user
@@ -123,7 +123,7 @@ crates/gam-linalg/src/matrix/symmetric.rs	addridge	retired-no-product-user
 crates/gam-linalg/src/matrix/symmetric.rs	max_abs_diag	retired-no-product-user
 crates/gam-linalg/src/matrix/symmetric.rs	xt_diag_x_psd	retired-by-later-deletion:b66b773539
 crates/gam-linalg/src/matrix/weights.rs	as_psd	retired-by-later-deletion:b66b773539
-crates/gam-linalg/src/matrix/weights.rs	from_array	restored-in-place
+crates/gam-linalg/src/matrix/weights.rs	from_array	retired-no-product-user
 crates/gam-linalg/src/matrix/weights.rs	view_signed	retired-by-later-deletion:b66b773539
 crates/gam-linalg-test-support/src/numeric_derivative.rs	agreement_bound	restored-in-place
 crates/gam-linalg/src/numeric_derivative.rs	judge	retired-by-owner:jets
