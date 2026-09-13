@@ -441,30 +441,82 @@ pub(crate) fn matern_center_function_gram(
     Ok(symmetrize_penalty(&fast_ata(&center_design)))
 }
 
+/// The Matérn primary penalty `Zᵀ K Z`, built from the kernel's own energy
+/// factor so it is PSD by construction.
+///
+/// `K` is a Matérn kernel matrix at the centers, positive semidefinite as a
+/// kernel. Forming `Zᵀ K Z` densely and then testing it for PSD judged roundoff
+/// against the wrong scale. At a length scale long against the cloud `K` tends
+/// to the all-ones matrix, the identifiability chart removes that limit, and
+/// what is left is a difference of unit-size entries: its roundoff is
+/// `O(n·ε·‖K‖)` while its largest eigenvalue is `O((κr)²)`. The dense test
+/// measured that roundoff relative to the small result and refused a PSD kernel
+/// at a length scale the κ window admits — `matern(x, z)` under gamma-log at
+/// ψ = −8.94 stopped the fit with a minimum eigenvalue of −4.07e-15 against a
+/// tolerance of 7.72e-16 (#2817).
+///
+/// So the spectrum is taken on `K` itself, against its own roundoff envelope
+/// `α·n·ε·‖K‖`. An eigenvalue inside the envelope is roundoff of a PSD matrix
+/// and carries no energy; one below it means `K` is not a kernel matrix and is
+/// refused. The factor `Λ₊^{1/2}Vᵀ` restricted through `Z` represents `Zᵀ K Z`
+/// on the resolved spectrum, and the dense PSD test never runs (#2318: rank
+/// revelation acts on the factor, not on its Gram).
+pub(crate) fn matern_primary_penalty(
+    penalty_kernel: &Array2<f64>,
+    full_transform: Option<&Array2<f64>>,
+) -> Result<ConstructiveQuadratic, BasisError> {
+    // gam#1379 — a degenerate trial geometry can make the kernel non-finite; we
+    // cannot ship that as a penalty (the range-block eigensolve would abort the
+    // fit), so surface a clear basis error instead of an opaque downstream one.
+    if !matrix_all_finite(penalty_kernel) {
+        crate::bail_invalid_basis!(
+            "Matérn double-penalty kernel Gram is non-finite; the kernel `K` could not \
+             be formed at this length scale (degenerate geometry). Widen the data \
+             spread, change the length scale, or drop the term."
+        );
+    }
+    let (sym, evals, evecs) = spectral_summary(penalty_kernel)?;
+    let tolerance = generalized_spectral_tolerance(&evals, &sym);
+    if let Some(&negative) = evals.iter().find(|&&value| value < -tolerance) {
+        return Err(BasisError::IndefinitePenalty {
+            context: "Matérn kernel penalty".to_string(),
+            min_eigenvalue: negative,
+            tolerance,
+            guidance: "a Matérn kernel matrix is positive semidefinite; negative curvature \
+                       beyond its roundoff envelope means the kernel was mis-assembled"
+                .to_string(),
+        });
+    }
+    let kept: Vec<usize> = (0..evals.len())
+        .filter(|&index| evals[index] > tolerance)
+        .collect();
+    let mut factor = Array2::<f64>::zeros((kept.len(), sym.nrows()));
+    for (row, &index) in kept.iter().enumerate() {
+        let scale = evals[index].sqrt();
+        for column in 0..sym.nrows() {
+            factor[[row, column]] = scale * evecs[[column, index]];
+        }
+    }
+    let factor = match full_transform {
+        Some(transform) => fast_ab(&factor, transform),
+        None => factor,
+    };
+    ConstructiveQuadratic::from_energy_factor(factor, "Matérn primary kernel penalty")
+}
+
 pub(crate) fn matern_double_penalty_candidates(
-    primary: &Array2<f64>,
+    primary: ConstructiveQuadratic,
     function_gram: &Array2<f64>,
     include_intercept: bool,
 ) -> Result<Vec<PenaltyCandidate>, BasisError> {
-    // gam#1379 — guard the Primary projected kernel Gram itself. It is `Zᵀ K Z`
-    // with a finite Matérn kernel `K`, so it is finite in exact arithmetic; if a
-    // degenerate trial geometry made it non-finite we cannot ship it as a
-    // penalty (the range-block eigensolve would abort the fit). Surface a clear
-    // basis error instead of an opaque downstream "non-finite range penalty".
-    if !matrix_all_finite(primary) {
-        crate::bail_invalid_basis!(
-            "Matérn double-penalty primary kernel Gram is non-finite; the projected \
-             kernel `Zᵀ K Z` could not be formed at this length scale (degenerate \
-             geometry). Widen the data spread, change the length scale, or drop the term."
-        );
-    }
-    if primary.dim() != function_gram.dim() || !matrix_all_finite(function_gram) {
+    let p = primary.dense().nrows();
+    if primary.dense().dim() != function_gram.dim() || !matrix_all_finite(function_gram) {
         crate::bail_invalid_basis!(
             "Matérn center function Gram is non-finite or does not match the primary penalty"
         );
     }
-    let mut candidates = vec![normalize_penalty_candidate(
-        primary.clone(),
+    let mut candidates = vec![normalize_constructive_penalty_candidate(
+        primary,
         PenaltySource::Primary,
     )?];
     // K_CC is strictly positive definite after center rank reduction. The ONLY
@@ -473,7 +525,6 @@ pub(crate) fn matern_double_penalty_candidates(
     // must be conditioned/reduced, never reclassified into a κ-dependent null
     // projector. This makes penalty topology structural and κ-invariant.
     if include_intercept {
-        let p = primary.nrows();
         let mut intercept_frame = Array2::<f64>::zeros((p, 1));
         intercept_frame[[p - 1, 0]] = 1.0;
         let shrinkage = function_space_subspace_shrinkage(&intercept_frame, function_gram)?;
@@ -489,11 +540,11 @@ pub(crate) fn build_matern_double_penalty_candidates(
     spline: &MaternSplineBasis,
     full_transform: Option<&Array2<f64>>,
 ) -> Result<Vec<PenaltyCandidate>, BasisError> {
-    let primary = project_penalty_matrix(&spline.penalty_kernel, full_transform);
+    let primary = matern_primary_penalty(&spline.penalty_kernel, full_transform)?;
     let include_intercept = spline.num_polynomial_basis == 1;
     let function_gram =
         matern_center_function_gram(&spline.penalty_kernel, include_intercept, full_transform)?;
-    matern_double_penalty_candidates(&primary, &function_gram, include_intercept)
+    matern_double_penalty_candidates(primary, &function_gram, include_intercept)
 }
 
 /// Creates a Matérn spline basis from data and centers.
@@ -1586,8 +1637,12 @@ mod matern_function_metric_tests {
         embedded.slice_mut(s![0..3, 0..3]).assign(&center_kernel);
         let gram =
             matern_center_function_gram(&embedded, true, None).expect("raw center function Gram");
-        let base =
-            matern_double_penalty_candidates(&embedded, &gram, true).expect("raw candidates");
+        let base = matern_double_penalty_candidates(
+            matern_primary_penalty(&embedded, None).expect("raw primary"),
+            &gram,
+            true,
+        )
+        .expect("raw candidates");
         assert_eq!(base.len(), 2);
         let raw_ridge = base[1].matrix.dense() * base[1].normalization_scale;
 
@@ -1611,10 +1666,11 @@ mod matern_function_metric_tests {
             [0.0, 0.0, 1.7, 0.0],
             [0.0, 0.0, 0.0, 2.5]
         ];
-        let primary_t = fast_atb(&transform, &fast_ab(&embedded, &transform));
+        let primary_t =
+            matern_primary_penalty(&embedded, Some(&transform)).expect("transformed primary");
         let gram_t = matern_center_function_gram(&embedded, true, Some(&transform))
             .expect("transformed center function Gram");
-        let transformed = matern_double_penalty_candidates(&primary_t, &gram_t, true)
+        let transformed = matern_double_penalty_candidates(primary_t, &gram_t, true)
             .expect("transformed candidates");
         let ridge_t = transformed[1].matrix.dense() * transformed[1].normalization_scale;
         let expected = fast_atb(&transform, &fast_ab(&raw_ridge, &transform));
@@ -1634,10 +1690,11 @@ mod matern_function_metric_tests {
         )
         .expect("kernel-only Gram");
         let kernel_only = matern_double_penalty_candidates(
-            &fast_atb(
-                &transform.slice(s![0..3, 0..3]).to_owned(),
-                &fast_ab(&center_kernel, &transform.slice(s![0..3, 0..3]).to_owned()),
-            ),
+            matern_primary_penalty(
+                &center_kernel,
+                Some(&transform.slice(s![0..3, 0..3]).to_owned()),
+            )
+            .expect("kernel-only primary"),
             &no_intercept_gram,
             false,
         )

@@ -2779,7 +2779,7 @@ fn generalized_nullspace_basis(
 /// decides a structural null space and must not erase genuine low-frequency
 /// modes merely because the largest generalized frequency grows with basis
 /// resolution.
-fn generalized_spectral_tolerance(evals: &Array1<f64>, operator: &Array2<f64>) -> f64 {
+pub(crate) fn generalized_spectral_tolerance(evals: &Array1<f64>, operator: &Array2<f64>) -> f64 {
     let spectral_scale = evals
         .iter()
         .copied()

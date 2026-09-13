@@ -950,13 +950,13 @@ pub(crate) fn build_matern_basis_seeded(
                 spec.include_intercept,
                 aniso.as_deref(),
             )?;
-            let primary = project_penalty_matrix(&penalty_kernel, full_transform.as_ref());
+            let primary = matern_primary_penalty(&penalty_kernel, full_transform.as_ref())?;
             let function_gram = matern_center_function_gram(
                 &penalty_kernel,
                 spec.include_intercept,
                 full_transform.as_ref(),
             )?;
-            matern_double_penalty_candidates(&primary, &function_gram, spec.include_intercept)?
+            matern_double_penalty_candidates(primary, &function_gram, spec.include_intercept)?
         } else {
             build_matern_operator_penalty_candidates(
                 centers.view(),
@@ -1033,13 +1033,13 @@ pub(crate) fn build_matern_basis_seeded(
                 spec.include_intercept,
                 aniso.as_deref(),
             )?;
-            let primary = project_penalty_matrix(&penalty_kernel, full_transform.as_ref());
+            let primary = matern_primary_penalty(&penalty_kernel, full_transform.as_ref())?;
             let function_gram = matern_center_function_gram(
                 &penalty_kernel,
                 spec.include_intercept,
                 full_transform.as_ref(),
             )?;
-            matern_double_penalty_candidates(&primary, &function_gram, spec.include_intercept)?
+            matern_double_penalty_candidates(primary, &function_gram, spec.include_intercept)?
         } else {
             build_matern_operator_penalty_candidates(
                 centers.view(),
