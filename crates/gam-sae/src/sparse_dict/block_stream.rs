@@ -530,9 +530,8 @@ impl BlockSparseStreamState {
         })
     }
 
-    /// fit_begin with caller-supplied block frames. This is the large-`K` front
-    /// door for experiments that cannot afford farthest-point seeding over
-    /// `K*N*P`; the supplied decoder is still required to be a `KxP` block
+    /// fit_begin with caller-supplied block frames, for experiments that seed their
+    /// own dictionary; the supplied decoder is still required to be a `KxP` block
     /// dictionary with `K = n_blocks*block_size`, and every row must be finite.
     pub fn new_with_decoder(
         decoder: Array2<f32>,

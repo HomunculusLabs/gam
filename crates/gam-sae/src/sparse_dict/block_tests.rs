@@ -195,7 +195,7 @@ fn make_decoder(n_blocks: usize, b: usize, p: usize, seed: u64) -> Array2<f32> {
     }
     for g in 0..n_blocks {
         let mut blk = d.slice(ndarray::s![g * b..g * b + b, ..]).to_owned();
-        super::orthonormalize_block(&mut blk);
+        super::gram_schmidt_rows(&mut blk);
         for r in 0..b {
             for c in 0..p {
                 d[[g * b + r, c]] = blk[[r, c]];
@@ -729,15 +729,16 @@ fn small_k_block_fit_runs_on_cpu_baseline_2134() {
 
 #[test]
 fn block_seed_preserves_planted_subspaces_2134() {
-    // The scalar farthest-point seed used to choose G*b unrelated rows and only
+    // A scalar farthest-point seed used to choose G*b unrelated rows and only
     // then group adjacent pairs.  On this orthogonal four-subspace fixture that
     // produced four live mixed frames, so usage-only revival could not repair
-    // the EV=0.86 local optimum.  The production block-aware seed must cover
-    // every planted rank-b projector before alternating minimisation begins.
+    // the EV=0.86 local optimum.  The production data-row seed grows each block
+    // by affinity to its partial frame, so it must cover every planted rank-b
+    // projector before alternating minimisation begins.
     let (p, b, n_blocks) = (8usize, 2usize, 4usize);
     let planted = planted_frames(p, n_blocks, b);
     let x = planted_data(&planted, n_blocks, b, p, 200);
-    let seeded = seed_frames(x.view(), n_blocks, b);
+    let seeded = data_row_frames(x.view(), n_blocks, b);
 
     let projector_roundoff = (p * b * b) as f64 * f32::EPSILON as f64;
     for planted_block in 0..n_blocks {
@@ -1151,9 +1152,8 @@ fn coordinate_partition_seed_fits_end_to_end() {
     // The cheap large-K seed produces a valid, converged block fit on real
     // structure: it must run end to end (no seeder corpus pass) and explain a
     // non-trivial fraction of the variance. It is NOT claimed to match the
-    // data-aware farthest-point seed on this adversarial orthogonal fixture — the
-    // coordinate seed is the K≫intrinsic-rank front door where atoms are spurious
-    // and revival, not the seed, carries recovery.
+    // data-row seed on this adversarial orthogonal fixture: from coordinate frames,
+    // revival, not the seed, carries recovery.
     let (p, b, n_blocks) = (8usize, 2usize, 3usize);
     let planted = planted_frames(p, n_blocks, b);
     let x = planted_data(&planted, n_blocks, b, p, 180);
@@ -1379,7 +1379,7 @@ fn greedy_admission_never_prices_worse_than_the_topk_quota_2825() {
                 frame[[axis, column]] = next() as f32;
             }
         }
-        orthonormalize_block(&mut frame);
+        gram_schmidt_rows(&mut frame);
         decoder
             .slice_mut(ndarray::s![block * b..(block + 1) * b, ..])
             .assign(&frame);

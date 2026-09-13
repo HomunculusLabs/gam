@@ -797,9 +797,7 @@ mod fit_tests {
     /// whose support step was not a descent step on the shared objective.
     #[test]
     fn block_sparse_fixed_point_certifies_once_the_support_step_descends_2275_2825() {
-        use crate::sparse_dict::{
-            BlockSeedPolicy, BlockSparseConfig, fit_block_sparse_dictionary_with_seed,
-        };
+        use crate::sparse_dict::{BlockSparseConfig, fit_block_sparse_dictionary};
         let n = 96usize;
         let p = 8usize;
         let mut x = Array2::<f32>::zeros((n, p));
@@ -813,12 +811,8 @@ mod fit_tests {
         config.aux_k = 4;
         config.max_epochs = 40;
 
-        let fit = fit_block_sparse_dictionary_with_seed(
-            x.view(),
-            &config,
-            BlockSeedPolicy::FarthestPoint,
-        )
-        .expect("#2275: the block entry must RETURN the converged fit");
+        let fit = fit_block_sparse_dictionary(x.view(), &config)
+            .expect("#2275: the block entry must RETURN the converged fit");
         let c = &fit.convergence;
         // #2825: the block entry now certifies this fit. See the two tiered cases
         // above — the open certificate measured a support step that was not a descent

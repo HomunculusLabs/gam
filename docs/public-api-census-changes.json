@@ -3443,5 +3443,14 @@
     },
     "reason": "#2899 (SPEC rules 9 and 18): the survival inverse-link parser and its two helpers move unchanged into gam_models::survival::construction, where materialize_survival calls them. gam-config keeps the same public names as a pub use of gam_models::survival, so the total public-function count is unchanged (11951 before and after in job 604534).",
     "evidence": "Job 604534 phase S1B: public_api_census.py reported 11951 public function declarations in 1343 files at both the parent 3e5c03f34 and candidate 6f94dcefe, and flagged only these three gam-config declarations as removed. The same three names are declared in crates/gam-models/src/survival/construction.rs at the candidate, and cargo check --workspace --all-targets --exclude gam-pyffi exited 0 there (/scratch.global/sauer354/pool/prune-cli/gate10.604534.log)."
+  },
+  {
+    "removed": {
+      "crates/gam-sae/src/sparse_dict/block.rs::orthonormalize_block": 1,
+      "crates/gam-sae/src/sparse_dict/block.rs::seed_frames": 1
+    },
+    "reason": "#2023 and SPEC rule 25. seed_frames, the block-aware farthest-point Tier-1 seed, had no product caller once bb51c3a6d deleted TieredSeedPolicy, its last configurable path. Every production block-sparse entry seeds with data_row_frames. orthonormalize_block's only lib caller was seed_frames. BlockSeedPolicy::FarthestPoint is deleted with them. The two tests that named the seed are restated on the production seed, and the two fixtures that used orthonormalize_block now build their Stiefel frames with gram_schmidt_rows.",
+    "evidence": "At the base, git grep -n -w seed_frames finds only the declaration, the FarthestPoint match arm and doc lines in crates/gam-sae/src/sparse_dict/block.rs, plus the #2134 test in block_tests.rs. git grep -n -w orthonormalize_block finds the declaration, seed_frames' call, and two test fixtures in block_tests.rs. Guarded pool job 605946 at 13bd8c5944196742fd444d5fd0088a75c85f6c35 plus this change: lane sw0f, acn86, log /scratch.global/sauer354/pool/sae2023/g2023j.605946.log. cargo check --workspace --all-targets --exclude gam-pyffi --keep-going returned rc 0. cargo check -p gam-sae --all-targets returned rc 0. The gam-sae lib tests over sparse_dict::block::block_tests and tiered::fit::fit_tests ran 45 and all passed, including the three restated or touched tests.",
+    "base": "3d9749035b4d5158f6c966af00bd82dd99fc98cb"
   }
 ]
