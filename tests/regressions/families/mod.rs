@@ -10,7 +10,6 @@ mod family_suite;
 mod flexible_blended_link_no_silent_noop_1596_1598;
 mod flexible_link_linkwiggle_joint_solve_aborts;
 mod gamlss_binomial_location_scale_bug_hunt_3_of_3;
-mod gamma_dispersion_location_scale_predictable_1119;
 mod gamma_dispersion_shape_locked_underestimate;
 mod gamma_location_scale_generate_ignores_precision_channel;
 mod gamma_observation_interval_symmetric_skew_miscoverage;

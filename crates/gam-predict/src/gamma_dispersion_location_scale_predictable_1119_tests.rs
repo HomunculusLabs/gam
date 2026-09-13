@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! #1119: a Gamma (and, by the same family path, NB / Tweedie) *dispersion*
 //! location-scale model — `family="gamma"` with a `noise_formula` on the shape
 //! channel — used to FIT but be completely UNPREDICTABLE: the joint
@@ -32,15 +33,16 @@
 //!   shape_true(x) = exp(0.7 + 0.4 cos(2 x))  = nu(x)  (genuine varying shape)
 //!   y ~ Gamma(shape = nu(x), scale = mu(x)/nu(x))     (mean mu, Var = mu^2/nu)
 
-use gam::estimate::BlockRole;
-use gam::gamlss::DispersionFamilyKind;
-use gam::smooth::build_term_collection_design;
-use gam::test_support::reference::{pearson, rmse};
-use gam::{
-    DispersionLocationScaleFitResult, FitConfig, FitResult, encode_recordswith_inferred_schema,
-    fit_from_formula, init_parallelism,
+use gam_problem::BlockRole;
+use gam_models::gamlss::DispersionFamilyKind;
+use gam_terms::smooth::build_term_collection_design;
+use gam_test_support::reference::{pearson, rmse};
+use crate::test_support::init_parallelism;
+use gam_data::encode_recordswith_inferred_schema;
+use gam_models::fit_orchestration::{
+    DispersionLocationScaleFitResult, FitConfig, FitResult, fit_from_formula,
 };
-use gam_predict::{
+use crate::{
     DispersionLocationScalePredictor, InferenceCovarianceMode, PosteriorMeanOptions, PredictInput,
     PredictableModel,
 };
@@ -347,8 +349,8 @@ fn gamma_dispersion_location_scale_assembles_covariance_and_is_predictable() {
 ///      noise the full-uncertainty path uses, row by row.
 #[test]
 fn gamma_dispersion_posterior_mean_observation_band_is_per_row_not_scalar() {
-    use gam_predict::PredictUncertaintyOptions;
-    use gam_predict::interval_policy::PredictionTransform;
+    use crate::PredictUncertaintyOptions;
+    use crate::interval_policy::PredictionTransform;
 
     init_parallelism();
     let n = 600usize;

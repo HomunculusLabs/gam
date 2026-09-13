@@ -18,7 +18,7 @@ use super::*;
 /// `sqrt(Var(y | mean, precision))` per the family's mean–variance law. The
 /// confidence interval on the mean is the delta-method propagation of the mean
 /// block's joint-covariance slice through the inverse link.
-pub struct DispersionLocationScalePredictor {
+pub(crate) struct DispersionLocationScalePredictor {
     pub beta_mu: Array1<f64>,
     pub beta_noise: Array1<f64>,
     /// Persisted location-scale likelihood: its `response` selects the

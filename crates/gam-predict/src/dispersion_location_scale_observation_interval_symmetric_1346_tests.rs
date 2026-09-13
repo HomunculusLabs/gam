@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! #1346: the **dispersion location-scale** (GAMLSS) observation/prediction
 //! interval was a symmetric `μ ± z·√(SE(μ̂)² + σ(x)²)` band — the equal-tailed
 //! skew fix that landed for the standard single-block skewed families (#817
@@ -25,13 +26,14 @@
 //! 1.000) with an upper tail that covers near nominal (`P(Y > hi) ≤ 0.04`; the
 //! symmetric band undershoots the Gamma upper quantile, ~0.052 measured).
 
-use gam::estimate::BlockRole;
-use gam::smooth::build_term_collection_design;
-use gam::{
-    DispersionLocationScaleFitResult, FitConfig, FitResult, encode_recordswith_inferred_schema,
-    fit_from_formula, init_parallelism,
+use gam_problem::BlockRole;
+use gam_terms::smooth::build_term_collection_design;
+use crate::test_support::init_parallelism;
+use gam_data::encode_recordswith_inferred_schema;
+use gam_models::fit_orchestration::{
+    DispersionLocationScaleFitResult, FitConfig, FitResult, fit_from_formula,
 };
-use gam_predict::{
+use crate::{
     DispersionLocationScalePredictor, InferenceCovarianceMode, PredictInput,
     PredictUncertaintyOptions, PredictableModel,
 };

@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Regression for #1125 (and its NB scalar sibling #1124): a dispersion
 //! location-scale fit — a `--predict-noise` / `noise_formula` smooth on an
 //! overdispersed family (Gamma / Negative-Binomial / Beta / Tweedie) — learns a
@@ -32,16 +33,17 @@
 //! generate-side variance diverge from the predict-side variance and trips this
 //! test.
 
-use gam::estimate::BlockRole;
-use gam::gamlss::DispersionFamilyKind;
-use gam::generative::NoiseModel;
-use gam::smooth::build_term_collection_design;
-use gam::types::LikelihoodSpec;
-use gam::{
-    DispersionLocationScaleFitResult, FitConfig, FitResult, encode_recordswith_inferred_schema,
-    fit_from_formula, init_parallelism,
+use gam_problem::BlockRole;
+use gam_models::gamlss::DispersionFamilyKind;
+use gam_inference::generative::NoiseModel;
+use gam_terms::smooth::build_term_collection_design;
+use gam_spec::LikelihoodSpec;
+use crate::test_support::init_parallelism;
+use gam_data::encode_recordswith_inferred_schema;
+use gam_models::fit_orchestration::{
+    DispersionLocationScaleFitResult, FitConfig, FitResult, fit_from_formula,
 };
-use gam_predict::{DispersionLocationScalePredictor, PredictInput, PredictableModel};
+use crate::{DispersionLocationScalePredictor, PredictInput, PredictableModel};
 use ndarray::{Array1, Array2};
 
 /// Deterministic seeded uniform in [0,1) (Numerical Recipes LCG, high bits) with

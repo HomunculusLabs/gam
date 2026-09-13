@@ -22,11 +22,7 @@ pub use posterior_bands::*;
 pub use posterior_predict::*;
 
 use crate::binomial_location_scale::BinomialLocationScalePredictor;
-// Surface the per-family predictors at the crate root so callers (integration
-// tests and downstream users) can name `gam_predict::DispersionLocationScalePredictor`
-// directly, matching the flat predict API these types had before the engine was
-// peeled into this crate.
-pub use crate::dispersion_location_scale::DispersionLocationScalePredictor;
+pub(crate) use crate::dispersion_location_scale::DispersionLocationScalePredictor;
 use crate::gaussian_location_scale::GaussianLocationScalePredictor;
 use crate::interval_policy::{
     EtaInterval, LinearState, MeanBoundMethod, PredictPass, PredictionTransform, ResponseBounds,
@@ -4927,3 +4923,12 @@ mod quality_vs_inla_binomial_smooth_probability_tests;
 
 #[cfg(test)]
 mod quality_vs_interpretml_ebm_poisson_log_tests;
+
+#[cfg(test)]
+mod dispersion_location_scale_generate_predict_variance_agreement_tests;
+
+#[cfg(test)]
+mod dispersion_location_scale_observation_interval_symmetric_1346_tests;
+
+#[cfg(test)]
+mod gamma_dispersion_location_scale_predictable_1119_tests;
