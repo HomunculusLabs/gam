@@ -439,7 +439,7 @@ pub(crate) fn radial_input_location_jet_nd(
                 r2 += delta * delta;
             }
             let r = r2.sqrt();
-            if r <= 1.0e-12 {
+            if r == 0.0 {
                 continue;
             }
             let scale = phi_r[[n, k]] / r;
@@ -1192,7 +1192,7 @@ pub fn build_duchon_basis_design_and_jets(
             let r = r2.sqrt();
             let phi_r = radial_first[[n, k]];
             let phi_rr = radial_second[[n, k]];
-            if r <= 1.0e-12 {
+            if r == 0.0 {
                 // Collision limit: the radial gradient vanishes and the Hessian
                 // is the isotropic φ''(0) δ_ac scaled by (δ_a')² (= 1 at the
                 // center for both linear and chord embeddings).
