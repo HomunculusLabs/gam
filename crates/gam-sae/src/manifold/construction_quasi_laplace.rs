@@ -2986,9 +2986,6 @@ impl SaeManifoldTerm {
         // #2283 — the warm-carried shift of the arrow exact-A step, the damping's
         // counterpart on states whose dense geometry the ledger does not admit.
         let mut shift = 0.0_f64;
-        // #2267 — the polish's own elapsed clock, one candidate denominator for the
-        // size predicate this route still lacks.
-        let polish_started = std::time::Instant::now();
         for step in 0..max_steps {
             let step_started = std::time::Instant::now();
             // #2267 — name each step to the process monitor; the guard ends with the
@@ -3144,31 +3141,6 @@ impl SaeManifoldTerm {
                     committed.committed_objective,
                 );
                 continue;
-            }
-            // #2267 — FORECAST the dense exact-stationarity step before entering it,
-            // and state it next to the two quantities any bar would be denominated
-            // against: the assemble this step already paid, and the time this polish
-            // call has burned so far. Measured on the shipped ladder's K=8 rung, the
-            // materialization's column loop alone is 406.5 s of a step the loop is
-            // permitted to repeat 64 times; measured on the shipped 160-row demo the
-            // whole step is ~1.6 s. A predicate that refuses the first and admits the
-            // second has to be read off BOTH, which is what this line is for. No bar
-            // is applied here: choosing one from a single fixture is how a literal
-            // gets laundered into a threshold.
-            match self.exact_stationarity_materialization_forecast(rho_fixed, target, &cache) {
-                Ok((forecast_dim, forecast)) => log::info!(
-                    "[SAE-NEWTON] step {}/{max_steps} FORECAST: dim={forecast_dim}, \
-                     materialization >= {:.3} s (column loop only, eigendecomposition \
-                     NOT included), assemble={:.3} s, polish elapsed={:.3} s",
-                    step + 1,
-                    forecast.as_secs_f64(),
-                    assemble_seconds,
-                    polish_started.elapsed().as_secs_f64(),
-                ),
-                Err(err) => log::info!(
-                    "[SAE-NEWTON] step {}/{max_steps} FORECAST unavailable: {err}",
-                    step + 1,
-                ),
             }
             // The stationarity residual `g` as one ambient vector. The damped
             // path below solves against `−g`; reporting the model residual for

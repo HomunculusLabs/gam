@@ -2627,5 +2627,13 @@
     },
     "reason": "SPEC rules 5, 23 and 25 (#2901 V22 slice 4c). The (cost, ridge) tuple's ridge was identically 0.0 after 8b5f0fdb5, so the function is renamed evaluate_externalcost and returns the cost alone.",
     "evidence": "At the base, git grep -n evaluate_externalcost_andridge over crates, src, tests, examples and bench finds only its definition, its pub use in estimate/mod.rs and call sites that project the cost; all are rewritten in this commit."
+  },
+  {
+    "base": "81784c956b8a31490226351dd5161660e389493a",
+    "removed": {
+      "crates/gam-sae/src/manifold/construction_exact_hessian.rs::exact_stationarity_materialization_forecast": 1
+    },
+    "reason": "#2267 slop removal. exact_stationarity_materialization_forecast existed only to print the [SAE-NEWTON] FORECAST info line in terminal_exact_newton_polish, and every polish step paid for it whatever the log level. It built prepare_decoder_prior_beta_curvature and prepare_residual_curvature_rows, which materialize_exact_hessian_dense_with_gap_border builds again moments later in the same step, and it ran one exact Hessian-vector apply. The materialization already logs the measured build time per probe ([SAE-EXACT-DENSE] operator BUILT) and the eigendecomposition time ([SAE-EXACT-DENSE] eigendecomposition DONE). So the forecast repeated work to predict a number the same step then measures. Its doc says it is not a bar, and nothing reads its value.",
+    "evidence": "At the base, git grep -n exact_stationarity_materialization_forecast finds only construction_exact_hessian.rs (the declaration and its own error string) and construction_quasi_laplace.rs (the one call, in terminal_exact_newton_polish). Outside construction_quasi_laplace.rs, git grep -n FORECAST finds only this function's doc comment and two unrelated comments in tests/quality/misc. The polish-local polish_started clock fed only the forecast line and is removed with it. Not compiled or run locally."
   }
 ]
