@@ -7,11 +7,11 @@
 //! with noise entering *only* through the Poisson response draw. The smoother's
 //! job is to estimate `mu_true` from the noisy counts. So the primary pass/fail
 //! is the root-mean-square error of gam's fitted Poisson mean against the TRUE
-//! mean surface:
-//!     RMSE(gam_mean, mu_true) <= 0.18 * range(mu_true).
-//! On this surface mu_true spans ~[1.79, 3.34] (range ~1.55), so the bar is an
-//! absolute RMSE of ~0.28 — comfortably below the per-cell Poisson noise sd
-//! (sqrt(mu) ~ 1.4..1.8) yet tight enough that a broken PIRLS-row / tensor-
+//! mean surface, averaged over the draws below:
+//!     mean over draws of RMSE(gam_mean, mu_true) <= 0.18 * range(mu_true).
+//! On this 15×20 grid mu_true spans [1.662, 3.642] (range 1.98, MSI job 578202),
+//! so the bar is an absolute RMSE of ~0.36 — comfortably below the per-cell
+//! Poisson noise sd (sqrt(mu) ~ 1.29..1.91) yet tight enough that a broken PIRLS-row / tensor-
 //! design integration (which would smear or bias the surface) fails it.
 //!
 //! This benchmarks the *critical cross-feature combination* that family-
@@ -22,10 +22,10 @@
 //! gam fits `y ~ te(x, z, k=[6,6])`, family = poisson, REML.
 //!
 //! mgcv is NOT the standard of correctness here — it is a peer smoother that is
-//! itself only an *estimate* of the same truth, fit on the same noisy draw. We
+//! itself only an *estimate* of the same truth, fit on the same noisy draws. We
 //! therefore demote it to a MATCH-OR-BEAT ACCURACY BASELINE: gam's RMSE-to-truth
-//! must be no worse than mgcv's RMSE-to-truth by more than 10%
-//!     RMSE(gam_mean, mu_true) <= 1.10 * RMSE(mgcv_mean, mu_true).
+//! must be no worse than mgcv's RMSE-to-truth by more than 10% on the draw
+//! average, and gam must not be RESOLVED worse draw by draw.
 //! Both engines use six basis functions per margin. GAM now defaults to natural
 //! cubic regression margins; the mgcv `bs="ps"` baseline uses cubic B-splines
 //! with a second-order difference penalty. Equal dimension does not imply
@@ -33,6 +33,17 @@
 //! separates this representation difference from differences between solvers.
 //! GAM also shrinks the joint penalty null space by default; this baseline
 //! does not. The standalone #1561 audit crosses both basis and shrinkage choices.
+//!
+//! PAIRED over draws, not one draw (#2395). Either engine's RMSE against the
+//! truth depends on which Poisson draw it fit, so one draw's ratio conflates the
+//! draw with the engine. The single draw this test used read gam 0.1845 against
+//! mgcv `ps` 0.1565, and mgcv `cr` 0.1671 (MSI job 578202 at 90c86056d). Both engines
+//! now fit the SAME `K_SEEDS` count draws on the same grid, and the decision is
+//! `assert_paired_match_or_beat`. It compares them draw by draw so the common
+//! noise cancels, keeps the 10% ceiling on the averaged metric, and additionally
+//! refuses gam being RESOLVED worse across draws. The first draw is the seed the
+//! single-draw version used. The pair is emitted before any assertion runs.
+//!
 //! The legacy rel_l2 / pearson "closeness to mgcv" numbers are still printed for
 //! context but are NOT pass criteria — reproducing a peer tool's noisy fit is
 //! not a quality claim; recovering the truth is.
@@ -40,7 +51,8 @@
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
 use gam::test_support::reference::{
-    Column, QualityPair, pad_to, pearson, relative_l2, rmse, run_r,
+    Column, PairedFoldComparison, QualityPair, assert_paired_match_or_beat, pad_to, pearson,
+    relative_l2, rmse, run_r,
 };
 use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
@@ -58,22 +70,20 @@ use std::path::Path;
 // `age` (years), `badh` = self-reported bad-health indicator (0/1).
 const BADHEALTH_CSV: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/bench/datasets/badhealth.csv");
 
-/// Deterministic 15×20 Poisson surface (n=300): x on an even grid over [0,2π],
-/// z on an even grid over [-1,1], log-mean eta = 0.8 + 0.3*sin(x) + 0.2*z^2,
-/// y ~ Poisson(exp(eta)) with the Poisson draws seeded (seed=345). The grid is
-/// fully deterministic and only the response carries noise, so the identical
-/// (x, z, y) triples reach both gam and mgcv via the shared CSV the harness
-/// writes — there is no sampling difference between the two engines.
-///
-/// Returns `(x, y, z, mu_true)` where `mu_true[i] = exp(eta_true(x[i], z[i]))`
-/// is the *noiseless* mean surface the smoother must recover.
-fn make_poisson_tensor_data(seed: u64) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
-    let mut rng = StdRng::seed_from_u64(seed);
+/// Paired Poisson draws per panel. See the "PAIRED over draws" note above.
+const K_SEEDS: usize = 25;
+/// Seed of the first draw: the single draw the unpaired version of this test used.
+const FIRST_SEED: u64 = 345;
+
+/// The deterministic 15×20 grid (n=300) and its noiseless mean surface: x on an
+/// even grid over [0,2π], z on an even grid over [-1,1], log-mean
+/// eta = 0.8 + 0.3*sin(x) + 0.2*z^2, and `mu_true[i] = exp(eta_true(x[i], z[i]))`
+/// is the surface the smoother must recover.
+fn poisson_tensor_grid() -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let nx = 15usize;
     let nz = 20usize;
     let mut x = Vec::with_capacity(nx * nz);
     let mut z = Vec::with_capacity(nx * nz);
-    let mut y = Vec::with_capacity(nx * nz);
     let mut mu_true = Vec::with_capacity(nx * nz);
     for ix in 0..nx {
         // even grid endpoints included: x in [0, 2π], z in [-1, 1].
@@ -81,26 +91,39 @@ fn make_poisson_tensor_data(seed: u64) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64
         for iz in 0..nz {
             let zi = -1.0 + 2.0 * (iz as f64) / ((nz - 1) as f64);
             let eta = 0.8 + 0.3 * xi.sin() + 0.2 * zi * zi;
-            let lambda = eta.exp();
-            let pois = Poisson::new(lambda).expect("poisson lambda > 0");
-            let yi: f64 = pois.sample(&mut rng);
             x.push(xi);
             z.push(zi);
-            y.push(yi);
-            mu_true.push(lambda);
+            mu_true.push(eta.exp());
         }
     }
-    (x, y, z, mu_true)
+    (x, z, mu_true)
 }
 
-#[test]
-fn gam_poisson_tensor_recovers_true_mean_surface() {
-    init_parallelism();
+/// One draw of the counts, `y[i] ~ Poisson(mu_true[i])`, from the stream seeded
+/// by `seed` in grid order. Only the response carries noise, so the identical
+/// (x, z, y) triples reach both gam and mgcv via the shared CSV the harness
+/// writes — there is no sampling difference between the two engines.
+fn poisson_counts(mu_true: &[f64], seed: u64) -> Vec<f64> {
+    let mut rng = StdRng::seed_from_u64(seed);
+    mu_true
+        .iter()
+        .map(|&lambda| -> f64 {
+            Poisson::new(lambda)
+                .expect("poisson lambda > 0")
+                .sample(&mut rng)
+        })
+        .collect()
+}
 
-    // ---- identical synthetic data for both engines ------------------------
-    let (x, y, z, mu_true) = make_poisson_tensor_data(345);
+/// Arithmetic mean of a panel column.
+fn mean(values: &[f64]) -> f64 {
+    values.iter().sum::<f64>() / values.len() as f64
+}
+
+/// gam's `y ~ te(x, z, k=[6,6])` Poisson(log) REML fit on one draw: the fitted
+/// mean on the response scale at the training points, and the fit's total EDF.
+fn gam_poisson_tensor_mean(x: &[f64], z: &[f64], y: &[f64]) -> (Vec<f64>, f64) {
     let n = x.len();
-    assert_eq!(n, 300, "grid 15x20 => n=300");
 
     // ---- build the encoded dataset for gam (columns x, z, y) --------------
     let headers = vec!["x".to_string(), "z".to_string(), "y".to_string()];
@@ -137,98 +160,179 @@ fn gam_poisson_tensor_recovers_true_mean_surface() {
     let design = build_term_collection_design(grid.view(), &fit.resolvedspec)
         .expect("rebuild tensor design at training points");
     let gam_eta = design.design.apply(&fit.fit.beta);
-    let gam_mean: Vec<f64> = gam_eta.iter().map(|e| e.exp()).collect();
+    (gam_eta.iter().map(|e| e.exp()).collect(), gam_edf)
+}
 
-    // ---- fit mgcv's P-spline baseline and natural-cubic diagnostic --------
-    let r = run_r(
-        &[
-            Column::new("x", &x),
-            Column::new("z", &z),
-            Column::new("y", &y),
-        ],
-        r#"
-        suppressPackageStartupMessages(library(mgcv))
-        m <- gam(y ~ te(x, z, bs = "ps", k = c(6, 6)), data = df,
-                 family = poisson(link = "log"), method = "REML")
-        emit("fitted", as.numeric(fitted(m)))
-        emit("edf", sum(m$edf))
-        natural <- gam(y ~ te(x, z, bs = "cr", k = c(6, 6)), data = df,
-                       family = poisson(link = "log"), method = "REML")
-        emit("natural_fitted", as.numeric(fitted(natural)))
-        emit("natural_edf", sum(natural$edf))
-        "#,
-    );
-    let mgcv_mean = r.vector("fitted");
-    let mgcv_edf = r.scalar("edf");
-    assert_eq!(mgcv_mean.len(), n, "mgcv fitted length mismatch");
+#[test]
+fn gam_poisson_tensor_recovers_true_mean_surface() {
+    init_parallelism();
 
-    // ---- OBJECTIVE METRIC: recover the TRUE mean surface ------------------
-    // The pass/fail quantities are errors against `mu_true` (the noiseless
-    // surface the data was generated from), NOT closeness to mgcv. We measure
-    // each smoother's RMSE to the truth on the response scale.
-    let gam_err = rmse(&gam_mean, &mu_true);
-    let mgcv_err = rmse(mgcv_mean, &mu_true);
-    let natural_err = rmse(r.vector("natural_fitted"), &mu_true);
-    eprintln!(
-        "Poisson tensor basis diagnostic: mgcv_ps_rmse={mgcv_err:.8} \
-         mgcv_cr_rmse={natural_err:.8} mgcv_cr_edf={:.5}",
-        r.scalar("natural_edf")
-    );
-
+    // ---- the fixed grid and its truth, shared by every draw ---------------
+    let (x, z, mu_true) = poisson_tensor_grid();
+    let n = x.len();
+    assert_eq!(n, 300, "grid 15x20 => n=300");
     let mu_min = mu_true.iter().copied().fold(f64::INFINITY, f64::min);
     let mu_max = mu_true.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let mu_range = mu_max - mu_min;
 
-    // Context only (peer-tool agreement); explicitly NOT a pass criterion.
-    let rel = relative_l2(&gam_mean, mgcv_mean);
-    let corr = pearson(&gam_mean, mgcv_mean);
+    // ---- gam on every draw, and the long-format data mgcv replays ---------
+    let mut gam_errs = Vec::with_capacity(K_SEEDS);
+    let mut gam_means = Vec::with_capacity(K_SEEDS);
+    let mut gam_edfs = Vec::with_capacity(K_SEEDS);
+    let mut long_seed = Vec::with_capacity(K_SEEDS * n);
+    let mut long_x = Vec::with_capacity(K_SEEDS * n);
+    let mut long_z = Vec::with_capacity(K_SEEDS * n);
+    let mut long_y = Vec::with_capacity(K_SEEDS * n);
+    for k in 0..K_SEEDS {
+        let seed = FIRST_SEED + k as u64;
+        let y = poisson_counts(&mu_true, seed);
+        let (gam_mean, gam_edf) = gam_poisson_tensor_mean(&x, &z, &y);
+        let gam_err = rmse(&gam_mean, &mu_true);
+        eprintln!(
+            "poisson te(x,z) draw seed={seed}: gam_rmse_to_truth={gam_err:.6} gam_edf={gam_edf:.3}"
+        );
+        gam_errs.push(gam_err);
+        gam_means.push(gam_mean);
+        gam_edfs.push(gam_edf);
+        long_seed.resize(long_seed.len() + n, seed as f64);
+        long_x.extend_from_slice(&x);
+        long_z.extend_from_slice(&z);
+        long_y.extend_from_slice(&y);
+    }
+
+    // ---- the SAME draws through mgcv's P-spline baseline and natural-cubic
+    // diagnostic, in ONE R session ------------------------------------------
+    let r = run_r(
+        &[
+            Column::new("seed", &long_seed),
+            Column::new("x", &long_x),
+            Column::new("z", &long_z),
+            Column::new("y", &long_y),
+        ],
+        r#"
+        suppressPackageStartupMessages(library(mgcv))
+        fitted_all <- c()
+        edf_all <- c()
+        natural_all <- c()
+        natural_edf_all <- c()
+        for (s in sort(unique(df$seed))) {
+            d <- df[df$seed == s, c("x", "z", "y")]
+            m <- gam(y ~ te(x, z, bs = "ps", k = c(6, 6)), data = d,
+                     family = poisson(link = "log"), method = "REML")
+            fitted_all <- c(fitted_all, as.numeric(fitted(m)))
+            edf_all <- c(edf_all, sum(m$edf))
+            natural <- gam(y ~ te(x, z, bs = "cr", k = c(6, 6)), data = d,
+                           family = poisson(link = "log"), method = "REML")
+            natural_all <- c(natural_all, as.numeric(fitted(natural)))
+            natural_edf_all <- c(natural_edf_all, sum(natural$edf))
+        }
+        emit("fitted", fitted_all)
+        emit("edf", edf_all)
+        emit("natural_fitted", natural_all)
+        emit("natural_edf", natural_edf_all)
+        "#,
+    );
+    let mgcv_fitted = r.vector("fitted");
+    let natural_fitted = r.vector("natural_fitted");
+    let mgcv_edfs = r.vector("edf");
+    let natural_edfs = r.vector("natural_edf");
+    assert_eq!(
+        mgcv_fitted.len(),
+        K_SEEDS * n,
+        "mgcv fitted panel length mismatch"
+    );
+    assert_eq!(
+        natural_fitted.len(),
+        K_SEEDS * n,
+        "mgcv natural-cubic fitted panel length mismatch"
+    );
+    assert_eq!(mgcv_edfs.len(), K_SEEDS, "mgcv edf panel length mismatch");
+    assert_eq!(
+        natural_edfs.len(),
+        K_SEEDS,
+        "mgcv natural-cubic edf panel length mismatch"
+    );
+
+    // ---- OBJECTIVE METRIC per draw: recover the TRUE mean surface ---------
+    // The pass/fail quantities are errors against `mu_true` (the noiseless
+    // surface the data was generated from), NOT closeness to mgcv. We measure
+    // each smoother's RMSE to the truth on the response scale.
+    let mut mgcv_errs = Vec::with_capacity(K_SEEDS);
+    let mut natural_errs = Vec::with_capacity(K_SEEDS);
+    let mut rel_total = 0.0;
+    let mut corr_total = 0.0;
+    for k in 0..K_SEEDS {
+        let mgcv_mean = &mgcv_fitted[k * n..(k + 1) * n];
+        mgcv_errs.push(rmse(mgcv_mean, &mu_true));
+        natural_errs.push(rmse(&natural_fitted[k * n..(k + 1) * n], &mu_true));
+        // Context only (peer-tool agreement); explicitly NOT a pass criterion.
+        rel_total += relative_l2(&gam_means[k], mgcv_mean);
+        corr_total += pearson(&gam_means[k], mgcv_mean);
+    }
+    let panel = PairedFoldComparison::new(&gam_errs, &mgcv_errs, true);
+    let natural_panel = PairedFoldComparison::new(&gam_errs, &natural_errs, true);
     eprintln!(
-        "poisson te(x,z) truth recovery: n={n} mu_range=[{mu_min:.3},{mu_max:.3}] \
-         gam_rmse_to_truth={gam_err:.4} mgcv_rmse_to_truth={mgcv_err:.4} \
-         gam_edf={gam_edf:.3} mgcv_edf={mgcv_edf:.3} \
-         (context: rel_l2_vs_mgcv={rel:.4} pearson_vs_mgcv={corr:.5})"
+        "poisson te(x,z) K={K_SEEDS}-draw paired truth recovery: n={n} \
+         mu_range=[{mu_min:.3},{mu_max:.3}] fold-mean rmse_to_truth gam={:.4} \
+         mgcv_ps={:.4} mgcv_cr={:.4} mean_edf gam={:.3} mgcv_ps={:.3} mgcv_cr={:.3} \
+         (context: mean rel_l2_vs_mgcv={:.4} mean pearson_vs_mgcv={:.5})",
+        panel.gam_mean,
+        panel.reference_mean,
+        natural_panel.reference_mean,
+        mean(&gam_edfs),
+        mean(mgcv_edfs),
+        mean(natural_edfs),
+        rel_total / K_SEEDS as f64,
+        corr_total / K_SEEDS as f64,
+    );
+    eprintln!("{}", panel.report("poisson_tensor::rmse_to_truth"));
+    // The natural-cubic mgcv fit builds the margin kind gam builds by default.
+    // Context only, never a pass criterion.
+    eprintln!(
+        "{}",
+        natural_panel.report("poisson_tensor::rmse_to_truth_vs_mgcv_cr")
     );
     eprintln!(
         "{}",
-        QualityPair::error(
+        QualityPair::paired(
             "families",
             "quality_vs_mgcv_poisson_tensor",
             "rmse_to_truth",
-            gam_err,
             "mgcv",
-            mgcv_err,
+            &panel,
         )
         .line()
     );
+
+    // EDF sanity only (complexity in a signal-appropriate range), never a
+    // match-to-reference: the surface has real 2-D structure (sin(x) + z^2), so
+    // a sensible fit uses more than a flat plane yet far less than the full
+    // 6*6-1 = 35-dim tensor basis. Every draw's fit must be sane.
+    for (k, &gam_edf) in gam_edfs.iter().enumerate() {
+        assert!(
+            gam_edf > 1.0 && gam_edf < 35.0,
+            "Poisson+te() effective degrees of freedom outside the sane range \
+             (1, 35) on draw seed={}: gam_edf={gam_edf:.3}",
+            FIRST_SEED + k as u64
+        );
+    }
 
     // PRIMARY claim: gam recovers the true mean surface. The absolute bar is a
     // small fraction of the signal range; well inside the per-cell Poisson
     // sampling sd, but tight enough that a biased/smeared tensor fit fails.
     let abs_bar = 0.18 * mu_range;
     assert!(
-        gam_err <= abs_bar,
+        panel.gam_mean <= abs_bar,
         "Poisson+te() failed to recover the true mean surface: \
-         RMSE(gam, truth)={gam_err:.4} > {abs_bar:.4} (= 0.18 * range {mu_range:.4})"
+         fold-mean RMSE(gam, truth)={:.4} > {abs_bar:.4} (= 0.18 * range {mu_range:.4})",
+        panel.gam_mean
     );
 
-    // SECONDARY claim (match-or-beat ACCURACY): gam's error to the truth is no
-    // worse than the mature tensor smoother's error to the same truth by >10%.
+    // SECONDARY claim (match-or-beat ACCURACY), paired across the K shared draws:
+    // gam's error to the truth may not exceed the mature tensor smoother's by
+    // more than 10% on the draw average, nor be resolved worse draw by draw.
     // mgcv is a baseline to match-or-beat on accuracy, not a correctness oracle.
-    assert!(
-        gam_err <= 1.10 * mgcv_err,
-        "Poisson+te() less accurate than mgcv at recovering the truth: \
-         RMSE(gam, truth)={gam_err:.4} > 1.10 * RMSE(mgcv, truth)={mgcv_err:.4}"
-    );
-
-    // EDF sanity only (complexity in a signal-appropriate range), never a
-    // match-to-reference: the surface has real 2-D structure (sin(x) + z^2), so
-    // a sensible fit uses more than a flat plane yet far less than the full
-    // 6*6-1 = 35-dim tensor basis.
-    assert!(
-        gam_edf > 1.0 && gam_edf < 35.0,
-        "Poisson+te() effective degrees of freedom outside the sane range \
-         (1, 35): gam_edf={gam_edf:.3}"
-    );
+    assert_paired_match_or_beat("poisson_tensor::rmse_to_truth", &panel, 1.10);
 }
 
 /// Mean Poisson deviance of a count predictor: the held-out goodness-of-fit
@@ -341,9 +445,9 @@ fn gam_poisson_tensor_recovers_true_mean_surface_on_real_data() {
     let gam_test_eta = test_design.design.apply(&fit.fit.beta);
     let gam_test_mean: Vec<f64> = gam_test_eta.iter().map(|e| e.exp()).collect();
 
-    // ---- fit the SAME model on TRAIN with mgcv, predict the SAME TEST ------
-    // bs="ps" margins match gam's te() construction (cubic B-spline + 2nd-order
-    // penalty). The test columns ride along padded; only the first k are read.
+    // ---- fit the SAME capability on TRAIN with mgcv, predict the SAME TEST ---
+    // mgcv's baseline is the P-spline smooth-by-factor described in the R body.
+    // The test columns ride along padded; only the first k are read.
     let r = run_r(
         &[
             Column::new("age", &train_age),
@@ -360,8 +464,9 @@ fn gam_poisson_tensor_recovers_true_mean_surface_on_real_data() {
         # step size" / fails to converge. The mgcv-idiomatic encoding of the SAME
         # age x badh interaction that gam's te(age, badh) represents over a binary
         # margin is a smooth-by-factor: a separate s(age) curve per badh level
-        # plus the badh main effect (the age margin keeps the ps basis to match
-        # gam's cubic-B-spline + 2nd-order-penalty construction).
+        # plus the badh main effect. The age curve is a ps basis, while gam's
+        # default te() margin with k >= 3 is a natural cubic regression spline:
+        # the same capability, not the same construction.
         df$badhf <- factor(df$badh)
         m <- gam(numvisit ~ s(age, bs = "ps", by = badhf) + badhf, data = df,
                  family = poisson(link = "log"), method = "REML")
