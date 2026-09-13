@@ -125,8 +125,8 @@ fn build_underdetermined_specs(n: usize, n_levels: usize) -> Vec<ParameterBlockS
     vec![t_spec, th_spec]
 }
 
-/// Drive `canonicalize_for_identifiability` on a deliberately bounded-stack
-/// worker and assert it satisfies BOTH #1388 halves:
+/// Drive `canonicalize_for_identifiability_with_operating_scalars` on a
+/// deliberately bounded-stack worker and assert it satisfies BOTH #1388 halves:
 ///   * does NOT overflow the bounded stack (a data-proportional / unbounded
 ///     fan-out would abort the worker — the `join` observes that), and
 ///   * does NOT falsely trip the post-T rank invariant (returns `Ok`, channel-

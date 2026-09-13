@@ -481,9 +481,7 @@ pub struct SaeManifoldTerm {
     /// structure-search [`gam_solve::structure_search::SearchLedger`].
     pub(crate) collapse_events: Vec<CollapseEvent>,
     /// Per-row **design honesty weights** (#991): Horvitz–Thompson inclusion
-    /// corrections from a designed corpus subsample
-    /// ([`gam_solve::row_sampling_measure::RowSamplingMeasure::designed_subsample`]),
-    /// self-normalized to
+    /// corrections from a designed corpus subsample, self-normalized to
     /// mean `1.0` over the term's rows so dispersion, dof, and the
     /// data-vs-penalty balance stay consistent at the fitted sample size while
     /// the design's selection bias is removed (oversampled loud rows are

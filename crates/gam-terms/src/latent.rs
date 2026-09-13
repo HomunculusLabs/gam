@@ -925,16 +925,19 @@ impl LatentCoordValues {
     ) -> Self {
         id_mode
             .validate()
-            .expect("invalid LatentIdMode for LatentCoordValues::from_flat");
+            .expect("invalid LatentIdMode for LatentCoordValues::from_flat_with_manifold_and_retraction_and_id");
         assert_eq!(
             values.len(),
             n_obs * latent_dim,
-            "LatentCoordValues::from_flat: length {} != n_obs * latent_dim = {}",
+            "LatentCoordValues::from_flat_with_manifold_and_retraction_and_id: length {} != n_obs * latent_dim = {}",
             values.len(),
             n_obs * latent_dim
         );
         retraction_registry
-            .validate_dim(latent_dim, "LatentCoordValues::from_flat_with_manifold")
+            .validate_dim(
+                latent_dim,
+                "LatentCoordValues::from_flat_with_manifold_and_retraction_and_id",
+            )
             .expect("invalid latent retraction dimension");
         let mut out = Self {
             id,

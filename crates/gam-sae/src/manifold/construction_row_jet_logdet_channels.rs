@@ -161,15 +161,8 @@ mod tests_hand_reference {
         /// is now test-only as the strongest non-abstracted performance and
         /// correctness baseline.
         ///
-        /// The generic jet is retained as an independent oracle: the program
-        /// tower (`SaeReconstructionRowProgram::reconstruction_column` /
-        /// `reconstruction_all_columns_packed` / `beta_border_tower`) is
-        /// cross-checked against this hand
-        /// arithmetic to ≤1e-9 (value/grad) / ≤1e-8 (Hessian) by
-        /// `sae_row_jet_program_matches_production_row_jets_on_converged_cache` (on a
-        /// real converged cache, weighted + unweighted √w arms) and by the
-        /// `row_jet_program` unit oracles (incl. the planted-cross-block-sign-flip
-        /// #736 guard).
+        /// The #932 compiled-schedule tests in `tests_row_jet_and_outer_objective_780.rs`
+        /// compare the compiled row-jet schedules against this hand arithmetic.
         ///
         pub(crate) fn fill_row_jets_hand_reference(
             &self,

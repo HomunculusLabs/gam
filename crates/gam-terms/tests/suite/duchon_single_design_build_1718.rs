@@ -38,10 +38,8 @@ use gam_terms::basis::{BasisMetadata, CenterStrategy, DuchonBasisSpec, DuchonNul
 use ndarray::Array2;
 use std::sync::Mutex;
 
-/// `duchon_design_build_count` is a PROCESS-WIDE counter, so any Duchon build on
-/// another test thread would pollute a `before`/`after` delta. Serialize every
-/// build in this file behind one mutex so the counted region is never racing a
-/// concurrent build. (`cargo test` runs test fns in parallel by default.)
+/// Serializes every Duchon build in this file behind one mutex. (`cargo test`
+/// runs test fns in parallel by default.)
 static DESIGN_BUILD_COUNT_GUARD: Mutex<()> = Mutex::new(());
 
 /// A deterministic 2-D scatter, large enough to take the dense cold-build path
@@ -94,8 +92,7 @@ fn duchon_fused_reparam_design_equals_unfused_rebuild() {
     let data = spatial_data_2d(400);
     let spec = reparam_branch_duchon_spec_2d();
 
-    // Share the counter guard so this test's builds never overlap the counted
-    // region of the sibling count test.
+    // Hold the file's build guard for the duration of this test's builds.
     let count_guard = DESIGN_BUILD_COUNT_GUARD
         .lock()
         .unwrap_or_else(|e| e.into_inner());

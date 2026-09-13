@@ -3157,10 +3157,9 @@ fn evaluate_marginal_slope_row(
         let beta_w = beta_time.slice(s![p_time_base..]).to_owned();
         let eta_exit_row = Array1::from_elem(1, q_exit_base);
         let deriv_row = Array1::from_elem(1, qd_exit_base);
-        // Only the VALUE basis is wanted here. Going through
-        // `buildwiggle_block_input_from_knots` also assembled the penalty set —
-        // discarded one line later — which since gam#2647 additionally costs a
-        // function Gram and a generalized eigendecomposition per predicted row.
+        // Only the VALUE basis is wanted here, so the design is built without a
+        // penalty set: since gam#2647 assembling one costs a function Gram and a
+        // generalized eigendecomposition per predicted row.
         let exit_design = monotone_wiggle_basis_with_derivative_order(
             eta_exit_row.view(),
             &knots,

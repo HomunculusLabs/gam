@@ -1,7 +1,7 @@
 #![cfg(test)]
-//! `sae_row_jet_program_matches_production_row_jets_on_converged_cache` and
-//! `ordered_beta_bernoulli_outer_objective_advertises_analytic_gradient`, split verbatim out
-//! of `tests.rs` to keep that tracked file under the #780 10k-line gate.
+//! The #932 compiled-schedule tests against the hand row-jet reference and
+//! `ordered_beta_bernoulli_outer_objective_advertises_analytic_gradient`, split out of
+//! `tests.rs` to keep that tracked file under the #780 10k-line gate.
 //! Declared as a sibling `#[cfg(test)] mod` in `mod.rs`; the shared
 //! `gamma_fd_tiny_fixture` is sourced from the sibling `tests` module.
 //!

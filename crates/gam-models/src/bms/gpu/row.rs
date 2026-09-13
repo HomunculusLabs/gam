@@ -2,9 +2,7 @@
 //! derivative moments (built by Stage 1 in `src/gpu/cubic_cell/mod.rs`) into a
 //! row gradient and row-primary `r × r` Hessian.
 //!
-//! Math (mirrors the CPU reference
-//! `BernoulliMarginalSlope::lower_bms_flex_row_order2_from_parts` in
-//! `src/families/bernoulli_marginal_slope.rs`):
+//! Math:
 //!
 //! For each row `i`, with per-cell cubic predictor coefficients
 //! `C_c = (C0, C1, C2, C3)` and derivative moments `m_0..m_9`, build
@@ -1130,8 +1128,7 @@ pub(crate) fn launch_linux(
 // ─────────────────────────────────────────────────────────────────────────────
 // Phase 3: device-resident row Hessian + HVP / diagonal kernels.
 //
-// Math (mirrors the CPU oracle in
-// `src/families/bernoulli_marginal_slope.rs::exact_newton_joint_hessian_*_from_cache`):
+// Math:
 //
 //   Block layout (joint β):
 //     marginal = [0..p_m), slope = [p_m..p_m+p_g),
@@ -1282,12 +1279,9 @@ pub(crate) fn num_hvp_chunks(n: usize) -> usize {
 }
 
 /// NVRTC source: deterministic joint-gradient, HVP, diagonal, and dense
-/// partial+reduce kernels. All kernels mirror CPU oracles in this file.
+/// partial+reduce kernels.
 #[cfg(target_os = "linux")]
 pub(crate) const HVP_KERNEL_SOURCE: &str = r#"
-// CPU parity reference: cpu_oracle_bms_flex_row_hvp / cpu_oracle_bms_flex_row_diagonal
-// in this module.
-
 #define MAX_MULTI_RHS 8
 
 __device__ __forceinline__ double bms_flex_primary_direction(

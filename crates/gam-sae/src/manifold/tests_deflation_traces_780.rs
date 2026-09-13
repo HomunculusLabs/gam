@@ -92,7 +92,7 @@ pub(crate) fn ard_log_precision_trace_matches_dense_fd_pd_region_deflation() {
 }
 
 /// #Bug4 — the assignment log-strength ρ-trace must carry NO contribution from a
-/// FIXED (ungated) logit. `assignment_prior_grad_hdiag` zeroes the assembled
+/// FIXED (ungated) logit. The assembled assignment prior zeroes the
 /// `htt` diagonal entry of every fixed logit, so its ρ-derivative — which the
 /// `assignment_log_strength_hessian_trace` contracts against the selected-inverse
 /// diagonals — must also be zero. Equivalently, the trace must be INVARIANT to the
