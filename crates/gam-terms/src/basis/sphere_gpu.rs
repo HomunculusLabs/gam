@@ -848,7 +848,7 @@ struct SphereGpuContext {
 
 /// Process-wide sphere GPU backend. Lazy-initialised on first call to
 /// [`SphereGpuBackend::probe`].
-pub struct SphereGpuBackend {
+pub(crate) struct SphereGpuBackend {
     #[cfg(target_os = "linux")]
     inner: SphereGpuContext,
 }

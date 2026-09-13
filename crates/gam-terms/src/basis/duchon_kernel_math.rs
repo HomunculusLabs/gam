@@ -2578,7 +2578,7 @@ pub(crate) fn auto_seed_aniso_contrasts(
 /// How the Matérn forward design build interprets an *exactly all-zero*
 /// `aniso_log_scales` vector.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AnisoSeedMode {
+pub(crate) enum AnisoSeedMode {
     /// All-zero `η` is the κ-optimizer / `scale_dims` seeding sentinel: replace
     /// it with geometry-derived contrasts from the knot cloud
     /// (`auto_seed_aniso_contrasts`). This is the default for every internal

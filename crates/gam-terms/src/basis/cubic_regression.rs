@@ -38,7 +38,7 @@ use super::*;
 
 /// Precomputed natural cubic regression spline geometry for a fixed knot set.
 #[derive(Clone, Debug)]
-pub struct CubicRegressionBasis {
+pub(crate) struct CubicRegressionBasis {
     /// Knot locations `x*_1 < … < x*_k` (strictly increasing).
     pub knots: Array1<f64>,
     /// The `k × k` second-derivative map `F` (`δ = F β`); rows 0 and k-1 are zero.
@@ -71,10 +71,6 @@ impl CubicRegressionBasis {
         let h: Vec<f64> = (0..k - 1).map(|i| knots[i + 1] - knots[i]).collect();
         let f_matrix = build_f_matrix(&h, k)?;
         Ok(Self { knots, f_matrix })
-    }
-
-    pub fn num_basis(&self) -> usize {
-        self.knots.len()
     }
 
     /// The natural cubic regression roughness penalty `S = Dᵀ B⁻¹ D` (k×k).

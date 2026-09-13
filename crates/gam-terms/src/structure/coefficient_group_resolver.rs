@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// validates hierarchy relationships against it and never reinterprets the
 /// coordinates themselves.
 #[derive(Debug, Clone)]
-pub struct ResolvedGroup<C: Ord + Clone> {
+pub(crate) struct ResolvedGroup<C: Ord + Clone> {
     pub label: String,
     pub parent: Option<String>,
     pub coordinates: BTreeSet<C>,

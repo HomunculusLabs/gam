@@ -98,8 +98,8 @@
 //! and a SIMPLE (or sup-dominated) null has `E_{H0}[BF] ≤ 1` — the #907
 //! geometry-adjudication harness (circle vs clusters vs line, with its
 //! discrete-mixture null) is therefore ONE PRIOR-FREEZE away from anytime
-//! validity. The integration contract: route its per-batch BFs through
-//! [`EProcess::absorb`] instead of comparing a final BF to a threshold,
+//! validity. The integration contract: route its per-batch log BFs through
+//! [`EProcess::absorb_log`] instead of comparing a final BF to a threshold,
 //! and geometry claims inherit optional-stopping safety for free.
 //!
 //! **e-BH (the dictionary certificate).** Given e-values e_1..e_m for m
@@ -173,16 +173,6 @@ impl EProcess {
             steps: 0,
             log_e_max: 0.0,
         }
-    }
-
-    /// Absorb one conditionally-valid e-value (NOT in log space; must be
-    /// ≥ 0; `E[e | past] ≤ 1` under H0 is the caller's contract — e.g. a
-    /// universal-inference batch ratio or a fixed-prior Bayes factor).
-    pub fn absorb(&mut self, e_value: f64) -> Result<(), String> {
-        if e_value.is_nan() || e_value < 0.0 {
-            return Err(format!("e-value must be in [0, ∞], got {e_value}"));
-        }
-        self.absorb_log(e_value.ln())
     }
 
     /// Absorb a batch e-value supplied in log space (the only numerically

@@ -78,7 +78,7 @@ pub(crate) const PROFILE_SPOT_CHECK_POINTS: usize = 5;
 
 /// Certified Chebyshev interpolant of `(φ, q, t)` over `u = ln r ∈
 /// [u_lo, u_hi]` for one frozen [`RadialScalarKind`].
-pub struct RadialProfile {
+pub(crate) struct RadialProfile {
     pub(crate) u_lo: f64,
     pub(crate) u_hi: f64,
     pub(crate) m: usize,

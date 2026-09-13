@@ -55,7 +55,7 @@ string_lit = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" | "'" ~ (!"'" ~ ANY)* ~ "'" }
 struct FormulaParser;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FormulaDslParse {
+pub(crate) struct FormulaDslParse {
     pub response_expr: String,
     pub rhs_terms: Vec<String>,
 }

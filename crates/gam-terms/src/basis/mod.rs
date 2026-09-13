@@ -114,7 +114,7 @@ pub use bspline_build::*;
 pub use bspline_eval::*;
 pub use center_selection::*;
 pub use closed_form_operator::ClosedFormPenaltyOperator;
-pub use cubic_regression::*;
+pub(crate) use cubic_regression::*;
 pub use derivative_penalty::*;
 pub use duchon_kernel_math::*;
 pub(crate) use duchon_radial_profile::*;

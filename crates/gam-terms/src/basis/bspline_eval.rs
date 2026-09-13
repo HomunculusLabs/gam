@@ -23,19 +23,6 @@ pub struct Dense;
 /// Marker type for sparse basis matrix output.
 pub struct Sparse;
 
-/// Trait for selecting basis storage format at compile time.
-pub trait BasisOutput {
-    type Output;
-}
-
-impl BasisOutput for Dense {
-    type Output = Arc<Array2<f64>>;
-}
-
-impl BasisOutput for Sparse {
-    type Output = SparseColMat<usize, f64>;
-}
-
 /// Unified B-spline basis generation with configurable storage, knot source, and options.
 ///
 /// This function consolidates various basis generation functions into a single entry point.

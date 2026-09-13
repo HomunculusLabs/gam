@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 const KERNEL_OPERATOR_ROW_CHUNK_SIZE: usize = 2048;
 
-pub trait SpatialKernelEvaluator: Send + Sync + 'static {
+pub(crate) trait SpatialKernelEvaluator: Send + Sync + 'static {
     fn eval(&self, x: &[f64], c: &[f64]) -> f64;
 }
 

@@ -3477,5 +3477,14 @@
     },
     "reason": "#2469 follow-up to the BlockwiseFitOptions::ridge_policy deletion: gam_linalg::RidgePolicy's constructors and predicate have no remaining behaviour-changing reader, since solve_systemwith_policy used the policy only in an error string. DesignMatrix::solve_systemwith_policy is renamed solve_system_with_ridge_floor now that the ridge floor is its only extra argument.",
     "evidence": "At the base, git grep -n -w for each removed name finds its declaration, the test module in types.rs and the callers rewritten in this change. There is no gam-pyffi or python reference. Guarded cargo check --workspace --all-targets --exclude gam-pyffi with public_api_census.py on a temporary commit: job 608376 (stage rp23), /scratch.global/sauer354/pool/const2469b/rp123.608376.log."
+  },
+  {
+    "base": "e130760195c3782800f222ca3031da71b3bfb37f",
+    "removed": {
+      "crates/gam-terms/src/basis/cubic_regression.rs::num_basis": 1,
+      "crates/gam-terms/src/inference/structure_evidence.rs::absorb": 1
+    },
+    "reason": "#2899 slop: two uncalled public methods are deleted, CubicRegressionBasis::num_basis and EProcess::absorb, which only forwarded to absorb_log.",
+    "evidence": "public_functions() counts both pub fn declarations. At the base, git grep finds no caller of either, and pool job 606370 (r12b.p2.cargo.out) reported both as never used once their types were crate-visible."
   }
 ]

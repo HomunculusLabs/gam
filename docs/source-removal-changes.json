@@ -8248,5 +8248,16 @@
     ],
     "reason": "#2469 follow-up to the BlockwiseFitOptions::ridge_policy deletion: gam_linalg::RidgePolicy has no reader left that changes behaviour. DesignMatrix::solve_systemwith_policy used its argument only inside an error string, and its three production callers (the custom-family diagonal block solve, penalized_projection and LinearOperator::solve_system) passed solver_only(). The enum, its constructors, its predicate and its test module go with crates/gam-linalg/src/types.rs. solve_systemwith_policy is renamed solve_system_with_ridge_floor, because the ridge floor is now its only extra argument.",
     "evidence": "At the base, git grep -n -w RidgePolicy over crates, src, tests and gam-pyffi finds, outside types.rs, only the lib.rs and gam-problem re-exports, the matrix/mod.rs import and signatures, penalized_projection.rs, blockwise_solve.rs and test helpers or doc mentions. git grep -n -w solve_systemwith_policy finds the trait method, the DesignMatrix wrapper and the three callers rewritten here. Guarded cargo check --workspace --all-targets --exclude gam-pyffi on the change, with source_removal_guard.py and public_api_census.py on a temporary commit: job 608376 (stage rp23), /scratch.global/sauer354/pool/const2469b/rp123.608376.log."
+  },
+  {
+    "base": "e130760195c3782800f222ca3031da71b3bfb37f",
+    "items": [
+      "crates/gam-terms/src/basis/bspline_eval.rs:trait:BasisOutput",
+      "crates/gam-terms/src/basis/bspline_eval.rs:type:Output",
+      "crates/gam-terms/src/basis/cubic_regression.rs:fn:num_basis",
+      "crates/gam-terms/src/inference/structure_evidence.rs:fn:absorb"
+    ],
+    "reason": "#2899 slop: the gam-terms narrowing census exposed three items nothing uses. basis::BasisOutput was a trait with two impls (Dense, Sparse) that no bound names and no code reads an Output from; create_basis dispatches on BasisOutputFormat, which stays. CubicRegressionBasis::num_basis and EProcess::absorb had no caller; absorb only forwarded to absorb_log, which the module docs now name. The same commit narrows seven gam-terms types that only gam-terms names, and makes the cubic_regression glob re-export crate-private because nothing in that module stays public.",
+    "evidence": "At the base, git grep -n -w BasisOutput finds only bspline_eval.rs:27 (the trait) and its impls at :31 and :35. The removed type:Output declarations are those three items' associated types; BasisOutputFormat's own type Output declarations survive. No Rust source calls CubicRegressionBasis::num_basis or EProcess::absorb; the other .absorb( calls in gam-linalg and gam-sae belong to unrelated types, and the only other absorb mention was the module doc link at structure_evidence.rs:102. Pool job 606370 (log /scratch.global/sauer354/pool/prune-api-b/r12b.606370.log, r12b.p2.cargo.out) compiled the census with these types crate-visible, and rustc reported trait BasisOutput is never used, method num_basis is never used and method absorb is never used."
   }
 ]
