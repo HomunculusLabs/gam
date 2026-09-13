@@ -761,6 +761,7 @@ pub(crate) fn prepare_survival_location_scale_model(
         wiggle_knots: spec.linkwiggle_block.as_ref().map(|w| w.knots.clone()),
         wiggle_degree: spec.linkwiggle_block.as_ref().map(|w| w.degree),
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
+        jeffreys_armed: true,
     };
 
     let mut blockspecs = vec![timespec, thresholdspec, log_sigmaspec];

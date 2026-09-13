@@ -20,7 +20,7 @@
 use crate::custom_family::{
     BlockWorkingSet, BlockwiseFitOptions, ConstraintSet, CustomFamily,
     ExactNewtonJointGradientEvaluation, ExactNewtonJointHessianWorkspace, FamilyEvaluation,
-    ParameterBlockSpec, ParameterBlockState, PenaltyMatrix, fit_custom_family,
+    ParameterBlockSpec, ParameterBlockState, PenaltyMatrix, fit_custom_family_arming_on_evidence,
     fit_custom_family_fixed_log_lambdas,
 };
 use crate::fit_orchestration::drivers::freeze_term_collection_from_design;
@@ -386,6 +386,10 @@ pub struct LatentSurvivalFamily {
     /// when the baseline carries no outer coordinates (#2714).
     pub(crate) baseline_theta_rows:
         Option<Arc<crate::survival::construction::LatentSurvivalOffsetGeometry>>,
+    /// Whether this member's Jeffreys/Firth prior is armed. A fit arms it only
+    /// on the unarmed fit's own evidence, through
+    /// `fit_custom_family_arming_on_evidence` (#979).
+    pub(crate) jeffreys_armed: bool,
 }
 
 #[derive(Clone)]
@@ -405,6 +409,10 @@ pub(crate) struct LatentBinaryFamily {
     /// [`LatentSurvivalFamily::baseline_theta_rows`]).
     pub(crate) baseline_theta_rows:
         Option<Arc<crate::survival::construction::LatentSurvivalOffsetGeometry>>,
+    /// Whether this member's Jeffreys/Firth prior is armed. A fit arms it only
+    /// on the unarmed fit's own evidence, through
+    /// `fit_custom_family_arming_on_evidence` (#979).
+    pub(crate) jeffreys_armed: bool,
 }
 
 impl LatentSurvivalFamily {
@@ -704,6 +712,7 @@ pub(crate) fn fit_latent_survival_terms(
         time_linear_constraints: time_prepared.linear_constraints.clone(),
         quadctx: Arc::new(QuadratureContext::new()),
         baseline_theta_rows: None,
+        jeffreys_armed: true,
     };
 
     let mut blocks = vec![
@@ -866,7 +875,7 @@ pub(crate) fn fit_latent_survival_terms(
             options,
         )?,
         None => {
-            let fit = fit_custom_family(&family, &blocks, options).map_err(|e| e.to_string())?;
+            let fit = fit_custom_family_arming_on_evidence(&family, &blocks, options).map_err(|e| e.to_string())?;
             (fit, family, spec.baseline_config.clone())
         }
     };
@@ -956,7 +965,7 @@ impl LatentBaselineChartFamily for LatentBinaryFamily {
 /// derivative-guard constraints built from the moved `o_D`; no design, knot or
 /// penalty moves. Working precision is the chart's only domain: a θ whose offsets
 /// leave the likelihood's domain is refused at evaluation.
-fn fit_latent_baseline_axes<F: LatentBaselineChartFamily>(
+fn fit_latent_baseline_axes<F: LatentBaselineChartFamily + crate::custom_family::JeffreysArming>(
     data: ArrayView2<'_, f64>,
     seed_family: &F,
     seed_blocks: &[ParameterBlockSpec],
@@ -1082,7 +1091,7 @@ fn fit_latent_baseline_axes<F: LatentBaselineChartFamily>(
             let (family, blocks) = realize(theta)?;
             let fit = match provenance {
                 SpatialFitProvenance::NoOuterOptimization => {
-                    fit_custom_family(&family, &blocks, options).map_err(|error| error.to_string())?
+                    fit_custom_family_arming_on_evidence(&family, &blocks, options).map_err(|error| error.to_string())?
                 }
                 SpatialFitProvenance::Certified { outer, mode } => {
                     let exact_options = crate::outer_subsample::exact_outer_options(options);
@@ -1206,6 +1215,7 @@ pub(crate) fn fit_latent_binary_terms(
         time_linear_constraints: time_prepared.linear_constraints.clone(),
         quadctx: Arc::new(QuadratureContext::new()),
         baseline_theta_rows: None,
+        jeffreys_armed: true,
     };
 
     let blocks = vec![
@@ -1239,7 +1249,7 @@ pub(crate) fn fit_latent_binary_terms(
             options,
         )?,
         None => {
-            let fit = fit_custom_family(&family, &blocks, options).map_err(|e| e.to_string())?;
+            let fit = fit_custom_family_arming_on_evidence(&family, &blocks, options).map_err(|e| e.to_string())?;
             (fit, family, spec.baseline_config.clone())
         }
     };

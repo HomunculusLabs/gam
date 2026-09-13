@@ -151,7 +151,7 @@ fn fit_survival_location_scale_with_geometry_authority(
             fit_reduced_parametric_aft(&prepared, &options)?
         }
         SurvivalLocationScaleFitAuthority::Direct => {
-            fit_custom_family(&prepared.family, &prepared.blockspecs, &options).map_err(|error| error.to_string())?
+            fit_custom_family_arming_on_evidence(&prepared.family, &prepared.blockspecs, &options).map_err(|error| error.to_string())?
         }
         // A reduced fit carries no smoothing coordinate, so it reaches this arm
         // only through the inverse-link shape axes (#2904): the certificate is

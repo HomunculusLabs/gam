@@ -38,6 +38,10 @@ pub(crate) struct SurvivalLocationScaleFamily {
     /// and the event Jacobian gains `−log σ − log t`. `None` everywhere else.
     pub(crate) location_log_time: Option<LocationLogTimeOffset>,
     pub(crate) policy: gam_runtime::resource::ResourcePolicy,
+    /// Whether this member's Jeffreys/Firth prior is armed. A fit arms it only
+    /// on the unarmed fit's own evidence, through
+    /// `fit_custom_family_arming_on_evidence` (#979).
+    pub(crate) jeffreys_armed: bool,
 }
 
 /// The σ-scaled log-t AFT location baseline (issue #892), applied to the `q`

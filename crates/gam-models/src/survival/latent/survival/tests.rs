@@ -27,6 +27,7 @@
             time_linear_constraints: None,
             quadctx: Arc::new(QuadratureContext::new()),
             baseline_theta_rows: None,
+            jeffreys_armed: true,
         }
     }
 
@@ -225,6 +226,7 @@
             time_linear_constraints: None,
             quadctx: Arc::new(QuadratureContext::new()),
             baseline_theta_rows: None,
+            jeffreys_armed: true,
         }
     }
 
@@ -367,6 +369,7 @@
             time_linear_constraints: None,
             quadctx: Arc::new(QuadratureContext::new()),
             baseline_theta_rows: None,
+            jeffreys_armed: true,
         }
     }
 
@@ -3407,6 +3410,7 @@
             time_linear_constraints: None,
             quadctx: Arc::new(QuadratureContext::new()),
             baseline_theta_rows: None,
+            jeffreys_armed: true,
         }
     }
 
@@ -3568,6 +3572,7 @@
             time_linear_constraints: None,
             quadctx: Arc::new(QuadratureContext::new()),
             baseline_theta_rows: None,
+            jeffreys_armed: true,
         };
         let age_entry = array![0.4, 0.7, 1.1, 0.5];
         let age_exit = array![1.9, 2.6, 3.4, 4.2];

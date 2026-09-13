@@ -437,6 +437,7 @@ fn survival_exact_newton_test_family() -> SurvivalLocationScaleFamily {
         wiggle_degree: None,
         location_log_time: None,
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
+        jeffreys_armed: true,
     }
 }
 
@@ -890,6 +891,7 @@ fn survival_ls_default_guard_unit_family() -> SurvivalLocationScaleFamily {
         wiggle_degree: None,
         location_log_time: None,
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
+        jeffreys_armed: true,
     }
 }
 
@@ -1002,6 +1004,7 @@ fn survival_ls_joint_oracle_family(
         wiggle_degree: None,
         location_log_time: None,
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
+        jeffreys_armed: true,
     }
 }
 
@@ -5456,6 +5459,7 @@ fn heart_failure_structural_time_small() {
         wiggle_degree: None,
         location_log_time: None,
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
+        jeffreys_armed: true,
     };
 
     // Build initial states with beta=0 and a feasible positive derivative offset.
@@ -5585,6 +5589,7 @@ fn evaluate_survival_location_scale_rejects_non_finite_d_eta_dt() {
         wiggle_degree: None,
         location_log_time: None,
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
+        jeffreys_armed: true,
     };
 
     let mut eta_time = Array1::<f64>::zeros(3 * n);
@@ -7123,6 +7128,7 @@ fn survival_ls_heteroscedastic_two_col_location_family()
         wiggle_degree: None,
         location_log_time: None,
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
+        jeffreys_armed: true,
     };
     // Block betas: a small time β; zero location β; β_ls = 1 so η_σ realizes the
     // −3 / +1 split above.

@@ -10,12 +10,20 @@
 
 use super::*;
 
+impl crate::custom_family::JeffreysArming for LatentSurvivalFamily {
+    fn with_jeffreys_armed(&self, armed: bool) -> Self {
+        Self {
+            jeffreys_armed: armed,
+            ..self.clone()
+        }
+    }
+}
+
 impl CustomFamily for LatentSurvivalFamily {
-    // Latent survival fits keep the self-limiting Jeffreys/Firth curvature
-    // active for their under-identification regime. The trait default flipped to
-    // OFF in gam#1395 (flat-prior exact-Newton objective); opt back in here.
+    // The self-limiting Jeffreys/Firth curvature bounds a direction the data do
+    // not, but it is armed only when the unarmed fit proves it is needed (#979).
     fn joint_jeffreys_term_required(&self) -> bool {
-        true
+        self.jeffreys_armed
     }
 
     fn exact_newton_joint_hessian_beta_dependent(&self) -> bool {
@@ -405,12 +413,21 @@ impl CustomFamily for LatentSurvivalFamily {
     }
 }
 
+impl crate::custom_family::JeffreysArming for LatentBinaryFamily {
+    fn with_jeffreys_armed(&self, armed: bool) -> Self {
+        Self {
+            jeffreys_armed: armed,
+            ..self.clone()
+        }
+    }
+}
+
 impl CustomFamily for LatentBinaryFamily {
-    // Latent binary fits have a separation regime; keep the self-limiting
-    // Jeffreys/Firth curvature active. The trait default flipped to OFF in
-    // gam#1395 (flat-prior exact-Newton objective); opt back in here.
+    // Latent binary fits have a separation regime. The self-limiting
+    // Jeffreys/Firth curvature bounds it there, but it is armed only when the
+    // unarmed fit proves it is needed (#979).
     fn joint_jeffreys_term_required(&self) -> bool {
-        true
+        self.jeffreys_armed
     }
 
     fn exact_newton_joint_hessian_beta_dependent(&self) -> bool {

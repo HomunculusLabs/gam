@@ -951,12 +951,20 @@ impl SurvivalLocationScaleFamily {
 // contribution by `mask[i]`. This deliberately masks after each row's nonlinear
 // survival derivative algebra has produced the final row coefficient, preserving
 // the invariant E[Σ_i (mask_i / π_i) contribution_i] = full-data sum.
+impl crate::custom_family::JeffreysArming for SurvivalLocationScaleFamily {
+    fn with_jeffreys_armed(&self, armed: bool) -> Self {
+        Self {
+            jeffreys_armed: armed,
+            ..self.clone()
+        }
+    }
+}
+
 impl CustomFamily for SurvivalLocationScaleFamily {
-    // Survival location-scale fits keep the self-limiting Jeffreys/Firth
-    // curvature active for their under-identification regime. The trait default
-    // flipped to OFF in gam#1395 (flat-prior exact-Newton objective); opt in.
+    // The self-limiting Jeffreys/Firth curvature bounds a direction the data do
+    // not, but it is armed only when the unarmed fit proves it is needed (#979).
     fn joint_jeffreys_term_required(&self) -> bool {
-        true
+        self.jeffreys_armed
     }
 
     /// Differentiate the same unscaled observed information returned by
@@ -3138,6 +3146,7 @@ mod post_update_roundoff_floor_symmetry_2722_tests {
             wiggle_degree: None,
             location_log_time: None,
             policy: gam_runtime::resource::ResourcePolicy::default_library(),
+            jeffreys_armed: true,
         }
     }
 
