@@ -587,18 +587,14 @@ pub fn expanded_num_centers(current: usize, ceiling: usize) -> Option<usize> {
 /// subtracting `nullspace_dim` yields its penalized contribution, which rises
 /// toward that capacity exactly as REML drives the penalty
 /// λ toward its floor to chase structure the basis cannot resolve. Saturated ⟺
-/// `edf ≥ capacity − ε`, with the margin `ε` DERIVED from the outer REML
-/// numerical resolution (`ε = capacity · resolution_tol`, floored at
-/// `resolution_tol` so a tiny-capacity block still has a positive margin) rather
-/// than a tuned knob. The workflow derives `resolution_tol` from the maximum of
-/// its outer convergence tolerance and any rho-independent penalty shrinkage
-/// floor, because that floor bounds how closely EDF can approach the algebraic
-/// ceiling even as lambda tends to zero. Non-positive capacity (a block whose
-/// null space already exhausts its columns) is never saturated. The absolute
-/// scale of `ε` is what the MSI truth-recovery sweep
-/// (sin8/kappa/large_scale + #1074) validates — the criterion SHAPE
-/// (edf-vs-capacity, nullspace excluded, tol-tied margin) is the load-bearing
-/// contract this function pins.
+/// `edf ≥ capacity − ε`, with the margin `ε = capacity · resolution_tol`, floored
+/// at `resolution_tol` so a tiny-capacity block still has a positive margin. The
+/// workflow passes its outer REML convergence tolerance as `resolution_tol`, so
+/// `ε` is a numerical resolution, not a statistical threshold: saturation fires
+/// only once REML has driven λ to its floor and the penalized capacity is used
+/// up. Non-positive capacity (a block whose null space already exhausts its
+/// columns) is never saturated. The criterion SHAPE (edf-vs-capacity, nullspace
+/// excluded, tol-tied margin) is the contract this function pins.
 pub fn basis_is_saturated(
     edf: f64,
     realized_width: usize,
