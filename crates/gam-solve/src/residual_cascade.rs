@@ -3955,11 +3955,6 @@ impl ResidualCascadeDesign {
         self.metric_scaled_aspect_ratio() <= QUASI_UNIFORMITY_MAX_ASPECT
     }
 
-    /// Total coefficient count (`dim + 1` polynomial + all centers).
-    pub fn num_coeffs(&self) -> usize {
-        self.core.m
-    }
-
     /// Total centers across all levels.
     pub fn num_centers(&self) -> usize {
         self.core.m - self.core.nullity()
@@ -6240,7 +6235,7 @@ mod refinement_decision_tests {
             let mut lo = endpoint - 1.0;
             let mut hi = endpoint;
             let mut best_exponent = lo;
-            let mut best_columns = current.num_coeffs();
+            let mut best_columns = current.core.m;
             for _ in 0..40 {
                 let midpoint = 0.5 * (lo + hi);
                 let mut exponents = base_exponents.clone();
@@ -6254,10 +6249,10 @@ mod refinement_decision_tests {
                     &exponents,
                 )
                 .expect("sub-level 2628 design");
-                if design.num_coeffs() <= y.len() {
+                if design.core.m <= y.len() {
                     lo = midpoint;
                     best_exponent = midpoint;
-                    best_columns = design.num_coeffs();
+                    best_columns = design.core.m;
                 } else {
                     hi = midpoint;
                 }
@@ -6272,7 +6267,7 @@ mod refinement_decision_tests {
                 &base_exponents,
             )
             .expect("maximal identified sub-level design");
-            assert_eq!(sublevel.num_coeffs(), best_columns);
+            assert_eq!(sublevel.core.m, best_columns);
             let sublevel_fit = sublevel
                 .fit_reml()
                 .expect("identified sub-level must admit certified REML");
@@ -6334,7 +6329,7 @@ mod refinement_decision_tests {
                  sublevel_route={sublevel_route} sublevel_iterations={sublevel_iterations} \
                  endpoint_route={completed_route} endpoint_iterations={completed_iterations}",
                 y.len(),
-                completed.num_coeffs(),
+                completed.core.m,
             );
 
             match fit_residual_cascade(&axes, y, w, &[1.0, 1.0], 2.5) {
@@ -6367,10 +6362,10 @@ mod refinement_decision_tests {
                     // fields below are unchanged by that extra level.
                     assert_eq!(checkpoint.num_levels(), current_levels + 1);
                     assert_eq!(checkpoint.num_centers(), y.len() - next.core.nullity());
-                    assert_eq!(candidate_columns, next.num_coeffs());
+                    assert_eq!(candidate_columns, next.core.m);
                     assert_eq!(
                         candidate_penalized_modes,
-                        next.num_coeffs() - next.core.nullity()
+                        next.core.m - next.core.nullity()
                     );
                     assert_eq!(identifiable_directions, y.len() - next.core.nullity());
                     assert!(
@@ -7667,7 +7662,7 @@ mod refinement_decision_tests {
                 ResidualCascadeError::RemlScoreProofUnavailable {
                     columns,
                     certified_spectrum_max,
-                } if columns == design.num_coeffs() && columns > certified_spectrum_max
+                } if columns == design.core.m && columns > certified_spectrum_max
             ),
             "the wrong refusal for a design past the certified spectrum budget: {refusal}"
         );

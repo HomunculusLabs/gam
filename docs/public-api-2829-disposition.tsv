@@ -999,7 +999,7 @@ crates/gam-solve/src/residual_cascade.rs	coarse_space_cols	retired-no-product-us
 crates/gam-solve/src/residual_cascade.rs	log_lambda_domain	retired-no-product-user
 crates/gam-solve/src/residual_cascade.rs	logdet_exact	retired-no-product-user
 crates/gam-solve/src/residual_cascade.rs	logdet_slq	retired-no-product-user
-crates/gam-solve/src/residual_cascade.rs	num_coeffs	restored-in-place
+crates/gam-solve/src/residual_cascade.rs	num_coeffs	retired-no-product-user
 crates/gam-solve/src/residual_cascade.rs	num_nonzeros	retired-no-product-user
 crates/gam-solve/src/residual_cascade.rs	sample_coefficients	retired-no-product-user
 crates/gam-solve/src/rho_optimizer/kl_certificate.rs	assess	retired-no-product-user
