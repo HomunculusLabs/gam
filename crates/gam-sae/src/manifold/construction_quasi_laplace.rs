@@ -1331,8 +1331,8 @@ impl SaeManifoldTerm {
                     step_norm_sq,
                     &lambda_smooth,
                 )?;
-                log::debug!(
-                    "SAE criterion factor accepted at KKT stationarity: ‖g‖={grad_norm:.6e} \
+                log::info!(
+                    "[SAE-ACCEPT] kkt fixed point: ‖g‖={grad_norm:.6e} \
                      ‖Π⊥null g‖={quotient_grad_norm:.6e} tol={grad_tolerance:.6e} \
                      ‖Δ‖={:.6e} ‖Π⊥null Δ‖={:.6e} after {total_inner_iter} inner iterations",
                     step_norm_sq.sqrt(),
@@ -1521,8 +1521,8 @@ impl SaeManifoldTerm {
                         .unwrap_or(f64::INFINITY);
                     let predicted_relative_decrease = 0.5 * decrement_sq / limit_scale;
                     if Self::inner_decrement_certifies(predicted_relative_decrease) {
-                        log::debug!(
-                            "SAE inner limit-boundary decrement acceptance: ‖g‖={grad_norm:.6e} \
+                        log::info!(
+                            "[SAE-ACCEPT] limit-boundary decrement certificate: ‖g‖={grad_norm:.6e} \
                              (tol {grad_tolerance:.6e}) ½λ²/scale={predicted_relative_decrease:.6e} \
                              after {total_inner_iter} inner iterations"
                         );
@@ -1737,8 +1737,8 @@ impl SaeManifoldTerm {
                                     .ok()
                                 });
                             if let Some(best_factor) = refactored {
-                                log::debug!(
-                                    "SAE #2228 certify-at-best-seen: ‖g‖ {grad_norm:.6e} \
+                                log::info!(
+                                    "[SAE-ACCEPT] best-seen decrement certificate: ‖g‖ {grad_norm:.6e} \
                                      \u{2192} {best_g:.6e}, ½λ²/scale {excursion_cert:.6e} \
                                      \u{2192} {best_cert:.6e} after {total_inner_iter} iters"
                                 );
@@ -1750,8 +1750,8 @@ impl SaeManifoldTerm {
                             // then fall through to the honest refusal below.
                             self.restore_mutable_state(&excursion)?;
                         } else if Self::inner_decrement_certifies(excursion_cert) {
-                            log::debug!(
-                                "SAE inner final-gate decrement acceptance: ‖g‖={grad_norm:.6e} \
+                            log::info!(
+                                "[SAE-ACCEPT] final-gate decrement certificate: ‖g‖={grad_norm:.6e} \
                                  (tol {grad_tolerance:.6e}) λ²={newton_decrement_sq:.6e} \
                                  ½λ²/scale={excursion_cert:.6e} after \
                                  {total_inner_iter} inner iterations"
@@ -1998,6 +1998,11 @@ impl SaeManifoldTerm {
                         stationary_quotient_grad_norm,
                         grad_tolerance,
                     ) {
+                        log::info!(
+                            "[SAE-ACCEPT] stall-branch kkt: ‖g‖={stationary_grad_norm:.6e} \
+                             ‖Π⊥null g‖={stationary_quotient_grad_norm:.6e} tol={grad_tolerance:.6e} \
+                             after {total_inner_iter} inner iterations"
+                        );
                         drop(criterion_scope);
                         return Ok(stationary_cache);
                     }
@@ -2067,6 +2072,11 @@ impl SaeManifoldTerm {
                     // trusts it was inconsistent, and no budget can close a gap
                     // that the objective's own resolution cannot express.)
                     if Self::inner_decrement_certifies(predicted_relative_decrease) {
+                        log::info!(
+                            "[SAE-ACCEPT] stall decrement certificate: ‖g‖={stationary_grad_norm:.6e} \
+                             ½λ²/scale={predicted_relative_decrease:.6e} tol={grad_tolerance:.6e} \
+                             after {total_inner_iter} inner iterations"
+                        );
                         drop(criterion_scope);
                         return Ok(stationary_cache);
                     }
