@@ -10,17 +10,11 @@ pub(crate) use comfy_table::{Cell, ContentArrangement, Row, Table, presets::UTF8
 pub(crate) use csv::WriterBuilder;
 
 pub(crate) use gam::estimate::{
-    BlockRole, ContinuousSmoothnessOrderStatus, FittedLinkState, ModelSummary,
+    BlockRole, ContinuousSmoothnessOrderStatus, ModelSummary,
     ParametricTermSummary, UnifiedFitResult, smooth_term_summary_rows,
 };
 
 pub(crate) use gam::families::survival::latent::fixed_latent_hazard_frailty;
-
-pub(crate) use gam::families::scale_design::build_scale_deviation_transform_design;
-
-pub(crate) use gam::gamlss::{
-    BinomialLocationScaleTermSpec, BlockwiseTermFitResult, GaussianLocationScaleTermSpec,
-};
 
 pub(crate) use gam::sample::NutsConfig;
 
@@ -32,12 +26,10 @@ pub(crate) use gam::data::{
 };
 
 pub(crate) use gam::inference::formula_dsl::{
-    LinkChoice, LinkMode, LinkWiggleFormulaSpec, ParsedFormula, ParsedTerm,
-    effectivelinkwiggle_formulaspec, parse_formula, parse_link_choice,
+    LinkChoice, LinkMode, ParsedFormula, ParsedTerm,
+    parse_formula,
     parse_matching_auxiliary_formula, parse_surv_interval_response, parse_surv_response,
-    parsed_term_column_names, require_inverse_link_supports_joint_wiggle,
-    require_likelihood_spec_supports_joint_wiggle, require_linkchoice_supports_joint_wiggle,
-    validate_auxiliary_formula_controls, validate_marginal_slope_z_column_exclusion,
+    parsed_term_column_names, validate_marginal_slope_z_column_exclusion,
 };
 
 pub(crate) use gam::inference::model::{
@@ -47,10 +39,8 @@ pub(crate) use gam::inference::model::{
 pub(crate) use gam_data::ColumnKindTag;
 
 pub(crate) use gam::inference::model_payload_builders::{
-    LocationScaleInputs, LocationScaleResponse,
-    LocationScaleWiggle, SavedModelSourceMetadata, StandardPayloadInputs,
+    StandardPayloadInputs,
     apply_request_metadata,
-    assemble_location_scale_payload,
     assemble_residual_cascade_payload, assemble_spline_scan_payload, assemble_standard_payload,
     };
 
@@ -61,8 +51,6 @@ pub(crate) use gam_predict::input::{
 pub(crate) use gam_predict::linalg::{PredictionCovarianceBackend, rowwise_local_covariances};
 
 pub(crate) use gam::matrix::{DesignMatrix, SymmetricMatrix};
-
-pub(crate) use gam::mixture_link::state_fromspec;
 
 pub(crate) use gam_predict::{
     FittedModelPredictExt, InferenceCovarianceMode, MeanIntervalMethod, PosteriorMeanOptions,
@@ -77,10 +65,9 @@ pub(crate) use gam::probability::{
     student_t_two_sided_probability,
 };
 
-pub(crate) use gam::families::fit_orchestration::drivers::freeze_term_collection_from_design;
 pub(crate) use gam::smooth::{
     BoundedCoefficientPriorSpec, LinearCoefficientGeometry, LinearTermSpec, SmoothBasisSpec,
-    SmoothTermSpec, SpatialLengthScaleOptimizationOptions, TermCollectionSpec,
+    SmoothTermSpec, TermCollectionSpec,
 };
 // #1521: relocated DOWN into gam_terms::smooth (was families::...::drivers).
 pub(crate) use gam::terms::smooth::build_term_collection_design;
@@ -113,20 +100,19 @@ pub(crate) use gam::families::survival::predict::{
 };
 
 pub(crate) use gam::term_builder::{
-    build_termspec, enable_scale_dimensions, resolve_role_col,
+    resolve_role_col,
 };
 
 pub(crate) use gam::types::{
-    InverseLink, LikelihoodScaleMetadata, LikelihoodSpec, LinkFunction, LogLikelihoodNormalization,
-    MixtureLinkSpec, ResponseFamily, SasLinkSpec, StandardLink,
+    LikelihoodSpec,
+    ResponseFamily,
 };
 
 pub(crate) use gam::families::fit_orchestration::{
-    BinomialLocationScaleFitRequest,
-    DispersionLocationScaleFitRequest, FitConfig, FitRequest, FitResult,
-    GaussianLocationScaleFitRequest, LinkWiggleConfig, PreparedSurvivalTimeStack, WorkflowError,
-    fit_from_formula_with_notes, fit_model, is_binary_response, prepare_survival_time_stack,
-    resolve_offset_column, resolve_weight_column, response_column_kind,
+    FitConfig, FitResult,
+    PreparedSurvivalTimeStack, WorkflowError,
+    fit_from_formula_with_notes, is_binary_response, prepare_survival_time_stack,
+    resolve_offset_column, resolve_weight_column,
 };
 
 pub(crate) use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};

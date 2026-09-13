@@ -9298,5 +9298,34 @@
     ],
     "reason": "SPEC rules 9, 18 and 25 (#2899, #2631). gam fit --slope-formula/--z-column ran run_fit_bernoulli_marginal_slope, a CLI copy of the library marginal-slope materializer, while the library fitted any main-formula link as probit without a word. The base-link resolver moves into gam-models as resolve_marginal_slope_base_link, called by the Bernoulli and survival marginal-slope materializers, replacing resolve_survival_marginal_slope_base_link; the fit goes through fit_formula_to_payload and --inference, read only by that route, is deleted. run_fit_bernoulli_marginal_slope, build_bernoulli_marginal_slope_saved_model, the CLI resolve_bernoulli_marginal_slope_base_link and FAMILY_BERNOULLI_MARGINAL_SLOPE are deleted; the two CLI base-link tests move to gam-models materialize/tests.rs as marginal_slope_base_link_accepts_only_probit and marginal_slope_base_link_rejects_flexible_and_unbounded_links.",
     "evidence": "Job 627938 (gate13, lane sw0, node acn82) stacked this slice on 0bbba5310 as phase S3B. source_removal_guard.py reported exactly these identities, and cargo check --keep-going --workspace --all-targets --exclude gam-pyffi at that phase exited 0 with 0 errors, so no code still names a deleted item (/scratch.global/sauer354/pool/prune-cli/gate13.627938.log)."
+  },
+  {
+    "base": "620d19353abfee6f21b187fca35d1acb9e70c9e3",
+    "items": [
+      "crates/gam-cli/src/main/cli_args.rs:const:FAMILY_BINOMIAL_LOCATION_SCALE",
+      "crates/gam-cli/src/main/cli_args.rs:const:FAMILY_GAUSSIAN_LOCATION_SCALE",
+      "crates/gam-cli/src/main/family_resolve.rs:fn:binomial_mean_linkwiggle_supports_family",
+      "crates/gam-cli/src/main/model_build.rs:fn:compact_saved_fit_retains_outer_certificate_and_training_sample_size",
+      "crates/gam-cli/src/main/model_build.rs:fn:compact_saved_multiblock_fit_result",
+      "crates/gam-cli/src/main/model_build.rs:fn:core_saved_fit_result",
+      "crates/gam-cli/src/main/model_build.rs:fn:from_blockwise_fit",
+      "crates/gam-cli/src/main/model_build.rs:fn:location_scale_fit_with_outer_certificate",
+      "crates/gam-cli/src/main/model_build.rs:fn:max_iterations_reached_status_is_still_rejected",
+      "crates/gam-cli/src/main/model_build.rs:fn:validated",
+      "crates/gam-cli/src/main/model_build.rs:struct:SavedFitSummary",
+      "crates/gam-cli/src/main/run_fit.rs:fn:blockwise_options_from_fit_args",
+      "crates/gam-cli/src/main/run_fit.rs:fn:compute_probit_q0_from_eta",
+      "crates/gam-cli/src/main/run_fit.rs:fn:compute_probit_q0_from_fit",
+      "crates/gam-cli/src/main/run_fit.rs:fn:dispersion_location_scale_kind_for_cli",
+      "crates/gam-cli/src/main/run_fit.rs:fn:run_fitwith_predict_noise",
+      "crates/gam-cli/src/main/run_fit.rs:fn:summarizewiggle_domain",
+      "crates/gam-cli/src/main/run_fit.rs:struct:WiggleDomainDiagnostics",
+      "crates/gam-cli/src/main/smooth_warnings.rs:fn:emit_smooth_structure_warnings",
+      "tests/src_modules/misc/cli_tests.rs:fn:probit_q0_helper_matches_manual_threshold_over_sigma",
+      "tests/src_modules/misc/cli_tests.rs:fn:wiggle_domain_summary_counts_out_of_range_q0",
+      "tests/src_modules/misc/cli_tests.rs:fn:wiggle_domain_summary_inside_range_reportszero_outside"
+    ],
+    "reason": "SPEC rules 9, 18 and 25 (#2899, #2631). gam fit --predict-noise ran run_fitwith_predict_noise, a 500-line CLI copy of the library location-scale materialization (link and mixture parsing, family resolution, response-support checks, link-wiggle policy and three saved-model assemblers). The fit now goes through fit_formula_to_payload, as gamfit does. run_fitwith_predict_noise, dispersion_location_scale_kind_for_cli, blockwise_options_from_fit_args, compute_probit_q0_from_fit, compute_probit_q0_from_eta, summarizewiggle_domain, WiggleDomainDiagnostics, FAMILY_GAUSSIAN_LOCATION_SCALE and FAMILY_BINOMIAL_LOCATION_SCALE are deleted with their three helper tests. core_saved_fit_result, SavedFitSummary with from_blockwise_fit and validated, compact_saved_multiblock_fit_result, and the two model_build tests with their location_scale_fit_with_outer_certificate fixture lose their last production caller and move into the saved_fit_fixtures test module in tests/src_modules/misc/cli_tests.rs. binomial_mean_linkwiggle_supports_family and emit_smooth_structure_warnings lose their last callers with that route; library fits collect the same smooth-structure warnings as inference notes (gam_terms term_builder) and print_inference_summary prints them.",
+    "evidence": "Job 627938 (gate13, lane sw0, node acn82) stacked this slice on 0bbba5310 as phase S3C. source_removal_guard.py reported exactly these identities, and cargo check --keep-going --workspace --all-targets --exclude gam-pyffi at that phase exited 0 with 0 errors, so no code still names a deleted item (/scratch.global/sauer354/pool/prune-cli/gate13.627938.log)."
   }
 ]

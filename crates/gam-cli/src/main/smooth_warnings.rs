@@ -1,25 +1,5 @@
 use super::*;
 
-// The three smooth-structure advisories — separate 1D spatial smooths, a
-// smooth/linear feature overlap, and nested-smooth hierarchical ownership — are
-// library-owned now (`gam_terms::smooth::structure_warnings`, #2470). They were
-// ~215 lines of pure `TermCollectionSpec -> Vec<String>` sitting in the CLI with
-// no counterpart anywhere else, so a Python user fitting
-// `s(x1,type=tps) + s(x2,type=tps)` got two unrelated 1-D smooths and no word
-// about it, while the identical CLI invocation told them to write
-// `thinplate(x1,x2)`. SPEC line 10 requires the three surfaces to be unified.
-//
-// What stays here is the only CLI-specific half: rendering. The library decides
-// WHAT to say; `emit_smooth_structure_warnings` below decides that it goes to
-// stderr with a stage prefix.
-pub(crate) use gam::smooth::collect_smooth_structure_warnings;
-
-pub(crate) fn emit_smooth_structure_warnings(stage: &str, warnings: &[String]) {
-    for warning in warnings {
-        cli_err!("WARNING [{stage}]: {warning}");
-    }
-}
-
 /// Build anisotropic spatial-geometry report rows from an optional resolved spec.
 pub(crate) fn build_anisotropic_scales_rows(
     spec: Option<&TermCollectionSpec>,

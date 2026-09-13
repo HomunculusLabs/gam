@@ -22,17 +22,3 @@ pub(crate) fn family_arg_canonical_name(arg: FamilyArg) -> Option<&'static str> 
     }
 }
 
-pub(crate) fn binomial_mean_linkwiggle_supports_family(
-    family: &LikelihoodSpec,
-    link_choice: Option<&LinkChoice>,
-) -> bool {
-    let standard_binomial = family.is_binomial()
-        && matches!(
-            &family.link,
-            InverseLink::Standard(StandardLink::Logit)
-                | InverseLink::Standard(StandardLink::Probit)
-                | InverseLink::Standard(StandardLink::CLogLog)
-        );
-    standard_binomial
-        && !link_choice.is_some_and(|choice| matches!(choice.mode, LinkMode::Flexible))
-}

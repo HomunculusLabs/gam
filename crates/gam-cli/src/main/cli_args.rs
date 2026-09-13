@@ -593,10 +593,6 @@ pub(crate) fn validate_cli_firth_configuration(
     })
 }
 
-pub(crate) const FAMILY_GAUSSIAN_LOCATION_SCALE: &str = "gaussian-location-scale";
-
-pub(crate) const FAMILY_BINOMIAL_LOCATION_SCALE: &str = "binomial-location-scale";
-
 pub(crate) fn parse_positive_usize_cli(raw: &str) -> Result<usize, String> {
     let value = raw
         .parse::<usize>()
