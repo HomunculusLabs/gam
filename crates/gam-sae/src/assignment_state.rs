@@ -34,22 +34,15 @@
 //! `indices`, `1` for `gate_params`, and `d_max` for `coords` — every cell an
 //! 8-byte word (`SAE_BYTES_PER_F64`; the `u32` index cell is budgeted as a full
 //! 8-byte slot, matching the ledger's uniform-word accounting). For a uniform
-//! `k_active = s`, `d_k = d_max` shape this state therefore occupies
-//! `SaeAssignmentState::active_state_bytes`
-//! `= N · s · (2 + d_max) · 8 = active_state_bytes`, verified by
-//! `sparse_topk_state_memory_shape_matches_budget_formula`.
+//! `k_active = s`, `d_k = d_max` shape the ledger's charge
+//! `N · s · (2 + d_max) · 8` is therefore exactly this state's cell count at
+//! 8 bytes per cell.
 
 use gam_problem::LatentRetractionRegistry;
 use gam_terms::latent::{LatentCoordValues, LatentIdMode, LatentManifold};
 use ndarray::{Array1, Array2};
 
 use crate::assignment::{AssignmentMode, SaeAssignment};
-
-/// Byte width of one budgeted state cell, matching
-/// `streaming_plan::SAE_BYTES_PER_F64`. Kept as a local constant so this module
-/// does not reach into the private streaming-plan module for a single integer;
-/// the layout-contract test pins it against the real budget arithmetic.
-const STATE_CELL_BYTES: usize = 8;
 
 /// Per-atom coordinate metadata needed to reconstruct the dense
 /// [`LatentCoordValues`] block bit-for-bit on materialization.
@@ -580,37 +573,6 @@ impl SaeAssignmentState {
         self.indices.iter().all(|row| {
             row.len() == self.k_atoms && row.iter().enumerate().all(|(k, &a)| a as usize == k)
         })
-    }
-
-    // -- Layout-contract cell accounting (see module docs) -------------------
-
-    /// Total `indices` cells `Σ_i |S_i|`.
-    pub(crate) fn index_cells(&self) -> usize {
-        self.indices.iter().map(Vec::len).sum()
-    }
-
-    /// Total `gate_params` cells `Σ_i |S_i|`.
-    pub(crate) fn gate_cells(&self) -> usize {
-        self.gate_params.iter().map(Vec::len).sum()
-    }
-
-    /// Total coordinate cells `Σ_i Σ_{k∈S_i} d_k`.
-    pub(crate) fn coord_cells(&self) -> usize {
-        self.coords.iter().map(Vec::len).sum()
-    }
-
-    /// Total support-sparse state cells `indices + gate_params + coords`.
-    pub(crate) fn active_state_cells(&self) -> usize {
-        self.index_cells() + self.gate_cells() + self.coord_cells()
-    }
-
-    /// Support-sparse state footprint in bytes, one 8-byte word per cell —
-    /// equal to the [`SaeTopKCurvedBudget`] `active_state_bytes` for a uniform
-    /// TopK shape (see the module layout contract).
-    ///
-    /// [`SaeTopKCurvedBudget`]: crate::manifold::SaeTopKCurvedBudget
-    pub fn active_state_bytes(&self) -> usize {
-        self.active_state_cells().saturating_mul(STATE_CELL_BYTES)
     }
 
     /// Materialize the exact dense [`SaeAssignment`] layout this state
