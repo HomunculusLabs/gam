@@ -1030,6 +1030,73 @@ fn fit_geometry_wire_schema_requires_explicit_coefficient_gauge() {
     assert!(error.to_string().contains("missing field `coefficient_gauge`"));
 }
 
+/// #2901 V22: the published identified subspace survives a saved-model round
+/// trip with its numbers, and a payload saved before the field existed still
+/// loads, with no subspace.
+#[test]
+fn identified_subspace_round_trips_and_is_absent_from_older_payloads_2901() {
+    let mut fit = decode_invariant_test_fit();
+    let basis = array![
+        [std::f64::consts::FRAC_1_SQRT_2],
+        [-std::f64::consts::FRAC_1_SQRT_2]
+    ];
+    fit.inference
+        .as_mut()
+        .expect("test fit has inference")
+        .identified_subspace = Some(crate::model_types::IdentifiedCoefficientSubspace {
+        rank: 1,
+        unidentified_basis: basis.clone(),
+        rank_constancy: crate::model_types::IdentifiedRankConstancy::Certified {
+            step_radius: 1.0e-3,
+            smallest_identified: 2.5,
+            largest_unidentified: Some(0.0),
+            band: 4.0 * f64::EPSILON,
+        },
+    });
+    let payload = serde_json::to_value(&fit).expect("serialize fit");
+    let decoded: UnifiedFitResult =
+        serde_json::from_value(payload.clone()).expect("deserialize fit");
+    let subspace = decoded
+        .inference
+        .as_ref()
+        .and_then(|inference| inference.identified_subspace.as_ref())
+        .expect("the published subspace survives the round trip");
+    assert_eq!(subspace.rank, 1);
+    assert_eq!(subspace.unidentified_basis, basis);
+    assert!(
+        matches!(
+            subspace.rank_constancy,
+            crate::model_types::IdentifiedRankConstancy::Certified {
+                step_radius,
+                smallest_identified,
+                largest_unidentified: Some(largest),
+                band,
+            } if step_radius == 1.0e-3
+                && smallest_identified == 2.5
+                && largest == 0.0
+                && band == 4.0 * f64::EPSILON
+        ),
+        "the constancy verdict must round-trip with its numbers: {:?}",
+        subspace.rank_constancy
+    );
+
+    let mut older = payload;
+    older["inference"]
+        .as_object_mut()
+        .expect("serialized inference object")
+        .remove("identified_subspace");
+    let loaded: UnifiedFitResult = serde_json::from_value(older)
+        .expect("a payload saved before the field existed still loads");
+    assert!(
+        loaded
+            .inference
+            .as_ref()
+            .expect("test fit has inference")
+            .identified_subspace
+            .is_none()
+    );
+}
+
 #[test]
 fn unified_fit_decode_validation_rejects_beta_drift_from_blocks() {
     let fit = decode_invariant_test_fit();
