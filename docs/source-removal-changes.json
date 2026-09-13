@@ -8864,5 +8864,13 @@
     ],
     "reason": "SPEC rules 9, 18 and 25 (#2899, #2631). gam fit sent every Surv(...) response to run_survival, a CLI copy of the library survival materialization that rebuilt a FitConfig from SurvivalArgs and dropped any setting SurvivalArgs did not carry. Surv(...) fits now go through fit_formula_to_payload, as gamfit does; run_survival.rs with run_survival, run_canonical_survival_transformation and build_survival_time_initial_beta, SurvivalArgs, fit_config_from_survival_args, required_columns_for_survival, surv_response_expr, compact_saved_survival_location_scale_fit_result, set_saved_weight_column, baseline_timewiggle_is_present (its callers call SavedModel::has_baseline_time_wiggle) and the SurvivalArgs test helper survival_args_for_inverse_link_test are deleted. CliCauseCountResult with its into_cli_result impls, whose only call was run_survival's cause_count_from_event_codes(...).into_cli_result(), is deleted with it.",
     "evidence": "Job 612253 (gate12, lane sw0e, node acn16) stacked this slice on 2f49564f1 as phase S2. source_removal_guard.py reported exactly these identities, and cargo check --keep-going --workspace --all-targets --exclude gam-pyffi at that phase exited 0 with 0 errors, so no code still names a deleted item (/scratch.global/sauer354/pool/prune-cli/gate12.612253.log)."
+  },
+  {
+    "base": "4b9613dfb2624c4d64a97ef37fbde0c8c43213d5",
+    "items": [
+      "crates/gam-models/src/inference/full_conformal.rs:const:REML_STRENGTH_POLISH_BUDGET"
+    ],
+    "reason": "#2469: the Gaussian REML strength polish in full-conformal select_rho no longer caps Newton at a picked 32 steps. It stops on its own certificates: the gradient inside its rounding band returns, and a contraction ratio |G_{k+1}|/|G_k| that fails to shrink below the previous step's (starting from 1, the old no-decrease refusal) is refused with the numbers named. While the ratios keep shrinking below one, |G| falls at least geometrically, so the band is reached in finitely many steps without a budget.",
+    "evidence": "At the base, git grep -n -w REML_STRENGTH_POLISH_BUDGET finds its declaration, the loop header and the exhaustion message inside select_rho, and nothing else. Guarded cargo check --workspace --all-targets --exclude gam-pyffi and the gam-models full_conformal tests: job 619965, /scratch.global/sauer354/pool/const2469b/rp89.619965.log."
   }
 ]

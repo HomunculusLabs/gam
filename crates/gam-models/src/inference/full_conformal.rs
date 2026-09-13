@@ -193,10 +193,6 @@ use ndarray::{Array1, Array2};
 
 use gam_linalg::faer_ndarray::{FaerCholesky, FaerEigh, fast_av};
 
-/// Newton steps allowed when polishing the REML strength from the outer
-/// engine's certified point to the arithmetic's stationarity. Quadratic
-/// convergence from inside the basin takes a handful; exhaustion is refused.
-const REML_STRENGTH_POLISH_BUDGET: usize = 32;
 use opt::{BacktrackConfig, backtracking_line_search};
 
 /// One maximal interval of candidate values retained in the prediction set.
@@ -1217,11 +1213,17 @@ impl<'a> GaussianRemlRhoResponse<'a> {
         // rounding band. The response ρ̂(z) is differentiated downstream,
         // which needs exactly that resolution. (A step below ρ's representation
         // is not reachable: the gradient's rounding floor is what bounds the
-        // step, so the band, not the step, is the statement.) The budget is a
-        // refusal budget, never a source of a returned iterate.
+        // step, so the band, not the step, is the statement.) Quadratic
+        // convergence makes each step's contraction ratio `|G_{k+1}|/|G_k|`
+        // smaller than the last. A ratio that stops shrinking is refused with
+        // both ratios named. While the ratios keep shrinking below one, `|G|`
+        // falls at least geometrically and reaches the band in finitely many
+        // steps, so no step budget is needed. A zero band means a zero gradient,
+        // which returns at once.
         let mut rho = result.rho[0];
         let mut ev = self.eval(rho, z)?;
-        for _ in 0..REML_STRENGTH_POLISH_BUDGET {
+        let mut previous_ratio = 1.0_f64;
+        loop {
             if ev.grad.abs() <= ev.grad_band {
                 return Ok(rho);
             }
@@ -1234,25 +1236,29 @@ impl<'a> GaussianRemlRhoResponse<'a> {
             }
             let candidate = rho - ev.grad / ev.hess;
             let ev_candidate = self.eval(candidate, z)?;
-            if ev_candidate.grad.abs() >= ev.grad.abs() {
-                // The step no longer reduces the gradient: the iteration sits
-                // on the gradient's noise floor, above the band the terms
-                // predict — refused, with both numbers named.
+            // A step that lands inside its own rounding band is done, whatever its
+            // ratio: overshooting into the noise is the end of quadratic convergence,
+            // not a failure of it.
+            if ev_candidate.grad.abs() <= ev_candidate.grad_band {
+                return Ok(candidate);
+            }
+            let ratio = ev_candidate.grad.abs() / ev.grad.abs();
+            if !(ratio < previous_ratio) {
+                // The step does not contract the gradient faster than the one
+                // before it: the iteration sits on the gradient's noise floor,
+                // above the band the terms predict, or is not in Newton's
+                // quadratic regime — refused, with the numbers named.
                 return Err(format!(
-                    "{context}: Newton polish stalled at ρ={rho} with gradient {} above its \
-                     rounding band {} (next step gave {})",
+                    "{context}: Newton polish stopped contracting at ρ={rho} with gradient {} \
+                     above its rounding band {} (next step gave {}, contraction ratio {ratio} \
+                     not below the previous {previous_ratio})",
                     ev.grad, ev.grad_band, ev_candidate.grad
                 ));
             }
+            previous_ratio = ratio;
             rho = candidate;
             ev = ev_candidate;
         }
-        Err(format!(
-            "{context}: Newton polish from the certified ρ did not reach the gradient's \
-             rounding band within {REML_STRENGTH_POLISH_BUDGET} steps (ρ={rho}, gradient {}, \
-             band {})",
-            ev.grad, ev.grad_band
-        ))
     }
 
     /// Run the certificate-first procedure: build the frozen-ρ exact set, then
