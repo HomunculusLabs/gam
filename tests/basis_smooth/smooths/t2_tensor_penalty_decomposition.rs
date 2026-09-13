@@ -112,10 +112,21 @@ fn t2_uses_separable_penalty_decomposition_not_te_marginal_alias() {
         "t2 must not be a te penalty alias: te={te_separable:?}, t2={t2_marginal:?}"
     );
 
-    // The shared block is shared: exactly one on each, so neither term type is
-    // quietly accumulating extra global shrinkage.
-    assert_eq!(te_ridge, 1, "te carries exactly one global tensor ridge");
-    assert_eq!(t2_ridge, 1, "t2 carries exactly one global tensor ridge");
+    // Both decompositions share one joint polynomial null, `⊗_j null(S_j)`, and
+    // #1561 gives each functional-ANOVA block of that null its own null-function
+    // ridge (`tensor_null_function_block_ridges`). Cubic margins with
+    // second-order penalties have a constant and a trend in each margin's null,
+    // and the default sum-to-zero chart removes the grand constant, so exactly
+    // three blocks survive: the x trend, the z trend and their interaction. Both
+    // term types carry the same count, so neither accumulates extra shrinkage.
+    assert_eq!(
+        te_ridge, 3,
+        "te carries one null-function ridge per retained ANOVA block: x trend, z trend, x·z trend"
+    );
+    assert_eq!(
+        t2_ridge, te_ridge,
+        "t2 shares te's joint polynomial null, so it carries the same null-function block ridges"
+    );
 
     let t2_width = t2_term.coeff_range.len();
     assert!(
