@@ -168,7 +168,6 @@ pub(crate) fn compute_split_rhat_and_ess(samples: &Array3<f64>) -> (f64, f64) {
             return (m * n).max(1) as f64;
         }
 
-        let mut means = vec![0.0_f64; m];
         let mut gamma0 = vec![0.0_f64; m];
         let mut informative = vec![false; m];
         for sc in 0..m {
@@ -180,7 +179,6 @@ pub(crate) fn compute_split_rhat_and_ess(samples: &Array3<f64>) -> (f64, f64) {
                 magnitude = magnitude.max(value.abs());
             }
             let mean = sum / n as f64;
-            means[sc] = mean;
             let mut g0 = 0.0;
             for t in 0..n {
                 let d = splitvalue(samples, n_chains, half, dim, sc, t) - mean;
