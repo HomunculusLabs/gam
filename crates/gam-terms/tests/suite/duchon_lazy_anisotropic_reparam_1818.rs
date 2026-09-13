@@ -6,6 +6,7 @@
 //! builds stayed in the raw constrained-kernel frame, so their penalty spectrum
 //! and REML geometry depended on which memory route happened to be selected.
 
+use gam_linalg::matrix::{DenseDesignMatrix, DesignMatrix};
 use gam_runtime::resource::ResourcePolicy;
 use gam_terms::basis::{
     BasisMetadata, BasisWorkspace, CenterStrategy, DuchonBasisSpec, DuchonNullspaceOrder,
@@ -72,7 +73,7 @@ fn lazy_anisotropic_duchon_uses_data_metric_radial_chart() {
     // would contradict the fixture's one-byte materialization ceiling and test
     // the refusal mechanism rather than the anisotropic chart.
     assert!(
-        built.design.is_operator_backed(),
+        matches!(built.design, DesignMatrix::Dense(DenseDesignMatrix::Lazy(_))),
         "one-byte materialization policy must select the lazy design"
     );
     let radial_width = radial_reparam.ncols();
@@ -86,7 +87,7 @@ fn lazy_anisotropic_duchon_uses_data_metric_radial_chart() {
             .assign(&cross_products.slice(s![..radial_width]));
     }
     assert!(
-        built.design.is_operator_backed(),
+        matches!(built.design, DesignMatrix::Dense(DenseDesignMatrix::Lazy(_))),
         "matrix-free Gram evaluation must preserve the lazy design"
     );
     let mut max_identity_residual = 0.0_f64;

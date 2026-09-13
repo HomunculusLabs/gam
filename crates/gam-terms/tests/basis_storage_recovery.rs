@@ -1,6 +1,6 @@
 //! #2818 recovery: storage policy must preserve the #2684 mathematical basis.
 
-use gam_linalg::matrix::DesignMatrix;
+use gam_linalg::matrix::{DenseDesignMatrix, DesignMatrix};
 use gam_runtime::resource::{DerivativeStorageMode, ResourcePolicy};
 use gam_runtime::test_support::simulated_cgroup_memory_environment;
 use gam_terms::basis::{
@@ -82,7 +82,7 @@ fn the_storage_route_changes_how_the_basis_is_carried_not_which_basis_it_is_2684
         "the permissive arm must actually materialize its design"
     );
     assert!(
-        matches!(&operator.design, DesignMatrix::Dense(design) if design.is_operator_backed()),
+        matches!(&operator.design, DesignMatrix::Dense(DenseDesignMatrix::Lazy(_))),
         "the restrictive arm must actually carry an operator"
     );
     assert_eq!(
