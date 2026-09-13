@@ -782,7 +782,7 @@ pub struct CertificateEntry {
 
 /// The deliverable: "we found N structures at FDR ≤ α, certificate
 /// attached". Ships next to the identifiability certificate
-/// (`crate::terms::sae::identifiability::residual_gauge`, #981) — that one says
+/// (`gam_sae::identifiability::ResidualGaugeReport`, #981) — that one says
 /// what the GAUGE cannot distinguish, this one says what the DATA can.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StructureCertificate {

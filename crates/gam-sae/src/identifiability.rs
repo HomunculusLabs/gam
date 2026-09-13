@@ -1,12 +1,12 @@
 //! SAE identifiability primitives and partial-supervision gauge fixing.
 //!
-//! # Object 4 — the Certificate (`residual_gauge`)
+//! # Object 4 — the Certificate (`residual_gauge_exact_from_*`)
 //!
 //! The partial-supervision solver above *removes* gauge freedom by aligning to
 //! auxiliary supervision. The certificate answers the dual question: after a fit
 //! has converged, **which gauge group is the model identified up to?** It does
-//! so by running the same penalty-aware RRQR rank machinery the cross-block
-//! identifiability audit uses
+//! so by deciding rank at the tolerance shape of the RRQR rank machinery the
+//! cross-block identifiability audit uses
 //! ([`gam_identifiability::audit::audit_identifiability`] /
 //! [`gam_linalg::faer_ndarray::rrqr_with_permutation`]) — but on the
 //! **symmetry generators** of the fitted model rather than on stacked design
@@ -22,8 +22,8 @@
 //! the isometry-penalty curvature). It is *pinned* (broken by the data or the
 //! isometry penalty) iff `ξ` has a component in `range(H)`.
 //!
-//! The RRQR supplies the pinning RANK via the same penalty-aware,
-//! leverage-scaled rank decision the audit uses. Each generator's verdict,
+//! The pinning RANK counts the curvature root's singular values above that
+//! RRQR-shaped tolerance. Each generator's verdict,
 //! however, keeps the curvature **magnitudes**: the relative curvature
 //! fraction `‖R ξ̂‖² / σ_max(R)²` measures how much objective curvature the
 //! unit generator carries, relative to the model's stiffest direction. A
@@ -49,7 +49,7 @@
 //!
 //! # This module IS the empirical Terracini certificate (Theorem A)
 //!
-//! Read structurally, `residual_gauge` is doing exactly what Terracini's
+//! Read structurally, the residual-gauge certificate does exactly what Terracini's
 //! theorem does for a join/secant variety: at a generic point of a join of
 //! manifolds `M_1, …, M_K`, the tangent space to the join is the (direct) sum
 //! of the individual tangent spaces `T M_1 ⊕ … ⊕ T M_K`, of dimension
@@ -60,10 +60,9 @@
 //! are exactly a spanning set for that border-block tangent space, realised as
 //! literal tangent directions `ξ` in the fitted model's free-parameter space —
 //! this file's `param_dim()` coordinates are the ambient space Terracini's
-//! generic-point argument is stated in. The stacked curvature root `R`
-//! (`stacked_curvature_root`) is the empirical analogue of the Jacobian whose
-//! rank Terracini's theorem predicts: its RRQR-pinned rank (see
-//! `CurvatureReduction::from_model`) is the empirically REALISED tangent
+//! generic-point argument is stated in. The pinning curvature `H = RᵀR`
+//! is the empirical analogue of the Jacobian whose rank Terracini's theorem
+//! predicts: its pinning rank is the empirically REALISED tangent
 //! dimension the fit's curvature can see, and the per-generator relative
 //! curvature fraction is a Marchenko–Pastur-style edge test applied
 //! direction-by-direction — a genuine signal direction has curvature energy
@@ -90,9 +89,7 @@ pub use frame_curvature::{
 use crate::inference::layer_transport::TransportLadderReport;
 use crate::inference::riesz::{RieszInput, SmoothFunctional, debias_with_dense_hessian};
 use faer::Side;
-use gam_linalg::faer_ndarray::{
-    FaerCholesky, FaerEigh, FaerSvd, default_rrqr_rank_alpha, rrqr_with_permutation,
-};
+use gam_linalg::faer_ndarray::{FaerCholesky, FaerEigh, FaerSvd, default_rrqr_rank_alpha};
 use gam_problem::{MetricProvenance, RowMetric};
 use ndarray::{Array1, Array2, Array3, Array4, ArrayView1, ArrayView2, s};
 
@@ -811,7 +808,7 @@ pub fn partial_supervision_solve(
 }
 
 // ============================================================================
-// Object 4 — the Certificate: `residual_gauge()`
+// Object 4 — the Certificate: `residual_gauge_exact_from_curvature` / `_from_streamed`
 // ============================================================================
 
 /// The latent-manifold topology of one fitted atom, as far as the certificate
@@ -1085,18 +1082,12 @@ pub struct AtomInferenceReport {
 ///
 /// Self-contained on purpose: it carries exactly the objects the residual-gauge
 /// computation needs — the atoms (with topology + fitted frames + ARD), the
-/// curvature/Jacobian row-blocks that pin directions, and the one
+/// isometry-penalty root that pins directions, and the one
 /// [`RowMetric`] whose provenance the report reads. The flattened free-parameter
 /// vector the generators live in is `vec(frame_0) ⊕ vec(frame_1) ⊕ …` in atom
 /// order; `param_dim()` is its length.
 pub struct FittedSaeManifold {
     pub atoms: Vec<FittedAtom>,
-    /// Per-row decoder Jacobian blocks `J_n ∈ ℝ^{p × param_dim}` flattened
-    /// row-major (`J_n[i, c] = jacobian_rows[n][i * param_dim + c]`), one entry
-    /// per metric row. These are the directions the *data* gives cost to; the
-    /// certificate whitens them through [`RowMetric`] and orthonormalizes to
-    /// obtain the data part of the pinning span `range(H_data)`.
-    pub jacobian_rows: Vec<Vec<f64>>,
     /// The isometry-penalty curvature root `R ∈ ℝ^{r × param_dim}` (so the
     /// penalty Hessian is `RᵀR`). Its row space is `range(H_isometry)` — the
     /// directions the isometry pin gives cost to. Empty (`0 × param_dim`) when
@@ -1131,7 +1122,7 @@ impl FittedSaeManifold {
 /// The full model-class gauge groupoid has one object per fitted model and one
 /// morphism per way of relabelling it (isometries of each atom, ARD-tied
 /// rotations, output-frame rotations, atom exchanges, chart reparameterizations)
-/// without changing what it reconstructs. `residual_gauge` cannot certify the
+/// without changing what it reconstructs. The certificate cannot certify the
 /// whole groupoid abstractly — it certifies, per generator, whether *this
 /// specific converged fit* sits on a fixed point of that morphism (pinned) or
 /// can slide along its orbit (unpinned). That per-generator pinned/unpinned
@@ -1354,7 +1345,7 @@ impl PinningRankSupport {
     }
 }
 
-/// The certificate produced by `residual_gauge`.
+/// The residual-gauge certificate.
 #[derive(Debug, Clone)]
 pub struct ResidualGaugeReport {
     /// "computed in metric X" — read straight off
@@ -1389,8 +1380,7 @@ pub struct ResidualGaugeReport {
     pub sym_f_trivial_under_output_fisher: Option<bool>,
     /// The #972 decoder-frame inner-rotation gauge `∏_k O(r_k)` — enumerated,
     /// never curvature-tested (see [`FrameInnerRotationGauge`] for why).
-    /// `None` when no frame factorization was declared (full-`B` dictionaries,
-    /// or a pre-#972 caller using `residual_gauge` directly).
+    /// `None` when no frame factorization was declared (full-`B` dictionaries).
     pub frame_inner_rotation: Option<FrameInnerRotationGauge>,
     /// Human-readable one-line summary.
     pub summary: String,
@@ -2334,88 +2324,6 @@ fn exact_orbit_verdicts(
     Ok(out)
 }
 
-/// The stacked curvature root `R` of the pinning operator, in the fit's
-/// metric: `(m, param_dim)` with `H = H_data + H_isometry = RᵀR`.
-///
-/// We assemble `R = [ W^{½} J ; R_isom ]` whose row space is
-/// `range(H_data) + range(H_isometry)`, where `W^{½} J` is the metric-whitened
-/// decoder Jacobian (the metric whitening is the `RowMetric`'s
-/// `whiten_residual_row` applied to each output residual basis vector — i.e.
-/// each Jacobian row is whitened in the same inner product the likelihood
-/// sums). The caller derives both faces from this one object: the pinning
-/// RANK (RRQR on `Rᵀ`, the audit's leverage-scaled rank decision) and the
-/// per-generator relative curvature `‖R ξ̂‖² / σ_max(R)²` — magnitudes kept,
-/// not orthonormalized away, so the statistic survives a full-rank span.
-fn stacked_curvature_root(model: &FittedSaeManifold) -> Result<Array2<f64>, String> {
-    let param_dim = model.param_dim();
-    if param_dim == 0 {
-        return Ok(Array2::<f64>::zeros((0, 0)));
-    }
-    let p = model.metric.p_out();
-    // Metric-whitened Jacobian rows: each row's Jacobian J_n ∈ ℝ^{p × param_dim}
-    // is whitened to U_nᵀ J_n ∈ ℝ^{rank × param_dim} so that the resulting rows
-    // span the same directions the metric-whitened residual gives cost to. We
-    // build the stacked matrix `R` with one block of whitened rows per metric
-    // row, then the isometry-penalty root beneath it.
-    let mut stacked_rows: Vec<Array1<f64>> = Vec::new();
-    for (n, j_flat) in model.jacobian_rows.iter().enumerate() {
-        if j_flat.len() != p * param_dim {
-            return Err(format!(
-                "stacked_curvature_root: jacobian_rows[{n}] has len {} but expected p*param_dim = {}*{} = {}",
-                j_flat.len(),
-                p,
-                param_dim,
-                p * param_dim
-            ));
-        }
-        // Whiten each parameter column's p-vector of output sensitivities.
-        // Column c of J_n is the p-vector (j_flat[i*param_dim + c])_i. Whitening
-        // it through the metric row (U_nᵀ ·) maps each column to a
-        // `whit_len`-vector; the resulting `whit_len × param_dim` block's rows
-        // are the metric-whitened Jacobian rows whose span the data gives cost
-        // to. For Euclidean provenance `whiten_residual_row` is the identity, so
-        // `whit_len == p` and the block is J_n unchanged (bit-for-bit the
-        // isotropic data span).
-        let mut cols_whitened: Vec<Vec<f64>> = Vec::with_capacity(param_dim);
-        for c in 0..param_dim {
-            let mut col = vec![0.0_f64; p];
-            for i in 0..p {
-                col[i] = j_flat[i * param_dim + c];
-            }
-            cols_whitened.push(model.metric.whiten_residual_row(n, ArrayView1::from(&col)));
-        }
-        let whit_len = cols_whitened.first().map_or(0, |c| c.len());
-        for r in 0..whit_len {
-            let mut row = Array1::<f64>::zeros(param_dim);
-            for (c, col) in cols_whitened.iter().enumerate() {
-                row[c] = col[r];
-            }
-            stacked_rows.push(row);
-        }
-    }
-    // Append isometry-penalty root rows.
-    if model.isometry_penalty_root.ncols() != 0 {
-        if model.isometry_penalty_root.ncols() != param_dim {
-            return Err(format!(
-                "stacked_curvature_root: isometry_penalty_root has {} cols but param_dim = {param_dim}",
-                model.isometry_penalty_root.ncols()
-            ));
-        }
-        for r in 0..model.isometry_penalty_root.nrows() {
-            stacked_rows.push(model.isometry_penalty_root.row(r).to_owned());
-        }
-    }
-    if stacked_rows.is_empty() {
-        return Ok(Array2::<f64>::zeros((0, param_dim)));
-    }
-    let m = stacked_rows.len();
-    let mut r_mat = Array2::<f64>::zeros((m, param_dim));
-    for (i, row) in stacked_rows.iter().enumerate() {
-        r_mat.row_mut(i).assign(row);
-    }
-    Ok(r_mat)
-}
-
 /// The curvature `H = H_data + H_isometry`, reduced to exactly the three things
 /// the certificate reads off it: the pinning rank, the stiffness scale
 /// `σ_max(R)²`, and the quadratic form `ξᵀHξ` along a unit generator.
@@ -2431,13 +2339,8 @@ fn stacked_curvature_root(model: &FittedSaeManifold) -> Result<Array2<f64>, Stri
 /// * [`Self::DualRoot`] — `H = RᵀR` with `R` having fewer rows `m` than
 ///   columns. `spec(RᵀR) = spec(RRᵀ) ∪ {0}^{param_dim − m}`, so the same
 ///   spectral decisions come from an `m × m` eigenproblem.
-/// * [`Self::Gram`] / [`Self::Root`] — the unstructured fallbacks.
+/// * [`Self::Gram`] — the unstructured fallback.
 enum CurvatureReduction {
-    Root {
-        pinning_rank: usize,
-        sigma_max_sq: f64,
-        root: Array2<f64>,
-    },
     Gram {
         pinning_rank: usize,
         sigma_max_sq: f64,
@@ -2464,9 +2367,9 @@ enum CurvatureReduction {
 /// The pinning-rank tolerance, in singular values of `R`.
 ///
 /// The same shape as [`gam_linalg::faer_ndarray::rrqr_with_permutation`]'s own
-/// threshold (`α · ε · max(rows, cols) · max(scale, 1)`), so the streamed
-/// reductions and the RRQR path make one decision rather than two. Written once
-/// here so no reduction can drift into a tolerance of its own.
+/// threshold (`α · ε · max(rows, cols) · max(scale, 1)`), so every reduction
+/// decides rank at the RRQR's own tolerance shape. Written once here so no
+/// reduction can drift into a tolerance of its own.
 fn curvature_rank_tolerance(sigma_max: f64, root_rows: usize, param_dim: usize) -> f64 {
     default_rrqr_rank_alpha()
         * f64::EPSILON
@@ -2535,46 +2438,6 @@ fn gram_spectral_rank(spectrum: &[f64], root_rows: usize, param_dim: usize) -> (
 }
 
 impl CurvatureReduction {
-    /// Theorem A, made empirical: `root` is the stacked curvature root `R`
-    /// whose row space is `range(H) = range(H_data) + range(H_isometry)`, the
-    /// pullback of the Terracini border-block Jacobian into this fit's own
-    /// metric. The RRQR rank of `Rᵀ` below is *the same* penalty-aware,
-    /// leverage-scaled rank decision [`gam_identifiability::audit::audit_identifiability`]
-    /// uses on stacked design columns, applied here to the enumerated symmetry
-    /// generators instead — so "pinning rank" is a genuine empirical measurement
-    /// of the realised tangent dimension `Σ_k(d_k+1)` Terracini predicts, not a
-    /// nominal count: rank-deficient curvature (fewer independent directions
-    /// resolved than atoms enumerate) is exactly a failure of the generic-point
-    /// hypothesis Terracini's theorem requires, and shows up here as a smaller
-    /// `pinning_rank` than the generator count.
-    fn from_model(model: &FittedSaeManifold) -> Result<Self, String> {
-        let root = stacked_curvature_root(model)?;
-        if root.nrows() == 0 {
-            return Ok(Self::Root {
-                pinning_rank: 0,
-                sigma_max_sq: 0.0,
-                root,
-            });
-        }
-        let r_t = root.t().to_owned();
-        // RRQR-pinned rank of Rᵀ = the empirical tangent-independence
-        // certificate: this is the rank machinery deciding how many of the
-        // Terracini-predicted tangent directions the fit's curvature actually
-        // resolves as independent, i.e. how much of `Σ_k dim Isom(M_k)` etc. is
-        // a genuine, separately-identified direction versus collapsed noise.
-        let rrqr = rrqr_with_permutation(&r_t, default_rrqr_rank_alpha())
-            .map_err(|e| format!("residual_gauge: RRQR on Rᵀ failed: {e:?}"))?;
-        let (_u, sv, _vt) = root
-            .svd(false, false)
-            .map_err(|e| format!("residual_gauge: SVD of curvature root failed: {e}"))?;
-        let smax = sv.iter().cloned().fold(0.0_f64, f64::max);
-        Ok(Self::Root {
-            pinning_rank: rrqr.rank,
-            sigma_max_sq: smax * smax,
-            root,
-        })
-    }
-
     /// Reduce whichever representation the streaming builder produced.
     ///
     /// The curvature is checked against the model it will certify — in shape,
@@ -2799,8 +2662,7 @@ impl CurvatureReduction {
 
     fn pinning_rank(&self) -> usize {
         match self {
-            Self::Root { pinning_rank, .. }
-            | Self::Gram { pinning_rank, .. }
+            Self::Gram { pinning_rank, .. }
             | Self::OutputBlockRoots { pinning_rank, .. }
             | Self::DualRoot { pinning_rank, .. } => *pinning_rank,
         }
@@ -2808,8 +2670,7 @@ impl CurvatureReduction {
 
     fn sigma_max_sq(&self) -> f64 {
         match self {
-            Self::Root { sigma_max_sq, .. }
-            | Self::Gram { sigma_max_sq, .. }
+            Self::Gram { sigma_max_sq, .. }
             | Self::OutputBlockRoots { sigma_max_sq, .. }
             | Self::DualRoot { sigma_max_sq, .. } => *sigma_max_sq,
         }
@@ -2817,7 +2678,7 @@ impl CurvatureReduction {
 
     fn unit_generator_energy(&self, unit: &Array1<f64>) -> f64 {
         match self {
-            Self::Root { root, .. } | Self::DualRoot { root, .. } => {
+            Self::DualRoot { root, .. } => {
                 let r_xi = root.dot(unit);
                 r_xi.iter().map(|c| c * c).sum::<f64>()
             }
@@ -2861,66 +2722,13 @@ impl CurvatureReduction {
     }
 }
 
-/// Evaluate the identifiability rank machinery on the symmetry generators of a
-/// fitted SAE-manifold model and certify which gauge group the fit is identified
-/// up to.
-///
-/// # Method
-///
-/// 1. Enumerate the symmetry generators as tangent directions on the flattened
-///    decoder frames: per-atom `Isom(M_k)` generators
-///    (`atom_isometry_generators`), equal-ARD rotations
-///    (`equal_ard_rotation_generators`), global output-frame rotations
-///    (`frame_rotation_generators`), and exchangeable-atom permutations
-///    (`atom_permutation_generators`).
-/// 2. Build the stacked curvature root `R` of the pinning operator
-///    `H = H_data + H_isometry = RᵀR` in the fit's [`RowMetric`]
-///    (`stacked_curvature_root`); the pinning RANK is the audit's RRQR rank
-///    of `R`, reported alongside.
-/// 3. For each generator `ξ`, the **relative curvature fraction**
-///    `‖R ξ̂‖² / σ_max(R)²` measures the curvature the converged objective has
-///    along the unit generator, relative to the model's stiffest direction.
-///    `ξ` is **unpinned** (a residual gauge freedom) iff that fraction is at
-///    or below the calibrated tolerance
-///    `max(`[`GENERATOR_FLAT_ENERGY_TOL`]`, lowering_error_scale)` — flat up
-///    to numerical noise and the mean-frame lowering's own resolution
-///    ([`FittedAtom::lowering_error`], #995). Any larger fraction — including
-///    the *mixed* regime where `ξ` carries both a curved and a flat component
-///    — means the orbit costs objective, the exact group element is broken,
-///    and the generator is **pinned**. (A span-membership or rank-increase
-///    test degenerates when `R` is full-rank, which production fits always
-///    are: every direction is "in the span", so verdicts would collapse to
-///    all-pinned regardless of magnitudes. Keeping the curvature magnitudes
-///    is what lets a genuinely flat direction stay visible inside a full-rank
-///    span.) The fraction and the calibration scale are reported per
-///    generator so partial flatness stays visible.
-///
-/// # Escalations
-///
-/// * When the isometry pin is inactive (`isometry_penalty_root` has no rows) the
-///   report sets `diffeomorphism_unpinned = true`: with no metric pin the model
-///   is only identified up to an arbitrary diffeomorphism of the latent
-///   manifolds, so every isometry generator is a residual freedom.
-/// * Under [`MetricProvenance::OutputFisher`] the `Sym(F)` permutation subgroup
-///   is checked for triviality: every atom-exchange generator must be pinned
-///   (the output-Fisher metric separates the atoms behaviorally). The result is
-///   carried in `sym_f_trivial_under_output_fisher`.
-pub fn residual_gauge(model: &FittedSaeManifold) -> Result<ResidualGaugeReport, String> {
-    residual_gauge_inner(model, None, CurvatureAccess::FromModel)
-}
-
 /// How this certificate reaches the curvature.
 ///
-/// The three arms are not three algorithms — they are three *availabilities*.
+/// The two arms are not two algorithms — they are two *availabilities*.
 /// The certificate's arithmetic is identical downstream of
 /// [`CurvatureMeasurement`]; what differs is whether `H` was handed over
-/// reduced, has to be built from a hand-assembled model's retained Jacobian
-/// rows, or exists only as an operator that re-streams its own root (#2757).
+/// reduced, or exists only as an operator that re-streams its own root (#2757).
 enum CurvatureAccess<'a> {
-    /// Build `R` from the model's retained per-row Jacobian blocks. The general
-    /// path, for callers that hand-build a model whose Jacobian is not
-    /// frame-structured.
-    FromModel,
     /// A curvature the producer already reduced.
     Reduced(CurvatureReduction),
     /// A curvature that is never materialized.
@@ -3113,8 +2921,8 @@ fn measure_streamed(
 /// This is the memory-scaled entry point for callers that can stream their
 /// metric-whitened Jacobian rows into the reductions the certificate consumes,
 /// instead of retaining every per-row `p × param_dim` Jacobian block. The
-/// curvature must cover the same rows `stacked_curvature_root` would have
-/// placed in `R`; its [`ResidualGaugeCurvature::root_rows`] is that row count,
+/// curvature must cover the metric-whitened decoder Jacobian rows and the
+/// isometry-penalty root; its [`ResidualGaugeCurvature::root_rows`] is that row count,
 /// which sets the rank tolerance scale.
 ///
 /// The caller passes the *structure* it was able to build, not a dense matrix:
@@ -3292,9 +3100,6 @@ fn residual_gauge_inner(
     let measurement = match access {
         CurvatureAccess::Streamed(operator) => measure_streamed(operator, &gens)?,
         CurvatureAccess::Reduced(curvature) => measure_reduced(&curvature, &gens),
-        CurvatureAccess::FromModel => {
-            measure_reduced(&CurvatureReduction::from_model(model)?, &gens)
-        }
     };
     let pinning_rank = measurement.pinning_rank;
     let pinning_rank_support = measurement.pinning_rank_support;

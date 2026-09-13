@@ -3324,5 +3324,13 @@
     },
     "reason": "#2234, SPEC rule 25. The pub wrapper gaussian_reml_stationary_set lost its only caller in a905d68bf and is deleted with its GaussianRemlStationarySet certificate type.",
     "evidence": "public_functions() counts pub fn declarations, so deleting the wrapper takes one identity off gaussian_reml.rs. At the base, git grep -n -w gaussian_reml_stationary_set matches only its own declaration in gaussian_reml.rs. Guarded pool job 602897 at a905d68bf with this deletion applied: cargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0 (/scratch.global/sauer354/pool/steer/drift2234.602897.log)."
+  },
+  {
+    "base": "49b77237b5cc35d1af6757574613966c266e68ea",
+    "removed": {
+      "crates/gam-sae/src/identifiability.rs::residual_gauge": 1
+    },
+    "reason": "#2899 public API sweep of gam-sae (prune-api-d): the uncalled identifiability::residual_gauge wrapper is deleted with the Jacobian-block curvature route only it used.",
+    "evidence": "At the base, git grep -w finds no call of the free function residual_gauge; production certifies through residual_gauge_exact_from_curvature and residual_gauge_exact_from_streamed. residual_gauge is the only pub fn this change removes (from_model and stacked_curvature_root are private), which is what public_functions() counts; the map was derived by reading the change, not by running the script. Guarded job 602680 at 5116880ca compiled the workspace and gam-pyffi with the change, log /scratch.global/sauer354/pool/prune-api-d/check.602680.log."
   }
 ]

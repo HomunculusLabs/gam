@@ -1875,9 +1875,7 @@ impl SaeManifoldTerm {
         // the model's retained per-row Jacobian blocks — an object a factor of
         // `p` denser than the data it holds. Both branches now stream the same
         // structured curvature, with the pin's rows carried alongside the
-        // output-coordinate blocks, so `jacobian_rows` has no production
-        // producer at all. The general `residual_gauge` path remains for callers
-        // that hand-build a model whose Jacobian is not frame-structured.
+        // output-coordinate blocks.
         let residual_gauge = match curvature_source {
             ResidualGaugeCurvatureSource::Stored(curvature) => {
                 crate::identifiability::residual_gauge_exact_from_curvature(
@@ -2360,23 +2358,6 @@ impl SaeManifoldTerm {
         let layout = FrameColumnLayout::new(p, &atom_axis_dim);
         let param_dim = layout.param_dim();
 
-        // Per-row pinning Jacobian `J_n ∈ ℝ^{p × param_dim}` flattened row-major
-        // (`J_n[i, c] = jacobian_rows[n][i · param_dim + c]`). Column `(k, i', a)`
-        // of `J_n` is `a_{nk} · ∂g_k/∂t_a(n)[i']` placed at the atom-k frame slot
-        // and read out on output coordinate `i = i'` (a frame perturbation of
-        // output `i'` moves only the row's output coordinate `i'`).
-        //
-        // Both certificate branches consume the SAME structured curvature, and
-        // neither materializes the per-row pinning Jacobian as a dense
-        // `p x param_dim` block. That block has `p*D` nonzeros, so storing it
-        // densely is a factor of `p` too much -- 2.55 GiB PER OBSERVATION at
-        // `p = 4096, D = 19`, times `n`. The isometry-pin branch was the last
-        // caller of that layout (#2757); the field remains on
-        // `FittedSaeManifold` for callers that hand-build a model whose
-        // Jacobian is NOT frame-structured, where the general
-        // `stacked_curvature_root` path still applies.
-        let jacobian_rows: Vec<Vec<f64>> = Vec::new();
-
         // Isometry-penalty curvature root over the frame parameter space. When
         // the isometry gauge pin is active it gives curvature along every fitted
         // frame direction (it resists deviation of the decoder image from its
@@ -2432,7 +2413,6 @@ impl SaeManifoldTerm {
         Ok((
             FittedSaeManifold {
                 atoms: fitted_atoms,
-                jacobian_rows,
                 isometry_penalty_root,
                 metric,
             },

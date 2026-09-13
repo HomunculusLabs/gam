@@ -262,7 +262,8 @@ pub struct SaeManifoldFitDiagnostics {
     /// ([`crate::inference::atom_lens::atom_two_lens`]).
     pub atom_two_lens: crate::inference::atom_lens::AtomTwoLensReport,
     /// Residual-gauge certificate: which symmetry group the fit is identified up
-    /// to (`crate::identifiability::residual_gauge`).
+    /// to (`crate::identifiability::residual_gauge_exact_from_curvature` and
+    /// `residual_gauge_exact_from_streamed`).
     pub residual_gauge: crate::identifiability::ResidualGaugeReport,
     /// Empirical curved-dictionary certificate inputs (#1008). Present when the
     /// caller supplies the fitted reconstruction dispersion needed for the SNR

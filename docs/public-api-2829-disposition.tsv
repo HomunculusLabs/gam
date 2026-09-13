@@ -524,7 +524,7 @@ crates/gam-sae/src/identifiability.rs	enumerated_unit_generators	retired-by-late
 crates/gam-sae/src/identifiability.rs	frame_inner_rotation_dim	retired-by-later-deletion:95168f4880
 crates/gam-sae/src/identifiability.rs	from_ranks	retired-by-later-deletion:95168f4880
 crates/gam-sae/src/identifiability.rs	piecewise_linear_eval	retired-by-later-deletion:95168f4880
-crates/gam-sae/src/identifiability.rs	residual_gauge	restored-in-place
+crates/gam-sae/src/identifiability.rs	residual_gauge	retired-no-product-user
 crates/gam-sae/src/identifiability.rs	residual_gauge_exact	retired-by-later-deletion:95168f4880
 crates/gam-sae/src/identifiability.rs	with_frame_inner_rotation	retired-by-later-deletion:95168f4880
 crates/gam-sae/src/identifiability.rs	with_inner_fit	retired-by-later-deletion:95168f4880
