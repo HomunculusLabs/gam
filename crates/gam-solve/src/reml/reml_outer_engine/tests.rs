@@ -5549,7 +5549,7 @@ pub(crate) fn stochastic_rho_control_variate_is_unbiased_with_predicted_variance
 }
 
 #[test]
-pub(crate) fn modified_gram_schmidt_orthonormalizes_well_conditioned_input() {
+pub(crate) fn orthonormal_range_basis_orthonormalizes_well_conditioned_input() {
     let y = array![
         [1.0, 2.0, 0.5, 3.0],
         [0.0, 1.0, 0.5, 1.5],
@@ -5557,7 +5557,7 @@ pub(crate) fn modified_gram_schmidt_orthonormalizes_well_conditioned_input() {
         [0.0, 0.0, 0.0, 1.0],
     ];
     let mut q = Array2::<f64>::zeros(y.dim());
-    let rank = modified_gram_schmidt(&y, &mut q);
+    let rank = orthonormal_range_basis(&y, &mut q);
     assert_eq!(rank, 4, "well-conditioned input should retain full rank");
     // Q^T Q = I within the retained rank.
     for j in 0..rank {
@@ -5573,7 +5573,7 @@ pub(crate) fn modified_gram_schmidt_orthonormalizes_well_conditioned_input() {
 }
 
 #[test]
-pub(crate) fn modified_gram_schmidt_drops_redundant_columns() {
+pub(crate) fn orthonormal_range_basis_drops_redundant_columns() {
     let y = array![
         [1.0, 2.0, 1.0, 4.0],
         [0.0, 1.0, 0.0, 2.0],
@@ -5581,7 +5581,7 @@ pub(crate) fn modified_gram_schmidt_drops_redundant_columns() {
         [0.0, 0.0, 0.0, 0.0],
     ];
     let mut q = Array2::<f64>::zeros(y.dim());
-    let rank = modified_gram_schmidt(&y, &mut q);
+    let rank = orthonormal_range_basis(&y, &mut q);
     assert_eq!(
         rank, 2,
         "two duplicate columns plus a zero-extension should drop to rank 2"

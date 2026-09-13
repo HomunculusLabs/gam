@@ -1403,16 +1403,18 @@ pub(crate) fn rademacher_probe_into(mut z: ArrayViewMut1<'_, f64>, rng: &mut Xos
     }
 }
 
-/// Modified Gram–Schmidt orthonormalization of the columns of `y`,
-/// writing the orthonormal basis into `q` and returning the retained
-/// rank.
+/// Orthonormal basis of `range(y)` for the Hutch++ range finder, written into
+/// the leading columns of `q`, returning its dimension.
 ///
-/// `y` and `q` must have the same shape `(p, m)`. Columns whose
-/// reduction norm falls below `1e-12` of the largest input column
-/// norm are dropped (numerical-rank cutoff). After this call,
-/// `q.column(0..rank)` is column-orthonormal and approximates
-/// `range(y)`; later columns of `q` are zeroed.
-pub(crate) fn modified_gram_schmidt(y: &Array2<f64>, q: &mut Array2<f64>) -> usize {
+/// `y` and `q` must have the same shape `(p, m)`. The basis is the leading left
+/// singular vectors of `y`'s thin SVD, cut at the SVD's own rounding band
+/// `max(p, m)·ε·σ_max` (`crate::active_set::svd_rank`). A direction at or
+/// below that band is indistinguishable from zero, so no picked fraction of the
+/// longest column decides the rank, and the columns are orthonormal to working
+/// precision however ill-conditioned `y` is (#2469). Later columns of `q` are
+/// zeroed. An SVD that does not converge yields dimension zero, which leaves
+/// the residual Hutchinson phase estimating the whole trace unbiasedly.
+pub(crate) fn orthonormal_range_basis(y: &Array2<f64>, q: &mut Array2<f64>) -> usize {
     let p = y.nrows();
     let m = y.ncols();
     assert_eq!(q.dim(), (p, m));
@@ -1420,32 +1422,13 @@ pub(crate) fn modified_gram_schmidt(y: &Array2<f64>, q: &mut Array2<f64>) -> usi
     if p == 0 || m == 0 {
         return 0;
     }
-    let mut max_norm: f64 = 0.0;
-    for j in 0..m {
-        let n = y.column(j).dot(&y.column(j)).sqrt();
-        if n > max_norm {
-            max_norm = n;
-        }
-    }
-    let drop_tol = (max_norm * 1.0e-12).max(f64::MIN_POSITIVE);
-    let mut rank = 0usize;
-    for j in 0..m {
-        let mut v = y.column(j).to_owned();
-        for k in 0..rank {
-            let qk = q.column(k);
-            let proj = qk.dot(&v);
-            if proj != 0.0 {
-                v.scaled_add(-proj, &qk);
-            }
-        }
-        let norm = v.dot(&v).sqrt();
-        if !norm.is_finite() || norm <= drop_tol {
-            continue;
-        }
-        let inv = 1.0 / norm;
-        v.iter_mut().for_each(|x| *x *= inv);
-        q.column_mut(rank).assign(&v);
-        rank += 1;
+    let Ok((Some(u), singular, None)) = gam_linalg::faer_ndarray::FaerSvd::svd(y, true, false)
+    else {
+        return 0;
+    };
+    let rank = crate::active_set::svd_rank(&singular, p, m);
+    for axis in 0..rank {
+        q.column_mut(axis).assign(&u.column(axis));
     }
     rank
 }
@@ -1462,7 +1445,7 @@ pub(crate) fn modified_gram_schmidt(y: &Array2<f64>, q: &mut Array2<f64>) -> usi
 /// * `tr(H⁻¹ A_L H⁻¹ A_R)` — `apply` = `A_R`/solve/`A_L`/solve.
 ///
 /// Everything else (sketch dim, RNG seeding, randomized range finder +
-/// modified Gram–Schmidt, exact low-rank trace `tr(Qᵀ B Q)`, residual
+/// orthonormal range basis, exact low-rank trace `tr(Qᵀ B Q)`, residual
 /// Hutchinson on `(I - Q Qᵀ) B (I - Q Qᵀ)` with the Welford-style
 /// adaptive relative-error stop) is identical, so it lives here once.
 /// `B` need not be self-adjoint: on Rademacher probes `E[zᵀ B z] = tr(B)`
@@ -1494,7 +1477,7 @@ where
             let w = apply(z.view(), &mut tmp);
             y.column_mut(j).assign(&w);
         }
-        q_rank = modified_gram_schmidt(&y, &mut q);
+        q_rank = orthonormal_range_basis(&y, &mut q);
     }
 
     // Phase 2: T_low = tr(Qᵀ B Q), exact on range(Q).
