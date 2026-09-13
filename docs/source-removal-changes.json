@@ -8872,5 +8872,18 @@
     ],
     "reason": "#2469: the Gaussian REML strength polish in full-conformal select_rho no longer caps Newton at a picked 32 steps. It stops on its own certificates: the gradient inside its rounding band returns, and a contraction ratio |G_{k+1}|/|G_k| that fails to shrink below the previous step's (starting from 1, the old no-decrease refusal) is refused with the numbers named. While the ratios keep shrinking below one, |G| falls at least geometrically, so the band is reached in finitely many steps without a budget.",
     "evidence": "At the base, git grep -n -w REML_STRENGTH_POLISH_BUDGET finds its declaration, the loop header and the exhaustion message inside select_rho, and nothing else. Guarded cargo check --workspace --all-targets --exclude gam-pyffi and the gam-models full_conformal tests: job 619965, /scratch.global/sauer354/pool/const2469b/rp89.619965.log."
+  },
+  {
+    "base": "2df72b25a369c8c6bb9a3644b0b00fd134489136",
+    "items": [
+      "crates/gam-pyffi/src/inference/inference_instruments.rs:fn:sweep_color_arm_throughput",
+      "crates/gam-solve/src/gpu_kernels/sae_resident.rs:fn:assert_sweep_parity_vs_sequential",
+      "crates/gam-solve/src/gpu_kernels/sae_resident.rs:fn:color_arm_variant_matrix",
+      "crates/gam-solve/src/gpu_kernels/sae_resident.rs:fn:run_battery_sweep_multiplexed",
+      "crates/gam-solve/src/gpu_kernels/sae_resident.rs:fn:run_variant_sweep_multiplexed",
+      "crates/gam-solve/src/gpu_kernels/sae_resident.rs:struct:SweepThroughput"
+    ],
+    "reason": "#2899, SPEC rule 25: sweep_color_arm_throughput was a GPU throughput benchmark exported from the production wheel as a pyfunction, and its only caller was tests/sae/olmo_research_battery.py behind a hasattr guard. It is deleted with the throughput-quote helpers only it reached: SweepThroughput, run_variant_sweep_multiplexed, run_battery_sweep_multiplexed (whose doc called it a real-slab production entry although its only caller built fixture frames), color_arm_variant_matrix and assert_sweep_parity_vs_sequential, and with the battery's experiment 6. examples/sae_perf_harness.rs uses SweepVariant, build_sweep_workspaces, run_resident_fits_multiplexed and run_resident_fits_sequential, so those, MultiplexedFit and their scheduling-invariance tests stay.",
+    "evidence": "Guarded pool job 621604 (lane sw0l, node acn146) at 7afcb5facf5bf90628b134ded61b827f0aa54867 with this slice and the disjoint P11 slice overlaid (HEAD==PIN, 0 dirty files, 11 changed paths): no reference to a deleted name left in crates, src, tests, bench, examples or gamfit; cargo check --locked --workspace --all-targets --exclude gam-pyffi --keep-going WORKSPACE_RC=0, which compiles examples/sae_perf_harness.rs against the kept runners; cargo check --locked -p gam-pyffi --all-targets PYFFI_TARGETS_RC=0. The item list is source_removal_guard.py's refusal list against a scratch commit holding only this slice's three files. Log: /scratch.global/sauer354/pool/spec-api/c2/check.621604.log. The earlier check 615689, of a wider deletion, failed on examples/sae_perf_harness.rs, which is why SweepVariant, build_sweep_workspaces, run_resident_fits_multiplexed, run_resident_fits_sequential and MultiplexedFit stay."
   }
 ]
