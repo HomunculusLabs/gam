@@ -3039,3 +3039,90 @@ fn auto_resolution_writes_the_atom_dim_its_own_plan_builder_accepts() {
         "the seed's storage width must match the plan the same inputs produce",
     );
 }
+
+/// #2280 (former #2907) collapsed-coordinate control for the gluing verdict: two arc atoms
+/// with the SAME decoder as the gluing pair of `tiled_circle_term`, but a chart coordinate that
+/// is constant on every row. Each atom decodes one ambient point, so the pooled decoded
+/// scatter is zero and the seam equivalence e-value has no reference-null scale to score
+/// against. Constant coordinates must earn no glue certificate and no glue or fusion
+/// proposal: a coordinate collapse cannot read as two charts of one manifold.
+#[test]
+fn collapsed_arcs_earn_no_glue_2280() {
+    let n = 40usize;
+    let k = 2usize;
+    let p = 4usize;
+    let evaluator = Arc::new(
+        PeriodicHarmonicEvaluator::new(3)
+            .expect("a degree-3 periodic harmonic basis is a valid evaluator spec"),
+    );
+    let coords = Array2::<f64>::from_elem((n, 1), 0.25);
+    let (phi, jet) = evaluator
+        .evaluate(coords.view())
+        .expect("the constant fixture coordinate lies inside the evaluator chart");
+    let m = phi.ncols();
+    let mut atoms = Vec::with_capacity(k);
+    let mut coord_blocks = Vec::with_capacity(k);
+    for j in 0..k {
+        let mut decoder = Array2::<f64>::zeros((m, p));
+        decoder[[1, 0]] = 1.0;
+        decoder[[2, 1]] = 1.0;
+        let atom = SaeManifoldAtom::new_with_provided_function_gram(
+            format!("collapsed_arc_{j}"),
+            SaeAtomBasisKind::Periodic,
+            1,
+            phi.clone(),
+            jet.clone(),
+            decoder,
+            Array2::<f64>::eye(m),
+        )
+        .expect("the collapsed atom's phi/jet/decoder/gram shapes agree by construction")
+        .with_basis_second_jet(evaluator.clone());
+        atoms.push(atom);
+        coord_blocks.push(coords.clone());
+    }
+    let mut logits = Array2::<f64>::zeros((n, k));
+    for row in 0..n {
+        let owner = (row * k) / n;
+        for j in 0..k {
+            logits[[row, j]] = if j == owner { ON } else { OFF };
+        }
+    }
+    let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
+        logits,
+        coord_blocks,
+        vec![LatentManifold::Circle { period: 1.0 }; k],
+        AssignmentMode::softmax(1.0),
+    )
+    .expect("the collapsed fixture's logits, coord blocks and manifolds have length k");
+    let term = SaeManifoldTerm::new(atoms, assignment)
+        .expect("the collapsed fixture atoms and assignment agree on the atom count");
+    let rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(1); k]);
+    let residuals = Array2::<f64>::zeros((n, p));
+
+    assert!(
+        unit_speed_glue_certificate(&term, residuals.view(), 0, 1).is_none(),
+        "two constant chart coordinates must earn no seam equivalence certificate"
+    );
+    let params = HarvestParams {
+        max_fusions: 4,
+        max_fissions: 4,
+        max_births: 0,
+    };
+    let report = harvest_move_proposals(&term, &rho, residuals.view(), &params)
+        .expect("the collapsed fixture harvests");
+    let merging = report
+        .proposals
+        .iter()
+        .filter(|proposal| {
+            matches!(
+                proposal.mv,
+                StructureMove::Glue { .. } | StructureMove::Fusion { .. }
+            )
+        })
+        .count();
+    let total = report.proposals.len();
+    assert_eq!(
+        merging, 0,
+        "collapsed coordinates must yield no glue or fusion proposal, got {merging} of {total}"
+    );
+}
