@@ -55,7 +55,7 @@ def test_from_fitted_inside_torch_module() -> None:
     for _ in range(60):
         optim.zero_grad()
         preds = wrapped(X_t).detach()  # frozen
-        mean_col = preds[:, 1:2]
+        mean_col = preds.unsqueeze(1)
         out = head(mean_col).squeeze(1)
         loss = torch.nn.functional.mse_loss(out, target)
         torch.autograd.backward(loss)
