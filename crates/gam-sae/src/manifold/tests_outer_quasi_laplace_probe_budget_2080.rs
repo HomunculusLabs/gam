@@ -3044,22 +3044,30 @@ fn value_lane_prices_at_shared_fixed_point_2228() {
     // satisfy, not easier: a Value lane wrongly rebuilt on the coarse budget would
     // surface `OuterEval::infeasible` (+inf) rather than a merely-~1%-off value,
     // so the regression this test exists to catch still goes red.
-    let v_true = {
+    let (v_true, v_true_loss) = {
         let mut t = term.clone();
-        t.penalized_quasi_laplace_criterion_with_cache(z.view(), &rho, None, imi, lr, re, rb)
-            .expect("full-budget bare criterion evaluates")
-            .0
+        let evaluated = t
+            .penalized_quasi_laplace_criterion_with_cache(z.view(), &rho, None, imi, lr, re, rb)
+            .expect("full-budget bare criterion evaluates");
+        (evaluated.0, evaluated.1.total())
     };
     // The full budget must be ADEQUATE, not merely non-erroring: a root that still
     // moves when given twice the budget is not the root the Value lane is supposed to
     // price, and pinning the test to one would make every assertion below a statement
     // about a budget rather than about a fixed point. Doubling must not move it.
-    let v_true_double = {
+    let (v_true_double, v_true_double_loss) = {
         let mut t = term.clone();
-        t.penalized_quasi_laplace_criterion_with_cache(z.view(), &rho, None, 2 * imi, lr, re, rb)
-            .expect("double-budget bare criterion evaluates")
-            .0
+        let evaluated = t
+            .penalized_quasi_laplace_criterion_with_cache(z.view(), &rho, None, 2 * imi, lr, re, rb)
+            .expect("double-budget bare criterion evaluates");
+        (evaluated.0, evaluated.1.total())
     };
+    // Printed before the assertion: a moved root is either a different penalized
+    // objective or the same objective with different complexity terms.
+    eprintln!(
+        "[#2228] v_true={v_true:.16e} loss={v_true_loss:.16e} \
+         v_true(2x)={v_true_double:.16e} loss(2x)={v_true_double_loss:.16e}"
+    );
     let root_bound = f64::EPSILON.sqrt() * v_true.abs().max(v_true_double.abs()).max(1.0);
     assert!(
         (v_true - v_true_double).abs() <= root_bound,

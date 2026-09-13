@@ -3084,6 +3084,8 @@ pub(crate) fn small_two_atom_ordered_beta_bernoulli_term()
 /// false-reject bug; this test pins the invariant that forbids it.
 #[test]
 pub(crate) fn value_probe_refine_policy_ranks_same_criterion_as_full_policy() {
+    // #2228 — both policies' refine rounds and polish steps are `log::info!`.
+    gam_runtime::test_support::install_diagnostic_logger();
     let (term0, target, rho) = small_two_atom_periodic_term();
     let mut full = term0.clone();
     let mut probe = term0;
@@ -3111,6 +3113,15 @@ pub(crate) fn value_probe_refine_policy_ranks_same_criterion_as_full_policy() {
             false,
         )
         .expect("probe-budget criterion must converge on the small fixture");
+    // Printed before either assertion: the cost gap alone cannot say whether the
+    // two policies stopped at different penalized objectives or priced one
+    // objective with different complexity terms.
+    eprintln!(
+        "[#2228 refine-policy] full_cost={full_cost:.16e} probe_cost={probe_cost:.16e} \
+         full_loss={:.16e} probe_loss={:.16e}",
+        full_loss.total(),
+        probe_loss.total(),
+    );
     assert_abs_diff_eq!(probe_cost, full_cost, epsilon = 1.0e-8);
     assert_abs_diff_eq!(probe_loss.total(), full_loss.total(), epsilon = 1.0e-8);
 }
