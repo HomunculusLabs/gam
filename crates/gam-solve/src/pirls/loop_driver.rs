@@ -1869,8 +1869,7 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
                 .likelihood
                 .resolved_gamma_shape()
                 .map_err(|error| EstimationError::InvalidInput(error.to_string()))?;
-            let rel_change =
-                (refreshed_shape - prior_shape).abs() / prior_shape.max(f64::MIN_POSITIVE);
+            let rel_change = (refreshed_shape - prior_shape).abs() / prior_shape;
             // Install the refreshed shape and hold it fixed for any re-solve so
             // the LM objective stays stationary (the lock is *re-armed*, not
             // released — the seed-from-warm-start branch in `update_with_curvature`
@@ -1965,8 +1964,7 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
                     .likelihood
                     .resolved_tweedie_phi()
                     .map_err(|error| EstimationError::InvalidInput(error.to_string()))?;
-                let rel_change =
-                    (refreshed_phi - prior_phi).abs() / prior_phi.max(f64::MIN_POSITIVE);
+                let rel_change = (refreshed_phi - prior_phi).abs() / prior_phi;
                 // Install the refreshed φ (the scale metadata the working weight
                 // reads via `fixed_phi()`) and re-arm the lock so a following
                 // re-solve does not overwrite this converged-η value. Because the
@@ -2066,7 +2064,7 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
                 .likelihood
                 .resolved_beta_precision()
                 .map_err(|error| EstimationError::InvalidInput(error.to_string()))?;
-            let rel_change = (refreshed_phi - prior_phi).abs() / prior_phi.max(f64::MIN_POSITIVE);
+            let rel_change = (refreshed_phi - prior_phi).abs() / prior_phi;
             // Install the refreshed φ (updates BOTH the `Beta { phi }` family
             // variant every weight/deviance expression reads and the
             // `EstimatedBetaPhi` scale metadata) and re-arm the lock so a
@@ -2205,8 +2203,7 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
                 .likelihood
                 .resolved_negbin_theta()
                 .map_err(|error| EstimationError::InvalidInput(error.to_string()))?;
-            let rel_change =
-                (refreshed_theta - prior_theta).abs() / prior_theta.max(f64::MIN_POSITIVE);
+            let rel_change = (refreshed_theta - prior_theta).abs() / prior_theta;
             // Install the refreshed θ (updates BOTH the `NegativeBinomial { theta }`
             // family variant every weight/deviance expression reads and the
             // `EstimatedNegBinTheta` scale metadata) and re-arm the lock so a
