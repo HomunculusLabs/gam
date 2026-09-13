@@ -1143,7 +1143,7 @@ mod tests {
         // before any full-data or control fit is launched.
         let coords = Array2::<f64>::zeros((4, 2));
         for folds in [0usize, 1, 5] {
-            let error = run_atom_shape_race(coords.view(), folds, 11, &[3])
+            let error = run_atom_shape_race(coords.view(), folds, 11)
                 .expect_err("shape CV requires 2 <= folds <= n");
             assert_eq!(
                 error,
@@ -1151,19 +1151,9 @@ mod tests {
             );
         }
 
-        let error = run_atom_shape_race(coords.view(), 2, 11, &[3])
+        let error = run_atom_shape_race(coords.view(), 2, 11)
             .expect_err("every ring-cluster training fold needs at least three rows");
         assert!(error.contains("minimum of 2 with n=4, folds=2"), "{error}");
-
-        for (ladder, expected) in [
-            (vec![0], "require 1 <= k <= n"),
-            (vec![5], "require 1 <= k <= n"),
-            (vec![2, 2], "duplicate k=2"),
-        ] {
-            let error = run_atom_shape_race(coords.view(), 4, 11, &ladder)
-                .expect_err("invalid order ladders must fail before fitting");
-            assert!(error.contains(expected), "{error}");
-        }
     }
 
     #[test]
@@ -1187,7 +1177,7 @@ mod tests {
                 coords[[row, 1]] = -0.25 + radius * sin_angle + tangent_noise * cos_angle;
             }
         }
-        let verdict = run_atom_shape_race(coords.view(), 5, 2262, &[5, 7, 9]).unwrap();
+        let verdict = run_atom_shape_race(coords.view(), 5, 2262).unwrap();
         assert_eq!(verdict.ring_clusters_reporting_k, 7);
         assert_eq!(verdict.winner_class, "ring_clusters");
         assert!(
@@ -1541,13 +1531,11 @@ mod tests {
         let train = (0..train_rows).collect::<Vec<_>>();
         let eval = (train_rows..train_rows + eval_rows).collect::<Vec<_>>();
         let config = GaussianMixtureConfig::default();
-        let ladder = vec![2usize, 3];
         let (train_coords, eval_coords, log_volume_scale) =
             canonical_shape_fold(free_coords.view(), &train, &eval, "test mixture").unwrap();
         let (train_selected_k, mut expected) = free_mixture_rung_predictive_density(
             train_coords.view(),
             eval_coords.view(),
-            &ladder,
             config,
         )
         .unwrap();
@@ -1557,7 +1545,6 @@ mod tests {
         let free_trace = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let actual = free_mixture_rung_provider_2d(
             free_coords.clone(),
-            ladder.clone(),
             config,
             std::rc::Rc::clone(&free_trace),
         )(&train, &eval)
@@ -1577,7 +1564,6 @@ mod tests {
         let perturbed_free_trace = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let perturbed_actual = free_mixture_rung_provider_2d(
             perturbed_free_coords,
-            ladder,
             config,
             std::rc::Rc::clone(&perturbed_free_trace),
         )(&train, &eval)
@@ -1610,7 +1596,6 @@ mod tests {
         let ring_train = (0..clusters * per_cluster).collect::<Vec<_>>();
         let ring_eval =
             (clusters * per_cluster..clusters * per_cluster + eval_rows).collect::<Vec<_>>();
-        let ring_ladder = vec![3usize, 4];
         let (ring_train_coords, ring_eval_coords, ring_log_volume_scale) = canonical_shape_fold(
             ring_coords.view(),
             &ring_train,
@@ -1621,7 +1606,6 @@ mod tests {
         let (ring_selected_k, mut ring_expected) = ring_cluster_rung_predictive_density(
             ring_train_coords.view(),
             ring_eval_coords.view(),
-            &ring_ladder,
             config,
         )
         .unwrap();
@@ -1631,7 +1615,6 @@ mod tests {
         let ring_trace = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let ring_actual = ring_cluster_rung_provider_2d(
             ring_coords.clone(),
-            ring_ladder.clone(),
             config,
             std::rc::Rc::clone(&ring_trace),
         )(&ring_train, &ring_eval)
@@ -1647,7 +1630,6 @@ mod tests {
         let perturbed_ring_trace = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let perturbed_ring_actual = ring_cluster_rung_provider_2d(
             perturbed_ring_coords,
-            ring_ladder,
             config,
             std::rc::Rc::clone(&perturbed_ring_trace),
         )(&ring_train, &ring_eval)
@@ -1679,16 +1661,11 @@ mod tests {
             coords[[row, 1]] = normal.sample(&mut rng);
         }
 
-        // Include k=1 deliberately: it is the Euclidean candidate, not a
-        // second free-mixture candidate. The race must remove that duplicate
-        // before fitting and stacking.
-        let ladder = [1usize, 5, 7, 9];
         let (shuffle_verdict, gaussian_verdict, control_circular_win_fraction) =
             matched_control_verdicts(
                 coords.view(),
                 5,
                 2262,
-                &ladder,
                 Some(80.0), // plausible healthy-dictionary mean L0
             )
             .expect("matched controls must run cleanly on pure noise, not error out");
@@ -1714,7 +1691,7 @@ mod tests {
 
         // mean_l0 is mandatory: omitting it must be a clean error, not a panic
         // or a silent floor.
-        let err = matched_control_verdicts(coords.view(), 5, 2262, &ladder, None)
+        let err = matched_control_verdicts(coords.view(), 5, 2262, None)
             .expect_err("mean_l0 must be required for matched controls");
         assert!(err.contains("mean_l0"), "error should name mean_l0: {err}");
     }
@@ -2354,10 +2331,9 @@ fn canonical_shape_fold(
 fn free_mixture_rung_predictive_density(
     train: ArrayView2<'_, f64>,
     eval: ArrayView2<'_, f64>,
-    ladder: &[usize],
     config: gam::solver::evidence::GaussianMixtureConfig,
 ) -> Result<(usize, Vec<f64>), String> {
-    let rung = gam::solver::fit_free_cluster_rung(train, ladder, config)
+    let rung = gam::solver::fit_free_cluster_rung(train, config)
         .map_err(|error| error.to_string())?;
     let fit = rung.winner();
     Ok((fit.k, fit.fit.per_point_log_density(eval)?.to_vec()))
@@ -2366,10 +2342,9 @@ fn free_mixture_rung_predictive_density(
 fn ring_cluster_rung_predictive_density(
     train: ArrayView2<'_, f64>,
     eval: ArrayView2<'_, f64>,
-    ladder: &[usize],
     config: gam::solver::evidence::GaussianMixtureConfig,
 ) -> Result<(usize, Vec<f64>), String> {
-    let rung = gam::solver::fit_ring_of_clusters_rung(train, ladder, config)
+    let rung = gam::solver::fit_ring_of_clusters_rung(train, config)
         .map_err(|error| error.to_string())?;
     let fit = rung.winner();
     Ok((fit.k, fit.fit.per_point_log_density(eval)?.to_vec()))
@@ -2377,7 +2352,6 @@ fn ring_cluster_rung_predictive_density(
 
 fn free_mixture_rung_provider_2d(
     coords: Array2<f64>,
-    ladder: Vec<usize>,
     config: gam::solver::evidence::GaussianMixtureConfig,
     selected_orders: std::rc::Rc<std::cell::RefCell<Vec<usize>>>,
 ) -> gam::solver::HeldOutDensityProvider<'static> {
@@ -2387,7 +2361,6 @@ fn free_mixture_rung_provider_2d(
         let (selected_k, mut density) = free_mixture_rung_predictive_density(
             train_coords.view(),
             eval_coords.view(),
-            &ladder,
             config,
         )?;
         for value in &mut density {
@@ -2400,7 +2373,6 @@ fn free_mixture_rung_provider_2d(
 
 fn ring_cluster_rung_provider_2d(
     coords: Array2<f64>,
-    ladder: Vec<usize>,
     config: gam::solver::evidence::GaussianMixtureConfig,
     selected_orders: std::rc::Rc<std::cell::RefCell<Vec<usize>>>,
 ) -> gam::solver::HeldOutDensityProvider<'static> {
@@ -2410,7 +2382,6 @@ fn ring_cluster_rung_provider_2d(
         let (selected_k, mut density) = ring_cluster_rung_predictive_density(
             train_coords.view(),
             eval_coords.view(),
-            &ladder,
             config,
         )?;
         for value in &mut density {
@@ -2448,7 +2419,6 @@ fn run_atom_shape_race(
     coords: ArrayView2<'_, f64>,
     folds: usize,
     seed: u64,
-    k_ladder: &[usize],
 ) -> Result<AtomShapeRaceVerdict, String> {
     use gam::solver::evidence::{GaussianMixtureConfig, StackingConfig};
     use gam::solver::topology_selector::EvidenceCertification;
@@ -2482,22 +2452,6 @@ fn run_atom_shape_race(
     if !coords.iter().all(|value| value.is_finite()) {
         return Err("adjudicate_atom_shape: coords must be finite".to_string());
     }
-    if k_ladder.is_empty() {
-        return Err("adjudicate_atom_shape: k_ladder must not be empty".to_string());
-    }
-    let mut seen_orders = std::collections::BTreeSet::new();
-    for &k in k_ladder {
-        if k == 0 || k > n {
-            return Err(format!(
-                "adjudicate_atom_shape: requested order k={k} is invalid for n={n}; require 1 <= k <= n"
-            ));
-        }
-        if !seen_orders.insert(k) {
-            return Err(format!(
-                "adjudicate_atom_shape: k_ladder contains duplicate k={k}"
-            ));
-        }
-    }
     // Full-data coordinates are canonicalized only for reporting fits and
     // corroborating BIC/2 scores. Every outer-CV provider below receives the raw
     // chart and derives its gauge from that fold's training rows alone.
@@ -2509,59 +2463,12 @@ fn run_atom_shape_race(
     // so the stacking optimum is non-identifiable and the reported weights
     // depend on candidate ordering. The free *cluster* contender begins at two
     // components; the circular cluster model begins at three.
-    let mixture_reporting_ladder = k_ladder
-        .iter()
-        .copied()
-        .filter(|&k| k >= 2)
-        .collect::<Vec<_>>();
-    if mixture_reporting_ladder.is_empty() {
-        return Err(
-            "adjudicate_atom_shape: k_ladder must contain a free-mixture order k >= 2".to_string(),
-        );
-    }
-    let ring_cluster_reporting_ladder = mixture_reporting_ladder
-        .iter()
-        .copied()
-        .filter(|&k| k >= 3)
-        .collect::<Vec<_>>();
-    if ring_cluster_reporting_ladder.is_empty() {
-        return Err(
-            "adjudicate_atom_shape: k_ladder must contain a ring-cluster order k >= 3".to_string(),
-        );
-    }
-    // Every outer fold races the same, explicitly feasible order sets. Orders
-    // that require more rows than the smallest training fold remain eligible
-    // for the all-data reporting fit but cannot define a common CV class.
-    let mixture_fold_ladder = mixture_reporting_ladder
-        .iter()
-        .copied()
-        .filter(|&k| k <= minimum_training_rows)
-        .collect::<Vec<_>>();
-    if mixture_fold_ladder.is_empty() {
-        return Err(format!(
-            "adjudicate_atom_shape: k_ladder has no free-mixture order feasible in every outer training fold (minimum training rows {minimum_training_rows})"
-        ));
-    }
-    let ring_cluster_fold_ladder = ring_cluster_reporting_ladder
-        .iter()
-        .copied()
-        .filter(|&k| k <= minimum_training_rows)
-        .collect::<Vec<_>>();
-    if ring_cluster_fold_ladder.is_empty() {
-        return Err(format!(
-            "adjudicate_atom_shape: k_ladder has no ring-cluster order feasible in every outer training fold (minimum training rows {minimum_training_rows})"
-        ));
-    }
-    let mixture = fit_free_cluster_rung(reporting_coords.view(), &mixture_reporting_ladder, config)
+    let mixture = fit_free_cluster_rung(reporting_coords.view(), config)
         .map_err(|error| error.to_string())?;
     let mixture_winner = mixture.winner();
     let mixture_reporting_k = mixture_winner.k;
-    let ring_clusters = fit_ring_of_clusters_rung(
-        reporting_coords.view(),
-        &ring_cluster_reporting_ladder,
-        config,
-    )
-    .map_err(|error| error.to_string())?;
+    let ring_clusters = fit_ring_of_clusters_rung(reporting_coords.view(), config)
+        .map_err(|error| error.to_string())?;
     let ring_clusters_reporting_k = ring_clusters.winner().k;
     let mixture_fold_orders = std::rc::Rc::new(std::cell::RefCell::new(Vec::with_capacity(folds)));
     let ring_cluster_fold_orders =
@@ -2595,7 +2502,6 @@ fn run_atom_shape_race(
             // rows cannot leak into either preprocessing or model selection.
             density_provider: free_mixture_rung_provider_2d(
                 raw_coords.clone(),
-                mixture_fold_ladder,
                 config,
                 std::rc::Rc::clone(&mixture_fold_orders),
             ),
@@ -2606,7 +2512,6 @@ fn run_atom_shape_race(
             certification: EvidenceCertification::Exact,
             density_provider: ring_cluster_rung_provider_2d(
                 raw_coords,
-                ring_cluster_fold_ladder,
                 config,
                 std::rc::Rc::clone(&ring_cluster_fold_orders),
             ),
@@ -2672,7 +2577,6 @@ fn matched_control_verdicts(
     coords_view: ArrayView2<'_, f64>,
     folds: usize,
     seed: u64,
-    ladder: &[usize],
     mean_l0: Option<f64>,
 ) -> Result<(AtomShapeRaceVerdict, AtomShapeRaceVerdict, f64), String> {
     validate_control_mean_l0(mean_l0)?;
@@ -2681,8 +2585,8 @@ fn matched_control_verdicts(
     };
     let shuffled = per_dimension_shuffle_null(coords_view, seed ^ 0xD1AE_510F)?;
     let gaussian = covariance_matched_gaussian_null(coords_view, seed ^ 0xC0A4_71A1)?;
-    let shuffle_verdict = run_atom_shape_race(shuffled.view(), folds, seed, ladder)?;
-    let gaussian_verdict = run_atom_shape_race(gaussian.view(), folds, seed, ladder)?;
+    let shuffle_verdict = run_atom_shape_race(shuffled.view(), folds, seed)?;
+    let gaussian_verdict = run_atom_shape_race(gaussian.view(), folds, seed)?;
     let control_circular_win_fraction = (usize::from(shuffle_verdict.circle_wins)
         + usize::from(gaussian_verdict.circle_wins)) as f64
         / 2.0;
@@ -2894,9 +2798,9 @@ pub(crate) fn randomization_p_value(
 /// of the held-out density table and must satisfy `2 <= folds <= n`. Thus the
 /// default `folds = 5` requires `n >= 5`; with an explicit smaller fold count,
 /// the shape models require `n >= 4` and at least three rows in every outer
-/// training fold. An explicit `k_ladder` must contain unique orders in `1..=n`;
-/// the default ladder is truncated to that feasible range before the race. By
-/// default, the identical race also runs on an independent per-dimension
+/// training fold. Each cluster class walks its order up from its minimum (two
+/// free clusters, three ring clusters) until the BIC is bracketed; no ladder of
+/// orders is raced (SPEC rule 18, #2902). By default, the identical race also runs on an independent per-dimension
 /// shuffle and a covariance-matched Gaussian of these supplied coordinates;
 /// `mean_l0` is then required and is emitted beside this adjudicator-input
 /// two-control circular-win fraction. That `{0, 1/2, 1}` value is descriptive,
@@ -2918,14 +2822,13 @@ pub(crate) fn randomization_p_value(
 /// `reconstruction_rank_edge` as `None`; supplying only a subset is an error.
 #[pyfunction]
 #[pyo3(
-    signature = (coords, folds = 5, seed = 11, k_ladder = None, mean_l0 = None, matched_controls = true, n_eff = None, ambient_p = None, dispersion_r = None)
+    signature = (coords, folds = 5, seed = 11, mean_l0 = None, matched_controls = true, n_eff = None, ambient_p = None, dispersion_r = None)
 )]
 pub(crate) fn adjudicate_atom_shape<'py>(
     py: Python<'py>,
     coords: numpy::PyReadonlyArray2<'py, f64>,
     folds: usize,
     seed: u64,
-    k_ladder: Option<Vec<usize>>,
     mean_l0: Option<f64>,
     matched_controls: bool,
     n_eff: Option<f64>,
@@ -2941,15 +2844,7 @@ pub(crate) fn adjudicate_atom_shape<'py>(
     }
     let reconstruction_rank_edge =
         shape_reconstruction_rank_edge(n_eff, ambient_p, dispersion_r).map_err(py_value_error)?;
-    let ladder = k_ladder.unwrap_or_else(|| {
-        gam::solver::MIXTURE_K_LADDER
-            .iter()
-            .copied()
-            .filter(|&k| k <= coords_view.nrows())
-            .collect()
-    });
-    let observed =
-        run_atom_shape_race(coords_view, folds, seed, &ladder).map_err(py_value_error)?;
+    let observed = run_atom_shape_race(coords_view, folds, seed).map_err(py_value_error)?;
     let out = atom_shape_verdict_dict(py, &observed)?;
     out.set_item("dictionary_mean_l0", mean_l0)?;
 
@@ -2957,7 +2852,7 @@ pub(crate) fn adjudicate_atom_shape<'py>(
 
     if matched_controls {
         let (shuffle_verdict, gaussian_verdict, control_circular_win_fraction) =
-            matched_control_verdicts(coords_view, folds, seed, &ladder, mean_l0)
+            matched_control_verdicts(coords_view, folds, seed, mean_l0)
                 .map_err(py_value_error)?;
         let controls = PyDict::new(py);
         controls.set_item(

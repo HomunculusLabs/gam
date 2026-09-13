@@ -47,12 +47,6 @@ use std::time::{Duration, Instant};
 
 const TK_LOG_2PI: f64 = 1.8378770664093453_f64;
 
-/// Fixed component ladder swept for the discrete-mixture rung. Deterministic;
-/// each `k` is priced by its own free-parameter count via the rank-aware
-/// Laplace evidence and ranked against the others in-class before the winning
-/// mixture order competes cross-class.
-pub const MIXTURE_K_LADDER: &[usize] = &[1, 2, 3, 5, 7, 9];
-
 /// Number of cross-validation folds used to build the selection-time held-out
 /// predictive log-density table for cross-class stacking. Fixed (no flag).
 pub const STACKING_CV_FOLDS: usize = 5;
@@ -1380,7 +1374,7 @@ pub struct MixtureRungFit {
     pub bic: f64,
 }
 
-/// Result of fitting the whole mixture ladder: every fitted order plus the index
+/// Result of fitting the mixture rung: every fitted order plus the index
 /// of the in-class winner (lowest BIC).
 #[derive(Debug, Clone)]
 pub struct MixtureRungResult {
@@ -1430,8 +1424,7 @@ pub struct AdaptiveRungOrderFailure {
 /// Order selection is only meaningful when all evidence values being compared
 /// came from certified fits. A failed order is therefore surfaced, even if a
 /// different order fitted successfully; choosing among the survivors would
-/// silently change the estimand. Likewise, hitting the local-refinement budget
-/// is an explicit refusal rather than an unbracketed best-so-far result.
+/// silently change the estimand.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdaptiveRungError {
     InvalidInput {
@@ -1441,11 +1434,6 @@ pub enum AdaptiveRungError {
     OrderFailures {
         kind: AdaptiveRungKind,
         failures: Vec<AdaptiveRungOrderFailure>,
-    },
-    RefinementBudgetExhausted {
-        kind: AdaptiveRungKind,
-        best_k: usize,
-        completed_probes: usize,
     },
 }
 
@@ -1471,84 +1459,36 @@ impl std::fmt::Display for AdaptiveRungError {
                 }
                 Ok(())
             }
-            Self::RefinementBudgetExhausted {
-                kind,
-                best_k,
-                completed_probes,
-            } => write!(
-                formatter,
-                "{} rung exhausted its {completed_probes}-probe refinement budget before bracketing k={best_k}",
-                kind.display_name()
-            ),
         }
     }
 }
 
 impl std::error::Error for AdaptiveRungError {}
 
-fn eligible_adaptive_orders(
-    kind: AdaptiveRungKind,
-    ladder: &[usize],
-    minimum_order: usize,
-    n: usize,
-) -> Result<Vec<usize>, AdaptiveRungError> {
-    if ladder.is_empty() {
-        return Err(AdaptiveRungError::InvalidInput {
-            kind,
-            message: "order ladder must not be empty".to_string(),
-        });
-    }
-    let mut seen = std::collections::BTreeSet::new();
-    let mut orders = Vec::with_capacity(ladder.len());
-    for &k in ladder {
-        if k < minimum_order || k > n {
-            return Err(AdaptiveRungError::InvalidInput {
-                kind,
-                message: format!(
-                    "requested order k={k} is outside this class on n={n} rows; require {minimum_order} <= k <= n"
-                ),
-            });
-        }
-        if !seen.insert(k) {
-            return Err(AdaptiveRungError::InvalidInput {
-                kind,
-                message: format!("order ladder contains duplicate k={k}"),
-            });
-        }
-        orders.push(k);
-    }
-    Ok(orders)
-}
-
-/// Hard cap on the number of EXTRA orders the local refinement around the
-/// coarse-ladder winner may probe. Refinement walks one neighbour at a time
-/// and stops as soon as the running winner is bracketed (both immediate
-/// neighbours fitted and worse). If the cap binds, the rung returns
-/// [`AdaptiveRungError::RefinementBudgetExhausted`]; it never treats an
-/// unbracketed best-so-far order as a certified winner.
-pub(crate) const MIXTURE_REFINEMENT_MAX_PROBES: usize = 16;
-
 /// Fit the free-cluster adaptive class. Unlike the general Gaussian-mixture
 /// rung, this class owns only orders `k >= 2`: the one-component full Gaussian
-/// is the Euclidean candidate. The minimum is enforced inside refinement, so a
-/// coarse `k = 2` winner can never be bracketed by an ineligible `k = 1` fit.
+/// is the Euclidean candidate. The order is walked up from two, so a `k = 2`
+/// winner can never be bracketed by an ineligible `k = 1` fit.
 pub fn fit_free_cluster_rung(
     data: ArrayView2<'_, f64>,
-    ladder: &[usize],
     config: GaussianMixtureConfig,
 ) -> Result<MixtureRungResult, AdaptiveRungError> {
-    fit_mixture_rung_with_minimum_order(data, ladder, 2, config)
+    fit_mixture_rung_with_minimum_order(data, 2, config)
 }
 
 fn fit_mixture_rung_with_minimum_order(
     data: ArrayView2<'_, f64>,
-    ladder: &[usize],
     minimum_order: usize,
     config: GaussianMixtureConfig,
 ) -> Result<MixtureRungResult, AdaptiveRungError> {
     let kind = AdaptiveRungKind::GaussianMixture;
     let n = data.nrows();
-    let coarse_orders = eligible_adaptive_orders(kind, ladder, minimum_order, n)?;
+    if n < minimum_order {
+        return Err(AdaptiveRungError::InvalidInput {
+            kind,
+            message: format!("order k={minimum_order} is outside this class on n={n} rows"),
+        });
+    }
     let mut fits: Vec<MixtureRungFit> = Vec::new();
     // Every order ever attempted (fitted OR failed): refinement must not
     // re-propose a failed order forever.
@@ -1588,20 +1528,19 @@ fn fit_mixture_rung_with_minimum_order(
         }
     };
 
-    let mut failures = Vec::new();
-    for k in coarse_orders {
-        if let Some(failure) = try_order(k, &mut fits, &mut attempted) {
-            failures.push(failure);
-        }
-    }
-    if !failures.is_empty() {
-        return Err(AdaptiveRungError::OrderFailures { kind, failures });
+    if let Some(failure) = try_order(minimum_order, &mut fits, &mut attempted) {
+        return Err(AdaptiveRungError::OrderFailures {
+            kind,
+            failures: vec![failure],
+        });
     }
 
-    // Local refinement: bracket the running winner. The running winner uses
-    // the same rule as the final ranking (lower BIC, ties to the smaller k), so
-    // refinement and ranking can never disagree about who the winner is.
-    let mut probes = 0usize;
+    // Walk the order up from the class minimum until the running winner is
+    // bracketed: both immediate neighbours attempted and not better. The running
+    // winner uses the same rule as the final ranking (lower BIC, ties to the
+    // smaller k), so the walk and the ranking can never disagree about who the
+    // winner is. The walk is bounded by the rows (k <= n); no ladder of orders
+    // and no probe budget is consulted (SPEC rule 18, #2902).
     loop {
         let Some(best_k) = fits
             .iter()
@@ -1620,20 +1559,12 @@ fn fit_mixture_rung_with_minimum_order(
         let Some(k) = next else {
             break; // bracketed: both neighbours attempted (or out of range).
         };
-        if probes == MIXTURE_REFINEMENT_MAX_PROBES {
-            return Err(AdaptiveRungError::RefinementBudgetExhausted {
-                kind,
-                best_k,
-                completed_probes: probes,
-            });
-        }
         if let Some(failure) = try_order(k, &mut fits, &mut attempted) {
             return Err(AdaptiveRungError::OrderFailures {
                 kind,
                 failures: vec![failure],
             });
         }
-        probes += 1;
     }
     // In-class winner-take-all on the BIC scale (lower wins).
     let ranked = rank_priority_candidates(
@@ -1676,18 +1607,22 @@ impl RingOfClustersRungResult {
     }
 }
 
-/// Fit and locally refine the constrained ring-of-clusters order ladder.
+/// Fit the constrained ring-of-clusters class, walking the order up from three.
 /// Orders below three are structurally incapable of identifying a circle and
-/// are rejected as outside the class. Ranking uses the same BIC-form criterion
-/// as the free Gaussian-mixture rung and the smooth parametric shape candidates.
+/// are outside the class. Ranking uses the same BIC-form criterion as the free
+/// Gaussian-mixture rung and the smooth parametric shape candidates.
 pub fn fit_ring_of_clusters_rung(
     data: ArrayView2<'_, f64>,
-    ladder: &[usize],
     config: GaussianMixtureConfig,
 ) -> Result<RingOfClustersRungResult, AdaptiveRungError> {
     let kind = AdaptiveRungKind::RingOfClusters;
     let n = data.nrows();
-    let coarse_orders = eligible_adaptive_orders(kind, ladder, 3, n)?;
+    if n < 3 {
+        return Err(AdaptiveRungError::InvalidInput {
+            kind,
+            message: format!("order k=3 is outside this class on n={n} rows"),
+        });
+    }
     let mut fits = Vec::<RingOfClustersRungFit>::new();
     let mut attempted = std::collections::BTreeSet::<usize>::new();
     let try_order = |k: usize,
@@ -1722,16 +1657,13 @@ pub fn fit_ring_of_clusters_rung(
             }),
         }
     };
-    let mut failures = Vec::new();
-    for k in coarse_orders {
-        if let Some(failure) = try_order(k, &mut fits, &mut attempted) {
-            failures.push(failure);
-        }
+    if let Some(failure) = try_order(3, &mut fits, &mut attempted) {
+        return Err(AdaptiveRungError::OrderFailures {
+            kind,
+            failures: vec![failure],
+        });
     }
-    if !failures.is_empty() {
-        return Err(AdaptiveRungError::OrderFailures { kind, failures });
-    }
-    let mut probes = 0usize;
+    // The same bracketing walk as the free-cluster rung, from the class minimum.
     loop {
         let Some(best_k) = fits
             .iter()
@@ -1750,20 +1682,12 @@ pub fn fit_ring_of_clusters_rung(
         let Some(k) = next else {
             break;
         };
-        if probes == MIXTURE_REFINEMENT_MAX_PROBES {
-            return Err(AdaptiveRungError::RefinementBudgetExhausted {
-                kind,
-                best_k,
-                completed_probes: probes,
-            });
-        }
         if let Some(failure) = try_order(k, &mut fits, &mut attempted) {
             return Err(AdaptiveRungError::OrderFailures {
                 kind,
                 failures: vec![failure],
             });
         }
-        probes += 1;
     }
     let ranked = rank_priority_candidates(
         fits.into_iter()

@@ -565,7 +565,8 @@ verdict = gamfit.adjudicate_atom_shape(
 # coords: contiguous float64 (n, 2). Default folds=5 requires n >= 5;
 # explicit folds must satisfy 2 <= folds <= n and leave >= 3 training rows
 # in every outer fold (a few dozen points are recommended).
-# k_ladder=[2, 3, ...] optionally overrides the mixture orders raced.
+# Each cluster class walks its order up from its minimum until the BIC is
+# bracketed; there is no order ladder to supply.
 ```
 
 Returns a dict:

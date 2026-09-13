@@ -79,7 +79,7 @@ pub use evidence::{
 };
 pub use topology_selector::{
     AdaptiveRungError, AdaptiveRungFailureStage, AdaptiveRungKind, AdaptiveRungOrderFailure,
-    AutoTopologyKind, EvidenceCertification, Headline, HeldOutDensityProvider, MIXTURE_K_LADDER,
+    AutoTopologyKind, EvidenceCertification, Headline, HeldOutDensityProvider,
     MixtureRungFit, MixtureRungResult, PredictiveCandidateKind, PredictiveRaceCandidate,
     PredictiveRaceVerdict, RingOfClustersRungFit, RingOfClustersRungResult, STACKING_CV_FOLDS,
     STACKING_CV_SEED, TopologyAutoFitEvidence, TopologyAutoRankedFit, TopologyAutoSelector,
