@@ -6,20 +6,6 @@
 
 use ndarray::{Array2, ArrayView2};
 
-/// Outcome reported by `iterative_refinement_cholesky_solve`.
-#[derive(Clone, Debug)]
-pub struct RefinementOutcome {
-    /// Solution vector `x` satisfying `A x ≈ b`.
-    pub solution: ndarray::Array1<f64>,
-    /// `‖r‖ / ‖b‖` where `r = b − A x` after the last refinement step
-    /// (or after the initial fp32 solve when no steps were taken).
-    pub relative_residual: f64,
-    /// Precision path used for the factorization.
-    pub used_fp32_factor: bool,
-    /// Number of refinement steps taken (0 means only the initial solve ran).
-    pub refinement_steps: usize,
-}
-
 #[cfg(target_os = "linux")]
 mod cuda {
     use crate::driver::{from_col_major, to_col_major};
@@ -525,7 +511,7 @@ mod cuda {
     ///       band → converged, break.
     ///    c. Residual did not drop below previous step → bail, return `Err`.
     ///    d. Cast `r` to f32. Solve `A e = r` in fp32. `x += e` (f64).
-    /// 4. Return `(x, ‖r‖/‖b‖, refinement_steps)`.
+    /// 4. Return `x`.
     ///
     /// Returns `Err` when the fp32 POTRF fails (not SPD at f32) or when the
     /// residual does not decrease monotonically (κ(A)·u_f32 ≥ 1 regime).
@@ -533,7 +519,7 @@ mod cuda {
     pub(super) fn iterative_refinement_solve_impl(
         hessian: ArrayView2<'_, f64>,
         rhs: &[f64],
-    ) -> Result<super::RefinementOutcome, String> {
+    ) -> Result<ndarray::Array1<f64>, String> {
         use crate::policy::GpuDispatchPolicy;
         let (p, p2) = hessian.dim();
         if p == 0 || p != p2 || rhs.len() != p {
@@ -569,9 +555,7 @@ mod cuda {
             .map_err(|e| format!("download f32 x: {e}"))?;
         let mut x: Vec<f64> = x_f32.iter().map(|&v| v as f64).collect();
 
-        // Compute ‖b‖ for relative residual.
         let norm_b = rhs.iter().map(|v| v * v).sum::<f64>().sqrt();
-        let norm_b_safe = if norm_b > 0.0 { norm_b } else { 1.0 };
         // Refinement has converged once the fp64 residual `b − A·x` is inside its own
         // rounding: each component is a `p`-term inner product and a subtraction, so it
         // rounds by at most `γ_{p+1}·(|A||x| + |b|)`, whose 2-norm is at most
@@ -584,21 +568,14 @@ mod cuda {
 
         let mut x_dev_f64 = pinned_htod(&stream, &x).map_err(|e| format!("upload f64 x: {e}"))?;
         let (r0, norm_r0) = residual_norm_and_vec(&blas, &stream, p, &a_dev_f64, &x_dev_f64, rhs)?;
-        let mut rel_residual = norm_r0 / norm_b_safe;
 
         // Early exit: already converged after initial solve.
         if norm_r0 <= attainable(&x) {
-            return Ok(super::RefinementOutcome {
-                solution: ndarray::Array1::from_vec(x),
-                relative_residual: rel_residual,
-                used_fp32_factor: true,
-                refinement_steps: 0,
-            });
+            return Ok(ndarray::Array1::from_vec(x));
         }
 
         let mut r = r0;
         let mut prev_norm_r = norm_r0;
-        let mut steps_taken = 0_usize;
 
         for _ in 0..max_steps {
             // Cast residual to f32, solve A e = r in fp32.
@@ -614,13 +591,11 @@ mod cuda {
             for (xi, ei) in x.iter_mut().zip(e_f32.iter()) {
                 *xi += *ei as f64;
             }
-            steps_taken += 1;
 
             // Reupload x_dev_f64 and compute new residual.
             x_dev_f64 = pinned_htod(&stream, &x).map_err(|e| format!("upload refined x: {e}"))?;
             let (r_new, norm_r_new) =
                 residual_norm_and_vec(&blas, &stream, p, &a_dev_f64, &x_dev_f64, rhs)?;
-            rel_residual = norm_r_new / norm_b_safe;
 
             // Check monotone decrease. Non-monotone → κ(A)·u ≥ 1.
             if norm_r_new >= prev_norm_r {
@@ -637,12 +612,7 @@ mod cuda {
             }
         }
 
-        Ok(super::RefinementOutcome {
-            solution: ndarray::Array1::from_vec(x),
-            relative_residual: rel_residual,
-            used_fp32_factor: true,
-            refinement_steps: steps_taken,
-        })
+        Ok(ndarray::Array1::from_vec(x))
     }
 
     /// Bind a specific device ordinal's cached context on the calling thread and
@@ -924,14 +894,13 @@ pub use cuda::{
 ///    skipped entirely — the returned logdet is `NaN` in that case. The solution
 ///    is always full-fp64-accurate via the residual refinement regardless.
 ///
-/// Returns `(solution, logdet, Some(RefinementOutcome))` when the fp32 path
-/// succeeded, or `(solution, logdet, None)` on the fp64 fallback. When
-/// `need_logdet` is false and the fp32 path succeeds, the logdet field is `NaN`.
+/// Returns `(solution, logdet)`. When `need_logdet` is false and the fp32 path
+/// succeeds, the logdet is `NaN`.
 pub(crate) fn iterative_refinement_cholesky_solve(
     hessian: ArrayView2<'_, f64>,
     rhs: ArrayView2<'_, f64>,
     need_logdet: bool,
-) -> Result<(Array2<f64>, f64, Option<RefinementOutcome>), String> {
+) -> Result<(Array2<f64>, f64), String> {
     #[cfg(not(target_os = "linux"))]
     {
         let (rows, cols) = hessian.dim();
@@ -959,7 +928,7 @@ pub(crate) fn iterative_refinement_cholesky_solve(
         if rhs.ncols() == 1 && runtime.policy.iterative_refinement_should_attempt(p) {
             let rhs_col = rhs.column(0);
             let rhs_slice: Vec<f64> = rhs_col.iter().copied().collect();
-            if let Ok(outcome) = cuda::iterative_refinement_solve_impl(hessian, &rhs_slice) {
+            if let Ok(solution) = cuda::iterative_refinement_solve_impl(hessian, &rhs_slice) {
                 // fp32 + refinement succeeded; the refined solution is full
                 // fp64 accuracy. The logdet, however, needs the fp64 Cholesky
                 // factor (the fp32 diagonal is only fp32-accurate, and the
@@ -971,12 +940,12 @@ pub(crate) fn iterative_refinement_cholesky_solve(
                 // direction, which discards the logdet) gets the genuine
                 // fp32-factor speedup; logdet is reported as NaN.
                 let mut sol = Array2::<f64>::zeros((p, 1));
-                sol.column_mut(0).assign(&outcome.solution);
+                sol.column_mut(0).assign(&solution);
                 if !need_logdet {
-                    return Ok((sol, f64::NAN, Some(outcome)));
+                    return Ok((sol, f64::NAN));
                 }
                 if let Ok(logdet) = cuda::cholesky_logdet(hessian) {
-                    return Ok((sol, logdet, Some(outcome)));
+                    return Ok((sol, logdet));
                 }
                 // fp64 logdet failed (theoretically impossible for SPD A);
                 // fall through to plain fp64 path.
@@ -985,8 +954,7 @@ pub(crate) fn iterative_refinement_cholesky_solve(
             // fall through to fp64.
         }
 
-        let (sol, logdet) = cuda::cholesky_solve(hessian, rhs)?;
-        Ok((sol, logdet, None))
+        cuda::cholesky_solve(hessian, rhs)
     }
 }
 
@@ -995,11 +963,9 @@ pub fn cholesky_solve_gpu(
     rhs: ArrayView2<'_, f64>,
 ) -> Result<(Array2<f64>, f64), String> {
     // Route through iterative refinement. The function falls back to fp64
-    // internally, so callers always get a valid result; the refinement
-    // outcome metadata is intentionally not surfaced by this thin wrapper.
-    // This wrapper returns the logdet, so it must request it (`need_logdet`).
-    let result = iterative_refinement_cholesky_solve(hessian, rhs, /*need_logdet=*/ true)?;
-    Ok((result.0, result.1))
+    // internally, so callers always get a valid result. This wrapper returns
+    // the logdet, so it must request it (`need_logdet`).
+    iterative_refinement_cholesky_solve(hessian, rhs, /*need_logdet=*/ true)
 }
 
 /// Solution-only mixed-precision solve: like [`cholesky_solve_gpu`] but skips
