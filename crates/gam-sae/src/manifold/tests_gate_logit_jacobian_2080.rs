@@ -345,3 +345,353 @@ fn a_saturating_gate_has_a_finite_mode_at_the_derived_curvature_2080() {
         }
     }
 }
+
+/// A softmax assignment over `logits` at `temperature`, with one circle coordinate per atom.
+fn softmax_assignment(logits: Array2<f64>, temperature: f64) -> SaeAssignment {
+    let (n, k) = logits.dim();
+    let mut coords = Vec::with_capacity(k);
+    let mut manifolds = Vec::with_capacity(k);
+    for atom in 0..k {
+        coords.push(Array2::from_shape_fn((n, 1), |(row, axis)| {
+            0.05 * (row + axis + atom) as f64
+        }));
+        manifolds.push(LatentManifold::Circle { period: 1.0 });
+    }
+    SaeAssignment::from_blocks_with_mode_and_manifolds(
+        logits,
+        coords,
+        manifolds,
+        AssignmentMode::softmax(temperature),
+    )
+    .expect("one logit column, coordinate block and manifold per atom")
+}
+
+/// A softmax row's Jacobian orders against central differences, along every free logit of two
+/// K=4 rows with saturated minority atoms, under row weights. The value producer's slope must be
+/// the gradient producer, the gradient's slope the row block, and the block's slope
+/// `simplex_gate_logit_jacobian_third`. The bars use `|∂ⁿJ| ≤ m_n·c/τⁿ` with
+/// `m = 1, 1, 3, 12, 60`, since each z-factor's logit derivative is bounded by the factor.
+#[test]
+fn simplex_gate_logit_jacobian_orders_match_central_differences_2080() {
+    let temperature = 0.6_f64;
+    let inv_tau = temperature.recip();
+    let assignment = softmax_assignment(
+        array![[6.0, -8.0, 0.5, 0.0], [-1.2, 2.4, -30.0, 0.0]],
+        temperature,
+    );
+    let (n, k) = assignment.logits.dim();
+    let row_weights = [1.5, 0.75];
+    let count = crate::assignment::simplex_gate_free_count(&assignment)
+        .expect("a K=4 softmax row has three free logits");
+    let h = temperature * f64::EPSILON.cbrt();
+    let gradient = gate_logit_jacobian_grad_hdiag_weighted(&assignment, Some(&row_weights)).0;
+    for row in 0..n {
+        let weight = row_weights[row];
+        let sup = |order: i32, multiple: f64| weight * count * multiple * inv_tau.powi(order);
+        let block = crate::assignment::simplex_gate_logit_jacobian_row_block(
+            &assignment,
+            Some(&row_weights),
+            row,
+        )
+        .expect("a free softmax row");
+        let z = crate::assignment::softmax_row(assignment.logits.row(row), temperature);
+        let z_slice = z.as_slice().expect("contiguous softmax row");
+        for i in 0..k - 1 {
+            let logit = assignment.logits[[row, i]];
+            let scale = logit.abs();
+            let moved = |value: f64| {
+                let mut shifted = assignment.clone();
+                shifted.logits[[row, i]] = value;
+                shifted
+            };
+            let (difference, bar) = central_difference(
+                |l| gate_logit_jacobian_value_weighted(&moved(l), Some(&row_weights)),
+                logit,
+                h,
+                scale,
+                sup(1, 1.0),
+                sup(3, 3.0),
+            );
+            let analytic = gradient[row * k + i];
+            assert!(
+                (difference - analytic).abs() <= bar + 4.0 * f64::EPSILON * analytic.abs(),
+                "softmax Jacobian gradient at row {row}, slot {i}: analytic {analytic:.12e}, \
+                 central difference {difference:.12e}, bar {bar:.3e}"
+            );
+            for j in 0..k - 1 {
+                let (difference, bar) = central_difference(
+                    |l| {
+                        gate_logit_jacobian_grad_hdiag_weighted(&moved(l), Some(&row_weights)).0
+                            [row * k + j]
+                    },
+                    logit,
+                    h,
+                    scale,
+                    sup(2, 1.0),
+                    sup(4, 12.0),
+                );
+                let analytic = block[[j, i]];
+                assert!(
+                    (difference - analytic).abs() <= bar + 4.0 * f64::EPSILON * analytic.abs(),
+                    "softmax Jacobian curvature [{j}, {i}] at row {row}: analytic \
+                     {analytic:.12e}, central difference {difference:.12e}, bar {bar:.3e}"
+                );
+                for w in 0..k - 1 {
+                    let (difference, bar) = central_difference(
+                        |l| {
+                            crate::assignment::simplex_gate_logit_jacobian_row_block(
+                                &moved(l),
+                                Some(&row_weights),
+                                row,
+                            )
+                            .expect("a free softmax row")[[j, w]]
+                        },
+                        logit,
+                        h,
+                        scale,
+                        sup(3, 3.0),
+                        sup(5, 60.0),
+                    );
+                    let analytic = weight
+                        * crate::assignment::simplex_gate_logit_jacobian_third(
+                            z_slice, j, w, i, count, inv_tau,
+                        );
+                    assert!(
+                        (difference - analytic).abs()
+                            <= bar + 4.0 * f64::EPSILON * analytic.abs(),
+                        "softmax Jacobian third [{j}, {w}, {i}] at row {row}: analytic \
+                         {analytic:.12e}, central difference {difference:.12e}, bar {bar:.3e}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// At K=2 the softmax chart's one free logit is the sigmoid gate `z₀ = σ(ℓ₀/τ)` against the
+/// reference at zero, so the simplex Jacobian must equal [`GateLogitJacobian`] exactly: the
+/// value, the gradient `(2z − 1)/τ` and the curvature `2z(1 − z)/τ²`.
+#[test]
+fn two_atom_softmax_jacobian_is_the_sigmoid_gate_jacobian_2080() {
+    let temperature = 0.8_f64;
+    let assignment = softmax_assignment(array![[3.5, 0.0], [-12.0, 0.0], [0.25, 0.0]], temperature);
+    let (n, k) = assignment.logits.dim();
+    let sigmoid = |row: usize| {
+        GateLogitJacobian::eval(1.0, assignment.logits[[row, 0]], 0.0, temperature)
+    };
+    let softmax_value = gate_logit_jacobian_value_weighted(&assignment, None);
+    let sigmoid_value: f64 = (0..n).map(|row| sigmoid(row).value()).sum();
+    assert!(
+        (softmax_value - sigmoid_value).abs() <= 64.0 * f64::EPSILON * (1.0 + sigmoid_value.abs()),
+        "K=2 softmax Jacobian value {softmax_value:.15e} is not the sigmoid gate's \
+         {sigmoid_value:.15e}"
+    );
+    let (gradient, curvature) = gate_logit_jacobian_grad_hdiag_weighted(&assignment, None);
+    for row in 0..n {
+        let expected = sigmoid(row);
+        let pairs = [
+            ("gradient", gradient[row * k], expected.gradient()),
+            ("curvature", curvature[row * k], expected.curvature()),
+        ];
+        for (order, softmax, gate) in pairs {
+            assert!(
+                (softmax - gate).abs() <= 64.0 * f64::EPSILON * (1.0 + gate.abs()),
+                "K=2 softmax Jacobian {order} at row {row}: {softmax:.15e} against the sigmoid \
+                 gate's {gate:.15e}"
+            );
+        }
+    }
+}
+
+/// A softmax row whose remaining objective charges `μ` per unit of a minority atom's
+/// probability wants that atom's logit at `−∞`: along `ℓ_m`, with the other logits held,
+/// `f(ℓ_m) = μ·z_m + J(ℓ)`.
+///
+/// Without the Jacobian, `f′ = μ·z_m(1 − z_m)/τ > 0` at every finite logit, so there is no mode.
+/// With it `μ·z(1 − z) + c·z − 1 = 0`, i.e. `z* = 2/[(μ + c) + √((μ + c)² − 4μ)]`, where
+/// `f″ = z*(1 − z*)·(μ(1 − 2z*) + c)/τ²`. On `z < ½`, `f″ > 0`, so `f′` increases from `−1/τ`
+/// toward positive values and the mode is its one root there.
+#[test]
+fn a_minority_softmax_atom_has_a_finite_mode_at_the_derived_curvature_2080() {
+    for (mu, temperature) in [(50.0_f64, 1.0_f64), (2.0e3, 0.3), (8.0, 1.7)] {
+        let inv_tau = temperature.recip();
+        // Minority atom 0 and dominant atom 1 are free; atom 2 is the reference at zero.
+        let assignment = softmax_assignment(array![[0.0, 3.0, 0.0]], temperature);
+        let count = crate::assignment::simplex_gate_free_count(&assignment)
+            .expect("a K=3 softmax row has two free logits");
+        let along = |logit: f64| {
+            let mut shifted = assignment.clone();
+            shifted.logits[[0, 0]] = logit;
+            shifted
+        };
+        let minority = |logit: f64| {
+            crate::assignment::softmax_row(along(logit).logits.row(0), temperature)[0]
+        };
+        let slope = |logit: f64| {
+            let z = minority(logit);
+            mu * z * (1.0 - z) * inv_tau
+                + gate_logit_jacobian_grad_hdiag_weighted(&along(logit), None).0[0]
+        };
+        // `z₀ = ½` at `ℓ₀ = τ·ln(e^{3/τ} + 1)`, where the slope is positive; walk down until it
+        // is negative, then bisect to float resolution.
+        let mut high = temperature * ((3.0 * inv_tau).exp() + 1.0).ln();
+        assert!(slope(high) > 0.0, "the slope at z₀ = ½ must be positive");
+        let mut step = temperature;
+        let mut low = high - step;
+        while slope(low) >= 0.0 {
+            high = low;
+            step *= 2.0;
+            low -= step;
+            assert!(low.is_finite(), "the minority slope never turned negative");
+        }
+        loop {
+            let middle = 0.5 * (low + high);
+            if middle <= low || middle >= high {
+                break;
+            }
+            if slope(middle) < 0.0 {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        let mode = 0.5 * (low + high);
+        let z_mode = minority(mode);
+        let z_derived = 2.0 / ((mu + count) + ((mu + count) * (mu + count) - 4.0 * mu).sqrt());
+        let x_mode = mode * inv_tau;
+        assert!(
+            mode.is_finite()
+                && (z_mode - z_derived).abs() <= 64.0 * f64::EPSILON * (1.0 + x_mode.abs()),
+            "μ={mu}, τ={temperature}: the minority gate at the mode {z_mode:.15e} is not the \
+             derived {z_derived:.15e}"
+        );
+        let block = crate::assignment::simplex_gate_logit_jacobian_row_block(&along(mode), None, 0)
+            .expect("a free softmax row");
+        let curvature =
+            mu * z_mode * (1.0 - z_mode) * (1.0 - 2.0 * z_mode) * inv_tau * inv_tau + block[[0, 0]];
+        let derived_curvature =
+            z_derived * (1.0 - z_derived) * (mu * (1.0 - 2.0 * z_derived) + count) * inv_tau * inv_tau;
+        assert!(
+            (curvature - derived_curvature).abs()
+                <= 64.0 * f64::EPSILON * (mu + count) * inv_tau * inv_tau * (1.0 + x_mode.abs()),
+            "μ={mu}, τ={temperature}: curvature at the mode {curvature:.15e} is not the derived \
+             {derived_curvature:.15e}"
+        );
+        // Negative control: without the Jacobian the slope below the mode stays strictly
+        // positive, so the minority logit has nowhere finite to stop.
+        for walk in 1..=6 {
+            let logit = mode - 10.0 * walk as f64 * temperature;
+            let z = minority(logit);
+            let bare_slope = mu * z * (1.0 - z) * inv_tau;
+            assert!(
+                bare_slope > 0.0,
+                "μ={mu}, τ={temperature}: without the Jacobian the slope at logit {logit} must be \
+                 positive, got {bare_slope:.3e}"
+            );
+        }
+    }
+}
+
+/// A three-atom softmax term whose atoms are one decoder on one chart, so the reconstruction's
+/// logit derivative `Σ_k (∂z_k/∂ℓ_j)·f_k = f·Σ_k ∂z_k/∂ℓ_j` is zero to rounding. The data
+/// Gauss--Newton block on the logits vanishes, and the installed `H_tt` logit block is the
+/// entropy prior's diagonal Gershgorin majorizer plus the Jacobian's own block. Off the
+/// diagonal the installed entry must be the Jacobian's `−w·c·z_i z_j/τ²`, which the fixture
+/// holds away from zero; on the diagonal the remainder is non-negative. The loss field carries
+/// the Jacobian value beyond the entropy prior. By AM–GM on the `c` masses that value is at
+/// least `c·ln c + |F|·ln τ > 0` per row, so neither lane can pass by omitting the term.
+#[test]
+fn installed_softmax_logit_block_holds_the_jacobian_block_2080() {
+    let temperature = 0.8_f64;
+    let inv_tau = temperature.recip();
+    let z = one_circle_wide_target(24, 8, 0.05);
+    let mut term = two_circle_periodic_term(z.view(), 3, 1).0;
+    term.assignment.mode = AssignmentMode::softmax(temperature);
+    for atom in 1..3 {
+        term.atoms[atom] = term.atoms[0].clone();
+        term.assignment.coords[atom] = term.assignment.coords[0].clone();
+    }
+    for row in 0..term.assignment.logits.nrows() {
+        term.assignment.logits[[row, 2]] = 0.0;
+    }
+    let rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; 3])
+        .for_assignment(AssignmentMode::softmax(temperature));
+    let weights = term.row_loss_weights.clone();
+    let n = term.assignment.logits.nrows();
+    let count = crate::assignment::simplex_gate_free_count(&term.assignment)
+        .expect("a K=3 softmax row has two free logits");
+    let jacobian_value = gate_logit_jacobian_value_weighted(&term.assignment, weights.as_deref());
+    let total_weight = weights.as_ref().map_or(n as f64, |w| w.iter().sum());
+    let row_floor = count * count.ln() + (count - 1.0) * temperature.ln();
+    assert!(
+        row_floor > 0.0
+            && jacobian_value >= total_weight * row_floor - 64.0 * f64::EPSILON * jacobian_value,
+        "the softmax Jacobian value {jacobian_value:.12e} is below its AM–GM floor \
+         {:.12e}",
+        total_weight * row_floor
+    );
+    let loss = term.loss(z.view(), &rho).expect("loss at the fixture state");
+    let prior = assignment_prior_value_weighted(&term.assignment, &rho, weights.as_deref())
+        .expect("entropy prior value at the fixture state");
+    assert!(
+        (loss.assignment_sparsity - prior - jacobian_value).abs()
+            <= 64.0 * f64::EPSILON * (1.0 + prior.abs() + jacobian_value.abs()),
+        "the loss field must carry exactly the softmax Jacobian {jacobian_value:.12e} beyond the \
+         entropy prior {prior:.12e}; it carries {:.12e}",
+        loss.assignment_sparsity - prior
+    );
+    let mut assembled = term.clone();
+    let system = assembled
+        .assemble_arrow_schur(z.view(), &rho, None)
+        .expect("assemble the softmax fixture's arrow system");
+    for (row, block) in system.rows.iter().enumerate() {
+        let weight = weights.as_ref().map_or(1.0, |w| w[row]);
+        let jacobian = crate::assignment::simplex_gate_logit_jacobian_row_block(
+            &term.assignment,
+            weights.as_deref(),
+            row,
+        )
+        .expect("a free softmax row");
+        let slots = jacobian.nrows();
+        let vars = assembled
+            .row_vars_for_row_dim(row, block.htt.nrows())
+            .expect("row layout of the assembled system");
+        for (slot, var) in vars.iter().take(slots).enumerate() {
+            assert!(
+                matches!(*var, SaeLocalRowVar::Logit { atom } if atom == slot),
+                "row {row}: slot {slot} must be the free logit of atom {slot}"
+            );
+        }
+        // `z₀ = z₁ = 1/(2 + e^{−6/τ})`, so `z₀z₁ > 0.2`.
+        assert!(
+            -jacobian[[0, 1]] >= 0.2 * weight * count * inv_tau * inv_tau,
+            "row {row}: the two dominant atoms must couple through the Jacobian, got \
+             {:.12e}",
+            jacobian[[0, 1]]
+        );
+        let scale = (0..slots)
+            .map(|i| block.htt[[i, i]].abs().max(jacobian[[i, i]].abs()))
+            .fold(0.0_f64, f64::max);
+        let tolerance = 64.0 * f64::EPSILON * (1.0 + scale);
+        for i in 0..slots {
+            assert!(
+                block.htt[[i, i]] - jacobian[[i, i]] >= -tolerance,
+                "row {row}, slot {i}: installed logit curvature {:.12e} is below the Jacobian's \
+                 {:.12e}",
+                block.htt[[i, i]],
+                jacobian[[i, i]]
+            );
+            for j in 0..slots {
+                if j != i {
+                    assert!(
+                        (block.htt[[i, j]] - jacobian[[i, j]]).abs() <= tolerance,
+                        "row {row}, slots ({i}, {j}): installed logit coupling {:.12e} is not \
+                         the Jacobian's {:.12e}",
+                        block.htt[[i, j]],
+                        jacobian[[i, j]]
+                    );
+                }
+            }
+        }
+    }
+}

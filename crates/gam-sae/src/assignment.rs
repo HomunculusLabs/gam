@@ -1828,14 +1828,82 @@ fn gate_logit_jacobian_at(
     ))
 }
 
-/// [`GateLogitJacobian`]'s value summed over every free gate: the change-of-variables
-/// term of the gate prior's density in logit coordinates.
+/// The free logits of a softmax assignment and its temperature, or `None` when the mode is
+/// not softmax or no logit is free.
+///
+/// A softmax row's prior is a density on the simplex, while the inner solve and the Laplace
+/// evidence integrate over its free logits. The chart holds the reference logit `K − 1` at
+/// zero, and a fixed logit (an ungated atom, or every atom under frozen routing) is held too.
+/// For the free set `F`, with `R = 1 − Σ_{i∈F} z_i` the mass on the held atoms, the change of
+/// variables has `|det ∂z_F/∂ℓ_F| = Π_{i∈F} z_i · R / τ^{|F|}` (#2080), so each row carries
+/// `J = −Σ_{i∈F} ln z_i − ln R + |F|·ln τ`. With `c = |F| + 1`, `∂J/∂ℓ_j = (c·z_j − 1)/τ` and
+/// `∂²J/∂ℓ_i∂ℓ_j = c·z_i(δ_ij − z_j)/τ²`, which is exact and PSD. Without it a minority atom's
+/// probability runs to zero with no finite mode, the softmax twin of the saturated sigmoid
+/// gate [`GateLogitJacobian`] fixes. Nothing here depends on ρ.
+fn simplex_gate_frame(assignment: &SaeAssignment) -> Option<(Vec<usize>, f64)> {
+    let AssignmentMode::Softmax { temperature, .. } = assignment.mode else {
+        return None;
+    };
+    let free: Vec<usize> = (0..assignment.k_atoms().saturating_sub(1))
+        .filter(|&atom| !assignment.logit_is_fixed(atom))
+        .collect();
+    (!free.is_empty()).then_some((free, temperature))
+}
+
+/// `ln Σ_{atom ∈ atoms} e^{ℓ_atom/τ}`, shifted by its largest term so no exponent overflows or
+/// underflows to an infinite logarithm.
+fn log_sum_exp_scaled(
+    logits: ArrayView1<'_, f64>,
+    atoms: impl Iterator<Item = usize> + Clone,
+    inv_tau: f64,
+) -> f64 {
+    let top = atoms
+        .clone()
+        .map(|atom| logits[atom] * inv_tau)
+        .fold(f64::NEG_INFINITY, f64::max);
+    top + atoms
+        .map(|atom| (logits[atom] * inv_tau - top).exp())
+        .sum::<f64>()
+        .ln()
+}
+
+/// One softmax row's `J = −Σ_{i∈F} ln z_i − ln R + |F|·ln τ` (see [`simplex_gate_frame`]), from
+/// log-sum-exps so a minority atom's `ln z_i` and the held mass `ln R` stay finite.
+fn simplex_gate_logit_jacobian_value(
+    logits: ArrayView1<'_, f64>,
+    free: &[usize],
+    temperature: f64,
+) -> f64 {
+    let inv_tau = temperature.recip();
+    let k = logits.len();
+    let all = log_sum_exp_scaled(logits, 0..k, inv_tau);
+    let held = log_sum_exp_scaled(logits, (0..k).filter(|atom| !free.contains(atom)), inv_tau);
+    let free_log_mass: f64 = free.iter().map(|&atom| logits[atom] * inv_tau - all).sum();
+    -free_log_mass - (held - all) + free.len() as f64 * temperature.ln()
+}
+
+/// `z_i(1 − z_i)` as `z_i·Σ_{k≠i} z_k`, free of the cancellation at a dominant atom.
+fn simplex_spread(z: &Array1<f64>, i: usize) -> f64 {
+    let others: f64 = (0..z.len()).filter(|&atom| atom != i).map(|atom| z[atom]).sum();
+    z[i] * others
+}
+
+/// The gate prior's change-of-variables term in logit coordinates, summed over every free
+/// sigmoid gate ([`GateLogitJacobian`]) or every softmax row ([`simplex_gate_frame`]).
 pub(crate) fn gate_logit_jacobian_value_weighted(
     assignment: &SaeAssignment,
     row_weights: Option<&[f64]>,
 ) -> f64 {
-    let k = assignment.k_atoms();
     let mut total = 0.0_f64;
+    if let Some((free, temperature)) = simplex_gate_frame(assignment) {
+        for row in 0..assignment.n_obs() {
+            let weight = row_weights.map_or(1.0, |w| w[row]);
+            total += weight
+                * simplex_gate_logit_jacobian_value(assignment.logits.row(row), &free, temperature);
+        }
+        return total;
+    }
+    let k = assignment.k_atoms();
     for row in 0..assignment.n_obs() {
         for atom in 0..k {
             if let Some(jacobian) = gate_logit_jacobian_at(assignment, row_weights, row, atom) {
@@ -1846,8 +1914,9 @@ pub(crate) fn gate_logit_jacobian_value_weighted(
     total
 }
 
-/// Gradient and curvature of [`gate_logit_jacobian_value_weighted`] per flat
-/// `(row·K + atom)` logit, the layout of [`assignment_prior_grad_hdiag_weighted`].
+/// Gradient and curvature diagonal of [`gate_logit_jacobian_value_weighted`] per flat
+/// `(row·K + atom)` logit, the layout of [`assignment_prior_grad_hdiag_weighted`]. A softmax
+/// row's full curvature block is [`simplex_gate_logit_jacobian_row_block`].
 pub(crate) fn gate_logit_jacobian_grad_hdiag_weighted(
     assignment: &SaeAssignment,
     row_weights: Option<&[f64]>,
@@ -1856,6 +1925,20 @@ pub(crate) fn gate_logit_jacobian_grad_hdiag_weighted(
     let n = assignment.n_obs();
     let mut grad = Array1::<f64>::zeros(n * k);
     let mut curvature = Array1::<f64>::zeros(n * k);
+    if let Some((free, temperature)) = simplex_gate_frame(assignment) {
+        let inv_tau = temperature.recip();
+        let count = (free.len() + 1) as f64;
+        for row in 0..n {
+            let weight = row_weights.map_or(1.0, |w| w[row]);
+            let z = softmax_row(assignment.logits.row(row), temperature);
+            for &atom in &free {
+                grad[row * k + atom] = weight * (count * z[atom] - 1.0) * inv_tau;
+                curvature[row * k + atom] =
+                    weight * count * simplex_spread(&z, atom) * inv_tau * inv_tau;
+            }
+        }
+        return (grad, curvature);
+    }
     for row in 0..n {
         for atom in 0..k {
             if let Some(jacobian) = gate_logit_jacobian_at(assignment, row_weights, row, atom) {
@@ -1865,6 +1948,54 @@ pub(crate) fn gate_logit_jacobian_grad_hdiag_weighted(
         }
     }
     (grad, curvature)
+}
+
+/// One softmax row's Jacobian curvature `c·z_i(δ_ij − z_j)/τ²` over the chart's `K − 1` logit
+/// slots, zero on held slots, or `None` when the assignment has no free softmax logit.
+pub(crate) fn simplex_gate_logit_jacobian_row_block(
+    assignment: &SaeAssignment,
+    row_weights: Option<&[f64]>,
+    row: usize,
+) -> Option<Array2<f64>> {
+    let (free, temperature) = simplex_gate_frame(assignment)?;
+    let k = assignment.k_atoms();
+    let inv_tau = temperature.recip();
+    let scale = row_weights.map_or(1.0, |w| w[row]) * (free.len() + 1) as f64 * inv_tau * inv_tau;
+    let z = softmax_row(assignment.logits.row(row), temperature);
+    let mut block = Array2::<f64>::zeros((k - 1, k - 1));
+    for &i in &free {
+        block[[i, i]] = scale * simplex_spread(&z, i);
+        for &j in &free {
+            if j != i {
+                block[[i, j]] = -scale * z[i] * z[j];
+            }
+        }
+    }
+    Some(block)
+}
+
+/// `c = |F| + 1` for a softmax assignment's free logits (see [`simplex_gate_frame`]), or `None`
+/// when there is none.
+pub(crate) fn simplex_gate_free_count(assignment: &SaeAssignment) -> Option<f64> {
+    simplex_gate_frame(assignment).map(|(free, _)| (free.len() + 1) as f64)
+}
+
+/// `∂³J/∂ℓ_i∂ℓ_j∂ℓ_w = (c/τ³)·[z_i(δ_iw − z_w)δ_ij − z_i(δ_iw − z_w)z_j − z_i z_j(δ_jw − z_w)]`, the
+/// logit derivative of one softmax row's Jacobian curvature, for the θ-adjoints. `z` is the
+/// row's full softmax vector, `count` is [`simplex_gate_free_count`], and the caller masks held
+/// logits.
+pub(crate) fn simplex_gate_logit_jacobian_third(
+    z: &[f64],
+    i: usize,
+    j: usize,
+    w: usize,
+    count: f64,
+    inv_tau: f64,
+) -> f64 {
+    let delta = |a: usize, b: usize| if a == b { 1.0 } else { 0.0 };
+    let dz_i = z[i] * (delta(i, w) - z[w]);
+    let dz_j = z[j] * (delta(j, w) - z[w]);
+    count * inv_tau * inv_tau * inv_tau * (dz_i * delta(i, j) - dz_i * z[j] - z[i] * dz_j)
 }
 
 /// The logit derivative of one gate's [`GateLogitJacobian`] curvature, for the θ-adjoints

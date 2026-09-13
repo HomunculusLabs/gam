@@ -2484,6 +2484,7 @@ impl SaeManifoldTerm {
                 .as_slice()
                 .expect("softmax assignments row must be contiguous");
             let m_log_mean = softmax_majorizer_log_mean(a_soft);
+            let simplex_count = crate::assignment::simplex_gate_free_count(&self.assignment);
             let w_row = self.row_loss_weights.as_deref().map_or(1.0, |w| w[row]);
             // #2330 Patch D — per-row `error_metric = √w·M·r` in output space,
             // built EXACTLY as `apply_exact_hessian_minus_b` builds the object it
@@ -2617,6 +2618,19 @@ impl SaeManifoldTerm {
                                         entropy_scale,
                                         inv_tau,
                                     );
+                            }
+                            // #2080 — the softmax row's logit Jacobian has the exact dense
+                            // curvature `c·(diag z − zzᵀ)/τ²` in both `B` and `A`.
+                            if let Some(count) = simplex_count {
+                                if !self.assignment.logit_is_fixed(atom_a)
+                                    && !self.assignment.logit_is_fixed(atom_b)
+                                    && !self.assignment.logit_is_fixed(atom_w)
+                                {
+                                    dh += w_row
+                                        * crate::assignment::simplex_gate_logit_jacobian_third(
+                                            a_soft, atom_a, atom_b, atom_w, count, inv_tau,
+                                        );
+                                }
                             }
                         }
                         if a == b && a == w {

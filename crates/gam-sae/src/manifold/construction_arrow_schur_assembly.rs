@@ -1059,6 +1059,21 @@ impl SaeManifoldTerm {
                                         block.htt[[ki, kj]] += h_dense[[ki, kj]];
                                     }
                                 }
+                                // #2080 — the softmax row's logit Jacobian `c·(diag z − zzᵀ)/τ²`
+                                // is exact and PSD, so it joins the majorizer with no ΔC remainder.
+                                if let Some(jacobian) =
+                                    crate::assignment::simplex_gate_logit_jacobian_row_block(
+                                        &self.assignment,
+                                        self.row_loss_weights.as_deref(),
+                                        row,
+                                    )
+                                {
+                                    for ki in 0..assignment_dim {
+                                        for kj in 0..assignment_dim {
+                                            block.htt[[ki, kj]] += jacobian[[ki, kj]];
+                                        }
+                                    }
+                                }
                             } else {
                                 for free_idx in 0..assignment_dim {
                                     let raw = assignment_hdiag[assignment_base + free_idx];
