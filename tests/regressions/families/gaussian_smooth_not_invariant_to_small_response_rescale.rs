@@ -44,8 +44,7 @@
 //! to an **absolute** objective/gradient scale rather than one that tracks the
 //! response magnitude. The inner-solve plateau band floors the objective scale
 //! at `1.0` (`objective_scale = state.deviance.abs().max(...).max(1.0)`,
-//! `src/solver/pirls/newton_solve.rs:903`, and the `.max(1.0)` in
-//! `src/solver/latent_inner.rs:316`), and the outer ρ-gradient tolerance is the
+//! `src/solver/pirls/newton_solve.rs:903`), and the outer ρ-gradient tolerance is the
 //! bare `config.tolerance` whenever no `objective_scale` is supplied
 //! (`outer_gradient_tolerance`, `src/solver/outer_strategy/run.rs:1724-1735`).
 //! When the whole Gaussian objective is `O(a²) ≪ 1`, those absolute floors swamp
