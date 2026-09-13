@@ -1211,6 +1211,11 @@ pub struct SurvivalMarginalSlopeInputs<'a> {
 /// `fit_result` / `data_schema` install. Callers supply the two variants that
 /// differ — `survival_distribution` and `frailty` — and then set their own
 /// family-specific fields on the returned payload.
+///
+/// A fit whose constrained posterior declined its moments stores an optimizer
+/// mode, not the posterior mean a saved model publishes, so every survival
+/// contract refuses it here by the decline's summary, as the location-scale and
+/// transformation-normal assemblers do (#979).
 fn new_royston_parmar_survival_payload(
     formula: String,
     fit_result: UnifiedFitResult,
@@ -1218,7 +1223,10 @@ fn new_royston_parmar_survival_payload(
     survival_likelihood_label: &str,
     survival_distribution: Option<ResidualDistribution>,
     frailty: crate::survival::lognormal_kernel::FrailtySpec,
-) -> FittedModelPayload {
+) -> Result<FittedModelPayload, String> {
+    fit_result
+        .require_posterior_mean("survival saved-model assembly")
+        .map_err(|error| error.to_string())?;
     let mut payload = FittedModelPayload::new(
         MODEL_PAYLOAD_VERSION,
         formula,
@@ -1237,7 +1245,7 @@ fn new_royston_parmar_survival_payload(
     payload.unified = Some(fit_result.clone());
     payload.fit_result = Some(fit_result);
     payload.data_schema = Some(data_schema);
-    payload
+    Ok(payload)
 }
 
 /// Assemble the canonical survival marginal-slope payload — single source of
@@ -1245,7 +1253,7 @@ fn new_royston_parmar_survival_payload(
 pub fn assemble_survival_marginal_slope_payload(
     inputs: SurvivalMarginalSlopeInputs<'_>,
     source: SavedModelSourceMetadata,
-) -> FittedModelPayload {
+) -> Result<FittedModelPayload, String> {
     let mut payload = new_royston_parmar_survival_payload(
         inputs.formula,
         inputs.fit_result,
@@ -1253,7 +1261,7 @@ pub fn assemble_survival_marginal_slope_payload(
         &inputs.survival_likelihood_label,
         Some(ResidualDistribution::Gaussian),
         inputs.frailty,
-    );
+    )?;
     payload.survival_entry = inputs.survival_entry;
     payload.survival_exit = Some(inputs.survival_exit);
     payload.survival_event = Some(inputs.survival_event);
@@ -1315,7 +1323,7 @@ pub fn assemble_survival_marginal_slope_payload(
             .collect(),
     );
     source.apply_to(&mut payload);
-    payload
+    Ok(payload)
 }
 
 /// Fitted baseline-timewiggle coefficients: a single block (net) or one per
@@ -1377,7 +1385,7 @@ pub struct SurvivalTransformationInputs {
 pub fn assemble_survival_transformation_payload(
     inputs: SurvivalTransformationInputs,
     source: SavedModelSourceMetadata,
-) -> FittedModelPayload {
+) -> Result<FittedModelPayload, String> {
     let mut payload = new_royston_parmar_survival_payload(
         inputs.formula,
         inputs.fit_result,
@@ -1385,7 +1393,7 @@ pub fn assemble_survival_transformation_payload(
         &inputs.survival_likelihood_label,
         None,
         crate::survival::lognormal_kernel::FrailtySpec::None,
-    );
+    )?;
     payload.survival_entry = inputs.survival_entry;
     payload.survival_exit = Some(inputs.survival_exit);
     payload.survival_event = Some(inputs.survival_event);
@@ -1416,7 +1424,7 @@ pub fn assemble_survival_transformation_payload(
     payload.survival_beta_time = inputs.survival_beta_time;
     payload.resolved_termspec = Some(inputs.resolved_termspec);
     source.apply_to(&mut payload);
-    payload
+    Ok(payload)
 }
 
 /// Source-agnostic semantic content of a survival location-scale
@@ -1459,7 +1467,7 @@ pub struct SurvivalLocationScaleInputs {
 pub fn assemble_survival_location_scale_payload(
     inputs: SurvivalLocationScaleInputs,
     source: SavedModelSourceMetadata,
-) -> FittedModelPayload {
+) -> Result<FittedModelPayload, String> {
     let survival_distribution =
         residual_distribution_from_inverse_link(&inputs.fitted_inverse_link);
     let mut payload = new_royston_parmar_survival_payload(
@@ -1469,7 +1477,7 @@ pub fn assemble_survival_location_scale_payload(
         &inputs.survival_likelihood_label,
         survival_distribution,
         crate::survival::lognormal_kernel::FrailtySpec::None,
-    );
+    )?;
     payload.link = Some(inputs.fitted_inverse_link);
     payload.linkwiggle_degree = inputs.linkwiggle_degree;
     payload.linkwiggle_knots = inputs.linkwiggle_knots;
@@ -1506,7 +1514,7 @@ pub fn assemble_survival_location_scale_payload(
     payload.resolved_termspec = Some(inputs.resolved_thresholdspec);
     payload.resolved_termspec_noise = Some(inputs.resolved_log_sigmaspec);
     source.apply_to(&mut payload);
-    payload
+    Ok(payload)
 }
 
 /// Source-agnostic semantic content of a latent survival / latent binary saved
@@ -2207,7 +2215,7 @@ fn payload_for_survival_marginal_slope(
     // time basis from the formula + FitConfig and freezing its term collections
     // from their designs; the semantic payload is assembled by the same core
     // path the CLI uses, so the two save routes produce identical contracts.
-    Ok(assemble_survival_marginal_slope_payload(
+    assemble_survival_marginal_slope_payload(
         SurvivalMarginalSlopeInputs {
             formula,
             data_schema: dataset.schema.clone(),
@@ -2245,7 +2253,7 @@ fn payload_for_survival_marginal_slope(
             offset_column: fit_config.offset_column.clone(),
             noise_offset_column: fit_config.noise_offset_column.clone(),
         },
-    ))
+    )
 }
 
 fn payload_for_survival_transformation(
@@ -2336,7 +2344,7 @@ fn payload_for_survival_transformation(
             offset_column: fit_config.offset_column.clone(),
             noise_offset_column: None,
         },
-    );
+    )?;
     Ok(payload)
 }
 
@@ -2618,7 +2626,7 @@ fn payload_for_survival_location_scale(
     // work above re-derives the survival metadata and compacts the fit result
     // with the fitted link state; the canonical payload is assembled by the
     // same path the CLI uses.
-    Ok(assemble_survival_location_scale_payload(
+    assemble_survival_location_scale_payload(
         SurvivalLocationScaleInputs {
             formula,
             data_schema: dataset.schema.clone(),
@@ -2662,7 +2670,7 @@ fn payload_for_survival_location_scale(
             offset_column: fit_config.offset_column.clone(),
             noise_offset_column: fit_config.noise_offset_column.clone(),
         },
-    ))
+    )
 }
 
 fn payload_for_latent_survival(

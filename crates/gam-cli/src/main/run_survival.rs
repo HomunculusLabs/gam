@@ -793,7 +793,7 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
                     offset_column: effective_config.offset_column.clone(),
                     noise_offset_column: effective_config.noise_offset_column.clone(),
                 },
-            );
+            )?;
             write_payload_json(&out, payload)?;
         }
         return Ok(());
@@ -1126,7 +1126,7 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
                     offset_column: effective_config.offset_column.clone(),
                     noise_offset_column: effective_config.noise_offset_column.clone(),
                 },
-            );
+            )?;
             write_payload_json(&out, payload)?;
         }
         return Ok(());
@@ -1590,7 +1590,7 @@ fn run_canonical_survival_transformation(
                 offset_column: fit_config.offset_column.clone(),
                 noise_offset_column: fit_config.noise_offset_column.clone(),
             },
-        );
+        )?;
         apply_request_metadata(&mut payload, fit_config, outcome.inference_notes);
         set_saved_weight_column(&mut payload, fit_config.weight_column.clone());
         write_payload_json(out, payload)?;
