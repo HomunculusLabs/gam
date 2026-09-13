@@ -7296,5 +7296,15 @@
     ],
     "reason": "#2899 moved tests: tests/regressions/predict/predict_2_2.rs was the only user outside gam-predict of gam_predict::enrich_posterior_mean_bounds, which production calls only inside gam-predict (lib.rs, standard.rs). The file moves verbatim into the gam-predict unit-test module predict_2_2_tests.rs, importing the crate's own items through crate:: and the spec types through gam_spec::, so no test is lost and the function narrows to pub(crate).",
     "evidence": "At the base, git grep -n -w enrich_posterior_mean_bounds over crates, src, tests, examples and bench finds it outside crates/gam-predict/src only in tests/regressions/predict/predict_2_2.rs (lines 2, 51, 78). Every removed identity is a declaration in that deleted root file, and each reappears unchanged in the new module file."
+  },
+  {
+    "base": "234c6f9e01ecee9c01c8b4110ef3499a0c40a25f",
+    "items": [
+      "crates/gam-inference/src/hmc_io.rs:fn:splitmix64",
+      "crates/gam-inference/src/sample.rs:fn:chain_stream_seed",
+      "crates/gam-inference/src/sample.rs:fn:splitmix64"
+    ],
+    "reason": "#2899 slop: two private splitmix64 functions in gam-inference were one-line wrappers over gam_linalg::utils::splitmix64_hash, and sample.rs carried a private copy of hmc_io's chain_stream_seed with the same formula. The callers now call splitmix64_hash directly, and sample.rs imports the hmc_io chain_stream_seed, now pub(crate) const. Every seed is bit-identical.",
+    "evidence": "At the base, hmc_io.rs:3225-3228 and sample.rs:225-228 each define splitmix64(x) as gam_linalg::utils::splitmix64_hash(x). sample.rs:231-233 and hmc_io.rs:3231-3233 define chain_stream_seed with the identical body splitmix64(seed ^ stream ^ ((chain as u64).wrapping_mul(0xD1B5_4A32_D192_ED03))). The removed names stay declared elsewhere, gam_linalg::utils::splitmix64 among them, which is why the guard counts them."
   }
 ]

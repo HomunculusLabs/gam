@@ -15,7 +15,8 @@ use ndarray::{Array1, Array2, ArrayView2, s};
 use rand::{RngExt, SeedableRng};
 
 use super::hmc_io::{
-    FamilyNutsInputs, GlmFlatInputs, SurvivalFlatInputs, explicit_fit_hessian_for_whitening,
+    FamilyNutsInputs, GlmFlatInputs, SurvivalFlatInputs, chain_stream_seed,
+    explicit_fit_hessian_for_whitening,
     run_nuts_sampling_flattened_family, run_survival_nuts_sampling_flattened, validate_nuts_config,
 };
 pub use super::hmc_io::{NUTS_CHAINS, NutsConfig, NutsResult, PosteriorSampler};
@@ -220,16 +221,6 @@ fn refresh_negbin_theta_for_sampling(
 /// dispatch directly on the cloned spec.
 fn likelihood_spec_for_saved_model(model: &SavedModel) -> Result<LikelihoodSpec, String> {
     Ok(model.likelihood())
-}
-
-#[inline]
-const fn splitmix64(x: u64) -> u64 {
-    gam_linalg::utils::splitmix64_hash(x)
-}
-
-#[inline]
-const fn chain_stream_seed(seed: u64, chain: usize, stream: u64) -> u64 {
-    splitmix64(seed ^ stream ^ ((chain as u64).wrapping_mul(0xD1B5_4A32_D192_ED03)))
 }
 
 /// Run NUTS posterior sampling over a saved model.

@@ -3192,18 +3192,15 @@ pub(crate) fn validate_nuts_config(config: &NutsConfig) -> Result<(), HmcError> 
 }
 
 #[inline]
-fn splitmix64(x: u64) -> u64 {
-    gam_linalg::utils::splitmix64_hash(x)
-}
-
-#[inline]
-fn chain_stream_seed(seed: u64, chain: usize, stream: u64) -> u64 {
-    splitmix64(seed ^ stream ^ ((chain as u64).wrapping_mul(0xD1B5_4A32_D192_ED03)))
+pub(crate) const fn chain_stream_seed(seed: u64, chain: usize, stream: u64) -> u64 {
+    gam_linalg::utils::splitmix64_hash(
+        seed ^ stream ^ ((chain as u64).wrapping_mul(0xD1B5_4A32_D192_ED03)),
+    )
 }
 
 #[inline]
 fn nuts_transition_seed(seed: u64, stream: u64) -> u64 {
-    splitmix64(seed ^ stream ^ 0xA24B_AED4_963E_E407)
+    gam_linalg::utils::splitmix64_hash(seed ^ stream ^ 0xA24B_AED4_963E_E407)
 }
 
 #[inline]
