@@ -10,8 +10,10 @@
 //! 1. Explicit partials of `M` and of `G` in `(a, θ)`. A slot is the raw
 //!    direction `u`, the raw direction `v`, the intercept, or one of at most
 //!    three primary coordinates. Cell integrals come from the set-partition
-//!    moment kernel, and every interior link-knot crossing adds its
-//!    moving-boundary Leibniz flux at orders four and five.
+//!    moment kernel, and every link-knot crossing adds its moving-boundary
+//!    terms from order two on. The link deviation is `C²` at an interior knot
+//!    but only `C⁰` at a support edge, where its tails turn constant, so an edge
+//!    crossing carries jumps in `L′` and `L″` as well as `L‴`.
 //! 2. The implicit intercept derivatives `a_B` for every subset `B` of the slot
 //!    labels `{u, v, c, k, l}`, solved from `D^B M = 0`.
 //! 3. `D^B G` through the same chain rule, then Faà di Bruno with the loss.
@@ -331,6 +333,7 @@ impl ExplicitTensors {
 /// `deviation[p][n_a][n_b] = ∂_a^{n_a} ∂_b^{n_b} ∂_p η`. Both vanish beyond third
 /// order in `(a, b)`. `directional[e]` contracts the deviation columns with the
 /// deviation components of direction `e`.
+#[derive(Clone)]
 struct IndexAtoms {
     q: usize,
     slope: usize,
@@ -338,8 +341,6 @@ struct IndexAtoms {
     deviation: Vec<[[[f64; 4]; 4]; 4]>,
     directional: [[[[f64; 4]; 4]; 4]; 2],
     slope_components: [f64; 2],
-    /// Raw leading coefficient of each link-deviation column's local cubic.
-    link_leading: Vec<f64>,
     /// The slope and every deviation coordinate whose column does not vanish here.
     active: Vec<usize>,
     /// `∂^S η` for every block content: a direction code (`u` is 2, `v` is 1),
@@ -362,7 +363,6 @@ impl IndexAtoms {
         let r = primary.total;
         let scale = family.probit_frailty_scale();
         let mut deviation = vec![[[[0.0; 4]; 4]; 4]; r];
-        let mut link_leading = vec![0.0; r];
         if let (Some(range), Some(runtime)) = (primary.h.as_ref(), family.score_warp.as_ref()) {
             BernoulliMarginalSlopeFamily::for_each_deviation_basis_cubic_at(
                 runtime,
@@ -400,7 +400,6 @@ impl IndexAtoms {
                     column[2][1] = scale_coeff4(daab, scale);
                     column[1][2] = scale_coeff4(dabb, scale);
                     column[0][3] = scale_coeff4(dbbb, scale);
-                    link_leading[index] = span.c3;
                     Ok(())
                 },
             )?;
@@ -435,7 +434,6 @@ impl IndexAtoms {
             deviation,
             directional,
             slope_components: [directions[0][primary.slope], directions[1][primary.slope]],
-            link_leading,
             active,
             content: Vec::new(),
         };
@@ -452,6 +450,16 @@ impl IndexAtoms {
         }
         atoms.content = content;
         Ok(atoms)
+    }
+
+    /// The same atoms with the content table re-expanded about `z`, so a subset
+    /// lookup returns `∂^S η(z + t)` as a cubic in `t`.
+    fn about(&self, z: f64) -> Self {
+        let mut shifted = self.clone();
+        for polynomial in &mut shifted.content {
+            *polynomial = cubic_about(polynomial, z);
+        }
+        shifted
     }
 
     #[inline]
@@ -599,153 +607,238 @@ fn observed_base_partials(observed: &ObservedDenestedCellPartials) -> [[[f64; 4]
     base
 }
 
-#[derive(Clone, Copy)]
-struct FluxSlot {
-    /// `∂u/∂s` at the crossing, `u = a + b·z`.
-    crossing: f64,
-    /// `∂b/∂s`.
-    slope: f64,
-    /// `∂η/∂s` at the crossing.
-    eta: f64,
-    /// `∂Δc₃/∂s`.
-    jump: f64,
+/// Taylor coefficients in `t = z − z*`. A moving-boundary term of order five
+/// reads at most the fourth `z`-derivative of the integrand jump.
+type Taylor = [f64; 5];
+
+const FACTORIALS: [f64; 5] = [1.0, 1.0, 2.0, 6.0, 24.0];
+
+/// The product of two truncated series, through `len` coefficients.
+fn taylor_product(left: &Taylor, right: &Taylor, len: usize) -> Taylor {
+    let mut out = [0.0; 5];
+    for (i, &value) in left.iter().enumerate().take(len) {
+        if value == 0.0 {
+            continue;
+        }
+        for (j, &other) in right.iter().enumerate().take(len - i) {
+            out[i + j] += value * other;
+        }
+    }
+    out
 }
 
-impl FluxSlot {
-    const ZERO: Self = Self {
-        crossing: 0.0,
-        slope: 0.0,
-        eta: 0.0,
-        jump: 0.0,
-    };
+/// `p(z + t)` for a cubic `p`, as a cubic in `t`.
+fn cubic_about(polynomial: &[f64; 4], z: f64) -> [f64; 4] {
+    [
+        polynomial[0] + z * (polynomial[1] + z * (polynomial[2] + z * polynomial[3])),
+        polynomial[1] + z * (2.0 * polynomial[2] + 3.0 * z * polynomial[3]),
+        polynomial[2] + 3.0 * z * polynomial[3],
+        polynomial[3],
+    ]
 }
 
-/// Moving-boundary Leibniz flux of one interior link-knot crossing
-/// `z* = (τ − a)/b`.
-///
-/// Across the crossing the index changes by `scale·Δc₃·(u − τ)³`, so the
-/// calibration integrand is `C²` and orders through three need no boundary
-/// term. Differentiating `Σ_cells ∫` further moves `z*` (`∂z*/∂s = −u_s/b`):
-///   order 4: `K·(−Δc₃/b)·Π u_s`;
-///   order 5: `K·[−(1/b)·Σ_t (∂_tΔc₃ − η*·∂_tη·Δc₃)·Π_{r≠t} u_r
-///            − (Δc₃/b²)·(z* + η*·η_z)·Π u_s + (Δc₃/b²)·Σ_t ∂_t b·Π_{r≠t} u_r]`,
-/// with `K = 6·scale·e^{−q(z*)}/2π` and per slot `u_s = ∂u/∂s`, `∂_t b`, `∂_tη`
-/// and `∂_tΔc₃` at the crossing. The order-five form is the jump of the fourth
-/// integrand carried by the moving crossing plus the order-four flux
-/// differentiated along it, and it is symmetric in its slots.
-struct KnotFlux {
-    prefactor: f64,
-    jump: f64,
-    slope: f64,
-    eta_star: f64,
-    q_z: f64,
-    intercept: FluxSlot,
-    coordinates: Vec<FluxSlot>,
-    directions: [FluxSlot; 2],
+/// `φ⁽ʲ⁾(x) = (−1)ʲ·He_j(x)·φ(x)` for `j ≤ 7`, from the probabilists' Hermite
+/// recurrence `He_{j+1} = x·He_j − j·He_{j−1}`.
+fn density_derivatives(x: f64) -> [f64; 8] {
+    let mut hermite = [0.0; 8];
+    hermite[0] = 1.0;
+    hermite[1] = x;
+    for j in 1..7 {
+        hermite[j + 1] = x * hermite[j] - j as f64 * hermite[j - 1];
+    }
+    let density = (-0.5 * x * x).exp() / std::f64::consts::TAU.sqrt();
+    std::array::from_fn(|j| {
+        let sign = if j % 2 == 0 { 1.0 } else { -1.0 };
+        sign * hermite[j] * density
+    })
 }
 
-impl KnotFlux {
+/// One cell at a link-knot crossing, re-expanded about `z*`: its atoms,
+/// `φ⁽ᵏ⁾(η(z* + t))` for `k ≤ 3`, and `Φ(η(z* + t)) − Φ(η*)`.
+struct CrossingSide {
+    atoms: IndexAtoms,
+    density: [Taylor; 4],
+    probability: Taylor,
+}
+
+impl CrossingSide {
     fn new(
         cell: exact_kernel::DenestedCubicCell,
         atoms: &IndexAtoms,
-        column_jumps: &[f64],
-        jump: f64,
-        b: f64,
-        scale: f64,
-        primary: &PrimarySlices,
-        directions: [&Array1<f64>; 2],
+        z_star: f64,
+        eta_density: &[f64; 8],
     ) -> Self {
-        let z_star = cell.right;
-        let eta_star = cell.eta(z_star);
-        let eta_z = cell.c1 + z_star * (2.0 * cell.c2 + 3.0 * cell.c3 * z_star);
-        let mut coordinates = vec![FluxSlot::ZERO; primary.total];
-        for (p, slot) in coordinates.iter_mut().enumerate() {
-            if p == primary.slope {
-                *slot = FluxSlot {
-                    crossing: z_star,
-                    slope: 1.0,
-                    eta: eval_coeff4_at(&atoms.base[0][1], z_star),
-                    jump: 0.0,
-                };
-            } else if p != primary.q {
-                *slot = FluxSlot {
-                    crossing: 0.0,
-                    slope: 0.0,
-                    eta: eval_coeff4_at(&atoms.deviation[p][0][0], z_star),
-                    jump: column_jumps[p],
-                };
+        let index = cubic_about(&[cell.c0, cell.c1, cell.c2, cell.c3], z_star);
+        // Both cells take the same index value at the crossing, so only the
+        // motion away from it enters the expansion.
+        let motion: Taylor = [0.0, index[1], index[2], index[3], 0.0];
+        let mut powers = [[0.0; 5]; 5];
+        powers[0][0] = 1.0;
+        for order in 1..5 {
+            powers[order] = taylor_product(&powers[order - 1], &motion, 5);
+        }
+        let mut density = [[0.0; 5]; 4];
+        for (k, series) in density.iter_mut().enumerate() {
+            for (order, power) in powers.iter().enumerate() {
+                let weight = eta_density[k + order] / FACTORIALS[order];
+                for (slot, &value) in series.iter_mut().zip(power) {
+                    *slot += weight * value;
+                }
             }
         }
-        let direction_slot = |direction: &Array1<f64>| {
-            let mut slot = FluxSlot {
-                crossing: direction[primary.slope] * z_star,
-                slope: direction[primary.slope],
-                eta: 0.0,
-                jump: 0.0,
-            };
-            for (p, coordinate) in coordinates.iter().enumerate() {
-                slot.eta += direction[p] * coordinate.eta;
-                slot.jump += direction[p] * coordinate.jump;
+        let mut probability = [0.0; 5];
+        for (order, power) in powers.iter().enumerate().skip(1) {
+            let weight = eta_density[order - 1] / FACTORIALS[order];
+            for (slot, &value) in probability.iter_mut().zip(power) {
+                *slot += weight * value;
             }
-            slot
-        };
-        let direction_slots = [direction_slot(directions[0]), direction_slot(directions[1])];
+        }
         Self {
-            prefactor: 6.0 * scale * (-cell.q(z_star)).exp() / std::f64::consts::TAU,
-            jump,
+            atoms: atoms.about(z_star),
+            density,
+            probability,
+        }
+    }
+}
+
+/// The moving-boundary terms of one link-knot crossing `z*(θ) = (τ − a)/b`.
+///
+/// Across the crossing the calibration integrand `φ(z)·Φ(η)` switches from the
+/// left cell's index to the right cell's. With the crossing's base location
+/// `z₀`, `Σ_cells ∫` carries the extra `E(θ) = ∫_{z₀}^{z*(θ)} J dz` of the jump
+/// `J = φ(z)·(Φ(η_L) − Φ(η_R))`, and Faà di Bruno gives
+///   `D^S E = Σ_{R ⊊ S} Σ_{π ∈ Π(S∖R)} (∂^R ∂_z^{|π|−1} J)(z*)·Π_{B ∈ π} D^B z*`.
+/// The index is continuous at every crossing, so `J(z*) = 0` and order one has
+/// no boundary term. At an interior knot the index is `C²` and the terms start
+/// at order four. At a support edge it is only `C⁰`, and they start at order two.
+/// Because `b·z* = τ − a` with `a` and `b` linear in the slots,
+/// `D_s z* = −(∂_s a + ∂_s b·z*)/b` and `D^B z* = −(1/b)·Σ_{t ∈ B} ∂_t b·D^{B∖t} z*`
+/// for `|B| ≥ 2`. Only the intercept and slope-bearing slots move the crossing,
+/// so every slot outside `R` is one of them.
+struct LinkCrossing {
+    z_star: f64,
+    slope: f64,
+    slope_index: usize,
+    slope_components: [f64; 2],
+    /// `φ(z* + t)`.
+    density: Taylor,
+    left: CrossingSide,
+    right: CrossingSide,
+}
+
+impl LinkCrossing {
+    fn new(
+        left_cell: exact_kernel::DenestedCubicCell,
+        left_atoms: &IndexAtoms,
+        right_cell: exact_kernel::DenestedCubicCell,
+        right_atoms: &IndexAtoms,
+        b: f64,
+    ) -> Self {
+        let z_star = left_cell.right;
+        let z_density = density_derivatives(z_star);
+        let eta_density = density_derivatives(left_cell.eta(z_star));
+        Self {
+            z_star,
             slope: b,
-            eta_star,
-            q_z: z_star + eta_star * eta_z,
-            intercept: FluxSlot {
-                crossing: 1.0,
-                slope: 0.0,
-                eta: eval_coeff4_at(&atoms.base[1][0], z_star),
-                jump: 0.0,
-            },
-            coordinates,
-            directions: direction_slots,
+            slope_index: left_atoms.slope,
+            slope_components: left_atoms.slope_components,
+            density: std::array::from_fn(|order| z_density[order] / FACTORIALS[order]),
+            left: CrossingSide::new(left_cell, left_atoms, z_star, &eta_density),
+            right: CrossingSide::new(right_cell, right_atoms, z_star, &eta_density),
         }
     }
 
-    fn slot(&self, slot: ExplicitSlot) -> FluxSlot {
-        match slot {
-            ExplicitSlot::U => self.directions[0],
-            ExplicitSlot::V => self.directions[1],
-            ExplicitSlot::Intercept => self.intercept,
-            ExplicitSlot::Coordinate(p) => self.coordinates[p],
+    /// `(∂^R ∂_z^j J)(z*)/j!` for `j < len`, over the slots selected by `mask`.
+    fn jump(&self, polynomials: &[[[f64; 4]; 32]; 2], mask: usize, len: usize) -> Taylor {
+        let mut difference = [0.0; 5];
+        if mask == 0 {
+            for (slot, (left, right)) in difference
+                .iter_mut()
+                .zip(self.left.probability.iter().zip(&self.right.probability))
+                .take(len)
+            {
+                *slot = left - right;
+            }
+        } else {
+            for_each_partition(mask, |blocks| {
+                for (side, cubics, sign) in [
+                    (&self.left, &polynomials[0], 1.0),
+                    (&self.right, &polynomials[1], -1.0),
+                ] {
+                    let mut term = side.density[blocks.len() - 1];
+                    for &block in blocks {
+                        let cubic = cubics[block];
+                        term = taylor_product(
+                            &term,
+                            &[cubic[0], cubic[1], cubic[2], cubic[3], 0.0],
+                            len,
+                        );
+                    }
+                    for (slot, &value) in difference.iter_mut().zip(&term).take(len) {
+                        *slot += sign * value;
+                    }
+                }
+            });
         }
+        taylor_product(&self.density, &difference, len)
     }
 
-    fn flux(&self, slots: &[ExplicitSlot]) -> f64 {
-        let mut values = [FluxSlot::ZERO; 5];
-        for (value, &slot) in values.iter_mut().zip(slots) {
-            *value = self.slot(slot);
-        }
-        let values = &values[..slots.len()];
-        let crossing_product_without = |skip: usize| {
-            let mut product = 1.0;
-            for (position, value) in values.iter().enumerate() {
-                if position != skip {
-                    product *= value.crossing;
-                }
+    /// `D^S E` over `slots`.
+    fn partial(&self, slots: &[ExplicitSlot]) -> f64 {
+        let n = slots.len();
+        let mut velocity = [0.0; 5];
+        let mut rate = [0.0; 5];
+        let mut moving = 0_usize;
+        for (position, &slot) in slots.iter().enumerate() {
+            let (intercept, slope) = match slot {
+                ExplicitSlot::U => (0.0, self.slope_components[0]),
+                ExplicitSlot::V => (0.0, self.slope_components[1]),
+                ExplicitSlot::Intercept => (1.0, 0.0),
+                ExplicitSlot::Coordinate(p) => (0.0, if p == self.slope_index { 1.0 } else { 0.0 }),
+            };
+            velocity[position] = intercept + slope * self.z_star;
+            rate[position] = slope;
+            if intercept != 0.0 || slope != 0.0 {
+                moving |= 1 << position;
             }
-            product
-        };
-        let b = self.slope;
-        let all = crossing_product_without(values.len());
-        match values.len() {
-            4 => self.prefactor * (-self.jump / b) * all,
-            5 => {
-                let mut total = -(self.jump / (b * b)) * self.q_z * all;
-                for (position, value) in values.iter().enumerate() {
-                    let others = crossing_product_without(position);
-                    total -= (value.jump - self.eta_star * value.eta * self.jump) / b * others;
-                    total += self.jump / (b * b) * value.slope * others;
-                }
-                self.prefactor * total
-            }
-            _ => 0.0,
         }
+        if n < 2 || moving == 0 {
+            return 0.0;
+        }
+        let full = (1_usize << n) - 1;
+        let mut polynomials = [[[0.0; 4]; 32]; 2];
+        for mask in 1..full {
+            polynomials[0][mask] = self.left.atoms.subset_polynomial(slots, mask);
+            polynomials[1][mask] = self.right.atoms.subset_polynomial(slots, mask);
+        }
+        let mut motion = [0.0; 32];
+        for mask in 1..=full {
+            if mask & !moving != 0 {
+                continue;
+            }
+            motion[mask] = if mask.count_ones() == 1 {
+                -velocity[mask.trailing_zeros() as usize] / self.slope
+            } else {
+                let mut sum = 0.0;
+                for (position, &value) in rate.iter().enumerate().take(n) {
+                    if mask & (1 << position) != 0 {
+                        sum += value * motion[mask & !(1 << position)];
+                    }
+                }
+                -sum / self.slope
+            };
+        }
+        let mut total = 0.0;
+        let mut rest = moving;
+        while rest != 0 {
+            let jump = self.jump(&polynomials, full & !rest, rest.count_ones() as usize);
+            for_each_partition(rest, |blocks| {
+                let product: f64 = blocks.iter().map(|&block| motion[block]).product();
+                total += FACTORIALS[blocks.len() - 1] * jump[blocks.len() - 1] * product;
+            });
+            rest = (rest - 1) & moving;
+        }
+        total
     }
 }
 
@@ -1019,57 +1112,43 @@ impl BernoulliMarginalSlopeFamily {
 
         for (left_index, window) in cells.windows(2).enumerate() {
             let (left, right) = (&window[0], &window[1]);
-            let z_star = left.cell.right;
-            if !z_star.is_finite() || (right.cell.left - z_star).abs() > 1.0e-12 {
+            // Score breaks sit at fixed z. Only a link-knot crossing moves with the
+            // row scalars, and adjacent cells share its edge bit for bit.
+            if !matches!(left.right_edge, exact_kernel::PartitionEdge::Crossing { .. })
+                || right.cell.left != left.cell.right
+            {
                 continue;
             }
-            let jump = left.link_span.c3 - right.link_span.c3;
-            let column_jumps: Vec<f64> = cell_atoms[left_index]
-                .link_leading
-                .iter()
-                .zip(&cell_atoms[left_index + 1].link_leading)
-                .map(|(left_c3, right_c3)| left_c3 - right_c3)
-                .collect();
-            if jump == 0.0 && column_jumps.iter().all(|value| *value == 0.0) {
-                continue;
-            }
-            let knot = KnotFlux::new(
+            let crossing = LinkCrossing::new(
                 left.cell,
                 &cell_atoms[left_index],
-                &column_jumps,
-                jump,
+                right.cell,
+                &cell_atoms[left_index + 1],
                 b,
-                scale,
-                primary,
-                directions,
             );
+            let mut active: Vec<usize> = cell_atoms[left_index]
+                .active
+                .iter()
+                .chain(&cell_atoms[left_index + 1].active)
+                .copied()
+                .collect();
+            active.sort_unstable();
+            active.dedup();
             for (m_u, m_v, j, n) in explicit_signatures() {
-                let order = m_u + m_v + j + n;
-                if order < 4 {
+                if m_u + m_v + j + n < 2 {
                     continue;
                 }
-                // Only the slope moves the crossing, so an order-four flux lands on
-                // slope coordinates alone; at order five one other coordinate may
-                // carry the jump of the fourth integrand.
-                let mut coordinates = [primary.slope; 3];
-                let (slots, len) = explicit_slots(m_u, m_v, j, &coordinates[..n]);
-                calibration.add_symmetric(m_u, m_v, j, &coordinates[..n], knot.flux(&slots[..len]));
-                if order == 5 && n > 0 {
-                    for deviation in 0..r {
-                        if deviation == primary.q || deviation == primary.slope {
-                            continue;
-                        }
-                        coordinates[n - 1] = deviation;
-                        let (slots, len) = explicit_slots(m_u, m_v, j, &coordinates[..n]);
-                        calibration.add_symmetric(
-                            m_u,
-                            m_v,
-                            j,
-                            &coordinates[..n],
-                            knot.flux(&slots[..len]),
-                        );
-                    }
-                }
+                for_each_sorted_tuple(&active, n, |coordinates| {
+                    let (slots, len) = explicit_slots(m_u, m_v, j, coordinates);
+                    calibration.add_symmetric(
+                        m_u,
+                        m_v,
+                        j,
+                        coordinates,
+                        crossing.partial(&slots[..len]),
+                    );
+                    Ok(())
+                })?;
             }
         }
         calibration.seal();
@@ -1147,10 +1226,12 @@ mod explicit_calibration_tests {
 
     /// At a fixed row state, with no root solve, each explicit calibration partial
     /// is the intercept or slope derivative of the one below it. Order five against
-    /// a Richardson difference of order four exercises the degree-27 cell fold and
-    /// the order-five link-knot flux, deviation jumps included. Order four against
-    /// order three exercises the order-four flux. The implicit chain rule and the
-    /// loss composition take no part.
+    /// a Richardson difference of order four exercises the degree-27 cell fold, and
+    /// every order from two up exercises the link-knot crossings' moving-boundary
+    /// terms, deviation jumps included. The fixture's link support edges are
+    /// crossings where the index is only `C⁰`, so the low orders read their jumps
+    /// in `L′` and `L″`. The implicit chain rule and the loss composition take no
+    /// part.
     #[test]
     fn standard_normal_flex_calibration_partials_differentiate_along_intercept_and_slope() {
         let row = 0usize;
@@ -1195,6 +1276,10 @@ mod explicit_calibration_tests {
         let (w, h, w_last) = (w_range.start, h_range.start, w_range.end - 1);
         // (label, m_u, m_v, j, lower coordinates, along the slope instead of the intercept)
         let cases: Vec<(&str, usize, usize, usize, Vec<usize>, bool)> = vec![
+            ("a->b (order two)", 0, 0, 1, vec![], true),
+            ("aa->a (order three)", 0, 0, 2, vec![], false),
+            ("ab->b (order three)", 0, 0, 1, vec![slope], true),
+            ("bw->b (order three)", 0, 0, 0, vec![slope, w_last], true),
             ("aaaa->a", 0, 0, 4, vec![], false),
             ("aaaa->b", 0, 0, 4, vec![], true),
             ("aaab->a", 0, 0, 3, vec![slope], false),
