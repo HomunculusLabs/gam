@@ -2661,5 +2661,16 @@
     },
     "reason": "SPEC rules 5 and 23 (#2901 V22 slice 5a). The eigendecomposing wrapper RemlState::intrinsic_hessian_pseudo_logdet_parts served only the pseudo-logdet correction fallbacks that this commit removes. The dense REML assemblies price H on its identified subspace through one exact operator.",
     "evidence": "At the base, git grep -n 'intrinsic_hessian_pseudo_logdet_parts(' finds its definition and two calls in crates/gam-solve/src/reml/objective.rs, both deleted in this commit."
+  },
+  {
+    "removed": {
+      "crates/gam-linalg/src/decision.rs::merge": 1,
+      "crates/gam-linalg/src/decision.rs::new": 1,
+      "crates/gam-linalg/src/decision.rs::push": 1,
+      "crates/gam-linalg/src/decision.rs::rounding_floor": 1
+    },
+    "reason": "#2899, api2829 go on ShadowSum: ShadowSum's public methods new, push, merge and rounding_floor are deleted with the struct, which no product uses.",
+    "evidence": "public_api_census.py --base ef1e74ddd --head 3c10e63bd reports these four identities among the stack's removals (job 579772, /scratch.global/sauer354/pool/prune-api-a/stack4.check.579772.log).",
+    "base": "88cd62b754cf2d11341a9da345460e9f3ce68903"
   }
 ]

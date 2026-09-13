@@ -6542,5 +6542,18 @@
     ],
     "reason": "SPEC rules 5 and 23 (#2901 V22, lead ruling (a), slice 5a). RemlState::intrinsic_hessian_pseudo_logdet_parts eigendecomposed an assembled Hessian and forwarded to intrinsic_hessian_pseudo_logdet_parts_from_eigensystem. Its only callers were the non-spectral fallbacks of the pseudo-logdet correction in build_dense_assembly and build_dense_original_assembly. Both assemblies now price H with DenseSpectralOperator::from_symmetric_on_identified_subspace and install no correction, so the wrapper has no caller. intrinsic_hessian_pseudo_logdet_parts_from_eigensystem stays for estimate/identified_hessian.rs, and its #2748 documentation moves onto it.",
     "evidence": "At the base, git grep -n 'intrinsic_hessian_pseudo_logdet_parts(' finds its definition in crates/gam-solve/src/reml/gradient_hessian.rs and exactly two calls, crates/gam-solve/src/reml/objective.rs (the None arms of both correction blocks), which this commit deletes. The remaining mentions (atoms.rs, reml/mod.rs, penalty_coordinate.rs) are prose, restated here. Not compiled locally; a guarded job follows."
+  },
+  {
+    "items": [
+      "crates/gam-linalg/src/decision.rs:fn:gamma",
+      "crates/gam-linalg/src/decision.rs:fn:merge",
+      "crates/gam-linalg/src/decision.rs:fn:new",
+      "crates/gam-linalg/src/decision.rs:fn:push",
+      "crates/gam-linalg/src/decision.rs:fn:rounding_floor",
+      "crates/gam-linalg/src/decision.rs:struct:ShadowSum"
+    ],
+    "reason": "#2899, api2829 go on ShadowSum: gam_linalg::decision::ShadowSum (new, push, merge, rounding_floor) has no user in any crate, test, example or binding. It is deleted with the private Higham gamma helper that only rounding_floor called. The api2829 row decision.rs rounding_floor becomes retired-no-product-user and docs/rust-library-surface.md's counts table is recomputed from the TSV.",
+    "evidence": "git grep -n -w ShadowSum over crates, src, tests, examples, bench, benches, python, gamfit and docs finds only decision.rs's definition, impl and merge signature; gamma( appears in decision.rs only at rounding_floor and the helper's definition. Item list from source_removal_guard.py --base ef1e74ddd --head 3c10e63bd (job 579772, /scratch.global/sauer354/pool/prune-api-a/stack4.check.579772.log).",
+    "base": "88cd62b754cf2d11341a9da345460e9f3ce68903"
   }
 ]

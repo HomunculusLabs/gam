@@ -96,7 +96,7 @@ crates/gam-linalg/src/curvature_resolution.rs	dominant_source	retired-no-product
 crates/gam-linalg/src/curvature_resolution.rs	finite_difference_error_bound	retired-by-later-deletion:c9481ef606
 crates/gam-linalg/src/curvature_resolution.rs	optimal_step	retired-by-later-deletion:c9481ef606
 crates/gam-linalg/src/decision.rs	newton_decrement_enclosure	retired-by-later-deletion:b66b773539
-crates/gam-linalg/src/decision.rs	rounding_floor	restored-in-place
+crates/gam-linalg/src/decision.rs	rounding_floor	retired-no-product-user
 crates/gam-linalg/src/decision.rs	rounding_floor_with_depth	retired-by-later-deletion:b66b773539
 crates/gam-linalg/src/faer_ndarray.rs	eigh_census	retired-no-surviving-dependent
 crates/gam-linalg/src/faer_ndarray.rs	eigh_census_this_thread	retired-no-surviving-dependent
