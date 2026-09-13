@@ -242,7 +242,7 @@ impl SeparationBarrierCurvature {
 /// mutually consistent and both frozen at the same
 /// chokepoint (lagged diffusivity — the gradient treats all three as constants,
 /// so the line-search value must too).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct BarrierCoactivationGate {
     /// Co-firing pairs `(j, k, q_jk)`, `j < k`, `q_jk ∈ (0, 1]`.
     pub(crate) pairs: Vec<(usize, usize, f64)>,

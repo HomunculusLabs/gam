@@ -426,6 +426,18 @@ impl SaeManifoldTerm {
                 Err(err) => break Err(SaeCriterionError::from(err)),
             };
             loss.criterion_gauge_deflated_directions = cache.gauge_deflated_directions;
+            // The root was converged under the gates frozen where the initial joint
+            // fit ended. A re-entry from this root re-derives them at the root, so the
+            // value would depend on where the gates were frozen, not on the root.
+            // Refresh them at the root and converge again until the root reproduces
+            // its own gates.
+            if inner_max_iter > 0
+                && !gates_were_frozen
+                && self.refresh_collapse_prevention_gates_at_root()
+            {
+                criterion_fixed_point = false;
+                continue;
+            }
             // #2330 Phase-2: rank the EXACT observed-information Laplace term ½log|A|
             // (A = B + ΔC = ∇²_θθ L), not the majorizer surrogate ½log|B|. One
             // eigendecomposition yields the joint log|A|, applying the shared PD
@@ -628,6 +640,21 @@ impl SaeManifoldTerm {
             self.streaming_gates_frozen = true;
         }
         gates_were_frozen
+    }
+
+    /// Refresh the collapse-prevention gates at the current state, returning
+    /// whether any of them changed. Same set as
+    /// [`Self::freeze_collapse_prevention_gates`].
+    fn refresh_collapse_prevention_gates_at_root(&mut self) -> bool {
+        let repulsion = self.decoder_repulsion_gate.clone();
+        let coactivation = self.barrier_coactivation_gate.clone();
+        let amplitude = self.amplitude_barrier_gate;
+        self.refresh_decoder_repulsion_gate();
+        self.refresh_barrier_coactivation_gate();
+        self.refresh_amplitude_barrier_gate();
+        self.decoder_repulsion_gate != repulsion
+            || self.barrier_coactivation_gate != coactivation
+            || self.amplitude_barrier_gate != amplitude
     }
 
     pub(crate) fn converge_inner_for_undamped_logdet(
