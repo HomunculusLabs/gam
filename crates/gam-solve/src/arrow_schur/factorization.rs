@@ -322,7 +322,7 @@ pub(crate) fn factor_gauge_deflated_evidence_row(
     if !(max_diag.is_finite() && max_diag > 0.0) {
         return None;
     }
-    let mut basis: Vec<Array1<f64>> = Vec::new();
+    let mut qualified: Vec<Array1<f64>> = Vec::new();
     // Closest miss, in units of the qualification bar itself: 1.0 means a
     // direction sat exactly on the threshold, 1e6 means it was six orders away.
     let mut closest_disqualified_ratio = f64::INFINITY;
@@ -364,24 +364,9 @@ pub(crate) fn factor_gauge_deflated_evidence_row(
             }
             continue;
         }
-        let mut direction = gauge.clone();
-        for existing in &basis {
-            let coeff = direction.dot(existing);
-            for idx in 0..d {
-                direction[idx] -= coeff * existing[idx];
-            }
-        }
-        let residual_norm_sq = direction.iter().map(|&v| v * v).sum::<f64>();
-        if !(residual_norm_sq.is_finite() && residual_norm_sq > 1.0e-24) {
-            continue;
-        }
-        let inv_norm = residual_norm_sq.sqrt().recip();
-        for value in direction.iter_mut() {
-            *value *= inv_norm;
-        }
-        basis.push(direction);
+        qualified.push(gauge / norm_sq.sqrt());
     }
-    if basis.is_empty() {
+    if qualified.is_empty() {
         // Costs nothing when deflation succeeds; emitted only on the branch that
         // is currently indistinguishable from "no gauge was supplied".
         log::debug!(
@@ -396,6 +381,20 @@ pub(crate) fn factor_gauge_deflated_evidence_row(
         );
         return None;
     }
+    // Orthonormal basis of the qualified orbit's span. Whether a gauge adds a
+    // direction is decided on the unit gauges' thin SVD at its own rounding band
+    // (`svd_rank`), with no absolute cutoff on how short a reduced gauge may be
+    // (#2469). The stiffening below adds the span's projector, which does not
+    // depend on the basis chosen for it.
+    let mut unit_rows = Array2::<f64>::zeros((qualified.len(), d));
+    for (position, unit) in qualified.iter().enumerate() {
+        unit_rows.row_mut(position).assign(unit);
+    }
+    let (_, singular, vt_opt) =
+        gam_linalg::faer_ndarray::FaerSvd::svd(&unit_rows, false, true).ok()?;
+    let vt = vt_opt?;
+    let rank = crate::active_set::svd_rank(&singular, unit_rows.nrows(), unit_rows.ncols());
+    let basis: Vec<Array1<f64>> = (0..rank).map(|axis| vt.row(axis).to_owned()).collect();
 
     // Faddeev-Popov stiffening of the orbit, at UNIT stiffness kappa = 1.0
     // (NOT max_diag). The direction is already unit-normalized, so each deflated
