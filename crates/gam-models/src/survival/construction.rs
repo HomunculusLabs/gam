@@ -983,8 +983,7 @@ impl BaselineDerivativeContract {
             // default walked to.
             BaselineDerivativeContract::GradientOnly => problem
                 .with_gradient(Derivative::Analytic)
-                .with_hessian(DeclaredHessianForm::Unavailable)
-                .with_max_iter(240),
+                .with_hessian(DeclaredHessianForm::Unavailable),
         }
     }
 }

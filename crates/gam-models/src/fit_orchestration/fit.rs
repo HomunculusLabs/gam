@@ -1896,7 +1896,6 @@ fn optimize_survival_transformation_smoothing(
         // (#2912).
         .with_hessian(gam_problem::DeclaredHessianForm::Dense)
         .with_prefer_gradient_only(true)
-        .with_max_iter(120)
         .with_bounds(lower.clone(), upper.clone())
         .with_initial_rho(seed_rho.clone())
         .with_seed_config(gam_problem::SeedConfig {

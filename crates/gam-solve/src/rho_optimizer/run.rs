@@ -282,6 +282,23 @@ pub(crate) struct OuterConfig {
     pub(crate) require_measured_psd: bool,
 }
 
+/// The outer search's iteration count when a caller declares none: no count.
+///
+/// Every outer route now ends a stalled search on a progress certificate rather
+/// than a count (#2817):
+/// - The dense ARC and matrix-free trust-region bridges, and the host BFGS
+///   stuck-stall escapes, license another filled cost-stall window only after
+///   resolved descent or a smaller incumbent residual
+///   (`CostStallGuard::license_continuation`).
+/// - The fixed-point and per-atom walks carry `FixedPointProgress`.
+/// - The device BFGS walk carries opt's native cost stall.
+///
+/// A stationary point stops on the certificate's own rungs. The 200-iteration
+/// default this replaces decided when a search that had not converged was
+/// refused, which is the grind #2817 is about. A caller with an explicit
+/// option-driven budget still passes it through `OuterProblem::with_max_iter`.
+pub(crate) const UNBOUNDED_OUTER_ITERATIONS: usize = usize::MAX;
+
 impl Default for OuterConfig {
     fn default() -> Self {
         Self {
@@ -289,7 +306,7 @@ impl Default for OuterConfig {
             rel_cost_tolerance: None,
             required_projected_gradient_norm: None,
             require_measured_psd: false,
-            max_iter: 200,
+            max_iter: UNBOUNDED_OUTER_ITERATIONS,
             model_domain_bounds: None,
             search_bounds_override: None,
             seed_config: gam_problem::SeedConfig::default(),
@@ -381,7 +398,7 @@ impl OuterProblem {
             rel_cost_tolerance: None,
             required_projected_gradient_norm: None,
             require_measured_psd: false,
-            max_iter: 200,
+            max_iter: UNBOUNDED_OUTER_ITERATIONS,
             bounds: None,
             seed_config: gam_problem::SeedConfig::default(),
             heuristic_lambdas: None,

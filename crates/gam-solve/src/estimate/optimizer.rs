@@ -1312,7 +1312,6 @@ where
                     ),
                 )
                 .with_tolerance(reml_tol)
-                .with_max_iter(reml_max_iter)
                 .with_seed_config(reml_seed_config)
                 .with_screening_cap(Arc::clone(&reml_state.screening_max_inner_iterations))
                 .with_outer_inner_cap(reml_inner_progress_feedback(&reml_state))
@@ -1830,7 +1829,6 @@ where
                     ),
                 )
                 .with_tolerance(reml_tol)
-                .with_max_iter(reml_max_iter)
                 .with_seed_config(reml_seed_config_mix)
                 .with_screening_cap(Arc::clone(&reml_state.screening_max_inner_iterations))
                 .with_outer_inner_cap(reml_inner_progress_feedback(&reml_state))

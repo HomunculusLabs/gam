@@ -875,7 +875,6 @@ fn constant_curvature_kappa_profile_optimum(
         .with_fallback_policy(gam_solve::rho_optimizer::FallbackPolicy::Disabled)
         .with_psi_dim(1)
         .with_tolerance(options.tol.max(f64::EPSILON.sqrt()))
-        .with_max_iter(options.max_iter.max(1))
         .with_bounds(
             Array1::from_vec(vec![kappa_min]),
             Array1::from_vec(vec![kappa_max]),
