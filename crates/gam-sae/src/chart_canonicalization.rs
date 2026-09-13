@@ -624,18 +624,6 @@ const LM_LAMBDA_DECAY: f64 = 10.0;
 /// on a rank-deficient `JᵀJ`). Used by [`lm_damped_accept_sweep`].
 const LM_LAMBDA_FLOOR: f64 = 1.0e-12;
 
-/// Relative improvement cut declaring the flow converged: once an accepted step
-/// lowers the isometry defect by `≤ LM_IMPROVEMENT_REL_TOL · (1 + defect)` the
-/// iterate is treated as a stationary point of the flow objective. Applied by
-/// [`lm_damped_accept_sweep`].
-const LM_IMPROVEMENT_REL_TOL: f64 = 1.0e-14;
-
-/// Relative step-stall floor for the outer Gauss–Newton loop: after an accepted
-/// step, if the squared step norm is `≤ LM_STEP_STALL_REL_FLOOR · (1 + ‖θ‖²)`
-/// the iterate has stopped moving and the flow terminates. Applied by both
-/// `d = 2` flow cores (torus and sphere-boost).
-const LM_STEP_STALL_REL_FLOOR: f64 = 1.0e-24;
-
 /// Minimum per-axis node count of the decoder-recomposition audit grid. The
 /// actual count also scales with the basis width (`3·√m` per axis) so the
 /// tensor harmonic basis is always Nyquist-oversampled on the audit grid.
@@ -1253,6 +1241,8 @@ pub fn chart_arclength_coordinates(
 /// (row-major `[a00, a01, a10, a11]`) the Gauss--Newton rows are built from.
 struct FlowObjectiveState {
     defect: f64,
+    /// Rounding band of `defect`'s evaluation (see [`flow_defect_state`]).
+    defect_band: f64,
     scale: f64,
     a_rows: Vec<[f64; 4]>,
 }
@@ -1262,12 +1252,10 @@ struct FlowObjectiveState {
 struct LmTrustStep {
     /// A strict-descent, fold-free candidate was accepted this sweep.
     accepted: bool,
-    /// The accepted step improved the defect by less than the relative
-    /// convergence cut ([`LM_IMPROVEMENT_REL_TOL`]) — treat as stationary.
+    /// The accepted step lowered the defect by no more than the two
+    /// evaluations' rounding bands, so no evaluation can tell it from a
+    /// stationary point.
     converged: bool,
-    /// Squared Euclidean norm of the accepted step (0 if none was accepted);
-    /// the outer loop compares it against the relative step-stall floor.
-    step_norm_sq: f64,
 }
 
 /// The shared Levenberg–Marquardt damped-accept trust step for the analytic
@@ -1279,15 +1267,14 @@ struct LmTrustStep {
 ///   damping (`λ ← LM_LAMBDA_GROWTH · λ`) and counts a rejection;
 /// * on an accepted candidate it commits `theta`/`state`, relaxes the damping
 ///   (`λ ← max(λ / LM_LAMBDA_DECAY, LM_LAMBDA_FLOOR)`), and flags convergence
-///   when the relative improvement drops below [`LM_IMPROVEMENT_REL_TOL`].
+///   when the improvement lies within the two evaluations' rounding bands.
 ///
 /// The `λ` here is decayed on accept and carried across outer Gauss–Newton
 /// iterations (a stateful trust-region damping), which is why this is NOT the
 /// generic ridge-escalation optimizer primitive. The only flow-specific piece
 /// is `eval_candidate`, which folds the family's diffeomorphism guard and its
 /// defect evaluation into one closure returning `None` for a folded or
-/// out-of-band candidate. The numerics are bit-for-bit identical to the two
-/// former hand-rolled loops it replaces.
+/// out-of-band candidate.
 fn lm_damped_accept_sweep(
     jtj: &Array2<f64>,
     jtr: &Array2<f64>,
@@ -1300,7 +1287,6 @@ fn lm_damped_accept_sweep(
     let mut rejects = 0usize;
     let mut accepted = false;
     let mut converged = false;
-    let mut step_norm_sq = 0.0_f64;
     while rejects < TORUS_FLOW_GN_MAX_REJECTS {
         let mut damped = jtj.clone();
         for d in 0..q {
@@ -1318,22 +1304,18 @@ fn lm_damped_accept_sweep(
         neg_jtr.mapv_inplace(|v| -v);
         let delta = factor.solve_mat(&neg_jtr);
         let mut candidate = theta.clone();
-        step_norm_sq = 0.0;
         for k in 0..q {
             candidate[k] += delta[[k, 0]];
-            step_norm_sq += delta[[k, 0]] * delta[[k, 0]];
         }
         match eval_candidate(&candidate) {
             Some(next) if next.defect < state.defect => {
-                let improvement = state.defect - next.defect;
+                // Converged: the accepted step moves E by no more than either
+                // evaluation can resolve.
+                converged = state.defect - next.defect <= state.defect_band + next.defect_band;
                 *theta = candidate;
                 *state = next;
                 accepted = true;
                 *lambda = (*lambda / LM_LAMBDA_DECAY).max(LM_LAMBDA_FLOOR);
-                if improvement <= LM_IMPROVEMENT_REL_TOL * (1.0 + state.defect) {
-                    // Converged: the accepted step no longer moves E.
-                    converged = true;
-                }
                 break;
             }
             Some(..) | None => {
@@ -1345,7 +1327,6 @@ fn lm_damped_accept_sweep(
     LmTrustStep {
         accepted,
         converged,
-        step_norm_sq,
     }
 }
 
@@ -1367,41 +1348,100 @@ fn evaluate_flow_defect(
 ) -> Option<FlowObjectiveState> {
     let n = row_modes.len();
     let mut a_rows = Vec::with_capacity(n);
-    let mut cross = 0.0_f64;
+    let mut a_bands = Vec::with_capacity(n);
+    // An entry is its base plus at most `theta.len()` mode terms, each one rounded
+    // product and one rounded sum.
+    let growth = gam_linalg::roundoff::accumulation_growth(2 * theta.len());
     for (modes, base) in row_modes.iter().zip(row_base.iter()) {
         let mut a = *base;
+        let mut magnitude = base.map(f64::abs);
         for (coef, sample) in theta.iter().zip(modes.iter()) {
-            a[2 * sample.component] += coef * sample.grad[0];
-            a[2 * sample.component + 1] += coef * sample.grad[1];
+            let (term0, term1) = (coef * sample.grad[0], coef * sample.grad[1]);
+            a[2 * sample.component] += term0;
+            a[2 * sample.component + 1] += term1;
+            magnitude[2 * sample.component] += term0.abs();
+            magnitude[2 * sample.component + 1] += term1.abs();
         }
         a_rows.push(a);
+        a_bands.push(magnitude.map(|value| growth * value));
     }
-    for (a, g) in a_rows.iter().zip(ghat.iter()) {
+    flow_defect_state(a_rows, &a_bands, ghat, ghat_norm_sq)
+}
+
+/// The profiled isometry defect `E = Σ_i ‖A_iᵀA_i − c·Ĝ_i‖²_F` of per-row flow
+/// Jacobians, with the rounding band of its evaluation.
+///
+/// `a_bands[i][e]` bounds the formation error of `a_rows[i][e]`. Forming
+/// `m = svec(AᵀA)` adds `|a_x|·δa_y + |a_y|·δa_x` per product plus `γ_3` of the
+/// entry's magnitude, and each residual `r = m − c·g` adds `γ_2·(|m| + |c·g|)`, so
+/// the weighted squares carry `Σ w·(2|r|·δr + δr²)`. The profiled `c` minimizes `E`
+/// over the scale exactly for the computed `m`, so its own error `δc` moves `E` only
+/// by `‖Ĝ‖²·δc²`. The final accumulation adds `γ_{3n+2}·E`. Two defects whose
+/// difference lies inside the sum of their bands cannot be told apart.
+fn flow_defect_state(
+    a_rows: Vec<[f64; 4]>,
+    a_bands: &[[f64; 4]],
+    ghat: &[[f64; 3]],
+    ghat_norm_sq: f64,
+) -> Option<FlowObjectiveState> {
+    use gam_linalg::roundoff::accumulation_growth;
+    let n = a_rows.len();
+    let gamma2 = accumulation_growth(2);
+    let gamma3 = accumulation_growth(3);
+    let mut products = Vec::with_capacity(n);
+    let mut cross = 0.0_f64;
+    let mut cross_band = 0.0_f64;
+    let mut cross_magnitude = 0.0_f64;
+    for ((a, e), g) in a_rows.iter().zip(a_bands.iter()).zip(ghat.iter()) {
         // AᵀA in symmetric storage [m00, m11, m01].
-        let m00 = a[0] * a[0] + a[2] * a[2];
-        let m11 = a[1] * a[1] + a[3] * a[3];
-        let m01 = a[0] * a[1] + a[2] * a[3];
-        cross += m00 * g[0] + m11 * g[1] + 2.0 * m01 * g[2];
+        let m = [
+            a[0] * a[0] + a[2] * a[2],
+            a[1] * a[1] + a[3] * a[3],
+            a[0] * a[1] + a[2] * a[3],
+        ];
+        let dm = [
+            2.0 * (a[0].abs() * e[0] + a[2].abs() * e[2]) + gamma3 * m[0],
+            2.0 * (a[1].abs() * e[1] + a[3].abs() * e[3]) + gamma3 * m[1],
+            a[1].abs() * e[0] + a[0].abs() * e[1] + a[3].abs() * e[2] + a[2].abs() * e[3]
+                + gamma3 * ((a[0] * a[1]).abs() + (a[2] * a[3]).abs()),
+        ];
+        let terms = [m[0] * g[0], m[1] * g[1], 2.0 * m[2] * g[2]];
+        cross += terms[0] + terms[1] + terms[2];
+        cross_band += dm[0] * g[0].abs() + dm[1] * g[1].abs() + 2.0 * dm[2] * g[2].abs();
+        cross_magnitude += terms[0].abs() + terms[1].abs() + terms[2].abs();
+        products.push((m, dm));
     }
     let scale = cross / ghat_norm_sq;
     if !(scale.is_finite() && scale > 0.0) {
         return None;
     }
+    // `cross` and `‖Ĝ‖²` each sum `3n` terms formed with at most two rounded products.
+    let accumulation = accumulation_growth(3 * n + 2);
+    let scale_band = (cross_band + accumulation * cross_magnitude) / ghat_norm_sq
+        + accumulation_growth(3 * n + 3) * scale;
     let mut defect = 0.0_f64;
-    for (a, g) in a_rows.iter().zip(ghat.iter()) {
-        let m00 = a[0] * a[0] + a[2] * a[2];
-        let m11 = a[1] * a[1] + a[3] * a[3];
-        let m01 = a[0] * a[1] + a[2] * a[3];
-        let r00 = m00 - scale * g[0];
-        let r11 = m11 - scale * g[1];
-        let r01 = m01 - scale * g[2];
+    let mut defect_band = 0.0_f64;
+    for ((m, dm), g) in products.iter().zip(ghat.iter()) {
+        let r00 = m[0] - scale * g[0];
+        let r11 = m[1] - scale * g[1];
+        let r01 = m[2] - scale * g[2];
         defect += r00 * r00 + r11 * r11 + 2.0 * r01 * r01;
+        let dr00 = dm[0] + gamma2 * (m[0].abs() + (scale * g[0]).abs());
+        let dr11 = dm[1] + gamma2 * (m[1].abs() + (scale * g[1]).abs());
+        let dr01 = dm[2] + gamma2 * (m[2].abs() + (scale * g[2]).abs());
+        defect_band += 2.0 * r00.abs() * dr00
+            + dr00 * dr00
+            + 2.0 * r11.abs() * dr11
+            + dr11 * dr11
+            + 2.0 * (2.0 * r01.abs() * dr01 + dr01 * dr01);
     }
     if !defect.is_finite() {
         return None;
     }
+    defect_band += ghat_norm_sq * scale_band * scale_band + accumulation * defect;
     Some(FlowObjectiveState {
         defect,
+        defect_band,
         scale,
         a_rows,
     })
@@ -1505,10 +1545,6 @@ fn minimize_isometry_defect_flow(
             break;
         }
         if step.converged {
-            break;
-        }
-        let theta_norm_sq: f64 = theta.iter().map(|v| v * v).sum();
-        if step.step_norm_sq <= LM_STEP_STALL_REL_FLOOR * (1.0 + theta_norm_sq) {
             break;
         }
     }
@@ -2604,7 +2640,10 @@ struct SphereFlowMinimization {
 /// The derivative includes both the linear flow-Jacobian term and the
 /// moved-latitude whitening term:
 /// `∂Ã_k = L Dv_k + diag(0, -sin(lat̃) v_k,lat) Dφ`.
-fn sphere_whitened_boost_row(theta: &[f64], t: [f64; 2]) -> Option<([f64; 4], [[f64; 4]; 3])> {
+fn sphere_whitened_boost_row(
+    theta: &[f64],
+    t: [f64; 2],
+) -> Option<([f64; 4], [f64; 4], [[f64; 4]; 3])> {
     let q = SphereBoostFlowBasis.dim();
     if theta.len() != q {
         return None;
@@ -2612,14 +2651,19 @@ fn sphere_whitened_boost_row(theta: &[f64], t: [f64; 2]) -> Option<([f64; 4], [[
     let displacements = SphereBoostFlowBasis::mode_displacements(t);
     let mode_jacobians = SphereBoostFlowBasis::mode_jacobians(t);
     let mut dphi = [[1.0_f64, 0.0], [0.0, 1.0]];
+    let mut dphi_magnitude = [[1.0_f64, 0.0], [0.0, 1.0]];
     let mut moved_lat = t[0];
+    let mut lat_magnitude = t[0].abs();
     for k in 0..q {
-        moved_lat += theta[k] * displacements[k][0];
+        let lat_term = theta[k] * displacements[k][0];
+        moved_lat += lat_term;
+        lat_magnitude += lat_term.abs();
         let dv = mode_jacobians[k];
-        dphi[0][0] += theta[k] * dv[0][0];
-        dphi[0][1] += theta[k] * dv[0][1];
-        dphi[1][0] += theta[k] * dv[1][0];
-        dphi[1][1] += theta[k] * dv[1][1];
+        for (row, col) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+            let term = theta[k] * dv[row][col];
+            dphi[row][col] += term;
+            dphi_magnitude[row][col] += term.abs();
+        }
     }
 
     let (sin_lat_new, cos_lat_new) = moved_lat.sin_cos();
@@ -2637,6 +2681,19 @@ fn sphere_whitened_boost_row(theta: &[f64], t: [f64; 2]) -> Option<([f64; 4], [[
         cos_lat_new * dphi[1][0],
         cos_lat_new * dphi[1][1],
     ];
+    // Each accumulated entry is off by `γ_{2q}` of its magnitude. `cos lat̃` inherits
+    // the moved latitude's error through `|sin lat̃|` and adds one rounding of its
+    // own, and the whitened row adds one product.
+    let growth = gam_linalg::roundoff::accumulation_growth(2 * q);
+    let gamma1 = gam_linalg::roundoff::accumulation_growth(1);
+    let dphi_band = dphi_magnitude.map(|row| row.map(|value| growth * value));
+    let cos_band = sin_lat_new.abs() * growth * lat_magnitude + gamma1 * cos_lat_new;
+    let a_bands = [
+        dphi_band[0][0],
+        dphi_band[0][1],
+        dphi[1][0].abs() * cos_band + cos_lat_new * dphi_band[1][0] + gamma1 * a[2].abs(),
+        dphi[1][1].abs() * cos_band + cos_lat_new * dphi_band[1][1] + gamma1 * a[3].abs(),
+    ];
     let mut da = [[0.0_f64; 4]; 3];
     for k in 0..q {
         let dv = mode_jacobians[k];
@@ -2653,7 +2710,7 @@ fn sphere_whitened_boost_row(theta: &[f64], t: [f64; 2]) -> Option<([f64; 4], [[
     {
         return None;
     }
-    Some((a, da))
+    Some((a, a_bands, da))
 }
 
 /// Per-row whitened flow Jacobian `Ã_i = L(φ(t_i)) · Dφ_θ(t_i)` (row-major
@@ -2672,40 +2729,14 @@ fn sphere_eval_boost_defect(
 ) -> Option<FlowObjectiveState> {
     let n = row_coords.nrows();
     let mut a_rows: Vec<[f64; 4]> = Vec::with_capacity(n);
-    let mut cross = 0.0_f64;
+    let mut a_bands: Vec<[f64; 4]> = Vec::with_capacity(n);
     for row in 0..n {
         let t = [row_coords[[row, 0]], row_coords[[row, 1]]];
-        let (a, _da) = sphere_whitened_boost_row(theta, t)?;
+        let (a, a_band, _da) = sphere_whitened_boost_row(theta, t)?;
         a_rows.push(a);
+        a_bands.push(a_band);
     }
-    for (a, g) in a_rows.iter().zip(ghat.iter()) {
-        let m00 = a[0] * a[0] + a[2] * a[2];
-        let m11 = a[1] * a[1] + a[3] * a[3];
-        let m01 = a[0] * a[1] + a[2] * a[3];
-        cross += m00 * g[0] + m11 * g[1] + 2.0 * m01 * g[2];
-    }
-    let scale = cross / ghat_norm_sq;
-    if !(scale.is_finite() && scale > 0.0) {
-        return None;
-    }
-    let mut defect = 0.0_f64;
-    for (a, g) in a_rows.iter().zip(ghat.iter()) {
-        let m00 = a[0] * a[0] + a[2] * a[2];
-        let m11 = a[1] * a[1] + a[3] * a[3];
-        let m01 = a[0] * a[1] + a[2] * a[3];
-        let r00 = m00 - scale * g[0];
-        let r11 = m11 - scale * g[1];
-        let r01 = m01 - scale * g[2];
-        defect += r00 * r00 + r11 * r11 + 2.0 * r01 * r01;
-    }
-    if !defect.is_finite() {
-        return None;
-    }
-    Some(FlowObjectiveState {
-        defect,
-        scale,
-        a_rows,
-    })
+    flow_defect_state(a_rows, &a_bands, ghat, ghat_norm_sq)
 }
 
 /// Exact profiled residual and analytic Jacobian for the sphere boost flow.
@@ -2746,7 +2777,7 @@ fn sphere_boost_residual_jacobian(
 
     for row in 0..n {
         let t = [row_coords[[row, 0]], row_coords[[row, 1]]];
-        let (a, da) = sphere_whitened_boost_row(theta, t)?;
+        let (a, _a_band, da) = sphere_whitened_boost_row(theta, t)?;
         let g = ghat[row];
         let m00 = a[0] * a[0] + a[2] * a[2];
         let m11 = a[1] * a[1] + a[3] * a[3];
@@ -2841,10 +2872,6 @@ fn sphere_minimize_boost_defect(
         );
         any_accepted |= step.accepted;
         if !step.accepted || step.converged {
-            break;
-        }
-        let theta_norm_sq: f64 = theta.iter().map(|v| v * v).sum();
-        if step.step_norm_sq <= LM_STEP_STALL_REL_FLOOR * (1.0 + theta_norm_sq) {
             break;
         }
     }
