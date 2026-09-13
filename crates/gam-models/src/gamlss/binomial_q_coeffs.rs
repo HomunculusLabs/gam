@@ -89,7 +89,7 @@ mod oracle_tests {
     //! composition. Production consumes the joint bundles above, whose own
     //! oracle and strongest-hand performance gates live in `gam_math`.
     use super::*;
-    use gam_math::fast_channel::{faa_top3, faa_top4};
+    use gam_math::fast_channel::faa_top4;
     use gam_math::jet_tower::{Tower2, Tower4};
 
     #[inline]
@@ -106,18 +106,21 @@ mod oracle_tests {
         dq_ab: f64,
     ) -> f64 {
         // #932 unified source: `D_u H_ab = ∂³(F∘q)/∂a∂b∂u` is the fully-mixed
-        // order-3 top channel, so it IS `fast_channel::faa_top3` — the universal
-        // partition sum over the three distinct directions {a, b, u}. Pack the
-        // q-map block partials into the bitmask array (a=1, b=2, u=4) and read the
-        // top channel. This is the SAME jet truth as `Tower4<3>::compose.t3[a][b][u]`
-        // (pinned in `oracle_tests`) but computes ONLY the read channel as a
-        // compile-time-unrolled sum — measured at ~hand instruction count, vs ~19×
-        // for the dense tower that materializes the whole 3⁴ tensor.
+        // order-3 top channel — the universal partition sum over the three
+        // distinct directions {a, b, u}, written here in the same nested form as
+        // gam-math's crate-private `fast_channel::faa_top3` (which gam-math's own
+        // oracle tests pin bit-for-bit against the runtime partition walker).
+        // Pack the q-map block partials into the bitmask array (a=1, b=2, u=4) and
+        // read the top channel. This is the SAME jet truth as
+        // `Tower4<3>::compose.t3[a][b][u]`, which the tests below compare it to.
         let q = [
             0.0, q_a, q_b, q_ab, // _, a, b, ab
             dq, dq_a, dq_b, dq_ab, // u, au, bu, abu
         ];
-        faa_top3([m1, m2, m3], &q)
+        let (a, b, u) = (1usize, 2, 4);
+        let p = q[a] * q[b];
+        let p_u = q[a | u] * q[b] + q[a] * q[b | u];
+        m3 * (q[u] * p) + m2 * (p_u + q[u] * q[a | b]) + m1 * q[a | b | u]
     }
 
     #[inline]

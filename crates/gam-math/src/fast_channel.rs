@@ -55,7 +55,7 @@ pub fn faa_top2(m: [f64; 2], q: &[f64; 4]) -> f64 {
 /// `∂_u [m₂·q_a·q_b + m₁·q_ab]` regrouped by `f^{(k)}`.
 /// Bitmask: `a=1, b=2, u=4`. `m=[m₁,m₂,m₃]`.
 #[inline(always)]
-pub fn faa_top3(m: [f64; 3], q: &[f64; 8]) -> f64 {
+pub(crate) fn faa_top3(m: [f64; 3], q: &[f64; 8]) -> f64 {
     let (a, b, u) = (1usize, 2, 4);
     // P = q_a·q_b and its u-derivative.
     let p = q[a] * q[b];
