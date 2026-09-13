@@ -1414,11 +1414,14 @@ where
     if !rhs_norm_sq.is_finite() {
         return None;
     }
-    if rhs_norm_sq <= f64::MIN_POSITIVE {
+    // Only a zero right-hand side has the exact solve `x = 0`. Past it the
+    // target is the relative bound itself: once `rel_tol^2 ||rhs||^2` underflows,
+    // `r.r` underflows with it and the loop below still exits (#2469).
+    if rhs_norm_sq == 0.0 {
         return Some((Array1::<f64>::zeros(dim), 0, 0.0));
     }
 
-    let target_sq = (rel_tol * rel_tol * rhs_norm_sq).max(f64::MIN_POSITIVE);
+    let target_sq = rel_tol * rel_tol * rhs_norm_sq;
     let mut r = rhs.clone();
     if x.iter().any(|value| *value != 0.0) {
         let ax = apply(&x);
