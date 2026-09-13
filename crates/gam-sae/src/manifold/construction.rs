@@ -5467,9 +5467,10 @@ impl SaeManifoldTerm {
         (LatentManifold::Product(parts), point)
     }
 
-    /// Numerical rank of a symmetric matrix: the count of eigenvalues
-    /// exceeding `tol · max_eig`, with `tol = 1e-9` (the conventional
-    /// relative spectral cutoff used elsewhere in the codebase).
+    /// Numerical rank of a symmetric penalty matrix: the count of eigenvalues
+    /// above the REML positive-eigenspace threshold
+    /// (`gam_solve::estimate::reml::reml_outer_engine::positive_eigenvalue_threshold`),
+    /// the workspace's one rule for what a positive penalty mode is.
     ///
     /// Used to count the penalised dimension of each atom's `smooth_penalty`
     /// `S_k` so the penalized quasi-Laplace criterion's `−½·p·rank(S)·log λ_smooth` Occam term
@@ -5487,9 +5488,9 @@ impl SaeManifoldTerm {
         if m == 0 {
             return Ok(0);
         }
-        // Symmetrize defensively through the shared ndarray helper. The SAE
-        // rank cutoff is intentionally local to the SAE evidence contract; only
-        // the symmetric cleanup is shared with the other construction modules.
+        // Symmetrize defensively through the shared ndarray helper, then count the
+        // positive eigenspace with the threshold the REML pseudo-logdet reads for a
+        // penalty, rather than a cutoff local to the SAE evidence.
         let mut sym = s.clone();
         gam_linalg::matrix::symmetrize_in_place(&mut sym);
         let (evals, _evecs) = sym
@@ -5499,8 +5500,10 @@ impl SaeManifoldTerm {
         if !(max_eig > 0.0) {
             return Ok(0);
         }
-        let tol = SAE_MANIFOLD_SPECTRAL_RANK_CUTOFF * max_eig;
-        Ok(evals.iter().filter(|&&v| v > tol).count())
+        let threshold = gam_solve::estimate::reml::reml_outer_engine::positive_eigenvalue_threshold(
+            &evals.to_vec(),
+        );
+        Ok(evals.iter().filter(|&&v| v > threshold).count())
     }
 }
 

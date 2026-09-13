@@ -182,9 +182,11 @@ pub(crate) const SAE_MANIFOLD_INNER_OBJECTIVE_STALL_MIN_ROUNDS: usize = 3;
 /// directly in the factored coordinate space instead.
 pub(crate) const SAE_DENSE_BETA_PENALTY_PROBE_MAX_DIM: usize = 4096;
 
-/// Relative spectral cutoff for counting the numerical rank / nullity of a
-/// symmetric penalty Gram: eigenvalues at or below `cutoff · λ_max` are treated
-/// as zero. Used by [`SaeManifoldTerm::symmetric_rank`].
+/// Relative spectral cutoff below which a data-dependent Gram's eigen-direction
+/// is treated as unsupported: eigenvalues at or below `cutoff · λ_max` are
+/// dropped by the per-atom data-supported basis reduction and by the separation
+/// barrier's design-Gram whitening. A penalty's rank is counted by
+/// [`SaeManifoldTerm::symmetric_rank`] on the REML positive eigenspace instead.
 pub(crate) const SAE_MANIFOLD_SPECTRAL_RANK_CUTOFF: f64 = 1.0e-9;
 
 /// Floor on the Levenberg-Marquardt ridge added to a per-row Hessian before
