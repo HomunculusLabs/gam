@@ -3685,24 +3685,18 @@ fn solve_operator_metric_projection_dual_active_set(
         // The discriminator is the smallest residual ANY multipliers could
         // achieve, `min_μ || g - A_Aᵀ μ ||`, which is exactly the norm of `g`
         // projected onto the face tangent. Report it beside the achieved one:
-        // near zero means (b), near `residual` means (a). A ridge keeps the
-        // normal-equation solve defined on a rank-deficient face, which is the
-        // very case this diagnostic exists to name; it only makes the reported
-        // achievable residual an UPPER bound, so it can never turn (a) into (b).
+        // near zero means (b), near `residual` means (a). The face rows' thin SVD
+        // gives their row space at its own rounding band, which stays defined on
+        // a rank-deficient face, the very case this diagnostic exists to name.
+        // A singular value inside the band counts as absent, and that can only
+        // enlarge the complement, so the reported achievable residual is an
+        // UPPER bound and can never turn (a) into (b) (#2469).
         let achievable = if active_ids.is_empty() {
             Some(gradient_inf_norm(&gradient))
         } else {
             ops.gather_unit_rows(&active_ids).ok().and_then(|rows| {
-                let gram = rows.a.dot(&rows.a.t());
-                let ridge = 1.0e-12 * gram.diag().iter().fold(0.0_f64, |m, v| m.max(v.abs()));
-                let mut regularized = gram;
-                for i in 0..regularized.nrows() {
-                    regularized[[i, i]] += ridge.max(f64::MIN_POSITIVE);
-                }
-                regularized.cholesky(Side::Lower).ok().map(|factor| {
-                    let least_squares = factor.solvevec(&rows.a.dot(&gradient));
-                    gradient_inf_norm(&(&gradient - &rows.a.t().dot(&least_squares)))
-                })
+                let (_, tangent) = null_space_of_rows(&rows.a)?;
+                Some(gradient_inf_norm(&tangent.dot(&tangent.t().dot(&gradient))))
             })
         };
         let achievable_report = achievable.map_or_else(
