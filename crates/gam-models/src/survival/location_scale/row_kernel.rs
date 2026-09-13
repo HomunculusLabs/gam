@@ -4501,7 +4501,8 @@ impl SurvivalLocationScaleFamily {
     /// Jacobian (link-independent), and the link enters ONLY through the scalar
     /// `log S(u) = log(1 − μ(u;θ))` and `log φ(u) = log d1(u;θ)` terms. Hence
     ///   ∂(log S)/∂θ = −(∂μ/∂θ)/S,   ∂(log φ)/∂θ = (∂d1/∂θ)/d1,
-    /// with `S = 1 − μ`, `μ = jet.mu`, `d1 = jet.d1`, and the parameter partials
+    /// with `S` the stable survival complement of `μ = jet.mu` that the row kernel's
+    /// generic arm uses, `d1 = jet.d1`, and the parameter partials
     /// `∂μ/∂θ`, `∂d1/∂θ` supplied analytically by
     /// [`InverseLinkKernel::param_partials`]. The higher-order ratio/pdf
     /// derivatives (r, dr, …, fppp) carry the inner-Newton curvature only and do
@@ -4539,7 +4540,7 @@ impl SurvivalLocationScaleFamily {
             return Ok(None);
         }
         let dynamic = self.build_dynamic_geometry(block_states)?;
-        // ∂(log S)/∂θ = −(∂μ/∂θ)/S at argument u (S = 1 − μ);
+        // ∂(log S)/∂θ = −(∂μ/∂θ)/S at argument u (S the stable complement of μ);
         // ∂(log φ)/∂θ = (∂d1/∂θ)/d1 at argument u.
         let dlog_survival_dtheta = |u: f64| -> Result<Vec<f64>, String> {
             let partials = self
@@ -4547,11 +4548,15 @@ impl SurvivalLocationScaleFamily {
                 .param_partials(u)
                 .map_err(|e| format!("inverse-link survival param partials failed: {e}"))?
                 .ok_or_else(|| "inverse-link reported no param partials".to_string())?;
-            let jet = self
-                .inverse_link
-                .jet(u)
-                .map_err(|e| format!("inverse-link jet failed at u={u}: {e}"))?;
-            let s = (1.0 - jet.mu).clamp(f64::MIN_POSITIVE, 1.0);
+            // The complement the value path takes, not `1 − μ` floored: in the far
+            // tail `1 − μ` rounds to zero while `S` stays representable.
+            let s = inverse_link_survival_probvalue(&self.inverse_link, u);
+            if !(s.is_finite() && s > 0.0 && s <= 1.0) {
+                return Err(format!(
+                    "inverse-link survival probability must lie in (0,1] for the θ-gradient, \
+                     got {s} at u={u}"
+                ));
+            }
             let map = |dmu: f64| -dmu / s;
             Ok(match partials {
                 LinkParamPartials::Sas(p) => {
