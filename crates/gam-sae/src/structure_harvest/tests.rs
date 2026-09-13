@@ -306,24 +306,18 @@ fn klein_r4_embedding_beats_the_unrestricted_torus_cover() {
 
 /// #2238 — a genuinely two-dimensional primary factor must not be pinned to
 /// the old one-dimensional circle. A full 8x8 planar grid is represented
-/// exactly by the flat 2-D candidate, while phase alone discards radius. The
-/// grid carries a small deterministic observation perturbation: a sheet design
-/// reproduces the noiseless grid exactly, Gaussian REML refuses that candidate
-/// for having no finite profiled dispersion, and the race is then undecided
-/// rather than won (#2280).
+/// exactly by the flat 2-D candidate, while phase alone discards radius.
 #[test]
 fn auto_primary_topology_selects_two_dimensional_factor_2238() {
     let side = 8usize;
-    let n = side * side;
-    let target = Array2::<f64>::from_shape_fn((n, 2), |(row, col)| {
+    let target = Array2::<f64>::from_shape_fn((side * side, 2), |(row, col)| {
         let i = row / side;
         let j = row % side;
-        let planted = if col == 0 {
+        if col == 0 {
             i as f64 - 0.5 * (side - 1) as f64
         } else {
             j as f64 - 0.5 * (side - 1) as f64
-        };
-        planted + (((row + 1) * (col + 3)) as f64).sin() / n as f64
+        }
     });
     let labels = vec![0usize; target.nrows()];
     let choices = discover_primary_atom_topologies(target.view(), &labels, 1, &[2])

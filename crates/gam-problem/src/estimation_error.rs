@@ -831,10 +831,12 @@ pub enum EstimationError {
     /// resolution at `rho`: the design reproduces its response, so the profiled dispersion has
     /// no finite value and no smoothing parameter can be scored (#2723). Typed rather than
     /// carried as prose, because a caller comparing candidates must tell a candidate that fits
-    /// the response exactly from one that failed (#2280). It renders as the `InvalidInput` it
-    /// replaced, so no message a user or a test reads changes.
+    /// the response exactly from one that failed (#2280). The full-column-rank design's
+    /// `design_columns` against the positive-weight `observations` says which: a design with
+    /// as many columns as observations reproduces any response, so its refusal carries no
+    /// statement about this one.
     #[error(
-        "Invalid input: Gaussian REML profiled residual {output} is not resolvably positive at rho={rho}: {residual} against its own arithmetic resolution {resolution} (gamma_m * 2 * ywy, ywy={ywy}); the design interpolates its response, so the profiled dispersion has no finite value"
+        "Invalid input: Gaussian REML profiled residual {output} is not resolvably positive at rho={rho}: {residual} against its own arithmetic resolution {resolution} (gamma_m * 2 * ywy, ywy={ywy}); the design interpolates its response ({design_columns} columns on {observations} observations), so the profiled dispersion has no finite value"
     )]
     ProfiledResidualUnresolved {
         output: usize,
@@ -842,6 +844,8 @@ pub enum EstimationError {
         residual: f64,
         resolution: f64,
         ywy: f64,
+        design_columns: usize,
+        observations: usize,
     },
 
     #[error(

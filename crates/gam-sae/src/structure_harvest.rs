@@ -4192,10 +4192,15 @@ fn fit_topology_candidate_at_fixed_metric(
     )
     .map_err(|error| {
         let reason = format!("fit_topology_candidate: REML evidence: {error:?}");
+        // A design with as many columns as observations reproduces any response, so its
+        // refusal says nothing about this image; only a narrower design that reproduces it
+        // is a candidate fitting the data exactly.
         match error {
-            EstimationError::ProfiledResidualUnresolved { .. } => {
-                CandidateFitRefusal::InterpolatesResponse(reason)
-            }
+            EstimationError::ProfiledResidualUnresolved {
+                design_columns,
+                observations,
+                ..
+            } if design_columns < observations => CandidateFitRefusal::InterpolatesResponse(reason),
             _ => CandidateFitRefusal::Failed(reason),
         }
     })?;
@@ -4872,9 +4877,10 @@ impl RankedTopology {
 /// Why one topology candidate produced no selectable evidence (#2280).
 ///
 /// Gaussian REML refuses a candidate whose design reproduces the response exactly, because the
-/// profiled dispersion of an exact fit has no finite value. That refusal is not a loss: the
-/// candidate fits the data at least as well as every candidate that scored. Every other refusal
-/// says the candidate cannot be fit on this chart.
+/// profiled dispersion of an exact fit has no finite value. When the design has fewer columns
+/// than observations, that refusal is not a loss: the candidate fits the data at least as well
+/// as every candidate that scored. A design spanning every observation reproduces any response,
+/// so its refusal, like every other one, says the candidate cannot be scored on this chart.
 #[derive(Clone, Debug)]
 enum CandidateFitRefusal {
     InterpolatesResponse(String),
@@ -4902,13 +4908,15 @@ impl From<&str> for CandidateFitRefusal {
 }
 
 /// A metric profile's evaluation failure as a candidate refusal, keeping Gaussian REML's typed
-/// verdict that the response is interpolated.
+/// verdict that a design narrower than the observations reproduces the response.
 fn profile_refusal(context: &str, error: &ObjectiveEvalError) -> CandidateFitRefusal {
     let reason = format!("{context}: {error}");
     match error.downcast_ref::<EstimationError>() {
-        Some(EstimationError::ProfiledResidualUnresolved { .. }) => {
-            CandidateFitRefusal::InterpolatesResponse(reason)
-        }
+        Some(EstimationError::ProfiledResidualUnresolved {
+            design_columns,
+            observations,
+            ..
+        }) if design_columns < observations => CandidateFitRefusal::InterpolatesResponse(reason),
         _ => CandidateFitRefusal::Failed(reason),
     }
 }

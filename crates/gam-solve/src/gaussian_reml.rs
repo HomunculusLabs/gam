@@ -1436,6 +1436,7 @@ pub fn gaussian_reml_multi_shared_dispersion_closed_form(
         &prepared.cache,
         pooled_ywy.view(),
         pooled_projected_rhs_squared.view(),
+        prepared.n_effective,
         rho_lower,
     )?;
     let eval = |rho: f64| {
@@ -4472,6 +4473,7 @@ fn validate_reml_profile_residuals(
     cache: &GaussianRemlEigenCache,
     ywy: ArrayView1<'_, f64>,
     projected_rhs_squared: ArrayView2<'_, f64>,
+    observations: usize,
     rho: f64,
 ) -> Result<(), EstimationError> {
     for output in 0..ywy.len() {
@@ -4493,6 +4495,8 @@ fn validate_reml_profile_residuals(
                 residual,
                 resolution,
                 ywy: ywy[output],
+                design_columns: cache.penalty_eigenvalues.len(),
+                observations,
             });
         }
     }
@@ -5474,6 +5478,7 @@ fn optimize_rho(
         &prepared.cache,
         prepared.ywy.view(),
         prepared.projected_rhs_squared.view(),
+        prepared.n_effective,
         rho_lower,
     )?;
     if prepared.cache.penalty_rank == 0 {
@@ -8645,6 +8650,7 @@ mod perfect_fit_refusal_tests {
                 &prepared.cache,
                 prepared.ywy.view(),
                 prepared.projected_rhs_squared.view(),
+                prepared.n_effective,
                 rho_min,
             );
             assert!(
@@ -8699,6 +8705,7 @@ mod perfect_fit_refusal_tests {
                 &prepared.cache,
                 prepared.ywy.view(),
                 prepared.projected_rhs_squared.view(),
+                prepared.n_effective,
                 prepared.cache.resolvability_rho_domain().0,
             );
             verdicts.push((name, verdict.is_ok()));
@@ -8760,6 +8767,7 @@ mod perfect_fit_refusal_tests {
                 &prepared.cache,
                 prepared.ywy.view(),
                 prepared.projected_rhs_squared.view(),
+                prepared.n_effective,
                 prepared.cache.resolvability_rho_domain().0,
             );
             assert!(
@@ -8791,6 +8799,7 @@ mod perfect_fit_refusal_tests {
                     &prepared.cache,
                     prepared.ywy.view(),
                     prepared.projected_rhs_squared.view(),
+                    prepared.n_effective,
                     prepared.cache.resolvability_rho_domain().0,
                 );
                 assert!(
