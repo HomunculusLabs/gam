@@ -471,10 +471,13 @@ impl AnalyticPenalty for BlockOrthogonalityPenalty {
 /// decoder output directions, while unrelated atoms are not pushed apart just
 /// because they both exist in the dictionary.
 ///
-/// The Hessian used here is the Gauss-Newton (positive-semidefinite) curvature
-/// of the Frobenius objective in `C`, dropping the indefinite second-order term
-/// in `C`. This keeps the β-tier Newton / PIRLS curvature block PSD, matching
-/// the other quadratic-on-Gram penalties.
+/// `hvp` is the exact Hessian-vector product: it carries both the Gauss-Newton
+/// term `W·Σ_b dC[a,b]·B_k[b,o]` and the indefinite residual term
+/// `W·Σ_b C[a,b]·V_k[b,o]`. `psd_majorizer_hvp` and the dense and carrier
+/// scatters drop the residual term and keep only the Gauss-Newton
+/// (positive-semidefinite) curvature of the Frobenius objective in `C`, which
+/// keeps the β-tier Newton / PIRLS curvature block PSD, matching the other
+/// quadratic-on-Gram penalties.
 ///
 /// Gotchas:
 ///
