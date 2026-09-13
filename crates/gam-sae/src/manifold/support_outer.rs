@@ -272,6 +272,17 @@ impl SaeSupportSmoothingLayout {
 /// came to disagree 4:1.
 pub const SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER: usize = 256;
 
+/// Relative first-order tolerance of the support-sparse inner fixed point.
+///
+/// [`SaeSupportSparseTerm::solve_fixed_point`] certifies `|g|_inf <= tol·max(1, |f|)`
+/// on relative, gauge-invariant limbs and reports the value it achieved (#2517). This
+/// is the `ε^(1/4)` scale, rounded to `1e-4`: a relative `1e-6` is unreachable for an
+/// alternating inner solve on real irreducible-residual data.
+///
+/// The public support-sparse fit entry, through its FFI request, and the code-space
+/// census's pair chart read this one declaration.
+pub const SAE_SUPPORT_INNER_TOLERANCE: f64 = 1.0e-4;
+
 pub struct SaeSupportOuterRequest {
     pub term: SaeSupportSparseTerm,
     pub target: Array2<f64>,
