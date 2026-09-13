@@ -5309,10 +5309,10 @@ pub fn matern_operator_penalty_triplet_at_length_scale(
         if min_order > 0.0 && (nondifferentiable_ou || m < min_order) {
             continue;
         }
-        let (matrix, normalization_scale) =
-            matern_operator_penalty_quadratic(&raw, "Matérn operator penalty")?;
+        let sym = (&raw + &raw.t()) * 0.5;
+        let (matrix, normalization_scale) = normalize_penalty_in_constrained_space(&sym);
         candidates.push(PenaltyCandidate {
-            matrix,
+            matrix: ConstructiveQuadratic::try_from_dense_psd(matrix, "Matérn operator penalty")?,
             source,
             normalization_scale,
             kronecker_factors: None,
@@ -5320,10 +5320,13 @@ pub fn matern_operator_penalty_triplet_at_length_scale(
         });
     }
     if let Some(gram) = ops.third_order_gram.as_ref() {
-        let (matrix, normalization_scale) =
-            matern_operator_penalty_quadratic(gram, "Matérn third-order operator penalty")?;
+        let sym = (gram + &gram.t()) * 0.5;
+        let (matrix, normalization_scale) = normalize_penalty_in_constrained_space(&sym);
         candidates.push(PenaltyCandidate {
-            matrix,
+            matrix: ConstructiveQuadratic::try_from_dense_psd(
+                matrix,
+                "Matérn third-order operator penalty",
+            )?,
             source: PenaltySource::OperatorThirdOrder,
             normalization_scale,
             kronecker_factors: None,
@@ -5331,72 +5334,6 @@ pub fn matern_operator_penalty_triplet_at_length_scale(
         });
     }
     filter_penalty_candidates(candidates)
-}
-
-/// A Matérn collocation Gram as a unit-Frobenius penalty that keeps every
-/// positive eigenvalue: the energy factor `V·diag(√λ₊)/√c`, `c = ‖S₊‖_F`.
-///
-/// `ConstructiveQuadratic::try_from_dense_psd` keeps only eigenvalues above the
-/// spectral rank cutoff. A spatial κ search moves this spectrum across that
-/// cutoff, so the realized block loses a rank-one piece at one length scale and
-/// keeps it at the next: the criterion jumps, and the ψ-gradient, which
-/// differentiates the untruncated collocation Gram, sees none of it. MSI job
-/// 602008 (`y ~ matern(x, periodic=true, period=2π)`, n = 400) measured exactly
-/// one eigenvalue of `S_λ` fall from 4.163e-3 to 3.203e-3 between psi = 1.098661
-/// and psi = 1.098663, with every other eigenvalue unchanged to four digits. That
-/// drop over the third-order block's λ = 2.06e5 is the cutoff of a normalized
-/// 89-column block. It moved the REML cost from -147.4001 to -148.0976, and every
-/// line search that bracketed that psi failed.
-///
-/// Clamping only negative roundoff to zero makes the block a continuous function
-/// of the Gram. `filter_penalty_candidates` still reports rank and nullity at the
-/// cutoff; it no longer decides the matrix.
-fn matern_operator_penalty_quadratic(
-    gram: &Array2<f64>,
-    context: &str,
-) -> Result<(ConstructiveQuadratic, f64), BasisError> {
-    use gam_linalg::faer_ndarray::FaerEigh;
-    let sym = crate::basis::symmetrize_penalty(gram);
-    let (evals, evecs) =
-        FaerEigh::eigh(&sym, faer::Side::Lower).map_err(BasisError::LinalgError)?;
-    let tolerance = crate::basis::spectral_tolerance(&evals);
-    if let Some(&negative) = evals.iter().find(|&&value| value < -tolerance) {
-        return Err(BasisError::IndefinitePenalty {
-            context: context.to_string(),
-            min_eigenvalue: negative,
-            tolerance,
-            guidance: "a collocation Gram DᵀD is PSD by construction; a negative eigenvalue \
-                       beyond roundoff is an assembly defect"
-                .to_string(),
-        });
-    }
-    let positive: Vec<usize> = evals
-        .iter()
-        .enumerate()
-        .filter_map(|(index, &value)| (value > 0.0).then_some(index))
-        .collect();
-    let frobenius = positive
-        .iter()
-        .map(|&index| evals[index] * evals[index])
-        .sum::<f64>()
-        .sqrt();
-    let normalization_scale = if frobenius.is_finite() && frobenius > 0.0 {
-        frobenius
-    } else {
-        1.0
-    };
-    let root_scale = normalization_scale.sqrt();
-    let mut factor = Array2::<f64>::zeros((positive.len(), sym.nrows()));
-    for (row, &index) in positive.iter().enumerate() {
-        let scale = evals[index].sqrt() / root_scale;
-        for column in 0..sym.nrows() {
-            factor[[row, column]] = scale * evecs[[column, index]];
-        }
-    }
-    Ok((
-        ConstructiveQuadratic::from_energy_factor(factor, context)?,
-        normalization_scale,
-    ))
 }
 
 pub(crate) fn normalize_penalty_in_constrained_space(matrix: &Array2<f64>) -> (Array2<f64>, f64) {
