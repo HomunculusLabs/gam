@@ -279,9 +279,16 @@ pub fn scalar_skovgaard_r_star(input: &ScalarSkovgaardInput) -> Option<ScalarSko
 
     let p_corr = normal_two_sided_probability(r_star);
     let p_corr_empirical = normal_two_sided_probability(r_star_empirical);
-    let p_denom = p_first.max(p_corr).max(f64::MIN_POSITIVE);
-    let p_move = (p_corr - p_first).abs() / p_denom;
-    let r_move = (r_star - r).abs() / r.abs().max(f64::MIN_POSITIVE);
+    let p_denom = p_first.max(p_corr);
+    // Two tail probabilities that both underflowed to zero have not moved.
+    let p_move = if p_denom > 0.0 {
+        (p_corr - p_first).abs() / p_denom
+    } else {
+        0.0
+    };
+    // `lr_statistic > 0` was checked above, so `|r| = √W > 0` even for a
+    // subnormal `W`.
+    let r_move = (r_star - r).abs() / r.abs();
     let material = p_move > SKOVGAARD_MATERIAL_THRESHOLD || r_move > SKOVGAARD_MATERIAL_THRESHOLD;
 
     Some(ScalarSkovgaardResult {
