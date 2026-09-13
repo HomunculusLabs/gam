@@ -1646,6 +1646,9 @@ impl<'a> RemlState<'a> {
             };
 
         let mut coords = Vec::with_capacity(psi_dim);
+        // One active-basis coefficient map per implicit term, shared by its axes.
+        let mut coefficient_maps: Vec<(std::ops::Range<usize>, std::sync::Arc<Array2<f64>>)> =
+            Vec::new();
 
         for j in 0..psi_dim {
             let implicit_first = if use_implicit {
@@ -1846,6 +1849,25 @@ impl<'a> RemlState<'a> {
                         } else {
                             None
                         };
+                        let support = hyper_dirs[j].x_tau_original.column_support().expect(
+                            "an implicit first derivative records the global columns it spans",
+                        );
+                        let coefficient_map = if let Some(entry) =
+                            coefficient_maps.iter().find(|entry| entry.0 == support)
+                        {
+                            std::sync::Arc::clone(&entry.1)
+                        } else {
+                            // `X_τ v` in the active basis is the term's operator applied
+                            // to rows `support` of `Qs · Z v`. Axes of one term share
+                            // the map, so the batched traces still group them.
+                            let rows = reparam_result.qs.slice(ndarray::s![support.clone(), ..]);
+                            let map = std::sync::Arc::new(match free_basis_opt.as_ref() {
+                                Some(z) => gam_linalg::faer_ndarray::fast_ab(&rows, z),
+                                None => rows.to_owned(),
+                            });
+                            coefficient_maps.push((support, std::sync::Arc::clone(&map)));
+                            map
+                        };
                         let core: std::sync::Arc<dyn super::reml_outer_engine::HyperOperator> =
                             std::sync::Arc::new(super::reml_outer_engine::ImplicitHyperOperator {
                                 implicit_deriv,
@@ -1862,6 +1884,7 @@ impl<'a> RemlState<'a> {
                                 ),
                                 s_psi: s_tau_j.clone(),
                                 p: p_dim,
+                                coefficient_map,
                                 c_x_psi_beta,
                             });
                         // Firth augmentation: when the Firth operator is active

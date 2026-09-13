@@ -1164,10 +1164,9 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
     /// The ψ-ψ entries are read only by the outer-Hessian pair builders, which
     /// multiply implicit storage in place; densifying them cost one `n × p`
     /// materialization per ψ pair on every evaluation, gradient-only ones
-    /// included (#2735). First derivatives stay dense:
-    /// `ImplicitHyperOperator` applies the term's own operator to the active
-    /// basis without the reparametrization, so an implicit first derivative
-    /// must not reach it.
+    /// included (#2735). First derivatives stay dense: the original-basis
+    /// builder's `SparseDirectionalHyperOperator` traces an implicit `X_τ` by
+    /// one matvec per factor column.
     fn condition_hyper_dirs(&self, hyper_dirs: &mut [DirectionalHyperParam]) {
         for dir in hyper_dirs.iter_mut() {
             let mut x_tau = dir.x_tau_dense();

@@ -956,12 +956,7 @@ impl StochasticTraceEstimator {
                     .into_par_iter()
                     .map(|idx| {
                         let op = implicit_ops[idx];
-                        let dx_u = op
-                            .implicit_deriv
-                            .forward_mul(op.axis, &u.view())
-                            .expect(
-                                "radial scalar evaluation failed during implicit derivative forward_mul",
-                            );
+                        let dx_u = op.design_forward(u.view());
                         let w = &*op.w_diag;
                         let mut w_dx_u = Array1::<f64>::zeros(n_obs);
                         let mut w_y = Array1::<f64>::zeros(n_obs);
@@ -997,12 +992,7 @@ impl StochasticTraceEstimator {
                             let op = implicit_ops[oi];
                             let scratch = &implicit_scratch[oi];
                             let x_re = &x_r[e];
-                            let dx_re = op
-                                .implicit_deriv
-                                .forward_mul(op.axis, &r_e)
-                                .expect(
-                                    "radial scalar evaluation failed during implicit derivative forward_mul",
-                                );
+                            let dx_re = op.design_forward(r_e);
 
                             let mut design_val = 0.0f64;
                             for i in 0..scratch.w_dx_u.len() {
@@ -1174,14 +1164,8 @@ impl StochasticTraceEstimator {
 
             op.x_design.apply_view_into(u.view(), x_u.view_mut());
             op.x_design.apply_view_into(r.view(), x_r.view_mut());
-            let dx_u = op
-                .implicit_deriv
-                .forward_mul(op.axis, &u.view())
-                .expect("radial scalar evaluation failed during implicit derivative forward_mul");
-            let dx_r = op
-                .implicit_deriv
-                .forward_mul(op.axis, &r.view())
-                .expect("radial scalar evaluation failed during implicit derivative forward_mul");
+            let dx_u = op.design_forward(u.view());
+            let dx_r = op.design_forward(r.view());
 
             let w = &*op.w_diag;
             let mut value = 0.0;

@@ -80,6 +80,7 @@ pub(crate) fn composite_trace_implicit_batched(
             }
             if let Some(impl_j) = as_implicit(operators[j].as_ref())
                 && Arc::ptr_eq(&impl_i.implicit_deriv, &impl_j.implicit_deriv)
+                && Arc::ptr_eq(&impl_i.coefficient_map, &impl_j.coefficient_map)
                 && Arc::ptr_eq(&impl_i.x_design, &impl_j.x_design)
                 && Arc::ptr_eq(impl_i.w_diag.as_arc(), impl_j.w_diag.as_arc())
                 && impl_i.p == impl_j.p
@@ -162,6 +163,7 @@ pub(crate) fn trace_projected_factors_batched(
             }
             if let Some(impl_j) = as_implicit(operators[j].as_ref())
                 && Arc::ptr_eq(&impl_i.implicit_deriv, &impl_j.implicit_deriv)
+                && Arc::ptr_eq(&impl_i.coefficient_map, &impl_j.coefficient_map)
                 && Arc::ptr_eq(&impl_i.x_design, &impl_j.x_design)
                 && Arc::ptr_eq(impl_i.w_diag.as_arc(), impl_j.w_diag.as_arc())
                 && impl_i.p == impl_j.p
@@ -300,6 +302,7 @@ pub(crate) fn trace_projected_operator_terms_batched(
             }
             if let Some(impl_j) = as_implicit(terms[j].2)
                 && Arc::ptr_eq(&impl_i.implicit_deriv, &impl_j.implicit_deriv)
+                && Arc::ptr_eq(&impl_i.coefficient_map, &impl_j.coefficient_map)
                 && Arc::ptr_eq(&impl_i.x_design, &impl_j.x_design)
                 && Arc::ptr_eq(impl_i.w_diag.as_arc(), impl_j.w_diag.as_arc())
                 && impl_i.p == impl_j.p
@@ -759,6 +762,11 @@ pub struct ImplicitHyperOperator {
     pub s_psi: Array2<f64>,
     /// Total basis dimension p.
     pub(crate) p: usize,
+    /// Active-basis coefficients to the term-local coefficients
+    /// `implicit_deriv` multiplies (`p_out × p`): rows `global_range` of
+    /// `Qs · Z`. The term's operator works in its own original basis, so every
+    /// product through it goes through this map.
+    pub(crate) coefficient_map: std::sync::Arc<Array2<f64>>,
     /// Non-Gaussian fixed-β third-derivative correction: c ⊙ (X_{ψ_d} β̂),
     /// length n. When present, the operator additionally applies
     /// `Xᵀ diag(c_x_psi_beta) X v` so that the full B_d formula
@@ -816,7 +824,6 @@ impl HyperOperator for ImplicitHyperOperator {
         assert!(start + cols <= self.p);
 
         let n_obs = self.w_diag.len();
-        let mut basis = Array1::<f64>::zeros(self.p);
         let mut x_col = Array1::<f64>::zeros(n_obs);
         let mut dx_col = Array1::<f64>::zeros(n_obs);
         let mut weighted = Array1::<f64>::zeros(n_obs);
@@ -832,22 +839,17 @@ impl HyperOperator for ImplicitHyperOperator {
                 .and(self.w_diag.view())
                 .and(x_col.view())
                 .par_for_each(|dst, &w, &x| *dst = w * x);
-            term.assign(
-                &self
-                    .implicit_deriv
-                    .transpose_mul(self.axis, &weighted.view())
-                    .expect("radial scalar evaluation failed during implicit hyper transpose_mul"),
-            );
+            term.assign(&self.design_transpose(weighted.view()));
             out_col += &term;
 
-            basis[global_col] = 1.0;
+            // The active basis vector `e_j` reaches the term as column `j` of
+            // the coefficient map.
             dx_col.assign(
                 &self
                     .implicit_deriv
-                    .forward_mul(self.axis, &basis.view())
+                    .forward_mul(self.axis, &self.coefficient_map.column(global_col))
                     .expect("radial scalar evaluation failed during implicit hyper forward_mul"),
             );
-            basis[global_col] = 0.0;
 
             Zip::from(weighted.view_mut())
                 .and(self.w_diag.view())
@@ -877,14 +879,8 @@ impl HyperOperator for ImplicitHyperOperator {
 
         let x_v = self.x_design.apply_view(v);
         let x_u = self.x_design.apply_view(u);
-        let dx_v = self
-            .implicit_deriv
-            .forward_mul(self.axis, &v)
-            .expect("radial scalar evaluation failed during implicit hyper forward_mul");
-        let dx_u = self
-            .implicit_deriv
-            .forward_mul(self.axis, &u)
-            .expect("radial scalar evaluation failed during implicit hyper forward_mul");
+        let dx_v = self.design_forward(v);
+        let dx_u = self.design_forward(u);
 
         let w = &*self.w_diag;
         let mut design = 0.0;
@@ -986,6 +982,29 @@ impl HyperOperator for ImplicitHyperOperator {
 pub(crate) use gam_runtime::resource::byte_balanced_row_chunk;
 
 impl ImplicitHyperOperator {
+    /// `(∂X/∂ψ_d) · v` for an active-basis `v`.
+    pub(crate) fn design_forward(&self, v: ArrayView1<'_, f64>) -> Array1<f64> {
+        let local = self.coefficient_map.dot(&v);
+        self.implicit_deriv
+            .forward_mul(self.axis, &local.view())
+            .expect("radial scalar evaluation failed during implicit hyper forward_mul")
+    }
+
+    /// `(∂X/∂ψ_d)ᵀ · w` in the active basis.
+    pub(crate) fn design_transpose(&self, w: ArrayView1<'_, f64>) -> Array1<f64> {
+        let local = self
+            .implicit_deriv
+            .transpose_mul(self.axis, &w)
+            .expect("radial scalar evaluation failed during implicit hyper transpose_mul");
+        self.coefficient_map.t().dot(&local)
+    }
+
+    /// The knot-space image `unproject(A · F)` of an active-basis factor `F`.
+    fn knot_factor(&self, factor: &Array2<f64>) -> Array2<f64> {
+        let local = gam_linalg::faer_ndarray::fast_ab(&*self.coefficient_map, factor);
+        self.implicit_deriv.unproject_matrix(&local.view())
+    }
+
     /// Chunked `X · F` via faer SIMD-parallel GEMM. The chunk-row sizing
     /// targets ~8 MiB live blocks so the (chunk_n × p) row slice and
     /// (chunk_n × rank) result both stay in L2/L3 across realistic large-scale
@@ -1055,7 +1074,7 @@ impl ImplicitHyperOperator {
         assert_eq!(xf.dim(), (n_obs, rank));
 
         // Once: unproject F to raw knot space → (n_knots × rank).
-        let u_knot = self.implicit_deriv.unproject_matrix(&factor.view());
+        let u_knot = self.knot_factor(factor);
 
         // Match the chunk sizing `xt_logdet_kernel_x_diagonal` uses so the
         // live block stays in L2/L3 across realistic large-scale shapes.
@@ -1122,7 +1141,7 @@ impl ImplicitHyperOperator {
         let n_obs = self.w_diag.len();
         assert_eq!(xf.dim(), (n_obs, rank));
 
-        let u_knot = self.implicit_deriv.unproject_matrix(&factor.view());
+        let u_knot = self.knot_factor(factor);
 
         let chunk_rows = byte_balanced_row_chunk(self.p + rank, n_obs.max(1));
 
@@ -1242,14 +1261,8 @@ impl ImplicitHyperOperator {
         u: &Array1<f64>,
     ) -> f64 {
         // Design part: dx_z^T (w ⊙ y_vec) + dx_u^T (w ⊙ x_vec)
-        let dx_z = self
-            .implicit_deriv
-            .forward_mul(self.axis, &z.view())
-            .expect("radial scalar evaluation failed during implicit hyper forward_mul");
-        let dx_u = self
-            .implicit_deriv
-            .forward_mul(self.axis, &u.view())
-            .expect("radial scalar evaluation failed during implicit hyper forward_mul");
+        let dx_z = self.design_forward(z.view());
+        let dx_u = self.design_forward(u.view());
 
         let mut design = 0.0f64;
         let w = &*self.w_diag;
@@ -1301,16 +1314,10 @@ impl ImplicitHyperOperator {
         for i in 0..w.len() {
             n_work[i] = w[i] * x_vec[i];
         }
-        let term1 = self
-            .implicit_deriv
-            .transpose_mul(self.axis, &n_work.view())
-            .expect("radial scalar evaluation failed during implicit hyper transpose_mul");
+        let term1 = self.design_transpose(n_work.view());
         out.assign(&term1);
 
-        let dx_z = self
-            .implicit_deriv
-            .forward_mul(self.axis, &z)
-            .expect("radial scalar evaluation failed during implicit hyper forward_mul");
+        let dx_z = self.design_forward(z);
         for i in 0..w.len() {
             n_work[i] = w[i] * dx_z[i];
         }

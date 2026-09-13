@@ -6567,6 +6567,8 @@ pub(crate) fn batched_implicit_trace_matches_per_operator_trace() {
     let w_diag = Arc::new(array![1.0, 0.7, 1.3, 0.9, 1.1]);
     let h = Array2::<f64>::eye(p);
     let ds = DenseSpectralOperator::from_symmetric(&h).unwrap();
+    // The batched trace groups axes that share one coefficient map.
+    let coefficient_map = Arc::new(Array2::<f64>::eye(p));
     let make_op = |axis: usize, scale: f64| -> Arc<dyn HyperOperator> {
         Arc::new(ImplicitHyperOperator {
             implicit_deriv: Arc::clone(&implicit),
@@ -6575,6 +6577,7 @@ pub(crate) fn batched_implicit_trace_matches_per_operator_trace() {
             w_diag: gam_linalg::matrix::SignedWeightsArc::from_arc(Arc::clone(&w_diag)),
             s_psi: Array2::<f64>::eye(p) * scale,
             p,
+            coefficient_map: Arc::clone(&coefficient_map),
             c_x_psi_beta: Some(Arc::new(Array1::from_vec(
                 (0..n).map(|i| scale * (i as f64 + 1.0)).collect(),
             ))),
@@ -6591,6 +6594,135 @@ pub(crate) fn batched_implicit_trace_matches_per_operator_trace() {
     for (want, got) in per_operator.iter().zip(batched.iter()) {
         assert_relative_eq!(got, want, epsilon = 1.0e-10, max_relative = 1.0e-10);
     }
+}
+
+/// Contract: an `ImplicitHyperOperator` for a term spanning only some global
+/// columns, in a reparametrized (`Qs`) and constrained (`Z`) active basis,
+/// multiplies through its coefficient map. `mul_vec`, `mul_basis_columns_into`,
+/// `bilinear` and `trace_projected_factor` equal the dense drift
+/// `B = X_τᵀ W X + Xᵀ W X_τ + Xᵀ diag(c) X + S_ψ` with
+/// `X_τ = embed(∂X_term/∂ψ_d) · Qs · Z` (#2735). Without the map the term's
+/// operator received active-basis vectors of the wrong length and frame.
+#[test]
+pub(crate) fn implicit_hyper_operator_multiplies_through_the_active_basis_map_2735() {
+    use gam_terms::basis::ImplicitDesignPsiDerivative;
+    use std::sync::Arc;
+
+    let n = 6usize;
+    let n_knots = 3usize;
+    let n_axes = 2usize;
+    let axis = 1usize;
+    let p_full = 5usize;
+    let term = 1..4usize;
+    let p = 4usize;
+
+    let pairs = n * n_knots;
+    let implicit = Arc::new(ImplicitDesignPsiDerivative::new(
+        Array1::from_shape_fn(pairs, |k| 0.4 + 0.3 * (k as f64 * 0.7).cos()),
+        Array1::from_shape_fn(pairs, |k| (k as f64 * 0.53).sin()),
+        Array1::zeros(pairs),
+        Array2::from_shape_fn((pairs, n_axes), |(k, a)| {
+            0.2 + ((k + 3 * a) as f64 * 0.41).cos()
+        }),
+        None,
+        None,
+        n,
+        n_knots,
+        0,
+        n_axes,
+    ));
+    let qs = Array2::from_shape_fn((p_full, p_full), |(i, j)| {
+        if i == j {
+            1.0
+        } else {
+            0.3 * ((i * p_full + j) as f64 * 0.37).sin()
+        }
+    });
+    let z = Array2::from_shape_fn((p_full, p), |(i, j)| ((i + 2 * j) as f64 * 0.29).cos());
+    let x_original =
+        Array2::from_shape_fn((n, p_full), |(i, j)| ((i * p_full + j) as f64 * 0.61).sin());
+    let dx_term = implicit
+        .materialize_first(axis)
+        .expect("materialize_first should succeed on the tiny fixture");
+    let mut x_tau_original = Array2::<f64>::zeros((n, p_full));
+    x_tau_original
+        .slice_mut(s![.., term.clone()])
+        .assign(&dx_term);
+    let qs_z = qs.dot(&z);
+    let x_active = x_original.dot(&qs_z);
+    let x_tau_active = x_tau_original.dot(&qs_z);
+    let weights = Array1::from_shape_fn(n, |i| 0.7 + 0.1 * i as f64);
+    let c_x_psi_beta = Array1::from_shape_fn(n, |i| 0.15 * (i as f64 * 0.83).sin());
+    let s_psi = Array2::from_shape_fn((p, p), |(i, j)| if i == j { 0.25 } else { 0.04 });
+
+    let op = ImplicitHyperOperator {
+        implicit_deriv: Arc::clone(&implicit),
+        axis,
+        x_design: Arc::new(DesignMatrix::Dense(
+            gam_linalg::matrix::DenseDesignMatrix::from(x_active.clone()),
+        )),
+        w_diag: gam_linalg::matrix::SignedWeightsArc::from_array(weights.clone()),
+        s_psi: s_psi.clone(),
+        p,
+        coefficient_map: Arc::new(qs_z.slice(s![term.clone(), ..]).to_owned()),
+        c_x_psi_beta: Some(Arc::new(c_x_psi_beta.clone())),
+    };
+
+    let weighted_x = Array2::from_shape_fn((n, p), |(i, j)| weights[i] * x_active[[i, j]]);
+    let weighted_x_tau =
+        Array2::from_shape_fn((n, p), |(i, j)| weights[i] * x_tau_active[[i, j]]);
+    let corrected_x = Array2::from_shape_fn((n, p), |(i, j)| c_x_psi_beta[i] * x_active[[i, j]]);
+    let drift = x_tau_active.t().dot(&weighted_x)
+        + x_active.t().dot(&weighted_x_tau)
+        + x_active.t().dot(&corrected_x)
+        + &s_psi;
+    let magnitude = drift.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
+    // Each entry accumulates a few hundred rounded products along either route.
+    let band = 1.0e3 * f64::EPSILON * magnitude.max(1.0);
+
+    let mut columns = Array2::<f64>::zeros((p, p));
+    op.mul_basis_columns_into(0, columns.view_mut());
+    for j in 0..p {
+        let mut e_j = Array1::<f64>::zeros(p);
+        e_j[j] = 1.0;
+        let column = op.mul_vec(&e_j);
+        for i in 0..p {
+            let want = drift[[i, j]];
+            assert!(
+                (column[i] - want).abs() <= band,
+                "mul_vec B[{i},{j}] = {:.15e}, dense {want:.15e}",
+                column[i]
+            );
+            assert!(
+                (columns[[i, j]] - want).abs() <= band,
+                "mul_basis_columns_into B[{i},{j}] = {:.15e}, dense {want:.15e}",
+                columns[[i, j]]
+            );
+        }
+    }
+
+    let v = Array1::from_shape_fn(p, |i| (i as f64 * 0.9).sin() + 0.2);
+    let u = Array1::from_shape_fn(p, |i| (i as f64 * 1.3).cos());
+    let bilinear_want = v.dot(&drift.dot(&u));
+    let bilinear_got = op.bilinear(&v, &u);
+    assert!(
+        (bilinear_got - bilinear_want).abs() <= band * p as f64,
+        "bilinear {bilinear_got:.15e}, dense {bilinear_want:.15e}"
+    );
+
+    let rank = 2usize;
+    let factor = Array2::from_shape_fn((p, rank), |(i, k)| ((i * rank + k) as f64 * 0.47).sin());
+    let trace_want: f64 = (0..rank)
+        .map(|k| {
+            let f = factor.column(k);
+            f.dot(&drift.dot(&f))
+        })
+        .sum();
+    let trace_got = op.trace_projected_factor(&factor);
+    assert!(
+        (trace_got - trace_want).abs() <= band * (p * p) as f64,
+        "trace_projected_factor {trace_got:.15e}, dense {trace_want:.15e}"
+    );
 }
 
 /// Contract: `SparseDirectionalHyperOperator::trace_projected_factor`, which
@@ -6717,6 +6849,7 @@ pub(crate) fn implicit_hyper_operator_third_derivative_term_matches_dense_refere
         w_diag: gam_linalg::matrix::SignedWeightsArc::from_arc(Arc::clone(&w_diag)),
         s_psi: s_psi.clone(),
         p,
+        coefficient_map: Arc::new(Array2::<f64>::eye(p)),
         c_x_psi_beta,
     };
 
@@ -6764,6 +6897,7 @@ pub(crate) fn implicit_hyper_operator_third_derivative_term_matches_dense_refere
         w_diag: gam_linalg::matrix::SignedWeightsArc::from_arc(Arc::clone(&w_diag)),
         s_psi: s_psi.clone(),
         p,
+        coefficient_map: Arc::new(Array2::<f64>::eye(p)),
         c_x_psi_beta: None,
     };
     let v = array![0.7, -0.4];
@@ -6849,6 +6983,7 @@ pub(crate) fn implicit_hyper_operator_third_derivative_term_centered_fd_matches_
         w_diag: gam_linalg::matrix::SignedWeightsArc::from_arc(w_diag),
         s_psi,
         p,
+        coefficient_map: Arc::new(Array2::<f64>::eye(p)),
         c_x_psi_beta: Some(Arc::new(c_x_psi_beta_dense.clone())),
     };
 
