@@ -527,9 +527,8 @@ pub fn pentagamma(mut x: f64) -> f64 {
 ///
 /// Canonical home for the routine previously triplicated in
 /// `gam-terms/basis/closed_form_penalty.rs`, `gam-model-kernels/
-/// cubic_cell_kernel.rs`, and `gam-models/survival/base.rs`; this copy keeps
-/// the tightest of their Newton settings (200-iteration cap, `1e-15`
-/// convergence).
+/// cubic_cell_kernel.rs`, and `gam-models/survival/base.rs`; this copy runs
+/// Newton until a step stops contracting, with no pass cap or step threshold.
 pub fn gauss_legendre(n: usize) -> (Vec<f64>, Vec<f64>) {
     let mut tmp: Vec<(f64, f64)> = Vec::with_capacity(n);
     let half = n.div_ceil(2);
@@ -547,17 +546,24 @@ pub fn gauss_legendre(n: usize) -> (Vec<f64>, Vec<f64>) {
             }
             (p1, n as f64 * (z * p1 - p2) / (z * z - 1.0))
         };
-        for _ in 0..200 {
+        // Newton contracts quadratically from the cosine guess, so every step is
+        // smaller than the one before until the iterate reaches the root's
+        // rounding band, where a step is noise and stops shrinking. That first
+        // non-contracting step is not taken. The step magnitudes strictly
+        // decrease through a finite set of floats, so the loop ends without a cap.
+        let mut last_step = f64::INFINITY;
+        loop {
             let (p1, pp) = legendre_value_and_slope(z);
-            let z_prev = z;
-            z = z_prev - p1 / pp;
-            if (z - z_prev).abs() < 1e-15 {
+            let step = p1 / pp;
+            if !(step.abs() < last_step) {
                 break;
             }
+            z -= step;
+            last_step = step.abs();
         }
-        // Re-evaluate `P_n'` AT the node being returned. The loop leaves `pp`
-        // one Newton step stale — it was formed at `z_prev`, and `z` has since
-        // moved by up to the `1e-15` break threshold — while the weight below
+        // Re-evaluate `P_n'` AT the node being returned. A slope carried out of
+        // the loop belongs to the iterate before the last step taken, and `z` has
+        // since moved by that step — while the weight below
         // reads the fresh `z` in its `(1 − z²)`. Mixing the two is not a wash:
         // Legendre's equation gives `P_n'' = 2z·P_n'/(1 − z²)` at a root, so a
         // node offset `δ` lands in the weight amplified by `2·2z/(1 − z²)`,
