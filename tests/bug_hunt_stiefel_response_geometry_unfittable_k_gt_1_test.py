@@ -1,5 +1,5 @@
-"""Bug hunt: the documented ``response_geometry="stiefel(k=...)"`` is
-categorically unfittable for k >= 2.
+"""Contract (#1637): the documented ``response_geometry="stiefel(k=...)"`` fits
+for k >= 2.
 
 ``docs/response-geometry.md`` lists ``"stiefel(k=...)"`` (orthonormal k-frames)
 as a supported manifold-valued response geometry, alongside ``"spherical"``,
@@ -8,39 +8,20 @@ as a supported manifold-valued response geometry, alongside ``"spherical"``,
 frame to the tangent space at the intrinsic Fréchet/Karcher mean of the training
 frames, fits Gaussian REML in tangent coordinates, and exponentiates back.
 
-For k == 1 the Stiefel manifold St(n, 1) is the unit sphere and the fit works
-(it dispatches to the sphere maps). For **k >= 2 the fit cannot even start**:
-the Fréchet-mean initializer
-(``crates/gam-geometry/src/response_geometry.rs``, the seed loop at ~734-766)
-seeds the Karcher iteration by evaluating ``log_point(base, x)`` for every
-sample, but ``StiefelManifold::log_map``
-(``crates/gam-geometry/src/manifolds/stiefel.rs:136-139``) deliberately returns
-``GeometryError::Unsupported("Stiefel log_map: no closed-form Riemannian
-logarithm for k > 1")`` for EVERY pair. So no sample is ever an admissible seed,
-and the init aborts with
-
-    response geometry Fréchet mean init: no admissible seed among samples
-    (every sample lies at another's cut locus; last error: unsupported geometry
-     operation: Stiefel log_map: no closed-form Riemannian logarithm for k > 1)
-
-The "every sample lies at another's cut locus" wording misattributes the cause
-to the data — but the failure is data-independent: there is *no* St(n, k>=2)
-dataset, however tightly clustered, that can be fit, because the Stiefel
-logarithm the initializer relies on is simply not implemented for k >= 2.
+For k == 1 the Stiefel manifold St(n, 1) is the unit sphere and the fit
+dispatches to the sphere maps. For k >= 2 the Fréchet-mean initializer needs the
+Stiefel logarithm, which ``StiefelManifold::log_map``
+(``crates/gam-geometry/src/manifolds/stiefel.rs``) computes as the
+canonical-metric logarithm (``stiefel_canonical_log``). Before #1637 that
+logarithm was refused for every k > 1 pair, so every k >= 2 fit aborted with a
+misleading "cut locus" init error, whatever the data.
 
 This test builds a deterministic, **tightly clustered** set of St(3, 2) frames
 (0.05-scale perturbations of the canonical [e0, e1] frame — so the intrinsic
 mean is manifestly well defined and unambiguous, with no genuine cut-locus
 pair) and asserts the documented Stiefel response fit succeeds and that its
-predictions are valid orthonormal frames (YᵀY = I_2). It currently fails at
-``gamfit.fit`` with the Fréchet-mean init error above.
-
-When the mean initializer is made to work for Stiefel k >= 2 — e.g. by seeding
-from a retraction-based / induced mean (QR of the Euclidean average, which the
-crate already has via ``StiefelManifold::retract``) instead of requiring the
-unimplemented logarithm, or by implementing the canonical-metric Stiefel log —
-the fit succeeds and this test passes with no further edits. (A k == 1 control
-fit is included to show the breakage is specific to k >= 2.)
+predictions are valid orthonormal frames (YᵀY = I_2). A k == 1 control fit is
+included.
 """
 
 from __future__ import annotations
@@ -88,8 +69,7 @@ def test_stiefel_k2_response_geometry_is_fittable():
     df = pd.DataFrame({"x": x, "z": z, **cols})
 
     # The documented Stiefel response geometry must accept tightly clustered
-    # frames. Today this raises a Fréchet-mean init error because the k>1
-    # Stiefel logarithm is unimplemented.
+    # frames: the k>1 Fréchet-mean init goes through the canonical Stiefel log.
     model = gamfit.fit(
         df,
         "f0 ~ s(x) + s(z)",
