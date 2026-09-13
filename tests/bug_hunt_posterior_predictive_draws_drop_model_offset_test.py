@@ -21,9 +21,9 @@ to machine precision, while the point prediction is correct.
 This test fits a Poisson model with a sizeable offset, then asserts the
 per-row posterior-predictive mean (a) tracks the offset-using point prediction
 (correlation ≈ 1, since the offset dominates the row-to-row variation) and
-(b) is the same order of magnitude as it. Both currently fail — the predictive
-draws instead reproduce the offset-less prediction. When ``posterior_predict``
-re-applies the offset, the assertions hold without edits.
+(b) is the same order of magnitude as it. Under the defect both failed: the
+predictive draws reproduced the offset-less prediction, because
+``posterior_predict`` did not re-apply the offset.
 """
 
 from __future__ import annotations

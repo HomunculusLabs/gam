@@ -24,9 +24,8 @@ This test fits a clean monotone-increasing signal, confirms the *fitted* curve
 is monotone (the constraint works at fit time), then draws the posterior
 predictive curves on a dense grid and asserts that essentially all of them are
 monotone increasing (a tolerance of 1% of the signal range absorbs round-off).
-It currently fails — about three quarters of the drawn curves contain a clear
-decrease. When the sampler respects the monotone cone, the assertion holds
-without edits.
+Under the defect about three quarters of the drawn curves contained a clear
+decrease: the sampler must respect the monotone cone.
 """
 
 from __future__ import annotations

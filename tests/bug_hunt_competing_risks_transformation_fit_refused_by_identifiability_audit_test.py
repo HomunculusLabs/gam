@@ -38,9 +38,8 @@ probability identity
     S_overall(t) + sum_k CIF_k(t) = 1
 
 (everyone is, at any time t, either still at risk or has already failed from
-exactly one of the K causes). It fails today at the ``fit`` call. When the
-identifiability gate stops halting this full-rank, penalised, cause-specific
-model, the fit succeeds and the survival/CIF identity holds without edits.
+exactly one of the K causes). Under the defect the identifiability gate halted
+this full-rank, penalised, cause-specific model at the ``fit`` call.
 """
 
 from __future__ import annotations

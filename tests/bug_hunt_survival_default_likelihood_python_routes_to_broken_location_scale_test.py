@@ -43,7 +43,7 @@ entry point and surfaces only on the Python path.
 This test asserts the contract the CLI already honors: a plain ``Surv()`` fit
 must use the same default formulation as the CLI (``transformation``), succeed
 on textbook censored data, and yield the same survival surface as the explicit
-``transformation`` fit. It currently fails at the default ``gamfit.fit`` call.
+``transformation`` fit. Under the defect the default ``gamfit.fit`` call failed.
 
 Related: #1123 (the transformation-survival Python path aborting via the inner
 solve — a different failure mode of the survival Python path).

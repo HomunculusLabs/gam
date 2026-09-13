@@ -32,11 +32,10 @@ Contract asserted here (well-posed and family-agnostic): **if ``fit`` returns a
 training frame must not raise an internal-consistency error and must yield a
 finite response mean per row. Seeds 0, 4 and 16 (with the data-generating code
 below, n=150, ``y ~ s(x1)+s(x2)``, ``family="gamma"``) deterministically
-produce the landmine today; the loop below sweeps seeds 0..19 and asserts every
-returned model predicts. It currently fails (multiple returned models raise the
-covariance-mismatch ``GamError`` at predict time); once the fit keeps the two
-covariance blocks consistent (or refuses to return a model it cannot validate),
-every returned model predicts and the test passes without edits.
+produced the landmine; the loop below sweeps seeds 0..19 and asserts every
+returned model predicts. Under the defect several returned models raised the
+covariance-mismatch ``GamError`` at predict time. A fit must keep the two
+covariance blocks consistent, or refuse to return a model it cannot validate.
 """
 
 from __future__ import annotations

@@ -35,10 +35,9 @@ Royston-Parmar model, predicts on held-out covariates at valid positive query
 times, and asserts the survival surface is a well-posed survival function:
 finite, in ``[0, 1]``, monotone non-increasing in time, and ordered correctly
 across the covariate (a longer Weibull scale must give a higher survival
-probability). It currently fails because ``predict`` raises before any of these
-checks can run. When the RP predict path stops evaluating the baseline at a
-non-positive age, ``predict`` returns and every assertion below holds without
-edits.
+probability). Under the defect ``predict`` raised before any of these checks
+could run, because the RP predict path evaluated the baseline at a non-positive
+age.
 """
 
 from __future__ import annotations

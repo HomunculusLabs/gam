@@ -25,9 +25,8 @@ be encoded as a factor regardless of whether its labels parse as numbers.
 This test fits ``family="multinomial"`` on a 3-class softmax-in-``x`` dataset
 with class labels ``"0","1","2"`` and asserts the fit succeeds and predicts a
 well-posed probability matrix (shape ``(n, 3)``, rows summing to 1, calibrated
-class frequencies). It currently fails at ``gamfit.fit(...)`` with the rejection
-above. When a string-valued response is treated as categorical regardless of
-label spelling, the fit succeeds and every assertion below holds without edits.
+class frequencies). Under the defect ``gamfit.fit(...)`` raised the rejection
+above; a string-valued response is categorical whatever its label spelling.
 """
 
 from __future__ import annotations
