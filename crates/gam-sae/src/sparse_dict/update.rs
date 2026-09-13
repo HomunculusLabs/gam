@@ -1504,10 +1504,12 @@ pub fn run_linear_reml_schedule(
     run_linear_reml_schedule_with_recycle(x, config, &mut decoder_recycle, None)
 }
 
-/// Grow a fitted dictionary's capacity while retaining its learned directions
-/// and evidence-selected ridge. New directions cover the largest remaining
-/// signed-line residuals. The complete REML schedule freshly routes and certifies
-/// the enlarged model; no codes or certificates are inherited from the prior.
+/// Grow a fitted dictionary's capacity from its learned directions and
+/// evidence-selected ridge. New capacity first splits learned atoms along their members'
+/// spread ([`split_decoder_seed`]). Any capacity beyond the splittable atoms covers the
+/// largest remaining signed-line residuals. The complete REML schedule freshly routes
+/// and certifies the enlarged model, and no codes or certificates are inherited from
+/// the prior.
 pub(crate) fn extend_linear_reml_schedule(
     x: ArrayView2<'_, f32>,
     config: &SparseDictConfig,
@@ -1524,7 +1526,8 @@ pub(crate) fn extend_linear_reml_schedule(
     decoder
         .slice_mut(ndarray::s![..prefix, ..])
         .assign(&prior.decoder);
-    complete_decoder_seed(x, &mut decoder, prefix);
+    let split = split_decoder_seed(x, &mut decoder, prior);
+    complete_decoder_seed(x, &mut decoder, prefix + split);
     unit_norm_rows(&mut decoder)?;
     let mut recycle = DecoderRecycleSpace::new(config.n_atoms);
     run_linear_reml_schedule_with_recycle(
@@ -1763,6 +1766,147 @@ fn validate(
     Ok(())
 }
 
+/// Fill new dictionary capacity by splitting learned atoms along their members' spread
+/// (#2283).
+///
+/// A doubling ladder (the spectrometer's `K_j = k_min·2^j`) grows capacity where clusters
+/// already sit. Splitting an atom into two children along its members' leading residual
+/// direction starts both children inside the cluster they will share. Seeding new capacity
+/// on the largest-residual rows instead places atoms on outliers, and the relaxation then
+/// needs many epochs (job 648726: the torus K=8 rung of
+/// `spectrometer_recovers_torus_dimension_two` is still reassigning rows after 30 epochs).
+///
+/// For an atom `d` with members `x_i`, `v` is the leading direction of the residuals
+/// `x_i − (x_i·d)d`. With rows sign-aligned by `a_i = x_i·d`, `μ_d` is the mean of `|a_i|`,
+/// and `μ_v`, `σ_v` are the mean and standard deviation of `sign(a_i)·x_i·v`. The children
+/// are `μ_d·d + (μ_v ± √(2/π)·σ_v)·v`, which along `v` sit at the means of the two halves of
+/// a normal coordinate, `μ ± σ·√(2/π)`. Atoms split in descending residual energy
+/// `Σ_i ‖x_i − (x_i·d)d‖²`, ties broken by index, until the capacity is filled or no atom
+/// with two or more members and a resolved residual direction remains. The parent's row
+/// takes the `+` child and the next new slot the `−` child, and the caller re-norms. Returns
+/// the number of new slots filled.
+fn split_decoder_seed(
+    x: ArrayView2<'_, f32>,
+    decoder: &mut Array2<f32>,
+    prior: &SparseDictFit,
+) -> usize {
+    let prefix = prior.decoder.nrows();
+    let capacity = decoder.nrows().saturating_sub(prefix);
+    if capacity == 0 {
+        return 0;
+    }
+    let p = x.ncols();
+    let mut members: Vec<Vec<usize>> = vec![Vec::new(); prefix];
+    for (row, (indices, codes)) in prior
+        .indices
+        .outer_iter()
+        .zip(prior.codes.outer_iter())
+        .enumerate()
+    {
+        for (&atom, &code) in indices.iter().zip(codes.iter()) {
+            let atom = atom as usize;
+            if code != 0.0 && atom < prefix && members[atom].last() != Some(&row) {
+                members[atom].push(row);
+            }
+        }
+    }
+    let splits: Vec<Option<(usize, f64, Vec<f32>, Vec<f32>)>> = (0..prefix)
+        .into_par_iter()
+        .map(|atom| {
+            let rows = &members[atom];
+            let direction = prior.decoder.row(atom);
+            if rows.len() < 2 || direction.iter().all(|&value| value == 0.0) {
+                return None;
+            }
+            let mut residuals = Array2::<f32>::zeros((rows.len(), p));
+            let mut amplitudes = Vec::with_capacity(rows.len());
+            let mut energy = 0.0f64;
+            for (slot, &row) in rows.iter().enumerate() {
+                let values = x.row(row);
+                let amplitude = values
+                    .iter()
+                    .zip(direction.iter())
+                    .map(|(&left, &right)| f64::from(left) * f64::from(right))
+                    .sum::<f64>();
+                for ((target, &value), &axis) in residuals
+                    .row_mut(slot)
+                    .iter_mut()
+                    .zip(values.iter())
+                    .zip(direction.iter())
+                {
+                    let residual = f64::from(value) - amplitude * f64::from(axis);
+                    energy += residual * residual;
+                    *target = residual as f32;
+                }
+                amplitudes.push(amplitude);
+            }
+            let local: Vec<usize> = (0..rows.len()).collect();
+            let spread =
+                match super::single_atom::profiled_direction(residuals.view(), &local, direction) {
+                    Ok(spread) => spread,
+                    Err(reason) => {
+                        log::debug!("[SAE sparse_dict] atom {atom} is not split: {reason}");
+                        return None;
+                    }
+                };
+            let count = rows.len() as f64;
+            let mean_amplitude = amplitudes.iter().map(|value| value.abs()).sum::<f64>() / count;
+            let coordinates: Vec<f64> = rows
+                .iter()
+                .zip(amplitudes.iter())
+                .map(|(&row, &amplitude)| {
+                    let sign = if amplitude < 0.0 { -1.0 } else { 1.0 };
+                    sign * x
+                        .row(row)
+                        .iter()
+                        .zip(spread.iter())
+                        .map(|(&left, &right)| f64::from(left) * f64::from(right))
+                        .sum::<f64>()
+                })
+                .collect();
+            let mean_coordinate = coordinates.iter().sum::<f64>() / count;
+            let spread_sd = (coordinates
+                .iter()
+                .map(|value| (value - mean_coordinate).powi(2))
+                .sum::<f64>()
+                / count)
+                .sqrt();
+            if !(spread_sd > 0.0) {
+                return None;
+            }
+            let offset = (2.0 / std::f64::consts::PI).sqrt() * spread_sd;
+            let child = |shift: f64| -> Vec<f32> {
+                direction
+                    .iter()
+                    .zip(spread.iter())
+                    .map(|(&axis, &along)| {
+                        (mean_amplitude * f64::from(axis)
+                            + (mean_coordinate + shift) * f64::from(along)) as f32
+                    })
+                    .collect()
+            };
+            Some((atom, energy, child(offset), child(-offset)))
+        })
+        .collect();
+    let mut ranked: Vec<(usize, f64, Vec<f32>, Vec<f32>)> = splits.into_iter().flatten().collect();
+    ranked.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
+    let mut filled = 0usize;
+    for (atom, plus, minus) in ranked
+        .into_iter()
+        .take(capacity)
+        .map(|entry| (entry.0, entry.2, entry.3))
+    {
+        for (target, &value) in decoder.row_mut(atom).iter_mut().zip(plus.iter()) {
+            *target = value;
+        }
+        for (target, &value) in decoder.row_mut(prefix + filled).iter_mut().zip(minus.iter()) {
+            *target = value;
+        }
+        filled += 1;
+    }
+    filled
+}
+
 /// Seed distinct signed lines by the largest remaining one-atom reconstruction
 /// residual. A decoder atom represents all scalar multiples of its direction:
 /// Euclidean row distance incorrectly treats an antipode as a new direction.
@@ -1905,6 +2049,54 @@ mod seed_geometry_tests {
         assert!(
             super::extend_linear_reml_schedule(x.view(), &config, &fit).is_err(),
             "continuation must strictly increase capacity"
+        );
+    }
+
+    #[test]
+    fn a_doubling_continuation_splits_each_atom_along_its_members_spread_2283() {
+        // One line cluster spread along e1: rows (1, t, 0) with t evenly spread over
+        // [-0.5, 0.5]. The one-atom fit takes e0, and doubling the capacity must split that
+        // atom into two children that stay near it and straddle it along e1. It must not
+        // leave the parent and seed the new atom on the largest-residual row. By the split
+        // rule the children are (1, ±√(2/π)·σ_t, 0), normalized.
+        let n = 64usize;
+        let x = ndarray::Array2::from_shape_fn((n, 3), |(i, j)| match j {
+            0 => 1.0_f32,
+            1 => (i as f32 / (n - 1) as f32) - 0.5,
+            _ => 0.0,
+        });
+        let config = crate::sparse_dict::SparseDictConfig {
+            score_mode: gam_gpu::GpuPolicy::Off,
+            ..Default::default()
+        };
+        let prior = super::run_linear_reml_schedule(x.view(), &config).expect("one-atom fit");
+        let mut decoder = ndarray::Array2::<f32>::zeros((2, 3));
+        decoder
+            .slice_mut(ndarray::s![..1, ..])
+            .assign(&prior.decoder);
+        let filled = super::split_decoder_seed(x.view(), &mut decoder, &prior);
+        assert_eq!(filled, 1, "the one splittable atom must fill the one new slot");
+        let along = |row: usize| -> (f64, f64) {
+            let norm = decoder
+                .row(row)
+                .iter()
+                .map(|&value| f64::from(value).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            (
+                f64::from(decoder[[row, 0]]).abs() / norm,
+                f64::from(decoder[[row, 1]]) / norm,
+            )
+        };
+        let (plus_axis, plus_spread) = along(0);
+        let (minus_axis, minus_spread) = along(1);
+        assert!(
+            plus_axis > 0.9 && minus_axis > 0.9,
+            "children must stay near the parent: {plus_axis} {minus_axis}"
+        );
+        assert!(
+            plus_spread * minus_spread < 0.0,
+            "children must straddle the parent along the spread: {plus_spread} {minus_spread}"
         );
     }
 
