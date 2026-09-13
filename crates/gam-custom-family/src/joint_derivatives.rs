@@ -514,6 +514,15 @@ impl<'a> JeffreysHphiAwareJointDerivatives<'a> {
 
 impl HessianDerivativeProvider for JeffreysHphiAwareJointDerivatives<'_> {
     fn mode_response_rhs_correction(&self) -> Option<gam_solve::estimate::reml::reml_outer_engine::ModeResponseRhsCorrectionFn> {
+        // The correction is `D(C)` for `C = M_stationarity − M_logdet`. A criterion that
+        // prices the completion already carries it in `M_logdet`: `criterion_first` folds
+        // `D_β completion` into every `hessian_derivative_correction`, so `C = 0` and the
+        // pair right-hand side moves the completion through `h_k·v` already. Installing it
+        // here as well counted it twice (the survival marginal-slope outer Hessian read
+        // 0.40957 at [1,1] against a central difference of 0.37341; gam#2894).
+        if self.drift.completion_first.is_some() {
+            return None;
+        }
         let beta = Arc::clone(&self.drift.completion_beta);
         let psi = self.drift.completion_psi.clone();
         let scale = self.drift.response_scale;
