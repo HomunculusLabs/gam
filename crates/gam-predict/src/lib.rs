@@ -1301,11 +1301,15 @@ pub struct PredictPosteriorMeanResult {
 ///   * `include_observation_interval` — emit the response-scale observation
 ///     (prediction) band `μ ± z·√(Var(μ̂) + Var(Y|μ))` for families that expose
 ///     a conditional response variance (Binomial `p(1−p)`, Poisson `μ`, …).
-#[derive(Clone, Copy, Debug)]
+///   * `extrapolation_variance` — per-row η-scale variance added to the band's
+///     `Var(η)`, exactly as [`PredictUncertaintyOptions::extrapolation_variance`].
+///     The posterior-mean point is unaffected.
+#[derive(Clone, Debug)]
 pub struct PosteriorMeanOptions {
     pub confidence_level: Option<f64>,
     pub covariance_mode: InferenceCovarianceMode,
     pub include_observation_interval: bool,
+    pub extrapolation_variance: Option<Array1<f64>>,
 }
 
 impl PosteriorMeanOptions {
@@ -1315,6 +1319,7 @@ impl PosteriorMeanOptions {
             confidence_level: None,
             covariance_mode: InferenceCovarianceMode::SmoothingCorrected,
             include_observation_interval: false,
+            extrapolation_variance: None,
         }
     }
 }

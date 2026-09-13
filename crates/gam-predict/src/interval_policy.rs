@@ -630,6 +630,25 @@ fn eta_interval_for(policy: &ResponseInterval) -> EtaInterval {
     }
 }
 
+/// Refuse a measure-jet extrapolation variance a generic driver cannot carry.
+///
+/// Only `predict_gamwith_uncertainty` adds a per-row η variance to its band
+/// after the covariance's own `Var(η)`. The generic drivers take the transform's
+/// η and response standard errors as they come, so a supplied extrapolation
+/// variance would silently drop out of the band instead of widening it.
+fn refuse_unfused_extrapolation_variance(
+    extrapolation_variance: Option<&Array1<f64>>,
+) -> Result<(), EstimationError> {
+    if extrapolation_variance.is_some() {
+        return Err(EstimationError::InvalidInput(
+            "this predictor's interval driver cannot add a measure-jet extrapolation variance \
+             to its band; only the standard prediction engine fuses it"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// The single full-uncertainty driver. Runs the predict pipeline once for any
 /// [`PredictionTransform`]: compute the η-scale state, require its standard
 /// errors, attach the optional observation interval, and assemble the result
@@ -640,6 +659,7 @@ pub(crate) fn predict_full_uncertainty_generic<T: PredictionTransform>(
     fit: &UnifiedFitResult,
     options: &PredictUncertaintyOptions,
 ) -> Result<PredictUncertaintyResult, EstimationError> {
+    refuse_unfused_extrapolation_variance(options.extrapolation_variance.as_ref())?;
     let response_family = transform.response_family();
     let mut state = transform.linear_state(
         input,
@@ -756,6 +776,7 @@ pub(crate) fn predict_posterior_mean_generic<T: PredictionTransform>(
     fit: &UnifiedFitResult,
     options: &PosteriorMeanOptions,
 ) -> Result<PredictPosteriorMeanResult, EstimationError> {
+    refuse_unfused_extrapolation_variance(options.extrapolation_variance.as_ref())?;
     // POINT: the posterior-mean pass always integrates the *conditional*
     // posterior, so the reported point is invariant to the uncertainty request
     // (issue #398). `covariance_mode` only shapes the uncertainty attached below.
@@ -969,6 +990,11 @@ pub struct PredictionRequest {
     /// `Var(y_i) = σ̂²/w_i` (#2077). `None` is the unweighted case and keeps the
     /// band byte-identical to a pooled scalar `σ̂²`.
     pub observation_prior_weights: Option<Array1<f64>>,
+    /// Per-row η-scale variance the band adds to `Var(η)` (V∞ §5): the priced
+    /// off-support ignorance of the model's measure-jet terms,
+    /// `FittedModel::measure_jet_extrapolation_variance` over the RAW query rows.
+    /// `None` when the model prices none or no interval is requested.
+    pub extrapolation_variance: Option<Array1<f64>>,
 }
 
 /// The estimands every standard prediction surface publishes before
@@ -1034,6 +1060,7 @@ pub fn resolve_prediction_request(
                 confidence_level: Some(level),
                 covariance_mode: request.covariance_mode,
                 include_observation_interval: request.observation_interval,
+                extrapolation_variance: request.extrapolation_variance.clone(),
             };
             let prediction = predictor.predict_posterior_mean(input, fit, &options)?;
             let mean_standard_error = prediction.mean_standard_error.ok_or_else(|| {
@@ -1076,6 +1103,7 @@ pub fn resolve_prediction_request(
                 mean_interval_method: crate::MeanIntervalMethod::TransformEta,
                 includeobservation_interval: request.observation_interval,
                 observation_prior_weights: request.observation_prior_weights.clone(),
+                extrapolation_variance: request.extrapolation_variance.clone(),
                 ..PredictUncertaintyOptions::default()
             };
             let prediction = predictor.predict_full_uncertainty(input, fit, &options)?;

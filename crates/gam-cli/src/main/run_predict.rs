@@ -989,6 +989,7 @@ pub(crate) fn run_predict_unified(
     model: &SavedModel,
     pred_input: &PredictInput,
     predictor: &dyn PredictableModel,
+    extrapolation_variance: Option<Array1<f64>>,
 ) -> Result<(), String> {
     let fit_for_predict = fit_result_from_saved_model_for_prediction(model)?;
     let model_class = model.predict_model_class();
@@ -1032,6 +1033,9 @@ pub(crate) fn run_predict_unified(
         // column map, so the weights are not reachable here without threading
         // the dataset through `run_predict_model`.
         observation_prior_weights: None,
+        // V∞ §5: the measure-jet terms' priced off-support ignorance, which
+        // `run_predict_model` prices over the raw rows.
+        extrapolation_variance,
     };
     let columns = gam_predict::interval_policy::resolve_prediction_request(
         predictor,
@@ -1181,7 +1185,18 @@ pub(crate) fn run_predict_model(
         predict_noise_offset,
         noise_offset_supplied,
     )?;
-    run_predict_unified(args, model, &pred_input, &*predictor)
+    // V∞ §5: price the measure-jet terms' off-support ignorance over the RAW rows.
+    // `build_predict_input_for_model` clips the design input to the training
+    // ranges, which would freeze the distance signal at the hull. Only an
+    // interval consumes it.
+    let extrapolation_variance = if args.uncertainty {
+        model
+            .measure_jet_extrapolation_variance(data, col_map)
+            .map_err(String::from)?
+    } else {
+        None
+    };
+    run_predict_unified(args, model, &pred_input, &*predictor, extrapolation_variance)
 }
 
 pub(crate) fn validate_level(level: f64) -> Result<(), String> {
@@ -2626,6 +2641,7 @@ pub(crate) fn run_predict_survival(
                 },
                 covariance_mode,
                 include_observation_interval: false,
+                extrapolation_variance: None,
             };
             let pred = predictor
                 .predict_posterior_mean(&pred_input, &predictor_fit, &pm_options)

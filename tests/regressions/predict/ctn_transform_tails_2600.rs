@@ -449,6 +449,7 @@ fn ctn_observation_bands_are_the_models_own_quantiles_at_every_level_2600() {
                     confidence_level: Some(level),
                     covariance_mode: InferenceCovarianceMode::Conditional,
                     include_observation_interval: true,
+                    extrapolation_variance: None,
                 },
             )
             .expect("posterior-mean prediction with an observation band");

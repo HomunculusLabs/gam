@@ -258,6 +258,7 @@ pub fn split_conformal_prediction_columns(
             covariance_mode,
             observation_interval: false,
             observation_prior_weights: None,
+            extrapolation_variance: None,
         },
     )
     .map_err(|err| format!("conformal point prediction failed: {err}"))?;

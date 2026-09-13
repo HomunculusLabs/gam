@@ -7552,6 +7552,16 @@ fn predict_columns(
     // a requirement and refuses when the fit cannot supply it.
     let covariance_mode = parse_covariance_mode(options.covariance_mode.as_deref())?
         .unwrap_or_else(|| fit.published_covariance_mode());
+    // V∞ §5: price the measure-jet terms' off-support ignorance over the RAW rows;
+    // the predict input above clips the design input to the training ranges.
+    // Only an interval consumes it.
+    let extrapolation_variance = if options.interval.is_some() {
+        model
+            .measure_jet_extrapolation_variance(dataset.values.view(), &col_map)
+            .map_err(String::from)?
+    } else {
+        None
+    };
     let request = gam_predict::interval_policy::PredictionRequest {
         interval: options.interval,
         covariance_mode,
@@ -7560,6 +7570,7 @@ fn predict_columns(
         // prior weight `Var(y_i) = σ̂²/w_i` (#2077); unweighted fits pass `None`
         // and stay byte-identical.
         observation_prior_weights: observation_prior_weights.clone(),
+        extrapolation_variance,
         // This entry point exposes no plug-in switch, so a curved link always
         // reports the posterior mean (SPEC: it is always the default).
     };

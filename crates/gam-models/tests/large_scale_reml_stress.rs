@@ -437,6 +437,7 @@ fn gaussian_identity_posterior(
                 confidence_level,
                 covariance_mode: InferenceCovarianceMode::SmoothingCorrected,
                 include_observation_interval: false,
+                extrapolation_variance: None,
             },
         )
         .expect("production Gaussian posterior prediction")

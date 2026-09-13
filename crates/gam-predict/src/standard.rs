@@ -434,6 +434,9 @@ impl PredictableModel for StandardPredictor {
                     // The observation band is recomputed below, centred on the
                     // posterior-mean point rather than the plug-in point.
                     includeobservation_interval: false,
+                    // V∞ §5: the measure-jet extrapolation variance widens the
+                    // band adopted below, never the posterior-mean point above.
+                    extrapolation_variance: options.extrapolation_variance.clone(),
                     ..PredictUncertaintyOptions::default()
                 };
                 let unc = predict_gamwith_uncertainty(

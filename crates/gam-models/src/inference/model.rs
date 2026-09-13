@@ -4081,17 +4081,19 @@ impl FittedModel {
     /// the fit's coefficient-covariance scale φ̂ so the result sits on Vp's
     /// η-variance scale. Terms not yet frozen (no `frozen_quadrature` or
     /// non-`UserProvided` centers) are skipped with a warning. Returns
-    /// `Ok(None)` when no measure-jet term contributes, so callers leave
-    /// `PredictUncertaintyOptions::extrapolation_variance` untouched.
+    /// `Ok(None)` when no measure-jet term contributes, so the request's
+    /// `extrapolation_variance` stays `None`. A model whose predictor cannot add
+    /// the term to its band (any class but `Standard`, or a link wiggle: their
+    /// generic interval drivers refuse it) also returns `Ok(None)`, with a
+    /// warning that its band omits the term.
     ///
     /// `data` must be the RAW (unclipped) prediction matrix in prediction
     /// column order — clipping to the training ranges would freeze the
     /// distance signal at the hull and defeat the honesty contract — and
     /// `col_map` the prediction header → column map (the same map handed to
-    /// the design builder). This is the minimal-plumbing producer seam: the
-    /// option-building callers (CLI predict, FFI) hold exactly
-    /// `(model, data, col_map)` at the point where they assemble
-    /// `PredictUncertaintyOptions`, and the fusion in
+    /// the design builder). `gam predict` and the Python `predict` call this
+    /// when an interval is requested and hand the result to
+    /// `gam_predict::interval_policy::PredictionRequest`; the fusion in
     /// `predict_gamwith_uncertainty` adds the array AFTER its multiplicative
     /// inflations: `Var_total = Var_Vp·inflation + Var_extrap`.
     pub fn measure_jet_extrapolation_variance(
@@ -4114,6 +4116,17 @@ impl FittedModel {
                 .iter()
                 .any(|t| matches!(t.basis, SmoothBasisSpec::MeasureJet { .. }))
         {
+            return Ok(None);
+        }
+        // Only `predict_gamwith_uncertainty` adds this term to a band. Every other
+        // predictor goes through the generic interval drivers, which refuse it, so
+        // pricing it here would turn such a model's interval into an error.
+        if self.predict_model_class() != PredictModelClass::Standard || self.has_link_wiggle() {
+            log::warn!(
+                "measure-jet extrapolation variance is fused only by the standard, \
+                 link-wiggle-free predictor; the {:?} model's interval omits it",
+                self.predict_model_class()
+            );
             return Ok(None);
         }
         let fit = self
