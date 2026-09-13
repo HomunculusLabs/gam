@@ -1697,19 +1697,23 @@ pub fn standard_normal_quantile_from_log_cdf(log_p: f64) -> Result<f64, String> 
         let t = (-log_p).sqrt() * std::f64::consts::SQRT_2;
         -t + (t.ln() + 0.5 * (2.0 * std::f64::consts::PI).ln()) / t
     };
-    for _ in 0..4 {
+    // Newton on `ln Φ(x) − ln p` contracts monotonically (ln Φ is concave), so
+    // each step is smaller than the one before until the iterate reaches the
+    // root's rounding band, where a step is noise and stops shrinking. That step
+    // is not taken. The magnitudes strictly decrease through a finite set of
+    // floats, so the loop ends with no pass cap and no absolute step floor.
+    let mut last_step = f64::INFINITY;
+    loop {
         let (current_log_p, mills_ratio) = signed_probit_logcdf_and_mills_ratio(x);
         if !(current_log_p.is_finite() && mills_ratio.is_finite() && mills_ratio > 0.0) {
             break;
         }
         let step = (current_log_p - log_p) / mills_ratio;
-        if !step.is_finite() {
+        if !(step.abs() < last_step) {
             break;
         }
         x -= step;
-        if step.abs() <= 2.0 * f64::EPSILON * x.abs().max(1.0) {
-            break;
-        }
+        last_step = step.abs();
     }
     Ok(x)
 }
