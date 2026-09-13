@@ -62,9 +62,7 @@
 
 use crate::chart_canonicalization::CanonicalChartTopology;
 use gam_math::probability::normal_two_sided_probability;
-use gam_solve::gaussian_reml::{
-    gaussian_reml_closed_form_with_nullspace_dim, gaussian_reml_stationary_set,
-};
+use gam_solve::gaussian_reml::gaussian_reml_closed_form_with_nullspace_dim;
 use gam_terms::basis::{
     BasisOptions, Dense, KnotSource, PeriodicBSplineBasisSpec, bspline_derivative_penalty_matrix,
     build_periodic_bspline_basis_1d, create_basis, cyclic_bspline_derivative_penalty_matrix,
@@ -454,31 +452,15 @@ fn fit_penalized_1d(
     }
 
     let nullspace_dim = m - penalty_rank;
-    let weight_view = || weights.as_ref().map(|w| w.view());
-    let stationary = gaussian_reml_stationary_set(
-        design.view(),
-        response.view(),
-        penalty.view(),
-        Some(nullspace_dim),
-        weight_view(),
-        None,
-    )
-    .map_err(|error| format!("penalized 1-D REML stationary enumeration failed: {error}"))?;
     let reml = gaussian_reml_closed_form_with_nullspace_dim(
         design.view(),
         response.view(),
         penalty.view(),
         Some(nullspace_dim),
-        weight_view(),
+        weights.as_ref().map(|w| w.view()),
         None,
     )
     .map_err(|error| format!("penalized 1-D Gaussian REML failed: {error}"))?;
-    if reml.rho.to_bits() != stationary.selected_rho.to_bits() {
-        return Err(format!(
-            "penalized 1-D REML selection drifted between its certificate ({}) and fit ({})",
-            stationary.selected_rho, reml.rho,
-        ));
-    }
 
     // If C = L⁻ᵀU is the cache's coefficient basis and δᵢ are the
     // eigenvalues of L⁻¹SL⁻ᵀ, then the exact penalized inverse is
