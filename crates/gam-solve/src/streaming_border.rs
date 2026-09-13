@@ -163,11 +163,6 @@ impl StreamingBorderGram {
         self.frontier
     }
 
-    /// `true` once every chunk of the pass has been submitted.
-    pub fn is_complete(&self) -> bool {
-        self.frontier == self.n_chunks() && self.pending.is_empty()
-    }
-
     /// Serialize the full accumulation state — partial Grams + chunk cursor —
     /// for checkpointing. [`StreamingBorderGram::resume`] reconstructs an
     /// accumulator whose future behavior is bit-identical to never having

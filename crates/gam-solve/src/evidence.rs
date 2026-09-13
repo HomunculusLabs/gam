@@ -936,10 +936,6 @@ impl GaussianMixtureFit {
         self.means.view()
     }
 
-    pub fn covariances(&self) -> &[Array2<f64>] {
-        &self.covariances
-    }
-
     pub fn iterations(&self) -> usize {
         self.iterations
     }

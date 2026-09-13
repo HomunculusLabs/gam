@@ -4861,11 +4861,6 @@ impl UnifiedFitResult {
             .and_then(|geometry| geometry.working.as_ref())
     }
 
-    /// Get working weights if single diagonal row evidence is available.
-    pub fn working_weights(&self) -> Option<&Array1<f64>> {
-        self.working_geometry().map(|working| &working.weights)
-    }
-
     /// Get working response if single diagonal row evidence is available.
     pub fn working_response(&self) -> Option<&Array1<f64>> {
         self.working_geometry().map(|working| &working.response)
@@ -5035,13 +5030,6 @@ impl UnifiedFitResult {
             .map(|b| b.beta.clone())
     }
 
-    /// Smoothing parameters for time block.
-    pub fn lambdas_time(&self) -> Array1<f64> {
-        self.block_by_role(BlockRole::Time)
-            .map(|b| b.lambdas.clone())
-            .unwrap_or_else(|| Array1::zeros(0))
-    }
-
     /// Smoothing parameters for threshold block.
     pub fn lambdas_threshold(&self) -> Array1<f64> {
         self.block_by_role(BlockRole::Threshold)
@@ -5054,12 +5042,6 @@ impl UnifiedFitResult {
         self.block_by_role(BlockRole::Scale)
             .map(|b| b.lambdas.clone())
             .unwrap_or_else(|| Array1::zeros(0))
-    }
-
-    /// Smoothing parameters for link-wiggle block.
-    pub fn lambdas_linkwiggle(&self) -> Option<Array1<f64>> {
-        self.block_by_role(BlockRole::LinkWiggle)
-            .map(|b| b.lambdas.clone())
     }
 
     /// Number of coefficient blocks.

@@ -6735,5 +6735,18 @@
     ],
     "reason": "#2829 no product user: these getters have no caller in crates, src, tests, benches, bench or examples, and every field they returned keeps another reader.",
     "evidence": "At 129ba1a92054531b85b9f8946a0bdebf8a4b7d98, git grep -n for each name as a method call (.name( or ::name() over crates, src, tests and examples finds no call on the owning type; same-named items elsewhere are different types (checked by reading), and each returned field is still read inside its own impl."
+  },
+  {
+    "base": "471ecffd8da73624df695d5d649abc6f0f896e07",
+    "items": [
+      "crates/gam-solve/src/arrow_schur/system.rs:fn:used_device",
+      "crates/gam-solve/src/evidence.rs:fn:covariances",
+      "crates/gam-solve/src/model_types/result_types.rs:fn:lambdas_linkwiggle",
+      "crates/gam-solve/src/model_types/result_types.rs:fn:lambdas_time",
+      "crates/gam-solve/src/model_types/result_types.rs:fn:working_weights",
+      "crates/gam-solve/src/streaming_border.rs:fn:is_complete"
+    ],
+    "reason": "#2829 no product user: these getters have no caller in crates, src, tests, benches, bench or examples, and every field they returned keeps another reader.",
+    "evidence": "At 471ecffd8da73624df695d5d649abc6f0f896e07, git grep -n for each name as a method call (.name( or ::name() over crates, src, tests and examples finds no call on the owning type; same-named items elsewhere are different types (checked by reading), and each returned field is still read inside its own impl."
   }
 ]

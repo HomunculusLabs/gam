@@ -864,7 +864,7 @@ crates/gam-solve/src/arrow_schur/system.rs	schur_inverse_apply_deflated	retired-
 crates/gam-solve/src/arrow_schur/system.rs	schur_inverse_block_deflated	retired-by-later-deletion:e3b50feaf1
 crates/gam-solve/src/arrow_schur/system.rs	solve_with_lm_escalation	retired-by-later-deletion:e3b50feaf1
 crates/gam-solve/src/arrow_schur/system.rs	take_accumulators	retired-by-later-deletion:e3b50feaf1
-crates/gam-solve/src/arrow_schur/system.rs	used_device	restored-in-place
+crates/gam-solve/src/arrow_schur/system.rs	used_device	retired-no-product-user
 crates/gam-solve/src/cone_reduction.rs	constrained_cone_mode	retired-no-product-user
 crates/gam-solve/src/constrained_posterior.rs	constrained_projection_law	retired-no-product-user
 crates/gam-solve/src/cross_node.rs	is_complete	retired-no-product-user
@@ -884,7 +884,7 @@ crates/gam-solve/src/estimate/outer_eval_capture.rs	take_outer_eval_capture	reti
 crates/gam-solve/src/evidence.rs	arrow_log_det_from_cache	retired-by-decision
 crates/gam-solve/src/evidence.rs	cache_matches_system	retired-no-product-user
 crates/gam-solve/src/evidence.rs	complexity_rank	retired-no-product-user
-crates/gam-solve/src/evidence.rs	covariances	restored-in-place
+crates/gam-solve/src/evidence.rs	covariances	retired-no-product-user
 crates/gam-solve/src/evidence.rs	evidence_grad_rho	retired-no-product-user
 crates/gam-solve/src/evidence.rs	evidence_hessian_log_det	retired-no-product-user
 crates/gam-solve/src/evidence.rs	evidence_ift_gradient_correction	retired-no-product-user
@@ -949,12 +949,12 @@ crates/gam-solve/src/measure_jet_gram_cache.rs	xtwz	retired-no-surviving-depende
 crates/gam-solve/src/mixture_link.rs	inverse_link_jet_for_family	retired-no-product-user
 crates/gam-solve/src/mixture_link.rs	softmaxwith_jacobian_last_fixedzero	retired-no-product-user
 crates/gam-solve/src/model_types/result_types.rs	block_roles	restored-in-place
-crates/gam-solve/src/model_types/result_types.rs	lambdas_linkwiggle	restored-in-place
-crates/gam-solve/src/model_types/result_types.rs	lambdas_time	restored-in-place
+crates/gam-solve/src/model_types/result_types.rs	lambdas_linkwiggle	retired-no-product-user
+crates/gam-solve/src/model_types/result_types.rs	lambdas_time	retired-no-product-user
 crates/gam-solve/src/model_types/result_types.rs	penalized_hessian_unscaled	retired-no-product-user
 crates/gam-solve/src/model_types/result_types.rs	smoothing_correction_method	restored-in-place
 crates/gam-solve/src/model_types/result_types.rs	was_measured	retired-no-product-user
-crates/gam-solve/src/model_types/result_types.rs	working_weights	restored-in-place
+crates/gam-solve/src/model_types/result_types.rs	working_weights	retired-no-product-user
 crates/gam-solve/src/orthogonal_reparam.rs	build_unconditional	retired-no-surviving-dependent
 crates/gam-solve/src/orthogonal_reparam.rs	confound_cols	retired-no-surviving-dependent
 crates/gam-solve/src/orthogonal_reparam.rs	primary_cols	retired-no-surviving-dependent
@@ -1027,7 +1027,7 @@ crates/gam-solve/src/sensitivity.rs	from_lower_triangular	retired-no-product-use
 crates/gam-solve/src/sensitivity.rs	leverage_block	retired-no-product-user
 crates/gam-solve/src/sensitivity.rs	response_jacobian	retired-no-product-user
 crates/gam-solve/src/spline_scan.rs	deriv_at_knot	retired-no-surviving-dependent
-crates/gam-solve/src/streaming_border.rs	is_complete	restored-in-place
+crates/gam-solve/src/streaming_border.rs	is_complete	retired-no-product-user
 crates/gam-solve/src/streaming_border.rs	push_rows	retired-no-product-user
 crates/gam-solve/src/streaming_border.rs	submit_chunk	retired-no-product-user
 crates/gam-solve/src/streaming_border.rs	submit_chunk_gram	retired-no-product-user
