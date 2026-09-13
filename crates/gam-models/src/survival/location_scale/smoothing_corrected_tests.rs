@@ -176,8 +176,37 @@ fn penalized_location_spec(x: &Array1<f64>, age_exit: &Array1<f64>) -> SurvivalL
 /// covariance".
 #[test]
 fn penalized_survival_location_scale_finalization_keeps_smoothing_corrected_covariance() {
+    assert_selected_fit_keeps_smoothing_corrected_covariance(residual_distribution_inverse_link(
+        ResidualDistribution::Gaussian,
+    ));
+}
+
+/// #2903: since 0fa276e59 the loglog residual distribution declares the third
+/// information derivative, so a penalized fit on it selects rho with an analytic
+/// outer Hessian and must carry the correction through finalization as the
+/// Gaussian fit does.
+#[test]
+fn penalized_loglog_survival_location_scale_fit_keeps_smoothing_corrected_covariance_2903() {
+    assert_selected_fit_keeps_smoothing_corrected_covariance(InverseLink::Standard(
+        StandardLink::LogLog,
+    ));
+}
+
+/// #2903: the cauchit counterpart of the loglog witness.
+#[test]
+fn penalized_cauchit_survival_location_scale_fit_keeps_smoothing_corrected_covariance_2903() {
+    assert_selected_fit_keeps_smoothing_corrected_covariance(InverseLink::Standard(
+        StandardLink::Cauchit,
+    ));
+}
+
+/// The penalized fixture fitted with `inverse_link` as its residual
+/// distribution selects rho and publishes `V_c = V_cond + C` in the raw
+/// coefficient frame, with `C` positive semi-definite and its typed provenance.
+fn assert_selected_fit_keeps_smoothing_corrected_covariance(inverse_link: InverseLink) {
     let (x, age_exit) = penalized_location_sample(300, 0.35, 20260731);
-    let spec = penalized_location_spec(&x, &age_exit);
+    let mut spec = penalized_location_spec(&x, &age_exit);
+    spec.inverse_link = inverse_link;
 
     // Guard the fixture: a reduced unpenalized AFT would never reach the
     // custom-family smoothing-correction code at all, so this test would be
