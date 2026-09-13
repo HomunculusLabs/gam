@@ -10,7 +10,7 @@
 
 use faer::Side;
 use gam_linalg::faer_ndarray::{FaerCholesky, FaerSvd, fast_ata, fast_atb};
-use ndarray::{Array1, Array2, Array3, ArrayView2, ArrayView3};
+use ndarray::{Array1, Array2, Array3, ArrayView2, ArrayView3, Axis};
 
 use crate::assignment::{ordered_beta_bernoulli_row, threshold_gate_row, topk_row};
 
@@ -79,24 +79,28 @@ pub fn sae_residual_seed_logits(
                 phi[[row, c]] = basis_values[[atom_idx, row, c]];
             }
         }
-        let mut gram = fast_ata(&phi);
-        let mut trace = 0.0_f64;
-        for i in 0..m_k {
-            trace += gram[[i, i]];
+        // The per-row residual reads the fit only through the projection of `z`
+        // onto the column space of `Phi_k`, so it is taken from the thin SVD on the
+        // resolved rank, with no ridge. A singular value at or below
+        // `max(N, m_k)·ε·σ_max` is rounding, not a resolved basis direction.
+        let (u_opt, s_vals, _) = phi
+            .svd(true, false)
+            .map_err(|err| format!("sae_residual_seed_logits: SVD failed: {err:?}"))?;
+        let u = u_opt.ok_or_else(|| "sae_residual_seed_logits: SVD returned no U".to_string())?;
+        let rank_cutoff =
+            n_obs.max(m_k) as f64 * f64::EPSILON * s_vals.iter().copied().fold(0.0_f64, f64::max);
+        let resolved: Vec<usize> = (0..s_vals.len())
+            .filter(|&j| s_vals[j] > rank_cutoff)
+            .collect();
+        let fitted = if resolved.is_empty() {
+            Array2::<f64>::zeros((n_obs, p_out))
+        } else {
+            let u_resolved = u.select(Axis(1), &resolved); // (N, rank)
+            u_resolved.dot(&fast_atb(&u_resolved, &z_owned)) // (N, p_out)
+        };
+        if !fitted.iter().all(|v| v.is_finite()) {
+            return Err("sae_residual_seed_logits: non-finite LSQ projection".to_string());
         }
-        let jitter = (trace / m_k as f64).max(1.0).max(1.0e-12) * 1.0e-8;
-        for i in 0..m_k {
-            gram[[i, i]] += jitter;
-        }
-        let rhs = fast_atb(&phi, &z_owned);
-        let factor = gram
-            .cholesky(Side::Lower)
-            .map_err(|err| format!("sae_residual_seed_logits: Cholesky failed: {err:?}"))?;
-        let b_k = factor.solve_mat(&rhs); // (m_k, p_out)
-        if !b_k.iter().all(|v| v.is_finite()) {
-            return Err("sae_residual_seed_logits: non-finite LSQ solution".to_string());
-        }
-        let fitted = phi.dot(&b_k); // (N, p_out)
         for row in 0..n_obs {
             let mut e = 0.0_f64;
             for col in 0..p_out {
