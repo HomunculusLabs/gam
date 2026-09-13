@@ -1096,7 +1096,7 @@ crates/gam-terms/src/basis/duchon_thinplate.rs	create_thin_plate_spline_basis_in
 crates/gam-terms/src/basis/duchon_thinplate.rs	create_thin_plate_spline_basis_with_knot_count	retired-by-later-deletion:dc325f1909
 crates/gam-terms/src/basis/duchon_thinplate.rs	create_thin_plate_spline_basis_with_knot_count_andworkspace	retired-no-product-user
 crates/gam-terms/src/basis/duchon_thinplate.rs	create_thin_plate_spline_basiswithworkspace	retired-no-product-user
-crates/gam-terms/src/basis/duchon_thinplate.rs	duchon_resolve_chart	restored-in-place
+crates/gam-terms/src/basis/duchon_thinplate.rs	duchon_resolve_chart	retired-no-product-user
 crates/gam-terms/src/basis/matern_gradient.rs	forward_mul	defined-elsewhere-in-crate
 crates/gam-terms/src/basis/measure_jet_anisotropy.rs	block_residual_jets	retired-no-product-user
 crates/gam-terms/src/basis/measure_jet_anisotropy.rs	build_normalized_factor	retired-no-product-user
