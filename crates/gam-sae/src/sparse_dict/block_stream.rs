@@ -1020,6 +1020,16 @@ impl BlockSparseStreamState {
                 self.rss = baseline_rss;
                 self.usage = std::mem::take(&mut trial.baseline_usage);
                 self.second = std::mem::take(&mut trial.baseline_second);
+                // The paired baseline pass accumulated its code second moments
+                // without γ, as the live pass does, and the frame step below is what
+                // applies γ² to them. A rejected trial skips that step, so the restored
+                // moments take the baseline's own profiled γ² here, and every closed
+                // epoch stashes γ²-scaled moments for `block_rank_charges`, whose
+                // deviance and rank charge read their scale.
+                let baseline_gamma_sq = (baseline_gamma as f64) * (baseline_gamma as f64);
+                for second in &mut self.second {
+                    second.mapv_inplace(|value| value * baseline_gamma_sq);
+                }
                 self.alive_count = self.usage.iter().filter(|&&count| count > 0).count();
                 if midpoint != self.decoder {
                     let baseline_decoder = self.decoder.clone();

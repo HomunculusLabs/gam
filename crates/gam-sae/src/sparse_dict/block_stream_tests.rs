@@ -918,3 +918,62 @@ fn tied_row_moment_kernel_is_bit_identical_to_the_indexed_loop_2826() {
         );
     }
 }
+
+#[test]
+fn a_rejected_frame_trial_stashes_gamma_scaled_moments_for_rank_charges() {
+    // Two overlapping unit frames in R^2, both admitted on every row, so the
+    // profiled gamma is well away from one. The proposal swaps the two blocks: it
+    // represents the same model, its RSS equals the baseline's exactly, and the
+    // equality rule rejects it.
+    let x = Array2::from_shape_fn(
+        (17, 2),
+        |(_, column)| if column == 0 { 1.0_f32 } else { 0.0 },
+    );
+    let baseline = array![[1.0_f32, 0.0], [0.6, 0.8]];
+    let proposal = array![[0.6_f32, 0.8], [1.0, 0.0]];
+    let mut config = BlockSparseConfig::new(2, 1);
+    config.block_topk = 2;
+    config.minibatch = 5;
+    config.aux_k = 0;
+    let mut state = BlockSparseStreamState::new_with_decoder(proposal.clone(), &config).unwrap();
+    state.gamma = 1.0;
+    state.pending_frame = Some(super::PendingFrameTrial {
+        baseline_decoder: baseline,
+        baseline_gamma: 1.0,
+        proposed_decoder: proposal,
+        baseline_rss: 0.0,
+        baseline_gamma_num: 0.0,
+        baseline_gamma_den: 0.0,
+        baseline_rows: 0,
+        baseline_usage: vec![0; 2],
+        baseline_second: vec![Array2::zeros((1, 1)); 2],
+        rerouted_rows: 0,
+    });
+    state.partial_fit(x.view()).unwrap();
+    let pending = state.pending_frame.as_ref().unwrap();
+    let gamma = (pending.baseline_gamma_num / pending.baseline_gamma_den) as f32 as f64;
+    assert!(
+        (gamma * gamma - 1.0).abs() > 0.1,
+        "gamma^2 = {} would not tell scaled from unscaled moments",
+        gamma * gamma
+    );
+    let expected: Vec<f64> = pending
+        .baseline_second
+        .iter()
+        .map(|second| second[[0, 0]] * (gamma * gamma))
+        .collect();
+    assert!(expected.iter().all(|&value| value > 0.0));
+    let stats = state.end_epoch().unwrap();
+    assert!(
+        stats.frame_residual.is_infinite(),
+        "the swapped proposal must be rejected, not stepped"
+    );
+    assert_eq!(state.gamma as f64, gamma);
+    for (block, &target) in expected.iter().enumerate() {
+        let stashed = state.last_second[block][[0, 0]];
+        assert!(
+            (stashed - target).abs() <= 1e-12 * target,
+            "block {block}: stashed {stashed:e}, expected the gamma^2-scaled {target:e}"
+        );
+    }
+}
