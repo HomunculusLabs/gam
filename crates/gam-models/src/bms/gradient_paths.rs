@@ -2783,12 +2783,22 @@ mod jet_tower_oracle_tests {
     }
 
     /// The shipped jet value/grad/Hessian kernel must equal the original HAND
-    /// path it replaced (≤1e-9 rel) on the standard fixture grid — a third,
-    /// independent #932 single-source witness (the jet composes `q(η)` directly
-    /// on the η primary; the hand path differentiates in the q-index then chains
-    /// `q1/q2`, a different FP order, so this is a tolerance not a bit check).
+    /// path it replaced on the standard fixture grid — a third, independent #932
+    /// single-source witness (the jet composes `q(η)` directly on the η primary;
+    /// the hand path differentiates in the q-index then chains `q1/q2`, a
+    /// different FP order, so this is a tolerance not a bit check).
+    ///
+    /// The two programs evaluate one closed form, so they differ only by roundoff.
+    /// The hand chain's longest entry, `h00·q1² + u1·c·q2`, takes about fifteen
+    /// rounding steps of at most ε/2 each, so it is exact to about 7.5ε relative;
+    /// two programs make 15ε. The probit stack amplifies a relative error in the
+    /// margin by at most about |m| ≲ 3 on this grid, so the bound is 45ε, and the
+    /// band is 64ε relative. Pool job 603819 measured the worst entry at 8.3e-16
+    /// (3.75ε) over 98 entries, with the value bit-identical. The previous band,
+    /// `1e-12 + 1e-9·max(|a|, |b|)`, admitted a defect five orders larger than
+    /// that. A one-part-in-10¹² corruption of `q1` must trip the band on every row.
     /// Every entry is measured and each channel's worst relative error is printed
-    /// before any assertion: a justified band needs that measurement.
+    /// before any assertion.
     #[test]
     fn rigid_bernoulli_row_kernel_matches_hand_chain_witness() {
         let eta = [0.3_f64, -0.7, 0.05, 0.9, -1.2, 2.1, -2.4];
@@ -2845,13 +2855,57 @@ mod jet_tower_oracle_tests {
             worst("hess"),
             entries.len()
         );
+        let band = |a: f64, b: f64| 64.0 * f64::EPSILON * a.abs().max(b.abs());
+        // Corruption control: the hand chain with `q1` off by one part in 10¹².
+        // `grad[0] = u1·c·q1` reads `q1` once, so its relative change is 1e-12,
+        // about 70 times the band.
+        let mut weakest_trip = f64::INFINITY;
+        for &probit_scale in &[1.0_f64, 0.8] {
+            for r in 0..eta.len() {
+                let marginal = bernoulli_marginal_link_map(
+                    &InverseLink::Standard(gam_problem::StandardLink::Probit),
+                    eta[r],
+                )
+                .expect("link map");
+                let (jv, jg, jh) = rigid_standard_normal_row_kernel(
+                    marginal,
+                    g[r],
+                    z[r],
+                    y[r],
+                    w[r],
+                    probit_scale,
+                )
+                .expect("jet kernel");
+                let mut corrupted = marginal;
+                corrupted.q1 *= 1.0 + 1e-12;
+                let (cv, cg, ch) =
+                    hand_rigid_vgh(corrupted, g[r], z[r], y[r], w[r], probit_scale)
+                        .expect("corrupted hand rigid row");
+                assert!(
+                    jv.is_finite() && cv.is_finite() && jh[0][0].is_finite() && ch[0][0].is_finite(),
+                    "corruption control row {r}: non-finite channel"
+                );
+                let trip = (jg[0] - cg[0]).abs() / band(jg[0], cg[0]);
+                if !(trip >= weakest_trip) {
+                    weakest_trip = trip;
+                }
+            }
+        }
+        eprintln!(
+            "RIGID-HAND-CHAIN-932 band=64eps corrupted_q1_weakest_trip_over_band={weakest_trip:.3e}"
+        );
         for &(label, a, b) in &entries {
-            let band = 1e-12 + 1e-9 * a.abs().max(b.abs());
             assert!(
-                (a - b).abs() <= band,
-                "{label}: jet {a:+.15e} vs hand {b:+.15e} (band {band:.3e})"
+                (a - b).abs() <= band(a, b),
+                "{label}: jet {a:+.15e} vs hand {b:+.15e} (band {:.3e})",
+                band(a, b)
             );
         }
+        assert!(
+            weakest_trip > 1.0,
+            "a 1e-12 corruption of q1 did not trip the 64ε band on every row: weakest \
+             grad[0] difference is {weakest_trip:.3e} of the band"
+        );
     }
 
     /// #932 release speed gate for the rigid Bernoulli row: the shipped jet
