@@ -71,7 +71,9 @@
 use crate::model_types::EstimationError;
 use crate::vector_response::VectorLikelihood;
 use faer::Side;
-use gam_linalg::faer_ndarray::{FaerArrayView, array2_to_matmut, factorize_symmetricwith_fallback};
+use gam_linalg::faer_ndarray::{
+    FaerArrayView, FaerCholesky, FaerEigh, array2_to_matmut, factorize_symmetricwith_fallback,
+};
 use gam_problem::{
     FixedLambdaCheckpoint, FixedLambdaResidualKind, FixedLambdaSolverStage, FixedLambdaStallReason,
     FixedLambdaStationarityEvidence,
@@ -80,18 +82,14 @@ use gam_solve::pirls::dense_block_xtwx;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayView3};
 use opt::{BacktrackConfig, RidgeSchedule, backtracking_line_search, escalate_ridge};
 
-/// Base Levenberg–Marquardt ridge as a fraction of the penalized Hessian's
-/// largest diagonal entry (so it is invariant to the problem's overall
-/// curvature scale). At ~1e-10 of the dominant curvature it is negligible
-/// relative to identified-direction curvature — it never biases the identified
-/// optimum (at β̂ the unridged gradient still vanishes there) — yet large
-/// enough to lift an exactly rank-deficient null direction off zero so the
-/// Bunch–Kaufman fallback yields a finite, descent Newton step (gam#856).
+/// Base ridge of the covariance inversion's escalation ladder, as a fraction of
+/// the penalized Hessian's largest diagonal entry. Only
+/// `invert_symmetric_penalized_hessian` reads it. The Newton step takes the
+/// minimum-norm solution on the resolved positive eigenspace instead of a ridge.
 const BASE_RIDGE_FRACTION_OF_MAX_DIAG: f64 = 1.0e-10;
 
-/// Geometric ridge-escalation budget for a single Newton step. 30 doublings
-/// span ~9 orders of magnitude over the base ridge, which covers any
-/// conditioning a finite-curvature softmax/binomial block can present.
+/// Ridge-escalation budget of the covariance inversion's ladder: 30 doublings
+/// over the base ridge. Only `invert_symmetric_penalized_hessian` reads it.
 const MAX_RIDGE_ESCALATIONS: usize = 30;
 
 /// Backtracking budget for the damped-Newton line search: full step first, then
@@ -615,9 +613,10 @@ fn fill_penalized_gradient(
 /// diagnostic. A curvature-scaled Tikhonov ridge `τ·I` — floored at
 /// [`BASE_RIDGE_FRACTION_OF_MAX_DIAG`]·max_diag and escalated geometrically up
 /// to [`MAX_RIDGE_ESCALATIONS`] times — is added ONLY when the raw factor/solve
-/// is non-finite (a rank-deficient null direction), exactly mirroring the
-/// Newton step's ridge so the covariance is always finite; at full rank the
-/// ridge is never engaged and `Σ` is the exact `H⁻¹`. The returned matrix is
+/// is non-finite (a rank-deficient null direction), so the covariance is always
+/// finite; at full rank the ridge is never engaged and `Σ` is the exact `H⁻¹`.
+/// The Newton step does not use this ladder: it takes the minimum-norm solution
+/// on the resolved positive eigenspace. The returned matrix is
 /// symmetrized `(Σ + Σᵀ)/2` to null round-off asymmetry from the back-solve.
 fn invert_symmetric_penalized_hessian(
     hessian: &Array2<f64>,
@@ -938,100 +937,62 @@ pub fn fit_penalized_vector_glm<L: VectorLikelihood>(
             &mut grad_flat,
         );
 
-        // δ = − H^{-1} · grad, solved through an adaptive Levenberg–Marquardt
-        // ridge. The penalized Hessian `H = block(XᵀWX) + diag_a(λ_a S)` can be
-        // rank-deficient — a multinomial class block with quasi-separated /
-        // collinear columns and a small per-class λ leaves `XᵀW_aX + λ_a S`
-        // singular. faer's symmetric fallback chain ends at Bunch–Kaufman
-        // (LBLᵀ), which factorizes indefinite/singular matrices "successfully"
-        // and then back-substitutes through near-zero pivots, yielding a
-        // non-finite δ. Rather than aborting the whole fit on one bad block, we
-        // add a small ridge `τ·I` (Levenberg style) to the diagonal and
-        // re-factorize, escalating τ geometrically until the step is finite.
-        //
-        // The base ridge is scaled by the Hessian's largest diagonal entry so
-        // it is invariant to the problem's overall curvature scale: a tiny
-        // nudge relative to the dominant curvature, large enough to lift the
-        // null directions off zero. A finite δ from the ridged system is a
-        // descent direction for the *unridged* penalized objective `F`
-        // (ridging only shrinks the step toward the gradient direction), and
-        // the backtracking line search below validates it against `F` itself,
-        // so the ridge never biases the converged β̂ — at the optimum the
-        // gradient vanishes and the step → 0 regardless of τ.
+        // δ = −H⁺·grad on the penalized Hessian `H = block(XᵀWX) + diag_a(λ_a S)`.
+        // A positive-definite `H` takes the exact Newton step through one
+        // Cholesky factorization. `H` can also be exactly rank-deficient: a
+        // multinomial class block with quasi-separated or collinear columns and a
+        // small per-class λ leaves `XᵀW_aX + λ_a S` singular (gam#856). The step
+        // that descends on the identified subspace is then the minimum-norm one
+        // on `H`'s resolved positive eigenspace, and the directions the data and
+        // penalty do not identify take no step. Bunch–Kaufman back-substitution
+        // through a zero pivot gives an arbitrary null-space component instead,
+        // and a ridge escalated from a picked fraction of `max_diag` only
+        // approximated the minimum-norm answer.
         let max_diag =
             (0..beta_flat_dim).fold(0.0_f64, |acc, idx| acc.max(hessian[[idx, idx]].abs()));
-        // The ridge floors at `base_ridge` (not 0) for every solve. An exactly
-        // rank-deficient block (e.g. duplicate / collinear design columns under
-        // a near-zero λ) leaves `H = block(XᵀWX) + diag_a(λ_a S)` singular along
-        // a null direction. faer's Bunch–Kaufman fallback factorizes a singular
-        // matrix "successfully" and back-substitutes through the zero pivot to a
-        // *finite but arbitrary* component in the null space, so the resulting
-        // Newton direction is not a descent direction in the identified
-        // subspace — the line search then shrinks α toward 0 and the step-norm
-        // test declares a false convergence at a point where the unridged
-        // penalized gradient on identified directions is still large (gam#856).
-        // A minimal Tikhonov ridge `base_ridge·I` resolves the null direction to
-        // its minimum-norm representative, giving a true descent direction.
-        let base_ridge = if max_diag.is_finite() && max_diag > 0.0 {
-            max_diag * BASE_RIDGE_FRACTION_OF_MAX_DIAG
-        } else {
-            BASE_RIDGE_FRACTION_OF_MAX_DIAG
+        let cholesky_step = match hessian.cholesky(Side::Lower) {
+            Ok(factor) => {
+                let step = factor.solvevec(&grad_flat).mapv(|v| -v);
+                step.iter().all(|v| v.is_finite()).then_some(step)
+            }
+            Err(_) => None,
         };
-        // A genuine factorization failure (not just a singular pivot) is
-        // remembered so exhaustion can surface its distinct terminal error;
-        // singular pivots back-substituted to ±inf/NaN just escalate.
-        let mut last_factor_err: Option<(f64, String)> = None;
-        let delta = match escalate_ridge(
-            RidgeSchedule {
-                initial: base_ridge,
-                growth: 2.0,
-                max_escalations: MAX_RIDGE_ESCALATIONS + 1,
-            },
-            |ridge| {
-                let mut ridged = hessian.clone();
-                for idx in 0..beta_flat_dim {
-                    ridged[[idx, idx]] += ridge;
-                }
-                let factor = match factorize_symmetricwith_fallback(
-                    FaerArrayView::new(&ridged).as_ref(),
-                    Side::Lower,
-                ) {
-                    Ok(factor) => factor,
-                    Err(err) => {
-                        last_factor_err = Some((ridge, err.to_string()));
-                        return None;
+        let delta = match cholesky_step {
+            Some(step) => step,
+            None => {
+                let (eigenvalues, eigenvectors) = hessian.eigh(Side::Lower).map_err(|error| {
+                    EstimationError::InvalidInput(format!(
+                        "{context}: penalized Hessian eigendecomposition failed at iter {iter}: \
+                         {error}"
+                    ))
+                })?;
+                let threshold =
+                    gam_solve::estimate::reml::reml_outer_engine::positive_eigenvalue_threshold(
+                        eigenvalues.as_slice().ok_or_else(|| {
+                            EstimationError::InvalidInput(format!(
+                                "{context}: penalized Hessian eigenvalues are not contiguous at \
+                                 iter {iter}"
+                            ))
+                        })?,
+                    );
+                let projected_gradient = eigenvectors.t().dot(&grad_flat);
+                let mut step = Array1::<f64>::zeros(beta_flat_dim);
+                for k in 0..beta_flat_dim {
+                    if eigenvalues[k] > threshold {
+                        step.scaled_add(
+                            -projected_gradient[k] / eigenvalues[k],
+                            &eigenvectors.column(k),
+                        );
                     }
-                };
-                last_factor_err = None;
-                let mut rhs = Array2::<f64>::zeros((beta_flat_dim, 1));
-                for i in 0..beta_flat_dim {
-                    rhs[[i, 0]] = -grad_flat[i];
                 }
-                {
-                    let rhs_view = array2_to_matmut(&mut rhs);
-                    factor.solve_in_place(rhs_view);
-                }
-                (0..beta_flat_dim)
-                    .all(|i| rhs[[i, 0]].is_finite())
-                    .then(|| Array1::from_iter((0..beta_flat_dim).map(|i| rhs[[i, 0]])))
-            },
-        ) {
-            Ok(success) => success.value,
-            Err(exhausted) => {
-                if let Some((ridge, err)) = last_factor_err {
+                if !step.iter().all(|v| v.is_finite()) {
                     return Err(EstimationError::InvalidInput(format!(
-                        "{context}: Hessian factorization failed at iter {iter} \
-                         even with ridge {ridge:.3e}: {err}"
+                        "{context}: minimum-norm Newton step is non-finite at iter {iter} \
+                         (grad_norm={:.3e}, max_diag={max_diag:.3e})",
+                        grad_flat.iter().map(|v| v * v).sum::<f64>().sqrt(),
                     )));
                 }
-                return Err(EstimationError::InvalidInput(format!(
-                    "{context}: Newton step remained non-finite at iter {iter} after {} ridge \
-                     escalations up to {:.3e}; the penalized Hessian is pathologically \
-                     rank-deficient (grad_norm={:.3e}, max_diag={max_diag:.3e})",
-                    MAX_RIDGE_ESCALATIONS,
-                    exhausted.next_ridge,
-                    grad_flat.iter().map(|v| v * v).sum::<f64>().sqrt(),
-                )));
+                step
             }
         };
 
