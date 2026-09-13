@@ -90,9 +90,9 @@ pub(crate) fn ensure_exact_joint_hessian_dense_budget(
     if bytes > cap {
         return Err(CustomFamilyError::UnsupportedConfiguration {
             reason: format!(
-                "{context}: exact dense joint Hessian requires {:.2} GiB for dim={total}, \
-             exceeding the memory governor's {:.2} GiB single-materialization cap; refusing \
-             approximate determinant algebra",
+                "{context}: exact dense joint Hessian for dim={total} requires {bytes} bytes \
+             ({:.2} GiB), exceeding the memory governor's single-materialization cap of \
+             {cap} bytes ({:.2} GiB); refusing approximate determinant algebra",
                 bytes as f64 / (1024.0 * 1024.0 * 1024.0),
                 cap as f64 / (1024.0 * 1024.0 * 1024.0),
             ),
