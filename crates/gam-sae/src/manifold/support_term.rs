@@ -6093,6 +6093,9 @@ impl SaeSupportSparseTerm {
         scaled_step: &mut Vec<f64>,
         previous_step: &mut Option<SupportJointStepMemory>,
     ) -> Result<Option<f64>, String> {
+        // #2576: a coupled cycle costs about 350 alternation cycles on the 3000x48
+        // chart (job 557966), so each step reports where its time went.
+        let step_start = std::time::Instant::now();
         let mut system = self.assemble_arrow_schur(target, lambda_smooth, ard_precisions)?;
         if system.k == 0 || self.n_obs() == 0 {
             *previous_step = None;
@@ -6105,6 +6108,7 @@ impl SaeSupportSparseTerm {
         // joint step over one row. Deflating that direction to unit stiffness is
         // what the dense manifold lane already does for the same reason.
         SaeManifoldTerm::ensure_row_gauge_deflation_for_quasi_laplace(&mut system);
+        let assembled = step_start.elapsed();
         // The coupled step is used to satisfy this caller's KKT certificate,
         // so its linear solve cannot stop at InexactPCG's generic 1e-4 LM
         // default when the requested certificate is tighter. Both PCG knobs
@@ -6136,9 +6140,14 @@ impl SaeSupportSparseTerm {
         let seed_ridge = f64::EPSILON.sqrt() * curvature_scale;
         let mut step_pair = None;
         let mut ridge = 0.0_f64;
+        let mut solve_attempts = 0usize;
+        let mut solve_iterations = 0usize;
+        let mut solve_refusal = String::new();
         for attempt in 0..4 {
+            solve_attempts += 1;
             match system.solve_with_options(ridge, ridge, &options) {
                 Ok((delta_t, delta_beta, diagnostics)) => {
+                    solve_iterations += diagnostics.iterations;
                     let admissible = diagnostics.stopping_reason
                         == gam_solve::arrow_schur::PcgStopReason::Converged
                         && diagnostics.final_relative_residual.is_finite()
@@ -6147,15 +6156,19 @@ impl SaeSupportSparseTerm {
                         step_pair = Some((delta_t, delta_beta));
                         break;
                     }
-                    log::debug!(
-                        "support joint Newton linear solve refused at ridge {ridge:.3e} \
-                         (attempt {attempt}): stop={:?}, relative residual {:.3e}, requested {:.3e}",
+                    solve_refusal = format!(
+                        "stop={:?}, relative residual {:.3e}, requested {:.3e}",
                         diagnostics.stopping_reason,
                         diagnostics.final_relative_residual,
                         stationarity_tolerance,
                     );
+                    log::debug!(
+                        "support joint Newton linear solve refused at ridge {ridge:.3e} \
+                         (attempt {attempt}): {solve_refusal}"
+                    );
                 }
                 Err(error) => {
+                    solve_refusal = error.to_string();
                     log::debug!(
                         "support joint Newton refused at ridge {ridge:.3e} (attempt {attempt}): {error}"
                     );
@@ -6166,9 +6179,17 @@ impl SaeSupportSparseTerm {
             }
             ridge = if ridge > 0.0 { ridge * 16.0 } else { seed_ridge };
         }
+        let solved = step_start.elapsed();
         let (delta_t, delta_beta) = match step_pair {
             Some(pair) => pair,
             None => {
+                log::info!(
+                    "support joint Newton: linear solve refused after {solve_attempts} attempt(s) \
+                     and {solve_iterations} PCG iterations ({solve_refusal}); assemble {:.2}s, \
+                     solve {:.2}s",
+                    assembled.as_secs_f64(),
+                    (solved - assembled).as_secs_f64(),
+                );
                 *previous_step = None;
                 return Ok(None);
             }
@@ -6322,6 +6343,7 @@ impl SaeSupportSparseTerm {
                     }
                 }
             };
+        let curved = step_start.elapsed();
         self.snapshot_coordinates(coordinate_snapshot);
         let restore: Vec<Array2<f64>> = self
             .atoms
@@ -6393,12 +6415,21 @@ impl SaeSupportSparseTerm {
                 // The prediction comes from the model the first trial was chosen
                 // from, so the ratio reads that model's accuracy along this step.
                 let predicted = -(scale * model_linear + 0.5 * scale * scale * model_quadratic);
+                let searched = step_start.elapsed();
                 log::info!(
                     "support joint Newton: accepted scale={scale:.6e} (2^-{halving} of \
                      {first_scale:.6e}, {model} model) predicted={predicted:+.3e} \
-                     actual={:+.3e} ratio={:.3} objective={objective:.9e} -> {trial:.9e}",
+                     actual={:+.3e} ratio={:.3} objective={objective:.9e} -> {trial:.9e}; \
+                     assemble {:.2}s, solve {:.2}s ({solve_iterations} PCG iterations over \
+                     {solve_attempts} attempt(s)), exact curvature {:.2}s, line search {:.2}s \
+                     over {} objective evaluation(s)",
                     objective - trial,
                     if predicted != 0.0 { (objective - trial) / predicted } else { f64::NAN },
+                    assembled.as_secs_f64(),
+                    (solved - assembled).as_secs_f64(),
+                    (curved - solved).as_secs_f64(),
+                    (searched - curved).as_secs_f64(),
+                    halving + 1,
                 );
                 self.reconstruct_into(fitted)?;
                 *previous_step = Some(SupportJointStepMemory {
@@ -6416,6 +6447,17 @@ impl SaeSupportSparseTerm {
             }
             halving += 1;
         }
+        log::info!(
+            "support joint Newton: no measurable decrease along the {model} step after {} \
+             objective evaluation(s); assemble {:.2}s, solve {:.2}s ({solve_iterations} PCG \
+             iterations over {solve_attempts} attempt(s)), exact curvature {:.2}s, line search \
+             {:.2}s",
+            halving + 1,
+            assembled.as_secs_f64(),
+            (solved - assembled).as_secs_f64(),
+            (curved - solved).as_secs_f64(),
+            (step_start.elapsed() - curved).as_secs_f64(),
+        );
         self.install_coordinates(coordinate_snapshot)?;
         for (atom, decoder) in restore.into_iter().enumerate() {
             self.atoms[atom].set_decoder_coefficients(decoder)?;
