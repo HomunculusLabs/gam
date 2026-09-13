@@ -2620,7 +2620,16 @@ where
                         .and_then(gam_linalg::utils::symmetric_extremes);
                     let (label, accept_observed) = match inertia {
                         Some((min_eig, max_eig)) => {
-                            let pd_tolerance = max_eig.abs().max(1.0) * 1e-12;
+                            // A computed eigenvalue is only known to the rounding
+                            // of the Hessian it came from: `n` per-row terms and
+                            // `p²` penalty products, the objective band's own
+                            // accounting (`convergence::objective_rounding_band`),
+                            // at the matrix's spectral scale. Below that the
+                            // curvature is resolvably indefinite (#2469).
+                            let pd_tolerance = gam_linalg::roundoff::accumulation_growth(
+                                observed_state.eta.len()
+                                    + observed_state.gradient.len() * observed_state.gradient.len(),
+                            ) * min_eig.abs().max(max_eig.abs());
                             if min_eig > -pd_tolerance {
                                 (ExportedLaplaceCurvature::ObservedExact, true)
                             } else {
