@@ -5640,6 +5640,11 @@ mod test_support {
     /// different execution paths over the same jets. The fixture is softmax with
     /// periodic (Circle) manifolds and non-empty `log_ard`, so channels (1a),
     /// (1b), (2) and (3) are all live — asserted below rather than assumed.
+    ///
+    /// The applier also adds leg (5), the decoder priors' exact-minus-majorizer
+    /// border block (#2828), which no row block holds. The assembled side contracts
+    /// the operator the exact-A arrow system carries for it, so the gate covers
+    /// both halves of the `ΔC` that system prices.
     #[test]
     fn assembled_exact_hessian_delta_contracts_like_the_applier_2509() {
         use ndarray::Array1;
@@ -5713,6 +5718,9 @@ mod test_support {
             max_block > 0.0,
             "ΔC is identically zero on this fixture, so the gate cannot discriminate"
         );
+        let border_remainder = term
+            .decoder_prior_border_remainder_op(cache.k, 1.0)
+            .expect("the pinned state's border is the full-B or the factored layout");
 
         // Deterministic probes: every (t, β) unit direction, plus one dense mix so
         // every stored entry contributes to at least one compared component.
@@ -5758,6 +5766,19 @@ mod test_support {
                     }
                     assembled.t[base + a] += acc;
                 }
+            }
+            // Leg (5), `ΔC_ββ`, is a border object the rows do not hold: the
+            // exact-A arrow system carries it as the decoder-prior remainder
+            // operator (#2828), so the assembled side contracts that operator.
+            if let Some(remainder) = border_remainder.as_ref() {
+                gam_solve::arrow_schur::BetaPenaltyOp::matvec(
+                    remainder,
+                    v.beta.as_slice().expect("an owned probe is contiguous"),
+                    assembled
+                        .beta
+                        .as_slice_mut()
+                        .expect("an owned accumulator is contiguous"),
+                );
             }
 
             // Both sides sum the SAME products in a different association, so the
