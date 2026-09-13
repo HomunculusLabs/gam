@@ -2161,10 +2161,9 @@ impl SaeManifoldTerm {
     /// The smoothness Gram `λ S ⊗ I`, the data-fit β Gram (β enters the
     /// reconstruction linearly, so Gauss–Newton IS exact there), and the ARD
     /// prior (a t-tier object) install no majorizer and appear in neither side.
-    #[cfg_attr(not(test), allow(dead_code))]
-
-    /// `Self::decoder_prior_beta_hvp_pair` against a plan prepared once for
-    /// this decoder state ([`Self::prepare_decoder_prior_beta_curvature`]).
+    ///
+    /// Both sides read a plan prepared once for this decoder state
+    /// ([`Self::prepare_decoder_prior_beta_curvature`]).
     pub(crate) fn decoder_prior_beta_hvp_pair_prepared(
         &self,
         prepared: &PreparedDecoderPriorBetaCurvature,
