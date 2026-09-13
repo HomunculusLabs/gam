@@ -3523,21 +3523,21 @@ impl SaeManifoldTerm {
         let complement = &basin.complement;
         let basis = &basin.basis;
         let q = negative.len();
-        let mut a_derivative = Array2::<f64>::zeros((dim, dim));
+        // The positive-inverse part `Σ vᵢvᵢᵀ/λᵢ` over the retained complement, as the
+        // Gram `S·Sᵀ` of the columns `vᵢ/√λᵢ` (#2267). The rank-1 loop this replaces
+        // paid `retained·dim²` scalar updates on every gradient evaluation.
+        let retained: Vec<usize> = complement
+            .iter()
+            .copied()
+            .filter(|&i| block.eigenvalues[i] > block.rank_floor(i))
+            .collect();
+        let scaled = Array2::from_shape_fn((dim, retained.len()), |(row, col)| {
+            let i = retained[col];
+            block.eigenvectors[[row, i]] / block.eigenvalues[i].sqrt()
+        });
+        let mut a_derivative = scaled.dot(&scaled.t());
         let mut clamp_diagonal_derivative = Array1::<f64>::zeros(total_t);
         let mut clamp_border_derivative = Array2::<f64>::zeros((dim - total_t, dim - total_t));
-        for &i in complement {
-            let lambda = block.eigenvalues[i];
-            if lambda <= block.rank_floor(i) {
-                continue;
-            }
-            let vector = block.eigenvectors.column(i);
-            for row in 0..dim {
-                for col in 0..dim {
-                    a_derivative[[row, col]] += vector[row] * vector[col] / lambda;
-                }
-            }
-        }
         let mut basin_inverse = Array2::<f64>::zeros((q, q));
         for (i, &inverse) in basin.inverse_values.iter().enumerate() {
             if inverse == 0.0 {
