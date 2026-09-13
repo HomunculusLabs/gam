@@ -157,11 +157,12 @@ fn nearly_degenerate_distinct_spectrum_preserves_eigenpairs_2515() {
 /// pointwise, so the smooth clamp only GROWS e_v — the attributability test loosens
 /// by at most α·τ₀·ln2 = α·(deflation floor), within #2339's τ₀ budget — hence
 /// a_saddle prices under both the hard and the smooth clamp.
-/// after. This is the canonical E-attributable wrinkle-saddle specimen (same state
+/// This is the canonical E-attributable wrinkle-saddle specimen (same state
 /// fix-2253 anchored as `converged_state_with_residual_a_saddle_2336`, now
 /// documented as the PRICING specimen: its `λ+e_v(ARD)=+0.026` shows the clamp
-/// alone lifts it, so it prices — it is NOT a genuine deep saddle). The genuine
-/// refusal path is exercised by `genuine_saddle_is_infeasible_probe_not_fatal_2336`.
+/// alone lifts it, so it prices — it is NOT a genuine deep saddle). No specimen
+/// pins the genuine refusal path: the criterion descends a refused exact-A saddle
+/// before it refuses (#2080).
 #[test]
 pub(crate) fn e_attributable_ard_saddle_prices_finite_2336() {
     let (mut term, target, rho) = ard_saddle_state();

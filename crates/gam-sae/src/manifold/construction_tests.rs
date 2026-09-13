@@ -494,9 +494,9 @@ mod amortized_encoder_tests {
     /// `zz_measure_e_attributability_2336`) — NOT a residual-rooted genuine saddle.
     /// So under the value-side E-attributability semantics (#2336) the criterion
     /// PRICES it at the basin curvature and returns a FINITE value. This is the
-    /// price half of the (price ⟺ E-attributable, refuse ⟺ genuine) contract; the
-    /// refuse half is `genuine_saddle_is_infeasible_probe_not_fatal_2336` on the
-    /// obb window-scan specimen.
+    /// price half of the (price ⟺ E-attributable, refuse ⟺ genuine) contract; no
+    /// specimen pins the refuse half, since the criterion descends a refused exact-A
+    /// saddle before it refuses (#2080).
     #[test]
     fn exact_observed_information_prices_e_attributable_a_saddle_2336() {
         let (mut term, target, rho) =
