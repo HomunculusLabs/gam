@@ -643,6 +643,10 @@ pub struct BinomialLocationScaleWiggleFamily {
     /// derivative evaluation. Defaults to `ResourcePolicy::default_library()`
     /// when the family is built without an explicit policy.
     pub policy: gam_runtime::resource::ResourcePolicy,
+    /// Whether this member's Jeffreys/Firth prior is armed. A fit arms it only
+    /// on the unarmed fit's own evidence, through
+    /// `fit_custom_family_arming_on_evidence` (#979).
+    pub jeffreys_armed: bool,
 }
 
 impl MonotoneWiggleFamily for BinomialLocationScaleWiggleFamily {
@@ -862,6 +866,7 @@ impl BinomialLocationScaleWiggleFamily {
             wiggle_knots: self.wiggle_knots.clone(),
             wiggle_degree: self.wiggle_degree,
             policy: self.policy.clone(),
+            jeffreys_armed: self.jeffreys_armed,
         }))
     }
 

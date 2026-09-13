@@ -4,31 +4,30 @@
 // resolve through the parent namespace.
 use super::*;
 
+impl crate::custom_family::JeffreysArming for BinomialLocationScaleWiggleFamily {
+    fn with_jeffreys_armed(
+        &self,
+        evidence: Option<&gam_problem::jeffreys_arming::JeffreysArmingEvidence>,
+    ) -> Self {
+        Self {
+            jeffreys_armed: evidence.is_some(),
+            ..self.clone()
+        }
+    }
+}
+
 impl CustomFamily for BinomialLocationScaleWiggleFamily {
-    // NO full-span Firth/Jeffreys for THIS family (gam#932). The trait default is
-    // OFF (gam#1395 flat-prior exact-Newton objective); plain binomial families
-    // opt back in for their separation regime, but the location-scale-WIGGLE
-    // variant must NOT, because it carries an EXACT structural gauge null: the
-    // threshold β_t and the wiggle-intercept `β_wᵀB(q₀)` both shift `q = q₀ + Bᵀβ_w`
-    // additively (documented on `pseudo_logdet_mode` below), so the reduced Fisher
-    // information is singular at `σ_min ≈ ridge_floor ≈ 1e-10`. The always-on
-    // full-span Firth term floor-inverts that gauge direction into a
-    // `1/floor ≈ 1e9` curvature "wall" that couples into the identified threshold
-    // block and freezes the constrained joint Newton (the binomial-wiggle+matérn
-    // refit stall: a feasible 9e-2 step gutted to ~7e-6 while the threshold
-    // carried |g|≈8). The conditioning gate cannot save it — the gate reads the
-    // gauge null as ill-conditioning and ARMS the term, mistaking a structural
-    // gauge for near-separation. There is no clean fix at the Firth-spectrum
-    // layer: the wiggle's monotone modes form a sub-ε continuum, so any hard
-    // eigenvalue cutoff flips the kept-set cycle-to-cycle and steps Φ
-    // discontinuously (re-collapsing the trust region), while a smooth/floor
-    // variant only trades the 1e9 wall for a smaller-but-still-stalling one.
-    //
-    // The bias-correction term is also UNNECESSARY here: the base penalized
-    // Hessian is well-conditioned (the smoothing penalty breaks the gauge,
-    // cond≈7e2) and the monotone wiggle is already bounded by its β≥0 inequality
-    // constraint, so genuine separation is regularized by the penalty + cone, not
-    // by Firth. Disabling the term lets the well-conditioned Newton converge.
+    // The self-limiting Jeffreys/Firth curvature bounds a coefficient the data do
+    // not, but it is armed only when the unarmed fit proves it is needed (#979).
+    // Always-on, it stalled the constrained binomial-wiggle + Matérn refit: the
+    // warp's linear element rescales `q₀`, a near-exact likelihood gauge the
+    // default full Jeffreys span holds, and the term inverted its information into
+    // a curvature wall. The #2647 closure penalizes that element, so `H_L + S` is
+    // nonsingular, but the information itself is not. Which span the armed refit
+    // uses is open in the #932 audit's constrained Firth/Jeffreys row.
+    fn joint_jeffreys_term_required(&self) -> bool {
+        self.jeffreys_armed
+    }
 
     /// The Binomial location-scale-wiggle joint Hessian depends on β because
     /// it involves the nonlinear link function evaluated at the combined

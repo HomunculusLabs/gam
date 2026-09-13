@@ -3791,6 +3791,16 @@ pub(crate) struct BinomialLocationScaleTermBuilder {
 impl LocationScaleFamilyBuilder for BinomialLocationScaleTermBuilder {
     type Family = BinomialLocationScaleFamily;
 
+    fn fit_blocks(
+        &self,
+        family: &Self::Family,
+        blocks: &[ParameterBlockSpec],
+        options: &BlockwiseFitOptions,
+    ) -> Result<UnifiedFitResult, String> {
+        crate::custom_family::fit_custom_family_arming_on_evidence(family, blocks, options)
+            .map_err(|error| error.to_string())
+    }
+
     fn meanspec(&self) -> &TermCollectionSpec {
         &self.meanspec
     }
@@ -3856,6 +3866,7 @@ impl LocationScaleFamilyBuilder for BinomialLocationScaleTermBuilder {
             threshold_design: Some(mean_design.design.clone()),
             log_sigma_design: Some(identifiednoise_design),
             policy: gam_runtime::resource::ResourcePolicy::default_library(),
+            jeffreys_armed: false,
         }
     }
 
@@ -3911,6 +3922,16 @@ pub(crate) struct BinomialLocationScaleWiggleTermBuilder {
 
 impl LocationScaleFamilyBuilder for BinomialLocationScaleWiggleTermBuilder {
     type Family = BinomialLocationScaleWiggleFamily;
+
+    fn fit_blocks(
+        &self,
+        family: &Self::Family,
+        blocks: &[ParameterBlockSpec],
+        options: &BlockwiseFitOptions,
+    ) -> Result<UnifiedFitResult, String> {
+        crate::custom_family::fit_custom_family_arming_on_evidence(family, blocks, options)
+            .map_err(|error| error.to_string())
+    }
 
     fn meanspec(&self) -> &TermCollectionSpec {
         &self.meanspec
@@ -4008,6 +4029,7 @@ impl LocationScaleFamilyBuilder for BinomialLocationScaleWiggleTermBuilder {
             wiggle_knots: self.wiggle_knots.clone(),
             wiggle_degree: self.wiggle_degree,
             policy: gam_runtime::resource::ResourcePolicy::default_library(),
+            jeffreys_armed: false,
         }
     }
 

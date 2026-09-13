@@ -2045,24 +2045,29 @@ impl BinomialLocationScaleFamily {
     }
 }
 
+impl crate::custom_family::JeffreysArming for BinomialLocationScaleFamily {
+    fn with_jeffreys_armed(
+        &self,
+        evidence: Option<&gam_problem::jeffreys_arming::JeffreysArmingEvidence>,
+    ) -> Self {
+        Self {
+            jeffreys_armed: evidence.is_some(),
+            ..self.clone()
+        }
+    }
+}
+
 impl CustomFamily for BinomialLocationScaleFamily {
-    // NO full-span Firth/Jeffreys for this family (#1607, Cluster 2 — gamlss
-    // batched gradient), mirroring `BinomialLocationScaleWiggleFamily`. The
-    // threshold/log-σ map `q = −η_t/σ` carries an EXACT gauge null (`δη_t = η_t,
-    // δη_ls = 1` gives `q̇ = 0`), so the reduced Fisher information is singular
-    // along it. The always-on full-span Firth term floor-inverts that gauge
-    // direction into a `1/floor` curvature wall whose bounded divided-difference
-    // `H_Φ` is only an APPROXIMATION of the exact Firth curvature the inner
-    // Newton converges on; on the gauge-degenerate reduced span the outer
-    // gradient's `H_Φ`-drift contraction then desynchronises from the finite
-    // difference of the folded cost by ~4-5%, tripping the batched-gradient FD
-    // check. The smoothing penalty already regularises the identifiable
-    // coefficients, so the self-limiting Firth curvature is unnecessary here;
-    // dropping it lets value, gradient, and mode-response stay on the exact
-    // observed penalized Hessian. (The `expected_joint_information_*` /
-    // `joint_jeffreys_information_*` methods are retained: they still back the
-    // directly-tested Fisher-information derivative surface and any future
-    // opt-in.)
+    // The self-limiting Jeffreys/Firth curvature bounds a coefficient the data do
+    // not, but it is armed only when the unarmed fit proves it is needed (#979).
+    // When the log-σ design carries an intercept, the threshold/log-σ map
+    // `q = −η_t/σ` has an exact likelihood gauge (`δη_t = η_t, δη_ls = 1` gives
+    // `q̇ = 0`), so the expected information is singular along it at every β, and
+    // the default full Jeffreys span holds that direction. Which span the armed
+    // refit uses is open in the #932 audit's constrained Firth/Jeffreys row.
+    fn joint_jeffreys_term_required(&self) -> bool {
+        self.jeffreys_armed
+    }
 
     /// The Binomial location-scale joint Hessian depends on β because the
     /// Hessian blocks are functions of q = -t/σ and the link derivatives,

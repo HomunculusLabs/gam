@@ -123,6 +123,7 @@ fn gamlss_joint_derivatives_match_finite_difference() {
                 threshold_design: Some(DesignMatrix::from(x.clone())),
                 log_sigma_design: Some(DesignMatrix::from(z.clone())),
                 policy: ResourcePolicy::default_library(),
+                jeffreys_armed: false,
             }),
             vec![spec("threshold", &x), spec("log_sigma", &z)],
             array![0.1, 0.15],

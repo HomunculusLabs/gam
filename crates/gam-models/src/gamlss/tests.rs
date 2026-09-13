@@ -192,6 +192,7 @@ pub(crate) fn binomial_location_scale_joint_hessian_matches_single_sourced_tower
             threshold_design: None,
             log_sigma_design: None,
             policy: gam_runtime::resource::ResourcePolicy::default_library(),
+            jeffreys_armed: false,
         };
         let states = vec![
             ParameterBlockState {
@@ -661,6 +662,7 @@ pub(crate) fn binomial_location_scale_loglik_uses_tail_stable_standard_links() {
         threshold_design: Some(design.clone()),
         log_sigma_design: Some(design.clone()),
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
+        jeffreys_armed: false,
     };
     let logit_states = vec![
         ParameterBlockState {
@@ -684,6 +686,7 @@ pub(crate) fn binomial_location_scale_loglik_uses_tail_stable_standard_links() {
         threshold_design: Some(design.clone()),
         log_sigma_design: Some(design),
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
+        jeffreys_armed: false,
     };
     let cloglog_states = vec![
         ParameterBlockState {
@@ -920,6 +923,7 @@ pub(crate) fn bls_workspace_fixture() -> (
         threshold_design: Some(threshold_design.clone()),
         log_sigma_design: Some(log_sigma_design.clone()),
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
+        jeffreys_armed: false,
     };
     let states = vec![
         ParameterBlockState {
@@ -1222,6 +1226,7 @@ pub(crate) fn binomial_location_scale_operator_workspace_never_densifies_specs()
         threshold_design: None,
         log_sigma_design: None,
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
+        jeffreys_armed: false,
     };
     let states = vec![
         ParameterBlockState {
@@ -2257,6 +2262,7 @@ pub(crate) fn binomial_location_scale_exact_probit_tailobjects_stay_finite() {
         threshold_design: Some(threshold_design.clone()),
         log_sigma_design: Some(log_sigma_design.clone()),
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
+        jeffreys_armed: false,
     };
     let beta_t = array![250.0];
     let beta_ls = array![0.0];
@@ -2323,6 +2329,7 @@ pub(crate) fn binomial_location_scale_many_smoothing_params_keeps_second_order_o
         threshold_design: None,
         log_sigma_design: None,
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
+        jeffreys_armed: false,
     };
     let specs = vec![
         spec_with_penalties("threshold", n, 3, 2),

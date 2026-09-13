@@ -39,6 +39,7 @@ pub(crate) fn nonwiggle_family_evaluate_returns_exact_newton_blockswhen_designs_
         threshold_design: Some(threshold_design.clone()),
         log_sigma_design: Some(log_sigma_design.clone()),
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
+        jeffreys_armed: false,
     };
 
     let beta_t = array![0.2, -0.15];
@@ -113,6 +114,7 @@ pub(crate) fn nonwiggle_family_joint_exacthessian_directional_derivative_matches
         threshold_design: Some(threshold_design.clone()),
         log_sigma_design: Some(log_sigma_design.clone()),
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
+        jeffreys_armed: false,
     };
 
     let rebuild_states = |beta_t: &Array1<f64>, beta_ls: &Array1<f64>| {
@@ -186,6 +188,7 @@ pub(crate) fn nonwiggle_family_joint_exacthessiansecond_directional_derivative_m
         threshold_design: Some(threshold_design.clone()),
         log_sigma_design: Some(log_sigma_design.clone()),
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
+        jeffreys_armed: false,
     };
 
     let rebuild_states = |beta_t: &Array1<f64>, beta_ls: &Array1<f64>| {
@@ -294,6 +297,7 @@ pub(crate) fn binomial_location_scale_generative_matches_coremu() {
         threshold_design: None,
         log_sigma_design: None,
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
+        jeffreys_armed: false,
     };
     let states = vec![
         ParameterBlockState {
@@ -346,6 +350,7 @@ pub(crate) fn binomial_location_scale_batched_gradient_matches_finite_difference
         threshold_design: Some(base.threshold_design),
         log_sigma_design: Some(base.log_sigma_design),
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
+        jeffreys_armed: false,
     };
 
     let specs = vec![base.threshold_spec, base.log_sigma_spec];
@@ -492,6 +497,7 @@ pub(crate) fn binomial_location_scale_expected_info_derivatives_match_finite_dif
         threshold_design: Some(base.threshold_design.clone()),
         log_sigma_design: Some(base.log_sigma_design.clone()),
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
+        jeffreys_armed: false,
     };
     let specs = vec![base.threshold_spec, base.log_sigma_spec];
     let x_t = specs[BinomialLocationScaleFamily::BLOCK_T]
@@ -629,6 +635,7 @@ pub(crate) fn expected_info_jeffreys_does_not_reward_probit_saturation() {
         threshold_design: Some(base.threshold_design.clone()),
         log_sigma_design: Some(base.log_sigma_design.clone()),
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
+        jeffreys_armed: false,
     };
     let specs = vec![base.threshold_spec, base.log_sigma_spec];
     let x_t = specs[BinomialLocationScaleFamily::BLOCK_T]
@@ -724,6 +731,7 @@ pub(crate) fn binomial_location_scale_expected_info_contracted_trace_matches_sec
         threshold_design: Some(base.threshold_design.clone()),
         log_sigma_design: Some(base.log_sigma_design.clone()),
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
+        jeffreys_armed: false,
     };
     let specs = vec![base.threshold_spec, base.log_sigma_spec];
     let x_t = specs[BinomialLocationScaleFamily::BLOCK_T]
@@ -790,6 +798,7 @@ pub(crate) fn binomial_location_scale_expected_hphi_drift_matches_finite_differe
         threshold_design: Some(base.threshold_design.clone()),
         log_sigma_design: Some(base.log_sigma_design.clone()),
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
+        jeffreys_armed: false,
     };
     let specs = vec![base.threshold_spec, base.log_sigma_spec];
     let x_t = specs[BinomialLocationScaleFamily::BLOCK_T]
@@ -1416,6 +1425,7 @@ pub(crate) fn bls_wiggle_workspace_fixture() -> (
         wiggle_knots: knots,
         wiggle_degree: 2,
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
+        jeffreys_armed: false,
     };
     let q0 = Array1::from_iter(
         eta_t
@@ -1503,6 +1513,7 @@ pub(crate) fn binomial_location_scale_wiggle_order2_rows_match_jet_tower_932() {
             wiggle_knots: probit_family.wiggle_knots.clone(),
             wiggle_degree: probit_family.wiggle_degree,
             policy: probit_family.policy.clone(),
+            jeffreys_armed: probit_family.jeffreys_armed,
         };
 
         let pieces = family
@@ -1968,6 +1979,7 @@ pub(crate) fn binomial_wiggle_joint_hessian_reduces_to_nonwiggle_at_zero_betaw_9
             wiggle_knots: knots.clone(),
             wiggle_degree: 2,
             policy: gam_runtime::resource::ResourcePolicy::default_library(),
+            jeffreys_armed: false,
         };
         // βw = 0 ⇒ etaw = 0, m = 1, g2 = 0, q = q0.
         let q0 = Array1::from_iter(
@@ -2010,6 +2022,7 @@ pub(crate) fn binomial_wiggle_joint_hessian_reduces_to_nonwiggle_at_zero_betaw_9
             threshold_design: None,
             log_sigma_design: None,
             policy: gam_runtime::resource::ResourcePolicy::default_library(),
+            jeffreys_armed: false,
         };
         let nonwiggle_states = vec![
             ParameterBlockState {

@@ -71,6 +71,7 @@ pub(crate) fn joint_penalized_hessian_is_nonsingular_where_the_likelihood_alone_
         wiggle_knots: knots,
         wiggle_degree: 2,
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
+        jeffreys_armed: false,
     };
     let block = |name: &str, design: DesignMatrix| ParameterBlockSpec {
         name: name.to_string(),

@@ -16,6 +16,10 @@ pub struct BinomialLocationScaleFamily {
     /// derivative evaluation. Defaults to `ResourcePolicy::default_library()`
     /// when the family is built without an explicit policy.
     pub policy: gam_runtime::resource::ResourcePolicy,
+    /// Whether this member's Jeffreys/Firth prior is armed. A fit arms it only
+    /// on the unarmed fit's own evidence, through
+    /// `fit_custom_family_arming_on_evidence` (#979).
+    pub jeffreys_armed: bool,
 }
 
 /// Both Binomial location-scale families plug into the unified
