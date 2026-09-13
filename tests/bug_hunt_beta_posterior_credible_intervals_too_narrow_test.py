@@ -36,9 +36,10 @@ siblings: different family, different mechanism (a dispersion double-count in th
 Laplace fallback, not a wrong fitted hyperparameter).
 
 This test fits a clean Beta model, confirms the posterior MEAN reproduces the
-point estimate (so only the spread is wrong), then asserts each coefficient's
-posterior SD is within a factor of 2 of the Wald SE. It currently fails (ratio
-~0.21); when the fallback uses the coefficient-covariance scale it passes.
+point estimate (so a failure isolates the spread), then asserts each
+coefficient's posterior SD is within a factor of 2 of the Wald SE. The defective
+fallback gave a ratio of ~0.21; the fallback must use the coefficient-covariance
+scale.
 """
 
 from __future__ import annotations

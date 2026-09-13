@@ -27,9 +27,8 @@ therefore yields ≈ 1 − α = (1+L)/2 typical coverage. The correct setting is
 
 This test measures empirical marginal coverage at ``conformal_level=0.5`` over a
 handful of seeds with a large test set per fit, and asserts the coverage is not
-grossly inflated. It currently fails (coverage ~0.74, matching the buggy
-``(1+0.5)/2 = 0.75``); once ``alpha = 1 - conformal_level`` the coverage drops to
-~0.50 and the assertion holds without edits.
+grossly inflated. Under the defect the coverage was ~0.74, matching the buggy
+``(1+0.5)/2 = 0.75``; the correct ``alpha = 1 - conformal_level`` targets ~0.50.
 """
 
 from __future__ import annotations

@@ -37,9 +37,8 @@ This test fits a deterministic Gaussian intercept-only model, predicts on a
 held-out frame containing only a covariate column (no response), and asserts the
 prediction is the well-posed constant a null model must produce: ``n`` finite,
 identical values equal to the training-response mean (the exact OLS intercept of
-``y ~ 1``). It currently fails because ``predict`` raises before any assertion
-can run. When the projection stops collapsing a covariate-free model's frame to
-zero columns, ``predict`` returns and every assertion below holds without edits.
+``y ~ 1``). Under the defect ``predict`` raised before any assertion could run,
+because the projection collapsed a covariate-free model's frame to zero columns.
 """
 
 from __future__ import annotations

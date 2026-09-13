@@ -28,11 +28,10 @@ categorical levels.
 
 This test fits ``y ~ g`` on four groups with strongly non-monotone true means
 ``[2, -3, 8, 1]`` labeled ``"0".."3"`` and asserts the fitted per-group means
-recover the truth. It currently fails: the integer-labeled fit collapses to a
-linear ramp (``[0.88, 1.67, 2.45, 3.23]``, max error ≈ 5.5). When a ``by=``/main
-factor over a string-valued column is treated as categorical regardless of
-whether the labels look numeric, the per-group means are recovered and the
-assertion holds without edits.
+recover the truth. Under the defect the integer-labeled fit collapsed to a
+linear ramp (``[0.88, 1.67, 2.45, 3.23]``, max error ≈ 5.5). A ``by=``/main
+factor over a string-valued column is categorical whatever its labels look
+like, so the per-group means are recovered.
 """
 
 from __future__ import annotations

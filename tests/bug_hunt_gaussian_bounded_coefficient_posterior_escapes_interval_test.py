@@ -26,14 +26,13 @@ This test contrasts the two families on the identical ``bounded(x, min=0,
 max=1)`` term:
 
 * **Gaussian** (default): asserts every posterior draw of the bounded
-  coefficient lies in ``[0, 1]``. This currently FAILS — a sizeable fraction of
-  draws fall outside (observed range overshoots ~1.7 and dips below 0).
+  coefficient lies in ``[0, 1]``. Under the defect a sizeable fraction of draws
+  fell outside (the observed range overshot ~1.7 and dipped below 0).
 * **Binomial** (control): the same assertion already holds, isolating the defect
   to the Gaussian early-return ordering rather than to the bounded machinery
   itself.
 
-When the ``has_bounded`` check runs before the Gaussian-identity shortcut, the
-Gaussian assertion holds without edits.
+The ``has_bounded`` check must run before the Gaussian-identity shortcut.
 """
 
 from __future__ import annotations

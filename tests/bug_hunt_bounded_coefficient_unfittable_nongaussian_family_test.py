@@ -32,10 +32,9 @@ Gaussian/Binomial. Unlike the Matérn manifestation (which depends on the spatia
 This test fits a Poisson count model whose log-mean increases linearly in ``x``
 with a true slope (0.7) interior to the requested bound ``[0, 2]``, confirms the
 data IS fittable via a plain ``y ~ x`` control, and then asserts the
-``bounded(x, min=0, max=2)`` term fits and recovers the increasing trend. It
-currently fails (the bounded fit raises before producing any result); once the
-bounded-linear builder handles the non-Gaussian families, the fit completes and
-the assertion holds without edits.
+``bounded(x, min=0, max=2)`` term fits and recovers the increasing trend. Under
+the defect the bounded fit raised before producing any result, because the
+bounded-linear builder did not handle the non-Gaussian families.
 
 Related: #1615
 """
@@ -75,8 +74,7 @@ def test_bounded_coefficient_is_fittable_under_poisson_family() -> None:
     assert ctrl_corr > 0.5, f"sanity: y~x should track the trend, got corr={ctrl_corr:.3f}"
 
     # The documented bounded() interval-coefficient term must fit the same data
-    # under the same family. Today this raises IntegrationError ("bounded linear
-    # terms are not supported for PoissonLog fits") before any prediction exists.
+    # under the same family.
     bnd = gamfit.fit(df, "y ~ bounded(x, min=0, max=2)", family="poisson")
     bnd_pred = np.asarray(bnd.predict(df), dtype=float)
     assert np.all(np.isfinite(bnd_pred)), "bounded fit produced non-finite predictions"

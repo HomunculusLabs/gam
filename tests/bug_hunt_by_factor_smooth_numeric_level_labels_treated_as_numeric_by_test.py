@@ -39,10 +39,9 @@ depend on the names of categorical levels.
 This test fits ``y ~ g + s(x, by=g)`` on two groups that share the **same** true
 shape ``sin(2x)`` but are labeled ``"0"`` and ``"1"``, and asserts that BOTH
 per-group fitted curves recover that shape (non-constant, well correlated with
-the truth). It currently fails: the ``"0"`` group is flat (annihilated by the
-``×0`` numeric scaling). When ``by=`` over a string-valued column is treated as
-categorical regardless of whether the labels look numeric, every level gets its
-own smooth and both assertions below hold without edits.
+the truth). Under the defect the ``"0"`` group was flat, annihilated by the
+``×0`` numeric scaling. A ``by=`` over a string-valued column is categorical
+whatever its labels look like, so every level gets its own smooth.
 """
 
 from __future__ import annotations
