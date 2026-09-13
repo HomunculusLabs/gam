@@ -1,5 +1,6 @@
 import typing
 import csv
+import functools
 import importlib.util
 import re
 import sys
@@ -549,6 +550,7 @@ class LargeScaleRunnerTests(unittest.TestCase):
         self.assertGreater(len(set(round(v, 6) for v in pc2)), 10)
 
 
+@functools.cache
 def _rust_sources() -> str:
     """Concatenate every Rust source under `crates/` once.
 
@@ -559,18 +561,12 @@ def _rust_sources() -> str:
     for two months. These tests search the real tree so a removed or
     renamed emission site fails here.
     """
-    global _RUST_SOURCES_CACHE
-    if _RUST_SOURCES_CACHE is None:
-        chunks: list[str] = []
-        for path in sorted((_REPO_ROOT / "crates").rglob("*.rs")):
-            if "target" in path.parts:
-                continue
-            chunks.append(path.read_text(encoding="utf-8", errors="replace"))
-        _RUST_SOURCES_CACHE = "\n".join(chunks)
-    return _RUST_SOURCES_CACHE
-
-
-_RUST_SOURCES_CACHE: str | None = None
+    chunks: list[str] = []
+    for path in sorted((_REPO_ROOT / "crates").rglob("*.rs")):
+        if "target" in path.parts:
+            continue
+        chunks.append(path.read_text(encoding="utf-8", errors="replace"))
+    return "\n".join(chunks)
 
 
 # One row per marker family the runner parses:
