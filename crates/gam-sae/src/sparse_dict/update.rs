@@ -509,15 +509,19 @@ fn penalized_row_loss(
 }
 
 /// The loss `‖X − C D‖² − ‖X‖²` of two decoders at the codes that assembled `eq`,
-/// `Σ_a (A_aa‖d_a‖² − 2 d_a·b_a + Σ_{b≠a} A_ab d_a·d_b)`. One adjacency serves
-/// both, and the per-atom terms are summed in atom order over sorted neighbour
-/// lists, so the pair does not depend on the thread count.
+/// each paired with the band its f32 rows resolve. Per atom the loss is
+/// `A_aa‖d_a‖² − d_a·b_a − d_a·g_a`, with `g_a = b_a − Σ_{b≠a} A_ab d_b`, and its
+/// gradient in `d_a` is `2(A_aa d_a − g_a)`. A row that rounds by at most `ε_f32·√P`
+/// in norm, the currency [`polish_unit_rows_against_normal_eq`] stops on, moves the
+/// loss by at most `2·ε_f32·√P·(A_aa‖d_a‖ + ‖g_a‖)` to first order. One adjacency
+/// serves both decoders, and the per-atom terms are summed in atom order over
+/// sorted neighbour lists, so the pair does not depend on the thread count.
 fn fixed_code_losses(
     first: ArrayView2<'_, f32>,
     second: ArrayView2<'_, f32>,
     eq: &DecoderNormalEq,
-) -> (f64, f64) {
-    let k = eq.diag.len();
+) -> [(f64, f64); 2] {
+    let (k, p) = eq.b.dim();
     let mut neigh: Vec<Vec<(usize, f64)>> = vec![Vec::new(); k];
     for (&(a, b), &value) in eq.off.iter() {
         neigh[a as usize].push((b as usize, value));
@@ -526,33 +530,45 @@ fn fixed_code_losses(
     neigh.par_iter_mut().for_each(|list| {
         list.sort_by_key(|entry| entry.0);
     });
-    let atom_loss = |decoder: ArrayView2<'_, f32>, atom: usize| -> f64 {
-        let direction = decoder.row(atom);
-        let dot = |other: ArrayView1<'_, f32>| -> f64 {
-            direction
-                .iter()
-                .zip(other.iter())
-                .map(|(&left, &right)| f64::from(left) * f64::from(right))
-                .sum::<f64>()
-        };
-        let rhs = direction
+    let row_rounding = f64::from(f32::EPSILON) * (p as f64).sqrt();
+    let atom_terms = |decoder: ArrayView2<'_, f32>, atom: usize| -> (f64, f64) {
+        let mut conditional: Vec<f64> = eq.b.row(atom).to_vec();
+        for &(nb, value) in &neigh[atom] {
+            for (slot, &entry) in conditional.iter_mut().zip(decoder.row(nb).iter()) {
+                *slot -= value * f64::from(entry);
+            }
+        }
+        let mut norm2 = 0.0f64;
+        let mut along_b = 0.0f64;
+        let mut along_g = 0.0f64;
+        let mut conditional_norm2 = 0.0f64;
+        for ((&entry, &target), &g) in decoder
+            .row(atom)
             .iter()
             .zip(eq.b.row(atom).iter())
-            .map(|(&entry, &target)| f64::from(entry) * target)
-            .sum::<f64>();
-        let coupling = neigh[atom]
-            .iter()
-            .map(|&(nb, value)| value * dot(decoder.row(nb)))
-            .sum::<f64>();
-        eq.diag[atom] * dot(direction) - 2.0 * rhs + coupling
+            .zip(conditional.iter())
+        {
+            let entry = f64::from(entry);
+            norm2 += entry * entry;
+            along_b += entry * target;
+            along_g += entry * g;
+            conditional_norm2 += g * g;
+        }
+        let loss = eq.diag[atom] * norm2 - along_b - along_g;
+        let band =
+            2.0 * row_rounding * (eq.diag[atom] * norm2.sqrt() + conditional_norm2.sqrt());
+        (loss, band)
     };
-    let per_atom: Vec<(f64, f64)> = (0..k)
+    let per_atom: Vec<[(f64, f64); 2]> = (0..k)
         .into_par_iter()
-        .map(|atom| (atom_loss(first, atom), atom_loss(second, atom)))
+        .map(|atom| [atom_terms(first, atom), atom_terms(second, atom)])
         .collect();
-    per_atom
-        .iter()
-        .fold((0.0, 0.0), |(left, right), &(a, b)| (left + a, right + b))
+    per_atom.iter().fold([(0.0, 0.0); 2], |sum, terms| {
+        [
+            (sum[0].0 + terms[0].0, sum[0].1 + terms[0].1),
+            (sum[1].0 + terms[1].0, sum[1].1 + terms[1].1),
+        ]
+    })
 }
 
 /// Per-term rounding scale for the fixed-point convergence floor (#2396).
@@ -761,11 +777,15 @@ fn run_from_decoder(
             polish_unit_rows_against_normal_eq(&mut decoder, &normal_eq, &refresh)?;
             // The polish descends from the normalized MOD rows, and that start can
             // sit above the certified decoder at these codes. Descend from the
-            // certified rows instead whenever they are lower, so the refresh never
-            // raises the loss the code and support steps lower (#2283).
-            let (certified_loss, polished_loss) =
+            // certified rows instead when they are lower by more than both losses'
+            // rounding, so the refresh never raises the loss the code and support
+            // steps lower (#2283). Inside that band the two decoders are one state to
+            // f32, and restarting there traded the MOD path for a single sweep from
+            // the old rows on rounding noise: the continuation crawled at ~5e-9 EV per
+            // epoch and never certified (job 602679, returned_ev_is_fresh_code_ev).
+            let [certified, polished] =
                 fixed_code_losses(certified_decoder.view(), decoder.view(), &normal_eq);
-            if certified_loss < polished_loss {
+            if certified.0 + certified.1 < polished.0 - polished.1 {
                 decoder.assign(&certified_decoder);
                 polish_unit_rows_against_normal_eq(&mut decoder, &normal_eq, &refresh)?;
             }
