@@ -39,8 +39,7 @@ pub use code_space::{
     harvest_code_space_pair_promotions, harvest_code_space_promotions, linear_distortion_floor,
 };
 pub use fit::{
-    LinearPeel, LinearPeelConfig, TieredFitConfig, TieredFitReport, TieredSeedPolicy, fit_tiered,
-    linear_bulk_census,
+    LinearPeel, LinearPeelConfig, TieredFitConfig, TieredFitReport, fit_tiered, linear_bulk_census,
 };
 
 use ndarray::{Array1, Array2, ArrayView2, Axis};

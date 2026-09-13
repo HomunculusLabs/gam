@@ -36,7 +36,7 @@ use gam_sae::manifold::{
     fit_sae_support_sparse,
 };
 use gam_sae::sparse_dict::{block_sparse_dictionary_transform, reconstruct_block_sparse_rows};
-use gam_sae::tiered::{TieredFitConfig, TieredSeedPolicy, fit_tiered};
+use gam_sae::tiered::{TieredFitConfig, fit_tiered};
 use ndarray::{Array1, Array2, ArrayView2, Axis};
 use std::process::ExitCode;
 use std::time::Instant;
@@ -383,7 +383,6 @@ fn run() -> Result<(), String> {
 
     // --- Tier-1 only (linear-bulk baseline) ---
     let mut lin = TieredFitConfig::linear_bulk(args.n_blocks, args.block_size);
-    lin.tier1_seed = TieredSeedPolicy::Auto; // Auto is the data-row seed at every width.
     lin.tier1.block_topk = args.block_topk;
     lin.tier1.aux_k = args.aux_k;
     lin.tier1.max_epochs = args.epochs;
@@ -451,7 +450,6 @@ fn run() -> Result<(), String> {
 
     // --- Tiered (Tier-1 + Tier-2 curved support-sparse refinement on the residual) ---
     let mut tiered = TieredFitConfig::tiered(args.n_blocks, args.block_size);
-    tiered.tier1_seed = TieredSeedPolicy::Auto;
     tiered.tier1.block_topk = args.block_topk;
     tiered.tier1.aux_k = args.aux_k;
     tiered.tier1.max_epochs = args.epochs;

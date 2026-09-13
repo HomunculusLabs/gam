@@ -34,13 +34,18 @@
 //!    representation — the front door refuses any resident `N×K` alternative — so
 //!    the Tier-2 dictionary width must exceed the residual dimension.
 //!
-//! The unified [`SaeMigrationLedger`] records the Tier-1 block deaths, the
-//! code-space census's adjudicated promotions and refusals, and Tier-2's own
-//! account folded from its support fit: every curved atom born at the support
-//! seed from projections of the Tier-1 residual rows (the residual-factor pool),
-//! and the atoms that seed pruned for zero support mass. The support-sparse lane
-//! prices complexity through its grouped-LAML smoothing, not a per-move
-//! description-length charge, so those curved moves carry no `dl_bits`.
+//! The unified [`SaeMigrationLedger`] records three accounts.
+//! - Tier-1: the `G` blocks born at the data-row seed, each committed revival as
+//!   one death and one birth of its block, and the blocks still dead at the end,
+//!   so linear births minus linear deaths is the number of live blocks.
+//! - The code-space census's adjudicated promotions and refusals.
+//! - Tier-2's own account folded from its support fit: every curved atom born at
+//!   the support seed from projections of the Tier-1 residual rows (the
+//!   residual-factor pool), and the atoms that seed pruned for zero support mass.
+//!   The support-sparse lane prices complexity through its grouped-LAML smoothing,
+//!   not a per-move description-length charge, so those curved moves carry no
+//!   `dl_bits`.
+//!
 //! `pc_reseed_events` is always `0` on this path.
 
 use ndarray::{Array1, Array2, ArrayView2, Axis};
@@ -53,41 +58,13 @@ use crate::manifold::{
 };
 use crate::migration_ledger::{BirthSeed, MoveEvidence, MoveReason, MoveStage, SaeMigrationLedger};
 use crate::sparse_dict::{
-    BlockSeedPolicy, BlockSparseConfig, BlockSparseFit, block_sparse_dictionary_transform,
-    fit_block_sparse_dictionary_with_seed, reconstruct_block_sparse_rows,
+    BlockSparseConfig, BlockSparseFit, block_sparse_dictionary_transform,
+    fit_block_sparse_dictionary, reconstruct_block_sparse_rows,
 };
 use crate::tiered::Tier0Mean;
 use crate::tiered::code_space::{
     CodeSpacePromotionReport, harvest_code_space_promotions, linear_distortion_floor,
 };
-
-/// How Tier-1 seeds its `K = G·b` block frames. The default [`Auto`] keeps the
-/// seed data-placed at every width using the linear-cost data-row construction.
-///
-/// [`Auto`]: TieredSeedPolicy::Auto
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum TieredSeedPolicy {
-    /// Use the scalable data-row seed.
-    #[default]
-    Auto,
-    /// Force the data-aware farthest-point seed regardless of `K`.
-    FarthestPoint,
-    /// Force the cheap coordinate-partition seed regardless of `K`.
-    CoordinatePartition,
-}
-
-impl TieredSeedPolicy {
-    /// Resolve to a concrete [`BlockSeedPolicy`]. Since #2023 the choice no
-    /// longer depends on the corpus size or the block geometry: `Auto` is the
-    /// data-row seed at every width.
-    fn resolve(self) -> BlockSeedPolicy {
-        match self {
-            TieredSeedPolicy::Auto => BlockSeedPolicy::DataRows,
-            TieredSeedPolicy::FarthestPoint => BlockSeedPolicy::FarthestPoint,
-            TieredSeedPolicy::CoordinatePartition => BlockSeedPolicy::CoordinatePartition,
-        }
-    }
-}
 
 /// Tier-2 curved refinement configuration: the overcomplete hard-TopK
 /// support-sparse dictionary fit on the Tier-1 residual (#2023). The residual
@@ -154,10 +131,6 @@ pub struct TieredFitConfig {
     /// not by this config: the Tier-1 router dispatches each minibatch to the CUDA
     /// block-gate lane when the mode admits it and a runtime is present.
     pub tier1: BlockSparseConfig,
-    /// How Tier-1 seeds its `K` block frames. [`TieredSeedPolicy::Auto`] (default)
-    /// uses the data-row seed, so a `K ≈ 1e4` fit is both linear-cost and
-    /// data-placed from its first routing pass.
-    pub tier1_seed: TieredSeedPolicy,
     /// Whether to run the Tier-2 curved refinement on the Tier-1 residual
     /// (`false` ⇒ Tier-0 + Tier-1 only, the linear-bulk baseline).
     pub tier2_enabled: bool,
@@ -171,7 +144,6 @@ impl TieredFitConfig {
     pub fn linear_bulk(n_blocks: usize, block_size: usize) -> Self {
         Self {
             tier1: BlockSparseConfig::new(n_blocks, block_size),
-            tier1_seed: TieredSeedPolicy::Auto,
             tier2_enabled: false,
             tier2: Tier2SupportConfig::default(),
         }
@@ -181,7 +153,6 @@ impl TieredFitConfig {
     pub fn tiered(n_blocks: usize, block_size: usize) -> Self {
         Self {
             tier1: BlockSparseConfig::new(n_blocks, block_size),
-            tier1_seed: TieredSeedPolicy::Auto,
             tier2_enabled: true,
             tier2: Tier2SupportConfig::default(),
         }
@@ -194,8 +165,6 @@ impl TieredFitConfig {
 pub struct LinearPeelConfig {
     /// Tier-1 block geometry (`G` blocks of size `b`, block budget `k`).
     pub tier1: BlockSparseConfig,
-    /// How Tier-1 seeds its `K = G·b` block frames.
-    pub tier1_seed: TieredSeedPolicy,
 }
 
 /// The linear bulk `L` on rows `z` (`N×P`): de-mean by `μ`, route the rows against
@@ -264,12 +233,9 @@ pub fn fit_linear_peel(
     let r0 = tier0.apply(z)?;
     let r0_f32 = r0.mapv(|value| value as f32);
 
-    // Tier 1: block-sparse collapsed-linear bulk on the de-meaned residual. `Auto`
-    // is the linear-cost data-row seed at every width (#2023).
-    let seed_policy = config
-        .tier1_seed
-        .resolve();
-    let tier1 = fit_block_sparse_dictionary_with_seed(r0_f32.view(), &config.tier1, seed_policy)?;
+    // Tier 1: block-sparse collapsed-linear bulk on the de-meaned residual, seeded
+    // from its rows at every width (#2023), so every block is a residual-factor birth.
+    let tier1 = fit_block_sparse_dictionary(r0_f32.view(), &config.tier1)?;
 
     let (n_obs, output_dim) = r0.dim();
     let linear = route_linear_bulk(
@@ -373,7 +339,8 @@ pub struct TieredFitReport {
 /// support-sparse engine (`fit_tier2_support` → [`fit_sae_support_sparse`]),
 /// whose returned fit carries a certified inner fixed point and outer stationarity
 /// certificate. No principal-component reseeding occurs; the [`SaeMigrationLedger`]
-/// accounts for the curved births / deaths and pins `pc_reseed_events = 0`.
+/// accounts for every Tier-1 block and every curved birth and death, and pins
+/// `pc_reseed_events = 0`.
 pub fn fit_tiered(
     z: ArrayView2<'_, f64>,
     config: &TieredFitConfig,
@@ -383,15 +350,49 @@ pub fn fit_tiered(
         z,
         &LinearPeelConfig {
             tier1: config.tier1,
-            tier1_seed: config.tier1_seed,
         },
     )?;
 
     let mut ledger = SaeMigrationLedger::new();
 
-    // Structural deaths: Tier-1 blocks no row selected fall back to the residual
-    // factor pool. (Revival, when it happens, draws from worst-residual rows in
-    // the block lane — never from PCs.)
+    // Tier-1 births: all `G` block frames are read off rows of `R0`, the residual
+    // before any atom exists, so each block is born from the residual-factor pool.
+    ledger.birth(
+        MoveStage::Linear,
+        BirthSeed::ResidualFactor,
+        peel.tier1.block_utilization.len(),
+        None,
+        MoveEvidence::none(),
+        f64::NAN,
+    );
+    // Revivals: each committed residual-row birth installed a new frame in a block
+    // no row selected, so it is one death and one birth of that block. The lane
+    // admitted each only when rows select the new block and its deviance gain beats
+    // its rank charge; that margin is not carried out of the fit, so these moves
+    // are unscored here.
+    let revivals = peel.tier1.committed_births;
+    if revivals > 0 {
+        ledger.death(
+            MoveStage::Linear,
+            MoveReason::DeadRouting,
+            revivals,
+            None,
+            MoveEvidence::none(),
+            f64::NAN,
+        );
+        ledger.birth(
+            MoveStage::Linear,
+            BirthSeed::ResidualFactor,
+            revivals,
+            None,
+            MoveEvidence::none(),
+            f64::NAN,
+        );
+    }
+
+    // Structural deaths: Tier-1 blocks no row selects at the end fall back to the
+    // residual factor pool. With the births above, linear births minus linear
+    // deaths is the number of live blocks.
     let n_dead = peel
         .tier1
         .block_utilization
@@ -615,7 +616,39 @@ fn record_support_moves(ledger: &mut SaeMigrationLedger, fit: &Tier2SupportFit) 
 #[cfg(test)]
 mod fit_tests {
     use super::*;
+    use crate::migration_ledger::SaeMove;
     use ndarray::Array2;
+
+    /// The births and deaths a ledger records on one rung.
+    fn stage_tally(ledger: &SaeMigrationLedger, stage: MoveStage) -> (usize, usize) {
+        ledger
+            .moves
+            .iter()
+            .fold((0, 0), |(births, deaths), mv| match &mv.kind {
+                SaeMove::Birth { stage: rung, .. } if *rung == stage => (births + mv.count, deaths),
+                SaeMove::Death { stage: rung, .. } if *rung == stage => (births, deaths + mv.count),
+                _ => (births, deaths),
+            })
+    }
+
+    /// #2023 criterion 3 on Tier-1: the linear rung records the `G` seed blocks and
+    /// every committed revival as births, and every revival and the blocks dead at
+    /// the end as deaths, so births minus deaths is the number of live blocks.
+    fn assert_linear_blocks_accounted(report: &TieredFitReport) {
+        let (births, deaths) = stage_tally(&report.ledger, MoveStage::Linear);
+        let tier1 = &report.tier1;
+        let live = tier1.block_utilization.iter().filter(|&&u| u > 0.0).count();
+        assert_eq!(
+            births,
+            tier1.block_utilization.len() + tier1.committed_births,
+            "every seed block and every revival is one linear birth"
+        );
+        assert_eq!(
+            births - deaths,
+            live,
+            "linear births minus linear deaths must be the live block count"
+        );
+    }
 
     /// Two planted linear directions in P=6; the tiered driver runs end to end,
     /// returns a finite composed EV, and performs zero PC reseeds.
@@ -884,9 +917,11 @@ mod fit_tests {
             "the tiered path must never PC-reseed"
         );
         assert_eq!(
-            report.ledger.n_births, tier2.retained_atoms,
+            stage_tally(&report.ledger, MoveStage::Curved).0,
+            tier2.retained_atoms,
             "every retained curved atom is a promotion off the linear residual"
         );
+        assert_linear_blocks_accounted(&report);
         // A curved refinement (which also peels the residual's own mean) can never
         // do worse than the pure-linear tier it refines.
         assert!(
@@ -952,83 +987,15 @@ mod fit_tests {
             proposal.crossover_prescreen_bits
         );
         assert_eq!(census.n_accepted, 0, "deferred, not bought");
-        // Ledger provenance: the deferral is a recorded Curved REFUSAL; no birth.
-        assert_eq!(report.ledger.n_births, 0);
+        // Ledger provenance: the deferral is a recorded Curved REFUSAL, never a
+        // curved birth, and the linear rung accounts for the one block.
+        assert_eq!(stage_tally(&report.ledger, MoveStage::Curved).0, 0);
+        assert_linear_blocks_accounted(&report);
         assert!(
             report.ledger.n_refusals >= 1,
             "the ledger must record the deferred promotion"
         );
         assert_eq!(report.ledger.pc_reseed_events, 0);
-    }
-
-    /// `TieredSeedPolicy::Auto` is data-placed without a serial farthest-point
-    /// search at both small and large `K`.
-    #[test]
-    fn auto_seed_is_scalable_and_data_placed_at_every_width_2023() {
-        let small = TieredFitConfig::linear_bulk(8, 2);
-        assert_eq!(
-            small.tier1_seed.resolve(),
-            BlockSeedPolicy::DataRows
-        );
-        let large = TieredFitConfig::linear_bulk(2_500, 4);
-        assert_eq!(
-            large.tier1_seed.resolve(),
-            BlockSeedPolicy::DataRows,
-            "large-K tiered fit must remain data-placed"
-        );
-        // Explicit overrides remain available for controlled comparisons.
-        let mut forced = TieredFitConfig::linear_bulk(2_500, 4);
-        forced.tier1_seed = TieredSeedPolicy::FarthestPoint;
-        assert_eq!(
-            forced.tier1_seed.resolve(),
-            BlockSeedPolicy::FarthestPoint
-        );
-        forced.tier1_seed = TieredSeedPolicy::CoordinatePartition;
-        assert_eq!(
-            forced.tier1_seed.resolve(),
-            BlockSeedPolicy::CoordinatePartition
-        );
-    }
-
-    /// The coordinate-partition seed carries a full tiered fit end to end (Tier-0
-    /// mean → Tier-1 bulk on the cheap seed → Tier-2 curved co-fit on the residual),
-    /// producing a finite composed EV and never PC-reseeding. This is the large-`K`
-    /// entry's fit path exercised at a small `K` (the seed is what changes, not the
-    /// engine), so the test stays fast while still driving every stage.
-    #[test]
-    fn coordinate_seed_carries_a_full_tiered_fit() {
-        let z = two_circle_fixture_2634();
-        let p = z.ncols();
-
-        let mut config = TieredFitConfig::tiered(2, 1);
-        config.tier1_seed = TieredSeedPolicy::CoordinatePartition;
-        config.tier1.block_topk = 1;
-        config.tier1.aux_k = 2;
-        config.tier1.max_epochs = 200;
-        // Smallest overcomplete curved dictionary for this seed-path witness.
-        config.tier2.n_atoms = p + 1;
-        config.tier2.support_k = 1;
-        config.tier2.max_outer_iter = 24;
-        config.tier2.max_inner_iter = 128;
-        let report =
-            fit_tiered(z.view(), &config).expect("coordinate-seeded tiered fit runs end to end");
-        assert!(
-            report.explained_variance.is_finite() && report.explained_variance > 0.0,
-            "coordinate-seeded composed EV must be finite and positive, got {}",
-            report.explained_variance
-        );
-        assert_eq!(
-            report.ledger.pc_reseed_events, 0,
-            "the coordinate-seeded tiered path must never PC-reseed"
-        );
-        let tier2 = report
-            .tier2
-            .as_ref()
-            .expect("tiered config must run Tier-2");
-        assert!(
-            tier2.outer_certificate.certifies(),
-            "the Tier-2 support-sparse refinement must return a certified fit"
-        );
     }
 
     /// Focused #2023 gate: on a tiny two-circle fixture the Tier-2 branch drives
@@ -1103,11 +1070,13 @@ mod fit_tests {
         );
 
         // Ledger provenance: retained atoms are curved promotions off the linear
-        // residual, never PC reseeds.
+        // residual, never PC reseeds, and every Tier-1 block is accounted for.
         assert_eq!(
-            report.ledger.n_births, tier2.retained_atoms,
+            stage_tally(&report.ledger, MoveStage::Curved).0,
+            tier2.retained_atoms,
             "every retained curved atom is one curved birth"
         );
+        assert_linear_blocks_accounted(&report);
         assert_eq!(
             report.ledger.pc_reseed_events, 0,
             "the support-sparse Tier-2 path must never PC-reseed"
@@ -1183,6 +1152,7 @@ mod fit_tests {
         config.tier1.aux_k = 2;
         config.tier1.max_epochs = 200;
         let report = fit_tiered(z.view(), &config).expect("linear-bulk fit runs");
+        assert_linear_blocks_accounted(&report);
         let record = report.census_json();
         assert_eq!(record["linear_bulk"]["n_blocks"].as_u64(), Some(2));
         assert_eq!(record["linear_bulk"]["block_size"].as_u64(), Some(1));

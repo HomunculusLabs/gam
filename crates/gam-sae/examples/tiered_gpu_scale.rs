@@ -28,9 +28,8 @@
 //!
 //! # Seeding at high `K`
 //!
-//! [`fit_tiered`]'s Tier-1 seeds its `K` frames per the `TieredSeedPolicy` on the
-//! config. The default `Auto` is the linear-cost data-row seed at every width, so the
-//! serial farthest-point pass never runs unless a caller forces it, and `--rows` can be
+//! [`fit_tiered`]'s Tier-1 seeds its `K` frames from data rows at every width, a
+//! linear-cost pass with no serial farthest-point search, so `--rows` can be
 //! raised toward the #2023 `N=1e5` target. Device admission depends on `minibatch·K`
 //! (not `N`), so routing engages at `K≈1e4` at any `N`.
 

@@ -289,6 +289,10 @@ pub struct BlockSparseFit {
     pub explained_variance: f64,
     /// Number of epochs actually run.
     pub epochs: usize,
+    /// Residual-row births the fit committed across its epochs. Each installed a
+    /// new frame in a block no row selected, so it is one death and one birth of
+    /// that block. The replayed certificate alternation commits none.
+    pub committed_births: usize,
     /// Checkable fixed-point certificate for the final full alternation.
     pub convergence: BlockSparseConvergence,
     /// Block budget `k` actually used (`min(block_topk, G)`).
@@ -2430,6 +2434,7 @@ fn fit_block_sparse_dictionary_with_seed_inner(
     let routing_residual: f64;
     let reconstruction_residual: f64;
     let mut accepted_births = 0usize;
+    let mut committed_births = 0usize;
     let mut polar_failures = 0usize;
     // The frame residual is read off f32-stored frames, so the configured
     // tolerance governs wherever it is attainable and the storage resolution
@@ -2449,6 +2454,7 @@ fn fit_block_sparse_dictionary_with_seed_inner(
             frame_fixed_point_residual(state.decoder.view(), step.next.decoder.view(), g, b)?
                 .max(step.frame_stationarity);
         accepted_births = step.accepted_births;
+        committed_births += step.accepted_births;
         polar_failures = step.polar_failures;
         let next_ev = step.next.explained_variance;
         state = step.next;
@@ -2615,6 +2621,7 @@ fn fit_block_sparse_dictionary_with_seed_inner(
         matryoshka_prefix_losses: prefix_losses,
         explained_variance: final_ev,
         epochs: epochs_run,
+        committed_births,
         convergence: BlockSparseConvergence {
             ev_residual,
             gamma_residual,
