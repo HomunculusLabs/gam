@@ -337,7 +337,13 @@ fn a_smooth_multinomial_that_does_not_separate_keeps_the_prior_disarmed_2612() {
 #[test]
 fn genuine_separation_still_arms_the_prior_2612() {
     const ROWS: usize = 300;
-    let model = fit(separated_records(ROWS), "y ~ x1 + x2");
+    // b7b874a2a gave formula linear effects the null-recovery ridge by default (SPEC rules 12
+    // and 14), so a bare `x1 + x2` now carries one penalty per effect. This arm needs a design
+    // the #2612 repair provably cannot act on, `S_lambda = 0`, so it opts both effects out.
+    let model = fit(
+        separated_records(ROWS),
+        "y ~ linear(x1, double_penalty=false) + linear(x2, double_penalty=false)",
+    );
 
     assert!(
         model.smooth_term_spans.is_empty() && model.lambdas.is_empty(),
