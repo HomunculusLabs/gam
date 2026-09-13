@@ -756,3 +756,152 @@ fn ard_trace_dense_and_probes_agree_on_clamp_basin_rows_2914() {
          separation={separation:e} gap={gap:e}"
     );
 }
+
+/// #2913 — the Softmax lane on clamp-basin rows, against the lane value.
+///
+/// A Softmax row writes no clamp on its logits, so its clamp-basin rows come from
+/// the periodic ARD prior's concave half on coordinate slots, and its reduced Schur
+/// prices basins through that clamp. On the first rung of the declared ladder whose
+/// exact-A factor prices such a row, every exact-operator from-probes channel must
+/// be the central difference of the lane value on the anchor's stratum: the sparse
+/// log-strength trace and one ARD precision trace against `½ arrow_log_det` over
+/// frozen θ̂, and the θ-adjoint of every latent variable of a clamp-basin row against
+/// `arrow_log_det` at frozen ρ. Parity between `logdet_theta_adjoint_dense` and the
+/// from-probes adjoint on one cache cannot see a convention both share, as the #2915
+/// numbers showed for the threshold gate, so the arbiter is the value. Every gap
+/// prints before the assertion.
+#[test]
+fn softmax_lane_channels_match_the_lane_value_on_clamp_basin_rows_2913() {
+    let state = first_clamp_basin_state(AssignmentMode::softmax(1.0), true);
+    let (_, target, _) = threshold_gate_tiny_fixture(true);
+    let (probes, sinv) = full_basis_bundle(&state.cache);
+    let operator = EvidenceOperator::ExactObservedInformation;
+    let anchor_stratum = factor_stratum(&state.cache);
+    let log_det_at = |moved_term: &SaeManifoldTerm, moved_rho: &SaeManifoldRho| -> f64 {
+        let (_, endpoint) = exact_a_evidence_cache(moved_term, &target, moved_rho)
+            .expect("#2913 exact-A factor at a finite-difference endpoint");
+        assert_eq!(
+            factor_stratum(&endpoint),
+            anchor_stratum,
+            "#2913: both endpoints must sit on the anchor's stratum"
+        );
+        endpoint
+            .arrow_log_det()
+            .expect("#2913 authoritative joint log-det of the exact-A factor")
+    };
+    let h = 1.0e-5;
+    let mut report = Vec::new();
+    let mut failures = Vec::new();
+
+    let sparse = state
+        .term
+        .assignment_log_strength_hessian_trace_from_probes(
+            &state.rho,
+            &state.cache,
+            &probes,
+            &sinv,
+            operator,
+        )
+        .expect("#2913 exact-operator sparse trace");
+    let sparse_fd = {
+        let mut plus = state.rho.clone();
+        let mut minus = state.rho.clone();
+        plus.log_lambda_sparse += h;
+        minus.log_lambda_sparse -= h;
+        0.5 * (log_det_at(&state.term, &plus) - log_det_at(&state.term, &minus)) / (2.0 * h)
+    };
+    report.push(format!(
+        "sparse={sparse:.12e} fd={sparse_fd:.12e} gap={:.3e}",
+        (sparse - sparse_fd).abs()
+    ));
+    if (sparse - sparse_fd).abs() > 1.0e-6 * (1.0 + sparse_fd.abs()) {
+        failures.push("sparse".to_string());
+    }
+
+    let ard_atom = (0..state.rho.log_ard.len())
+        .find(|&atom| !state.rho.log_ard[atom].is_empty())
+        .expect("#2913 premise: the fixture must carry an ARD precision");
+    let ard = state
+        .term
+        .ard_log_precision_hessian_trace_from_probes(
+            &state.rho,
+            &state.cache,
+            &probes,
+            &sinv,
+            operator,
+        )
+        .expect("#2913 exact-operator ARD trace")[ard_atom][0];
+    let ard_fd = {
+        let mut plus = state.rho.clone();
+        let mut minus = state.rho.clone();
+        plus.log_ard[ard_atom][0] += h;
+        minus.log_ard[ard_atom][0] -= h;
+        0.5 * (log_det_at(&state.term, &plus) - log_det_at(&state.term, &minus)) / (2.0 * h)
+    };
+    report.push(format!(
+        "ard[{ard_atom},0]={ard:.12e} fd={ard_fd:.12e} gap={:.3e}",
+        (ard - ard_fd).abs()
+    ));
+    if (ard - ard_fd).abs() > 1.0e-6 * (1.0 + ard_fd.abs()) {
+        failures.push("ard".to_string());
+    }
+
+    let theta = state
+        .term
+        .logdet_theta_adjoint_from_probes(
+            &state.rho,
+            &state.cache,
+            &probes,
+            &sinv,
+            operator,
+            Some(target.view()),
+        )
+        .expect("#2913 exact-operator theta-adjoint");
+    let row = state.rows[0];
+    let variables = state
+        .term
+        .row_vars_for_cache_row(row, &state.cache)
+        .expect("#2913 row variables");
+    for (position, variable) in variables.iter().enumerate() {
+        let (label, endpoint) = match *variable {
+            SaeLocalRowVar::Logit { atom } => (format!("logit {atom}"), (atom, None)),
+            SaeLocalRowVar::Coord { atom, axis } => {
+                (format!("coord {atom}.{axis}"), (atom, Some(axis)))
+            }
+        };
+        let moved = |sign: f64| {
+            let mut term = frozen_gate_endpoint(&state.term);
+            match endpoint {
+                (atom, None) => term.assignment.logits[[row, atom]] += sign * h,
+                (atom, Some(axis)) => {
+                    let index = row * term.assignment.coords[atom].latent_dim() + axis;
+                    let mut flat = term.assignment.coords[atom].as_flat().clone();
+                    flat[index] += sign * h;
+                    term.assignment.coords[atom].set_flat(flat.view());
+                }
+            }
+            term
+        };
+        let adjoint = theta.t[state.cache.row_offsets[row] + position];
+        let fd = (log_det_at(&moved(1.0), &state.rho) - log_det_at(&moved(-1.0), &state.rho))
+            / (2.0 * h);
+        report.push(format!(
+            "theta[row {row}, {label}]={adjoint:.12e} fd={fd:.12e} gap={:.3e}",
+            (adjoint - fd).abs()
+        ));
+        if (adjoint - fd).abs() > 1.0e-5 * (1.0 + fd.abs()) {
+            failures.push(format!("theta {label}"));
+        }
+    }
+    eprintln!(
+        "#2913 SOFTMAX_CLAMP_BASIN rows={:?}\n  {}",
+        state.rows,
+        report.join("\n  ")
+    );
+    assert!(
+        failures.is_empty(),
+        "#2913: the exact-operator lane channels must differentiate the lane value on Softmax \
+         clamp-basin rows; failing: {failures:?}\n  {}",
+        report.join("\n  ")
+    );
+}
