@@ -151,7 +151,7 @@ impl PenaltyOp for ClosedFormPenaltyOperator {
 /// and we need an operator whose `as_dense()` matches it bit-for-bit. The
 /// adapter divides every matvec / diag / trace result by `norm` (equivalently:
 /// scales by `1/norm`).
-pub struct ScaledPenaltyOp {
+pub(crate) struct ScaledPenaltyOp {
     inner: Arc<dyn PenaltyOp>,
     scale: f64,
 }

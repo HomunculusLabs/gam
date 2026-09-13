@@ -256,7 +256,7 @@ fn smooth_is_owned_by_prior_term(owner: &SmoothTermSpec, target: &SmoothTermSpec
 /// cross-residual overlap test on the realized design columns; the CLI structure-warning
 /// path consumes the same structure for diagnostic messages, so both paths agree on which
 /// smooths own which subspaces.
-pub struct SmoothStructureAnalysis {
+pub(crate) struct SmoothStructureAnalysis {
     /// Smooth-term indices sorted into ownership-processing order (lowest priority first):
     /// lower-order / narrower smooths come first and own their subspaces.
     pub ownership_order: Vec<usize>,

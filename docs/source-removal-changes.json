@@ -8938,5 +8938,13 @@
     ],
     "reason": "#2822 high-p gauge-deflated timeout: the scalar #2828 border form cost k² per entry and was evaluated for every pair of a repeated-eigenvalue run in cluster_stable_eigh, and for every entry of the negative basin and its complement response. dropped_curvature_border_forms computes the same entries over two bases in one pass, bit-identically, and the three call sites use it, so the scalar form has no callers.",
     "evidence": "Guarded pool job 622876 (lane sw0k, node acn20) at b359ccfe9d0efc90075a67293ed3a0739c49730b with exactly this one-file patch overlaid (HEAD==PIN, 1 dirty file): cargo check --locked --workspace --all-targets --exclude gam-pyffi --keep-going CHECK_RC=0; cargo nextest run -p gam-sae --lib over the _2820 tests, the #2330 eigendecomposition oracle and tests_clamp_basin_deflation_2333: 15 tests run: 12 passed, 3 failed (ORACLE_RC=100); the three failures (tests_clamp_basin_deflation_2333::softmax_lane_channels_match_the_lane_value_on_clamp_basin_rows_2913, threshold_gate_exact_sparse_logdet_trace_matches_the_lane_value_2915, clamp_basin_price_derivative_matches_the_lane_value_2915) read the same digits without this patch (exact=6.365082847688942e0 fd=6.365623965720601e0, and the #2913 premise) in jet932b's guarded job 609221 at 3a5be6550, /scratch.global/sauer354/pool/jet932b/t2916a.609221.log. jet932b attributes them to cf712b006's decoder-prior border clamp not yet carried in the basin-price weights and a Softmax ladder that never factors; the fixes are staged in their job 611992. Log: /scratch.global/sauer354/pool/sae2822b/bformcheck.622876.log"
+  },
+  {
+    "base": "f89259dcc13c36a0a1219a77b7319112e28dec64",
+    "items": [
+      "crates/gam-terms/src/analytic_penalties/registry.rs:fn:penalty"
+    ],
+    "reason": "#2899 slop: FrozenAnalyticPenaltyOp::penalty, a read-only accessor to the frozen op's AnalyticPenaltyKind, has no caller. Once the op is crate-private, rustc reports it never used. The same commit narrows seven gam-terms items that only gam-terms uses and that no public item exposes: FrozenAnalyticPenaltyOp, ScaledPenaltyOp, SmoothStructureAnalysis, and the three sphere_spectral functions.",
+    "evidence": "At the base, git grep -n -w penalty finds no .penalty() call on a FrozenAnalyticPenaltyOp. Pool job 627786 (log /scratch.global/sauer354/pool/prune-api-b/r18b.627786.log, r18b.cargo.out) compiled the op crate-private, and rustc reported crates/gam-terms/src/analytic_penalties/registry.rs:336 method `penalty` is never used."
   }
 ]

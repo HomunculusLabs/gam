@@ -121,7 +121,8 @@ pub(crate) use ndarray::{
 pub(crate) use std::sync::{Arc, RwLock};
 
 pub use self::manifest::PenaltyManifest;
-pub use self::op::{PenaltyOp, ScaledPenaltyOp};
+pub use self::op::PenaltyOp;
+pub(crate) use self::op::ScaledPenaltyOp;
 pub use self::sheaf::{EdgeRestriction, SheafConsistencyPenalty};
 pub(crate) use crate::basis::{
     BasisError, DuchonNullspaceOrder, radial_basis_cartesian_derivative,

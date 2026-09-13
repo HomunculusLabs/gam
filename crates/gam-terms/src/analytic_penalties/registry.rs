@@ -302,7 +302,7 @@ impl AnalyticPenaltyRegistry {
 /// `as_dense()` materializes the frozen local Hessian via `n` matvecs against
 /// the standard basis — `O(n²)` and intended only for spectral diagnostics;
 /// the hot path uses `matvec` and `diag` directly.
-pub struct FrozenAnalyticPenaltyOp {
+pub(crate) struct FrozenAnalyticPenaltyOp {
     penalty: AnalyticPenaltyKind,
     target: Array1<f64>,
     rho: Array1<f64>,
@@ -329,12 +329,6 @@ impl FrozenAnalyticPenaltyOp {
             target,
             rho,
         })
-    }
-
-    /// Underlying penalty (read-only). Useful for the outer driver that needs
-    /// to query `grad_rho` while still holding the frozen op.
-    pub fn penalty(&self) -> &AnalyticPenaltyKind {
-        &self.penalty
     }
 }
 

@@ -34,7 +34,8 @@ pub use scale_contract::{
 
 pub mod structure_analysis;
 use self::structure_analysis::smooth_has_frozen_identifiability;
-pub use self::structure_analysis::{SmoothStructureAnalysis, smooth_term_feature_cols};
+pub(crate) use self::structure_analysis::SmoothStructureAnalysis;
+pub use self::structure_analysis::smooth_term_feature_cols;
 pub(crate) use self::structure_analysis::analyze_smooth_ownership;
 
 // The advisories that read the structure `structure_analysis` computes. They

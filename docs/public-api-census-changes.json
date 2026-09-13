@@ -3846,5 +3846,13 @@
     },
     "reason": "#979 (former #2893; SPEC rules 15, 25). The hand design-ψ calculus of the survival marginal-slope time wiggle (the ψ row lift, its action, the score lift and the lift accumulators) double-counted x_ψ·T'(h) and never differentiated the time-wiggle map along v. 940ba0cf6, 8f027a3b5 and cbdebe6c4 route every single-slope time-wiggle frame through the ζ composition of timewiggle_third, so the lift is deleted with add_rank1_psi_cross_with_q_geometry, which only it called. A per-score slope or a FLEX program beside a follow-up-varying slope now refuses design ψ by name. timewiggle_flex_design_psi_third_available merges into timewiggle_zeta_available, and the ζ sweeps drop \"flex\" from their names because they serve the rigid row program since cbdebe6c4.",
     "evidence": "Guarded compile: pool job 620859 (sw0g, acn02), with this patch applied at e1f107b60 and committed locally, ran cargo check --workspace --all-targets --exclude gam-pyffi: CHECK_RC=0, /scratch.global/sauer354/pool/gpu2826/combo12.check.620859.log. This record's items and the census entry's functions are the exact lists that scripts/source_removal_guard.py and scripts/public_api_census.py printed for this patch in that job (combo12.srg.620859.txt, combo12.census.620859.txt). Job 615371 at 5df882b79 ran the same deletion through the guarded check: CHECK_RC=0, combo10.check.615371.log."
+  },
+  {
+    "base": "f89259dcc13c36a0a1219a77b7319112e28dec64",
+    "removed": {
+      "crates/gam-terms/src/analytic_penalties/registry.rs::penalty": 1
+    },
+    "reason": "#2899 slop: the uncalled FrozenAnalyticPenaltyOp::penalty accessor is deleted.",
+    "evidence": "public_functions() counts the pub fn penalty declaration at registry.rs:336. Pool job 627786 (r18b.cargo.out) reported it never used once FrozenAnalyticPenaltyOp was crate-private, and git grep finds no caller."
   }
 ]

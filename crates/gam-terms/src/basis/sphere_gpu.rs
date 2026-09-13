@@ -1036,9 +1036,9 @@ pub(crate) fn build_kernel_matrix_device(
 mod sphere_gpu_tests {
     use super::*;
     use crate::basis::sphere_half_angle::{SphereTrig, half_angle_separation_scalar};
+    use crate::basis::sphere_spectral::sphere_truncated_spectral_eval;
     use crate::basis::{
-        SphereWahbaKernel, sobolev_s2_truncated_coefficients, sphere_truncated_spectral_eval,
-        spherical_wahba_kernel_matrix_with_kind,
+        SphereWahbaKernel, sobolev_s2_truncated_coefficients, spherical_wahba_kernel_matrix_with_kind,
     };
     use ndarray::Array2;
 

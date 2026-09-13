@@ -11,7 +11,7 @@
 /// `c_0 = 0`, `c_ℓ = (2ℓ+1) / (4π · [ℓ(ℓ+1)]^m)` for `ℓ = 1..=lmax`.
 /// Returned vector has length `lmax + 1` with `result[ℓ] = c_ℓ`. The
 /// GPU `s2_wahba_legendre_colmajor` kernel uploads exactly this array.
-pub fn sobolev_s2_truncated_coefficients(lmax: usize, m: usize) -> Vec<f64> {
+pub(crate) fn sobolev_s2_truncated_coefficients(lmax: usize, m: usize) -> Vec<f64> {
     let four_pi = 4.0 * std::f64::consts::PI;
     let mut coeffs = vec![0.0_f64; lmax + 1];
     let mi = m as i32;
@@ -25,7 +25,7 @@ pub fn sobolev_s2_truncated_coefficients(lmax: usize, m: usize) -> Vec<f64> {
 
 /// Build the truncated pseudo-spline coefficient array
 /// `c_0 = 0`, `c_ℓ = 2 / (4π · Π_{k=1..m+1}(ℓ + k))` for `ℓ = 1..=lmax`.
-pub fn pseudo_s2_truncated_coefficients(lmax: usize, m: usize) -> Vec<f64> {
+pub(crate) fn pseudo_s2_truncated_coefficients(lmax: usize, m: usize) -> Vec<f64> {
     let four_pi = 4.0 * std::f64::consts::PI;
     let mut coeffs = vec![0.0_f64; lmax + 1];
     for ell in 1..=lmax {
@@ -44,7 +44,7 @@ pub fn pseudo_s2_truncated_coefficients(lmax: usize, m: usize) -> Vec<f64> {
 /// `coeffs.len() = lmax + 1`. The recurrence is
 /// `p_{ℓ+1} = ((2ℓ+1)·t·p_ℓ − ℓ·p_{ℓ−1}) / (ℓ + 1)`.
 #[inline]
-pub fn sphere_truncated_spectral_eval(cos_gamma: f64, coeffs: &[f64]) -> f64 {
+pub(crate) fn sphere_truncated_spectral_eval(cos_gamma: f64, coeffs: &[f64]) -> f64 {
     let t = cos_gamma.clamp(-1.0, 1.0);
     let lmax = coeffs.len().saturating_sub(1);
     if lmax == 0 {
