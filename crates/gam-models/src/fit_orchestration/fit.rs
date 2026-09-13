@@ -1627,7 +1627,15 @@ fn optimize_survival_transformation_smoothing(
     // and every asserted recovery bar are unchanged — only redundant inner
     // solves are removed. This mirrors the gamlss outer evaluator's `last_eval`
     // cache (`families::gamlss::builders`).
-    let eval_cache: std::cell::RefCell<Option<(Array1<f64>, f64, Array1<f64>)>> =
+    //
+    // The entry also carries the certified inner mode β̂ it was evaluated at. The
+    // terminal mint asks for curvature at the ρ it has just valued, and the cache
+    // holds no Hessian, so that request evaluates again (#2912). It evaluates at
+    // THIS mode: continuing P-IRLS from it stops at a second "converged" β̂ whose
+    // LAML differs from the valued one by more than the outer value-agreement
+    // audit admits (#1082 q26: 1.390e-4 against a 2.274e-5 bound), and the mint
+    // then refused a converged fit for pricing value and curvature at two modes.
+    let eval_cache: std::cell::RefCell<Option<(Array1<f64>, f64, Array1<f64>, Array1<f64>)>> =
         std::cell::RefCell::new(None);
     // Warm-start chaining for the inner PIRLS across outer probes (#2298). The
     // generic BFGS bridge evaluates this objective at a sequence of spatially
@@ -1654,14 +1662,20 @@ fn optimize_survival_transformation_smoothing(
     > {
         let physical_smoothing =
             gam_problem::checked_exp_log_strengths(rho_smooth.iter().copied())?;
-        // The cache holds no Hessian, so a curvature request always evaluates.
+        // The cache holds no Hessian, so a curvature request always evaluates: at
+        // the cached mode when the cache is at this ρ, otherwise from P-IRLS.
         let wants_hessian = matches!(order, OuterEvalOrder::ValueGradientHessian);
-        if !wants_hessian
-            && let Some((cached_rho, cached_cost, cached_grad)) = eval_cache.borrow().as_ref()
-            && cached_rho == rho_smooth
-        {
-            return Ok((*cached_cost, cached_grad.clone(), HessianValue::Unavailable));
-        }
+        let cached_mode = match eval_cache.borrow().as_ref() {
+            Some((cached_rho, cached_cost, cached_grad, cached_beta))
+                if cached_rho == rho_smooth =>
+            {
+                if !wants_hessian {
+                    return Ok((*cached_cost, cached_grad.clone(), HessianValue::Unavailable));
+                }
+                Some(cached_beta.clone())
+            }
+            _ => None,
+        };
         let mut candidate = model.clone();
         candidate
             .set_penalty_lambdas(&physical_smoothing)
@@ -1686,76 +1700,84 @@ fn optimize_survival_transformation_smoothing(
                     reason: format!("survival smoothing trial lambda rejected: {error}"),
                 }
             })?;
-        let opts = gam_solve::pirls::WorkingModelPirlsOptions {
-            max_iterations: SURVIVAL_TRANSFORMATION_PIRLS_MAX_ITERATIONS,
-            convergence_tolerance: SURVIVAL_TRANSFORMATION_PIRLS_CONVERGENCE_TOL,
-            adaptive_kkt_tolerance: None,
-            max_step_halving: SURVIVAL_TRANSFORMATION_PIRLS_MAX_STEP_HALVING,
-            firth_bias_reduction: false,
-            coefficient_lower_bounds: structural_lower_bounds.cloned(),
-            linear_constraints: None,
-            initial_lm_lambda: None,
+        let beta = match cached_mode {
+            Some(beta) => beta,
+            None => {
+                let opts = gam_solve::pirls::WorkingModelPirlsOptions {
+                    max_iterations: SURVIVAL_TRANSFORMATION_PIRLS_MAX_ITERATIONS,
+                    convergence_tolerance: SURVIVAL_TRANSFORMATION_PIRLS_CONVERGENCE_TOL,
+                    adaptive_kkt_tolerance: None,
+                    max_step_halving: SURVIVAL_TRANSFORMATION_PIRLS_MAX_STEP_HALVING,
+                    firth_bias_reduction: false,
+                    coefficient_lower_bounds: structural_lower_bounds.cloned(),
+                    linear_constraints: None,
+                    initial_lm_lambda: None,
+                };
+                let summary = gam_solve::pirls::runworking_model_pirls(
+                    &mut candidate,
+                    gam_problem::Coefficients::new(warm_beta.borrow().clone()),
+                    &opts,
+                    Some(&mut |info: &gam_solve::pirls::WorkingModelIterationInfo| {
+                        log::trace!(
+                            "[SURV-TRANS inner] iter={} deviance={:.6e} |grad|={:.6e} step={:.3e} \
+                             halvings={}",
+                            info.iteration,
+                            info.deviance,
+                            info.gradient_norm,
+                            info.step_size,
+                            info.step_halving
+                        );
+                    }),
+                )?;
+                // The envelope gradient exists only at a certified beta optimum. A
+                // finite exhausted state is a checkpoint, not a derivative-bearing
+                // objective sample, so refuse this trial point and let the generic
+                // outer bridge retreat from this rho without fabricating a cost or a
+                // zero gradient.
+                //
+                // The refusal carries the solve's real terminal status. Mapping every
+                // non-`Converged` status to `PirlsDidNotConverge { max_iterations }`
+                // printed "did not converge within 400 iterations" for solves that had
+                // stopped after 2 to 9 iterations on a numerical plateau
+                // (`LmStepSearchExhausted`, exact decrement just above its threshold),
+                // pointing diagnosis at a budget that was never spent (#2705, #1561).
+                // Both variants grade as the same trial-point retreat
+                // (`EstimationError::is_trial_point_infeasible`, one table since #2593).
+                if !survival_pirls_status_is_certified(summary.status) {
+                    // The exact decrement is the half of the certificate a plateau exit
+                    // misses by, so the refusal reports it on the same monotonicity rows,
+                    // curvature correction and deviance scale the LAML gate uses.
+                    let decrement = gam_solve::pirls::exact_newton_decrement_evidence(
+                        &summary.state,
+                        summary.beta.as_ref(),
+                        candidate.monotonicity_linear_constraints().as_ref(),
+                        gam_solve::pirls::WorkingModel::objective_hessian_matrix_correction(
+                            &candidate,
+                        ),
+                        gam_solve::pirls::WorkingModel::penalized_deviance_scale(&candidate)?,
+                    );
+                    let decrement_note = match decrement.decrement_sq {
+                        Some(decrement_sq) => format!("{decrement_sq:.3e}"),
+                        None => "unavailable (the face curvature did not factorize)".to_string(),
+                    };
+                    return Err(gam_solve::estimate::EstimationError::TrialPointRefused {
+                        reason: format!(
+                            "survival transformation inner P-IRLS at this trial rho ended with \
+                             status {:?} after {} of {} iteration(s) (projected gradient norm \
+                             {:.6e}, exact Newton decrement {decrement_note} against threshold \
+                             {:.3e}) without a strict convergence certificate; no envelope \
+                             gradient exists at this rho",
+                            summary.status,
+                            summary.iterations,
+                            opts.max_iterations,
+                            summary.lastgradient_norm,
+                            decrement.threshold,
+                        ),
+                    });
+                }
+                summary.beta.as_ref().to_owned()
+            }
         };
-        let summary = gam_solve::pirls::runworking_model_pirls(
-            &mut candidate,
-            gam_problem::Coefficients::new(warm_beta.borrow().clone()),
-            &opts,
-            Some(&mut |info: &gam_solve::pirls::WorkingModelIterationInfo| {
-                log::trace!(
-                    "[SURV-TRANS inner] iter={} deviance={:.6e} |grad|={:.6e} step={:.3e} \
-                     halvings={}",
-                    info.iteration,
-                    info.deviance,
-                    info.gradient_norm,
-                    info.step_size,
-                    info.step_halving
-                );
-            }),
-        )?;
-        // The envelope gradient exists only at a certified beta optimum. A
-        // finite exhausted state is a checkpoint, not a derivative-bearing
-        // objective sample, so refuse this trial point and let the generic
-        // outer bridge retreat from this rho without fabricating a cost or a
-        // zero gradient.
-        //
-        // The refusal carries the solve's real terminal status. Mapping every
-        // non-`Converged` status to `PirlsDidNotConverge { max_iterations }`
-        // printed "did not converge within 400 iterations" for solves that had
-        // stopped after 2 to 9 iterations on a numerical plateau
-        // (`LmStepSearchExhausted`, exact decrement just above its threshold),
-        // pointing diagnosis at a budget that was never spent (#2705, #1561).
-        // Both variants grade as the same trial-point retreat
-        // (`EstimationError::is_trial_point_infeasible`, one table since #2593).
-        if !survival_pirls_status_is_certified(summary.status) {
-            // The exact decrement is the half of the certificate a plateau exit
-            // misses by, so the refusal reports it on the same monotonicity rows,
-            // curvature correction and deviance scale the LAML gate uses.
-            let decrement = gam_solve::pirls::exact_newton_decrement_evidence(
-                &summary.state,
-                summary.beta.as_ref(),
-                candidate.monotonicity_linear_constraints().as_ref(),
-                gam_solve::pirls::WorkingModel::objective_hessian_matrix_correction(&candidate),
-                gam_solve::pirls::WorkingModel::penalized_deviance_scale(&candidate)?,
-            );
-            let decrement_note = match decrement.decrement_sq {
-                Some(decrement_sq) => format!("{decrement_sq:.3e}"),
-                None => "unavailable (the face curvature did not factorize)".to_string(),
-            };
-            return Err(gam_solve::estimate::EstimationError::TrialPointRefused {
-                reason: format!(
-                    "survival transformation inner P-IRLS at this trial rho ended with status \
-                     {:?} after {} of {} iteration(s) (projected gradient norm {:.6e}, exact \
-                     Newton decrement {decrement_note} against threshold {:.3e}) without a strict \
-                     convergence certificate; no envelope gradient exists at this rho",
-                    summary.status,
-                    summary.iterations,
-                    opts.max_iterations,
-                    summary.lastgradient_norm,
-                    decrement.threshold,
-                ),
-            });
-        }
-        let beta = summary.beta.as_ref().to_owned();
         // Advance the warm start: a CERTIFIED inner mode at this ρ (the
         // convergence gate above already rejected non-certified states) is the
         // best available seed for the next, adjacent probe. Reached only after
@@ -1829,7 +1851,7 @@ fn optimize_survival_transformation_smoothing(
                 reason: "survival smoothing LAML gradient was non-finite".to_string(),
             });
         }
-        *eval_cache.borrow_mut() = Some((rho_smooth.to_owned(), cost, grad.clone()));
+        *eval_cache.borrow_mut() = Some((rho_smooth.to_owned(), cost, grad.clone(), beta));
         Ok((cost, grad, hessian))
     };
 
