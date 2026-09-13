@@ -28,7 +28,7 @@ use super::{SparseDictConfig, SparseDictConvergence, SparseDictFit};
 use gam_linalg::pcg::{
     CpuPcgBlockBackend, PcgCoreResult, PcgStop, SymmetricLowRankPreconditioner, pcg_multi_core,
 };
-use ndarray::{Array2, ArrayView2, Axis};
+use ndarray::{Array2, ArrayView1, ArrayView2, Axis};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fmt;
@@ -377,6 +377,184 @@ fn routing_fixed_point_residual(
     code_residual.max(reconstruction_residual)
 }
 
+/// [`route_and_code_all`] for an epoch that has certified codes to descend from.
+///
+/// Every row is routed afresh and adopts the routed support only when that lowers
+/// its penalized loss by more than the rounding of both losses
+/// ([`descent_support`]). Otherwise the row keeps its certified support, with codes
+/// re-solved at `decoder`. Top-`s` by `|score|` is not the loss minimizer among
+/// coherent atoms, so without this arbitration near-tied atoms trade places epoch
+/// after epoch: the `K ≫ rank` limit cycle (#2283). With it the support step is a
+/// descent step, and a row changes support only on a decrease its arithmetic
+/// resolves, so supports can change only finitely often.
+fn route_and_code_retaining_descent(
+    x: ArrayView2<'_, f32>,
+    decoder: ArrayView2<'_, f32>,
+    scorer: &TileScorer,
+    s: usize,
+    code_ridge: f32,
+    minibatch: usize,
+    score_mode: gam_gpu::GpuPolicy,
+    score_route_stats: Option<&mut ScoreRouteStats>,
+    certified: &[SparseCode],
+) -> Result<Vec<SparseCode>, String> {
+    if certified.len() != x.nrows() {
+        return Err(format!(
+            "support descent: {} certified codes for {} rows",
+            certified.len(),
+            x.nrows()
+        ));
+    }
+    let routed = route_and_code_all(
+        x,
+        decoder,
+        scorer,
+        s,
+        code_ridge,
+        minibatch,
+        score_mode,
+        score_route_stats,
+    )?;
+    Ok(routed
+        .into_par_iter()
+        .zip(certified.par_iter())
+        .enumerate()
+        .map(|(row, (fresh, prior))| {
+            descent_support(x.row(row), decoder, fresh, prior, s, code_ridge)
+        })
+        .collect())
+}
+
+/// The code one row carries out of an epoch: the freshly routed `fresh` code when
+/// its penalized loss is below that of `prior`'s support, re-solved at `decoder`,
+/// by more than both losses' rounding; that re-solved prior code otherwise.
+fn descent_support(
+    row: ArrayView1<'_, f32>,
+    decoder: ArrayView2<'_, f32>,
+    fresh: SparseCode,
+    prior: &SparseCode,
+    s: usize,
+    code_ridge: f32,
+) -> SparseCode {
+    let live_support = |code: &SparseCode| -> Vec<u32> {
+        let mut support: Vec<u32> = code
+            .indices
+            .iter()
+            .zip(code.codes.iter())
+            .filter(|entry| *entry.1 != 0.0)
+            .map(|entry| *entry.0)
+            .collect();
+        support.sort_unstable();
+        support
+    };
+    let prior_support = live_support(prior);
+    if prior_support.is_empty() || prior_support == live_support(&fresh) {
+        return fresh;
+    }
+    let shortlist: Vec<(u32, f32)> = prior_support.iter().map(|&atom| (atom, 0.0)).collect();
+    let kept = solve_row_codes(row, decoder, &shortlist, s, code_ridge);
+    let (fresh_loss, fresh_rounding) = penalized_row_loss(row, decoder, &fresh, code_ridge);
+    let (kept_loss, kept_rounding) = penalized_row_loss(row, decoder, &kept, code_ridge);
+    if fresh_loss + fresh_rounding < kept_loss - kept_rounding {
+        fresh
+    } else {
+        kept
+    }
+}
+
+/// Penalized loss `‖x − Σ_j c_j d_{a_j}‖² + ρ‖c‖²` of one stored row code, and the
+/// band its f32 state resolves. When the residual's entries round by at most `r` in
+/// Euclidean norm ([`super::residual_reservoir::residual_rounding_energy`] gives
+/// `r²`), its squared norm moves by at most `2‖x − Dc‖·r + r²`.
+fn penalized_row_loss(
+    row: ArrayView1<'_, f32>,
+    decoder: ArrayView2<'_, f32>,
+    code: &SparseCode,
+    code_ridge: f32,
+) -> (f64, f64) {
+    let p = row.len();
+    let mut residual: Vec<f64> = row.iter().map(|&value| f64::from(value)).collect();
+    let mut penalty = 0.0f64;
+    let mut live_codes = 0usize;
+    let mut code_mass = 0.0f64;
+    for (&atom, &value) in code.indices.iter().zip(code.codes.iter()) {
+        if value == 0.0 {
+            continue;
+        }
+        let value = f64::from(value);
+        live_codes += 1;
+        code_mass += value.abs();
+        penalty += value * value;
+        let direction = decoder.row(atom as usize);
+        for c in 0..p {
+            residual[c] -= value * f64::from(direction[c]);
+        }
+    }
+    let residual_energy = residual.iter().map(|entry| entry * entry).sum::<f64>();
+    let row_norm = row
+        .iter()
+        .map(|&value| f64::from(value) * f64::from(value))
+        .sum::<f64>()
+        .sqrt();
+    // The decoder rows are unit-normed, so `Σ_j |c_j|` is the reconstruction mass,
+    // and each live code costs one f32 product and one subtraction.
+    let band_energy = super::residual_reservoir::residual_rounding_energy(
+        f64::from(f32::EPSILON) / 2.0,
+        2 * live_codes,
+        row_norm,
+        code_mass,
+    );
+    let rounding = 2.0 * residual_energy.sqrt() * band_energy.sqrt() + band_energy;
+    (residual_energy + f64::from(code_ridge) * penalty, rounding)
+}
+
+/// The loss `‖X − C D‖² − ‖X‖²` of two decoders at the codes that assembled `eq`,
+/// `Σ_a (A_aa‖d_a‖² − 2 d_a·b_a + Σ_{b≠a} A_ab d_a·d_b)`. One adjacency serves
+/// both, and the per-atom terms are summed in atom order over sorted neighbour
+/// lists, so the pair does not depend on the thread count.
+fn fixed_code_losses(
+    first: ArrayView2<'_, f32>,
+    second: ArrayView2<'_, f32>,
+    eq: &DecoderNormalEq,
+) -> (f64, f64) {
+    let k = eq.diag.len();
+    let mut neigh: Vec<Vec<(usize, f64)>> = vec![Vec::new(); k];
+    for (&(a, b), &value) in eq.off.iter() {
+        neigh[a as usize].push((b as usize, value));
+        neigh[b as usize].push((a as usize, value));
+    }
+    neigh.par_iter_mut().for_each(|list| {
+        list.sort_by_key(|entry| entry.0);
+    });
+    let atom_loss = |decoder: ArrayView2<'_, f32>, atom: usize| -> f64 {
+        let direction = decoder.row(atom);
+        let dot = |other: ArrayView1<'_, f32>| -> f64 {
+            direction
+                .iter()
+                .zip(other.iter())
+                .map(|(&left, &right)| f64::from(left) * f64::from(right))
+                .sum::<f64>()
+        };
+        let rhs = direction
+            .iter()
+            .zip(eq.b.row(atom).iter())
+            .map(|(&entry, &target)| f64::from(entry) * target)
+            .sum::<f64>();
+        let coupling = neigh[atom]
+            .iter()
+            .map(|&(nb, value)| value * dot(decoder.row(nb)))
+            .sum::<f64>();
+        eq.diag[atom] * dot(direction) - 2.0 * rhs + coupling
+    };
+    let per_atom: Vec<(f64, f64)> = (0..k)
+        .into_par_iter()
+        .map(|atom| (atom_loss(first, atom), atom_loss(second, atom)))
+        .collect();
+    per_atom
+        .iter()
+        .fold((0.0, 0.0), |(left, right), &(a, b)| (left + a, right + b))
+}
+
 /// Per-term rounding scale for the fixed-point convergence floor (#2396).
 ///
 /// The certified arm compares three O(1)-normalized residuals — the EV change
@@ -581,6 +759,16 @@ fn run_from_decoder(
             // to the unit-constrained optimum at these codes (#2822).
             let refresh: Vec<bool> = gate.iter().map(|decision| decision.refresh).collect();
             polish_unit_rows_against_normal_eq(&mut decoder, &normal_eq, &refresh)?;
+            // The polish descends from the normalized MOD rows, and that start can
+            // sit above the certified decoder at these codes. Descend from the
+            // certified rows instead whenever they are lower, so the refresh never
+            // raises the loss the code and support steps lower (#2283).
+            let (certified_loss, polished_loss) =
+                fixed_code_losses(certified_decoder.view(), decoder.view(), &normal_eq);
+            if certified_loss < polished_loss {
+                decoder.assign(&certified_decoder);
+                polish_unit_rows_against_normal_eq(&mut decoder, &normal_eq, &refresh)?;
+            }
             solve_stats
         };
         decoder_solve_stats = stats;
@@ -609,8 +797,10 @@ fn run_from_decoder(
         // re-route deliberately replaces the previous STALE-code EV (which scored
         // the new decoder against codes solved before the refresh + normalisation):
         // the convergence decision now uses exactly the codes that define the
-        // returned model, so there is no stale-code surrogate gap.
-        let mut next_codes = route_and_code_all(
+        // returned model, so there is no stale-code surrogate gap. A row adopts its
+        // routed support only when that lowers its penalized loss beyond rounding;
+        // otherwise it keeps its certified support, re-solved at this decoder (#2283).
+        let mut next_codes = route_and_code_retaining_descent(
             x,
             decoder.view(),
             &scorer,
@@ -619,6 +809,7 @@ fn run_from_decoder(
             config.minibatch,
             config.score_mode,
             Some(&mut score_route_stats),
+            &certified_codes,
         )?;
 
         let route_secs = epoch_start.elapsed().as_secs_f64() - refresh_secs;
@@ -728,7 +919,11 @@ fn run_from_decoder(
         // on to `max_epochs` and is refused there as a typed non-convergence (SPEC
         // rule 22, #2902). An EV plateau whose routing keeps churning, the K >> rank
         // limit cycle, is such a state; returning it as a best-effort open iterate
-        // was the violation this replaced. Raw normal-equation convergence alone
+        // was the violation this replaced. The map now removes that churn at its
+        // source (#2283): the refresh, the code solve and the support step each lower
+        // one penalized loss, and a row changes support only on a decrease its
+        // arithmetic resolves, so supports change finitely often and the fixed point
+        // is reachable rather than merely refused. Raw normal-equation convergence alone
         // cannot certify a model because unit projection and rerouting happen
         // afterward.
         //
@@ -4771,10 +4966,12 @@ mod exact_solve_tests {
     fn reml_schedule_terminates_on_noise_floored_interior_fixed_point() {
         // #2396 termination guarantee (different angle from the noise-tracking test):
         // for a non-interpolating OVER-COMPLETE fit the ρ fixed point is INTERIOR (ρ
-        // never reaches the identifiability boundary) and top-s routing may never
-        // certify its inner fixed point. The schedule must still end: it returns a
-        // certified fit whose ρ step settled within the requested band, or refuses
-        // with typed inner or outer non-convergence within the outer-iteration cap.
+        // never reaches the identifiability boundary). #2283: the inner map descends
+        // one penalized loss (the refresh never raises it at fixed codes, and a row
+        // changes support only on a decrease its arithmetic resolves), so its
+        // supports settle, and the schedule must return a certified fit whose ρ step
+        // settled within the requested band. Accepting a typed refusal here was a
+        // test that passed on the limit cycle it names.
         use super::run_linear_reml_schedule;
 
         // Deterministic over-complete planted mixture (K=32 atoms in p=10, so K >>
@@ -4817,45 +5014,97 @@ mod exact_solve_tests {
             score_mode: gam_gpu::GpuPolicy::Off,
         };
 
-        // The schedule terminates on this regime by construction. Either every inner
-        // iterate certified and the ρ step settled within its band, or the fit is
-        // refused as a typed non-convergence. Returning an unsettled or open iterate
-        // was the SPEC rule 22 violation (#2902).
-        match run_linear_reml_schedule(x.view(), &config) {
-            Ok(fit) => {
-                assert!(
-                    fit.convergence.certified,
-                    "a returned schedule fit must be certified"
-                );
-                assert!(
-                    fit.convergence.outer_iterations >= 1
-                        && fit.convergence.outer_iterations <= super::REML_SCHEDULE_MAX_OUTER_ITERS,
-                    "outer iterations must be bounded by the cap; got {}",
-                    fit.convergence.outer_iterations
-                );
-                assert!(
-                    fit.convergence.selected_rho.is_finite() && fit.convergence.selected_rho > 0.0,
-                    "an interior ρ fixed point must be finite and positive; got {}",
-                    fit.convergence.selected_rho
-                );
-                assert!(
-                    fit.convergence.outer_rho_residual <= fit.convergence.outer_tolerance,
-                    "a returned ρ must sit within the certified band: residual={} vs band={}",
-                    fit.convergence.outer_rho_residual,
-                    fit.convergence.outer_tolerance
-                );
-                assert_eq!(
-                    fit.convergence.outer_tolerance,
-                    super::reml_schedule_rho_log_tol(config.tolerance),
-                    "a certified schedule settles at the requested band, never a widened one"
-                );
-            }
-            Err(
-                SparseDictionaryError::InnerNonConvergence { .. }
-                | SparseDictionaryError::OuterNonConvergence { .. },
-            ) => {}
-            Err(other) => panic!("unexpected typed failure: {other}"),
-        }
+        // Returning an unsettled or open iterate was the SPEC rule 22 violation
+        // (#2902); refusing here is the limit cycle this fixture reproduces.
+        let fit = run_linear_reml_schedule(x.view(), &config)
+            .expect("over-complete schedule must certify its fixed point");
+        assert!(
+            fit.convergence.certified,
+            "a returned schedule fit must be certified"
+        );
+        assert!(
+            fit.convergence.outer_iterations >= 1
+                && fit.convergence.outer_iterations <= super::REML_SCHEDULE_MAX_OUTER_ITERS,
+            "outer iterations must be bounded by the cap; got {}",
+            fit.convergence.outer_iterations
+        );
+        assert!(
+            fit.convergence.selected_rho.is_finite() && fit.convergence.selected_rho > 0.0,
+            "an interior ρ fixed point must be finite and positive; got {}",
+            fit.convergence.selected_rho
+        );
+        assert!(
+            fit.convergence.outer_rho_residual <= fit.convergence.outer_tolerance,
+            "a returned ρ must sit within the certified band: residual={} vs band={}",
+            fit.convergence.outer_rho_residual,
+            fit.convergence.outer_tolerance
+        );
+        assert_eq!(
+            fit.convergence.outer_tolerance,
+            super::reml_schedule_rho_log_tol(config.tolerance),
+            "a certified schedule settles at the requested band, never a widened one"
+        );
+    }
+
+    #[test]
+    fn a_row_keeps_its_support_unless_the_routed_support_lowers_its_loss_2283() {
+        // x = (1, 1, 0) lies in span{e0, e1}. By |score| the diagonal atom d2 ranks
+        // first (1.40 against 1.0), so top-2 routing takes {e0, d2}, whose span misses
+        // x by a squared distance of about 0.038. The certified support {e0, e1}
+        // reconstructs x exactly and must survive; handed the other way round, the
+        // row must switch to it.
+        let norm = 2.04f32.sqrt();
+        let decoder = ndarray::array![
+            [1.0f32, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0 / norm, 1.0 / norm, 0.2 / norm],
+        ];
+        let row = ndarray::array![1.0f32, 1.0, 0.0];
+        let ridge = 1.0e-6f32;
+        let routed = TileScorer::new(2, 3).route_minibatch(
+            row.view().insert_axis(ndarray::Axis(0)),
+            decoder.view(),
+        );
+        let live = |code: &SparseCode| -> Vec<u32> {
+            let mut atoms: Vec<u32> = code
+                .indices
+                .iter()
+                .zip(code.codes.iter())
+                .filter(|entry| *entry.1 != 0.0)
+                .map(|entry| *entry.0)
+                .collect();
+            atoms.sort_unstable();
+            atoms
+        };
+        let fresh = super::solve_row_codes(row.view(), decoder.view(), &routed[0], 2, ridge);
+        assert_eq!(live(&fresh), vec![0, 2], "the fixture must route the worse support");
+        let certified = super::solve_row_codes(
+            row.view(),
+            decoder.view(),
+            &[(0u32, 0.0f32), (1u32, 0.0f32)],
+            2,
+            ridge,
+        );
+        let kept = super::descent_support(
+            row.view(),
+            decoder.view(),
+            fresh.clone(),
+            &certified,
+            2,
+            ridge,
+        );
+        assert_eq!(
+            live(&kept),
+            vec![0, 1],
+            "a routed support that raises the row's loss must not replace the certified one"
+        );
+        let switched =
+            super::descent_support(row.view(), decoder.view(), certified, &fresh, 2, ridge);
+        assert_eq!(
+            live(&switched),
+            vec![0, 1],
+            "a routed support that lowers the row's loss must replace the certified one"
+        );
     }
 
     #[test]
