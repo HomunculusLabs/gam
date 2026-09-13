@@ -600,6 +600,9 @@ fn estimation_error_to_pyerr_with_message(err: &EstimationError, message: String
         EstimationError::HessianNotPositiveDefinite { .. } => {
             HessianNotPositiveDefiniteError::new_err(message)
         }
+        EstimationError::LaplacePrecisionIndefinite { .. } => {
+            HessianNotPositiveDefiniteError::new_err(message)
+        }
         EstimationError::RemlOptimizationFailed(_) => RemlConvergenceError::new_err(message),
         // The outer certificate at the fitted point describes a criterion whose
         // identified rank can change inside its own Newton step, so what the

@@ -41,17 +41,12 @@
 //! with the per-row Fisher block `W_{n,·,·} = −∂² log L / ∂η ∂η` (the family's
 //! [`VectorLikelihood::hess_block`], or a caller override) and the residual
 //! `r_{n,a} = −∂ log L / ∂η_a` (`−`[`VectorLikelihood::grad_eta`]). The step
-//! `δ = − H^{-1} g` is solved through faer's symmetric-PD-with-fallback
-//! factorisation under an adaptive Levenberg–Marquardt ridge: when a
-//! rank-deficient block (collinear / quasi-separated columns under a small
-//! per-output λ) makes the Bunch–Kaufman fallback back-substitute through
-//! near-zero pivots into a non-finite δ, a diagonal ridge `τ·I` — scaled by the
-//! Hessian's largest diagonal so it is curvature-scale invariant — is added and
-//! the system re-solved, escalating τ geometrically until δ is finite. The
-//! step is then accepted by a backtracking line search on `F` (full step first,
-//! halve up to 8 times). Because the line search validates against the
-//! *unridged* objective `F`, the ridge never biases the converged β̂ (at the
-//! optimum the gradient vanishes and δ → 0 for any τ). Convergence requires
+//! `δ = − H⁺ g` is the exact Newton step through one Cholesky factorization when
+//! `H` is positive definite, otherwise the minimum-norm step on `H`'s resolved
+//! positive eigenspace: a rank-deficient block (collinear or quasi-separated
+//! columns under a small per-output λ) takes no step along a direction the data
+//! and penalty do not identify. The step is then accepted by a backtracking line
+//! search on `F` (full step first, halve up to 8 times). Convergence requires
 //! both the relative coefficient step `‖δ‖ / (1 + ‖β‖) ≤ tol` and an exact
 //! curvature-scaled first-order score certificate recomputed at the accepted
 //! final iterate.
@@ -72,7 +67,7 @@ use crate::model_types::EstimationError;
 use crate::vector_response::VectorLikelihood;
 use faer::Side;
 use gam_linalg::faer_ndarray::{
-    FaerArrayView, FaerCholesky, FaerEigh, array2_to_matmut, factorize_symmetricwith_fallback,
+    FaerCholesky, FaerEigh,
 };
 use gam_problem::{
     FixedLambdaCheckpoint, FixedLambdaResidualKind, FixedLambdaSolverStage, FixedLambdaStallReason,
@@ -80,17 +75,7 @@ use gam_problem::{
 };
 use gam_solve::pirls::dense_block_xtwx;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayView3};
-use opt::{BacktrackConfig, RidgeSchedule, backtracking_line_search, escalate_ridge};
-
-/// Base ridge of the covariance inversion's escalation ladder, as a fraction of
-/// the penalized Hessian's largest diagonal entry. Only
-/// `invert_symmetric_penalized_hessian` reads it. The Newton step takes the
-/// minimum-norm solution on the resolved positive eigenspace instead of a ridge.
-const BASE_RIDGE_FRACTION_OF_MAX_DIAG: f64 = 1.0e-10;
-
-/// Ridge-escalation budget of the covariance inversion's ladder: 30 doublings
-/// over the base ridge. Only `invert_symmetric_penalized_hessian` reads it.
-const MAX_RIDGE_ESCALATIONS: usize = 30;
+use opt::{BacktrackConfig, backtracking_line_search};
 
 /// Backtracking budget for the damped-Newton line search: full step first, then
 /// halve up to this many times if the penalized objective fails to decrease.
@@ -254,7 +239,8 @@ pub struct PenalizedVectorGlmOutputs {
     pub log_likelihood: f64,
     /// Penalty term `½ Σ_a λ_a · β̂_aᵀ S β̂_a` at the returned `β̂`.
     pub penalty_term: f64,
-    /// Joint Laplace posterior coefficient covariance `H⁻¹` at the converged
+    /// Joint Laplace posterior coefficient covariance `H⁻¹` (`H⁺` on the resolved
+    /// positive eigenspace when `H` is singular) at the converged
     /// `β̂`, shape `(P·M)×(P·M)` (#1101). `H = block(XᵀWX) + diag_a(λ_a)⊗S` is
     /// the penalized Hessian the Newton loop already assembles and factors at
     /// every step, discarding the factor; here it is re-assembled once at the
@@ -608,95 +594,94 @@ fn fill_penalized_gradient(
 }
 
 /// Invert the symmetric penalized Hessian `H` to the joint Laplace covariance
-/// `Σ = H⁻¹` by solving `H·Σ = I` through the shared symmetric factorization
-/// (#1101). `dim` is the flat block dimension `P·M`; `context` prefixes any
-/// diagnostic. A curvature-scaled Tikhonov ridge `τ·I` — floored at
-/// [`BASE_RIDGE_FRACTION_OF_MAX_DIAG`]·max_diag and escalated geometrically up
-/// to [`MAX_RIDGE_ESCALATIONS`] times — is added ONLY when the raw factor/solve
-/// is non-finite (a rank-deficient null direction), so the covariance is always
-/// finite; at full rank the ridge is never engaged and `Σ` is the exact `H⁻¹`.
-/// The Newton step does not use this ladder: it takes the minimum-norm solution
-/// on the resolved positive eigenspace. The returned matrix is
-/// symmetrized `(Σ + Σᵀ)/2` to null round-off asymmetry from the back-solve.
+/// by solving `H·Σ = I` (#1101). `dim` is the flat block dimension `P·M`;
+/// `context` prefixes any diagnostic. A positive-definite `H` is inverted
+/// exactly through one Cholesky factorization. An exactly rank-deficient `H`
+/// (the gam#856 quasi-separated or collinear class block) that is positive
+/// semidefinite to its rounding band gets the Moore–Penrose inverse on its resolved
+/// positive eigenspace, the subspace the minimum-norm Newton step descends on: a
+/// direction the data and penalty do not identify carries no variance, and the
+/// variance of every estimable function is exact. A negative eigenvalue beyond the
+/// band is a typed decline, [`EstimationError::LaplacePrecisionIndefinite`],
+/// carrying the inertia.
+/// The returned matrix is symmetrized `(Σ + Σᵀ)/2` to null round-off asymmetry
+/// from the back-solve.
 fn invert_symmetric_penalized_hessian(
     hessian: &Array2<f64>,
     dim: usize,
     context: &str,
 ) -> Result<Array2<f64>, EstimationError> {
-    let max_diag = (0..dim).fold(0.0_f64, |acc, idx| acc.max(hessian[[idx, idx]].abs()));
-    let base_ridge = if max_diag.is_finite() && max_diag > 0.0 {
-        max_diag * BASE_RIDGE_FRACTION_OF_MAX_DIAG
-    } else {
-        BASE_RIDGE_FRACTION_OF_MAX_DIAG
-    };
-    // `last_failure` distinguishes the two exhaustion modes so their distinct
-    // terminal errors survive the migration: `Some((ridge, err))` when the
-    // final attempt died in the factorization, `None` when it factored but the
-    // back-solve stayed non-finite.
-    let mut last_failure: Option<(f64, String)> = None;
-    let mut try_ridge = |ridge: f64| -> Option<Array2<f64>> {
-        let mut ridged = hessian.clone();
-        if ridge > 0.0 {
-            for idx in 0..dim {
-                ridged[[idx, idx]] += ridge;
-            }
-        }
-        let factor = match factorize_symmetricwith_fallback(
-            FaerArrayView::new(&ridged).as_ref(),
-            Side::Lower,
-        ) {
-            Ok(factor) => factor,
-            Err(err) => {
-                last_failure = Some((ridge, err.to_string()));
-                return None;
-            }
-        };
-        // Solve H·Σ = I: identity RHS, back-solved in place to yield Σ = H⁻¹.
-        let mut rhs = Array2::<f64>::eye(dim);
-        {
-            let rhs_view = array2_to_matmut(&mut rhs);
-            factor.solve_in_place(rhs_view);
-        }
-        if !rhs.iter().all(|v| v.is_finite()) {
-            last_failure = None;
-            return None;
-        }
-        // Symmetrize to remove round-off asymmetry from the back-solve.
-        let mut cov = Array2::<f64>::zeros((dim, dim));
-        for i in 0..dim {
+    let cholesky_inverse = match hessian.cholesky(Side::Lower) {
+        Ok(factor) => {
+            let mut inverse = Array2::<f64>::zeros((dim, dim));
             for j in 0..dim {
-                cov[[i, j]] = 0.5 * (rhs[[i, j]] + rhs[[j, i]]);
+                let mut unit = Array1::<f64>::zeros(dim);
+                unit[j] = 1.0;
+                inverse.column_mut(j).assign(&factor.solvevec(&unit));
             }
+            inverse.iter().all(|v| v.is_finite()).then_some(inverse)
         }
-        Some(cov)
+        Err(_) => None,
     };
-    // Bare (unridged) attempt first — at full rank the ridge is never engaged —
-    // then the geometric escalation from `base_ridge` with the doubling growth
-    // this site has always used.
-    if let Some(cov) = try_ridge(0.0) {
-        return Ok(cov);
+    let inverse = match cholesky_inverse {
+        Some(inverse) => inverse,
+        None => {
+            let (eigenvalues, eigenvectors) = hessian.eigh(Side::Lower).map_err(|error| {
+                EstimationError::InvalidInput(format!(
+                    "{context}: penalized Hessian eigendecomposition for the covariance failed: \
+                     {error}"
+                ))
+            })?;
+            let threshold =
+                gam_solve::estimate::reml::reml_outer_engine::positive_eigenvalue_threshold(
+                    eigenvalues.as_slice().ok_or_else(|| {
+                        EstimationError::InvalidInput(format!(
+                            "{context}: penalized Hessian eigenvalues are not contiguous"
+                        ))
+                    })?,
+                );
+            // At a certified mode a negative eigenvalue beyond the rounding band
+            // means `H` is not a Laplace precision: no covariance exists, and a
+            // pseudoinverse would silently project the negative curvature away.
+            // That is a typed decline carrying the inertia, not a matrix.
+            let negative = eigenvalues.iter().filter(|&&value| value < -threshold).count();
+            if negative > 0 {
+                let positive = eigenvalues.iter().filter(|&&value| value > threshold).count();
+                let min_eigenvalue = eigenvalues.iter().copied().fold(f64::INFINITY, f64::min);
+                return Err(EstimationError::LaplacePrecisionIndefinite {
+                    context: context.to_string(),
+                    inertia: gam_problem::Inertia::new(positive, dim - positive - negative, negative)?,
+                    min_eigenvalue,
+                    band: threshold,
+                });
+            }
+            let mut inverse = Array2::<f64>::zeros((dim, dim));
+            for k in 0..dim {
+                if eigenvalues[k] > threshold {
+                    let column = eigenvectors.column(k);
+                    for i in 0..dim {
+                        let scaled = column[i] / eigenvalues[k];
+                        for j in 0..dim {
+                            inverse[[i, j]] += scaled * column[j];
+                        }
+                    }
+                }
+            }
+            if !inverse.iter().all(|v| v.is_finite()) {
+                return Err(EstimationError::InvalidInput(format!(
+                    "{context}: positive-eigenspace covariance is non-finite"
+                )));
+            }
+            inverse
+        }
+    };
+    let mut cov = Array2::<f64>::zeros((dim, dim));
+    for i in 0..dim {
+        for j in 0..dim {
+            cov[[i, j]] = 0.5 * (inverse[[i, j]] + inverse[[j, i]]);
+        }
     }
-    match escalate_ridge(
-        RidgeSchedule {
-            initial: base_ridge,
-            growth: 2.0,
-            max_escalations: MAX_RIDGE_ESCALATIONS,
-        },
-        &mut try_ridge,
-    ) {
-        Ok(success) => Ok(success.value),
-        Err(_) => match last_failure {
-            Some((ridge, err)) => Err(EstimationError::InvalidInput(format!(
-                "{context}: covariance factorization failed even with ridge \
-                 {ridge:.3e}: {err}"
-            ))),
-            None => Err(EstimationError::InvalidInput(format!(
-                "{context}: covariance solve remained non-finite after {} ridge escalations \
-                 (max_diag={max_diag:.3e})",
-                MAX_RIDGE_ESCALATIONS,
-            ))),
-        },
-    }
+    Ok(cov)
 }
 
 /// Fit a penalized vector-response GLM at fixed `λ` via damped Newton.
@@ -1099,12 +1084,10 @@ pub fn fit_penalized_vector_glm<L: VectorLikelihood>(
     // Joint Laplace covariance `H⁻¹` at the converged mode (#1101). Re-assemble
     // the penalized Hessian `H = block(XᵀWX) + penalty` at β̂ — the SAME algebra
     // the Newton loop runs each iteration — and invert it by solving `H·Σ = I`
-    // through the shared symmetric factorization. The Newton loop discarded its
-    // per-step factor; this recomputes the factor once at the mode where the
-    // curvature is the correct posterior precision. A tiny curvature-scaled
-    // ridge is added only when the raw factorization / solve is non-finite
-    // (rank-deficient null direction), mirroring the Newton step's ridge logic,
-    // so the covariance is always finite; at full rank the ridge is never used.
+    // through one Cholesky factorization. The Newton loop discarded its per-step
+    // factor; this recomputes it once at the mode where the curvature is the
+    // correct posterior precision. A rank-deficient `H` gets the positive-
+    // eigenspace pseudoinverse, mirroring the minimum-norm Newton step.
     let analytic_fisher_final = match fisher_w_override.as_ref() {
         Some(_) => None,
         None => Some(likelihood.hess_block(eta.view(), y)?),
@@ -1755,20 +1738,54 @@ mod parity_tests {
 
         // The recovered fit must satisfy first-order optimality of the penalized
         // objective along every NON-NULL coordinate. The (e₁ − e₂) null
-        // direction is unidentified (the ridge picks the minimum-norm split
-        // between the duplicate columns), so the gradient is exactly zero along
-        // every identified direction; a central finite difference of F over the
-        // full coefficient matrix is dominated by the identified part and must be
-        // small. We assert the penalized objective gradient is near-zero — the
-        // ridge biases the step but never the optimum (at β̂ the unridged
-        // gradient vanishes for any τ).
+        // direction is unidentified (the minimum-norm step never moves along it),
+        // so the gradient is exactly zero along every identified direction; a
+        // central finite difference of F over the full coefficient matrix is
+        // dominated by the identified part and must be small.
         let g = fd_grad(&fit.coefficients_active, |b| {
             multinomial_objective(&design, &y, &penalty, &lambdas, b)
         });
         assert!(
             g < 1.0e-4,
-            "penalized objective gradient at the ridge-recovered β̂ must (near-)vanish \
+            "penalized objective gradient at the recovered β̂ must (near-)vanish \
              along identified directions (max |∂F| = {g})"
+        );
+    }
+}
+
+#[cfg(test)]
+mod covariance_decline_tests {
+    use super::*;
+    use ndarray::array;
+
+    /// A singular positive-semidefinite penalized Hessian gets the positive-
+    /// eigenspace pseudoinverse: the unidentified direction `(1, −1)/√2` carries
+    /// no variance and the identified one carries `1/2`.
+    #[test]
+    fn singular_psd_hessian_covariance_is_the_positive_pseudoinverse() {
+        let hessian = array![[1.0, 1.0], [1.0, 1.0]];
+        let cov = invert_symmetric_penalized_hessian(&hessian, 2, "singular fixture")
+            .expect("a singular positive-semidefinite Hessian has a pseudoinverse covariance");
+        assert!(
+            cov.iter().all(|value| (value - 0.25).abs() <= 1e-12),
+            "covariance {cov:?} must be (1/2)·uuᵀ with u = (1, 1)/√2"
+        );
+    }
+
+    /// An indefinite penalized Hessian at a mode is a typed decline carrying its
+    /// inertia, not a pseudoinverse that drops the negative direction.
+    #[test]
+    fn indefinite_hessian_covariance_is_a_typed_decline_with_its_inertia() {
+        let hessian = array![[3.0, 0.0], [0.0, -2.0]];
+        let result = invert_symmetric_penalized_hessian(&hessian, 2, "indefinite fixture");
+        assert!(
+            matches!(
+                &result,
+                Err(EstimationError::LaplacePrecisionIndefinite { inertia, min_eigenvalue, .. })
+                    if (inertia.positive(), inertia.zero(), inertia.negative()) == (1, 0, 1)
+                        && (min_eigenvalue + 2.0).abs() <= 1e-12
+            ),
+            "expected the typed indefinite decline with inertia (1, 0, 1), got {result:?}"
         );
     }
 }

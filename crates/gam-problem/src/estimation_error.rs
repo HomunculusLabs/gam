@@ -629,6 +629,25 @@ pub enum EstimationError {
     #[error("{}", hessian_not_positive_definite_message(*min_eigenvalue))]
     HessianNotPositiveDefinite { min_eigenvalue: f64 },
 
+    /// A penalized Hessian at a certified mode with a negative eigenvalue beyond its
+    /// rounding band. It is not a Laplace precision, so the mode has no covariance;
+    /// the inertia names how many directions are positive, numerically zero and
+    /// negative.
+    #[error(
+        "{context}: the penalized Hessian at the certified mode is indefinite (inertia: \
+         {} positive, {} zero, {} negative; minimum eigenvalue {min_eigenvalue:.3e} below \
+         −{band:.3e}), so it is not a Laplace precision and no covariance exists",
+        .inertia.positive(),
+        .inertia.zero(),
+        .inertia.negative()
+    )]
+    LaplacePrecisionIndefinite {
+        context: String,
+        inertia: crate::Inertia,
+        min_eigenvalue: f64,
+        band: f64,
+    },
+
     /// The penalized Hessian's identified rank at the fitted smoothing
     /// parameters is not certified constant over the outer certificate's own
     /// Newton step (#2901 V22).
@@ -965,6 +984,7 @@ impl EstimationError {
             | Self::PrefitRankDeficientDesignDetected { .. }
             | Self::PrefitNearDegenerateDesignDetected { .. }
             | Self::HessianNotPositiveDefinite { .. }
+            | Self::LaplacePrecisionIndefinite { .. }
             | Self::IdentifiedRankNotLocallyConstant { .. }
             | Self::RemlOptimizationFailed { .. }
             | Self::OuterObjectiveEvaluationFailed { .. }

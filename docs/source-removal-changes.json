@@ -8771,5 +8771,14 @@
     ],
     "reason": "#2469 under the V22 ruling (no ridge; the minimum-norm solve on the identified subspace), with negative curvature kept per the lead's follow-up: after a strict Cholesky refusal, the exact-Newton block step no longer escalates a δ-ridge Cholesky from CUSTOM_FAMILY_RIDGE_FLOOR = 1e-12 with growth 10 and a budget of 16. strict_solve_spd_or_spectral_step reads the spectrum. A positive-semidefinite singular H takes the positive-eigenspace pseudoinverse. An H with an eigenvalue below −band takes the minimal positive-definite shift band − λ_min, so negative directions still receive a descent step. strict_spd_lm_engine (one caller), StrictSpdLmStats (a debug log only) and CUSTOM_FAMILY_RIDGE_FLOOR (the ladder's starting δ) go with it. The negative-definite regression test that asserted a zero step is replaced by a singular-PSD and an indefinite fixture.",
     "evidence": "At the base, git grep -n -w for each removed name finds only blockwise_solve.rs, the gam-problem declaration and lib.rs re-export, and in tests inner_solver_numerics.rs (six ridge_floor option literals, now 0.0, and the replaced regression test). Guarded cargo check --workspace --all-targets --exclude gam-pyffi plus the gam-custom-family and transformation-normal tests: job 615497, /scratch.global/sauer354/pool/const2469b/rp47.615497.log."
+  },
+  {
+    "base": "e72bb8e3549f224d52700d1a54491feab49f0dbb",
+    "items": [
+      "crates/gam-models/src/penalized_vector_glm.rs:const:BASE_RIDGE_FRACTION_OF_MAX_DIAG",
+      "crates/gam-models/src/penalized_vector_glm.rs:const:MAX_RIDGE_ESCALATIONS"
+    ],
+    "reason": "#2469 under the V22 ruling (no ridge; the minimum-norm solve on the identified subspace): the vector-GLM Laplace covariance no longer adds τ·I, starting from BASE_RIDGE_FRACTION_OF_MAX_DIAG = 1e-10 times the largest diagonal entry and doubling up to MAX_RIDGE_ESCALATIONS = 30 times, when the raw solve of a rank-deficient penalized Hessian is non-finite. A positive-definite H is inverted exactly by Cholesky. Otherwise the covariance is the Moore–Penrose inverse on H's resolved positive eigenspace, the subspace the minimum-norm Newton step already descends on. Both constants fed only that ladder. A negative eigenvalue beyond the band at the certified mode now returns the typed decline EstimationError::LaplacePrecisionIndefinite with the inertia, not a matrix.",
+    "evidence": "At the base, git grep -n -w for each name finds its declaration, the doc comments and the ladder inside invert_symmetric_penalized_hessian, and nothing else. Guarded cargo check --workspace --all-targets --exclude gam-pyffi and gam-models penalized_vector_glm / multinomial tests: job 615497, /scratch.global/sauer354/pool/const2469b/rp47.615497.log."
   }
 ]
