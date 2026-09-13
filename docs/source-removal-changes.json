@@ -7459,5 +7459,13 @@
     ],
     "reason": "#2280 (folded #2906): holonomy_quotient_coordinates loses its Möbius arm. Its flat glide-reflection read is not a loop coordinate on the embedded band: the centerline's geodesic curvature -cos(u/2)/2 turns the developed tangent by up to two radians, so the projection onto the glide axis runs backwards over part of the loop. width_level_recovery_rate scored only that arm's width against the principal double cover, inside holonomy_seeded_loops_recover_their_planted_parameter_2906, and goes with it.",
     "evidence": "At the base, git grep -n width_level_recovery_rate finds its declaration and its two calls, all in the Möbius block of holonomy_seeded_loops_recover_their_planted_parameter_2906 in crates/gam-sae/src/manifold/local_charts.rs, which this change removes. Job 588786 (/scratch.global/sauer354/pool/sae2280/follow1.full.588786.txt) measured that block at 0.0381 base recovery and 0.0000 width levels against the principal seed's 1.0000."
-   }
- ]
+  },
+  {
+    "base": "b51bbe357cc8459ddf5aaed461fc1a84250e1c1a",
+    "items": [
+      "crates/gam-custom-family/src/covariance.rs:fn:joint_outer_matrix_free_route"
+    ],
+    "reason": "#2900 (SPEC rules 6 and 10), the covariance.rs:26 trace-solve route. joint_outer_evaluate and joint_outer_evaluate_efs built a MatrixFreeSpdOperator whenever joint_outer_matrix_free_route priced the joint Hessian matrix-free (p > 3n for an operator source, or past the memory cap). Within the exact dense spectral budget that operator materializes the same matrix and answers every logdet, trace and solve through its eigendecomposition (CG trace solves run only past the budget), and past the budget its logdet panics. It also added a 1e-10 trace ridge the dense arm lacked. Both evaluations now take the dense BlockCoupledOperator arm at every shape, with materialize_joint_hessian_source refusing an operator source past the governor cap, so the route has no subject.",
+    "evidence": "At the base, git grep -n -w joint_outer_matrix_free_route over the repository finds its definition in crates/gam-custom-family/src/covariance.rs and its only two callers in crates/gam-custom-family/src/assembly.rs (joint_outer_evaluate and joint_outer_evaluate_efs), all rewritten in this commit. No test names it. Guarded compile: pool job 603675."
+  }
+]

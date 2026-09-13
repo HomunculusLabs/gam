@@ -1,5 +1,5 @@
 //! Joint covariance/geometry and the stationarity/KKT-residual machinery in the
-//! flattened joint coefficient space: matrix-free path selection, joint penalty
+//! flattened joint coefficient space: joint penalty
 //! application + preconditioner, flat-beta state sync, projected-stationarity and
 //! KKT-residual-for-IFT computations, and the joint covariance/geometry assembly.
 
@@ -15,28 +15,6 @@ pub(crate) fn joint_observation_count(states: &[ParameterBlockState]) -> usize {
         .map(|state| state.eta.len())
         .max()
         .unwrap_or(0)
-}
-
-/// Whether the outer evaluation runs the joint Hessian `source` over `total`
-/// coefficients and `n` rows as a matrix-free operator
-/// ([`JointHessianWork::matrix_free_route`]). A materialized source has nothing
-/// left to build and each product is a dense `p²` product, so factoring it
-/// (`p³/3`) never loses to CG's worst case (`p³`) and only the materialization
-/// cap sends it matrix-free. An operator source is priced as a row pullback.
-pub(crate) fn joint_outer_matrix_free_route(
-    source: &JointHessianSource,
-    n: usize,
-    total: usize,
-) -> bool {
-    let p = total as u64;
-    let work = match source {
-        JointHessianSource::Dense(_) => JointHessianWork {
-            build: 0,
-            apply: p.saturating_mul(p),
-        },
-        JointHessianSource::Operator { .. } => JointHessianWork::row_pullback(n as u64, p),
-    };
-    work.matrix_free_route(total)
 }
 
 pub(crate) fn apply_joint_block_penalty(

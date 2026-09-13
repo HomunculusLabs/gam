@@ -3042,5 +3042,13 @@
     },
     "reason": "#979 (folded #2897), SPEC rule 25. The survival auto-subsample installer could never sample: its only production context producer disabled automatic sampling first. It is removed with its z_subsample_key helper.",
     "evidence": "At the base, install_auto_outer_subsample_options is called only by two survival custom_family_impl.rs wrappers, and z_subsample_key only by the installer. The one EvalScope::OuterDerivative producer, the survival fit_entry.rs evaluator, built its options through exact_outer_options (auto_outer_subsample = false)."
+  },
+  {
+    "base": "b51bbe357cc8459ddf5aaed461fc1a84250e1c1a",
+    "removed": {
+      "crates/gam-custom-family/src/covariance.rs::joint_outer_matrix_free_route": 1
+    },
+    "reason": "#2900 (SPEC rules 6 and 10): the outer joint evaluations price log|H| and every trace on the dense BlockCoupledOperator at every shape. The matrix-free route materialized the same matrix inside MatrixFreeSpdOperator within its budget, added a 1e-10 trace ridge the dense arm lacked, and panicked in logdet past the budget.",
+    "evidence": "At the base, git grep -n -w joint_outer_matrix_free_route finds only its declaration in crates/gam-custom-family/src/covariance.rs and two callers in crates/gam-custom-family/src/assembly.rs, both rewritten in this commit. Guarded compile: pool job 603675."
   }
 ]
