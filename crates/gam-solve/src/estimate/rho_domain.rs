@@ -202,8 +202,8 @@ pub fn resolvability_domain_from_gram_blocks<'a>(
 
 /// The per-coordinate domain of a penalized design given one canonical penalty
 /// per ρ coordinate, from the weighted Gram of each penalty's own columns. The
-/// Grams are accumulated by streaming the design in row chunks sized to the
-/// process's single-materialization budget, so no `p × p` matrix is formed and
+/// Grams are accumulated by streaming the design in the library's byte-balanced
+/// row chunks (`byte_balanced_row_chunk`), so no `p × p` matrix is formed and
 /// sparse or lazy designs are read through the same stream. A coordinate whose
 /// block cannot be projected keeps the precision box.
 pub(crate) fn resolvability_domain_from_design(
@@ -230,10 +230,7 @@ pub(crate) fn resolvability_domain_from_design(
         .iter()
         .map(|range| Array2::<f64>::zeros((range.len(), range.len())))
         .collect();
-    let budget_rows = gam_runtime::resource::ResourcePolicy::default_library()
-        .max_single_materialization_bytes
-        / (std::mem::size_of::<f64>() * p.max(1));
-    let chunk_rows = budget_rows.clamp(1, n.max(1));
+    let chunk_rows = gam_runtime::resource::byte_balanced_row_chunk(p, n);
     let mut chunk = Array2::<f64>::zeros((chunk_rows, p));
     for start in (0..n).step_by(chunk_rows) {
         let end = (start + chunk_rows).min(n);
