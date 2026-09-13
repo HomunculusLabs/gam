@@ -3516,6 +3516,41 @@ fn timewiggle_flex_design_psi_hessian_all_beta_axes_matches_single_axis_2893() {
     }
 }
 
+/// gam#2893: the time-wiggle flex ψ Hessian drift `D_β ∂_ψ H[v]` served by the ψ calculus
+/// matches a Ridders difference of `D_β H[v]` along the design motion `X(ψ) = X + ψ·X_ψ` of a
+/// marginal design ψ. Mixed partials commute, so this grades the drift that the ζ design-ψ gates
+/// difference along β without reading the ζ composition.
+#[test]
+fn timewiggle_flex_marginal_psi_drift_matches_design_difference_2893() {
+    let blocks = timewiggle_design_psi_blocks();
+    let options = BlockwiseFitOptions::default();
+    let base = timewiggle_marginal_slope_family(Some(test_deviation_runtime()));
+    let beta = timewiggle_marginal_slope_beta(&base);
+    let states = timewiggle_marginal_slope_states(&base, &beta);
+    let x_psi = blocks[1][0].x_psi.clone();
+    let base_design = base.marginal_design.to_dense().to_owned();
+    let family_at = |t: f64| {
+        let mut family = timewiggle_marginal_slope_family(Some(test_deviation_runtime()));
+        family.marginal_design = DesignMatrix::from(&base_design + &(&x_psi * t));
+        family
+    };
+    let v = Array1::from_shape_fn(beta.len(), |i| ((i * 5 + 1) % 13) as f64 / 13.0 - 0.5);
+    let drift = base
+        .psi_hessian_directional_derivative_with_options(&states, &blocks, 0, &v, &options)
+        .expect("design ψ Hessian drift")
+        .expect("a marginal design ψ publishes its Hessian drift");
+    assert_matches_ridders_2893("marginal ψ drift", &drift, &|t| {
+        let family = family_at(t);
+        family
+            .exact_newton_joint_hessian_directional_derivative(
+                &timewiggle_marginal_slope_states(&family, &beta),
+                &v,
+            )
+            .expect("displaced D_beta H[v]")
+            .expect("a time wiggle publishes D_beta H")
+    });
+}
+
 
 #[test]
 fn link_flex_blockwise_exact_newton_matches_joint_principal_blocks() {
