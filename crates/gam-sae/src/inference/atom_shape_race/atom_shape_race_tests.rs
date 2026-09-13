@@ -364,7 +364,7 @@ fn circular_verdict_aggregates_within_class_stacking_mass() {
     // would make the class verdict depend on how finely that class happened
     // to be represented in the candidate list.
     let (circular, noncircular, margin, circle_wins) =
-        circular_stacking_summary(&kinds, &[0.30, 0.40, 0.0, 0.30]).unwrap();
+        circular_stacking_summary(&kinds, &[0.30, 0.40, 0.0, 0.30], 0.0).unwrap();
     assert!((circular - 0.60).abs() < 1e-15);
     assert!((noncircular - 0.40).abs() < 1e-15);
     assert!((margin - 0.20).abs() < 1e-15);

@@ -203,6 +203,7 @@ pub struct AtomShapeRaceVerdict {
 fn circular_stacking_summary(
     candidate_kinds: &[gam_solve::PredictiveCandidateKind],
     stacking_weights: &[f64],
+    simplex_residual: f64,
 ) -> Result<(f64, f64, f64, bool), String> {
     if candidate_kinds.len() != stacking_weights.len() || candidate_kinds.is_empty() {
         return Err(format!(
@@ -227,9 +228,17 @@ fn circular_stacking_summary(
         }
     }
     let total = circular_weight + noncircular_weight;
-    if !total.is_finite() || (total - 1.0).abs() > 64.0 * f64::EPSILON.sqrt() {
+    // The solver certified its own sum of the `K` weights within `simplex_residual`
+    // of 1, and that sum lies within `γ_K` of the exact mass. Regrouping the same
+    // weights into two partial sums and adding them rounds `K + 1` more times, so an
+    // honest simplex vector lands within `simplex_residual + γ_{2K+2}·(total + 1)`.
+    let mass_band = simplex_residual
+        + gam_linalg::roundoff::accumulation_growth(2 * stacking_weights.len() + 2)
+            * (total + 1.0);
+    if !total.is_finite() || !simplex_residual.is_finite() || (total - 1.0).abs() > mass_band {
         return Err(format!(
-            "shape stacking weights must have unit mass; got {total}"
+            "shape stacking weights must have unit mass; got {total} against the certified \
+             simplex residual {simplex_residual}"
         ));
     }
     let circular_margin = circular_weight - noncircular_weight;
@@ -598,10 +607,10 @@ pub fn run_atom_shape_race(
     ];
     let verdict =
         adjudicate_predictive_race(n, candidates, folds, seed, StackingConfig::default())?;
-    let stacking_weights = verdict
+    let (stacking_weights, simplex_residual) = verdict
         .stacking
         .as_ref()
-        .map(|stacking| stacking.weights.to_vec())
+        .map(|stacking| (stacking.weights.to_vec(), stacking.certificate.simplex_residual))
         .ok_or_else(|| {
             "shape race mixed model classes but returned no stacking result".to_string()
         })?;
@@ -616,7 +625,7 @@ pub fn run_atom_shape_race(
         kind => kind.display_name(),
     };
     let (circular_stacking_weight, noncircular_stacking_weight, circular_margin, circle_wins) =
-        circular_stacking_summary(&candidate_kinds, &stacking_weights)?;
+        circular_stacking_summary(&candidate_kinds, &stacking_weights, simplex_residual)?;
     let mixture_fold_selected_k =
         finish_fold_order_trace(&mixture_fold_orders, folds, "mixture class")?;
     let ring_clusters_fold_selected_k =
