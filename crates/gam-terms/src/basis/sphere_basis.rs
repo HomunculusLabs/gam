@@ -2384,12 +2384,31 @@ pub(crate) fn build_duchon_operator_penalty_psi_derivatives_in_directions(
     let d1_psi_psi = project(d1_psi_psi);
     let d2_psi_psi = project(d2_psi_psi);
 
-    let (s0, s0_psi, s0_psi_psi) =
-        centered_operator_gram_and_psi_derivatives(&d0, &d0_psi, &d0_psi_psi);
-    let (mut s1, mut s1_psi, mut s1_psi_psi) =
-        gram_and_psi_derivatives_from_operator(&d1, &d1_psi, &d1_psi_psi);
-    let (mut s2, mut s2_psi, mut s2_psi_psi) =
-        gram_and_psi_derivatives_from_operator(&d2, &d2_psi, &d2_psi_psi);
+    // gam#2735 — build, normalize and PSD-check ONLY the operator blocks the
+    // effective spec keeps, as the value's closed-form candidates do: each block
+    // is assembled inside its own `OperatorPenaltySpec::Active` arm there. This
+    // builder used to assemble mass, tension and stiffness unconditionally and
+    // discard the disabled ones only after `try_from_dense_psd` had judged them,
+    // so a refusal raised by a block the design never carries refused the whole
+    // ψ rebuild. At `2(p+s) = d+2` stiffness is disabled while its closed-form
+    // q=2 predicate still converges; on the `large_scale_reml_stress` κ phase
+    // that block was materially indefinite at a trial ψ the value realized
+    // cleanly (MSI job 628719: minimum eigenvalue −3.219e-3 against tolerance
+    // 1.779e-8), and every such refusal halved the outer line search. Pushing
+    // each survivor together with its derivatives also makes `original_index`
+    // the derivative map by construction, not by the disabled block sitting last.
+    let mass_active = matches!(
+        effective_operator_penalties.mass,
+        OperatorPenaltySpec::Active { .. }
+    );
+    let tension_active = matches!(
+        effective_operator_penalties.tension,
+        OperatorPenaltySpec::Active { .. }
+    );
+    let stiffness_active = matches!(
+        effective_operator_penalties.stiffness,
+        OperatorPenaltySpec::Active { .. }
+    );
 
     // Match the value-side Duchon penalty exactly. q=0 mass remains the
     // collocation Gram; q∈{1,2} uses the continuous closed-form Lebesgue
@@ -2402,45 +2421,6 @@ pub(crate) fn build_duchon_operator_penalty_psi_derivatives_in_directions(
     // `aniso_log_scales = None`. Differentiating it at the spec's η instead
     // differentiated a block the design never carries (gam#2735).
     let kappa = duchon_inverse_length_scale(length_scale, "sphere Duchon operator penalty")?;
-    if duchon_closed_form_operator_penalty_converges(1, p_order, s_order as f64, d) {
-        let (cf_s, cf_s_psi, cf_s_psi_psi) = closed_form_psi_derivatives_in_total_basis(
-            centers,
-            1,
-            p_order,
-            s_order,
-            kappa,
-            aniso,
-            Some(&z_kernel),
-            poly_cols,
-            identifiability_transform,
-        );
-        s1 = amp2 * cf_s;
-        s1_psi = amp2 * cf_s_psi;
-        s1_psi_psi = amp2 * cf_s_psi_psi;
-    }
-    if duchon_closed_form_operator_penalty_converges(2, p_order, s_order as f64, d) {
-        let (cf_s, cf_s_psi, cf_s_psi_psi) = closed_form_psi_derivatives_in_total_basis(
-            centers,
-            2,
-            p_order,
-            s_order,
-            kappa,
-            aniso,
-            Some(&z_kernel),
-            poly_cols,
-            identifiability_transform,
-        );
-        s2 = amp2 * cf_s;
-        s2_psi = amp2 * cf_s_psi;
-        s2_psi_psi = amp2 * cf_s_psi_psi;
-    }
-
-    let (s0_norm, s0_norm_psi, s0_norm_psi_psi, c0) =
-        normalize_penaltywith_psi_derivatives(&s0, &s0_psi, &s0_psi_psi);
-    let (s1_norm, s1_norm_psi, s1_norm_psi_psi, c1) =
-        normalize_penaltywith_psi_derivatives(&s1, &s1_psi, &s1_psi_psi);
-    let (s2_norm, s2_norm_psi, s2_norm_psi_psi, c2) =
-        normalize_penaltywith_psi_derivatives(&s2, &s2_psi, &s2_psi_psi);
 
     // gam#2735 — MIRROR THE VALUE'S TENSION SPLIT.
     //
@@ -2457,23 +2437,28 @@ pub(crate) fn build_duchon_operator_penalty_psi_derivatives_in_directions(
     //
     // `D1` rows are indexed `collocation_i · dim + axis`, so axis `a` owns the
     // strided row set `a, a+dim, a+2·dim, …` — the same slice the value uses.
-    let split_tension = per_axis_relevance
-        && matches!(
-            effective_operator_penalties.tension,
-            OperatorPenaltySpec::Active { .. }
-        );
-    let mut candidates = vec![PenaltyCandidate {
-        matrix: ConstructiveQuadratic::try_from_dense_psd(
-            s0_norm,
-            "spherical operator mass penalty",
-        )?,
-        source: PenaltySource::OperatorMass,
-        normalization_scale: c0,
-        kronecker_factors: None,
-        op: None,
-    }];
-    let mut first_derivs = vec![s0_norm_psi];
-    let mut second_derivs = vec![s0_norm_psi_psi];
+    let split_tension = per_axis_relevance && tension_active;
+    let mut candidates = Vec::new();
+    let mut first_derivs = Vec::new();
+    let mut second_derivs = Vec::new();
+    if mass_active {
+        let (s0, s0_psi, s0_psi_psi) =
+            centered_operator_gram_and_psi_derivatives(&d0, &d0_psi, &d0_psi_psi);
+        let (s0_norm, s0_norm_psi, s0_norm_psi_psi, c0) =
+            normalize_penaltywith_psi_derivatives(&s0, &s0_psi, &s0_psi_psi);
+        candidates.push(PenaltyCandidate {
+            matrix: ConstructiveQuadratic::try_from_dense_psd(
+                s0_norm,
+                "spherical operator mass penalty",
+            )?,
+            source: PenaltySource::OperatorMass,
+            normalization_scale: c0,
+            kronecker_factors: None,
+            op: None,
+        });
+        first_derivs.push(s0_norm_psi);
+        second_derivs.push(s0_norm_psi_psi);
+    }
     if split_tension {
         for axis in 0..d {
             let stride = ndarray::s![axis..; d, ..];
@@ -2501,7 +2486,27 @@ pub(crate) fn build_duchon_operator_penalty_psi_derivatives_in_directions(
             first_derivs.push(norm_psi);
             second_derivs.push(norm_psi_psi);
         }
-    } else {
+    } else if tension_active {
+        let (mut s1, mut s1_psi, mut s1_psi_psi) =
+            gram_and_psi_derivatives_from_operator(&d1, &d1_psi, &d1_psi_psi);
+        if duchon_closed_form_operator_penalty_converges(1, p_order, s_order as f64, d) {
+            let (cf_s, cf_s_psi, cf_s_psi_psi) = closed_form_psi_derivatives_in_total_basis(
+                centers,
+                1,
+                p_order,
+                s_order,
+                kappa,
+                aniso,
+                Some(&z_kernel),
+                poly_cols,
+                identifiability_transform,
+            );
+            s1 = amp2 * cf_s;
+            s1_psi = amp2 * cf_s_psi;
+            s1_psi_psi = amp2 * cf_s_psi_psi;
+        }
+        let (s1_norm, s1_norm_psi, s1_norm_psi_psi, c1) =
+            normalize_penaltywith_psi_derivatives(&s1, &s1_psi, &s1_psi_psi);
         candidates.push(PenaltyCandidate {
             matrix: ConstructiveQuadratic::try_from_dense_psd(
                 s1_norm,
@@ -2515,18 +2520,40 @@ pub(crate) fn build_duchon_operator_penalty_psi_derivatives_in_directions(
         first_derivs.push(s1_norm_psi);
         second_derivs.push(s1_norm_psi_psi);
     }
-    candidates.push(PenaltyCandidate {
-        matrix: ConstructiveQuadratic::try_from_dense_psd(
-            s2_norm,
-            "spherical operator stiffness penalty",
-        )?,
-        source: PenaltySource::OperatorStiffness,
-        normalization_scale: c2,
-        kronecker_factors: None,
-        op: None,
-    });
-    first_derivs.push(s2_norm_psi);
-    second_derivs.push(s2_norm_psi_psi);
+    if stiffness_active {
+        let (mut s2, mut s2_psi, mut s2_psi_psi) =
+            gram_and_psi_derivatives_from_operator(&d2, &d2_psi, &d2_psi_psi);
+        if duchon_closed_form_operator_penalty_converges(2, p_order, s_order as f64, d) {
+            let (cf_s, cf_s_psi, cf_s_psi_psi) = closed_form_psi_derivatives_in_total_basis(
+                centers,
+                2,
+                p_order,
+                s_order,
+                kappa,
+                aniso,
+                Some(&z_kernel),
+                poly_cols,
+                identifiability_transform,
+            );
+            s2 = amp2 * cf_s;
+            s2_psi = amp2 * cf_s_psi;
+            s2_psi_psi = amp2 * cf_s_psi_psi;
+        }
+        let (s2_norm, s2_norm_psi, s2_norm_psi_psi, c2) =
+            normalize_penaltywith_psi_derivatives(&s2, &s2_psi, &s2_psi_psi);
+        candidates.push(PenaltyCandidate {
+            matrix: ConstructiveQuadratic::try_from_dense_psd(
+                s2_norm,
+                "spherical operator stiffness penalty",
+            )?,
+            source: PenaltySource::OperatorStiffness,
+            normalization_scale: c2,
+            kronecker_factors: None,
+            op: None,
+        });
+        first_derivs.push(s2_norm_psi);
+        second_derivs.push(s2_norm_psi_psi);
+    }
 
     let candidates = operator_penalty_candidates_from_derivative_candidates(
         candidates,
