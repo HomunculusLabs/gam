@@ -893,8 +893,8 @@ fn decompose_projection(
         .diag()
         .iter()
         .map(|value| value.abs())
-        .fold(f64::MIN_POSITIVE, f64::max);
-    let contrast_scale = contrast.dot(contrast).max(f64::MIN_POSITIVE);
+        .fold(0.0, f64::max);
+    let contrast_scale = contrast.dot(contrast);
     let variance_floor = (p.max(1) as f64) * f64::EPSILON * covariance_scale * contrast_scale;
     if ambient_variance < -variance_floor || !ambient_variance.is_finite() {
         return Err(format!(
@@ -935,11 +935,8 @@ fn decompose_projection(
     let projection_lift = correction.lift.t().dot(contrast);
     let normal_component_variance = projection_lift.dot(&normal_covariance.dot(&projection_lift));
     let residual_variance = ambient_variance - normal_component_variance;
-    let residual_floor = (p.max(q).max(1) as f64)
-        * f64::EPSILON
-        * ambient_variance
-            .max(normal_component_variance)
-            .max(f64::MIN_POSITIVE);
+    let residual_floor =
+        (p.max(q).max(1) as f64) * f64::EPSILON * ambient_variance.max(normal_component_variance);
     if residual_variance < -residual_floor || !residual_variance.is_finite() {
         return Err(format!(
             "constrained projection decomposition produced residual variance \
@@ -3632,7 +3629,9 @@ fn projection_quantile(
             })
             .sum::<f64>()
     };
-    let mut step = ambient_sd.max(residual_sd).max(f64::MIN_POSITIVE);
+    // `residual_variance == 0` returned above, so `residual_sd > 0` and every
+    // doubling below moves the bracket (#2469).
+    let mut step = ambient_sd.max(residual_sd);
     let mut lower = posterior_mean - step;
     let mut upper = posterior_mean + step;
     while cdf(lower) > probability {
@@ -3644,7 +3643,7 @@ fn projection_quantile(
             ));
         }
     }
-    step = ambient_sd.max(residual_sd).max(f64::MIN_POSITIVE);
+    step = ambient_sd.max(residual_sd);
     while cdf(upper) < probability {
         step *= 2.0;
         upper = posterior_mean + step;
