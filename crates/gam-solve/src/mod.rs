@@ -97,10 +97,6 @@ pub use topology_selector::{
 /// (and integration tests) can construct and probe barrier objectives without
 /// reaching through the private `estimate::reml::reml_outer_engine` path.
 pub use estimate::reml::reml_outer_engine::BarrierConfig;
-/// Re-exported for the Python bindings (`gam-pyffi`), which must name the
-/// covariance-correction error type without reaching through the private
-/// `estimate::reml::reml_outer_engine` path.
-pub use estimate::reml::reml_outer_engine::CorrectedCovarianceError;
 /// Re-exported for the Python bindings (`gam-pyffi`), which build their
 /// analytic-penalty registry through the single shared descriptor parser that
 /// also serves the in-process workflow pipeline. Exposed here so PyFFI can name

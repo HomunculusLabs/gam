@@ -41,8 +41,8 @@
 //! - `outer_derivatives`: outer-Hessian routing, scale decisions, the
 //!   derivative-trace computers, and the assembled outer-Hessian operator.
 //! - `efs`: the Extended Fellner–Schall and hybrid-EFS hyperparameter updates.
-//! - `corrected_covariance`: smoothing-parameter-corrected coefficient
-//!   covariance and the spectral-regularization helpers.
+//! - `corrected_covariance`: the smooth spectral-regularization helpers
+//!   (`spectral_regularize`, `spectral_epsilon`).
 //! - `dense_spectral`: the dense spectral [`DenseSpectralOperator`] backend.
 //! - `sparse_cholesky_backends`: the [`SparseCholeskyOperator`] and the other
 //!   concrete [`HessianFactorization`] backends (dense exact Cholesky,
@@ -191,7 +191,7 @@ mod stochastic_trace;
 // Each `*` glob re-exports exactly the visibility the moved item already carried
 // (`pub` stays `pub`, `pub(crate)` stays `pub(crate)`); private items stay
 // private to their submodule.
-pub use corrected_covariance::*;
+pub(crate) use corrected_covariance::*;
 pub use dense_spectral::*;
 pub use derivative_providers::*;
 pub use efs::*;

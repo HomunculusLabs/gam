@@ -7259,5 +7259,29 @@
     ],
     "reason": "SPEC rule 23 (#2469). WEIGHTED_CHI_SQUARE_TOLERANCE (1e-11) was the Imhof truncation accuracy that signed_weighted_chi_square_sf_to_tolerance substituted for a tolerance that is not finite and positive, and the tolerance the smooth-term LR reference requested when it had no statistic resolution. The invalid tolerance is now refused with NaN, and the no-resolution reference requests 0, which its existing clamp lifts to SMOOTH_LR_TAIL_ROUNDOFF_FLOOR. Nothing else read the constant.",
     "evidence": "At the base, git grep -n -w WEIGHTED_CHI_SQUARE_TOLERANCE finds only crates/gam-math/src/probability.rs (the declaration, the fallback read, two tests) and crates/gam-models/src/fit_orchestration/drivers/smooth_term_lr.rs (the no-resolution branch). There are no hits in docs, python, scripts, bench or examples. Guarded check job 598199 (/scratch.global/sauer354/pool/const2469d/cand5.check.598199.log): cargo check --workspace --all-targets --exclude gam-pyffi --keep-going errors only in the root tests conformal_coverage_quality.rs and row_metric_loud_vs_loadbearing.rs, which ffac510db fixed. gam-math lib chi_square imhof signed 5 passed, 0 failed (/scratch.global/sauer354/pool/const2469d/g5.598199.log)."
+  },
+  {
+    "base": "13df3ae51a6143d22351eb672796002acfd15ba1",
+    "items": [
+      "crates/gam-solve/src/reml/reml_outer_engine/corrected_covariance.rs:const:INDEFINITE_SUGGESTED_ACTION",
+      "crates/gam-solve/src/reml/reml_outer_engine/corrected_covariance.rs:enum:CorrectedCovarianceError",
+      "crates/gam-solve/src/reml/reml_outer_engine/corrected_covariance.rs:fn:active_bound_indices_for_theta",
+      "crates/gam-solve/src/reml/reml_outer_engine/corrected_covariance.rs:fn:active_theta_bounds_use_the_optimizer_rail_margin",
+      "crates/gam-solve/src/reml/reml_outer_engine/corrected_covariance.rs:fn:compute_corrected_covariance",
+      "crates/gam-solve/src/reml/reml_outer_engine/corrected_covariance.rs:fn:compute_corrected_covariance_diagonal",
+      "crates/gam-solve/src/reml/reml_outer_engine/corrected_covariance.rs:fn:compute_corrected_covariance_diagonal_with_constraints",
+      "crates/gam-solve/src/reml/reml_outer_engine/corrected_covariance.rs:fn:compute_corrected_covariance_with_constraints",
+      "crates/gam-solve/src/reml/reml_outer_engine/corrected_covariance.rs:fn:detect_active_theta_bounds",
+      "crates/gam-solve/src/reml/reml_outer_engine/corrected_covariance.rs:fn:fmt",
+      "crates/gam-solve/src/reml/reml_outer_engine/corrected_covariance.rs:fn:has_structural_diagnostics",
+      "crates/gam-solve/src/reml/reml_outer_engine/corrected_covariance.rs:fn:projected_inverse_with_inertia_gate",
+      "crates/gam-solve/src/reml/reml_outer_engine/corrected_covariance.rs:struct:CorrectedCovariance",
+      "crates/gam-solve/src/reml/reml_outer_engine/corrected_covariance.rs:struct:CorrectedCovarianceDiagonal",
+      "crates/gam-solve/src/reml/reml_outer_engine/corrected_covariance.rs:struct:OuterHessianIndefinite",
+      "crates/gam-solve/src/reml/reml_outer_engine/tests.rs:fn:corrected_covariance_indefinite_returns_diagnostic",
+      "crates/gam-solve/src/reml/reml_outer_engine/tests.rs:fn:corrected_covariance_indefinite_with_active_bound_succeeds"
+    ],
+    "reason": "#2902 row 8: the corrected coefficient covariance was reachable from production only through a trace-only validation block in compute_smoothing_correction_auto that ran it with no hyperparameters and read nothing back. Its theta option, the only route to the hardcoded ±RHO_BOUND rail scan, was supplied only by two tests, and no outer search has that box since 04726d916. The block, every corrected-covariance function and type, CorrectedCovarianceError with its OuterHessianIndefinite payload and root re-export, and the tests of the removed code are deleted; spectral_regularize and spectral_epsilon stay for dense_spectral.",
+    "evidence": "At the base, git grep finds compute_corrected_covariance and compute_corrected_covariance_diagonal called in production only at crates/gam-solve/src/reml/eval.rs:1163 and :1180 (q = 0, results only logged), the _with_constraints entries and detect_active_theta_bounds called only inside corrected_covariance.rs and from crates/gam-solve/src/reml/reml_outer_engine/tests.rs, and CorrectedCovarianceError imported by no crate (gam-pyffi and gamfit name only the separate create_exception! Python class). The deletion is gated by pool job 598363 (log /scratch.global/sauer354/pool/outer2817/gate2.598363.log): this patch applied at 46d51b5d5 with every start blob unchanged; gam-solve lib tests in the touched modules 21 passed, 0 failed; the guarded workspace --all-targets check compiled every crate, and its only errors are 20 in two root test targets this patch does not touch (tests/inference/misc/conformal_coverage_quality.rs, tests/perf_scale/misc/row_metric_loud_vs_loadbearing.rs), naming no deleted item."
   }
 ]
