@@ -11,14 +11,15 @@
 //! tool's (equally noisy) fit. So the pass/fail criterion is truth recovery, and
 //! the EBM is demoted to a baseline-to-match-or-beat on that same truth metric.
 //!
-//! OBJECTIVE METRIC (the primary assertion): on a held-out 30% test fold, the
-//! Poisson deviance of gam's fitted mean against the TRUE mean,
-//!   D_true(mu_hat) = 2*sum( mu_true*log(mu_true/mu_hat) - (mu_true - mu_hat) ),
-//! must be small in absolute terms — at most a small fraction of the irreducible
-//! deviance the truth itself carries against the realized counts. Equivalently the
-//! held-out RMSE of mu_hat against mu_true must be a small fraction of the signal
-//! amplitude. This is a real recovery claim: a broken PIRLS loop or a mis-inverted
-//! log link cannot recover exp(true_eta) and fails it.
+//! OBJECTIVE METRICS, on a held-out 30% test fold of each draw:
+//!   * the RMSE of gam's fitted mean against the TRUE mean `mu_true`, which gam must
+//!     bring below the no-skill predictor's (the train-fold mean count at every test
+//!     row). This is a real recovery claim: a broken PIRLS loop stuck at the
+//!     intercept, a mis-inverted log link, or a fit that chases the counts cannot
+//!     beat that predictor on the truth.
+//!   * the Poisson deviance of the fitted mean against the TRUE mean,
+//!       D_true(mu_hat) = 2*sum( mu_true*log(mu_true/mu_hat) - (mu_true - mu_hat) ),
+//!     on which the EBM is the baseline to match or beat.
 //!
 //! Setup (identical bytes fed to both engines):
 //!   * `K_SEEDS` synthetic draws of n=250, x1,x2 ~ U[0,10], counts as above, seeded
@@ -37,10 +38,15 @@
 //! (ratio 1.126, gam EDF 2.996) at fa0e33bb4 (CI run 34702231507).
 //!
 //! Assertions:
-//!   1. TRUTH RECOVERY (primary): gam's held-out RMSE against the TRUE mean
-//!      `mu_true`, averaged over draws, is a small fraction of the true-mean range
-//!      — gam has recovered the smooth count surface, not merely tracked the noisy
-//!      realization.
+//!   1. TRUTH RECOVERY (primary): paired over the draws, gam's held-out RMSE
+//!      against the TRUE mean `mu_true` is RESOLVED below the no-skill predictor's
+//!      (`PairedFoldComparison::gam_resolved_better`). It replaces an absolute bar,
+//!      RMSE < 0.20 of the true-mean range, that only an oracle parametric fit
+//!      meets. On 25 numpy draws of this truth at n_train = 175 (MSI job 602703,
+//!      `panel-602703/diag_pois.txt`) the mean relative RMSE was: flat 0.2788,
+//!      linear Poisson GLM 0.2551, InterpretML EBM 0.2177 (under 0.20 on 28% of
+//!      draws), and the GLM on the true sin/cos basis 0.1304. gam read 0.2135 on
+//!      this test's draws at 46d51b5d5 (job 598347).
 //!   2. MATCH-OR-BEAT (baseline): `assert_paired_match_or_beat` on the held-out
 //!      truth deviance. gam's draw-averaged deviance is no worse than the EBM's
 //!      times 1.10, and gam is not RESOLVED worse draw by draw. The mature ML
@@ -210,7 +216,8 @@ fn gam_poisson_log_matches_interpretml_ebm() {
 
     // ---- gam on every draw, and the long-format data EBM replays ------------
     let mut gam_truth_devs = Vec::with_capacity(K_SEEDS);
-    let mut rel_truth_rmses = Vec::with_capacity(K_SEEDS);
+    let mut gam_truth_rmses = Vec::with_capacity(K_SEEDS);
+    let mut no_skill_truth_rmses = Vec::with_capacity(K_SEEDS);
     let mut mu_trues = Vec::with_capacity(K_SEEDS);
     let mut gam_edf_total = 0.0;
     let mut irreducible_total = 0.0;
@@ -242,18 +249,27 @@ fn gam_poisson_log_matches_interpretml_ebm() {
                 .map(|(&mt, &mh)| poisson_dev_unit(mt, mh))
                 .sum::<f64>(),
         );
-        // Truth-recovery RMSE on the held-out mean surface, relative to the range
-        // of the true mean over the test fold.
-        let gam_truth_rmse = (gam_mu
-            .iter()
-            .zip(&mu_true)
-            .map(|(&mh, &mt)| (mh - mt).powi(2))
-            .sum::<f64>()
-            / n_test as f64)
-            .sqrt();
-        let mu_true_min = mu_true.iter().cloned().fold(f64::INFINITY, f64::min);
-        let mu_true_max = mu_true.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        rel_truth_rmses.push(gam_truth_rmse / (mu_true_max - mu_true_min).max(1e-12));
+        // Truth-recovery RMSE on the held-out mean surface, for gam and for the
+        // no-skill predictor on the same draw: the train-fold mean count at every
+        // test row, the best a learner that ignores x1 and x2 can do.
+        gam_truth_rmses.push(
+            (gam_mu
+                .iter()
+                .zip(&mu_true)
+                .map(|(&mh, &mt)| (mh - mt).powi(2))
+                .sum::<f64>()
+                / n_test as f64)
+                .sqrt(),
+        );
+        let train_mean = train_idx.iter().map(|&i| y[i]).sum::<f64>() / train_idx.len() as f64;
+        no_skill_truth_rmses.push(
+            (mu_true
+                .iter()
+                .map(|&mt| (train_mean - mt).powi(2))
+                .sum::<f64>()
+                / n_test as f64)
+                .sqrt(),
+        );
         // Irreducible deviance the truth itself carries against the realized
         // counts — a no-model-can-beat reference scale (context only).
         irreducible_total += test_idx
@@ -332,20 +348,22 @@ emit("mu", mu_all)
                 .sum::<f64>()
         })
         .collect();
-    let rel_truth_rmse_mean = rel_truth_rmses.iter().sum::<f64>() / K_SEEDS as f64;
-
+    let no_skill = PairedFoldComparison::new(&gam_truth_rmses, &no_skill_truth_rmses, true);
     let panel = PairedFoldComparison::new(&gam_truth_devs, &ebm_truth_devs, true);
     eprintln!(
         "poisson truth-recovery K={K_SEEDS}-draw paired: n_train={} n_test={n_test} \
          mean_gam_edf={:.3} fold-mean truth_dev gam={:.4} ebm={:.4} \
-         mean rel_truth_rmse={rel_truth_rmse_mean:.4} \
+         fold-mean truth_rmse gam={:.4} no_skill={:.4} \
          mean irreducible_dev(truth_vs_counts)={:.4}",
         train_idx.len(),
         gam_edf_total / K_SEEDS as f64,
         panel.gam_mean,
         panel.reference_mean,
+        no_skill.gam_mean,
+        no_skill.reference_mean,
         irreducible_total / K_SEEDS as f64,
     );
+    eprintln!("{}", no_skill.report("ebm_poisson::truth_rmse_vs_no_skill"));
     eprintln!("{}", panel.report("ebm_poisson::truth_deviance"));
     eprintln!(
         "{}",
@@ -359,15 +377,15 @@ emit("mu", mu_all)
         .line()
     );
 
-    // (1) PRIMARY — truth recovery, on the draw average: gam's held-out fitted
-    //     mean tracks the TRUE mean to well within a fifth of the true-mean
-    //     amplitude. exp(true_eta) ranges only mildly (the signal is gentle), so a
-    //     learner that recovered the smooth surface lands far inside this; a broken
-    //     PIRLS loop or a mis-inverted log link cannot.
+    // (1) PRIMARY — truth recovery, paired over the draws: gam's held-out fitted
+    //     mean is closer to the TRUE mean than the no-skill predictor by more than
+    //     the draw-to-draw noise can explain. Assertion 1 in the module docs gives
+    //     the measured scale and the absolute bar this replaces.
     assert!(
-        rel_truth_rmse_mean < 0.20,
-        "gam did not recover the true held-out mean surface: draw-averaged \
-         RMSE(mu_hat, mu_true) is {rel_truth_rmse_mean:.4} of the true-mean range (bar 0.20)"
+        no_skill.gam_resolved_better(),
+        "gam did not recover the true held-out mean surface: its RMSE against the true \
+         mean is not resolved below the no-skill train-mean predictor's\n{}",
+        no_skill.report("ebm_poisson::truth_rmse_vs_no_skill")
     );
 
     // (2) MATCH-OR-BEAT — gam's truth deviance, paired over the shared draws, may
