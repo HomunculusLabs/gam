@@ -881,7 +881,17 @@ fn survival_location_scale_outer_link_shape_gradient_matches_finite_difference_s
                         fd(3)
                     );
                 }
-                _ => eprintln!("[2695] rho {k}: a probe recorded no criterion components"),
+                _ => eprintln!(
+                    "[2695] rho {k}: a probe recorded no criterion components; analytic \
+                     total={:.9e} fixed_beta={:.9e} logdet_h={:.9e} (frozen {:.9e}, mode \
+                     response {:.9e}) logdet_s={:.9e}",
+                    part.total,
+                    part.fixed_beta,
+                    part.logdet_h,
+                    part.frozen_logdet_h,
+                    part.mode_response_logdet_h,
+                    part.logdet_s
+                ),
             }
         }
     }
