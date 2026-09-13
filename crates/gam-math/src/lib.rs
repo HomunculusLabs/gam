@@ -1,5 +1,5 @@
 pub mod fast_channel;
-pub mod jet_algebra;
+mod jet_algebra;
 pub mod jet_partitions;
 pub mod jet_scalar;
 pub mod jet_tower;

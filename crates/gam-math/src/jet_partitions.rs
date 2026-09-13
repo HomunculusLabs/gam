@@ -2,7 +2,7 @@
 //! latent-survival row kernels.
 //!
 //! The layout stores one coefficient per direction mask. The calculus itself
-//! lives in [`crate::jet_algebra`]: that module owns the layout-agnostic
+//! lives in `crate::jet_algebra`: that module owns the layout-agnostic
 //! Leibniz / Faà di Bruno *combinatorics* once, and the scalar (`n_dirs <= 1`)
 //! path here still routes through it so a fix to the rule is a fix to both
 //! representations.
