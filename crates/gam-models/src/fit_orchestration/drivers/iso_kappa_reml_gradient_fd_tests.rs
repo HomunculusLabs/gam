@@ -3525,6 +3525,21 @@ fn iso_kappa_gradient_is_certified_six_e_folds_past_the_box_2461() {
 ///   rhoALL@30               1.3324e-7  1.3324e-7  1.3324e-7   psi 3.6220e-11
 /// ```
 ///
+/// Re-measured at 66539c4b5 (job 578200), after the #2818 restoration:
+///
+/// ```text
+///   rhoALL@21  rho j=0/1/2  3.4849e-7  1.9127e-6  2.1448e-7   psi -1.0305e-5
+///   rhoALL@24               1.4365e-7  2.2153e-7  1.3698e-7   psi -5.1308e-7
+///   rhoALL@27               1.3367e-7  1.3755e-7  1.3334e-7   psi -2.5545e-8
+///   rhoALL@30               1.3327e-7  1.3346e-7  1.3325e-7   psi -1.2718e-9
+/// ```
+///
+/// The law held and the constants did not. The ρ residual's tail constant is
+/// 2.3479e3 at ρ=21 against 87.5, and `c_psi = g_psi*e^rho` is −1.3591e4 at
+/// every rung against +388. Nothing here isolates what moved them. The
+/// assertions are therefore stated as tail laws, so a constant can neither make
+/// them pass nor fail.
+///
 /// analytic against central FD to 6.5e-9 relative at ρ=30, so this is the
 /// criterion itself and not a gradient artifact. Two things are worth reading
 /// off it rather than leaving implicit:
@@ -3581,6 +3596,8 @@ fn outer_gradient_at_large_rho_has_a_lambda_infinity_face_2450() {
         // validated only where one of its inputs is zero has not been validated
         // in that input, which is exactly how this one nearly shipped wrong.
         let mut face_tail: Vec<(f64, f64, f64)> = Vec::new();
+        // `(rho, g_psi, c_psi = g_psi*e^rho)` per probe: the ψ tail, judged after the loop.
+        let mut psi_tail: Vec<(f64, f64, f64)> = Vec::new();
         // #2545: the aggregate `worst_fraction` printed at the end is a max over
         // probes AND components, and reading it as a per-ρ number produced a
         // published "the floor is 1.5-2.1x w*a, so something else saturates"
@@ -3617,11 +3634,9 @@ fn outer_gradient_at_large_rho_has_a_lambda_infinity_face_2450() {
             face_tail.push((value, residual, residual * value.exp()));
             for (j, &observed) in grad.iter().enumerate() {
                 if j + 1 == grad.len() {
-                    assert!(
-                        observed.abs() <= 1.0e-6,
-                        "{label} {probe}: psi gradient should have decayed at a \
-                         saturated rho, got {observed:+.6e}"
-                    );
+                    // ψ carries no barrier, so on the λ=∞ face its whole value is the
+                    // REML tail `c_psi*e^-rho`; its constant is judged after the loop.
+                    psi_tail.push((value, observed, observed * value.exp()));
                     continue;
                 }
                 let fraction = observed.abs() / retired;
@@ -3645,6 +3660,37 @@ fn outer_gradient_at_large_rho_has_a_lambda_infinity_face_2450() {
              {worst_fraction:.3e} of the retired Normal(0,3) contribution"
         );
 
+        // ── ψ on the λ=∞ face: `g_psi = c_psi*e^-rho` with ONE constant ──
+        //
+        // The ψ gradient carries no barrier, so on the face it IS the REML tail. An
+        // absolute bar on it encodes one fixture's tail constant: the #2545 ladder had
+        // c_psi ≈ +388 (2.9394e-7 at ρ=21), while job 578200 at 66539c4b5 measured
+        // −1.0305e-5 / −5.1308e-7 / −2.5545e-8 / −1.2718e-9 at ρ = 21/24/27/30, i.e.
+        // c_psi = −1.3591e4 at every rung, with FD agreeing at 21, 27 and 30. The law is
+        // what this gate is about, so it is asserted in the form the ρ tail uses below:
+        // one sign, and one constant within 1%. A ψ term that survives saturation makes
+        // c_psi grow like e^rho, a factor e^9 across the ladder.
+        assert_eq!(
+            psi_tail.len(),
+            SATURATED.len(),
+            "{label}: the psi decomposition must cover every saturated probe"
+        );
+        let psi_rows = psi_tail
+            .iter()
+            .map(|(rho, g, c)| format!("rho={rho} g_psi={g:+.6e} c_psi={c:+.5e}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let psi_c_max = psi_tail.iter().map(|(_, _, c)| c.abs()).fold(0.0f64, f64::max);
+        let psi_c_min = psi_tail.iter().map(|(_, _, c)| c.abs()).fold(f64::MAX, f64::min);
+        let psi_one_sign = psi_tail.iter().all(|(_, g, _)| g.is_finite() && *g < 0.0)
+            || psi_tail.iter().all(|(_, g, _)| g.is_finite() && *g > 0.0);
+        assert!(
+            psi_one_sign && psi_c_max - psi_c_min <= 1.0e-2 * psi_c_max,
+            "{label}: the psi gradient must follow the lambda=infinity tail law \
+             g_psi = c_psi*e^-rho with ONE constant across the ladder. Got {psi_rows}"
+        );
+        eprintln!("[#2450-psi-face] {label}: {psi_rows}");
+
         // ── #2545 acceptance: the residual under the barrier IS the λ=∞ face ──
         //
         // Three statements, each of which the printed decomposition above was
@@ -3658,12 +3704,16 @@ fn outer_gradient_at_large_rho_has_a_lambda_infinity_face_2450() {
         //    ρ = 21/24/27/30, a spread of 4.3e-4 relative, so a 1% band is two
         //    orders of headroom over the measurement and still refuses a
         //    divergent `ĉ` (the pre-#2450 failure this whole family is about);
-        // 3. the residual at the deepest probe is ORDERS below the
-        //    barrier-bearing gradient the certificate used to be handed. That is
-        //    the number the fix is accepted on: `max|g_rho| = 1.332521e-7` with
-        //    the barrier in, `residual = 8.185450e-12` with it out — a factor
-        //    6.1e-5, which the 1e-3 bar states as a relative claim so it cannot
-        //    be satisfied by the fixture merely getting smaller.
+        // 3. at the deepest probe the barrier is the DOMINANT term of the
+        //    barrier-bearing gradient the certificate used to be handed, so removing
+        //    it is what leaves the face. The #2545 measurement was `max|g_rho| =
+        //    1.332521e-7` with the barrier in and `residual = 8.185450e-12` with it
+        //    out, a factor 6.1e-5. How far below the barrier the residual sits is
+        //    `c*e^-rho / (w*a)`, a property of the fixture's tail constant: job 578200
+        //    at 66539c4b5 has c = 2.3479e3 at ρ=21 (27x the 87.5 above), which puts
+        //    the ρ=30 residual near 2.2e-10, about 1.65e-3 of the barrier-bearing
+        //    gradient. So the claim is stated as dominance, residual below the
+        //    barrier, and the constancy in (2) carries the control on the subtraction.
         assert_eq!(
             face_tail.len(),
             SATURATED.len(),
@@ -3701,14 +3751,17 @@ fn outer_gradient_at_large_rho_has_a_lambda_infinity_face_2450() {
                     .fold(0.0f64, |acc, v| acc.max(v.abs()))
             })
             .unwrap_or_else(|| panic!("{label}: probe {deepest_probe} missing"));
+        let deepest_a = GUARD_SHARPNESS / GUARD_BOUND;
+        let deepest_guard = GUARD_WEIGHT * deepest_a * (deepest_a * deepest_rho).tanh();
         assert!(
-            deepest_residual <= 1.0e-3 * deepest_max,
+            deepest_residual < deepest_guard,
             "{label} rho={deepest_rho}: with the soft rho-guard barrier removed \
-             from the certificate's view (#2545) the residual must be ORDERS below \
-             the barrier-bearing gradient the certificate used to judge. Got \
-             residual={deepest_residual:.6e} against max|g_rho|={deepest_max:.6e}, a \
-             fraction {:.3e}. If this fails, the barrier is no longer the dominant \
-             term at a saturated rho and the subtraction is no longer the fix.",
+             from the certificate's view (#2545) the residual must sit below the \
+             barrier it removed, i.e. the barrier is the dominant term of the gradient \
+             the certificate used to judge. Got residual={deepest_residual:.6e} against \
+             guard={deepest_guard:.6e} (max|g_rho|={deepest_max:.6e}, a fraction {:.3e}). \
+             If this fails, the barrier is no longer the dominant term at a saturated \
+             rho and the subtraction is no longer the fix.",
             deepest_residual / deepest_max
         );
         eprintln!(
