@@ -3186,6 +3186,14 @@ impl BernoulliMarginalSlopeFamily {
                     })
                     .collect::<Result<Vec<_>, String>>()?
             };
+            let crossing_cells: Vec<exact::DenestedPartitionCell> = if need_hessian {
+                cached_cells
+                    .iter()
+                    .map(|(partition_cell, _)| *partition_cell)
+                    .collect()
+            } else {
+                Vec::new()
+            };
             for (partition_cell, state) in cached_cells {
                 // coeff_u is consumed by `cell_first_derivative_from_moments`
                 // for every cell; coeff_au and coeff_bu only feed the
@@ -3362,6 +3370,19 @@ impl BernoulliMarginalSlopeFamily {
                         Ok(())
                     },
                 )?;
+            }
+            if need_hessian {
+                // Moving-boundary terms of the link-knot crossings (#2901).
+                let crossing =
+                    super::standard_normal_flex_fifth::standard_normal_flex_crossing_second_partials(
+                        &crossing_cells,
+                        a,
+                        b,
+                        scale,
+                    );
+                f_aa += crossing[0];
+                f_au[1] += crossing[1];
+                f_uv[[1, 1]] += crossing[2];
             }
         }
 

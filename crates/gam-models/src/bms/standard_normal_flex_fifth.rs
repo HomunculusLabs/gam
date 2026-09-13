@@ -844,6 +844,55 @@ impl LinkCrossing {
     }
 }
 
+/// The link-knot crossings' moving-boundary terms of order two,
+/// `[B[a,a], B[a,b], B[b,b]]`, over the intercept and the slope, the only
+/// coordinates that move a crossing. With `Δ` the jump of an index partial
+/// across a crossing at `z*`,
+///   `B[s,t] = φ(z*)·φ(η*)·[Δη_z·U_s·U_t/b² − (Δη_s·U_t + Δη_t·U_s)/b]`,
+/// with `U_a = 1` and `U_b = z*`. At an interior knot the index is `C²` and every
+/// `Δ` vanishes. At a support edge the link deviation is only `C⁰`.
+pub(super) fn standard_normal_flex_crossing_second_partials(
+    cells: &[exact_kernel::DenestedPartitionCell],
+    a: f64,
+    b: f64,
+    scale: f64,
+) -> [f64; 3] {
+    let mut out = [0.0; 3];
+    for window in cells.windows(2) {
+        let (left, right) = (&window[0], &window[1]);
+        if !matches!(left.right_edge, exact_kernel::PartitionEdge::Crossing { .. })
+            || right.cell.left != left.cell.right
+        {
+            continue;
+        }
+        let z_star = left.cell.right;
+        let density = (-left.cell.q(z_star)).exp() / std::f64::consts::TAU;
+        let index_slope = |cell: exact_kernel::DenestedCubicCell| {
+            cell.c1 + z_star * (2.0 * cell.c2 + 3.0 * z_star * cell.c3)
+        };
+        let index_partials = |partition_cell: &exact_kernel::DenestedPartitionCell| {
+            let (da, db) = exact_kernel::denested_cell_coefficient_partials(
+                partition_cell.score_span,
+                partition_cell.link_span,
+                a,
+                b,
+            );
+            (
+                scale * eval_coeff4_at(&da, z_star),
+                scale * eval_coeff4_at(&db, z_star),
+            )
+        };
+        let z_jump = index_slope(left.cell) - index_slope(right.cell);
+        let (left_a, left_b) = index_partials(left);
+        let (right_a, right_b) = index_partials(right);
+        let (a_jump, b_jump) = (left_a - right_a, left_b - right_b);
+        out[0] += density * (z_jump / (b * b) - 2.0 * a_jump / b);
+        out[1] += density * (z_jump * z_star / (b * b) - (a_jump * z_star + b_jump) / b);
+        out[2] += density * (z_jump * z_star * z_star / (b * b) - 2.0 * b_jump * z_star / b);
+    }
+    out
+}
+
 /// The link-knot crossings of one row's partition, for adding their
 /// moving-boundary terms to explicit calibration partials a lowering
 /// accumulates cell by cell.
