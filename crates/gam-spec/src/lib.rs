@@ -2536,11 +2536,6 @@ impl GlmLikelihoodSpec {
         self.spec.link_function()
     }
 
-    #[inline]
-    pub fn fixed_phi(&self) -> Option<f64> {
-        self.scale.fixed_phi()
-    }
-
     /// Multiplier converting the stored unscaled inverse penalized Hessian
     /// `H⁻¹` into the reported coefficient covariance `Vb = H⁻¹ · scale`.
     ///
@@ -2708,16 +2703,6 @@ impl GlmLikelihoodSpec {
             self.scale = LikelihoodScaleMetadata::EstimatedNegBinTheta { theta };
         }
         self
-    }
-
-    /// The estimated Negative-Binomial `theta`, read from the family variant
-    /// (the canonical store), or `None` for non-NB families.
-    #[inline]
-    pub fn negbin_theta(&self) -> Option<f64> {
-        match self.spec.response {
-            ResponseFamily::NegativeBinomial { theta, .. } => Some(theta),
-            _ => None,
-        }
     }
 
     /// Produce a copy of this spec with the Tweedie exponential-dispersion

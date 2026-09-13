@@ -3589,5 +3589,14 @@
     },
     "reason": "#2829 product-root rule: ShiftedDiagonalPreconditioner::is_identity, restored in place from d484a091a, has no caller. Every is_identity call in the tree is on a coefficient gauge. It is deleted.",
     "evidence": "At d39affbb4d976e243a2954941366e1279e2f9e60, git grep -n -E '[.:]is_identity\\(' over crates/gam-solve finds no call. Across crates, src and tests, every call is on a gauge or coefficient_gauge value in gam-custom-family, gam-identifiability, gam-inference, gam-models or gam-predict. Pool job 612031 on sw0k at b4753af5fe359ab3ad65afaa6ef90a42f10e13a4, the chain latentflat, linalg, runtime, solve, spec, terms, logit, cascade, kl on 07f9b8d88bcd5a060d5003a98298a977412467cf, whose Rust blobs this landing reproduces (log /scratch.global/sauer354/pool/api2829/check.612031.log): source_removal_guard.py and public_api_census.py exited 0 on all nine links, and cargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0. The same job's run of the moved residual_cascade past-cap test had not reported when these landed."
+  },
+  {
+    "base": "3739c92f0cc1a4cfa5459a81ed3f20368d0279fb",
+    "removed": {
+      "crates/gam-spec/src/lib.rs::fixed_phi": 1,
+      "crates/gam-spec/src/lib.rs::negbin_theta": 1
+    },
+    "reason": "#2829 product-root rule: GlmLikelihoodSpec::fixed_phi and GlmLikelihoodSpec::negbin_theta, restored in place from d484a091a, have no caller. Every fixed_phi and negbin_theta call in the tree is on LikelihoodScaleMetadata. Both getters are deleted; the metadata methods keep their gam-predict and gam-inference callers.",
+    "evidence": "At 3739c92f0cc1a4cfa5459a81ed3f20368d0279fb, git grep -n -E '[.:]fixed_phi\\(' over crates, src, tests and examples finds the getter's delegating body, a gam-spec unit test on a LikelihoodScaleMetadata, and calls on likelihood_scale values in gam-predict and the root tests. git grep -n -E '[.:]negbin_theta\\(' finds calls on scale and likelihood_scale values in gam-inference, gam-predict and the root tests. Neither is ever called on a GlmLikelihoodSpec. Pool job 612031 on sw0k at b4753af5fe359ab3ad65afaa6ef90a42f10e13a4, the chain latentflat, linalg, runtime, solve, spec, terms, logit, cascade, kl on 07f9b8d88bcd5a060d5003a98298a977412467cf, whose Rust blobs this landing reproduces (log /scratch.global/sauer354/pool/api2829/check.612031.log): source_removal_guard.py and public_api_census.py exited 0 on all nine links, and cargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0. The same job's run of the moved residual_cascade past-cap test had not reported when these landed."
   }
 ]
