@@ -252,17 +252,19 @@ pub(crate) fn sae_streaming_plan_from_budget(
     let direct_fits_tiny = direct_peak_bytes <= SAE_DIRECT_ALWAYS_ADMIT_BYTES
         && direct_peak_bytes <= process_available_bytes;
     let direct_admitted = direct_peak_bytes <= in_core_budget_bytes || direct_fits_tiny;
-    // #2724 — the dense exact-`A` route's own ledger. `total_t = Σ_rows row_dim`
-    // and `row_dim = Σ_{k active in that row} d_k ≤ k_atoms · d_max`, so the
-    // shape this function already receives bounds the joint dimension the
-    // allocator will build. The bound is exact when every atom is active in
-    // every row (the dense-softmax regime that produced the measured witness)
-    // and conservative under a compact TopK layout — the direction a memory
-    // admission must err in.
-    let exact_stationarity_dim = sae_exact_stationarity_dim(
-        n_obs.saturating_mul(k_atoms).saturating_mul(d_max),
-        border_dim,
-    );
+    // #2724 — the dense exact-`A` route's own ledger. `total_t = Σ_rows row_dim`,
+    // and a row's block is the assignment's free gate coordinates plus its active
+    // atoms' chart coordinates (`SaeAssignment::row_block_dim`: `K − 1` softmax
+    // logits, `K` ordered Beta–Bernoulli or threshold gates, none under TopK, plus
+    // `Σ_k d_k`). That is at most `row_block_dim = k_atoms · (1 + d_max)`, the width
+    // the cross-block ledger above already prices, and the exact route builds the
+    // same rows. Pricing chart coordinates alone (`k_atoms · d_max`) dropped the
+    // gate block: on a softmax circle fit it priced `n·K` coordinates where the
+    // allocator builds `n·(2K − 1)`. The bound is exact for one gate per atom at a
+    // uniform `d`, one slot per row above a softmax row, and conservative under a
+    // compact TopK layout — the direction a memory admission must err in.
+    let exact_stationarity_dim =
+        sae_exact_stationarity_dim(n_obs.saturating_mul(row_block_dim), border_dim);
     let exact_stationarity_bytes = sae_exact_stationarity_resident_bytes(exact_stationarity_dim);
     // The host-budget admission the terminal polish also asks, at its exact
     // dimension (#2283); here at the shape-derived bound.
@@ -966,15 +968,19 @@ mod exact_stationarity_admission_tests {
     /// `(n_obs, total_basis, k_atoms, d_max, border_dim)`.
     ///
     /// `n_obs = 508`, `k_atoms = 8` and `border_dim = 72` are read off the
-    /// shipped `[SAE-EXACT-DENSE]` line for that fit (`border=72`). `d_max = 2`
-    /// is the issue's INFERENCE, not a measurement — `coords/rows = 7620/508 =
-    /// 15` over 8 atoms forces `d_max ≥ 2`, and 2 is the smallest value
-    /// consistent with it; a larger true `d_max` only makes the priced bound
-    /// larger, so the assertion below is the conservative side of that
-    /// uncertainty. `total_basis` is not pinned by the log line; it enters only
-    /// the full-batch slab, and this value keeps that slab at ~8 MB — which is
-    /// the whole point, since it is the ledger that used to stand alone.
-    const WITNESS: (usize, usize, usize, usize, usize) = (508, 96, 8, 2, 72);
+    /// shipped `[SAE-EXACT-DENSE]` line for that fit (`border=72`). `d_max = 1`
+    /// is derived from the row layout, not measured: a row block is
+    /// `assignment_coord_dim + Σ_k d_k`, and `coords/rows = 7620/508 = 15` over
+    /// 8 softmax atoms is 7 free logits plus 8 one-dimensional circle
+    /// coordinates. This value used to be 2, inferred from 15 as if every slot
+    /// were a chart coordinate; that inference is how the plan's omitted gate
+    /// block stayed covered here. At `d_max = 1` the chart-only expression prices
+    /// 4136, below the measured 7692, so the covering assertion below fails
+    /// unless the gate block is priced. `total_basis` is not pinned by the log
+    /// line; it enters only the full-batch slab, and this value keeps that slab
+    /// at ~8 MB — which is the whole point, since it is the ledger that used to
+    /// stand alone.
+    const WITNESS: (usize, usize, usize, usize, usize) = (508, 96, 8, 1, 72);
 
     /// `dim` from the shipped `[SAE-EXACT-DENSE]` line for that fit. The plan's
     /// shape-derived bound must not fall below it, or the ledger would price a
@@ -1003,7 +1009,7 @@ mod exact_stationarity_admission_tests {
         let (n_obs, _, k_atoms, d_max, border_dim) = WITNESS;
         assert_eq!(
             plan.estimated_exact_stationarity_dim,
-            sae_exact_stationarity_dim(n_obs * k_atoms * d_max, border_dim),
+            sae_exact_stationarity_dim(n_obs * k_atoms * (1 + d_max), border_dim),
             "the plan must price the joint dimension through the shared expression"
         );
         assert!(
