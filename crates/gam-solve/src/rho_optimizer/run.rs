@@ -1301,6 +1301,9 @@ pub enum OuterResultOrigin {
     /// projected gradient. The search was stopped at its best feasible iterate
     /// (#2817).
     ArcUnprogressingStallCheckpoint,
+    /// The same unprogressing stop on the matrix-free trust-region route, which
+    /// has no stall stop of its own (#2817).
+    OperatorUnprogressingStallCheckpoint,
     /// ARC was stopped at a point its own terminal certificate accepts: the
     /// Newton decrement ½gᵀH⁻¹g of the rail-projected gradient sat at or below
     /// the criterion's resolution under a PSD reduced Hessian (#2817), or a

@@ -16,6 +16,7 @@
 
 use super::*;
 use ndarray::array;
+use opt::OperatorObjective;
 
 /// The criterion resolution floor these fixtures hand the bridge — the same
 /// quantity `outer_rel_cost_floor` returns at the default outer tolerance
@@ -774,6 +775,111 @@ fn a_stall_whose_residual_contracted_between_windows_keeps_moving_2817() {
         "a window that halved the incumbent's residual must license the next one: \
          {outcomes:?}"
     );
+}
+
+/// Drive `samples.len()` evaluations of the matrix-free route's operator oracle
+/// at `point`, one per entry, and report each outcome plus whatever the bridge
+/// published to its unprogressing-stop slot. Evaluation stops at the first
+/// error.
+fn drive_operator_oracle_2817(
+    point: Array1<f64>,
+    samples: Vec<(f64, Array1<f64>)>,
+) -> (Vec<Result<f64, String>>, Option<CostStallExit>) {
+    let table = Arc::new(samples.clone());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let problem = OuterProblem::new(point.len())
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Either);
+    let flat = samples[0].0;
+    let mut obj = problem.build_objective_with_eval_order(
+        (),
+        move |_: &mut (), _: &Array1<f64>| Ok(flat),
+        |_: &mut (), _: &Array1<f64>| {
+            Err(EstimationError::InvalidInput(
+                "legacy eager eval should not run".to_string(),
+            ))
+        },
+        move |_: &mut (), theta: &Array1<f64>, _: OuterEvalOrder| {
+            let idx = calls.fetch_add(1, Ordering::Relaxed);
+            let (cost, gradient) = table[idx.min(table.len() - 1)].clone();
+            Ok(OuterEval {
+                cost,
+                gradient,
+                hessian: HessianValue::Dense(Array2::eye(theta.len())),
+                inner_beta_hint: None,
+            })
+        },
+        None::<fn(&mut ())>,
+        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+    );
+    let stop: Arc<Mutex<Option<CostStallExit>>> = Arc::new(Mutex::new(None));
+    let guard = CostStallGuard::new(
+        FLOOR_2817,
+        ARC_COST_STALL_WINDOW,
+        COST_STALL_PROJECTED_GRAD_FLOOR,
+        Arc::new(Mutex::new(None)),
+    );
+    let mut bridge = OuterOperatorBridge {
+        obj: &mut obj,
+        layout: OuterThetaLayout::new(point.len(), 0),
+        outer_inner_cap: None,
+        eval_count: 0,
+        g_norm_initial: None,
+        last_g_norm: None,
+        last_value_grad_rho: None,
+        cost_stall: Some(guard),
+        cost_stall_bounds: Some(wide_box_2817(point.len())),
+        unprogressing_stop: Arc::clone(&stop),
+    };
+    let mut outcomes = Vec::new();
+    for _ in 0..samples.len() {
+        match OperatorObjective::eval_value_grad_op(&mut bridge, &point) {
+            Ok(sample) => outcomes.push(Ok(sample.value)),
+            Err(err) => {
+                outcomes.push(Err(err.into_message()));
+                break;
+            }
+        }
+    }
+    let published = stop.lock().expect("stop cell").take();
+    (outcomes, published)
+}
+
+/// The matrix-free route stops the same way (#2817). opt's matrix-free trust
+/// region has no stall stop of its own, so this flat stall, whose residual is
+/// in the guard's first-order band and whose Newton decrement is 5000× the
+/// criterion's resolution, used to end only when the iteration count ran out.
+#[test]
+fn an_operator_route_stall_that_buys_nothing_stops_at_its_second_window_2817() {
+    let (outcomes, published) = drive_operator_oracle_2817(
+        array![0.5],
+        flatlined_2817(array![1.0], 2 * ARC_COST_STALL_WINDOW + 3),
+    );
+    assert_stops_at_the_second_window_2817(&outcomes, published);
+}
+
+/// NEGATIVE CONTROL on the matrix-free route: resolved descent between the two
+/// windows licenses the second one.
+#[test]
+fn an_operator_route_stall_that_bought_resolved_descent_keeps_moving_2817() {
+    let flat = ARC_COST_STALL_WINDOW + 1;
+    let schedule: Vec<(f64, Array1<f64>)> = (0..2 * flat + 1)
+        .map(|index| {
+            let cost = if index < flat {
+                COST_2817
+            } else {
+                COST_2817 - 1.0
+            };
+            (cost, array![1.0])
+        })
+        .collect();
+    let (outcomes, published) = drive_operator_oracle_2817(array![0.5], schedule);
+    assert!(
+        outcomes.iter().all(|outcome| outcome.is_ok()),
+        "a window that bought 10000 resolutions of descent must license the next one: \
+         {outcomes:?}"
+    );
+    assert!(published.is_none(), "a licensed run publishes no stop");
 }
 
 // ─── an exhausted budget refuses ─────────────────────────────────────────────

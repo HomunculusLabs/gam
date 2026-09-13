@@ -237,6 +237,10 @@ pub(crate) const ARC_CURVATURE_STATIONARY_SENTINEL: &str = "OUTER_ARC_CURVATURE_
 /// The runner maps this sentinel to a NON-converged checkpoint: the point is
 /// the trajectory's best feasible iterate, and whether it is stationary is the
 /// terminal certificate's question, answered from a fresh evaluation.
+///
+/// The matrix-free route stops through the same guard and returns the same
+/// sentinel. opt drops the message there, so that runner reads
+/// [`OuterOperatorBridge::unprogressing_stop`] instead.
 pub(crate) const ARC_UNPROGRESSING_STALL_SENTINEL: &str = "OUTER_ARC_UNPROGRESSING_STALL";
 
 /// Verdict produced by folding one accepted outer iterate into
@@ -875,6 +879,35 @@ impl CostStallGuard {
             self.continuation_incumbent = Some((self.best_value, self.best_grad_norm));
         }
         licensed
+    }
+
+    /// The incumbent to stop at when a filled window is not licensed to
+    /// continue (see [`Self::license_continuation`]); `None` while continuing
+    /// is licensed. Every route that installs the guard stops through here, so
+    /// what "bought nothing" means is decided in one place (#2817).
+    pub(crate) fn unprogressing_stop(&mut self) -> Option<CostStallExit> {
+        if self.license_continuation() {
+            return None;
+        }
+        let rho = self.best_rho.clone()?;
+        log::info!(
+            "[OUTER] stopping at an unprogressing stall: the window filled again at \
+             value={:.6e} |Pg|={:.3e} after {} accepted outer iteration(s), with no resolved \
+             descent and no contraction of the projected gradient since the last one; the \
+             terminal certificate judges the incumbent (#2817).",
+            self.best_value,
+            self.best_grad_norm,
+            self.accepted_iters,
+        );
+        Some(CostStallExit {
+            rho,
+            value: self.best_value,
+            grad_norm: self.best_grad_norm,
+            iterations: self.accepted_iters,
+            converged: false,
+            noise_grad_bound: None,
+            probe_scale: None,
+        })
     }
 
     /// Record one trusted accepted iterate into the #2241 noise-evidence
@@ -2923,29 +2956,9 @@ impl OuterSecondOrderBridge<'_> {
     /// [`CostStallGuard::license_continuation`].
     fn unprogressing_stall_exit(&mut self) -> Option<ObjectiveEvalError> {
         let guard = self.cost_stall.as_mut()?;
-        if guard.license_continuation() {
-            return None;
-        }
-        let best_rho = guard.best_rho.clone()?;
-        log::info!(
-            "[OUTER] ARC stopping at an unprogressing stall: the window filled again at \
-             value={:.6e} |Pg|={:.3e} after {} accepted outer iteration(s), with no resolved \
-             descent and no contraction of the projected gradient since the last one; the \
-             terminal certificate judges the incumbent (#2817).",
-            guard.best_value,
-            guard.best_grad_norm,
-            guard.accepted_iters,
-        );
+        let stop = guard.unprogressing_stop()?;
         if let Ok(mut slot) = guard.exit.lock() {
-            *slot = Some(CostStallExit {
-                rho: best_rho,
-                value: guard.best_value,
-                grad_norm: guard.best_grad_norm,
-                iterations: guard.accepted_iters,
-                converged: false,
-                noise_grad_bound: None,
-                probe_scale: None,
-            });
+            *slot = Some(stop);
         }
         Some(ObjectiveEvalError::fatal(
             ARC_UNPROGRESSING_STALL_SENTINEL.to_string(),
@@ -3620,6 +3633,60 @@ pub(crate) struct OuterOperatorBridge<'a> {
     /// Most recent derivative-evaluation point, used to log value-probe
     /// displacement in line-search STAGE traces.
     pub(crate) last_value_grad_rho: Option<Array1<f64>>,
+    /// The progress certificate that ends a stalled search on this route
+    /// (#2817). opt's matrix-free trust region has no stall stop of its own,
+    /// so without it a boundary-limited crawl buying sub-resolution descent
+    /// ended only when its iteration count ran out.
+    pub(crate) cost_stall: Option<CostStallGuard>,
+    /// The box the guard's projected residual is measured against.
+    pub(crate) cost_stall_bounds: Option<(Array1<f64>, Array1<f64>)>,
+    /// Where an unprogressing stop publishes its incumbent. opt reports an
+    /// objective failure without its message, so this slot, written only when
+    /// the guard stops the run, is how the runner tells that stop from a
+    /// genuine evaluation failure.
+    pub(crate) unprogressing_stop: Arc<Mutex<Option<CostStallExit>>>,
+}
+
+impl OuterOperatorBridge<'_> {
+    /// Fold one evaluated point into the stall guard, and stop the run when a
+    /// filled window has bought nothing since the previous one (#2817).
+    ///
+    /// A filled window is handled as the dense route handles a deferred one:
+    /// the window reopens, a stuck stall uncaps the inner solve, and continuing
+    /// needs [`CostStallGuard::license_continuation`]. This route holds only a
+    /// Hessian operator at the bridge, so there is no second-order adjudication
+    /// to run first; the terminal certificate judges whatever point this stops
+    /// at.
+    fn observe_unprogressing_stall(
+        &mut self,
+        x: &Array1<f64>,
+        cost: f64,
+        gradient: &Array1<f64>,
+    ) -> Option<ObjectiveEvalError> {
+        let bounds = self.cost_stall_bounds.clone();
+        let inner_converged = inner_solve_converged(self.outer_inner_cap.as_ref());
+        let guard = self.cost_stall.as_mut()?;
+        let projected_g_norm = rail_projected_gradient_norm(x, gradient, bounds.as_ref());
+        match guard.observe_second_order(x, cost, projected_g_norm, inner_converged, None) {
+            CostStallVerdict::Continue => return None,
+            CostStallVerdict::StuckKeepDescending { .. } => {
+                if let Some(feedback) = self.outer_inner_cap.as_ref() {
+                    feedback.cap.store(0, Ordering::Relaxed);
+                    feedback.force_cold.store(true, Ordering::Relaxed);
+                }
+            }
+            CostStallVerdict::Converged | CostStallVerdict::FlatValleyStall { .. } => {
+                guard.defer_finite_second_order_stall();
+            }
+        }
+        let stop = guard.unprogressing_stop()?;
+        if let Ok(mut slot) = self.unprogressing_stop.lock() {
+            *slot = Some(stop);
+        }
+        Some(ObjectiveEvalError::fatal(
+            ARC_UNPROGRESSING_STALL_SENTINEL.to_string(),
+        ))
+    }
 }
 
 impl ZerothOrderObjective for OuterOperatorBridge<'_> {
@@ -3727,6 +3794,9 @@ impl OperatorObjective for OuterOperatorBridge<'_> {
             self.last_g_norm = Some(g_norm);
         }
         self.last_value_grad_rho = Some(x.clone());
+        if let Some(stop) = self.observe_unprogressing_stall(x, eval.cost, &eval.gradient) {
+            return Err(stop);
+        }
         log::info!(
             "[STAGE] outer eval end elapsed={:.3}s cost={:.6e} |g|={:.3e} (operator bridge)",
             stage_start.elapsed().as_secs_f64(),

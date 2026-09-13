@@ -1435,6 +1435,32 @@ pub(crate) fn run_outer_with_plan(
                         hessian: seed_eval.hessian.clone(),
                     };
 
+                    // opt's matrix-free trust region has no stall stop of its
+                    // own, so a boundary-limited crawl buying sub-resolution
+                    // descent ended only when its iteration count ran out. The
+                    // same progress certificate the dense route uses ends it
+                    // instead (#2817); its floor and band are derived exactly as
+                    // the ARC arm below derives them.
+                    let mut cost_stall_guard = CostStallGuard::new(
+                        config
+                            .rel_cost_tolerance
+                            .unwrap_or(config.tolerance * 1.0e-2)
+                            .max(COST_STALL_REL_TOL_FLOOR),
+                        ARC_COST_STALL_WINDOW,
+                        grad_tol.abs.max(COST_STALL_PROJECTED_GRAD_FLOOR),
+                        Arc::new(Mutex::new(None)),
+                    );
+                    cost_stall_guard.observe_seed(
+                        &seed,
+                        seed_eval.cost,
+                        rail_projected_gradient_norm(
+                            &seed,
+                            &seed_eval.gradient,
+                            Some(&(lo.clone(), hi.clone())),
+                        ),
+                    );
+                    let unprogressing_stop: Arc<Mutex<Option<CostStallExit>>> =
+                        Arc::new(Mutex::new(None));
                     let bridge_obj = OuterOperatorBridge {
                         obj,
                         layout,
@@ -1443,6 +1469,9 @@ pub(crate) fn run_outer_with_plan(
                         g_norm_initial: None,
                         last_g_norm: None,
                         last_value_grad_rho: None,
+                        cost_stall: Some(cost_stall_guard),
+                        cost_stall_bounds: Some((lo.clone(), hi.clone())),
+                        unprogressing_stop: Arc::clone(&unprogressing_stop),
                     };
 
                     let mut solver = MatrixFreeTrustRegion::new(seed.clone(), bridge_obj)
@@ -1593,14 +1622,34 @@ pub(crate) fn run_outer_with_plan(
                             result.operator_trust_radius = final_radius;
                             Ok(result)
                         }
-                        OptimizationStatus::ObjectiveFailed
-                            => Err(EstimationError::fatal_outer_evaluation(
-                                "matrix-free trust-region evaluation",
-                                EstimationError::RemlOptimizationFailed(
-                                    "matrix-free trust-region objective evaluation failed"
-                                        .to_string(),
-                                ),
-                            )),
+                        // `opt` reports an objective failure without its
+                        // message, so the bridge's stop slot is what tells the
+                        // guard's unprogressing stop from a genuine failure.
+                        OptimizationStatus::ObjectiveFailed => {
+                            match unprogressing_stop.lock().ok().and_then(|mut slot| slot.take()) {
+                                Some(exit) => {
+                                    let mut result = outer_result_with_gradient_norm(
+                                        exit.rho,
+                                        exit.value,
+                                        exit.iterations,
+                                        Some(exit.grad_norm),
+                                        false,
+                                        *the_plan,
+                                    );
+                                    result.origin =
+                                        OuterResultOrigin::OperatorUnprogressingStallCheckpoint;
+                                    result.operator_trust_radius = final_radius;
+                                    Ok(result)
+                                }
+                                None => Err(EstimationError::fatal_outer_evaluation(
+                                    "matrix-free trust-region evaluation",
+                                    EstimationError::RemlOptimizationFailed(
+                                        "matrix-free trust-region objective evaluation failed"
+                                            .to_string(),
+                                    ),
+                                )),
+                            }
+                        }
                         OptimizationStatus::NumericalFailure
                         | OptimizationStatus::LineSearchFailed => {
                             Err(EstimationError::RemlOptimizationFailed(format!(
