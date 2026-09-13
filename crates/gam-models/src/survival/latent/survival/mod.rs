@@ -699,6 +699,7 @@ pub(crate) fn fit_latent_survival_terms(
         x_mean: mean_design.design.clone(),
         time_linear_constraints: time_prepared.linear_constraints.clone(),
         quadctx: Arc::new(QuadratureContext::new()),
+        baseline_theta_rows: None,
     };
 
     let mut blocks = vec![
