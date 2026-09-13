@@ -287,7 +287,8 @@ impl SaeAtomBasisKind {
 /// `α·softplus_{τ₀}(cos κt)` of the hard clamp `α·max(cos κt, 0)`, not the hard
 /// clamp itself (#2339): it removes the kink at `cos κt = 0` so the streaming
 /// `½log|B̃|` criterion is a composite-analytic estimand, while the tiny
-/// dimensionless temperature `τ₀` (see [`gam_linalg::utils::SMOOTH_PSD_CLAMP_TEMPERATURE`]) keeps the
+/// dimensionless temperature `τ₀ = SPECTRAL_DEFLATION_REL_FLOOR / ln 2` (see
+/// [`gam_linalg::utils::smooth_psd_clamp`]) keeps the
 /// value change below the criterion's own spectral-deflation floor. Euclidean
 /// axes have constant `V'' = α > 0`, so the clamp is a no-op there and
 /// `hess_majorized == hess` bit-for-bit.
@@ -426,7 +427,7 @@ impl ArdAxisPrior {
     /// its Laplace log determinant declare this positive-part operator, so every
     /// derivative of that operator must call this seam. On a periodic axis it is
     /// the smooth envelope `α·softplus_{τ₀}(cos κt)` (see
-    /// [`gam_linalg::utils::SMOOTH_PSD_CLAMP_TEMPERATURE`]); on a Euclidean axis it is `hess = α`.
+    /// [`gam_linalg::utils::smooth_psd_clamp`]); on a Euclidean axis it is `hess = α`.
     #[inline]
     pub(crate) fn psd_majorizer_hess(self) -> f64 {
         self.hess_majorized

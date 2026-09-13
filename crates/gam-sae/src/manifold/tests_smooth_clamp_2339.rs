@@ -19,10 +19,12 @@ use crate::manifold::ArdAxisPrior;
 use gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR;
 use std::f64::consts::{LN_2, TAU};
 
-/// τ₀, the dimensionless softplus temperature. Mirrors the derived constant so
-/// the test fails loudly if the derivation constant is ever silently retuned.
+/// τ₀, the dimensionless softplus temperature, derived from the deflation floor
+/// (`τ₀·ln2 = floor`). The clamp's own temperature is pinned through the public
+/// `smooth_psd_clamp` seam value in `tau0_is_the_derived_deflation_floor_constant`,
+/// so a silent retune fails loudly.
 fn tau0() -> f64 {
-    gam_linalg::utils::SMOOTH_PSD_CLAMP_TEMPERATURE
+    SPECTRAL_DEFLATION_REL_FLOOR / LN_2
 }
 
 /// The maximum admissible deviation of the smooth clamp from the hard clamp, in
@@ -34,8 +36,14 @@ fn deviation_ceiling(alpha: f64) -> f64 {
 
 #[test]
 fn tau0_is_the_derived_deflation_floor_constant() {
-    // τ₀ = SPECTRAL_DEFLATION_REL_FLOOR / ln2, and hence α·τ₀·ln2 = α·floor.
-    assert_eq!(tau0(), SPECTRAL_DEFLATION_REL_FLOOR / LN_2);
+    // τ₀ = SPECTRAL_DEFLATION_REL_FLOOR / ln2, and hence α·τ₀·ln2 = α·floor. The
+    // clamp's seam deviation is `τ₀·ln(1 + e⁰) = τ₀·ln2`, so the production clamp
+    // at `x = 0` must read back the deflation floor.
+    assert!(
+        (gam_linalg::utils::smooth_psd_clamp(1.0, 0.0) - SPECTRAL_DEFLATION_REL_FLOOR).abs()
+            <= 4.0 * f64::EPSILON * SPECTRAL_DEFLATION_REL_FLOOR,
+        "smooth_psd_clamp's seam deviation must equal the relative deflation floor"
+    );
     assert!(
         (deviation_ceiling(1.0) - SPECTRAL_DEFLATION_REL_FLOOR).abs()
             <= 4.0 * f64::EPSILON * SPECTRAL_DEFLATION_REL_FLOOR,

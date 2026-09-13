@@ -59,10 +59,11 @@ pub const SPECTRAL_DEFLATION_REL_FLOOR: f64 = 1.0e-8;
 /// (largest-admissible, hence smoothest) value gives `τ₀ = floor/ln2 ≈ 1.443e-8`,
 /// so the absolute perturbation is `P·floor` — exactly the deflation floor
 /// relative to the operator's own curvature scale.
-pub const SMOOTH_PSD_CLAMP_TEMPERATURE: f64 = SPECTRAL_DEFLATION_REL_FLOOR / std::f64::consts::LN_2;
+pub(crate) const SMOOTH_PSD_CLAMP_TEMPERATURE: f64 = SPECTRAL_DEFLATION_REL_FLOOR / std::f64::consts::LN_2;
 
 /// Homogeneity-preserving smooth replacement for `prefactor · max(x, 0)` on a
-/// dimensionless `x` (`prefactor ≥ 0`), at [`SMOOTH_PSD_CLAMP_TEMPERATURE`].
+/// dimensionless `x` (`prefactor ≥ 0`), at the temperature
+/// `τ₀ = SPECTRAL_DEFLATION_REL_FLOOR / ln 2`.
 ///
 /// Uses the numerically stable softplus `max(x,0) + τ₀·ln(1 + e^{−|x|/τ₀})`,
 /// which collapses to `max(x,0)` exactly (via IEEE underflow of `e^{−|x|/τ₀}`)

@@ -93,10 +93,11 @@ fn full_basis_bundle(cache: &ArrowFactorCache) -> (Vec<Array1<f64>>, Vec<Array1<
 /// on an indefinite fit or on a structurally null direction with zero derivative.
 #[test]
 fn sae_logdet_theta_adjoint_from_probes_matches_dense_on_deflated_rows_2712() {
-    use gam_linalg::utils::{SMOOTH_PSD_CLAMP_TEMPERATURE, SPECTRAL_DEFLATION_REL_FLOOR};
+    use gam_linalg::utils::SPECTRAL_DEFLATION_REL_FLOOR;
 
     let (mut term, target, rho) = small_two_atom_periodic_term();
-    let cosine = SMOOTH_PSD_CLAMP_TEMPERATURE * SPECTRAL_DEFLATION_REL_FLOOR.sqrt().ln();
+    let cosine =
+        SPECTRAL_DEFLATION_REL_FLOOR / std::f64::consts::LN_2 * SPECTRAL_DEFLATION_REL_FLOOR.sqrt().ln();
     let weak_phase = cosine.acos() / std::f64::consts::TAU;
     let n = term.n_obs();
     for atom in &mut term.atoms {

@@ -14,7 +14,7 @@
 //! `cos κt` are both dimensionless factors on `[−1, 1]`.
 
 use crate::assignment::ThresholdGateLogitCurvature;
-use gam_linalg::utils::{SMOOTH_PSD_CLAMP_TEMPERATURE, stable_logistic};
+use gam_linalg::utils::{SPECTRAL_DEFLATION_REL_FLOOR, stable_logistic};
 use std::f64::consts::LN_2;
 
 /// The exact prior curvature, written out independently of the seam under test:
@@ -144,7 +144,7 @@ fn the_smoothing_deviation_stays_under_the_deflation_floor() {
     // The smooth clamp differs from the hard clamp `max(c, 0)` by at most
     // `τ₀·ln2` per unit prefactor — #2339's derivation, reused here rather than
     // re-tuned, which is why this change introduces no constant of its own.
-    let ceiling_per_unit = SMOOTH_PSD_CLAMP_TEMPERATURE * LN_2;
+    let ceiling_per_unit = SPECTRAL_DEFLATION_REL_FLOOR / LN_2 * LN_2;
     for &strength in &[1.0e-3, 1.0, 25.0] {
         for &inv_tau in &[0.5, 1.0, 4.0] {
             for &logit in &LOGITS {

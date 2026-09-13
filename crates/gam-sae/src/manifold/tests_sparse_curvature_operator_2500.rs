@@ -446,9 +446,10 @@ fn threshold_gate_dense_exact_a_sparse_logdet_trace_matches_finite_difference_25
 /// Re-anchoring therefore means routing the gate onto a fixture that reaches the
 /// stratum, not moving the old fixture's knobs.
 fn deflating_ard_fixture() -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho) {
-    use gam_linalg::utils::{SMOOTH_PSD_CLAMP_TEMPERATURE, SPECTRAL_DEFLATION_REL_FLOOR};
+    use gam_linalg::utils::SPECTRAL_DEFLATION_REL_FLOOR;
     let (mut term, target, rho) = crate::manifold::tests::small_two_atom_periodic_term();
-    let cosine = SMOOTH_PSD_CLAMP_TEMPERATURE * SPECTRAL_DEFLATION_REL_FLOOR.sqrt().ln();
+    let cosine =
+        SPECTRAL_DEFLATION_REL_FLOOR / std::f64::consts::LN_2 * SPECTRAL_DEFLATION_REL_FLOOR.sqrt().ln();
     let weak_phase = cosine.acos() / std::f64::consts::TAU;
     let n = term.n_obs();
     for atom in &mut term.atoms {
