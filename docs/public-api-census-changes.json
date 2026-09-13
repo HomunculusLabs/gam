@@ -3730,5 +3730,13 @@
     },
     "reason": "#2899 slop: the pub(crate) marginal_slope_hints helper is deleted; its one caller built a resource policy only for the deleted build_termspec policy parameter.",
     "evidence": "public_functions() counts pub(crate) fn declarations. Pool job 615871 (r17.615871.log) ran public_api_census.py on this change without the record and it refused exactly {entry.rs::marginal_slope_hints: 1}, 11653 -> 11652 declarations. At the base, git grep -n -w marginal_slope_hints finds only that declaration and the call at materialize/transformation.rs:39."
+  },
+  {
+    "removed": {
+      "crates/gam-math/src/jet_tower.rs::ln_gamma_derivative_stack_order2": 1
+    },
+    "reason": "#2899, SPEC rule 25. ln_gamma_derivative_stack_order2 returned the first three entries of ln_gamma_derivative_stack, and only tests called it. The dispersion-family tower oracle now reads the full stack's prefix, and the prefix test that compared the two functions is removed with it (the order-3 twin went the same way in 3d572744b).",
+    "evidence": "At the base, git grep -w ln_gamma_derivative_stack_order2 finds the declaration and derivative_stack_tests::ln_gamma_derivative_stack_order2_is_prefix in crates/gam-math/src/jet_tower.rs, and one call in crates/gam-models/src/gamlss/test_support.rs (order2_ln_gamma, the dispersion-family oracle). Both functions build their entries from the same statrs::function::gamma::ln_gamma, digamma_positive and polygamma_positive::<1> calls. The item list is the guard's refusal list from the guarded check job named in the commit message.",
+    "base": "cbd289aca39a808caeeb37f4692c2c54a3d3c775"
   }
 ]

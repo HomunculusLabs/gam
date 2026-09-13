@@ -152,7 +152,10 @@ pub(crate) fn order2_ln_gamma<const K: usize>(
     x: &gam_math::jet_scalar::Order2<K>,
 ) -> gam_math::jet_scalar::Order2<K> {
     gam_math::jet_scalar::Order2(
-        x.0.compose_unary(gam_math::jet_tower::ln_gamma_derivative_stack_order2(x.0.v)),
+        x.0.compose_unary({
+            let stack = gam_math::jet_tower::ln_gamma_derivative_stack(x.0.v);
+            [stack[0], stack[1], stack[2]]
+        }),
     )
 }
 
