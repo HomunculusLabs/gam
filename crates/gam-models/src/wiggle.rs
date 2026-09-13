@@ -377,16 +377,6 @@ fn buildwiggle_block_input_from_canonical_penalties(
     })
 }
 
-pub fn buildwiggle_block_input_from_knots(
-    seed: ArrayView1<'_, f64>,
-    knots: &Array1<f64>,
-    degree: usize,
-    penalty_order: usize,
-    double_penalty: bool,
-) -> Result<ParameterBlockInput, String> {
-    buildwiggle_block_input_from_orders(seed, knots, degree, &[penalty_order], double_penalty)
-}
-
 /// Build a monotone I-spline block carrying the COMPLETE requested penalty set.
 ///
 /// Callers that want several derivative orders must come through here rather
@@ -693,7 +683,7 @@ mod tests {
         assert_eq!(monotone_wiggle_internal_degree(10).unwrap(), 9);
     }
 
-    // ---- buildwiggle_block_input_from_knots (driven via seed for valid knots) ----
+    // ---- buildwiggle_block_input_from_orders (driven via seed for valid knots) ----
 
     /// Smallest generalized eigenvalue of `Σ_j S_j` against the I-spline
     /// function Gram, relative to the largest — i.e. how close the assembled

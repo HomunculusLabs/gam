@@ -3188,11 +3188,11 @@ mod test_support {
         ) -> Result<(ParameterBlockInput, Array1<f64>), String> {
             let knots =
                 gam_terms::basis::initializewiggle_knots_from_seed(q_seed, degree, num_internal_knots)?;
-            let block = crate::wiggle::buildwiggle_block_input_from_knots(
+            let block = crate::wiggle::buildwiggle_block_input_from_orders(
                 q_seed,
                 &knots,
                 degree,
-                penalty_order,
+                &[penalty_order],
                 double_penalty,
             )?;
             Ok((block, knots))

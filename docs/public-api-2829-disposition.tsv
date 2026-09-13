@@ -286,7 +286,7 @@ crates/gam-models/src/transformation_normal/quantile_table.rs	tail_slopes	retire
 crates/gam-models/src/vector_response.rs	diag_precision	retired-by-later-deletion:418c732d2f
 crates/gam-models/src/vector_response.rs	from_target	retired-by-later-deletion:418c732d2f
 crates/gam-models/src/vector_response.rs	with_row_weights	retired-by-later-deletion:7c185e2c51
-crates/gam-models/src/wiggle.rs	buildwiggle_block_input_from_knots	restored-in-place
+crates/gam-models/src/wiggle.rs	buildwiggle_block_input_from_knots	retired-no-product-user
 crates/gam-models/src/wiggle.rs	buildwiggle_block_input_from_seed	retired-by-later-deletion:418c732d2f
 crates/gam-predict/src/affine_design.rs	eta_gradient_matrix	retired-by-later-deletion:05b4f04286
 crates/gam-predict/src/conformal.rs	apply_to_uncertainty_result	retired-by-later-deletion:05b4f04286
