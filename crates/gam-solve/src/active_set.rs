@@ -948,22 +948,20 @@ pub(crate) fn feasible_point_for_linear_constraints(
     {
         return None;
     }
-    // The zero-vector shortcut must compare `b` in GEOMETRIC (per-row-scaled)
-    // units: on raw `b` alone, `1e-20·β ≥ 1e-20` — the same half-space as
-    // `β ≥ 1` — would accept `β = 0`. A numerically-zero row is vacuous when
-    // `b_i ≤ 0` and infeasible (no seed exists) when `b_i > 0`.
-    let mut all_scaled_b_tiny = true;
+    // `β = 0` satisfies `a_iᵀβ ≥ b_i` exactly when `b_i ≤ 0`, whatever the row's
+    // scale, so the shortcut needs no band: when every row allows it, `β = 0` is
+    // feasible and is the minimum-norm feasible point (#2469). A zero row with
+    // `b_i > 0` admits no point at all.
+    let mut zero_is_feasible = true;
     for i in 0..constraints.a.nrows() {
-        let norm = constraints.a.row(i).dot(&constraints.a.row(i)).sqrt();
-        if norm > 0.0 {
-            if constraints.b[i].abs() > 1e-14 * norm {
-                all_scaled_b_tiny = false;
+        if constraints.b[i] > 0.0 {
+            if constraints.a.row(i).iter().all(|value| *value == 0.0) {
+                return None;
             }
-        } else if constraints.b[i] > 0.0 {
-            return None;
+            zero_is_feasible = false;
         }
     }
-    if all_scaled_b_tiny {
+    if zero_is_feasible {
         return Some(Array1::zeros(p));
     }
 
