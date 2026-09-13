@@ -148,6 +148,10 @@ pub fn sae_residual_seed_logits(
 }
 
 pub(crate) fn sae_output_energy_cluster_labels(z: ArrayView2<'_, f64>, k_atoms: usize) -> Vec<usize> {
+    // #2283 — the k-means++ distance updates and the Lloyd assignment read one row
+    // each, `O(n·K·p)` per pass at the #2283 cell (96,000 × 32 × 2048), so they run
+    // on the pool. Each row's arithmetic is unchanged, so the labels are too.
+    use rayon::prelude::*;
     let (n_obs, p_out) = z.dim();
     let mut labels = vec![0usize; n_obs];
     if n_obs == 0 || p_out == 0 || k_atoms <= 1 {
@@ -182,13 +186,19 @@ pub(crate) fn sae_output_energy_cluster_labels(z: ArrayView2<'_, f64>, k_atoms: 
         .unwrap_or(0);
     centers.row_mut(0).assign(&features.row(first));
     let mut min_dist = vec![0.0_f64; n_obs];
-    for row in 0..n_obs {
-        let mut dist = 0.0_f64;
-        for col in 0..p_out {
-            let diff = features[[row, col]] - centers[[0, col]];
-            dist += diff * diff;
-        }
-        min_dist[row] = dist;
+    {
+        let center = centers.row(0);
+        min_dist
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(row, dist_out)| {
+                let mut dist = 0.0_f64;
+                for (&feature, &center_value) in features.row(row).iter().zip(center.iter()) {
+                    let diff = feature - center_value;
+                    dist += diff * diff;
+                }
+                *dist_out = dist;
+            });
     }
     for atom_idx in 1..k_atoms {
         let next = min_dist
@@ -198,36 +208,49 @@ pub(crate) fn sae_output_energy_cluster_labels(z: ArrayView2<'_, f64>, k_atoms: 
             .map(|(idx, _)| idx)
             .unwrap_or(0);
         centers.row_mut(atom_idx).assign(&features.row(next));
-        for row in 0..n_obs {
-            let mut dist = 0.0_f64;
-            for col in 0..p_out {
-                let diff = features[[row, col]] - centers[[atom_idx, col]];
-                dist += diff * diff;
-            }
-            if dist < min_dist[row] {
-                min_dist[row] = dist;
-            }
-        }
+        let center = centers.row(atom_idx);
+        min_dist
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(row, dist_out)| {
+                let mut dist = 0.0_f64;
+                for (&feature, &center_value) in features.row(row).iter().zip(center.iter()) {
+                    let diff = feature - center_value;
+                    dist += diff * diff;
+                }
+                if dist < *dist_out {
+                    *dist_out = dist;
+                }
+            });
     }
 
     for _ in 0..20 {
+        let assignments: Vec<usize> = (0..n_obs)
+            .into_par_iter()
+            .map(|row| {
+                let features_row = features.row(row);
+                let mut best_atom = 0usize;
+                let mut best_dist = f64::INFINITY;
+                for atom_idx in 0..k_atoms {
+                    let mut dist = 0.0_f64;
+                    for (&feature, &center_value) in
+                        features_row.iter().zip(centers.row(atom_idx).iter())
+                    {
+                        let diff = feature - center_value;
+                        dist += diff * diff;
+                    }
+                    if dist < best_dist {
+                        best_dist = dist;
+                        best_atom = atom_idx;
+                    }
+                }
+                best_atom
+            })
+            .collect();
         let mut changed = false;
-        for row in 0..n_obs {
-            let mut best_atom = 0usize;
-            let mut best_dist = f64::INFINITY;
-            for atom_idx in 0..k_atoms {
-                let mut dist = 0.0_f64;
-                for col in 0..p_out {
-                    let diff = features[[row, col]] - centers[[atom_idx, col]];
-                    dist += diff * diff;
-                }
-                if dist < best_dist {
-                    best_dist = dist;
-                    best_atom = atom_idx;
-                }
-            }
-            if labels[row] != best_atom {
-                labels[row] = best_atom;
+        for (label, best_atom) in labels.iter_mut().zip(assignments) {
+            if *label != best_atom {
+                *label = best_atom;
                 changed = true;
             }
         }
