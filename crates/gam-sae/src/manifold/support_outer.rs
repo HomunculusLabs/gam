@@ -608,8 +608,8 @@ impl SaeSupportOuterObjective {
             // `evidence_factorization = true` must match what the lane itself
             // will use, or the pilot would measure a different operator from
             // the one the frozen plan is built on. It does: the lane runs
-            // `ArrowEvidencePolicy::PositiveDefinite`
-            // (`with_positive_definite_evidence` below), and
+            // `ArrowEvidencePolicy::UnitDeflation`
+            // (`with_evidence_unit_deflation` below), and
             // `factors_undamped_evidence()` is `!matches!(self, Strict)` — true
             // for every policy except `Strict`, which this lane never selects.
             let htt_factors = CpuBatchedBlockSolver
@@ -640,7 +640,14 @@ impl SaeSupportOuterObjective {
         // evaluation can never be paired with a previous operator's gradient.
         lane.request_logdet_derivative_bundle();
         let timer = std::time::Instant::now();
-        let options = ArrowSolveOptions::inexact_pcg().with_positive_definite_evidence();
+        // The lane factors the Gauss–Newton majorizer, PSD by construction, so a reduced-Schur
+        // eigenvalue below the unit-deflation floor is the rounding image of a numerically null
+        // direction. Under `UnitDeflation` both lanes pin it to unit stiffness, `log 1 = 0`: the
+        // dense route off its eigendecomposition (024816108), the rational route through its Ritz
+        // conditioning (e8fa40de7). `PositiveDefinite` refused it instead: the pair-chart ring fit
+        // in job 623388 stopped on the spectrum [-6.161538e-16, 2.584721e1] (dim 24) (#2576).
+        let options = ArrowSolveOptions::inexact_pcg()
+            .with_evidence_unit_deflation(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR);
         // #2731: where the dense `k × k` reduced Schur's complete eigensystem fits the
         // cgroup-aware in-core ledger, the lane takes the exact `log|S|` off one
         // eigendecomposition and its derivative bundle is the exact `tr(S⁻¹·D)`;
