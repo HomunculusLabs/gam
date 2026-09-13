@@ -17,7 +17,6 @@ mod covariance;
 mod family;
 mod forecast;
 mod formula;
-pub mod joint;
 mod marginal;
 mod preserve;
 mod scalar;
