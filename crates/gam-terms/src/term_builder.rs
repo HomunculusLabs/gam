@@ -4385,7 +4385,7 @@ pub(crate) fn col_minmax(col: ArrayView1<'_, f64>) -> Result<(f64, f64), String>
     }
 }
 
-pub fn unique_count_column(col: ArrayView1<'_, f64>) -> usize {
+pub(crate) fn unique_count_column(col: ArrayView1<'_, f64>) -> usize {
     use std::collections::HashSet;
     let mut set = HashSet::<u64>::with_capacity(col.len());
     for &v in col {
@@ -4517,7 +4517,7 @@ pub(crate) const MAX_DEFAULT_INTERNAL_KNOTS: usize = 8;
 /// need enough basis functions to fit a non-trivial smooth at all, and the
 /// `unique/4` growth below the cap keeps small/sparse columns (n ≤ 32, where
 /// `unique/4 ≤ 8`) on exactly their previous knot count.
-pub fn heuristic_knots_for_column(col: ArrayView1<'_, f64>) -> usize {
+pub(crate) fn heuristic_knots_for_column(col: ArrayView1<'_, f64>) -> usize {
     let unique = unique_count_column(col);
     (unique / 4).clamp(4, MAX_DEFAULT_INTERNAL_KNOTS)
 }
@@ -5816,7 +5816,7 @@ pub(crate) fn parse_duchon_order_opt(
     parse_duchon_order(options).map(Some)
 }
 
-pub fn parse_duchon_order(
+pub(crate) fn parse_duchon_order(
     options: &BTreeMap<String, String>,
 ) -> Result<DuchonNullspaceOrder, String> {
     // `nullspace_order` is the whitelist's alias of `order` and was read

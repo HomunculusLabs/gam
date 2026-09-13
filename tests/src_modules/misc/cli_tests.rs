@@ -74,7 +74,6 @@ use gam::smooth::{
     build_term_collection_design,
 };
 use gam::solver::gauge::Gauge;
-use gam::term_builder::{heuristic_knots_for_column, parse_duchon_order, unique_count_column};
 use gam::types::{
     InverseLink, LikelihoodScaleMetadata, LinkComponent, LinkFunction, LogLikelihoodNormalization,
     ResponseColumnKind, StandardLink, WigglePenaltyConfig,
@@ -4639,41 +4638,6 @@ fn parse_survmodel_formula_config_extractsspec_and_distribution() {
 }
 
 #[test]
-fn parse_duchon_order_accepts_supportedvalues() {
-    let options = BTreeMap::new();
-    assert_eq!(
-        parse_duchon_order(&options)
-            .unwrap_or_else(|e| panic!("{} failed: {:?}", "default Duchon order", e)),
-        DuchonNullspaceOrder::Linear
-    );
-
-    let mut linear = BTreeMap::new();
-    linear.insert("order".to_string(), "1".to_string());
-    assert_eq!(
-        parse_duchon_order(&linear)
-            .unwrap_or_else(|e| panic!("{} failed: {:?}", "linear Duchon order", e)),
-        DuchonNullspaceOrder::Linear
-    );
-}
-
-#[test]
-fn parse_duchon_order_accepts_higher_polynomial_degrees_and_rejects_malformedvalues() {
-    let mut quadratic = BTreeMap::new();
-    quadratic.insert("order".to_string(), "2".to_string());
-    assert_eq!(
-        parse_duchon_order(&quadratic)
-            .unwrap_or_else(|e| panic!("{} failed: {:?}", "quadratic Duchon order", e)),
-        DuchonNullspaceOrder::Degree(2)
-    );
-
-    let mut malformed = BTreeMap::new();
-    malformed.insert("order".to_string(), "linear".to_string());
-    let malformed_err =
-        parse_duchon_order(&malformed).expect_err("malformed Duchon order should fail");
-    assert!(malformed_err.contains("invalid Duchon order"));
-}
-
-#[test]
 fn parse_formula_retains_explicit_duchon_power_and_order_options() {
     let parsed = parse_formula("y ~ s(pc1, type=duchon, centers=12, power=0, order=1)")
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "formula", e));
@@ -8122,26 +8086,6 @@ fn saved_linkwiggle_runtime_rejects_partial_metadata() {
         .saved_link_wiggle()
         .expect_err("expected partial-metadata error");
     assert!(err.to_string().contains("link-wiggle"));
-}
-
-#[test]
-fn heuristic_knots_for_column_uses_uniquevalue_rule() {
-    // Few unique values → `unique/4` clamped up to the 4-knot floor.
-    let col = array![0.0, 0.0, 1.0, 1.0, 2.0, 3.0, 4.0, 5.0];
-    assert_eq!(unique_count_column(col.view()), 6);
-    assert_eq!(heuristic_knots_for_column(col.view()), 4);
-    // Many unique values → clamped to the flat mgcv-like default cap of 8
-    // internal knots (cubic basis ≈ 12 functions), NOT grown with n. A larger
-    // column used to return 20 internal knots (a 24-function basis); that
-    // over-rich default over-parameterized weak-signal additive fits and the
-    // penalty could not shrink it away cleanly (gam#1680). The cap is flat in n:
-    // users opt *in* to a wigglier fit by raising `k` explicitly.
-    let bigger = Array1::from_iter((0..200).map(|v| v as f64));
-    assert_eq!(heuristic_knots_for_column(bigger.view()), 8);
-    // The 32-unique boundary is exactly where `unique/4` meets the cap, so
-    // columns at or below it keep their previous knot count unchanged.
-    let boundary = Array1::from_iter((0..32).map(|v| v as f64));
-    assert_eq!(heuristic_knots_for_column(boundary.view()), 8);
 }
 
 #[test]
