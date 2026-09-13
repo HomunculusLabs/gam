@@ -1,9 +1,10 @@
+#![cfg(test)]
 //! Sanity check: the Sobolev and pseudo-spline Wahba kernels must produce
 //! NUMERICALLY DIFFERENT Gram matrices on the same center set. If they
 //! gave identical Gram matrices, the `wahba_kernel` selector would be
 //! a no-op — a real bug.
 
-use gam::basis::{SphereWahbaKernel, spherical_wahba_kernel_matrix_with_kind};
+use crate::basis::{SphereWahbaKernel, spherical_wahba_kernel_matrix_with_kind};
 use ndarray::array;
 
 fn sample_centers() -> ndarray::Array2<f64> {

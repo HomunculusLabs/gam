@@ -1,3 +1,4 @@
+#![cfg(test)]
 // Numerical study: eigenspectrum of the Wahba spherical kernel Gram matrix
 // for penalty orders m ∈ {1, 2, 3, 4} on a quasi-uniform set of 30 S² points.
 
@@ -12,8 +13,8 @@
 // m=1 conditioning is therefore a function of `L` and is labelled as such.
 
 use faer::Side;
-use gam::basis::{SphereWahbaKernel, spherical_wahba_kernel_matrix_with_kind};
-use gam::faer_ndarray::FaerEigh;
+use crate::basis::{SphereWahbaKernel, spherical_wahba_kernel_matrix_with_kind};
+use gam_linalg::faer_ndarray::FaerEigh;
 use ndarray::Array2;
 
 /// Stated spectral resolution for the `m = 1` row. 200 is the documented cap on

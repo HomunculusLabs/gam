@@ -27,7 +27,6 @@ mod sphere_single_hemisphere_extrapolation;
 mod sphere_small_k_corner_cases;
 mod sphere_top_pole_fit_quality;
 mod sphere_uncertainty_intervals;
-mod sphere_wahba_kernels_are_distinct;
 mod sphere_with_bc_option_rejected;
 mod bug_hunt_1464_curv_sign_identifiable;
 mod bug_hunt_2351_constant_curvature_translation_sensitive;

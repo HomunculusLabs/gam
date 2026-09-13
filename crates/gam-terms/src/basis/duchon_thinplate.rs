@@ -3497,7 +3497,7 @@ pub(crate) fn applyweighted_orthogonality_constraint(
 ///
 /// # Errors
 /// Returns error if knot vector is too short or Greville abscissae are degenerate.
-pub fn compute_greville_abscissae(
+pub(crate) fn compute_greville_abscissae(
     knot_vector: &Array1<f64>,
     degree: usize,
 ) -> Result<Array1<f64>, BasisError> {
@@ -4588,3 +4588,6 @@ mod range_floor_psi_jet_tests {
 
 #[cfg(test)]
 mod sum_to_zero_sparse_projector_idempotence_tests;
+
+#[cfg(test)]
+mod owed_bughunt_splines_tests;

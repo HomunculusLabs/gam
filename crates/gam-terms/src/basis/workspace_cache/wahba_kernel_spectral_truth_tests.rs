@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Verify each Wahba closed-form kernel against the spectral ground truth.
 //!
 //! The Wahba reproducing kernel on S² with smoothness order m is
@@ -19,7 +20,7 @@
 //! The π/2 offset cancels any additive constant difference, isolating
 //! the shape-only error of the kernel implementation.
 
-use gam::basis::{SphereWahbaKernel, spherical_wahba_kernel_matrix_with_kind};
+use crate::basis::{SphereWahbaKernel, spherical_wahba_kernel_matrix_with_kind};
 use ndarray::array;
 
 fn legendre_p(l: usize, x: f64) -> f64 {

@@ -5428,7 +5428,7 @@ pub(crate) const PCA_SMOOTH_OPTION_KEYS: &[&str] = &[
 /// to a term's option map on the user's behalf — the `by=` column index the
 /// `BySmooth` wrapper resolves (`__by_col`), the secondary-predictor center cap
 /// ([`SECONDARY_CENTER_CAP_OPTION`]) — carry this prefix. They are never typed
-/// in a formula, so [`validate_known_options`] does not judge them: that
+/// in a formula, so `validate_known_options` does not judge them: that
 /// validator answers "is this USER key spelled right?", and an engine key is
 /// neither a user key nor a member of any one arm's vocabulary. Listing
 /// `__by_col` in every arm's whitelist, and the cap in none, is how a
@@ -5441,7 +5441,7 @@ pub(crate) fn is_engine_option(key: &str) -> bool {
     key.starts_with(ENGINE_OPTION_PREFIX)
 }
 
-pub fn validate_known_options(
+pub(crate) fn validate_known_options(
     term_name: &str,
     options: &BTreeMap<String, String>,
     known: &[&str],

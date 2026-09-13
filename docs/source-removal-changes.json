@@ -7314,5 +7314,39 @@
     ],
     "reason": "#2502, #2825. db2f4cbd3 weighted the streaming block majorizer by each admitted block's expected motion, read off the previous frame step, and the #2825 certification pin coupled_stream_certifies_the_returned_frames_gamma_and_fresh_ev_2825 went red under it. This commit restores the k-bound surrogate that stood before db2f4cbd3 and deletes block_motion, the motion-weight helper that only the weighting called.",
     "evidence": "At the base, git grep -n -w block_motion finds only crates/gam-sae/src/sparse_dict/block_stream.rs: the declaration (line 165) and its two calls in partial_fit (lines 731 and 845), both removed here. search_motion, normal_second and majorizer_weight appear only in block_stream.rs and block_stream_tests.rs. Job 585946 (/scratch.global/sauer354/pool/sae-overcomplete/diag0912l_tests.585946.log), HEAD f39a9bb56 plus this patch: cargo test -p gam-sae --lib -- sparse_dict:: spectrometer:: 124 passed and 5 failed, none of them in block_stream. Guarded check job 598209 (/scratch.global/sauer354/pool/sae-overcomplete/chk0913a_check.598209.log), HEAD 08fbec7ce plus this patch: cargo check --workspace --all-targets --exclude gam-pyffi errors only in the root tests conformal_coverage_quality.rs and row_metric_loud_vs_loadbearing.rs, which ffac510db fixed."
+  },
+  {
+    "base": "0243a382df04f7ae7d1156f8342df6df2e7cf48a",
+    "items": [
+      "tests/manifolds/manifolds/sphere_wahba_kernels_are_distinct.rs:const:PAPER_AT_PI_OVER_SIX",
+      "tests/manifolds/manifolds/sphere_wahba_kernels_are_distinct.rs:fn:assert_untruncated_sobolev_m1_refused",
+      "tests/manifolds/manifolds/sphere_wahba_kernels_are_distinct.rs:fn:sample_centers",
+      "tests/manifolds/manifolds/sphere_wahba_kernels_are_distinct.rs:fn:sobolev_and_pseudo_kernels_differ_substantially",
+      "tests/manifolds/manifolds/sphere_wahba_kernels_are_distinct.rs:fn:sobolev_kernel_at_north_pole_matches_paper_closed_form",
+      "tests/manifolds/misc/spherical_wahba_spectrum.rs:const:M1_TRUNCATION_LMAX",
+      "tests/manifolds/misc/spherical_wahba_spectrum.rs:fn:kernel_for_order",
+      "tests/manifolds/misc/spherical_wahba_spectrum.rs:fn:quasi_uniform_sphere",
+      "tests/manifolds/misc/spherical_wahba_spectrum.rs:fn:wahba_kernel_spectrum_orders_1_to_4",
+      "tests/manifolds/misc/wahba_kernel_spectral_truth.rs:const:LMAX",
+      "tests/manifolds/misc/wahba_kernel_spectral_truth.rs:const:PROBE_GAMMAS",
+      "tests/manifolds/misc/wahba_kernel_spectral_truth.rs:fn:closed_form_kernel",
+      "tests/manifolds/misc/wahba_kernel_spectral_truth.rs:fn:closed_form_kernel_with_kind",
+      "tests/manifolds/misc/wahba_kernel_spectral_truth.rs:fn:legendre_p",
+      "tests/manifolds/misc/wahba_kernel_spectral_truth.rs:fn:run_compare",
+      "tests/manifolds/misc/wahba_kernel_spectral_truth.rs:fn:spectral_kernel",
+      "tests/manifolds/misc/wahba_kernel_spectral_truth.rs:fn:wahba_m1_truncated_matches_its_own_spectral_partial_sum",
+      "tests/manifolds/misc/wahba_kernel_spectral_truth.rs:fn:wahba_m1_untruncated_is_refused_with_its_remedy",
+      "tests/manifolds/misc/wahba_kernel_spectral_truth.rs:fn:wahba_m2_closed_matches_spectral_truth",
+      "tests/manifolds/misc/wahba_kernel_spectral_truth.rs:fn:wahba_m3_closed_matches_spectral_truth",
+      "tests/manifolds/misc/wahba_kernel_spectral_truth.rs:fn:wahba_m4_closed_matches_spectral_truth",
+      "tests/regressions/misc/owed_bughunt_splines.rs:fn:clamped_cubic_knots",
+      "tests/regressions/misc/owed_bughunt_splines.rs:fn:difference_penalty_annihilates_constant_and_greville_linear",
+      "tests/regressions/misc/owed_bughunt_splines.rs:fn:difference_penalty_rejects_collapsed_span",
+      "tests/regressions/misc/owed_bughunt_splines.rs:fn:difference_penalty_value_is_scale_invariant_across_decades",
+      "tests/regressions/misc/owed_bughunt_splines.rs:fn:penalty_for_width",
+      "tests/regressions/misc/thin_plate_workspace_equivalence_regression.rs:fn:bug_thin_plate_workspace_variant_mismatch"
+    ],
+    "reason": "#2899 moved tests: five root test files were the only users outside gam-terms of three gam-terms functions that production calls only inside gam-terms: basis::build_thin_plate_basiswithworkspace (thin_plate_workspace_equivalence_regression.rs), basis::compute_greville_abscissae (owed_bughunt_splines.rs), and basis::spherical_wahba_kernel_matrix_with_kind (sphere_wahba_kernels_are_distinct.rs, spherical_wahba_spectrum.rs, wahba_kernel_spectral_truth.rs). Each file moves verbatim into a gam-terms unit-test module beside its function, importing through crate::basis:: and gam_linalg::faer_ndarray::, so no test is lost and the three functions narrow to pub(crate).",
+    "evidence": "At the base, git grep -n -w over crates, src, tests, examples and bench finds build_thin_plate_basiswithworkspace, compute_greville_abscissae and spherical_wahba_kernel_matrix_with_kind outside crates/gam-terms/src only in those five root files and the in-crate tests/src_modules/smooths fixture that gam-terms' own tests include. Every removed identity is a declaration in those five deleted root files, and each reappears unchanged in its new module file."
   }
 ]

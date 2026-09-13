@@ -1,4 +1,5 @@
-use gam::terms::basis::{
+#![cfg(test)]
+use crate::basis::{
     BasisWorkspace, CenterStrategy, SpatialIdentifiability, ThinPlateBasisSpec,
     build_thin_plate_basis, build_thin_plate_basiswithworkspace,
 };

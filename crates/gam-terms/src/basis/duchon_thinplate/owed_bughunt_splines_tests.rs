@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Bug-hunt lane regression gates for the spline / basis / penalty subsystem.
 //!
 //! Each test pins a property derived from the math the code is supposed to
@@ -19,7 +20,7 @@
 //!
 //! No `let _`, no `#[allow(...)]`, no env vars, no `#[cfg(feature=...)]`.
 
-use gam::basis::{compute_greville_abscissae, create_difference_penalty_matrix};
+use crate::basis::{compute_greville_abscissae, create_difference_penalty_matrix};
 use ndarray::{Array1, Array2};
 
 /// A clamped cubic knot vector over `[a, a + width]` with `n_internal` interior

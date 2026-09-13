@@ -683,7 +683,7 @@ fn validate_spherical_wahba_gram_request(
 /// either GPU dispatch or CPU scalar/SIMD evaluation. Its Gram diagonal does
 /// not exist; [`SphereWahbaKernel::SobolevTruncated`] is the explicit-
 /// resolution alternative.
-pub fn spherical_wahba_kernel_matrix_with_kind(
+pub(crate) fn spherical_wahba_kernel_matrix_with_kind(
     data: ArrayView2<'_, f64>,
     centers: ArrayView2<'_, f64>,
     penalty_order: usize,
@@ -1664,3 +1664,12 @@ pub fn auto_streaming_chunk_size_for_dense(n_rows: usize, n_basis_cols: usize) -
     (dense_design_bytes(n_rows, n_basis_cols) > ceiling)
         .then(|| gam_runtime::resource::byte_balanced_row_chunk(n_basis_cols, n_rows))
 }
+
+#[cfg(test)]
+mod sphere_wahba_kernels_are_distinct_tests;
+
+#[cfg(test)]
+mod spherical_wahba_spectrum_tests;
+
+#[cfg(test)]
+mod wahba_kernel_spectral_truth_tests;

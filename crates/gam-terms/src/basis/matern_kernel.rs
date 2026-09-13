@@ -59,7 +59,7 @@ pub fn build_thin_plate_basis(
     build_thin_plate_basiswithworkspace(data, spec, &mut workspace)
 }
 
-pub fn build_thin_plate_basiswithworkspace(
+pub(crate) fn build_thin_plate_basiswithworkspace(
     data: ArrayView2<'_, f64>,
     spec: &ThinPlateBasisSpec,
     workspace: &mut BasisWorkspace,
@@ -4073,3 +4073,6 @@ mod matern_basis_size_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod thin_plate_workspace_equivalence_regression_tests;
