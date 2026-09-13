@@ -862,7 +862,7 @@ fn audit_identifiability_impl(
     // time column that looks collinear with another block's covariate in the
     // first `n` rows is genuinely distinguished by the deriv/entry channels
     // (gam#1197). Use the `k·n`-row stacked operator as the block's effective
-    // rank/alias geometry whenever present; plain blocks are aligned to it below.
+    // rank/alias geometry whenever present; plain blocks pack at their native `n` rows.
     // `stacked_design` has the SAME column count as `design`, so the joint column
     // layout (`col_offsets`) is unchanged.
     let block_effective_designs: Vec<std::borrow::Cow<'_, Array2<f64>>> = specs
@@ -891,79 +891,17 @@ fn audit_identifiability_impl(
         .unwrap_or(n)
         .max(n);
 
-    // ── Observation-channel alignment for plain blocks (gam#1197) ───────────
-    //
-    // A stacked block's `k·n`-row operator partitions the joint row space into
-    // `k` per-observation bands of `n` rows (e.g. `[entry; exit; deriv]`). A
-    // plain per-observation block (no `stacked_design`) contributes to the SAME
-    // additive predictor the stacked block evaluates, so its true effective
-    // image is NOT just rows `0..n` (which coincide with only the FIRST band):
-    // it is replicated across every OBSERVATION band — the bands in which the
-    // predictor (not its derivative) is evaluated — and is zero in pure-
-    // derivative bands. For a time-invariant covariate this matches the family's
-    // own `x_threshold_entry = x_threshold`, `x_threshold_deriv = None` wiring.
-    //
-    // Without this alignment, packing a plain block into rows `0..n` only made
-    // its intercept land in the stacked block's ENTRY band alone, so it was no
-    // longer collinear with the stacked block's additive constant (which spans
-    // entry AND exit) — the redundant shared intercept stopped being detected,
-    // the joint ranked full, and the genuinely-aliased constant was never
-    // demoted (then the downstream MAP-uniqueness check fired on the still-
-    // collinear predictor space). Replicating the plain block across the
-    // observation bands restores the intercept alias while the stacked block's
-    // derivative band keeps a genuine covariate (e.g. `age`) distinguished.
-    //
-    // Observation bands are detected structurally from the tallest stacked
-    // block: a band `b` is an observation band iff the stacked operator carries
-    // an (approximately) constant non-zero column over that band's rows — i.e.
-    // the additive intercept is evaluated there. The derivative band annihilates
-    // constants, so its constant column is ~0 and it is correctly excluded. With
-    // no stacked block present, `k_bands == 1` and this is the historical
-    // single-band packing, bit-identical for plain GAM designs.
-    let k_bands = (r_joint / n).max(1);
-    let observation_bands: Vec<usize> = if k_bands <= 1 {
-        vec![0]
-    } else {
-        // Use the tallest stacked block to define the band partition.
-        let stacked_ref = block_effective_designs
-            .iter()
-            .max_by_key(|d| d.nrows())
-            .expect("non-empty blocks");
-        let mut bands: Vec<usize> = (0..k_bands)
-            .filter(|&b| {
-                let lo = b * n;
-                let hi = ((b + 1) * n).min(stacked_ref.nrows());
-                if hi <= lo {
-                    return false;
-                }
-                // Band is an observation band iff the block's INTERCEPT column
-                // (column 0, the additive constant by the universal
-                // intercept-first convention) is ~constant and non-zero over it
-                // — i.e. the additive constant is evaluated there. In a pure
-                // derivative band the intercept coefficient maps to ZERO (the
-                // derivative of a constant), so column 0 is ~0 there and the band
-                // is correctly excluded — even though the band may still carry a
-                // constant column for a NON-intercept basis coefficient (e.g. the
-                // unit derivative of a linear time term), which must NOT count as
-                // an observation band.
-                if stacked_ref.ncols() == 0 {
-                    return false;
-                }
-                let first = stacked_ref[[lo, 0]];
-                first.abs() > 1e-12
-                    && (lo..hi)
-                        .all(|r| (stacked_ref[[r, 0]] - first).abs() <= 1e-9 * first.abs().max(1.0))
-            })
-            .collect();
-        if bands.is_empty() {
-            // Degenerate: no detectable constant-bearing band (no intercept in
-            // the stacked operator). Fall back to band 0 so plain blocks keep
-            // their historical n-row support rather than vanishing.
-            bands.push(0);
-        }
-        bands
-    };
-
+    // Every block packs at its native rows: a stacked block's `k·n`-row operator
+    // fills `..k·n`, a plain per-observation block `..n`, a global-scalar block
+    // its own `..br`. Plain blocks used to be replicated into every band where
+    // the tallest stacked operator's column 0 read as a constant non-zero
+    // intercept (gam#1197). That kept a plain intercept collinear with the time
+    // block's additive constant `[1, 1, 0]` over `[entry; exit; deriv]`. No
+    // stacked producer has carried that constant since #2301: 40e3cb64d removed
+    // it from the Linear time basis, and the B-spline and I-spline time bases
+    // never had one. So the detection always fell back to band 0, which is this
+    // packing, and its `1e-12` and `1e-9·max(|c|, 1)` band tests could only fire
+    // on a log-time column that happened to be constant.
     let mut x_joint = Array2::<f64>::zeros((r_joint, p_total));
     for (idx, block) in block_effective_designs.iter().enumerate() {
         let start = col_offsets[idx];
@@ -972,26 +910,9 @@ fn audit_identifiability_impl(
             continue;
         }
         let br = block.nrows();
-        if specs[idx].stacked_design.is_some() || br != n {
-            // Stacked blocks (own multi-band geometry) and global-scalar blocks
-            // (rows < n, disjoint support) pack at their native rows `..br`.
-            x_joint
-                .slice_mut(ndarray::s![..br, start..end])
-                .assign(block.as_ref());
-        } else {
-            // Plain per-observation block: replicate its `n`-row design into
-            // every observation band so its intercept aligns with the stacked
-            // block's additive constant across the same bands (gam#1197).
-            for &b in &observation_bands {
-                let lo = b * n;
-                let hi = (lo + n).min(r_joint);
-                if hi > lo {
-                    x_joint
-                        .slice_mut(ndarray::s![lo..hi, start..end])
-                        .assign(&block.slice(ndarray::s![..(hi - lo), ..]));
-                }
-            }
-        }
+        x_joint
+            .slice_mut(ndarray::s![..br, start..end])
+            .assign(block.as_ref());
     }
 
     // Joint Gram G = Xᵀ·X of the UNAUGMENTED design, computed once with the

@@ -1194,20 +1194,18 @@ fn canonicalize_for_identifiability_inner(
         // `age` covariate that are affine-equal on the observation grid) is
         // falsely flagged as a flat null direction (gam#1197). Mirror the joint
         // audit's geometry exactly: size `j_pre` to the tallest stacked
-        // operator, pack stacked blocks at their native `k_s·n` rows, and
-        // replicate plain per-observation blocks across the stacked operator's
-        // OBSERVATION bands (the bands carrying an ~constant intercept column;
-        // the derivative band annihilates constants and is excluded), so a plain
-        // block's intercept aligns with the stacked additive constant while a
-        // genuine covariate stays distinguished by the derivative band.
+        // operator, pack stacked blocks at their native `k_s·n` rows, and pack
+        // plain per-observation blocks at their native `n` rows. No stacked
+        // producer has carried an additive constant column since #2301, so
+        // there is no plain intercept to replicate across its bands (see the
+        // joint audit in audit.rs).
         let stacked_rows = specs
             .iter()
             .filter_map(|s| s.stacked_design.as_ref().map(|d| d.nrows()))
             .max()
             .unwrap_or(0);
         let r_map = nk.max(stacked_rows);
-        // Dense stacked designs (k_s·n × p_b) for the observation-band detection
-        // and stacked packing.
+        // Dense stacked designs (k_s·n × p_b) for stacked packing.
         // A refusal here is fatal rather than a fallback (gam#2465). Dropping a
         // stacked design to `None` does not disable this check — it silently
         // runs it on the wrong geometry: `r_map` is still sized from the
@@ -1238,39 +1236,6 @@ fn canonicalize_for_identifiability_inner(
                     .transpose()
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let k_bands = (r_map / n_rows).max(1);
-        let observation_bands: Vec<usize> = if k_bands <= 1 {
-            vec![0]
-        } else if let Some(stacked_ref) = stacked_dense.iter().flatten().max_by_key(|d| d.nrows()) {
-            let mut bands: Vec<usize> = (0..k_bands)
-                .filter(|&b| {
-                    let lo = b * n_rows;
-                    let hi = ((b + 1) * n_rows).min(stacked_ref.nrows());
-                    if hi <= lo {
-                        return false;
-                    }
-                    // Observation band iff the INTERCEPT column (column 0, the
-                    // additive constant) is ~constant non-zero there; a pure
-                    // derivative band maps the intercept coefficient to ~0 and is
-                    // excluded (see the matching audit.rs comment, gam#1197).
-                    if stacked_ref.ncols() == 0 {
-                        return false;
-                    }
-                    let first = stacked_ref[[lo, 0]];
-                    first.abs() > 1e-12
-                        && (lo..hi).all(|r| {
-                            (stacked_ref[[r, 0]] - first).abs() <= 1e-9 * first.abs().max(1.0)
-                        })
-                })
-                .collect();
-            if bands.is_empty() {
-                bands.push(0);
-            }
-            bands
-        } else {
-            vec![0]
-        };
-
         // Build J_pre_T: (r_map, p_total_raw) by row-stacking per-block Jacobians.
         let mut j_pre = Array2::<f64>::zeros((r_map, p_total_raw));
         let mut col_off = 0usize;
@@ -1299,23 +1264,15 @@ fn canonicalize_for_identifiability_inner(
             match spec.effective_jacobian_at("canonicalize_rank_check", &state) {
                 Ok(j_b) => {
                     // j_b is channel-major (k_b·n_rows, p_b): row `r·n_rows + i`
-                    // carries observation `i`'s channel-`r` row Jacobian. For a
-                    // single-channel plain block (k_b == 1) replicate it across
-                    // the observation bands so its intercept aligns with the
-                    // stacked additive constant (gam#1197); a genuinely multi-
+                    // carries observation `i`'s channel-`r` row Jacobian. A
+                    // single-channel plain block (k_b == 1) packs at its native
+                    // `n_rows` rows, as in the joint audit; a genuinely multi-
                     // channel block keeps its own channel-major rows.
                     let k_b = j_b.nrows() / n_rows;
                     if k_b <= 1 {
-                        for &b in &observation_bands {
-                            let base = b * n_rows;
-                            for i in 0..n_rows {
-                                let dst_row = base + i;
-                                if dst_row >= r_map {
-                                    break;
-                                }
-                                for j in 0..p_b {
-                                    j_pre[[dst_row, col_off + j]] = j_b[[i, j]];
-                                }
+                        for i in 0..n_rows.min(r_map) {
+                            for j in 0..p_b {
+                                j_pre[[i, col_off + j]] = j_b[[i, j]];
                             }
                         }
                     } else {
@@ -1333,22 +1290,15 @@ fn canonicalize_for_identifiability_inner(
                     }
                 }
                 Err(_) => {
-                    // Fall back: embed flat design across the observation bands.
+                    // Fall back: embed the flat design at its native rows.
                     if let Ok(flat) = spec
                         .design
                         .try_to_dense_arc("canonicalize_rank_check")
                         .map(|a| a.as_ref().clone())
                     {
-                        for &b in &observation_bands {
-                            let base = b * n_rows;
-                            for i in 0..n_rows.min(flat.nrows()) {
-                                let dst_row = base + i;
-                                if dst_row >= r_map {
-                                    break;
-                                }
-                                for j in 0..p_b.min(flat.ncols()) {
-                                    j_pre[[dst_row, col_off + j]] = flat[[i, j]];
-                                }
+                        for i in 0..n_rows.min(flat.nrows()).min(r_map) {
+                            for j in 0..p_b.min(flat.ncols()) {
+                                j_pre[[i, col_off + j]] = flat[[i, j]];
                             }
                         }
                     }
