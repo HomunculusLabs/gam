@@ -276,6 +276,17 @@ impl SurvivalMarginalSlopeFamily {
                 out.slice_mut(s![primary_range])
                     .assign(&d_beta_flat.slice(s![block_range]));
             }
+            // The absorbed influence offset moves along its coefficients through the row of
+            // `Z̃_infl` (#461).
+            if let (Some(infl_primary), Some(infl_range), Some(z_tilde)) = (
+                primary.infl,
+                slices.influence.as_ref(),
+                self.influence_absorber.as_ref(),
+            ) {
+                out[infl_primary] = z_tilde
+                    .row(row)
+                    .dot(&d_beta_flat.slice(s![infl_range.clone()]));
+            }
         } else {
             out[PRIMARY_Q0] = q0_dir;
             out[PRIMARY_Q1] = q1_dir;
