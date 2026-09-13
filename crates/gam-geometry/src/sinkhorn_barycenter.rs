@@ -708,16 +708,16 @@ pub fn euclidean_cost(points: ArrayView2<'_, f64>) -> Result<Array2<f64>, String
 /// Squared great-circle (geodesic) distance on the unit 2-sphere from
 /// `(M, 3)` direction vectors.
 ///
-/// Each row must lie within `1e-6` of the unit sphere; rows that pass
-/// this check are renormalized to exact unit length before any cosine
-/// is formed, so the cost is the true squared great-circle distance
+/// Each row is a direction: it is normalized to exact unit length before any
+/// cosine is formed, and a zero row, which has no direction, is refused. The
+/// cost is the true squared great-circle distance
 ///
 /// `C_ij = arccos( <x_i/|x_i|, x_j/|x_j|> )^2`
 ///
 /// of the projected directions. This guarantees a symmetric matrix
-/// with an exactly-zero diagonal: without renormalization an accepted
-/// row with `|x|^2 = 1 - O(1e-6)` would yield `arccos(<x,x>)^2 > 0` on
-/// the diagonal, contradicting `d(x, x) = 0`.
+/// with an exactly-zero diagonal: without normalization a row with
+/// `|x| != 1` would yield `arccos(<x,x>)^2 > 0` on the diagonal, contradicting
+/// `d(x, x) = 0`.
 pub fn geodesic_sphere_cost(directions: ArrayView2<'_, f64>) -> Result<Array2<f64>, String> {
     let (m, d) = directions.dim();
     if d != 3 {
@@ -738,9 +738,9 @@ pub fn geodesic_sphere_cost(directions: ArrayView2<'_, f64>) -> Result<Array2<f6
             norm_sq += v * v;
         }
         let norm = norm_sq.sqrt();
-        if (norm - 1.0).abs() > 1.0e-6 {
+        if !(norm > 0.0) {
             return Err(format!(
-                "geodesic_sphere_cost row {i} must be unit-norm; got |x| = {norm}"
+                "geodesic_sphere_cost row {i} has zero norm and so no direction"
             ));
         }
         for k in 0..3 {
