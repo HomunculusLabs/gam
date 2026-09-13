@@ -342,6 +342,7 @@ struct SelectionGeometry {
 ///
 /// ```text
 /// C(t) = Uᵀ T(t) U = RᵀR,     R = qr(M(t)),   M(t) = [√(t_iλ̂_i)·R_iU ; …]
+/// I + C = R̃ᵀR̃,               R̃ = qr([M(t); I])
 /// D    = (I + C)⁻¹ C,         v = Uᵀu
 /// criterion = vᵀDv + log|I + C| − log|C|
 /// statistic = ‖u‖² − ‖Dv‖²
@@ -356,18 +357,21 @@ struct SelectionGeometry {
 ///
 /// # Where the conditioning goes
 ///
-/// The two log-determinants are NOT symmetric in how much they can be trusted,
-/// and this splits them accordingly (#2644):
+/// Neither log-determinant is read off an assembled sum (#2644, #2902):
 ///
-/// * `log|C|` is taken from the TRIANGULAR FACTOR of the scaled roots, never
-///   from an assembled sum. `κ(C)` reaches `e^{60}` on a null-true
-///   double-penalty smooth, where an assembled Cholesky has no small pivots
-///   left to speak of.
-/// * `log|I + C|` and `D` are taken from an assembled `I + C`, which is benign:
-///   a mode `e` enters as `log(1 + e)` and as `e/(1 + e)`, both of which are
-///   insensitive to an ABSOLUTE error of `ε‖C‖` in a mode near zero. That is
-///   the same split `SelectionGeometry`'s own doc draws between the bracket's
-///   two summands.
+/// * `log|C|` is taken from the TRIANGULAR FACTOR of the scaled roots. `κ(C)`
+///   reaches `e^{60}` on a null-true double-penalty smooth, where an assembled
+///   Cholesky has no small pivots left to speak of.
+/// * `log|I + C|` and `D` are taken from the triangular factor of the roots
+///   bordered by `I`. An assembled `I + C` carries an ABSOLUTE error of `ε‖C‖`
+///   into every mode, and `‖C‖` follows the largest scale: on a dense pair at a
+///   scale separation of 40 it moved the criterion by `4.2e-6` against an exact
+///   axis slice, where the bordered factor agrees to `1e-14`.
+///
+/// Both reductions stack their blocks in decreasing scale. A Householder
+/// reduction of rows graded by `e^{30}` keeps each small row accurate to its own
+/// scale only when every row it is eliminated against precedes it; stacked the
+/// other way, the same bordered factor misses by `4.7e-5` on that pair.
 struct SelectionFactor {
     /// `r`, the structural rank.
     rank: usize,
@@ -376,14 +380,16 @@ struct SelectionFactor {
     stacked: Array2<f64>,
     /// `R`'s diagonal, which the reduction overwrites in `stacked`.
     diagonal: Vec<f64>,
-    /// The lower Cholesky factor of `I + C`.
+    /// `[M(t); I]`, overwritten in place by its Householder reduction.
+    bordered: Array2<f64>,
+    /// `R̃`'s diagonal, which the reduction overwrites in `bordered`.
+    bordered_diagonal: Vec<f64>,
+    /// `R̃ᵀ`, the lower factor of `I + C`.
     factor: Array2<f64>,
+    /// The blocks in decreasing scale, the identity as the last index.
+    order: Vec<usize>,
     /// `log|I + T| − log|T|₊`, the criterion's `t`-dependent Occam term.
     offset: f64,
-    /// `C v` and then `D v`.
-    mapped: Vec<f64>,
-    /// `R v`, the intermediate of `C v = Rᵀ(R v)`.
-    projected: Vec<f64>,
 }
 
 /// One grid point of the replay: the data operator's eigenvalues, the statistic's
@@ -580,84 +586,90 @@ impl SelectionFactor {
             .range_roots
             .iter()
             .map(|root| root.nrows())
-            .sum::<usize>()
-            .max(rank);
+            .sum::<usize>();
         Self {
             rank,
-            stacked: Array2::zeros((rows, rank)),
+            stacked: Array2::zeros((rows.max(rank), rank)),
             diagonal: vec![0.0; rank],
+            bordered: Array2::zeros((rows + rank, rank)),
+            bordered_diagonal: vec![0.0; rank],
             factor: Array2::zeros((rank, rank)),
+            order: Vec::with_capacity(geometry.range_roots.len() + 1),
             offset: 0.0,
-            mapped: vec![0.0; rank],
-            projected: vec![0.0; rank],
         }
     }
 
     /// Factor the geometry at `ln t`. `false` means the point is unusable and
     /// the caller must not read the scores.
     fn refactor(&mut self, geometry: &SelectionGeometry, log_t: &[f64]) -> bool {
-        if log_t.len() != geometry.range_roots.len() {
+        let components = geometry.range_roots.len();
+        if log_t.len() != components {
             return false;
         }
-        self.stacked.fill(0.0);
-        let mut offset_row = 0usize;
-        for ((root, &rho), &shift) in geometry
-            .range_roots
-            .iter()
-            .zip(geometry.log_lambda.iter())
-            .zip(log_t.iter())
-        {
+        // Block `components` is the identity of `[M; I]`, at scale one.
+        let log_scale = |block: usize| {
+            if block == components {
+                0.0
+            } else {
+                0.5 * (geometry.log_lambda[block] + log_t[block])
+            }
+        };
+        for block in 0..components {
             // `exp(s/2)` rather than `sqrt(exp(s))`, so a `λ̂` at the box wall
             // never round-trips through an intermediate that overflows.
-            let scale = (0.5 * (rho + shift)).exp();
-            if !scale.is_finite() {
+            if !log_scale(block).exp().is_finite() {
                 return false;
             }
+        }
+        // Rows in decreasing scale (see the type's doc): each block goes in
+        // before every block it outweighs.
+        self.order.clear();
+        self.order.extend(0..=components);
+        self.order
+            .sort_by(|&left, &right| log_scale(right).total_cmp(&log_scale(left)));
+        self.stacked.fill(0.0);
+        self.bordered.fill(0.0);
+        let (mut stacked_row, mut bordered_row) = (0usize, 0usize);
+        for &block in &self.order {
+            if block == components {
+                for index in 0..self.rank {
+                    self.bordered[[bordered_row + index, index]] = 1.0;
+                }
+                bordered_row += self.rank;
+                continue;
+            }
+            let root = &geometry.range_roots[block];
+            let scale = log_scale(block).exp();
             for row in 0..root.nrows() {
                 for column in 0..self.rank {
-                    self.stacked[[offset_row + row, column]] = scale * root[[row, column]];
+                    let value = scale * root[[row, column]];
+                    self.stacked[[stacked_row + row, column]] = value;
+                    self.bordered[[bordered_row + row, column]] = value;
                 }
             }
-            offset_row += root.nrows();
+            stacked_row += root.nrows();
+            bordered_row += root.nrows();
         }
         let Some(log_determinant) =
             householder_triangularize(&mut self.stacked, &mut self.diagonal)
         else {
             return false;
         };
-        // `I + C` with `C = RᵀR`, assembled — the benign half (see the type's
-        // doc): an absolute `ε‖C‖` in a mode near zero moves `log(1 + e)` and
-        // `e/(1 + e)` by the same absolute amount and nothing more.
-        for row in 0..self.rank {
-            for column in 0..self.rank {
-                let mut sum = 0.0_f64;
-                for k in 0..=row.min(column) {
-                    let left = if k == row {
-                        self.diagonal[k]
-                    } else {
-                        self.stacked[[k, row]]
-                    };
-                    let right = if k == column {
-                        self.diagonal[k]
-                    } else {
-                        self.stacked[[k, column]]
-                    };
-                    sum += left * right;
-                }
-                self.factor[[row, column]] = sum + f64::from(row == column);
-            }
-        }
-        let Some(cholesky) = gam_linalg::triangular::cholesky_factor_in_place(
-            self.factor.view(),
-            gam_linalg::triangular::CholeskyGuard::FiniteStrict,
-        ) else {
+        let Some(log_hessian) =
+            householder_triangularize(&mut self.bordered, &mut self.bordered_diagonal)
+        else {
             return false;
         };
-        let mut log_hessian = 0.0_f64;
-        for index in 0..self.rank {
-            log_hessian += cholesky[[index, index]].ln();
+        // `R̃ᵀR̃ = [M; I]ᵀ[M; I] = I + C`, kept as the lower factor `R̃ᵀ`.
+        for row in 0..self.rank {
+            for column in 0..self.rank {
+                self.factor[[row, column]] = match row.cmp(&column) {
+                    std::cmp::Ordering::Equal => self.bordered_diagonal[row],
+                    std::cmp::Ordering::Greater => self.bordered[[column, row]],
+                    std::cmp::Ordering::Less => 0.0,
+                };
+            }
         }
-        self.factor = cholesky;
         self.offset = 2.0 * (log_hessian - log_determinant);
         self.offset.is_finite()
     }
@@ -669,29 +681,17 @@ impl SelectionFactor {
     /// absent from `projected` (which lives in `range(T)`) and they contribute
     /// nothing to the criterion and their full square to the statistic.
     fn score(&mut self, projected: &[f64], norm_squared: f64) -> (f64, f64) {
-        // `R v`, then `Rᵀ(R v)` — `C v` without ever forming `C`.
-        for row in 0..self.rank {
-            let mut sum = self.diagonal[row] * projected[row];
-            for column in (row + 1)..self.rank {
-                sum += self.stacked[[row, column]] * projected[column];
-            }
-            self.projected[row] = sum;
-        }
-        for row in 0..self.rank {
-            let mut sum = self.diagonal[row] * self.projected[row];
-            for k in 0..row {
-                sum += self.stacked[[k, row]] * self.projected[k];
-            }
-            self.mapped[row] = sum;
-        }
-        // `D v = (I + C)⁻¹ (C v)`.
-        let solved =
-            gam_linalg::triangular::cholesky_solve_vector(&self.factor, self.mapped.as_slice());
+        // `D = (I + C)⁻¹C = I − (I + C)⁻¹`, so `vᵀDv = ‖v‖² − ‖R̃⁻ᵀv‖²` and
+        // `D v = v − (I + C)⁻¹v`, without ever forming `C v`.
+        let whitened =
+            gam_linalg::triangular::forward_substitution_lower_vector(&self.factor, projected);
+        let solved = gam_linalg::triangular::cholesky_solve_vector(&self.factor, projected);
         let mut data = 0.0_f64;
         let mut mapped_norm = 0.0_f64;
         for row in 0..self.rank {
-            data += projected[row] * solved[row];
-            mapped_norm += solved[row] * solved[row];
+            data += projected[row] * projected[row] - whitened[row] * whitened[row];
+            let mapped = projected[row] - solved[row];
+            mapped_norm += mapped * mapped;
         }
         (self.offset + data, norm_squared - mapped_norm)
     }
@@ -1178,9 +1178,11 @@ impl DiagonalCriterion<'_> {
 /// * **Data and `log|I + C|`.** `I + B = LLᵀ` and `L⁻¹AL⁻ᵀ = V diag(ν) Vᵀ`, so
 ///   `I + C(u) = LV(I + e^u ν)VᵀLᵀ`. With `h = VᵀL⁻¹v`,
 ///   `vᵀDv = const + Σ_j h_j² s_j(u)` and
-///   `log|I + C(u)| = log|I + B| + Σ_j ln(1 + e^u ν_j)`. This half is benign in the
-///   sense [`SelectionFactor`] documents, so `I + B` is assembled and `ν` is read
-///   off the singular values of `L⁻¹(A's root)ᵀ`.
+///   `log|I + C(u)| = log|I + B| + Σ_j ln(1 + e^u ν_j)`. `B` does not move along
+///   the slice, so the absolute error of an assembled `I + B` is common to every
+///   value the slice returns and cancels from each change it is asked about. So
+///   `I + B` is assembled and `ν` is read off the singular values of
+///   `L⁻¹(A's root)ᵀ`.
 /// * **`log|C|₊`.** Here the conditioning is the whole problem (#2644), so it is
 ///   taken from the stacked scaled ROOTS at the current point `x = u_i`,
 ///   `M = [B's roots; e^{x/2}·A's root] = QR`, never from an assembled sum. With
