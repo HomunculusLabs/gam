@@ -9,8 +9,8 @@
 //!   [`observe_next_outer_seed`]. At the first seed with enough ψ axes the
 //!   generic outer runner lends it an [`OuterSeedProbe`], which evaluates the
 //!   real objective at any θ from that seed's own inner start. Every evaluation
-//!   returns analytic evidence only: the criterion value, its analytic gradient,
-//!   the scalar criterion components, and the selected coefficient mode with its
+//!   returns analytic evidence only: the criterion value, its analytic gradient
+//!   and Hessian, the scalar criterion components, and the selected coefficient mode with its
 //!   analytic mode response. A test that compares that evidence with a finite
 //!   difference forms the difference itself, so the production tree differences
 //!   nothing (SPEC rule 2, #2901).
@@ -29,6 +29,8 @@ pub enum OuterSeedOrder {
     Value,
     /// The criterion value and its analytic θ-gradient.
     ValueAndGradient,
+    /// The criterion value, its analytic θ-gradient and its analytic θ-Hessian.
+    ValueGradientHessian,
 }
 
 /// The seed a probe is lent at, and the box every evaluation it makes has to
@@ -51,8 +53,13 @@ pub struct OuterSeedEvaluation {
     /// The criterion value.
     pub cost: f64,
     /// The analytic θ-gradient, present exactly when the evaluation asked for
-    /// [`OuterSeedOrder::ValueAndGradient`].
+    /// [`OuterSeedOrder::ValueAndGradient`] or
+    /// [`OuterSeedOrder::ValueGradientHessian`].
     pub gradient: Option<Array1<f64>>,
+    /// The analytic θ-Hessian, materialized dense, on a
+    /// [`OuterSeedOrder::ValueGradientHessian`] evaluation. `None` otherwise, and
+    /// where the objective declares no analytic Hessian.
+    pub hessian: Option<Array2<f64>>,
     /// `(cost, [fixed_beta, logdet_h, logdet_s, kkt])` as the evaluator
     /// published them.
     ///
@@ -102,10 +109,12 @@ impl OuterSeedCapture {
         self,
         cost: f64,
         gradient: Option<Array1<f64>>,
+        hessian: Option<Array2<f64>>,
     ) -> OuterSeedEvaluation {
         OuterSeedEvaluation {
             cost,
             gradient,
+            hessian,
             criterion_components: self.criterion_components,
             selected_mode: self.selected_mode,
         }

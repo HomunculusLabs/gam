@@ -492,16 +492,34 @@ impl crate::estimate::outer_eval_capture::OuterSeedProbe for RunnerSeedProbe<'_>
         crate::estimate::outer_eval_capture::begin_outer_seed_capture();
         let evaluated = match order {
             crate::estimate::outer_eval_capture::OuterSeedOrder::Value => {
-                self.obj.eval_cost(theta).map(|cost| (cost, None))
+                self.obj.eval_cost(theta).map(|cost| (cost, None, None))
             }
             crate::estimate::outer_eval_capture::OuterSeedOrder::ValueAndGradient => self
                 .obj
                 .eval_with_order(theta, OuterEvalOrder::ValueAndGradient)
-                .map(|eval| (eval.cost, Some(eval.gradient))),
+                .map(|eval| (eval.cost, Some(eval.gradient), None)),
+            crate::estimate::outer_eval_capture::OuterSeedOrder::ValueGradientHessian => self
+                .obj
+                .eval_with_order(theta, OuterEvalOrder::ValueGradientHessian)
+                .and_then(|eval| {
+                    let hessian = match eval.hessian {
+                        HessianValue::Dense(hessian) => Some(hessian),
+                        HessianValue::Operator(op) => {
+                            Some(op.materialize_dense().map_err(|message| {
+                                EstimationError::RemlOptimizationFailed(format!(
+                                    "outer-seed probe Hessian operator materialization failed: \
+                                     {message}"
+                                ))
+                            })?)
+                        }
+                        HessianValue::Unavailable => None,
+                    };
+                    Ok((eval.cost, Some(eval.gradient), hessian))
+                }),
         };
         let published = crate::estimate::outer_eval_capture::end_outer_seed_capture();
-        let (cost, gradient) = evaluated?;
-        Ok(published.into_evaluation(cost, gradient))
+        let (cost, gradient, hessian) = evaluated?;
+        Ok(published.into_evaluation(cost, gradient, hessian))
     }
 }
 
