@@ -782,6 +782,17 @@ fn survival_location_scale_outer_link_shape_gradient_matches_finite_difference_s
     // from a state the base solve had not settled; a value-only objective that
     // differs from the value-and-gradient objective at the same mode is a value
     // path that disagrees with the gradient path.
+    // The fixture bounds its one time coefficient below at 0. A base mode on that
+    // bound evaluates the Laplace criterion on the active face's tangent, so the
+    // face this pin differentiates across is printed before anything is asserted.
+    let base_time_coefficient = base
+        .warm_start
+        .block_beta_view(0)
+        .expect("the time block's coefficients")[0];
+    eprintln!(
+        "[2695] base time coefficient={base_time_coefficient:.12e} (lower bound 0; on the bound: {})",
+        base_time_coefficient <= f64::EPSILON
+    );
     let warm_value = value_at(epsilon0, log_delta0, &rho);
     let warm = crate::custom_family::evaluate_custom_family_joint_hyper_owned(
         &family_at(epsilon0, log_delta0),
