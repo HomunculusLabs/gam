@@ -207,7 +207,6 @@ mod minimal_seed;
 mod oos_entry;
 mod oos_logit_seed;
 mod outer_objective;
-mod pair_kappa;
 mod pair_phase;
 mod pca_seed;
 mod penalties;
@@ -503,9 +502,6 @@ mod tests_chart_angle_fidelity_2081;
 mod tests_embeddedness_2518;
 
 #[cfg(test)]
-mod tests_joint_vs_cascade_2131;
-
-#[cfg(test)]
 mod tests_quality_behavior_calibration_2015;
 
 #[cfg(test)]
@@ -585,7 +581,6 @@ pub use loss::*;
 pub use minimal_seed::*;
 pub use oos_entry::*;
 pub use outer_objective::*;
-pub use pair_kappa::*;
 pub use pca_seed::*;
 pub use penalties::*;
 pub use persistence::*;

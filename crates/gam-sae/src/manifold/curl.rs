@@ -144,8 +144,7 @@ fn radius_law(alpha: ArrayView1<f64>, beta: ArrayView1<f64>) -> Result<RadiusLaw
     // grad = (−2 m₄/m₂³, 1/m₂²), Var(m̂₂) = (E[r⁴]−m₂²)/n, Var(m̂₄) = (E[r⁸]−m₄²)/n,
     // Cov(m̂₂, m̂₄) = (E[r⁶]−m₂·m₄)/n. The E[r⁶] cross moment is accumulated
     // directly (no proxy) — keeping the covariance term is what makes this SE
-    // exact to first order (the pair screen's ratio SE cancels the analogous
-    // denominator fluctuation; see `pair_kappa`).
+    // exact to first order.
     let mut m6 = 0.0_f64;
     for i in 0..n {
         let r2 = alpha[i] * alpha[i] + beta[i] * beta[i];

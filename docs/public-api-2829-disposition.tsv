@@ -431,9 +431,9 @@ crates/gam-sae/src/chart_canonicalization.rs	sphere_chart_isometry_defect	retire
 crates/gam-sae/src/coactivation_conditionality.rs	derive_residual_cluster_labels	retired-by-later-deletion:10ac599e4c
 crates/gam-sae/src/coactivation_conditionality.rs	estimate_from_designed_sample	retired-by-later-deletion:10ac599e4c
 crates/gam-sae/src/coactivation_conditionality.rs	estimate_from_measure	retired-by-later-deletion:10ac599e4c
-crates/gam-sae/src/coactivation_conditionality.rs	estimate_on_rows	narrowed-to-crate
+crates/gam-sae/src/coactivation_conditionality.rs	estimate_on_rows	retired-no-product-user
 crates/gam-sae/src/coactivation_conditionality.rs	full_pass_rows	retired-by-later-deletion:10ac599e4c
-crates/gam-sae/src/coactivation_conditionality.rs	residual_gate_activities	narrowed-to-crate
+crates/gam-sae/src/coactivation_conditionality.rs	residual_gate_activities	retired-no-product-user
 crates/gam-sae/src/corpus/designed_target.rs	auto_designed_budget	retired-no-product-user
 crates/gam-sae/src/corpus/designed_target.rs	collect_designed_target	retired-no-product-user
 crates/gam-sae/src/corpus/designed_target.rs	collect_designed_target_auto	retired-no-product-user
@@ -732,8 +732,8 @@ crates/gam-sae/src/manifold/outer_objective.rs	set_isometry_homotopy_weight	reti
 crates/gam-sae/src/manifold/outer_objective.rs	solve_at_eta	retired-no-surviving-dependent
 crates/gam-sae/src/manifold/outer_objective.rs	warm_start_telemetry	retired-no-surviving-dependent
 crates/gam-sae/src/manifold/pair_kappa.rs	screen_all_pairs	retired-by-later-deletion:e6fd4251e5
-crates/gam-sae/src/manifold/pair_kappa.rs	screen_pair	restored-in-place
-crates/gam-sae/src/manifold/pair_kappa.rs	screen_pair_with_contexts	narrowed-to-crate
+crates/gam-sae/src/manifold/pair_kappa.rs	screen_pair	retired-no-product-user
+crates/gam-sae/src/manifold/pair_kappa.rs	screen_pair_with_contexts	retired-no-product-user
 crates/gam-sae/src/manifold/pair_phase.rs	certify_phase_circuit	retired-by-later-deletion:fea430c0c4
 crates/gam-sae/src/manifold/pair_phase.rs	fuse_race_candidate	retired-by-later-deletion:fea430c0c4
 crates/gam-sae/src/manifold/pair_phase.rs	phase_fusion_moves	retired-by-later-deletion:fea430c0c4

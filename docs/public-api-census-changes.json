@@ -2928,5 +2928,16 @@
     },
     "reason": "#2899 public API sweep of gam-models (prune-api-d): four uncalled SavedCompiledFlexBlock span accessors and SmoothLrSelectionReplay::conditional_mean are deleted.",
     "evidence": "At ae4dca244, git grep finds no call to these public functions on their own types. The removed map is public_api_census.py's census difference over this change, computed on MSI."
+  },
+  {
+    "base": "511a548ee101fb860670a31cb73fff9b929ba56b",
+    "removed": {
+      "crates/gam-sae/src/coactivation_conditionality.rs::estimate_on_rows": 1,
+      "crates/gam-sae/src/coactivation_conditionality.rs::residual_gate_activities": 1,
+      "crates/gam-sae/src/manifold/pair_kappa.rs::screen_pair": 1,
+      "crates/gam-sae/src/manifold/pair_kappa.rs::screen_pair_with_contexts": 1
+    },
+    "reason": "#2899 public API sweep of gam-sae (prune-api-d): the test-only pairwise energy screen and the conditionality fit only it reached are deleted; the coupling certificate and influence values gam-pyffi uses stay.",
+    "evidence": "At 2788ad226, the guarded check 579283 reports the screen and the conditionality fit as never used once the test-only wrapper is gone. The removed map is public_api_census.py's census difference over this change, computed on MSI."
   }
 ]
