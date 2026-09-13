@@ -32,6 +32,20 @@ struct ClampBasinState {
     rows: Vec<usize>,
 }
 
+/// A clone of `anchor` that keeps its three per-assembly gates and its freeze
+/// flag. `SaeManifoldTerm::clone` drops the gates, so a finite-difference
+/// endpoint built from a plain clone re-derives them from its own state, a
+/// motion production holds fixed across a step. A fresh fixture carries no
+/// gates and is not frozen, so its first assembly derives them.
+fn frozen_gate_endpoint(anchor: &SaeManifoldTerm) -> SaeManifoldTerm {
+    let mut endpoint = anchor.clone();
+    endpoint.decoder_repulsion_gate = anchor.decoder_repulsion_gate.clone();
+    endpoint.barrier_coactivation_gate = anchor.barrier_coactivation_gate.clone();
+    endpoint.amplitude_barrier_gate = anchor.amplitude_barrier_gate;
+    endpoint.streaming_gates_frozen = anchor.streaming_gates_frozen;
+    endpoint
+}
+
 /// The exact-A evidence factor the matrix-free outer gradient consumes
 /// (`BundleEvidenceGeometry::cache`): the majorizer system corrected to
 /// `A = B + ΔC`, carrying the classification geometry, and factored under the
@@ -41,7 +55,7 @@ fn exact_a_evidence_cache(
     target: &Array2<f64>,
     rho: &SaeManifoldRho,
 ) -> Result<(SaeManifoldTerm, ArrowFactorCache), String> {
-    let mut anchor = term.clone();
+    let mut anchor = frozen_gate_endpoint(term);
     let mut majorizer = anchor.assemble_arrow_schur(target.view(), rho, None)?;
     SaeManifoldTerm::ensure_row_gauge_deflation_for_quasi_laplace(&mut majorizer);
     let exact = anchor.exact_a_evidence_system(target.view(), rho, &majorizer)?;
@@ -398,21 +412,41 @@ fn threshold_gate_exact_sparse_logdet_trace_matches_the_lane_value_2915() {
     let (term, target, fixture_rho) = threshold_gate_tiny_fixture(true);
     let mut census = Vec::new();
     let mut selected = None;
-    for log_ard in [-1.0_f64, 0.0, 1.0, 2.0, 3.0, 4.0] {
+    // Job 558166: at log_ard = -1 rows [1, 4, 6] price a clamp basin, and every
+    // rung from log_ard = 0 up refused to factor. The periodic prior's concave
+    // half scales with the precision, so the ladder lowers the precision, then
+    // the gate strength. The remainder is live on every rung, since each row
+    // carries a switched-on logit and λ_sparse > 0.
+    let base_sparse = fixture_rho.log_lambda_sparse;
+    for (log_ard, log_lambda_sparse) in [
+        (-1.0_f64, base_sparse),
+        (-2.0, base_sparse),
+        (-3.0, base_sparse),
+        (-4.0, base_sparse),
+        (-6.0, base_sparse),
+        (-6.0, base_sparse - 1.0),
+        (-6.0, base_sparse - 2.0),
+    ] {
         let mut rho = fixture_rho.clone();
+        rho.log_lambda_sparse = log_lambda_sparse;
         for axes in rho.log_ard.iter_mut() {
             axes.fill(log_ard);
         }
         match exact_a_evidence_cache(&term, &target, &rho) {
             Ok((anchor, cache)) => {
                 let rows = clamp_basin_rows(&cache);
-                census.push(format!("log_ard={log_ard}: clamp_basin_rows={rows:?}"));
+                census.push(format!(
+                    "log_ard={log_ard} log_lambda_sparse={log_lambda_sparse}: \
+                     clamp_basin_rows={rows:?}"
+                ));
                 if rows.is_empty() {
                     selected = Some((anchor, cache, rho));
                     break;
                 }
             }
-            Err(err) => census.push(format!("log_ard={log_ard}: no factor: {err}")),
+            Err(err) => census.push(format!(
+                "log_ard={log_ard} log_lambda_sparse={log_lambda_sparse}: no factor: {err}"
+            )),
         }
     }
     eprintln!("#2915 LANE_SPARSE_TRACE census\n{}", census.join("\n"));
@@ -465,7 +499,7 @@ fn threshold_gate_exact_sparse_logdet_trace_matches_the_lane_value_2915() {
     let half_log_det = |log_lambda_sparse: f64| -> f64 {
         let mut moved = rho.clone();
         moved.log_lambda_sparse = log_lambda_sparse;
-        let (_, endpoint) = exact_a_evidence_cache(&term, &target, &moved)
+        let (_, endpoint) = exact_a_evidence_cache(&anchor, &target, &moved)
             .expect("#2915 exact-A factor at a finite-difference endpoint");
         assert_eq!(
             stratum(&endpoint),
@@ -513,8 +547,7 @@ fn threshold_gate_exact_sparse_logdet_trace_matches_the_lane_value_2915() {
 fn clamp_basin_price_derivative_matches_the_lane_value_2915() {
     let mode = AssignmentMode::threshold_gate(1.0, 0.0);
     let state = first_clamp_basin_state(mode, true);
-    let (mut term, target, _) = threshold_gate_tiny_fixture(true);
-    term.assignment.mode = mode;
+    let (_, target, _) = threshold_gate_tiny_fixture(true);
     let basin_price = state
         .rows
         .iter()
@@ -574,7 +607,7 @@ fn clamp_basin_price_derivative_matches_the_lane_value_2915() {
         let mut minus = state.rho.clone();
         plus.log_lambda_sparse += h;
         minus.log_lambda_sparse -= h;
-        0.5 * (log_det_at(&term, &plus) - log_det_at(&term, &minus)) / (2.0 * h)
+        0.5 * (log_det_at(&state.term, &plus) - log_det_at(&state.term, &minus)) / (2.0 * h)
     };
 
     let ard_atom = (0..state.rho.log_ard.len())
@@ -595,11 +628,12 @@ fn clamp_basin_price_derivative_matches_the_lane_value_2915() {
         let mut minus = state.rho.clone();
         plus.log_ard[ard_atom][0] += h;
         minus.log_ard[ard_atom][0] -= h;
-        0.5 * (log_det_at(&term, &plus) - log_det_at(&term, &minus)) / (2.0 * h)
+        0.5 * (log_det_at(&state.term, &plus) - log_det_at(&state.term, &minus)) / (2.0 * h)
     };
 
     let row = state.rows[0];
-    let variables = term
+    let variables = state
+        .term
         .row_vars_for_cache_row(row, &state.cache)
         .expect("#2915 row variables");
     let (position, atom) = variables
@@ -623,8 +657,8 @@ fn clamp_basin_price_derivative_matches_the_lane_value_2915() {
         .expect("#2915 exact-operator theta-adjoint")
         .t[state.cache.row_offsets[row] + position];
     let theta_fd = {
-        let mut plus = term.clone();
-        let mut minus = term.clone();
+        let mut plus = frozen_gate_endpoint(&state.term);
+        let mut minus = frozen_gate_endpoint(&state.term);
         plus.assignment.logits[[row, atom]] += h;
         minus.assignment.logits[[row, atom]] -= h;
         (log_det_at(&plus, &state.rho) - log_det_at(&minus, &state.rho)) / (2.0 * h)
