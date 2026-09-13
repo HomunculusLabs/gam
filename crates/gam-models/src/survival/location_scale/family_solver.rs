@@ -1253,6 +1253,19 @@ impl CustomFamily for SurvivalLocationScaleFamily {
         }
     }
 
+    /// On the non-wiggle row kernel the family forms the rotated first information rows from
+    /// its projected channel rows (#2668). The link-wiggle lowering has no fixed-width row
+    /// kernel and provides none.
+    fn jeffreys_rotated_first_derivative(
+        &self,
+    ) -> Option<&dyn crate::custom_family::JeffreysRotatedFirstDerivative> {
+        if self.row_kernel_directional_supported() {
+            Some(self)
+        } else {
+            None
+        }
+    }
+
     /// `∇²_β tr(W · I(β))` for the unscaled observed information: the same
     /// fourth-order row contraction that
     /// [`Self::joint_jeffreys_information_second_directional_derivative_with_specs`]
@@ -2117,6 +2130,30 @@ impl CustomFamily for SurvivalLocationScaleFamily {
     // by both this trait method and the ψ workspace's `first_order_terms`
     // override to thread the Horvitz-Thompson row mask through the staged
     // outer-score subsample.
+}
+
+impl crate::custom_family::JeffreysRotatedFirstDerivative for SurvivalLocationScaleFamily {
+    /// The rows `vec(sym(Uᵀ I'[e_a] U))` from each row's nine third contractions and its channel
+    /// rows projected onto `U`, so the `p` dense axis matrices are never formed (#2668).
+    fn first_directional_rotated_all_axes(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        basis: ndarray::ArrayView2<'_, f64>,
+    ) -> Result<Array2<f64>, String> {
+        self.validate_joint_specs(
+            specs,
+            "SurvivalLocationScaleFamily joint Jeffreys rotated first directional derivative",
+        )?;
+        crate::block_layout::block_count::validate_block_count::<SurvivalLocationScaleError>(
+            "SurvivalLocationScaleFamily joint Jeffreys rotated first directional derivative",
+            self.expected_blocks(),
+            block_states.len(),
+        )?;
+        let dynamic = self.build_dynamic_geometry(block_states)?;
+        let kernel = self.survival_ls_row_kernel_rescaled(&dynamic, 0.0);
+        kernel.directional_derivative_rotated_all_axes(basis)
+    }
 }
 
 impl crate::custom_family::JeffreysAxisContractions for SurvivalLocationScaleFamily {
