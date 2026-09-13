@@ -1,7 +1,6 @@
 use gam::estimate::FitOptions;
 use gam::smooth::{
     LinearCoefficientGeometry, LinearTermSpec, TermCollectionSpec, fit_term_collection_forspec,
-    fit_term_collection_with_penalty_block_gamma_prior_callback,
     fit_term_collection_with_penalty_block_gamma_priors,
 };
 use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, RhoPrior, StandardLink};
@@ -164,61 +163,6 @@ fn informative_gamma_precision_prior_shrinks_by_map_update() {
     assert!(
         ((observed_beta - expected_beta) / expected_beta).abs() < 1e-4,
         "beta={observed_beta}, expected ridge shrinkage {expected_beta} at lambda={lambda}"
-    );
-}
-
-#[test]
-fn gamma_precision_prior_callback_is_invoked_once_per_penalty_block() {
-    let (data, y, weights, offset, spec) = linear_fixture();
-    let opts = fit_options();
-    let likelihood = LikelihoodSpec::new(
-        ResponseFamily::Gaussian,
-        InverseLink::Standard(StandardLink::Identity),
-    );
-    let mut seen = Vec::new();
-    let callback_fit = fit_term_collection_with_penalty_block_gamma_prior_callback(
-        data.view(),
-        y.view(),
-        weights.view(),
-        offset.view(),
-        &spec,
-        |metadata| {
-            seen.push((
-                metadata.label.clone(),
-                metadata.global_index,
-                metadata.effective_rank,
-            ));
-            Some((13.0, 0.25))
-        },
-        likelihood.clone(),
-        &opts,
-    )
-    .expect("callback gamma fit");
-    let keyed_fit = fit_term_collection_with_penalty_block_gamma_priors(
-        data.view(),
-        y.view(),
-        weights.view(),
-        offset.view(),
-        &spec,
-        &[(LINEAR_TERM_BLOCK.to_string(), 13.0, 0.25)],
-        likelihood,
-        &opts,
-    )
-    .expect("keyed gamma fit");
-
-    assert_eq!(
-        seen,
-        vec![(LINEAR_TERM_BLOCK.to_string(), 0, 1)],
-        "the callback's `label` is the TERM NAME (`penalty_block_metadata` reads \
-         `info.termname`), so it must agree with the key the keyed API accepts"
-    );
-    assert_eq!(
-        callback_fit.fit.lambdas.as_slice(),
-        keyed_fit.fit.lambdas.as_slice()
-    );
-    assert_eq!(
-        callback_fit.fit.beta.as_slice(),
-        keyed_fit.fit.beta.as_slice()
     );
 }
 

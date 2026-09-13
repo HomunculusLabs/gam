@@ -55,9 +55,7 @@ use gam_spec::{
     SasLinkState, StandardLink,
 };
 
-use gam_terms::smooth::penalty_priors::{
-    realize_keyed_penalty_block_gamma_priors, realize_penalty_block_gamma_priors,
-};
+use gam_terms::smooth::penalty_priors::realize_keyed_penalty_block_gamma_priors;
 
 use gam_terms::smooth::shape_constraints::{
     linear_constraints_from_lower_bounds_global, merge_linear_constraints_global,

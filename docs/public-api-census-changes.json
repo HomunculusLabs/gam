@@ -2878,5 +2878,13 @@
     },
     "reason": "#2899 (prune-api-d), following the lead's ruling: SaeManifoldTerm::set_guards_enabled and guards_enabled have no production caller, so both accessors are deleted and the collapse guards are always armed.",
     "evidence": "At 271836b2d, git grep -n -e set_guards_enabled -e guards_enabled finds the setter called only by gam-sae unit and integration tests, and the reader called nowhere. The removed map is public_api_census.py's census difference over this change, computed on MSI."
+  },
+  {
+    "base": "04e7ec24c5c4e6890c8a7f168e88aefba16de4d2",
+    "removed": {
+      "crates/gam-models/src/fit_orchestration/drivers/design_construction.rs::fit_term_collection_with_penalty_block_gamma_prior_callback": 1
+    },
+    "reason": "#2899 (prune-api-d), under the lead's gamma-prior ruling: fit_term_collection_with_penalty_block_gamma_prior_callback has no product caller, so the wrapper is deleted and the keyed product route stays.",
+    "evidence": "At 67607d851, git grep -n -w shows the callback wrapper called only by one root integration test and re-exported only from src/lib.rs. The removed map is public_api_census.py's census difference over this change, computed on MSI."
   }
 ]
