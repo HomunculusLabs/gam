@@ -192,30 +192,32 @@ fn gam_recovers_interval_censored_latent_truth_match_or_beat_lifelines() {
 
     // ---- gam's own fitted marginal survival curve, from the saved model -----
     // A SurvInterval fit saves L as its exit column and no entry column, so the
-    // latent-window law over a row with L = t is P(T > t) = S(t). R and event are
-    // carried only because the saved schema names them; the window reads neither.
+    // saved latent law's time grid over one row reads P(T > t) = S(t) at every
+    // evaluation time (8bbc815e8). R and event are carried only because the saved
+    // schema names them; the grid reads neither.
     let eval_t: Vec<f64> = (1..=12).map(|k| 0.5 * k as f64).collect();
     let columns = data.column_map();
-    let mut frame = Array2::<f64>::zeros((eval_t.len(), data.headers.len()));
-    for (row, &t) in eval_t.iter().enumerate() {
-        frame[[row, columns["L"]]] = t;
-        frame[[row, columns["R"]]] = t + 0.5;
-        frame[[row, columns["event"]]] = 1.0;
-    }
-    let offset = Array1::<f64>::zeros(eval_t.len());
-    let gam_curve = predict_latent_window_survival(SurvivalPredictRequest {
+    let mut frame = Array2::<f64>::zeros((1, data.headers.len()));
+    frame[[0, columns["L"]]] = eval_t[0];
+    frame[[0, columns["R"]]] = eval_t[0] + 0.5;
+    frame[[0, columns["event"]]] = 1.0;
+    let offset = Array1::<f64>::zeros(1);
+    let gam_curve: Vec<f64> = predict_latent_window_survival(SurvivalPredictRequest {
         model: &model,
         data: frame.view(),
         col_map: &columns,
         training_headers: Some(&data.headers),
         primary_offset: &offset,
         noise_offset: &offset,
-        time_grid: None,
+        time_grid: Some(eval_t.as_slice()),
         with_uncertainty: false,
         estimand: SurvivalPredictEstimand::Plugin,
     })
-    .expect("the saved latent survival model predicts its marginal window survival")
-    .window_survival;
+    .expect("the saved latent survival model predicts its marginal survival on the grid")
+    .grid_survival
+    .expect("a requested time grid returns grid survival")
+    .row(0)
+    .to_vec();
 
     // ---- lifelines baseline on the IDENTICAL brackets --------------------
     // lifelines fits the same interval brackets; we read its fitted marginal
@@ -268,7 +270,7 @@ emit("S_ref", list(S))
         ref_curve_rell2,
         sigma_hat,
         sigma_true,
-        gam_curve.to_vec()
+        gam_curve
     );
 
     // ---- truth-recovery assertion on the identified estimand -------------
