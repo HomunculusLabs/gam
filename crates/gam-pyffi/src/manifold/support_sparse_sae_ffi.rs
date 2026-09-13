@@ -145,7 +145,6 @@ pub(crate) struct SupportSparseManifoldSaeCore {
     termination: serde_json::Value,
     max_iter: usize,
     trust_radius: f64,
-    tolerance: f64,
     random_state: u64,
 }
 
@@ -186,7 +185,10 @@ fn coords_rows<'py>(py: Python<'py>, term: &SaeSupportSparseTerm) -> PyResult<Bo
     Ok(rows)
 }
 
-fn fixed_point_json(report: &SaeSupportFixedPointReport) -> serde_json::Value {
+/// The inner fixed point's certificate, with the tolerance it certified to: the
+/// engine derives that tolerance from the term's own objective resolution, so the
+/// numbers above it are readable only beside it.
+fn fixed_point_json(report: &SaeSupportFixedPointReport, tolerance: f64) -> serde_json::Value {
     let SaeSupportStationarity {
         decoder_l2,
         decoder_max_abs,
@@ -210,6 +212,7 @@ fn fixed_point_json(report: &SaeSupportFixedPointReport) -> serde_json::Value {
         "coordinate_scaled_max_abs": coordinate_scaled_max_abs,
         "max_recurrence_change": report.max_recurrence_change,
         "recurred": report.recurred,
+        "tolerance": tolerance,
     })
 }
 
@@ -234,11 +237,14 @@ impl SupportSparseManifoldSaeCore {
             self.support_k,
             self.random_state,
         )?;
+        // The frozen-decoder objective sums these rows' cells, so the tolerance is
+        // derived from this term, not copied from the training fit's.
+        let tolerance = term.fixed_point_tolerance();
         let report = term.solve_coordinates_fixed_decoder(
             centered_target.view(),
             &self.ard_precisions,
             self.max_iter,
-            self.tolerance,
+            tolerance,
             self.trust_radius,
         )?;
         let fitted = add_mean(term.reconstruct()?, &self.training_mean);
@@ -249,6 +255,7 @@ impl SupportSparseManifoldSaeCore {
             "coordinate_max_abs": report.coordinate_max_abs,
             "max_recurrence_change": report.max_recurrence_change,
             "recurred": report.recurred,
+            "tolerance": tolerance,
         });
         Ok((term, fitted, certificate))
     }
@@ -433,12 +440,12 @@ impl SupportSparseManifoldSaeCore {
         )?;
         // Without these the payload cannot rebuild the model it came from:
         // `reconstruction_r2` is not recoverable from `fitted` alone (the
-        // training target is not stored), and the four fit knobs are model
-        // state that `from_dict` must restore rather than invent.
+        // training target is not stored), and the three fit knobs are model
+        // state that `from_dict` must restore rather than invent. The inner
+        // tolerance is not one of them: it is derived from each solve's term.
         out.set_item("reconstruction_r2", self.reconstruction_r2)?;
         out.set_item("max_iter", self.max_iter)?;
         out.set_item("trust_radius", self.trust_radius)?;
-        out.set_item("tolerance", self.tolerance)?;
         out.set_item("random_state", self.random_state)?;
         Ok(out.unbind().into_any())
     }
@@ -501,7 +508,6 @@ impl SupportSparseManifoldSaeCore {
         let reconstruction_r2: f64 = required_field(payload, "reconstruction_r2")?.extract()?;
         let max_iter: usize = required_field(payload, "max_iter")?.extract()?;
         let trust_radius: f64 = required_field(payload, "trust_radius")?.extract()?;
-        let tolerance: f64 = required_field(payload, "tolerance")?.extract()?;
         let random_state: u64 = required_field(payload, "random_state")?.extract()?;
         let certificates = crate::manifold::manifold_sae_coercion::py_any_to_json_value(
             &required_field(payload, "certificates")?,
@@ -543,7 +549,6 @@ impl SupportSparseManifoldSaeCore {
             termination,
             max_iter,
             trust_radius,
-            tolerance,
             random_state,
         })
     }
@@ -610,7 +615,6 @@ impl SupportSparseManifoldSaeCore {
             )?,
             "max_iter": self.max_iter,
             "trust_radius": require_finite_for_json("trust_radius", self.trust_radius)?,
-            "tolerance": require_finite_for_json("tolerance", self.tolerance)?,
             "random_state": self.random_state,
         });
         let text = serde_json::to_string(&payload).map_err(|error| {
@@ -730,7 +734,7 @@ pub(crate) fn fit_support_sparse_manifold_sae(
         reconstruction_r2,
         migration,
     } = censused.fit;
-    let fixed = fixed_point_json(&outer.fixed_point);
+    let fixed = fixed_point_json(&outer.fixed_point, outer.inner_tolerance);
     let outer_certificate = serde_json::to_value(&outer.outer_certificate)
         .map_err(|error| py_value_error(error.to_string()))?;
     let certificates = serde_json::json!({
@@ -767,8 +771,6 @@ pub(crate) fn fit_support_sparse_manifold_sae(
         termination,
         max_iter: request.max_iter,
         trust_radius: request.trust_radius,
-        // The tolerance the fit certified to, re-used for out-of-sample latents.
-        tolerance: outer.inner_tolerance,
         random_state: request.random_state,
     };
     Ok(Py::new(py, model)?.into_any())
