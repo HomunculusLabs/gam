@@ -5282,6 +5282,56 @@ fn survival_flex_fifth_contraction_matches_differenced_fourth_2893() {
     }
 }
 
+/// #932 row 64: `flex_production_fourth_contraction_matches_scalar_fd_witness` checks the
+/// production fourth contraction against a difference of the third only along g/h/w, because
+/// q0, q1 and qd1 cannot be moved through block states one axis at a time. Without a time
+/// wiggle the primary map is linear, so moving β along `d` moves the primaries along `J d`,
+/// and `J d` carries q-axis components. This checks
+/// `row_flex_primary_fourth_contracted_exact(u, J d)` against a Ridders-certified central
+/// difference of `row_flex_primary_third_contracted_exact(u)` along `d`, at nonzero
+/// score-warp coefficients, on three rows. It fails if the image of `d` leaves the q axes
+/// still, so it cannot pass on the g/h/w components alone.
+#[test]
+fn survival_flex_fourth_contraction_matches_differenced_third_along_q_axes_932() {
+    let family = make_flex_no_wiggle_test_family(40);
+    let beta = flex_no_wiggle_beta(&family);
+    let states = flex_no_wiggle_states_at_beta(&family, &beta);
+    assert!(family.effective_flex_active(&states).unwrap());
+    let primary = flex_primary_slices(&family);
+    let slices = block_slices(&family, &states);
+    let direction = Array1::from_shape_fn(beta.len(), |i| ((i * 5 + 2) % 7) as f64 / 7.0 - 0.4);
+    let u = Array1::from_shape_fn(primary.total, |i| ((i * 7 + 3) % 11) as f64 / 11.0 - 0.45);
+    for row in [0usize, 7, 19] {
+        let q_geom = family.row_dynamic_q_geometry(row, &states).expect("q geometry");
+        let image = family
+            .row_primary_direction_from_flat_dynamic_with_q_geometry(
+                row, &states, &slices, &q_geom, &direction,
+            )
+            .expect("primary image of the direction");
+        let q_mass = image[primary.q0].abs() + image[primary.q1].abs() + image[primary.qd1].abs();
+        assert!(
+            q_mass > 1e-6,
+            "row {row}: the direction's primary image must move q0, q1 or qd1 (|image_q| = {q_mass:.3e})"
+        );
+        let analytic = family
+            .row_flex_primary_fourth_contracted_exact(row, &states, &u, &image)
+            .expect("fourth contraction");
+        assert!(
+            analytic.iter().any(|value| value.abs() > 1e-8),
+            "row {row}: the fourth contraction must be nonzero on this fixture"
+        );
+        assert_matches_ridders_2893(&format!("row {row}"), &analytic, &|t| {
+            family
+                .row_flex_primary_third_contracted_exact(
+                    row,
+                    &flex_no_wiggle_states_at_beta(&family, &(&beta + &(&direction * t))),
+                    &u,
+                )
+                .expect("third contraction")
+        });
+    }
+}
+
 /// gam#2893: the flex no-wiggle joint third information derivative `D³H[u, v, e_a]`, served
 /// by the Jeffreys hook, matches a Ridders-certified central difference of `D²H[u, v]` along
 /// every coefficient axis.
