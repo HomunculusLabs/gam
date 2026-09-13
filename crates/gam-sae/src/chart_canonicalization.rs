@@ -1913,8 +1913,7 @@ impl FreePatchFlowBasis {
         let mut inv_half = [0.0_f64; 2];
         for axis in 0..2 {
             let span = hi[axis] - lo[axis];
-            let scale = lo[axis].abs().max(hi[axis].abs()).max(1.0);
-            if !(span.is_finite() && span > 1.0e-12 * scale) {
+            if !(span > 0.0 && (2.0 / span).is_finite()) {
                 return Err(format!(
                     "FreePatchFlowBasis: patch axis {axis} has collapsed extent [{}, {}]",
                     lo[axis], hi[axis]
@@ -2128,6 +2127,21 @@ pub fn patch_isometry_flow_reparameterization(
             hi[axis] = hi[axis].max(t);
         }
     }
+    // The decoder-transport audit grid samples `axis_nodes` abscissae
+    // `lo + (hi − lo)·i/(axis_nodes − 1)` per axis. Each is formed with four rounded
+    // operations (span, product, quotient, sum), so it lies within
+    // `γ_4·(|lo| + |hi|)` of its exact value, while consecutive exact nodes sit
+    // `(hi − lo)/(axis_nodes − 1)` apart. An axis narrower than
+    // `2·(axis_nodes − 1)·γ_4·(|lo| + |hi|)` cannot place distinct audit nodes.
+    let axis_nodes = PATCH_TRANSPORT_MIN_NODES_PER_AXIS.max(3 * (m as f64).sqrt().ceil() as usize);
+    let node_growth = gam_linalg::roundoff::accumulation_growth(4);
+    for axis in 0..2 {
+        let resolution =
+            2.0 * (axis_nodes - 1) as f64 * node_growth * (lo[axis].abs() + hi[axis].abs());
+        if !(hi[axis] - lo[axis] > resolution) {
+            return Ok(None);
+        }
+    }
 
     // ── Fitted pullback metric, normalized against the flat reference I ──────
     let Some((g_rows, g_bar)) = extract_pullback_metric_d2(
@@ -2177,7 +2191,6 @@ pub fn patch_isometry_flow_reparameterization(
     }
 
     // ── Decoder transport on the audit grid spanning the patch box ──────────
-    let axis_nodes = PATCH_TRANSPORT_MIN_NODES_PER_AXIS.max(3 * (m as f64).sqrt().ceil() as usize);
     let grid_rows = axis_nodes * axis_nodes;
     let mut grid = Array2::<f64>::zeros((grid_rows, 2));
     let mut new_grid = Array2::<f64>::zeros((grid_rows, 2));
