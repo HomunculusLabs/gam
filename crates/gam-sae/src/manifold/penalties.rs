@@ -2292,14 +2292,37 @@ impl SaeManifoldTerm {
         // Whether each atom's block of `v` holds a nonzero entry, filled on first
         // use by the edge loop below.
         let mut live_blocks: Vec<Option<bool>> = vec![None; self.k_atoms()];
+        // Whether each atom's whole decoder block of `v` holds a nonzero entry.
+        let mut live_atoms: Vec<Option<bool>> = vec![None; self.k_atoms()];
         for plan in plans {
             // (1) the overlap-space couplings, contracted through the carriers.
             let ne = plan.carriers.len();
             if ne > 0 {
-                let dots: Vec<f64> = plan
-                    .carriers
-                    .iter()
-                    .map(|runs| {
+                // #2731 — a carrier none of whose atom blocks is live in `v` has dot
+                // `Σ value·(±0) = ±0`, so each of its coupling terms is `±0`. Adding
+                // `±0` never changes a nonzero accumulator, and a weight that ends at
+                // `±0` is skipped by the zero test below either way, so contracting
+                // only the live carriers, in the same order, is bit-identical. A border
+                // probe of the dense exact-A build lifts one border coordinate into one
+                // atom block, so it pays for the carriers incident to that atom instead
+                // of every realized edge's `2·M·p` run. Job 578261's dense perf window
+                // read this function at 21.33 % of self time.
+                let mut live_carriers: Vec<usize> = Vec::with_capacity(ne);
+                let mut dots: Vec<f64> = Vec::with_capacity(ne);
+                for (b, runs) in plan.carriers.iter().enumerate() {
+                    let live = runs.iter().any(|run| {
+                        let atom = run.0;
+                        *live_atoms[atom].get_or_insert_with(|| {
+                            let base = offsets[atom];
+                            let width = self.atoms[atom].basis_size() * p;
+                            (base..base + width).any(|idx| v[idx] != 0.0)
+                        })
+                    });
+                    if !live {
+                        continue;
+                    }
+                    live_carriers.push(b);
+                    dots.push(
                         runs.iter()
                             .map(|(atom, values)| {
                                 let base = offsets[*atom];
@@ -2309,23 +2332,23 @@ impl SaeManifoldTerm {
                                     .map(|(idx, value)| value * v[base + idx])
                                     .sum::<f64>()
                             })
-                            .sum::<f64>()
-                    })
-                    .collect();
+                            .sum::<f64>(),
+                    );
+                }
                 for a in 0..ne {
                     let mut exact_weight = 0.0_f64;
                     let mut majorized_weight = 0.0_f64;
-                    for b in 0..ne {
+                    for (&b, &dot) in live_carriers.iter().zip(dots.iter()) {
                         exact_weight += plan
                             .coupling_exact
                             .as_ref()
                             .map_or(0.0, |coupling| coupling[[a, b]])
-                            * dots[b];
+                            * dot;
                         majorized_weight += plan
                             .coupling_majorizer
                             .as_ref()
                             .map_or(0.0, |coupling| coupling[[a, b]])
-                            * dots[b];
+                            * dot;
                     }
                     if exact_weight == 0.0 && majorized_weight == 0.0 {
                         continue;
