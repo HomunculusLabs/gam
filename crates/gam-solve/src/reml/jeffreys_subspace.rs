@@ -1868,9 +1868,11 @@ impl JointJeffreysPlan {
     /// equivalent, the scale at which "a direction carrying less than a single
     /// observation's worth of information is, by construction, not identified
     /// by the data and is the regime Firth exists to stabilise") or
-    /// `CONDITIONING_GATE_RELATIVE`-poor. It is expressed as
-    /// `conditioning_gate_weight == 1` so that one arithmetic authority decides
-    /// both the weight and the verdict; the ramp's lower branch returns exactly
+    /// `CONDITIONING_GATE_RELATIVE`-poor. It is expressed as the spectral gate
+    /// `spectral_gate_weight == 1`: the ramps that decide the weight, read before the
+    /// floor-collapse factor multiplies them (gam#2765). A collapsed log window turns the
+    /// term's contribution off, but it says nothing about whether the data determine a
+    /// direction, so it does not move this verdict. The ramp's lower branch returns exactly
     /// `1.0` by early return, so the comparison is exact rather than
     /// approximate, and the degenerate spectra (`λ_max ≤ 0`, non-finite
     /// `λ_min`) that the weight calls fully active are under-identified here
@@ -1882,7 +1884,7 @@ impl JointJeffreysPlan {
     /// how much of it is warranted needs [`Self::conditioning_gate_weight`]
     /// (gam#2612).
     pub fn is_under_identified(&self) -> bool {
-        self.reduced_dim != 0 && self.gate_weight == 1.0
+        self.reduced_dim != 0 && spectral_gate_weight(self.lambda_min, self.lambda_max) == 1.0
     }
 
     /// Whether the reduced information is SINGULAR at this plan's own numerical
