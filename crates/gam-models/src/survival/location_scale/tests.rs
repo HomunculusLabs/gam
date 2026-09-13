@@ -735,8 +735,15 @@ fn survival_location_scale_outer_link_shape_gradient_matches_finite_difference_s
         )
         .expect("shape-axis hyper layout")
     };
-    let specs = survival_outergradient_testspecs();
-    let rho = array![0.0];
+    // Every block carries a ridge. With the threshold and log-σ blocks unpenalized,
+    // job 582344 measured the base inner solve stalling after 20 cycles at residual
+    // 19.6 against a tolerance of 5e-6, so no gradient was ever compared.
+    let mut specs = survival_outergradient_testspecs();
+    for spec in specs.iter_mut().skip(1) {
+        spec.penalties = vec![PenaltyMatrix::Dense(Array2::eye(1))];
+        spec.initial_log_lambdas = array![0.0];
+    }
+    let rho = array![0.0, 0.0, 0.0];
     let options = crate::custom_family::BlockwiseFitOptions {
         use_remlobjective: true,
         compute_covariance: false,
