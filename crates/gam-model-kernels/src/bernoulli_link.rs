@@ -536,7 +536,7 @@ fn cauchit_natural_fifth(eta: f64) -> [f64; 2] {
 /// Fifth η-derivatives `(d⁵ log μ, d⁵ log(1 − μ))`, continuing each dedicated
 /// tail kernel one step. `None` for the parameterized links, whose generic
 /// inverse-link jet has no fifth derivative.
-fn bernoulli_natural_log_fifth_derivatives(
+pub fn bernoulli_natural_log_fifth_derivatives(
     eta: f64,
     link: &InverseLink,
 ) -> Result<Option<[f64; 2]>, EstimationError> {

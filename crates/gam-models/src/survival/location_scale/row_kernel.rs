@@ -5585,8 +5585,8 @@ impl SurvivalLocationScaleFamily {
 
     /// Whether every residual-distribution stack of this link has the closed
     /// form [`Self::exact_row_kernel_fifth_from_parts`] extends through the
-    /// fifth derivative. The links served by the generic pdf-jet dispatch have
-    /// no certified fifth pdf derivative.
+    /// fifth derivative. The parameterized links served by the generic pdf-jet
+    /// dispatch have no certified fifth pdf derivative.
     pub(crate) fn inverse_link_has_fifth_derivative_stacks(inverse_link: &InverseLink) -> bool {
         matches!(
             inverse_link,
@@ -5594,6 +5594,8 @@ impl SurvivalLocationScaleFamily {
                 StandardLink::Probit
                     | StandardLink::Logit
                     | StandardLink::CLogLog
+                    | StandardLink::LogLog
+                    | StandardLink::Cauchit
                     | StandardLink::Identity
             )
         )
@@ -5609,7 +5611,9 @@ impl SurvivalLocationScaleFamily {
     /// probit `ddddr = d⁵ log Φ(−u)`, `(log φ)⁽⁵⁾ = 0`; logit
     /// `ddddr = w(1 − 2μ)(1 − 12w)`, `(log φ)⁽⁵⁾ = −2w(1 − 2μ)(1 − 12w)`;
     /// cloglog `ddddr = e^{u − L}`, `(log f)⁽⁵⁾ = −e^{u − L}`; identity
-    /// `ddddr = 24/(1 − u)⁵`, `(log φ)⁽⁵⁾ = 0`. The guarded `log g` continues
+    /// `ddddr = 24/(1 − u)⁵`, `(log φ)⁽⁵⁾ = 0`; loglog and cauchit
+    /// `ddddr = −(log(1 − F))⁽⁵⁾` from the Bernoulli tail kernels, with
+    /// `(log f)⁽⁵⁾ = e^{−u}` and `−48u(u⁴ − 10u² + 5)/(1 + u²)⁵` (#2903). The guarded `log g` continues
     /// `ln` above the guard (`24/g⁵`) and a quartic below it (`0`).
     pub(crate) fn exact_row_kernel_fifth_from_parts(
         inverse_link: &InverseLink,
@@ -5648,6 +5652,37 @@ impl SurvivalLocationScaleFamily {
                     24.0 * inv.powi(5)
                 };
                 (fifth(u0), fifth(u1), 0.0)
+            }
+            InverseLink::Standard(link @ (StandardLink::LogLog | StandardLink::Cauchit)) => {
+                // `(−log S)⁽⁵⁾ = −(log(1 − F))⁽⁵⁾`: the survival tower of the
+                // Bernoulli tail kernel, continued one step.
+                let neglog_survival_fifth = |eta: f64| {
+                    match gam_model_kernels::bernoulli_link::bernoulli_natural_log_fifth_derivatives(
+                        eta,
+                        inverse_link,
+                    ) {
+                        Ok(Some([_, log_one_minus_mu])) => Some(-log_one_minus_mu),
+                        _ => None,
+                    }
+                };
+                let d5logphi1 = if matches!(link, StandardLink::LogLog) {
+                    // log f = −u − e^{−u}.
+                    (-u1).exp()
+                } else {
+                    // log f = −ln π − ln(1 + u²), written in the tail-stable ratios
+                    // u/(1 + u²) and 1/(1 + u²).
+                    let (ratio, inv) = if u1.abs() <= 1.0 {
+                        let inv = (1.0 + u1 * u1).recip();
+                        (u1 * inv, inv)
+                    } else {
+                        let r = u1.recip();
+                        ((u1 + r).recip(), r * r / (1.0 + r * r))
+                    };
+                    let ratio_sq = ratio * ratio;
+                    let inv_sq = inv * inv;
+                    -48.0 * ratio * (ratio_sq * ratio_sq - 10.0 * ratio_sq * inv_sq + 5.0 * inv_sq * inv_sq)
+                };
+                (neglog_survival_fifth(u0)?, neglog_survival_fifth(u1)?, d5logphi1)
             }
             _ => return None,
         };

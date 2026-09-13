@@ -1312,8 +1312,8 @@ impl CustomFamily for SurvivalLocationScaleFamily {
     /// The fifth likelihood derivative lowers through `sls_row_program`'s
     /// three-seed directional surface wherever every residual-distribution
     /// stack has a closed-form fifth derivative. The link-wiggle runtime
-    /// lowering carries no fifth order, and neither do the links served by the
-    /// generic pdf-jet dispatch.
+    /// lowering carries no fifth order, and neither do the parameterized links
+    /// served by the generic pdf-jet dispatch.
     fn joint_jeffreys_information_third_directional_available(&self) -> bool {
         self.row_kernel_directional_supported()
             && Self::inverse_link_has_fifth_derivative_stacks(&self.inverse_link)

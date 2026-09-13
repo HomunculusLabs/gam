@@ -2000,7 +2000,9 @@ fn survival_exact_newton_test_familywith_inverse_link(
 /// every residual distribution with closed-form fifth stacks, a five-point
 /// difference of `I''[u, v]` along each coefficient axis reproduces
 /// `{I'''[u, v, e_a]}` built from the row program's fifth-order contraction,
-/// and the family declares that channel available.
+/// and the family declares that channel available. LogLog and Cauchit read
+/// their fourth-order stacks from the generic pdf-jet dispatch and their fifth
+/// from the Bernoulli tail kernels (#2903).
 #[test]
 fn survival_ls_third_directional_all_axes_matches_difference_of_second_2677() {
     use crate::custom_family::CustomFamily;
@@ -2010,13 +2012,13 @@ fn survival_ls_third_directional_all_axes_matches_difference_of_second_2677() {
     let u = array![0.7, -0.5, 0.9];
     let v = array![-0.4, 1.1, 0.6];
     for distribution in [
-        ResidualDistribution::Gaussian,
-        ResidualDistribution::Gumbel,
-        ResidualDistribution::Logistic,
+        residual_distribution_inverse_link(ResidualDistribution::Gaussian),
+        residual_distribution_inverse_link(ResidualDistribution::Gumbel),
+        residual_distribution_inverse_link(ResidualDistribution::Logistic),
+        InverseLink::Standard(StandardLink::LogLog),
+        InverseLink::Standard(StandardLink::Cauchit),
     ] {
-        let family = survival_exact_newton_test_familywith_inverse_link(
-            residual_distribution_inverse_link(distribution),
-        );
+        let family = survival_exact_newton_test_familywith_inverse_link(distribution.clone());
         assert!(
             family.joint_jeffreys_information_third_directional_available(),
             "{distribution:?}: a closed-form link must declare the third information derivative"
