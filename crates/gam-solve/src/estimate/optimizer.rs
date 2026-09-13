@@ -1383,7 +1383,8 @@ where
             // Score a small set of analytic, data-derived starts before the outer
             // solve. These are initial conditions only: the optimizer must converge
             // from the selected start, and no seed is promoted directly to a fit.
-            let run_gaussian_anchored_prepass = gaussian_risk && weight_log_geom_mean.abs() > 1e-12;
+            // `rho_weight_anchor` is exactly 0 for unit weights and fixed dispersion (#2469).
+            let run_gaussian_anchored_prepass = gaussian_risk && weight_log_geom_mean != 0.0;
             // A caller-supplied rho seed (`init_rhos`/`heuristic_lambdas`, now in
             // rho-space) is an explicit warm-start installed via `with_initial_rho`
             // above. It still ANCHORS the initial.sp prepass below rather than
@@ -1562,7 +1563,9 @@ where
                 let seed_moved = refined
                     .iter()
                     .zip(base.iter())
-                    .any(|(&a, &b)| (a - b).abs() > 1e-12);
+                    // `refined` is `base` bit for bit unless a strictly cheaper candidate
+                    // replaced it, so moved means differs (#2469).
+                    .any(|(&a, &b)| a != b);
                 // For a caller-seeded fit, adopt the analytic result only when it
                 // strictly moved the warm seed (found a strictly-cheaper basin); an
                 // unmoved result leaves the warm start exactly as installed above, so
