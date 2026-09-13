@@ -909,10 +909,6 @@ impl HyperCoordDrift {
         self.operator.is_some() || self.block_local.is_some()
     }
 
-    pub fn operator_ref(&self) -> Option<&dyn HyperOperator> {
-        self.operator.as_ref().map(Arc::as_ref)
-    }
-
     pub fn materialize(&self) -> Array2<f64> {
         let p = self.infer_dim();
         if p == 0 {

@@ -8975,5 +8975,13 @@
     ],
     "reason": "SPEC rule 23 (#2469). SpdManifold::sectional_curvature refused its plane when the Gram determinant under the affine-invariant metric was at most an absolute 1e-14, which is scale-dependent. The Gram entries now come from the whitened tangents the commutator already uses, and the plane is refused only inside the determinant rounding band gamma_{n^2+3}(uu vv + uv^2). That left the private SpdManifold::affine_inner with test callers only; it is deleted and the two test modules each keep a local tr(P^-1 U P^-1 V) helper.",
     "evidence": "At the base, git grep -n -w affine_inner finds 7 occurrences, all in crates/gam-geometry/src/manifolds/spd.rs: the declaration, three calls in sectional_curvature, and three calls in the parallel_transport_tests and christoffel_tests modules. The candidate file has no production caller and no declaration."
+  },
+  {
+    "base": "58f2ca68888485cde3d39ecdd31ba27dfd55df86",
+    "items": [
+      "crates/gam-problem/src/lib.rs:fn:operator_ref"
+    ],
+    "reason": "#2899 slop: HyperCoordDrift::operator_ref lost its one production caller when 3c870be95 deleted dense.rs's stochastic cross-trace block. It only returned the public operator field through Arc::as_ref, and the one remaining caller, the BMS joint-Hessian HVP correction unit test that gam-models includes, now reads coord.drift.operator.as_deref() directly.",
+    "evidence": "At the base, git grep -n -w operator_ref over crates, src, tests, examples, bench and python finds only its declaration at crates/gam-problem/src/lib.rs:912 and the call at tests/src_modules/optimization/families_bms_joint_hessian_hvp_correction_tests.rs:2406, included by crates/gam-models/src/bms/mod.rs. HyperCoordDrift.operator is a pub field of type Option<Arc<dyn HyperOperator>>, so as_deref() yields the same Option<&dyn HyperOperator>."
   }
 ]

@@ -3854,5 +3854,13 @@
     },
     "reason": "#2899 slop: the uncalled FrozenAnalyticPenaltyOp::penalty accessor is deleted.",
     "evidence": "public_functions() counts the pub fn penalty declaration at registry.rs:336. Pool job 627786 (r18b.cargo.out) reported it never used once FrozenAnalyticPenaltyOp was crate-private, and git grep finds no caller."
+  },
+  {
+    "base": "58f2ca68888485cde3d39ecdd31ba27dfd55df86",
+    "removed": {
+      "crates/gam-problem/src/lib.rs::operator_ref": 1
+    },
+    "reason": "#2899 slop: the uncalled accessor HyperCoordDrift::operator_ref is deleted; its one test caller reads the public operator field directly.",
+    "evidence": "public_functions() counts the pub fn operator_ref declaration at gam-problem/src/lib.rs:912. At the base, git grep -n -w operator_ref finds only that declaration and one call in a gam-models unit test, rewritten to coord.drift.operator.as_deref()."
   }
 ]

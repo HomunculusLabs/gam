@@ -2403,7 +2403,7 @@ fn bernoulli_batched_outer_gradient_matches_hypercoord_path_for_rho_and_psi() {
             );
             manual_trace_h_inv_hdot[idx] += part_block_local;
         }
-        if let Some(operator) = coord.drift.operator_ref() {
+        if let Some(operator) = coord.drift.operator.as_deref() {
             part_operator = spectral.trace_logdet_operator(operator);
             manual_trace_h_inv_hdot[idx] += part_operator;
         }
