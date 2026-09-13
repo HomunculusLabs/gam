@@ -3035,8 +3035,10 @@ pub fn rational_reduced_schur_log_det<B: BatchedBlockSolver + Sync>(
     // is a sound lower bracket for the quadrature window sizing. The window is
     // padded two decades below `λ_min` inside `RationalLogdetPlan::build`, so a
     // conservative (too-small) floor only widens the resolved range, never biases
-    // the estimate.
-    let lambda_min = (SPECTRAL_DEFLATION_REL_FLOOR * lambda_max).max(f64::MIN_POSITIVE);
+    // the estimate. The bracket certifies `λ_max > 0`, so the floor is positive
+    // unless it underflows, and then the plan refuses the bracket rather than
+    // sizing a window from a picked subnormal (#2469).
+    let lambda_min = SPECTRAL_DEFLATION_REL_FLOOR * lambda_max;
     let plan = RationalLogdetPlan::build(k, num_probes, seed, lambda_min, lambda_max, rel_tol)?;
     // One resident operator; the plan's shift ladder reuses it across every
     // shifted solve. The probes fan across rayon workers (in `evaluate`), and
@@ -3133,7 +3135,7 @@ pub(crate) fn rational_reduced_schur_plan_derived<B: BatchedBlockSolver + Sync>(
              reduced Schur dim {k} within its {k}-step span at relative residual {rel_tol:.3e}"
         )
     })?;
-    let lambda_min = (SPECTRAL_DEFLATION_REL_FLOOR * lambda_max).max(f64::MIN_POSITIVE);
+    let lambda_min = SPECTRAL_DEFLATION_REL_FLOOR * lambda_max;
     let base_plan = RationalLogdetPlan::build(
         k, num_probes, seed, lambda_min, lambda_max, rel_tol,
     )
