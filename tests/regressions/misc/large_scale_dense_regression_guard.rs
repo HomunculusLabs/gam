@@ -151,7 +151,6 @@ fn large_scale_dense_logit_regression_guard() {
             nullspace_dims: vec![2, 2],
             linear_constraints: None,
             firth_bias_reduction: false,
-            adaptive_regularization: None,
             rho_prior: Default::default(),
             kronecker_penalty_system: None,
             kronecker_factored: None,

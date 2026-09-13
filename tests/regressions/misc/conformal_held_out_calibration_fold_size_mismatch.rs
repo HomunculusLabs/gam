@@ -92,7 +92,6 @@ fn fit_options() -> FitOptions {
         nullspace_dims: vec![0],
         linear_constraints: None,
         firth_bias_reduction: false,
-        adaptive_regularization: None,
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
@@ -170,7 +169,6 @@ fn held_out_calibration_fold_of_different_size_is_accepted_and_covers() {
     let mut options = PredictUncertaintyOptions {
         confidence_level: nominal,
         includeobservation_interval: false,
-        apply_bias_correction: false,
         edgeworth_one_sided: false,
         boundary_correction: false,
         ..Default::default()
