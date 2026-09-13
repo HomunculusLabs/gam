@@ -4127,7 +4127,7 @@ fn lower_bound_outward_axes_mark_separation_stationarity() {
 fn outer_config_default() {
     let cfg = OuterConfig::default();
     assert_eq!(cfg.tolerance, 1e-5);
-    assert_eq!(cfg.max_iter, 200);
+    assert_eq!(cfg.max_iter, UNBOUNDED_OUTER_ITERATIONS);
     assert!(cfg.model_domain_bounds.is_none());
 }
 
