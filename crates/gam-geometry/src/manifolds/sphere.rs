@@ -39,6 +39,15 @@ impl SphereManifold {
         }
         Ok(())
     }
+
+    /// Whether the geodesic `cos θ·p + (sin θ/θ)·ξ` equals its small-angle form
+    /// `p + ξ` to rounding. The corrections are `θ²/2` in `cos θ` and `θ²/6` in
+    /// `sin θ/θ`, so both round to within `u = ε/2` of 1 once `θ² ≤ ε`.
+    /// `exp_map` and `exp_map_vjp` branch on this one predicate, so the value and
+    /// its adjoint switch at the same θ.
+    fn geodesic_is_small_angle(theta: f64) -> bool {
+        theta * theta <= f64::EPSILON
+    }
 }
 
 impl RiemannianManifold for SphereManifold {
@@ -117,10 +126,10 @@ impl RiemannianManifold for SphereManifold {
         let c = dot(point, tangent_vec);
         let xi = &tangent_vec.to_owned() - &(point.to_owned() * c);
         let theta = norm(xi.view());
-        if theta < 1.0e-10 {
-            // Numerically-stable evaluation of the geodesic below as θ→0: both
-            // cos(θ)=1 and sin(θ)/θ=1 hold to full f64 precision (the corrections
-            // are O(θ²)≈1e-20), so the map degenerates to `p + ξ`. This keeps
+        if Self::geodesic_is_small_angle(theta) {
+            // Numerically-stable evaluation of the geodesic below as θ→0: once
+            // θ² ≤ ε, cos(θ) and sin(θ)/θ both round to within u of 1 (see
+            // `geodesic_is_small_angle`), so the map degenerates to `p + ξ`. This keeps
             // exp_map a SINGLE geodesic map — bit-identical and C¹ across the
             // branch boundary, with a matching adjoint in `exp_map_vjp` — rather
             // than switching to a normalized retraction `normalize(p+ξ)`, a
@@ -159,16 +168,28 @@ impl RiemannianManifold for SphereManifold {
             chord_sq += d * d;
         }
         let theta = 2.0 * (0.5 * chord_sq.sqrt()).min(1.0).asin();
-        if theta < 1.0e-10 {
+        if theta == 0.0 {
             return Ok(Array1::<f64>::zeros(m));
         }
         let mut u = &p_to - &(p_from.to_owned() * c);
         let u_nrm = norm(u.view());
-        if u_nrm < 1.0e-10 {
-            // theta ≈ π with a vanishing tangent direction means p_to is the
-            // antipode of p_from. The logarithm there is multivalued — every
-            // unit u ⟂ p_from satisfies Exp_{p_from}(πu) = −p_from — so there
-            // is no single correct answer to return. Surface it rather than
+        // `u = p_to − (p_from·p_to)·p_from` is an m-term inner product and one
+        // subtraction per coordinate, so its rounding is at most
+        // `γ_{m+2}·(‖p_to‖₁ + |c|·‖p_from‖₁)` in ℓ1, which bounds it in ℓ2 too.
+        let p_from_l1: f64 = p_from.iter().map(|v| v.abs()).sum();
+        let p_to_l1: f64 = p_to.iter().map(|v| v.abs()).sum();
+        let resolution = gam_linalg::roundoff::accumulation_growth(m + 2)
+            * (p_to_l1 + c.abs() * p_from_l1);
+        if !(u_nrm > resolution) {
+            if c > 0.0 {
+                // p_to coincides with p_from to rounding, so the logarithm is
+                // zero within that band.
+                return Ok(Array1::<f64>::zeros(m));
+            }
+            // An unresolvable tangent direction opposite p_from means p_to is
+            // its antipode. The logarithm there is multivalued — every unit
+            // u ⟂ p_from satisfies Exp_{p_from}(πu) = −p_from — so there is no
+            // single correct answer to return. Surface it rather than
             // fabricating an arbitrary basis direction (which was also
             // discontinuous across the cut locus).
             return Err(GeometryError::Singular(
@@ -195,7 +216,14 @@ impl RiemannianManifold for SphereManifold {
         self.require_unit(from)?;
         self.require_unit(to)?;
         let denom = 1.0 + dot(from, to);
-        if denom.abs() < 1.0e-10 {
+        // `1 + from·to` accumulates an m-term inner product and one addition, so
+        // it rounds within `γ_{m+1}·(1 + Σ|from_i·to_i|)`. A denominator inside
+        // that band leaves the endpoints antipodal to rounding.
+        let mut absolute_terms = 1.0_f64;
+        for i in 0..m {
+            absolute_terms += (from[i] * to[i]).abs();
+        }
+        if !(denom.abs() > gam_linalg::roundoff::accumulation_growth(m + 1) * absolute_terms) {
             // from ≈ −to: parallel transport across the cut locus depends on
             // which geodesic is chosen (transporting along the great circle
             // through e₂ versus e₃ gives different results), so with only the
@@ -334,8 +362,9 @@ impl RiemannianManifold for SphereManifold {
         //   grad_p = (1 - c) g - v (p·g).
         // These are exactly the theta -> 0 limit of the general branch below, so
         // the VJP is continuous at the switch. At p = g = e1, xi = 0 they give
-        // grad_v = (I - p p^T) g = 0 — the correct radial derivative.
-        if theta < 1.0e-10 {
+        // grad_v = (I - p p^T) g = 0 — the correct radial derivative. The switch
+        // is `exp_map`'s own, `geodesic_is_small_angle`.
+        if Self::geodesic_is_small_angle(theta) {
             let p_dot_g = dot(p, g);
             let grad_v = &g.to_owned() - &(p.to_owned() * p_dot_g);
             let grad_p = &(&g.to_owned() * (1.0 - c)) - &(v.to_owned() * p_dot_g);
@@ -441,12 +470,14 @@ pub fn response_sphere_log_map(
     let dots_mat = crate::manifold::fast_ab_rows_multi_gpu(y.view(), base_col.view());
     let dots = dots_mat.column(0).to_owned();
     let mut out = Array2::<f64>::zeros((n, d));
+    let base_l1: f64 = b_mat.row(0).iter().map(|v| v.abs()).sum();
+    // `u = q − (p·q)·p` is a d-term inner product and one subtraction per
+    // coordinate, so its rounding is at most `γ_{d+2}·(‖q‖₁ + |p·q|·‖p‖₁)` in
+    // ℓ1, which bounds it in ℓ2 too.
+    let growth = gam_linalg::roundoff::accumulation_growth(d + 2);
     for row in 0..n {
         let mut dot = dots[row];
         dot = dot.clamp(-1.0, 1.0);
-        if dot <= -1.0 + 1.0e-12 {
-            return Err("spherical log map is undefined at antipodal points".to_string());
-        }
         // Geodesic angle via theta = atan2(|u|, p·q) with u = q − (p·q)p, the
         // component of q orthogonal to p (|u| = sin theta). For nearby points
         // p·q rounds to exactly 1.0 in f64 and acos(p·q) collapses a genuine
@@ -454,12 +485,20 @@ pub fn response_sphere_log_map(
         // no near-1 subtraction, so atan2(|u|, p·q) ≈ |u| stays accurate and
         // the tangent norm equals the geodesic distance as documented.
         let mut s_sq = 0.0_f64;
+        let mut row_l1 = 0.0_f64;
         for col in 0..d {
             let uc = y[[row, col]] - dot * b_mat[[0, col]];
             s_sq += uc * uc;
+            row_l1 += y[[row, col]].abs();
         }
         let s = s_sq.sqrt();
-        if s == 0.0 {
+        if !(s > growth * (row_l1 + dot.abs() * base_l1)) {
+            // The tangent direction is inside its own rounding band. Opposite
+            // `base` that is the antipode, where the log map has no direction;
+            // beside `base` the row coincides with it and its log is zero.
+            if dot < 0.0 {
+                return Err("spherical log map is undefined at antipodal points".to_string());
+            }
             for col in 0..d {
                 out[[row, col]] = 0.0;
             }
