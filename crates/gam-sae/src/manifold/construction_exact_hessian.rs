@@ -2508,6 +2508,20 @@ impl SaeManifoldTerm {
                     SaeLocalRowVar::Logit { atom } => Some(atom),
                     SaeLocalRowVar::Coord { .. } => None,
                 };
+                // The exact operator's entropy block moves with the logit through the
+                // dense entropy third derivative; one O(K) setup per logit variable.
+                let softmax_entropy_derivative = match logit_w {
+                    Some(atom_w) if exact_a && entropy_scale != 0.0 => Some(
+                        SoftmaxEntropyDerivative::new(
+                            a_soft,
+                            atom_w,
+                            m_log_mean,
+                            entropy_scale,
+                            inv_tau,
+                        ),
+                    ),
+                    _ => None,
+                };
                 let mut gamma = 0.0_f64;
                 let mut dh_mat = if !defl_live {
                     Array2::<f64>::zeros((0, 0))
@@ -2584,7 +2598,16 @@ impl SaeManifoldTerm {
                             SaeLocalRowVar::Logit { atom: atom_b },
                         ) = (logit_w, jets.vars[a], jets.vars[b])
                         {
-                            if atom_a == atom_b {
+                            if exact_a {
+                                // #2333 — `A` carries the exact dense entropy Hessian on
+                                // the logit block: `B`'s Gershgorin majorizer `D̃` plus the
+                                // ΔC remainder `h_entropy − D̃` on the diagonal and
+                                // `h_entropy` off it. Its logit derivative is the dense
+                                // entropy third derivative, off-diagonal pairs included.
+                                if let Some(derivative) = softmax_entropy_derivative.as_ref() {
+                                    dh += w_row * derivative.entry(atom_a, atom_b).1;
+                                }
+                            } else if atom_a == atom_b {
                                 dh += w_row
                                     * active_softmax_majorizer_logit_derivative_entry(
                                         a_soft,

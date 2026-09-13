@@ -7587,6 +7587,14 @@ impl SaeManifoldTerm {
                         }
                         _ => None,
                     };
+                // The exact operator's entropy block moves with the logit through the
+                // dense entropy third derivative; one O(K) setup per logit variable.
+                let softmax_entropy_derivative = match softmax_d_dw {
+                    Some((a_soft, mm, scale, inv_tau, atom_w)) if exact_a => Some(
+                        SoftmaxEntropyDerivative::new(a_soft, atom_w, mm, scale, inv_tau),
+                    ),
+                    _ => None,
+                };
                 // t–t block: reuse the dense contraction. On a deflated row the raw
                 // per-slot derivative is retained as a matrix so the Daleckii–Krein
                 // correction can be applied to it after the loop; on a PD row the
@@ -7644,24 +7652,20 @@ impl SaeManifoldTerm {
                             SaeLocalRowVar::Logit { atom: atom_b },
                         ) = (softmax_d_dw, jets.vars[a], jets.vars[b])
                         {
-                            if atom_a == atom_b {
+                            if exact_a {
+                                // #2333 — `A` carries the exact dense entropy Hessian on
+                                // the logit block: `B`'s Gershgorin majorizer `D̃` plus the
+                                // ΔC remainder `h_entropy − D̃` on the diagonal and
+                                // `h_entropy` off it. Its logit derivative is the dense
+                                // entropy third derivative, off-diagonal pairs included.
+                                if let Some(derivative) = softmax_entropy_derivative.as_ref() {
+                                    dh += w_row_prior * derivative.entry(atom_a, atom_b).1;
+                                }
+                            } else if atom_a == atom_b {
                                 dh += w_row_prior
                                     * active_softmax_majorizer_logit_derivative_entry(
                                         a_soft, atom_a, _atom_w, mm, scale, inv_tau,
                                     );
-                            }
-                            // #2080 — the softmax row's logit Jacobian has the exact dense
-                            // curvature `c·(diag z − zzᵀ)/τ²` in both `B` and `A`.
-                            if let Some(count) = simplex_count {
-                                if !self.assignment.logit_is_fixed(atom_a)
-                                    && !self.assignment.logit_is_fixed(atom_b)
-                                    && !self.assignment.logit_is_fixed(_atom_w)
-                                {
-                                    dh += w_row_prior
-                                        * crate::assignment::simplex_gate_logit_jacobian_third(
-                                            a_soft, atom_a, atom_b, _atom_w, count, inv_tau,
-                                        );
-                                }
                             }
                         }
                         if a == b {
