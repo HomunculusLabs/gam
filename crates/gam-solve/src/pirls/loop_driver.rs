@@ -1565,7 +1565,10 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
         // The min-norm fallback (`feasible_point_for_linear_constraints`) is only
         // used for a NON-homogeneous cone (`b ≠ 0`), where it returns a genuine
         // interior-of-the-offset-polyhedron point. For a HOMOGENEOUS shape cone
-        // (`b ≈ 0` — the convex/concave second-difference rows) that function
+        // (the convex/concave second-difference rows, where every row is active at
+        // `β = 0` under the solver's own activity tolerance
+        // `|b_i| ≤ ACTIVE_SET_PRIMAL_FEASIBILITY_TOL·‖a_i‖`, in the geometric units
+        // the active face uses, not an absolute band on raw `b`; #2469) that function
         // returns the minimum-norm feasible point `β = 0`, which is the cone
         // *vertex*: the exact all-rows-tight degenerate seed #873 is about. Taking
         // it would silently reintroduce the #873 pathology whenever the strict
@@ -1574,7 +1577,10 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
         // violates at most *some* rows (a lower-dimensional, non-degenerate face the
         // inner active-set QP can recover from), strictly better than the vertex
         // where *every* row is simultaneously tight.
-        let cone_is_homogeneous = constraints.b.iter().all(|v| v.abs() <= 1e-14);
+        let cone_is_homogeneous = (0..constraints.b.len()).all(|row| {
+            let norm = constraints.a.row(row).dot(&constraints.a.row(row)).sqrt();
+            constraints.b[row].abs() <= crate::active_set::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL * norm
+        });
         if min_scaled_slack < active_set::interior_seed_margin() {
             let projected =
                 active_set::project_point_strictly_into_feasible_cone(&initial_beta, constraints)
