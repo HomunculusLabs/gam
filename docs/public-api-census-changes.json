@@ -3948,5 +3948,14 @@
     },
     "reason": "#2899 public API sweep of gam-models (prune-api-d): OuterRowIter::len and is_empty, which no caller reads, are deleted as OuterRowIter narrows to the crate.",
     "evidence": "At the base they are the file's only len and is_empty declarations, and every production caller of outer_row_indices takes .to_vec(). The removed map was derived by reading the change, not by running the script. Receipt: guarded job 651939 (agsmall, lane sw0f, node acn77) at 5582f1706 with\nHEAD==PIN, dirty=0 and the 13 files of the d1, n12c and s35 slices overlaid:\ncargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0\n(130 s) and cargo check -p gam-pyffi --lib exited 0 (86 s), with no error line.\nLog /scratch.global/sauer354/pool/prune-api-d/combo17b.651939.log. The first\npass on this overlay (649104) stopped at one unused BlockSparseFit import in\ncoordinate.rs, which the d1 slice removes."
+  },
+  {
+    "removed": {
+      "crates/gam-math/src/jet_scalar.rs::g": 1,
+      "crates/gam-math/src/jet_scalar.rs::into_channels": 1
+    },
+    "reason": "#2899, SPEC rule 25. gam_math::jet_scalar::Order1 (value+gradient JetScalar) had no production constructor in any crate. It is removed with its three impls, the five gam-math unit tests that only exercised it, and the gam-models dispersion_family test helpers (order1_ln_gamma, dispersion_nb_disp_order1) that pinned an Order1 NB2 tower against the Order2 oracle.",
+    "evidence": "At the base, git grep -w Order1 finds the definition and unit_tests in crates/gam-math/src/jet_scalar.rs, and the tests module of crates/gam-models/src/gamlss/dispersion_family.rs (lines after its #[cfg(test)] mod tests at 2448). No other source names it. A census compile with the crate's unused public items made private (job 619045) reported struct Order1 is never constructed. The item list is the guard's refusal list from the guarded check job named in the commit message.",
+    "base": "c5201c7dfd7eb818dcbe153e9e95fa4d01d3817a"
   }
 ]

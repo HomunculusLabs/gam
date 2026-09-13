@@ -9247,5 +9247,32 @@
     ],
     "reason": "#2899 public API sweep of gam-models (prune-api-d), SPEC rule 25: nine marginal_slope_shared helpers are narrowed to pub(crate). OuterRowIter::len and is_empty had no reader and are deleted. The root tests that named the narrowed helpers through the gam::families facade move verbatim into marginal_slope_shared mod outer_row_tests: the four tests of tests/inference/misc/subsample_outer_integration.rs, whose file is deleted, and one test of tests/regressions/families/family_suite.rs.",
     "evidence": "At the base, every production caller of outer_row_indices takes .to_vec(), and the row_iter.len() calls are on that Vec, so nothing reads OuterRowIter::len or is_empty. The five removed test identities reappear in crates/gam-models/src/marginal_slope_shared.rs mod outer_row_tests, changed only in the BlockwiseFitOptions path. Receipt: guarded job 651939 (agsmall, lane sw0f, node acn77) at 5582f1706 with\nHEAD==PIN, dirty=0 and the 13 files of the d1, n12c and s35 slices overlaid:\ncargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0\n(130 s) and cargo check -p gam-pyffi --lib exited 0 (86 s), with no error line.\nLog /scratch.global/sauer354/pool/prune-api-d/combo17b.651939.log. The first\npass on this overlay (649104) stopped at one unused BlockSparseFit import in\ncoordinate.rs, which the d1 slice removes."
+  },
+  {
+    "items": [
+      "crates/gam-math/src/jet_scalar.rs:fn:add",
+      "crates/gam-math/src/jet_scalar.rs:fn:compose_unary",
+      "crates/gam-math/src/jet_scalar.rs:fn:constant",
+      "crates/gam-math/src/jet_scalar.rs:fn:g",
+      "crates/gam-math/src/jet_scalar.rs:fn:into_channels",
+      "crates/gam-math/src/jet_scalar.rs:fn:mul",
+      "crates/gam-math/src/jet_scalar.rs:fn:neg",
+      "crates/gam-math/src/jet_scalar.rs:fn:order1_and_order2_agree_on_value_and_gradient",
+      "crates/gam-math/src/jet_scalar.rs:fn:order1_constant_has_zero_gradient",
+      "crates/gam-math/src/jet_scalar.rs:fn:order1_exp_has_correct_value_and_gradient",
+      "crates/gam-math/src/jet_scalar.rs:fn:order1_mul_satisfies_product_rule",
+      "crates/gam-math/src/jet_scalar.rs:fn:order1_variable_has_unit_gradient_in_seeded_slot",
+      "crates/gam-math/src/jet_scalar.rs:fn:scale",
+      "crates/gam-math/src/jet_scalar.rs:fn:sub",
+      "crates/gam-math/src/jet_scalar.rs:fn:value",
+      "crates/gam-math/src/jet_scalar.rs:fn:variable",
+      "crates/gam-math/src/jet_scalar.rs:struct:Order1",
+      "crates/gam-models/src/gamlss/dispersion_family.rs:fn:dispersion_nb_disp_order1",
+      "crates/gam-models/src/gamlss/dispersion_family.rs:fn:order1_ln_gamma",
+      "crates/gam-models/src/gamlss/dispersion_family.rs:type:O1"
+    ],
+    "reason": "#2899, SPEC rule 25. gam_math::jet_scalar::Order1 (value+gradient JetScalar) had no production constructor in any crate. It is removed with its three impls, the five gam-math unit tests that only exercised it, and the gam-models dispersion_family test helpers (order1_ln_gamma, dispersion_nb_disp_order1) that pinned an Order1 NB2 tower against the Order2 oracle.",
+    "evidence": "At the base, git grep -w Order1 finds the definition and unit_tests in crates/gam-math/src/jet_scalar.rs, and the tests module of crates/gam-models/src/gamlss/dispersion_family.rs (lines after its #[cfg(test)] mod tests at 2448). No other source names it. A census compile with the crate's unused public items made private (job 619045) reported struct Order1 is never constructed. The item list is the guard's refusal list from the guarded check job named in the commit message.",
+    "base": "c5201c7dfd7eb818dcbe153e9e95fa4d01d3817a"
   }
 ]
