@@ -623,17 +623,19 @@ impl<'a> RemlState<'a> {
         // no statement at all about a curvature-heavy direction at the small
         // end — and taking the max makes every gap down there unresolvable by
         // an eigenvalue that has nothing to do with it.
-        let mut pair_resolution = Array1::<f64>::zeros(p);
-        let arithmetic_floor = 64.0 * (p.max(1) as f64) * f64::EPSILON;
-        for q in 0..p {
-            let vector = evecs.column(q);
-            let residual = sym_h.dot(&vector) - &vector.mapv(|value| value * evals[q]);
-            // Floored by the arithmetic this pair's OWN Rayleigh quotient costs
-            // — `64·p·ε·|σ_q|`, scaled by the eigenvalue rather than by ‖H‖, for
-            // the same reason the residual is taken per pair.
-            pair_resolution[q] =
-                residual.dot(&residual).sqrt().max(arithmetic_floor * evals[q].abs());
-        }
+        // Each pair's residual is certified against its OWN evaluation error,
+        // which is what bounds a residual that rounds to zero, so nothing is
+        // chosen here either.
+        let pair_resolution =
+            match crate::estimate::smoothing_correction::eigenpair_residual_bounds(
+                &sym_h, &evals, &evecs,
+            ) {
+                Ok(bounds) => bounds,
+                Err(reason) => {
+                    log::info!("[#784] block-local fallback declined: {reason}");
+                    return Ok(zero());
+                }
+            };
         let r_tilde = evecs.t().dot(&r_mat); // p × m
         let mut g_mat = Array2::<f64>::zeros((p, m));
         for (jr, &col_r) in block_cols.iter().enumerate() {

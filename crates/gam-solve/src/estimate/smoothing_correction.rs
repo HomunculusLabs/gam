@@ -504,14 +504,8 @@ fn smoothing_correction_gram(
 ///
 /// The measured quantity is `max_i ‖H v_i − σ_i v_i‖₂`, a certified `‖δH‖₂` for
 /// the eigenpairs as returned — exactly Weyl's perturbation, computed rather
-/// than assumed. That residual is itself computed in floating point, so where it
-/// rounds to zero (a diagonal input, say) it certifies only down to its own
-/// evaluation error. Component `j` is the `n`-term inner product `Σ_k H_jk v_k`,
-/// one product `σ_i v_j` and one subtraction, so Higham's model
-/// (`gam_linalg::roundoff`) puts the exact component within
-/// `γ_{n+1}·(Σ_k |H_jk||v_k| + |σ_i||v_j|)` of the computed one. Each eigenpair
-/// bounds its exact residual norm by the computed norm plus the norm of those
-/// bounds, and the resolution is the largest; no coefficient is chosen.
+/// than assumed — with each pair's residual certified against its own
+/// evaluation error by [`eigenpair_residual_bounds`].
 ///
 /// ⚠ This bounds *"given this matrix, how wrong is σ?"*. It says nothing about
 /// *"how wrong is this matrix?"* — the assembly error of `H` itself, which is
@@ -522,6 +516,28 @@ pub(crate) fn eigenpair_backward_error_bound(
     eigenvalues: &Array1<f64>,
     eigenvectors: &Array2<f64>,
 ) -> Result<gam_linalg::curvature_resolution::CurvatureResolution, String> {
+    let resolution = eigenpair_residual_bounds(matrix, eigenvalues, eigenvectors)?
+        .iter()
+        .copied()
+        .fold(0.0_f64, f64::max);
+    gam_linalg::curvature_resolution::CurvatureResolution::analytic_weyl(resolution)
+        .map_err(|error| error.to_string())
+}
+
+/// Per eigenpair, a certified bound on the exact residual `‖H v_i − σ_i v_i‖₂`:
+/// the computed residual norm plus the norm of its own evaluation error.
+///
+/// The residual is computed in floating point, so where it rounds to zero (a
+/// diagonal input, say) it certifies only down to that evaluation error.
+/// Component `j` is the `n`-term inner product `Σ_k H_jk v_k`, one product
+/// `σ_i v_j` and one subtraction, so Higham's model (`gam_linalg::roundoff`)
+/// puts the exact component within `γ_{n+1}·(Σ_k |H_jk||v_k| + |σ_i||v_j|)` of
+/// the computed one. No coefficient is chosen.
+pub(crate) fn eigenpair_residual_bounds(
+    matrix: &Array2<f64>,
+    eigenvalues: &Array1<f64>,
+    eigenvectors: &Array2<f64>,
+) -> Result<Array1<f64>, String> {
     let n = matrix.nrows();
     if matrix.ncols() != n || eigenvalues.len() != n || eigenvectors.dim() != (n, n) {
         return Err("eigendecomposition dimensions do not match the symmetric matrix".into());
@@ -534,20 +550,17 @@ pub(crate) fn eigenpair_backward_error_bound(
     }
     let magnitudes = matrix.mapv(f64::abs);
     let evaluation_growth = gam_linalg::roundoff::accumulation_growth(n + 1);
-    let mut resolution = 0.0_f64;
+    let mut bounds = Array1::<f64>::zeros(n);
     for column in 0..n {
         let vector = eigenvectors.column(column);
         let eigenvalue = eigenvalues[column];
         let residual = matrix.dot(&vector) - &vector.mapv(|value| value * eigenvalue);
         let evaluation_scale = magnitudes.dot(&vector.mapv(f64::abs))
             + &vector.mapv(|value| (value * eigenvalue).abs());
-        resolution = resolution.max(
-            residual.dot(&residual).sqrt()
-                + evaluation_growth * evaluation_scale.dot(&evaluation_scale).sqrt(),
-        );
+        bounds[column] = residual.dot(&residual).sqrt()
+            + evaluation_growth * evaluation_scale.dot(&evaluation_scale).sqrt();
     }
-    gam_linalg::curvature_resolution::CurvatureResolution::analytic_weyl(resolution)
-        .map_err(|error| error.to_string())
+    Ok(bounds)
 }
 
 /// Invert the ρ-Hessian on the subspace where its curvature is actually
