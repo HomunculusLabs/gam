@@ -274,7 +274,7 @@ fn psi_gram_tensor_fast_path_skips_n_row_lane_and_matches_streamed() {
             .hyper_dirs_for_current_design(data.view(), SpatialHyperKind::Isotropic)
             .unwrap_or_else(|e| panic!("{} failed: {:?}", "hyper_dirs", e));
         let penalty = cache
-            .canonical_penalties_at(theta)
+            .canonical_penalties_at(theta, evaluator.frozen_penalty_ranks())
             .unwrap_or_else(|e| panic!("{} failed: {:?}", "exact n-free S(ψ) rebuild", e));
         evaluator.stage_fast_path_penalty(Some(penalty));
         let (cost, grad, _h) = evaluate_joint_reml_outer_eval_at_theta(

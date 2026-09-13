@@ -266,6 +266,13 @@ pub struct ExternalJointHyperEvaluator<'a> {
     /// re-materialising them per trial. `None` until the first install (or when
     /// no tensor is armed for this fit).
     pub(crate) psi_gram_frozen_rows: Option<std::sync::Arc<crate::pirls::GaussianFrozenRows>>,
+    /// Each penalty block's structural rank, frozen at the build ψ from the
+    /// block's own rounding band
+    /// (`gam_terms::construction::penalty_structural_ranks_at_rounding_band`).
+    /// Every later canonicalization in this fit roots the blocks at these ranks
+    /// (`canonicalize_penalty_specs_at_frozen_ranks`), so a moving ψ cannot
+    /// change the priced penalty's rank between two trials.
+    pub(crate) frozen_penalty_ranks: Vec<usize>,
 }
 
 impl<'a> ExternalJointHyperEvaluator<'a> {
@@ -285,10 +292,13 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
         let p = x.ncols();
         let specs: Vec<PenaltySpec> = s_list.iter().map(PenaltySpec::from_blockwise_ref).collect();
         validate_penalty_specs(&specs, p, context)?;
+        let frozen_penalty_ranks =
+            gam_terms::construction::penalty_structural_ranks_at_rounding_band(&specs, p, context)?;
         let (canonical, active_nullspace_dims) =
-            gam_terms::construction::canonicalize_penalty_specs(
+            gam_terms::construction::canonicalize_penalty_specs_at_frozen_ranks(
                 &specs,
                 &opts.nullspace_dims,
+                &frozen_penalty_ranks,
                 p,
                 context,
             )?;
@@ -340,7 +350,16 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
             pending_glm_psi_gram_deriv: None,
             slow_path_reset_count: std::cell::Cell::new(0),
             psi_gram_frozen_rows: None,
+            frozen_penalty_ranks,
         })
+    }
+
+    /// The structural rank of each penalty block, frozen for this fit at the
+    /// build ψ. A caller that canonicalizes this fit's penalties on its own (the
+    /// n-free ψ re-key) must root them at these ranks too, or its surface and the
+    /// evaluator's would price different penalties.
+    pub fn frozen_penalty_ranks(&self) -> &[usize] {
+        &self.frozen_penalty_ranks
     }
 
     /// #1033 instrumentation accessor: number of slow-path `reset_surface`
@@ -1098,9 +1117,10 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
         let specs: Vec<PenaltySpec> = s_list.iter().map(PenaltySpec::from_blockwise_ref).collect();
         validate_penalty_specs(&specs, p, context)?;
         let (canonical, active_nullspace_dims) =
-            gam_terms::construction::canonicalize_penalty_specs(
+            gam_terms::construction::canonicalize_penalty_specs_at_frozen_ranks(
                 &specs,
                 nullspace_dims,
+                &self.frozen_penalty_ranks,
                 p,
                 context,
             )?;
@@ -1406,9 +1426,10 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
         let specs: Vec<PenaltySpec> = s_list.iter().map(PenaltySpec::from_blockwise_ref).collect();
         validate_penalty_specs(&specs, p, context)?;
         let (canonical, active_nullspace_dims) =
-            gam_terms::construction::canonicalize_penalty_specs(
+            gam_terms::construction::canonicalize_penalty_specs_at_frozen_ranks(
                 &specs,
                 nullspace_dims,
+                &self.frozen_penalty_ranks,
                 p,
                 context,
             )?;

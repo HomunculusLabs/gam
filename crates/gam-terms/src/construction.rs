@@ -1549,6 +1549,197 @@ pub fn canonicalize_penalty_specs(
     Ok((active, active_nullspace))
 }
 
+/// Structural rank of each penalty block at its own rounding band, for a fit
+/// that re-realizes its penalties while ψ moves.
+///
+/// A generic block counts the eigenvalues above `dim·ε·‖S‖₂`, the band a
+/// symmetric eigensolver resolves `S` at (the rule `H` uses for its identified
+/// rank, #2901 V22). A hinted block (ridge, Kronecker) keeps the rank of its
+/// closed-form root. A joint ρ+ψ fit computes these once at the build ψ and
+/// canonicalizes every later realization at them through
+/// [`canonicalize_penalty_specs_at_frozen_ranks`].
+pub fn penalty_structural_ranks_at_rounding_band(
+    specs: &[crate::PenaltySpec],
+    p: usize,
+    context: &str,
+) -> Result<Vec<usize>, EstimationError> {
+    let mut ranks = Vec::with_capacity(specs.len());
+    for (idx, spec) in specs.iter().enumerate() {
+        if penalty_spec_has_structure_hint(spec) {
+            ranks.push(
+                canonicalize_penalty_spec(spec, p, idx, context)?
+                    .map_or(0, |canonical| canonical.root.nrows()),
+            );
+            continue;
+        }
+        crate::validate_penalty_spec_shape(idx, spec, p, context)?;
+        let analysis = analyze_penalty_block(&penalty_spec_local_matrix(spec)).map_err(|err| {
+            EstimationError::InvalidInput(format!(
+                "{context}: structural rank analysis failed at penalty {idx}: {err}"
+            ))
+        })?;
+        let spectral_radius = analysis
+            .eigenvalues
+            .iter()
+            .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+        let rounding_band = analysis.eigenvalues.len() as f64 * f64::EPSILON * spectral_radius;
+        ranks.push(
+            analysis
+                .eigenvalues
+                .iter()
+                .filter(|&&value| value > rounding_band)
+                .count(),
+        );
+    }
+    Ok(ranks)
+}
+
+/// Canonicalize a batch of penalty specs at structural ranks frozen for the
+/// fit, dropping blocks frozen at rank zero.
+///
+/// [`canonicalize_penalty_spec`] roots a block from the eigenpairs above the
+/// spectral rank cutoff, so a moving ψ can push one of them across the cutoff
+/// and the priced penalty drops or regains a rank-one piece between two nearby
+/// trials. On the periodic Matérn bug-hunt fixture (MSI job 602008, and again
+/// at 575e25e4d in job 608882) the REML cost split at psi = 1.098662, -147.4001
+/// against -148.0976. Exactly one eigenvalue of `S_λ` moved (4.163e-3 →
+/// 3.203e-3), and its drop over λ₄ = 2.06e5 is the cutoff of a normalized
+/// 89-column block. Every line search that bracketed that psi failed.
+///
+/// Here each generic block is rooted from its `frozen_ranks[idx]` largest
+/// eigenpairs at every ψ, so the priced penalty is a continuous function of the
+/// realized block. If the smallest kept eigenvalue is not positive, the block's
+/// range at this trial is not the one the fit froze. That trial is refused
+/// (`TrialPointRefused`), never re-ranked. Hinted blocks keep their closed-form
+/// roots and are refused when that root's rank differs from the frozen rank.
+pub fn canonicalize_penalty_specs_at_frozen_ranks(
+    specs: &[crate::PenaltySpec],
+    nullspace_dims: &[usize],
+    frozen_ranks: &[usize],
+    p: usize,
+    context: &str,
+) -> Result<(Vec<CanonicalPenalty>, Vec<usize>), EstimationError> {
+    if specs.len() != nullspace_dims.len() || specs.len() != frozen_ranks.len() {
+        crate::bail_invalid_estim!(
+            "{context}: penalty topology mismatch: penalties={}, nullspace_dims={}, frozen ranks={}",
+            specs.len(),
+            nullspace_dims.len(),
+            frozen_ranks.len()
+        );
+    }
+    let mut active = Vec::with_capacity(specs.len());
+    let mut active_nullspace = Vec::with_capacity(specs.len());
+    for (idx, spec) in specs.iter().enumerate() {
+        let frozen_rank = frozen_ranks[idx];
+        let canonical = if penalty_spec_has_structure_hint(spec) {
+            let canonical = canonicalize_penalty_spec(spec, p, idx, context)?;
+            let realized_rank = canonical.as_ref().map_or(0, |c| c.root.nrows());
+            if realized_rank != frozen_rank {
+                return Err(EstimationError::TrialPointRefused {
+                    reason: format!(
+                        "{context}: hinted penalty block idx={idx} has root rank {realized_rank} \
+                         at this trial but the fit froze it at {frozen_rank}"
+                    ),
+                });
+            }
+            canonical
+        } else {
+            canonicalize_penalty_spec_at_frozen_rank(spec, p, idx, frozen_rank, context)?
+        };
+        if let Some(canonical) = canonical {
+            active_nullspace.push(nullspace_dims[idx]);
+            active.push(canonical);
+        }
+    }
+    Ok((active, active_nullspace))
+}
+
+fn penalty_spec_has_structure_hint(spec: &crate::PenaltySpec) -> bool {
+    matches!(
+        spec,
+        crate::PenaltySpec::Block {
+            structure_hint: Some(_),
+            ..
+        }
+    )
+}
+
+fn penalty_spec_local_matrix(spec: &crate::PenaltySpec) -> Array2<f64> {
+    match spec {
+        crate::PenaltySpec::Block { local, .. } => local.to_owned(),
+        crate::PenaltySpec::Dense(matrix)
+        | crate::PenaltySpec::DenseWithMean { matrix, .. } => matrix.to_owned(),
+    }
+}
+
+fn canonicalize_penalty_spec_at_frozen_rank(
+    spec: &crate::PenaltySpec,
+    p: usize,
+    idx: usize,
+    frozen_rank: usize,
+    context: &str,
+) -> Result<Option<CanonicalPenalty>, EstimationError> {
+    crate::validate_penalty_spec_shape(idx, spec, p, context)?;
+    if frozen_rank == 0 {
+        return Ok(None);
+    }
+    let (col_range, prior_mean_spec, op) = match spec {
+        crate::PenaltySpec::Block {
+            col_range,
+            prior_mean,
+            op,
+            ..
+        } => (col_range.clone(), prior_mean, op.clone()),
+        crate::PenaltySpec::Dense(_) => (0..p, &gam_problem::CoefficientPriorMean::Zero, None),
+        crate::PenaltySpec::DenseWithMean { prior_mean, .. } => (0..p, prior_mean, None),
+    };
+    let block_dim = col_range.len();
+    if frozen_rank > block_dim {
+        crate::bail_invalid_estim!(
+            "{context}: penalty {idx} frozen at rank {frozen_rank} exceeds its block dimension {block_dim}"
+        );
+    }
+    let prior_mean = prior_mean_spec
+        .evaluate(block_dim, &format!("{context}: penalty {idx}"))
+        .map_err(|e| EstimationError::InvalidInput(e.0))?;
+    let analysis = analyze_penalty_block(&penalty_spec_local_matrix(spec)).map_err(|err| {
+        EstimationError::InvalidInput(format!(
+            "{context}: penalty canonicalization failed at index {idx}: {err}"
+        ))
+    })?;
+    let mut descending: Vec<usize> = (0..analysis.eigenvalues.len()).collect();
+    descending.sort_by(|&a, &b| analysis.eigenvalues[b].total_cmp(&analysis.eigenvalues[a]));
+    let kept = &descending[..frozen_rank];
+    let smallest_kept = analysis.eigenvalues[kept[frozen_rank - 1]];
+    if !(smallest_kept > 0.0) {
+        return Err(EstimationError::TrialPointRefused {
+            reason: format!(
+                "{context}: penalty block idx={idx} was frozen at structural rank {frozen_rank}, \
+                 but its smallest kept eigenvalue is {smallest_kept:e} at this trial"
+            ),
+        });
+    }
+    let mut root = Array2::zeros((frozen_rank, block_dim));
+    let mut positive_eigenvalues = Vec::with_capacity(frozen_rank);
+    for (row_idx, &i) in kept.iter().enumerate() {
+        let eigenval = analysis.eigenvalues[i];
+        root.row_mut(row_idx)
+            .assign(&(&analysis.eigenvectors.column(i) * eigenval.sqrt()));
+        positive_eigenvalues.push(eigenval);
+    }
+    let local = root.t().dot(&root);
+    Ok(Some(CanonicalPenalty {
+        root,
+        col_range,
+        total_dim: p,
+        nullity: block_dim - frozen_rank,
+        local,
+        prior_mean,
+        positive_eigenvalues,
+        op,
+    }))
+}
+
 /// Hard cap on the dimension `p` allowed to fall back to a dense p × p
 /// eigendecomposition of the overlapping balanced penalty.
 ///

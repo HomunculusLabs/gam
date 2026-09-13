@@ -1655,13 +1655,14 @@ impl<'d> SingleBlockExactJointDesignCache<'d> {
     fn canonical_penalties_at(
         &mut self,
         theta: &Array1<f64>,
+        frozen_penalty_ranks: &[usize],
     ) -> Result<(Vec<gam_terms::construction::CanonicalPenalty>, Vec<usize>), String> {
         let psi = &theta
             .as_slice()
             .ok_or_else(|| "canonical_penalties_at: theta is not contiguous".to_string())?
             [self.rho_dim..];
         self.realizer
-            .canonical_penalties_at_psi(&self.spatial_terms, psi)
+            .canonical_penalties_at_psi(&self.spatial_terms, psi, frozen_penalty_ranks)
     }
 }
 
@@ -3385,7 +3386,10 @@ impl<'d> SpatialJointContext<'d> {
         // pairing a stale S — the safe outcome, since a rebuild from frozen
         // geometry should never fail in practice.
         if self.evaluator.supports_nfree_penalty_rekey() {
-            match self.cache.canonical_penalties_at(theta) {
+            match self
+                .cache
+                .canonical_penalties_at(theta, self.evaluator.frozen_penalty_ranks())
+            {
                 Ok(penalty) => self.evaluator.stage_fast_path_penalty(Some(penalty)),
                 Err(e) => {
                     log::warn!(
@@ -3576,7 +3580,10 @@ impl<'d> SpatialJointContext<'d> {
         // re-realized). The slow path clears it. A rebuild failure clears the
         // stage; the evaluator then takes the slow path or hard-errors (safe).
         if self.evaluator.supports_nfree_penalty_rekey() {
-            match self.cache.canonical_penalties_at(theta) {
+            match self
+                .cache
+                .canonical_penalties_at(theta, self.evaluator.frozen_penalty_ranks())
+            {
                 Ok(penalty) => self.evaluator.stage_fast_path_penalty(Some(penalty)),
                 Err(_) => self.evaluator.stage_fast_path_penalty(None),
             }
@@ -5698,6 +5705,7 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
         &mut self,
         spatial_terms: &[usize],
         psi: &[f64],
+        frozen_penalty_ranks: &[usize],
     ) -> Result<(Vec<gam_terms::construction::CanonicalPenalty>, Vec<usize>), String> {
         let rebuild_started = std::time::Instant::now();
         if spatial_terms.len() != 1 {
@@ -5878,9 +5886,10 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
                 op: tmpl.op.clone(),
             })
             .collect();
-        let canonical = gam_terms::construction::canonicalize_penalty_specs(
+        let canonical = gam_terms::construction::canonicalize_penalty_specs_at_frozen_ranks(
             &specs,
             &nullspace_dims,
+            frozen_penalty_ranks,
             p_total,
             "nfree-psi-penalty",
         )

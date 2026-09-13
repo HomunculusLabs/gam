@@ -41,6 +41,10 @@
 //     the post-revert production reality.  Should a future change flip that
 //     admit arm, test 2 will fire and force a deliberate re-evaluation rather
 //     than a silent topology regression.
+//
+// The re-key roots each block at the structural rank the joint evaluator froze
+// for the fit at its build ψ (`ExternalJointHyperEvaluator::frozen_penalty_ranks`),
+// so these tests freeze the same ranks from the frozen design they build.
 
 #[cfg(test)]
 mod matern_nfree_rekey_topology_tests {
@@ -111,6 +115,31 @@ mod matern_nfree_rekey_topology_tests {
         (resolved, design)
     }
 
+    /// The frozen design's penalties as canonicalization specs.
+    fn penalty_specs_of(design: &TermCollectionDesign) -> Vec<gam_solve::estimate::PenaltySpec> {
+        design
+            .penalties
+            .iter()
+            .map(|b| gam_solve::estimate::PenaltySpec::Block {
+                local: b.local.clone(),
+                col_range: b.col_range.clone(),
+                prior_mean: b.prior_mean.clone(),
+                structure_hint: b.structure_hint.clone(),
+                op: b.op.clone(),
+            })
+            .collect()
+    }
+
+    /// The structural ranks a joint evaluator freezes for `design` at its build ψ.
+    fn frozen_penalty_ranks_of(design: &TermCollectionDesign) -> Vec<usize> {
+        gam_terms::construction::penalty_structural_ranks_at_rounding_band(
+            &penalty_specs_of(design),
+            design.design.ncols(),
+            "frozen-design structural ranks",
+        )
+        .expect("structural ranks of the frozen design")
+    }
+
     #[test]
     fn matern_2d_nfree_rekey_preserves_penalty_topology_across_psi() {
         let data = matern_2d_dataset(360);
@@ -124,6 +153,7 @@ mod matern_nfree_rekey_topology_tests {
             frozen_blocks >= 3,
             "expected the ν=5/2 d=2 Matérn design to ship the 3-block operator triplet; got {frozen_blocks}"
         );
+        let frozen_ranks = frozen_penalty_ranks_of(&design);
 
         let mut realizer = FrozenTermCollectionIncrementalRealizer::new(
             data.view(),
@@ -140,7 +170,7 @@ mod matern_nfree_rekey_topology_tests {
         for step in [-2.0_f64, -1.0, -0.4, 0.0, 0.4, 1.0, 2.0] {
             let psi = psi0 + step;
             let (penalties, nullspace_dims) = realizer
-                .canonical_penalties_at_psi(&spatial_terms, &[psi])
+                .canonical_penalties_at_psi(&spatial_terms, &[psi], &frozen_ranks)
                 .unwrap_or_else(|e| panic!("re-key must succeed at psi={psi} (step {step}): {e}"));
             assert_eq!(
                 penalties.len(),
@@ -191,6 +221,7 @@ mod matern_nfree_rekey_topology_tests {
             frozen_blocks >= 3,
             "expected the ν=5/2 d=2 Matérn design to ship the 3-block operator triplet; got {frozen_blocks}"
         );
+        let frozen_ranks = frozen_penalty_ranks_of(&design);
 
         let mut realizer = FrozenTermCollectionIncrementalRealizer::new(
             data.view(),
@@ -247,7 +278,7 @@ mod matern_nfree_rekey_topology_tests {
 
             // Fast path: the n-free re-key at the same ψ.
             let (rekey, rekey_nulldims) = realizer
-                .canonical_penalties_at_psi(&spatial_terms, &[psi])
+                .canonical_penalties_at_psi(&spatial_terms, &[psi], &frozen_ranks)
                 .unwrap_or_else(|e| panic!("re-key must succeed at psi={psi} (step {step}): {e}"));
 
             assert_eq!(
@@ -305,26 +336,17 @@ mod matern_nfree_rekey_topology_tests {
         let (resolved, design) = frozen_matern_2d(data.view(), seed_length_scale);
 
         // The frozen design's canonical penalty surface, reconstructed through
-        // the SAME `canonicalize_penalty_specs` pipeline the re-key uses, so a
-        // value mismatch reflects a real numeric divergence and not a
-        // representational one. The single spatial term owns the whole penalty
-        // list.
+        // the SAME frozen-rank canonicalization the re-key uses, so a value
+        // mismatch reflects a real numeric divergence and not a representational
+        // one. The single spatial term owns the whole penalty list.
         let p_total = design.design.ncols();
-        let truth_specs: Vec<gam_solve::estimate::PenaltySpec> = design
-            .penalties
-            .iter()
-            .map(|b| gam_solve::estimate::PenaltySpec::Block {
-                local: b.local.clone(),
-                col_range: b.col_range.clone(),
-                prior_mean: b.prior_mean.clone(),
-                structure_hint: b.structure_hint.clone(),
-                op: b.op.clone(),
-            })
-            .collect();
+        let truth_specs = penalty_specs_of(&design);
+        let frozen_ranks = frozen_penalty_ranks_of(&design);
         let truth_nulldims: Vec<usize> = design.nullspace_dims.clone();
-        let (truth, _truth_nd) = gam_terms::construction::canonicalize_penalty_specs(
+        let (truth, _truth_nd) = gam_terms::construction::canonicalize_penalty_specs_at_frozen_ranks(
             &truth_specs,
             &truth_nulldims,
+            &frozen_ranks,
             p_total,
             "frozen-design-truth",
         )
@@ -340,7 +362,7 @@ mod matern_nfree_rekey_topology_tests {
 
         let psi_seed = -seed_length_scale.ln();
         let (rekey, _rekey_nd) = realizer
-            .canonical_penalties_at_psi(&spatial_terms, &[psi_seed])
+            .canonical_penalties_at_psi(&spatial_terms, &[psi_seed], &frozen_ranks)
             .expect("re-key at seed psi");
 
         assert_eq!(
@@ -383,6 +405,7 @@ mod matern_nfree_rekey_topology_tests {
         let data = matern_2d_dataset(360);
         let seed_length_scale = 0.30;
         let (resolved, design) = frozen_matern_2d(data.view(), seed_length_scale);
+        let frozen_ranks = frozen_penalty_ranks_of(&design);
         let mut realizer = FrozenTermCollectionIncrementalRealizer::new(
             data.view(),
             resolved.clone(),
@@ -417,7 +440,7 @@ mod matern_nfree_rekey_topology_tests {
 
         let psi_trial = -trial_length_scale.ln();
         let (rekey, rekey_nulldims) = realizer
-            .canonical_penalties_at_psi(&spatial_terms, &[psi_trial])
+            .canonical_penalties_at_psi(&spatial_terms, &[psi_trial], &frozen_ranks)
             .expect("re-key at trial psi");
 
         assert_eq!(
