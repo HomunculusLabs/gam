@@ -7224,4 +7224,78 @@ mod tests {
             "a four-block fold must refuse a fifth-order contraction"
         );
     }
+
+    /// The five-block fold differentiates the enumerated fourth-order kernel. Along
+    /// a fifth coefficient direction, with slot 1's first slice moving too, the
+    /// set-partition fifth derivative matches a Richardson difference of the fourth
+    /// derivative over moments re-evaluated at every shifted cell.
+    #[test]
+    fn cell_partition_moments_fifth_order_differentiates_the_fourth_kernel() {
+        let base = DenestedCubicCell {
+            left: -1.9,
+            right: 1.4,
+            c0: 0.3,
+            c1: 0.7,
+            c2: -0.2,
+            c3: 0.09,
+        };
+        let directions = [
+            [0.4, -0.3, 0.12, 0.05],
+            [-0.2, 0.5, -0.07, 0.03],
+            [0.15, 0.1, 0.2, -0.04],
+            [0.35, -0.05, -0.1, 0.06],
+            [-0.25, 0.3, 0.08, -0.02],
+        ];
+        let cross = [0.1, -0.2, 0.05, 0.01];
+        let state = evaluate_cell_derivative_moments_uncached(base, 27)
+            .expect("degree-27 moments of a non-affine cell");
+        let partition = CellPartitionMoments::new(base, &state.moments, 5)
+            .expect("five-block partition moments");
+        let mut subsets = [[0.0_f64; 4]; 32];
+        for (slot, direction) in directions.iter().enumerate() {
+            subsets[1 << slot] = *direction;
+        }
+        subsets[0b10001] = cross;
+        let fifth = partition.derivative(5, &subsets).expect("partition fifth");
+        let fourth_at = |step: f64| -> f64 {
+            let shifted = DenestedCubicCell {
+                c0: base.c0 + step * directions[4][0],
+                c1: base.c1 + step * directions[4][1],
+                c2: base.c2 + step * directions[4][2],
+                c3: base.c3 + step * directions[4][3],
+                ..base
+            };
+            let moments = evaluate_cell_derivative_moments_uncached(shifted, 21)
+                .expect("degree-21 moments of the shifted cell");
+            let moving: Vec<f64> = directions[0]
+                .iter()
+                .zip(cross.iter())
+                .map(|(first, second)| first + step * second)
+                .collect();
+            let zero = [0.0_f64; 4];
+            cell_fourth_derivative_from_moments(
+                shifted,
+                &moving,
+                &directions[1],
+                &directions[2],
+                &directions[3],
+                &zero,
+                &zero,
+                &zero,
+                &zero,
+                &zero,
+                &zero,
+                &zero,
+                &zero,
+                &zero,
+                &zero,
+                &zero,
+                &moments.moments,
+            )
+            .expect("enumerated fourth at the shifted cell")
+        };
+        let central = |step: f64| (fourth_at(step) - fourth_at(-step)) / (2.0 * step);
+        let richardson = (4.0 * central(5e-4) - central(1e-3)) / 3.0;
+        assert_close_rel("fifth along slot 5", fifth, richardson, 1e-7);
+    }
 }
