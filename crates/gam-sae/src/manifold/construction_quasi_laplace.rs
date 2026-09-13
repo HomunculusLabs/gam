@@ -3061,25 +3061,35 @@ impl SaeManifoldTerm {
                 step + 1,
             );
             let cache = factor.cache;
-            // #2283 — ask whether this step's dense geometry fits BEFORE paying for
-            // it. `materialize_exact_stationarity_geometry` below holds `dim × dim`
-            // host blocks with `dim = coords + border`, and the coordinate block grows
-            // with ROWS: the #2283 cell's 96 000 training rows with 2 active circle
-            // charts each give 192 000 coordinates before the border. Both criterion
-            // routes reach this phase through the gate-frozen inner converge, and
-            // the log-determinant and ρ-adjoint already route away from the dense lane
-            // on #2724's ledger; this phase never asked it, so a streaming-routed fit
-            // allocated the blocks at its first plateau. Ask the SAME predicate at the
-            // EXACT dimension this step would build. A declined geometry does not end
-            // the phase: the step is taken on the arrow form of the same operator
-            // (`shifted_exact_newton_polish_trials`), which holds no `dim²` object.
+            // #2228 — which form of `A` this step is taken on is decided by the work of
+            // the two forms, not only by whether the dense one fits. The dense geometry
+            // (`materialize_exact_stationarity_geometry` below) pays one `O(dim³)`
+            // symmetric eigendecomposition per step, and `dim = coords + border` grows
+            // with ROWS. The arrow form (`shifted_exact_newton_polish_trials`) factors
+            // each row block and the `k × k` border Schur complement,
+            // `Σᵢ qᵢ³/3 + Σᵢ qᵢ²·k + k³/3`, linear in rows: at the #2132 anchor's C=3
+            // shape (508 rows, `q = 5`, `k = 72`, dim 2612) about `1.1e6` flops against
+            // `1.8e10·c`, and pool job 578251 read the dense step at ~4.8 s there, 40+
+            // times in one call. Every assignment mode whose observed information is
+            // arrow-structured therefore steps on the arrow form. Ordered Beta–Bernoulli
+            // is the exception: its prior couples every row, so
+            // `exact_a_evidence_system` cannot express `A`, and the dense geometry stays
+            // its route under the #2724/#2283 memory admission at the EXACT dimension it
+            // would build (the #2283 cell's 96 000 rows × 2 charts is 192 000
+            // coordinates). A declined ordered Beta–Bernoulli geometry still tries the
+            // arrow form, which refuses it and ends the phase.
             let exact_dim = sae_exact_stationarity_dim(cache.delta_t_len(), cache.k);
-            if !sae_exact_stationarity_admitted(exact_dim, self.host_available_bytes) {
+            let dense_admitted =
+                sae_exact_stationarity_admitted(exact_dim, self.host_available_bytes);
+            let dense_geometry_route = matches!(
+                self.assignment.mode,
+                AssignmentMode::OrderedBetaBernoulli { .. }
+            ) && dense_admitted;
+            if !dense_geometry_route {
                 log::info!(
-                    "[SAE-NEWTON] step {}/{max_steps} declined the dense geometry: the exact \
-                     stationarity geometry at dim={exact_dim} needs {} resident bytes, which \
-                     the carried host reading of {} bytes does not admit; stepping on the \
-                     arrow exact-A system instead",
+                    "[SAE-NEWTON] step {}/{max_steps} steps on the arrow exact-A system (the \
+                     dense geometry at dim={exact_dim} would hold {} resident bytes; admitted \
+                     by the carried host reading of {} bytes: {dense_admitted})",
                     step + 1,
                     sae_exact_stationarity_resident_bytes(exact_dim),
                     self.host_available_bytes,
