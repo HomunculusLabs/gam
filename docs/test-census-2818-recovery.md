@@ -1084,4 +1084,19 @@ still on main, renamed, moved or reshaped. They are restored:
 | `tests/quality/families/quality_vs_pymc_nuts_binomial_logit.rs` | 2 | `NutsConfig` no longer carries `nwarmup` or `n_chains`: gam runs `NUTS_CHAINS` chains and ends warmup when adaptation stabilizes. The PyMC baseline's chain count reads `gam::hmc::NUTS_CHAINS`, and payloads use `MODEL_PAYLOAD_VERSION`. |
 | `tests/inference/misc/bms_audit_nonzero_slope_baseline_370.rs` | 1 | the rigid #370 pin, as above |
 
-`tests/autodiff/misc/contract_gradient_gates.rs` is still being reconciled.
+`tests/autodiff/misc/contract_gradient_gates.rs` (1 test) is restored with six of its seven
+rows. `09d533460` replaced `evaluate_externalcost_andridge` with `evaluate_externalcost`, which
+returns the cost alone, and `a88c62eee` removed `ExternalOptimOptions`' two Kronecker fields.
+The gate now evaluates every row before it asserts, so one red row cannot hide the others.
+Its two SAE rows take their central differences in place on the assembled term and restore it
+afterwards. `assemble_arrow_schur` freezes the barrier coactivation on the term it assembles,
+and the gradient treats that coactivation as constant (#1625). `SaeManifoldTerm::clone` drops
+the frozen gates, and `barrier_coactivation_pairs` then recomputes coactivation from live
+routing. A difference taken on clones therefore differentiates another objective, and on the
+K=2 softmax row that showed up as a flat logit residual.
+
+The `survival/laml-net-single-block` row is not restored. Its subject,
+`WorkingModelSurvival::evaluate_survival_lamlcost_and_gradient`, was a test shim that
+`d484a091a` deleted together with its private inner-mode reconvergence. The unified survival
+LAML evaluator it wrapped, `unified_lamlobjective_and_rhogradient`, is `pub(crate)`, so no
+public route re-solves the inner mode at a perturbed ρ.
