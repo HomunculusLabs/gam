@@ -2435,10 +2435,11 @@ impl CircularGaussianFit2d {
         // width is roundoff, rather than imposing a floor in data units. That
         // width is the rounding band of the squared-radius moments: each term
         // costs five rounded operations before the `n − 1` additions and the
-        // division (#2469).
-        let variance_floor = (gam_linalg::roundoff::accumulation_growth(6 * points.len())
-            * mean_squared_radius)
-            .max(f64::MIN_POSITIVE);
+        // division (#2469). The chart puts the anchor at 0 and the farthest point
+        // at distance 1, so `mean_squared_radius ≥ 1/(2n)` and the band is
+        // positive with no floor.
+        let variance_floor =
+            gam_linalg::roundoff::accumulation_growth(6 * points.len()) * mean_squared_radius;
         let radius_squared = (mean_squared_radius * mean_squared_radius - squared_radius_variance)
             .max(0.0)
             .sqrt();
