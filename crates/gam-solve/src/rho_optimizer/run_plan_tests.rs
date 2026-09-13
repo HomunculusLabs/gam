@@ -6039,12 +6039,13 @@ mod run_plan_warm_start_cache_tests;
 mod run_plan_saddle_escape_tests;
 
 /// #2370: an inverted per-coordinate ρ-box (lower > upper) must surface as a
-/// typed `EstimationError::InvalidInput` from the outer runner, NOT panic in
-/// `project_to_bounds`' `f64::clamp(min, max)` (`min > max`) and escape as an
-/// opaque "panicked inside Rust boundary" `GamError` across the FFI. The
+/// typed `EstimationError::InvalidInput` from the outer runner. The
 /// custom-family effective-df ceiling once emitted an upper bound below
-/// `rho_lower_bound`, inverting the box; the runner now rejects any such box up
-/// front, before a seed is projected against it.
+/// `rho_lower_bound`, inverting the box, and `f64::clamp(min, max)` with
+/// `min > max` then panicked inside `project_to_bounds` and escaped as an opaque
+/// "panicked inside Rust boundary" `GamError` across the FFI. The projection no
+/// longer panics, so an inverted box would instead place seeds outside it; the
+/// runner rejects any such box up front, before a seed is projected against it.
 #[test]
 fn inverted_rho_box_is_a_typed_error_not_a_clamp_panic_2370() {
     let problem = OuterProblem::new(1)
