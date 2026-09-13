@@ -506,32 +506,183 @@ fn psi_zeta_images(
     Ok(images)
 }
 
-/// `∇³_ζ(ℓ∘G)[e_ζ]` for every ζ axis: Faà di Bruno over the 5 set partitions of the two free
-/// axes and the ζ axis.
-fn order_three_axes(frame: &ZetaFrame<'_>, calc: &ZetaRowCalculus) -> Vec<Array2<f64>> {
-    let layout = &frame.layout;
-    let p_primary = frame.primary.total;
-    let geometry = &calc.zeta_row.geometry;
-    let mut phi_axes = Vec::with_capacity(layout.width);
-    for zeta_axis in 0..layout.width {
-        let mut unit = Array1::<f64>::zeros(layout.width);
-        unit[zeta_axis] = 1.0;
-        let dir_z = geometry.direction(unit.slice(s![..layout.z_width]));
-        let dirs = [&ZetaDirection::ZERO, &ZetaDirection::ZERO, &dir_z];
-        let jz = layout.primary_image(&calc.jq, &unit, p_primary);
-        let jz1 = geometry.q_rows(dirs, Z);
+/// The direction-independent parts of one row's ζ composition that every order reads: where the
+/// primaries sit in ζ, the wiggle geometry, `Ĵ` and `D²q` over the z block, and the ℓ gradient and
+/// Hessian.
+struct ZetaParts<'a> {
+    layout: &'a ZetaLayout,
+    geometry: &'a WiggleRowGeometry,
+    jq: &'a Array2<f64>,
+    k0: &'a [Array2<f64>; 3],
+    gradient: &'a Array1<f64>,
+    hessian: &'a Array2<f64>,
+}
+
+impl ZetaParts<'_> {
+    /// `∇_ζ(ℓ∘G) = Ĵᵀ∇ℓ`.
+    fn order_one(&self) -> Array1<f64> {
+        let layout = self.layout;
+        let mut out = Array1::<f64>::zeros(layout.width);
+        for (row, &k) in layout.q.iter().enumerate() {
+            let mut z_block = out.slice_mut(s![..layout.z_width]);
+            z_block.scaled_add(self.gradient[k], &self.jq.row(row));
+        }
+        for &(k, zeta) in &layout.linear {
+            out[zeta] = self.gradient[k];
+        }
+        out
+    }
+
+    /// `∇²_ζ(ℓ∘G) = Ĵᵀ∇²ℓĴ + Σ_q ∂_qℓ·D²q`.
+    fn order_two(&self) -> Array2<f64> {
+        let mut phi = Array2::<f64>::zeros((self.layout.width, self.layout.width));
+        self.layout.add_full_sandwich(&mut phi, self.jq, self.hessian);
+        self.layout.add_curvature(&mut phi, self.gradient, self.k0);
+        phi
+    }
+
+    /// `∇³_ζ(ℓ∘G)[x]` for a ζ direction `x`, reading the ℓ contraction `third` along primary
+    /// directions: Faà di Bruno over the 5 set partitions of the two free axes and `x`.
+    fn order_three(
+        &self,
+        x: &Array1<f64>,
+        third: &dyn Fn(&Array1<f64>) -> Result<Array2<f64>, String>,
+    ) -> Result<Array2<f64>, String> {
+        let (layout, geometry) = (self.layout, self.geometry);
+        let p_primary = self.gradient.len();
+        let dir_x = geometry.direction(x.slice(s![..layout.z_width]));
+        let dirs = [&ZetaDirection::ZERO, &ZetaDirection::ZERO, &dir_x];
+        let jx = layout.primary_image(self.jq, x, p_primary);
+        let jx1 = geometry.q_rows(dirs, Z);
         let mut phi = Array2::<f64>::zeros((layout.width, layout.width));
 
         // Both free axes in one block.
-        layout.add_curvature(&mut phi, &calc.hessian.dot(&jz), &calc.k0);
-        layout.add_curvature(&mut phi, &calc.gradient, &geometry.q_matrices(dirs, Z));
+        layout.add_curvature(&mut phi, &self.hessian.dot(&jx), self.k0);
+        layout.add_curvature(&mut phi, self.gradient, &geometry.q_matrices(dirs, Z));
 
         // Free axes in separate blocks.
-        layout.add_full_sandwich(&mut phi, &calc.jq, &combine_axes(&calc.third, &jz, p_primary));
-        layout.add_symmetric_half_sandwich(&mut phi, &jz1, &calc.hessian, &calc.jq);
-        phi_axes.push(phi);
+        layout.add_full_sandwich(&mut phi, self.jq, &third(&jx)?);
+        layout.add_symmetric_half_sandwich(&mut phi, &jx1, self.hessian, self.jq);
+        Ok(phi)
     }
-    phi_axes
+
+    /// `∇⁴_ζ(ℓ∘G)[u, v]` for ζ directions `u` and `v`, reading the ℓ contractions `third` and
+    /// `fourth` along primary directions: Faà di Bruno over the 15 set partitions of the two free
+    /// axes, `u` and `v`. `timewiggle_order_four_axes` evaluates the same composition along every
+    /// ζ axis at once.
+    fn order_four(
+        &self,
+        u: &Array1<f64>,
+        v: &Array1<f64>,
+        third: &dyn Fn(&Array1<f64>) -> Result<Array2<f64>, String>,
+        fourth: &dyn Fn(&Array1<f64>, &Array1<f64>) -> Result<Array2<f64>, String>,
+    ) -> Result<Array2<f64>, String> {
+        let (layout, geometry) = (self.layout, self.geometry);
+        let (jq, hessian) = (self.jq, self.hessian);
+        let p_primary = self.gradient.len();
+        let dir_u = geometry.direction(u.slice(s![..layout.z_width]));
+        let dir_v = geometry.direction(v.slice(s![..layout.z_width]));
+        let dirs = [&dir_u, &ZetaDirection::ZERO, &dir_v];
+        let ju = layout.primary_image(jq, u, p_primary);
+        let jv = layout.primary_image(jq, v, p_primary);
+        let g2uv = layout.on_primaries(geometry.q_derivative(dirs, U | Z), p_primary);
+        let ju1 = geometry.q_rows(dirs, U);
+        let jv1 = geometry.q_rows(dirs, Z);
+        let juv2 = geometry.q_rows(dirs, U | Z);
+        let t_u = third(&ju)?;
+        let t_v = third(&jv)?;
+        let mut phi = Array2::<f64>::zeros((layout.width, layout.width));
+
+        // Both free axes in one block: the ℓ contraction of the remaining blocks weights the
+        // curvature of G over both axes.
+        layout.add_curvature(&mut phi, &(t_u.dot(&jv) + hessian.dot(&g2uv)), self.k0);
+        layout.add_curvature(&mut phi, &hessian.dot(&jv), &geometry.q_matrices(dirs, U));
+        layout.add_curvature(&mut phi, &hessian.dot(&ju), &geometry.q_matrices(dirs, Z));
+        layout.add_curvature(&mut phi, self.gradient, &geometry.q_matrices(dirs, U | Z));
+
+        // Free axes in separate blocks: an ℓ derivative between one-axis derivatives of G.
+        layout.add_full_sandwich(&mut phi, jq, &(fourth(&ju, &jv)? + third(&g2uv)?));
+        layout.add_symmetric_half_sandwich(&mut phi, &ju1, &t_v, jq);
+        layout.add_symmetric_half_sandwich(&mut phi, &jv1, &t_u, jq);
+        layout.add_symmetric_row_sandwich(&mut phi, &ju1, hessian, &jv1);
+        layout.add_symmetric_half_sandwich(&mut phi, &juv2, hessian, jq);
+        Ok(phi)
+    }
+}
+
+/// `out += scale·Lᵀ values` for one row, where column `c` of `L` is `images[c]`.
+fn add_pulled_back(images: &[ZetaImage], values: &Array1<f64>, scale: f64, out: &mut Array1<f64>) {
+    for (c, image) in images.iter().enumerate() {
+        for &(zeta, weight) in image.entries() {
+            out[c] += scale * weight * values[zeta];
+        }
+    }
+}
+
+impl ZetaRowCalculus {
+    /// The direction-independent parts every order of the composition reads.
+    fn parts<'a>(&'a self, layout: &'a ZetaLayout) -> ZetaParts<'a> {
+        ZetaParts {
+            layout,
+            geometry: &self.zeta_row.geometry,
+            jq: &self.jq,
+            k0: &self.k0,
+            gradient: &self.gradient,
+            hessian: &self.hessian,
+        }
+    }
+}
+
+/// A row's ℓ contractions along primary directions from the family's own row program: the FLEX
+/// program through its direction-independent base, built once per row, or the rigid program.
+enum ZetaRowProgram {
+    Flex(FlexThirdRowBase),
+    Rigid,
+}
+
+/// One row's ζ value calculus for the design-ψ terms: its geometry and images, `Ĵ` and `D²q` over
+/// the z block, and the ℓ gradient, Hessian and contractions of the family's own row program.
+struct ZetaPsiRow {
+    zeta_row: ZetaRow,
+    jq: Array2<f64>,
+    k0: [Array2<f64>; 3],
+    gradient: Array1<f64>,
+    hessian: Array2<f64>,
+    program: ZetaRowProgram,
+}
+
+impl ZetaPsiRow {
+    /// The direction-independent parts every order of the composition reads.
+    fn parts<'a>(&'a self, layout: &'a ZetaLayout) -> ZetaParts<'a> {
+        ZetaParts {
+            layout,
+            geometry: &self.zeta_row.geometry,
+            jq: &self.jq,
+            k0: &self.k0,
+            gradient: &self.gradient,
+            hessian: &self.hessian,
+        }
+    }
+}
+
+/// `∇³_ζ(ℓ∘G)[e_ζ]` for every ζ axis.
+fn order_three_axes(
+    frame: &ZetaFrame<'_>,
+    calc: &ZetaRowCalculus,
+) -> Result<Vec<Array2<f64>>, String> {
+    let layout = &frame.layout;
+    let p_primary = frame.primary.total;
+    let parts = calc.parts(layout);
+    let third = |direction: &Array1<f64>| -> Result<Array2<f64>, String> {
+        Ok(combine_axes(&calc.third, direction, p_primary))
+    };
+    (0..layout.width)
+        .map(|zeta_axis| {
+            let mut unit = Array1::<f64>::zeros(layout.width);
+            unit[zeta_axis] = 1.0;
+            parts.order_three(&unit, &third)
+        })
+        .collect()
 }
 
 /// The flat coefficient vector of `block_states`, in block order.
@@ -1179,7 +1330,7 @@ impl SurvivalMarginalSlopeFamily {
                         .map_err(|error| format!("time-wiggle design ψ Hessian sweep row: {error}"))?;
                     let psi_images = psi_zeta_images(&frame, block_idx, &x_psi)?;
                     let w = zeta_image_of(&psi_images, &beta, width);
-                    let third_axes = order_three_axes(&frame, &calc);
+                    let third_axes = order_three_axes(&frame, &calc)?;
                     let fourth_w = self.timewiggle_order_four_axes(&frame, &calc, &w)?;
                     for c in 0..p_total {
                         let (image, psi_image) = (&images[c], &psi_images[c]);
@@ -1313,7 +1464,7 @@ impl SurvivalMarginalSlopeFamily {
                         .transpose()?;
                     let w_i = zeta_image_of(&images_i, &beta, width);
                     let w_j = zeta_image_of(&images_j, &beta, width);
-                    let third_axes = order_three_axes(&frame, &calc);
+                    let third_axes = order_three_axes(&frame, &calc)?;
                     let fourth_i = self.timewiggle_order_four_axes(&frame, &calc, &w_i)?;
                     let fourth_j = self.timewiggle_order_four_axes(&frame, &calc, &w_j)?;
                     let fifth_ij = self.timewiggle_order_five_axes(&frame, &calc, &w_i, &w_j)?;
@@ -1383,5 +1534,429 @@ impl SurvivalMarginalSlopeFamily {
         )?
         .unwrap_or_else(zeros);
         Ok(Some(result))
+    }
+}
+
+impl SurvivalMarginalSlopeFamily {
+    /// Whether the ζ composition serves this family's design-ψ terms, their Hessian drift and the
+    /// pair terms (gam#2893): a time wiggle without an influence absorber, per-score slopes or a
+    /// follow-up-varying slope. Without a score warp or link deviation the rigid row program
+    /// supplies the ℓ derivatives on the same four primaries.
+    pub(crate) fn timewiggle_design_psi_terms_available(&self) -> bool {
+        self.flex_timewiggle_active()
+            && self.influence_absorber.is_none()
+            && !self.per_z_slope_active()
+            && !self.slope_is_follow_up_varying()
+    }
+
+    /// Row `row`'s ζ value calculus for the design-ψ terms, from the FLEX row program when `flex`
+    /// holds and from the rigid one otherwise.
+    fn timewiggle_zeta_psi_row(
+        &self,
+        frame: &ZetaFrame<'_>,
+        block_states: &[ParameterBlockState],
+        row: usize,
+        flex: bool,
+    ) -> Result<ZetaPsiRow, String> {
+        let zeta_row = self.timewiggle_zeta_row(frame, block_states, row)?;
+        let zero = [&ZetaDirection::ZERO; 3];
+        let jq = zeta_row.geometry.q_rows(zero, 0);
+        let k0 = zeta_row.geometry.q_matrices(zero, 0);
+        let (gradient, hessian, program) = if flex {
+            let q_geom = self.row_dynamic_q_geometry(row, block_states)?;
+            let (_, gradient, hessian) = self.compute_row_flex_primary_gradient_hessian_exact(
+                row,
+                block_states,
+                &q_geom,
+                &frame.primary,
+            )?;
+            let base =
+                self.build_row_flex_third_base_with_states(row, block_states, &frame.primary)?;
+            (gradient, hessian, ZetaRowProgram::Flex(base))
+        } else {
+            let (_, gradient, hessian) =
+                self.compute_row_primary_gradient_hessian_uncached(row, block_states)?;
+            (gradient, hessian, ZetaRowProgram::Rigid)
+        };
+        Ok(ZetaPsiRow {
+            zeta_row,
+            jq,
+            k0,
+            gradient,
+            hessian,
+            program,
+        })
+    }
+
+    /// `ℓ³[dir]` on row `row` from `program`.
+    fn zeta_row_third(
+        &self,
+        program: &ZetaRowProgram,
+        block_states: &[ParameterBlockState],
+        row: usize,
+        dir: &Array1<f64>,
+    ) -> Result<Array2<f64>, String> {
+        match program {
+            ZetaRowProgram::Flex(base) => self.row_flex_third_contract_from_base(base, dir),
+            ZetaRowProgram::Rigid => {
+                self.row_primary_third_contracted(row, block_states, dir.view())
+            }
+        }
+    }
+
+    /// `ℓ⁴[u, v]` on row `row` from `program`.
+    fn zeta_row_fourth(
+        &self,
+        program: &ZetaRowProgram,
+        block_states: &[ParameterBlockState],
+        row: usize,
+        u: &Array1<f64>,
+        v: &Array1<f64>,
+    ) -> Result<Array2<f64>, String> {
+        match program {
+            ZetaRowProgram::Flex(base) => self.row_flex_fourth_contract_from_base(base, u, v),
+            ZetaRowProgram::Rigid => {
+                self.row_primary_fourth_contracted(row, block_states, u.view(), v.view())
+            }
+        }
+    }
+
+    /// The block of design ψ `psi_index` and its design-derivative row map, or `None` where the
+    /// family has no ψ block for the axis.
+    fn timewiggle_design_psi_map(
+        &self,
+        derivative_blocks: &[Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>],
+        psi_index: usize,
+    ) -> Result<Option<(usize, crate::custom_family::PsiDesignMap)>, String> {
+        let Some((block_idx, local_idx, p_psi, label)) =
+            self.psi_block_info(derivative_blocks, psi_index)?
+        else {
+            return Ok(None);
+        };
+        let policy = gam_runtime::resource::ResourcePolicy::default_library();
+        let map = crate::custom_family::resolve_custom_family_x_psi_map(
+            &derivative_blocks[block_idx][local_idx],
+            self.n,
+            p_psi,
+            0..self.n,
+            label,
+            &policy,
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(Some((block_idx, map)))
+    }
+
+    /// `∂_ψ ℓ̄`, `∂_ψ ∇_β ℓ̄` and `∂_ψ H` for a design ψ under the row measure of `options`
+    /// (gam#2893). A design ψ moves `Ã` by its ζ image `Ã_ψ`, so ζ moves by `w = Ã_ψβ` and a row
+    /// contributes `∇·w`, `Ã_ψᵀ∇ + Ãᵀ∇²w` and `Ãᵀ∇³[w]Ã + Ã_ψᵀ∇²Ã + Ãᵀ∇²Ã_ψ`. The time-wiggle map
+    /// moves through `G`, so its Jacobian needs no hand lift. Returns `None` where the family has
+    /// no ψ block for the axis.
+    pub(crate) fn timewiggle_design_psi_terms(
+        &self,
+        block_states: &[ParameterBlockState],
+        derivative_blocks: &[Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>],
+        psi_index: usize,
+        options: &BlockwiseFitOptions,
+    ) -> Result<Option<ExactNewtonJointPsiTerms>, String> {
+        let Some((block_idx, psi_map)) =
+            self.timewiggle_design_psi_map(derivative_blocks, psi_index)?
+        else {
+            return Ok(None);
+        };
+        let frame = self.timewiggle_zeta_frame(block_states)?;
+        let flex = self.effective_flex_active(block_states)?;
+        let row_weights = self.rigid_third_row_weights(options);
+        let width = frame.layout.width;
+        let p_total = frame.slices.total;
+        let beta = flat_beta(block_states)?;
+        let zeros = || {
+            (
+                0.0,
+                Array1::<f64>::zeros(p_total),
+                Array2::<f64>::zeros((p_total, p_total)),
+            )
+        };
+        let (objective_psi, score_psi, hessian_psi) =
+            gam_linalg::pairwise_reduce::par_deterministic_try_block_fold(
+                self.n,
+                |range| -> Result<(f64, Array1<f64>, Array2<f64>), String> {
+                    let (mut objective, mut score, mut hessian) = zeros();
+                    let mut scratch = Array2::<f64>::zeros((width, p_total));
+                    for row in range {
+                        let weight = row_weights[row];
+                        if weight == 0.0 {
+                            continue;
+                        }
+                        let psi_row = self.timewiggle_zeta_psi_row(&frame, block_states, row, flex)?;
+                        let parts = psi_row.parts(&frame.layout);
+                        let images = &psi_row.zeta_row.images;
+                        let x_psi = psi_map
+                            .row_vector(row)
+                            .map_err(|error| format!("time-wiggle design ψ terms row: {error}"))?;
+                        let psi_images = psi_zeta_images(&frame, block_idx, &x_psi)?;
+                        let w = zeta_image_of(&psi_images, &beta, width);
+                        let third = |direction: &Array1<f64>| -> Result<Array2<f64>, String> {
+                            self.zeta_row_third(&psi_row.program, block_states, row, direction)
+                        };
+                        let gradient = parts.order_one();
+                        let second = parts.order_two();
+                        objective += weight * gradient.dot(&w);
+                        add_pulled_back(&psi_images, &gradient, weight, &mut score);
+                        add_pulled_back(images, &second.dot(&w), weight, &mut score);
+                        let third_w = parts.order_three(&w, &third)? * weight;
+                        add_zeta_sandwich(&third_w, images, images, &mut scratch, &mut hessian);
+                        let second = second * weight;
+                        add_zeta_sandwich(&second, &psi_images, images, &mut scratch, &mut hessian);
+                        add_zeta_sandwich(&second, images, &psi_images, &mut scratch, &mut hessian);
+                    }
+                    Ok((objective, score, hessian))
+                },
+                |left, right| -> Result<_, String> {
+                    Ok((left.0 + right.0, left.1 + right.1, left.2 + right.2))
+                },
+            )?
+            .unwrap_or_else(zeros);
+        Ok(Some(ExactNewtonJointPsiTerms {
+            objective_psi,
+            score_psi,
+            hessian_psi,
+            hessian_psi_operator: None,
+        }))
+    }
+
+    /// `D_β ∂_ψ H[v]` for a design ψ along the coefficient direction `d_beta` under the row measure
+    /// of `options` (gam#2893). With `w = Ã_ψβ`, a row contributes
+    /// `Ãᵀ(∇⁴[w, Ãv] + ∇³[Ã_ψv])Ã + Ã_ψᵀ∇³[Ãv]Ã + Ãᵀ∇³[Ãv]Ã_ψ`, the single-direction case of
+    /// `timewiggle_flex_design_psi_hessian_all_beta_axes`. Returns `None` where the family has no ψ
+    /// block for the axis.
+    pub(crate) fn timewiggle_design_psi_hessian_drift(
+        &self,
+        block_states: &[ParameterBlockState],
+        derivative_blocks: &[Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>],
+        psi_index: usize,
+        d_beta: &Array1<f64>,
+        options: &BlockwiseFitOptions,
+    ) -> Result<Option<Array2<f64>>, String> {
+        let Some((block_idx, psi_map)) =
+            self.timewiggle_design_psi_map(derivative_blocks, psi_index)?
+        else {
+            return Ok(None);
+        };
+        let frame = self.timewiggle_zeta_frame(block_states)?;
+        let flex = self.effective_flex_active(block_states)?;
+        let row_weights = self.rigid_third_row_weights(options);
+        let width = frame.layout.width;
+        let p_total = frame.slices.total;
+        if d_beta.len() != p_total {
+            return Err(format!(
+                "time-wiggle design ψ Hessian drift needs a direction of length {p_total}, got {}",
+                d_beta.len()
+            ));
+        }
+        let beta = flat_beta(block_states)?;
+        let zeros = || Array2::<f64>::zeros((p_total, p_total));
+        let result = gam_linalg::pairwise_reduce::par_deterministic_try_block_fold(
+            self.n,
+            |range| -> Result<Array2<f64>, String> {
+                let mut acc = zeros();
+                let mut scratch = Array2::<f64>::zeros((width, p_total));
+                for row in range {
+                    let weight = row_weights[row];
+                    if weight == 0.0 {
+                        continue;
+                    }
+                    let psi_row = self.timewiggle_zeta_psi_row(&frame, block_states, row, flex)?;
+                    let parts = psi_row.parts(&frame.layout);
+                    let images = &psi_row.zeta_row.images;
+                    let x_psi = psi_map
+                        .row_vector(row)
+                        .map_err(|error| format!("time-wiggle design ψ Hessian drift row: {error}"))?;
+                    let psi_images = psi_zeta_images(&frame, block_idx, &x_psi)?;
+                    let w = zeta_image_of(&psi_images, &beta, width);
+                    let v_zeta = zeta_image_of(images, d_beta, width);
+                    let psi_v_zeta = zeta_image_of(&psi_images, d_beta, width);
+                    let third = |direction: &Array1<f64>| -> Result<Array2<f64>, String> {
+                        self.zeta_row_third(&psi_row.program, block_states, row, direction)
+                    };
+                    let fourth =
+                        |left: &Array1<f64>, right: &Array1<f64>| -> Result<Array2<f64>, String> {
+                            self.zeta_row_fourth(&psi_row.program, block_states, row, left, right)
+                        };
+                    let inner = parts.order_four(&w, &v_zeta, &third, &fourth)?
+                        + parts.order_three(&psi_v_zeta, &third)?;
+                    add_zeta_sandwich(&(inner * weight), images, images, &mut scratch, &mut acc);
+                    let third_v = parts.order_three(&v_zeta, &third)? * weight;
+                    add_zeta_sandwich(&third_v, &psi_images, images, &mut scratch, &mut acc);
+                    add_zeta_sandwich(&third_v, images, &psi_images, &mut scratch, &mut acc);
+                }
+                Ok(acc)
+            },
+            |left, right| -> Result<_, String> { Ok(left + right) },
+        )?
+        .unwrap_or_else(zeros);
+        Ok(Some(result))
+    }
+
+    /// `∂²_ψiψj ℓ̄`, `∂²_ψiψj ∇_β ℓ̄` and `∂²_ψiψj H` for a pair of design ψ under the row measure
+    /// of `options` (gam#2893). With the ζ images `Ã_i`, `Ã_j` and `Ã_ij` of the design motions and
+    /// `w_• = Ã_•β`, a row contributes `∇·w_ij + w_iᵀ∇²w_j`,
+    /// `Ã_ijᵀ∇ + Ã_iᵀ∇²w_j + Ã_jᵀ∇²w_i + Ãᵀ(∇³[w_i]w_j + ∇²w_ij)` and
+    /// `Ãᵀ(∇⁴[w_i, w_j] + ∇³[w_ij])Ã`, plus `Ã_iᵀ∇³[w_j]Ã`, `Ã_jᵀ∇³[w_i]Ã`, `Ã_ijᵀ∇²Ã` and
+    /// `Ã_iᵀ∇²Ã_j`, each with its transpose. `Ã_ij` is zero across blocks. Returns `None` where the
+    /// family has no ψ block for either axis.
+    pub(crate) fn timewiggle_design_psi_second_order_terms(
+        &self,
+        block_states: &[ParameterBlockState],
+        derivative_blocks: &[Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>],
+        psi_i: usize,
+        psi_j: usize,
+        options: &BlockwiseFitOptions,
+    ) -> Result<Option<ExactNewtonJointPsiSecondOrderTerms>, String> {
+        let Some((block_i, local_i, p_psi_i, label_i)) =
+            self.psi_block_info(derivative_blocks, psi_i)?
+        else {
+            return Ok(None);
+        };
+        let Some((block_j, local_j, p_psi_j, label_j)) =
+            self.psi_block_info(derivative_blocks, psi_j)?
+        else {
+            return Ok(None);
+        };
+        let frame = self.timewiggle_zeta_frame(block_states)?;
+        let flex = self.effective_flex_active(block_states)?;
+        let row_weights = self.rigid_third_row_weights(options);
+        let width = frame.layout.width;
+        let p_total = frame.slices.total;
+        let n = self.n;
+        let beta = flat_beta(block_states)?;
+        let policy = gam_runtime::resource::ResourcePolicy::default_library();
+        let map_i = crate::custom_family::resolve_custom_family_x_psi_map(
+            &derivative_blocks[block_i][local_i],
+            n,
+            p_psi_i,
+            0..n,
+            label_i,
+            &policy,
+        )
+        .map_err(|error| error.to_string())?;
+        let map_j = crate::custom_family::resolve_custom_family_x_psi_map(
+            &derivative_blocks[block_j][local_j],
+            n,
+            p_psi_j,
+            0..n,
+            label_j,
+            &policy,
+        )
+        .map_err(|error| error.to_string())?;
+        let map_ij = if block_i == block_j {
+            Some(
+                crate::custom_family::resolve_custom_family_x_psi_psi_map(
+                    &derivative_blocks[block_i][local_i],
+                    &derivative_blocks[block_j][local_j],
+                    local_j,
+                    n,
+                    p_psi_i,
+                    0..n,
+                    label_i,
+                    &policy,
+                )
+                .map_err(|error| error.to_string())?,
+            )
+        } else {
+            None
+        };
+        let zeros = || {
+            (
+                0.0,
+                Array1::<f64>::zeros(p_total),
+                Array2::<f64>::zeros((p_total, p_total)),
+            )
+        };
+        let (objective_psi_psi, score_psi_psi, hessian_psi_psi) =
+            gam_linalg::pairwise_reduce::par_deterministic_try_block_fold(
+                n,
+                |range| -> Result<(f64, Array1<f64>, Array2<f64>), String> {
+                    let (mut objective, mut score, mut hessian) = zeros();
+                    let mut scratch = Array2::<f64>::zeros((width, p_total));
+                    for row in range {
+                        let weight = row_weights[row];
+                        if weight == 0.0 {
+                            continue;
+                        }
+                        let psi_row = self.timewiggle_zeta_psi_row(&frame, block_states, row, flex)?;
+                        let parts = psi_row.parts(&frame.layout);
+                        let images = &psi_row.zeta_row.images;
+                        let x_i = map_i
+                            .row_vector(row)
+                            .map_err(|error| format!("time-wiggle design ψ pair terms row: {error}"))?;
+                        let x_j = map_j
+                            .row_vector(row)
+                            .map_err(|error| format!("time-wiggle design ψ pair terms row: {error}"))?;
+                        let images_i = psi_zeta_images(&frame, block_i, &x_i)?;
+                        let images_j = psi_zeta_images(&frame, block_j, &x_j)?;
+                        let images_ij = match map_ij.as_ref() {
+                            Some(map) => {
+                                let x_ij = map.row_vector(row).map_err(|error| {
+                                    format!("time-wiggle design ψ pair terms row: {error}")
+                                })?;
+                                Some(psi_zeta_images(&frame, block_i, &x_ij)?)
+                            }
+                            None => None,
+                        };
+                        let w_i = zeta_image_of(&images_i, &beta, width);
+                        let w_j = zeta_image_of(&images_j, &beta, width);
+                        let third = |direction: &Array1<f64>| -> Result<Array2<f64>, String> {
+                            self.zeta_row_third(&psi_row.program, block_states, row, direction)
+                        };
+                        let fourth = |left: &Array1<f64>,
+                                      right: &Array1<f64>|
+                         -> Result<Array2<f64>, String> {
+                            self.zeta_row_fourth(&psi_row.program, block_states, row, left, right)
+                        };
+                        let gradient = parts.order_one();
+                        let second = parts.order_two();
+                        let third_i = parts.order_three(&w_i, &third)?;
+                        let third_j = parts.order_three(&w_j, &third)?;
+                        let second_w_i = second.dot(&w_i);
+                        let second_w_j = second.dot(&w_j);
+                        objective += weight * w_i.dot(&second_w_j);
+                        add_pulled_back(&images_i, &second_w_j, weight, &mut score);
+                        add_pulled_back(&images_j, &second_w_i, weight, &mut score);
+                        add_pulled_back(images, &third_i.dot(&w_j), weight, &mut score);
+                        let mut inner = parts.order_four(&w_i, &w_j, &third, &fourth)?;
+                        if let Some(images_ij) = images_ij.as_ref() {
+                            let w_ij = zeta_image_of(images_ij, &beta, width);
+                            objective += weight * gradient.dot(&w_ij);
+                            add_pulled_back(images_ij, &gradient, weight, &mut score);
+                            add_pulled_back(images, &second.dot(&w_ij), weight, &mut score);
+                            inner += &parts.order_three(&w_ij, &third)?;
+                            let second_ij = &second * weight;
+                            add_zeta_sandwich(&second_ij, images_ij, images, &mut scratch, &mut hessian);
+                            add_zeta_sandwich(&second_ij, images, images_ij, &mut scratch, &mut hessian);
+                        }
+                        add_zeta_sandwich(&(inner * weight), images, images, &mut scratch, &mut hessian);
+                        let third_j = third_j * weight;
+                        add_zeta_sandwich(&third_j, &images_i, images, &mut scratch, &mut hessian);
+                        add_zeta_sandwich(&third_j, images, &images_i, &mut scratch, &mut hessian);
+                        let third_i = third_i * weight;
+                        add_zeta_sandwich(&third_i, &images_j, images, &mut scratch, &mut hessian);
+                        add_zeta_sandwich(&third_i, images, &images_j, &mut scratch, &mut hessian);
+                        let second = second * weight;
+                        add_zeta_sandwich(&second, &images_i, &images_j, &mut scratch, &mut hessian);
+                        add_zeta_sandwich(&second, &images_j, &images_i, &mut scratch, &mut hessian);
+                    }
+                    Ok((objective, score, hessian))
+                },
+                |left, right| -> Result<_, String> {
+                    Ok((left.0 + right.0, left.1 + right.1, left.2 + right.2))
+                },
+            )?
+            .unwrap_or_else(zeros);
+        Ok(Some(ExactNewtonJointPsiSecondOrderTerms {
+            objective_psi_psi,
+            score_psi_psi,
+            hessian_psi_psi,
+            hessian_psi_psi_operator: None,
+        }))
     }
 }

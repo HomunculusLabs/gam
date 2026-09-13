@@ -218,6 +218,16 @@ impl SurvivalMarginalSlopeFamily {
         cache: Option<&EvalCache>,
         options: &BlockwiseFitOptions,
     ) -> Result<Option<ExactNewtonJointPsiTerms>, String> {
+        // A time wiggle moves every design ψ through the ζ composition, which differentiates the
+        // time-wiggle map itself instead of lifting its Jacobian by hand (gam#2893).
+        if self.timewiggle_design_psi_terms_available() {
+            return self.timewiggle_design_psi_terms(
+                block_states,
+                derivative_blocks,
+                psi_index,
+                options,
+            );
+        }
         let flex_active = self.effective_flex_active(block_states)?;
         let flex_primary = flex_active.then(|| flex_primary_slices(self));
         let slices = block_slices(self, block_states);
@@ -735,6 +745,16 @@ impl SurvivalMarginalSlopeFamily {
         cache: Option<&EvalCache>,
         options: &BlockwiseFitOptions,
     ) -> Result<Option<ExactNewtonJointPsiSecondOrderTerms>, String> {
+        // A time wiggle takes the ζ composition; see `psi_terms_inner_with_options` (gam#2893).
+        if self.timewiggle_design_psi_terms_available() {
+            return self.timewiggle_design_psi_second_order_terms(
+                block_states,
+                derivative_blocks,
+                psi_i,
+                psi_j,
+                options,
+            );
+        }
         let flex_active = self.effective_flex_active(block_states)?;
         let flex_primary = flex_active.then(|| flex_primary_slices(self));
         let slices = block_slices(self, block_states);
@@ -1445,6 +1465,16 @@ impl SurvivalMarginalSlopeFamily {
         d_beta_flat: &Array1<f64>,
         options: &BlockwiseFitOptions,
     ) -> Result<Option<Array2<f64>>, String> {
+        // A time wiggle takes the ζ composition; see `psi_terms_inner_with_options` (gam#2893).
+        if self.timewiggle_design_psi_terms_available() {
+            return self.timewiggle_design_psi_hessian_drift(
+                block_states,
+                derivative_blocks,
+                psi_index,
+                d_beta_flat,
+                options,
+            );
+        }
         Ok(self
             .psi_hessian_directional_derivative_accumulator(
                 block_states,
@@ -1673,6 +1703,21 @@ impl SurvivalMarginalSlopeFamily {
         d_beta_flat: &Array1<f64>,
         options: &BlockwiseFitOptions,
     ) -> Result<Option<Arc<dyn HyperOperator>>, String> {
+        // A time wiggle takes the ζ composition; see `psi_terms_inner_with_options` (gam#2893).
+        if self.timewiggle_design_psi_terms_available() {
+            return Ok(self
+                .timewiggle_design_psi_hessian_drift(
+                    block_states,
+                    derivative_blocks,
+                    psi_index,
+                    d_beta_flat,
+                    options,
+                )?
+                .map(|matrix| {
+                    Arc::new(gam_problem::DenseMatrixHyperOperator { matrix })
+                        as Arc<dyn HyperOperator>
+                }));
+        }
         Ok(self
             .psi_hessian_directional_derivative_accumulator(
                 block_states,
