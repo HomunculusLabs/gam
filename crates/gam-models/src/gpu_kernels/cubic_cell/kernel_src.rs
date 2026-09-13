@@ -64,9 +64,9 @@ fn emit_table(dst: &mut String, table: &[f64; 384]) {
 const HEADER: &str = r#"// AUTO-GENERATED CUDA C++ source for the de-nested cubic-cell derivative
 // moment kernel. Do not edit by hand; see src/gpu/cubic_cell/kernel_src.rs.
 //
-// One warp processes one cell. For non-affine finite cells each lane folds
+// One warp processes one cell. For finite cells, affine or not, each lane folds
 // 12 of the 384 GL nodes (stride 32) and the warp reduces via __shfl_xor_sync
-// butterflies. For affine and affine-tail cells lane 0 runs the closed-form
+// butterflies. For affine-tail cells lane 0 runs the closed-form
 // q'-recurrence and broadcasts via __shfl_sync.
 
 // We deliberately do NOT `#include <stdint.h>`. NVRTC compiles with no usable
@@ -94,7 +94,6 @@ typedef unsigned int   uint32_t;
 #define STATUS_NONFINITE_COEF  3
 #define STATUS_NONFINITE_Q     4
 
-#define BRANCH_AFFINE          0
 #define BRANCH_NONAFFINE_FIN   1
 #define BRANCH_AFFINE_TAIL     2
 
@@ -175,10 +174,6 @@ const KERNEL_BODY: &str = r#"    const double* __restrict__ cell_left,
             // Host classifier vets c2/c3 as structurally zero.
             // Tails with any curvature never reach this kernel, so the device
             // result matches `affine_anchor_moment_vector` byte-for-byte.
-            if (!(R > L)) {
-                local_status = STATUS_INVALID;
-            }
-        } else if (branch == BRANCH_AFFINE) {
             if (!(R > L)) {
                 local_status = STATUS_INVALID;
             }
@@ -268,7 +263,7 @@ const KERNEL_BODY: &str = r#"    const double* __restrict__ cell_left,
         return;
     }
 
-    // Affine / Affine-tail: lane 0 runs the closed-form q'-recurrence.
+    // Affine tail: lane 0 runs the closed-form q'-recurrence.
     if (lane == 0) {
         const double alpha = c0;
         const double beta  = c1;

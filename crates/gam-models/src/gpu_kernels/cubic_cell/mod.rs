@@ -14,8 +14,8 @@
 //! Two branches feed into the same device API:
 //!
 //! * **Finite** (any polynomial class): fixed 384-point Gauss–Legendre on the
-//!   cell. The kernel's affine `T_n` recurrence branch is not dispatched: on a
-//!   finite interval it amplifies roundoff like `(n−1)!!`.
+//!   cell. The kernel has no finite affine branch: on a finite interval the
+//!   affine `T_n` recurrence amplifies roundoff like `(n−1)!!`.
 //! * **Affine tail**: closed-form on a semi-infinite (or whole-line) interval.
 //!
 //! This is **distinct** from `src/gpu/cubic_bspline_moments.rs`, which

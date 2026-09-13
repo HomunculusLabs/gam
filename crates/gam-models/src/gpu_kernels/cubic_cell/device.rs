@@ -1,7 +1,7 @@
 //! Device-resident dispatcher for the cubic-cell derivative-moment substrate.
 //!
 //! Every cell is classified exactly once by the canonical CPU predicate, then
-//! the all-branch NVRTC kernel evaluates affine, non-affine finite, and affine
+//! the all-branch NVRTC kernel evaluates finite cells (affine or not) and affine
 //! tail cells into one device-resident `[n_cells, max_degree+1]` buffer. There
 //! is no selected-device-to-host fallback. Invalid cells receive zeroed rows and
 //! a typed [`super::CubicCellMomentStatus`].
@@ -123,9 +123,9 @@ impl CubicCellGpuBackend {
     }
 
     /// Device-resident dispatcher: leaves the moments + status buffers on
-    /// the GPU. Stage-4 strategy: route **all three**
-    /// branches through the single NVRTC kernel (which already covers
-    /// Affine, NonAffineFinite, and AffineTail in closed form) so the
+    /// the GPU. Stage-4 strategy: route **both**
+    /// branches through the single NVRTC kernel (NonAffineFinite on the
+    /// Gauss–Legendre ladder, AffineTail in closed form) so the
     /// output is naturally `[n_cells, stride]` indexed by original cell
     /// index — no host-side scatter required.
     ///
@@ -158,7 +158,7 @@ impl CubicCellGpuBackend {
         //      `dispatch` host-resident path's classifier behavior.
         let mut status_host = vec![CubicCellMomentStatus::Ok; n_cells];
         // Branch code per cell for the kernel:
-        // BRANCH_AFFINE = 0, BRANCH_NONAFFINE_FIN = 1, BRANCH_AFFINE_TAIL = 2.
+        // BRANCH_NONAFFINE_FIN = 1, BRANCH_AFFINE_TAIL = 2.
         // 255 marks "classifier-rejected" — the kernel's lane-0 validator
         // falls into the trailing `else { local_status = STATUS_INVALID; }`
         // branch on any unrecognized code, which zeros the row + writes
