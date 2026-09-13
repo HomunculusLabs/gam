@@ -1784,8 +1784,7 @@ pub struct MultinomialSavedModel {
     /// instead, which is a second numerical route to one quantity (#1082). That
     /// inversion's error grows with the covariance's condition number, which the
     /// selected λ sets (up to 4.9e10 on the penguins real-data fit, pool job
-    /// 580128), and the curvature it feeds is the small difference
-    /// `T − (XᵀWX + S_λ)`.
+    /// 580128), and the predictive subtracts the likelihood curvature `XᵀWX` from it.
     #[serde(default)]
     pub terminal_precision_flat: Option<Vec<f64>>,
     /// Joint coefficient-space influence matrix `F = H⁻¹ X'WX` (#1101),
@@ -2305,6 +2304,11 @@ impl MultinomialSavedModel {
     /// Asking for `SmoothingCorrected` on a model that carries no correction is
     /// an ERROR, not a silent downgrade — the same contract
     /// `gam-predict`'s `SmoothingCorrected` mode holds.
+    ///
+    /// A fit that armed a proper prior whose fitted quadratic is not certified
+    /// positive definite has no second-order spread to publish, and declines with
+    /// `EstimationError::PredictiveIntervalsDeclined`, carrying the quadratic's
+    /// inertia. `predict_multinomial_formula` still publishes the means (#1082).
     pub fn predict_probabilities_with_se_in_mode(
         &self,
         x_new: ArrayView2<'_, f64>,

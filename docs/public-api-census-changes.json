@@ -3890,5 +3890,13 @@
     },
     "reason": "#2899, SPEC rule 25 (delete public API no product uses, and code only its own tests use). gam-solve: evidence::TopologyCandidate, TopologySelectOptions and TopologyKind, gaussian_reml::GaussianRemlNoAllocWorkspace, row_sampling_measure::CertifiedRowSample, the streaming_border module, and RationalLogdetPlan::evaluate_with_shifted_solver with its private solve_shift_ladder_with helper and its one unit test. None has a product user or a production caller.",
     "evidence": "The removed pub fn declarations are the census's own refusal map at the checked pair: methods of the deleted types and module, and evaluate_with_shifted_solver. Guarded compile: pool job 639789."
+  },
+  {
+    "base": "ea6a1881fb88a3ef9636ab959320184a23fa61b3",
+    "removed": {
+      "crates/gam-solve/src/reml/reml_outer_engine/dense_spectral.rs::rounding_band": 1
+    },
+    "reason": "#1082. The multinomial ratio predictive now integrates ℓ(θ) + s(β̂)ᵀo − ½oᵀQo anchored at the published mode, with Q = T − XᵀW(β̂)X as its one quadratic and Q certified against its rounding band before any solve. The separate prior quadratic PriorQuadratic (A = T − (XᵀWX + S_λ) and its anchor) has no remaining use. DenseSpectralOperator::rounding_band held H's rounding band p·ε·‖H‖₂ inside gam-solve; the certificate on Q needs the same band, so the definition moves to gam_linalg::roundoff::symmetric_spectrum_rounding_band (the same expression) and its gam-solve callers read it there.",
+    "evidence": "At bfb09a938, git grep -n -w PriorQuadratic finds it only in crates/gam-models/src/multinomial_predictive.rs. DenseSpectralOperator::rounding_band is called only in crates/gam-solve/src/reml/reml_outer_engine/dense_spectral.rs (as Self::rounding_band, including the call 0c9570b18 added after that base) and crates/gam-solve/src/estimate/identified_hessian.rs. All of these read gam_linalg::roundoff::symmetric_spectrum_rounding_band in the same commit, and the landing script refuses a tree that still names either removed item. Guarded check job 612561 (lane sw0c, bfb09a938 plus qcert.patch): cargo check -p gam-pyffi --all-targets passed; the workspace check stopped at a foreign E0277 (5d443c3c8, fixed by 3a5be6550); and the gam-models multinomial suites passed 12 of 12 (/scratch.global/sauer354/pool/perf1082/check12.612561.log)."
   }
 ]

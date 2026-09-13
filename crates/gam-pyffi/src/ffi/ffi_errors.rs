@@ -647,6 +647,9 @@ fn estimation_error_to_pyerr_with_message(err: &EstimationError, message: String
         EstimationError::CalibratorTrainingFailed(_) => CalibratorError::new_err(message),
         EstimationError::InvalidSpecification(_) => InvalidSpecificationError::new_err(message),
         EstimationError::PredictionError => PredictionError::new_err(message),
+        // The fitted posterior's second-order model cannot publish a spread; the
+        // prediction request is what declines, not the fit (#1082).
+        EstimationError::PredictiveIntervalsDeclined { .. } => PredictionError::new_err(message),
         EstimationError::CustomFamily(_) => CustomFamilyError::new_err(message),
         // Invalid stabilization metadata is a model/solver specification
         // defect, not a data problem.

@@ -59,13 +59,18 @@
 //! # Cost
 //!
 //! One warm-started Newton solve per (row, class), plus `K(K+1)/2` more per row
-//! when second moments are requested. Without a fitted extra term the augmented
-//! objective is strictly convex, so Newton with backtracking is unconditionally
-//! safe. With one it also carries the curvature `A = −∇²Φ(β̂)`, whose
-//! second-order completion `−½ tr(K H''[e_a, e_b])` is indefinite in general, so
-//! the objective is convex only where `XᵀWX + S_λ + A` stays positive definite,
-//! and the Cholesky refusal in `augmented_mode` is the exit where it does not.
-//! Each Newton
+//! when second moments are requested. Every objective is expanded around the
+//! published mode `β̂` as `ℓ(θ) + s(β̂)ᵀo − ½ oᵀ Q o`, with `o = θ − β̂` and
+//! `s = −∇ℓ`, so its curvature is `XᵀW(θ)X + Q` plus the extra rows' (see
+//! [`MultinomialPredictiveModel::terminal_precision`] for `Q`). Where `Q` is
+//! positive definite every augmented objective is strictly concave, so Newton
+//! with backtracking is unconditionally safe. A fitted extra term brings the
+//! second-order completion `−½ tr(K H''[e_a, e_b])`, which is indefinite in
+//! general, so `Q` need not be positive definite, and where it is not the
+//! second-order posterior is improper. `predictive_moments` therefore certifies
+//! `Q` against its rounding band before any solve and integrates it only where it
+//! is positive definite (see `terminal_precision` for what it does otherwise), so
+//! the Cholesky refusal in `augmented_mode` is a numerical exit only. Each Newton
 //! iteration is `O(n·M²·P²)` for the curvature (as `M(M+1)/2` GEMMs) and
 //! `O(d³)` for the factorisation, so the whole predictive is
 //! `O(R·K·iters·(n M² P² + d³))`.
@@ -81,7 +86,7 @@
 //! being wrong.
 
 use crate::model_types::EstimationError;
-use gam_linalg::faer_ndarray::FaerCholesky;
+use gam_linalg::faer_ndarray::{FaerCholesky, FaerEigh};
 use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2};
 
 /// Largest tolerated deviation of `Σ_c E[p_c(x)]` from one before a prediction
@@ -136,14 +141,32 @@ pub struct MultinomialPredictiveModel<'a> {
     pub n_classes: usize,
     /// The fitted objective's own terminal posterior precision at the published
     /// mode, in the same stacked order, shape `(P·M, P·M)`. On a fit that armed a
-    /// proper prior it is `H + S_λ + H_Φ + completion`, the matrix the saved
+    /// proper prior it is `T = H + S_λ + H_Φ + completion`, the matrix the saved
     /// covariance inverts. `None` when the fitted objective is `ℓ − ½θ'S_λθ`
     /// itself.
     ///
-    /// At the mode, `A = terminal_precision − (Xᵀ W X + S_λ)` is the extra term's
-    /// curvature `−∇²Φ(β̂)`. The predictive carries it as the quadratic
-    /// `−½(θ − β̂)ᵀ A (θ − β̂)` beside the linear tilt, so each ratio integrates the
-    /// posterior the published coefficients belong to (#1082).
+    /// What the objective carries beyond the likelihood has curvature
+    /// `Q = T − Xᵀ W(β̂) X` at the mode: `S_λ` plus the extra term's `−∇²Φ(β̂)`.
+    /// Around `β̂`, `−½θ'S_λθ + Φ(θ)` is `s(β̂)ᵀo − ½ oᵀ Q o` to second order and up
+    /// to a constant, where `o = θ − β̂` and `s(β̂) = −∇ℓ(β̂)` is what the fit's
+    /// stationarity balances. So the predictive integrates `ℓ(θ) + s(β̂)ᵀo − ½ oᵀ Q o`,
+    /// and each ratio integrates the posterior the published coefficients belong to
+    /// (#1082). Without a fitted term `Q = S_λ`, and that objective is
+    /// `ℓ − ½θ'S_λθ` up to a constant.
+    ///
+    /// `Q` is formed once, as `T` less the likelihood curvature. It is never
+    /// rebuilt as `S_λ + (T − XᵀWX − S_λ)`: where `λ` is large `S_λ` dwarfs both
+    /// other terms, and that round trip leaves rounding at the scale of `S_λ` in
+    /// every precision the predictive factors.
+    ///
+    /// `Q` is integrated only where its spectrum certifies it positive definite
+    /// against its rounding band `p·ε·‖Q‖₂`. A negative direction makes the
+    /// second-order posterior improper, because `ℓ ≤ 0` while `−½ oᵀ Q o` grows
+    /// along it, and an unresolved one cannot be certified either way. Such a fit
+    /// has no second-order spread to publish: second moments decline with
+    /// `EstimationError::PredictiveIntervalsDeclined`, carrying `Q`'s inertia. The
+    /// point moments never need `T`, and integrate `ℓ − ½θ'S_λθ` with the measured
+    /// tilt, the published posterior with its extra term carried to first order.
     pub terminal_precision: Option<ArrayView2<'a, f64>>,
 }
 
@@ -168,13 +191,15 @@ struct ExtraRow<'a> {
     class: usize,
 }
 
-/// The second-order model of the fitted objective's extra term around the
-/// published mode, `−½(θ − anchor)ᵀ curvature (θ − anchor)`. See
-/// [`MultinomialPredictiveModel::terminal_precision`].
-#[derive(Debug, Clone)]
-struct PriorQuadratic {
-    anchor: Vec<f64>,
-    curvature: Array2<f64>,
+/// The fitted quadratic `Q = T − XᵀW(β̂)X` and its inertia against its rounding
+/// band. See [`MultinomialPredictiveModel::terminal_precision`].
+struct FittedQuadratic {
+    quadratic: Array2<f64>,
+    positive: usize,
+    negative: usize,
+    unresolved: usize,
+    lowest_eigenvalue: f64,
+    rounding_band: f64,
 }
 
 impl<'a> MultinomialPredictiveModel<'a> {
@@ -289,19 +314,18 @@ impl<'a> MultinomialPredictiveModel<'a> {
         }
     }
 
-    /// The objective this predictive integrates:
-    /// `ℓ(θ) − ½ θ' S_λ θ + cᵀθ − ½(θ − β̂)ᵀ A (θ − β̂)`, optionally with extra
-    /// observations appended. The last term is present only when the fit carried an
-    /// extra term (see `terminal_precision`).
+    /// The objective this predictive integrates, expanded around `anchor = β̂`:
+    /// `ℓ(θ) + tiltᵀo − ½ oᵀ Q o` with `o = θ − β̂` and `Q = self.joint_penalty`,
+    /// optionally with extra observations appended (see `terminal_precision`).
     ///
-    /// See [`Self::stationarity_tilt`] for what `c` is and why it is measured
+    /// See [`Self::stationarity_tilt`] for what the tilt is and why it is measured
     /// rather than assumed.
     fn log_posterior(
         &self,
         theta: &[f64],
         extra: &[ExtraRow<'_>],
+        anchor: &[f64],
         tilt: &[f64],
-        prior: Option<&PriorQuadratic>,
     ) -> f64 {
         let m = self.active_classes();
         let mut eta = vec![0.0_f64; m];
@@ -324,54 +348,37 @@ impl<'a> MultinomialPredictiveModel<'a> {
             let picked = if row.class < m { eta[row.class] } else { 0.0 };
             total += picked - Self::row_log_partition(&eta);
         }
+        let offset: Vec<f64> = theta
+            .iter()
+            .zip(anchor.iter())
+            .map(|(t, a)| t - a)
+            .collect();
         let mut quadratic = 0.0_f64;
-        for (i, &ti) in theta.iter().enumerate() {
+        for (i, &oi) in offset.iter().enumerate() {
             let mut acc = 0.0_f64;
-            for (j, &tj) in theta.iter().enumerate() {
-                acc += self.joint_penalty[[i, j]] * tj;
+            for (j, &oj) in offset.iter().enumerate() {
+                acc += self.joint_penalty[[i, j]] * oj;
             }
-            quadratic += ti * acc;
+            quadratic += oi * acc;
         }
-        let linear: f64 = theta.iter().zip(tilt.iter()).map(|(t, c)| t * c).sum();
-        let mut prior_quadratic = 0.0_f64;
-        if let Some(prior) = prior {
-            let offset: Vec<f64> = theta
-                .iter()
-                .zip(prior.anchor.iter())
-                .map(|(t, a)| t - a)
-                .collect();
-            for (i, &oi) in offset.iter().enumerate() {
-                let mut acc = 0.0_f64;
-                for (j, &oj) in offset.iter().enumerate() {
-                    acc += prior.curvature[[i, j]] * oj;
-                }
-                prior_quadratic += oi * acc;
-            }
-        }
-        total - 0.5 * quadratic + linear - 0.5 * prior_quadratic
+        let linear: f64 = offset.iter().zip(tilt.iter()).map(|(o, c)| o * c).sum();
+        total - 0.5 * quadratic + linear
     }
 
-    /// Gradient of the NEGATIVE penalized log-posterior and its Hessian, both
-    /// in the stacked class-major order.
+    /// The training rows' part of the NEGATIVE log-posterior: their gradient
+    /// `Xᵀ(p(θ) − y)`, returned, and their curvature `XᵀW(θ)X`, added into
+    /// `curvature`, both in the stacked class-major order.
     ///
     /// The `(a, b)` curvature block is `Xᵀ diag(w_ab) X` with
     /// `w_ab[row] = weight · p_a (δ_ab − p_b)`, which is a GEMM. Accumulating it
     /// row-by-row instead would be the same flops with none of the locality,
     /// and this is the inner loop of every augmented mode: one per (prediction
     /// row, class).
-    fn gradient_and_precision(
-        &self,
-        theta: &[f64],
-        extra: &[ExtraRow<'_>],
-        tilt: &[f64],
-        prior: Option<&PriorQuadratic>,
-    ) -> (Array1<f64>, Array2<f64>) {
+    fn add_training_rows(&self, theta: &[f64], curvature: &mut Array2<f64>) -> Array1<f64> {
         let n = self.training_design.nrows();
         let p = self.training_design.ncols();
         let m = self.active_classes();
-        let d = p * m;
-        let mut gradient = Array1::<f64>::zeros(d);
-        let mut precision = self.joint_penalty.to_owned();
+        let mut gradient = Array1::<f64>::zeros(p * m);
         let mut eta = vec![0.0_f64; m];
         let mut probs = vec![0.0_f64; self.n_classes];
         // `curvature_weights[(row, a * m + b)]` is the row's contribution to the
@@ -409,17 +416,36 @@ impl<'a> MultinomialPredictiveModel<'a> {
                 let block = self.training_design.t().dot(&scaled);
                 for i in 0..p {
                     for j in 0..p {
-                        precision[[a * p + i, b * p + j]] += block[[i, j]];
+                        curvature[[a * p + i, b * p + j]] += block[[i, j]];
                         if a != b {
                             // `w_ab = w·p_a(δ_ab − p_b)` is symmetric in `(a, b)`,
                             // so the mirrored block is the transpose and does not
                             // need its own GEMM.
-                            precision[[b * p + j, a * p + i]] += block[[i, j]];
+                            curvature[[b * p + j, a * p + i]] += block[[i, j]];
                         }
                     }
                 }
             }
         }
+        gradient
+    }
+
+    /// Gradient of the NEGATIVE of [`Self::log_posterior`] and its Hessian, both
+    /// in the stacked class-major order.
+    fn gradient_and_precision(
+        &self,
+        theta: &[f64],
+        extra: &[ExtraRow<'_>],
+        anchor: &[f64],
+        tilt: &[f64],
+    ) -> (Array1<f64>, Array2<f64>) {
+        let p = self.training_design.ncols();
+        let m = self.active_classes();
+        let d = p * m;
+        let mut precision = self.joint_penalty.to_owned();
+        let mut gradient = self.add_training_rows(theta, &mut precision);
+        let mut eta = vec![0.0_f64; m];
+        let mut probs = vec![0.0_f64; self.n_classes];
 
         // The extra observations are rank-`m` and there are at most two of them,
         // so they are accumulated directly rather than through another GEMM.
@@ -452,34 +478,66 @@ impl<'a> MultinomialPredictiveModel<'a> {
             }
         }
 
-        // The penalty's own contribution to the gradient of the NEGATIVE
-        // log-posterior is `S_λ θ`; the tilt's is `−c`. Neither touches the
-        // curvature — the penalty is already in `precision` and a linear term
-        // has no second derivative.
+        // The quadratic's contribution to the gradient of the NEGATIVE
+        // log-posterior is `Q(θ − β̂)`; the tilt's is `−tilt`. Neither touches the
+        // curvature — `Q` is already in `precision` and a linear term has no
+        // second derivative.
         for i in 0..d {
             let mut acc = 0.0_f64;
             for j in 0..d {
-                acc += self.joint_penalty[[i, j]] * theta[j];
+                acc += self.joint_penalty[[i, j]] * (theta[j] - anchor[j]);
             }
             gradient[i] += acc - tilt[i];
-        }
-        // The fitted extra term's quadratic model contributes `A(θ − β̂)` to the
-        // gradient and `A` to the curvature.
-        if let Some(prior) = prior {
-            precision += &prior.curvature;
-            for i in 0..d {
-                let mut acc = 0.0_f64;
-                for j in 0..d {
-                    acc += prior.curvature[[i, j]] * (theta[j] - prior.anchor[j]);
-                }
-                gradient[i] += acc;
-            }
         }
         (gradient, precision)
     }
 
-    /// The linear term `c` that makes the SUPPLIED coefficients an exact
-    /// stationary point of the objective this predictive integrates.
+    /// `Q = T − XᵀW(β̂)X` at `anchor`, symmetrized, with its inertia against its
+    /// own rounding band (see `terminal_precision`).
+    fn fitted_quadratic(
+        &self,
+        anchor: &[f64],
+        terminal: ArrayView2<'_, f64>,
+    ) -> Result<FittedQuadratic, EstimationError> {
+        let d = self.coefficient_dim();
+        let mut likelihood_curvature = Array2::<f64>::zeros((d, d));
+        self.add_training_rows(anchor, &mut likelihood_curvature);
+        let mut quadratic = terminal.to_owned();
+        quadratic -= &likelihood_curvature;
+        for i in 0..d {
+            for j in (i + 1)..d {
+                let average = 0.5 * (quadratic[[i, j]] + quadratic[[j, i]]);
+                quadratic[[i, j]] = average;
+                quadratic[[j, i]] = average;
+            }
+        }
+        let eigenvalues = quadratic
+            .eigh(faer::Side::Lower)
+            .map_err(EstimationError::EigendecompositionFailed)?
+            .0
+            .to_vec();
+        let rounding_band = gam_linalg::roundoff::symmetric_spectrum_rounding_band(&eigenvalues);
+        let positive = eigenvalues
+            .iter()
+            .filter(|value| **value > rounding_band)
+            .count();
+        let negative = eigenvalues
+            .iter()
+            .filter(|value| **value < -rounding_band)
+            .count();
+        let lowest_eigenvalue = eigenvalues.iter().copied().fold(f64::INFINITY, f64::min);
+        Ok(FittedQuadratic {
+            quadratic,
+            positive,
+            negative,
+            unresolved: eigenvalues.len() - positive - negative,
+            lowest_eigenvalue,
+            rounding_band,
+        })
+    }
+
+    /// The linear term that makes the SUPPLIED coefficients an exact stationary
+    /// point of the objective this predictive integrates.
     ///
     /// # What it is measuring
     ///
@@ -493,40 +551,38 @@ impl<'a> MultinomialPredictiveModel<'a> {
     /// would take every ratio against a posterior the published coefficients do
     /// not live in.
     ///
-    /// `c = ∇(−[ℓ − ½θ'S_λθ])(β̂)` is EXACTLY `∇Φ(β̂)`, by stationarity of the
-    /// fit's own mode — so the first-order content of whatever extra term the
-    /// objective carried is *measurable* at the published point rather than
-    /// something this module has to reconstruct. Carrying it as a linear term is
-    /// free: it moves no curvature (a linear function has no second derivative),
-    /// so the augmented modes and their log-determinants stay the ones the ratio
-    /// needs.
+    /// The first-order content of everything the objective carries beyond the
+    /// likelihood is `−S_λβ̂ + ∇Φ(β̂)`, and by stationarity of the fit's own mode
+    /// it is EXACTLY `s(β̂) = −∇ℓ(β̂)`, the likelihood's part of the gradient at the
+    /// published point. So it is *measured* here rather than reconstructed.
+    /// Carrying it as a linear term is free: it moves no curvature (a linear
+    /// function has no second derivative), so the augmented modes and their
+    /// log-determinants stay the ones the ratio needs.
     ///
-    /// When the fit carried no extra term, `c` is the inner solve's own residual
-    /// gradient — orders below anything that matters, and absorbing it makes the
-    /// base exactly stationary rather than nearly so, which is a strict
-    /// improvement on using the raw mode.
+    /// When the fit carried no extra term, the tilt differs from `−S_λβ̂` by the
+    /// inner solve's own residual gradient — orders below anything that matters,
+    /// and absorbing it makes the base exactly stationary rather than nearly so,
+    /// which is a strict improvement on using the raw mode.
     ///
     /// The extra term's CURVATURE cannot be measured from the gradient, and it is
     /// not second-order in the ratio where the term arms: there `Φ`'s curvature is
     /// `O(1)` along directions the penalized likelihood leaves at `O(λ)`, so it
-    /// sets how far each augmented mode moves. It is carried from the fit's own
-    /// terminal precision as the quadratic `−½(θ − β̂)ᵀ A (θ − β̂)` (see
-    /// `terminal_precision`). That term has zero gradient at `β̂`, so `c` is the
-    /// same with or without it. The mass-defect identity below cannot stand in for
-    /// it: `Σ_c E[p_c] = 1` holds for whichever posterior the ratios integrate, so
-    /// it measures the Laplace expansion, not whether the right posterior was
-    /// integrated (#1082).
+    /// sets how far each augmented mode moves. It is carried in the quadratic `Q`
+    /// read from the fit's own terminal precision (see `terminal_precision`). The
+    /// mass-defect identity below cannot stand in for it: `Σ_c E[p_c] = 1` holds
+    /// for whichever posterior the ratios integrate, so it measures the Laplace
+    /// expansion, not whether the right posterior was integrated (#1082).
     fn stationarity_tilt(&self, mode: &[f64]) -> Array1<f64> {
         let zero = vec![0.0_f64; mode.len()];
-        let (gradient, _) = self.gradient_and_precision(mode, &[], &zero, None);
+        let (gradient, _) = self.gradient_and_precision(mode, &[], mode, &zero);
         gradient
     }
 
     /// Newton with backtracking on the negative log-posterior, warm-started at
-    /// `start`. It is strictly convex without a prior quadratic. With one it is
-    /// convex only where its precision stays positive definite, and a precision
-    /// that is not is refused rather than stepped on (see the module doc's Cost
-    /// section).
+    /// `start`. Its Hessian is `XᵀW(θ)X + Q` plus the extra rows' curvature, which
+    /// is positive definite everywhere when `Q` is, so the objective is then
+    /// strictly convex. A precision that is not positive definite is refused rather
+    /// than stepped on (see the module doc's Cost section).
     ///
     /// Returns the mode, the objective value there, and the log-determinant of
     /// the precision at that point — the three quantities a Laplace ratio needs
@@ -541,14 +597,14 @@ impl<'a> MultinomialPredictiveModel<'a> {
         &self,
         start: &[f64],
         extra: &[ExtraRow<'_>],
+        anchor: &[f64],
         tilt: &[f64],
-        prior: Option<&PriorQuadratic>,
     ) -> Result<(Vec<f64>, f64, f64), EstimationError> {
         let d = self.coefficient_dim();
         let mut theta = start.to_vec();
-        let mut value = self.log_posterior(&theta, extra, tilt, prior);
+        let mut value = self.log_posterior(&theta, extra, anchor, tilt);
         loop {
-            let (gradient, precision) = self.gradient_and_precision(&theta, extra, tilt, prior);
+            let (gradient, precision) = self.gradient_and_precision(&theta, extra, anchor, tilt);
             let factor = precision.cholesky(faer::Side::Lower).map_err(|error| {
                 EstimationError::InvalidInput(format!(
                     "multinomial predictive: augmented posterior precision is not positive \
@@ -574,12 +630,10 @@ impl<'a> MultinomialPredictiveModel<'a> {
             // module publishes is `exp(L⁺ − L)`, so the residual error in `L` is what
             // has to vanish and the decrement bounds exactly that, while a gradient
             // norm is `O(n)` and not the currency of the answer. `L` accumulates the
-            // weighted rows, the extra rows, `d²` quadratic-penalty products, `d²`
-            // prior-quadratic products when the fit carried an extra term, and `d` tilt
+            // weighted rows, the extra rows, `d²` quadratic products and `d` tilt
             // products; a predicted gain inside that accumulation's rounding band
             // `γ·|L|` is one the objective cannot represent.
-            let prior_terms = if prior.is_some() { d * d } else { 0 };
-            let terms = self.training_class_index.len() + extra.len() + d * d + prior_terms + d;
+            let terms = self.training_class_index.len() + extra.len() + d * d + d;
             let growth = gam_linalg::roundoff::accumulation_growth(terms);
             let objective_band = growth * value.abs();
             if decrement <= objective_band {
@@ -601,7 +655,7 @@ impl<'a> MultinomialPredictiveModel<'a> {
                 {
                     break false;
                 }
-                let trial_value = self.log_posterior(&trial, extra, tilt, prior);
+                let trial_value = self.log_posterior(&trial, extra, anchor, tilt);
                 // A step is accepted only when the objective rises by more than it
                 // can represent. A trial that leaves the value bit-identical, or
                 // moves it inside the rounding bands, is not progress, and accepting
@@ -657,36 +711,56 @@ impl<'a> MultinomialPredictiveModel<'a> {
             );
         }
         let base_theta: Vec<f64> = mode.iter().copied().collect();
+        // Everything the objective carries beyond the likelihood, as the quadratic
+        // `Q` the ratios integrate (see `terminal_precision`): the fit's own terminal
+        // precision less the likelihood curvature at the published mode, used only
+        // where its spectrum certifies it positive definite. Otherwise the point
+        // moments integrate `S_λ` with the measured tilt, and a spread declines.
+        let fitted_quadratic = match self.terminal_precision {
+            Some(terminal) => Some(self.fitted_quadratic(&base_theta, terminal)?),
+            None => None,
+        };
+        let certified_quadratic = match fitted_quadratic {
+            Some(fitted) if fitted.negative == 0 && fitted.unresolved == 0 => {
+                Some(fitted.quadratic)
+            }
+            Some(fitted) => {
+                if want_second_moments {
+                    return Err(EstimationError::PredictiveIntervalsDeclined {
+                        positive: fitted.positive,
+                        negative: fitted.negative,
+                        unresolved: fitted.unresolved,
+                        lowest_eigenvalue: fitted.lowest_eigenvalue,
+                        rounding_band: fitted.rounding_band,
+                    });
+                }
+                None
+            }
+            None => None,
+        };
+        let model = MultinomialPredictiveModel {
+            training_design: self.training_design,
+            training_class_index: self.training_class_index,
+            training_weights: self.training_weights,
+            joint_penalty: match certified_quadratic.as_ref() {
+                Some(quadratic) => quadratic.view(),
+                None => self.joint_penalty,
+            },
+            n_classes: self.n_classes,
+            terminal_precision: None,
+        };
         // The base mode and its log-determinant are recomputed here rather than
         // read from the saved covariance ON PURPOSE: numerator and denominator
         // of every ratio must come from the same assembly, or the difference of
         // two log-determinants inherits whatever the two paths disagree about.
-        let tilt = self.stationarity_tilt(&base_theta);
+        let tilt = model.stationarity_tilt(&base_theta);
         let tilt = tilt.as_slice().expect("owned gradient is contiguous");
-        // The fitted extra term's curvature at the published mode: the fit's own
-        // terminal precision less the penalized likelihood's curvature there.
-        let prior = self.terminal_precision.map(|terminal| {
-            let (_, base_precision) = self.gradient_and_precision(&base_theta, &[], tilt, None);
-            let mut curvature = terminal.to_owned();
-            curvature -= &base_precision;
-            for i in 0..d {
-                for j in (i + 1)..d {
-                    let average = 0.5 * (curvature[[i, j]] + curvature[[j, i]]);
-                    curvature[[i, j]] = average;
-                    curvature[[j, i]] = average;
-                }
-            }
-            PriorQuadratic {
-                anchor: base_theta.clone(),
-                curvature,
-            }
-        });
         let (base_mode, base_value, base_logdet) =
-            self.augmented_mode(&base_theta, &[], tilt, prior.as_ref())?;
+            model.augmented_mode(&base_theta, &[], &base_theta, tilt)?;
         // ... and with the stationarity tilt in place the polish must be a
-        // NO-OP: `c` was measured so that the supplied coefficients ARE the
+        // NO-OP: the tilt was measured so that the supplied coefficients ARE the
         // stationary point of this objective, so the tilted gradient there is only
-        // the rounding residual of `score + (S_λθ − c)`, and its Newton decrement is
+        // the rounding residual of `score − tilt`, and its Newton decrement is
         // that residual squared — far inside the objective's rounding band, where
         // `augmented_mode` returns its start unchanged. A polish that moves the
         // coefficients at all is therefore a statement about this module, not about
@@ -737,7 +811,8 @@ impl<'a> MultinomialPredictiveModel<'a> {
                     design: design_row,
                     class,
                 }];
-                let (_, value, logdet) = self.augmented_mode(&base_mode, &extra, tilt, prior.as_ref())?;
+                let (_, value, logdet) =
+                    model.augmented_mode(&base_mode, &extra, &base_theta, tilt)?;
                 raw[class] = (value - base_value + 0.5 * (base_logdet - logdet)).exp();
             }
             let total: f64 = raw.iter().sum();
@@ -778,7 +853,8 @@ impl<'a> MultinomialPredictiveModel<'a> {
                                 class: dd,
                             },
                         ];
-                        let (_, value, logdet) = self.augmented_mode(&base_mode, &extra, tilt, prior.as_ref())?;
+                        let (_, value, logdet) =
+                            model.augmented_mode(&base_mode, &extra, &base_theta, tilt)?;
                         let entry = (value - base_value + 0.5 * (base_logdet - logdet)).exp();
                         raw_second[c * k + dd] = entry;
                         raw_second[dd * k + c] = entry;

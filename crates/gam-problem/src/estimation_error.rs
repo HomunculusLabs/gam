@@ -648,6 +648,33 @@ pub enum EstimationError {
         band: f64,
     },
 
+    /// A posterior-predictive spread was requested from a fit whose objective
+    /// carried a term beyond the penalized likelihood, and that term's
+    /// second-order model around the published mode does not describe a proper
+    /// posterior (#1082).
+    ///
+    /// `Q = T − XᵀW(β̂)X`, the curvature at the mode of everything the objective
+    /// carries beyond the likelihood, has an eigenvalue that is negative or not
+    /// resolved from zero by its rounding band. The likelihood is bounded above,
+    /// so along a negative direction of `Q` that second-order posterior grows
+    /// without bound and has no spread to publish. The inertia is carried so a
+    /// caller sees how far from proper it is. Point predictions do not read `Q`
+    /// and are published.
+    #[error(
+        "posterior predictive intervals declined: the fitted posterior's curvature beyond the \
+         likelihood has inertia ({positive} positive, {negative} negative, {unresolved} within \
+         its rounding band {rounding_band:e}; lowest eigenvalue {lowest_eigenvalue:e}), so its \
+         second-order model is not a proper posterior and has no spread to publish. Point \
+         predictions are unaffected."
+    )]
+    PredictiveIntervalsDeclined {
+        positive: usize,
+        negative: usize,
+        unresolved: usize,
+        lowest_eigenvalue: f64,
+        rounding_band: f64,
+    },
+
     /// The penalized Hessian's identified rank at the fitted smoothing
     /// parameters is not certified constant over the outer certificate's own
     /// Newton step (#2901 V22).
@@ -1016,6 +1043,7 @@ impl EstimationError {
             | Self::HessianNotPositiveDefinite { .. }
             | Self::LaplacePrecisionIndefinite { .. }
             | Self::IdentifiedRankNotLocallyConstant { .. }
+            | Self::PredictiveIntervalsDeclined { .. }
             | Self::RemlOptimizationFailed { .. }
             | Self::OuterObjectiveEvaluationFailed { .. }
             | Self::RemlDidNotConverge { .. }

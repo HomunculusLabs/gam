@@ -9089,5 +9089,14 @@
     ],
     "reason": "#2469 (SPEC rule 23): the formula multinomial path set BlockwiseFitOptions::ridge_floor to a picked 1e-4. It was the only production options value that did not take the default 0. The floor never entered the objective. It set the minimum positive-definiteness margin of the stabilizing diagonal shift the custom-family solvers add when the penalized Hessian fails Cholesky, and its doc justified it as a step bound on near-separable curvature. The shift already carries a derived margin: stabilizing_shift_core raises any caller floor to the Cholesky pivot band accumulation_growth(p + 1) * max diag. Step length belongs to the trust region, and the family declares levenberg_on_ill_conditioning. Separation belongs to the conditional Jeffreys/Firth arming. The options value now takes the default, and the constant, its doc and the stale #747 comment go.",
     "evidence": "At the base, git grep -n -F MULTINOMIAL_FORMULA_RIDGE_FLOOR over the whole tree finds its declaration and the single options literal in fit_penalized_multinomial_formula's parts builder, and nothing else. Guarded check and multinomial suites: job 632866, /scratch.global/sauer354/pool/const2469b/rp10.632866.log."
+  },
+  {
+    "base": "ea6a1881fb88a3ef9636ab959320184a23fa61b3",
+    "items": [
+      "crates/gam-models/src/multinomial_predictive.rs:struct:PriorQuadratic",
+      "crates/gam-solve/src/reml/reml_outer_engine/dense_spectral.rs:fn:rounding_band"
+    ],
+    "reason": "#1082. The multinomial ratio predictive now integrates ℓ(θ) + s(β̂)ᵀo − ½oᵀQo anchored at the published mode, with Q = T − XᵀW(β̂)X as its one quadratic and Q certified against its rounding band before any solve. The separate prior quadratic PriorQuadratic (A = T − (XᵀWX + S_λ) and its anchor) has no remaining use. DenseSpectralOperator::rounding_band held H's rounding band p·ε·‖H‖₂ inside gam-solve; the certificate on Q needs the same band, so the definition moves to gam_linalg::roundoff::symmetric_spectrum_rounding_band (the same expression) and its gam-solve callers read it there.",
+    "evidence": "At bfb09a938, git grep -n -w PriorQuadratic finds it only in crates/gam-models/src/multinomial_predictive.rs. DenseSpectralOperator::rounding_band is called only in crates/gam-solve/src/reml/reml_outer_engine/dense_spectral.rs (as Self::rounding_band, including the call 0c9570b18 added after that base) and crates/gam-solve/src/estimate/identified_hessian.rs. All of these read gam_linalg::roundoff::symmetric_spectrum_rounding_band in the same commit, and the landing script refuses a tree that still names either removed item. Guarded check job 612561 (lane sw0c, bfb09a938 plus qcert.patch): cargo check -p gam-pyffi --all-targets passed; the workspace check stopped at a foreign E0277 (5d443c3c8, fixed by 3a5be6550); and the gam-models multinomial suites passed 12 of 12 (/scratch.global/sauer354/pool/perf1082/check12.612561.log)."
   }
 ]

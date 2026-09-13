@@ -47,7 +47,7 @@ impl IdentifiedHessianInverse {
             .eigh(Side::Lower)
             .map_err(EstimationError::EigendecompositionFailed)?;
         let eigenvalues = eigenvalues.to_vec();
-        let rounding_band = DenseSpectralOperator::rounding_band(&eigenvalues);
+        let rounding_band = gam_linalg::roundoff::symmetric_spectrum_rounding_band(&eigenvalues);
         let min_eigenvalue = eigenvalues.iter().copied().fold(f64::INFINITY, f64::min);
         if !(min_eigenvalue >= -rounding_band) {
             return Err(EstimationError::HessianNotPositiveDefinite { min_eigenvalue });
@@ -297,7 +297,7 @@ pub(crate) fn certificate_newton_displacement(
     let (eigenvalues, eigenvectors) = block
         .eigh(Side::Lower)
         .map_err(EstimationError::EigendecompositionFailed)?;
-    let rounding_band = DenseSpectralOperator::rounding_band(&eigenvalues.to_vec());
+    let rounding_band = gam_linalg::roundoff::symmetric_spectrum_rounding_band(&eigenvalues.to_vec());
     let interior_gradient: Array1<f64> = interior.iter().map(|&index| gradient[index]).collect();
     let coordinates = eigenvectors.t().dot(&interior_gradient);
     let mut interior_step = Array1::<f64>::zeros(interior.len());
@@ -353,7 +353,7 @@ pub(crate) fn certify_identified_rank_locally_constant(
 ) -> Result<IdentifiedRankCertificate, EstimationError> {
     let coefficients = eigenvalues.len();
     let rank = DenseSpectralOperator::identified_rank(eigenvalues, penalty_rank);
-    let band = DenseSpectralOperator::rounding_band(eigenvalues);
+    let band = gam_linalg::roundoff::symmetric_spectrum_rounding_band(eigenvalues);
     let spectral_radius = eigenvalues
         .iter()
         .fold(0.0_f64, |acc, value| acc.max(value.abs()));

@@ -17,7 +17,7 @@ pub struct DenseSpectralOperator {
     /// traces, solves, and logdet contributions.  Under
     /// [`PseudoLogdetMode::Smooth`] every entry is `true`.  Under
     /// [`PseudoLogdetMode::HardPseudo`] entries with
-    /// `σ_j ≤ max(ε, p·ε_mach·‖H‖₂)` (`rounding_band`) are `false`,
+    /// `σ_j ≤ max(ε, p·ε_mach·‖H‖₂)` (`gam_linalg::roundoff::symmetric_spectrum_rounding_band`) are `false`,
     /// so the numerical null space is excluded consistently from
     /// `log|H|_+`, its gradient, its cross-traces, AND `H⁻¹` solves
     /// (`H⁺` on the active subspace).
@@ -85,15 +85,6 @@ impl DenseSpectralOperator {
         Self::from_symmetric_with_rank_policy(h, PseudoLogdetMode::PositiveDefinite, Some(rank))
     }
 
-    /// `H`'s rounding band `p·ε·‖H‖₂`, read off its eigenvalues: the band the
-    /// PIRLS minimum-norm solve identifies coefficients at (#2901 V22).
-    pub(crate) fn rounding_band(eigenvalues: &[f64]) -> f64 {
-        let spectral_radius = eigenvalues
-            .iter()
-            .fold(0.0_f64, |acc, value| acc.max(value.abs()));
-        eigenvalues.len() as f64 * f64::EPSILON * spectral_radius
-    }
-
     /// Rank of `H`'s numerically identified subspace (#2901 V22).
     ///
     /// An eigenvalue is resolved when it exceeds `H`'s rounding band
@@ -103,7 +94,7 @@ impl DenseSpectralOperator {
     /// the band claims more nullity than the penalty has, the largest positive
     /// eigenvalues count too (#2748).
     pub(crate) fn identified_rank(eigenvalues: &[f64], penalty_rank: usize) -> usize {
-        let rounding_band = Self::rounding_band(eigenvalues);
+        let rounding_band = gam_linalg::roundoff::symmetric_spectrum_rounding_band(eigenvalues);
         let resolved = eigenvalues
             .iter()
             .filter(|&&sigma| sigma > rounding_band)
@@ -205,7 +196,7 @@ impl DenseSpectralOperator {
             // `identified_rank` would keep, so it is refused rather than dropped.
             // A negative saddle direction must not be discarded in favor of a
             // tiny positive numerical alias when selecting the retained rank.
-            let rounding_band = Self::rounding_band(eigenvalues.as_slice().ok_or_else(|| {
+            let rounding_band = gam_linalg::roundoff::symmetric_spectrum_rounding_band(eigenvalues.as_slice().ok_or_else(|| {
                 "dense spectral pseudo-logdet: the eigenvalue array is not contiguous".to_string()
             })?);
             for (index, &value) in eigenvalues.iter().enumerate() {
@@ -264,12 +255,12 @@ impl DenseSpectralOperator {
         // mode explicitly through `pseudo_logdet_mode()`.
         //
         // The exclusion floor is `max(ε, p·ε_mach·‖H‖₂)`: the smooth
-        // regularization scale or `H`'s rounding band (`rounding_band`, the band
+        // regularization scale or `H`'s rounding band (`gam_linalg::roundoff::symmetric_spectrum_rounding_band`, the band
         // `identified_rank` resolves eigenvalues at), whichever is larger. An
         // eigenvalue at or below it is not resolved from zero by the decomposition
         // that produced it, so it is excluded from the logdet, the traces and `H⁺`
         // alike; an eigenvalue above it is curvature and stays.
-        let rounding_band = Self::rounding_band(eigenvalues.as_slice().ok_or_else(|| {
+        let rounding_band = gam_linalg::roundoff::symmetric_spectrum_rounding_band(eigenvalues.as_slice().ok_or_else(|| {
             "dense spectral pseudo-logdet: the eigenvalue array is not contiguous".to_string()
         })?);
         let active: Vec<bool> = structural_mask.unwrap_or_else(|| match mode {

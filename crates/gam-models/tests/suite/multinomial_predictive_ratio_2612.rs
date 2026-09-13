@@ -19,6 +19,7 @@
 //! Gaussian puts half its mass where the likelihood has already excluded the
 //! coefficient.
 
+use gam_models::model_types::EstimationError;
 use gam_models::multinomial_predictive::MultinomialPredictiveModel;
 use ndarray::{Array1, Array2};
 
@@ -416,4 +417,120 @@ fn invert_two_by_two(matrix: &Array2<f64>) -> Array2<f64> {
     out[[0, 1]] = -matrix[[0, 1]] / determinant;
     out[[1, 0]] = -matrix[[1, 0]] / determinant;
     out
+}
+
+/// #1082: where the fitted quadratic `Q = T − XᵀW(β̂)X` has a negative direction,
+/// the second-order posterior is improper (`ℓ ≤ 0` while `−½oᵀQo` grows along it),
+/// so there is no spread to publish and the point moments must not need `T`. `T`
+/// itself stays positive definite, as a fit's certified terminal precision does on
+/// the penguins real-data fit, whose `Q` has six negative eigenvalues (pool job
+/// 602869).
+#[test]
+fn ratio_predictive_declines_intervals_where_the_fitted_quadratic_is_improper_1082() {
+    let (design, labels, weights) = training_frame();
+    let penalty = Array2::from_diag(&Array1::from_vec(vec![WALL, WALL]));
+    // `newton_mode` returns `Xᵀ W X + S_λ` at the mode.
+    let (mode, base_precision) = newton_mode(&design, &labels);
+    let likelihood_curvature = &base_precision - &penalty;
+    let likelihood_lowest = lowest_eigenvalue_two_by_two(&likelihood_curvature);
+    assert!(
+        likelihood_lowest > 0.0,
+        "premise: the likelihood curvature at the mode is positive definite, got \
+         {likelihood_lowest:e}"
+    );
+    // One negative direction of `Q`, half the likelihood's smallest curvature, so
+    // `T = XᵀWX + Q` stays positive definite by Weyl.
+    let improper = Array2::from_diag(&Array1::from_vec(vec![WALL, -0.5 * likelihood_lowest]));
+    let improper_terminal = &likelihood_curvature + &improper;
+    assert!(
+        lowest_eigenvalue_two_by_two(&improper_terminal) > 0.0,
+        "premise: the terminal precision stays positive definite"
+    );
+
+    let mut x_new = Array2::<f64>::zeros((TEST_X.len(), 2));
+    for (row, x) in TEST_X.iter().enumerate() {
+        x_new[[row, 0]] = 1.0;
+        x_new[[row, 1]] = *x;
+    }
+    let start = Array1::from_vec(vec![mode[0], mode[1]]);
+    let armed = MultinomialPredictiveModel {
+        training_design: design.view(),
+        training_class_index: &labels,
+        training_weights: weights.view(),
+        joint_penalty: penalty.view(),
+        n_classes: 2,
+        terminal_precision: Some(improper_terminal.view()),
+    };
+    let bare = MultinomialPredictiveModel {
+        training_design: design.view(),
+        training_class_index: &labels,
+        training_weights: weights.view(),
+        joint_penalty: penalty.view(),
+        n_classes: 2,
+        terminal_precision: None,
+    };
+
+    let armed_points = armed
+        .predictive_moments(start.view(), x_new.view(), false)
+        .expect("point moments publish where the fitted quadratic is improper");
+    let bare_points = bare
+        .predictive_moments(start.view(), x_new.view(), false)
+        .expect("point moments of the penalized likelihood with the measured tilt");
+    assert_eq!(
+        armed_points.class_mean, bare_points.class_mean,
+        "an improper fitted quadratic must leave the point moments on the penalized likelihood \
+         with the measured tilt"
+    );
+
+    match armed.predictive_moments(start.view(), x_new.view(), true) {
+        Err(EstimationError::PredictiveIntervalsDeclined {
+            positive,
+            negative,
+            unresolved,
+            lowest_eigenvalue,
+            rounding_band,
+        }) => {
+            assert_eq!(
+                (positive, negative, unresolved),
+                (1, 1, 0),
+                "the declined inertia must be that of Q = diag(WALL, −½λ_min(XᵀWX))"
+            );
+            assert!(
+                lowest_eigenvalue < -rounding_band,
+                "the declined direction must be resolved from zero: lowest {lowest_eigenvalue:e}, \
+                 band {rounding_band:e}"
+            );
+        }
+        Ok(moments) => panic!(
+            "second moments were published for {} rows from an improper fitted quadratic",
+            moments.class_mean.nrows()
+        ),
+        Err(other) => panic!("expected a typed interval decline, got: {other}"),
+    }
+
+    // Positive control: the same fixture with `Q = diag(WALL, +½λ_min)` certifies and
+    // publishes its spread, so the decline above is about `Q`, not about the fixture.
+    let proper = Array2::from_diag(&Array1::from_vec(vec![WALL, 0.5 * likelihood_lowest]));
+    let proper_terminal = &likelihood_curvature + &proper;
+    let proper_moments = MultinomialPredictiveModel {
+        training_design: design.view(),
+        training_class_index: &labels,
+        training_weights: weights.view(),
+        joint_penalty: penalty.view(),
+        n_classes: 2,
+        terminal_precision: Some(proper_terminal.view()),
+    }
+    .predictive_moments(start.view(), x_new.view(), true)
+    .expect("a proper fitted quadratic publishes its spread");
+    assert!(
+        proper_moments.class_second_moment.is_some(),
+        "second moments were requested from a proper fitted quadratic"
+    );
+}
+
+fn lowest_eigenvalue_two_by_two(matrix: &Array2<f64>) -> f64 {
+    let trace = matrix[[0, 0]] + matrix[[1, 1]];
+    let determinant = matrix[[0, 0]] * matrix[[1, 1]] - matrix[[0, 1]] * matrix[[1, 0]];
+    let half_gap = (0.25 * trace * trace - determinant).max(0.0).sqrt();
+    0.5 * trace - half_gap
 }

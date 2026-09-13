@@ -76,6 +76,20 @@ pub fn accumulation_band(terms: usize, absolute_sum: f64) -> f64 {
     accumulation_growth(terms) * absolute_sum
 }
 
+/// Rounding band `p·ε·‖H‖₂` of a symmetric `p×p` matrix's computed spectrum,
+/// read off its eigenvalues.
+///
+/// A backward-stable symmetric eigensolver returns the exact spectrum of `H + E`
+/// with `‖E‖₂ = O(p·ε·‖H‖₂)`, so by Weyl an eigenvalue whose magnitude is at or
+/// below this band is not resolved from zero by the decomposition that produced
+/// it, and a sign inside it is not a measurement.
+pub fn symmetric_spectrum_rounding_band(eigenvalues: &[f64]) -> f64 {
+    let spectral_radius = eigenvalues
+        .iter()
+        .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+    eigenvalues.len() as f64 * f64::EPSILON * spectral_radius
+}
+
 /// Forward-error band of a **compensated** summation (Kahan–Babuška–Neumaier)
 /// whose summands have absolute sum `absolute_sum`, where building each summand
 /// cost `formation_roundings` floating-point operations.
