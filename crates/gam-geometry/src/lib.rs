@@ -2,7 +2,7 @@ pub mod curvature_estimand;
 mod latent_seed;
 pub mod manifold;
 pub mod manifolds;
-pub mod optimizer;
+mod optimizer;
 pub mod response_geometry;
 pub mod sinkhorn_barycenter;
 
