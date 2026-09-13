@@ -614,15 +614,11 @@ pub const TORUS_FLOW_GN_MAX_REJECTS: usize = 12;
 /// direction. Shared verbatim by the torus and sphere-boost Gauss–Newton cores.
 const LM_LAMBDA_GROWTH: f64 = 10.0;
 
-/// Levenberg damping decay factor applied on an accepted step: `λ ←
-/// max(λ / LM_LAMBDA_DECAY, LM_LAMBDA_FLOOR)` relaxes the trust region back
-/// toward the (fast) Gauss–Newton direction. Used by [`lm_damped_accept_sweep`].
+/// Levenberg damping decay factor applied on an accepted step: `λ ← λ /
+/// LM_LAMBDA_DECAY`, no lower than the damping the normal equations can still
+/// resolve, relaxes the trust region back toward the (fast) Gauss–Newton
+/// direction. Used by [`lm_damped_accept_sweep`].
 const LM_LAMBDA_DECAY: f64 = 10.0;
-
-/// Floor on the Levenberg damping so an accepted-step relaxation can never drive
-/// `λ` to zero (which would leave the next damped normal-equation solve singular
-/// on a rank-deficient `JᵀJ`). Used by [`lm_damped_accept_sweep`].
-const LM_LAMBDA_FLOOR: f64 = 1.0e-12;
 
 /// Minimum per-axis node count of the decoder-recomposition audit grid. The
 /// actual count also scales with the basis width (`3·√m` per axis) so the
@@ -1266,7 +1262,8 @@ struct LmTrustStep {
 /// * on a Cholesky failure or a folded / non-improving candidate it grows the
 ///   damping (`λ ← LM_LAMBDA_GROWTH · λ`) and counts a rejection;
 /// * on an accepted candidate it commits `theta`/`state`, relaxes the damping
-///   (`λ ← max(λ / LM_LAMBDA_DECAY, LM_LAMBDA_FLOOR)`), and flags convergence
+///   (`λ ← λ / LM_LAMBDA_DECAY`, no lower than the damping the diagonal of `JᵀJ`
+///   can still resolve), and flags convergence
 ///   when the improvement lies within the two evaluations' rounding bands.
 ///
 /// The `λ` here is decayed on accept and carried across outer Gauss–Newton
@@ -1315,7 +1312,15 @@ fn lm_damped_accept_sweep(
                 *theta = candidate;
                 *state = next;
                 accepted = true;
-                *lambda = (*lambda / LM_LAMBDA_DECAY).max(LM_LAMBDA_FLOOR);
+                // On diagonal `d` the damping `λ·(1 + jtj_dd)` rounds away once `λ` is
+                // below `u·jtj_dd/(1 + jtj_dd)`, so a decay past the largest such value
+                // leaves the next damped system bit-identical to the undamped one.
+                let resolvable = jtj
+                    .diag()
+                    .iter()
+                    .map(|&value| gam_linalg::roundoff::UNIT_ROUNDOFF * value / (1.0 + value))
+                    .fold(0.0_f64, f64::max);
+                *lambda = (*lambda / LM_LAMBDA_DECAY).max(resolvable);
                 break;
             }
             Some(..) | None => {
