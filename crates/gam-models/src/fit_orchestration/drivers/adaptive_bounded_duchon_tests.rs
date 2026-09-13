@@ -1189,7 +1189,11 @@ mod adaptive_bounded_duchon_tests {
                 BoundedCoefficientPriorSpec::Beta { a: 2.0, b: 3.0 },
             ),
             (
-                LikelihoodSpec::binomial_logit(),
+                LikelihoodSpec::try_new(
+                    gam_problem::ResponseFamily::Binomial,
+                    gam_problem::InverseLink::Standard(gam_problem::StandardLink::Logit),
+                )
+                .expect("binomial logit is a legal likelihood cell"),
                 array![0.0, 1.0, 1.0, 0.0],
                 BoundedCoefficientPriorSpec::Beta { a: 1.5, b: 2.5 },
             ),

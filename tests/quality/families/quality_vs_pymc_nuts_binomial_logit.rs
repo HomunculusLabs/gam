@@ -33,7 +33,7 @@ use gam::inference::model::{
 };
 use gam::smooth::{build_term_collection_design, freeze_term_collection_from_design};
 use gam::test_support::reference::{Column, QualityPair, rmse, run_python};
-use gam::types::{LikelihoodSpec, StandardLink};
+use gam::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
 use gam::{
     FitConfig, FitResult, fit_from_formula, hmc::NutsConfig, init_parallelism,
     load_csvwith_inferred_schema, sample::sample_saved_model,
@@ -204,7 +204,11 @@ fn gam_nuts_binomial_logit_recovers_truth_and_is_calibrated() {
         "y ~ s(x)".to_string(),
         ModelKind::Standard,
         FittedFamily::Standard {
-            likelihood: LikelihoodSpec::binomial_logit(),
+            likelihood: LikelihoodSpec::try_new(
+                ResponseFamily::Binomial,
+                InverseLink::Standard(StandardLink::Logit),
+            )
+            .expect("binomial logit is a legal likelihood cell"),
             link: Some(StandardLink::Logit),
             latent_cloglog_state: None,
             mixture_state: None,
@@ -607,7 +611,11 @@ fn gam_nuts_binomial_logit_recovers_truth_and_is_calibrated_on_real_data() {
         "y ~ s(pc1) + s(pc2)".to_string(),
         ModelKind::Standard,
         FittedFamily::Standard {
-            likelihood: LikelihoodSpec::binomial_logit(),
+            likelihood: LikelihoodSpec::try_new(
+                ResponseFamily::Binomial,
+                InverseLink::Standard(StandardLink::Logit),
+            )
+            .expect("binomial logit is a legal likelihood cell"),
             link: Some(StandardLink::Logit),
             latent_cloglog_state: None,
             mixture_state: None,

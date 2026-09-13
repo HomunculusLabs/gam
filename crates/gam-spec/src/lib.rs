@@ -1534,14 +1534,6 @@ impl LikelihoodSpec {
     }
 
     #[inline]
-    pub const fn binomial_logit() -> Self {
-        Self::new(
-            ResponseFamily::Binomial,
-            InverseLink::Standard(StandardLink::Logit),
-        )
-    }
-
-    #[inline]
     pub const fn binomial_probit() -> Self {
         Self::new(
             ResponseFamily::Binomial,

@@ -1049,7 +1049,7 @@ crates/gam-spec/src/lib.rs	beta_logit	retired-by-later-deletion:5110f6487f
 crates/gam-spec/src/lib.rs	beta_phi_is_estimated	retired-no-product-user
 crates/gam-spec/src/lib.rs	binomial_cloglog	retired-by-later-deletion:47c2319015
 crates/gam-spec/src/lib.rs	binomial_latent_cloglog	retired-by-later-deletion:47c2319015
-crates/gam-spec/src/lib.rs	binomial_logit	restored-in-place
+crates/gam-spec/src/lib.rs	binomial_logit	retired-no-product-user
 crates/gam-spec/src/lib.rs	binomial_sas	retired-by-later-deletion:47c2319015
 crates/gam-spec/src/lib.rs	fixed_phi	retired-no-product-user
 crates/gam-spec/src/lib.rs	negative_binomial_log	retired-by-later-deletion:47c2319015

@@ -3410,7 +3410,15 @@ fn iso_kappa_rail_gradient_matches_fd_at_both_faces_2444() {
     for (label, n, family) in [
         ("duchon_gaussian", 80usize, LikelihoodSpec::gaussian_identity()),
         ("matern_gaussian", 80, LikelihoodSpec::gaussian_identity()),
-        ("duchon_logit", 80, LikelihoodSpec::binomial_logit()),
+        (
+            "duchon_logit",
+            80,
+            LikelihoodSpec::try_new(
+                gam_problem::ResponseFamily::Binomial,
+                gam_problem::InverseLink::Standard(gam_problem::StandardLink::Logit),
+            )
+            .expect("binomial logit is a legal likelihood cell"),
+        ),
     ] {
         let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } =
             iso_kappa_fd_variant_driver(label, n, family, false, false, &[11.5, -11.5]);
