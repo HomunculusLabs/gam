@@ -171,20 +171,15 @@ impl<'a> RemlState<'a> {
             return Ok(zero());
         }
 
-        // Problem-scale gate. The non-Gaussianity diagnostic costs an O(p³)
-        // dense eigendecomposition plus O(n·p) cubic contractions, and the
-        // sampler adds O(draws · n · m) deviance work. At large scale that is
-        // prohibitive on every inner evaluation, and the Laplace floor error is
-        // already O(1/n) → negligible there, so the correction would be a
-        // no-op anyway. Mirror the established TK scale caps: skip the audit
-        // entirely above them and retain the (asymptotically exact) plain
-        // Laplace summary.
-        let n_obs = x_design.nrows();
-        let dense_work = n_obs.saturating_mul(p);
-        if n_obs > TK_MAX_OBSERVATIONS || p > TK_MAX_COEFFICIENTS || dense_work > TK_MAX_DENSE_WORK
-        {
-            return Ok(zero());
-        }
+        // The correction integrates over a dense copy of the design, which the
+        // memory governor admits or refuses with a typed error. Below its cap the
+        // skewness verdict decides at every n and p; no picked problem-scale cap
+        // switches the criterion off (gam#2900).
+        block_correction_design_admission(
+            x_design.nrows(),
+            p,
+            gam_runtime::resource::MemoryGovernor::global().single_materialization_cap_bytes(),
+        )?;
 
         // ── Unconditional declines, BEFORE any evidence is bought ────────────
         //
@@ -846,5 +841,63 @@ impl<'a> RemlState<'a> {
             gradient: Some(gradient),
             hessian: None,
         })
+    }
+}
+
+/// Admit the dense design copy the #784 block-local correction integrates over,
+/// against the memory governor's single-materialization cap `cap_bytes`. Past it
+/// the correction refuses with a typed error instead of switching the criterion
+/// off at a picked problem size (gam#2900).
+fn block_correction_design_admission(
+    n_obs: usize,
+    p: usize,
+    cap_bytes: usize,
+) -> Result<(), EstimationError> {
+    let requested_bytes = n_obs
+        .saturating_mul(p)
+        .saturating_mul(std::mem::size_of::<f64>());
+    if requested_bytes > cap_bytes {
+        return Err(EstimationError::DenseMaterializationRefused {
+            context: "#784 block-local correction design".to_string(),
+            rows: n_obs,
+            cols: p,
+            requested_bytes,
+            cap_bytes,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod design_admission_tests {
+    use super::*;
+
+    #[test]
+    fn design_admission_admits_shapes_past_the_old_tk_scale_caps() {
+        // Each shape sat past one of the deleted caps (n > 20,000, p > 2,000,
+        // n·p > 5e6), where the correction used to be zero whatever its verdict.
+        for (n_obs, p) in [(20_001usize, 1usize), (10, 2_001), (2_501, 2_000)] {
+            assert!(
+                block_correction_design_admission(n_obs, p, usize::MAX).is_ok(),
+                "n={n_obs} p={p} must be decided by the skewness verdict, not refused"
+            );
+        }
+    }
+
+    #[test]
+    fn design_admission_refuses_one_byte_past_the_cap() {
+        let (n_obs, p) = (20_001usize, 3usize);
+        let bytes = n_obs * p * std::mem::size_of::<f64>();
+        assert!(block_correction_design_admission(n_obs, p, bytes).is_ok());
+        assert!(matches!(
+            block_correction_design_admission(n_obs, p, bytes - 1),
+            Err(EstimationError::DenseMaterializationRefused {
+                rows,
+                cols,
+                requested_bytes,
+                cap_bytes,
+                ..
+            }) if (rows, cols, requested_bytes, cap_bytes) == (n_obs, p, bytes, bytes - 1)
+        ));
     }
 }

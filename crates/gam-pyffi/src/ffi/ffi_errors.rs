@@ -655,6 +655,9 @@ fn estimation_error_to_pyerr_with_message(err: &EstimationError, message: String
         EstimationError::ExactTweedieSeriesWorkLimit { .. } => {
             RemlConvergenceError::new_err(message)
         }
+        // A dense copy the process cannot hold is a statement about the size of
+        // the data the caller supplied, so it carries invalid-input identity.
+        EstimationError::DenseMaterializationRefused { .. } => InvalidInputError::new_err(message),
     }
 }
 

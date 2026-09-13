@@ -3,15 +3,9 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 pub(crate) const TK_BLOCK_SIZE: usize = 128;
 
-pub(crate) const TK_MAX_OBSERVATIONS: usize = 20_000;
-
-pub(crate) const TK_MAX_COEFFICIENTS: usize = 2_000;
-
 pub(crate) const ADAPTIVE_KKT_ETA: f64 = 0.1;
 
 pub(crate) const ADAPTIVE_KKT_FLOOR_REML_DIVISOR: f64 = 100.0;
-
-pub(crate) const TK_MAX_DENSE_WORK: usize = 5_000_000;
 
 pub(crate) const IFT_QUALITY_HISTORY_CAP: usize = 5;
 

@@ -830,6 +830,19 @@ pub enum EstimationError {
         required_terms_lower_bound: f64,
         budget: usize,
     },
+    /// A dense copy that cannot fit the memory governor's single-materialization
+    /// cap. A statement about the problem's size, not about rho.
+    #[error(
+        "{context}: a dense {rows}x{cols} copy needs {requested_bytes} bytes, past the memory \
+         governor's single-materialization cap of {cap_bytes} bytes"
+    )]
+    DenseMaterializationRefused {
+        context: String,
+        rows: usize,
+        cols: usize,
+        requested_bytes: usize,
+        cap_bytes: usize,
+    },
 
     #[error(
         "Log-strength domain violation at coordinate {coordinate}: value={value:?} is outside \
@@ -996,6 +1009,7 @@ impl EstimationError {
             | Self::InverseLinkDomainViolation { .. }
             | Self::PirlsRowGeometryUnrepresentable { .. }
             | Self::ExactTweedieSeriesWorkLimit { .. }
+            | Self::DenseMaterializationRefused { .. }
             | Self::LogStrengthDomainViolation { .. }
             | Self::MonotoneRoot { .. }
             | Self::CalibratorTrainingFailed { .. }
