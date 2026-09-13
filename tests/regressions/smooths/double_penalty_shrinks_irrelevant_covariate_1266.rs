@@ -152,6 +152,9 @@ fn criterion_band(full: &FitResult, reduced: &FitResult, v_full: f64, v_reduced:
 #[test]
 fn default_double_penalty_is_never_beaten_by_deleting_the_irrelevant_covariate_1266() {
     init_parallelism();
+    // The fits' `[CERTIFICATE]` lines name railed coordinates and their boxes. A railed
+    // coordinate's outward pull is dropped from `outer_gradient_norm`, so it is absent from `band`.
+    gam_runtime::test_support::install_diagnostic_logger();
 
     let cfg = FitConfig {
         family: Some("gaussian".to_string()),
@@ -175,6 +178,10 @@ fn default_double_penalty_is_never_beaten_by_deleting_the_irrelevant_covariate_1
         x_edf.push(smooth_term_edf(&full, "x"));
         let z_edf = smooth_term_edf(&full, "z");
         let rho = standard(&full).fit.log_lambdas.to_vec();
+        println!(
+            "#1266 seed {seed}: reml(full) - reml(y ~ s(x)) = {gap:.3e}, band {band:.1e}, z edf={z_edf:.6}, \
+             rho=[x bend, x null, z bend, z null]={rho:?}"
+        );
         if gap > band {
             beaten.push(format!(
                 "seed {seed}: reml(full)={v_full:.9} > reml(y ~ s(x))={v_reduced:.9} by {gap:.3e} \
