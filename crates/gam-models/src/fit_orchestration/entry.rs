@@ -916,6 +916,7 @@ fn deterministic_gaussian_standard_fit(
         beta_covariance_frequentist: None,
         coefficient_influence,
         weighted_gram: Some(xtwx),
+        identified_subspace: None,
     };
     let geometry = Some(gam_solve::estimate::FitGeometry {
         coefficient_gauge,

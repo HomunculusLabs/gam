@@ -168,6 +168,7 @@ mod per_term_edf_tests {
                 beta_covariance_frequentist: None,
                 coefficient_influence: None,
                 weighted_gram: None,
+                identified_subspace: None,
             }),
             fitted_link: FittedLinkState::Standard(None),
             geometry: None,
@@ -279,6 +280,7 @@ mod per_term_edf_tests {
                 beta_covariance_frequentist: None,
                 coefficient_influence: Some(influence),
                 weighted_gram: None,
+                identified_subspace: None,
             }),
             fitted_link: FittedLinkState::Standard(None),
             geometry: None,
@@ -354,6 +356,7 @@ mod per_term_edf_tests {
                 // per-block-trace channel, where the `penalty_cursor` walk matters.
                 coefficient_influence: None,
                 weighted_gram: None,
+                identified_subspace: None,
             }),
             fitted_link: FittedLinkState::Standard(None),
             geometry: None,
@@ -557,6 +560,7 @@ mod per_term_edf_tests {
                 // `penalty_cursor` keys into `penalty_block_trace`.
                 coefficient_influence: None,
                 weighted_gram: None,
+                identified_subspace: None,
             }),
             fitted_link: FittedLinkState::Standard(None),
             geometry: None,
@@ -2758,6 +2762,98 @@ pub struct FitInference {
     /// correction indefinite and the corrected EDF drop below the conditional).
     #[serde(default)]
     pub weighted_gram: Option<Array2<f64>>,
+    /// The penalized Hessian's identified coefficient subspace at the fitted
+    /// smoothing parameters (#2901 V22): its rank, the directions no observation
+    /// and no penalty pins down, and whether that rank was certified constant
+    /// over the outer certificate's Newton step. `None` where the criterion did
+    /// not price `½log|H|₊` on a band-identified subspace: a Firth fit's
+    /// structural rank, a sparse Hessian's strict factorization, or a route that
+    /// does not form this Hessian.
+    #[serde(default)]
+    pub identified_subspace: Option<IdentifiedCoefficientSubspace>,
+}
+
+/// The coefficient directions the REML criterion scored `½log|H|₊` over at the
+/// fitted smoothing parameters, and the ones it dropped (#2901 V22).
+///
+/// `H = XᵀWX + S_λ` is priced over its eigenvalues above the rounding band
+/// `p·ε·‖H‖₂`, never fewer than `rank(S_λ)`. The dropped directions lie in
+/// `null(X) ∩ null(S_λ)` to that resolution: no observation and no penalty pins
+/// the coefficients along them, and the fit reports the minimum-norm solution
+/// there.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IdentifiedCoefficientSubspace {
+    /// The number of identified coefficient directions.
+    pub rank: usize,
+    /// One column per unidentified direction, `p × (p − rank)`, in the same
+    /// coefficient frame as [`FitInference::penalized_hessian`]; empty at full
+    /// rank. The columns are orthonormal in the solver's internal frame and are
+    /// carried to the original frame like β.
+    pub unidentified_basis: Array2<f64>,
+    /// Whether `rank` was certified constant over the outer certificate's step.
+    pub rank_constancy: IdentifiedRankConstancy,
+}
+
+/// Whether the identified rank was certified constant over the outer
+/// certificate's own Newton step (#2901 V22). A fit whose rank can change inside
+/// that step is refused, so a published fit carries one of these two.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum IdentifiedRankConstancy {
+    /// Certified over the step whose largest coordinate is `step_radius`.
+    Certified {
+        step_radius: f64,
+        /// The smallest identified eigenvalue `σ_r`.
+        smallest_identified: f64,
+        /// The largest unidentified eigenvalue `σ_{r+1}`; `None` at full rank.
+        largest_unidentified: Option<f64>,
+        /// `H`'s rounding band `p·ε·‖H‖₂`.
+        band: f64,
+    },
+    /// Not evaluated, for the typed reason.
+    NotEvaluated { reason: RankConstancyNotEvaluated },
+}
+
+/// Why the identified rank's constancy was not evaluated at the fitted smoothing
+/// parameters (#2901 V22).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RankConstancyNotEvaluated {
+    /// The fit has no smoothing parameters, so there is no step to certify over.
+    NoSmoothingParameters,
+    /// The outer search also moved link coordinates, whose Hessian drift the
+    /// bound does not model.
+    LinkCoordinates,
+    /// The criterion priced the Hessian on an active linear-constraint face.
+    ActiveConstraintFace,
+    /// The fit carries no row curvature derivative to bound the weight motion by.
+    NoRowCurvatureDerivative,
+    /// The outer search tracked no Hessian over the certified coordinates, so its
+    /// certificate has no Newton step.
+    NoOuterHessian,
+}
+
+impl RankConstancyNotEvaluated {
+    /// The reason, in words.
+    pub(crate) fn description(self) -> &'static str {
+        match self {
+            Self::NoSmoothingParameters => {
+                "the fit has no smoothing parameters, so there is no step to certify over"
+            }
+            Self::LinkCoordinates => {
+                "the outer search also moved link coordinates, whose Hessian drift this bound \
+                 does not model"
+            }
+            Self::ActiveConstraintFace => {
+                "the criterion priced the Hessian on an active linear-constraint face"
+            }
+            Self::NoRowCurvatureDerivative => {
+                "the fit carries no row curvature derivative to bound the weight motion by"
+            }
+            Self::NoOuterHessian => {
+                "the outer search tracked no Hessian over the certified coordinates, so its \
+                 certificate has no Newton step"
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -3217,6 +3313,7 @@ mod assembly_inner_status_gate_tests {
                 beta_covariance_frequentist: None,
                 coefficient_influence: None,
                 weighted_gram: None,
+                identified_subspace: None,
             }),
             fitted_link: FittedLinkState::Standard(None),
             geometry: None,
@@ -3773,6 +3870,12 @@ impl FitInference {
             gam_problem::validate_all_finite_trial_point(
                 "fit_result.coefficient_influence",
                 v.iter().copied(),
+            )?;
+        }
+        if let Some(subspace) = self.identified_subspace.as_ref() {
+            validate_all_finite_estimation(
+                "fit_result.identified_subspace.unidentified_basis",
+                subspace.unidentified_basis.iter().copied(),
             )?;
         }
         if let Some(v) = self.weighted_gram.as_ref() {

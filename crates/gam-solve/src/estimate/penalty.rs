@@ -528,6 +528,12 @@ impl ParametricColumnConditioning {
                 .smoothing_correction_first_order
                 .take()
                 .map(|cov| self.backtransform_covariance(&cov));
+            // The unidentified directions are coefficient displacements, so they
+            // map like β, `β_orig = M·β_int`: a direction `v` with `X_int·v = 0`
+            // becomes `M·v`, and `X_orig·M·v = X_int·v = 0` (#2901 V22).
+            if let Some(subspace) = inf.identified_subspace.as_mut() {
+                subspace.unidentified_basis = self.left_multiply_by_m(&subspace.unidentified_basis);
+            }
             inf.reparam_qs = None;
         }
         result.constraint_kkt = None;

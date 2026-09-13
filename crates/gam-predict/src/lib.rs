@@ -3422,6 +3422,7 @@ mod tests {
             beta_covariance_frequentist: None,
             coefficient_influence: None,
             weighted_gram: None,
+            identified_subspace: None,
         });
         fit
     }
@@ -4207,6 +4208,7 @@ mod tests {
             beta_covariance_frequentist: None,
             coefficient_influence: None,
             weighted_gram: None,
+            identified_subspace: None,
         };
         UnifiedFitResult::try_from_parts(UnifiedFitResultParts {
             blocks: vec![FittedBlock {

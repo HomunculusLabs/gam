@@ -1011,6 +1011,7 @@ pub fn blockwise_fit_from_parts(
         beta_covariance_frequentist: None,
         coefficient_influence: None,
         weighted_gram: None,
+        identified_subspace: None,
     });
 
     gam_solve::model_types::UnifiedFitResult::try_from_parts(UnifiedFitResultParts {

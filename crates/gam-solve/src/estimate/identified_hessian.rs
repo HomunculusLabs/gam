@@ -409,11 +409,62 @@ pub(crate) fn certify_identified_rank_locally_constant(
     }
 }
 
+/// The fitted penalized Hessian's spectrum and the identified rank the criterion
+/// priced it at (#2901 V22).
+pub(crate) struct FittedHessianSpectrum {
+    /// Every eigenvalue of `H`, in the eigensolver's order.
+    eigenvalues: Vec<f64>,
+    /// The matching eigenvectors, one column each, in `H`'s basis.
+    eigenvectors: Array2<f64>,
+    /// `rank(S_λ)` in the same basis.
+    penalty_rank: usize,
+    /// [`DenseSpectralOperator::identified_rank`] of `eigenvalues`.
+    rank: usize,
+}
+
+impl FittedHessianSpectrum {
+    /// Decompose PIRLS's dense penalized `hessian`, for a penalty of rank
+    /// `penalty_rank`.
+    pub(crate) fn of(hessian: &Array2<f64>, penalty_rank: usize) -> Result<Self, EstimationError> {
+        let mut symmetric = hessian.clone();
+        gam_linalg::matrix::symmetrize_in_place(&mut symmetric);
+        let (eigenvalues, eigenvectors) = symmetric
+            .eigh(Side::Lower)
+            .map_err(EstimationError::EigendecompositionFailed)?;
+        let eigenvalues = eigenvalues.to_vec();
+        let rank = DenseSpectralOperator::identified_rank(&eigenvalues, penalty_rank);
+        Ok(Self {
+            eigenvalues,
+            eigenvectors,
+            penalty_rank,
+            rank,
+        })
+    }
+
+    /// The number of identified coefficient directions.
+    pub(crate) fn rank(&self) -> usize {
+        self.rank
+    }
+
+    /// An orthonormal basis, `p × (p − rank)`, of the directions the criterion
+    /// dropped: the eigenvectors of the `p − rank` smallest eigenvalues, the
+    /// complement of the kept set
+    /// `RemlState::intrinsic_hessian_pseudo_logdet_parts_from_eigensystem` scores.
+    pub(crate) fn unidentified_basis(&self) -> Array2<f64> {
+        let mut order: Vec<usize> = (0..self.eigenvalues.len()).collect();
+        order.sort_by(|&left, &right| self.eigenvalues[right].total_cmp(&self.eigenvalues[left]));
+        let dropped = &order[self.rank..];
+        Array2::from_shape_fn((self.eigenvectors.nrows(), dropped.len()), |(row, column)| {
+            self.eigenvectors[[row, dropped[column]]]
+        })
+    }
+}
+
 /// Certify at finalization that the fitted Hessian's identified rank is constant
 /// over the outer certificate's own Newton step (#2901 V22), and return that
 /// certificate with the step's largest coordinate.
 ///
-/// `hessian` is PIRLS's dense penalized Hessian in its transformed basis;
+/// `spectrum` is PIRLS's dense penalized Hessian's, in its transformed basis;
 /// `hessian_rho` and `gradient` are the outer certificate's curvature and
 /// gradient at ρ̂, and `railed` lists the coordinates it certified on a rail. The
 /// curvature weights move through `β̂`: `ΔW_i = c_i·x_iᵀΔβ` with
@@ -423,7 +474,7 @@ pub(crate) fn certify_identified_rank_locally_constant(
 /// charged by the exact spectral norm of their weighted rank-one sum.
 pub(crate) fn certify_fitted_identified_rank(
     pirls: &crate::pirls::PirlsResult,
-    hessian: &Array2<f64>,
+    spectrum: &FittedHessianSpectrum,
     lambdas: &Array1<f64>,
     design: &gam_linalg::matrix::DesignMatrix,
     hessian_rho: &Array2<f64>,
@@ -432,13 +483,9 @@ pub(crate) fn certify_fitted_identified_rank(
 ) -> Result<(IdentifiedRankCertificate, f64), EstimationError> {
     let displacement = certificate_newton_displacement(hessian_rho, gradient, railed)?;
     let step_radius = displacement.iter().fold(0.0_f64, |acc, value| acc.max(*value));
-    let penalty_rank = pirls.reparam_result.e_transformed.nrows();
-    let mut symmetric = hessian.clone();
-    gam_linalg::matrix::symmetrize_in_place(&mut symmetric);
-    let (eigenvalues, eigenvectors) = symmetric
-        .eigh(Side::Lower)
-        .map_err(EstimationError::EigendecompositionFailed)?;
-    let eigenvalues = eigenvalues.to_vec();
+    let eigenvalues = &spectrum.eigenvalues;
+    let eigenvectors = &spectrum.eigenvectors;
+    let penalty_rank = spectrum.penalty_rank;
     let rows = design.nrows();
     let weight_motion = if pirls.solve_c_nontrivial && step_radius > 0.0 {
         let rank = DenseSpectralOperator::identified_rank(&eigenvalues, penalty_rank);

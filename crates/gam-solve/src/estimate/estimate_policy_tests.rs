@@ -737,6 +737,7 @@ fn decode_invariant_test_parts() -> UnifiedFitResultParts {
             beta_covariance_frequentist: None,
             coefficient_influence: None,
             weighted_gram: None,
+            identified_subspace: None,
         }),
         fitted_link: FittedLinkState::Standard(None),
         geometry: Some(FitGeometry {

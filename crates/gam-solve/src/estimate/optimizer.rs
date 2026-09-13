@@ -3034,32 +3034,35 @@ where
     // #2901 V22: the criterion priced `½log|H|₊` on H's identified subspace, and
     // `½log|H|₊` jumps by `½ln σ` where a direction crosses the rounding band.
     // The derivative certificate at ρ̂ describes a smooth criterion only if that
-    // rank is the same over the certificate's own Newton step. A Firth fit
+    // rank is the same over the certificate's own Newton step. The rank and the
+    // unidentified directions are published beside that verdict. A Firth fit
     // prices a structural rank and a sparse Hessian a strict factorization, so
-    // neither has a band to cross.
-    if !final_rho.is_empty() && !cfg.firth_bias_reduction {
-        if let gam_linalg::matrix::SymmetricMatrix::Dense(dense) =
-            &pirls_res.stabilizedhessian_transformed
-        {
+    // neither has a band to cross and neither publishes a band-identified
+    // subspace.
+    let identified_subspace = match &pirls_res.stabilizedhessian_transformed {
+        gam_linalg::matrix::SymmetricMatrix::Dense(dense) if !cfg.firth_bias_reduction => {
+            let spectrum = super::identified_hessian::FittedHessianSpectrum::of(
+                dense,
+                pirls_res.reparam_result.e_transformed.nrows(),
+            )?;
             let rows = reml_state.x().nrows();
-            let unevaluated = if !final_link_coords.is_empty() {
-                Some(
-                    "the outer search also moved link coordinates, whose Hessian drift this \
-                     bound does not model",
-                )
+            let not_evaluated = if final_rho.is_empty() {
+                Some(crate::model_types::RankConstancyNotEvaluated::NoSmoothingParameters)
+            } else if !final_link_coords.is_empty() {
+                Some(crate::model_types::RankConstancyNotEvaluated::LinkCoordinates)
             } else if reml_state.active_constraint_free_basis(&pirls_res).is_some() {
-                Some("the criterion priced the Hessian on an active linear-constraint face")
+                Some(crate::model_types::RankConstancyNotEvaluated::ActiveConstraintFace)
             } else if pirls_res.finalweights.len() != rows
                 || (pirls_res.solve_c_nontrivial
                     && (pirls_res.derivatives_unsupported
                         || pirls_res.solve_c_array.len() != rows))
             {
-                Some("the fit carries no row curvature derivative to bound the weight motion by")
+                Some(crate::model_types::RankConstancyNotEvaluated::NoRowCurvatureDerivative)
             } else {
                 None
             };
-            match (
-                unevaluated,
+            let rank_constancy = match (
+                not_evaluated,
                 outer_result.final_hessian.as_ref(),
                 outer_result.final_gradient.as_ref(),
             ) {
@@ -3087,39 +3090,53 @@ where
                     let (certificate, step_radius) =
                         super::identified_hessian::certify_fitted_identified_rank(
                             &pirls_res,
-                            dense,
+                            &spectrum,
                             &lambdas,
                             reml_state.x(),
                             hessian_rho,
                             gradient,
                             &railed,
                         )?;
-                    let largest_unidentified = match certificate.largest_unidentified {
-                        Some(sigma) => format!("{sigma:.3e}"),
-                        None => "none at full rank".to_string(),
-                    };
                     log::info!(
                         "[#2901 V22] identified rank {} of {} is certified constant over the \
                          certificate's Newton step {step_radius:.3e}: smallest identified \
-                         eigenvalue {:.3e}, largest unidentified {largest_unidentified}, rounding \
-                         band {:.3e}",
+                         eigenvalue {:.3e}, rounding band {:.3e}",
                         certificate.rank,
                         dense.nrows(),
                         certificate.smallest_identified,
                         certificate.band,
                     );
+                    crate::model_types::IdentifiedRankConstancy::Certified {
+                        step_radius,
+                        smallest_identified: certificate.smallest_identified,
+                        largest_unidentified: certificate.largest_unidentified,
+                        band: certificate.band,
+                    }
                 }
-                (reason, ..) => log::info!(
-                    "[#2901 V22] identified-rank constancy not evaluated at the fitted smoothing \
-                     parameters: {}",
-                    reason.unwrap_or(
-                        "the outer search tracked no Hessian over the certified coordinates, so \
-                         its certificate has no Newton step"
-                    )
-                ),
-            }
+                (reason, ..) => {
+                    let reason = reason
+                        .unwrap_or(crate::model_types::RankConstancyNotEvaluated::NoOuterHessian);
+                    log::info!(
+                        "[#2901 V22] identified rank {} of {}; its constancy over the \
+                         certificate's step was not evaluated: {}",
+                        spectrum.rank(),
+                        dense.nrows(),
+                        reason.description(),
+                    );
+                    crate::model_types::IdentifiedRankConstancy::NotEvaluated { reason }
+                }
+            };
+            Some(crate::model_types::IdentifiedCoefficientSubspace {
+                rank: spectrum.rank(),
+                unidentified_basis: pirls_res
+                    .reparam_result
+                    .qs
+                    .dot(&spectrum.unidentified_basis()),
+                rank_constancy,
+            })
         }
-    }
+        _ => None,
+    };
 
     if opts.compute_inference || needs_constrained_posterior {
         penalized_hessian = map_hessian_to_original_basis(&pirls_res)?;
@@ -3932,6 +3949,7 @@ where
         beta_covariance_frequentist,
         coefficient_influence,
         weighted_gram,
+        identified_subspace,
     });
 
     let pirls_status = pirls_res.status;

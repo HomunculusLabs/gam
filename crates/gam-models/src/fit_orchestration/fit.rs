@@ -2226,6 +2226,7 @@ fn survival_unified_fit_result(
         beta_covariance_frequentist: None,
         coefficient_influence: None,
         weighted_gram: None,
+        identified_subspace: None,
     };
 
     UnifiedFitResult::try_from_parts(gam_solve::estimate::UnifiedFitResultParts {

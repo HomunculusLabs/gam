@@ -1257,6 +1257,7 @@ mod tests {
                 beta_covariance_frequentist: None,
                 coefficient_influence: None,
                 weighted_gram: None,
+                identified_subspace: None,
             }),
             None,
         );
