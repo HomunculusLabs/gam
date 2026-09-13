@@ -520,10 +520,20 @@ fn stiefel_canonical_log(
             nrm += y_perp_t[[i, j]] * y_perp_t[[i, j]];
         }
         let nrm = nrm.sqrt();
-        if nrm > 1.0e-12 {
-            for i in 0..n {
-                y_perp_t[[i, j]] /= nrm;
-            }
+        // The projected column started as a unit column of `Y⊥` and took two
+        // passes of `k + j` projections, so its rounding is at most
+        // `γ_{2(k+j)n+n}`. A residual inside that band means `Y⊥_j` lies in
+        // `span(Ỹ)`: the frames are beyond the region where this anchored
+        // completion exists, and an unnormalized column would make `V₀` fail to
+        // be orthogonal.
+        if !(nrm > gam_linalg::roundoff::accumulation_growth(2 * (k + j) * n + n)) {
+            return Err(GeometryError::Unsupported(
+                "Stiefel log_map: a complement direction of the target frame is unresolvable \
+                 (frames beyond the injectivity radius / near the cut locus)",
+            ));
+        }
+        for i in 0..n {
+            y_perp_t[[i, j]] /= nrm;
         }
     }
 
@@ -549,12 +559,14 @@ fn stiefel_canonical_log(
     }
     let mut v = fast_atb(&frame_y, &frame_yt); // n×n, first k columns = [M; B₀]
 
-    const MAX_ITER: usize = 100;
-    const TOL: f64 = 1.0e-13;
     let mut a_block = Array2::<f64>::zeros((k, k));
     let mut b_block = Array2::<f64>::zeros((c_dim, k));
-    let mut converged = false;
-    for _ in 0..MAX_ITER {
+    // The normal block `C` is read off `log V`, whose rounding is at most
+    // `γ_{n²+2n}·‖log V‖_F`. The iteration is certified once `‖C‖_F` is inside
+    // that band, and refused when `‖C‖_F` stops shrinking above it, which is
+    // what frames beyond the injectivity radius do.
+    let mut previous_norm = f64::INFINITY;
+    loop {
         let log_v = skew_log_orthogonal(&v)?; // n×n skew
         let mut c_norm_sq = 0.0_f64;
         for i in 0..k {
@@ -571,10 +583,18 @@ fn stiefel_canonical_log(
                 c_norm_sq += c * c;
             }
         }
-        if c_norm_sq.sqrt() <= TOL {
-            converged = true;
+        let log_norm = log_v.iter().map(|x| x * x).sum::<f64>().sqrt();
+        let c_norm = c_norm_sq.sqrt();
+        if c_norm <= gam_linalg::roundoff::accumulation_growth(n * n + 2 * n) * log_norm {
             break;
         }
+        if !(c_norm < previous_norm) {
+            return Err(GeometryError::Unsupported(
+                "Stiefel log_map: iteration did not converge \
+                 (frames beyond the injectivity radius / near the cut locus)",
+            ));
+        }
+        previous_norm = c_norm;
         // Φ = expm(−C); V ← V · diag(I_k, Φ) — right-multiply the last c_dim
         // columns, leaving the first k (= P) untouched.
         let mut neg_c = Array2::<f64>::zeros((c_dim, c_dim));
@@ -595,12 +615,6 @@ fn stiefel_canonical_log(
             }
         }
         v = v_new;
-    }
-    if !converged {
-        return Err(GeometryError::Unsupported(
-            "Stiefel log_map: iteration did not converge \
-             (frames beyond the injectivity radius / near the cut locus)",
-        ));
     }
 
     // Δ = Y A + Y⊥ B.

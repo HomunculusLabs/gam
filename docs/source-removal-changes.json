@@ -9098,5 +9098,14 @@
     ],
     "reason": "#1082. The multinomial ratio predictive now integrates ℓ(θ) + s(β̂)ᵀo − ½oᵀQo anchored at the published mode, with Q = T − XᵀW(β̂)X as its one quadratic and Q certified against its rounding band before any solve. The separate prior quadratic PriorQuadratic (A = T − (XᵀWX + S_λ) and its anchor) has no remaining use. DenseSpectralOperator::rounding_band held H's rounding band p·ε·‖H‖₂ inside gam-solve; the certificate on Q needs the same band, so the definition moves to gam_linalg::roundoff::symmetric_spectrum_rounding_band (the same expression) and its gam-solve callers read it there.",
     "evidence": "At bfb09a938, git grep -n -w PriorQuadratic finds it only in crates/gam-models/src/multinomial_predictive.rs. DenseSpectralOperator::rounding_band is called only in crates/gam-solve/src/reml/reml_outer_engine/dense_spectral.rs (as Self::rounding_band, including the call 0c9570b18 added after that base) and crates/gam-solve/src/estimate/identified_hessian.rs. All of these read gam_linalg::roundoff::symmetric_spectrum_rounding_band in the same commit, and the landing script refuses a tree that still names either removed item. Guarded check job 612561 (lane sw0c, bfb09a938 plus qcert.patch): cargo check -p gam-pyffi --all-targets passed; the workspace check stopped at a foreign E0277 (5d443c3c8, fixed by 3a5be6550); and the gam-models multinomial suites passed 12 of 12 (/scratch.global/sauer354/pool/perf1082/check12.612561.log)."
+  },
+  {
+    "base": "0a4faf8459e7881704bcb218d397485db319b9c1",
+    "items": [
+      "crates/gam-geometry/src/manifolds/stiefel.rs:const:MAX_ITER",
+      "crates/gam-geometry/src/manifolds/stiefel.rs:const:TOL"
+    ],
+    "reason": "SPEC rule 23 (#2469). stiefel_canonical_log iterated V <- V diag(I, expm(-C)) until the normal block satisfied ||C||_F <= TOL = 1e-13, refusing after MAX_ITER = 100 passes. The iteration is now certified once ||C||_F is inside the rounding band gamma_{n^2+2n} ||log V||_F of the symmetric-eigendecomposition logarithm, and refused when ||C||_F stops shrinking above it, so both function-local constants are deleted. The complement Gram-Schmidt also refuses a projected column whose residual is inside its rounding band instead of leaving it unnormalized.",
+    "evidence": "At the base, MAX_ITER and TOL are each declared once in crates/gam-geometry/src/manifolds/stiefel.rs, as function-local constants inside stiefel_canonical_log, and read only by that function iteration loop. The candidate file declares neither."
   }
 ]
