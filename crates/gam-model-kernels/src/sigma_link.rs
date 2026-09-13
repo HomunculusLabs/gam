@@ -209,7 +209,7 @@ pub fn exp_sigma_derivs_up_to_fourth_scalar(eta: f64) -> (f64, f64, f64, f64, f6
 /// This 0.01 looks absolute but is *operationally* scale-relative: the single
 /// Gaussian location-scale model entry point
 /// (`fit_gaussian_location_scale_model` in `solver::fit_orchestration`) first computes
-/// `response_scale = sample_std(y).max(1e-6)` and fits on `y → y / response_scale`,
+/// `response_scale = sample_std(y)` and fits on `y → y / response_scale`,
 /// then maps the fitted coefficients back to raw response units (the
 /// Location/Mean block scaled by `response_scale`, the log-σ block intercept
 /// shifted by `+ln(response_scale)`) via `rescale_gaussian_location_scale_to_raw`.
@@ -224,12 +224,10 @@ pub fn exp_sigma_derivs_up_to_fourth_scalar(eta: f64) -> (f64, f64, f64, f64, f6
 /// range, so the scale-block Fisher information matches gamlss's floorless 2a
 /// and the log-σ smooth traces the variance envelope instead of being
 /// over-smoothed. Under a rescaling `y → c·y` the prefit divides by `c` again,
-/// leaving the dimensionless internal floor unchanged. The single lingering
-/// breakage is the underflow guard `response_scale.max(1e-6)`: if the user feeds
-/// responses with `sample_std(y) < 1e-6` the floor stops tracking the data
-/// scale. That is a deliberate guard against a pathological constant-y input
-/// rather than a model assumption, and 1e-6 sits well below any sensible
-/// measurement-noise floor.
+/// leaving the dimensionless internal floor unchanged. There is no underflow
+/// guard: a response without a finite positive spread has no scale to
+/// standardise by and is refused, so the floor tracks the data scale at every
+/// spread the fit accepts.
 ///
 /// Equivariance requires the floor to scale **with** the response, not just the
 /// `exp(η)` term: the `+ln(response_scale)` intercept shift only multiplies the
