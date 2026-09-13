@@ -98,7 +98,6 @@ fn fit_options() -> FitOptions {
         nullspace_dims: vec![0],
         linear_constraints: None,
         firth_bias_reduction: false,
-        adaptive_regularization: None,
         rho_prior: Default::default(),
         kronecker_penalty_system: None,
         kronecker_factored: None,
@@ -173,7 +172,6 @@ fn predict_with_conformal(
         // Keep the model-based interval comparison clean: no extra coverage
         // inflation that would muddy the "plain interval under-covers" claim.
         includeobservation_interval: false,
-        apply_bias_correction: false,
         edgeworth_one_sided: false,
         boundary_correction: false,
         ..Default::default()
