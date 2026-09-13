@@ -197,6 +197,24 @@ pub(crate) fn run_fit(args: FitArgs) -> Result<(), String> {
     if fit_config.family.as_deref() == Some("multinomial") {
         return run_fit_multinomial(&args, &parsed, &formula_text, &fit_config);
     }
+    // Transformation-normal fits go through the library materializer, which refuses
+    // link(...), linkwiggle(...), frailty, a noise formula and marginal-slope
+    // settings. It reads neither Firth nor another family, so those are refused here.
+    let family_names_transformation_normal = fit_config
+        .family
+        .as_deref()
+        .is_some_and(|name| name.eq_ignore_ascii_case("transformation-normal"));
+    if fit_config.transformation_normal || family_names_transformation_normal {
+        if fit_config.firth {
+            return Err("--firth is not supported for the transformation-normal family".to_string());
+        }
+        if !family_names_transformation_normal {
+            if let Some(family) = fit_config.family.as_deref() {
+                return Err(format!("--transformation-normal conflicts with --family {family}"));
+            }
+        }
+        return run_library_formula_fit(&args, &parsed, formula_text, &fit_config);
+    }
     let requested_columns = required_columns_for_resolved_fit(&args, &parsed, &fit_config)?;
     // Force `group(g)` / `factor(g)` / `re(g)` grouping columns to a factor
     // encoding even when their labels are numeric. An untyped CSV cannot carry
@@ -214,25 +232,6 @@ pub(crate) fn run_fit(args: FitArgs) -> Result<(), String> {
     let y_col = resolve_role_col(&col_map, &parsed.response, "response")?;
     let y = ds.values.column(y_col);
     let mut inference_notes: Vec<String> = Vec::new();
-
-    if fit_config.transformation_normal {
-        if fit_config.noise_offset_column.is_some() {
-            return Err(
-                "--noise-offset-column is not supported with --transformation-normal".to_string(),
-            );
-        }
-        let y = y.to_owned();
-        return run_fit_transformation_normal(
-            &args,
-            &fit_config,
-            &ds,
-            &col_map,
-            &parsed,
-            &formula_text,
-            &y,
-            &mut inference_notes,
-        );
-    }
 
     if fit_config.slope_formula.is_some() || fit_config.z_column.is_some() {
         if fit_config.slope_formula.is_none() || fit_config.z_column.is_none() {
@@ -914,119 +913,6 @@ pub(crate) fn run_fit_bernoulli_marginal_slope(
             solved.link_dev_runtime.as_ref(),
             base_link,
             save_frailty,
-        )?;
-        model.offset_column = fit_config.offset_column.clone();
-        model.noise_offset_column = fit_config.noise_offset_column.clone();
-        write_model_json(out, &model)?;
-    }
-
-    emit_smooth_structure_warnings("fit-end", &spatial_usagewarnings);
-    Ok(())
-}
-
-pub(crate) fn run_fit_transformation_normal(
-    args: &FitArgs,
-    fit_config: &FitConfig,
-    ds: &Dataset,
-    col_map: &HashMap<String, usize>,
-    parsed: &ParsedFormula,
-    formula_text: &str,
-    y: &Array1<f64>,
-    inference_notes: &mut Vec<String>,
-) -> Result<(), String> {
-    if fit_config.firth {
-        return Err("--firth is not supported for the transformation-normal family".to_string());
-    }
-    if parsed.linkspec.is_some() {
-        return Err("link(...) is not supported for the transformation-normal family".to_string());
-    }
-    if parsed.linkwiggle.is_some() {
-        return Err(
-            "linkwiggle(...) is not supported for the transformation-normal family".to_string(),
-        );
-    }
-    if fit_config.noise_formula.is_some() {
-        return Err("--predict-noise cannot be combined with --transformation-normal".to_string());
-    }
-
-    let mut covariate_spec = build_termspec(
-        &parsed.terms,
-        ds,
-        col_map,
-        inference_notes,
-    )?;
-    if fit_config.scale_dimensions {
-        enable_scale_dimensions(&mut covariate_spec);
-    }
-
-    let spatial_usagewarnings =
-        collect_smooth_structure_warnings(&covariate_spec, &ds.headers, "transformation-normal");
-    emit_smooth_structure_warnings("fit-start", &spatial_usagewarnings);
-    print_inference_summary(inference_notes);
-
-    let options = blockwise_options_from_fit_args()?;
-    let config = TransformationNormalConfig::default();
-    let weights = resolve_weight_column(ds, col_map, fit_config.weight_column.as_deref())?;
-    let offset = resolve_offset_column(ds, col_map, fit_config.offset_column.as_deref())?;
-    let kappa_options = SpatialLengthScaleOptimizationOptions::default();
-
-    let phase_start = std::time::Instant::now();
-    log::info!(
-        "[PHASE] CTN(transformation-normal) fit start n={} cov_terms={}",
-        ds.values.nrows(),
-        covariate_spec.linear_terms.len()
-            + covariate_spec.smooth_terms.len()
-            + covariate_spec.random_effect_terms.len()
-    );
-    let solved = match fit_model(FitRequest::TransformationNormal(
-        TransformationNormalFitRequest {
-            data: ds.values.view(),
-            response: y.clone(),
-            weights,
-            offset,
-            covariate_spec: covariate_spec.clone(),
-            config,
-            options,
-            kappa_options: kappa_options.clone(),
-        },
-    )) {
-        Ok(FitResult::TransformationNormal(result)) => result,
-        Ok(_) => {
-            emit_smooth_structure_warnings("fit-end", &spatial_usagewarnings);
-            return Err(
-                "internal transformation-normal workflow returned the wrong result variant"
-                    .to_string(),
-            );
-        }
-        Err(e) => {
-            emit_smooth_structure_warnings("fit-end", &spatial_usagewarnings);
-            return Err(format!("transformation-normal fit failed: {e}"));
-        }
-    };
-    log::info!(
-        "[PHASE] CTN(transformation-normal) fit end elapsed={:.3}s",
-        phase_start.elapsed().as_secs_f64()
-    );
-
-    let frozen_covariate = solved.covariate_spec_resolved.clone();
-    cli_out!(
-        "model fit complete | family={} | outer_iter={} | status={}",
-        FAMILY_TRANSFORMATION_NORMAL,
-        solved.fit.outer_iterations,
-        solved.fit.convergence_evidence().inner_status().label()
-    );
-    print_spatial_aniso_scales(&solved.covariate_spec_resolved);
-
-    if let Some(out) = args.out.as_ref() {
-        let mut model = build_transformation_normal_saved_model(
-            formula_text.to_string(),
-            ds.schema.clone(),
-            ds.headers.clone(),
-            ds.feature_ranges(),
-            frozen_covariate,
-            solved.fit,
-            &solved.family,
-            solved.score_calibration,
         )?;
         model.offset_column = fit_config.offset_column.clone();
         model.noise_offset_column = fit_config.noise_offset_column.clone();

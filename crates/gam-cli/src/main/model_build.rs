@@ -113,38 +113,6 @@ pub(crate) fn resolve_bernoulli_marginal_slope_base_link(
     Ok(InverseLink::Standard(StandardLink::Probit))
 }
 
-pub(crate) fn build_transformation_normal_saved_model(
-    formula: String,
-    data_schema: DataSchema,
-    training_headers: Vec<String>,
-    training_feature_ranges: Vec<(f64, f64)>,
-    resolved_covariate_spec: TermCollectionSpec,
-    fit_result: UnifiedFitResult,
-    family: &gam::families::transformation_normal::TransformationNormalFamily,
-    score_calibration: gam::inference::model::TransformationScoreCalibration,
-) -> Result<SavedModel, String> {
-    // Thin adapter over the shared core assembler; the CLI supplies per-feature
-    // training ranges and no offset columns. See
-    // `assemble_transformation_normal_payload`.
-    let payload = assemble_transformation_normal_payload(
-        TransformationNormalInputs {
-            formula,
-            data_schema,
-            resolved_covariate_spec,
-            fit_result,
-            family,
-            score_calibration,
-        },
-        SavedModelSourceMetadata {
-            training_headers,
-            training_feature_ranges: Some(training_feature_ranges),
-            offset_column: None,
-            noise_offset_column: None,
-        },
-    );
-    Ok(SavedModel::from_payload(payload?))
-}
-
 pub(crate) fn core_saved_fit_result(
     beta: Array1<f64>,
     lambdas: Array1<f64>,

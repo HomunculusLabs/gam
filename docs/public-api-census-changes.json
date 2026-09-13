@@ -3957,5 +3957,14 @@
     "reason": "#2899, SPEC rule 25. gam_math::jet_scalar::Order1 (value+gradient JetScalar) had no production constructor in any crate. It is removed with its three impls, the five gam-math unit tests that only exercised it, and the gam-models dispersion_family test helpers (order1_ln_gamma, dispersion_nb_disp_order1) that pinned an Order1 NB2 tower against the Order2 oracle.",
     "evidence": "At the base, git grep -w Order1 finds the definition and unit_tests in crates/gam-math/src/jet_scalar.rs, and the tests module of crates/gam-models/src/gamlss/dispersion_family.rs (lines after its #[cfg(test)] mod tests at 2448). No other source names it. A census compile with the crate's unused public items made private (job 619045) reported struct Order1 is never constructed. The item list is the guard's refusal list from the guarded check job named in the commit message.",
     "base": "c5201c7dfd7eb818dcbe153e9e95fa4d01d3817a"
+  },
+  {
+    "base": "edc655d4ff52ac19a3590839befd074a356eba9d",
+    "removed": {
+      "crates/gam-cli/src/main/model_build.rs::build_transformation_normal_saved_model": 1,
+      "crates/gam-cli/src/main/run_fit.rs::run_fit_transformation_normal": 1
+    },
+    "reason": "SPEC rules 9, 18 and 25 (#2899, #2631). gam fit --transformation-normal ran run_fit_transformation_normal, a CLI copy of the library transformation-normal materializer with its own saved-model assembly. The fit now goes through fit_formula_to_payload; run_fit_transformation_normal, build_transformation_normal_saved_model and FAMILY_TRANSFORMATION_NORMAL, which only that route read, are deleted.",
+    "evidence": "Job 627938 phase S3A: public_api_census.py counted 11590 -> 11588 public function declarations and reported exactly these as removed; the all-targets workspace check at that phase exited 0 with 0 errors (/scratch.global/sauer354/pool/prune-cli/gate13.627938.log)."
   }
 ]

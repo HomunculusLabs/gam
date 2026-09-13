@@ -610,8 +610,6 @@ pub(crate) const FAMILY_BINOMIAL_LOCATION_SCALE: &str = "binomial-location-scale
 
 pub(crate) const FAMILY_BERNOULLI_MARGINAL_SLOPE: &str = "bernoulli-marginal-slope";
 
-pub(crate) const FAMILY_TRANSFORMATION_NORMAL: &str = "transformation-normal";
-
 pub(crate) fn parse_positive_usize_cli(raw: &str) -> Result<usize, String> {
     let value = raw
         .parse::<usize>()

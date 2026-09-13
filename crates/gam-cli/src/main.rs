@@ -53,12 +53,10 @@ pub(crate) use gam_data::{ColumnKindTag, DataSchema};
 pub(crate) use gam::inference::model_payload_builders::{
     BernoulliMarginalSlopeInputs, LocationScaleInputs, LocationScaleResponse,
     LocationScaleWiggle, SavedModelSourceMetadata, StandardPayloadInputs,
-    TransformationNormalInputs,
     apply_request_metadata, assemble_bernoulli_marginal_slope_payload,
     assemble_location_scale_payload,
     assemble_residual_cascade_payload, assemble_spline_scan_payload, assemble_standard_payload,
-    assemble_transformation_normal_payload,
-};
+    };
 
 pub(crate) use gam_predict::input::{
     build_predict_input_for_model, build_transformation_normal_observed_scores,
@@ -122,8 +120,6 @@ pub(crate) use gam::term_builder::{
     build_termspec, column_map_with_alias, enable_scale_dimensions, resolve_role_col,
 };
 
-pub(crate) use gam::transformation_normal::TransformationNormalConfig;
-
 pub(crate) use gam::types::{
     InverseLink, LikelihoodScaleMetadata, LikelihoodSpec, LinkFunction, LogLikelihoodNormalization,
     MixtureLinkSpec, ResponseFamily, SasLinkSpec, StandardLink,
@@ -132,7 +128,7 @@ pub(crate) use gam::types::{
 pub(crate) use gam::families::fit_orchestration::{
     BernoulliMarginalSlopeFitRequest, BinomialLocationScaleFitRequest,
     DispersionLocationScaleFitRequest, FitConfig, FitRequest, FitResult,
-    GaussianLocationScaleFitRequest, LinkWiggleConfig, PreparedSurvivalTimeStack, TransformationNormalFitRequest, WorkflowError,
+    GaussianLocationScaleFitRequest, LinkWiggleConfig, PreparedSurvivalTimeStack, WorkflowError,
     fit_from_formula_with_notes, fit_model, is_binary_response, prepare_survival_time_stack,
     resolve_offset_column, resolve_weight_column, response_column_kind,
     route_marginal_slope_deviation_blocks,
