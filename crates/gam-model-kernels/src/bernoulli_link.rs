@@ -208,8 +208,21 @@ fn loglog_natural_jet(eta: f64) -> BernoulliNaturalJet {
     }
 }
 
+/// Tail-stable Cauchit pieces: the probability, both log probabilities,
+/// `log μ'`, and the ratios `η/(1 + η²)` and `1/(1 + η²)` every derivative order
+/// is written in.
+#[derive(Clone, Copy)]
+struct CauchitPieces {
+    mu: f64,
+    log_mu: f64,
+    log_one_minus_mu: f64,
+    log_d1: f64,
+    ratio: f64,
+    inv_one_plus_sq: f64,
+}
+
 #[inline]
-fn cauchit_natural_jet(eta: f64) -> BernoulliNaturalJet {
+fn cauchit_pieces(eta: f64) -> CauchitPieces {
     let (mu, one_minus_mu) = if eta > 0.0 {
         let q = (eta.recip()).atan() / std::f64::consts::PI;
         (1.0 - q, q)
@@ -236,13 +249,33 @@ fn cauchit_natural_jet(eta: f64) -> BernoulliNaturalJet {
     } else {
         1.0 / (eta + eta.recip())
     };
-    let d2_over_d1 = -2.0 * ratio;
     let inv_one_plus_sq = if abs_eta <= 1.0 {
         1.0 / (1.0 + eta * eta)
     } else {
         let inv = eta.recip();
         inv * inv / (1.0 + inv * inv)
     };
+    CauchitPieces {
+        mu,
+        log_mu,
+        log_one_minus_mu,
+        log_d1,
+        ratio,
+        inv_one_plus_sq,
+    }
+}
+
+#[inline]
+fn cauchit_natural_jet(eta: f64) -> BernoulliNaturalJet {
+    let CauchitPieces {
+        mu,
+        log_mu,
+        log_one_minus_mu,
+        log_d1,
+        ratio,
+        inv_one_plus_sq,
+    } = cauchit_pieces(eta);
+    let d2_over_d1 = -2.0 * ratio;
     let d3_over_d1 = inv_one_plus_sq * (6.0 * (eta * ratio) - 2.0 * inv_one_plus_sq);
     let d4_over_d1 = 24.0 * ratio * (inv_one_plus_sq * inv_one_plus_sq - ratio * ratio);
     let d1_over_mu = (log_d1 - log_mu).exp();
@@ -403,9 +436,192 @@ pub fn bernoulli_natural_observation(
     })
 }
 
+#[inline]
+fn logit_natural_fifth(eta: f64) -> [f64; 2] {
+    let tail = (-eta.abs()).exp();
+    let (mu, one_minus_mu) = if eta >= 0.0 {
+        let q = tail / (1.0 + tail);
+        (1.0 - q, q)
+    } else {
+        let p = tail / (1.0 + tail);
+        (p, 1.0 - p)
+    };
+    let curvature = mu * one_minus_mu;
+    // Both towers share every derivative past the first:
+    // d⁵ log μ = w(2μ − 1)(1 − 12w), with w = μ(1 − μ).
+    let fifth = curvature * (mu - one_minus_mu) * (1.0 - 12.0 * curvature);
+    [fifth, fifth]
+}
+
+#[inline]
+fn cloglog_natural_fifth(eta: f64) -> [f64; 2] {
+    let x = eta.exp();
+    if x == f64::INFINITY {
+        return [0.0, f64::NEG_INFINITY];
+    }
+    if x == 0.0 {
+        return [0.0, 0.0];
+    }
+    let log_mu_fifth = if x <= 0.01 {
+        // The series of `cloglog_natural_jet`, each x^k term scaled by k⁵.
+        let p1 = -0.5 * x;
+        let p2 = x * x / 24.0;
+        let p4 = -x.powi(4) / 2880.0;
+        let p6 = x.powi(6) / 181440.0;
+        p1 + 32.0 * p2 + 1024.0 * p4 + 7776.0 * p6
+    } else if x < 1.0 {
+        // One more step of the `h, a, b` recurrence: h' = h·a, a' = −x − h·a,
+        // and b' is the fourth-order builder's `b_derivative`.
+        let h = x / x.exp_m1();
+        let a = 1.0 - x - h;
+        let b = a * a - x - h * a;
+        let a_derivative = -x - h * a;
+        let b_derivative = -x * (2.0 * a + 1.0 - h) - 3.0 * h * a * a + h * h * a;
+        let b_second_derivative = -x * (2.0 * a + 1.0 - h)
+            - x * (2.0 * a_derivative - h * a)
+            - 3.0 * h * a * a * a
+            - 6.0 * h * a * a_derivative
+            + 2.0 * h * h * a * a
+            + h * h * a_derivative;
+        let c = a * b + b_derivative;
+        h * (a * c + a_derivative * b + a * b_derivative + b_second_derivative)
+    } else {
+        // Stirling numbers S(5, k) = 1, 15, 25, 10, 1 over the geometric-series
+        // factors of `cloglog_natural_jet`, with the Eulerian coefficients
+        // 1, 11, 11, 1 on the fifth factor.
+        let q = (-x).exp();
+        let inv = 1.0 / -(-x).exp_m1();
+        let p1 = (eta - x).exp() * inv;
+        let p2 = (2.0 * eta - x).exp() * inv.powi(2);
+        let p3 = (3.0 * eta - x).exp() * (1.0 + q) * inv.powi(3);
+        let p4 = (4.0 * eta - x).exp() * (1.0 + 4.0 * q + q * q) * inv.powi(4);
+        let p5 = (5.0 * eta - x).exp() * (1.0 + 11.0 * q + 11.0 * q * q + q.powi(3)) * inv.powi(5);
+        p1 - 15.0 * p2 + 25.0 * p3 - 10.0 * p4 + p5
+    };
+    [log_mu_fifth, -x]
+}
+
+#[inline]
+fn cauchit_natural_fifth(eta: f64) -> [f64; 2] {
+    let CauchitPieces {
+        log_mu,
+        log_one_minus_mu,
+        log_d1,
+        ratio,
+        inv_one_plus_sq,
+        ..
+    } = cauchit_pieces(eta);
+    let d2_over_d1 = -2.0 * ratio;
+    let d3_over_d1 = inv_one_plus_sq * (6.0 * (eta * ratio) - 2.0 * inv_one_plus_sq);
+    let d4_over_d1 = 24.0 * ratio * (inv_one_plus_sq * inv_one_plus_sq - ratio * ratio);
+    // d⁴/dη⁴ (1 + η²)⁻¹ = 24(5η⁴ − 10η² + 1)/(1 + η²)⁵.
+    let ratio_sq = ratio * ratio;
+    let inv_sq = inv_one_plus_sq * inv_one_plus_sq;
+    let d5_over_d1 = 24.0 * (5.0 * ratio_sq * ratio_sq - 10.0 * ratio_sq * inv_sq + inv_sq * inv_sq);
+    let r1 = (log_d1 - log_mu).exp();
+    let (r2, r3, r4, r5) = (d2_over_d1 * r1, d3_over_d1 * r1, d4_over_d1 * r1, d5_over_d1 * r1);
+    let s1 = (log_d1 - log_one_minus_mu).exp();
+    let (s2, s3, s4, s5) = (d2_over_d1 * s1, d3_over_d1 * s1, d4_over_d1 * s1, d5_over_d1 * s1);
+    // The fifth cumulant of the ratios μ⁽ᵏ⁾/μ, and of −μ⁽ᵏ⁾/(1 − μ).
+    [
+        r5 - 5.0 * r1 * r4 - 10.0 * r2 * r3 + 20.0 * r1 * r1 * r3 + 30.0 * r1 * r2 * r2
+            - 60.0 * r1.powi(3) * r2
+            + 24.0 * r1.powi(5),
+        -s5 - 5.0 * s1 * s4 - 10.0 * s2 * s3 - 20.0 * s1 * s1 * s3 - 30.0 * s1 * s2 * s2
+            - 60.0 * s1.powi(3) * s2
+            - 24.0 * s1.powi(5),
+    ]
+}
+
+/// Fifth η-derivatives `(d⁵ log μ, d⁵ log(1 − μ))`, continuing each dedicated
+/// tail kernel one step. `None` for the parameterized links, whose generic
+/// inverse-link jet has no fifth derivative.
+fn bernoulli_natural_log_fifth_derivatives(
+    eta: f64,
+    link: &InverseLink,
+) -> Result<Option<[f64; 2]>, EstimationError> {
+    match link {
+        InverseLink::Standard(StandardLink::Logit) => Ok(Some(logit_natural_fifth(eta))),
+        InverseLink::Standard(StandardLink::Probit) => Ok(Some([
+            gam_math::probability::normal_logcdf_derivatives_through_fifth(eta)[5],
+            -gam_math::probability::normal_logcdf_derivatives_through_fifth(-eta)[5],
+        ])),
+        InverseLink::Standard(StandardLink::CLogLog) => Ok(Some(cloglog_natural_fifth(eta))),
+        InverseLink::Standard(StandardLink::LogLog) => {
+            let mirrored = cloglog_natural_fifth(-eta);
+            Ok(Some([-mirrored[1], -mirrored[0]]))
+        }
+        InverseLink::Standard(StandardLink::Cauchit) => Ok(Some(cauchit_natural_fifth(eta))),
+        InverseLink::Standard(link @ (StandardLink::Identity | StandardLink::Log)) => {
+            Err(EstimationError::InvalidInput(format!(
+                "Bernoulli likelihood requires a bounded inverse link; `{}` is not bounded to [0,1]",
+                link.name()
+            )))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Third η-derivative of one unweighted Bernoulli observation's negative
+/// Hessian, `−d⁵ℓ/dη⁵`, one order past [`bernoulli_natural_observation`]. Hard
+/// `0/1` outcomes select one tower as there. `None` for the parameterized links,
+/// whose generic inverse-link jet has no fifth derivative (#2903).
+pub fn bernoulli_natural_negative_hessian_third_derivative(
+    row: usize,
+    y: f64,
+    eta: f64,
+    link: &InverseLink,
+) -> Result<Option<f64>, EstimationError> {
+    if !(y.is_finite() && (0.0..=1.0).contains(&y)) {
+        return Err(EstimationError::InvalidInput(format!(
+            "Bernoulli response at row {row} must be finite and in [0,1], got {y}"
+        )));
+    }
+    Ok(bernoulli_natural_log_fifth_derivatives(eta, link)?
+        .map(|[log_mu, log_one_minus_mu]| -response_mixture(y, log_mu, log_one_minus_mu)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #2903: `W'''` must equal a central difference of the analytic `W''` on every
+    /// dedicated tail kernel. η = −5 reaches the small-x cloglog series, −2.5 and
+    /// −0.25 its recurrence, 0.7 and 2.5 its geometric tail, and the mirrored
+    /// values do the same for loglog.
+    #[test]
+    fn negative_hessian_third_derivative_matches_difference_of_second_2903() {
+        for link in [
+            StandardLink::Logit,
+            StandardLink::Probit,
+            StandardLink::CLogLog,
+            StandardLink::LogLog,
+            StandardLink::Cauchit,
+        ] {
+            let link = InverseLink::Standard(link);
+            for (row, eta) in [-5.0, -2.5, -0.25, 0.7, 2.5, 5.0].into_iter().enumerate() {
+                for y in [0.0, 0.3, 1.0] {
+                    let h = 2.0e-5;
+                    let center =
+                        bernoulli_natural_negative_hessian_third_derivative(row, y, eta, &link)
+                            .expect("third derivative")
+                            .expect("a dedicated tail kernel carries the fifth derivative");
+                    let plus = bernoulli_natural_observation(row, y, eta + h, &link)
+                        .expect("plus observation");
+                    let minus = bernoulli_natural_observation(row, y, eta - h, &link)
+                        .expect("minus observation");
+                    let fd = (plus.negative_hessian_second_derivative
+                        - minus.negative_hessian_second_derivative)
+                        / (2.0 * h);
+                    assert!(
+                        (center - fd).abs() <= 2.0e-4 * (1.0 + fd.abs()),
+                        "{} curvature third derivative at eta={eta}, y={y}: analytic={center} FD={fd}",
+                        link.link_function().name(),
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn logit_and_cloglog_keep_informative_log_tails() {

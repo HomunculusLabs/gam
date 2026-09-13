@@ -1258,6 +1258,7 @@ fn exact_noncanonical_binomial_observation_row(
     if weight == 0.0 {
         return Ok(ExactStandardObservationRow::zero_weight(observation.mu));
     }
+    let third_derivative = bernoulli_natural_negative_hessian_third_derivative(row, y, eta, link)?;
     let fisherweight = weighted_positive_from_log(weight, observation.log_fisher);
     if !(fisherweight.is_finite() && fisherweight > 0.0) {
         return Err(EstimationError::pirls_row_geometry_unrepresentable(
@@ -1278,9 +1279,9 @@ fn exact_noncanonical_binomial_observation_row(
             neghessian_eta_derivative: weight * observation.negative_hessian_derivative,
             neghessian_eta_second_derivative: weight
                 * observation.negative_hessian_second_derivative,
-            // The natural-coordinate Bernoulli jet stops at the fourth η-derivative,
-            // so these links have no `W'''` (#2903).
-            neghessian_eta_third_derivative: None,
+            // `W'''` continues each dedicated Bernoulli tail kernel one step; the
+            // parameterized links have no fifth derivative (#2903).
+            neghessian_eta_third_derivative: third_derivative.map(|value| weight * value),
             log_likelihood: weight * observation.log_likelihood,
         },
     )
@@ -2377,8 +2378,8 @@ impl CustomFamily for BoundedLinearFamily {
     }
 
     /// `W'''` has a closed form in every observation branch except the
-    /// non-canonical binomial links, whose natural jet stops at the fourth
-    /// η-derivative (#2903).
+    /// parameterized binomial links, whose generic inverse-link jet has no fifth
+    /// derivative (#2903).
     fn joint_jeffreys_information_third_directional_available(&self) -> bool {
         match &self.likelihood.spec.response {
             ResponseFamily::Gaussian
@@ -2393,7 +2394,13 @@ impl CustomFamily for BoundedLinearFamily {
                     self.mixture_link_state.as_ref(),
                     self.sas_link_state.as_ref(),
                 ),
-                InverseLink::Standard(StandardLink::Logit)
+                InverseLink::Standard(
+                    StandardLink::Logit
+                        | StandardLink::Probit
+                        | StandardLink::CLogLog
+                        | StandardLink::LogLog
+                        | StandardLink::Cauchit
+                )
             ),
             _ => false,
         }

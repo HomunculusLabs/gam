@@ -22,7 +22,9 @@ use gam_custom_family::{
     ParameterBlockSpec, ParameterBlockState, PenaltyMatrix, fit_custom_family,
 };
 
-use gam_model_kernels::bernoulli_link::bernoulli_natural_observation;
+use gam_model_kernels::bernoulli_link::{
+    bernoulli_natural_negative_hessian_third_derivative, bernoulli_natural_observation,
+};
 
 use gam_solve::estimate::{
     EstimationError, ExternalOptimOptions, FitInference, FitOptions, PenaltySpec,

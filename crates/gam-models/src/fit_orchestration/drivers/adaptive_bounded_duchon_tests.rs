@@ -1145,9 +1145,8 @@ mod adaptive_bounded_duchon_tests {
     /// #2903: `{D³H[u, v, e_a]}` must equal a five-point difference of the
     /// analytic `D²H[u, v]` along each coefficient axis, on the likelihoods whose
     /// observation kernel carries a closed-form `W'''`: Gaussian, where only the
-    /// bounded transform curves, and Poisson and logit binomial, where `W'''`
-    /// enters. A probit binomial has no fifth η-derivative and must not declare
-    /// the channel.
+    /// bounded transform curves, and Poisson, logit and probit binomial, where
+    /// `W'''` enters.
     #[test]
     fn bounded_joint_hessian_third_directional_all_axes_matches_difference_of_second_2903() {
         let x = array![[0.2, -1.0], [0.8, 0.5], [1.1, 1.2], [1.7, -0.3]];
@@ -1175,15 +1174,6 @@ mod adaptive_bounded_duchon_tests {
                     }],
                 }
             };
-        assert!(
-            !family_for(
-                LikelihoodSpec::binomial_probit(),
-                array![0.0, 1.0, 1.0, 0.0],
-                BoundedCoefficientPriorSpec::Uniform,
-            )
-            .joint_jeffreys_information_third_directional_available(),
-            "a probit binomial has no closed-form W''' and must not declare the channel"
-        );
         let cases = [
             (
                 LikelihoodSpec::gaussian_identity(),
@@ -1199,6 +1189,11 @@ mod adaptive_bounded_duchon_tests {
                 LikelihoodSpec::binomial_logit(),
                 array![0.0, 1.0, 1.0, 0.0],
                 BoundedCoefficientPriorSpec::Beta { a: 1.5, b: 2.5 },
+            ),
+            (
+                LikelihoodSpec::binomial_probit(),
+                array![0.0, 1.0, 1.0, 0.0],
+                BoundedCoefficientPriorSpec::Uniform,
             ),
         ];
         let u = array![0.3, -0.4];
