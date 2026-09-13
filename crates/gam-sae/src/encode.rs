@@ -65,7 +65,7 @@ use opt::constants::{ARMIJO_C1, BACKTRACK_CONTRACTION};
 use opt::{AcceptedStep, BacktrackConfig, backtracking_line_search};
 
 use crate::chart_coordinate_solve::PeriodicCurveExtrema;
-use crate::manifold::{AffineCoordinateEvaluator, AmbientSphereHarmonicEvaluator, CylinderHarmonicEvaluator, EuclideanPatchEvaluator, PeriodicHarmonicEvaluator, SaeBasisEvaluator, SaeManifoldAtom, TorusHarmonicEvaluator};
+use crate::manifold::{AffineCoordinateEvaluator, AmbientSphereHarmonicEvaluator, CylinderHarmonicEvaluator, EuclideanPatchEvaluator, PeriodicHarmonicEvaluator, SHAPE_BAND_MAX_POINTS, SaeBasisEvaluator, SaeManifoldAtom, TorusHarmonicEvaluator};
 use gam_linalg::faer_ndarray::FaerEigh;
 
 use faer::Side;
@@ -2988,10 +2988,6 @@ pub(crate) fn encode_reconstruction_error_core(
         unavailable
     }
 }
-
-/// Maximum number of chart centers laid down per atom (the SHAPE_BAND grid
-/// point cap; mirrors `SHAPE_BAND_MAX_POINTS` in the atom band machinery).
-pub(crate) const SHAPE_BAND_MAX_POINTS: usize = 512;
 
 /// Lay down chart centers on an atom's coordinate grid (the SHAPE_BAND grid
 /// idiom): a regular grid spanning the compact latent domain for periodic /

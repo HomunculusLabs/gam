@@ -6641,5 +6641,13 @@
     "reason": "#2899 test-only API: gam_math::jet_tower::ln_gamma_derivative_stack_order3 had no production caller. Its one outside user was the gam-models GAMLSS order-3 oracle helper o3_ln_gamma in the cfg(test) test_support module, which now reads the first four entries of ln_gamma_derivative_stack, the same four kernel calls, so the oracle values are bit-identical.",
     "evidence": "git grep -n -w ln_gamma_derivative_stack_order3 over crates, src, tests, examples, bench, benches, python and gamfit finds its definition, the tetragamma doc line, the jet_tower derivative_stack_tests prefix test, and crates/gam-models/src/gamlss/test_support.rs (mod test_support is cfg(test) in gamlss.rs). Item list from source_removal_guard.py --base ef1e74ddd --head 3c10e63bd (job 579772, /scratch.global/sauer354/pool/prune-api-a/stack4.check.579772.log).",
     "base": "edf3bcfa77d74d2599a9ea477ac8d4d8e48a515a"
+  },
+  {
+    "base": "2bec4c4f72667d3e0bbbb665b0c26fa5f07100a6",
+    "items": [
+      "crates/gam-sae/src/encode.rs:const:SHAPE_BAND_MAX_POINTS"
+    ],
+    "reason": "#2469: encode.rs declared its own pub(crate) SHAPE_BAND_MAX_POINTS = 512, documented as mirroring the shape-band cap in manifold/shape_uncertainty.rs. That made two pins for one budget, and either could drift from the other without anything noticing. The encode atlas now reads the manifold constant through the existing crate::manifold import, which already re-exports it with `pub use shape_uncertainty::*`. The value and every cap derived from it are unchanged.",
+    "evidence": "At the base, git grep -n -w SHAPE_BAND_MAX_POINTS finds two declarations, crates/gam-sae/src/encode.rs:2994 (pub(crate)) and crates/gam-sae/src/manifold/shape_uncertainty.rs:7 (pub, re-exported by manifold/mod.rs:596). Every read of the encode.rs copy is in encode.rs (lines 3032-3371). The manifold copy is also read by construction_reconstruction.rs and cited by persistence.rs. Not compiled or run locally."
   }
 ]
