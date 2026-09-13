@@ -274,7 +274,15 @@ fn gam_binomial_smooth_recovers_true_probability() {
         );
 
         let (gam_prob, gam_prob_sd, gam_edf) = gam_probability_and_sd(&ages, &y);
-        gam_rmses.push(rmse(&gam_prob, &truth));
+        let gam_rmse = rmse(&gam_prob, &truth);
+        // Per-draw context, printed whichever assertion branch runs below, so a
+        // fold mean dominated by one collapsed draw can be told from a uniformly
+        // weaker fit.
+        eprintln!(
+            "haberman s(age) draw seed={seed} n_pos={n_pos} gam_rmse_to_truth={gam_rmse:.4} \
+             gam_edf={gam_edf:.3}"
+        );
+        gam_rmses.push(gam_rmse);
         gam_edf_total += gam_edf;
         // Coverage of p_true by gam's +/- 2 SD probability band, pooled over draws.
         for i in 0..n {
