@@ -28,33 +28,55 @@
 //! essentially constant eta and make an RMSE bar trivially passable. A genuine,
 //! identifiable curve keeps the recovery claim load-bearing.
 //!
+//! PAIRED over draws, not one draw (#2395). Either engine's RMSE against the
+//! truth depends on which Bernoulli draw it fit, so one draw's ratio conflates
+//! the draw with the engine. The single draw this test used read gam 0.3946
+//! against pyGAM 0.3431 at fa0e33bb4 (CI run 34702231507), with pyGAM's λ fixed
+//! at its default. Both engines now fit the SAME `K_SEEDS` draws, and the
+//! decision is `assert_paired_match_or_beat`. It compares them draw by draw so
+//! the common noise cancels, keeps the 10% ceiling on the averaged metric, and
+//! additionally refuses gam being RESOLVED worse across draws. The first draw is
+//! the seed the single-draw version used.
+//!
 //! Truth-recovery bar (principled, un-weakened): the true eta ranges over a span
 //! of `2*1.2 = 2.4` logits. Bernoulli responses are extremely noisy (each carries
 //! < 1 bit), so a penalized smooth at n=400 cannot pin eta tightly; we require
-//! `RMSE(eta_gam, eta_truth) < 0.45`, i.e. under ~19% of the signal span — small
-//! enough that a flat or wrong-phase fit (RMSE near the truth's own RMS of ~0.85)
-//! fails, yet honest about the binary noise floor. EDF is reported for context
-//! only and not asserted against the reference.
+//! the draw-averaged `RMSE(eta_gam, eta_truth) < 0.45`, i.e. under ~19% of the
+//! signal span — small enough that a flat or wrong-phase fit (RMSE near the
+//! truth's own RMS of ~0.85) fails, yet honest about the binary noise floor. EDF
+//! is reported for context only and not asserted against the reference.
 
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
-use gam::test_support::reference::{Column, QualityPair, pearson, relative_l2, rmse, run_python};
+use gam::test_support::reference::{
+    Column, PairedFoldComparison, QualityPair, assert_paired_match_or_beat, pearson, relative_l2,
+    rmse, run_python,
+};
 use gam::{FitConfig, FitResult, fit_from_formula, init_parallelism, load_csvwith_inferred_schema};
 use ndarray::Array2;
 use std::io::Write;
 use std::path::Path;
 
-#[test]
-fn gam_logistic_1d_shape_matches_pygam_on_logit_scale() {
-    init_parallelism();
+/// Rows per draw.
+const N_ROWS: usize = 400;
+/// Evaluation grid points spanning [0, 100].
+const N_GRID: usize = 100;
+/// Paired Bernoulli draws per panel. See the "PAIRED over draws" note above.
+const K_SEEDS: usize = 25;
+/// Seed of the first draw: the single draw the unpaired version of this test used.
+const FIRST_SEED: u64 = 42;
 
-    // ---- fixed-seed synthetic 1-D logistic problem ------------------------
-    // x uniform on [0,100]; truth on the logit scale is a smooth sinusoid that
-    // completes one full period over the domain; y ~ Bernoulli(logistic(eta)).
-    // A self-contained, fully reproducible LCG (no external RNG crate) makes the
-    // x and y vectors byte-identical for both engines.
-    let n = 400usize;
-    let mut state: u64 = 42; // seed=42
+/// Known logit-scale truth: a smooth sinusoid completing one full period over
+/// the domain.
+fn truth_eta(xi: f64) -> f64 {
+    1.2 * (std::f64::consts::PI * xi / 50.0).sin()
+}
+
+/// One draw's `(x, y)`: x uniform on [0,100] and y ~ Bernoulli(logistic(eta)).
+/// A self-contained SplitMix64 stream (no external RNG crate) makes the x and y
+/// vectors byte-identical for both engines.
+fn logistic_draw(seed: u64) -> (Vec<f64>, Vec<f64>) {
+    let mut state: u64 = seed;
     let mut next_unit = || -> f64 {
         // SplitMix64-style advance; map to [0,1).
         state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -64,36 +86,40 @@ fn gam_logistic_1d_shape_matches_pygam_on_logit_scale() {
         z ^= z >> 31;
         (z >> 11) as f64 / (1u64 << 53) as f64
     };
-
-    let mut x = vec![0.0f64; n];
-    let mut y = vec![0.0f64; n];
-    let truth_eta = |xi: f64| 1.2 * (std::f64::consts::PI * xi / 50.0).sin();
-    for i in 0..n {
+    let mut x = vec![0.0f64; N_ROWS];
+    let mut y = vec![0.0f64; N_ROWS];
+    for i in 0..N_ROWS {
         let xi = 100.0 * next_unit();
         let p = 1.0 / (1.0 + (-truth_eta(xi)).exp());
         let yi = if next_unit() < p { 1.0 } else { 0.0 };
         x[i] = xi;
         y[i] = yi;
     }
-    // Sanity: both classes present (required for a meaningful logistic fit).
-    let n_pos = y.iter().filter(|&&v| v > 0.5).count();
-    assert!(
-        n_pos > 10 && n_pos < n - 10,
-        "synthetic data should have both classes well represented, got {n_pos}/{n} positives"
-    );
+    (x, y)
+}
 
-    // ---- materialize the synthetic data as CSV and load it via gam --------
+/// A penalized smooth on a centered basis recovers eta only up to an additive
+/// constant (the intercept), so curves are de-meaned before their shapes are
+/// compared.
+fn demean(v: &[f64]) -> Vec<f64> {
+    let m = v.iter().sum::<f64>() / v.len() as f64;
+    v.iter().map(|value| value - m).collect()
+}
+
+/// gam's `y ~ s(x, k=10)` binomial/logit REML fit on one draw: the logit-scale
+/// linear predictor on the grid `xg`, and the fit's total EDF.
+fn gam_logit_eta_on_grid(seed: u64, x: &[f64], y: &[f64], xg: &[f64]) -> (Vec<f64>, f64) {
     // (load_csvwith_inferred_schema is the same loader the canonical reference
     // tests use; a temp file keeps the data path identical to those tests.)
     let mut csv = String::from("x,y\n");
-    for i in 0..n {
+    for i in 0..x.len() {
         csv.push_str(&format!("{:.17e},{}\n", x[i], y[i] as i64));
     }
     let mut tmp = std::env::temp_dir();
     tmp.push(format!(
-        "gam_pygam_logistic_1d_{}_{}.csv",
+        "gam_pygam_logistic_1d_{}_{}_{seed}.csv",
         std::process::id(),
-        n
+        x.len()
     ));
     {
         let mut f = std::fs::File::create(&tmp).expect("create synthetic csv");
@@ -111,7 +137,6 @@ fn gam_logistic_1d_shape_matches_pygam_on_logit_scale() {
     let col = ds.column_map();
     let x_idx = col["x"];
 
-    // ---- fit with gam: y ~ s(x, k=10), binomial / logit / REML ------------
     let cfg = FitConfig {
         family: Some("binomial".to_string()),
         link: Some("logit".to_string()),
@@ -123,136 +148,165 @@ fn gam_logistic_1d_shape_matches_pygam_on_logit_scale() {
     };
     let gam_edf = fit.fit.edf_total().expect("gam reports total edf");
 
-    // Evaluate the fitted smooth on a dense, sorted grid spanning the domain so
-    // the shape comparison is independent of the random sampling density; the
-    // logit-scale eta is exactly design*beta (the link is applied afterwards).
-    let n_grid = 100usize;
-    let mut xg = vec![0.0f64; n_grid];
-    let mut grid = Array2::<f64>::zeros((n_grid, ds.headers.len()));
-    for j in 0..n_grid {
-        let xj = 100.0 * (j as f64) / (n_grid as f64 - 1.0);
-        xg[j] = xj;
+    // The logit-scale eta is exactly design*beta (the link is applied
+    // afterwards), rebuilt from the frozen resolved spec at the grid.
+    let mut grid = Array2::<f64>::zeros((xg.len(), ds.headers.len()));
+    for (j, &xj) in xg.iter().enumerate() {
         grid[[j, x_idx]] = xj;
     }
     let design = build_term_collection_design(grid.view(), &fit.resolvedspec)
         .expect("rebuild 1-D smooth design on evaluation grid");
     let gam_eta: Vec<f64> = design.design.apply(&fit.fit.beta).to_vec();
-    assert_eq!(gam_eta.len(), n_grid, "gam eta grid length mismatch");
+    assert_eq!(gam_eta.len(), xg.len(), "gam eta grid length mismatch");
+    (gam_eta, gam_edf)
+}
 
-    // Ground-truth logit-scale eta on the same evaluation grid — the target the
-    // recovery metric is measured against. A penalized smooth fit on a centered
-    // basis recovers eta only up to an additive constant (the intercept), so we
-    // de-mean both gam's eta and the truth before comparing shapes; the sinusoid
-    // truth is mean-zero by construction, but de-meaning keeps the comparison
-    // robust to the engine's intercept/centering convention.
+#[test]
+fn gam_logistic_1d_shape_matches_pygam_on_logit_scale() {
+    init_parallelism();
+
+    // ---- evaluation grid and the known truth on it -------------------------
+    // A dense, sorted grid spanning the domain, so the shape comparison is
+    // independent of each draw's sampling density.
+    let xg: Vec<f64> = (0..N_GRID)
+        .map(|j| 100.0 * (j as f64) / (N_GRID as f64 - 1.0))
+        .collect();
     let truth_grid: Vec<f64> = xg.iter().map(|&xj| truth_eta(xj)).collect();
-    let demean = |v: &[f64]| -> Vec<f64> {
-        let m = v.iter().sum::<f64>() / v.len() as f64;
-        v.iter().map(|x| x - m).collect()
-    };
-    let gam_eta_c = demean(&gam_eta);
     let truth_c = demean(&truth_grid);
     // RMS of the (de-meaned) truth itself — the error a degenerate flat fit would
     // incur, i.e. the scale the recovery bar must beat.
     let truth_rms = (truth_c.iter().map(|t| t * t).sum::<f64>() / truth_c.len() as f64).sqrt();
 
-    // ---- fit the SAME model with pyGAM's LogisticGAM (the reference) -------
+    // ---- gam on every draw, and the long-format data pyGAM replays ---------
+    let mut gam_errs = Vec::with_capacity(K_SEEDS);
+    let mut gam_etas = Vec::with_capacity(K_SEEDS);
+    let mut gam_edf_total = 0.0;
+    let mut long_seed = Vec::with_capacity(K_SEEDS * N_ROWS);
+    let mut long_x = Vec::with_capacity(K_SEEDS * N_ROWS);
+    let mut long_y = Vec::with_capacity(K_SEEDS * N_ROWS);
+    for k in 0..K_SEEDS {
+        let seed = FIRST_SEED + k as u64;
+        let (x, y) = logistic_draw(seed);
+        // Sanity: both classes present (required for a meaningful logistic fit).
+        let n_pos = y.iter().filter(|&&v| v > 0.5).count();
+        assert!(
+            n_pos > 10 && n_pos < N_ROWS - 10,
+            "draw {seed} should have both classes well represented, got {n_pos}/{N_ROWS} positives"
+        );
+        let (gam_eta, gam_edf) = gam_logit_eta_on_grid(seed, &x, &y, &xg);
+        gam_errs.push(rmse(&demean(&gam_eta), &truth_c));
+        gam_etas.push(gam_eta);
+        gam_edf_total += gam_edf;
+        for i in 0..N_ROWS {
+            long_seed.push(seed as f64);
+            long_x.push(x[i]);
+            long_y.push(y[i]);
+        }
+    }
+
+    // ---- the SAME draws through pyGAM's LogisticGAM, in ONE Python session ----
     // LogisticGAM(s(0, n_splines=10)) is a penalized binomial PIRLS fit over a
-    // cubic B-spline smooth; we predict the linear predictor on the identical
-    // grid. pyGAM exposes the logit-scale predictor either via predict_mu's
-    // inverse or the link directly; we compute it from the predicted prob to
-    // avoid relying on a private attribute, then return eta = logit(mu).
+    // cubic B-spline smooth at pyGAM's default λ. The logit-scale predictor is
+    // computed from the predicted probability, to avoid relying on a private
+    // attribute. The grid travels as a (padded) column so both engines see the
+    // exact same query points; only its first N_GRID entries are meaningful.
+    let mut xg_column = vec![0.0f64; K_SEEDS * N_ROWS];
+    xg_column[..N_GRID].copy_from_slice(&xg);
     let py = run_python(
         &[
-            Column::new("x", &x),
-            Column::new("y", &y),
-            // The evaluation grid travels as a (padded) column so both engines
-            // see the exact same query points; only the first n_grid entries are
-            // meaningful (n_grid < n), the tail is ignored on the Python side.
-            Column::new("xg", &{
-                let mut g = vec![0.0f64; n];
-                g[..n_grid].copy_from_slice(&xg);
-                g
-            }),
+            Column::new("seed", &long_seed),
+            Column::new("x", &long_x),
+            Column::new("y", &long_y),
+            Column::new("xg", &xg_column),
         ],
         r#"
 from pygam import LogisticGAM, s
-X = np.asarray(df["x"], dtype=float).reshape(-1, 1)
-yv = np.asarray(df["y"], dtype=float)
 n_grid = 100
 Xg = np.asarray(df["xg"], dtype=float)[:n_grid].reshape(-1, 1)
-gam = LogisticGAM(s(0, n_splines=10)).fit(X, yv)
-mu = np.asarray(gam.predict_mu(Xg), dtype=float)
-# logit-scale linear predictor; clip mu off the open-interval boundary so the
-# logit is finite even when a grid point sits in a near-saturated region.
-mu = np.clip(mu, 1e-12, 1.0 - 1e-12)
-eta = np.log(mu / (1.0 - mu))
-emit("eta", eta)
-emit("edf", [float(gam.statistics_["edof"])])
+seeds = np.asarray(df["seed"], dtype=float)
+xs = np.asarray(df["x"], dtype=float)
+ys = np.asarray(df["y"], dtype=float)
+eta_all = []
+edf_all = []
+for seed in np.unique(seeds):
+    mask = seeds == seed
+    gam = LogisticGAM(s(0, n_splines=10)).fit(xs[mask].reshape(-1, 1), ys[mask])
+    mu = np.asarray(gam.predict_mu(Xg), dtype=float)
+    # clip mu off the open-interval boundary so the logit is finite even when a
+    # grid point sits in a near-saturated region.
+    mu = np.clip(mu, 1e-12, 1.0 - 1e-12)
+    eta_all.extend(np.log(mu / (1.0 - mu)).tolist())
+    edf_all.append(float(gam.statistics_["edof"]))
+emit("eta", eta_all)
+emit("edf", edf_all)
 "#,
     );
-    let pygam_eta = py.vector("eta");
-    let pygam_edf = py.scalar("edf");
-    assert_eq!(pygam_eta.len(), n_grid, "pyGAM eta grid length mismatch");
-
-    // ---- OBJECTIVE METRIC: recovery of the known true eta -----------------
-    // gam's error against ground truth (de-meaned, logit scale). This is the
-    // pass/fail quantity: how well gam recovers the true smooth, independent of
-    // any reference tool.
-    let gam_err = rmse(&gam_eta_c, &truth_c);
-
-    // pyGAM fit on the identical data, scored on the SAME truth — used only as a
-    // match-or-beat accuracy baseline, never as the target itself.
-    let pygam_eta_c = demean(pygam_eta);
-    let pygam_err = rmse(&pygam_eta_c, &truth_c);
-
-    // Diagnostic context only (NOT assertion criteria): how close the two fitted
-    // predictors are to each other. Printed so a reviewer can see the agreement,
-    // but "close to pyGAM" is deliberately not what makes this test pass.
-    let corr = pearson(&gam_eta, pygam_eta);
-    let rel = relative_l2(&gam_eta, pygam_eta);
-    let edf_rel = (gam_edf - pygam_edf).abs() / pygam_edf.abs().max(1.0);
-
-    eprintln!(
-        "synthetic logistic s(x,k=10): n={n} n_pos={n_pos} truth_rms={truth_rms:.3} \
-         gam_err_to_truth={gam_err:.4} pygam_err_to_truth={pygam_err:.4} \
-         gam_edf={gam_edf:.3} pygam_edf={pygam_edf:.3} (edf_rel={edf_rel:.3}) \
-         [diag only] eta-vs-pygam pearson={corr:.5} rel_l2={rel:.4}"
+    let pygam_eta_flat = py.vector("eta");
+    let pygam_edfs = py.vector("edf");
+    assert_eq!(
+        pygam_eta_flat.len(),
+        K_SEEDS * N_GRID,
+        "pyGAM eta panel length mismatch"
     );
+    assert_eq!(pygam_edfs.len(), K_SEEDS, "pyGAM edf panel length mismatch");
+
+    // ---- OBJECTIVE METRIC per draw: recovery of the known true eta ----------
+    // pyGAM is scored on the SAME truth, as a match-or-beat accuracy baseline and
+    // never as the target itself.
+    let mut pygam_errs = Vec::with_capacity(K_SEEDS);
+    let mut corr_total = 0.0;
+    let mut rel_total = 0.0;
+    for k in 0..K_SEEDS {
+        let pygam_eta = &pygam_eta_flat[k * N_GRID..(k + 1) * N_GRID];
+        pygam_errs.push(rmse(&demean(pygam_eta), &truth_c));
+        // Diagnostic context only (NOT assertion criteria): how close the two
+        // fitted predictors are to each other.
+        corr_total += pearson(&gam_etas[k], pygam_eta);
+        rel_total += relative_l2(&gam_etas[k], pygam_eta);
+    }
+    let gam_edf_mean = gam_edf_total / K_SEEDS as f64;
+    let pygam_edf_mean = pygam_edfs.iter().sum::<f64>() / K_SEEDS as f64;
+
+    let panel = PairedFoldComparison::new(&gam_errs, &pygam_errs, true);
+    eprintln!(
+        "synthetic logistic s(x,k=10) K={K_SEEDS}-draw paired: n={N_ROWS} truth_rms={truth_rms:.3} \
+         fold-mean err_to_truth gam={:.4} pygam={:.4} mean_edf gam={gam_edf_mean:.3} \
+         pygam={pygam_edf_mean:.3} [diag only] mean eta-vs-pygam pearson={:.5} rel_l2={:.4}",
+        panel.gam_mean,
+        panel.reference_mean,
+        corr_total / K_SEEDS as f64,
+        rel_total / K_SEEDS as f64,
+    );
+    eprintln!("{}", panel.report("pygam_logistic_1d::err_to_truth"));
     eprintln!(
         "{}",
-        QualityPair::error(
+        QualityPair::paired(
             "misc",
             "quality_vs_pygam_logistic_1d_shape",
             "err_to_truth",
-            gam_err,
             "pygam",
-            pygam_err,
+            &panel,
         )
         .line()
     );
 
-    // (1) PRIMARY truth-recovery claim: gam's fitted logit-scale eta tracks the
-    // true sinusoid. The true (de-meaned) eta has RMS ~0.85 over a 2.4-logit
-    // span; a flat or wrong-phase fit incurs RMSE of that order. Requiring RMSE
-    // < 0.45 (under ~19% of the signal span) demands genuine shape recovery
-    // while respecting that Bernoulli data carries < 1 bit/point and cannot pin
-    // eta tightly at n=400. A wrong binomial reweight or misapplied penalty
-    // pushes eta toward flat/wrong and blows past this bar.
+    // (1) PRIMARY truth-recovery claim, on the draw average: gam's fitted
+    // logit-scale eta tracks the true sinusoid. The true (de-meaned) eta has RMS
+    // ~0.85 over a 2.4-logit span; a flat or wrong-phase fit incurs RMSE of that
+    // order. Requiring RMSE < 0.45 (under ~19% of the signal span) demands genuine
+    // shape recovery while respecting that Bernoulli data carries < 1 bit/point
+    // and cannot pin eta tightly at n=400. A wrong binomial reweight or misapplied
+    // penalty pushes eta toward flat/wrong and blows past this bar.
     assert!(
-        gam_err < 0.45 && gam_err < truth_rms,
+        panel.gam_mean < 0.45 && panel.gam_mean < truth_rms,
         "gam fails to recover the true logit-scale smooth: \
-         RMSE(eta_gam, truth)={gam_err:.4} (bar 0.45, truth_rms={truth_rms:.3})"
+         fold-mean RMSE(eta_gam, truth)={:.4} (bar 0.45, truth_rms={truth_rms:.3})",
+        panel.gam_mean
     );
-    // (2) MATCH-OR-BEAT the mature baseline on the SAME accuracy metric: gam's
-    // recovery error must be no worse than pyGAM's by more than 10%. This makes
-    // pyGAM a competitor to beat on objective accuracy, not a target whose noisy
-    // output gam must reproduce.
-    assert!(
-        gam_err <= pygam_err * 1.10,
-        "gam's truth-recovery error exceeds pyGAM's by >10%: \
-         gam={gam_err:.4} pygam={pygam_err:.4}"
-    );
+    // (2) MATCH-OR-BEAT the mature baseline on the SAME accuracy metric, paired
+    // across the shared draws: gam's averaged recovery error may be no worse than
+    // pyGAM's by more than 10%, nor resolved worse draw by draw.
+    assert_paired_match_or_beat("pygam_logistic_1d::err_to_truth", &panel, 1.10);
 }
 
 /// Lowest held-out AUC that is `z` standard errors above the no-skill value
