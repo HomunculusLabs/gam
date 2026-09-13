@@ -34,9 +34,10 @@ its own (correspondingly rotated) training points, and asserts the two fitted
 surfaces agree. A row-permutation control asserts the pipeline is otherwise
 exact, so the rotation failure is specifically a rotation-invariance defect.
 
-The test drives the ``gam`` CLI (on $PATH); the Python ``gamfit`` wheel is not
-built in the hunt environment. It currently FAILS (rotation drift >> tolerance)
-and will PASS once thin-plate knot selection is made rotation-equivariant.
+The test drives the ``gam`` CLI (``target/release/gam``, else $PATH); the Python
+``gamfit`` wheel is not built in the hunt environment. When the test was written
+the rotation drift was far above tolerance: thin-plate knot selection must be
+rotation-equivariant.
 """
 
 import csv
@@ -48,7 +49,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-GAM = shutil.which("gam")
+# CI builds target/release/gam without putting it on PATH, so a PATH-only lookup
+# skipped this test in every CI run.
+_REPO_BIN = Path(__file__).resolve().parent.parent / "target" / "release" / "gam"
+GAM = str(_REPO_BIN) if _REPO_BIN.exists() else shutil.which("gam")
 
 
 def _write(path, header, rows):
@@ -84,7 +88,7 @@ def _fit_predict(workdir, tag, train_xy, y, grid_xy):
     )
 
 
-@pytest.mark.skipif(GAM is None, reason="gam CLI not on PATH")
+@pytest.mark.skipif(GAM is None, reason="gam CLI not built (neither target/release/gam nor PATH)")
 def test_thinplate_default_fit_is_rotation_invariant():
     rng = np.random.default_rng(21)
     n = 300
