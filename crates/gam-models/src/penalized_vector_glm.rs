@@ -1684,19 +1684,20 @@ mod parity_tests {
     }
 
     #[test]
-    fn multinomial_rank_deficient_block_recovers_via_ridge_not_crash() {
+    fn multinomial_rank_deficient_block_takes_the_minimum_norm_step_not_crash() {
         // Issue #557: a rank-deficient class block under a tiny per-class λ used
         // to make faer's Bunch–Kaufman fallback back-substitute through near-zero
         // pivots into a non-finite Newton step δ, and the solver aborted with
-        // "Newton step is non-finite". The adaptive Levenberg–Marquardt ridge
-        // must instead lift the null direction off zero, keep δ finite, and let
-        // the backtracking line search converge to the penalized optimum.
+        // "Newton step is non-finite". The Newton step must instead be the
+        // minimum-norm solution on the penalized Hessian's resolved positive
+        // eigenspace: the null direction takes no step, δ stays finite, and the
+        // backtracking line search converges to the penalized optimum.
         //
         // Construct an exactly rank-deficient design: column 2 is a perfect
         // duplicate of column 1, so XᵀWX is singular along (e₁ − e₂) for every
         // class, and we drive the corresponding λ to a tiny value so the penalty
         // cannot regularize that null direction. A non-robust solver crashes
-        // here; the ridge path must produce a finite, self-consistent fit.
+        // here; the minimum-norm step must produce a finite, self-consistent fit.
         let n = 50;
         let p = 4;
         let k = 4;
@@ -1729,7 +1730,7 @@ mod parity_tests {
             tol: 1.0e-10,
             resume_from: None,
         })
-        .expect("rank-deficient multinomial fit must NOT crash (#557): the ridge path recovers it");
+        .expect("rank-deficient multinomial fit must NOT crash (#557): the minimum-norm step recovers it");
 
         // Every coefficient and fitted probability must be finite (no inf/NaN
         // leaked from the near-singular solve).
