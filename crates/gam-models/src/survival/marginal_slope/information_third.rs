@@ -54,7 +54,7 @@ pub(super) fn mixed_fifth(q: f64, c: &[f64; 6], b: f64, leaf: &[f64; 6]) -> [f64
     mixed_order(q, c, b, leaf)
 }
 
-fn static_row_fifth(
+pub(super) fn static_row_fifth(
     primaries: &[f64; STATIC_SLOPE_PRIMARIES],
     inputs: &RigidRowInputs,
 ) -> Result<[[[[[f64; 4]; 4]; 4]; 4]; 4], String> {

@@ -17,23 +17,27 @@ impl crate::custom_family::JeffreysThirdInformationDerivative for SurvivalMargin
         if specs.len() != states.len() {
             return Err("survival third information derivative block count mismatch".into());
         }
-        if self.per_z_slope_active()
-            || (self.flex_timewiggle_active() && !self.flex_active())
-            || self.influence_absorber.is_some()
-        {
-            return Ok(None);
-        }
-        if self.effective_flex_active(states)? {
-            return if self.flex_timewiggle_active() {
+        // A time wiggle takes the ζ composition of `timewiggle_third` on every frame it serves,
+        // from the FLEX base or the rigid closed-form fifth derivatives (gam#2893).
+        if self.flex_timewiggle_active() {
+            return if self.timewiggle_flex_design_psi_third_available() {
                 self.exact_newton_joint_hessian_third_directional_derivative_timewiggle_flex_all_axes(
                     states, u, v,
                 )
+                .map(Some)
             } else {
-                self.exact_newton_joint_hessian_third_directional_derivative_flex_no_wiggle_all_axes(
+                Ok(None)
+            };
+        }
+        if self.per_z_slope_active() || self.influence_absorber.is_some() {
+            return Ok(None);
+        }
+        if self.effective_flex_active(states)? {
+            return self
+                .exact_newton_joint_hessian_third_directional_derivative_flex_no_wiggle_all_axes(
                     states, u, v,
                 )
-            }
-            .map(Some);
+                .map(Some);
         }
         in_slope_frame!(self, P, Frame, {
             let kernel =
@@ -747,15 +751,10 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
             });
         }
 
-        // Flex with a time wiggle: one row pass of the ζ composition in `timewiggle_third`
-        // serves every axis, where the per-axis loop below rebuilds each row's flex base once
-        // per axis (gam#2893). An influence absorber's primary has no ζ coordinate, so it
-        // keeps that loop.
-        if !self.per_z_slope_active()
-            && self.effective_flex_active(block_states)?
-            && self.flex_timewiggle_active()
-            && self.influence_absorber.is_none()
-        {
+        // A time wiggle: one row pass of the ζ composition in `timewiggle_third` serves every axis
+        // on every frame it serves, where the per-axis loop below rebuilds each row's program once
+        // per axis (gam#2893).
+        if self.flex_timewiggle_active() && self.timewiggle_flex_design_psi_third_available() {
             let axes = self
                 .exact_newton_joint_hessian_second_directional_derivative_timewiggle_flex_all_axes(
                     block_states,
@@ -837,22 +836,21 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
         Ok(true)
     }
 
-    /// The rigid single-slope row kernel has a closed-form third information derivative. A score
-    /// warp or link deviation has the order-five flex contraction, pulled back linearly without a
-    /// time wiggle and through the ζ composition of `timewiggle_third` with one. A per-score
-    /// slope, a time wiggle without a score warp or link deviation, and an influence absorber have
-    /// none, and exposing it on those would plan an outer Hessian with no derivative to consume.
+    /// The rigid single-slope row kernel has a closed-form third information derivative, and a
+    /// score warp or link deviation without a time wiggle has the order-five flex contraction
+    /// pulled back linearly. A time wiggle has the ζ composition of `timewiggle_third` on every
+    /// frame it serves, from the FLEX base or the rigid closed-form fifth derivatives. A per-score
+    /// slope, and an influence absorber without a time wiggle, have none; exposing it there would
+    /// plan an outer Hessian with no derivative to consume.
     fn jeffreys_third_information_derivative(
         &self,
     ) -> Option<&dyn crate::custom_family::JeffreysThirdInformationDerivative> {
-        if self.per_z_slope_active()
-            || (self.flex_timewiggle_active() && !self.flex_active())
-            || self.influence_absorber.is_some()
-        {
-            None
+        let served = if self.flex_timewiggle_active() {
+            self.timewiggle_flex_design_psi_third_available()
         } else {
-            Some(self)
-        }
+            !self.per_z_slope_active() && self.influence_absorber.is_none()
+        };
+        if served { Some(self) } else { None }
     }
 
     /// The closed-form fifth and sixth likelihood derivatives cover the rigid, time-constant
