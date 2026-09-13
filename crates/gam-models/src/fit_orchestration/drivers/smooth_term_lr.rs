@@ -2282,9 +2282,10 @@ impl SmoothLrReferenceDf {
             (summary(statistic) - summary(statistic + delta)).abs()
         } else {
             // A reference built without a fit behind it (a unit test, a
-            // hand-assembled spectrum) has no statistic resolution to derive
-            // from, so it gets `gam-math`'s own default rather than a guess.
-            gam_math::probability::WEIGHTED_CHI_SQUARE_TOLERANCE
+            // hand-assembled spectrum) has no statistic resolution, so its
+            // statistic is exact and nothing coarsens the request: the clamp
+            // below lifts it to the quadrature's own roundoff floor.
+            0.0
         };
         // AND NO FINER THAN THE ANSWER'S OWN NOISE. The published accuracy of a
         // replayed p-value is `quadrature + 2·se`, where `se` is the selection

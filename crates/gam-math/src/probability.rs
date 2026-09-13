@@ -441,21 +441,18 @@ pub struct WeightedChiSquareTerm {
 ///   inequality is decided by the support;
 /// * all weights bit-identical — `Q = λ·χ²_{Σh}` exactly, on either sign.
 ///
-/// Returns `NaN` if any weight is non-finite, if any degrees-of-freedom is not
-/// finite and positive, or if `statistic` is `NaN`.
+/// Returns `NaN` if `absolute_tolerance` is not finite and positive, if any weight
+/// is non-finite, if any degrees-of-freedom is not finite and positive, or if
+/// `statistic` is `NaN`.
 pub fn signed_weighted_chi_square_sf_to_tolerance(
     terms: &[WeightedChiSquareTerm],
     statistic: f64,
     absolute_tolerance: f64,
 ) -> (f64, f64) {
-    let tolerance = if absolute_tolerance.is_finite() && absolute_tolerance > 0.0 {
-        absolute_tolerance
-    } else {
-        WEIGHTED_CHI_SQUARE_TOLERANCE
-    };
-    if statistic.is_nan() {
+    if !(absolute_tolerance.is_finite() && absolute_tolerance > 0.0) || statistic.is_nan() {
         return (f64::NAN, f64::NAN);
     }
+    let tolerance = absolute_tolerance;
     let mut active = Vec::with_capacity(terms.len());
     for term in terms {
         if !term.weight.is_finite()
@@ -498,14 +495,6 @@ pub fn signed_weighted_chi_square_sf_to_tolerance(
     }
     imhof_survival(&active, statistic, tolerance)
 }
-
-/// Default absolute accuracy of the Imhof truncation, which
-/// [`signed_weighted_chi_square_sf_to_tolerance`] applies when the requested
-/// tolerance is not finite and positive. It is four orders below the smallest
-/// probability any consumer of a survival function resolves in practice and
-/// eleven below one, so the truncation is never the term that limits a reported
-/// tail.
-pub const WEIGHTED_CHI_SQUARE_TOLERANCE: f64 = 1e-11;
 
 /// Gauss-Legendre nodes and weights on `[-1, 1]`, 16 points. A 16-node rule is
 /// exact through degree 31, which is far beyond the smooth amplitude
@@ -3277,7 +3266,7 @@ mod signed_weighted_chi_square_tests {
                 let (got, bound) = signed_weighted_chi_square_sf_to_tolerance(
                     &terms,
                     0.0,
-                    WEIGHTED_CHI_SQUARE_TOLERANCE,
+                    1e-11,
                 );
                 let want = fisher_snedecor_sf(f, a, b);
                 let error = (got - want).abs();
@@ -3351,7 +3340,7 @@ mod signed_weighted_chi_square_tests {
                 let (got, bound) = signed_weighted_chi_square_sf_to_tolerance(
                     terms,
                     statistic,
-                    WEIGHTED_CHI_SQUARE_TOLERANCE,
+                    1e-11,
                 );
                 let error = (got - reference).abs();
                 worst = worst.max(error);
