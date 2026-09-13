@@ -5699,6 +5699,7 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
         spatial_terms: &[usize],
         psi: &[f64],
     ) -> Result<(Vec<gam_terms::construction::CanonicalPenalty>, Vec<usize>), String> {
+        let rebuild_started = std::time::Instant::now();
         if spatial_terms.len() != 1 {
             return Err(format!(
                 "n-free penalty re-key requires exactly one spatial term, found {}",
@@ -5877,13 +5878,20 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
                 op: tmpl.op.clone(),
             })
             .collect();
-        gam_terms::construction::canonicalize_penalty_specs(
+        let canonical = gam_terms::construction::canonicalize_penalty_specs(
             &specs,
             &nullspace_dims,
             p_total,
             "nfree-psi-penalty",
         )
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+        log::info!(
+            "[STAGE] n-free S(psi) rebuild: {} penalty block(s), p={p_total}, psi_dim={}, elapsed={:.3}s",
+            canonical.0.len(),
+            psi.len(),
+            rebuild_started.elapsed().as_secs_f64(),
+        );
+        Ok(canonical)
     }
 
     fn canonical_penalty_derivatives_at_psi(
