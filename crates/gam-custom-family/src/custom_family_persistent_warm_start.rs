@@ -434,7 +434,6 @@ pub(crate) fn persistent_custom_family_key<F: CustomFamily + ?Sized>(
         hasher.write_f64(value);
     }
     hasher.write_f64(options.ridge_floor);
-    hasher.write_str(&format!("{:?}", options.ridge_policy));
     hasher.write_bool(options.use_remlobjective);
     hasher.write_bool(options.use_outer_hessian);
     hasher.write_bool(options.compute_covariance);

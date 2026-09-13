@@ -3452,5 +3452,19 @@
     "reason": "#2023 and SPEC rule 25. seed_frames, the block-aware farthest-point Tier-1 seed, had no product caller once bb51c3a6d deleted TieredSeedPolicy, its last configurable path. Every production block-sparse entry seeds with data_row_frames. orthonormalize_block's only lib caller was seed_frames. BlockSeedPolicy::FarthestPoint is deleted with them. The two tests that named the seed are restated on the production seed, and the two fixtures that used orthonormalize_block now build their Stiefel frames with gram_schmidt_rows.",
     "evidence": "At the base, git grep -n -w seed_frames finds only the declaration, the FarthestPoint match arm and doc lines in crates/gam-sae/src/sparse_dict/block.rs, plus the #2134 test in block_tests.rs. git grep -n -w orthonormalize_block finds the declaration, seed_frames' call, and two test fixtures in block_tests.rs. Guarded pool job 605946 at 13bd8c5944196742fd444d5fd0088a75c85f6c35 plus this change: lane sw0f, acn86, log /scratch.global/sauer354/pool/sae2023/g2023j.605946.log. cargo check --workspace --all-targets --exclude gam-pyffi --keep-going returned rc 0. cargo check -p gam-sae --all-targets returned rc 0. The gam-sae lib tests over sparse_dict::block::block_tests and tiered::fit::fit_tests ran 45 and all passed, including the three restated or touched tests.",
     "base": "3d9749035b4d5158f6c966af00bd82dd99fc98cb"
+  },
+  {
+    "base": "9bb386498353ff349dc8f8f4ce46e3db5a3211b6",
+    "removed": {
+      "crates/gam-custom-family/src/blockwise_solve.rs::effective_solverridge": 1,
+      "crates/gam-custom-family/src/blockwise_solve.rs::stable_logdet_with_ridge_policy": 1,
+      "crates/gam-custom-family/src/joint_newton.rs::active_face_logdet_with_ridge_policy": 1,
+      "crates/gam-custom-family/src/tests/inner_solver_numerics.rs::auto_determinant_mode_is_exact_full_logdet_policy": 1,
+      "crates/gam-custom-family/src/tests/inner_solver_numerics.rs::effectiveridge_is_never_below_solver_floor": 1,
+      "crates/gam-custom-family/src/tests/inner_solver_numerics.rs::exact_newton_backtracking_descent_includes_explicit_ridge": 1,
+      "crates/gam-custom-family/src/tests/inner_solver_numerics.rs::objective_includes_solverridge_quadratic_term": 1
+    },
+    "reason": "#2469: BlockwiseFitOptions::ridge_policy is deleted. Production always selected RidgePolicy::solver_only(), so effective_solverridge (a 1e-15 floor) fed only unreachable objective-ridge branches. The two logdet helpers are renamed stable_logdet and active_face_logdet after losing their policy and ridge arguments. The four tests pinned the deleted floor, exercised the ExactFullObjective inhabitant no fit selects, or compared two identical calls.",
+    "evidence": "At the base, git grep -n -w for each removed name finds its declaration, the call sites this change rewrites and no caller outside gam-custom-family. Guarded cargo check --workspace --all-targets --exclude gam-pyffi at 853ef3bd0 plus this change, with public_api_census.py on a temporary commit of it: job 608376 (stage rp1), /scratch.global/sauer354/pool/const2469b/rp123.608376.log."
   }
 ]

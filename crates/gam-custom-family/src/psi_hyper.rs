@@ -2376,12 +2376,7 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
             psi_dim,
         });
     }
-    let ridge = effective_solverridge(options.ridge_floor);
-    let moderidge = if options.ridge_policy.accounts_for_objective() {
-        ridge
-    } else {
-        0.0
-    };
+    let moderidge = 0.0;
     let extra_logdet_ridge = 0.0;
 
     refresh_all_block_etas(family, specs, &mut inner.block_states)?;
@@ -2492,19 +2487,11 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                     for (k, s) in spec.penalties.iter().enumerate() {
                         s.add_scaled_to(lambdas[k], &mut s_lambda);
                     }
-                    let ridge_hint = if options.ridge_policy.accounts_for_objective() {
-                        for d in 0..p {
-                            s_lambda[[d, d]] += ridge;
-                        }
-                        Some(ridge)
-                    } else {
-                        None
-                    };
                     // No metadata-based structural-nullity hint: the
                     // PenaltyPseudologdet classifier derives the positive
                     // eigenspace from the assembled spectrum alone (issues
                     // #192/#318).
-                    PenaltyPseudologdet::from_assembled(s_lambda, ridge_hint)
+                    PenaltyPseudologdet::from_assembled(s_lambda, None)
                         .map_err(CustomFamilyError::trial_point)
                 })
                 .collect();
@@ -2608,7 +2595,6 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                         h_joint_unpen,
                         &ranges,
                         total,
-                        ridge,
                         moderidge,
                         extra_logdet_ridge,
                         rho_curvature_scale,
@@ -2873,7 +2859,6 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
             h_joint_unpen,
             &ranges,
             total,
-            ridge,
             moderidge,
             extra_logdet_ridge,
             rho_curvature_scale,
@@ -3047,7 +3032,6 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                         h_joint_unpen,
                         &ranges,
                         total,
-                        ridge,
                         moderidge,
                         extra_logdet_ridge,
                         rho_curvature_scale,
@@ -3145,7 +3129,6 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
             h_joint_unpen,
             &ranges,
             total,
-            ridge,
             moderidge,
             extra_logdet_ridge,
             rho_curvature_scale,
@@ -3490,7 +3473,6 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
         JointHessianSource::Dense(h_joint_unpen),
         &ranges,
         total,
-        ridge,
         moderidge,
         extra_logdet_ridge,
         1.0,
@@ -4196,12 +4178,7 @@ pub(crate) fn evaluate_custom_family_joint_hyper_efs_internal_shared<
         .map_err(CustomFamilyError::from)?;
         return Ok((eval, warm, converged, inner));
     }
-    let ridge = effective_solverridge(options.ridge_floor);
-    let moderidge = if options.ridge_policy.accounts_for_objective() {
-        ridge
-    } else {
-        0.0
-    };
+    let moderidge = 0.0;
     let extra_logdet_ridge = 0.0;
 
     refresh_all_block_etas(family, specs, &mut inner.block_states)?;
@@ -4292,19 +4269,11 @@ pub(crate) fn evaluate_custom_family_joint_hyper_efs_internal_shared<
                 for (k, s) in spec.penalties.iter().enumerate() {
                     s.add_scaled_to(lambdas[k], &mut s_lambda);
                 }
-                let ridge_hint = if options.ridge_policy.accounts_for_objective() {
-                    for d in 0..p {
-                        s_lambda[[d, d]] += ridge;
-                    }
-                    Some(ridge)
-                } else {
-                    None
-                };
                 // No metadata-based structural-nullity hint: the
                 // PenaltyPseudologdet classifier derives the positive
                 // eigenspace from the assembled spectrum alone (issues
                 // #192/#318).
-                PenaltyPseudologdet::from_assembled(s_lambda, ridge_hint)
+                PenaltyPseudologdet::from_assembled(s_lambda, None)
                     .map_err(CustomFamilyError::trial_point)
             })
             .collect();
@@ -4431,7 +4400,6 @@ pub(crate) fn evaluate_custom_family_joint_hyper_efs_internal_shared<
         h_joint_unpen,
         &ranges,
         total,
-        ridge,
         moderidge,
         extra_logdet_ridge,
         rho_curvature_scale,

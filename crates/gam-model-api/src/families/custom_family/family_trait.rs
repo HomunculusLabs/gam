@@ -431,10 +431,8 @@ pub trait CustomFamily {
     ///
     ///   -loglik + penalty + 0.5 (log|H| - log|S|_+)
     ///
-    /// The determinant terms in this mode are evaluated on the stabilized
-    /// curvature surface declared by `ridge_policy`, so this objective is an
-    /// explicitly modified surrogate rather than an exact Laplace expansion
-    /// at an indefinite Hessian.
+    /// The determinant terms in this mode are evaluated on the penalized
+    /// curvature `H + S(λ)`; solver damping never enters them.
     ///
     /// `StrictPseudoLaplace` is the exact-mode pseudo-Laplace surface used by the
     /// Charbonnier spatial family:

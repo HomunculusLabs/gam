@@ -2277,7 +2277,6 @@ fn bernoulli_batched_outer_gradient_matches_hypercoord_path_for_rho_and_psi() {
         .expect("flatten beta");
     assert_eq!(beta.len(), total);
 
-    let ridge = opts.ridge_floor.max(1e-15);
     let mut h = family
         .exact_newton_joint_hessian(&states)
         .expect("joint hessian")
@@ -2309,17 +2308,7 @@ fn bernoulli_batched_outer_gradient_matches_hypercoord_path_for_rho_and_psi() {
         penalties_dense.push(block_penalties);
         penalty_cursor += count;
     }
-    if opts.ridge_policy.accounts_for_objective() {
-        for diag in 0..total {
-            h[[diag, diag]] += ridge;
-        }
-    }
 
-    let penalty_logdet_ridge = if opts.ridge_policy.accounts_for_objective() {
-        ridge
-    } else {
-        0.0
-    };
     let mut penalty_logdet_blocks = Vec::with_capacity(specs.len());
     penalty_cursor = 0;
     for (block_idx, spec) in specs.iter().enumerate() {
@@ -2331,7 +2320,7 @@ fn bernoulli_batched_outer_gradient_matches_hypercoord_path_for_rho_and_psi() {
         let pld = PenaltyPseudologdet::from_components(
             &penalties_dense[block_idx],
             &lambdas,
-            penalty_logdet_ridge,
+            0.0,
         )
         .expect("penalty pseudologdet");
         let first = pld.rho_derivatives(&penalties_dense[block_idx], &lambdas).0;

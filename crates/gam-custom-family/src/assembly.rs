@@ -27,7 +27,6 @@ pub(crate) fn build_custom_family_inner_assembly<'dp>(
     mode_response_op: Option<Arc<dyn HessianFactorization>>,
     ranges: &[(usize, usize)],
     total: usize,
-    ridge: f64,
     rho_curvature_scale: f64,
     hessian_logdet_correction: f64,
     penalty_subspace_trace: Option<Arc<PenaltySubspaceTrace>>,
@@ -78,11 +77,6 @@ pub(crate) fn build_custom_family_inner_assembly<'dp>(
         .iter()
         .map(|v| v.as_slice())
         .collect();
-    let penalty_logdet_ridge = if options.ridge_policy.accounts_for_objective() {
-        ridge
-    } else {
-        0.0
-    };
 
     // gam#1587: append the full-width joint penalties as one extra pseudo-block.
     // Each `M⊗S_t` becomes a `PenaltyCoordinate::DenseRoot` (dim == total) at the
@@ -112,7 +106,7 @@ pub(crate) fn build_custom_family_inner_assembly<'dp>(
     }
     let per_block_with_joint: Vec<Array1<f64>>;
     let penalty_logdet = if joint_penalty_matrices.is_empty() {
-        compute_block_penalty_logdet_derivs(per_block, &per_block_penalties, penalty_logdet_ridge)?
+        compute_block_penalty_logdet_derivs(per_block, &per_block_penalties, 0.0)?
     } else {
         // Append the joint pseudo-block to the per-block rho list and penalty list
         // so its logdet value / ρ-derivatives slot in after the per-block coords.
@@ -125,7 +119,7 @@ pub(crate) fn build_custom_family_inner_assembly<'dp>(
         compute_block_penalty_logdet_derivs(
             &per_block_with_joint,
             &per_block_penalties,
-            penalty_logdet_ridge,
+            0.0,
         )?
     };
 
@@ -438,7 +432,6 @@ pub(crate) fn unified_joint_cost_gradient(
     mode_response_op: Option<Arc<dyn HessianFactorization>>,
     ranges: &[(usize, usize)],
     total: usize,
-    ridge: f64,
     rho_curvature_scale: f64,
     hessian_logdet_correction: f64,
     penalty_subspace_trace: Option<Arc<PenaltySubspaceTrace>>,
@@ -483,7 +476,6 @@ pub(crate) fn unified_joint_cost_gradient(
         mode_response_op,
         ranges,
         total,
-        ridge,
         rho_curvature_scale,
         hessian_logdet_correction,
         penalty_subspace_trace,
@@ -565,7 +557,6 @@ pub(crate) fn unified_joint_efs_eval(
     hessian_op: Arc<dyn HessianFactorization>,
     ranges: &[(usize, usize)],
     total: usize,
-    ridge: f64,
     rho_curvature_scale: f64,
     hessian_logdet_correction: f64,
     penalty_subspace_trace: Option<Arc<PenaltySubspaceTrace>>,
@@ -588,7 +579,6 @@ pub(crate) fn unified_joint_efs_eval(
         None,
         ranges,
         total,
-        ridge,
         rho_curvature_scale,
         hessian_logdet_correction,
         penalty_subspace_trace,
@@ -869,7 +859,6 @@ pub(crate) fn joint_outer_evaluate(
     h_joint_unpen: JointHessianSource,
     ranges: &[(usize, usize)],
     total: usize,
-    ridge: f64,
     moderidge: f64,
     extra_logdet_ridge: f64,
     rho_curvature_scale: f64,
@@ -1428,7 +1417,6 @@ pub(crate) fn joint_outer_evaluate(
             mode_response_op,
             ranges,
             total,
-            ridge,
             rho_curvature_scale,
             hessian_logdet_correction,
             penalty_subspace_trace,
@@ -1545,7 +1533,6 @@ pub(crate) fn joint_outer_evaluate_efs(
     h_joint_unpen: JointHessianSource,
     ranges: &[(usize, usize)],
     total: usize,
-    ridge: f64,
     moderidge: f64,
     extra_logdet_ridge: f64,
     rho_curvature_scale: f64,
@@ -1695,7 +1682,6 @@ pub(crate) fn joint_outer_evaluate_efs(
         hessian_op,
         ranges,
         total,
-        ridge,
         rho_curvature_scale,
         hessian_logdet_correction,
         penalty_subspace_trace,
@@ -1795,12 +1781,7 @@ pub(crate) fn outerobjectiveefs<F: CustomFamily + Clone + Send + Sync + 'static>
         )?;
         return Ok((eval, warm, converged, inner));
     }
-    let ridge = effective_solverridge(options.ridge_floor);
-    let moderidge = if options.ridge_policy.accounts_for_objective() {
-        ridge
-    } else {
-        0.0
-    };
+    let moderidge = 0.0;
     let extra_logdet_ridge = 0.0;
 
     refresh_all_block_etas(family, specs, &mut inner.block_states)?;
@@ -1843,7 +1824,6 @@ pub(crate) fn outerobjectiveefs<F: CustomFamily + Clone + Send + Sync + 'static>
                 h_joint_unpen,
                 &ranges,
                 total,
-                ridge,
                 moderidge,
                 extra_logdet_ridge,
                 rho_curvature_scale,
@@ -2133,7 +2113,6 @@ pub(crate) fn outerobjectiveefs<F: CustomFamily + Clone + Send + Sync + 'static>
                 JointHessianSource::Dense(h_joint_unpen),
                 &ranges,
                 total,
-                ridge,
                 moderidge,
                 extra_logdet_ridge,
                 1.0,

@@ -325,7 +325,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         options,
         mut states,
         s_lambdas,
-        ridge,
         joint_bundle,
         mut lastobjective,
         mut converged,
@@ -402,12 +401,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
     // ½log|I| to the log-likelihood ⇒ the NLL objective SUBTRACTS Φ, matching
     // the Newton step rhs / KKT residual which ADD `∇Φ` to `∇L − Sβ`.
 
-    let joint_mode_diagonal_ridge = if ridge > 0.0 && options.ridge_policy.accounts_for_objective()
-    {
-        ridge
-    } else {
-        0.0
-    };
+    let joint_mode_diagonal_ridge = 0.0;
 
     // Exact joint Newton steps are guarded by two independent mechanisms:
     // family-owned feasibility (`max_feasible_step_size`) and the adaptive
@@ -966,8 +960,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     current_penalty = total_quadratic_penalty(
                         &states,
                         &s_lambdas,
-                        ridge,
-                        options.ridge_policy,
                         joint_bundle,
                         Some(specs),
                     );
@@ -1494,8 +1486,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             &states,
             specs,
             &s_lambdas,
-            ridge,
-            options.ridge_policy,
             &block_constraints,
             Some(cached_active_sets.as_slice()),
             joint_lower_bounds.as_ref(),
@@ -3775,8 +3765,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             let mut trial_penalty = total_quadratic_penalty(
                 &states,
                 &s_lambdas,
-                ridge,
-                options.ridge_policy,
                 joint_bundle,
                 Some(specs),
             );
@@ -4901,8 +4889,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         current_penalty = total_quadratic_penalty(
             &states,
             &s_lambdas,
-            ridge,
-            options.ridge_policy,
             joint_bundle,
             Some(specs),
         );
@@ -5037,8 +5023,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             &states,
             specs,
             &s_lambdas,
-            ridge,
-            options.ridge_policy,
             &block_constraints,
             Some(cached_active_sets.as_slice()),
             joint_lower_bounds.as_ref(),
@@ -5098,10 +5082,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     .map(|x: &f64| x.abs())
                     .fold(0.0_f64, f64::max),
             );
-            let mut penalty_block = s_lambdas[block_idx].dot(&states[block_idx].beta);
-            if options.ridge_policy.accounts_for_objective() && ridge > 0.0 {
-                penalty_block += &states[block_idx].beta.mapv(|v| ridge * v);
-            }
+            let penalty_block = s_lambdas[block_idx].dot(&states[block_idx].beta);
             block_penalty_norms.push(
                 penalty_block
                     .iter()
@@ -5129,16 +5110,11 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         // residual's own rounding band (#2812).
         let stationarity_band = {
             let block_betas: Vec<&Array1<f64>> = states.iter().map(|s| &s.beta).collect();
-            let effective_ridge = if options.ridge_policy.accounts_for_objective() && ridge > 0.0 {
-                ridge
-            } else {
-                0.0
-            };
             joint_stationarity_rounding_band(
                 &s_lambdas,
                 &block_betas,
                 joint_bundle,
-                effective_ridge,
+                0.0,
                 grad_inf,
                 total_joint_n,
             )
@@ -5170,8 +5146,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 &states,
                 specs,
                 &s_lambdas,
-                ridge,
-                options.ridge_policy,
                 &block_constraints,
                 Some(cached_active_sets.as_slice()),
                 joint_penalty_stationarity_score(options, specs, &states).as_ref(),
@@ -5887,7 +5861,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 // names the condition that failed.
                 let mut constrained_fixed_point_nullity: Option<Option<usize>> = None;
                 if any_block_constrained && constrained_numerical_fixed_point {
-                    // Materialize H_pen = H + S(λ) (+ model ridge) and count its
+                    // Materialize H_pen = H + S(λ) and count its
                     // numerical null space at the shared rank tolerance: nullity == 0
                     // ⇒ the stuck residual is NOT an H-null/rank-deficient defect
                     // (that case is handled by the range-space certificate above) but
@@ -5899,19 +5873,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     )
                     .ok()
                     .map(|mut h_pen| {
-                        let model_diagonal_ridge =
-                            if options.ridge_policy.accounts_for_objective() && ridge > 0.0 {
-                                ridge
-                            } else {
-                                0.0
-                            };
-                        add_joint_penalty_to_matrix(
-                            &mut h_pen,
-                            &ranges,
-                            &s_lambdas,
-                            model_diagonal_ridge,
-                            None,
-                        );
+                        add_joint_penalty_to_matrix(&mut h_pen, &ranges, &s_lambdas, 0.0, None);
                         symmetrize_dense_in_place(&mut h_pen);
                         symmetric_penalized_hessian_nullity(&h_pen)
                     })
@@ -6118,8 +6080,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     &block_constraints,
                     Some(&joint_hessian_source),
                     total_p,
-                    ridge,
-                    options.ridge_policy,
                     accepted_step_inf,
                     step_inf,
                     joint_trust_radius,
@@ -6459,8 +6419,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 &block_constraints,
                 Some(&joint_hessian_source),
                 total_p,
-                ridge,
-                options.ridge_policy,
                 accepted_step_inf,
                 step_inf,
                 joint_trust_radius,
@@ -6991,8 +6949,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         let penalty_value = total_quadratic_penalty(
             &states,
             &s_lambdas,
-            ridge,
-            options.ridge_policy,
             joint_bundle,
             Some(specs),
         );
@@ -7068,8 +7024,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             specs,
             &states,
             &s_lambdas,
-            ridge,
-            options.ridge_policy,
             Some(cached_active_sets.as_slice()),
             ift_gradient,
             joint_penalty_score.as_ref(),
@@ -7181,8 +7135,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                         &states,
                         specs,
                         &s_lambdas,
-                        ridge,
-                        options.ridge_policy,
                     )
                     .ok()
                 })
@@ -7253,8 +7205,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                         &block_constraints,
                         None,
                         total_p,
-                        ridge,
-                        options.ridge_policy,
                         f64::NAN,
                         f64::NAN,
                         f64::NAN,
@@ -7275,8 +7225,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         let penalty_value = total_quadratic_penalty(
             &states,
             &s_lambdas,
-            ridge,
-            options.ridge_policy,
             joint_bundle,
             Some(specs),
         );
@@ -7373,8 +7321,6 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         let penalty_value = total_quadratic_penalty(
             &states,
             &s_lambdas,
-            ridge,
-            options.ridge_policy,
             joint_bundle,
             Some(specs),
         );

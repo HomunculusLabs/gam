@@ -5,7 +5,6 @@
 use crate::families::custom_family::psi_design::{
     CustomFamilyHyperLayout, ExactNewtonJointHessianWorkspace,
 };
-use gam_linalg::RidgePolicy;
 use gam_problem::{ParameterBlockSpec, ParameterBlockState};
 use ndarray::Array1;
 use std::ops::Range;
@@ -459,16 +458,11 @@ pub struct BlockwiseFitOptions {
     /// penalty boundary (the multinomial's derived minimum strength) raises
     /// the lower edge here; nothing here supplies an upper wall.
     pub rho_lower_bound: Option<f64>,
-    /// Optional seed for transient solver damping. The default is zero and the
-    /// default [`RidgePolicy`] excludes every damping shift from the quadratic
-    /// objective, penalty determinant, and Laplace Hessian. A nonzero value is
-    /// therefore a numerical step-control request unless a caller explicitly
-    /// selects an objective-including policy.
+    /// Optional seed for transient solver damping. The default is zero. The
+    /// damping enters only inner linear solves, never the quadratic objective,
+    /// the penalty determinant, or the Laplace Hessian, so the converged
+    /// estimand is the stationary point of the undamped statistical objective.
     pub ridge_floor: f64,
-    /// Shared ridge semantics used by solve/quadratic/logdet terms. Defaults to
-    /// solver-only damping so the converged estimand is the stationary point of
-    /// the undamped statistical objective.
-    pub ridge_policy: RidgePolicy,
     /// If true, outer smoothing optimization uses a Laplace/REML-style objective:
     ///   -loglik + penalty + 0.5(log|H| - log|S|_+)
     /// where H is blockwise working curvature and S is blockwise penalty.
@@ -629,7 +623,6 @@ impl Default for BlockwiseFitOptions {
             // objective or its derivatives and convergence is certified on the
             // undamped KKT residual.
             ridge_floor: 0.0,
-            ridge_policy: RidgePolicy::solver_only(),
             use_remlobjective: true,
             // Default ON: families expose exact outer Hessians whenever their
             // analytic dense or operator representation is implemented.
@@ -697,7 +690,6 @@ mod tests {
     fn default_custom_family_objective_is_coefficient_ridge_free() {
         let options = BlockwiseFitOptions::default();
         assert_eq!(options.ridge_floor, 0.0);
-        assert!(!options.ridge_policy.accounts_for_objective());
     }
 
     // -----------------------------------------------------------------------

@@ -1532,7 +1532,7 @@ impl ParameterBlockUpdater for DiagonalBlockUpdater<'_> {
                         &xtwy,
                         Some(ctx.s_lambda),
                         ctx.options.ridge_floor,
-                        ctx.options.ridge_policy,
+                        RidgePolicy::solver_only(),
                     )
                     .map_err(|_| "block solve failed after ridge retries".to_string())?;
                 Ok(BlockUpdateResult {
@@ -1837,22 +1837,8 @@ pub(crate) fn check_linear_feasibility(
     Ok(())
 }
 
-#[inline]
-pub(crate) fn effective_solverridge(ridge_floor: f64) -> f64 {
-    ridge_floor.max(1e-15)
-}
-
-pub(crate) fn block_quadratic_penalty(
-    beta: &Array1<f64>,
-    s_lambda: &Array2<f64>,
-    ridge: f64,
-    ridge_policy: RidgePolicy,
-) -> f64 {
-    let mut value = 0.5 * beta.dot(&s_lambda.dot(beta));
-    if ridge_policy.accounts_for_objective() {
-        value += 0.5 * ridge * beta.dot(beta);
-    }
-    value
+pub(crate) fn block_quadratic_penalty(beta: &Array1<f64>, s_lambda: &Array2<f64>) -> f64 {
+    0.5 * beta.dot(&s_lambda.dot(beta))
 }
 
 pub(crate) fn block_penalized_hessian_vector(
@@ -1860,8 +1846,6 @@ pub(crate) fn block_penalized_hessian_vector(
     work: &BlockWorkingSet,
     s_lambda: &Array2<f64>,
     direction: &Array1<f64>,
-    ridge: f64,
-    ridge_policy: RidgePolicy,
 ) -> Array1<f64> {
     let mut hpen = match work {
         BlockWorkingSet::ExactNewton { hessian, .. } => hessian.dot(direction),
@@ -1879,9 +1863,6 @@ pub(crate) fn block_penalized_hessian_vector(
         }
     };
     hpen += &s_lambda.dot(direction);
-    if ridge_policy.accounts_for_objective() && ridge > 0.0 {
-        hpen.scaled_add(ridge, direction);
-    }
     hpen
 }
 
@@ -1909,8 +1890,6 @@ pub(crate) fn block_penalized_metric_diagonal(
     spec: &ParameterBlockSpec,
     work: &BlockWorkingSet,
     s_lambda: &Array2<f64>,
-    ridge: f64,
-    ridge_policy: RidgePolicy,
 ) -> Result<Array1<f64>, CustomFamilyError> {
     let mut diagonal = match work {
         BlockWorkingSet::ExactNewton { hessian, .. } => symmetric_matrix_diagonal(hessian),
@@ -1932,9 +1911,6 @@ pub(crate) fn block_penalized_metric_diagonal(
     }
     for j in 0..diagonal.len() {
         diagonal[j] += s_lambda[[j, j]];
-        if ridge_policy.accounts_for_objective() && ridge > 0.0 {
-            diagonal[j] += ridge;
-        }
         diagonal[j] = positive_joint_diagonal_entry(diagonal[j]);
     }
     Ok(diagonal)
@@ -1945,10 +1921,8 @@ pub(crate) fn block_penalized_metric_norm(
     work: &BlockWorkingSet,
     s_lambda: &Array2<f64>,
     direction: &Array1<f64>,
-    ridge: f64,
-    ridge_policy: RidgePolicy,
 ) -> Result<f64, CustomFamilyError> {
-    let diagonal = block_penalized_metric_diagonal(spec, work, s_lambda, ridge, ridge_policy)?;
+    let diagonal = block_penalized_metric_diagonal(spec, work, s_lambda)?;
     if diagonal.len() != direction.len() {
         return Err(CustomFamilyError::trial_point(format!(
             "block penalized metric direction length mismatch: direction={}, diag={}",
@@ -1965,10 +1939,8 @@ pub(crate) fn truncate_block_step_to_metric_radius(
     s_lambda: &Array2<f64>,
     delta: Array1<f64>,
     radius: f64,
-    ridge: f64,
-    ridge_policy: RidgePolicy,
 ) -> Result<(Array1<f64>, f64), CustomFamilyError> {
-    let norm = block_penalized_metric_norm(spec, work, s_lambda, &delta, ridge, ridge_policy)?;
+    let norm = block_penalized_metric_norm(spec, work, s_lambda, &delta)?;
     if norm.is_finite() && norm > radius && radius > 0.0 {
         Ok((&delta * (radius / norm), radius))
     } else {
@@ -2008,8 +1980,6 @@ pub(crate) fn total_quadratic_penalty_parallel_worthwhile(
 pub(crate) fn total_quadratic_penalty(
     states: &[ParameterBlockState],
     s_lambdas: &[Array2<f64>],
-    ridge: f64,
-    ridge_policy: RidgePolicy,
     joint_full_width: Option<&gam_problem::JointPenaltyBundle>,
     specs: Option<&[ParameterBlockSpec]>,
 ) -> f64 {
@@ -2020,7 +1990,7 @@ pub(crate) fn total_quadratic_penalty(
             .par_iter()
             .zip(s_lambdas.par_iter())
             .map(|(state, s_lambda)| {
-                block_quadratic_penalty(&state.beta, s_lambda, ridge, ridge_policy)
+                block_quadratic_penalty(&state.beta, s_lambda)
             })
             .reduce(|| 0.0, |left, right| left + right)
     } else {
@@ -2028,7 +1998,7 @@ pub(crate) fn total_quadratic_penalty(
             .iter()
             .zip(s_lambdas.iter())
             .map(|(state, s_lambda)| {
-                block_quadratic_penalty(&state.beta, s_lambda, ridge, ridge_policy)
+                block_quadratic_penalty(&state.beta, s_lambda)
             })
             .sum()
     };
@@ -2132,22 +2102,10 @@ pub(crate) fn exact_newton_hessian_finite_check(
     Ok(())
 }
 
-pub(crate) fn stable_logdet_with_ridge_policy(
-    matrix: &Array2<f64>,
-    ridge_floor: f64,
-    ridge_policy: RidgePolicy,
-) -> Result<f64, CustomFamilyError> {
+pub(crate) fn stable_logdet(matrix: &Array2<f64>) -> Result<f64, CustomFamilyError> {
     let mut a = matrix.clone();
     symmetrize_dense_in_place(&mut a);
     let p = a.nrows();
-    let ridge = if ridge_policy.accounts_for_objective() {
-        effective_solverridge(ridge_floor)
-    } else {
-        0.0
-    };
-    for i in 0..p {
-        a[[i, i]] += ridge;
-    }
 
     // #2670 — one determinant semantics, so no dispatch. The deleted
     // `RidgeDeterminantMode::PositivePartApproximation` arm evaluated a smooth
@@ -2181,7 +2139,7 @@ pub(crate) fn stable_logdet_with_ridge_policy(
             let (evals, _) = gam_linalg::faer_ndarray::FaerEigh::eigh(&a, Side::Lower)
                 .map_err(|_| {
                     format!(
-                        "cholesky failed and the eigendecomposition also failed while computing full ridge-aware logdet (p={p}, ridge={ridge:.3e})"
+                        "cholesky failed and the eigendecomposition also failed while computing the full logdet (p={p})"
                     )
                 })?;
             let min_eig = evals.iter().copied().fold(f64::INFINITY, f64::min);
@@ -2190,15 +2148,14 @@ pub(crate) fn stable_logdet_with_ridge_policy(
             let neg_tol = CUSTOM_FAMILY_CONDITION_RELATIVE_FLOOR * max_eig.abs().max(1.0);
             if min_eig <= -neg_tol {
                 return Err(CustomFamilyError::trial_point(format!(
-                    "cholesky failed while computing full ridge-aware logdet and the symmetric spectrum is genuinely indefinite (p={p}, ridge={ridge:.3e}, min_eig={min_eig:.6e}, max_eig={max_eig:.6e}); an indefinite Hessian has no SPD log-determinant and defines no Laplace mode"
+                    "cholesky failed while computing the full logdet and the symmetric spectrum is genuinely indefinite (p={p}, min_eig={min_eig:.6e}, max_eig={max_eig:.6e}); an indefinite Hessian has no SPD log-determinant and defines no Laplace mode"
                 )));
             }
             // PD but ill-conditioned: exact logdet from the positive spectrum,
-            // flooring round-off-nonpositive eigenvalues at the ridge-relative
-            // floor so a numerically-singular direction contributes a bounded
+            // flooring round-off-nonpositive eigenvalues at the negative-eigenvalue
+            // tolerance so a numerically-singular direction contributes a bounded
             // (not `-inf`) term.
-            let floor = ridge.max(neg_tol);
-            Ok(evals.iter().map(|&e| e.max(floor).ln()).sum())
+            Ok(evals.iter().map(|&e| e.max(neg_tol).ln()).sum())
         }
     }
 }

@@ -834,68 +834,6 @@ pub(crate) fn joint_trust_region_takes_a_measured_decrease_the_model_cannot_reso
 }
 
 #[test]
-pub(crate) fn effectiveridge_is_never_below_solver_floor() {
-    assert!((effective_solverridge(0.0) - 1e-15).abs() < 1e-30);
-    assert!((effective_solverridge(1e-8) - 1e-8).abs() < 1e-20);
-}
-
-#[test]
-pub(crate) fn objective_includes_solverridge_quadratic_term() {
-    // One-parameter block with X=1, y*=1, w=1, no explicit penalties.
-    // Inner solve gives beta = 1 / (1 + ridge), so objective should include
-    // 0.5 * ridge * beta^2 even when no smoothing penalties are present.
-    let spec = ParameterBlockSpec {
-        name: "b0".to_string(),
-        design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(array![[1.0]])),
-        offset: array![0.0],
-        penalties: vec![],
-        nullspace_dims: vec![],
-        initial_log_lambdas: Array1::zeros(0),
-        initial_beta: Some(array![0.0]),
-        gauge_priority: 100,
-        jacobian_callback: None,
-        stacked_design: None,
-        stacked_offset: None,
-    };
-    let options = BlockwiseFitOptions {
-        inner_max_cycles: 1,
-        inner_tol: 0.0,
-        outer_max_iter: 1,
-        outer_tol: 1e-8,
-        outer_rel_cost_tol: None,
-        rho_lower_bound: Some(-10.0),
-        ridge_floor: 1e-4,
-        ridge_policy: RidgePolicy::exact_full_objective(),
-        use_remlobjective: false,
-        compute_covariance: false,
-        use_outer_hessian: false,
-        screening_max_inner_iterations: None,
-        outer_inner_max_iterations: None,
-        seed_screening: false,
-        early_exit_threshold: None,
-        outer_score_subsample: None,
-        auto_outer_subsample: false,
-        cache_session: None,
-        persistent_warm_start_store: None,
-        cache_mirror_sessions: Vec::new(),
-        joint_penalties: None,
-        screen_initial_rho: true,
-    };
-
-    let result = fit_custom_family(&OneBlockIdentityFamily, &[spec], &options)
-        .expect("custom family fit should succeed");
-    let ridge = effective_solverridge(options.ridge_floor);
-    let beta = result.block_states[0].beta[0];
-    let expected_penalty = 0.5 * ridge * beta * beta;
-    assert!(
-        (result.penalized_objective().expect("objective present") - expected_penalty).abs() < 1e-12,
-        "penalized objective should equal ridge quadratic term when ll=0 and S=0; got {:?}, expected {}",
-        result.penalized_objective(),
-        expected_penalty
-    );
-}
-
-#[test]
 pub(crate) fn inner_block_accepts_penalty_improving_step_even_if_loglik_drops() {
     let family = OneBlockGaussianFamily { y: array![1.0] };
     let spec = ParameterBlockSpec {
@@ -919,7 +857,6 @@ pub(crate) fn inner_block_accepts_penalty_improving_step_even_if_loglik_drops() 
         outer_rel_cost_tol: None,
         rho_lower_bound: Some(-10.0),
         ridge_floor: 0.0,
-        ridge_policy: RidgePolicy::exact_full_objective(),
         use_remlobjective: false,
         compute_covariance: false,
         use_outer_hessian: false,
@@ -949,63 +886,6 @@ pub(crate) fn inner_block_accepts_penalty_improving_step_even_if_loglik_drops() 
         inner.log_likelihood < -1e-8,
         "raw log-likelihood should drop for this strongly penalized move; got {}",
         inner.log_likelihood
-    );
-}
-
-#[test]
-pub(crate) fn exact_newton_backtracking_descent_includes_explicit_ridge() {
-    let family = OneBlockLinearLikelihoodExactFamily { score: 0.5 };
-    let spec = ParameterBlockSpec {
-        name: "b0".to_string(),
-        design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(array![[1.0]])),
-        offset: array![0.0],
-        penalties: vec![],
-        nullspace_dims: vec![],
-        initial_log_lambdas: Array1::zeros(0),
-        initial_beta: Some(array![1.0]),
-        gauge_priority: 100,
-        jacobian_callback: None,
-        stacked_design: None,
-        stacked_offset: None,
-    };
-    let options = BlockwiseFitOptions {
-        inner_max_cycles: 1,
-        inner_tol: 0.0,
-        outer_max_iter: 1,
-        outer_tol: 1e-8,
-        outer_rel_cost_tol: None,
-        rho_lower_bound: Some(-10.0),
-        ridge_floor: 1.0,
-        ridge_policy: RidgePolicy::exact_full_objective(),
-        use_remlobjective: false,
-        compute_covariance: false,
-        use_outer_hessian: false,
-        screening_max_inner_iterations: None,
-        outer_inner_max_iterations: None,
-        seed_screening: false,
-        early_exit_threshold: None,
-        outer_score_subsample: None,
-        auto_outer_subsample: false,
-        cache_session: None,
-        persistent_warm_start_store: None,
-        cache_mirror_sessions: Vec::new(),
-        joint_penalties: None,
-        screen_initial_rho: true,
-    };
-    let inner = inner_blockwise_fit(&family, &[spec], &[Array1::zeros(0)], &options, None)
-        .expect("inner blockwise fit should succeed");
-
-    let beta = inner.block_states[0].beta[0];
-    let objective = -inner.log_likelihood + inner.penalty_value;
-    assert!(
-        beta < 1.0 - 1e-12,
-        "ridge-aware fallback descent should shrink beta after rejecting the uphill Newton step; got {}",
-        beta
-    );
-    assert!(
-        objective < -1e-12,
-        "accepted fallback step should lower the penalized objective; got {}",
-        objective
     );
 }
 
@@ -1717,9 +1597,8 @@ pub(crate) fn joint_proposal_at_step_floor_suppresses_descent_substitution_near_
 ///     adds to lift a negative-eigenvalue joint Hessian above the
 ///     SPD floor.
 ///   * **TRIAL OBJECTIVE** path (`total_quadratic_penalty`) uses
-///     only `joint_mode_diagonal_ridge` (= `effective_solverridge`),
-///     which is the true penalty in the objective `f` and does NOT
-///     include the stabilizing shift.
+///     only `joint_mode_diagonal_ridge` (zero: no ridge enters the
+///     objective `f`), which does NOT include the stabilizing shift.
 ///
 /// Let `Δ = joint_solver_diagonal_ridge - joint_mode_diagonal_ridge`
 /// (the gap between the SOLVE / APPLY matrix and the TRUE Hessian).
@@ -1749,8 +1628,8 @@ pub(crate) fn joint_proposal_at_step_floor_suppresses_descent_substitution_near_
 ///
 /// We construct a 2D synthetic case with H_NLL indefinite (one
 /// negative eigenvalue, mimicking the entry-survival concave term),
-/// `S = 0`, and `joint_mode_diagonal_ridge = 0` (i.e. the policy
-/// does NOT include the ridge in the objective). The stabilizing
+/// `S = 0`, and `joint_mode_diagonal_ridge = 0` (no ridge enters the
+/// objective). The stabilizing
 /// shift lifts the negative eigenvalue to the SPD floor; the Newton
 /// step lies in the formerly-near-null direction; predicted and
 /// actual are computed by the exact same routines the inner solver
@@ -2681,36 +2560,24 @@ pub(crate) fn pseudo_laplace_exact_newton_rejects_indefinite_hessian() {
 }
 
 #[test]
-pub(crate) fn auto_determinant_mode_is_exact_full_logdet_policy() {
-    let h = array![[6.0, 0.8, 0.1], [0.8, 4.5, 0.4], [0.1, 0.4, 3.2]];
-    let exact = stable_logdet_with_ridge_policy(&h, 1e-8, RidgePolicy::exact_full_objective())
-        .expect("exact logdet");
-    let auto = stable_logdet_with_ridge_policy(&h, 1e-8, RidgePolicy::exact_full_objective())
-        .expect("auto logdet");
-    assert!((auto - exact).abs() < 1e-12, "auto={auto}, exact={exact}");
-}
-
-#[test]
 pub(crate) fn active_face_logdet_ignores_constraint_normal_indefiniteness() {
     // The first coefficient is fixed by the active row. Its negative curvature
     // is normal to the integration manifold and must not make the one-dimensional
     // tangent Laplace determinant fail.
     let h = array![[-4.0, 0.0], [0.0, 3.0]];
     assert!(
-        stable_logdet_with_ridge_policy(&h, 0.0, RidgePolicy::exact_full_objective()).is_err(),
+        stable_logdet(&h).is_err(),
         "the full-space Cholesky witness must be indefinite",
     );
     let active = ActiveLinearConstraintBlock {
         a: array![[1.0, 0.0]],
     };
     let full_correction = 2.0 * 5.0_f64.ln();
-    let logdet = active_face_logdet_with_ridge_policy(
+    let logdet = active_face_logdet(
         &h,
         Some(&active),
         false,
         10,
-        0.0,
-        RidgePolicy::exact_full_objective(),
         full_correction,
     )
     .expect("active-face determinant should use only positive tangent curvature");
@@ -2757,13 +2624,11 @@ pub(crate) fn active_face_logdet_indefinite_tangent_is_infeasible_not_fatal() {
     let active = ActiveLinearConstraintBlock {
         a: array![[1.0, 0.0]],
     };
-    let logdet = active_face_logdet_with_ridge_policy(
+    let logdet = active_face_logdet(
         &h,
         Some(&active),
         false,
         10,
-        0.0,
-        RidgePolicy::exact_full_objective(),
         0.0,
     )
     .expect("an indefinite tangent must yield a value (+inf), not a fatal error");
@@ -4840,8 +4705,6 @@ pub(crate) fn joint_stationarity_from_gradient_projects_coupled_linear_constrain
         &[state.clone()],
         std::slice::from_ref(&spec),
         &s_lambdas,
-        0.0,
-        RidgePolicy::exact_full_objective(),
         &[Some(constraints.clone())],
         None,
         None,
@@ -4854,8 +4717,6 @@ pub(crate) fn joint_stationarity_from_gradient_projects_coupled_linear_constrain
         std::slice::from_ref(&spec),
         &[state.clone()],
         &s_lambdas,
-        0.0,
-        RidgePolicy::exact_full_objective(),
         &[Some(constraints.clone())],
         None,
         None,
@@ -4873,8 +4734,6 @@ pub(crate) fn joint_stationarity_from_gradient_projects_coupled_linear_constrain
         &[state],
         &[spec],
         &s_lambdas,
-        0.0,
-        RidgePolicy::exact_full_objective(),
         &[Some(constraints)],
         None,
         None,
@@ -4930,8 +4789,6 @@ pub(crate) fn stationarity_projects_valid_lower_bound_multiplier_but_keeps_wrong
         std::slice::from_ref(&state),
         std::slice::from_ref(&spec),
         &s_lambdas,
-        0.0,
-        RidgePolicy::exact_full_objective(),
         &[None],
         None,
         Some(&lower_bounds),
@@ -4948,8 +4805,6 @@ pub(crate) fn stationarity_projects_valid_lower_bound_multiplier_but_keeps_wrong
         std::slice::from_ref(&state),
         std::slice::from_ref(&spec),
         &s_lambdas,
-        0.0,
-        RidgePolicy::exact_full_objective(),
         &[None],
         None,
         None,
@@ -4990,8 +4845,6 @@ pub(crate) fn kkt_residual_uses_cached_joint_gradient_without_re_evaluating_fami
         std::slice::from_ref(&spec),
         std::slice::from_ref(&state),
         std::slice::from_ref(&s_lambda),
-        0.0,
-        RidgePolicy::exact_full_objective(),
         None,
         Some(&cached_gradient),
         None,
@@ -5041,8 +4894,6 @@ pub(crate) fn projected_stationarity_vector_uses_penalized_residual_not_raw_scor
         std::slice::from_ref(&state),
         std::slice::from_ref(&spec),
         std::slice::from_ref(&s_lambda),
-        0.0,
-        RidgePolicy::exact_full_objective(),
         &[None],
         None,
         None,
@@ -6440,8 +6291,6 @@ pub(crate) fn blockwise_trust_region_uses_penalized_metric_not_raw_coefficient_s
         &s_lambda,
         raw_delta,
         radius,
-        0.0,
-        RidgePolicy::exact_full_objective(),
     )
     .expect("block metric truncation should succeed");
     assert!(
@@ -6494,8 +6343,6 @@ pub(crate) fn blockwise_trust_region_never_reverts_to_raw_beta_norm_on_indefinit
         &s_lambda,
         raw_delta,
         radius,
-        0.0,
-        RidgePolicy::exact_full_objective(),
     )
     .expect("block metric truncation should succeed");
     assert!(
@@ -6647,8 +6494,6 @@ pub(crate) fn kkt_refusal_report_classifies_rank_deficient_hpen_third_block() {
         &block_constraints,
         Some(&source),
         total_p,
-        0.0,
-        RidgePolicy::exact_full_objective(),
         1.0e-9,
         1.0e-3,
         1.0,
@@ -6842,8 +6687,6 @@ pub(crate) fn rank_deficient_hpen_canary_fires_on_large_scale_shaped_failure() {
         Some(&source),
         total_p,
         0.0,
-        RidgePolicy::exact_full_objective(),
-        0.0,
         1.0e-3,
         1.0,
         1.0e-6,
@@ -6956,8 +6799,6 @@ pub(crate) fn rank_deficient_hpen_canary_disappears_after_nullspace_absorption()
         &block_constraints,
         Some(&source),
         total_p,
-        0.0,
-        RidgePolicy::exact_full_objective(),
         0.0,
         0.0,
         1.0,

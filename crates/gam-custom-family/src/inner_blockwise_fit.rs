@@ -44,7 +44,6 @@ struct ExactJointFitContext<'a, F> {
     options: &'a BlockwiseFitOptions,
     states: Vec<ParameterBlockState>,
     s_lambdas: Vec<Array2<f64>>,
-    ridge: f64,
     joint_bundle: Option<&'a gam_problem::JointPenaltyBundle>,
     lastobjective: f64,
     converged: bool,
@@ -2277,7 +2276,7 @@ pub(crate) fn exact_joint_mode_curvature_certificate<
     )?;
     // Constrained modes are certified on the active-face TANGENT null(A_act) —
     // the same geometry the terminal determinant integrates over
-    // (`active_face_logdet_with_ridge_policy`). Curvature normal to the face
+    // (`active_face_logdet`). Curvature normal to the face
     // is neither integrated by the Laplace approximation nor differentiated by
     // the constrained outer kernel, so full-space indefiniteness there is not
     // evidence against the mode; conversely a saddle WITHIN the face is
@@ -3077,7 +3076,6 @@ fn inner_blockwise_fit_for_product<F: CustomFamily + Clone + Send + Sync + 'stat
             inner_started.elapsed().as_secs_f64(),
         );
     }
-    let ridge = effective_solverridge(options.ridge_floor);
     let joint_bundle: Option<&gam_problem::JointPenaltyBundle> = options.joint_penalties.as_deref();
     if let Some(bundle) = joint_bundle {
         for (i, spec) in bundle.specs().iter().enumerate() {
@@ -3139,12 +3137,6 @@ fn inner_blockwise_fit_for_product<F: CustomFamily + Clone + Send + Sync + 'stat
             cached_active_sets = seed.active_sets.clone();
             refresh_all_block_etas(family, specs, &mut states)?;
             let local_ranges = block_param_ranges(specs);
-            let local_joint_mode_diagonal_ridge =
-                if ridge > 0.0 && options.ridge_policy.accounts_for_objective() {
-                    ridge
-                } else {
-                    0.0
-                };
             let block_constraints = collect_block_linear_constraints(family, &states, specs)?;
             let joint_constraints = assemble_joint_linear_constraints(
                 &block_constraints,
@@ -3176,7 +3168,7 @@ fn inner_blockwise_fit_for_product<F: CustomFamily + Clone + Send + Sync + 'stat
                     options,
                     &local_ranges,
                     &s_lambdas,
-                    local_joint_mode_diagonal_ridge,
+                    0.0,
                     joint_bundle,
                     total_joint_p,
                     mode_active_block.as_ref(),
@@ -3334,8 +3326,6 @@ fn inner_blockwise_fit_for_product<F: CustomFamily + Clone + Send + Sync + 'stat
     let mut current_penalty = total_quadratic_penalty(
         &states,
         &s_lambdas,
-        ridge,
-        options.ridge_policy,
         joint_bundle,
         Some(specs),
     );
@@ -3392,7 +3382,6 @@ fn inner_blockwise_fit_for_product<F: CustomFamily + Clone + Send + Sync + 'stat
             options,
             states,
             s_lambdas,
-            ridge,
             joint_bundle,
             lastobjective,
             converged,
@@ -3574,8 +3563,6 @@ fn inner_blockwise_fit_for_product<F: CustomFamily + Clone + Send + Sync + 'stat
                 s_lambda,
                 raw_delta,
                 block_cap,
-                ridge,
-                options.ridge_policy,
             )?;
             let step_hit_trust_boundary =
                 joint_block_step_hit_trust_boundary(step_metric_norm, block_cap);
@@ -3587,7 +3574,7 @@ fn inner_blockwise_fit_for_product<F: CustomFamily + Clone + Send + Sync + 'stat
             // is accepted, so we must snapshot it here.
             let obj_before_block = objective_cycle_prev;
             let old_block_penalty =
-                block_quadratic_penalty(&beta_old, s_lambda, ridge, options.ridge_policy);
+                block_quadratic_penalty(&beta_old, s_lambda);
             let step_beta_inf = delta.iter().copied().map(f64::abs).fold(0.0, f64::max);
             max_proposed_beta_step = max_proposed_beta_step.max(step_beta_inf);
             log::debug!(
@@ -3647,7 +3634,7 @@ fn inner_blockwise_fit_for_product<F: CustomFamily + Clone + Send + Sync + 'stat
                     refresh_single_block_eta(family, specs, &mut states, b)?;
                 }
                 let trial_block_penalty =
-                    block_quadratic_penalty(&states[b].beta, s_lambda, ridge, options.ridge_policy);
+                    block_quadratic_penalty(&states[b].beta, s_lambda);
                 let trial_penalty = current_penalty - old_block_penalty + trial_block_penalty;
                 // The early exit certifies that the accept test below would
                 // refuse the trial, so its slack is the accept test's own
@@ -3707,9 +3694,9 @@ fn inner_blockwise_fit_for_product<F: CustomFamily + Clone + Send + Sync + 'stat
             //   Q(β + αδ) ≈ Q(β) − α·rhs·δ + 0.5·α²·δ·H_pen·δ
             //   predicted_reduction(α) = α·(rhs·δ) − 0.5·α²·(δ·H_pen·δ)
             //
-            // where `rhs = score − S·β (− ridge·β)` is the penalized
-            // gradient (in maximize-direction) and `H_pen = H + S
-            // (+ ridge·I)` is the penalized observed information.
+            // where `rhs = score − S·β` is the penalized gradient (in
+            // maximize-direction) and `H_pen = H + S` is the penalized
+            // observed information.
             // Actual reduction is the true penalized objective change
             // measured by the line search; rho = actual / predicted is
             // the standard model-vs-truth ratio that drives the same
@@ -3722,17 +3709,12 @@ fn inner_blockwise_fit_for_product<F: CustomFamily + Clone + Send + Sync + 'stat
             };
             let (rhs_block, hpen_delta_full): (Array1<f64>, Array1<f64>) = match work {
                 BlockWorkingSet::ExactNewton { gradient, .. } => {
-                    let mut rhs = gradient - &s_lambda.dot(&beta_old);
-                    if options.ridge_policy.accounts_for_objective() && ridge > 0.0 {
-                        rhs.scaled_add(-ridge, &beta_old);
-                    }
+                    let rhs = gradient - &s_lambda.dot(&beta_old);
                     let hpen = block_penalized_hessian_vector(
                         spec,
                         work,
                         s_lambda,
                         &delta,
-                        ridge,
-                        options.ridge_policy,
                     );
                     (rhs, hpen)
                 }
@@ -3749,32 +3731,22 @@ fn inner_blockwise_fit_for_product<F: CustomFamily + Clone + Send + Sync + 'stat
                     let w_resid = &resid * working_weights;
                     let mut rhs = solver_design.transpose_vector_multiply(&w_resid);
                     rhs -= &s_lambda.dot(&beta_old);
-                    if options.ridge_policy.accounts_for_objective() && ridge > 0.0 {
-                        rhs.scaled_add(-ridge, &beta_old);
-                    }
                     let hpen = block_penalized_hessian_vector(
                         spec,
                         work,
                         s_lambda,
                         &delta,
-                        ridge,
-                        options.ridge_policy,
                     );
                     (rhs, hpen)
                 }
                 BlockWorkingSet::NaturalDiagonal { score, .. } => {
                     let mut rhs = spec.solver_design().transpose_vector_multiply(score);
                     rhs -= &s_lambda.dot(&beta_old);
-                    if options.ridge_policy.accounts_for_objective() && ridge > 0.0 {
-                        rhs.scaled_add(-ridge, &beta_old);
-                    }
                     let hpen = block_penalized_hessian_vector(
                         spec,
                         work,
                         s_lambda,
                         &delta,
-                        ridge,
-                        options.ridge_policy,
                     );
                     (rhs, hpen)
                 }
@@ -3807,18 +3779,13 @@ fn inner_blockwise_fit_for_product<F: CustomFamily + Clone + Send + Sync + 'stat
                 states[b].beta.assign(&beta_old);
                 eta_checkpoint.restore_eta(&mut states[b]);
                 if let BlockWorkingSet::ExactNewton { gradient, .. } = work {
-                    let mut raw_descent = gradient - &s_lambda.dot(&beta_old);
-                    if options.ridge_policy.accounts_for_objective() && ridge > 0.0 {
-                        raw_descent -= &beta_old.mapv(|v| ridge * v);
-                    }
+                    let raw_descent = gradient - &s_lambda.dot(&beta_old);
                     let (descent_dir, descent_metric_norm) = truncate_block_step_to_metric_radius(
                         spec,
                         work,
                         s_lambda,
                         raw_descent,
                         block_cap,
-                        ridge,
-                        options.ridge_policy,
                     )?;
                     trust_boundary_hit_in_cycle |=
                         joint_block_step_hit_trust_boundary(descent_metric_norm, block_cap);
@@ -3863,8 +3830,6 @@ fn inner_blockwise_fit_for_product<F: CustomFamily + Clone + Send + Sync + 'stat
                             let trial_block_penalty = block_quadratic_penalty(
                                 &states[b].beta,
                                 s_lambda,
-                                ridge,
-                                options.ridge_policy,
                             );
                             let trial_penalty =
                                 current_penalty - old_block_penalty + trial_block_penalty;
@@ -3935,8 +3900,6 @@ fn inner_blockwise_fit_for_product<F: CustomFamily + Clone + Send + Sync + 'stat
         current_penalty = total_quadratic_penalty(
             &states,
             &s_lambdas,
-            ridge,
-            options.ridge_policy,
             joint_bundle,
             Some(specs),
         );
@@ -4008,8 +3971,6 @@ fn inner_blockwise_fit_for_product<F: CustomFamily + Clone + Send + Sync + 'stat
                 &cached_eval,
                 &states,
                 &s_lambdas,
-                ridge,
-                options.ridge_policy,
                 None,
             )?
             .map(|residual| residual <= residual_tol)
@@ -4121,7 +4082,6 @@ fn inner_blockwise_fit_for_product<F: CustomFamily + Clone + Send + Sync + 'stat
             specs,
             options,
             &s_lambdas,
-            ridge,
             joint_bundle,
             inner_tol,
             &cached_active_sets,
@@ -4139,7 +4099,6 @@ fn inner_blockwise_fit_for_product<F: CustomFamily + Clone + Send + Sync + 'stat
         block_log_lambdas,
         options,
         s_lambdas,
-        ridge,
         joint_bundle,
         cached_active_sets,
         &cached_eval,
@@ -4172,7 +4131,6 @@ pub(crate) fn polish_joint_newton_step<F: CustomFamily + Clone + Send + Sync + '
     specs: &[ParameterBlockSpec],
     options: &BlockwiseFitOptions,
     s_lambdas: &[Array2<f64>],
-    ridge: f64,
     joint_bundle: Option<&gam_problem::JointPenaltyBundle>,
     inner_tol: f64,
     cached_active_sets: &[Option<Vec<usize>>],
@@ -4193,13 +4151,7 @@ pub(crate) fn polish_joint_newton_step<F: CustomFamily + Clone + Send + Sync + '
             .collect()
     };
     let total_p_joint: usize = ranges_joint.last().map_or(0, |r| r.1);
-    let joint_mode_diagonal_ridge = if ridge > 0.0 && options.ridge_policy.accounts_for_objective()
-    {
-        ridge
-    } else {
-        0.0
-    };
-    let trace_diagonal_ridge = joint_mode_diagonal_ridge + JOINT_TRACE_STABILITY_RIDGE;
+    let trace_diagonal_ridge = JOINT_TRACE_STABILITY_RIDGE;
 
     // Allow up to a few polishing steps. The blockwise endpoint is close
     // to optimum, so step sizes should be small and line search should
@@ -4261,7 +4213,7 @@ pub(crate) fn polish_joint_newton_step<F: CustomFamily + Clone + Send + Sync + '
             &ranges_joint,
             s_lambdas,
             &beta_joint,
-            joint_mode_diagonal_ridge,
+            0.0,
             joint_bundle,
         );
         let rhs = &grad_full - &penalty_beta;
@@ -4397,8 +4349,6 @@ pub(crate) fn polish_joint_newton_step<F: CustomFamily + Clone + Send + Sync + '
             let trial_penalty = total_quadratic_penalty(
                 states,
                 s_lambdas,
-                ridge,
-                options.ridge_policy,
                 joint_bundle,
                 Some(specs),
             );
@@ -4442,7 +4392,6 @@ fn assemble_inner_blockwise_result<F: CustomFamily + Clone + Send + Sync + 'stat
     block_log_lambdas: &[Array1<f64>],
     options: &BlockwiseFitOptions,
     s_lambdas: Vec<Array2<f64>>,
-    ridge: f64,
     joint_bundle: Option<&gam_problem::JointPenaltyBundle>,
     cached_active_sets: Vec<Option<Vec<usize>>>,
     cached_eval: &FamilyEvaluation,
@@ -4476,12 +4425,6 @@ fn assemble_inner_blockwise_result<F: CustomFamily + Clone + Send + Sync + 'stat
     } else {
         None
     };
-    let joint_mode_diagonal_ridge = if ridge > 0.0 && options.ridge_policy.accounts_for_objective()
-    {
-        ridge
-    } else {
-        0.0
-    };
     let mut certified_workspace = None;
     if converged && exact_joint_curvature_available {
         let certificate = exact_joint_mode_curvature_certificate(
@@ -4491,7 +4434,7 @@ fn assemble_inner_blockwise_result<F: CustomFamily + Clone + Send + Sync + 'stat
             options,
             &local_ranges,
             &s_lambdas,
-            joint_mode_diagonal_ridge,
+            0.0,
             joint_bundle,
             local_total_p,
             active_constraints.as_deref(),
@@ -4517,8 +4460,6 @@ fn assemble_inner_blockwise_result<F: CustomFamily + Clone + Send + Sync + 'stat
     let penalty_value = total_quadratic_penalty(
         &states,
         &s_lambdas,
-        ridge,
-        options.ridge_policy,
         joint_bundle,
         Some(specs),
     );
@@ -4551,8 +4492,6 @@ fn assemble_inner_blockwise_result<F: CustomFamily + Clone + Send + Sync + 'stat
                     specs,
                     &states,
                     &s_lambdas,
-                    ridge,
-                    options.ridge_policy,
                     &block_constraints,
                     Some(cached_active_sets.as_slice()),
                     joint_penalty_stationarity_score(options, specs, &states).as_ref(),

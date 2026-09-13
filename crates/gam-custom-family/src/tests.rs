@@ -656,7 +656,6 @@ pub(crate) fn joint_outer_gradient_uses_projected_trace_for_rank_deficient_penal
         3,
         0.0,
         0.0,
-        0.0,
         1.0,
         0.0,
         true,
@@ -692,7 +691,6 @@ pub(crate) fn joint_outer_gradient_uses_projected_trace_for_rank_deficient_penal
         JointHessianSource::Dense(h.clone()),
         &ranges,
         3,
-        0.0,
         0.0,
         0.0,
         1.0,
@@ -839,7 +837,6 @@ pub(crate) fn joint_outer_gradient_projected_trace_drops_joint_null() {
         3,
         0.0,
         0.0,
-        0.0,
         1.0,
         0.0,
         true,
@@ -983,7 +980,6 @@ pub(crate) fn large_scale_rho_scan_joint_outer_evaluate_is_projection_invariant(
             3,
             0.0,
             0.0,
-            0.0,
             1.0,
             0.0,
             true,
@@ -1020,7 +1016,6 @@ pub(crate) fn large_scale_rho_scan_joint_outer_evaluate_is_projection_invariant(
             JointHessianSource::Dense(h.clone()),
             &ranges,
             3,
-            0.0,
             0.0,
             0.0,
             1.0,
@@ -1362,7 +1357,6 @@ pub(crate) fn large_scale_multiblock_outer_gradient_with_realistic_drift_is_boun
         JointHessianSource::Dense(h.clone()),
         &ranges,
         p_total,
-        0.0,
         0.0,
         0.0,
         1.0,
@@ -5141,30 +5135,6 @@ impl CustomFamily for OneBlockConstrainedIndefiniteHessianFamily {
             a,
             b,
         })))
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct OneBlockLinearLikelihoodExactFamily {
-    pub(crate) score: f64,
-}
-
-impl CustomFamily for OneBlockLinearLikelihoodExactFamily {
-    fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
-        let beta = block_states
-            .first()
-            .ok_or_else(|| "missing block 0".to_string())?
-            .beta
-            .first()
-            .copied()
-            .ok_or_else(|| "missing coefficient".to_string())?;
-        Ok(FamilyEvaluation {
-            log_likelihood: self.score * beta,
-            blockworking_sets: vec![BlockWorkingSet::ExactNewton {
-                gradient: array![self.score],
-                hessian: SymmetricMatrix::Dense(array![[0.0]]),
-            }],
-        })
     }
 }
 

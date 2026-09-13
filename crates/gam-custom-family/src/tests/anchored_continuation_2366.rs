@@ -408,7 +408,6 @@ fn double_well_options() -> BlockwiseFitOptions {
         outer_rel_cost_tol: None,
         rho_lower_bound: Some(-10.0),
         ridge_floor: 1e-8,
-        ridge_policy: RidgePolicy::exact_full_objective(),
         use_remlobjective: true,
         compute_covariance: false,
         use_outer_hessian: false,

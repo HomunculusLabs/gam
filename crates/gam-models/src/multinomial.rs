@@ -103,9 +103,8 @@ use std::sync::Arc;
 /// Solver-only numerical stabilization floor for the formula-driven
 /// multinomial REML inner solve (gam#747).
 ///
-/// Installed with [`RidgePolicy::solver_only`](gam_problem::RidgePolicy::solver_only)
-/// so it stabilizes the inner joint-Newton **linear solve** but never enters
-/// the REML objective, the penalty log-determinant, or the Laplace Hessian.
+/// It stabilizes the inner joint-Newton **linear solve** but never enters the
+/// REML objective, the penalty log-determinant, or the Laplace Hessian.
 ///
 /// What it does: the multinomial smoothing penalties are rank-deficient by
 /// design (each smooth carries an unpenalized polynomial null space) and the
@@ -3533,7 +3532,6 @@ pub(crate) fn penalized_multinomial_formula_parts(
         // optimized objective is the true penalized REML criterion (value tracks
         // its analytic gradient), and the smooth directions remain governed
         // solely by their own REML-selected `λ`.
-        ridge_policy: gam_problem::RidgePolicy::solver_only(),
         use_outer_hessian,
         // #715 real-data arm ("canonical-gauge null direction rejects all REML
         // seeds"): skip the multi-seed outer screening cascade and let the

@@ -992,12 +992,6 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
         }
 
         let penalty_started = std::time::Instant::now();
-        let ridge = options.ridge_floor.max(1e-15);
-        let trace_diagonal_ridge = if options.ridge_policy.accounts_for_objective() {
-            ridge
-        } else {
-            0.0
-        };
         let mut objective_theta = Array1::<f64>::zeros(theta_dim);
         let mut trace_s_pinv_sdot = Array1::<f64>::zeros(theta_dim);
         let mut penalty_cursor = 0usize;
@@ -1026,17 +1020,7 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
             penalties_dense.push(block_penalties);
             penalty_cursor += count;
         }
-        if trace_diagonal_ridge != 0.0 {
-            for diag in 0..total {
-                h[[diag, diag]] += trace_diagonal_ridge;
-            }
-        }
 
-        let penalty_logdet_ridge = if options.ridge_policy.accounts_for_objective() {
-            ridge
-        } else {
-            0.0
-        };
         let mut penalty_logdet_blocks = Vec::with_capacity(specs.len());
         penalty_cursor = 0;
         for (block_idx, lambdas) in per_block_lambdas.iter().enumerate() {
@@ -1045,7 +1029,7 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
                 gam_solve::estimate::reml::penalty_logdet::PenaltyPseudologdet::from_components(
                     &penalties_dense[block_idx],
                     &lambdas,
-                    penalty_logdet_ridge,
+                    0.0,
                 )
                 .map_err(|e| {
                     format!(

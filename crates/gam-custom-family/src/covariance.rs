@@ -552,8 +552,6 @@ pub(crate) fn exact_newton_joint_stationarity_inf_norm<F: CustomFamily + ?Sized>
     eval: &FamilyEvaluation,
     states: &[ParameterBlockState],
     s_lambdas: &[Array2<f64>],
-    ridge: f64,
-    ridge_policy: RidgePolicy,
     block_active_sets: Option<&[Option<Vec<usize>>]>,
 ) -> Result<Option<f64>, CustomFamilyError> {
     if eval.blockworking_sets.len() != states.len() || states.len() != s_lambdas.len() {
@@ -608,10 +606,7 @@ pub(crate) fn exact_newton_joint_stationarity_inf_norm<F: CustomFamily + ?Sized>
             BlockWorkingSet::ExactNewton { gradient, .. } => gradient,
             _ => return Ok(None),
         };
-        let mut residual = s_lambdas[b].dot(&states[b].beta) - gradient;
-        if ridge_policy.accounts_for_objective() && ridge > 0.0 {
-            residual += &states[b].beta.mapv(|v| ridge * v);
-        }
+        let residual = s_lambdas[b].dot(&states[b].beta) - gradient;
         let block_active_hint = block_active_sets
             .and_then(|sets| sets.get(b))
             .and_then(|opt| opt.as_deref());
@@ -743,8 +738,6 @@ pub(crate) fn exact_newton_joint_stationarity_inf_norm_from_gradient(
     states: &[ParameterBlockState],
     specs: &[ParameterBlockSpec],
     s_lambdas: &[Array2<f64>],
-    ridge: f64,
-    ridge_policy: RidgePolicy,
     block_constraints: &[Option<ConstraintSet>],
     block_active_sets: Option<&[Option<Vec<usize>>]>,
     // gam#979: per-coordinate simple lower bounds (`f64::NEG_INFINITY` where
@@ -837,9 +830,6 @@ pub(crate) fn exact_newton_joint_stationarity_inf_norm_from_gradient(
         if let Some(js) = joint_penalty_score {
             residual += &js.slice(ndarray::s![offset..offset + width]);
         }
-        if ridge_policy.accounts_for_objective() && ridge > 0.0 {
-            residual += &states[b].beta.mapv(|v| ridge * v);
-        }
         // gam#979 box-bound (simple lower bound) KKT residual. `residual` here is
         // the objective gradient `r = Sβ − ∇ℓ`. The correct stationarity measure
         // for `β_j ≥ L_j` is the PROJECTED GRADIENT
@@ -889,8 +879,6 @@ pub(crate) fn exact_newton_joint_stationarity_vector_from_gradient(
     states: &[ParameterBlockState],
     specs: &[ParameterBlockSpec],
     s_lambdas: &[Array2<f64>],
-    ridge: f64,
-    ridge_policy: RidgePolicy,
 ) -> Result<Array1<f64>, CustomFamilyError> {
     if states.len() != specs.len() || states.len() != s_lambdas.len() {
         return Err(CustomFamilyError::DimensionMismatch {
@@ -913,10 +901,7 @@ pub(crate) fn exact_newton_joint_stationarity_vector_from_gradient(
         let width = specs[b].design.ncols();
         let start = offset;
         let end = offset + width;
-        let mut block = s_lambdas[b].dot(&states[b].beta) - gradient.slice(ndarray::s![start..end]);
-        if ridge_policy.accounts_for_objective() && ridge > 0.0 {
-            block += &states[b].beta.mapv(|v| ridge * v);
-        }
+        let block = s_lambdas[b].dot(&states[b].beta) - gradient.slice(ndarray::s![start..end]);
         residual.slice_mut(ndarray::s![start..end]).assign(&block);
         offset = end;
     }
@@ -961,8 +946,6 @@ pub(crate) fn exact_newton_joint_projected_stationarity_vector_from_gradient(
     states: &[ParameterBlockState],
     specs: &[ParameterBlockSpec],
     s_lambdas: &[Array2<f64>],
-    ridge: f64,
-    ridge_policy: RidgePolicy,
     block_constraints: &[Option<ConstraintSet>],
     block_active_sets: Option<&[Option<Vec<usize>>]>,
     // gam#1587/#561: `Σ_t λ_t (M⊗S_t) · β` — the full-width joint penalty's
@@ -1025,9 +1008,6 @@ pub(crate) fn exact_newton_joint_projected_stationarity_vector_from_gradient(
         if let Some(js) = joint_penalty_score {
             block += &js.slice(ndarray::s![start..end]);
         }
-        if ridge_policy.accounts_for_objective() && ridge > 0.0 {
-            block += &states[b].beta.mapv(|v| ridge * v);
-        }
         if let Some(constraints) = block_constraints[b].as_ref() {
             let block_active_hint = block_active_sets
                 .and_then(|sets| sets.get(b))
@@ -1073,8 +1053,6 @@ pub(crate) fn exact_newton_joint_kkt_residual_for_ift<F: CustomFamily + ?Sized>(
     specs: &[ParameterBlockSpec],
     states: &[ParameterBlockState],
     s_lambdas: &[Array2<f64>],
-    ridge: f64,
-    ridge_policy: RidgePolicy,
     block_active_sets: Option<&[Option<Vec<usize>>]>,
     joint_penalty_score: Option<&Array1<f64>>,
 ) -> Result<Option<ProjectedKktResidual>, CustomFamilyError> {
@@ -1088,8 +1066,6 @@ pub(crate) fn exact_newton_joint_kkt_residual_for_ift<F: CustomFamily + ?Sized>(
         specs,
         states,
         s_lambdas,
-        ridge,
-        ridge_policy,
         &block_constraints,
         block_active_sets,
         joint_penalty_score,
@@ -1103,8 +1079,6 @@ pub(crate) fn exact_newton_joint_kkt_residual_for_ift_from_cached_gradient<
     specs: &[ParameterBlockSpec],
     states: &[ParameterBlockState],
     s_lambdas: &[Array2<f64>],
-    ridge: f64,
-    ridge_policy: RidgePolicy,
     block_active_sets: Option<&[Option<Vec<usize>>]>,
     cached_gradient: Option<&Array1<f64>>,
     joint_penalty_score: Option<&Array1<f64>>,
@@ -1116,8 +1090,6 @@ pub(crate) fn exact_newton_joint_kkt_residual_for_ift_from_cached_gradient<
             specs,
             states,
             s_lambdas,
-            ridge,
-            ridge_policy,
             &block_constraints,
             block_active_sets,
             joint_penalty_score,
@@ -1128,8 +1100,6 @@ pub(crate) fn exact_newton_joint_kkt_residual_for_ift_from_cached_gradient<
         specs,
         states,
         s_lambdas,
-        ridge,
-        ridge_policy,
         block_active_sets,
         joint_penalty_score,
     )
@@ -1140,8 +1110,6 @@ pub(crate) fn exact_newton_joint_projected_kkt_residual_for_ift_from_gradient(
     specs: &[ParameterBlockSpec],
     states: &[ParameterBlockState],
     s_lambdas: &[Array2<f64>],
-    ridge: f64,
-    ridge_policy: RidgePolicy,
     block_constraints: &[Option<ConstraintSet>],
     block_active_sets: Option<&[Option<Vec<usize>>]>,
     joint_penalty_score: Option<&Array1<f64>>,
@@ -1151,8 +1119,6 @@ pub(crate) fn exact_newton_joint_projected_kkt_residual_for_ift_from_gradient(
         states,
         specs,
         s_lambdas,
-        ridge,
-        ridge_policy,
         block_constraints,
         block_active_sets,
         joint_penalty_score,

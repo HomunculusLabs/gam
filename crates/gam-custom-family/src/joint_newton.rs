@@ -1218,13 +1218,11 @@ pub(crate) fn use_exact_newton_strict_spd<F: CustomFamily + ?Sized>(family: &F) 
 /// so asking a full-space Cholesky to certify it is mathematically wrong. The
 /// fully-pinned convention remains the fixed-mode full-curvature criterion used
 /// by `try_tangent_projected_evaluate`.
-pub(crate) fn active_face_logdet_with_ridge_policy(
+pub(crate) fn active_face_logdet(
     matrix: &Array2<f64>,
     active_constraints: Option<&ActiveLinearConstraintBlock>,
     strict_spd: bool,
     n_observations: usize,
-    ridge_floor: f64,
-    ridge_policy: RidgePolicy,
     full_space_logdet_correction: f64,
 ) -> Result<f64, CustomFamilyError> {
     let mut projected = None;
@@ -1256,7 +1254,7 @@ pub(crate) fn active_face_logdet_with_ridge_policy(
     let logdet = if strict_spd {
         strict_exact_pseudo_logdet(determinant_matrix, n_observations)?
     } else {
-        match stable_logdet_with_ridge_policy(determinant_matrix, ridge_floor, ridge_policy) {
+        match stable_logdet(determinant_matrix) {
             Ok(value) => value,
             // VALUE-SIDE CONVENTION for a genuinely-indefinite constrained mode
             // (gam#979 survival marginal-slope seed-κ saddle; the same
@@ -1489,19 +1487,14 @@ pub(crate) fn blockwise_logdet_terms_with_workspace<
             // magnitude rule). To guarantee value↔gradient agree by
             // construction, compute the value from the SAME canonical
             // `PenaltyPseudologdet` the gradient differentiates, with the same
-            // dense penalty components, the same λ, and the same ridge.
-            let ridge = if options.ridge_policy.accounts_for_objective() {
-                effective_solverridge(options.ridge_floor)
-            } else {
-                0.0
-            };
+            // dense penalty components and the same λ.
             let penalties_dense: Vec<Array2<f64>> =
                 spec.penalties.iter().map(|pen| pen.to_dense()).collect();
             let lambdas_vec: Vec<f64> = lambdas.to_vec();
             match gam_solve::estimate::reml::penalty_logdet::PenaltyPseudologdet::from_components(
                 &penalties_dense,
                 &lambdas_vec,
-                ridge,
+                0.0,
             ) {
                 Ok(pld) => pld.value(),
                 Err(eigh_err_msg) => {
@@ -1518,13 +1511,7 @@ pub(crate) fn blockwise_logdet_terms_with_workspace<
                     // traces = a Hessian for a different objective" trap (gam#748).
                     // A genuinely un-decomposable penalty now surfaces as a hard
                     // error instead of a masked, biased number.
-                    let mut s_for_logdet = s_lambda.clone();
-                    if ridge > 0.0 {
-                        for i in 0..p {
-                            s_for_logdet[[i, i]] += ridge;
-                        }
-                    }
-                    strict_exact_pseudo_logdet(&s_for_logdet, p).map_err(|strict_err| {
+                    strict_exact_pseudo_logdet(&s_lambda, p).map_err(|strict_err| {
                         format!(
                             "penalty logdet: canonical PenaltyPseudologdet eigendecomposition \
                              failed for block {b} ({eigh_err_msg}); strict pseudo-logdet fallback \
@@ -1568,11 +1555,7 @@ pub(crate) fn blockwise_logdet_terms_with_workspace<
             &ranges,
             block_log_lambdas,
             active,
-            if options.ridge_policy.accounts_for_objective() {
-                effective_solverridge(options.ridge_floor)
-            } else {
-                0.0
-            },
+            0.0,
         )?
     {
         penalty_logdet_s_total = tangent_logdet;
@@ -1596,13 +1579,11 @@ pub(crate) fn blockwise_logdet_terms_with_workspace<
         if let Some(hphi) = logdet_jeffreys_hphi.as_ref() {
             h_joint.scaled_add(curvature.rho_curvature_scale, hphi);
         }
-        let logdet_h_total = active_face_logdet_with_ridge_policy(
+        let logdet_h_total = active_face_logdet(
             &h_joint,
             active_constraints,
             strict_spd,
             joint_observation_count(states),
-            options.ridge_floor * curvature.rho_curvature_scale,
-            options.ridge_policy,
             curvature.hessian_logdet_correction,
         )?;
         return Ok((logdet_h_total, penalty_logdet_s_total));
@@ -1658,13 +1639,11 @@ pub(crate) fn blockwise_logdet_terms_with_workspace<
         if let Some(hphi) = logdet_jeffreys_hphi.as_ref() {
             h_joint.scaled_add(1.0, hphi);
         }
-        let logdet_h_total = active_face_logdet_with_ridge_policy(
+        let logdet_h_total = active_face_logdet(
             &h_joint,
             active_constraints,
             strict_spd,
             joint_observation_count(states),
-            options.ridge_floor,
-            options.ridge_policy,
             0.0,
         )?;
         return Ok((logdet_h_total, penalty_logdet_s_total));
@@ -1688,13 +1667,11 @@ pub(crate) fn blockwise_logdet_terms_with_workspace<
         if let Some(hphi) = logdet_jeffreys_hphi.as_ref() {
             h_joint.scaled_add(1.0, hphi);
         }
-        let logdet_h_total = active_face_logdet_with_ridge_policy(
+        let logdet_h_total = active_face_logdet(
             &h_joint,
             active_constraints,
             strict_spd,
             joint_observation_count(states),
-            options.ridge_floor,
-            options.ridge_policy,
             0.0,
         )?;
         return Ok((logdet_h_total, penalty_logdet_s_total));
@@ -1758,25 +1735,21 @@ pub(crate) fn blockwise_logdet_terms_with_workspace<
                 .slice_mut(ndarray::s![start..end, start..end])
                 .assign(&h);
         } else {
-            logdet_h_total += active_face_logdet_with_ridge_policy(
+            logdet_h_total += active_face_logdet(
                 &h,
                 None,
                 strict_spd,
                 joint_observation_count(states),
-                options.ridge_floor,
-                options.ridge_policy,
                 0.0,
             )?;
         }
     }
     if let Some(h_joint) = active_face_hessian {
-        logdet_h_total = active_face_logdet_with_ridge_policy(
+        logdet_h_total = active_face_logdet(
             &h_joint,
             active_constraints,
             strict_spd,
             joint_observation_count(states),
-            options.ridge_floor,
-            options.ridge_policy,
             0.0,
         )?;
     }
@@ -4788,8 +4761,6 @@ pub(crate) fn compute_kkt_refusal_report(
     block_constraints: &[Option<ConstraintSet>],
     joint_hessian_source: Option<&JointHessianSource>,
     total_p: usize,
-    ridge: f64,
-    ridge_policy: RidgePolicy,
     accepted_step_inf: f64,
     proposal_step_inf: f64,
     trust_radius: f64,
@@ -4844,10 +4815,7 @@ pub(crate) fn compute_kkt_refusal_report(
         .iter()
         .enumerate()
         .map(|(b, _)| {
-            let mut penalty_block = s_lambdas[b].dot(&states[b].beta);
-            if ridge_policy.accounts_for_objective() && ridge > 0.0 {
-                penalty_block += &states[b].beta.mapv(|v| ridge * v);
-            }
+            let penalty_block = s_lambdas[b].dot(&states[b].beta);
             penalty_block
                 .iter()
                 .map(|x: &f64| x.abs())
@@ -4861,8 +4829,6 @@ pub(crate) fn compute_kkt_refusal_report(
             states,
             specs,
             s_lambdas,
-            ridge,
-            ridge_policy,
             block_constraints,
             Some(cached_active_sets),
             // Diagnostic refusal report only; the joint-penalty score is not in
@@ -4927,12 +4893,7 @@ pub(crate) fn compute_kkt_refusal_report(
                     .fold(0.0_f64, f64::max),
             );
         }
-        let model_diagonal_ridge = if ridge_policy.accounts_for_objective() && ridge > 0.0 {
-            ridge
-        } else {
-            0.0
-        };
-        add_joint_penalty_to_matrix(&mut h_joint, ranges, s_lambdas, model_diagonal_ridge, None);
+        add_joint_penalty_to_matrix(&mut h_joint, ranges, s_lambdas, 0.0, None);
         symmetrize_dense_in_place(&mut h_joint);
         match FaerEigh::eigh(&h_joint, Side::Lower) {
             Ok((evals, evecs)) if evals.iter().all(|x| x.is_finite()) => {
