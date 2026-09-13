@@ -416,6 +416,9 @@ mod tests_inner_convergence_rate_2267;
 mod tests_outer_quasi_laplace_probe_budget_2080;
 
 #[cfg(test)]
+mod tests_gate_logit_jacobian_2080;
+
+#[cfg(test)]
 #[cfg(test)]
 mod lambda_smooth_1556_tests;
 

@@ -274,6 +274,14 @@ impl SaeManifoldTerm {
                 rho,
                 self.row_loss_weights.as_deref(),
             )?;
+        // #2080 — the gate prior's change of variables to logit coordinates. Its curvature
+        // is exact and non-negative, so it joins `htt` after the ordered Beta--Bernoulli
+        // majorizer transform, which zeroes a row whose local prior term is non-positive.
+        let (gate_jacobian_grad, gate_jacobian_curvature) =
+            crate::assignment::gate_logit_jacobian_grad_hdiag_weighted(
+                &self.assignment,
+                self.row_loss_weights.as_deref(),
+            );
 
         // #1038 softmax entropy: the exact per-row Hessian in logits is dense
         // (`H_kj = (λ/τ²) a_k[δ_kj(m−L_k−1)+a_j(L_k+L_j+1−2m)]`), not just the
@@ -1004,7 +1012,8 @@ impl SaeManifoldTerm {
                         let assignment_base = row * k_atoms;
                         if row_layout.is_none() {
                             for free_idx in 0..assignment_dim {
-                                block.gt[free_idx] += assignment_grad[assignment_base + free_idx];
+                                block.gt[free_idx] += assignment_grad[assignment_base + free_idx]
+                                    + gate_jacobian_grad[assignment_base + free_idx];
                             }
                             if let Some((penalty, scale)) = softmax_dense.as_ref() {
                                 // #1419: write the genuine Gershgorin Loewner majorizer
@@ -1061,7 +1070,8 @@ impl SaeManifoldTerm {
                                         ),
                                         None => raw,
                                     };
-                                    block.htt[[free_idx, free_idx]] += val;
+                                    block.htt[[free_idx, free_idx]] +=
+                                        val + gate_jacobian_curvature[assignment_base + free_idx];
                                 }
                             }
                         }

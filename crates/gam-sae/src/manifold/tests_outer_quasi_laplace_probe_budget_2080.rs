@@ -1331,25 +1331,28 @@ fn profile_wide_p_criterion_cost_2080() {
     }
 }
 
-/// #2080 / #2336 — a refused exact-A saddle is descended before it is refused, and
-/// a refusal the descent cannot resolve reaches the outer search as a probe value,
-/// never as a fatal abort.
+/// #2080 — once the gate prior carries its logit Jacobian, the specimen whose gates used
+/// to saturate into refused exact-A saddles prices a finite root, and every gate's installed
+/// curvature carries the Jacobian's own.
 ///
 /// Specimen: the p=16 rung of `profile_wide_p_criterion_cost_2080` (K=1 correctly
-/// specified circle, ordered Beta–Bernoulli gates). Pool job 532798 at 1c456287c read
-/// its converged root refused on four gate-logit modes, then four committed descents,
-/// then a final mode no refused direction could descend above the material floor.
+/// specified circle, ordered Beta–Bernoulli gates seeded at logit 6). With the gate prior
+/// integrated over the logit without its Jacobian, pool job 532798 at 1c456287c read this
+/// root refused on four gate-logit modes, and job 603989 at 9c266da56 read its smallest
+/// retained exact-A curvature at 14× its floor. Lane-only job 607907 with the Jacobian read
+/// the root priced finite (820.7168453207069), every logit below |ℓ/τ| = 5, and the
+/// smallest retained curvature at 5.6e5× its floor.
 ///
 /// Pinned:
-/// * the converged root, from the criterion's own initial fit and converge without its
-///   descent, is refused on the joint block (non-vacuity);
-/// * after the criterion runs, the installed state's penalized objective is strictly
-///   below the refused root's, so at least one descent committed, whatever the final
-///   verdict;
+/// * the converged root, from the criterion's own initial fit and converge, prices a finite
+///   exact-A evidence;
+/// * at that root every free logit's installed `H_tt` diagonal holds at least the Jacobian's
+///   curvature `2z(1 − z)/τ²` (the data Gauss–Newton term and the majorized prior term it
+///   sits beside are non-negative);
 /// * the outer evaluation at the same ρ returns a finite value or the `+inf` infeasible
 ///   probe, never an error.
 #[test]
-fn refused_exact_a_saddle_is_descended_before_the_refusal_2080() {
+fn saturating_gate_specimen_prices_a_finite_root_2080() {
     let (n, p, harmonics, inner_max_iter) = (96usize, 16usize, 2usize, 8usize);
     let (learning_rate, ridge_ext_coord, ridge_beta) = (0.04, 1.0e-6, 1.0e-6);
     let z = one_circle_wide_target(n, p, 0.05);
@@ -1359,7 +1362,7 @@ fn refused_exact_a_saddle_is_descended_before_the_refusal_2080() {
         .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
         .expect("seed dispersion is finite and strictly positive");
 
-    // The refused root: the criterion's own initial fit and converge, without its descent.
+    // The root: the criterion's own initial fit and converge.
     let mut root = term.clone();
     let mut rho_fixed = rho.clone();
     let initial = root
@@ -1395,44 +1398,40 @@ fn refused_exact_a_saddle_is_descended_before_the_refusal_2080() {
             true,
         )
         .expect("converge the specimen to its inner root");
-    let root_verdict = root.exact_observed_information_log_dets(&rho, z.view(), &root_cache);
+    let root_log_det = root
+        .exact_observed_information_log_dets(&rho, z.view(), &root_cache)
+        .expect("the specimen's converged root must price a finite exact-A evidence");
     assert!(
-        matches!(
-            root_verdict,
-            Err(super::construction::SaeCriterionError::IndefiniteObservedInformation { block })
-                if block == "joint"
-        ),
-        "the specimen's converged root must be a refused exact-A saddle, or this gate proves \
-         nothing; got: {root_verdict:?}"
+        root_log_det.is_finite(),
+        "the specimen's exact-A log-determinant must be finite, got {root_log_det}"
     );
-    let root_objective = root
-        .penalized_objective_total(z.view(), &rho, None, 1.0)
-        .expect("penalized objective at the refused root");
+    eprintln!("[#2080 saturating-gate pin] root ½log|A| {:.12e}", 0.5 * root_log_det);
 
-    // The criterion leaves its final installed state whatever its verdict.
-    let mut descended = term.clone();
-    let verdict = descended.penalized_quasi_laplace_criterion_with_cache(
-        z.view(),
-        &rho,
-        None,
-        inner_max_iter,
-        learning_rate,
-        ridge_ext_coord,
-        ridge_beta,
-    );
-    let descended_objective = descended
-        .penalized_objective_total(z.view(), &rho, None, 1.0)
-        .expect("penalized objective after the criterion");
-    eprintln!(
-        "[#2080 saddle pin] refused root objective {root_objective:.12e}, after the criterion \
-         {descended_objective:.12e}, criterion verdict {:?}",
-        verdict.as_ref().map(|(value, _, _)| *value)
-    );
-    assert!(
-        descended_objective < root_objective,
-        "the criterion must descend the refused root before any verdict: after \
-         {descended_objective:.12e}, refused root {root_objective:.12e}"
-    );
+    let gate_jacobian_curvature = crate::assignment::gate_logit_jacobian_grad_hdiag_weighted(
+        &root.assignment,
+        root.row_loss_weights.as_deref(),
+    )
+    .1;
+    let k_atoms = root.k_atoms();
+    let system = root
+        .assemble_arrow_schur(z.view(), &rho, None)
+        .expect("assemble the specimen's arrow system at its root");
+    for (row, block) in system.rows.iter().enumerate() {
+        let vars = root
+            .row_vars_for_row_dim(row, block.htt.nrows())
+            .expect("row layout of the assembled system");
+        for (slot, var) in vars.iter().enumerate() {
+            if let SaeLocalRowVar::Logit { atom } = *var {
+                let installed = block.htt[[slot, slot]];
+                let jacobian = gate_jacobian_curvature[row * k_atoms + atom];
+                assert!(
+                    installed >= jacobian,
+                    "row {row}, atom {atom}: installed logit curvature {installed:.12e} is below \
+                     the gate Jacobian's own {jacobian:.12e}"
+                );
+            }
+        }
+    }
 
     let rho_flat = rho.to_flat();
     let mut objective = SaeManifoldOuterObjective::new(

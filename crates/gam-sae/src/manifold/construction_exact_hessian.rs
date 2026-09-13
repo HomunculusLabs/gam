@@ -2599,6 +2599,16 @@ impl SaeManifoldTerm {
                             }
                         }
                         if a == b && a == w {
+                            // #2080 — the gate prior's logit Jacobian has the exact curvature
+                            // `2z(1 − z)/τ²` in both `B` and `A`.
+                            if let SaeLocalRowVar::Logit { atom } = jets.vars[a] {
+                                dh += crate::assignment::gate_logit_jacobian_third_weighted(
+                                    &self.assignment,
+                                    self.row_loss_weights.as_deref(),
+                                    row,
+                                    atom,
+                                );
+                            }
                             if let SaeLocalRowVar::Coord { atom, axis } = jets.vars[a] {
                                 if !ard_precisions[atom].is_empty() {
                                     dh += if exact_a {

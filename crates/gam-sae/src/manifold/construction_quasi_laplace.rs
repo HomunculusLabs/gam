@@ -6588,7 +6588,20 @@ impl SaeManifoldTerm {
         if self.assignment.logit_is_fixed(wrt_atom) {
             return 0.0;
         }
-        match self.assignment.mode {
+        // #2080 — the gate prior's logit Jacobian adds the exact curvature `2z(1 − z)/τ²`
+        // to the logit diagonal of both `B` and `A`, so both adjoints differentiate it the
+        // same way. The prior's own channels follow.
+        let gate_jacobian_third = if diag_atom == wrt_atom {
+            crate::assignment::gate_logit_jacobian_third_weighted(
+                &self.assignment,
+                self.row_loss_weights.as_deref(),
+                row,
+                diag_atom,
+            )
+        } else {
+            0.0
+        };
+        gate_jacobian_third + match self.assignment.mode {
             AssignmentMode::Softmax { .. } => {
                 // #1038: the softmax entropy Hessian is now stored DENSE in
                 // `block.htt` and its full θ-derivative `∂H_{k,j}/∂z_w` (diagonal

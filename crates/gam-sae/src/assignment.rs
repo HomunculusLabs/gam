@@ -1729,6 +1729,155 @@ impl ThresholdGateLogitCurvature {
 
 }
 
+/// The logit Jacobian of a sigmoid gate's prior density (#2080).
+///
+/// The ordered Beta--Bernoulli and ThresholdGate priors are densities on the gate
+/// `z = σ((ℓ − θ)/τ)`, while the inner solve and the Laplace evidence integrate over
+/// the logit `ℓ`. Changing variables, `p(ℓ) = p(z)·|dz/dℓ| = p(z)·z(1 − z)/τ`, so the
+/// penalized objective carries `−ln[z(1 − z)/τ]` per free gate. Without it the prior in
+/// `ℓ` is improper: along a saturated logit the data slope and the prior slope both
+/// decay like `e^{−|ℓ|/τ}`, the objective has no finite mode, and the evidence curvature
+/// `λ_ℓ ∝ e^{−|ℓ|/τ}` drifts through the exact-A rank floor. On the #2080 wide-p fixture
+/// 121–144 of 424 exact-A directions, every one a gate logit at `15 ≤ |ℓ/τ| < 50`,
+/// crossed that floor between neighbouring ρ and moved the criterion by `½·|ln floor|`
+/// per crossing (pool jobs 598388, 603989).
+///
+/// With `x = (ℓ − θ)/τ`: `J = |x| + 2·ln(1 + e^{−|x|}) + ln τ`, `J′ = (2z − 1)/τ`,
+/// `J″ = 2z(1 − z)/τ²` and `J‴ = 2z(1 − z)(1 − 2z)/τ³`. `J″ ≥ 0` is the exact curvature,
+/// so `B` carries it and `ΔC` gains no remainder. Nothing here depends on ρ, so no ρ
+/// channel changes. Each gate carries its row's design weight (#991).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GateLogitJacobian {
+    value: f64,
+    gradient: f64,
+    curvature: f64,
+    third: f64,
+}
+
+impl GateLogitJacobian {
+    pub(crate) fn eval(weight: f64, logit: f64, threshold: f64, temperature: f64) -> Self {
+        let inv_tau = 1.0 / temperature;
+        let x = (logit - threshold) * inv_tau;
+        // `z(1 − z) = e^{−|x|}/(1 + e^{−|x|})²` and `2z − 1 = tanh(x/2)`, both free of the
+        // cancellation `1 − z` suffers where a gate saturates on: at `x = 25` that loses five
+        // digits, and past `x ≈ 37` it rounds the slope to exactly zero.
+        let tail = (-x.abs()).exp();
+        let slope = tail / ((1.0 + tail) * (1.0 + tail));
+        let centre = (0.5 * x).tanh();
+        Self {
+            value: weight * (x.abs() + 2.0 * tail.ln_1p() + temperature.ln()),
+            gradient: weight * centre * inv_tau,
+            curvature: weight * 2.0 * slope * inv_tau * inv_tau,
+            third: -weight * 2.0 * slope * centre * inv_tau * inv_tau * inv_tau,
+        }
+    }
+
+    /// `w·(−ln[z(1 − z)/τ])`.
+    pub(crate) fn value(self) -> f64 {
+        self.value
+    }
+
+    /// `w·(2z − 1)/τ`.
+    pub(crate) fn gradient(self) -> f64 {
+        self.gradient
+    }
+
+    /// `w·2z(1 − z)/τ²`: exact and non-negative.
+    pub(crate) fn curvature(self) -> f64 {
+        self.curvature
+    }
+
+    /// `w·2z(1 − z)(1 − 2z)/τ³`, the logit derivative of [`Self::curvature`].
+    pub(crate) fn third(self) -> f64 {
+        self.third
+    }
+}
+
+/// `(θ, τ)` for a mode whose gates are per-logit sigmoids `z = σ((ℓ − θ)/τ)`, where
+/// [`GateLogitJacobian`] applies. Softmax gates share one simplex per row, and TopK has
+/// no free logits.
+pub(crate) fn sigmoid_gate_frame(mode: &AssignmentMode) -> Option<(f64, f64)> {
+    match *mode {
+        AssignmentMode::OrderedBetaBernoulli { temperature, .. } => Some((0.0, temperature)),
+        AssignmentMode::ThresholdGate {
+            temperature,
+            threshold,
+        } => Some((threshold, temperature)),
+        AssignmentMode::Softmax { .. } | AssignmentMode::TopK { .. } => None,
+    }
+}
+
+/// One free gate's [`GateLogitJacobian`], or `None` for a fixed logit or a mode without
+/// per-logit sigmoid gates, which carry no gate prior and so no change of variables.
+fn gate_logit_jacobian_at(
+    assignment: &SaeAssignment,
+    row_weights: Option<&[f64]>,
+    row: usize,
+    atom: usize,
+) -> Option<GateLogitJacobian> {
+    let (threshold, temperature) = sigmoid_gate_frame(&assignment.mode)?;
+    if assignment.routing_is_frozen() || assignment.logit_is_fixed(atom) {
+        return None;
+    }
+    let weight = row_weights.map_or(1.0, |w| w[row]);
+    Some(GateLogitJacobian::eval(
+        weight,
+        assignment.logits[[row, atom]],
+        threshold,
+        temperature,
+    ))
+}
+
+/// [`GateLogitJacobian`]'s value summed over every free gate: the change-of-variables
+/// term of the gate prior's density in logit coordinates.
+pub(crate) fn gate_logit_jacobian_value_weighted(
+    assignment: &SaeAssignment,
+    row_weights: Option<&[f64]>,
+) -> f64 {
+    let k = assignment.k_atoms();
+    let mut total = 0.0_f64;
+    for row in 0..assignment.n_obs() {
+        for atom in 0..k {
+            if let Some(jacobian) = gate_logit_jacobian_at(assignment, row_weights, row, atom) {
+                total += jacobian.value();
+            }
+        }
+    }
+    total
+}
+
+/// Gradient and curvature of [`gate_logit_jacobian_value_weighted`] per flat
+/// `(row·K + atom)` logit, the layout of [`assignment_prior_grad_hdiag_weighted`].
+pub(crate) fn gate_logit_jacobian_grad_hdiag_weighted(
+    assignment: &SaeAssignment,
+    row_weights: Option<&[f64]>,
+) -> (Array1<f64>, Array1<f64>) {
+    let k = assignment.k_atoms();
+    let n = assignment.n_obs();
+    let mut grad = Array1::<f64>::zeros(n * k);
+    let mut curvature = Array1::<f64>::zeros(n * k);
+    for row in 0..n {
+        for atom in 0..k {
+            if let Some(jacobian) = gate_logit_jacobian_at(assignment, row_weights, row, atom) {
+                grad[row * k + atom] = jacobian.gradient();
+                curvature[row * k + atom] = jacobian.curvature();
+            }
+        }
+    }
+    (grad, curvature)
+}
+
+/// The logit derivative of one gate's [`GateLogitJacobian`] curvature, for the θ-adjoints
+/// that differentiate the logit diagonal of `B` or `A`.
+pub(crate) fn gate_logit_jacobian_third_weighted(
+    assignment: &SaeAssignment,
+    row_weights: Option<&[f64]>,
+    row: usize,
+    atom: usize,
+) -> f64 {
+    gate_logit_jacobian_at(assignment, row_weights, row, atom).map_or(0.0, GateLogitJacobian::third)
+}
+
 /// The ΔC channel of the ThresholdGate prior: the non-positive remainder
 /// `exact − majorizer` per flat `(row·K + atom)` logit, masked identically to
 /// the curvature [`assignment_prior_grad_hdiag_weighted`] writes into `B`.

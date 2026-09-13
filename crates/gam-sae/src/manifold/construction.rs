@@ -5009,11 +5009,16 @@ impl SaeManifoldTerm {
             }
             pairwise_sum(&vals)
         };
+        // #2080 — the gate prior is a density on `z`, and this objective is integrated over
+        // the logit, so the prior carries its change-of-variables term.
         let assignment_sparsity = crate::assignment::assignment_prior_value_weighted(
             &self.assignment,
             rho,
             self.row_loss_weights.as_deref(),
-        )?;
+        )? + crate::assignment::gate_logit_jacobian_value_weighted(
+            &self.assignment,
+            self.row_loss_weights.as_deref(),
+        );
         let smoothness =
             penalty_scale * self.decoder_smoothness_value(&rho.lambda_smooth_vec()?)?;
         let ard = self.ard_value(rho)?;
