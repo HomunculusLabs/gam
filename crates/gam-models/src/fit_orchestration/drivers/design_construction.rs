@@ -2493,8 +2493,8 @@ impl CustomFamily for BoundedLinearFamily {
     /// and the blockwise convergence certificate, which measures the step on
     /// `theta` against `inner_tol*(1 + |theta|_inf)`, never fires. The loop
     /// then spends its whole `inner_max_cycles` budget and the no-smoothing
-    /// path reports "coefficient optimization did not converge after N
-    /// cycles" (gam#2705 group C: three `bounded()` anchors whose optimum is a
+    /// path returns `InnerSolveNotConverged` with that exit as its terminal
+    /// reason (gam#2705 group C: three `bounded()` anchors whose optimum is a
     /// bound — `bounded(x,0,1)` on `y = 2 + 5x`, and two `bounded(x,0,·)`
     /// anchors whose slope binds at the lower bound).
     ///
