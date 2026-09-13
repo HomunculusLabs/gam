@@ -547,46 +547,89 @@ pub(crate) fn flatten(a: &Array2<f64>) -> Array1<f64> {
 ///
 /// This is the shared engine behind [`tangent_basis`](RiemannianManifold::tangent_basis)
 /// for the matrix manifolds whose tangent space has no closed-form basis. It
-/// walks the `n × k` standard basis in column-major order (outer `col`, inner
-/// `row`), projects each `e_{row,col}` onto the tangent space via
-/// `m.project_tangent`, re-orthogonalizes against the columns accepted so far,
-/// and keeps it iff its residual norm exceeds the `1e-10` drop tolerance,
-/// stopping the moment `m.dim()` independent directions have been collected.
+/// projects every `e_{row,col}` of the `n × k` standard basis onto the tangent
+/// space via `m.project_tangent`, then runs Gram–Schmidt with column pivoting
+/// (see [`pivoted_projected_standard_basis`]) for exactly `m.dim()` steps.
 /// Each caller keeps its own input validation and then delegates here, so the
-/// numerically delicate orthogonalization order, drop tolerance, and early-exit
-/// logic live in exactly one place.
+/// numerically delicate orthogonalization order and selection logic live in
+/// exactly one place.
 pub(crate) fn projected_standard_basis_tangent<M: RiemannianManifold + ?Sized>(
     m: &M,
     point: ArrayView1<'_, f64>,
     n: usize,
     k: usize,
 ) -> GeometryResult<Array2<f64>> {
-    let mut columns: Vec<Array1<f64>> = Vec::with_capacity(m.dim());
+    pivoted_projected_standard_basis(m, point, n, k, None)
+}
+
+/// The inner product a tangent-basis walk orthonormalizes under: the metric
+/// `aᵀ W b` when a metric is given, the ambient `aᵀ b` otherwise.
+fn tangent_walk_inner(
+    metric: Option<ArrayView2<'_, f64>>,
+    a: ArrayView1<'_, f64>,
+    b: ArrayView1<'_, f64>,
+) -> f64 {
+    match metric {
+        Some(w) => quad_form(w, a, b),
+        None => dot(a, b),
+    }
+}
+
+/// Gram–Schmidt with column pivoting over the projected standard basis.
+///
+/// Every step takes the candidate with the largest residual norm, normalizes
+/// it, and orthogonalizes all remaining candidates against it, for exactly
+/// `m.dim()` steps. No drop tolerance decides what counts as a direction. The
+/// candidates span the tangent space, so while fewer than `m.dim()` columns
+/// are chosen some residual is nonzero. Under the ambient inner product, with
+/// `project_tangent` the orthogonal projector `P`, the residuals after `j`
+/// steps are `R_j e_i` for the projector `R_j` onto the unchosen
+/// `(dim − j)`-dimensional part of the tangent space. So `Σ_i ‖R_j e_i‖² =
+/// tr R_j = dim − j`, and the chosen residual is at least `(n·k)^{-1/2}`: a
+/// genuine direction, never rounding. A largest residual that is not positive
+/// means the projection spans fewer than `m.dim()` directions, which is refused.
+fn pivoted_projected_standard_basis<M: RiemannianManifold + ?Sized>(
+    m: &M,
+    point: ArrayView1<'_, f64>,
+    n: usize,
+    k: usize,
+    metric: Option<ArrayView2<'_, f64>>,
+) -> GeometryResult<Array2<f64>> {
+    let mut candidates: Vec<Array1<f64>> = Vec::with_capacity(n * k);
     for col in 0..k {
         for row in 0..n {
             let mut e = Array2::<f64>::zeros((n, k));
             e[[row, col]] = 1.0;
-            let mut v = m.project_tangent(point, flatten(&e).view())?;
-            for q in &columns {
-                let proj = dot(q.view(), v.view());
-                v -= &(q * proj);
-            }
-            let nrm = dot(v.view(), v.view()).sqrt();
-            if nrm > 1.0e-10 {
-                columns.push(v / nrm);
-            }
-            if columns.len() == m.dim() {
-                let mut out = Array2::<f64>::zeros((m.ambient_dim(), m.dim()));
-                for j in 0..columns.len() {
-                    for i in 0..m.ambient_dim() {
-                        out[[i, j]] = columns[j][i];
-                    }
-                }
-                return Ok(out);
-            }
+            candidates.push(m.project_tangent(point, flatten(&e).view())?);
         }
     }
-    Ok(Array2::<f64>::zeros((m.ambient_dim(), columns.len())))
+    let dim = m.dim();
+    let mut out = Array2::<f64>::zeros((m.ambient_dim(), dim));
+    for j in 0..dim {
+        let mut best = 0usize;
+        let mut best_norm = 0.0_f64;
+        for (index, candidate) in candidates.iter().enumerate() {
+            let candidate_norm = tangent_walk_inner(metric, candidate.view(), candidate.view())
+                .max(0.0)
+                .sqrt();
+            if candidate_norm > best_norm {
+                best = index;
+                best_norm = candidate_norm;
+            }
+        }
+        if !(best_norm > 0.0) {
+            return Err(GeometryError::Singular(
+                "tangent basis: the projected standard basis spans fewer than dim() directions",
+            ));
+        }
+        let q = candidates.swap_remove(best) / best_norm;
+        for candidate in &mut candidates {
+            let proj = tangent_walk_inner(metric, q.view(), candidate.view());
+            *candidate -= &(&q * proj);
+        }
+        out.column_mut(j).assign(&q);
+    }
+    Ok(out)
 }
 
 /// Build a **metric-orthonormal** basis of the tangent space at `point`, i.e. a
@@ -599,11 +642,11 @@ pub(crate) fn projected_standard_basis_tangent<M: RiemannianManifold + ?Sized>(
 /// Euclidean-metric manifold like Grassmann, `W = I` and this coincides with
 /// [`projected_standard_basis_tangent`].)
 ///
-/// Same projected-standard-basis walk as the Euclidean routine, but every inner
-/// product is the metric inner product `⟨u,v⟩_W = uᵀ W v` (via
-/// [`quad_form`]): Gram–Schmidt projections subtract `⟨q,v⟩_W · q` and the
-/// retained columns are normalized by `‖v‖_W = sqrt(⟨v,v⟩_W)`, so the resulting
-/// `Q` is orthonormal *in the manifold's metric*.
+/// Same pivoted projected-standard-basis walk as the Euclidean routine, but
+/// every inner product is the metric inner product `⟨u,v⟩_W = uᵀ W v` (via
+/// [`quad_form`]): pivots are chosen by `‖v‖_W = sqrt(⟨v,v⟩_W)`, Gram–Schmidt
+/// projections subtract `⟨q,v⟩_W · q`, and the chosen columns are normalized by
+/// `‖v‖_W`, so the resulting `Q` is orthonormal *in the manifold's metric*.
 ///
 /// Concretely on `St(3, 2)` at `Y = [e₁, e₂]`, the vertical tangent
 /// `Δ = Y·[[0,−1],[1,0]]` has Euclidean norm² 2 but canonical-metric norm² 1, so
@@ -616,32 +659,7 @@ pub(crate) fn tangent_basis_metric_orthonormal<M: RiemannianManifold + ?Sized>(
     k: usize,
 ) -> GeometryResult<Array2<f64>> {
     let w = m.metric_tensor(point)?;
-    let mut columns: Vec<Array1<f64>> = Vec::with_capacity(m.dim());
-    for col in 0..k {
-        for row in 0..n {
-            let mut e = Array2::<f64>::zeros((n, k));
-            e[[row, col]] = 1.0;
-            let mut v = m.project_tangent(point, flatten(&e).view())?;
-            for q in &columns {
-                let proj = quad_form(w.view(), q.view(), v.view());
-                v -= &(q * proj);
-            }
-            let nrm = quad_form(w.view(), v.view(), v.view()).max(0.0).sqrt();
-            if nrm > 1.0e-10 {
-                columns.push(v / nrm);
-            }
-            if columns.len() == m.dim() {
-                let mut out = Array2::<f64>::zeros((m.ambient_dim(), m.dim()));
-                for j in 0..columns.len() {
-                    for i in 0..m.ambient_dim() {
-                        out[[i, j]] = columns[j][i];
-                    }
-                }
-                return Ok(out);
-            }
-        }
-    }
-    Ok(Array2::<f64>::zeros((m.ambient_dim(), columns.len())))
+    pivoted_projected_standard_basis(m, point, n, k, Some(w.view()))
 }
 
 /// Thin/compact Gram–Schmidt QR factorization `A = Q·R` for an `n×k` input
