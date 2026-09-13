@@ -2457,10 +2457,12 @@ pub struct FitArtifacts {
     ///
     /// The single fallback in the tree is
     /// [`UnifiedFitResult::beta_covariance_corrected`], which returns `Vb` for
-    /// `Vp` when `lambdas.is_empty()`. It is guarded, documented, and exact —
-    /// with no smoothing coordinates the correction `J Var(rho) Jᵀ` is
-    /// identically zero — and it `.flatten()`s to `None` when the conditional
-    /// covariance is also absent, which is the state a declined fit is in.
+    /// `Vp` when the fit has no smoothing coordinate, per-block or joint. It is
+    /// guarded, documented, and exact — with no smoothing coordinates the
+    /// correction `J Var(rho) Jᵀ` is identically zero; a joint-penalty family
+    /// with an empty per-block `lambdas` still has joint coordinates (#2898) —
+    /// and it `.flatten()`s to `None` when the conditional covariance is also
+    /// absent, which is the state a declined fit is in.
     ///
     /// # The trigger, as a checkable condition
     ///
@@ -3305,6 +3307,52 @@ mod assembly_inner_status_gate_tests {
         assert_eq!(fit.outer_iterations, 7);
         assert_eq!(fit.convergence_evidence().outer_iterations(), 7);
         assert_eq!(fit.outer_gradient_norm, Some(2e-7));
+    }
+
+    /// #2898: joint smoothing coordinates make the correction `J Var(ρ) Jᵀ`
+    /// nonzero, so a certified joint-penalty fit that persisted no corrected
+    /// covariance publishes conditional instead of substituting `Vb` for `Vp`.
+    #[test]
+    fn joint_penalty_fit_without_a_persisted_correction_publishes_conditional_2898() {
+        let mut parts = parts_with_inner_status(PirlsStatus::Converged);
+        parts.blocks[0].lambdas = Array1::zeros(0);
+        parts.log_lambdas = Array1::zeros(0);
+        parts.lambdas = Array1::zeros(0);
+        parts.covariance_conditional = Some(Array2::from_diag(&Array1::from_vec(vec![2.0, 3.0])));
+        if let Some(inference) = parts.inference.as_mut() {
+            inference.edf_by_block.clear();
+            inference.penalty_block_trace.clear();
+        }
+        parts.artifacts.joint_log_lambdas = Some(Array1::from_vec(vec![0.4, -1.3]));
+        parts.artifacts.criterion_certificate = Some(OuterCriterionCertificate {
+            stationarity: OuterStationarityCertificate::AnalyticGradient {
+                grad_norm: 2e-7,
+                projected_grad_norm: 2e-7,
+                bound: 1e-5,
+                rung: CertifiedRung {
+                    label: "solver-band".to_string(),
+                    derived_standard: false,
+                },
+            },
+            curvature: CurvatureEvidence::Measured { psd: true },
+            lambdas_railed: Vec::new(),
+            railed_facts: Vec::new(),
+            curvature_floor: None,
+        });
+        parts.outer_gradient_norm = Some(2e-7);
+        parts.outer_iterations = 7;
+
+        let fit = UnifiedFitResult::try_from_parts(parts)
+            .expect("a certified joint-penalty fit must mint");
+        assert!(fit.beta_covariance().is_some());
+        assert!(
+            fit.beta_covariance_corrected().is_none(),
+            "with joint smoothing coordinates Vb is not Vp"
+        );
+        assert_eq!(
+            fit.published_covariance_mode(),
+            InferenceCovarianceMode::Conditional
+        );
     }
 
     #[test]
@@ -4704,8 +4752,7 @@ impl UnifiedFitResult {
                     .and_then(|inf| inf.beta_covariance_corrected.as_ref())
             })
             .or_else(|| {
-                self.lambdas
-                    .is_empty()
+                has_no_smoothing_coordinate(&self.log_lambdas, &self.artifacts)
                     .then(|| self.beta_covariance())
                     .flatten()
             })
@@ -4749,7 +4796,9 @@ impl UnifiedFitResult {
     /// the corrected definition is a requirement, not a policy, and still
     /// refuses when the matrix is absent.
     pub fn published_covariance_mode(&self) -> InferenceCovarianceMode {
-        if self.beta_covariance_corrected().is_some() || self.lambdas.is_empty() {
+        if self.beta_covariance_corrected().is_some()
+            || has_no_smoothing_coordinate(&self.log_lambdas, &self.artifacts)
+        {
             InferenceCovarianceMode::SmoothingCorrected
         } else {
             InferenceCovarianceMode::Conditional
