@@ -3664,3 +3664,132 @@ fn gaussian_location_scale_wiggle_face_criterion_gradient_matches_central_differ
         "no coordinate was graded on a stable active face: {grades:?}"
     );
 }
+
+/// #2677 (former #2903): since f9d54b9d9 the Gaussian location-scale wiggle family declares its
+/// third information derivative, so the planner gives its armed Jeffreys objective an analytic
+/// outer Hessian. A wiggle refit that selects rho must then publish `V_c = V_cond + C`, with `C`
+/// positive semi-definite and its typed provenance, on the top level and in the inference block.
+#[test]
+fn gaussian_location_scale_wiggle_fit_publishes_smoothing_corrected_covariance_2677() {
+    let n = 96usize;
+    let mut records: Vec<csv::StringRecord> = Vec::with_capacity(n);
+    for i in 0..n {
+        let x = -2.0 + 4.0 * (i as f64) / ((n - 1) as f64);
+        let y = 0.8 * x + 0.3 * x * x.abs() + 0.1 * (9.7 * x + 0.3).sin();
+        records.push(csv::StringRecord::from(vec![
+            format!("{y:.17e}"),
+            format!("{x:.17e}"),
+        ]));
+    }
+    let data =
+        gam_data::encode_recordswith_inferred_schema(vec!["y".to_string(), "x".to_string()], records)
+            .expect("encode the wiggle witness dataset");
+    let config = FitConfig {
+        family: Some("gaussian".to_string()),
+        noise_formula: Some("1".to_string()),
+        ..FitConfig::default()
+    };
+    let materialized =
+        materialize("y ~ x", &data, &config).expect("gaussian location-scale materialization");
+    let FitRequest::GaussianLocationScale(request) = materialized.request else {
+        panic!("expected a Gaussian location-scale request");
+    };
+    let GaussianLocationScaleFitRequest {
+        data: req_data,
+        mut spec,
+        options,
+        kappa_options,
+        ..
+    } = request;
+    standardize_gaussian_spec_like_engine(&mut spec);
+    let wiggle_cfg = small_wiggle_cfg();
+    let pilot = fit_gaussian_location_scale_terms(req_data, spec.clone(), &options, &kappa_options)
+        .expect("wiggle witness pilot");
+    let basis = select_gaussian_location_scale_link_wiggle_basis_from_pilot(
+        &pilot,
+        &WiggleBlockConfig {
+            degree: wiggle_cfg.degree,
+            num_internal_knots: wiggle_cfg.num_internal_knots,
+            penalty_order: 2,
+            double_penalty: wiggle_cfg.double_penalty,
+        },
+        &wiggle_cfg.penalty_orders,
+    )
+    .expect("wiggle witness basis selection");
+    let solved = fit_gaussian_location_scale_terms_with_selected_wiggle(
+        req_data,
+        spec,
+        basis,
+        &options,
+        &kappa_options,
+    )
+    .expect("the wiggle witness refit must converge");
+    let fit = &solved.fit.fit;
+    eprintln!(
+        "[2677-WIGGLE] lambdas={:.6e} outer_iterations={}",
+        fit.lambdas, fit.outer_iterations
+    );
+    assert_eq!(
+        fit.block_states.len(),
+        3,
+        "the refit must be the three-block mean, log-sigma and wiggle family"
+    );
+    assert!(
+        fit.outer_iterations > 0 && !fit.lambdas.is_empty(),
+        "the refit must SELECT the wiggle smoothing strength; with a fixed lambda the corrected \
+         covariance is the conditional one by the zero-rho identity and this test proves nothing"
+    );
+
+    let conditional = fit
+        .covariance_conditional
+        .as_ref()
+        .expect("the wiggle refit must publish a conditional covariance");
+    let corrected = fit.covariance_corrected.as_ref().expect(
+        "#2677: a wiggle refit that selected rho must publish the smoothing-corrected covariance",
+    );
+    assert_eq!(
+        corrected.dim(),
+        conditional.dim(),
+        "the corrected covariance must live in the conditional covariance's coefficient frame"
+    );
+    let mut max_gain: f64 = 0.0;
+    for j in 0..conditional.nrows() {
+        let gain = corrected[[j, j]] - conditional[[j, j]];
+        let scale = conditional[[j, j]].abs().max(1e-12);
+        assert!(
+            gain >= -1e-9 * scale,
+            "corrected variance {} is below the conditional {} at coefficient {j}: the \
+             smoothing correction must be positive semi-definite",
+            corrected[[j, j]],
+            conditional[[j, j]]
+        );
+        max_gain = max_gain.max(gain / scale);
+    }
+    assert!(
+        max_gain > 0.0,
+        "the smoothing correction is identically zero on the diagonal; a carried correction must \
+         widen at least one marginal variance"
+    );
+
+    let inference = fit
+        .inference
+        .as_ref()
+        .expect("the wiggle refit must publish an inference block");
+    assert!(
+        inference.beta_covariance_corrected.is_some()
+            && inference.beta_standard_errors_corrected.is_some(),
+        "the saved-model path reads the inference copies of the corrected covariance and SEs"
+    );
+    assert!(
+        inference.smoothing_correction.is_some()
+            && matches!(
+                inference.smoothing_correction_method,
+                Some(
+                    gam_solve::model_types::SmoothingCorrectionMethod::FirstOrderIdentifiedSubspace {
+                        ..
+                    }
+                )
+            ),
+        "the correction term and its first-order provenance must be published together"
+    );
+}
