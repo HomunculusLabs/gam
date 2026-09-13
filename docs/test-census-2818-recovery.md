@@ -181,11 +181,9 @@ They do not execute unrelated stale local term-collection gauge tests.
 
 ## Curvature estimate support: #2687
 
-The unit tests in `crates/gam-geometry/src/curvature_estimand.rs` restore both
-historical pins through `profile_ci_walk`, without reinstating the removed
-`is_railed` convenience accessor. They moved there verbatim from
-`crates/gam-geometry/tests/curvature_support_recovery.rs` when #2899 narrowed
-`profile_ci_walk` to `pub(crate)`:
+`crates/gam-geometry/tests/curvature_support_recovery.rs` restores both historical
+pins through public `profile_ci_walk`, without reinstating the removed
+`is_railed` convenience accessor:
 
 | Historical identity | Current asserted contract |
 | --- | --- |
@@ -954,6 +952,28 @@ compiling. The surviving `build_duchon_basis_log_kappa_derivativeswith_collocati
 takes explicit centers and transform, so the cold-spec contract the file pins has no
 production subject. The body is removed again, and its identities are recorded in
 `docs/source-removal-changes.json`.
+
+### Two restored root files that did not compile at `9c266da56`
+
+The tip check at `9c266da56` failed on the `inference` and `perf_scale` binaries, with
+10 errors in each of two files restored from `c0a21b554^`:
+
+- `tests/inference/misc/conformal_coverage_quality.rs` (`a5daa52e4`):
+  `conformal_calibrator_pure_math_matches_split_conformal_definition` and
+  `conformal_is_honest_about_too_small_calibration_set` call
+  `ConformalCalibrator::from_residuals_and_scales`, `calibrated_interval` and
+  `ResponseBounds::UNBOUNDED`, which are `pub(crate)` in gam-predict. They also call
+  `certifies_finite()` and `q_hat()`, which no longer exist. The first test is removed:
+  `multiplier_is_exact_order_statistic` and `multiplier_does_not_interpolate` in
+  `crates/gam-predict/src/conformal.rs` pin the order statistic, and the file's two
+  end-to-end arms pin realized coverage through `predict_full_uncertainty_conformal`. The
+  second test moves into `conformal.rs`'s test module and reads the `q_hat` field. Both
+  root identities are recorded in `docs/source-removal-changes.json`.
+- `tests/perf_scale/misc/row_metric_loud_vs_loadbearing.rs` (`358e2a197`):
+  `AtomLensEntry::is_represented_not_used` and `is_used` were deleted by `d484a091a`. They
+  read `discrepancy >= 0.5` and `discrepancy <= 0.0`. The test already asserts
+  `loud_disc > 0.5` and `quiet_disc <= 0.0` on the live field, so the flag assertions are
+  dropped and the cross-over is asserted on the two discrepancies.
 
 ### Unsuffixed swept tests: files cut to their module doc
 

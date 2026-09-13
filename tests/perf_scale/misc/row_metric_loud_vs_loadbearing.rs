@@ -191,8 +191,8 @@ fn lens_flags_loud_represented_not_used_and_quiet_used() {
         quiet_e.presence
     );
     // Graceful degradation: with no Fisher, coupling / discrepancy are None, so
-    // there is no discrepancy to flag (the lens is optional, the behavioral axis
-    // simply absent).
+    // there is nothing to report (the lens is optional, the behavioral axis simply
+    // absent).
     assert!(loud_e.coupling.is_none() && loud_e.discrepancy.is_none());
     assert!(quiet_e.coupling.is_none() && quiet_e.discrepancy.is_none());
 
@@ -282,15 +282,20 @@ fn lens_flags_loud_represented_not_used_and_quiet_used() {
     );
 
     // The quiet load-bearing atom reads as USED: its behavioral coupling matches
-    // or exceeds its presence (non-positive discrepancy). Beside the loud atom's
-    // large positive discrepancy this is the decisive cross-over: SAME activation
-    // fit (both represented), opposite behavioral reading — selected solely by the
-    // additive Fisher report, never by the loss. This is the honest negative
-    // control for the metric design.
+    // or exceeds its presence (non-positive discrepancy).
     let quiet_disc = quiet.discrepancy.expect("quiet discrepancy available");
     assert!(
         quiet_disc <= 0.0,
         "quiet atom's coupling must match-or-exceed its presence (non-positive \
          discrepancy); got {quiet_disc}"
+    );
+
+    // Decisive cross-over: SAME activation fit (both represented), opposite
+    // behavioral reading — selected solely by the additive Fisher report, never
+    // by the loss. This is the honest negative control for the metric design.
+    assert!(
+        loud_disc > quiet_disc,
+        "the lens must separate represented-not-used (loud, {loud_disc}) from used \
+         (quiet, {quiet_disc})"
     );
 }

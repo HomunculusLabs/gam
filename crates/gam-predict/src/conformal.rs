@@ -370,4 +370,26 @@ mod tests {
                 .is_err()
         );
     }
+
+    #[test]
+    fn conformal_is_honest_about_too_small_calibration_set() {
+        // With n = 4 and α = 0.05, rank = ⌈5·0.95⌉ = 5 > 4, so the only honest
+        // multiplier is +∞ → an unbounded interval, never a finite under-covering
+        // one.
+        let calib = ConformalCalibrator::from_residuals_and_scales(
+            array![0.1, -0.4, 0.9, -0.2].view(),
+            array![1.0, 1.0, 1.0, 1.0].view(),
+            0.05,
+        )
+        .expect("valid");
+        assert_eq!(calib.q_hat, f64::INFINITY, "q̂ must be +∞ for n=4, α=0.05");
+
+        let mean = array![0.0, 5.0];
+        let scale = array![1.0, 2.0];
+        let (lower, upper) = calib
+            .calibrated_interval(&mean, &scale, ResponseBounds::UNBOUNDED)
+            .expect("interval");
+        assert!(lower.iter().all(|&v| v == f64::NEG_INFINITY));
+        assert!(upper.iter().all(|&v| v == f64::INFINITY));
+    }
 }
