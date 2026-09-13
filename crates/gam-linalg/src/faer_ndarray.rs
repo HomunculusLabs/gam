@@ -1617,6 +1617,15 @@ pub fn stream_weighted_crossprod_into<S1: Data<Elem = f64>, S2: Data<Elem = f64>
         }
         return;
     }
+    // A product the matmul dispatcher keeps sequential stays sequential whatever
+    // policy the caller passes. faer's parallel split of a small GEMM changes its
+    // summation order with the pool width, so a small fit's bits would follow
+    // `RAYON_NUM_THREADS` (#2627 thread_count_reproducibility).
+    let par = if matmul_parallelism(p, p, n) == Par::Seq {
+        Par::Seq
+    } else {
+        par
+    };
 
     if !should_use_faer_matmul(p, p, n) {
         // Tiny products: ndarray's own GEMM avoids faer setup overhead.

@@ -714,7 +714,7 @@ pub(crate) fn streaming_sparse_csc_xt_diag_x(
     }
 
     let chunk_rows = dense_materialization_chunk_rows(n, p);
-    let par = effective_global_parallelism();
+    let par = crate::faer_ndarray::matmul_parallelism(p, p, n);
     let mut x_chunk = Array2::<f64>::zeros((chunk_rows, p).f());
     let mut wx_chunk = Array2::<f64>::zeros((chunk_rows, p).f());
 
