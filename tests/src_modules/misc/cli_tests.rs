@@ -2533,12 +2533,12 @@ fn cli_bernoulli_marginal_slope_rejects_z_column_in_main_formula() {
         scale_dimensions: false,
         precompute_conformal: true,
         persistent_warm_start_root: None,
-        out: None,
+        out: Some(td.path().join("model.json")),
     })
     .expect_err("main formula should reject z-column reuse");
 
-    assert!(err.contains("reserves z column 'z'"));
-    assert!(err.contains("main formula"));
+    assert!(err.contains("reserves z column 'z'"), "{err}");
+    assert!(err.contains("main formula"), "{err}");
 }
 
 #[test]
@@ -2578,12 +2578,12 @@ fn cli_bernoulli_marginal_slope_rejects_z_column_in_slope_formula() {
         scale_dimensions: false,
         precompute_conformal: true,
         persistent_warm_start_root: None,
-        out: None,
+        out: Some(td.path().join("model.json")),
     })
     .expect_err("slope formula should reject z-column reuse");
 
-    assert!(err.contains("reserves z column 'z'"));
-    assert!(err.contains("slope_formula"));
+    assert!(err.contains("reserves z column 'z'"), "{err}");
+    assert!(err.contains("slope_formula"), "{err}");
 }
 
 #[test]
