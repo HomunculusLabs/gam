@@ -22,7 +22,7 @@
 //! advisory that exists on one surface only is a parity gap by that rule
 //! (issue #2470).
 //!
-//! The engine was already here — [`analyze_smooth_ownership`] and
+//! The engine was already here — `analyze_smooth_ownership` and
 //! [`smooth_term_feature_cols`] are this module's neighbours. Only the messages
 //! were stranded. Rendering stays with each surface: the CLI writes them to
 //! stderr with its own prefix, and nothing here knows about a terminal.

@@ -898,7 +898,7 @@ pub fn build_constant_curvature_basis(
 ///
 /// The match is exhaustive rather than wildcarded: a new strategy has to state
 /// its own radius law instead of silently inheriting a wrong one.
-pub fn constant_curvature_center_chart_radius2(
+pub(crate) fn constant_curvature_center_chart_radius2(
     data: ArrayView2<'_, f64>,
     feature_cols: &[usize],
     strategy: &CenterStrategy,
@@ -958,7 +958,7 @@ pub fn constant_curvature_center_chart_radius2(
 /// `max‖x‖²` over the term's feature columns of `data`, the other half of the
 /// evaluated pair set. Non-finite coordinates are skipped rather than poisoning
 /// the maximum (the basis build refuses them separately, by row and name).
-pub fn constant_curvature_data_chart_radius2(
+pub(crate) fn constant_curvature_data_chart_radius2(
     data: ArrayView2<'_, f64>,
     feature_cols: &[usize],
 ) -> f64 {

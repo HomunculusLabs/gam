@@ -272,7 +272,7 @@ pub struct SmoothStructureAnalysis {
 /// Compute the static hierarchical smooth-ownership decomposition from the smooth-term specs.
 ///
 /// `smoothspecs` is the same slice that `apply_global_smooth_identifiability` receives.
-pub fn analyze_smooth_ownership(smoothspecs: &[SmoothTermSpec]) -> SmoothStructureAnalysis {
+pub(crate) fn analyze_smooth_ownership(smoothspecs: &[SmoothTermSpec]) -> SmoothStructureAnalysis {
     let term_feature_cols: Vec<Vec<usize>> =
         smoothspecs.iter().map(smooth_term_feature_cols).collect();
 

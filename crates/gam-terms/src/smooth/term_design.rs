@@ -971,7 +971,7 @@ impl GlobalIdentifiabilityPlan {
 /// The identifiability chart a basis's own build applied, read off its metadata.
 ///
 /// This is `z_local` — the term-local half. After
-/// [`realize_smooth_collection_gauge`] runs, the metadata carries the
+/// `realize_smooth_collection_gauge` runs, the metadata carries the
 /// COMPOSITION `z_local · T`, so this must be read BEFORE the gauge composes,
 /// which is exactly where [`SmoothCollectionGauge::local_identifiability_transform`]
 /// is filled from (gam#2760).
@@ -1041,7 +1041,7 @@ pub struct RealizedCollectionGauge {
 /// realization.
 ///
 /// This is the ONLY operation that may choose RRQR/eigenvectors.  A later
-/// spatial-psi replay uses [`realize_smooth_collection_gauge`] with the chart
+/// spatial-psi replay uses `realize_smooth_collection_gauge` with the chart
 /// stored on [`SmoothCollectionGauge`]; differentiating or replaying freshly
 /// chosen vectors would differentiate a numerical coordinate convention rather
 /// than the statistical smooth (gam#2760).
@@ -1093,7 +1093,7 @@ fn derive_smooth_collection_coefficient_transform(
 /// The orthogonality the whole step is for is asserted here, at the same
 /// relative bar the collection has always used, so neither caller can produce a
 /// block that fails it and report success.
-pub fn realize_smooth_collection_gauge(
+pub(crate) fn realize_smooth_collection_gauge(
     design_local: DesignMatrix,
     gauge: &SmoothCollectionGauge,
     termname: &str,
@@ -1172,7 +1172,7 @@ pub struct CollectionGaugedTerm {
 ///
 /// This is the whole per-term tail of `apply_global_smooth_identifiability`,
 /// available to a caller that holds ONE term rather than a collection: the
-/// design through [`realize_smooth_collection_gauge`], the penalties through
+/// design through `realize_smooth_collection_gauge`, the penalties through
 /// `penalty_candidates_under_collection_gauge`, the local inequality rows
 /// through the same congruence, and the coefficient transform composed into the
 /// basis metadata so a later freeze carries it.

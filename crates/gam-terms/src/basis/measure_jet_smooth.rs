@@ -443,7 +443,7 @@ pub(crate) fn symmetric_pseudoinverse(
 /// Rank-adapted center values of the measure-jet energy's affine null space.
 ///
 /// The first column is the constant. The remaining columns are the supported
-/// ambient-linear directions returned by [`measure_jet_affine_head_transform`].
+/// ambient-linear directions returned by `measure_jet_affine_head_transform`.
 /// Using that transform makes the basis full-column-rank even when the centers
 /// lie on a lower-dimensional affine stratum of the ambient coordinates.
 fn measure_jet_affine_value_basis(
@@ -1235,7 +1235,7 @@ pub fn measure_jet_ln_range_window(
 ///
 /// A cloud whose kernel masses are equal at every scale gives `α` nothing to
 /// move, and the window collapses onto the spec's own `α`.
-pub fn measure_jet_alpha_window(
+pub(crate) fn measure_jet_alpha_window(
     data: ArrayView2<'_, f64>,
     spec: &MeasureJetBasisSpec,
 ) -> Result<(f64, f64), BasisError> {
@@ -1701,7 +1701,7 @@ pub(crate) fn project_symmetric_psd(
 /// Each level is projected onto the PSD cone for the same reason the fused
 /// [`measure_jet_energy_form`] is, and the projection is load-bearing HERE in a
 /// way it is not there — see the note at the return.
-pub fn measure_jet_energy_forms_per_scale(
+pub(crate) fn measure_jet_energy_forms_per_scale(
     centers: ArrayView2<'_, f64>,
     masses: ArrayView1<'_, f64>,
     band: &MeasureJetBand,
@@ -1848,7 +1848,7 @@ pub(crate) fn measure_jet_support_means(
 }
 
 /// Gaussian representer features `exp(−‖x − c‖²/(2ℓ²))` (n × m).
-pub fn measure_jet_design_matrix(
+pub(crate) fn measure_jet_design_matrix(
     data: ArrayView2<'_, f64>,
     centers: ArrayView2<'_, f64>,
     length_scale: f64,
@@ -1934,13 +1934,13 @@ fn measure_jet_design_log_length_jets(
 ///
 /// This is the LINEAR half of the null space. The realized head block is the
 /// whole affine null space `[1 | points·T]`; build it through
-/// [`measure_jet_affine_head_lift`] + [`measure_jet_affine_head_block`], which
+/// [`measure_jet_affine_head_lift`] + `measure_jet_affine_head_block`, which
 /// is what the design, the gauge and the null-component penalty all use. A
 /// linear-only head is a defect, not an economy: the global parametric
 /// orthogonalization removes ONE design direction, and if the term's null space
 /// has no constant to give up, the direction it takes comes out of the null
 /// space itself, leaving `d − 1` free linear directions instead of `d` (#2751).
-pub fn measure_jet_affine_head_transform(
+pub(crate) fn measure_jet_affine_head_transform(
     centers: ArrayView2<'_, f64>,
     masses: ArrayView1<'_, f64>,
 ) -> Array2<f64> {
@@ -2007,7 +2007,7 @@ pub fn measure_jet_affine_head_transform(
 
 /// Affine head lift `T_aff` (`(d+1) × (1 + head_rank)`) acting on the augmented
 /// point rows `[1 | x]`: column 0 is the constant, the rest are the supported
-/// ambient-linear directions of [`measure_jet_affine_head_transform`].
+/// ambient-linear directions of `measure_jet_affine_head_transform`.
 ///
 /// This — not the linear lift alone — is the energy's null space. The energy
 /// annihilates every AFFINE function of the centers exactly, constant included
@@ -2043,7 +2043,7 @@ pub fn measure_jet_affine_head_lift(
 /// Realize the affine head block `[1 | points] · T_aff` for the lift returned
 /// by [`measure_jet_affine_head_lift`]. A zero-column lift (multiscale mode,
 /// which carries no head) yields a zero-column block.
-pub fn measure_jet_affine_head_block(
+pub(crate) fn measure_jet_affine_head_block(
     points: ArrayView2<'_, f64>,
     lift: ArrayView2<'_, f64>,
 ) -> Array2<f64> {
@@ -2304,7 +2304,7 @@ pub(crate) fn realize_measure_jet_geometry(
 /// with fewer than `d + 1` points per cell, or a full-dimensional stratum with
 /// no separable perpendicular direction) — the caller then leaves `Var_input`
 /// disabled rather than invent a scale.
-pub fn measure_jet_input_noise_scale(
+pub(crate) fn measure_jet_input_noise_scale(
     data: ArrayView2<'_, f64>,
     centers: ArrayView2<'_, f64>,
 ) -> Result<Option<f64>, BasisError> {

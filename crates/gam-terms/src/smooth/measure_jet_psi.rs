@@ -111,7 +111,7 @@ pub(crate) fn measure_jet_psi_seed(mj: &crate::basis::MeasureJetBasisSpec) -> Ve
 /// is [`crate::basis::measure_jet_ln_range_window`]: the node-spacing floor and
 /// the feasibility ceiling the range bracket already derives (gam#2750). The
 /// penalty dial `α` is a density-normalization exponent, and its window is
-/// [`crate::basis::measure_jet_alpha_window`]: the range over which it still
+/// `crate::basis::measure_jet_alpha_window`: the range over which it still
 /// moves the relative weight of the outer centers (#2902). The `κ`-window
 /// machinery never applies to either.
 ///

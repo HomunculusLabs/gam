@@ -37,9 +37,8 @@ pub use scale_contract::{
 
 pub mod structure_analysis;
 use self::structure_analysis::smooth_has_frozen_identifiability;
-pub use self::structure_analysis::{
-    SmoothStructureAnalysis, analyze_smooth_ownership, smooth_term_feature_cols,
-};
+pub use self::structure_analysis::{SmoothStructureAnalysis, smooth_term_feature_cols};
+pub(crate) use self::structure_analysis::analyze_smooth_ownership;
 
 // The advisories that read the structure `structure_analysis` computes. They
 // lived in `gam-cli` with no counterpart on any other surface, so a smooth
@@ -65,7 +64,7 @@ pub use term_design::{
     build_planned_term_collection_design_inner_with_policy,
     build_term_collection_design_with_policy,
     orthogonality_relative_residual_for_design, place_term_in_collection_gauge,
-    realize_smooth_collection_gauge, smooth_intrinsic_parametric_feature_cols,
+    smooth_intrinsic_parametric_feature_cols,
     term_collection_has_anchored_bspline, term_collection_has_nonzero_anchor,
 };
 

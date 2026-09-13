@@ -3626,7 +3626,7 @@ pub(crate) const CONSTANT_CURVATURE_MIN_CHART_RADIUS2: f64 = 1e-8;
 /// ```
 ///
 /// which is the pre-#2716 formula with `R` taken over the right set. `R_c` comes
-/// from [`constant_curvature_center_chart_radius2`](crate::basis::constant_curvature_center_chart_radius2),
+/// from `constant_curvature_center_chart_radius2`,
 /// which bounds `max‖c‖²` per strategy WITHOUT materializing the centers.
 ///
 /// ## Why `R` and not the two walls separately
