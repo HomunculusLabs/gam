@@ -57,7 +57,9 @@
 
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
-use gam::test_support::reference::{Column, QualityPair, relative_l2, rmse, run_r};
+use gam::test_support::reference::{
+    Column, PairedFoldComparison, QualityPair, relative_l2, rmse, run_r,
+};
 use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
     load_csvwith_inferred_schema,
@@ -80,6 +82,86 @@ fn g_of_x(x: f64) -> f64 {
 /// Logistic CDF (inverse logit).
 fn inv_logit(z: f64) -> f64 {
     1.0 / (1.0 + (-z).exp())
+}
+
+/// The real-data arm's shared-slope weather model and its cutpoint-only null, on
+/// the stacked stopping-ratio frame. The cutpoint dummy is an intercept, so it
+/// opts out of the null-recovery ridge formula linear effects carry by default
+/// (b7b874a2a); the weather slopes keep it.
+const WINE_WEATHER_FORMULA: &str = "z ~ s_temp + h_temp + linear(thr2, double_penalty=false)";
+const WINE_NULL_FORMULA: &str = "z ~ linear(thr2, double_penalty=false)";
+
+/// The stacked stopping-ratio binomial `formula`, fit on the `train` vintages of
+/// the wine frame: its class probabilities at the `test` vintages, and its total
+/// EDF. Each vintage emits one binary row z = 1{Y = j} for every cutpoint j it
+/// reached (Y >= j), with the shared weather covariates and the cutpoint dummy
+/// thr2 = 1{j >= 2}. J = 3 means one cutpoint dummy (j = 1 baseline). The summed
+/// Bernoulli log-likelihood over these rows IS the stopping-ratio multinomial
+/// log-likelihood (chain-rule factorization), identical to the model
+/// VGAM::sratio fits.
+fn wine_stopping_ratio_probs(
+    formula: &str,
+    train: &[usize],
+    test: &[usize],
+    s_temp: &[f64],
+    h_temp: &[f64],
+    y: &[f64],
+) -> (Vec<[f64; 3]>, f64) {
+    let mut rows = Vec::new();
+    for &i in train {
+        for j in [1.0_f64, 2.0] {
+            if y[i] < j {
+                continue;
+            }
+            rows.push(csv::StringRecord::from(vec![
+                (if (y[i] - j).abs() < 0.5 { 1.0 } else { 0.0 }).to_string(),
+                s_temp[i].to_string(),
+                h_temp[i].to_string(),
+                (if j >= 2.0 { 1.0 } else { 0.0 }).to_string(),
+            ]));
+        }
+    }
+    let headers = ["z", "s_temp", "h_temp", "thr2"]
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<_>>();
+    let ds = encode_recordswith_inferred_schema(headers, rows).expect("encode stacked wine frame");
+    let colmap = ds.column_map();
+    let (s_col, h_col, thr2_col) = (colmap["s_temp"], colmap["h_temp"], colmap["thr2"]);
+    let cfg = FitConfig {
+        family: Some("binomial".to_string()),
+        ..FitConfig::default()
+    };
+    let result = fit_from_formula(formula, &ds, &cfg)
+        .expect("gam stacked stopping-ratio fit on wine vintages");
+    let FitResult::Standard(fit) = result else {
+        panic!("expected a standard binomial GAM fit for `{formula}`");
+    };
+    let edf = fit.fit.edf_total().expect("gam reports total edf");
+    // Conditional stopping probabilities q_j = P(Y = j | Y >= j) at each test
+    // vintage, then the class probabilities by the chain rule:
+    // P(1) = q1, P(2) = (1 - q1) q2, P(3) = (1 - q1)(1 - q2).
+    let stop_prob = |thr2: f64| -> Vec<f64> {
+        let mut grid = Array2::<f64>::zeros((test.len(), ds.headers.len()));
+        for (r, &i) in test.iter().enumerate() {
+            grid[[r, s_col]] = s_temp[i];
+            grid[[r, h_col]] = h_temp[i];
+            grid[[r, thr2_col]] = thr2;
+        }
+        let design = build_term_collection_design(grid.view(), &fit.resolvedspec)
+            .expect("rebuild the stacked design at held-out wine vintages");
+        design
+            .design
+            .apply(&fit.fit.beta)
+            .iter()
+            .map(|&e| inv_logit(e))
+            .collect()
+    };
+    let (q1, q2) = (stop_prob(0.0), stop_prob(1.0));
+    let probs: Vec<[f64; 3]> = (0..test.len())
+        .map(|r| [q1[r], (1.0 - q1[r]) * q2[r], (1.0 - q1[r]) * (1.0 - q2[r])])
+        .collect();
+    (probs, edf)
 }
 
 #[test]
@@ -501,16 +583,17 @@ fn gam_continuation_ratio_matches_vgam_sratio() {
 /// ordinal tool — fits the identical stopping-ratio likelihood and is DEMOTED to
 /// a match-or-beat baseline.
 ///
-/// Split: a deterministic train/test split (every 3rd surviving row held out).
-/// Both engines see the IDENTICAL train rows and predict the IDENTICAL test rows
-/// in the SAME order. Objective held-out metrics, computed in plain Rust on gam's
-/// own predictions:
-///   PRIMARY (objective, tool-free): gam's held-out multiclass LOG-LOSS beats
-///     the train-fitted cutpoint-only null model (`z ~ thr2` on the same stacked
-///     train frame), and its held-out ACCURACY is no lower than that null's.
-///   BASELINE (match-or-beat): gam's held-out accuracy >= VGAM's held-out
-///     accuracy minus a small margin, AND gam's held-out log-loss <= VGAM's
-///     held-out log-loss times a small slack.
+/// Objective held-out metrics, computed in plain Rust on gam's own predictions:
+///   PRIMARY (objective, tool-free): leaving one vintage out at a time over all
+///     priced vintages, gam's per-vintage multiclass LOG-LOSS is not RESOLVED
+///     worse than that of the cutpoint-only null model (`z ~ thr2`, fit on the
+///     same n - 1 vintages), paired per vintage; and on the split below gam's
+///     held-out ACCURACY is no lower than that null's.
+///   BASELINE (match-or-beat): on a deterministic train/test split (every 3rd
+///     surviving row held out), where both engines see the IDENTICAL train rows
+///     and predict the IDENTICAL test rows in the SAME order, gam's held-out
+///     accuracy >= VGAM's minus a small margin, AND gam's held-out log-loss <=
+///     VGAM's times a small slack.
 #[test]
 fn gam_continuation_ratio_matches_vgam_sratio_on_real_data() {
     init_parallelism();
@@ -584,114 +667,20 @@ fn gam_continuation_ratio_matches_vgam_sratio_on_real_data() {
     let test_h: Vec<f64> = test_rows.iter().map(|&i| h_temp[i]).collect();
     let test_y: Vec<f64> = test_rows.iter().map(|&i| y[i]).collect();
 
-    // ---- build gam's stacked stopping-ratio binomial frame on TRAIN -------
-    // For each train obs and each cutpoint j it reached (Y >= j), emit a binary
-    // row z = 1{Y == j} with shared covariates s_temp, h_temp and the cutpoint
-    // dummy thr2 = 1{j >= 2}. J=3 means one cutpoint dummy (j=1 baseline). The
-    // summed Bernoulli log-likelihood over these rows IS the stopping-ratio
-    // multinomial log-likelihood (chain-rule factorization), identical to the
-    // model VGAM::sratio fits.
-    let cutpoints = [1.0_f64, 2.0];
-    let mut sx_s = Vec::new();
-    let mut sx_h = Vec::new();
-    let mut sthr2 = Vec::new();
-    let mut sz = Vec::new();
-    for &gi in &train_rows {
-        for &j in &cutpoints {
-            if y[gi] < j {
-                continue;
-            }
-            sx_s.push(s_temp[gi]);
-            sx_h.push(h_temp[gi]);
-            sthr2.push(if j >= 2.0 { 1.0 } else { 0.0 });
-            sz.push(if (y[gi] - j).abs() < 0.5 { 1.0 } else { 0.0 });
-        }
-    }
-    let n_stack = sz.len();
-    assert!(
-        n_stack > train_rows.len(),
-        "stacked frame should have >train rows of conditional rows"
-    );
-
-    let headers = ["z", "s_temp", "h_temp", "thr2"]
-        .into_iter()
-        .map(String::from)
-        .collect::<Vec<_>>();
-    let rows = (0..n_stack)
-        .map(|r| {
-            csv::StringRecord::from(vec![
-                sz[r].to_string(),
-                sx_s[r].to_string(),
-                sx_h[r].to_string(),
-                sthr2[r].to_string(),
-            ])
-        })
-        .collect::<Vec<_>>();
-    let ds = encode_recordswith_inferred_schema(headers, rows).expect("encode stacked wine frame");
-    let colmap = ds.column_map();
-    let s_col = colmap["s_temp"];
-    let h_col = colmap["h_temp"];
-    let thr2_col = colmap["thr2"];
-    let n_headers = ds.headers.len();
-
-    // ---- fit gam on TRAIN: stacked binomial stopping-ratio ----------------
-    // Shared LINEAR weather slopes (s_temp + h_temp) plus the cutpoint dummy.
-    // n is small (real vintage data), so a parametric shared-slope predictor is
-    // the honest model; this is the same parallel-slope structure VGAM uses.
-    let cfg = FitConfig {
-        family: Some("binomial".to_string()),
-        ..FitConfig::default()
-    };
-    let result = fit_from_formula(
-        "z ~ s_temp + h_temp + linear(thr2, double_penalty=false)",
-        &ds,
-        &cfg,
-    )
-    .expect("gam stopping-ratio (stacked binomial) fit on wine train");
-    let FitResult::Standard(fit) = result else {
-        panic!("expected a standard binomial GAM fit");
-    };
-    let gam_edf = fit.fit.edf_total().expect("gam reports total edf");
-
-    // Helper: gam logit-scale eta = design * beta at given rows.
-    let gam_eta = |ss: &[f64], hs: &[f64], thr2s: &[f64]| -> Vec<f64> {
-        let m = ss.len();
-        let mut grid = Array2::<f64>::zeros((m, n_headers));
-        for r in 0..m {
-            grid[[r, s_col]] = ss[r];
-            grid[[r, h_col]] = hs[r];
-            grid[[r, thr2_col]] = thr2s[r];
-        }
-        let design = build_term_collection_design(grid.view(), &fit.resolvedspec)
-            .expect("rebuild gam design at wine test rows");
-        design.design.apply(&fit.fit.beta).to_vec()
-    };
-
-    // Conditional stopping probs q_j = P(Y=j | Y>=j) at each TEST row, then the
-    // unconditional class probs by the chain rule. For J=3:
-    //   P(1)=q1, P(2)=(1-q1)q2, P(3)=(1-q1)(1-q2).
+    // ---- gam on TRAIN, predicted at TEST ------------------------------------
+    // Shared LINEAR weather slopes (s_temp + h_temp) plus the cutpoint dummy on the
+    // stacked stopping-ratio frame. n is small (real vintage data), so a parametric
+    // shared-slope predictor is the honest model; this is the same parallel-slope
+    // structure VGAM uses.
     let n_test = test_rows.len();
-    let q1 = {
-        let thr2s = vec![0.0; n_test];
-        gam_eta(&test_s, &test_h, &thr2s)
-            .iter()
-            .map(|&e| inv_logit(e))
-            .collect::<Vec<f64>>()
-    };
-    let q2 = {
-        let thr2s = vec![1.0; n_test];
-        gam_eta(&test_s, &test_h, &thr2s)
-            .iter()
-            .map(|&e| inv_logit(e))
-            .collect::<Vec<f64>>()
-    };
-    let mut gam_test_probs: Vec<[f64; 3]> = Vec::with_capacity(n_test);
-    for r in 0..n_test {
-        let p1 = q1[r];
-        let p2 = (1.0 - q1[r]) * q2[r];
-        let p3 = (1.0 - q1[r]) * (1.0 - q2[r]);
-        gam_test_probs.push([p1, p2, p3]);
-    }
+    let (gam_test_probs, gam_edf) = wine_stopping_ratio_probs(
+        WINE_WEATHER_FORMULA,
+        &train_rows,
+        &test_rows,
+        &s_temp,
+        &h_temp,
+        &y,
+    );
 
     // ---- fit the SAME stopping-ratio likelihood in R (VGAM::vglm) ---------
     // ONE run_r call: every Column must be equal length. We pass the TRAIN rows
@@ -789,41 +778,20 @@ fn gam_continuation_ratio_matches_vgam_sratio_on_real_data() {
     let vgam_ll = log_loss(&ref_test_probs);
 
     // ---- train-fitted NULL stopping-ratio model: the informative-model floor --
-    // The cutpoint-only model `z ~ thr2`, fit on the SAME stacked train frame,
+    // The cutpoint-only model `z ~ thr2`, fit on the SAME train vintages,
     // reproduces the train tier frequencies and ignores the weather. A weather
     // model that carries real information must predict the held-out tiers better
     // than it does. The held-out majority class is NOT such a floor: it reads the
     // TEST labels, which no train-fitted model can know.
-    let null_result = fit_from_formula("z ~ linear(thr2, double_penalty=false)", &ds, &cfg)
-        .expect("gam cutpoint-only null stopping-ratio fit on wine train");
-    let FitResult::Standard(null_fit) = null_result else {
-        panic!("expected a standard binomial GAM fit for the cutpoint-only null model");
-    };
-    let null_q = |thr2: f64| -> Vec<f64> {
-        let mut grid = Array2::<f64>::zeros((n_test, n_headers));
-        for r in 0..n_test {
-            grid[[r, thr2_col]] = thr2;
-        }
-        let design = build_term_collection_design(grid.view(), &null_fit.resolvedspec)
-            .expect("rebuild null design at wine test rows");
-        design
-            .design
-            .apply(&null_fit.fit.beta)
-            .iter()
-            .map(|&e| inv_logit(e))
-            .collect()
-    };
-    let null_q1 = null_q(0.0);
-    let null_q2 = null_q(1.0);
-    let null_test_probs: Vec<[f64; 3]> = (0..n_test)
-        .map(|r| {
-            [
-                null_q1[r],
-                (1.0 - null_q1[r]) * null_q2[r],
-                (1.0 - null_q1[r]) * (1.0 - null_q2[r]),
-            ]
-        })
-        .collect();
+    let null_test_probs = wine_stopping_ratio_probs(
+        WINE_NULL_FORMULA,
+        &train_rows,
+        &test_rows,
+        &s_temp,
+        &h_temp,
+        &y,
+    )
+    .0;
     let null_acc = accuracy(&null_test_probs);
     let null_ll = log_loss(&null_test_probs);
 
@@ -841,7 +809,7 @@ fn gam_continuation_ratio_matches_vgam_sratio_on_real_data() {
     let probs_rmse_vs_ref = rmse(&gam_flat, &ref_flat);
 
     eprintln!(
-        "wine ordinal stopping-ratio held-out: n={n} n_train={n_train} n_stack={n_stack} \
+        "wine ordinal stopping-ratio held-out: n={n} n_train={n_train} \
          n_test={n_test} J={n_levels} gam_edf={gam_edf:.3} null_acc={null_acc:.4} null_logloss={null_ll:.4} \
          acc gam={gam_acc:.4} vgam={vgam_acc:.4} | logloss gam={gam_ll:.4} vgam={vgam_ll:.4} \
          (context: rel_l2 vs vgam={probs_rel_vs_ref:.4} rmse vs vgam={probs_rmse_vs_ref:.4})"
@@ -872,14 +840,47 @@ fn gam_continuation_ratio_matches_vgam_sratio_on_real_data() {
     );
 
     // ---- PRIMARY objective assertions: the weather model is informative ----
-    // Held-out log-loss must beat the train-fitted cutpoint-only null model. The
-    // floor rejects a wrong link direction or a flipped response label, both of
-    // which push held-out log-loss above the null's. Accuracy must not fall below
-    // the null's arg-max predictor either.
+    // Leave-one-vintage-out log-loss, paired against the cutpoint-only null. Every
+    // priced vintage is held out once; gam and the null are both fit on the other
+    // n - 1 vintages and score its tier, so the vintage-to-vintage swing cancels in
+    // the pair, and gam must not be RESOLVED worse than the null. A wrong link
+    // direction or a flipped response label loses to the null on nearly every
+    // vintage and is resolved worse. This replaces a point comparison on the 13
+    // split rows, which even the unpenalized VGAM fit clears by only 0.024: at
+    // 853ef3bd0 (MSI job 608674) gam 1.3365, null 1.3027, VGAM 1.2788. Accuracy
+    // must not fall below the null's arg-max predictor either.
+    let mut loo_gam_ll = Vec::with_capacity(n);
+    let mut loo_null_ll = Vec::with_capacity(n);
+    for held_out in 0..n {
+        let rest: Vec<usize> = (0..n).filter(|&i| i != held_out).collect();
+        let tier = (y[held_out].round() as usize).saturating_sub(1).min(2);
+        let gam_p = wine_stopping_ratio_probs(
+            WINE_WEATHER_FORMULA,
+            &rest,
+            &[held_out],
+            &s_temp,
+            &h_temp,
+            &y,
+        )
+        .0;
+        let null_p = wine_stopping_ratio_probs(
+            WINE_NULL_FORMULA,
+            &rest,
+            &[held_out],
+            &s_temp,
+            &h_temp,
+            &y,
+        )
+        .0;
+        loo_gam_ll.push(-(gam_p[0][tier].max(1e-12)).ln());
+        loo_null_ll.push(-(null_p[0][tier].max(1e-12)).ln());
+    }
+    let loo = PairedFoldComparison::new(&loo_gam_ll, &loo_null_ll, true);
+    eprintln!("{}", loo.report("polr_wine::loo_logloss_vs_null"));
     assert!(
-        gam_ll < null_ll,
-        "gam held-out log-loss does not beat the train-fitted cutpoint-only null model: \
-         gam={gam_ll:.4} null={null_ll:.4}"
+        !loo.gam_resolved_worse(),
+        "gam's leave-one-vintage-out log-loss is RESOLVED worse than the cutpoint-only null's\n{}",
+        loo.report("polr_wine::loo_logloss_vs_null")
     );
     assert!(
         gam_acc >= null_acc,
