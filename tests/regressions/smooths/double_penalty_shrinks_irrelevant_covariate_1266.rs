@@ -189,6 +189,10 @@ fn default_double_penalty_is_never_beaten_by_deleting_the_irrelevant_covariate_1
     // The supported smooth `s(x)` must NOT shrink out — sin(6x) is genuinely
     // wiggly, so its EDF clearly exceeds the 2-d null space on every draw.
     let mean_x = x_edf.iter().sum::<f64>() / x_edf.len() as f64;
+    println!(
+        "#1266 deletion face: at_face={at_face:?} interior={interior:?} beaten={} mean x edf={mean_x:.6}",
+        beaten.len()
+    );
     assert!(
         mean_x > 2.5,
         "supported smooth s(x) failed to recover the sin(6x) signal: mean x edf={mean_x:.6}, \
@@ -252,6 +256,10 @@ fn default_double_penalty_shrinks_irrelevant_covariate_edf_below_one() {
 
     let mean_z = z_edf.iter().sum::<f64>() / z_edf.len() as f64;
     let mean_x = x_edf.iter().sum::<f64>() / x_edf.len() as f64;
+    println!(
+        "#1266 row 23: mean z edf={mean_z:.6} (bar < 1.0) z={z_edf:?}; mean x edf={mean_x:.6} \
+         x={x_edf:?}; rho=[x bend, x null, z bend, z null] by seed={fitted_rhos:?}"
+    );
 
     assert!(
         mean_x > 2.5,
@@ -370,6 +378,10 @@ fn default_double_penalty_keeps_supported_slope_while_shrinking_unsupported() {
     let mean_slope = slopes.iter().sum::<f64>() / slopes.len() as f64;
     let mean_double = x2_double.iter().sum::<f64>() / x2_double.len() as f64;
     let mean_single = x2_single.iter().sum::<f64>() / x2_single.len() as f64;
+    println!(
+        "#1266 discriminator: mean x1 slope={mean_slope:.4} (truth 3.0); x2 edf double={mean_double:.6} \
+         single={mean_single:.6}"
+    );
 
     // SUPPORTED null space RETAINED: the genuine slope=3 trend survives (the
     // #1371 guard, now beside a second smooth — the shrink-out must NOT
