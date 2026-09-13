@@ -644,6 +644,25 @@ fn aitken_decoder_candidate(
     candidate
 }
 
+/// Null every revival proposal in `decoder` that no code in `codes` fires. A rejected
+/// proposal is dormant capacity, not a trained direction, and the plain epoch image nulls
+/// its own rejected proposals the same way.
+fn null_unfired_revivals(decoder: &mut Array2<f32>, revived_atoms: &[usize], codes: &[SparseCode]) {
+    let mut fired = vec![false; decoder.nrows()];
+    for code in codes {
+        for (&atom, &value) in code.indices.iter().zip(code.codes.iter()) {
+            if value != 0.0 {
+                fired[atom as usize] = true;
+            }
+        }
+    }
+    for &atom in revived_atoms {
+        if !fired[atom] {
+            decoder.row_mut(atom).fill(0.0);
+        }
+    }
+}
+
 /// The loss `‖X − C D‖² − ‖X‖²` of two decoders at the codes that assembled `eq`,
 /// each paired with the band its f32 rows resolve. Per atom the loss is
 /// `A_aa‖d_a‖² − d_a·b_a − d_a·g_a`, with `g_a = b_a − Σ_{b≠a} A_ab d_b`, and its
@@ -978,8 +997,10 @@ fn run_from_decoder(
         // of a fixed point the map would reach (job 640872: the torus K=8 decoder
         // residual falls at ~0.7 per epoch and is refused at 30 epochs). The measured rate
         // `r = ‖Δ_e‖/‖Δ_{e−1}‖` gives the candidate `D + r/(1 − r)·Δ`. The candidate is
-        // routed below and adopted only on a lower penalized loss, so the map is unchanged
-        // at a fixed point, where `Δ = 0`. Revival proposals have no trajectory and stay put.
+        // routed after the certificate check below, and adopted only for a state its plain
+        // image did not certify and only on a lower penalized loss. So the step can neither
+        // hold a certificate open nor raise the loss. Revival proposals have no trajectory
+        // and stay put.
         let mut frozen = vec![false; k];
         for &atom in &revived_atoms {
             frozen[atom] = true;
@@ -1024,39 +1045,11 @@ fn run_from_decoder(
             Some(&mut score_route_stats),
             &certified_codes,
         )?;
-        // Adopt the Aitken candidate only when its routed state has the lower penalized
-        // loss beyond both states' rounding, so the step never raises the loss the plain
-        // map lowers (#2283).
-        if let Some(candidate) = extrapolated {
-            let candidate_codes = route_and_code_retaining_descent(
-                x,
-                candidate.view(),
-                &scorer,
-                s,
-                config.code_ridge,
-                config.minibatch,
-                config.score_mode,
-                Some(&mut score_route_stats),
-                &certified_codes,
-            )?;
-            let (plain_loss, plain_band) =
-                penalized_objective(x, decoder.view(), &next_codes, config.code_ridge);
-            let (candidate_loss, candidate_band) =
-                penalized_objective(x, candidate.view(), &candidate_codes, config.code_ridge);
-            if candidate_loss + candidate_band < plain_loss - plain_band {
-                log::warn!(
-                    "[SAE epoch {epochs_run}] Aitken step adopted: penalized loss \
-                     {plain_loss:.9e} -> {candidate_loss:.9e}"
-                );
-                decoder = candidate;
-                next_codes = candidate_codes;
-            }
-        }
 
         let route_secs = epoch_start.elapsed().as_secs_f64() - refresh_secs;
 
         // Convergence-decision EV, computed from the FRESH post-normalisation codes.
-        let next_ev = explained_variance(x, &next_codes, decoder.view());
+        let mut next_ev = explained_variance(x, &next_codes, decoder.view());
         let improve = next_ev - certified_ev;
         let mut revived_mask = vec![false; k];
         for &atom in &revived_atoms {
@@ -1200,6 +1193,37 @@ fn run_from_decoder(
                 inner_tolerance: config.tolerance,
                 accepted_births,
             });
+        }
+        // The Aitken candidate is considered only for a state its plain image did not
+        // certify, so an accelerator can never hold a certificate open. It is adopted only
+        // when its routed state has the lower penalized loss beyond both states' rounding,
+        // so the step never raises the loss the plain map lowers (#2283).
+        if let Some(mut candidate) = extrapolated {
+            let candidate_codes = route_and_code_retaining_descent(
+                x,
+                candidate.view(),
+                &scorer,
+                s,
+                config.code_ridge,
+                config.minibatch,
+                config.score_mode,
+                Some(&mut score_route_stats),
+                &certified_codes,
+            )?;
+            let (plain_loss, plain_band) =
+                penalized_objective(x, decoder.view(), &next_codes, config.code_ridge);
+            let (candidate_loss, candidate_band) =
+                penalized_objective(x, candidate.view(), &candidate_codes, config.code_ridge);
+            if candidate_loss + candidate_band < plain_loss - plain_band {
+                log::warn!(
+                    "[SAE epoch {epochs_run}] Aitken step adopted: penalized loss \
+                     {plain_loss:.9e} -> {candidate_loss:.9e}"
+                );
+                null_unfired_revivals(&mut candidate, &revived_atoms, &candidate_codes);
+                decoder = candidate;
+                next_codes = candidate_codes;
+                next_ev = explained_variance(x, &next_codes, decoder.view());
+            }
         }
         codes = std::mem::take(&mut next_codes);
         current_ev = next_ev;
