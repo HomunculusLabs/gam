@@ -389,10 +389,10 @@ mod tests {
     /// fixture would not exercise the companions-off read.
     #[test]
     fn oblique_null_ridge_upper_edge_reaches_the_companions_off_curvature() {
-        let bend = array![[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 0.0]];
+        let bend: Array2<f64> = array![[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 0.0]];
         let v = array![6.0, 0.0, 1.0] / 37.0_f64.sqrt();
         let ridge = Array2::from_shape_fn((3, 3), |(i, j)| v[i] * v[j]);
-        let gram = array![[4.0, 0.5, 0.2], [0.5, 3.0, 0.1], [0.2, 0.1, 5.0]];
+        let gram: Array2<f64> = array![[4.0, 0.5, 0.2], [0.5, 3.0, 0.1], [0.2, 0.1, 5.0]];
         let switch_off = (gram[[2, 2]] / (v[2] * v[2])).ln() - log_gradient_resolution();
 
         let (lower, upper) =
@@ -420,9 +420,9 @@ mod tests {
     /// the shared read `nᵀGn`, so the edge is what a1fadc5d1 derived.
     #[test]
     fn complementary_null_ridge_keeps_the_shared_upper_edge() {
-        let bend = array![[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 0.0]];
-        let ridge = array![[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
-        let gram = array![[4.0, 0.5, 0.2], [0.5, 3.0, 0.1], [0.2, 0.1, 5.0]];
+        let bend: Array2<f64> = array![[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 0.0]];
+        let ridge: Array2<f64> = array![[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+        let gram: Array2<f64> = array![[4.0, 0.5, 0.2], [0.5, 3.0, 0.1], [0.2, 0.1, 5.0]];
         let expected = gram[[2, 2]].ln() - log_gradient_resolution();
 
         let (lower, upper) =
