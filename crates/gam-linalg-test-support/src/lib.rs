@@ -33,6 +33,9 @@
 //!
 //! [`no_densify_design`] wraps a dense array in an operator that panics if any
 //! consumer densifies it, turning a lazy-path regression into a test failure.
+//!
+//! [`dense_to_upper_csc`] builds the upper-triangle CSC storage the
+//! `sparse_exact` SPD routines read, for tests that feed them a dense matrix.
 
 pub mod fd_checker;
 pub mod numeric_derivative;
@@ -68,6 +71,7 @@ macro_rules! assert_central_difference_array {
     };
 }
 
+use faer::sparse::{SparseColMat, SymbolicSparseColMat};
 use gam_linalg::matrix::{DenseDesignMatrix, DenseDesignOperator, DesignMatrix, LinearOperator};
 use gam_runtime::resource::MatrixMaterializationError;
 use ndarray::{Array1, Array2, Axis, s};
@@ -561,6 +565,32 @@ pub fn no_densify_design(dense: Array2<f64>) -> DesignMatrix {
     DesignMatrix::from(DenseDesignMatrix::from(Arc::new(NoDensifyOperator {
         dense,
     })))
+}
+
+/// Upper-triangle CSC storage of a dense symmetric matrix, the input shape the
+/// `gam_linalg::sparse_exact` SPD routines read. Every entry `a[r, c]` with
+/// `r ≤ c` and `|a[r, c]| > 0` is kept, rows ascending within each column: the
+/// same storage gam-linalg's crate-private dense→sparse conversion builds at a
+/// zero tolerance.
+pub fn dense_to_upper_csc(matrix: &Array2<f64>) -> SparseColMat<usize, f64> {
+    let (nrows, ncols) = matrix.dim();
+    let row_limit = nrows.min(ncols);
+    let mut col_ptr = Vec::with_capacity(ncols + 1);
+    let mut row_idx = Vec::new();
+    let mut values = Vec::new();
+    col_ptr.push(0);
+    for col in 0..ncols {
+        for row in 0..(col + 1).min(row_limit) {
+            let value = matrix[[row, col]];
+            if value.abs() > 0.0 {
+                row_idx.push(row);
+                values.push(value);
+            }
+        }
+        col_ptr.push(row_idx.len());
+    }
+    let symbolic = SymbolicSparseColMat::<usize>::new_checked(nrows, ncols, col_ptr, None, row_idx);
+    SparseColMat::<usize, f64>::new(symbolic, values)
 }
 
 #[cfg(test)]

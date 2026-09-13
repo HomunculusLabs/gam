@@ -5806,7 +5806,7 @@ pub(crate) fn sparse_block_local_operator_cross_without_takahashi_matches_dense_
         [0.0, 0.3, 3.0, 0.4],
         [0.1, 0.0, 0.4, 2.5],
     ];
-    let h_sparse = gam_linalg::sparse_exact::dense_to_sparse_symmetric_upper(&h, 0.0).unwrap();
+    let h_sparse = gam_linalg_test_support::dense_to_upper_csc(&h);
     let factor =
         std::sync::Arc::new(gam_linalg::sparse_exact::factorize_sparse_spd(&h_sparse).unwrap());
     let sparse = SparseCholeskyOperator::new(factor, 0.0, h.nrows());
@@ -5841,7 +5841,7 @@ pub(crate) fn sparse_matrix_block_operator_cross_without_takahashi_matches_dense
         [0.0, 0.3, 3.0, 0.4],
         [0.1, 0.0, 0.4, 2.5],
     ];
-    let h_sparse = gam_linalg::sparse_exact::dense_to_sparse_symmetric_upper(&h, 0.0).unwrap();
+    let h_sparse = gam_linalg_test_support::dense_to_upper_csc(&h);
     let factor =
         std::sync::Arc::new(gam_linalg::sparse_exact::factorize_sparse_spd(&h_sparse).unwrap());
     let sparse = SparseCholeskyOperator::new(factor, 0.0, h.nrows());
@@ -5877,7 +5877,7 @@ pub(crate) fn sparse_matrix_block_operator_cross_without_takahashi_matches_dense
 #[test]
 pub(crate) fn sparse_takahashi_trace_hinv_product_pairs_symmetric_lookups() {
     let h = array![[4.0, 0.2, 0.1], [0.2, 3.0, 0.4], [0.1, 0.4, 2.5],];
-    let h_sparse = gam_linalg::sparse_exact::dense_to_sparse_symmetric_upper(&h, 0.0).unwrap();
+    let h_sparse = gam_linalg_test_support::dense_to_upper_csc(&h);
     let factor =
         std::sync::Arc::new(gam_linalg::sparse_exact::factorize_sparse_spd(&h_sparse).unwrap());
     let sfactor = gam_linalg::sparse_exact::factorize_simplicial(&h_sparse).unwrap();

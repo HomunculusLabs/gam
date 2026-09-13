@@ -11,6 +11,7 @@ repository = "https://github.com/SauersML/gam"
 path = "src/lib.rs"
 
 [dependencies]
+faer = "0.24.4"
 gam-linalg = { path = "../gam-linalg", version = "=0.3.157" }
 gam-runtime = { path = "../gam-runtime", version = "=0.3.157" }
 ndarray = { version = "0.17.2", features = ["serde", "rayon"] }

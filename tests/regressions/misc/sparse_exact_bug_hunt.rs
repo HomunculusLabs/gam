@@ -1,6 +1,7 @@
 use faer::Side;
 use gam::faer_ndarray::FaerCholesky;
-use gam::linalg::sparse_exact::{TakahashiInverse, dense_to_sparse_symmetric_upper, factorize_simplicial, factorize_sparse_spd, logdet_from_factor};
+use gam::linalg::sparse_exact::{TakahashiInverse, factorize_simplicial, factorize_sparse_spd, logdet_from_factor};
+use gam::test_support::dense_to_upper_csc;
 use ndarray::Array2;
 
 fn make_spd_from_banded(seed_shift: f64, n: usize) -> Array2<f64> {
@@ -37,8 +38,7 @@ fn dense_inverse_spd(a: &Array2<f64>) -> Array2<f64> {
 #[test]
 fn sparse_cholesky_reconstructs_random_spd_within_1e9() {
     let a = make_spd_from_banded(0.4, 8);
-    let a_sparse =
-        dense_to_sparse_symmetric_upper(&a, 0.0).expect("upper sparse conversion should succeed");
+    let a_sparse = dense_to_upper_csc(&a);
     let factor = factorize_sparse_spd(&a_sparse)
         .expect("sparse Cholesky factorization should succeed for SPD matrix");
     let reconstructed = gam::linalg::sparse_exact::assemble_sparse_factor_h_dense(&factor)
@@ -59,8 +59,7 @@ fn sparse_cholesky_reconstructs_random_spd_within_1e9() {
 #[test]
 fn sparse_cholesky_logdet_matches_dense_two_sum_log_diag_l() {
     let a = make_spd_from_banded(0.9, 7);
-    let a_sparse =
-        dense_to_sparse_symmetric_upper(&a, 0.0).expect("upper sparse conversion should succeed");
+    let a_sparse = dense_to_upper_csc(&a);
     let factor = factorize_sparse_spd(&a_sparse)
         .expect("sparse Cholesky factorization should succeed for SPD matrix");
     let sparse_logdet =
@@ -81,8 +80,7 @@ fn sparse_cholesky_logdet_matches_dense_two_sum_log_diag_l() {
 #[test]
 fn takahashi_inverse_diagonal_matches_dense_inverse_diagonal_random_spd() {
     let a = make_spd_from_banded(1.1, 9);
-    let a_sparse =
-        dense_to_sparse_symmetric_upper(&a, 0.0).expect("upper sparse conversion should succeed");
+    let a_sparse = dense_to_upper_csc(&a);
     let simplicial = factorize_simplicial(&a_sparse)
         .expect("simplicial sparse factorization should succeed for SPD matrix");
     let taka = TakahashiInverse::compute(&simplicial)

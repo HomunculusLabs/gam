@@ -1,15 +1,38 @@
 use faer::Side;
+use faer::sparse::{SparseColMat, SymbolicSparseColMat};
 use gam_linalg::faer_ndarray::{fast_ata, strict_symmetric_eigh, FaerCholesky};
 use gam_linalg::matrix::{FactorizedSystem, SymmetricMatrix};
 use gam_linalg::roundoff::accumulation_growth;
-use gam_linalg::sparse_exact::{
-    dense_to_sparse_symmetric_upper, factorize_sparse_spd_strict, logdet_from_factor,
-    solve_sparse_spd,
-};
+use gam_linalg::sparse_exact::{factorize_sparse_spd_strict, logdet_from_factor, solve_sparse_spd};
 use ndarray::{Array1, Array2};
 use proptest::prelude::*;
 
 const MAX_DIMENSION: usize = 6;
+
+/// Upper-triangle CSC of a dense symmetric matrix (`r ≤ c`, `|a[r, c]| > 0`, rows
+/// ascending), the storage `sparse_exact`'s SPD routines read. gam-linalg's own
+/// conversion is crate-private, and this integration test cannot dev-depend on
+/// gam-linalg-test-support without compiling gam-linalg twice.
+fn dense_to_upper_csc(matrix: &Array2<f64>) -> SparseColMat<usize, f64> {
+    let (nrows, ncols) = matrix.dim();
+    let row_limit = nrows.min(ncols);
+    let mut col_ptr = Vec::with_capacity(ncols + 1);
+    let mut row_idx = Vec::new();
+    let mut values = Vec::new();
+    col_ptr.push(0);
+    for col in 0..ncols {
+        for row in 0..(col + 1).min(row_limit) {
+            let value = matrix[[row, col]];
+            if value.abs() > 0.0 {
+                row_idx.push(row);
+                values.push(value);
+            }
+        }
+        col_ptr.push(row_idx.len());
+    }
+    let symbolic = SymbolicSparseColMat::<usize>::new_checked(nrows, ncols, col_ptr, None, row_idx);
+    SparseColMat::<usize, f64>::new(symbolic, values)
+}
 
 fn spd_case() -> impl Strategy<Value = (Array2<f64>, Array1<f64>)> {
     (
@@ -73,7 +96,7 @@ proptest! {
         let n = matrix.nrows();
         let condition = condition_number(&matrix);
         let dense_logdet = matrix.cholesky(Side::Lower).unwrap().logdet();
-        let sparse = dense_to_sparse_symmetric_upper(&matrix, 0.0).unwrap();
+        let sparse = dense_to_upper_csc(&matrix);
         let sparse_factor = factorize_sparse_spd_strict(&sparse).unwrap();
         let sparse_logdet = logdet_from_factor(&sparse_factor).unwrap();
 
@@ -127,7 +150,7 @@ proptest! {
             matrix[[index, n - 1]] = matrix[[index, 0]];
         }
         prop_assert!(SymmetricMatrix::Dense(matrix.clone()).factorize_spd().is_err());
-        let sparse = dense_to_sparse_symmetric_upper(&matrix, 0.0).unwrap();
+        let sparse = dense_to_upper_csc(&matrix);
         prop_assert!(factorize_sparse_spd_strict(&sparse).is_err());
     }
 
@@ -135,7 +158,7 @@ proptest! {
     fn sparse_spd_solve_recovers_x_with_condition_derived_error((matrix, expected) in spd_case()) {
         let n = matrix.nrows();
         let rhs = matrix.dot(&expected);
-        let sparse = dense_to_sparse_symmetric_upper(&matrix, 0.0).unwrap();
+        let sparse = dense_to_upper_csc(&matrix);
         let factor = factorize_sparse_spd_strict(&sparse).unwrap();
         let actual = solve_sparse_spd(&factor, &rhs).unwrap();
         let error = infinity_norm(&(&actual - &expected));
@@ -162,7 +185,7 @@ proptest! {
         });
         prop_assert!(SymmetricMatrix::Dense(matrix.clone()).factorize_spd().is_ok());
         prop_assert!(SymmetricMatrix::Dense(scaled.clone()).factorize_spd().is_ok());
-        let sparse = dense_to_sparse_symmetric_upper(&scaled, 0.0).unwrap();
+        let sparse = dense_to_upper_csc(&scaled);
         prop_assert!(factorize_sparse_spd_strict(&sparse).is_ok());
     }
 }

@@ -47,7 +47,7 @@ impl SparseExactFactor {
 /// This encoding is required by sparse SPD routines in this module that interpret
 /// entries as symmetric-upper storage and mirror off-diagonals when reconstructing
 /// dense diagnostics.
-pub fn dense_to_sparse_symmetric_upper(
+pub(crate) fn dense_to_sparse_symmetric_upper(
     matrix: &Array2<f64>,
     tol: f64,
 ) -> Result<SparseColMat<usize, f64>, LinalgError> {

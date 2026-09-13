@@ -3769,6 +3769,7 @@ name = "gam-linalg-test-support"
 version = "0.3.157"
 dependencies = [
  "approx",
+ "faer",
  "gam-linalg",
  "gam-runtime",
  "ndarray 0.17.2",
