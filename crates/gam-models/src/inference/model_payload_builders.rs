@@ -407,17 +407,13 @@ fn standard_conformal_substrates(
     family: &LikelihoodSpec,
     fit: &UnifiedFitResult,
     design: &TermCollectionDesign,
-) -> (
-    Option<crate::inference::full_conformal::GaussianJackknifePlusStats>,
-    Option<crate::inference::full_conformal::ExactFullConformalSubstrate>,
-) {
-    // #2633: these two substrates are ~94% of a saved Gaussian model at
-    // n=20,000 and grow with the training rows, to save ~5.6 ms of rebuild. A
-    // caller that keeps its training data, or never asks for a conformal
-    // interval, can decline them; see `FitConfig::precompute_conformal` for the
-    // measured trade-off and why the default is to keep them.
+) -> Option<crate::inference::full_conformal::ExactFullConformalSubstrate> {
+    // #2633: the substrate grows with the training rows. A caller that keeps
+    // its training data, or never asks for a conformal interval, can decline it;
+    // see `FitConfig::precompute_conformal` for the measured trade-off and why
+    // the default is to keep it.
     if fit_config.precompute_conformal == Some(false) {
-        return (None, None);
+        return None;
     }
     let expectile = fit_config.family.as_deref().is_some_and(|family| {
         let family = family.trim().to_ascii_lowercase();
@@ -430,40 +426,22 @@ fn standard_conformal_substrates(
         || fit_config.flexible_link
         || design.affine_offset.iter().any(|value| *value != 0.0)
     {
-        return (None, None);
+        return None;
     }
-    let Some(y) = response_for_standard_payload(formula, dataset) else {
-        return (None, None);
-    };
-    let Ok(x) = design.design.try_to_dense_arc("standard conformal design") else {
-        return (None, None);
-    };
-    let Some(normal_matrix) = fit.penalized_hessian() else {
-        return (None, None);
-    };
+    let y = response_for_standard_payload(formula, dataset)?;
+    let x = design.design.try_to_dense_arc("standard conformal design").ok()?;
+    let normal_matrix = fit.penalized_hessian()?;
     if x.nrows() != y.len()
         || normal_matrix.nrows() != x.ncols()
         || normal_matrix.ncols() != x.ncols()
     {
-        return (None, None);
+        return None;
     }
     let weights = Array1::<f64>::ones(y.len());
-    // Either substrate may legitimately decline this design (rank, shape, or a
+    // The substrate may legitimately decline this design (rank, shape, or a
     // non-invertible normal matrix). `None` is the contract, but the reason is
     // what explains a fit that silently ships without conformal intervals.
-    let jackknife = match crate::inference::full_conformal::GaussianJackknifePlusStats::from_design_unit_weight_normal_matrix(
-        x.as_ref(),
-        &y,
-        &weights,
-        normal_matrix,
-    ) {
-        Ok(stats) => Some(stats),
-        Err(reason) => {
-            log::debug!("jackknife+ conformal substrate unavailable: {reason}");
-            None
-        }
-    };
-    let full = match crate::inference::full_conformal::ExactFullConformalSubstrate::from_design_unit_weight_normal_matrix(
+    match crate::inference::full_conformal::ExactFullConformalSubstrate::from_design_unit_weight_normal_matrix(
         x.as_ref(),
         &y,
         &weights,
@@ -474,8 +452,7 @@ fn standard_conformal_substrates(
             log::debug!("exact full-conformal substrate unavailable: {reason}");
             None
         }
-    };
-    (jackknife, full)
+    }
 }
 
 /// Assemble the one canonical saved payload for a standard formula fit.
@@ -530,7 +507,7 @@ pub fn assemble_standard_payload(
         FittedEstimator::Likelihood => family.name().to_string(),
         FittedEstimator::Expectile { tau } => format!("expectile({tau})"),
     };
-    let (gaussian_jackknife_plus, full_conformal) =
+    let full_conformal =
         standard_conformal_substrates(&formula, dataset, fit_config, &family, &fit, &design);
     let latent_cloglog_state = if family.is_latent_cloglog() {
         Some(saved_latent_cloglog_state_from_fit(&fit).ok_or_else(|| {
@@ -578,7 +555,6 @@ pub fn assemble_standard_payload(
     payload.offset_column = fit_config.offset_column.clone();
     payload.noise_offset_column = fit_config.noise_offset_column.clone();
     payload.weight_column = fit_config.weight_column.clone();
-    payload.gaussian_jackknife_plus = gaussian_jackknife_plus;
     payload.full_conformal = full_conformal;
     Ok(payload)
 }

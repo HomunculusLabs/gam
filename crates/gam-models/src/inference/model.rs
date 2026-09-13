@@ -675,27 +675,11 @@ pub struct FittedModelPayload {
     pub resolved_slopespec: Option<TermCollectionSpec>,
     #[serde(default)]
     pub resolved_slopespecs: Option<Vec<TermCollectionSpec>>,
-    /// Precomputed exact Gaussian-identity jackknife+ statistics (#942).
-    ///
-    /// Populated *only* for a standard Gaussian-identity model fit with unit
-    /// prior weights, where the closed-form Sherman–Morrison leave-one-out
-    /// substrate gives a distribution-free prediction interval with no held-out
-    /// fold, targeting ≈level coverage at α = 1 − level with the finite-sample
-    /// floor ≥ 2·level − 1 (Barber et al. 2021, ≥ 1 − 2α; see the pyffi
-    /// route for the calibration decision, #1546). When `Some`, `predict(interval=level)`
-    /// auto-routes through it (the MAGIC default); when `None` — any other
-    /// family/link, reweighted rows, or an older payload — predict falls back
-    /// to the model-based posterior band and labels the provenance honestly.
-    /// `#[serde(default)]` so pre-existing models deserialize as: no jackknife+
-    /// substrate available.
-    #[serde(default)]
-    pub gaussian_jackknife_plus:
-        Option<crate::inference::full_conformal::GaussianJackknifePlusStats>,
     /// Precomputed substrate for the EXACT Gaussian-identity full-conformal set
     /// (#942 Layer 1 + the frozen-ρ self-diagnostic).
     ///
-    /// Populated under the SAME eligibility as `gaussian_jackknife_plus`
-    /// (Gaussian-identity, unit prior weights, offset-free, no link wiggle). It
+    /// Populated only for a standard Gaussian-identity fit with unit prior
+    /// weights, no offset and no link wiggle. It
     /// persists the training design + response + frozen penalty `Sλ` so the
     /// prediction set that is exact GIVEN `Sλ` (a union of intervals, valid for
     /// any penalized smooth) can be replayed per test point — one Cholesky each,
@@ -705,9 +689,9 @@ pub struct FittedModelPayload {
     /// only per row where the surfaced frozen-ρ certificate accepts (under the
     /// global-ρ grid-Lipschitz assumption). `None` for any
     /// ineligible model or an older payload, in which case the exact-set predict
-    /// path errors with a clear message and the caller uses jackknife+ or the
-    /// posterior band. `#[serde(default)]` so pre-existing models deserialize as
-    /// no exact substrate available.
+    /// path errors with a clear message and the caller uses split conformal or
+    /// the posterior band. `#[serde(default)]` so pre-existing models deserialize
+    /// as no exact substrate available.
     #[serde(default)]
     pub full_conformal: Option<crate::inference::full_conformal::ExactFullConformalSubstrate>,
 }
@@ -950,7 +934,6 @@ impl FittedModelPayload {
             resolved_termspec_noise: None,
             resolved_slopespec: None,
             resolved_slopespecs: None,
-            gaussian_jackknife_plus: None,
             full_conformal: None,
         }
     }

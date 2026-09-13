@@ -7119,5 +7119,25 @@
     ],
     "reason": "#2080: the SAE criterion's gauge-deflation reversal guard refused a fit once the per-row count of unit-stiffness evidence directions reversed direction, at an amplitude above max(level/4, 2), more than k·(SAE_ATOM_COLLAPSE_RESEED_BUDGET + SAE_DICTIONARY_COCOLLAPSE_RESEED_BUDGET + 1) + 1 times. It changed no criterion value: its only effects were its own anchor, drift-sign and reversal fields and the refusal, and its own doc records that each deflated direction contributes log 1 = 0. The criterion prices ½log|A| from its exact observed-information classification, and the outer terminal certificate decides convergence. On a threshold gate a logit crossing the floor moves the count, so the guard aborted outer fits over bookkeeping. The guard, its three term fields with their resets and clone lines, the zoo report column, the two unit tests that pinned its budget arithmetic, and the classifier assert on its error text are deleted.",
     "evidence": "At 2b452bf5d, git grep -n -w record_criterion_gauge_deflation_count over crates finds the definition (construction_quasi_laplace.rs:584), its one production call (:467), the calls inside the two deleted tests in manifold/tests.rs, and doc mentions in gam-solve arrow_schur/factorization.rs:454 and arrow_schur/tests.rs:998, reworded here. git grep -w over crates and python for expected_criterion_gauge_deflated_directions, criterion_gauge_deflation_reanchors and criterion_gauge_deflation_last_delta_sign finds only term.rs, construction.rs, outer_objective.rs, structure_harvest.rs, structure_harvest/tests.rs, tests_zoo_micro_local.rs and the deleted tests. The published loss.criterion_gauge_deflated_directions diagnostic is kept."
+  },
+  {
+    "base": "a9eece11aefeefdecb021236c6f2f52eddb1ee21",
+    "items": [
+      "crates/gam-models/src/fit_orchestration/materialize/tests.rs:fn:precompute_conformal_false_drops_both_substrates_2633",
+      "crates/gam-models/src/inference/full_conformal.rs:fn:beta",
+      "crates/gam-models/src/inference/full_conformal.rs:fn:from_design_and_normal_matrix",
+      "crates/gam-models/src/inference/full_conformal.rs:fn:from_design_unit_weight_normal_matrix",
+      "crates/gam-models/src/inference/full_conformal.rs:fn:interval",
+      "crates/gam-models/src/inference/full_conformal.rs:fn:jackknife_plus_interval",
+      "crates/gam-models/src/inference/full_conformal.rs:fn:n",
+      "crates/gam-models/src/inference/full_conformal.rs:fn:new",
+      "crates/gam-models/src/inference/full_conformal.rs:fn:p",
+      "crates/gam-models/src/inference/full_conformal.rs:struct:GaussianJackknifePlusStats",
+      "crates/gam-models/src/inference/full_conformal.rs:struct:JackknifePlusInterval",
+      "crates/gam-pyffi/src/manifold/geometry_ffi.rs:fn:predict_encoded_table_jackknife_plus_impl",
+      "crates/gam-pyffi/src/manifold/geometry_ffi.rs:fn:predict_table_jackknife_plus"
+    ],
+    "reason": "SPEC rules 6 and 25 (#2899 row O17). Since 13df3ae51 gamfit's one conformal route runs the exact full-conformal set or split conformal, the same routes `gam predict --conformal` runs (baf308726), so the jackknife+ route had no caller, yet every eligible Gaussian-identity fit still factored and persisted GaussianJackknifePlusStats. The stats type with new, from_design_unit_weight_normal_matrix, from_design_and_normal_matrix, n, p, beta and interval, jackknife_plus_interval, JackknifePlusInterval, FittedModelPayload::gaussian_jackknife_plus, its producer arm and the pyffi predict_table_jackknife_plus route are deleted. The same-named n, p, interval, new and from_design_unit_weight_normal_matrix declarations on ExactFullConformalSubstrate and the other full_conformal.rs types survive. The #2633 opt-out test is restated for the one remaining substrate as precompute_conformal_false_drops_the_full_conformal_substrate_2633.",
+    "evidence": "At the base (after 35e4866d2 deleted gaussian_jackknife_plus), git grep -n -w GaussianJackknifePlusStats, jackknife_plus_interval, JackknifePlusInterval, predict_encoded_table_jackknife_plus_impl and predict_table_jackknife_plus over the repository finds them only in crates/gam-models/src/inference/{full_conformal.rs, model.rs, model_payload_builders.rs}, crates/gam-models/src/fit_orchestration/materialize/tests.rs and crates/gam-pyffi/src/manifold/geometry_ffi.rs, and gamfit no longer calls predict_table_jackknife_plus after 13df3ae51."
   }
 ]

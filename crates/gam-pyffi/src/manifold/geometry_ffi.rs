@@ -4981,8 +4981,6 @@ fn rust_extension(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(ctn_required_fit_columns, module)?)?;
     module.add_function(wrap_pyfunction!(required_model_columns, module)?)?;
     module.add_function(wrap_pyfunction!(predict_table_conformal, module)?)?;
-    // #1054: exact Gaussian jackknife+ conformal intervals (no calibration fold).
-    module.add_function(wrap_pyfunction!(predict_table_jackknife_plus, module)?)?;
     // #1098: exact Gaussian full-conformal prediction set (no calibration fold).
     module.add_function(wrap_pyfunction!(predict_table_full_conformal, module)?)?;
     // #1057: posterior-predictive replicate sampling from the fitted model.
@@ -7359,8 +7357,8 @@ fn predict_dataset_with_options_impl(
         point_shape: model_class.point_shape(),
         family: family_link_kind(&model_likelihood_spec(model)).to_string(),
         // The plain dataset predict path returns the model-based credible /
-        // predictive band (or no interval at all); the jackknife+ provenance
-        // tag is only attached by the dedicated full-conformal predict entry.
+        // predictive band (or no interval at all); a conformal provenance tag
+        // is only attached by the dedicated conformal predict entries.
         interval_method: None,
         // Result-owned provenance (#2296): both fields come from what the
         // evaluator reports it consumed, never from the request string. The
@@ -7713,130 +7711,6 @@ fn predict_encoded_table_conformal_impl(
     .map_err(|err| format!("failed to serialize conformal prediction payload: {err}"))
 }
 
-/// #1054 Exact Gaussian jackknife+ conformal intervals — no calibration fold.
-///
-/// Reads the `GaussianJackknifePlusStats` precomputed at fit time (only
-/// available for Gaussian-identity, unit-weight, offset-free models without a
-/// link wiggle), builds the test design from the saved `resolved_termspec`,
-/// and calls `stats.interval(x_*, alpha)` per test row. Returns the same
-/// column schema as the model-based predict path so Python can shape-route
-/// through the existing machinery.
-///
-/// Falls back with a clear error when the model is ineligible (non-Gaussian
-/// family, scan-routed model, link wiggle, weighted training data, or an older
-/// serialised payload that pre-dates the jackknife+ precomputation).
-fn predict_encoded_table_jackknife_plus_impl(
-    model_bytes: &[u8],
-    source: EncodedDataset,
-    conformal_level: f64,
-) -> Result<String, String> {
-    if !(conformal_level > 0.0 && conformal_level < 1.0) {
-        return Err(format!(
-            "conformal_level must be in (0, 1), got {conformal_level}"
-        ));
-    }
-    let model = load_model_impl(model_bytes)?;
-    // Reject the scan path immediately — it never builds a dense design, so the
-    // jackknife+ stats are absent and the termspec-based design reconstruction
-    // below would not apply.
-    if scan_introspection(&model).map_err(String::from)?.is_some() {
-        return Err(
-            "jackknife+ conformal intervals require a penalised-spline (B-spline) model; \
-             this model was fit by the exact O(n) state-space scan. Refit with \
-             double_penalty=true to obtain the standard model that carries jackknife+ stats."
-                .to_string(),
-        );
-    }
-    let stats = model.gaussian_jackknife_plus.as_ref().ok_or_else(|| {
-        "jackknife+ conformal intervals require a Gaussian-identity GLM trained without \
-         prior weights, offsets, or a link wiggle, AND a fit that precomputed the \
-         substrate. This model carries none (non-Gaussian family, weighted data, offset, \
-         link wiggle, an older serialised payload, or precompute_conformal=false at fit \
-         time). Use Model.predict_conformal(calibration=...) for split-conformal intervals \
-         on arbitrary families."
-            .to_string()
-    })?;
-    if !matches!(model.predict_model_class(), PredictModelClass::Standard) {
-        return Err(format!(
-            "jackknife+ conformal prediction supports only standard GAM models; got '{}'",
-            prediction_model_class_label(&model)
-        ));
-    }
-    // Build test design via the frozen resolved_termspec so column ordering
-    // and spline knots are identical to the training design the stats were
-    // computed from.
-    let dataset = dataset_with_model_schema_from_encoded(&model, &source)?;
-    let col_map = dataset.column_map();
-    let spec = gam::families::survival::predict::resolve_termspec_for_prediction(
-        &model.resolved_termspec,
-        model.training_headers.as_ref(),
-        &col_map,
-        "resolved_termspec",
-    )?;
-    let design = gam::terms::smooth::build_term_collection_design(dataset.values.view(), &spec)
-        .map_err(|err| format!("jackknife+ conformal: failed to build test design: {err}"))?;
-    let x_test = design
-        .design
-        .try_to_dense_by_chunks("jackknife+ conformal test design")?;
-    let n_test = x_test.nrows();
-    if x_test.ncols() != stats.p() {
-        return Err(format!(
-            "jackknife+ conformal: test design has {} columns but the stored stats have p={}; \
-             the model may need to be refit",
-            x_test.ncols(),
-            stats.p()
-        ));
-    }
-    // Plug-in mean (= beta-hat @ x_star for the Gaussian-identity model); we
-    // read it from the stored stats' beta directly to avoid touching the
-    // predictor stack.
-    // The jackknife+ theorem (Barber et al. 2021) guarantees
-    // P(Y_* ∈ Ĉ_α) ≥ 1 − 2α, while the set built at parameter α delivers
-    // ≈ 1 − α marginal coverage on exchangeable data in practice. Running at
-    // α = (1 − level)/2 to make the worst-case bound read "≥ level" was
-    // measured to systematically over-cover at (1 + level)/2 (#1546), so this
-    // path TARGETS the requested level with α = 1 − conformal_level — and
-    // every claim surface must then state the honest finite-sample floor at
-    // this setting, 1 − 2α = 2·level − 1, never "≥ level" (the theorem does
-    // not deliver that here).
-    let alpha = 1.0 - conformal_level;
-    let mut mean_vec = Vec::with_capacity(n_test);
-    let mut lower_vec = Vec::with_capacity(n_test);
-    let mut upper_vec = Vec::with_capacity(n_test);
-    for i in 0..n_test {
-        let x_star = x_test.row(i).to_owned();
-        let iv = stats
-            .interval(&x_star, alpha)
-            .map_err(|e| format!("jackknife+ conformal at row {i}: {e}"))?;
-        mean_vec.push(x_star.dot(stats.beta()));
-        lower_vec.push(iv.lo);
-        upper_vec.push(iv.hi);
-    }
-    let mut columns = BTreeMap::<String, Vec<f64>>::new();
-    // Identity link: the plug-in response and posterior mean coincide exactly.
-    columns.insert("linear_predictor_plugin".to_string(), mean_vec.clone());
-    columns.insert("mean_plugin".to_string(), mean_vec.clone());
-    columns.insert("posterior_mean".to_string(), mean_vec);
-    columns.insert("posterior_mean_lower".to_string(), lower_vec);
-    columns.insert("posterior_mean_upper".to_string(), upper_vec);
-    serde_json::to_string(&PredictionPayload {
-        columns,
-        model_class: prediction_model_class_label(&model),
-        point_column: model.predict_model_class().point_column(),
-        point_shape: model.predict_model_class().point_shape(),
-        family: family_link_kind(&model_likelihood_spec(&model)).to_string(),
-        interval_method: Some(format!(
-            "jackknife+ targeting {:.0}% coverage (distribution-free finite-sample \
-             guarantee ≥{:.0}%; Barber et al. 2021, ≥ 1 − 2α)",
-            conformal_level * 100.0,
-            (2.0 * conformal_level - 1.0).max(0.0) * 100.0
-        )),
-        covariance_source: None,
-        point_covariance_source: None,
-    })
-    .map_err(|err| format!("failed to serialize jackknife+ prediction payload: {err}"))
-}
-
 /// #1098 Gaussian full-conformal prediction set at frozen `Sλ` — no
 /// calibration fold.
 ///
@@ -7877,8 +7751,8 @@ fn predict_encoded_table_full_conformal_impl(
 /// Full-conformal prediction intervals at frozen smoothing parameters — no
 /// held-out calibration fold required (#1098 / #942 Layer 1).
 ///
-/// Routes `predict(interval='full_conformal')` for Gaussian-identity models to
-/// the `ExactFullConformalSubstrate` precomputed at fit time. The set is exact
+/// Routes `predict(interval='conformal')` without a calibration fold to the
+/// `ExactFullConformalSubstrate` precomputed at fit time. The set is exact
 /// given the frozen `Sλ`; the distribution-free finite-sample
 /// ≥`conformal_level` marginal-coverage theorem additionally requires the
 /// symmetric ρ-re-selecting fit and is certified per row only where the
@@ -7887,7 +7761,7 @@ fn predict_encoded_table_full_conformal_impl(
 /// `predict_table` plus that certificate column.
 ///
 /// Raises a descriptive Python exception for ineligible models (non-Gaussian,
-/// weighted, scan-routed, …) directing the user to `predict_conformal`.
+/// weighted, scan-routed, …) directing the user to split conformal.
 #[pyfunction(signature = (model_bytes, headers, rows, conformal_level=0.9))]
 fn predict_table_full_conformal(
     py: Python<'_>,
@@ -7900,35 +7774,6 @@ fn predict_table_full_conformal(
     let dataset = rows.dataset.clone();
     detach_py_result(py, "predict_table_full_conformal", move || {
         predict_encoded_table_full_conformal_impl(&model_bytes, dataset, conformal_level)
-    })
-}
-
-/// Distribution-free jackknife+ conformal prediction intervals — no held-out
-/// calibration fold required (#1054 / #942).
-///
-/// Auto-routes `predict(interval='conformal')` for Gaussian-identity models to
-/// the `GaussianJackknifePlusStats` precomputed at fit time. The interval
-/// targets ≈`conformal_level` marginal coverage (α = 1 − level, #1546); the
-/// distribution-free finite-sample guarantee at that setting is
-/// ≥ `2·conformal_level − 1` (Barber et al. 2021, coverage ≥ 1 − 2α).
-/// Returns the same explicit standard-prediction columns as `predict_table`
-/// (`linear_predictor_plugin`, `mean_plugin`, `posterior_mean`, and posterior
-/// interval bounds) so the Python shaper is unchanged.
-///
-/// Raises a descriptive Python exception for ineligible models (non-Gaussian,
-/// weighted, scan-routed, …) directing the user to `predict_conformal`.
-#[pyfunction(signature = (model_bytes, headers, rows, conformal_level=0.9))]
-fn predict_table_jackknife_plus(
-    py: Python<'_>,
-    model_bytes: Vec<u8>,
-    headers: Vec<String>,
-    rows: PyRef<'_, PyEncodedTable>,
-    conformal_level: f64,
-) -> PyResult<String> {
-    rows.require_headers(&headers).map_err(py_value_error)?;
-    let dataset = rows.dataset.clone();
-    detach_py_result(py, "predict_table_jackknife_plus", move || {
-        predict_encoded_table_jackknife_plus_impl(&model_bytes, dataset, conformal_level)
     })
 }
 

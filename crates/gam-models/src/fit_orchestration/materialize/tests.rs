@@ -388,17 +388,17 @@ fn materialized_standard_fit_carries_no_survival_time_basis_2470() {
     );
 }
 
-/// #2633: `FitConfig::precompute_conformal = Some(false)` must drop BOTH
-/// conformal substrates from the saved payload, and nothing else about the fit.
+/// #2633: `FitConfig::precompute_conformal = Some(false)` must drop the exact
+/// full-conformal substrate from the saved payload, and nothing else about the
+/// fit.
 ///
-/// The substrates are ~94% of a saved Gaussian model at n=20,000 and grow with
-/// the training rows, to save ~5.6 ms of rebuild. The knob lets a caller that
-/// keeps its training data decline them. Both arms are asserted so the test
-/// proves the FLAG is what removed them, rather than the fit having been
+/// The substrate grows with the training rows. The knob lets a caller that
+/// keeps its training data decline it. Both arms are asserted so the test
+/// proves the FLAG is what removed it, rather than the fit having been
 /// ineligible for a substrate all along — an assertion on the off-arm alone
 /// would pass just as well against a model that never qualified.
 #[test]
-fn precompute_conformal_false_drops_both_substrates_2633() {
+fn precompute_conformal_false_drops_the_full_conformal_substrate_2633() {
     use crate::inference::model_payload_builders::fit_formula_to_payload;
 
     let td = tempdir().expect("tempdir");
@@ -425,11 +425,9 @@ fn precompute_conformal_false_drops_both_substrates_2633() {
     let on = fit_formula_to_payload(formula.clone(), &data, &FitConfig::default())
         .expect("eligible gaussian fit should materialize and fit");
     assert!(
-        on.gaussian_jackknife_plus.is_some() && on.full_conformal.is_some(),
+        on.full_conformal.is_some(),
         "precondition: this fit must be substrate-eligible by default, otherwise the \
-         opt-out arm below proves nothing (jackknife+={}, full_conformal={})",
-        on.gaussian_jackknife_plus.is_some(),
-        on.full_conformal.is_some()
+         opt-out arm below proves nothing"
     );
 
     let config = FitConfig {
@@ -437,11 +435,7 @@ fn precompute_conformal_false_drops_both_substrates_2633() {
         ..FitConfig::default()
     };
     let off = fit_formula_to_payload(formula, &data, &config)
-        .expect("opting out of the substrates must not affect fittability");
-    assert!(
-        off.gaussian_jackknife_plus.is_none(),
-        "precompute_conformal=false must drop the jackknife+ substrate"
-    );
+        .expect("opting out of the substrate must not affect fittability");
     assert!(
         off.full_conformal.is_none(),
         "precompute_conformal=false must drop the exact full-conformal substrate"

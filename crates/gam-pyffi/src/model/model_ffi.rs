@@ -403,12 +403,10 @@ struct PredictionPayload {
     point_shape: &'static str,
     /// Inverse-link family kind tag (`identity`, `logit`, `probit`, `log`, ...).
     family: String,
-    /// Provenance of the returned prediction interval (#942). Present only when
-    /// an interval was requested. `"jackknife+ (distribution-free, finite-sample
-    /// ≥level coverage)"` when the exact Gaussian-identity jackknife+ magic ran;
-    /// `"model-based (Gaussian posterior)"` when the eligibility gate fell back
-    /// to the model's credible/predictive band. `None` (omitted) for point-only
-    /// predictions or model classes that do not carry the field yet.
+    /// Provenance of the returned prediction interval (#942). Present only on
+    /// the conformal routes, which name the full-conformal or split-conformal
+    /// construction they ran. `None` (omitted) for point-only and model-based
+    /// predictions.
     #[serde(skip_serializing_if = "Option::is_none")]
     interval_method: Option<String>,
     /// Exact covariance definition used for model-based interval uncertainty.

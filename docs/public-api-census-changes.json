@@ -2978,5 +2978,19 @@
     },
     "reason": "#2829 no product user: SparseExactFactor::factor_nnz, pirls_row::row_reweight_cpu and ResidualCascadeDesign::coarse_space_cols and logdet_slq have no caller on their own types.",
     "evidence": "At e86e693908649bdca1f7f9d7a528db2a05436597, reading every call-shaped occurrence over crates, src and tests: SparseExactFactor::factor_nnz only delegates to SimplicialFactor::factor_nnz, which keeps its callers; coarse_space_cols and logdet_slq are only called on the cascade Core that these design methods delegate to; row_reweight_cpu has no call, and row_reweight_cpu_at keeps its production callers in pirls_gpu.rs and pirls_row.rs."
+  },
+  {
+    "base": "a9eece11aefeefdecb021236c6f2f52eddb1ee21",
+    "removed": {
+      "crates/gam-models/src/inference/full_conformal.rs::beta": 1,
+      "crates/gam-models/src/inference/full_conformal.rs::from_design_unit_weight_normal_matrix": 1,
+      "crates/gam-models/src/inference/full_conformal.rs::interval": 1,
+      "crates/gam-models/src/inference/full_conformal.rs::jackknife_plus_interval": 1,
+      "crates/gam-models/src/inference/full_conformal.rs::n": 1,
+      "crates/gam-models/src/inference/full_conformal.rs::new": 1,
+      "crates/gam-models/src/inference/full_conformal.rs::p": 1
+    },
+    "reason": "#2899 row O17: the jackknife+ conformal substrate (GaussianJackknifePlusStats and its methods, jackknife_plus_interval) has no caller since gamfit and the CLI run only the exact full-conformal and split-conformal routes (13df3ae51, baf308726).",
+    "evidence": "At the base, git grep -n -w for each deleted name as a call on GaussianJackknifePlusStats or as a free function finds only the pyffi predict_table_jackknife_plus route and the payload producer, both deleted in the same commit; the same-named methods on ExactFullConformalSubstrate and the other full_conformal.rs types keep their callers."
   }
 ]
