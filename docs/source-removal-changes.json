@@ -8685,5 +8685,13 @@
     "reason": "#2899, SPEC rule 25. RefinementOutcome carried fp32-refinement metadata (relative_residual, used_fp32_factor, refinement_steps) that no caller read; iterative_refinement_cholesky_solve's two callers read only (solution, logdet). The refinement impl now returns the solution vector and the solve returns (solution, logdet).",
     "evidence": "At the base, git grep finds RefinementOutcome only in crates/gam-gpu/src/solver.rs. Its three metadata fields are written at the two construction sites and read nowhere. cholesky_solve_gpu read result.0 and result.1, and cholesky_solve_only_gpu read result.0. The item list is the guard's refusal list from the guarded check job named in the commit message.",
     "base": "8a422a8c933be8eff30d08e1072f4146e9d5fd55"
+  },
+  {
+    "items": [
+      "crates/gam-spec/src/lib.rs:fn:supports_firth"
+    ],
+    "reason": "#2899, SPEC rule 25. FamilySpecKind::supports_firth duplicated the link-resolved LikelihoodSpec::supports_firth as a kind-level approximation, and nothing calls it.",
+    "evidence": "At the base, every .supports_firth() call site takes a LikelihoodSpec receiver: gam-cli cli_args.rs:633 (ctx.family), gam-inference hmc_io.rs:57 (spec: &LikelihoodSpec), gam-models fit.rs:458 (request.family), gam-solve external_options.rs:139 (family, whose pretty_name is LikelihoodSpec's) and mixture_link.rs:5149 (LikelihoodSpec::new(..)), plus two root regression tests on spec.spec. No call goes through .kind(). The item list is the guard's refusal list from the guarded check job named in the commit message.",
+    "base": "96b83bf8d671401454373fa6d345e70dac304b5a"
   }
 ]
