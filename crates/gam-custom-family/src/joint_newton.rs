@@ -1593,23 +1593,6 @@ pub(crate) fn blockwise_logdet_terms_with_workspace<
             MaterializationIntent::LogdetFactorization,
             "joint exact-newton operator mismatch in logdet terms",
         )?
-    } else if !strict_spd
-        && JointHessianWork::row_pullback(joint_observation_count(states) as u64, total as u64)
-            .matrix_free_route(total)
-    {
-        family
-            .exact_newton_joint_hessian_workspace_with_options(states, specs, options)?
-            .as_ref()
-            .map(|workspace| {
-                exact_newton_joint_hessian_source_from_workspace(
-                    workspace,
-                    total,
-                    MaterializationIntent::LogdetFactorization,
-                    "joint exact-newton operator mismatch in logdet terms",
-                )
-            })
-            .transpose()?
-            .flatten()
     } else {
         None
     };
@@ -1645,6 +1628,13 @@ pub(crate) fn blockwise_logdet_terms_with_workspace<
             0.0,
         )?;
         return Ok((logdet_h_total, penalty_logdet_s_total));
+    }
+    // A family that advertises its direct dense joint Hessian builds `total × total`
+    // here at every shape, so it is admitted against the memory governor's
+    // single-materialization cap first, as an operator source is inside
+    // `materialize_joint_hessian_source` (gam#2900).
+    if family.has_explicit_joint_hessian() {
+        ensure_exact_joint_hessian_dense_budget(total, "joint exact-newton logdet dense Hessian")?;
     }
     // Fallback: try the non-rescaled symmetrized path (for families that
     // don't implement exact_newton_outer_curvature but do provide

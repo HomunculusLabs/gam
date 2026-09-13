@@ -1299,15 +1299,6 @@ impl CustomFamily for SurvivalLocationScaleFamily {
         .is_ok()
     }
 
-    fn outer_hyper_hessian_dense_available(
-        &self,
-        specs: &[crate::custom_family::ParameterBlockSpec],
-    ) -> bool {
-        let p_total: usize = specs.iter().map(|spec| spec.design.ncols()).sum();
-        !crate::custom_family::JointHessianWork::row_pullback(self.n as u64, p_total as u64)
-            .matrix_free_route(p_total)
-    }
-
     fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
         let (ll, block_gradients) =
             self.evaluate_log_likelihood_and_block_gradients(block_states)?;
