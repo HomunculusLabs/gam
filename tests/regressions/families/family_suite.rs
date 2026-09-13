@@ -1,8 +1,6 @@
 use gam::families::family_runtime::{FamilyStrategy, strategy_for_spec};
-use gam::families::marginal_slope_shared::{outer_row_weights_by_index, outer_weighted_rows};
 use gam::families::survival::latent::fixed_latent_hazard_frailty;
 use gam::families::survival::lognormal_kernel::{FrailtyScale, FrailtySpec, HazardLoading};
-use gam_problem::outer_subsample::{OuterScoreSubsample, WeightedOuterRow};
 use gam::types::inverse_link_to_binomial_spec;
 use gam::types::{InverseLink, LatentCLogLogState, LikelihoodSpec, ResponseFamily, StandardLink};
 
@@ -76,41 +74,6 @@ fn bug_strategy_for_spec_preserves_family_marker_for_all_response_variants() {
             "strategy_for_spec must preserve the response-family marker for each LikelihoodSpec variant."
         );
     }
-}
-
-#[test]
-fn bug_marginal_slope_outer_weighted_rows_match_documented_row_weights() {
-    let rows = vec![
-        WeightedOuterRow {
-            index: 1,
-            weight: 2.5,
-            stratum: 4,
-        },
-        WeightedOuterRow {
-            index: 3,
-            weight: 5.0,
-            stratum: 7,
-        },
-    ];
-    let mut opts = gam::families::custom_family::BlockwiseFitOptions::default();
-    opts.outer_score_subsample = Some(OuterScoreSubsample::from_weighted_rows(rows, 5, 123).into());
-
-    let weighted = outer_weighted_rows(&opts, 5);
-    assert_eq!(
-        weighted.len(),
-        2,
-        "outer_weighted_rows must return only retained rows when a subsample is active."
-    );
-    assert!(
-        (weighted[0].weight - 2.5).abs() < 1e-12 && (weighted[1].weight - 5.0).abs() < 1e-12,
-        "outer_weighted_rows must preserve per-row Horvitz-Thompson weights exactly."
-    );
-
-    let dense = outer_row_weights_by_index(&opts, 5);
-    assert!(
-        (dense[1] - 2.5).abs() < 1e-12 && (dense[3] - 5.0).abs() < 1e-12,
-        "outer_row_weights_by_index must place retained-row weights at their original row indices."
-    );
 }
 
 #[test]

@@ -279,7 +279,7 @@ fn core_saved_fit_result_preserves_summary_metrics() {
 mod saved_survival_marginal_slope_test_support {
     use super::exact_kernel;
     use super::{Array1, SavedCompiledFlexBlock};
-    use gam::families::marginal_slope_shared::{probit_frailty_scale, scale_coeff4};
+    use gam::families::marginal_slope_shared::probit_frailty_scale;
     use gam::probability::normal_cdf;
 
     fn saved_survival_default_score_span() -> exact_kernel::LocalSpanCubic {
@@ -395,7 +395,7 @@ mod saved_survival_marginal_slope_test_support {
                 a,
                 slope,
             );
-            let dc_da = scale_coeff4(dc_da_pos, -scale);
+            let dc_da = dc_da_pos.map(|c| c * -scale);
             f_a += exact_kernel::cell_first_derivative_from_moments(&dc_da, &state.moments)?;
         }
         Ok((f, f_a))

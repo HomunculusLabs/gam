@@ -9233,5 +9233,19 @@
     ],
     "reason": "#2899 public API sweep of gam-sae (prune-api-d): harmonic_measure_coordinates had no caller, and it was the only producer of BlockMeasureCoordinateReport, whose firings were the only use of MeasureValuedCode, and the only caller of the private collect_firings; AtomTransportLadderReport was never constructed. All five are deleted, with the sparse_dict re-export narrowed, the TransportLadderReport import only the deleted struct read, and the doc text that named the deleted readout.",
     "evidence": "At the base, git grep -w names harmonic_measure_coordinates only in its declaration, its error strings, the sparse_dict re-export, the recover_measure_from_code doc link and the binding_multiplicity example module doc; BlockMeasureCoordinateReport and MeasureValuedCode only in their declarations, that function, each other and the re-export; AtomTransportLadderReport only in its declaration and a docs/source-removal-changes.json evidence string. Receipt: guarded job 651939 (agsmall, lane sw0f, node acn77) at 5582f1706 with\nHEAD==PIN, dirty=0 and the 13 files of the d1, n12c and s35 slices overlaid:\ncargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0\n(130 s) and cargo check -p gam-pyffi --lib exited 0 (86 s), with no error line.\nLog /scratch.global/sauer354/pool/prune-api-d/combo17b.651939.log. The first\npass on this overlay (649104) stopped at one unused BlockSparseFit import in\ncoordinate.rs, which the d1 slice removes."
+  },
+  {
+    "base": "f5ed10a4daea71f350722849495a8f90b94cc4ea",
+    "items": [
+      "crates/gam-models/src/marginal_slope_shared.rs:fn:is_empty",
+      "crates/gam-models/src/marginal_slope_shared.rs:fn:len",
+      "tests/inference/misc/subsample_outer_integration.rs:fn:build_outer_score_subsample_is_deterministic_per_seed",
+      "tests/inference/misc/subsample_outer_integration.rs:fn:outer_row_indices_and_weights_round_trip_to_full_n_when_no_subsample",
+      "tests/inference/misc/subsample_outer_integration.rs:fn:per_row_ht_weight_recovers_full_data_sum_under_constant_within_stratum",
+      "tests/inference/misc/subsample_outer_integration.rs:fn:stratified_builder_assigns_unequal_per_row_weights",
+      "tests/regressions/families/family_suite.rs:fn:bug_marginal_slope_outer_weighted_rows_match_documented_row_weights"
+    ],
+    "reason": "#2899 public API sweep of gam-models (prune-api-d), SPEC rule 25: nine marginal_slope_shared helpers are narrowed to pub(crate). OuterRowIter::len and is_empty had no reader and are deleted. The root tests that named the narrowed helpers through the gam::families facade move verbatim into marginal_slope_shared mod outer_row_tests: the four tests of tests/inference/misc/subsample_outer_integration.rs, whose file is deleted, and one test of tests/regressions/families/family_suite.rs.",
+    "evidence": "At the base, every production caller of outer_row_indices takes .to_vec(), and the row_iter.len() calls are on that Vec, so nothing reads OuterRowIter::len or is_empty. The five removed test identities reappear in crates/gam-models/src/marginal_slope_shared.rs mod outer_row_tests, changed only in the BlockwiseFitOptions path. Receipt: guarded job 651939 (agsmall, lane sw0f, node acn77) at 5582f1706 with\nHEAD==PIN, dirty=0 and the 13 files of the d1, n12c and s35 slices overlaid:\ncargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0\n(130 s) and cargo check -p gam-pyffi --lib exited 0 (86 s), with no error line.\nLog /scratch.global/sauer354/pool/prune-api-d/combo17b.651939.log. The first\npass on this overlay (649104) stopped at one unused BlockSparseFit import in\ncoordinate.rs, which the d1 slice removes."
   }
 ]

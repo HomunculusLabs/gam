@@ -3939,5 +3939,14 @@
     },
     "reason": "#2899 public API sweep of gam-sae (prune-api-d): the uncalled sparse_dict::harmonic_measure_coordinates readout is deleted with the report types only it built.",
     "evidence": "At the base, git grep -w finds no call of harmonic_measure_coordinates in crates, src, tests, examples, bench or gamfit. It is the only pub fn this change removes; the removed map was derived by reading the change, not by running the script. Receipt: guarded job 651939 (agsmall, lane sw0f, node acn77) at 5582f1706 with\nHEAD==PIN, dirty=0 and the 13 files of the d1, n12c and s35 slices overlaid:\ncargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0\n(130 s) and cargo check -p gam-pyffi --lib exited 0 (86 s), with no error line.\nLog /scratch.global/sauer354/pool/prune-api-d/combo17b.651939.log. The first\npass on this overlay (649104) stopped at one unused BlockSparseFit import in\ncoordinate.rs, which the d1 slice removes."
+  },
+  {
+    "base": "f5ed10a4daea71f350722849495a8f90b94cc4ea",
+    "removed": {
+      "crates/gam-models/src/marginal_slope_shared.rs::is_empty": 1,
+      "crates/gam-models/src/marginal_slope_shared.rs::len": 1
+    },
+    "reason": "#2899 public API sweep of gam-models (prune-api-d): OuterRowIter::len and is_empty, which no caller reads, are deleted as OuterRowIter narrows to the crate.",
+    "evidence": "At the base they are the file's only len and is_empty declarations, and every production caller of outer_row_indices takes .to_vec(). The removed map was derived by reading the change, not by running the script. Receipt: guarded job 651939 (agsmall, lane sw0f, node acn77) at 5582f1706 with\nHEAD==PIN, dirty=0 and the 13 files of the d1, n12c and s35 slices overlaid:\ncargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0\n(130 s) and cargo check -p gam-pyffi --lib exited 0 (86 s), with no error line.\nLog /scratch.global/sauer354/pool/prune-api-d/combo17b.651939.log. The first\npass on this overlay (649104) stopped at one unused BlockSparseFit import in\ncoordinate.rs, which the d1 slice removes."
   }
 ]

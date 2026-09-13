@@ -9,7 +9,6 @@ mod multi_z_marginal_slope;
 mod nuts_leapfrog_identity_posterior_recovery;
 mod random_effect_recovers_group_means;
 mod riesz_functionals_contract;
-mod subsample_outer_integration;
 mod uncertainty_integration;
 mod sbc_family_predictive_interval_coverage;
 mod sbc_gaussian_mean_band_covariance_modes;
