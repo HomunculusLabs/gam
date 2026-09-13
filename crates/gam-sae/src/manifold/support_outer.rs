@@ -398,15 +398,18 @@ fn penalty_spectrum(
         let (values, _) = symmetric
             .eigh(Side::Lower)
             .map_err(|error| format!("support smooth-penalty eigendecomposition: {error}"))?;
-        let scale = values.iter().copied().fold(0.0_f64, f64::max).max(1.0);
-        let tolerance = f64::EPSILON.sqrt() * scale * atom.basis_size().max(1) as f64;
-        if values.iter().any(|value| *value < -tolerance) {
-            return Err(format!(
-                "support smooth penalty for atom {atom_idx} is not positive semidefinite"
-            ));
-        }
+        // The positive eigenspace is counted on gam-solve's REML rule, the one the
+        // dense criterion's `symmetric_rank` reads for the same `S_k`, so both lanes
+        // price one rank and one pseudo-logdet. Every install path already refuses a
+        // Gram that is not positive semidefinite
+        // (`SaeManifoldAtom::validate_reference_function_gram`), so a computed
+        // eigenvalue at or below the threshold is a null mode here, not a refusal.
+        let threshold =
+            gam_solve::estimate::reml::reml_outer_engine::positive_eigenvalue_threshold(
+                &values.to_vec(),
+            );
         let group = layout.atom_group[atom_idx];
-        for value in values.iter().copied().filter(|value| *value > tolerance) {
+        for value in values.iter().copied().filter(|value| *value > threshold) {
             rank_by_group[group] = rank_by_group[group]
                 .checked_add(term.output_dim())
                 .ok_or_else(|| "support penalty rank overflow".to_string())?;
