@@ -244,11 +244,13 @@ fn gpd_quantile(p: f64, k: f64, sigma: f64) -> f64 {
     // Callers pass `p = (rank + ½) / tail_count`, strictly inside (0, 1), so the
     // survival is strictly inside (0, 1) and needs no floor before its log.
     let survival = 1.0 - p;
-    if k.abs() < 1e-8 {
-        -sigma * survival.ln()
-    } else {
-        sigma * (survival.powf(-k) - 1.0) / k
-    }
+    // `σ (S^{-k} − 1) / k = −σ ln S · (eˣ − 1) / x` with `x = −k ln S`: `expm1`
+    // carries `eˣ − 1` without cancellation at every `k`, and `x = 0` (including a
+    // `k` whose product with `ln S` underflows) is the exponential limit `−σ ln S`.
+    let log_survival = survival.ln();
+    let x = -k * log_survival;
+    let exprel = if x == 0.0 { 1.0 } else { x.exp_m1() / x };
+    -sigma * log_survival * exprel
 }
 
 #[cfg(test)]
