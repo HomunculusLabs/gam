@@ -3871,5 +3871,24 @@
     },
     "reason": "#2899, SPEC rule 25 (delete public API no product uses). gam-solve's ConstrainedProjectionLaw is never constructed, so it and its mean() and variance() are deleted. The live constrained-projection path passes the cubature nodes and the residual variance loose into constrained_projection_equal_tailed_interval. The module is pub, so the dead-code lint could not see the type. Found by surv2894; verified by prune-api-c.",
     "evidence": "Removes the two pub fn declarations of the never-constructed ConstrainedProjectionLaw's impl in crates/gam-solve/src/constrained_posterior.rs. No caller exists anywhere in the tree at base 41c765d3d. Guarded compile: pool job 609573."
+  },
+  {
+    "base": "ab14d8062bf51848ffa7871ed2b50be45bed529d",
+    "removed": {
+      "crates/gam-solve/src/arrow_schur/rational_logdet.rs::evaluate_with_shifted_solver": 1,
+      "crates/gam-solve/src/gaussian_reml.rs::new": 1,
+      "crates/gam-solve/src/row_sampling_measure.rs::is_empty": 1,
+      "crates/gam-solve/src/row_sampling_measure.rs::len": 1,
+      "crates/gam-solve/src/row_sampling_measure.rs::race_transfer_margin": 1,
+      "crates/gam-solve/src/streaming_border.rs::checkpoint": 1,
+      "crates/gam-solve/src/streaming_border.rs::chunk_rows": 1,
+      "crates/gam-solve/src/streaming_border.rs::finish": 1,
+      "crates/gam-solve/src/streaming_border.rs::frontier": 1,
+      "crates/gam-solve/src/streaming_border.rs::n_chunks": 1,
+      "crates/gam-solve/src/streaming_border.rs::new": 1,
+      "crates/gam-solve/src/streaming_border.rs::resume": 1
+    },
+    "reason": "#2899, SPEC rule 25 (delete public API no product uses, and code only its own tests use). gam-solve: evidence::TopologyCandidate, TopologySelectOptions and TopologyKind, gaussian_reml::GaussianRemlNoAllocWorkspace, row_sampling_measure::CertifiedRowSample, the streaming_border module, and RationalLogdetPlan::evaluate_with_shifted_solver with its private solve_shift_ladder_with helper and its one unit test. None has a product user or a production caller.",
+    "evidence": "The removed pub fn declarations are the census's own refusal map at the checked pair: methods of the deleted types and module, and evaluate_with_shifted_solver. Guarded compile: pool job 639789."
   }
 ]

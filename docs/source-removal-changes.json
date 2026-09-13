@@ -9050,5 +9050,36 @@
     ],
     "reason": "#979 (folded #2897), mission rule 7.4 (no public API without a product user). The K-cap regression tests h1a-h1d and h3a, and the three constants only they used, move from the root regressions binary into gam-models marginal_slope_shared::subsample_k_cap_tests with the same names and assertions. The seven auto outer-subsample items they named through the gam::families facade are narrowed to pub(crate). The root file keeps the identifiability audit tests h2a and h2b.",
     "evidence": "At the base, outside crates/gam-models/src, AUTO_OUTER_WORK_BUDGET, AUTO_OUTER_MIN_K_FLOOR, AutoOuterCapReason, auto_outer_target_k and maybe_install_auto_outer_subsample are named only by tests/regressions/misc/subsample_k_cap_and_audit.rs. AutoOuterKChoice is named nowhere else. auto_outer_score_subsample is otherwise named only in doc comments (gam-model-api options.rs, gam-problem outer_subsample.rs) and a comment in tests/src_modules/optimization/families_bms_joint_hessian_hvp_correction_tests.rs. The one production caller of the installer is bms/custom_family_impl.rs in gam-models."
+  },
+  {
+    "base": "ab14d8062bf51848ffa7871ed2b50be45bed529d",
+    "items": [
+      "crates/gam-solve/src/arrow_schur/rational_logdet.rs:fn:evaluate_with_shifted_solver",
+      "crates/gam-solve/src/arrow_schur/rational_logdet.rs:fn:injected_shifted_solver_preserves_value_and_derivative_authority_2515",
+      "crates/gam-solve/src/arrow_schur/rational_logdet.rs:fn:solve_shift_ladder_with",
+      "crates/gam-solve/src/evidence.rs:enum:TopologyKind",
+      "crates/gam-solve/src/evidence.rs:fn:default",
+      "crates/gam-solve/src/evidence.rs:struct:TopologyCandidate",
+      "crates/gam-solve/src/evidence.rs:struct:TopologySelectOptions",
+      "crates/gam-solve/src/gaussian_reml.rs:fn:new",
+      "crates/gam-solve/src/gaussian_reml.rs:struct:GaussianRemlNoAllocWorkspace",
+      "crates/gam-solve/src/row_sampling_measure.rs:fn:is_empty",
+      "crates/gam-solve/src/row_sampling_measure.rs:fn:len",
+      "crates/gam-solve/src/row_sampling_measure.rs:fn:race_transfer_margin",
+      "crates/gam-solve/src/row_sampling_measure.rs:struct:CertifiedRowSample",
+      "crates/gam-solve/src/streaming_border.rs:const:CROSS_CHUNK_BASE",
+      "crates/gam-solve/src/streaming_border.rs:fn:add_into",
+      "crates/gam-solve/src/streaming_border.rs:fn:checkpoint",
+      "crates/gam-solve/src/streaming_border.rs:fn:chunk_rows",
+      "crates/gam-solve/src/streaming_border.rs:fn:finish",
+      "crates/gam-solve/src/streaming_border.rs:fn:frontier",
+      "crates/gam-solve/src/streaming_border.rs:fn:n_chunks",
+      "crates/gam-solve/src/streaming_border.rs:fn:new",
+      "crates/gam-solve/src/streaming_border.rs:fn:resume",
+      "crates/gam-solve/src/streaming_border.rs:struct:BorderGramCheckpoint",
+      "crates/gam-solve/src/streaming_border.rs:struct:StreamingBorderGram"
+    ],
+    "reason": "#2899, SPEC rule 25 (delete public API no product uses, and code only its own tests use). gam-solve: evidence::TopologyCandidate, TopologySelectOptions and TopologyKind, gaussian_reml::GaussianRemlNoAllocWorkspace, row_sampling_measure::CertifiedRowSample, the streaming_border module, and RationalLogdetPlan::evaluate_with_shifted_solver with its private solve_shift_ladder_with helper and its one unit test. None has a product user or a production caller.",
+    "evidence": "At the check pin, git grep -w over the whole tree finds each deleted type or function only at its own declaration, impl, crate-root re-export or doc lines in its own file. The one caller of evaluate_with_shifted_solver is the deleted test injected_shifted_solver_preserves_value_and_derivative_authority_2515, and solve_shift_ladder_with was called only by evaluate_with_shifted_solver. These identities are the guard's own refusal list at the checked pair. Guarded compile: pool job 639789."
   }
 ]

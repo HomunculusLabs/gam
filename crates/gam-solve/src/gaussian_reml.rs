@@ -964,28 +964,6 @@ pub struct GaussianRemlMultiBackwardProblem<'a> {
 }
 
 #[derive(Clone, Debug)]
-pub struct GaussianRemlNoAllocWorkspace {
-    pub xtwy: Array2<f64>,
-    pub ywy: Array1<f64>,
-    pub projected_rhs: Array2<f64>,
-    pub projected_rhs_squared: Array2<f64>,
-    pub scaled_projected_rhs: Array2<f64>,
-}
-
-impl GaussianRemlNoAllocWorkspace {
-    pub fn new(n_coefficients: usize, n_outputs: usize) -> Self {
-        Self {
-            xtwy: Array2::zeros((n_coefficients, n_outputs)),
-            ywy: Array1::zeros(n_outputs),
-            projected_rhs: Array2::zeros((n_coefficients, n_outputs)),
-            projected_rhs_squared: Array2::zeros((n_coefficients, n_outputs)),
-            scaled_projected_rhs: Array2::zeros((n_coefficients, n_outputs)),
-        }
-    }
-
-}
-
-#[derive(Clone, Debug)]
 pub struct GaussianRemlBlockOrthogonalResult {
     pub coefficients: Vec<Array2<f64>>,
     pub fitted: Array2<f64>,

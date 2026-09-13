@@ -306,43 +306,6 @@ impl RowSamplingMeasure {
 
 }
 
-/// A **certified** designed subsample (#1012): the rows that certify BOTH
-/// evidence halves within the target `eps`, their deterministic BSS /
-/// sensitivity weights, and the [`CoresetCertificate`] a race consumer gates
-/// the verdict transfer against.
-#[derive(Clone, Debug)]
-pub struct CertifiedRowSample {
-    /// Provenance of the measure that shaped the design.
-    pub provenance: MeasureProvenance,
-    /// Selected row indices, ascending (union of the spectral and sensitivity
-    /// coresets).
-    pub rows: Vec<usize>,
-    /// Per-selected-row weight aligned with `rows`: the BSS spectral weight
-    /// where the row was chosen for the log-determinant half, else the
-    /// Horvitz–Thompson scale-up for a likelihood-only row.
-    pub weights: Vec<f64>,
-    /// The certificate bounding the worst-case evidence transfer error. Feed
-    /// [`CoresetCertificate::race_transfer_margin`] to the race consumer's
-    /// margin gate.
-    pub certificate: CoresetCertificate,
-}
-
-impl CertifiedRowSample {
-    pub fn len(&self) -> usize {
-        self.rows.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.rows.is_empty()
-    }
-
-    /// The race-transfer margin a consumer must clear before inheriting the
-    /// full-corpus verdict from this coreset — the shared #1011/#1012 seam.
-    pub fn race_transfer_margin(&self) -> f64 {
-        self.certificate.race_transfer_margin()
-    }
-}
-
 /// Salt mixed into the enrichment seed so the offset hash is distinct from any
 /// other `splitmix64_hash` use of the same numeric seed elsewhere in the crate.
 const ENRICHMENT_SALT: u64 = 0x980E_1C45_F00D_AC70;

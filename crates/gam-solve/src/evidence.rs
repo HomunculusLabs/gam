@@ -54,62 +54,6 @@ use gam_math::special::bessel_i0_log_minus_abs_and_ratio;
 // Topology candidate enum and selection result
 // ---------------------------------------------------------------------------
 
-/// Discrete topology choice for the latent coordinate domain.
-///
-/// Maps directly to the set `{periodic, flat, sphere, torus}`. No additional
-/// variants — unused candidate variants are deliberately not carried
-/// alongside the four-way selector.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TopologyKind {
-    /// `S¹` or periodic interval (cyclic B-spline / periodic Duchon).
-    Periodic,
-    /// `Rᵈ` Euclidean Duchon / Matérn / thin-plate patch.
-    Flat,
-    /// `S²` embedded in `R³`, spherical Wahba/Sobolev basis.
-    Sphere,
-    /// `S¹ × S¹` mixed-periodicity Duchon.
-    Torus,
-}
-
-impl TopologyKind {
-}
-
-/// One topology candidate together with the evidence ingredients it
-/// produced at its own fitted optimum.
-#[derive(Debug, Clone)]
-pub struct TopologyCandidate {
-    pub kind: TopologyKind,
-    /// Negative-log-evidence `V(ρ_T*, T)` evaluated at the candidate's own
-    /// fitted `(ρ_T*, β_T*, u_T*)`.
-    pub negative_log_evidence: f64,
-    /// Effective integrated dimension after rank/nullspace accounting. This
-    /// is the dimension used for per-complexity topology normalization.
-    pub effective_dim: f64,
-    /// Number of response rows used to fit this topology candidate. This is
-    /// the dimension used for per-observation topology normalization.
-    pub n_obs: usize,
-    /// `True` iff the candidate's continuous inner+outer fit converged
-    /// cleanly. Failed candidates are excluded from ranking (proposal
-    /// §4.4 item 7 and §6.11).
-    pub converged: bool,
-    /// Optional rationale string for excluded candidates (proposal
-    /// §6.11): `"sphere input not on S²"`, `"torus periods missing"`, etc.
-    pub exclusion_reason: Option<String>,
-}
-
-/// Tolerance options for the topology comparator.
-#[derive(Debug, Clone, Copy)]
-pub struct TopologySelectOptions {
-    /// Maximum `|V_a - V_b|` for which two candidates are treated as
-    /// numerically tied after [`TopologyScoreScale`] normalization. Default
-    /// `1e-3` per proposal §4.6 examples.
-    pub tie_tolerance: f64,
-    /// Score scale used for discrete topology comparison. Raw evidence is
-    /// intentionally not a selector because candidates may have different
-    /// row counts and basis/nullspace dimensions.
-    pub score_scale: TopologyScoreScale,
-}
-
 /// Normalization applied before ranking topology candidates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TopologyScoreScale {
@@ -2975,15 +2919,6 @@ pub(crate) fn format_three_significant(value: f64) -> String {
     let scale = 10f64.powi(decimals as i32);
     let rounded = (value * scale).abs().round() / scale * value.signum();
     format!("{rounded:.decimals$}")
-}
-
-impl Default for TopologySelectOptions {
-    fn default() -> Self {
-        Self {
-            tie_tolerance: 1e-3,
-            score_scale: TopologyScoreScale::PerObservation,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

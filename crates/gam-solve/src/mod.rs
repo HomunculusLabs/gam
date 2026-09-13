@@ -58,7 +58,6 @@ pub mod seeding;
 pub mod sensitivity;
 pub mod spline_scan;
 pub(crate) mod startup_stats;
-pub mod streaming_border;
 pub mod structure_search;
 pub mod topology_formula;
 pub mod topology_selector;
@@ -73,8 +72,7 @@ pub use evidence::{
     CircularGaussianFit2d, GaussianMixtureCertificate, GaussianMixtureCheckpoint,
     GaussianMixtureConfig, GaussianMixtureError, GaussianMixtureFit, RingGaussianMixtureFit,
     StackingCertificate, StackingCheckpoint, StackingConfig, StackingError, StackingWeights,
-    TopologyCandidate, TopologyKind, TopologyScoreScale, TopologySelectOptions, UnionStructure,
-    solve_stacking_weights,
+    TopologyScoreScale, UnionStructure, solve_stacking_weights,
 };
 pub use topology_selector::{
     AdaptiveRungError, AdaptiveRungFailureStage, AdaptiveRungKind, AdaptiveRungOrderFailure,
