@@ -3546,5 +3546,13 @@
     },
     "reason": "#2695 lead ruling (09-13): the custom-family outer's adaptive inner-cycle cap, its full-budget retry and CustomOuterState's cap sharing are deleted; an inner solve stops on its own certificate.",
     "evidence": "The removed declarations are pub(crate) fn update_custom_outer_inner_cap_from_warm_start and pub(crate) fn evaluate_past_inner_cycle_cap (crates/gam-custom-family/src/custom_family_persistent_warm_start.rs) and pub(crate) fn with_inner_cap (crates/gam-custom-family/src/warm_start.rs). At the base git grep -n -w finds their callers only in crates/gam-custom-family/src/fit.rs and the lib.rs re-export, all removed in the same commit."
+  },
+  {
+    "removed": {
+      "crates/gam-linalg/src/sparse_exact.rs::factor_nnz": 1
+    },
+    "reason": "#2899, SPEC rule 25. SimplicialFactor::factor_nnz returned l_values.len(); its one caller, SparseExactFactor::factor_nnz, was deleted by #2829 as having no product user, and no other caller exists.",
+    "evidence": "At the base, git grep -w factor_nnz over crates, src, tests, bench and examples finds only the declaration in crates/gam-linalg/src/sparse_exact.rs. The earlier #2829 ledger entry that deleted SparseExactFactor::factor_nnz describes it as delegating to this accessor. Guarded check job 609222 (/scratch.global/sauer354/pool/prune-api-a/check42.609222.log) compiled this deletion together with a since-dropped RidgePolicy slice: cargo check --workspace --all-targets --exclude gam-pyffi exited 0.",
+    "base": "3adfb621fa3be424839a4f7cd16baf3690e49f10"
   }
 ]

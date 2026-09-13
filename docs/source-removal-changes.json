@@ -8363,5 +8363,13 @@
     ],
     "reason": "#2668 row 23 follow-up to c886bb1fb. shared_columns_aggregate summed every penalty on a column range, the one being read included. shared_columns_companions sums only the OTHER penalties, skipped by coordinate index, so the new companions-off read classifies null(C) directly instead of from the roundoff of aggregate minus local. Both callers in rho_domain.rs pass their coordinate index.",
     "evidence": "At the landing tree git grep -n -w shared_columns_aggregate over crates finds nothing. Verified by reading at landing (lead instruction to land without waiting on the job): every hunk reviewed against 1ecda75d1, and git grep -n -w shared_columns_aggregate over crates finds nothing. A pool job at the landed sha runs scripts/source_removal_guard.py against the parent, cargo check --workspace --all-targets --exclude gam-pyffi, the two rho_domain unit tests, the #1266 regressions module and scripts/verify_issue_2668.py over all 30 rows. owed_1477_factorial already passed under c886bb1fb in job 603362 (228.86 s)."
+  },
+  {
+    "items": [
+      "crates/gam-linalg/src/sparse_exact.rs:fn:factor_nnz"
+    ],
+    "reason": "#2899, SPEC rule 25. SimplicialFactor::factor_nnz returned l_values.len(); its one caller, SparseExactFactor::factor_nnz, was deleted by #2829 as having no product user, and no other caller exists.",
+    "evidence": "At the base, git grep -w factor_nnz over crates, src, tests, bench and examples finds only the declaration in crates/gam-linalg/src/sparse_exact.rs. The earlier #2829 ledger entry that deleted SparseExactFactor::factor_nnz describes it as delegating to this accessor. Guarded check job 609222 (/scratch.global/sauer354/pool/prune-api-a/check42.609222.log) compiled this deletion together with a since-dropped RidgePolicy slice: cargo check --workspace --all-targets --exclude gam-pyffi exited 0.",
+    "base": "3adfb621fa3be424839a4f7cd16baf3690e49f10"
   }
 ]

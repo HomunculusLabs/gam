@@ -854,12 +854,6 @@ fn factorize_simplicial_canonical_upper(
 }
 
 impl SimplicialFactor {
-    /// Nonzeros stored in `L` — the realized fill-in of the AMD ordering, and
-    /// the quantity a sparse-direct memory budget is stated in.
-    pub fn factor_nnz(&self) -> usize {
-        self.l_values.len()
-    }
-
     /// Reconstruct the original-order dense SPD matrix represented by this
     /// permuted sparse Cholesky factor.
     ///
