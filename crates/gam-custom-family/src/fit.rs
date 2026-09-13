@@ -2732,15 +2732,22 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             } else {
                 screened_outer_warm_start(outer.warm_cache.as_ref(), rho)
             };
-            return match outerobjectivegradienthessian_labeled(
-                family,
-                specs,
-                &outer_options,
-                &label_layout,
-                rho,
-                warm_ref,
-                &rho_prior,
-                EvalMode::ValueOnly,
+            return match evaluate_past_inner_cycle_cap(
+                &outer_inner_cap,
+                options.inner_max_cycles.max(1),
+                || {
+                    outerobjectivegradienthessian_labeled(
+                        family,
+                        specs,
+                        &outer_options,
+                        &label_layout,
+                        rho,
+                        warm_ref,
+                        &rho_prior,
+                        EvalMode::ValueOnly,
+                    )
+                },
+                |evaluation| (!evaluation.inner_converged).then_some(evaluation.inner.cycles),
             ) {
                 Ok(eval) if eval.inner_converged && eval.objective.is_finite() => {
                     let inner_beta_hint = Some(Array1::from_iter(
@@ -2821,19 +2828,26 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         } else {
             screened_outer_warm_start(outer.warm_cache.as_ref(), rho)
         };
-        let eval_result = match outerobjectivegradienthessian_labeled(
-            family,
-            specs,
-            &outer_options,
-            &label_layout,
-            rho,
-            warm_ref,
-            &rho_prior,
-            if request_hessian {
-                EvalMode::ValueGradientHessian
-            } else {
-                EvalMode::ValueAndGradient
+        let eval_result = match evaluate_past_inner_cycle_cap(
+            &outer_inner_cap,
+            options.inner_max_cycles.max(1),
+            || {
+                outerobjectivegradienthessian_labeled(
+                    family,
+                    specs,
+                    &outer_options,
+                    &label_layout,
+                    rho,
+                    warm_ref,
+                    &rho_prior,
+                    if request_hessian {
+                        EvalMode::ValueGradientHessian
+                    } else {
+                        EvalMode::ValueAndGradient
+                    },
+                )
             },
+            |evaluation| (!evaluation.inner_converged).then_some(evaluation.inner.cycles),
         ) {
             Ok(eval) if !eval.inner_converged => {
                 let failure = inner_solve_not_converged_error(&eval.inner, rho.len(), 0);
@@ -2972,15 +2986,22 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             } else {
                 screened_outer_warm_start(outer.warm_cache.as_ref(), rho)
             };
-            match outerobjectivegradienthessian_labeled(
-                family,
-                specs,
-                &outer_options,
-                &label_layout,
-                rho,
-                warm_ref,
-                &rho_prior,
-                EvalMode::ValueOnly,
+            match evaluate_past_inner_cycle_cap(
+                &outer_inner_cap,
+                options.inner_max_cycles.max(1),
+                || {
+                    outerobjectivegradienthessian_labeled(
+                        family,
+                        specs,
+                        &outer_options,
+                        &label_layout,
+                        rho,
+                        warm_ref,
+                        &rho_prior,
+                        EvalMode::ValueOnly,
+                    )
+                },
+                |evaluation| (!evaluation.inner_converged).then_some(evaluation.inner.cycles),
             ) {
                 Ok(eval) if eval.inner_converged && eval.objective.is_finite() => {
                     // Adapt the inner-cycle cap from THIS probe's converged

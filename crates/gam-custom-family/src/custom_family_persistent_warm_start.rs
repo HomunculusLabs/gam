@@ -17,7 +17,7 @@ use gam_solve::persistent_warm_start::{
 };
 use ndarray::{Array1, Array2};
 use std::any::type_name;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use gam_solve::warm_start_artifact::{
     FIT_ARTIFACT_SCHEMA, FitArtifact, FitDescriptor, GlobalFitSummary, ResponseSig,
@@ -649,4 +649,88 @@ pub(crate) fn update_custom_outer_inner_cap_from_warm_start(
     }
     .clamp(cap_floor, full_budget);
     outer_cap.store(next_cap, Ordering::Relaxed);
+}
+
+/// Evaluate one trial point, and when the adaptive inner-cycle cap ended its
+/// solve short of convergence, evaluate it once more at the full budget from the
+/// same warm start (#2695).
+///
+/// [`update_custom_outer_inner_cap_from_warm_start`] shrinks the cap to the last
+/// converged cycle count plus a margin, floored at 64. That is a performance
+/// budget, not an admissibility constraint. A stiff trial point that needs more
+/// cycles than the previous point is not refused by the problem, and scoring it
+/// infeasible turns the budget into a verdict: the line search retreats from a
+/// point it never measured, and the seed ends on `StepSizeTooSmall` (row 30,
+/// `survival_location_scale_penalized_edf_below_ncoef_2106`). So a solve that ran
+/// out the cap is solved again uncapped, and only a solve that stops for another
+/// reason, or fails at the full budget, reaches the caller unconverged. The cap
+/// stays lifted until the next converged evaluation shrinks it again.
+///
+/// `unconverged_cycles` returns the cycle count of an evaluation that did not
+/// converge, and `None` for one that did. A cap of `0` is the uncapped sentinel.
+pub(crate) fn evaluate_past_inner_cycle_cap<T, E>(
+    outer_inner_cap: &AtomicUsize,
+    full_budget: usize,
+    mut evaluate: impl FnMut() -> Result<T, E>,
+    unconverged_cycles: impl Fn(&T) -> Option<usize>,
+) -> Result<T, E> {
+    let cap = outer_inner_cap.load(Ordering::Relaxed);
+    let evaluation = evaluate()?;
+    match unconverged_cycles(&evaluation) {
+        Some(cycles) if cap > 0 && cap < full_budget && cycles >= cap => {
+            log::info!(
+                "[OUTER] a trial inner solve ran out the adaptive {cap}-cycle cap without \
+                 converging; solving it again at the full {full_budget}-cycle budget before it \
+                 may be scored infeasible (#2695)"
+            );
+            outer_inner_cap.store(full_budget, Ordering::Relaxed);
+            evaluate()
+        }
+        _ => Ok(evaluation),
+    }
+}
+
+#[cfg(test)]
+mod inner_cycle_cap_tests {
+    use super::evaluate_past_inner_cycle_cap;
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// `(converged, cycles)` of one synthetic trial evaluation.
+    type Trial = (bool, usize);
+
+    /// Runs the helper with a first and a second synthetic outcome and returns the
+    /// outcome it hands back, how many evaluations it ran, and the cap it left.
+    fn run(cap: usize, full_budget: usize, first: Trial, second: Trial) -> (Trial, usize, usize) {
+        let atomic = AtomicUsize::new(cap);
+        let calls = Cell::new(0usize);
+        let outcome = evaluate_past_inner_cycle_cap(
+            &atomic,
+            full_budget,
+            || -> Result<Trial, String> {
+                calls.set(calls.get() + 1);
+                Ok(if calls.get() == 1 { first } else { second })
+            },
+            |trial| (!trial.0).then_some(trial.1),
+        )
+        .expect("synthetic trial evaluation");
+        (outcome, calls.get(), atomic.load(Ordering::Relaxed))
+    }
+
+    #[test]
+    fn a_trial_that_ran_out_the_adaptive_cap_is_solved_again_at_the_full_budget_2695() {
+        assert_eq!(run(64, 1200, (false, 64), (true, 180)), ((true, 180), 2, 1200));
+    }
+
+    #[test]
+    fn a_trial_that_stopped_short_of_the_cap_is_not_solved_again_2695() {
+        assert_eq!(run(64, 1200, (false, 41), (true, 180)), ((false, 41), 1, 64));
+    }
+
+    #[test]
+    fn a_converged_or_uncapped_trial_is_not_solved_again_2695() {
+        assert_eq!(run(64, 1200, (true, 12), (true, 180)), ((true, 12), 1, 64));
+        assert_eq!(run(1200, 1200, (false, 1200), (true, 180)), ((false, 1200), 1, 1200));
+        assert_eq!(run(0, 1200, (false, 1200), (true, 180)), ((false, 1200), 1, 0));
+    }
 }
