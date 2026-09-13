@@ -2464,8 +2464,8 @@ impl ExactNewtonJointHessianWorkspace for BernoulliMarginalSlopeExactNewtonJoint
     fn hessian_dense_forced(&self) -> Result<Option<Array2<f64>>, String> {
         // Callers that genuinely require a dense joint Hessian (e.g. outer
         // batched-gradient assembly that pulls back the dense `H_β`, or the LAML
-        // logdet factorization in `MatrixFreeSpdOperator::materialize_dense_
-        // operator`) bypass the matrix-free route gate above. The fused row pass
+        // logdet factorization in `materialize_joint_hessian_source`) bypass the
+        // matrix-free route gate above. The fused row pass
         // is the structural direct-dense path here: it streams every row exactly
         // ONCE and uses BLAS-3 for the `XᵀWX` pullback — O(n·p²) total. The only
         // alternative for a consumer that needs the full dense matrix is

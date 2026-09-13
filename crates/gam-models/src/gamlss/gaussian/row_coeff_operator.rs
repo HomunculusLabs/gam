@@ -749,7 +749,7 @@ impl ExactNewtonJointHessianWorkspace for GaussianLocationScaleHessianWorkspace 
     fn hessian_dense(&self) -> Result<Option<Array2<f64>>, String> {
         // Same Hv structure as `hessian_matvec`, but built once via 3 GEMMs
         // (`Xᵀ diag(W) X` per block) instead of letting
-        // `MatrixFreeSpdOperator::materialize_dense_operator` reconstruct the
+        // `materialize_joint_hessian_source` reconstruct the
         // dense Hessian via `total` canonical-basis HVPs. At large scale
         // (n≈320k, p_total≈82) the canonical-basis path takes ~568s per κ-iter
         // while the dense build via fast_xt_diag_x/y is ~1s.

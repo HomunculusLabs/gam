@@ -2185,7 +2185,7 @@ impl<const K: usize, T: RowKernel<K> + 'static> ExactNewtonJointHessianWorkspace
         // The cached row-kernel state already encodes everything needed to
         // accumulate the dense joint Hessian in one row pass via
         // `row_kernel_hessian_dense`. Without this override the trace path
-        // calls `MatrixFreeSpdOperator::materialize_dense_operator`, which
+        // calls `materialize_joint_hessian_source`, which
         // rebuilds the same dense matrix by applying the Hv operator to
         // every canonical basis vector: a `p * O(n*K^2)` redundant
         // re-stream of the row data. At large scale (n~320k, p~200) that

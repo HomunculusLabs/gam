@@ -219,7 +219,7 @@ impl ExactNewtonJointHessianWorkspace for BinomialLocationScaleHessianWorkspace 
         //   H_tt = X_tᵀ diag(coeff_tt) X_t,
         //   H_tl = X_tᵀ diag(coeff_tl) X_ls,
         //   H_ll = X_lsᵀ diag(coeff_ll) X_ls,
-        // versus letting `MatrixFreeSpdOperator::materialize_dense_operator`
+        // versus letting `materialize_joint_hessian_source`
         // reconstruct the dense Hessian via `total` canonical-basis HVPs. At
         // large scale, canonical-basis materialization costs p_total full
         // Hessian-vector products. The design helpers below stream row chunks,

@@ -2853,7 +2853,7 @@ impl ExactNewtonJointHessianWorkspace for GaussianLocationScaleWiggleHessianWork
         // Same Hv structure as `hessian_matvec`, but routed through the
         // already-existing `assemble_dense` row-pieces helper (six GEMMs:
         // h_mm, h_ml, h_mw_b, h_mw_d, h_lw, h_ww). Avoids `total` canonical-
-        // basis HVPs in `MatrixFreeSpdOperator::materialize_dense_operator`,
+        // basis HVPs in `materialize_joint_hessian_source`,
         // which at large scale (n≈320k, p_total≈82) costs ~568s per κ-iter
         // versus ~1s for the dense build.
         let dense = self

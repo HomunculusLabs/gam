@@ -96,7 +96,7 @@ impl ExactNewtonJointHessianWorkspace for BinomialLocationScaleWiggleHessianWork
         // already-existing `assemble_dense` row-pieces helper (eight GEMMs
         // covering h_tt, h_tl, h_ll, h_tw_b, h_tw_d, h_lw_b, h_lw_d, h_ww).
         // Avoids `total` canonical-basis HVPs in
-        // `MatrixFreeSpdOperator::materialize_dense_operator`, which at
+        // `materialize_joint_hessian_source`, which at
         // large scale (n≈320k, p_total≈82) costs ~568s per κ-iter versus
         // ~1s for the dense build.
         let dense = self
