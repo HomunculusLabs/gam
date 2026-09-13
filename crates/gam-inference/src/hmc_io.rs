@@ -4665,7 +4665,7 @@ pub fn run_nuts_sampling_flattened_family(
 /// passes `false` and skips Phase 2's multi-probe O(probes·iters·np) refinement
 /// on every inner evaluation. Diagnostic callers that report the true supremum
 /// pass `true`.
-pub fn laplace_directional_cubic_diagnostic(
+pub(crate) fn laplace_directional_cubic_diagnostic(
     hessian: &Array2<f64>,
     design: &DesignMatrix,
     c_weights: &Array1<f64>,

@@ -63,7 +63,7 @@ use crate::polya_gamma::PolyaGamma;
 /// implementation's draws across runs; CPU and GPU consume the bits through
 /// different distribution transforms.
 #[derive(Clone, Copy, Debug)]
-pub struct PgSeed(pub u64);
+pub(crate) struct PgSeed(pub u64);
 
 impl Default for PgSeed {
     fn default() -> Self {
@@ -78,12 +78,12 @@ impl Default for PgSeed {
 /// * `[SADDLE_MIN_B, SADDLE_MAX_B]` — saddlepoint-rejection regime.
 /// * `b > SADDLE_MAX_B` — normal-approximation regime.
 pub(crate) const PG1_MAX_B: u32 = 1;
-pub const SADDLE_MIN_B: u32 = 14;
-pub const SADDLE_MAX_B: u32 = 170;
+pub(crate) const SADDLE_MIN_B: u32 = 14;
+pub(crate) const SADDLE_MAX_B: u32 = 170;
 
 /// Inputs for the dispatched batched sampler.
 #[derive(Clone, Debug)]
-pub struct PolyaGammaBatchInput<'a> {
+pub(crate) struct PolyaGammaBatchInput<'a> {
     /// Shape parameters `b_i`. Must be ≥ 1.
     pub shapes: ArrayView1<'a, u32>,
     /// Tilt parameters `c_i = ψ_i`. Sign is irrelevant (sampler uses |c|).
@@ -126,7 +126,7 @@ impl<'a> PolyaGammaBatchInput<'a> {
 /// SplitMix64 finalizer (matches `reml_trace::splitmix64_mix`). Thin wrapper
 /// over the canonical implementation in [`gam_linalg::utils::splitmix64_hash`].
 #[inline]
-pub fn splitmix64_mix(z: u64) -> u64 {
+pub(crate) fn splitmix64_mix(z: u64) -> u64 {
     gam_linalg::utils::splitmix64_hash(z)
 }
 
@@ -140,7 +140,7 @@ const WORD_GAMMA: u64 = 0x0F1E_2D3C_4B5A_6978;
 /// `curandStateXORWOW_t` for the five state lanes plus the addition
 /// counter; we omit the boxmuller cache (PG sampler doesn’t use it).
 #[derive(Clone, Copy, Debug)]
-pub struct XorwowState {
+pub(crate) struct XorwowState {
     pub s: [u32; 5],
     pub d: u32,
 }
@@ -353,7 +353,7 @@ fn cpu_regime_for_shape(shape: u32) -> PolyaGammaCpuRegime {
 /// Per-row CPU draw using the appropriate regime. Used by the harness
 /// when the GPU runtime is unavailable, and as the per-row oracle for
 /// the dispatched device path’s parity tests.
-pub fn draw_batch_cpu(input: &PolyaGammaBatchInput<'_>) -> Result<Array1<f64>, String> {
+pub(crate) fn draw_batch_cpu(input: &PolyaGammaBatchInput<'_>) -> Result<Array1<f64>, String> {
     input.validate()?;
     let n = input.rows();
     let mut out = Array1::<f64>::zeros(n);
@@ -379,7 +379,7 @@ pub fn draw_batch_cpu(input: &PolyaGammaBatchInput<'_>) -> Result<Array1<f64>, S
 /// it in distribution. CUDA probe and execution faults are returned; only a
 /// size-policy refusal or lossless `Ok(None)` availability result selects the
 /// CPU implementation.
-pub fn draw_batch(input: PolyaGammaBatchInput<'_>) -> Result<Array1<f64>, String> {
+pub(crate) fn draw_batch(input: PolyaGammaBatchInput<'_>) -> Result<Array1<f64>, String> {
     input.validate()?;
 
     #[cfg(target_os = "linux")]
