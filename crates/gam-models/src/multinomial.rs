@@ -1222,11 +1222,15 @@ fn fit_penalized_multinomial_firth_fallback(
     }
     let weight = |row: usize| -> f64 { row_weights.as_ref().map_or(1.0, |w| w[row]) };
 
-    let tol_eff = if tol.is_finite() && tol > 0.0 {
-        tol
-    } else {
-        1e-8
-    };
+    // The decrement and step certificates below compare against `tol`. A
+    // non-finite or non-positive contract certifies nothing, so it is refused
+    // rather than silently replaced.
+    if !(tol.is_finite() && tol > 0.0) {
+        crate::bail_invalid_estim!(
+            "multinomial Firth solve: tol must be finite and positive, got {tol}"
+        );
+    }
+    let tol_eff = tol;
 
     // Probabilities (N, K), active classes 0..M then the pinned reference at M.
     let probs_at = |beta: &Array2<f64>| -> Array2<f64> {
