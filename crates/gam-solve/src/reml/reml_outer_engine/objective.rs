@@ -1790,9 +1790,9 @@ pub(crate) fn reml_laml_evaluate(
     // KKT projection onto the model's canonical upper face (#197, corrected by
     // #2615).
     //
-    // `active_upper_rho_mask` answers a DISTANCE question — "is this coordinate
-    // within 1e-8 of its upper bound?" — and #197 used that answer alone to
-    // return exactly 0 for the entry. Proximity is not activity. At an upper
+    // `active_upper_rho_mask` answers a PRIMAL question — "does this coordinate
+    // sit on its upper bound?" — and #197 used that answer alone to return
+    // exactly 0 for the entry. Sitting on the bound is not activity. At an upper
     // bound the feasible directions are DECREASING rho, so an entry with
     // `dV/drho_k > 0` is feasible descent the search must be allowed to take;
     // only a NEGATIVE entry (whose descent step `-g` leaves the box) is the

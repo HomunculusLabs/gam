@@ -256,6 +256,12 @@ pub(crate) fn solve_kkt_residual_kernel(
 /// recorded there is no rail to freeze on: reading a fixed ±RHO_BOUND instead
 /// froze an interior ρ̂ above 30 on a derived domain whose face is wider
 /// (#2902 row 8).
+///
+/// A coordinate is on the face when it equals the recorded upper bound, which
+/// is where opt's box projection puts an iterate that reaches it. The
+/// optimizer's own activity test has no band either (`project_gradient_vector`
+/// passes tolerance 0), so a band here would freeze coordinates the optimizer
+/// still treats as interior (#2469).
 pub(crate) fn active_upper_rho_mask(rho: &[f64]) -> Vec<bool> {
     let latest_theta = outer_eval::latest_outer_theta_for_ift();
     let matching_outer_theta = latest_theta.as_ref().is_some_and(|theta| {
@@ -275,7 +281,7 @@ pub(crate) fn active_upper_rho_mask(rho: &[f64]) -> Vec<bool> {
             model_upper_bounds
                 .as_ref()
                 .and_then(|bounds| bounds.get(idx))
-                .is_some_and(|upper| value >= upper - 1.0e-8)
+                .is_some_and(|upper| value >= upper)
         })
         .collect()
 }
