@@ -36,6 +36,15 @@ def main():
     scratch.mkdir(exist_ok=True)
     with binary.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    # Rows that drive the CLI spawn `target/<profile>/gam` beside the test binary
+    # (`gam_test_support::cli_harness::resolve_gam_binary`), and building the
+    # regressions binary never rebuilds it. Without its digest the receipt does not
+    # name the code those rows ran.
+    cli = binary.parent.parent / "gam"
+    if not cli.is_file():
+        parser.error(f"{cli} is missing: build gam-cli's gam at the same tree first")
+    with cli.open("rb") as stream:
+        cli_digest = hashlib.file_digest(stream, "sha256").hexdigest()
     environment = dict(os.environ, TMPDIR=str(scratch), RAYON_NUM_THREADS="2",
                        OPENBLAS_NUM_THREADS="1", OMP_NUM_THREADS="1")
 
@@ -74,6 +83,7 @@ def main():
             records.append(record)
             print(f"{record['status']:10} {record['original']}", flush=True)
             receipt = dict(binary=str(binary), binary_sha256=digest,
+                           gam_binary=str(cli), gam_sha256=cli_digest,
                            test_timeout_seconds=args.timeout, workers=args.workers,
                            results=records)
             (args.output / "results.json").write_text(json.dumps(receipt, indent=2) + "\n")
@@ -81,11 +91,16 @@ def main():
               for status in sorted({r["status"] for r in records})}
     with binary.open("rb") as stream:
         final_digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    with cli.open("rb") as stream:
+        cli_final_digest = hashlib.file_digest(stream, "sha256").hexdigest()
     receipt["binary_sha256_after"] = final_digest
     receipt["binary_unchanged"] = final_digest == digest
+    receipt["gam_sha256_after"] = cli_final_digest
+    receipt["gam_unchanged"] = cli_final_digest == cli_digest
     (args.output / "results.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(json.dumps(counts, sort_keys=True), flush=True)
-    return 0 if final_digest == digest and len(records) == 30 and counts == {"passed": 30} else 1
+    unchanged = final_digest == digest and cli_final_digest == cli_digest
+    return 0 if unchanged and len(records) == 30 and counts == {"passed": 30} else 1
 
 
 if __name__ == "__main__":
