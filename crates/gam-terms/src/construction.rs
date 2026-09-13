@@ -44,27 +44,6 @@ pub enum PenaltyRepresentation {
 }
 
 impl PenaltyRepresentation {
-    /// Side length of the square penalty block this representation expands to.
-    pub fn block_dimension(&self) -> usize {
-        match self {
-            PenaltyRepresentation::Dense(matrix) => matrix.nrows(),
-            PenaltyRepresentation::Banded { bands, offsets } => {
-                let mut dim = 0usize;
-                for (band, &offset) in bands.iter().zip(offsets.iter()) {
-                    let len = band.len();
-                    let extent = if offset >= 0 {
-                        len + offset as usize
-                    } else {
-                        len + (-offset) as usize
-                    };
-                    dim = dim.max(extent);
-                }
-                dim
-            }
-            PenaltyRepresentation::Kronecker { left, right } => left.nrows() * right.nrows(),
-        }
-    }
-
 }
 
 #[derive(Clone)]

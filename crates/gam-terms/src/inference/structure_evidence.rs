@@ -791,13 +791,6 @@ pub struct StructureCertificate {
 }
 
 impl StructureCertificate {
-    pub fn confirmed(&self) -> impl Iterator<Item = &CertificateEntry> {
-        self.entries.iter().filter(|e| e.confirmed)
-    }
-
-    pub fn contested(&self) -> impl Iterator<Item = &CertificateEntry> {
-        self.entries.iter().filter(|e| !e.confirmed)
-    }
 }
 
 /// Calibrate one (super)uniform p-value into a single e-value, in log
