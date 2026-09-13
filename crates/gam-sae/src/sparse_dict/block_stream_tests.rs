@@ -921,14 +921,13 @@ fn tied_row_moment_kernel_is_bit_identical_to_the_indexed_loop_2826() {
 
 #[test]
 fn a_rejected_frame_trial_stashes_gamma_scaled_moments_for_rank_charges() {
-    // Two overlapping unit frames in R^2, both admitted on every row, so the
-    // profiled gamma is well away from one. The proposal swaps the two blocks: it
-    // represents the same model, its RSS equals the baseline's exactly, and the
-    // equality rule rejects it.
-    let x = Array2::from_shape_fn(
-        (17, 2),
-        |(_, column)| if column == 0 { 1.0_f32 } else { 0.0 },
-    );
+    // Two overlapping unit frames in R^2 and rows x = (1, 1). Admission is descent in
+    // the tied loss at the stored gamma: [0.6, 0.8] enters first (gate 1.4), and at
+    // gamma = 0.5 the frame [1, 0] lowers the loss too (-(2γ-γ²)·1 + 2γ²·0.84 < 0). Both
+    // blocks are admitted, their projections overlap, and the profiled gamma (about
+    // 0.64) is well away from one. The proposal swaps the two blocks: it represents the
+    // same model, its RSS equals the baseline's exactly, and the equality rule rejects it.
+    let x = Array2::from_elem((17, 2), 1.0_f32);
     let baseline = array![[1.0_f32, 0.0], [0.6, 0.8]];
     let proposal = array![[0.6_f32, 0.8], [1.0, 0.0]];
     let mut config = BlockSparseConfig::new(2, 1);
@@ -936,10 +935,10 @@ fn a_rejected_frame_trial_stashes_gamma_scaled_moments_for_rank_charges() {
     config.minibatch = 5;
     config.aux_k = 0;
     let mut state = BlockSparseStreamState::new_with_decoder(proposal.clone(), &config).unwrap();
-    state.gamma = 1.0;
+    state.gamma = 0.5;
     state.pending_frame = Some(super::PendingFrameTrial {
         baseline_decoder: baseline,
-        baseline_gamma: 1.0,
+        baseline_gamma: 0.5,
         proposed_decoder: proposal,
         baseline_rss: 0.0,
         baseline_gamma_num: 0.0,
