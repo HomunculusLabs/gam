@@ -3351,8 +3351,8 @@ pub(crate) fn rational_reduced_schur_plan_derived<B: BatchedBlockSolver + Sync>(
                  needed {:.1}%",
                 eval.std_err,
                 eval.estimate,
-                100.0 * (1.0 - eval.std_err / pilot_std_err.max(f64::MIN_POSITIVE)),
-                100.0 * (1.0 - target / pilot_std_err.max(f64::MIN_POSITIVE)),
+                100.0 * (1.0 - eval.std_err / pilot_std_err),
+                100.0 * (1.0 - target / pilot_std_err),
             ));
         }
         rank = rank.saturating_mul(2);
@@ -3392,9 +3392,17 @@ impl ReducedSchurCgReport {
     /// Merge two certificates into the weaker of the pair, so a bundle of
     /// solves reports its LEAST converged member rather than its best.
     pub fn weaker(self, other: Self) -> Self {
-        let self_slack = self.relative_residual / self.tolerance.max(f64::MIN_POSITIVE);
-        let other_slack = other.relative_residual / other.tolerance.max(f64::MIN_POSITIVE);
-        if other_slack > self_slack { other } else { self }
+        if other.slack() > self.slack() { other } else { self }
+    }
+
+    /// `relative_residual / tolerance`: an exact solve reads 0, and a residual against
+    /// a zero tolerance reads unbounded (#2469).
+    fn slack(&self) -> f64 {
+        if self.relative_residual == 0.0 {
+            0.0
+        } else {
+            self.relative_residual / self.tolerance
+        }
     }
 }
 
