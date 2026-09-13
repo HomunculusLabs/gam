@@ -3568,7 +3568,21 @@ fn reduced_schur_cg_solve<B: BatchedBlockSolver + Sync>(
         None => y0.clone(),
     };
     let mut r = &b - &apply(&y);
-    let b_norm = b.dot(&b).sqrt().max(f64::MIN_POSITIVE);
+    // A zero right-hand side has the exact solve `y = 0` whatever the warm start,
+    // and past this return `tol = cg_rel_tol * b_norm > 0` (#2469).
+    let b_norm = b.dot(&b).sqrt();
+    if b_norm == 0.0 {
+        return Some((
+            Array1::<f64>::zeros(b.len()),
+            ReducedSchurCgReport {
+                iterations: 0,
+                max_iterations: cg_max_iters,
+                relative_residual: 0.0,
+                tolerance: cg_rel_tol,
+                preconditioner: precond.kind(),
+            },
+        ));
+    }
     // One matvec buffer reused across every CG iteration. `apply_owned` builds a
     // fresh `Array1::zeros(k)` per call, which at this scale is an ~11 MB
     // mmap/munmap pair with first-touch faults and a TLB shootdown EVERY

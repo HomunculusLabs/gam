@@ -949,6 +949,12 @@ fn shifted_pcg_core(
     if !(rel_tol.is_finite() && rel_tol > 0.0) {
         return None;
     }
+    // A zero right-hand side has the exact solve `y = 0` whatever the warm start,
+    // and past this return `tol = rel_tol * b_norm > 0` (#2469).
+    let b_norm = b.dot(b).sqrt();
+    if b_norm == 0.0 {
+        return Some((Array1::<f64>::zeros(b.len()), 0));
+    }
     let apply = |v: ArrayView1<f64>| -> Array1<f64> {
         let mut out = matvec(v);
         out.scaled_add(t, &v.to_owned());
@@ -956,7 +962,6 @@ fn shifted_pcg_core(
     };
     let mut y = y0.clone();
     let mut r = b - &apply(y.view());
-    let b_norm = b.dot(b).sqrt().max(f64::MIN_POSITIVE);
     let mut z = preconditioner.apply(&r, t);
     let mut p = z.clone();
     // `rs` is the PRECONDITIONED inner product `rᵀz` that drives the recurrence;
@@ -1311,7 +1316,11 @@ fn solve_shift_family(
     if !sigma.is_finite() {
         return None;
     }
-    let b_norm = b.dot(b).sqrt().max(f64::MIN_POSITIVE);
+    // A zero right-hand side has the exact solve `y = 0` at every shift (#2469).
+    let b_norm = b.dot(b).sqrt();
+    if b_norm == 0.0 {
+        return Some((vec![Array1::<f64>::zeros(dim); shifts.len()], 0));
+    }
     let tol = rel_tol * b_norm;
 
     // Seed recurrence on `(A + σI) y = b` from `y = 0`, so `r_0 = b` and every
