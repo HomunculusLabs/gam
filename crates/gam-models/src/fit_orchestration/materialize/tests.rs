@@ -3033,6 +3033,19 @@ fn gaussian_location_scale_engine_matches_reference_flow() {
         "a wiggle refit must populate beta_link_wiggle (block 2 present)"
     );
 
+    // The facts the assertions below decide on, printed before any of them can
+    // fail: the arming evidence the lifecycle published, and the typed decline
+    // with its certificate, or its absence (#2627, #979).
+    let arming_evidence = format!("{:?}", engine_wiggle.fit.fit.artifacts.jeffreys_arming_evidence);
+    let decline_summary = engine_wiggle
+        .fit
+        .fit
+        .posterior_moment_decline()
+        .map_or_else(|| "no typed moment decline".to_string(), |decline| decline.summary());
+    eprintln!(
+        "[2627-CONE] gaussian wiggle: arming evidence {arming_evidence}; covariance published {}; {decline_summary}",
+        engine_wiggle.fit.fit.beta_covariance().is_some()
+    );
     // #2635: the ambient Hessian is indefinite, but the fitted cone excludes
     // its negative direction and the exact certificate proves the truncated
     // posterior proper. Preserve that converged diagnostic fit and its cone,
@@ -3587,7 +3600,12 @@ fn gaussian_location_scale_wiggle_face_criterion_gradient_matches_central_differ
                             .ok_or_else(|| format!("{point}: no analytic gradient"))?;
                         let (beta, _) = at
                             .selected_mode
-                            .ok_or_else(|| format!("{point}: no selected mode"))?;
+                            .ok_or_else(|| {
+                                format!(
+                                    "{point}: no selected mode (criterion components published: {})",
+                                    at.criterion_components.is_some()
+                                )
+                            })?;
                         let face = pinned(&beta);
                         for j in 0..theta.len() {
                             let room = (theta[j] - layout.lower[j])
