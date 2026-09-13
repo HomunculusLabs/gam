@@ -4349,12 +4349,6 @@ impl OuterFixedPointBridge<'_> {
 /// staying inside one cache-warm Hessian factorization budget.
 pub(crate) const MAX_EFS_BACKTRACK: usize = 8;
 
-/// Step components below this threshold (in θ-space) are treated as zero
-/// for backtracking purposes — there is no point line-searching a step of
-/// magnitude `1e-12`, and skipping the trial keeps the convergence path
-/// numerically clean (no spurious cost decreases from ULP noise).
-pub(crate) const EFS_NEGLIGIBLE_STEP: f64 = 1e-12;
-
 /// Maximum infinity-norm of the EFS step (in θ-space) at which we skip the
 /// cost line search and trust the multiplicative formula's quadratic
 /// convergence. Above this, we always backtrack.
@@ -4589,12 +4583,13 @@ impl FixedPointObjective for OuterFixedPointBridge<'_> {
                 status: FixedPointStatus::Stop,
             });
         }
-        // Negligible raw step — the iteration is at (or numerically
-        // indistinguishable from) a fixed point. Pass it through so opt's
-        // step-norm test stops the walk and the runner screens the point
-        // (#2817); no point evaluating the
-        // cost at x + 1e-30·s to chase ULP-level "improvements".
-        if max_step_abs < EFS_NEGLIGIBLE_STEP {
+        // A raw step that no longer moves the iterate: `x + s` rounds back to `x`
+        // in every coordinate, so the iteration is at a fixed point to working
+        // precision and every backtracking trial would evaluate `x` itself. Pass
+        // it through so opt's step-norm test stops the walk and the runner
+        // screens the point (#2817). The test is the representable one, not a
+        // picked step size (#2469).
+        if x.iter().zip(raw_step.iter()).all(|(value, delta)| value + delta == *value) {
             if psi_indices.is_some() {
                 self.consecutive_psi_zero_iters = 0;
             }
@@ -4659,8 +4654,11 @@ impl FixedPointObjective for OuterFixedPointBridge<'_> {
             for &i in psi_idx {
                 rho_only[i] = 0.0;
             }
-            let max_rho_abs = rho_only.iter().map(|s| s.abs()).fold(0.0_f64, f64::max);
-            if max_rho_abs >= EFS_NEGLIGIBLE_STEP
+            let rho_only_moves = x
+                .iter()
+                .zip(rho_only.iter())
+                .any(|(value, delta)| value + delta != *value);
+            if rho_only_moves
                 && let Some(scaled) =
                     self.efs_backtrack(x, &rho_only, current_cost, MAX_EFS_BACKTRACK)?
             {
