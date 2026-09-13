@@ -343,6 +343,8 @@ struct IndexAtoms {
     deviation: Vec<[[[f64; 4]; 4]; 4]>,
     directional: [[[[f64; 4]; 4]; 4]; 2],
     slope_components: [f64; 2],
+    /// Raw leading coefficient of each link-deviation column's local cubic.
+    link_leading: Vec<f64>,
     /// The slope and every deviation coordinate whose column does not vanish here.
     active: Vec<usize>,
     /// `∂^S η` for every block content: a direction code (`u` is 2, `v` is 1),
@@ -365,6 +367,7 @@ impl IndexAtoms {
         let r = primary.total;
         let scale = family.probit_frailty_scale();
         let mut deviation = vec![[[[0.0; 4]; 4]; 4]; r];
+        let mut link_leading = vec![0.0; r];
         if let (Some(range), Some(runtime)) = (primary.h.as_ref(), family.score_warp.as_ref()) {
             BernoulliMarginalSlopeFamily::for_each_deviation_basis_cubic_at(
                 runtime,
@@ -402,6 +405,7 @@ impl IndexAtoms {
                     column[2][1] = scale_coeff4(daab, scale);
                     column[1][2] = scale_coeff4(dabb, scale);
                     column[0][3] = scale_coeff4(dbbb, scale);
+                    link_leading[index] = span.c3;
                     Ok(())
                 },
             )?;
@@ -436,6 +440,7 @@ impl IndexAtoms {
             deviation,
             directional,
             slope_components: [directions[0][primary.slope], directions[1][primary.slope]],
+            link_leading,
             active,
             content: Vec::new(),
         };
@@ -844,6 +849,221 @@ impl LinkCrossing {
     }
 }
 
+#[derive(Clone, Copy)]
+struct FluxSlot {
+    /// `∂u/∂s` at the crossing, `u = a + b·z`.
+    crossing: f64,
+    /// `∂b/∂s`.
+    slope: f64,
+    /// `∂η/∂s` at the crossing.
+    eta: f64,
+    /// `∂Δc₃/∂s`.
+    jump: f64,
+}
+
+impl FluxSlot {
+    const ZERO: Self = Self {
+        crossing: 0.0,
+        slope: 0.0,
+        eta: 0.0,
+        jump: 0.0,
+    };
+}
+
+/// Moving-boundary terms of one interior link-knot crossing `z* = (τ − a)/b`.
+///
+/// At an interior knot the link deviation is `C²`: across the crossing the index
+/// changes by `scale·Δc₃·(u − τ)³`, so the calibration integrand is `C²` and
+/// orders through three need no boundary term. Differentiating `Σ_cells ∫`
+/// further moves `z*` (`∂z*/∂s = −u_s/b`):
+///   order 4: `K·(−Δc₃/b)·Π u_s`;
+///   order 5: `K·[−(1/b)·Σ_t (∂_tΔc₃ − η*·∂_tη·Δc₃)·Π_{r≠t} u_r
+///            − (Δc₃/b²)·(z* + η*·η_z)·Π u_s + (Δc₃/b²)·Σ_t ∂_t b·Π_{r≠t} u_r]`,
+/// with `K = 6·scale·e^{−q(z*)}/2π` and per slot `u_s = ∂u/∂s`, `∂_t b`, `∂_tη`
+/// and `∂_tΔc₃` at the crossing. This is `LinkCrossing`'s general term with
+/// only `L‴` jumping, in closed form.
+struct KnotFlux {
+    prefactor: f64,
+    jump: f64,
+    slope: f64,
+    eta_star: f64,
+    q_z: f64,
+    intercept: FluxSlot,
+    coordinates: Vec<FluxSlot>,
+    directions: [FluxSlot; 2],
+}
+
+impl KnotFlux {
+    fn new(
+        cell: exact_kernel::DenestedCubicCell,
+        atoms: &IndexAtoms,
+        column_jumps: &[f64],
+        jump: f64,
+        b: f64,
+        scale: f64,
+        primary: &PrimarySlices,
+        directions: [&Array1<f64>; 2],
+    ) -> Self {
+        let z_star = cell.right;
+        let eta_star = cell.eta(z_star);
+        let eta_z = cell.c1 + z_star * (2.0 * cell.c2 + 3.0 * cell.c3 * z_star);
+        let mut coordinates = vec![FluxSlot::ZERO; primary.total];
+        for (p, slot) in coordinates.iter_mut().enumerate() {
+            if p == primary.slope {
+                *slot = FluxSlot {
+                    crossing: z_star,
+                    slope: 1.0,
+                    eta: eval_coeff4_at(&atoms.base[0][1], z_star),
+                    jump: 0.0,
+                };
+            } else if p != primary.q {
+                *slot = FluxSlot {
+                    crossing: 0.0,
+                    slope: 0.0,
+                    eta: eval_coeff4_at(&atoms.deviation[p][0][0], z_star),
+                    jump: column_jumps[p],
+                };
+            }
+        }
+        let direction_slot = |direction: &Array1<f64>| {
+            let mut slot = FluxSlot {
+                crossing: direction[primary.slope] * z_star,
+                slope: direction[primary.slope],
+                eta: 0.0,
+                jump: 0.0,
+            };
+            for (p, coordinate) in coordinates.iter().enumerate() {
+                slot.eta += direction[p] * coordinate.eta;
+                slot.jump += direction[p] * coordinate.jump;
+            }
+            slot
+        };
+        let direction_slots = [direction_slot(directions[0]), direction_slot(directions[1])];
+        Self {
+            prefactor: 6.0 * scale * (-cell.q(z_star)).exp() / std::f64::consts::TAU,
+            jump,
+            slope: b,
+            eta_star,
+            q_z: z_star + eta_star * eta_z,
+            intercept: FluxSlot {
+                crossing: 1.0,
+                slope: 0.0,
+                eta: eval_coeff4_at(&atoms.base[1][0], z_star),
+                jump: 0.0,
+            },
+            coordinates,
+            directions: direction_slots,
+        }
+    }
+
+    fn slot(&self, slot: ExplicitSlot) -> FluxSlot {
+        match slot {
+            ExplicitSlot::U => self.directions[0],
+            ExplicitSlot::V => self.directions[1],
+            ExplicitSlot::Intercept => self.intercept,
+            ExplicitSlot::Coordinate(p) => self.coordinates[p],
+        }
+    }
+
+    fn flux(&self, slots: &[ExplicitSlot]) -> f64 {
+        let mut values = [FluxSlot::ZERO; 5];
+        for (value, &slot) in values.iter_mut().zip(slots) {
+            *value = self.slot(slot);
+        }
+        let values = &values[..slots.len()];
+        let crossing_product_without = |skip: usize| {
+            let mut product = 1.0;
+            for (position, value) in values.iter().enumerate() {
+                if position != skip {
+                    product *= value.crossing;
+                }
+            }
+            product
+        };
+        let b = self.slope;
+        let all = crossing_product_without(values.len());
+        match values.len() {
+            4 => self.prefactor * (-self.jump / b) * all,
+            5 => {
+                let mut total = -(self.jump / (b * b)) * self.q_z * all;
+                for (position, value) in values.iter().enumerate() {
+                    let others = crossing_product_without(position);
+                    total -= (value.jump - self.eta_star * value.eta * self.jump) / b * others;
+                    total += self.jump / (b * b) * value.slope * others;
+                }
+                self.prefactor * total
+            }
+            _ => 0.0,
+        }
+    }
+}
+
+/// A link-knot crossing's moving-boundary terms. An interior knot jumps only in
+/// `L‴`, where the closed-form flux is exact and cheap. A support edge is only
+/// `C⁰`, and the general term runs there.
+enum Crossing {
+    General(LinkCrossing),
+    InteriorKnot(KnotFlux),
+}
+
+impl Crossing {
+    fn partial(&self, slots: &[ExplicitSlot]) -> f64 {
+        match self {
+            Self::General(crossing) => crossing.partial(slots),
+            Self::InteriorKnot(knot) => knot.flux(slots),
+        }
+    }
+}
+
+impl BernoulliMarginalSlopeFamily {
+    /// The moving-boundary terms of the crossing between the adjacent cells
+    /// `left` and `right`: the closed-form flux where `τ` is an interior link
+    /// knot, the general term where it is a support endpoint.
+    fn link_crossing(
+        &self,
+        left: &exact_kernel::DenestedPartitionCell,
+        left_atoms: &IndexAtoms,
+        right: &exact_kernel::DenestedPartitionCell,
+        right_atoms: &IndexAtoms,
+        b: f64,
+        primary: &PrimarySlices,
+        directions: [&Array1<f64>; 2],
+    ) -> Crossing {
+        let interior_knot = match (left.right_edge, self.link_dev.as_ref()) {
+            (exact_kernel::PartitionEdge::Crossing { tau }, Some(runtime)) => {
+                let breakpoints = runtime.breakpoints();
+                breakpoints.first() != Some(&tau) && breakpoints.last() != Some(&tau)
+            }
+            _ => false,
+        };
+        if !interior_knot {
+            return Crossing::General(LinkCrossing::new(
+                left.cell,
+                left_atoms,
+                right.cell,
+                right_atoms,
+                b,
+            ));
+        }
+        let column_jumps: Vec<f64> = left_atoms
+            .link_leading
+            .iter()
+            .zip(&right_atoms.link_leading)
+            .map(|(left_c3, right_c3)| left_c3 - right_c3)
+            .collect();
+        Crossing::InteriorKnot(KnotFlux::new(
+            left.cell,
+            left_atoms,
+            &column_jumps,
+            left.link_span.c3 - right.link_span.c3,
+            b,
+            self.probit_frailty_scale(),
+            primary,
+            directions,
+        ))
+    }
+}
+
 /// The link-knot crossings' moving-boundary terms of order two,
 /// `[B[a,a], B[a,b], B[b,b]]`, over the intercept and the slope, the only
 /// coordinates that move a crossing. With `Δ` the jump of an index partial
@@ -897,7 +1117,7 @@ pub(super) fn standard_normal_flex_crossing_second_partials(
 /// moving-boundary terms to explicit calibration partials a lowering
 /// accumulates cell by cell.
 pub(super) struct CalibrationCrossings {
-    crossings: Vec<LinkCrossing>,
+    crossings: Vec<Crossing>,
 }
 
 impl CalibrationCrossings {
@@ -944,12 +1164,14 @@ impl BernoulliMarginalSlopeFamily {
             {
                 continue;
             }
-            crossings.push(LinkCrossing::new(
-                left.cell,
+            crossings.push(self.link_crossing(
+                left,
                 &atoms(left)?,
-                right.cell,
+                right,
                 &atoms(right)?,
                 b,
+                primary,
+                directions,
             ));
         }
         Ok(CalibrationCrossings { crossings })
@@ -1402,12 +1624,14 @@ impl BernoulliMarginalSlopeFamily {
             {
                 continue;
             }
-            let crossing = LinkCrossing::new(
-                left.cell,
+            let crossing = self.link_crossing(
+                left,
                 &cell_atoms[left_index],
-                right.cell,
+                right,
                 &cell_atoms[left_index + 1],
                 b,
+                primary,
+                directions,
             );
             let mut active: Vec<usize> = cell_atoms[left_index]
                 .active
