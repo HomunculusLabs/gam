@@ -9,7 +9,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: test-census-${{ github.sha }}
+  # One running census per ref plus the newest waiting one: a started run is
+  # never cancelled, and a superseded waiting run is covered by the next.
+  group: test-census-${{ github.event_name == 'push' && github.ref || github.sha }}
   cancel-in-progress: false
 
 jobs:

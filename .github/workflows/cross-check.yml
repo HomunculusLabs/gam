@@ -66,7 +66,14 @@ concurrency:
   # Ref-keying with cancellation is right for "give me the newest answer about
   # this branch". It is wrong for "is THIS commit good?", because the verdict's
   # subject is the commit and superseding it destroys the only record of it.
-  group: cross-check-${{ github.sha }}
+  #
+  # Keyed per commit, a swarm landing ~200 commits an hour queued ~150 gate runs
+  # at once (09-12) and starved every other workflow of the 20 runner slots.
+  # Pushes now share one group per ref with cancel-in-progress false: a running
+  # gate is never cancelled, so every started verdict completes, and only the
+  # newest waiting run survives. A superseded waiting run never started, so it
+  # destroys no record, and the later verdict covers its commit as an ancestor.
+  group: cross-check-${{ github.event_name == 'push' && github.ref || github.sha }}
   cancel-in-progress: false
 
 jobs:
