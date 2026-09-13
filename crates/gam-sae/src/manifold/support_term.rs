@@ -3638,12 +3638,19 @@ impl SaeSupportSparseTerm {
                 )
             })?;
         let coordinate_dim = *system.row_offsets.last().unwrap_or(&0);
-        let mut gamma = SaeArrowVector {
-            t: Array1::<f64>::zeros(coordinate_dim),
-            beta: Array1::<f64>::zeros(beta_dim),
-        };
         let inverse_rank = 1.0 / derivative_vectors.len() as f64;
-        for border_vector in derivative_vectors {
+        // #2576: each derivative vector contributes independently, so the vectors
+        // fold in parallel over the length-only tree `schur_matvec` uses, and the
+        // sum does not depend on thread count. On the 3000x48 chart the dense lane
+        // hands this loop k = 7680 vectors. Serially it took about 125 s of one
+        // outer evaluation (job 635403: the gap between the evidence line and the
+        // adjoint FGMRES start).
+        let accumulate = |range: core::ops::Range<usize>| -> Result<SaeArrowVector, String> {
+            let mut gamma = SaeArrowVector {
+                t: Array1::<f64>::zeros(coordinate_dim),
+                beta: Array1::<f64>::zeros(beta_dim),
+            };
+            for border_vector in &derivative_vectors[range] {
             for (row_index, row) in rows.iter().enumerate() {
                 let row_start = system.row_offsets[row_index];
                 let q = system.row_dims[row_index];
@@ -3724,7 +3731,22 @@ impl SaeSupportSparseTerm {
                 // is not an invariant. Integer compare, negligible in release.
                 assert_eq!(local_t.len(), q);
             }
-        }
+            }
+            Ok(gamma)
+        };
+        let gamma = gam_linalg::pairwise_reduce::par_deterministic_try_block_fold(
+            derivative_vectors.len(),
+            accumulate,
+            |mut left: SaeArrowVector, right: SaeArrowVector| -> Result<SaeArrowVector, String> {
+                left.t += &right.t;
+                left.beta += &right.beta;
+                Ok(left)
+            },
+        )?
+        .ok_or_else(|| {
+            "support reduced-logdet profile adjoint requires a non-empty derivative bundle"
+                .to_string()
+        })?;
         if gamma
             .t
             .iter()
