@@ -70,8 +70,6 @@ pub enum JointHessianSource {
     },
 }
 
-pub(crate) const EXACT_JOINT_HESSIAN_DENSE_MAX_BYTES: usize = 512 * 1024 * 1024;
-
 pub(crate) fn exact_joint_hessian_dense_bytes(total: usize) -> Result<usize, CustomFamilyError> {
     total
         .checked_mul(total)
@@ -79,18 +77,24 @@ pub(crate) fn exact_joint_hessian_dense_bytes(total: usize) -> Result<usize, Cus
         .ok_or_else(|| CustomFamilyError::trial_point(format!("joint Hessian dense byte count overflow for dim={total}")))
 }
 
+/// Refuse a dense joint Hessian past the memory governor's
+/// single-materialization cap. The same cap decides when the inner PCG attempt
+/// is the only solve (`JointHessianWork::pcg_attempt`), so a Hessian whose
+/// attempt may hand the step to the dense route is never refused here.
 pub(crate) fn ensure_exact_joint_hessian_dense_budget(
     total: usize,
     context: &str,
 ) -> Result<(), CustomFamilyError> {
     let bytes = exact_joint_hessian_dense_bytes(total)?;
-    if bytes > EXACT_JOINT_HESSIAN_DENSE_MAX_BYTES {
+    let cap = gam_runtime::resource::MemoryGovernor::global().single_materialization_cap_bytes();
+    if bytes > cap {
         return Err(CustomFamilyError::UnsupportedConfiguration {
             reason: format!(
                 "{context}: exact dense joint Hessian requires {:.2} GiB for dim={total}, \
-             exceeding the {:.2} GiB cap; refusing approximate determinant algebra",
+             exceeding the memory governor's {:.2} GiB single-materialization cap; refusing \
+             approximate determinant algebra",
                 bytes as f64 / (1024.0 * 1024.0 * 1024.0),
-                EXACT_JOINT_HESSIAN_DENSE_MAX_BYTES as f64 / (1024.0 * 1024.0 * 1024.0),
+                cap as f64 / (1024.0 * 1024.0 * 1024.0),
             ),
         });
     }

@@ -19,7 +19,7 @@
 
 use crate::custom_family::{
     ExactNewtonJointGradientEvaluation, ExactNewtonJointHessianWorkspace,
-    JointHessianSourcePreference, JointHessianWork, MaterializationIntent,
+    JointHessianSourcePreference, MaterializationIntent,
 };
 use crate::util::loop_progress::LoopProgress;
 use gam_linalg::faer_ndarray::fast_ab;
@@ -2209,15 +2209,11 @@ impl<const K: usize, T: RowKernel<K> + 'static> ExactNewtonJointHessianWorkspace
     ) -> JointHessianSourcePreference {
         match intent {
             // The inner Newton step only needs H·v and the diagonal
-            // preconditioner. Serve the operator whenever the row-pullback
-            // work model routes the joint solve matrix-free.
-            MaterializationIntent::InnerSolve
-                if JointHessianWork::row_pullback(self.cache.n as u64, self.cache.p as u64)
-                    .matrix_free_route(self.cache.p) =>
-            {
-                JointHessianSourcePreference::Operator
-            }
-            MaterializationIntent::InnerSolve => JointHessianSourcePreference::Dense,
+            // preconditioner. Serving the operator at every shape lets it try
+            // PCG within the dense build's cost and fall back to the one-pass
+            // dense build below only when CG has not converged by then
+            // (`JointHessianWork::pcg_attempt`, gam#2900).
+            MaterializationIntent::InnerSolve => JointHessianSourcePreference::Operator,
             // Logdet and outer consumers either factorize/materialize H or
             // have row-kernel-specific projected trace paths. The one-pass
             // dense build is bounded and cheaper than reconstructing H from
@@ -2527,10 +2523,10 @@ mod gram_inner_contraction_tests {
 
     #[test]
     fn row_kernel_workspace_routes_inner_solve_to_operator() {
-        // 512 coefficients over 8 rows is far past the p ≤ 3n dense turn.
-        let p = 512;
-        assert!(crate::custom_family::JointHessianWork::row_pullback(8, p as u64).matrix_free_route(p));
-        let kernel = SyntheticKernel::new(8, p, 0x979);
+        // 64 rows over 8 coefficients is a tall shape the worst-case rule priced
+        // dense; the inner solve still gets the operator, so its PCG attempt can run.
+        let p = 8;
+        let kernel = SyntheticKernel::new(64, p, 0x979);
         let workspace: Arc<dyn ExactNewtonJointHessianWorkspace> =
             Arc::new(RowKernelHessianWorkspace::new(kernel).expect("workspace"));
 
