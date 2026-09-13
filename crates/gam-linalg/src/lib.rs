@@ -41,8 +41,6 @@ pub mod sparse_exact;
 #[cfg(test)]
 mod test_support;
 pub mod triangular;
-pub mod types;
 pub mod utils;
 
 pub use error::LinalgError;
-pub use types::RidgePolicy;

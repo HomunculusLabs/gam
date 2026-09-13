@@ -372,7 +372,6 @@ pub(crate) fn solve_blockweighted_system(
     w: &Array1<f64>,
     s_lambda: &Array2<f64>,
     ridge_floor: f64,
-    ridge_policy: RidgePolicy,
 ) -> Result<Array1<f64>, CustomFamilyError> {
     let n = x.nrows();
     if y_star.len() != n || w.len() != n {
@@ -381,7 +380,7 @@ pub(crate) fn solve_blockweighted_system(
         });
     }
     let xtwy = x.compute_xtwy(w, y_star)?;
-    x.solve_systemwith_policy(w, &xtwy, Some(s_lambda), ridge_floor, ridge_policy)
+    x.solve_system_with_ridge_floor(w, &xtwy, Some(s_lambda), ridge_floor)
         .map_err(|_| CustomFamilyError::NumericalFailure {
             reason: "block solve failed after ridge retries".to_string(),
         })

@@ -3466,5 +3466,16 @@
     },
     "reason": "#2469: BlockwiseFitOptions::ridge_policy is deleted. Production always selected RidgePolicy::solver_only(), so effective_solverridge (a 1e-15 floor) fed only unreachable objective-ridge branches. The two logdet helpers are renamed stable_logdet and active_face_logdet after losing their policy and ridge arguments. The four tests pinned the deleted floor, exercised the ExactFullObjective inhabitant no fit selects, or compared two identical calls.",
     "evidence": "At the base, git grep -n -w for each removed name finds its declaration, the call sites this change rewrites and no caller outside gam-custom-family. Guarded cargo check --workspace --all-targets --exclude gam-pyffi at 853ef3bd0 plus this change, with public_api_census.py on a temporary commit of it: job 608376 (stage rp1), /scratch.global/sauer354/pool/const2469b/rp123.608376.log."
+  },
+  {
+    "base": "1719dba455fe2a0ae65d03c535f879fb2faa2688",
+    "removed": {
+      "crates/gam-linalg/src/matrix/mod.rs::solve_systemwith_policy": 1,
+      "crates/gam-linalg/src/types.rs::accounts_for_objective": 1,
+      "crates/gam-linalg/src/types.rs::exact_full_objective": 1,
+      "crates/gam-linalg/src/types.rs::solver_only": 1
+    },
+    "reason": "#2469 follow-up to the BlockwiseFitOptions::ridge_policy deletion: gam_linalg::RidgePolicy's constructors and predicate have no remaining behaviour-changing reader, since solve_systemwith_policy used the policy only in an error string. DesignMatrix::solve_systemwith_policy is renamed solve_system_with_ridge_floor now that the ridge floor is its only extra argument.",
+    "evidence": "At the base, git grep -n -w for each removed name finds its declaration, the test module in types.rs and the callers rewritten in this change. There is no gam-pyffi or python reference. Guarded cargo check --workspace --all-targets --exclude gam-pyffi with public_api_census.py on a temporary commit: job 608376 (stage rp23), /scratch.global/sauer354/pool/const2469b/rp123.608376.log."
   }
 ]

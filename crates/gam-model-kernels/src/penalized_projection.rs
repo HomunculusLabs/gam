@@ -2,15 +2,14 @@
 //!
 //! Family-agnostic helper that solves a single penalized WLS system
 //! `(XᵀWX + Σ λ_k S_k + ridge) β = Xᵀ W (target_eta − offset)` through the
-//! design operator's stabilized policy solve. Carved out of the gamlss family
+//! design operator's ridge-floored solve. Carved out of the gamlss family
 //! stack under #1521 because it carries no gamlss-specific type — its inputs are
-//! the lower-tier [`DesignMatrix`] / [`PenaltyMatrix`] / [`RidgePolicy`]
-//! primitives — and is consumed across families (gamlss block warm starts and
-//! the transformation-normal warm start). Error text is emitted as `String`
+//! the lower-tier [`DesignMatrix`] / [`PenaltyMatrix`] primitives — and is
+//! consumed across families (gamlss block warm starts and the
+//! transformation-normal warm start). Error text is emitted as `String`
 //! verbatim, byte-identical to the previous `GamlssError`-coerced output.
 
 use gam_linalg::matrix::DesignMatrix;
-use gam_linalg::types::RidgePolicy;
 use gam_problem::PenaltyMatrix;
 use ndarray::{Array1, Array2};
 
@@ -61,13 +60,8 @@ pub fn solve_penalizedweighted_projection(
         }
     }
 
-    let beta = design.solve_systemwith_policy(
-        weights,
-        &xtwy,
-        penalty_system.as_ref(),
-        ridge_floor,
-        RidgePolicy::solver_only(),
-    )?;
+    let beta =
+        design.solve_system_with_ridge_floor(weights, &xtwy, penalty_system.as_ref(), ridge_floor)?;
     if beta.iter().any(|v| !v.is_finite()) {
         return Err(
             "solve_penalizedweighted_projection produced non-finite coefficients".to_string(),

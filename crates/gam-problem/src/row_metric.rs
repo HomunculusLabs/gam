@@ -47,7 +47,7 @@
 //! single point of truth for "is this a valid precision metric".
 //!
 //! Any rank floor used to make a block invertible for an internal solve is
-//! **solver-only** (mirroring `RidgePolicy::solver_only`, #747): it never enters
+//! **solver-only** (#747): it never enters
 //! the residual the objective sums, so `δ` cannot bias the criterion.
 //!
 //! # Rung 1 — the behavioral metric *in the reconstruction loss* (nats currency)
@@ -300,7 +300,7 @@ pub struct RowMetric {
     /// **Solver-only** Tikhonov floor `δ` added as `δ I_p` to make a
     /// rank-deficient `U_n U_nᵀ` invertible for an *internal solve only*.
     ///
-    /// Invariant (mirrors `RidgePolicy::solver_only`, #747): `δ` **never** enters
+    /// Invariant (#747): `δ` **never** enters
     /// any quantity that feeds the evidence criterion. The criterion-facing
     /// quad-form / whitening / fisher-mass methods all use the *un-floored*
     /// `U_n U_nᵀ`; only [`Self::solve_floor`]-tagged solver helpers see `δ`. A

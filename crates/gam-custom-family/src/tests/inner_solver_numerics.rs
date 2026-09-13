@@ -2703,7 +2703,6 @@ pub(crate) fn block_solve_sparse_matches_dense() {
         &w,
         &s_lambda,
         1e-12,
-        RidgePolicy::exact_full_objective(),
     )
     .expect("dense solve should succeed");
 
@@ -2713,7 +2712,6 @@ pub(crate) fn block_solve_sparse_matches_dense() {
         &w,
         &s_lambda,
         1e-12,
-        RidgePolicy::exact_full_objective(),
     )
     .expect("sparse solve should succeed");
 
@@ -2755,7 +2753,6 @@ pub(crate) fn block_solve_falls_backwhen_llt_rejects_indefinite_system() {
         &w,
         &s_lambda,
         1e-12,
-        RidgePolicy::exact_full_objective(),
     )
     .expect("fallback solve should succeed");
 

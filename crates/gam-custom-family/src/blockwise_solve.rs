@@ -1527,12 +1527,11 @@ impl ParameterBlockUpdater for DiagonalBlockUpdater<'_> {
                 });
                 let xtwy = x.transpose_vector_multiply(&wy);
                 let beta = x
-                    .solve_systemwith_policy(
+                    .solve_system_with_ridge_floor(
                         working_weights,
                         &xtwy,
                         Some(ctx.s_lambda),
                         ctx.options.ridge_floor,
-                        RidgePolicy::solver_only(),
                     )
                     .map_err(|_| "block solve failed after ridge retries".to_string())?;
                 Ok(BlockUpdateResult {

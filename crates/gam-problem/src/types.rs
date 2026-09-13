@@ -2,8 +2,6 @@ use ndarray::{Array1, ArrayView1};
 use serde::{Deserialize, Serialize};
 use std::ops::{Deref, DerefMut};
 
-pub use gam_linalg::RidgePolicy;
-
 pub use gam_spec::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

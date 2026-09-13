@@ -8233,5 +8233,20 @@
     ],
     "reason": "#2469: BlockwiseFitOptions::ridge_policy is deleted. Every production options value carried RidgePolicy::solver_only(), so every objective-ridge branch took its else arm. effective_solverridge and its 1e-15 floor fed only those branches. stable_logdet_with_ridge_policy and active_face_logdet_with_ridge_policy lose their policy and ridge arguments and become stable_logdet and active_face_logdet. The four tests pinned the deleted floor, exercised the ExactFullObjective inhabitant no fit selects, or compared two identical calls. OneBlockLinearLikelihoodExactFamily, with its evaluate, was the fixture of one of those tests and of nothing else.",
     "evidence": "At the base, git grep -n -w ridge_policy over crates, src, tests and gam-pyffi finds two production assignments of the field (the options.rs Default and multinomial.rs), both RidgePolicy::solver_only(), and exact_full_objective() only inside test modules. git grep -n -w OneBlockLinearLikelihoodExactFamily finds only its declaration, its impl and exact_newton_backtracking_descent_includes_explicit_ridge. Guarded cargo check --workspace --all-targets --exclude gam-pyffi at 853ef3bd0 plus this change, with source_removal_guard.py and public_api_census.py run on a temporary commit of it: job 608376 (stage rp1), /scratch.global/sauer354/pool/const2469b/rp123.608376.log."
+  },
+  {
+    "base": "1719dba455fe2a0ae65d03c535f879fb2faa2688",
+    "items": [
+      "crates/gam-linalg/src/matrix/mod.rs:fn:solve_systemwith_policy",
+      "crates/gam-linalg/src/types.rs:enum:RidgePolicy",
+      "crates/gam-linalg/src/types.rs:fn:accounts_for_objective",
+      "crates/gam-linalg/src/types.rs:fn:exact_full_objective",
+      "crates/gam-linalg/src/types.rs:fn:exact_policy_accounts_for_the_objective",
+      "crates/gam-linalg/src/types.rs:fn:solver_only",
+      "crates/gam-linalg/src/types.rs:fn:solver_only_policy_cannot_enter_objective_accounting",
+      "crates/gam-linalg/src/types.rs:fn:the_policy_has_no_third_inhabitant"
+    ],
+    "reason": "#2469 follow-up to the BlockwiseFitOptions::ridge_policy deletion: gam_linalg::RidgePolicy has no reader left that changes behaviour. DesignMatrix::solve_systemwith_policy used its argument only inside an error string, and its three production callers (the custom-family diagonal block solve, penalized_projection and LinearOperator::solve_system) passed solver_only(). The enum, its constructors, its predicate and its test module go with crates/gam-linalg/src/types.rs. solve_systemwith_policy is renamed solve_system_with_ridge_floor, because the ridge floor is now its only extra argument.",
+    "evidence": "At the base, git grep -n -w RidgePolicy over crates, src, tests and gam-pyffi finds, outside types.rs, only the lib.rs and gam-problem re-exports, the matrix/mod.rs import and signatures, penalized_projection.rs, blockwise_solve.rs and test helpers or doc mentions. git grep -n -w solve_systemwith_policy finds the trait method, the DesignMatrix wrapper and the three callers rewritten here. Guarded cargo check --workspace --all-targets --exclude gam-pyffi on the change, with source_removal_guard.py and public_api_census.py on a temporary commit: job 608376 (stage rp23), /scratch.global/sauer354/pool/const2469b/rp123.608376.log."
   }
 ]

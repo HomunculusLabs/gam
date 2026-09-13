@@ -3,7 +3,6 @@ use crate::faer_ndarray::{
     effective_global_parallelism, fast_ab, fast_atb, fast_atv, fast_atv_into, fast_av,
     fast_av_into, fast_xt_diag_x, stream_weighted_crossprod_into,
 };
-use crate::types::RidgePolicy;
 use faer::Accum;
 use faer::linalg::matmul::matmul;
 use faer::sparse::{SparseColMat, SparseRowMat, Triplet};
@@ -4001,26 +4000,25 @@ pub trait LinearOperator {
         rhs: &Array1<f64>,
         penalty: Option<&Array2<f64>>,
     ) -> Result<Array1<f64>, String> {
-        self.solve_systemwith_policy(weights, rhs, penalty, 0.0, RidgePolicy::solver_only())
+        self.solve_system_with_ridge_floor(weights, rhs, penalty, 0.0)
     }
-    fn solve_systemwith_policy(
+    fn solve_system_with_ridge_floor(
         &self,
         weights: &Array1<f64>,
         rhs: &Array1<f64>,
         penalty: Option<&Array2<f64>>,
         ridge_floor: f64,
-        ridge_policy: RidgePolicy,
     ) -> Result<Array1<f64>, String> {
         if rhs.len() != self.ncols() {
             return Err(format!(
-                "solve_systemwith_policy rhs dimension mismatch: rhs length {} != ncols {}",
+                "solve_system_with_ridge_floor rhs dimension mismatch: rhs length {} != ncols {}",
                 rhs.len(),
                 self.ncols()
             ));
         }
         if !(ridge_floor.is_finite() && ridge_floor >= 0.0) {
             return Err(format!(
-                "solve_systemwith_policy ridge floor must be finite and non-negative, got {ridge_floor:?}"
+                "solve_system_with_ridge_floor ridge floor must be finite and non-negative, got {ridge_floor:?}"
             ));
         }
         let ridge = ridge_floor;
@@ -4078,7 +4076,7 @@ pub trait LinearOperator {
         if let Some(pen) = penalty {
             if pen.nrows() != system.nrows() || pen.ncols() != system.ncols() {
                 return Err(format!(
-                    "solve_systemwith_policy penalty shape mismatch: got {}x{}, expected {}x{}",
+                    "solve_system_with_ridge_floor penalty shape mismatch: got {}x{}, expected {}x{}",
                     pen.nrows(),
                     pen.ncols(),
                     system.nrows(),
@@ -4096,7 +4094,7 @@ pub trait LinearOperator {
             .factorize(&system)
             .map_err(|error| {
                 format!(
-                    "solve_systemwith_policy ({ridge_policy:?}) exact factorization failed at ridge {ridge:.3e}: {error:?}"
+                    "solve_system_with_ridge_floor exact factorization failed at ridge {ridge:.3e}: {error:?}"
                 )
             })?;
         let mut solution = rhs.clone();
@@ -4105,7 +4103,7 @@ pub trait LinearOperator {
         if solution.iter().all(|value| value.is_finite()) {
             Ok(solution)
         } else {
-            Err("solve_systemwith_policy produced a non-finite solution".to_string())
+            Err("solve_system_with_ridge_floor produced a non-finite solution".to_string())
         }
     }
 }
@@ -5833,21 +5831,19 @@ impl DesignMatrix {
         <Self as DenseDesignOperator>::quadratic_form_diag(self, middle)
     }
 
-    pub fn solve_systemwith_policy(
+    pub fn solve_system_with_ridge_floor(
         &self,
         weights: &Array1<f64>,
         rhs: &Array1<f64>,
         penalty: Option<&Array2<f64>>,
         ridge_floor: f64,
-        ridge_policy: RidgePolicy,
     ) -> Result<Array1<f64>, String> {
-        <Self as LinearOperator>::solve_systemwith_policy(
+        <Self as LinearOperator>::solve_system_with_ridge_floor(
             self,
             weights,
             rhs,
             penalty,
             ridge_floor,
-            ridge_policy,
         )
     }
 }
@@ -6740,7 +6736,7 @@ mod tests {
         let rhs = Array1::from_shape_fn(p, |j| (j as f64 * 0.37).sin());
         let beta = design
             .solve_system(&weights, &rhs, Some(&penalty))
-            .expect("policy solve should answer a wide penalized system");
+            .expect("ridge-floored solve should answer a wide penalized system");
         let residual = (x.t().dot(&x) + &penalty).dot(&beta) - &rhs;
         let relative = residual.dot(&residual).sqrt() / rhs.dot(&rhs).sqrt();
         assert!(relative < 1e-10, "relative residual {relative:e}");
