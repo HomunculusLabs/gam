@@ -275,19 +275,20 @@ fn gaussian_reml_optimize_latent<'py>(
                 .map(|value| value * value)
                 .sum::<f64>()
                 .sqrt();
-            // A zero iteration budget is an intentional checkpoint probe:
-            // evaluate the caller's start and let this FFI wrapper emit its
-            // typed, resumable convergence evidence below. Sending the
-            // probe through `RiemannianTrustRegion::minimize` loses that
-            // evidence because the generic optimizer can only return its
-            // unstructured "0 iterations" error.
+            // A zero iteration budget is an intentional checkpoint probe that
+            // evaluates the caller's start. Otherwise the trust region reports its
+            // terminal iterate whether or not its certificate holds, so an
+            // exhausted budget still hands back the point: this wrapper's own
+            // stationarity test below then refuses with typed, resumable evidence
+            // instead of the optimizer's untyped non-convergence error.
             let optimized = if max_iter == 0 {
                 start
             } else {
                 let mut objective = LatentOuterObjective { problem: &problem };
                 trust_region
-                    .minimize(manifold_ref, &mut objective, start.view())
+                    .minimize_reporting_termination(manifold_ref, &mut objective, start.view())
                     .map_err(|err| err.to_string())?
+                    .point
             };
             let (value, _) = problem.value_and_grad(optimized.view(), false);
             Ok((optimized, value, start_grad_norm))

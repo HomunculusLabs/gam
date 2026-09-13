@@ -48,7 +48,7 @@ pub(crate) const TRUST_REGION_RELATIVE_GRADIENT_CONTEXT: &str =
 /// Terminal state of a trust-region run: the iterate reached, and the numbers the
 /// first-order certificate was decided against.
 #[derive(Clone, Debug)]
-pub(crate) struct TrustRegionTermination {
+pub struct TrustRegionTermination {
     /// The last iterate. Present whether or not the certificate holds — this is
     /// the work a budget-exhausted run has to hand back.
     pub point: Array1<f64>,
@@ -131,7 +131,7 @@ impl RiemannianTrustRegion {
     /// a non-finite value, an invalid radius, an objective or manifold error —
     /// are still `Err` here; only the first-order test is demoted from an error
     /// to a reported verdict.
-    pub(crate) fn minimize_reporting_termination(
+    pub fn minimize_reporting_termination(
         &self,
         manifold: &dyn RiemannianManifold,
         objective: &mut dyn RiemannianObjective,
