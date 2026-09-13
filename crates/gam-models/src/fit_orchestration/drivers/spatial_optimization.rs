@@ -4091,7 +4091,9 @@ fn run_exact_joint_spatial_optimization(
             // bad probe — e.g. an anisotropy that overflows the Duchon radial
             // kernel — no longer aborts the whole REML optimization.
             Err(err) if is_recoverable_trial_point_error(&err) => {
-                log::debug!(
+                // Each refusal costs the line search a halving and this call's
+                // work; a run that crawls on refusals must say why (#2735).
+                log::info!(
                     "[{label}] trial point infeasible (kernel design \
                      not constructible at theta={theta:?}): {err}; retreating",
                 );
