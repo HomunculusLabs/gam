@@ -351,7 +351,7 @@ crates/gam-runtime/src/cgroup_memory.rs	inspected_levels	retired-no-product-user
 crates/gam-runtime/src/cgroup_memory.rs	working_set_bytes	retired-no-product-user
 crates/gam-runtime/src/process_monitor.rs	inc	retired-by-later-deletion:1beaa2893d
 crates/gam-runtime/src/process_monitor.rs	track_scope_with_progress	retired-by-later-deletion:1beaa2893d
-crates/gam-runtime/src/resource.rs	availability	restored-in-place
+crates/gam-runtime/src/resource.rs	availability	retired-no-product-user
 crates/gam-runtime/src/resource.rs	budget_bytes	retired-no-product-user
 crates/gam-runtime/src/resource.rs	cgroup	retired-no-product-user
 crates/gam-runtime/src/resource.rs	host_available_bytes	retired-no-product-user

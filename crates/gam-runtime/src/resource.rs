@@ -421,10 +421,6 @@ impl MemoryGovernor {
         }
     }
 
-    pub fn availability(&self) -> MemoryAvailability {
-        self.ledger.availability.clone()
-    }
-
     pub(crate) fn reserved_bytes(&self) -> usize {
         self.ledger
             .reserved_bytes
