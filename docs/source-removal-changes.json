@@ -6625,5 +6625,13 @@
     ],
     "reason": "SPEC rules 5 and 23 (#2901 V22, slice 5b). Since 88cd62b75 every derivative lane of the dense standard REML prices log|H| on H's identified subspace with exact kernels. DenseCholeskyOperator::from_spd_with_smooth_logdet_agreement still certified the value-only LLT against the smooth-floored sum of ln r_eps(sigma) at eps = sqrt(machine eps)*p, a floor no standard lane prices. It is renamed from_spd_with_logdet_agreement and certified by the factorization roundoff bound alone, which also holds every eigenvalue above the rounding band. spectral_epsilon_for_dim served only that certificate beside spectral_epsilon, so it is inlined into spectral_epsilon. The #2457 tests are restated against the identified-subspace operator. floor_touching_spectrum becomes small_resolved_spectrum, and the smooth-floor control only_a_floor_touching_hessian_separates_the_two_logdets_2457 becomes only_a_band_touching_hessian_separates_the_two_logdets_2457, which compares the analytic full-spectrum log-determinant instead of raw_cholesky_logdet's LLT.",
     "evidence": "At the base, git grep -n from_spd_with_smooth_logdet_agreement finds its definition, one production call in crates/gam-solve/src/reml/objective.rs (renamed here) and five calls in logdet_lane_agreement_2457_tests.rs (restated here). git grep -n spectral_epsilon_for_dim finds its definition, spectral_epsilon, the certificate and the 2457 test fixture. floor_touching_spectrum, raw_cholesky_logdet and the control test are named only in logdet_lane_agreement_2457_tests.rs. Not compiled locally; a guarded job follows."
+  },
+  {
+    "base": "8ade9c77fee7183a4a9c3494c4342e2039d041a7",
+    "items": [
+      "crates/gam-sae/src/encode.rs:const:NEWTON_REFINE_CONVERGED_EPS"
+    ],
+    "reason": "SPEC rule 23 (#2469). refine_certified_start stopped once the pending Newton step fell to NEWTON_REFINE_CONVERGED_EPS·(1 + ‖t‖), a picked ratio of 1e-12 plus an absolute unit. The certificate in hand already fixes the stopping rule. From a certified iterate (h_k ≤ ½), the exact next step obeys η_{k+1} ≤ β_{k+1}·(L/2)·η_k², with β_{k+1} ≤ β_k/(1 − h_k) by the Banach perturbation lemma, so η_{k+1} ≤ h_k/(2(1 − h_k))·η_k. A computed step that fails that contraction is round-off in the field rather than Newton progress, and refinement stops at that iterate. An exactly zero step stops at once. Nothing is left for the constant to scale.",
+    "evidence": "At the base, git grep -n -w NEWTON_REFINE_CONVERGED_EPS finds only crates/gam-sae/src/encode.rs:86 (the declaration) and :1584 (its one read, the refine early exit). refine_certified_start has one caller, certify_with_basin_warmup, which both the batched and the per-row encodes reach. Not compiled or run locally."
   }
 ]

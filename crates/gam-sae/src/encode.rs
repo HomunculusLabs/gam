@@ -75,16 +75,6 @@ use faer::Side;
 /// the certified ball; at or above it the start is uncertified.
 pub(crate) const KANTOROVICH_THRESHOLD: f64 = 0.5;
 
-/// Newton refinement convergence floor. Once a refinement step's length `‖δ‖`
-/// falls below this (relative to the coordinate scale `1 + ‖t‖`), the iterate has
-/// reached the certified root to f64 resolution: applying the step cannot move `t`
-/// meaningfully, and the remaining fixed-budget steps only re-accumulate round-off.
-/// Stopping there is STRICTLY more accurate than draining a fixed step budget on a
-/// well-conditioned quadratic Newton tail, and it removes that tail's per-step
-/// `evaluate` + `second_jet` cost (the dominant per-row encode work). The batched
-/// and per-row encodes share this rule, so they stay bit-identical.
-pub(crate) const NEWTON_REFINE_CONVERGED_EPS: f64 = 1.0e-12;
-
 /// A chart region on an atom's latent coordinate: a center `t_c` plus a
 /// certified in-chart radius. Over the ball `‖t − t_c‖ ≤ radius` the jet sup
 /// bounds returned by [`BasisHessianLipschitz`] hold, so the Kantorovich
@@ -1576,12 +1566,8 @@ fn refine_certified_start(
     assert!(initial_cert.certified());
     let mut final_cert = initial_cert;
     for _ in 0..newton_steps {
-        // Convergence early-exit: the pending Newton step is below the coordinate
-        // ULP scale, so `t + δ == t` to f64 resolution — the certified root is
-        // reached and the remaining fixed-budget steps would only re-accumulate
-        // round-off. This is where the well-conditioned quadratic Newton tail's
-        // redundant `evaluate` + `second_jet` work is eliminated.
-        if delta.dot(&delta).sqrt() <= NEWTON_REFINE_CONVERGED_EPS * (1.0 + t.dot(&t).sqrt()) {
+        // An exactly zero pending step is the root itself.
+        if final_cert.eta == 0.0 {
             break;
         }
         let next = &t + &delta;
@@ -1611,8 +1597,19 @@ fn refine_certified_start(
         if !cert.certified() {
             return Ok(None);
         }
+        // Newton–Kantorovich contraction. From a certified iterate (`h_k ≤ ½`) the
+        // exact next step satisfies `η_{k+1} ≤ β_{k+1}·(L/2)·η_k²` with
+        // `β_{k+1} ≤ β_k/(1 − h_k)`, hence `η_{k+1} ≤ h_k/(2(1 − h_k))·η_k`. A computed
+        // step that fails to contract that far is round-off in the field, not Newton
+        // progress, so refinement stops at this iterate: further steps would only
+        // re-accumulate round-off and pay another `evaluate` + `second_jet`.
+        let contracted =
+            cert.eta <= final_cert.h / (2.0 * (1.0 - final_cert.h)) * final_cert.eta;
         final_cert = cert;
         delta = next_delta;
+        if !contracted {
+            break;
+        }
     }
     Ok(Some(CertifiedEncodeProbe {
         coord: t,
