@@ -238,7 +238,7 @@ pub struct CompiledBlocks {
 /// Structural relationship between one raw penalized block and the higher-priority
 /// anchor already accepted by the identifiability compiler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PenalizedDirectionAnnotationKind {
+pub(crate) enum PenalizedDirectionAnnotationKind {
     /// The block kept its full realized-design span; none of its penalized
     /// directions were already represented by a higher-priority block.
     Independent,
@@ -253,7 +253,7 @@ pub enum PenalizedDirectionAnnotationKind {
 
 /// Per-block structural annotation emitted by `orthogonalize_design_blocks`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PenalizedDirectionAnnotation {
+pub(crate) struct PenalizedDirectionAnnotation {
     pub block_idx: usize,
     pub raw_width: usize,
     pub kept_width: usize,
@@ -1375,7 +1375,7 @@ impl CompiledMap {
 /// pilot W-metric) by the cumulative anchor of all higher-priority blocks —
 /// those directions are removed (not penalised), so the joint design
 /// `[X_0 V_0 | X_1 V_1 | …]` has the overlap excised exactly.
-pub struct BlockOrthogonalization {
+pub(crate) struct BlockOrthogonalization {
     /// `block_transforms[b]`: the `(p_b × r_b)` reparam `V_b` for raw block `b`,
     /// in the **original block order** (parallel to the `block_designs` input).
     pub block_transforms: Vec<Array2<f64>>,
