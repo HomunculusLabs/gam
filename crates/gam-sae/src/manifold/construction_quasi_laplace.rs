@@ -87,7 +87,9 @@ struct ShiftedTerminalStep {
 
 /// #2731/#2228 — what one terminal-polish call learned from its committed steps
 /// that bought less than their own quadratic model: the largest rung (damping or
-/// shift) such a step was taken at, and the shortest such step.
+/// shift) such a step was taken at, and the shortest such step. While the memory
+/// holds, a carry walks back only as far as its growth bound keeps the next step
+/// inside that radius, instead of staying where it is.
 #[derive(Clone, Copy)]
 struct RefutedRung {
     rung: f64,
@@ -3126,10 +3128,21 @@ impl SaeManifoldTerm {
                             walked_back
                         };
                     let growth = committed.shift / walked_back;
-                    if refuted_shift
-                        .is_some_and(|refuted| refuted.holds(walked_back, growth, step_norm))
+                    if let Some(refuted) = refuted_shift
+                        .filter(|refuted| refuted.holds(walked_back, growth, step_norm))
                     {
-                        committed.shift
+                        // #2731 — the rung below could make the step as long as a refuted
+                        // one, so σ walks back only to `σ′ = σ·‖Δ‖/r`, which lengthens
+                        // every positive-curvature component by at most `σ/σ′ = r/‖Δ‖`.
+                        // Job 605564 (`b7945fab1`) held σ = 8.956239e-3 over polish steps
+                        // 3–44 at agreement 1.85–1.990 while ‖Δ‖ went 0.168 → 0.109 under
+                        // step 1's refuted radius 1.094; `σ′` was 1.375e-3 at step 3.
+                        let bound = committed.shift * step_norm / refuted.radius;
+                        if bound <= f64::EPSILON * committed.curvature_along_step {
+                            0.0
+                        } else {
+                            bound.min(committed.shift)
+                        }
                     } else {
                         walked_back
                     }
@@ -3402,11 +3415,12 @@ impl SaeManifoldTerm {
             // took ‖g‖ 1.18 → 0.044, and the walked-back ν = 7.68e-8 (agreement
             // 0.44–0.81) took it back to 1.18, until `max_steps` ended the call at a
             // refine entry ‖g‖ of 3.49e-2 against tol 2.501e-3. So a rung that bought
-            // less than its model is remembered, and the walk-back stops above it while
-            // the walked-back step could be as long as the shortest refuted step. The
-            // two steps of such a 2-cycle undo each other, so they are about equally
-            // long, and the memory holds there. It lets go once the committed steps
-            // are shorter than a refuted one by more than a rung's growth (#2228).
+            // less than its model is remembered. While the walked-back step could be as
+            // long as the shortest refuted step, the walk-back goes only as far as the
+            // growth bound keeps the step inside that radius. The two steps of such a
+            // 2-cycle undo each other, so they are about equally long, and the memory
+            // holds there. It lets go once the committed steps are shorter than a
+            // refuted one by more than a rung's growth (#2228).
             let model_agreement = (pre_objective - committed_objective)
                 / (0.5 * accepted.predicted_objective_decrease);
             let step_norm = accepted.step.step_norm_sq.sqrt();
@@ -3420,10 +3434,17 @@ impl SaeManifoldTerm {
                 // ν back to ν′ lengthens it by at most `(λ_min + √ν)/(λ_min + √ν′)`.
                 let growth = (curvature_min + accepted.damping.sqrt())
                     / (curvature_min + walked_back.sqrt());
-                if refuted_damping
-                    .is_some_and(|refuted| refuted.holds(walked_back, growth, step_norm))
+                if let Some(refuted) = refuted_damping
+                    .filter(|refuted| refuted.holds(walked_back, growth, step_norm))
                 {
-                    accepted.damping
+                    // The same bound on ν: `√ν′ = (λ_min + √ν)·‖Δ‖/r − λ_min` keeps every
+                    // retained component inside the refuted radius (#2731).
+                    let root = (curvature_min + accepted.damping.sqrt()) * step_norm
+                        / refuted.radius
+                        - curvature_min;
+                    let bound = if root > 0.0 { root * root } else { 0.0 };
+                    let bound = if bound < smallest_damping { 0.0 } else { bound };
+                    bound.min(accepted.damping)
                 } else {
                     walked_back
                 }
