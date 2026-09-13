@@ -57,7 +57,7 @@ pub(crate) fn pulled_back_operator(
     ensure_finite(ambient_jvp_input_chart, "ambient JVP")?;
     let gram = output_chart_jet.t().dot(&output_chart_jet);
     let rhs = output_chart_jet.t().dot(&ambient_jvp_input_chart);
-    solve_spd_1_or_2(gram.view(), rhs.view())
+    solve_spd_1_or_2(gram.view(), rhs.view(), p)
 }
 
 /// Aggregate token operators with optional density weights.
@@ -238,6 +238,7 @@ pub fn rotation_angle_band(
 fn solve_spd_1_or_2(
     gram: ArrayView2<'_, f64>,
     rhs: ArrayView2<'_, f64>,
+    jet_rows: usize,
 ) -> Result<Array2<f64>, String> {
     match gram.nrows() {
         1 => {
@@ -250,8 +251,16 @@ fn solve_spd_1_or_2(
         2 => {
             let (a, b, c) = (gram[[0, 0]], gram[[0, 1]], gram[[1, 1]]);
             let det = a * c - b * b;
-            let scale = (a.abs() * c.abs()).max(b.abs() * b.abs()).max(1.0);
-            if !det.is_finite() || det <= f64::EPSILON.sqrt() * scale {
+            // `JᵀJ` has an exact determinant `≥ 0` (Cauchy–Schwarz), so the metric
+            // is singular exactly when that determinant is zero. Each Gram entry is
+            // a length-`jet_rows` inner product, off by at most `γ_rows` of its
+            // absolute sum, and `Σ|J_i0·J_i1| ≤ √(a·c)`, so the formed `a·c` and `b²`
+            // are each off by at most `γ_{2·rows}·a·c`. The two products and the
+            // subtraction add `γ_2·(a·c + b²)`. A computed determinant within
+            // `γ_{4·rows+2}·(a·c + b²)` cannot be told apart from a singular metric.
+            let formation_band =
+                gam_linalg::roundoff::accumulation_growth(4 * jet_rows + 2) * (a * c + b * b);
+            if !det.is_finite() || det <= formation_band {
                 return Err("singular output chart metric".to_string());
             }
             let mut out = Array2::<f64>::zeros(rhs.dim());
