@@ -1,10 +1,11 @@
+#![cfg(test)]
 //! Contract tests for https://github.com/SauersML/gam/issues/219: the formula
 //! DSL parses the documented Wilkinson-Rogers operator family (`+`, `:`, `*`,
 //! `/`, `^`, `I(...)`) and the smooth/group constructors advertised in the
 //! README and docs. #219 was the grammar rejecting `:` as an interaction
 //! operator. Each test fails with the parser's error if a formula is rejected.
 
-use gam::inference::formula_dsl::{parse_formula, parse_formula_dsl};
+use super::{parse_formula, parse_formula_dsl};
 
 #[test]
 fn colon_interaction_in_dsl_string_parses() {

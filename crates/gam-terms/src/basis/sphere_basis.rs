@@ -627,7 +627,7 @@ pub(crate) fn fill_real_spherical_harmonics_row(
 /// - The L=12 cap (168 cols) matches the historical wisdom that beyond
 ///   degree 12 the spherical-harmonic Gram conditioning starts to suffer
 ///   under realistic data densities.
-pub fn default_spherical_harmonic_degree(n_rows: usize) -> usize {
+pub(crate) fn default_spherical_harmonic_degree(n_rows: usize) -> usize {
     // Convert a target column count into the smallest L with L(L+2) >= target.
     // L=2 → 8 cols; L=3 → 15; L=4 → 24; L=5 → 35; L=6 → 48; L=7 → 63; L=12 → 168.
     let target_cols = ((n_rows as f64) * 0.25).min(50.0).max(3.0);
@@ -4269,3 +4269,6 @@ mod harmonic_penalty_invariants_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod sphere_harmonic_default_degree_tests;

@@ -3322,7 +3322,7 @@ pub fn apply_sum_to_zero_constraint(
 /// dense matrix even when `B` is sparse. Callers that previously relied on
 /// the constrained basis being sparse should wrap the result in
 /// `DenseDesignMatrix`.
-pub fn apply_sum_to_zero_constraint_sparse(
+pub(crate) fn apply_sum_to_zero_constraint_sparse(
     basis_matrix: &SparseColMat<usize, f64>,
     weights: Option<ArrayView1<f64>>,
 ) -> Result<(Array2<f64>, Array2<f64>), BasisError> {
@@ -4585,3 +4585,6 @@ mod range_floor_psi_jet_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod sum_to_zero_sparse_projector_idempotence_tests;

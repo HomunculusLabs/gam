@@ -1,5 +1,6 @@
+#![cfg(test)]
 use faer::sparse::{SparseColMat, Triplet};
-use gam::basis::apply_sum_to_zero_constraint_sparse;
+use super::apply_sum_to_zero_constraint_sparse;
 use ndarray::Array2;
 
 fn dense_from_sparse(s: &SparseColMat<usize, f64>) -> Array2<f64> {

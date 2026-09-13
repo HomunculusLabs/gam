@@ -6,7 +6,6 @@ mod constant_curvature_kappa_inference_e2e;
 mod constant_curvature_kappa_outer_gradient_fd;
 mod identifiability_audit_hard_halt_gate;
 mod identifiability_audit_leverage_thresholds;
-mod identifiability_nullspace_projector_idempotence_bug;
 mod ladder_cert_rate_measure;
 mod structured_residual_974;
 mod topology_mixture_refinement;

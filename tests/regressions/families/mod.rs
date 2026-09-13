@@ -9,7 +9,6 @@ mod family_link_paren_poisson_gamma_gaussian_unknown;
 mod family_suite;
 mod flexible_blended_link_no_silent_noop_1596_1598;
 mod flexible_link_linkwiggle_joint_solve_aborts;
-mod formula_dsl_operator_family_issue_219;
 mod gamlss_binomial_location_scale_bug_hunt_3_of_3;
 mod gamma_dispersion_location_scale_predictable_1119;
 mod gamma_dispersion_shape_locked_underestimate;

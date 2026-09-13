@@ -126,7 +126,7 @@ impl From<String> for FormulaDslError {
     }
 }
 
-pub fn parse_formula_dsl(formula: &str) -> Result<FormulaDslParse, String> {
+pub(crate) fn parse_formula_dsl(formula: &str) -> Result<FormulaDslParse, String> {
     validate_balanced_delimiters(formula, "invalid formula syntax")?;
     let mut parsed =
         FormulaParser::parse(Rule::formula, formula).map_err(|e| FormulaDslError::ParseError {
@@ -3516,3 +3516,6 @@ pub(crate) fn parse_link_component_list(v: &str) -> Result<Vec<LinkComponent>, S
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod formula_dsl_operator_family_issue_219_tests;

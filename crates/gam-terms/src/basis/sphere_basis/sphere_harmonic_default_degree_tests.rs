@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Regression guard for `default_spherical_harmonic_degree`.
 //!
 //! Before fix: the function clamped `target = sqrt(n).clamp(3,12)` and then
@@ -10,7 +11,7 @@
 //! For modest-to-large n we hit L=6 or 7 (~48–63 cols), matching mgcv's
 //! `bs="sos"` default of k=50.
 
-use gam::basis::default_spherical_harmonic_degree;
+use super::default_spherical_harmonic_degree;
 
 #[test]
 fn default_degree_small_n_does_not_overfit() {

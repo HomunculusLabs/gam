@@ -6669,5 +6669,28 @@
     ],
     "reason": "#2899 moved tests: the #1018 gamma_quantile lower-tail regression and the #938 rho-posterior escalation-tier tests were the only users outside gam-inference of gam_inference::probability::gamma_quantile and rho_posterior::{rho_posterior_quadrature, rho_posterior_nuts}, which production calls only inside gam-inference (gamma_moment_matched_interval, escalate_rho_posterior). Both test files move verbatim into gam-inference unit-test modules (probability/gamma_quantile_small_shape_lower_tail_tests.rs, rho_posterior/rho_posterior_escalation_tiers_tests.rs), importing through super::, so no test is lost and the three functions narrow to pub(crate).",
     "evidence": "At the base, git grep -n -w over crates, src, tests, examples and bench finds gamma_quantile outside probability.rs only in tests/regressions/families/gamma_quantile_small_shape_lower_tail.rs, and rho_posterior_quadrature / rho_posterior_nuts outside rho_posterior.rs only in tests/perf_scale/misc/rho_posterior_escalation_tiers.rs. Every removed identity here is a declaration in those two deleted root files, and each reappears unchanged in the new module file."
+  },
+  {
+    "base": "e890e5d3eb2ad6a5abb2b09560c3cbd4bab7df2f",
+    "items": [
+      "tests/identifiability/misc/identifiability_nullspace_projector_idempotence_bug.rs:fn:dense_from_sparse",
+      "tests/identifiability/misc/identifiability_nullspace_projector_idempotence_bug.rs:fn:sparse_sum_to_zero_transform_acts_like_true_projector_under_zz_t",
+      "tests/manifolds/manifolds/sphere_harmonic_default_degree.rs:fn:default_degree_large_n_caps_at_l12",
+      "tests/manifolds/manifolds/sphere_harmonic_default_degree.rs:fn:default_degree_medium_n_targets_around_50_cols",
+      "tests/manifolds/manifolds/sphere_harmonic_default_degree.rs:fn:default_degree_monotonic_in_n",
+      "tests/manifolds/manifolds/sphere_harmonic_default_degree.rs:fn:default_degree_small_n_does_not_overfit",
+      "tests/regressions/families/formula_dsl_operator_family_issue_219.rs:fn:caret_power_in_dsl_string_parses",
+      "tests/regressions/families/formula_dsl_operator_family_issue_219.rs:fn:colon_interaction_in_dsl_string_parses",
+      "tests/regressions/families/formula_dsl_operator_family_issue_219.rs:fn:full_mixed_operator_formula_from_issue_219_parses",
+      "tests/regressions/families/formula_dsl_operator_family_issue_219.rs:fn:group_constructor_with_interaction_parses",
+      "tests/regressions/families/formula_dsl_operator_family_issue_219.rs:fn:high_level_parser_accepts_colon_interaction",
+      "tests/regressions/families/formula_dsl_operator_family_issue_219.rs:fn:identity_wrapper_in_dsl_string_parses",
+      "tests/regressions/families/formula_dsl_operator_family_issue_219.rs:fn:nested_smooth_with_interaction_inside_parses",
+      "tests/regressions/families/formula_dsl_operator_family_issue_219.rs:fn:slash_nesting_in_dsl_string_parses",
+      "tests/regressions/families/formula_dsl_operator_family_issue_219.rs:fn:star_expansion_in_dsl_string_parses",
+      "tests/regressions/families/formula_dsl_operator_family_issue_219.rs:fn:tensor_and_interaction_terms_coexist"
+    ],
+    "reason": "#2899 moved tests: three root test files were the only users outside gam-terms of gam_terms::basis::default_spherical_harmonic_degree, basis::apply_sum_to_zero_constraint_sparse and inference::formula_dsl::parse_formula_dsl, which production calls only inside gam-terms (term_builder.rs, bspline_build.rs, formula_dsl.rs). Each file moves verbatim into a gam-terms unit-test module beside its function (basis/sphere_basis/sphere_harmonic_default_degree_tests.rs, basis/duchon_thinplate/sum_to_zero_sparse_projector_idempotence_tests.rs, inference/formula_dsl/formula_dsl_operator_family_issue_219_tests.rs), importing through super::, so no test is lost and the three functions narrow to pub(crate).",
+    "evidence": "At the base, git grep -n -w over crates, src, tests, examples and bench finds default_spherical_harmonic_degree outside gam-terms only in tests/manifolds/manifolds/sphere_harmonic_default_degree.rs, apply_sum_to_zero_constraint_sparse only in tests/identifiability/misc/identifiability_nullspace_projector_idempotence_bug.rs, and parse_formula_dsl only in tests/regressions/families/formula_dsl_operator_family_issue_219.rs. Every removed identity is a declaration in those three deleted root files, and each reappears unchanged in its new module file."
   }
 ]
