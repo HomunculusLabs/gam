@@ -91,9 +91,8 @@ pub fn solve_row_codes(
             gram[[i, j]] = g;
             gram[[j, i]] = g;
         }
-        gram[[i, i]] += ridge as f64;
     }
-    let solution = solve_spd(&gram, &rhs);
+    let solution = solve_resolved_posterior_mean(&gram, &rhs, ridge as f64, p);
 
     let mut indices = Vec::with_capacity(s);
     let mut codes = Vec::with_capacity(s);
@@ -109,43 +108,62 @@ pub fn solve_row_codes(
     SparseCode { indices, codes }
 }
 
-/// Solve the positive-semidefinite active Gram system. A positive ridge makes
-/// the system strictly positive definite and takes the Cholesky path. With
-/// zero ridge, collinear selected atoms are legitimate; the Moore--Penrose
-/// solution is then the unique minimum-norm joint least-squares code. At no
-/// point are off-diagonal Gram terms discarded.
-fn solve_spd(gram: &Array2<f64>, rhs: &Array1<f64>) -> Array1<f64> {
+/// Posterior-mean active codes `(G + ρI)⁻¹ Dᵀx` on the eigenspace the stored atoms
+/// resolve.
+///
+/// `gram` is `G = DᵀD` over the `m` active f32 decoder rows, formed in f64 over `p`
+/// entries per pair, and `ridge` is `ρ`. Two sources bound what `G` separates from zero.
+/// The stored rows round by at most `μ = ε_f32/2` relative per entry, so `‖E‖_F ≤ μ‖D‖_F`,
+/// and by Weyl a singular value of `D` at or below `μ‖D‖_F` is not resolved: an eigenvalue
+/// `λ ≤ μ²·tr(G)`. Each Gram entry is a sum of `p` products and rounds by
+/// `γ_p = p·ε/(1 − p·ε)` of `Σ_c |d_ic d_jc| ≤ ‖d_i‖‖d_j‖`, which moves an eigenvalue by at
+/// most `γ_p·(Σ_i ‖d_i‖)²`.
+///
+/// An eigendirection `v` inside that band is a combination of atoms that the stored
+/// dictionary separates only at rounding, such as a near-duplicate pair. Its right-hand
+/// side `vᵀDᵀx = (Dv)ᵀx` is itself a rounding-level quantity, so neither the data nor the
+/// prior identifies that coordinate. A solve that keeps it swings the split of the code
+/// between those atoms on rounding-level decoder changes while the reconstruction stays put
+/// (#2283, job 612377: routing residual 2.5e-4..7.8e-4 for 30 epochs at a fixed decoder,
+/// ρ = 1.07e-14). Resolved directions contribute their exact coordinate `vᵀb/(λ + ρ)`, and
+/// unresolved ones contribute nothing, which is the minimum-norm code on the resolved
+/// subspace. With zero ridge and exactly collinear atoms this is the Moore–Penrose joint
+/// least-squares code. At no point are off-diagonal Gram terms discarded.
+fn solve_resolved_posterior_mean(
+    gram: &Array2<f64>,
+    rhs: &Array1<f64>,
+    ridge: f64,
+    p: usize,
+) -> Array1<f64> {
     use faer::Side;
-    use gam_linalg::faer_ndarray::{FaerCholesky, FaerEigh};
+    use gam_linalg::faer_ndarray::FaerEigh;
 
     let m = rhs.len();
-    if let Ok(factor) = gram.cholesky(Side::Lower) {
-        return factor.solvevec(rhs);
-    }
-
     let (eigenvalues, eigenvectors) = gram
         .eigh(Side::Lower)
         .expect("an active Gram matrix must admit a symmetric eigendecomposition");
-    let spectral_radius = eigenvalues
-        .iter()
-        .map(|value| value.abs())
-        .fold(0.0_f64, f64::max);
-    if spectral_radius == 0.0 {
-        return Array1::<f64>::zeros(m);
-    }
-    let cutoff = f64::EPSILON * (m as f64) * spectral_radius;
+    let trace = gram.diag().sum();
+    let norm_sum: f64 = gram.diag().iter().map(|value| value.max(0.0).sqrt()).sum();
+    let unit_roundoff = f64::from(f32::EPSILON) / 2.0;
+    let accumulation = p as f64 * f64::EPSILON;
+    let resolution = if accumulation < 1.0 {
+        unit_roundoff * unit_roundoff * trace
+            + accumulation / (1.0 - accumulation) * norm_sum * norm_sum
+    } else {
+        f64::INFINITY
+    };
     let mut out = Array1::<f64>::zeros(m);
     for eigen_index in 0..m {
         let eigenvalue = eigenvalues[eigen_index];
         assert!(
-            eigenvalue >= -cutoff,
-            "active Gram matrix is not positive semidefinite: eigenvalue {eigenvalue:e}, cutoff {cutoff:e}"
+            eigenvalue >= -resolution,
+            "active Gram matrix is not positive semidefinite: eigenvalue {eigenvalue:e}, resolution {resolution:e}"
         );
-        if eigenvalue <= cutoff {
+        if eigenvalue <= resolution {
             continue;
         }
         let eigenvector = eigenvectors.column(eigen_index);
-        let projection = eigenvector.dot(rhs) / eigenvalue;
+        let projection = eigenvector.dot(rhs) / (eigenvalue + ridge);
         for coordinate in 0..m {
             out[coordinate] += projection * eigenvector[coordinate];
         }
@@ -179,5 +197,43 @@ mod tests {
         assert!((code.codes[1] - 0.5).abs() < 1.0e-6);
         let reconstructed = code.codes[0] * decoder[[0, 0]] + code.codes[1] * decoder[[1, 0]];
         assert!((reconstructed - 1.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn atoms_equal_to_rounding_share_their_code_instead_of_amplifying_the_difference_2283() {
+        // Two f32 atoms one ulp apart in their first entry: a near-duplicate pair whose
+        // difference is pure rounding (Gram λ_min ≈ 1e-15, inside the resolution band). The
+        // row is orthogonal to their common direction, so the difference gets a right-hand
+        // side of about 5e-8. A solve on the whole Gram at ρ = 1e-14 amplifies that by 1/λ_min
+        // into codes of order 1e6, and they change sign when the ulp moves. The resolved
+        // posterior mean gives the pair one shared coordinate that stays put.
+        let row = array![0.8_f32, -0.6, 0.0];
+        let ridge = 1.0e-14_f32;
+        let solve = |first_entry: f32| {
+            let decoder = array![[0.6_f32, 0.8, 0.0], [first_entry, 0.8, 0.0]];
+            solve_row_codes(row.view(), decoder.view(), &[(0, 0.0), (1, 0.0)], 2, ridge)
+        };
+        let up = solve(f32::from_bits(0.6_f32.to_bits() + 1));
+        let down = solve(f32::from_bits(0.6_f32.to_bits() - 1));
+        for code in [&up, &down] {
+            assert!(
+                code.codes.iter().all(|value| value.abs() < 1.0e-6),
+                "a rounding-level atom difference must not carry a code: {} {}",
+                code.codes[0],
+                code.codes[1]
+            );
+            assert!(
+                (code.codes[0] - code.codes[1]).abs() < 1.0e-12,
+                "the pair must share one coordinate: {} {}",
+                code.codes[0],
+                code.codes[1]
+            );
+        }
+        assert!(
+            (up.codes[0] - down.codes[0]).abs() < 1.0e-6,
+            "moving the ulp must not move the code: {} vs {}",
+            up.codes[0],
+            down.codes[0]
+        );
     }
 }

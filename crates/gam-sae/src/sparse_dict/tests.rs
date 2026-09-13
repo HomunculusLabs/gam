@@ -245,50 +245,75 @@ fn sparse_trainer_recovers_planted_dictionary_beats_pca_baseline() {
 /// `fit_sparse_dictionary` refuses it as typed non-convergence instead of returning
 /// it. The 60-epoch budget is the regime whose EV plateau the removed best-effort
 /// arm returned as an open certificate: it now yields typed non-convergence or a
-/// certified fixed point with no births. The 3-epoch budget is too short to reach
-/// any fixed point and must refuse.
+/// certified fixed point with no births.
+///
+/// The refusal arm needs a budget that cannot reach a fixed point by construction.
+/// One epoch on noisy rows is such a budget. The seeded atoms are single noisy rows,
+/// and the first refresh moves every atom with two or more members to their
+/// conditional optimum, which differs from any one member by that member's noise:
+/// `1 − cos²` of order `(‖ε‖/‖x‖)² ≈ 1e-3`, against the `1e-9` tolerance. The earlier
+/// 3-epoch arm on the noise-free rows stopped being one once the code solve stopped
+/// amplifying rounding splits among their near-duplicate seeds. Those rows sit exactly
+/// on 16 lines and certify within three epochs (#2283, job 618419).
 #[test]
 fn an_unconverged_over_complete_fit_is_refused_not_returned_2902() {
     let (k, p, n) = (64usize, 16usize, 1600usize);
     let (x, _atoms) = planted(k, p, n, 0.35);
-    for max_epochs in [60usize, 3] {
-        let config = SparseDictConfig {
-            n_atoms: k,
-            active: 2,
-            minibatch: 256,
-            max_epochs,
-            score_tile: 16,
-            code_ridge: 1.0e-6,
-            decoder_ridge: 1.0e-6,
-            tolerance: 1.0e-9,
-            score_mode: gam_gpu::GpuPolicy::Off,
-        };
-        match fit_sparse_dictionary(x.view(), &config) {
-            Ok(fit) => {
-                assert!(
-                    max_epochs > 3,
-                    "a 3-epoch over-complete fit has not reached its fixed point and must \
-                     not become a model; got EV {}",
-                    fit.explained_variance
-                );
-                assert!(
-                    fit.convergence.certified && fit.convergence.accepted_births == 0,
-                    "a returned fit must be a certified fixed point with no births; got \
-                     certified={} births={} routing_residual={}",
-                    fit.convergence.certified,
-                    fit.convergence.accepted_births,
-                    fit.convergence.routing_residual
-                );
-            }
-            Err(err) => {
-                let message = err.to_string();
-                assert!(
-                    message.contains("did not converge")
-                        || (max_epochs > 3 && message.contains("did not settle")),
-                    "expected typed non-convergence at max_epochs={max_epochs}, got: {err}"
-                );
-            }
+    let config = |max_epochs: usize| SparseDictConfig {
+        n_atoms: k,
+        active: 2,
+        minibatch: 256,
+        max_epochs,
+        score_tile: 16,
+        code_ridge: 1.0e-6,
+        decoder_ridge: 1.0e-6,
+        tolerance: 1.0e-9,
+        score_mode: gam_gpu::GpuPolicy::Off,
+    };
+    match fit_sparse_dictionary(x.view(), &config(60)) {
+        Ok(fit) => {
+            assert!(
+                fit.convergence.certified && fit.convergence.accepted_births == 0,
+                "a returned fit must be a certified fixed point with no births; got \
+                 certified={} births={} routing_residual={}",
+                fit.convergence.certified,
+                fit.convergence.accepted_births,
+                fit.convergence.routing_residual
+            );
         }
+        Err(err) => {
+            let message = err.to_string();
+            assert!(
+                message.contains("did not converge") || message.contains("did not settle"),
+                "expected typed non-convergence at max_epochs=60, got: {err}"
+            );
+        }
+    }
+
+    // Deterministic uniform noise of half-width 0.01 on every entry.
+    let mut noisy = x.clone();
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    for value in noisy.iter_mut() {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        let unit = ((state >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0;
+        *value += (0.01 * unit) as f32;
+    }
+    let refused = fit_sparse_dictionary(noisy.view(), &config(1));
+    let returned_ev = refused
+        .as_ref()
+        .map_or(f64::NAN, |fit| fit.explained_variance);
+    assert!(
+        refused.is_err(),
+        "a one-epoch over-complete fit on noisy rows has not reached its fixed point and \
+         must not become a model; got EV {returned_ev}"
+    );
+    if let Err(err) = refused {
+        assert!(
+            err.to_string().contains("did not converge"),
+            "expected typed non-convergence at max_epochs=1, got: {err}"
+        );
     }
 }
 
