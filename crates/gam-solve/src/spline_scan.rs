@@ -4899,12 +4899,46 @@ pub fn fit_spline_scan(
             };
             let (kkt_holds, kkt_curvature) = spline_kkt_holds(kkt_kind, kkt_enclosure);
             if !kkt_holds {
-                return Err(SplineScoreProofError::OptimumKktUncertified {
-                    location: search.location,
-                    bracket: kkt_bracket,
-                    derivative: kkt_enclosure.derivative,
-                    curvature: kkt_curvature,
-                });
+                // A boundary whose derivative sign lies inside the evaluator's
+                // certified rounding floor cannot carry an exact-real KKT
+                // certificate. A resolution-flat region the search retired at that
+                // same represented point already proves the maximum over its
+                // bracket exceeds the boundary score by at most pairwise evaluation
+                // error, and the global value certificate above orders every other
+                // candidate at resolution. That is the typed resolution-flat
+                // optimum `spline_optimum_proof` accepts, reached at a boundary
+                // (#2902 row 3: at the near-interpolation lower edge the order-2
+                // derivative ball is -8.3e-8 ± 1.3e-7).
+                let boundary_flat = matches!(
+                    kkt_kind,
+                    SplineKktKind::LowerBoundary | SplineKktKind::UpperBoundary
+                )
+                .then(|| {
+                    search.resolution_flat_regions.iter().find(|region| {
+                        region.sample.x.to_bits() == search.optimum.x.to_bits()
+                            && region.max_score_gap <= region.score_resolution
+                    })
+                })
+                .flatten();
+                match boundary_flat {
+                    Some(region) => log::debug!(
+                        "spline scan: boundary KKT sign is below the evaluator's derivative \
+                         resolution ({:?}); accepting the certified resolution-flat optimum on \
+                         {:?} (maximum score excess {:e} <= comparison resolution {:e})",
+                        kkt_enclosure.derivative,
+                        region.bracket,
+                        region.max_score_gap,
+                        region.score_resolution
+                    ),
+                    None => {
+                        return Err(SplineScoreProofError::OptimumKktUncertified {
+                            location: search.location,
+                            bracket: kkt_bracket,
+                            derivative: kkt_enclosure.derivative,
+                            curvature: kkt_curvature,
+                        });
+                    }
+                }
             }
         }
         SplineOptimumProof::ResolutionFlat {
