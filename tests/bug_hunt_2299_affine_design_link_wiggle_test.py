@@ -26,37 +26,30 @@ on ordinary GAM fixtures that converge cleanly and are deterministic (their
 covariance is always finite), so they assert the full contract including all
 covariance definitions.
 
-The LINK-WIGGLE frame's contract cannot ride on a green test today: this family
-has no comfortably-PD converging fixture (an explicit ``linkwiggle`` warp, a
-``double_penalty`` warp, larger ``n``, and a stronger slope were each measured
-to FAIL to converge; only the mild default ``flexible(logit)`` warp converges,
-and its joint precision is #2358-marginal -- a PD verdict that flips with
-rayon-fold order under load). So the link-wiggle contract is exercised by honest
-red gates that assert it UNWEAKENED and flip green when their upstream lanes
-land. The deterministic covariance-function coverage (exact ``M^-1`` and
-singular-posterior fit refusal) lives in Rust ``required_covariance_tests``
-(gam-custom-family/src/covariance.rs), which feeds a controlled joint precision
-with no marginal fit involved.
+The LINK-WIGGLE frame's contract has a narrow convergent window: an explicit
+``linkwiggle`` warp, a ``double_penalty`` warp, larger ``n``, and a stronger
+slope were each measured to fail to converge, and only the mild default
+``flexible(logit)`` warp converged, with a joint precision close to the PD
+tolerance (#2358). The deterministic covariance-function coverage (exact
+``M^-1`` and singular-posterior fit refusal) lives in Rust
+``required_covariance_tests`` (gam-custom-family/src/covariance.rs), which feeds
+a controlled joint precision with no marginal fit involved.
 
-Honest red gates in this file (unweakened contract, red until their lane lands):
+The link-wiggle and hostile-geometry tests in this file assert the same
+unweakened contract:
 
-  * ``test_link_wiggle_affine_design_covariance_and_identity_red_gate`` -- the
-    #2299 joint-frame covariance + affine identity; #2358 fit-marginality (the
-    covariance PD verdict is load-sensitive) + the #2299 predict-mu residual
-    (predict routes through the covariance). PASSES on a quiet box, red under
-    ordinary load; a green there is progress signal.
-  * ``test_link_wiggle_affine_design_offset_separation_red_gate`` -- the
-    link-wiggle model-offset separation; #2358 offset joint-Newton
-    non-convergence.
-  * ``test_ordinary_affine_design_reml_offset_smoothing_boundary_red_gate`` --
-    a smooth-of-x model offset drives a REML-with-offset smoothing-boundary
-    non-stationarity for ``s(x)`` + offset (gaussian).
-  * ``test_link_wiggle_affine_design_flex_link_joint_newton_blowup_red_gate`` --
-    the ``s(x)`` + ``flexible_link=True`` binomial joint-Newton blow-up
-    (#979 / #1596; min-eig ~ -1e200, degenerate fit, covariance unavailable).
+  * ``test_link_wiggle_affine_design_covariance_and_identity`` -- the #2299
+    joint-frame covariance + affine identity on the default flexible(logit) warp.
+  * ``test_link_wiggle_affine_design_offset_separation`` -- the link-wiggle
+    model-offset separation (#2358 was its convergence lane).
+  * ``test_ordinary_affine_design_reml_offset_smoothing_boundary`` -- ``s(x)`` +
+    a smooth-of-x model offset (gaussian), a REML-with-offset smoothing-boundary
+    geometry.
+  * ``test_link_wiggle_affine_design_flex_link_joint_newton_blowup`` -- the
+    ``s(x)`` + ``flexible_link=True`` binomial geometry that once blew up the
+    joint Newton solve (#979 / #1596).
 
-Those gates keep the contract assertions unweakened; they simply cannot pass
-until their convergence lanes are fixed, and they will flip green when they are.
+None of them is expected to be red: a failure in any of them is a defect.
 """
 
 import numpy as np
@@ -124,7 +117,7 @@ def test_ordinary_affine_design_exposes_model_offset_and_full_frame() -> None:
     # Well-conditioned ordinary GAM: a genuinely smooth mean signal with a known
     # per-row model offset that is NOT collinear with s(x), so REML has a clean
     # interior optimum. (The smooth-of-x offset that drives the REML boundary
-    # non-stationarity is preserved in the red gate below.)
+    # non-stationarity is preserved in the test below.)
     rng = np.random.default_rng(2299)
     n = 800
     x = rng.uniform(0.0, 1.0, n)
@@ -140,40 +133,31 @@ def test_ordinary_affine_design_exposes_model_offset_and_full_frame() -> None:
     np.testing.assert_allclose(affine.offset, offset, rtol=0.0, atol=0.0)
 
 
-def test_link_wiggle_affine_design_covariance_and_identity_red_gate() -> None:
-    """RED GATE (#2358 fit-marginality + the #2299 predict-mu residual).
+def test_link_wiggle_affine_design_covariance_and_identity() -> None:
+    """#2358 fit-marginality + the #2299 predict-mu path.
 
     The #2299 joint-frame covariance + affine-identity contract for a converged
     link-wiggle fit, asserted UNWEAKENED: frame == ``link_wiggle_joint``, the
     joint ``[Mean, LinkWiggle]`` covariance is non-None, and
     ``offset + matrix @ coefficients == linear_predictor`` to the fp floor.
 
-    This gate is NOT deterministic -- it is honestly-red-under-ordinary-load. On
-    a QUIET box (load < ~25) the flexible(logit) fit converges, its joint
-    precision ``H + S_lambda`` lands PD so the covariance is finite, and
-    ``predict`` serves the linear predictor, and the gate PASSES. Under ORDINARY
-    load it goes red, for two coupled reasons both UPSTREAM of the design-matrix
-    contract:
-      * the fit is #2358-marginal -- the mild logit=~probit warp leaves a
+    Two things upstream of the design-matrix contract decide this test:
+      * the fit was #2358-marginal: the mild logit=~probit warp leaves a
         weakly-identified warp direction, so the smallest eigenvalue of
-        ``H + S_lambda`` straddles the PD tolerance and rayon-fold summation
-        order (load-dependent) decides finite covariance versus a typed fit
-        refusal. The load-sensitivity IS the bug (a PD verdict that depends on
-        iteration order), owned by #2358.
+        ``H + S_lambda`` sat near the PD tolerance and rayon-fold summation order
+        (load-dependent) decided finite covariance versus a typed fit refusal. A
+        PD verdict that depends on iteration order is a defect, so a red result
+        under load is a real failure, not noise.
       * ``_assert_affine_identity`` obtains the engine linear predictor via
         ``model.predict``, which for a curved flexible link routes through the
         posterior-mean path and REQUIRES the joint covariance to integrate
-        ``E[g^-1(eta)]``. A posterior-incomplete fit is now refused before a
-        model can reach this assertion.
+        ``E[g^-1(eta)]``. A posterior-incomplete fit is refused before a model
+        can reach this assertion.
 
-    A green here is PROGRESS SIGNAL, not a flake to silence; the red-gate
-    direction is the safe one (an occasional quiet-box green under-reports the
-    red, it never falsely blocks CI). Do NOT convert this back to a plain green
-    test until BOTH #2358 (load-invariant / iteration-order-invariant
-    convergence) and the #2299 predict-mu residual land. The covariance FUNCTION
-    is pinned deterministically, with exact ``M^-1`` values, in the Rust
-    ``required_covariance_tests`` (gam-custom-family/src/covariance.rs); this
-    gate is the end-to-end wiring half.
+    The covariance FUNCTION is pinned deterministically, with exact ``M^-1``
+    values, in the Rust ``required_covariance_tests``
+    (gam-custom-family/src/covariance.rs); this test is the end-to-end wiring
+    half.
 
     Do NOT "simplify" the fixture to a leaner or heavier-penalty warp to make the
     covariance "more PD": an explicit ``linkwiggle(internal_knots=2)``, a
@@ -205,7 +189,7 @@ def test_link_wiggle_affine_design_covariance_and_identity_red_gate() -> None:
     # same-frame covariances carry mean variance and every Mean--wiggle cross
     # term for external variance calculations. There is no model offset here, so
     # the affine row offset is the zero vector; the offset-SEPARATION assertion
-    # lives on the ordinary frame and the link-wiggle red gate below.
+    # lives on the ordinary frame and the link-wiggle test below.
     assert affine.offset.shape == (n,)
     np.testing.assert_allclose(affine.offset, 0.0, rtol=0.0, atol=0.0)
 
@@ -233,7 +217,7 @@ def test_link_wiggle_affine_design_covariance_and_identity_red_gate() -> None:
     assert not bool(identical_columns.all())
 
 
-def test_link_wiggle_affine_design_offset_separation_red_gate() -> None:
+def test_link_wiggle_affine_design_offset_separation() -> None:
     """Gate (#2358 link-wiggle + offset joint-Newton convergence).
 
     The #2299 offset-SEPARATION contract for the link-wiggle joint frame: a
@@ -287,25 +271,22 @@ def test_design_matrix_array_returns_the_same_typed_affine_contract() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Honest red gates: the SAME #2299 affine-design contract, exercised on the two
-# convergence lanes that currently blow up before a fit exists. These assert the
-# unweakened contract (no xfail/skip); they fail today because the fit does not
-# converge, and they will flip green when their lanes are fixed. Do NOT weaken
-# or delete -- they are the coverage the contract tests above deliberately move
-# off of hostile fixtures.
+# The SAME #2299 affine-design contract, exercised on the two hostile geometries
+# whose convergence lanes once blew up before a fit existed. They assert the
+# unweakened contract. Do NOT weaken or delete them: they are the coverage the
+# contract tests above deliberately move off of hostile fixtures.
 # ---------------------------------------------------------------------------
 
 
-def test_ordinary_affine_design_reml_offset_smoothing_boundary_red_gate() -> None:
-    """RED GATE (REML-with-offset boundary non-stationarity).
+def test_ordinary_affine_design_reml_offset_smoothing_boundary() -> None:
+    """REML-with-offset smoothing-boundary geometry.
 
     A model offset that is itself a smooth function of ``x`` is collinear with
-    ``s(x)``; REML then drives the smoothing parameter to a boundary where the
-    outer objective is non-stationary and the fit does not settle. This is a
-    convergence-lane defect ORTHOGONAL to the #2299 design-matrix contract,
-    which is exercised on a well-conditioned fixture in
-    ``test_ordinary_affine_design_exposes_model_offset_and_full_frame``. When
-    the REML-with-offset lane is stationary this gate passes unchanged.
+    ``s(x)``; REML drives the smoothing parameter toward a boundary where the
+    outer objective was once non-stationary and the fit did not settle. That
+    convergence lane is ORTHOGONAL to the #2299 design-matrix contract, which
+    is exercised on a well-conditioned fixture in
+    ``test_ordinary_affine_design_exposes_model_offset_and_full_frame``.
     """
     rng = np.random.default_rng(2299)
     n = 160
@@ -319,20 +300,19 @@ def test_ordinary_affine_design_reml_offset_smoothing_boundary_red_gate() -> Non
     np.testing.assert_allclose(affine.offset, offset, rtol=0.0, atol=0.0)
 
 
-def test_link_wiggle_affine_design_flex_link_joint_newton_blowup_red_gate() -> None:
-    """RED GATE (#979 / #1596 flexible-link joint-Newton blow-up).
+def test_link_wiggle_affine_design_flex_link_joint_newton_blowup() -> None:
+    """#979 / #1596 flexible-link joint-Newton geometry.
 
     Deterministic flexible-link repro inherited from #2141: a smooth mean
-    ``s(x)`` aliased against a ``flexible_link=True`` warp collapses the joint
-    Newton solve (min-eig ~ -1e200, degenerate fit, no conditional covariance),
-    so the affine design cannot be built. This is a convergence-lane defect
-    ORTHOGONAL to the #2299 contract, which is exercised on an identifiable
+    ``s(x)`` aliased against a ``flexible_link=True`` warp once collapsed the
+    joint Newton solve (min-eig ~ -1e200, degenerate fit, no conditional
+    covariance), so the affine design could not be built. That convergence lane
+    is ORTHOGONAL to the #2299 contract, which is exercised on an identifiable
     parametric-mean flexible-link fit in
-    ``test_link_wiggle_affine_design_covariance_and_identity_red_gate``.
+    ``test_link_wiggle_affine_design_covariance_and_identity``.
     On this geometry the de-alias shift is material: evaluating B at the base
     predictor instead of the saved frozen index produced a dramatically
-    different fitted link. When the #979 / #1596 lane converges this gate passes
-    unchanged.
+    different fitted link.
     """
     rng = np.random.default_rng(0)
     n = 500
