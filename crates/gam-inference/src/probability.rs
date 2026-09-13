@@ -90,7 +90,7 @@ pub use gam_math::probability::standard_normal_quantile;
 /// (observation) intervals: a Gamma response is strongly right-skewed, so the
 /// symmetric `μ ± z·σ` band mis-covers each tail even when its width (variance)
 /// is correct. Equal-tailed Gamma quantiles place the right mass in each tail.
-pub fn gamma_quantile(p: f64, shape: f64, scale: f64) -> f64 {
+pub(crate) fn gamma_quantile(p: f64, shape: f64, scale: f64) -> f64 {
     if !(shape.is_finite() && shape > 0.0 && scale.is_finite() && scale > 0.0) {
         return f64::NAN;
     }
@@ -1768,3 +1768,6 @@ mod tests {
         assert!(tweedie_moment_matched_interval(2.0, 1.0, 1.5, 6.0, 0.025, 0.975).is_some());
     }
 }
+
+#[cfg(test)]
+mod gamma_quantile_small_shape_lower_tail_tests;

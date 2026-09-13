@@ -6649,5 +6649,25 @@
     ],
     "reason": "#2469: encode.rs declared its own pub(crate) SHAPE_BAND_MAX_POINTS = 512, documented as mirroring the shape-band cap in manifold/shape_uncertainty.rs. That made two pins for one budget, and either could drift from the other without anything noticing. The encode atlas now reads the manifold constant through the existing crate::manifold import, which already re-exports it with `pub use shape_uncertainty::*`. The value and every cap derived from it are unchanged.",
     "evidence": "At the base, git grep -n -w SHAPE_BAND_MAX_POINTS finds two declarations, crates/gam-sae/src/encode.rs:2994 (pub(crate)) and crates/gam-sae/src/manifold/shape_uncertainty.rs:7 (pub, re-exported by manifold/mod.rs:596). Every read of the encode.rs copy is in encode.rs (lines 3032-3371). The manifold copy is also read by construction_reconstruction.rs and cited by persistence.rs. Not compiled or run locally."
+  },
+  {
+    "base": "a40e7dbb9dffad4c0425021dbc483ed0684de177",
+    "items": [
+      "tests/perf_scale/misc/rho_posterior_escalation_tiers.rs:fn:gaussian_quadratic",
+      "tests/perf_scale/misc/rho_posterior_escalation_tiers.rs:fn:gaussian_quadratic_grad",
+      "tests/perf_scale/misc/rho_posterior_escalation_tiers.rs:fn:inverse_2x2",
+      "tests/perf_scale/misc/rho_posterior_escalation_tiers.rs:fn:nuts_recovers_gaussian_quadratic_moments_with_fixed_seed",
+      "tests/perf_scale/misc/rho_posterior_escalation_tiers.rs:fn:quadrature_reproduces_laplace_moments_on_gaussian_quadratic",
+      "tests/regressions/families/gamma_quantile_small_shape_lower_tail.rs:const:C",
+      "tests/regressions/families/gamma_quantile_small_shape_lower_tail.rs:const:G",
+      "tests/regressions/families/gamma_quantile_small_shape_lower_tail.rs:const:TINY",
+      "tests/regressions/families/gamma_quantile_small_shape_lower_tail.rs:fn:gamma_quantile_inverts_its_cdf_at_small_shape",
+      "tests/regressions/families/gamma_quantile_small_shape_lower_tail.rs:fn:gamma_quantile_is_correct_in_the_working_regime",
+      "tests/regressions/families/gamma_quantile_small_shape_lower_tail.rs:fn:ln_gamma",
+      "tests/regressions/families/gamma_quantile_small_shape_lower_tail.rs:fn:reference_cdf_matches_closed_forms",
+      "tests/regressions/families/gamma_quantile_small_shape_lower_tail.rs:fn:reg_lower_gamma"
+    ],
+    "reason": "#2899 moved tests: the #1018 gamma_quantile lower-tail regression and the #938 rho-posterior escalation-tier tests were the only users outside gam-inference of gam_inference::probability::gamma_quantile and rho_posterior::{rho_posterior_quadrature, rho_posterior_nuts}, which production calls only inside gam-inference (gamma_moment_matched_interval, escalate_rho_posterior). Both test files move verbatim into gam-inference unit-test modules (probability/gamma_quantile_small_shape_lower_tail_tests.rs, rho_posterior/rho_posterior_escalation_tiers_tests.rs), importing through super::, so no test is lost and the three functions narrow to pub(crate).",
+    "evidence": "At the base, git grep -n -w over crates, src, tests, examples and bench finds gamma_quantile outside probability.rs only in tests/regressions/families/gamma_quantile_small_shape_lower_tail.rs, and rho_posterior_quadrature / rho_posterior_nuts outside rho_posterior.rs only in tests/perf_scale/misc/rho_posterior_escalation_tiers.rs. Every removed identity here is a declaration in those two deleted root files, and each reappears unchanged in the new module file."
   }
 ]

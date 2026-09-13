@@ -1,8 +1,8 @@
 //! Exact marginal smoothing inference over the smoothing parameters `ρ`
 //! (issue #938): the Tier-0 **PSIS certificate**, plus the auto-selected
 //! escalation tiers — Tier-1 **Gauss-Hermite quadrature** over `ρ` (`K ≤ 4`,
-//! [`rho_posterior_quadrature`]) and Tier-2 **NUTS over `ρ`** with the exact
-//! profiled gradient (`K ≤ 16`, [`rho_posterior_nuts`]), routed by
+//! `rho_posterior_quadrature`) and Tier-2 **NUTS over `ρ`** with the exact
+//! profiled gradient (`K ≤ 16`, `rho_posterior_nuts`), routed by
 //! [`escalate_rho_posterior`] when the certificate refuses to certify the
 //! plug-in.
 //!
@@ -378,7 +378,7 @@ fn mixture_moments(nodes: &[RhoMixtureNode], k: usize) -> (Array1<f64>, Array2<f
 ///   profile solve.
 /// * `nodes_per_axis` — 3 or 5; pass `None` to auto-select (5 for `K ≤ 2`,
 ///   3 for `K ≤ 4` — at most 125 criterion evaluations either way).
-pub fn rho_posterior_quadrature<F>(
+pub(crate) fn rho_posterior_quadrature<F>(
     rho_hat: &Array1<f64>,
     outer_hessian: &Array2<f64>,
     mut criterion: F,
@@ -428,7 +428,7 @@ where
 /// * `seed` — deterministic seeding: the seed feeds the same splitmix64 chain /
 ///   transition streams as every other NUTS entry point. No clock, no global
 ///   RNG: the same `(fit, seed)` yields the same draws every run.
-pub fn rho_posterior_nuts<F>(
+pub(crate) fn rho_posterior_nuts<F>(
     rho_hat: &Array1<f64>,
     outer_hessian: &Array2<f64>,
     criterion_and_grad: F,
@@ -807,3 +807,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod rho_posterior_escalation_tiers_tests;

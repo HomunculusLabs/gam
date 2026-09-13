@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! #938 escalation tiers over the smoothing-parameter posterior `π(ρ|y)`.
 //!
 //! Reference-as-truth: every assertion here is against self-constructed
@@ -10,7 +11,7 @@
 //! mixture-corrected coefficient covariance must reduce to the plug-in
 //! `Vb(ρ̂)` when all mixture weight concentrates at `ρ̂`.
 
-use gam::inference::rho_posterior::{rho_posterior_nuts, rho_posterior_quadrature};
+use super::{rho_posterior_nuts, rho_posterior_quadrature};
 use ndarray::{Array1, Array2, array};
 
 /// `½ (ρ−ρ̂)ᵀ H (ρ−ρ̂)` — the criterion whose exact posterior is `N(ρ̂, H⁻¹)`.

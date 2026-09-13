@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Bug hunt: `gam::inference::probability::gamma_quantile` must invert the Gamma
 //! CDF in the *lower tail* at small shape (`a ≲ 0.1`).
 //!
@@ -18,7 +19,7 @@
 //! It shares no code with the routine under test, so the round-trip identity it
 //! checks is an independent oracle.
 
-use gam::inference::probability::gamma_quantile;
+use super::gamma_quantile;
 
 /// Lanczos approximation to `ln Γ(z)` for `z > 0` (g = 7, n = 9), accurate to
 /// ~1e-15 relative across the range exercised here.
