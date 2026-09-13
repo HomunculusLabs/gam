@@ -302,7 +302,7 @@ impl PairedTiming {
     /// on this host; a large value says the measurement is dominated by
     /// whichever arm goes first, and **no ordering of a non-randomised harness
     /// would have been trustworthy**. Returns `NaN` if either group is empty.
-    pub fn first_position_bias(&self) -> f64 {
+    pub(crate) fn first_position_bias(&self) -> f64 {
         let a_first: Vec<f64> = self
             .ratios
             .iter()
