@@ -853,19 +853,32 @@ impl CostStallGuard {
     /// * resolved descent: the incumbent improved by more than the criterion's
     ///   resolution `rel_tol·(1 + |V|)`, the same floor that decides whether one
     ///   step counts as an improvement; or
-    /// * stationarity: the incumbent's projected gradient contracted.
+    /// * stationarity: the incumbent's projected gradient contracted;
+    ///
+    /// or when descent is still available at the incumbent itself: its reduced
+    /// Hessian carries a negative eigenvalue beyond the criterion's curvature
+    /// resolution (`best_hessian_psd == Some(false)`, the bridge's verdict at
+    /// `criterion_curvature_resolution`). A certified strict saddle has a
+    /// feasible direction the cubic model can exploit, so a window that bought
+    /// nothing there is no evidence that continuing buys nothing. #2668 row 30
+    /// stopped at λ_min = −3.7e5 against a resolution of 7.1e-5 after the saddle
+    /// escape's bit-identity cut, where the search had previously escaped and
+    /// certified.
     ///
     /// The first window is always licensed, since nothing has yet been measured
-    /// about what continuing buys. A window that bought neither has measured
-    /// that continuing buys nothing, and spending another one on the same
-    /// evidence is the grind this exists to end, so the run stops at its
+    /// about what continuing buys. A window that bought none of these has
+    /// measured that continuing buys nothing, and spending another one on the
+    /// same evidence is the grind this exists to end, so the run stops at its
     /// incumbent and the terminal certificate judges that point.
     ///
     /// Termination follows without a count. The criterion is bounded below on
     /// the declared domain, so resolved descent can be bought only finitely
-    /// often; every other licence strictly lowers the incumbent's projected
-    /// gradient, a floating-point value bounded below by zero, which can also
-    /// happen only finitely often.
+    /// often, and every contraction licence strictly lowers the incumbent's
+    /// projected gradient, a floating-point value bounded below by zero. A
+    /// saddle licence is spent inside the solver's own stop: steps along
+    /// resolvable negative curvature either buy descent or are rejected until
+    /// the regularization reaches its ceiling, which opt reports as
+    /// `TrustRegionRejectFloor`.
     pub(crate) fn license_continuation(&mut self) -> bool {
         let licensed = match self.continuation_incumbent {
             None => true,
@@ -873,6 +886,7 @@ impl CostStallGuard {
                 let resolution = self.rel_tol * (1.0 + self.best_value.abs());
                 previous_value - self.best_value > resolution
                     || self.best_grad_norm < previous_grad_norm
+                    || self.best_hessian_psd == Some(false)
             }
         };
         if licensed {

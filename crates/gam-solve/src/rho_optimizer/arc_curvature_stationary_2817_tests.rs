@@ -882,6 +882,41 @@ fn an_operator_route_stall_that_bought_resolved_descent_keeps_moving_2817() {
     assert!(published.is_none(), "a licensed run publishes no stop");
 }
 
+/// A stall at a certified strict saddle keeps the search moving: resolvable
+/// negative curvature at the incumbent is descent still available (#2817, #2668
+/// row 30).
+///
+/// `H = diag(1, −1)`, so λ_min = −1 is far outside the criterion's curvature
+/// resolution `2·1e-7·(1 + 1e3) ≈ 2e-4`, and the bridge calls the incumbent a
+/// strict saddle. `|g| = 2` sits above the solver band, so the criterion's
+/// negative-curvature adjudication does not stop the run. The first window
+/// grants the saddle escape. The second is cut as a bit-identical replay and
+/// licensed as the first continuation. The third bought no descent and no
+/// smaller residual. Before, that third window stopped the run at the saddle,
+/// which is how row 30 ended at λ_min = −3.7e5. The saddle licence keeps it
+/// running, and ARC's regularization ceiling still ends a saddle it cannot
+/// exploit.
+#[test]
+fn a_stall_at_a_certified_strict_saddle_keeps_moving_2817() {
+    let (outcomes, published) = drive_arc_oracle_valued_2817(
+        array![0.5, 0.5],
+        flatlined_2817(array![2.0, 0.0], 3 * ARC_COST_STALL_WINDOW + 3),
+        array![[1.0, 0.0], [0.0, -1.0]],
+        wide_box_2817(2),
+        Some(FLOOR_2817),
+        |_| COST_2817,
+    );
+    assert!(
+        outcomes.iter().all(|outcome| outcome.is_ok()),
+        "a stall at a strict saddle whose negative curvature the criterion resolves must \
+         keep the search running: {outcomes:?}"
+    );
+    assert!(
+        published.is_none_or(|exit| !exit.converged),
+        "a strict saddle must never be published as converged"
+    );
+}
+
 // ─── an unprogressing fixed-point walk stops ─────────────────────────────────
 
 /// A fixed-point walk caught in a limit cycle stops when its second window
