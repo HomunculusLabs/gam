@@ -1,4 +1,4 @@
-//! Fisher-effect-weighted atom retention and fit-quality reporting.
+//! Fisher-effect-weighted atom retention.
 //!
 //! Reconstruction EV is a distributional currency: an atom that fires rarely can
 //! explain almost no variance even when ablating it changes the downstream
@@ -216,46 +216,8 @@ pub fn effect_weighted_retention(
     Ok(out)
 }
 
-/// Primary fit-quality report. Interchange accuracy is deliberately the headline
-/// because coordinates are useful only if interventions in those coordinates
-/// land in the intended downstream behavior; reconstruction EV is secondary.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct EffectWeightedFitReport {
-    pub headline: FitQualityMetric,
-    pub interchange_accuracy: f64,
-    pub explained_variance: f64,
-}
-
-impl EffectWeightedFitReport {
-    pub fn new(interchange_accuracy: f64, explained_variance: f64) -> Result<Self, String> {
-        validate_unit_interval("interchange_accuracy", interchange_accuracy)?;
-        validate_unit_interval("explained_variance", explained_variance)?;
-        Ok(Self {
-            headline: FitQualityMetric::InterchangeAccuracy(interchange_accuracy),
-            interchange_accuracy,
-            explained_variance,
-        })
-    }
-
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum FitQualityMetric {
-    InterchangeAccuracy(f64),
-}
-
 fn bic_one_degree_threshold_nats(n_interventions: usize) -> f64 {
     0.5 * (n_interventions.max(2) as f64).ln()
-}
-
-fn validate_unit_interval(name: &str, value: f64) -> Result<(), String> {
-    if value.is_finite() && (0.0..=1.0).contains(&value) {
-        Ok(())
-    } else {
-        Err(format!(
-            "EffectWeightedFitReport: {name} must be finite and in [0, 1], got {value}"
-        ))
-    }
 }
 
 fn validate_nonnegative_finite(caller: &str, name: &str, value: f64) -> Result<(), String> {

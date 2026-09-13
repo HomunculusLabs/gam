@@ -2825,5 +2825,20 @@
     },
     "reason": "#2829 no product user: SparseAtomCodes::coactivation, CoactivationStats::fusion_evidence, SubspaceReducedEvaluator::reduced_width, persistence::atlas_nerve and sparse_dict::block_firing_coordinates have no caller; weight_codependence, AtlasNerveReport, farthest_point_subsample and gf2_column_rank were reached only through them.",
     "evidence": "At 8f2d0c6c37c0c0d2a716fe2e4c3d56c5cd4709f8, git grep -n -w over crates, src and tests finds no call of these functions: coactive_pair_stats builds CoactivationStats with its own inline weight correlation, the atlas_nerve names elsewhere are the inference::atlas_nerve module and build_atlas_nerve, and the gam-pyffi block_firing_coordinates wrapper calls block_route_firing_coordinates. weight_codependence was called only by coactivation, and AtlasNerveReport was built only by persistence::atlas_nerve."
+  },
+  {
+    "base": "6e9cf47144600b414f977683b6faeaf0c7e254c8",
+    "removed": {
+      "crates/gam-sae/src/criterion_atoms.rs::assemble": 1,
+      "crates/gam-sae/src/criterion_atoms.rs::atoms": 1,
+      "crates/gam-sae/src/criterion_atoms.rs::grad": 1,
+      "crates/gam-sae/src/criterion_atoms.rs::gradient": 1,
+      "crates/gam-sae/src/criterion_atoms.rs::label": 1,
+      "crates/gam-sae/src/criterion_atoms.rs::n_rho": 1,
+      "crates/gam-sae/src/criterion_atoms.rs::value": 2,
+      "crates/gam-sae/src/effect_weight.rs::new": 1
+    },
+    "reason": "#2899 public API sweep of gam-sae (prune-api-d): the criterion_atoms module and the effect-weighted fit report have no consumer outside their own files, so their public functions are deleted.",
+    "evidence": "At e65a93a99, git grep -l -w finds SaeCriterion and SaeCriterionAtom only in criterion_atoms.rs and EffectWeightedFitReport only in effect_weight.rs. The removed map is public_api_census.py's census difference over this change, computed on MSI."
   }
 ]

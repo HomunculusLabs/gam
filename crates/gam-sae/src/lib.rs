@@ -14,7 +14,6 @@ pub mod chart_transfer;
 pub mod circular_concordance;
 pub mod coactivation_conditionality;
 pub mod corpus;
-pub mod criterion_atoms;
 pub mod description_length;
 mod discrete_fourier;
 pub mod dual_certificate;

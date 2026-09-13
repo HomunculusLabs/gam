@@ -6850,5 +6850,30 @@
     ],
     "reason": "#2469: the SAE resident host operator folded cross_beta over row chunks of width n.div_ceil(OPERATOR_MAX_ROW_CHUNKS = 256).max(OPERATOR_MIN_ROW_CHUNK = 64), two picked numbers blind to the d x p slab each row reads. The width is now gam_runtime::resource::byte_balanced_row_chunk(d * p, n), the library row-chunk rule, still a function of the shape alone so the reduction order is thread-count independent.",
     "evidence": "git grep -n -E 'OPERATOR_MAX_ROW_CHUNKS|OPERATOR_MIN_ROW_CHUNK' over the base finds the two declarations, one doc reference and their single use in apply_operator_host, all in crates/gam-solve/src/gpu_kernels/sae_resident.rs. No test names them. Not compiled or run locally (user directive); compile is covered by the lead shared tip check."
+  },
+  {
+    "base": "6e9cf47144600b414f977683b6faeaf0c7e254c8",
+    "items": [
+      "crates/gam-sae/src/criterion_atoms.rs:enum:SaeCriterionAtom",
+      "crates/gam-sae/src/criterion_atoms.rs:fn:assemble",
+      "crates/gam-sae/src/criterion_atoms.rs:fn:atoms",
+      "crates/gam-sae/src/criterion_atoms.rs:fn:atoms_have_distinct_labels",
+      "crates/gam-sae/src/criterion_atoms.rs:fn:grad",
+      "crates/gam-sae/src/criterion_atoms.rs:fn:gradient",
+      "crates/gam-sae/src/criterion_atoms.rs:fn:gradient_is_channel_sum_including_correction",
+      "crates/gam-sae/src/criterion_atoms.rs:fn:implicit_correction_atom_is_gradient_only",
+      "crates/gam-sae/src/criterion_atoms.rs:fn:label",
+      "crates/gam-sae/src/criterion_atoms.rs:fn:n_rho",
+      "crates/gam-sae/src/criterion_atoms.rs:fn:sample_criterion",
+      "crates/gam-sae/src/criterion_atoms.rs:fn:value",
+      "crates/gam-sae/src/criterion_atoms.rs:fn:value_is_atom_sum",
+      "crates/gam-sae/src/criterion_atoms.rs:struct:SaeCriterion",
+      "crates/gam-sae/src/effect_weight.rs:enum:FitQualityMetric",
+      "crates/gam-sae/src/effect_weight.rs:fn:new",
+      "crates/gam-sae/src/effect_weight.rs:fn:validate_unit_interval",
+      "crates/gam-sae/src/effect_weight.rs:struct:EffectWeightedFitReport"
+    ],
+    "reason": "#2899 public API sweep of gam-sae (prune-api-d): crates/gam-sae/src/criterion_atoms.rs (the #931 criterion-as-atoms pilot: SaeCriterionAtom with value/grad/label, SaeCriterion with assemble/value/gradient/atoms/n_rho, and its four unit tests) and the EffectWeightedFitReport report in crates/gam-sae/src/effect_weight.rs (EffectWeightedFitReport::new, FitQualityMetric, validate_unit_interval) have no consumer outside their own files. The production SAE criterion never assembles through SaeCriterion, and no product root builds the report. bf15edbe7 restored pub on them only to bring the build back to green after the narrowing. The module is deleted with its lib.rs declaration, and effect_weight.rs keeps its retention ledger; its module doc drops the fit-quality phrase.",
+    "evidence": "At e65a93a99, git grep -l -w over the whole tree finds EffectWeightedFitReport, FitQualityMetric and validate_unit_interval only in crates/gam-sae/src/effect_weight.rs, and SaeCriterion and SaeCriterionAtom only in crates/gam-sae/src/criterion_atoms.rs. The module name criterion_atoms appears only on crates/gam-sae/src/lib.rs:17 and in two generated JSON artifacts (bench/measurements/issue_triage_20260908/issue2833-final-extension-source-sha256.json, tools/codebase-city/public/city-data.json). docs/public-api-2829-disposition.tsv names none of them. Pool overlay check 557881 applied this change at 7ae739779 before landing (log /scratch.global/sauer354/pool/prune-api-d/check.557881.log). Not compiled locally (user directive)."
   }
 ]
