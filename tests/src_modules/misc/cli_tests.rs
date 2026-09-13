@@ -7,7 +7,7 @@ use super::{
     covariance_from_model, family_arg_canonical_name,
     load_dataset_projected, parse_formula, parse_matching_auxiliary_formula,
     parse_surv_response, parse_survival_time_basis_config, predict_gam,
-    prepend_id_column_to_prediction_csv, required_columns_for_fit, required_columns_for_formula,
+    prepend_id_column_to_prediction_csv, required_columns_for_formula, required_columns_for_resolved_fit,
     validate_cli_firth_configuration, validate_fit_args_preflight,
     write_estimand_explicit_prediction_csv, write_prediction_csv,
     write_survival_binary_prediction_csv, write_survival_prediction_csv,
@@ -1352,8 +1352,11 @@ fn required_columns_for_fit_includes_auxiliary_formula_columns() {
     );
     args.slope_formula = Some("slope_x + slope_z".to_string());
     args.z_column = Some("z_anchor".to_string());
+    let fit_config = super::resolve_fit_invocation(&args)
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "resolve fit invocation", e))
+        .fit_config;
 
-    let required = required_columns_for_fit(&args, &parsed)
+    let required = required_columns_for_resolved_fit(&parsed, &fit_config)
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "required columns", e));
 
     assert_eq!(

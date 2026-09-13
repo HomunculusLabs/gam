@@ -9327,5 +9327,15 @@
     ],
     "reason": "SPEC rules 9, 18 and 25 (#2899, #2631). gam fit --predict-noise ran run_fitwith_predict_noise, a 500-line CLI copy of the library location-scale materialization (link and mixture parsing, family resolution, response-support checks, link-wiggle policy and three saved-model assemblers). The fit now goes through fit_formula_to_payload, as gamfit does. run_fitwith_predict_noise, dispersion_location_scale_kind_for_cli, blockwise_options_from_fit_args, compute_probit_q0_from_fit, compute_probit_q0_from_eta, summarizewiggle_domain, WiggleDomainDiagnostics, FAMILY_GAUSSIAN_LOCATION_SCALE and FAMILY_BINOMIAL_LOCATION_SCALE are deleted with their three helper tests. core_saved_fit_result, SavedFitSummary with from_blockwise_fit and validated, compact_saved_multiblock_fit_result, and the two model_build tests with their location_scale_fit_with_outer_certificate fixture lose their last production caller and move into the saved_fit_fixtures test module in tests/src_modules/misc/cli_tests.rs. binomial_mean_linkwiggle_supports_family and emit_smooth_structure_warnings lose their last callers with that route; library fits collect the same smooth-structure warnings as inference notes (gam_terms term_builder) and print_inference_summary prints them.",
     "evidence": "Job 627938 (gate13, lane sw0, node acn82) stacked this slice on 0bbba5310 as phase S3C. source_removal_guard.py reported exactly these identities, and cargo check --keep-going --workspace --all-targets --exclude gam-pyffi at that phase exited 0 with 0 errors, so no code still names a deleted item (/scratch.global/sauer354/pool/prune-cli/gate13.627938.log)."
+  },
+  {
+    "base": "719888f2f801973d875f879f85cdd7c23a9948ec",
+    "items": [
+      "crates/gam-cli/src/main/dataset_io.rs:fn:merge_required_columns",
+      "crates/gam-cli/src/main/dataset_io.rs:fn:required_columns_for_fit",
+      "crates/gam-cli/src/main/run_fit.rs:fn:family_arg_name"
+    ],
+    "reason": "SPEC rules 18 and 25 (#2899, #2631). validate_fit_args_preflight refused conflicting settings twice, once from the resolved FitConfig and once from FitArgs, so a request document setting the same conflict skipped the flag copy. Every family route now fits through the library, which refuses those conflicts for both entry points, so preflight reads the resolved configuration once. required_columns_for_fit re-derived auxiliary-formula columns from FitArgs and family_arg_name named the family flag; required_columns_for_resolved_fit covers the first and nothing calls the second. merge_required_columns served only required_columns_for_fit and is deleted with it.",
+    "evidence": "Job 627938 (gate13, lane sw0, node acn82) stacked this slice on 0bbba5310 as phase S4. source_removal_guard.py reported exactly these identities, and cargo check --keep-going --workspace --all-targets --exclude gam-pyffi at that phase exited 0 with 0 errors, so no code still names a deleted item (/scratch.global/sauer354/pool/prune-cli/gate13.627938.log)."
   }
 ]

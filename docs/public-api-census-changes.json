@@ -3994,5 +3994,15 @@
     },
     "reason": "#2899 (SPEC rules 9, 18, 25): the CLI location-scale route and its helpers are deleted in favour of fit_formula_to_payload; the saved-fit fixtures that only tests call move into test scope.",
     "evidence": "Job 627938 phase S3C: public_api_census.py counted 11586 -> 11575 public function declarations and reported exactly these as removed; the all-targets workspace check at that phase exited 0 with 0 errors (/scratch.global/sauer354/pool/prune-cli/gate13.627938.log)."
+  },
+  {
+    "base": "719888f2f801973d875f879f85cdd7c23a9948ec",
+    "removed": {
+      "crates/gam-cli/src/main/dataset_io.rs::required_columns_for_fit": 1,
+      "crates/gam-cli/src/main/run_fit.rs::family_arg_name": 1,
+      "crates/gam-cli/src/main/dataset_io.rs::merge_required_columns": 1
+    },
+    "reason": "SPEC rules 18 and 25 (#2899, #2631). validate_fit_args_preflight refused conflicting settings twice, once from the resolved FitConfig and once from FitArgs, so a request document setting the same conflict skipped the flag copy. Every family route now fits through the library, which refuses those conflicts for both entry points, so preflight reads the resolved configuration once. required_columns_for_fit re-derived auxiliary-formula columns from FitArgs and family_arg_name named the family flag; required_columns_for_resolved_fit covers the first and nothing calls the second.",
+    "evidence": "Job 627938 phase S4: public_api_census.py counted 11575 -> 11573 public function declarations and reported exactly these as removed; the all-targets workspace check at that phase exited 0 with 0 errors (/scratch.global/sauer354/pool/prune-cli/gate13.627938.log)."
   }
 ]

@@ -88,12 +88,11 @@ pub(crate) fn resolve_fit_invocation(
     }
 }
 
-fn required_columns_for_resolved_fit(
-    args: &FitArgs,
+pub(crate) fn required_columns_for_resolved_fit(
     parsed: &ParsedFormula,
     fit_config: &FitConfig,
 ) -> Result<Vec<String>, String> {
-    let mut required = required_columns_for_fit(args, parsed)?
+    let mut required = required_columns_for_formula(parsed)?
         .into_iter()
         .collect::<BTreeSet<_>>();
 
@@ -204,7 +203,16 @@ pub(crate) fn run_fit(args: FitArgs) -> Result<(), String> {
     }
     // Bernoulli marginal-slope fits go through the library materializer, which
     // resolves the probit base link and refuses the settings this family cannot use.
+    // It reads no other family, so a family other than this one is refused here.
     if fit_config.slope_formula.is_some() || fit_config.z_column.is_some() {
+        if let Some(family) = fit_config.family.as_deref() {
+            let canonical = family.to_ascii_lowercase().replace('_', "-");
+            if canonical != "bernoulli-marginal-slope" && canonical != "binary-marginal-slope" {
+                return Err(format!(
+                    "--family {family} is ignored by marginal-slope fitting; select its link in the formula"
+                ));
+            }
+        }
         return run_library_formula_fit(&args, &parsed, formula_text, &fit_config);
     }
     // Location-scale fits go through the library materializer, like the other
@@ -226,7 +234,7 @@ pub(crate) fn run_fit(args: FitArgs) -> Result<(), String> {
                 .to_string(),
         );
     }
-    let requested_columns = required_columns_for_resolved_fit(&args, &parsed, &fit_config)?;
+    let requested_columns = required_columns_for_resolved_fit(&parsed, &fit_config)?;
     // Force `group(g)` / `factor(g)` / `re(g)` grouping columns to a factor
     // encoding even when their labels are numeric. An untyped CSV cannot carry
     // the typed-frame categorical sentinel the Python path uses, so without this
@@ -408,7 +416,7 @@ fn run_library_formula_fit(
         .out
         .as_ref()
         .ok_or("fit requires --out; refusing to run a training job that writes no model")?;
-    let requested_columns = required_columns_for_resolved_fit(args, parsed, fit_config)?;
+    let requested_columns = required_columns_for_resolved_fit(parsed, fit_config)?;
     let dataset = load_fit_dataset_with_roles(&args.data, &requested_columns, parsed, false)?;
     require_dataset_rows("fit", &args.data, dataset.values.nrows())?;
     let phase_start = std::time::Instant::now();
@@ -506,144 +514,45 @@ pub(crate) fn validate_fit_args_preflight(
     parsed: &ParsedFormula,
     fit_config: &FitConfig,
 ) -> Result<(), String> {
-    if let (Some(slope_formula), Some(z_column)) =
-        (args.slope_formula.as_deref(), args.z_column.as_deref())
-    {
-        let (_, parsed_slope) = parse_matching_auxiliary_formula(
-            slope_formula,
-            &parsed.response,
-            "--slope-formula",
-        )?;
-        validate_marginal_slope_z_column_exclusion(
-            parsed,
-            &parsed_slope,
-            z_column,
-            "bernoulli marginal-slope",
-            "--slope-formula",
-        )?;
-    }
     if args.out.is_none() {
         return Err(
             "fit requires --out; refusing to run a training job that writes no model".to_string(),
         );
     }
-    if args.request.is_some() {
-        let is_survival = parse_surv_response(&parsed.response)?.is_some();
-        refuse_family_mismatched_with_the_response(fit_config, is_survival)?;
-        if is_survival {
-            let likelihood =
-                parse_survival_likelihood_mode(fit_config.resolved_survival_likelihood())?;
-            gam::families::fit_orchestration::validate_survival_baseline_config(
-                likelihood,
-                &fit_config.baseline_target,
-                fit_config.baseline_scale,
-                fit_config.baseline_shape,
-                fit_config.baseline_rate,
-                fit_config.baseline_makeham,
-            )?;
-            validate_time_margin_args(
-                "request.config.threshold_time_k",
-                fit_config.threshold_time_k,
-                fit_config.threshold_time_degree,
-            )?;
-            validate_time_margin_args(
-                "request.config.sigma_time_k",
-                fit_config.sigma_time_k,
-                fit_config.sigma_time_degree,
-            )?;
-            validate_time_margin_args(
-                "request.config.slope_time_k",
-                fit_config.slope_time_k,
-                fit_config.slope_time_degree,
-            )?;
-            if fit_config.time_basis.trim().eq_ignore_ascii_case("ispline") {
-                parse_survival_time_basis_config(
-                    &fit_config.time_basis,
-                    fit_config.time_degree,
-                    fit_config.time_num_internal_knots,
-                )?;
-            }
-        } else {
-            refuse_survival_only_settings_without_surv(fit_config)?;
-        }
-        return Ok(());
-    }
-    if args.transformation_normal && args.family != FamilyArg::Auto {
-        return Err(format!(
-            "--transformation-normal conflicts with --family {}",
-            family_arg_name(args.family)
-        ));
-    }
-    if args.transformation_normal {
-        if args.predict_noise.is_some() {
-            return Err("--transformation-normal conflicts with --predict-noise".to_string());
-        }
-        if args.noise_offset_column.is_some() {
-            return Err("--transformation-normal conflicts with --noise-offset-column".to_string());
-        }
-        if args.slope_formula.is_some() || args.z_column.is_some() {
-            return Err(
-                "--transformation-normal conflicts with marginal-slope --slope-formula/--z-column"
-                    .to_string(),
-            );
-        }
-        if args.firth {
-            return Err("--transformation-normal conflicts with --firth".to_string());
-        }
-        if args.frailty_kind.is_some() || args.frailty_sd.is_some() || args.hazard_loading.is_some()
-        {
-            return Err("--transformation-normal conflicts with frailty flags".to_string());
-        }
-    }
-    if args.slope_formula.is_some() != args.z_column.is_some() {
-        return Err("--slope-formula and --z-column must be provided together".to_string());
-    }
-    if args.slope_formula.is_some() {
-        if args.predict_noise.is_some() {
-            return Err(
-                "--predict-noise cannot be combined with --slope-formula/--z-column".to_string(),
-            );
-        }
-        if args.firth {
-            log::info!(
-                "--firth is redundant for marginal-slope fitting: the robust Jeffreys/Firth stabilizer is installed by policy"
-            );
-        }
-        if args.family != FamilyArg::Auto {
-            return Err(
-                "--family is ignored by marginal-slope fitting; select its link in the formula"
-                    .to_string(),
-            );
-        }
-    }
-    if args.negative_binomial_theta.is_some() && args.family != FamilyArg::NegativeBinomial {
-        return Err("--negative-binomial-theta requires --family negative-binomial".to_string());
-    }
+    // The flags resolve into the same document a --request supplies, so one set of
+    // refusals reads the resolved configuration for both entry points. The family
+    // routes (survival, transformation-normal, marginal-slope, location-scale) refuse
+    // their own conflicting settings in the library materializers.
     let is_survival = parse_surv_response(&parsed.response)?.is_some();
-    let survival_likelihood =
-        parse_survival_likelihood_mode(fit_config.resolved_survival_likelihood())?;
-    let baseline_target_raw = fit_config.baseline_target.trim().to_ascii_lowercase();
-    let time_basis_raw = fit_config.time_basis.trim().to_ascii_lowercase();
     refuse_family_mismatched_with_the_response(fit_config, is_survival)?;
     if !is_survival {
-        refuse_survival_only_settings_without_surv(fit_config)?;
+        return refuse_survival_only_settings_without_surv(fit_config);
     }
+    let likelihood = parse_survival_likelihood_mode(fit_config.resolved_survival_likelihood())?;
     gam::families::fit_orchestration::validate_survival_baseline_config(
-        survival_likelihood,
-        &baseline_target_raw,
+        likelihood,
+        &fit_config.baseline_target.trim().to_ascii_lowercase(),
         fit_config.baseline_scale,
         fit_config.baseline_shape,
         fit_config.baseline_rate,
         fit_config.baseline_makeham,
     )?;
     validate_time_margin_args(
-        "--threshold-time-k",
-        args.threshold_time_k,
+        "threshold_time_k (--threshold-time-k)",
+        fit_config.threshold_time_k,
         fit_config.threshold_time_degree,
     )?;
-    validate_time_margin_args("--sigma-time-k", args.sigma_time_k, fit_config.sigma_time_degree)?;
-    validate_time_margin_args("--slope-time-k", args.slope_time_k, fit_config.slope_time_degree)?;
-    if time_basis_raw == "ispline" {
+    validate_time_margin_args(
+        "sigma_time_k (--sigma-time-k)",
+        fit_config.sigma_time_k,
+        fit_config.sigma_time_degree,
+    )?;
+    validate_time_margin_args(
+        "slope_time_k (--slope-time-k)",
+        fit_config.slope_time_k,
+        fit_config.slope_time_degree,
+    )?;
+    if fit_config.time_basis.trim().eq_ignore_ascii_case("ispline") {
         parse_survival_time_basis_config(
             &fit_config.time_basis,
             fit_config.time_degree,
@@ -651,25 +560,6 @@ pub(crate) fn validate_fit_args_preflight(
         )?;
     }
     Ok(())
-}
-
-pub(crate) fn family_arg_name(arg: FamilyArg) -> &'static str {
-    match arg {
-        FamilyArg::Auto => "auto",
-        FamilyArg::Gaussian => "gaussian",
-        FamilyArg::BinomialLogit => "binomial-logit",
-        FamilyArg::BinomialProbit => "binomial-probit",
-        FamilyArg::BinomialCloglog => "binomial-cloglog",
-        FamilyArg::LatentCloglogBinomial => "latent-cloglog-binomial",
-        FamilyArg::PoissonLog => "poisson-log",
-        FamilyArg::NegativeBinomial => "negative-binomial",
-        FamilyArg::GammaLog => "gamma-log",
-        FamilyArg::Tweedie => "tweedie",
-        FamilyArg::Beta => "beta",
-        FamilyArg::RoystonParmar => "royston-parmar",
-        FamilyArg::Expectile => "expectile",
-        FamilyArg::Multinomial => "multinomial",
-    }
 }
 
 pub(crate) fn validate_time_margin_args(

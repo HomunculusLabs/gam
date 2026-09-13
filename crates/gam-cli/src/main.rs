@@ -29,8 +29,7 @@ pub(crate) use gam::inference::formula_dsl::{
     LinkChoice, LinkMode, ParsedFormula, ParsedTerm,
     parse_formula,
     parse_matching_auxiliary_formula, parse_surv_interval_response, parse_surv_response,
-    parsed_term_column_names, validate_marginal_slope_z_column_exclusion,
-};
+    parsed_term_column_names, };
 
 pub(crate) use gam::inference::model::{
     FittedFamily, FittedModel as SavedModel, FittedModelPayload, PredictModelClass,

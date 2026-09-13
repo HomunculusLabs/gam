@@ -31,53 +31,6 @@ pub(crate) fn required_columns_for_formula(parsed: &ParsedFormula) -> Result<Vec
     Ok(out.into_iter().collect())
 }
 
-pub(crate) fn merge_required_columns(target: &mut BTreeSet<String>, cols: Vec<String>) {
-    target.extend(cols);
-}
-
-pub(crate) fn required_columns_for_fit(
-    args: &FitArgs,
-    parsed: &ParsedFormula,
-) -> Result<Vec<String>, String> {
-    let mut required = BTreeSet::<String>::new();
-    merge_required_columns(&mut required, required_columns_for_formula(parsed)?);
-
-    if let Some(noise_formula_raw) = args.predict_noise.as_deref() {
-        let (_, parsed_noise) = parse_matching_auxiliary_formula(
-            noise_formula_raw,
-            &parsed.response,
-            "--predict-noise",
-        )?;
-        merge_required_columns(&mut required, required_columns_for_formula(&parsed_noise)?);
-    }
-
-    if let Some(slope_formula_raw) = args.slope_formula.as_deref() {
-        let (_, parsed_slope) = parse_matching_auxiliary_formula(
-            slope_formula_raw,
-            &parsed.response,
-            "--slope-formula",
-        )?;
-        merge_required_columns(
-            &mut required,
-            required_columns_for_formula(&parsed_slope)?,
-        );
-    }
-
-    if let Some(z_column) = args.z_column.as_ref() {
-        required.insert(z_column.clone());
-    }
-    if let Some(weights_column) = args.weights_column.as_ref() {
-        required.insert(weights_column.clone());
-    }
-    if let Some(offset_column) = args.offset_column.as_ref() {
-        required.insert(offset_column.clone());
-    }
-    if let Some(noise_offset_column) = args.noise_offset_column.as_ref() {
-        required.insert(noise_offset_column.clone());
-    }
-    Ok(required.into_iter().collect())
-}
-
 pub(crate) fn load_dataset_projected(
     path: &Path,
     requested_columns: &[String],
