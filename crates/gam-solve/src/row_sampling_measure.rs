@@ -306,37 +306,6 @@ impl RowSamplingMeasure {
 
 }
 
-/// A designed importance subsample with honest Horvitz–Thompson likelihood
-/// weights — what a frontier fit sums over instead of the full corpus
-/// (#987 / #973). Produced by `RowSamplingMeasure::designed_subsample`.
-#[derive(Clone, Debug)]
-pub struct DesignedRowSample {
-    /// Provenance of the measure that shaped the design (uniform fallback or
-    /// Fisher mass), echoed for consumer certification.
-    pub provenance: MeasureProvenance,
-    /// Selected row indices, ascending.
-    pub rows: Vec<usize>,
-    /// Per-selected-row likelihood weight `1 / π_i`, aligned with `rows`.
-    /// Multiplying row `i`'s loss term by this makes the subsampled criterion
-    /// unbiased for the full-corpus criterion.
-    pub likelihood_weights: Vec<f64>,
-    /// `Σ π_i` — the design's expected sample size (≈ the requested budget;
-    /// Madow selection realizes `⌊·⌋` or `⌈·⌉` of it).
-    pub expected_size: f64,
-}
-
-impl DesignedRowSample {
-    /// Number of rows actually selected.
-    pub fn len(&self) -> usize {
-        self.rows.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.rows.is_empty()
-    }
-
-}
-
 /// A **certified** designed subsample (#1012): the rows that certify BOTH
 /// evidence halves within the target `eps`, their deterministic BSS /
 /// sensitivity weights, and the [`CoresetCertificate`] a race consumer gates
