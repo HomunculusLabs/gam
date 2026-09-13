@@ -2554,6 +2554,7 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
             resident.as_ref(),
             gpu_matvec,
             slq_seed,
+            options.evidence_policy,
             state,
         )?,
         Some(state) => {
@@ -2806,6 +2807,15 @@ pub fn dense_lane_reduced_schur_peak_bytes(k: usize) -> Option<usize> {
 /// refused with its spectrum. Jobs 578261 and 581909 (`p = 2048, charts = 32`,
 /// reduced Schur dim 288, a 0.63 MiB block) refused the criterion at the rational
 /// ladder's former rank ceiling 128.
+///
+/// Under [`ArrowEvidencePolicy::UnitDeflation`] the evidence operator is a PSD
+/// majorizer, so an eigenvalue under the policy's floor, negative ones included, is
+/// a numerically null direction. The lane pins it to unit stiffness exactly as
+/// `factor_evidence_unit_deflated_schur` and `slq_logdet_unit_deflated` do: it adds
+/// `log 1 = 0`, and the derivative bundle and the EFS pairs carry the conditioned
+/// inverse `1/1` along it, the direct route's factor. Job 623388 (`7afcb5fac`,
+/// `pair_chart_fit_is_certified_reml_on_a_noisy_ring`) refused the support lane's
+/// spectrum `[-6.161538e-16, 2.584721e1]` (dim 24) before this.
 fn dense_lane_reduced_schur_log_det<B: BatchedBlockSolver + Sync>(
     sys: &ArrowSchurSystem,
     mut classified: Option<&mut ArrowSchurSystem>,
@@ -2815,6 +2825,7 @@ fn dense_lane_reduced_schur_log_det<B: BatchedBlockSolver + Sync>(
     resident: Option<&SaeResidentReducedSchur>,
     gpu_matvec: Option<&GpuSchurMatvec>,
     seed: u64,
+    evidence_policy: ArrowEvidencePolicy,
     state: &mut SurrogateLaneState,
 ) -> Result<f64, ArrowSchurError> {
     let dim = sys.k;
@@ -2863,6 +2874,28 @@ fn dense_lane_reduced_schur_log_det<B: BatchedBlockSolver + Sync>(
                 });
             }
         };
+        if let ArrowEvidencePolicy::UnitDeflation { relative_floor } = evidence_policy {
+            let max_abs = eigenvalues
+                .iter()
+                .fold(0.0_f64, |acc, &lambda| acc.max(lambda.abs()));
+            if !(relative_floor.is_finite() && relative_floor > 0.0 && max_abs > 0.0) {
+                return Err(ArrowSchurError::SchurFactorFailed {
+                    reason: format!(
+                        "the dense lane reduced Schur (dim {dim}) cannot be unit-deflated: \
+                         relative floor {relative_floor:.3e}, spectral radius {max_abs:.3e}"
+                    ),
+                });
+            }
+            let floor = relative_floor * max_abs * (1.0 - SPECTRAL_DEFLATION_HYSTERESIS_FRACTION);
+            let conditioned = eigenvalues.mapv(|lambda| {
+                if lambda.is_finite() && lambda >= floor {
+                    lambda
+                } else {
+                    1.0
+                }
+            });
+            break (conditioned, eigenvectors);
+        }
         if eigenvalues.iter().all(|&lambda| lambda > 0.0) {
             break (eigenvalues, eigenvectors);
         }

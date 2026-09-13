@@ -4593,6 +4593,66 @@ fn a_dense_admitted_lane_takes_the_exact_log_det_2731() {
     );
 }
 
+/// #2731 — a dense lane under `UnitDeflation` pins a numerically null reduced-Schur
+/// direction to unit stiffness, as the direct route and SLQ do: it prices `log 1 = 0`
+/// and carries the conditioned inverse `1/1`. Negative control: the same lane under
+/// `PositiveDefinite` refuses that spectrum.
+#[test]
+fn a_unit_deflated_dense_lane_pins_a_null_reduced_schur_direction_2731() {
+    // One row, d = 1, k = 2: `H_tt = 1`, `H_tβ = [1, 0]`, `H_ββ = diag(1, 3)`, so the
+    // reduced Schur is `diag(0, 3)`, with one exactly null direction.
+    let mut sys = ArrowSchurSystem::new(1, 1, 2);
+    sys.rows[0].htt[[0, 0]] = 1.0;
+    sys.rows[0].htbeta[[0, 0]] = 1.0;
+    sys.hbb[[0, 0]] = 1.0;
+    sys.hbb[[1, 1]] = 3.0;
+    let config = SurrogateLaneConfig {
+        num_probes: 4,
+        seed: 0x2731,
+        rel_tol: 1.0e-10,
+        cg_rel_tol: 1.0e-12,
+        deflation_subspace_iters: 1,
+        deflation_target_std_err_rel: 1.0,
+    };
+    let identity = |v: ArrayView1<f64>| v.to_owned();
+
+    let deflated =
+        ArrowSolveOptions::direct().with_evidence_unit_deflation(SPECTRAL_DEFLATION_REL_FLOOR);
+    let mut lane = SurrogateLaneState::new(config.clone());
+    lane.request_logdet_derivative_bundle();
+    let evaluated = matrix_free_arrow_evidence_evaluation(
+        &sys, 0.0, 0.0, &deflated, 4, 1, 0x2731, &mut lane, true,
+    )
+    .expect("a unit-deflated dense lane must price the null direction at log 1 = 0");
+    assert!(
+        (evaluated.log_det_schur - 3.0_f64.ln()).abs() <= 1.0e-12,
+        "log|S| with the null direction pinned must be ln 3, got {}",
+        evaluated.log_det_schur
+    );
+    let trace = lane
+        .take_logdet_derivative_bundle()
+        .expect("the requested derivative bundle")
+        .directional_derivative(&identity)
+        .expect("a finite derivative");
+    assert!(
+        (trace - (1.0 + 1.0 / 3.0)).abs() <= 1.0e-12,
+        "the pinned direction must carry the conditioned inverse 1/1: tr(S̃⁻¹) = {trace}"
+    );
+
+    let strict = ArrowSolveOptions::direct().with_positive_definite_evidence();
+    let mut strict_lane = SurrogateLaneState::new(config);
+    let refusal = matrix_free_arrow_evidence_evaluation(
+        &sys, 0.0, 0.0, &strict, 4, 1, 0x2731, &mut strict_lane, true,
+    )
+    .err()
+    .expect("a positive-definite lane must refuse a null reduced-Schur direction")
+    .to_string();
+    assert!(
+        refusal.contains("not positive definite"),
+        "the refusal must name the non-positive spectrum: {refusal}"
+    );
+}
+
 /// Dense reference `tr(S⁻¹)` from the lower-Cholesky factor `S = L Lᵀ`:
 /// `tr(S⁻¹) = tr(L⁻ᵀ L⁻¹) = ‖L⁻¹‖_F²`, with each `L⁻¹` column solved by forward
 /// substitution (`L y = e_c`). Self-contained oracle for the matrix-free
