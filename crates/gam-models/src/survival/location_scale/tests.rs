@@ -208,15 +208,17 @@ fn test_link_wiggle_metadata(beta_link_wiggle: &Array1<f64>) -> (Array1<f64>, us
     let seed = array![-2.0, -1.0, 0.0, 1.0, 2.0];
     for degree in [2usize, 3, 1] {
         for num_internal_knots in 0..=8 {
-            let cfg = WiggleBlockConfig {
+            if let Ok(knots) = crate::wiggle::monotone_warp_knots_from_seed(
+                seed.view(),
                 degree,
                 num_internal_knots,
-                penalty_order: 2,
-                double_penalty: false,
-            };
-            if let Ok((block, knots)) =
-                crate::wiggle::buildwiggle_block_input_from_seed(seed.view(), &cfg)
-                && block.design.ncols() == beta_link_wiggle.len()
+            ) && let Ok(block) = crate::wiggle::buildwiggle_block_input_from_orders(
+                seed.view(),
+                &knots,
+                degree,
+                &[2],
+                false,
+            ) && block.design.ncols() == beta_link_wiggle.len()
             {
                 return (knots, degree);
             }
