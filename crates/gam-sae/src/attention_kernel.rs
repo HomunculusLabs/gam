@@ -155,11 +155,6 @@ impl CoordinateMapFit {
             .iter()
             .max_by(|left, right| left.amplitude.total_cmp(&right.amplitude))
     }
-
-    pub fn harmonic_content(&self) -> Vec<HarmonicContent> {
-        harmonic_content(&self.harmonics)
-    }
-
 }
 
 pub fn fit_attention_kernel(
