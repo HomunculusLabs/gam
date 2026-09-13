@@ -402,21 +402,24 @@ fn certify_prefit_binomial_linear_separator(
                 continue;
             };
             let mut dot = 0.0;
-            let mut row_norm_sq = 0.0;
+            let mut magnitude = 0.0;
             for (local_col, &global_col) in column_indices.iter().enumerate() {
                 let value = chunk[[local_row, global_col]];
                 if !value.is_finite() {
                     return Ok(None);
                 }
-                dot += direction[local_col] * value;
-                row_norm_sq += value * value;
+                let term = direction[local_col] * value;
+                dot += term;
+                magnitude += term.abs();
             }
-            let row_norm = row_norm_sq.sqrt();
-            if !row_norm.is_finite() {
+            if !magnitude.is_finite() {
                 return Ok(None);
             }
             let signed_margin = if is_positive { dot } else { -dot };
-            let tolerance = 1e-12 * direction_norm * row_norm.max(1.0);
+            // The margin is a rounded sum of `q` products: it certifies a side only
+            // beyond that sum's rounding band `gamma_q * sum |d_j x_ij|` (#2469).
+            let tolerance =
+                gam_linalg::roundoff::accumulation_growth(column_indices.len()) * magnitude;
             if signed_margin <= tolerance {
                 return Ok(None);
             }
@@ -474,20 +477,24 @@ fn detect_prefit_binomial_linear_combination_separation_in_design(
                 };
                 let sign = if is_positive { 1.0 } else { -1.0 };
                 let mut dot = 0.0;
+                let mut magnitude = 0.0;
                 let mut row_norm_sq = 0.0;
                 for (local_col, &global_col) in column_indices.iter().enumerate() {
                     let value = chunk[[local_row, global_col]];
                     if !value.is_finite() {
                         return Ok(None);
                     }
-                    dot += direction[local_col] * value;
+                    let term = direction[local_col] * value;
+                    dot += term;
+                    magnitude += term.abs();
                     row_norm_sq += value * value;
                 }
                 if !row_norm_sq.is_finite() {
                     return Ok(None);
                 }
                 let signed_margin = sign * dot;
-                let margin_tolerance = 1e-12 * row_norm_sq.sqrt().max(1.0);
+                // Same rounding band as the certificate: a margin inside it is a mistake.
+                let margin_tolerance = gam_linalg::roundoff::accumulation_growth(q) * magnitude;
                 if signed_margin > margin_tolerance {
                     continue;
                 }
