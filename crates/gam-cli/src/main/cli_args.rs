@@ -165,10 +165,6 @@ pub(crate) struct CrosscoderArgs {
     #[arg(long)]
     pub(crate) random_state: Option<u64>,
 
-    /// Evaluate fitted consecutive-layer transport on this caller-chosen grid.
-    #[arg(long, value_parser = parse_positive_usize_cli)]
-    pub(crate) transport_grid_resolution: Option<usize>,
-
     /// GAM-SAE-owned wire report JSON output path.
     #[arg(long, value_name = "REPORT.json")]
     pub(crate) out: PathBuf,

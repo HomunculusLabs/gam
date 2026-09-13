@@ -149,7 +149,6 @@ gam crosscoder \
 | `--atoms N` | Number of shared manifold atoms. |
 | `--harmonics N` | Harmonic order of each periodic manifold atom. |
 | `--random-state N` | Seed for the library's deterministic initialization. Every other fit control belongs to the library. |
-| `--transport-grid-resolution N` | Number of source-chart samples at which consecutive-layer transport is measured. |
 
 ## Formula Notes
 

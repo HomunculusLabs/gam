@@ -295,9 +295,7 @@ impl SaeBehaviorFitReport {
     pub fn wire_report(&self) -> Result<SaeBehaviorWireReport, String> {
         let log_lambda_y = self.behavior_block.log_lambda_y();
         Ok(SaeBehaviorWireReport {
-            crosscoder: self
-                .crosscoder
-                .wire_report(SaeCrosscoderEvaluationConfig::default())?,
+            crosscoder: self.crosscoder.wire_report()?,
             log_lambda_y,
             lambda_y: self.behavior_block.lambda_y(),
             weight_identifiability: self.weight_identifiability.clone(),

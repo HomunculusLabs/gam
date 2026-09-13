@@ -23,7 +23,6 @@ def sae_crosscoder_fit(
     ridge_ext_coord: float | None = None,
     ridge_beta: float | None = None,
     random_state: int | None = None,
-    transport_grid_resolution: int | None = None,
 ) -> Any:
     """Fit one shared-chart manifold dictionary across row-aligned layers.
 
@@ -64,7 +63,6 @@ def sae_crosscoder_fit(
         ridge_ext_coord,
         ridge_beta,
         random_state,
-        transport_grid_resolution,
     )
 
 

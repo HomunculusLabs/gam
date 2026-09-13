@@ -89,46 +89,47 @@ fn olmo_l18_l19_pair_crosscoder_fits_with_measured_drift() {
 
     // The wire report is the FFI/CLI contract — it must materialize (with
     // transport measured between the two real layers) without error.
-    let wire = report
-        .wire_report(SaeCrosscoderEvaluationConfig {
-            transport_grid_resolution: Some(64),
-        })
-        .expect("wire report on the real pair");
+    let wire = report.wire_report().expect("wire report on the real pair");
     assert_eq!(wire.layout.anchor_dim, 64);
     assert_eq!(wire.layout.block_dims, vec![64]);
     assert_eq!(wire.transport.len(), 4, "one anchor->block report per atom");
     // OBJECTIVE transport-law measurement on the REAL L18 -> L19 pair (#2234).
     //
     // The phase-shift law (transport `t -> s·t + φ`, `transport_law.rs`) is
-    // MEASURED here but NOT asserted to hold on every atom: it does not on real
-    // OLMo L18/L19 at K=4 (atom 2's `phase_r2` measured -0.641). That is a
-    // genuine NEGATIVE RESULT (see #2234): layer-to-layer transport is not a
-    // clean phase shift for every atom, and asserting it would be a known-red
-    // XFAIL in disguise. The invariants with teeth are that every atom's
-    // measurement is defined over the requested grid, and that the most
+    // MEASURED here but NOT asserted to hold on every atom: it did not on real
+    // OLMo L18/L19 at K=4 when the law was read off a 64-point grid (atom 2's
+    // `phase_r2` measured -0.641). That is a genuine NEGATIVE RESULT (see #2234):
+    // layer-to-layer transport is not a clean phase shift for every atom, and
+    // asserting it would be a known-red XFAIL in disguise. The invariants with
+    // teeth are that every atom's transport is measured, and that the most
     // phase-like atom explains a strong majority of its transport with a pure
-    // phase shift (measured phase_r2 = 0.940; the recovered phase is a near
+    // phase shift (the 64-point grid measured phase_r2 = 0.940 and a near
     // half-turn, φ ≈ ±0.49, for every atom).
     let mut best_phase_r2 = f64::NEG_INFINITY;
     for transport in &wire.transport {
+        let SaeCrosscoderWireTransport::Measured {
+            atom,
+            phase_r2,
+            deviation_locus,
+            transport_grid,
+            ..
+        } = transport
+        else {
+            panic!("a periodic atom between equal-width layers must be measured, got {transport:?}");
+        };
         assert!(
-            transport.phase_r2.is_finite(),
-            "atom {}: phase-law circular R^2 must be finite, got {}",
-            transport.atom,
-            transport.phase_r2
-        );
-        assert_eq!(
-            transport.transport_grid.len(),
-            64,
-            "atom {}: one transport sample per requested grid point",
-            transport.atom
+            phase_r2.is_finite(),
+            "atom {atom}: phase-law circular R^2 must be finite, got {phase_r2}"
         );
         assert!(
-            transport.deviation_locus.is_some(),
-            "atom {}: a non-empty grid must name the phase law's worst locus",
-            transport.atom
+            !transport_grid.is_empty(),
+            "atom {atom}: the transport integrals must evaluate samples"
         );
-        best_phase_r2 = best_phase_r2.max(transport.phase_r2);
+        assert!(
+            deviation_locus.is_some(),
+            "atom {atom}: a non-empty grid must name the phase law's worst locus"
+        );
+        best_phase_r2 = best_phase_r2.max(*phase_r2);
     }
     assert!(
         best_phase_r2 > 0.8,

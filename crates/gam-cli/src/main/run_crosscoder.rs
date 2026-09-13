@@ -2,7 +2,7 @@ use super::*;
 
 use gam_sae::manifold::{
     NamedCrosscoderTarget, SaeCrosscoderAutoFitOverrides, SaeCrosscoderAutoFitRequest,
-    SaeCrosscoderEvaluationConfig, run_auto_sae_crosscoder_fit,
+    run_auto_sae_crosscoder_fit,
 };
 use ndarray::ShapeBuilder;
 use npyz::{NpyFile, Order};
@@ -122,11 +122,7 @@ pub(crate) fn run_crosscoder(args: CrosscoderArgs) -> CliResult<()> {
         cancel: None,
     })
     .map_err(|err| CliError::from(err.to_string()))?;
-    let wire = fit
-        .wire_report(SaeCrosscoderEvaluationConfig {
-            transport_grid_resolution: args.transport_grid_resolution,
-        })
-        .map_err(CliError::from)?;
+    let wire = fit.wire_report().map_err(CliError::from)?;
     write_wire_report(&args.out, &wire)?;
     cli_out!("Wrote crosscoder report to {}", args.out.display());
     Ok(())
@@ -171,7 +167,6 @@ mod tests {
         assert_eq!(args.anchor.label, "anchor");
         assert_eq!(args.block.len(), 1);
         assert!(args.random_state.is_none());
-        assert!(args.transport_grid_resolution.is_none());
     }
 
     #[test]
@@ -183,7 +178,6 @@ mod tests {
         for required in [
             "--anchor <LABEL=FILE>",
             "--block <LABEL=FILE>",
-            "--transport-grid-resolution",
             "--out <REPORT.json>",
         ] {
             assert!(help.contains(required), "missing {required:?} in:\n{help}");
@@ -199,6 +193,7 @@ mod tests {
             "--learning-rate",
             "--ridge-ext-coord",
             "--ridge-beta",
+            "--transport-grid-resolution",
         ] {
             assert!(
                 !help.contains(removed),

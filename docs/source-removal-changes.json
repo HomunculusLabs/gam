@@ -8993,5 +8993,15 @@
     ],
     "reason": "#2899, SPEC rule 25 (delete public API no product uses). gam-solve's ConstrainedProjectionLaw is never constructed, so it and its mean() and variance() are deleted. The live constrained-projection path passes the cubature nodes and the residual variance loose into constrained_projection_equal_tailed_interval. The module is pub, so the dead-code lint could not see the type. Found by surv2894; verified by prune-api-c.",
     "evidence": "At base 41c765d3d, git grep -w ConstrainedProjectionLaw over the whole tree finds only constrained_posterior.rs:1061 (the struct) and :1072 (its impl header). No struct literal exists in production code, tests, benches or examples. mean and variance have no other declaration in the file, and variance() was mean()'s only caller. Guarded compile: pool job 609573."
+  },
+  {
+    "base": "dbe892a9a42c0048b5bcef4071704cbd6a274b17",
+    "items": [
+      "crates/gam-sae/src/manifold/crosscoder_fit.rs:struct:SaeCrosscoderEvaluationConfig",
+      "crates/gam-sae/src/manifold/crosscoder_fit.rs:struct:SaeCrosscoderWireTransport",
+      "crates/gam-sae/src/manifold/tests_transport_law_2234.rs:fn:transport_refuses_an_empty_grid_and_an_absent_block"
+    ],
+    "reason": "#2899 row O2 and #2234, SPEC rules 23 and 25. The crosscoder transport law read its statistics off a caller-chosen grid. The library now integrates the law resultants to their rounding, so SaeCrosscoderEvaluationConfig, whose only field was transport_grid_resolution, is deleted. SaeCrosscoderWireTransport becomes a status-tagged enum (Measured, Undefined), so an atom the law does not describe no longer fails the whole wire report. The fit-free test transport_refuses_an_empty_grid_and_an_absent_block becomes transport_refuses_an_absent_block, because there is no grid to be empty.",
+    "evidence": "At the base, git grep -n -w SaeCrosscoderEvaluationConfig finds its declaration in crates/gam-sae/src/manifold/crosscoder_fit.rs and its uses in wire_report, behavior_entry.rs, tests_crosscoder_olmo.rs, crates/gam-cli/src/main/run_crosscoder.rs and crates/gam-pyffi/src/manifold/crosscoder_ffi.rs, all rewritten in this commit. SaeCrosscoderWireTransport is built only in wire_report, carried by SaeCrosscoderWireReport and SaeCrosscoderWirePersistence, read by tests_crosscoder_olmo.rs, and only serialized by the CLI and pyffi. The renamed test keeps its absent-block arm. cargo check --workspace --all-targets --exclude gam-pyffi --keep-going: exit 0, ban scanner included. cargo check -p gam-pyffi: exit 0. cargo test -p gam-sae --lib -- manifold::tests_transport_law_2234::: 5 passed, 0 failed (planted_rotation_is_recovered_in_both_directions, planted_reflection_reports_a_negative_sign, half_turn_at_the_wrap_boundary_is_an_exact_law, transport_refuses_an_absent_block, an_atom_short_of_the_fitted_homotopy_endpoint_is_undefined_not_an_error). cargo test -p gam-cli --bin gam -- run_crosscoder::tests::: 5 passed, 0 failed, including crosscoder_help_exposes_named_npy_and_transport_contracts."
   }
 ]

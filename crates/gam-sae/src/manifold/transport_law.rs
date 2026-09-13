@@ -17,14 +17,14 @@
 //! so the atom image at layer `ℓ` (`C^(ℓ) = {Φ_k(t) B^(ℓ)_k}`) and at layer `ℓ+1`
 //! (`C^(ℓ+1) = {Φ_k(t) B^(ℓ+1)_k}`) are two curves in one `ℝ^p`. The network's
 //! transport carries a layer-`ℓ` feature to layer `ℓ+1`; with no network in hand
-//! we approximate that correspondence by NEAREST POINT: for each reported source
-//! sample `t_g`, decode the SOURCE (layer `ℓ`) image
-//! `x_g = Φ_k(t_g) B^(ℓ)_k`, then PROJECT `x_g` onto the CONTINUOUS TARGET
-//! (layer `ℓ+1`) atom image to read off the chart coordinate that best reproduces it,
-//! `t'_g = argmin_{t'} ‖x_g − Φ_k(t') B^(ℓ+1)_k‖²`. The empirical transport map is
-//! `t_g ↦ t'_g`.  The target projection enumerates every stationary point of
-//! this trigonometric polynomial through its companion-matrix roots, so `t'_g`
-//! is not quantized by the source-report sampling density.
+//! we approximate that correspondence by NEAREST POINT: for a source coordinate
+//! `t`, decode the SOURCE (layer `ℓ`) image `x(t) = Φ_k(t) B^(ℓ)_k`, then PROJECT
+//! `x(t)` onto the CONTINUOUS TARGET (layer `ℓ+1`) atom image to read off the chart
+//! coordinate that best reproduces it,
+//! `t'(t) = argmin_{t'} ‖x(t) − Φ_k(t') B^(ℓ+1)_k‖²`. The empirical transport map
+//! is `t ↦ t'(t)`. The target projection enumerates every stationary point of
+//! this trigonometric polynomial through its companion-matrix roots, so `t'` is
+//! not quantized by any sampling lattice.
 //!
 //! (The mission brief phrased the grid step as "decode at layer ℓ+1 … project
 //! back onto the layer-(ℓ+1) atom image", which is the identity map; the
@@ -40,19 +40,36 @@
 //! period-correct with no unwrapping). The report carries the circular
 //! coefficient of determination `R² = 1 − SS_res/SS_tot` of the **phase-shift
 //! model** `t' = s·t + φ`, `s ∈ {+1, −1}` — the LAW — against the circular-mean
-//! baseline `SS_tot = Σ_g c(t'_g, t̄')`. The optimal `φ` at fixed `s` is the
-//! circular mean of `u_g = t'_g − s·t_g`, which maximizes
-//! `Σ_g cos(2π(u_g − φ)) = |Σ_g e^{i 2π u_g}|`; `s` is chosen for the larger
-//! resultant, and `SS_res = G − |Σ_g e^{i 2π u_g}|`.
+//! baseline, both taken over the uniform measure on the source chart:
+//! `SS_tot = 1 − |ρ_tot|` with `ρ_tot = ∫₀¹ e^{i 2π t'(t)} dt`. The optimal `φ` at
+//! fixed `s` is the circular mean of `u(t) = t'(t) − s·t`, which maximizes
+//! `∫₀¹ cos(2π(u − φ)) dt = |ρ_s|` with `ρ_s = ∫₀¹ e^{i 2π u(t)} dt`; `s` is chosen
+//! for the larger resultant, and `SS_res = 1 − |ρ_s|`.
 //!
-//! `phase_r2 = 1` exactly when transport is a phase shift at every reported
-//! sample (`NaN` when every transported coordinate coincides, a degenerate
-//! baseline); its shortfall is the chordal residual the law leaves unexplained,
-//! and [`AtomTransportReport::deviation_locus`] reports the chart location where
-//! the phase model deviates most (the interesting locus). No smooth-map
-//! alternative is fitted and no verdict threshold is applied: the alternative's
-//! Fourier order and a gap tolerance would both be tuning constants that no
-//! measured transport identifies.
+//! `phase_r2 = 1` exactly when transport is a phase shift everywhere on the chart
+//! (`NaN` when every transported coordinate coincides, a degenerate baseline); its
+//! shortfall is the chordal residual the law leaves unexplained, and
+//! [`AtomTransportReport::deviation_locus`] reports the chart location where the
+//! phase model deviates most (the interesting locus). No smooth-map alternative
+//! is fitted and no verdict threshold is applied: the alternative's Fourier order
+//! and a gap tolerance would both be tuning constants that no measured transport
+//! identifies.
+//!
+//! # The resultants are integrals, not grid sums
+//!
+//! There is no sampling resolution to choose. `t'(t)` is analytic except where two
+//! local minimizers of the projection objective tie and the nearest point jumps.
+//! The three resultants `ρ_tot`, `ρ_+` and `ρ_−` are integrated cell by cell with
+//! the `m`-point Gauss–Legendre rule, `m = 2H + 1` the atom's harmonic width,
+//! starting from `m` equal cells of `[0, 1)`. A cell is accepted when its estimate
+//! and the sum of its two halves' estimates agree within their rounding, and is
+//! halved otherwise. Every node is a unit phasor whose angle carries the rounding
+//! of `t` and `t'`, at most `2π·2ε`, and the weights sum to the cell width, so an
+//! estimate over a cell of width `w` is resolved to `(4π + 1)·ε·w` and two
+//! estimates can differ by twice that. A jump confines the halving to the one cell
+//! that holds it, and halving ends where a cell's midpoint is no longer
+//! representable, so every integral ends. The published transport samples are the
+//! nodes of the accepted halves.
 //!
 //! # Drift statistics (gam#2231 §3)
 //!
@@ -63,6 +80,8 @@
 
 use super::*;
 use crate::chart_coordinate_solve::{ChartBasisKind, PeriodicCurveExtrema};
+use gam_math::special::gauss_legendre;
+use ndarray::ArrayView1;
 
 /// A reference to one column block of a crosscoder target: the implicit anchor
 /// layer `[0, p_x)`, or an explicit output block `ℓ`.
@@ -80,9 +99,6 @@ pub enum CrosscoderLayer {
 /// the drift statistics.
 #[derive(Clone, Debug)]
 pub struct AtomTransportReport {
-    /// Number of source chart samples reported over `[0, 1)`.  Target
-    /// coordinates are solved continuously and do not inherit this resolution.
-    pub grid_resolution: usize,
     /// The atom's harmonic order `H = (M − 1)/2`.
     pub n_harmonics: usize,
     /// The best phase-shift model `t' = s·t + φ`: `(s, φ)` with `s ∈ {+1, −1}`
@@ -102,15 +118,16 @@ pub struct AtomTransportReport {
     /// rank_tgt)` with `|rank_src − rank_tgt|` trailing `π/2` entries when the
     /// ranks differ; empty only if BOTH images are numerically rank-0.
     pub principal_angles: Vec<f64>,
-    /// The empirical transport samples `(t_g, t'_g)` in chart units, one per grid
-    /// point, for plotting / downstream analysis.
+    /// The transport samples `(t, t')` in chart units that the integrals'
+    /// accepted cells evaluated, sorted by `t`, for plotting / downstream analysis.
     pub transport_grid: Vec<(f64, f64)>,
 }
 
 impl AtomTransportReport {
-    /// The chart location `t_g` where the phase-shift model deviates most from
-    /// the empirical transport (the largest chordal residual). `None` for an
-    /// empty grid. This is the "interesting locus" where linear transport breaks.
+    /// The chart location `t` where the phase-shift model deviates most from the
+    /// empirical transport (the largest chordal residual) among the transport
+    /// samples. `None` for an empty grid. This is the "interesting locus" where
+    /// linear transport breaks.
     pub fn deviation_locus(&self) -> Option<f64> {
         let (s, phi) = self.phase_shift;
         let two_pi = std::f64::consts::TAU;
@@ -125,6 +142,16 @@ impl AtomTransportReport {
     }
 }
 
+/// Whether the phase-shift law measured one atom between two layers.
+#[derive(Clone, Debug)]
+pub enum AtomTransportStatus {
+    Measured(AtomTransportReport),
+    /// The law does not describe this atom or layer pair: not a 1-D periodic
+    /// atom at the fitted homotopy endpoint, or layer images in different
+    /// ambient spaces.
+    Undefined { reason: String },
+}
+
 /// Measure the empirical transport of one circle atom between two explicit
 /// crosscoder layers (source image projected onto the target image).
 pub fn measure_atom_transport_between(
@@ -133,8 +160,7 @@ pub fn measure_atom_transport_between(
     atom: usize,
     source: CrosscoderLayer,
     target: CrosscoderLayer,
-    grid_resolution: usize,
-) -> Result<AtomTransportReport, String> {
+) -> Result<AtomTransportStatus, String> {
     if atom >= term.atoms.len() {
         return Err(format!(
             "measure_atom_transport_between: atom index {atom} out of range (K = {})",
@@ -151,23 +177,28 @@ pub fn measure_atom_transport_between(
     }
     let atom_ref = &term.atoms[atom];
     if atom_ref.latent_dim() != 1 {
-        return Err(format!(
-            "measure_atom_transport_between: the phase-shift law is defined for a 1-D circle atom; atom \
-             {atom} has latent_dim {}",
-            atom_ref.latent_dim()
-        ));
+        return Ok(AtomTransportStatus::Undefined {
+            reason: format!(
+                "the phase-shift law is defined for a 1-D circle atom; atom {atom} has latent_dim {}",
+                atom_ref.latent_dim()
+            ),
+        });
     }
     if atom_ref.basis_kind() != &SaeAtomBasisKind::Periodic {
-        return Err(format!(
-            "measure_atom_transport_between: atom {atom} must use the standard periodic harmonic basis, got {:?}",
-            atom_ref.basis_kind()
-        ));
+        return Ok(AtomTransportStatus::Undefined {
+            reason: format!(
+                "the phase-shift law needs the standard periodic harmonic basis; atom {atom} uses {:?}",
+                atom_ref.basis_kind()
+            ),
+        });
     }
     if atom_ref.homotopy_eta != 1.0 {
-        return Err(format!(
-            "measure_atom_transport_between: atom {atom} is at homotopy eta {}, not the fitted eta = 1 endpoint",
-            atom_ref.homotopy_eta
-        ));
+        return Ok(AtomTransportStatus::Undefined {
+            reason: format!(
+                "atom {atom} is at homotopy eta {}, not the fitted eta = 1 endpoint",
+                atom_ref.homotopy_eta
+            ),
+        });
     }
 
     // Honest-units source and target decoders, both `M × p` in the SAME ambient.
@@ -177,86 +208,127 @@ pub fn measure_atom_transport_between(
     let b_src = honest_layer_decoder(&physical_decoder, layout, source)?;
     let b_tgt = honest_layer_decoder(&physical_decoder, layout, target)?;
     if b_src.ncols() != b_tgt.ncols() {
-        return Err(format!(
-            "measure_atom_transport_between: source ambient width {} != target ambient width {} — the \
-             nearest-point transport needs both layer images in one ambient space (a crosscoder \
-             shares the residual-stream dimension across layers)",
-            b_src.ncols(),
-            b_tgt.ncols()
-        ));
+        return Ok(AtomTransportStatus::Undefined {
+            reason: format!(
+                "source ambient width {} != target ambient width {}: the nearest-point transport \
+                 needs both layer images in one ambient space",
+                b_src.ncols(),
+                b_tgt.ncols()
+            ),
+        });
     }
 
     let m = physical_decoder.nrows();
     let n_harmonics = m.saturating_sub(1) / 2;
-    if grid_resolution == 0 {
-        return Err("measure_atom_transport_between: grid_resolution must be positive".to_string());
-    }
-
-    // Evaluate the standard full-width harmonic basis on the SOURCE grid.
-    // These samples do not serve as target candidates.
     let basis = ChartBasisKind::Periodic { n_harmonics };
-    let grid = Array2::<f64>::from_shape_fn((grid_resolution, 1), |(g, _)| {
-        g as f64 / grid_resolution as f64
-    });
     if basis.width() != m {
         return Err(format!(
             "measure_atom_transport_between: periodic basis width {} != physical decoder width {m}",
             basis.width()
         ));
     }
-    let mut phi_grid = Array2::<f64>::zeros((grid_resolution, m));
-    let mut phi = vec![0.0; m];
-    for g in 0..grid_resolution {
-        basis.eval_into(grid[[g, 0]], &mut phi);
-        for column in 0..m {
-            phi_grid[[g, column]] = phi[column];
-        }
-    }
-    let source_image = phi_grid.dot(&b_src); // G × p, decoded source points
     let target_gram = b_tgt.dot(&b_tgt.t());
     let target_extrema = PeriodicCurveExtrema::from_gram(target_gram.view())?;
 
-    // Empirical transport: project each source point onto the continuous target
-    // image by comparing every companion-enumerated stationary point. The
-    // per-point linear coefficients `B_tgt·x_g` are ONE `G×p · p×M` GEMM (the
-    // former per-point gemv was the loop's memory-bound half), and the
-    // companion-eigenvalue projections are embarrassingly parallel.
-    let linear_all = source_image.dot(&b_tgt.t()); // G × M
-    use rayon::prelude::*;
-    let tprime: Vec<f64> = (0..grid_resolution)
-        .into_par_iter()
-        .map(|g| {
-            let linear = linear_all.row(g);
-            let projection = target_extrema
-                .minimize_squared_distance(linear.as_slice().ok_or_else(|| {
-                    "measure_atom_transport_between: target linear coefficients are not contiguous"
-                        .to_string()
-                })?)
-                .map_err(|error| {
-                    format!("measure_atom_transport_between: source sample {g} target projection: {error}")
-                })?;
-            Ok(projection.coordinate)
-        })
-        .collect::<Result<Vec<f64>, String>>()?;
-    let t_arr: Vec<f64> = (0..grid_resolution)
-        .map(|g| g as f64 / grid_resolution as f64)
-        .collect();
-    let transport_grid: Vec<(f64, f64)> =
-        t_arr.iter().copied().zip(tprime.iter().copied()).collect();
+    // Project the decoded source point at `t` onto the continuous target image.
+    let mut phi = vec![0.0; m];
+    let transport_at = |t: f64| -> Result<f64, String> {
+        basis.eval_into(t, &mut phi);
+        let source_point = b_src.t().dot(&ArrayView1::from(phi.as_slice()));
+        let linear = b_tgt.dot(&source_point);
+        let linear = linear.as_slice().ok_or_else(|| {
+            "measure_atom_transport_between: target linear coefficients are not contiguous"
+                .to_string()
+        })?;
+        target_extrema
+            .minimize_squared_distance(linear)
+            .map(|projection| projection.coordinate)
+            .map_err(|error| {
+                format!("measure_atom_transport_between: source coordinate {t} target projection: {error}")
+            })
+    };
+    let (resultants, transport_grid) = integrate_transport_resultants(m, transport_at)?;
 
-    let (phase_shift, phase_r2) = fit_transport_law(&t_arr, &tprime);
+    let (phase_shift, phase_r2) = fit_transport_law(&resultants);
     let drift = decoder_drift(&b_src, &b_tgt);
     let principal_angles = principal_angles_between_images(&b_src, &b_tgt)?;
 
-    Ok(AtomTransportReport {
-        grid_resolution,
+    Ok(AtomTransportStatus::Measured(AtomTransportReport {
         n_harmonics,
         phase_shift,
         phase_r2,
         drift,
         principal_angles,
         transport_grid,
-    })
+    }))
+}
+
+/// The transport map's three resultants over `t ∈ [0, 1)`, as `(re, im)` pairs
+/// `[ρ_tot, ρ_+, ρ_−]` with `ρ_tot = ∫ e^{i2πt'}`, `ρ_± = ∫ e^{i2π(t' ∓ t)}`, and
+/// the `(t, t')` nodes of the accepted cells sorted by `t`. The module
+/// documentation derives the cell rule and its rounding bound.
+fn integrate_transport_resultants(
+    width: usize,
+    mut transport_at: impl FnMut(f64) -> Result<f64, String>,
+) -> Result<([f64; 6], Vec<(f64, f64)>), String> {
+    let (nodes, weights) = gauss_legendre(width);
+    let tau = std::f64::consts::TAU;
+    let mut estimate = |a: f64, b: f64| -> Result<([f64; 6], Vec<(f64, f64)>), String> {
+        let half = 0.5 * (b - a);
+        let middle = a + half;
+        let mut sum = [0.0_f64; 6];
+        let mut samples = Vec::with_capacity(nodes.len());
+        for (&node, &weight) in nodes.iter().zip(weights.iter()) {
+            let t = middle + half * node;
+            let t_prime = transport_at(t)?;
+            let scaled = half * weight;
+            for (slot, angle) in [t_prime, t_prime - t, t_prime + t].into_iter().enumerate() {
+                sum[2 * slot] += scaled * (tau * angle).cos();
+                sum[2 * slot + 1] += scaled * (tau * angle).sin();
+            }
+            samples.push((t, t_prime));
+        }
+        Ok((sum, samples))
+    };
+
+    let cells = width as f64;
+    let mut pending = Vec::with_capacity(width);
+    for cell in 0..width {
+        let a = cell as f64 / cells;
+        let b = (cell + 1) as f64 / cells;
+        let (sum, samples) = estimate(a, b)?;
+        pending.push((a, b, sum, samples));
+    }
+    let mut totals = [0.0_f64; 6];
+    let mut transport_grid = Vec::new();
+    while let Some((a, b, coarse, coarse_samples)) = pending.pop() {
+        let middle = a + 0.5 * (b - a);
+        if !(middle > a && middle < b) {
+            // The cell's midpoint is not representable: this is the resolution
+            // limit of the coordinate itself.
+            for slot in 0..6 {
+                totals[slot] += coarse[slot];
+            }
+            transport_grid.extend(coarse_samples);
+            continue;
+        }
+        let (left, left_samples) = estimate(a, middle)?;
+        let (right, right_samples) = estimate(middle, b)?;
+        let rounding = 2.0 * (2.0 * tau + 1.0) * f64::EPSILON * (b - a);
+        let settled = (0..6).all(|slot| (left[slot] + right[slot] - coarse[slot]).abs() <= rounding);
+        if settled {
+            for slot in 0..6 {
+                totals[slot] += left[slot] + right[slot];
+            }
+            transport_grid.extend(left_samples);
+            transport_grid.extend(right_samples);
+        } else {
+            pending.push((a, middle, left, left_samples));
+            pending.push((middle, b, right, right_samples));
+        }
+    }
+    transport_grid.sort_by(|left, right| left.0.total_cmp(&right.0));
+    Ok((totals, transport_grid))
 }
 
 /// The honest-units decoder of one crosscoder layer carved from the atom's
@@ -285,48 +357,30 @@ pub(crate) fn honest_layer_decoder(
     }
 }
 
-/// Fit the phase-shift law to a period-1 circular transport `t ↦ t'`. Returns
+/// Fit the phase-shift law from the transport map's resultants
+/// `[ρ_tot, ρ_+, ρ_−]` over the uniform measure on `[0, 1)`. Returns
 /// `((s, φ), phase_r2)`.
 ///
-/// `R²` uses the circular-mean baseline `SS_tot = G − |Σ e^{i2π t'_g}|`. The
-/// optimal `φ` at fixed `s` is `circmean(t'_g − s·t_g)`; `s` is chosen for the
-/// larger resultant.
-fn fit_transport_law(t: &[f64], tprime: &[f64]) -> ((f64, f64), f64) {
+/// `R²` uses the circular-mean baseline `SS_tot = 1 − |ρ_tot|`. The optimal `φ`
+/// at fixed `s` is `arg ρ_s / 2π`; `s` is chosen for the larger resultant, and
+/// `SS_res = 1 − |ρ_s|`.
+fn fit_transport_law(resultants: &[f64; 6]) -> ((f64, f64), f64) {
     let two_pi = std::f64::consts::TAU;
-    let g = t.len();
-    let gf = g as f64;
-
-    // Circular-mean baseline SS_tot over the responses t'_g.
-    let (sum_sin, sum_cos) = tprime.iter().fold((0.0, 0.0), |(s, c), &v| {
-        (s + (two_pi * v).sin(), c + (two_pi * v).cos())
-    });
-    let r_tot = (sum_sin * sum_sin + sum_cos * sum_cos).sqrt();
-    let ss_tot = gf - r_tot;
-
-    // Phase model: for each s ∈ {+1,-1}, best φ is circmean(u), residual SS is
-    // G − |Σ e^{i2π u}|. Pick the s with the smaller residual (larger resultant).
+    let ss_tot = 1.0 - resultants[0].hypot(resultants[1]);
     let mut best_s = 1.0_f64;
     let mut best_phi = 0.0_f64;
     let mut best_ss_res = f64::INFINITY;
-    for &s in &[1.0_f64, -1.0_f64] {
-        let (su, cu) = t
-            .iter()
-            .zip(tprime.iter())
-            .fold((0.0, 0.0), |(a, b), (&ti, &tpi)| {
-                let u = tpi - s * ti;
-                (a + (two_pi * u).sin(), b + (two_pi * u).cos())
-            });
-        let r_u = (su * su + cu * cu).sqrt();
-        let ss_res = gf - r_u;
+    for (s, slot) in [(1.0_f64, 2_usize), (-1.0_f64, 4_usize)] {
+        let (cos_u, sin_u) = (resultants[slot], resultants[slot + 1]);
+        let ss_res = 1.0 - cos_u.hypot(sin_u);
         if ss_res < best_ss_res {
             best_ss_res = ss_res;
             best_s = s;
-            // Circular mean of u: mean angle atan2(Σsin, Σcos) in turns, wrapped.
-            best_phi = wrap_half(su.atan2(cu) / two_pi);
+            // Circular mean of u in turns, wrapped.
+            best_phi = wrap_half(sin_u.atan2(cos_u) / two_pi);
         }
     }
-    let phase_r2 = circular_r2(ss_tot, best_ss_res);
-    ((best_s, best_phi), phase_r2)
+    ((best_s, best_phi), circular_r2(ss_tot, best_ss_res))
 }
 
 /// `1 − SS_res/SS_tot`, guarding a degenerate (all-equal responses) baseline.

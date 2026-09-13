@@ -6,20 +6,22 @@
 //! block is related to the anchor block by a known isometry of the circle, so
 //! every reported quantity has a closed form derived here, not read from the
 //! code under test: the sign `s`, the phase `φ`, a unit circular `R²`, every
-//! transport sample on the law, the honest-units drift
-//! `‖B_tgt − B_src‖_F / √(‖B_src‖_F·‖B_tgt‖_F)`, and zero principal angles
-//! between the two images (both span the same output plane).
+//! transport sample the integrals evaluate lying on the law, the honest-units
+//! drift `‖B_tgt − B_src‖_F / √(‖B_src‖_F·‖B_tgt‖_F)`, and zero principal angles
+//! between the two images (both span the same output plane). An atom the law does
+//! not describe reports a typed undefined status, not an error.
 //!
 //! The anchor decodes `q(t) = (sin 2πt, cos 2πt)` and the downstream block is
 //! stored in the weighted fit space `√λ·B`, so the fixtures also exercise the
 //! honest-units division.
+
+#![cfg(test)]
 
 use super::*;
 use ndarray::Array2;
 use std::sync::Arc;
 
 const N_ROWS: usize = 32;
-const GRID: usize = 64;
 const BLOCK_LOG_LAMBDA: f64 = 1.4;
 const PHASE: f64 = 0.173_205_080_756_887_73;
 
@@ -113,6 +115,17 @@ fn reflection_drift() -> f64 {
     std::f64::consts::SQRT_2
 }
 
+/// The measured report, or a panic naming why the fixture was not measured.
+fn measured(label: &str, status: Result<AtomTransportStatus, String>) -> AtomTransportReport {
+    match status {
+        Ok(AtomTransportStatus::Measured(report)) => report,
+        Ok(AtomTransportStatus::Undefined { reason }) => {
+            panic!("{label}: a periodic circle atom must be measured, got undefined: {reason}")
+        }
+        Err(error) => panic!("{label}: transport measurement failed: {error}"),
+    }
+}
+
 fn assert_isometry(
     label: &str,
     report: &AtomTransportReport,
@@ -139,12 +152,17 @@ fn assert_isometry(
         "{label}: a planted isometry must be an exact phase law, got phase_r2 = {}",
         report.phase_r2
     );
-    assert_eq!(report.transport_grid.len(), GRID, "{label}: one sample per grid point");
-    for (index, &(t, t_prime)) in report.transport_grid.iter().enumerate() {
+    assert!(
+        !report.transport_grid.is_empty(),
+        "{label}: the transport integrals evaluated no sample"
+    );
+    let mut previous = f64::NEG_INFINITY;
+    for &(t, t_prime) in &report.transport_grid {
         assert!(
-            (t - index as f64 / GRID as f64).abs() <= f64::EPSILON,
-            "{label}: grid sample {index} is at t = {t}"
+            (0.0..1.0).contains(&t) && t > previous,
+            "{label}: samples must be strictly increasing inside [0, 1), got t = {t} after {previous}"
         );
+        previous = t;
         let on_law = expected_sign * t + expected_phase;
         assert!(
             circular_gap(t_prime, on_law) <= 1.0e-9,
@@ -174,25 +192,27 @@ fn planted_rotation_is_recovered_in_both_directions() {
     let (term, layout) = crosscoder_term(Planted::Shift(PHASE));
     // The downstream block decodes q(t' + φ), so the anchor point q(t) lands at
     // t' = t − φ; the reverse direction lands at t' = t + φ.
-    let forward = measure_atom_transport_between(
-        &term,
-        &layout,
-        0,
-        CrosscoderLayer::Anchor,
-        CrosscoderLayer::Block(0),
-        GRID,
-    )
-    .expect("anchor to downstream transport");
+    let forward = measured(
+        "rotation anchor->block",
+        measure_atom_transport_between(
+            &term,
+            &layout,
+            0,
+            CrosscoderLayer::Anchor,
+            CrosscoderLayer::Block(0),
+        ),
+    );
     assert_isometry("rotation anchor->block", &forward, 1.0, -PHASE, rotation_drift(PHASE));
-    let reverse = measure_atom_transport_between(
-        &term,
-        &layout,
-        0,
-        CrosscoderLayer::Block(0),
-        CrosscoderLayer::Anchor,
-        GRID,
-    )
-    .expect("downstream to anchor transport");
+    let reverse = measured(
+        "rotation block->anchor",
+        measure_atom_transport_between(
+            &term,
+            &layout,
+            0,
+            CrosscoderLayer::Block(0),
+            CrosscoderLayer::Anchor,
+        ),
+    );
     assert_isometry("rotation block->anchor", &reverse, 1.0, PHASE, rotation_drift(PHASE));
 }
 
@@ -205,8 +225,10 @@ fn planted_reflection_reports_a_negative_sign() {
         ("reflection anchor->block", CrosscoderLayer::Anchor, CrosscoderLayer::Block(0)),
         ("reflection block->anchor", CrosscoderLayer::Block(0), CrosscoderLayer::Anchor),
     ] {
-        let report = measure_atom_transport_between(&term, &layout, 0, source, target, GRID)
-            .expect("reflected transport");
+        let report = measured(
+            label,
+            measure_atom_transport_between(&term, &layout, 0, source, target),
+        );
         assert_isometry(label, &report, -1.0, PHASE, reflection_drift());
     }
 }
@@ -216,43 +238,52 @@ fn half_turn_at_the_wrap_boundary_is_an_exact_law() {
     // φ = ½ sits exactly on the wrap boundary of [−½, ½), where an unwrapped
     // phase average would split the samples between ±½.
     let (term, layout) = crosscoder_term(Planted::Shift(0.5));
-    let report = measure_atom_transport_between(
-        &term,
-        &layout,
-        0,
-        CrosscoderLayer::Anchor,
-        CrosscoderLayer::Block(0),
-        GRID,
-    )
-    .expect("half-turn transport");
+    let report = measured(
+        "half turn",
+        measure_atom_transport_between(
+            &term,
+            &layout,
+            0,
+            CrosscoderLayer::Anchor,
+            CrosscoderLayer::Block(0),
+        ),
+    );
     assert_isometry("half turn", &report, 1.0, 0.5, rotation_drift(0.5));
 }
 
 #[test]
-fn transport_refuses_an_empty_grid_and_an_absent_block() {
+fn transport_refuses_an_absent_block() {
     let (term, layout) = crosscoder_term(Planted::Shift(PHASE));
-    let empty = measure_atom_transport_between(
-        &term,
-        &layout,
-        0,
-        CrosscoderLayer::Anchor,
-        CrosscoderLayer::Block(0),
-        0,
-    );
-    assert!(
-        matches!(&empty, Err(message) if message.contains("grid_resolution must be positive")),
-        "an empty grid must be refused, got {empty:?}"
-    );
     let absent = measure_atom_transport_between(
         &term,
         &layout,
         0,
         CrosscoderLayer::Anchor,
         CrosscoderLayer::Block(1),
-        GRID,
     );
     assert!(
         matches!(&absent, Err(message) if message.contains("block index")),
         "a block the layout does not have must be refused, got {absent:?}"
+    );
+}
+
+#[test]
+fn an_atom_short_of_the_fitted_homotopy_endpoint_is_undefined_not_an_error() {
+    let (mut term, layout) = crosscoder_term(Planted::Shift(PHASE));
+    term.atoms[0].homotopy_eta = 0.5;
+    let status = measure_atom_transport_between(
+        &term,
+        &layout,
+        0,
+        CrosscoderLayer::Anchor,
+        CrosscoderLayer::Block(0),
+    );
+    assert!(
+        matches!(
+            &status,
+            Ok(AtomTransportStatus::Undefined { reason }) if reason.contains("homotopy eta")
+        ),
+        "an atom the phase-shift law does not describe must report a typed undefined status, \
+         got {status:?}"
     );
 }

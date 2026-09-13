@@ -201,14 +201,6 @@ pub struct SaeCrosscoderAutoFitRequest {
     pub cancel: Option<Arc<AtomicBool>>,
 }
 
-/// Optional scientific measurements to materialize from a completed fit.
-/// Transport is not run implicitly: its grid resolution is a caller-owned
-/// experimental resolution.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SaeCrosscoderEvaluationConfig {
-    pub transport_grid_resolution: Option<usize>,
-}
-
 /// Honest-unit reconstruction and per-atom decoders for one fitted layer. The
 /// layer's TARGET is deliberately not retained (`reconstruction_r2` is computed
 /// at construction) — keeping it doubled the report's resident footprint for
@@ -308,19 +300,29 @@ pub enum SaeCrosscoderWireDrift {
     },
 }
 
+/// One atom's consecutive-layer transport. Every atom and layer pair is reported;
+/// `Undefined` names why the phase-shift law does not describe it.
 #[derive(Clone, Debug, Serialize)]
-pub struct SaeCrosscoderWireTransport {
-    pub atom: usize,
-    pub source: String,
-    pub target: String,
-    pub grid_resolution: usize,
-    pub n_harmonics: usize,
-    pub phase_shift: (f64, f64),
-    pub phase_r2: f64,
-    pub deviation_locus: Option<f64>,
-    pub drift: f64,
-    pub principal_angles: Vec<f64>,
-    pub transport_grid: Vec<(f64, f64)>,
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SaeCrosscoderWireTransport {
+    Measured {
+        atom: usize,
+        source: String,
+        target: String,
+        n_harmonics: usize,
+        phase_shift: (f64, f64),
+        phase_r2: f64,
+        deviation_locus: Option<f64>,
+        drift: f64,
+        principal_angles: Vec<f64>,
+        transport_grid: Vec<(f64, f64)>,
+    },
+    Undefined {
+        atom: usize,
+        source: String,
+        target: String,
+        reason: String,
+    },
 }
 
 /// Stable, binding-neutral report shape owned by GAM-SAE. pyffi and CLI only
@@ -653,12 +655,9 @@ impl SaeCrosscoderFitReport {
         crate::inference::steering::collateral_curve(&self.term, atom, axis, &others, doses)
     }
 
-    /// Materialize the stable report shared by bindings. The optional transport
-    /// experiment is evaluated here, not in pyffi/CLI.
-    pub fn wire_report(
-        &self,
-        evaluation: SaeCrosscoderEvaluationConfig,
-    ) -> Result<SaeCrosscoderWireReport, String> {
+    /// Materialize the stable report shared by bindings. Every atom's
+    /// consecutive-layer transport is measured here, not in pyffi/CLI.
+    pub fn wire_report(&self) -> Result<SaeCrosscoderWireReport, String> {
         let anchor_label = self
             .layers
             .first()
@@ -706,39 +705,37 @@ impl SaeCrosscoderFitReport {
                 reason: reason.clone(),
             },
         };
-        let mut transport = Vec::new();
-        if let Some(grid_resolution) = evaluation.transport_grid_resolution {
-            let chain: Vec<CrosscoderLayer> = std::iter::once(CrosscoderLayer::Anchor)
-                .chain((0..self.layout.num_blocks()).map(CrosscoderLayer::Block))
-                .collect();
-            // One independent measurement per (atom, consecutive-pair):
-            // embarrassingly parallel, and inner-loop parallelism (the grid
-            // projections) composes fine under rayon's work stealing.
-            use rayon::prelude::*;
-            let pairs: Vec<(usize, CrosscoderLayer, CrosscoderLayer)> = (0..self.term.k_atoms())
-                .flat_map(|atom| {
-                    chain
-                        .windows(2)
-                        .map(move |pair| (atom, pair[0], pair[1]))
-                        .collect::<Vec<_>>()
-                })
-                .collect();
-            transport = pairs
-                .into_par_iter()
-                .map(|(atom, source_layer, target_layer)| {
-                    let measured = measure_atom_transport_between(
-                        &self.term,
-                        &self.layout,
+        let chain: Vec<CrosscoderLayer> = std::iter::once(CrosscoderLayer::Anchor)
+            .chain((0..self.layout.num_blocks()).map(CrosscoderLayer::Block))
+            .collect();
+        // One independent measurement per (atom, consecutive-pair): embarrassingly
+        // parallel.
+        use rayon::prelude::*;
+        let pairs: Vec<(usize, CrosscoderLayer, CrosscoderLayer)> = (0..self.term.k_atoms())
+            .flat_map(|atom| {
+                chain
+                    .windows(2)
+                    .map(move |pair| (atom, pair[0], pair[1]))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let transport = pairs
+            .into_par_iter()
+            .map(|(atom, source_layer, target_layer)| {
+                let source = wire_layer_label(source_layer, anchor_label, block_labels)?;
+                let target = wire_layer_label(target_layer, anchor_label, block_labels)?;
+                let status = measure_atom_transport_between(
+                    &self.term,
+                    &self.layout,
+                    atom,
+                    source_layer,
+                    target_layer,
+                )?;
+                Ok(match status {
+                    AtomTransportStatus::Measured(measured) => SaeCrosscoderWireTransport::Measured {
                         atom,
-                        source_layer,
-                        target_layer,
-                        grid_resolution,
-                    )?;
-                    Ok(SaeCrosscoderWireTransport {
-                        atom,
-                        source: wire_layer_label(source_layer, anchor_label, block_labels)?,
-                        target: wire_layer_label(target_layer, anchor_label, block_labels)?,
-                        grid_resolution: measured.grid_resolution,
+                        source,
+                        target,
                         n_harmonics: measured.n_harmonics,
                         phase_shift: measured.phase_shift,
                         phase_r2: measured.phase_r2,
@@ -746,10 +743,18 @@ impl SaeCrosscoderFitReport {
                         drift: measured.drift,
                         principal_angles: measured.principal_angles,
                         transport_grid: measured.transport_grid,
-                    })
+                    },
+                    AtomTransportStatus::Undefined { reason } => {
+                        SaeCrosscoderWireTransport::Undefined {
+                            atom,
+                            source,
+                            target,
+                            reason,
+                        }
+                    }
                 })
-                .collect::<Result<Vec<_>, String>>()?;
-        }
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         let crosscoder = SaeCrosscoderWirePersistence {
             anchor_label: layout.anchor_label.clone(),
             anchor_dim: layout.anchor_dim,

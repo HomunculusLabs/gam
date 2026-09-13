@@ -80,7 +80,6 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--rows", type=int, default=None, help="max prompts/rows to use (default: all)")
     ap.add_argument("--n-atoms", type=int, default=32, help="number of shared circle atoms K")
     ap.add_argument("--n-harmonics", type=int, default=3, help="Fourier order per circle atom")
-    ap.add_argument("--grid-resolution", type=int, default=512, help="chart grid points over [0,1)")
     ap.add_argument("--inner-max-iter", type=int, default=80, help="inner arrow-Schur iterations")
     ap.add_argument("--out", required=True, help="output directory for the JSON report")
     args = ap.parse_args(argv)
@@ -100,7 +99,6 @@ def main(argv: list[str] | None = None) -> int:
         "ridge_ext_coord": 1e-6,
         "ridge_beta": 1e-6,
         "n_harmonics": args.n_harmonics,
-        "grid_resolution": args.grid_resolution,
     }
     model = sae_crosscoder_fit(
         anchor,
@@ -111,7 +109,6 @@ def main(argv: list[str] | None = None) -> int:
         max_iter=args.inner_max_iter,
         ridge_ext_coord=1e-6,
         ridge_beta=1e-6,
-        transport_grid_resolution=args.grid_resolution,
     )
     fit = model.to_dict()
     reports = list(fit["transport"])
