@@ -95,7 +95,6 @@ fn fitted_circle(
     .expect("fixture assignment: one logit column and one coord block per atom");
     let mut term = SaeManifoldTerm::new(vec![atom], assignment)
         .expect("fixture term: every atom's basis width matches its assignment block");
-    term.set_guards_enabled(false);
     let mut rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(1)]);
     term.run_joint_fit_arrow_schur(x.view(), &mut rho, None, 80, 1.0, 1e-7, 1e-7)
         .expect("K=1 circle joint fit");

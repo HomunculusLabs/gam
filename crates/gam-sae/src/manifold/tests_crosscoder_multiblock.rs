@@ -140,14 +140,12 @@ fn empty_layout_is_a_pure_descriptor_byte_identical_to_plain_fit() {
 
     // Path A — plain joint fit, no layout.
     let (mut term_a, mut rho_a) = build_k1(&evaluator, &coords, p);
-    term_a.set_guards_enabled(false);
     term_a
         .run_joint_fit_arrow_schur(z.view(), &mut rho_a, None, 48, 1.0, 1e-6, 1e-6)
         .unwrap();
 
     // Path B — identical fit, but with an anchor-only crosscoder layout installed.
     let (mut term_b, mut rho_b) = build_k1(&evaluator, &coords, p);
-    term_b.set_guards_enabled(false);
     let empty = CrosscoderLayout::new(p, vec![], vec![], vec![]).unwrap();
     assert_eq!(empty.total_dim(), p);
     assert_eq!(empty.num_blocks(), 0);

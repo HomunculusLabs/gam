@@ -151,7 +151,6 @@ fn fitted_defect(uneven: bool) -> (f64, f64, f64) {
     let (atom, cb) = augmented_circle_atom(&evaluator, &coords, p_tot);
     let (mut term, mut rho) = build_k1(atom, cb);
     term.set_behavior_block(block).unwrap();
-    term.set_guards_enabled(false);
     // Match the production fit entry: seed the linear decoder conditionally at
     // the planted chart before asking the joint nonlinear walk to move chart and
     // decoder together. A cold decoder makes the coordinate Jacobian vanish and

@@ -2869,5 +2869,14 @@
     },
     "reason": "#2899 public API sweep of gam-sae (prune-api-d): under the lead's good-cover ruling, the test-only good-cover certificate types and the named-compression constructor only their branch used are deleted, along with the good_cover parameter.",
     "evidence": "At 349c8c056, git grep -n -w finds ConvexIntersectionProof::new and AtlasGoodCoverCertificate::new constructed only in the atlas_nerve.rs unit test, every production build_atlas_nerve call passing None for good_cover, and GraphCompressionReport::certified called only by that dead branch. The removed map is public_api_census.py's census difference over this change, computed on MSI."
+  },
+  {
+    "base": "6874b6d216db6a3aa6591afedd0f6acb06f9e4ab",
+    "removed": {
+      "crates/gam-sae/src/manifold/construction.rs::guards_enabled": 1,
+      "crates/gam-sae/src/manifold/construction.rs::set_guards_enabled": 1
+    },
+    "reason": "#2899 (prune-api-d), following the lead's ruling: SaeManifoldTerm::set_guards_enabled and guards_enabled have no production caller, so both accessors are deleted and the collapse guards are always armed.",
+    "evidence": "At 271836b2d, git grep -n -e set_guards_enabled -e guards_enabled finds the setter called only by gam-sae unit and integration tests, and the reader called nowhere. The removed map is public_api_census.py's census difference over this change, computed on MSI."
   }
 ]

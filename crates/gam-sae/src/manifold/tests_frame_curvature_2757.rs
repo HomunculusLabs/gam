@@ -140,9 +140,7 @@ fn planted_term_with_gate(
         AssignmentMode::ordered_beta_bernoulli(0.7, 1.0, false),
     )
     .expect("assignment blocks agree");
-    let mut term = SaeManifoldTerm::new(atoms, assignment).expect("term");
-    term.set_guards_enabled(false);
-    term
+    SaeManifoldTerm::new(atoms, assignment).expect("term")
 }
 
 /// `H = Σ_n J_nᵀ M_n J_n` written out from the definition, with the per-row

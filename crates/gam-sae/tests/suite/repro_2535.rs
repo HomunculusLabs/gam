@@ -119,7 +119,6 @@ fn fresh_arrow_schur_joint_fits_are_bit_reproducible_at_k2_2535() {
         .map(|_| build_k2(&evaluator, &coords, output_dim))
         .collect();
     for (term, rho) in &mut fits {
-        term.set_guards_enabled(false);
         term.run_joint_fit_arrow_schur(target.view(), rho, None, 1, 1.0, 1.0e-6, 1.0e-6)
             .unwrap();
     }

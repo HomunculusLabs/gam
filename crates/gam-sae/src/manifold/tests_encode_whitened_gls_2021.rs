@@ -93,9 +93,8 @@ fn build_circle_term(
         AssignmentMode::softmax(1.0),
     )
     .expect("one logit block, one coordinate block and one manifold agree at K=1");
-    let mut term = SaeManifoldTerm::new(vec![atom], assignment)
+    let term = SaeManifoldTerm::new(vec![atom], assignment)
         .expect("the single atom and the K=1 assignment share one latent block");
-    term.set_guards_enabled(false);
     // Null the coordinate prior so the frozen-decoder read is pure (metric-only) GLS.
     let rho = SaeManifoldRho::new(-50.0, -50.0, vec![Array1::<f64>::from_elem(1, -50.0)]);
     (term, rho)

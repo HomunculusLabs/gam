@@ -118,7 +118,6 @@ fn fresh_arrow_schur_joint_fits_are_bit_reproducible_above_61_rows_2512() {
             );
         }
         for (term, rho) in &mut fits {
-            term.set_guards_enabled(false);
             term.run_joint_fit_arrow_schur(target.view(), rho, None, 1, 1.0, 1.0e-6, 1.0e-6)
                 .unwrap();
         }

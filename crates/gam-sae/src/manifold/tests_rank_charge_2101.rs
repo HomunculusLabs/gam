@@ -93,7 +93,6 @@ fn fit_circle_subset(
     .expect("the fixture's logits, coordinate blocks and manifolds agree in length");
     let mut term = SaeManifoldTerm::new(atoms, assignment)
         .expect("the fixture's atoms and assignment describe the same latent blocks");
-    term.set_guards_enabled(false);
     let mut rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(1); circles.len()]);
     term.run_joint_fit_arrow_schur(
         x.view(),

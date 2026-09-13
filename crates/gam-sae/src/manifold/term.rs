@@ -788,17 +788,6 @@ pub struct SaeManifoldTerm {
     /// Chunk terms inherit the parent's sample (`materialize_chunk`), so a chunk
     /// can never plan against a different environment than the fit it belongs to.
     pub(crate) host_available_bytes: usize,
-    /// SAC — whether the #976 Layer-1 collapse-guard stack (active-mass /
-    /// decoder-norm re-seed, co-collapse reseed-all) is armed on this term's
-    /// inner joint fits. Default `true` (bit-for-bit historical path). The
-    /// Sequential Atom Composition driver ([`super::stagewise`]) fits one atom at
-    /// a time and drives this to `false` on the K=1 path: a single atom never
-    /// trips the guards (there is no dictionary peer to collapse against), so the
-    /// guards are pure no-ops there, and disarming them makes the per-atom /
-    /// backfitting refits provably reseed-free — a reseed mid-refit would break
-    /// the block-coordinate monotonicity the composition rests on. Carried across
-    /// clones like the other per-fit config so a cloned candidate keeps the lane.
-    pub(crate) guards_enabled: bool,
     /// Rung-2 behavioral data block: when `Some`, this term's output is the
     /// AUGMENTED stack `[activation | √λ_y · behavior-tangent]` and each atom's
     /// decoder is the widened `[B_k | C_k]`. The block records the sphere-tangent
@@ -913,7 +902,6 @@ impl Clone for SaeManifoldTerm {
             separation_barrier_strength_override: self.separation_barrier_strength_override,
             gpu_policy: self.gpu_policy,
             host_available_bytes: self.host_available_bytes,
-            guards_enabled: self.guards_enabled,
             // Rung-2 behavioral identity is persisted configuration (like the
             // assignment mode / barrier override), carried across clones so a
             // cloned candidate fits the same augmented two-block problem.
