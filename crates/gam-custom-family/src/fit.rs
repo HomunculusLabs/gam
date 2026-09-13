@@ -734,9 +734,9 @@ pub(crate) fn resolvability_rho_domain(
         upper[outer] = hi;
     }
     log::debug!(
-        "[RHO-DOMAIN] resolvability domain per coordinate: lower={:?} upper={:?}",
-        lower.iter().map(|b| (b * 1e3).round() / 1e3).collect::<Vec<_>>(),
-        upper.iter().map(|b| (b * 1e3).round() / 1e3).collect::<Vec<_>>(),
+        "[RHO-DOMAIN] resolvability domain per coordinate: lower={:.3?} upper={:.3?}",
+        lower.to_vec(),
+        upper.to_vec(),
     );
     Ok((lower, upper))
 }
