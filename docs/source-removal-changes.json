@@ -6692,5 +6692,13 @@
     ],
     "reason": "#2899 moved tests: three root test files were the only users outside gam-terms of gam_terms::basis::default_spherical_harmonic_degree, basis::apply_sum_to_zero_constraint_sparse and inference::formula_dsl::parse_formula_dsl, which production calls only inside gam-terms (term_builder.rs, bspline_build.rs, formula_dsl.rs). Each file moves verbatim into a gam-terms unit-test module beside its function (basis/sphere_basis/sphere_harmonic_default_degree_tests.rs, basis/duchon_thinplate/sum_to_zero_sparse_projector_idempotence_tests.rs, inference/formula_dsl/formula_dsl_operator_family_issue_219_tests.rs), importing through super::, so no test is lost and the three functions narrow to pub(crate).",
     "evidence": "At the base, git grep -n -w over crates, src, tests, examples and bench finds default_spherical_harmonic_degree outside gam-terms only in tests/manifolds/manifolds/sphere_harmonic_default_degree.rs, apply_sum_to_zero_constraint_sparse only in tests/identifiability/misc/identifiability_nullspace_projector_idempotence_bug.rs, and parse_formula_dsl only in tests/regressions/families/formula_dsl_operator_family_issue_219.rs. Every removed identity is a declaration in those three deleted root files, and each reappears unchanged in its new module file."
+  },
+  {
+    "base": "b7beaf54c1601ab89cbbf709a59c5a7eb9e29cb8",
+    "items": [
+      "crates/gam-problem/src/row_measure.rs:fn:splitmix64"
+    ],
+    "reason": "#2899 slop: gam_problem::row_measure carried a private splitmix64(x) that only forwarded to gam_linalg::utils::splitmix64_hash. hash_full and hash_subsample now call splitmix64_hash directly, so every row-measure id is bit-identical.",
+    "evidence": "At the base, row_measure.rs:68-72 defines splitmix64(x) as gam_linalg::utils::splitmix64_hash(x), and its six calls are in hash_full and hash_subsample. The name stays declared elsewhere (for example gam_linalg::utils::splitmix64), which is why the guard counts it."
   }
 ]

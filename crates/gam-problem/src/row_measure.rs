@@ -14,12 +14,16 @@
 //! different objectives and ρ can take any sign, producing the observed
 //! ρ = -0.05 with predicted_reduction = +7.378e6 sign flip.
 //!
-//! `RowSubsampleMask::id` is a stable 64-bit content hash: equal masks
-//! (`Arc<OuterScoreSubsample>` pointer equality OR identical mask
-//! contents) ⇒ equal ids; differing masks ⇒ differing ids with high
-//! probability. The TR loop captures one `RowSubsampleMask` at the top of an
-//! iteration and hard-asserts that the id observed by each of the four
-//! quantities matches before computing ρ.
+//! `RowSubsampleMask::id` identifies the measure a handle walks. The full-data
+//! id hashes `n`. A subsample id hashes the `Arc<OuterScoreSubsample>`
+//! allocation address together with the mask's `n_full`, length, seed and
+//! weight scale, so handles cloned from one `Arc` share an id, while a
+//! content-equal mask rebuilt as a separate allocation gets a different one.
+//! Ids are compared only between handles that are alive together, which keeps
+//! a freed address from being reused under a stale id. The TR loop captures
+//! one `RowSubsampleMask` at the top of an iteration, keeps it alive, and
+//! hard-asserts that the id observed by each of the four quantities matches
+//! before computing ρ.
 //!
 //! The `BlockwiseFitOptions`-coupled `from_options` constructor stays up in
 //! `gam-solve` (it depends on the options type, which lives above this tier);
@@ -27,6 +31,8 @@
 //! consume the measure without depending on `gam-solve`.
 
 use std::sync::Arc;
+
+use gam_linalg::utils::splitmix64_hash;
 
 use crate::outer_subsample::OuterScoreSubsample;
 
@@ -36,8 +42,8 @@ use crate::outer_subsample::OuterScoreSubsample;
 /// duplicated.
 #[derive(Clone, Debug)]
 pub struct RowSubsampleMask {
-    /// Stable 64-bit content hash. Same `mask` (by Arc pointer OR by
-    /// row content) ⇒ same id; different `mask` ⇒ different id.
+    /// Measure identity: a hash of `n` for full data, or of the mask's `Arc`
+    /// allocation and metadata for a subsample (see the module docs).
     pub id: u64,
     /// `None` means full data (`0..n`, weight 1.0 per row).
     /// `Some(_)` means the rows and HT weights inside the subsample.
@@ -65,16 +71,10 @@ impl RowSubsampleMask {
     }
 }
 
-/// Thin wrapper over the canonical SplitMix64 hash in
-/// [`gam_linalg::utils::splitmix64_hash`].
-fn splitmix64(x: u64) -> u64 {
-    gam_linalg::utils::splitmix64_hash(x)
-}
-
 const FULL_DATA_ROW_SUBSAMPLE_SENTINEL: u64 = 0xA5A5_5A5A_DEAD_BEEF;
 
 fn hash_full(n: usize) -> u64 {
-    let mut h = splitmix64(FULL_DATA_ROW_SUBSAMPLE_SENTINEL ^ (n as u64));
+    let mut h = splitmix64_hash(FULL_DATA_ROW_SUBSAMPLE_SENTINEL ^ (n as u64));
     if h == 0 {
         h = 0x1234_5678_9ABC_DEF0;
     }
@@ -83,11 +83,11 @@ fn hash_full(n: usize) -> u64 {
 
 fn hash_subsample(mask: &Arc<OuterScoreSubsample>) -> u64 {
     let ptr = Arc::as_ptr(mask) as u64;
-    let mut h = splitmix64(ptr);
-    h ^= splitmix64(mask.n_full as u64);
-    h ^= splitmix64(mask.len() as u64);
-    h ^= splitmix64(mask.seed);
-    h ^= splitmix64((mask.weight_scale.to_bits()) ^ 0xC0FF_EE00_0000_0000);
+    let mut h = splitmix64_hash(ptr);
+    h ^= splitmix64_hash(mask.n_full as u64);
+    h ^= splitmix64_hash(mask.len() as u64);
+    h ^= splitmix64_hash(mask.seed);
+    h ^= splitmix64_hash((mask.weight_scale.to_bits()) ^ 0xC0FF_EE00_0000_0000);
     if h == 0 {
         h = 0xDEAD_BEEF_FEED_FACE;
     }
