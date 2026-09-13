@@ -2,7 +2,7 @@ use crate::active_set::ConstraintKktDiagnostics;
 use crate::estimate::EstimationError;
 use gam_linalg::matrix::{DesignMatrix, ReparamOperator, SignedWeightsView, SymmetricMatrix};
 use gam_problem::LinearInequalityConstraints;
-use gam_problem::{Coefficients, GlmLikelihoodSpec, InverseLink, LinearPredictor, RidgePassport};
+use gam_problem::{Coefficients, GlmLikelihoodSpec, InverseLink, LinearPredictor};
 use gam_terms::construction::ReparamResult;
 use ndarray::{ArcArray1, Array1, Array2, ArrayView1};
 use serde::{Deserialize, Serialize};
@@ -367,8 +367,6 @@ pub struct PirlsResult {
     pub penalized_hessian_transformed: SymmetricMatrix,
     // Single stabilized Hessian for consistent cost/gradient computation
     pub stabilizedhessian_transformed: SymmetricMatrix,
-    /// Canonical ridge metadata passport consumed by outer objective/gradient code.
-    pub ridge_passport: RidgePassport,
 
     // The unpenalized deviance, calculated from mu and y
     pub deviance: f64,
@@ -564,7 +562,6 @@ impl PirlsResult {
             beta_transformed: self.beta_transformed.clone(),
             penalized_hessian_transformed: self.penalized_hessian_transformed.clone(),
             stabilizedhessian_transformed: self.stabilizedhessian_transformed.clone(),
-            ridge_passport: self.ridge_passport,
             final_kkt_tolerance: self.final_kkt_tolerance,
             deviance: self.deviance,
             edf: self.edf,
@@ -663,7 +660,6 @@ impl PirlsResult {
             beta_transformed: self.beta_transformed.clone(),
             penalized_hessian_transformed: self.penalized_hessian_transformed.clone(),
             stabilizedhessian_transformed: self.stabilizedhessian_transformed.clone(),
-            ridge_passport: self.ridge_passport,
             final_kkt_tolerance: self.final_kkt_tolerance,
             used_device: self.used_device,
             deviance: self.deviance,

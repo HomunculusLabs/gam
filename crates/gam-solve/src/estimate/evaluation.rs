@@ -194,8 +194,8 @@ where
     reml_state.compute_gradient(rho)
 }
 
-/// Evaluate the external cost and report the stabilization ridge used.
-/// This is a diagnostic helper for tests that need to detect ridge jitter.
+/// Evaluate the external cost. The second element is identically zero: no
+/// PIRLS fit carries a stabilization ridge (#2901 V22).
 pub fn evaluate_externalcost_andridge<X>(
     y: ArrayView1<'_, f64>,
     w: ArrayView1<'_, f64>,
@@ -259,8 +259,7 @@ where
     );
 
     let cost = reml_state.compute_cost(rho)?;
-    let ridge = reml_state.last_ridge_used().unwrap_or(0.0);
-    Ok((cost, ridge))
+    Ok((cost, 0.0))
 }
 
 #[cfg(test)]

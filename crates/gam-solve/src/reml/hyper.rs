@@ -1548,7 +1548,7 @@ impl<'a> RemlState<'a> {
         let penalty_logdet = super::penalty_logdet::PenaltyPseudologdet::from_penalties(
             &ct_eval,
             lambdas.as_slice().unwrap_or(&[]),
-            bundle.ridge_passport.penalty_logdet_ridge(),
+            0.0,
             p_dim,
         )
         .map_err(EstimationError::InvalidInput)?;
@@ -2803,7 +2803,7 @@ impl<'a> RemlState<'a> {
         let pld = super::penalty_logdet::PenaltyPseudologdet::from_penalties(
             &ct_eval,
             lambdas.as_slice().unwrap_or(&[]),
-            bundle.ridge_passport.penalty_logdet_ridge(),
+            0.0,
             p_dim,
         )
         .map_err(EstimationError::InvalidInput)?;

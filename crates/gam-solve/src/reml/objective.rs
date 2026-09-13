@@ -322,7 +322,6 @@ impl<'a> RemlState<'a> {
         {
             // Validation and diagnostics (before delegating to unified evaluator).
             let pirls_result = bundle.pirls_result.as_ref();
-            let ridge_used = bundle.ridge_passport.delta();
 
             if !p.is_empty() {
                 let k_lambda = p.len();
@@ -351,24 +350,22 @@ impl<'a> RemlState<'a> {
             // confuse log readers and mask real production-fit issues.
             let want_hot_diag = !pirls_result.status.is_failed_max_iterations()
                 && self.should_compute_hot_diagnostics(cost_call_idx);
-            if ridge_used > 0.0 && want_hot_diag {
+            if want_hot_diag {
                 // Eigenvalue diagnostics require dense; only pay the cost when
-                // hot diagnostics are requested and ridge was applied.
+                // hot diagnostics are requested.
                 let pht_dense = pirls_result.penalized_hessian_transformed.to_dense();
                 if let Ok((eigs, _)) = pht_dense.eigh(Side::Lower)
                     && let Some(min_eig) = eigs.iter().cloned().reduce(f64::min)
                 {
                     if gam_problem::diagnostics::should_emit_h_min_eig_diag(min_eig) {
                         log::debug!(
-                            "[Diag] H min_eig={:.3e} (ridge={:.3e})",
-                            min_eig,
-                            ridge_used
+                            "[Diag] H min_eig={:.3e}",
+                            min_eig
                         );
                     }
                     if min_eig <= 0.0 {
                         log::warn!(
-                            "Penalized Hessian not PD (min eig <= 0) before stabilization; proceeding with ridge {:.3e}.",
-                            ridge_used
+                            "Penalized Hessian not PD (min eig <= 0)."
                         );
                     }
                     // An eigenvalue inside the eigensolver's own rounding band
@@ -378,7 +375,7 @@ impl<'a> RemlState<'a> {
                     if !min_eig.is_finite() || min_eig <= resolvable_floor {
                         let condition_number = symmetric_spectrum_condition_number(&pht_dense);
                         log::warn!(
-                            "Penalized Hessian extremely ill-conditioned (cond={:.3e}); continuing with stabilized Hessian.",
+                            "Penalized Hessian extremely ill-conditioned (cond={:.3e}); continuing.",
                             condition_number
                         );
                     }
@@ -1326,7 +1323,6 @@ impl<'a> RemlState<'a> {
         use std::borrow::Cow;
 
         let pirls_result = bundle.pirls_result.as_ref();
-        let ridge_passport = pirls_result.ridge_passport;
 
         let free_basis_opt = self.active_constraint_free_basis(pirls_result);
         let (h_for_operator, e_for_logdet) = if let Some(z) = free_basis_opt.as_ref() {
@@ -1359,11 +1355,7 @@ impl<'a> RemlState<'a> {
                 let likelihood_basis = free_basis_opt
                     .as_ref()
                     .map_or_else(|| firth.q_basis.clone(), |z| z.t().dot(&firth.q_basis));
-                if ridge_passport.delta() > 0.0 {
-                    Ok(h_for_operator.nrows())
-                } else {
-                    firth_penalized_structural_rank(&likelihood_basis, e_for_logdet.as_ref())
-                }
+                firth_penalized_structural_rank(&likelihood_basis, e_for_logdet.as_ref())
             })
             .transpose()?;
 
@@ -1452,7 +1444,7 @@ impl<'a> RemlState<'a> {
         // subspace now; the Hessian-side kernel is intrinsic to H_pen (#901)
         // and no longer needs `range(S_+)`.
         let penalty_subspace = if !uses_kron_penalty_logdet {
-            Some(self.compute_penalty_subspace(e_for_logdet.as_ref(), ridge_passport)?)
+            Some(self.compute_penalty_subspace(e_for_logdet.as_ref())?)
         } else {
             None
         };
@@ -1460,7 +1452,6 @@ impl<'a> RemlState<'a> {
             rho,
             e_for_logdet.as_ref(),
             &[],
-            ridge_passport,
             penalty_subspace.as_ref(),
             bundle,
             mode,
@@ -1736,7 +1727,6 @@ impl<'a> RemlState<'a> {
         use super::reml_outer_engine::{DenseSpectralOperator, PseudoLogdetMode};
 
         let pirls_result = bundle.pirls_result.as_ref();
-        let ridge_passport = pirls_result.ridge_passport;
 
         let mut h_total_original =
             self.bundle_matrix_in_original_basis(pirls_result, bundle.h_total.as_ref());
@@ -1840,19 +1830,11 @@ impl<'a> RemlState<'a> {
                 .reparam_result
                 .e_transformed
                 .dot(&pirls_result.reparam_result.qs.t());
-            Some(if ridge_passport.delta() > 0.0 {
-                h_total_original.nrows()
-            } else {
-                firth_penalized_structural_rank(&firth.q_basis, &root_original)?
-            })
+            Some(firth_penalized_structural_rank(&firth.q_basis, &root_original)?)
         } else if let Some(firth) = bundle.firth_dense_operator.as_ref() {
             let qs = &pirls_result.reparam_result.qs;
             let root_original = pirls_result.reparam_result.e_transformed.dot(&qs.t());
-            Some(if ridge_passport.delta() > 0.0 {
-                h_total_original.nrows()
-            } else {
-                firth_penalized_structural_rank(&qs.dot(&firth.q_basis), &root_original)?
-            })
+            Some(firth_penalized_structural_rank(&qs.dot(&firth.q_basis), &root_original)?)
         } else {
             None
         };
@@ -1878,7 +1860,7 @@ impl<'a> RemlState<'a> {
             weights: pirls_result.finalweights.view(),
             penalties: root_penalties.as_slice(),
             lambdas: &root_lambdas,
-            delta: ridge_passport.delta(),
+            delta: 0.0,
         };
         let hessian_op: std::sync::Arc<dyn super::reml_outer_engine::HessianFactorization> = {
             use super::reml_outer_engine::HessianFactorization as _;
@@ -1949,7 +1931,7 @@ impl<'a> RemlState<'a> {
         // Penalty-side `log|S|₊` machinery only; the Hessian-side kernel is
         // intrinsic to H_pen (#901) and no longer consumes `range(S_+)`.
         let penalty_subspace = if !uses_kron_penalty_logdet {
-            Some(self.compute_penalty_subspace(e_for_logdet, ridge_passport)?)
+            Some(self.compute_penalty_subspace(e_for_logdet)?)
         } else {
             None
         };
@@ -1957,7 +1939,6 @@ impl<'a> RemlState<'a> {
             rho,
             e_for_logdet,
             &[],
-            ridge_passport,
             penalty_subspace.as_ref(),
             bundle,
             mode,

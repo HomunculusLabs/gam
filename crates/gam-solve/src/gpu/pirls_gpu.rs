@@ -63,8 +63,8 @@ pub struct PirlsGpuInput<'a> {
     /// Callers must assemble the corrected RHS before passing it here.
     pub gradient: ArrayView1<'a, f64>,
     /// Temporary Levenberg–Marquardt damping; added to H for the solve
-    /// only. Never enters the exported `penalized_hessian`, `RidgePassport`,
-    /// EDF, REML curvature, or penalty term.
+    /// only. Never enters the exported `penalized_hessian`, EDF, REML
+    /// curvature, or penalty term.
     pub step_lm_lambda: f64,
 }
 
@@ -778,7 +778,7 @@ extern "C" __global__ void chol_logdet_col_major(
 
         // Exported penalised Hessian: H_final = Qsᵀ·XᵀWX·Qs + S.
         // Apply Qs rotation host-side on the downloaded XᵀWX so LM damping
-        // never contaminates exported EDF / REML curvature / RidgePassport.
+        // never contaminates exported EDF / REML curvature.
         let xtwx_col = ws
             .stream
             .clone_dtoh(&ws.xtwx_dev)
@@ -1133,7 +1133,7 @@ extern "C" __global__ void chol_logdet_col_major(
 
         // Exported penalised Hessian: H_final = Qsᵀ·XᵀWX·Qs + S.
         // Apply Qs rotation host-side on the downloaded XᵀWX so LM damping
-        // never contaminates exported EDF / REML curvature / RidgePassport.
+        // never contaminates exported EDF / REML curvature.
         let xtwx_col = ws
             .stream
             .clone_dtoh(&ws.xtwx_dev)
@@ -2348,11 +2348,11 @@ extern "C" __global__ void status_first_ladder(
     /// When `None`, the derived fields on `PirlsLoopOutcome`
     /// (`finalweights`, `solveweights`, `solve_dmu_deta`,
     /// `solve_d2mu_deta2`, `solve_d3mu_deta3`, `solve_c_array`,
-    /// `solve_d_array`, `status`, `constraint_kkt`, `ridge_passport`,
-    /// `firth`, `edf`, `beta_transformed`, `derivatives_unsupported`)
+    /// `solve_d_array`, `status`, `constraint_kkt`, `firth`, `edf`,
+    /// `beta_transformed`, `derivatives_unsupported`)
     /// take safe defaults: empty arrays, `PirlsStatus::Converged` or
     /// `MaxIterationsReached` reflecting `converged`, no KKT
-    /// diagnostics, a zero identity-ridge passport,
+    /// diagnostics,
     /// `FirthDiagnostics::Inactive`, `edf = NaN`,
     /// `beta_transformed = beta`, `derivatives_unsupported = true`.
     /// Existing callers that do not need the CPU oracle surface can
@@ -2393,11 +2393,6 @@ extern "C" __global__ void status_first_ladder(
         /// outcome matches the CPU oracle's `exported_laplace_curvature`
         /// contract.
         pub exported_curvature: crate::pirls::HessianCurvatureKind,
-        /// Pre-built ridge passport that the dispatch wirer wants stamped on
-        /// `PirlsResult::ridge_passport`. When `None`, the postpass uses a
-        /// zero ridge, matching the CPU oracle: no PIRLS path adds a
-        /// stabilization ridge (#2901 V22).
-        pub ridge_passport: Option<gam_problem::RidgePassport>,
         /// Firth bias-reduction diagnostics. Today the GPU loop does
         /// not implement Firth; pass `None` to land
         /// `FirthDiagnostics::Inactive` on the outcome. A future
@@ -2481,9 +2476,6 @@ extern "C" __global__ void status_first_ladder(
         /// those go non-finite; `MaxIterationsReached` when the loop
         /// hit its iteration cap without converging.
         pub status: crate::pirls::PirlsStatus,
-        /// Ridge passport. When `extra.ridge_passport` is `Some`, this is the
-        /// supplied value verbatim; otherwise a zero-ridge passport.
-        pub ridge_passport: gam_problem::RidgePassport,
         /// Firth diagnostics. `Inactive` unless the caller passes an
         /// `Active` value through `extra.firth`.
         pub firth: crate::pirls::FirthDiagnostics,
@@ -2551,7 +2543,7 @@ extern "C" __global__ void status_first_ladder(
         // `0.0` for fits with no prior-mean shift.
         constant_shift: f64,
         // Temporary LM damping for the Newton solves only; never enters
-        // RidgePassport / exported Hessian / EDF / penalty term.
+        // exported Hessian / EDF / penalty term.
         lm_ridge: f64,
         max_iter: usize,
         tol: f64,
@@ -3152,14 +3144,6 @@ extern "C" __global__ void status_first_ladder(
             crate::pirls::PirlsStatus::MaxIterationsReached
         };
 
-        // No PIRLS path adds a stabilization ridge (#2901 V22), and
-        // step_lm_lambda is a solve-only artefact that never enters EDF / REML.
-        let default_ridge = gam_problem::RidgePassport::scaled_identity(
-            0.0,
-            gam_linalg::RidgePolicy::exact_full_objective(),
-        )
-        .map_err(gam_problem::EstimationError::from)?;
-
         let max_abs_eta = final_eta.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
 
         match extra {
@@ -3214,7 +3198,6 @@ extern "C" __global__ void status_first_ladder(
                     ))
                 });
 
-                let ridge_passport = ext.ridge_passport.unwrap_or(default_ridge);
                 let firth = ext
                     .firth
                     .clone()
@@ -3250,7 +3233,6 @@ extern "C" __global__ void status_first_ladder(
                     solve_d_array,
                     derivatives_unsupported,
                     status,
-                    ridge_passport,
                     firth,
                     constraint_kkt,
                     edf,
@@ -3293,7 +3275,6 @@ extern "C" __global__ void status_first_ladder(
                     solve_d_array: Array1::<f64>::zeros(0),
                     derivatives_unsupported: true,
                     status,
-                    ridge_passport: default_ridge,
                     firth: crate::pirls::FirthDiagnostics::Inactive,
                     constraint_kkt: None,
                     edf: f64::NAN,
@@ -3778,7 +3759,7 @@ pub fn solve_pirls_step_on_stream_device(
 ///
 /// `step_lm_lambda` is the Levenberg–Marquardt damping applied to each
 /// Newton solve only; it never enters the exported `penalized_hessian`,
-/// `RidgePassport`, EDF, or penalty term.
+/// EDF, or penalty term.
 #[cfg(target_os = "linux")]
 pub(crate) fn pirls_loop_on_stream(
     shared: &PirlsGpuSharedData,

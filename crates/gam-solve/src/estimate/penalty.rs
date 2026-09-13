@@ -548,9 +548,8 @@ pub(crate) fn map_hessian_to_original_basis(
     pirls: &crate::pirls::PirlsResult,
 ) -> Result<Array2<f64>, EstimationError> {
     let qs = &pirls.reparam_result.qs;
-    // The accepted posterior precision is the stabilized Hessian. Any solver
-    // ridge is part of the minted objective and its RidgePassport; exporting
-    // the pre-stabilization matrix would make dense inference, factorized
+    // The accepted posterior precision is the penalized Hessian PIRLS minted.
+    // Exporting any other matrix would make dense inference, factorized
     // prediction, and constrained-posterior moments describe different local
     // Gaussians.
     let h_t = &pirls.stabilizedhessian_transformed;

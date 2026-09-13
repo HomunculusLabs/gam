@@ -863,7 +863,6 @@ impl<'a> RemlState<'a> {
         lambdas: &Array1<f64>,
         bundle: &EvalShared,
     ) -> Result<(f64, usize, Array1<f64>, Array2<f64>), EstimationError> {
-        let ridge = bundle.ridge_passport.penalty_logdet_ridge();
         // Kronecker fast path: compute logdet derivatives directly from the
         // marginal eigenvalue grid.  O(d · ∏q_j) with no coordinate-frame
         // dependence — eigenvalues of Σ_k λ_k (I⊗...⊗S_k⊗...⊗I) are invariant
@@ -873,7 +872,7 @@ impl<'a> RemlState<'a> {
             let lambdas_slice = lambdas
                 .as_slice()
                 .expect("owned Array1 is contiguous, so as_slice always succeeds");
-            let (logdet, rank, det1, det2) = kron.logdet_rank_and_derivatives(lambdas_slice, ridge);
+            let (logdet, rank, det1, det2) = kron.logdet_rank_and_derivatives(lambdas_slice, 0.0);
             return Ok((logdet, rank, det1, det2));
         }
 

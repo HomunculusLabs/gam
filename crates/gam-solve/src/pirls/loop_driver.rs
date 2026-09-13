@@ -64,7 +64,7 @@ use gam_math::probability::standard_normal_quantile;
 use gam_problem::{
     Coefficients, GlmLikelihoodSpec, InverseLink, LinearPredictor, LinkFunction,
     LogSmoothingParamsView, MixtureLinkState, ResolvedLikelihoodScale, ResponseFamily,
-    RidgePassport, RidgePolicy, SasLinkState, StandardLink,
+    SasLinkState, StandardLink,
 };
 use gam_terms::construction::{KroneckerReparamResult, ReparamResult};
 use ndarray::{ArcArray1, Array1, Array2, ArrayView1, ArrayView2, s};
@@ -446,10 +446,6 @@ pub(super) fn assemble_pirls_result(
         beta_transformed: working_summary.beta.clone(),
         penalized_hessian_transformed,
         stabilizedhessian_transformed,
-        ridge_passport: RidgePassport::scaled_identity(
-            0.0,
-            RidgePolicy::exact_full_objective(),
-        )?,
         deviance: working_summary.state.deviance,
         edf,
         stable_penalty_term: penalty_term,
@@ -1572,10 +1568,6 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
             beta_transformed,
             penalized_hessian_transformed: penalized_hessian,
             stabilizedhessian_transformed: stabilizedhessian,
-            ridge_passport: RidgePassport::scaled_identity(
-                0.0,
-                RidgePolicy::exact_full_objective(),
-            )?,
             deviance,
             edf,
             stable_penalty_term: penalty_term,

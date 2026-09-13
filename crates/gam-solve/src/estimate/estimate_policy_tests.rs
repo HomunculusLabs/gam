@@ -1278,11 +1278,6 @@ fn sas_beta_raw_epsilon_sensitivity_matchesfd_at_seed19() {
         for ((r, c), v) in pirls_result.reparam_result.s_transformed.indexed_iter() {
             j[[r, c]] += v;
         }
-        if pirls_result.ridge_passport.delta() > 0.0 {
-            for d in 0..j.nrows() {
-                j[[d, d]] += pirls_result.ridge_passport.delta();
-            }
-        }
         j
     };
     let factor = StableSolver::new()
@@ -1322,13 +1317,10 @@ fn sas_beta_raw_epsilon_sensitivity_matchesfd_at_seed19() {
             .obtain_eval_bundle(&rho)
             .map(|b| b.pirls_result.clone())
             .expect("fd pirls");
-        (
-            pirls.beta_transformed.as_ref().clone(),
-            pirls.ridge_passport.delta(),
-        )
+        pirls.beta_transformed.as_ref().clone()
     };
-    let (beta_p, ridge_p) = beta_at(theta[1] + fd_h);
-    let (beta_m, ridge_m) = beta_at(theta[1] - fd_h);
+    let beta_p = beta_at(theta[1] + fd_h);
+    let beta_m = beta_at(theta[1] - fd_h);
     let fd_beta = (&beta_p - &beta_m).mapv(|v| v / (2.0 * fd_h));
 
     // gam#855: the analytic composite `dβ/dε = J⁻¹·rhs` is the exact IFT
@@ -1336,40 +1328,16 @@ fn sas_beta_raw_epsilon_sensitivity_matchesfd_at_seed19() {
     // convergence at each perturbed ε. With the ε-derivative channel of the
     // SAS-reweighted IRLS system fully captured (the original report's missing
     // channel), the two agree to ~1e-9 here — the well-conditioned n=20 fit
-    // takes NO stabilization ridge (`ridge_passport.delta() == 0`), so the earlier
+    // takes NO stabilization ridge, so the earlier
     // "adaptive-ridge contaminates the FD" rationale does not hold and a slack
     // relative bound would silently re-admit the dropped-channel regression
     // (its original signature was abs_diff ≈ 3.7e-3). An absolute 1e-5 bar is a
     // genuine guard: ~1e4× the observed residual yet ~370× tighter than the
     // original miss, and robust to cross-platform PIRLS-convergence jitter.
-    // gam#855's precondition, stated as what it is about.
-    //
-    // This used to assert `ridge == 0`, which was the right instrument while δ
-    // was EXCEPTIONAL — applied only where a bare Cholesky failed. Under that
-    // selector a nonzero ridge here would have meant the analytic point and the
-    // FD re-solves had been rescued differently, so they would linearize
-    // different systems and the comparison below would be meaningless.
-    //
-    // δ was later applied unconditionally (#1575/#2519: a δ chosen by a
-    // Cholesky-success predicate is a function of ρ, and made the outer
-    // criterion jump by 0.5·ln(1e8) = 9.21 between neighbouring ρ), and is now
-    // zero on every path (#2901 V22). Either way a CONSTANT δ satisfies the
-    // precondition: the analytic Jacobian and both FD re-solves linearize the
-    // same penalized Hessian.
-    //
-    // So the assertion now checks the property directly — the three points
-    // agree — instead of checking a value that only implied it. This is
-    // strictly stronger: it would still catch an adaptive ridge, which
-    // `== 0` would also have caught, AND it catches a δ that differs between
-    // the analytic point and a perturbed one, which `== 0` would not have
-    // caught had δ ever been nonzero-but-equal.
-    let ridge_0 = pirls_result.ridge_passport.delta();
-    assert!(
-        ridge_0 == ridge_p && ridge_0 == ridge_m,
-        "the IFT Jacobian and the FD re-solves must linearize the SAME system, \
-         so the stabilization ridge must not change across the perturbation \
-         (gam#855): analytic δ={ridge_0:.3e}, δ(+h)={ridge_p:.3e}, δ(-h)={ridge_m:.3e}"
-    );
+    // gam#855's precondition, stated as what it is about: the IFT Jacobian and
+    // both FD re-solves must linearize the SAME system. No PIRLS path adds a
+    // stabilization ridge (#2901 V22), so all three linearize `XᵀWX + S_λ` by
+    // construction.
     gam_linalg_test_support::fd_checker::assert_matrix_derivativefd(
         &fd_beta.insert_axis(Axis(1)),
         &dbeta_exact.insert_axis(Axis(1)),
@@ -1474,7 +1442,6 @@ fn sas_true_score_beta_jacobian_matchesfd_at_seed19() {
         .expect("pirls_result");
     let beta0 = pirls_result.beta_transformed.as_ref().clone();
     let s_transformed = pirls_result.reparam_result.s_transformed.clone();
-    let ridge = pirls_result.ridge_passport.delta();
     let x_dense = match &pirls_result.x_transformed {
         DesignMatrix::Dense(x_dense) => x_dense.to_dense(),
         DesignMatrix::Sparse(_) => {
@@ -1501,9 +1468,6 @@ fn sas_true_score_beta_jacobian_matchesfd_at_seed19() {
         }
         let mut g = -x_dense.t().dot(&u);
         g += &s_transformed.dot(beta);
-        if ridge > 0.0 {
-            g += &beta.mapv(|v| ridge * v);
-        }
         g
     };
 
@@ -1528,11 +1492,6 @@ fn sas_true_score_beta_jacobian_matchesfd_at_seed19() {
     let weighted_x = &x_dense * &neg_du_deta.insert_axis(Axis(1));
     analytic_j.assign(&x_dense.t().dot(&weighted_x));
     analytic_j += &s_transformed;
-    if ridge > 0.0 {
-        for j in 0..analytic_j.nrows() {
-            analytic_j[[j, j]] += ridge;
-        }
-    }
 
     let mut fd_j = Array2::<f64>::zeros((beta0.len(), beta0.len()));
     for j in 0..beta0.len() {
@@ -1651,7 +1610,6 @@ fn sas_pirlshessian_matches_true_score_jacobian_at_seed19() {
         .expect("pirls_result");
     let beta0 = pirls_result.beta_transformed.as_ref().clone();
     let s_transformed = pirls_result.reparam_result.s_transformed.clone();
-    let ridge = pirls_result.ridge_passport.delta();
     let x_dense = match &pirls_result.x_transformed {
         DesignMatrix::Dense(x_dense) => x_dense.to_dense(),
         DesignMatrix::Sparse(_) => {
@@ -1679,11 +1637,6 @@ fn sas_pirlshessian_matches_true_score_jacobian_at_seed19() {
     let weighted_x = &x_dense * &neg_du_deta.insert_axis(Axis(1));
     let mut true_jacobian = x_dense.t().dot(&weighted_x);
     true_jacobian += &s_transformed;
-    if ridge > 0.0 {
-        for j in 0..true_jacobian.nrows() {
-            true_jacobian[[j, j]] += ridge;
-        }
-    }
 
     let pht_dense = pirls_result.penalized_hessian_transformed.to_dense();
     let max_abs_diff = true_jacobian

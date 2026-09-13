@@ -4847,7 +4847,6 @@ pub(crate) struct FirthTauBetaPartialKernel {
 pub(crate) struct EvalShared {
     pub(crate) key: Option<Vec<u64>>,
     pub(crate) pirls_result: Arc<PirlsResult>,
-    pub(crate) ridge_passport: RidgePassport,
     /// The routing verdict this bundle was built under, carried WITH the
     /// quantities it was decided from (#2465 instance 4). The bundle used to
     /// hold the bare `RemlGeometry` label, so every consumer that reported
@@ -5017,9 +5016,7 @@ impl EvalShared {
     /// This is the #931 port of the penalty-logdet term: value, ρ-first /
     /// ρ-second derivatives, τ-gradient components, τ×τ and ρ×τ Hessian
     /// blocks are all projections of one eigendecomposition, so no pair of
-    /// consumers can disagree about the ridge or the positive-eigenspace
-    /// threshold. The ridge is read from this bundle's `ridge_passport` —
-    /// the single place that convention is decided.
+    /// consumers can disagree about the positive-eigenspace threshold.
     ///
     /// `lambdas` must be the λ = exp(ρ) vector of this bundle's evaluation
     /// point and `p` the original-basis coefficient dimension; on a cache
@@ -5077,7 +5074,7 @@ impl EvalShared {
             penalty_logdet::PenaltyPseudologdet::from_penalties(
                 &applied,
                 lambdas,
-                self.ridge_passport.penalty_logdet_ridge(),
+                0.0,
                 p,
             )
             .map_err(EstimationError::InvalidInput)?,
@@ -5213,7 +5210,6 @@ impl PirlsLruCache {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PenaltySubspaceCacheKey {
     pub(crate) penalty_matrix_fingerprint: u64,
-    pub(crate) ridge_passport_signature: u64,
 }
 
 pub(crate) struct PenaltySubspaceCache {
@@ -5249,14 +5245,10 @@ impl PenaltySubspaceCache {
 }
 
 impl PenaltySubspaceCacheKey {
-    /// Build a cache key from the transformed-E matrix and ridge passport.
-    /// `E` is hashed by exact f64 bits (column-major), so the key is bit-exact
-    /// and avoids float-Hash issues; the ridge passport is hashed via its
-    /// `Hash` impl. Two calls at the same `(E, ridge)` yield equal keys.
-    pub(crate) fn from_inputs(
-        e_transformed: &ndarray::Array2<f64>,
-        ridge_passport: &gam_problem::RidgePassport,
-    ) -> Self {
+    /// Build a cache key from the transformed-E matrix. `E` is hashed by exact
+    /// f64 bits (column-major), so the key is bit-exact and avoids float-Hash
+    /// issues. Two calls at the same `E` yield equal keys.
+    pub(crate) fn from_inputs(e_transformed: &ndarray::Array2<f64>) -> Self {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let mut hasher = DefaultHasher::new();
@@ -5265,15 +5257,8 @@ impl PenaltySubspaceCacheKey {
         for value in e_transformed.iter() {
             value.to_bits().hash(&mut hasher);
         }
-        let penalty_matrix_fingerprint = hasher.finish();
-        let mut ridge_hasher = DefaultHasher::new();
-        ridge_passport.delta().to_bits().hash(&mut ridge_hasher);
-        ridge_passport.matrix_form().hash(&mut ridge_hasher);
-        ridge_passport.policy().hash(&mut ridge_hasher);
-        let ridge_passport_signature = ridge_hasher.finish();
         Self {
-            penalty_matrix_fingerprint,
-            ridge_passport_signature,
+            penalty_matrix_fingerprint: hasher.finish(),
         }
     }
 }
@@ -5437,19 +5422,18 @@ impl EvalCacheManager {
     /// Memoizing wrapper for `PenaltySubspace` construction.
     ///
     /// The penalty-subspace eigendecomposition is shape-invariant: any two
-    /// outer evaluations at the same `(E_transformed, ridge_passport)` produce
-    /// bit-identical subspaces. The single-slot cache amortizes consecutive
-    /// fixed-S queries (rank, logdet, trace) within a single outer iter.
+    /// outer evaluations at the same `E_transformed` produce bit-identical
+    /// subspaces. The single-slot cache amortizes consecutive fixed-S queries
+    /// (rank, logdet, trace) within a single outer iter.
     pub(super) fn cached_penalty_subspace<F>(
         &self,
         e_transformed: &ndarray::Array2<f64>,
-        ridge_passport: &gam_problem::RidgePassport,
         build: F,
     ) -> Result<Arc<outer_eval::PenaltySubspace>, EstimationError>
     where
         F: FnOnce() -> Result<outer_eval::PenaltySubspace, EstimationError>,
     {
-        let key = PenaltySubspaceCacheKey::from_inputs(e_transformed, ridge_passport);
+        let key = PenaltySubspaceCacheKey::from_inputs(e_transformed);
         if let Some(hit) = self
             .penalty_subspace_cache
             .read()

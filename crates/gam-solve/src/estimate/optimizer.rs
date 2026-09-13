@@ -2343,9 +2343,8 @@ where
         // EDF by block using stabilized H and penalty roots in transformed basis.
         let h = &pirls_res.stabilizedhessian_transformed;
         let p_dim = h.nrows();
-        // Factor the exact Hessian already minted by PIRLS. Any objective-level
-        // ridge is already present in this matrix and its RidgePassport; this
-        // inference layer is not allowed to add another unaccounted diagonal.
+        // Factor the exact Hessian already minted by PIRLS. This inference layer
+        // is not allowed to add an unaccounted diagonal to it.
         let factor = h.factorize_spd().map_err(|reason| {
             EstimationError::RemlOptimizationFailed(format!(
                 "exact inference Hessian factorization failed: {reason}"

@@ -232,21 +232,11 @@ impl<'a> RemlState<'a> {
         }
     }
 
-    pub(crate) fn last_ridge_used(&self) -> Option<f64> {
-        self.cache_manager
-            .current_eval_bundle
-            .read()
-            .expect("current outer-eval bundle lock poisoned")
-            .as_ref()
-            .map(|bundle| bundle.ridge_passport.delta())
-    }
-
     pub(crate) fn dense_penalty_logdet_derivs(
         &self,
         rho: &Array1<f64>,
         e_for_logdet: &Array2<f64>,
         penalty_roots: &[Array2<f64>],
-        ridge_passport: RidgePassport,
         penalty_subspace: Option<&PenaltySubspace>,
         bundle: &EvalShared,
         mode: super::reml_outer_engine::EvalMode,
@@ -255,7 +245,6 @@ impl<'a> RemlState<'a> {
         let logdet_s_start = std::time::Instant::now();
         let lambdas =
             Array1::from_vec(gam_problem::checked_exp_log_strengths(rho.iter().copied())?);
-        let ridge = ridge_passport.penalty_logdet_ridge();
 
         // Active-constraint projection consistency (#1380). When an active
         // shape/box constraint reduces the smooth to a constraint-free subspace
@@ -345,7 +334,7 @@ impl<'a> RemlState<'a> {
                 .structural_penalty_logdet_value_and_derivatives(
                     &projected_roots,
                     &lambdas,
-                    ridge,
+                    0.0,
                 )?;
             log::info!(
                 "[STAGE] logdet S (Z-projected) rho_dim={} penalty_rank={} elapsed={:.3}s",
@@ -390,7 +379,7 @@ impl<'a> RemlState<'a> {
                 lambdas
                     .as_slice()
                     .expect("lambdas is an owned contiguous Array1"),
-                ridge,
+                0.0,
             );
             (rank, logdet, det1, det2)
         } else if !self.canonical_penalties.is_empty()
@@ -403,7 +392,7 @@ impl<'a> RemlState<'a> {
             let (value, rank, det1, det2) = self.structural_penalty_logdet_value_and_derivatives(
                 penalty_roots,
                 &lambdas,
-                ridge,
+                0.0,
             )?;
             (rank, value, det1, det2)
         } else {
@@ -437,7 +426,7 @@ impl<'a> RemlState<'a> {
             let subspace = if let Some(penalty_subspace) = penalty_subspace {
                 penalty_subspace
             } else {
-                owned_subspace = self.compute_penalty_subspace(e_for_logdet, ridge_passport)?;
+                owned_subspace = self.compute_penalty_subspace(e_for_logdet)?;
                 &owned_subspace
             };
             let (rank, value) = self.fixed_subspace_penalty_rank_and_logdet_from_subspace(subspace);
@@ -3917,13 +3906,13 @@ impl<'a> RemlState<'a> {
     pub(super) fn effectivehessian(
         &self,
         pr: &PirlsResult,
-    ) -> Result<(Array2<f64>, RidgePassport), EstimationError> {
-        // Use the same stabilized H = X' W X + S + delta I that PIRLS built.
-        // W is the exact signed statistical curvature; only the assembled
-        // matrix receives the explicit, rho-independent stabilization ridge.
+    ) -> Result<Array2<f64>, EstimationError> {
+        // Use the same H = X' W X + S that PIRLS built. W is the exact signed
+        // statistical curvature, and no stabilization ridge is added
+        // (#2901 V22).
         let h = &pr.stabilizedhessian_transformed;
         if h.factorize().is_ok() {
-            return Ok((h.to_dense(), pr.ridge_passport));
+            return Ok(h.to_dense());
         }
 
         Err(EstimationError::ModelIsIllConditioned {
@@ -4657,7 +4646,6 @@ impl<'a> RemlState<'a> {
     pub(super) fn compute_penalty_subspace(
         &self,
         e_transformed: &Array2<f64>,
-        ridge_passport: RidgePassport,
     ) -> Result<PenaltySubspace, EstimationError> {
         let p = e_transformed.ncols();
         if e_transformed.nrows() == 0 || p == 0 {
@@ -4668,14 +4656,8 @@ impl<'a> RemlState<'a> {
         }
         let cached =
             self.cache_manager
-                .cached_penalty_subspace(e_transformed, &ridge_passport, || {
-                    let mut s_lambda = e_transformed.t().dot(e_transformed);
-                    let ridge = ridge_passport.penalty_logdet_ridge();
-                    if ridge > 0.0 {
-                        for i in 0..p {
-                            s_lambda[[i, i]] += ridge;
-                        }
-                    }
+                .cached_penalty_subspace(e_transformed, || {
+                    let s_lambda = e_transformed.t().dot(e_transformed);
                     let (evals, _) = s_lambda
                         .eigh(Side::Lower)
                         .map_err(EstimationError::EigendecompositionFailed)?;
@@ -6472,7 +6454,7 @@ impl<'a> RemlState<'a> {
         } else {
             self.execute_pirls_if_needed(rho)?
         };
-        let (mut h_total, ridge_passport) = self.effectivehessian(pirls_result.as_ref())?;
+        let mut h_total = self.effectivehessian(pirls_result.as_ref())?;
         let mut firth_dense_operator: Option<Arc<FirthDenseOperator>> = None;
         if let Some(jeffreys_link) = reml_robust_jeffreys_link(&self.config) {
             // Built at every problem scale: the inner P-IRLS arms the Jeffreys
@@ -6546,7 +6528,6 @@ impl<'a> RemlState<'a> {
         Ok(EvalShared {
             key,
             pirls_result,
-            ridge_passport,
             geometry: decision,
             h_total: Arc::new(h_total),
             sparse_exact: None,
@@ -6580,7 +6561,6 @@ impl<'a> RemlState<'a> {
                 "sparse exact geometry requires sparse-native PIRLS coordinates"
             );
         }
-        let ridge_passport = pirls_result.ridge_passport;
         let x_sparse = self.x().as_sparse().ok_or_else(|| {
             EstimationError::InvalidInput(
                 "sparse exact geometry requires sparse original design".to_string(),
@@ -6646,7 +6626,7 @@ impl<'a> RemlState<'a> {
         let penalty_logdet = super::penalty_logdet::PenaltyPseudologdet::from_penalties(
             &applied_penalties,
             lambdas_slice,
-            ridge_passport.penalty_logdet_ridge(),
+            0.0,
             self.p,
         )
         .map_err(EstimationError::InvalidInput)?;
@@ -6676,7 +6656,6 @@ impl<'a> RemlState<'a> {
         Ok(EvalShared {
             key,
             pirls_result,
-            ridge_passport,
             geometry: decision,
             h_total: Arc::new(Array2::zeros((0, 0))),
             sparse_exact: Some(Arc::new({

@@ -607,18 +607,15 @@ fn binomial_logit_outer_objective_is_a_function_of_rho_1575() {
 
     let mut table = String::new();
     let mut record = |state: &RemlState<'_>, label: &str, rho: &Array1<f64>, cost_text: String| {
-        let ridge = state.last_ridge_used();
         let inner = state.obtain_eval_bundle(rho).map(|bundle| {
             let pr = &bundle.pirls_result;
             format!(
-                "dev={:.9e} edf={:.6} pen={:.9e} iters={} |g_inner|={:.3e} ridge_pirls={:.6e} ridge_bundle={:.6e} status={:?}",
+                "dev={:.9e} edf={:.6} pen={:.9e} iters={} |g_inner|={:.3e} status={:?}",
                 pr.deviance,
                 pr.edf,
                 pr.stable_penalty_term,
                 pr.iteration,
                 pr.lastgradient_norm,
-                pr.ridge_passport.delta(),
-                bundle.ridge_passport.delta(),
                 pr.status,
             )
         });
@@ -626,13 +623,7 @@ fn binomial_logit_outer_objective_is_a_function_of_rho_1575() {
             Ok(text) => text,
             Err(err) => format!("bundle unavailable: {err}"),
         };
-        let ridge_text = match ridge {
-            Some(value) => format!("{value:.9e}"),
-            None => "none".to_string(),
-        };
-        table.push_str(&format!(
-            "\n  {label:<12} cost={cost_text}  ridge={ridge_text}  {inner_text}"
-        ));
+        table.push_str(&format!("\n  {label:<12} cost={cost_text}  {inner_text}"));
     };
 
     record(&state, "rho0 (first)", &rho0, format!("{f0:.12e}"));

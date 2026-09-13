@@ -269,19 +269,6 @@ impl RemlState<'_> {
                 ),
             });
         }
-        // This form expands `H = XᵀWX + S_λ`, the operator every PIRLS limit fit
-        // factors now that no path adds a stabilization ridge (#2901 V22). A
-        // limit fit reporting any ridge would be a different criterion, so it
-        // declines.
-        let limit_ridge = limit_fit.ridge_passport.delta();
-        if limit_ridge != 0.0 {
-            return Ok(RailFaceLimitOutcome::FaceUnavailable {
-                reason: format!(
-                    "the limit fit reported a stabilization ridge of {limit_ridge:.3e}; this \
-                     form expands the unridged criterion"
-                ),
-            });
-        }
         if limit_fit.derivatives_unsupported {
             return Ok(RailFaceLimitOutcome::OutsideClosedForm {
                 reason: "this family does not expose the third-derivative curvature array the \

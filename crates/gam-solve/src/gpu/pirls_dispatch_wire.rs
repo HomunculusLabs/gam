@@ -336,7 +336,6 @@ mod linux_impl {
             offset: input.offset,
             linear_constraints: input.linear_constraints.as_ref(),
             exported_curvature: input.exported_curvature,
-            ridge_passport: None,
             firth: Some(firth_default.clone()),
             edf: input.edf,
         };
@@ -388,7 +387,6 @@ mod linux_impl {
             solve_d_array,
             derivatives_unsupported,
             status,
-            ridge_passport,
             firth,
             constraint_kkt,
             edf,
@@ -624,7 +622,6 @@ mod linux_impl {
             beta_transformed: beta_transformed_coef,
             penalized_hessian_transformed: penalized_hessian_sym,
             stabilizedhessian_transformed: stabilizedhessian_sym,
-            ridge_passport,
             deviance,
             edf: edf_final,
             stable_penalty_term: penalty_term,
@@ -777,7 +774,6 @@ mod linux_impl {
         };
         use gam_linalg::matrix::LinearOperator;
         use gam_linalg::utils::inf_norm;
-        use gam_problem::{RidgePassport, RidgePolicy};
         use ndarray::Array1;
 
         let pls = pirls_gpu::solve_gaussian_pls_gpu(
@@ -1015,11 +1011,6 @@ mod linux_impl {
             beta_transformed: beta_coef.clone(),
             penalized_hessian_transformed: penalized_hessian_sym,
             stabilizedhessian_transformed: stabilizedhessian_sym,
-            ridge_passport: RidgePassport::scaled_identity(
-                0.0,
-                RidgePolicy::exact_full_objective(),
-            )
-            .map_err(|error| format!("invalid GPU PIRLS ridge metadata: {error}"))?,
             deviance,
             edf: f64::NAN, // recomputed by outer REML from penalized_hessian + e_transformed
             stable_penalty_term: penalty_term,

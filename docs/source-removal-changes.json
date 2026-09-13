@@ -6314,5 +6314,15 @@
     ],
     "reason": "#2899 dead code: gam_math::jet_scalar::DynamicOrder1 is named nowhere outside its own definition. Every RuntimeJetScalar consumer is generic over S, and no caller names DynamicOrder1, so it is never instantiated. The struct, its inherent g accessor and assert_compatible, and its RuntimeJetScalar impl (constant, variable, constant_like, with_value, dimension, value, add, sub, mul, neg, scale, compose_unary) are deleted. The guard lists each removed method by name. The same names survive on the other jet types, and arena_vector and DynamicJetArena::zeros keep their other users.",
     "evidence": "At 6d11cc207, git grep -n -w DynamicOrder1 over crates, src, tests, examples, bench, benches, python, gamfit and docs finds only jet_scalar.rs:1419 (struct), 1427 (inherent impl) and 1449 (RuntimeJetScalar impl). The item list is from source_removal_guard.py --base 6d11cc207 --head 0c093d47f (/scratch.global/sauer354/pool/prune-api-a/slice26.srg.out)."
+  },
+  {
+    "base": "90c86056d30f3b704b498803b52040563f307b46",
+    "items": [
+      "crates/gam-solve/src/estimate/ridge_continuity_tests.rs:fn:ridge_sweep",
+      "crates/gam-solve/src/estimate/ridge_continuity_tests.rs:fn:stabilization_ridge_is_constant_along_rho_2519",
+      "crates/gam-solve/src/reml/gradient_hessian.rs:fn:last_ridge_used"
+    ],
+    "reason": "SPEC rules 5 and 23 (#2901 V22, lead ruling (a), slice 4a). Since e5d94eb33 no PIRLS path adds a stabilization ridge, so the ridge passport is deleted from PirlsResult and EvalShared. RemlState::last_ridge_used read that passport and has nothing left to report. ridge_continuity_tests measured the passport's δ along ρ (ridge_sweep, stabilization_ridge_is_constant_along_rho_2519). It is restated as hessian_identity_sweep and penalized_hessian_carries_no_stabilization_ridge_along_rho_2519. Those rebuild XₜᵀWXₜ + S_t from each fit and require the criterion's penalized Hessian to match it within the assembly band, which is the property the old value pin stood in for.",
+    "evidence": "At the base, git grep -w over the repository finds these callers. last_ridge_used: estimate/evaluation.rs (evaluate_externalcost_andridge), estimate/binomial_reml_outer_cost_1575_tests.rs (the probe table) and estimate/ridge_continuity_tests.rs. ridge_sweep and stabilization_ridge_is_constant_along_rho_2519: only estimate/ridge_continuity_tests.rs itself. This change returns 0.0 from evaluate_externalcost_andridge, drops the #1575 table's ridge columns, and replaces the ridge_continuity scan with the Hessian-identity scan over the same fixture, degrees and ρ grid. The guarded job covers compile and the restated test."
   }
 ]

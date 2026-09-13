@@ -34,7 +34,7 @@ use gam_linalg::utils::{KahanSum, row_mismatch_message};
 use gam_problem::{
     Coefficients, GlmLikelihoodSpec, InverseLink, LatentCLogLogState, LikelihoodScaleMetadata,
     LikelihoodSpec, LinkFunction, LogLikelihoodNormalization, LogSmoothingParamsView,
-    ResponseFamily, RidgePassport, StandardLink,
+    ResponseFamily, StandardLink,
 };
 use gam_problem::{MixtureLinkSpec, SasLinkSpec};
 use gam_terms::construction::{CanonicalPenalty, ReparamInvariant};
