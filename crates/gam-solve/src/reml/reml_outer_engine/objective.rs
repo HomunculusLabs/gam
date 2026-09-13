@@ -834,243 +834,6 @@ pub(crate) fn reml_laml_evaluate(
         Some(out)
     };
 
-    // --- Stochastic trace estimation decision ---
-    //
-    // Hutchinson traces based on H^{-1} are only valid for logdet-gradient
-    // terms on backends where the logdet kernel is exactly H^{-1}.
-    // Smooth spectral regularization uses G_eps(H) instead, so those backends
-    // must stay on the exact trace path.  The rank-deficient LAML fix also
-    // replaces the kernel with the projected `U_S · (U_Sᵀ H U_S)⁻¹ · U_Sᵀ`,
-    // which the Hutchinson path cannot produce — stay exact when it is active.
-    let total_p = hop.dim();
-    let use_stochastic_traces = can_use_stochastic_logdet_hinv_kernel(hop, incl_logdet_h)
-        && solution.penalty_subspace_trace.is_none();
-
-    // When using stochastic traces, pre-collect all H_k drifts (both rho and
-    // ext coordinates) and batch them through a single StochasticTraceEstimator.
-    // This amortizes the H^{-1} solve cost: ONE solve per probe, shared across
-    // all k + ext_dim coordinates. The collector must inspect the fully
-    // assembled drift (base coordinate plus SCOP/family correction) before
-    // deciding dense vs operator; checking only the base coordinate misses
-    // matrix-free derivative corrections and silently densifies them.
-    //
-    // Set when every ρ target in the stochastic batch carries its penalty-logdet
-    // control variate, i.e. when each probe already averages the FUSED difference
-    // `zᵀ(H⁻¹Ḣ_k − S_λ⁺A_k)z`. Only then may the gradient loop drop the separate
-    // `−first[idx]` subtraction; when the chart is unavailable the batch estimates
-    // the unfused `tr(H⁻¹Ḣ_k)` and the exact det derivative must still be paired.
-    let mut stochastic_rho_det_fused = false;
-    let stochastic_trace_values: Option<Vec<f64>> = if use_stochastic_traces {
-        let mut dense_matrices: Vec<Array2<f64>> = Vec::with_capacity(k + ext_dim);
-        let mut operators: Vec<Arc<dyn HyperOperator>> = Vec::new();
-        let mut coord_has_operator = Vec::with_capacity(k + ext_dim);
-
-        // rho-coordinates: H_k = A_k + correction(v_k)
-        for idx in 0..k {
-            match penalty_total_drift_result(
-                &solution.penalty_coords[idx],
-                curvature_lambdas[idx],
-                rho_corrections[idx].as_ref(),
-            ) {
-                DriftDerivResult::Dense(matrix) => {
-                    dense_matrices.push(matrix);
-                    coord_has_operator.push(false);
-                }
-                DriftDerivResult::Operator(op) => {
-                    operators.push(op);
-                    coord_has_operator.push(true);
-                }
-            }
-        }
-
-        // ext-coordinates: H_i = B_i + D_beta H[-v_i].
-        for (ext_idx, coord) in solution.ext_coords.iter().enumerate() {
-            let correction = ext_corrections[ext_idx].as_ref();
-            match hyper_coord_total_drift_result(&coord.drift, correction, hop.dim()) {
-                DriftDerivResult::Dense(matrix) => {
-                    dense_matrices.push(matrix);
-                    coord_has_operator.push(false);
-                }
-                DriftDerivResult::Operator(op) => {
-                    operators.push(op);
-                    coord_has_operator.push(true);
-                }
-            }
-        }
-
-        let dense_refs: Vec<&Array2<f64>> = dense_matrices.iter().collect();
-        let generic_ops: Vec<&dyn HyperOperator> = operators.iter().map(|op| op.as_ref()).collect();
-        let implicit_ops: Vec<&ImplicitHyperOperator> = operators
-            .iter()
-            .filter_map(|op| as_implicit(op.as_ref()))
-            .collect();
-        let n_dense_total = coord_has_operator.iter().filter(|&&b| !b).count();
-        let mut dense_cursor = 0usize;
-        let mut operator_cursor = n_dense_total;
-        let mut original_to_raw = Vec::with_capacity(k + ext_dim);
-        for &has_operator in &coord_has_operator {
-            if has_operator {
-                original_to_raw.push(operator_cursor);
-                operator_cursor += 1;
-            } else {
-                original_to_raw.push(dense_cursor);
-                dense_cursor += 1;
-            }
-        }
-        // Same-probe penalty-logdet control variates (#2354 Gap 1). Both routes
-        // are UNBIASED estimators of the same fused target — `E[zᵀMz] = tr(M)`
-        // for Rademacher probes, and expectation is linear, so subtracting
-        // `zᵀS_λ⁺A_k z` inside the probe changes the VARIANCE and the
-        // floating-point cancellation, never the mean. A chart that cannot be
-        // built, or whose `tr(S_λ⁺A_k)` disagrees with the cost's own `det1[k]`,
-        // is therefore a variance problem and not a correctness one: keep the
-        // retained naive backstop for this evaluation rather than failing the
-        // whole outer objective. This mirrors the exact-dense fused path's own
-        // precedent (`weight_sum` self-consistency mismatch ⇒ `None` ⇒ naive
-        // pairing) instead of introducing a second, harder failure mode.
-        let control_variates = if incl_logdet_s {
-            match StochasticTraceControlVariates::from_penalty_coordinates(
-                &solution.penalty_coords,
-                &curvature_lambdas,
-                &solution.penalty_logdet.first,
-                k + ext_dim,
-                &original_to_raw[..k],
-            ) {
-                Ok(controls) => Some(controls),
-                Err(reason) => {
-                    log::warn!(
-                        "[RHO-GRAD] stochastic penalty control chart unavailable ({reason}); \
-                         falling back to the unfused trace − det pairing (same expectation, \
-                         higher variance) for this evaluation"
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        stochastic_rho_det_fused = control_variates.is_some();
-
-        // ── Block 2.5: GPU-adaptive Hutchinson bypass.
-        //
-        // When the gate fires we replace the CPU stochastic estimator with
-        // the device-resident path in `crate::gpu_kernels::reml_trace::evidence_traces_adaptive`,
-        // which factors `H` once on device (potrf), then for an adaptive
-        // K-schedule (16→32→64→128) solves `H W = Z` in one batched potrs
-        // and reduces `q_{j,k} = z_k^T H_j w_k` on device. CRN is preserved
-        // because the SplitMix probe RNG hashes `(seed, k_index, i)`
-        // statelessly. The gate requires:
-        //   * `operators.is_empty()`  — every drift is a dense `p × p`
-        //     matrix, so each `H_j` can be packed as
-        //     `DerivativeHessian::Dense(...)` without re-walking penalty
-        //     operators on device.
-        //   * `crate::gpu_kernels::reml_trace::should_bypass_cpu_with_gpu_adaptive(...)`
-        //     — `p ≥ 512`, plain SPD logdet kernel, dense backend, projected
-        //     penalty subspace inactive.
-        // Both must hold; otherwise we fall through to the existing CPU
-        // path. The dispatch entry inside `evidence_traces_adaptive`
-        // itself falls back to the SplitMix CPU reference when the CUDA
-        // runtime is absent — so non-GPU hosts keep the existing
-        // estimator behaviour even with the gate set.
-        let gpu_bypass_raw_traces: Option<Vec<f64>> = if control_variates.is_none()
-            && operators.is_empty()
-            && crate::gpu_kernels::reml_trace::should_bypass_cpu_with_gpu_adaptive(
-                total_p,
-                hop.as_exact_dense_spectral().is_some(),
-                hop.logdet_traces_match_hinv_kernel() && hop.is_dense(),
-                hop.prefers_stochastic_trace_estimation(),
-                solution.penalty_subspace_trace.is_some(),
-            ) {
-            use crate::gpu_kernels::reml_trace::{
-                DerivativeHessian, HUTCHINSON_ADAPTIVE_REL_TOL, HUTCHINSON_ADAPTIVE_TAU_REL,
-                ProbeSeed, evidence_traces_adaptive,
-            };
-            // Build the dense SPD H from the operator's spectral
-            // decomposition (same path the LAML/tangent-projection code
-            // uses, so the matrix is bit-identical to what other backends
-            // see). The unwrap is safe: the gate verified
-            // `hop.as_exact_dense_spectral().is_some()`.
-            let dense_op = hop
-                .as_exact_dense_spectral()
-                .expect("gate guarantees as_exact_dense_spectral().is_some()");
-            let h_dense = assemble_h_raw_dense(dense_op);
-            let derivatives: Vec<DerivativeHessian<'_>> = dense_refs
-                .iter()
-                .map(|m| DerivativeHessian::Dense(m.view()))
-                .collect();
-            // Seed the device RNG. We use a single deterministic seed
-            // across REML iterations: the SplitMix probe RNG is stateless
-            // (`(seed, k_index, i) → ±1`), so the K=16, 32, 64, 128
-            // adaptive schedule within one call already enjoys CRN, and
-            // the cross-iteration bias from probe reuse is bounded by the
-            // adaptive SE check (a fixed-seed Hutchinson is still
-            // unbiased; only its variance across REML trajectories is
-            // correlated). Matching `StochasticTraceConfig::default().seed`
-            // keeps the GPU probes bit-identical to the CPU reference for
-            // parity testing (Block 2.6 test "same-probes CPU vs GPU").
-            let probe_seed = ProbeSeed::default();
-            match evidence_traces_adaptive(
-                h_dense.view(),
-                derivatives,
-                None,
-                probe_seed,
-                HUTCHINSON_ADAPTIVE_REL_TOL,
-                HUTCHINSON_ADAPTIVE_TAU_REL,
-            ) {
-                // Honest-evidence policy (#2313 hardware gate finding): the
-                // adaptive estimator reports `converged` and its standard
-                // errors precisely so consumers can act — and a p=2000, d=8
-                // workload measured on a real A10 hits the 128-probe cap
-                // with the SE criterion unmet. A non-converged trace is a
-                // silently high-variance outer gradient; route it to the
-                // CPU stochastic fallback below instead of consuming it.
-                Ok(evidence) if evidence.converged => Some(evidence.traces.to_vec()),
-                Ok(_) | Err(_) => None,
-            }
-        } else {
-            None
-        };
-
-        let raw_traces = if let Some(gpu_traces) = gpu_bypass_raw_traces {
-            gpu_traces
-        } else if generic_ops.is_empty() {
-            stochastic_trace_hinv_products_with_floor(
-                hop,
-                StochasticTraceTargets::Dense(&dense_refs),
-                Some(Arc::clone(&solution.stochastic_trace_state)),
-                control_variates.as_ref(),
-            )
-        } else if generic_ops.len() == implicit_ops.len() {
-            stochastic_trace_hinv_products_with_floor(
-                hop,
-                StochasticTraceTargets::Structural {
-                    dense_matrices: &dense_refs,
-                    implicit_ops: &implicit_ops,
-                },
-                Some(Arc::clone(&solution.stochastic_trace_state)),
-                control_variates.as_ref(),
-            )
-        } else {
-            stochastic_trace_hinv_products_with_floor(
-                hop,
-                StochasticTraceTargets::Mixed {
-                    dense_matrices: &dense_refs,
-                    operators: &generic_ops,
-                },
-                Some(Arc::clone(&solution.stochastic_trace_state)),
-                control_variates.as_ref(),
-            )
-        };
-
-        let mut result = Vec::with_capacity(k + ext_dim);
-        for &raw_index in &original_to_raw {
-            result.push(raw_traces[raw_index]);
-        }
-        Some(result)
-    } else {
-        None
-    };
-
     let build_trace_drifts = || {
         let mut drifts = Vec::with_capacity(k + ext_dim);
         for idx in 0..k {
@@ -1091,7 +854,7 @@ pub(crate) fn reml_laml_evaluate(
     };
 
     let projected_trace_values: Option<Vec<f64>> =
-        if incl_logdet_h && stochastic_trace_values.is_none() {
+        if incl_logdet_h {
             solution
                 .penalty_subspace_trace
                 .as_ref()
@@ -1101,7 +864,7 @@ pub(crate) fn reml_laml_evaluate(
         };
 
     let exact_dense_trace_values: Option<Vec<f64>> =
-        if incl_logdet_h && stochastic_trace_values.is_none() && projected_trace_values.is_none() {
+        if incl_logdet_h && projected_trace_values.is_none() {
             hop.as_exact_dense_spectral()
                 .map(|ds| dense_spectral_trace_logdet_drifts_batched(ds, &build_trace_drifts()))
         } else {
@@ -1147,12 +910,8 @@ pub(crate) fn reml_laml_evaluate(
     // the active pairs `scale·s_term_j − share_j` stay O(1/λ_k) as in the
     // full-rank rail derivation, and each masked pair contributes only the
     // non-negative lump `0 − share_j` (no large-minus-large).
-    // The stochastic-SLQ branch is fused at the probe seam instead: each rho
-    // sample subtracts `zᵀ S_λ⁺ A_k z` from `zᵀ H⁻¹ Ḣ_k z` before averaging
-    // through `StochasticTraceControlVariates` (#2354).
     let fused_logdet_minus_rank: Vec<Option<f64>> = if incl_logdet_h
         && incl_logdet_s
-        && stochastic_trace_values.is_none()
         && projected_trace_values.is_none()
     {
         match hop.as_exact_dense_spectral() {
@@ -1288,7 +1047,6 @@ pub(crate) fn reml_laml_evaluate(
     // This preserves the full first-order gradient (no iteration caps or
     // stochastic approximation) while collapsing the per-coordinate trace pass.
     let rho_operator_correction_traces: Option<Vec<Option<f64>>> = if incl_logdet_h
-        && stochastic_trace_values.is_none()
         && solution.penalty_subspace_trace.is_none()
     {
         let pairs: Vec<(usize, Arc<dyn HyperOperator>)> = rho_corrections
@@ -1376,8 +1134,6 @@ pub(crate) fn reml_laml_evaluate(
             } else {
                 let trace = if !incl_logdet_h {
                     0.0
-                } else if let Some(ref stoch_traces) = stochastic_trace_values {
-                    stoch_traces[idx]
                 } else if let Some(ref projected_traces) = projected_trace_values {
                     projected_traces[idx]
                 } else if let Some(ref exact_traces) = exact_dense_trace_values {
@@ -1424,16 +1180,7 @@ pub(crate) fn reml_laml_evaluate(
                     )
                     .trace_logdet(hop)
                 };
-                // The stochastic batch already averaged the fused per-probe
-                // difference ONLY when its control chart was built; otherwise it
-                // estimated the unfused `tr(H⁻¹Ḣ_k)` and still owes the exact
-                // det derivative (both routes share the same expectation).
-                let penalty_logdet_trace = if stochastic_rho_det_fused && incl_logdet_s {
-                    0.0
-                } else {
-                    solution.penalty_logdet.first[idx]
-                };
-                (trace, penalty_logdet_trace)
+                (trace, solution.penalty_logdet.first[idx])
             };
             let value = outer_gradient_entry(
                 a_i,
@@ -1713,8 +1460,6 @@ pub(crate) fn reml_laml_evaluate(
             // they drop into the `None` arm below.
             let trace_logdet_i = if !incl_logdet_h {
                 0.0
-            } else if let Some(ref stoch_traces) = stochastic_trace_values {
-                stoch_traces[k + ext_idx]
             } else if let Some(ref projected_traces) = projected_trace_values {
                 projected_traces[k + ext_idx]
             } else if let Some(ref exact_traces) = exact_dense_trace_values {

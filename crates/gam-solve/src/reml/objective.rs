@@ -2071,10 +2071,8 @@ impl<'a> RemlState<'a> {
         let prior = self.build_prior(rho, mode);
         self.validate_tk_ext_coords(mode, &assembly.ext_coords)?;
         let tk_atom = self.tierney_kadane_terms(rho, bundle, mode, &assembly.ext_coords)?;
-        let trace_state = self.hypergradient_trace_state();
         let assembly_ext_len = assembly.ext_coords.len();
         let mut inner_solution = assembly.build();
-        inner_solution.stochastic_trace_state = trace_state;
         inner_solution.gaussian_weight_log_sum_half = self.gaussian_weight_log_sum_half();
         inner_solution.dp_floor_scale = self.gaussian_dp_floor_scale();
         let solution_beta = inner_solution.beta.clone();

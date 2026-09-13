@@ -63,76 +63,6 @@ impl StoredFirstDrift {
     }
 }
 
-pub(crate) struct BorrowedStoredDriftOperator<'a> {
-    pub(crate) drift: &'a StoredFirstDrift,
-    pub(crate) dim_hint: usize,
-}
-
-impl HyperOperator for BorrowedStoredDriftOperator<'_> {
-    fn dim(&self) -> usize {
-        self.dim_hint
-    }
-
-    fn mul_vec(&self, v: &Array1<f64>) -> Array1<f64> {
-        let mut out = Array1::<f64>::zeros(v.len());
-        self.mul_vec_into(v.view(), out.view_mut());
-        out
-    }
-
-    fn mul_vec_view(&self, v: ArrayView1<'_, f64>) -> Array1<f64> {
-        let mut out = Array1::<f64>::zeros(v.len());
-        self.mul_vec_into(v, out.view_mut());
-        out
-    }
-
-    fn mul_vec_into(&self, v: ArrayView1<'_, f64>, mut out: ArrayViewMut1<'_, f64>) {
-        out.fill(0.0);
-        if let Some(matrix) = self.drift.dense.as_ref() {
-            dense::matvec_into(matrix, v, out.view_mut());
-        }
-        for op in &self.drift.operators {
-            op.scaled_add_mul_vec(v, 1.0, out.view_mut());
-        }
-    }
-
-    fn scaled_add_mul_vec(&self, v: ArrayView1<'_, f64>, scale: f64, out: ArrayViewMut1<'_, f64>) {
-        if scale == 0.0 {
-            return;
-        }
-        let mut out = out;
-        if let Some(matrix) = self.drift.dense.as_ref() {
-            dense::matvec_scaled_add_into(matrix, v, scale, out.view_mut());
-        }
-        for op in &self.drift.operators {
-            op.scaled_add_mul_vec(v, scale, out.view_mut());
-        }
-    }
-
-    fn bilinear(&self, v: &Array1<f64>, u: &Array1<f64>) -> f64 {
-        self.drift.apply_dot(v.view(), u.view())
-    }
-
-    fn bilinear_view(&self, v: ArrayView1<'_, f64>, u: ArrayView1<'_, f64>) -> f64 {
-        self.drift.apply_dot(v, u)
-    }
-
-    fn to_dense(&self) -> Array2<f64> {
-        let mut out = self
-            .drift
-            .dense
-            .clone()
-            .unwrap_or_else(|| Array2::<f64>::zeros((self.dim_hint, self.dim_hint)));
-        for op in &self.drift.operators {
-            out += &op.to_dense();
-        }
-        out
-    }
-
-    fn is_implicit(&self) -> bool {
-        !self.drift.operators.is_empty()
-    }
-}
-
 /// Linear combination of `HyperOperator` factors with explicit scalar
 /// weights. Used to bundle a coord's per-mode drift operators (or any other
 /// per-term linear combination) into a single matrix-free operator that
@@ -1108,16 +1038,13 @@ pub(crate) fn build_outer_hessian_operator(
             })
             .collect();
         let entries = entries?;
-        // Batch all second-drift traces so `--scale-dimensions` pays one
-        // shared Hutchinson solve stream for the whole rho-ext block instead
-        // of one estimator per pair.  Projected subspace traces skip the
-        // stochastic shortcut inside `compute_base_h2_traces`.
+        // Batch all second-drift traces so the rho-ext block shares one projected
+        // sweep inside `compute_base_h2_traces` instead of one per pair.
         let pair_refs: Vec<&HyperCoordPair> = entries.iter().map(|(_, _, pair)| pair).collect();
         let bases = compute_base_h2_traces(
             hop.as_ref(),
             &pair_refs,
             subspace,
-            Some(Arc::clone(&solution.stochastic_trace_state)),
         );
         for ((rho_idx, ext_idx, pair), base) in entries.into_iter().zip(bases.into_iter()) {
             let row = rho_idx;
@@ -1160,7 +1087,6 @@ pub(crate) fn build_outer_hessian_operator(
             hop.as_ref(),
             &pair_refs,
             subspace,
-            Some(Arc::clone(&solution.stochastic_trace_state)),
         );
         for ((ii, jj, pair), base) in entries.into_iter().zip(bases.into_iter()) {
             let row = k + ii;
@@ -1307,38 +1233,6 @@ pub(crate) fn build_outer_hessian_operator(
                     ct[[jj, ii]] = value;
                 }
             }
-            Some(ct)
-        } else if hop.prefers_stochastic_trace_estimation() && hop.logdet_traces_match_hinv_kernel()
-        {
-            // Matrix-free backends expose the SPD logdet kernel
-            //   ∂² log|H|[A_i,A_j] = -tr(H⁻¹ A_i H⁻¹ A_j).
-            //
-            // Estimate the whole coordinate matrix in one Hutchinson batch
-            // rather than launching one two-coordinate estimator per upper
-            // triangle entry.  For `--scale-dimensions` with 16 ψ axes this
-            // replaces 136 independent solve batches with one 16-coordinate
-            // batch sharing the same probes and Krylov solves.
-            let bundled: Vec<BorrowedStoredDriftOperator<'_>> = coords
-                .iter()
-                .map(|coord| BorrowedStoredDriftOperator {
-                    drift: &coord.total_drift,
-                    dim_hint: hop.dim(),
-                })
-                .collect();
-            let op_refs: Vec<&dyn HyperOperator> =
-                bundled.iter().map(|op| op as &dyn HyperOperator).collect();
-            let estimator = StochasticTraceEstimator::for_outer_hessian_with_trace_state(
-                hop.dim(),
-                total,
-                Arc::clone(&solution.stochastic_trace_state),
-            );
-            let no_dense: [&Array2<f64>; 0] = [];
-            let mut ct = estimator.estimate_second_order_traces_with_operators(
-                hop.as_ref(),
-                &no_dense,
-                &op_refs,
-            );
-            ct.mapv_inplace(|value| -value);
             Some(ct)
         } else if let Some(dense_hop) = dense_hop_opt {
             // Exact smooth-logdet Hessian kernel for operator-backed drifts.

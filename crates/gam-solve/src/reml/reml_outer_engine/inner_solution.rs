@@ -267,11 +267,6 @@ pub struct InnerSolution<'dp> {
     /// `None` is the legacy/unconstrained path (no active inequality
     /// constraints to project against).
     pub active_constraints: Option<Arc<ActiveLinearConstraintBlock>>,
-
-    /// Fit-level stochastic trace state. Shared by stochastic trace batches so
-    /// CRN probe prefixes stay fixed and matrix-free trace CG can warm-start
-    /// from the previous solve of the same probe id.
-    pub stochastic_trace_state: Arc<Mutex<StochasticTraceState>>,
 }
 
 /// Builder for `InnerSolution` that provides sensible defaults and
@@ -598,7 +593,6 @@ impl<'dp> InnerSolutionBuilder<'dp> {
             barrier_config: self.barrier_config,
             kkt_residual: self.kkt_residual,
             active_constraints: self.active_constraints,
-            stochastic_trace_state: Arc::new(Mutex::new(StochasticTraceState::default())),
         }
     }
 }

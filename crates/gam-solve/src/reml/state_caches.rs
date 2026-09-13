@@ -112,20 +112,6 @@ pub(crate) struct PenaltySubspace {
     pub(crate) rank: usize,
 }
 
-pub(crate) struct HyperGradientRuntimeState {
-    pub(crate) trace_state: Arc<Mutex<super::reml_outer_engine::StochasticTraceState>>,
-}
-
-impl HyperGradientRuntimeState {
-    pub(crate) fn new() -> Self {
-        Self {
-            trace_state: Arc::new(Mutex::new(
-                super::reml_outer_engine::StochasticTraceState::default(),
-            )),
-        }
-    }
-}
-
 #[derive(Default)]
 pub(crate) struct IftQualityRuntimeState {
     pub(crate) quality_history: Vec<f64>,

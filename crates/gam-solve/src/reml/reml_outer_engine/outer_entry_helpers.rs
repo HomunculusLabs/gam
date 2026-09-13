@@ -1177,9 +1177,7 @@ impl HessianFactorization for TangentProjectedHessianOperator {
         //
         // The `HessianFactorization` trait default densifies `op` (`op.to_dense()`,
         // p forward HVPs + a p×p transient) and then evaluates
-        // `trace_logdet_gradient`, which internally forms `Zᵀ Bdense Z`. For a
-        // spectral tangent operator `logdet_traces_match_hinv_kernel()` is
-        // false, so that default never reaches the Hutch++ fast path and
+        // `trace_logdet_gradient`, which internally forms `Zᵀ Bdense Z`, so it
         // unconditionally hits the warn-and-materialize branch — the dominant
         // source of `trace_logdet_operator: materializing implicit
         // HyperOperator` spam (and O(p²) work per outer eval per penalty) on
@@ -1198,9 +1196,8 @@ impl HessianFactorization for TangentProjectedHessianOperator {
         // tr(Z H_T⁻¹ Zᵀ · B) = tr(H_T⁻¹ · ZᵀBZ) (cyclic permutation), with `ZᵀBZ`
         // taken through the operator's own action exactly as in
         // `trace_logdet_operator`: m ≤ p HVPs and no dense p×p B. The trait default
-        // would densify B below its Hutch++ dimension and estimate the trace
-        // stochastically above it, although this backend holds an exact factor of
-        // H_T; the value and logdet traces of one drift must share that factor.
+        // would densify B; the value and logdet traces of one drift share H_T's
+        // exact factor.
         let zbz = op.projected_matrix(&self.z);
         self.h_t_op.trace_hinv_product(&zbz)
     }
@@ -1522,7 +1519,6 @@ pub(crate) fn try_tangent_projected_evaluate(
         // Prevent recursive constrained-response installation. The operator
         // above already carries the active geometry.
         active_constraints: None,
-        stochastic_trace_state: solution.stochastic_trace_state.clone(),
     };
     reml_laml_evaluate(&constrained, rho, mode, prior_cost_gradient).map(Some)
 }

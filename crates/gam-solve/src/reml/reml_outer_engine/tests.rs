@@ -2157,7 +2157,6 @@ pub(crate) fn build_sentinel_tripwire_solution(
         barrier_config: None,
         kkt_residual,
         active_constraints: None,
-        stochastic_trace_state: Arc::new(Mutex::new(StochasticTraceState::default())),
     }
 }
 
@@ -2246,7 +2245,6 @@ pub(crate) fn value_gradient_hessian_prefers_family_supplied_outer_operator() {
         barrier_config: None,
         kkt_residual: None,
         active_constraints: None,
-        stochastic_trace_state: Arc::new(Mutex::new(StochasticTraceState::default())),
     };
 
     let result = reml_laml_evaluate(&solution, &[0.0], EvalMode::ValueGradientHessian, None)
@@ -2943,27 +2941,27 @@ pub(crate) fn test_compute_adjoint_z_c_streaming_matches_dense_reference() {
     // with n=64, p=8 the gap is bounded by O(εn) ≈ 1e-14.
     let n = 64usize;
     let p = 8usize;
-    let mut rng = Xoshiro256SS::from_seed(0x5EED_C0FFEE_u64);
-    let unit = |rng: &mut Xoshiro256SS| {
-        let bits = rng.next_u64() >> 11;
+    let mut state = 0x5EED_C0FFEE_u64;
+    let unit = |state: &mut u64| {
+        let bits = gam_linalg::utils::splitmix64(state) >> 11;
         (bits as f64) / ((1u64 << 53) as f64) * 2.0 - 1.0
     };
 
     let mut x_data = Array2::<f64>::zeros((n, p));
     for i in 0..n {
         for j in 0..p {
-            x_data[[i, j]] = unit(&mut rng);
+            x_data[[i, j]] = unit(&mut state);
         }
     }
     let mut c_array = Array1::<f64>::zeros(n);
     for i in 0..n {
-        c_array[i] = unit(&mut rng);
+        c_array[i] = unit(&mut state);
     }
 
     let mut m = Array2::<f64>::zeros((p, p));
     for i in 0..p {
         for j in 0..p {
-            m[[i, j]] = unit(&mut rng);
+            m[[i, j]] = unit(&mut state);
         }
     }
     let mut h = m.t().dot(&m);
@@ -3016,25 +3014,25 @@ pub(crate) fn fourth_derivative_trace_matrix_matches_scalar_pair_formula() {
     let n = 37usize;
     let p = 5usize;
     let t = 4usize;
-    let mut rng = Xoshiro256SS::from_seed(0xF047_ACE5_u64);
-    let unit = |rng: &mut Xoshiro256SS| {
-        let bits = rng.next_u64() >> 11;
+    let mut state = 0xF047_ACE5_u64;
+    let unit = |state: &mut u64| {
+        let bits = gam_linalg::utils::splitmix64(state) >> 11;
         (bits as f64) / ((1u64 << 53) as f64) * 2.0 - 1.0
     };
 
     let mut x_data = Array2::<f64>::zeros((n, p));
     for i in 0..n {
         for j in 0..p {
-            x_data[[i, j]] = unit(&mut rng);
+            x_data[[i, j]] = unit(&mut state);
         }
     }
     let mut c_array = Array1::<f64>::zeros(n);
     let mut d_array = Array1::<f64>::zeros(n);
     let mut leverage = Array1::<f64>::zeros(n);
     for i in 0..n {
-        c_array[i] = unit(&mut rng);
-        d_array[i] = unit(&mut rng);
-        leverage[i] = 0.25 + unit(&mut rng).abs();
+        c_array[i] = unit(&mut state);
+        d_array[i] = unit(&mut state);
+        leverage[i] = 0.25 + unit(&mut state).abs();
     }
     let x = DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(x_data));
     let ing = ScalarGlmIngredients {
@@ -3047,7 +3045,7 @@ pub(crate) fn fourth_derivative_trace_matrix_matches_scalar_pair_formula() {
     for _ in 0..t {
         let mut mode = Array1::<f64>::zeros(p);
         for j in 0..p {
-            mode[j] = unit(&mut rng);
+            mode[j] = unit(&mut state);
         }
         modes.push(mode);
     }
@@ -3146,7 +3144,6 @@ pub(crate) fn operator_hessian_matches_dense_with_operator_drifts_and_extended_g
         barrier_config: None,
         kkt_residual: None,
         active_constraints: None,
-        stochastic_trace_state: Arc::new(Mutex::new(StochasticTraceState::default())),
     };
     let rho: Vec<f64> = vec![0.2_f64];
     let lambdas: Vec<f64> = rho.iter().map(|value| value.exp()).collect();
@@ -3349,7 +3346,6 @@ pub(crate) fn operator_hessian_with_contracted_psi_hook_matches_per_pair_dense()
             barrier_config: None,
             kkt_residual: None,
             active_constraints: None,
-            stochastic_trace_state: Arc::new(Mutex::new(StochasticTraceState::default())),
         }
     };
 
@@ -3725,7 +3721,7 @@ pub(crate) fn subspace_base_h2_traces_match_scalar_projected_kernel_path() {
     ];
     let pair_refs: Vec<&HyperCoordPair> = pairs.iter().collect();
 
-    let batched = compute_base_h2_traces(&hop, &pair_refs, Some(&kernel), None);
+    let batched = compute_base_h2_traces(&hop, &pair_refs, Some(&kernel));
     let scalar: Vec<f64> = pair_refs
         .iter()
         .map(|pair| {
@@ -3831,7 +3827,6 @@ pub(crate) fn outer_hessian_operator_matvec_matches_dense_subspace_with_null_alp
         barrier_config: None,
         kkt_residual: None,
         active_constraints: None,
-        stochastic_trace_state: Arc::new(Mutex::new(StochasticTraceState::default())),
     };
     let rho: Vec<f64> = vec![0.2_f64, -0.1];
     let lambdas: Vec<f64> = rho.iter().map(|value| value.exp()).collect();
@@ -3955,7 +3950,6 @@ pub(crate) fn projected_operator_hessian_matches_dense_subspace_trace() {
         barrier_config: None,
         kkt_residual: None,
         active_constraints: None,
-        stochastic_trace_state: Arc::new(Mutex::new(StochasticTraceState::default())),
     };
     let rho: Vec<f64> = vec![0.2_f64];
     let lambdas: Vec<f64> = rho.iter().map(|value| value.exp()).collect();
@@ -4237,7 +4231,6 @@ pub(crate) fn gaussian_outer_hessian_operator_matches_dense_assembly() {
         barrier_config: None,
         kkt_residual: None,
         active_constraints: None,
-        stochastic_trace_state: Arc::new(Mutex::new(StochasticTraceState::default())),
     };
     let rho: Vec<f64> = vec![0.2_f64, -0.4_f64];
     let lambdas: Vec<f64> = rho.iter().map(|value| value.exp()).collect();
@@ -4316,7 +4309,6 @@ pub(crate) fn efs_step_is_zero_at_scalar_optimum() {
         barrier_config: None,
         kkt_residual: None,
         active_constraints: None,
-        stochastic_trace_state: Arc::new(Mutex::new(StochasticTraceState::default())),
     };
     let rho = [lambda.ln()];
 
@@ -4490,7 +4482,6 @@ pub(crate) fn test_reml_laml_evaluate_gaussian_basic() {
         barrier_config: None,
         kkt_residual: None,
         active_constraints: None,
-        stochastic_trace_state: Arc::new(Mutex::new(StochasticTraceState::default())),
     };
 
     let rho = [0.0]; // λ = 1
@@ -4559,7 +4550,6 @@ pub(crate) fn fixed_dispersion_firth_cost_subtracts_jeffreys_term() {
         barrier_config: None,
         kkt_residual: None,
         active_constraints: None,
-        stochastic_trace_state: Arc::new(Mutex::new(StochasticTraceState::default())),
     };
 
     let result = reml_laml_evaluate(&solution, &[], EvalMode::ValueOnly, None).unwrap();
@@ -4675,7 +4665,6 @@ pub(crate) fn family_outer_hessian_operator_short_circuits_dense_pairwise_assemb
         barrier_config: None,
         kkt_residual: None,
         active_constraints: None,
-        stochastic_trace_state: Arc::new(Mutex::new(StochasticTraceState::default())),
     };
 
     let result =
@@ -4758,7 +4747,6 @@ pub(crate) fn build_projected_rho_gradient_solution(rho: f64) -> InnerSolution<'
         barrier_config: None,
         kkt_residual: None,
         active_constraints: None,
-        stochastic_trace_state: Arc::new(Mutex::new(StochasticTraceState::default())),
     }
 }
 
@@ -4977,7 +4965,6 @@ pub(crate) fn build_gaussian_test_solution(rho: &[f64]) -> InnerSolution<'_> {
         barrier_config: None,
         kkt_residual: None,
         active_constraints: None,
-        stochastic_trace_state: Arc::new(Mutex::new(StochasticTraceState::default())),
     }
 }
 
@@ -5033,7 +5020,6 @@ pub(crate) fn build_large_dense_spectral_gaussian_solution(rho: f64) -> InnerSol
         barrier_config: None,
         kkt_residual: None,
         active_constraints: None,
-        stochastic_trace_state: Arc::new(Mutex::new(StochasticTraceState::default())),
     }
 }
 
@@ -5163,496 +5149,6 @@ pub(crate) fn gaussian_reml_outer_gradient_matches_fd_up_the_saturated_rho_ladde
 }
 
 #[test]
-pub(crate) fn test_stochastic_trace_estimator_accuracy() {
-    // Build a small SPD matrix and compare stochastic trace estimate
-    // against the exact DenseSpectralOperator trace.
-    let h = array![[4.0, 1.0, 0.5], [1.0, 3.0, 0.2], [0.5, 0.2, 2.0],];
-    let a1 = array![[1.0, 0.3, 0.0], [0.3, 0.5, 0.1], [0.0, 0.1, 0.2],];
-    let a2 = array![[0.2, 0.0, 0.1], [0.0, 1.0, 0.4], [0.1, 0.4, 0.8],];
-
-    let op = DenseSpectralOperator::from_symmetric(&h).unwrap();
-
-    // Exact traces via the dense operator.
-    let exact1 = op.trace_hinv_product(&a1);
-    let exact2 = op.trace_hinv_product(&a2);
-
-    // Stochastic estimates with tight tolerance and many probes.
-    let config = StochasticTraceConfig {
-        n_probes_min: 50,
-        n_probes_max: 200,
-        relative_tol: 0.005,
-        tau_rel: 1e-10,
-        solve_rel_tol: 1e-8,
-        seed: 42,
-        hutchpp_sketch_dim: None,
-    };
-    let estimator = StochasticTraceEstimator::new(config);
-    let matrices: Vec<&Array2<f64>> = vec![&a1, &a2];
-    let estimates = estimator.estimate_traces(&op, &matrices);
-
-    // With 200 probes on a 3x3 system, we should be very close.
-    let rel_err1 = (estimates[0] - exact1).abs() / exact1.abs().max(1e-10);
-    let rel_err2 = (estimates[1] - exact2).abs() / exact2.abs().max(1e-10);
-
-    assert!(
-        rel_err1 < 0.05,
-        "Stochastic trace 1: est={:.6}, exact={:.6}, rel_err={:.4}",
-        estimates[0],
-        exact1,
-        rel_err1,
-    );
-    assert!(
-        rel_err2 < 0.05,
-        "Stochastic trace 2: est={:.6}, exact={:.6}, rel_err={:.4}",
-        estimates[1],
-        exact2,
-        rel_err2,
-    );
-}
-
-#[test]
-pub(crate) fn stochastic_rho_control_cancels_rank_inside_each_probe_2354() {
-    // A rank-one penalty whose range is not coordinate-aligned.  Rademacher
-    // probes therefore produce a noisy zᵀPz even though E[zᵀPz] = rank = 1.
-    let direction: Array1<f64> = array![1.0, 2.0, -1.5];
-    let norm = direction.dot(&direction).sqrt();
-    let unit = direction.mapv(|value| value / norm);
-    let projector = unit
-        .view()
-        .insert_axis(ndarray::Axis(1))
-        .dot(&unit.view().insert_axis(ndarray::Axis(0)));
-    let lambda = 1.6e3;
-    let a = &projector * lambda;
-    // H = λP + (I-P), hence H⁻¹A = P exactly.  The penalty-side chart also
-    // gives S_λ⁺A = P, so the fused per-probe difference is identically zero.
-    let h = &a + &(Array2::<f64>::eye(3) - &projector);
-    let hop = DenseSpectralOperator::from_symmetric(&h).unwrap();
-    let root = unit.view().insert_axis(ndarray::Axis(0)).to_owned();
-    let coordinate = PenaltyCoordinate::from_dense_root(root);
-    let controls = StochasticTraceControlVariates::from_penalty_coordinates(
-        std::slice::from_ref(&coordinate),
-        &[lambda],
-        &array![1.0],
-        1,
-        &[0],
-    )
-    .unwrap();
-    let config = StochasticTraceConfig {
-        n_probes_min: 16,
-        n_probes_max: 16,
-        relative_tol: 0.0,
-        tau_rel: 1e-12,
-        solve_rel_tol: 1e-12,
-        seed: 0x2354,
-        hutchpp_sketch_dim: None,
-    };
-    let estimator = StochasticTraceEstimator::new(config);
-    let targets = [&a];
-    let naive = estimator.estimate_traces(&hop, &targets)[0] - 1.0;
-    let fused = estimator.estimate_hinv_traces_with_control_variates(
-        &hop,
-        StochasticTraceTargets::Dense(&targets),
-        Some(&controls),
-    )[0];
-
-    assert!(
-        fused.abs() <= 1e-12,
-        "same-probe difference should cancel at the rail, got {fused:.16e}"
-    );
-    assert!(
-        naive.abs() > 1e-4,
-        "fixture must expose the separate-estimate residual, got {naive:.16e}"
-    );
-}
-
-// ─── #2354 Gap 1: the same-probe penalty control variate is an UNBIASED
-// estimator of the fused ρ-gradient trace, with the variance its own derivation
-// predicts in advance ───
-//
-// The ρ_k-gradient of the stochastic branch needs
-//   `T_k = tr(H⁻¹Ḣ_k) − ∂_{ρ_k} log|S_λ|₊ = tr(A_kH⁻¹) − tr(S_λ⁺A_k)`,  `A_k = λ_kS_k`.
-// The estimator draws Rademacher `z` (`E[z_iz_j] = δ_ij`, `E[z_i⁴] = 1`) and
-// averages the SAME-PROBE difference `q_k(z) = zᵀM_k z`, `M_k = A_kH⁻¹ − S_λ⁺A_k`.
-//
-//   BIAS.      `E[zᵀMz] = Σ_{i,j} M_ij E[z_iz_j] = tr(M)`, and expectation is
-//              linear, so `E[q_k] = T_k` EXACTLY, at any probe count. The
-//              unfused route (average `zᵀA_kH⁻¹z`, then subtract the exact
-//              `det1[k]`) has the SAME expectation — it is a higher-variance
-//              estimator of the same scalar, never a wrong one, which is why
-//              `objective.rs` may fall back to it when the chart is unavailable.
-//   VARIANCE.  With `M_s = ½(M + Mᵀ)`, `q = Σ_i M_s,ii + Σ_{i≠j} M_s,ij z_iz_j`
-//              and `E[z_iz_jz_kz_l] = 1` iff `{i,j} = {k,l}` (`i≠j`, `k≠l`), so
-//                  `Var(zᵀMz) = 2(‖M_s‖_F² − Σ_i M_s,ii²)`  — closed form.
-//   RAIL.      Splitting on `R = range(S_λ)`, `N = null(S_λ)`: `A_k` kills `N`,
-//              `S_λ⁺A_k = P_{range(S_k)}`, and `(H⁻¹)_{RN} = −(H⁻¹)_{RR}M_{RN}M_{NN}⁻¹`,
-//              so `A_kH⁻¹ − S_λ⁺A_k → −P_kM_{RN}M_{NN}⁻¹` as `λ_k → ∞`. The
-//              residual variance is therefore governed by the coupling `M_{RN}`
-//              between penalized and unpenalized directions; it collapses as
-//              `O(λ_k⁻²)` exactly when that coupling vanishes. This fixture sets
-//              `M_{RN} = 0` by construction (`M = c₀I + P G P`), so the predicted
-//              ratio is that clean rail limit — while the bias and closed-form
-//              variance identities below hold for ANY `M`.
-//
-// The gate is EXHAUSTIVE, not sampled: over the complete Rademacher ensemble
-// (all `2⁶` sign vectors) the empirical mean IS `E[·]` and the empirical
-// population variance IS `Var(·)`, so both predictions are checked as identities
-// with no seed sensitivity and no fitted tolerance. The residual tolerance is
-// the fixture's own arithmetic floor: the spectral solve carries
-// `ε·‖H⁻¹‖·‖A_k‖·p ≈ 1e-11` of absolute rounding into a per-probe statistic
-// whose fused scale is `O(‖M‖/λ) ≈ 1e-2`, i.e. `≈1e-9` relative — the `1e-6`
-// used below leaves three decades over that floor. A second arm runs the
-// PRODUCTION estimator entry point at a fixed seed and certifies each route
-// against its OWN predicted standard error, with Chebyshev's distribution-free
-// coverage factor rather than a tuned bound.
-#[test]
-pub(crate) fn stochastic_rho_control_variate_is_unbiased_with_predicted_variance_2354() {
-    let p = 6usize;
-    let width = 3usize;
-    let starts = [0usize, 3];
-    let lambdas = [8.0e2_f64, 3.0e2];
-    let det1 = array![2.0_f64, 2.0];
-
-    // First-difference root `D` (2×3): `S = DᵀD` has rank 2 and null space
-    // `span(1₃)`, so `range(S) = 1₃^⊥` and its orthogonal projector is
-    // `I₃ − J₃/3` — the HAND-DERIVED operand the production chart is pinned to.
-    let d_root = array![[-1.0_f64, 1.0, 0.0], [0.0, -1.0, 1.0]];
-    let s_local = d_root.t().dot(&d_root);
-    let coordinates: Vec<PenaltyCoordinate> = starts
-        .iter()
-        .map(|&start| PenaltyCoordinate::from_block_root(d_root.clone(), start, start + width, p))
-        .collect();
-
-    let mut a_full: Vec<Array2<f64>> = Vec::with_capacity(starts.len());
-    let mut projector: Vec<Array2<f64>> = Vec::with_capacity(starts.len());
-    for (idx, &start) in starts.iter().enumerate() {
-        let mut a = Array2::<f64>::zeros((p, p));
-        let mut proj = Array2::<f64>::zeros((p, p));
-        for row in 0..width {
-            for col in 0..width {
-                a[[start + row, start + col]] = lambdas[idx] * s_local[[row, col]];
-                let identity = if row == col { 1.0 } else { 0.0 };
-                proj[[start + row, start + col]] = identity - 1.0 / width as f64;
-            }
-        }
-        a_full.push(a);
-        projector.push(proj);
-    }
-
-    // `P_k` is the orthogonal projector onto `range(S_k)`: symmetric, idempotent,
-    // `A_kP_k = A_k`, `tr(P_k) = rank = det1[k]`. With disjoint supports
-    // `S_λ⁺A_k = (λ_kS_k)⁺(λ_kS_k) = P_k`, so this is the exact control operand.
-    for (idx, proj) in projector.iter().enumerate() {
-        let trace: f64 = (0..p).map(|i| proj[[i, i]]).sum();
-        assert!(
-            (trace - det1[idx]).abs() < 1e-12,
-            "P_{idx} trace {trace:.16e} must be the penalty rank {:.1}",
-            det1[idx]
-        );
-        let idempotent = proj.dot(proj) - proj;
-        assert!(
-            idempotent.iter().all(|value| value.abs() < 1e-12),
-            "P_{idx} must be idempotent"
-        );
-        let fixes_range = a_full[idx].dot(proj) - &a_full[idx];
-        assert!(
-            fixes_range.iter().all(|value| value.abs() < 1e-10),
-            "P_{idx} must act as the identity on range(S_k)"
-        );
-    }
-
-    // Data curvature with ZERO range/null coupling: `M = c₀I + P G P`, `P` the
-    // projector onto `range(S_λ)`. `M_{RN} = 0`, so the rail limit is the clean
-    // `A_kH⁻¹ → P_k` and the predicted variance ratio is `O(λ⁻²)`.
-    let p_range = &projector[0] + &projector[1];
-    let design = Array2::from_shape_fn((9, p), |(i, j)| {
-        ((i as f64 + 1.0) * 0.37 + (j as f64 + 1.0) * 0.61).sin()
-    });
-    let gram = design.t().dot(&design) / 9.0;
-    let mut m_data = p_range.dot(&gram).dot(&p_range);
-    for i in 0..p {
-        m_data[[i, i]] += 0.25;
-    }
-    let mut h = m_data.clone();
-    for a in &a_full {
-        h += a;
-    }
-    let hop = DenseSpectralOperator::from_symmetric(&h).expect("SPD fixture");
-
-    // `H⁻¹` through the SAME production solve the probes use.
-    let mut h_inv = Array2::<f64>::zeros((p, p));
-    for i in 0..p {
-        let mut unit = Array1::<f64>::zeros(p);
-        unit[i] = 1.0;
-        h_inv.column_mut(i).assign(&hop.solve(&unit));
-    }
-
-    // Predicted per-probe matrices and their exact Rademacher moments.
-    let m_naive: Vec<Array2<f64>> = a_full.iter().map(|a| a.dot(&h_inv)).collect();
-    let m_fused: Vec<Array2<f64>> = m_naive
-        .iter()
-        .zip(&projector)
-        .map(|(matrix, proj)| matrix - proj)
-        .collect();
-    let trace_hinv: Vec<f64> = m_naive
-        .iter()
-        .map(|matrix| (0..p).map(|i| matrix[[i, i]]).sum())
-        .collect();
-    let target: Vec<f64> = trace_hinv
-        .iter()
-        .zip(det1.iter())
-        .map(|(trace, det)| trace - det)
-        .collect();
-    let rademacher_variance = |matrix: &Array2<f64>| -> f64 {
-        let mut total = 0.0;
-        for i in 0..p {
-            for j in 0..p {
-                if i == j {
-                    continue;
-                }
-                let sym = 0.5 * (matrix[[i, j]] + matrix[[j, i]]);
-                total += 2.0 * sym * sym;
-            }
-        }
-        total
-    };
-    let var_naive: Vec<f64> = m_naive.iter().map(rademacher_variance).collect();
-    let var_fused: Vec<f64> = m_fused.iter().map(rademacher_variance).collect();
-
-    let controls = StochasticTraceControlVariates::from_penalty_coordinates(
-        &coordinates,
-        &lambdas,
-        &det1,
-        starts.len(),
-        &[0, 1],
-    )
-    .expect("disjoint block supports own independent reduced charts");
-
-    // ── Arm 1: the complete Rademacher ensemble (2⁶ sign vectors). ──
-    let ensemble = 1usize << p;
-    let mut naive_samples: Vec<Vec<f64>> = vec![Vec::with_capacity(ensemble); starts.len()];
-    let mut fused_samples: Vec<Vec<f64>> = vec![Vec::with_capacity(ensemble); starts.len()];
-    for pattern in 0..ensemble {
-        let z = Array1::from_shape_fn(p, |i| if (pattern >> i) & 1 == 1 { 1.0 } else { -1.0 });
-        let w = hop.stochastic_trace_solve_for_probe(&z, 1e-12, pattern as u64, None);
-        let mut probe = vec![0.0_f64; starts.len()];
-        for (k, a) in a_full.iter().enumerate() {
-            probe[k] = z.dot(&a.dot(&w));
-        }
-        let raw = probe.clone();
-        controls.subtract_from_probe(&z, &mut probe);
-        for k in 0..starts.len() {
-            // The chart removed exactly `zᵀP_k z` — the hand-derived `zᵀS_λ⁺A_kz`.
-            let hand = z.dot(&projector[k].dot(&z));
-            let removed = raw[k] - probe[k];
-            assert!(
-                (removed - hand).abs() <= 1e-9 * (1.0 + hand.abs()),
-                "coord {k}: chart removed {removed:.16e}, hand-derived zᵀP_kz = {hand:.16e}"
-            );
-            naive_samples[k].push(raw[k]);
-            fused_samples[k].push(probe[k]);
-        }
-    }
-    let moments = |samples: &[f64]| -> (f64, f64) {
-        let count = samples.len() as f64;
-        let mean = samples.iter().sum::<f64>() / count;
-        let variance = samples
-            .iter()
-            .map(|value| (value - mean) * (value - mean))
-            .sum::<f64>()
-            / count;
-        (mean, variance)
-    };
-
-    for k in 0..starts.len() {
-        let (mean_fused, measured_var_fused) = moments(&fused_samples[k]);
-        let (mean_naive, measured_var_naive) = moments(&naive_samples[k]);
-
-        // (1) ZERO BIAS: the fused ensemble mean is the fused target exactly.
-        assert!(
-            (mean_fused - target[k]).abs() <= 1e-8 * (1.0 + target[k].abs()),
-            "coord {k}: E[fused probe] = {mean_fused:.16e}, target tr(A_kH⁻¹) − det1 = {:.16e}",
-            target[k]
-        );
-        // (2) The unfused route has the SAME expectation — so the retained
-        //     `−first[idx]` fallback in `objective.rs` is unbiased too.
-        assert!(
-            (mean_naive - trace_hinv[k]).abs() <= 1e-8 * (1.0 + trace_hinv[k].abs()),
-            "coord {k}: E[unfused probe] = {mean_naive:.16e}, tr(A_kH⁻¹) = {:.16e}",
-            trace_hinv[k]
-        );
-        // (3) CLOSED-FORM VARIANCE, both routes.
-        assert!(
-            (measured_var_fused - var_fused[k]).abs() <= 1e-6 * var_fused[k],
-            "coord {k}: Var[fused] measured {measured_var_fused:.16e} vs predicted {:.16e}",
-            var_fused[k]
-        );
-        assert!(
-            (measured_var_naive - var_naive[k]).abs() <= 1e-6 * var_naive[k],
-            "coord {k}: Var[unfused] measured {measured_var_naive:.16e} vs predicted {:.16e}",
-            var_naive[k]
-        );
-        // (4) The rail collapse the derivation predicts for `M_{RN} = 0`.
-        let ratio = var_fused[k] / var_naive[k];
-        assert!(
-            ratio < 1.0e-2,
-            "coord {k}: predicted variance ratio {ratio:.3e} must show the rail collapse"
-        );
-    }
-
-    // ── Arm 2: the production estimator, fixed seed, fixed probe count. ──
-    //
-    // Each route is certified against ITS OWN predicted standard error with
-    // Chebyshev's distribution-free coverage factor (`P(|X̄−μ| ≥ 5σ/√n) ≤ 1/25`),
-    // so the bound is derived from the closed form above, not fitted to the run.
-    let n_probes = 64usize;
-    let config = StochasticTraceConfig {
-        n_probes_min: n_probes,
-        n_probes_max: n_probes,
-        relative_tol: 0.0,
-        tau_rel: 1e-12,
-        solve_rel_tol: 1e-12,
-        seed: 0x2354,
-        hutchpp_sketch_dim: None,
-    };
-    let estimator = StochasticTraceEstimator::new(config);
-    let target_refs: Vec<&Array2<f64>> = a_full.iter().collect();
-    let fused_estimate = estimator.estimate_hinv_traces_with_control_variates(
-        &hop,
-        StochasticTraceTargets::Dense(&target_refs),
-        Some(&controls),
-    );
-    let naive_estimate = estimator.estimate_traces(&hop, &target_refs);
-    let coverage = 5.0_f64;
-    for k in 0..starts.len() {
-        let se_fused = (var_fused[k] / n_probes as f64).sqrt();
-        let se_naive = (var_naive[k] / n_probes as f64).sqrt();
-        assert!(
-            (fused_estimate[k] - target[k]).abs() <= coverage * se_fused,
-            "coord {k}: fused estimate {:.16e} outside {coverage}·SE = {:.3e} of target {:.16e}",
-            fused_estimate[k],
-            coverage * se_fused,
-            target[k]
-        );
-        assert!(
-            (naive_estimate[k] - det1[k] - target[k]).abs() <= coverage * se_naive,
-            "coord {k}: unfused estimate {:.16e} outside {coverage}·SE = {:.3e} of target {:.16e}",
-            naive_estimate[k] - det1[k],
-            coverage * se_naive,
-            target[k]
-        );
-        // The fused certificate is tighter by `√ratio`, i.e. at least 10×.
-        assert!(
-            se_fused * 10.0 < se_naive,
-            "coord {k}: fused SE {se_fused:.3e} must be ≥10× tighter than unfused {se_naive:.3e}"
-        );
-    }
-}
-
-#[test]
-pub(crate) fn orthonormal_range_basis_orthonormalizes_well_conditioned_input() {
-    let y = array![
-        [1.0, 2.0, 0.5, 3.0],
-        [0.0, 1.0, 0.5, 1.5],
-        [0.0, 0.0, 1.0, 0.5],
-        [0.0, 0.0, 0.0, 1.0],
-    ];
-    let mut q = Array2::<f64>::zeros(y.dim());
-    let rank = orthonormal_range_basis(&y, &mut q);
-    assert_eq!(rank, 4, "well-conditioned input should retain full rank");
-    // Q^T Q = I within the retained rank.
-    for j in 0..rank {
-        for k in 0..rank {
-            let dot = q.column(j).dot(&q.column(k));
-            let expected = if j == k { 1.0 } else { 0.0 };
-            assert!(
-                (dot - expected).abs() < 1e-12,
-                "QᵀQ off-identity at ({j},{k}): got {dot}",
-            );
-        }
-    }
-}
-
-#[test]
-pub(crate) fn orthonormal_range_basis_drops_redundant_columns() {
-    let y = array![
-        [1.0, 2.0, 1.0, 4.0],
-        [0.0, 1.0, 0.0, 2.0],
-        [0.0, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 0.0],
-    ];
-    let mut q = Array2::<f64>::zeros(y.dim());
-    let rank = orthonormal_range_basis(&y, &mut q);
-    assert_eq!(
-        rank, 2,
-        "two duplicate columns plus a zero-extension should drop to rank 2"
-    );
-    for j in 0..rank {
-        for k in 0..rank {
-            let dot = q.column(j).dot(&q.column(k));
-            let expected = if j == k { 1.0 } else { 0.0 };
-            assert!((dot - expected).abs() < 1e-12);
-        }
-    }
-}
-
-#[test]
-pub(crate) fn hutchpp_estimate_trace_hinv_op_squared_matches_exact() {
-    // SPD H and symmetric A; compare tr(H⁻¹ A H⁻¹ A) to the exact
-    // value computed via trace_hinv_product_cross(A, A) =
-    // tr((H⁻¹ A) (H⁻¹ A)).
-    let h = array![
-        [4.0, 1.0, 0.5, 0.0, 0.0, 0.0],
-        [1.0, 3.0, 0.2, 0.0, 0.0, 0.0],
-        [0.5, 0.2, 2.0, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 5.0, 0.7, 0.1],
-        [0.0, 0.0, 0.0, 0.7, 4.0, 0.3],
-        [0.0, 0.0, 0.0, 0.1, 0.3, 3.0],
-    ];
-    let a = array![
-        [1.0, 0.3, 0.0, 0.1, 0.0, 0.0],
-        [0.3, 0.5, 0.1, 0.0, 0.2, 0.0],
-        [0.0, 0.1, 0.2, 0.0, 0.0, 0.05],
-        [0.1, 0.0, 0.0, 0.8, 0.2, 0.0],
-        [0.0, 0.2, 0.0, 0.2, 0.6, 0.1],
-        [0.0, 0.0, 0.05, 0.0, 0.1, 0.4],
-    ];
-    let hop = DenseSpectralOperator::from_symmetric(&h).unwrap();
-    let a_op = DenseMatrixHyperOperator { matrix: a.clone() };
-
-    let exact = hop.trace_hinv_product_cross(&a, &a);
-
-    let config = StochasticTraceConfig {
-        n_probes_min: 16,
-        n_probes_max: 96,
-        relative_tol: 0.005,
-        tau_rel: 1e-10,
-        solve_rel_tol: 1e-10,
-        seed: 0xC0FFEE,
-        hutchpp_sketch_dim: Some(3),
-    };
-    let est = hutchpp_estimate_trace_hinv_op_squared(&hop, &a_op, &config);
-    let rel_err = (est - exact).abs() / exact.abs().max(1e-10);
-    assert!(
-        rel_err < 0.05,
-        "Hutch++ tr((H⁻¹A)²) est={est:.6} exact={exact:.6} rel_err={rel_err:.4}"
-    );
-
-    // Wired path: estimate_second_order_single_dense routes through
-    // Hutch++ when hutchpp_sketch_dim is Some(_).
-    let estimator = StochasticTraceEstimator::new(config.clone());
-    let est_wired = estimator.estimate_second_order_single_dense(&hop, &a);
-    let rel_err_wired = (est_wired - exact).abs() / exact.abs().max(1e-10);
-    assert!(
-        rel_err_wired < 0.05,
-        "wired Hutch++ second-order est={est_wired:.6} exact={exact:.6} rel_err={rel_err_wired:.4}"
-    );
-    assert!(
-        (est_wired - est).abs() <= 1e-12,
-        "wired path must call hutchpp_estimate_trace_hinv_op_squared with the same seed/config"
-    );
-}
-
-#[test]
 pub(crate) fn dense_spectral_operator_cross_traces_agree_with_dense_products() {
     // A synthetic 200-dim SPD H and HVP-only operators (`is_implicit() = true`).
     // `DenseSpectralOperator` overrides every operator cross trace with its
@@ -5772,15 +5268,11 @@ pub(crate) fn dense_spectral_large_p_outer_gradient_matches_finite_difference() 
 pub(crate) fn dense_spectral_logdet_traces_do_not_claim_hinv_kernel_equivalence() {
     let h = array![[4.0, 1.0], [1.0, 3.0]];
     let op = DenseSpectralOperator::from_symmetric(&h).unwrap();
-    assert!(!op.prefers_stochastic_trace_estimation());
     assert!(!op.logdet_traces_match_hinv_kernel());
-    assert!(!can_use_stochastic_logdet_hinv_kernel(&op, true));
 
     let block =
         BlockCoupledOperator::from_joint_hessian_with_mode(&h, PseudoLogdetMode::Smooth).unwrap();
-    assert!(!block.prefers_stochastic_trace_estimation());
     assert!(!block.logdet_traces_match_hinv_kernel());
-    assert!(!can_use_stochastic_logdet_hinv_kernel(&block, true));
 }
 
 #[test]
@@ -5986,135 +5478,6 @@ pub(crate) fn hyper_operator_scaled_add_mul_vec_matches_owned_matvec() {
             );
         }
     }
-}
-
-#[test]
-pub(crate) fn stochastic_single_second_order_estimators_match_batched_paths() {
-    let diag = array![4.0, 3.0, 2.0];
-    let hop = MatrixFreeSpdOperator::new_with_mode(
-        diag.len(),
-        move |v| &diag * v,
-        PseudoLogdetMode::Smooth,
-    );
-    let estimator = StochasticTraceEstimator::with_defaults();
-    let dense = array![[0.8, 0.2, 0.0], [0.2, 0.5, 0.1], [0.0, 0.1, 0.7],];
-    let op = DenseMatrixHyperOperator {
-        matrix: dense.clone(),
-    };
-
-    let no_ops: [&dyn HyperOperator; 0] = [];
-    let dense_refs = [&dense];
-    let batched_dense =
-        estimator.estimate_second_order_traces_with_operators(&hop, &dense_refs, &no_ops);
-    assert_relative_eq!(
-        estimator.estimate_second_order_single_dense(&hop, &dense),
-        batched_dense[[0, 0]],
-        epsilon = 1e-12,
-        max_relative = 1e-12
-    );
-
-    let no_dense: [&Array2<f64>; 0] = [];
-    let op_refs: [&dyn HyperOperator; 1] = [&op];
-    let batched_op =
-        estimator.estimate_second_order_traces_with_operators(&hop, &no_dense, &op_refs);
-    assert_relative_eq!(
-        estimator.estimate_second_order_single_operator(&hop, &op),
-        batched_op[[0, 0]],
-        epsilon = 1e-12,
-        max_relative = 1e-12
-    );
-}
-
-/// gam#979. A backend that materializes its dense curvature for every other
-/// exact path must not refuse it to the active-constraint mode response.
-/// `assemble_h_dense_for_tangent_projection` has exactly one consumer —
-/// `try_tangent_projected_evaluate`, which needs `Z' M Z` — and its error is
-/// not a demotion to a slower route: it REFUSES THE TRIAL POINT. The
-/// matrix-free backend inherited the trait's "no dense form at all" default
-/// while `as_exact_dense_spectral` was handing that very matrix out, so the
-/// large-scale CTN preprocessor's outer search spent whole BFGS restarts on
-/// probes declined for a capability it had.
-#[test]
-pub(crate) fn matrix_free_spd_gives_the_tangent_projection_its_own_curvature_979() {
-    let hessian = array![[4.0, 1.0, 0.0], [1.0, 3.0, 0.5], [0.0, 0.5, 2.0]];
-    let applied = hessian.clone();
-    let op = MatrixFreeSpdOperator::new_with_mode(
-        hessian.nrows(),
-        move |v| applied.dot(v),
-        PseudoLogdetMode::Smooth,
-    );
-
-    let assembled = op
-        .assemble_h_dense_for_tangent_projection()
-        .expect("a backend that materializes its curvature must not refuse the mode response");
-    assert_eq!(assembled.dim(), hessian.dim());
-    for row in 0..hessian.nrows() {
-        for col in 0..hessian.ncols() {
-            assert_relative_eq!(assembled[[row, col]], hessian[[row, col]], epsilon = 1e-10);
-        }
-    }
-
-    // The projection this feeds is the point: it must reproduce `Zᵀ H Z` for a
-    // tangent basis, not merely return something of the right shape.
-    let z = array![[1.0, 0.0], [0.0, 1.0], [-1.0, 1.0]];
-    let want = z.t().dot(&hessian).dot(&z);
-    let got = z.t().dot(&assembled).dot(&z);
-    for row in 0..want.nrows() {
-        for col in 0..want.ncols() {
-            assert_relative_eq!(got[[row, col]], want[[row, col]], epsilon = 1e-10);
-        }
-    }
-    assert!(
-        want.iter().any(|v| v.abs() > 1.0),
-        "the tangent projection must be non-trivial, or the comparison is vacuous"
-    );
-}
-
-#[test]
-pub(crate) fn matrix_free_logdet_traces_use_exact_spectral_algebra() {
-    let diag = array![4.0, 3.0, 2.0];
-    let h = Array2::from_diag(&diag);
-    let dense = DenseSpectralOperator::from_symmetric(&h).unwrap();
-    let op = MatrixFreeSpdOperator::new_with_mode(
-        diag.len(),
-        move |v| &diag * v,
-        PseudoLogdetMode::Smooth,
-    );
-    let a = array![[0.7, 0.1, 0.0], [0.1, 0.4, 0.2], [0.0, 0.2, 0.5]];
-
-    assert_relative_eq!(op.logdet(), dense.logdet(), epsilon = 1e-12);
-    assert_relative_eq!(
-        op.trace_hinv_product(&a),
-        dense.trace_hinv_product(&a),
-        epsilon = 1e-12
-    );
-    assert_relative_eq!(
-        op.trace_logdet_hessian_cross(&a, &a),
-        dense.trace_logdet_hessian_cross(&a, &a),
-        epsilon = 1e-12
-    );
-    assert!(!op.prefers_stochastic_trace_estimation());
-    assert!(!op.logdet_traces_match_hinv_kernel());
-    assert!(!can_use_stochastic_logdet_hinv_kernel(&op, true));
-    assert!(!can_use_stochastic_logdet_hinv_kernel(&op, false));
-}
-
-#[test]
-pub(crate) fn test_rademacher_probe_properties() {
-    // Verify probes have entries +/-1 and are deterministic given the same seed.
-    let mut rng = Xoshiro256SS::from_seed(99);
-    let mut z = Array1::zeros(100);
-    rademacher_probe_into(z.view_mut(), &mut rng);
-    assert_eq!(z.len(), 100);
-    for &v in z.iter() {
-        assert!(v == 1.0 || v == -1.0, "Rademacher entry must be +/-1");
-    }
-
-    // Same seed produces the same probe.
-    let mut rng2 = Xoshiro256SS::from_seed(99);
-    let mut z2 = Array1::zeros(100);
-    rademacher_probe_into(z2.view_mut(), &mut rng2);
-    assert_eq!(z, z2, "Same seed must produce identical probes");
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -7260,7 +6623,6 @@ pub(crate) fn build_leak_proof_solution(
         barrier_config: None,
         kkt_residual: None,
         active_constraints: None,
-        stochastic_trace_state: Arc::new(Mutex::new(StochasticTraceState::default())),
     }
 }
 
@@ -7515,7 +6877,6 @@ pub(crate) fn build_gaussian_solution_at_beta(
         barrier_config: None,
         kkt_residual,
         active_constraints: None,
-        stochastic_trace_state: Arc::new(Mutex::new(StochasticTraceState::default())),
     }
 }
 
@@ -8113,7 +7474,6 @@ pub(crate) fn build_scaled_curvature_solution(rho: &[f64], s: f64) -> InnerSolut
         barrier_config: None,
         kkt_residual: None,
         active_constraints: None,
-        stochastic_trace_state: Arc::new(Mutex::new(StochasticTraceState::default())),
     }
 }
 
@@ -8864,7 +8224,6 @@ fn mode_response_solution(
         barrier_config: None,
         kkt_residual: None,
         active_constraints: None,
-        stochastic_trace_state: Arc::new(Mutex::new(StochasticTraceState::default())),
     }
 }
 

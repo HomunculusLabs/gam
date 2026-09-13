@@ -1229,70 +1229,10 @@ impl ImplicitHyperOperator {
             .sum()
     }
 
-    /// Compute the design-part bilinear form u^T (X^T C_d X) z using precomputed
-    /// shared X-multiplies, avoiding the full B_d matvec.
-    ///
-    /// The design part of B_d is:
-    ///   (∂X/∂ψ_d)^T W X + X^T W (∂X/∂ψ_d)
-    ///
-    /// For vectors z and u, the bilinear form u^T \[design_part\] z equals:
-    ///   ((∂X/∂ψ_d) u)^T (W (Xz)) + (Xu)^T (W ((∂X/∂ψ_d) z))
-    ///   = 2 * (w ⊙ y_vec)^T dx_z       [when u = u, z = z]
-    ///
-    /// where y_vec = X u, dx_z = (∂X/∂ψ_d) z.
-    ///
-    /// But the full bilinear form is NOT symmetric in its dependence on z vs u
-    /// through the design derivative, so we compute both cross-terms:
-    ///   dx_z^T (w ⊙ y_vec) + dx_u^T (w ⊙ x_vec)
-    ///
-    /// # Arguments
-    /// - `x_vec`: X z (precomputed, shared across axes)
-    /// - `y_vec`: X u (precomputed, shared across axes)
-    /// - `z`: the probe vector (needed for forward_mul and penalty)
-    /// - `u`: H⁻¹ z (needed for forward_mul and penalty)
-    ///
-    /// # Returns
-    /// The full bilinear form u^T B_d z = design_part + penalty_part.
-    pub(crate) fn bilinear_with_shared_x(
-        &self,
-        x_vec: &Array1<f64>,
-        y_vec: &Array1<f64>,
-        z: &Array1<f64>,
-        u: &Array1<f64>,
-    ) -> f64 {
-        // Design part: dx_z^T (w ⊙ y_vec) + dx_u^T (w ⊙ x_vec)
-        let dx_z = self.design_forward(z.view());
-        let dx_u = self.design_forward(u.view());
-
-        let mut design = 0.0f64;
-        let w = &*self.w_diag;
-        for i in 0..x_vec.len() {
-            let wi = w[i];
-            design += dx_z[i] * wi * y_vec[i];
-            design += dx_u[i] * wi * x_vec[i];
-        }
-
-        // Non-Gaussian fixed-β third-derivative correction:
-        //   uᵀ Xᵀ diag(c ⊙ X_{ψ_d} β̂) X z = Σ_i (X u)_i · c_x_psi_beta_i · (X z)_i
-        //   = Σ_i y_vec[i] · c_x_psi_beta[i] · x_vec[i]
-        if let Some(c_x_psi_beta) = self.c_x_psi_beta.as_ref() {
-            let c = c_x_psi_beta.as_ref();
-            for i in 0..x_vec.len() {
-                design += y_vec[i] * c[i] * x_vec[i];
-            }
-        }
-
-        // Penalty part: u^T S_psi z
-        let penalty = dense::bilinear(&self.s_psi, z.view(), u.view());
-
-        design + penalty
-    }
-
     /// Compute the design-part contribution to A_d z without the X^T step.
     ///
     /// Returns the n-vector C_d (X z) where C_d encodes the diagonal weighting.
-    /// Specifically: (∂X/∂ψ_d)^T maps FROM n-space, but for stochastic trace
-    /// estimation we need q_d = A_d z = X^T (C_d x_vec) + P_d z.
+    /// Specifically: (∂X/∂ψ_d)^T maps FROM n-space, and q_d = A_d z = X^T (C_d x_vec) + P_d z.
     ///
     /// This method computes q_d = A_d z using the shared x_vec = X z:
     ///   q_d = (∂X/∂ψ_d)^T (W (X z)) + X^T (W ((∂X/∂ψ_d) z)) + S_psi z

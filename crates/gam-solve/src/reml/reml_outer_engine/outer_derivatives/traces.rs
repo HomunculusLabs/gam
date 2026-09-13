@@ -283,7 +283,6 @@ pub(crate) fn compute_base_h2_traces(
     hop: &dyn HessianFactorization,
     pairs: &[&HyperCoordPair],
     subspace: Option<&PenaltySubspaceTrace>,
-    trace_state: Option<Arc<Mutex<StochasticTraceState>>>,
 ) -> Vec<f64> {
     if pairs.is_empty() {
         return Vec::new();
@@ -339,44 +338,6 @@ pub(crate) fn compute_base_h2_traces(
         }
         return out;
     }
-    if subspace.is_none()
-        && hop.prefers_stochastic_trace_estimation()
-        && hop.logdet_traces_match_hinv_kernel()
-    {
-        let mut out = vec![0.0; pairs.len()];
-        let mut dense_refs: Vec<&Array2<f64>> = Vec::new();
-        let mut dense_slots = Vec::new();
-        let mut op_refs: Vec<&dyn HyperOperator> = Vec::new();
-        let mut op_slots = Vec::new();
-        for (idx, pair) in pairs.iter().enumerate() {
-            if let Some(op) = pair.b_operator.as_deref() {
-                op_slots.push(idx);
-                op_refs.push(op);
-            } else if pair.b_mat.nrows() > 0 {
-                dense_slots.push(idx);
-                dense_refs.push(&pair.b_mat);
-            }
-        }
-        if !dense_refs.is_empty() || !op_refs.is_empty() {
-            let estimator = match trace_state {
-                Some(state) => StochasticTraceEstimator::with_shared_trace_state(
-                    StochasticTraceConfig::default(),
-                    state,
-                ),
-                None => StochasticTraceEstimator::with_defaults(),
-            };
-            let values = estimator.estimate_traces_with_operators(hop, &dense_refs, &op_refs);
-            for (local, &slot) in dense_slots.iter().enumerate() {
-                out[slot] = values[local];
-            }
-            let offset = dense_refs.len();
-            for (local, &slot) in op_slots.iter().enumerate() {
-                out[slot] = values[offset + local];
-            }
-        }
-        return out;
-    }
-
     pairs
         .iter()
         .map(|pair| compute_base_h2_trace(hop, &pair.b_mat, pair.b_operator.as_deref(), subspace))
@@ -448,14 +409,4 @@ pub(crate) fn trace_logdet_hessian_crosses_dense_spectral_drifts(
         }
     }
     out
-}
-
-#[inline]
-pub(crate) fn can_use_stochastic_logdet_hinv_kernel(
-    hop: &dyn HessianFactorization,
-    incl_logdet_h: bool,
-) -> bool {
-    hop.prefers_stochastic_trace_estimation()
-        && hop.logdet_traces_match_hinv_kernel()
-        && incl_logdet_h
 }

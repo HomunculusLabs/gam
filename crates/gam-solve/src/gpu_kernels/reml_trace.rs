@@ -70,8 +70,7 @@ pub struct ProbeSeed(pub u64);
 
 impl Default for ProbeSeed {
     fn default() -> Self {
-        // Matches the CPU default seed (`StochasticTraceConfig::default()`)
-        // so cross-implementation parity tests can use a shared constant.
+        // A fixed seed, so repeated evaluations draw the same probes.
         Self(0xCAFE_BABE)
     }
 }
@@ -165,12 +164,6 @@ pub struct RemlTraceHutchinsonEvidence {
     pub probe_count: usize,
 }
 
-// ────────────────────────────────────────────────────────────────────────
-// Gating
-// ────────────────────────────────────────────────────────────────────────
-
-/// Minimum joint-dimension at which the GPU Hutchinson path is enabled.
-pub(crate) const HUTCHINSON_GPU_MIN_P: usize = 512;
 // ────────────────────────────────────────────────────────────────────────
 // Stateless SplitMix64 Rademacher RNG (host reference; mirrors the NVRTC
 // kernel byte-for-byte so CPU and GPU produce identical probes for the
@@ -385,10 +378,8 @@ pub fn evidence_derivatives_hutchinson_gpu(
 // ────────────────────────────────────────────────────────────────────────
 
 /// Default relative-error target for the adaptive-K stopping rule.
-/// Matches `StochasticTraceConfig::default().relative_tol`.
 pub const HUTCHINSON_ADAPTIVE_REL_TOL: f64 = 0.01;
-/// Default near-zero-trace protection floor. Matches
-/// `StochasticTraceConfig::default().tau_rel`.
+/// Default near-zero-trace protection floor.
 pub const HUTCHINSON_ADAPTIVE_TAU_REL: f64 = 1e-8;
 
 /// Adaptive-K Hutchinson trace schedule with common random numbers (CRN).
@@ -501,41 +492,6 @@ pub fn evidence_traces_adaptive<'a>(
         probe_count: last_k,
         converged,
     })
-}
-
-// ────────────────────────────────────────────────────────────────────────
-// Outer logdet-gradient dispatch gate (Block 2.5)
-// ────────────────────────────────────────────────────────────────────────
-
-/// Composite gate predicate for the outer REML logdet-gradient bypass:
-/// when this returns `true`, the unified evaluator should replace its
-/// CPU stochastic-trace call with [`evidence_traces_adaptive`].
-///
-/// All five conditions must hold simultaneously:
-/// * `p ≥ 512` and `K_initial..=K_max` is `[16, 128]`
-/// * `H` is resident as a dense SPD operator (caller passes
-///   `dense_spd_h_resident = true` when `hop.as_exact_dense_spectral()`
-///   is `Some` AND the Cholesky succeeds — the latter is checked
-///   indirectly by `plain_spd_logdet`).
-/// * `plain_spd_logdet`: the operator's logdet kernel is `H⁻¹` exactly
-///   (i.e. `hop.logdet_traces_match_hinv_kernel() && hop.is_dense()`),
-///   so smooth-spectral and SCOP-warped paths are excluded.
-/// * `prefers_stochastic`: `hop.prefers_stochastic_trace_estimation()`.
-/// * `!projected_penalty_subspace_active`: the rank-deficient LAML
-///   projected kernel `U_S H_proj⁻¹ U_Sᵀ` is **not** installed.
-#[must_use]
-pub(crate) fn should_bypass_cpu_with_gpu_adaptive(
-    p: usize,
-    dense_spd_h_resident: bool,
-    plain_spd_logdet: bool,
-    prefers_stochastic: bool,
-    projected_penalty_subspace_active: bool,
-) -> bool {
-    p >= HUTCHINSON_GPU_MIN_P
-        && dense_spd_h_resident
-        && plain_spd_logdet
-        && prefers_stochastic
-        && !projected_penalty_subspace_active
 }
 
 // ────────────────────────────────────────────────────────────────────────

@@ -1206,10 +1206,6 @@ impl HessianFactorization for DenseSpectralOperator {
         true
     }
 
-    fn prefers_stochastic_trace_estimation(&self) -> bool {
-        false
-    }
-
     fn logdet_traces_match_hinv_kernel(&self) -> bool {
         false
     }

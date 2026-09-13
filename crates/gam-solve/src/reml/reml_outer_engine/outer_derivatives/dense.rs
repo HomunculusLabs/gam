@@ -233,30 +233,6 @@ pub(crate) fn compute_outer_hessian(
 
     // ── ext precomputation ──
 
-    // Check if any ext coordinate uses implicit operators and if the problem
-    // is large enough to warrant stochastic cross-traces instead of
-    // materializing p x p Hessian drift matrices.
-    let any_ext_implicit = solution.ext_coords.iter().any(|c| {
-        c.drift
-            .operator_ref()
-            .is_some_and(|op| c.drift.uses_operator_fast_path() && op.is_implicit())
-    });
-    // Stochastic cross-traces are only used when:
-    // (1) implicit operators are present
-    // (2) the backend prefers stochastic traces (it cannot hold an exact
-    //     factor) and its logdet traces match the H⁻¹ kernel
-    // (3) logdet_h is included
-    // (4) no third-derivative corrections (Gaussian family)
-    //
-    // Condition (4) ensures correctness: the stochastic estimator uses
-    // B_d (the implicit operator) which equals Ḣ_d only when C[v_d] = 0.
-    // For non-Gaussian families, Ḣ_d = B_d + C[v_d] and the correction
-    // is a dense p x p matrix, so we fall back to dense materialization.
-    let use_stochastic_cross_traces = any_ext_implicit
-        && can_use_stochastic_logdet_hinv_kernel(hop, incl_logdet_h)
-        && !effective_deriv.has_corrections()
-        && solution.penalty_subspace_trace.is_none();
-
     // Precompute ext solve responses and total Hessian drifts. All ext
     // coordinates use canonical fixed-β stationarity derivatives, so
     // β_i = -K g_i and the correction provider is called with +v_i.
@@ -338,73 +314,6 @@ pub(crate) fn compute_outer_hessian(
             None
         };
 
-    // ── Stochastic second-order cross-trace precomputation ──
-    //
-    // When implicit operators are present and the problem is large, compute
-    // the full (total x total) cross-trace matrix
-    //   cross[d,e] = tr(H^{-1} Hd H^{-1} He)
-    // stochastically. This path is only enabled on backends where the
-    // logdet-Hessian cross term is exactly -tr(H^{-1} Hd H^{-1} He).
-    //
-    // Estimator:
-    //   u = H^{-1} z,  q_e = A_e z,  r_e = H^{-1} q_e,  estimate = u^T A_d r_e
-    //
-    // This avoids materializing the (p x p) Hessian drift matrices for
-    // implicit operators, and uses the correct tr(H^{-1} A_d H^{-1} A_e)
-    // formula rather than the WRONG tr(A_d H^{-2} A_e).
-    //
-    // NOTE: The sign convention here gives +tr(H^{-1} Hd H^{-1} He).
-    // The outer Hessian uses -tr(H^{-1} Hj H^{-1} Hi) = -(this value).
-    let stochastic_cross_traces: Option<Array2<f64>> = if use_stochastic_cross_traces {
-        let total_coords = k + ext_dim;
-        // Borrow the rho-coordinate Ḣₖ drifts and the dense ext drifts directly
-        // — the estimator only ever reads them, so the previous per-coordinate
-        // clones (issue #922) were pure copies of `h_k_matrices` / `ext_h_drifts`.
-        let mut dense_mats: Vec<&Array2<f64>> = Vec::new();
-        let mut coord_has_operator: Vec<bool> = Vec::with_capacity(total_coords);
-        let mut operator_arcs: Vec<Arc<dyn HyperOperator>> = Vec::new();
-
-        // rho coordinates: always dense.
-        for h_k in h_k_matrices.iter().take(k) {
-            dense_mats.push(h_k);
-            coord_has_operator.push(false);
-        }
-
-        // ext coordinates: dense or operator-backed, including any
-        // non-Gaussian third-derivative correction already composed into
-        // `ext_h_drifts`.
-        for drift in &ext_h_drifts {
-            match drift {
-                DriftDerivResult::Dense(matrix) => {
-                    dense_mats.push(matrix);
-                    coord_has_operator.push(false);
-                }
-                DriftDerivResult::Operator(operator) => {
-                    operator_arcs.push(Arc::clone(operator));
-                    coord_has_operator.push(true);
-                }
-            }
-        }
-
-        let generic_ops: Vec<&dyn HyperOperator> =
-            operator_arcs.iter().map(|op| op.as_ref()).collect();
-        let impl_ops: Vec<&ImplicitHyperOperator> = generic_ops
-            .iter()
-            .filter_map(|&op| as_implicit(op))
-            .collect();
-
-        Some(stochastic_trace_hinv_crosses_with_floor(
-            hop,
-            &dense_mats,
-            &coord_has_operator,
-            &generic_ops,
-            &impl_ops,
-            Some(Arc::clone(&solution.stochastic_trace_state)),
-        ))
-    } else {
-        None
-    };
-
     // When the rank-deficient LAML fix replaces the full-space logdet
     // kernel with the projected `U_S · H_proj⁻¹ · U_Sᵀ`, the cross-trace
     // `−tr(K Ḣ_j K Ḣ_i)` must also use the projected kernel for the same
@@ -422,7 +331,7 @@ pub(crate) fn compute_outer_hessian(
         drifts.extend(ext_h_drifts.iter().cloned());
         penalty_subspace_reduce_drifts_batched(kernel, &drifts)
     });
-    let exact_logdet_cross_traces = if incl_logdet_h && stochastic_cross_traces.is_none() {
+    let exact_logdet_cross_traces = if incl_logdet_h {
         if let (Some(kernel), Some(reduced)) = (subspace, reduced_h_drifts.as_ref()) {
             use rayon::iter::{IntoParallelIterator, ParallelIterator};
             let n = reduced.len();
@@ -629,8 +538,6 @@ pub(crate) fn compute_outer_hessian(
                     0.0
                 } else if let Some(ref exact) = exact_logdet_cross_traces {
                     exact[[kk, ll]]
-                } else if let Some(ref sct) = stochastic_cross_traces {
-                    -sct[[kk, ll]]
                 } else {
                     hop.trace_logdet_hessian_cross(&h_k_matrices[kk], &h_k_matrices[ll])
                 };
@@ -730,8 +637,6 @@ pub(crate) fn compute_outer_hessian(
                 let (cross_trace, h2_trace) = if incl_logdet_h {
                     let cross_trace = if let Some(ref exact) = exact_logdet_cross_traces {
                         exact[[rho_idx, k + ext_idx]]
-                    } else if let Some(ref sct) = stochastic_cross_traces {
-                        -sct[[rho_idx, k + ext_idx]]
                     } else {
                         trace_logdet_hessian_cross_dense_drift(
                             hop,
@@ -857,8 +762,6 @@ pub(crate) fn compute_outer_hessian(
                 let (cross_trace, h2_trace) = if incl_logdet_h {
                     let cross_trace = if let Some(ref exact) = exact_logdet_cross_traces {
                         exact[[k + ii, k + jj]]
-                    } else if let Some(ref sct) = stochastic_cross_traces {
-                        -sct[[k + ii, k + jj]]
                     } else {
                         ext_h_drifts[ii].trace_logdet_hessian_cross(&ext_h_drifts[jj], hop)
                     };
@@ -1045,13 +948,6 @@ pub(crate) fn compute_outer_hessian(
             for ii in 0..exact.nrows() {
                 for jj in 0..exact.ncols() {
                     report_finite("exact_logdet_cross_traces", exact[[ii, jj]], ii, jj);
-                }
-            }
-        }
-        if let Some(ref sct) = stochastic_cross_traces {
-            for ii in 0..sct.nrows() {
-                for jj in 0..sct.ncols() {
-                    report_finite("stochastic_cross_traces", sct[[ii, jj]], ii, jj);
                 }
             }
         }

@@ -373,50 +373,11 @@ pub fn compute_hybrid_efs_update(
             });
         }
 
-        let any_psi_operator = psi_local_indices.iter().any(|&li| {
-            let drift = &solution.ext_coords[li].drift;
-            drift.uses_operator_fast_path()
-        });
-        let use_stochastic_psi_gram =
-            any_psi_operator && hop.prefers_stochastic_trace_estimation();
-
         // Step 1: Build the trace Gram matrix
         //   G_{de} = tr(H⁻¹ B_d H⁻¹ B_e).
         //
-        // Large matrix-free/operator-backed problems batch this through the
-        // shared stochastic second-order trace estimator. Smaller or fully
-        // dense problems use exact pairwise cross traces.
-        let gram = if use_stochastic_psi_gram {
-            let mut dense_mats = Vec::new();
-            let mut coord_has_operator = Vec::with_capacity(n_psi);
-            let mut operator_arcs: Vec<Arc<dyn HyperOperator>> = Vec::new();
-
-            for &li in &psi_local_indices {
-                let coord = &solution.ext_coords[li];
-                if let Some(op) = hyper_coord_drift_operator_arc(&coord.drift, hop.dim()) {
-                    coord_has_operator.push(true);
-                    operator_arcs.push(op);
-                } else {
-                    coord_has_operator.push(false);
-                    dense_mats.push(coord.drift.materialize());
-                }
-            }
-
-            let generic_ops: Vec<&dyn HyperOperator> =
-                operator_arcs.iter().map(|op| op.as_ref()).collect();
-            let impl_ops: Vec<&ImplicitHyperOperator> = generic_ops
-                .iter()
-                .filter_map(|&op| as_implicit(op))
-                .collect();
-
-            stochastic_trace_hinv_crosses(
-                hop,
-                &dense_mats,
-                &coord_has_operator,
-                &generic_ops,
-                &impl_ops,
-            )
-        } else {
+        // Every backend prices it with exact pairwise cross traces.
+        let gram = {
             let mut gram = ndarray::Array2::<f64>::zeros((n_psi, n_psi));
             let parallel_psi_drifts = n_psi >= HYBRID_EFS_PSI_DRIFT_PAR_THRESHOLD
                 && rayon::current_thread_index().is_none();

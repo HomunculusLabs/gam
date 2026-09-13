@@ -273,29 +273,6 @@ impl HessianFactorization for FirstOrderTraceSkipOperator {
         self.inner.solve_multi(rhs)
     }
 
-    fn stochastic_trace_solve(&self, rhs: &Array1<f64>, rel_tol: f64) -> Array1<f64> {
-        self.inner.stochastic_trace_solve(rhs, rel_tol)
-    }
-
-    fn stochastic_trace_solve_for_probe(
-        &self,
-        rhs: &Array1<f64>,
-        rel_tol: f64,
-        probe_id: u64,
-        trace_state: Option<&Arc<Mutex<StochasticTraceState>>>,
-    ) -> Array1<f64> {
-        self.inner
-            .stochastic_trace_solve_for_probe(rhs, rel_tol, probe_id, trace_state)
-    }
-
-    fn stochastic_trace_solve_multi(&self, rhs: &Array2<f64>, rel_tol: f64) -> Array2<f64> {
-        self.inner.stochastic_trace_solve_multi(rhs, rel_tol)
-    }
-
-    fn has_matrix_free_trace_cg_operator(&self) -> bool {
-        self.inner.has_matrix_free_trace_cg_operator()
-    }
-
     fn trace_hinv_product_cross(&self, a: &Array2<f64>, b: &Array2<f64>) -> f64 {
         self.inner.trace_hinv_product_cross(a, b)
     }
@@ -394,14 +371,6 @@ impl HessianFactorization for FirstOrderTraceSkipOperator {
 
     fn is_dense(&self) -> bool {
         self.inner.is_dense()
-    }
-
-    fn prefers_stochastic_trace_estimation(&self) -> bool {
-        if self.first_order_skip_active() {
-            false
-        } else {
-            self.inner.prefers_stochastic_trace_estimation()
-        }
     }
 
     fn logdet_traces_match_hinv_kernel(&self) -> bool {

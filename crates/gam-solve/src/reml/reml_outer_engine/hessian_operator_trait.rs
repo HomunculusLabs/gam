@@ -4,18 +4,6 @@ use super::*;
 //  Core traits
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Fit-level stochastic trace state shared by all adaptive Hutchinson batches.
-///
-/// `monotone_probe_floor` pins the CRN prefix length across batches. The
-/// `cg_warm_starts` map stores the previous H⁻¹ solve for the same deterministic
-/// probe id so the next outer evaluation can initialize matrix-free trace CG
-/// from the matching probe only.
-#[derive(Debug, Default)]
-pub struct StochasticTraceState {
-    pub monotone_probe_floor: usize,
-    pub cg_warm_starts: HashMap<u64, Array1<f64>>,
-}
-
 /// Abstract interface for Hessian linear algebra operations.
 ///
 /// All operations use the SAME internal decomposition, ensuring spectral
@@ -71,58 +59,6 @@ pub trait HessianFactorization: Send + Sync {
 
     /// H⁻¹ M — multi-column solve.
     fn solve_multi(&self, rhs: &Array2<f64>) -> Array2<f64>;
-
-    /// H⁻¹ v for stochastic trace probes.
-    ///
-    /// Exact backends use the normal solve. Matrix-free backends may override
-    /// this to use a looser PCG tolerance when the caller's Monte Carlo error
-    /// dominates the linear-solve error.
-    fn stochastic_trace_solve(&self, rhs: &Array1<f64>, rel_tol: f64) -> Array1<f64> {
-        assert!(
-            rel_tol.is_finite() && rel_tol > 0.0,
-            "stochastic trace solve tolerance must be positive and finite"
-        );
-        self.solve(rhs)
-    }
-
-    /// H⁻¹ v for a deterministic stochastic trace probe id.
-    ///
-    /// Backends with matrix-free CG may use `probe_id` to warm-start from the
-    /// previous solve of the same CRN probe. The default exact backend ignores
-    /// the id and uses the normal stochastic trace solve.
-    fn stochastic_trace_solve_for_probe(
-        &self,
-        rhs: &Array1<f64>,
-        rel_tol: f64,
-        probe_id: u64,
-        state: Option<&Arc<Mutex<StochasticTraceState>>>,
-    ) -> Array1<f64> {
-        // Default exact backend has no matrix-free CG, so per-probe warm
-        // starts are inapplicable. If a previous matrix-free backend left
-        // a warm-start vector for this `probe_id` in the shared state,
-        // drop it so a later matrix-free run does not consume a vector
-        // that was generated against a different operator factorization.
-        if let Some(state_arc) = state
-            && let Ok(mut guard) = state_arc.lock()
-        {
-            guard.cg_warm_starts.remove(&probe_id);
-        }
-        self.stochastic_trace_solve(rhs, rel_tol)
-    }
-
-    /// H⁻¹ M for stochastic trace probes.
-    fn stochastic_trace_solve_multi(&self, rhs: &Array2<f64>, rel_tol: f64) -> Array2<f64> {
-        assert!(
-            rel_tol.is_finite() && rel_tol > 0.0,
-            "stochastic trace multi-solve tolerance must be positive and finite"
-        );
-        self.solve_multi(rhs)
-    }
-
-    /// Whether this backend exposes a matrix-free operator usable by trace CG.
-    fn has_matrix_free_trace_cg_operator(&self) -> bool {
-        false
-    }
 
     /// tr(H⁻¹ A H⁻¹ B) for dense symmetric Hessian drifts.
     ///
@@ -367,16 +303,6 @@ pub trait HessianFactorization: Send + Sync {
     /// Dense operators (eigendecomposition) have O(p²) trace cost per matrix;
     /// sparse operators (Cholesky) have O(nnz) solve cost.
     fn is_dense(&self) -> bool {
-        false
-    }
-
-    /// Whether the unified evaluator should route trace computations through
-    /// the stochastic Hutchinson path for this operator.
-    ///
-    /// A backend that holds an exact factor computes its traces exactly, so the
-    /// default is `false`. Only a backend that cannot hold an exact factor
-    /// within its memory budget prefers the estimator.
-    fn prefers_stochastic_trace_estimation(&self) -> bool {
         false
     }
 

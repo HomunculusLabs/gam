@@ -5647,8 +5647,6 @@ pub(crate) struct RemlState<'a> {
     /// `ift_warm_start_cache` / `ift_cached_factor`, which were already
     /// per-state interior-mutability fields — these were the odd ones out.
     pub(crate) ift_quality_runtime: std::sync::Mutex<outer_eval::IftQualityRuntimeState>,
-    pub(crate) hypergradient_runtime:
-        std::sync::Mutex<Option<outer_eval::HyperGradientRuntimeState>>,
     pub(crate) ift_mode_response_slot:
         std::sync::Mutex<Option<outer_eval::IftModeResponseRuntimeCache>>,
     pub(crate) ift_joint_mode_response_slot:

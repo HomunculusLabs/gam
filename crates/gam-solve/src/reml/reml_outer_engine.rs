@@ -22,8 +22,7 @@
 //! This module separates those concerns into honest submodules:
 //! - `error`: the [`RemlError`] type and its `String` boundary conversion.
 //! - `hessian_factorization`: the [`HessianFactorization`] trait — backend-specific
-//!   linear algebra (logdet, trace, solve) plus its default trace-estimation
-//!   machinery and the shared [`StochasticTraceState`].
+//!   linear algebra (logdet, trace, solve) and its exact trace defaults.
 //! - `derivative_providers`: the [`HessianDerivativeProvider`] trait and every
 //!   concrete provider (Gaussian, single-predictor GLM, Firth-aware, Jeffreys,
 //!   guarded-correction, barrier).
@@ -46,9 +45,7 @@
 //! - `dense_spectral`: the dense spectral [`DenseSpectralOperator`] backend.
 //! - `sparse_cholesky_backends`: the [`SparseCholeskyOperator`] and the other
 //!   concrete [`HessianFactorization`] backends (dense exact Cholesky,
-//!   block-coupled, matrix-free SPD) plus the penalty-root helpers.
-//! - `stochastic_trace`: the Girard–Hutchinson / Hutch++ trace estimators and
-//!   their deterministic RNG.
+//!   block-coupled) plus the penalty-root helpers.
 //! - `pseudo_logdet`, `dense_projection`: leaf,
 //!   state-free linear-algebra kernels.
 //!
@@ -60,69 +57,33 @@
 //! Cholesky-based logdet while gradient uses eigendecomposition-based traces
 //! with a different numerical threshold.
 //!
-//! # Trace-Estimation Tiers
+//! # Traces
 //!
 //! Several REML/LAML/PIRLS quantities reduce to traces of operators that
-//! have efficient HVPs but expensive dense materialization. The codebase
-//! picks among three estimators depending on the operator's structure and
-//! the problem size; backends override the default trait method to take
-//! the cheapest path natively when one exists.
+//! have efficient HVPs but expensive dense materialization. Every trace is
+//! exact. When materializing the operator as a dense `p × p` matrix and
+//! summing the diagonal of `H⁻¹ M` is cheap, or when a backend has a
+//! structure-aware exact path (e.g. the Takahashi-selected inverse for sparse
+//! Cholesky), that path is taken: every concrete `HessianFactorization` impl
+//! overrides `trace_hinv_operator` and the cross-trace family natively.
 //!
-//! ## Tier 1: Exact (default for small p, native overrides for large p)
+//! The operator-trace defaults of [`HessianFactorization`] densify the drift.
+//! Every backend that holds a factor overrides them with an exact projected
+//! route (dense spectral, the Cholesky backends, the tangent-projected
+//! Hessian).
 //!
-//! When the operator is small enough that materializing it as a dense
-//! `p × p` matrix and summing the diagonal of `H⁻¹ M` is cheap, OR when a
-//! backend has a structure-aware exact path (e.g. Takahashi-selected
-//! inverse for sparse Cholesky), use it. Examples: every concrete
-//! `HessianFactorization` impl overrides `trace_hinv_operator` and the
-//! cross-trace family with a native exact path.
-//!
-//! ## Tier 2: Hutchinson (multi-target shared-probe)
-//!
-//! When the same `H⁻¹` solve serves multiple coordinate targets — the
-//! REML/LAML rho-gradient computes `tr(H⁻¹ A_k)` for `k = 1, ..., K` —
-//! [`StochasticTraceEstimator`] runs Girard–Hutchinson with one shared
-//! `H⁻¹` solve per probe and adaptive Welford-style stopping. Common
-//! random numbers (deterministic seed) hold across rho coordinates, so
-//! each probe contributes coherently to every coordinate's gradient.
-//! Triggered for very large `p` via `can_use_stochastic_logdet_hinv_kernel`.
-//!
-//! ## Tier 3: Hutch++ (second-order, HVP-only operator)
-//!
-//! `hutchpp_estimate_trace_hinv_op_squared` estimates the symmetric
-//! same-operator cross-trace `tr((H⁻¹A)²)` used by outer-Hessian diagonals
-//! when the stochastic estimator carries a sketch
-//! (`StochasticTraceConfig::hutchpp_sketch_dim`). Meyer–Musco's randomized
-//! range finder captures the dominant subspace of `(H⁻¹A)²` exactly and the
-//! Hutchinson residual handles the orthogonal complement with greatly reduced
-//! variance: `O(1/ε)` matvecs vs `O(1/ε²)` for plain Hutchinson.
-//!
-//! The operator-trace defaults of [`HessianFactorization`] never estimate;
-//! they densify the drift. Every backend that holds a factor overrides them
-//! with an exact projected route (dense spectral, the Cholesky backends, the
-//! tangent-projected Hessian), and a backend that cannot hold an exact factor
-//! opts into stochastic traces through `prefers_stochastic_trace_estimation`.
-//!
-//! ## Why these three and not more
-//!
-//! The BMS / survival-marginal-slope row-trace path is *not* a
-//! Hutch++ candidate even though it computes a trace. The exact
-//! per-row algebra exploits a rank-r factor projection plus linearity
-//! in the rho direction to compute one length-r vector per row that
-//! serves all rho coordinates; a probe-based estimator would require
-//! `O(m · k_directions)` row passes vs the existing single row pass.
+//! The BMS / survival-marginal-slope row-trace path is exact as well. Its
+//! per-row algebra exploits a rank-r factor projection plus linearity in the
+//! rho direction to compute one length-r vector per row that serves all rho
+//! coordinates in a single row pass.
 //! See `bernoulli_marginal_slope::row_primary_third_trace_gradient_with_moments`.
 //!
 //! ## Orthogonal axis: row subsampling for large-scale fits
 //!
-//! Trace estimators here reduce work *within* the Hessian structure
-//! for a fixed row set. The marginal-slope families have a separate,
-//! complementary mechanism that reduces the row set itself: stratified
-//! Horvitz–Thompson outer-score subsampling (see
-//! `families::marginal_slope_shared`). The two compose naturally — a
-//! Hutch++ trace against an `H⁻¹ M` operator stays valid when `M` is
-//! itself a partial-row sum, and the row subsample's variance bound
-//! is independent of the trace estimator used inside the per-row work.
+//! Traces here reduce work *within* the Hessian structure for a fixed row
+//! set. The marginal-slope families have a separate, complementary mechanism
+//! that reduces the row set itself: stratified Horvitz–Thompson outer-score
+//! subsampling (see `families::marginal_slope_shared`).
 
 // ─────────────────────────────────────────────────────────────────────────
 // Shared imports used across the concern submodules. Re-exported as
@@ -134,9 +95,7 @@ pub(crate) use ndarray::{
 
 pub(crate) use rayon::prelude::*;
 
-pub(crate) use std::collections::HashMap;
-
-pub(crate) use std::sync::{Arc, Mutex};
+pub(crate) use std::sync::Arc;
 
 pub(crate) use gam_linalg::faer_ndarray::{FaerEigh, FaerSvd};
 
@@ -182,7 +141,6 @@ mod outer_derivatives;
 mod outer_entry_helpers;
 mod penalty_coordinate;
 mod sparse_cholesky_backends;
-mod stochastic_trace;
 
 // Flatten every concern submodule's items back into this module's namespace so
 // that (a) sibling submodules resolve cross-concern names through `use super::*;`
@@ -207,7 +165,6 @@ pub use outer_derivatives::{OuterHessianRoutePlan, outer_hessian_route_plan};
 pub use outer_entry_helpers::*;
 pub use penalty_coordinate::*;
 pub use sparse_cholesky_backends::*;
-pub use stochastic_trace::*;
 
 #[cfg(test)]
 mod logdet_lane_agreement_2457_tests;

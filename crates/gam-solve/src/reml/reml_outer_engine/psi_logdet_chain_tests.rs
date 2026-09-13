@@ -46,7 +46,7 @@
 use super::*;
 use crate::model_types::ActiveLinearConstraintBlock;
 use ndarray::{Array1, Array2, array};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// `D_β M[u] = Σ_j u_j C_j` for a curvature that is exactly linear in β.
 ///
@@ -302,7 +302,6 @@ impl PsiModel {
             barrier_config: None,
             kkt_residual: None,
             active_constraints: self.active_constraints(),
-            stochastic_trace_state: Arc::new(Mutex::new(StochasticTraceState::default())),
         }
     }
 

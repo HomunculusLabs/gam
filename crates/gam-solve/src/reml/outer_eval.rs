@@ -42,7 +42,7 @@ pub(crate) use gam_terms::construction::{
 pub(crate) use gam_problem::laplace_sampler_contract::BlockExcessTarget;
 pub(crate) use ndarray::{Array1, Array2, ArrayView1, s};
 pub(crate) use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-pub(crate) use std::sync::{Arc, Mutex};
+pub(crate) use std::sync::Arc;
 
 #[path = "block_quadrature_correction.rs"]
 mod block_quadrature_correction;

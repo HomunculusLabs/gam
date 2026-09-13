@@ -61,24 +61,6 @@ impl<'a> RemlState<'a> {
         Some(next_step_cap)
     }
 
-    pub(crate) fn reset_hypergradient_runtime(&self) {
-        *self
-            .hypergradient_runtime
-            .lock()
-            .expect("hypergradient runtime mutex poisoned") = None;
-    }
-
-    pub(crate) fn hypergradient_trace_state(
-        &self,
-    ) -> Arc<Mutex<super::reml_outer_engine::StochasticTraceState>> {
-        let mut slot = self
-            .hypergradient_runtime
-            .lock()
-            .expect("hypergradient runtime mutex poisoned");
-        let state = slot.get_or_insert_with(HyperGradientRuntimeState::new);
-        Arc::clone(&state.trace_state)
-    }
-
     pub(crate) fn apply_inner_polish_step_to_warm_start(
         &self,
         bundle: &EvalShared,
@@ -4004,7 +3986,6 @@ impl<'a> RemlState<'a> {
             prev_warm_start_rho: RwLock::new(None),
             block_correction_admission: AtomicUsize::new(0),
             ift_quality_runtime: std::sync::Mutex::new(Default::default()),
-            hypergradient_runtime: std::sync::Mutex::new(None),
             ift_mode_response_slot: std::sync::Mutex::new(None),
             ift_joint_mode_response_slot: std::sync::Mutex::new(None),
             warm_start_enabled: AtomicBool::new(true),
@@ -4129,7 +4110,6 @@ impl<'a> RemlState<'a> {
         // the helpers' doc-comments for the per-slot staleness arguments.
         self.clear_warm_start_predictor_state();
         self.clear_warm_start_adaptive_signals();
-        self.reset_hypergradient_runtime();
         // The λ-search frozen NB θ (#1082) is computed from the seed fit on the
         // PREVIOUS design; a new surface (different X / penalties) must re-freeze
         // it from its own seed. `0` = "not yet frozen".
@@ -5916,7 +5896,6 @@ impl<'a> RemlState<'a> {
         self.outer_inner_cap.store(0, Ordering::Relaxed);
         self.screening_max_inner_iterations
             .store(0, Ordering::Relaxed);
-        self.reset_hypergradient_runtime();
     }
 
     // Accessor methods for private fields

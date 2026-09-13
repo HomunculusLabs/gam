@@ -52,7 +52,6 @@ pub(crate) use gam_solve::estimate::reml::reml_outer_engine::{
     HessianFactorization,
     OuterHessianDerivativeKernel,
     PenaltySubspaceTrace,
-    StochasticTraceState,
     active_constraint_face_geometry,
     active_constraint_tangent_geometry,
     compute_block_penalty_logdet_derivs,
