@@ -56,11 +56,11 @@ Sources: [issue and original deployment plan](https://github.com/SauersML/gam/is
 | GPU end-to-end regression (reported 0.69x at n=32768/r=20) | Transfer-inclusive current CPU/GPU comparison at that shape and relevant dispatch behavior, with utilization | Pending; CUDA compilation alone is insufficient |
 | SAE non-softmax/IBP/JumpReLU strongest-hand comparison | Equivalent live prior and reconstruction semantics, all-channel parity and optimized hand timing | Source audit 09-12: production `AssignmentMode` is {Softmax, OrderedBetaBernoulli, ThresholdGate, TopK}; no JumpReLU mode exists. `row_jets_for_logdet` routes Softmax through `execute_softmax_row_program`, OrderedBetaBernoulli and ThresholdGate through the shared `execute_independent_logistic_row_program`, and TopK through that schedule's constant-gate degeneration (no logit primaries). `SAE-SOFTMAX-SCHEDULE-932` and `SAE-INDEPENDENT-SCHEDULE-932` race each compiled schedule against `row_jets_for_logdet_hand_reference`, the historical non-abstracted hand assembly, at K = 1, 2, 8, 16, 32, 64 and P = 16. Each first requires full-channel parity at 2e-12 of scale and no more allocations than the hand (exactly 2). The independent fixture is OrderedBetaBernoulli. ThresholdGate shares its program and still has no speed cell of its own, but `threshold_gate_compiled_schedule_matches_hand_full_channels_932` (`e0f3b5402`) pins its full-channel parity and allocations at every width. Not run in the 09-12 pass |
 | Runtime-width SLS wiggle, orders two through four | Runtime-sized analytic hand opponent and complete channel parity/timing | Incomplete: current test measures allocation policy |
-| Constrained Firth/Jeffreys root cause | Correction enabled on identifiable geometry and converged constrained binomial-wiggle/Matérn fit, plus affected-family regressions | Incomplete: disabling rationale remains in production |
+| Constrained Firth/Jeffreys root cause | Correction enabled on identifiable geometry and converged constrained binomial-wiggle/Matérn fit, plus affected-family regressions | Source audit 09-12, not started. `BinomialLocationScaleWiggleFamily` (and `BinomialLocationScaleFamily`) opt out because the default span `Z_J = ker(S)` holds an unpenalized gauge direction of `q`, which the always-on term floor-inverts into a `1/floor` curvature wall. Under the I-spline warp `q = q₀ + Σ βw_j·I_j(q₀)` the ramps are not a partition of unity, so that gauge moves with the data, and no constant projector meets `jeffreys_span_basis`'s constancy contract. The route that meets it is multinomial's #2612 measured span: fit the unbiased probe, measure `{v : vᵀ(H + S_λ)v < 1 observation-equivalent}` at its certified mode, then refit armed and warm-started. For these families it belongs in the shared `fit_location_scale_terms` driver, which has no Firth logic today. Open design: the curvature metric in threshold, log-σ and wiggle coordinates; the `β ≥ 0` wiggle cone in the refit; the spatial length-scale loop around the blockwise fit. Overlap with the 09-12 Jeffreys gate and floor commits raised with the lead |
 | Large-scale flex end-to-end benchmark | A real converged fit selecting the intended branch, cold/warm cache attribution, comparable baseline and timing | Pending; per-row allocation test is insufficient; inspect current Criterion target's capped-fit semantics |
 | Retired hand fourth-order oracle reduced to finiteness | Independent numerical agreement through fourth order on the live route | BMS FLEX route covered on main by `standard_normal_flex_canonical_derivative_ladder_matches_vgh_t3_t4_932`: central differences through the production `lower_bms_flex_row_order2_with_moments` / `row_primary_third_contracted_with_moments` / `row_primary_fourth_contracted_ordered` along one mixed direction; V→G 2e-7, G→H 2e-6, H→t3 2e-5, t3→t4 2e-4; exact symmetry and nonzero-signal asserts. Not run in the 09-12 pass; other flex routes not yet enumerated |
 | Block10 fourth-order FD convergence omissions | Every required entry covered by a converged independent witness or exact oracle | Fixed and verified on MSI: all four fixtures, no skipped matrix entries, exact-zero checks for zero directions; original error bounds retained |
-| Loosened oracle tolerances and narrowed fixtures | Justified numerical error bounds, wider relevant fixtures, corruption sensitivity | Pending; inspect each affected oracle, not only the repaired rigid test |
+| Loosened oracle tolerances and narrowed fixtures | Justified numerical error bounds, wider relevant fixtures, corruption sensitivity | Item status 09-12. (1) Empirical-rigid implicit solve, loosened 1e-9 → 1e-8 at T3/T4: back to 1e-9 through the independent polynomial oracle, now degree five (`a4fbf57f4`, passed in pool job 578401). (2) Rigid Bernoulli hand-chain witness: the band is now `1e-12 + 1e-9·max(|a|, |b|)`, and the thread's 3e-11 bar no longer exists; tightening it needs the measured worst error, not yet collected. (3) SAE cache-seam oracle with the mixed 1e-12 floor: deleted by `c0a21b554` with no census row while two doc comments still cite it; handed to restore2818. (4) `base_moment_jets` percent-level difference bars: replaced by an exact θ-Taylor oracle through order five on four cells (`3dc5240be`); first run pending. (5) BMS flex deviation ramp narrowed to 0.06: score-warp and link-dev arms at 0.25 added (`4d504767d`); first run pending |
 | Removed hand-oracle coverage | Independent replacement for each still-live channel, not a comparison of one lowering with itself | Pending |
 | M=32 complete canonical fourth-order coverage without stack overflow | Executed bounded-stack live-route/canonical test, explicit matrix coverage, no width refusal | Passed on MSI: four fixtures, every 32×32 third/fourth entry, canonical evaluation on an explicit 1 MiB stack |
 | Moment-order, implicit-lift, heap and CUDA tile costs | Measurements covering the live changes, including common widths at and below 32 | Pending; isolated primitive wins cannot establish total path speed |
@@ -592,3 +592,28 @@ space.
     Richardson verifier.
   - The coefficient-space directional surfaces are covered only by operator,
     batched and cache identity tests (`families_bms_joint_hessian_hvp_correction_tests.rs`).
+
+### Affine cell moments: the anchor recurrence loses precision on finite cells
+
+Every affine cell (`c2 = c3 = 0`) took its moments from `affine_anchor_moment_vector`. Its
+truncated-Gaussian moments come from the upward recurrence
+`T_n = a^{n−1}e^{−a²/2} − b^{n−1}e^{−b²/2} + (n−1)·T_{n−2}`, which amplifies the roundoff in
+`T_0` and `T_1` like `(n−1)!!`. On a semi-infinite interval `T_n` grows at the same rate
+and no precision is lost. On a finite interval inside the Gaussian bulk `T_n` shrinks
+instead.
+
+`affine_anchor_moments_match_quadrature_through_degree_34_932` (`654b1513c`) compares the
+moments with a 20 000-panel Simpson reference. Pool job 580277 at `187735f30` (EPYC 9534)
+measured relative errors on `[−0.3, 0.2]` with `η = 0.4 − 0.7z`: 1.4e-8 at degree 9,
+2.0e-2 at 15, 8.3e4 at 21 and 2.1e20 at 34. The first cell's assertion stopped the run
+before the off-centre and wide cells.
+
+Production reads these degrees. The BMS row Hessians evaluate cells at degrees 15 and 21,
+survival flex partitions at up to 32, and the order-five base-moment jets through `M_34`.
+Interior partition cells whose score and link spans are locally linear are exactly affine.
+
+`c7823aadd` evaluates finite affine cells on the certified Gauss–Legendre ladder and keeps
+the anchor for semi-infinite and whole-line cells. Rigid rows have no split points, so
+their single whole-line cell is unchanged. The GPU host classifier routes finite affine
+cells to the device's non-affine branch, so the kernel source's `BRANCH_AFFINE` recurrence
+is no longer dispatched. First run after the fix: pending (pool job 584112).
