@@ -6520,14 +6520,40 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
                     })
                     .and_then(Option::take)
                 else {
+                    let produced = slots
+                        .iter()
+                        .flatten()
+                        .map(|active| active.info.original_index)
+                        .collect::<Vec<_>>();
+                    // A cached block the rebuild DROPPED at this psi is a trial whose
+                    // rho coordinate has no matrix behind it, not a broken invariant.
+                    // The Matérn collocation Grams of odd derivative order are exactly
+                    // zero once every off-diagonal kernel value underflows, which a
+                    // length scale far below the center spacing produces. MSI job
+                    // 602008 (`y ~ matern(x, periodic=true, period=2π)`, n = 400)
+                    // reached this branch at an ARC trial with psi = 9.43, where the
+                    // rebuild kept originals [0, 2] of the 4 cached, and the InvalidInput
+                    // aborted the whole fit. The model does not exist at that trial, so
+                    // it is refused and the search shortens its step or rejects the seed.
+                    // A block missing from both lists is a real inconsistency and stays
+                    // fatal.
+                    if let Some(vacated) = dropped_penalties
+                        .iter()
+                        .find(|info| info.original_index == *original)
+                    {
+                        return Err(EstimationError::TrialPointRefused {
+                            reason: format!(
+                                "incremental realizer: cached penalty {original} ({:?}) of term \
+                                 '{name}' was dropped as {:?} at this psi and the rebuild produced \
+                                 {produced:?}, so its rho coordinate has no matrix at the trial. \
+                                 Trial: {trial_report}",
+                                vacated.source, vacated.reason
+                            ),
+                        });
+                    }
                     return Err(EstimationError::InvalidInput(SmoothError::dimension_mismatch(format!(
                         "incremental realizer lost cached penalty {original} for term \
-                         '{name}': the rebuild produced {:?}",
-                        slots
-                            .iter()
-                            .flatten()
-                            .map(|active| active.info.original_index)
-                            .collect::<Vec<_>>()
+                         '{name}': the rebuild produced {produced:?}"
                     )).to_string()));
                 };
                 kept.push(found);
