@@ -54,12 +54,15 @@ const SUPPORT_LAML_CONTEXT: &str = "support-sparse TopK grouped LAML";
 /// of `|log|S|| + 1`. **That is unreachable at overcomplete border widths, and
 /// unreachable here means REFUSED**, not merely slow:
 /// `rational_reduced_schur_plan_derived` doubles the deflation rank until the
-/// bar clears and returns `None` when its ceiling is exhausted, which this lane
-/// turns into a typed evidence failure. Measured on a small overcomplete chart
-/// (N=2000, P=32, K=59, border 5056, `log|S| ≈ 1.4e4`): the bare estimator's
-/// relative error bar is 3.7e-3 at 8 probes and 1.9e-3 at 16, so the shared bar
-/// asks for roughly a hundredfold variance reduction that peeling 128 of 5056
-/// directions cannot deliver.
+/// bar clears and refuses with `Err` when its ceiling is exhausted, which this
+/// lane turns into a typed evidence failure. Measured on a small overcomplete
+/// chart (N=2000, P=32, K=59, border 5056, `log|S| ≈ 1.4e4`): the bare
+/// estimator's relative error bar is 3.7e-3 at 8 probes and 1.9e-3 at 16, so the
+/// shared bar asks for roughly a hundredfold variance reduction that peeling 128
+/// of 5056 directions, the ladder's ceiling when this was measured, could not
+/// deliver. The ceiling is now the border itself, lowered only by the plan
+/// storage memory admits (#2731), so the bar is either refused there or bought
+/// with a basis spanning nearly the whole border.
 ///
 /// The reachable bar, derived from the probe count rather than borrowed from an
 /// inner-solve stall tolerance: `√(2/m)`, the relative standard error a
