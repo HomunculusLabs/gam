@@ -3,6 +3,7 @@
 //! and the per-row deflation candidates the evidence factor qualifies.
 
 use super::*;
+use super::fit_drivers::ambient_sphere_killing_directions;
 
 impl SaeManifoldTerm {
     pub(crate) fn dense_step_gauge_vectors(&self) -> Result<Vec<Array1<f64>>, String> {
