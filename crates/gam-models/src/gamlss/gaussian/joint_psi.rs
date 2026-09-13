@@ -14,7 +14,7 @@ use gam_row_macros::row_atom;
 // expression retains the production extreme-value semantics while build-time
 // differentiation emits exact observed H, contracted t3, and contracted t4.
 row_atom! {
-    pub(crate) fn gaussian_normalized_row [generic, order2_at_zero, third_at_zero, fourth_at_zero](
+    pub(crate) fn gaussian_normalized_row [generic, order2_at_zero, third_at_zero, fourth_at_zero, fifth_at_zero](
         delta_mu,
         delta_eta;
         obs_weight: f64,
@@ -741,6 +741,120 @@ impl<'a> GaussianJointRowProgram<'a> {
             direction_u,
             direction_v,
         )
+    }
+
+    /// Symbolically lowered third derivative of the row Hessian along three
+    /// predictor directions.
+    #[inline(always)]
+    pub(crate) fn row_fifth_contracted(
+        &self,
+        row: usize,
+        direction_u: &[f64; 2],
+        direction_v: &[f64; 2],
+        direction_w: &[f64; 2],
+    ) -> [[f64; 2]; 2] {
+        gaussian_normalized_row_fifth_contracted_at_zero(
+            self.rows.obs_weight[row],
+            self.rows.standardized_residual[row],
+            self.rows.inv_sigma[row],
+            self.rows.kappa[row],
+            direction_u,
+            direction_v,
+            direction_w,
+        )
+    }
+
+    /// `(g, H)` at one certified row, differentiated along every subset `S` of
+    /// three coefficient directions and indexed by the direction bitmask
+    /// (`u = 1`, `v = 2`, `w = 4`). `legs[S]` is `a_S`, the derivative of the
+    /// row predictors `(δq, δℓ)` along `S`; `legs[0]` is not read. With `T3`,
+    /// `T4` and `T5` the generated contractions of the row Hessian's first
+    /// three derivatives, the chain rule through the legs is
+    ///
+    /// * `g_d = H·a_d` and `H_d = T3(a_d)`;
+    /// * `g_de = H_d·a_e + H·a_de` and `H_de = T4(a_d, a_e) + T3(a_de)`;
+    /// * `g_uvw = H_vw·a_u + H_v·a_uw + H_w·a_uv + H·a_uvw` and
+    ///   `H_uvw = T5(a_u, a_v, a_w) + T4(a_uw, a_v) + T4(a_u, a_vw) + T4(a_uv, a_w) + T3(a_uvw)`.
+    pub(crate) fn row_third_tower(
+        &self,
+        row: usize,
+        legs: &[[f64; 2]; 8],
+    ) -> ([[f64; 2]; 8], [[[f64; 2]; 2]; 8]) {
+        let atom = self.row_order2(row);
+        let gradient = atom.gradient();
+        let hessian = [
+            [atom.hessian_at(0, 0), atom.hessian_at(0, 1)],
+            [atom.hessian_at(1, 0), atom.hessian_at(1, 1)],
+        ];
+        let [a_u, a_v, a_uv, a_w, a_uw, a_vw, a_uvw] =
+            [legs[1], legs[2], legs[3], legs[4], legs[5], legs[6], legs[7]];
+        let hessian_u = self.row_third_contracted(row, &a_u);
+        let hessian_v = self.row_third_contracted(row, &a_v);
+        let hessian_w = self.row_third_contracted(row, &a_w);
+        let hessian_uv = add_matrix_2(
+            self.row_fourth_contracted(row, &a_u, &a_v),
+            self.row_third_contracted(row, &a_uv),
+        );
+        let hessian_uw = add_matrix_2(
+            self.row_fourth_contracted(row, &a_u, &a_w),
+            self.row_third_contracted(row, &a_uw),
+        );
+        let hessian_vw = add_matrix_2(
+            self.row_fourth_contracted(row, &a_v, &a_w),
+            self.row_third_contracted(row, &a_vw),
+        );
+        let hessian_uvw = add_matrix_2(
+            add_matrix_2(
+                self.row_fifth_contracted(row, &a_u, &a_v, &a_w),
+                self.row_fourth_contracted(row, &a_uw, &a_v),
+            ),
+            add_matrix_2(
+                add_matrix_2(
+                    self.row_fourth_contracted(row, &a_u, &a_vw),
+                    self.row_fourth_contracted(row, &a_uv, &a_w),
+                ),
+                self.row_third_contracted(row, &a_uvw),
+            ),
+        );
+        let gradients = [
+            gradient,
+            matrix_vector_2(&hessian, &a_u),
+            matrix_vector_2(&hessian, &a_v),
+            add_vector_2(
+                matrix_vector_2(&hessian_u, &a_v),
+                matrix_vector_2(&hessian, &a_uv),
+            ),
+            matrix_vector_2(&hessian, &a_w),
+            add_vector_2(
+                matrix_vector_2(&hessian_u, &a_w),
+                matrix_vector_2(&hessian, &a_uw),
+            ),
+            add_vector_2(
+                matrix_vector_2(&hessian_v, &a_w),
+                matrix_vector_2(&hessian, &a_vw),
+            ),
+            add_vector_2(
+                add_vector_2(
+                    matrix_vector_2(&hessian_vw, &a_u),
+                    matrix_vector_2(&hessian_v, &a_uw),
+                ),
+                add_vector_2(
+                    matrix_vector_2(&hessian_w, &a_uv),
+                    matrix_vector_2(&hessian, &a_uvw),
+                ),
+            ),
+        ];
+        let hessians = [
+            hessian,
+            hessian_u,
+            hessian_v,
+            hessian_uv,
+            hessian_w,
+            hessian_uw,
+            hessian_vw,
+            hessian_uvw,
+        ];
+        (gradients, hessians)
     }
 }
 

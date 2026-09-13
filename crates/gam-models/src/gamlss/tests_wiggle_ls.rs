@@ -2896,3 +2896,157 @@ pub(crate) fn gaussian_wiggle_joint_hessian_and_directional_derivatives_match_ex
     }
 }
 
+/// #2677 (former #2903): the Gaussian location-scale wiggle family's third information
+/// derivative `{D³H[u, v, e_a]}` must be the β-derivative, along every coefficient axis, of its
+/// own second directional derivative, which the `_932` test above pins to exact dual numbers.
+/// The warp is quintic and every row's `q0` lies inside one span, so `B⁽⁴⁾` and `d⁵q/dq0⁵` are
+/// live and no five-point stencil straddles a knot.
+#[test]
+pub(crate) fn gaussian_wiggle_third_information_derivative_matches_difference_of_second_2677() {
+    let (template, template_states, mut specs, xmu, xls, _xw_seed) =
+        gls_wiggle_workspace_fixture();
+    let n = template.y.len();
+    let degree = 5usize;
+    // Two internal knots on the seed range [-3, 3] sit at ±1, while every q0 = X_mu·β_mu of this
+    // fixture lies in (-0.25, 0.25).
+    let q_seed = Array1::linspace(-3.0, 3.0, n);
+    let (wiggle_block, knots) = BinomialLocationScaleWiggleFamily::buildwiggle_block_input(
+        q_seed.view(),
+        degree,
+        2,
+        2,
+        false,
+    )
+    .expect("quintic wiggle block");
+    let p_mu = xmu.ncols();
+    let p_ls = xls.ncols();
+    let p_w = wiggle_block.design.ncols();
+    specs[GaussianLocationScaleWiggleFamily::BLOCK_WIGGLE].design = wiggle_block.design;
+    let family = GaussianLocationScaleWiggleFamily {
+        wiggle_knots: knots,
+        wiggle_degree: degree,
+        ..template
+    };
+    let beta = Array1::from_iter(
+        template_states[GaussianLocationScaleWiggleFamily::BLOCK_MU]
+            .beta
+            .iter()
+            .chain(
+                template_states[GaussianLocationScaleWiggleFamily::BLOCK_LOG_SIGMA]
+                    .beta
+                    .iter(),
+            )
+            .copied()
+            .chain((0..p_w).map(|j| 0.05 + 0.03 * ((j + 1) as f64).sin())),
+    );
+    let total = beta.len();
+    let states_at = |point: &Array1<f64>| -> Vec<ParameterBlockState> {
+        let beta_mu = Array1::from_iter(point.iter().take(p_mu).copied());
+        let beta_ls = Array1::from_iter(point.iter().skip(p_mu).take(p_ls).copied());
+        let beta_w = Array1::from_iter(point.iter().skip(p_mu + p_ls).copied());
+        let eta_mu = xmu.dot(&beta_mu);
+        let eta_ls = xls.dot(&beta_ls);
+        let eta_w = family
+            .wiggle_design(eta_mu.view())
+            .expect("quintic warp basis at q0")
+            .dot(&beta_w);
+        vec![
+            ParameterBlockState {
+                beta: beta_mu,
+                eta: eta_mu,
+            },
+            ParameterBlockState {
+                beta: beta_ls,
+                eta: eta_ls,
+            },
+            ParameterBlockState {
+                beta: beta_w,
+                eta: eta_w,
+            },
+        ]
+    };
+    let states = states_at(&beta);
+
+    let q0 = &states[GaussianLocationScaleWiggleFamily::BLOCK_MU].eta;
+    let beta_w = &states[GaussianLocationScaleWiggleFamily::BLOCK_WIGGLE].beta;
+    let nearest_knot = q0
+        .iter()
+        .flat_map(|&value| {
+            family
+                .wiggle_knots
+                .iter()
+                .map(move |&knot| (value - knot).abs())
+        })
+        .fold(f64::INFINITY, f64::min);
+    assert!(
+        nearest_knot > 0.25,
+        "every q0 must lie inside one span, but one is {nearest_knot:.3e} from a knot, so the \
+         five-point difference would straddle a piecewise-polynomial break"
+    );
+    let fifth_slope = family
+        .wiggle_d5q_dq05(q0.view(), beta_w.view())
+        .expect("fifth warp slope");
+    let fourth_basis = family
+        .wiggle_d4basis_constrained(q0.view())
+        .expect("fourth warp basis");
+    assert!(
+        fifth_slope.iter().any(|value| value.abs() > 1.0e-6)
+            && fourth_basis.iter().any(|value| value.abs() > 1.0e-6),
+        "the quintic warp must carry a live d5q/dq0^5 and B4, or its new legs are compared on zeros"
+    );
+
+    let u = Array1::from_shape_fn(total, |k| 0.3 * ((k as f64) * 0.71 + 0.2).sin());
+    let v = Array1::from_shape_fn(total, |k| -0.25 * ((k as f64) * 0.43 + 0.9).cos());
+    let axes = family
+        .jeffreys_third_information_derivative()
+        .expect("the wiggle family must declare its third information derivative")
+        .third_directional_all_axes(&states, &specs, &u, &v)
+        .expect("third information derivative")
+        .expect("the wiggle family publishes the third information derivative");
+    assert_eq!(axes.len(), total, "one matrix per coefficient axis");
+    let second_at = |axis: usize, step: f64| {
+        let mut moved = beta.clone();
+        moved[axis] += step;
+        family
+            .exact_newton_joint_hessiansecond_directional_derivative(&states_at(&moved), &u, &v)
+            .expect("wiggle d2H[u, v]")
+            .expect("wiggle d2H[u, v] present")
+    };
+    let h = 1.0e-3;
+    let mut largest = 0.0_f64;
+    let mut mean_wiggle_peak = 0.0_f64;
+    for axis in 0..total {
+        let difference = (-second_at(axis, 2.0 * h) + 8.0 * second_at(axis, h)
+            - 8.0 * second_at(axis, -h)
+            + second_at(axis, -2.0 * h))
+            / (12.0 * h);
+        for ((a, b), &want) in difference.indexed_iter() {
+            let got = axes[axis][[a, b]];
+            largest = largest.max(got.abs());
+            if a < p_mu && b >= p_mu + p_ls {
+                mean_wiggle_peak = mean_wiggle_peak.max(got.abs());
+            }
+            assert!(
+                (got - want).abs() <= 1.0e-6 * (1.0 + want.abs().max(got.abs())),
+                "axis {axis} D3H[{a}][{b}]: produced {got:+.15e}, difference {want:+.15e}"
+            );
+            let mirrored = axes[a][[axis, b]];
+            assert!(
+                (got - mirrored).abs() <= 1.0e-9 * (1.0 + got.abs().max(mirrored.abs())),
+                "D3H[u, v, e_{axis}][{a}][{b}] = {got:+.15e} must equal \
+                 D3H[u, v, e_{a}][{axis}][{b}] = {mirrored:+.15e}"
+            );
+        }
+    }
+    assert!(
+        largest > 1.0e-3,
+        "the third information derivative is too small ({largest:.3e}) for the agreement to say \
+         anything"
+    );
+    assert!(
+        mean_wiggle_peak > 1.0e-6,
+        "the mean×wiggle block, where the warp legs enter, must carry curvature \
+         ({mean_wiggle_peak:.3e})"
+    );
+}
+
