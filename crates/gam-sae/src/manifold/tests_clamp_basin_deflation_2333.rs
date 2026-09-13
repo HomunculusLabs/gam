@@ -58,7 +58,7 @@ fn exact_a_evidence_cache(
     let mut anchor = frozen_gate_endpoint(term);
     let mut majorizer = anchor.assemble_arrow_schur(target.view(), rho, None)?;
     SaeManifoldTerm::ensure_row_gauge_deflation_for_quasi_laplace(&mut majorizer);
-    let exact = anchor.exact_a_evidence_system(target.view(), rho, &majorizer)?;
+    let exact = anchor.exact_a_evidence_system(target.view(), rho, &majorizer, 1.0)?;
     let options = ArrowSolveOptions::direct()
         .with_newton_schur_tikhonov(SPECTRAL_DEFLATION_REL_FLOOR)
         .with_indefinite_refusing_evidence_unit_deflation(SPECTRAL_DEFLATION_REL_FLOOR);

@@ -184,9 +184,176 @@ pub(crate) struct PreparedAmplitudeBarrierAtom {
 pub(crate) struct PreparedDecoderPriorBetaCurvature {
     pub(crate) beta_dim: usize,
     pub(crate) penalty_scale: f64,
+    /// The decoder layout and the decoders the plan was prepared at. Every apply
+    /// reads the state from here and never from the term, so a plan can outlive
+    /// the borrow it was built under: the arrow exact-A system owns one as its
+    /// border remainder operator (#2828).
+    pub(crate) output_dim: usize,
+    pub(crate) beta_offsets: Vec<usize>,
+    pub(crate) basis_sizes: Vec<usize>,
+    pub(crate) decoders: Vec<Array2<f64>>,
     pub(crate) repulsion: Option<(DecoderIncoherencePenalty, Array1<f64>)>,
     pub(crate) amplitude: Vec<PreparedAmplitudeBarrierAtom>,
     pub(crate) separation: Vec<SeparationBarrierComponentPlan>,
+}
+
+/// #2828 — leg (5) of `ΔC` as an operator an arrow system owns: the β-tier
+/// decoder priors' exact-minus-majorizer curvature `ΔC_ββ` on the border the
+/// system was assembled in.
+///
+/// The exact-A arrow system composes it with the majorizer's shared penalty
+/// operator, so every reduced-Schur apply, factorization and Krylov solve of that
+/// system sees `A_ββ`. Before it existed the arrow route priced `B_ββ` there while
+/// the dense route materialized `A_ββ` (#2515). Under an engaged frame the border
+/// coordinate is the factored `C`, and the operator is the congruence
+/// `Φᵀ ΔC_ββ Φ` that `decoder_prior_gap_border_leg` applies.
+pub(crate) struct DecoderPriorBorderRemainderOp {
+    border_dim: usize,
+    prepared: PreparedDecoderPriorBetaCurvature,
+    projection: Option<crate::frames::FrameProjection>,
+    diagonal: std::sync::OnceLock<Array1<f64>>,
+}
+
+impl DecoderPriorBorderRemainderOp {
+    fn apply(&self, v: ArrayView1<'_, f64>) -> Array1<f64> {
+        match self.projection.as_ref() {
+            Some(projection) => {
+                let lifted = projection.lift_border_vec(v);
+                let (exact, majorizer) = SaeManifoldTerm::decoder_prior_beta_hvp_pair_of_plan(
+                    &self.prepared,
+                    lifted.view(),
+                );
+                projection.project_border_vec((&exact - &majorizer).view())
+            }
+            None => {
+                let (exact, majorizer) =
+                    SaeManifoldTerm::decoder_prior_beta_hvp_pair_of_plan(&self.prepared, v);
+                &exact - &majorizer
+            }
+        }
+    }
+
+    fn column(&self, index: usize) -> Array1<f64> {
+        let mut unit = Array1::<f64>::zeros(self.border_dim);
+        unit[index] = 1.0;
+        self.apply(unit.view())
+    }
+}
+
+impl gam_solve::arrow_schur::BetaPenaltyOp for DecoderPriorBorderRemainderOp {
+    fn dim(&self) -> usize {
+        self.border_dim
+    }
+
+    fn matvec(&self, x: &[f64], y: &mut [f64]) {
+        let action = self.apply(ArrayView1::from(x));
+        for (out, value) in y.iter_mut().zip(action.iter()) {
+            *out += value;
+        }
+    }
+
+    fn gradient(&self, beta: &[f64], out: &mut [f64]) {
+        self.matvec(beta, out);
+    }
+
+    fn diagonal(&self, diag: &mut [f64]) {
+        let own = self.diagonal.get_or_init(|| {
+            Array1::from_shape_fn(self.border_dim, |index| self.column(index)[index])
+        });
+        for (out, value) in diag.iter_mut().zip(own.iter()) {
+            *out += value;
+        }
+    }
+
+    fn block(
+        &self,
+        id: gam_solve::arrow_schur::BetaBlockId,
+        offsets: &[std::ops::Range<usize>],
+        out: &mut Array2<f64>,
+    ) {
+        let range = offsets[id.0].clone();
+        for (local_col, col) in range.clone().enumerate() {
+            let column = self.column(col);
+            for (local_row, row) in range.clone().enumerate() {
+                out[[local_row, local_col]] += column[row];
+            }
+        }
+    }
+
+    fn to_dense(&self) -> Array2<f64> {
+        let mut dense = Array2::<f64>::zeros((self.border_dim, self.border_dim));
+        for col in 0..self.border_dim {
+            dense.column_mut(col).assign(&self.column(col));
+        }
+        dense
+    }
+
+    fn fingerprint(&self, hasher: &mut gam_runtime::warm_start::Fingerprinter) {
+        hasher.write_str("sae-decoder-prior-border-remainder-v1");
+        hasher.write_usize(self.border_dim);
+        let prepared = &self.prepared;
+        hasher.write_usize(prepared.beta_dim);
+        hasher.write_f64(prepared.penalty_scale);
+        hasher.write_usize(prepared.output_dim);
+        for decoder in &prepared.decoders {
+            hasher.write_f64_array2(decoder);
+        }
+        match prepared.repulsion.as_ref() {
+            Some((per_fit, target_beta)) => {
+                hasher.write_bool(true);
+                hasher.write_f64_array1(target_beta);
+                hasher.write_f64(per_fit.weight);
+                hasher.write_usize(per_fit.pairs.len());
+                for &(j, k, weight) in &per_fit.pairs {
+                    hasher.write_usize(j);
+                    hasher.write_usize(k);
+                    hasher.write_f64(weight);
+                }
+            }
+            None => hasher.write_bool(false),
+        }
+        hasher.write_usize(prepared.amplitude.len());
+        for entry in &prepared.amplitude {
+            hasher.write_usize(entry.atom);
+            hasher.write_f64(entry.gradient_coefficient);
+            hasher.write_f64(entry.radial_curvature);
+        }
+        hasher.write_usize(prepared.separation.len());
+        for plan in &prepared.separation {
+            hasher.write_usize(plan.edges.len());
+            for edge in &plan.edges {
+                hasher.write_usize(edge.j);
+                hasher.write_usize(edge.k);
+                hasher.write_f64(edge.alpha);
+                hasher.write_f64(edge.lev_j);
+                hasher.write_f64(edge.lev_k);
+            }
+            for coupling in [plan.coupling_exact.as_ref(), plan.coupling_majorizer.as_ref()] {
+                match coupling {
+                    Some(coupling) => {
+                        hasher.write_bool(true);
+                        hasher.write_f64_array2(coupling);
+                    }
+                    None => hasher.write_bool(false),
+                }
+            }
+        }
+        match self.projection.as_ref() {
+            Some(projection) => {
+                hasher.write_bool(true);
+                for frame in projection.frames_owned() {
+                    match frame {
+                        Some(frame) => {
+                            hasher.write_bool(true);
+                            hasher.write_f64_array2(&frame);
+                        }
+                        None => hasher.write_bool(false),
+                    }
+                }
+            }
+            None => hasher.write_bool(false),
+        }
+    }
 }
 
 /// #2828 — one co-firing component's separation-barrier plan: the edges, their
@@ -2087,10 +2254,17 @@ impl SaeManifoldTerm {
         penalty_scale: f64,
     ) -> PreparedDecoderPriorBetaCurvature {
         let beta_dim = self.beta_dim();
+        let output_dim = self.output_dim();
+        let beta_offsets = self.beta_offsets();
+        let basis_sizes: Vec<usize> = self.atoms.iter().map(|atom| atom.basis_size()).collect();
         if penalty_scale == 0.0 {
             return PreparedDecoderPriorBetaCurvature {
                 beta_dim,
                 penalty_scale,
+                output_dim,
+                beta_offsets,
+                basis_sizes,
+                decoders: Vec::new(),
                 repulsion: None,
                 amplitude: Vec::new(),
                 separation: Vec::new(),
@@ -2130,10 +2304,55 @@ impl SaeManifoldTerm {
         PreparedDecoderPriorBetaCurvature {
             beta_dim,
             penalty_scale,
+            output_dim,
+            beta_offsets,
+            basis_sizes,
+            decoders: self
+                .atoms
+                .iter()
+                .map(|atom| atom.decoder_coefficients().clone())
+                .collect(),
             repulsion,
             amplitude,
             separation: self.separation_barrier_plan(penalty_scale, true),
         }
+    }
+
+    /// #2828 — leg (5) of `ΔC` on an arrow border of width `border_dim`, for an
+    /// exact-A arrow system to own; `None` when no β-tier decoder prior is live, so
+    /// `A_ββ = B_ββ` there. `penalty_scale` must be the one the majorizer system was
+    /// assembled with, since the priors' majorizers were installed at it.
+    pub(crate) fn decoder_prior_border_remainder_op(
+        &self,
+        border_dim: usize,
+        penalty_scale: f64,
+    ) -> Result<Option<DecoderPriorBorderRemainderOp>, String> {
+        let prepared = self.prepare_decoder_prior_beta_curvature(penalty_scale);
+        if prepared.repulsion.is_none()
+            && prepared.amplitude.is_empty()
+            && prepared.separation.is_empty()
+        {
+            return Ok(None);
+        }
+        let beta_dim = self.beta_dim();
+        let projection = if self.last_frames_active && border_dim == self.factored_border_dim() {
+            Some(crate::frames::FrameProjection::new(self))
+        } else if border_dim == beta_dim {
+            None
+        } else {
+            return Err(format!(
+                "decoder_prior_border_remainder_op: border width {border_dim} is neither the \
+                 full-B beta_dim {beta_dim} nor the factored border dim {}, so the beta-tier \
+                 decoder-prior curvature correction has no coordinate system to be expressed in",
+                self.factored_border_dim(),
+            ));
+        };
+        Ok(Some(DecoderPriorBorderRemainderOp {
+            border_dim,
+            prepared,
+            projection,
+            diagonal: std::sync::OnceLock::new(),
+        }))
     }
 
     /// #2828 — the β-tier decoder priors' curvature BOTH ways: the exact
@@ -2178,11 +2397,22 @@ impl SaeManifoldTerm {
                 prepared.beta_dim,
             ));
         }
+        Ok(Self::decoder_prior_beta_hvp_pair_of_plan(prepared, v))
+    }
+
+    /// The body of [`Self::decoder_prior_beta_hvp_pair_prepared`] once the widths
+    /// are validated. It reads the decoder state from the plan alone (#2828), so an
+    /// operator that owns the plan applies it with no term borrowed.
+    pub(crate) fn decoder_prior_beta_hvp_pair_of_plan(
+        prepared: &PreparedDecoderPriorBetaCurvature,
+        v: ArrayView1<'_, f64>,
+    ) -> (Array1<f64>, Array1<f64>) {
+        let beta_dim = prepared.beta_dim;
         let penalty_scale = prepared.penalty_scale;
         let mut exact = Array1::<f64>::zeros(beta_dim);
         let mut majorizer = Array1::<f64>::zeros(beta_dim);
         if penalty_scale == 0.0 {
-            return Ok((exact, majorizer));
+            return (exact, majorizer);
         }
         // (a) decoder repulsion.
         if let Some((per_fit, target_beta)) = prepared.repulsion.as_ref() {
@@ -2196,9 +2426,9 @@ impl SaeManifoldTerm {
             }
         }
         // (b) amplitude barrier.
-        let p = self.output_dim();
+        let p = prepared.output_dim;
         for entry in &prepared.amplitude {
-            let b = self.atoms[entry.atom].decoder_coefficients();
+            let b = &prepared.decoders[entry.atom];
             let m = entry.basis_size;
             let off = entry.offset;
             // #2731 — an atom block that is zero in `v` adds only `±0` below, to
@@ -2233,12 +2463,12 @@ impl SaeManifoldTerm {
         }
         // (c) separation barrier.
         let (sep_exact, sep_majorizer) =
-            self.separation_barrier_beta_hvp_pair_prepared(&prepared.separation, v);
+            Self::separation_barrier_beta_hvp_pair_prepared(prepared, v);
         for idx in 0..beta_dim {
             exact[idx] += sep_exact[idx];
             majorizer[idx] += sep_majorizer[idx];
         }
-        Ok((exact, majorizer))
+        (exact, majorizer)
     }
 
     /// #2828 — the SEPARATION barrier's β curvature, BOTH ways: the exact
@@ -2280,21 +2510,21 @@ impl SaeManifoldTerm {
     /// #2828 — the SEPARATION barrier's β curvature BOTH ways, against plans built once for
     /// this decoder state.
     pub(crate) fn separation_barrier_beta_hvp_pair_prepared(
-        &self,
-        plans: &[SeparationBarrierComponentPlan],
+        prepared: &PreparedDecoderPriorBetaCurvature,
         v: ArrayView1<'_, f64>,
     ) -> (Array1<f64>, Array1<f64>) {
-        let p = self.output_dim();
-        let offsets = self.beta_offsets();
-        let beta_dim = self.beta_dim();
+        let p = prepared.output_dim;
+        let offsets = &prepared.beta_offsets;
+        let beta_dim = prepared.beta_dim;
+        let k_atoms = prepared.basis_sizes.len();
         let mut exact = Array1::<f64>::zeros(beta_dim);
         let mut majorizer = Array1::<f64>::zeros(beta_dim);
         // Whether each atom's block of `v` holds a nonzero entry, filled on first
         // use by the edge loop below.
-        let mut live_blocks: Vec<Option<bool>> = vec![None; self.k_atoms()];
+        let mut live_blocks: Vec<Option<bool>> = vec![None; k_atoms];
         // Whether each atom's whole decoder block of `v` holds a nonzero entry.
-        let mut live_atoms: Vec<Option<bool>> = vec![None; self.k_atoms()];
-        for plan in plans {
+        let mut live_atoms: Vec<Option<bool>> = vec![None; k_atoms];
+        for plan in &prepared.separation {
             // (1) the overlap-space couplings, contracted through the carriers.
             let ne = plan.carriers.len();
             if ne > 0 {
@@ -2314,7 +2544,7 @@ impl SaeManifoldTerm {
                         let atom = run.0;
                         *live_atoms[atom].get_or_insert_with(|| {
                             let base = offsets[atom];
-                            let width = self.atoms[atom].basis_size() * p;
+                            let width = prepared.basis_sizes[atom] * p;
                             (base..base + width).any(|idx| v[idx] != 0.0)
                         })
                     });
@@ -2388,8 +2618,8 @@ impl SaeManifoldTerm {
                 if !(live_j || live_k) {
                     continue;
                 }
-                let bj = self.atoms[edge.j].decoder_coefficients();
-                let bk = self.atoms[edge.k].decoder_coefficients();
+                let bj = &prepared.decoders[edge.j];
+                let bk = &prepared.decoders[edge.k];
                 let (m_j, m_k) = (bj.nrows(), bk.nrows());
                 if edge.alpha != 0.0 {
                     let vj = Array2::from_shape_fn((m_j, p), |(a, o)| v[off_j + a * p + o]);

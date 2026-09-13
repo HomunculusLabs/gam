@@ -278,6 +278,7 @@ fn the_rational_lane_prices_or_refuses_a_bottom_mode_its_fixed_step_conditioning
             }]
             .into(),
             border_indices: std::sync::Arc::from([] as [usize; 0]),
+            border_remainder: None,
         });
         system
     };

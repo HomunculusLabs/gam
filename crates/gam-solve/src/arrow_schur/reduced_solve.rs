@@ -904,6 +904,21 @@ pub(crate) fn exact_a_reduced_classification(
     let k = sys.k;
     let mut majorizer_metric = sys.effective_penalty_op().to_dense();
     let mut clamp_metric = Array2::<f64>::zeros((k, k));
+    // #2828 — the shared block is `A_ββ = B_ββ + delta_beta`: the majorizer
+    // metric is `B`'s, and `E_ββ = -delta_beta` is border clamp curvature.
+    if let Some(remainder) = geometry.border_remainder.as_ref() {
+        if remainder.dim() != k {
+            return Err(ArrowSchurError::SchurFactorFailed {
+                reason: format!(
+                    "exact-A classification border remainder has width {} for border width {k}",
+                    remainder.dim(),
+                ),
+            });
+        }
+        let remainder = remainder.to_dense();
+        majorizer_metric -= &remainder;
+        clamp_metric -= &remainder;
+    }
     for (row_idx, row) in sys.rows.iter().enumerate() {
         let q = sys.row_dims[row_idx];
         let operands = &geometry.rows[row_idx];
@@ -1016,6 +1031,29 @@ pub(crate) fn exact_a_reduced_direction_metrics(
         + ridge_beta * physical_direction.dot(&physical_direction)
         + gauge_stiffness;
     let mut clamp_curvature = 0.0_f64;
+    // #2828 — `penalty_matvec_add` applies `A_ββ = B_ββ + delta_beta`; the
+    // majorizer form is `B`'s, and `E_ββ = -delta_beta` is border clamp curvature.
+    if let Some(remainder) = geometry.border_remainder.as_ref() {
+        if remainder.dim() != sys.k {
+            return Err(ArrowSchurError::SchurFactorFailed {
+                reason: format!(
+                    "exact-A reduced direction classification border remainder has width {} \
+                     for border width {}",
+                    remainder.dim(),
+                    sys.k,
+                ),
+            });
+        }
+        let mut remainder_action = vec![0.0_f64; sys.k];
+        remainder.matvec(beta_slice, &mut remainder_action);
+        let remainder_form = physical_direction
+            .iter()
+            .zip(remainder_action.iter())
+            .map(|(&left, &right)| left * right)
+            .sum::<f64>();
+        majorizer_curvature -= remainder_form;
+        clamp_curvature -= remainder_form;
+    }
 
     for (row_index, row) in sys.rows.iter().enumerate() {
         let q = sys.row_dims[row_index];

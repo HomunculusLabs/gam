@@ -31,7 +31,7 @@ fn dense_and_arrow_materialize_the_same_raw_exact_a_2515() {
         .assemble_arrow_schur(target.view(), &rho, None)
         .expect("#2515: the deflated anchor assembles");
     let a_sys = term
-        .exact_a_evidence_system(target.view(), &rho, &sys)
+        .exact_a_evidence_system(target.view(), &rho, &sys, 1.0)
         .expect("#2515: the deflated anchor builds its exact-A evidence system");
 
     // Reconstruct the entire arrow operator, not only its diagonal row blocks.
@@ -73,14 +73,14 @@ fn dense_and_arrow_materialize_the_same_raw_exact_a_2515() {
             .slice_mut(s![total_t.., base..base + q])
             .assign(&cross.t());
     }
-    // ΔC_ββ is identically zero: the decoder is linear in β, and the exact-A
-    // system retains the majorizer system's canonical shared penalty operator.
-    // That operator is intentionally private and may leave both public legacy
-    // slabs empty, so copying the already-common block here avoids pretending a
-    // 0×0 compatibility slab is the effective H_ββ.
+    // The border block is the exact-A system's own effective shared operator:
+    // the majorizer's penalty operator composed with leg (5) of ΔC, the β-tier
+    // decoder priors' exact-minus-majorizer remainder (#2828). The legacy `hbb`
+    // slab may be empty, and copying the dense block here instead would bless an
+    // arrow route that prices B_ββ where the dense route prices A_ββ.
     a_arrow
         .slice_mut(s![total_t.., total_t..])
-        .assign(&a_dense.slice(s![total_t.., total_t..]));
+        .assign(&a_sys.effective_penalty_op().to_dense());
 
     let mut worst_operator_gap = 0.0_f64;
     let mut worst_block_scale = 0.0_f64;

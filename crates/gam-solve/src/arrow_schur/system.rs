@@ -54,12 +54,32 @@ pub struct ExactAClassificationRow {
     pub clamp_diag: Array1<f64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ExactAClassificationGeometry {
     pub rows: Arc<[ExactAClassificationRow]>,
     /// Column indices mapping each `delta_tbeta` carrier column into the arrow
     /// system's shared border.
     pub border_indices: Arc<[usize]>,
+    /// `delta_beta = A_ββ - B_ββ` on the shared border, when the exact-A system's
+    /// shared block departs from its majorizer's (#2828). SAE's decoder priors
+    /// install PSD majorizers there, so the assembled exact-A system composes
+    /// this remainder into its penalty operator; the classifier subtracts it to
+    /// recover `B_raw`, and its negation is border clamp curvature `E_ββ`, as the
+    /// dense route prices it. `None` means `A_ββ = B_ββ`.
+    pub border_remainder: Option<Arc<dyn BetaPenaltyOp>>,
+}
+
+impl std::fmt::Debug for ExactAClassificationGeometry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExactAClassificationGeometry")
+            .field("rows", &self.rows)
+            .field("border_indices", &self.border_indices)
+            .field(
+                "border_remainder_dim",
+                &self.border_remainder.as_ref().map(|remainder| remainder.dim()),
+            )
+            .finish()
+    }
 }
 
 /// Low-rank spectral conditioning discovered from the matrix-free exact-A

@@ -3466,7 +3466,7 @@ impl SaeManifoldTerm {
         majorizer: &ArrowSchurSystem,
         carried_shift: f64,
     ) -> Result<Option<ShiftedTerminalStep>, String> {
-        let exact = match self.exact_a_evidence_system(target, rho_fixed, majorizer) {
+        let exact = match self.exact_a_evidence_system(target, rho_fixed, majorizer, 1.0) {
             Ok(exact) => exact,
             Err(err) => {
                 log::debug!("terminal Newton bail: arrow exact-A system: {err}");
@@ -4499,9 +4499,12 @@ impl SaeManifoldTerm {
     /// [`Self::border_channels_for_border_dim`],
     /// [`Self::row_vars_for_row_dim`], `refill_jet_window_with_row_dims`).
     ///
-    /// `ΔC_ββ ≡ 0` (the decoder is linear in β), so `hbb` / `penalty_op` are
-    /// untouched and the whole correction lands in the row blocks and the
-    /// eliminated Schur sum.
+    /// `ΔC_ββ` is leg (5) of `ΔC` (#2828): the β-tier decoder priors install PSD
+    /// majorizers in the shared block, so `A_ββ` is the majorizer's operator plus
+    /// their exact-minus-majorizer remainder, at the `penalty_scale` the majorizer
+    /// system was assembled with. The system composes that remainder into its
+    /// penalty operator and the classification geometry carries it alone, so this
+    /// route prices the `A_ββ` the dense route materializes (#2515).
     ///
     /// `ΔC_tβ` is carried by COMPOSING the installed matrix-free row operator
     /// rather than by a dense supplement, because
@@ -4515,6 +4518,7 @@ impl SaeManifoldTerm {
         target: ArrayView2<'_, f64>,
         rho: &SaeManifoldRho,
         majorizer: &ArrowSchurSystem,
+        penalty_scale: f64,
     ) -> Result<ArrowSchurSystem, String> {
         let border_dim = majorizer.k;
         let row_dims: Vec<usize> = majorizer.row_dims.to_vec();
@@ -4694,10 +4698,33 @@ impl SaeManifoldTerm {
                 );
             }
         }
+        // #2828 — leg (5): `A_ββ = B_ββ + ΔC_ββ`, at the scale the majorizer's
+        // β-tier priors were installed with. Every reduced-Schur apply of this
+        // system sees the composed operator; the geometry carries the remainder
+        // alone so the classifier recovers `B_raw` and the border clamp.
+        let remainder_op = self.decoder_prior_border_remainder_op(border_dim, penalty_scale)?;
+        let border_remainder = match remainder_op {
+            Some(remainder) => {
+                let remainder: std::sync::Arc<dyn gam_solve::arrow_schur::BetaPenaltyOp> =
+                    std::sync::Arc::new(remainder);
+                system.set_penalty_op(std::sync::Arc::new(
+                    gam_solve::arrow_schur::CompositePenaltyOp {
+                        k: border_dim,
+                        ops: vec![
+                            majorizer.effective_penalty_op(),
+                            std::sync::Arc::clone(&remainder),
+                        ],
+                    },
+                ));
+                Some(remainder)
+            }
+            None => None,
+        };
         system.exact_a_classification =
             Some(gam_solve::arrow_schur::ExactAClassificationGeometry {
                 rows: classification_rows,
                 border_indices: classification_indices,
+                border_remainder,
             });
         system.refresh_row_hessian_fingerprint();
         Ok(system)
@@ -4840,7 +4867,7 @@ impl SaeManifoldTerm {
             // normalizer, so it must be taken off the exact observed information
             // `A = B + ΔC`, not off the Arrow-Schur majorizer `B`. `B` itself is
             // returned unchanged below as the solve/IFT scale.
-            let a_sys = chunk_term.exact_a_evidence_system(target, rho, &sys)?;
+            let a_sys = chunk_term.exact_a_evidence_system(target, rho, &sys, 1.0)?;
             // #2080: the reduced-Schur `log|S|` term. `lane = None` runs the
             // bit-identical SLQ estimate; `lane = Some(state)` swaps in the frozen
             // derived-rank rational surrogate (matrix-free, value+ρ-gradient one
@@ -4981,8 +5008,8 @@ impl SaeManifoldTerm {
             // the Laplace normalizer is `log|A|`, and every `ΔC` channel except
             // ordered Beta-Bernoulli is row-local, so the correction is
             // chunk-additive exactly as the majorizer is. (`penalty_scale` scales
-            // only β-side penalties, and `ΔC_ββ ≡ 0`.)
-            let sys = chunk.exact_a_evidence_system(z_chunk, rho, &sys)?;
+            // the β-side penalties, and leg (5) of `ΔC` with them.)
+            let sys = chunk.exact_a_evidence_system(z_chunk, rho, &sys, penalty_scale)?;
             let mut streaming = StreamingArrowSchur::from_system(&sys, sys.rows.len().max(1));
             let evidence = streaming
                 .evidence_schur_chunk(0.0, 0.0, &options)

@@ -4623,8 +4623,9 @@ impl SaeManifoldTerm {
     /// REFUSED here rather than silently dropped: pricing `B` while claiming `A`
     /// is the defect this function exists to remove.
     ///
-    /// `ΔC_ββ` is identically zero (the decoder is linear in β), so the β block of
-    /// the arrow system is unchanged and only the eliminated Schur sum moves.
+    /// These are the row and cross-block legs only. Leg (5), `ΔC_ββ`, lives on the
+    /// border, and `Self::exact_a_evidence_system` composes it into the shared
+    /// block (#2828).
     pub(crate) fn assemble_exact_hessian_minus_b_rows(
         &self,
         rho: &SaeManifoldRho,

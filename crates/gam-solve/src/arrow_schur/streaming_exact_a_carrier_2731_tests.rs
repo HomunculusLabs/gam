@@ -21,6 +21,7 @@ fn streaming_chunk_carries_exact_a_operands_from_the_source_system() {
         }]
         .into(),
         border_indices: vec![0].into(),
+        border_remainder: None,
     });
 
     let mut streaming = StreamingArrowSchur::from_system(&system, 1);

@@ -6306,6 +6306,7 @@ fn matrix_free_exact_a_prices_a_clamp_basin_before_refusing_a_saddle_2515() {
             }]
             .into(),
             border_indices: Arc::from([] as [usize; 0]),
+            border_remainder: None,
         });
         system
     };
