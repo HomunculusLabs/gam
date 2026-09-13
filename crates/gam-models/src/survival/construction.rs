@@ -3683,6 +3683,191 @@ impl SurvivalMarginalSlopeFrozenOffsetChart {
     }
 }
 
+/// The additive time offsets of a latent-survival fit and their first partials
+/// with respect to a nonlinear baseline chart, realized at one chart point
+/// (#2714).
+///
+/// The four channels are the ones the latent row reads through additive offsets:
+/// `q_entry`, `q_exit`, `q̇_exit` and the interval upper bound `q_right`. Each
+/// `*_theta` array is `n × d`, `d = theta.len()`.
+#[derive(Clone, Debug)]
+pub(crate) struct LatentSurvivalOffsetGeometry {
+    pub(crate) baseline_config: SurvivalBaselineConfig,
+    pub(crate) theta: Array1<f64>,
+    pub(crate) offset_entry: Array1<f64>,
+    pub(crate) offset_exit: Array1<f64>,
+    pub(crate) derivative_offset_exit: Array1<f64>,
+    pub(crate) offset_right: Array1<f64>,
+    pub(crate) offset_entry_theta: Array2<f64>,
+    pub(crate) offset_exit_theta: Array2<f64>,
+    pub(crate) derivative_offset_exit_theta: Array2<f64>,
+    pub(crate) offset_right_theta: Array2<f64>,
+}
+
+/// A nonlinear baseline chart over the prepared offsets of a latent-survival fit
+/// (#2714).
+///
+/// Construction subtracts the seed baseline from the prepared channels once, so
+/// the time-derivative guard offset and every other θ-free part stay frozen, and
+/// a candidate θ adds its own log cumulative hazard back. No time design, knot or
+/// penalty moves with θ. Only a fully loaded hazard realizes its offsets as that
+/// log cumulative hazard alone; a loaded/unloaded split also moves the unloaded
+/// masses, which no offset chart carries.
+#[derive(Clone, Debug)]
+pub(crate) struct LatentSurvivalFrozenOffsetChart {
+    age_entry: Array1<f64>,
+    age_exit: Array1<f64>,
+    /// Interval upper bounds. `None` leaves the `q_right` channel θ-free: the fit
+    /// reads no interval row.
+    age_right: Option<Array1<f64>>,
+    target: SurvivalBaselineTarget,
+    initial_theta: Array1<f64>,
+    fixed_offset_entry: Array1<f64>,
+    fixed_offset_exit: Array1<f64>,
+    fixed_derivative_offset_exit: Array1<f64>,
+    fixed_offset_right: Array1<f64>,
+}
+
+impl LatentSurvivalFrozenOffsetChart {
+    /// The chart of `initial_config` over the prepared offsets, or `None` for a
+    /// linear baseline, which has no chart coordinates.
+    pub(crate) fn new(
+        age_entry: &Array1<f64>,
+        age_exit: &Array1<f64>,
+        age_right: Option<&Array1<f64>>,
+        initial_config: &SurvivalBaselineConfig,
+        prepared_offset_entry: &Array1<f64>,
+        prepared_offset_exit: &Array1<f64>,
+        prepared_derivative_offset_exit: &Array1<f64>,
+        prepared_offset_right: &Array1<f64>,
+    ) -> Result<Option<Self>, String> {
+        let Some(initial_theta) = survival_baseline_theta_from_config(initial_config)? else {
+            return Ok(None);
+        };
+        let n = age_exit.len();
+        if age_entry.len() != n
+            || age_right.is_some_and(|ages| ages.len() != n)
+            || prepared_offset_entry.len() != n
+            || prepared_offset_exit.len() != n
+            || prepared_derivative_offset_exit.len() != n
+            || prepared_offset_right.len() != n
+        {
+            return Err(format!(
+                "latent survival frozen offset chart length mismatch: exit={n}, entry={}, right={:?}, prepared entry={}, exit={}, derivative={}, right={}",
+                age_entry.len(),
+                age_right.map(|ages| ages.len()),
+                prepared_offset_entry.len(),
+                prepared_offset_exit.len(),
+                prepared_derivative_offset_exit.len(),
+                prepared_offset_right.len(),
+            ));
+        }
+        let mut chart = Self {
+            age_entry: age_entry.clone(),
+            age_exit: age_exit.clone(),
+            age_right: age_right.cloned(),
+            target: initial_config.target,
+            initial_theta: initial_theta.clone(),
+            fixed_offset_entry: prepared_offset_entry.clone(),
+            fixed_offset_exit: prepared_offset_exit.clone(),
+            fixed_derivative_offset_exit: prepared_derivative_offset_exit.clone(),
+            fixed_offset_right: prepared_offset_right.clone(),
+        };
+        let seed = chart.baseline_geometry(&initial_theta)?;
+        chart.fixed_offset_entry -= &seed.offset_entry;
+        chart.fixed_offset_exit -= &seed.offset_exit;
+        chart.fixed_derivative_offset_exit -= &seed.derivative_offset_exit;
+        chart.fixed_offset_right -= &seed.offset_right;
+        Ok(Some(chart))
+    }
+
+    pub(crate) fn initial_theta(&self) -> &Array1<f64> {
+        &self.initial_theta
+    }
+
+    /// The prepared offsets moved to the baseline at `theta`, with their partials.
+    /// `theta` is recorded verbatim, for the family's bitwise manifest check.
+    pub(crate) fn evaluate(
+        &self,
+        theta: &Array1<f64>,
+    ) -> Result<LatentSurvivalOffsetGeometry, String> {
+        let mut geometry = self.baseline_geometry(theta)?;
+        geometry.offset_entry += &self.fixed_offset_entry;
+        geometry.offset_exit += &self.fixed_offset_exit;
+        geometry.derivative_offset_exit += &self.fixed_derivative_offset_exit;
+        geometry.offset_right += &self.fixed_offset_right;
+        Ok(geometry)
+    }
+
+    /// The parametric baseline alone at `theta`: `(η, ∂η/∂t)` from
+    /// `evaluate_survival_baseline` and the chart partials from
+    /// `baseline_offset_theta_partials`, per row and channel.
+    fn baseline_geometry(
+        &self,
+        theta: &Array1<f64>,
+    ) -> Result<LatentSurvivalOffsetGeometry, String> {
+        type Channel = ((f64, f64), Vec<(f64, f64)>);
+        let config = survival_baseline_config_from_theta(self.target, theta)?;
+        let dim = theta.len();
+        let n = self.age_exit.len();
+        let channel = |age: f64| -> Result<Channel, String> {
+            let value = evaluate_survival_baseline(age, &config)?;
+            let partials = baseline_offset_theta_partials(age, &config)?.ok_or_else(|| {
+                "latent survival nonlinear baseline chart lost its theta partials".to_string()
+            })?;
+            if partials.len() != dim {
+                return Err(format!(
+                    "latent survival baseline chart has {} partials for a {dim}-coordinate theta",
+                    partials.len()
+                ));
+            }
+            Ok((value, partials))
+        };
+        let rows = (0..n)
+            .into_par_iter()
+            .map(|row| -> Result<(Channel, Channel, Option<Channel>), String> {
+                let entry = channel(self.age_entry[row])?;
+                let exit = channel(self.age_exit[row])?;
+                let right = self
+                    .age_right
+                    .as_ref()
+                    .map(|ages| channel(ages[row]))
+                    .transpose()?;
+                Ok((entry, exit, right))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let mut geometry = LatentSurvivalOffsetGeometry {
+            baseline_config: config.clone(),
+            theta: theta.clone(),
+            offset_entry: Array1::zeros(n),
+            offset_exit: Array1::zeros(n),
+            derivative_offset_exit: Array1::zeros(n),
+            offset_right: Array1::zeros(n),
+            offset_entry_theta: Array2::zeros((n, dim)),
+            offset_exit_theta: Array2::zeros((n, dim)),
+            derivative_offset_exit_theta: Array2::zeros((n, dim)),
+            offset_right_theta: Array2::zeros((n, dim)),
+        };
+        for (row, (entry, exit, right)) in rows.into_iter().enumerate() {
+            geometry.offset_entry[row] = entry.0.0;
+            geometry.offset_exit[row] = exit.0.0;
+            geometry.derivative_offset_exit[row] = exit.0.1;
+            for axis in 0..dim {
+                geometry.offset_entry_theta[[row, axis]] = entry.1[axis].0;
+                geometry.offset_exit_theta[[row, axis]] = exit.1[axis].0;
+                geometry.derivative_offset_exit_theta[[row, axis]] = exit.1[axis].1;
+            }
+            if let Some(((value, _), partials)) = right {
+                geometry.offset_right[row] = value;
+                for axis in 0..dim {
+                    geometry.offset_right_theta[[row, axis]] = partials[axis].0;
+                }
+            }
+        }
+        Ok(geometry)
+    }
+}
+
 pub fn location_scale_uses_probit_survival_baseline(inverse_link: Option<&InverseLink>) -> bool {
     matches!(
         inverse_link,

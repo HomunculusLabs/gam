@@ -354,6 +354,52 @@ impl CustomFamily for LatentSurvivalFamily {
         true
     }
 
+    /// Fixed-β first-order terms of a baseline-chart hyper axis (#2714).
+    fn exact_newton_joint_psi_terms(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        hyper_layout: &crate::custom_family::CustomFamilyHyperLayout,
+        psi_index: usize,
+    ) -> Result<Option<gam_problem::ExactNewtonJointPsiTerms>, String> {
+        if specs.len() != block_states.len() {
+            return Err(format!(
+                "exact_newton_joint_psi_terms: {} parameter-block specs for {} block states",
+                specs.len(),
+                block_states.len()
+            ));
+        }
+        let (rows, axis) = self.baseline_theta_family_axis(hyper_layout, psi_index)?;
+        self.baseline_theta_psi_terms_dense(block_states, &rows, axis)
+            .map(Some)
+    }
+
+    /// `D_β H_θ[u]` of a baseline-chart hyper axis (#2714).
+    fn exact_newton_joint_psihessian_directional_derivative(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        hyper_layout: &crate::custom_family::CustomFamilyHyperLayout,
+        psi_index: usize,
+        d_beta_flat: &Array1<f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        if specs.len() != block_states.len() {
+            return Err(format!(
+                "exact_newton_joint_psihessian_directional_derivative: {} parameter-block specs for {} block states",
+                specs.len(),
+                block_states.len()
+            ));
+        }
+        let (rows, axis) = self.baseline_theta_family_axis(hyper_layout, psi_index)?;
+        self.baseline_theta_hessian_directional_derivative_dense(
+            block_states,
+            &rows,
+            axis,
+            d_beta_flat,
+        )
+        .map(Some)
+    }
+
     fn requires_joint_outer_hyper_path(&self) -> bool {
         true
     }

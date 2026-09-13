@@ -26,6 +26,7 @@
             x_mean: DesignMatrix::Dense(DenseDesignMatrix::from(array![[1.0, -0.3], [0.2, 0.9]])),
             time_linear_constraints: None,
             quadctx: Arc::new(QuadratureContext::new()),
+            baseline_theta_rows: None,
         }
     }
 
@@ -223,6 +224,7 @@
             ))),
             time_linear_constraints: None,
             quadctx: Arc::new(QuadratureContext::new()),
+            baseline_theta_rows: None,
         }
     }
 
@@ -856,6 +858,7 @@
             time_block: validation_time_block(n, p_time),
             time_design_right: None,
             time_offset_right: None,
+            age_right: None,
             unloaded_mass_entry: Array1::from_elem(n, 0.01),
             unloaded_mass_exit: Array1::from_elem(n, 0.05),
             unloaded_mass_right: Array1::zeros(0),
@@ -3402,6 +3405,7 @@
             ])),
             time_linear_constraints: None,
             quadctx: Arc::new(QuadratureContext::new()),
+            baseline_theta_rows: None,
         }
     }
 

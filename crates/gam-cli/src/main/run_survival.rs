@@ -1183,6 +1183,7 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
                     time_block: build_time_block(&prepared),
                     time_design_right: None,
                     time_offset_right: None,
+                    age_right: None,
                     unloaded_mass_entry: prepared.unloaded_mass_entry.clone(),
                     unloaded_mass_exit: prepared.unloaded_mass_exit.clone(),
                     unloaded_mass_right: Array1::zeros(0),
@@ -1214,7 +1215,16 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
             frailty: frailty.clone(),
             options: options.clone(),
         };
-        if baseline_cfg.target != SurvivalBaselineTarget::Linear {
+        // A fully loaded latent survival fit selects its baseline chart together
+        // with ρ on the one LAML criterion (#2714); only the loaded/unloaded split
+        // and the binary deployment still search θ here.
+        if baseline_cfg.target != SurvivalBaselineTarget::Linear
+            && !(likelihood_mode == SurvivalLikelihoodMode::Latent
+                && matches!(
+                    latent_loading,
+                    gam::families::survival::lognormal_kernel::HazardLoading::Full
+                ))
+        {
             // Analytic-gradient BFGS over the latent baseline shape params
             // (weibull scale/shape; gompertz rate/shape; gompertz-makeham
             // rate/shape/makeham). The baseline θ enters the inner latent fit
@@ -1338,13 +1348,15 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
             None,
             Some(latent_loading),
         )?;
-        let (fit, learned_latent_sd) = match likelihood_mode {
+        let (fit, learned_latent_sd, fitted_baseline_cfg) = match likelihood_mode {
             SurvivalLikelihoodMode::Latent => {
                 match fit_model(FitRequest::LatentSurvival(build_survival_request(
                     &baseline_cfg,
                     prepared,
                 ))) {
-                    Ok(FitResult::LatentSurvival(result)) => (result.fit, Some(result.latent_sd)),
+                    Ok(FitResult::LatentSurvival(result)) => {
+                        (result.fit, Some(result.latent_sd), result.baseline_config)
+                    }
                     Ok(_) => {
                         return Err(
                             "internal latent survival workflow returned the wrong result variant"
@@ -1356,7 +1368,7 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
             }
             SurvivalLikelihoodMode::LatentBinary => {
                 match fit_model(FitRequest::LatentBinary(build_binary_request(&baseline_cfg, prepared))) {
-                    Ok(FitResult::LatentBinary(result)) => (result.fit, None),
+                    Ok(FitResult::LatentBinary(result)) => (result.fit, None, result.baseline_config),
                     Ok(_) => {
                         return Err(
                             "internal latent binary workflow returned the wrong result variant"
@@ -1452,7 +1464,9 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
                     survival_entry: args.entry,
                     survival_exit: args.exit,
                     survival_event: args.event,
-                    baseline_cfg: baseline_cfg.clone(),
+                    // The fit's own baseline: a fully loaded latent survival fit
+                    // selects it, so the seed is not what its offsets were realized at.
+                    baseline_cfg: fitted_baseline_cfg.clone(),
                     time_basis: SavedSurvivalTimeBasis::from_build(&time_build, time_anchor),
                     beta_time: fit.beta_time().to_vec(),
                     resolved_termspec,

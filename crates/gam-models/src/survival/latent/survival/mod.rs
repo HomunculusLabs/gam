@@ -270,6 +270,10 @@ pub struct LatentSurvivalTermSpec {
     /// likelihood `log[S(L) − S(R)]`.
     pub time_design_right: Option<DesignMatrix>,
     pub time_offset_right: Option<Array1<f64>>,
+    /// The interval upper bounds `R` the right offsets were realized at, so the
+    /// baseline chart moves them with θ. `None` exactly when `time_offset_right`
+    /// is `None`.
+    pub age_right: Option<Array1<f64>>,
     pub unloaded_mass_entry: Array1<f64>,
     pub unloaded_mass_exit: Array1<f64>,
     /// Unloaded (background) cumulative mass at the interval upper bound `R`.
@@ -377,6 +381,11 @@ pub struct LatentSurvivalFamily {
     pub x_mean: DesignMatrix,
     pub time_linear_constraints: Option<LinearInequalityConstraints>,
     pub quadctx: Arc<QuadratureContext>,
+    /// The baseline chart point this family's time offsets were realized at, with
+    /// their per-row θ partials: the family-owned hyper axes it serves. `None`
+    /// when the baseline carries no outer coordinates (#2714).
+    pub(crate) baseline_theta_rows:
+        Option<Arc<crate::survival::construction::LatentSurvivalOffsetGeometry>>,
 }
 
 #[derive(Clone)]
@@ -822,7 +831,33 @@ pub(crate) fn fit_latent_survival_terms(
             }
         }
     }
-    let fit = fit_custom_family(&family, &blocks, options).map_err(|e| e.to_string())?;
+    // A fully loaded hazard realizes its offsets as the parametric log cumulative
+    // hazard alone, so its baseline chart is a set of family-owned outer
+    // coordinates selected together with ρ (#2714). A loaded/unloaded split also
+    // moves the unloaded masses with θ; the workflow still searches that baseline
+    // outside the fit.
+    let chart = match hazard_loading {
+        HazardLoading::Full => crate::survival::construction::LatentSurvivalFrozenOffsetChart::new(
+            &spec.age_entry,
+            &spec.age_exit,
+            spec.age_right.as_ref(),
+            &spec.baseline_config,
+            &spec.time_block.offset_entry,
+            &spec.time_block.offset_exit,
+            &spec.time_block.derivative_offset_exit,
+            &family.time_offset_right,
+        )?,
+        HazardLoading::LoadedVsUnloaded => None,
+    };
+    let (fit, family, baseline_config) = match chart {
+        Some(chart) => {
+            fit_latent_survival_baseline_axes(data, &family, &blocks, &spec, &chart, options)?
+        }
+        None => {
+            let fit = fit_custom_family(&family, &blocks, options).map_err(|e| e.to_string())?;
+            (fit, family, spec.baseline_config.clone())
+        }
+    };
     let latent_sd = family.latent_sd(&fit.block_states)?;
     let baseline_offset_residuals = family.offset_channel_residuals(&fit.block_states)?;
     Ok(LatentSurvivalTermFitResult {
@@ -830,9 +865,251 @@ pub(crate) fn fit_latent_survival_terms(
         design: mean_design,
         resolvedspec,
         latent_sd,
-        baseline_config: spec.baseline_config,
+        baseline_config,
         baseline_offset_residuals,
     })
+}
+
+/// Fit a latent survival model with its nonlinear baseline chart as family-owned
+/// outer coordinates of the one LAML problem (#2714).
+///
+/// The workflow used to search θ in a nested BFGS whose every probe was a complete
+/// REML fit, against the profile-NLL envelope gradient, which omits the Jeffreys
+/// term's mode response and the response of ρ̂ to θ. Here ρ and θ are selected
+/// together on the exact criterion. A θ moves the four additive time offsets and
+/// the derivative-guard constraints built from the moved `o_D`; no design, knot or
+/// penalty moves. Working precision is the chart's only domain: a θ whose offsets
+/// leave the likelihood's domain is refused at evaluation.
+fn fit_latent_survival_baseline_axes(
+    data: ArrayView2<'_, f64>,
+    seed_family: &LatentSurvivalFamily,
+    seed_blocks: &[ParameterBlockSpec],
+    spec: &LatentSurvivalTermSpec,
+    chart: &crate::survival::construction::LatentSurvivalFrozenOffsetChart,
+    options: &BlockwiseFitOptions,
+) -> Result<(UnifiedFitResult, LatentSurvivalFamily, SurvivalBaselineConfig), String> {
+    use crate::fit_orchestration::drivers::{
+        ExactJointEfsEvaluation, ExactJointEvaluation, ExactJointHyperSetup, SpatialFitProvenance,
+        optimize_spatial_length_scale_exact_joint,
+    };
+    let penalty_counts: Vec<usize> = seed_blocks
+        .iter()
+        .map(|block| block.penalties.len())
+        .collect();
+    let rho_dim: usize = penalty_counts.iter().sum();
+    let rho0 = Array1::from_iter(
+        seed_blocks
+            .iter()
+            .flat_map(|block| block.initial_log_lambdas.iter().copied()),
+    );
+    let theta0 = chart.initial_theta().clone();
+    let axis_count = theta0.len();
+    let (precision_lower, precision_upper) = gam_solve::estimate::rho_domain::precision_box();
+    let no_kappa =
+        || gam_terms::smooth::SpatialLogKappaCoords::new_with_dims(Array1::zeros(0), Vec::new());
+    let setup = ExactJointHyperSetup::new(rho0, no_kappa(), no_kappa(), no_kappa())
+        .with_auxiliary(
+            theta0,
+            Array1::from_elem(axis_count, precision_lower),
+            Array1::from_elem(axis_count, precision_upper),
+        );
+
+    let realize = |theta: &Array1<f64>| -> Result<(LatentSurvivalFamily, Vec<ParameterBlockSpec>), String> {
+        if theta.len() != rho_dim + axis_count {
+            return Err(format!(
+                "latent survival outer point has {} coordinates, expected {rho_dim} smoothing and {axis_count} baseline",
+                theta.len()
+            ));
+        }
+        let geometry = chart.evaluate(&theta.slice(s![rho_dim..]).to_owned())?;
+        let mut family = seed_family.clone();
+        family.time_linear_constraints = structural_time_coefficient_constraints(
+            &spec.time_block.design_derivative_exit,
+            &geometry.derivative_offset_exit,
+            spec.derivative_guard,
+        )?;
+        family.time_offset_right = geometry.offset_right.clone();
+        let mut blocks = seed_blocks.to_vec();
+        let mut cursor = 0usize;
+        for (block, &count) in blocks.iter_mut().zip(penalty_counts.iter()) {
+            block.initial_log_lambdas = theta.slice(s![cursor..cursor + count]).to_owned();
+            cursor += count;
+        }
+        let time_block = &mut blocks[LatentSurvivalFamily::BLOCK_TIME];
+        time_block.offset = geometry.offset_exit.clone();
+        time_block.stacked_offset = Some(gam_linalg::utils::stack_offsets(&[
+            &geometry.offset_entry,
+            &geometry.offset_exit,
+            &geometry.derivative_offset_exit,
+        ]));
+        family.baseline_theta_rows = Some(Arc::new(geometry));
+        Ok((family, blocks))
+    };
+    let check_designs = |specs: &[TermCollectionSpec], designs: &[TermCollectionDesign]| {
+        if specs.len() == 1 && designs.len() == 1 {
+            Ok(())
+        } else {
+            Err(format!(
+                "latent survival outer driver handed {} term specs and {} designs for its one mean term collection",
+                specs.len(),
+                designs.len()
+            ))
+        }
+    };
+    let family_hyper_layout = |blocks: &[ParameterBlockSpec], theta: &Array1<f64>| {
+        crate::custom_family::CustomFamilyHyperLayout::new(
+            vec![Vec::new(); blocks.len()],
+            (0..axis_count).collect(),
+            theta.slice(s![rho_dim..]).to_owned(),
+        )
+    };
+    let exact_warm_start =
+        std::cell::RefCell::new(None::<crate::custom_family::CustomFamilyWarmStart>);
+    // Outer ρ-cache β-seed staging slot: promoted once the per-block widths of the
+    // realized blocks are known (the survival location-scale contract).
+    let pending_beta_seed = std::cell::RefCell::new(None::<Array1<f64>>);
+    let promote_pending_seed = |blocks: &[ParameterBlockSpec]| {
+        if let Some(beta_seed) = pending_beta_seed.borrow_mut().take() {
+            let widths: Vec<usize> = blocks.iter().map(|block| block.design.ncols()).collect();
+            match crate::custom_family::CustomFamilyWarmStart::from_cached_beta(&widths, &beta_seed)
+            {
+                Ok(warm_start) => {
+                    exact_warm_start.replace(Some(warm_start));
+                }
+                Err(error) => {
+                    log::warn!(
+                        "[latent-survival] outer ρ-cache β warm start rejected: {error}; the next solve starts cold"
+                    );
+                }
+            }
+        }
+    };
+    let outer_policy = seed_family.outer_derivative_policy(seed_blocks, options);
+    let kappa_options = gam_terms::smooth::SpatialLengthScaleOptimizationOptions {
+        enabled: false,
+        ..Default::default()
+    };
+    let solved = optimize_spatial_length_scale_exact_joint(
+        data,
+        std::slice::from_ref(&spec.meanspec),
+        &[Vec::new()],
+        &kappa_options,
+        &setup,
+        crate::seeding::SeedRiskProfile::Survival,
+        true,
+        false,
+        true,
+        None,
+        outer_policy,
+        |theta, specs: &[TermCollectionSpec], designs: &[TermCollectionDesign], provenance| {
+            check_designs(specs, designs)?;
+            let (family, blocks) = realize(theta)?;
+            let fit = match provenance {
+                SpatialFitProvenance::NoOuterOptimization => {
+                    fit_custom_family(&family, &blocks, options).map_err(|error| error.to_string())?
+                }
+                SpatialFitProvenance::Certified { outer, mode } => {
+                    let exact_options = crate::outer_subsample::exact_outer_options_for_row_set(
+                        options,
+                        &crate::row_kernel::RowSet::All,
+                    );
+                    crate::custom_family::fit_custom_family_fixed_log_lambdas_from_owned_mode(
+                        &family,
+                        &blocks,
+                        &exact_options,
+                        mode,
+                        theta,
+                        outer,
+                    )
+                    .map_err(|error| error.to_string())?
+                }
+            };
+            Ok((fit, family))
+        },
+        |theta,
+         specs: &[TermCollectionSpec],
+         designs: &[TermCollectionDesign],
+         eval_mode,
+         row_set: &crate::row_kernel::RowSet,
+         _| {
+            check_designs(specs, designs)?;
+            let (family, blocks) = realize(theta)?;
+            promote_pending_seed(&blocks);
+            let rho = theta.slice(s![..rho_dim]).to_owned();
+            let hyper_layout = family_hyper_layout(&blocks, theta)?;
+            // The criterion has no exact outer Hessian along θ: ask for the gradient.
+            let effective_mode = match eval_mode {
+                gam_problem::EvalMode::ValueGradientHessian => {
+                    gam_problem::EvalMode::ValueAndGradient
+                }
+                other => other,
+            };
+            let eval_options =
+                crate::outer_subsample::exact_outer_options_for_row_set(options, row_set);
+            let owned = crate::custom_family::evaluate_custom_family_joint_hyper_owned(
+                &family,
+                &blocks,
+                &eval_options,
+                &rho,
+                &hyper_layout,
+                exact_warm_start.borrow().as_ref(),
+                effective_mode,
+            )
+            .map_err(|error| error.to_string())?;
+            // An unconverged inner state is neither a fit nor a seed (#2902).
+            if !owned.result.inner_converged {
+                return Err(
+                    "latent survival exact joint inner solve did not converge".to_string(),
+                );
+            }
+            exact_warm_start.replace(Some(owned.result.warm_start.clone()));
+            Ok(ExactJointEvaluation {
+                objective: owned.result.objective,
+                gradient: owned.result.gradient,
+                hessian: owned.result.outer_hessian,
+                mode: owned.mode,
+            })
+        },
+        |theta,
+         specs: &[TermCollectionSpec],
+         designs: &[TermCollectionDesign],
+         row_set: &crate::row_kernel::RowSet| {
+            check_designs(specs, designs)?;
+            let (family, blocks) = realize(theta)?;
+            promote_pending_seed(&blocks);
+            let rho = theta.slice(s![..rho_dim]).to_owned();
+            let hyper_layout = family_hyper_layout(&blocks, theta)?;
+            let eval_options =
+                crate::outer_subsample::exact_outer_options_for_row_set(options, row_set);
+            let owned = crate::custom_family::evaluate_custom_family_joint_hyper_efs_owned(
+                &family,
+                &blocks,
+                &eval_options,
+                &rho,
+                &hyper_layout,
+                exact_warm_start.borrow().as_ref(),
+            )
+            .map_err(|error| error.to_string())?;
+            if !owned.result.inner_converged {
+                return Err(
+                    "latent survival exact joint EFS inner solve did not converge".to_string(),
+                );
+            }
+            exact_warm_start.replace(Some(owned.result.warm_start.clone()));
+            Ok(ExactJointEfsEvaluation {
+                evaluation: owned.result.efs_eval,
+                mode: owned.mode,
+            })
+        },
+        crate::marginal_slope_shared::make_beta_seed_validator(&pending_beta_seed),
+    )?;
+    let (fit, family) = solved.fit;
+    let baseline_config = family
+        .baseline_theta_rows
+        .as_ref()
+        .map(|geometry| geometry.baseline_config.clone())
+        .ok_or_else(|| "latent survival baseline-axes fit lost its chart point".to_string())?;
+    Ok((fit, family, baseline_config))
 }
 
 pub(crate) fn fit_latent_binary_terms(
@@ -4182,6 +4459,59 @@ fn latent_survival_row_primary_third_contracted(
     }
 }
 
+/// One one-seed lift along a primary direction, read as the row's channels
+/// `(∇ℓ, −∇²ℓ, −∇³ℓ[u])` and masked to the live primaries (#2714). A
+/// baseline-chart axis moves only the offsets, so its row direction is a primary
+/// vector and one lift serves its value, score and information derivative.
+fn latent_survival_row_primary_one_seed_channels(
+    quadctx: &QuadratureContext,
+    row: &LatentSurvivalRow,
+    point: LatentSurvivalPrimaryPoint,
+    direction: &Array1<f64>,
+    include_log_sigma: bool,
+) -> Result<(Array1<f64>, Array2<f64>, Array2<f64>), LatentSurvivalError> {
+    let dim = LATENT_SURVIVAL_PRIMARY_DIM;
+    if include_log_sigma {
+        let backend = LatentOneSeedBackend {
+            direction: std::array::from_fn(|a| direction[a]),
+        };
+        let out = latent_survival_row_primary_jet::<LATENT_SURVIVAL_PRIMARY_DIM, _>(
+            &backend, quadctx, row, point,
+        )?;
+        let gradient = out.base.g();
+        let hessian = out.base.h();
+        let third = out.contracted_third();
+        Ok((
+            Array1::from_shape_fn(dim, |a| gradient[a]),
+            Array2::from_shape_fn((dim, dim), |(a, b)| -hessian[a][b]),
+            Array2::from_shape_fn((dim, dim), |(a, b)| -third[a][b]),
+        ))
+    } else {
+        let out = latent_survival_row_primary_one_seed_fixed_sigma(quadctx, row, point, direction)?;
+        let live = |a: usize| a < LATENT_SURVIVAL_PRIMARY_LOG_SIGMA;
+        let gradient = out.base.g();
+        let hessian = out.base.h();
+        let third = out.contracted_third();
+        Ok((
+            Array1::from_shape_fn(dim, |a| if live(a) { gradient[a] } else { 0.0 }),
+            Array2::from_shape_fn((dim, dim), |(a, b)| {
+                if live(a) && live(b) {
+                    -hessian[a][b]
+                } else {
+                    0.0
+                }
+            }),
+            Array2::from_shape_fn((dim, dim), |(a, b)| {
+                if live(a) && live(b) {
+                    -third[a][b]
+                } else {
+                    0.0
+                }
+            }),
+        ))
+    }
+}
+
 fn latent_survival_row_primary_fourth_contracted(
     quadctx: &QuadratureContext,
     row: &LatentSurvivalRow,
@@ -5555,6 +5885,256 @@ impl LatentSurvivalFamily {
             },
         )?;
         require_finite_likelihood_matrix(&acc.hessian, "second directional Hessian derivative")?;
+        Ok(acc.hessian)
+    }
+
+    /// The row direction of baseline-chart axis `axis`. The chart moves only the
+    /// four additive time offsets, so `∂q_i/∂θ_axis` is a primary vector with no
+    /// mean or log-σ component (#2714).
+    fn baseline_theta_row_direction(
+        rows: &crate::survival::construction::LatentSurvivalOffsetGeometry,
+        row: usize,
+        axis: usize,
+    ) -> Array1<f64> {
+        let mut direction = Array1::<f64>::zeros(LATENT_SURVIVAL_PRIMARY_DIM);
+        direction[LATENT_SURVIVAL_PRIMARY_Q_ENTRY] = rows.offset_entry_theta[[row, axis]];
+        direction[LATENT_SURVIVAL_PRIMARY_Q_EXIT] = rows.offset_exit_theta[[row, axis]];
+        direction[LATENT_SURVIVAL_PRIMARY_QDOT_EXIT] =
+            rows.derivative_offset_exit_theta[[row, axis]];
+        direction[LATENT_SURVIVAL_PRIMARY_Q_RIGHT] = rows.offset_right_theta[[row, axis]];
+        direction
+    }
+
+    /// The baseline-chart axis a hyper coordinate addresses, after checking that
+    /// the manifest carries exactly the chart point this family was realized at
+    /// (#2714).
+    pub(crate) fn baseline_theta_family_axis(
+        &self,
+        hyper_layout: &crate::custom_family::CustomFamilyHyperLayout,
+        psi_index: usize,
+    ) -> Result<(Arc<crate::survival::construction::LatentSurvivalOffsetGeometry>, usize), String>
+    {
+        let rows = self.baseline_theta_rows.as_ref().ok_or_else(|| {
+            "latent survival family was realized with no baseline chart, so it owns no hyper axes"
+                .to_string()
+        })?;
+        let manifest = hyper_layout
+            .values()
+            .slice(s![hyper_layout.design_axis_count()..]);
+        if hyper_layout.family_axis_count() != rows.theta.len()
+            || manifest.len() != rows.theta.len()
+            || manifest
+                .iter()
+                .zip(rows.theta.iter())
+                .any(|(declared, realized)| declared.to_bits() != realized.to_bits())
+        {
+            return Err(format!(
+                "latent survival baseline chart was realized at {:?}, but the hyper manifest carries {:?}",
+                rows.theta, manifest
+            ));
+        }
+        match hyper_layout.axis(psi_index) {
+            Some(crate::custom_family::CustomFamilyHyperAxis::Family { family_axis }) => {
+                Ok((Arc::clone(rows), family_axis))
+            }
+            other => Err(format!(
+                "latent survival owns only baseline-chart hyper axes; psi index {psi_index} resolves to {other:?}"
+            )),
+        }
+    }
+
+    /// Fixed-β first-order terms of baseline-chart axis `axis` (#2714):
+    ///
+    /// ```text
+    ///   V_θ = −Σ_i w_i ∇ℓ_i·d_i,
+    ///   g_θ = Σ_i w_i X_iᵀ (−∇²ℓ_i d_i),
+    ///   H_θ = Σ_i w_i X_iᵀ (−∇³ℓ_i[d_i]) X_i,
+    /// ```
+    ///
+    /// with `d_i = ∂q_i/∂θ` the row's offset direction. The Jeffreys information
+    /// is the observed Hessian, so `H_θ` is also its explicit θ-derivative.
+    fn baseline_theta_psi_terms_dense(
+        &self,
+        block_states: &[ParameterBlockState],
+        rows: &crate::survival::construction::LatentSurvivalOffsetGeometry,
+        axis: usize,
+    ) -> Result<gam_problem::ExactNewtonJointPsiTerms, String> {
+        struct BaselinePsiAccum {
+            objective: CompensatedRowSum,
+            score: Array1<f64>,
+            hessian: Array2<f64>,
+        }
+        let weights = ValidatedLikelihoodWeights::new(&self.weights, "latent-survival")
+            .map_err(String::from)?;
+        let (q_entry, q_exit, qdot_exit, mu) = self.split_time_eta(block_states)?;
+        let q_right = self.time_q_right(block_states)?;
+        let sigma = self.latent_sd(block_states)?;
+        let slices = self.joint_slices();
+        let include_log_sigma = slices.log_sigma.is_some();
+        let total = slices.total;
+        if axis >= rows.theta.len() || rows.offset_exit_theta.nrows() != self.event_target.len() {
+            return Err(format!(
+                "latent survival baseline psi axis {axis} is outside a {}-coordinate chart realized over {} rows for {} observations",
+                rows.theta.len(),
+                rows.offset_exit_theta.nrows(),
+                self.event_target.len()
+            ));
+        }
+        let acc = deterministic_latent_survival_row_reduction(
+            self.event_target.len(),
+            || BaselinePsiAccum {
+                objective: CompensatedRowSum::default(),
+                score: Array1::<f64>::zeros(total),
+                hessian: Array2::<f64>::zeros((total, total)),
+            },
+            |row_idx, acc| {
+                let wi = weights.at(row_idx);
+                if wi == 0.0 {
+                    return Ok(());
+                }
+                let row = self.build_row_at(
+                    row_idx,
+                    q_entry[row_idx],
+                    q_exit[row_idx],
+                    qdot_exit[row_idx],
+                    q_right[row_idx],
+                )?;
+                let direction = Self::baseline_theta_row_direction(rows, row_idx, axis);
+                let (gradient, neg_hessian, neg_third) =
+                    latent_survival_row_primary_one_seed_channels(
+                        &self.quadctx,
+                        &row,
+                        LatentSurvivalPrimaryPoint {
+                            q_entry: q_entry[row_idx],
+                            q_exit: q_exit[row_idx],
+                            qdot_exit: qdot_exit[row_idx],
+                            q_right: q_right[row_idx],
+                            mu: mu[row_idx],
+                            sigma,
+                        },
+                        &direction,
+                        include_log_sigma,
+                    )?;
+                acc.objective.add(checked_weighted_row_value(
+                    wi,
+                    -gradient.dot(&direction),
+                    row_idx,
+                    "baseline psi objective",
+                )?);
+                self.add_pullback_primary_gradient(
+                    &mut acc.score,
+                    row_idx,
+                    &slices,
+                    &neg_hessian.dot(&direction),
+                    wi,
+                )?;
+                let weighted_third =
+                    checked_weighted_row_matrix(wi, &neg_third, row_idx, "baseline psi third")?;
+                self.add_pullback_primary_hessian(
+                    &mut acc.hessian,
+                    row_idx,
+                    &slices,
+                    &weighted_third,
+                )?;
+                Ok(())
+            },
+            |total_acc, chunk_acc| {
+                total_acc.objective.add(chunk_acc.objective.value());
+                total_acc.score += &chunk_acc.score;
+                total_acc.hessian += &chunk_acc.hessian;
+            },
+        )?;
+        let objective_psi =
+            require_finite_likelihood_scalar(acc.objective.value(), "baseline psi objective")?;
+        require_finite_likelihood_vector(&acc.score, "baseline psi score")?;
+        require_finite_likelihood_matrix(&acc.hessian, "baseline psi information derivative")?;
+        Ok(gam_problem::ExactNewtonJointPsiTerms {
+            objective_psi,
+            score_psi: acc.score,
+            hessian_psi: acc.hessian,
+            hessian_psi_operator: None,
+        })
+    }
+
+    /// `D_β H_θ[u] = Σ_i w_i X_iᵀ (−∇⁴ℓ_i[d_i, X_i u]) X_i` for baseline-chart
+    /// axis `axis` (#2714): the mixed information derivative the explicit
+    /// Jeffreys score and curvature read along every coefficient axis.
+    fn baseline_theta_hessian_directional_derivative_dense(
+        &self,
+        block_states: &[ParameterBlockState],
+        rows: &crate::survival::construction::LatentSurvivalOffsetGeometry,
+        axis: usize,
+        d_beta_flat: &Array1<f64>,
+    ) -> Result<Array2<f64>, String> {
+        let weights = ValidatedLikelihoodWeights::new(&self.weights, "latent-survival")
+            .map_err(String::from)?;
+        let (q_entry, q_exit, qdot_exit, mu) = self.split_time_eta(block_states)?;
+        let q_right = self.time_q_right(block_states)?;
+        let sigma = self.latent_sd(block_states)?;
+        let slices = self.joint_slices();
+        if d_beta_flat.len() != slices.total || axis >= rows.theta.len() {
+            return Err(format!(
+                "latent survival baseline psi-Hessian derivative: direction length {} against {} coefficients, axis {axis} of {}",
+                d_beta_flat.len(),
+                slices.total,
+                rows.theta.len()
+            ));
+        }
+        let include_log_sigma = slices.log_sigma.is_some();
+        let total = slices.total;
+        let acc = deterministic_latent_survival_row_reduction(
+            self.event_target.len(),
+            || LatentSurvivalDenseHessianAccum {
+                hessian: Array2::<f64>::zeros((total, total)),
+            },
+            |row_idx, acc| {
+                let wi = weights.at(row_idx);
+                if wi == 0.0 {
+                    return Ok(());
+                }
+                let row = self.build_row_at(
+                    row_idx,
+                    q_entry[row_idx],
+                    q_exit[row_idx],
+                    qdot_exit[row_idx],
+                    q_right[row_idx],
+                )?;
+                let direction_theta = Self::baseline_theta_row_direction(rows, row_idx, axis);
+                let direction_beta =
+                    self.row_primary_direction_from_flat(row_idx, &slices, d_beta_flat);
+                let fourth = latent_survival_row_primary_fourth_contracted(
+                    &self.quadctx,
+                    &row,
+                    LatentSurvivalPrimaryPoint {
+                        q_entry: q_entry[row_idx],
+                        q_exit: q_exit[row_idx],
+                        qdot_exit: qdot_exit[row_idx],
+                        q_right: q_right[row_idx],
+                        mu: mu[row_idx],
+                        sigma,
+                    },
+                    &direction_theta,
+                    &direction_beta,
+                    include_log_sigma,
+                )?;
+                let weighted_fourth =
+                    checked_weighted_row_matrix(wi, &fourth, row_idx, "baseline psi fourth")?;
+                self.add_pullback_primary_hessian(
+                    &mut acc.hessian,
+                    row_idx,
+                    &slices,
+                    &weighted_fourth,
+                )?;
+                Ok(())
+            },
+            |total_acc, chunk_acc| {
+                total_acc.hessian += &chunk_acc.hessian;
+            },
+        )?;
+        require_finite_likelihood_matrix(
+            &acc.hessian,
+            "baseline psi information second derivative",
+        )?;
         Ok(acc.hessian)
     }
 

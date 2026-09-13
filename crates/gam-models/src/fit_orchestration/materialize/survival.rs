@@ -1043,6 +1043,11 @@ pub(crate) fn materialize_survival<'a>(
                     derivative_guard: exact_derivative_guard,
                     time_block,
                     time_design_right,
+                    age_right: if time_offset_right.is_some() {
+                        age_right.clone()
+                    } else {
+                        None
+                    },
                     time_offset_right,
                     unloaded_mass_entry: prepared.unloaded_mass_entry,
                     unloaded_mass_exit: prepared.unloaded_mass_exit,
@@ -1223,7 +1228,16 @@ pub(crate) fn materialize_survival<'a>(
             Ok(baseline) => baseline,
             Err(e) => return Err(e.into()),
         }
-    } else if baseline_cfg.target != SurvivalBaselineTarget::Linear {
+    } else if baseline_cfg.target != SurvivalBaselineTarget::Linear
+        // A fully loaded latent survival fit selects its baseline chart together
+        // with ρ on the one LAML criterion (#2714); only the loaded/unloaded split
+        // and the binary deployment still search θ here.
+        && !(survival_mode == SurvivalLikelihoodMode::Latent
+            && matches!(
+                latent_loading,
+                Some(crate::survival::lognormal_kernel::HazardLoading::Full)
+            ))
+    {
         // Latent / LatentBinary baseline-θ. The baseline configuration enters
         // the inner latent fit only through the three additive time-block
         // offsets (entry η, exit η, exit ∂η/∂t), so the envelope theorem at the
