@@ -5456,8 +5456,8 @@ fn beta_half_unit_deviance_from_shape_differences_is_exact_and_resolved() {
         - logit(y);
     let analytic = c * (1.0 - 2.0 * mu) * bracket
         + c * c
-            * (gam_math::jet_tower::trigamma(mu * phi)
-                + gam_math::jet_tower::trigamma(one_minus_mu * phi));
+            * (gam_math::special::trigamma(mu * phi)
+                + gam_math::special::trigamma(one_minus_mu * phi));
     let stable_curv = curvature_of(&stable_fn);
     let direct_curv = curvature_of(&direct_fn);
     assert!(

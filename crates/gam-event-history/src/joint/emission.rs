@@ -217,8 +217,8 @@ pub(super) fn parameter_scores(
             scores[0] = (df + 1.0) * fraction - 1.0;
             scores[1] = 0.5
                 * sigmoid(shape[1])
-                * (gam_math::jet_tower::digamma(0.5 * (df + 1.0))
-                    - gam_math::jet_tower::digamma(0.5 * df)
+                * (gam_math::special::digamma(0.5 * (df + 1.0))
+                    - gam_math::special::digamma(0.5 * df)
                     - 1.0 / df
                     - softplus(&contrast)
                     + (1.0 + 1.0 / df) * fraction);
@@ -238,8 +238,8 @@ pub(super) fn parameter_scores(
                 (log_derivative - log_size).exp()
                     * (1.0
                         + size
-                            * (gam_math::jet_tower::digamma(size + y)
-                                - gam_math::jet_tower::digamma(size + 1.0)))
+                            * (gam_math::special::digamma(size + y)
+                                - gam_math::special::digamma(size + 1.0)))
             };
             let count_term = if y == 0.0 {
                 0.0

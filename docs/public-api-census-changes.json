@@ -2672,5 +2672,15 @@
     "reason": "#2899, api2829 go on ShadowSum: ShadowSum's public methods new, push, merge and rounding_floor are deleted with the struct, which no product uses.",
     "evidence": "public_api_census.py --base ef1e74ddd --head 3c10e63bd reports these four identities among the stack's removals (job 579772, /scratch.global/sauer354/pool/prune-api-a/stack4.check.579772.log).",
     "base": "88cd62b754cf2d11341a9da345460e9f3ce68903"
+  },
+  {
+    "removed": {
+      "crates/gam-math/src/jet_tower.rs::digamma": 1,
+      "crates/gam-math/src/jet_tower.rs::tetragamma": 1,
+      "crates/gam-math/src/jet_tower.rs::trigamma": 1
+    },
+    "reason": "#2899 digamma dedupe: the duplicate jet_tower digamma, trigamma and tetragamma wrappers are deleted; gam_math::special::{digamma, trigamma, tetragamma} are the one public polygamma API over the same kernels.",
+    "evidence": "public_api_census.py --base ef1e74ddd --head 3c10e63bd reports these three identities among the stack's removals; special.rs keeps its four public polygamma names (job 579772, /scratch.global/sauer354/pool/prune-api-a/stack4.check.579772.log).",
+    "base": "f571be49344bce5cf13cfa258b762c260eceeda9"
   }
 ]

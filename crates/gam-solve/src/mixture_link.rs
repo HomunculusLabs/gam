@@ -1,8 +1,8 @@
 use crate::estimate::EstimationError;
 use crate::quadrature::latent_cloglog_jet5;
 use gam_math::{
-    jet_tower::trigamma,
     probability::{normal_cdf, normal_pdf},
+    special::trigamma,
 };
 use gam_math::special::stable_polynomial_times_exp_neg as stable_nonnegative_poly_times_exp_neg;
 use gam_problem::{

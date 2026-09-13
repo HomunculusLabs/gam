@@ -606,8 +606,8 @@ fn nb_log_precision_fisher_jensen(mu: f64, theta: f64) -> f64 {
     let q = positive_share(mu, theta);
     if theta <= 32.0 {
         let total = theta + mu;
-        let remainder_theta = gam_math::jet_tower::trigamma(theta) - theta.recip();
-        let remainder_total = gam_math::jet_tower::trigamma(total) - total.recip();
+        let remainder_theta = gam_math::special::trigamma(theta) - theta.recip();
+        let remainder_total = gam_math::special::trigamma(total) - total.recip();
         return theta * theta * (remainder_theta - remainder_total);
     }
     let one_minus_r2 = q * (1.0 + r);
@@ -731,7 +731,7 @@ fn dispersion_eta_loglik_second(
     em: f64,
     ed: f64,
 ) -> ([f64; 2], [f64; 3]) {
-    use gam_math::jet_tower::{digamma, trigamma};
+    use gam_math::special::{digamma, trigamma};
     match kind {
         DispersionFamilyKind::NegativeBinomial => {
             // ℓ = ln Γ(θ + y) − ln Γ(θ) − ln Γ(y + 1) + θ ln r + y ln q, with
@@ -862,7 +862,7 @@ fn dispersion_eta_loglik_third(
     em: f64,
     ed: f64,
 ) -> [f64; 4] {
-    use gam_math::jet_tower::{digamma, tetragamma, trigamma};
+    use gam_math::special::{digamma, tetragamma, trigamma};
     match kind {
         DispersionFamilyKind::NegativeBinomial => {
             // ∂s/∂η_μ = s(r − q) and ∂s/∂η_d = s(q − r) for s = qr.
@@ -1134,8 +1134,8 @@ pub(super) fn dispersion_row_kernel(
             } else {
                 (1.0 - yi / mu) / (1.0 + theta / mu)
             };
-            let score_theta = gam_math::jet_tower::digamma(theta + yi)
-                - gam_math::jet_tower::digamma(theta)
+            let score_theta = gam_math::special::digamma(theta + yi)
+                - gam_math::special::digamma(theta)
                 + log_positive_share(theta, mu)
                 + theta_fraction;
             let score_eta = theta * score_theta;
@@ -1157,9 +1157,9 @@ pub(super) fn dispersion_row_kernel(
             // ℓ(ν) = ν ln ν − ν ln μ − ln Γ(ν) + (ν − 1) ln y − ν y/μ, so the
             // shape score is ℓ_ν = ln ν + 1 − ln μ − ψ(ν) + ln y − y/μ and the
             // observed information is −ℓ_νν = ψ′(ν) − 1/ν, positive for ν > 0.
-            let s_nu = nu.ln() + 1.0 - mu.ln() - gam_math::jet_tower::digamma(nu) + yi.ln()
+            let s_nu = nu.ln() + 1.0 - mu.ln() - gam_math::special::digamma(nu) + yi.ln()
                 - (1.0 / mu) * yi;
-            let info_nu = gam_math::jet_tower::trigamma(nu) - nu.recip();
+            let info_nu = gam_math::special::trigamma(nu) - nu.recip();
             let mean_weight = wi * nu;
             let mean_response = em + (yi - mu) / mu;
             let disp_weight = wi * nu * nu * info_nu;
@@ -1186,17 +1186,17 @@ pub(super) fn dispersion_row_kernel(
             // with a = μφ and b = (1 − μ)φ, so
             //   ℓ_μ = φ (ψ(b) − ψ(a) + ln y − ln(1 − y)),
             //   ℓ_φ = ψ(φ) − μ ψ(a) − (1 − μ) ψ(b) + μ ln y + (1 − μ) ln(1 − y).
-            let psi_a = gam_math::jet_tower::digamma(a);
-            let psi_b = gam_math::jet_tower::digamma(b);
+            let psi_a = gam_math::special::digamma(a);
+            let psi_b = gam_math::special::digamma(b);
             let ln_y = yi.ln();
             let ln_one_minus_y = (-yi).ln_1p();
             let score_mu = phi * (psi_b - psi_a + ln_y - ln_one_minus_y);
-            let s_phi = gam_math::jet_tower::digamma(phi) - mu * psi_a - one_minus_mu * psi_b
+            let s_phi = gam_math::special::digamma(phi) - mu * psi_a - one_minus_mu * psi_b
                 + mu * ln_y
                 + one_minus_mu * ln_one_minus_y;
-            let tri_a = gam_math::jet_tower::trigamma(a);
-            let tri_b = gam_math::jet_tower::trigamma(b);
-            let tri_phi = gam_math::jet_tower::trigamma(phi);
+            let tri_a = gam_math::special::trigamma(a);
+            let tri_b = gam_math::special::trigamma(b);
+            let tri_phi = gam_math::special::trigamma(phi);
             let info_mu = phi * phi * (tri_a + tri_b);
             let info_phi = mu * mu * tri_a + one_minus_mu * one_minus_mu * tri_b - tri_phi;
             let mean_weight = wi * q * q * info_mu;
@@ -2450,13 +2450,13 @@ mod tests {
         .expect("Gamma row geometry must be representable");
 
         let ratio = y / mu;
-        let a = gam_math::jet_tower::digamma(nu) - nu.ln() - 1.0 + mu.ln() - y.ln() + ratio;
+        let a = gam_math::special::digamma(nu) - nu.ln() - 1.0 + mu.ln() - y.ln() + ratio;
         let expected_score = [weight * nu * (1.0 - ratio), weight * nu * a];
         let expected_hessian = [
             [weight * nu * ratio, weight * nu * (1.0 - ratio)],
             [
                 weight * nu * (1.0 - ratio),
-                weight * nu * (a + nu * gam_math::jet_tower::trigamma(nu) - 1.0),
+                weight * nu * (a + nu * gam_math::special::trigamma(nu) - 1.0),
             ],
         ];
         for coordinate in 0..2 {
@@ -2504,7 +2504,7 @@ mod tests {
     ) -> gam_math::jet_scalar::Order1<K> {
         x.compose_unary([
             ln_gamma(x.v),
-            gam_math::jet_tower::digamma(x.v),
+            gam_math::special::digamma(x.v),
             0.0,
             0.0,
             0.0,
@@ -3094,11 +3094,11 @@ mod tests {
             let tower = dispersion_beta_nll_order2(yi, mu, phi, wi);
             let score_mu = -tower.g()[0] / wi;
             let s_phi = -tower.g()[1] / wi;
-            let tri_a = gam_math::jet_tower::trigamma(mu * phi);
-            let tri_b = gam_math::jet_tower::trigamma((1.0 - mu) * phi);
+            let tri_a = gam_math::special::trigamma(mu * phi);
+            let tri_b = gam_math::special::trigamma((1.0 - mu) * phi);
             let info_mu = phi * phi * (tri_a + tri_b);
             let info_phi = mu * mu * tri_a + (1.0 - mu) * (1.0 - mu) * tri_b
-                - gam_math::jet_tower::trigamma(phi);
+                - gam_math::special::trigamma(phi);
             close("beta loglik", row.loglik, -tower.value());
             close(
                 "beta mean response",

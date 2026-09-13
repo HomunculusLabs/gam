@@ -391,133 +391,38 @@ pub fn bessel_i0_log_and_ratio(eta: f64) -> (f64, f64) {
     (eta.abs() + centered_log_i0, ratio)
 }
 
-/// Argument above which the polygamma family switches from its downward
-/// recurrence to the Bernoulli asymptotic series.
-///
-/// The series is divergent, but its terms only start growing near `x ≈ πk`, so
-/// at this threshold each of the four functions below is already limited by
-/// `f64` rounding rather than by truncation — see the per-function notes for
-/// the first omitted term. The recurrence that walks a small argument up to
-/// here costs one reciprocal and one add per unit step.
-const POLYGAMMA_ASYMPTOTIC_THRESHOLD: f64 = 20.0;
-
 /// Digamma `ψ(x) = d/dx ln Γ(x)`, for `x > 0`; `NaN` otherwise.
 ///
-/// Recurrence `ψ(x) = ψ(x+1) − 1/x` up to the threshold, then
-/// `ψ(x) ~ ln x − 1/(2x) − Σ_{k≥1} B_{2k}/(2k·x^{2k})`. Carried through
-/// `B₁₂`, so the first omitted term is `1/(12x¹⁴)` — `5e−20` at `x = 20`,
-/// against `ψ(20) ≈ 2.97`.
-pub fn digamma(mut x: f64) -> f64 {
-    if !(x.is_finite() && x > 0.0) {
-        return f64::NAN;
-    }
-    let mut recurrence = 0.0_f64;
-    while x < POLYGAMMA_ASYMPTOTIC_THRESHOLD {
-        recurrence -= 1.0 / x;
-        x += 1.0;
-    }
-    let inv = 1.0 / x;
-    let inv2 = inv * inv;
-    // −1/12 + w/120 − w²/252 + w³/240 − w⁴/132 + 691w⁵/32760, w = 1/x².
-    let series = horner_polynomial(
-        inv2,
-        &[
-            -1.0 / 12.0,
-            1.0 / 120.0,
-            -1.0 / 252.0,
-            1.0 / 240.0,
-            -1.0 / 132.0,
-            691.0 / 32_760.0,
-        ],
-    );
-    recurrence + x.ln() - 0.5 * inv + inv2 * series
+/// These polygamma functions are the workspace's one implementation. Each
+/// evaluates the same kernel as the `jet_tower` derivative stacks, so a scalar
+/// value and the matching stack entry are bit-identical. The kernel walks the
+/// recurrence `ψ(x) = ψ(x+1) − 1/x` up to `x ≥ 20`, then sums the Bernoulli
+/// asymptotic series through `B₂₀`, where truncation sits far below `f64`
+/// rounding.
+#[inline]
+pub fn digamma(x: f64) -> f64 {
+    crate::jet_tower::digamma_positive(x)
 }
 
-/// Trigamma `ψ₁(x) = d²/dx² ln Γ(x)`, for `x > 0`; `NaN` otherwise.
-///
-/// Recurrence `ψ₁(x) = ψ₁(x+1) + 1/x²`, then
-/// `ψ₁(x) ~ 1/x + 1/(2x²) + Σ_{k≥1} B_{2k}/x^{2k+1}`. Carried through `B₁₂`,
-/// first omitted `7/(6x¹⁵)` — `4e−20` at `x = 20` against `ψ₁(20) ≈ 0.051`.
-pub fn trigamma(mut x: f64) -> f64 {
-    if !(x.is_finite() && x > 0.0) {
-        return f64::NAN;
-    }
-    let mut recurrence = 0.0_f64;
-    while x < POLYGAMMA_ASYMPTOTIC_THRESHOLD {
-        recurrence += 1.0 / (x * x);
-        x += 1.0;
-    }
-    let inv = 1.0 / x;
-    let inv2 = inv * inv;
-    // 1/6 − w/30 + w²/42 − w³/30 + 5w⁴/66 − 691w⁵/2730, w = 1/x².
-    let series = horner_polynomial(
-        inv2,
-        &[
-            1.0 / 6.0,
-            -1.0 / 30.0,
-            1.0 / 42.0,
-            -1.0 / 30.0,
-            5.0 / 66.0,
-            -691.0 / 2_730.0,
-        ],
-    );
-    recurrence + inv + 0.5 * inv2 + inv2 * inv * series
+/// Trigamma `ψ₁(x) = d²/dx² ln Γ(x)`, for `x > 0`; `NaN` otherwise. Same kernel
+/// and stack identity as [`digamma`].
+#[inline]
+pub fn trigamma(x: f64) -> f64 {
+    crate::jet_tower::polygamma_positive::<1>(x)
 }
 
-/// Tetragamma `ψ₂(x) = d³/dx³ ln Γ(x)`, for `x > 0`; `NaN` otherwise.
-///
-/// Recurrence `ψ₂(x) = ψ₂(x+1) − 2/x³`, then the `n = 2` case of
-/// `ψ⁽ⁿ⁾(x) ~ (−1)^{n−1}[(n−1)!/xⁿ + n!/(2x^{n+1})
-/// + Σ_k B_{2k}(2k+n−1)!/((2k)!·x^{2k+n})]`. Carried through `B₁₂`, first
-/// omitted `17.5/x¹⁶` — `3e−20` at `x = 20` against `|ψ₂(20)| ≈ 2.6e−3`.
-pub fn tetragamma(mut x: f64) -> f64 {
-    if !(x.is_finite() && x > 0.0) {
-        return f64::NAN;
-    }
-    let mut recurrence = 0.0_f64;
-    while x < POLYGAMMA_ASYMPTOTIC_THRESHOLD {
-        recurrence -= 2.0 / (x * x * x);
-        x += 1.0;
-    }
-    let inv = 1.0 / x;
-    let inv2 = inv * inv;
-    // Coefficients B_{2k}(2k+1): 1/2, −1/6, 1/6, −3/10, 5/6, −691/210.
-    let series = horner_polynomial(
-        inv2,
-        &[
-            0.5,
-            -1.0 / 6.0,
-            1.0 / 6.0,
-            -3.0 / 10.0,
-            5.0 / 6.0,
-            -691.0 / 210.0,
-        ],
-    );
-    recurrence - (inv2 + inv2 * inv + inv2 * inv2 * series)
+/// Tetragamma `ψ₂(x) = d³/dx³ ln Γ(x)`, for `x > 0`; `NaN` otherwise. Same
+/// kernel and stack identity as [`digamma`].
+#[inline]
+pub fn tetragamma(x: f64) -> f64 {
+    crate::jet_tower::polygamma_positive::<2>(x)
 }
 
-/// Pentagamma `ψ₃(x) = d⁴/dx⁴ ln Γ(x)`, for `x > 0`; `NaN` otherwise.
-///
-/// Recurrence `ψ₃(x) = ψ₃(x+1) + 6/x⁴`, then the `n = 3` case of the same
-/// expansion. Carried through `B₁₂`, first omitted `280/x¹⁷` — `2e−20` at
-/// `x = 20` against `ψ₃(20) ≈ 2.6e−4`.
-pub fn pentagamma(mut x: f64) -> f64 {
-    if !(x.is_finite() && x > 0.0) {
-        return f64::NAN;
-    }
-    let mut recurrence = 0.0_f64;
-    while x < POLYGAMMA_ASYMPTOTIC_THRESHOLD {
-        recurrence += 6.0 / (x * x * x * x);
-        x += 1.0;
-    }
-    let inv = 1.0 / x;
-    let inv2 = inv * inv;
-    // Coefficients B_{2k}(2k+1)(2k+2): 2, −1, 4/3, −3, 10, −691·182/2730.
-    let series = horner_polynomial(
-        inv2,
-        &[2.0, -1.0, 4.0 / 3.0, -3.0, 10.0, -691.0 * 182.0 / 2_730.0],
-    );
-    recurrence + 2.0 * inv2 * inv + 3.0 * inv2 * inv2 + inv2 * inv2 * inv * series
+/// Pentagamma `ψ₃(x) = d⁴/dx⁴ ln Γ(x)`, for `x > 0`; `NaN` otherwise. Same
+/// kernel and stack identity as [`digamma`].
+#[inline]
+pub fn pentagamma(x: f64) -> f64 {
+    crate::jet_tower::polygamma_positive::<3>(x)
 }
 
 /// Gauss-Legendre nodes and weights on `[-1, 1]` for `n` points, computed via

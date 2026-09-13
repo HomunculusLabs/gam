@@ -1046,8 +1046,8 @@ pub fn deviance_eta_row_with_log_measure_scale(
                 let curvature = saturated_c * (1.0 - 2.0 * saturated_mu) * bracket
                     + saturated_c
                         * saturated_c
-                        * (gam_math::jet_tower::trigamma(saturated_a)
-                            + gam_math::jet_tower::trigamma(saturated_b));
+                        * (gam_math::special::trigamma(saturated_a)
+                            + gam_math::special::trigamma(saturated_b));
                 let local = score_at_saturation * eta_difference
                     + 0.5 * curvature * eta_difference * eta_difference;
                 if local.is_finite() {

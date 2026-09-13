@@ -1067,39 +1067,7 @@ pub(crate) fn digamma_derivative_stack(x: f64) -> [f64; 5] {
     ]
 }
 
-/// Scalar digamma ψ(x) for x>0. Bit-identical to `digamma_derivative_stack(x)[0]`
-/// and to `ln_gamma_derivative_stack(x)[1]`, but evaluates ONLY ψ — the four
-/// higher polygammas those `[f64; 5]` stacks build are pure discarded work at a
-/// scalar consumer that reads a single element. Hot-path row kernels that need
-/// only the digamma value (e.g. the GAMLSS Beta observed cross weight) call this
-/// instead of indexing `[0]` off a full derivative stack.
-#[inline]
-pub fn digamma(x: f64) -> f64 {
-    digamma_positive(x)
-}
-
-/// Scalar trigamma ψ′(x) for x>0. Bit-identical to
-/// `digamma_derivative_stack(x)[1]` and `ln_gamma_derivative_stack(x)[2]`
-/// (all use `polygamma_positive::<1>(x)`), but evaluates ONLY ψ′ — the other
-/// polygammas those `[f64; 5]` stacks build are discarded at a consumer that
-/// reads one element. Used by the
-/// dispersion-channel Fisher-information row kernels (NB2 `ψ′(θ)−ψ′(θ+μ)`, Beta
-/// `μψ′(μφ)−(1−μ)ψ′((1−μ)φ)`) which read the trigamma value alone.
-#[inline]
-pub fn trigamma(x: f64) -> f64 {
-    polygamma_positive::<1>(x)
-}
-
-/// Scalar tetragamma ψ″(x) for x>0. Bit-identical to
-/// `digamma_derivative_stack(x)[2]` and `ln_gamma_derivative_stack_order3(x)[3]`
-/// (all use `polygamma_positive::<2>(x)`), but evaluates only ψ″. Used by the
-/// dispersion-channel third-order row derivatives.
-#[inline]
-pub fn tetragamma(x: f64) -> f64 {
-    polygamma_positive::<2>(x)
-}
-
-fn digamma_positive(mut x: f64) -> f64 {
+pub(crate) fn digamma_positive(mut x: f64) -> f64 {
     if !(x.is_finite() && x > 0.0) {
         return f64::NAN;
     }
@@ -1111,7 +1079,7 @@ fn digamma_positive(mut x: f64) -> f64 {
     acc + digamma_asymptotic(x)
 }
 
-fn polygamma_positive<const ORDER: usize>(mut x: f64) -> f64 {
+pub(crate) fn polygamma_positive<const ORDER: usize>(mut x: f64) -> f64 {
     if !(x.is_finite() && x > 0.0) {
         return f64::NAN;
     }
