@@ -9081,5 +9081,13 @@
     ],
     "reason": "#2899, SPEC rule 25 (delete public API no product uses, and code only its own tests use). gam-solve: evidence::TopologyCandidate, TopologySelectOptions and TopologyKind, gaussian_reml::GaussianRemlNoAllocWorkspace, row_sampling_measure::CertifiedRowSample, the streaming_border module, and RationalLogdetPlan::evaluate_with_shifted_solver with its private solve_shift_ladder_with helper and its one unit test. None has a product user or a production caller.",
     "evidence": "At the check pin, git grep -w over the whole tree finds each deleted type or function only at its own declaration, impl, crate-root re-export or doc lines in its own file. The one caller of evaluate_with_shifted_solver is the deleted test injected_shifted_solver_preserves_value_and_derivative_authority_2515, and solve_shift_ladder_with was called only by evaluate_with_shifted_solver. These identities are the guard's own refusal list at the checked pair. Guarded compile: pool job 639789."
+  },
+  {
+    "base": "578b781e7181423b9a37e910d087341fb7a904cb",
+    "items": [
+      "crates/gam-models/src/multinomial.rs:const:MULTINOMIAL_FORMULA_RIDGE_FLOOR"
+    ],
+    "reason": "#2469 (SPEC rule 23): the formula multinomial path set BlockwiseFitOptions::ridge_floor to a picked 1e-4. It was the only production options value that did not take the default 0. The floor never entered the objective. It set the minimum positive-definiteness margin of the stabilizing diagonal shift the custom-family solvers add when the penalized Hessian fails Cholesky, and its doc justified it as a step bound on near-separable curvature. The shift already carries a derived margin: stabilizing_shift_core raises any caller floor to the Cholesky pivot band accumulation_growth(p + 1) * max diag. Step length belongs to the trust region, and the family declares levenberg_on_ill_conditioning. Separation belongs to the conditional Jeffreys/Firth arming. The options value now takes the default, and the constant, its doc and the stale #747 comment go.",
+    "evidence": "At the base, git grep -n -F MULTINOMIAL_FORMULA_RIDGE_FLOOR over the whole tree finds its declaration and the single options literal in fit_penalized_multinomial_formula's parts builder, and nothing else. Guarded check and multinomial suites: job 632866, /scratch.global/sauer354/pool/const2469b/rp10.632866.log."
   }
 ]

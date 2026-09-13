@@ -99,49 +99,6 @@ use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::sync::Arc;
 
-/// Solver-only numerical stabilization floor for the formula-driven
-/// multinomial REML inner solve (gam#747).
-///
-/// It stabilizes the inner joint-Newton **linear solve** but never enters the
-/// REML objective, the penalty log-determinant, or the Laplace Hessian.
-///
-/// What it does: the multinomial smoothing penalties are rank-deficient by
-/// design (each smooth carries an unpenalized polynomial null space) and the
-/// formula may add a fully unpenalized parametric term (`x3` / `body_mass`). On
-/// near-separable hard labels the softmax curvature is ill-conditioned along
-/// those directions, so the bare Newton step `H⁻¹∇` is huge. Lifting the
-/// smallest Hessian eigenvalue to `δ` bounds the step (`‖(H+δI)⁻¹∇‖ ≤ ‖∇‖/δ`),
-/// keeping the screening iterates finite without poisoning the softmax with
-/// `inf − inf = NaN`.
-///
-/// What it deliberately does NOT do: it adds no `½·δ·‖β‖²` term to the
-/// objective and no `δ`-shift to the REML log-determinant. The earlier
-/// `explicit_stabilization_pospart` policy folded both into the criterion,
-/// which made `1e-4` a fixed-λ Gaussian prior that shrank every identified
-/// coefficient off the MLE and biased smoothing-parameter selection — a value
-/// that had to be tuned *between* under-stabilization (NaN seeds) and
-/// over-shrinkage (lost VGAM match). As a solver-only floor that tradeoff is
-/// gone: the over-shrinkage failure mode cannot occur (nothing is shrunk), the
-/// optimized objective is the true penalized REML criterion, and the floor
-/// only has to be large enough to keep the linear algebra finite.
-///
-/// The separation defect (#753) is no longer this floor's job. If the
-/// multinomial MLE is genuinely at infinity for an unpenalized/null-space
-/// direction (complete/quasi-complete separation), no solver floor makes that
-/// direction's estimate finite. The formula REML path arms the full-span
-/// Jeffreys/Firth correction CONDITIONALLY — only on separation evidence (see
-/// [`multinomial_formula_penalized_separation_evidence`] and the two-attempt logic
-/// in [`fit_penalized_multinomial_formula`]) — so an interior, well-identified
-/// fit optimizes the unbiased penalized-REML criterion with no Firth shrinkage
-/// toward the uniform simplex, while a finite-but-Fisher-underidentified or
-/// non-finite geometry gets the proper prior that is the only thing able to
-/// bound its penalty-null directions (#715/#2612 real-data arm). The bare
-/// fixed-λ inner driver
-/// [`fit_penalized_multinomial`] (no outer REML, no Jeffreys term) surfaces the
-/// explicit `MultinomialSeparationDetected` diagnostic for the path that has no
-/// proper prior to lean on.
-const MULTINOMIAL_FORMULA_RIDGE_FLOOR: f64 = 1.0e-4;
-
 /// Inner joint-Newton KKT tolerance for the multinomial formula path.
 ///
 /// The softmax Fisher weight `W = diag(p) − ppᵀ` collapses on saturated rows,
@@ -3516,19 +3473,6 @@ pub(crate) fn penalized_multinomial_formula_parts(
         // The design/penalty spectrum determines the smoothing domain. A
         // sample-count floor changes the statistical fit and is not a prior.
         rho_lower_bound: None,
-        ridge_floor: MULTINOMIAL_FORMULA_RIDGE_FLOOR,
-        // #747: the stabilization floor is SOLVER-ONLY — it keeps the inner
-        // joint-Newton linear solve finite during screening (bounding the step
-        // `(H+δI)⁻¹∇` away from a near-separable, rank-deficient curvature) but
-        // is excluded from the REML objective, the penalty log-determinant, and
-        // the Laplace Hessian. The earlier default (`explicit_stabilization_pospart`)
-        // folded `½·δ·‖β‖²` and a `δ`-shift of the log-determinant into the
-        // criterion, shrinking every identified coefficient off the MLE and
-        // perturbing smoothing-parameter selection — a fixed-λ prior masking
-        // separation, not a numerical stabilizer. With the floor solver-only the
-        // optimized objective is the true penalized REML criterion (value tracks
-        // its analytic gradient), and the smooth directions remain governed
-        // solely by their own REML-selected `λ`.
         use_outer_hessian,
         // #715 real-data arm ("canonical-gauge null direction rejects all REML
         // seeds"): skip the multi-seed outer screening cascade and let the
