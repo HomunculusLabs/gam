@@ -1646,6 +1646,9 @@ pub fn fit_formula_to_payload(
     // serialized payload so gamfit can surface them as `GamInferenceWarning`s
     // and via `model.notes`.
     let mut inference_notes = materialized.inference_notes;
+    // The typed record of scalar terms materialization removed as unidentified,
+    // published beside the notes (#2627).
+    let unidentified_scalar_terms = materialized.unidentified_scalar_terms;
 
     let mut payload = match request {
         FitRequest::Standard(standard_request) => {
@@ -1956,6 +1959,7 @@ pub fn fit_formula_to_payload(
             payload_for_dispersion_location_scale(formula, dataset, fit_config, kind, ls_result)?
         }
     };
+    payload.unidentified_scalar_terms = unidentified_scalar_terms;
     apply_request_metadata(&mut payload, fit_config, inference_notes);
     Ok(payload)
 }

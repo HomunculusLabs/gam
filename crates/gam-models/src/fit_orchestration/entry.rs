@@ -1464,6 +1464,8 @@ pub fn fit_from_formula(
 pub struct FormulaFitResult {
     pub result: FitResult,
     pub inference_notes: Vec<String>,
+    /// Scalar terms the training rows could not identify, removed before the fit.
+    pub unidentified_scalar_terms: Vec<UnidentifiedScalarTerm>,
 }
 
 /// Resolve, materialize, and fit a formula without making front ends repeat any
@@ -1478,6 +1480,7 @@ pub fn fit_from_formula_with_notes(
         let payload = crate::inference::model_payload_builders::fit_formula_to_payload(
             formula.to_string(), data, config)?;
         return Ok(FormulaFitResult { inference_notes: payload.inference_notes.clone(),
+                                    unidentified_scalar_terms: payload.unidentified_scalar_terms.clone(),
                                     result: FitResult::Ctn(Box::new(payload)) });
     }
     let mut config = config
@@ -1517,6 +1520,7 @@ pub(crate) fn fit_materialized_standard_with_notes(
     let current = fit_materialized_once_with_notes(MaterializedModel {
         request: FitRequest::Standard(request),
         inference_notes,
+        unidentified_scalar_terms: Vec::new(),
         survival_time_basis: None,
     })?;
     finish_adaptive_spatial_fit(formula, data, config, current)
@@ -1844,6 +1848,7 @@ fn fit_from_formula_once_with_notes(
         return Ok(FormulaFitResult {
             result: FitResult::Standard(result),
             inference_notes: Vec::new(),
+            unidentified_scalar_terms: Vec::new(),
         });
     }
     let mat = materialize(formula, data, &config)?;
@@ -1854,6 +1859,7 @@ fn fit_materialized_once_with_notes(
     mat: MaterializedModel<'_>,
 ) -> Result<FormulaFitResult, WorkflowError> {
     let inference_notes = mat.inference_notes;
+    let unidentified_scalar_terms = mat.unidentified_scalar_terms;
     // The materialized numeric covariate frame, kept across the `fit_model`
     // move. `SmoothBasisSpec::structural_feature_cols` indexes THIS matrix, so
     // it is the only frame in which a smooth's covariates can be identified;
@@ -1880,6 +1886,7 @@ fn fit_materialized_once_with_notes(
                 FitResult::Standard(result),
                 standard_covariate_frame,
                 inference_notes,
+                unidentified_scalar_terms,
             ));
         }
         if let Some(inputs) = spline_scan_fast_path(request) {
@@ -1895,6 +1902,7 @@ fn fit_materialized_once_with_notes(
             return Ok(FormulaFitResult {
                 result: FitResult::SplineScan(scan),
                 inference_notes,
+                unidentified_scalar_terms,
             });
         }
         // O(n log n) multiresolution residual-cascade fast path (#1032): a
@@ -1923,6 +1931,7 @@ fn fit_materialized_once_with_notes(
             return Ok(FormulaFitResult {
                 result: FitResult::ResidualCascade(fit),
                 inference_notes,
+                unidentified_scalar_terms,
             });
         }
     }
@@ -1933,6 +1942,7 @@ fn fit_materialized_once_with_notes(
         result,
         standard_covariate_frame,
         inference_notes,
+        unidentified_scalar_terms,
     ))
 }
 
@@ -1953,11 +1963,13 @@ fn attach_basis_adequacy(
     result: FitResult,
     covariate_frame: Option<StandardFitData<'_>>,
     mut inference_notes: Vec<String>,
+    unidentified_scalar_terms: Vec<UnidentifiedScalarTerm>,
 ) -> FormulaFitResult {
     let FitResult::Standard(mut standard) = result else {
         return FormulaFitResult {
             result,
             inference_notes,
+            unidentified_scalar_terms,
         };
     };
     if let Some(data) = covariate_frame {
@@ -1974,6 +1986,7 @@ fn attach_basis_adequacy(
     FormulaFitResult {
         result: FitResult::Standard(standard),
         inference_notes,
+        unidentified_scalar_terms,
     }
 }
 

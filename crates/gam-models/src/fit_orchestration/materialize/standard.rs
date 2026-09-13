@@ -341,5 +341,6 @@ pub(crate) fn materialize_standard<'a>(
             latent_coord,
         }),
         inference_notes,
+        unidentified_scalar_terms: Vec::new(),
     })
 }

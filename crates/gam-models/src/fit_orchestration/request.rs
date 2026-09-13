@@ -762,10 +762,30 @@ impl Default for FitConfig {
         }
     }
 }
+/// A formula scalar term the training rows cannot identify, removed before
+/// fitting: its realized column lies within the rank tolerance of the span of the
+/// implicit intercept and the scalar terms kept before it. It is published on the
+/// fitted model, so a user sees which term was removed and why (#2627).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct UnidentifiedScalarTerm {
+    /// The formula the term was written in, e.g. the marginal or slope formula.
+    pub formula: String,
+    /// The term as named in that formula.
+    pub term: String,
+    /// Norm of the term's column after projecting out the intercept and the
+    /// scalar terms kept before it.
+    pub residual_norm: f64,
+    /// The rank tolerance that residual fell inside.
+    pub tolerance: f64,
+}
+
 /// The result of materializing a formula + config against a dataset.
 pub struct MaterializedModel<'a> {
     pub request: FitRequest<'a>,
     pub inference_notes: Vec<String>,
+    /// Scalar terms materialization removed as unidentified. Empty for every
+    /// request that does not prune scalar terms.
+    pub unidentified_scalar_terms: Vec<UnidentifiedScalarTerm>,
     /// The survival time basis THIS materialization built, including the time
     /// anchor it centered at. Persistence must record the basis the fit
     /// actually used; re-deriving it downstream from the `FitConfig` silently

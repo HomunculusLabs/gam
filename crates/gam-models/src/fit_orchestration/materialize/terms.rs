@@ -252,9 +252,9 @@ pub(crate) fn prune_unidentified_linear_terms_for_marginal_slope(
     data: &Dataset,
     label: &str,
     inference_notes: &mut Vec<String>,
-) -> Result<(), WorkflowError> {
+) -> Result<Vec<UnidentifiedScalarTerm>, WorkflowError> {
     if spec.linear_terms.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     let n = data.values.nrows();
@@ -277,7 +277,7 @@ pub(crate) fn prune_unidentified_linear_terms_for_marginal_slope(
     let rank_alpha = gam_linalg::faer_ndarray::default_rrqr_rank_alpha();
     let mut scale = intercept_norm.max(1.0);
     let mut kept = Vec::<LinearTermSpec>::with_capacity(spec.linear_terms.len());
-    let mut dropped = Vec::<String>::new();
+    let mut dropped = Vec::<UnidentifiedScalarTerm>::new();
 
     for term in &spec.linear_terms {
         let column = linear_term_training_column(data, term)?;
@@ -307,10 +307,12 @@ pub(crate) fn prune_unidentified_linear_terms_for_marginal_slope(
             // Every formula linear effect carries the null-recovery ridge by default
             // (b7b874a2a). A ridge adds no identifiable data direction, so a
             // redundant column is pruned whether or not it carries one.
-            dropped.push(format!(
-                "{} (residual_norm={:.3e}, tol={:.3e})",
-                term.name, residual_norm, tol
-            ));
+            dropped.push(UnidentifiedScalarTerm {
+                formula: label.to_string(),
+                term: term.name.clone(),
+                residual_norm,
+                tolerance: tol,
+            });
             continue;
         }
         if residual_norm > tol {
@@ -324,10 +326,17 @@ pub(crate) fn prune_unidentified_linear_terms_for_marginal_slope(
             "{label}: removed {} scalar term(s) that add no identifiable \
              direction beyond the implicit intercept and earlier scalar terms: {}",
             dropped.len(),
-            dropped.join(", ")
+            dropped
+                .iter()
+                .map(|removed| format!(
+                    "{} (residual_norm={:.3e}, tol={:.3e})",
+                    removed.term, removed.residual_norm, removed.tolerance
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
         spec.linear_terms = kept;
     }
-    Ok(())
+    Ok(dropped)
 }
 

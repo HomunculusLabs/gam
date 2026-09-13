@@ -1855,6 +1855,7 @@ fn materialize_bernoulli_marginal_slope_prunes_redundant_scalar_term() {
     let MaterializedModel {
         request,
         inference_notes,
+        unidentified_scalar_terms,
         ..
     } = materialized;
     let FitRequest::BernoulliMarginalSlope(request) = request else {
@@ -1875,6 +1876,22 @@ fn materialize_bernoulli_marginal_slope_prunes_redundant_scalar_term() {
             .iter()
             .any(|note| note.contains("constant_spline_col")),
         "materialization should report the removed redundant scalar term; notes={inference_notes:?}"
+    );
+    // #2627: the removal is published as a typed record naming the formula, the
+    // term and the residual that decided it, not only as note text.
+    assert_eq!(
+        unidentified_scalar_terms
+            .iter()
+            .map(|removed| (removed.formula.as_str(), removed.term.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("bernoulli marginal-slope marginal formula", "constant_spline_col")],
+        "the removed scalar term must be published as a typed record"
+    );
+    assert!(
+        unidentified_scalar_terms
+            .iter()
+            .all(|removed| removed.residual_norm <= removed.tolerance),
+        "each record carries the residual that fell inside its rank tolerance: {unidentified_scalar_terms:?}"
     );
 }
 
@@ -2128,13 +2145,21 @@ fn bernoulli_marginal_slope_prune_drops_penalized_redundant_scalar_term() {
         smooth_terms: vec![],
     };
     let mut notes = Vec::new();
-    prune_unidentified_linear_terms_for_marginal_slope(
+    let removed = prune_unidentified_linear_terms_for_marginal_slope(
         &mut spec,
         &data,
         "test BMS formula",
         &mut notes,
     )
     .expect("a ridge-carrying duplicate scalar term is pruned like an unpenalized one");
+    assert_eq!(
+        removed
+            .iter()
+            .map(|record| (record.formula.as_str(), record.term.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("test BMS formula", "constant_spline_col")],
+        "the prune returns the typed record of what it removed"
+    );
     assert!(
         spec.linear_terms.is_empty(),
         "the duplicate scalar direction must be pruned, not left for its ridge to identify: {:?}",

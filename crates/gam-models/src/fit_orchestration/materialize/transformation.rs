@@ -65,5 +65,6 @@ pub(crate) fn materialize_transformation_normal<'a>(
             kappa_options: config.spatial_optimization.clone(),
         }),
         inference_notes,
+        unidentified_scalar_terms: Vec::new(),
     })
 }

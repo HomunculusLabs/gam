@@ -380,6 +380,12 @@ pub struct FittedModelPayload {
     /// such field) deserializing cleanly as "no notes".
     #[serde(default)]
     pub inference_notes: Vec<String>,
+    /// Scalar terms the training rows could not identify and materialization
+    /// removed before the fit, each with the formula it came from and the residual
+    /// norm and rank tolerance that decided it (#2627). `#[serde(default)]` keeps
+    /// payloads written before this field existed loading as "none removed".
+    #[serde(default)]
+    pub unidentified_scalar_terms: Vec<crate::fit_orchestration::UnidentifiedScalarTerm>,
     /// Per-smooth basis-adequacy evidence measured at fit time (#2774): for each
     /// smooth term, the residual lack-of-fit verdict against a higher-resolution
     /// alternative over that term's own covariates, or a typed reason it could
@@ -844,6 +850,7 @@ impl FittedModelPayload {
             family,
             estimator: FittedEstimator::Likelihood,
             inference_notes: Vec::new(),
+            unidentified_scalar_terms: Vec::new(),
             basis_adequacy: Vec::new(),
             used_device: false,
             fit_result: None,
@@ -6130,6 +6137,37 @@ mod tests {
             },
             "gaussian".to_string(),
         )
+    }
+
+    /// #2627: a scalar term materialization removed as unidentified is published on
+    /// the saved model with its formula, name and deciding residual, and a payload
+    /// written before the field existed loads with none removed.
+    #[test]
+    fn unidentified_scalar_terms_persist_on_the_saved_payload_2627() {
+        let mut payload = standard_gaussian_payload();
+        payload.unidentified_scalar_terms = vec![crate::fit_orchestration::UnidentifiedScalarTerm {
+            formula: "bernoulli marginal-slope marginal formula".to_string(),
+            term: "constant_spline_col".to_string(),
+            residual_norm: 1.5e-16,
+            tolerance: 4.2e-15,
+        }];
+        let encoded = serde_json::to_value(&payload).expect("serialize payload");
+        let decoded: FittedModelPayload =
+            serde_json::from_value(encoded.clone()).expect("reload payload");
+        assert_eq!(
+            decoded.unidentified_scalar_terms,
+            payload.unidentified_scalar_terms
+        );
+
+        let mut legacy = encoded;
+        let removed = legacy
+            .as_object_mut()
+            .expect("the payload serializes as an object")
+            .remove("unidentified_scalar_terms");
+        assert!(removed.is_some(), "the field is serialized under its own name");
+        let legacy: FittedModelPayload =
+            serde_json::from_value(legacy).expect("reload a payload written without the field");
+        assert!(legacy.unidentified_scalar_terms.is_empty());
     }
 
     fn anchored_runtime(basis_dim: usize) -> SavedCompiledFlexBlock {

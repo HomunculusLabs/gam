@@ -454,13 +454,14 @@ pub(crate) fn materialize_survival<'a>(
         config.smooth_overrides.as_ref(),
         None,
     )?;
+    let mut unidentified_scalar_terms = Vec::new();
     if survival_mode == SurvivalLikelihoodMode::MarginalSlope {
-        prune_unidentified_linear_terms_for_marginal_slope(
+        unidentified_scalar_terms.extend(prune_unidentified_linear_terms_for_marginal_slope(
             &mut termspec,
             data,
             "survival marginal-slope marginal formula",
             &mut inference_notes,
-        )?;
+        )?);
     }
 
     // `survmodel(distribution=...)` in the formula names the residual law, as
@@ -675,12 +676,12 @@ pub(crate) fn materialize_survival<'a>(
                     config.smooth_overrides.as_ref(),
                     None,
                 )?;
-                prune_unidentified_linear_terms_for_marginal_slope(
+                unidentified_scalar_terms.extend(prune_unidentified_linear_terms_for_marginal_slope(
                     &mut spec,
                     data,
                     "survival marginal-slope slope_formula",
                     &mut inference_notes,
-                )?;
+                )?);
                 specs.push(spec);
             }
             (
@@ -1482,6 +1483,7 @@ pub(crate) fn materialize_survival<'a>(
     Ok(MaterializedModel {
         request,
         inference_notes,
+        unidentified_scalar_terms,
         survival_time_basis: Some(
             crate::survival::construction::SavedSurvivalTimeBasis::from_build(
                 &time_build,

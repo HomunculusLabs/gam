@@ -132,6 +132,7 @@ pub(crate) fn materialize_location_scale<'a>(
                 kappa_options,
             }),
             inference_notes,
+            unidentified_scalar_terms: Vec::new(),
         })
     } else if let Some(kind) = dispersion_location_scale_kind(&family.response) {
         // Genuine-dispersion mean families (NegativeBinomial / Gamma / Beta /
@@ -163,6 +164,7 @@ pub(crate) fn materialize_location_scale<'a>(
                 kappa_options,
             }),
             inference_notes,
+            unidentified_scalar_terms: Vec::new(),
         })
     } else {
         Ok(MaterializedModel {
@@ -182,6 +184,7 @@ pub(crate) fn materialize_location_scale<'a>(
                 kappa_options,
             }),
             inference_notes,
+            unidentified_scalar_terms: Vec::new(),
         })
     }
 }

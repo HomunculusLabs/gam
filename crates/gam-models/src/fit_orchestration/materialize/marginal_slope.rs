@@ -141,7 +141,7 @@ pub(crate) fn materialize_bernoulli_marginal_slope<'a>(
         config.smooth_overrides.as_ref(),
         None,
     )?;
-    prune_unidentified_linear_terms_for_marginal_slope(
+    let mut unidentified_scalar_terms = prune_unidentified_linear_terms_for_marginal_slope(
         &mut marginalspec,
         data,
         "bernoulli marginal-slope marginal formula",
@@ -156,12 +156,12 @@ pub(crate) fn materialize_bernoulli_marginal_slope<'a>(
         config.smooth_overrides.as_ref(),
         None,
     )?;
-    prune_unidentified_linear_terms_for_marginal_slope(
+    unidentified_scalar_terms.extend(prune_unidentified_linear_terms_for_marginal_slope(
         &mut slopespec,
         data,
         "bernoulli marginal-slope slope_formula",
         &mut inference_notes,
-    )?;
+    )?);
     let weights = resolve_weight_column(data, col_map, config.weight_column.as_deref())?;
     let marginal_offset = resolve_offset_column(data, col_map, config.offset_column.as_deref())?;
     let slope_offset =
@@ -213,5 +213,6 @@ pub(crate) fn materialize_bernoulli_marginal_slope<'a>(
             policy,
         }),
         inference_notes,
+        unidentified_scalar_terms,
     })
 }
