@@ -431,6 +431,66 @@ pub(crate) fn certificate_curvature_verdict_resolution(
         .filter(|value| value.is_finite() && *value > 0.0)
 }
 
+/// The measured error of a ρ-Hessian whose negative direction the criterion
+/// contradicted (#2612, #1561).
+///
+/// Standard REML certifies on stationarity. A measured negative direction the
+/// gradient floor does not clear is adjudicated against the criterion: the
+/// escape steps `ρ ± αv` along the judged block's most negative eigenvector,
+/// from one e-fold down to the step at which `½|λ_min|α²` reaches the
+/// criterion's resolution. When the objective never falls, the verdict is
+/// withdrawn as `CriterionContradicted` together with its floor clearance, and
+/// the point ships. Along `v` the matrix predicted a decrease the criterion does
+/// not have, so the matrix is wrong there by at least `|λ_min|`. That is a
+/// MEASURED lower bound on `‖δH‖₂`, the currency the smoothing correction's
+/// definiteness gate spends.
+///
+/// `certificate_curvature_verdict_resolution` forwards nothing for a withdrawn
+/// verdict, so the correction re-judged that direction on the matrix's word and
+/// refused the fit the outer loop had just accepted.
+/// `quality_vs_inla_binomial_smooth_probability` at 7ebbacd3d (MSI job 555236)
+/// refused `σ = −1.651e-6` against a bar of `1.333e-7`, and the prostate EBM case
+/// at fa0e33bb4 (CI run 34702231507) refused `σ = −1.755e-6` against `1.330e-7`.
+/// In both, the only resolution components were the eigensolver's backward error
+/// and three exactly-zero identities.
+///
+/// `hessian` is the matrix the certificate judged and `invariance` the
+/// criterion's exact invariance at the same ρ. The block is taken by the owners
+/// the adjudication used, off the certificate's railed face. Every other verdict
+/// publishes nothing here.
+pub(crate) fn certificate_contradicted_curvature_error(
+    certificate: Option<&crate::model_types::OuterCriterionCertificate>,
+    hessian: Option<&Array2<f64>>,
+    invariance: Option<&Array2<f64>>,
+) -> Option<f64> {
+    use gam_linalg::faer_ndarray::FaerEigh;
+
+    let certificate = certificate.filter(|certificate| {
+        matches!(
+            certificate.curvature,
+            crate::rho_optimizer::CurvatureEvidence::CriterionContradicted
+        )
+    })?;
+    let hessian = hessian?;
+    let n = hessian.nrows();
+    if n == 0 || hessian.ncols() != n || hessian.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+    let railed: Vec<usize> = certificate
+        .railed_facts
+        .iter()
+        .map(|fact| fact.index)
+        .collect();
+    let deflate = invariance.filter(|basis| basis.nrows() == n && basis.ncols() > 0);
+    let judged = crate::penalty_invariance::judged_subspace_basis(n, &railed, deflate)?;
+    let block = crate::penalty_invariance::compress_to_judged_subspace(hessian, &judged);
+    let (eigenvalues, _) = block.eigh(faer::Side::Lower).ok()?;
+    let lambda_min = eigenvalues
+        .iter()
+        .fold(f64::INFINITY, |smallest, value| smallest.min(*value));
+    (lambda_min.is_finite() && lambda_min < 0.0).then_some(-lambda_min)
+}
+
 fn reml_inner_progress_feedback(
     state: &crate::estimate::reml::RemlState<'_>,
 ) -> crate::rho_optimizer::InnerProgressFeedback {
@@ -3103,6 +3163,37 @@ where
             // loop certified a minimum and this site refused sigma = -1.755e-6
             // against a bar of 1.330e-7 whose resolution components were the
             // eigensolver's 2.737740e-14 and three exactly-zero identities.
+            //
+            // #2612 -- A WITHDRAWN VERDICT TRAVELS AS WHAT IT MEASURED (#1561).
+            //
+            // Standard REML certifies on stationarity, and a negative direction
+            // the floor did not clear is adjudicated against the criterion. When
+            // the objective never falls along it, the certificate withdraws its
+            // verdict together with its floor clearance, so the shift above
+            // forwards nothing, and this site then refused that same direction
+            // on the matrix's word: `quality_vs_inla_binomial_smooth_probability`
+            // at 7ebbacd3d (job 555236), sigma = -1.651e-6 against a bar of
+            // 1.333e-7. The adjudication measured the matrix wrong along that
+            // direction by |lambda_min|, which is a component of ||dH||_2 this
+            // gate is entitled to spend. The invariance is formed only for a
+            // contradicted certificate, the one verdict that reads it.
+            let contradicted_curvature_error = if outer_result
+                .criterion_certificate
+                .as_ref()
+                .is_some_and(|certificate| {
+                    matches!(
+                        certificate.curvature,
+                        crate::rho_optimizer::CurvatureEvidence::CriterionContradicted
+                    )
+                }) {
+                certificate_contradicted_curvature_error(
+                    outer_result.criterion_certificate.as_ref(),
+                    outer_result.final_hessian.as_ref(),
+                    reml_state.criterion_invariant_directions(&final_rho).as_ref(),
+                )
+            } else {
+                None
+            };
             let measured_hessian_error: Vec<
                 gam_linalg::curvature_resolution::MeasuredHessianError,
             > = certificate_curvature_verdict_resolution(
@@ -3115,6 +3206,12 @@ where
                     value,
                 )
             })
+            .chain(contradicted_curvature_error.into_iter().map(|value| {
+                gam_linalg::curvature_resolution::MeasuredHessianError::new(
+                    "criterion-contradicted negative curvature |lambda_min| of the certificate's judged rho-Hessian (the objective did not fall along its eigenvector)",
+                    value,
+                )
+            }))
             .collect();
             let smoothing_outcome = reml_state.compute_smoothing_correction_auto(
                 &final_rho,

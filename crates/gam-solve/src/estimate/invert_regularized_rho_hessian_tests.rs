@@ -653,3 +653,143 @@ fn only_a_cleared_measured_verdict_publishes_its_shift_1561() {
     );
     assert_eq!(publish(None), None);
 }
+
+/// #1561, the INLA binomial and prostate refusals. Standard REML certifies on
+/// stationarity, and a measured negative direction the gradient floor does not
+/// clear is adjudicated against the criterion. When the objective never falls
+/// along it, the verdict is withdrawn as `CriterionContradicted` together with
+/// its floor clearance, and the point ships. The correction then had no
+/// forwarded standard and refused `σ = −1.651e-6` against a bar of `1.333e-7`
+/// (`quality_vs_inla_binomial_smooth_probability`, MSI job 555236). The
+/// contradiction measured the matrix wrong along that direction by `|λ_min|`,
+/// and that travels as a measured component of `‖δH‖₂`.
+#[test]
+fn a_criterion_contradicted_direction_travels_to_the_correction_1561() {
+    use crate::model_types::CurvatureEvidence;
+
+    let (hessian, _q) = build_with_spectrum(&[0.4, 0.05, -1.651e-6]);
+    let gradient = Array1::from(vec![1.333e-7, 1.333e-7, 1.333e-7]);
+
+    // The certificate's own verdicts on this matrix, from their owners: not PSD,
+    // and the gradient floor does not clear, so the direction is adjudicated
+    // rather than admitted.
+    assert_eq!(
+        crate::rho_optimizer::certificate_hessian_is_psd_off_railed(&hessian, &[], None),
+        Some(false),
+        "fixture must be a matrix the certificate does not call PSD"
+    );
+    let clearance =
+        crate::rho_optimizer::interior_curvature_floor_clearance(&hessian, &[], &gradient, None)
+            .expect("a measured verdict records its floor clearance");
+    assert!(
+        !clearance.cleared,
+        "fixture must carry negative curvature the floor does not clear: {clearance:?}"
+    );
+
+    // Control: judged with only the eigensolver's resolution, the direction is refused.
+    let refused = invert_identified_rho_hessian(&hessian, 0, &gradient, None, &[])
+        .expect_err("with only the eigensolver's resolution this direction is refused");
+    assert!(
+        refused.contains("negative curvature"),
+        "unexpected error text: {refused}"
+    );
+
+    // The withdrawn verdict carries no floor, so the #2748 channel forwards nothing.
+    let certificate = certificate_with(CurvatureEvidence::CriterionContradicted, None);
+    assert_eq!(
+        super::optimizer::certificate_curvature_verdict_resolution(Some(&certificate)),
+        None
+    );
+    let falsified = super::optimizer::certificate_contradicted_curvature_error(
+        Some(&certificate),
+        Some(&hessian),
+        None,
+    )
+    .expect("a contradicted verdict publishes the curvature the criterion falsified");
+    // The eigensolver's backward error on a unit-scale 3x3 matrix is O(ε).
+    assert!(
+        (falsified - 1.651e-6).abs() <= 1.0e-14,
+        "the published error is the judged block's |λ_min|: {falsified:.6e}"
+    );
+
+    let forwarded = [gam_linalg::curvature_resolution::MeasuredHessianError::new(
+        "criterion-contradicted negative curvature |lambda_min| of the certificate's judged rho-Hessian",
+        falsified,
+    )];
+    let inverse = invert_identified_rho_hessian(&hessian, 0, &gradient, None, &forwarded)
+        .unwrap_or_else(|error| {
+            panic!("the outer loop accepted this point and the correction refused it: {error}")
+        });
+    assert_eq!(inverse.active_rank, 2);
+    // The resolution is the forwarded |λ_min| itself, so rounding decides which
+    // of the two excluded classes σ lands in; either way it is not inverted.
+    assert_eq!(
+        inverse.unresolvable_curvature + inverse.below_gradient_floor,
+        1,
+        "the contradicted direction is excluded from the inverse, not inverted"
+    );
+    assert!(inverse.inverse.iter().all(|value| value.is_finite()));
+}
+
+/// Which verdicts publish a falsified curvature (#1561): a contradicted verdict
+/// whose judged block still reports a negative eigenvalue, and nothing else.
+#[test]
+fn only_a_contradicted_verdict_publishes_its_falsified_curvature_1561() {
+    use super::optimizer::certificate_contradicted_curvature_error as publish;
+    use crate::model_types::{CurvatureEvidence, CurvatureFloorClearance};
+
+    let (indefinite, _q) = build_with_spectrum(&[0.4, 0.05, -1.651e-6]);
+    let (definite, _q) = build_with_spectrum(&[0.4, 0.05, 2.0e-3]);
+    let contradicted = certificate_with(CurvatureEvidence::CriterionContradicted, None);
+    let not_cleared = CurvatureFloorClearance {
+        interior_min_eigenvalue: -1.651e-6,
+        gradient_floor: 1.333e-7,
+        floored_min_eigenvalue: -1.518e-6,
+        measured_resolution: 0.0,
+        decided_at_resolution: f64::EPSILON.sqrt(),
+        cleared: false,
+    };
+
+    assert!(publish(Some(&contradicted), Some(&indefinite), None).is_some());
+    assert_eq!(
+        publish(Some(&contradicted), Some(&definite), None),
+        None,
+        "a judged block with no negative eigenvalue has nothing falsified to forward"
+    );
+    assert_eq!(
+        publish(Some(&contradicted), None, None),
+        None,
+        "no judged matrix, no measurement"
+    );
+    assert_eq!(
+        publish(
+            Some(&certificate_with(
+                CurvatureEvidence::Measured { psd: false },
+                Some(not_cleared)
+            )),
+            Some(&indefinite),
+            None,
+        ),
+        None,
+        "a refused verdict that was never adjudicated admits nothing"
+    );
+    assert_eq!(
+        publish(
+            Some(&certificate_with(CurvatureEvidence::Measured { psd: true }, None)),
+            Some(&indefinite),
+            None,
+        ),
+        None,
+        "a PSD verdict travels by its shift, not here"
+    );
+    assert_eq!(
+        publish(
+            Some(&certificate_with(CurvatureEvidence::NotAvailable, None)),
+            Some(&indefinite),
+            None,
+        ),
+        None,
+        "unmeasured curvature has no direction to have contradicted"
+    );
+    assert_eq!(publish(None, Some(&indefinite), None), None);
+}
