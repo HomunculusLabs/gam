@@ -1635,8 +1635,11 @@ fn optimize_survival_transformation_smoothing(
     // LAML differs from the valued one by more than the outer value-agreement
     // audit admits (#1082 q26: 1.390e-4 against a 2.274e-5 bound), and the mint
     // then refused a converged fit for pricing value and curvature at two modes.
-    let eval_cache: std::cell::RefCell<Option<(Array1<f64>, f64, Array1<f64>, Array1<f64>)>> =
-        std::cell::RefCell::new(None);
+    // A line-search value probe stores no gradient, so a gradient request at its ρ
+    // evaluates at its mode instead of reading one.
+    let eval_cache: std::cell::RefCell<
+        Option<(Array1<f64>, f64, Option<Array1<f64>>, Array1<f64>)>,
+    > = std::cell::RefCell::new(None);
     // Warm-start chaining for the inner PIRLS across outer probes (#2298). The
     // generic BFGS bridge evaluates this objective at a sequence of spatially
     // adjacent ρ — line-search probes walk along one direction and accepted steps
@@ -1653,26 +1656,38 @@ fn optimize_survival_transformation_smoothing(
     // ρ is restored. A non-converged probe never advances the seed (see below), so
     // a bad probe cannot corrupt the warm start for the next attempt.
     let warm_beta: std::cell::RefCell<Array1<f64>> = std::cell::RefCell::new(beta0.clone());
-    // Evaluate the LAML objective and ρ-gradient at a ρ proposal, and its
-    // analytic ρ-Hessian when the order asks for curvature: set the λ, re-run
-    // the constrained inner PIRLS, and evaluate the unified survival LAML.
+    // Evaluate the LAML objective at a ρ proposal, its ρ-gradient when the order
+    // asks for one, and its analytic ρ-Hessian when it asks for curvature: set the
+    // λ, re-run the constrained inner PIRLS, and evaluate the unified survival
+    // LAML. A line-search value probe discards any gradient, so it asks for none.
     let eval_at = |rho_smooth: &Array1<f64>, order: OuterEvalOrder| -> Result<
-        (f64, Array1<f64>, HessianValue),
+        (f64, Option<Array1<f64>>, HessianValue),
         gam_solve::estimate::EstimationError,
     > {
         let physical_smoothing =
             gam_problem::checked_exp_log_strengths(rho_smooth.iter().copied())?;
         // The cache holds no Hessian, so a curvature request always evaluates: at
-        // the cached mode when the cache is at this ρ, otherwise from P-IRLS.
+        // the cached mode when the cache is at this ρ, otherwise from P-IRLS. A
+        // gradient request at a value probe's ρ evaluates the same way.
         let wants_hessian = matches!(order, OuterEvalOrder::ValueGradientHessian);
+        let wants_gradient = !matches!(order, OuterEvalOrder::Value);
         let cached_mode = match eval_cache.borrow().as_ref() {
             Some((cached_rho, cached_cost, cached_grad, cached_beta))
                 if cached_rho == rho_smooth =>
             {
-                if !wants_hessian {
-                    return Ok((*cached_cost, cached_grad.clone(), HessianValue::Unavailable));
+                match (wants_hessian, wants_gradient, cached_grad) {
+                    (false, false, _) => {
+                        return Ok((*cached_cost, None, HessianValue::Unavailable));
+                    }
+                    (false, true, Some(gradient)) => {
+                        return Ok((
+                            *cached_cost,
+                            Some(gradient.clone()),
+                            HessianValue::Unavailable,
+                        ));
+                    }
+                    _ => Some(cached_beta.clone()),
                 }
-                Some(cached_beta.clone())
             }
             _ => None,
         };
@@ -1792,10 +1807,10 @@ fn optimize_survival_transformation_smoothing(
         // survival LAML evaluator requires: every block is an outer coordinate,
         // so the evaluator sees the optimizer's ρ itself rather than an
         // `exp`/`ln` round trip of it.
-        let mode = if wants_hessian {
-            gam_problem::EvalMode::ValueGradientHessian
-        } else {
-            gam_problem::EvalMode::ValueAndGradient
+        let mode = match order {
+            OuterEvalOrder::Value => gam_problem::EvalMode::ValueOnly,
+            OuterEvalOrder::ValueAndGradient => gam_problem::EvalMode::ValueAndGradient,
+            OuterEvalOrder::ValueGradientHessian => gam_problem::EvalMode::ValueGradientHessian,
         };
         let (cost, grad_full, hessian, _resolution) = candidate
             .unified_lamlobjective_and_rhogradient(&beta, &state, rho_smooth, mode)
@@ -1840,13 +1855,17 @@ fn optimize_survival_transformation_smoothing(
                 reason: "survival smoothing LAML cost was non-finite".to_string(),
             });
         }
-        let grad = grad_full;
+        // A value probe's evaluator returns a placeholder gradient, which is not kept.
+        let grad = wants_gradient.then_some(grad_full);
         // Also rho-local, and again the layer below agrees:
         // `rho_optimizer/objective.rs` `validate_outer_first_order` returns
         // `ObjectiveEvalError::recoverable` for a non-finite outer gradient.
         // `InvalidInput` was the one grading that short-circuits the seed
         // cascade (#2531/#2590).
-        if grad.iter().any(|g| !g.is_finite()) {
+        if grad
+            .as_ref()
+            .is_some_and(|gradient| gradient.iter().any(|g| !g.is_finite()))
+        {
             return Err(gam_solve::estimate::EstimationError::TrialPointRefused {
                 reason: "survival smoothing LAML gradient was non-finite".to_string(),
             });
@@ -1906,24 +1925,30 @@ fn optimize_survival_transformation_smoothing(
     let mut obj = problem.build_objective_with_eval_order(
         (),
         |_: &mut (), rho: &Array1<f64>| {
-            eval_at(rho, OuterEvalOrder::ValueAndGradient).map(|(cost, _, _)| cost)
+            eval_at(rho, OuterEvalOrder::Value).map(|(cost, _, _)| cost)
         },
         |_: &mut (), rho: &Array1<f64>| {
             let (cost, gradient, hessian) = eval_at(rho, OuterEvalOrder::ValueAndGradient)?;
-            Ok(OuterEval {
-                cost,
-                gradient,
-                hessian,
-                inner_beta_hint: None,
+            Ok(match gradient {
+                Some(gradient) => OuterEval {
+                    cost,
+                    gradient,
+                    hessian,
+                    inner_beta_hint: None,
+                },
+                None => OuterEval::value_only(cost, rho.len(), None),
             })
         },
         |_: &mut (), rho: &Array1<f64>, order: OuterEvalOrder| {
             let (cost, gradient, hessian) = eval_at(rho, order)?;
-            Ok(OuterEval {
-                cost,
-                gradient,
-                hessian,
-                inner_beta_hint: None,
+            Ok(match gradient {
+                Some(gradient) => OuterEval {
+                    cost,
+                    gradient,
+                    hessian,
+                    inner_beta_hint: None,
+                },
+                None => OuterEval::value_only(cost, rho.len(), None),
             })
         },
         None::<fn(&mut ())>,
