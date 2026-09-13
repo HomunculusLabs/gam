@@ -57,7 +57,8 @@ fn h1a_target_k_with_default_work_per_k_picks_noise_rule() {
 
 #[test]
 fn h1b_target_k_with_survival_work_per_k_picks_work_rule() {
-    // The survival per-K cost 250_000 binds the work cap at ~2_000.
+    // A per-K cost of 250_000, the survival cost at the time of the 8h hang,
+    // binds the work cap at 2_000.
     let choice = auto_outer_target_k(LARGE_SCALE_N, SURVIVAL_WORK_PER_K_UNIT)
         .expect("large-scale n should auto-subsample");
     let expected_k_work = (AUTO_OUTER_WORK_BUDGET / SURVIVAL_WORK_PER_K_UNIT) as usize;
@@ -68,12 +69,12 @@ fn h1b_target_k_with_survival_work_per_k_picks_work_rule() {
     assert_eq!(
         choice.cap_reason,
         AutoOuterCapReason::Work,
-        "work cap should bind for survival per-K-unit cost"
+        "work cap should bind at a per-K cost of 250_000"
     );
     assert_eq!(choice.k, expected_k_work);
     assert!(
         choice.k < OBSERVED_K_IN_RUN / 5,
-        "if the survival arg were applied, K would be ~2k; got k={}",
+        "if the 250_000 per-K cost were applied, K would be ~2k; got k={}",
         choice.k
     );
     // sanity: floor still respected
@@ -191,8 +192,8 @@ fn h3a_uncapped_vs_capped_subsample_size_ratio_is_about_10x() {
     // Same n, same z, same strata; only `outer_work_per_k_unit` differs.
     // Outer Hessian per-direction work scales linearly in K when the
     // HT-weighted row pass dominates, so this K ratio is the wall-time
-    // and intermediate-working-set blowup the survival family would
-    // suffer if the cap argument were not honoured.
+    // and intermediate-working-set blowup a family at this per-K cost
+    // would suffer if the cap argument were not honoured.
     let z: Vec<f64> = (0..LARGE_SCALE_N)
         .map(|i| (i as f64) / (LARGE_SCALE_N as f64))
         .collect();
