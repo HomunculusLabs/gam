@@ -97,6 +97,66 @@ impl DenseSpectralOperator {
         Self::from_symmetric_with_rank_policy(h, PseudoLogdetMode::PositiveDefinite, Some(rank))
     }
 
+    /// Rank of `H`'s numerically identified subspace (#2901 V22).
+    ///
+    /// An eigenvalue is resolved when it exceeds `H`'s rounding band
+    /// `p·ε·‖H‖₂`, the band the PIRLS minimum-norm solve identifies
+    /// coefficients at. `H = XᵀWX + S_λ` with both terms PSD has
+    /// `null(H) ⊆ null(S_λ)`, so the rank never falls below `rank(S_λ)`: where
+    /// the band claims more nullity than the penalty has, the largest positive
+    /// eigenvalues count too (#2748).
+    pub(crate) fn identified_rank(eigenvalues: &[f64], penalty_rank: usize) -> usize {
+        let spectral_radius = eigenvalues
+            .iter()
+            .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+        let rounding_band = eigenvalues.len() as f64 * f64::EPSILON * spectral_radius;
+        let resolved = eigenvalues
+            .iter()
+            .filter(|&&sigma| sigma > rounding_band)
+            .count();
+        let positive = eigenvalues.iter().filter(|&&sigma| sigma > 0.0).count();
+        resolved.max(penalty_rank.min(positive))
+    }
+
+    /// Exact pseudodeterminant on `H`'s numerically identified subspace: the
+    /// top [`identified_rank`](Self::identified_rank) eigenpairs, with exact
+    /// kernels and no spectral floor, so `log|H|₊`, its traces and `H⁺` solves
+    /// are one object (#2901 V22). Every discarded eigenvalue lies inside the
+    /// rounding band, so only material indefiniteness is refused.
+    pub(crate) fn from_symmetric_on_identified_subspace(
+        h: &Array2<f64>,
+        penalty_rank: usize,
+    ) -> Result<Self, String> {
+        use faer::Side;
+
+        let n = h.nrows();
+        if n != h.ncols() {
+            return Err(RemlError::DimensionMismatch {
+                reason: format!(
+                    "HessianFactorization: expected square matrix, got {}×{}",
+                    n,
+                    h.ncols()
+                ),
+            }
+            .into());
+        }
+        let (eigenvalues, eigenvectors) = h
+            .eigh(Side::Lower)
+            .map_err(|e| format!("Eigendecomposition failed: {e}"))?;
+        let rank = Self::identified_rank(
+            eigenvalues.as_slice().ok_or_else(|| {
+                "dense spectral pseudo-logdet: the eigenvalue array is not contiguous".to_string()
+            })?,
+            penalty_rank,
+        );
+        Self::from_eigenpairs(
+            eigenvalues,
+            eigenvectors,
+            PseudoLogdetMode::PositiveDefinite,
+            Some(rank),
+        )
+    }
+
     fn from_symmetric_with_rank_policy(
         h: &Array2<f64>,
         mode: PseudoLogdetMode,
@@ -199,8 +259,9 @@ impl DenseSpectralOperator {
         //
         // `Smooth` is the regularized full-spectrum mode: every eigenpair stays
         // active and singular directions are handled only through
-        // `r_ε(σ)`. This is the documented default semantics used by the
-        // unified REML/LAML objective.
+        // `r_ε(σ)`. The standard dense REML/LAML assemblies do not use it: they
+        // price H on its identified subspace
+        // (`from_symmetric_on_identified_subspace`, #2901 V22).
         //
         // `HardPseudo` is the identified-subspace mode: numerically singular
         // eigenpairs are excluded consistently from logdet, traces, and solves.

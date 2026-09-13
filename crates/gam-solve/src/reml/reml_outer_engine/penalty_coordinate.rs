@@ -55,8 +55,9 @@ pub struct PenaltyLogdetDerivs {
 ///
 /// Two producers install it, with different (documented) exactness domains:
 ///
-/// 1. **Intrinsic spectral form (#901, the GLM dense paths in runtime.rs —
-///    `intrinsic_hessian_pseudo_logdet_parts`):** `u_s = U_H`, the kept
+/// 1. **Intrinsic spectral form (#901,
+///    `intrinsic_hessian_pseudo_logdet_parts_from_eigensystem`, read by post-fit
+///    inference on H's identified subspace):** `u_s = U_H`, the kept
 ///    eigenvectors of the penalized Hessian `H_pen`, and `h_proj_inverse =
 ///    diag(1/σ_a)`. Then `K = H_pen⁺` exactly, and `tr(K · Ḣ)` is the exact
 ///    first derivative of the cost's `log|H_pen|₊` along **every** drift

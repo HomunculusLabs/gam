@@ -6534,5 +6534,13 @@
     ],
     "reason": "#2829 test-only code: EfsEval::logdet_enclosure_gap is None in every production objective, so the per-atom EFS enclosure margin gate, LogdetEnclosure::gap_resolves_margin and the EnclosureGapObjective test fixture that alone set Some were reachable only from tests.",
     "evidence": "At 2dcfb25d18e3fa97d44619f0894bcd5462b5acf0, git grep -n -w logdet_enclosure_gap over crates, src and tests finds 23 None initializers, the field declaration in crates/gam-problem/src/solver_contract.rs, the two gate reads in crates/gam-solve/src/reml/per_atom_efs.rs and one Some assignment inside that file test module (EnclosureGapObjective::eval_efs). gap_resolves_margin is called only by the gate; the six OuterObjective method identities fall by one because the test objective impl is deleted."
+  },
+  {
+    "base": "8872e8095d1373d763fb345db537d9a2a81dc3b8",
+    "items": [
+      "crates/gam-solve/src/reml/gradient_hessian.rs:fn:intrinsic_hessian_pseudo_logdet_parts"
+    ],
+    "reason": "SPEC rules 5 and 23 (#2901 V22, lead ruling (a), slice 5a). RemlState::intrinsic_hessian_pseudo_logdet_parts eigendecomposed an assembled Hessian and forwarded to intrinsic_hessian_pseudo_logdet_parts_from_eigensystem. Its only callers were the non-spectral fallbacks of the pseudo-logdet correction in build_dense_assembly and build_dense_original_assembly. Both assemblies now price H with DenseSpectralOperator::from_symmetric_on_identified_subspace and install no correction, so the wrapper has no caller. intrinsic_hessian_pseudo_logdet_parts_from_eigensystem stays for estimate/identified_hessian.rs, and its #2748 documentation moves onto it.",
+    "evidence": "At the base, git grep -n 'intrinsic_hessian_pseudo_logdet_parts(' finds its definition in crates/gam-solve/src/reml/gradient_hessian.rs and exactly two calls, crates/gam-solve/src/reml/objective.rs (the None arms of both correction blocks), which this commit deletes. The remaining mentions (atoms.rs, reml/mod.rs, penalty_coordinate.rs) are prose, restated here. Not compiled locally; a guarded job follows."
   }
 ]

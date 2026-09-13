@@ -1708,13 +1708,11 @@ pub(crate) fn reml_laml_evaluate(
             // all-ones intercept column. The historical range(S_+)-projected
             // kernel dropped both the penalty-null Schur curvature (ρ sign
             // flips) and the moving-subspace ψ term (~1e5 FD blow-ups).
-            // For canonical Gaussian (Identity link) the assembly skips
-            // installing `penalty_subspace_trace` at all — `c ≡ 0` forces
-            // `D_β H ≡ 0`, the classical Gaussian REML cost identity reads
-            // smooth-floored `log|H|`, and `G_ε(H)` is the kernel matching
-            // that cost surface within FD precision — see the `c_nontrivial`
-            // gate in `build_dense_assembly` / `build_dense_original_assembly`.
-            // Drops into the `None` arm below in that branch.
+            // The standard dense assemblies (`build_dense_assembly`,
+            // `build_dense_original_assembly`) install no `penalty_subspace_trace`:
+            // their operator is exact on H's identified subspace (#2901 V22), so
+            // its own `G_ε(H)` with `ε = 0` on the kept eigenpairs IS `H⁺`, and
+            // they drop into the `None` arm below.
             let trace_logdet_i = if !incl_logdet_h {
                 0.0
             } else if let Some(ref stoch_traces) = stochastic_trace_values {

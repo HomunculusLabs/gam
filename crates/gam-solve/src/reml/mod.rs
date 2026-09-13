@@ -3049,11 +3049,10 @@ mod tests {
 
     #[test]
     pub(crate) fn binomial_logit_n30_rank_deficient_hessian_matches_cost_fd() {
-        // Regression lock for the `PenaltySubspaceTrace` pseudo-logdet
-        // kernel installed by the rank-deficient LAML fix (see
-        // `PenaltySubspaceTrace` and `intrinsic_hessian_pseudo_logdet_parts`;
-        // since #901 the cost is the intrinsic `½ log|H_pen|₊` and the kernel
-        // is the spectral `H_pen⁺`, exact for every drift direction).
+        // Regression lock for the rank-deficient LAML pseudo-logdet: the cost
+        // is the intrinsic `½ log|H_pen|₊` and the trace kernel the spectral
+        // `H_pen⁺`, exact for every drift direction (#901). Since #2901 V22
+        // both come from one operator on H's identified subspace.
         //
         // The sibling `binomial_logit_n30_design_moving_hessian_matches_fd`
         // passes pre- AND post-fix because its FD reference differentiates

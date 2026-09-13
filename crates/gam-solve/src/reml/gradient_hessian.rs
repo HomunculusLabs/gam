@@ -4787,49 +4787,17 @@ impl<'a> RemlState<'a> {
     /// point sat on the low side of the jump and no trial point could beat it,
     /// so the fit died with `StepSizeTooSmall after 50 attempt(s)`.
     ///
-    /// The threshold still identifies the null space where one exists — this
+    /// The band still identifies the null space where one exists — the bound
     /// only refuses to let it claim MORE nullity than the penalty structurally
     /// has, which for a full-rank model means the pseudo-logdet is the full
-    /// logdet at every ρ, and `C∞` again.
-    pub(super) fn intrinsic_hessian_pseudo_logdet_parts(
-        h_total: &Array2<f64>,
-        penalty_rank: usize,
-    ) -> Result<(f64, Option<super::reml_outer_engine::PenaltySubspaceTrace>), EstimationError>
-    {
-        let p = h_total.ncols();
-        if p == 0 {
-            return Ok((0.0, None));
-        }
-        if h_total.nrows() != p {
-            crate::bail_invalid_estim!(
-                "intrinsic_hessian_pseudo_logdet_parts: H must be square, got {}x{}",
-                h_total.nrows(),
-                p
-            );
-        }
-
-        // Symmetrize before eigh: H_pen is symmetric in exact arithmetic and
-        // faer rejects visibly asymmetric input.
-        let mut h_sym = h_total.clone();
-        gam_linalg::matrix::symmetrize_in_place(&mut h_sym);
-        let (h_evals, h_evecs) = h_sym
-            .eigh(Side::Lower)
-            .map_err(EstimationError::EigendecompositionFailed)?;
-        Self::intrinsic_hessian_pseudo_logdet_parts_from_eigensystem(
-            h_evals
-                .as_slice()
-                .expect("eigh returns an owned contiguous eigenvalue Array1"),
-            &h_evecs,
-            penalty_rank,
-        )
-    }
-
-    /// [`Self::intrinsic_hessian_pseudo_logdet_parts`] on an eigensystem the
-    /// caller already holds. The criterion's Hessian operator owns the most
-    /// accurate eigensystem of `H_pen` available (the root-scale SVD when one
-    /// was installed, #2644); re-decomposing the assembled matrix here would
-    /// price `log|H_pen|₊` and every trace this kernel serves at that matrix's
-    /// `O(ε·κ(H))` error instead.
+    /// logdet at every ρ, and `C∞` again. The band is now H's own rounding band
+    /// `p·ε·‖H‖₂` ([`DenseSpectralOperator::identified_rank`], #2901 V22), the
+    /// one the PIRLS minimum-norm solve and the criterion's operator use.
+    ///
+    /// It reads an eigensystem the caller already holds, so post-fit inference
+    /// summarizes the fit on the subspace the criterion scored it on.
+    ///
+    /// [`DenseSpectralOperator::identified_rank`]: super::reml_outer_engine::DenseSpectralOperator::identified_rank
     pub(crate) fn intrinsic_hessian_pseudo_logdet_parts_from_eigensystem(
         h_evals: &[f64],
         h_evecs: &Array2<f64>,
@@ -4847,79 +4815,35 @@ impl<'a> RemlState<'a> {
                 h_evecs.ncols()
             );
         }
-        let h_thr = super::reml_outer_engine::positive_eigenvalue_threshold(h_evals);
-        // `null(H_pen) ⊆ null(S_λ)`: `H_pen = XᵀWX + S_λ` with both terms PSD,
-        // so `vᵀHv ≥ vᵀS_λv` and `Hv = 0 ⟹ S_λv = 0`. The Hessian can have AT
-        // MOST the penalty's nullity, whatever a magnitude threshold on its
-        // spectrum says — and the threshold is RELATIVE to `max|σ|`, which the
-        // outer search itself drives: at two railed penalties (`λ = 1e13`) it
-        // reached `5.64` and landed on a genuine curvature direction at
-        // `σ ≈ 5.6`, three thousand times the eigensolver's own noise. Crossing
-        // it moved the criterion by `½·ln 5.6 = 0.86` for a `Δρ` of `3e-4`
-        // against `|g| = 3.3`, and the fit died with `StepSizeTooSmall`
-        // (`haberman_5yr`, #2748).
-        //
-        // Where the threshold wants more nullity than the penalty structurally
-        // has, the largest positive eigenvalues are restored in descending
-        // order until the bound is met. For a full-rank model that makes the
-        // pseudo-logdet the full logdet at every ρ — `C∞` again.
-        let structural_floor = penalty_rank.min(p);
-        let mut kept: Vec<usize> = (0..p).filter(|&j| h_evals[j] > h_thr).collect();
-        if kept.len() < structural_floor {
-            let mut restored: Vec<usize> = (0..p).filter(|&j| h_evals[j] <= h_thr).collect();
-            restored.sort_by(|&a, &b| {
-                h_evals[b]
-                    .partial_cmp(&h_evals[a])
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            let wanted = structural_floor - kept.len();
-            // A restored direction still has to be POSITIVE curvature: the
-            // bound says the Hessian is non-singular there, not that a
-            // numerically non-positive eigenvalue can be logged.
-            let admitted: Vec<usize> = restored
-                .into_iter()
-                .filter(|&j| h_evals[j] > 0.0)
-                .take(wanted)
-                .collect();
-            if !admitted.is_empty() {
-                log::debug!(
-                    "[#2748] H_pen pseudo-logdet: the relative threshold {h_thr:.6e} kept {} of \
-                     {p} directions, below the {structural_floor} the penalty's own rank permits \
-                     (null(H) ⊆ null(S_λ)); restoring {} direction(s), smallest σ = {:.6e}",
-                    kept.len(),
-                    admitted.len(),
-                    admitted.last().map_or(f64::NAN, |&j| h_evals[j]),
-                );
-                kept.extend(admitted);
-                kept.sort_unstable();
-            }
-        }
+        // The kept set is the top `identified_rank` eigenvalues: those above H's
+        // rounding band, and never fewer than the penalty's own rank, because
+        // `null(H_pen) ⊆ null(S_λ)` (#2748). The rank rule has one definition,
+        // shared with the criterion's operator.
+        let rank = super::reml_outer_engine::DenseSpectralOperator::identified_rank(
+            h_evals,
+            penalty_rank,
+        );
+        let mut order: Vec<usize> = (0..p).collect();
+        order.sort_by(|&a, &b| h_evals[b].total_cmp(&h_evals[a]));
+        let mut kept: Vec<usize> = order.into_iter().take(rank).collect();
+        kept.sort_unstable();
         if kept.is_empty() {
             // No positive curvature anywhere: nothing identified, nothing to
             // correct — mirrors the structurally-null-penalty contract.
             return Ok((0.0, None));
         }
         // Rank-guarded full log|H| (#1426 part A). When EVERY eigenvalue clears
-        // the (relative, eigensolver-noise-calibrated) threshold, H is full
-        // rank: there is no genuinely-null direction, so the pseudo-logdet is
-        // *identically* the full logdet `Σ_j ln μ_j`. Computing it as the full
-        // sum over all p eigenvalues here makes that equivalence explicit and
-        // guarantees the LAML determinant pair `½(log|H| − log|S|₊)` never
-        // orphans a small-but-real H direction that the penalty side keeps —
-        // the #1426 Occam-pair-inversion hazard. This is behaviourally identical
-        // to `exact_pseudo_logdet(.., h_thr)` whenever `kept.len() == p` (the
-        // filtered sum already spans every eigenvalue), so it cannot perturb any
-        // existing FD cert; it differs from the pseudo path ONLY in the
-        // genuinely rank-deficient case, where `kept.len() < p` and we fall back
-        // to the exact pseudo-logdet that #901 installed to tame the
-        // (p − rank)·ln ε divergence over true-null directions.
+        // the rounding band, H is full rank: there is no genuinely-null
+        // direction, so the pseudo-logdet is *identically* the full logdet
+        // `Σ_j ln μ_j`, and the LAML determinant pair `½(log|H| − log|S|₊)`
+        // never orphans a small-but-real H direction that the penalty side
+        // keeps — the #1426 Occam-pair-inversion hazard. Only in the genuinely
+        // rank-deficient case, `kept.len() < p`, is the sum restricted to the
+        // kept set, which drops the (p − rank)·ln ε divergence over true-null
+        // directions (#901).
         let log_det = if kept.len() == p {
             h_evals.iter().map(|&s| s.ln()).sum()
         } else {
-            // Over the KEPT set, which is the threshold's answer bounded below
-            // by the penalty's rank. `exact_pseudo_logdet(.., h_thr)` is the
-            // same sum whenever nothing was restored, so nothing moves on a
-            // model whose threshold already respected its own structural rank.
             kept.iter().map(|&j| h_evals[j].ln()).sum()
         };
 

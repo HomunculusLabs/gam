@@ -1317,9 +1317,7 @@ impl<'a> RemlState<'a> {
         force_spectral_logdet: bool,
         populate_inner_kkt: bool,
     ) -> Result<super::assembly::InnerAssembly<'static>, EstimationError> {
-        use super::reml_outer_engine::{
-            DenseCholeskyOperator, DenseSpectralOperator, PseudoLogdetMode,
-        };
+        use super::reml_outer_engine::{DenseCholeskyOperator, DenseSpectralOperator};
         use std::borrow::Cow;
 
         let pirls_result = bundle.pirls_result.as_ref();
@@ -1341,13 +1339,9 @@ impl<'a> RemlState<'a> {
         // and penalty spans. Its rank must be determined BEFORE λ scales the
         // Hessian: a relative Hessian cutoff deletes identifiable weaker
         // smooth blocks and leaves the spurious −rank(S_k)/2 score (#2835).
-        // HardPseudo here marks the intrinsic-logdet assembly contract; the
-        // operator below receives the structural rank and uses exact kernels.
-        let hessian_mode = if bundle.firth_dense_operator.is_some() {
-            PseudoLogdetMode::HardPseudo
-        } else {
-            PseudoLogdetMode::Smooth
-        };
+        // The operator below receives that structural rank and uses exact
+        // kernels; every other fit is priced on H's identified subspace at its
+        // rounding band (#2901 V22).
         let structural_rank = bundle
             .firth_dense_operator
             .as_ref()
@@ -1361,6 +1355,28 @@ impl<'a> RemlState<'a> {
 
         let c_nontrivial = pirls_result.solve_c_nontrivial;
 
+        let uses_kron_penalty_logdet = self.kronecker_penalty_system.as_ref().is_some_and(|kron| {
+            self.kronecker_factored.is_some() && kron.num_penalties() == rho.len()
+        });
+        // Only the penalty-side `log|S|₊` machinery consumes the penalty
+        // subspace now; the Hessian-side kernel is intrinsic to H_pen (#901)
+        // and no longer needs `range(S_+)`. Its rank bounds H's identified rank
+        // below, so it is computed before the Hessian operator.
+        let penalty_subspace = if !uses_kron_penalty_logdet {
+            Some(self.compute_penalty_subspace(e_for_logdet.as_ref())?)
+        } else {
+            None
+        };
+        let (penalty_rank, penalty_logdet) = self.dense_penalty_logdet_derivs(
+            rho,
+            e_for_logdet.as_ref(),
+            &[],
+            penalty_subspace.as_ref(),
+            bundle,
+            mode,
+            free_basis_opt.as_ref(),
+        )?;
+
         // For ValueOnly evaluations on the SPD fast path (no Firth, no hard
         // linear constraints), use a Cholesky-backed operator.  LLT costs
         // O(p³/3) versus the O(9·p³) full eigendecomposition, giving a
@@ -1368,34 +1384,18 @@ impl<'a> RemlState<'a> {
         // any gradient trace call, so the operator only needs to serve
         // `logdet()` and `solve()`/`solve_multi()` — both provided by LLT.
         //
-        // Keep c-nontrivial non-Gaussian fits on the spectral path even for
-        // value-only probes: their LAML value installs the intrinsic
-        // pseudo-logdet correction below, and using the Cholesky full logdet
-        // here would make cost-only line-search / FD probes evaluate a
-        // different scalar from the value+gradient path (#901).
+        // The LLT prices the exact `Σ ln σ_j`; every derivative lane prices
+        // `log|H|₊` on H's identified subspace. The certificate holds the
+        // factorization error `2γ_p‖H‖_F‖H⁻¹‖_F` inside the value envelope
+        // `√ε·max(|log|H||, 1)`, which bounds `κ(H)` far below `1/(pε)`: every
+        // eigenvalue clears the rounding band, so the two scalars coincide.
         //
-        // #1376: the Cholesky fast path returns the EXACT log-determinant
-        // `Σ ln σ_j`, while the gradient path's `DenseSpectralOperator` returns
-        // the smooth-floored `Σ ln r_ε(σ_j)` and differentiates exactly THAT
-        // floored object via `tr(G_ε Ḣ)`. The two agree only when every σ_j is
-        // safely above the stability floor ε. A design-moving ψ coordinate (the
-        // Matérn/Duchon log-κ axis) under the default double-penalty drives the
-        // projected-kernel shrinkage block's near-null eigenvalues of
-        // `H = XᵀWX + Sλ` down toward ε, so the exact and floored log-dets — and
-        // hence their κ-derivatives — diverge. The outer FD audit then central-
-        // differences the EXACT-logdet ValueOnly cost while the analytic gradient
-        // reports the FLOORED-logdet derivative: an objective↔gradient DESYNC
-        // (analytic ≠ FD on `psi_kappa[..]`, the headline #1376 symptom). Gate the
-        // Cholesky fast path off whenever the outer vector carries a design-moving
-        // ψ coordinate, so value and gradient share ONE smooth-floored `log|H|`.
-        // Pure-ρ (penalty-only) fits keep the LLT speedup: their drifts live in
-        // `range(Sλ)`, the floored/exact logdets and their ρ-derivatives match,
-        // and there is no design-moving axis to desync. The caller passes
-        // `force_spectral_logdet = true` exactly when the outer vector carries a
-        // design-moving ψ coordinate.
+        // c-nontrivial fits and design-moving ψ coordinates
+        // (`force_spectral_logdet`, #1376) stay on the spectral path even for
+        // value-only probes (#901).
         let hessian_op: std::sync::Arc<dyn super::reml_outer_engine::HessianFactorization> = if mode
             == super::reml_outer_engine::EvalMode::ValueOnly
-            && matches!(hessian_mode, PseudoLogdetMode::Smooth)
+            && structural_rank.is_none()
             && free_basis_opt.is_none()
             && !c_nontrivial
             && !force_spectral_logdet
@@ -1405,9 +1405,9 @@ impl<'a> RemlState<'a> {
             ) {
                 Ok(chol_op) => std::sync::Arc::new(chol_op),
                 Err(_) => std::sync::Arc::new(
-                    DenseSpectralOperator::from_symmetric_with_mode(
+                    DenseSpectralOperator::from_symmetric_on_identified_subspace(
                         h_for_operator.as_ref(),
-                        hessian_mode,
+                        penalty_rank,
                     )
                     .map_err(|e| {
                         EstimationError::InvalidInput(format!(
@@ -1424,9 +1424,9 @@ impl<'a> RemlState<'a> {
                         rank,
                     )
                 } else {
-                    DenseSpectralOperator::from_symmetric_with_mode(
+                    DenseSpectralOperator::from_symmetric_on_identified_subspace(
                         h_for_operator.as_ref(),
-                        hessian_mode,
+                        penalty_rank,
                     )
                 }
                 .map_err(|e| {
@@ -1437,27 +1437,6 @@ impl<'a> RemlState<'a> {
             )
         };
 
-        let uses_kron_penalty_logdet = self.kronecker_penalty_system.as_ref().is_some_and(|kron| {
-            self.kronecker_factored.is_some() && kron.num_penalties() == rho.len()
-        });
-        // Only the penalty-side `log|S|₊` machinery consumes the penalty
-        // subspace now; the Hessian-side kernel is intrinsic to H_pen (#901)
-        // and no longer needs `range(S_+)`.
-        let penalty_subspace = if !uses_kron_penalty_logdet {
-            Some(self.compute_penalty_subspace(e_for_logdet.as_ref())?)
-        } else {
-            None
-        };
-        let (penalty_rank, penalty_logdet) = self.dense_penalty_logdet_derivs(
-            rho,
-            e_for_logdet.as_ref(),
-            &[],
-            penalty_subspace.as_ref(),
-            bundle,
-            mode,
-            free_basis_opt.as_ref(),
-        )?;
-
         let beta = if let Some(z) = free_basis_opt.as_ref() {
             z.t().dot(pirls_result.beta_transformed.as_ref())
         } else {
@@ -1466,72 +1445,11 @@ impl<'a> RemlState<'a> {
 
         let nullspace_dim = h_for_operator.ncols().saturating_sub(penalty_rank) as f64;
 
-        // Rank-deficient LAML fix (#901 corrected object): under `Smooth` the
-        // spectral operator's cached logdet sums `ln r_ε(σ_j(H))` over ALL
-        // eigenvalues, so genuinely null directions contribute `(p − rank) ·
-        // ln ε` — very negative — and make `½(log|H| − log|S|_+)` diverge to
-        // −∞ whenever `rank(X'WX) + rank(S) < p`. Replace it with the
-        // intrinsic pseudo-logdet `log|H_pen|₊` over `range(H_pen)` (mgcv's
-        // generalized determinant) by routing the scalar difference through
-        // `hessian_logdet_correction`; `reml_laml_evaluate` already sums
-        // `hop.logdet() + correction`.
-        //
-        // The matching gradient kernel is the SAME spectral object: `H_pen⁺`
-        // carried as `PenaltySubspaceTrace { U_H, diag(1/σ) }`, whose trace
-        // `tr(H_pen⁺ · Ḣ)` is the exact pseudo-logdet derivative for EVERY
-        // drift — ρ-direction penalty drifts `λ_k S_k`, ψ-direction basis
-        // drifts `λ_k ∂S_k/∂ψ` (whose `range(Sλ(ψ))` rotates with ψ), and the
-        // non-Gaussian IFT correction `D_β H[v] = X' diag(c ⊙ X v) X` (which
-        // leaks onto `null(S)` through the intercept column). The previous
-        // realization projected value AND kernel onto `range(S_+)` — see
-        // `intrinsic_hessian_pseudo_logdet_parts` for why that object drops
-        // the θ-dependent Schur curvature `log det(C − BᵀA⁻¹B)` of the
-        // penalty-null block and produced sign-flipped ρ-gradients and ~1e5
-        // ψ-gradient blow-ups against FD (#901).
-        //
-        // Under `HardPseudo` the operator already masks null eigenpairs
-        // consistently in `logdet`, `trace_logdet_*`, and `solve`, so the
-        // correction is zero there and no kernel is needed.
-        //
-        // Gate on `c_nontrivial`: for canonical Gaussian (Identity link) the
-        // IRLS weights are η-independent, `c ≡ 0`, `D_β H ≡ 0`, and the
-        // classical Gaussian REML cost identity (`log|H|` through the smooth
-        // spectral floor) is already FD-consistent — installing the exact
-        // pseudo-logdet there would change the cost surface for no gradient
-        // benefit. Every c-nontrivial family (Probit / Logit / cloglog /
-        // Poisson / Gamma / SAS / GAMLSS noise blocks / …) gets the intrinsic
-        // object unconditionally.
-        //
-        // The corrected value and this kernel are ONE object (#2765): the
-        // scalar rides on the kernel, so no downstream lane can inherit the
-        // corrected `log|H_pen|₊` while declining the `H_pen⁺` that
-        // differentiates it. `InnerSolution::hessian_logdet_correction` keeps
-        // its documented meaning — a uniform curvature rescale — and nothing
-        // else.
-        let penalty_subspace_trace = if matches!(hessian_mode, PseudoLogdetMode::Smooth)
-            && c_nontrivial
-        {
-            let (log_det_h_plus, kernel) =
-                match super::reml_outer_engine::HessianFactorization::as_exact_dense_spectral(
-                    &*hessian_op,
-                ) {
-                    Some(spectral) => Self::intrinsic_hessian_pseudo_logdet_parts_from_eigensystem(
-                        &spectral.raw_eigenvalues,
-                        &spectral.eigenvectors,
-                        penalty_rank,
-                    )?,
-                    None => Self::intrinsic_hessian_pseudo_logdet_parts(
-                        h_for_operator.as_ref(),
-                        penalty_rank,
-                    )?,
-                };
-            kernel.map(|mut kernel| {
-                kernel.logdet_correction = log_det_h_plus - hessian_op.logdet();
-                std::sync::Arc::new(kernel)
-            })
-        } else {
-            None
-        };
+        // `log|H|₊`, its gradient and cross traces and the `H⁺` solves are all
+        // projections of the one operator above, exact on H's identified
+        // subspace, so no pseudo-logdet correction and no separate `H_pen⁺`
+        // kernel is installed (#901, #2765, #2901 V22). Canonical Gaussian is
+        // no exception: its fit was solved on the same subspace.
         let hessian_logdet_correction = 0.0_f64;
 
         // #1271 diagnostic: dump the REML logdet internals at every dense
@@ -1612,7 +1530,7 @@ impl<'a> RemlState<'a> {
             penalty_rank,
             nullspace_dim,
             hessian_logdet_correction,
-            penalty_subspace_trace,
+            None,
             free_basis_opt.as_ref(),
             inner_kkt_residual,
         ))
@@ -1818,13 +1736,6 @@ impl<'a> RemlState<'a> {
 
         // Match the transformed assembly's structural-rank Firth operator.
         // A strong penalty changes curvature, never coefficient identifiability.
-        let hessian_mode = if bundle.firth_dense_operator.is_some()
-            || bundle.firth_dense_operator_original.is_some()
-        {
-            PseudoLogdetMode::HardPseudo
-        } else {
-            PseudoLogdetMode::Smooth
-        };
         let structural_rank = if let Some(firth) = bundle.firth_dense_operator_original.as_ref() {
             let root_original = pirls_result
                 .reparam_result
@@ -1838,7 +1749,29 @@ impl<'a> RemlState<'a> {
         } else {
             None
         };
-        let c_nontrivial = pirls_result.solve_c_nontrivial;
+        let e_for_logdet = &pirls_result.reparam_result.e_transformed;
+        let uses_kron_penalty_logdet = self.kronecker_penalty_system.as_ref().is_some_and(|kron| {
+            self.kronecker_factored.is_some() && kron.num_penalties() == rho.len()
+        });
+        // Penalty-side `log|S|₊` machinery only; the Hessian-side kernel is
+        // intrinsic to H_pen (#901) and no longer consumes `range(S_+)`. Its
+        // rank bounds H's identified rank, so it is computed before the operator.
+        let penalty_subspace = if !uses_kron_penalty_logdet {
+            Some(self.compute_penalty_subspace(e_for_logdet)?)
+        } else {
+            None
+        };
+        let (penalty_rank, penalty_logdet) = self.dense_penalty_logdet_derivs(
+            rho,
+            e_for_logdet,
+            &[],
+            penalty_subspace.as_ref(),
+            bundle,
+            mode,
+            // Original-basis assembly is only used when there are no active
+            // constraints, so no constraint-free projection applies here.
+            None,
+        )?;
 
         // All evaluation orders use the spectral operator in this original
         // basis. Unlike `build_dense_assembly`, there is no value-only
@@ -1870,7 +1803,10 @@ impl<'a> RemlState<'a> {
                         rank,
                     )
                 } else {
-                    DenseSpectralOperator::from_symmetric_with_mode(&h_total_original, hessian_mode)
+                    DenseSpectralOperator::from_symmetric_on_identified_subspace(
+                        &h_total_original,
+                        penalty_rank,
+                    )
                 }
                 .map_err(|e| {
                     EstimationError::InvalidInput(format!(
@@ -1891,11 +1827,7 @@ impl<'a> RemlState<'a> {
                             &h_total_original,
                             op.raw_spectrum(),
                             op.logdet(),
-                            if structural_rank.is_some() {
-                                PseudoLogdetMode::PositiveDefinite
-                            } else {
-                                hessian_mode
-                            },
+                            PseudoLogdetMode::PositiveDefinite,
                         )
                         .map(std::sync::Arc::new)
                     })
@@ -1923,74 +1855,13 @@ impl<'a> RemlState<'a> {
             build_spectral()?
         };
 
-        let e_for_logdet = &pirls_result.reparam_result.e_transformed;
-        let uses_kron_penalty_logdet = self.kronecker_penalty_system.as_ref().is_some_and(|kron| {
-            self.kronecker_factored.is_some() && kron.num_penalties() == rho.len()
-        });
-        // Penalty-side `log|S|₊` machinery only; the Hessian-side kernel is
-        // intrinsic to H_pen (#901) and no longer consumes `range(S_+)`.
-        let penalty_subspace = if !uses_kron_penalty_logdet {
-            Some(self.compute_penalty_subspace(e_for_logdet)?)
-        } else {
-            None
-        };
-        let (penalty_rank, penalty_logdet) = self.dense_penalty_logdet_derivs(
-            rho,
-            e_for_logdet,
-            &[],
-            penalty_subspace.as_ref(),
-            bundle,
-            mode,
-            // Original-basis assembly is only used when there are no active
-            // constraints, so no constraint-free projection applies here.
-            None,
-        )?;
-
         let nullspace_dim = beta.len().saturating_sub(penalty_rank) as f64;
 
-        // Same rank-deficient LAML fix as `build_dense_assembly` (#901
-        // corrected object), adapted to the original-basis Hessian. The
-        // intrinsic pseudo-logdet `log|H_pen|₊` and its spectral kernel
-        // `H_pen⁺` are properties of `H_pen` ALONE — no external `range(S_+)`
-        // basis is involved — so the historical rotate-into-transformed-basis
-        // / project / rotate-`U_S`-back-via-`Qs` dance is gone: build the
-        // parts directly from `h_total_original` in the basis the ψ/τ drift
-        // matrices are produced in. (The pseudo-logdet scalar is invariant
-        // under the orthogonal Qs change of basis, so the value pairing with
-        // `hessian_op.logdet()` — also original-basis — is unchanged.)
-        //
-        // Gate `c_nontrivial` and the `HardPseudo` skip: same rationale as
-        // `build_dense_assembly`; see `intrinsic_hessian_pseudo_logdet_parts`
-        // for the full #901 derivation (why range(Sλ)-projected value+kernel
-        // was the wrong object, and why `tr(H_pen⁺ Ḣ)` is exact for every
-        // drift including moving-subspace ψ directions).
-        // Value and kernel are one object (#2765) — see the twin site in
-        // `build_dense_assembly`.
-        let penalty_subspace_trace =
-            if matches!(hessian_mode, PseudoLogdetMode::Smooth) && c_nontrivial {
-                let (log_det_h_plus, kernel) =
-                    match super::reml_outer_engine::HessianFactorization::as_exact_dense_spectral(
-                        &*hessian_op,
-                    ) {
-                        Some(spectral) => {
-                            Self::intrinsic_hessian_pseudo_logdet_parts_from_eigensystem(
-                                &spectral.raw_eigenvalues,
-                                &spectral.eigenvectors,
-                                penalty_rank,
-                            )?
-                        }
-                        None => Self::intrinsic_hessian_pseudo_logdet_parts(
-                            &h_total_original,
-                            penalty_rank,
-                        )?,
-                    };
-                kernel.map(|mut kernel| {
-                    kernel.logdet_correction = log_det_h_plus - hessian_op.logdet();
-                    std::sync::Arc::new(kernel)
-                })
-            } else {
-                None
-            };
+        // As in `build_dense_assembly`, `log|H|₊`, its traces and the `H⁺`
+        // solves are projections of the one operator above, exact on H's
+        // identified subspace in the basis the ψ/τ drift matrices are produced
+        // in, so no pseudo-logdet correction and no separate kernel is
+        // installed (#901, #2765, #2901 V22).
         let hessian_logdet_correction = 0.0_f64;
 
         // #1271 diagnostic (twin of the build_dense_assembly probe): this is the
@@ -2092,7 +1963,7 @@ impl<'a> RemlState<'a> {
             penalty_rank,
             nullspace_dim,
             hessian_logdet_correction,
-            penalty_subspace_trace,
+            None,
             None,
             inner_kkt_residual,
         ))

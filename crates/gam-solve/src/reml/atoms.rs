@@ -10,9 +10,9 @@
 //! #901). The #901 campaign proved the class is TWO-layer deep:
 //!
 //! 1. the determinant term's value used one object (range(Sλ)-projected
-//!    logdet) while its trace kernel meant another — fixed by
-//!    `intrinsic_hessian_pseudo_logdet_parts` (value and kernel are now one
-//!    eigendecomposition); and yet
+//!    logdet) while its trace kernel meant another — fixed by pricing H on
+//!    its identified subspace (value and kernel are now one
+//!    eigendecomposition, #901, #2901 V22); and yet
 //! 2. the FD drivers STILL fail with byte-identical blow-ups, because the
 //!    DRIFT matrices fed to that kernel (`Ḣ_j = ∂H/∂θ_j + D_βH[β̇_j]`) are
 //!    assembled by a third code path that disagrees with the cost's actual
@@ -113,9 +113,9 @@
 //! SAME commit. No compat shims, no parallel evaluation layers, no
 //! "fallback to legacy path" flags. `penalty_logdet.rs` is already the
 //! first atom in everything but the trait impl; the landed
-//! `intrinsic_hessian_pseudo_logdet_parts` (#901) is the second — its
+//! identified-subspace Hessian operator (#901, #2901 V22) is the second — its
 //! (value, spectral kernel) pair is precisely a `frozen` emission and its
-//! `PenaltySubspaceTrace` is the contraction state. The #784 moment seam
+//! eigensystem is the contraction state. The #784 moment seam
 //! specified on `block_sampled_marginal_correction` is the third, and the
 //! hardest test of the abstraction: a SAMPLED atom whose frozen channel is
 //! the explicit penalty score, whose direction channel is one rank-≤3m
