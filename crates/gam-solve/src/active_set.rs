@@ -696,6 +696,9 @@ where
     let mut passive: Vec<usize> = Vec::new();
     let mut in_passive = vec![false; m];
     let mut residual = target.clone();
+    // The rounding band each residual entry is known to. The initial residual is
+    // the exact input, so its band is zero.
+    let mut residual_band = Array1::<f64>::zeros(p);
     // Rows whose trial coefficient collapsed to zero at the current residual;
     // re-eligible as soon as the residual moves. Prevents an add/drop loop on
     // exactly degenerate geometry.
@@ -804,8 +807,14 @@ where
                 break;
             }
         }
-        // Refresh the residual; any movement re-enables banned rows.
+        // Refresh the residual. Movement beyond the rounding of both residuals
+        // re-enables banned rows. Each refreshed entry `target_i − Σ_r c_r·a_ri` is
+        // a `passive.len() + 1`-term accumulation, known only to the accumulation
+        // band of its absolute sum, and the previous residual carries its own band.
+        // A change inside their sum is arithmetic, and re-enabling on it would let
+        // a degenerate add/drop pair cycle at rounding (#2469).
         let mut fitted = Array1::<f64>::zeros(p);
+        let mut fitted_absolute = Array1::<f64>::zeros(p);
         let passive_rows = gather_rows(&passive)?;
         if passive_rows.nrows() != passive.len()
             || passive_rows.ncols() != p
@@ -814,17 +823,25 @@ where
             return None;
         }
         for (position, &row) in passive.iter().enumerate() {
-            fitted.scaled_add(
-                lambda_unit[row] / row_norms[row],
-                &passive_rows.row(position),
+            let coefficient = lambda_unit[row] / row_norms[row];
+            fitted.scaled_add(coefficient, &passive_rows.row(position));
+            fitted_absolute.scaled_add(
+                coefficient.abs(),
+                &passive_rows.row(position).mapv(f64::abs),
             );
         }
         let new_residual = target - &fitted;
-        let moved = new_residual
-            .iter()
-            .zip(residual.iter())
-            .any(|(a, b)| (a - b).abs() > 1e-15 * target_inf);
+        let new_band = Array1::from_iter((0..p).map(|axis| {
+            gam_linalg::roundoff::accumulation_band(
+                passive.len() + 1,
+                target[axis].abs() + fitted_absolute[axis],
+            )
+        }));
+        let moved = (0..p).any(|axis| {
+            (new_residual[axis] - residual[axis]).abs() > new_band[axis] + residual_band[axis]
+        });
         residual = new_residual;
+        residual_band = new_band;
         if moved {
             banned.iter_mut().for_each(|b| *b = false);
         } else if !inner_ok {
