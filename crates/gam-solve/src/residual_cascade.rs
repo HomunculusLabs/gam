@@ -7139,7 +7139,7 @@ mod refinement_decision_tests {
     /// 1. THE TWO ROUTES DO NOT EVALUATE AT THE SAME LAMBDA. The cascade
     ///    exponentiates `rho` through `checked_exp_log_strength`, i.e. the
     ///    platform `exp` (sub-ulp); [`AffineRemlProfile::evaluate`] uses
-    ///    `certified_exp_representative`, the midpoint of an outward-rounded
+    ///    the clamped midpoint of `certified_exp`'s outward-rounded
     ///    enclosure that is hundreds of ulps wide. Neither route may adopt the
     ///    other's: the cascade's criterion has to describe the lambda the fit
     ///    is actually solved at, and the affine profile's exponential has to be
@@ -7194,8 +7194,12 @@ mod refinement_decision_tests {
             // between them.
             let lambda =
                 gam_problem::checked_exp_log_strength(log_lambda).expect("cascade lambda");
-            let affine_lambda = gam_math::score_opt::certified_exp_representative(log_lambda)
-                .expect("affine lambda");
+            let enclosure =
+                gam_math::score_opt::certified_exp(log_lambda).expect("affine lambda enclosure");
+            // `AffineRemlProfile::evaluate` reads the clamped midpoint of this enclosure.
+            let affine_lambda = (enclosure.lo + 0.5 * (enclosure.hi - enclosure.lo))
+                .max(enclosure.lo)
+                .min(enclosure.hi);
             let shift = (affine_lambda - lambda).abs() / lambda;
 
             let (rss, s2, s3, s4) = spectrum.moments(lambda);

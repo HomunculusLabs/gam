@@ -3816,7 +3816,7 @@ fn certified_midpoint(interval: ClosedInterval) -> f64 {
 /// needing a proof must retain the full enclosure returned by
 /// [`certified_exp`].
 #[inline]
-pub fn certified_exp_representative(value: f64) -> Option<f64> {
+pub(crate) fn certified_exp_representative(value: f64) -> Option<f64> {
     certified_exp(value).map(certified_midpoint)
 }
 
