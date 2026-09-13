@@ -65,7 +65,7 @@ use opt::constants::{ARMIJO_C1, BACKTRACK_CONTRACTION};
 use opt::{AcceptedStep, BacktrackConfig, backtracking_line_search};
 
 use crate::chart_coordinate_solve::PeriodicCurveExtrema;
-use crate::manifold::{AffineCoordinateEvaluator, AmbientSphereHarmonicEvaluator, CylinderHarmonicEvaluator, EuclideanPatchEvaluator, PeriodicHarmonicEvaluator, SHAPE_BAND_MAX_POINTS, SaeBasisEvaluator, SaeManifoldAtom, TorusHarmonicEvaluator};
+use crate::manifold::{AmbientSphereHarmonicEvaluator, CylinderHarmonicEvaluator, EuclideanPatchEvaluator, PeriodicHarmonicEvaluator, SHAPE_BAND_MAX_POINTS, SaeBasisEvaluator, SaeManifoldAtom, TorusHarmonicEvaluator};
 use gam_linalg::faer_ndarray::FaerEigh;
 
 use faer::Side;
@@ -211,28 +211,6 @@ impl BasisHessianLipschitz for AmbientSphereHarmonicEvaluator {
     fn third_sup(&self, chart: &ChartRegion) -> f64 {
         chart.assert_valid();
         self.column_jet_bound() * (self.degree() as f64).powi(3)
-    }
-}
-
-impl BasisHessianLipschitz for AffineCoordinateEvaluator {
-    /// The affine basis `[1, t₁, …, t_d]` is degree ≤ 1: its first jet has unit
-    /// columns, and all second and third jets vanish. The value sup is
-    /// `max(1, ‖t‖)` over the chart, bounded by `1 + ‖t_c‖ + radius`.
-    fn value_sup(&self, chart: &ChartRegion) -> f64 {
-        let center_norm = chart.center.dot(&chart.center).sqrt();
-        1.0 + center_norm + chart.radius
-    }
-    fn jacobian_sup(&self, chart: &ChartRegion) -> f64 {
-        chart.assert_valid();
-        1.0
-    }
-    fn hessian_sup(&self, chart: &ChartRegion) -> f64 {
-        chart.assert_valid();
-        0.0
-    }
-    fn third_sup(&self, chart: &ChartRegion) -> f64 {
-        chart.assert_valid();
-        0.0
     }
 }
 

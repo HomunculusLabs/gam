@@ -78,10 +78,6 @@ pub(crate) fn phi_eta_one_reproduces_current_atom_bases_bit_for_bit() {
     let periodic = PeriodicHarmonicEvaluator::new(7).unwrap();
     assert_eta_one_parity(&periodic, periodic_coords.view(), 4);
 
-    let raw_circle_coords = array![[0.0_f64], [0.3], [1.1]];
-    let raw_circle = RawPeriodicCircleEvaluator::new(1).unwrap();
-    assert_eta_one_parity(&raw_circle, raw_circle_coords.view(), 0);
-
     let torus_coords = array![[0.0_f64, 0.2], [0.25, 0.5], [0.7, 0.9]];
     let torus = TorusHarmonicEvaluator::new(2, 2).unwrap();
     assert_eta_one_parity(&torus, torus_coords.view(), 20);

@@ -1,7 +1,7 @@
 //! Chart / basis-evaluator jet & finite-difference fidelity tests, split out of
 //! `tests.rs` to keep that file under the #780 line-count gate. These exercise
 //! the per-manifold coordinate evaluators (periodic, sphere, torus, cylinder,
-//! Duchon, Euclidean patch, affine) and pin their analytic Jacobian / second /
+//! Duchon, Euclidean patch) and pin their analytic Jacobian / second /
 //! third jets against central-difference oracles, the continuous fixed-decoder
 //! OOS projection solve, and the Euclidean affine-gauge canonicalization. They
 //! share the parent module's helpers via `super::tests`.
@@ -62,12 +62,6 @@ pub(crate) fn sae_basis_evaluator_jacobians_match_central_differences() {
         1.0e-6,
     );
 
-    assert_jacobian_matches_central_difference(
-        &RawPeriodicCircleEvaluator::new(3).unwrap(),
-        array![[-1.2, 0.3, 2.0], [0.0, -0.4, 0.8], [2.4, 1.1, -0.7]],
-        1.0e-6,
-    );
-
     // Ambient unit vectors, poles INCLUDED: the ambient sphere has no boundary,
     // so a pole is an ordinary sample point rather than a place to stay away
     // from — which is the whole difference from the chart this replaced.
@@ -108,12 +102,6 @@ pub(crate) fn sae_basis_evaluator_jacobians_match_central_differences() {
             );
         }
     }
-
-    assert_jacobian_matches_central_difference(
-        &AffineCoordinateEvaluator::new(3),
-        array![[0.0, -1.0, 2.0], [3.5, 0.25, -0.75]],
-        1.0e-6,
-    );
 
     // Torus T^2 with H=3 → 49-column tensor product.
     let torus_coords = array![[0.1, 0.7], [0.42, 0.0], [0.95, 0.33], [0.5, 0.5]];
@@ -493,19 +481,6 @@ pub(crate) fn isometry_torus_third_jet_matches_fd() -> Result<(), String> {
     let evaluator = TorusHarmonicEvaluator::new(2, 3).unwrap();
     assert!(evaluator.basis_size() > 0);
     assert_third_jet_matches_central_difference(&evaluator, torus_coords, 1.0e-6, 1.0e-5)?;
-    Ok(())
-}
-
-#[test]
-pub(crate) fn isometry_affine_third_jet_is_trivial_zero() -> Result<(), String> {
-    let evaluator = AffineCoordinateEvaluator { latent_dim: 3 };
-    let coords = array![[0.2, -0.3, 0.7], [1.1, 0.0, -0.4]];
-    let third = evaluator.third_jet(coords.view())?;
-    assert_eq!(third.dim(), (coords.nrows(), 4, 3, 3, 3));
-    assert!(
-        third.iter().all(|x| *x == 0.0),
-        "affine third jet must vanish identically, got {third:?}"
-    );
     Ok(())
 }
 

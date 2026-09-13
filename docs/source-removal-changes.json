@@ -6875,5 +6875,26 @@
     ],
     "reason": "#2899 public API sweep of gam-sae (prune-api-d): crates/gam-sae/src/criterion_atoms.rs (the #931 criterion-as-atoms pilot: SaeCriterionAtom with value/grad/label, SaeCriterion with assemble/value/gradient/atoms/n_rho, and its four unit tests) and the EffectWeightedFitReport report in crates/gam-sae/src/effect_weight.rs (EffectWeightedFitReport::new, FitQualityMetric, validate_unit_interval) have no consumer outside their own files. The production SAE criterion never assembles through SaeCriterion, and no product root builds the report. bf15edbe7 restored pub on them only to bring the build back to green after the narrowing. The module is deleted with its lib.rs declaration, and effect_weight.rs keeps its retention ledger; its module doc drops the fit-quality phrase.",
     "evidence": "At e65a93a99, git grep -l -w over the whole tree finds EffectWeightedFitReport, FitQualityMetric and validate_unit_interval only in crates/gam-sae/src/effect_weight.rs, and SaeCriterion and SaeCriterionAtom only in crates/gam-sae/src/criterion_atoms.rs. The module name criterion_atoms appears only on crates/gam-sae/src/lib.rs:17 and in two generated JSON artifacts (bench/measurements/issue_triage_20260908/issue2833-final-extension-source-sha256.json, tools/codebase-city/public/city-data.json). docs/public-api-2829-disposition.tsv names none of them. Pool overlay check 557881 applied this change at 7ae739779 before landing (log /scratch.global/sauer354/pool/prune-api-d/check.557881.log). Not compiled locally (user directive)."
+  },
+  {
+    "base": "f9aab93bddfcc17d897576911bb5d28b6e1b01d4",
+    "items": [
+      "crates/gam-sae/src/basis.rs:fn:evaluate",
+      "crates/gam-sae/src/basis.rs:fn:new",
+      "crates/gam-sae/src/basis.rs:fn:phi_eta_split",
+      "crates/gam-sae/src/basis.rs:fn:second_jet",
+      "crates/gam-sae/src/basis.rs:fn:second_jet_dyn",
+      "crates/gam-sae/src/basis.rs:fn:third_jet",
+      "crates/gam-sae/src/basis.rs:fn:third_jet_dyn",
+      "crates/gam-sae/src/basis.rs:struct:AffineCoordinateEvaluator",
+      "crates/gam-sae/src/basis.rs:struct:RawPeriodicCircleEvaluator",
+      "crates/gam-sae/src/encode.rs:fn:hessian_sup",
+      "crates/gam-sae/src/encode.rs:fn:jacobian_sup",
+      "crates/gam-sae/src/encode.rs:fn:third_sup",
+      "crates/gam-sae/src/encode.rs:fn:value_sup",
+      "crates/gam-sae/src/manifold/tests_chart_evaluator_jets.rs:fn:isometry_affine_third_jet_is_trivial_zero"
+    ],
+    "reason": "#2899 public API sweep of gam-sae (prune-api-d): two basis evaluators have no product consumer. RawPeriodicCircleEvaluator (crates/gam-sae/src/basis.rs, the raw-angle [cos t, sin t] evaluator for the minimal SAE-manifold front-end) is constructed only in two manifold unit tests. AffineCoordinateEvaluator (basis.rs, the affine fallback for the minimal fit entrypoint, with its SaeBasisSecondJet and SaeBasisThirdJet impls) is constructed only in manifold unit tests. Production code names it only in its encode.rs BasisHessianLipschitz impl, the matching import, and a penalties.rs error message. Both evaluators are deleted with their trait impls and the encode.rs impl, and so is the affine-only test isometry_affine_third_jet_is_trivial_zero. The parity and Jacobian tests lose only their raw-circle and affine rows; every other evaluator stays covered. The penalties.rs message no longer names the affine evaluator.",
+    "evidence": "At 532a020d5, git grep -l -w over the whole tree finds RawPeriodicCircleEvaluator only in basis.rs, manifold/tests.rs (phi_eta_one_reproduces_current_atom_bases_bit_for_bit) and manifold/tests_chart_evaluator_jets.rs (sae_basis_evaluator_jacobians_match_central_differences). It finds AffineCoordinateEvaluator only in basis.rs, encode.rs (the import and the BasisHessianLipschitz impl), manifold/penalties.rs (an error-message string) and tests_chart_evaluator_jets.rs. Rebuilt at the landing base, the same whole-tree check leaves no reference to either name. docs/public-api-2829-disposition.tsv names neither. Pool overlay check 557881 applied this change at 7ae739779 before landing (log /scratch.global/sauer354/pool/prune-api-d/check.557881.log). Not compiled locally (user directive)."
   }
 ]

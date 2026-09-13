@@ -2840,5 +2840,14 @@
     },
     "reason": "#2899 public API sweep of gam-sae (prune-api-d): the criterion_atoms module and the effect-weighted fit report have no consumer outside their own files, so their public functions are deleted.",
     "evidence": "At e65a93a99, git grep -l -w finds SaeCriterion and SaeCriterionAtom only in criterion_atoms.rs and EffectWeightedFitReport only in effect_weight.rs. The removed map is public_api_census.py's census difference over this change, computed on MSI."
+  },
+  {
+    "base": "f9aab93bddfcc17d897576911bb5d28b6e1b01d4",
+    "removed": {
+      "crates/gam-sae/src/basis.rs::new": 2,
+      "crates/gam-sae/src/manifold/tests_chart_evaluator_jets.rs::isometry_affine_third_jet_is_trivial_zero": 1
+    },
+    "reason": "#2899 public API sweep of gam-sae (prune-api-d): only gam-sae unit tests construct RawPeriodicCircleEvaluator and AffineCoordinateEvaluator, so the evaluators and their public constructors are deleted.",
+    "evidence": "At 532a020d5, git grep -l -w finds RawPeriodicCircleEvaluator and AffineCoordinateEvaluator constructed only in manifold/tests.rs and manifold/tests_chart_evaluator_jets.rs. The removed map is public_api_census.py's census difference over this change, computed on MSI."
   }
 ]
