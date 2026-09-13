@@ -99,7 +99,7 @@ const MAX_BOUNCES_BASE: usize = 256;
 ///   families (Binomial / Poisson). Scales the posterior covariance to
 ///   `φ·H⁻¹`, exactly as `crate::sample::laplace_gaussian_fallback`.
 /// * `constraints` — `A` (`m × p`) and `b` (`m`), meaning `A β ≥ b`.
-pub fn sample_truncated_gaussian_posterior(
+pub(crate) fn sample_truncated_gaussian_posterior(
     center: &Array1<f64>,
     feasible_start: &Array1<f64>,
     penalized_hessian: &Array2<f64>,

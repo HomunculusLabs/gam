@@ -2578,5 +2578,13 @@
     },
     "reason": "SPEC rules 5 and 23 (#2901 V22 slice 4b). gam_problem::RidgePassport has no constructor or reader after 8b5f0fdb5, so its methods (scaled_identity, zero, delta, matrix_form, policy, penalty_logdet_ridge) go with it; Inertia::zero keeps the other declaration of zero. The five penalty_logdet tests are renamed to drop 'ridge' because from_penalties no longer takes one; they are restated at zero ridge.",
     "evidence": "At the base, git grep -n -w RidgePassport over crates, src, tests, bench, examples, python and docs finds only crates/gam-problem/src/types.rs and one unrelated prose line in docs/source-removal-changes.json. The renamed tests are test-module pub(crate) fns in crates/gam-solve/src/reml/penalty_logdet.rs with no callers."
+  },
+  {
+    "base": "0e63fbb1d2b6e416832e16df731fd36ea3be884f",
+    "removed": {
+      "crates/gam-terms/src/basis/implicit_psi_derivative.rs::is_duchon_family": 1
+    },
+    "reason": "#2899 dead code: ImplicitDesignPsiDerivative::is_duchon_family has no caller. The gam-terms call sites use RadialScalarKind::is_duchon_family, which stays.",
+    "evidence": "Guarded job 558165 (probe cbbda5a12) reported the method never used once narrowed. At the base, git grep -n -w is_duchon_family over crates, src, tests, examples, bench and python finds no call on an ImplicitDesignPsiDerivative."
   }
 ]

@@ -2971,7 +2971,7 @@ impl SpatialLogKappaCoords {
 
     /// Isotropic lower bounds for the κ SEARCH BOX.
     ///
-    /// Each entry gets the ψ_lo edge of [`spatial_term_psi_search_box`] — the
+    /// Each entry gets the ψ_lo edge of `spatial_term_psi_search_box` — the
     /// data-geometry window widened to contain the term's own incumbent length
     /// scale, so the point the search starts at and is graded against is inside
     /// the set being searched (#2454).
@@ -2991,7 +2991,7 @@ impl SpatialLogKappaCoords {
     }
 
     /// Isotropic upper bounds for the κ SEARCH BOX — the ψ_hi edge of
-    /// [`spatial_term_psi_search_box`]; see [`Self::lower_bounds_from_data`].
+    /// `spatial_term_psi_search_box`; see [`Self::lower_bounds_from_data`].
     pub fn upper_bounds_from_data(
         data: ArrayView2<'_, f64>,
         spec: &TermCollectionSpec,
@@ -3999,7 +3999,7 @@ pub fn spatial_term_psi_bounds(
 ///
 /// So the box is the geometry window WIDENED — never narrowed — to contain the
 /// incumbent.
-pub fn spatial_term_psi_search_box(
+pub(crate) fn spatial_term_psi_search_box(
     data: ArrayView2<'_, f64>,
     spec: &TermCollectionSpec,
     term_idx: usize,

@@ -251,7 +251,7 @@ pub enum PenalizedDirectionAnnotationKind {
     FullyAbsorbedByHigherPriority,
 }
 
-/// Per-block structural annotation emitted by [`orthogonalize_design_blocks`].
+/// Per-block structural annotation emitted by `orthogonalize_design_blocks`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PenalizedDirectionAnnotation {
     pub block_idx: usize,
@@ -386,7 +386,7 @@ pub(crate) fn compile_protected(
 /// while still anchoring later blocks (see `compile_protected` /
 /// `compile_from_raw_grams_protected` for the motivation). `protected` may
 /// be shorter than `ordering`; an empty slice protects nothing.
-pub fn compile_with_dual_metric_protected(
+pub(crate) fn compile_with_dual_metric_protected(
     operators: &[Arc<dyn RowJacobianOperator>],
     row_hess: &dyn RowHessian,
     row_structural: &dyn RowHessian,
@@ -703,7 +703,7 @@ pub fn compile_with_dual_metric_protected(
 
 /// Build `W_b = stack_i sqrt(H_i) · J_b,i` flattened to `(n*K, ncols)` from a
 /// materialised `(n, p, K)` tensor. Thin wrapper over
-/// [`scale_jacobian_by_sqrt_h_with`] that reads the tensor element-wise.
+/// `scale_jacobian_by_sqrt_h_with` that reads the tensor element-wise.
 fn scale_block_by_sqrt_h(jb: &Array3<f64>, h_full: &Array3<f64>) -> Array2<f64> {
     let n = jb.shape()[0];
     let p = jb.shape()[1];
@@ -724,7 +724,7 @@ fn scale_block_by_sqrt_h(jb: &Array3<f64>, h_full: &Array3<f64>) -> Array2<f64> 
 ///
 /// `K` is tiny (1 or 4), so the per-row symmetric sqrt is negligible relative
 /// to the overall compile.
-pub fn scale_jacobian_by_sqrt_h_with(
+pub(crate) fn scale_jacobian_by_sqrt_h_with(
     n: usize,
     p: usize,
     k: usize,
@@ -1128,7 +1128,7 @@ pub struct CompiledMap {
 /// usable structural/curvature span. Later fully absorbed blocks compile to a
 /// zero-width block range, which is the reduced-coordinate representation of
 /// the lower-priority block owning no degrees of freedom.
-pub fn compile_from_raw_grams(
+pub(crate) fn compile_from_raw_grams(
     gram_h: &Array2<f64>,
     gram_struct: &Array2<f64>,
     raw_block_ranges: &[std::ops::Range<usize>],
@@ -1137,7 +1137,7 @@ pub fn compile_from_raw_grams(
     compile_from_raw_grams_protected(gram_h, gram_struct, raw_block_ranges, ordering, &[])
 }
 
-/// Variant of [`compile_from_raw_grams`] that keeps designated blocks at full
+/// Variant of `compile_from_raw_grams` that keeps designated blocks at full
 /// raw width instead of dropping their near-null structural/curvature
 /// directions.
 ///
@@ -1161,7 +1161,7 @@ pub fn compile_from_raw_grams(
 /// treatment for a within-block (as opposed to cross-block) rank deficiency.
 ///
 /// `protected` may be shorter than `ordering` (missing entries default to
-/// `false`); an empty slice reproduces [`compile_from_raw_grams`] exactly.
+/// `false`); an empty slice reproduces `compile_from_raw_grams` exactly.
 pub(crate) fn compile_from_raw_grams_protected(
     gram_h: &Array2<f64>,
     gram_struct: &Array2<f64>,
@@ -1414,7 +1414,7 @@ pub struct BlockOrthogonalization {
 /// `β_b_raw = V_b · θ_b` lifts a reduced fit back to raw coordinates. `V_b` has
 /// orthonormal columns (eigenvectors of the residual Gram), so the lift is the
 /// minimum-norm raw representative of the reduced fit.
-pub fn orthogonalize_design_blocks(
+pub(crate) fn orthogonalize_design_blocks(
     block_designs: &[Array2<f64>],
     priority: &[u32],
     weight: &[f64],

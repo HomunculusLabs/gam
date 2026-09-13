@@ -297,7 +297,7 @@ impl ScadMcpPenalty {
         weight * d_p_d_weight
     }
 
-    pub fn diag_target(
+    pub(crate) fn diag_target(
         &self,
         target: ArrayView1<'_, f64>,
         rho: ArrayView1<'_, f64>,

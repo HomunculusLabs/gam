@@ -116,7 +116,7 @@ pub(crate) fn measure_jet_psi_seed(mj: &crate::basis::MeasureJetBasisSpec) -> Ve
 /// machinery never applies to either.
 ///
 /// Each window is WIDENED, never narrowed, to contain the incumbent dial, the
-/// same feasible-set rule [`spatial_term_psi_search_box`] applies to the other
+/// same feasible-set rule `spatial_term_psi_search_box` applies to the other
 /// spatial families (#2454): a box that excludes the incumbent turns a
 /// monotonicity contract into a contradiction.
 pub(crate) fn measure_jet_psi_bound_values(

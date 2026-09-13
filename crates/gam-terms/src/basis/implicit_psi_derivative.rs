@@ -1370,15 +1370,6 @@ impl ImplicitDesignPsiDerivative {
             .map_or(self.n_axes, Vec::len)
     }
 
-    pub fn is_duchon_family(&self) -> bool {
-        self.streaming.as_ref().is_some_and(|state| {
-            matches!(
-                state.radial_kind,
-                RadialScalarKind::Duchon { .. } | RadialScalarKind::PureDuchon { .. }
-            )
-        }) || self.psi_scale_share != 0.0
-    }
-
     /// Whether this operator is wired up by a basis whose large-scale path
     /// is supposed to stay implicit, so a dense `(n × p)` materialization
     /// here is a regression rather than a normal compute path. Duchon-family

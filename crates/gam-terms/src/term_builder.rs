@@ -310,7 +310,7 @@ fn encoded_levels_for_column(ds: &Dataset, col: ColIdx) -> Vec<(u64, String)> {
 /// ill-conditioned 100-column mean block whose truth-recovery floor (0.111)
 /// no λ could beat, while the same smooth sized for the level's own 100 rows
 /// recovers to ~0.036. Explicit user `centers=`/`k=` bypass the default and
-/// are unaffected. Stripped at the top of [`build_smooth_basis`] like
+/// are unaffected. Stripped at the top of `build_smooth_basis` like
 /// `__by_col`, so per-kind option allow-lists never see it.
 const DEFAULT_SIZING_ROWS_OPTION: &str = "__default_sizing_rows";
 
@@ -368,7 +368,7 @@ pub(crate) const MARGINAL_SLOPE_Z_ALIAS: &str = "z";
 /// own real `z` column keeps it and the alias is inert — writing `z` there means
 /// that column, which is legitimate. The alias is live only when `z_column`
 /// exists and `z` does not, and only then does `z` silently denote the score.
-pub fn marginal_slope_z_alias_is_live(col_map: &HashMap<String, usize>, z_column: &str) -> bool {
+pub(crate) fn marginal_slope_z_alias_is_live(col_map: &HashMap<String, usize>, z_column: &str) -> bool {
     col_map.contains_key(z_column) && !col_map.contains_key(MARGINAL_SLOPE_Z_ALIAS)
 }
 
@@ -1046,7 +1046,7 @@ fn parse_numeric_expr(raw: &str) -> Result<f64, String> {
 ///
 /// Returns `Ok(None)` when the key is absent, `Ok(Some(v))` when it parses, and
 /// a hard `Err` when the key is *present but unparseable*. The crucial contrast
-/// is with the lenient [`option_f64`], which collapses an unparseable value to
+/// is with the lenient `option_f64`, which collapses an unparseable value to
 /// `None` and lets the caller silently substitute the data range — wrapping a
 /// cyclic smooth at the wrong period with no diagnostic (the #815 failure mode).
 fn option_numeric_expr(
@@ -2126,7 +2126,7 @@ fn bspline_boundary_declares_periodic_axis(options: &BTreeMap<String, String>) -
 ///
 /// User-facing names — including mgcv-compatible spellings whose semantics
 /// match an existing gamfit smooth exactly — collapse to the engine-internal
-/// canonical names used by the dispatch in [`build_smooth_basis`]. Adding a
+/// canonical names used by the dispatch in `build_smooth_basis`. Adding a
 /// new exactly-equivalent alias is a one-line entry here; the match arms
 /// below remain the single dispatch site.
 ///
@@ -2136,7 +2136,7 @@ fn bspline_boundary_declares_periodic_axis(options: &BTreeMap<String, String>) -
 /// are intentionally NOT mapped here — they should reach the unsupported-type
 /// path so users get a real diagnostic instead of a silent semantic
 /// substitution. mgcv's `bs="cr"`/`"cs"` (cubic regression and its shrinkage
-/// twin) are handled directly in the [`build_smooth_basis`] dispatch — they
+/// twin) are handled directly in the `build_smooth_basis` dispatch — they
 /// are not aliased here because the `cr`/`cs` distinction controls a default
 /// (`double_penalty`) that the canonical-name layer cannot see.
 ///
@@ -2206,7 +2206,7 @@ pub(crate) fn smooth_options_declare_periodic(options: &BTreeMap<String, String>
 /// aliases (`tp`→`tps`, `gp`→`matern`) via [`canonicalize_smooth_type`], or
 /// derives the default from the smooth kind/arity when no selector is given.
 /// This is the single source of truth for the dispatch in
-/// [`build_smooth_basis`]; other call sites (e.g. predictor-specific basis
+/// `build_smooth_basis`; other call sites (e.g. predictor-specific basis
 /// policy) use it so the classification never drifts from the dispatch.
 /// Is the raw `bs=`/`type=` selector a vector literal (`c('tp','tp')`,
 /// `['tp','tp']`, `(tp, tp)`) rather than a scalar smooth-type name?
@@ -2265,7 +2265,7 @@ pub fn smooth_type_uses_spatial_center_heuristic(canonical_type: &str) -> bool {
     matches!(canonical_type, "tps" | "matern" | "duchon")
 }
 
-pub fn build_smooth_basis(
+pub(crate) fn build_smooth_basis(
     kind: SmoothKind,
     vars: &[String],
     cols: &[usize],
@@ -5509,7 +5509,7 @@ pub const SECONDARY_CENTER_CAP_OPTION: &str = "__secondary_center_cap";
 /// Apply the secondary-predictor center cap to a *default* spatial center
 /// count. A no-op when the cap option is absent (the common case) or when the
 /// user supplied an explicit count (then `default_count` is ignored downstream
-/// by [`parse_countwith_basis_alias`] anyway).
+/// by `parse_countwith_basis_alias` anyway).
 pub(crate) fn cap_default_spatial_centers(
     options: &BTreeMap<String, String>,
     default_count: usize,
@@ -5581,7 +5581,7 @@ fn default_duchon_center_count(
         .max(univariate_floor.min(n))
 }
 
-pub fn parse_countwith_basis_alias(
+pub(crate) fn parse_countwith_basis_alias(
     options: &BTreeMap<String, String>,
     primarykey: &str,
     default_count: usize,

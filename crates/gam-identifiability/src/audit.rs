@@ -1805,7 +1805,7 @@ fn audit_identifiability_impl(
 ///
 /// `row_hess` is the structural row metric `K^S` (typically an
 /// [`crate::families::compiler::IdentityRowHessian`] —
-/// see [`compile_with_dual_metric_protected`] for why the structural metric is
+/// see `compile_with_dual_metric_protected` for why the structural metric is
 /// the rank-decision metric, not the pilot curvature).
 ///
 /// The output [`IdentifiabilityAudit`] preserves the same contract as

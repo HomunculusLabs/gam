@@ -1598,7 +1598,7 @@ pub(crate) fn parsed_terms_reference_column(terms: &[ParsedTerm], column_name: &
 ///
 /// Checked against the frame rather than the formula text because the alias is
 /// only live when the frame has no real `z` column of its own — see
-/// [`marginal_slope_z_alias_is_live`]. A frame that genuinely carries `z` keeps
+/// `marginal_slope_z_alias_is_live`. A frame that genuinely carries `z` keeps
 /// it, and writing `z` there is legitimate and still accepted.
 pub fn validate_marginal_slope_z_alias_exclusion(
     main_formula: &ParsedFormula,
@@ -1931,7 +1931,7 @@ pub(crate) fn option_usize_any_strict(
     Ok(None)
 }
 
-pub fn option_f64(map: &BTreeMap<String, String>, key: &str) -> Option<f64> {
+pub(crate) fn option_f64(map: &BTreeMap<String, String>, key: &str) -> Option<f64> {
     map.get(key).and_then(|v| v.parse::<f64>().ok())
 }
 

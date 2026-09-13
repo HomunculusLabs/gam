@@ -616,7 +616,7 @@ pub fn basis_is_saturated(
 
 /// Resource-aware plan for a spatial smooth (Duchon / Matérn / TPS).
 ///
-/// Returned by [`plan_spatial_basis`]. Captures the resolved center count,
+/// Returned by `plan_spatial_basis`. Captures the resolved center count,
 /// final basis dimension `p`, the dense byte cost for the value matrix and
 /// each derivative tier, and a recommended storage mode that is consistent
 /// with the supplied [`gam_runtime::resource::ResourcePolicy`].
@@ -632,7 +632,7 @@ pub struct SpatialBasisPlan {
     pub recommended_storage: SpatialStorageMode,
 }
 
-/// Storage mode recommended by [`plan_spatial_basis`].
+/// Storage mode recommended by `plan_spatial_basis`.
 ///
 /// * `DenseValueDenseDerivatives` — both the value design and its derivative
 ///   matrices fit under the policy's single-materialization budget.
@@ -647,7 +647,7 @@ pub enum SpatialStorageMode {
     OperatorOnly,
 }
 
-/// How [`plan_spatial_basis`] should pick the spatial center count.
+/// How `plan_spatial_basis` should pick the spatial center count.
 #[derive(Clone, Copy, Debug)]
 pub enum CenterCountRequest {
     /// Use the heuristic [`default_num_centers`].
@@ -664,7 +664,7 @@ pub enum CenterCountRequest {
 /// estimates for the value design and first/second derivative tiers, and a
 /// recommended [`SpatialStorageMode`] derived from `policy`. This is the
 /// resource-aware replacement for ad-hoc calls to [`default_num_centers`].
-pub fn plan_spatial_basis(
+pub(crate) fn plan_spatial_basis(
     n: usize,
     d: usize,
     requested_centers: CenterCountRequest,
@@ -1917,7 +1917,7 @@ pub struct ActivePenaltyInfo {
     pub kronecker_factors: Option<Vec<Array2<f64>>>,
     /// Structural null frame carried from the candidate's
     /// [`ConstructiveQuadratic`] (see
-    /// [`ConstructiveQuadratic::with_structural_null_frame`]): the declared
+    /// `ConstructiveQuadratic::with_structural_null_frame`): the declared
     /// null space of the seminorm this penalty represents, in the penalty's
     /// own coefficient chart. Downstream rebuilds
     /// (`rebuild_metric_consistent_ridge` at the term-collection chokepoint)
@@ -2008,7 +2008,7 @@ pub struct ConstructiveQuadratic {
 
 impl ConstructiveQuadratic {
     /// Construct directly from an energy factor `A`, representing `AᵀA`.
-    pub fn from_energy_factor(factor: Array2<f64>, context: &str) -> Result<Self, BasisError> {
+    pub(crate) fn from_energy_factor(factor: Array2<f64>, context: &str) -> Result<Self, BasisError> {
         if factor.iter().any(|value| !value.is_finite()) {
             crate::bail_invalid_basis!(
                 "{context}: constructive penalty factor contains a non-finite value"
@@ -2032,7 +2032,7 @@ impl ConstructiveQuadratic {
     /// (`crate::basis::rebuild_metric_consistent_ridge`) consume the
     /// declaration instead of re-deriving it from a rank test on a matrix
     /// that deliberately contains a conditioning term.
-    pub fn with_structural_null_frame(
+    pub(crate) fn with_structural_null_frame(
         mut self,
         frame: Array2<f64>,
         context: &str,
@@ -2066,7 +2066,7 @@ impl ConstructiveQuadratic {
     }
 
     /// The declared structural null frame, if any (see
-    /// [`Self::with_structural_null_frame`]).
+    /// `Self::with_structural_null_frame`).
     pub fn structural_null_frame(&self) -> Option<&Array2<f64>> {
         self.structural_null_frame.as_ref()
     }
@@ -2100,7 +2100,7 @@ impl ConstructiveQuadratic {
     /// canonical range spectrum. Material negative curvature is rejected; a
     /// caller can no longer place an unchecked `Array2` in a
     /// [`PenaltyCandidate`]. New factories should use
-    /// [`Self::from_energy_factor`] so PSD is true by construction rather than
+    /// `Self::from_energy_factor` so PSD is true by construction rather than
     /// inferred after dense assembly.
     pub fn try_from_dense_psd(dense: Array2<f64>, context: &str) -> Result<Self, BasisError> {
         if dense.nrows() != dense.ncols() {
@@ -2884,7 +2884,7 @@ pub(crate) fn orthogonality_transform_from_cross_and_gram(
 ///
 /// # Overlap is not containment, and only containment licenses a deletion
 ///
-/// [`orthogonality_transform_for_design`] removes `rank(BᵀWC)` coefficient
+/// `orthogonality_transform_for_design` removes `rank(BᵀWC)` coefficient
 /// directions from the smooth — one for every parametric direction the design
 /// has any measurable overlap with. That is the wrong predicate. A direction may
 /// be deleted **without loss** only when it is contained in the design's span:
@@ -3072,7 +3072,7 @@ pub fn contained_constraint_directions(
 /// The span-preserving orthogonalization of a smooth design against a
 /// constraint block: the realized block becomes `X·T − C·R`.
 ///
-/// See [`parametric_residualization_for_design`] for the derivation. `T` is the
+/// See `parametric_residualization_for_design` for the derivation. `T` is the
 /// ordinary coefficient-space transform every basis already carries (it goes
 /// into the basis metadata and restricts the penalties); `R` is the part that is
 /// new, and it is what makes the construction cost no model dimension.
@@ -3090,7 +3090,7 @@ pub struct ParametricResidualization {
 /// dimension**, by projecting in row space rather than restricting in
 /// coefficient space.
 ///
-/// # Why this and not [`orthogonality_transform_for_design`]
+/// # Why this and not `orthogonality_transform_for_design`
 ///
 /// That function returns a `Z` spanning `null((XᵀWC)ᵀ)`, so the realized block
 /// becomes `X·Z` with span `col(X) ∩ col(C)^⊥` — it drops one coefficient
@@ -3135,10 +3135,10 @@ pub struct ParametricResidualization {
 /// `1 − cos²θ`.
 ///
 /// The constraint columns are unit-normalized internally, for the scale reason
-/// [`orthogonality_transform_for_design`] documents at length; the normalization
+/// `orthogonality_transform_for_design` documents at length; the normalization
 /// is folded back into `row_space_correction` so the returned matrix is stated
 /// against the RAW block a predict-time rebuild will reconstruct.
-pub fn parametric_residualization_for_design(
+pub(crate) fn parametric_residualization_for_design(
     design: &DesignMatrix,
     constraint_matrix: ArrayView2<'_, f64>,
     weights: Option<ArrayView1<'_, f64>>,
@@ -3267,7 +3267,7 @@ pub fn parametric_residualization_for_design(
     })
 }
 
-pub fn orthogonality_transform_for_design(
+pub(crate) fn orthogonality_transform_for_design(
     design: &DesignMatrix,
     constraint_matrix: ArrayView2<'_, f64>,
     weights: Option<ArrayView1<'_, f64>>,

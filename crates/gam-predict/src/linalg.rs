@@ -33,7 +33,7 @@ impl<'a> PredictionCovarianceBackend<'a> {
     /// Factorize the penalized Hessian and multiply the resulting `H^{-1} rhs`
     /// by the supplied dispersion `φ`, so the backend returns `φ · H^{-1} rhs`
     /// (i.e. the `Vb = φ · H^{-1}` covariance application).
-    pub fn from_factorized_hessian_scaled(
+    pub(crate) fn from_factorized_hessian_scaled(
         hessian: SymmetricMatrix,
         phi: f64,
     ) -> Result<Self, String> {

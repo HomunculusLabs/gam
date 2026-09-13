@@ -475,7 +475,7 @@ pub fn evaluate_bspline_derivative_scalar(
 /// Zero-allocation version: pass pre-allocated buffers for lower_basis and scratch.
 /// - `lower_basis`: length = knot_vector.len() - degree
 /// - `lower_scratch`: BsplineScratch for degree-1
-pub fn evaluate_bspline_derivative_scalar_into(
+pub(crate) fn evaluate_bspline_derivative_scalar_into(
     x: f64,
     knot_vector: ArrayView1<f64>,
     degree: usize,
@@ -806,7 +806,7 @@ impl BsplineDerivativeWorkspace {
 ///                                    − B^{(m-1)}_{i+1,degree-1}(x)/(t_{i+degree+1}−t_{i+1}) )`
 /// recursively: order `m` is obtained from order `m−1` on degree `degree−1`,
 /// bottoming out at order 1, which delegates to
-/// [`evaluate_bspline_derivative_scalar_into`]. The order-2/3/4 public entry
+/// `evaluate_bspline_derivative_scalar_into`. The order-2/3/4 public entry
 /// points are thin adapters over this function — the recurrence body lives here
 /// exactly once.
 ///

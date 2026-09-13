@@ -82,7 +82,7 @@ pub(crate) enum DeviceMatrixLayout {
 ///
 /// `radians = false` interprets inputs as degrees (the codebase default
 /// for `SphericalSplineBasisSpec`).
-pub fn latlon_to_xyz_host(latlon: ArrayView2<'_, f64>, radians: bool) -> Result<Vec<f64>, String> {
+pub(crate) fn latlon_to_xyz_host(latlon: ArrayView2<'_, f64>, radians: bool) -> Result<Vec<f64>, String> {
     if latlon.ncols() != 2 {
         return Err(format!(
             "latlon_to_xyz_host: expected (_, 2) lat/lon matrix, got shape {:?}",
@@ -452,7 +452,7 @@ impl Drop for PinnedLease {
 ///
 /// `data_xyz` and `centers_xyz` are flat row-major
 /// `[x_0, y_0, z_0, …]` length `3 * n` and `3 * m` respectively, pre-
-/// computed via [`latlon_to_xyz_host`]. `coeffs` has length `lmax + 1`,
+/// computed via `latlon_to_xyz_host`. `coeffs` has length `lmax + 1`,
 /// indexed as `coeffs[ℓ] = c_ℓ` with `c_0 = 0`.
 #[derive(Clone, Debug)]
 pub(crate) struct S2KernelBuildInputs<'a> {
@@ -714,7 +714,7 @@ pub(crate) const fn sphere_gpu_compiled() -> bool {
 ///   * device memory budget admits at least one `(ld × m)` design at
 ///     `ld = ((n + 31) / 32) * 32`.
 #[must_use]
-pub fn sphere_kernel_decision(n: usize, m: usize, lmax: usize) -> Result<GpuDecision, GpuError> {
+pub(crate) fn sphere_kernel_decision(n: usize, m: usize, lmax: usize) -> Result<GpuDecision, GpuError> {
     let large_enough = match gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::global_policy())?
     {
         Some(runtime) => {
@@ -755,7 +755,7 @@ pub(crate) fn truncated_device_kind(
 }
 
 /// Production entry: build the raw `(n × m)` truncated-spectral Wahba kernel
-/// design matrix on the GPU when [`sphere_kernel_decision`] admits the device,
+/// design matrix on the GPU when `sphere_kernel_decision` admits the device,
 /// returning `None` to signal the caller to use its CPU oracle.
 ///
 /// Contract:

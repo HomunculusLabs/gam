@@ -927,7 +927,7 @@ fn smooth_basis_kind_label(basis: &SmoothBasisSpec) -> &'static str {
 /// per parametric direction and is free only where that direction is inside the
 /// design's span; RESIDUALIZATION costs none and is available always. See the
 /// fork in [`apply_global_smooth_identifiability`] and the derivation on
-/// [`crate::basis::parametric_residualization_for_design`].
+/// `crate::basis::parametric_residualization_for_design`.
 enum GlobalIdentifiabilityPlan {
     /// No constraint block for this term.
     Absent,

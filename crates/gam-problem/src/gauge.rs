@@ -258,7 +258,7 @@ impl Gauge {
     /// Block-upper-triangular section from per-block `V_b` plus
     /// cross-block residualisation stacks `R_{a→b}` — see
     /// [`assemble_block_triangular_t`] for the packing convention.
-    pub fn from_v_and_r(v_per_term: &[Array2<f64>], r_per_term: &[Option<Array2<f64>>]) -> Self {
+    pub(crate) fn from_v_and_r(v_per_term: &[Array2<f64>], r_per_term: &[Option<Array2<f64>>]) -> Self {
         let raw_widths: Vec<usize> = v_per_term.iter().map(|v| v.nrows()).collect();
         let reduced_widths: Vec<usize> = v_per_term.iter().map(|v| v.ncols()).collect();
         Self {
