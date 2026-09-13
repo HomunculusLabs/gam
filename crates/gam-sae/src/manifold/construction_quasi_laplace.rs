@@ -69,6 +69,22 @@ struct AcceptedTerminalResidualStep {
     system: Option<ArrowSchurSystem>,
 }
 
+/// #2283 — one committed trial of the arrow exact-A polish step, carrying what the
+/// caller's band check, shift carry and phase log read.
+struct ShiftedTerminalStep {
+    shift: f64,
+    ridge_escalations: usize,
+    pre_objective: f64,
+    committed_objective: f64,
+    predicted_objective_decrease: f64,
+    /// `Δᵀ(A + σI)Δ/‖Δ‖² = −gᵀΔ/‖Δ‖²`: the shifted operator's curvature along the
+    /// committed step, the ladder's first rung above `σ = 0`.
+    curvature_along_step: f64,
+    step_norm_sq: f64,
+    trials: usize,
+    system: Option<ArrowSchurSystem>,
+}
+
 impl SaeManifoldTerm {
     /// Custom penalized quasi-Laplace score for the SAE term at a fixed `ρ`.
     ///
@@ -2969,6 +2985,9 @@ impl SaeManifoldTerm {
         // Newton step, so the very first trial of the very first step is
         // byte-identical to the step this phase has always proposed.
         let mut damping = 0.0_f64;
+        // #2283 — the warm-carried shift of the arrow exact-A step, the damping's
+        // counterpart on states whose dense geometry the ledger does not admit.
+        let mut shift = 0.0_f64;
         // #2267 — the polish's own elapsed clock, one candidate denominator for the
         // size predicate this route still lacks.
         let polish_started = std::time::Instant::now();
@@ -3047,19 +3066,86 @@ impl SaeManifoldTerm {
             // the log-determinant and ρ-adjoint already route away from the dense lane
             // on #2724's ledger; this phase never asked it, so a streaming-routed fit
             // allocated the blocks at its first plateau. Ask the SAME predicate at the
-            // EXACT dimension this step would build. Declining is "no step", which both
-            // callers already handle.
+            // EXACT dimension this step would build. A declined geometry does not end
+            // the phase: the step is taken on the arrow form of the same operator
+            // (`shifted_exact_newton_polish_trials`), which holds no `dim²` object.
             let exact_dim = sae_exact_stationarity_dim(cache.delta_t_len(), cache.k);
             if !sae_exact_stationarity_admitted(exact_dim, self.host_available_bytes) {
                 log::info!(
-                    "[SAE-NEWTON] step {}/{max_steps} declined: the exact stationarity \
-                     geometry at dim={exact_dim} needs {} resident bytes, which the carried \
-                     host reading of {} bytes does not admit",
+                    "[SAE-NEWTON] step {}/{max_steps} declined the dense geometry: the exact \
+                     stationarity geometry at dim={exact_dim} needs {} resident bytes, which \
+                     the carried host reading of {} bytes does not admit; stepping on the \
+                     arrow exact-A system instead",
                     step + 1,
                     sae_exact_stationarity_resident_bytes(exact_dim),
                     self.host_available_bytes,
                 );
-                break;
+                let backtrack_started = std::time::Instant::now();
+                let Some(committed) = self.shifted_exact_newton_polish_trials(
+                    target, rho_fixed, registry, options, &sys, shift,
+                )?
+                else {
+                    log::debug!(
+                        "terminal Newton bail: no shift on the arrow exact-A ladder bought \
+                         sufficient Armijo decrease of the penalized objective at \
+                         ‖g‖={grad_norm:.6e}"
+                    );
+                    break;
+                };
+                made_progress = true;
+                if let Some(system) = committed.system.as_ref() {
+                    let after_sq = Self::system_grad_norm_sq(system);
+                    let after_gate =
+                        self.quotient_gradient_norm_from_system(system, after_sq, lambda_smooth);
+                    if Self::quasi_laplace_kkt_stationary(
+                        after_sq.sqrt(),
+                        after_gate,
+                        grad_tolerance,
+                    ) {
+                        log::debug!(
+                            "SAE terminal Newton reached the KKT band at arrow exact-A step {}: \
+                             gate norm {quotient_grad_norm:.6e} → {after_gate:.6e} against tol \
+                             {grad_tolerance:.6e}",
+                            step + 1,
+                        );
+                        return Ok(true);
+                    }
+                }
+                // The dense phase's carry, on the shift. The step's quadratic model buys
+                // exactly half of `−gᵀΔ`, so a measured decrease at or above that walks
+                // the shift back toward the undamped Newton step, and a smaller one
+                // starts the next step one rung more damped. A shift at or under `ε` of
+                // the operator's curvature along the step changes no digit of `A + σI`
+                // there, so it IS the undamped step and is carried as exactly that.
+                let model_agreement = (committed.pre_objective - committed.committed_objective)
+                    / (0.5 * committed.predicted_objective_decrease);
+                shift = if model_agreement >= 1.0 {
+                    let walked_back = committed.shift / opt::constants::RIDGE_GROWTH;
+                    if walked_back <= f64::EPSILON * committed.curvature_along_step {
+                        0.0
+                    } else {
+                        walked_back
+                    }
+                } else if committed.shift > 0.0 {
+                    committed.shift * opt::constants::RIDGE_GROWTH
+                } else {
+                    committed.curvature_along_step
+                };
+                log::info!(
+                    "[SAE-NEWTON] step {} arrow exact-A phases: assemble={assemble_seconds:.2}s \
+                     trials={} in {:.2}s (σ={:.6e}, ridge escalations {}, ‖Δ‖={:.6e}, model \
+                     agreement {model_agreement:.3e}) total={:.2}s \
+                     penalized_objective={:.10e}",
+                    step + 1,
+                    committed.trials,
+                    backtrack_started.elapsed().as_secs_f64(),
+                    committed.shift,
+                    committed.ridge_escalations,
+                    committed.step_norm_sq.sqrt(),
+                    step_started.elapsed().as_secs_f64(),
+                    committed.committed_objective,
+                );
+                continue;
             }
             // #2267 — FORECAST the dense exact-stationarity step before entering it,
             // and state it next to the two quantities any bar would be denominated
@@ -3370,6 +3456,166 @@ impl SaeManifoldTerm {
             drop(polish_step_scope);
         }
         Ok(made_progress)
+    }
+
+    /// #2283 — the objective-globalized terminal step on the ARROW form of the exact
+    /// observed information, for a state whose dense exact-stationarity geometry the
+    /// #2724 ledger does not admit.
+    ///
+    /// The dense phase reads `Δ = −Σᵢ uᵢ(uᵢᵀg)/(|λᵢ| + √ν)` off one eigendecomposition
+    /// of `A`, whose `dim × dim` blocks grow with rows (dim 192,288 at the #2283
+    /// cell). Declining that geometry used to end the phase, so a plateau at any row
+    /// count the ledger refuses fell through to the stall refusal. The shifted Newton
+    /// step `Δ(σ) = −(A + σI)⁻¹g` meets the same descent contract with no `dim²`
+    /// object: [`Self::exact_a_evidence_system`] is `A` in arrow form, and the
+    /// escalating solve factors it row by row plus the border Schur complement at the
+    /// smallest ridge that is positive definite. For any such factorization
+    ///
+    /// ```text
+    ///   gᵀΔ = −gᵀ(A + σI)⁻¹g < 0,     gᵀΔ + ½Δᵀ(A + σI)Δ = ½·gᵀΔ,
+    /// ```
+    ///
+    /// so the step descends at either sign of curvature, its quadratic model buys
+    /// exactly half of `−gᵀΔ` (the identity the caller's model-agreement carry reads),
+    /// and `−gᵀΔ(σ)` falls as `σ` grows, which is what lets the verifiability floor end
+    /// the ladder for a stated reason. The first rung above `σ = 0` is the shifted
+    /// operator's own curvature along the rejected step, `Δᵀ(A + σI)Δ/‖Δ‖² =
+    /// −gᵀΔ/‖Δ‖²`; later rungs grow by `RIDGE_GROWTH`. Acceptance, and the floor under
+    /// the prediction, are the dense ladder's own, so a committed step is a strict
+    /// Armijo decrease of the penalized objective (#2861), and a rejected trial
+    /// restores the snapshot. `None` means no rung bought that decrease, or a solve
+    /// failed.
+    fn shifted_exact_newton_polish_trials(
+        &mut self,
+        target: ArrayView2<'_, f64>,
+        rho_fixed: &SaeManifoldRho,
+        registry: Option<&AnalyticPenaltyRegistry>,
+        options: &ArrowSolveOptions,
+        majorizer: &ArrowSchurSystem,
+        carried_shift: f64,
+    ) -> Result<Option<ShiftedTerminalStep>, String> {
+        let exact = match self.exact_a_evidence_system(target, rho_fixed, majorizer) {
+            Ok(exact) => exact,
+            Err(err) => {
+                log::debug!("terminal Newton bail: arrow exact-A system: {err}");
+                return Ok(None);
+            }
+        };
+        // The escalating solve reuses a supplied resident device frame for every
+        // trial, and a frame describes the system it was prepared for. This system
+        // is `A`, so it prepares its own.
+        let mut exact_options = options.clone();
+        exact_options.sae_resident_frame = None;
+        let total_t: usize = exact.rows.iter().map(|row| row.gt.len()).sum();
+        let pre_objective = self.penalized_objective_total(target, rho_fixed, registry, 1.0)?;
+        // The dense ladder's floor: the smallest prediction whose Armijo threshold
+        // `c1·pred − cushion` is positive, so every trial the test below admits
+        // lowered the objective.
+        let predicted_floor = opt::armijo_roundoff_cushion(pre_objective) / SAE_MANIFOLD_ARMIJO_C1;
+        let snapshot = self.snapshot_mutable_state();
+        let mut shift = carried_shift;
+        let mut trials = 0usize;
+        loop {
+            let (delta_t, delta_beta, diagnostics) =
+                match gam_solve::arrow_schur::solve_with_lm_escalation_inner(
+                    &exact,
+                    shift,
+                    shift,
+                    &exact_options,
+                ) {
+                    Ok(solution) => solution,
+                    Err(err) => {
+                        log::debug!(
+                            "terminal Newton bail: arrow exact-A solve at σ={shift:.6e}: {err}"
+                        );
+                        return Ok(None);
+                    }
+                };
+            if delta_t.len() != total_t {
+                return Err(format!(
+                    "SaeManifoldTerm::terminal_exact_newton_polish: the arrow exact-A step has \
+                     {} coordinates for a system whose rows hold {total_t}",
+                    delta_t.len()
+                ));
+            }
+            let mut directional = exact.gb.dot(&delta_beta);
+            let mut offset = 0usize;
+            for row in &exact.rows {
+                for (axis, &g) in row.gt.iter().enumerate() {
+                    directional += g * delta_t[offset + axis];
+                }
+                offset += row.gt.len();
+            }
+            let predicted_objective_decrease = -directional;
+            if !(predicted_objective_decrease.is_finite()
+                && predicted_objective_decrease > predicted_floor)
+            {
+                log::debug!(
+                    "terminal Newton: arrow exact-A ladder exhausted at σ={shift:.6e} — \
+                     predicted objective decrease {predicted_objective_decrease:.6e} is under \
+                     the verifiable floor {predicted_floor:.6e}",
+                );
+                return Ok(None);
+            }
+            trials += 1;
+            let step_norm_sq = delta_t.dot(&delta_t) + delta_beta.dot(&delta_beta);
+            let trial_system =
+                match self.apply_newton_step(delta_t.view(), delta_beta.view(), 1.0) {
+                    Ok(()) => match self.assemble_arrow_schur(target, rho_fixed, registry) {
+                        Ok(trial_sys) => Some(trial_sys),
+                        Err(err) => {
+                            log::debug!(
+                                "terminal Newton: arrow exact-A trial assembly at σ={shift:.6e}: \
+                                 {err}"
+                            );
+                            None
+                        }
+                    },
+                    Err(err) => {
+                        log::debug!(
+                            "terminal Newton: arrow exact-A trial step at σ={shift:.6e}: {err}"
+                        );
+                        None
+                    }
+                };
+            let trial_objective = if trial_system.is_some() {
+                self.penalized_objective_total(target, rho_fixed, registry, 1.0)
+                    .unwrap_or(f64::INFINITY)
+            } else {
+                f64::INFINITY
+            };
+            let sufficient = SAE_MANIFOLD_ARMIJO_C1 * predicted_objective_decrease;
+            if trial_objective.is_finite()
+                && pre_objective - trial_objective
+                    >= sufficient - opt::armijo_roundoff_cushion(pre_objective)
+            {
+                return Ok(Some(ShiftedTerminalStep {
+                    shift,
+                    ridge_escalations: diagnostics.ridge_escalations,
+                    pre_objective,
+                    committed_objective: trial_objective,
+                    predicted_objective_decrease,
+                    curvature_along_step: predicted_objective_decrease / step_norm_sq,
+                    step_norm_sq,
+                    trials,
+                    system: trial_system,
+                }));
+            }
+            self.restore_mutable_state(&snapshot)?;
+            let next = if shift > 0.0 {
+                shift * opt::constants::RIDGE_GROWTH
+            } else {
+                predicted_objective_decrease / step_norm_sq
+            };
+            if !(next.is_finite() && next > shift) {
+                log::debug!(
+                    "terminal Newton: arrow exact-A ladder cannot advance past σ={shift:.6e} \
+                     (next rung {next:.6e})"
+                );
+                return Ok(None);
+            }
+            shift = next;
+        }
     }
 
     pub(crate) fn outer_gradient_arrow_solver<'a>(

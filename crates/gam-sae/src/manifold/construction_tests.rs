@@ -1069,6 +1069,49 @@ mod exact_stationarity_solve_1418_tests {
         );
     }
 
+    /// #2283 — the step a declined dense geometry falls back to. On the 2080
+    /// fixture's live residual, the shifted Newton step on the arrow exact-A system
+    /// predicts a positive decrease, commits an Armijo decrease, and reports both
+    /// objectives exactly as an independent evaluation at the entry and committed
+    /// states reads them.
+    #[test]
+    fn arrow_exact_a_polish_step_commits_objective_descent_2283() {
+        let (mut term, target, rho, _cache) =
+            super::exact_hessian_fixture_tests::converged_state_with_residual();
+        let options = term.evidence_factor_options();
+        let majorizer = term
+            .assemble_arrow_schur(target.view(), &rho, None)
+            .expect("arrow-Schur assembly at the polish entry state");
+        let objective_before = term
+            .penalized_objective_total(target.view(), &rho, None, 1.0)
+            .expect("objective before the arrow exact-A step");
+        let committed = term
+            .shifted_exact_newton_polish_trials(target.view(), &rho, None, &options, &majorizer, 0.0)
+            .expect("the arrow exact-A step degrades every internal failure to Ok(None)")
+            .expect("a state with a live residual must buy an Armijo decrease on some rung");
+        let objective_after = term
+            .penalized_objective_total(target.view(), &rho, None, 1.0)
+            .expect("objective after the arrow exact-A step");
+        assert!(
+            committed.predicted_objective_decrease > 0.0
+                && committed.curvature_along_step > 0.0
+                && committed.trials >= 1,
+            "the committed arrow exact-A step must be descent with positive model curvature: \
+             predicted {:.6e}, curvature {:.6e}, trials {}",
+            committed.predicted_objective_decrease,
+            committed.curvature_along_step,
+            committed.trials,
+        );
+        assert!(
+            committed.committed_objective < committed.pre_objective,
+            "the arrow exact-A step must lower the penalized objective: {:.6e} -> {:.6e}",
+            committed.pre_objective,
+            committed.committed_objective,
+        );
+        assert_abs_diff_eq!(committed.pre_objective, objective_before, epsilon = 0.0);
+        assert_abs_diff_eq!(committed.committed_objective, objective_after, epsilon = 0.0);
+    }
+
     /// #2762 — `retained_curvature_extremes` is the DERIVED span of the damping
     /// ladder, and it reads the retained band only.
     #[test]
