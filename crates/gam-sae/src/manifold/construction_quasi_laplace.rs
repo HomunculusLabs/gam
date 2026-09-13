@@ -5327,80 +5327,48 @@ impl SaeManifoldTerm {
     ) -> Result<f64, String> {
         self.assignment.validate_rho_domain(rho)?;
         let k_atoms = self.k_atoms();
-        // #1038 softmax: `H` carries the DENSE entropy block, and since the
-        // entropy curvature scales linearly with `λ_sparse = exp(ρ)`,
-        // `∂H/∂ρ = H_entropy` (the full dense per-row block, not just its
-        // diagonal). The trace `½ tr(H⁻¹ ∂H/∂ρ)` must therefore contract the
-        // dense `∂H/∂ρ` against the per-row selected-inverse BLOCK, mirroring the
-        // dense `log|H|` and θ-adjoint — a diagonal-only contraction would
-        // desync the ρ-gradient from the criterion. The assembled majorizer
-        // `D = diag(Σ_j|H_kj|)` is itself DIAGONAL (#1419), so the contraction
-        // reduces to `½ Σ_slot (H⁻¹)_{slot,slot}·D_atom`. On the dense `None`
-        // layout the logit slot equals the atom position; on the compact
-        // softmax top-`k` layout (#1408/#1409) the slots are the row's active
-        // atoms — the SAME `D_atom` (full-`K` abs-row-sum) the assembly wrote.
-        if let AssignmentMode::Softmax {
-            temperature,
-            sparsity,
-        } = self.assignment.mode
-        {
-            if k_atoms <= 1 {
-                return Ok(0.0);
-            }
-            let inv_tau = 1.0 / temperature;
-            let scale = rho.lambda_sparse()? * sparsity * inv_tau * inv_tau;
-            let penalty = gam_terms::analytic_penalties::SoftmaxAssignmentSparsityPenalty::new(
-                k_atoms,
+        // #1038/#1419 softmax: the assembled majorizer is the DIAGONAL
+        // `scale·D`, `D = diag(Σ_j|H_kj|)` of the entropy block, carrying the row's
+        // design weight (#991). It scales linearly with `λ_sparse = exp(ρ)`, so
+        // `∂B/∂ρ = scale·D` on the free logit slots of the reduced K−1 chart, and
+        // it takes the one Daleckii–Krein deflation correction below, like every
+        // other family (#2916). The kept-subspace diagonal it used to contract
+        // equals that correction only when no deflated direction couples to the
+        // border, since `vᵢᵀ (H⁻¹)_tt vᵢ = 1 + (H_βt vᵢ)ᵀ S⁻¹ (H_βt vᵢ)`.
+        let mut hdiag = match self.assignment.mode {
+            AssignmentMode::Softmax {
                 temperature,
-            );
-            // Softmax uses the reduced K−1 free-logit chart on the dense layout
-            // (last reference logit fixed); the compact layout carries one slot
-            // per active atom. The diagonal selected inverse gives each slot's
-            // (H⁻¹)_{slot,slot}.
-            let assignment_dim = self.assignment.assignment_coord_dim();
-            // Kept-subspace inverse diagonal: the deflated inverse assigns
-            // `1/λ̃ = 1` to each per-row UNIT-stiffness direction `vᵢ`, so a raw
-            // diagonal `D` contraction would spuriously add `½ Σ_i vᵢᵀ D vᵢ` (a
-            // ρ-independent direction must add 0). `latent_inverse_diagonal_kept`
-            // removes that per-row deflated diagonal centrally.
-            let inv_diag = solver
-                .latent_inverse_diagonal_kept()
-                .map_err(|err| format!("assignment_log_strength_hessian_trace: {err}"))?;
-            let row_loss_w = self.row_loss_weights.as_deref();
-            let mut trace = 0.0_f64;
-            for row in 0..self.n_obs() {
-                let row_base = cache.row_offsets[row];
-                // #991 — the softmax prior curvature written to `htt` carries the
-                // row's design weight `w_row` (via the `scale·w_row` the majorizer
-                // sites fold in), so its ρ-trace must carry the SAME `w_row`.
-                let w_row = row_loss_w.map_or(1.0, |w| w[row]);
-                // ∂(scale·D)/∂ρ = scale·D (linear in λ_sparse = eᵖ) — the SAME
-                // operator the assembly and θ-adjoint differentiate.
-                match self.last_row_layout {
-                    Some(_) => {}
-                    None => {
-                        // Dense layout genuinely contracts every free logit slot's
-                        // `D_kk`, so the full-`K` `d` is intrinsic here; keep the
-                        // single-source dense majorizer call.
-                        let row_logits: Vec<f64> = (0..k_atoms)
-                            .map(|k| self.assignment.logits[[row, k]])
-                            .collect();
-                        let d = penalty.psd_majorizer_abs_row_sums(&row_logits, scale);
-                        let q = cache.row_dims[row];
-                        let logit_dim = assignment_dim.min(q);
-                        for atom in 0..logit_dim {
-                            trace += inv_diag[row_base + atom] * w_row * d[atom];
-                        }
+                sparsity,
+            } => {
+                if k_atoms <= 1 {
+                    return Ok(0.0);
+                }
+                let inv_tau = 1.0 / temperature;
+                let scale = rho.lambda_sparse()? * sparsity * inv_tau * inv_tau;
+                let penalty = gam_terms::analytic_penalties::SoftmaxAssignmentSparsityPenalty::new(
+                    k_atoms,
+                    temperature,
+                );
+                let row_loss_w = self.row_loss_weights.as_deref();
+                let mut weighted = Array1::<f64>::zeros(self.n_obs() * k_atoms);
+                for row in 0..self.n_obs() {
+                    let w_row = row_loss_w.map_or(1.0, |w| w[row]);
+                    let row_logits: Vec<f64> = (0..k_atoms)
+                        .map(|k| self.assignment.logits[[row, k]])
+                        .collect();
+                    let d = penalty.psd_majorizer_abs_row_sums(&row_logits, scale);
+                    for atom in 0..k_atoms.min(d.len()) {
+                        weighted[row * k_atoms + atom] = w_row * d[atom];
                     }
                 }
+                weighted
             }
-            return Ok(0.5 * trace);
-        }
-        let mut hdiag = crate::assignment::assignment_prior_log_strength_hdiag_weighted(
-            &self.assignment,
-            rho,
-            self.row_loss_weights.as_deref(),
-        )?;
+            _ => crate::assignment::assignment_prior_log_strength_hdiag_weighted(
+                &self.assignment,
+                rho,
+                self.row_loss_weights.as_deref(),
+            )?,
+        };
         if hdiag.is_empty() {
             return Ok(0.0);
         }
@@ -5550,8 +5518,7 @@ impl SaeManifoldTerm {
     /// rho-gradient cluster. Per-row deflation is PRICED, not refused (#2712):
     /// the reconstructed block is the DEFLATED one (`A_i` is the conditioned row
     /// block), so each branch applies the same deflation treatment as its dense
-    /// counterpart — the within-row kept-subspace diagonal on the softmax branch,
-    /// the full Daleckii–Krein `tr(inv_vv·(D − DΦ[D]))` elsewhere.
+    /// counterpart: the full Daleckii–Krein `tr(inv_vv·(D − DΦ[D]))` on every branch.
     pub(crate) fn assignment_log_strength_hessian_trace_from_probes(
         &self,
         rho: &SaeManifoldRho,
@@ -5725,19 +5692,21 @@ impl SaeManifoldTerm {
                         );
                         match operator {
                             EvidenceOperator::Majorizer => {
-                                // `∂B/∂ρ_sparse` is DIAGONAL, so the contraction is
-                                // the kept-subspace diagonal — matching the dense
-                                // softmax branch's `latent_inverse_diagonal_kept`:
-                                // the deflated inverse assigns `1/λ̃ = 1` to each
-                                // `vᵢ`, and a ρ-independent direction must
-                                // contribute 0.
+                                // `∂B/∂ρ_sparse` is DIAGONAL. It takes the one
+                                // Daleckii–Krein correction every family takes
+                                // (#2916). The kept-subspace diagonal it used to
+                                // contract equals that correction only when no
+                                // deflated direction couples to the border, since
+                                // `vᵢᵀ inv_vv vᵢ = 1 + (H_βt vᵢ)ᵀ S⁻¹ (H_βt vᵢ)`.
+                                let mut d_mat = Array2::<f64>::zeros((q, q));
                                 for atom in 0..logit_dim {
-                                    let kept = inverse_diagonal[atom]
-                                        - dirs
-                                            .iter()
-                                            .map(|v| v.get(atom).copied().unwrap_or(0.0).powi(2))
-                                            .sum::<f64>();
-                                    trace += kept * block[[atom, atom]];
+                                    d_mat[[atom, atom]] = block[[atom, atom]];
+                                    trace += inverse_diagonal[atom] * block[[atom, atom]];
+                                }
+                                if Self::row_deflation_is_live(dirs, spectrum) {
+                                    trace -= Self::deflation_block_correction(
+                                        &inv_vv, &d_mat, dirs, spectrum,
+                                    );
                                 }
                             }
                             EvidenceOperator::ExactObservedInformation => {

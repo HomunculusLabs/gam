@@ -14,8 +14,8 @@ use super::*;
 /// the ordered Beta--Bernoulli-prior negative curvature triggers stiffens the WHOLE per-row `H_tt`
 /// block (logit AND coordinate slots), so it corrupts EVERY outer ρ-component's
 /// `½ tr(H⁻¹ ∂H/∂ρ)` trace — not only the ordered Beta--Bernoulli α one. This pins the ARD
-/// log-precision trace (`ard_log_precision_hessian_trace`, routed through the
-/// kept-subspace `latent_inverse_diagonal_kept`) against the fixed-state central
+/// log-precision trace (`ard_log_precision_hessian_trace`, through its per-slot
+/// Daleckii–Krein correction) against the fixed-state central
 /// difference of `log|H|` w.r.t. `log_ard[atom][axis]`, with deflation active.
 #[test]
 pub(crate) fn ard_log_precision_trace_matches_dense_fd_pd_region_deflation() {
