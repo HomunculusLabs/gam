@@ -3134,13 +3134,17 @@ impl SaeManifoldTerm {
                 quotient: 0.5 * quotient_grad_norm * quotient_grad_norm,
                 ambient: 0.5 * grad_norm_sq,
             };
-            // Round-off floor on the MODEL's predicted reduction, in the merit's
-            // own units — the same relative floor the majorized Armijo lane
-            // applies to its directional decrease. A prediction below it is
-            // f64 noise in the quadratic model, not a step worth measuring.
+            // The smallest predicted reduction the acceptance test below can verify.
+            // That test admits `pre − trial ≥ c1·pred − cushion`, with the round-off
+            // cushion `opt::armijo_roundoff_cushion(pre)`. At or under
+            // `pred = cushion / c1` its right-hand side is not positive, so a trial
+            // that did not lower the objective, or raised it within round-off, would
+            // commit and report progress. Above this floor every committed step is a
+            // strict Armijo decrease (#2861), and a ladder whose prediction falls
+            // under it has no verifiable decrease left to buy.
             let pre_objective = self.penalized_objective_total(target, rho_fixed, registry, 1.0)?;
             let predicted_floor =
-                SAE_MANIFOLD_DIRECTIONAL_DECREASE_REL_FLOOR * (1.0 + pre_objective.abs());
+                opt::armijo_roundoff_cushion(pre_objective) / SAE_MANIFOLD_ARMIJO_C1;
             let snapshot = self.snapshot_mutable_state();
             let backtrack_started = std::time::Instant::now();
             let mut trials = 0usize;
