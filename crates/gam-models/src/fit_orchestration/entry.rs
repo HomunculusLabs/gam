@@ -1050,13 +1050,16 @@ fn exact_gaussian_coefficients(
     x: &Array2<f64>,
     adjusted_response: &Array1<f64>,
     weights: &Array1<f64>,
-    subspace: Option<&Array2<f64>>,
+    subspace: Option<(&Array2<f64>, f64)>,
 ) -> Option<Array1<f64>> {
     let p = x.ncols();
-    let reduced_x = match subspace {
-        Some(z) => gam_linalg::faer_ndarray::fast_ab(x, z),
-        None => x.clone(),
+    let (reduced_x, basis, rotation_radius) = match subspace {
+        Some((z, radius)) => (gam_linalg::faer_ndarray::fast_ab(x, z), Some(z), radius),
+        None => (x.clone(), None, 0.0),
     };
+    if !rotation_radius.is_finite() {
+        return None;
+    }
     if adjusted_response.len() != reduced_x.nrows() || weights.len() != reduced_x.nrows() {
         return None;
     }
@@ -1112,7 +1115,7 @@ fn exact_gaussian_coefficients(
         )
         .ok()?
         .into_solution();
-        match subspace {
+        match basis {
             Some(z) => z.dot(&reduced_beta),
             None => reduced_beta,
         }
@@ -1124,6 +1127,27 @@ fn exact_gaussian_coefficients(
         return None;
     }
     let gamma = roundoff / (1.0 - roundoff);
+    // A computed subspace is rotated away from the exact one by at most
+    // `rotation_radius` (see `embedded_penalty_null_basis`). An exact coefficient
+    // β* in the exact subspace therefore lies within `rotation_radius·‖β*‖₂` of the
+    // computed span, and the weighted least-squares residual on that span is no
+    // larger than the residual at that nearest point:
+    //   ‖W^{1/2} r‖₂ ≤ ‖W^{1/2} X‖_F · rotation_radius · ‖β*‖₂,
+    // evaluated at the computed coefficient. A row of positive weight w carries at
+    // most that norm over √w, on top of the rounding of its own dot product.
+    let rotation_residual = if rotation_radius > 0.0 {
+        let weighted_frobenius = x
+            .rows()
+            .into_iter()
+            .zip(weights.iter())
+            .map(|(row, &weight)| weight * row.iter().map(|value| value * value).sum::<f64>())
+            .sum::<f64>()
+            .sqrt();
+        let beta_norm = beta.iter().map(|value| value * value).sum::<f64>().sqrt();
+        weighted_frobenius * rotation_radius * beta_norm
+    } else {
+        0.0
+    };
     for row in 0..x.nrows() {
         if weights[row] == 0.0 {
             continue;
@@ -1135,7 +1159,8 @@ fn exact_gaussian_coefficients(
                 .map(|(&value, &coefficient)| (value * coefficient).abs())
                 .sum::<f64>();
         let residual = (adjusted_response[row] - fitted[row]).abs();
-        if !residual.is_finite() || residual > gamma * operand_scale {
+        let allowed = gamma * operand_scale + rotation_residual / weights[row].sqrt();
+        if !(residual.is_finite() && residual <= allowed) {
             return None;
         }
     }
@@ -1295,19 +1320,25 @@ fn exact_gaussian_boundary(
         // support), so the response is reproduced on `null(S_k)` if and only if
         // β itself lies there: a certified restricted solve is then an exact
         // annihilation witness, and aliasing cannot make it disagree with β.
+        // The computed null basis is itself rotated by the eigensolver's rounding,
+        // amplified by the penalty's spectral gap (#2355: on an exact line at
+        // n = p the rotated span alone leaves a residual above the dot-product
+        // bound), so the restricted solve prices that rotation.
         let reproduced_on_null_space = !annihilates && {
-            let null_basis = embedded_penalty_null_basis(p, r.clone(), &block.local)
-                .map_err(|reason| WorkflowError::IntegrationFailed {
-                    reason: format!(
-                        "deterministic Gaussian candidate could not resolve penalty \
-                         {penalty_index}'s null space: {reason}"
-                    ),
+            let (null_basis, rotation_radius) =
+                embedded_penalty_null_basis(p, r.clone(), &block.local).map_err(|reason| {
+                    WorkflowError::IntegrationFailed {
+                        reason: format!(
+                            "deterministic Gaussian candidate could not resolve penalty \
+                             {penalty_index}'s null space: {reason}"
+                        ),
+                    }
                 })?;
             exact_gaussian_coefficients(
                 &x,
                 &adjusted_response,
                 request.weights.as_ref(),
-                Some(&null_basis),
+                Some((&null_basis, rotation_radius)),
             )
             .is_some()
         };
@@ -1326,18 +1357,20 @@ fn exact_gaussian_boundary(
     // `null(S_infinite)`: uniqueness makes it the same coefficient in exact
     // arithmetic, and a joint solve that does not certify declines the route.
     let beta = if restricted_certification {
-        let joint_null_basis = embedded_penalty_null_basis(p, 0..p, &infinite_face_penalty)
-            .map_err(|reason| WorkflowError::IntegrationFailed {
-                reason: format!(
-                    "deterministic Gaussian candidate could not resolve the joint \
-                     infinite-face null space: {reason}"
-                ),
+        let (joint_null_basis, joint_rotation_radius) =
+            embedded_penalty_null_basis(p, 0..p, &infinite_face_penalty).map_err(|reason| {
+                WorkflowError::IntegrationFailed {
+                    reason: format!(
+                        "deterministic Gaussian candidate could not resolve the joint \
+                         infinite-face null space: {reason}"
+                    ),
+                }
             })?;
         let Some(tangent_beta) = exact_gaussian_coefficients(
             &x,
             &adjusted_response,
             request.weights.as_ref(),
-            Some(&joint_null_basis),
+            Some((&joint_null_basis, joint_rotation_radius)),
         ) else {
             return Ok(None);
         };
@@ -1356,11 +1389,14 @@ fn exact_gaussian_boundary(
 /// full `p`-coefficient frame. Every coordinate outside `range` is free; the
 /// block's own null directions come from its spectrum at the same relative
 /// rank floor `deterministic_gaussian_standard_fit` uses for an infinite face.
+///
+/// Also returns the radius by which the computed span can be rotated away from
+/// the exact null space, `+∞` when the spectrum does not separate the two.
 fn embedded_penalty_null_basis(
     p: usize,
     range: std::ops::Range<usize>,
     local: &Array2<f64>,
-) -> Result<Array2<f64>, String> {
+) -> Result<(Array2<f64>, f64), String> {
     use gam_linalg::faer_ndarray::FaerEigh;
     let symmetric = (local + &local.t().to_owned()) * 0.5;
     let (eigenvalues, eigenvectors) = symmetric
@@ -1375,6 +1411,24 @@ fn embedded_penalty_null_basis(
         .enumerate()
         .filter_map(|(index, &value)| (value <= rank_floor).then_some(index))
         .collect();
+    // The eigensolver's backward error sits at the rank floor the null directions
+    // are classified at, and by Weyl it moves the weakest penalized eigenvalue by
+    // at most that floor. Davis–Kahan then bounds the rotation of the computed
+    // null directions away from the exact null space by
+    //   floor / (weakest penalized − 2·floor);
+    // a gap that does not clear twice the floor leaves the rotation unbounded.
+    let weakest_penalized = eigenvalues
+        .iter()
+        .copied()
+        .filter(|&value| value > rank_floor)
+        .fold(f64::INFINITY, f64::min);
+    let rotation_radius = if weakest_penalized.is_infinite() {
+        0.0
+    } else if weakest_penalized > 2.0 * rank_floor {
+        rank_floor / (weakest_penalized - 2.0 * rank_floor)
+    } else {
+        f64::INFINITY
+    };
     let outside = p - range.len();
     let mut basis = Array2::<f64>::zeros((p, outside + null_directions.len()));
     let mut column = 0usize;
@@ -1388,7 +1442,7 @@ fn embedded_penalty_null_basis(
         }
         column += 1;
     }
-    Ok(basis)
+    Ok((basis, rotation_radius))
 }
 
 fn try_deterministic_gaussian_standard_fit(
