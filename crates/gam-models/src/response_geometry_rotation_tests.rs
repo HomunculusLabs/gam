@@ -139,12 +139,30 @@ fn formula_shared_tangent_fit_preserves_output_rotations_2627() {
     // is the coefficient and prediction agreement asserted above. On this fixture
     // census job 505917 at 7ad913f69 measured H = [[6.563, 6.2e-9], [6.2e-9, −4.5e-9]]
     // against a decided resolution of 9.78e-8, so ρ₁ (the rank-one ridge) is flat.
+    //
+    // A strength railed on its domain face is judged by the certificate on the
+    // off-railed subspace (#2299), and so it is here. Since the strengths are
+    // searched in their #2812 resolvability domain (60b0f746a) a strength can rail
+    // at a face well inside the old ±30 box, and the full outer Hessian then carries
+    // curvature along railed directions that no feasible step can use. Both fits
+    // certify the same optimum, so they rail the same strengths.
     let base_rho = base.lambdas.mapv(f64::ln);
     let rotated_rho = rotated.lambdas.mapv(f64::ln);
-    let base_hessian = prepared
+    let railed = base.outer_certificate.lambdas_railed.clone();
+    assert_eq!(
+        railed, rotated.outer_certificate.lambdas_railed,
+        "a rotation must not change which strengths rail"
+    );
+    let free: Vec<usize> = (0..base_rho.len())
+        .filter(|index| !railed.contains(index))
+        .collect();
+    let full_hessian = prepared
         .evaluate(&base_rho)
         .expect("same-point base diagnostic")
         .hessian;
+    let base_hessian = Array2::from_shape_fn((free.len(), free.len()), |(row, col)| {
+        full_hessian[[free[row], free[col]]]
+    });
     let resolution = base
         .outer_certificate
         .curvature_floor
@@ -152,10 +170,11 @@ fn formula_shared_tangent_fit_preserves_output_rotations_2627() {
         .decided_at_resolution;
     let (curvatures, directions) = base_hessian
         .eigh(Side::Lower)
-        .expect("outer Hessian spectrum");
+        .expect("off-railed outer Hessian spectrum");
     let gradient_sum = base.outer_certificate.stationarity.projected_norm()
         + rotated.outer_certificate.stationarity.projected_norm();
-    let displacement = &base_rho - &rotated_rho;
+    let displacement =
+        Array1::from_shape_fn(free.len(), |row| base_rho[free[row]] - rotated_rho[free[row]]);
     let mut resolvable = 0usize;
     for (index, &curvature) in curvatures.iter().enumerate() {
         if curvature > resolution {
