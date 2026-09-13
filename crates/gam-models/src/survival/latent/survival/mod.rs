@@ -401,6 +401,10 @@ pub(crate) struct LatentBinaryFamily {
     pub x_mean: DesignMatrix,
     pub time_linear_constraints: Option<LinearInequalityConstraints>,
     pub quadctx: Arc<QuadratureContext>,
+    /// The baseline chart point this family's time offsets were realized at (see
+    /// [`LatentSurvivalFamily::baseline_theta_rows`]).
+    pub(crate) baseline_theta_rows:
+        Option<Arc<crate::survival::construction::LatentSurvivalOffsetGeometry>>,
 }
 
 impl LatentSurvivalFamily {
@@ -1135,6 +1139,7 @@ pub(crate) fn fit_latent_binary_terms(
         x_mean: mean_design.design.clone(),
         time_linear_constraints: time_prepared.linear_constraints.clone(),
         quadctx: Arc::new(QuadratureContext::new()),
+        baseline_theta_rows: None,
     };
 
     let blocks = vec![
@@ -5899,42 +5904,14 @@ impl LatentSurvivalFamily {
         direction
     }
 
-    /// The baseline-chart axis a hyper coordinate addresses, after checking that
-    /// the manifest carries exactly the chart point this family was realized at
-    /// (#2714).
+    /// The baseline-chart axis a hyper coordinate addresses (#2714).
     pub(crate) fn baseline_theta_family_axis(
         &self,
         hyper_layout: &crate::custom_family::CustomFamilyHyperLayout,
         psi_index: usize,
     ) -> Result<(Arc<crate::survival::construction::LatentSurvivalOffsetGeometry>, usize), String>
     {
-        let rows = self.baseline_theta_rows.as_ref().ok_or_else(|| {
-            "latent survival family was realized with no baseline chart, so it owns no hyper axes"
-                .to_string()
-        })?;
-        let manifest = hyper_layout
-            .values()
-            .slice(s![hyper_layout.design_axis_count()..]);
-        if hyper_layout.family_axis_count() != rows.theta.len()
-            || manifest.len() != rows.theta.len()
-            || manifest
-                .iter()
-                .zip(rows.theta.iter())
-                .any(|(declared, realized)| declared.to_bits() != realized.to_bits())
-        {
-            return Err(format!(
-                "latent survival baseline chart was realized at {:?}, but the hyper manifest carries {:?}",
-                rows.theta, manifest
-            ));
-        }
-        match hyper_layout.axis(psi_index) {
-            Some(crate::custom_family::CustomFamilyHyperAxis::Family { family_axis }) => {
-                Ok((Arc::clone(rows), family_axis))
-            }
-            other => Err(format!(
-                "latent survival owns only baseline-chart hyper axes; psi index {psi_index} resolves to {other:?}"
-            )),
-        }
+        latent_baseline_theta_family_axis(self.baseline_theta_rows.as_ref(), hyper_layout, psi_index)
     }
 
     /// Fixed-β first-order terms of baseline-chart axis `axis` (#2714):
@@ -7111,6 +7088,186 @@ pub fn latent_binary_alo_row_geometry(
     })
 }
 
+/// The baseline-chart axis a hyper coordinate addresses, after checking that the
+/// manifest carries exactly the chart point the family was realized at (#2714).
+fn latent_baseline_theta_family_axis(
+    rows: Option<&Arc<crate::survival::construction::LatentSurvivalOffsetGeometry>>,
+    hyper_layout: &crate::custom_family::CustomFamilyHyperLayout,
+    psi_index: usize,
+) -> Result<(Arc<crate::survival::construction::LatentSurvivalOffsetGeometry>, usize), String> {
+    let rows = rows.ok_or_else(|| {
+        "latent family was realized with no baseline chart, so it owns no hyper axes".to_string()
+    })?;
+    let manifest = hyper_layout
+        .values()
+        .slice(s![hyper_layout.design_axis_count()..]);
+    if hyper_layout.family_axis_count() != rows.theta.len()
+        || manifest.len() != rows.theta.len()
+        || manifest
+            .iter()
+            .zip(rows.theta.iter())
+            .any(|(declared, realized)| declared.to_bits() != realized.to_bits())
+    {
+        return Err(format!(
+            "latent baseline chart was realized at {:?}, but the hyper manifest carries {:?}",
+            rows.theta, manifest
+        ));
+    }
+    match hyper_layout.axis(psi_index) {
+        Some(crate::custom_family::CustomFamilyHyperAxis::Family { family_axis }) => {
+            Ok((Arc::clone(rows), family_axis))
+        }
+        other => Err(format!(
+            "a latent family owns only baseline-chart hyper axes; psi index {psi_index} resolves to {other:?}"
+        )),
+    }
+}
+
+/// A latent-binary row's NLL channels along one primary direction `u`, from one
+/// one-seed fixed-σ lift (#2714): `(∇ℓ_bin, −∇²ℓ_bin, D_u(−∇²ℓ_bin))`.
+///
+/// The binary chain reads the survival value, gradient `g`, Hessian `H` and the
+/// one-seed third contraction `T(u)`:
+///
+/// ```text
+///   ∇ℓ_bin        = grad_scale·g,
+///   −∇²ℓ_bin      = grad_scale·(−H) + outer_scale·g gᵀ,
+///   D_u(−∇²ℓ_bin) = grad_scale·(−T(u)) − outer_scale·(g·u)·(−H) + outer_scale′·(g·u)·g gᵀ
+///                   + outer_scale·((−H u) gᵀ + g (−H u)ᵀ),
+/// ```
+///
+/// where `grad_scale`, `outer_scale` and `outer_scale′` are functions of the row's
+/// value alone.
+fn latent_binary_row_one_seed_channels(
+    quadctx: &QuadratureContext,
+    row: &LatentSurvivalRow,
+    point: LatentSurvivalPrimaryPoint,
+    event: u8,
+    direction: &Array1<f64>,
+) -> Result<(Array1<f64>, Array2<f64>, Array2<f64>), LatentSurvivalError> {
+    let dim = LATENT_SURVIVAL_PRIMARY_DIM;
+    let live = |a: usize| a < LATENT_SURVIVAL_PRIMARY_LOG_SIGMA;
+    // OneSeed already carries the ordinary value/gradient/Hessian in its base
+    // part; the binary outer chain reuses those channels instead of running a
+    // separate Order2 row first.
+    let row_jet = latent_survival_row_primary_one_seed_fixed_sigma(quadctx, row, point, direction)?;
+    let (binary, outer_scale_prime) =
+        binary_from_log_survival_through_third(row_jet.base.value(), event)?;
+    let base_gradient = row_jet.base.g();
+    let base_hessian = row_jet.base.h();
+    let contracted_third = row_jet.contracted_third();
+    let survival_gradient =
+        Array1::from_shape_fn(dim, |a| if live(a) { base_gradient[a] } else { 0.0 });
+    let survival_hessian = Array2::from_shape_fn((dim, dim), |(a, b)| {
+        if live(a) && live(b) {
+            -base_hessian[a][b]
+        } else {
+            0.0
+        }
+    });
+    let third = Array2::from_shape_fn((dim, dim), |(a, b)| {
+        if live(a) && live(b) {
+            -contracted_third[a][b]
+        } else {
+            0.0
+        }
+    });
+    let g_u = -survival_hessian.dot(direction);
+    let t_u = survival_gradient.dot(direction);
+    let mut neg_third = binary.grad_scale * third;
+    neg_third.scaled_add(-binary.outer_scale * t_u, &survival_hessian);
+    let mut neg_hessian = binary.grad_scale * &survival_hessian;
+    for a in 0..dim {
+        for b in 0..dim {
+            neg_third[[a, b]] += outer_scale_prime * t_u * survival_gradient[a] * survival_gradient[b]
+                + binary.outer_scale
+                    * (g_u[a] * survival_gradient[b] + survival_gradient[a] * g_u[b]);
+            neg_hessian[[a, b]] += binary.outer_scale * survival_gradient[a] * survival_gradient[b];
+        }
+    }
+    let gradient = binary.grad_scale * &survival_gradient;
+    Ok((gradient, neg_hessian, neg_third))
+}
+
+/// `D_u D_v(−∇²ℓ_bin)` of a latent-binary row, from one two-seed fixed-σ lift
+/// (#2714). One TwoSeed row carries the base VGH, both one-seed Hessians and the
+/// mixed two-seed Hessian, so the binary chain closes without the four complete
+/// rows (Order2 + OneSeed(u) + OneSeed(v) + TwoSeed(u,v)) a composition would run.
+fn latent_binary_row_contracted_fourth(
+    quadctx: &QuadratureContext,
+    row: &LatentSurvivalRow,
+    point: LatentSurvivalPrimaryPoint,
+    event: u8,
+    direction_u: &Array1<f64>,
+    direction_v: &Array1<f64>,
+) -> Result<Array2<f64>, LatentSurvivalError> {
+    let row_jet =
+        latent_survival_row_primary_two_seed_fixed_sigma(quadctx, row, point, direction_u, direction_v)?;
+    let (binary, outer_scale_prime, outer_scale_second) =
+        binary_from_log_survival_through_fourth(row_jet.base.value(), event)?;
+    let base_gradient = row_jet.base.g();
+    let base_hessian = row_jet.base.h();
+    let contracted_third_u = row_jet.eps.h();
+    let contracted_third_v = row_jet.del.h();
+    let contracted_fourth = row_jet.contracted_fourth();
+    let survival_gradient = Array1::from_shape_fn(LATENT_SURVIVAL_PRIMARY_DIM, |a| {
+        if a < LATENT_SURVIVAL_PRIMARY_LOG_SIGMA {
+            base_gradient[a]
+        } else {
+            0.0
+        }
+    });
+    let pad_matrix =
+        |matrix: &[[f64; LATENT_SURVIVAL_PRIMARY_LOG_SIGMA]; LATENT_SURVIVAL_PRIMARY_LOG_SIGMA]| {
+            Array2::from_shape_fn(
+                (LATENT_SURVIVAL_PRIMARY_DIM, LATENT_SURVIVAL_PRIMARY_DIM),
+                |(a, b)| {
+                    if a < LATENT_SURVIVAL_PRIMARY_LOG_SIGMA && b < LATENT_SURVIVAL_PRIMARY_LOG_SIGMA
+                    {
+                        -matrix[a][b]
+                    } else {
+                        0.0
+                    }
+                },
+            )
+        };
+    let survival_hessian = pad_matrix(&base_hessian);
+    let third_u = pad_matrix(&contracted_third_u);
+    let third_v = pad_matrix(&contracted_third_v);
+    let fourth = pad_matrix(&contracted_fourth);
+    let g_u = -survival_hessian.dot(direction_u);
+    let g_v = -survival_hessian.dot(direction_v);
+    let g_uv = -third_v.dot(direction_u);
+    let t_u = survival_gradient.dot(direction_u);
+    let t_v = survival_gradient.dot(direction_v);
+    let l_uv = -direction_u.dot(&survival_hessian.dot(direction_v));
+    let grad_scale_prime = -binary.outer_scale;
+    let grad_scale_second = -outer_scale_prime;
+    let c_u = grad_scale_prime * t_u;
+    let c_v = grad_scale_prime * t_v;
+    let c_uv = grad_scale_second * t_u * t_v + grad_scale_prime * l_uv;
+    let o_u = outer_scale_prime * t_u;
+    let o_v = outer_scale_prime * t_v;
+    let o_uv = outer_scale_second * t_u * t_v + outer_scale_prime * l_uv;
+    let mut primary = binary.grad_scale * fourth;
+    primary.scaled_add(c_u, &third_v);
+    primary.scaled_add(c_v, &third_u);
+    primary.scaled_add(c_uv, &survival_hessian);
+    for a in 0..LATENT_SURVIVAL_PRIMARY_DIM {
+        for b in 0..LATENT_SURVIVAL_PRIMARY_DIM {
+            primary[[a, b]] += o_uv * survival_gradient[a] * survival_gradient[b]
+                + o_v * (g_u[a] * survival_gradient[b] + survival_gradient[a] * g_u[b])
+                + o_u * (g_v[a] * survival_gradient[b] + survival_gradient[a] * g_v[b])
+                + binary.outer_scale
+                    * (g_uv[a] * survival_gradient[b]
+                        + g_u[a] * g_v[b]
+                        + g_v[a] * g_u[b]
+                        + survival_gradient[a] * g_uv[b]);
+        }
+    }
+    Ok(primary)
+}
+
 impl LatentBinaryFamily {
     /// Assemble the per-row [`LatentSurvivalRow`] for a row treated as a pure
     /// right-censored survival contribution (exit time is the censoring
@@ -7487,10 +7644,7 @@ impl LatentBinaryFamily {
             let row =
                 self.build_right_censored_row_at(row_idx, q_entry[row_idx], q_exit[row_idx])?;
             let direction = self.row_primary_direction_from_flat(row_idx, &slices, d_beta_flat);
-            // OneSeed already carries the ordinary value/gradient/Hessian in
-            // its base part.  Reuse those channels for the binary outer chain
-            // instead of running a separate Order2 row first.
-            let row_jet = latent_survival_row_primary_one_seed_fixed_sigma(
+            let primary = latent_binary_row_one_seed_channels(
                 &self.quadctx,
                 &row,
                 LatentSurvivalPrimaryPoint {
@@ -7501,58 +7655,10 @@ impl LatentBinaryFamily {
                     mu: mu[row_idx],
                     sigma: self.latent_sd,
                 },
-                &direction,
-            )?;
-            let (binary, outer_scale_prime) = binary_from_log_survival_through_third(
-                row_jet.base.value(),
                 self.event_target[row_idx],
-            )?;
-            let base_gradient = row_jet.base.g();
-            let base_hessian = row_jet.base.h();
-            let contracted_third = row_jet.contracted_third();
-            let survival_gradient = Array1::from_shape_fn(LATENT_SURVIVAL_PRIMARY_DIM, |a| {
-                if a < LATENT_SURVIVAL_PRIMARY_LOG_SIGMA {
-                    base_gradient[a]
-                } else {
-                    0.0
-                }
-            });
-            let survival_hessian = Array2::from_shape_fn(
-                (LATENT_SURVIVAL_PRIMARY_DIM, LATENT_SURVIVAL_PRIMARY_DIM),
-                |(a, b)| {
-                    if a < LATENT_SURVIVAL_PRIMARY_LOG_SIGMA
-                        && b < LATENT_SURVIVAL_PRIMARY_LOG_SIGMA
-                    {
-                        -base_hessian[a][b]
-                    } else {
-                        0.0
-                    }
-                },
-            );
-            let third = Array2::from_shape_fn(
-                (LATENT_SURVIVAL_PRIMARY_DIM, LATENT_SURVIVAL_PRIMARY_DIM),
-                |(a, b)| {
-                    if a < LATENT_SURVIVAL_PRIMARY_LOG_SIGMA
-                        && b < LATENT_SURVIVAL_PRIMARY_LOG_SIGMA
-                    {
-                        -contracted_third[a][b]
-                    } else {
-                        0.0
-                    }
-                },
-            );
-            let g_u = -survival_hessian.dot(&direction);
-            let t_u = survival_gradient.dot(&direction);
-            let mut primary = binary.grad_scale * third;
-            primary.scaled_add(-binary.outer_scale * t_u, &survival_hessian);
-            for a in 0..LATENT_SURVIVAL_PRIMARY_DIM {
-                for b in 0..LATENT_SURVIVAL_PRIMARY_DIM {
-                    primary[[a, b]] +=
-                        outer_scale_prime * t_u * survival_gradient[a] * survival_gradient[b]
-                            + binary.outer_scale
-                                * (g_u[a] * survival_gradient[b] + survival_gradient[a] * g_u[b]);
-                }
-            }
+                &direction,
+            )?
+            .2;
             let weighted_primary =
                 checked_weighted_row_matrix(wi, &primary, row_idx, "binary contracted third")?;
             self.add_pullback_primary_hessian(&mut out, row_idx, &slices, &weighted_primary);
@@ -7728,11 +7834,7 @@ impl LatentBinaryFamily {
                 self.build_right_censored_row_at(row_idx, q_entry[row_idx], q_exit[row_idx])?;
             let direction_u = self.row_primary_direction_from_flat(row_idx, &slices, d_beta_u_flat);
             let direction_v = self.row_primary_direction_from_flat(row_idx, &slices, d_beta_v_flat);
-            // One TwoSeed row contains the base VGH, both one-seed Hessians,
-            // and the mixed two-seed Hessian.  The previous composition ran
-            // four complete rows (Order2 + OneSeed(u) + OneSeed(v) +
-            // TwoSeed(u,v)) to recover these same channels.
-            let row_jet = latent_survival_row_primary_two_seed_fixed_sigma(
+            let primary = latent_binary_row_contracted_fourth(
                 &self.quadctx,
                 &row,
                 LatentSurvivalPrimaryPoint {
@@ -7743,81 +7845,173 @@ impl LatentBinaryFamily {
                     mu: mu[row_idx],
                     sigma: self.latent_sd,
                 },
+                self.event_target[row_idx],
                 &direction_u,
                 &direction_v,
             )?;
-            let (binary, outer_scale_prime, outer_scale_second) =
-                binary_from_log_survival_through_fourth(
-                    row_jet.base.value(),
-                    self.event_target[row_idx],
-                )?;
-            let base_gradient = row_jet.base.g();
-            let base_hessian = row_jet.base.h();
-            let contracted_third_u = row_jet.eps.h();
-            let contracted_third_v = row_jet.del.h();
-            let contracted_fourth = row_jet.contracted_fourth();
-            let survival_gradient = Array1::from_shape_fn(LATENT_SURVIVAL_PRIMARY_DIM, |a| {
-                if a < LATENT_SURVIVAL_PRIMARY_LOG_SIGMA {
-                    base_gradient[a]
-                } else {
-                    0.0
-                }
-            });
-            let pad_matrix =
-                |matrix: &[[f64; LATENT_SURVIVAL_PRIMARY_LOG_SIGMA];
-                      LATENT_SURVIVAL_PRIMARY_LOG_SIGMA]| {
-                    Array2::from_shape_fn(
-                        (LATENT_SURVIVAL_PRIMARY_DIM, LATENT_SURVIVAL_PRIMARY_DIM),
-                        |(a, b)| {
-                            if a < LATENT_SURVIVAL_PRIMARY_LOG_SIGMA
-                                && b < LATENT_SURVIVAL_PRIMARY_LOG_SIGMA
-                            {
-                                -matrix[a][b]
-                            } else {
-                                0.0
-                            }
-                        },
-                    )
-                };
-            let survival_hessian = pad_matrix(&base_hessian);
-            let third_u = pad_matrix(&contracted_third_u);
-            let third_v = pad_matrix(&contracted_third_v);
-            let fourth = pad_matrix(&contracted_fourth);
-            let g_u = -survival_hessian.dot(&direction_u);
-            let g_v = -survival_hessian.dot(&direction_v);
-            let g_uv = -third_v.dot(&direction_u);
-            let t_u = survival_gradient.dot(&direction_u);
-            let t_v = survival_gradient.dot(&direction_v);
-            let l_uv = -direction_u.dot(&survival_hessian.dot(&direction_v));
-            let grad_scale_prime = -binary.outer_scale;
-            let grad_scale_second = -outer_scale_prime;
-            let c_u = grad_scale_prime * t_u;
-            let c_v = grad_scale_prime * t_v;
-            let c_uv = grad_scale_second * t_u * t_v + grad_scale_prime * l_uv;
-            let o_u = outer_scale_prime * t_u;
-            let o_v = outer_scale_prime * t_v;
-            let o_uv = outer_scale_second * t_u * t_v + outer_scale_prime * l_uv;
-            let mut primary = binary.grad_scale * fourth;
-            primary.scaled_add(c_u, &third_v);
-            primary.scaled_add(c_v, &third_u);
-            primary.scaled_add(c_uv, &survival_hessian);
-            for a in 0..LATENT_SURVIVAL_PRIMARY_DIM {
-                for b in 0..LATENT_SURVIVAL_PRIMARY_DIM {
-                    primary[[a, b]] += o_uv * survival_gradient[a] * survival_gradient[b]
-                        + o_v * (g_u[a] * survival_gradient[b] + survival_gradient[a] * g_u[b])
-                        + o_u * (g_v[a] * survival_gradient[b] + survival_gradient[a] * g_v[b])
-                        + binary.outer_scale
-                            * (g_uv[a] * survival_gradient[b]
-                                + g_u[a] * g_v[b]
-                                + g_v[a] * g_u[b]
-                                + survival_gradient[a] * g_uv[b]);
-                }
-            }
             let weighted_primary =
                 checked_weighted_row_matrix(wi, &primary, row_idx, "binary contracted fourth")?;
             self.add_pullback_primary_hessian(&mut out, row_idx, &slices, &weighted_primary);
         }
         require_finite_likelihood_matrix(&out, "binary second directional Hessian derivative")?;
+        Ok(out)
+    }
+
+    /// The latent-binary row direction of baseline-chart axis `axis`. The
+    /// deployment holds `q̇_exit = 1` and reads no interval bound, so only the entry
+    /// and exit offsets move (#2714).
+    fn baseline_theta_row_direction(
+        rows: &crate::survival::construction::LatentSurvivalOffsetGeometry,
+        row: usize,
+        axis: usize,
+    ) -> Array1<f64> {
+        let mut direction = Array1::<f64>::zeros(LATENT_SURVIVAL_PRIMARY_DIM);
+        direction[LATENT_SURVIVAL_PRIMARY_Q_ENTRY] = rows.offset_entry_theta[[row, axis]];
+        direction[LATENT_SURVIVAL_PRIMARY_Q_EXIT] = rows.offset_exit_theta[[row, axis]];
+        direction
+    }
+
+    /// The baseline-chart axis a hyper coordinate addresses (#2714).
+    pub(crate) fn baseline_theta_family_axis(
+        &self,
+        hyper_layout: &crate::custom_family::CustomFamilyHyperLayout,
+        psi_index: usize,
+    ) -> Result<(Arc<crate::survival::construction::LatentSurvivalOffsetGeometry>, usize), String>
+    {
+        latent_baseline_theta_family_axis(self.baseline_theta_rows.as_ref(), hyper_layout, psi_index)
+    }
+
+    /// Fixed-β first-order terms of baseline-chart axis `axis` for the binary
+    /// deployment (#2714), the binary twin of
+    /// [`LatentSurvivalFamily::baseline_theta_psi_terms_dense`]:
+    /// `V_θ = −Σ w ∇ℓ_bin·d`, `g_θ = Σ w Xᵀ(−∇²ℓ_bin d)`, `H_θ = Σ w Xᵀ D_d(−∇²ℓ_bin) X`.
+    fn baseline_theta_psi_terms_dense(
+        &self,
+        block_states: &[ParameterBlockState],
+        rows: &crate::survival::construction::LatentSurvivalOffsetGeometry,
+        axis: usize,
+    ) -> Result<gam_problem::ExactNewtonJointPsiTerms, String> {
+        let weights = ValidatedLikelihoodWeights::new(&self.weights, "latent-binary")
+            .map_err(String::from)?;
+        let (q_entry, q_exit, mu) = self.split_time_eta(block_states)?;
+        let slices = self.joint_slices();
+        let total = slices.total;
+        if axis >= rows.theta.len() || rows.offset_exit_theta.nrows() != self.event_target.len() {
+            return Err(format!(
+                "latent binary baseline psi axis {axis} is outside a {}-coordinate chart realized over {} rows for {} observations",
+                rows.theta.len(),
+                rows.offset_exit_theta.nrows(),
+                self.event_target.len()
+            ));
+        }
+        let mut objective = CompensatedRowSum::default();
+        let mut score = Array1::<f64>::zeros(total);
+        let mut hessian = Array2::<f64>::zeros((total, total));
+        for row_idx in 0..self.event_target.len() {
+            let wi = weights.at(row_idx);
+            if wi == 0.0 {
+                continue;
+            }
+            let row =
+                self.build_right_censored_row_at(row_idx, q_entry[row_idx], q_exit[row_idx])?;
+            let direction = Self::baseline_theta_row_direction(rows, row_idx, axis);
+            let (gradient, neg_hessian, neg_third) = latent_binary_row_one_seed_channels(
+                &self.quadctx,
+                &row,
+                LatentSurvivalPrimaryPoint {
+                    q_entry: q_entry[row_idx],
+                    q_exit: q_exit[row_idx],
+                    qdot_exit: 1.0,
+                    q_right: q_exit[row_idx],
+                    mu: mu[row_idx],
+                    sigma: self.latent_sd,
+                },
+                self.event_target[row_idx],
+                &direction,
+            )?;
+            objective.add(checked_weighted_row_value(
+                wi,
+                -gradient.dot(&direction),
+                row_idx,
+                "binary baseline psi objective",
+            )?);
+            self.add_pullback_primary_gradient(
+                &mut score,
+                row_idx,
+                &slices,
+                &neg_hessian.dot(&direction),
+                wi,
+            )?;
+            let weighted_third =
+                checked_weighted_row_matrix(wi, &neg_third, row_idx, "binary baseline psi third")?;
+            self.add_pullback_primary_hessian(&mut hessian, row_idx, &slices, &weighted_third);
+        }
+        let objective_psi =
+            require_finite_likelihood_scalar(objective.value(), "binary baseline psi objective")?;
+        require_finite_likelihood_vector(&score, "binary baseline psi score")?;
+        require_finite_likelihood_matrix(&hessian, "binary baseline psi information derivative")?;
+        Ok(gam_problem::ExactNewtonJointPsiTerms {
+            objective_psi,
+            score_psi: score,
+            hessian_psi: hessian,
+            hessian_psi_operator: None,
+        })
+    }
+
+    /// `D_β H_θ[u] = Σ w Xᵀ D_d D_{Xu}(−∇²ℓ_bin) X` for baseline-chart axis `axis`
+    /// of the binary deployment (#2714).
+    fn baseline_theta_hessian_directional_derivative_dense(
+        &self,
+        block_states: &[ParameterBlockState],
+        rows: &crate::survival::construction::LatentSurvivalOffsetGeometry,
+        axis: usize,
+        d_beta_flat: &Array1<f64>,
+    ) -> Result<Array2<f64>, String> {
+        let weights = ValidatedLikelihoodWeights::new(&self.weights, "latent-binary")
+            .map_err(String::from)?;
+        let (q_entry, q_exit, mu) = self.split_time_eta(block_states)?;
+        let slices = self.joint_slices();
+        if d_beta_flat.len() != slices.total || axis >= rows.theta.len() {
+            return Err(format!(
+                "latent binary baseline psi-Hessian derivative: direction length {} against {} coefficients, axis {axis} of {}",
+                d_beta_flat.len(),
+                slices.total,
+                rows.theta.len()
+            ));
+        }
+        let mut out = Array2::<f64>::zeros((slices.total, slices.total));
+        for row_idx in 0..self.event_target.len() {
+            let wi = weights.at(row_idx);
+            if wi == 0.0 {
+                continue;
+            }
+            let row =
+                self.build_right_censored_row_at(row_idx, q_entry[row_idx], q_exit[row_idx])?;
+            let direction_theta = Self::baseline_theta_row_direction(rows, row_idx, axis);
+            let direction_beta = self.row_primary_direction_from_flat(row_idx, &slices, d_beta_flat);
+            let fourth = latent_binary_row_contracted_fourth(
+                &self.quadctx,
+                &row,
+                LatentSurvivalPrimaryPoint {
+                    q_entry: q_entry[row_idx],
+                    q_exit: q_exit[row_idx],
+                    qdot_exit: 1.0,
+                    q_right: q_exit[row_idx],
+                    mu: mu[row_idx],
+                    sigma: self.latent_sd,
+                },
+                self.event_target[row_idx],
+                &direction_theta,
+                &direction_beta,
+            )?;
+            let weighted_fourth =
+                checked_weighted_row_matrix(wi, &fourth, row_idx, "binary baseline psi fourth")?;
+            self.add_pullback_primary_hessian(&mut out, row_idx, &slices, &weighted_fourth);
+        }
+        require_finite_likelihood_matrix(
+            &out,
+            "binary baseline psi information second derivative",
+        )?;
         Ok(out)
     }
 }

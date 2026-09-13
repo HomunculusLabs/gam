@@ -366,6 +366,7 @@
             x_mean: DesignMatrix::Dense(DenseDesignMatrix::from(array![[1.0, -0.3], [0.2, 0.9]])),
             time_linear_constraints: None,
             quadctx: Arc::new(QuadratureContext::new()),
+            baseline_theta_rows: None,
         }
     }
 
@@ -3529,6 +3530,138 @@
                 family
                     .exact_newton_joint_hessian_directional_derivative_dense(states, &direction)
                     .expect("joint Hessian directional derivative")
+            };
+            let central_mixed =
+                (information_drift(&states_plus) - information_drift(&states_minus)) / (2.0 * h);
+            for ((a, b), &analytic) in mixed.indexed_iter() {
+                let central = central_mixed[[a, b]];
+                assert!(
+                    close(analytic, central),
+                    "axis {axis}: D_β H_θ[u][{a},{b}] {analytic} against central difference {central}"
+                );
+            }
+        }
+    }
+
+    /// #2714: the binary deployment's baseline-chart hyper axes serve the exact
+    /// θ-derivatives of its objective, score, information and mixed information
+    /// at fixed β. The family is realized at `θ ± h` through the same chart, and
+    /// only the entry and exit offsets move: the deployment holds `q̇_exit = 1`.
+    #[test]
+    fn binary_baseline_chart_psi_terms_match_central_differences_2714() {
+        let n = 4;
+        let family = LatentBinaryFamily {
+            event_target: array![1u8, 0u8, 1u8, 0u8],
+            weights: array![1.0, 0.8, 1.1, 1.3],
+            latent_sd: 0.4,
+            hazard_loading: HazardLoading::Full,
+            unloaded_mass_entry: Array1::zeros(n),
+            unloaded_mass_exit: Array1::zeros(n),
+            x_time_entry: array![[1.0, 0.0], [1.0, 0.0], [1.0, 0.0], [1.0, 0.0]],
+            x_time_exit: array![[1.0, 0.35], [1.0, 0.90], [1.0, 1.70], [1.0, 2.60]],
+            x_mean: DesignMatrix::Dense(DenseDesignMatrix::from(array![
+                [1.0, -0.40],
+                [1.0, 0.15],
+                [1.0, 0.60],
+                [1.0, -0.90]
+            ])),
+            time_linear_constraints: None,
+            quadctx: Arc::new(QuadratureContext::new()),
+            baseline_theta_rows: None,
+        };
+        let age_entry = array![0.4, 0.7, 1.1, 0.5];
+        let age_exit = array![1.9, 2.6, 3.4, 4.2];
+        let seed = SurvivalBaselineConfig {
+            target: crate::survival::construction::SurvivalBaselineTarget::Weibull,
+            scale: Some(2.0),
+            shape: Some(1.3),
+            rate: None,
+            makeham: None,
+        };
+        let (seed_entry, seed_exit, seed_derivative) =
+            crate::survival::construction::build_survival_baseline_offsets(
+                &age_entry, &age_exit, &seed,
+            )
+            .expect("seed baseline offsets");
+        let chart = crate::survival::construction::LatentSurvivalFrozenOffsetChart::new(
+            &age_entry,
+            &age_exit,
+            None,
+            &seed,
+            &seed_entry,
+            &seed_exit,
+            &seed_derivative,
+            &Array1::zeros(n),
+        )
+        .expect("chart construction")
+        .expect("a Weibull baseline has chart coordinates");
+        let beta = array![-0.60, 0.85, -0.25, 0.40_f64];
+        let realized = |point: &Array1<f64>| {
+            let geometry = chart.evaluate(point).expect("chart evaluation");
+            let mut states = latent_binary_states_from_joint_beta(&family, &beta);
+            let eta = &mut states[LatentBinaryFamily::BLOCK_TIME].eta;
+            eta.slice_mut(s![0..n]).scaled_add(1.0, &geometry.offset_entry);
+            eta.slice_mut(s![n..2 * n]).scaled_add(1.0, &geometry.offset_exit);
+            (geometry, states)
+        };
+        let theta = chart.initial_theta().clone();
+        let (geometry, states) = realized(&theta);
+        let rows = Arc::new(geometry);
+        let h = 1e-5_f64;
+        let close = |analytic: f64, central: f64| {
+            (analytic - central).abs() <= 1e-6 * analytic.abs().max(central.abs()).max(1.0)
+        };
+        let direction = array![0.3, -0.2, 0.5, 0.1_f64];
+        for axis in 0..theta.len() {
+            let terms = family
+                .baseline_theta_psi_terms_dense(&states, &rows, axis)
+                .expect("binary baseline psi terms");
+            let mixed = family
+                .baseline_theta_hessian_directional_derivative_dense(
+                    &states, &rows, axis, &direction,
+                )
+                .expect("binary baseline mixed information derivative");
+            let mut plus = theta.clone();
+            plus[axis] += h;
+            let mut minus = theta.clone();
+            minus[axis] -= h;
+            let states_plus = realized(&plus).1;
+            let states_minus = realized(&minus).1;
+            let joint = |states: &[ParameterBlockState]| {
+                family
+                    .evaluate_exact_newton_joint_dense(states)
+                    .expect("binary joint value, gradient and Hessian")
+            };
+            let (ll_plus, gradient_plus, information_plus) = joint(&states_plus);
+            let (ll_minus, gradient_minus, information_minus) = joint(&states_minus);
+
+            let central_objective = -(ll_plus - ll_minus) / (2.0 * h);
+            assert!(
+                close(terms.objective_psi, central_objective),
+                "axis {axis}: V_θ {} against central difference {central_objective}",
+                terms.objective_psi
+            );
+            let central_score = (gradient_minus - gradient_plus) / (2.0 * h);
+            for (a, (&analytic, &central)) in
+                terms.score_psi.iter().zip(central_score.iter()).enumerate()
+            {
+                assert!(
+                    close(analytic, central),
+                    "axis {axis}: g_θ[{a}] {analytic} against central difference {central}"
+                );
+            }
+            let central_information = (information_plus - information_minus) / (2.0 * h);
+            for ((a, b), &analytic) in terms.hessian_psi.indexed_iter() {
+                let central = central_information[[a, b]];
+                assert!(
+                    close(analytic, central),
+                    "axis {axis}: H_θ[{a},{b}] {analytic} against central difference {central}"
+                );
+            }
+            let information_drift = |states: &[ParameterBlockState]| {
+                family
+                    .exact_newton_joint_hessian_directional_derivative_dense(states, &direction)
+                    .expect("binary joint Hessian directional derivative")
             };
             let central_mixed =
                 (information_drift(&states_plus) - information_drift(&states_minus)) / (2.0 * h);
