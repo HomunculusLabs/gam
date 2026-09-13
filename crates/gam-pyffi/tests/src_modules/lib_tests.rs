@@ -466,19 +466,17 @@ fn shared_tangent_fit_is_output_rotation_equivariant() {
 /// Fréchet (Karcher) mean, log-map to the shared tangent, fit `r ~ 1`, and assert
 /// (a) the fit SUCCEEDS (it raised before the fix) and (b) the intercept-only
 /// prediction, mapped back by the exponential map, equals the intrinsic Fréchet
-/// mean — verified against a direct Karcher-mean computation. The math: an
+/// mean the product log map chose as its base point. The math: an
 /// isotropic-tangent LSQ intercept at the Karcher mean solves
 /// `mean_i log_base(Y_i) = 0`, and `exp_base(0) = base`, so the constant
 /// prediction is exactly the Fréchet mean.
 #[test]
 fn response_geometry_parametric_only_rhs_fits_frechet_mean() {
-    use gam::geometry::response_geometry::{
-        ResponseManifold, response_exp_map, response_frechet_mean, response_log_map,
-    };
+    use gam::geometry::response_geometry::{dispatch_exp_map, dispatch_log_map};
 
     // A handful of genuine 2×2 SPD matrices, flattened row-major to 4 ambient
     // columns (the layout SpdManifold uses).
-    let spd = ResponseManifold::Spd { n: 2 };
+    let spd = "spd(n=2)";
     let mats = [
         [1.5_f64, 0.2, 0.2, 0.9],
         [2.0, -0.3, -0.3, 1.2],
@@ -494,13 +492,13 @@ fn response_geometry_parametric_only_rhs_fits_frechet_mean() {
         }
     }
 
-    // Base point = intrinsic Fréchet (Karcher) mean, computed directly — the same
-    // default base point the response-geometry dispatch uses when none is given.
-    let base =
-        response_frechet_mean(spd, values.view(), None, 1.0e-12, 256).expect("SPD Fréchet mean");
-    // Shared tangent responses at the base point (what the Python response-geometry
-    // wrapper feeds the shared-tangent fit).
-    let tangent = response_log_map(spd, values.view(), base.view()).expect("SPD log map");
+    // Shared tangent responses through the product log map: with no explicit base
+    // it picks the intrinsic Fréchet (Karcher) mean and maps every row to that
+    // tangent space, which is what the Python response-geometry wrapper feeds the
+    // shared-tangent fit.
+    let (tangent, base, resolved) =
+        dispatch_log_map(values.view(), spd, None, None).expect("SPD log map");
+    assert!(resolved.starts_with("spd"), "resolved response geometry {resolved}");
 
     // Intercept-only RHS. `r` is a non-constant placeholder LHS the materializer
     // needs to parse the formula; the impl discards it and uses the `tangent`
@@ -534,7 +532,7 @@ fn response_geometry_parametric_only_rhs_fits_frechet_mean() {
     // The intercept tangent prediction, mapped back through the exponential map,
     // must equal the intrinsic Fréchet mean of the responses.
     let intercept = fit.coefficients.row(0).to_owned();
-    let predicted = response_exp_map(spd, intercept.view().insert_axis(Axis(0)), base.view())
+    let predicted = dispatch_exp_map(intercept.view().insert_axis(Axis(0)), spd, base.view())
         .expect("exp map of the intercept prediction");
     let mean_err = predicted
         .row(0)

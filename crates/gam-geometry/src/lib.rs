@@ -29,7 +29,7 @@ pub use manifolds::{
 pub use optimizer::{RiemannianObjective, RiemannianTrustRegion, TrustRegionTermination};
 pub use response_geometry::{
     ResponseCurvatureFit, ResponseGeometryError, ResponseManifold, fit_response_curvature,
-    response_curvature_criterion, response_exp_map, response_frechet_mean, response_log_map,
+    response_curvature_criterion,
 };
 
 use ndarray::{Array1, ArrayView1};

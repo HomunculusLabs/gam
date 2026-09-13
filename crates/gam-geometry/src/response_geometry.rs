@@ -420,7 +420,7 @@ impl ResponseManifold {
 /// flat ambient layout — the tangent of a matrix manifold is itself a flattened
 /// matrix). The scalar Gaussian GAMs the caller fits operate column-wise on
 /// this matrix exactly as they do for the sphere.
-pub fn response_log_map(
+pub(crate) fn response_log_map(
     manifold: ResponseManifold,
     values: ArrayView2<'_, f64>,
     base: ArrayView1<'_, f64>,
@@ -451,7 +451,7 @@ pub fn response_log_map(
 /// Batched response-geometry exponential: map predicted tangent coordinates
 /// back to manifold-valued responses at `base`. Inverse of [`response_log_map`]
 /// with the same shapes.
-pub fn response_exp_map(
+pub(crate) fn response_exp_map(
     manifold: ResponseManifold,
     tangent: ArrayView2<'_, f64>,
     base: ArrayView1<'_, f64>,
@@ -568,7 +568,7 @@ pub fn dispatch_exp_map(
 /// analytic strong-convexity radius, certifying the stationary point as the
 /// unique global Fréchet mean; diffuse data return a typed error and require an
 /// explicit base instead of selecting a capped multistart basin.
-pub fn response_frechet_mean(
+pub(crate) fn response_frechet_mean(
     manifold: ResponseManifold,
     values: ArrayView2<'_, f64>,
     weights: Option<ArrayView1<'_, f64>>,
