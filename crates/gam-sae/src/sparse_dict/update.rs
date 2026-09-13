@@ -428,6 +428,15 @@ fn route_and_code_retaining_descent(
 /// The code one row carries out of an epoch: the freshly routed `fresh` code when
 /// its penalized loss is below that of `prior`'s support, re-solved at `decoder`,
 /// by more than both losses' rounding; that re-solved prior code otherwise.
+///
+/// The prior support is re-solved in the prior's own slot order, and that re-solve
+/// is also what a row carries when the routed support is the same set. Coherent
+/// atoms at a small ridge leave the split of a row's code among them resolved only
+/// by the solve's arithmetic, so a solve in another order (route order, or sorted
+/// order) moves the coordinates without moving the reconstruction. Rows at a
+/// routing tie then toggle between two splits every epoch, and the routing residual
+/// never settles at a fixed decoder (job 608885, `large_k_fit_reports_admitted_route_stats_and_is_reproducible`:
+/// decoder residual 3e-15, routing residual 5.6e-4..8.0e-4 over its continuation).
 fn descent_support(
     row: ArrayView1<'_, f32>,
     decoder: ArrayView2<'_, f32>,
@@ -448,11 +457,20 @@ fn descent_support(
         support
     };
     let prior_support = live_support(prior);
-    if prior_support.is_empty() || prior_support == live_support(&fresh) {
+    if prior_support.is_empty() {
         return fresh;
     }
-    let shortlist: Vec<(u32, f32)> = prior_support.iter().map(|&atom| (atom, 0.0)).collect();
+    let shortlist: Vec<(u32, f32)> = prior
+        .indices
+        .iter()
+        .zip(prior.codes.iter())
+        .filter(|entry| *entry.1 != 0.0)
+        .map(|entry| (*entry.0, 0.0))
+        .collect();
     let kept = solve_row_codes(row, decoder, &shortlist, s, code_ridge);
+    if prior_support == live_support(&fresh) {
+        return kept;
+    }
     let (fresh_loss, fresh_rounding) = penalized_row_loss(row, decoder, &fresh, code_ridge);
     let (kept_loss, kept_rounding) = penalized_row_loss(row, decoder, &kept, code_ridge);
     if fresh_loss + fresh_rounding < kept_loss - kept_rounding {
