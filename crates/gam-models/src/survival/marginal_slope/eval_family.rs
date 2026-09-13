@@ -722,7 +722,7 @@ impl SurvivalMarginalSlopeFamily {
 
     /// The outer row measure as one weight per row: a retained row carries its
     /// Horvitz–Thompson weight and a row the measure leaves out carries zero.
-    fn rigid_third_row_weights(&self, options: &BlockwiseFitOptions) -> Vec<f64> {
+    pub(crate) fn rigid_third_row_weights(&self, options: &BlockwiseFitOptions) -> Vec<f64> {
         let mut weights = vec![0.0; self.n];
         for row in crate::marginal_slope_shared::outer_weighted_rows(options, self.n) {
             weights[row.index] = row.weight;

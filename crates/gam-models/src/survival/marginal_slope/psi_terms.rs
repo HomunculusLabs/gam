@@ -1478,10 +1478,12 @@ impl SurvivalMarginalSlopeFamily {
     /// axis with the sparse loading column; only the design pullbacks remain
     /// per axis.
     ///
-    /// Rigid frame only. The flex and time-wiggle kernels carry their own
-    /// primary layout and ψ lifts, and keep the per-axis path: this returns
-    /// `None` there, exactly as it does where the per-axis path has no ψ block,
-    /// so a caller falls back to the per-axis sweep with identical semantics.
+    /// A time wiggle with a score warp or link deviation takes the ζ sweep of
+    /// `timewiggle_third` under the same row measure (gam#2893). The other flex
+    /// frames and a follow-up-varying slope carry their own primary layout and ψ
+    /// lifts, and keep the per-axis path: this returns `None` there, exactly as it
+    /// does where the per-axis path has no ψ block, so a caller falls back to the
+    /// per-axis sweep with identical semantics.
     pub(crate) fn psi_hessian_directional_derivatives_all_beta_axes_with_options(
         &self,
         block_states: &[ParameterBlockState],
@@ -1489,6 +1491,14 @@ impl SurvivalMarginalSlopeFamily {
         psi_index: usize,
         options: &BlockwiseFitOptions,
     ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        if self.timewiggle_flex_design_psi_third_available() {
+            return self.timewiggle_flex_design_psi_hessian_all_beta_axes(
+                block_states,
+                derivative_blocks,
+                psi_index,
+                &self.rigid_third_row_weights(options),
+            );
+        }
         if self.effective_flex_active(block_states)?
             || self.flex_timewiggle_active()
             || self.slope_is_follow_up_varying()

@@ -3466,6 +3466,56 @@ fn timewiggle_flex_design_psi_pair_third_information_matches_finite_difference_2
     }
 }
 
+/// gam#2893: the flex + time-wiggle `{D_β_a ∂_ψ H}` sweep through the ζ composition reproduces
+/// the single-direction ψ Hessian drift on every coefficient axis, for a marginal and a slope
+/// design ψ.
+#[test]
+fn timewiggle_flex_design_psi_hessian_all_beta_axes_matches_single_axis_2893() {
+    let family = timewiggle_marginal_slope_family(Some(test_deviation_runtime()));
+    let beta = timewiggle_marginal_slope_beta(&family);
+    let states = timewiggle_marginal_slope_states(&family, &beta);
+    let blocks = timewiggle_design_psi_blocks();
+    let options = BlockwiseFitOptions::default();
+    for psi in 0..2 {
+        let swept = family
+            .psi_hessian_directional_derivatives_all_beta_axes_with_options(
+                &states, &blocks, psi, &options,
+            )
+            .expect("design ψ Hessian sweep")
+            .expect("a time wiggle with a score warp publishes the ψ Hessian sweep");
+        assert_eq!(swept.len(), beta.len());
+        let single: Vec<Array2<f64>> = (0..beta.len())
+            .map(|index| {
+                let mut axis = Array1::<f64>::zeros(beta.len());
+                axis[index] = 1.0;
+                family
+                    .psi_hessian_directional_derivative_with_options(
+                        &states, &blocks, psi, &axis, &options,
+                    )
+                    .expect("single-axis design ψ Hessian drift")
+                    .expect("a design ψ axis publishes its Hessian drift")
+            })
+            .collect();
+        let scale = single
+            .iter()
+            .flat_map(|matrix| matrix.iter())
+            .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+        assert!(
+            scale > 1e-8,
+            "ψ {psi}: the ψ Hessian drift must be nonzero on this fixture"
+        );
+        for (index, (swept_axis, single_axis)) in swept.iter().zip(single.iter()).enumerate() {
+            let gap = (swept_axis - single_axis)
+                .iter()
+                .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+            assert!(
+                gap <= 1e-10 * scale,
+                "ψ {psi} axis {index}: ζ sweep vs single axis: gap {gap:e}, scale {scale:e}"
+            );
+        }
+    }
+}
+
 
 #[test]
 fn link_flex_blockwise_exact_newton_matches_joint_principal_blocks() {

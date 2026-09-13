@@ -1120,6 +1120,97 @@ impl SurvivalMarginalSlopeFamily {
         Ok(Some(result))
     }
 
+    /// `{D_β_a ∂_ψ H}` along every coefficient axis `a` for a design ψ, under the row measure
+    /// `row_weights` (gam#2893). With `Ã_ψ` the ζ image of the design motion and `w = Ã_ψ β`, a
+    /// row contributes `Ãᵀ(∇⁴[w, Ãe_a] + ∇³[Ã_ψe_a])Ã` and `Ã_ψᵀ ∇³[Ãe_a] Ã` with its
+    /// transpose, so one row pass serves every axis. Returns `None` where the family has no ψ
+    /// block for the axis.
+    pub(crate) fn timewiggle_flex_design_psi_hessian_all_beta_axes(
+        &self,
+        block_states: &[ParameterBlockState],
+        derivative_blocks: &[Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>],
+        psi_index: usize,
+        row_weights: &[f64],
+    ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        let Some((block_idx, local_idx, p_psi, label)) =
+            self.psi_block_info(derivative_blocks, psi_index)?
+        else {
+            return Ok(None);
+        };
+        let frame = self.timewiggle_zeta_frame(block_states)?;
+        let width = frame.layout.width;
+        let p_total = frame.slices.total;
+        if row_weights.len() != self.n {
+            return Err(format!(
+                "time-wiggle design ψ Hessian sweep has {} row weights for {} rows",
+                row_weights.len(),
+                self.n
+            ));
+        }
+        let beta = flat_beta(block_states)?;
+        let policy = gam_runtime::resource::ResourcePolicy::default_library();
+        let psi_map = crate::custom_family::resolve_custom_family_x_psi_map(
+            &derivative_blocks[block_idx][local_idx],
+            self.n,
+            p_psi,
+            0..self.n,
+            label,
+            &policy,
+        )
+        .map_err(|error| error.to_string())?;
+        let zeros = || vec![Array2::<f64>::zeros((p_total, p_total)); p_total];
+        let result = gam_linalg::pairwise_reduce::par_deterministic_try_block_fold(
+            self.n,
+            |range| -> Result<Vec<Array2<f64>>, String> {
+                let mut acc = zeros();
+                let mut scratch = Array2::<f64>::zeros((width, p_total));
+                let mut phi_axis = Array2::<f64>::zeros((width, width));
+                for row in range {
+                    let weight = row_weights[row];
+                    if weight == 0.0 {
+                        continue;
+                    }
+                    let base =
+                        self.build_row_flex_third_base_with_states(row, block_states, &frame.primary)?;
+                    let calc = self.timewiggle_zeta_row_calculus(&frame, block_states, row, base)?;
+                    let images = &calc.zeta_row.images;
+                    let x_psi = psi_map
+                        .row_vector(row)
+                        .map_err(|error| format!("time-wiggle design ψ Hessian sweep row: {error}"))?;
+                    let psi_images = psi_zeta_images(&frame, block_idx, &x_psi)?;
+                    let w = zeta_image_of(&psi_images, &beta, width);
+                    let third_axes = order_three_axes(&frame, &calc);
+                    let fourth_w = self.timewiggle_order_four_axes(&frame, &calc, &w)?;
+                    for c in 0..p_total {
+                        let (image, psi_image) = (&images[c], &psi_images[c]);
+                        if image.entries().is_empty() && psi_image.entries().is_empty() {
+                            continue;
+                        }
+                        phi_axis.fill(0.0);
+                        add_combined_axes(&fourth_w, image, weight, &mut phi_axis);
+                        add_combined_axes(&third_axes, psi_image, weight, &mut phi_axis);
+                        add_zeta_sandwich(&phi_axis, images, images, &mut scratch, &mut acc[c]);
+                        if !image.entries().is_empty() {
+                            phi_axis.fill(0.0);
+                            add_combined_axes(&third_axes, image, weight, &mut phi_axis);
+                            add_zeta_sandwich(&phi_axis, &psi_images, images, &mut scratch, &mut acc[c]);
+                            add_zeta_sandwich(&phi_axis, images, &psi_images, &mut scratch, &mut acc[c]);
+                        }
+                    }
+                }
+                Ok(acc)
+            },
+            |mut a, b| -> Result<_, String> {
+                for (ai, bi) in a.iter_mut().zip(b.into_iter()) {
+                    *ai += &bi;
+                }
+                Ok(a)
+            },
+        )?
+        .unwrap_or_else(zeros);
+        Ok(Some(result))
+    }
+
     /// `{D_β_a ∂²_ψiψj H}` along every coefficient axis `a` for a pair of design ψ, under the
     /// row measure `row_weights` (gam#2893). With the ζ images `Ã_i`, `Ã_j` and `Ã_ij` of the
     /// design motions, `w_• = Ã_• β` and `z_• = Ã_• e_a`, a row contributes
