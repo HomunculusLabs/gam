@@ -1441,8 +1441,18 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     // overrides below). Keep analytic curvature advertised at large scale;
     // the unified REML/LAML planner chooses the matrix-free outer-HVP route for
     // large `(n, p, K)` shapes instead of falling back to first-order BFGS.
-    let analytic_joint_hessian_available =
-        analytic_joint_derivatives_available && joint_hessian.is_analytic();
+    //
+    // An armed Jeffreys objective's exact outer Hessian over ψ reads the ψ-mixed third
+    // information derivatives (`prepare_explicit_jeffreys_curvature_drifts`). They have closed
+    // forms on the rigid frame only, so a score warp, link deviation or time wiggle beside ψ
+    // coordinates keeps the analytic gradient without declared curvature: declaring it would
+    // refuse every trial point that asks for curvature (gam#2893).
+    let psi_jeffreys_curvature_exact = setup.theta0().len() == setup.rho_dim()
+        || !initial_family.joint_jeffreys_term_required()
+        || initial_family.rigid_third_information_available();
+    let analytic_joint_hessian_available = analytic_joint_derivatives_available
+        && joint_hessian.is_analytic()
+        && psi_jeffreys_curvature_exact;
     log::info!(
         "[survival-marginal-slope] initial derivative probe end gradient_analytic={} hessian_analytic={} elapsed={:.3}s",
         analytic_joint_gradient_available,
