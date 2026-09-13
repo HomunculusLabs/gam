@@ -9200,5 +9200,18 @@
     ],
     "reason": "#1378: the tp permutation gate now judges both arms on what the two outer certificates publish, the stationarity bound b. The log-λ ball is ‖V_ρ‖∞·(b_base + b_perm) and the criterion bar is ½·m·‖V_ρ‖∞·(b_base² + b_perm²). The 1024-ulp budget it replaces was borrowed from the warm-start contract on the premise that two certified fits differ only by reassociating O(n) reductions. Pool job 609264 measured that premise false for tp: one-ulp x nudges in the same row order move the tp criterion 1.2e8–6.3e8 ulps.",
     "evidence": "At the base, git grep -n CRITERION_ULP_BUDGET finds its declaration and two uses in tests/basis_smooth/smooths/owed_1378.rs, and the warm-start contract's own separate constant in tests/pyffi/optimization/warm_start_invariance_contract.rs, which this commit does not touch. The owed_1378 uses are rewritten in this commit."
+  },
+  {
+    "base": "12a77009662a7045e45ad1e1e0d7f1d3f2c0ff39",
+    "items": [
+      "crates/gam-models/src/survival/latent/survival/mod.rs:fn:mean_block_seed_log_lambdas",
+      "crates/gam-models/src/survival/latent/survival/mod.rs:fn:offset_channel_residuals",
+      "crates/gam-models/src/survival/latent/survival/tests.rs:fn:latent_binary_offset_residuals_reject_missing_block_state",
+      "crates/gam-models/src/survival/latent/survival/tests.rs:fn:latent_survival_offset_channel_residuals_match_finite_difference",
+      "crates/gam-models/src/survival/latent/survival/tests.rs:fn:latent_survival_offset_residuals_reject_missing_block_state",
+      "crates/gam-models/src/survival/latent/survival/tests.rs:fn:mean_block_seed_takes_a_carried_strength_only_for_its_own_penalty_set_2714"
+    ],
+    "reason": "#2714: a loaded/unloaded latent split now selects its Gompertz-Makeham baseline chart together with rho on the one LAML criterion, as a fully loaded one already did, so the workflow's nested per-probe BFGS over the baseline is deleted from materialize. That search's only inputs were the latent fit results' baseline_offset_residuals, a profile-NLL envelope gradient that omitted the Jeffreys mode response and the response of rho-hat, and the previous probe's carried mean strengths. Both latent families' offset_channel_residuals, the mean seed helper that read the carry, and the four tests that pinned them are removed with the search.",
+    "evidence": "At the base, git grep -n -w offset_channel_residuals finds the two latent declarations called only at the fit_latent_survival_terms and fit_latent_binary_terms result assemblies, whose baseline_offset_residuals field only the nested latent closures in materialize/survival.rs and gam-cli run_survival.rs read; the remaining hits are WorkingModelSurvival::offset_channel_residuals in survival/base.rs and fit_orchestration/fit.rs, which this commit does not touch. mean_block_seed_log_lambdas is called only by build_mean_blockspec on initial_mean_log_lambdas, which only the deleted carry in materialize set. The four removed tests exercise exactly these functions. The loaded/unloaded chart is pinned by loaded_vs_unloaded_chart_psi_terms_match_central_differences_2714 and binary_loaded_vs_unloaded_chart_psi_terms_match_central_differences_2714, added in this commit."
   }
 ]

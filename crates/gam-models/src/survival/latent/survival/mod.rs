@@ -283,11 +283,6 @@ pub struct LatentSurvivalTermSpec {
     pub unloaded_hazard_exit: Array1<f64>,
     pub meanspec: TermCollectionSpec,
     pub mean_offset: Array1<f64>,
-    /// Log smoothing strengths the mean block's outer search starts from when
-    /// the caller carries them from an earlier fit of the same term (the latent
-    /// workflow's baseline-θ probes). `None`, or a length that does not match
-    /// the mean design's penalties, starts at zero.
-    pub initial_mean_log_lambdas: Option<Array1<f64>>,
     /// The parametric baseline the time block's offsets were realized from.
     /// The fit result carries it to every consumer that rebuilds those offsets
     /// at new ages, so the saved model cannot disagree with the fit (#2714).
@@ -302,12 +297,6 @@ pub struct LatentSurvivalTermFitResult {
     /// The baseline whose offsets this fit's time coefficients were estimated
     /// against; the saved model persists exactly this configuration.
     pub baseline_config: SurvivalBaselineConfig,
-    /// Per-row residuals of the unpenalized NLL w.r.t. the additive baseline
-    /// time-block offsets `(entry, exit, derivative)` at the converged β̂.
-    /// Contracted against `baseline_offset_theta_partials` by
-    /// `baseline_chain_rule_gradient` to give the exact θ-gradient of the
-    /// profile penalized NLL for the outer baseline-config optimizer.
-    pub baseline_offset_residuals: crate::survival::OffsetChannelResiduals,
 }
 
 #[derive(Clone)]
@@ -334,10 +323,6 @@ pub struct LatentBinaryTermFitResult {
     /// The baseline whose offsets this fit's time coefficients were estimated
     /// against; the saved model persists exactly this configuration.
     pub baseline_config: SurvivalBaselineConfig,
-    /// Per-row residuals of the unpenalized NLL w.r.t. the additive baseline
-    /// time-block offsets `(entry, exit)` at the converged β̂ (the derivative
-    /// channel is identically zero for the binary deployment likelihood).
-    pub baseline_offset_residuals: crate::survival::OffsetChannelResiduals,
 }
 
 #[derive(Clone)]
@@ -717,11 +702,7 @@ pub(crate) fn fit_latent_survival_terms(
 
     let mut blocks = vec![
         build_time_blockspec(&time_prepared, &spec.time_block),
-        build_mean_blockspec(
-            &mean_design,
-            mean_offset,
-            spec.initial_mean_log_lambdas.as_ref(),
-        ),
+        build_mean_blockspec(&mean_design, mean_offset),
     ];
     if let Some(initial_sigma) = learned_initial_sigma {
         blocks.push(build_log_sigma_blockspec(
@@ -845,24 +826,20 @@ pub(crate) fn fit_latent_survival_terms(
             }
         }
     }
-    // A fully loaded hazard realizes its offsets as the parametric log cumulative
-    // hazard alone, so its baseline chart is a set of family-owned outer
-    // coordinates selected together with ρ (#2714). A loaded/unloaded split also
-    // moves the unloaded masses with θ; the workflow still searches that baseline
-    // outside the fit.
-    let chart = match hazard_loading {
-        HazardLoading::Full => crate::survival::construction::LatentSurvivalFrozenOffsetChart::new(
-            &spec.age_entry,
-            &spec.age_exit,
-            spec.age_right.as_ref(),
-            &spec.baseline_config,
-            &spec.time_block.offset_entry,
-            &spec.time_block.offset_exit,
-            &spec.time_block.derivative_offset_exit,
-            &family.time_offset_right,
-        )?,
-        HazardLoading::LoadedVsUnloaded => None,
-    };
+    // The baseline chart is a set of family-owned outer coordinates selected
+    // together with ρ (#2714): a fully loaded hazard moves only the time offsets,
+    // and a loaded/unloaded split also moves its background components.
+    let chart = crate::survival::construction::LatentSurvivalFrozenOffsetChart::new(
+        &spec.age_entry,
+        &spec.age_exit,
+        spec.age_right.as_ref(),
+        &spec.baseline_config,
+        hazard_loading,
+        &spec.time_block.offset_entry,
+        &spec.time_block.offset_exit,
+        &spec.time_block.derivative_offset_exit,
+        &family.time_offset_right,
+    )?;
     let (fit, family, baseline_config) = match chart {
         Some(chart) => fit_latent_baseline_axes(
             data,
@@ -880,14 +857,12 @@ pub(crate) fn fit_latent_survival_terms(
         }
     };
     let latent_sd = family.latent_sd(&fit.block_states)?;
-    let baseline_offset_residuals = family.offset_channel_residuals(&fit.block_states)?;
     Ok(LatentSurvivalTermFitResult {
         fit,
         design: mean_design,
         resolvedspec,
         latent_sd,
         baseline_config,
-        baseline_offset_residuals,
     })
 }
 
@@ -921,6 +896,12 @@ impl LatentBaselineChartFamily for LatentSurvivalFamily {
         let mut family = self.clone();
         family.time_linear_constraints = time_linear_constraints;
         family.time_offset_right = geometry.offset_right.clone();
+        if let Some(unloaded) = geometry.unloaded.as_ref() {
+            family.unloaded_mass_entry = unloaded.mass_entry.clone();
+            family.unloaded_mass_exit = unloaded.mass_exit.clone();
+            family.unloaded_hazard_exit = unloaded.hazard_exit.clone();
+            family.unloaded_mass_right = unloaded.mass_right.clone();
+        }
         family.baseline_theta_rows = Some(geometry);
         family
     }
@@ -935,8 +916,8 @@ impl LatentBaselineChartFamily for LatentSurvivalFamily {
 impl LatentBaselineChartFamily for LatentBinaryFamily {
     const TIME_BLOCK: usize = Self::BLOCK_TIME;
 
-    /// The binary deployment reads no interval bound, so only the constraints and
-    /// the chart point move.
+    /// The binary deployment reads no interval bound and no exit hazard, so the
+    /// constraints, a split's background masses and the chart point move.
     fn at_chart_point(
         &self,
         geometry: Arc<crate::survival::construction::LatentSurvivalOffsetGeometry>,
@@ -944,6 +925,10 @@ impl LatentBaselineChartFamily for LatentBinaryFamily {
     ) -> Self {
         let mut family = self.clone();
         family.time_linear_constraints = time_linear_constraints;
+        if let Some(unloaded) = geometry.unloaded.as_ref() {
+            family.unloaded_mass_entry = unloaded.mass_entry.clone();
+            family.unloaded_mass_exit = unloaded.mass_exit.clone();
+        }
         family.baseline_theta_rows = Some(geometry);
         family
     }
@@ -961,9 +946,10 @@ impl LatentBaselineChartFamily for LatentBinaryFamily {
 /// The workflow used to search θ in a nested BFGS whose every probe was a complete
 /// REML fit, against the profile-NLL envelope gradient, which omits the Jeffreys
 /// term's mode response and the response of ρ̂ to θ. Here ρ and θ are selected
-/// together on the exact criterion. A θ moves the additive time offsets and the
-/// derivative-guard constraints built from the moved `o_D`; no design, knot or
-/// penalty moves. Working precision is the chart's only domain: a θ whose offsets
+/// together on the exact criterion. A θ moves the additive time offsets, the
+/// derivative-guard constraints built from the moved `o_D` and, for a
+/// loaded/unloaded split, the background components; no design, knot or penalty
+/// moves. Working precision is the chart's only domain: a θ whose offsets
 /// leave the likelihood's domain is refused at evaluation.
 fn fit_latent_baseline_axes<F: LatentBaselineChartFamily + crate::custom_family::JeffreysArming>(
     data: ArrayView2<'_, f64>,
@@ -1220,46 +1206,46 @@ pub(crate) fn fit_latent_binary_terms(
 
     let blocks = vec![
         build_time_blockspec(&time_prepared, &spec.time_block),
-        build_mean_blockspec(&mean_design, mean_offset, None),
+        build_mean_blockspec(&mean_design, mean_offset),
     ];
-    // The binary deployment selects a fully loaded baseline chart together with ρ,
-    // as the survival family does (#2714).
-    let chart = match hazard_loading {
-        HazardLoading::Full => crate::survival::construction::LatentSurvivalFrozenOffsetChart::new(
-            &spec.age_entry,
-            &spec.age_exit,
-            None,
-            &spec.baseline_config,
-            &spec.time_block.offset_entry,
-            &spec.time_block.offset_exit,
-            &spec.time_block.derivative_offset_exit,
-            &Array1::zeros(spec.event_target.len()),
-        )?,
-        HazardLoading::LoadedVsUnloaded => None,
-    };
-    let (fit, family, baseline_config) = match chart {
-        Some(chart) => fit_latent_baseline_axes(
-            data,
-            &family,
-            &blocks,
-            &spec.meanspec,
-            &spec.time_block,
-            spec.derivative_guard,
-            &chart,
-            options,
-        )?,
+    // The binary deployment selects its baseline chart together with ρ, as the
+    // survival family does (#2714).
+    let chart = crate::survival::construction::LatentSurvivalFrozenOffsetChart::new(
+        &spec.age_entry,
+        &spec.age_exit,
+        None,
+        &spec.baseline_config,
+        hazard_loading,
+        &spec.time_block.offset_entry,
+        &spec.time_block.offset_exit,
+        &spec.time_block.derivative_offset_exit,
+        &Array1::zeros(spec.event_target.len()),
+    )?;
+    let (fit, baseline_config) = match chart {
+        Some(chart) => {
+            let solved = fit_latent_baseline_axes(
+                data,
+                &family,
+                &blocks,
+                &spec.meanspec,
+                &spec.time_block,
+                spec.derivative_guard,
+                &chart,
+                options,
+            )?;
+            (solved.0, solved.2)
+        }
         None => {
-            let fit = fit_custom_family_arming_on_evidence(&family, &blocks, options).map_err(|e| e.to_string())?;
-            (fit, family, spec.baseline_config.clone())
+            let fit = fit_custom_family_arming_on_evidence(&family, &blocks, options)
+                .map_err(|e| e.to_string())?;
+            (fit, spec.baseline_config.clone())
         }
     };
-    let baseline_offset_residuals = family.offset_channel_residuals(&fit.block_states)?;
     Ok(LatentBinaryTermFitResult {
         fit,
         design: mean_design,
         resolvedspec,
         baseline_config,
-        baseline_offset_residuals,
     })
 }
 
@@ -1551,30 +1537,14 @@ fn build_time_blockspec(
     }
 }
 
-/// The mean block's starting log smoothing strengths: a carried vector when it
-/// belongs to this penalty set (same length), zero otherwise.
-fn mean_block_seed_log_lambdas(n_penalties: usize, carried: Option<&Array1<f64>>) -> Array1<f64> {
-    carried
-        .filter(|carried| carried.len() == n_penalties)
-        .cloned()
-        .unwrap_or_else(|| Array1::zeros(n_penalties))
-}
-
-fn build_mean_blockspec(
-    design: &TermCollectionDesign,
-    offset: Array1<f64>,
-    initial_log_lambdas: Option<&Array1<f64>>,
-) -> ParameterBlockSpec {
+fn build_mean_blockspec(design: &TermCollectionDesign, offset: Array1<f64>) -> ParameterBlockSpec {
     ParameterBlockSpec {
         name: "mean".to_string(),
         design: design.design.clone(),
         offset,
         penalties: design.penalties_as_penalty_matrix(),
         nullspace_dims: design.nullspace_dims.clone(),
-        initial_log_lambdas: mean_block_seed_log_lambdas(
-            design.penalties.len(),
-            initial_log_lambdas,
-        ),
+        initial_log_lambdas: Array1::zeros(design.penalties.len()),
         initial_beta: None,
         // Strictly below `time_transform` (200) so any constant direction
         // shared between the monotone time baseline and the mean intercept is
@@ -4617,6 +4587,371 @@ fn latent_survival_row_primary_one_seed_channels(
     }
 }
 
+/// `u ↦ eᵘ/(1 − eᵘ)` with its first four derivatives at a negative log-survival
+/// gap `u` (#2714).
+///
+/// With `ω = eᵘ/(1 − eᵘ)`: `ω′ = ω(1 + ω)`, `ω″ = ω′(1 + 2ω)`,
+/// `ω‴ = 2ω′² + (1 + 2ω)ω″` and `ω⁗ = 6ω′ω″ + (1 + 2ω)ω‴`. Every term is a
+/// product of positive factors, so no channel cancels.
+fn latent_unary_derivatives_survival_odds(
+    u: f64,
+    context: &str,
+) -> Result<[f64; 5], LatentSurvivalError> {
+    if !(u.is_finite() && u < 0.0) {
+        return Err(LatentSurvivalError::NumericalFailure {
+            reason: format!("{context} requires a finite negative log-survival gap, got {u:?}"),
+        });
+    }
+    let odds = u.exp() / -u.exp_m1();
+    let spread = 1.0 + 2.0 * odds;
+    let first = odds * (1.0 + odds);
+    let second = first * spread;
+    let third = 2.0 * first * first + spread * second;
+    let fourth = 6.0 * first * second + spread * third;
+    let stack = [odds, first, second, third, fourth];
+    if !stack.iter().all(|value| value.is_finite()) {
+        return Err(LatentSurvivalError::NumericalFailure {
+            reason: format!(
+                "{context} odds derivatives are not representable at log-survival gap {u:?}: {stack:?}"
+            ),
+        });
+    }
+    Ok(stack)
+}
+
+/// A loaded/unloaded row's log-likelihood derivative along the background scale
+/// `ln m`, as a jet over the row primaries (#2714).
+///
+/// Every background component is linear in the Makeham rate `m`, so its
+/// `∂/∂ln m` is itself, and the row's derivative closes on the kernel jets its
+/// likelihood builds:
+///
+/// ```text
+///   right-censored:  φ = M_U(a_in) − M_U(a_out),
+///   exact event:     φ = M_U(a_in) − M_U(a_out) + h_U·K₀ / (h_U·K₀ + q̇·e^q·K₁),
+///   interval:        φ = M_U(a_in) − M_U(L) + (M_U(R) − M_U(L))·ω(b − a),
+/// ```
+///
+/// with `a = log K₀(L) − M_U(L)`, `b = log K₀(R) − M_U(R)` and
+/// `ω(u) = eᵘ/(1 − eᵘ)`. The jet's gradient and Hessian are `∂_{ln m}` of the
+/// row's.
+fn latent_survival_row_unloaded_scale_jet<const K: usize, B: LatentPrimaryJetBackend<K>>(
+    backend: &B,
+    quadctx: &QuadratureContext,
+    row: &LatentSurvivalRow,
+    point: LatentSurvivalPrimaryPoint,
+) -> Result<B::Jet, LatentSurvivalError> {
+    let LatentSurvivalPrimaryPoint {
+        q_exit,
+        qdot_exit,
+        q_right,
+        mu,
+        sigma,
+        ..
+    } = point;
+    let log_sigma_factor = point.log_sigma_factor();
+    let single_k0 = [LatentKernelPrimaryTerm {
+        coeff: 1.0,
+        q_exp: 0,
+        qdot_power: 0,
+        tau_exp: 0,
+        k: 0,
+    }];
+    let out = match row.event_type {
+        LatentSurvivalEventType::RightCensored => {
+            B::Jet::constant(row.mass_unloaded_entry - row.mass_unloaded_exit)
+        }
+        LatentSurvivalEventType::ExactEvent => {
+            if !(row.hazard_unloaded.is_finite() && row.hazard_unloaded > 0.0) {
+                return Err(LatentSurvivalError::NumericalFailure {
+                    reason: format!(
+                        "latent survival background share requires a positive background hazard, got {:?}",
+                        row.hazard_unloaded
+                    ),
+                });
+            }
+            let exit_state = LatentKernelPrimaryState {
+                q: q_exit,
+                qdot: qdot_exit,
+                mu,
+                sigma,
+                log_sigma_factor,
+            };
+            let exit_directions: [LatentKernelPrimaryDirection; K] = std::array::from_fn(|a| {
+                latent_survival_map_exit_direction(
+                    latent_survival_basis_direction(a),
+                    LatentSurvivalEventType::ExactEvent,
+                )
+            });
+            let numerator = backend.kernel_sum_log(
+                quadctx,
+                &[
+                    LatentKernelPrimaryTerm {
+                        coeff: row.hazard_unloaded,
+                        q_exp: 0,
+                        qdot_power: 0,
+                        tau_exp: 0,
+                        k: 0,
+                    },
+                    LatentKernelPrimaryTerm {
+                        coeff: 1.0,
+                        q_exp: 1,
+                        qdot_power: 1,
+                        tau_exp: 0,
+                        k: 1,
+                    },
+                ],
+                exit_state,
+                &exit_directions,
+                "latent survival numerator",
+            )?;
+            let background = backend.kernel_sum_log(
+                quadctx,
+                &single_k0,
+                exit_state,
+                &exit_directions,
+                "latent survival background share",
+            )?;
+            let log_share = background
+                .sub(&numerator)
+                .add(&B::Jet::constant(row.hazard_unloaded.ln()));
+            let share = log_share.value().exp();
+            log_share.compose_unary([share; 5]).add(&B::Jet::constant(
+                row.mass_unloaded_entry - row.mass_unloaded_exit,
+            ))
+        }
+        LatentSurvivalEventType::IntervalCensored => {
+            let left_state = LatentKernelPrimaryState {
+                q: q_exit,
+                qdot: 1.0,
+                mu,
+                sigma,
+                log_sigma_factor,
+            };
+            let right_state = LatentKernelPrimaryState {
+                q: q_right,
+                qdot: 1.0,
+                mu,
+                sigma,
+                log_sigma_factor,
+            };
+            let left_directions: [LatentKernelPrimaryDirection; K] = std::array::from_fn(|a| {
+                latent_survival_map_left_direction(latent_survival_basis_direction(a))
+            });
+            let right_directions: [LatentKernelPrimaryDirection; K] = std::array::from_fn(|a| {
+                latent_survival_map_right_direction(latent_survival_basis_direction(a))
+            });
+            let log_left = backend.kernel_sum_log(
+                quadctx,
+                &single_k0,
+                left_state,
+                &left_directions,
+                "latent survival interval left boundary",
+            )?;
+            let log_right = backend.kernel_sum_log(
+                quadctx,
+                &single_k0,
+                right_state,
+                &right_directions,
+                "latent survival interval right boundary",
+            )?;
+            let gap = log_right
+                .add(&B::Jet::constant(-row.mass_unloaded_right))
+                .sub(&log_left.add(&B::Jet::constant(-row.mass_unloaded_left)));
+            let odds = gap.compose_unary(latent_unary_derivatives_survival_odds(
+                gap.value(),
+                "latent survival interval background share",
+            )?);
+            odds.scale(row.mass_unloaded_right - row.mass_unloaded_left)
+                .add(&B::Jet::constant(
+                    row.mass_unloaded_entry - row.mass_unloaded_left,
+                ))
+        }
+    };
+    if !backend.all_channels_finite(&out) {
+        return Err(LatentSurvivalError::NumericalFailure {
+            reason: format!(
+                "latent survival background share is not finite on a {:?} row",
+                row.event_type
+            ),
+        });
+    }
+    Ok(out)
+}
+
+/// `(φ, ∇φ, ∇²φ)` of [`latent_survival_row_unloaded_scale_jet`] from one order-2
+/// lift, masked to the live primaries (#2714).
+fn latent_survival_row_unloaded_scale_channels(
+    quadctx: &QuadratureContext,
+    row: &LatentSurvivalRow,
+    point: LatentSurvivalPrimaryPoint,
+    include_log_sigma: bool,
+) -> Result<(f64, Array1<f64>, Array2<f64>), LatentSurvivalError> {
+    let dim = LATENT_SURVIVAL_PRIMARY_DIM;
+    if include_log_sigma {
+        let jet = latent_survival_row_unloaded_scale_jet::<LATENT_SURVIVAL_PRIMARY_DIM, _>(
+            &LatentOrder2Backend,
+            quadctx,
+            row,
+            point,
+        )?;
+        let gradient = jet.g();
+        let hessian = jet.h();
+        Ok((
+            jet.value(),
+            Array1::from_shape_fn(dim, |a| gradient[a]),
+            Array2::from_shape_fn((dim, dim), |(a, b)| hessian[a][b]),
+        ))
+    } else {
+        let jet = latent_survival_row_unloaded_scale_jet::<LATENT_SURVIVAL_PRIMARY_LOG_SIGMA, _>(
+            &LatentOrder2Backend,
+            quadctx,
+            row,
+            point,
+        )?;
+        let live = |a: usize| a < LATENT_SURVIVAL_PRIMARY_LOG_SIGMA;
+        let gradient = jet.g();
+        let hessian = jet.h();
+        Ok((
+            jet.value(),
+            Array1::from_shape_fn(dim, |a| if live(a) { gradient[a] } else { 0.0 }),
+            Array2::from_shape_fn((dim, dim), |(a, b)| {
+                if live(a) && live(b) {
+                    hessian[a][b]
+                } else {
+                    0.0
+                }
+            }),
+        ))
+    }
+}
+
+/// `∇³φ[u]` of [`latent_survival_row_unloaded_scale_jet`] from one one-seed lift,
+/// masked to the live primaries (#2714).
+fn latent_survival_row_unloaded_scale_third(
+    quadctx: &QuadratureContext,
+    row: &LatentSurvivalRow,
+    point: LatentSurvivalPrimaryPoint,
+    direction: &Array1<f64>,
+    include_log_sigma: bool,
+) -> Result<Array2<f64>, LatentSurvivalError> {
+    let dim = LATENT_SURVIVAL_PRIMARY_DIM;
+    if include_log_sigma {
+        let backend = LatentOneSeedBackend {
+            direction: std::array::from_fn(|a| direction[a]),
+        };
+        let third = latent_survival_row_unloaded_scale_jet::<LATENT_SURVIVAL_PRIMARY_DIM, _>(
+            &backend, quadctx, row, point,
+        )?
+        .contracted_third();
+        Ok(Array2::from_shape_fn((dim, dim), |(a, b)| third[a][b]))
+    } else {
+        let backend = LatentOneSeedBackend {
+            direction: std::array::from_fn(|a| direction[a]),
+        };
+        let third = latent_survival_row_unloaded_scale_jet::<LATENT_SURVIVAL_PRIMARY_LOG_SIGMA, _>(
+            &backend, quadctx, row, point,
+        )?
+        .contracted_third();
+        let live = |a: usize| a < LATENT_SURVIVAL_PRIMARY_LOG_SIGMA;
+        Ok(Array2::from_shape_fn((dim, dim), |(a, b)| {
+            if live(a) && live(b) {
+                third[a][b]
+            } else {
+                0.0
+            }
+        }))
+    }
+}
+
+/// A latent-binary row's log-likelihood derivative along the background scale
+/// `ln m`, as a jet over the fixed-σ primaries (#2714).
+///
+/// The row's log survival `s` moves by the β-free background shift
+/// `c = M_U(a_in) − M_U(a_out)`. A survivor's log-likelihood is `s`, so `φ = c`;
+/// an event's is `log(1 − eˢ)`, so `φ = −c·ω(s)` with `ω(s) = eˢ/(1 − eˢ)`.
+fn latent_binary_row_unloaded_scale_jet<
+    B: LatentPrimaryJetBackend<LATENT_SURVIVAL_PRIMARY_LOG_SIGMA>,
+>(
+    backend: &B,
+    quadctx: &QuadratureContext,
+    row: &LatentSurvivalRow,
+    point: LatentSurvivalPrimaryPoint,
+    event: u8,
+) -> Result<B::Jet, LatentSurvivalError> {
+    let shift = row.mass_unloaded_entry - row.mass_unloaded_exit;
+    if event == 0 {
+        return Ok(B::Jet::constant(shift));
+    }
+    let log_survival = latent_survival_row_primary_jet::<LATENT_SURVIVAL_PRIMARY_LOG_SIGMA, _>(
+        backend, quadctx, row, point,
+    )?;
+    let out = log_survival
+        .compose_unary(latent_unary_derivatives_survival_odds(
+            log_survival.value(),
+            "latent binary background share",
+        )?)
+        .scale(-shift);
+    if !backend.all_channels_finite(&out) {
+        return Err(LatentSurvivalError::NumericalFailure {
+            reason: "latent binary background share is not finite on an event row".to_string(),
+        });
+    }
+    Ok(out)
+}
+
+/// `(φ, ∇φ, ∇²φ)` of [`latent_binary_row_unloaded_scale_jet`] from one order-2
+/// lift, masked to the live primaries (#2714).
+fn latent_binary_row_unloaded_scale_channels(
+    quadctx: &QuadratureContext,
+    row: &LatentSurvivalRow,
+    point: LatentSurvivalPrimaryPoint,
+    event: u8,
+) -> Result<(f64, Array1<f64>, Array2<f64>), LatentSurvivalError> {
+    let dim = LATENT_SURVIVAL_PRIMARY_DIM;
+    let live = |a: usize| a < LATENT_SURVIVAL_PRIMARY_LOG_SIGMA;
+    let jet =
+        latent_binary_row_unloaded_scale_jet(&LatentOrder2Backend, quadctx, row, point, event)?;
+    let gradient = jet.g();
+    let hessian = jet.h();
+    Ok((
+        jet.value(),
+        Array1::from_shape_fn(dim, |a| if live(a) { gradient[a] } else { 0.0 }),
+        Array2::from_shape_fn((dim, dim), |(a, b)| {
+            if live(a) && live(b) {
+                hessian[a][b]
+            } else {
+                0.0
+            }
+        }),
+    ))
+}
+
+/// `∇³φ[u]` of [`latent_binary_row_unloaded_scale_jet`] from one one-seed lift,
+/// masked to the live primaries (#2714).
+fn latent_binary_row_unloaded_scale_third(
+    quadctx: &QuadratureContext,
+    row: &LatentSurvivalRow,
+    point: LatentSurvivalPrimaryPoint,
+    event: u8,
+    direction: &Array1<f64>,
+) -> Result<Array2<f64>, LatentSurvivalError> {
+    let dim = LATENT_SURVIVAL_PRIMARY_DIM;
+    let live = |a: usize| a < LATENT_SURVIVAL_PRIMARY_LOG_SIGMA;
+    let backend = LatentOneSeedBackend {
+        direction: std::array::from_fn(|a| direction[a]),
+    };
+    let third =
+        latent_binary_row_unloaded_scale_jet(&backend, quadctx, row, point, event)?.contracted_third();
+    Ok(Array2::from_shape_fn((dim, dim), |(a, b)| {
+        if live(a) && live(b) {
+            third[a][b]
+        } else {
+            0.0
+        }
+    }))
+}
+
 fn latent_survival_row_primary_fourth_contracted(
     quadctx: &QuadratureContext,
     row: &LatentSurvivalRow,
@@ -5292,122 +5627,6 @@ impl LatentSurvivalFamily {
         Ok((ll, acc.gradient))
     }
 
-    /// Per-row residuals of the unpenalized NLL with respect to the three
-    /// additive baseline time-block offsets `(entry, exit, derivative)`.
-    ///
-    /// The baseline configuration θ enters the latent-survival working model
-    /// only through the additive offsets on the three time channels
-    ///   q_entry = x_time_entry·β_time + o_E(θ),
-    ///   q_exit  = x_time_exit·β_time  + o_X(θ),
-    ///   q̇_exit = x_time_deriv·β_time + o_D(θ),
-    /// exactly the offset channel the transformation path carries through
-    /// `WorkingModelSurvival::offset_channel_residuals`. Because
-    /// `∂q_ch/∂o_ch = 1`, the residual `∂NLL/∂o_ch_i` equals
-    /// `−∂(log-likelihood)/∂q_ch_i`, and the per-row primary log-likelihood
-    /// gradient over `(q_entry, q_exit, q̇_exit)` is precisely the
-    /// `Q_ENTRY`/`Q_EXIT`/`QDOT_EXIT` components returned by
-    /// `latent_survival_row_primary_gradient_hessian`. Sampleweight-scaled to
-    /// match the `OffsetChannelResiduals` contract consumed by
-    /// `baseline_chain_rule_gradient`.
-    ///
-    /// At the converged (constrained) β̂ the envelope theorem makes this the
-    /// exact θ-gradient of the profile penalized NLL `0.5·deviance + 0.5·βᵀSβ`.
-    /// The interval upper-bound `q_right = x_time_right·β_time + o_R(θ)` channel
-    /// DOES carry its own baseline-θ offset `o_R(θ)` (the time basis evaluated at
-    /// the bracket upper bound `R`), distinct from the exit offset at `L`, so its
-    /// residual `−∂(log-likelihood)/∂q_right` is returned in the dedicated
-    /// `OffsetChannelResiduals::right` channel; it is exactly 0 on every
-    /// non-interval row (the `Q_RIGHT` primary channel is inert there) and the
-    /// baseline-θ chain rule contracts it against the `age_right`-evaluated
-    /// η-partial.
-    pub fn offset_channel_residuals(
-        &self,
-        block_states: &[ParameterBlockState],
-    ) -> Result<crate::survival::OffsetChannelResiduals, LatentSurvivalError> {
-        let weights = ValidatedLikelihoodWeights::new(&self.weights, "latent-survival")?;
-        let n = self.event_target.len();
-        // `split_time_eta` validates the complete block slate before indexing
-        // it and returns `LatentSurvivalError::BlockMismatch` when fitted state
-        // is missing. There is deliberately no zero-residual fallback: zeros
-        // would manufacture a stationary outer baseline gradient.
-        let (q_entry, q_exit, qdot_exit, mu) = self.split_time_eta(block_states)?;
-        let q_right = self.time_q_right(block_states)?;
-        let sigma = self.latent_sd(block_states)?;
-        let include_log_sigma = self.joint_slices().log_sigma.is_some();
-        let mut entry = Array1::<f64>::zeros(n);
-        let mut exit = Array1::<f64>::zeros(n);
-        let mut derivative = Array1::<f64>::zeros(n);
-        let mut right = Array1::<f64>::zeros(n);
-        for row_idx in 0..n {
-            let wi = weights.at(row_idx);
-            if wi == 0.0 {
-                continue;
-            }
-            let row = self.build_row_at(
-                row_idx,
-                q_entry[row_idx],
-                q_exit[row_idx],
-                qdot_exit[row_idx],
-                q_right[row_idx],
-            )?;
-            let point = LatentSurvivalPrimaryPoint {
-                q_entry: q_entry[row_idx],
-                q_exit: q_exit[row_idx],
-                qdot_exit: qdot_exit[row_idx],
-                q_right: q_right[row_idx],
-                mu: mu[row_idx],
-                sigma,
-            };
-            let (_, primary_gradient, _) = latent_survival_row_primary_gradient_hessian(
-                &self.quadctx,
-                &row,
-                point,
-                include_log_sigma,
-            )?;
-            // ∂NLL/∂o_ch = −w · ∂(log-likelihood)/∂q_ch.
-            entry[row_idx] = -checked_weighted_row_value(
-                wi,
-                primary_gradient[LATENT_SURVIVAL_PRIMARY_Q_ENTRY],
-                row_idx,
-                "entry-offset score",
-            )
-            .map_err(|reason| LatentSurvivalError::NumericalFailure { reason })?;
-            exit[row_idx] = -checked_weighted_row_value(
-                wi,
-                primary_gradient[LATENT_SURVIVAL_PRIMARY_Q_EXIT],
-                row_idx,
-                "exit-offset score",
-            )
-            .map_err(|reason| LatentSurvivalError::NumericalFailure { reason })?;
-            derivative[row_idx] = -checked_weighted_row_value(
-                wi,
-                primary_gradient[LATENT_SURVIVAL_PRIMARY_QDOT_EXIT],
-                row_idx,
-                "derivative-offset score",
-            )
-            .map_err(|reason| LatentSurvivalError::NumericalFailure { reason })?;
-            // Interval upper-bound (`R`) channel. `q_right` shares the time-block
-            // coefficients but carries its OWN baseline-θ η-offset evaluated at
-            // `R` (`o_R(θ)`), so the profile-NLL θ-gradient must include it.
-            // `∂(log-likelihood)/∂q_right` is exactly 0 for non-interval rows
-            // (the `Q_RIGHT` channel is inert there), so this is 0 except on
-            // interval-censored rows.
-            right[row_idx] = -checked_weighted_row_value(
-                wi,
-                primary_gradient[LATENT_SURVIVAL_PRIMARY_Q_RIGHT],
-                row_idx,
-                "right-offset score",
-            )
-            .map_err(|reason| LatentSurvivalError::NumericalFailure { reason })?;
-        }
-        Ok(crate::survival::OffsetChannelResiduals {
-            exit,
-            entry,
-            derivative,
-            right,
-        })
-    }
-
     /// Block-diagonal-only pullback: writes only time-time, mean-mean, and
     /// log_sigma-log_sigma rowwise contributions into per-block targets.
     /// Used by `evaluate()` to populate per-block working sets without ever
@@ -6036,6 +6255,13 @@ impl LatentSurvivalFamily {
         rows: &crate::survival::construction::LatentSurvivalOffsetGeometry,
         axis: usize,
     ) -> Result<gam_problem::ExactNewtonJointPsiTerms, String> {
+        if rows
+            .unloaded
+            .as_ref()
+            .is_some_and(|unloaded| unloaded.axis == axis)
+        {
+            return self.unloaded_scale_psi_terms_dense(block_states);
+        }
         struct BaselinePsiAccum {
             objective: CompensatedRowSum,
             score: Array1<f64>,
@@ -6143,6 +6369,16 @@ impl LatentSurvivalFamily {
         axis: usize,
         d_beta_flat: &Array1<f64>,
     ) -> Result<Array2<f64>, String> {
+        if rows
+            .unloaded
+            .as_ref()
+            .is_some_and(|unloaded| unloaded.axis == axis)
+        {
+            return self.unloaded_scale_hessian_directional_derivative_dense(
+                block_states,
+                d_beta_flat,
+            );
+        }
         let weights = ValidatedLikelihoodWeights::new(&self.weights, "latent-survival")
             .map_err(String::from)?;
         let (q_entry, q_exit, qdot_exit, mu) = self.split_time_eta(block_states)?;
@@ -6211,6 +6447,192 @@ impl LatentSurvivalFamily {
         require_finite_likelihood_matrix(
             &acc.hessian,
             "baseline psi information second derivative",
+        )?;
+        Ok(acc.hessian)
+    }
+
+    /// Fixed-β first-order terms of the background-scale axis `ln m` of a
+    /// loaded/unloaded chart (#2714). With `φ_i = ∂ℓ_i/∂ln m`
+    /// ([`latent_survival_row_unloaded_scale_jet`]):
+    ///
+    /// ```text
+    ///   V_θ = −Σ_i w_i φ_i,   g_θ = −Σ_i w_i X_iᵀ ∇φ_i,   H_θ = −Σ_i w_i X_iᵀ ∇²φ_i X_i.
+    /// ```
+    fn unloaded_scale_psi_terms_dense(
+        &self,
+        block_states: &[ParameterBlockState],
+    ) -> Result<gam_problem::ExactNewtonJointPsiTerms, String> {
+        struct UnloadedPsiAccum {
+            objective: CompensatedRowSum,
+            score: Array1<f64>,
+            hessian: Array2<f64>,
+        }
+        let weights = ValidatedLikelihoodWeights::new(&self.weights, "latent-survival")
+            .map_err(String::from)?;
+        let (q_entry, q_exit, qdot_exit, mu) = self.split_time_eta(block_states)?;
+        let q_right = self.time_q_right(block_states)?;
+        let sigma = self.latent_sd(block_states)?;
+        let slices = self.joint_slices();
+        let include_log_sigma = slices.log_sigma.is_some();
+        let total = slices.total;
+        let acc = deterministic_latent_survival_row_reduction(
+            self.event_target.len(),
+            || UnloadedPsiAccum {
+                objective: CompensatedRowSum::default(),
+                score: Array1::<f64>::zeros(total),
+                hessian: Array2::<f64>::zeros((total, total)),
+            },
+            |row_idx, acc| {
+                let wi = weights.at(row_idx);
+                if wi == 0.0 {
+                    return Ok(());
+                }
+                let row = self.build_row_at(
+                    row_idx,
+                    q_entry[row_idx],
+                    q_exit[row_idx],
+                    qdot_exit[row_idx],
+                    q_right[row_idx],
+                )?;
+                let (value, gradient, hessian) = latent_survival_row_unloaded_scale_channels(
+                    &self.quadctx,
+                    &row,
+                    LatentSurvivalPrimaryPoint {
+                        q_entry: q_entry[row_idx],
+                        q_exit: q_exit[row_idx],
+                        qdot_exit: qdot_exit[row_idx],
+                        q_right: q_right[row_idx],
+                        mu: mu[row_idx],
+                        sigma,
+                    },
+                    include_log_sigma,
+                )?;
+                acc.objective.add(checked_weighted_row_value(
+                    wi,
+                    -value,
+                    row_idx,
+                    "background-scale psi objective",
+                )?);
+                self.add_pullback_primary_gradient(
+                    &mut acc.score,
+                    row_idx,
+                    &slices,
+                    &(-&gradient),
+                    wi,
+                )?;
+                let weighted_hessian = checked_weighted_row_matrix(
+                    wi,
+                    &(-&hessian),
+                    row_idx,
+                    "background-scale psi information",
+                )?;
+                self.add_pullback_primary_hessian(
+                    &mut acc.hessian,
+                    row_idx,
+                    &slices,
+                    &weighted_hessian,
+                )?;
+                Ok(())
+            },
+            |total_acc, chunk_acc| {
+                total_acc.objective.add(chunk_acc.objective.value());
+                total_acc.score += &chunk_acc.score;
+                total_acc.hessian += &chunk_acc.hessian;
+            },
+        )?;
+        let objective_psi = require_finite_likelihood_scalar(
+            acc.objective.value(),
+            "background-scale psi objective",
+        )?;
+        require_finite_likelihood_vector(&acc.score, "background-scale psi score")?;
+        require_finite_likelihood_matrix(
+            &acc.hessian,
+            "background-scale psi information derivative",
+        )?;
+        Ok(gam_problem::ExactNewtonJointPsiTerms {
+            objective_psi,
+            score_psi: acc.score,
+            hessian_psi: acc.hessian,
+            hessian_psi_operator: None,
+        })
+    }
+
+    /// `D_β H_θ[u] = −Σ_i w_i X_iᵀ ∇³φ_i[X_i u] X_i` for the background-scale axis
+    /// `ln m` of a loaded/unloaded chart (#2714).
+    fn unloaded_scale_hessian_directional_derivative_dense(
+        &self,
+        block_states: &[ParameterBlockState],
+        d_beta_flat: &Array1<f64>,
+    ) -> Result<Array2<f64>, String> {
+        let weights = ValidatedLikelihoodWeights::new(&self.weights, "latent-survival")
+            .map_err(String::from)?;
+        let (q_entry, q_exit, qdot_exit, mu) = self.split_time_eta(block_states)?;
+        let q_right = self.time_q_right(block_states)?;
+        let sigma = self.latent_sd(block_states)?;
+        let slices = self.joint_slices();
+        if d_beta_flat.len() != slices.total {
+            return Err(format!(
+                "latent survival background-scale psi-Hessian derivative: direction length {} against {} coefficients",
+                d_beta_flat.len(),
+                slices.total
+            ));
+        }
+        let include_log_sigma = slices.log_sigma.is_some();
+        let total = slices.total;
+        let acc = deterministic_latent_survival_row_reduction(
+            self.event_target.len(),
+            || LatentSurvivalDenseHessianAccum {
+                hessian: Array2::<f64>::zeros((total, total)),
+            },
+            |row_idx, acc| {
+                let wi = weights.at(row_idx);
+                if wi == 0.0 {
+                    return Ok(());
+                }
+                let row = self.build_row_at(
+                    row_idx,
+                    q_entry[row_idx],
+                    q_exit[row_idx],
+                    qdot_exit[row_idx],
+                    q_right[row_idx],
+                )?;
+                let direction_beta =
+                    self.row_primary_direction_from_flat(row_idx, &slices, d_beta_flat);
+                let third = latent_survival_row_unloaded_scale_third(
+                    &self.quadctx,
+                    &row,
+                    LatentSurvivalPrimaryPoint {
+                        q_entry: q_entry[row_idx],
+                        q_exit: q_exit[row_idx],
+                        qdot_exit: qdot_exit[row_idx],
+                        q_right: q_right[row_idx],
+                        mu: mu[row_idx],
+                        sigma,
+                    },
+                    &direction_beta,
+                    include_log_sigma,
+                )?;
+                let weighted_third = checked_weighted_row_matrix(
+                    wi,
+                    &(-&third),
+                    row_idx,
+                    "background-scale psi mixed information",
+                )?;
+                self.add_pullback_primary_hessian(
+                    &mut acc.hessian,
+                    row_idx,
+                    &slices,
+                    &weighted_third,
+                )?;
+                Ok(())
+            },
+            |total_acc, chunk_acc| {
+                total_acc.hessian += &chunk_acc.hessian;
+            },
+        )?;
+        require_finite_likelihood_matrix(
+            &acc.hessian,
+            "background-scale psi information second derivative",
         )?;
         Ok(acc.hessian)
     }
@@ -7651,80 +8073,6 @@ impl LatentBinaryFamily {
         Ok((ll, gradient, hessian))
     }
 
-    /// Per-row residuals of the unpenalized NLL with respect to the baseline
-    /// time-block offsets `(entry, exit)`.
-    ///
-    /// The latent-binary deployment likelihood is a monotone scalar transform
-    /// `ℓ_bin = b(log S_row)` of the latent-survival row log-survival, so by the
-    /// chain rule `∂ℓ_bin/∂q_ch = b'(log S)·∂(log S)/∂q_ch = grad_scale·g_ch`,
-    /// where `g_ch` are the `Q_ENTRY`/`Q_EXIT` components of the survival row
-    /// primary gradient. The baseline θ enters only the additive entry/exit time
-    /// offsets (`q̇_exit` is held at the constant deployment derivative `1`, so
-    /// the derivative channel carries no baseline offset and its residual is 0).
-    /// Sampleweight-scaled to match the `OffsetChannelResiduals` contract.
-    pub fn offset_channel_residuals(
-        &self,
-        block_states: &[ParameterBlockState],
-    ) -> Result<crate::survival::OffsetChannelResiduals, LatentSurvivalError> {
-        let weights = ValidatedLikelihoodWeights::new(&self.weights, "latent-binary")?;
-        let n = self.event_target.len();
-        // `split_time_eta` returns a typed block-count error before indexing.
-        // Missing state is never translated into zero residuals, because that
-        // would falsely certify the enclosing baseline optimization.
-        let (q_entry, q_exit, mu) = self.split_time_eta(block_states)?;
-        let mut entry = Array1::<f64>::zeros(n);
-        let mut exit = Array1::<f64>::zeros(n);
-        for row_idx in 0..n {
-            let wi = weights.at(row_idx);
-            if wi == 0.0 {
-                continue;
-            }
-            let row =
-                self.build_right_censored_row_at(row_idx, q_entry[row_idx], q_exit[row_idx])?;
-            let (row_log_survival, survival_gradient, _) =
-                latent_survival_row_primary_gradient_hessian(
-                    &self.quadctx,
-                    &row,
-                    LatentSurvivalPrimaryPoint {
-                        q_entry: q_entry[row_idx],
-                        q_exit: q_exit[row_idx],
-                        qdot_exit: 1.0,
-                        q_right: q_exit[row_idx],
-                        mu: mu[row_idx],
-                        sigma: self.latent_sd,
-                    },
-                    false,
-                )?;
-            let (_, grad_scale) = binary_from_log_survival_through_first(
-                row_log_survival,
-                self.event_target[row_idx],
-            )?;
-            // ∂NLL/∂o_ch = −w · grad_scale · ∂(log S)/∂q_ch.
-            entry[row_idx] = -checked_weighted_row_value(
-                wi,
-                grad_scale * survival_gradient[LATENT_SURVIVAL_PRIMARY_Q_ENTRY],
-                row_idx,
-                "binary entry-offset score",
-            )
-            .map_err(|reason| LatentSurvivalError::NumericalFailure { reason })?;
-            exit[row_idx] = -checked_weighted_row_value(
-                wi,
-                grad_scale * survival_gradient[LATENT_SURVIVAL_PRIMARY_Q_EXIT],
-                row_idx,
-                "binary exit-offset score",
-            )
-            .map_err(|reason| LatentSurvivalError::NumericalFailure { reason })?;
-        }
-        Ok(crate::survival::OffsetChannelResiduals {
-            exit,
-            entry,
-            derivative: Array1::<f64>::zeros(n),
-            // Latent-binary deployment has no interval upper bound; the `R`
-            // channel is structurally absent (every row is right-censored).
-            right: Array1::<f64>::zeros(n),
-        })
-    }
-
     fn exact_newton_joint_hessian_directional_derivative_dense(
         &self,
         block_states: &[ParameterBlockState],
@@ -7997,6 +8345,13 @@ impl LatentBinaryFamily {
         rows: &crate::survival::construction::LatentSurvivalOffsetGeometry,
         axis: usize,
     ) -> Result<gam_problem::ExactNewtonJointPsiTerms, String> {
+        if rows
+            .unloaded
+            .as_ref()
+            .is_some_and(|unloaded| unloaded.axis == axis)
+        {
+            return self.unloaded_scale_psi_terms_dense(block_states);
+        }
         let weights = ValidatedLikelihoodWeights::new(&self.weights, "latent-binary")
             .map_err(String::from)?;
         let (q_entry, q_exit, mu) = self.split_time_eta(block_states)?;
@@ -8064,6 +8419,133 @@ impl LatentBinaryFamily {
         })
     }
 
+    /// Fixed-β first-order terms of the background-scale axis `ln m` of the binary
+    /// deployment of a loaded/unloaded chart (#2714), with `φ_i = ∂ℓ_i/∂ln m` from
+    /// [`latent_binary_row_unloaded_scale_jet`]:
+    ///
+    /// ```text
+    ///   V_θ = −Σ_i w_i φ_i,   g_θ = −Σ_i w_i X_iᵀ ∇φ_i,   H_θ = −Σ_i w_i X_iᵀ ∇²φ_i X_i.
+    /// ```
+    fn unloaded_scale_psi_terms_dense(
+        &self,
+        block_states: &[ParameterBlockState],
+    ) -> Result<gam_problem::ExactNewtonJointPsiTerms, String> {
+        let weights = ValidatedLikelihoodWeights::new(&self.weights, "latent-binary")
+            .map_err(String::from)?;
+        let (q_entry, q_exit, mu) = self.split_time_eta(block_states)?;
+        let slices = self.joint_slices();
+        let total = slices.total;
+        let mut objective = CompensatedRowSum::default();
+        let mut score = Array1::<f64>::zeros(total);
+        let mut hessian = Array2::<f64>::zeros((total, total));
+        for row_idx in 0..self.event_target.len() {
+            let wi = weights.at(row_idx);
+            if wi == 0.0 {
+                continue;
+            }
+            let row =
+                self.build_right_censored_row_at(row_idx, q_entry[row_idx], q_exit[row_idx])?;
+            let (value, gradient, curvature) = latent_binary_row_unloaded_scale_channels(
+                &self.quadctx,
+                &row,
+                LatentSurvivalPrimaryPoint {
+                    q_entry: q_entry[row_idx],
+                    q_exit: q_exit[row_idx],
+                    qdot_exit: 1.0,
+                    q_right: q_exit[row_idx],
+                    mu: mu[row_idx],
+                    sigma: self.latent_sd,
+                },
+                self.event_target[row_idx],
+            )?;
+            objective.add(checked_weighted_row_value(
+                wi,
+                -value,
+                row_idx,
+                "binary background-scale psi objective",
+            )?);
+            self.add_pullback_primary_gradient(&mut score, row_idx, &slices, &(-&gradient), wi)?;
+            let weighted_curvature = checked_weighted_row_matrix(
+                wi,
+                &(-&curvature),
+                row_idx,
+                "binary background-scale psi information",
+            )?;
+            self.add_pullback_primary_hessian(&mut hessian, row_idx, &slices, &weighted_curvature);
+        }
+        let objective_psi = require_finite_likelihood_scalar(
+            objective.value(),
+            "binary background-scale psi objective",
+        )?;
+        require_finite_likelihood_vector(&score, "binary background-scale psi score")?;
+        require_finite_likelihood_matrix(
+            &hessian,
+            "binary background-scale psi information derivative",
+        )?;
+        Ok(gam_problem::ExactNewtonJointPsiTerms {
+            objective_psi,
+            score_psi: score,
+            hessian_psi: hessian,
+            hessian_psi_operator: None,
+        })
+    }
+
+    /// `D_β H_θ[u] = −Σ_i w_i X_iᵀ ∇³φ_i[X_i u] X_i` for the background-scale axis
+    /// `ln m` of the binary deployment of a loaded/unloaded chart (#2714).
+    fn unloaded_scale_hessian_directional_derivative_dense(
+        &self,
+        block_states: &[ParameterBlockState],
+        d_beta_flat: &Array1<f64>,
+    ) -> Result<Array2<f64>, String> {
+        let weights = ValidatedLikelihoodWeights::new(&self.weights, "latent-binary")
+            .map_err(String::from)?;
+        let (q_entry, q_exit, mu) = self.split_time_eta(block_states)?;
+        let slices = self.joint_slices();
+        if d_beta_flat.len() != slices.total {
+            return Err(format!(
+                "latent binary background-scale psi-Hessian derivative: direction length {} against {} coefficients",
+                d_beta_flat.len(),
+                slices.total
+            ));
+        }
+        let mut out = Array2::<f64>::zeros((slices.total, slices.total));
+        for row_idx in 0..self.event_target.len() {
+            let wi = weights.at(row_idx);
+            if wi == 0.0 {
+                continue;
+            }
+            let row =
+                self.build_right_censored_row_at(row_idx, q_entry[row_idx], q_exit[row_idx])?;
+            let direction_beta = self.row_primary_direction_from_flat(row_idx, &slices, d_beta_flat);
+            let third = latent_binary_row_unloaded_scale_third(
+                &self.quadctx,
+                &row,
+                LatentSurvivalPrimaryPoint {
+                    q_entry: q_entry[row_idx],
+                    q_exit: q_exit[row_idx],
+                    qdot_exit: 1.0,
+                    q_right: q_exit[row_idx],
+                    mu: mu[row_idx],
+                    sigma: self.latent_sd,
+                },
+                self.event_target[row_idx],
+                &direction_beta,
+            )?;
+            let weighted_third = checked_weighted_row_matrix(
+                wi,
+                &(-&third),
+                row_idx,
+                "binary background-scale psi mixed information",
+            )?;
+            self.add_pullback_primary_hessian(&mut out, row_idx, &slices, &weighted_third);
+        }
+        require_finite_likelihood_matrix(
+            &out,
+            "binary background-scale psi information second derivative",
+        )?;
+        Ok(out)
+    }
+
     /// `D_β H_θ[u] = Σ w Xᵀ D_d D_{Xu}(−∇²ℓ_bin) X` for baseline-chart axis `axis`
     /// of the binary deployment (#2714).
     fn baseline_theta_hessian_directional_derivative_dense(
@@ -8073,6 +8555,16 @@ impl LatentBinaryFamily {
         axis: usize,
         d_beta_flat: &Array1<f64>,
     ) -> Result<Array2<f64>, String> {
+        if rows
+            .unloaded
+            .as_ref()
+            .is_some_and(|unloaded| unloaded.axis == axis)
+        {
+            return self.unloaded_scale_hessian_directional_derivative_dense(
+                block_states,
+                d_beta_flat,
+            );
+        }
         let weights = ValidatedLikelihoodWeights::new(&self.weights, "latent-binary")
             .map_err(String::from)?;
         let (q_entry, q_exit, mu) = self.split_time_eta(block_states)?;

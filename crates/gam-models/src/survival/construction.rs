@@ -3917,6 +3917,27 @@ pub(crate) struct LatentSurvivalOffsetGeometry {
     pub(crate) offset_exit_theta: Array2<f64>,
     pub(crate) derivative_offset_exit_theta: Array2<f64>,
     pub(crate) offset_right_theta: Array2<f64>,
+    /// The background components a loaded/unloaded split realizes at this chart
+    /// point; `None` for a fully loaded hazard, whose chart moves only offsets.
+    pub(crate) unloaded: Option<LatentSurvivalUnloadedGeometry>,
+}
+
+/// The unloaded (background, not frailty-modified) components of a
+/// loaded/unloaded split at one chart point (#2714).
+///
+/// Every component is linear in the Makeham rate `m`: `M_U(t) = m·t` and
+/// `h_U = m`. So along the chart axis `ln m` each component's partial is the
+/// component itself, and no other axis moves them.
+#[derive(Clone, Debug)]
+pub(crate) struct LatentSurvivalUnloadedGeometry {
+    /// The chart axis the components scale along (`ln m`).
+    pub(crate) axis: usize,
+    pub(crate) mass_entry: Array1<f64>,
+    pub(crate) mass_exit: Array1<f64>,
+    pub(crate) hazard_exit: Array1<f64>,
+    /// Background mass at the interval upper bounds; zero when the fit reads no
+    /// interval row.
+    pub(crate) mass_right: Array1<f64>,
 }
 
 /// A nonlinear baseline chart over the prepared offsets of a latent-survival fit
@@ -3925,9 +3946,9 @@ pub(crate) struct LatentSurvivalOffsetGeometry {
 /// Construction subtracts the seed baseline from the prepared channels once, so
 /// the time-derivative guard offset and every other θ-free part stay frozen, and
 /// a candidate θ adds its own log cumulative hazard back. No time design, knot or
-/// penalty moves with θ. Only a fully loaded hazard realizes its offsets as that
-/// log cumulative hazard alone; a loaded/unloaded split also moves the unloaded
-/// masses, which no offset chart carries.
+/// penalty moves with θ. A fully loaded hazard realizes its offsets as that log
+/// cumulative hazard alone. A loaded/unloaded split realizes them as the Gompertz
+/// part's, and realizes the Makeham background as unloaded components.
 #[derive(Clone, Debug)]
 pub(crate) struct LatentSurvivalFrozenOffsetChart {
     age_entry: Array1<f64>,
@@ -3936,6 +3957,7 @@ pub(crate) struct LatentSurvivalFrozenOffsetChart {
     /// reads no interval row.
     age_right: Option<Array1<f64>>,
     target: SurvivalBaselineTarget,
+    loading: HazardLoading,
     initial_theta: Array1<f64>,
     fixed_offset_entry: Array1<f64>,
     fixed_offset_exit: Array1<f64>,
@@ -3944,13 +3966,14 @@ pub(crate) struct LatentSurvivalFrozenOffsetChart {
 }
 
 impl LatentSurvivalFrozenOffsetChart {
-    /// The chart of `initial_config` over the prepared offsets, or `None` for a
-    /// linear baseline, which has no chart coordinates.
+    /// The chart of `initial_config` over the prepared offsets of a `loading`
+    /// hazard, or `None` for a linear baseline, which has no chart coordinates.
     pub(crate) fn new(
         age_entry: &Array1<f64>,
         age_exit: &Array1<f64>,
         age_right: Option<&Array1<f64>>,
         initial_config: &SurvivalBaselineConfig,
+        loading: HazardLoading,
         prepared_offset_entry: &Array1<f64>,
         prepared_offset_exit: &Array1<f64>,
         prepared_derivative_offset_exit: &Array1<f64>,
@@ -3959,6 +3982,14 @@ impl LatentSurvivalFrozenOffsetChart {
         let Some(initial_theta) = survival_baseline_theta_from_config(initial_config)? else {
             return Ok(None);
         };
+        if matches!(loading, HazardLoading::LoadedVsUnloaded)
+            && initial_config.target != SurvivalBaselineTarget::GompertzMakeham
+        {
+            return Err(format!(
+                "HazardLoading::LoadedVsUnloaded requires --baseline-target gompertz-makeham, got {}",
+                survival_baseline_targetname(initial_config.target)
+            ));
+        }
         let n = age_exit.len();
         if age_entry.len() != n
             || age_right.is_some_and(|ages| ages.len() != n)
@@ -3982,6 +4013,7 @@ impl LatentSurvivalFrozenOffsetChart {
             age_exit: age_exit.clone(),
             age_right: age_right.cloned(),
             target: initial_config.target,
+            loading,
             initial_theta: initial_theta.clone(),
             fixed_offset_entry: prepared_offset_entry.clone(),
             fixed_offset_exit: prepared_offset_exit.clone(),
@@ -4017,6 +4049,10 @@ impl LatentSurvivalFrozenOffsetChart {
     /// The parametric baseline alone at `theta`: `(η, ∂η/∂t)` from
     /// `evaluate_survival_baseline` and the chart partials from
     /// `baseline_offset_theta_partials`, per row and channel.
+    ///
+    /// A loaded/unloaded split realizes its offsets from the Gompertz part alone,
+    /// whose partials fill every axis but the last, `ln m`, and realizes the
+    /// Makeham background as unloaded components linear in `m`.
     fn baseline_geometry(
         &self,
         theta: &Array1<f64>,
@@ -4025,14 +4061,32 @@ impl LatentSurvivalFrozenOffsetChart {
         let config = survival_baseline_config_from_theta(self.target, theta)?;
         let dim = theta.len();
         let n = self.age_exit.len();
+        let (loaded_config, makeham) = match self.loading {
+            HazardLoading::Full => (config.clone(), None),
+            HazardLoading::LoadedVsUnloaded => {
+                let makeham = config.makeham.ok_or_else(|| {
+                    "gompertz-makeham latent survival chart is missing its makeham rate".to_string()
+                })?;
+                let loaded_config = SurvivalBaselineConfig {
+                    target: SurvivalBaselineTarget::Gompertz,
+                    scale: None,
+                    shape: config.shape,
+                    rate: config.rate,
+                    makeham: None,
+                };
+                (loaded_config, Some(makeham))
+            }
+        };
+        let loaded_dim = if makeham.is_some() { dim - 1 } else { dim };
         let channel = |age: f64| -> Result<Channel, String> {
-            let value = evaluate_survival_baseline(age, &config)?;
-            let partials = baseline_offset_theta_partials(age, &config)?.ok_or_else(|| {
-                "latent survival nonlinear baseline chart lost its theta partials".to_string()
-            })?;
-            if partials.len() != dim {
+            let value = evaluate_survival_baseline(age, &loaded_config)?;
+            let partials =
+                baseline_offset_theta_partials(age, &loaded_config)?.ok_or_else(|| {
+                    "latent survival nonlinear baseline chart lost its theta partials".to_string()
+                })?;
+            if partials.len() != loaded_dim {
                 return Err(format!(
-                    "latent survival baseline chart has {} partials for a {dim}-coordinate theta",
+                    "latent survival baseline chart has {} partials for the {loaded_dim} loaded coordinates of a {dim}-coordinate theta",
                     partials.len()
                 ));
             }
@@ -4062,19 +4116,29 @@ impl LatentSurvivalFrozenOffsetChart {
             offset_exit_theta: Array2::zeros((n, dim)),
             derivative_offset_exit_theta: Array2::zeros((n, dim)),
             offset_right_theta: Array2::zeros((n, dim)),
+            unloaded: makeham.map(|makeham| LatentSurvivalUnloadedGeometry {
+                axis: loaded_dim,
+                mass_entry: self.age_entry.mapv(|age| makeham * age),
+                mass_exit: self.age_exit.mapv(|age| makeham * age),
+                hazard_exit: Array1::from_elem(n, makeham),
+                mass_right: self
+                    .age_right
+                    .as_ref()
+                    .map_or_else(|| Array1::zeros(n), |ages| ages.mapv(|age| makeham * age)),
+            }),
         };
         for (row, (entry, exit, right)) in rows.into_iter().enumerate() {
             geometry.offset_entry[row] = entry.0.0;
             geometry.offset_exit[row] = exit.0.0;
             geometry.derivative_offset_exit[row] = exit.0.1;
-            for axis in 0..dim {
+            for axis in 0..loaded_dim {
                 geometry.offset_entry_theta[[row, axis]] = entry.1[axis].0;
                 geometry.offset_exit_theta[[row, axis]] = exit.1[axis].0;
                 geometry.derivative_offset_exit_theta[[row, axis]] = exit.1[axis].1;
             }
             if let Some(((value, _), partials)) = right {
                 geometry.offset_right[row] = value;
-                for axis in 0..dim {
+                for axis in 0..loaded_dim {
                     geometry.offset_right_theta[[row, axis]] = partials[axis].0;
                 }
             }

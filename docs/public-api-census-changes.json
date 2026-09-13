@@ -3923,5 +3923,13 @@
     },
     "reason": "#2899, SPEC rule 25 (delete public API no product uses). gam-solve gpu::reml_gpu (evidence_derivatives_gpu, RemlGpuInput, RemlGpuEvidence) and gpu::arrow_schur_gpu (solve_arrow_newton_step_gpu) were called only by their own benches, and pirls_gpu::cholesky_solve_gpu only by reml_gpu. The benches, their [[bench]] entries and the docs describing these paths go with them.",
     "evidence": "The removed pub fn declarations are the census's own refusal map at the checked pair. Guarded compile: pool job 648543."
+  },
+  {
+    "base": "12a77009662a7045e45ad1e1e0d7f1d3f2c0ff39",
+    "removed": {
+      "crates/gam-models/src/survival/latent/survival/mod.rs::offset_channel_residuals": 2
+    },
+    "reason": "#2714, SPEC rule 25: the latent survival and latent binary offset_channel_residuals fed only the nested per-probe baseline BFGS this commit deletes, now that both hazard loadings select the baseline chart together with rho on the one LAML criterion.",
+    "evidence": "At the base, the two latent declarations are called only at the fit_latent_survival_terms and fit_latent_binary_terms result assemblies, whose baseline_offset_residuals field only the nested latent baseline closure in materialize/survival.rs reads; the closure and the field are deleted in this commit."
   }
 ]

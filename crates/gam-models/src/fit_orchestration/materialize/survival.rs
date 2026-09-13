@@ -991,14 +991,6 @@ pub(crate) fn materialize_survival<'a>(
         })
     };
 
-    // Warm-start cache for the latent baseline-θ probes (gam#2714): every probe
-    // runs a complete nested custom-family REML fit over the mean and time
-    // smoothing strengths. Carrying the previous probe's converged strengths into
-    // the next request starts that search next to the optimum a small θ step
-    // barely moves, instead of at zero, exactly as the location-scale branch
-    // above does with `location_scale_smoothing_warm_start`.
-    let latent_smoothing_warm_start: RefCell<Option<(Option<Array1<f64>>, Option<Array1<f64>>)>> =
-        RefCell::new(None);
     let build_latent_survival_request =
         |candidate: &crate::survival::construction::SurvivalBaselineConfig| {
             let loading = latent_loading.ok_or_else(|| {
@@ -1071,21 +1063,7 @@ pub(crate) fn materialize_survival<'a>(
                     )
                 };
             let time_p = prepared.time_design_exit.ncols();
-            // A baseline-θ probe after the first starts both smoothing searches
-            // from the previous probe's converged strengths; a carried vector
-            // for a different penalty set is not a seed for this one.
-            let (carried_mean_log_lambdas, carried_time_log_lambdas) = latent_smoothing_warm_start
-                .borrow()
-                .as_ref()
-                .map(|(mean, time)| (mean.clone(), time.clone()))
-                .unwrap_or((None, None));
-            let time_initial_log_lambdas = if prepared.time_penalties.is_empty() {
-                None
-            } else {
-                carried_time_log_lambdas
-                    .filter(|carried| carried.len() == prepared.time_penalties.len())
-                    .or_else(|| prepared.time_initial_log_lambdas.clone())
-            };
+            let time_initial_log_lambdas = prepared.time_initial_log_lambdas.clone();
             let time_block = TimeBlockInput {
                 design_entry: prepared.time_design_entry.clone(),
                 design_exit: prepared.time_design_exit.clone(),
@@ -1122,7 +1100,6 @@ pub(crate) fn materialize_survival<'a>(
                     unloaded_hazard_exit: prepared.unloaded_hazard_exit,
                     meanspec: termspec.clone(),
                     mean_offset: threshold_offset.clone(),
-                    initial_mean_log_lambdas: carried_mean_log_lambdas,
                     baseline_config: candidate.clone(),
                 },
                 frailty: config.frailty.clone(),
@@ -1295,125 +1272,9 @@ pub(crate) fn materialize_survival<'a>(
             Ok(baseline) => baseline,
             Err(e) => return Err(e.into()),
         }
-    } else if baseline_cfg.target != SurvivalBaselineTarget::Linear
-        // A fully loaded latent survival or binary fit selects its baseline chart
-        // together with ρ on the one LAML criterion (#2714); only the
-        // loaded/unloaded split still searches θ here.
-        && !(matches!(
-            survival_mode,
-            SurvivalLikelihoodMode::Latent | SurvivalLikelihoodMode::LatentBinary
-        ) && matches!(
-                latent_loading,
-                Some(crate::survival::lognormal_kernel::HazardLoading::Full)
-            ))
-    {
-        // Latent / LatentBinary baseline-θ. The baseline configuration enters
-        // the inner latent fit only through the three additive time-block
-        // offsets (entry η, exit η, exit ∂η/∂t), so the envelope theorem at the
-        // converged β̂ gives the exact θ-gradient of the *profile penalized NLL*
-        //   V(θ) = −ℓ(β̂(θ)) + ½·β̂ᵀS β̂,
-        //     dV/dθ_k = Σ_i Σ_ch r^ch_i ∂o^ch_i/∂θ_k,
-        // with r^ch = LatentSurvivalFamily::offset_channel_residuals(β̂)
-        // (`baseline_offset_residuals` on the fit result) contracted against
-        // `baseline_offset_theta_partials` by `baseline_chain_rule_gradient`.
-        // We optimize the profile-NLL — not the LAML `reml_score` whose
-        // ½log|H+S_λ| term carries its own θ-dependence through H(β̂,θ) — and
-        // the downstream final refit re-picks ρ on the full REML surface at the
-        // converged baseline θ. BFGS converges in ≲10 outer evaluations.
-        let baseline_outcome = optimize_survival_baseline_config_with_gradient_only(
-            &baseline_cfg,
-            age_exit.view(),
-            "workflow latent survival baseline",
-            |candidate| {
-                let (log_likelihood, stable_penalty_term, residuals) = match survival_mode {
-                    SurvivalLikelihoodMode::Latent => {
-                        let request = build_latent_survival_request(candidate)?;
-                        match fit_model(FitRequest::LatentSurvival(request)) {
-                            Ok(FitResult::LatentSurvival(result)) => {
-                                // The next probe's nested fit starts from this
-                                // probe's converged strengths.
-                                let carried_log_lambdas = |role: gam_problem::BlockRole| {
-                                    result
-                                        .fit
-                                        .block_by_role(role)
-                                        .map(|block| block.lambdas.mapv(f64::ln))
-                                        .filter(|log_lambdas| {
-                                            log_lambdas.iter().all(|value| value.is_finite())
-                                        })
-                                };
-                                *latent_smoothing_warm_start.borrow_mut() = Some((
-                                    carried_log_lambdas(gam_problem::BlockRole::Mean),
-                                    carried_log_lambdas(gam_problem::BlockRole::Time),
-                                ));
-                                (
-                                    result.fit.log_likelihood,
-                                    result.fit.stable_penalty_term,
-                                    result.baseline_offset_residuals,
-                                )
-                            }
-                            Ok(_) => {
-                                return Err("internal latent survival workflow returned the wrong result variant".to_string());
-                            }
-                            Err(e) => return Err(format!("latent survival fit failed: {e}")),
-                        }
-                    }
-                    SurvivalLikelihoodMode::LatentBinary => {
-                        let request = build_latent_binary_request(candidate)?;
-                        match fit_model(FitRequest::LatentBinary(request)) {
-                            Ok(FitResult::LatentBinary(result)) => (
-                                result.fit.log_likelihood,
-                                result.fit.stable_penalty_term,
-                                result.baseline_offset_residuals,
-                            ),
-                            Ok(_) => {
-                                return Err("internal latent binary workflow returned the wrong result variant".to_string());
-                            }
-                            Err(e) => return Err(format!("latent binary fit failed: {e}")),
-                        }
-                    }
-                    SurvivalLikelihoodMode::Transformation
-                    | SurvivalLikelihoodMode::Weibull
-                    | SurvivalLikelihoodMode::LocationScale
-                    | SurvivalLikelihoodMode::MarginalSlope => {
-                        return Err(format!(
-                            "internal: workflow latent baseline closure reached for non-latent mode {survival_mode:?}"
-                        ));
-                    }
-                };
-                let profile_cost = -log_likelihood + 0.5 * stable_penalty_term;
-                if !profile_cost.is_finite() {
-                    return Err(format!(
-                        "workflow latent baseline: non-finite profile cost \
-                         (log_likelihood={log_likelihood}, \
-                         stable_penalty_term={stable_penalty_term}, cost={profile_cost})"
-                    ));
-                }
-                // Interval upper-bound boundary ages for the `right` channel.
-                // When the formula carries no `SurvInterval(L, R, event)` column
-                // `age_right` is None and every row's `residuals.right` is 0, so
-                // `age_exit` is an unconsulted placeholder; when present it is the
-                // per-row `R` the interval likelihood `log[S(L) − S(R)]` brackets
-                // against, and its baseline-θ η-offset sensitivity is the missing
-                // gradient channel the latent interval fit needs.
-                let age_right_view = age_right.as_ref().unwrap_or(&age_exit);
-                let gradient = baseline_chain_rule_gradient(
-                    age_entry.view(),
-                    age_exit.view(),
-                    age_right_view.view(),
-                    candidate,
-                    &residuals,
-                )?
-                .ok_or_else(|| {
-                    "workflow latent baseline unexpectedly has no theta gradient".to_string()
-                })?;
-                Ok((profile_cost, gradient))
-            },
-        );
-        match baseline_outcome {
-            Ok(baseline) => baseline,
-            Err(e) => return Err(WorkflowError::InvalidConfig { reason: e }.into()),
-        }
     } else {
+        // A latent survival or binary fit selects its baseline chart together with
+        // ρ on the one LAML criterion (#2714).
         baseline_cfg
     };
 

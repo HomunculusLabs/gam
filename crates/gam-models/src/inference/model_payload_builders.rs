@@ -3107,6 +3107,7 @@ mod latent_saved_baseline_tests {
             &request.spec.age_exit,
             None,
             &request.spec.baseline_config,
+            HazardLoading::Full,
             &request.spec.time_block.offset_entry,
             &request.spec.time_block.offset_exit,
             &request.spec.time_block.derivative_offset_exit,

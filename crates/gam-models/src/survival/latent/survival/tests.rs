@@ -373,32 +373,6 @@
         }
     }
 
-    #[test]
-    fn latent_survival_offset_residuals_reject_missing_block_state() {
-        let error = learnable_sigma_test_family()
-            .offset_channel_residuals(&[])
-            .expect_err("missing fitted blocks must not become zero residuals");
-        match error {
-            LatentSurvivalError::BlockMismatch { reason } => {
-                assert!(reason.contains("got 0"), "unexpected mismatch: {reason}");
-            }
-            other => panic!("missing fitted blocks must be a block mismatch, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn latent_binary_offset_residuals_reject_missing_block_state() {
-        let error = fixed_sigma_binary_test_family()
-            .offset_channel_residuals(&[])
-            .expect_err("missing fitted blocks must not become zero residuals");
-        match error {
-            LatentSurvivalError::BlockMismatch { reason } => {
-                assert!(reason.contains("got 0"), "unexpected mismatch: {reason}");
-            }
-            other => panic!("missing fitted blocks must be a block mismatch, got {other:?}"),
-        }
-    }
-
     fn latent_binary_states_from_joint_beta(
         family: &LatentBinaryFamily,
         joint_beta: &Array1<f64>,
@@ -869,7 +843,6 @@
             unloaded_hazard_exit: Array1::from_elem(n, 0.02),
             meanspec: empty_meanspec(),
             mean_offset: Array1::zeros(n),
-            initial_mean_log_lambdas: None,
             baseline_config: validation_baseline_config(),
         }
     }
@@ -882,29 +855,6 @@
             rate: None,
             makeham: None,
         }
-    }
-
-    /// gam#2714: the latent workflow's baseline-θ probes carry the previous
-    /// probe's converged mean strengths into the next nested fit; a vector for
-    /// a different penalty set must not become a seed.
-    #[test]
-    fn mean_block_seed_takes_a_carried_strength_only_for_its_own_penalty_set_2714() {
-        let carried = array![1.5, -2.0];
-        assert_eq!(
-            mean_block_seed_log_lambdas(2, Some(&carried)),
-            carried,
-            "a carried strength of the right length is the seed"
-        );
-        assert_eq!(
-            mean_block_seed_log_lambdas(3, Some(&carried)),
-            Array1::<f64>::zeros(3),
-            "a carried strength for another penalty set starts at zero"
-        );
-        assert_eq!(
-            mean_block_seed_log_lambdas(2, None),
-            Array1::<f64>::zeros(2),
-            "no carried strength starts at zero"
-        );
     }
 
     /// A valid latent-binary term spec mirroring `valid_survival_spec` but
@@ -1507,76 +1457,6 @@
                 -((&gradient_plus - &gradient_minus) / (2.0 * h))
             );
         }
-    }
-
-    /// FD check for `LatentSurvivalFamily::offset_channel_residuals`: each
-    /// channel residual sums to `∂(−ℓ)/∂o_ch` for a uniform additive offset on
-    /// that time channel (the baseline-θ enters only through these offsets).
-    /// `o_ch` shifts `eta_time[ch-slice]` uniformly, so `Σ_i r^ch_i` is exactly
-    /// the directional derivative of `−ℓ` along a constant offset on channel ch.
-    /// This validates the envelope-theorem latent baseline-θ gradient primitive.
-    #[test]
-    fn latent_survival_offset_channel_residuals_match_finite_difference() {
-        let family = survival_stress_test_family(24);
-        let beta = survival_stress_test_joint_beta();
-        let states = latent_survival_states_from_joint_beta(&family, &beta);
-        let n = family.event_target.len();
-
-        let residuals = family
-            .offset_channel_residuals(&states)
-            .expect("offset channel residuals");
-        let sum_entry: f64 = residuals.entry.sum();
-        let sum_exit: f64 = residuals.exit.sum();
-        let sum_deriv: f64 = residuals.derivative.sum();
-
-        #[derive(Clone, Copy)]
-        enum TimeOffsetChannel {
-            Entry,
-            Exit,
-            Derivative,
-        }
-
-        // `−ℓ` after shifting one time channel's eta by a constant δ.
-        let neg_ll_with_offset = |channel: TimeOffsetChannel, delta: f64| -> f64 {
-            let mut shifted = states.clone();
-            let slice = match channel {
-                TimeOffsetChannel::Entry => s![0..n],
-                TimeOffsetChannel::Exit => s![n..2 * n],
-                TimeOffsetChannel::Derivative => s![2 * n..3 * n],
-            };
-            shifted[LatentSurvivalFamily::BLOCK_TIME]
-                .eta
-                .slice_mut(slice)
-                .mapv_inplace(|v| v + delta);
-            let (ll, _) = family
-                .evaluate_exact_newton_joint_gradient_dense(&shifted)
-                .expect("shifted joint gradient evaluation");
-            -ll
-        };
-
-        let h = 1e-6;
-        let fd_entry = (neg_ll_with_offset(TimeOffsetChannel::Entry, h)
-            - neg_ll_with_offset(TimeOffsetChannel::Entry, -h))
-            / (2.0 * h);
-        let fd_exit = (neg_ll_with_offset(TimeOffsetChannel::Exit, h)
-            - neg_ll_with_offset(TimeOffsetChannel::Exit, -h))
-            / (2.0 * h);
-        let fd_deriv = (neg_ll_with_offset(TimeOffsetChannel::Derivative, h)
-            - neg_ll_with_offset(TimeOffsetChannel::Derivative, -h))
-            / (2.0 * h);
-
-        assert!(
-            (sum_entry - fd_entry).abs() <= 1e-5 * fd_entry.abs().max(1.0),
-            "entry-channel residual sum mismatch: analytic={sum_entry}, fd={fd_entry}"
-        );
-        assert!(
-            (sum_exit - fd_exit).abs() <= 1e-5 * fd_exit.abs().max(1.0),
-            "exit-channel residual sum mismatch: analytic={sum_exit}, fd={fd_exit}"
-        );
-        assert!(
-            (sum_deriv - fd_deriv).abs() <= 1e-5 * fd_deriv.abs().max(1.0),
-            "derivative-channel residual sum mismatch: analytic={sum_deriv}, fd={fd_deriv}"
-        );
     }
 
     #[test]
@@ -3443,6 +3323,7 @@
             &age_exit,
             None,
             &seed,
+            HazardLoading::Full,
             &seed_entry,
             &seed_exit,
             &seed_derivative,
@@ -3593,6 +3474,7 @@
             &age_exit,
             None,
             &seed,
+            HazardLoading::Full,
             &seed_entry,
             &seed_exit,
             &seed_derivative,
@@ -3670,6 +3552,349 @@
             };
             let central_mixed =
                 (information_drift(&states_plus) - information_drift(&states_minus)) / (2.0 * h);
+            for ((a, b), &analytic) in mixed.indexed_iter() {
+                let central = central_mixed[[a, b]];
+                assert!(
+                    close(analytic, central),
+                    "axis {axis}: D_β H_θ[u][{a},{b}] {analytic} against central difference {central}"
+                );
+            }
+        }
+    }
+
+    /// The #2714 loaded/unloaded fixture: a Gompertz-Makeham hazard whose Makeham
+    /// background is not frailty-modified, a learned scale, and an exact event, a
+    /// right-censored row and an interval row, so every row kind reads the
+    /// background components the `ln m` chart axis moves. The unloaded arrays are
+    /// placeholders: realizing the family at a chart point installs them.
+    fn loaded_vs_unloaded_learned_sigma_family() -> LatentSurvivalFamily {
+        let n = 4;
+        LatentSurvivalFamily {
+            event_target: array![1u8, 0u8, LATENT_SURVIVAL_EVENT_INTERVAL, 1u8],
+            weights: array![1.0, 0.8, 1.1, 1.3],
+            latent_sd_fixed: None,
+            hazard_loading: HazardLoading::LoadedVsUnloaded,
+            unloaded_mass_entry: Array1::zeros(n),
+            unloaded_mass_exit: Array1::zeros(n),
+            unloaded_hazard_exit: Array1::zeros(n),
+            x_time_entry: array![[1.0, 0.0], [1.0, 0.0], [1.0, 0.0], [1.0, 0.0]],
+            x_time_exit: array![[1.0, 0.35], [1.0, 0.90], [1.0, 1.70], [1.0, 2.60]],
+            x_time_derivative_exit: array![
+                [0.0, 1.00],
+                [0.0, 1.00],
+                [0.0, 1.00],
+                [0.0, 1.00]
+            ],
+            // The interval row's upper bound lies past its exit, so `q_right > q_exit`
+            // at every β the sweep visits.
+            x_time_right: array![[1.0, 0.35], [1.0, 0.90], [1.0, 2.20], [1.0, 2.60]],
+            time_offset_right: Array1::zeros(n),
+            unloaded_mass_right: Array1::zeros(n),
+            x_mean: DesignMatrix::Dense(DenseDesignMatrix::from(array![
+                [1.0, -0.40],
+                [1.0, 0.15],
+                [1.0, 0.60],
+                [1.0, -0.90]
+            ])),
+            time_linear_constraints: None,
+            quadctx: Arc::new(QuadratureContext::new()),
+            baseline_theta_rows: None,
+            jeffreys_armed: true,
+        }
+    }
+
+    fn gompertz_makeham_seed() -> SurvivalBaselineConfig {
+        SurvivalBaselineConfig {
+            target: crate::survival::construction::SurvivalBaselineTarget::GompertzMakeham,
+            scale: None,
+            shape: Some(0.3),
+            rate: Some(0.05),
+            makeham: Some(0.02),
+        }
+    }
+
+    /// #2714: a loaded/unloaded chart's `ln m` axis moves only the Makeham
+    /// background, which no row primary carries, so its terms come from the
+    /// background-share jet rather than an offset direction; the Gompertz axes
+    /// move the offsets the split realizes from the Gompertz part alone. With the
+    /// family realized at `θ ± h` through the chart, every term of every axis must
+    /// match the central difference of the production hook it differentiates.
+    #[test]
+    fn loaded_vs_unloaded_chart_psi_terms_match_central_differences_2714() {
+        let family = loaded_vs_unloaded_learned_sigma_family();
+        let n = family.event_target.len();
+        let age_entry = array![0.4, 0.7, 1.1, 0.5];
+        let age_exit = array![1.9, 2.6, 3.4, 4.2];
+        let age_right = array![2.5, 3.2, 4.6, 5.0];
+        let seed = gompertz_makeham_seed();
+        let seed_offsets = crate::survival::construction::build_latent_survival_baseline_offsets(
+            &age_entry,
+            &age_exit,
+            &seed,
+            HazardLoading::LoadedVsUnloaded,
+        )
+        .expect("seed loaded offsets");
+        let seed_right = crate::survival::construction::build_latent_survival_baseline_offsets(
+            &age_entry,
+            &age_right,
+            &seed,
+            HazardLoading::LoadedVsUnloaded,
+        )
+        .expect("seed loaded right offsets");
+        let chart = crate::survival::construction::LatentSurvivalFrozenOffsetChart::new(
+            &age_entry,
+            &age_exit,
+            Some(&age_right),
+            &seed,
+            HazardLoading::LoadedVsUnloaded,
+            &seed_offsets.loaded_eta_entry,
+            &seed_offsets.loaded_eta_exit,
+            &seed_offsets.loaded_derivative_exit,
+            &seed_right.loaded_eta_exit,
+        )
+        .expect("chart construction")
+        .expect("a Gompertz-Makeham baseline has chart coordinates");
+        let beta = array![-0.60, 0.85, -0.25, 0.40, -0.3_f64];
+        let realized = |point: &Array1<f64>| {
+            let geometry = Arc::new(chart.evaluate(point).expect("chart evaluation"));
+            let at_point = family.at_chart_point(Arc::clone(&geometry), None);
+            let mut states = latent_survival_states_from_joint_beta(&at_point, &beta);
+            let eta = &mut states[LatentSurvivalFamily::BLOCK_TIME].eta;
+            eta.slice_mut(s![0..n]).scaled_add(1.0, &geometry.offset_entry);
+            eta.slice_mut(s![n..2 * n]).scaled_add(1.0, &geometry.offset_exit);
+            eta.slice_mut(s![2 * n..3 * n])
+                .scaled_add(1.0, &geometry.derivative_offset_exit);
+            (geometry, at_point, states)
+        };
+        let theta = chart.initial_theta().clone();
+        assert_eq!(theta.len(), 3, "precondition: the chart carries ln rate, shape and ln m");
+        let (rows, at_theta, states) = realized(&theta);
+        assert!(
+            rows.unloaded
+                .as_ref()
+                .is_some_and(|unloaded| unloaded.axis == 2),
+            "precondition: the split realizes its background along ln m"
+        );
+        let h = 1e-5_f64;
+        let close = |analytic: f64, central: f64| {
+            (analytic - central).abs() <= 1e-6 * analytic.abs().max(central.abs()).max(1.0)
+        };
+        let direction = array![0.3, -0.2, 0.5, 0.1, -0.4_f64];
+        for axis in 0..theta.len() {
+            let terms = at_theta
+                .baseline_theta_psi_terms_dense(&states, &rows, axis)
+                .expect("baseline psi terms");
+            let mixed = at_theta
+                .baseline_theta_hessian_directional_derivative_dense(
+                    &states, &rows, axis, &direction,
+                )
+                .expect("baseline mixed information derivative");
+            let mut plus = theta.clone();
+            plus[axis] += h;
+            let mut minus = theta.clone();
+            minus[axis] -= h;
+            let realized_plus = realized(&plus);
+            let realized_minus = realized(&minus);
+            let (family_plus, states_plus) = (&realized_plus.1, &realized_plus.2);
+            let (family_minus, states_minus) = (&realized_minus.1, &realized_minus.2);
+
+            let central_objective = -(family_plus
+                .log_likelihood_only(states_plus)
+                .expect("log likelihood")
+                - family_minus
+                    .log_likelihood_only(states_minus)
+                    .expect("log likelihood"))
+                / (2.0 * h);
+            assert!(
+                close(terms.objective_psi, central_objective),
+                "axis {axis}: V_θ {} against central difference {central_objective}",
+                terms.objective_psi
+            );
+
+            let central_score = (family_minus
+                .evaluate_exact_newton_joint_gradient_dense(states_minus)
+                .expect("joint gradient")
+                .1
+                - family_plus
+                    .evaluate_exact_newton_joint_gradient_dense(states_plus)
+                    .expect("joint gradient")
+                    .1)
+                / (2.0 * h);
+            for (a, (&analytic, &central)) in
+                terms.score_psi.iter().zip(central_score.iter()).enumerate()
+            {
+                assert!(
+                    close(analytic, central),
+                    "axis {axis}: g_θ[{a}] {analytic} against central difference {central}"
+                );
+            }
+
+            let central_information = (family_plus
+                .evaluate_exact_newton_joint_dense(states_plus)
+                .expect("joint Hessian")
+                .2
+                - family_minus
+                    .evaluate_exact_newton_joint_dense(states_minus)
+                    .expect("joint Hessian")
+                    .2)
+                / (2.0 * h);
+            for ((a, b), &analytic) in terms.hessian_psi.indexed_iter() {
+                let central = central_information[[a, b]];
+                assert!(
+                    close(analytic, central),
+                    "axis {axis}: H_θ[{a},{b}] {analytic} against central difference {central}"
+                );
+            }
+
+            let central_mixed = (family_plus
+                .exact_newton_joint_hessian_directional_derivative_dense(states_plus, &direction)
+                .expect("joint Hessian directional derivative")
+                - family_minus
+                    .exact_newton_joint_hessian_directional_derivative_dense(
+                        states_minus,
+                        &direction,
+                    )
+                    .expect("joint Hessian directional derivative"))
+                / (2.0 * h);
+            for ((a, b), &analytic) in mixed.indexed_iter() {
+                let central = central_mixed[[a, b]];
+                assert!(
+                    close(analytic, central),
+                    "axis {axis}: D_β H_θ[u][{a},{b}] {analytic} against central difference {central}"
+                );
+            }
+        }
+    }
+
+    /// #2714: the binary deployment of a loaded/unloaded chart. A survivor's
+    /// `ln m` term is the β-free background shift; an event's runs through the
+    /// binary chain. Realized at `θ ± h` through the chart, every term must match
+    /// the central difference of the production hook it differentiates.
+    #[test]
+    fn binary_loaded_vs_unloaded_chart_psi_terms_match_central_differences_2714() {
+        let n = 4;
+        let family = LatentBinaryFamily {
+            event_target: array![1u8, 0u8, 1u8, 0u8],
+            weights: array![1.0, 0.8, 1.1, 1.3],
+            latent_sd: 0.4,
+            hazard_loading: HazardLoading::LoadedVsUnloaded,
+            unloaded_mass_entry: Array1::zeros(n),
+            unloaded_mass_exit: Array1::zeros(n),
+            x_time_entry: array![[1.0, 0.0], [1.0, 0.0], [1.0, 0.0], [1.0, 0.0]],
+            x_time_exit: array![[1.0, 0.35], [1.0, 0.90], [1.0, 1.70], [1.0, 2.60]],
+            x_mean: DesignMatrix::Dense(DenseDesignMatrix::from(array![
+                [1.0, -0.40],
+                [1.0, 0.15],
+                [1.0, 0.60],
+                [1.0, -0.90]
+            ])),
+            time_linear_constraints: None,
+            quadctx: Arc::new(QuadratureContext::new()),
+            baseline_theta_rows: None,
+            jeffreys_armed: true,
+        };
+        let age_entry = array![0.4, 0.7, 1.1, 0.5];
+        let age_exit = array![1.9, 2.6, 3.4, 4.2];
+        let seed = gompertz_makeham_seed();
+        let seed_offsets = crate::survival::construction::build_latent_survival_baseline_offsets(
+            &age_entry,
+            &age_exit,
+            &seed,
+            HazardLoading::LoadedVsUnloaded,
+        )
+        .expect("seed loaded offsets");
+        let chart = crate::survival::construction::LatentSurvivalFrozenOffsetChart::new(
+            &age_entry,
+            &age_exit,
+            None,
+            &seed,
+            HazardLoading::LoadedVsUnloaded,
+            &seed_offsets.loaded_eta_entry,
+            &seed_offsets.loaded_eta_exit,
+            &seed_offsets.loaded_derivative_exit,
+            &Array1::zeros(n),
+        )
+        .expect("chart construction")
+        .expect("a Gompertz-Makeham baseline has chart coordinates");
+        let beta = array![-0.60, 0.85, -0.25, 0.40_f64];
+        let realized = |point: &Array1<f64>| {
+            let geometry = Arc::new(chart.evaluate(point).expect("chart evaluation"));
+            let at_point = family.at_chart_point(Arc::clone(&geometry), None);
+            let mut states = latent_binary_states_from_joint_beta(&at_point, &beta);
+            let eta = &mut states[LatentBinaryFamily::BLOCK_TIME].eta;
+            eta.slice_mut(s![0..n]).scaled_add(1.0, &geometry.offset_entry);
+            eta.slice_mut(s![n..2 * n]).scaled_add(1.0, &geometry.offset_exit);
+            (geometry, at_point, states)
+        };
+        let theta = chart.initial_theta().clone();
+        let (rows, at_theta, states) = realized(&theta);
+        let h = 1e-5_f64;
+        let close = |analytic: f64, central: f64| {
+            (analytic - central).abs() <= 1e-6 * analytic.abs().max(central.abs()).max(1.0)
+        };
+        let direction = array![0.3, -0.2, 0.5, 0.1_f64];
+        for axis in 0..theta.len() {
+            let terms = at_theta
+                .baseline_theta_psi_terms_dense(&states, &rows, axis)
+                .expect("binary baseline psi terms");
+            let mixed = at_theta
+                .baseline_theta_hessian_directional_derivative_dense(
+                    &states, &rows, axis, &direction,
+                )
+                .expect("binary baseline mixed information derivative");
+            let mut plus = theta.clone();
+            plus[axis] += h;
+            let mut minus = theta.clone();
+            minus[axis] -= h;
+            let realized_plus = realized(&plus);
+            let realized_minus = realized(&minus);
+            let (ll_plus, gradient_plus, information_plus) = realized_plus
+                .1
+                .evaluate_exact_newton_joint_dense(&realized_plus.2)
+                .expect("binary joint value, gradient and Hessian");
+            let (ll_minus, gradient_minus, information_minus) = realized_minus
+                .1
+                .evaluate_exact_newton_joint_dense(&realized_minus.2)
+                .expect("binary joint value, gradient and Hessian");
+
+            let central_objective = -(ll_plus - ll_minus) / (2.0 * h);
+            assert!(
+                close(terms.objective_psi, central_objective),
+                "axis {axis}: V_θ {} against central difference {central_objective}",
+                terms.objective_psi
+            );
+            let central_score = (gradient_minus - gradient_plus) / (2.0 * h);
+            for (a, (&analytic, &central)) in
+                terms.score_psi.iter().zip(central_score.iter()).enumerate()
+            {
+                assert!(
+                    close(analytic, central),
+                    "axis {axis}: g_θ[{a}] {analytic} against central difference {central}"
+                );
+            }
+            let central_information = (information_plus - information_minus) / (2.0 * h);
+            for ((a, b), &analytic) in terms.hessian_psi.indexed_iter() {
+                let central = central_information[[a, b]];
+                assert!(
+                    close(analytic, central),
+                    "axis {axis}: H_θ[{a},{b}] {analytic} against central difference {central}"
+                );
+            }
+            let central_mixed = (realized_plus
+                .1
+                .exact_newton_joint_hessian_directional_derivative_dense(
+                    &realized_plus.2,
+                    &direction,
+                )
+                .expect("binary joint Hessian directional derivative")
+                - realized_minus
+                    .1
+                    .exact_newton_joint_hessian_directional_derivative_dense(
+                        &realized_minus.2,
+                        &direction,
+                    )
+                    .expect("binary joint Hessian directional derivative"))
+                / (2.0 * h);
             for ((a, b), &analytic) in mixed.indexed_iter() {
                 let central = central_mixed[[a, b]];
                 assert!(
