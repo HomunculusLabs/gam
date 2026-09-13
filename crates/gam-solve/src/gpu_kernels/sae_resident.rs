@@ -841,9 +841,11 @@ impl DeviceResidentArrowWorkspace {
         let cross = self.slabs.row_cross_slabs.as_slice();
         let border = self.slabs.border_hessian.as_slice();
 
-        // Chunk width depends only on `n`, so the reduction order is identical
-        // on every host and at every thread count.
-        let chunk_rows = n.div_ceil(OPERATOR_MAX_ROW_CHUNKS).max(OPERATOR_MIN_ROW_CHUNK);
+        // One row chunk reads `d x p` slab entries per row, so the chunk width is the
+        // library row-chunk rule on that width (#2469). It depends only on the shape,
+        // so the `cross_beta` reduction order is identical on every host and at every
+        // thread count.
+        let chunk_rows = gam_runtime::resource::byte_balanced_row_chunk(d * p, n);
         let parallel = n >= OPERATOR_PARALLEL_ROW_MIN && rayon::current_thread_index().is_none();
 
         let mut cross_t = vec![0.0_f64; n * d];
@@ -1266,16 +1268,6 @@ impl DeviceResidentArrowWorkspace {
         }
     }
 }
-
-/// Upper bound on the number of row chunks the host operator apply folds. Fixes
-/// the `cross_beta` reduction tree (and hence the exact floating-point result)
-/// as a function of `n` alone, and bounds the partial-buffer memory at
-/// `OPERATOR_MAX_ROW_CHUNKS · p` regardless of row count.
-const OPERATOR_MAX_ROW_CHUNKS: usize = 256;
-
-/// Smallest row chunk worth handing to a worker: below this the per-chunk
-/// `p`-wide partial buffer costs more than the rows it folds.
-const OPERATOR_MIN_ROW_CHUNK: usize = 64;
 
 /// Row count below which the host operator apply stays sequential — the fan-out
 /// and the per-chunk partial allocation dominate the contraction itself.
