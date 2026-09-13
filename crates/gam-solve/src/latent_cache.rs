@@ -30,7 +30,6 @@ use gam_terms::smooth::{TermCollectionDesign, TermCollectionSpec};
 
 const DEFAULT_LATENT_CACHE_CAPACITY: usize = 4;
 const DEFAULT_PERSISTENT_LATENT_CACHE_CAPACITY: usize = 16;
-const DEFAULT_PERSISTENT_LATENT_CACHE_BYTE_BUDGET: usize = 1024 * 1024 * 1024;
 
 static PERSISTENT_LATENT_DESIGN_CACHE: OnceLock<Mutex<PersistentLatentDesignCache>> =
     OnceLock::new();
@@ -607,7 +606,10 @@ impl PersistentLatentDesignCache {
             entries: HashMap::new(),
             lru: VecDeque::new(),
             capacity: capacity.max(1),
-            byte_budget: DEFAULT_PERSISTENT_LATENT_CACHE_BYTE_BUDGET,
+            // Retained designs are admitted against the process's operator-cache cap,
+            // derived from host memory, not a fixed 1 GiB (#2469).
+            byte_budget: gam_runtime::resource::ResourcePolicy::default_library()
+                .max_operator_cache_bytes,
             cache_bytes: 0,
         }
     }

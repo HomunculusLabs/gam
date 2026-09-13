@@ -6833,5 +6833,13 @@
     ],
     "reason": "#2829 no product user: SparseAtomCodes::coactivation, CoactivationStats::fusion_evidence, SubspaceReducedEvaluator::reduced_width, persistence::atlas_nerve and sparse_dict::block_firing_coordinates have no caller; weight_codependence, AtlasNerveReport, farthest_point_subsample and gf2_column_rank were reached only through them.",
     "evidence": "At 8f2d0c6c37c0c0d2a716fe2e4c3d56c5cd4709f8, git grep -n -w over crates, src and tests finds no call of these functions: coactive_pair_stats builds CoactivationStats with its own inline weight correlation, the atlas_nerve names elsewhere are the inference::atlas_nerve module and build_atlas_nerve, and the gam-pyffi block_firing_coordinates wrapper calls block_route_firing_coordinates. weight_codependence was called only by coactivation, and AtlasNerveReport was built only by persistence::atlas_nerve."
+  },
+  {
+    "base": "c7823aadd83349879fdd20fd142d3c510039b2fd",
+    "items": [
+      "crates/gam-solve/src/latent_cache.rs:const:DEFAULT_PERSISTENT_LATENT_CACHE_BYTE_BUDGET"
+    ],
+    "reason": "#2469: DEFAULT_PERSISTENT_LATENT_CACHE_BYTE_BUDGET (1 GiB) was the picked eviction budget of PersistentLatentDesignCache, independent of host memory. The cache now admits entries against ResourcePolicy::default_library().max_operator_cache_bytes, the capacity-derived operator-cache cap the arrow H_tbeta factor cache already uses.",
+    "evidence": "git grep -n -w DEFAULT_PERSISTENT_LATENT_CACHE_BYTE_BUDGET over the base finds two lines, both in crates/gam-solve/src/latent_cache.rs: the declaration and its single use in PersistentLatentDesignCache::new. No test names it. Not compiled or run locally (user directive); compile is covered by the lead shared tip check."
   }
 ]
