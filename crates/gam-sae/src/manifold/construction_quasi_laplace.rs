@@ -7577,7 +7577,6 @@ impl SaeManifoldTerm {
             // softmax majorizer written into `htt` carries `w_row`, so its
             // θ-derivative does too.
             let w_row_prior = self.row_loss_weights.as_deref().map_or(1.0, |w| w[row]);
-            let simplex_count = crate::assignment::simplex_gate_free_count(&self.assignment);
             for w in 0..q {
                 let mut gamma = 0.0_f64;
                 let softmax_d_dw: Option<(&[f64], f64, f64, f64, usize)> =
