@@ -1,13 +1,17 @@
 # Joint latent signatures: mathematical target
 
-This document specifies the complete model being built. The `joint` module in
-`gam_event_history` implements its complete-path density, structured Laplace
-posterior, importance integration, and differentiated reference evolution with
-disease histories, independent replication, adaptive time/particle
-refinement, and a cohort observation objective sharing these reference strata.
-The parameter-fitting workflow, structure search, and serving
-interface are still unfinished. The older log-linear Gaussian event model and its
-numerical limits are documented in `event-history.md`.
+This document is a mathematical target, not a description of code in the tree.
+An implementation of it -- `gam_event_history::joint`: the complete-path
+density, structured Laplace posterior, importance integration, differentiated
+reference evolution with disease histories, independent replication, adaptive
+time/particle refinement, and a cohort observation objective sharing these
+reference strata -- was removed in 8e9e48c499 (#2899) because no product or
+production code used it. It is recoverable from
+`8e9e48c499^:crates/gam-event-history/src/joint/` and `.../joint.rs`; its
+parameter-fitting workflow, structure search and serving interface were never
+finished. The engine that is built today is the older log-linear Gaussian event
+model, documented in `event-history.md`. Where this document says "the
+implemented state", read "the state that implementation reached".
 
 The implemented state has independent OU innovations with stationary variance
 one, a genetic mean linear in supplied predictable basis rows, and constant
