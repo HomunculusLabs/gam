@@ -44,6 +44,7 @@
 //! reproduces the builder's own squared-distance accumulation bit for bit, so
 //! `sqrt` monotonicity gives `g_l(row) ≤ 0` with no roundtrip, and the exact
 //! margin of a membership simplex must lie inside the resolution window of 0.
+#![cfg(test)]
 
 use super::*;
 use crate::manifold::local_charts::LocalAtlasConfig;
@@ -266,11 +267,17 @@ impl BallCover {
             }
         }
         // Lift the argmin back to ambient coordinates through the plane basis.
+        // Collinear centers have no second basis vector (`e2_norm` can be
+        // exactly zero, and `best_y` is then identically zero), so the lift
+        // uses only `e1` there instead of dividing zero by zero.
         let argmin = (0..dim)
             .map(|column| {
-                self.centers[i][column]
-                    + best_x * e1[column] / e1_norm
-                    + best_y * e2[column] / e2_norm
+                let along = self.centers[i][column] + best_x * e1[column] / e1_norm;
+                if collinear {
+                    along
+                } else {
+                    along + best_y * e2[column] / e2_norm
+                }
             })
             .collect::<Vec<_>>();
         (best, argmin)
