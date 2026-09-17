@@ -2182,7 +2182,7 @@
     "evidence": "The removed map is what scripts/public_api_census.py printed for this change on the lane (gate job 1121497 on gx2 at 10043352cf). At the base git grep -w finds these names outside test files only in gam-solve estimate/optimizer.rs, reml/{atoms,gradient_hessian,mod,objective}.rs and rho_optimizer/{objective,run}.rs, and every one of those occurrences is deleted in this commit. cargo check --workspace --all-targets --exclude gam-pyffi on the patched tree names none of them."
   },
   {
-    "base": "cc2ea46f82a599c9619004b9574615f653349bdd",
+    "base": "eddb62faa7ccbd9afd09acd104a553e6638bea8f",
     "removed": {
       "crates/gam-solve/src/estimate/fit.rs::fit_gamwith_heuristic_lambdas": 1,
       "crates/gam-solve/src/estimate/fit.rs::fit_gamwith_heuristic_lambdas_andwarm_start": 1,

@@ -5166,7 +5166,7 @@
     "evidence": "At the base, git grep -w over crates, src, tests, examples, bench and benches finds soft_rho_guard_gradient, soft_rho_guard_prior_atom, SoftRhoGuardPriorAtom, with_soft_rho_guard_gradient, gradient_with_rail_barrier_removed, RHO_SOFT_PRIOR_WEIGHT and RHO_SOFT_PRIOR_SHARPNESS only in the files this commit edits or deletes (gam-solve estimate/{optimizer,mod,smoothing_correction}.rs, reml/{atoms,gradient_hessian,mod,objective}.rs, rho_optimizer/{objective,run}.rs, the two deleted test files, gam-custom-family soft_rho_guard_floor_2629_tests.rs and gam-models iso_kappa_reml_gradient_fd_tests.rs), and relax_smoothing_rho_prior and RELAX_UNDERDETERMINED_RHO_SD only in design_construction.rs plus two root test doc comments. The remaining RHO_BOUND occurrences outside the edited files are prose. The item list is what scripts/source_removal_guard.py printed for this change on the lane (gate job 1121497 on gx2 at 10043352cf)."
   },
   {
-    "base": "cc2ea46f82a599c9619004b9574615f653349bdd",
+    "base": "eddb62faa7ccbd9afd09acd104a553e6638bea8f",
     "items": [
       "crates/gam-models/src/fit_orchestration/drivers/design_construction.rs:fn:fit_term_collection_forspecwith_heuristic_lambdas",
       "crates/gam-solve/src/estimate/fit.rs:fn:fit_gamwith_heuristic_lambdas",
