@@ -963,14 +963,14 @@ fn softmax_lane_channels_match_the_lane_value_on_clamp_basin_rows_2913() {
                 (format!("coord {atom}.{axis}"), (atom, Some(axis)))
             }
         };
-        let moved = |sign: f64| {
+        let moved = |shift: f64| {
             let mut term = frozen_gate_endpoint(&state.term);
             match endpoint {
-                (atom, None) => term.assignment.logits[[row, atom]] += sign * h,
+                (atom, None) => term.assignment.logits[[row, atom]] += shift,
                 (atom, Some(axis)) => {
                     let index = row * term.assignment.coords[atom].latent_dim() + axis;
                     let mut flat = term.assignment.coords[atom].as_flat().clone();
-                    flat[index] += sign * h;
+                    flat[index] += shift;
                     term.assignment.coords[atom].set_flat(flat.view());
                     // The atoms cache their basis at the coordinates they were last
                     // refreshed at, and the arrow assembly reads that cache, so a moved
@@ -983,13 +983,20 @@ fn softmax_lane_channels_match_the_lane_value_on_clamp_basin_rows_2913() {
             term
         };
         let adjoint = theta.t[state.cache.row_offsets[row] + position];
-        let fd = (log_det_at(&moved(1.0), &state.rho) - log_det_at(&moved(-1.0), &state.rho))
-            / (2.0 * h);
+        // Job 656665: this state's θ entries reach 1e3, and a single central difference
+        // at h = 1e-5 carries 1.4e-5 to 5.6e-5 relative truncation. Richardson over
+        // (2h, h) removes the O(h²) term, and on every correct entry it agreed with
+        // production to 1e-10..3e-8.
+        let central = |step: f64| {
+            (log_det_at(&moved(step), &state.rho) - log_det_at(&moved(-step), &state.rho))
+                / (2.0 * step)
+        };
+        let fd = (4.0 * central(h) - central(2.0 * h)) / 3.0;
         report.push(format!(
-            "theta[row {row}, {label}]={adjoint:.12e} fd={fd:.12e} gap={:.3e}",
+            "theta[row {row}, {label}]={adjoint:.12e} richardson={fd:.12e} gap={:.3e}",
             (adjoint - fd).abs()
         ));
-        if (adjoint - fd).abs() > 1.0e-5 * (1.0 + fd.abs()) {
+        if (adjoint - fd).abs() > 1.0e-6 * (1.0 + fd.abs()) {
             failures.push(format!("theta {label}"));
         }
     }
