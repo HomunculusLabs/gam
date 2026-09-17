@@ -7966,14 +7966,16 @@ impl SaeManifoldTerm {
     ///
     /// The criterion prices `½log|A|` from its own dense materialization but
     /// returns only the majorizer's factor cache, whose Schur inverse is
-    /// `[B⁻¹]_ββ`. This re-forms the same `A`
-    /// ([`Self::materialize_exact_hessian_dense_with_gap_border`], the operator
-    /// `exact_observed_information_log_dets_with_saddle_directions` classifies)
-    /// and reads every atom's block off one eigendecomposition. That costs one
-    /// extra dense build and `O(dim³)` decomposition per uncertainty report, on
-    /// the route whose admission (`direct_logdet_admitted`) already prices that
-    /// block for every criterion evaluation. The criterion's block has been
-    /// dropped by then, so the peak memory is unchanged.
+    /// `[B⁻¹]_ββ`. This re-forms the same `A` through
+    /// [`Self::materialize_exact_stationarity_geometry`], the one construction the
+    /// IFT solve and the fitted-response divergence (#2933 F36) read, over the
+    /// operator `exact_observed_information_log_dets_with_saddle_directions`
+    /// classifies, and reads every atom's block off its eigensystem. That costs a
+    /// dense build and an `O(dim³)` decomposition per uncertainty report, on the
+    /// route whose admission (`direct_logdet_admitted`) already prices that block
+    /// for every criterion evaluation. The dispersion's divergence currently
+    /// forms its own copy of the same geometry; neither block outlives its
+    /// consumer, so the peak memory is one block.
     ///
     /// A resolved negative direction of `A` returns
     /// [`SaeShapeCovarianceUnavailable::IndefiniteObservedInformation`]. The value
@@ -7991,16 +7993,7 @@ impl SaeManifoldTerm {
         cache: &ArrowFactorCache,
     ) -> Result<SaeShapeInformation, String> {
         let total_t = cache.delta_t_len();
-        let (a, e_beta) =
-            self.materialize_exact_hessian_dense_with_gap_border(rho, target, cache)?;
-        let e_diag = self.materialize_ard_concave_clamp_diagonal(rho, cache)?;
-        let joint = Self::exact_hessian_spectral_block(
-            a,
-            &e_diag,
-            e_beta.as_ref(),
-            total_t,
-            ArrowMetric::Joint(cache),
-        )?;
+        let joint = self.materialize_exact_stationarity_geometry(rho, target, cache)?;
         let meat = self.reconstruction_border_score_meat(target)?;
         joint.border_selected_inverse_blocks(
             total_t,
