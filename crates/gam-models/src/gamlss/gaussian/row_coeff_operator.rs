@@ -1062,7 +1062,6 @@ mod diagonal_exactness_tests {
 mod to_dense_direct_1720_tests {
     use super::*;
     use gam_problem::HyperOperator;
-    use std::time::Instant;
 
     /// Deterministic, allocation-free pseudo-random value in `[-1, 1)` keyed by
     /// `(i, j, salt)` — a splitmix64 finaliser over a mixed index. Gives every
@@ -1103,6 +1102,9 @@ mod to_dense_direct_1720_tests {
     /// the dense operator is exactly `mul_vec(e_j)`. This is an independent code
     /// path (per-column matvec) from the direct `X_aᵀ diag(c) X_b` assembly, so
     /// agreement pins the fast path's correctness, not a value against itself.
+    /// Both forms are linear in n at fixed width, so the #1720 gain is a
+    /// constant factor that no row-scaling ratio can separate from the probe;
+    /// this value pin is the change's whole contract.
     #[test]
     fn to_dense_matches_basis_probe_reference_1720() {
         let op = build_op(257, 5, 4);
@@ -1127,47 +1129,6 @@ mod to_dense_direct_1720_tests {
         assert!(
             max_abs <= 1e-9 * scale,
             "direct to_dense diverged from the basis-probe reference: max_abs={max_abs} scale={scale}"
-        );
-    }
-
-    /// Best-of-`blocks` mean per-call `to_dense` wall time at `n` rows.
-    fn per_call_secs(n: usize, pa: usize, pb: usize) -> f64 {
-        let op = build_op(n, pa, pb);
-        for _ in 0..3 {
-            std::hint::black_box(op.to_dense());
-        }
-        let mut best = f64::MAX;
-        for _ in 0..5 {
-            let reps = 20;
-            let t0 = Instant::now();
-            for _ in 0..reps {
-                std::hint::black_box(op.to_dense());
-            }
-            best = best.min(t0.elapsed().as_secs_f64() / reps as f64);
-        }
-        best
-    }
-
-    /// Root cause of #1720: the outer-Hessian correction densified the joint
-    /// row-coefficient operator by probing `dim` basis vectors through
-    /// `mul_vec`, so each `to_dense` cost `O(dim · n · Σ p_b)` and — because a
-    /// plain Gaussian REML is ~flat in n — the location-scale fit's *relative*
-    /// overhead grew super-linearly (3× at n=100 → 9× at n=2000). The direct
-    /// block-Gram assembly is `O(Σ_pairs n · p_a p_b)`, i.e. linear in n at
-    /// fixed width. Pin that scaling: quadrupling the rows must cost no worse
-    /// than ~6× the wall time (linear 4× plus fixed-overhead / measurement
-    /// slack), never the super-linear blow-up the probing regression showed.
-    #[test]
-    fn to_dense_scales_linearly_in_n_1720() {
-        let (pa, pb) = (12, 12);
-        let t_small = per_call_secs(1_000, pa, pb);
-        let t_large = per_call_secs(4_000, pa, pb);
-        let ratio = t_large / t_small.max(1e-9);
-        assert!(
-            ratio <= 6.0,
-            "#1720 to_dense scales super-linearly in n: \
-             t(1000)={t_small:.6}s t(4000)={t_large:.6}s ratio={ratio:.2} \
-             (want <= 6.0 for a 4x row increase)"
         );
     }
 }

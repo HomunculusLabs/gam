@@ -4741,6 +4741,15 @@
     "evidence": "At the base, git grep -n riesz_kernel_coefficient_nonlog finds only its declaration and one call inside the unreachable p == 2q arm of pure_duchon_self_pair_value, both in crates/gam-terms/src/basis/closed_form_penalty.rs. The new test pure_duchon_self_pair_is_zero_above_the_uv_exponent_in_the_log_case_2469 pins Some(0.0) at (q=2, d=6, m=2, s=1), None at the p = 2q log divergence, and a shrinking |g_2(R)| from the kappa = 0 radial chain. Receipt: MSI job 1107646 (lane sw0d) at 5113e49b8 with the landing patch applied: cargo check -p gam-terms --all-targets exited 0, and cargo nextest -p gam-terms --lib passed 120 of 120 selected tests including the new one (/scratch.global/sauer354/pool/const2469/combo.1107646.log)."
   },
   {
+    "base": "6ba6015c7ca05ae79df4e4f8ca78ad83db34a6ec",
+    "items": [
+      "crates/gam-models/src/gamlss/gaussian/row_coeff_operator.rs:fn:per_call_secs",
+      "crates/gam-models/src/gamlss/gaussian/row_coeff_operator.rs:fn:to_dense_scales_linearly_in_n_1720"
+    ],
+    "reason": "#2627 vacuous-gate row: to_dense_scales_linearly_in_n_1720 asserted t(4000)/t(1000) <= 6.0 for RowCoeffOperator::to_dense at fixed width. The basis-probing to_dense it guarded against (#1720) runs dim calls of mul_vec, each O(n·Σp_b) (fast_av_into and fast_atv per channel plus O(n) pair saxpys), so it is also linear in n, and the ratio gate cannot fail on the regression it names. Its recorded red was ratio 6.08 against 6.0 in census job 631053 at e35b53864, timing a sub-millisecond operation during a 16-way parallel run. The #1720 change is a constant factor at fixed width (one weighted gemm per pair instead of dim per-column matvecs); its value contract stays pinned by to_dense_matches_basis_probe_reference_1720. per_call_secs was the removed gate's only helper.",
+    "evidence": "At the base, git grep -n for per_call_secs and to_dense_scales_linearly_in_n_1720 finds only their declarations in row_coeff_operator.rs and the two per_call_secs calls inside the removed test. No other test, bench, example, doc or production source names either function."
+  },
+  {
     "base": "53d420d79d102e86898b8ce9f9f32a04aef101cc",
     "items": [
       "crates/gam-solve/src/cone_reduction.rs:fn:constrained_cone_mode",
