@@ -438,6 +438,8 @@ pub enum FaerLinalgError {
     StrictSelfAdjointEigenInvalidInput { reason: String },
     #[error("Self-adjoint eigendecomposition failed: {0:?}")]
     SelfAdjointEigen(solvers::EvdError),
+    #[error("General eigendecomposition failed: {0:?}")]
+    GeneralEigen(solvers::EvdError),
     #[error("Cholesky factorization failed: {0:?}")]
     Cholesky(solvers::LltError),
     #[error("LDLT factorization failed: {0:?}")]
@@ -2953,6 +2955,227 @@ pub fn strict_symmetric_eigh<S: Data<Elem = f64>>(
     Ok((values, vectors))
 }
 
+/// #2627 — the counted-worst-case relative backward error `η_A` of faer 0.24's
+/// real Hessenberg–Schur reduction of an `n × n` matrix.
+///
+/// Applying `r` Householder or Givens transformations, each of which updates an
+/// entry by an inner product over at most `n` terms, one product and one
+/// subtraction, perturbs the matrix by at most `r·γ_{n+2}` relative to its
+/// Frobenius norm (Higham, *Accuracy and Stability of Numerical Algorithms*, 2nd
+/// ed., §19.3). The reduction applies at most:
+/// - `2(n − 2)` reflectors for the Hessenberg form, one from each side;
+/// - `2·itmax·(n − 1)` bulge-chasing transformations, under faer's iteration cap
+///   `itmax = 30·max(10, n)` (`real_schur::lahqr` and `real_schur::multishift_qr`).
+///
+/// The count takes the iteration cap, not the iterations run, so the band is
+/// loose by that ratio.
+fn general_eigen_reduction_band(n: usize) -> f64 {
+    let itmax = 30 * n.max(10);
+    let applications = 2 * n.saturating_sub(2) + 2 * itmax * n.saturating_sub(1);
+    applications as f64 * crate::roundoff::accumulation_growth(n + 2)
+}
+
+/// `(‖A‖_F², tr A, Σ|a_ii|)`.
+fn frobenius_trace_and_diagonal_mass(a: MatRef<'_, f64>) -> (f64, f64, f64) {
+    let n = a.nrows();
+    let (mut frobenius_sq, mut trace, mut diagonal_mass) = (0.0_f64, 0.0_f64, 0.0_f64);
+    for j in 0..n {
+        trace += a[(j, j)];
+        diagonal_mass += a[(j, j)].abs();
+        for i in 0..n {
+            frobenius_sq += a[(i, j)] * a[(i, j)];
+        }
+    }
+    (frobenius_sq, trace, diagonal_mass)
+}
+
+/// Certificate (i) of [`real_general_eigenvalues`]. Conjugate pairs are adjacent
+/// with equal real parts and negated imaginary parts, and every eigenpair's
+/// backward error `‖Av − λv‖₂ / ((‖A‖_F + |λ|)·‖v‖₂)` is within
+/// `η = η_A + 2·γ_{n+1}`. The two `γ_{n+1}` terms charge the eigenvectors'
+/// back-substitution and the residual's formation. `vectors` holds faer's right
+/// eigenvectors: a real eigenvalue's in its own column, and for
+/// `λ = re[i] + i·im[i]` of a conjugate pair, `col(i) + i·col(i + 1)`.
+fn general_eigenpairs_backward_stable(
+    a: MatRef<'_, f64>,
+    re: &Array1<f64>,
+    im: &Array1<f64>,
+    vectors: MatRef<'_, f64>,
+    reduction: f64,
+) -> bool {
+    let n = a.nrows();
+    let (frobenius_sq, _, _) = frobenius_trace_and_diagonal_mass(a);
+    let frobenius = frobenius_sq.sqrt();
+    let eta = reduction + 2.0 * crate::roundoff::accumulation_growth(n + 1);
+    let mut av = Mat::<f64>::zeros(n, n);
+    faer::linalg::matmul::matmul(av.as_mut(), faer::Accum::Replace, a, vectors, 1.0, pool_parallelism());
+    let column_sq = |j: usize| (0..n).map(|k| vectors[(k, j)] * vectors[(k, j)]).sum::<f64>();
+    let mut i = 0;
+    while i < n {
+        if im[i] == 0.0 {
+            let lambda = re[i];
+            let residual_sq: f64 = (0..n).map(|k| (av[(k, i)] - lambda * vectors[(k, i)]).powi(2)).sum();
+            if !(residual_sq.sqrt() <= eta * (frobenius + lambda.abs()) * column_sq(i).sqrt()) {
+                return false;
+            }
+            i += 1;
+        } else {
+            if i + 1 >= n || re[i + 1] != re[i] || im[i + 1] != -im[i] {
+                return false;
+            }
+            // A(x + iy) = (a + ib)(x + iy) is Ax = a·x − b·y and Ay = b·x + a·y.
+            let (real, imag) = (re[i], im[i]);
+            let residual_sq: f64 = (0..n)
+                .map(|k| {
+                    let (x, y) = (vectors[(k, i)], vectors[(k, i + 1)]);
+                    (av[(k, i)] - real * x + imag * y).powi(2) + (av[(k, i + 1)] - imag * x - real * y).powi(2)
+                })
+                .sum();
+            let vector_norm = (column_sq(i) + column_sq(i + 1)).sqrt();
+            if !(residual_sq.sqrt() <= eta * (frobenius + real.hypot(imag)) * vector_norm) {
+                return false;
+            }
+            i += 2;
+        }
+    }
+    true
+}
+
+/// Certificate (ii), the trace, of [`real_general_eigenvalues`]. The computed
+/// spectrum is exactly that of `A + E` with `‖E‖_F ≤ η_A·‖A‖_F`, so
+/// `Σλ = tr A + tr E` with `|tr E| ≤ √n·‖E‖_F`. Both sums are charged their
+/// accumulation bands.
+fn general_spectrum_trace_consistent(a: MatRef<'_, f64>, re: &Array1<f64>, reduction: f64) -> bool {
+    let n = a.nrows();
+    let (frobenius_sq, trace, diagonal_mass) = frobenius_trace_and_diagonal_mass(a);
+    let sum_re: f64 = re.iter().sum();
+    let re_mass: f64 = re.iter().map(|value| value.abs()).sum();
+    let band = (n as f64).sqrt() * reduction * frobenius_sq.sqrt()
+        + crate::roundoff::accumulation_growth(n.saturating_sub(1)) * (diagonal_mass + re_mass);
+    (sum_re - trace).abs() <= band
+}
+
+/// Certificate (ii), Schur's inequality, of [`real_general_eigenvalues`]:
+/// `Σ|λ|² ≤ ‖A + E‖_F² ≤ (1 + η_A)²·‖A‖_F²`. `‖A‖_F²` is charged the rounding of
+/// its `n²` squares and `Σ|λ|²` that of its `2n`. An unconverged slot that
+/// inflates a magnitude breaks it.
+fn general_spectrum_within_schur_bound(
+    a: MatRef<'_, f64>,
+    re: &Array1<f64>,
+    im: &Array1<f64>,
+    reduction: f64,
+) -> bool {
+    use crate::roundoff::accumulation_growth;
+    let n = a.nrows();
+    let (frobenius_sq, _, _) = frobenius_trace_and_diagonal_mass(a);
+    let magnitude_sq: f64 = re.iter().zip(im.iter()).map(|(r, j)| r * r + j * j).sum();
+    magnitude_sq
+        <= (1.0 + reduction).powi(2) * frobenius_sq * (1.0 + accumulation_growth(n * n))
+            + accumulation_growth(2 * n) * magnitude_sq
+}
+
+/// #2627 — the eigenvalues `(re, im)` of a real square matrix at
+/// [`evd_parallelism`], certified after faer returns.
+///
+/// Conjugate pairs are adjacent, the member with the positive imaginary part
+/// first, and a real eigenvalue has `im == 0.0` exactly. Non-finite input is
+/// refused before faer sees it.
+///
+/// **Why it certifies.** faer 0.24's `evd_real` discards the info return of its
+/// Schur QR iteration (`linalg::evd::evd_imp`, mod.rs:1083-1094 in 0.24.0 and
+/// 0.24.4). An iteration that exhausts its cap leaves shift estimates in the
+/// undeflated slots and still returns `Ok(())`, and the iteration itself is
+/// `pub(crate)` in faer. So the helper computes the right eigenvectors internally
+/// and refuses as `GeneralEigen(EvdError::NoConvergence)` unless both hold:
+/// - (i) [`general_eigenpairs_backward_stable`]: every eigenpair's backward error
+///   is within the reduction's counted band [`general_eigen_reduction_band`]
+///   plus the vectors' and the residual's rounding;
+/// - (ii) `Σ re` agrees with `tr A` ([`general_spectrum_trace_consistent`]), and
+///   Schur's inequality `Σ|λ|² ≤ ‖A‖_F²` holds
+///   ([`general_spectrum_within_schur_bound`]), each within its band.
+///
+/// An undeflated slot's residual is O(1) relative, far outside the band.
+///
+/// **Known limit.** A multiplicity error with a correct eigenvalue sum passes
+/// both checks: two slots on one eigenvalue while another is missing.
+///
+/// **faer dependency.** This reads faer's info-discarding `evd_imp`, its
+/// iteration cap, and its conjugate-pair eigenvector convention. Like
+/// [`EVD_DEPLOYMENT_DEGREE`], re-read them whenever faer is bumped.
+pub fn real_general_eigenvalues<S: Data<Elem = f64>>(
+    matrix: &ArrayBase<S, Ix2>,
+) -> Result<(Array1<f64>, Array1<f64>), FaerLinalgError> {
+    let owned = matrix.to_owned();
+    let n = owned.nrows();
+    if n != owned.ncols() {
+        return Err(FaerLinalgError::FactorizationFailed {
+            context: "general eigenvalues: non-square input",
+        });
+    }
+    if n == 0 {
+        return Ok((Array1::zeros(0), Array1::zeros(0)));
+    }
+    if owned.iter().any(|value| !value.is_finite()) {
+        return Err(FaerLinalgError::FactorizationFailed {
+            context: "general eigenvalues: non-finite input",
+        });
+    }
+    // A 1×1 matrix is its own eigenvalue, exactly; there is nothing to reduce.
+    if n == 1 {
+        return Ok((Array1::from_elem(1, owned[[0, 0]]), Array1::zeros(1)));
+    }
+    let view = FaerArrayView::new(&owned);
+    let (re, im, vectors) = catch_unwind(AssertUnwindSafe(|| general_evd(view.as_ref())))
+        .map_err(|_| FaerLinalgError::FactorizationFailed {
+            context: "general eigendecomposition panic boundary",
+        })?
+        .map_err(FaerLinalgError::GeneralEigen)?;
+    let reduction = general_eigen_reduction_band(n);
+    if !(general_eigenpairs_backward_stable(view.as_ref(), &re, &im, vectors.as_ref(), reduction)
+        && general_spectrum_trace_consistent(view.as_ref(), &re, reduction)
+        && general_spectrum_within_schur_bound(view.as_ref(), &re, &im, reduction))
+    {
+        return Err(FaerLinalgError::GeneralEigen(solvers::EvdError::NoConvergence));
+    }
+    let mut im = im;
+    let mut i = 0;
+    while i < n {
+        if im[i] < 0.0 {
+            im[i] = -im[i];
+            im[i + 1] = -im[i + 1];
+        }
+        i += if im[i] == 0.0 { 1 } else { 2 };
+    }
+    Ok((re, im))
+}
+
+/// faer's real eigendecomposition with right eigenvectors, at [`evd_parallelism`].
+fn general_evd(a: MatRef<'_, f64>) -> Result<(Array1<f64>, Array1<f64>, Mat<f64>), solvers::EvdError> {
+    let n = a.nrows();
+    let par = evd_parallelism();
+    let mut re = Diag::<f64>::zeros(n);
+    let mut im = Diag::<f64>::zeros(n);
+    let mut vectors = Mat::<f64>::zeros(n, n);
+    let mut mem = MemBuffer::new(faer::linalg::evd::evd_scratch::<f64>(
+        n,
+        faer::linalg::evd::ComputeEigenvectors::No,
+        faer::linalg::evd::ComputeEigenvectors::Yes,
+        par,
+        Default::default(),
+    ));
+    faer::linalg::evd::evd_real(
+        a,
+        re.as_mut(),
+        im.as_mut(),
+        None,
+        Some(vectors.as_mut()),
+        par,
+        MemStack::new(&mut mem),
+        Default::default(),
+    )?;
+    Ok((diag_to_array(re.as_ref()), diag_to_array(im.as_ref()), vectors))
+}
+
 impl<S: Data<Elem = f64>> FaerEigh for ArrayBase<S, Ix2> {
     fn eigh(&self, side: Side) -> Result<(Array1<f64>, Array2<f64>), FaerLinalgError> {
         fn try_eigh(
@@ -4941,5 +5164,188 @@ mod eigh_ordering_contract_tests {
                 "the two lambda=7 eigenvalues must occupy indices 3..5 contiguously: {values:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod general_eigenvalues_2627_tests {
+    use super::*;
+    use crate::roundoff::accumulation_growth;
+
+    fn hashed_matrix(n: usize, seed: u64) -> Array2<f64> {
+        let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(0x2627_6E1A);
+        Array2::from_shape_fn((n, n), |_| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 11) as f64 / (1_u64 << 53) as f64 - 0.5
+        })
+    }
+
+    fn frobenius(a: &Array2<f64>) -> f64 {
+        a.iter().map(|value| value * value).sum::<f64>().sqrt()
+    }
+
+    /// A normal matrix with a planted spectrum (two rotation–scaling blocks and
+    /// one real eigenvalue) turned by a Householder reflector `Q`. By Bauer–Fike
+    /// on the exact normal `QBQᵀ`, every computed eigenvalue is within
+    /// `‖E‖₂ + ‖F‖₂` of a planted one. `E` is the reduction's backward error, at
+    /// most `η_A·‖A‖_F`. `F` is the rounding of forming `QBQᵀ`, two products of
+    /// `n`-term inner products, at most `γ_{2n+2}·‖A‖_F`.
+    #[test]
+    fn real_general_eigenvalues_recovers_a_planted_rotation_spectrum_2627() {
+        let n = 5;
+        let (r1, t1, r2, t2, real) = (2.0_f64, 0.7_f64, 0.5_f64, 2.1_f64, -1.25_f64);
+        let mut b = Array2::<f64>::zeros((n, n));
+        for (offset, r, t) in [(0_usize, r1, t1), (3_usize, r2, t2)] {
+            b[[offset, offset]] = r * t.cos();
+            b[[offset, offset + 1]] = -r * t.sin();
+            b[[offset + 1, offset]] = r * t.sin();
+            b[[offset + 1, offset + 1]] = r * t.cos();
+        }
+        b[[2, 2]] = real;
+        let v = ndarray::arr1(&[1.0_f64, -2.0, 3.0, -4.0, 5.0]);
+        let vtv = v.dot(&v);
+        let mut q = Array2::<f64>::eye(n);
+        for i in 0..n {
+            for j in 0..n {
+                q[[i, j]] -= 2.0 * v[i] * v[j] / vtv;
+            }
+        }
+        let a = q.dot(&b).dot(&q.t());
+        let (re, im) = real_general_eigenvalues(&a).expect("certified spectrum");
+        let band = (general_eigen_reduction_band(n) + accumulation_growth(2 * n + 2)) * frobenius(&a);
+        let mut planted = vec![(r1 * t1.cos(), r1 * t1.sin()), (real, 0.0), (r2 * t2.cos(), r2 * t2.sin())];
+        let mut i = 0;
+        while i < n {
+            let found = (re[i], im[i]);
+            let position = planted
+                .iter()
+                .position(|&(pr, pi)| (pr - found.0).hypot(pi - found.1) <= band)
+                .unwrap_or_else(|| panic!("eigenvalue {found:?} is within {band:.3e} of no planted one: {planted:?}"));
+            planted.remove(position);
+            i += if im[i] == 0.0 { 1 } else { 2 };
+        }
+        assert!(planted.is_empty(), "planted eigenvalues left unrecovered: {planted:?}");
+    }
+
+    /// The ordering contract on hashed matrices. A conjugate pair is adjacent,
+    /// with equal real parts, negated imaginary parts and the positive member
+    /// first. A real eigenvalue has `im == 0.0` exactly. At least one pair must
+    /// appear across the sweep, or the contract was never exercised.
+    #[test]
+    fn real_general_eigenvalues_orders_conjugate_pairs_positive_first_2627() {
+        let mut pairs = 0_usize;
+        for &n in &[1_usize, 2, 3, 5, 17, 40] {
+            for seed in 0..4_u64 {
+                let a = hashed_matrix(n, seed);
+                let (re, im) = real_general_eigenvalues(&a).expect("certified spectrum");
+                assert_eq!((re.len(), im.len()), (n, n));
+                let mut i = 0;
+                while i < n {
+                    if im[i] == 0.0 {
+                        i += 1;
+                        continue;
+                    }
+                    assert!(im[i] > 0.0, "n={n} seed={seed}: the pair at {i} starts with im {}", im[i]);
+                    assert!(i + 1 < n, "n={n} seed={seed}: a pair member at the last index");
+                    assert_eq!(re[i + 1], re[i], "n={n} seed={seed}: the pair at {i} has unequal real parts");
+                    assert_eq!(im[i + 1], -im[i], "n={n} seed={seed}: the pair at {i} is not conjugate");
+                    pairs += 1;
+                    i += 2;
+                }
+            }
+        }
+        assert!(pairs > 0, "no conjugate pair appeared, so the ordering contract was never exercised");
+    }
+
+    /// Non-finite input is refused before faer sees it, never as faer's
+    /// `NoConvergence`, which would misname the cause.
+    #[test]
+    fn real_general_eigenvalues_refuses_non_finite_input_before_faer_2627() {
+        for poison in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut a = hashed_matrix(4, 7);
+            a[[2, 1]] = poison;
+            match real_general_eigenvalues(&a) {
+                Err(FaerLinalgError::FactorizationFailed { context }) => {
+                    assert!(context.contains("non-finite"), "refused for another reason: {context}")
+                }
+                other => panic!("{poison} input must be refused before faer: {other:?}"),
+            }
+        }
+    }
+
+    /// Each certificate arm refuses output it cannot vouch for, for its own
+    /// reason. faer's converged output on a hashed matrix passes every arm; that
+    /// is the negative control. Then:
+    /// - arm (i): the leading eigenvalue (both members if it is a pair, so the pair
+    ///   stays conjugate) moved by `10⁶·η·(‖A‖_F + |λ|)` fails the backward-error
+    ///   arm. An unconverged slot must meet that refusal;
+    /// - arm (i): a pair broken off conjugacy fails it;
+    /// - arm (ii): `Σ re` moved by `‖A‖_F` fails the trace arm;
+    /// - arm (ii): two real parts moved by `±s` with `s = 4‖A‖_F` keep the trace
+    ///   and fail Schur's inequality. `(λ_k + s)² + (λ_j − s)² − λ_k² − λ_j²` is at
+    ///   least `2s(s − |λ_k − λ_j|)`, which is at least `2s(s − 2‖A‖_F) = 16‖A‖_F²`.
+    #[test]
+    fn general_eigen_certificate_arms_refuse_corrupted_spectra_2627() {
+        let n = 12;
+        let a = hashed_matrix(n, 3);
+        let view = FaerArrayView::new(&a);
+        let (re, im, vectors) = general_evd(view.as_ref()).expect("faer eigendecomposition");
+        let reduction = general_eigen_reduction_band(n);
+        assert!(general_eigenpairs_backward_stable(view.as_ref(), &re, &im, vectors.as_ref(), reduction));
+        assert!(general_spectrum_trace_consistent(view.as_ref(), &re, reduction));
+        assert!(general_spectrum_within_schur_bound(view.as_ref(), &re, &im, reduction));
+        let scale = frobenius(&a);
+        let eta = reduction + 2.0 * accumulation_growth(n + 1);
+
+        let shift = 1.0e6 * eta * (scale + re[0].hypot(im[0]));
+        let mut moved = re.clone();
+        moved[0] += shift;
+        if im[0] != 0.0 {
+            moved[1] += shift;
+        }
+        assert!(
+            !general_eigenpairs_backward_stable(view.as_ref(), &moved, &im, vectors.as_ref(), reduction),
+            "an eigenvalue moved by {shift:.3e} must fail the backward-error arm"
+        );
+
+        let mut first_pair = None;
+        let mut i = 0;
+        while i < n {
+            if im[i] == 0.0 {
+                i += 1;
+            } else {
+                first_pair = Some(i);
+                break;
+            }
+        }
+        let k = first_pair.expect("the hashed 12×12 matrix has a conjugate pair");
+        let mut broken = im.clone();
+        broken[k + 1] *= 0.5;
+        assert!(
+            !general_eigenpairs_backward_stable(view.as_ref(), &re, &broken, vectors.as_ref(), reduction),
+            "a pair broken off conjugacy must fail the backward-error arm"
+        );
+
+        let mut off_trace = re.clone();
+        off_trace[0] += scale;
+        assert!(
+            !general_spectrum_trace_consistent(view.as_ref(), &off_trace, reduction),
+            "a spectrum whose sum is off the trace by ‖A‖_F must fail the trace arm"
+        );
+
+        let s = 4.0 * scale;
+        let mut inflated = re.clone();
+        inflated[0] += s;
+        inflated[1] -= s;
+        assert!(
+            general_spectrum_trace_consistent(view.as_ref(), &inflated, reduction),
+            "the inflation keeps the trace, so only Schur's inequality may refuse it"
+        );
+        assert!(
+            !general_spectrum_within_schur_bound(view.as_ref(), &inflated, &im, reduction),
+            "real parts moved by ±{s:.3e} must fail Schur's inequality"
+        );
     }
 }
