@@ -1490,7 +1490,23 @@ fn seam_equivalence_log_e(
         pool_acc += point_null_sq(points_b.row(i));
     }
     let pool_sq = pool_acc / (n_est as f64 * p as f64);
-    if !(pool_sq.is_finite() && pool_sq > 0.0) {
+    // Each deviation `pt − μ` rounds by at most `γ_{n_est+2}` of `|pt| + |μ|` (the
+    // centroid's accumulation, its division and the subtraction), so a pooled scatter
+    // inside the mean square of that band cannot be told from zero. Two charts that
+    // decode one point leave exactly such debris, and it must not become the
+    // reference-null scale an e-value is scored against.
+    let deviation_growth = gam_linalg::roundoff::accumulation_growth(n_est + 2);
+    let mut pool_resolution_acc = 0.0_f64;
+    for (points, est) in [(points_a, &a_est), (points_b, &b_est)] {
+        for &i in est {
+            for c in 0..p {
+                let band = deviation_growth * (points[[i, c]].abs() + mu[c].abs());
+                pool_resolution_acc += band * band;
+            }
+        }
+    }
+    let pool_resolution = pool_resolution_acc / (n_est as f64 * p as f64);
+    if !(pool_sq.is_finite() && pool_sq > pool_resolution) {
         return None;
     }
 
