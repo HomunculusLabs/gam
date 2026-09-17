@@ -5648,6 +5648,13 @@ impl ManifoldSaeCore {
             .map(|block| manifold_sae_owned2(block))
             .collect::<PyResult<Vec<_>>>()?;
         let coord_views = coords.iter().map(|block| block.view()).collect::<Vec<_>>();
+        let decoders = self
+            .inner
+            .decoder_blocks
+            .iter()
+            .map(|block| manifold_sae_owned2(block))
+            .collect::<PyResult<Vec<_>>>()?;
+        let decoder_views = decoders.iter().map(|block| block.view()).collect::<Vec<_>>();
         // A declared precision prices every stored scalar at that width. Without
         // one, the decoder is quantized against its own effect on the output.
         let dictionary = match l_param_bits {
@@ -5671,13 +5678,6 @@ impl ManifoldSaeCore {
                 }
             }
             None => {
-                let decoders = self
-                    .inner
-                    .decoder_blocks
-                    .iter()
-                    .map(|block| manifold_sae_owned2(block))
-                    .collect::<PyResult<Vec<_>>>()?;
-                let decoder_views = decoders.iter().map(|block| block.view()).collect::<Vec<_>>();
                 let output_side_scalars = self.inner.training_mean.len()
                     + self.inner.tier0_scale.as_ref().map_or(0, Vec::len);
                 gam::terms::sae::description_length::persisted_decoder_dictionary_code(
@@ -5690,12 +5690,21 @@ impl ManifoldSaeCore {
                 .map_err(py_value_error)?
             }
         };
-        manifold_description_length_from_arrays(
-            assignments.view(),
-            &coord_views,
-            self.inner.reconstruction_r2,
-            &dictionary,
-            1.0e-8,
+        gam::terms::sae::description_length::native_manifold_description_length(
+            gam::terms::sae::description_length::NativeDescriptionLengthRequest {
+                assignments: assignments.view(),
+                geometry_plans: &self.inner.geometry_plans,
+                decoder_blocks: &decoder_views,
+                coords: &coord_views,
+                tier0_scale: self
+                    .inner
+                    .tier0_scale
+                    .as_deref()
+                    .map(ndarray::ArrayView1::from),
+                ev: self.inner.reconstruction_r2,
+                dictionary: &dictionary,
+                active_threshold: 1.0e-8,
+            },
         )
         .map(Some)
         .map_err(py_value_error)

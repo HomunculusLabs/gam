@@ -13,11 +13,13 @@
 //! experiments/mdl_ladder/mdl.py` reference: the rate-distortion primitives, the
 //! closed-form curved-birth pre-screen ([`predicted_birth_dl_bits`]), matched
 //! curved-vs-flat description lengths ([`matched_dl`]), and the fit-level
-//! [`manifold_fit_description_length`].
+//! [`manifold_fit_description_length`] with its persisted-artifact entry
+//! [`native_manifold_description_length`].
 
 use crate::atom_codes::SparseAtomCodes;
 use crate::manifold::SaeAtomGeometryPlan;
-use ndarray::ArrayView2;
+use crate::native_code_source::native_active_code_sources;
+use ndarray::{ArrayView1, ArrayView2};
 
 /// Bits to code one Gaussian scalar of variance `signal_var` to per-sample MSE
 /// `delta2`: the Gaussian rate-distortion law
@@ -976,6 +978,121 @@ pub fn manifold_fit_description_length(
         total_bits,
         bits_per_token: total_bits / n,
     })
+}
+
+/// Everything the native fit-level description length reads off a persisted
+/// manifold-SAE artifact.
+pub struct NativeDescriptionLengthRequest<'a> {
+    /// `(N, K)` gates. An atom is transmitted on a row when its gate magnitude
+    /// clears `active_threshold`.
+    pub assignments: ArrayView2<'a, f64>,
+    /// One persisted geometry plan per atom.
+    pub geometry_plans: &'a [SaeAtomGeometryPlan],
+    /// One physical-frame `M_k × P` decoder per atom.
+    pub decoder_blocks: &'a [ArrayView2<'a, f64>],
+    /// One `(N, latent_dim_k)` coordinate block per atom.
+    pub coords: &'a [ArrayView2<'a, f64>],
+    /// The per-channel standardization the fit's `ev` was measured under.
+    pub tier0_scale: Option<ArrayView1<'a, f64>>,
+    /// The fit's explained variance.
+    pub ev: f64,
+    /// The decoder message.
+    pub dictionary: &'a DictionaryCode,
+    /// Gate magnitude above which an atom is transmitted.
+    pub active_threshold: f64,
+}
+
+/// The fit-level [`ManifoldFitDl`] of a persisted manifold-SAE artifact (#2933
+/// F11, F12).
+///
+/// The transmitted support is read off the gates. Each atom's code spectrum is
+/// its conditional active-code source in the output metric
+/// ([`native_active_code_sources`]): moments over the rows where the atom
+/// fires, whitened by the mean pullback metric of its gated decoder. The budget
+/// `D = (1 − ev)·Σ_k p_k Σ_j λ_kj` leaves the transmitted codes the same relative
+/// output fidelity the fit leaves unexplained, measured in their own decoded
+/// variance, and the ledger is [`manifold_fit_description_length`].
+pub fn native_manifold_description_length(
+    request: NativeDescriptionLengthRequest<'_>,
+) -> Result<ManifoldFitDl, String> {
+    let NativeDescriptionLengthRequest {
+        assignments,
+        geometry_plans,
+        decoder_blocks,
+        coords,
+        tier0_scale,
+        ev,
+        dictionary,
+        active_threshold,
+    } = request;
+    let (n_obs, k_atoms) = assignments.dim();
+    if coords.len() != k_atoms {
+        return Err(format!(
+            "manifold description length expected {k_atoms} coordinate blocks, got {}",
+            coords.len()
+        ));
+    }
+    if !active_threshold.is_finite() || active_threshold < 0.0 {
+        return Err(format!(
+            "manifold description length active_threshold must be finite and non-negative; got {active_threshold}"
+        ));
+    }
+    // EV = 1 − RSS/TSS is negative on a poor held-out fit, which is valid, but
+    // it never exceeds one: a larger value would create a negative budget.
+    if !ev.is_finite() || ev > 1.0 {
+        return Err(format!(
+            "manifold description length ev must be finite and at most one; got {ev}"
+        ));
+    }
+    if let Some(((row, atom), gate)) = assignments
+        .indexed_iter()
+        .find(|(_, gate)| !gate.is_finite())
+    {
+        return Err(format!(
+            "manifold description length assignments[{row}, {atom}] must be finite; got {gate}"
+        ));
+    }
+    for (atom, block) in coords.iter().enumerate() {
+        if block.nrows() != n_obs {
+            return Err(format!(
+                "manifold description length coords[{atom}] has {} rows, expected {n_obs}",
+                block.nrows()
+            ));
+        }
+        if let Some(((row, axis), value)) = block
+            .indexed_iter()
+            .find(|(_, value)| !value.is_finite())
+        {
+            return Err(format!(
+                "manifold description length coords[{atom}][{row}, {axis}] must be finite; got {value}"
+            ));
+        }
+    }
+
+    let mut codes = SparseAtomCodes::empty(n_obs, k_atoms);
+    for row in 0..n_obs {
+        for atom in 0..k_atoms {
+            let gate = assignments[[row, atom]];
+            if gate.abs() > active_threshold {
+                codes.row_mut(row).assign(atom, gate);
+            }
+        }
+    }
+    let sources =
+        native_active_code_sources(&codes, geometry_plans, decoder_blocks, coords, tier0_scale)?;
+    let atom_code_spectra: Vec<Vec<f64>> = sources
+        .iter()
+        .map(|source| source.output_spectrum.clone())
+        .collect();
+    let decoded_code_variance: f64 = sources
+        .iter()
+        .map(|source| source.firing_probability * source.output_spectrum.iter().sum::<f64>())
+        .sum();
+    // A reconstruction with ev = 1 leaves no distortion, and the water-filling
+    // rate of a continuous coordinate at zero distortion is infinite: that is its
+    // description length, not a value to floor away.
+    let distortion_budget = (1.0 - ev) * decoded_code_variance;
+    manifold_fit_description_length(&codes, &atom_code_spectra, distortion_budget, ev, dictionary)
 }
 
 #[cfg(test)]

@@ -29,6 +29,7 @@ pub mod inference;
 pub mod k_selection;
 pub mod manifold;
 pub mod migration_ledger;
+pub mod native_code_source;
 pub mod null_battery;
 pub mod null_sampler;
 pub mod routability;
