@@ -53,11 +53,16 @@
 //! - A claimed bound is refuted only by a witness mask exceeding it beyond that band, and it is
 //!   certified only when the supremum plus the band is at or below it.
 //! - Mask-law moments are expectations under a declared law. They are never bounds.
+//! - A supremum over masks is reported as [`MaskEvidence`], the shared evidence status: `Exact` by
+//!   the algebraic identity `max(h(u), h(−u))`, with the band as its numerical error and an
+//!   endpoint mask as its witness.
 
 use std::cmp::Ordering;
 
 use gam_linalg::roundoff::{UNIT_ROUNDOFF, accumulation_band, accumulation_growth};
 use ndarray::Array1;
+
+use super::supports::{EvidenceStatus, EvidenceStatusError, ExactBasis};
 
 /// One moment coordinate space: the coefficient space of one edited tensor use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,6 +137,8 @@ pub enum MomentGeometryError {
     CoordinateOutOfRange { coordinate: MomentCoordinate },
     RepeatedPlaneCoordinate { coordinate: MomentCoordinate },
     NonFiniteClaim { claimed: f64 },
+    /// The shared evidence-status constructor refused a value, e.g. a support that overflowed.
+    Evidence(EvidenceStatusError),
 }
 
 /// The declared product mask domain `m_c ∈ [lower_c, upper_c]`, one interval per control.
@@ -290,6 +297,17 @@ pub enum ClaimedBoundCheck {
     /// The claim lies inside the supremum's band.
     Unresolved { supremum: f64, band: f64 },
 }
+
+/// The declared mask domain with its kept set: the region an extremum over masks is stated over.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdmissibleMasks {
+    pub domain: MaskDomain,
+    /// `kept[c]` pins control `c` at all-on.
+    pub kept: Vec<bool>,
+}
+
+/// What a reported extremum over the admissible masks may mean, with an endpoint mask as its witness.
+pub type MaskEvidence = EvidenceStatus<Vec<WitnessEndpoint>, AdmissibleMasks>;
 
 /// Controls merged by positive collinear refinement (#2951 P10).
 #[derive(Clone, Debug, PartialEq)]
@@ -471,10 +489,24 @@ impl MaskMomentSystem {
         Ok(larger)
     }
 
-    /// Checks a claimed bound on `sup |⟨u, q⟩|` against the certified supremum (#2951 A6).
+    /// `sup |⟨u, q⟩|` over the admissible masks as shared evidence: `Exact` by the algebraic identity
+    /// `max(h(u), h(−u))`, with the band as its numerical error and the larger side's witness.
+    pub fn absolute_supremum_status(
+        &self,
+        domain: &MaskDomain,
+        kept: &[bool],
+        direction: &MomentVector,
+    ) -> Result<MaskEvidence, MomentGeometryError> {
+        let supremum = self.absolute_supremum(domain, kept, direction)?;
+        supremum_status(domain, kept, &supremum)
+    }
+
+    /// Checks a claimed bound on `sup |⟨u, q⟩|` against
+    /// [`MaskMomentSystem::absolute_supremum_status`] (#2951 A6).
     ///
-    /// When the supremum exceeds the claim beyond the band, the witness mask refutes it. That
-    /// includes an expectation under a mask law presented as a bound.
+    /// The claim is refuted when the status's lower bound exceeds it, since the witness mask
+    /// attains at least that lower bound. It is certified when the status's upper bound is at most
+    /// the claim. An expectation under a mask law presented as a bound is refuted this way.
     pub fn check_claimed_absolute_bound(
         &self,
         domain: &MaskDomain,
@@ -486,13 +518,14 @@ impl MaskMomentSystem {
             return Err(MomentGeometryError::NonFiniteClaim { claimed });
         }
         let supremum = self.absolute_supremum(domain, kept, direction)?;
-        Ok(if supremum.value - supremum.band > claimed {
+        let status = supremum_status(domain, kept, &supremum)?;
+        Ok(if status.refutes_at_most(claimed) {
             ClaimedBoundCheck::Refuted {
                 attained: supremum.value,
                 band: supremum.band,
                 witness: supremum.witness,
             }
-        } else if supremum.value + supremum.band <= claimed {
+        } else if status.certifies_at_most(claimed) {
             ClaimedBoundCheck::Certified {
                 supremum: supremum.value,
                 band: supremum.band,
@@ -746,6 +779,25 @@ impl MaskMomentSystem {
         }
         (product, accumulation_band(terms, absolute))
     }
+}
+
+/// The exact algebraic status of a computed supremum over the admissible masks.
+fn supremum_status(
+    domain: &MaskDomain,
+    kept: &[bool],
+    supremum: &SupportEvaluation,
+) -> Result<MaskEvidence, MomentGeometryError> {
+    EvidenceStatus::exact(
+        supremum.value,
+        supremum.band,
+        ExactBasis::Algebraic,
+        Some(supremum.witness.clone()),
+        AdmissibleMasks {
+            domain: domain.clone(),
+            kept: kept.to_vec(),
+        },
+    )
+    .map_err(MomentGeometryError::Evidence)
 }
 
 /// The planar zonotope boundary from each control's projected generator.
@@ -1375,11 +1427,20 @@ mod tests {
                 }
                 other => panic!("an average claimed as a bound must be refuted, got {other:?}"),
             }
-            // Negative control: the supremum plus its band is certified, and the bare supremum sits
+            // The shared status carries the same supremum: it refutes the root mean square, bounds the
+            // supremum on both sides by the band, and carries the witness.
+            let status = system
+                .absolute_supremum_status(&domain, &kept, &direction)
+                .expect("finite support");
+            let upper = status.upper_bound().expect("an exact status bounds its extremum");
+            assert!(upper > 1.0 && status.lower_bound().is_some_and(|lower| lower < 1.0));
+            assert!(status.refutes_at_most(law.mean_square.sqrt()) && status.certifies_at_most(upper));
+            assert_eq!(status.witness(), Some(&supremum.witness));
+            // Negative control: the status's rounded-up upper bound is certified, and the bare supremum sits
             // inside the band.
             assert_eq!(
                 system
-                    .check_claimed_absolute_bound(&domain, &kept, &direction, supremum.value + supremum.band)
+                    .check_claimed_absolute_bound(&domain, &kept, &direction, upper)
                     .expect("finite claim"),
                 ClaimedBoundCheck::Certified {
                     supremum: 1.0,
