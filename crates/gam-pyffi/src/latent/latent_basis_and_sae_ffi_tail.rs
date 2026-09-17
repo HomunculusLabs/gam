@@ -1,6 +1,6 @@
 /// One-shot SAE-manifold fit driver: takes only `(z, atom_basis, atom_dim,
 /// ...scalar hyperparams)` and assembles the full basis + jacobian + penalty
-/// stack + PCA seed coords + zero-init decoder + zero-init logits internally
+/// stack + PCA seed coords + least-squares decoder seed + jittered routing logits internally
 /// before delegating to the same end-to-end Rust Newton loop as
 /// the native fit orchestration. Returns the raw native fit payload with
 /// `"geometry_plans"`, holding each validated atom geometry so OOS prediction can

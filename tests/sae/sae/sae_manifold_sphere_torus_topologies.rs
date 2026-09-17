@@ -58,6 +58,9 @@ fn fit_single_atom(
     .expect("assignment construction");
     let mut term = SaeManifoldTerm::new(vec![atom], assignment).expect("term construction");
     let mut rho = SaeManifoldRho::new(0.0, -4.0, vec![Array1::<f64>::zeros(ard_axes)]);
+    // #2822 — the data least-squares decoder at the supplied chart; an entry refuses a zero decoder.
+    term.refit_decoder_least_squares_at_current_state(z.view(), Some(&rho))
+        .expect("the planted signal spans a nonzero least-squares decoder");
     let ridge = 1.0e-6;
     for _ in 0..max_outer {
         let loss = term
@@ -220,6 +223,9 @@ fn k2_periodic_atoms_recover_torus_signal() {
     .expect("assignment construction");
     let mut term = SaeManifoldTerm::new(atoms, assignment).expect("term construction");
     let mut rho = SaeManifoldRho::new(0.0, -4.0, vec![Array1::<f64>::zeros(1); k]);
+    // #2822 — the data least-squares decoders at the initial charts; an entry refuses a zero decoder.
+    term.refit_decoder_least_squares_at_current_state(z.view(), Some(&rho))
+        .expect("the planted torus signal spans nonzero least-squares decoders");
     let ridge = 1.0e-6;
     let mut prev = f64::INFINITY;
     for _ in 0..40 {

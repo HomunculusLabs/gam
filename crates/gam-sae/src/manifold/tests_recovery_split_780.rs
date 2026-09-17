@@ -79,6 +79,9 @@ pub(crate) fn sae_torus_atom_recovers_two_frequency_synthetic() {
     // the validation in `negative_log_ard_prior` (`ARD rho atom k has
     // len ... but atom dim is d`).
     let mut rho = SaeManifoldRho::new(0.0, -4.0, vec![Array1::<f64>::zeros(d)]);
+    // #2822 — the data least-squares decoder at the planted chart; an entry refuses a zero decoder.
+    term.refit_decoder_least_squares_at_current_state(z.view(), Some(&rho))
+        .unwrap();
     let ridge = 1.0e-6;
     for _ in 0..10 {
         let loss = term
@@ -160,6 +163,9 @@ pub(crate) fn sae_sphere_atom_recovers_synthetic_signal() {
     // indexed out of bounds in the per-axis assembly loop and is rejected by
     // the per-axis ARD contract.
     let mut rho = SaeManifoldRho::new(0.0, -4.0, vec![Array1::<f64>::zeros(3)]);
+    // #2822 — the data least-squares decoder at the planted chart; an entry refuses a zero decoder.
+    term.refit_decoder_least_squares_at_current_state(z.view(), Some(&rho))
+        .unwrap();
     let ridge = 1.0e-6;
     for _ in 0..10 {
         let loss = term
@@ -230,6 +236,9 @@ pub(crate) fn sae_manifold_fit_10_steps_one_harmonic_reaches_high_r2() {
     .unwrap();
     let mut term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
     let mut rho = SaeManifoldRho::new(0.0, -6.0, vec![Array1::<f64>::zeros(1)]);
+    // #2822 — the data least-squares decoder at the seeded chart; an entry refuses a zero decoder.
+    term.refit_decoder_least_squares_at_current_state(z.view(), Some(&rho))
+        .unwrap();
 
     let max_iter = 10usize;
     let learning_rate = 1.0;

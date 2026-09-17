@@ -56,8 +56,11 @@ pub(crate) fn euclidean_line_contract_fixture() -> (SaeManifoldTerm, Array2<f64>
         AssignmentMode::softmax(1.0),
     )
     .expect("assignment");
-    let term = SaeManifoldTerm::new(vec![atom], assignment).expect("term");
+    let mut term = SaeManifoldTerm::new(vec![atom], assignment).expect("term");
     let rho = SaeManifoldRho::new(0.0, (0.01_f64).ln(), vec![Array1::<f64>::zeros(1)]);
+    // #2822 — the data least-squares decoder at the fixture's chart; an entry refuses a zero decoder.
+    term.refit_decoder_least_squares_at_current_state(z.view(), Some(&rho))
+        .expect("the planted line spans a nonzero least-squares decoder");
     (term, z, rho)
 }
 
@@ -981,6 +984,9 @@ fn sae_1026_curved_beats_linear_reconstruction_through_solver() {
         let mut term = SaeManifoldTerm::new(vec![atom], assignment)
             .expect("fixture term: every atom's basis width matches its assignment block");
         let mut rho = SaeManifoldRho::new(0.0, 0.8_f64.ln(), vec![Array1::<f64>::zeros(1)]);
+        // #2822 — the data least-squares decoder at this chart; an entry refuses a zero decoder.
+        term.refit_decoder_least_squares_at_current_state(target.view(), Some(&rho))
+            .expect("the circle target spans a nonzero least-squares linear decoder");
         term.run_joint_fit_arrow_schur(target.view(), &mut rho, None, 12, 0.1, 1.0e-4, 1.0e-4)
             .expect("linear inner solve converges");
         let fitted = term
@@ -1085,6 +1091,9 @@ fn sae_1026_solver_recovers_separable_superposition_but_not_below_2k() {
             0.01_f64.ln(),
             vec![array![1.0_f64.ln()], array![1.0_f64.ln()]],
         );
+        // #2822 — the data least-squares decoders at the seeded charts; an entry refuses a zero decoder.
+        term.refit_decoder_least_squares_at_current_state(target.view(), Some(&rho))
+            .expect("the superposed circles span nonzero least-squares decoders");
         term.run_joint_fit_arrow_schur(target.view(), &mut rho, None, 24, 0.1, 1.0e-4, 1.0e-4)
             .expect("K=2 inner solve converges");
         let fitted = term

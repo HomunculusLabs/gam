@@ -3156,10 +3156,34 @@ impl SaeManifoldTerm {
     /// entry that builds a criterion over a supplied state runs it first: the native stage
     /// objectives, `run_sae_manifold_certify`, and the crosscoder fit. The zero-iteration freeze
     /// skips it on the assumption that it already ran, so a route that bypassed it would price
-    /// the full-width border instead of the prepared one.
+    /// the full-width border instead of the prepared one. It first refuses an atom whose decoder
+    /// is identically zero (#2822).
     pub(crate) fn prepare_entry_stages(&mut self) -> Result<(), String> {
+        self.refuse_identically_zero_decoders()?;
         self.reduce_atoms_to_data_supported_rank()?;
         self.ensure_decoder_frames_active_for_current_decoder()
+    }
+
+    /// #2822 — an entry refuses an atom whose decoder is identically zero. Such a decoder has no
+    /// column space: the atom's coordinates receive exactly zero gradient, and the decoder-frame
+    /// stage has no data-supported frame to install. On small_n's zero-seeded fixture (lane probe
+    /// g5m, job 1150258) the coordinate gradient was exactly 0 while the decoder gradient was 63.7,
+    /// and frame activation collapsed the 72-wide border to 3. Only exact zero is refused: any
+    /// nonzero coefficient spans a direction.
+    fn refuse_identically_zero_decoders(&self) -> Result<(), String> {
+        for (atom_idx, atom) in self.atoms.iter().enumerate() {
+            let decoder = atom.decoder_coefficients();
+            if !decoder.is_empty() && decoder.iter().all(|value| *value == 0.0) {
+                return Err(format!(
+                    "SaeManifoldTerm::prepare_entry_stages: atom {atom_idx} '{}' has an identically zero \
+                     decoder. It has no column space, so its coordinates receive no gradient and there is \
+                     no data-supported decoder frame to install; seed the decoder from the data \
+                     (build_sae_minimal_seed, or refit_decoder_least_squares_at_current_state)",
+                    atom.name
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Reconcile decoder-frame activation before a fit entry point. The

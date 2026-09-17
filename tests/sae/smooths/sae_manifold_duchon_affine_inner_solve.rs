@@ -100,6 +100,9 @@ fn fit_euclidean_curve(kind: CurveKind) -> f64 {
     .expect("assignment");
     let mut term = SaeManifoldTerm::new(vec![atom], assignment).expect("term");
     let mut rho = SaeManifoldRho::new(0.0, (0.01_f64).ln(), vec![Array1::<f64>::zeros(1)]);
+    // #2822 — the data least-squares decoder at the fixture's chart; an entry refuses a zero decoder.
+    term.refit_decoder_least_squares_at_current_state(z.view(), Some(&rho))
+        .expect("the planted curve spans a nonzero least-squares decoder");
     let ridge = 1.0e-6;
     let loss = term
         .run_joint_fit_arrow_schur(z.view(), &mut rho, None, 96, 1.0, ridge, ridge)

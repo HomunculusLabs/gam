@@ -89,6 +89,9 @@ fn sae_manifold_p_greater_than_d_does_not_panic() {
 
     let mut term = SaeManifoldTerm::new(vec![atom], assignment).expect("term construction");
     let mut rho = SaeManifoldRho::new(0.0, -4.0, vec![Array1::<f64>::zeros(1)]);
+    // #2822 — the data least-squares decoder at the planted chart; an entry refuses a zero decoder.
+    term.refit_decoder_least_squares_at_current_state(z.view(), Some(&rho))
+        .expect("the planted signal spans a nonzero least-squares decoder");
     let ridge = 1.0e-6;
 
     // 20 Newton iterations is more than enough; pre-fix the first step aborts.

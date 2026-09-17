@@ -1745,3 +1745,31 @@ mod learned_frame_shape_covariance_2933_f35_tests {
         assert_integrates_learned_frames_2933_f35(&shape);
     }
 }
+
+mod tests_zero_decoder_entry_2822 {
+    use crate::manifold::tests::trivial_k1_euclidean_term;
+
+    /// #2822 — an entry refuses an identically zero decoder and names the atom.
+    #[test]
+    fn identically_zero_decoder_is_refused_at_entry_naming_the_atom_2822() {
+        let mut term = trivial_k1_euclidean_term();
+        let refusal = term.prepare_entry_stages();
+        assert!(
+            matches!(&refusal, Err(message) if message.contains("atom 0 'atom0'")
+                && message.contains("identically zero decoder")),
+            "an identically zero decoder must be refused at entry, naming the atom: {refusal:?}"
+        );
+    }
+
+    /// #2822 — only exact zero is refused: a nonzero decoder, however small, spans a direction.
+    #[test]
+    fn nonzero_near_zero_decoder_is_admitted_at_entry_2822() {
+        let mut term = trivial_k1_euclidean_term();
+        term.atoms[0].decoder_coefficients_mut().fill(1.0e-300);
+        let admitted = term.prepare_entry_stages();
+        assert!(
+            admitted.is_ok(),
+            "a 1e-300 decoder is not identically zero, so the entry must admit it: {admitted:?}"
+        );
+    }
+}
