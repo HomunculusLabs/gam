@@ -1,4 +1,4 @@
-//! Fidelity bounds with explicit evidence status (#2951 P14, P15).
+//! Fidelity bounds with explicit evidence status, and conservation conditioning (#2951 P14, P15, P17).
 //!
 //! Every function here returns an [`EvidenceStatus`] and never a stronger one than it proved. A certificate is
 //! reported with the region it holds over, and a claim whose hypotheses fail is reported as unresolved rather than as a
@@ -28,11 +28,29 @@
 //! trajectories stay inside every stage's certificate. [`certify_kl_over_input_ball`] asks [`whole_set_containment`]
 //! for that over a declared ball and converts the gap bound through P15. When containment fails no upper bound is
 //! derived, and the result is [`EvidenceStatus::Unresolved`] with `KL ≥ 0` as its only side.
+//!
+//! # P17, conservation conditioning
+//!
+//! A conditionally Gaussian coefficient block `b ~ N(0, Q⁻¹)` conditioned on the exact conservation constraint `Ab = y`
+//! has `μ = Q⁻¹AᵀV⁻¹y` and `Σ = Q⁻¹ − Q⁻¹AᵀV⁻¹AQ⁻¹` with `V = AQ⁻¹Aᵀ`, and model comparison pays
+//! `−log p(y) = ½(yᵀV⁻¹y + log|V| + n·log 2π)`. fr-reuse's [`condition_on_exact_constraint`] is the one evaluator, and
+//! [`condition_on_conservation`] keeps its result together with the constraint it was computed in. This applies only to
+//! conditionally Gaussian blocks: `B ↦ F_{Θ_m}(x)` is nonlinear, so nothing is marginalized through the network.
+//!
+//! The evidence is a density in the constraint's own coordinates (mpd-verify, #2951 comment 5716934168). Re-expressing
+//! the constraint as `TAb = Ty` with invertible `T` leaves `μ` and `Σ` unchanged but sends `V` to `TVTᵀ` while `yᵀV⁻¹y`
+//! stays invariant, so `−log p(y)` moves by exactly `log|det T|`. [`compare_conservation_evidence`] therefore refuses two
+//! evidences whose constraint representations differ. Comparing different constraint sets needs a declared base measure,
+//! which this module does not invent. Scope: `Q ≻ 0`, `A` of full row rank (refused otherwise, never jittered), and prior
+//! mean 0; a nonzero prior mean `μ₀` enters as `y − Aμ₀`.
 
 use std::fmt;
 
 use gam_linalg::roundoff::accumulation_growth;
-use ndarray::ArrayView1;
+use gam_solve::gaussian_marginal::{
+    ExactConstraintPosterior, GaussianMarginalError, condition_on_exact_constraint,
+};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 use super::supports::{EvidenceStatus, EvidenceStatusError, Extremum};
 use crate::inference::contracts::{Contract, whole_set_containment};
@@ -73,13 +91,17 @@ pub enum KlBoundRegion {
     },
 }
 
-/// Why a bound could not be evaluated.
-#[derive(Clone, Debug, PartialEq)]
+/// Why a bound or a conditioning could not be evaluated.
+#[derive(Debug, PartialEq)]
 pub enum BoundError {
     /// A shape, finiteness or sign requirement failed.
     InvalidInput(String),
     /// The evidence constructor refused the computed values.
     Evidence(EvidenceStatusError),
+    /// fr-reuse refused the exact conditioning: an improper prior, a rank-deficient constraint or a failed certificate.
+    GaussianMarginal(GaussianMarginalError),
+    /// Two evidences are densities in different constraint coordinates, so they share no base measure.
+    ConstraintRepresentationMismatch,
 }
 
 impl fmt::Display for BoundError {
@@ -87,6 +109,11 @@ impl fmt::Display for BoundError {
         match self {
             Self::InvalidInput(message) => f.write_str(message),
             Self::Evidence(error) => write!(f, "fidelity bound: {error}"),
+            Self::GaussianMarginal(error) => write!(f, "conservation conditioning: {error}"),
+            Self::ConstraintRepresentationMismatch => f.write_str(
+                "the two evidences were computed in different constraint representations; re-expressing a constraint \
+                 as TAb = Ty moves its evidence by log|det T|, so comparing them needs a declared base measure",
+            ),
         }
     }
 }
@@ -212,12 +239,87 @@ fn kl_upper_from_gap(gap: f64, norm: LogitGapNorm) -> f64 {
     }
 }
 
+/// P17: a conditionally Gaussian coefficient block `b ~ N(0, Q⁻¹)` conditioned on the exact conservation constraint
+/// `Ab = y`, kept together with the constraint representation its evidence is a density in.
+#[derive(Clone, Debug)]
+pub struct ConservationConditioning {
+    posterior: ExactConstraintPosterior,
+    constraint: Array2<f64>,
+    value: Array1<f64>,
+}
+
+impl ConservationConditioning {
+    /// The conditioned posterior: `E[b | Ab = y] = Q⁻¹AᵀV⁻¹y` and `Cov[b | Ab = y] = Q⁻¹ − Q⁻¹AᵀV⁻¹AQ⁻¹`.
+    pub fn posterior(&self) -> &ExactConstraintPosterior {
+        &self.posterior
+    }
+
+    /// The rows `A` whose coordinates the evidence is a density in.
+    pub fn constraint(&self) -> ArrayView2<'_, f64> {
+        self.constraint.view()
+    }
+
+    /// The conserved values `y`.
+    pub fn value(&self) -> ArrayView1<'_, f64> {
+        self.value.view()
+    }
+
+    /// `−log p(y) = ½(yᵀV⁻¹y + log|V| + n·log 2π)` with `V = AQ⁻¹Aᵀ`, in the coordinates of
+    /// [`constraint`](Self::constraint).
+    pub fn negative_log_evidence(&self) -> f64 {
+        -self.posterior.evidence().log_evidence()
+    }
+}
+
+/// P17 through fr-reuse's one evaluator, [`condition_on_exact_constraint`]. A rank-deficient constraint is refused there
+/// ([`GaussianMarginalError::RankDeficientConstraint`]), never jittered.
+pub fn condition_on_conservation(
+    constraint: ArrayView2<'_, f64>,
+    value: ArrayView1<'_, f64>,
+    prior_precision: ArrayView2<'_, f64>,
+) -> Result<ConservationConditioning, BoundError> {
+    let posterior = condition_on_exact_constraint(constraint, value, prior_precision)
+        .map_err(BoundError::GaussianMarginal)?;
+    Ok(ConservationConditioning {
+        posterior,
+        constraint: constraint.to_owned(),
+        value: value.to_owned(),
+    })
+}
+
+/// `−log p₁(y) − (−log p₂(y))`, the code-length difference between two conditioned blocks. It is refused unless both
+/// evidences are densities in the same constraint coordinates, with identical rows and values bit for bit: re-expressing
+/// a constraint as `TAb = Ty` moves its evidence by `log|det T|`, so even two representations of one constraint set
+/// disagree by that much, and comparing different constraint sets needs a declared base measure.
+pub fn compare_conservation_evidence(
+    first: &ConservationConditioning,
+    second: &ConservationConditioning,
+) -> Result<f64, BoundError> {
+    let same_rows = first.constraint.dim() == second.constraint.dim()
+        && first
+            .constraint
+            .iter()
+            .zip(second.constraint.iter())
+            .all(|(a, b)| a.to_bits() == b.to_bits());
+    let same_values = first.value.len() == second.value.len()
+        && first
+            .value
+            .iter()
+            .zip(second.value.iter())
+            .all(|(a, b)| a.to_bits() == b.to_bits());
+    if !(same_rows && same_values) {
+        return Err(BoundError::ConstraintRepresentationMismatch);
+    }
+    Ok(first.negative_log_evidence() - second.negative_log_evidence())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gam_linalg::roundoff::{UNIT_ROUNDOFF, accumulation_band};
-    use gam_math::categorical::categorical_kl_from_logits;
+    use gam_math::categorical::categorical_kl_from_logits_with_error;
     use ndarray::array;
+    use std::f64::consts::{LN_2, PI};
 
     fn contract(name: &str, domain_radius: f64, defect: f64, lipschitz: f64) -> Contract {
         Contract {
@@ -228,17 +330,12 @@ mod tests {
         }
     }
 
-    /// `KL(softmax z ‖ softmax z′)` from gam-math's categorical owner, with a first-order relative band per the owner's
-    /// accuracy section: the series below `80u`, the probabilities, normalizers and `log1p` below `48u` plus `4u` per
-    /// unit of the largest logit or gap, and the log-space round trip `4u·|log KL|`.
+    /// `KL(softmax z ‖ softmax z′)` and its derived `numerical_error`, both from gam-math's categorical owner.
     fn divergence_with_band(logits: &[f64], perturbed: &[f64]) -> (f64, f64) {
-        let divergence = categorical_kl_from_logits(logits, perturbed).expect("valid logits");
-        let magnitude = logits
-            .iter()
-            .chain(perturbed)
-            .fold(0.0_f64, |largest, value| largest.max(value.abs()));
-        let relative = 128.0 + 4.0 * magnitude + 4.0 * divergence.ln().abs();
-        (divergence, relative * UNIT_ROUNDOFF * divergence)
+        let (divergence, numerical_error) =
+            categorical_kl_from_logits_with_error(logits, perturbed).expect("valid logits");
+        assert!(numerical_error.is_finite(), "the owner refused to bound KL {divergence}");
+        (divergence, numerical_error)
     }
 
     #[test]
@@ -292,14 +389,17 @@ mod tests {
         // most γ_2·14, the band adds γ_3·(osc + 10), and (osc + band)²/8 stays below (γ_8·7)².
         let floor = accumulation_band(8, 7.0);
         assert!(upper <= floor * floor, "upper {upper}");
-        // Positive control: tilting one logit by 10⁻³ lifts the bound to (10⁻³)²/8, above the floor.
+        // Positive control: tilting one logit by 10⁻³ lifts the bound. The exact oscillation of the stored logits is at
+        // least 10⁻³ − u·(10⁻³ + 5.301 + 2·7): the rounded 10⁻³ literal, the tilt addition fl(s₀ + 10⁻³), and the two
+        // shift roundings fl(z_i + 5) with |z_i + 5| ≤ 7. The uniform bound claims osc²/8 of the stored logits.
         let mut tilted = shifted;
         tilted[0] += 1e-3;
         let raised = softmax_kl_oscillation_bound(logits.view(), tilted.view())
             .expect("finite logits")
             .upper_bound()
             .expect("a uniform bound has an upper side");
-        assert!(raised >= (1e-3_f64 * (1.0 - 1e-6)).powi(2) / 8.0, "raised {raised}");
+        let tilt_floor = 1e-3 - UNIT_ROUNDOFF * (1e-3 + 5.301 + 2.0 * 7.0);
+        assert!(raised >= tilt_floor * tilt_floor / 8.0, "raised {raised}");
         assert!(raised > floor * floor, "raised {raised}");
     }
 
@@ -360,5 +460,106 @@ mod tests {
         let refused = certify_kl_over_input_ball(&chain, 0.3, &[0.0], LogitGapNorm::Supremum)
             .expect_err("offset count");
         assert!(matches!(refused, BoundError::InvalidInput(..)));
+    }
+
+    /// `Q = s·diag(1, 2, 4)` and the conservation constraint `k·(b₁ + b₂ + b₃) = 3k`. At `s = k = 1`: `Q⁻¹Aᵀ = (1, ½, ¼)`,
+    /// `V = 7/4`, `μ = (12/7, 6/7, 3/7)` and `−log p(y) = ½(36/7 + log(7/4) + log 2π)`.
+    fn conservation_fixture(row_scale: f64, precision_scale: f64) -> ConservationConditioning {
+        let constraint = array![[row_scale, row_scale, row_scale]];
+        let value = array![3.0 * row_scale];
+        let precision = array![[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 4.0]] * precision_scale;
+        condition_on_conservation(constraint.view(), value.view(), precision.view())
+            .expect("proper prior and a full-rank constraint")
+    }
+
+    /// Relative rounding of fr-reuse's evaluation on these fixtures: the 3×3 prior's strict Cholesky errs by at most
+    /// `γ_{10}·κ(Q)` with `κ(Q) = 4` (Higham, ASNA 2nd ed., Thm 10.3), the readout's two triangular solves by `γ_6`,
+    /// `V`'s three products and two additions by `γ_5`, `V`'s 1×1 factor and solve by `γ_4`, and the mean's product by
+    /// `γ_1`, together below `γ_{64}`.
+    fn conditioning_growth() -> f64 {
+        accumulation_growth(64)
+    }
+
+    #[test]
+    fn conservation_conditioning_matches_the_closed_form_and_satisfies_the_constraint() {
+        let conditioned = conservation_fixture(1.0, 1.0);
+        let growth = conditioning_growth();
+        let expected_mean = [12.0 / 7.0, 6.0 / 7.0, 3.0 / 7.0];
+        let mean = conditioned.posterior().mean();
+        for (computed, expected) in mean.iter().zip(expected_mean) {
+            // The expected entries are a division each, one unit.
+            let band = growth * expected + UNIT_ROUNDOFF * expected;
+            assert!((computed - expected).abs() <= band, "mean {computed}, expected {expected}");
+        }
+        // Ab = y: the three-term sum rounds by γ_3 and inherits each entry's band.
+        let total: f64 = mean.iter().sum();
+        let total_band = accumulation_band(3, 3.0) + (growth + UNIT_ROUNDOFF) * 3.0;
+        assert!((total - 3.0).abs() <= total_band, "constraint residual {}", total - 3.0);
+        // The conditioned covariance annihilates the constraint direction: ΣAᵀ = Q⁻¹Aᵀ − ZV⁻¹ZᵀAᵀ = 0, a difference of
+        // two terms of size at most 1, each carrying the evaluation's relative rounding.
+        let annihilated = conditioned
+            .posterior()
+            .covariance_times(&conditioned.constraint().t().to_owned())
+            .expect("certified solves");
+        for entry in annihilated.iter() {
+            assert!(entry.abs() <= 2.0 * growth, "ΣAᵀ entry {entry}");
+        }
+        // −log p(y) = ½(36/7 + log(7/4) + log 2π): the quadratic form carries γ_64 relatively and log|V| carries V's
+        // relative error absolutely; three additions and the reference's own divisions and logarithms add γ_8.
+        let expected_evidence = 0.5 * (36.0 / 7.0 + (7.0_f64 / 4.0).ln() + (2.0 * PI).ln());
+        let evidence_band = growth * (36.0 / 7.0 + 1.0) + accumulation_band(8, 36.0 / 7.0 + 1.0 + (2.0 * PI).ln());
+        let evidence = conditioned.negative_log_evidence();
+        assert!(
+            (evidence - expected_evidence).abs() <= evidence_band,
+            "−log p(y) {evidence}, expected {expected_evidence}"
+        );
+        assert_eq!(conditioned.value(), array![3.0].view());
+    }
+
+    #[test]
+    fn rescaling_the_constraint_moves_the_evidence_by_log_det_and_the_comparison_refuses() {
+        let original = conservation_fixture(1.0, 1.0);
+        let rescaled = conservation_fixture(2.0, 1.0);
+        let growth = conditioning_growth();
+        // T = 2 leaves the posterior mean unchanged.
+        for (a, b) in original.posterior().mean().iter().zip(rescaled.posterior().mean().iter()) {
+            assert!((a - b).abs() <= 2.0 * (growth + UNIT_ROUNDOFF) * a.abs(), "mean {a} versus {b}");
+        }
+        // Positive control: the raw evidences differ by log|det T| = log 2, since V → 4V and yᵀV⁻¹y is invariant. Each
+        // evidence carries its band, and the stored LN_2 its own unit.
+        let shift = rescaled.negative_log_evidence() - original.negative_log_evidence();
+        let shift_band = 2.0 * (growth * (36.0 / 7.0 + 2.0) + accumulation_band(8, 36.0 / 7.0 + 2.0 + (2.0 * PI).ln()))
+            + UNIT_ROUNDOFF * LN_2;
+        assert!((shift - LN_2).abs() <= shift_band, "evidence shift {shift}");
+        assert_eq!(
+            compare_conservation_evidence(&original, &rescaled).expect_err("different representations"),
+            BoundError::ConstraintRepresentationMismatch
+        );
+        // Same representation, different priors: s = 2 gives V = 7/8, so the difference is ½(36/7 − 72/7 + log 2).
+        let tighter = conservation_fixture(1.0, 2.0);
+        let difference = compare_conservation_evidence(&original, &tighter).expect("same representation");
+        let expected = 0.5 * (36.0 / 7.0 - 72.0 / 7.0 + LN_2);
+        let difference_band = 2.0 * (growth * (72.0 / 7.0 + 2.0) + accumulation_band(8, 72.0 / 7.0 + 2.0 + (2.0 * PI).ln()))
+            + UNIT_ROUNDOFF * LN_2;
+        assert!((difference - expected).abs() <= difference_band, "difference {difference}, expected {expected}");
+    }
+
+    #[test]
+    fn a_rank_deficient_conservation_constraint_is_refused() {
+        let constraint = array![[1.0, 1.0, 1.0], [2.0, 2.0, 2.0]];
+        let value = array![3.0, 6.0];
+        let precision = Array2::<f64>::eye(3);
+        let refused = condition_on_conservation(constraint.view(), value.view(), precision.view())
+            .expect_err("a repeated constraint row");
+        assert!(
+            matches!(
+                refused,
+                BoundError::GaussianMarginal(GaussianMarginalError::RankDeficientConstraint {
+                    rows: 2,
+                    resolved_rank: 1
+                })
+            ),
+            "{refused}"
+        );
     }
 }
