@@ -1406,25 +1406,19 @@ pub(crate) fn radial_derivatives_of_isotropic_duchon(
 /// implemented via analytic radial derivatives of f. Matrix assembly
 /// multiplies this value by `J = exp(Ση)`.
 ///
-/// Closed-form pure-Duchon self-pair value `g_q(0; η, m, s, κ=0)`,
-/// implementing the math team's Letter A §3 finite-part formulas:
+/// Closed-form pure-Duchon self-pair value `g_q(0; η, m, s, κ=0)` for `q ∈ {1, 2}`.
 ///
-///   h_1(0) = −s_1 · F_{2,0},
-///   h_2(0) =  (F_{4,0}/3) · (s_1² + 2 s_2),
+/// The q = 0 kernel is `f(R) = R_{2(m+s)}^d(R)`: `c · R^p` with
+/// `p = 4(m+s) − d`, or `c · R^p · (log R + A)` when `p` is a non-negative even
+/// integer (the log case, which is every even `d`). Every term of `(−Δ_B)^q f`
+/// at `R → 0⁺` carries `R^{p − 2q}`, times a polynomial in `log R` in the log
+/// case, so:
+///   * `p > 2q`: the self-pair value is exactly `0`, in both cases;
+///   * `p ≤ 2q`: the value diverges (a negative power of `R`, or `log R` at
+///     `p = 2q`, which is always the log case), and no self-pair value exists.
 ///
-/// where `F_{2q,0} = f^{(2q)}(0)` is the (2q)-th radial derivative of
-/// the q = 0 kernel `f(R) = R_{2(m+s)}^d(R) = c · R^p` with
-/// `p = 4(m+s) − d`. For non-log cases (`p` not a non-negative even
-/// integer):
-///   * `p > 2q`:  F_{2q,0} = 0, so `h_q(0) = 0`.
-///   * `p = 2q`:  F_{2q,0} = c · p!/(p − 2q)! = c · (2q)!.
-///   * `p < 2q`:  divergent — Hadamard finite-part needed; not
-///                 handled here (caller falls back to ε-reg).
-/// Log cases (`p` non-negative even integer) are also returned as
-/// `None`.
-///
-/// Returns `None` if the analytic limit is unavailable for the given
-/// (q, d, m, s); caller should keep its ε-regularization path.
+/// `p > 2q` is the UV clause of `duchon_closed_form_operator_penalty_converges`,
+/// so every gated closed-form block has the zero self-pair.
 pub(crate) fn pure_duchon_self_pair_value(
     q: usize,
     d: usize,
@@ -1432,63 +1426,12 @@ pub(crate) fn pure_duchon_self_pair_value(
     s: usize,
     eta: &[f64],
 ) -> Option<f64> {
-    if q != 1 && q != 2 {
+    if (q != 1 && q != 2) || eta.len() != d {
         return None;
     }
-    if eta.len() != d {
-        return None;
-    }
-    let mm = 2 * (m + s); // Riesz block index for q=0 pure-Duchon kernel
-    // Detect log case: 2·mm == d + 2n for some n ≥ 0 ⇔ p = 2 mm − d
-    // is a non-negative even integer.
-    let two_mm = 2 * mm;
-    if two_mm >= d && (two_mm - d).is_multiple_of(2) {
-        return None; // log regime — Hadamard not implemented here
-    }
-    let p_int = two_mm as isize - d as isize; // exponent of R in f(R) = c·R^p
-
-    let two_q = 2 * q as isize;
-    if p_int < two_q {
-        return None; // divergent — Hadamard not implemented here
-    }
-
-    // s_1, s_2 (R=0 reduces u_1 = u_2 = 0).
-    let mut s_1 = 0.0_f64;
-    let mut s_2 = 0.0_f64;
-    for &e in eta {
-        let bb = (-2.0 * e).exp();
-        s_1 += bb;
-        s_2 += bb * bb;
-    }
-
-    // F_{2q,0}: 0 if p > 2q, else c · (2q)! at p = 2q (per math team §3).
-    let f_2q_0 = if p_int > two_q {
-        0.0
-    } else {
-        // p == two_q
-        let c = riesz_kernel_coefficient_nonlog(d, mm);
-        c * factorial_f64(two_q as usize)
-    };
-
-    let value = match q {
-        1 => -s_1 * f_2q_0,
-        2 => (f_2q_0 / 3.0) * (s_1 * s_1 + 2.0 * s_2),
-        // `q ∉ {1, 2}` is rejected by the early guard above; this arm
-        // therefore cannot run. Returning `None` keeps the typed
-        // contract intact rather than panicking.
-        _ => return None,
-    };
-    Some(value)
-}
-
-/// Riesz kernel coefficient `c_j^d` for the non-log case
-/// (`R_j^d(R) = c_j^d · R^{2j − d}`):
-///   c_j^d = Γ(d/2 − j) / (4^j · π^{d/2} · Γ(j)).
-pub(crate) fn riesz_kernel_coefficient_nonlog(d: usize, j: usize) -> f64 {
-    let half_d = d as f64 / 2.0;
-    let num = gamma_fn(half_d - j as f64);
-    let denom = 4.0_f64.powi(j as i32) * std::f64::consts::PI.powf(half_d) * gamma_fn(j as f64);
-    num / denom
+    // Exponent of R in the q = 0 pure-Duchon kernel.
+    let p = 4 * (m + s) as isize - d as isize;
+    (p > 2 * q as isize).then_some(0.0)
 }
 
 pub(crate) fn anisotropic_duchon_penalty_radial_with_powers(
@@ -2537,6 +2480,33 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// At `p = 4(m+s) − d > 2q` every term of `(−Δ_B)^q f` at `R → 0⁺` carries
+    /// `R^{p−2q}` (times powers of `log R` in the log case), so the pure-Duchon
+    /// self-pair value is exactly zero. The log case (every even `d`) used to
+    /// return `None`, which sent the closed-form diagonal to a median-lag ε
+    /// (#2469). At `p = 2q` the log case diverges and there is no value.
+    #[test]
+    pub(crate) fn pure_duchon_self_pair_is_zero_above_the_uv_exponent_in_the_log_case_2469() {
+        let eta = [0.0_f64; 6];
+        // d = 6, m = 2, s = 1, q = 2: p = 6 > 4, even d, the log case.
+        assert_eq!(super::pure_duchon_self_pair_value(2, 6, 2, 1, &eta), Some(0.0));
+        // d = 8, m = 2, s = 1, q = 2: p = 4 = 2q, the log divergence.
+        assert_eq!(super::pure_duchon_self_pair_value(2, 8, 2, 1, &[0.0_f64; 8]), None);
+        // The κ = 0 radial chain approaches that zero from R > 0.
+        let powers = super::AnisoMetricPowers::new(&eta);
+        let magnitude_at = |r: f64| {
+            let mut lag = [0.0_f64; 6];
+            lag[0] = r;
+            super::anisotropic_duchon_penalty_radial_with_powers(2, 2, 1.0, 0.0, &eta, &powers, &lag)
+                .abs()
+        };
+        let (coarse, middle, fine) = (magnitude_at(1.0e-2), magnitude_at(1.0e-3), magnitude_at(1.0e-4));
+        assert!(
+            fine < middle && middle < coarse,
+            "|g_2(R)| must shrink toward the zero self-pair: R=1e-2 {coarse:e}, 1e-3 {middle:e}, 1e-4 {fine:e}"
+        );
     }
 
     /// Regression for #2291: the odd-d hybrid self-pair κ-derivative must match

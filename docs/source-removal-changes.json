@@ -4717,6 +4717,14 @@
     "evidence": "At the base, git grep -n test_matern_safe_ratio_half_is_finitewith_floor finds only its declaration in tests/src_modules/smooths/basis_duchon_matern_jet_derivative_tests.rs, which gam-terms basis/tests.rs includes. No other test, bench or source names it. Receipt: MSI job 1103377 (lane sw0d) at fb17ed6de with the landing patch applied: cargo check -p gam-terms --all-targets exited 0, and cargo nextest -p gam-terms --lib ran the replacement test and the two remaining triplet tests, 3 passed (/scratch.global/sauer354/pool/const2469/matern.1103377.log)."
   },
   {
+    "base": "1162e536029ac5beb324c82bfc6f4737af0506cc",
+    "items": [
+      "crates/gam-terms/src/basis/closed_form_penalty.rs:fn:riesz_kernel_coefficient_nonlog"
+    ],
+    "reason": "#2469: pure_duchon_self_pair_value returned None for the log case (every even d) whenever p = 4(m+s) - d > 2q, although every term of (-Delta_B)^q f at R -> 0+ carries R^(p-2q) times powers of log R, so the self-pair value is exactly zero. On the gated pure closed-form path that None sent the diagonal to pure_duchon_diagonal_epsilon's median-lag 1e-6 regularization. Its p = 2q non-log branch was unreachable: odd d gives odd p, which never equals 2q, and even d had already returned on the log check. The function is now Some(0.0) iff p > 2q. riesz_kernel_coefficient_nonlog served only that dead branch and is deleted.",
+    "evidence": "At the base, git grep -n riesz_kernel_coefficient_nonlog finds only its declaration and one call inside the unreachable p == 2q arm of pure_duchon_self_pair_value, both in crates/gam-terms/src/basis/closed_form_penalty.rs. The new test pure_duchon_self_pair_is_zero_above_the_uv_exponent_in_the_log_case_2469 pins Some(0.0) at (q=2, d=6, m=2, s=1), None at the p = 2q log divergence, and a shrinking |g_2(R)| from the kappa = 0 radial chain. Receipt: MSI job 1107646 (lane sw0d) at 5113e49b8 with the landing patch applied: cargo check -p gam-terms --all-targets exited 0, and cargo nextest -p gam-terms --lib passed 120 of 120 selected tests including the new one (/scratch.global/sauer354/pool/const2469/combo.1107646.log)."
+  },
+  {
     "base": "53d420d79d102e86898b8ce9f9f32a04aef101cc",
     "items": [
       "crates/gam-solve/src/cone_reduction.rs:fn:constrained_cone_mode",
