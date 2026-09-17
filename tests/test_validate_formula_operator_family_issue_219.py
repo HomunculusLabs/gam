@@ -80,8 +80,12 @@ def test_caret_power_crossing() -> None:
     _accept("y ~ (x1 + x2 + x3)^2")
 
 
-def test_identity_wrapper_pass_through() -> None:
-    _accept("y ~ I(x1 + x2)")
+def test_identity_wrapper_is_refused_as_an_undocumented_term_function() -> None:
+    # `I(...)` is not part of the formula DSL: docs/formulas.md documents no
+    # arithmetic identity wrapper, so the materializer refuses it by name with
+    # the typed error that lists the supported term functions.
+    with pytest.raises(gamfit.GamError, match=r"unknown term function `i` in 'I\(x1 \+ x2\)'"):
+        gamfit.validate_formula(ROWS, "y ~ I(x1 + x2)")
 
 
 def test_full_operator_family_from_issue_219() -> None:
