@@ -38,6 +38,14 @@ pub enum OuterSeedOrder {
 ///
 /// `seed` is the complete outer coordinate `θ = (ρ ‖ ψ)`, and `rho_dim` locates
 /// the ψ block inside it.
+///
+/// The layout is published from inside the runner's search frame, so on a route
+/// whose structural keys permute ρ (#1538/#1539) `seed`, `lower`, `upper` and the
+/// θ a probe evaluates are in canonical order, not the caller's. That is inert
+/// today: keys come only from standard REML (estimate/optimizer.rs:1349) and
+/// exact block Gaussian REML (gaussian_reml.rs:778), and no observer is installed
+/// on either. The first keyed consumer maps the layout through the same
+/// permutation that `outer_result_to_native` uses (#2902).
 #[derive(Clone, Debug)]
 pub struct OuterSeedLayout {
     pub seed: Array1<f64>,
