@@ -159,6 +159,25 @@ events before termination.
 ## Python example
 
 ```python
+import numpy as np
+import pandas as pd
+
+rng = np.random.default_rng(0)
+n = 200
+ids = [f"s{i}" for i in range(n)]
+prs = rng.standard_normal(n)
+death = rng.exponential(1.0 / 0.15, n)
+disease = rng.exponential(1.0 / (0.25 * np.exp(0.5 * prs)))
+exit_time = np.minimum(death, 4.0)            # death ends follow-up; censored at 4
+subjects = pd.DataFrame({"id": ids, "entry": 0.0, "exit": exit_time})
+diseased = disease < exit_time
+died = death < 4.0
+events = pd.concat([
+    pd.DataFrame({"id": np.array(ids)[diseased], "time": disease[diseased], "mark": "disease"}),
+    pd.DataFrame({"id": np.array(ids)[died], "time": death[died], "mark": "death"}),
+]).sort_values(["id", "time"], ignore_index=True)
+covariates = pd.DataFrame({"id": ids, "start": 0.0, "prs": prs})
+
 model = gamfit.fit_event_history(
     subjects, events, covariates, ["s(time, by=prs)", "s(time)"],
     marks={"disease": "once", "death": "terminal"},
