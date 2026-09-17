@@ -1538,18 +1538,17 @@ pub fn canonicalize_penalty_specs(
     Ok((active, active_nullspace))
 }
 
-/// Structural rank of each penalty block at its own rounding band, for a fit
-/// that re-realizes its penalties while ψ moves.
+/// Structural rank of each penalty block, for a fit that re-realizes its
+/// penalties while ψ moves.
 ///
-/// A generic block counts the eigenvalues above its own rounding band,
-/// `dim·ε·max|Sᵢⱼ|` ([`crate::basis::ConstructiveQuadratic::gram_rounding_band`],
-/// the rounding rule of
-/// [`crate::basis::ConstructiveQuadratic::unit_frobenius_from_gram_within_rounding_band`]).
-/// A canonicalization spec carries no assembly magnitude, so only the entrywise
-/// term applies. A hinted block (ridge, Kronecker) keeps the rank of its
-/// closed-form root. A joint ρ+ψ fit computes these once at the build ψ and
-/// canonicalizes every later realization at them through
-/// [`canonicalize_penalty_specs_at_frozen_ranks`].
+/// A generic block counts its resolved eigenvalues through the one Gram-side
+/// predicate, [`gam_linalg::roundoff::resolved_eigenvalue_count`], which counts
+/// those above the eigensolver's backward-error band `p·ε·‖S‖₂`. A
+/// canonicalization spec carries no assembly bound, so no assembly term applies.
+/// A hinted block (ridge, Kronecker) keeps the rank of its closed-form root. A
+/// joint ρ+ψ fit computes these once at the build ψ, and every later realization
+/// is canonicalized at them through [`canonicalize_penalty_specs_at_frozen_ranks`],
+/// which reads the same predicate.
 pub fn penalty_structural_ranks_at_rounding_band(
     specs: &[crate::PenaltySpec],
     p: usize,
@@ -1570,15 +1569,10 @@ pub fn penalty_structural_ranks_at_rounding_band(
                 "{context}: structural rank analysis failed at penalty {idx}: {err}"
             ))
         })?;
-        let rounding_band =
-            crate::basis::ConstructiveQuadratic::gram_rounding_band(&analysis.sym_penalty, 0.0);
-        ranks.push(
-            analysis
-                .eigenvalues
-                .iter()
-                .filter(|&&value| value > rounding_band)
-                .count(),
-        );
+        ranks.push(gam_linalg::roundoff::resolved_eigenvalue_count(
+            &analysis.eigenvalues.to_vec(),
+            0.0,
+        ));
     }
     Ok(ranks)
 }
@@ -1597,10 +1591,12 @@ pub fn penalty_structural_ranks_at_rounding_band(
 ///
 /// Here each generic block is rooted from its `frozen_ranks[idx]` largest
 /// eigenpairs at every ψ, so the priced penalty is a continuous function of the
-/// realized block. If the smallest kept eigenvalue is not positive, the block's
-/// range at this trial is not the one the fit froze. That trial is refused
-/// (`TrialPointRefused`), never re-ranked. Hinted blocks keep their closed-form
-/// roots and are refused when that root's rank differs from the frozen rank.
+/// realized block. If the frozen rank exceeds the block's resolved eigenvalue
+/// count at this trial ([`gam_linalg::roundoff::resolved_eigenvalue_count`], the
+/// predicate the freeze counted with), the block's rank is unresolved. That trial
+/// is refused (`TrialPointRefused`), never re-ranked. Hinted blocks keep their
+/// closed-form roots and are refused when that root's rank differs from the
+/// frozen rank.
 pub fn canonicalize_penalty_specs_at_frozen_ranks(
     specs: &[crate::PenaltySpec],
     nullspace_dims: &[usize],
@@ -1700,11 +1696,19 @@ fn canonicalize_penalty_spec_at_frozen_rank(
     descending.sort_by(|&a, &b| analysis.eigenvalues[b].total_cmp(&analysis.eigenvalues[a]));
     let kept = &descending[..frozen_rank];
     let smallest_kept = analysis.eigenvalues[kept[frozen_rank - 1]];
-    if !(smallest_kept > 0.0) {
+    // The predicate the freeze counted with
+    // (`penalty_structural_ranks_at_rounding_band`). A kept eigenvalue inside the
+    // band is rounding of either sign, so the block's rank at this trial is
+    // unresolved: pricing it would put `ln(roundoff)` into `log|S|₊`, and its
+    // sign carries no information.
+    let eigenvalues = analysis.eigenvalues.to_vec();
+    if gam_linalg::roundoff::resolved_eigenvalue_count(&eigenvalues, 0.0) < frozen_rank {
+        let rounding_band = gam_linalg::roundoff::symmetric_spectrum_rounding_band(&eigenvalues);
         return Err(EstimationError::TrialPointRefused {
             reason: format!(
                 "{context}: penalty block idx={idx} was frozen at structural rank {frozen_rank}, \
-                 but its smallest kept eigenvalue is {smallest_kept:e} at this trial"
+                 but at this trial its smallest kept eigenvalue {smallest_kept:e} is unresolved \
+                 within the Gram's rounding band {rounding_band:e}"
             ),
         });
     }
@@ -2899,6 +2903,58 @@ pub fn stable_reparameterization_engine_canonical(
 
 #[cfg(test)]
 mod tests {
+    /// #2469: the freeze and the trial read one band. A kept eigenvalue inside
+    /// the Gram's rounding band is an unresolved rank, refused whatever its sign.
+    /// The sign test it replaces accepted positive roundoff and priced
+    /// `ln(roundoff)` into `log|S|₊`. A tail above the band is still priced.
+    #[test]
+    fn frozen_rank_trial_refuses_a_kept_eigenvalue_inside_the_rounding_band_2469() {
+        use ndarray::array;
+        let angle = 0.3_f64;
+        let rotation = array![
+            [angle.cos(), -angle.sin(), 0.0],
+            [angle.sin(), angle.cos(), 0.0],
+            [0.0, 0.0, 1.0]
+        ];
+        let spec_with_tail = |tail: f64| {
+            let diagonal = array![[1.0, 0.0, 0.0], [0.0, 0.5, 0.0], [0.0, 0.0, tail]];
+            crate::PenaltySpec::Block {
+                local: rotation.dot(&diagonal).dot(&rotation.t()),
+                col_range: 0..3,
+                prior_mean: gam_problem::CoefficientPriorMean::Zero,
+                structure_hint: None,
+                op: None,
+            }
+        };
+        for tail in [3.0e-17, -3.0e-17] {
+            let outcome = super::canonicalize_penalty_specs_at_frozen_ranks(
+                &[spec_with_tail(tail)],
+                &[0],
+                &[3],
+                3,
+                "band test",
+            );
+            assert!(
+                matches!(
+                    &outcome,
+                    Err(super::EstimationError::TrialPointRefused { reason })
+                        if reason.contains("unresolved within the Gram's rounding band")
+                ),
+                "tail {tail:e} inside the rounding band must be an unresolved-rank refusal, got {:?}",
+                outcome.as_ref().map(|(active, _)| active.len())
+            );
+        }
+        let (active, _) = super::canonicalize_penalty_specs_at_frozen_ranks(
+            &[spec_with_tail(1.0e-6)],
+            &[0],
+            &[3],
+            3,
+            "band test",
+        )
+        .expect("a resolved tail is priced");
+        assert_eq!(active[0].root.nrows(), 3);
+    }
+
     /// gam#2454: the reparameterization's penalized rank and the shared
     /// balanced structural rank are one number. Three unit directions penalized
     /// at Frobenius norms `1e6`, `1e-9` and `1` (overlapping full-width
