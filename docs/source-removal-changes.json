@@ -9420,5 +9420,26 @@
     ],
     "reason": "#2933 F36 follow-up. fill_decoded_second_derivative_row contracted the diagonal second coordinate jet through the decoder for the per-axis SURE completion coordinate_sure_deflation_correction, which c7b0801f07 replaced by the joint fitted-response divergence tr(A+ G). With its callers gone the pub(crate) fn is a dead_code error under -D warnings. The divergence reads second derivatives through the row-jet program and the exact stationarity operator, so no replacement is needed.",
     "evidence": "At the base, git grep -n fill_decoded_second_derivative_row over crates and tests finds only its declaration in crates/gam-sae/src/manifold/atom.rs. Its callers, coordinate_sure_deflation_correction in construction_ard.rs and the hand replica in tests_sure_dispersion_2133.rs, were removed by c7b0801f07 with ledger base bd1d96965134459c792332a740bdffc58eaa2356. No bench, example, Python or FFI source names it."
+  },
+  {
+    "base": "69befd10c5f23f5463ba7e6f3e89a5a8a40fd717",
+    "items": [
+      "crates/gam-sae/src/manifold/atom.rs:fn:curvature_shrinkage_factor",
+      "crates/gam-sae/src/manifold/construction_ard.rs:fn:ard_shrinkage_traces",
+      "crates/gam-sae/src/manifold/construction_fitted_response.rs:fn:exact_spectral_fitted_response_divergence",
+      "crates/gam-sae/src/manifold/construction_reconstruction.rs:const:ARD_EDF_FORWARD_ERROR_FACTOR",
+      "crates/gam-sae/src/manifold/construction_reconstruction.rs:fn:ard_edf_tolerance_admits_pinned_axis_roundoff_and_still_refuses_a_saddle",
+      "crates/gam-sae/src/manifold/construction_reconstruction.rs:fn:block_count_reconstruction_edf",
+      "crates/gam-sae/src/manifold/construction_reconstruction.rs:fn:certified_ard_axis_edf",
+      "crates/gam-sae/src/manifold/construction_reconstruction.rs:fn:likelihood_scalar_count",
+      "crates/gam-sae/src/manifold/construction_reconstruction.rs:fn:projected_hutchinson_ard_axis_edf",
+      "crates/gam-sae/src/manifold/construction_reconstruction.rs:fn:refuses_material_or_nonfinite_ard_edf_excursions",
+      "crates/gam-sae/src/manifold/construction_reconstruction.rs:fn:snaps_only_trace_roundoff_at_the_ard_edf_faces",
+      "crates/gam-sae/src/manifold/construction_reconstruction.rs:fn:stochastic_trace_lane_uses_the_declared_constrained_estimator",
+      "crates/gam-sae/src/manifold/construction_reconstruction.rs:fn:undamped_row_curvature_scale",
+      "crates/gam-sae/src/manifold/tests.rs:fn:reconstruction_dispersion_uses_ard_shrunk_coordinate_edf"
+    ],
+    "reason": "#2933 F39/F40. reconstruction_dispersion priced RSS/(N - EDF) with the EDF clamped to [0, N] and the residual dof floored at one, and without a residual it priced a block count (beta dim minus a smoothness trace plus ARD-shrunk chart dimensions) that omitted gates, non-smoothing penalties and couplings and charged an ambient S^2 coordinate three. For a linear smoother E||X - RX||^2 = ||(I - R)mu||^2 + phi*||I - R||_F^2 with ||I - R||_F^2 = N - 2 tr R + ||R||_F^2, which is N - tr R only for a projection (R = I/2, mu = 0 gives mean phi/2). The dispersion now requires the residual, takes both frames' residual dofs off the exact observed information (fitted_response_divergence, whose exact spectral helper is renamed exact_spectral_fitted_response because it now returns the residual dofs too), and refuses a nonpositive dof. The block count and the helpers only it called (certified_ard_axis_edf, projected_hutchinson_ard_axis_edf, undamped_row_curvature_scale, ARD_EDF_FORWARD_ERROR_FACTOR, ard_shrinkage_traces, ArdAxisPrior::curvature_shrinkage_factor, likelihood_scalar_count), the certificate unit tests of those helpers, and the test that pinned the block count are deleted.",
+    "evidence": "At the base, git grep -n finds each removed name only at its declaration and doc comments, in its callers inside the deleted chain (block_count_reconstruction_edf called certified_ard_axis_edf, projected_hutchinson_ard_axis_edf, undamped_row_curvature_scale and ard_shrinkage_traces; ard_shrinkage_traces called curvature_shrinkage_factor; certified_ard_axis_edf read ARD_EDF_FORWARD_ERROR_FACTOR; unfactored_reconstruction_dispersion and reconstruction_dispersion called likelihood_scalar_count; fitted_response_divergence called exact_spectral_fitted_response_divergence), in the ard_edf_certificate_tests module that tested the certificate helpers, and in tests.rs::reconstruction_dispersion_uses_ard_shrunk_coordinate_edf, which this commit removes. No bench, example, Python or FFI source names any of them. The replacement test is crates/gam-sae/src/manifold/tests_fitted_response_edf_2933.rs."
   }
 ]

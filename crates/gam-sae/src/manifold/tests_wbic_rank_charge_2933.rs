@@ -271,7 +271,7 @@ fn rank_charge_audit_fills_every_field_from_one_state_2933() {
         .reconstruction_residual(target.view(), &rho)
         .expect("fitted and target shapes match");
     let dispersion = term
-        .reconstruction_dispersion(&loss, &cache, &rho, Some(residual.view()))
+        .reconstruction_dispersion(&loss, &cache, &rho, residual.view())
         .expect("the fixture dispersion is finite and positive")
         .raw_output_noise_variance;
     assert_eq!(audit.dispersion.to_bits(), dispersion.to_bits());

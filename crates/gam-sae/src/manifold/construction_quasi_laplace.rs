@@ -587,7 +587,7 @@ impl SaeManifoldTerm {
                 }
             }
             let disp = self
-                .reconstruction_dispersion(&loss, &cache, rho, Some(residual.view()))
+                .reconstruction_dispersion(&loss, &cache, rho, residual.view())
                 .map_err(|e| {
                     format!(
                         "SaeManifoldTerm::penalized_quasi_laplace_criterion: rank-charge dispersion is required: {e}"
@@ -4544,7 +4544,7 @@ impl SaeManifoldTerm {
                     &loss,
                     &converged_cache,
                     rho,
-                    Some(residual.view()),
+                    residual.view(),
                 )
                 .map_err(|e| {
                     format!(
@@ -5260,6 +5260,7 @@ impl SaeManifoldTerm {
     /// matrix-free Hutchinson estimator (the exact `K·M·p`-solve trace is
     /// infeasible at that scale); below it the exact column solve is used
     /// unchanged.
+    #[cfg(test)]
     pub(crate) fn decoder_smoothness_effective_dof_per_atom(
         &self,
         cache: &ArrowFactorCache,
@@ -8715,7 +8716,7 @@ mod shape_covariance_observed_information_2933_f33_tests {
             .reconstruction_residual(target.view(), &rho)
             .expect("reconstruction residual");
         let dispersion = term
-            .reconstruction_dispersion(&loss, &cache, &rho, Some(residual.view()))
+            .reconstruction_dispersion(&loss, &cache, &rho, residual.view())
             .expect("dispersion");
         let uncertainty = term
             .assemble_shape_uncertainty(&information, dispersion)
@@ -8871,7 +8872,7 @@ mod shape_covariance_observed_information_2933_f33_tests {
             .reconstruction_residual(target.view(), &rho)
             .expect("reconstruction residual");
         let dispersion = term
-            .reconstruction_dispersion(&loss, &cache, &rho, Some(residual.view()))
+            .reconstruction_dispersion(&loss, &cache, &rho, residual.view())
             .expect("dispersion");
         let uncertainty = term
             .assemble_shape_uncertainty(&information, dispersion)

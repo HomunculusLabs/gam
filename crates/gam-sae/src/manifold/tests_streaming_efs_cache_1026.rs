@@ -73,11 +73,15 @@ fn streaming_cache_is_efs_dropin_for_dense_cache_1026() {
         }
     }
 
+    let dense_residual = dense.reconstruction_residual(target.view(), &rho).unwrap();
+    let stream_residual = streaming
+        .reconstruction_residual(target.view(), &rho)
+        .unwrap();
     let dense_disp = dense
-        .reconstruction_dispersion(&dense_loss, &dense_cache, &rho, None)
+        .reconstruction_dispersion(&dense_loss, &dense_cache, &rho, dense_residual.view())
         .unwrap();
     let stream_disp = streaming
-        .reconstruction_dispersion(&stream_loss, &stream_cache, &rho, None)
+        .reconstruction_dispersion(&stream_loss, &stream_cache, &rho, stream_residual.view())
         .unwrap();
     assert_abs_diff_eq!(
         dense_disp.raw_output_noise_variance,

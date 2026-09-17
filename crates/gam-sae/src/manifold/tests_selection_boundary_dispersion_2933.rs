@@ -203,12 +203,12 @@ fn topk_dispersion_is_conditional_on_the_fitted_support_2933_f37() {
         two_center_term(&targets, AssignmentMode::top_k_support(1), 1.0, 0.0);
     let (loss, cache, residual) = dispersion_inputs(&mut term, &rho, &target);
     let routed = term
-        .reconstruction_dispersion(&loss, &cache, &rho, Some(residual.view()))
+        .reconstruction_dispersion(&loss, &cache, &rho, residual.view())
         .expect("the TopK two-center dispersion is defined");
     // Freezing the same logits changes no gate, no residual and no factor.
     term.assignment.frozen_logits = Some(term.assignment.logits.clone());
     let frozen = term
-        .reconstruction_dispersion(&loss, &cache, &rho, Some(residual.view()))
+        .reconstruction_dispersion(&loss, &cache, &rho, residual.view())
         .expect("the frozen-routing two-center dispersion is defined");
     let rss = 2.0 * loss.data_fit;
     for ((label, routed_scale), (_, frozen_scale)) in scales(routed).into_iter().zip(scales(frozen))
@@ -238,7 +238,7 @@ fn saturated_softmax_dispersion_is_continuous_in_its_logits_2933_f37() {
     let dispersion_at = |logit_gap: f64| {
         let (mut term, rho, target) = two_center_term(&targets, mode, logit_gap, 0.0);
         let (loss, cache, residual) = dispersion_inputs(&mut term, &rho, &target);
-        term.reconstruction_dispersion(&loss, &cache, &rho, Some(residual.view()))
+        term.reconstruction_dispersion(&loss, &cache, &rho, residual.view())
             .expect("the softmax two-center dispersion is defined")
             .likelihood_dispersion
     };
@@ -302,14 +302,14 @@ fn dispersion_is_the_explicit_root_of_its_scale_equation_2933_f38() {
         );
         let (loss, cache, residual) = dispersion_inputs(&mut term, &rho, &target);
         let base = term
-            .reconstruction_dispersion(&loss, &cache, &rho, Some(residual.view()))
+            .reconstruction_dispersion(&loss, &cache, &rho, residual.view())
             .expect("the TopK two-center dispersion is defined");
         let rss = 2.0 * loss.data_fit;
         for scale in [0.25_f64, 0.5, 2.0, 4.0] {
             let mut scaled = loss;
             scaled.data_fit *= scale * scale;
             let rescaled = term
-                .reconstruction_dispersion(&scaled, &cache, &rho, Some(residual.view()))
+                .reconstruction_dispersion(&scaled, &cache, &rho, residual.view())
                 .expect("the rescaled dispersion is defined");
             let scaled_rss = scale * scale * rss;
             for ((label, base_scale), (_, phi)) in scales(base).into_iter().zip(scales(rescaled)) {

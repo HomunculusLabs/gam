@@ -278,10 +278,8 @@ impl SaeManifoldTerm {
     ///
     /// The single source of truth for walking the arrow's latent layout — both
     /// the compact hard-TopK support and the dense full-support layout — so the
-    /// two quantities the ARD machinery needs off the same diagonal
-    /// ([`Self::ard_inverse_traces`] with `factor ≡ 1`, and
-    /// [`Self::ard_shrinkage_traces`] with the per-row prior-curvature factor)
-    /// cannot drift apart in which slots they visit.
+    /// trace [`Self::ard_inverse_traces`] reads off the diagonal (with
+    /// `factor ≡ 1`) visits exactly the slots the layout declares.
     ///
     /// Horvitz–Thompson row weight, IDENTICAL to `ard_coord_sumsq`'s numerator
     /// weighting: the posterior-variance trace `tr H⁻¹` is the OTHER half of
@@ -341,68 +339,6 @@ impl SaeManifoldTerm {
             }
         }
         traces
-    }
-
-    /// Per-`(atom, axis)` ARD SHRINKAGE trace
-    /// `τ_kj = Σ_i f(t_ikj) · wᵢ · [H⁻¹]_{ss}`, the dimensionless companion of
-    /// [`Self::ard_inverse_traces`] that the effective-degrees-of-freedom
-    /// identity — not the Fellner–Schall α-step — is a function of.
-    ///
-    /// # Why this is a different quantity from `tr(H⁻¹)` (#2499)
-    ///
-    /// The ARD EDF identity is `edf_kj = n_active − Σ_i P_i·[H⁻¹]_{ss}` where
-    /// `P_i` is the prior curvature the arrow was ACTUALLY assembled with at
-    /// row `i`. Writing that shrinkage as `α·tr(H⁻¹)` silently assumes
-    /// `P_i ≡ α`, which holds on a Euclidean axis and FAILS on a periodic one:
-    /// the von-Mises coordinate prior has exact curvature `V'' = α·cos κt`, and
-    /// what the factorization declares is its PSD majorizer
-    /// `P_i = α·softplus_{τ₀}(cos κt_i) ∈ [0, α]`
-    /// ([`ArdAxisPrior::psd_majorizer_hess`], written into `htt` by both
-    /// assembly paths). With `P_i < α` the slot has `[H⁻¹]_{ss} > 1/α`, so
-    /// `α·tr(H⁻¹)` is bounded by nothing and the "EDF" leaves `[0, n_active]`
-    /// from below — measured at `−72.56` against an interval of width `24` on a
-    /// `Circle` fixture, ten orders past any roundoff tolerance.
-    ///
-    /// With the true `P_i` restored the interval is a theorem again. Write
-    /// `H = C + P` with Gauss-Newton data curvature `C ⪰ 0` and diagonal
-    /// `P ⪰ 0`. For any slot `s` with `P_s > 0`, `H ⪰ P` gives
-    /// `[H⁻¹]_{ss} ≤ 1/P_s`, so `P_s·[H⁻¹]_{ss} ∈ [0, 1]`; where `P_s = 0` the
-    /// term is exactly `0`. Summing over the axis's `n_active` slots puts the
-    /// shrinkage in `[0, n_active]` and the EDF in `[0, n_active]` — with no
-    /// appeal to `λ_min(H) ≥ α`, which a periodic axis does not satisfy.
-    ///
-    /// Factored as `α·τ_kj` with `τ` carrying only the DIMENSIONLESS
-    /// `f = softplus_{τ₀}(cos κt)` ([`ArdAxisPrior::curvature_shrinkage_factor`])
-    /// so that a Euclidean axis has `f ≡ 1` and this returns
-    /// [`Self::ard_inverse_traces`] bit-for-bit.
-    /// Needs no `rho`: `α` is factored out, and the only ρ-dependence left in
-    /// `f` is through the fitted coordinates themselves.
-    pub(crate) fn ard_shrinkage_traces(
-        &self,
-        cache: &ArrowFactorCache,
-    ) -> Result<Vec<Array1<f64>>, String> {
-        let inv_diag = if self.k_atoms() >= Self::ARD_TRACE_HUTCHINSON_MIN_ATOMS {
-            Self::latent_block_inverse_diagonal_hutchinson(
-                cache,
-                Self::ARD_TRACE_HUTCHINSON_PROBES,
-                Self::ARD_TRACE_HUTCHINSON_SEED,
-            )
-            .map_err(|e| format!("ard_shrinkage_traces: {e}"))?
-        } else {
-            cache
-                .latent_block_inverse_diagonal()
-                .map_err(|e| format!("ard_shrinkage_traces: {e}"))?
-        };
-        let periods: Vec<Vec<Option<f64>>> = self.all_ard_axis_periods();
-        // Hoisting the per-axis coordinate columns is not possible (the factor is
-        // per row AND per axis), but the period lookup and the coordinate read are
-        // both O(1), so this stays one pass over the same slots.
-        let coords = &self.assignment.coords;
-        Ok(
-            self.accumulate_latent_inverse_diagonal(cache, &inv_diag, |row, k, axis| {
-                ArdAxisPrior::curvature_shrinkage_factor(coords[k].row(row)[axis], periods[k][axis])
-            }),
-        )
     }
 
     /// Per-atom, per-axis posterior-variance trace `tr_kj(H⁻¹)` — the SAME

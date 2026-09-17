@@ -753,7 +753,7 @@ mod robust_shape_band_tests {
             .reconstruction_residual(target.view(), &rho)
             .expect("reconstruction residual");
         let dispersion = term
-            .reconstruction_dispersion(&loss, &cache, &rho, Some(residual.view()))
+            .reconstruction_dispersion(&loss, &cache, &rho, residual.view())
             .expect("dispersion");
         (term, target, rho, cache, dispersion)
     }

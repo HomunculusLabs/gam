@@ -297,7 +297,7 @@ fn torus_and_ard_free_divergence_prices_the_dispersion_2933() {
         .reconstruction_residual(target.view(), &rho)
         .expect("the fitted state has a residual");
     let dispersion = term
-        .reconstruction_dispersion(&loss, &cache, &rho, Some(residual.view()))
+        .reconstruction_dispersion(&loss, &cache, &rho, residual.view())
         .expect("the fitted state prices a dispersion");
     // With no row metric the raw output noise variance is `RSS/(N·p − edf)`, and
     // the dispersion charges no selection degrees of freedom, so the priced EDF is

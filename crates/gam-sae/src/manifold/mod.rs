@@ -367,6 +367,11 @@ mod tests_persistence_engine_2757;
 #[cfg(test)]
 mod tests_fitted_response_divergence_2933;
 
+/// #2933 F39 — the priced EDF counts an embedded sphere coordinate's tangent
+/// dimension, against a re-solved response trace.
+#[cfg(test)]
+mod tests_fitted_response_edf_2933;
+
 /// #2933 F37/F38 — the dispersion is conditional on the fitted routing and its
 /// scale equation is explicit.
 #[cfg(test)]

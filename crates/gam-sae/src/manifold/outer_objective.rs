@@ -1852,7 +1852,7 @@ impl SaeManifoldOuterObjective {
             .reconstruction_residual(self.target.view(), &rho)?;
         let dispersion =
             self.term
-                .reconstruction_dispersion(&loss, &cache, &rho, Some(residual.view()))?;
+                .reconstruction_dispersion(&loss, &cache, &rho, residual.view())?;
         let information = self.term.shape_information(
             &rho,
             self.target.view(),

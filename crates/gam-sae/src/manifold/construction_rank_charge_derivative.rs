@@ -70,7 +70,7 @@ impl SaeManifoldTerm {
         self.assignment.validate_rho_domain(rho)?;
         let residual = self.reconstruction_residual(target, rho)?;
         let dispersion = self
-            .reconstruction_dispersion(loss, cache, rho, Some(residual.view()))?
+            .reconstruction_dispersion(loss, cache, rho, residual.view())?
             .raw_output_noise_variance;
         let mut grams = self.empty_decoder_gram_accumulator();
         self.accumulate_decoder_gram(&mut grams)?;
@@ -296,7 +296,7 @@ impl SaeManifoldTerm {
         }
         let residual = self.reconstruction_residual(target, rho)?;
         let dispersion = self
-            .reconstruction_dispersion(loss, cache, rho, Some(residual.view()))?
+            .reconstruction_dispersion(loss, cache, rho, residual.view())?
             .raw_output_noise_variance;
         let mut grams = self.empty_decoder_gram_accumulator();
         self.accumulate_decoder_gram(&mut grams)?;

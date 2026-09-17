@@ -8,291 +8,6 @@
 
 use super::*;
 
-/// Assembly scale `‖H‖₂` of the whole arrow, from the Cholesky factors the
-/// cache already carries.
-///
-/// The arrow factorizes as `H = L Lᵀ` with `L` block-lower: the per-row
-/// coordinate factors on the diagonal, the border rows below them, and the
-/// β-Schur factor last. So `‖H‖₂ ≤ ‖L‖₂² ≤ ‖L‖_F²`, and `‖L‖_F²` is the SUM of
-/// its blocks' squared Frobenius norms — not their maximum. The distinction
-/// matters: the ARD trace reads the latent diagonal of `H⁻¹`, which is
-/// `A_i⁻¹ + G_i S⁻¹ G_iᵀ`, so both the row-local and the border-through-Schur
-/// paths contribute, and the n-fold accumulation across rows is already
-/// carried by the `shrinkage` factor in the tolerance rather than by this
-/// scale.
-///
-/// The border rows themselves are an operator (`apply_htbeta_row`), not a
-/// stored matrix, so this sums the two block families the cache materializes
-/// and omits the border's own contribution. `‖L‖_F²` is therefore
-/// under-counted, which makes this an observable scale rather than a proved
-/// bound on `‖H‖₂`. The certificate does not rest on tightness: roundoff at
-/// this scale and a genuinely indefinite block are separated by ten orders of
-/// magnitude on every state measured (`1.97e-9` against `5.5e1` on the same
-/// fixture), so what the scale has to get right is the exponent, not the
-/// constant.
-pub(super) fn undamped_row_curvature_scale(cache: &ArrowFactorCache) -> f64 {
-    let frobenius_squared =
-        |factor: ArrayView2<'_, f64>| -> f64 { factor.iter().map(|entry| entry * entry).sum() };
-    let mut scale = 0.0_f64;
-    for row in 0..cache.undamped_factor_count() {
-        scale += frobenius_squared(cache.undamped_factor(row));
-    }
-    if let Some(schur) = cache.schur_factor.as_ref() {
-        scale += frobenius_squared(schur.view());
-    }
-    scale
-}
-
-/// Forward-error constant for the ARD trace. Matches the constant the interval
-/// certificate has always used; the change below is the SCALE it multiplies,
-/// not its size.
-const ARD_EDF_FORWARD_ERROR_FACTOR: f64 = 64.0;
-
-/// Certify the ARD identity
-/// `edf = n_active - alpha * shrinkage_trace` against its exact
-/// `[0, n_active]` interval.  A tiny excursion at the forward-error scale of
-/// the accumulated trace is snapped to the boundary; a material excursion is a
-/// failed trace certificate, not an EDF that may be silently projected into
-/// another model.
-///
-/// `shrinkage_trace` is [`SaeManifoldTerm::ard_shrinkage_traces`], NOT
-/// [`SaeManifoldTerm::ard_inverse_traces`]: it carries the per-row
-/// dimensionless prior-curvature factor `f = softplus_{τ₀}(cos κt)` so that
-/// `alpha * shrinkage_trace` is `Σ_i P_i·[H⁻¹]_{ss}` with `P_i` the curvature
-/// the arrow was actually assembled with. On a Euclidean axis `f ≡ 1` and the
-/// two traces are the same number; on a periodic axis they are not, and only
-/// this one is bounded (#2499 — see that function's derivation).
-///
-/// # Why the tolerance carries the block's conditioning
-///
-/// The interval is exact for `H = C + P` with data curvature `C ⪰ 0` and
-/// diagonal prior curvature `P ⪰ 0`: then `H ⪰ P`, so every slot has
-/// `P_s·[H⁻¹]_ss ≤ 1` (and `= 0` where `P_s = 0`), and the sum lands in
-/// `[0, n_active]`. The certificate is therefore asking whether the ASSEMBLED
-/// curvature is PSD, and it must tell a state whose curvature is genuinely
-/// indefinite from one whose curvature is zero on this axis and whose assembled
-/// copy carries a roundoff-scale negative eigenvalue.
-///
-/// For `Ĥ = H + E`,
-/// `|α·tr(Ĥ⁻¹) − α·tr(H⁻¹)| ≤ α‖E‖₂·tr(H⁻²) ≤ (‖E‖₂/λ_min(H))·α·tr(H⁻¹)`,
-/// and on the Euclidean axis this derivation was written for, `λ_min(H) ≥ α`,
-/// so with `‖E‖₂ ≤ c·ε·‖H‖₂` the excursion is bounded by
-/// `c·ε·(‖H‖₂/α)·shrinkage`. The factor `‖H‖₂/α` is the block's conditioning,
-/// and it is exactly what a tolerance written against `n_active + shrinkage`
-/// omits: on a `d`-dimensional axis pinned at the prior, `shrinkage = n_active`
-/// identically, so that form measures the answer's magnitude rather than the
-/// accuracy with which it was reached. Measured on the shared two-atom fixture
-/// it was short by ~700x (excursion `1.97e-9` against a `2.84e-12` bound) at a
-/// state where the exact EDF is zero, which refused an ordinary dispersion.
-/// A genuinely indefinite state on the same fixture missed the interval by
-/// `17.3` on `n_active = 10` — ten orders of magnitude clear of either bound,
-/// so the conditioning factor costs the certificate no discrimination. On a
-/// periodic axis `λ_min(H) ≥ α` does not hold, so `‖H‖₂/α` is an observable
-/// scale there rather than a proved bound — the same standing the scale it
-/// multiplies already has (see [`undamped_row_curvature_scale`]), and the two
-/// regimes this certificate separates are ten orders apart on every state
-/// measured.
-pub(super) fn certified_ard_axis_edf(
-    n_active: f64,
-    alpha: f64,
-    inverse_trace: f64,
-    curvature_scale: f64,
-    atom: usize,
-    axis: usize,
-) -> Result<f64, String> {
-    if !(n_active.is_finite() && n_active >= 0.0) {
-        return Err(format!(
-            "reconstruction_dispersion: ARD active count at atom {atom}, axis {axis} \
-             must be finite and non-negative; got {n_active}"
-        ));
-    }
-    if !(alpha.is_finite() && alpha > 0.0 && inverse_trace.is_finite()) {
-        return Err(format!(
-            "reconstruction_dispersion: ARD precision/trace at atom {atom}, axis {axis} \
-             must be finite with positive precision; got alpha={alpha}, trace={inverse_trace}"
-        ));
-    }
-    let shrinkage = alpha * inverse_trace;
-    let raw = n_active - shrinkage;
-    if !shrinkage.is_finite() || !raw.is_finite() {
-        return Err(format!(
-            "reconstruction_dispersion: ARD EDF arithmetic is unrepresentable at atom \
-             {atom}, axis {axis} (n_active={n_active}, alpha={alpha}, trace={inverse_trace})"
-        ));
-    }
-    if !(curvature_scale.is_finite() && curvature_scale >= 0.0) {
-        return Err(format!(
-            "reconstruction_dispersion: ARD curvature scale at atom {atom}, axis {axis} \
-             must be finite and non-negative; got {curvature_scale}"
-        ));
-    }
-    // `‖H‖₂/α ≥ 1` always, since `H ⪰ αI`; a scale that says otherwise is a
-    // block whose largest eigenvalue is the prior itself.
-    let conditioning = (curvature_scale / alpha).max(1.0);
-    let tolerance = ARD_EDF_FORWARD_ERROR_FACTOR
-        * f64::EPSILON
-        * conditioning
-        * shrinkage.abs().max(n_active).max(1.0);
-    // #2499 — one message cannot serve two failure modes whose remedies are
-    // opposite. A roundoff excursion (just past a correctly-derived tolerance)
-    // is answered by re-deriving the tolerance; a STRUCTURAL excursion — one
-    // whose magnitude is orders past any admissible tolerance — is answered by
-    // suspecting the assembly, and widening is categorically wrong. The
-    // discriminator is already computed: the excursion measured in units of the
-    // tolerance. Ten-plus orders means no admissible widening reaches it, so
-    // the two must not be one grep-able string.
-    if raw < -tolerance || raw > n_active + tolerance {
-        let excursion = if raw < 0.0 { -raw } else { raw - n_active };
-        let over_tolerance = excursion / tolerance;
-        let regime = if over_tolerance > 1.0e3 {
-            "STRUCTURAL: the assembled quantity is not the EDF this interval was \
-             derived for — widening the tolerance cannot reach it. An EDF is a \
-             trace of a projection-like operator; check that the prior curvature \
-             the shrinkage trace carries is the curvature the arrow was assembled \
-             with (a periodic axis majorizes it to α·softplus(cos κt), NOT α)"
-        } else {
-            "ROUNDOFF: the excursion is at the forward-error scale of the \
-             accumulated trace, so the tolerance's derivation is the suspect, \
-             not the assembly"
-        };
-        return Err(format!(
-            "reconstruction_dispersion: ARD EDF at atom {atom}, axis {axis} is \
-             {raw:.6e}, outside certified [0, {n_active}] by {excursion:.6e} = \
-             {over_tolerance:.3e}x the roundoff tolerance {tolerance:.6e} at \
-             conditioning {conditioning:.6e}; alpha={alpha:.6e}, \
-             shrinkage_trace={inverse_trace:.6e}. {regime}"
-        ));
-    }
-    Ok(raw.clamp(0.0, n_active))
-}
-
-/// Project a Hutchinson ARD-EDF estimate onto its known parameter space.
-///
-/// Individual grouped diagonal estimates can leave `[0, n_active]` by sampling
-/// noise even when the exact trace is valid. Euclidean projection onto this
-/// closed interval is the constrained estimator: for every true EDF in the
-/// interval it cannot increase squared error. This is deliberately distinct
-/// from the exact-trace certificate above and is used only on the declared
-/// massive-K stochastic trace lane.
-///
-/// `shrinkage_trace_estimate` is the stochastic
-/// [`SaeManifoldTerm::ard_shrinkage_traces`] — carrying the per-row prior
-/// curvature factor, so `alpha * estimate` is `Σ_i P_i·[H⁻¹]_ii` and the
-/// interval it is projected onto is the one the quantity actually lives in
-/// (#2499). Projecting an `α·tr(H⁻¹)` estimate here would clamp a structurally
-/// out-of-range value to a boundary and report it as sampling noise.
-fn projected_hutchinson_ard_axis_edf(
-    n_active: f64,
-    alpha: f64,
-    shrinkage_trace_estimate: f64,
-    atom: usize,
-    axis: usize,
-) -> Result<f64, String> {
-    if !(n_active.is_finite()
-        && n_active >= 0.0
-        && alpha.is_finite()
-        && alpha > 0.0
-        && shrinkage_trace_estimate.is_finite())
-    {
-        return Err(format!(
-            "reconstruction_dispersion: stochastic ARD EDF inputs at atom {atom}, axis \
-             {axis} must be finite with non-negative active count and positive precision; \
-             got n_active={n_active}, alpha={alpha}, trace={shrinkage_trace_estimate}"
-        ));
-    }
-    let estimate = n_active - alpha * shrinkage_trace_estimate;
-    if !estimate.is_finite() {
-        return Err(format!(
-            "reconstruction_dispersion: stochastic ARD EDF estimate is unrepresentable at \
-             atom {atom}, axis {axis}"
-        ));
-    }
-    Ok(estimate.clamp(0.0, n_active))
-}
-
-#[cfg(test)]
-mod ard_edf_certificate_tests {
-    use super::{certified_ard_axis_edf, projected_hutchinson_ard_axis_edf};
-
-    #[test]
-    fn snaps_only_trace_roundoff_at_the_ard_edf_faces() {
-        let n = 8.0;
-        let tiny = 8.0 * f64::EPSILON;
-        assert_eq!(certified_ard_axis_edf(n, 1.0, -tiny, 1.0, 0, 0).unwrap(), n);
-        assert_eq!(
-            certified_ard_axis_edf(n, 1.0, n + tiny, 1.0, 0, 0).unwrap(),
-            0.0
-        );
-    }
-
-    #[test]
-    fn refuses_material_or_nonfinite_ard_edf_excursions() {
-        for trace in [-1.0e-8, 8.0 + 1.0e-8, f64::NAN, f64::INFINITY] {
-            assert!(certified_ard_axis_edf(8.0, 1.0, trace, 1.0, 2, 3).is_err());
-        }
-    }
-
-    /// The tolerance must track the block's conditioning `‖H‖₂/α`, not the
-    /// magnitude of the answer.
-    ///
-    /// The state below is the one measured on the shared two-atom fixture: an
-    /// ARD axis pinned at the prior, so the exact EDF is zero and the trace is
-    /// `n_active/α` exactly. Its assembled copy overshoots by `1.97e-9`, which
-    /// is `c·ε·(‖H‖₂/α)·shrinkage` for an assembly scale of order `10³` — an
-    /// ordinary state, not an indefinite one. A tolerance written against
-    /// `n_active + shrinkage` alone rejects it, so this pins the scale.
-    #[test]
-    fn ard_edf_tolerance_admits_pinned_axis_roundoff_and_still_refuses_a_saddle() {
-        let n_active = 10.0_f64;
-        let alpha = 2.478752e-3_f64;
-        let pinned_trace = n_active / alpha;
-        // The measured excursion, expressed back in trace units.
-        let overshoot = 1.973920e-9 / alpha;
-        let curvature_scale = 1.0e3;
-        assert_eq!(
-            certified_ard_axis_edf(
-                n_active,
-                alpha,
-                pinned_trace + overshoot,
-                curvature_scale,
-                1,
-                0
-            )
-            .unwrap(),
-            0.0,
-            "a pinned ARD axis whose assembled trace overshoots at the block's \
-             own forward-error scale is EDF zero, not a failed certificate"
-        );
-        // The same fixture's genuinely indefinite state: `α·tr = 27.3` against
-        // `n_active = 10`. Ten orders of magnitude clear of the bound above.
-        let saddle_trace = 27.27_f64 / alpha;
-        assert!(
-            certified_ard_axis_edf(n_active, alpha, saddle_trace, curvature_scale, 1, 0).is_err(),
-            "coordinate curvature far below the prior is an indefinite block; the \
-             conditioning factor must not launder it"
-        );
-        // Conditioning cannot buy an arbitrary excursion: a scale large enough
-        // to admit the saddle is not one this certificate ever sees, but the
-        // bound must still be the derived product rather than a free pass.
-        assert!(
-            certified_ard_axis_edf(n_active, alpha, pinned_trace + overshoot, 0.0, 1, 0).is_err(),
-            "at unit conditioning the pinned-axis overshoot is far outside the bound"
-        );
-    }
-
-    #[test]
-    fn stochastic_trace_lane_uses_the_declared_constrained_estimator() {
-        assert_eq!(
-            projected_hutchinson_ard_axis_edf(8.0, 1.0, -2.0, 0, 0).unwrap(),
-            8.0
-        );
-        assert_eq!(
-            projected_hutchinson_ard_axis_edf(8.0, 1.0, 10.0, 0, 0).unwrap(),
-            0.0
-        );
-    }
-}
-
 /// Reconstruct a persisted SAE-manifold atom set from frozen coordinates,
 /// assignment masses, and decoder blocks.
 ///
@@ -381,7 +96,9 @@ impl SaeManifoldTerm {
     ///
     /// `likelihood_rss = 2·data_fit` is the energy the likelihood sums, whitened
     /// when the metric whitens. Under a whitening metric the raw energy is not
-    /// recoverable from the loss, so the raw residual is then required.
+    /// recoverable from the loss, so the raw residual is then required. A row with
+    /// zero design weight is excluded from estimation and carries no energy in
+    /// either frame.
     fn reconstruction_residual_energies(
         &self,
         loss: &SaeManifoldLoss,
@@ -412,8 +129,15 @@ impl SaeManifoldTerm {
                      reconstruction residual"
                         .to_string()
                 })?;
+                let weights = self.row_loss_weights.as_deref();
+                let raw_rss = residual
+                    .outer_iter()
+                    .enumerate()
+                    .filter(|(row, _)| weights.is_none_or(|weights| weights[*row] > 0.0))
+                    .map(|(_, values)| values.iter().map(|value| value * value).sum::<f64>())
+                    .sum::<f64>();
                 (
-                    residual.iter().map(|value| value * value).sum::<f64>(),
+                    raw_rss,
                     SaeLikelihoodFrame::Whitened {
                         metric_rank: metric.metric_rank(),
                     },
@@ -430,15 +154,6 @@ impl SaeManifoldTerm {
             }
         }
         Ok((raw_rss, likelihood_rss, frame))
-    }
-
-    /// Scalar observations the likelihood frame sums over: `n·p` raw, or
-    /// `n·metric_rank` whitened coordinates.
-    fn likelihood_scalar_count(&self, frame: SaeLikelihoodFrame) -> f64 {
-        match frame {
-            SaeLikelihoodFrame::RawOutput => (self.n_obs() * self.output_dim()) as f64,
-            SaeLikelihoodFrame::Whitened { metric_rank } => (self.n_obs() * metric_rank) as f64,
-        }
     }
 
     /// Both noise scales with no effective-dof correction, for execution plans
@@ -460,70 +175,64 @@ impl SaeManifoldTerm {
         };
         let (raw_rss, likelihood_rss, likelihood_frame) =
             self.reconstruction_residual_energies(&loss, residual.as_ref().map(|r| r.view()))?;
-        let n_scalar = (self.n_obs().saturating_mul(self.output_dim())).max(1) as f64;
+        let (likelihood_scalars, raw_scalars) = self.fitted_response_scalar_counts()?;
         Ok(SaeReconstructionDispersion {
-            raw_output_noise_variance: raw_rss / n_scalar,
-            likelihood_dispersion: likelihood_rss
-                / self.likelihood_scalar_count(likelihood_frame).max(1.0),
+            raw_output_noise_variance: raw_rss / raw_scalars.max(1.0),
+            likelihood_dispersion: likelihood_rss / likelihood_scalars.max(1.0),
             likelihood_frame,
         })
     }
 
     /// The two Gaussian reconstruction noise scales of
-    /// [`SaeReconstructionDispersion`], sharing one effective-dof count.
+    /// [`SaeReconstructionDispersion`], each the root of its frame's scale equation.
     ///
-    /// * `likelihood_dispersion = 2·data_fit / (n_likelihood − EDF)` is the
-    ///   dispersion of the likelihood the fit minimizes, in its own frame. It
-    ///   turns the metric-weighted inverse-Hessian β-block `S_β⁻¹` into a
-    ///   posterior covariance `Cov(β) = φ̂·S_β⁻¹` — the same `Vb = φ·H⁻¹`
-    ///   convention the main GAM inference path uses. Under a whitening metric
-    ///   `S_β` already carries the metric's variance scale, so this multiplier is
-    ///   dimensionless and counts the `n·metric_rank` whitened observations.
-    /// * `raw_output_noise_variance = Σ_{i,c} r_{ic}² / (n·p − EDF)` is the raw
-    ///   output-frame noise per scalar, whatever the metric. Under a whitening
-    ///   metric `data_fit` is ≈ n·p by construction, so the Marchenko–Pastur rank
-    ///   edge, which compares against the unwhitened decoder Gram, must read this
-    ///   one (#2228/#2258: the whitened value vetoed a fitted EV = 0.998 circle as
-    ///   rank zero). On the isotropic frame the two coincide exactly.
+    /// * `likelihood_dispersion` is the dispersion of the likelihood the fit
+    ///   minimizes, in its own frame. It turns the metric-weighted inverse
+    ///   information into a posterior covariance, the `Vb = φ·H⁻¹` convention the
+    ///   main GAM inference path uses. Under a whitening metric the information
+    ///   already carries the metric's variance scale, so this multiplier is
+    ///   dimensionless and counts the whitened observations.
+    /// * `raw_output_noise_variance` is the raw output-frame noise per scalar,
+    ///   whatever the metric. Under a whitening metric `data_fit` is ≈ n·p by
+    ///   construction, so the Marchenko–Pastur rank edge, which compares against
+    ///   the unwhitened decoder Gram, must read this one (#2228/#2258: the whitened
+    ///   value vetoed a fitted EV = 0.998 circle as rank zero). On the isotropic
+    ///   frame the two coincide exactly.
     ///
-    /// The loss stores the half-sum, so `RSS = 2·data_fit` on the isotropic
-    /// frame. The residual degrees of freedom subtract the effective
-    /// parameter count from the scalar observations:
-    ///   * decoder β: `beta_dim − tr(λ_smooth · S_β⁻¹ · ⊕_k S_k⊗I_p)`, the
-    ///     smoothness effective-dof already assembled for the Fellner-Schall
-    ///     step (penalty-shrunk directions do not cost a full parameter);
-    ///   * latent coordinates: enabled ARD axes use the ARD-shrunk trace
-    ///     `Σ_k Σ_j (n_active_k − α_{kj}·tr_{kj}(H⁻¹))`; atoms with disabled
-    ///     native ARD charge the full active coordinate count because those
-    ///     latent variables are estimated without an ARD precision.
-    ///
-    /// Below the declared massive-K threshold the coordinate term is the exact
-    /// ARD-shrunk effective dof of the latent block: along axis `(k,j)` the
-    /// MacKay/Fellner-Schall edf is
-    /// `n_active_k − α_{kj}·τ_{kj}`, the well-determined-direction count
-    /// after the ARD prior `α_{kj}` shrinks each coordinate. `τ_{kj}` is the
-    /// SHRINKAGE trace [`Self::ard_shrinkage_traces`], NOT the posterior-variance
-    /// trace [`Self::ard_inverse_traces`] the EFS ARD step consumes: the two
-    /// coincide on a Euclidean axis and differ on a periodic one, where the prior
-    /// curvature the arrow carries is the PSD majorizer `α·softplus(cos κt) ≤ α`
-    /// rather than `α` (#2499). Only the former makes `α·τ ∈ [0, n_active_k]`.
-    /// The per-axis scalar count `n_active_k` must match the support the trace sums
-    /// over: `n` for the dense full-support layout, or the number of rows where
-    /// atom `k` is active for the compact active-set layout (inactive
-    /// prior-dominated coordinates contribute 0 to both the trace and the
-    /// count, hence 0 edf). At massive K the selected-inverse diagonal is the
-    /// declared Hutchinson estimate; its grouped EDF is projected onto the exact
-    /// `[0,n_active_k]` parameter space, which cannot increase squared error.
-    /// The residual dof is floored at 1 so `φ̂` stays finite and positive.
     /// `residual` is the per-row reconstruction residual `f(θ̂) − y` (n×p) at the
-    /// same state that produced `cache`. When supplied, the block count above is
-    /// NOT used: the effective parameter count is the joint fitted-response
-    /// divergence `tr(∂f̂/∂y) = tr(A⁺G)` ([`Self::fitted_response_divergence`],
-    /// #2933 F36), through the exact observed information of the logits,
-    /// coordinates, and decoder border together, plus the profiled frame
-    /// dimension. `None` prices the block count, an approximation that omits the
-    /// gates, the non-smoothing penalties, the residual curvature, and every
-    /// coupling between blocks.
+    /// same state that produced `cache`.
+    ///
+    /// # The scale equation (#2933 F40)
+    ///
+    /// The noise model is the likelihood's own: `yᵢ = fᵢ(θ) + εᵢ` with
+    /// `Cov(εᵢ) = φ·(wᵢMᵢ)⁻¹` on the likelihood frame, and `Cov(εᵢ) = φ·I` on the raw
+    /// output frame. Linearize the fit about its converged inner state,
+    /// `f̂ ≈ f̂(μ) + R·(y − μ)`, with `R = ∂f̂/∂y` taken through the exact observed
+    /// information of the logits, coordinates and decoder border together
+    /// ([`Self::fitted_response_divergence`], #2933 F36). Then, in the frame's norm
+    /// over its `N` scalars of positive weight,
+    ///
+    /// ```text
+    ///   E‖y − f̂‖² = ‖(I − R)μ‖² + φ·ν,   ν = ‖I − R‖²_F = N − 2 tr R + ‖R‖²_F,
+    /// ```
+    ///
+    /// and each scale is `φ̂ = RSS/ν`. It is unbiased when the fitted response
+    /// reproduces the mean, `(I − R)μ = 0`, for example a mean in the unpenalized
+    /// space of every prior. Otherwise the bias `‖(I − R)μ‖²/ν` is non-negative,
+    /// so the scale errs toward wider bands and a higher rank edge. The historical
+    /// `RSS/(N − tr R)` is the special case `R² = R` of a projection. For a
+    /// shrinking smoother it is biased low: with `R = ½I` and `μ = 0` its
+    /// expectation is `½φ`. No floor is put on `ν`. A response that reproduces
+    /// every observation has `ν = 0`, leaves no residual to estimate a scale from,
+    /// and is refused.
+    ///
+    /// The divergence holds the profiled decoder frames at their fitted
+    /// orientation. Each frame's `r·(p − r)` unpenalized tangent dimensions are
+    /// charged as fully determined response directions, so `tr R` and `‖R‖²_F`
+    /// each gain that count and `ν` loses it. When the frame block carries
+    /// Gauss–Newton curvature and no prior, that count bounds the frame-coupled
+    /// divergence from above, which makes the scale conservative. The coupled
+    /// frame-tangent response is not assembled yet.
     ///
     /// # Selection is conditioned on, not charged
     ///
@@ -553,168 +262,83 @@ impl SaeManifoldTerm {
         loss: &SaeManifoldLoss,
         cache: &ArrowFactorCache,
         rho: &SaeManifoldRho,
-        residual: Option<ArrayView2<'_, f64>>,
+        residual: ArrayView2<'_, f64>,
     ) -> Result<SaeReconstructionDispersion, String> {
         self.assignment.validate_rho_domain(rho)?;
-        let n = self.n_obs();
-        let p = self.output_dim();
-        // Design-honesty weights are normalized to mean one, so they redistribute
-        // residual mass without changing the scalar observation count.
-        let n_scalar = (n * p) as f64;
         // FRAME CONSISTENCY: the raw energy prices the output-frame noise the MP
         // edge compares against; the likelihood energy prices the covariance
         // multiplier of the metric-weighted Hessian. See the fn doc.
         let (raw_rss, likelihood_rss, likelihood_frame) =
-            self.reconstruction_residual_energies(loss, residual)?;
-        let edf = match residual {
-            Some(residual) => {
-                // #2933 F36 — the effective degrees of freedom are the joint
-                // fitted-response divergence `tr(∂f̂/∂y) = tr(A⁺G)` of the converged
-                // inner state, taken through the exact observed information of every
-                // estimated block at once. The per-axis completion this replaced
-                // summed `htt/(htt+c+V'') − htt/(htt+V'')` from diagonal curvatures
-                // and a clamped prior majorizer. An off-diagonal residual curvature
-                // `A = [[1, c], [c, 1]]` gave it zero where the trace correction is
-                // `2/(1−c²) − 2`, and it went silent on atoms without ARD and on atoms
-                // without a second jet. The divergence holds the fitted routing (TopK
-                // support, converged basin) fixed, so selection degrees of freedom are
-                // omitted, not estimated; see the fn doc (#2933 F37).
-                let fitted = self.try_fitted_for_rho(rho)?;
-                if fitted.dim() != residual.dim() {
-                    return Err(format!(
-                        "reconstruction_dispersion: fitted {:?} != residual {:?}",
-                        fitted.dim(),
-                        residual.dim()
-                    ));
-                }
-                let target = &fitted - &residual;
-                let response = self
-                    .fitted_response_divergence(target.view(), rho, cache)
-                    .map_err(|refusal| format!("reconstruction_dispersion: {refusal}"))?;
-                match response.estimator {
-                    FittedResponseDivergenceEstimator::ExactSpectral => log::debug!(
-                        "[SAE-DISPERSION] exact spectral fitted-response divergence {:.6e}",
-                        response.divergence
-                    ),
-                    FittedResponseDivergenceEstimator::Hutchinson {
-                        probes,
-                        standard_error,
-                    } => log::debug!(
-                        "[SAE-DISPERSION] Hutchinson fitted-response divergence {:.6e} \
-                         (standard error {standard_error:.3e}) from {probes} probes",
-                        response.divergence
-                    ),
-                }
-                // The divergence holds the decoder frames at their fitted orientation;
-                // the profiled Grassmann directions are counted by dimension, as the
-                // block count counts them.
-                let frame_dof = if self.frames_active() {
-                    self.grassmann_evidence_dimension() as f64
-                } else {
-                    0.0
-                };
-                (response.divergence + frame_dof).clamp(0.0, n_scalar)
-            }
-            None => self.block_count_reconstruction_edf(cache, rho)?,
+            self.reconstruction_residual_energies(loss, Some(residual))?;
+        let fitted = self.try_fitted_for_rho(rho)?;
+        if fitted.dim() != residual.dim() {
+            return Err(format!(
+                "reconstruction_dispersion: fitted {:?} != residual {:?}",
+                fitted.dim(),
+                residual.dim()
+            ));
+        }
+        let target = &fitted - &residual;
+        let response = self
+            .fitted_response_divergence(target.view(), rho, cache)
+            .map_err(|refusal| format!("reconstruction_dispersion: {refusal}"))?;
+        match response.estimator {
+            FittedResponseDivergenceEstimator::ExactSpectral => log::debug!(
+                "[SAE-DISPERSION] exact spectral fitted-response divergence {:.6e}, residual dof \
+                 {:.6e} likelihood / {:.6e} raw",
+                response.divergence,
+                response.likelihood_residual_dof,
+                response.raw_residual_dof
+            ),
+            FittedResponseDivergenceEstimator::Hutchinson {
+                probes,
+                standard_error,
+            } => log::debug!(
+                "[SAE-DISPERSION] Hutchinson fitted-response divergence {:.6e} (standard error \
+                 {standard_error:.3e}) and residual dof {:.6e} likelihood / {:.6e} raw from \
+                 {probes} probes",
+                response.divergence,
+                response.likelihood_residual_dof,
+                response.raw_residual_dof
+            ),
+        }
+        let frame_dimension = if self.frames_active() {
+            self.grassmann_evidence_dimension() as f64
+        } else {
+            0.0
         };
-        let resid_dof = (n_scalar - edf).max(1.0);
-        let raw_output_noise_variance = raw_rss / resid_dof;
-        let likelihood_resid_dof = (self.likelihood_scalar_count(likelihood_frame) - edf).max(1.0);
-        let likelihood_dispersion = likelihood_rss / likelihood_resid_dof;
-        for (label, phi) in [
-            ("raw output noise variance", raw_output_noise_variance),
-            ("likelihood dispersion", likelihood_dispersion),
-        ] {
+        let scale = |label: &str, rss: f64, residual_dof: f64| -> Result<f64, String> {
+            if !(residual_dof.is_finite() && residual_dof > 0.0) {
+                return Err(format!(
+                    "reconstruction_dispersion: the {label} has no residual degrees of freedom: \
+                     ‖I − R‖²_F = {residual_dof:.6e} at divergence {:.6e} and profiled frame \
+                     dimension {frame_dimension}; the fitted response reproduces the \
+                     observations, so no noise scale is estimable",
+                    response.divergence
+                ));
+            }
+            let phi = rss / residual_dof;
             if !phi.is_finite() || phi < 0.0 {
                 return Err(format!(
-                    "reconstruction_dispersion: non-finite/negative {label} {phi} \
-                     (raw RSS={raw_rss}, likelihood RSS={likelihood_rss}, resid_dof={resid_dof}, \
-                     likelihood resid_dof={likelihood_resid_dof}, edf={edf})"
+                    "reconstruction_dispersion: non-finite/negative {label} {phi} (RSS={rss}, \
+                     residual dof={residual_dof})"
                 ));
             }
-        }
+            Ok(phi.max(f64::MIN_POSITIVE))
+        };
         Ok(SaeReconstructionDispersion {
-            raw_output_noise_variance: raw_output_noise_variance.max(f64::MIN_POSITIVE),
-            likelihood_dispersion: likelihood_dispersion.max(f64::MIN_POSITIVE),
+            raw_output_noise_variance: scale(
+                "raw output noise variance",
+                raw_rss,
+                response.raw_residual_dof - frame_dimension,
+            )?,
+            likelihood_dispersion: scale(
+                "likelihood dispersion",
+                likelihood_rss,
+                response.likelihood_residual_dof - frame_dimension,
+            )?,
             likelihood_frame,
         })
-    }
-
-    /// The block-count effective degrees of freedom `beta_edf + coord_edf` that
-    /// [`Self::reconstruction_dispersion`] prices when no residual is in hand, and
-    /// so no observed information can be formed. It is an approximation to the
-    /// fitted-response divergence, not that divergence: it omits the gate logits,
-    /// every non-smoothing penalty, the residual curvature, and the couplings
-    /// between blocks.
-    fn block_count_reconstruction_edf(
-        &self,
-        cache: &ArrowFactorCache,
-        rho: &SaeManifoldRho,
-    ) -> Result<f64, String> {
-        let n = self.n_obs();
-        let smooth_edf: f64 = self
-            .decoder_smoothness_effective_dof_per_atom(cache, &rho.lambda_smooth_vec()?)
-            .map_err(|e| format!("reconstruction_dispersion: smooth edf: {e}"))?
-            .iter()
-            .sum();
-        // #972 / #977 T1: the raw decoder-parameter count is `beta_dim` on the
-        // full-`B` path, but when frames are active the estimated decoder freedom
-        // is the factored border `Σ M_k·r_k` PLUS the `Σ r_k·(p−r_k)` Grassmann
-        // frame degrees profiled out (both are genuinely estimated), which the
-        // smoothness shrinkage `smooth_edf` (taken over the factored border) then
-        // discounts. On the full-`B` path `factored_border_dim == beta_dim` and
-        // `grassmann_evidence_dimension == 0`, so this is exactly `beta_dim`.
-        let raw_decoder_dof = if self.frames_active() {
-            (self.factored_border_dim() + self.grassmann_evidence_dimension()) as f64
-        } else {
-            self.beta_dim() as f64
-        };
-        let beta_edf = (raw_decoder_dof - smooth_edf).max(0.0);
-        // ARD-shrunk latent-coordinate EDF, reusing the EFS trace cache.
-        let ard_precisions = self.validated_ard_precisions(rho)?;
-        let stochastic_ard_trace = self.k_atoms() >= Self::ARD_TRACE_HUTCHINSON_MIN_ATOMS;
-        let traces = self
-            .ard_shrinkage_traces(cache)
-            .map_err(|e| format!("reconstruction_dispersion: ARD shrinkage traces: {e}"))?;
-        // The scale at which those traces' forward error lives (see
-        // `certified_ard_axis_edf`). One pass over factors the cache already
-        // holds.
-        let curvature_scale = undamped_row_curvature_scale(cache);
-        let mut coord_edf = 0.0_f64;
-        for (k, atom) in self.atoms.iter().enumerate() {
-            let d_k = atom.latent_dim();
-            if traces[k].len() != d_k {
-                return Err(format!(
-                    "reconstruction_dispersion: trace shape mismatch at atom {k} \
-                     (traces={}, d_k={d_k})",
-                    traces[k].len()
-                ));
-            }
-            let ard_len = rho.log_ard[k].len();
-            // Scalar count matched to the trace support (see fn doc).
-            let n_active_k = match self.last_row_layout {
-                Some(ref layout) => layout
-                    .active_atoms
-                    .iter()
-                    .filter(|active| active.contains(&k))
-                    .count() as f64,
-                None => n as f64,
-            };
-            if ard_len == 0 {
-                coord_edf += n_active_k * d_k as f64;
-                continue;
-            }
-            for j in 0..d_k {
-                let alpha = ard_precisions[k][j];
-                let edf_kj = if stochastic_ard_trace {
-                    projected_hutchinson_ard_axis_edf(n_active_k, alpha, traces[k][j], k, j)?
-                } else {
-                    certified_ard_axis_edf(n_active_k, alpha, traces[k][j], curvature_scale, k, j)?
-                };
-                coord_edf += edf_kj;
-            }
-        }
-        Ok(beta_edf + coord_edf)
     }
 
     /// The border range of each atom's decoder block in the joint cache layout:
@@ -988,7 +612,7 @@ impl SaeManifoldTerm {
             .map_err(|error| error.to_string())?;
         let residual = self.reconstruction_residual(target, rho)?;
         let dispersion =
-            self.reconstruction_dispersion(&loss, &cache, rho, Some(residual.view()))?;
+            self.reconstruction_dispersion(&loss, &cache, rho, residual.view())?;
         let information = self.shape_information(rho, target, registry, &cache)?;
         self.assemble_shape_uncertainty(&information, dispersion)
     }
