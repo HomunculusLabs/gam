@@ -7472,7 +7472,15 @@ pub(crate) fn run_outer(
     {
         let canonical_config = canonicalize_outer_config(config, &perm);
         let mut canonical_obj = CanonicalizedObjective::new(obj, perm.clone());
-        let result = run_outer(&mut canonical_obj, &canonical_config, context)?;
+        // The runner's trail below prints ρ in canonical order; this line is what
+        // lets a reader map it back. Only the returned result and refusal are
+        // mapped to native order, both here.
+        log::info!(
+            "[OUTER] {context}: searching in canonical coordinate order; canonical slot c \
+             holds native coordinate perm[c], perm={perm:?}"
+        );
+        let result = run_outer(&mut canonical_obj, &canonical_config, context)
+            .map_err(|error| outer_error_to_native(error, &perm))?;
         return Ok(outer_result_to_native(result, &perm));
     }
     let mut result = run_outer_uncertified(obj, config, context)?;
@@ -9207,3 +9215,7 @@ mod outer_stationarity_band_tests;
 #[cfg(test)]
 #[path = "criterion_curvature_ladder_2748_tests.rs"]
 mod criterion_curvature_ladder_2748_tests;
+
+#[cfg(test)]
+#[path = "canonical_checkpoint_order_tests.rs"]
+mod canonical_checkpoint_order_tests;

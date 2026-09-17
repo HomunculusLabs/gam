@@ -1673,6 +1673,47 @@ pub(crate) fn outer_result_to_native(mut result: OuterResult, perm: &[usize]) ->
     result
 }
 
+/// Map a refusal raised inside the CANONICAL run back to the objective's native
+/// layout, the `Err` twin of [`outer_result_to_native`] (#2902). A refusal's
+/// checkpoint is the point a caller resumes from (`init_rhos`,
+/// `with_initial_rho`), so a checkpoint left in canonical order seeds the
+/// permuted point, and the resumed search starts at a criterion value other
+/// than the one the refusal reported. Coordinate indices already rendered into
+/// `reason` name canonical slots, so the slot map is appended to it.
+pub(crate) fn outer_error_to_native(error: EstimationError, perm: &[usize]) -> EstimationError {
+    match error {
+        EstimationError::RemlDidNotConverge {
+            context,
+            reason,
+            iterations,
+            final_value,
+            projected_grad_norm,
+            stationarity_standard,
+            rho_checkpoint,
+        } => {
+            let rho_checkpoint = if rho_checkpoint.len() == perm.len() {
+                permute_to_native(&Array1::from_vec(rho_checkpoint), perm).to_vec()
+            } else {
+                rho_checkpoint
+            };
+            EstimationError::RemlDidNotConverge {
+                context,
+                reason: format!(
+                    "{reason}; the search ran in canonical coordinate order, so a coordinate \
+                     index named above is a canonical slot c naming native coordinate perm[c], \
+                     perm={perm:?}; rho_checkpoint is in native order"
+                ),
+                iterations,
+                final_value,
+                projected_grad_norm,
+                stationarity_standard,
+                rho_checkpoint,
+            }
+        }
+        other => other,
+    }
+}
+
 /// Rename the coordinates a criterion certificate names by index from canonical
 /// to native (`perm[c]` is the native coordinate at canonical slot `c`). The
 /// certificate is built inside the canonical run, so without this a report of a
