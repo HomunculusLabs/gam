@@ -8786,9 +8786,16 @@ mod shape_covariance_observed_information_2933_f33_tests {
     }
 
     /// Central difference of the analytic joint gradient along every joint
-    /// coordinate, with the collapse-prevention gates held at the root as the
-    /// criterion holds them. Shares no code with the exact-Hessian applies, the
-    /// majorizer, or the selected-inverse producer.
+    /// coordinate. Shares no code with the exact-Hessian applies, the majorizer,
+    /// or the selected-inverse producer.
+    ///
+    /// The collapse-prevention gates are the ones `term` declared at its root: `A`
+    /// is the Hessian of `V(ρ; w₀)` with the routing weights `w₀` held fixed
+    /// (#2933 F05). `SaeManifoldTerm::clone` resets every gate to `None`, and a
+    /// clone without a gate reads the separation barrier's coactivation from its
+    /// live assignments. Its logit columns would then differentiate a routing
+    /// refresh the observed information does not carry, so every perturbed clone
+    /// re-declares the root's gates.
     fn finite_difference_hessian(
         term: &SaeManifoldTerm,
         target: ArrayView2<'_, f64>,
@@ -8798,6 +8805,7 @@ mod shape_covariance_observed_information_2933_f33_tests {
         step: f64,
     ) -> Array2<f64> {
         let dim = total_t + k;
+        let gates = term.collapse_prevention_gates();
         let mut hessian = Array2::<f64>::zeros((dim, dim));
         for column in 0..dim {
             let mut dt = Array1::<f64>::zeros(total_t);
@@ -8808,12 +8816,12 @@ mod shape_covariance_observed_information_2933_f33_tests {
                 db[column - total_t] = 1.0;
             }
             let mut plus = term.clone();
-            plus.streaming_gates_frozen = true;
+            plus.declare_collapse_prevention_gates(&gates);
             plus.apply_newton_step(dt.view(), db.view(), step)
                 .expect("forward perturbation");
             let forward = joint_gradient(&mut plus, target, rho);
             let mut minus = term.clone();
-            minus.streaming_gates_frozen = true;
+            minus.declare_collapse_prevention_gates(&gates);
             let (neg_t, neg_b) = (-&dt, -&db);
             minus
                 .apply_newton_step(neg_t.view(), neg_b.view(), step)
@@ -8824,7 +8832,7 @@ mod shape_covariance_observed_information_2933_f33_tests {
                 .column_mut(column)
                 .assign(&((&forward - &backward) / (2.0 * step)));
         }
-        (&hessian + &hessian.t()) * 0.5
+        hessian
     }
 
     /// An independent spectral classification of a dense operator: plain `eigh`
@@ -8933,8 +8941,10 @@ mod shape_covariance_observed_information_2933_f33_tests {
     /// The oracle is a central difference of the analytic joint gradient, which
     /// shares no code with the exact-Hessian applies, the majorizer or the
     /// selected-inverse producer. Central error is `O(h²)`, so at steps `h` and
-    /// `h/2`, `H(h) − H(h/2) ≈ ¾·err(h)` and the finer Hessian's error is about
-    /// `‖H(h) − H(h/2)‖/3`. The Neumann bound
+    /// `h/2`, `H(h) − H(h/2) ≈ ¾·err(h)` and the finer Hessian's truncation error
+    /// is about `‖H(h) − H(h/2)‖/3`; the antisymmetric half of the raw difference
+    /// measures the error that does not shrink with `h` and is added to it. The
+    /// Neumann bound
     /// `‖δ(A⁻¹)‖_F ≤ ‖A⁻¹‖₂²‖δA‖_F / (1 − ‖A⁻¹‖₂‖δA‖_F)` turns that into a
     /// covariance tolerance with no tuned constant. The majorizer's Schur block
     /// must miss the same oracle by more than that tolerance, so the fixture can
@@ -8959,9 +8969,9 @@ mod shape_covariance_observed_information_2933_f33_tests {
             );
         };
 
-        let coarse =
+        let coarse_raw =
             finite_difference_hessian(&term, target.view(), &rho, total_t, k, GRADIENT_ORACLE_STEP);
-        let fine = finite_difference_hessian(
+        let fine_raw = finite_difference_hessian(
             &term,
             target.view(),
             &rho,
@@ -8969,43 +8979,74 @@ mod shape_covariance_observed_information_2933_f33_tests {
             k,
             0.5 * GRADIENT_ORACLE_STEP,
         );
+        // The true Hessian is symmetric, so the antisymmetric half of the raw
+        // difference is pure oracle error: roundoff and any gradient that is not
+        // the derivative of one scalar. A symmetric error of the same size need not
+        // cancel, so it joins the truncation estimate in the error the bar allows.
+        let roundoff = 0.5 * frobenius((&fine_raw - &fine_raw.t()).view());
+        let coarse = (&coarse_raw + &coarse_raw.t()) * 0.5;
+        let fine = (&fine_raw + &fine_raw.t()) * 0.5;
         let step_error = frobenius((&coarse - &fine).view()) / 3.0;
+        let oracle_error = step_error + roundoff;
         let oracle = classify(&fine, &cache);
-        assert_eq!(
-            (oracle.negative, oracle.in_band),
-            (0, 0),
-            "the oracle Hessian must be positive definite at the converged basin"
-        );
         let smallest = oracle
             .retained
             .iter()
             .map(|&index| oracle.values[index])
             .fold(f64::INFINITY, f64::min);
         let inverse_norm = 1.0 / smallest;
-        let contraction = inverse_norm * step_error;
+        let contraction = inverse_norm * oracle_error;
+        let tolerance = inverse_norm * inverse_norm * oracle_error / (1.0 - contraction);
+        let expected: Vec<Array2<f64>> = ranges
+            .iter()
+            .map(|range| border_block(&oracle, total_t, range))
+            .collect();
+        let misses: Vec<f64> = expected
+            .iter()
+            .enumerate()
+            .map(|(atom, block)| frobenius((&covariance.blocks[atom] - block).view()))
+            .collect();
+        let majorizer_gap = ranges
+            .iter()
+            .zip(&expected)
+            .map(|(range, block)| {
+                let majorizer = cache
+                    .schur_inverse_block(range.clone())
+                    .expect("majorizer Schur inverse block");
+                frobenius((&majorizer - block).view())
+            })
+            .fold(0.0_f64, f64::max);
+        eprintln!(
+            "[#2933 F33] gradient oracle: step error {step_error:.3e}, antisymmetric roundoff \
+             {roundoff:.3e} (‖H‖_F = {:.3e}), smallest curvature {smallest:.3e}, Neumann \
+             contraction {contraction:.3e}, tolerance {tolerance:.3e}; per-atom misses [{}]; \
+             majorizer gap {majorizer_gap:.3e}",
+            frobenius(fine.view()),
+            misses
+                .iter()
+                .map(|miss| format!("{miss:.3e}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        assert_eq!(
+            (oracle.negative, oracle.in_band),
+            (0, 0),
+            "the oracle Hessian must be positive definite at the converged basin"
+        );
         assert!(
             contraction < 1.0,
-            "the gradient oracle's step error {step_error:.3e} must be inside the Neumann \
-             radius of the smallest curvature {smallest:.3e}"
+            "the gradient oracle's error {oracle_error:.3e} must be inside the Neumann radius \
+             of the smallest curvature {smallest:.3e}"
         );
-        let tolerance = inverse_norm * inverse_norm * step_error / (1.0 - contraction);
         assert_eq!(covariance.identified_rank, oracle.retained.len());
         assert_eq!(covariance.ambient_dim, total_t + k);
-
-        let mut majorizer_gap = 0.0_f64;
-        for (atom, range) in ranges.iter().enumerate() {
-            let expected = border_block(&oracle, total_t, range);
-            let miss = frobenius((&covariance.blocks[atom] - &expected).view());
+        for (atom, miss) in misses.iter().enumerate() {
             assert!(
-                miss <= tolerance,
+                *miss <= tolerance,
                 "atom {atom}: ‖[A⁺]_ββ − oracle‖_F = {miss:.3e} exceeds the gradient-oracle \
                  tolerance {tolerance:.3e} (‖oracle‖_F = {:.3e})",
-                frobenius(expected.view())
+                frobenius(expected[atom].view())
             );
-            let majorizer = cache
-                .schur_inverse_block(range.clone())
-                .expect("majorizer Schur inverse block");
-            majorizer_gap = majorizer_gap.max(frobenius((&majorizer - &expected).view()));
         }
         assert!(
             majorizer_gap > tolerance,
