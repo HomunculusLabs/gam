@@ -1,6 +1,6 @@
 #![cfg(test)]
 //! Support-code, rare-atom and spectrum-sampling contracts of the Eq. 4 scorer
-//! (#2933 F09, F16, F19). The support oracles are exact integer combinatorics, the
+//! (#2933 F09, F15, F16, F19). The support oracles are exact integer combinatorics, the
 //! Kraft sum and explicit Krichevsky–Trofimov products, never the scorer's own
 //! helpers; the spectrum oracles are row
 //! permutations and closed-form raw second moments of the contributions.
@@ -327,4 +327,55 @@ fn eq4_atom_spectrum_is_row_order_invariant_at_every_stride() {
             }
         }
     }
+}
+
+/// A signed gate transmits whenever it is nonzero, the support the native coder
+/// prices ([`crate::description_length::gate_is_transmitted`], #2933 F15). The
+/// gates cycle `−1, +1, 0, 0` over eight rows with contribution `gate·w`, so the
+/// atom fires on the four nonzero rows: `L0 = ½`, and the callback is handed exactly
+/// those rows. The predicate `gate > 0` counted only the two positive rows
+/// (`L0 = ¼`) and never fetched the negative firings, whose contributions still sit
+/// in `recon`, so they rode free in both the support and the spectrum.
+///
+/// Oracle: the contribution has mean zero and reconstruction is exact, so
+/// `v_x = ½·w²` and `D = (1−R²)·v_x`. The atom's raw per-firing moment is `λ = w²`
+/// at weight `p = ½`, the only component above the water level, so `θ = D/p` and
+/// the code bits are `p·½·log₂(λ/θ) = ¼·log₂(1/(1−R²))`.
+#[test]
+fn eq4_a_negative_gate_is_a_firing() {
+    const ROWS: usize = 8;
+    const WEIGHT: f64 = 3.0;
+    const TARGET: f64 = 0.9;
+    let gate = Array2::from_shape_fn((ROWS, 1), |(row, _)| match row % 4 {
+        0 => -1.0,
+        1 => 1.0,
+        _ => 0.0,
+    });
+    let contribution = gate.mapv(|value| value * WEIGHT);
+    let mut fetched: Vec<usize> = Vec::new();
+    let report = eq4_fixed_distortion_description_length(
+        contribution.view(),
+        contribution.view(),
+        gate.view(),
+        &[1],
+        0,
+        2,
+        &[TARGET],
+        None,
+        |_, take| {
+            fetched.extend_from_slice(take);
+            Ok(Array2::from_shape_fn((take.len(), 1), |(out_row, _)| {
+                contribution[[take[out_row], 0]]
+            }))
+        },
+    )
+    .expect("signed-gate Eq. 4 fixture must score");
+    assert_eq!(fetched, vec![0, 1, 4, 5]);
+    assert_eq!(report.achieved_block_l0, 0.5);
+    let expected = 0.25 * (1.0 / (1.0 - TARGET)).log2();
+    let code_bits = report.per_target[0].code_bits;
+    assert!(
+        (code_bits - expected).abs() <= 1.0e-10 * expected,
+        "signed gate: code bits {code_bits}, the four nonzero firings cost {expected}"
+    );
 }

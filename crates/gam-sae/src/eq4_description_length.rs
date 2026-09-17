@@ -84,7 +84,9 @@ use ndarray::{Array1, Array2, ArrayView2};
 use gam_linalg::faer_ndarray::{FaerEigh, FaerSvd};
 
 use crate::atom_codes::{combinatorial_support_bits, kt_code_bits};
-use crate::description_length::{DescriptionLengthScoreKind, weighted_reverse_water_filling};
+use crate::description_length::{
+    DescriptionLengthScoreKind, gate_is_transmitted, weighted_reverse_water_filling,
+};
 
 /// Standard fixed-distortion reporting points shared by every front-end.
 pub const DEFAULT_EQ4_R2_TARGETS: &[f64] = &[0.99, 0.95, 0.90, 0.80];
@@ -322,8 +324,10 @@ fn atom_code_spectrum(
 ///
 /// * `test_x` / `recon` — the held-out activations and the featurizer's
 ///   reconstruction of them; same shape `(N, d)`, both finite.
-/// * `gate` — the `(N, G)` per-atom firing gate; an atom fires on a row when its
-///   gate there is strictly positive.
+/// * `gate` — the `(N, G)` per-atom firing gate; an atom fires on a row exactly
+///   when its gate there is nonzero ([`gate_is_transmitted`], the support the
+///   native coder prices). A negative gate is a firing: its contribution is in
+///   `recon`, so it is paid for in the support code and the spectrum.
 /// * `code_dims` — the number `d_g` of scalars each of the `G` atoms transmits
 ///   per firing (length `G`, nonnegative). The top `d_g` modes of the atom's raw
 ///   contribution spectrum are priced as code bits, and every further mode as
@@ -444,8 +448,8 @@ where
     for row in 0..n {
         let mut cardinality = 0_usize;
         for atom in 0..n_atoms {
-            // Any positive gate value is a firing.
-            if gate[[row, atom]] > 0.0 {
+            // Any nonzero gate value is a firing, whatever its sign.
+            if gate_is_transmitted(gate[[row, atom]]) {
                 firings_per_atom[atom] += 1;
                 cardinality += 1;
             }
@@ -491,7 +495,7 @@ where
     for atom in 0..n_atoms {
         let code_dim = code_dims[atom] as usize;
         let rows: Vec<usize> = (0..n)
-            .filter(|&row| gate[[row, atom]] > 0.0)
+            .filter(|&row| gate_is_transmitted(gate[[row, atom]]))
             .collect();
         if rows.is_empty() {
             // A never-firing atom has weight `p_g = 0`: it transmits nothing and
