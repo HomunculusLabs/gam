@@ -551,11 +551,18 @@ fn softmax_exact_a_logdet_theta_adjoint_matches_finite_difference_2933() {
 /// #2933 F01 — the bundle / matrix-free θ-adjoint `logdet_theta_adjoint_from_probes`
 /// receives the data target in production
 /// (`analytic_outer_rho_gradient_components_with_bundle`) and must carry the same
-/// residual third leg. At full-basis probes it reconstructs `B⁻¹` exactly, so the
-/// leg's contribution (the adjoint with the target minus the adjoint without it)
-/// must equal the dense route's on the same inverse, and must be far from zero.
+/// residual third leg as the dense route. At full-basis probes it reconstructs `B⁻¹`
+/// exactly, so the leg's contribution (the adjoint with the target minus the adjoint
+/// without it) must equal the dense route's on the same inverse, and must be far
+/// from zero.
+///
+/// This is route parity, not the defect's arbiter: both towers call one
+/// `patchd_residual_third_leg`, so a leg missing from that helper is missing from
+/// both and the parity still holds (it did at F01's parent). The two
+/// central-difference tests above arbitrate the leg on the dense route; this test
+/// carries their verdict to the from-probes route.
 #[test]
-fn from_probes_theta_adjoint_carries_the_softmax_residual_third_jet_2933() {
+fn from_probes_residual_third_leg_matches_the_dense_route_2933() {
     let (term, target, rho) = softmax_residual_fixture();
     let (anchor, cache) = anchored_state(&term, &target, &rho);
     assert_eq!(
@@ -629,38 +636,16 @@ fn from_probes_theta_adjoint_carries_the_softmax_residual_third_jet_2933() {
             .expect("from-probes exact-A θ-adjoint without the data target"),
     );
     let largest = dense_leg.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
-    // Every triple contracted into a logit slot holds a logit, so a leg that drops
-    // the logit triples reads exactly zero there.
-    let mut logit_leg_largest = 0.0_f64;
-    for row in 0..anchor.n_obs() {
-        let base = cache.row_offsets[row];
-        let vars = anchor
-            .row_vars_for_cache_row(row, &cache)
-            .expect("row variables of a fixture row");
-        for (position, var) in vars.iter().enumerate() {
-            if matches!(var, SaeLocalRowVar::Logit { .. }) {
-                logit_leg_largest = logit_leg_largest.max(dense_leg[base + position].abs());
-            }
-        }
-    }
     let gap = dense_leg
         .iter()
         .zip(&probes_leg)
         .map(|(x, y)| (x - y).abs())
         .fold(0.0_f64, f64::max);
-    eprintln!(
-        "[#2933 F01 probes] max|dense leg|={largest:.6e} max|dense leg on logit slots|=\
-         {logit_leg_largest:.6e} max|probes − dense|={gap:.6e}"
-    );
+    eprintln!("[#2933 F01 probes] max|dense leg|={largest:.6e} max|probes − dense|={gap:.6e}");
     assert!(
         largest >= 1.0e-3,
         "#2933 F01: the residual third leg must carry real weight on this fixture \
          (max|leg|={largest:.3e}), or the parity below is a zero-vs-zero comparison"
-    );
-    assert!(
-        logit_leg_largest >= 1.0e-3,
-        "#2933 F01: the residual third leg must carry real weight on the logit slots \
-         (max|leg|={logit_leg_largest:.3e}), or the parity below cannot see the logit triples"
     );
     assert!(
         gap <= 1.0e-9 * (1.0 + largest),
