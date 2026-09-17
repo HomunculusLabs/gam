@@ -63,3 +63,60 @@
 //! default. Every other tolerance is derived (a roundoff bound, an eigengap, a
 //! Lipschitz covering). Derivatives are analytic; finite differences appear only
 //! in tests.
+
+// Nonlinear separation over the moment zonotope: lower witnesses, derived upper bounds.
+// [unlanded: adversary]
+
+// Matrix-free structured edits applied to the current intervened input.
+// [unlanded: apply]
+
+// Component query-key kernel under the source's joint softmax and causal mask.
+// [unlanded: attention]
+
+// KL oscillation bound, whole-set composition containment, conservation conditioning.
+// [unlanded: bounds]
+
+// Prefix, subset and graph codes for the global artifact and local packets.
+// [unlanded: codec]
+
+// Matrix-valued parameter fields over GAM bases, with anchored pullbacks.
+// [unlanded: field]
+
+// Joint finite-intervention objective and structural proposals.
+// [unlanded: fit]
+
+// Exact masked rewrites of gated units, norms, biases and residual edges.
+// [unlanded: gated_rewrite]
+
+// Tensor registry and the exact residual anchor.
+// [unlanded: lift]
+
+// Mask moments, the admissible zonotope, support function and affine-logit adversary.
+// [unlanded: moments]
+
+// Global versus use-specific edits and occurrence scopes.
+// [unlanded: occurrence]
+
+// Gauge-covariant group masks, structured parameter paths, Sum and Compose accounting.
+// [unlanded: operators]
+
+// Declared-precision real codes and decode-then-evaluate distortion.
+// [unlanded: precision]
+
+// The typed mechanism program graph and its versioned serialization.
+// [unlanded: program]
+
+// Exact component-coordinate MLP program under masks.
+// [unlanded: rewrite]
+
+// Plane-rotation and response-projector recovery with derived eigengaps.
+// [unlanded: spectral]
+
+// Sufficient-state quotient and realization contracts.
+// [unlanded: state]
+
+// Evidence status, failure hypergraph and robust supports.
+// [unlanded: supports]
+
+// Versioned request and report document shared by pyffi and the CLI.
+// [unlanded: surface]
