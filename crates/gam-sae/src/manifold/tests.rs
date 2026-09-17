@@ -6331,8 +6331,10 @@ pub(crate) fn periodic_ard_centered_bessel_value_gradient_survive_domain_edge() 
     let rho = SaeManifoldRho::new(0.0, 0.0, vec![array![log_alpha]]);
 
     let value = term.ard_value(&rho).unwrap();
-    let log_eta = log_alpha - 2.0 * std::f64::consts::TAU.ln();
-    let expected = -0.5 * n as f64 * (std::f64::consts::TAU.ln() + log_eta);
+    // At large η the period-one partition is `log Z = −η + log I0(η) → ½·log(2π/α)`;
+    // paired with the coordinate's Laplace `−½·log 2π` (#2933 F26) it is the
+    // Euclidean `−½·n·log α`.
+    let expected = -0.5 * n as f64 * log_alpha;
     assert!(value.is_finite());
     assert!(
         (value - expected).abs() < 2.0e-8,

@@ -8,7 +8,7 @@
 #![cfg(test)]
 use super::*;
 use crate::manifold::tests_sparse_curvature_operator_2500::threshold_gate_tiny_fixture;
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, Array3};
 
 const RESCALINGS: [f64; 2] = [100.0, 1.0e-3];
 
@@ -131,6 +131,68 @@ fn dense_criterion_is_invariant_under_compensated_penalty_rescaling_2933() {
             "S → {c}·S, λ → λ/{c} moved the dense criterion from {base_value} to {value} \
              (Δ = {}); a log-λ-only normalizer moves it by {shift}",
             value - base_value
+        );
+    }
+}
+
+/// A one-atom, one-axis term whose `n` coordinates sit at the origin of `manifold`.
+/// `ard_value` reads only the coordinates and their manifold, so the decoder side
+/// is a shape-consistent placeholder.
+fn origin_axis_term(manifold: LatentManifold, n: usize) -> SaeManifoldTerm {
+    let m = 2usize;
+    let p = 3usize;
+    let atom = SaeManifoldAtom::new_with_provided_function_gram(
+        "origin_axis",
+        SaeAtomBasisKind::EuclideanPatch,
+        1,
+        Array2::<f64>::ones((n, m)),
+        Array3::<f64>::zeros((n, m, 1)),
+        Array2::<f64>::zeros((m, p)),
+        Array2::<f64>::eye(m),
+    )
+    .expect("basis, jet, decoder and Gram shapes agree");
+    let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
+        Array2::<f64>::zeros((n, 1)),
+        vec![Array2::<f64>::zeros((n, 1))],
+        vec![manifold],
+        AssignmentMode::softmax(1.0),
+    )
+    .expect("one coordinate block for one atom");
+    SaeManifoldTerm::new(vec![atom], assignment).expect("single-atom term")
+}
+
+/// #2933 F26 — the coordinate priors of different topologies must share one
+/// normalization convention. A von Mises prior at large concentration is the
+/// Gaussian prior, so at the origin (both energies zero) a periodic axis and a
+/// Euclidean axis at the same precision must price the same normalizer, up to the
+/// partition's own `log(1 + 1/(8η) + …)` correction. The Euclidean normalizer had
+/// its `½·log 2π` paired with the Laplace constant while the periodic one did not,
+/// a gap of `½·n·log 2π`.
+#[test]
+fn periodic_and_euclidean_ard_normalizers_agree_in_the_gaussian_limit_2933() {
+    let n = 5usize;
+    let log_alpha = 12.0_f64;
+    let rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::from_elem(1, log_alpha)]);
+    let euclidean = origin_axis_term(LatentManifold::Euclidean, n)
+        .ard_value(&rho)
+        .expect("Euclidean ARD value");
+    let unpaired_gap = 0.5 * n as f64 * std::f64::consts::TAU.ln();
+    for period in [1.0, std::f64::consts::TAU] {
+        let periodic = origin_axis_term(LatentManifold::Circle { period }, n)
+            .ard_value(&rho)
+            .expect("periodic ARD value");
+        let eta = log_alpha.exp() * (period / std::f64::consts::TAU).powi(2);
+        let partition_correction = n as f64 / (8.0 * eta);
+        let tolerance = 2.0 * partition_correction + 1.0e-9;
+        assert!(
+            tolerance < 1.0e-3 * unpaired_gap,
+            "tolerance {tolerance} must sit far below the unpaired ½·n·log 2π = {unpaired_gap}"
+        );
+        assert!(
+            (periodic - euclidean).abs() <= tolerance,
+            "period {period}: periodic ARD normalizer {periodic} vs Euclidean {euclidean} \
+             (gap {}); a concentrated von Mises prior is the Gaussian prior",
+            periodic - euclidean
         );
     }
 }

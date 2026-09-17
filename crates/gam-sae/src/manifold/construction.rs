@@ -5303,9 +5303,14 @@ impl SaeManifoldTerm {
                 }
                 // Negative-log prior for precision alpha. The data-dependent
                 // energy is the (Gaussian or von-Mises) coordinate prior; the
-                // accompanying normaliser is the precision log-partition.
+                // accompanying normaliser is the precision log-partition `log Z(α)`
+                // paired with the Laplace integration constant `−½·log 2π` of the
+                // coordinate it normalizes, which `½·log|A|` leaves out (#2933 F26).
+                // Every axis family enters the criterion in that one convention, so
+                // a periodic axis prices a concentrated prior exactly as a Euclidean
+                // axis does.
                 //
-                // Euclidean axes keep the Gaussian normaliser `-0.5 n log α`.
+                // Euclidean axes: `log Z = ½·log(2π/α)`, paired normaliser `-0.5 n log α`.
                 // Periodic (von-Mises) axes use the EXACT von-Mises precision
                 // log-partition `n[-η + log I0(η)]`, η = α/κ², κ = 2π/P, rather
                 // than the Gaussian surrogate: the von-Mises partition function
@@ -5330,7 +5335,15 @@ impl SaeManifoldTerm {
                         // `P=2π`) by `n_eff·ln P` in the absolute prior evidence that
                         // cross-topology/K model comparison consumes. `ln P` is
                         // ρ-independent, so no inner gradient / FD channel is affected.
-                        acc += energy + n_eff * (p.ln() + centered_log_i0);
+                        //
+                        // #2933 F26 — `log Z → ½·log(2π/α)` as η → ∞, the Euclidean
+                        // partition. The Euclidean branch writes it with its `½·log 2π`
+                        // already paired against the coordinate's Laplace `−½·log 2π`;
+                        // this branch carried the full `log Z` unpaired, pricing every
+                        // periodic row `½·log 2π` (0.919 nats) above a Euclidean row at a
+                        // matched distribution. It is paired here the same way.
+                        acc += energy
+                            + n_eff * (p.ln() + centered_log_i0 - 0.5 * std::f64::consts::TAU.ln());
                     }
                 }
             }
