@@ -3058,6 +3058,12 @@ fn fit_bounded_term_collection_with_design(
         (None, Some(v_cond)) if fit_penalties.is_empty() => Some(v_cond.clone()),
         _ => None,
     };
+    // The latent fit's typed reason carries through the user-scale lift unchanged (#2677).
+    let smoothing_correction_absence = if covariance_corrected.is_none() {
+        fit.smoothing_correction_absence().cloned()
+    } else {
+        None
+    };
     let beta_standard_errors_corrected = covariance_corrected
         .as_ref()
         .map(gam_problem::se_from_covariance)
@@ -3102,6 +3108,7 @@ fn fit_bounded_term_collection_with_design(
                 smoothing_correction_method_first_order: smoothing_corrected
                     .as_ref()
                     .map(|(_, method)| *method),
+                smoothing_correction_absence,
                 // Boundary adapter: `penalized_hessian` storage is now
                 // `UnscaledPrecision`.
                 penalized_hessian: penalized_hessian.clone().into(),

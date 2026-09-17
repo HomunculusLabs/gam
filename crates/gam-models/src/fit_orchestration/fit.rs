@@ -2352,8 +2352,8 @@ fn survival_unified_fit_result(
     // refused interior keeps the typed absence: handing back `Vb` under a
     // corrected request would silently under-report every interval.
     let lambda_is_fixed = outer_iterations == 0 && criterion_certificate.is_none();
-    let smoothing_corrected = if lambda_is_fixed {
-        None
+    let (smoothing_corrected, smoothing_correction_absence) = if lambda_is_fixed {
+        (None, None)
     } else {
         match (
             covariance_conditional.as_ref(),
@@ -2375,7 +2375,7 @@ fn survival_unified_fit_result(
                         .scaled_add(lambdas[coordinate], &s_beta);
                 }
                 let no_gradient = Array1::<f64>::zeros(0);
-                gam_custom_family::first_order_smoothing_correction(
+                match gam_custom_family::first_order_smoothing_correction(
                     v_cond,
                     &u_mat,
                     outer_hessian,
@@ -2384,26 +2384,34 @@ fn survival_unified_fit_result(
                 )
                 .map_err(|reason| {
                     format!("survival transformation smoothing correction: {reason}")
-                })?
-                .map(|(correction, active_rank)| {
-                    (
-                        correction,
-                        gam_solve::model_types::SmoothingCorrectionMethod::FirstOrderIdentifiedSubspace {
-                            active_rank,
-                            rho_dimension: lambdas.len(),
-                        },
-                    )
-                })
+                })? {
+                    Ok((correction, active_rank)) => (
+                        Some((
+                            correction,
+                            gam_solve::model_types::SmoothingCorrectionMethod::FirstOrderIdentifiedSubspace {
+                                active_rank,
+                                rho_dimension: lambdas.len(),
+                            },
+                        )),
+                        None,
+                    ),
+                    Err(absence) => (None, Some(absence)),
+                }
             }
             (Some(_), None, _) => {
                 log::info!(
-                    "[smoothing-correction] branch=unavailable reason=outer-hessian-not-analytic \
+                    "[smoothing-correction] branch=unavailable reason=outer-hessian-not-published \
                      rho_dimension={}",
                     lambdas.len(),
                 );
-                None
+                (
+                    None,
+                    Some(gam_solve::model_types::SmoothingCorrectionAbsence::OuterHessianUndeclared {
+                        reason: gam_solve::model_types::OuterHessianAbsence::NotPublished,
+                    }),
+                )
             }
-            _ => None,
+            _ => (None, None),
         }
     };
     let covariance_corrected = if lambda_is_fixed {
@@ -2438,6 +2446,7 @@ fn survival_unified_fit_result(
         smoothing_correction_method_first_order: smoothing_corrected
             .as_ref()
             .map(|(_, method)| *method),
+        smoothing_correction_absence,
         penalized_hessian: penalized_hessian.clone(),
         reparam_qs: None,
         dispersion: gam_solve::estimate::Dispersion::UNIT,

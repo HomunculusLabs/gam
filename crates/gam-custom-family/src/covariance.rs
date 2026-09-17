@@ -2203,7 +2203,10 @@ pub(crate) fn joint_smoothing_correction(
     outer_hessian: &Array2<f64>,
     outer_gradient: &Array1<f64>,
     excluded_outer: &[usize],
-) -> Result<Option<(Array2<f64>, usize)>, CustomFamilyError> {
+) -> Result<
+    Result<(Array2<f64>, usize), gam_solve::model_types::SmoothingCorrectionAbsence>,
+    CustomFamilyError,
+> {
     let p_total: usize = specs.iter().map(|spec| spec.design.ncols()).sum();
     let k_outer = rho_outer.len();
     if block_states.len() != specs.len() {
@@ -2304,7 +2307,8 @@ pub(crate) fn joint_smoothing_correction(
 /// unavailable). A direction whose curvature sits under the certificate's own
 /// gradient floor `Σ_k |g_k| v_k²` is a saturated λ, where `∂β̂/∂ρ → 0`, so it
 /// is dropped from `V_ρ`; a curvature the certificate could not have passed is
-/// refused, logged, and returned as `Ok(None)`. With every coordinate excluded
+/// refused, logged, and returned as the typed absence
+/// `SmoothingCorrectionAbsence::InteriorRhoHessianRefused`. With every coordinate excluded
 /// the correction is exactly zero at identified rank 0. Returns the correction
 /// together with the identified interior rank. Both the custom-family joint
 /// mint and the single-cause survival transformation fit mint through here
@@ -2315,7 +2319,8 @@ pub fn first_order_smoothing_correction(
     outer_hessian: &Array2<f64>,
     outer_gradient: &Array1<f64>,
     excluded_outer: &[usize],
-) -> Result<Option<(Array2<f64>, usize)>, String> {
+) -> Result<Result<(Array2<f64>, usize), gam_solve::model_types::SmoothingCorrectionAbsence>, String>
+{
     let (p_total, k_outer) = u_mat.dim();
     if !outer_gradient.is_empty() && outer_gradient.len() != k_outer {
         return Err(format!(
@@ -2349,7 +2354,7 @@ pub fn first_order_smoothing_correction(
         // uncertainty definition"). Returning `Ok(None)` here made it
         // indistinguishable from the genuinely-undefined non-PD-interior case
         // below and left the fit reporting no corrected covariance at all.
-        return Ok(Some((Array2::<f64>::zeros((p_total, p_total)), 0)));
+        return Ok(Ok((Array2::<f64>::zeros((p_total, p_total)), 0)));
     }
     let ki = included.len();
     let mut h_sub = Array2::<f64>::zeros((ki, ki));
@@ -2375,7 +2380,11 @@ pub fn first_order_smoothing_correction(
                      rho_dimension={k_outer} railed={}: {refusal}",
                     k_outer - ki,
                 );
-                return Ok(None);
+                return Ok(Err(
+                    gam_solve::model_types::SmoothingCorrectionAbsence::InteriorRhoHessianRefused {
+                        refusal,
+                    },
+                ));
             }
         };
 
@@ -2387,7 +2396,7 @@ pub fn first_order_smoothing_correction(
     let a_mat = v_cond.dot(&u_inc);
     let mut correction = a_mat.dot(&inverted.inverse).dot(&a_mat.t());
     symmetrize_dense_in_place(&mut correction);
-    Ok(Some((correction, inverted.active_rank)))
+    Ok(Ok((correction, inverted.active_rank)))
 }
 
 #[cfg(test)]
@@ -2421,11 +2430,14 @@ mod required_covariance_tests {
         assert!(correction[[0, 1]].abs() <= 1e-12, "{correction:?}");
 
         let contradicted = array![[2.0_f64, 0.0], [0.0, -1.0e-3]];
+        let absence = first_order_smoothing_correction(&v_cond, &u, &contradicted, &gradient, &[])
+            .expect("well-formed inputs");
         assert!(
-            first_order_smoothing_correction(&v_cond, &u, &contradicted, &gradient, &[])
-                .expect("well-formed inputs")
-                .is_none(),
-            "a curvature below the certificate's bar is a typed absence"
+            matches!(
+                absence,
+                Err(gam_solve::model_types::SmoothingCorrectionAbsence::InteriorRhoHessianRefused { .. })
+            ),
+            "a curvature below the certificate's bar is the typed interior refusal: {absence:?}"
         );
     }
 

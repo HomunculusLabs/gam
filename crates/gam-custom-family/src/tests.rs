@@ -245,6 +245,7 @@ pub(crate) fn blockwise_fit_from_parts_accepts_stacked_solver_eta_with_canonical
             precomputed_edf: Some((1.0, Vec::new(), vec![1.0], Vec::new())),
             joint_log_lambdas: None,
             smoothing_corrected: None,
+            smoothing_correction_absence: None,
         },
         &[spec],
     )
@@ -3315,6 +3316,16 @@ pub(crate) fn custom_family_outer_derivatives_respects_missing_second_order_capa
     );
     assert_eq!(gradient, gam_problem::Derivative::Analytic);
     assert_eq!(hessian, gam_problem::DeclaredHessianForm::Unavailable);
+    // #2677: the predicate the smoothing-correction mint names the absence from reads the same
+    // first-order capability that withheld the Hessian.
+    assert_eq!(
+        crate::joint_newton::custom_family_outer_hessian_absence(
+            &OneBlockFirstOrderOnlyFamily,
+            &specs,
+            &BlockwiseFitOptions::default(),
+        ),
+        Some(gam_solve::model_types::OuterHessianAbsence::FirstOrderCapability)
+    );
 }
 
 #[derive(Clone)]

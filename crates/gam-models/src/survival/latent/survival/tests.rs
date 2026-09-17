@@ -1116,6 +1116,28 @@
             custom_family_outer_derivatives(&binary, &binary_specs, &options);
         assert_eq!(bin_grad, Derivative::Analytic);
         assert_eq!(bin_hess, DeclaredHessianForm::Unavailable);
+
+        // #2677: a fit of either family that selects rho publishes no smoothing correction, and
+        // the reason it records is the armed Jeffreys term without its third derivative.
+        for absence in [
+            crate::custom_family::custom_family_outer_hessian_absence(
+                &survival,
+                &survival_specs,
+                &options,
+            ),
+            crate::custom_family::custom_family_outer_hessian_absence(
+                &binary,
+                &binary_specs,
+                &options,
+            ),
+        ] {
+            assert_eq!(
+                absence,
+                Some(
+                    gam_solve::model_types::OuterHessianAbsence::ArmedJeffreysWithoutThirdInformationDerivative
+                )
+            );
+        }
     }
 
     #[test]

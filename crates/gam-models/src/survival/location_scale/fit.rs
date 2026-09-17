@@ -110,6 +110,7 @@ pub(crate) fn fit_reduced_parametric_aft(
             precomputed_edf: None,
             joint_log_lambdas: None,
             smoothing_corrected: None,
+            smoothing_correction_absence: None,
         },
         &assembly_specs,
     )

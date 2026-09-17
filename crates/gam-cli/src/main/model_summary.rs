@@ -297,7 +297,10 @@ pub(crate) fn covariance_from_model(
         // compute. A fit that DOES carry smoothing coordinates keeps the hard
         // refusal: there the correction is a real, absent term.
         if fit.has_smoothing_coordinate() {
-            return Err(SMOOTHING_CORRECTED_ABSENT.to_string());
+            return Err(match fit.smoothing_correction_absence() {
+                Some(absence) => format!("{SMOOTHING_CORRECTED_ABSENT}; the fit recorded why: {absence}"),
+                None => SMOOTHING_CORRECTED_ABSENT.to_string(),
+            });
         }
     }
     if let Some(cov) = fit.beta_covariance() {
@@ -337,7 +340,10 @@ pub(crate) fn prediction_backend_from_model<'a>(
         // through to the conditional sources is the CORRECTED answer here, not
         // a substitution of a narrower band.
         if fit.has_smoothing_coordinate() {
-            return Err(SMOOTHING_CORRECTED_ABSENT.to_string());
+            return Err(match fit.smoothing_correction_absence() {
+                Some(absence) => format!("{SMOOTHING_CORRECTED_ABSENT}; the fit recorded why: {absence}"),
+                None => SMOOTHING_CORRECTED_ABSENT.to_string(),
+            });
         }
     }
     if let Some(covariance) = fit.beta_covariance() {

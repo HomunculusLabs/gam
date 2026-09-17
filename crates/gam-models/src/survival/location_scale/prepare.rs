@@ -983,6 +983,7 @@ pub(crate) fn finalize_survival_location_scale_fit(
         covariance_conditional,
         covariance_corrected,
         smoothing_correction,
+        smoothing_correction_absence: fit.smoothing_correction_absence().cloned(),
         geometry,
         // Per-penalty trace / effective-d.f. from the inner blockwise fit,
         // aligned 1:1 with `fit.lambdas` in block order

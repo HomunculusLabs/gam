@@ -1172,6 +1172,26 @@ pub fn custom_family_outer_derivatives<F: CustomFamily + ?Sized>(
     } else {
         Derivative::Unavailable
     };
+    let hessian = if custom_family_outer_hessian_absence(family, specs, options).is_none() {
+        DeclaredHessianForm::Either
+    } else {
+        DeclaredHessianForm::Unavailable
+    };
+
+    (gradient, hessian)
+}
+
+/// Why the custom-family outer search declares no analytic ρ-Hessian, or `None` when it declares
+/// one. [`custom_family_outer_derivatives`] and the smoothing-correction mint read this one
+/// predicate, so a fit's typed absence names exactly the condition that withheld the Hessian
+/// (#2677).
+pub fn custom_family_outer_hessian_absence<F: CustomFamily + ?Sized>(
+    family: &F,
+    specs: &[ParameterBlockSpec],
+    options: &BlockwiseFitOptions,
+) -> Option<gam_solve::model_types::OuterHessianAbsence> {
+    use gam_solve::model_types::OuterHessianAbsence;
+
     // The analytic outer Hessian is routed to ARC whenever the realized family
     // exposes second-order calculus. Matrix-free Hessian support is a
     // representation capability used by the evaluator; it must not be hidden
@@ -1182,19 +1202,23 @@ pub fn custom_family_outer_derivatives<F: CustomFamily + ?Sized>(
     // completion and the mixed H_Φ drift (`custom_family_outer_jeffreys_hphi_drift_batched`).
     // Without it no exact curvature exists, and declaring one made every seed
     // evaluation refuse at the completion instead of searching first-order.
-    let jeffreys_curvature_exact = !family.joint_jeffreys_term_required()
-        || family.jeffreys_third_information_derivative().is_some();
-    let hessian = if options.use_outer_hessian
-        && include_exact_newton_logdet_h(family, options)
-        && policy.capability.has_hessian()
-        && jeffreys_curvature_exact
+    if !options.use_outer_hessian {
+        Some(OuterHessianAbsence::DisabledByOptions)
+    } else if !include_exact_newton_logdet_h(family, options) {
+        Some(OuterHessianAbsence::ObjectiveWithoutLogdetH)
+    } else if !family
+        .outer_derivative_policy(specs, options)
+        .capability
+        .has_hessian()
     {
-        DeclaredHessianForm::Either
+        Some(OuterHessianAbsence::FirstOrderCapability)
+    } else if family.joint_jeffreys_term_required()
+        && family.jeffreys_third_information_derivative().is_none()
+    {
+        Some(OuterHessianAbsence::ArmedJeffreysWithoutThirdInformationDerivative)
     } else {
-        DeclaredHessianForm::Unavailable
-    };
-
-    (gradient, hessian)
+        None
+    }
 }
 
 pub(crate) fn include_exact_newton_logdet_s<F: CustomFamily + ?Sized>(

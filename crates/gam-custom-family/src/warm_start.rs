@@ -231,6 +231,8 @@ pub struct BlockwiseFitResultParts {
         Array2<f64>,
         gam_solve::model_types::SmoothingCorrectionMethod,
     )>,
+    /// Why no correction was minted on a fit that selected ρ (#2677).
+    pub smoothing_correction_absence: Option<gam_solve::model_types::SmoothingCorrectionAbsence>,
 }
 
 pub(crate) fn validate_parameter_block_state_finiteness(
@@ -625,6 +627,7 @@ mod assembly_convergence_tests {
             precomputed_edf: None,
             joint_log_lambdas: None,
             smoothing_corrected: None,
+            smoothing_correction_absence: None,
         }
     }
 
@@ -705,6 +708,7 @@ pub fn blockwise_fit_from_parts(
         precomputed_edf,
         joint_log_lambdas,
         smoothing_corrected,
+        smoothing_correction_absence,
     } = parts;
 
     // SPEC 20: a fit object only ever comes from a converged optimization.
@@ -999,6 +1003,7 @@ pub fn blockwise_fit_from_parts(
         smoothing_correction_method_first_order: smoothing_correction_method,
         smoothing_correction,
         smoothing_correction_method,
+        smoothing_correction_absence,
         penalized_hessian: geom.penalized_hessian.clone(),
         reparam_qs: None,
         dispersion: gam_solve::model_types::Dispersion::UNIT,

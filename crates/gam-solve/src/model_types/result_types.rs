@@ -157,6 +157,7 @@ mod per_term_edf_tests {
                 smoothing_correction_method: None,
                 smoothing_correction_first_order: None,
                 smoothing_correction_method_first_order: None,
+                smoothing_correction_absence: None,
                 penalized_hessian: gam_problem::dispersion_cov::UnscaledPrecision::wrap(eye(36)),
                 reparam_qs: None,
                 dispersion: Dispersion::estimated(1.0)
@@ -269,6 +270,7 @@ mod per_term_edf_tests {
                 smoothing_correction_method: None,
                 smoothing_correction_first_order: None,
                 smoothing_correction_method_first_order: None,
+                smoothing_correction_absence: None,
                 penalized_hessian: gam_problem::dispersion_cov::UnscaledPrecision::wrap(eye(p)),
                 reparam_qs: None,
                 dispersion: Dispersion::estimated(1.0)
@@ -343,6 +345,7 @@ mod per_term_edf_tests {
                 smoothing_correction_method: None,
                 smoothing_correction_first_order: None,
                 smoothing_correction_method_first_order: None,
+                smoothing_correction_absence: None,
                 penalized_hessian: gam_problem::dispersion_cov::UnscaledPrecision::wrap(eye(p)),
                 reparam_qs: None,
                 dispersion: Dispersion::estimated(1.0)
@@ -547,6 +550,7 @@ mod per_term_edf_tests {
                 smoothing_correction_method: None,
                 smoothing_correction_first_order: None,
                 smoothing_correction_method_first_order: None,
+                smoothing_correction_absence: None,
                 penalized_hessian: gam_problem::dispersion_cov::UnscaledPrecision::wrap(eye(p)),
                 reparam_qs: None,
                 dispersion: Dispersion::estimated(1.0)
@@ -2621,6 +2625,80 @@ pub enum SmoothingCorrectionMethod {
     },
 }
 
+/// Why a fit that selected smoothing parameters retains no smoothing-uncertainty correction.
+///
+/// Minted where the correction was attempted, at fit time, so a consumer asked for the corrected
+/// covariance names the structural cause instead of reporting a bare absence (#2677).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum SmoothingCorrectionAbsence {
+    /// The outer search declared no analytic ρ-Hessian, so there is no `V_ρ` to propagate.
+    OuterHessianUndeclared { reason: OuterHessianAbsence },
+    /// The interior ρ-Hessian was formed but refused inversion on its identified subspace.
+    InteriorRhoHessianRefused { refusal: String },
+    /// The outer ρ-Hessian has no analytic form for this fit: a non-canonical Firth link whose
+    /// outer search ran first-order.
+    OuterHessianNotAnalytic { detail: String },
+    /// The optimum is certified on an infinite-smoothing rail, where ρ has no finite variance.
+    RailCertified { detail: String },
+    /// The corrected covariance could not be truncated to the constrained feasible set.
+    ConstrainedTruncationRefused { detail: String },
+}
+
+/// Why a custom-family outer search declares no analytic ρ-Hessian.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OuterHessianAbsence {
+    /// The fit's options turned the outer Hessian off.
+    DisabledByOptions,
+    /// The family's outer objective prices no `log|H|` term.
+    ObjectiveWithoutLogdetH,
+    /// The family's derivative policy exposes first-order calculus only.
+    FirstOrderCapability,
+    /// The armed Jeffreys term needs a third information derivative the family does not provide.
+    ArmedJeffreysWithoutThirdInformationDerivative,
+    /// The smoothing selector published no analytic ρ-Hessian at its terminal point.
+    NotPublished,
+}
+
+impl std::fmt::Display for OuterHessianAbsence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::DisabledByOptions => "the fit's options turned the outer Hessian off",
+            Self::ObjectiveWithoutLogdetH => "the family's outer objective prices no log|H| term",
+            Self::FirstOrderCapability => "the family exposes first-order outer calculus only",
+            Self::ArmedJeffreysWithoutThirdInformationDerivative => {
+                "the armed Jeffreys term needs a third information derivative the family does not provide"
+            }
+            Self::NotPublished => {
+                "the smoothing selector published no analytic rho-Hessian at its terminal point"
+            }
+        })
+    }
+}
+
+impl std::fmt::Display for SmoothingCorrectionAbsence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OuterHessianUndeclared { reason } => {
+                write!(f, "no analytic outer rho-Hessian was declared: {reason}")
+            }
+            Self::InteriorRhoHessianRefused { refusal } => {
+                write!(f, "the interior rho-Hessian refused inversion: {refusal}")
+            }
+            Self::OuterHessianNotAnalytic { detail } => {
+                write!(f, "the outer rho-Hessian has no analytic form: {detail}")
+            }
+            Self::RailCertified { detail } => write!(
+                f,
+                "the optimum is certified on an infinite-smoothing rail with no finite rho-variance: {detail}"
+            ),
+            Self::ConstrainedTruncationRefused { detail } => write!(
+                f,
+                "the corrected covariance could not be truncated to the feasible set: {detail}"
+            ),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FitInference {
     pub edf_by_block: Vec<f64>,
@@ -2664,6 +2742,11 @@ pub struct FitInference {
     /// `SigmaPointCubature`, unlike `smoothing_correction_method` above.
     #[serde(default)]
     pub smoothing_correction_method_first_order: Option<SmoothingCorrectionMethod>,
+    /// The typed reason a fit that selected smoothing parameters publishes no
+    /// `beta_covariance_corrected`. `None` whenever the corrected covariance is published or the
+    /// fit has no smoothing coordinate.
+    #[serde(default)]
+    pub smoothing_correction_absence: Option<SmoothingCorrectionAbsence>,
     /// Penalised Hessian `H = X'W_HX + S(λ)` with NO dispersion scaling.
     /// When [`UnifiedFitResult::geometry`] is present, this matrix shares its
     /// exact active coefficient frame and therefore has dimension
@@ -3250,6 +3333,7 @@ mod assembly_inner_status_gate_tests {
                 smoothing_correction_method: None,
                 smoothing_correction_first_order: None,
                 smoothing_correction_method_first_order: None,
+                smoothing_correction_absence: None,
                 penalized_hessian: gam_problem::dispersion_cov::UnscaledPrecision::wrap(hessian),
                 reparam_qs: None,
                 dispersion: Dispersion::estimated(1.0)
@@ -4971,6 +5055,13 @@ impl UnifiedFitResult {
         self.inference
             .as_ref()
             .and_then(|inference| inference.smoothing_correction_method_first_order)
+    }
+
+    /// The typed reason this fit retains no smoothing correction, minted at fit time (#2677).
+    pub fn smoothing_correction_absence(&self) -> Option<&SmoothingCorrectionAbsence> {
+        self.inference
+            .as_ref()
+            .and_then(|inference| inference.smoothing_correction_absence.as_ref())
     }
 
     /// Total effective degrees of freedom.

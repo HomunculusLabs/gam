@@ -1247,6 +1247,7 @@ mod tests {
                 smoothing_correction_method: None,
                 smoothing_correction_first_order: None,
                 smoothing_correction_method_first_order: None,
+                smoothing_correction_absence: None,
                 penalized_hessian: hessian.clone().into(),
                 reparam_qs: None,
                 dispersion: gam_solve::estimate::Dispersion::UNIT,

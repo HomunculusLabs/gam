@@ -1878,8 +1878,11 @@ pub(crate) fn compute_smoothing_correction(
             Some(&inverted),
             outer_gradient,
         );
+        // Publish that zero, not an absence: `V_c = V_b` exactly at identified rank 0, the same
+        // identity the custom-family lane mints when every outer coordinate is railed (#2677).
+        let p_original = final_fit.reparam_result.qs.nrows();
         return SmoothingCorrectionComputation {
-            correction: None,
+            correction: Some(Array2::<f64>::zeros((p_original, p_original))),
             rho_covariance: Some(inverted.inverse),
             active_rank: Some(0),
             spectrum: None,

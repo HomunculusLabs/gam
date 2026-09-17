@@ -1091,6 +1091,7 @@ mod tests {
                 covariance_conditional: Some(sigma_pi.clone()),
                 covariance_corrected: None,
                 smoothing_correction: None,
+                smoothing_correction_absence: None,
                 geometry,
                 penalty_block_trace: Vec::new(),
                 edf_by_block: Vec::new(),

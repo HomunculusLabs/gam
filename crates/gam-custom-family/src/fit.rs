@@ -360,6 +360,8 @@ pub(crate) struct BlockwiseFitAssembly<'a> {
         Array2<f64>,
         gam_solve::model_types::SmoothingCorrectionMethod,
     )>,
+    /// Why no correction was minted on a fit that selected ρ (#2677).
+    pub(crate) smoothing_correction_absence: Option<gam_solve::model_types::SmoothingCorrectionAbsence>,
 }
 
 /// The family's classical deviance at the converged mode, as a typed
@@ -393,6 +395,7 @@ pub(crate) fn assemble_custom_family_fit_result(
         outer_converged,
         joint_log_lambdas,
         smoothing_corrected,
+        smoothing_correction_absence,
     } = assembly;
     let log_lambdas = rho_physical;
     let lambdas =
@@ -444,6 +447,7 @@ pub(crate) fn assemble_custom_family_fit_result(
             precomputed_edf,
             joint_log_lambdas,
             smoothing_corrected,
+            smoothing_correction_absence,
         },
         result_specs,
     )
@@ -2370,6 +2374,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                 outer_converged: true,
                 joint_log_lambdas: None,
                 smoothing_corrected: None,
+                smoothing_correction_absence: None,
             },
         );
     }
@@ -2397,6 +2402,8 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     let n_rho = rho0.len();
     let (cap_gradient, cap_hessian) =
         custom_family_outer_derivatives(family, specs, &outer_options);
+    let outer_hessian_absence =
+        crate::joint_newton::custom_family_outer_hessian_absence(family, specs, &outer_options);
     let derivative_policy = family.outer_derivative_policy(specs, &outer_options);
     let hessian = cap_hessian;
     let need_outer_hessian = hessian.is_analytic();
@@ -3383,7 +3390,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     // rails) have no finite ρ-variance and are excluded (#2337 Thm 2.3);
     // directions under the certificate's gradient floor are dropped from V_ρ,
     // and a refused interior yields a typed absence, never an error.
-    let smoothing_corrected = match (
+    let (smoothing_corrected, smoothing_correction_absence) = match (
         covariance_conditional.as_ref(),
         certified_outer.final_hessian(),
     ) {
@@ -3396,7 +3403,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                 }
             }
             let no_gradient = Array1::<f64>::zeros(0);
-            crate::covariance::joint_smoothing_correction(
+            match crate::covariance::joint_smoothing_correction(
                 v_cond,
                 specs,
                 &label_layout,
@@ -3409,26 +3416,43 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             .map_err(|reason| CustomFamilyError::Optimization {
                 context: "fit_custom_family smoothing correction",
                 reason: reason.to_string(),
-            })?
-            .map(|(correction, active_rank)| {
-                (
-                    correction,
-                    gam_solve::model_types::SmoothingCorrectionMethod::FirstOrderIdentifiedSubspace {
-                        active_rank,
-                        rho_dimension: rho_star.len(),
-                    },
-                )
-            })
+            })? {
+                Ok((correction, active_rank)) => (
+                    Some((
+                        correction,
+                        gam_solve::model_types::SmoothingCorrectionMethod::FirstOrderIdentifiedSubspace {
+                            active_rank,
+                            rho_dimension: rho_star.len(),
+                        },
+                    )),
+                    None,
+                ),
+                Err(absence) => (None, Some(absence)),
+            }
         }
+        (Some(_), None) if rho_star.is_empty() => (None, None),
         (Some(_), None) => {
+            // The run's mint refuses a declared analytic Hessian that publishes none, so a
+            // certified outer without one is exactly an undeclared Hessian, and the predicate
+            // that withheld it is the absence's reason.
+            let reason = outer_hessian_absence.ok_or_else(|| CustomFamilyError::Optimization {
+                context: "fit_custom_family smoothing correction",
+                reason: "the outer search declared an analytic rho-Hessian but the certified \
+                         outer published none"
+                    .to_string(),
+            })?;
             log::info!(
-                "[smoothing-correction] branch=unavailable reason=outer-hessian-not-analytic \
-                 rho_dimension={}",
+                "[smoothing-correction] branch=unavailable reason={reason} rho_dimension={}",
                 rho_star.len(),
             );
-            None
+            (
+                None,
+                Some(gam_solve::model_types::SmoothingCorrectionAbsence::OuterHessianUndeclared {
+                    reason,
+                }),
+            )
         }
-        (None, _) => None,
+        (None, _) => (None, None),
     };
     install_reported_posterior_mean(
         family,
@@ -3463,6 +3487,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             outer_converged: true,
             joint_log_lambdas,
             smoothing_corrected,
+            smoothing_correction_absence,
         },
     )
 }
@@ -3714,6 +3739,7 @@ fn fit_custom_family_user_fixed_log_lambdas_impl<
             outer_converged: true,
             joint_log_lambdas,
             smoothing_corrected: None,
+            smoothing_correction_absence: None,
         },
     )
 }
@@ -3965,6 +3991,7 @@ fn fit_custom_family_fixed_log_lambdas_from_owned_mode_with_provenance<
             outer_converged: true,
             joint_log_lambdas: None,
             smoothing_corrected: None,
+            smoothing_correction_absence: None,
         },
     )
 }

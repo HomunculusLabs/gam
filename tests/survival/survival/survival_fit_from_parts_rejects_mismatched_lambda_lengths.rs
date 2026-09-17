@@ -28,6 +28,7 @@ fn survival_fit_from_parts_rejects_mismatched_lambda_lengths() {
         covariance_conditional: Some(Array2::eye(5)),
         covariance_corrected: None,
         smoothing_correction: None,
+        smoothing_correction_absence: None,
         geometry: None,
         used_device: false,
         penalty_block_trace: Vec::new(),

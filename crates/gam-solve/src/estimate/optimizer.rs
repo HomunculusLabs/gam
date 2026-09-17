@@ -2455,6 +2455,7 @@ where
     // exactly when smoothing-parameter uncertainty is large enough to matter.
     let mut smoothing_correction_first_order = None;
     let mut smoothing_correction_method_first_order = None;
+    let mut smoothing_correction_absence = None;
     let mut rho_covariance = None;
     let mut penalized_hessian = Array2::<f64>::zeros((0, 0));
     let mut beta_covariance = None;
@@ -3493,6 +3494,14 @@ where
                          shipping the plug-in covariance without a smoothing correction",
                         if rail_certified { "rail-certified" } else { "non-analytic-outer-Hessian" }
                     );
+                    let detail = format!("{reason:?}");
+                    smoothing_correction_absence = Some(if rail_certified {
+                        crate::model_types::SmoothingCorrectionAbsence::RailCertified { detail }
+                    } else {
+                        crate::model_types::SmoothingCorrectionAbsence::OuterHessianNotAnalytic {
+                            detail,
+                        }
+                    });
                     rho_covariance = None;
                     smoothing_correction = None;
                     smoothing_correction_method = None;
@@ -3812,6 +3821,11 @@ where
                              every constrained interval. The rho-hat-conditional covariance is \
                              unaffected."
                         );
+                        smoothing_correction_absence = Some(
+                            crate::model_types::SmoothingCorrectionAbsence::ConstrainedTruncationRefused {
+                                detail: reason.to_string(),
+                            },
+                        );
                         None
                     }
                 }
@@ -3881,6 +3895,7 @@ where
         smoothing_correction_method,
         smoothing_correction_first_order,
         smoothing_correction_method_first_order,
+        smoothing_correction_absence,
         penalized_hessian: penalized_hessian.clone().into(),
         reparam_qs: Some(pirls_res.reparam_result.qs.clone()),
         dispersion,

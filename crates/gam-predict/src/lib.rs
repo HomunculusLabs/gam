@@ -375,7 +375,12 @@ fn selected_uncertainty_backend<'a>(
                     });
             }
             Err(EstimationError::InvalidInput(
-                "fit result does not contain smoothing-corrected covariance".to_string(),
+                match fit.smoothing_correction_absence() {
+                    Some(absence) => format!(
+                        "fit result does not contain smoothing-corrected covariance: {absence}"
+                    ),
+                    None => "fit result does not contain smoothing-corrected covariance".to_string(),
+                },
             ))
         }
     }
@@ -1816,9 +1821,12 @@ fn constrained_law<'a>(
         }),
         InferenceCovarianceMode::SmoothingCorrected => {
             let correction = fit.smoothing_correction().ok_or_else(|| {
-                EstimationError::InvalidInput(
-                    "fit result does not contain smoothing-corrected covariance".to_string(),
-                )
+                EstimationError::InvalidInput(match fit.smoothing_correction_absence() {
+                    Some(absence) => format!(
+                        "fit result does not contain smoothing-corrected covariance: {absence}"
+                    ),
+                    None => "fit result does not contain smoothing-corrected covariance".to_string(),
+                })
             })?;
             let correction = reduced_bilinear_form(&geometry.coefficient_gauge, correction)?;
             if correction.dim() != conditional.dim() {
@@ -3432,6 +3440,7 @@ mod tests {
                     rho_dimension: 1,
                 },
             ),
+            smoothing_correction_absence: None,
             penalized_hessian: array![[1.0]].into(),
             reparam_qs: None,
             dispersion: gam_problem::Dispersion::UNIT,
@@ -4220,6 +4229,7 @@ mod tests {
             smoothing_correction_method: None,
             smoothing_correction_first_order: None,
             smoothing_correction_method_first_order: None,
+            smoothing_correction_absence: None,
             penalized_hessian: Array2::<f64>::eye(p).into(),
             reparam_qs: None,
             dispersion: gam_problem::Dispersion::UNIT,

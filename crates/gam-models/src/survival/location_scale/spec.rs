@@ -330,6 +330,9 @@ pub struct SurvivalLocationScaleFitResultParts {
     /// covariances above. `None` is a typed absence, never an error.
     pub smoothing_correction:
         Option<(Array2<f64>, gam_solve::model_types::SmoothingCorrectionMethod)>,
+    /// Why the inner fit minted no correction although it selected ρ, carried through
+    /// finalization with the correction it stands in for (#2677).
+    pub smoothing_correction_absence: Option<gam_solve::model_types::SmoothingCorrectionAbsence>,
     pub geometry: Option<FitGeometry>,
     /// Raw per-penalty trace `tr_kk = λ_kk·tr(H⁻¹ S_kk)` at the converged fit,
     /// aligned 1:1 with the concatenated block lambdas in block order
@@ -454,6 +457,7 @@ pub fn survival_fit_from_parts(
         covariance_conditional,
         covariance_corrected,
         smoothing_correction,
+        smoothing_correction_absence,
         geometry,
         penalty_block_trace,
         edf_by_block,
@@ -804,6 +808,7 @@ pub fn survival_fit_from_parts(
             smoothing_correction_method_first_order: smoothing_correction_method,
             smoothing_correction: smoothing_correction_matrix.clone(),
             smoothing_correction_method,
+            smoothing_correction_absence: smoothing_correction_absence.clone(),
             penalized_hessian: geom.penalized_hessian.clone(),
             reparam_qs: None,
             dispersion: gam_solve::estimate::Dispersion::UNIT,
