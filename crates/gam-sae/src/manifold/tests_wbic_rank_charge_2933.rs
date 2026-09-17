@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! #2933 F30–F32. The tempered posterior expectation keeps its mean
 //! displacement; the rank-charge audit fills every field from one evaluated
 //! state; the MP edge's false-rank rate under a fitted noise-only null is
