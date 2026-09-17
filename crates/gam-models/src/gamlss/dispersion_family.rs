@@ -21,6 +21,7 @@ use gam_terms::smooth::{
     SpatialLengthScaleOptimizationOptions, TermCollectionDesign, TermCollectionSpec,
     get_spatial_length_scale, spatial_term_uses_per_axis_psi,
 };
+use gam_row_macros::row_program;
 use ndarray::{Array1, Array2, s};
 use statrs::function::gamma::ln_gamma;
 
@@ -396,8 +397,8 @@ mod test_support {
 
     /// #1591 jet-prune oracle: full `Order2<2>` (value/grad/Hessian) NB2 row NLL.
     ///
-    /// The NB row kernel derives its mean and dispersion channels by hand in
-    /// [`dispersion_row_kernel`], so this `K=2` form survives only as the
+    /// The NB row kernel reads its scores from the negative binomial row program
+    /// in [`dispersion_row_kernel`], so this `K=2` form survives only as the
     /// dense-`Tower4<2>` oracle pin (`order2_matches_dense_tower_all_channels`).
     #[inline]
     pub(super) fn dispersion_nb_nll_order2(
@@ -423,8 +424,8 @@ mod test_support {
     }
 
     /// #1591 jet-prune oracle: full `Order2<2>` Gamma row NLL. As with NB, the
-    /// row kernel derives the Gamma channels by hand, so this form is kept only
-    /// as the dense-tower oracle pin.
+    /// row kernel reads the Gamma scores from its row program, so this form is
+    /// kept only as the dense-tower oracle pin.
     #[inline]
     pub(super) fn dispersion_gamma_nll_order2(
         yi: f64,
@@ -446,8 +447,8 @@ mod test_support {
         loglik.scale(-wi)
     }
 
-    /// Full `Order2<2>` Beta row NLL seeded on `(μ, φ)`. The row kernel derives
-    /// the Beta score by hand; this tower is its oracle
+    /// Full `Order2<2>` Beta row NLL seeded on `(μ, φ)`. The row kernel reads
+    /// the Beta score from its row program; this tower is its oracle
     /// (`row_kernel_closed_form_dispersion_channels_match_the_towers`) and the
     /// dense-tower pin's subject.
     #[inline]
@@ -476,7 +477,7 @@ mod test_support {
     /// Pruned single-axis Gamma dispersion tower: `ν` is the sole jet variable
     /// (axis 0), `μ` a constant. Consumed channels match
     /// `dispersion_gamma_nll_order2` index-1 bit-for-bit, and the row kernel's
-    /// hand-derived dispersion score and information match this tower.
+    /// row-program dispersion score and closed-form information match this tower.
     #[inline]
     pub(super) fn dispersion_gamma_disp_order2(
         yi: f64,
@@ -540,16 +541,6 @@ mod test_support {
 }
 
 // ============================================================================
-// Dispersion-channel row derivatives (SPEC rule 1, #2901).
-//
-// The row kernel, the observed η-space Hessian, its directional derivative and
-// the saved-model ALO geometry all use hand-derived row derivatives. The jet
-// towers that used to supply them are test oracles: the pruned single-axis
-// towers in `test_support` above, and the η-space order-2/order-3 towers in
-// `crate::gamlss::test_support`.
-// ============================================================================
-
-// ============================================================================
 // #1591 jet-prune: value-only (`K=0`) row negative-log-likelihood.
 //
 // `log_likelihood_only` reads ONLY `row.loglik = -tower.value()`; the full row
@@ -600,13 +591,14 @@ fn positive_share(numerator: f64, other: f64) -> f64 {
 /// coordinates, `theta^2 I_theta`.  For large theta, expand
 /// `trigamma(x)-1/x` after the transformation so the representable O(1)
 /// result is never obtained by subtracting underflowed O(theta^-2) terms.
+/// `trigamma_theta` is `ψ′(θ)`, which the row's score stack already carries.
 #[inline]
-fn nb_log_precision_fisher_jensen(mu: f64, theta: f64) -> f64 {
+fn nb_log_precision_fisher_jensen(mu: f64, theta: f64, trigamma_theta: f64) -> f64 {
     let r = positive_share(theta, mu);
     let q = positive_share(mu, theta);
     if theta <= 32.0 {
         let total = theta + mu;
-        let remainder_theta = gam_math::special::trigamma(theta) - theta.recip();
+        let remainder_theta = trigamma_theta - theta.recip();
         let remainder_total = gam_math::special::trigamma(total) - total.recip();
         return theta * theta * (remainder_theta - remainder_total);
     }
@@ -714,9 +706,868 @@ pub(crate) fn dispersion_row_loglik(
     }
 }
 
+// ============================================================================
+// Dispersion-channel row derivatives (#932).
+//
+// Each member's row log-likelihood is declared once, as a `row_program!` in the
+// local predictor coordinates `(δ_μ, δ_d)` about the row's `(η_μ, η_d)`. Its
+// order-2 surface is the row's score and observed Hessian and its contracted
+// third surface is that Hessian's directional derivative, so the link chains,
+// the mean/precision cross curvature and every product-rule term are generated
+// from the declaration. The caller supplies only one-variable derivative stacks
+// at the row: `ln Γ` through tetragamma, softplus for the negative binomial log
+// shares, the logistic mean link, the Tweedie mean's power terms `e^{(2−p)t}` and
+// `e^{(1−p)t}` with their coefficients, and `e^t` at `t = 0`. Each argument's
+// polygamma entries come from one walk of the recurrence
+// (`gam_math::special::polygamma_stack`), which divides once per step for every
+// order where the per-order scalars divide once each.
+//
+// A supplied value that enters the result only through `add` or `scale` reaches
+// the value channel and nothing else. The production stacks supply zero for those
+// values (every `ln Γ` value, the negative binomial `−ln q`, the Tweedie density
+// normalizer), and the row log-likelihood comes from the plain-f64 functions
+// above. Values that multiply a jet (the negative binomial `−ln r`, the Beta mean,
+// the Tweedie deviance terms) are always supplied. The programs emit through
+// third order, whose surfaces read stack entries through the third, so every
+// fourth entry is zero.
+// ============================================================================
+
+// NB2: ℓ = ln Γ(θ + y) − ln Γ(θ) − ln Γ(y + 1) + θ ln r + y ln q, with
+// q = μ/(μ + θ) and r = θ/(μ + θ). In `x = η_μ − η_d`, `ln r = −softplus(x)` and
+// `ln q = −softplus(−x)`, whose stacks are the stable shares `q`, `r` and `qr`, so
+// `μ + θ` is never formed.
+row_program! {
+    fn negative_binomial_row_program(
+        delta_mu,
+        delta_d;
+        theta,
+        count,
+        ln_gamma_count,
+        ln_gamma_total,
+        digamma_total,
+        trigamma_total,
+        tetragamma_total,
+        ln_gamma_theta,
+        digamma_theta,
+        trigamma_theta,
+        tetragamma_theta,
+        neg_log_theta_share,
+        neg_log_mu_share,
+        mu_share,
+        theta_share
+    )
+    emit [order2, third];
+    leaves {
+        unit_exponential => supplied,
+        ln_gamma_at_total => supplied,
+        ln_gamma_at_theta => supplied,
+        softplus_at_log_ratio => supplied,
+        softplus_at_negative_log_ratio => supplied,
+    }
+    witnesses [];
+    {
+        let precision_ratio = compose(unit_exponential, delta_d, 1.0, 1.0, 1.0, 1.0, 1.0);
+        let precision = scale(precision_ratio, theta);
+        let total = add_constant(precision, count);
+        let ln_gamma_total_jet = compose(
+            ln_gamma_at_total,
+            total,
+            ln_gamma_total,
+            digamma_total,
+            trigamma_total,
+            tetragamma_total,
+            0.0
+        );
+        let ln_gamma_theta_jet = compose(
+            ln_gamma_at_theta,
+            precision,
+            ln_gamma_theta,
+            digamma_theta,
+            trigamma_theta,
+            tetragamma_theta,
+            0.0
+        );
+        let spread = add(delta_mu, neg(delta_d));
+        let theta_gap = compose(
+            softplus_at_log_ratio,
+            spread,
+            neg_log_theta_share,
+            mu_share,
+            mu_share * theta_share,
+            mu_share * theta_share * (theta_share - mu_share),
+            0.0
+        );
+        let reverse_spread = neg(spread);
+        let mu_gap = compose(
+            softplus_at_negative_log_ratio,
+            reverse_spread,
+            neg_log_mu_share,
+            theta_share,
+            mu_share * theta_share,
+            mu_share * theta_share * (mu_share - theta_share),
+            0.0
+        );
+        let ln_gamma_ratio = add(ln_gamma_total_jet, neg(ln_gamma_theta_jet));
+        let log_shares = add(mul(precision, theta_gap), scale(mu_gap, count));
+        return add_constant(add(ln_gamma_ratio, neg(log_shares)), -ln_gamma_count);
+    }
+}
+
+// Gamma: ℓ = ν (η_d − η_μ) − ln Γ(ν) + (ν − 1) ln y − ν y e^{−η_μ}, with
+// ν = e^{η_d}; `response_ratio` is `y/μ` at the row.
+row_program! {
+    fn gamma_row_program(
+        delta_mu,
+        delta_d;
+        shape,
+        log_shape_ratio,
+        log_response,
+        response_ratio,
+        ln_gamma_shape,
+        digamma_shape,
+        trigamma_shape,
+        tetragamma_shape
+    )
+    emit [order2, third];
+    leaves {
+        unit_exponential => supplied,
+        ln_gamma_at_shape => supplied,
+    }
+    witnesses [];
+    {
+        let shape_ratio = compose(unit_exponential, delta_d, 1.0, 1.0, 1.0, 1.0, 1.0);
+        let precision = scale(shape_ratio, shape);
+        let log_ratio = add_constant(add(delta_d, neg(delta_mu)), log_shape_ratio);
+        let reverse_delta_mu = neg(delta_mu);
+        let inverse_mean_ratio =
+            compose(unit_exponential, reverse_delta_mu, 1.0, 1.0, 1.0, 1.0, 1.0);
+        let ln_gamma_jet = compose(
+            ln_gamma_at_shape,
+            precision,
+            ln_gamma_shape,
+            digamma_shape,
+            trigamma_shape,
+            tetragamma_shape,
+            0.0
+        );
+        let scaled_response = scale(inverse_mean_ratio, response_ratio);
+        let kernel = add(mul(precision, log_ratio), neg(ln_gamma_jet));
+        let response = add(scale(precision, log_response), neg(mul(precision, scaled_response)));
+        return add_constant(add(kernel, response), -log_response);
+    }
+}
+
+// Beta(μφ, (1 − μ)φ): ℓ = ln Γ(φ) − ln Γ(a) − ln Γ(b) + (a − 1) ln y
+// + (b − 1) ln(1 − y), with a = μφ, b = (1 − μ)φ, μ = logistic(η_μ), φ = e^{η_d}.
+row_program! {
+    fn beta_row_program(
+        delta_mu,
+        delta_d;
+        precision,
+        mean,
+        mean_first,
+        mean_second,
+        mean_third,
+        log_response,
+        log_complement,
+        ln_gamma_precision,
+        digamma_precision,
+        trigamma_precision,
+        tetragamma_precision,
+        ln_gamma_first_shape,
+        digamma_first_shape,
+        trigamma_first_shape,
+        tetragamma_first_shape,
+        ln_gamma_second_shape,
+        digamma_second_shape,
+        trigamma_second_shape,
+        tetragamma_second_shape
+    )
+    emit [order2, third];
+    leaves {
+        unit_exponential => supplied,
+        logistic => supplied,
+        ln_gamma_at_precision => supplied,
+        ln_gamma_at_first_shape => supplied,
+        ln_gamma_at_second_shape => supplied,
+    }
+    witnesses [];
+    {
+        let mean_jet = compose(logistic, delta_mu, mean, mean_first, mean_second, mean_third, 0.0);
+        let complement = add_constant(neg(mean_jet), 1.0);
+        let precision_ratio = compose(unit_exponential, delta_d, 1.0, 1.0, 1.0, 1.0, 1.0);
+        let precision_jet = scale(precision_ratio, precision);
+        let first_shape = mul(mean_jet, precision_jet);
+        let second_shape = mul(complement, precision_jet);
+        let ln_gamma_precision_jet = compose(
+            ln_gamma_at_precision,
+            precision_jet,
+            ln_gamma_precision,
+            digamma_precision,
+            trigamma_precision,
+            tetragamma_precision,
+            0.0
+        );
+        let ln_gamma_first_jet = compose(
+            ln_gamma_at_first_shape,
+            first_shape,
+            ln_gamma_first_shape,
+            digamma_first_shape,
+            trigamma_first_shape,
+            tetragamma_first_shape,
+            0.0
+        );
+        let ln_gamma_second_jet = compose(
+            ln_gamma_at_second_shape,
+            second_shape,
+            ln_gamma_second_shape,
+            digamma_second_shape,
+            trigamma_second_shape,
+            tetragamma_second_shape,
+            0.0
+        );
+        let normalizer = add(
+            ln_gamma_precision_jet,
+            neg(add(ln_gamma_first_jet, ln_gamma_second_jet))
+        );
+        let response = add(scale(first_shape, log_response), scale(second_shape, log_complement));
+        return add_constant(add(normalizer, response), -(log_response + log_complement));
+    }
+}
+
+// Tweedie, positive y (saddlepoint density): ℓ = −½ κ dev + ½ η_d − ½ ln 2π
+// − ½ p ln y, with κ = 1/φ = e^{η_d} and
+// dev = 2 (μ^{2−p}/(2−p) − y μ^{1−p}/(1−p) + y^{2−p}/((1−p)(2−p))). About the
+// row, ½ dev = A e^{(2−p)δ_μ} − B e^{(1−p)δ_μ} + C with A = μ^{2−p}/(2−p),
+// B = y μ^{1−p}/(1−p) and C = y^{2−p}/((1−p)(2−p)). The caller supplies the two
+// exponential terms' stacks `A (2−p)^k` and `B (1−p)^k`; `deviance_offset` is C
+// and `log_normalizer` is `½ η_d − ½ ln 2π − ½ p ln y` at the row.
+row_program! {
+    fn tweedie_positive_row_program(
+        delta_mu,
+        delta_d;
+        kappa,
+        mean_term,
+        mean_first,
+        mean_second,
+        mean_third,
+        response_term,
+        response_first,
+        response_second,
+        response_third,
+        deviance_offset,
+        log_normalizer
+    )
+    emit [order2, third];
+    leaves {
+        unit_exponential => supplied,
+        mean_power => supplied,
+        response_power => supplied,
+    }
+    witnesses [];
+    {
+        let precision_ratio = compose(unit_exponential, delta_d, 1.0, 1.0, 1.0, 1.0, 1.0);
+        let precision = scale(precision_ratio, kappa);
+        let mean_jet = compose(
+            mean_power,
+            delta_mu,
+            mean_term,
+            mean_first,
+            mean_second,
+            mean_third,
+            0.0
+        );
+        let response_jet = compose(
+            response_power,
+            delta_mu,
+            response_term,
+            response_first,
+            response_second,
+            response_third,
+            0.0
+        );
+        let half_deviance = add_constant(add(mean_jet, neg(response_jet)), deviance_offset);
+        let density = add(neg(mul(precision, half_deviance)), scale(delta_d, 0.5));
+        return add_constant(density, log_normalizer);
+    }
+}
+
+// Tweedie, y = 0 (exact point mass): ℓ = −κ μ^{2−p}/(2−p), κ = e^{η_d}. About the
+// row μ^{2−p}/(2−p) = A e^{(2−p)δ_μ}, and the caller supplies the stack `A (2−p)^k`.
+row_program! {
+    fn tweedie_zero_row_program(
+        delta_mu,
+        delta_d;
+        kappa,
+        mean_term,
+        mean_first,
+        mean_second,
+        mean_third
+    )
+    emit [order2, third];
+    leaves {
+        unit_exponential => supplied,
+        mean_power => supplied,
+    }
+    witnesses [];
+    {
+        let precision_ratio = compose(unit_exponential, delta_d, 1.0, 1.0, 1.0, 1.0, 1.0);
+        let precision = scale(precision_ratio, kappa);
+        let mean_jet = compose(
+            mean_power,
+            delta_mu,
+            mean_term,
+            mean_first,
+            mean_second,
+            mean_third,
+            0.0
+        );
+        return neg(mul(precision, mean_jet));
+    }
+}
+
+/// One row's supplied stacks for its member's row program, through derivative
+/// `order`. Polygamma entries above `order` are zero, and so are the values that
+/// reach only the value channel (see the section note). A surface of order `k`
+/// reads the entries through `k`.
+#[derive(Clone, Copy)]
+enum DispersionRowStacks {
+    NegativeBinomial {
+        theta: f64,
+        count: f64,
+        ln_gamma_count: f64,
+        ln_gamma_total: f64,
+        digamma_total: f64,
+        trigamma_total: f64,
+        tetragamma_total: f64,
+        ln_gamma_theta: f64,
+        digamma_theta: f64,
+        trigamma_theta: f64,
+        tetragamma_theta: f64,
+        neg_log_theta_share: f64,
+        neg_log_mu_share: f64,
+        mu_share: f64,
+        theta_share: f64,
+    },
+    Gamma {
+        shape: f64,
+        log_shape_ratio: f64,
+        log_response: f64,
+        response_ratio: f64,
+        ln_gamma_shape: f64,
+        digamma_shape: f64,
+        trigamma_shape: f64,
+        tetragamma_shape: f64,
+    },
+    Beta {
+        precision: f64,
+        mean: f64,
+        mean_first: f64,
+        mean_second: f64,
+        mean_third: f64,
+        log_response: f64,
+        log_complement: f64,
+        ln_gamma_precision: f64,
+        digamma_precision: f64,
+        trigamma_precision: f64,
+        tetragamma_precision: f64,
+        ln_gamma_first_shape: f64,
+        digamma_first_shape: f64,
+        trigamma_first_shape: f64,
+        tetragamma_first_shape: f64,
+        ln_gamma_second_shape: f64,
+        digamma_second_shape: f64,
+        trigamma_second_shape: f64,
+        tetragamma_second_shape: f64,
+    },
+    TweediePositive {
+        kappa: f64,
+        mean_term: f64,
+        mean_first: f64,
+        mean_second: f64,
+        mean_third: f64,
+        response_term: f64,
+        response_first: f64,
+        response_second: f64,
+        response_third: f64,
+        deviance_offset: f64,
+        log_normalizer: f64,
+    },
+    TweedieZero {
+        kappa: f64,
+        mean_term: f64,
+        mean_first: f64,
+        mean_second: f64,
+        mean_third: f64,
+    },
+}
+
+impl DispersionRowStacks {
+    #[inline(always)]
+    fn at(kind: DispersionFamilyKind, yi: f64, em: f64, ed: f64, order: usize) -> Self {
+        use gam_math::special::polygamma_stack;
+        match kind {
+            DispersionFamilyKind::NegativeBinomial => {
+                let mu = em.exp();
+                let theta = ed.exp();
+                Self::negative_binomial(
+                    yi,
+                    mu,
+                    theta,
+                    polygamma_stack(theta + yi, order),
+                    polygamma_stack(theta, order),
+                )
+            }
+            DispersionFamilyKind::Gamma => {
+                let nu = ed.exp();
+                Self::gamma(yi, em, ed, nu, polygamma_stack(nu, order))
+            }
+            DispersionFamilyKind::Beta => {
+                let logit = gam_solve::mixture_link::logit_inverse_link_jet5(em);
+                let phi = ed.exp();
+                Self::beta(
+                    yi,
+                    &logit,
+                    phi,
+                    polygamma_stack(phi, order),
+                    polygamma_stack(logit.mu * phi, order),
+                    polygamma_stack((1.0 - logit.mu) * phi, order),
+                )
+            }
+            DispersionFamilyKind::Tweedie { p } => Self::tweedie(yi, p, em.exp(), ed.exp()),
+        }
+    }
+
+    /// `total` and `precision` are the polygamma stacks at `θ + y` and `θ`.
+    #[inline(always)]
+    fn negative_binomial(
+        yi: f64,
+        mu: f64,
+        theta: f64,
+        total: [f64; 5],
+        precision: [f64; 5],
+    ) -> Self {
+        let [digamma_total, trigamma_total, tetragamma_total, ..] = total;
+        let [digamma_theta, trigamma_theta, tetragamma_theta, ..] = precision;
+        Self::NegativeBinomial {
+            theta,
+            count: yi,
+            ln_gamma_count: 0.0,
+            ln_gamma_total: 0.0,
+            digamma_total,
+            trigamma_total,
+            tetragamma_total,
+            ln_gamma_theta: 0.0,
+            digamma_theta,
+            trigamma_theta,
+            tetragamma_theta,
+            neg_log_theta_share: -log_positive_share(theta, mu),
+            neg_log_mu_share: 0.0,
+            mu_share: positive_share(mu, theta),
+            theta_share: positive_share(theta, mu),
+        }
+    }
+
+    /// `shape` is the polygamma stack at `ν = e^{η_d}`.
+    #[inline(always)]
+    fn gamma(yi: f64, em: f64, ed: f64, nu: f64, shape: [f64; 5]) -> Self {
+        let [digamma_shape, trigamma_shape, tetragamma_shape, ..] = shape;
+        Self::Gamma {
+            shape: nu,
+            log_shape_ratio: ed - em,
+            log_response: yi.ln(),
+            response_ratio: (1.0 / em.exp()) * yi,
+            ln_gamma_shape: 0.0,
+            digamma_shape,
+            trigamma_shape,
+            tetragamma_shape,
+        }
+    }
+
+    /// `precision`, `first_shape` and `second_shape` are the polygamma stacks at
+    /// `φ`, `μφ` and `(1 − μ)φ`.
+    #[inline(always)]
+    fn beta(
+        yi: f64,
+        logit: &gam_solve::mixture_link::LogitJet5,
+        phi: f64,
+        precision: [f64; 5],
+        first_shape: [f64; 5],
+        second_shape: [f64; 5],
+    ) -> Self {
+        let [digamma_precision, trigamma_precision, tetragamma_precision, ..] = precision;
+        let [digamma_first_shape, trigamma_first_shape, tetragamma_first_shape, ..] = first_shape;
+        let [digamma_second_shape, trigamma_second_shape, tetragamma_second_shape, ..] =
+            second_shape;
+        Self::Beta {
+            precision: phi,
+            mean: logit.mu,
+            mean_first: logit.d1,
+            mean_second: logit.d2,
+            mean_third: logit.d3,
+            log_response: yi.ln(),
+            log_complement: (-yi).ln_1p(),
+            ln_gamma_precision: 0.0,
+            digamma_precision,
+            trigamma_precision,
+            tetragamma_precision,
+            ln_gamma_first_shape: 0.0,
+            digamma_first_shape,
+            trigamma_first_shape,
+            tetragamma_first_shape,
+            ln_gamma_second_shape: 0.0,
+            digamma_second_shape,
+            trigamma_second_shape,
+            tetragamma_second_shape,
+        }
+    }
+
+    /// The deviance's power terms are formed as `dispersion_tweedie_loglik` forms
+    /// them, so a row kernel that evaluates both shares their divisions.
+    #[inline(always)]
+    fn tweedie(yi: f64, p: f64, mu: f64, kappa: f64) -> Self {
+        let two_minus_p = 2.0 - p;
+        let mean_power_two = mu.powf(two_minus_p);
+        let mean_term = mean_power_two * (1.0 / two_minus_p);
+        let mean_second = mean_power_two * two_minus_p;
+        let mean_third = mean_second * two_minus_p;
+        if yi > 0.0 {
+            let one_minus_p = 1.0 - p;
+            let mean_power_one = mu.powf(one_minus_p);
+            let response_first = yi * mean_power_one;
+            let response_second = response_first * one_minus_p;
+            Self::TweediePositive {
+                kappa,
+                mean_term,
+                mean_first: mean_power_two,
+                mean_second,
+                mean_third,
+                response_term: mean_power_one * (yi / one_minus_p),
+                response_first,
+                response_second,
+                response_third: response_second * one_minus_p,
+                deviance_offset: yi.powf(two_minus_p) / (one_minus_p * two_minus_p),
+                log_normalizer: 0.0,
+            }
+        } else {
+            Self::TweedieZero {
+                kappa,
+                mean_term,
+                mean_first: mean_power_two,
+                mean_second,
+                mean_third,
+            }
+        }
+    }
+
+    /// Value, score and observed Hessian of the row log-likelihood in
+    /// `(η_μ, η_d)`: the member's order-2 surface at `δ = 0`.
+    #[inline(always)]
+    fn order2(self) -> (f64, [f64; 2], [[f64; 2]; 2]) {
+        let (value, gradient, hessian, []) = match self {
+            Self::NegativeBinomial {
+                theta,
+                count,
+                ln_gamma_count,
+                ln_gamma_total,
+                digamma_total,
+                trigamma_total,
+                tetragamma_total,
+                ln_gamma_theta,
+                digamma_theta,
+                trigamma_theta,
+                tetragamma_theta,
+                neg_log_theta_share,
+                neg_log_mu_share,
+                mu_share,
+                theta_share,
+            } => negative_binomial_row_program_order2(
+                0.0,
+                0.0,
+                theta,
+                count,
+                ln_gamma_count,
+                ln_gamma_total,
+                digamma_total,
+                trigamma_total,
+                tetragamma_total,
+                ln_gamma_theta,
+                digamma_theta,
+                trigamma_theta,
+                tetragamma_theta,
+                neg_log_theta_share,
+                neg_log_mu_share,
+                mu_share,
+                theta_share,
+            ),
+            Self::Gamma {
+                shape,
+                log_shape_ratio,
+                log_response,
+                response_ratio,
+                ln_gamma_shape,
+                digamma_shape,
+                trigamma_shape,
+                tetragamma_shape,
+            } => gamma_row_program_order2(
+                0.0,
+                0.0,
+                shape,
+                log_shape_ratio,
+                log_response,
+                response_ratio,
+                ln_gamma_shape,
+                digamma_shape,
+                trigamma_shape,
+                tetragamma_shape,
+            ),
+            Self::Beta {
+                precision,
+                mean,
+                mean_first,
+                mean_second,
+                mean_third,
+                log_response,
+                log_complement,
+                ln_gamma_precision,
+                digamma_precision,
+                trigamma_precision,
+                tetragamma_precision,
+                ln_gamma_first_shape,
+                digamma_first_shape,
+                trigamma_first_shape,
+                tetragamma_first_shape,
+                ln_gamma_second_shape,
+                digamma_second_shape,
+                trigamma_second_shape,
+                tetragamma_second_shape,
+            } => beta_row_program_order2(
+                0.0,
+                0.0,
+                precision,
+                mean,
+                mean_first,
+                mean_second,
+                mean_third,
+                log_response,
+                log_complement,
+                ln_gamma_precision,
+                digamma_precision,
+                trigamma_precision,
+                tetragamma_precision,
+                ln_gamma_first_shape,
+                digamma_first_shape,
+                trigamma_first_shape,
+                tetragamma_first_shape,
+                ln_gamma_second_shape,
+                digamma_second_shape,
+                trigamma_second_shape,
+                tetragamma_second_shape,
+            ),
+            Self::TweediePositive {
+                kappa,
+                mean_term,
+                mean_first,
+                mean_second,
+                mean_third,
+                response_term,
+                response_first,
+                response_second,
+                response_third,
+                deviance_offset,
+                log_normalizer,
+            } => tweedie_positive_row_program_order2(
+                0.0,
+                0.0,
+                kappa,
+                mean_term,
+                mean_first,
+                mean_second,
+                mean_third,
+                response_term,
+                response_first,
+                response_second,
+                response_third,
+                deviance_offset,
+                log_normalizer,
+            ),
+            Self::TweedieZero {
+                kappa,
+                mean_term,
+                mean_first,
+                mean_second,
+                mean_third,
+            } => tweedie_zero_row_program_order2(
+                0.0,
+                0.0,
+                kappa,
+                mean_term,
+                mean_first,
+                mean_second,
+                mean_third,
+            ),
+        };
+        (value, gradient, hessian)
+    }
+
+    /// The row log-likelihood's third derivative contracted along `direction`,
+    /// `Σ_c ℓ_abc u_c` in `(η_μ, η_d)`: the member's contracted third surface.
+    #[inline(always)]
+    fn third_contracted(self, direction: &[f64; 2]) -> [[f64; 2]; 2] {
+        match self {
+            Self::NegativeBinomial {
+                theta,
+                count,
+                ln_gamma_count,
+                ln_gamma_total,
+                digamma_total,
+                trigamma_total,
+                tetragamma_total,
+                ln_gamma_theta,
+                digamma_theta,
+                trigamma_theta,
+                tetragamma_theta,
+                neg_log_theta_share,
+                neg_log_mu_share,
+                mu_share,
+                theta_share,
+            } => negative_binomial_row_program_third_contracted(
+                0.0,
+                0.0,
+                theta,
+                count,
+                ln_gamma_count,
+                ln_gamma_total,
+                digamma_total,
+                trigamma_total,
+                tetragamma_total,
+                ln_gamma_theta,
+                digamma_theta,
+                trigamma_theta,
+                tetragamma_theta,
+                neg_log_theta_share,
+                neg_log_mu_share,
+                mu_share,
+                theta_share,
+                direction,
+            ),
+            Self::Gamma {
+                shape,
+                log_shape_ratio,
+                log_response,
+                response_ratio,
+                ln_gamma_shape,
+                digamma_shape,
+                trigamma_shape,
+                tetragamma_shape,
+            } => gamma_row_program_third_contracted(
+                0.0,
+                0.0,
+                shape,
+                log_shape_ratio,
+                log_response,
+                response_ratio,
+                ln_gamma_shape,
+                digamma_shape,
+                trigamma_shape,
+                tetragamma_shape,
+                direction,
+            ),
+            Self::Beta {
+                precision,
+                mean,
+                mean_first,
+                mean_second,
+                mean_third,
+                log_response,
+                log_complement,
+                ln_gamma_precision,
+                digamma_precision,
+                trigamma_precision,
+                tetragamma_precision,
+                ln_gamma_first_shape,
+                digamma_first_shape,
+                trigamma_first_shape,
+                tetragamma_first_shape,
+                ln_gamma_second_shape,
+                digamma_second_shape,
+                trigamma_second_shape,
+                tetragamma_second_shape,
+            } => beta_row_program_third_contracted(
+                0.0,
+                0.0,
+                precision,
+                mean,
+                mean_first,
+                mean_second,
+                mean_third,
+                log_response,
+                log_complement,
+                ln_gamma_precision,
+                digamma_precision,
+                trigamma_precision,
+                tetragamma_precision,
+                ln_gamma_first_shape,
+                digamma_first_shape,
+                trigamma_first_shape,
+                tetragamma_first_shape,
+                ln_gamma_second_shape,
+                digamma_second_shape,
+                trigamma_second_shape,
+                tetragamma_second_shape,
+                direction,
+            ),
+            Self::TweediePositive {
+                kappa,
+                mean_term,
+                mean_first,
+                mean_second,
+                mean_third,
+                response_term,
+                response_first,
+                response_second,
+                response_third,
+                deviance_offset,
+                log_normalizer,
+            } => tweedie_positive_row_program_third_contracted(
+                0.0,
+                0.0,
+                kappa,
+                mean_term,
+                mean_first,
+                mean_second,
+                mean_third,
+                response_term,
+                response_first,
+                response_second,
+                response_third,
+                deviance_offset,
+                log_normalizer,
+                direction,
+            ),
+            Self::TweedieZero {
+                kappa,
+                mean_term,
+                mean_first,
+                mean_second,
+                mean_third,
+            } => tweedie_zero_row_program_third_contracted(
+                0.0,
+                0.0,
+                kappa,
+                mean_term,
+                mean_first,
+                mean_second,
+                mean_third,
+                direction,
+            ),
+        }
+    }
+}
+
 /// Per-row log-likelihood derivatives in the predictor coordinates `(η_μ, η_d)`
-/// through second order, `([ℓ_μ, ℓ_d], [ℓ_μμ, ℓ_μd, ℓ_dd])`, derived by hand for
-/// every member (SPEC rule 1).
+/// through second order, `([ℓ_μ, ℓ_d], [ℓ_μμ, ℓ_μd, ℓ_dd])`, from the member's row
+/// program.
 ///
 /// The mean-link and precision-link chains, the inverse-link second-derivative
 /// terms and the mean/dispersion cross curvature are all included, so `−w` times
@@ -725,111 +1576,15 @@ pub(crate) fn dispersion_row_loglik(
 /// `∂²NLL/∂η_μ² = νy/μ = 6` and `∂²NLL/∂η_μ∂η_ν = ν(1 − y/μ) = −3`, where the
 /// Fisher working weights give `ν = 3` and `0`. The oracle is
 /// `crate::gamlss::test_support::dispersion_eta_nll_order2`.
+#[inline]
 fn dispersion_eta_loglik_second(
     kind: DispersionFamilyKind,
     yi: f64,
     em: f64,
     ed: f64,
 ) -> ([f64; 2], [f64; 3]) {
-    use gam_math::special::{digamma, trigamma};
-    match kind {
-        DispersionFamilyKind::NegativeBinomial => {
-            // ℓ = ln Γ(θ + y) − ln Γ(θ) − ln Γ(y + 1) + θ ln r + y ln q, with
-            // q = μ/(μ + θ) and r = θ/(μ + θ), so ∂q/∂η_μ = −∂q/∂η_d = qr.
-            let mu = em.exp();
-            let theta = ed.exp();
-            let q = positive_share(mu, theta);
-            let r = positive_share(theta, mu);
-            let s = q * r;
-            let log_r = log_positive_share(theta, mu);
-            let psi_gap = digamma(theta + yi) - digamma(theta);
-            let tri_gap = trigamma(theta + yi) - trigamma(theta);
-            let total = theta + yi;
-            let l_m = yi * r - theta * q;
-            let l_d = theta * (psi_gap + log_r + q) - yi * r;
-            let l_dd = theta * (psi_gap + log_r) + theta * theta * tri_gap + 2.0 * theta * q
-                - total * s;
-            ([l_m, l_d], [-total * s, total * s - theta * q, l_dd])
-        }
-        DispersionFamilyKind::Gamma => {
-            // ℓ = νη_d − νη_μ − ln Γ(ν) + (ν − 1) ln y − ν·(y/μ), with μ = e^{η_μ}
-            // and ν = e^{η_d}; `shape_score` is ∂ℓ/∂ν.
-            let mu = em.exp();
-            let nu = ed.exp();
-            let ratio = (1.0 / mu) * yi;
-            let shape_score = ed + 1.0 - em - digamma(nu) + yi.ln() - ratio;
-            let l_m = nu * (ratio - 1.0);
-            let l_d = nu * shape_score;
-            (
-                [l_m, l_d],
-                [-nu * ratio, l_m, l_d + nu - nu * nu * trigamma(nu)],
-            )
-        }
-        DispersionFamilyKind::Beta => {
-            // ℓ(μ, φ) = ln Γ(φ) − ln Γ(a) − ln Γ(b) + (a − 1) ln y + (b − 1) ln(1 − y),
-            // with a = μφ, b = (1 − μ)φ, μ = logistic(η_μ) and φ = e^{η_d}. The
-            // (μ, φ) partials are chained through dμ/dη_μ and φ = dφ/dη_d.
-            let logit = gam_solve::mixture_link::logit_inverse_link_jet5(em);
-            let (mu, d1, d2) = (logit.mu, logit.d1, logit.d2);
-            let phi = ed.exp();
-            let one_minus_mu = 1.0 - mu;
-            let a = mu * phi;
-            let b = one_minus_mu * phi;
-            let psi_a = digamma(a);
-            let psi_b = digamma(b);
-            let tri_a = trigamma(a);
-            let tri_b = trigamma(b);
-            let ln_y = yi.ln();
-            let ln_one_minus_y = (-yi).ln_1p();
-            let k = psi_b - psi_a + ln_y - ln_one_minus_y;
-            let cross = one_minus_mu * tri_b - mu * tri_a;
-            let l_mu = phi * k;
-            let l_phi = digamma(phi) - mu * psi_a - one_minus_mu * psi_b
-                + mu * ln_y
-                + one_minus_mu * ln_one_minus_y;
-            let l_mumu = -phi * phi * (tri_a + tri_b);
-            let l_muphi = k + phi * cross;
-            let l_phiphi =
-                trigamma(phi) - mu * mu * tri_a - one_minus_mu * one_minus_mu * tri_b;
-            (
-                [l_mu * d1, l_phi * phi],
-                [
-                    l_mumu * d1 * d1 + l_mu * d2,
-                    l_muphi * d1 * phi,
-                    l_phiphi * phi * phi + l_phi * phi,
-                ],
-            )
-        }
-        DispersionFamilyKind::Tweedie { p } => {
-            // κ = 1/φ = e^{η_d}. Positive y: ℓ = −½·dev·κ + ½η_d + const, where
-            // ∂dev/∂η_μ = 2(μ^{2−p} − yμ^{1−p}). y = 0: ℓ = −cκ with
-            // c = μ^{2−p}/(2−p), so ∂c/∂η_μ = μ^{2−p}.
-            let one_minus_p = 1.0 - p;
-            let two_minus_p = 2.0 - p;
-            let mu = em.exp();
-            let kappa = ed.exp();
-            let mu_two = mu.powf(two_minus_p);
-            if yi > 0.0 {
-                let mu_one = mu.powf(one_minus_p);
-                let dev = 2.0
-                    * (mu_two / two_minus_p - yi * mu_one / one_minus_p
-                        + yi.powf(two_minus_p) / (one_minus_p * two_minus_p));
-                let dev_m = 2.0 * (mu_two - yi * mu_one);
-                let dev_mm = 2.0 * (two_minus_p * mu_two - one_minus_p * yi * mu_one);
-                let half_kappa = 0.5 * kappa;
-                (
-                    [-half_kappa * dev_m, 0.5 - half_kappa * dev],
-                    [-half_kappa * dev_mm, -half_kappa * dev_m, -half_kappa * dev],
-                )
-            } else {
-                let c = mu_two / two_minus_p;
-                (
-                    [-kappa * mu_two, -kappa * c],
-                    [-kappa * two_minus_p * mu_two, -kappa * mu_two, -kappa * c],
-                )
-            }
-        }
-    }
+    let (_, gradient, hessian) = DispersionRowStacks::at(kind, yi, em, ed, 2).order2();
+    (gradient, [hessian[0][0], hessian[0][1], hessian[1][1]])
 }
 
 /// Per-row observed `(∂²NLL/∂η_μ², ∂²NLL/∂η_μ∂η_d, ∂²NLL/∂η_d²)` weights for
@@ -852,136 +1607,10 @@ pub(crate) fn dispersion_row_observed_hessian_weights(
     )
 }
 
-/// Per-row third log-likelihood derivatives in `(η_μ, η_d)`,
-/// `[ℓ_μμμ, ℓ_μμd, ℓ_μdd, ℓ_ddd]`, derived by hand with the same notation as
-/// [`dispersion_eta_loglik_second`]. The oracle is
-/// `crate::gamlss::test_support::dispersion_eta_nll_order3`.
-fn dispersion_eta_loglik_third(
-    kind: DispersionFamilyKind,
-    yi: f64,
-    em: f64,
-    ed: f64,
-) -> [f64; 4] {
-    use gam_math::special::{digamma, tetragamma, trigamma};
-    match kind {
-        DispersionFamilyKind::NegativeBinomial => {
-            // ∂s/∂η_μ = s(r − q) and ∂s/∂η_d = s(q − r) for s = qr.
-            let mu = em.exp();
-            let theta = ed.exp();
-            let q = positive_share(mu, theta);
-            let r = positive_share(theta, mu);
-            let s = q * r;
-            let log_r = log_positive_share(theta, mu);
-            let psi_gap = digamma(theta + yi) - digamma(theta);
-            let tri_gap = trigamma(theta + yi) - trigamma(theta);
-            let tetra_gap = tetragamma(theta + yi) - tetragamma(theta);
-            let total = theta + yi;
-            let spread = total * s * (q - r);
-            [
-                spread,
-                -theta * s - spread,
-                -theta * q + 2.0 * theta * s + spread,
-                theta * (psi_gap + log_r)
-                    + 3.0 * theta * theta * tri_gap
-                    + theta.powi(3) * tetra_gap
-                    + 3.0 * theta * q
-                    - 3.0 * theta * s
-                    - spread,
-            ]
-        }
-        DispersionFamilyKind::Gamma => {
-            let mu = em.exp();
-            let nu = ed.exp();
-            let ratio = (1.0 / mu) * yi;
-            let shape_score = ed + 1.0 - em - digamma(nu) + yi.ln() - ratio;
-            [
-                nu * ratio,
-                -nu * ratio,
-                nu * (ratio - 1.0),
-                nu * shape_score + 2.0 * nu
-                    - 3.0 * nu * nu * trigamma(nu)
-                    - nu.powi(3) * tetragamma(nu),
-            ]
-        }
-        DispersionFamilyKind::Beta => {
-            let logit = gam_solve::mixture_link::logit_inverse_link_jet5(em);
-            let (mu, d1, d2, d3) = (logit.mu, logit.d1, logit.d2, logit.d3);
-            let phi = ed.exp();
-            let one_minus_mu = 1.0 - mu;
-            let a = mu * phi;
-            let b = one_minus_mu * phi;
-            let psi_a = digamma(a);
-            let psi_b = digamma(b);
-            let tri_a = trigamma(a);
-            let tri_b = trigamma(b);
-            let tetra_a = tetragamma(a);
-            let tetra_b = tetragamma(b);
-            let ln_y = yi.ln();
-            let ln_one_minus_y = (-yi).ln_1p();
-            let k = psi_b - psi_a + ln_y - ln_one_minus_y;
-            let cross = one_minus_mu * tri_b - mu * tri_a;
-            let l_mu = phi * k;
-            let l_phi = digamma(phi) - mu * psi_a - one_minus_mu * psi_b
-                + mu * ln_y
-                + one_minus_mu * ln_one_minus_y;
-            let l_mumu = -phi * phi * (tri_a + tri_b);
-            let l_muphi = k + phi * cross;
-            let l_phiphi =
-                trigamma(phi) - mu * mu * tri_a - one_minus_mu * one_minus_mu * tri_b;
-            let l_mumumu = -phi.powi(3) * (tetra_a - tetra_b);
-            let l_mumuphi =
-                -2.0 * phi * (tri_a + tri_b) - phi * phi * (mu * tetra_a + one_minus_mu * tetra_b);
-            let l_muphiphi = 2.0 * cross
-                + phi * (one_minus_mu * one_minus_mu * tetra_b - mu * mu * tetra_a);
-            let l_phiphiphi =
-                tetragamma(phi) - mu.powi(3) * tetra_a - one_minus_mu.powi(3) * tetra_b;
-            [
-                l_mumumu * d1.powi(3) + 3.0 * l_mumu * d1 * d2 + l_mu * d3,
-                (l_mumuphi * d1 * d1 + l_muphi * d2) * phi,
-                (l_muphiphi * phi * phi + l_muphi * phi) * d1,
-                l_phiphiphi * phi.powi(3) + 3.0 * l_phiphi * phi * phi + l_phi * phi,
-            ]
-        }
-        DispersionFamilyKind::Tweedie { p } => {
-            let one_minus_p = 1.0 - p;
-            let two_minus_p = 2.0 - p;
-            let mu = em.exp();
-            let kappa = ed.exp();
-            let mu_two = mu.powf(two_minus_p);
-            if yi > 0.0 {
-                let mu_one = mu.powf(one_minus_p);
-                let dev = 2.0
-                    * (mu_two / two_minus_p - yi * mu_one / one_minus_p
-                        + yi.powf(two_minus_p) / (one_minus_p * two_minus_p));
-                let dev_m = 2.0 * (mu_two - yi * mu_one);
-                let dev_mm = 2.0 * (two_minus_p * mu_two - one_minus_p * yi * mu_one);
-                let dev_mmm = 2.0
-                    * (two_minus_p * two_minus_p * mu_two
-                        - one_minus_p * one_minus_p * yi * mu_one);
-                let half_kappa = 0.5 * kappa;
-                [
-                    -half_kappa * dev_mmm,
-                    -half_kappa * dev_mm,
-                    -half_kappa * dev_m,
-                    -half_kappa * dev,
-                ]
-            } else {
-                let c = mu_two / two_minus_p;
-                [
-                    -kappa * two_minus_p * two_minus_p * mu_two,
-                    -kappa * two_minus_p * mu_two,
-                    -kappa * mu_two,
-                    -kappa * c,
-                ]
-            }
-        }
-    }
-}
-
 /// Per-row directional derivative of the observed η-space Hessian channels
 /// `(∂²NLL/∂η_μ², ∂²NLL/∂η_μ∂η_d, ∂²NLL/∂η_d²)` along the per-row η-motion
-/// `(du_mu, du_d)`: the row-wise contraction of the third-derivative tensor from
-/// [`dispersion_eta_loglik_third`].
+/// `(du_mu, du_d)`: the member's contracted third surface. The oracle is
+/// `crate::gamlss::test_support::dispersion_eta_nll_order3`.
 pub(crate) fn dispersion_row_observed_hessian_directional(
     kind: DispersionFamilyKind,
     yi: f64,
@@ -994,12 +1623,13 @@ pub(crate) fn dispersion_row_observed_hessian_directional(
     if prior_weight <= 0.0 {
         return (0.0, 0.0, 0.0);
     }
-    let [l_mmm, l_mmd, l_mdd, l_ddd] = dispersion_eta_loglik_third(kind, yi, eta_mu, eta_d);
+    let drift =
+        DispersionRowStacks::at(kind, yi, eta_mu, eta_d, 3).third_contracted(&[du_mu, du_d]);
     let scale = -prior_weight;
     (
-        scale * (l_mmm * du_mu + l_mmd * du_d),
-        scale * (l_mmd * du_mu + l_mdd * du_d),
-        scale * (l_mdd * du_mu + l_ddd * du_d),
+        scale * drift[0][0],
+        scale * drift[0][1],
+        scale * drift[1][1],
     )
 }
 
@@ -1020,7 +1650,7 @@ pub struct DispersionAloRowGeometry {
 /// Replay the exact fitted row likelihood in its two affine predictor
 /// coordinates for saved-model ALO.
 ///
-/// This is intentionally a thin public boundary over the same hand-derived row
+/// This is intentionally a thin public boundary over the same row-program
 /// derivatives the fitter's observed Hessian uses, so diagnostics cannot drift
 /// onto a second approximation of the dispersion likelihood.
 pub fn dispersion_alo_row_geometry(
@@ -1092,8 +1722,21 @@ pub(super) fn dispersion_row_kernel(
             } else {
                 mu / (1.0 + mu / theta)
             };
+            // The score reads ψ at θ + y and θ, and the precision information
+            // below reads ψ′ at θ, so θ's stack carries both from one recurrence.
+            // The score reads stack entries through the first.
+            let theta_stack = gam_math::special::polygamma_stack(theta, 2);
+            let [score_mu, score_eta] = DispersionRowStacks::negative_binomial(
+                yi,
+                mu,
+                theta,
+                gam_math::special::polygamma_stack(theta + yi, 1),
+                theta_stack,
+            )
+            .order2()
+            .1;
             let mean_weight = wi * mean_eta_information;
-            let mean_response = em + (yi - mu) / mu;
+            let mean_response = em + score_mu / mean_eta_information;
             // Dispersion (log-θ) IRLS curvature: use the EXPECTED (Fisher)
             // information in θ, not the per-row OBSERVED Hessian channel
             // (`_info_theta_observed`). The NB2 log-likelihood is strongly
@@ -1120,26 +1763,16 @@ pub(super) fn dispersion_row_kernel(
             // curvature
             //   I_θ ≈ ψ′(θ) − ψ′(θ+μ) − 1/θ + 1/(θ+μ) > 0  for all (μ,θ),
             // since ψ′ is strictly decreasing. The working RESPONSE still
-            // carries the EXACT score `s_theta` (= ∂ℓ/∂θ from the tower), so the
+            // carries the EXACT score (the row program's `∂ℓ/∂η_d`), so the
             // penalized stationary point (score = 0) is byte-unchanged — this is
             // Fisher scoring, which only re-conditions the inner solve and never
             // shifts the optimum. The observed channel `_info_theta_observed` is no
             // longer consumed for the weight.
-            // #1591-follow-up: scalar `trigamma` evaluates ONLY ψ′; the old form
-            // built the full order-1..5 polygamma stack, read index 0 and
-            // discarded four of five per call (8 wasted polygamma evaluations per
-            // NB2 row).
-            let theta_fraction = if theta >= mu {
-                (mu / theta - yi / theta) / (1.0 + mu / theta)
-            } else {
-                (1.0 - yi / mu) / (1.0 + theta / mu)
-            };
-            let score_theta = gam_math::special::digamma(theta + yi)
-                - gam_math::special::digamma(theta)
-                + log_positive_share(theta, mu)
-                + theta_fraction;
-            let score_eta = theta * score_theta;
-            let eta_information = nb_log_precision_fisher_jensen(mu, theta);
+            // #1591-follow-up: the information reads ψ′(θ) off θ's score stack and
+            // evaluates only ψ′(θ+μ) itself; an earlier form built the full
+            // order-1..5 polygamma stack, read index 0 and discarded four of five
+            // per call (8 wasted polygamma evaluations per NB2 row).
+            let eta_information = nb_log_precision_fisher_jensen(mu, theta, theta_stack[1]);
             let disp_weight = wi * eta_information;
             let disp_response = ed + score_eta / eta_information;
             DispersionRowKernel {
@@ -1154,16 +1787,18 @@ pub(super) fn dispersion_row_kernel(
             let mu = em.exp();
             let nu = ed.exp(); // precision = shape ν
             let loglik = dispersion_gamma_loglik(yi, yi, mu, nu, wi);
-            // ℓ(ν) = ν ln ν − ν ln μ − ln Γ(ν) + (ν − 1) ln y − ν y/μ, so the
-            // shape score is ℓ_ν = ln ν + 1 − ln μ − ψ(ν) + ln y − y/μ and the
-            // observed information is −ℓ_νν = ψ′(ν) − 1/ν, positive for ν > 0.
-            let s_nu = nu.ln() + 1.0 - mu.ln() - gam_math::special::digamma(nu) + yi.ln()
-                - (1.0 / mu) * yi;
-            let info_nu = gam_math::special::trigamma(nu) - nu.recip();
+            // The shape information −ℓ_νν = ψ′(ν) − 1/ν is positive for ν > 0 and
+            // free of y, so it is the Fisher information too; the mean channel's
+            // is ν. The scores are the row program's gradient in (η_μ, η_d).
+            // One stack at ν carries the score's ψ and the information's ψ′.
+            let nu_stack = gam_math::special::polygamma_stack(nu, 2);
+            let [score_mu, score_eta] =
+                DispersionRowStacks::gamma(yi, em, ed, nu, nu_stack).order2().1;
+            let info_nu = nu_stack[1] - nu.recip();
             let mean_weight = wi * nu;
-            let mean_response = em + (yi - mu) / mu;
+            let mean_response = em + score_mu / nu;
             let disp_weight = wi * nu * nu * info_nu;
-            let disp_response = ed + s_nu / (nu * info_nu);
+            let disp_response = ed + score_eta / (nu * nu * info_nu);
             DispersionRowKernel {
                 loglik,
                 mean_weight,
@@ -1182,27 +1817,28 @@ pub(super) fn dispersion_row_kernel(
             let one_minus_mu = 1.0 - mu;
             let a = mu * phi;
             let b = one_minus_mu * phi;
-            // ℓ(μ, φ) = ln Γ(φ) − ln Γ(a) − ln Γ(b) + (a − 1) ln y + (b − 1) ln(1 − y)
-            // with a = μφ and b = (1 − μ)φ, so
-            //   ℓ_μ = φ (ψ(b) − ψ(a) + ln y − ln(1 − y)),
-            //   ℓ_φ = ψ(φ) − μ ψ(a) − (1 − μ) ψ(b) + μ ln y + (1 − μ) ln(1 − y).
-            let psi_a = gam_math::special::digamma(a);
-            let psi_b = gam_math::special::digamma(b);
-            let ln_y = yi.ln();
-            let ln_one_minus_y = (-yi).ln_1p();
-            let score_mu = phi * (psi_b - psi_a + ln_y - ln_one_minus_y);
-            let s_phi = gam_math::special::digamma(phi) - mu * psi_a - one_minus_mu * psi_b
-                + mu * ln_y
-                + one_minus_mu * ln_one_minus_y;
-            let tri_a = gam_math::special::trigamma(a);
-            let tri_b = gam_math::special::trigamma(b);
-            let tri_phi = gam_math::special::trigamma(phi);
+            // Fisher information of Beta(a, b) with a = μφ and b = (1 − μ)φ:
+            //   I_μμ = φ² (ψ′(a) + ψ′(b)),  I_φφ = μ² ψ′(a) + (1 − μ)² ψ′(b) − ψ′(φ),
+            // carried into (η_μ, η_d) by dμ/dη_μ = q and dφ/dη_d = φ. The scores
+            // are the row program's gradient in (η_μ, η_d).
+            // One stack at each of φ, a and b carries the score's ψ and the
+            // information's ψ′.
+            let phi_stack = gam_math::special::polygamma_stack(phi, 2);
+            let a_stack = gam_math::special::polygamma_stack(a, 2);
+            let b_stack = gam_math::special::polygamma_stack(b, 2);
+            let [score_mu, score_eta] =
+                DispersionRowStacks::beta(yi, &logit, phi, phi_stack, a_stack, b_stack)
+                    .order2()
+                    .1;
+            let tri_a = a_stack[1];
+            let tri_b = b_stack[1];
+            let tri_phi = phi_stack[1];
             let info_mu = phi * phi * (tri_a + tri_b);
             let info_phi = mu * mu * tri_a + one_minus_mu * one_minus_mu * tri_b - tri_phi;
             let mean_weight = wi * q * q * info_mu;
-            let mean_response = em + score_mu / (q * info_mu);
+            let mean_response = em + score_mu / (q * q * info_mu);
             let disp_weight = wi * phi * phi * info_phi;
-            let disp_response = ed + s_phi / (phi * info_phi);
+            let disp_response = ed + score_eta / (phi * phi * info_phi);
             DispersionRowKernel {
                 loglik,
                 mean_weight,
@@ -1216,34 +1852,28 @@ pub(super) fn dispersion_row_kernel(
             // Precision channel models log(1/φ) ⇒ φ = exp(−η_d).
             let phi = (-ed).exp();
             let two_minus_p = 2.0 - p;
-            // Mean channel: the quasi-score `(y−μ)/μ` and Fisher weight
-            // `μ^{2−p}/φ` are simple closed forms (and the mean block is
-            // Fisher-orthogonal to the dispersion block in this
-            // parameterization), so they stay hand-written exactly as the
-            // NB/Gamma mean arms do.
-            let mean_weight = wi * mu.powf(two_minus_p) / phi;
-            let mean_response = em + (yi - mu) / mu;
-            // Dispersion channel in η_d, where φ = exp(−η_d) and so 1/φ = exp(η_d).
-            // Positive y (saddlepoint density):
-            //   ℓ = −dev/(2φ) − ½ ln(2πφ) − ½ p ln y, so ℓ′ = ½ − dev/(2φ).
-            // y = 0 (point mass), with c = μ^{2−p}/(2−p):
-            //   ℓ = −c/φ, so ℓ′ = ℓ″ = −c/φ.
-            // The positive branch keeps the constant curvature ½; the point mass
-            // uses its observed information c/φ.
             let loglik = dispersion_tweedie_loglik(yi, em, ed, p, wi);
-            let one_minus_p = 1.0 - p;
-            let (s_eta, curvature_eta) = if yi > 0.0 {
-                let dev = (mu.powf(two_minus_p) * (1.0 / two_minus_p)
-                    - mu.powf(one_minus_p) * (yi / one_minus_p)
-                    + yi.powf(two_minus_p) / (one_minus_p * two_minus_p))
-                    * 2.0;
-                (0.5 - 0.5 * dev / phi, 0.5)
+            // κ = 1/φ is the reciprocal the log-likelihood forms, and the stacks form
+            // the deviance's power terms as it does, so the scores (the row
+            // program's gradient in (η_μ, η_d)) share its divisions.
+            let kappa = 1.0 / phi;
+            let [score_mu, score_eta] = DispersionRowStacks::tweedie(yi, p, mu, kappa).order2().1;
+            // Mean channel: the Fisher weight `μ^{2−p}/φ` (the mean block is
+            // Fisher-orthogonal to the dispersion block in this parameterization).
+            let mean_information = mu.powf(two_minus_p) * kappa;
+            let mean_weight = wi * mean_information;
+            let mean_response = em + score_mu / mean_information;
+            // Dispersion channel in η_d, where φ = exp(−η_d). Positive y
+            // (saddlepoint density ℓ = −dev/(2φ) − ½ ln(2πφ) − ½ p ln y) keeps the
+            // constant curvature ½. The point mass at y = 0 (ℓ = −c/φ with
+            // c = μ^{2−p}/(2−p)) uses its observed information c/φ.
+            let curvature_eta = if yi > 0.0 {
+                0.5
             } else {
-                let info = mu.powf(two_minus_p) * (1.0 / two_minus_p) / phi;
-                (-info, info)
+                mu.powf(two_minus_p) * (1.0 / two_minus_p) * kappa
             };
             let disp_weight = wi * curvature_eta;
-            let disp_response = ed + s_eta / curvature_eta;
+            let disp_response = ed + score_eta / curvature_eta;
             DispersionRowKernel {
                 loglik,
                 mean_weight,
@@ -1554,7 +2184,7 @@ impl CustomFamily for DispersionGlmLocationScaleFamily {
     /// (`dispersion_row_observed_hessian_weights`): the full mean-link and
     /// precision-link chains, the inverse-link second-derivative terms, and
     /// the mean/dispersion cross curvature are all carried exactly by the
-    /// hand-derived row derivatives. This is deliberately NOT the Fisher-scoring
+    /// member's row program. This is deliberately NOT the Fisher-scoring
     /// working-weight matrix that `evaluate` returns for the inner IRLS —
     /// expected information is a legitimate inner-solve preconditioner (the
     /// working response keeps the exact score, so the optimum is unchanged),
@@ -1609,7 +2239,7 @@ impl CustomFamily for DispersionGlmLocationScaleFamily {
         }
 
         // Per-row observed `(∂²/∂η_μ², ∂²/∂η_μ∂η_d, ∂²/∂η_d²)` weights, one
-        // hand-derived second-order row evaluation each. Row-independent, so fan it
+        // row-program second-order evaluation each. Row-independent, so fan it
         // out for large `n` (off a rayon worker) into a per-row buffer —
         // index-ordered, no reduction, so byte-identical to the serial map.
         let observed: Vec<(f64, f64, f64)> =
@@ -1701,8 +2331,8 @@ impl CustomFamily for DispersionGlmLocationScaleFamily {
     }
 
     /// Exact β-directional derivative of the observed joint Hessian,
-    /// `D_β H_L[u]`, assembled row-wise from the hand-derived third-order η-space
-    /// row derivatives (`dispersion_eta_loglik_third`): with per-row η-motion
+    /// `D_β H_L[u]`, assembled row-wise from each member's contracted third
+    /// row-program surface (`dispersion_row_observed_hessian_directional`): with per-row η-motion
     /// `du_μ = X_μ u_μ`, `du_d = X_d u_d`, each Hessian channel drifts by the
     /// exact tensor contraction `dW_ab = Σ_c (∂³NLL/∂η_a∂η_b∂η_c) du_c`, and
     /// the blocks are the same `Xᵀ diag(dW) X` grams the Hessian itself uses.
@@ -2446,6 +3076,9 @@ pub fn fit_dispersion_glm_location_scale_terms(
 }
 
 #[cfg(test)]
+mod tests_row_program_932;
+
+#[cfg(test)]
 mod tests {
     use super::test_support::{
         dispersion_beta_nll_order2, dispersion_gamma_disp_order2, dispersion_gamma_nll_order2,
@@ -2895,7 +3528,8 @@ mod tests {
         assert!((kernel.mean_weight / precision - 0.5).abs() <= 8.0 * f64::EPSILON);
         assert!(kernel.disp_weight.is_finite() && kernel.disp_weight > 0.0);
 
-        let eta_info = nb_log_precision_fisher_jensen(1.0, 1.0e17);
+        let eta_info =
+            nb_log_precision_fisher_jensen(1.0, 1.0e17, gam_math::special::trigamma(1.0e17));
         assert!(eta_info.is_finite() && eta_info > 0.0);
         assert!((eta_info * 1.0e17 - 1.0).abs() < 1.0e-12);
 
@@ -3015,10 +3649,10 @@ mod tests {
         }
     }
 
-    /// SPEC rule 1 (#2901): the row kernel derives the Gamma, Beta and Tweedie
-    /// dispersion score and information by hand. Its working sets must match
-    /// the ones the pruned jet towers produce, across randomized rows and both
-    /// Tweedie density branches.
+    /// #932: the row kernel reads the Gamma, Beta and Tweedie dispersion scores
+    /// from the row programs and forms their information in closed form. Its
+    /// working sets must match the ones the pruned jet towers produce, across
+    /// randomized rows and both Tweedie density branches.
     #[test]
     fn row_kernel_closed_form_dispersion_channels_match_the_towers() {
         let mut state: u64 = 0x2901_D15C_0A11_0001;
@@ -3032,7 +3666,7 @@ mod tests {
             let band = 1e-10 * (1.0 + hand.abs().max(tower.abs()));
             assert!(
                 (hand - tower).abs() <= band,
-                "{label}: hand-derived {hand:.17e} vs tower {tower:.17e}"
+                "{label}: row program {hand:.17e} vs tower {tower:.17e}"
             );
         };
         for _ in 0..500 {
@@ -3101,12 +3735,12 @@ mod tests {
         }
     }
 
-    /// SPEC rule 1 (#2901): the observed η-space Hessian, its directional
-    /// derivative and the saved-model ALO geometry are derived by hand. They
-    /// must match the jet towers they replaced, on randomized rows of every
-    /// member and both Tweedie density branches.
+    /// #932: the observed η-space Hessian, its directional derivative and the
+    /// saved-model ALO geometry come from each member's row program. They must
+    /// match the independent jet towers, on randomized rows of every member and
+    /// both Tweedie density branches.
     #[test]
-    fn eta_space_closed_form_derivatives_match_the_towers() {
+    fn eta_space_row_program_derivatives_match_the_towers() {
         let mut state: u64 = 0x2901_E7A5_0A11_0002;
         let mut next = || {
             state = state
@@ -3118,7 +3752,7 @@ mod tests {
             let band = 1e-9 * (1.0 + hand.abs().max(tower.abs()));
             assert!(
                 (hand - tower).abs() <= band,
-                "{label}: hand-derived {hand:.17e} vs tower {tower:.17e}"
+                "{label}: row program {hand:.17e} vs tower {tower:.17e}"
             );
         };
         for _ in 0..400 {

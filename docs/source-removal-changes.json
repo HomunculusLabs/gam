@@ -3740,6 +3740,19 @@
     "evidence": "At the base, git grep -w over crates, src, tests, examples, benches, bench and gamfit finds each removed name only in crates/gam-models/src/gamlss/binomial/kernel.rs, gamlss/binomial/location_scale.rs (the replaced gradient callers) and gamlss/test_support.rs (the tower oracle, now spelled independently as binomial_location_scale_nll_in_predictors); outside the code only the historical docs/test-census-2818-inventory.json names measure_gradient_order1_vs_tower4_932. Salvaged from the unpushed overnight swarm patch scratchpad/landing1.patch, which the shared working tree held byte-for-byte."
   },
   {
+    "base": "5a4f414b96b6a4ac8efc112aa159dcd332fb9b8c",
+    "items": [
+      "crates/gam-math/src/jet_tower.rs:fn:digamma_asymptotic",
+      "crates/gam-math/src/jet_tower.rs:fn:polygamma_asymptotic",
+      "crates/gam-math/src/jet_tower.rs:fn:polygamma_asymptotic_coefficients",
+      "crates/gam-math/src/jet_tower.rs:fn:polygamma_recurrence_term",
+      "crates/gam-models/src/gamlss/dispersion_family.rs:fn:dispersion_eta_loglik_third",
+      "crates/gam-models/src/gamlss/dispersion_family.rs:fn:eta_space_closed_form_derivatives_match_the_towers"
+    ],
+    "reason": "#932: the dispersion location-scale families (NegativeBinomial, Gamma, Beta, Tweedie) take their eta-space score, observed Hessian and its directional derivative from one row_program declaration per member instead of hand closed forms. dispersion_eta_loglik_third, the hand third-derivative tensor, is replaced by each member's contracted third surface; its closed form moves verbatim into tests_row_program_932.rs as the agreement subject and speed opponent. In gam-math, polygamma_positive_stack walks the recurrence once for every order with compile-time coefficient tables, so the per-order helpers digamma_asymptotic, polygamma_asymptotic, polygamma_asymptotic_coefficients and polygamma_recurrence_term are deleted; digamma_positive and polygamma_positive remain as its entries, bit for bit. The test eta_space_closed_form_derivatives_match_the_towers is renamed eta_space_row_program_derivatives_match_the_towers.",
+    "evidence": "The item list is the refusal of scripts/source_removal_guard.py over probe commit 64250e7939 (the exact code tree, patch md5 ae59ce07) on base d6e0e0dd79 (MSI job 1174196, python3.12), re-keyed to the push parent. public_api_census.py over the same pair exited 0."
+  },
+  {
     "base": "ad41db44910c5f12c7edee05dde1a6fd3f977b2c",
     "items": [
       "crates/gam-cli/src/main/run_crosscoder.rs:fn:transport_tolerance_requires_a_grid",

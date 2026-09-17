@@ -1031,47 +1031,77 @@ pub(crate) fn sqrt_derivative_stack<const N: usize>(u: f64) -> [f64; N] {
 }
 
 pub(crate) fn ln_gamma_derivative_stack(x: f64) -> [f64; 5] {
+    let [digamma, trigamma, tetragamma, pentagamma, _] = polygamma_positive_stack(x, 4);
     [
         statrs::function::gamma::ln_gamma(x),
-        digamma_positive(x),
-        polygamma_positive::<1>(x),
-        polygamma_positive::<2>(x),
-        polygamma_positive::<3>(x),
+        digamma,
+        trigamma,
+        tetragamma,
+        pentagamma,
     ]
 }
 
 pub(crate) fn digamma_derivative_stack(x: f64) -> [f64; 5] {
-    [
-        digamma_positive(x),
-        polygamma_positive::<1>(x),
-        polygamma_positive::<2>(x),
-        polygamma_positive::<3>(x),
-        polygamma_positive::<4>(x),
-    ]
+    polygamma_positive_stack(x, POLYGAMMA_STACK_ORDERS)
 }
 
-pub(crate) fn digamma_positive(mut x: f64) -> f64 {
-    if !(x.is_finite() && x > 0.0) {
-        return f64::NAN;
-    }
-    let mut acc = 0.0;
-    while x < POLYGAMMA_ASYMPTOTIC_MIN_X {
-        acc -= 1.0 / x;
-        x += 1.0;
-    }
-    acc + digamma_asymptotic(x)
+pub(crate) fn digamma_positive(x: f64) -> f64 {
+    polygamma_positive_stack(x, 1)[0]
 }
 
-pub(crate) fn polygamma_positive<const ORDER: usize>(mut x: f64) -> f64 {
+pub(crate) fn polygamma_positive<const ORDER: usize>(x: f64) -> f64 {
+    polygamma_positive_stack(x, ORDER + 1)[ORDER]
+}
+
+/// Derivative orders the polygamma kernel carries: `ψ` through `ψ₄`.
+pub(crate) const POLYGAMMA_STACK_ORDERS: usize = 5;
+
+/// `[ψ(x), ψ₁(x), …]` through the first `orders` entries (at most five) from one
+/// walk of the recurrence, for `x > 0`; those entries are `NaN` otherwise, and the
+/// entries past `orders` are zero.
+///
+/// Every order reads the same reciprocal of each shifted argument, so a step of
+/// the recurrence costs one division whatever the number of orders, and the
+/// asymptotic tail is one division and a Horner polynomial in `x⁻²`. The
+/// arithmetic of entry `k` does not depend on `orders`, so the scalar
+/// [`digamma_positive`] and [`polygamma_positive`] are this kernel's entries,
+/// bit for bit, and so is every stack.
+#[inline(always)]
+pub(crate) fn polygamma_positive_stack(mut x: f64, orders: usize) -> [f64; POLYGAMMA_STACK_ORDERS] {
+    let orders = orders.min(POLYGAMMA_STACK_ORDERS);
+    let mut out = [0.0; POLYGAMMA_STACK_ORDERS];
     if !(x.is_finite() && x > 0.0) {
-        return f64::NAN;
+        out[..orders].fill(f64::NAN);
+        return out;
     }
-    let mut acc = 0.0;
+    // ψ_k(x) = ψ_k(x + 1) − (−1)^k k! x^{−(k+1)}.
     while x < POLYGAMMA_ASYMPTOTIC_MIN_X {
-        acc += polygamma_recurrence_term::<ORDER>(x);
+        let inverse = 1.0 / x;
+        let mut power = inverse;
+        for (entry, coefficient) in out[..orders].iter_mut().zip(POLYGAMMA_RECURRENCE) {
+            *entry += coefficient * power;
+            power *= inverse;
+        }
         x += 1.0;
     }
-    acc + polygamma_asymptotic::<ORDER>(x)
+    let inverse = 1.0 / x;
+    let inverse_squared = inverse * inverse;
+    let mut power = 1.0;
+    for (order, entry) in out[..orders].iter_mut().enumerate() {
+        let mut tail = 0.0;
+        for coefficient in POLYGAMMA_ASYMPTOTIC_TAIL[order].iter().rev() {
+            tail = tail * inverse_squared + coefficient;
+        }
+        let series = if order == 0 {
+            x.ln() - 0.5 * inverse + inverse_squared * tail
+        } else {
+            let [leading, half_term] = POLYGAMMA_ASYMPTOTIC_LEADING[order];
+            power *= inverse;
+            power * (leading + half_term * inverse + inverse_squared * tail)
+        };
+        *entry += series;
+    }
+    out
 }
 
 const POLYGAMMA_ASYMPTOTIC_MIN_X: f64 = 20.0;
@@ -1088,54 +1118,55 @@ const BERNOULLI_EVEN: [(usize, f64); 10] = [
     (20, -174611.0 / 330.0),
 ];
 
-fn polygamma_recurrence_term<const ORDER: usize>(x: f64) -> f64 {
-    let coefficient = const {
-        let sign = if ORDER % 2 == 1 { 1.0 } else { -1.0 };
-        sign * factorial(ORDER)
-    };
-    coefficient / x.powi((ORDER + 1) as i32)
-}
+// The series' factorial products are built once at compile time, including in dev
+// builds: #2668's NB profile spent 13.53% of cycles in factorial alone.
 
-fn digamma_asymptotic(x: f64) -> f64 {
-    let mut out = x.ln() - 0.5 / x;
-    for (bernoulli_order, bernoulli) in BERNOULLI_EVEN {
-        out -= bernoulli / (bernoulli_order as f64 * x.powi(bernoulli_order as i32));
-    }
-    out
-}
-
-fn polygamma_asymptotic<const ORDER: usize>(x: f64) -> f64 {
-    const { assert!(ORDER >= 1 && ORDER <= 5) };
-    let (leading, half_term) = const {
-        let sign = if ORDER % 2 == 1 { 1.0 } else { -1.0 };
-        (sign * factorial(ORDER - 1), sign * factorial(ORDER))
-    };
-    let mut out =
-        leading / x.powi(ORDER as i32) + half_term / (2.0 * x.powi((ORDER + 1) as i32));
-
-    // Derivative order and Bernoulli coefficients are fixed by the series.
-    // Build their factorial products once at compile time, including in dev
-    // builds: #2668's NB profile spent 13.53% of cycles in factorial alone.
-    let coefficients = const { polygamma_asymptotic_coefficients::<ORDER>() };
-    for (power, coefficient) in coefficients {
-        out += coefficient / x.powi(power);
-    }
-    out
-}
-
-const fn polygamma_asymptotic_coefficients<const ORDER: usize>() -> [(i32, f64); 10] {
-    let sign = if ORDER % 2 == 1 { 1.0 } else { -1.0 };
-    let mut coefficients = [(0, 0.0); BERNOULLI_EVEN.len()];
-    let mut index = 0;
-    while index < BERNOULLI_EVEN.len() {
-        let (power, bernoulli) = BERNOULLI_EVEN[index];
-        coefficients[index] = (
-            (power + ORDER) as i32,
-            sign * bernoulli * rising_factorial(power, ORDER) / power as f64,
-        );
-        index += 1;
+/// `(−1)^{k+1} k!`: the recurrence coefficient of `x^{−(k+1)}` in `ψ_k`.
+const POLYGAMMA_RECURRENCE: [f64; POLYGAMMA_STACK_ORDERS] = {
+    let mut coefficients = [0.0; POLYGAMMA_STACK_ORDERS];
+    let mut order = 0;
+    while order < POLYGAMMA_STACK_ORDERS {
+        coefficients[order] = polygamma_sign(order) * factorial(order);
+        order += 1;
     }
     coefficients
+};
+
+/// `[(−1)^{k+1} (k − 1)!, (−1)^{k+1} k!/2]`: the coefficients of `x^{−k}` and
+/// `x^{−(k+1)}` in the asymptotic `ψ_k`, `k ≥ 1`. `ψ` itself leads with
+/// `ln x − 1/(2x)`, so its row is unread.
+const POLYGAMMA_ASYMPTOTIC_LEADING: [[f64; 2]; POLYGAMMA_STACK_ORDERS] = {
+    let mut coefficients = [[0.0; 2]; POLYGAMMA_STACK_ORDERS];
+    let mut order = 1;
+    while order < POLYGAMMA_STACK_ORDERS {
+        let sign = polygamma_sign(order);
+        coefficients[order] = [sign * factorial(order - 1), sign * factorial(order) / 2.0];
+        order += 1;
+    }
+    coefficients
+};
+
+/// `(−1)^{k+1} B_{2j} (2j)(2j+1)⋯(2j+k−1)/(2j)`, `j = 1, …, 10`: the Bernoulli
+/// tail of the asymptotic `ψ_k` is `x^{−k} Σ_j c_j x^{−2j}`.
+const POLYGAMMA_ASYMPTOTIC_TAIL: [[f64; BERNOULLI_EVEN.len()]; POLYGAMMA_STACK_ORDERS] = {
+    let mut coefficients = [[0.0; BERNOULLI_EVEN.len()]; POLYGAMMA_STACK_ORDERS];
+    let mut order = 0;
+    while order < POLYGAMMA_STACK_ORDERS {
+        let mut index = 0;
+        while index < BERNOULLI_EVEN.len() {
+            let (power, bernoulli) = BERNOULLI_EVEN[index];
+            coefficients[order][index] = polygamma_sign(order) * bernoulli
+                * rising_factorial(power, order)
+                / power as f64;
+            index += 1;
+        }
+        order += 1;
+    }
+    coefficients
+};
+
+const fn polygamma_sign(order: usize) -> f64 {
+    if order % 2 == 1 { 1.0 } else { -1.0 }
 }
 
 const fn factorial(n: usize) -> f64 {

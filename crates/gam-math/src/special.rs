@@ -394,11 +394,11 @@ pub fn bessel_i0_log_and_ratio(eta: f64) -> (f64, f64) {
 /// Digamma `ψ(x) = d/dx ln Γ(x)`, for `x > 0`; `NaN` otherwise.
 ///
 /// These polygamma functions are the workspace's one implementation. Each
-/// evaluates the same kernel as the `jet_tower` derivative stacks, so a scalar
-/// value and the matching stack entry are bit-identical. The kernel walks the
-/// recurrence `ψ(x) = ψ(x+1) − 1/x` up to `x ≥ 20`, then sums the Bernoulli
-/// asymptotic series through `B₂₀`, where truncation sits far below `f64`
-/// rounding.
+/// evaluates the same kernel as [`polygamma_stack`] and the `jet_tower` derivative
+/// stacks, so a scalar value and the matching stack entry are bit-identical. The
+/// kernel walks the recurrence `ψ(x) = ψ(x+1) − 1/x` up to `x ≥ 20`, then sums the
+/// Bernoulli asymptotic series through `B₂₀`, where truncation sits far below
+/// `f64` rounding.
 #[inline]
 pub fn digamma(x: f64) -> f64 {
     crate::jet_tower::digamma_positive(x)
@@ -423,6 +423,18 @@ pub fn tetragamma(x: f64) -> f64 {
 #[inline]
 pub fn pentagamma(x: f64) -> f64 {
     crate::jet_tower::polygamma_positive::<3>(x)
+}
+
+/// `[ψ(x), ψ₁(x), …]` through the first `orders` entries (at most five), zero past
+/// them; for `x ≤ 0` or non-finite `x` those entries are `NaN`.
+///
+/// One walk of the recurrence serves every order: each step divides once, where
+/// the per-order scalars divide once each. A row that needs several derivatives of
+/// `ln Γ` at one argument reads them here. Entry `k` is bit-identical to the
+/// scalar of that order.
+#[inline]
+pub fn polygamma_stack(x: f64, orders: usize) -> [f64; 5] {
+    crate::jet_tower::polygamma_positive_stack(x, orders)
 }
 
 /// Gauss-Legendre nodes and weights on `[-1, 1]` for `n` points, computed via
@@ -1553,6 +1565,42 @@ mod tests {
             assert!(trigamma(bad).is_nan(), "trigamma({bad}) must be NaN");
             assert!(tetragamma(bad).is_nan(), "tetragamma({bad}) must be NaN");
             assert!(pentagamma(bad).is_nan(), "pentagamma({bad}) must be NaN");
+            let stack = polygamma_stack(bad, 3);
+            assert!(
+                stack[..3].iter().all(|entry| entry.is_nan()) && stack[3..] == [0.0, 0.0],
+                "polygamma_stack({bad}, 3) = {stack:?}"
+            );
+        }
+    }
+
+    /// A stack's entries are the scalars, bit for bit, at every order count, and
+    /// the entries past the count are zero: a row reading its derivatives from one
+    /// stack computes what the per-order scalars compute.
+    #[test]
+    fn polygamma_stack_entries_are_the_scalars_bit_for_bit() {
+        let scalars: [fn(f64) -> f64; 4] = [digamma, trigamma, tetragamma, pentagamma];
+        for x in [
+            1e-8_f64, 0.01, 0.135, 0.5, 1.0, 1.4616321449683622, 3.5, 7.4, 19.999, 20.0, 20.001,
+            100.0, 1e15,
+        ] {
+            // Opaque to the optimizer, so neither side is folded at compile time.
+            let x = std::hint::black_box(x);
+            for orders in 1..=5 {
+                let stack = polygamma_stack(x, orders);
+                for (order, scalar) in scalars.iter().enumerate().take(orders) {
+                    assert_eq!(
+                        stack[order].to_bits(),
+                        scalar(x).to_bits(),
+                        "polygamma_stack({x}, {orders})[{order}] = {:.17e}, scalar {:.17e}",
+                        stack[order],
+                        scalar(x)
+                    );
+                }
+                assert!(
+                    stack[orders..].iter().all(|entry| *entry == 0.0),
+                    "polygamma_stack({x}, {orders}) past its orders: {stack:?}"
+                );
+            }
         }
     }
 

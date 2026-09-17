@@ -155,8 +155,8 @@ pub(crate) fn order2_ln_gamma<const K: usize>(
 }
 
 /// Observed η-space row NLL tower, both predictors as jet variables (`η_μ` axis 0,
-/// `η_d` axis 1). Oracle for the hand-derived production row derivatives in
-/// `dispersion_family` (`eta_space_closed_form_derivatives_match_the_towers`).
+/// `η_d` axis 1). Oracle for the row-program production row derivatives in
+/// `dispersion_family` (`eta_space_row_program_derivatives_match_the_towers`).
 pub(crate) fn dispersion_eta_nll_order2(
     kind: DispersionFamilyKind,
     yi: f64,
@@ -276,7 +276,7 @@ fn o3_ln_gamma(x: &O3) -> O3 {
 /// Observed η-space row NLL tower to third order, the order-3 sibling of
 /// [`dispersion_eta_nll_order2`] with the identical expression structure per
 /// family, so `t3` is the per-row tensor `∂³NLL/∂η_a∂η_b∂η_c`. Oracle for the
-/// hand-derived production directional Hessian derivative.
+/// row-program production directional Hessian derivative.
 pub(crate) fn dispersion_eta_nll_order3(
     kind: DispersionFamilyKind,
     yi: f64,
