@@ -1427,10 +1427,11 @@ def run_cmd_stream(cmd: list[str], cwd: Path | None = None) -> tuple[int, str, s
 # reconstructed here.
 # ----------------------------------------------------------------------
 
-_PHASE_END_PATTERN = re.compile(
-    r"\[PHASE\]\s+([\w\-]+(?:\([\w\-/]+\))?)\s+(?:fit\s+)?(?:end|done)\s+elapsed=([\d.]+)s"
-)
-_PHASE_START_PATTERN = re.compile(r"\[PHASE\]\s+([\w\-]+(?:\([\w\-/]+\))?)\s+(?:fit\s+)?start")
+# A phase name is every token between `[PHASE]` and the event word, so the
+# CLI's multi-word phases (`canonical formula fit end`, `predict load-model
+# done`) come back whole instead of not parsing at all.
+_PHASE_END_PATTERN = re.compile(r"\[PHASE\]\s+(.+?)\s+(?:fit\s+)?(?:end|done)\s+elapsed=([\d.]+)s")
+_PHASE_START_PATTERN = re.compile(r"\[PHASE\]\s+(.+?)\s+(?:fit\s+)?start\b")
 _BFGS_SUMMARY_PATTERN = re.compile(
     r"\[OUTER summary\]\s+BFGS\s+(converged|hit max_iter|line-search failed|failed)(?:\s+in\s+(\d+)\s+iters)?\s+elapsed=([\d.]+)s"
 )

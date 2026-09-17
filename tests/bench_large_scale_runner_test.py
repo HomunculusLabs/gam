@@ -579,12 +579,12 @@ def _rust_sources() -> str:
 # in a four-hour benchmark run.
 _MARKER_SAMPLES: dict[str, tuple[str, str]] = {
     "_PHASE_END_PATTERN": (
-        "[PHASE] CTN(transformation-normal) fit end elapsed=12.500s",
-        "[PHASE] CTN(transformation-normal) fit end elapsed=",
+        "[PHASE] canonical formula fit end elapsed=12.500s",
+        "[PHASE] canonical formula fit end elapsed=",
     ),
     "_PHASE_START_PATTERN": (
-        "[PHASE] survival-margslope fit start n=400000",
-        "[PHASE] survival-margslope fit start n=",
+        "[PHASE] canonical formula fit start n=400000",
+        "[PHASE] canonical formula fit start n=",
     ),
     "_BFGS_SUMMARY_PATTERN": (
         "[OUTER summary] BFGS converged in 12 iters elapsed=145.234s final_value=1.234567e3",
@@ -789,6 +789,35 @@ class MarkerContractTests(unittest.TestCase):
                 [reason],
                 f"reason {reason!r} emitted by the engine does not parse",
             )
+
+    def test_every_phase_emission_site_parses_with_its_whole_name(self) -> None:
+        """Every `[PHASE]` format string in the engine must parse, name intact.
+
+        A phase name is every token before the event word. The one-token name
+        pattern parsed neither the CLI's standard-fit phase (`canonical formula
+        fit start`) nor its predict phases (`predict load-model done`), while
+        the samples above still named producers #2631 had deleted, so the
+        standard-fit wall time went unaggregated.
+        """
+        emitted = sorted(
+            set(re.findall(r'"(\[PHASE\] [^"{]*?\b(?:start|end|done))\b', _rust_sources()))
+        )
+        self.assertGreater(len(emitted), 4, f"too few [PHASE] emission sites found: {emitted}")
+        for literal in emitted:
+            head, event = literal[len("[PHASE] ") :].rsplit(" ", 1)
+            name = head[: -len(" fit")] if head.endswith(" fit") else head
+            if event == "start":
+                self.assertEqual(
+                    _RUNNER._PHASE_START_PATTERN.findall(f"{literal} n=400000"),
+                    [name],
+                    f"{literal!r} does not parse to phase {name!r}",
+                )
+            else:
+                self.assertEqual(
+                    _RUNNER._PHASE_END_PATTERN.findall(f"{literal} elapsed=12.500s"),
+                    [(name, "12.500")],
+                    f"{literal!r} does not parse to phase {name!r}",
+                )
 
     def test_outer_hessian_route_reason_set_matches_the_engine(self) -> None:
         sources = _rust_sources()
