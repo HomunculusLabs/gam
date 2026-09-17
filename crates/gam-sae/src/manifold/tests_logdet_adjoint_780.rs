@@ -844,6 +844,241 @@ fn sae_logdet_theta_adjoint_from_probes_matches_dense_softmax_2080() {
     }
 }
 
+/// #2333 — the dense and from-probes θ-adjoints must carry the same logit legs on a
+/// Softmax row with more than one free logit, under both operators.
+///
+/// `f39b76a831` rewrote the from-probes logit×logit block and dropped the #2080
+/// simplex Jacobian third derivative, while the dense tower kept it. The K=2 parity
+/// above has one free logit, so it exercises only the diagonal of that leg. With
+/// K=3 the chart holds two free logits, and every off-diagonal triple `(a, b, w)` of
+/// `simplex_gate_logit_jacobian_third` and of the entropy derivative enters.
+///
+/// The state is one directly factored majorizer system, so no ladder decides which
+/// state is compared. Full-basis probes make the from-probes reconstruction
+/// algebraically exact, so the towers differ only by accumulation order. The
+/// separation is the simplex leg's own size, rebuilt from the dense inverse over the
+/// logit slots: a tower that drops the leg is short by exactly that amount on a
+/// logit entry.
+#[test]
+fn softmax_theta_adjoint_logit_legs_agree_across_towers_with_two_free_logits_2333() {
+    let n = 12usize;
+    let p = 3usize;
+    let k_atoms = 3usize;
+    let m = 3usize;
+    let temperature = 0.9_f64;
+    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(m).unwrap());
+    let weights = [
+        [
+            [0.10, -0.05, 0.03],
+            [0.35, -0.20, 0.12],
+            [-0.16, 0.18, 0.08],
+        ],
+        [
+            [-0.08, 0.04, 0.06],
+            [0.22, 0.10, -0.18],
+            [0.11, -0.24, 0.15],
+        ],
+        [
+            [0.05, 0.09, -0.07],
+            [-0.14, 0.27, 0.10],
+            [0.19, 0.06, -0.21],
+        ],
+    ];
+    let mut logits = Array2::<f64>::zeros((n, k_atoms));
+    let mut coords: Vec<Array2<f64>> = (0..k_atoms)
+        .map(|_| Array2::<f64>::zeros((n, 1)))
+        .collect();
+    for row in 0..n {
+        let phase = (row as f64 + 0.35) / n as f64;
+        for (atom, block) in coords.iter_mut().enumerate() {
+            block[[row, 0]] = (phase + 0.29 * atom as f64).fract();
+        }
+        // Unequal gates on both free logits; the reference logit `K − 1` stays at zero.
+        logits[[row, 0]] = 0.6 * (0.7 * row as f64).cos();
+        logits[[row, 1]] = -0.4 + 0.5 * (0.9 * row as f64).sin();
+    }
+    let bases: Vec<(Array2<f64>, Array3<f64>)> = coords
+        .iter()
+        .map(|block| evaluator.evaluate(block.view()).unwrap())
+        .collect();
+    let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
+        logits,
+        coords,
+        vec![LatentManifold::Circle { period: 1.0 }; k_atoms],
+        AssignmentMode::softmax(temperature),
+    )
+    .unwrap();
+    let mut target = Array2::<f64>::zeros((n, p));
+    let mut gates = vec![0.0_f64; k_atoms];
+    for row in 0..n {
+        assignment
+            .try_assignments_row_into(row, &mut gates)
+            .expect("finite softmax row");
+        for (atom, (phi, _)) in bases.iter().enumerate() {
+            for out_col in 0..p {
+                for basis_col in 0..m {
+                    target[[row, out_col]] +=
+                        gates[atom] * phi[[row, basis_col]] * weights[atom][basis_col][out_col];
+                }
+            }
+        }
+        // A small residual, so the fixture is not an exact interpolant.
+        target[[row, 0]] += 1.0e-3 * (0.37 * row as f64).sin();
+        target[[row, 2]] += 1.0e-3 * (0.29 * row as f64).cos();
+    }
+    let atoms: Vec<SaeManifoldAtom> = bases
+        .into_iter()
+        .enumerate()
+        .map(|(atom, (phi, jet))| {
+            let decoder = Array2::from_shape_fn((m, p), |(basis_col, out_col)| {
+                weights[atom][basis_col][out_col]
+            });
+            SaeManifoldAtom::new_with_provided_function_gram(
+                format!("free_logits_{atom}"),
+                SaeAtomBasisKind::Periodic,
+                1,
+                phi,
+                jet,
+                decoder,
+                Array2::<f64>::eye(m),
+            )
+            .unwrap()
+            .with_basis_second_jet(evaluator.clone())
+        })
+        .collect();
+    let mut term = SaeManifoldTerm::new(atoms, assignment).unwrap();
+    let rho = SaeManifoldRho::new(
+        0.8_f64.ln(),
+        0.0,
+        (0..k_atoms).map(|_| Array1::from_vec(vec![50.0_f64.ln()])).collect(),
+    );
+    let system = term
+        .assemble_arrow_schur(target.view(), &rho, None)
+        .expect("majorizer arrow system");
+    let options = ArrowSolveOptions::direct().with_positive_definite_evidence();
+    let cache = solve_arrow_newton_step_with_options(&system, 0.0, 0.0, &options)
+        .expect("positive-definite majorizer factor")
+        .2;
+
+    // Premise: some row must carry two free logit slots, or no off-diagonal leg enters.
+    let row_vars: Vec<Vec<SaeLocalRowVar>> = (0..n)
+        .map(|row| term.row_vars_for_cache_row(row, &cache).expect("row variables"))
+        .collect();
+    let most_free_logits = row_vars
+        .iter()
+        .map(|vars| {
+            vars.iter()
+                .filter(|var| matches!(var, SaeLocalRowVar::Logit { .. }))
+                .count()
+        })
+        .max()
+        .unwrap_or(0);
+    assert!(
+        most_free_logits >= 2,
+        "#2333 premise: a K=3 Softmax row must carry two free logit slots, got {most_free_logits}"
+    );
+
+    let solver = DeflatedArrowSolver::plain(&cache);
+    let inverse = term
+        .materialize_joint_inverse(&cache, &solver)
+        .expect("dense joint inverse");
+    let (probes, sinv) = full_basis_probe_bundle(&cache);
+
+    // The simplex leg `Σ_{a,b logit} inv_ab · ∂³J/∂ℓ_a∂ℓ_b∂ℓ_w` on every logit entry,
+    // relative to `1 + |Γ_w|` of the dense majorizer adjoint (unit row weights).
+    let count = crate::assignment::simplex_gate_free_count(&term.assignment)
+        .expect("a K=3 Softmax assignment has free logits");
+    let dense_majorizer = term
+        .logdet_theta_adjoint_dense(&rho, &cache, &inverse, false, false, None)
+        .expect("dense majorizer theta-adjoint");
+    let mut simplex_separation = 0.0_f64;
+    for (row, vars) in row_vars.iter().enumerate() {
+        let base = cache.row_offsets[row];
+        term.assignment
+            .try_assignments_row_into(row, &mut gates)
+            .expect("finite softmax row");
+        for (w, var_w) in vars.iter().enumerate() {
+            let SaeLocalRowVar::Logit { atom: atom_w } = *var_w else {
+                continue;
+            };
+            let mut leg = 0.0_f64;
+            for (a, var_a) in vars.iter().enumerate() {
+                let SaeLocalRowVar::Logit { atom: atom_a } = *var_a else {
+                    continue;
+                };
+                for (b, var_b) in vars.iter().enumerate() {
+                    let SaeLocalRowVar::Logit { atom: atom_b } = *var_b else {
+                        continue;
+                    };
+                    leg += inverse[[base + b, base + a]]
+                        * crate::assignment::simplex_gate_logit_jacobian_third(
+                            &gates,
+                            atom_a,
+                            atom_b,
+                            atom_w,
+                            count,
+                            temperature.recip(),
+                        );
+                }
+            }
+            simplex_separation =
+                simplex_separation.max(leg.abs() / (1.0 + dense_majorizer.t[base + w].abs()));
+        }
+    }
+
+    let mut report = Vec::new();
+    let mut worst_parity = 0.0_f64;
+    for (label, exact_a, operator) in [
+        ("majorizer", false, EvidenceOperator::Majorizer),
+        ("exact", true, EvidenceOperator::ExactObservedInformation),
+    ] {
+        let dense = term
+            .logdet_theta_adjoint_dense(&rho, &cache, &inverse, false, exact_a, None)
+            .expect("dense theta-adjoint");
+        let from_probes = term
+            .logdet_theta_adjoint_from_probes(&rho, &cache, &probes, &sinv, operator, None)
+            .expect("from-probes theta-adjoint");
+        assert_eq!(dense.t.len(), from_probes.t.len());
+        assert_eq!(dense.beta.len(), from_probes.beta.len());
+        let mut parity = 0.0_f64;
+        let mut worst_entry = String::from("none");
+        for (row, vars) in row_vars.iter().enumerate() {
+            let base = cache.row_offsets[row];
+            for (w, var_w) in vars.iter().enumerate() {
+                let (reference, observed) = (dense.t[base + w], from_probes.t[base + w]);
+                let gap = (reference - observed).abs() / (1.0 + reference.abs());
+                if gap > parity {
+                    parity = gap;
+                    worst_entry = format!(
+                        "row {row} {var_w:?}: dense={reference:.12e} from_probes={observed:.12e}"
+                    );
+                }
+            }
+        }
+        for (reference, observed) in dense.beta.iter().zip(from_probes.beta.iter()) {
+            parity = parity.max((reference - observed).abs() / (1.0 + reference.abs()));
+        }
+        report.push(format!("{label}: parity={parity:.6e} worst {worst_entry}"));
+        worst_parity = worst_parity.max(parity);
+    }
+    eprintln!(
+        "#2333 SOFTMAX_FREE_LOGIT_TOWER_PARITY free_logits={most_free_logits} \
+         simplex_separation={simplex_separation:.6e}\n  {}",
+        report.join("\n  ")
+    );
+    assert!(
+        worst_parity <= 1.0e-10,
+        "#2333: the from-probes θ-adjoint must reproduce the dense tower on every entry of a \
+         Softmax state with two free logits:\n  {}",
+        report.join("\n  ")
+    );
+    assert!(
+        simplex_separation > 1.0e-6 && simplex_separation > 1.0e3 * worst_parity,
+        "#2333: the parity bar must reject a tower missing the simplex Jacobian leg: \
+         separation {simplex_separation:e}, parity {worst_parity:e}"
+    );
+}
+
 /// gam#2144 — the log-det row jets must be whitened whenever the metric
 /// `whitens_likelihood()` at ANY rank, not only when rank-deficient. The
 /// arrow-Schur assembly builds the likelihood Hessian from whitened Jacobians
