@@ -3148,9 +3148,7 @@ impl SaeManifoldTerm {
     ///
     /// # The line search, and why every bound in it is derived
     ///
-    /// Each round minimizes `f` along `d̂ = −V y/‖V y‖`, where `y` is the Newton
-    /// coefficient vector of [`Self::gauge_block_newton_coefficients`] or, when
-    /// that declines, `Vᵀg` itself (steepest descent, `d̂ = −Π_V g/‖Π_V g‖`). The
+    /// Each round minimizes `f` along the steepest direction `d̂ = −Π_V g/‖Π_V g‖`. The
     /// search is [`Self::minimize_objective_along`], a sequential line search
     /// between two ENDPOINTS THE STATE ITSELF SUPPLIES, not chosen constants:
     ///
@@ -3286,21 +3284,10 @@ impl SaeManifoldTerm {
             if !(projected_norm.is_finite() && projected_norm > 0.0) {
                 return Ok(outcome);
             }
-            // #2267 — step coefficients from the restricted majorizer `VᵀBV`, else
-            // the steepest-descent coefficients `Vᵀg` themselves.
-            let step_coefficients = Self::gauge_block_newton_coefficients(
-                &system,
-                &basis,
-                &gradient_coefficients,
-                dense_len,
-                border_dim,
-                q,
-            )
-            .unwrap_or_else(|| gradient_coefficients.clone());
             let arrow_row_offsets = system.row_offsets.clone();
             drop(system);
             let mut direction = Array1::<f64>::zeros(gradient.len());
-            for (vector, &coeff) in basis.iter().zip(step_coefficients.iter()) {
+            for (vector, &coeff) in basis.iter().zip(gradient_coefficients.iter()) {
                 direction.scaled_add(-coeff, vector);
             }
             let direction_norm = direction.dot(&direction).sqrt();
@@ -3308,8 +3295,7 @@ impl SaeManifoldTerm {
                 return Ok(outcome);
             }
             direction.mapv_inplace(|value| value / direction_norm);
-            // `−φ′(0)` along `d̂`. For the steepest-descent coefficients this is
-            // `‖Π_V g‖`; for the Newton coefficients it is `cᵀy/‖y‖ > 0`.
+            // `−φ′(0)` along `d̂`, which is `‖Π_V g‖`.
             let slope = -gradient.dot(&direction);
             if !(slope.is_finite() && slope > 0.0) {
                 return Ok(outcome);
@@ -3424,68 +3410,6 @@ impl SaeManifoldTerm {
         }
         drop(gauge_orbit_scope);
         Ok(outcome)
-    }
-
-    /// #2267 — the coefficients `y = (VᵀBV)⁻¹ Vᵀg` of a Newton step on the
-    /// likelihood-flat block, with `B` the assembled arrow majorizer at this state
-    /// and `V` the orthonormal block basis.
-    ///
-    /// The block's curvature is the priors' alone (the data fit is flat along it),
-    /// and across the block it is far from isotropic. Steepest descent along
-    /// `−Π_V g` zig-zags there: measured on the #2267 K=8 rung (job 531157) as 40
-    /// rounds of about 0.2 per round still committing at the round bound, and one
-    /// round buying 2.589 at `α = 9.73` between rounds buying `4e-3`. The Newton
-    /// coefficients rotate the direction; [`Self::minimize_objective_along`] still
-    /// chooses the length and the material floor still referees the commit.
-    ///
-    /// `None` keeps steepest descent: a system the dense basis layout does not
-    /// index directly (compact rows, or a matrix-free shared block
-    /// [`gam_solve::arrow_schur::arrow_operator_apply`] does not apply), a
-    /// restricted majorizer that does not factor, or coefficients that do not
-    /// give a descent direction.
-    fn gauge_block_newton_coefficients(
-        system: &ArrowSchurSystem,
-        basis: &[Array1<f64>],
-        gradient_coefficients: &Array1<f64>,
-        dense_len: usize,
-        border_dim: usize,
-        q: usize,
-    ) -> Option<Array1<f64>> {
-        let dense_layout = system.row_offsets[system.rows.len()] == dense_len
-            && system.row_dims.iter().all(|&dim| dim == q)
-            && system.k == border_dim
-            && system.hbb.dim() == (border_dim, border_dim)
-            && system.hbb_matvec.is_none();
-        if !dense_layout {
-            return None;
-        }
-        let applied: Vec<Array1<f64>> = basis
-            .iter()
-            .map(|vector| {
-                let (applied_t, applied_beta) = gam_solve::arrow_schur::arrow_operator_apply(
-                    system,
-                    0.0,
-                    0.0,
-                    vector.slice(s![..dense_len]),
-                    vector.slice(s![dense_len..]),
-                );
-                let mut applied = Array1::<f64>::zeros(dense_len + border_dim);
-                applied.slice_mut(s![..dense_len]).assign(&applied_t);
-                applied.slice_mut(s![dense_len..]).assign(&applied_beta);
-                applied
-            })
-            .collect();
-        let dim = basis.len();
-        let mut restricted = Array2::<f64>::zeros((dim, dim));
-        for i in 0..dim {
-            for j in 0..dim {
-                restricted[[i, j]] = 0.5 * (basis[i].dot(&applied[j]) + basis[j].dot(&applied[i]));
-            }
-        }
-        let factor = restricted.cholesky(Side::Lower).ok()?;
-        let coefficients = factor.solvevec(gradient_coefficients);
-        let predicted_decrease = gradient_coefficients.dot(&coefficients);
-        (predicted_decrease.is_finite() && predicted_decrease > 0.0).then_some(coefficients)
     }
 
     /// Quotient KKT-gradient norm² for the inner convergence gate (#1117): the
