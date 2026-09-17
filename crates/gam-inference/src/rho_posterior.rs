@@ -62,7 +62,8 @@ use ndarray::{Array1, Array2};
 // constructs these types under their original names via this re-export.
 pub use gam_problem::rho_posterior::{
     ESCALATE_K_HAT, PLUG_IN_CERTIFIED_K_HAT, RhoCertificate, RhoMixtureNode,
-    RhoPosteriorCertificate, RhoPosteriorEscalation, RhoPosteriorMixture, RhoPosteriorSamples,
+    RhoPosteriorCertificate, RhoPosteriorEscalation, RhoPosteriorMixture, RhoPosteriorNotComputed,
+    RhoPosteriorOutcome, RhoPosteriorRefusal, RhoPosteriorSamples,
 };
 
 /// Monolith (gam-inference-tier) implementor of the contract-downed
@@ -82,7 +83,7 @@ impl gam_problem::rho_posterior::RhoPosteriorEscalator for HmcIoRhoPosteriorEsca
         outer_hessian: &Array2<f64>,
         criterion: &dyn Fn(&Array1<f64>) -> Option<f64>,
         n_samples: Option<usize>,
-    ) -> Result<Option<RhoPosteriorCertificate>, String> {
+    ) -> Result<Option<RhoPosteriorCertificate>, RhoPosteriorRefusal> {
         rho_posterior_certificate(rho_hat, outer_hessian, criterion, n_samples)
     }
 
@@ -145,10 +146,14 @@ impl DetNormal {
 /// not positive definite has no Gaussian proposal, so it is refused with the
 /// factorization's reason rather than ridged into one whose covariance is not
 /// `H_ρ⁻¹`.
-fn whitening_factor_from_outer_hessian(outer_hessian: &Array2<f64>) -> Result<Array2<f64>, String> {
+fn whitening_factor_from_outer_hessian(
+    outer_hessian: &Array2<f64>,
+) -> Result<Array2<f64>, RhoPosteriorRefusal> {
     let r = outer_hessian
         .cholesky(Side::Lower)
-        .map_err(|error| format!("outer Hessian is not positive definite: {error:?}"))?
+        .map_err(|error| RhoPosteriorRefusal::HessianNotPositiveDefinite {
+            detail: format!("{error:?}"),
+        })?
         .lower_triangular();
     let n = r.nrows();
     // Invert-transpose: solve R z = e_i columns to build R⁻¹, then transpose.
@@ -165,7 +170,9 @@ fn whitening_factor_from_outer_hessian(outer_hessian: &Array2<f64>) -> Result<Ar
             }
             let rii = r[[i, i]];
             if !(rii.is_finite() && rii.abs() > 0.0) {
-                return Err(format!("outer Hessian Cholesky pivot {i} is {rii}"));
+                return Err(RhoPosteriorRefusal::HessianNotPositiveDefinite {
+                    detail: format!("Cholesky pivot {i} is {rii}"),
+                });
             }
             x[i] = acc / rii;
         }
@@ -543,17 +550,18 @@ where
 ///   (or rebuilds) the objective.
 /// * `n_samples` — proposal draw count `M` (defaults to 64 when `None`).
 ///
-/// Returns `Ok(None)` when `K = 0`: there is nothing to certify. Returns `Err`
-/// naming the reason when the certificate cannot be formed — an outer Hessian
-/// whose shape does not match `ρ̂` or that is not positive definite, an
-/// infeasible or non-finite criterion at `ρ̂`, no proposal draw with a finite
-/// criterion, or too few finite weights for the Pareto tail fit.
+/// Returns `Ok(None)` when `K = 0`: there is nothing to certify. Returns the typed
+/// [`RhoPosteriorRefusal`] naming the site when the certificate cannot be formed —
+/// an outer Hessian whose shape does not match `ρ̂` or that is not positive
+/// definite, an infeasible or non-finite criterion at `ρ̂`, no proposal draw with a
+/// finite criterion, too few finite weights for the Pareto tail fit, a non-finite
+/// tail shape, or smoothed weights that do not normalize.
 pub fn rho_posterior_certificate<F>(
     rho_hat: &Array1<f64>,
     outer_hessian: &Array2<f64>,
     criterion: F,
     n_samples: Option<usize>,
-) -> Result<Option<RhoPosteriorCertificate>, String>
+) -> Result<Option<RhoPosteriorCertificate>, RhoPosteriorRefusal>
 where
     F: Fn(&Array1<f64>) -> Option<f64>,
 {
@@ -562,16 +570,15 @@ where
         return Ok(None);
     }
     if outer_hessian.nrows() != k || outer_hessian.ncols() != k {
-        return Err(format!(
-            "outer Hessian is {}x{}, expected {k}x{k}",
-            outer_hessian.nrows(),
-            outer_hessian.ncols()
-        ));
+        return Err(RhoPosteriorRefusal::HessianShape {
+            rows: outer_hessian.nrows(),
+            cols: outer_hessian.ncols(),
+            k,
+        });
     }
-    let cost_hat =
-        criterion(rho_hat).ok_or_else(|| "criterion is infeasible at rho_hat".to_string())?;
+    let cost_hat = criterion(rho_hat).ok_or(RhoPosteriorRefusal::CriterionInfeasibleAtRhoHat)?;
     if !cost_hat.is_finite() {
-        return Err(format!("criterion at rho_hat is not finite ({cost_hat})"));
+        return Err(RhoPosteriorRefusal::CriterionNotFiniteAtRhoHat);
     }
     let l_inv = whitening_factor_from_outer_hessian(outer_hessian)?;
     let m = n_samples
@@ -609,7 +616,7 @@ where
         .filter(|v| v.is_finite())
         .fold(f64::NEG_INFINITY, f64::max);
     if !max_lw.is_finite() {
-        return Err("no proposal draw has a finite criterion".to_string());
+        return Err(RhoPosteriorRefusal::NoFiniteProposal);
     }
     let weights: Vec<f64> = raw_weights
         .iter()
@@ -622,25 +629,32 @@ where
         })
         .collect();
 
-    let psis = pareto_smooth_weights(&weights)
-        .ok_or_else(|| "too few finite importance weights for the Pareto tail fit".to_string())?;
+    let psis = pareto_smooth_weights(&weights).ok_or(RhoPosteriorRefusal::TooFewFiniteWeights)?;
     let k_hat = psis.k_hat;
+    if !k_hat.is_finite() {
+        return Err(RhoPosteriorRefusal::TailShapeNotFinite);
+    }
 
-    // Self-normalize the smoothed weights.
+    // Self-normalize the smoothed weights. Normalized weights sum to 1, so
+    // Cauchy–Schwarz gives Σw² ≥ 1/M > 0 and the Kish ESS lies in [1, M].
     let total: f64 = psis.smoothed.iter().sum();
     if !(total.is_finite() && total > 0.0) {
-        return Err(format!("smoothed importance weights sum to {total}"));
+        return Err(RhoPosteriorRefusal::SmoothedWeightsNotNormalizable);
     }
-    let normalized: Array1<f64> = Array1::from_iter(psis.smoothed.iter().map(|&w| w / total));
-    let sum_sq: f64 = normalized.iter().map(|&w| w * w).sum();
-    let ess = if sum_sq > 0.0 { 1.0 / sum_sq } else { 0.0 };
+    let sum_sq: f64 = psis
+        .smoothed
+        .iter()
+        .map(|&w| {
+            let normalized = w / total;
+            normalized * normalized
+        })
+        .sum();
 
     Ok(Some(RhoPosteriorCertificate {
         k_hat,
         certificate: RhoCertificate::from_k_hat(k_hat),
         n_samples: m,
-        weights: normalized,
-        effective_sample_size: ess,
+        effective_sample_size: 1.0 / sum_sq,
     }))
 }
 
@@ -738,7 +752,7 @@ mod tests {
     }
 
     #[test]
-    fn weights_are_normalized_and_deterministic() {
+    fn effective_sample_size_is_bounded_and_deterministic() {
         let rho_hat = array![1.0];
         let h = array![[1.0]];
         let crit = |rho: &Array1<f64>| {
@@ -751,9 +765,16 @@ mod tests {
         let b = rho_posterior_certificate(&rho_hat, &h, crit, Some(64))
             .expect("b formed")
             .expect("b present");
-        // Self-normalized weights sum to 1.
-        let s: f64 = a.weights.iter().sum();
-        assert!((s - 1.0).abs() < 1e-10, "weights must sum to 1, got {s}");
+        // Kish's (Σw)²/Σw² of self-normalized weights lies in [1, M]: Σw = 1 and
+        // Cauchy–Schwarz give 1/M ≤ Σw² ≤ 1. Both edges carry the M-term
+        // summations' relative rounding M·ε (the normalizing total and Σw²).
+        let ess = a.effective_sample_size;
+        let m = a.n_samples as f64;
+        let rounding = 1.0 + m * f64::EPSILON;
+        assert!(
+            ess * rounding >= 1.0 && ess <= m * rounding,
+            "ESS must lie in [1, M = {m}], got {ess}"
+        );
         // Deterministic: identical k̂ across runs (fixed-seed stream).
         assert_eq!(a.k_hat.to_bits(), b.k_hat.to_bits());
     }
@@ -794,7 +815,7 @@ mod tests {
         let refusal = rho_posterior_certificate(&rho_hat, &h, |_| Some(0.0), Some(64))
             .expect_err("a singular outer Hessian must be refused");
         assert!(
-            refusal.contains("not positive definite"),
+            matches!(refusal, RhoPosteriorRefusal::HessianNotPositiveDefinite { .. }),
             "the refusal names its reason, got {refusal}"
         );
     }

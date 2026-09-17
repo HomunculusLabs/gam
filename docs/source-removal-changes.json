@@ -4259,6 +4259,14 @@
     "evidence": "At the base, git grep -n finds criterion_display only at its definition (result_types.rs), in the gam-solve re-exports (estimate/mod.rs, model_types.rs, both removed here), and in gam-cli: run_fit.rs (four sites, now gam::report::criterion_row and gam::report::criterion_display) and run_sample_generate_report.rs (one site, now gam::report::criterion_display). No test, bench, example, gam-pyffi, Python or other facade source names it. Re-confirmed at this base with git grep -n -w over crates, src, tests, bench, benches, examples, gamfit and python; the landing gates are cited in the commit message."
   },
   {
+    "base": "98ec39dfa245c5cf6283ea06c928ba63ba3d1455",
+    "items": [
+      "crates/gam-inference/src/rho_posterior.rs:fn:weights_are_normalized_and_deterministic"
+    ],
+    "reason": "#2627: the Tier-0 rho-posterior certificate now persists with the fit as the typed RhoPosteriorOutcome, and RhoPosteriorCertificate.weights (M floats per fit that no production code read) is deleted. weights_are_normalized_and_deterministic asserted that the deleted field sums to 1. It is restated as effective_sample_size_is_bounded_and_deterministic, which asserts Kish's bound: Σw = 1 and Cauchy–Schwarz give 1/M ≤ Σw² ≤ 1, so ESS lies in [1, M], and both edges carry the M-term summations' relative rounding M·ε. It also keeps the fixed-seed determinism check.",
+    "evidence": "At the base, git grep -n -w weights_are_normalized_and_deterministic over crates, src, tests, bench, benches, examples, gamfit and python finds only its definition (crates/gam-inference/src/rho_posterior.rs:741). The replacement test is in the same module. The direct-lane check at this base (dy1, tag rho18-p2) reported source_removal_guard refusing exactly this item before this entry; the landing gates are cited in the commit message."
+  },
+  {
     "base": "83787ff535eba1a5142adb845f9de8302958da03",
     "items": [
       "crates/gam-models/src/gamlss/gaussian/log_link.rs:const:BLOCK_ETA",

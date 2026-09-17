@@ -10,6 +10,7 @@
 
 use csv::StringRecord;
 use gam::inference::data::EncodedDataset;
+use gam::inference::rho_posterior::RhoPosteriorOutcome;
 use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
 };
@@ -60,16 +61,18 @@ fn fit_and_take_certificate(
         .fit
         .reml_score()
         .expect("the fit reports a REML/LAML criterion");
-    let cert = fit.fit.artifacts.rho_posterior_certificate.clone().expect(
-        "a smooth-term Gaussian GAM has ρ parameters and an SPD outer Hessian, so the \
-             Tier-0 ρ-posterior certificate must be present on the real fit artifact",
-    );
+    let cert = match &fit.fit.artifacts.rho_posterior {
+        RhoPosteriorOutcome::Certified(cert) => cert.clone(),
+        other => panic!(
+            "a smooth-term Gaussian GAM has ρ parameters and an SPD outer Hessian, so the \
+             Tier-0 ρ-posterior seam must certify on the real fit artifact, got {other:?}"
+        ),
+    };
     (reml_score, cert)
 }
 
-/// The seam delivers: a real fit produces a structurally valid Tier-0
-/// certificate, and the importance weights it carries are a proper
-/// self-normalized distribution with a sane effective sample size.
+/// The seam delivers: a real fit carries a Certified Tier-0 outcome with a finite
+/// tail shape and a Kish effective sample size inside its bounds.
 #[test]
 fn real_gaussian_fit_carries_a_sound_tier0_certificate() {
     init_parallelism();
@@ -82,32 +85,16 @@ fn real_gaussian_fit_carries_a_sound_tier0_certificate() {
     );
     assert!(cert.n_samples >= 2, "the certificate must draw proposals");
 
-    // Self-normalized weights: non-negative, finite, summing to 1.
-    let sum: f64 = cert.weights.iter().sum();
+    // Kish's (Σw)²/Σw² over the M self-normalized weights lies in [1, M]: Σw = 1
+    // and Cauchy–Schwarz give 1/M ≤ Σw² ≤ 1. Both edges carry the M-term
+    // summations' relative rounding M·ε.
+    let m = cert.n_samples as f64;
+    let rounding = 1.0 + m * f64::EPSILON;
     assert!(
-        (sum - 1.0).abs() < 1e-9,
-        "importance weights must self-normalize to 1, got {sum}"
-    );
-    assert!(
-        cert.weights.iter().all(|&w| w.is_finite() && w >= 0.0),
-        "importance weights must be finite and non-negative"
-    );
-
-    // Kish ESS lies in (0, M] and is consistent with the carried weights.
-    assert!(
-        cert.effective_sample_size > 0.0
-            && cert.effective_sample_size <= cert.n_samples as f64 + 1e-6,
-        "ESS {} must lie in (0, M={}]",
-        cert.effective_sample_size,
-        cert.n_samples
-    );
-    let sum_sq: f64 = cert.weights.iter().map(|&w| w * w).sum();
-    let ess_from_weights = if sum_sq > 0.0 { 1.0 / sum_sq } else { 0.0 };
-    assert!(
-        (cert.effective_sample_size - ess_from_weights).abs() < 1e-6,
-        "ESS {} must equal 1/Σw² = {}",
-        cert.effective_sample_size,
-        ess_from_weights
+        cert.effective_sample_size * rounding >= 1.0
+            && cert.effective_sample_size <= m * rounding,
+        "ESS {} must lie in [1, M = {m}]",
+        cert.effective_sample_size
     );
 }
 

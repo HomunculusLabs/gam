@@ -973,7 +973,7 @@ impl<'a> RemlState<'a> {
         allow_escalation: bool,
         n_samples: Option<usize>,
     ) -> (
-        Option<gam_problem::rho_posterior::RhoPosteriorCertificate>,
+        gam_problem::rho_posterior::RhoPosteriorOutcome,
         Option<gam_problem::rho_posterior::RhoPosteriorEscalation>,
     ) {
         // DATA types contract-downed to gam-problem (#1521); the certificate /
@@ -982,43 +982,59 @@ impl<'a> RemlState<'a> {
         // `inference::rho_posterior` (its Tier-2 NUTS pulls the gam-inference
         // `hmc_io` sampler), so it is called DOWN here through the contract-down
         // `gam_problem::rho_posterior` escalator registry (#1521 trait-inversion
-        // — the upward-compute back-edge is gone). When the sampler tier is not
-        // linked / not yet registered, decline the certificate AND escalation
-        // (`(None, None)`): intervals stay plug-in + first-order corrected, the
-        // existing decline outcome — a safe no-op.
-        use gam_problem::rho_posterior::RhoCertificate;
-        let Some(escalator) = gam_problem::rho_posterior::rho_posterior_escalator() else {
-            return (None, None);
+        // — the upward-compute back-edge is gone). Every early exit names why the
+        // certificate was not formed (#2627), and none runs an escalation, so the
+        // intervals stay plug-in + first-order corrected.
+        use gam_problem::rho_posterior::{
+            RhoCertificate, RhoPosteriorNotComputed, RhoPosteriorOutcome,
         };
         if final_rho.is_empty() {
-            return (None, None);
+            return (RhoPosteriorOutcome::NotApplicable, None);
         }
-        let Ok(outer_hessian) = self.compute_lamlhessian_consistent(final_rho) else {
-            return (None, None);
+        let Some(escalator) = gam_problem::rho_posterior::rho_posterior_escalator() else {
+            return (
+                RhoPosteriorOutcome::NotComputed(RhoPosteriorNotComputed::EscalatorUnregistered),
+                None,
+            );
         };
-        let certificate = match escalator.rho_posterior_certificate(
+        let outer_hessian = match self.compute_lamlhessian_consistent(final_rho) {
+            Ok(outer_hessian) => outer_hessian,
+            Err(error) => {
+                return (
+                    RhoPosteriorOutcome::NotComputed(
+                        RhoPosteriorNotComputed::OuterHessianUnavailable {
+                            reason: error.to_string(),
+                        },
+                    ),
+                    None,
+                );
+            }
+        };
+        let outcome = match escalator.rho_posterior_certificate(
             final_rho,
             &outer_hessian,
             &|rho| self.without_persistent_warm_start_store(|| self.compute_cost(rho).ok()),
             n_samples,
         ) {
-            Ok(certificate) => certificate,
+            Ok(Some(certificate)) => RhoPosteriorOutcome::Certified(certificate),
+            Ok(None) => RhoPosteriorOutcome::NotApplicable,
             // The certificate is a post-fit diagnostic of a fit the outer
-            // optimizer already certified, so a refusal leaves it absent
-            // rather than failing the fit — but the reason is reported, never
-            // silently collapsed into absence.
-            Err(reason) => {
-                log::warn!("rho-posterior certificate refused at the converged rho: {reason}");
-                None
+            // optimizer already certified, so a refusal publishes the fit and
+            // carries its typed reason with it.
+            Err(refusal) => {
+                log::warn!("rho-posterior certificate refused at the converged rho: {refusal}");
+                RhoPosteriorOutcome::Refused(refusal)
             }
         };
-        let escalation = match certificate.as_ref().map(|c| c.certificate) {
+        let escalation = match &outcome {
             // The certificate refuses to certify the plug-in, but escalation
             // (Tier-1 quadrature / Tier-2 NUTS over ρ) is the expensive tier;
             // only run it when the caller opts in. Interactive formula/CLI fits
             // pass `allow_escalation = false`, so they surface the cheap Tier-0
             // certificate while never launching the sampler.
-            Some(RhoCertificate::Escalate) if allow_escalation => {
+            RhoPosteriorOutcome::Certified(certificate)
+                if certificate.certificate == RhoCertificate::Escalate && allow_escalation =>
+            {
                 // #2450 — THE SAMPLER TARGETS A DISTRIBUTION; THE CRITERION DOES NOT.
                 //
                 // The tiers below sample `π(ρ|y) ∝ exp(−criterion(ρ))`, so the
@@ -1076,7 +1092,7 @@ impl<'a> RemlState<'a> {
             }
             _ => None,
         };
-        (certificate, escalation)
+        (outcome, escalation)
     }
 
     pub(crate) fn compute_smoothing_correction_auto(

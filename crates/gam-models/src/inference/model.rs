@@ -66,7 +66,10 @@ use std::path::Path;
 // link now standardizes `Z = logit(U)`, `U ~ Beta(a, b)`, to logit's location and
 // scale (#2902 row 34), so a v16 beta-logistic model would predict through a
 // different link; it is refused by name (`payload_version_mismatch`).
-pub const MODEL_PAYLOAD_VERSION: u32 = 17;
+// v18 persists the Tier-0 rho-posterior seam's typed outcome (`FitArtifacts::rho_posterior`,
+// #2627), which v17 skipped at serialization and which carries no serde default, so a v17
+// payload is refused by name before the field is parsed.
+pub const MODEL_PAYLOAD_VERSION: u32 = 18;
 
 /// Coefficient parameterization of a saved transformation-normal (CTN) fit.
 ///
@@ -6336,7 +6339,7 @@ mod tests {
                 survival_link_wiggle_knots: None,
                 survival_link_wiggle_degree: None,
                 criterion_certificate: None,
-                rho_posterior_certificate: None,
+                rho_posterior: Default::default(),
                 rho_posterior_escalation: None,
                 rho_covariance: None,
                 joint_log_lambdas: None,

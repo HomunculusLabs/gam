@@ -2524,7 +2524,11 @@ where
     // Factorization of stabilized Hessian in transformed basis, reused for
     // SE computation via solve-on-demand after dispersion is determined.
     let mut edf_factor: Option<InferenceHessianFactor> = None;
-    let mut rho_posterior_certificate = None;
+    // The Tier-0 seam runs only inside the inference pass below; a fit run without
+    // inference keeps this typed reason instead of an unexplained absence (#2627).
+    let mut rho_posterior = gam_problem::rho_posterior::RhoPosteriorOutcome::NotComputed(
+        gam_problem::rho_posterior::RhoPosteriorNotComputed::InferenceNotRequested,
+    );
     let mut rho_posterior_escalation = None;
     // Hold the governor charge across every dense inference allocation in this
     // fit. A refusal selects the factorized/diagonal path before any optional
@@ -3593,7 +3597,7 @@ where
         // benchmark, while lower-level callers that opt in (`skip = false`) get
         // the auto-selected escalation tier (quadrature for K≤4, NUTS over ρ for
         // K≤16, honest Unavailable beyond) at this same live seam.
-        (rho_posterior_certificate, rho_posterior_escalation) = reml_state.rho_posterior_inference(
+        (rho_posterior, rho_posterior_escalation) = reml_state.rho_posterior_inference(
             &final_rho,
             !opts.skip_rho_posterior_inference,
             None,
@@ -4125,7 +4129,7 @@ where
         artifacts: FitArtifacts {
             pirls: Some(pirls_res),
             criterion_certificate: outer_result.criterion_certificate.clone(),
-            rho_posterior_certificate,
+            rho_posterior,
             rho_posterior_escalation,
             rho_covariance,
             // Persist the optimized target's Firth state so saved-model

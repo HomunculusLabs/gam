@@ -2331,19 +2331,19 @@ pub struct FitArtifacts {
     /// gradient-free or an audit probe could not evaluate.
     #[serde(default)]
     pub criterion_certificate: Option<OuterCriterionCertificate>,
-    /// Tier-0 marginal-smoothing (`ρ`-uncertainty) PSIS certificate (#938):
-    /// the Pareto-`k̂` diagnostic that says whether the plug-in + first-order
-    /// `V_ρ` correction is adequate or `ρ`-uncertainty needs a heavier
-    /// quadrature/NUTS treatment. Computed against the live REML objective at
-    /// the converged `ρ̂` (see `RemlState::rho_posterior_inference`). `None`
-    /// when there are no smoothing parameters or the outer Hessian was
-    /// unavailable. Re-derivable from the fit, so it is not serialized.
-    #[serde(default, skip_serializing, skip_deserializing)]
-    pub rho_posterior_certificate: Option<gam_problem::rho_posterior::RhoPosteriorCertificate>,
+    /// What the Tier-0 marginal-smoothing (`ρ`-uncertainty) PSIS certificate seam
+    /// concluded (#938, #2627): the Pareto-`k̂` certificate that says whether the
+    /// plug-in + first-order `V_ρ` correction is adequate, or the typed reason it
+    /// was not formed or was refused. Computed against the live REML objective at
+    /// the converged `ρ̂` (see `RemlState::rho_posterior_inference`); a route that
+    /// never passes that seam carries `NotComputed(NotFormedOnThisRoute)`, and a
+    /// fit run without inference `NotComputed(InferenceNotRequested)`. It persists
+    /// with the fit, so a reloaded model carries the same outcome.
+    pub rho_posterior: gam_problem::rho_posterior::RhoPosteriorOutcome,
     /// Escalation outcome (#938) when the Tier-0 certificate read `Escalate`:
     /// the Tier-1 quadrature mixture (`K ≤ 4`), the Tier-2 NUTS draws
     /// (`K ≤ 16`), or an honest `Unavailable` report. `None` whenever the
-    /// certificate did not escalate (or is itself absent). Computed at the same
+    /// certificate did not escalate (or was not formed). Computed at the same
     /// live-objective seam as the certificate; re-derivable, not serialized.
     #[serde(default, skip_serializing, skip_deserializing)]
     pub rho_posterior_escalation: Option<gam_problem::rho_posterior::RhoPosteriorEscalation>,
@@ -2514,7 +2514,7 @@ impl std::fmt::Debug for FitArtifacts {
                 &self.survival_link_wiggle_degree,
             )
             .field("criterion_certificate", &self.criterion_certificate)
-            .field("rho_posterior_certificate", &self.rho_posterior_certificate)
+            .field("rho_posterior", &self.rho_posterior)
             .field("rho_posterior_escalation", &self.rho_posterior_escalation)
             .field(
                 "rho_covariance",

@@ -860,7 +860,11 @@ pub fn survival_fit_from_parts(
             survival_link_wiggle_knots: link_wiggle_knots,
             survival_link_wiggle_degree: link_wiggle_degree,
             criterion_certificate,
-            rho_posterior_certificate: None,
+            // The survival location-scale fit never passes the REML evaluator's
+            // post-fit certificate seam.
+            rho_posterior: gam_problem::rho_posterior::RhoPosteriorOutcome::NotComputed(
+                gam_problem::rho_posterior::RhoPosteriorNotComputed::NotFormedOnThisRoute,
+            ),
             rho_posterior_escalation: None,
             rho_covariance: None,
             joint_log_lambdas: None,
