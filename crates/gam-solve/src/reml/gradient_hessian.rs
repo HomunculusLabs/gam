@@ -4045,22 +4045,17 @@ impl<'a> RemlState<'a> {
         // the helpers' doc-comments for the per-slot staleness arguments.
         self.clear_warm_start_predictor_state();
         self.clear_warm_start_adaptive_signals();
-        // The λ-search frozen NB θ (#1082) is computed from the seed fit on the
-        // PREVIOUS design; a new surface (different X / penalties) must re-freeze
-        // it from its own seed. `0` = "not yet frozen".
-        self.frozen_negbin_theta.store(0, Ordering::Relaxed);
-        // The λ-search frozen Tweedie φ (#1477) is likewise computed from the
-        // seed fit on the PREVIOUS design; re-freeze it from the new surface's
-        // own seed. `0` = "not yet frozen".
-        self.frozen_tweedie_phi.store(0, Ordering::Relaxed);
-        // The λ-search frozen Gamma shape (#1074) is likewise computed from the
-        // seed fit on the PREVIOUS design; re-freeze it from the new surface's
-        // own seed. `0` = "not yet frozen".
-        self.frozen_gamma_shape.store(0, Ordering::Relaxed);
-        // The λ-search frozen Beta φ (#2369) is likewise computed from the seed
-        // fit on the PREVIOUS design; re-freeze it from the new surface's own
-        // seed. `0` = "not yet frozen".
-        self.frozen_beta_phi.store(0, Ordering::Relaxed);
+        // The frozen nuisances (NB θ #1082, Tweedie φ #1477, Gamma shape #1074,
+        // Beta φ #2369) survive the reset. Each defines the criterion for the
+        // whole search, design-moving coordinates included, and the joint
+        // evaluator anchors it once on its construction surface
+        // (`ExternalJointHyperEvaluator::anchor_fit_nuisance`). Re-freezing on
+        // every new surface made `V(ρ, ψ)` read `ν(ψ)` while the analytic
+        // ψ-gradient holds `ν` fixed, the #1074 `k(ρ)` defect one coordinate
+        // over. On #2817's gamma-log `matern(x, z)` fit the ρ = 0 anchor
+        // alternated between shapes 4.4642 and 4.2889 on adjacent κ trials at
+        // ψ ≈ −0.5953, and the κ search spent 1133 evaluations with 23 failed
+        // line searches.
         Ok(())
     }
 

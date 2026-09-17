@@ -3232,8 +3232,7 @@ fn duchon_hybrid_psi_components_match_fd_order0_power9_16d() {
 #[test]
 fn production_kappa_route_psi_gradient_matches_its_value_2895() {
     let n = 60usize;
-    let d = 2usize;
-    let mut data = Array2::<f64>::zeros((n, d));
+    let mut data = Array2::<f64>::zeros((n, 2));
     let mut y = Array1::<f64>::zeros(n);
     for i in 0..n {
         let x0 = i as f64 / (n as f64 - 1.0);
@@ -3242,6 +3241,57 @@ fn production_kappa_route_psi_gradient_matches_its_value_2895() {
         data[[i, 1]] = x1;
         y[i] = (3.0 * x0).cos() + 0.35 * x1;
     }
+    assert_production_kappa_route_psi_gradient_matches_its_value(
+        "#2895",
+        &data,
+        &y,
+        &LikelihoodSpec::gaussian_identity(),
+    );
+}
+
+/// gam#2817: the same gate under an estimated Gamma shape.
+///
+/// The frozen shape is part of the criterion's definition (#2363), and the
+/// analytic ψ-gradient holds it fixed. While `reset_surface` zeroed the freeze,
+/// every evaluation on a new design re-anchored the shape at ρ = 0 on that
+/// design, so differences of the value carried ∂V/∂ν · dν/dψ, a channel the
+/// analytic slope does not have. On the gamma-log `matern(x, z)` CLI fit (MSI job
+/// 630400) the re-anchored shape alternated between 4.4642 and 4.2889 on adjacent
+/// κ trials at ψ ≈ −0.5953, and the κ search spent 1133 evaluations with 23 failed
+/// line searches.
+#[test]
+fn production_kappa_route_psi_gradient_matches_its_value_under_an_estimated_gamma_shape_2817() {
+    let n = 120usize;
+    let mut data = Array2::<f64>::zeros((n, 2));
+    let mut y = Array1::<f64>::zeros(n);
+    for i in 0..n {
+        let x0 = i as f64 / (n as f64 - 1.0);
+        let x1 = (i as f64 * 0.17).sin();
+        data[[i, 0]] = x0;
+        data[[i, 1]] = x1;
+        // A positive response around a smooth log mean, with a deterministic
+        // multiplicative spread so the estimated shape is finite.
+        let spread = (0.45 * (2.3 * i as f64).sin()).exp();
+        y[i] = (0.8 * (3.0 * x0).sin() + 0.5 * x1).exp() * spread;
+    }
+    assert_production_kappa_route_psi_gradient_matches_its_value(
+        "#2817",
+        &data,
+        &y,
+        &LikelihoodSpec::gamma_log(),
+    );
+}
+
+/// Production's spatial κ route at the monotone Matérn fixture's θ0: the analytic
+/// ∂V/∂ψ against a Richardson extrapolation of central differences of the route's
+/// own value, and the negated slope as a control.
+fn assert_production_kappa_route_psi_gradient_matches_its_value(
+    label: &str,
+    data: &Array2<f64>,
+    y: &Array1<f64>,
+    family: &LikelihoodSpec,
+) {
+    let n = y.len();
     let weights = Array1::<f64>::ones(n);
     let offset = Array1::<f64>::zeros(n);
     // The spec, fit options and κ options of
@@ -3279,7 +3329,6 @@ fn production_kappa_route_psi_gradient_matches_its_value_2895() {
         rel_tol: 1e-5,
         ..SpatialLengthScaleOptimizationOptions::default()
     };
-    let family = LikelihoodSpec::gaussian_identity();
     let SpatialKappaIncumbent::Joint {
         resolvedspec,
         best,
@@ -3291,13 +3340,13 @@ fn production_kappa_route_psi_gradient_matches_its_value_2895() {
         weights.view(),
         offset.view(),
         &spec,
-        &family,
+        family,
         &fit_opts,
         &kappa_options,
     )
-    .unwrap_or_else(|e| panic!("incumbent failed: {e:?}"))
+    .unwrap_or_else(|e| panic!("{label}: incumbent failed: {e:?}"))
     else {
-        panic!("the monotone Matérn fixture enrolls a spatial coordinate");
+        panic!("{label}: the monotone Matérn fixture enrolls a spatial coordinate");
     };
     let seed = exact_joint_spatial_seed(
         data.view(),
@@ -3317,10 +3366,10 @@ fn production_kappa_route_psi_gradient_matches_its_value_2895() {
         weights.view(),
         offset.view(),
         &best.design,
-        &family,
+        family,
         &fit_opts,
     )
-    .unwrap_or_else(|e| panic!("route inputs failed: {e:?}"));
+    .unwrap_or_else(|e| panic!("{label}: route inputs failed: {e:?}"));
     let mut route = prepare_exact_joint_spatial_route(
         seed.kind,
         data.view(),
@@ -3330,7 +3379,7 @@ fn production_kappa_route_psi_gradient_matches_its_value_2895() {
         &inputs.external_opts,
         &resolvedspec,
         &best.design,
-        &family,
+        family,
         &fit_opts,
         &spatial_terms,
         &seed.dims_per_term,
@@ -3364,26 +3413,26 @@ fn production_kappa_route_psi_gradient_matches_its_value_2895() {
     let coarse = (4.0 * central[1] - central[2]) / 3.0;
     let bar = 4.0 * (reference - coarse).abs() + 1.0e-9 * analytic.abs().max(reference.abs());
     eprintln!(
-        "[#2895 gate] theta0={:?} analytic={analytic:+.10e} central={central:?} \
+        "[{label} gate] theta0={:?} analytic={analytic:+.10e} central={central:?} \
          reference={reference:+.10e} coarse={coarse:+.10e} bar={bar:.3e}",
         seed.theta0.to_vec()
     );
     assert!(
         reference.abs() > bar,
-        "the differences do not resolve the slope (|reference|={:.3e} <= bar={bar:.3e}), so \
-         neither the gate nor its negated control decides anything",
+        "{label}: the differences do not resolve the slope (|reference|={:.3e} <= bar={bar:.3e}), \
+         so neither the gate nor its negated control decides anything",
         reference.abs()
     );
     assert!(
         (analytic - reference).abs() <= bar,
-        "production's analytic dV/dpsi {analytic:+.10e} disagrees with differences of its own \
-         value {reference:+.10e} (gap {:.3e} > measured difference bar {bar:.3e})",
+        "{label}: production's analytic dV/dpsi {analytic:+.10e} disagrees with differences of \
+         its own value {reference:+.10e} (gap {:.3e} > measured difference bar {bar:.3e})",
         (analytic - reference).abs()
     );
     assert!(
         (-analytic - reference).abs() > bar,
-        "the negated slope {:+.10e} also passes the bar {bar:.3e}, so the gate cannot tell a \
-         sign error",
+        "{label}: the negated slope {:+.10e} also passes the bar {bar:.3e}, so the gate cannot \
+         tell a sign error",
         -analytic
     );
 }

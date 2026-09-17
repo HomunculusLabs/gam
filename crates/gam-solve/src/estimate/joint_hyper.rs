@@ -401,20 +401,25 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
         };
     }
 
-    /// Re-establish an estimated Gamma/Tweedie/Beta nuisance canonically after
-    /// `reset_surface` invalidates the value from the previous design.
+    /// Establish an estimated Gamma/Tweedie/Beta nuisance once for this
+    /// evaluator, canonically, on the surface it was built on.
+    ///
+    /// The frozen nuisance defines the criterion (#2363), so the joint search
+    /// needs one value, not one per realized design. Re-anchoring after every
+    /// `reset_surface` made the value read `ν(ψ)`, a channel the analytic
+    /// ψ-gradient does not carry (#2817). Every evaluation calls this BEFORE
+    /// `prepare_eval_state`, so the first call solves `rho = 0` on the
+    /// construction design, before any trial point has moved the surface.
+    /// `reset_surface` keeps the freeze, and later calls return without solving.
     ///
     /// The joint evaluator attaches persistent warm-start storage at
     /// construction time, so the fixed-design precondition ("anchor before the
     /// disk layer exists") is no longer available here. Suspend that layer for
     /// the canonical `rho = 0` solve instead. The shared anchor clears every
     /// in-memory predictor and adaptive signal before solving, which makes the
-    /// resulting nuisance and beta functions of this realized surface alone.
-    ///
-    /// Fast-path trials retain an already established freeze and return without
-    /// solving. A slow-path reset zeros the freeze, so the first requested
-    /// evaluation on that surface deterministically performs the anchor.
-    fn anchor_current_surface_nuisance(
+    /// resulting nuisance a function of the data, the model spec and the
+    /// construction design alone.
+    fn anchor_fit_nuisance(
         &self,
         external_hyper_count: usize,
     ) -> Result<(), EstimationError> {
@@ -1296,6 +1301,7 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
         order: crate::rho_optimizer::OuterEvalOrder,
         design_revision: Option<u64>,
     ) -> Result<(f64, Array1<f64>, gam_problem::HessianValue), EstimationError> {
+        self.anchor_fit_nuisance(theta.len() - rho_dim)?;
         let hyper_dirs = self.prepare_eval_state(
             x,
             s_list,
@@ -1308,7 +1314,6 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
             context,
             design_revision,
         )?;
-        self.anchor_current_surface_nuisance(theta.len() - rho_dim)?;
         crate::estimate::reml::RemlState::compute_joint_hyper_eval_with_order(
             &self.reml_state,
             theta,
@@ -1331,6 +1336,7 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
         context: &str,
         design_revision: Option<u64>,
     ) -> Result<gam_problem::EfsEval, EstimationError> {
+        self.anchor_fit_nuisance(theta.len() - rho_dim)?;
         let hyper_dirs = self.prepare_eval_state(
             x,
             s_list,
@@ -1343,7 +1349,6 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
             context,
             design_revision,
         )?;
-        self.anchor_current_surface_nuisance(theta.len() - rho_dim)?;
         let rho = theta.slice(s![..rho_dim]).to_owned();
         self.reml_state
             .compute_efs_steps_with_psi_ext(&rho, &hyper_dirs)
@@ -1517,6 +1522,7 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
                 theta.len()
             );
         }
+        self.anchor_fit_nuisance(theta.len() - rho_dim)?;
         self.prepare_eval_state_cost_only(
             x,
             s_list,
@@ -1528,7 +1534,6 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
             context,
             design_revision,
         )?;
-        self.anchor_current_surface_nuisance(theta.len() - rho_dim)?;
         let rho = theta.slice(s![..rho_dim]).to_owned();
         self.reml_state
             .compute_cost_with_ext_count(&rho, theta.len() - rho_dim)
