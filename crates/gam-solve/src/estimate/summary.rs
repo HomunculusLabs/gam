@@ -48,7 +48,13 @@ pub struct ContinuousSmoothnessOrder {
 pub struct ModelSummary {
     pub family: String,
     pub deviance_explained: Option<f64>,
+    /// The cross-model comparable REML/LAML criterion
+    /// (`UnifiedFitResult::comparable_reml_score`), the value the Python summary
+    /// publishes under the same name. `None` exactly when `raw_reml_score` is.
     pub reml_score: Option<f64>,
+    /// The outer optimizer's own criterion, un-normalized
+    /// (`UnifiedFitResult::reml_score`).
+    pub raw_reml_score: Option<f64>,
     pub parametric_terms: Vec<ParametricTermSummary>,
     pub smooth_terms: Vec<SmoothTermSummary>,
     /// Exact covariance definition behind the coefficient standard errors
@@ -377,7 +383,14 @@ impl fmt::Display for ModelSummary {
             .reml_score
             .map(|v| format!("{v:.4}"))
             .unwrap_or_else(|| "NA".to_string());
-        writeln!(f, "Deviance Explained: {dev_txt} | REML Score: {reml_txt}")?;
+        let raw_reml_txt = self
+            .raw_reml_score
+            .map(|v| format!("{v:.4}"))
+            .unwrap_or_else(|| "NA".to_string());
+        writeln!(
+            f,
+            "Deviance Explained: {dev_txt} | REML Score: {reml_txt} | Raw REML Score: {raw_reml_txt}"
+        )?;
         if let Some(source) = self.coefficient_se_source {
             writeln!(f, "Coefficient SE Covariance: {source}")?;
         }

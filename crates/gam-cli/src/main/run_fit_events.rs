@@ -338,7 +338,14 @@ pub(crate) fn run_fit_events(args: FitEventsArgs) -> Result<(), String> {
         summary.insert("latent_states".to_string(), Value::Array(states));
     }
     summary.insert("log_likelihood".to_string(), json!(fit.fit.log_likelihood));
-    summary.insert("reml_score".to_string(), json!(fit.fit.reml_score()));
+    summary.insert(
+        "reml_score".to_string(),
+        json!(fit
+            .fit
+            .comparable_reml_score()
+            .map_err(|err| format!("failed to compute comparable REML score: {err}"))?),
+    );
+    summary.insert("raw_reml_score".to_string(), json!(fit.fit.reml_score()));
     summary.insert(
         "outer_iterations".to_string(),
         json!(fit.fit.outer_iterations),

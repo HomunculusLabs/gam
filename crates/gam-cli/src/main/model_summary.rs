@@ -172,7 +172,10 @@ pub(crate) fn build_model_summary(
     Ok(ModelSummary {
         family: family.pretty_name().to_string(),
         deviance_explained,
-        reml_score: fit.reml_score(),
+        reml_score: fit
+            .comparable_reml_score()
+            .map_err(|err| format!("failed to compute comparable REML score: {err}"))?,
+        raw_reml_score: fit.reml_score(),
         parametric_terms,
         smooth_terms,
         coefficient_se_source: display_uncertainty.map(|view| view.definition),

@@ -248,27 +248,46 @@ fn run_canonical_standard_fit(
                 "standard"
             };
             print_spatial_aniso_scales(&result.resolvedspec);
+            let status = result.fit.convergence_evidence().inner_status().label();
+            let iterations = result.fit.outer_iterations;
+            let term_count =
+                result.resolvedspec.smooth_terms.len() + result.resolvedspec.linear_terms.len();
+            let edf = result.fit.edf_total().unwrap_or(f64::NAN);
+            let log_likelihood = result.fit.log_likelihood;
+            // The comparable criterion reads the null-space metadata that payload
+            // assembly derives from the realized penalty topology, so the criterion
+            // is printed from the assembled payload, as the library route prints it.
+            // Printed before assembly, the fit carried no metadata and the line
+            // published the raw criterion under reml_score.
+            compact_fit_result_for_batch(&mut result.fit);
+            let mut payload = assemble_standard_payload(StandardPayloadInputs {
+                formula: formula.to_string(),
+                dataset,
+                fit_config,
+                result,
+            })?;
+            let fit = payload
+                .fit_result
+                .as_ref()
+                .ok_or("standard payload assembly returned no fit result")?;
             cli_out!(
-                "{} fit | family={} | status={} | iterations={} | terms={} | edf={:.3} | loglik={:.6e} | objective={}",
+                "{} fit | family={} | status={} | iterations={} | terms={} | edf={:.3} | loglik={:.6e} | reml_score={} | raw_reml_score={}",
                 model_label,
                 family.name(),
-                result.fit.convergence_evidence().inner_status().label(),
-                result.fit.outer_iterations,
-                result.resolvedspec.smooth_terms.len() + result.resolvedspec.linear_terms.len(),
-                result.fit.edf_total().unwrap_or(f64::NAN),
-                result.fit.log_likelihood,
+                status,
+                iterations,
+                term_count,
+                edf,
+                log_likelihood,
                 // An exactly-interpolating Gaussian fit has no criterion at
                 // all; printing a stand-in would read as one (#2595).
-                gam::estimate::criterion_display(result.fit.reml_score()),
+                gam::estimate::criterion_display(
+                    fit.comparable_reml_score()
+                        .map_err(|err| format!("failed to compute comparable REML score: {err}"))?,
+                ),
+                gam::estimate::criterion_display(fit.reml_score()),
             );
             if let Some(out) = args.out.as_ref() {
-                compact_fit_result_for_batch(&mut result.fit);
-                let mut payload = assemble_standard_payload(StandardPayloadInputs {
-                    formula: formula.to_string(),
-                    dataset,
-                    fit_config,
-                    result,
-                })?;
                 apply_request_metadata(&mut payload, fit_config, outcome.inference_notes);
                 write_payload_json(out, payload)?;
             }
@@ -378,11 +397,15 @@ fn run_library_formula_fit(
     print_inference_summary(&payload.inference_notes);
     if let Some(fit) = payload.fit_result.as_ref() {
         cli_out!(
-            "{} fit | status={} | iterations={} | loglik={:.6e} | objective={}",
+            "{} fit | status={} | iterations={} | loglik={:.6e} | reml_score={} | raw_reml_score={}",
             payload.family,
             fit.convergence_evidence().inner_status().label(),
             fit.outer_iterations,
             fit.log_likelihood,
+            gam::estimate::criterion_display(
+                fit.comparable_reml_score()
+                    .map_err(|err| format!("failed to compute comparable REML score: {err}"))?,
+            ),
             gam::estimate::criterion_display(fit.reml_score()),
         );
     }
