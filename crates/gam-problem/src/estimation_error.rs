@@ -1252,6 +1252,9 @@ impl EstimationError {
             | Self::ExactTweedieSeriesWorkLimit { .. } => FailureCategory::Convergence,
             Self::StartupSeedsRefused(_) => FailureCategory::StartupSeeds,
             Self::FitResultInvariantViolated(_)
+            // A trace past its rank beyond the solve's rounding band says the
+            // Hessian and the penalty were not one operator.
+            | Self::EdfTraceOutsideRank { .. }
             | Self::GradientUnavailable { .. }
             | Self::LayoutError(_) => FailureCategory::Invariant,
             Self::InvalidStabilization(_)
@@ -1341,6 +1344,7 @@ impl EstimationError {
             Self::IdentifiedRankNotLocallyConstant { .. } => {
                 "EstimationError::IdentifiedRankNotLocallyConstant"
             }
+            Self::EdfTraceOutsideRank { .. } => "EstimationError::EdfTraceOutsideRank",
             Self::RemlOptimizationFailed(_) => "EstimationError::RemlOptimizationFailed",
             Self::StartupSeedsRefused(_) => "EstimationError::StartupSeedsRefused",
             Self::TrialPointRefused { .. } => "EstimationError::TrialPointRefused",

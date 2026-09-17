@@ -669,9 +669,9 @@ fn estimation_error_to_pyerr_with_message(err: &EstimationError, message: String
             RemlConvergenceError::new_err(message)
         }
         // A penalty trace outside its rank beyond its solve's band says the
-        // Hessian and the penalty were not one operator: an evaluator-construction
-        // failure, not a convergence budget.
-        EstimationError::EdfTraceOutsideRank { .. } => IntegrationError::new_err(message),
+        // Hessian and the penalty were not one operator: an engine consistency
+        // failure, neither a convergence budget nor an integration.
+        EstimationError::EdfTraceOutsideRank { .. } => FitInvariantError::new_err(message),
         // A trial-point refusal only reaches Python when the outer smoothing
         // search never found a rho it could evaluate — so what the caller is
         // holding is an outer non-convergence, and the remedy (reseed, widen
@@ -1269,6 +1269,18 @@ mod fit_failure_dispatch_tests {
             ));
             assert!(err.is_instance_of::<FitInvariantError>(py));
             assert!(!err.is_instance_of::<InvalidInputError>(py));
+
+            let trace = estimation_error_to_pyerr(EstimationError::EdfTraceOutsideRank {
+                block: 2,
+                trace: 6.09e4,
+                rank: 22,
+                band: 1.0e-6,
+            });
+            assert!(trace.is_instance_of::<FitInvariantError>(py));
+            assert!(
+                !trace.is_instance_of::<IntegrationError>(py),
+                "only a genuine integration failure is an IntegrationError"
+            );
         });
     }
 }
