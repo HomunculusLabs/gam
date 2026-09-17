@@ -28,6 +28,9 @@ X = np.column_stack([np.cos(angle), np.sin(angle)]) + 0.05 * rng.standard_normal
 gamfit.sae_manifold_fit(X, K=2, d_atom=1, gpu="off")
 ```
 
+The fence's fit uses the default penalty-gated assignment, which takes the dense
+certification lane: it admits at most as many atoms as data columns (`K <= P`).
+
 `gpu="off"` takes the exact CPU route before any CUDA runtime probe. This is
 the correct choice on a CPU allocation whose image happens to expose a broken
 or mismatched `libcuda`. It does not reclassify that driver fault as hardware

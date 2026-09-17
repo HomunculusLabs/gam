@@ -1,4 +1,8 @@
-"""Fit an ordered independent Beta--Bernoulli SAE with temperature annealing."""
+"""Fit an ordered independent Beta--Bernoulli SAE with temperature annealing.
+
+Ordered Beta--Bernoulli is a penalty-gated assignment, so the fit takes the dense certification lane, which admits
+at most as many atoms as ambient channels (K <= P): three atoms on three channels.
+"""
 
 from __future__ import annotations
 

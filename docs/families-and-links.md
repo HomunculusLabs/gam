@@ -30,9 +30,9 @@ When `link="log"` is pinned *without* a `family=`, Poisson vs Gamma is chosen
 automatically by whether the response is integer-valued — `family=` is optional:
 
 ```python
-gamfit.fit(df, "y ~ s(x)")                 # integer counts -> Poisson/log (auto)
-gamfit.fit(df, "y ~ s(x)", link="log")     # log pinned: Poisson (integer) / Gamma (else)
-gamfit.fit(df, "y ~ s(x)", family="poisson", link="log")  # explicit
+gamfit.fit(df, "count ~ s(x)")                 # integer counts -> Poisson/log (auto)
+gamfit.fit(df, "count ~ s(x)", link="log")     # log pinned: Poisson (integer) / Gamma (else)
+gamfit.fit(df, "count ~ s(x)", family="poisson", link="log")  # explicit
 ```
 
 ## Setting family and link
@@ -100,7 +100,7 @@ precision, negative-binomial size, or Tweedie inverse dispersion.
 ```python
 gamfit.fit(df, "rate ~ s(age)", family="negative-binomial", link="log")
 gamfit.fit(df, "prop ~ s(x)", family="beta", noise_formula="s(x)")
-gamfit.fit(df, "claim ~ te(age, year)", family="tweedie", link="log")
+gamfit.fit(df, "claim ~ te(age, year)", family="tweedie(p=1.5)", link="log")
 ```
 
 `negative_binomial_theta` / `--negative-binomial-theta` fixes the
