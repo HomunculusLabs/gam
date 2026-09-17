@@ -2389,7 +2389,9 @@ mod tests {
     /// support term, and the frozen support value equals `evaluate`'s cost. If the
     /// two routes were two factorizations of one scalar, the values and their
     /// explicit hypergradients at this state would agree. They must disagree by more
-    /// than a floor, and the typed scores must refuse to compare.
+    /// than a floor, and the typed scores must refuse to compare. A perturbed endpoint
+    /// the dense exact observed information refuses as a saddle, where the support value
+    /// prices it, counts as disagreement. Any other refusal fails.
     #[test]
     fn dense_and_support_topk_routes_score_different_criteria_at_one_state_2933_f27() {
         let n = 8usize;
@@ -2607,10 +2609,17 @@ mod tests {
             .sum::<f64>();
         let smooth_energy = objective.penalty_energy_by_group(&lambda).iter().sum::<f64>();
 
-        // Explicit fixed-state hypergradients of both values, per atom.
+        // Explicit fixed-state hypergradients of both values, per atom. The transferred
+        // state is the support route's optimum, not the dense objective's, so the dense
+        // frozen lane may refuse a perturbed endpoint. It refuses only where its exact
+        // observed information classifies a saddle at that state
+        // (`IndefiniteObservedInformation`), and the support value prices the same
+        // endpoint: that is a disagreement between the two criteria too. Any other
+        // refusal fails the test with its text.
         let h = 1.0e-4;
         let mut support_gradient = [0.0_f64; 2];
-        let mut dense_gradient = [f64::NAN; 2];
+        let mut dense_gradient: [Option<f64>; 2] = [None; 2];
+        let mut dense_saddle_refusals = [0usize; 2];
         for atom_idx in 0..2 {
             let group = objective.layout.atom_group[atom_idx];
             let mut plus = rho.clone();
@@ -2624,10 +2633,23 @@ mod tests {
             let mut dense_minus = log_lambda.clone();
             dense_plus[atom_idx] += h;
             dense_minus[atom_idx] -= h;
-            if let (Ok((value_plus, _)), Ok((value_minus, _))) =
-                (dense_frozen(&dense_plus), dense_frozen(&dense_minus))
-            {
-                dense_gradient[atom_idx] = (value_plus - value_minus) / (2.0 * h);
+            let endpoints = [dense_frozen(&dense_plus), dense_frozen(&dense_minus)];
+            for endpoint in &endpoints {
+                if let Err(error) = endpoint {
+                    eprintln!(
+                        "[#2933 F27] dense frozen lane refused at atom {atom_idx}, log λ ± {h:e}: \
+                         {error}"
+                    );
+                    assert!(
+                        error.contains("IndefiniteObservedInformation"),
+                        "dense frozen lane refused a perturbed endpoint of atom {atom_idx} for a \
+                         reason other than a saddle: {error}"
+                    );
+                    dense_saddle_refusals[atom_idx] += 1;
+                }
+            }
+            if let [Ok((value_plus, _)), Ok((value_minus, _))] = &endpoints {
+                dense_gradient[atom_idx] = Some((value_plus - value_minus) / (2.0 * h));
             }
         }
 
@@ -2681,21 +2703,34 @@ mod tests {
             "dense {dense_value:.12e} and support {:.12e} values agree at one state",
             evaluation.cost
         );
+        // Per atom, the criteria disagree when the dense criterion prices both endpoints
+        // and its explicit hypergradient departs from the support one by more than the
+        // floor, or when it refuses an endpoint as a saddle the support value prices.
         let gradient_scale = support_gradient
             .iter()
-            .chain(dense_gradient.iter())
+            .chain(dense_gradient.iter().flatten())
             .fold(0.0_f64, |acc, value| acc.max(value.abs()));
-        let gradient_gap = (0..2)
-            .map(|atom_idx| (dense_gradient[atom_idx] - support_gradient[atom_idx]).abs())
-            .fold(0.0_f64, f64::max);
         assert!(
-            dense_gradient.iter().all(|value| value.is_finite()),
-            "dense explicit hypergradient must evaluate at the frozen state: {dense_gradient:?}"
+            dense_gradient
+                .iter()
+                .flatten()
+                .chain(support_gradient.iter())
+                .all(|value| value.is_finite()),
+            "explicit hypergradients must be finite where they evaluate: dense {dense_gradient:?} \
+             support {support_gradient:?}"
         );
+        let disagreeing_atoms = (0..2)
+            .filter(|&atom_idx| match dense_gradient[atom_idx] {
+                Some(dense) => {
+                    (dense - support_gradient[atom_idx]).abs() > 1.0e-2 * (1.0 + gradient_scale)
+                }
+                None => dense_saddle_refusals[atom_idx] > 0,
+            })
+            .count();
         assert!(
-            gradient_gap > 1.0e-2 * (1.0 + gradient_scale),
+            disagreeing_atoms > 0,
             "explicit hypergradients agree at one state: dense {dense_gradient:?} support \
-             {support_gradient:?}"
+             {support_gradient:?}, dense saddle refusals {dense_saddle_refusals:?}"
         );
 
         // Typed identity: the admission names two kinds, and their scores refuse.
