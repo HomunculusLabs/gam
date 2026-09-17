@@ -13,14 +13,11 @@ def main() -> None:
     n = 256
     u = rng.uniform(0.0, 2.0 * np.pi, size=n)
     v = rng.uniform(0.0, 2.0 * np.pi, size=n)
-    z = rng.normal(size=n)
-    y = np.cos(u + v) + 0.45 * np.sin(2.0 * u) - 0.35 * np.cos(v) + 0.18 * z
-    df = pd.DataFrame({"u": u, "v": v, "z": z, "y": y + rng.normal(scale=0.12, size=n)})
-    result = gamfit.select_topology(
-        df,
-        "y ~ s(u, v, type=AUTO) + z",
-        return_fits=False,
-    )
+    y = np.cos(u + v) + 0.45 * np.sin(2.0 * u) - 0.35 * np.cos(v)
+    df = pd.DataFrame({"u": u, "v": v, "y": y + rng.normal(scale=0.12, size=n)})
+    # select_topology takes the response column and races candidate topologies
+    # for one smooth over every other column: here `y ~ s(u, v, type=AUTO)`.
+    result = gamfit.select_topology(df, "y", return_fits=False)
 
     print(f"selected topology: {result.winner_name}")
 
