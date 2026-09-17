@@ -52,8 +52,7 @@ pub struct SaeSupportStationarity {
     pub coordinate_l2: f64,
     pub coordinate_max_abs: f64,
     /// The decoder block's gradient divided by that block's OWN curvature
-    /// diagonal — the Jacobi-scaled Newton step, i.e. how far the coefficients
-    /// still have to move, in the units the coefficients live in.
+    /// diagonal: a diagonal-preconditioned first-order residual.
     ///
     /// #2517. The raw gradient is not a free-floating number: the decoder sweep
     /// solves `(G_k + λS_k) B_k = rhs_k` exactly per atom, so near the fixed
@@ -69,33 +68,42 @@ pub struct SaeSupportStationarity {
     /// Dividing by the curvature diagonal removes exactly that factor and
     /// leaves a quantity invariant to `n`, to rows-per-atom, and to basis
     /// scaling — the same domain-space discipline as #2548's per-block split.
+    ///
+    /// It is NOT the remaining parameter displacement (#2933 F08). That is
+    /// `A⁻¹g` with the full coupled Hessian, and a diagonal cannot see coupled
+    /// weakly curved directions: for `H = [[1, 1−ε], [1−ε, 1]]` at `θ − θ* =
+    /// (1, −1)` the diagonal-scaled gradient is `ε` while the displacement is 1.
+    /// A likelihood-flat reparameterisation curved only by the priors is the
+    /// same shape. This quantity schedules the certificate;
+    /// [`SaeSupportNewtonDisplacement`] is the certificate.
     pub decoder_scaled_max_abs: f64,
     /// The coordinate block's counterpart: its gradient divided by its own
-    /// curvature diagonal (`Σ_out J² + ARD curvature`), so both blocks are
-    /// certified in the space their parameters live in rather than in two
-    /// different gradient scales.
+    /// curvature diagonal (`Σ_out J² + ARD curvature`).
     pub coordinate_scaled_max_abs: f64,
 }
 
 impl SaeSupportStationarity {
-    /// The raw (gradient-space) certificate, kept for reporting and for every
+    /// The raw (gradient-space) residual, kept for reporting and for every
     /// consumer that compares against a historical number.
     pub fn max_abs(self) -> f64 {
         self.decoder_max_abs.max(self.coordinate_max_abs)
     }
 
-    /// The parameter-space certificate: the larger of the two blocks' scaled
-    /// Newton steps. This is what a fixed point should be certified on — see
-    /// [`Self::decoder_scaled_max_abs`] for why the raw gradient cannot be.
+    /// The larger of the two blocks' diagonal-preconditioned residuals. See
+    /// [`Self::decoder_scaled_max_abs`] for why it is intensive and why it is
+    /// not a displacement.
     pub fn scaled_max_abs(self) -> f64 {
         self.decoder_scaled_max_abs
             .max(self.coordinate_scaled_max_abs)
     }
 
-    /// Accept either of the two mathematically valid first-order currencies:
-    /// the extensive raw gradient relative to the objective, or the
-    /// componentwise curvature-scaled displacement relative to the iterate.
-    pub(crate) fn kkt_certifies(
+    /// Whether the first-order residual is small enough to price the exact
+    /// Newton displacement: the extensive raw gradient relative to the
+    /// objective, or the componentwise diagonal-scaled residual relative to the
+    /// iterate. A SCHEDULE, never a certificate (#2933 F08): the raw limb is
+    /// relative to an objective that can carry any additive constant, and the
+    /// diagonal limb is blind to coupled weakly curved directions.
+    pub(crate) fn first_order_screen(
         self,
         objective_scale: f64,
         parameter_scale: f64,
@@ -109,6 +117,43 @@ impl SaeSupportStationarity {
             && tolerance > 0.0
             && (self.max_abs() <= tolerance * objective_scale
                 || self.scaled_max_abs() <= tolerance * parameter_scale)
+    }
+}
+
+/// The exact Newton displacement `Δ = A⁻¹g` at an installed support state, per
+/// block, in parameter units (#2933 F08).
+///
+/// `A` is the exact stationarity Jacobian of the penalized inner objective, the
+/// Gauss–Newton arrow plus the residual second-jet and exact prior curvature: the
+/// operator the outer profile adjoint inverts, not its majorizer. Near a
+/// nondegenerate stationary point `θ − θ* = Δ + O(‖Δ‖²)`, so each component is how
+/// far that parameter still has to move, including along directions only a
+/// simultaneous change of coordinates and decoder can travel. It is covariant
+/// under reparameterisation and intensive under row replication, because `A` and
+/// `g` scale together.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SaeSupportNewtonDisplacement {
+    pub decoder_max_abs: f64,
+    pub coordinate_max_abs: f64,
+    /// `gᵀA⁻¹g`, the squared Newton decrement; the quadratic model predicts a
+    /// decrease of half of it.
+    pub decrement_sq: f64,
+}
+
+impl SaeSupportNewtonDisplacement {
+    pub fn max_abs(self) -> f64 {
+        self.decoder_max_abs.max(self.coordinate_max_abs)
+    }
+
+    /// The inner certificate: every parameter's remaining Newton displacement is
+    /// within `tolerance` of the iterate scale.
+    pub(crate) fn certifies(self, parameter_scale: f64, tolerance: f64) -> bool {
+        parameter_scale.is_finite()
+            && parameter_scale >= 1.0
+            && tolerance.is_finite()
+            && tolerance > 0.0
+            && self.max_abs().is_finite()
+            && self.max_abs() <= tolerance * parameter_scale
     }
 }
 
@@ -195,9 +240,12 @@ pub struct SaeSupportFixedPointReport {
     pub iterations: usize,
     pub objective: f64,
     pub stationarity: SaeSupportStationarity,
+    /// The exact Newton displacement the state certified on (#2933 F08).
+    pub newton_displacement: SaeSupportNewtonDisplacement,
     pub max_recurrence_change: f64,
     /// True only after a second complete decoder/coordinate cycle recurs within
-    /// the same tolerance at the raw (undamped) stationarity point.
+    /// the same tolerance at the raw (undamped) stationarity point and the exact
+    /// Newton displacement there is within tolerance.
     pub recurred: bool,
 }
 
@@ -3783,6 +3831,171 @@ impl SaeSupportSparseTerm {
         }
     }
 
+    /// Solve `A Δ = g` at the installed state: the exact Newton displacement the
+    /// fixed point certifies on, and the direction a refused certificate steps
+    /// along (#2933 F08).
+    ///
+    /// The solve is the profile adjoint's large-system route: flexible GMRES on the
+    /// exact stationarity Jacobian, right-preconditioned by the majorizer arrow's
+    /// per-row factors and reduced-Schur solve. It adds no dense factorization, and
+    /// it certifies the physical residual `‖g − AΔ‖ ≤ √ε‖g‖` rather than a
+    /// preconditioned proxy. `A` may be indefinite; GMRES does not assume otherwise.
+    fn exact_newton_solve(
+        &self,
+        target: ArrayView2<'_, f64>,
+        lambda_smooth: &[f64],
+        ard_precisions: &[Vec<f64>],
+    ) -> Result<(SaeSupportNewtonDisplacement, SaeArrowVector), String> {
+        let system = self.assemble_arrow_schur(target, lambda_smooth, ard_precisions)?;
+        let (beta_offsets, beta_dim) = self.beta_layout()?;
+        if beta_dim != system.k {
+            return Err(format!(
+                "support Newton displacement beta layout {beta_dim} != system border {}",
+                system.k
+            ));
+        }
+        let coordinate_dim = *system.row_offsets.last().unwrap_or(&0);
+        let mut gradient = SaeArrowVector {
+            t: Array1::<f64>::zeros(coordinate_dim),
+            beta: system.gb.clone(),
+        };
+        for (row, block) in system.rows.iter().enumerate() {
+            gradient
+                .t
+                .slice_mut(ndarray::s![system.row_offsets[row]..system.row_offsets[row + 1]])
+                .assign(&block.gt);
+        }
+        let rows = self.support_outer_differential_rows(target, ard_precisions, &beta_offsets)?;
+        let factors = CpuBatchedBlockSolver
+            .factor_blocks(&system.rows, 0.0, system.d, true)
+            .map_err(|error| format!("support Newton displacement row factorization: {error}"))?;
+        let displacement = solve_b_preconditioned_gmres_with(
+            &gradient,
+            |vector| self.support_outer_exact_hessian_apply(&system, &rows, vector),
+            |rhs| support_arrow_majorizer_inverse(&system, &factors, rhs),
+        )
+        .map_err(|error| format!("support Newton displacement solve: {error}"))?;
+        // `f64::max` returns its non-NaN operand, so finiteness is checked before
+        // the reductions rather than read off them.
+        if !displacement
+            .t
+            .iter()
+            .chain(displacement.beta.iter())
+            .all(|value| value.is_finite())
+        {
+            return Err("support Newton displacement is non-finite".to_string());
+        }
+        let max_abs =
+            |values: &Array1<f64>| values.iter().fold(0.0_f64, |current, value| current.max(value.abs()));
+        let decrement_sq =
+            gradient.t.dot(&displacement.t) + gradient.beta.dot(&displacement.beta);
+        if !decrement_sq.is_finite() {
+            return Err("support Newton decrement is non-finite".to_string());
+        }
+        Ok((
+            SaeSupportNewtonDisplacement {
+                decoder_max_abs: max_abs(&displacement.beta),
+                coordinate_max_abs: max_abs(&displacement.t),
+                decrement_sq,
+            },
+            displacement,
+        ))
+    }
+
+    /// Take the exact Newton step `−Δ` a refused certificate already paid for
+    /// (#2933 F08), backtracking only against a RESOLVED increase of the penalized
+    /// objective.
+    ///
+    /// Each trial re-solves the decoder block given the stepped coordinates, with the
+    /// same sweep the fixed point uses. The decoder is a linear least-squares block
+    /// given the coordinates, so this is the variable-projection form of the step:
+    /// its coordinate part is the reduced Newton step wherever the decoder gradient
+    /// vanishes. It follows the valleys the certificate exists for. A
+    /// reparameterisation orbit that is straight in the coordinates is curved in the
+    /// decoder (`β₁ = β₁*/s` for a scaled chart), so the straight Newton line leaves
+    /// it quadratically and a likelihood increase would force the step to a crawl.
+    ///
+    /// Near the stationary point the step's predicted decrease `½gᵀΔ` can lie below
+    /// the objective's arithmetic resolution while the displacement is still above
+    /// tolerance, so demanding a measured decrease would refuse exactly the steps the
+    /// certificate needs. What guards progress instead is the caller's next
+    /// certificate, which must find the displacement strictly contracted. Returns
+    /// the objective at the installed step, or `None` with the state restored bit
+    /// for bit when `Δ` is not a descent direction (`gᵀΔ ≤ 0`, the exact curvature
+    /// is not positive along it) or no trial avoids a resolved increase.
+    fn exact_newton_step(
+        &mut self,
+        target: ArrayView2<'_, f64>,
+        lambda_smooth: &[f64],
+        ard_precisions: &[Vec<f64>],
+        objective: f64,
+        displacement: &SaeArrowVector,
+        decrement_sq: f64,
+        coordinate_snapshot: &mut Vec<f64>,
+        scaled_step: &mut Vec<f64>,
+        trial_fitted: &mut Array2<f64>,
+    ) -> Result<Option<f64>, String> {
+        if !(decrement_sq.is_finite() && decrement_sq > 0.0) {
+            return Ok(None);
+        }
+        let (beta_offsets, _) = self.beta_layout()?;
+        self.snapshot_coordinates(coordinate_snapshot);
+        let decoder_snapshot = self
+            .atoms
+            .iter()
+            .map(|atom| atom.decoder_coefficients().clone())
+            .collect::<Vec<_>>();
+        let step = SaeArrowVector {
+            t: displacement.t.mapv(|value| -value),
+            beta: displacement.beta.mapv(|value| -value),
+        };
+        let resolution = self.objective_descent_resolution(objective);
+        let mut trial_coordinates = Vec::with_capacity(coordinate_snapshot.len());
+        let mut scale = 1.0_f64;
+        loop {
+            let changed = self.install_scaled_arrow_displacement(
+                coordinate_snapshot,
+                &decoder_snapshot,
+                &beta_offsets,
+                &step,
+                scale,
+                scaled_step,
+                &mut trial_coordinates,
+            )?;
+            if !changed {
+                break;
+            }
+            self.reconstruct_into(trial_fitted)?;
+            match self.decoder_fista_passes {
+                Some(passes) => {
+                    self.decoder_sweep_fista(target, lambda_smooth, trial_fitted, passes)?
+                }
+                None => self.decoder_sweep(target, lambda_smooth, trial_fitted)?,
+            };
+            let trial_residual = &target - &*trial_fitted;
+            let trial = self.penalized_objective_with_residual(
+                &trial_residual,
+                lambda_smooth,
+                ard_precisions,
+            )?;
+            if trial.is_finite() && trial - objective <= resolution {
+                return Ok(Some(trial));
+            }
+            // Past this rung the step's whole first-order change is within the
+            // objective's resolution, so no smaller rung can tell an increase from
+            // a decrease. The negated comparison also stops on NaN.
+            if !(scale * decrement_sq > resolution) {
+                break;
+            }
+            scale *= 0.5;
+        }
+        self.install_coordinates(coordinate_snapshot)?;
+        for (atom, decoder) in decoder_snapshot.into_iter().enumerate() {
+            self.atoms[atom].set_decoder_coefficients(decoder)?;
+        }
+        Ok(None)
+    }
+
     /// Evaluate one active `(row, slot)` pair into caller-owned storage.
     ///
     /// The allocating counterpart this replaces (`evaluate_active`) built six
@@ -6839,6 +7052,9 @@ impl SaeSupportSparseTerm {
         let mut previous_candidate = false;
         let mut last_max_change = f64::NAN;
         let mut last_objective: Option<f64> = None;
+        // The last exact Newton displacement a refused certificate priced, with the
+        // support it was priced under (#2933 F08): the next one must contract.
+        let mut last_newton_displacement: Option<(f64, Vec<u32>)> = None;
         // #2575: the alternating map's contraction is linear at ρ ≈ 0.975 on
         // real activations, so most cycles are spent crawling the tail rather
         // than resolving a nonlinearity. Anderson extrapolates over the
@@ -7006,14 +7222,14 @@ impl SaeSupportSparseTerm {
                 &mut cycle_end,
                 &mut cycle_residual,
             )?;
-            let certified = stationarity.kkt_certifies(
+            let screened = stationarity.first_order_screen(
                 kkt_scale,
                 parameter_scale,
                 tolerance,
             ) && pre_joint_change <= tolerance * parameter_scale;
             if joint_armed && joint_skip_remaining > 0 {
                 joint_skip_remaining -= 1;
-            } else if joint_armed && !certified {
+            } else if joint_armed && !screened {
                 match self.joint_newton_step(
                     target,
                     lambda_smooth,
@@ -7093,7 +7309,7 @@ impl SaeSupportSparseTerm {
             let mut objective_recurred = last_objective
                 .map(|previous: f64| (objective - previous).abs() <= tolerance * kkt_scale)
                 .unwrap_or(false);
-            // #2517 — the KKT limb is certified in PARAMETER space, not in
+            // #2517 — the first-order screen is read in PARAMETER space, not in
             // gradient space. The decoder sweep solves `(G + λS)B = rhs`
             // exactly, so near the fixed point the block gradient is
             // `(G + λS)·Δ` and `G = Σ_rows φφᵀ` is extensive in rows-per-atom:
@@ -7101,11 +7317,13 @@ impl SaeSupportSparseTerm {
             // error across two decades of shape, so an absolute (or
             // objective-relative) bound on it is a bound on `m·Δ` that tightens
             // as data is ADDED. Dividing each block's gradient by its own
-            // curvature diagonal removes exactly that factor and leaves the
-            // Newton step, which is what a fixed point has to make small and is
-            // invariant to n, to rows-per-atom, and to basis scaling.
+            // curvature diagonal removes that factor. It does not recover the
+            // Newton step (#2933 F08): coupled weakly curved directions are
+            // invisible to a diagonal, and a slowly contracting alternation
+            // moves by `(1 − ρ)` of its remaining error per cycle. These limbs
+            // only decide when the exact Newton displacement is worth pricing.
             let mut candidate = objective_recurred
-                && stationarity.kkt_certifies(kkt_scale, parameter_scale, tolerance)
+                && stationarity.first_order_screen(kkt_scale, parameter_scale, tolerance)
                 && max_change <= tolerance * parameter_scale;
             if candidate && previous_candidate {
                 // About to certify: recompute the decode from scratch and
@@ -7126,7 +7344,7 @@ impl SaeSupportSparseTerm {
                     .map(|previous: f64| (objective - previous).abs() <= tolerance * kkt_scale)
                     .unwrap_or(false);
                 candidate = objective_recurred
-                    && stationarity.kkt_certifies(kkt_scale, parameter_scale, tolerance)
+                    && stationarity.first_order_screen(kkt_scale, parameter_scale, tolerance)
                     && max_change <= tolerance * parameter_scale;
             }
             last_objective = Some(objective);
@@ -7284,6 +7502,9 @@ impl SaeSupportSparseTerm {
                             joint_skip_remaining = 0;
                             joint_skip_width = 1;
                             objective_at_window_start = escaped_objective;
+                            // A saddle escape starts a new basin; displacements priced
+                            // before it do not bound the ones after it.
+                            last_newton_displacement = None;
                             continue;
                         }
                         None => {
@@ -7297,14 +7518,97 @@ impl SaeSupportSparseTerm {
                         }
                     }
                 }
+                // #2933 F08 — the certificate. Every limb above is a schedule: the
+                // objective recurrence is relative to an objective that can carry
+                // any additive constant, the state recurrence sees `(1 − ρ)` of the
+                // remaining error of a slowly contracting alternation, and the
+                // diagonal-scaled residual cannot see coupled weakly curved
+                // directions. The exact Newton displacement is the first-order
+                // distance to the stationary point, so the state is returned only
+                // when every parameter's is within tolerance of the iterate scale.
+                let (newton_displacement, newton_direction) =
+                    self.exact_newton_solve(target, lambda_smooth, ard_precisions)?;
+                if !newton_displacement.certifies(parameter_scale, tolerance) {
+                    // A Newton step from inside the basin contracts the displacement.
+                    // One that does not, under the same discrete support, is a state
+                    // this iteration cannot bring to a certifiable stationary point,
+                    // and refusing now spends no further exact solves on it.
+                    let support = self.support_fingerprint();
+                    if let Some((previous, _)) = last_newton_displacement
+                        .as_ref()
+                        .filter(|(_, previous_support)| *previous_support == support)
+                    {
+                        if !(newton_displacement.max_abs() < *previous) {
+                            return Err(format!(
+                                "SaeSupportSparseTerm::solve_fixed_point: exact Newton displacement \
+                                 {:.6e} did not contract from {previous:.6e} after a Newton step \
+                                 (decoder {:.6e}, coordinate {:.6e}; bound {:.6e} = tolerance \
+                                 {tolerance:.6e} x scale {parameter_scale:.6e})",
+                                newton_displacement.max_abs(),
+                                newton_displacement.decoder_max_abs,
+                                newton_displacement.coordinate_max_abs,
+                                tolerance * parameter_scale,
+                            ));
+                        }
+                    }
+                    last_newton_displacement = Some((newton_displacement.max_abs(), support));
+                    match self.exact_newton_step(
+                        target,
+                        lambda_smooth,
+                        ard_precisions,
+                        objective,
+                        &newton_direction,
+                        newton_displacement.decrement_sq,
+                        &mut joint_snapshot,
+                        &mut joint_scaled_step,
+                        &mut trial_fitted,
+                    )? {
+                        Some(stepped_objective) => {
+                            log::info!(
+                                "support fixed-point cycle {iteration}: exact Newton displacement \
+                                 {:.3e} (decoder {:.3e}, coordinate {:.3e}) exceeds {:.3e} while \
+                                 the screen passed; Newton step installed, objective \
+                                 {objective:.6e} -> {stepped_objective:.6e}",
+                                newton_displacement.max_abs(),
+                                newton_displacement.decoder_max_abs,
+                                newton_displacement.coordinate_max_abs,
+                                tolerance * parameter_scale,
+                            );
+                            self.reconstruct_into(&mut fitted_state)?;
+                            accelerator.reset();
+                            taken_step.clear();
+                            taken_step.resize(self.coordinate_state_len(), 0.0);
+                            last_objective = None;
+                            previous_candidate = false;
+                            objective_at_window_start = stepped_objective;
+                            continue;
+                        }
+                        None => {
+                            return Err(format!(
+                                "SaeSupportSparseTerm::solve_fixed_point: exact Newton displacement \
+                                 {:.6e} (decoder {:.6e}, coordinate {:.6e}) exceeds the bound \
+                                 {:.6e}, and the Newton step neither descends (decrement² \
+                                 {:.6e}) nor avoids a resolved objective increase at any scale",
+                                newton_displacement.max_abs(),
+                                newton_displacement.decoder_max_abs,
+                                newton_displacement.coordinate_max_abs,
+                                tolerance * parameter_scale,
+                                newton_displacement.decrement_sq,
+                            ));
+                        }
+                    }
+                }
                 log::info!(
                     "support fixed-point cycle {iteration}: raw KKT max={:.3e} rel={:.3e} \
-                     parameter KKT max={:.3e} rel={:.3e} max_change={:.3e} objective={:.6e} \
+                     diagonal-scaled max={:.3e} rel={:.3e} exact Newton displacement={:.3e} \
+                     rel={:.3e} max_change={:.3e} objective={:.6e} \
                      anderson_accepted={accepted_extrapolations} joint_accepted={joint_accepted}",
                     stationarity.max_abs(),
                     stationarity.max_abs() / kkt_scale,
                     stationarity.scaled_max_abs(),
                     stationarity.scaled_max_abs() / parameter_scale,
+                    newton_displacement.max_abs(),
+                    newton_displacement.max_abs() / parameter_scale,
                     max_change,
                     objective
                 );
@@ -7312,6 +7616,7 @@ impl SaeSupportSparseTerm {
                     iterations: iteration,
                     objective,
                     stationarity,
+                    newton_displacement,
                     max_recurrence_change: max_change,
                     recurred: true,
                 });
@@ -7501,14 +7806,16 @@ impl SaeSupportSparseTerm {
         // and the certificate has not been reached — the split is what
         // distinguishes "a sweep is not solving its block" from "the blocks
         // disagree at the joint point".
+        let last_newton = last_newton_displacement.as_ref().map(|(value, _)| *value);
         Err(format!(
             "SaeSupportSparseTerm::solve_fixed_point did not recur within {max_iter} \
              alternating cycles nor in the {max_iter} coupled cycles that follow \
              (raw KKT max={:.6e}, relative to objective {:.6e}: {:.6e}; \
              per block: decoder max={:.6e} l2={:.6e}, coordinate max={:.6e} l2={:.6e}; \
-             parameter-space Newton step max={:.6e}, scale={parameter_scale:.6e}, relative={:.6e} \
+             diagonal-scaled residual max={:.6e}, scale={parameter_scale:.6e}, relative={:.6e} \
              vs tolerance {tolerance:.6e} (decoder {:.6e}, coordinate {:.6e}); \
-             certificate accepts raw-relative OR parameter-relative KKT; \
+             that screen schedules the exact Newton displacement certificate, last priced at \
+             {last_newton:?}; \
              last parameter max_change={last_max_change:.6e}, \
              joint Newton steps accepted={joint_accepted}, gauge-invariant limbs required)",
             stationarity.max_abs(),
@@ -7996,12 +8303,13 @@ mod tests {
         assert!(report.recurred && report.objective < before);
     }
 
-    /// #2634 — the support term accepts the same two KKT currencies as the
-    /// dense manifold lane. Replicating rows makes the raw decoder gradient
+    /// #2634 — the support first-order screen accepts the same two currencies as
+    /// the dense manifold lane. Replicating rows makes the raw decoder gradient
     /// extensive while its diagonal curvature grows by the identical factor;
-    /// only the componentwise parameter-space audit remains invariant.
+    /// only the componentwise diagonal-scaled limb remains invariant. The screen
+    /// schedules the exact Newton displacement certificate (#2933 F08).
     #[test]
-    fn support_parameter_certificate_survives_raw_global_refusal_2634() {
+    fn support_first_order_screen_survives_raw_global_refusal_2634() {
         let rows = 1_024usize;
         let evaluator: Arc<dyn SaeBasisSecondJet> =
             Arc::new(EuclideanPatchEvaluator::new(1, 1).expect("patch"));
@@ -8047,9 +8355,9 @@ mod tests {
         );
         assert!(
             stationarity.scaled_max_abs() <= tolerance * parameter_scale,
-            "the componentwise parameter certificate must be intensive"
+            "the componentwise diagonal-scaled screen must be intensive"
         );
-        assert!(stationarity.kkt_certifies(
+        assert!(stationarity.first_order_screen(
             objective_scale,
             parameter_scale,
             tolerance
@@ -8228,5 +8536,152 @@ mod tests {
             objective_again <= objective_after,
             "a further profile must not raise the objective: {objective_after} -> {objective_again}"
         );
+    }
+
+    /// #2933 F08 fixture: one degree-1 patch atom `f(t) = β₀ + β₁t` over eight rows
+    /// at `t₀ = ±1`, penalty `S = I`, ARD precision `α` and smoothing `λ = α`. The
+    /// fit is invariant along the scale orbit `(s·t₀, β₁*/s)`, so only the priors
+    /// curve it, `V(s) = ½αTs² + ½λβ₁*²s⁻²` with `T = Σt₀² = 8`, stationary at `s = 1`
+    /// when `β₁*² = αT/λ = T`. The target `y = (β₁* + α/β₁*)·t₀` leaves the residual
+    /// `r = α·t₀/β₁*`. That residual balances every coordinate's prior pull, and
+    /// because `Σt₀ = 0` and `Σt₀r = αT/β₁* = λβ₁*` it balances both decoder
+    /// gradients too. Neither affine profiler touches a degree-1 patch, so the orbit
+    /// is left to the solve.
+    fn scale_orbit_fixture_2933(
+        alpha: f64,
+        orbit_scale: f64,
+    ) -> (SaeSupportSparseTerm, Array2<f64>, Vec<f64>, Vec<Vec<f64>>, f64) {
+        let rows = 8usize;
+        let base: Vec<f64> = (0..rows)
+            .map(|row| if row % 2 == 0 { -1.0 } else { 1.0 })
+            .collect();
+        let slope = (rows as f64).sqrt();
+        let evaluator: Arc<dyn SaeBasisSecondJet> =
+            Arc::new(EuclideanPatchEvaluator::new(1, 1).expect("patch"));
+        let atoms = vec![atom(
+            "scale-orbit",
+            SaeAtomBasisKind::EuclideanPatch,
+            1,
+            evaluator,
+            &[0.0],
+            array![[0.0], [slope / orbit_scale]],
+        )];
+        let state = SaeAssignmentState::from_topk_support_heterogeneous(
+            rows,
+            1,
+            1,
+            vec![SaeAssignmentAtomSpec::euclidean(1)],
+            vec![vec![0]; rows],
+            vec![vec![1.0]; rows],
+            base.iter().map(|&t| vec![orbit_scale * t]).collect(),
+        )
+        .expect("state");
+        let term = SaeSupportSparseTerm::new(atoms, state).expect("term");
+        let target =
+            Array2::from_shape_fn((rows, 1), |(row, _)| (slope + alpha / slope) * base[row]);
+        (term, target, vec![alpha], vec![vec![alpha]], slope)
+    }
+
+    /// #2933 F08 — a diagonal-scaled gradient is not the remaining Newton
+    /// displacement. Five percent along the scale orbit (`α = 1e-6`) the state is
+    /// `β₁* − β₁*/1.05 ≈ 0.135` from the optimum in the slope and `0.05` in every
+    /// coordinate, yet the first-order screen passes on its diagonal limb: the
+    /// gradient is small only because the orbit's curvature is. The exact Newton
+    /// displacement recovers both distances to first order and refuses. At the
+    /// stationary point itself it certifies.
+    #[test]
+    fn exact_newton_displacement_sees_the_orbit_the_diagonal_misses_2933_f08() {
+        let alpha = 1.0e-6;
+        let orbit_scale = 1.05;
+        let (term, target, lambda, ard, slope) = scale_orbit_fixture_2933(alpha, orbit_scale);
+        let tolerance = term.fixed_point_tolerance();
+        let parameter_scale = term.parameter_iterate_scale().expect("parameter scale");
+        let objective = term
+            .penalized_objective(target.view(), &lambda, &ard)
+            .expect("objective");
+        let stationarity = term
+            .raw_stationarity(target.view(), &lambda, &ard)
+            .expect("stationarity");
+        assert!(
+            stationarity.scaled_max_abs() <= tolerance * parameter_scale
+                && stationarity.first_order_screen(
+                    objective.abs().max(1.0),
+                    parameter_scale,
+                    tolerance
+                ),
+            "the fixture must hide the orbit from the diagonal: scaled {:.3e} vs bound {:.3e}",
+            stationarity.scaled_max_abs(),
+            tolerance * parameter_scale,
+        );
+        let (displacement, _) = term
+            .exact_newton_solve(target.view(), &lambda, &ard)
+            .expect("exact Newton displacement");
+        let slope_distance = slope - slope / orbit_scale;
+        let coordinate_distance = orbit_scale - 1.0;
+        assert!(
+            displacement.decoder_max_abs >= 0.5 * slope_distance
+                && displacement.decoder_max_abs <= 2.0 * slope_distance,
+            "decoder displacement {:.6e} must recover the slope distance {slope_distance:.6e}",
+            displacement.decoder_max_abs,
+        );
+        assert!(
+            displacement.coordinate_max_abs >= 0.5 * coordinate_distance
+                && displacement.coordinate_max_abs <= 2.0 * coordinate_distance,
+            "coordinate displacement {:.6e} must recover the coordinate distance \
+             {coordinate_distance:.6e}",
+            displacement.coordinate_max_abs,
+        );
+        assert!(!displacement.certifies(parameter_scale, tolerance));
+
+        let (optimum, target, lambda, ard, _) = scale_orbit_fixture_2933(alpha, 1.0);
+        let optimum_scale = optimum.parameter_iterate_scale().expect("parameter scale");
+        let (at_optimum, _) = optimum
+            .exact_newton_solve(target.view(), &lambda, &ard)
+            .expect("exact Newton displacement at the optimum");
+        assert!(
+            at_optimum.certifies(optimum_scale, tolerance),
+            "the stationary point must certify: displacement {:.3e} vs bound {:.3e}",
+            at_optimum.max_abs(),
+            tolerance * optimum_scale,
+        );
+    }
+
+    /// #2933 F08 — `solve_fixed_point` returns only a state whose exact Newton
+    /// displacement is within tolerance, and that state is the optimum. Started five
+    /// percent along the scale orbit with `α = 1e-7`, the alternation moves along the
+    /// orbit by about `α/2` of its remaining distance per cycle. So the objective
+    /// recurrence, the state recurrence and the diagonal-scaled screen all pass
+    /// while the slope is still `0.135` from `β₁* = √8`. The analytic optimum, not
+    /// the certificate's own number, is the oracle.
+    #[test]
+    fn fixed_point_certifies_the_orbit_optimum_not_its_crawl_2933_f08() {
+        let alpha = 1.0e-7;
+        let (mut term, target, lambda, ard, slope) = scale_orbit_fixture_2933(alpha, 1.05);
+        let tolerance = term.fixed_point_tolerance();
+        let report = term
+            .solve_fixed_point(target.view(), &lambda, &ard, 64, tolerance, 1.0)
+            .expect("the orbit optimum is certifiable");
+        assert!(report.recurred);
+        let parameter_scale = term.parameter_iterate_scale().expect("parameter scale");
+        assert!(
+            report.newton_displacement.certifies(parameter_scale, tolerance),
+            "returned displacement {:.3e} vs bound {:.3e}",
+            report.newton_displacement.max_abs(),
+            tolerance * parameter_scale,
+        );
+        let fitted_slope = term.atoms[0].decoder_coefficients()[[1, 0]];
+        assert!(
+            (fitted_slope - slope).abs() <= 1.0e-4 * slope,
+            "certified slope {fitted_slope:.9e} must be the orbit optimum {slope:.9e}",
+        );
+        for row in 0..term.n_obs() {
+            let expected = if row % 2 == 0 { -1.0 } else { 1.0 };
+            let coordinate = term.assignment.coords_for_slot(row, 0)[0];
+            assert!(
+                (coordinate - expected).abs() <= 1.0e-4,
+                "row {row}: certified coordinate {coordinate:.9e} must be the orbit optimum \
+                 {expected}",
+            );
+        }
     }
 }

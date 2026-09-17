@@ -147,7 +147,7 @@ fn run_arm(arm: &Arm, budget: usize, tolerance: f64) -> Result<String, String> {
         }
     };
     Ok(format!(
-        "K={k_ret:>3} {verdict:<34} certified={:.3e} (dec {:.3e}, coord {:.3e}) raw={:.3e} obj={objective:.6e}",
+        "K={k_ret:>3} {verdict:<34} diagonal-scaled={:.3e} (dec {:.3e}, coord {:.3e}) raw={:.3e} obj={objective:.6e}",
         stationarity.scaled_max_abs(),
         stationarity.decoder_scaled_max_abs,
         stationarity.coordinate_scaled_max_abs,

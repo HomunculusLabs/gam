@@ -210,10 +210,14 @@ fn fixed_point_json(report: &SaeSupportFixedPointReport, tolerance: f64) -> serd
         "coordinate_max_abs": coordinate_max_abs,
         // #2517: the gradient-space numbers above scale with rows-per-atom, so
         // they cannot be read as a distance to the fixed point. The scaled pair
-        // is the parameter-space certificate, and a Python caller inspecting
-        // this report needs it for the same reason the Rust side does.
+        // is the diagonal-preconditioned residual that schedules the certificate.
         "decoder_scaled_max_abs": decoder_scaled_max_abs,
         "coordinate_scaled_max_abs": coordinate_scaled_max_abs,
+        // #2933 F08: the certificate itself, the exact Newton displacement `A⁻¹g`
+        // per block, in parameter units, and its squared decrement `gᵀA⁻¹g`.
+        "newton_displacement_decoder_max_abs": report.newton_displacement.decoder_max_abs,
+        "newton_displacement_coordinate_max_abs": report.newton_displacement.coordinate_max_abs,
+        "newton_decrement_sq": report.newton_displacement.decrement_sq,
         "max_recurrence_change": report.max_recurrence_change,
         "recurred": report.recurred,
         "tolerance": tolerance,
