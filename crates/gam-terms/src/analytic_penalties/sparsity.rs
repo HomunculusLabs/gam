@@ -107,11 +107,11 @@ pub struct SparsityPenalty {
 /// in each row and can be indefinite because entropy is concave in assignment
 /// space, so callers must use the HVP rather than a diagonal Hessian shortcut.
 ///
-/// As a prior this is an unnormalized regularization energy. Its simplex partition
-/// `∫_Δ exp(−λ·H(a)) da` depends on `λ` and is not computed (#2933 F45), so
-/// [`AnalyticPenalty::value`] and [`AnalyticPenalty::grad_rho`] are those of the
-/// energy, not of a normalized log density, and a chart Jacobian over the logits
-/// does not normalize it.
+/// As a prior this energy needs its simplex partition `Z_K(λ) = ∫_Δ exp(−λ·H(a)) da`,
+/// which depends on `λ` and which a chart Jacobian over the logits does not supply
+/// (#2933 F45). [`AnalyticPenalty::value`] and [`AnalyticPenalty::grad_rho`] are those
+/// of the energy; [`softmax_entropy_log_partition`] computes `ln Z_K` and its
+/// log-strength derivative, and the SAE assignment prior adds both per row weight.
 #[derive(Debug, Clone)]
 pub struct SoftmaxAssignmentSparsityPenalty {
     pub k_atoms: usize,

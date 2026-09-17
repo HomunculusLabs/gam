@@ -7,7 +7,7 @@ use crate::manifold::{AssignmentStrengthLayout, SaeManifoldRho};
 use gam_terms::analytic_penalties::{
     AnalyticPenalty, OrderedBetaBernoulliHessianDiagThirdChannels,
     OrderedBetaBernoulliLogitAdjointData, OrderedBetaBernoulliPenalty,
-    SoftmaxAssignmentSparsityPenalty, resolve_learnable_weight,
+    SoftmaxAssignmentSparsityPenalty, resolve_learnable_weight, softmax_entropy_log_partition,
 };
 use gam_terms::latent::{LatentCoordValues, LatentIdMode, LatentManifold};
 
@@ -1490,7 +1490,8 @@ mod ordered_beta_bernoulli_exact_hessian_tests {
 /// count inside its integrated scalar. Every derivative uses that same measure.
 ///
 /// The ThresholdGate value is the normalized negative log density `λz + log Z(λ)` per free
-/// gate ([`ThresholdGateLogPartition`]), so its strength derivative carries `∂_ρ log Z`.
+/// gate ([`ThresholdGateLogPartition`]), and the softmax value is `λH(a) + ln Z_K(λ)` per row
+/// ([`softmax_entropy_partition_weighted`]), so each strength derivative carries `∂_ρ log Z`.
 pub(crate) fn assignment_prior_value_weighted(
     assignment: &SaeAssignment,
     rho: &SaeManifoldRho,
@@ -1521,7 +1522,10 @@ pub(crate) fn assignment_prior_value_weighted(
             let penalty = SoftmaxAssignmentSparsityPenalty::new(assignment.k_atoms(), temperature)
                 .with_row_weights(row_weights);
             let rho_view = Array1::from_vec(vec![rho.log_lambda_sparse + sparsity.ln()]);
+            // #2933 F45 — `exp(−λH)` is a density over the simplex only with its partition.
             penalty.value(target.view(), rho_view.view())
+                + softmax_entropy_partition_weighted(assignment, rho_view[0].exp(), row_weights)?
+                    .0
         }
         AssignmentMode::OrderedBetaBernoulli {
             temperature, alpha, ..
@@ -1582,8 +1586,18 @@ pub(crate) fn assignment_prior_log_strength_derivative_weighted(
         return Ok(0.0);
     }
     Ok(match assignment.mode {
-        AssignmentMode::Softmax { .. } => {
-            return assignment_prior_value_weighted(assignment, rho, row_weights);
+        AssignmentMode::Softmax {
+            temperature,
+            sparsity,
+        } => {
+            // `∂_ρ[λ·Σ w·H + Σ w·ln Z_K(λ)]`: the energy is degree one in `λ = e^ρ`, the
+            // partition is not.
+            let penalty = SoftmaxAssignmentSparsityPenalty::new(assignment.k_atoms(), temperature)
+                .with_row_weights(row_weights);
+            let rho_view = Array1::from_vec(vec![rho.log_lambda_sparse + sparsity.ln()]);
+            penalty.value(target.view(), rho_view.view())
+                + softmax_entropy_partition_weighted(assignment, rho_view[0].exp(), row_weights)?
+                    .1
         }
         AssignmentMode::ThresholdGate {
             temperature,
@@ -1804,6 +1818,36 @@ impl ThresholdGateLogPartition {
     pub(crate) fn log_strength_derivative(self) -> f64 {
         self.log_strength_derivative
     }
+}
+
+/// `(Σ_i w_i·ln Z_K(λ), Σ_i w_i·∂ ln Z_K/∂ ln λ)`: the softmax entropy prior's partition per unit
+/// row weight ([`softmax_entropy_log_partition`], #2933 F45).
+///
+/// The normalizer integrates the simplex of all `K` gates, which is what the chart over the
+/// `K − 1` free logits of a row covers. A row whose logits are held beyond the reference atom
+/// integrates a lower-dimensional slice with a different normalizer, so it is refused rather than
+/// priced with this one.
+fn softmax_entropy_partition_weighted(
+    assignment: &SaeAssignment,
+    strength: f64,
+    row_weights: Option<&[f64]>,
+) -> Result<(f64, f64), String> {
+    let k = assignment.k_atoms();
+    match simplex_gate_frame(assignment) {
+        Some((free, _)) if free.len() + 1 == k => {}
+        _ => {
+            return Err(format!(
+                "softmax entropy partition: the prior is normalized over the simplex of all K={k} \
+                 gates, but this assignment holds logits beyond the reference atom (#2933 F45)"
+            ));
+        }
+    }
+    let partition = softmax_entropy_log_partition(k, strength)?;
+    let rows = row_weights.map_or(assignment.n_obs() as f64, |weights| weights.iter().sum());
+    Ok((
+        rows * partition.value,
+        rows * partition.log_strength_derivative,
+    ))
 }
 
 /// The ThresholdGate sparsity prior's curvature at ONE logit, split into the
@@ -3585,5 +3629,135 @@ mod ordered_beta_bernoulli_fixed_concentration_2933_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod softmax_entropy_partition_2933_tests {
+    //! #2933 F45 — the softmax entropy energy `λ·H(a)` on the simplex is a density only with
+    //! its partition `Z_K(λ) = ∫_Δ exp(−λ·H(a)) da`. Through the chart over the `K − 1` free
+    //! logits the production prior value must integrate to one for every strength and
+    //! temperature, and its log-strength derivative must have zero mean under that prior. Before
+    //! the partition the no-data mass was `Z_K(λ)` itself. Every reference is a quadrature over
+    //! the logits or the gate, never the production normalizer.
+    use super::*;
+    use ndarray::array;
+
+    fn softmax_assignment(logits: Array2<f64>, temperature: f64) -> SaeAssignment {
+        let (n, k) = logits.dim();
+        SaeAssignment::from_blocks_with_mode_and_manifolds(
+            logits,
+            vec![Array2::<f64>::zeros((n, 1)); k],
+            vec![LatentManifold::Euclidean; k],
+            AssignmentMode::softmax(temperature),
+        )
+        .expect("one logit column, coordinate block and manifold per atom")
+    }
+
+    fn strength_rho(k: usize, strength: f64) -> SaeManifoldRho {
+        SaeManifoldRho::new(strength.ln(), 0.0, vec![Array1::zeros(1); k])
+    }
+
+    fn negative_log_prior(assignment: &SaeAssignment, rho: &SaeManifoldRho) -> f64 {
+        assignment_prior_value_weighted(assignment, rho, None).expect("admitted prior value")
+            + gate_logit_jacobian_value_weighted(assignment, None)
+    }
+
+    /// `Σ h·f(i·h)` over `i·h ∈ [−range, range]`: the integrands decay like `e^{−|x|}` in the
+    /// scaled logit and are analytic in a strip, so the rule's error and the tails are far below
+    /// the bars at these steps.
+    fn trapezoid(range: f64, h: f64, mut f: impl FnMut(f64) -> f64) -> f64 {
+        let count = (range / h).round() as i64;
+        (-count..=count).map(|i| h * f(i as f64 * h)).sum()
+    }
+
+    #[test]
+    fn softmax_prior_integrates_to_one_over_its_free_logits_2933() {
+        for temperature in [0.6_f64, 1.4] {
+            for strength in [0.05_f64, 2.0, 9.0] {
+                let rho = strength_rho(2, strength);
+                let mut two = softmax_assignment(Array2::zeros((1, 2)), temperature);
+                let mass_two = temperature
+                    * trapezoid(60.0, 1.0 / 16.0, |x| {
+                        two.logits[[0, 0]] = temperature * x;
+                        (-negative_log_prior(&two, &rho)).exp()
+                    });
+                assert!(
+                    (mass_two - 1.0).abs() <= 1.0e-8,
+                    "K=2 softmax prior at λ={strength}, τ={temperature} has no-data mass \
+                     {mass_two:.15e}, not one"
+                );
+                let rho = strength_rho(3, strength);
+                let mut three = softmax_assignment(Array2::zeros((1, 3)), temperature);
+                let mass_three = temperature
+                    * temperature
+                    * trapezoid(40.0, 1.0 / 8.0, |x| {
+                        trapezoid(40.0, 1.0 / 8.0, |y| {
+                            three.logits[[0, 0]] = temperature * x;
+                            three.logits[[0, 1]] = temperature * y;
+                            (-negative_log_prior(&three, &rho)).exp()
+                        })
+                    });
+                assert!(
+                    (mass_three - 1.0).abs() <= 1.0e-8,
+                    "K=3 softmax prior at λ={strength}, τ={temperature} has no-data mass \
+                     {mass_three:.15e}, not one"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn softmax_log_strength_derivative_has_zero_prior_mean_2933() {
+        for temperature in [0.6_f64, 1.4] {
+            for strength in [0.05_f64, 2.0, 9.0] {
+                let rho = strength_rho(2, strength);
+                let mut assignment = softmax_assignment(Array2::zeros((1, 2)), temperature);
+                let mean = temperature
+                    * trapezoid(60.0, 1.0 / 16.0, |x| {
+                        assignment.logits[[0, 0]] = temperature * x;
+                        let derivative =
+                            assignment_prior_log_strength_derivative_weighted(&assignment, &rho, None)
+                                .expect("admitted log-strength derivative");
+                        derivative * (-negative_log_prior(&assignment, &rho)).exp()
+                    });
+                assert!(
+                    mean.abs() <= 1.0e-8 * (1.0 + strength),
+                    "softmax log-strength derivative at λ={strength}, τ={temperature} has prior \
+                     mean {mean:.15e}, not zero"
+                );
+            }
+        }
+    }
+
+    /// Rows carry the normalized negative log density at their design weight:
+    /// `λ·Σ w_i H(a_i) + Σ w_i·ln Z_K(λ)`, with `ln Z_2` from a quadrature over the gate.
+    #[test]
+    fn weighted_softmax_prior_carries_one_partition_per_unit_weight_2933() {
+        let strength = 3.0_f64;
+        let temperature = 0.8_f64;
+        let logits = array![[1.1, 0.0], [-2.0, 0.0], [0.3, 0.0]];
+        let weights = [0.5, 1.0, 1.5];
+        let assignment = softmax_assignment(logits.clone(), temperature);
+        let rho = strength_rho(2, strength);
+        let entropy = |row: usize| {
+            let a = 1.0 / (1.0 + (-logits[[row, 0]] / temperature).exp());
+            -(a * a.ln() + (1.0 - a) * (1.0 - a).ln())
+        };
+        let energy: f64 = (0..3).map(|row| weights[row] * strength * entropy(row)).sum();
+        // `ln ∫₀¹ exp(λ[a ln a + (1 − a) ln(1 − a)]) da`, through `a = σ(x)`, `da = σ(1 − σ) dx`.
+        let log_partition = trapezoid(60.0, 1.0 / 16.0, |x| {
+            let a = 1.0 / (1.0 + (-x).exp());
+            let b = 1.0 / (1.0 + x.exp());
+            (strength * (a * a.ln() + b * b.ln())).exp() * a * b
+        })
+        .ln();
+        let expected = energy + weights.iter().sum::<f64>() * log_partition;
+        let value = assignment_prior_value_weighted(&assignment, &rho, Some(&weights))
+            .expect("admitted prior value");
+        assert!(
+            (value - expected).abs() <= 1.0e-9 * (1.0 + expected.abs()),
+            "weighted softmax prior {value:.15e}, expected λ·Σw·H + Σw·ln Z_2 = {expected:.15e}"
+        );
     }
 }

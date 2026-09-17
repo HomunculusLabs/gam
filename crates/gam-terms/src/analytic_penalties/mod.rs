@@ -149,6 +149,7 @@ mod registry;
 mod row_precision;
 mod scad_mcp;
 mod sheaf;
+mod softmax_entropy_partition;
 mod sparsity;
 mod total_variation;
 
@@ -164,6 +165,7 @@ pub use penalty_trait::*;
 pub use registry::*;
 pub use row_precision::*;
 pub use scad_mcp::*;
+pub use softmax_entropy_partition::*;
 pub use sparsity::*;
 pub use total_variation::*;
 

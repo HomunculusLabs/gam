@@ -147,14 +147,11 @@ smoothing weights selected by a custom penalized quasi-Laplace criterion. It
 uses the solver's PSD/Gauss--Newton factor and explicit rank charges around the
 converged penalized mode, so it is not normalized LAML, REML, or model evidence.
 The smooth gate priors also differ in whether they are normalized densities over
-the relaxed gates. `"threshold_gate"` and `"ordered_beta_bernoulli"` add their
-partition functions, so the strength or concentration derivative of the
-criterion includes the prior's normalizer. An ordered Beta--Bernoulli fit learns
+the relaxed gates. `"softmax"`, `"threshold_gate"` and `"ordered_beta_bernoulli"`
+add their partition functions, so the strength or concentration derivative of
+the criterion includes the prior's normalizer. An ordered Beta--Bernoulli fit learns
 its concentration by default (`alpha=None`); a numeric `alpha` fixes it, and the
-fixed prior has no strength to tune, so `sparsity_weight` is refused there. The
-`"softmax"` entropy energy is an unnormalized regularization energy: its
-normalizer depends on the sparsity strength and is not computed, so that
-strength is selected by the criterion, not by empirical Bayes. Each piece plays a distinct role
+fixed prior has no strength to tune, so `sparsity_weight` is refused there. Each piece plays a distinct role
 (default state in parentheses):
 
 - **Reconstruction.** Squared error between `Z` and the sparse sum of
@@ -182,8 +179,12 @@ strength is selected by the criterion, not by empirical Bayes. Each piece plays 
   tempering strength `λ·L_k`: its partition over the relaxed gates is not the
   one-dimensional rate integral, and sparsity is already tuned through `α`.
   `"softmax"` is a dense,
-  simplex-normalized gate whose entropy energy `λ·H(a_i)` is not normalized over
-  the simplex. The `"threshold_gate"` energy `λ·z` carries
+  simplex-normalized gate whose entropy energy `λ·H(a_i)` carries
+  `ln Z_K(λ) = ln ∫_Δ exp(−λ·H(a)) da` per unit row weight, computed by balanced
+  splitting of the simplex into group integrals, refined until its declared
+  relative error is met (a numerical integral, not a parameter search). The
+  entropy prior's mode splits toward sparse routing once `λ > K`, which a
+  symmetric Dirichlet prior cannot do. The `"threshold_gate"` energy `λ·z` carries
   `log[(1 − e^{−λ})/λ]` per free gate, the normalizer of the truncated
   exponential on `(0, 1)`. `"threshold_gate"` is the smooth bounded gate
   `σ((ℓ−threshold)/τ)` with its exact logistic derivative; its threshold is
