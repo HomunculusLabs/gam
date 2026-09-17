@@ -4337,3 +4337,16 @@ fn canonical_penalty_partition_agrees_with_declared_nullity_across_families_2469
         disagreements.join("\n")
     );
 }
+
+/// #2469: a covariate with no spread supports no smooth, so `col_minmax` refuses
+/// it instead of boxing it to `(min, min + 1e-6)`, and a covariate whose spread is
+/// real but below `1e-12` keeps its exact range instead of the same box.
+#[test]
+fn col_minmax_refuses_a_constant_column_and_keeps_a_tiny_real_range_2469() {
+    assert!(
+        col_minmax(array![2.5, 2.5, 2.5].view()).is_err(),
+        "a constant column has no knot range"
+    );
+    let tiny = array![1.0, 1.0 + 4.0e-13, 1.0 + 2.0e-13];
+    assert_eq!(col_minmax(tiny.view()), Ok((1.0, 1.0 + 4.0e-13)));
+}

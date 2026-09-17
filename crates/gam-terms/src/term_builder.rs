@@ -4373,11 +4373,17 @@ pub(crate) fn col_minmax(col: ArrayView1<'_, f64>) -> Result<(f64, f64), String>
         )
         .to_string());
     }
-    if (max - min).abs() < 1e-12 {
-        Ok((min, min + 1e-6))
-    } else {
-        Ok((min, max))
+    // A covariate with no spread supports no smooth: the basis builders refuse a
+    // zero-width knot range, and boxing it to a made-up width would ship a smooth
+    // whose every row sits at one end of its own basis. Any real spread, however
+    // small in absolute units, is the covariate's range.
+    if max == min {
+        return Err(TermBuilderError::degenerate_data(
+            "a smooth needs a covariate with spread, but this column is constant",
+        )
+        .to_string());
     }
+    Ok((min, max))
 }
 
 pub(crate) fn unique_count_column(col: ArrayView1<'_, f64>) -> usize {
