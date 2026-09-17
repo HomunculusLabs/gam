@@ -41,16 +41,24 @@ pub fn exact_a_direction_floor(
     arithmetic_floor.max(identifiability_floor)
 }
 
-/// Classify one exact-`A` eigendirection using the single #2673/#2515 contract.
+/// Classify one exact-`A` eigendirection of a row block or reduced Schur using the
+/// #2673/#2515 contract.
 ///
 /// The numerical-null half-width is
 ///
 /// `max(dimension * eps * ||A||_2, sqrt(eps) * v^T B v)`.
 ///
-/// The first term is the symmetric eigensolver's backward-error floor; the
-/// second is the invariant majorizer-pencil identifiability floor.  A resolved
-/// negative direction is tested against the exactly known clamp curvature
-/// `v^T E v` before it may be called a saddle.
+/// The first term is the symmetric eigensolver's backward-error floor; the second
+/// compares the direction's curvature with the majorizer's along the same vector.
+/// These arrow lanes apply it to ORDINARY eigenvectors of the local block, and there
+/// the rule is coordinate-dependent: the Rayleigh quotient of a fixed vector is
+/// invariant under a congruence, but an ordinary eigenbasis does not transform with
+/// the pencil, so a nonorthogonal change of coordinates can change which directions it
+/// retains (#2933 F07). The dense exact-`A` route classifies generalized eigenvectors of
+/// `(A, Φ)` instead; a local lane cannot, because its majorizer block is the one the
+/// evidence factor is still conditioning and may be singular. A resolved negative
+/// direction is tested against the exactly known clamp curvature `v^T E v` before it may
+/// be called a saddle.
 #[must_use]
 pub(crate) fn classify_exact_a_direction(
     curvature: f64,

@@ -6,113 +6,97 @@
 // `construction.rs`, so these methods share that module's scope exactly as
 // before (same `impl SaeManifoldTerm`, same `use super::*` imports).
 
-/// ONE identifiability floor for directions of the exact observed information
-/// `A = B + ΔC`, in ONE metric, for the value path and the gradient path alike
-/// (#2673, #2080 defect 4, #2253 x #2330).
+/// The pencil floor for directions of the exact observed information `A = B_raw + ΔC`,
+/// in `μ` units (#2673, #2933 F07). ONE predicate for the value path and the gradient
+/// path alike (#2080 defect 4, #2253 x #2330).
 ///
-/// `B` is the positive-definite arrow factorization: the scale the inner Newton
-/// solve, the IFT solve and the evidence factor are all expressed in. The
-/// generalized Rayleigh quotient
+/// `Φ = Φ(B_raw)` is the positive-definite evidence factor: the conditioned arrow
+/// majorizer the inner Newton solve, the IFT solve and the evidence factor are all
+/// expressed in. Directions of `A` are the generalized eigenvectors of the pencil
 ///
 /// ```text
-///   μ(v) = vᵀAv / vᵀBv
+///   A w = μ Φ w,     wᵀΦw = 1
 /// ```
 ///
-/// therefore measures a direction's exact curvature against the problem's own
-/// scale. The floor is `√ε_machine`, the standard boundary below which a
-/// double-precision curvature ratio is not numerically identifiable; it is
-/// derived from the scalar type, not tuned to a fixture. A direction below it
-/// (a saturated ordered Beta--Bernoulli gate logit has data curvature
-/// `∝ σ'(ℓ)² → 0`) is numerically curvature-free: the inner optimizer cannot
-/// resolve the iterate's position along it, so the IFT response
-/// `θ̂_ρ = −A⁻¹g_ρ` there is an unidentifiable `1/μ` amplification rather than a
-/// derivative. That amplification is what flipped the analytic λ-gradient's sign
-/// against the criterion it differentiates (the #931 objective↔gradient desync).
+/// so `μ` measures a direction's exact curvature against the problem's own scale. A
+/// nonsingular change of coordinates `θ → Lθ` transforms the pencil by congruence,
+/// `A → LᵀAL` and `Φ → LᵀΦL`, maps its eigenvectors as `w → L⁻¹w` and leaves every `μ`
+/// where it was. The classification, the retained subspace and the pseudo-inverse are
+/// therefore properties of the pencil, not of the coordinates it happens to be written
+/// in — including nonorthogonal ones.
 ///
-/// # Why `μ` and not an absolute eigenvalue of `A` (#2673)
+/// The floor is `√ε`: an exact curvature under `√ε` of the majorizer's along the same
+/// direction is not resolved in double precision. That is a numerical convention, not a
+/// statistical proof that the direction is unidentifiable. A direction under it (a
+/// saturated ordered Beta--Bernoulli gate logit has data curvature `∝ σ'(ℓ)² → 0`) is
+/// removed from the IFT response `θ̂_ρ = −A⁺g_ρ`, where it would be an unresolved `1/μ`
+/// amplification rather than a derivative (the #931 objective↔gradient desync), and
+/// `½log|A|` prices it at the majorizer's own curvature
+/// ([`SaeManifoldTerm::classify_exact_hessian_basin`]).
 ///
-/// Until this became the single floor, the VALUE path classified the same
-/// directions of the same `A` by `|λ| ≤ 1e-9 · max(λ_max(A), 1)` while the
-/// GRADIENT path used `|μ| < √ε`. Both floors ran inside ONE evaluation on the
-/// streaming route — the value path's terminal Newton polish reaches
-/// `solve_exact_stationarity`, which is not route-gated, while the gradient
-/// adjoint takes the matrix-free sibling — and which of them the value path used
-/// was decided by `direct_logdet_admitted`, i.e. by ambient free memory. Three
-/// things were wrong with the pair, and none of them needed a fixture to
-/// witness:
+/// # The rule this replaced (#2933 F07)
 ///
-/// 1. **They are not one rule in two spellings.** Written as thresholds on the
-///    same `|λ|`, the value rule is ONE number for every direction and the
-///    gradient rule is `√ε·vᵀBv`, which varies across directions of one
-///    operator by the spread of the `B`-Rayleigh quotient (measured 24x on the
-///    #2515 route-invariance state, unbounded in general). No choice of the two
-///    constants makes a constant threshold equal a varying one, and on that same
-///    state the ratio STRADDLES 1 — so neither rule was even a conservative
-///    version of the other.
-/// 2. **Only `μ` is a curvature.** `μ` is invariant under a reparametrization
-///    `θ → Lθ` (`A → LᵀAL`, `B → LᵀBL` transform congruently); `λ/λ_max(A)` is
-///    not. `θ = (t, β)` mixes chart coordinates with border coefficients whose
-///    scale is set by the data's units, so `λ_max(A)` is a maximum over
-///    incommensurable coordinates and the band it defined moved when the units
-///    did.
-/// 3. **`1e-9` was tuned; `√ε` is derived.** SPEC rule 21.
+/// The classification used to diagonalize `A` in Euclidean coordinates and compare each
+/// ordinary eigenvalue `λᵢ` with `max(dim·ε·‖A‖₂, √ε·vᵢᵀBvᵢ)`, on the argument that a
+/// generalized Rayleigh quotient is congruence-invariant. The quotient of a FIXED vector
+/// is, but the ordinary eigenbasis of `LᵀAL` is not the image of the ordinary eigenbasis
+/// of `A`, so the rule was not: with `A = diag(1e-10, 1)`, `B = I` and
+/// `L = diag(1e5, 1)·Q·diag(1, √2)` (`Q` the 45° rotation) it kept one direction and,
+/// after the change of coordinates, none. The absolute floor before it (#2673) failed
+/// the same way more plainly. `tests_pencil_classification_2933` pins both congruences.
 ///
-/// Consistency then FORCES the direction of the unification: the value must pin
-/// exactly what the gradient cannot differentiate, or the criterion depends on
-/// `ρ` through a direction whose response the adjoint has projected out — the
-/// #931/#2253 desync in a new place. So the larger, derived, invariant floor
-/// wins at both sites and the absolute one is gone.
+/// # Numerical resolution is a separate floor
 ///
-/// Classification is per ordinary eigendirection of A. Dense and matrix-free
-/// solves both use Euclidean spectral projections and the same direction floor;
-/// the matrix-free solve lifts Ritz vectors to measure their B quadratic forms.
-/// An aggregate Rayleigh quotient of a solution is not a null-space policy.
-pub(crate) fn sae_exact_a_identifiability_floor() -> f64 {
+/// A computed `μᵢ` carries the backward error of the whitening and of the symmetric
+/// eigensolver, and that error does depend on the working coordinates. It is its own
+/// per-direction floor, [`sae_exact_a_pencil_resolution`], reported separately when it
+/// binds: it can pin a direction whose digits were lost, never resolve one.
+pub(crate) fn sae_exact_a_pencil_floor() -> f64 {
     f64::EPSILON.sqrt()
 }
 
-/// The null-band half-width, in `λ` units, for ONE direction of a dense
-/// exact-`A` block (#2673).
+/// The numerical resolution of one computed pencil eigenvalue, in `μ` units
+/// (#2933 F07).
 ///
 /// ```text
-///   floor = max( spectral_dim·ε·‖A‖₂ ,  √ε · vᵀBv )
+///   τ = dim · ε · ‖w‖₂² · ( ‖A‖_F + |μ| · ‖Φ‖_F )
 /// ```
 ///
-/// This is the whole rule, as a scalar function of three measured numbers, so
-/// that every consumer applies the SAME rule while supplying its OWN operands.
-/// Production reaches it through [`ExactHessianSpectralBlock::rank_floor`]; the
-/// independent oracles that re-derive the classification from a separately built
-/// dense `A` call it directly, which keeps them oracles (their inputs are their
-/// own) without letting a second copy of the predicate drift from this one — the
-/// failure mode #2740 names and the one this issue is.
-///
-/// See [`sae_exact_a_identifiability_floor`] for why the metric is `B` and why
-/// the second term is the one that classifies.
-pub(crate) fn sae_exact_a_direction_floor(
-    spectral_dim: usize,
-    spectral_norm: f64,
-    b_quadratic_form: f64,
+/// A backward-stable reduction returns the exact eigenpairs of a nearby pencil
+/// `(A + δA, Φ + δΦ)` with `‖δA‖₂ ≲ dim·ε·‖A‖₂` and `‖δΦ‖₂ ≲ dim·ε·‖Φ‖₂`, and to first
+/// order a simple eigenvalue moves by `wᵀ(δA − μ δΦ)w`, which `τ` bounds (a Frobenius norm
+/// bounds the spectral one). `‖w‖₂²` is where the working coordinates enter: the same
+/// pencil written in worse-conditioned coordinates resolves fewer digits of `μ`, and this
+/// floor pins the directions that lost them instead of classifying round-off.
+pub(crate) fn sae_exact_a_pencil_resolution(
+    dim: usize,
+    vector_norm_sq: f64,
+    operator_frobenius: f64,
+    metric_frobenius: f64,
+    curvature: f64,
 ) -> f64 {
-    gam_solve::arrow_schur::exact_a_direction_floor(spectral_dim, spectral_norm, b_quadratic_form)
+    (dim as f64)
+        * f64::EPSILON
+        * vector_norm_sq
+        * (operator_frobenius + curvature.abs() * metric_frobenius)
 }
 
-/// The null-band edge on the side of one direction's curvature, for the dense and
-/// the matrix-free exact-`A` routes (#2267).
+/// The null-band edge on the side of one pencil direction's curvature, for the dense
+/// and the matrix-free exact-`A` routes (#2267, #2933 F07), in `μ` units.
 ///
 /// ```text
-///   λ ≤ 0:  floor
-///   λ > 0:  max( floor ,  s ),     s = vᵀ(Φ(B_raw) − B_raw)v
+///   floor = max( √ε , τ )
+///   μ ≤ 0:  floor
+///   μ > 0:  max( floor ,  s ),     s = wᵀ(Φ − B_raw)w
 /// ```
 ///
-/// `floor` is [`sae_exact_a_direction_floor`], denominated in the CONDITIONED
-/// evidence metric `Φ(B_raw)`. Where the majorizer has no resolved curvature the
-/// evidence factor pins a direction at unit stiffness (`log 1 = 0`), so along it
-/// `Φ(B_raw)` carries a stiffness `s` that no term of the objective supplies, and
-/// `√ε·vᵀΦ(B_raw)v` compares `λ` against `√ε` in the pin's own units. A positive
-/// direction whose exact curvature does not exceed `s` is resolved by the
-/// substitution alone, so the value prices it the way the factor prices the pin.
-/// At a unit pin the edge is `λ ≈ 1`, where `½·ln λ ≈ 0`: the price is continuous
-/// across it, where the bare floor put a step of `½·ln √ε ≈ −9` per direction.
+/// `τ` is [`sae_exact_a_pencil_resolution`]. Where the majorizer has no resolved
+/// curvature the evidence factor pins a direction at unit stiffness (`log 1 = 0`), and
+/// `s` is the part of the direction's unit metric that pin substituted rather than
+/// measured. A positive direction whose exact curvature does not exceed `s` is resolved
+/// by the substitution alone, so the value prices it the way the factor prices the pin.
+/// At a full pin the edge is `μ = 1`, where `½·ln μ = 0`: the price is continuous across
+/// it, where the bare floor put a step of `½·ln √ε ≈ −9` per direction.
 ///
 /// Pool job 598561 (`sae_manifold_euclidean_k2_fit_terminates`) read that step. At
 /// one ρ, two evaluations whose loss differed by 1.8e-6 priced `½log|A|` at
@@ -123,14 +107,24 @@ pub(crate) fn sae_exact_a_direction_floor(
 /// The negative side keeps the bare floor. A resolved negative direction is a basin
 /// or saddle verdict (#2330/#2336) that the #2080 descent reads, and a pin does not
 /// turn it into a null.
+///
+/// # One convention on every route
+///
+/// A state's directions are classified once, by the joint pencil `(A, Φ)` in `μ` units, so
+/// `√ε` needs no operator scale. A route that eliminates the coordinate block classifies the
+/// Ritz pencil of `(A, Φ)` on the `A`-lift `z(v) = (−A_tt⁻¹A_tβ v, v)`: curvature
+/// `vᵀS_A v = zᵀAz`, metric `zᵀΦz`, the same `√ε`, `s = zᵀ(Φ − B_raw)z`, and `τ` from the
+/// joint operands (the joint dimension, `‖z‖²` of the `Φ`-normalized lift, the joint `‖A‖_F`
+/// and `‖Φ‖_F`). On a joint null the lift is the eigenvector and the Ritz value is exact;
+/// elsewhere in the band the eigenvector's `t` part departs from the lift by `μ·A_tt⁻¹(Φw)_t`,
+/// so the two values differ at second order. A route whose own arithmetic resolves fewer
+/// digits than `τ` reports a resolution crossing rather than widening the shared floor.
 pub(crate) fn sae_exact_a_band_edge(
     curvature: f64,
-    spectral_dim: usize,
-    spectral_norm: f64,
-    b_quadratic_form: f64,
+    resolution: f64,
     substituted_stiffness: f64,
 ) -> f64 {
-    let floor = sae_exact_a_direction_floor(spectral_dim, spectral_norm, b_quadratic_form);
+    let floor = sae_exact_a_pencil_floor().max(resolution);
     if curvature > 0.0 {
         floor.max(substituted_stiffness)
     } else {
@@ -148,136 +142,335 @@ pub(crate) struct ExactHessianDeltaRow {
     pub(crate) tbeta: Array2<f64>,
 }
 
-/// Rank-revealing spectral representation of one dense exact-stationarity
-/// block.  The materialized operator and its eigensystem remain together so a
-/// pseudo-inverse response can be certified against the physical operator that
-/// produced it, rather than against a projected Krylov surrogate.
+/// Rank-revealing generalized spectral representation of one dense exact-stationarity
+/// block (#2933 F07). The materialized operator and its pencil eigensystem remain
+/// together so a pseudo-inverse response can be certified against the physical
+/// operator that produced it, rather than against a projected Krylov surrogate.
 pub(crate) struct ExactHessianSpectralBlock {
     operator: Array2<f64>,
+    /// The pencil eigenvalues `μᵢ` of `A w = μ Φ w`, ascending.
     eigenvalues: Array1<f64>,
-    /// Ambient eigenvectors, SQUARE: every direction of the materialized
-    /// operator is classified by `rank_floor` and nothing is deleted ahead of
-    /// it.  #2674 — the analytic chart orbit used to be quotiented out here
-    /// before diagonalization, which deleted directions the penalized operator
-    /// has genuine curvature and genuine slope in.
+    /// `W`, SQUARE and `Φ`-orthonormal (`WᵀΦW = I`): every direction of the
+    /// materialized operator is classified by `rank_floor` and nothing is deleted
+    /// ahead of it. #2674 — the analytic chart orbit used to be quotiented out here
+    /// before diagonalization, which deleted directions the penalized operator has
+    /// genuine curvature and genuine slope in.
     eigenvectors: Array2<f64>,
-    /// `vᵢᵀBvᵢ` for every eigendirection — the scale the classification is
-    /// relative to (#2673). `B` is the arrow factorization's own operator
-    /// restricted to this block's coordinates, so every entry is strictly
-    /// positive and the ratio `λᵢ / metric_scale[i]` is the pencil curvature the
-    /// gradient path classifies the same directions by.
-    metric_scale: Array1<f64>,
-    /// `vᵢᵀ(Φ(B_raw) − B_raw)vᵢ` for every eigendirection: the part of
-    /// `metric_scale` the evidence factor substituted rather than measured. It sets
-    /// the positive band edge; see [`sae_exact_a_band_edge`] (#2267).
+    /// `wᵢᵀ(Φ − B_raw)wᵢ` for every direction: the part of its unit metric the
+    /// evidence factor substituted rather than measured. It sets the positive band
+    /// edge; see [`sae_exact_a_band_edge`] (#2267).
     substituted_stiffness: Array1<f64>,
-    /// `‖A‖₂ = maxᵢ|λᵢ|`, the scale the eigendecomposition's own backward error
-    /// is proportional to.
-    spectral_norm: f64,
+    /// The numerical resolution of every computed `μᵢ`; see
+    /// [`sae_exact_a_pencil_resolution`].
+    resolution: Array1<f64>,
+    /// `log|Φ|`. Every in-band direction is priced at the metric's own curvature, so
+    /// the metric's determinant is part of the priced `log|A|`.
+    metric_log_det: f64,
+    /// `‖A‖_F` and `‖Φ‖_F`, the scales the numerical resolution and the certificates
+    /// are denominated in.
+    operator_frobenius: f64,
+    metric_frobenius: f64,
+    /// The in-band directions `Z` (ascending) and their metric images `ΦW_Z`, one
+    /// column per entry of `band`: the dual components a pseudo-inverse removes from a
+    /// right-hand side.
+    band: Vec<usize>,
+    band_metric_images: Array2<f64>,
 }
 
-/// The `B` metric one spectral block is classified in (#2673).
+/// The positive-definite metric an exact-`A` pencil is classified in (#2673,
+/// #2933 F07).
 ///
-/// `B` is the arrow factorization that the inner Newton solve, the IFT solve and
-/// the evidence factor are all expressed in, and the ONE thing a direction's
-/// curvature is measured against at both the value and the gradient site. Which
-/// restriction of it applies is decided by which block of `A` is being
-/// classified, so the two cannot be paired up wrongly:
+/// The whitening `L⁻¹AL⁻ᵀ` is built from the metric's own Cholesky factor `Φ = LLᵀ`,
+/// applied one vector at a time, so a metric carried as a structured factorization is
+/// never materialized as a second `dim × dim` block.
+pub(crate) trait ExactAPencilMetric {
+    fn dim(&self) -> usize;
+    /// `Φv`.
+    fn apply(&self, v: ArrayView1<'_, f64>) -> Result<Array1<f64>, String>;
+    /// `(Φ − B_raw)v`: the stiffness the evidence factor substituted where the
+    /// majorizer has no resolved curvature.
+    fn substituted_image(&self, v: ArrayView1<'_, f64>) -> Result<Array1<f64>, String>;
+    /// `L⁻¹v`.
+    fn lower_solve(&self, v: ArrayView1<'_, f64>) -> Result<Array1<f64>, String>;
+    /// `L⁻ᵀv`.
+    fn lower_transpose_solve(&self, v: ArrayView1<'_, f64>) -> Result<Array1<f64>, String>;
+    /// `log|Φ|`.
+    fn log_det(&self) -> Result<f64, String>;
+}
+
+/// The `Φ` metric one spectral block is classified in (#2673).
+///
+/// `Φ` is the arrow factorization that the inner Newton solve, the IFT solve and the
+/// evidence factor are all expressed in, and the ONE thing a direction's curvature is
+/// measured against at both the value and the gradient site. Which restriction of it
+/// applies is decided by which block of `A` is being classified, so the two cannot be
+/// paired up wrongly:
 ///
 /// * the JOINT block is `A` itself, so its metric is the whole arrow operator,
 ///   border and all.
 ///
-/// Both are applies through the cached factors, never a materialized `B`: the
-/// dense route already carries one `dim × dim` block and #2724/#2757 price that
-/// memory, so a second one would be paid for a scalar per direction.
+/// Both are applies through the cached factors, never a materialized `Φ`: the dense
+/// route already carries one `dim × dim` block and #2724/#2757 price that memory, so a
+/// second one would be paid for a scalar per direction. [`Self::prepare`] resolves the
+/// metric's block Cholesky factor once.
 #[derive(Clone, Copy)]
 pub(crate) enum ArrowMetric<'a> {
-    /// `B` on the joint `(t, β)` coordinates.
+    /// `Φ` on the joint `(t, β)` coordinates.
     Joint(&'a ArrowFactorCache),
-    /// `B` on joint `(t, ξ)` coordinates whose border names other variables,
+    /// `Φ` on joint `(t, ξ)` coordinates whose border names other variables,
     /// `β = lift·ξ` (#2933 F35): the rank-`r_k` tangent coordinates of learned
     /// Grassmann frames, lifted into the unframed cache's decoder layout. The
-    /// pulled-back metric is `diag(I, liftᵀ)·B·diag(I, lift)`.
+    /// pulled-back metric is `diag(I, liftᵀ)·Φ·diag(I, lift)`.
     JointLifted {
         cache: &'a ArrowFactorCache,
         lift: &'a Array2<f64>,
     },
 }
 
-impl ArrowMetric<'_> {
-    pub(crate) fn quadratic_form(&self, v: ArrayView1<'_, f64>) -> Result<f64, String> {
-        Ok(v.dot(&self.apply(v)?))
+impl<'a> ArrowMetric<'a> {
+    /// Resolve the metric's block Cholesky factor (#2933 F07). With `T = ⊕ᵢ LᵢLᵢᵀ` the
+    /// row factors, `C` the cross block in the metric's border coordinates and `L_b` the
+    /// border's Schur factor,
+    ///
+    /// ```text
+    ///   L = [ L_t        0   ]
+    ///       [ CᵀL_t⁻ᵀ    L_b ]
+    /// ```
+    ///
+    /// so `L⁻¹` and `L⁻ᵀ` cost row triangular solves, one border apply and one border
+    /// triangular solve. On the joint layout `L_b` is the cache's reduced-Schur factor
+    /// `L_S`. A lift pulls the border back, `C → C·lift`, and the lifted Schur complement is
+    /// `liftᵀ·L_S L_Sᵀ·lift`, one `r × r` Gram of `L_Sᵀ·lift` factored here.
+    pub(crate) fn prepare(self) -> Result<PreparedArrowMetric<'a>, String> {
+        let (cache, lift) = match self {
+            Self::Joint(cache) => (cache, None),
+            Self::JointLifted { cache, lift } => (cache, Some(lift)),
+        };
+        let k = cache.k;
+        let border_lower = if k == 0 {
+            if lift.is_some_and(|lift| lift.ncols() > 0) {
+                return Err("ArrowMetric::JointLifted: a lift on a cache with no border".to_string());
+            }
+            Array2::<f64>::zeros((0, 0))
+        } else {
+            let Some(schur) = cache.schur_factor.as_ref() else {
+                return Err(
+                    "ArrowMetric: the pencil metric needs the dense reduced-Schur factor".to_string(),
+                );
+            };
+            if !cache.schur_factor_is_undamped {
+                return Err(
+                    "ArrowMetric: the Schur factor was not built from the undamped evidence row \
+                     factors"
+                        .to_string(),
+                );
+            }
+            match lift {
+                None => schur.clone(),
+                Some(lift) => {
+                    if lift.nrows() != k {
+                        return Err(format!(
+                            "ArrowMetric::JointLifted: lift has {} rows for a border of {k}",
+                            lift.nrows()
+                        ));
+                    }
+                    let width = lift.ncols();
+                    let mut factor_image = Array2::<f64>::zeros((k, width));
+                    for column in 0..width {
+                        for row in 0..k {
+                            let mut acc = 0.0_f64;
+                            for below in row..k {
+                                acc += schur[[below, row]] * lift[[below, column]];
+                            }
+                            factor_image[[row, column]] = acc;
+                        }
+                    }
+                    let gram = factor_image.t().dot(&factor_image);
+                    gam_linalg::triangular::cholesky_factor_in_place(
+                        gram.view(),
+                        gam_linalg::triangular::CholeskyGuard::FiniteStrict,
+                    )
+                    .ok_or_else(|| {
+                        "ArrowMetric::JointLifted: the lifted reduced Schur liftᵀ·S·lift is not \
+                         positive definite, so the lift is rank deficient in the metric"
+                            .to_string()
+                    })?
+                }
+            }
+        };
+        Ok(PreparedArrowMetric {
+            cache,
+            lift,
+            border_lower,
+        })
+    }
+}
+
+/// `Φ` with its border Cholesky factor resolved; see [`ArrowMetric::prepare`].
+pub(crate) struct PreparedArrowMetric<'a> {
+    cache: &'a ArrowFactorCache,
+    lift: Option<&'a Array2<f64>>,
+    border_lower: Array2<f64>,
+}
+
+impl PreparedArrowMetric<'_> {
+    fn border_width(&self) -> usize {
+        self.lift.map_or(self.cache.k, |lift| lift.ncols())
     }
 
-    /// The cache every apply goes through and the border width a direction
-    /// carries in this metric's coordinates.
-    fn cache_and_border_width(&self) -> (&ArrowFactorCache, usize) {
-        match self {
-            Self::Joint(cache) => (cache, cache.k),
-            Self::JointLifted { cache, lift } => (cache, lift.ncols()),
-        }
-    }
-
-    /// `vᵀ(Φ(B_raw) − B_raw)v`: the part of [`Self::quadratic_form`] the evidence
-    /// factor substituted rather than measured, read off the row spectra
-    /// `add_raw_row_deflation_correction` restores `B_raw` from (#2267). Zero on
-    /// every row the factor kept raw; the border block is raw in both applies, so
-    /// only `t` enters. A direction whose pins lower curvature more than they raise
-    /// it carries no substituted stiffness, so the total is clamped at zero.
-    pub(crate) fn substituted_stiffness(&self, v: ArrayView1<'_, f64>) -> Result<f64, String> {
-        let (cache, border_width) = self.cache_and_border_width();
-        let total_t = cache.delta_t_len();
-        if v.len() != total_t + border_width {
+    fn split_len(&self, len: usize, context: &str) -> Result<usize, String> {
+        let total_t = self.cache.delta_t_len();
+        if len != total_t + self.border_width() {
             return Err(format!(
-                "ArrowMetric: direction length {} != joint dimension {}",
-                v.len(),
-                total_t + border_width
+                "ArrowMetric::{context}: direction length {len} != joint dimension {}",
+                total_t + self.border_width()
             ));
         }
-        let v_t = v.slice(s![..total_t]);
-        let mut raw_minus_conditioned = Array1::<f64>::zeros(total_t);
-        add_raw_row_deflation_correction(
-            cache,
-            v_t,
-            raw_minus_conditioned.view_mut(),
-            "ArrowMetric::substituted_stiffness",
-        )?;
-        Ok((-v_t.dot(&raw_minus_conditioned)).max(0.0))
+        Ok(total_t)
+    }
+}
+
+impl ExactAPencilMetric for PreparedArrowMetric<'_> {
+    fn dim(&self) -> usize {
+        self.cache.delta_t_len() + self.border_width()
     }
 
     fn apply(&self, v: ArrayView1<'_, f64>) -> Result<Array1<f64>, String> {
-        let (cache, border_width) = self.cache_and_border_width();
-        let total_t = cache.delta_t_len();
-        if v.len() != total_t + border_width {
-            return Err(format!(
-                "ArrowMetric: direction length {} != joint dimension {}",
-                v.len(),
-                total_t + border_width
-            ));
-        }
-        match self {
-            Self::Joint(cache) => {
+        let total_t = self.split_len(v.len(), "apply")?;
+        match self.lift {
+            None => {
                 let b_v = apply_cached_arrow_hessian(
-                    cache,
+                    self.cache,
                     v.slice(s![..total_t]),
                     v.slice(s![total_t..]),
                 )?;
                 Ok(Array1::from_iter(b_v.t.iter().chain(b_v.beta.iter()).copied()))
             }
-            Self::JointLifted { cache, lift } => {
-                if lift.nrows() != cache.k {
-                    return Err(format!(
-                        "ArrowMetric::JointLifted: lift has {} rows for a border of {}",
-                        lift.nrows(),
-                        cache.k
-                    ));
-                }
+            Some(lift) => {
                 let beta = lift.dot(&v.slice(s![total_t..]));
-                let b_v = apply_cached_arrow_hessian(cache, v.slice(s![..total_t]), beta.view())?;
+                let b_v = apply_cached_arrow_hessian(self.cache, v.slice(s![..total_t]), beta.view())?;
                 let pulled_back = lift.t().dot(&b_v.beta);
                 Ok(Array1::from_iter(b_v.t.iter().chain(pulled_back.iter()).copied()))
             }
         }
+    }
+
+    /// Read off the row spectra `add_raw_row_deflation_correction` restores `B_raw`
+    /// from (#2267): zero on every row the factor kept raw, and on the border, which
+    /// that restoration leaves as installed.
+    fn substituted_image(&self, v: ArrayView1<'_, f64>) -> Result<Array1<f64>, String> {
+        let total_t = self.split_len(v.len(), "substituted_image")?;
+        let mut raw_minus_conditioned = Array1::<f64>::zeros(total_t);
+        add_raw_row_deflation_correction(
+            self.cache,
+            v.slice(s![..total_t]),
+            raw_minus_conditioned.view_mut(),
+            "ArrowMetric::substituted_image",
+        )?;
+        let mut out = Array1::<f64>::zeros(v.len());
+        out.slice_mut(s![..total_t])
+            .zip_mut_with(&raw_minus_conditioned, |slot, &value| *slot = -value);
+        Ok(out)
+    }
+
+    fn lower_solve(&self, v: ArrayView1<'_, f64>) -> Result<Array1<f64>, String> {
+        let total_t = self.split_len(v.len(), "lower_solve")?;
+        let cache = self.cache;
+        let k = cache.k;
+        let mut out = Array1::<f64>::zeros(v.len());
+        // `CᵀT⁻¹v_t` in the cache's border layout.
+        let mut coupled = Array1::<f64>::zeros(k);
+        for row in 0..cache.n_rows() {
+            let q = cache.row_dims[row];
+            let base = cache.row_offsets[row];
+            let factor = cache.undamped_factor(row);
+            let half = gam_linalg::triangular::forward_substitution_lower_vector(
+                factor,
+                v.slice(s![base..base + q]),
+            );
+            if k > 0 {
+                let solved =
+                    gam_linalg::triangular::back_substitution_lower_transpose(factor, half.view());
+                if !cache.apply_htbeta_row_transpose(row, solved.view(), &mut coupled, None) {
+                    return Err(format!("ArrowMetric::lower_solve: H_βt^({row}) apply failed"));
+                }
+            }
+            out.slice_mut(s![base..base + q]).assign(&half);
+        }
+        if self.border_width() > 0 {
+            let border_rhs = match self.lift {
+                None => &v.slice(s![total_t..]) - &coupled,
+                Some(lift) => &v.slice(s![total_t..]) - &lift.t().dot(&coupled),
+            };
+            let half = gam_linalg::triangular::forward_substitution_lower_vector(
+                self.border_lower.view(),
+                border_rhs.view(),
+            );
+            out.slice_mut(s![total_t..]).assign(&half);
+        }
+        Ok(out)
+    }
+
+    fn lower_transpose_solve(&self, v: ArrayView1<'_, f64>) -> Result<Array1<f64>, String> {
+        let total_t = self.split_len(v.len(), "lower_transpose_solve")?;
+        let cache = self.cache;
+        let k = cache.k;
+        let mut out = Array1::<f64>::zeros(v.len());
+        let border = if self.border_width() > 0 {
+            gam_linalg::triangular::back_substitution_lower_transpose(
+                self.border_lower.view(),
+                v.slice(s![total_t..]),
+            )
+        } else {
+            Array1::<f64>::zeros(0)
+        };
+        // The border solution in the cache's border layout.
+        let border_in_cache = match self.lift {
+            None => border.clone(),
+            Some(lift) => lift.dot(&border),
+        };
+        for row in 0..cache.n_rows() {
+            let q = cache.row_dims[row];
+            let base = cache.row_offsets[row];
+            let factor = cache.undamped_factor(row);
+            let mut rhs = v.slice(s![base..base + q]).to_owned();
+            if k > 0 {
+                let mut coupled = Array1::<f64>::zeros(q);
+                if !cache.apply_htbeta_row(row, border_in_cache.view(), &mut coupled) {
+                    return Err(format!(
+                        "ArrowMetric::lower_transpose_solve: H_tβ^({row}) apply failed"
+                    ));
+                }
+                rhs -= &gam_linalg::triangular::forward_substitution_lower_vector(factor, coupled.view());
+            }
+            let solved = gam_linalg::triangular::back_substitution_lower_transpose(factor, rhs.view());
+            out.slice_mut(s![base..base + q]).assign(&solved);
+        }
+        out.slice_mut(s![total_t..]).assign(&border);
+        Ok(out)
+    }
+
+    fn log_det(&self) -> Result<f64, String> {
+        let cache = self.cache;
+        let mut total = 0.0_f64;
+        let mut add_factor = |factor: ArrayView2<'_, f64>, label: &str| -> Result<(), String> {
+            for index in 0..factor.nrows() {
+                let pivot = factor[[index, index]];
+                if !(pivot.is_finite() && pivot > 0.0) {
+                    return Err(format!(
+                        "ArrowMetric::log_det: {label} pivot {index} is {pivot:e}, not a positive \
+                         Cholesky diagonal"
+                    ));
+                }
+                total += 2.0 * pivot.ln();
+            }
+            Ok(())
+        };
+        for row in 0..cache.n_rows() {
+            add_factor(cache.undamped_factor(row), "row factor")?;
+        }
+        add_factor(self.border_lower.view(), "border Schur")?;
+        Ok(total)
     }
 }
 
@@ -287,10 +480,10 @@ impl ArrowMetric<'_> {
 /// For damping `ν ≥ 0` the step
 ///
 /// ```text
-///   Δ(ν) = Σ_i u_i λ_i (u_iᵀ rhs) / (λ_i² + ν)
+///   Δ(ν) = Σ_i w_i μ_i (w_iᵀ rhs) / (μ_i² + ν)
 /// ```
 ///
-/// is the exact minimizer of `‖rhs − AΔ‖² + ν‖Δ‖²`, and `ν = 0` reproduces the
+/// is the exact minimizer of `‖rhs − AΔ‖²_{Φ⁻¹} + ν‖Δ‖²_Φ`, and `ν = 0` reproduces the
 /// pseudoinverse step of [`ExactHessianSpectralBlock::solve_stationarity`]
 /// (same `rank_floor`, same retained band). Because the eigensystem is already
 /// in hand, the WHOLE path costs one diagonal pass per point — no
@@ -302,74 +495,59 @@ impl ArrowMetric<'_> {
 pub(crate) struct DampedResidualStep {
     /// `Δ(ν)`.
     pub(crate) step: SaeArrowVector,
-    /// `‖Δ(ν)‖²`.
+    /// `‖Δ(ν)‖²_Φ`, in which the retained components are orthonormal.
     pub(crate) step_norm_sq: f64,
     /// Directions whose damped denominator cleared the null band.
     pub(crate) retained_rank: usize,
-    /// `‖g‖²` carried by the directions inside the null band. The step moves
+    /// `‖g‖²_{Φ⁻¹}` carried by the directions inside the null band. The step moves
     /// nothing along them, so this is the part of the stationarity residual that
     /// no step of this operator can reduce, at any damping.
     pub(crate) excluded_gradient_norm_sq: f64,
 }
 
 impl ExactHessianSpectralBlock {
-    /// The null-band half-width for eigendirection `index`, in `λ` units
-    /// (#2673).
+    /// The null-band half-width for pencil direction `index`, in `μ` units
+    /// (#2673, #2933 F07): [`sae_exact_a_band_edge`] on the direction's own
+    /// resolution and substituted stiffness.
     ///
-    /// ```text
-    ///   floor(i) = max( dim·ε·‖A‖₂ ,  √ε · vᵢᵀBvᵢ )
-    /// ```
-    ///
-    /// The second term is [`sae_exact_a_identifiability_floor`] — the SAME
-    /// predicate the matrix-free gradient path applies to its own solution
-    /// direction, written in `λ` units so this site can compare it against an
-    /// eigenvalue. It is the term that decides the classification: a direction
-    /// under it is one whose `A⁻¹` response is an unidentifiable `1/μ`
-    /// amplification, so the value must not price a `ρ`-dependence there that
-    /// the adjoint has projected out.
-    ///
-    /// The first term is not a second classification. It is the standard
-    /// backward-error bound for a symmetric eigendecomposition — the computed
-    /// spectrum of a perturbed `A + E` with `‖E‖₂ ≲ p(dim)·ε·‖A‖₂` — so an
-    /// eigenvalue below it carries no significant digits and `ln λ` is not a
-    /// quantity. The matrix-free Ritz solve uses the same arithmetic floor.
-    /// It is a floor under the identifiability term, never a ceiling, so it can
-    /// only pin directions, never resurrect one the gradient has deflated.
+    /// The pencil floor `√ε` is the term that decides the classification: a direction
+    /// under it is one whose `A⁺` response would be an unresolved `1/μ` amplification,
+    /// so the value must not price a `ρ`-dependence there that the adjoint has projected
+    /// out. The resolution term is not a second classification. It pins directions whose
+    /// computed `μ` has no significant digits in the working coordinates, and it can only
+    /// pin, never resurrect a direction the pencil floor has deflated.
     ///
     /// #2267 — on the positive side the edge rises to the stiffness the evidence
-    /// factor substituted along the direction, where that exceeds this floor; see
-    /// [`sae_exact_a_band_edge`]. The value, the differential, the polish and the
-    /// solves all read the band through this one function, so they move together.
+    /// factor substituted along the direction, where that exceeds the floor. The value,
+    /// the differential, the polish and the solves all read the band through this one
+    /// function, so they move together.
     fn rank_floor(&self, index: usize) -> f64 {
         sae_exact_a_band_edge(
             self.eigenvalues[index],
-            self.eigenvalues.len(),
-            self.spectral_norm,
-            self.metric_scale[index],
+            self.resolution[index],
             self.substituted_stiffness[index],
         )
     }
 
-    /// Directions discarded by arithmetic resolution despite a resolved
-    /// identifiability ratio. Both adjoint routes discard these directions;
-    /// report them because they indicate that arithmetic sets the rank.
-    fn arithmetic_band_crossings(&self) -> usize {
-        let arithmetic = (self.eigenvalues.len() as f64) * f64::EPSILON * self.spectral_norm;
-        let identifiability_floor = sae_exact_a_identifiability_floor();
+    /// Directions discarded because their computed `μ` has no resolved digits at its own
+    /// scale although `|μ|` clears the pencil floor. Both adjoint routes discard these
+    /// directions; they are reported because the working coordinates, not the pencil,
+    /// set the rank there.
+    fn resolution_band_crossings(&self) -> usize {
+        let floor = sae_exact_a_pencil_floor();
         (0..self.eigenvalues.len())
             .filter(|&index| {
-                let lambda = self.eigenvalues[index];
-                lambda.abs() <= arithmetic
-                    && lambda.abs() >= identifiability_floor * self.metric_scale[index]
+                let magnitude = self.eigenvalues[index].abs();
+                magnitude > floor && magnitude <= self.resolution[index]
             })
             .count()
     }
 
-    /// Smallest and largest `|λ|` the null band retained, or `None` when the
+    /// Smallest and largest `|μ|` the null band retained, or `None` when the
     /// whole spectrum is inside it. The two set the DERIVED damping ladder the
-    /// polish walks: below `λ_min²` a damping cannot change the flattest
-    /// resolved direction, and above `λ_max²` it has already flattened every
-    /// direction there is, so no ladder needs to leave `[λ_min², λ_max²]`.
+    /// polish walks: below `μ_min²` a damping cannot change the flattest
+    /// resolved direction, and above `μ_max²` it has already flattened every
+    /// direction there is, so no ladder needs to leave `[μ_min², μ_max²]`.
     fn retained_curvature_extremes(&self) -> Option<(f64, f64)> {
         let mut smallest = f64::INFINITY;
         let mut largest = 0.0_f64;
@@ -384,10 +562,10 @@ impl ExactHessianSpectralBlock {
     }
 
     /// A spectrally scaled descent step for the scalar objective whose gradient
-    /// is `residual`.  This uses `|A|` rather than `A`: every retained
-    /// component therefore has negative directional derivative even when the
-    /// stationarity operator is indefinite.  `nu` has the same
-    /// squared-curvature units as the damping ladder.
+    /// is `residual`.  This uses `|A|` in the pencil sense, `|μ|` on every retained
+    /// direction: every retained component therefore has negative directional
+    /// derivative even when the stationarity operator is indefinite.  `nu` has the
+    /// same squared-curvature units as the damping ladder.
     fn damped_objective_step(
         &self,
         residual: &SaeArrowVector,
@@ -428,33 +606,44 @@ impl ExactHessianSpectralBlock {
                 t: solution.slice(s![..total_t]).to_owned(),
                 beta: solution.slice(s![total_t..]).to_owned(),
             },
-            step_norm_sq: solution.dot(&solution),
+            step_norm_sq: step_coefficients.dot(&step_coefficients),
             retained_rank,
             excluded_gradient_norm_sq,
         })
     }
 
-    /// Apply the symmetric Moore--Penrose inverse.  Resolved positive and
-    /// negative modes are both retained; only the spectral null band
-    /// `|λ| ≤ rank_floor` is removed, and that band is the ONLY null predicate
-    /// on this route (#2674).  Three independent certificates guard the result:
-    /// physical backward residual on the retained range, least-squares
-    /// stationarity for the retained operator, and minimum-norm membership in the
-    /// retained range.
-    fn solve_stationarity(&self, rhs: &SaeArrowVector) -> Result<SaeArrowVector, String> {
+    /// Apply the covariant pseudo-inverse `A⁺ = W_R diag(1/μ_R) W_Rᵀ` (#2933 F07).
+    /// Resolved positive and negative modes are both retained; only the pencil null band
+    /// `|μ| ≤ rank_floor` is removed, and that band is the ONLY null predicate on this
+    /// route (#2674).
+    ///
+    /// Under `θ → Lθ` a right-hand side maps as `rhs → Lᵀrhs` and the solution as
+    /// `x → L⁻¹x`: the Euclidean Moore--Penrose inverse this replaced had no such law. The
+    /// solution satisfies `A x = rhs − ΦW_Z W_Zᵀ rhs` and carries no `Φ`-component along the
+    /// band. Three independent certificates guard the result: the physical residual on
+    /// that projected right-hand side, the dual residual `Wᵀ(A x − P rhs)` on every
+    /// direction, and the solution's `Φ`-mass along the band.
+    ///
+    /// #2228 — a non-empty band is not a failed solve. The result is the step on the
+    /// resolvable complement together with the band directions it held out, each with its
+    /// `|μ|` and band edge, so a caller that needs the band component reads it there. `Err`
+    /// means only that the solve failed a certificate or its input was malformed.
+    fn solve_stationarity(&self, rhs: &SaeArrowVector) -> Result<ExactStationaritySolve, String> {
         let total_t = rhs.t.len();
         let dim = total_t + rhs.beta.len();
         let spectral_dim = self.eigenvalues.len();
         if self.operator.dim() != (dim, dim)
             || self.eigenvectors.dim() != (dim, spectral_dim)
             || spectral_dim != dim
+            || self.band_metric_images.dim() != (dim, self.band.len())
         {
             return Err(format!(
                 "dense exact-stationarity pseudoinverse: geometry dimension {:?}, spectrum {}, \
-                 eigenvectors {:?}, but RHS dimension is {dim}",
+                 eigenvectors {:?}, band images {:?}, but RHS dimension is {dim}",
                 self.operator.dim(),
                 spectral_dim,
                 self.eigenvectors.dim(),
+                self.band_metric_images.dim(),
             ));
         }
         let mut flat_rhs = Array1::<f64>::zeros(dim);
@@ -468,95 +657,142 @@ impl ExactHessianSpectralBlock {
         }
 
         let coefficients = self.eigenvectors.t().dot(&flat_rhs);
-        let mut projected_coefficients = coefficients.clone();
         let mut inverse_coefficients = Array1::<f64>::zeros(spectral_dim);
         let mut retained_rank = 0usize;
         for index in 0..spectral_dim {
-            let lambda = self.eigenvalues[index];
-            if lambda.abs() > self.rank_floor(index) {
-                inverse_coefficients[index] = coefficients[index] / lambda;
+            let mu = self.eigenvalues[index];
+            if mu.abs() > self.rank_floor(index) {
+                inverse_coefficients[index] = coefficients[index] / mu;
                 retained_rank += 1;
-            } else {
-                projected_coefficients[index] = 0.0;
             }
         }
         let solution = self.eigenvectors.dot(&inverse_coefficients);
-        let projected_rhs = self.eigenvectors.dot(&projected_coefficients);
-        let applied = self.operator.dot(&solution);
-        // Range stationarity is `P_range A x = P_range rhs`, with `P_range` the
-        // projector onto the eigendirections the SPECTRAL floor retained.  The
-        // eigenbasis is complete, so this reprojection removes exactly the
-        // measured null band and nothing that was declared null in advance.
-        let applied_coefficients = self.eigenvectors.t().dot(&applied);
-        let projected_applied = self.eigenvectors.dot(&applied_coefficients);
-        let physical_residual = &projected_applied - &projected_rhs;
-        // The normal equations belong to the truncated operator too. Using
-        // the discarded RHS coefficients here rejects a pure numerical-null
-        // RHS even though its declared pseudoinverse response is exactly zero.
-        let residual_coefficients = &applied_coefficients - &projected_coefficients;
-        let normal_coefficients = &self.eigenvalues * &residual_coefficients;
-        let normal_residual = self.eigenvectors.dot(&normal_coefficients);
+        let band_coefficients =
+            Array1::from_iter(self.band.iter().map(|&index| coefficients[index]));
+        let band_removed = self.band_metric_images.dot(&band_coefficients);
+        let projected_rhs = &flat_rhs - &band_removed;
+        let physical_residual = &self.operator.dot(&solution) - &projected_rhs;
+        // Every direction's dual component of the residual vanishes: along the retained
+        // range `μᵢdᵢ = cᵢ`, and along the band both sides carry nothing.
+        let dual_residual = self.eigenvectors.t().dot(&physical_residual);
+        // The solution's `Φ`-components along the band, reprojected from the computed
+        // physical vector rather than from the coefficients that built it, so this gate
+        // also detects a loss of `Φ`-orthogonality.
+        let band_mass = self.band_metric_images.t().dot(&solution);
 
         let norm = |vector: &Array1<f64>| vector.dot(vector).max(0.0).sqrt();
-        let operator_norm = self
+        let curvature_norm = self
             .eigenvalues
             .iter()
             .map(|value| value.abs())
             .fold(0.0_f64, f64::max);
         let solution_norm = norm(&solution);
-        let projected_rhs_norm = norm(&projected_rhs);
+        let solution_metric_norm = norm(&inverse_coefficients);
         let physical_norm = norm(&physical_residual);
-        let normal_norm = norm(&normal_residual);
-        let physical_scale = operator_norm * solution_norm + projected_rhs_norm;
-        let normal_scale = operator_norm * (operator_norm * solution_norm + projected_rhs_norm);
+        let dual_norm = norm(&dual_residual);
+        let band_mass_norm = norm(&band_mass);
+        // Removing the band's dual components rounds at the scale of the right-hand side and
+        // of what it removes, so the backward scale carries both even where `P rhs` is small.
+        let physical_scale = self.operator_frobenius * solution_norm
+            + norm(&flat_rhs)
+            + norm(&band_removed)
+            + norm(&projected_rhs);
+        let dual_scale = curvature_norm * solution_metric_norm + norm(&coefficients);
 
-        // A Moore--Penrose solution must be orthogonal to the declared null
-        // space. Reproject the computed physical vector (not the coefficients
-        // used to construct it) so this gate also detects loss of orthogonality.
-        let solved_coefficients = self.eigenvectors.t().dot(&solution);
-        let spectral_null_solution_norm_sq = solved_coefficients
-            .iter()
-            .enumerate()
-            .filter_map(|(index, coefficient)| {
-                (self.eigenvalues[index].abs() <= self.rank_floor(index))
-                    .then_some(coefficient * coefficient)
-            })
-            .sum::<f64>();
-        let discarded_solution_norm = spectral_null_solution_norm_sq.max(0.0).sqrt();
         let tolerance = f64::EPSILON.sqrt();
         let within = |residual: f64, scale: f64| {
             residual == 0.0 || (scale > 0.0 && residual <= tolerance * scale)
         };
         if !solution.iter().all(|value| value.is_finite())
             || !within(physical_norm, physical_scale)
-            || !within(normal_norm, normal_scale)
-            || !within(discarded_solution_norm, solution_norm)
+            || !within(dual_norm, dual_scale)
+            || !within(band_mass_norm, solution_metric_norm)
         {
+            let resolution_range = self
+                .resolution
+                .iter()
+                .fold((f64::INFINITY, 0.0_f64), |(low, high), &value| {
+                    (low.min(value), high.max(value))
+                });
             return Err(format!(
                 "dense exact-stationarity pseudoinverse failed certification: \
                  physical residual {physical_norm:.6e} / backward scale {physical_scale:.6e}, \
-                 normal-equation stationarity {normal_norm:.6e} / scale {normal_scale:.6e}, \
-                 null-space solution mass {discarded_solution_norm:.6e} / solution norm \
-                 {solution_norm:.6e}, tolerance {tolerance:.6e}, rank {retained_rank}/{spectral_dim} \
-                 on ambient dimension {dim}, identifiability floor {:.6e}·vᵀBv with \
-                 vᵀBv ∈ [{:.6e}, {:.6e}], arithmetic floor {:.6e}",
-                sae_exact_a_identifiability_floor(),
-                self.metric_scale
-                    .iter()
-                    .copied()
-                    .fold(f64::INFINITY, f64::min),
-                self.metric_scale
-                    .iter()
-                    .copied()
-                    .fold(f64::NEG_INFINITY, f64::max),
-                (spectral_dim as f64) * f64::EPSILON * self.spectral_norm,
+                 dual residual {dual_norm:.6e} / scale {dual_scale:.6e}, \
+                 band Φ-mass {band_mass_norm:.6e} / solution Φ-norm {solution_metric_norm:.6e}, \
+                 tolerance {tolerance:.6e}, rank {retained_rank}/{spectral_dim} on ambient \
+                 dimension {dim}, pencil floor {:.6e}, numerical resolution ∈ [{:.6e}, {:.6e}]",
+                sae_exact_a_pencil_floor(),
+                resolution_range.0,
+                resolution_range.1,
             ));
         }
 
-        Ok(SaeArrowVector {
-            t: solution.slice(s![..total_t]).to_owned(),
-            beta: solution.slice(s![total_t..]).to_owned(),
+        Ok(ExactStationaritySolve {
+            step: SaeArrowVector {
+                t: solution.slice(s![..total_t]).to_owned(),
+                beta: solution.slice(s![total_t..]).to_owned(),
+            },
+            band: self
+                .band
+                .iter()
+                .map(|&index| ExactABandDirection {
+                    magnitude: self.eigenvalues[index].abs(),
+                    edge: self.rank_floor(index),
+                })
+                .collect(),
+            retained_rank,
         })
+    }
+}
+
+/// One direction the pencil null band held out of a dense stationarity solve
+/// (#2933 F07, #2228): its curvature `|μ|` and the band edge it did not clear.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ExactABandDirection {
+    pub(crate) magnitude: f64,
+    pub(crate) edge: f64,
+}
+
+/// A dense exact-stationarity solve (#2228): `A⁺rhs` on the resolvable complement, the
+/// band directions it held out, and how many directions the complement retained.
+pub(crate) struct ExactStationaritySolve {
+    pub(crate) step: SaeArrowVector,
+    pub(crate) band: Vec<ExactABandDirection>,
+    pub(crate) retained_rank: usize,
+}
+
+/// #2228 / #2933 F07 — outcomes of the dense root refinement's pencil solves. Every clone of a
+/// term shares one set of counters, so the outer objective's saved-term restore after a value
+/// probe cannot erase them; `SaeManifoldOuterObjective::probe_telemetry` reports them.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct EvidenceRootTelemetry(std::sync::Arc<EvidenceRootCounters>);
+
+#[derive(Debug, Default)]
+pub(crate) struct EvidenceRootCounters {
+    band_holds: std::sync::atomic::AtomicUsize,
+    band_skips: std::sync::atomic::AtomicUsize,
+    solve_failures: std::sync::atomic::AtomicUsize,
+}
+
+/// A snapshot of [`EvidenceRootTelemetry`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct EvidenceRootCounts {
+    /// The band held a direction while the resolvable complement still carried a step.
+    pub(crate) band_holds: usize,
+    /// The band held every direction, so no root step was taken.
+    pub(crate) band_skips: usize,
+    /// The geometry or its solve failed, so no root step was taken.
+    pub(crate) solve_failures: usize,
+}
+
+impl EvidenceRootTelemetry {
+    pub(crate) fn counts(&self) -> EvidenceRootCounts {
+        use std::sync::atomic::Ordering;
+        EvidenceRootCounts {
+            band_holds: self.0.band_holds.load(Ordering::Relaxed),
+            band_skips: self.0.band_skips.load(Ordering::Relaxed),
+            solve_failures: self.0.solve_failures.load(Ordering::Relaxed),
+        }
     }
 }
 
@@ -580,11 +816,16 @@ struct ExactHessianBasin {
     inverse_values: Array1<f64>,
 }
 
-/// Differential of one coherently priced spectral block.
+/// Differential of one coherently priced spectral block (#2933 F07): the weights the
+/// value contracts against `dA`, `dΦ` and `dE` on its rank stratum; see
+/// [`SaeManifoldTerm::exact_hessian_basin_differential`].
 /// E has a coordinate diagonal and a dense decoder-prior border block.
 /// `a_derivative` includes the negative-subspace projector response.
 struct ExactHessianPricing {
     a_derivative: Array2<f64>,
+    /// The weight on `dΦ`: the in-band projector and the negative subspace's response to
+    /// the metric. All zero on a full-rank positive stratum.
+    metric_derivative: Array2<f64>,
     clamp_diagonal_derivative: Array1<f64>,
     clamp_border_derivative: Array2<f64>,
 }
@@ -2153,6 +2394,60 @@ impl SaeManifoldTerm {
     ) -> Result<SaeArrowVector, String> {
         self.materialize_exact_stationarity_geometry(rho, target, cache)?
             .solve_stationarity(rhs)
+            .map(|solve| solve.step)
+    }
+
+    /// #2228 / #2933 F07 — the root step a dense pencil solve admits: `−A⁺g` on the
+    /// resolvable complement. A band direction belongs to the orbit evidence and the F08
+    /// certificate, not to this step, so a non-empty band is counted and logged, never read as
+    /// a failed solve. `None` is a skip, counted by kind: the band holds every direction, or
+    /// the geometry or its solve failed (an untrustworthy step; committed steps and the
+    /// accepted state stand).
+    fn evidence_root_step_from_pencil(
+        &self,
+        solve: Result<ExactStationaritySolve, String>,
+    ) -> Option<SaeArrowVector> {
+        use std::sync::atomic::Ordering;
+        let counters = &self.evidence_root_telemetry.0;
+        let solve = match solve {
+            Ok(solve) => solve,
+            Err(err) => {
+                counters.solve_failures.fetch_add(1, Ordering::Relaxed);
+                log::info!("[SAE-ROOT] no root step: dense exact-A pseudoinverse: {err}");
+                return None;
+            }
+        };
+        // Every edge is at least the pencil floor `√ε`; the ranking cross-multiplies, so no
+        // ratio is formed.
+        let nearest_edge = solve.band.iter().copied().max_by(|left, right| {
+            (left.magnitude * right.edge).total_cmp(&(right.magnitude * left.edge))
+        });
+        if let Some(nearest) = nearest_edge {
+            if solve.retained_rank == 0 {
+                counters.band_skips.fetch_add(1, Ordering::Relaxed);
+                log::info!(
+                    "[SAE-ROOT] no root step: pencil band holds a direction (|μ|={:.6e}, \
+                     band={:.6e}); all {} directions are in the band",
+                    nearest.magnitude,
+                    nearest.edge,
+                    solve.band.len(),
+                );
+                return None;
+            }
+            counters.band_holds.fetch_add(1, Ordering::Relaxed);
+            log::info!(
+                "[SAE-ROOT] pencil band holds {} direction(s) (nearest its edge |μ|={:.6e}, \
+                 band={:.6e}); stepping on the resolvable complement of rank {}",
+                solve.band.len(),
+                nearest.magnitude,
+                nearest.edge,
+                solve.retained_rank,
+            );
+        }
+        Some(SaeArrowVector {
+            t: -&solve.step.t,
+            beta: -&solve.step.beta,
+        })
     }
 
     /// `Self::apply_exact_hessian_matrix_free` against a β-tier plan prepared
@@ -2192,8 +2487,8 @@ impl SaeManifoldTerm {
     /// row factors and H_tbeta operator whose rational log-determinant and shared
     /// inverse-probe bundle were consumed by the value/trace lanes.
     ///
-    /// The adjoint uses ordinary-A Ritz directions and Euclidean projections,
-    /// with the same per-direction null floor as the dense pseudoinverse.
+    /// The adjoint uses pencil Ritz pairs of `(A, Φ)` and the covariant projections of
+    /// the dense pseudoinverse, with the same per-direction null band (#2933 F07).
     fn solve_exact_stationarity_matrix_free(
         &self,
         rho: &SaeManifoldRho,
@@ -2238,9 +2533,8 @@ impl SaeManifoldTerm {
             )?;
             Ok(raw)
         };
-        // Classify ordinary A Ritz directions with the dense route's floor
-        // and use Euclidean projections. B is only the classification metric;
-        // its inverse and generalized eigenvectors do not define A's inverse.
+        // Classify pencil Ritz pairs of `(A, Φ)` with the dense route's band and invert on
+        // their retained span, exactly as the dense pseudoinverse does.
         solve_exact_stationarity_krylov(rhs, &apply_a, &apply_b, &apply_b_raw)
     }
 
@@ -4276,30 +4570,21 @@ impl SaeManifoldTerm {
     }
 
     /// Classification of the exact observed information `A = B + ΔC` for the
-    /// value path (#2330 / #2336 / #2673).
+    /// value path (#2330 / #2336 / #2673 / #2933 F07).
     ///
     /// A converged inner mode is a genuine exact-Laplace maximum iff every
-    /// direction of `A` is `≥ −floor` in its own band, and that band is
-    /// [`ExactHessianSpectralBlock::rank_floor`] — ONE predicate, in the ONE
+    /// direction of the pencil `(A, Φ)` is `≥ −floor` in its own band, and that band
+    /// is [`ExactHessianSpectralBlock::rank_floor`] — ONE predicate, in the ONE
     /// metric the gradient path classifies the same directions by. #2330 ACCEPTS
     /// above `−floor`; #2336's clamp attribution TRIGGERS below it; both read
     /// that one function, so they cannot disagree in the band.
     ///
-    /// **The absolute floor this used to be is gone (#2673).** It was
-    /// `1e-9 · max(λ_max(A), 1)`, a single number applied to every direction,
-    /// while the gradient path used `|μ| = |vᵀAv/vᵀBv| < √ε` — and both ran on
-    /// the same `A` inside one evaluation, with WHICH one the value path used
-    /// decided by `direct_logdet_admitted`, i.e. by ambient free memory. Written
-    /// as thresholds on the same `|λ|`, one was constant across directions and
-    /// the other varied by the spread of the `B`-Rayleigh quotient (24.13x
-    /// measured on the #2515 state, ratio straddling 1, so neither was even the
-    /// conservative one), `λ/λ_max(A)` was not a curvature (it moves under a
-    /// reparametrization `θ → Lθ` that leaves `μ` fixed, and `θ = (t, β)` mixes
-    /// chart coordinates with data-scaled border coefficients), and `1e-9` was
-    /// tuned where `√ε` is derived. See
-    /// [`sae_exact_a_identifiability_floor`] for the argument and
-    /// `tests::the_two_floors_are_incommensurable_thresholds_on_one_operator_2673`
-    /// for the measurement.
+    /// **Two rules this used to be are gone.** #2673 retired `1e-9 · max(λ_max(A), 1)`,
+    /// a single number applied to every direction, whose band moved when the units of
+    /// `θ = (t, β)` did (`tests::the_two_floors_are_incommensurable_thresholds_on_one_operator_2673`
+    /// records what that pair did). #2933 F07 retired its successor, `|λᵢ| ≤ √ε·vᵢᵀBvᵢ`
+    /// on ordinary eigenvectors of `A`, which a nonorthogonal change of coordinates moved
+    /// too. See [`sae_exact_a_pencil_floor`] for the argument.
     ///
     /// #2674 — the band is the ONLY null predicate on the exact-A route.
     /// `exact_hessian_spectral_block` used to delete the analytic chart-gauge
@@ -4332,24 +4617,17 @@ impl SaeManifoldTerm {
         let (a, e_beta) =
             self.materialize_exact_hessian_dense_with_gap_border(rho, target, cache)?;
         let e_diag = self.materialize_ard_concave_clamp_diagonal(rho, cache)?;
-        let joint = Self::exact_hessian_spectral_block(
-            a,
-            &e_diag,
-            e_beta.as_ref(),
-            total_t,
-            ArrowMetric::Joint(cache),
-        )?;
-        // #2080/#2267 — a refused basin pushes its refused directions here: unit
-        // vectors in the joint `(t, β)` cache layout, each with its basin curvature,
-        // most negative first. The evidence root descends them before it concludes
-        // the state has no Laplace normaliser, off this same eigensystem, so a
-        // refusal pays one dense materialization and eigendecomposition, not two.
+        let joint = Self::exact_hessian_spectral_block(a, &ArrowMetric::Joint(cache).prepare()?)?;
+        // #2080/#2267 — a refused basin pushes its refused directions here: `Φ`-normalized
+        // vectors in the joint `(t, β)` cache layout, each with its basin curvature, most
+        // negative first. The evidence root descends them before it concludes the state
+        // has no Laplace normaliser, off this same eigensystem, so a refusal pays one dense
+        // materialization and eigendecomposition, not two.
         let joint_pricing = Self::classify_exact_hessian_basin(
             &joint,
             &e_diag,
             e_beta.as_ref(),
             total_t,
-            |v| ArrowMetric::Joint(cache).quadratic_form(v),
             "joint",
             Some(saddle_directions),
         )?;
@@ -4358,48 +4636,56 @@ impl SaeManifoldTerm {
         // points 0.125, 0.0625 and 0.03125 away priced +5.468e2, +5.536e2 and +5.570e2,
         // and the inner objective moved continuously (−45.10, −38.46, −35.14 → −31.81).
         // A jump that size over a continuous state is a change in which directions
-        // ½log|A| prices: an in-band direction adds nothing, a retained one adds ½·ln λ.
-        // `substituted` counts the in-band directions the bare floor would have kept,
-        // the ones only the evidence factor's substituted stiffness puts in the band.
+        // ½log|A| prices: an in-band direction adds its metric curvature, a retained one
+        // adds ½·ln μ on top of it. `substituted` counts the in-band directions only the
+        // evidence factor's substituted stiffness puts in the band, `resolution_limited`
+        // the ones only their numerical resolution does.
+        let floor = sae_exact_a_pencil_floor();
         let mut retained = 0usize;
         let mut in_band = 0usize;
         let mut substituted = 0usize;
+        let mut resolution_limited = 0usize;
         let mut min_retained_over_floor = f64::INFINITY;
         let mut max_band_over_floor = 0.0_f64;
         for index in 0..joint.eigenvalues.len() {
             let magnitude = joint.eigenvalues[index].abs();
-            let floor = joint.rank_floor(index);
-            if magnitude <= floor {
+            let edge = joint.rank_floor(index);
+            if magnitude <= edge {
                 in_band += 1;
-                max_band_over_floor = max_band_over_floor.max(magnitude / floor);
-                let bare = sae_exact_a_direction_floor(
-                    joint.eigenvalues.len(),
-                    joint.spectral_norm,
-                    joint.metric_scale[index],
-                );
+                max_band_over_floor = max_band_over_floor.max(magnitude / edge);
+                let bare = floor.max(joint.resolution[index]);
                 if magnitude > bare {
                     substituted += 1;
+                } else if magnitude > floor {
+                    resolution_limited += 1;
                 }
             } else if joint.eigenvalues[index] > 0.0 {
                 retained += 1;
-                min_retained_over_floor = min_retained_over_floor.min(magnitude / floor);
+                min_retained_over_floor = min_retained_over_floor.min(magnitude / edge);
             }
         }
         log::info!(
             "[SAE-EXACT-DENSE] priced: dim={} retained={retained} in_band={in_band} \
-             substituted={substituted} negative={} ½log|A|={:.6e} \
-             min retained |λ|/floor={:.3e} max in-band |λ|/floor={:.3e}",
+             substituted={substituted} resolution_limited={resolution_limited} negative={} \
+             ½log|A|={:.6e} ½log|Φ|={:.6e} min retained μ/floor={:.3e} \
+             max in-band |μ|/floor={:.3e}",
             joint.eigenvalues.len(),
             joint_pricing.negative.len(),
             0.5 * joint_pricing.log_det,
+            0.5 * joint.metric_log_det,
             min_retained_over_floor,
             max_band_over_floor,
         );
         Ok((joint_pricing.log_det, joint))
     }
 
-    /// Build a cluster-stable eigensystem and the shared absolute null floor for
-    /// one already-materialized exact-Hessian block.
+    /// The generalized eigensystem of one already-materialized exact-Hessian block in the
+    /// metric `Φ`, and the per-direction band every consumer reads (#2933 F07).
+    ///
+    /// The pencil is reduced by whitening: `Ã = L⁻¹AL⁻ᵀ` for `Φ = LLᵀ`, `Ã = U diag(μ)Uᵀ`, and
+    /// `W = L⁻ᵀU`, so `WᵀΦW = I` and `AW = ΦW diag(μ)`. One predicate owns the classification:
+    /// [`Self::rank_floor`], which the matrix-free Ritz route applies to its own pencil Ritz
+    /// pairs.
     ///
     /// #2674 — this used to take an analytic chart-gauge basis and diagonalize
     /// `Zᵀ A Z` on its orthogonal complement, deleting the declared orbit
@@ -4408,118 +4694,181 @@ impl SaeManifoldTerm {
     /// one is the one that is wrong here: the chart orbit is a symmetry of the
     /// RECONSTRUCTION (measured reconstruction-invariant to `rel_ls ~1e-16`),
     /// not of the PENALIZED objective this operator is the Hessian of — the ARD
-    /// and smoothing priors are not invariant along it. At the #2336/#2330 stall
-    /// the two declared directions carried 86.6%–93.2% of the KKT gradient's
-    /// norm and per-direction slopes of 8x, 10x and 210x the convergence
-    /// tolerance, so quotienting them out handed the Newton step a right-hand
-    /// side it was structurally unable to reduce and the inner solve stalled.
-    ///
-    /// One predicate owns the classification: [`Self::rank_floor`], which is
-    /// also the predicate the matrix-free gradient path applies to its own
-    /// solution direction (#2673). Where the orbit really is flat for the
-    /// penalized operator its eigenvalue lands in `[−floor(i), floor(i)]` and the
+    /// and smoothing priors are not invariant along it. Where the orbit really is flat
+    /// for the penalized operator its `μ` lands in `[−floor(i), floor(i)]` and the
     /// pseudoinverse discards it, which is what the independent oracle in
-    /// `exact_observed_information_log_det_matches_eigendecomposition_2330`
-    /// (full-spectrum `eigh` of the dense `A`, keeping `λ > floor(i)`) reads.
+    /// `exact_observed_information_log_det_matches_eigendecomposition_2330` reads.
     fn exact_hessian_spectral_block(
         operator: Array2<f64>,
-        e_diag: &Array1<f64>,
-        e_beta: Option<&Array2<f64>>,
-        total_t: usize,
-        metric: ArrowMetric<'_>,
+        metric: &dyn ExactAPencilMetric,
     ) -> Result<ExactHessianSpectralBlock, String> {
         let dimension = operator.nrows();
-        if operator.ncols() != dimension || total_t > dimension || e_diag.len() < total_t {
+        if operator.ncols() != dimension || metric.dim() != dimension {
             return Err(format!(
-                "exact_hessian_spectral_block: operator {:?}, t dimension {total_t}, E diagonal length {}",
+                "exact_hessian_spectral_block: operator {:?}, metric dimension {}",
                 operator.dim(),
-                e_diag.len()
+                metric.dim()
             ));
         }
         // #2267 — the other half of the split; see `materialize_exact_hessian_dense`.
         let eigh_started = std::time::Instant::now();
-        let (mut eigenvalues, mut eigenvectors) =
-            Self::cluster_stable_eigh(&operator, e_diag, e_beta, total_t)?;
-        let eigh_elapsed = eigh_started.elapsed();
+        // `L⁻¹A` column by column; `A` is symmetric, so `L⁻¹` on the columns of its
+        // transpose is `L⁻¹AL⁻ᵀ`.
+        let mut half = Array2::<f64>::zeros((dimension, dimension));
+        for column in 0..dimension {
+            half.column_mut(column)
+                .assign(&metric.lower_solve(operator.column(column))?);
+        }
+        let mut whitened = Array2::<f64>::zeros((dimension, dimension));
+        for column in 0..dimension {
+            whitened
+                .column_mut(column)
+                .assign(&metric.lower_solve(half.row(column))?);
+        }
+        drop(half);
+        for row in 0..dimension {
+            for column in (row + 1)..dimension {
+                let average = 0.5 * (whitened[[row, column]] + whitened[[column, row]]);
+                whitened[[row, column]] = average;
+                whitened[[column, row]] = average;
+            }
+        }
+        let (mut eigenvalues, rotation) = whitened
+            .eigh(Side::Lower)
+            .map_err(|error| format!("exact_hessian_spectral_block: whitened eigh failed: {error:?}"))?;
+        drop(whitened);
+        let mut eigenvectors = Array2::<f64>::zeros((dimension, dimension));
+        for column in 0..dimension {
+            eigenvectors
+                .column_mut(column)
+                .assign(&metric.lower_transpose_solve(rotation.column(column))?);
+        }
+        drop(rotation);
         log::info!(
-            "[SAE-EXACT-DENSE] eigendecomposition DONE: dim={dimension}, {:.3} s",
-            eigh_elapsed.as_secs_f64(),
+            "[SAE-EXACT-DENSE] pencil eigendecomposition DONE: dim={dimension}, {:.3} s",
+            eigh_started.elapsed().as_secs_f64(),
         );
-        // #2673 — the scale every direction is classified relative to. `dim`
-        // applies of the arrow factorization's own operator, which is `O(dim²)`
-        // against the `O(dim³)` decomposition above it and needs no second
-        // dense block.
-        let spectral_norm = eigenvalues
+        let curvature_norm = eigenvalues
             .iter()
             .map(|value| value.abs())
             .fold(0.0_f64, f64::max);
-        // Rank depends on v'Bv, so a repeated A eigenspace must resolve its
-        // B directions too. The matrix-free route uses this same convention.
+        // Rank depends on the substituted stiffness, so a repeated pencil eigenspace must
+        // resolve its substitution directions too. The matrix-free route uses this same
+        // convention.
         canonicalize_exact_a_rank_clusters(
             &mut eigenvalues,
             &mut eigenvectors,
-            spectral_norm,
-            &|v| metric.apply(v.view()),
+            curvature_norm,
+            &|v| metric.substituted_image(v.view()),
         )?;
-        let mut metric_scale = Array1::<f64>::zeros(eigenvalues.len());
-        let mut substituted_stiffness = Array1::<f64>::zeros(eigenvalues.len());
-        for index in 0..eigenvalues.len() {
-            let value = metric.quadratic_form(eigenvectors.column(index))?;
-            if !(value.is_finite() && value > 0.0) {
+        let operator_frobenius = operator.iter().map(|value| value * value).sum::<f64>().sqrt();
+        let mut metric_frobenius_sq = 0.0_f64;
+        let mut unit = Array1::<f64>::zeros(dimension);
+        for column in 0..dimension {
+            unit[column] = 1.0;
+            let image = metric.apply(unit.view())?;
+            metric_frobenius_sq += image.dot(&image);
+            unit[column] = 0.0;
+        }
+        let metric_frobenius = metric_frobenius_sq.sqrt();
+        let mut substituted_stiffness = Array1::<f64>::zeros(dimension);
+        let mut resolution = Array1::<f64>::zeros(dimension);
+        for index in 0..dimension {
+            let direction = eigenvectors.column(index);
+            let substituted = direction.dot(&metric.substituted_image(direction)?);
+            if !substituted.is_finite() {
                 return Err(format!(
-                    "exact_hessian_spectral_block: the arrow factorization must be positive \
-                     definite along every direction it classifies, but direction {index} of the \
-                     {dimension}-dimensional block has vᵀBv={value:.6e} (#2673)"
+                    "exact_hessian_spectral_block: direction {index} of the {dimension}-dimensional \
+                     block has a non-finite substituted stiffness {substituted:e}"
                 ));
             }
-            metric_scale[index] = value;
-            substituted_stiffness[index] =
-                metric.substituted_stiffness(eigenvectors.column(index))?;
+            // A direction whose pins lower curvature more than they raise it carries no
+            // substituted stiffness, so the total is clamped at zero.
+            substituted_stiffness[index] = substituted.max(0.0);
+            resolution[index] = sae_exact_a_pencil_resolution(
+                dimension,
+                direction.dot(&direction),
+                operator_frobenius,
+                metric_frobenius,
+                eigenvalues[index],
+            );
+        }
+        let metric_log_det = metric.log_det()?;
+        let band: Vec<usize> = (0..dimension)
+            .filter(|&index| {
+                eigenvalues[index].abs()
+                    <= sae_exact_a_band_edge(
+                        eigenvalues[index],
+                        resolution[index],
+                        substituted_stiffness[index],
+                    )
+            })
+            .collect();
+        let mut band_metric_images = Array2::<f64>::zeros((dimension, band.len()));
+        for (position, &index) in band.iter().enumerate() {
+            band_metric_images
+                .column_mut(position)
+                .assign(&metric.apply(eigenvectors.column(index))?);
         }
         let block = ExactHessianSpectralBlock {
             operator,
             eigenvalues,
             eigenvectors,
-            metric_scale,
             substituted_stiffness,
-            spectral_norm,
+            resolution,
+            metric_log_det,
+            operator_frobenius,
+            metric_frobenius,
+            band,
+            band_metric_images,
         };
-        let crossings = block.arithmetic_band_crossings();
+        let crossings = block.resolution_band_crossings();
         if crossings > 0 {
-            // Report when arithmetic, rather than the B-relative scale,
-            // determines the shared spectral rank.
+            // Report when the working coordinates, rather than the pencil, determine the
+            // shared spectral rank.
+            let widest = block.resolution.iter().copied().fold(0.0_f64, f64::max);
             log::warn!(
-                "[SAE-EXACT-DENSE] arithmetic rank limit: {crossings} of {dimension} \
-                 directions have |λ| inside the eigendecomposition's backward error \
-                 ({:.6e}) while their B-relative curvature is identifiable; \
-                 value and adjoint discard these directions",
-                (dimension as f64) * f64::EPSILON * block.spectral_norm,
+                "[SAE-EXACT-DENSE] numerical resolution limit: {crossings} of {dimension} \
+                 pencil directions clear √ε but not their own numerical resolution (widest \
+                 {widest:.6e}); value and adjoint discard these directions",
             );
         }
         Ok(block)
     }
 
-    /// Price the full basin on A's resolved negative spectral subspace.
-    /// If V spans that subspace, C = V' A V + V' E V. Its determinant and
-    /// definiteness are invariant under V -> V R, including repeated negative
-    /// eigenvalues. Independent diagonal prices discard E's coupling and do
+    /// Price the full basin on the pencil's resolved negative subspace (#2933 F07).
+    /// If `W_N` spans that subspace with `W_NᵀΦW_N = I`, `C = W_NᵀAW_N + W_NᵀEW_N`. Its
+    /// determinant and definiteness are invariant under `W_N → W_N R`, including repeated
+    /// negative eigenvalues. Independent diagonal prices discard E's coupling and do
     /// not even define a continuous value at a repeated eigenvalue.
     ///
-    /// On a fixed rank stratum, Q = V C^+ V' is the E derivative. The A
-    /// derivative adds the positive inverse and the response of V. Only
-    /// negative/complement spectral gaps enter that response; rotations inside
-    /// the negative subspace cancel in the determinant.
+    /// The value is
     ///
-    /// A basin direction with `μ < −floor` refuses the block. With
+    /// ```text
+    ///   log|A|_reg = log|Φ| + Σ_{μᵢ > floorᵢ} ln μᵢ + Σ_{κⱼ > floorⱼ} ln κⱼ
+    /// ```
+    ///
+    /// with `κ` the basin curvatures: the log-determinant of `ΦW diag(μ̃) WᵀΦ`, in which
+    /// every in-band direction, of the pencil or of the basin, carries the metric's own
+    /// curvature `μ̃ = 1`. Those directions are integrated against the majorizer's local
+    /// Gaussian rather than dropped or given an improper constant. Under `θ → Lθ` the
+    /// value moves by `2 log|det L|`, as the log-determinant of any Hessian does, and on a
+    /// full-rank positive stratum it IS `log|A|`.
+    ///
+    /// On a fixed rank stratum `Q = V C⁺ Vᵀ` is the E derivative; the differential adds
+    /// the retained inverse, the band's `dΦ` and the response of the negative subspace.
+    ///
+    /// A basin direction with `κ < −floor` refuses the block. With
     /// `refused_directions` present, every such direction is pushed with its
-    /// `μ` (most negative first) before the refusal is returned, so a caller can
-    /// descend the saddle rather than only learn that one exists (#2080).
+    /// `κ` (most negative first) before the refusal is returned, so a caller can
+    /// descend the saddle rather than only learn that one exists (#2080). The pushed
+    /// vectors are `Φ`-normalized, and `κ` is the basin curvature along the vector as
+    /// pushed.
     fn classify_exact_hessian_basin(
         block: &ExactHessianSpectralBlock,
         e_diag: &Array1<f64>,
         e_beta: Option<&Array2<f64>>,
         total_t: usize,
-        metric: impl Fn(ArrayView1<'_, f64>) -> Result<f64, String>,
         label: &'static str,
         mut refused_directions: Option<&mut Vec<(Array1<f64>, f64)>>,
     ) -> Result<ExactHessianBasin, SaeCriterionError> {
@@ -4535,13 +4884,13 @@ impl SaeManifoldTerm {
         let complement: Vec<usize> = (0..dim)
             .filter(|&i| block.eigenvalues[i] >= -block.rank_floor(i))
             .collect();
-        let mut log_det = 0.0;
+        let mut log_det = block.metric_log_det;
         for &i in &complement {
-            let lambda = block.eigenvalues[i];
-            if lambda <= block.rank_floor(i) {
+            let mu = block.eigenvalues[i];
+            if mu <= block.rank_floor(i) {
                 continue;
             }
-            log_det += lambda.ln();
+            log_det += mu.ln();
         }
         if negative.is_empty() {
             return Ok(ExactHessianBasin {
@@ -4590,54 +4939,44 @@ impl SaeManifoldTerm {
             .eigh(Side::Lower)
             .map_err(|error| format!("exact-A basin eigendecomposition: {error:?}"))?;
         let basin_vectors = basis.dot(&basin_rotation);
-        // Assembly of C can cancel A against E. Its arithmetic scale must
-        // include both operands, while the statistical band uses the actual
-        // B quadratic form of each rotated basin direction.
-        let assembly_scale = block.spectral_norm
-            + e_diag
-                .iter()
-                .take(total_t)
-                .map(|x| x.abs())
-                .fold(0.0_f64, f64::max)
-            + e_beta.map_or(0.0, |gap| {
-                // The border block is dense, so its arithmetic scale is a row sum
-                // (the induced ∞-norm), not a single entry: a cancellation in `C`
-                // can be as large as the whole row.
-                (0..gap.nrows())
-                    .map(|row| {
-                        (0..gap.ncols())
-                            .map(|col| gap[[row, col]].abs())
-                            .sum::<f64>()
-                    })
-                    .fold(0.0_f64, f64::max)
-            });
+        // `E` enters `C` at its own scale, so its norm joins the operator's in the
+        // resolution of each basin curvature.
+        let e_frobenius = (e_diag.iter().take(total_t).map(|x| x * x).sum::<f64>()
+            + e_beta.map_or(0.0, |gap| gap.iter().map(|x| x * x).sum::<f64>()))
+        .sqrt();
         let mut inverse_values = Array1::<f64>::zeros(q);
         let mut refused = false;
-        for (i, &mu) in basin_values.iter().enumerate() {
+        for (i, &kappa) in basin_values.iter().enumerate() {
             let vector = basin_vectors.column(i);
-            let metric_scale = metric(vector)?;
-            if !(mu.is_finite() && metric_scale.is_finite() && metric_scale > 0.0) {
+            if !kappa.is_finite() {
                 return Err(SaeCriterionError::Numerical(
-                    "exact-A basin needs finite curvature and a positive metric".to_string(),
+                    "exact-A basin needs a finite curvature".to_string(),
                 ));
             }
-            let floor = sae_exact_a_direction_floor(dim, assembly_scale, metric_scale);
-            if mu < -floor {
+            let resolution = sae_exact_a_pencil_resolution(
+                dim,
+                vector.dot(&vector),
+                block.operator_frobenius + e_frobenius,
+                block.metric_frobenius,
+                kappa,
+            );
+            let floor = sae_exact_a_band_edge(kappa, resolution, 0.0);
+            if kappa < -floor {
                 log::warn!(
-                    "SAE exact-A basin refusal: block={label}, mode={i}, curvature={mu:e}, floor={floor:e}"
+                    "SAE exact-A basin refusal: block={label}, mode={i}, curvature={kappa:e}, floor={floor:e}"
                 );
                 let Some(directions) = refused_directions.as_mut() else {
                     return Err(SaeCriterionError::IndefiniteObservedInformation { block: label });
                 };
-                directions.push((vector.to_owned(), mu));
+                directions.push((vector.to_owned(), kappa));
                 refused = true;
                 continue;
             }
-            if mu <= floor {
+            if kappa <= floor {
                 continue;
             }
-            log_det += mu.ln();
-            inverse_values[i] = 1.0 / mu;
+            log_det += kappa.ln();
+            inverse_values[i] = 1.0 / kappa;
         }
         if refused {
             return Err(SaeCriterionError::IndefiniteObservedInformation { block: label });
@@ -4660,15 +4999,29 @@ impl SaeManifoldTerm {
         e_diag: &Array1<f64>,
         e_beta: Option<&Array2<f64>>,
         total_t: usize,
-        metric: impl Fn(ArrayView1<'_, f64>) -> Result<f64, String>,
         label: &'static str,
     ) -> Result<ExactHessianPricing, SaeCriterionError> {
-        let basin = Self::classify_exact_hessian_basin(
-            block, e_diag, e_beta, total_t, metric, label, None,
-        )?;
+        let basin =
+            Self::classify_exact_hessian_basin(block, e_diag, e_beta, total_t, label, None)?;
         Self::exact_hessian_basin_differential(block, e_diag, e_beta, total_t, &basin)
     }
 
+    /// The differential of [`Self::classify_exact_hessian_basin`]'s value on its rank
+    /// stratum (#2933 F07), as three contraction weights:
+    ///
+    /// ```text
+    ///   d log|A|_reg = ⟨X_A, dA⟩ + ⟨X_Φ, dΦ⟩ + ⟨X_E, dE⟩
+    ///   X_A = W_P M_P⁻¹ W_Pᵀ + U_p K_p⁻¹ U_pᵀ + sym(2 W_N Ĥ W_cᵀ)
+    ///   X_Φ = W_Z W_Zᵀ + U_z U_zᵀ − sym(2 W_N M_N Ĥ W_cᵀ)
+    ///   X_E = U_p K_p⁻¹ U_pᵀ
+    /// ```
+    ///
+    /// `P`/`Z`/`N` are the retained, in-band and negative pencil directions, `c = P ∪ Z` the
+    /// complement, `U = W_N R` the basin vectors split into priced (`p`, curvatures `K_p`)
+    /// and in-band (`z`), and `Ĥ = (C⁺ W_NᵀEW_c) ⊘ (μ_N − μ_c)` the first-order response of the
+    /// negative subspace, which moves with `dA − μ_N dΦ` along the complement. The metric
+    /// weight exists because in-band directions are priced at `Φ`'s own curvature: a value
+    /// that moves with `Φ` there must be differentiated there.
     fn exact_hessian_basin_differential(
         block: &ExactHessianSpectralBlock,
         e_diag: &Array1<f64>,
@@ -4681,8 +5034,8 @@ impl SaeManifoldTerm {
         let complement = &basin.complement;
         let basis = &basin.basis;
         let q = negative.len();
-        // The positive-inverse part `Σ vᵢvᵢᵀ/λᵢ` over the retained complement, as the
-        // Gram `S·Sᵀ` of the columns `vᵢ/√λᵢ` (#2267). The rank-1 loop this replaces
+        // The positive-inverse part `Σ wᵢwᵢᵀ/μᵢ` over the retained complement, as the
+        // Gram `S·Sᵀ` of the columns `wᵢ/√μᵢ` (#2267). The rank-1 loop this replaces
         // paid `retained·dim²` scalar updates on every gradient evaluation.
         let retained: Vec<usize> = complement
             .iter()
@@ -4694,14 +5047,31 @@ impl SaeManifoldTerm {
             block.eigenvectors[[row, i]] / block.eigenvalues[i].sqrt()
         });
         let mut a_derivative = scaled.dot(&scaled.t());
+        drop(scaled);
+        let in_band: Vec<usize> = complement
+            .iter()
+            .copied()
+            .filter(|&i| block.eigenvalues[i] <= block.rank_floor(i))
+            .collect();
+        let band_basis = Array2::from_shape_fn((dim, in_band.len()), |(row, col)| {
+            block.eigenvectors[[row, in_band[col]]]
+        });
+        let mut metric_derivative = band_basis.dot(&band_basis.t());
+        drop(band_basis);
         let mut clamp_diagonal_derivative = Array1::<f64>::zeros(total_t);
         let mut clamp_border_derivative = Array2::<f64>::zeros((dim - total_t, dim - total_t));
         let mut basin_inverse = Array2::<f64>::zeros((q, q));
         for (i, &inverse) in basin.inverse_values.iter().enumerate() {
+            let vector = basin.vectors.column(i);
             if inverse == 0.0 {
+                // An in-band basin direction is priced at the metric's curvature too.
+                for row in 0..dim {
+                    for col in 0..dim {
+                        metric_derivative[[row, col]] += vector[row] * vector[col];
+                    }
+                }
                 continue;
             }
-            let vector = basin.vectors.column(i);
             for row in total_t..dim {
                 for col in total_t..dim {
                     clamp_border_derivative[[row - total_t, col - total_t]] += inverse * vector[row] * vector[col];
@@ -4766,14 +5136,26 @@ impl SaeManifoldTerm {
                 }
             }
             let cross = basis.dot(&response).dot(&other.t());
+            // The negative subspace responds to `dA − μ_N dΦ`, so the metric carries the
+            // same response weighted by each negative direction's curvature.
+            let mut weighted_response = response;
+            for (i, &negative_index) in negative.iter().enumerate() {
+                weighted_response
+                    .row_mut(i)
+                    .mapv_inplace(|value| value * block.eigenvalues[negative_index]);
+            }
+            let metric_cross = basis.dot(&weighted_response).dot(&other.t());
             for row in 0..dim {
                 for col in 0..dim {
                     a_derivative[[row, col]] += cross[[row, col]] + cross[[col, row]];
+                    metric_derivative[[row, col]] -=
+                        metric_cross[[row, col]] + metric_cross[[col, row]];
                 }
             }
         }
         Ok(ExactHessianPricing {
             a_derivative,
+            metric_derivative,
             clamp_diagonal_derivative,
             clamp_border_derivative,
         })
@@ -4788,17 +5170,9 @@ impl SaeManifoldTerm {
         target: ArrayView2<'_, f64>,
         cache: &ArrowFactorCache,
     ) -> Result<ExactHessianSpectralBlock, String> {
-        let total_t = cache.delta_t_len();
-        let (a, e_beta) =
+        let (a, _gap_border) =
             self.materialize_exact_hessian_dense_with_gap_border(rho, target, cache)?;
-        let e_diag = self.materialize_ard_concave_clamp_diagonal(rho, cache)?;
-        Self::exact_hessian_spectral_block(
-            a,
-            &e_diag,
-            e_beta.as_ref(),
-            total_t,
-            ArrowMetric::Joint(cache),
-        )
+        Self::exact_hessian_spectral_block(a, &ArrowMetric::Joint(cache).prepare()?)
     }
 
     /// #2330 Phase-2/#2653 — one coherent quotient geometry for the exact-A
@@ -4817,22 +5191,10 @@ impl SaeManifoldTerm {
         let (a, e_beta) =
             self.materialize_exact_hessian_dense_with_gap_border(rho, target, cache)?;
         let e_diag = self.materialize_ard_concave_clamp_diagonal(rho, cache)?;
-        let joint = Self::exact_hessian_spectral_block(
-            a,
-            &e_diag,
-            e_beta.as_ref(),
-            total_t,
-            ArrowMetric::Joint(cache),
-        )?;
-        let joint_pricing = Self::price_exact_hessian_block(
-            &joint,
-            &e_diag,
-            e_beta.as_ref(),
-            total_t,
-            |v| ArrowMetric::Joint(cache).quadratic_form(v),
-            "joint",
-        )
-        .map_err(|error| error.to_string())?;
+        let joint = Self::exact_hessian_spectral_block(a, &ArrowMetric::Joint(cache).prepare()?)?;
+        let joint_pricing =
+            Self::price_exact_hessian_block(&joint, &e_diag, e_beta.as_ref(), total_t, "joint")
+                .map_err(|error| error.to_string())?;
         Ok(ExactHessianQuotientGeometry {
             joint,
             joint_pricing,
@@ -5093,120 +5455,6 @@ impl SaeManifoldTerm {
         Ok((a, gap_border))
     }
 
-    /// #2330 Phase-2 — the A-based logdet gradient channels on the dense direct
-    /// route: the direct trace vector `logdet_trace_i = ½tr(A⁺ ∂A/∂ρ_i)
-    /// − ½tr(A_tt⁺ ∂A/∂ρ_i)` and the effective θ-adjoint
-    /// `Γ_eff = tr(A⁺ ∂A/∂θ) − tr(A_tt⁺ ∂A_tt/∂θ) + 2∇R` (fed to the unchanged
-    /// single-adjoint IFT collapse `a = A⁺Γ_eff`, `−½⟨a, g_ρ⟩`). `∂A/∂ρ_i =
-    /// ∂B/∂ρ_i (raw_penalty_curvature_operators_by_flat) + ∂ΔC/∂ρ_i
-    /// (exact_stationarity_penalty_derivative_delta_by_flat)`, already exact. The
-    /// θ-adjoint rides `exact_a = true` (ARD clamp-free) with `skip_deflation_dk
-    /// = true` (the exact A carries only the ρ-invariant gauge null, handled by
-    /// the quotient pseudo-inverse — no B-style Daleckii–Krein correction).
-    ///
-    /// EXACT-MINUS-PATCH-D: the two `logdet_theta_adjoint_dense` calls emit
-    /// `∂B/∂θ + ∂ΔC_ard/∂θ` but NOT the residual-curvature / softmax-entropy legs
-    /// of `∂ΔC/∂θ` (Patch D). Until D lands, Γ_eff — hence the IFT correction — is
-    /// missing that term and the conservation bisection stays red by exactly it.
-    /// #2336 flag-1 — eigendecomposition with an `E`-canonical basis inside
-    /// exactly repeated eigenspaces.
-    ///
-    /// A basis rotation preserves the eigenpair equation `A V = V diag(λ)` only
-    /// when every rotated eigenvalue is identical. The previous implementation
-    /// also rotated merely near-equal eigenvalues (gap at most `√ε·‖A‖₂`) while
-    /// leaving their distinct eigenvalues attached to the rotated columns. That
-    /// produced a matrix called a priced inverse which was not the inverse of the
-    /// operator whose eigenvalues the value summed; #2515 measured direct trace
-    /// derivatives of `5.340922` and `5.146446` for two scalar values whose
-    /// derivatives were both `4.974886`.
-    ///
-    /// Repeated eigenvalues genuinely have an arbitrary eigenspace basis, so
-    /// those and only those runs are resolved against the restriction of `E`.
-    /// Distinct eigenvalues retain the actual `eigh` columns, however small their
-    /// gap: numerical uncertainty cannot authorize returning false eigenpairs.
-    /// `e_diag` is the t-block diagonal of `E` (zero on the β border), so the
-    /// repeated-space restriction reads only the first `total_t` rows.
-    pub(crate) fn cluster_stable_eigh(
-        m: &Array2<f64>,
-        e_diag: &Array1<f64>,
-        e_beta: Option<&Array2<f64>>,
-        total_t: usize,
-    ) -> Result<(Array1<f64>, Array2<f64>), String> {
-        if m.nrows() != m.ncols() || total_t > m.nrows() || e_diag.len() < total_t {
-            return Err(format!(
-                "cluster_stable_eigh: operator {:?}, t dimension {total_t}, E diagonal length {}",
-                m.dim(),
-                e_diag.len()
-            ));
-        }
-        let (eigs, mut vecs) = m
-            .eigh(Side::Lower)
-            .map_err(|e| format!("cluster_stable_eigh: eigh failed: {e:?}"))?;
-        let dim = eigs.len();
-        let mut i = 0usize;
-        while i < dim {
-            let mut j = i + 1;
-            while j < dim && eigs[j] == eigs[i] {
-                j += 1;
-            }
-            let width = j - i;
-            if width > 1 {
-                // `E` is diagonal on the first `total_t` coordinate rows.  Its
-                // restriction to this cluster is therefore
-                //
-                //     E_c[a,b] = sum_r e_diag[r] V[r,i+a] V[r,i+b]
-                //
-                // plus, since #2828, the border block's own dense contribution
-                // (the β-tier decoder priors' majorization gap).  Accumulate one
-                // weighted row outer product at a time.  Besides reading the
-                // actual representation rather than manufacturing a dense matrix
-                // of zeros, this changes the coordinate half of the work from
-                // O(width^2 * dim^2) to O(width^2 * total_t).  Keeping `b` as the
-                // inner loop walks both the cluster row and `ec` contiguously.
-                let mut ec = Array2::<f64>::zeros((width, width));
-                for row in 0..total_t {
-                    let weight = e_diag[row];
-                    if weight == 0.0 {
-                        continue;
-                    }
-                    let cluster_row = vecs.slice(s![row, i..j]);
-                    for a in 0..width {
-                        let weighted_a = weight * cluster_row[a];
-                        for b in a..width {
-                            ec[[a, b]] += weighted_a * cluster_row[b];
-                        }
-                    }
-                }
-                // The upper triangle was accumulated once in the same order as
-                // the former scalar quadratic form.  Copy it exactly rather than
-                // averaging two independently-rounded contractions.
-                for a in 0..width {
-                    for b in (a + 1)..width {
-                        ec[[b, a]] = ec[[a, b]];
-                    }
-                }
-                if e_beta.is_some() {
-                    let run = vecs.slice(s![.., i..j]);
-                    let border = Self::dropped_curvature_border_forms(e_beta, total_t, run, run);
-                    for a in 0..width {
-                        for b in 0..width {
-                            ec[[a, b]] += border[[a, b]];
-                        }
-                    }
-                }
-                let (_ec_eigs, rot) = ec
-                    .eigh(Side::Lower)
-                    .map_err(|e| format!("cluster_stable_eigh: cluster eigh failed: {e:?}"))?;
-                drop(ec);
-                let cluster = vecs.slice(s![.., i..j]).to_owned();
-                let rotated = cluster.dot(&rot);
-                vecs.slice_mut(s![.., i..j]).assign(&rotated);
-            }
-            i = j;
-        }
-        Ok((eigs, vecs))
-    }
-
     /// #2336 — the coordinate-block (t-index → (atom, axis)) map for a cache, so
     /// the ARD-clamp E-attributability channels can attribute each priced
     /// direction's `e_v` mass back to the ρ_ard slot that scales it. `None` on
@@ -5369,6 +5617,8 @@ impl SaeManifoldTerm {
         for (&i, da) in da_by_flat.iter() {
             logdet_trace[i] = 0.5 * frob(&a_pinv, da);
         }
+        // One per-coordinate map at a time: the metric channel below builds its own.
+        drop(da_by_flat);
         // Ordered-Beta–Bernoulli sparse coordinate: its ∂A/∂ρ_sparse is the exact
         // integrated-marginal logit Hessian (cross-row), absent from the operator
         // map above (softmax-only). Add its ½log|A| trace directly.
@@ -5396,15 +5646,310 @@ impl SaeManifoldTerm {
         gamma.beta += &self.decoder_prior_gap_theta_trace(
             cache, geometry.joint_pricing.clamp_border_derivative.view(),
         )?;
+        // #2933 F07 — in-band pencil directions are priced at `Φ`'s own curvature, so the
+        // value moves with the evidence factor there as well.
+        let (metric_trace, metric_gamma) = self.evidence_metric_derivative_channels(
+            rho,
+            cache,
+            &geometry.joint_pricing.metric_derivative,
+        )?;
+        logdet_trace += &metric_trace;
+        gamma.t += &metric_gamma.t;
+        gamma.beta += &metric_gamma.beta;
         let rank_charge = self.production_rank_charge_derivative(target, rho, loss, cache)?;
         gamma.t.scaled_add(2.0, &rank_charge.theta.t);
         gamma.beta.scaled_add(2.0, &rank_charge.theta.beta);
-        let stationarity_adjoint = geometry.joint.solve_stationarity(&gamma)?;
+        let stationarity_adjoint = geometry.joint.solve_stationarity(&gamma)?.step;
         Ok(DenseExactALogdetChannels {
             logdet_trace,
             theta_adjoint: gamma,
             stationarity_adjoint,
         })
+    }
+
+    /// #2933 F07 — `(½⟨X, ∂Φ/∂ρ⟩, ⟨X, ∂Φ/∂θ⟩)` for a dense symmetric weight `X` on the
+    /// joint `(t, β)` layout, where `Φ = Φ(B_raw)` is the conditioned evidence factor the
+    /// exact-`A` pencil is classified and priced in. The trace half carries the
+    /// criterion's leading `½`; the θ half is in full log-determinant units, like every
+    /// θ-adjoint here.
+    ///
+    /// [`Self::evidence_metric_raw_weight`] folds both conditionings of `Φ` into a weight
+    /// on `dB_raw`, which the raw-majorizer builders contract: the per-coordinate
+    /// curvature operators, the ordered Beta--Bernoulli majorized diagonal, and the θ legs
+    /// of [`Self::logdet_theta_adjoint_dense`] with the decoder priors' border and the
+    /// ordered Beta--Bernoulli shared-mass leg added, as the majorizer channels add them.
+    fn evidence_metric_derivative_channels(
+        &self,
+        rho: &SaeManifoldRho,
+        cache: &ArrowFactorCache,
+        weight: &Array2<f64>,
+    ) -> Result<(Array1<f64>, SaeArrowVector), String> {
+        let total_t = cache.delta_t_len();
+        let mut trace = Array1::<f64>::zeros(rho.flat_coordinates().len());
+        if weight.iter().all(|&value| value == 0.0) {
+            return Ok((
+                trace,
+                SaeArrowVector {
+                    t: Array1::zeros(total_t),
+                    beta: Array1::zeros(cache.k),
+                },
+            ));
+        }
+        let raw_weight = self.evidence_metric_raw_weight(cache, weight)?;
+        for (flat, operator) in self.raw_penalty_curvature_operators_by_flat(rho, cache)? {
+            trace[flat] = 0.5 * (&raw_weight * &operator).sum();
+        }
+        let row_weights = self.row_loss_weights.as_deref();
+        let ordered_channels = ordered_beta_bernoulli_psd_majorizer_third_channels_weighted(
+            &self.assignment,
+            rho,
+            row_weights,
+        )?;
+        let k_atoms = self.k_atoms();
+        // `(flat logit slot, joint index)` of every free ordered Beta--Bernoulli logit.
+        let mut logit_sites: Vec<(usize, usize)> = Vec::new();
+        if let Some(channels) = ordered_channels.as_ref() {
+            for row in 0..self.n_obs() {
+                for (local, variable) in self.row_vars_for_cache_row(row, cache)?.iter().enumerate() {
+                    if let SaeLocalRowVar::Logit { atom } = *variable {
+                        if atom < k_atoms {
+                            logit_sites.push((row * k_atoms + atom, cache.row_offsets[row] + local));
+                        }
+                    }
+                }
+            }
+            // The sparse coordinate has no assembled operator here
+            // (`SparseLogitCurvature::CrossRowOwnedElsewhere`): the majorizer is the positive
+            // part of the row-local diagonal, whose log-strength derivative the majorizer
+            // trace reads slot by slot.
+            // A fixed concentration puts no coordinate into the prior (#2933 F45), so the
+            // majorizer does not move with `ρ_sparse` there.
+            if let Some(sparse) = rho
+                .sparse_flat_index()
+                .filter(|_| self.assignment.effective_alpha_is_learnable())
+            {
+                let hdiag = crate::assignment::assignment_prior_log_strength_hdiag_weighted(
+                    &self.assignment,
+                    rho,
+                    row_weights,
+                )?;
+                if !hdiag.is_empty() {
+                    let mut accumulated = 0.0_f64;
+                    for &(slot, global) in &logit_sites {
+                        let (row, atom) = (slot / k_atoms, slot % k_atoms);
+                        let majorized = super::construction_arrow_schur_assembly::ordered_beta_bernoulli_psd_majorized_log_alpha_hdiag(
+                            channels, row, k_atoms, atom, hdiag[slot],
+                        );
+                        accumulated += raw_weight[[global, global]] * majorized;
+                    }
+                    trace[sparse] = 0.5 * accumulated;
+                }
+            }
+        }
+        // θ: both conditionings are already folded into `raw_weight`, so the dense
+        // adjoint's own row Daleckii--Krein correction is skipped.
+        let mut gamma =
+            self.logdet_theta_adjoint_dense(rho, cache, &raw_weight, true, false, None)?;
+        if cache.k > 0 {
+            // `B_ββ` carries the decoder priors' majorizer, `A_ββ + E_ββ`.
+            let border = raw_weight.slice(s![total_t.., total_t..]);
+            gamma.beta += &self.exact_decoder_prior_theta_trace(cache, border)?;
+            gamma.beta += &self.decoder_prior_gap_theta_trace(cache, border)?;
+        }
+        if let Some(channels) = ordered_channels.as_ref() {
+            // `Φ` carries `B`'s ordered Beta--Bernoulli prior diagonal, the positive part of its
+            // row-local term. It moves with its own logit (`local_logit_third`) and with every
+            // logit of its column through the shared mass (`m_channel`, `∂M/∂ℓ = z_jac`). The
+            // dense majorizer builder carries no ordered prior channel on this route, so both
+            // legs are contracted here, as `logdet_theta_adjoint_from_probes` contracts them.
+            let mut column_coefficient = vec![0.0_f64; k_atoms];
+            for &(slot, global) in &logit_sites {
+                column_coefficient[slot % k_atoms] +=
+                    raw_weight[[global, global]] * channels.m_channel[slot];
+            }
+            for &(slot, global) in &logit_sites {
+                gamma.t[global] += raw_weight[[global, global]] * channels.local_logit_third[slot]
+                    + column_coefficient[slot % k_atoms] * channels.z_jac[slot];
+            }
+        }
+        Ok((trace, gamma))
+    }
+
+    /// #2933 F07 — the weight `X̃` on `dB_raw` with `⟨X̃, dB_raw⟩ = ⟨X, dΦ⟩`, for the
+    /// conditioned evidence factor `Φ = Φ(B_raw)` this cache represents.
+    ///
+    /// ```text
+    ///   Φ = [ T     C           ]    T = ⊕ᵢ φᵢ(B_raw,tt⁽ⁱ⁾) + VᵢVᵢᵀ
+    ///       [ Cᵀ    S̃ + CᵀT⁻¹C  ]    S̃ = φ_S(P S P + QQᵀ),   S = D − CᵀT⁻¹C
+    /// ```
+    ///
+    /// with `C = B_raw,tβ` and `D = B_raw,ββ` raw, `φᵢ`/`φ_S` the spectral pin maps the
+    /// cache records, `Vᵢ` the structural row gauge pins and `P = I − QQᵀ` the border gauge
+    /// quotient; both gauge pins are constant. A Daleckii--Krein map
+    /// `Dφ[dM] = U(F ∘ UᵀdMU)Uᵀ` is self-adjoint, so with `Z = P·Dφ_S[X_ββ]·P`,
+    /// `Y = X_ββ − Z` and `G = T⁻¹C`,
+    ///
+    /// ```text
+    ///   ⟨X, dΦ⟩ = Σᵢ⟨Dφᵢ[(X_tt − GYGᵀ)ᵢ], dB_raw,tt⁽ⁱ⁾⟩ + 2⟨X_tβ + GY, dC⟩ + ⟨Z, dD⟩.
+    /// ```
+    ///
+    /// Cross-row entries of `X̃_tt` are left in place: every raw curvature derivative is
+    /// row-local there, so they contract nothing.
+    fn evidence_metric_raw_weight(
+        &self,
+        cache: &ArrowFactorCache,
+        weight: &Array2<f64>,
+    ) -> Result<Array2<f64>, String> {
+        let total_t = cache.delta_t_len();
+        let k = cache.k;
+        if weight.dim() != (total_t + k, total_t + k) {
+            return Err(format!(
+                "evidence_metric_raw_weight: weight {:?} on joint dimension {}",
+                weight.dim(),
+                total_t + k
+            ));
+        }
+        let mut out = weight.clone();
+        if k > 0
+            && (cache.beta_schur_conditioning.is_some() || cache.beta_gauge_quotient.is_some())
+        {
+            let border = weight.slice(s![total_t.., total_t..]).to_owned();
+            let mut schur_weight = match cache.beta_schur_conditioning.as_ref() {
+                Some(spectrum) => Self::beta_schur_conditioning_fold(spectrum, &border)?,
+                None => border.clone(),
+            };
+            if let Some(quotient) = cache.beta_gauge_quotient.as_ref() {
+                // `X → (I − qqᵀ)X(I − qqᵀ)`, one orthonormal direction at a time.
+                for direction in quotient.directions.iter() {
+                    let image = schur_weight.dot(direction);
+                    let along = direction.dot(&image);
+                    for a in 0..k {
+                        for b in 0..k {
+                            schur_weight[[a, b]] += along * direction[a] * direction[b]
+                                - direction[a] * image[b]
+                                - image[a] * direction[b];
+                        }
+                    }
+                }
+            }
+            let remainder = &border - &schur_weight;
+            if remainder.iter().any(|&value| value != 0.0) {
+                let mut unit = Array1::<f64>::zeros(k);
+                for row in 0..cache.n_rows() {
+                    let q = cache.row_dims[row];
+                    let base = cache.row_offsets[row];
+                    let factor = cache.undamped_factor(row);
+                    // `Gᵢ = Tᵢ⁻¹Cᵢ`, one border column at a time.
+                    let mut graph = Array2::<f64>::zeros((q, k));
+                    for column in 0..k {
+                        unit[column] = 1.0;
+                        let mut coupled = Array1::<f64>::zeros(q);
+                        let applied = cache.apply_htbeta_row(row, unit.view(), &mut coupled);
+                        unit[column] = 0.0;
+                        if !applied {
+                            return Err(format!(
+                                "evidence_metric_raw_weight: H_tβ^({row}) apply failed"
+                            ));
+                        }
+                        graph
+                            .column_mut(column)
+                            .assign(&cholesky_solve_vector(factor, coupled.view()));
+                    }
+                    let graph_remainder = graph.dot(&remainder);
+                    let within = graph_remainder.dot(&graph.t());
+                    for a in 0..q {
+                        for b in 0..q {
+                            out[[base + a, base + b]] -= within[[a, b]];
+                        }
+                        for c in 0..k {
+                            out[[base + a, total_t + c]] += graph_remainder[[a, c]];
+                            out[[total_t + c, base + a]] += graph_remainder[[a, c]];
+                        }
+                    }
+                }
+            }
+            out.slice_mut(s![total_t.., total_t..]).assign(&schur_weight);
+        }
+        for row in 0..cache.n_rows() {
+            let Some(spectrum) = cache
+                .deflation_row_spectra
+                .get(row)
+                .and_then(Option::as_ref)
+            else {
+                continue;
+            };
+            let q = cache.row_dims[row];
+            let base = cache.row_offsets[row];
+            if spectrum.evecs.dim() != (q, q) {
+                return Err(format!(
+                    "evidence_metric_raw_weight: row {row} has dimension {q}, but its spectral \
+                     carrier is {:?}",
+                    spectrum.evecs.dim()
+                ));
+            }
+            let block = out.slice(s![base..base + q, base..base + q]).to_owned();
+            let folded = Self::deflation_folded_trace_weight(&block, &[], Some(spectrum));
+            out.slice_mut(s![base..base + q, base..base + q]).assign(&folded);
+        }
+        Ok(out)
+    }
+
+    /// `Dφ_S[X] = Q(F ∘ QᵀXQ)Qᵀ` for the reduced-Schur spectral conditioning the evidence
+    /// factor recorded, with the gap convention of
+    /// [`Self::row_deflation_frechet_coefficients`]: a unit pin has `φ' = 0` and a raw
+    /// direction `φ' = 1`. A clamp-basin price moves with `E`, which this map does not
+    /// carry, so a spectrum holding one is refused rather than differentiated as though
+    /// its price were constant.
+    fn beta_schur_conditioning_fold(
+        spectrum: &gam_solve::arrow_schur::BetaSchurConditioningSpectrum,
+        weight: &Array2<f64>,
+    ) -> Result<Array2<f64>, String> {
+        use gam_solve::arrow_schur::BetaSchurSpectralConditioning;
+        let k = weight.nrows();
+        if spectrum.evecs.dim() != (k, k)
+            || spectrum.raw_evals.len() != k
+            || spectrum.cond_evals.len() != k
+            || spectrum.conditioning.len() != k
+        {
+            return Err(format!(
+                "evidence_metric_raw_weight: the recorded reduced-Schur spectrum does not match \
+                 border width {k}"
+            ));
+        }
+        if spectrum
+            .conditioning
+            .iter()
+            .any(|branch| *branch == BetaSchurSpectralConditioning::ClampBasin)
+        {
+            return Err(
+                "evidence_metric_raw_weight: the reduced-Schur spectrum prices a clamp basin, \
+                 whose price moves with E; the pencil metric derivative there is not modelled"
+                    .to_string(),
+            );
+        }
+        let raw = &spectrum.raw_evals;
+        let conditioned = &spectrum.cond_evals;
+        let eigen_scale = raw
+            .iter()
+            .chain(conditioned.iter())
+            .copied()
+            .fold(0.0_f64, |scale, value| scale.max(value.abs()));
+        let gap_threshold = eigen_gap_threshold(eigen_scale, k);
+        let mut folded = spectrum.evecs.t().dot(weight).dot(&spectrum.evecs);
+        for a in 0..k {
+            for b in 0..k {
+                let denominator = raw[a] - raw[b];
+                let coefficient = if denominator.abs() > gap_threshold {
+                    (conditioned[a] - conditioned[b]) / denominator
+                } else if spectrum.conditioning[a] == BetaSchurSpectralConditioning::Raw {
+                    1.0
+                } else {
+                    0.0
+                };
+                folded[[a, b]] *= coefficient;
+            }
+        }
+        Ok(spectrum.evecs.dot(&folded).dot(&spectrum.evecs.t()))
     }
 
     /// #2330 — the ordered-Beta–Bernoulli (non-softmax) sparse-coordinate ½log|A|
@@ -5827,17 +6372,14 @@ mod test_support {
     use gam_linalg::faer_ndarray::FaerEigh;
     use ndarray::{Array1, Array2};
 
+    /// A block in the identity metric, where the pencil is the ordinary spectrum.
     fn spectral_fixture(a: &ndarray::Array2<f64>) -> super::ExactHessianSpectralBlock {
-        let (eigenvalues, eigenvectors) = a.eigh(Side::Lower).expect("symmetric fixture");
-        let spectral_norm = eigenvalues.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
-        super::ExactHessianSpectralBlock {
-            operator: a.clone(),
-            eigenvalues,
-            eigenvectors,
-            metric_scale: Array1::ones(a.nrows()),
-            substituted_stiffness: Array1::zeros(a.nrows()),
-            spectral_norm,
-        }
+        let identity = Array2::<f64>::eye(a.nrows());
+        let metric =
+            super::tests_pencil_classification_2933::DensePencilMetric::new(identity.clone(), &identity)
+                .expect("identity metric");
+        super::SaeManifoldTerm::exact_hessian_spectral_block(a.clone(), &metric)
+            .expect("symmetric fixture")
     }
 
     struct PricedFixture {
@@ -6115,7 +6657,6 @@ mod test_support {
             e,
             None,
             e.len(),
-            |v| Ok(v.dot(&v)),
             "fixture",
             None,
         )?;
@@ -6157,7 +6698,6 @@ mod test_support {
                 &e,
                 None,
                 2,
-                |v| Ok(v.dot(&v)),
                 "rotated fixture",
                 None,
             )
@@ -6306,7 +6846,6 @@ mod test_support {
                     &e,
                     e_beta.as_ref(),
                     e.len(),
-                    |direction| super::ArrowMetric::Joint(&cache).quadratic_form(direction),
                     "joint",
                     None,
                 )
@@ -6435,7 +6974,7 @@ mod test_support {
             // this operator can have, so counting under it is an upper bound on
             // the refusing population and cannot under-report.
             let spectral_norm = eigs.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
-            let floor = super::sae_exact_a_identifiability_floor() * spectral_norm;
+            let floor = super::sae_exact_a_pencil_floor() * spectral_norm;
             let n_neg = eigs.iter().filter(|&&lambda| lambda < -floor).count();
             let mut sorted: Vec<f64> = eigs.to_vec();
             sorted.sort_by(|x, y| x.partial_cmp(y).expect("finite eigenvalues"));
@@ -6498,6 +7037,13 @@ mod test_support {
             gamma.beta += &self.decoder_prior_gap_theta_trace(
                 cache, geometry.joint_pricing.clamp_border_derivative.view(),
             )?;
+            let (_, metric_gamma) = self.evidence_metric_derivative_channels(
+                rho,
+                cache,
+                &geometry.joint_pricing.metric_derivative,
+            )?;
+            gamma.t += &metric_gamma.t;
+            gamma.beta += &metric_gamma.beta;
             Ok(gamma)
         }
     }
@@ -6902,7 +7448,9 @@ mod tests_route_forced_classification_2673 {
         let system = term
             .assemble_arrow_schur(target.view(), &rho, None)
             .expect("undamped arrow-Schur assembly at the converged mode");
-        let options = ArrowSolveOptions::direct().with_positive_definite_evidence();
+        // #2933 F07 — production's evidence factor, whose unit pins are what put a saturated
+        // gate direction inside the pencil band.
+        let options = term.evidence_factor_options();
         let (_delta_t, _delta_beta, cache) =
             solve_arrow_newton_step_with_options(&system, 0.0, 0.0, &options)
                 .expect("undamped factor cache");
@@ -6912,29 +7460,50 @@ mod tests_route_forced_classification_2673 {
         let dense = term
             .materialize_exact_hessian_dense(&rho, target.view(), &cache)
             .expect("dense exact A at the converged mode");
-        let (eigenvalues, eigenvectors) = dense.eigh(Side::Lower).expect("dense exact-A spectrum");
-        let spectral_norm = eigenvalues
+        let spectral_norm = dense.iter().map(|value| value * value).sum::<f64>().sqrt();
+        // #2933 F07 — the band is a property of the pencil `(A, Φ)`, read off production's
+        // own geometry. The gate is only about the classification band, so it aims at the
+        // in-band direction nearest its own edge; an empty band would leave the two routes
+        // nothing to classify differently, which is why #2673's report is not evidence about
+        // the predicate.
+        let geometry = term
+            .materialize_exact_stationarity_geometry(&rho, target.view(), &cache)
+            .expect("dense pencil geometry at the converged mode");
+        let flattest = geometry
+            .band
             .iter()
-            .map(|value| value.abs())
-            .fold(0.0_f64, f64::max);
-
-        // The gate is only about the classification band, so prove the fixture
-        // is in it: the smallest direction must sit within a decade of its own
-        // floor. Far above and this is the #2673 test; below and the dense route
-        // would deflate it and there would be nothing to compare.
-        let smallest = eigenvectors.column(0);
-        let metric = ArrowMetric::Joint(&cache)
-            .quadratic_form(smallest)
-            .expect("B quadratic form of the smallest direction");
-        let floor = sae_exact_a_direction_floor(dim, spectral_norm, metric);
-        let ratio = eigenvalues[0].abs() / floor;
-        assert!(
-            (1.0..10.0).contains(&ratio),
-            "#2828 item 2: this gate is stated ON the classification band; the smallest \
-             exact-A direction is {:.6e} against a floor of {floor:.6e} (ratio {ratio:.4}, \
-             vBv={metric:.6e}, ||A||={spectral_norm:.6e})",
-            eigenvalues[0]
+            .copied()
+            .max_by(|&a, &b| {
+                (geometry.eigenvalues[a].abs() / geometry.rank_floor(a))
+                    .total_cmp(&(geometry.eigenvalues[b].abs() / geometry.rank_floor(b)))
+            })
+            .expect(
+                "#2828 item 2: this gate is stated ON the classification band, but the converged \
+                 Patch-D mode has no in-band pencil direction",
+            );
+        let steepest = (0..dim)
+            .max_by(|&a, &b| {
+                geometry.eigenvalues[a]
+                    .abs()
+                    .total_cmp(&geometry.eigenvalues[b].abs())
+            })
+            .expect("non-empty spectrum");
+        eprintln!(
+            "#2828 item 2: {} in-band pencil directions; nearest its edge μ={:.6e} against \
+             {:.6e}",
+            geometry.band.len(),
+            geometry.eigenvalues[flattest],
+            geometry.rank_floor(flattest),
         );
+        let metric = ArrowMetric::Joint(&cache)
+            .prepare()
+            .expect("prepared evidence metric");
+        let smallest = metric
+            .apply(geometry.eigenvectors.column(flattest))
+            .expect("metric image of the flattest direction");
+        let resolved = metric
+            .apply(geometry.eigenvectors.column(steepest))
+            .expect("metric image of the steepest direction");
 
         // (1) the OPERATORS, column by column.
         let mut worst_column = 0.0_f64;
@@ -6971,14 +7540,13 @@ mod tests_route_forced_classification_2673 {
              responses differ by the whole `1/λ` of that direction."
         );
 
-        // (2) the SOLVES, on a right-hand side aimed at the band. A rhs that
-        // missed the near-null directions would leave the two routes nothing to
-        // classify differently — which is exactly why #2673's report is not
-        // evidence about the predicate.
-        let resolved = eigenvectors.column(dim - 1).to_owned();
+        // (2) the SOLVES, on a right-hand side aimed at the band: the dual images `Φw` of
+        // the flattest and the steepest pencil directions. A rhs that missed the near-null
+        // directions would leave the two routes nothing to classify differently — which is
+        // exactly why #2673's report is not evidence about the predicate.
         for (label, flat) in [
-            ("null-only", smallest.to_owned()),
-            ("null+resolved", &smallest.to_owned() + &resolved),
+            ("null-only", smallest.clone()),
+            ("null+resolved", &smallest + &resolved),
         ] {
             let rhs = SaeArrowVector {
                 t: flat.slice(s![..total_t]).to_owned(),
@@ -7000,15 +7568,23 @@ mod tests_route_forced_classification_2673 {
             let dense_flat = flatten(&dense_solution);
             let free_flat = flatten(&free_solution);
             let rhs_norm = norm(&flat);
+            // The part of the right-hand side the pencil band removes, `ΦW_Z W_Zᵀ rhs`.
+            let band_coefficients = Array1::from_iter(
+                geometry
+                    .band
+                    .iter()
+                    .map(|&index| geometry.eigenvectors.column(index).dot(&flat)),
+            );
+            let projected = &flat - &geometry.band_metric_images.dot(&band_coefficients);
             // Both must actually SOLVE. The defect this gate was written for was
             // silent precisely because the matrix-free route returned a finite
             // vector that reduced no residual at all.
             for (who, solution) in [("dense", &dense_flat), ("matrix-free", &free_flat)] {
-                let residual = norm(&(&dense.dot(solution) - &flat));
+                let residual = norm(&(&dense.dot(solution) - &projected));
                 assert!(
                     residual <= 1.0e-6 * rhs_norm,
                     "#2828 item 2 ({label}): the {who} route returned a vector with \
-                     ||A x − rhs|| = {residual:.6e} against ||rhs|| = {rhs_norm:.6e}. A \
+                     ||A x − P rhs|| = {residual:.6e} against ||rhs|| = {rhs_norm:.6e}. A \
                      residual at the scale of the right-hand side is not a solution."
                 );
             }
@@ -7033,7 +7609,7 @@ mod tests_route_forced_classification_2673 {
     /// dense spectral path, and `√ε` on the pencil curvature
     /// `μ = xᵀAx/xᵀBx` in the former inverse-power solver. They
     /// are now ONE predicate in ONE metric — see
-    /// [`sae_exact_a_identifiability_floor`] and
+    /// [`sae_exact_a_pencil_floor`] and
     /// [`ExactHessianSpectralBlock::rank_floor`] — so the two routes below
     /// cannot classify a direction differently by construction, and this test is
     /// the executable statement of that.
@@ -7410,28 +7986,36 @@ mod tests_damped_residual_path {
             if !flat.iter().all(|value| value.is_finite()) {
                 return Err("damped residual step: residual contains a non-finite value".to_string());
             }
+            // The residual's dual expansion `g = Σᵢ cᵢ Φwᵢ`, `cᵢ = wᵢᵀg`. Off the band
+            // `Φwᵢ = Awᵢ/μᵢ`; on it the block carries the image itself.
             let coefficients = self.eigenvectors.t().dot(&flat);
             let mut step_coefficients = Array1::<f64>::zeros(spectral_dim);
-            let mut model_coefficients = Array1::<f64>::zeros(spectral_dim);
+            let mut model = Array1::<f64>::zeros(dim);
             let mut retained_rank = 0usize;
+            let mut band_position = 0usize;
             for index in 0..spectral_dim {
-                let lambda = self.eigenvalues[index];
+                let mu = self.eigenvalues[index];
                 let floor = self.rank_floor(index);
                 let null_band = floor * floor;
-                let denominator = lambda * lambda + nu;
+                let denominator = mu * mu + nu;
                 let coefficient = coefficients[index];
+                let image = if self.band.get(band_position) == Some(&index) {
+                    band_position += 1;
+                    self.band_metric_images.column(band_position - 1).to_owned()
+                } else {
+                    self.operator.dot(&self.eigenvectors.column(index)) / mu
+                };
                 let surviving = if denominator > null_band {
-                    // Δ solves `(A² + ν) Δ = −A g` in this direction.
-                    step_coefficients[index] = -lambda * coefficient / denominator;
+                    // Δ solves `(AΦ⁻¹A + νΦ) Δ = −AΦ⁻¹g` in this direction.
+                    step_coefficients[index] = -mu * coefficient / denominator;
                     retained_rank += 1;
                     coefficient * nu / denominator
                 } else {
                     coefficient
                 };
-                model_coefficients[index] = surviving;
+                model.scaled_add(surviving, &image);
             }
             let solution = self.eigenvectors.dot(&step_coefficients);
-            let model = self.eigenvectors.dot(&model_coefficients);
             Ok(DampedResidualPathPoint {
                 step: SaeArrowVector {
                     t: solution.slice(s![..total_t]).to_owned(),
@@ -7459,6 +8043,10 @@ mod tests_clamp_basin_deflation_2333;
 #[cfg(test)]
 #[path = "tests_residual_curvature_rows_2731.rs"]
 mod tests_residual_curvature_rows_2731;
+
+#[cfg(test)]
+#[path = "tests_pencil_classification_2933.rs"]
+mod tests_pencil_classification_2933;
 
 /// #2731 — test-side names for the two halves production reads together from
 /// `SaeManifoldTerm::materialize_exact_hessian_dense_with_gap_border`.

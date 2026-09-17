@@ -3687,7 +3687,7 @@ fn two_floor_overlap_predicate_detects_both_crossings_2673() {
 ///   eigenvalue of `A`. Inside the band the direction is the radial-gauge
 ///   quotient null and is priced `log 1 = 0`; below `−floor` #2336's saddle
 ///   escape triggers.
-/// * `sae_exact_a_identifiability_floor()` (`sqrt(EPSILON)`) on the GENERALIZED
+/// * the identifiability floor (`sqrt(EPSILON)`, now `sae_exact_a_pencil_floor()`) on the GENERALIZED
 ///   Rayleigh quotient `μ = xᵀAx / xᵀBx` of the IFT solution — a `B`-relative
 ///   ratio, not an eigenvalue of anything.
 ///
@@ -6389,4 +6389,119 @@ impl SaeBasisEvaluator for TestPeriodicEvaluator {
     fn evaluate(&self, coords: ArrayView2<'_, f64>) -> Result<(Array2<f64>, Array3<f64>), String> {
         Ok(periodic_basis(&coords.to_owned()))
     }
+}
+
+/// #2933 F07 — an independent classification of a dense operator in the evidence factor's pencil, for
+/// the oracles that re-derive production's band from their own operands: a dense `Φ` and
+/// `Φ − B_raw` read off metric applies, and the symmetric square-root reduction
+/// `Φ^{-1/2}AΦ^{-1/2}` where production whitens with the cache's block Cholesky factor. Only
+/// the scalar band rule is shared, so a second copy of the rule cannot drift from
+/// production's.
+pub(crate) struct PencilOracle {
+    pub(crate) values: Array1<f64>,
+    /// `Φ`-orthonormal generalized eigenvectors, one column per value.
+    pub(crate) vectors: Array2<f64>,
+    pub(crate) floors: Vec<f64>,
+    pub(crate) metric_log_det: f64,
+    pub(crate) operator_frobenius: f64,
+    pub(crate) metric_frobenius: f64,
+}
+
+impl PencilOracle {
+    pub(crate) fn new(operator: &Array2<f64>, cache: &ArrowFactorCache) -> Self {
+        use super::construction::ExactAPencilMetric as _;
+        use crate::manifold::{FaerEigh, Side};
+        let dim = operator.nrows();
+        let phi = dense_evidence_metric(cache);
+        let metric = super::construction::ArrowMetric::Joint(cache)
+            .prepare()
+            .expect("prepared evidence metric");
+        let mut substituted = Array2::<f64>::zeros((dim, dim));
+        let mut unit = Array1::<f64>::zeros(dim);
+        for column in 0..dim {
+            unit[column] = 1.0;
+            substituted.column_mut(column).assign(
+                &metric
+                    .substituted_image(unit.view())
+                    .expect("substituted stiffness image"),
+            );
+            unit[column] = 0.0;
+        }
+        let operator = (operator + &operator.t()) * 0.5;
+        let (phi_values, phi_vectors) = phi.eigh(Side::Lower).expect("Φ eigendecomposition");
+        assert!(
+            phi_values.iter().all(|&value| value > 0.0),
+            "the evidence factor must be positive definite"
+        );
+        let inverse_root = phi_vectors
+            .dot(&Array2::from_diag(&phi_values.mapv(|value| 1.0 / value.sqrt())))
+            .dot(&phi_vectors.t());
+        let whitened = inverse_root.dot(&operator).dot(&inverse_root);
+        let whitened = (&whitened + &whitened.t()) * 0.5;
+        let (values, rotation) = whitened
+            .eigh(Side::Lower)
+            .expect("whitened pencil eigendecomposition");
+        let vectors = inverse_root.dot(&rotation);
+        let frobenius = |matrix: &Array2<f64>| matrix.iter().map(|value| value * value).sum::<f64>().sqrt();
+        let operator_frobenius = frobenius(&operator);
+        let metric_frobenius = frobenius(&phi);
+        let floors = (0..dim)
+            .map(|index| {
+                let direction = vectors.column(index);
+                let substitution = direction.dot(&substituted.dot(&direction)).max(0.0);
+                let resolution = super::construction::sae_exact_a_pencil_resolution(
+                    dim,
+                    direction.dot(&direction),
+                    operator_frobenius,
+                    metric_frobenius,
+                    values[index],
+                );
+                super::construction::sae_exact_a_band_edge(values[index], resolution, substitution)
+            })
+            .collect();
+        Self {
+            values,
+            vectors,
+            floors,
+            metric_log_det: phi_values.iter().map(|value| value.ln()).sum(),
+            operator_frobenius,
+            metric_frobenius,
+        }
+    }
+
+    pub(crate) fn retained(&self) -> Vec<usize> {
+        (0..self.values.len())
+            .filter(|&index| self.values[index] > self.floors[index])
+            .collect()
+    }
+
+    pub(crate) fn negative(&self) -> Vec<usize> {
+        (0..self.values.len())
+            .filter(|&index| self.values[index] < -self.floors[index])
+            .collect()
+    }
+
+    pub(crate) fn in_band(&self) -> usize {
+        (0..self.values.len())
+            .filter(|&index| self.values[index].abs() <= self.floors[index])
+            .count()
+    }
+}
+
+/// The evidence factor's `Φ` materialized by columns of production's metric apply (#2933 F07).
+pub(crate) fn dense_evidence_metric(cache: &ArrowFactorCache) -> Array2<f64> {
+    use super::construction::ExactAPencilMetric as _;
+    let dim = cache.delta_t_len() + cache.k;
+    let metric = super::construction::ArrowMetric::Joint(cache)
+        .prepare()
+        .expect("prepared evidence metric");
+    let mut out = Array2::<f64>::zeros((dim, dim));
+    let mut unit = Array1::<f64>::zeros(dim);
+    for column in 0..dim {
+        unit[column] = 1.0;
+        out.column_mut(column)
+            .assign(&metric.apply(unit.view()).expect("metric apply"));
+        unit[column] = 0.0;
+    }
+    (&out + &out.t()) * 0.5
 }

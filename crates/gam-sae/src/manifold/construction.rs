@@ -897,6 +897,7 @@ impl SaeManifoldTerm {
             best_cocollapse_incumbent: None,
             best_fit_incumbent: None,
             structural_cocollapse_reseeds: 0,
+            evidence_root_telemetry: EvidenceRootTelemetry::default(),
             decoder_repulsion_gate: None,
             barrier_coactivation_gate: None,
             amplitude_barrier_gate: None,

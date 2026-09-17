@@ -4608,12 +4608,12 @@ mod eigh_ordering_contract_tests {
     /// `FaerEigh::eigh` returns eigenvalues in ASCENDING order, and at least one
     /// consumer's correctness depends on it while nothing pinned it.
     ///
-    /// `gam-sae`'s `cluster_stable_eigh`
-    /// (`crates/gam-sae/src/manifold/construction_exact_hessian.rs`) finds each
-    /// degenerate cluster with
+    /// `gam-sae`'s `canonicalize_exact_a_rank_clusters`
+    /// (`crates/gam-sae/src/manifold/exact_stationarity_krylov.rs`) finds each
+    /// numerically repeated cluster with
     ///
     /// ```text
-    /// while j < dim && eigs[j] == eigs[i] { j += 1; }
+    /// while end < values.len() && values[end] - values[start] <= envelope { end += 1; }
     /// ```
     ///
     /// — a scan for a RUN of equal values, which only enumerates a cluster when
@@ -4626,7 +4626,7 @@ mod eigh_ordering_contract_tests {
     /// with no test between it and the fit.
     ///
     /// Measured 2026-09-05 while attributing 1,383,210 `eigh` calls in one hung
-    /// SAE test: `cluster_stable_eigh` is one of the two callers the native
+    /// SAE test: the exact-A spectral block is one of the two callers the native
     /// stacks caught in the act, reached from `terminal_exact_newton_polish` ->
     /// `materialize_exact_stationarity_geometry` -> `exact_hessian_spectral_block`.
     /// The other is `gam_solve::arrow_schur::factorization::row_sub_floor_null_directions`.
@@ -4663,7 +4663,7 @@ mod eigh_ordering_contract_tests {
                         assert!(
                             values[w - 1] <= values[w],
                             "n={n} seed={seed} scale={scale:e}: eigenvalues are NOT ascending at \
-                             index {w} ({:e} then {:e}). `cluster_stable_eigh` scans for RUNS of \
+                             index {w} ({:e} then {:e}). `canonicalize_exact_a_rank_clusters` scans for RUNS of \
                              equal eigenvalues and would silently stop finding degenerate clusters.",
                             values[w - 1],
                             values[w]
@@ -4719,7 +4719,7 @@ mod eigh_ordering_contract_tests {
             assert!(
                 (values[w] - 2.0).abs() < 1.0e-9,
                 "the three lambda=2 eigenvalues must occupy indices 0..3 contiguously, \
-                 or `cluster_stable_eigh`'s run scan splits the cluster: {values:?}"
+                 or `canonicalize_exact_a_rank_clusters`'s run scan splits the cluster: {values:?}"
             );
         }
         for w in 3..5 {

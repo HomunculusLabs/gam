@@ -87,23 +87,28 @@ pub(crate) const fn sae_exact_stationarity_block_bytes(dim: usize) -> usize {
 
 /// Conservative count of named dense allocations in the exact-A route.
 ///
-/// At the peak in the coordinate basin differential, these allocations can
-/// coexist. Every rectangular factor below is bounded by `dim × dim`; adding
-/// those individual bounds is conservative for every negative-subspace rank.
+/// At the peak in the pencil basin differential, these allocations can coexist.
+/// Every rectangular factor below is bounded by `dim × dim`; adding those
+/// individual bounds is conservative for every negative-subspace and band rank.
 ///
-///   1–5. joint operator, joint eigenvectors, joint differential, coordinate
-///        operator, coordinate eigenvectors.
-///   6–8. classified basin's negative basis, rotation, rotated basis.
-///   9–10. coordinate A differential and restricted basin inverse.
+///   1–3. joint operator, `Φ`-orthonormal pencil eigenvectors, band metric images.
+///   4–6. classified basin's negative basis, rotation, rotated basis.
+///   7–9. retained-inverse differential, metric differential, border clamp
+///        differential.
+///   10. restricted basin inverse.
 ///   11–13. complement basis, E cross block, Sylvester response.
-///   14–15. first cross-product temporary and embedded symmetric cross block.
+///   14–17. the operator and metric responses' cross-product temporaries and
+///        embedded symmetric cross blocks.
 ///
-/// The scalar value stops at basin classification and has a smaller live set.
-/// The coordinate eigensolve and final zero-border embedding also fit within
-/// this bound. Backend eigensolver/BLAS workspace remains additional to these
-/// named Rust allocations. Update this enumeration when the allocating code
-/// in `construction_exact_hessian.rs` changes.
-pub(crate) const SAE_EXACT_STATIONARITY_LIVE_DIM_BLOCKS: usize = 15;
+/// The whitening holds at most three blocks (operator, `L⁻¹A`, `L⁻¹AL⁻ᵀ`, then
+/// operator, rotation, eigenvectors) before 4–17 exist. The metric derivative
+/// channel folds the metric differential into majorizer coordinates after 10–17
+/// are released, with a weight, a border fold and a remainder. The scalar value
+/// stops at basin classification and has a smaller live set. Backend
+/// eigensolver/BLAS workspace remains additional to these named Rust allocations.
+/// Update this enumeration when the allocating code in
+/// `construction_exact_hessian.rs` changes (#2933 F07).
+pub(crate) const SAE_EXACT_STATIONARITY_LIVE_DIM_BLOCKS: usize = 17;
 
 /// Resident bytes of the exact stationarity route at its peak.
 pub(crate) const fn sae_exact_stationarity_resident_bytes(dim: usize) -> usize {

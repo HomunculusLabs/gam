@@ -3083,19 +3083,12 @@ impl SaeManifoldTerm {
                     t: residual_t,
                     beta: sys.gb.clone(),
                 };
-                let solution = match self
+                let solve = self
                     .materialize_exact_stationarity_geometry(rho_fixed, target, &cache)
-                    .and_then(|geometry| geometry.solve_stationarity(&residual))
-                {
-                    Ok(solution) => solution,
-                    Err(err) => {
-                        log::debug!("[SAE-ROOT] no root step: dense exact-A pseudoinverse: {err}");
-                        return Ok(moved);
-                    }
-                };
-                SaeArrowVector {
-                    t: -&solution.t,
-                    beta: -&solution.beta,
+                    .and_then(|geometry| geometry.solve_stationarity(&residual));
+                match self.evidence_root_step_from_pencil(solve) {
+                    Some(step) => step,
+                    None => return Ok(moved),
                 }
             } else {
                 let exact = match self.exact_a_evidence_system(target, rho_fixed, &sys, 1.0) {
@@ -4957,7 +4950,7 @@ impl SaeManifoldTerm {
     /// Hessian by construction. `B` is the positive-definite scale /
     /// preconditioner for `A` — and, since #2673, the METRIC every direction of
     /// `A` is classified in at both the value and the gradient site (see
-    /// `sae_exact_a_identifiability_floor`); a
+    /// `sae_exact_a_pencil_floor`); a
     /// preconditioner is not the operator it preconditions. Pricing `log|B|`
     /// here while the dense lane prices `log|A|` is exactly the defect: the same
     /// statistical state was ranked ~22 criterion units apart because a host
@@ -8329,20 +8322,19 @@ impl SaeManifoldTerm {
         )
         .map_err(|err| format!("frame-marginal shape covariance: unframed evidence factor: {err}"))?;
         let total_t = cache.delta_t_len();
-        let (a, e_beta) =
+        let (a, _gap_border) =
             unframed.materialize_exact_hessian_dense_with_gap_border(rho, target, &cache)?;
-        let e_diag = unframed.materialize_ard_concave_clamp_diagonal(rho, &cache)?;
         let operator = tangent.joint_operator(&a, total_t)?;
-        let e_tangent = e_beta.as_ref().map(|gap| tangent.congruence(gap));
+        // #2933 F07 — the tangent coordinates' pencil, in the pulled-back evidence metric
+        // `diag(I, liftᵀ)·Φ·diag(I, lift)`, so the pushed-forward covariance is covariant in
+        // the frame coordinates it names.
         let joint = Self::exact_hessian_spectral_block(
             operator,
-            &e_diag,
-            e_tangent.as_ref(),
-            total_t,
-            ArrowMetric::JointLifted {
+            &ArrowMetric::JointLifted {
                 cache: &cache,
                 lift: &tangent.lift,
-            },
+            }
+            .prepare()?,
         )?;
         Ok(FrameMarginalInformation {
             tangent,
@@ -8439,13 +8431,14 @@ impl ExactHessianSpectralBlock {
     /// direction (#2933 F33).
     ///
     /// Classification is [`Self::rank_floor`], the one predicate the value, the
-    /// differential and the stationarity solve read: `λᵢ < −floor(i)` is a
-    /// negative direction, `|λᵢ| ≤ floor(i)` is unidentified and carries no
-    /// variance, `λᵢ > floor(i)` is retained. With `W = V_β[:, retained]·Λ^{−½}`
-    /// each block is the Gram `W_r W_rᵀ`, positive semidefinite by construction.
-    /// The robust blocks are those of the row sandwich over `sandwich`, whose
-    /// aggregate-mass carriers `c_k u_k` are projected here onto the retained
-    /// half-inverse, `z_k = Λ^{−½}V_retᵀ(c_k u_k)`.
+    /// differential and the stationarity solve read, on the generalized eigenpairs
+    /// `(μᵢ, wᵢ)` of the pencil `(A, Φ)` (#2933 F07): `μᵢ < −floor(i)` is a negative
+    /// direction, `|μᵢ| ≤ floor(i)` is unidentified and carries no variance, `μᵢ > floor(i)`
+    /// is retained. `A⁺ = Σ_retained wᵢwᵢᵀ/μᵢ` is the covariant pseudo-inverse, so with
+    /// `F = W_β[:, retained]·M^{−½}` each block is the Gram `F_r F_rᵀ`, positive
+    /// semidefinite by construction. The robust blocks are those of the row sandwich over
+    /// `sandwich`, whose aggregate-mass carriers `c_k u_k` are projected here onto the
+    /// retained half-inverse, `z_k = M^{−½}W_retᵀ(c_k u_k)`.
     fn border_selected_inverse_blocks(
         &self,
         total_t: usize,
@@ -8529,7 +8522,7 @@ struct FrameMarginalInformation {
     /// `vec B = T·ξ`, the cross curvature `E` and the per-atom `ξ` ranges.
     tangent: LearnedFrameTangentMap,
     /// The joint `(t, ξ)` operator `[[A_tt, A_tB·T], [Tᵀ·A_Bt, Tᵀ·A_BB·T + E]]` and
-    /// its eigensystem classified through `ArrowMetric::JointLifted`.
+    /// its pencil eigensystem in the pulled-back metric `ArrowMetric::JointLifted`.
     joint: ExactHessianSpectralBlock,
     /// The frozen evidence factor of the unframed assembly, in `(t, vec B)`.
     cache: ArrowFactorCache,
@@ -8835,8 +8828,9 @@ mod shape_covariance_observed_information_2933_f33_tests {
         hessian
     }
 
-    /// An independent spectral classification of a dense operator: plain `eigh`
-    /// and the shared scalar band rule with this oracle's own operands.
+    /// An independent classification of a dense operator in the evidence factor's
+    /// pencil, with this oracle's own operands and the shared scalar band rule
+    /// (#2933 F07).
     struct OracleSpectrum {
         values: Array1<f64>,
         vectors: Array2<f64>,
@@ -8846,35 +8840,13 @@ mod shape_covariance_observed_information_2933_f33_tests {
     }
 
     fn classify(operator: &Array2<f64>, cache: &ArrowFactorCache) -> OracleSpectrum {
-        let dim = operator.nrows();
-        let (values, vectors) = operator.eigh(Side::Lower).expect("oracle eigendecomposition");
-        let spectral_norm = values.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
-        let metric = ArrowMetric::Joint(cache);
-        let mut retained = Vec::new();
-        let mut negative = 0usize;
-        let mut in_band = 0usize;
-        for index in 0..dim {
-            let direction = vectors.column(index);
-            let edge = sae_exact_a_band_edge(
-                values[index],
-                dim,
-                spectral_norm,
-                metric.quadratic_form(direction).expect("B quadratic form"),
-                metric
-                    .substituted_stiffness(direction)
-                    .expect("substituted stiffness"),
-            );
-            if values[index] < -edge {
-                negative += 1;
-            } else if values[index] > edge {
-                retained.push(index);
-            } else {
-                in_band += 1;
-            }
-        }
+        let oracle = crate::manifold::tests::PencilOracle::new(operator, cache);
+        let retained = oracle.retained();
+        let negative = oracle.negative().len();
+        let in_band = oracle.in_band();
         OracleSpectrum {
-            values,
-            vectors,
+            values: oracle.values,
+            vectors: oracle.vectors,
             retained,
             negative,
             in_band,
@@ -9107,14 +9079,11 @@ mod shape_covariance_observed_information_2933_f33_tests {
         let largest = values.iter().copied().fold(0.0_f64, f64::max);
         assert!(smallest > 0.0, "the majorizer is positive definite");
         let tolerance = dim as f64 * f64::EPSILON * (largest / smallest);
-        let block = SaeManifoldTerm::exact_hessian_spectral_block(
-            b,
-            &Array1::<f64>::zeros(total_t),
-            None,
-            total_t,
-            ArrowMetric::Joint(&cache),
-        )
-        .expect("spectral block of B");
+        let metric = ArrowMetric::Joint(&cache)
+            .prepare()
+            .expect("prepared evidence metric");
+        let block = SaeManifoldTerm::exact_hessian_spectral_block(b, &metric)
+            .expect("spectral block of B");
         // Only the model blocks are checked here; the row-sandwich meat is inert.
         let sandwich = RowSandwichMeat {
             meat: Array2::<f64>::zeros((cache.k, cache.k)),
@@ -9149,54 +9118,94 @@ mod shape_covariance_observed_information_2933_f33_tests {
     /// #2933 F33 — an observed information with resolved negative curvature has
     /// no Laplace covariance.
     ///
-    /// The #2336 saddle specimen converges to a state the value path prices
-    /// through the ARD concave clamp. The covariance must refuse it, naming the
-    /// oracle's negative directions, with explicit `None` bands, rather than
-    /// invert either the clamped basin operator or the majorizer.
+    /// No converged fixture carries a resolved negative direction at its criterion
+    /// state. The #2336 ARD saddle this test used to take, the ordered
+    /// Beta--Bernoulli patchd fixture, this softmax basin and the periodic circle all
+    /// classify `negative = 0` in the evidence pencil (#2933 F07 census). The
+    /// specimen is therefore built exactly in that pencil. With the converged basin's
+    /// smallest retained pair `(μ, w)`, `Aw = μΦw` and `wᵀΦw = 1`, the rank-one update
+    /// `A′ = A − 2μ·(Φw)(Φw)ᵀ` sends `w` to `−μ` and leaves every pair `Φ`-orthogonal
+    /// to `w` unchanged. `A′` has exactly one negative direction, resolved as `μ` was.
+    /// It enters production's own spectral-block constructor and shape-covariance
+    /// entry, so the refusal predicate under test is production's, counted against
+    /// the independent pencil oracle. The two classifications must agree to the
+    /// oracle's band edge, the resolution it classifies at.
     #[test]
     fn shape_covariance_refuses_indefinite_observed_information_2933_f33() {
-        let (mut term, mut target, mut rho) =
-            crate::manifold::tests_recovery_split_780::gamma_fd_tiny_fixture();
-        let (n, p) = target.dim();
-        for row in 0..n {
-            for col in 0..p {
-                let theta = std::f64::consts::TAU * (row as f64 + 0.35) / n as f64;
-                target[[row, col]] += 0.6 * (3.0 * theta + 0.5 * col as f64).sin();
-            }
-        }
-        rho.log_lambda_sparse = -0.5;
-        for value in rho.log_lambda_smooth.iter_mut() {
-            *value = -1.0;
-        }
-        for axis in rho.log_ard.iter_mut() {
-            for value in axis.iter_mut() {
-                *value = -0.5;
-            }
-        }
-        let (value, loss, cache) = term
-            .penalized_quasi_laplace_criterion_with_cache(
-                target.view(),
-                &rho,
-                None,
-                40,
-                0.4,
-                1.0e-6,
-                1.0e-6,
-            )
-            .expect("the saddle specimen prices finite");
-        assert!(value.is_finite());
-        let a = term
-            .materialize_exact_hessian_dense_by_columns(&rho, target.view(), &cache)
-            .expect("column-loop A");
-        let oracle = classify(&((&a + &a.t()) * 0.5), &cache);
-        assert!(
-            oracle.negative > 0,
-            "the specimen must carry resolved negative observed curvature"
+        let (term, target, rho, loss, cache) = converged_basin();
+        let (a, _gap) = term
+            .materialize_exact_hessian_dense_with_gap_border(&rho, target.view(), &cache)
+            .expect("exact observed information at the converged basin");
+        let a = (&a + &a.t()) * 0.5;
+        let dim = a.nrows();
+        let basin = crate::manifold::tests::PencilOracle::new(&a, &cache);
+        let flip = basin
+            .retained()
+            .into_iter()
+            .min_by(|&left, &right| basin.values[left].total_cmp(&basin.values[right]))
+            .expect("the converged basin retains a direction");
+        let mu = basin.values[flip];
+        let metric = ArrowMetric::Joint(&cache)
+            .prepare()
+            .expect("prepared evidence metric");
+        let phi_w = metric
+            .apply(basin.vectors.column(flip))
+            .expect("evidence metric apply");
+        let flipped = &a
+            - &Array2::from_shape_fn((dim, dim), |(row, col)| 2.0 * mu * phi_w[row] * phi_w[col]);
+        let specimen = crate::manifold::tests::PencilOracle::new(&flipped, &cache);
+        let negative = specimen.negative();
+        let most_negative = specimen.values.iter().copied().fold(f64::INFINITY, f64::min);
+        let negative_edge = negative
+            .first()
+            .map_or(f64::NAN, |&index| specimen.floors[index]);
+        let listing = |values: &Array1<f64>, edge: &dyn Fn(usize) -> f64| -> String {
+            (0..values.len())
+                .map(|index| format!("{:.3e}/{:.1e}", values[index], edge(index)))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let euclidean = |operator: &Array2<f64>| -> (Array1<f64>, f64) {
+            let (values, _) = operator
+                .eigh(Side::Lower)
+                .expect("Euclidean eigendecomposition");
+            let norm = values.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
+            (values, dim as f64 * f64::EPSILON * norm)
+        };
+        let (basin_euclidean, basin_euclidean_edge) = euclidean(&a);
+        let (flipped_euclidean, flipped_euclidean_edge) = euclidean(&flipped);
+        eprintln!(
+            "[#2933 F33] refusal spectra, value/edge. basin A, Euclidean dim·ε·‖A‖₂: {} | basin \
+             A, evidence pencil: {} | A′, Euclidean: {} | A′, evidence pencil: {}",
+            listing(&basin_euclidean, &|_| basin_euclidean_edge),
+            listing(&basin.values, &|index| basin.floors[index]),
+            listing(&flipped_euclidean, &|_| flipped_euclidean_edge),
+            listing(&specimen.values, &|index| specimen.floors[index])
         );
-        let most_negative = oracle.values.iter().copied().fold(f64::INFINITY, f64::min);
-        let geometry = term
-            .materialize_exact_stationarity_geometry(&rho, target.view(), &cache)
-            .expect("exact stationarity geometry at the saddle specimen");
+        eprintln!(
+            "[#2933 F33] refusal specimen: basin negative {} in band {}, flipped μ {mu:.6e} \
+             (edge {:.3e}); flipped operator negative {} in band {}, most negative μ \
+             {most_negative:.6e} (edge {negative_edge:.3e})",
+            basin.negative().len(),
+            basin.in_band(),
+            basin.floors[flip],
+            negative.len(),
+            specimen.in_band()
+        );
+        assert_eq!(
+            (basin.negative().len(), basin.in_band()),
+            (0, 0),
+            "the converged basin must be positive definite in the evidence pencil"
+        );
+        assert_eq!(negative.len(), 1, "the flip must resolve exactly one negative direction");
+        assert!(
+            (most_negative + mu).abs() <= negative_edge,
+            "the flipped curvature {most_negative:.6e} must be −μ = {:.6e} to the band edge \
+             {negative_edge:.3e}",
+            -mu
+        );
+        let geometry = SaeManifoldTerm::exact_hessian_spectral_block(flipped, &metric)
+            .expect("production spectral block of the flipped operator");
         let information = term
             .exact_observed_information_shape_covariance(&geometry, &rho, target.view(), &cache)
             .expect("exact observed information");
@@ -9207,12 +9216,11 @@ mod shape_covariance_observed_information_2933_f33_tests {
                     most_negative_curvature,
                 },
             ) => {
-                assert_eq!(*negative_directions, oracle.negative);
+                assert_eq!(*negative_directions, negative.len());
                 assert!(
-                    (most_negative_curvature - most_negative).abs()
-                        <= f64::EPSILON.sqrt() * most_negative.abs(),
+                    (most_negative_curvature - most_negative).abs() <= negative_edge,
                     "most negative curvature {most_negative_curvature:.6e} against the oracle \
-                     {most_negative:.6e}"
+                     {most_negative:.6e} (band edge {negative_edge:.3e})"
                 );
             }
             other => panic!("an indefinite observed information must be refused; got {other:?}"),

@@ -262,8 +262,9 @@ impl SaeManifoldTerm {
     /// `tr(A⁺G)` and each frame's residual dof off the materialized exact
     /// stationarity eigensystem.
     ///
-    /// With the retained eigenpairs `(λᵢ, vᵢ)` and `W_x = VᵀG_xV`,
-    /// `tr(A⁺G) = Σᵢ Wᵢᵢ/λᵢ` and `tr(A⁺G_aA⁺G_b) = Σᵢⱼ (W_a)ᵢⱼ(W_b)ⱼᵢ/(λᵢλⱼ)`. The
+    /// With the retained generalized eigenpairs `(μᵢ, wᵢ)` of the pencil `(A, Φ)`, so that
+    /// `A⁺ = Σ_retained wᵢwᵢᵀ/μᵢ` (#2933 F07), and `W_x = WᵀG_xW`,
+    /// `tr(A⁺G) = Σᵢ Wᵢᵢ/μᵢ` and `tr(A⁺G_aA⁺G_b) = Σᵢⱼ (W_a)ᵢⱼ(W_b)ⱼᵢ/(μᵢμⱼ)`. The
     /// likelihood frame's `‖Ω^{½}RΩ^{−½}‖²_F` is `tr(A⁺GA⁺G)`. Under a whitening metric
     /// the raw frame's `‖R‖²_F` for `R = JA⁺JᵀΩ` is `tr(A⁺G_aA⁺G_b)` with
     /// `G_a = JᵀΩ²J` and `G_b = JᵀJ`.

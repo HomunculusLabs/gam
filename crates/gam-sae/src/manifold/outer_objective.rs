@@ -520,6 +520,13 @@ pub struct OuterProbeTelemetry {
     /// Installed waypoints that were bit-identical to the objective's literal
     /// target scalar state.
     pub reactive_target_restores: usize,
+    /// #2228 / #2933 F07 — dense root refinements whose pencil band held a direction while
+    /// the resolvable complement still carried a step.
+    pub root_band_holds: usize,
+    /// Dense root refinements skipped because the band held every direction.
+    pub root_band_skips: usize,
+    /// Dense root refinements skipped because the geometry or its solve failed.
+    pub root_solve_failures: usize,
 }
 
 impl OuterProbeTelemetry {
@@ -1060,6 +1067,8 @@ impl SaeManifoldOuterObjective {
         term.dictionary_cocollapse_reseeds = 0;
         term.best_cocollapse_incumbent = None;
         term.structural_cocollapse_reseeds = 0;
+        // #2228 — one objective, one root-refinement ledger, shared by every clone it takes.
+        term.evidence_root_telemetry = Default::default();
         // #2933 F05 — a term handed in with its collapse-prevention gates already
         // frozen declares them; otherwise the first priced root chooses them.
         let collapse_prevention_gates = term
@@ -1568,7 +1577,15 @@ impl SaeManifoldOuterObjective {
     /// evaluation counts). The wide-`p` acceptance test asserts these counts stay
     /// bounded (a PROBE-COUNT budget, per SPEC's ban on wall-clock budgets).
     pub fn probe_telemetry(&self) -> OuterProbeTelemetry {
-        self.probe_telemetry
+        // #2228 — the root-refinement ledger lives on the term and every clone shares it, so
+        // a value probe's saved-term restore cannot erase it; it is read here.
+        let root = self.term.evidence_root_telemetry.counts();
+        OuterProbeTelemetry {
+            root_band_holds: root.band_holds,
+            root_band_skips: root.band_skips,
+            root_solve_failures: root.solve_failures,
+            ..self.probe_telemetry
+        }
     }
 
     /// Record one amortized warm-start attempt. Once selected, this accelerator

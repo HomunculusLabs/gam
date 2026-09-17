@@ -607,6 +607,10 @@ pub struct SaeManifoldTerm {
     /// co-collapse: these atoms still carry decoder norm and EV, but duplicate an
     /// occupied output frame.
     pub(crate) structural_cocollapse_reseeds: usize,
+    /// #2228 / #2933 F07 — outcomes of the dense root refinement's pencil solves (band holds,
+    /// band skips, solve failures). Clones share the ledger, so an objective's saved-term
+    /// restore keeps what a value probe recorded.
+    pub(crate) evidence_root_telemetry: crate::manifold::construction::EvidenceRootTelemetry,
     /// #1026 decoder-repulsion gate, frozen per assembly (lagged-diffusivity
     /// discipline, exactly like [`SaeManifoldAtom::smooth_penalty`]): the
     /// symmetric `(K, K)` matrix of collinearity gate weights
@@ -855,6 +859,7 @@ impl Clone for SaeManifoldTerm {
             best_cocollapse_incumbent: None,
             best_fit_incumbent: None,
             structural_cocollapse_reseeds: self.structural_cocollapse_reseeds,
+            evidence_root_telemetry: self.evidence_root_telemetry.clone(),
             // Transient per-assembly frozen gate — rebuilt at the next assembly.
             decoder_repulsion_gate: None,
             // #1625 — transient per-assembly frozen barrier coactivation; rebuilt

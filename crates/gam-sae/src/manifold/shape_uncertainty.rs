@@ -227,9 +227,10 @@ pub enum SaeFrameMarginalUnavailable {
 ///
 /// Block `k` is `[A⁺]_ββ[r_k, r_k]` over atom `k`'s border range `r_k`: every
 /// latent coordinate and every other atom is marginalized through the whole
-/// joint operator. `A⁺` is the pseudo-inverse over the directions the exact-A
-/// value path retains (`λᵢ > rank_floor(i)`), so the covariance lives on the
-/// same identified space the criterion prices. The blocks are unscaled;
+/// joint operator. `A⁺` is the covariant pseudo-inverse over the generalized eigenpairs
+/// `(μᵢ, wᵢ)` of the pencil `(A, Φ)` that the exact-A value path retains
+/// (`μᵢ > rank_floor(i)`, #2933 F07), so the covariance lives on the same identified
+/// space the criterion prices. The blocks are unscaled;
 /// [`SaeReconstructionDispersion::posterior_covariance_scale`] multiplies them
 /// at assembly.
 #[derive(Debug, Clone)]
@@ -1188,9 +1189,11 @@ mod robust_shape_band_tests {
         let (information, _gap_border) = term
             .materialize_exact_hessian_dense_with_gap_border(rho, target, cache)
             .expect("materialized observed information");
-        let (eigenvalues, eigenvectors) = information
-            .eigh(Side::Lower)
-            .expect("eigendecomposition of the observed information");
+        // #2933 F07 — the bread is classified in the evidence factor's pencil `(A, Φ)`, whose
+        // retained pseudo-inverse `Σ wᵢwᵢᵀ/μᵢ` production reports; an ordinary eigenbasis of
+        // `A` names a different, coordinate-dependent pseudo-inverse once a direction drops.
+        let oracle = crate::manifold::tests::PencilOracle::new(&information, cache);
+        let (eigenvalues, eigenvectors) = (&oracle.values, &oracle.vectors);
         let mut order: Vec<usize> = (0..eigenvalues.len()).collect();
         order.sort_by(|&i, &j| eigenvalues[j].total_cmp(&eigenvalues[i]));
         let (retained, dropped) = order.split_at(identified_rank);

@@ -304,8 +304,8 @@ mod amortized_encoder_tests {
         // This module does not `use super::*`; the arbiter is the first test here
         // to build a `SaeArrowVector`, call `.eigh` (FaerEigh), and name `Side`.
         use super::{
-            ArrowMetric, FaerEigh, SaeArrowVector, SaeCriterionError, Side,
-            sae_exact_a_band_edge,
+            FaerEigh, SaeArrowVector, SaeCriterionError, Side, sae_exact_a_band_edge,
+            sae_exact_a_pencil_resolution,
         };
         let (mut term, target, rho, _stationary_cache) =
             super::exact_hessian_fixture_tests::converged_state_with_residual();
@@ -365,108 +365,96 @@ mod amortized_encoder_tests {
             }
         }
         let sym = (&a + &a.t()) * 0.5;
-        let (eigs, vecs) = sym.eigh(Side::Lower).expect("A eigendecomposition");
-        let min_eig = eigs.iter().copied().fold(f64::INFINITY, f64::min);
-        let max_eig = eigs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let n_nonpos = eigs.iter().filter(|&&l| l <= 0.0).count();
-        eprintln!(
-            "A spectrum: min_eig={min_eig:.6e} max_eig={max_eig:.6e} n_nonpos={n_nonpos}/{dim}"
-        );
         let result = term.exact_observed_information_log_dets(&rho, target.view(), &cache);
-        // #2330 Phase-2: the value path classifies the spectrum three ways against
-        // the SHARED floor — kept (λ>floor, contributes ln λ), null band
-        // (|λ|≤floor, contributes 0), refused (λ<−floor). The arbiter mirrors
-        // that classification exactly, so a future null-band-PD A is judged
-        // correctly rather than binary PD-vs-refuse.
-        //
-        // #2673 — the band is PER DIRECTION now, because the metric it is
-        // relative to is. This oracle keeps its own operands (its own dense `A`,
-        // its own plain `eigh`, its own `B`-applies) and shares only the scalar
-        // rule, so it still oracles the classification while a second copy of the
-        // rule cannot drift from production's.
-        let spectral_norm = eigs.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
-        let joint_metric = ArrowMetric::Joint(&cache);
-        let floors: Vec<f64> = (0..dim)
-            .map(|index| {
-                let direction = vecs.column(index);
-                let vbv = joint_metric
-                    .quadratic_form(direction)
-                    .expect("B quadratic form on the joint block");
-                let substituted = joint_metric
-                    .substituted_stiffness(direction)
-                    .expect("substituted stiffness on the joint block");
-                sae_exact_a_band_edge(eigs[index], dim, spectral_norm, vbv, substituted)
-            })
-            .collect();
-        let worst_floor = floors.iter().copied().fold(0.0_f64, f64::max);
-        if min_eig >= -worst_floor
-            && eigs
+        // #2933 F07 — the value classifies the PENCIL `(A, Φ)`, `Φ` the evidence factor. This
+        // oracle keeps its own operands: its own dense `A` from column applies, its own dense
+        // `Φ` and `Φ − B_raw` from metric applies, and a symmetric square-root reduction
+        // `Φ^{-1/2}AΦ^{-1/2}` where production whitens with the cache's block Cholesky factor.
+        // It shares only the scalar band rule, so a second copy of the rule cannot drift.
+        let oracle = crate::manifold::tests::PencilOracle::new(&sym, &cache);
+        let (mu, vectors) = (&oracle.values, &oracle.vectors);
+        eprintln!(
+            "pencil spectrum: min μ={:.6e} max μ={:.6e} log|Φ|={:.6e}",
+            mu.iter().copied().fold(f64::INFINITY, f64::min),
+            mu.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            oracle.metric_log_det,
+        );
+        let negative = oracle.negative();
+        let retained_price = oracle.metric_log_det
+            + oracle
+                .retained()
                 .iter()
-                .enumerate()
-                .all(|(index, &lambda)| lambda >= -floors[index])
-        {
-            // PD on the gauge quotient (min_eig may be a gauge null in [−floor, floor]).
-            let log_a = result.expect("A is PD on the quotient so the log-det must be Ok");
-            let kept: f64 = eigs
-                .iter()
-                .enumerate()
-                .filter(|&(index, l)| *l > floors[index])
-                .map(|(_, l)| l.ln())
-                .sum();
+                .map(|&index| mu[index].ln())
+                .sum::<f64>();
+        if negative.is_empty() {
+            // Every in-band direction is priced at `Φ`'s curvature through `log|Φ|`, every
+            // retained one adds `ln μ`.
+            let log_a = result.expect("the pencil has no resolved negative direction, so the log-det must be Ok");
             assert!(
-                (log_a - kept).abs() <= 1.0e-9 * (1.0 + kept.abs()),
-                "log|A| kept-eigenvalue sum {log_a} != oracle {kept}"
+                (log_a - retained_price).abs() <= 1.0e-9 * (1.0 + retained_price.abs()),
+                "log|A| {log_a} != pencil oracle {retained_price}"
             );
         } else {
-            // A is non-PD. Under #2336 value-side E-attributability the classification
-            // is three-way: an indefinite direction attributable to the bounded ARD
-            // concave-clamp (λ+e_v ≥ −floor) is PRICED at its basin curvature, only a
-            // genuinely indefinite one (λ+e_v < −floor) REFUSES. The earlier version of
-            // this branch asserted unconditional refusal and said so in a comment: the
-            // fixture was PD on the gauge quotient then, so the branch was unreached and
-            // the assertion was left as a placeholder to be "split by attributability"
-            // if a future fixture ever landed here. #2267's inner-solve step fix moves
-            // this fixture's converged state, so it lands here now — and the split is
-            // written out rather than assumed.
-            //
-            // The oracle reads the SAME clamp diagonal the value path reads
-            // (`materialize_ard_concave_clamp_diagonal`) and applies the same
-            // predicate, so the two cannot drift; the assertion is STRICTER than the
-            // placeholder, because it pins WHICH way each negative direction is
-            // classified and what the priced log-det then has to equal.
+            // Under #2336 value-side E-attributability the negative subspace is priced at its
+            // basin curvature `C = W_NᵀAW_N + W_NᵀEW_N` and refuses only a genuinely
+            // indefinite `C`. #2267's inner-solve step fix moves this fixture's converged
+            // state, so it lands here, and the split is written out rather than assumed.
             let e_diag = term
                 .materialize_ard_concave_clamp_diagonal(&rho, &cache)
                 .expect("ARD concave-clamp diagonal");
+            let e_beta = term
+                .decoder_prior_majorizer_gap_border(&cache)
+                .expect("decoder-prior majorization gap");
+            let q = negative.len();
+            let mut basin = Array2::<f64>::zeros((q, q));
+            for (i, &ni) in negative.iter().enumerate() {
+                for (j, &nj) in negative.iter().enumerate() {
+                    let (wi, wj) = (vectors.column(ni), vectors.column(nj));
+                    let mut value = (0..total_t).map(|row| e_diag[row] * wi[row] * wj[row]).sum::<f64>();
+                    if let Some(gap) = e_beta.as_ref() {
+                        value += wi
+                            .slice(ndarray::s![total_t..])
+                            .dot(&gap.dot(&wj.slice(ndarray::s![total_t..])));
+                    }
+                    if i == j {
+                        value += mu[ni];
+                    }
+                    basin[[i, j]] = value;
+                }
+            }
+            let basin = (&basin + &basin.t()) * 0.5;
+            let (kappa, basin_rotation) = basin.eigh(Side::Lower).expect("basin eigendecomposition");
+            let negative_basis = Array2::from_shape_fn((dim, q), |(row, col)| vectors[[row, negative[col]]]);
+            let basin_vectors = negative_basis.dot(&basin_rotation);
+            let e_frobenius = (e_diag.iter().take(total_t).map(|x| x * x).sum::<f64>()
+                + e_beta.as_ref().map_or(0.0, |gap| gap.iter().map(|x| x * x).sum::<f64>()))
+            .sqrt();
             let mut all_attributable = true;
-            let mut priced_log_a = 0.0_f64;
-            for (idx, &lambda) in eigs.iter().enumerate() {
-                let floor = floors[idx];
-                let priced = if lambda < -floor {
-                    let v = vecs.column(idx);
-                    let mut e_v = 0.0_f64;
-                    for j in 0..total_t {
-                        e_v += e_diag[j] * v[j] * v[j];
-                    }
-                    let basin = lambda + e_v;
-                    if basin < -floor {
-                        all_attributable = false;
-                    }
-                    basin
-                } else {
-                    lambda
-                };
-                if priced > floor {
-                    priced_log_a += priced.ln();
+            let mut priced_log_a = retained_price;
+            for j in 0..q {
+                let direction = basin_vectors.column(j);
+                let resolution = sae_exact_a_pencil_resolution(
+                    dim,
+                    direction.dot(&direction),
+                    oracle.operator_frobenius + e_frobenius,
+                    oracle.metric_frobenius,
+                    kappa[j],
+                );
+                let floor = sae_exact_a_band_edge(kappa[j], resolution, 0.0);
+                if kappa[j] < -floor {
+                    all_attributable = false;
+                } else if kappa[j] > floor {
+                    priced_log_a += kappa[j].ln();
                 }
             }
             eprintln!(
-                "A non-PD: min_eig={min_eig:.6e} all_attributable={all_attributable} \
+                "pencil non-PD: {q} negative directions, all_attributable={all_attributable} \
                  priced_log|A|={priced_log_a:.9e}"
             );
             if all_attributable {
                 let log_a = result.expect(
-                    "every sub-floor negative direction is ARD-clamp attributable, so the \
-                     value path must PRICE the basin curvature instead of refusing",
+                    "every negative pencil direction is clamp attributable, so the value path must \
+                     PRICE the basin curvature instead of refusing",
                 );
                 assert!(
                     (log_a - priced_log_a).abs() <= 1.0e-9 * (1.0 + priced_log_a.abs()),
@@ -478,9 +466,8 @@ mod amortized_encoder_tests {
                         assert_eq!(block, "joint", "refusal fired on the wrong block: {block}");
                     }
                     other => panic!(
-                        "A has a genuinely indefinite direction (min_eig={min_eig:.3e}, not \
-                         clamp-attributable) but exact_observed_information_log_dets did not \
-                         refuse: {other:?}"
+                        "the pencil has a genuinely indefinite basin, not clamp-attributable, but \
+                         exact_observed_information_log_dets did not refuse: {other:?}"
                     ),
                 }
             }
@@ -730,14 +717,14 @@ mod exact_stationarity_solve_1418_tests {
     }
 
     /// A synthetic spectral block whose per-direction band is one chosen
-    /// constant (#2673).
+    /// constant (#2673, #2933 F07).
     ///
-    /// Production classifies direction `i` at
-    /// `max(dim·ε·‖A‖₂, √ε·vᵢᵀBvᵢ)`, so a UNIFORM metric
-    /// `vᵢᵀBvᵢ = floor/√ε` reproduces the scalar band the fixtures below were
-    /// written against. That is asserted here rather than assumed: a block whose
-    /// realised floor is not the requested one would silently re-tune every
-    /// fixture that uses this helper.
+    /// The band is a threshold on the pencil curvature `μ` against the floor `√ε`. In the
+    /// metric `Φ = c·I` with `c = floor/√ε` the pencil curvature of an eigenvector of the
+    /// operator is `μ = λ/c`, so `|λ| ≤ floor` is exactly the band. The solves, steps and
+    /// model residuals the fixtures below assert are the same physical vectors in any
+    /// metric `c·I`; only curvatures and dampings read in `μ` units. That the block's own
+    /// `rank_floor` realises the requested band is asserted here rather than assumed.
     fn spectral_block_with_uniform_floor(
         operator: Array2<f64>,
         eigenvalues: Array1<f64>,
@@ -745,29 +732,33 @@ mod exact_stationarity_solve_1418_tests {
         floor: f64,
     ) -> ExactHessianSpectralBlock {
         let dimension = eigenvalues.len();
-        let spectral_norm = eigenvalues
-            .iter()
-            .map(|value| value.abs())
-            .fold(0.0_f64, f64::max);
+        let scale = floor / super::sae_exact_a_pencil_floor();
+        let operator_frobenius = operator.iter().map(|value| value * value).sum::<f64>().sqrt();
+        let vectors = eigenvectors.mapv(|value| value / scale.sqrt());
+        let band: Vec<usize> = (0..dimension)
+            .filter(|&index| eigenvalues[index].abs() <= floor)
+            .collect();
+        let band_metric_images = Array2::from_shape_fn((dimension, band.len()), |(row, col)| {
+            scale * vectors[[row, band[col]]]
+        });
         let block = ExactHessianSpectralBlock {
             operator,
-            eigenvalues,
-            eigenvectors,
-            metric_scale: Array1::from_elem(
-                dimension,
-                floor / super::sae_exact_a_identifiability_floor(),
-            ),
+            eigenvalues: eigenvalues.mapv(|value| value / scale),
+            eigenvectors: vectors,
             substituted_stiffness: Array1::zeros(dimension),
-            spectral_norm,
+            resolution: Array1::zeros(dimension),
+            metric_log_det: dimension as f64 * scale.ln(),
+            operator_frobenius,
+            metric_frobenius: scale * (dimension as f64).sqrt(),
+            band,
+            band_metric_images,
         };
         for index in 0..dimension {
-            let realised = block.rank_floor(index);
+            let realised = block.rank_floor(index) * scale;
             assert!(
                 (realised - floor).abs() <= 1.0e-12 * floor,
                 "#2673: the synthetic block must realise the requested band \
-                 (direction {index}: asked {floor:.6e}, got {realised:.6e}); the arithmetic \
-                 floor dim·ε·‖A‖₂ = {:.6e} may be binding instead",
-                (dimension as f64) * f64::EPSILON * spectral_norm
+                 (direction {index}: asked {floor:.6e}, got {realised:.6e})"
             );
         }
         block
@@ -797,7 +788,8 @@ mod exact_stationarity_solve_1418_tests {
         };
         let solved = geometry
             .solve_stationarity(&rhs)
-            .expect("rank-revealing dense exact-stationarity solve");
+            .expect("rank-revealing dense exact-stationarity solve")
+            .step;
         assert_abs_diff_eq!(solved.t[0], 2.0, epsilon = 1.0e-14);
         assert_abs_diff_eq!(solved.t[1], 0.0, epsilon = 1.0e-14);
         assert_abs_diff_eq!(solved.beta[0], -3.0, epsilon = 1.0e-14);
@@ -833,7 +825,8 @@ mod exact_stationarity_solve_1418_tests {
         };
         let pseudoinverse = geometry
             .solve_stationarity(&rhs)
-            .expect("rank-revealing dense exact-stationarity solve");
+            .expect("rank-revealing dense exact-stationarity solve")
+            .step;
         let damped = geometry
             .damped_residual_step(&residual, 0.0)
             .expect("zero damping is the pseudoinverse point of the path");
@@ -938,11 +931,14 @@ mod exact_stationarity_solve_1418_tests {
             t: Array1::from_vec(vec![1.0_f64]),
             beta: Array1::from_vec(vec![1.0]),
         };
+        // The block reads curvatures in pencil units `μ = λ/c`, so the damping `ν = 1e-6`
+        // in `λ²` units is `1e-6/c²` there.
+        let scale = 1.0e-14 / super::sae_exact_a_pencil_floor();
         let undamped = geometry
             .damped_residual_step(&residual, 0.0)
             .expect("undamped step");
         let damped = geometry
-            .damped_residual_step(&residual, 1.0e-6)
+            .damped_residual_step(&residual, 1.0e-6 / (scale * scale))
             .expect("damped step");
         assert!(
             undamped.step_norm_sq.sqrt() > 1.0e5 * damped.step_norm_sq.sqrt(),
@@ -1131,8 +1127,10 @@ mod exact_stationarity_solve_1418_tests {
         let (smallest, largest) = geometry
             .retained_curvature_extremes()
             .expect("three directions clear the null band");
-        assert_abs_diff_eq!(smallest, 0.5, epsilon = 0.0);
-        assert_abs_diff_eq!(largest, 7.0, epsilon = 0.0);
+        // In pencil units `μ = λ/c` of the block's metric `c·I`.
+        let scale = 1.0e-9 / super::sae_exact_a_pencil_floor();
+        assert_abs_diff_eq!(smallest * scale, 0.5, epsilon = 1.0e-12);
+        assert_abs_diff_eq!(largest * scale, 7.0, epsilon = 1.0e-12);
 
         // A block that is entirely inside its own null band has no ladder, and
         // must say so rather than hand back a degenerate span.
@@ -1181,17 +1179,16 @@ mod exact_stationarity_solve_1418_tests {
         let geometry = term
             .materialize_exact_stationarity_geometry(&rho, target.view(), &cache)
             .expect("exact stationarity geometry");
-        let dim = geometry.eigenvalues.len();
         let rhs_flat = Array1::from_iter(rhs.t.iter().chain(rhs.beta.iter()).copied());
-        let mut band = Array1::<f64>::zeros(dim);
-        let mut band_directions = 0usize;
-        for index in 0..dim {
-            if geometry.eigenvalues[index].abs() <= geometry.rank_floor(index) {
-                let direction = geometry.eigenvectors.column(index);
-                band.scaled_add(direction.dot(&rhs_flat), &direction);
-                band_directions += 1;
-            }
-        }
+        // #2933 F07 — the pseudoinverse removes the band's dual components `ΦW_Z W_Zᵀ rhs`.
+        let band_directions = geometry.band.len();
+        let band_coefficients = Array1::from_iter(
+            geometry
+                .band
+                .iter()
+                .map(|&index| geometry.eigenvectors.column(index).dot(&rhs_flat)),
+        );
+        let band = geometry.band_metric_images.dot(&band_coefficients);
         let band_norm = band.dot(&band).sqrt();
         let rhs_range = SaeArrowVector {
             t: &rhs.t - &band.slice(s![..total_t]),
