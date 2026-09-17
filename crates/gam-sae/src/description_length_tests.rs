@@ -3,11 +3,16 @@
 //! exactly.
 
 use super::{
-    BirthMdlPrescreen, circle_coding_gain_bits, manifold_fit_description_length, matched_dl,
-    matched_dl_delta, predicted_birth_dl_bits, reverse_water_filling, scalar_rate_bits,
-    se_resolution_bits, selection_bits, weighted_reverse_water_filling,
+    BirthMdlPrescreen, DecoderBlockCode, DictionaryCode, DictionaryCodeKind, atom_occupancy,
+    circle_coding_gain_bits, manifold_fit_description_length, matched_dl, matched_dl_delta,
+    persisted_decoder_dictionary_code, predicted_birth_dl_bits, reverse_water_filling,
+    scalar_rate_bits, se_resolution_bits, selection_bits, weighted_reverse_water_filling,
 };
 use crate::atom_codes::SparseAtomCodes;
+use crate::manifold::{
+    SaeAtomBasisKind, SaeAtomGeometryPlan, SaeBasisResolution, SaeReferenceMetricPlan,
+};
+use ndarray::Array2;
 
 /// A small deterministic support: `n` tokens over `g` atoms, atom `k` firing on
 /// every `(k+1)`-th token, so supports vary in cardinality (exercising the
@@ -24,46 +29,60 @@ fn planted_codes(n: usize, g: usize) -> SparseAtomCodes {
     codes
 }
 
+fn declared(n_params: usize, bits_per_scalar: f64) -> DictionaryCode {
+    DictionaryCode::DeclaredPrecision {
+        n_params,
+        bits_per_scalar,
+    }
+}
+
+fn assert_relative(actual: f64, expected: f64, tol: f64, what: &str) {
+    assert!(
+        (actual - expected).abs() <= tol * expected.abs().max(1.0),
+        "{what}: expected {expected}, got {actual}"
+    );
+}
+
 #[test]
 fn manifold_fit_dl_decomposes_and_sums_to_total() {
-    // N=40 tokens, G=4 atoms, d_k=1 coord each, a 2-coordinate variance spectrum
-    // coded to total distortion 0.2, 96 decoder scalars at the distortion-matched
-    // precision (l_param defaults to the per-coordinate code rate).
+    // N=40 tokens, G=4 scalar atoms with their own spectra, coded to expected
+    // per-token distortion 0.2, 96 decoder scalars at a declared 16 bits.
     let codes = planted_codes(40, 4);
-    let coord_variances = [1.0_f64, 0.5];
+    let spectra = vec![vec![1.0_f64], vec![0.5], vec![0.25], vec![0.125]];
     let delta2 = 0.2;
-    let atom_dims = [1.0_f64, 1.0, 1.0, 1.0];
-    let dl = manifold_fit_description_length(
-        &codes,
-        &coord_variances,
-        delta2,
-        &atom_dims,
-        0.9,
-        96,
-        None,
-    );
+    let dl = manifold_fit_description_length(&codes, &spectra, delta2, 0.9, &declared(96, 16.0))
+        .unwrap();
 
-    // Per-coordinate rate is the reverse-water-filling mean of the actual spectrum.
-    let (coord_total, _) = reverse_water_filling(&coord_variances, delta2);
-    let rate = coord_total / coord_variances.len() as f64;
-    assert!((dl.coordinate_rate_bits - rate).abs() < 1e-12);
-    assert!(
-        (dl.l_param_bits - rate).abs() < 1e-12,
-        "default l_param = code rate"
-    );
+    // Atom k fires on every (k+1)-th token: occupancies 40/40, 20/40, 14/40, 10/40.
+    let occupancy = atom_occupancy(&codes);
+    assert_eq!(occupancy, vec![1.0, 0.5, 0.35, 0.25]);
+    assert_eq!(dl.atom_occupancy, occupancy);
+    let components: Vec<(f64, Vec<f64>)> = occupancy
+        .iter()
+        .zip(&spectra)
+        .map(|(&probability, spectrum)| (probability, spectrum.clone()))
+        .collect();
+    let rates = weighted_reverse_water_filling(&components, delta2).unwrap();
+    for (atom, &rate) in rates.iter().enumerate() {
+        assert_relative(dl.atom_code_bits_per_token[atom], rate, 1e-12, "per-atom code bits");
+    }
+    assert_relative(dl.code_bits_per_token, rates.iter().sum(), 1e-12, "code bits per token");
 
-    // Selection = empirical support entropy H(S); code = every fired coded scalar.
+    // Selection = empirical support entropy H(S).
     let support = codes.support_entropy();
     assert!((dl.selection_bits_per_token - support.tree_bits).abs() < 1e-12);
+
+    // The mean rate per transmitted coordinate reconciles with the code ledger.
     let coded_scalars: f64 = codes
         .iter()
         .map(|c| c.active_mask.count_ones() as f64)
         .sum();
-    assert!((dl.code_bits - coded_scalars * rate).abs() < 1e-9);
+    assert_relative(dl.code_bits, dl.coordinate_rate_bits * coded_scalars, 1e-12, "mean rate");
 
     // Corpus totals and per-token accounting reconcile with the parts.
     assert!((dl.selection_bits - 40.0 * dl.selection_bits_per_token).abs() < 1e-9);
-    assert!((dl.dict_bits - 96.0 * rate).abs() < 1e-12);
+    assert_eq!(dl.dictionary_code, DictionaryCodeKind::DeclaredPrecision);
+    assert!((dl.dict_bits - 96.0 * 16.0).abs() < 1e-12);
     let total = dl.code_bits + dl.selection_bits + dl.dict_bits;
     assert!(
         (dl.total_bits - total).abs() < 1e-9,
@@ -78,15 +97,14 @@ fn manifold_fit_dl_decomposes_and_sums_to_total() {
 
 #[test]
 fn manifold_fit_dl_code_rate_rises_as_distortion_tightens() {
-    // The honest rate–distortion trade: a finer distortion floor (smaller delta2)
-    // costs MORE per-coordinate code bits, from the actual variance spectrum.
-    let codes = planted_codes(30, 4);
-    let coord_variances = [1.0_f64, 0.6, 0.3];
-    let atom_dims = [1.0_f64, 1.0, 1.0, 1.0];
+    // The rate–distortion trade: a finer distortion (smaller budget) costs MORE
+    // code bits, from the actual per-atom spectra.
+    let codes = planted_codes(30, 3);
+    let spectra = vec![vec![1.0_f64], vec![0.6], vec![0.3]];
     let coarse =
-        manifold_fit_description_length(&codes, &coord_variances, 0.6, &atom_dims, 0.5, 64, None);
+        manifold_fit_description_length(&codes, &spectra, 0.3, 0.5, &declared(64, 16.0)).unwrap();
     let fine =
-        manifold_fit_description_length(&codes, &coord_variances, 0.1, &atom_dims, 0.95, 64, None);
+        manifold_fit_description_length(&codes, &spectra, 0.05, 0.95, &declared(64, 16.0)).unwrap();
     assert!(
         fine.coordinate_rate_bits > coarse.coordinate_rate_bits,
         "a tighter distortion must cost more per-coordinate bits: {} !> {}",
@@ -97,47 +115,40 @@ fn manifold_fit_dl_code_rate_rises_as_distortion_tightens() {
 }
 
 #[test]
-fn manifold_fit_dl_tight_distortion_matches_reverse_water_filling_rate() {
-    let codes = planted_codes(10, 4);
-    let coord_variances = [1.0_f64, 0.5];
-    let atom_dims = [1.0_f64, 1.0, 1.0, 1.0];
+fn manifold_fit_dl_tight_distortion_matches_hand_solved_weighted_rate() {
+    // Atom 0 fires on all 10 tokens, atom 1 on the 5 even tokens: occupancies
+    // (1, 0.5). Below both variances D(θ) = θ + 0.5θ, so D = 1e-6 gives θ = 1e-6/1.5.
+    let codes = planted_codes(10, 2);
     let dl = manifold_fit_description_length(
         &codes,
-        &coord_variances,
+        &[vec![1.0], vec![0.5]],
         1.0e-6,
-        &atom_dims,
         0.999,
-        8,
-        None,
-    );
-    let theta = 0.5e-6_f64;
-    let expected_rate = 0.25 * ((1.0 / theta).log2() + (0.5 / theta).log2());
-    assert!(
-        (dl.coordinate_rate_bits - expected_rate).abs() <= 1e-12,
-        "tight-distortion rate: expected {expected_rate}, got {}",
-        dl.coordinate_rate_bits
-    );
-    assert_eq!(dl.l_param_bits.to_bits(), dl.coordinate_rate_bits.to_bits());
+        &declared(8, 16.0),
+    )
+    .unwrap();
+    let theta = 1.0e-6_f64 / 1.5;
+    let expected = 0.5 * (1.0 / theta).log2() + 0.5 * 0.5 * (0.5 / theta).log2();
+    assert_relative(dl.code_bits_per_token, expected, 1e-12, "tight-distortion code bits");
 }
 
 #[test]
-fn manifold_fit_dl_explicit_l_param_overrides_default() {
-    // Passing fp16 precision (16 bits/scalar) must be used verbatim for the
-    // dictionary charge instead of the distortion-matched default.
-    let codes = planted_codes(20, 4);
-    let coord_variances = [1.0_f64, 0.5];
-    let atom_dims = [1.0_f64, 1.0, 1.0, 1.0];
+fn manifold_fit_dl_declared_precision_is_used_verbatim() {
+    // A declared fp16 precision (16 bits/scalar) prices the dictionary directly
+    // and spends none of the distortion budget.
+    let codes = planted_codes(20, 2);
     let dl = manifold_fit_description_length(
         &codes,
-        &coord_variances,
+        &[vec![1.0], vec![0.5]],
         0.2,
-        &atom_dims,
         0.8,
-        50,
-        Some(16.0),
-    );
+        &declared(50, 16.0),
+    )
+    .unwrap();
     assert!((dl.l_param_bits - 16.0).abs() < 1e-12);
     assert!((dl.dict_bits - 50.0 * 16.0).abs() < 1e-9);
+    assert_eq!(dl.dictionary_header_bits, 0.0);
+    assert_eq!(dl.dictionary_distortion, 0.0);
 }
 
 #[test]
@@ -367,7 +378,7 @@ fn primitives_match_mdl_reference() {
 
 #[test]
 fn reverse_water_filling_matches_mdl_reference() {
-    let (rate, per) = reverse_water_filling(&[1.0, 0.5, 0.1], 0.3);
+    let (rate, per) = reverse_water_filling(&[1.0, 0.5, 0.1], 0.3).unwrap();
     assert!(close(rate, 2.821928094, 1e-4), "rate {rate}");
     assert!(close(per[0], 1.660964047, 1e-4));
     assert!(close(per[1], 1.160964047, 1e-4));
@@ -376,7 +387,7 @@ fn reverse_water_filling_matches_mdl_reference() {
 
 #[test]
 fn reverse_water_filling_spends_one_total_distortion_budget() {
-    let (rate, per) = reverse_water_filling(&[1.0, 1.0], 0.5);
+    let (rate, per) = reverse_water_filling(&[1.0, 1.0], 0.5).unwrap();
     assert!(close(rate, 2.0, 1e-12), "rate {rate}");
     assert!(close(per[0], 1.0, 1e-12));
     assert!(close(per[1], 1.0, 1e-12));
@@ -394,6 +405,297 @@ fn weighted_water_filling_solves_shared_level_exactly() {
     let expected_second = scalar_rate_bits(0.5, theta);
     assert!(close(rates[0], expected_first, 1.0e-12));
     assert!(close(rates[1], expected_second, 1.0e-12));
+}
+
+/// Two tokens-by-atoms supports for the #2933 F13 regressions: `n` rows, atom 0
+/// fires on the first `frequent` rows and atom 1 on the first `rare` rows.
+fn two_atom_codes(n: usize, frequent: usize, rare: usize) -> SparseAtomCodes {
+    let mut codes = SparseAtomCodes::empty(n, 2);
+    for row in 0..frequent {
+        codes.row_mut(row).assign(0, 1.0);
+    }
+    for row in 0..rare {
+        codes.row_mut(row).assign(1, 1.0);
+    }
+    codes
+}
+
+#[test]
+fn native_code_rates_stay_with_the_firing_atom_2933_f13() {
+    // Occupancies (1, 0.01). The audit's counterexample: averaging the rates and
+    // multiplying by the firing-weighted coordinate count gives the same number
+    // whichever atom carries the wide spectrum.
+    let codes = two_atom_codes(100, 100, 1);
+    let wide_frequent = manifold_fit_description_length(
+        &codes,
+        &[vec![16.0], vec![1.0e-4]],
+        1.0e-2,
+        0.9,
+        &declared(0, 0.0),
+    )
+    .unwrap();
+    let wide_rare = manifold_fit_description_length(
+        &codes,
+        &[vec![1.0e-4], vec![16.0]],
+        1.0e-2,
+        0.9,
+        &declared(0, 0.0),
+    )
+    .unwrap();
+    // Hand-solved allocations, D = 0.01 per token.
+    // Wide on the frequent atom: D(θ) = θ + 0.01·1e-4, θ = 0.009999.
+    let expected_frequent = 0.5 * (16.0_f64 / 0.009999).log2();
+    // Wide on the rare atom: D(θ) = 1e-4 + 0.01·θ, θ = 0.99.
+    let expected_rare = 0.01 * 0.5 * (16.0_f64 / 0.99).log2();
+    assert_relative(wide_frequent.code_bits_per_token, expected_frequent, 1e-9, "wide frequent");
+    assert_relative(wide_rare.code_bits_per_token, expected_rare, 1e-9, "wide rare");
+    assert_eq!(wide_frequent.atom_code_bits_per_token[1], 0.0);
+    assert_eq!(wide_rare.atom_code_bits_per_token[0], 0.0);
+    assert!(
+        wide_frequent.code_bits_per_token > 100.0 * wide_rare.code_bits_per_token,
+        "swapping spectra between a frequent and a rare atom must change the code: {} vs {}",
+        wide_frequent.code_bits_per_token,
+        wide_rare.code_bits_per_token
+    );
+}
+
+#[test]
+fn native_multidimensional_atoms_match_hand_solved_weighted_allocation_2933_f13() {
+    // N = 4: atom 0 (d = 2) fires on 2 tokens, atom 1 (d = 3) on 1 token, so the
+    // occupancies are (0.5, 0.25) and the dimensions differ.
+    let codes = two_atom_codes(4, 2, 1);
+    let two_dim = vec![4.0_f64, 1.0];
+    let three_dim = vec![2.0_f64, 0.5, 0.1];
+    let budget = 1.0875_f64;
+
+    // θ ∈ [0.5, 1]: D = 0.25·0.1 + 0.25·0.5 + θ·(0.5 + 0.25 + 0.5) = 0.15 + 1.25θ = 1.0875.
+    let planted = manifold_fit_description_length(
+        &codes,
+        &[two_dim.clone(), three_dim.clone()],
+        budget,
+        0.5,
+        &declared(0, 0.0),
+    )
+    .unwrap();
+    let theta = 0.75_f64;
+    let atom0 = 0.5 * 0.5 * ((4.0 / theta).log2() + (1.0 / theta).log2());
+    let atom1 = 0.25 * 0.5 * (2.0 / theta).log2();
+    assert_relative(planted.atom_code_bits_per_token[0], atom0, 1e-12, "atom 0");
+    assert_relative(planted.atom_code_bits_per_token[1], atom1, 1e-12, "atom 1");
+    assert_relative(planted.coord_dim, (0.5 * 2.0 + 0.25 * 3.0) / 0.75, 1e-12, "mean dim");
+
+    // Swapped: θ ∈ [0.5, 1]: D = 0.5·(θ + 0.5 + 0.1) + 0.25·(θ + θ) = θ + 0.3 = 1.0875.
+    let swapped = manifold_fit_description_length(
+        &codes,
+        &[three_dim, two_dim],
+        budget,
+        0.5,
+        &declared(0, 0.0),
+    )
+    .unwrap();
+    let theta = 0.7875_f64;
+    let atom0 = 0.5 * 0.5 * (2.0 / theta).log2();
+    let atom1 = 0.25 * 0.5 * ((4.0 / theta).log2() + (1.0 / theta).log2());
+    assert_relative(swapped.atom_code_bits_per_token[0], atom0, 1e-12, "swapped atom 0");
+    assert_relative(swapped.atom_code_bits_per_token[1], atom1, 1e-12, "swapped atom 1");
+    assert!(
+        (planted.code_bits_per_token - swapped.code_bits_per_token).abs()
+            > 0.1 * planted.code_bits_per_token,
+        "swapping multidimensional spectra must change the code: {} vs {}",
+        planted.code_bits_per_token,
+        swapped.code_bits_per_token
+    );
+}
+
+#[test]
+fn quantized_decoder_shares_the_budget_by_hand_2933_f14() {
+    // N = 4 tokens, one scalar atom firing everywhere with variance 1. One decoder
+    // block: range 2, one output channel, row sensitivity 0.75, so a coefficient's
+    // output variance is v = 0.75·2²/12 = 0.25 and it enters as weight 1/4 on N·v = 1.
+    // D(θ) = min(1, θ) + ¼·min(1, θ) = 1.25θ, so D = 0.5 gives θ = 0.4.
+    let codes = two_atom_codes(4, 4, 0);
+    let dictionary = DictionaryCode::Quantized {
+        blocks: vec![DecoderBlockCode {
+            coefficient_range: 2.0,
+            p_out: 1,
+            row_sensitivity: vec![0.75],
+        }],
+        header_bits: 128.0,
+    };
+    let dl = manifold_fit_description_length(&codes, &[vec![1.0], vec![]], 0.5, 0.5, &dictionary)
+        .unwrap();
+    let theta = 0.4_f64;
+    assert_relative(dl.code_bits_per_token, 0.5 * (1.0 / theta).log2(), 1e-12, "code bits");
+    // The coefficient spends θ/N = 0.1 of output distortion: ½log₂(v/0.1) bits.
+    let coefficient_bits = 0.5 * (0.25_f64 / 0.1).log2();
+    assert_eq!(dl.dictionary_code, DictionaryCodeKind::Quantized);
+    assert_eq!(dl.n_params, 1);
+    assert_relative(dl.dictionary_distortion, 0.1, 1e-12, "dictionary distortion");
+    assert_relative(dl.l_param_bits, coefficient_bits, 1e-12, "coefficient bits");
+    assert_relative(dl.dict_bits, coefficient_bits + 128.0, 1e-12, "dictionary bits");
+    assert_eq!(dl.dictionary_header_bits, 128.0);
+}
+
+#[test]
+fn quantized_decoder_is_never_free_for_constant_coordinates_2933_f14() {
+    // Fixed latent codes: one periodic atom at a constant coordinate (zero code
+    // variance) firing on every token. Only the decoder carries information.
+    let plan = SaeAtomGeometryPlan::new(
+        SaeAtomBasisKind::Periodic,
+        1,
+        SaeBasisResolution::PeriodicHarmonics { order: 1 },
+        SaeReferenceMetricPlan::UnitCircle,
+    )
+    .unwrap();
+    let basis_size = plan.basis_size().unwrap();
+    let n = 32;
+    let coords = Array2::<f64>::from_elem((n, 1), 0.125);
+    let assignments = Array2::<f64>::ones((n, 1));
+    let mut codes = SparseAtomCodes::empty(n, 1);
+    for row in 0..n {
+        codes.row_mut(row).assign(0, 1.0);
+    }
+    let decoder =
+        Array2::from_shape_fn((basis_size, 2), |(m, c)| 0.25 * (m as f64 + 1.0) - 0.5 * c as f64);
+    let mut moved = decoder.clone();
+    moved[[0, 1]] += 3.0;
+    let price = |block: &Array2<f64>| {
+        let dictionary = persisted_decoder_dictionary_code(
+            std::slice::from_ref(&plan),
+            &[block.view()],
+            &[coords.view()],
+            assignments.view(),
+            2,
+        )
+        .unwrap();
+        manifold_fit_description_length(&codes, &[vec![0.0]], 1.0e-3, 0.99, &dictionary).unwrap()
+    };
+    let base = price(&decoder);
+    let edited = price(&moved);
+    assert_eq!(base.code_bits, 0.0, "a constant coordinate carries no code bits");
+    assert_eq!(base.n_params as usize, basis_size * 2);
+    let base_coefficients = base.dict_bits - base.dictionary_header_bits;
+    let edited_coefficients = edited.dict_bits - edited.dictionary_header_bits;
+    assert!(
+        base_coefficients > 1.0,
+        "{} decoder coefficients were priced at {base_coefficients} bits",
+        basis_size * 2
+    );
+    assert!(
+        edited_coefficients > base_coefficients + 1.0,
+        "widening a decoder coefficient must cost more bits: {edited_coefficients} vs {base_coefficients}"
+    );
+    assert!(base.dictionary_header_bits > 0.0);
+    // The codes are constant, so the decoder spends the whole budget.
+    assert_relative(base.dictionary_distortion, 1.0e-3, 1e-9, "dictionary distortion");
+}
+
+#[test]
+fn water_filling_rejects_nonfinite_and_non_psd_spectra_2933_f44() {
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(reverse_water_filling(&[bad, 1.0], 0.5).is_err(), "eigenvalue {bad}");
+        assert!(
+            weighted_reverse_water_filling(&[(1.0, vec![1.0, bad])], 0.5).is_err(),
+            "weighted eigenvalue {bad}"
+        );
+        assert!(
+            weighted_reverse_water_filling(&[(bad, vec![1.0])], 0.5).is_err(),
+            "weight {bad}"
+        );
+        assert!(reverse_water_filling(&[1.0], bad).is_err(), "budget {bad}");
+    }
+    assert!(reverse_water_filling(&[1.0], -1.0e-12).is_err());
+    assert!(weighted_reverse_water_filling(&[(-0.5, vec![1.0])], 0.5).is_err());
+
+    // A rounded zero eigenvalue is clipped; a material negative one is reported.
+    let (rate, per) = reverse_water_filling(&[1.0, -1.0e-17], 0.25).unwrap();
+    assert_relative(rate, 0.5 * (1.0_f64 / 0.25).log2(), 1e-12, "rounding-clipped rate");
+    assert_eq!(per[1], 0.0);
+    let error = reverse_water_filling(&[1.0, -1.0e-3], 0.25).unwrap_err();
+    assert!(error.contains("not positive semidefinite"), "{error}");
+    assert!(reverse_water_filling(&[-1.0e-20], 0.25).is_err());
+}
+
+#[test]
+fn zero_distortion_is_an_infinite_rate_not_an_error_2933_f44() {
+    let (rate, per) = reverse_water_filling(&[1.0, 0.0], 0.0).unwrap();
+    assert!(rate.is_infinite() && rate > 0.0);
+    assert_eq!(per[1], 0.0);
+    let rates =
+        weighted_reverse_water_filling(&[(1.0, vec![2.0]), (0.0, vec![5.0]), (1.0, vec![0.0])], 0.0)
+            .unwrap();
+    assert!(rates[0].is_infinite());
+    assert_eq!(rates[1], 0.0, "a never-firing component transmits nothing");
+    assert_eq!(rates[2], 0.0, "a zero-variance component transmits nothing");
+    let (empty_rate, empty_per) = reverse_water_filling(&[], 0.0).unwrap();
+    assert_eq!(empty_rate, 0.0);
+    assert!(empty_per.is_empty());
+
+    // ev = 1 with zero budget: continuous codes need unbounded rate.
+    let codes = planted_codes(8, 2);
+    let dl =
+        manifold_fit_description_length(&codes, &[vec![1.0], vec![0.0]], 0.0, 1.0, &declared(4, 8.0))
+            .unwrap();
+    assert!(dl.code_bits.is_infinite() && dl.bits_per_token.is_infinite());
+}
+
+#[test]
+fn fit_description_length_validates_its_domain_2933_f44() {
+    let codes = planted_codes(8, 2);
+    let spectra = vec![vec![1.0], vec![0.5]];
+    let ok = |ev: f64| manifold_fit_description_length(&codes, &spectra, 0.1, ev, &declared(4, 8.0));
+
+    // EV just above one is impossible; just below one, negative, and one are valid.
+    assert!(ok(1.0 + 1.0e-12).is_err());
+    assert!(ok(f64::NAN).is_err());
+    assert!(ok(f64::INFINITY).is_err());
+    assert!(ok(f64::NEG_INFINITY).is_err());
+    assert!(ok(1.0 - 1.0e-12).is_ok());
+    assert!(ok(1.0).is_ok());
+    assert!(ok(-2.5).is_ok(), "negative held-out EV is meaningful");
+
+    for bad in [f64::NAN, f64::INFINITY, -1.0] {
+        assert!(
+            manifold_fit_description_length(&codes, &spectra, bad, 0.5, &declared(4, 8.0)).is_err(),
+            "budget {bad}"
+        );
+        assert!(
+            manifold_fit_description_length(&codes, &spectra, 0.1, 0.5, &declared(4, bad)).is_err(),
+            "declared precision {bad}"
+        );
+        let block = |range: f64, sensitivity: f64, header: f64| DictionaryCode::Quantized {
+            blocks: vec![DecoderBlockCode {
+                coefficient_range: range,
+                p_out: 2,
+                row_sensitivity: vec![sensitivity, 1.0],
+            }],
+            header_bits: header,
+        };
+        for dictionary in [block(bad, 1.0, 64.0), block(1.0, bad, 64.0), block(1.0, 1.0, bad)] {
+            assert!(
+                manifold_fit_description_length(&codes, &spectra, 0.1, 0.5, &dictionary).is_err(),
+                "quantized dictionary input {bad}"
+            );
+        }
+    }
+    for bad in [f64::NAN, f64::INFINITY, -0.25] {
+        assert!(
+            manifold_fit_description_length(&codes, &[vec![1.0], vec![bad]], 0.1, 0.5, &declared(4, 8.0))
+                .is_err(),
+            "spectrum value {bad}"
+        );
+    }
+
+    // Structural failures: no tokens, a spectrum count that disagrees with G.
+    let empty = SparseAtomCodes::empty(0, 2);
+    assert!(manifold_fit_description_length(&empty, &spectra, 0.1, 0.5, &declared(4, 8.0)).is_err());
+    assert!(manifold_fit_description_length(&codes, &spectra[..1], 0.1, 0.5, &declared(4, 8.0)).is_err());
+
+    // A zero-dimensional atom is valid and transmits no coordinates.
+    let point = manifold_fit_description_length(&codes, &[vec![1.0], vec![]], 0.1, 0.5, &declared(4, 8.0))
+        .unwrap();
+    assert_eq!(point.atom_code_bits_per_token[1], 0.0);
+    assert!(point.code_bits_per_token > 0.0);
 }
 
 /// #2233 closed-form birth pre-screen: hand-computed crossover on a planted

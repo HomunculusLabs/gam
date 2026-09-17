@@ -413,8 +413,9 @@ fn sae_auto_k_recommendation(
 /// chart coordinates' population covariance. This is the Gaussian-source variance
 /// spectrum the reverse-water-filling code rate is defined over, mirroring the
 /// block-chart MDL scorer's `coordinate_spectrum` (same mean-centred covariance,
-/// same `jacobi_eigh`, zeros clamped, descending). One eigenvalue per coded
-/// coordinate axis.
+/// same `jacobi_eigh`, descending). One eigenvalue per coded coordinate axis.
+/// Rounding-sized negative eigenvalues are clipped, and material ones rejected,
+/// by the description-length kernel that consumes the spectrum.
 fn coordinate_variance_spectrum(
     coords: ndarray::ArrayView2<'_, f64>,
 ) -> Result<Vec<f64>, String> {
@@ -452,8 +453,8 @@ fn coordinate_variance_spectrum(
              the Jacobi sweep budget (non-finite coordinates?)"
         ));
     }
-    let mut spectrum: Vec<f64> = vals.into_iter().map(|v| v.max(0.0)).collect();
-    spectrum.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let mut spectrum = vals;
+    spectrum.sort_by(|a, b| b.total_cmp(a));
     Ok(spectrum)
 }
 
@@ -461,8 +462,7 @@ pub(crate) fn manifold_description_length_from_arrays(
     assignments: ndarray::ArrayView2<'_, f64>,
     coords: &[ndarray::ArrayView2<'_, f64>],
     ev: f64,
-    n_params: i64,
-    l_param_bits: Option<f64>,
+    dictionary: &gam::terms::sae::description_length::DictionaryCode,
     active_threshold: f64,
 ) -> Result<gam::terms::sae::description_length::ManifoldFitDl, String> {
     let (n_obs, k_atoms) = assignments.dim();
@@ -477,9 +477,35 @@ pub(crate) fn manifold_description_length_from_arrays(
             "manifold description length active_threshold must be finite and non-negative; got {active_threshold}"
         ));
     }
+    // EV = 1 − RSS/TSS is negative on a poor held-out fit, which is valid, but
+    // it never exceeds one: a larger value would create a negative budget.
+    if !ev.is_finite() || ev > 1.0 {
+        return Err(format!(
+            "manifold description length ev must be finite and at most one; got {ev}"
+        ));
+    }
+    if let Some(((row, atom), gate)) = assignments
+        .indexed_iter()
+        .find(|(_, gate)| !gate.is_finite())
+    {
+        return Err(format!(
+            "manifold description length assignments[{row}, {atom}] must be finite; got {gate}"
+        ));
+    }
 
-    let mut coord_variances = Vec::<f64>::new();
-    let mut atom_coord_dims = Vec::<f64>::with_capacity(k_atoms);
+    let mut codes = gam::terms::sae::atom_codes::SparseAtomCodes::empty(n_obs, k_atoms);
+    for row in 0..n_obs {
+        for atom in 0..k_atoms {
+            let gate = assignments[[row, atom]];
+            if gate.abs() > active_threshold {
+                codes.row_mut(row).assign(atom, gate);
+            }
+        }
+    }
+    let occupancy = gam::terms::sae::description_length::atom_occupancy(&codes);
+
+    let mut atom_code_spectra = Vec::<Vec<f64>>::with_capacity(k_atoms);
+    let mut weighted_total_variance = 0.0_f64;
     for (atom, block) in coords.iter().enumerate() {
         if block.nrows() != n_obs {
             return Err(format!(
@@ -487,39 +513,32 @@ pub(crate) fn manifold_description_length_from_arrays(
                 block.nrows()
             ));
         }
-        atom_coord_dims.push(block.ncols() as f64);
-        coord_variances.extend(coordinate_variance_spectrum(*block)?);
+        if let Some(((row, axis), value)) = block
+            .indexed_iter()
+            .find(|(_, value)| !value.is_finite())
+        {
+            return Err(format!(
+                "manifold description length coords[{atom}][{row}, {axis}] must be finite; got {value}"
+            ));
+        }
+        let spectrum = coordinate_variance_spectrum(*block)?;
+        weighted_total_variance +=
+            occupancy[atom] * spectrum.iter().map(|&value| value.max(0.0)).sum::<f64>();
+        atom_code_spectra.push(spectrum);
     }
 
-    if !ev.is_finite() {
-        return Err(format!(
-            "manifold description length ev must be finite; got {ev}"
-        ));
-    }
-    let total_var: f64 = coord_variances.iter().sum();
-    // The achieved distortion. A reconstruction with ev = 1 has none, and the
-    // water-filling rate of a continuous coordinate at zero distortion is
-    // infinite: that is its description length, not a value to floor away.
-    let delta2 = (1.0 - ev) * total_var;
-    let mut codes = gam::terms::sae::atom_codes::SparseAtomCodes::empty(n_obs, k_atoms);
-    for row in 0..n_obs {
-        for atom in 0..k_atoms {
-            let gate = assignments[[row, atom]];
-            if gate.is_finite() && gate.abs() > active_threshold {
-                codes.row_mut(row).assign(atom, gate);
-            }
-        }
-    }
-    Ok(
-        gam::terms::sae::description_length::manifold_fit_description_length(
-            &codes,
-            &coord_variances,
-            delta2,
-            &atom_coord_dims,
-            ev,
-            n_params,
-            l_param_bits,
-        ),
+    // The achieved distortion, in the occupancy-weighted currency the allocation
+    // spends: atom k's coordinates are coded only on its p_k share of tokens. A
+    // reconstruction with ev = 1 has none, and the water-filling rate of a
+    // continuous coordinate at zero distortion is infinite: that is its
+    // description length, not a value to floor away.
+    let delta2 = (1.0 - ev) * weighted_total_variance;
+    gam::terms::sae::description_length::manifold_fit_description_length(
+        &codes,
+        &atom_code_spectra,
+        delta2,
+        ev,
+        dictionary,
     )
 }
 
@@ -537,6 +556,11 @@ pub(crate) fn manifold_description_length_to_pydict<'py>(
     out.set_item("selection_bits_per_token", dl.selection_bits_per_token)?;
     out.set_item("dict_bits_per_token", dl.dict_bits_per_token)?;
     out.set_item("coordinate_rate_bits", dl.coordinate_rate_bits)?;
+    out.set_item("atom_occupancy", dl.atom_occupancy.clone())?;
+    out.set_item("atom_code_bits_per_token", dl.atom_code_bits_per_token.clone())?;
+    out.set_item("dictionary_code", dl.dictionary_code.as_str())?;
+    out.set_item("dictionary_header_bits", dl.dictionary_header_bits)?;
+    out.set_item("dictionary_distortion", dl.dictionary_distortion)?;
     out.set_item("l_param_bits", dl.l_param_bits)?;
     out.set_item("ev", dl.ev)?;
     out.set_item("n_tokens", dl.n_tokens)?;
@@ -558,20 +582,31 @@ pub(crate) fn manifold_description_length_to_pydict<'py>(
 /// code and a maximally-spread row pays its true high support cost; `coords` is
 /// the per-atom `(N, d_k)` chart coordinates, whose per-atom covariance
 /// eigen-spectra are the per-coordinate variances the latent CODE rate reverse-
-/// water-fills at the achieved distortion `(1 − ev)·Σ var`; the code term is
-/// firing-weighted by each atom's coded dim `d_k`. Every math term is owned by
-/// `description_length::manifold_fit_description_length`; this marshals the
-/// support/spectrum in and the decomposition out.
-#[pyfunction(signature = (assignments, coords, ev, n_params, l_param_bits = None, active_threshold = 1.0e-8))]
+/// water-fills at the achieved distortion `(1 − ev)·Σ_k p_k tr Σ_k`, each atom
+/// weighted by its occupancy `p_k` in both its rate and its distortion. Every math
+/// term is owned by `description_length::manifold_fit_description_length`; this
+/// marshals the support/spectrum in and the decomposition out. This standalone
+/// surface carries no decoder, so its dictionary is the declared per-scalar
+/// precision `l_param_bits` over `n_params` stored scalars.
+#[pyfunction(signature = (assignments, coords, ev, n_params, l_param_bits, active_threshold = 1.0e-8))]
 fn sae_manifold_description_length<'py>(
     py: Python<'py>,
     assignments: PyReadonlyArray2<'py, f64>,
     coords: Vec<PyReadonlyArray2<'py, f64>>,
     ev: f64,
     n_params: i64,
-    l_param_bits: Option<f64>,
+    l_param_bits: f64,
     active_threshold: f64,
 ) -> PyResult<PyObject> {
+    let n_params = usize::try_from(n_params).map_err(|_| {
+        py_value_error(format!(
+            "manifold description length n_params must be nonnegative; got {n_params}"
+        ))
+    })?;
+    let dictionary = gam::terms::sae::description_length::DictionaryCode::DeclaredPrecision {
+        n_params,
+        bits_per_scalar: l_param_bits,
+    };
     let coord_views = coords
         .iter()
         .map(|block| block.as_array())
@@ -580,8 +615,7 @@ fn sae_manifold_description_length<'py>(
         assignments.as_array(),
         &coord_views,
         ev,
-        n_params,
-        l_param_bits,
+        &dictionary,
         active_threshold,
     )
     .map_err(py_value_error)?;
@@ -8223,4 +8257,72 @@ fn coefficient_name_from_json(value: &serde_json::Value) -> String {
 
 fn default_coefficient_names(n_coeffs: usize) -> Vec<String> {
     (0..n_coeffs).map(|j| format!("beta_{j}")).collect()
+}
+
+#[cfg(test)]
+mod native_mdl_domain_2933_tests {
+    use super::manifold_description_length_from_arrays;
+    use gam::terms::sae::description_length::{DictionaryCode, ManifoldFitDl};
+    use ndarray::{Array2, ArrayView2, array};
+
+    fn price(
+        assignments: ArrayView2<'_, f64>,
+        coords: ArrayView2<'_, f64>,
+        ev: f64,
+    ) -> Result<ManifoldFitDl, String> {
+        let dictionary = DictionaryCode::DeclaredPrecision {
+            n_params: 8,
+            bits_per_scalar: 16.0,
+        };
+        manifold_description_length_from_arrays(assignments, &[coords], ev, &dictionary, 1.0e-8)
+    }
+
+    #[test]
+    fn explained_variance_domain_is_validated_at_the_boundary() {
+        let assignments = array![[1.0], [1.0], [0.0], [1.0]];
+        let coords = array![[0.0], [1.0], [2.0], [3.0]];
+        for impossible in [1.5, 1.0 + 1.0e-12, f64::NAN, f64::INFINITY] {
+            assert!(
+                price(assignments.view(), coords.view(), impossible).is_err(),
+                "ev {impossible} must be rejected"
+            );
+        }
+        assert!(price(assignments.view(), coords.view(), 1.0 - 1.0e-12).is_ok());
+        assert!(
+            price(assignments.view(), coords.view(), -0.5).is_ok(),
+            "negative held-out EV is valid"
+        );
+        let exact = price(assignments.view(), coords.view(), 1.0).unwrap();
+        assert!(
+            exact.code_bits.is_infinite(),
+            "zero distortion is an infinite continuous rate, got {}",
+            exact.code_bits
+        );
+    }
+
+    #[test]
+    fn nonfinite_assignments_and_coordinates_are_rejected() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let assignments = array![[1.0], [bad], [0.0], [1.0]];
+            let coords = array![[0.0], [1.0], [2.0], [3.0]];
+            let error = price(assignments.view(), coords.view(), 0.5).unwrap_err();
+            assert!(error.contains("assignments[1, 0]"), "{error}");
+
+            let assignments = array![[1.0], [1.0], [0.0], [1.0]];
+            let coords = array![[0.0], [1.0], [bad], [3.0]];
+            let error = price(assignments.view(), coords.view(), 0.5).unwrap_err();
+            assert!(error.contains("coords[0][2, 0]"), "{error}");
+        }
+    }
+
+    #[test]
+    fn zero_observations_and_zero_dimensional_codes_are_distinguished() {
+        let no_rows = Array2::<f64>::zeros((0, 1));
+        assert!(price(no_rows.view(), no_rows.view(), 0.5).is_err());
+
+        let assignments = array![[1.0], [1.0], [0.0], [1.0]];
+        let point = Array2::<f64>::zeros((4, 0));
+        let dl = price(assignments.view(), point.view(), 0.5).unwrap();
+        assert_eq!(dl.code_bits, 0.0, "a zero-dimensional atom transmits no coordinates");
+    }
 }

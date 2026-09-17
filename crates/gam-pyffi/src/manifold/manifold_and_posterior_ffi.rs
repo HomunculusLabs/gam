@@ -5648,28 +5648,53 @@ impl ManifoldSaeCore {
             .map(|block| manifold_sae_owned2(block))
             .collect::<PyResult<Vec<_>>>()?;
         let coord_views = coords.iter().map(|block| block.view()).collect::<Vec<_>>();
-        let n_params = self
-            .inner
-            .decoder_blocks
-            .iter()
-            .try_fold(0_usize, |total, block| {
-                let block_size = block
+        // A declared precision prices every stored scalar at that width. Without
+        // one, the decoder is quantized against its own effect on the output.
+        let dictionary = match l_param_bits {
+            Some(bits_per_scalar) => {
+                let n_params = self
+                    .inner
+                    .decoder_blocks
                     .iter()
-                    .try_fold(0_usize, |rows, row| rows.checked_add(row.len()))?;
-                total.checked_add(block_size)
-            })
-            .ok_or_else(|| {
-                py_value_error("ManifoldSAE decoder parameter count overflowed".to_string())
-            })?;
-        let n_params = i64::try_from(n_params).map_err(|_| {
-            py_value_error("ManifoldSAE decoder parameter count exceeds i64".to_string())
-        })?;
+                    .try_fold(0_usize, |total, block| {
+                        let block_size = block
+                            .iter()
+                            .try_fold(0_usize, |rows, row| rows.checked_add(row.len()))?;
+                        total.checked_add(block_size)
+                    })
+                    .ok_or_else(|| {
+                        py_value_error("ManifoldSAE decoder parameter count overflowed".to_string())
+                    })?;
+                gam::terms::sae::description_length::DictionaryCode::DeclaredPrecision {
+                    n_params,
+                    bits_per_scalar,
+                }
+            }
+            None => {
+                let decoders = self
+                    .inner
+                    .decoder_blocks
+                    .iter()
+                    .map(|block| manifold_sae_owned2(block))
+                    .collect::<PyResult<Vec<_>>>()?;
+                let decoder_views = decoders.iter().map(|block| block.view()).collect::<Vec<_>>();
+                let output_side_scalars = self.inner.training_mean.len()
+                    + self.inner.tier0_scale.as_ref().map_or(0, Vec::len);
+                gam::terms::sae::description_length::persisted_decoder_dictionary_code(
+                    &self.inner.geometry_plans,
+                    &decoder_views,
+                    &coord_views,
+                    assignments.view(),
+                    output_side_scalars,
+                )
+                .map_err(py_value_error)?
+            }
+        };
         manifold_description_length_from_arrays(
             assignments.view(),
             &coord_views,
             self.inner.reconstruction_r2,
-            n_params,
-            l_param_bits,
+            &dictionary,
             1.0e-8,
         )
         .map(Some)

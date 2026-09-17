@@ -16,6 +16,9 @@
 //! [`manifold_fit_description_length`].
 
 use crate::atom_codes::SparseAtomCodes;
+use crate::basis::SaeBasisEvaluator;
+use crate::manifold::SaeAtomGeometryPlan;
+use ndarray::ArrayView2;
 
 /// Bits to code one Gaussian scalar of variance `signal_var` to per-sample MSE
 /// `delta2`: the Gaussian rate-distortion law
@@ -70,7 +73,116 @@ fn exact_weighted_water_level(breakpoints: &mut Vec<(f64, f64)>, total_distortio
     }
 }
 
-/// Joint reverse-water-filling of weighted Gaussian spectra to a positive
+/// Validate one covariance eigen-spectrum, clipping only rounding-sized negatives.
+///
+/// A covariance is positive semidefinite, so a negative eigenvalue is admissible
+/// only as eigensolver rounding. A backward-stable symmetric eigensolver returns
+/// the exact spectrum of a matrix within `len·ε·max|λ|` of its input, which bounds
+/// how far below zero a rounded zero eigenvalue can fall. Such values are clipped
+/// to zero. A nonfinite value, or one more negative than that bound, is malformed
+/// input and is reported rather than silently deleted from the variance.
+fn validated_variance_spectrum(spectrum: &[f64], context: &str) -> Result<Vec<f64>, String> {
+    let mut scale = 0.0_f64;
+    for (index, &value) in spectrum.iter().enumerate() {
+        if !value.is_finite() {
+            return Err(format!(
+                "{context}: eigenvalue [{index}] must be finite, got {value}"
+            ));
+        }
+        scale = scale.max(value.abs());
+    }
+    let rounding_bound = spectrum.len() as f64 * f64::EPSILON * scale;
+    spectrum
+        .iter()
+        .enumerate()
+        .map(|(index, &value)| {
+            if value < -rounding_bound {
+                Err(format!(
+                    "{context}: eigenvalue [{index}] = {value} lies below the eigensolver \
+                     rounding bound -{rounding_bound}; the covariance is not positive semidefinite"
+                ))
+            } else {
+                Ok(value.max(0.0))
+            }
+        })
+        .collect()
+}
+
+/// A solved weighted reverse-water-filling allocation.
+struct WeightedAllocation {
+    /// One rate in bits per component, already multiplied by its weight.
+    rates: Vec<f64>,
+    /// The shared water level `θ`: zero at a zero budget, `+∞` when the budget
+    /// covers every weighted variance.
+    water_level: f64,
+    /// The validated spectra with their weights, in component order.
+    spectra: Vec<(f64, Vec<f64>)>,
+}
+
+fn solve_weighted_allocation(
+    components: &[(f64, Vec<f64>)],
+    total_distortion: f64,
+) -> Result<WeightedAllocation, String> {
+    if !total_distortion.is_finite() || total_distortion < 0.0 {
+        return Err(format!(
+            "total distortion must be finite and nonnegative, got {total_distortion}"
+        ));
+    }
+
+    let mut breakpoints: Vec<(f64, f64)> = Vec::new();
+    let mut spectra: Vec<(f64, Vec<f64>)> = Vec::with_capacity(components.len());
+    let mut total_variance = 0.0_f64;
+    for (index, (weight, spectrum)) in components.iter().enumerate() {
+        if !weight.is_finite() || *weight < 0.0 {
+            return Err(format!(
+                "component weight must be finite and nonnegative, got {weight}"
+            ));
+        }
+        let variances =
+            validated_variance_spectrum(spectrum, &format!("component {index} spectrum"))?;
+        for &variance in &variances {
+            total_variance += *weight * variance;
+            if *weight > 0.0 {
+                breakpoints.push((variance, *weight));
+            }
+        }
+        spectra.push((*weight, variances));
+    }
+    if !total_variance.is_finite() {
+        return Err(format!(
+            "weighted total variance must be finite, got {total_variance}"
+        ));
+    }
+
+    let water_level = if total_distortion >= total_variance || breakpoints.is_empty() {
+        f64::INFINITY
+    } else if total_distortion == 0.0 {
+        0.0
+    } else {
+        exact_weighted_water_level(&mut breakpoints, total_distortion)
+    };
+
+    let rates = spectra
+        .iter()
+        .map(|(weight, variances)| {
+            if *weight == 0.0 {
+                return 0.0;
+            }
+            *weight
+                * variances
+                    .iter()
+                    .map(|&variance| scalar_rate_bits(variance, water_level))
+                    .sum::<f64>()
+        })
+        .collect();
+    Ok(WeightedAllocation {
+        rates,
+        water_level,
+        spectra,
+    })
+}
+
+/// Joint reverse-water-filling of weighted Gaussian spectra to a nonnegative
 /// total-distortion budget.  A component weight scales both its distortion and
 /// its rate (for Eq. 4 this is an atom's firing probability; the residual has
 /// weight one).  Returns one rate in bits per component.
@@ -81,55 +193,17 @@ fn exact_weighted_water_level(breakpoints: &mut Vec<(f64, f64)>, total_distortio
 /// `D(theta) = sum_{v<=theta} w*v + theta*sum_{v>theta} w`.
 /// The unique segment containing the requested budget therefore gives `theta`
 /// in closed form.
+///
+/// A zero budget is a valid boundary, not an error: every positive-weight
+/// component with a positive variance costs `+∞` bits, because an exact
+/// continuous Gaussian value needs unbounded rate. Nonfinite inputs and
+/// materially negative eigenvalues are rejected (see
+/// [`validated_variance_spectrum`]).
 pub fn weighted_reverse_water_filling(
     components: &[(f64, Vec<f64>)],
     total_distortion: f64,
 ) -> Result<Vec<f64>, String> {
-    if !total_distortion.is_finite() || total_distortion <= 0.0 {
-        return Err(format!(
-            "total distortion must be finite and positive, got {total_distortion}"
-        ));
-    }
-
-    let mut breakpoints: Vec<(f64, f64)> = Vec::new();
-    let mut spectra: Vec<(f64, Vec<f64>)> = Vec::with_capacity(components.len());
-    let mut total_variance = 0.0_f64;
-    for (weight, spectrum) in components {
-        if !weight.is_finite() || *weight < 0.0 {
-            return Err(format!(
-                "component weight must be finite and nonnegative, got {weight}"
-            ));
-        }
-        let mut variances = Vec::with_capacity(spectrum.len());
-        for &value in spectrum {
-            if !value.is_finite() {
-                return Err("component spectrum must contain only finite values".to_string());
-            }
-            let variance = value.max(0.0);
-            variances.push(variance);
-            total_variance += *weight * variance;
-            if *weight > 0.0 {
-                breakpoints.push((variance, *weight));
-            }
-        }
-        spectra.push((*weight, variances));
-    }
-    if total_distortion >= total_variance || breakpoints.is_empty() {
-        return Ok(vec![0.0; spectra.len()]);
-    }
-
-    let water_level = exact_weighted_water_level(&mut breakpoints, total_distortion);
-
-    Ok(spectra
-        .iter()
-        .map(|(weight, variances)| {
-            *weight
-                * variances
-                    .iter()
-                    .map(|&variance| scalar_rate_bits(variance, water_level))
-                    .sum::<f64>()
-        })
-        .collect())
+    solve_weighted_allocation(components, total_distortion).map(|allocation| allocation.rates)
 }
 
 /// Rate (bits/sample) of the optimal linear (reverse-water-filling) code of a
@@ -137,38 +211,18 @@ pub fn weighted_reverse_water_filling(
 /// `delta2`. Returns `(total_rate_bits, per_coordinate_bits)`. This is the
 /// best a LINEAR featurizer can do at that distortion — the block/direction lower
 /// bound a chart must beat.
-pub fn reverse_water_filling(eigs: &[f64], delta2: f64) -> (f64, Vec<f64>) {
-    if eigs.is_empty() {
-        return (0.0, Vec::new());
-    }
-    let variances: Vec<f64> = eigs.iter().map(|&value| value.max(0.0)).collect();
-    if delta2 <= 0.0 {
-        let per: Vec<f64> = variances
-            .iter()
-            .map(|&variance| if variance > 0.0 { f64::INFINITY } else { 0.0 })
-            .collect();
-        return (per.iter().sum(), per);
-    }
-    let total_variance: f64 = variances.iter().sum();
-    if delta2 >= total_variance {
-        return (0.0, vec![0.0; variances.len()]);
-    }
-    // The validated one-component specialization of the shared exact solver.
-    let component_rates = weighted_reverse_water_filling(&[(1.0, variances.clone())], delta2)
-        .expect("positive finite one-component water-fill inputs are valid");
-    // Recover the exact water level from the rate allocation segment so the
-    // longstanding per-coordinate reporting surface remains available.
-    let mut breakpoints: Vec<(f64, f64)> = variances
+///
+/// `delta2 = 0` gives the legitimate `+∞` rate of every positive variance.
+/// A nonfinite or negative `delta2`, a nonfinite eigenvalue, or an eigenvalue
+/// below the eigensolver rounding bound is an `Err`.
+pub fn reverse_water_filling(eigs: &[f64], delta2: f64) -> Result<(f64, Vec<f64>), String> {
+    let allocation = solve_weighted_allocation(&[(1.0, eigs.to_vec())], delta2)?;
+    let per: Vec<f64> = allocation.spectra[0]
+        .1
         .iter()
-        .copied()
-        .map(|variance| (variance, 1.0))
+        .map(|&variance| scalar_rate_bits(variance, allocation.water_level))
         .collect();
-    let theta = exact_weighted_water_level(&mut breakpoints, delta2);
-    let per: Vec<f64> = variances
-        .iter()
-        .map(|&e| scalar_rate_bits(e, theta))
-        .collect();
-    (component_rates[0], per)
+    Ok((allocation.rates[0], per))
 }
 
 /// The spectra-only inputs to the #2233 closed-form curved-birth MDL pre-screen.
@@ -452,26 +506,208 @@ pub(crate) fn matched_dl_delta(flat: &MatchedDl, chart: &MatchedDl) -> f64 {
 // `experiments/real_manifold_sae/results.md`).
 // ===========================================================================
 
+/// Occupancy `p_k = firings(k)/N` of each atom in a support matrix: the per-token
+/// weight atom `k`'s code rate and code distortion carry. All zero when `N = 0`.
+pub fn atom_occupancy(codes: &SparseAtomCodes) -> Vec<f64> {
+    let mut firings = vec![0.0_f64; codes.k_atoms()];
+    for code in codes.iter() {
+        for atom in code.active_mask.iter_ones() {
+            firings[atom] += 1.0;
+        }
+    }
+    let n = codes.n_obs() as f64;
+    if n > 0.0 {
+        for count in &mut firings {
+            *count /= n;
+        }
+    }
+    firings
+}
+
+/// One stored decoder block `B_k ∈ R^{M_k×P}`, priced as a uniform
+/// scalar-quantizer message in the output distortion budget.
+///
+/// Coefficient errors `E` perturb the output as `δf_i = a_ik φ_k(t_ik)ᵀE`. With
+/// independent zero-mean errors of variance `d_m` on basis row `m` (a dithered
+/// uniform quantizer), the expected per-token squared output error is
+/// `Σ_m g_m·P·d_m`, where `g_m = (1/N) Σ_i a_ik² φ_km(t_ik)²`. A uniform quantizer
+/// with cell width `Δ` on the block's coefficient support `R` spends `log₂(R/Δ)`
+/// bits and leaves error variance `Δ²/12`, so one coefficient costs
+/// `½log₂(v_m/d_out)` bits for output distortion `d_out = g_m Δ²/12`, with
+/// `v_m = g_m R²/12`. Sending no bits (the support midpoint) leaves `v_m`. Each
+/// coefficient is therefore a scalar source of variance `v_m` in output units.
+#[derive(Clone, Debug)]
+pub struct DecoderBlockCode {
+    /// Uniform quantizer support `max − min` over the block's coefficients.
+    pub coefficient_range: f64,
+    /// Output channels `P` each basis row spans.
+    pub p_out: usize,
+    /// Output sensitivity `g_m = (1/N) Σ_i a_ik² φ_km(t_ik)²` of each basis row.
+    pub row_sensitivity: Vec<f64>,
+}
+
+/// How the decoder message is coded. The decoder's precision is a property of
+/// the decoder and its effect on the output, never of the latent coordinates'
+/// variance.
+#[derive(Clone, Debug)]
+pub enum DictionaryCode {
+    /// A declared per-scalar storage precision (for example 16 bits for fp16):
+    /// `n_params · bits_per_scalar`. This is a declared approximation. Its
+    /// precision is not derived from the decoder's effect on the output, and it
+    /// spends none of the distortion budget.
+    DeclaredPrecision {
+        n_params: usize,
+        bits_per_scalar: f64,
+    },
+    /// Decoder-aware uniform quantization of every stored block (see
+    /// [`DecoderBlockCode`]), allocated in the SAME weighted water-filling budget
+    /// as the codes, plus `header_bits` of declared side information the receiver
+    /// needs to rebuild the decoder (basis plans, quantizer supports, output
+    /// mean/scale).
+    Quantized {
+        blocks: Vec<DecoderBlockCode>,
+        header_bits: f64,
+    },
+}
+
+/// Which [`DictionaryCode`] priced a report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DictionaryCodeKind {
+    DeclaredPrecision,
+    Quantized,
+}
+
+impl DictionaryCodeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DeclaredPrecision => "declared_precision",
+            Self::Quantized => "decoder_quantized",
+        }
+    }
+}
+
+/// Build the decoder-aware [`DictionaryCode::Quantized`] of a persisted atom set.
+///
+/// Row sensitivities evaluate each atom's analytic basis at its stored
+/// coordinates, weighted by the squared assignment masses: the same product
+/// [`crate::manifold::reconstruct_persisted_atom_set`] decodes. The header is
+/// the declared side information a receiver needs to rebuild the decoder: the
+/// geometry plans at their persisted JSON encoding, each block's quantizer
+/// support as two `f64`, and `output_side_scalars` persisted output mean/scale
+/// values as `f64`.
+pub fn persisted_decoder_dictionary_code(
+    geometry_plans: &[SaeAtomGeometryPlan],
+    decoder_blocks: &[ArrayView2<'_, f64>],
+    coords: &[ArrayView2<'_, f64>],
+    assignments: ArrayView2<'_, f64>,
+    output_side_scalars: usize,
+) -> Result<DictionaryCode, String> {
+    let k_atoms = geometry_plans.len();
+    if decoder_blocks.len() != k_atoms || coords.len() != k_atoms || assignments.ncols() != k_atoms
+    {
+        return Err(format!(
+            "persisted decoder dictionary code: {k_atoms} geometry plans need as many decoder \
+             blocks ({}), coordinate blocks ({}) and assignment columns ({})",
+            decoder_blocks.len(),
+            coords.len(),
+            assignments.ncols()
+        ));
+    }
+    let n_rows = assignments.nrows();
+    if n_rows == 0 {
+        return Err("persisted decoder dictionary code requires at least one token".to_string());
+    }
+    let mut blocks = Vec::with_capacity(k_atoms);
+    for atom in 0..k_atoms {
+        let decoder = decoder_blocks[atom];
+        let (basis_width, p_out) = decoder.dim();
+        if !decoder.iter().all(|value| value.is_finite()) {
+            return Err(format!(
+                "persisted decoder dictionary code: decoder block {atom} must be finite"
+            ));
+        }
+        if coords[atom].nrows() != n_rows {
+            return Err(format!(
+                "persisted decoder dictionary code: coords[{atom}] has {} rows, expected {n_rows}",
+                coords[atom].nrows()
+            ));
+        }
+        let (phi, _) = geometry_plans[atom].build_evaluator()?.evaluate(coords[atom])?;
+        if phi.dim() != (n_rows, basis_width) {
+            return Err(format!(
+                "persisted decoder dictionary code: atom {atom} basis {:?} != ({n_rows}, {basis_width})",
+                phi.dim()
+            ));
+        }
+        let mut row_sensitivity = vec![0.0_f64; basis_width];
+        for row in 0..n_rows {
+            let gate = assignments[[row, atom]];
+            if !gate.is_finite() {
+                return Err(format!(
+                    "persisted decoder dictionary code: assignments[{row}, {atom}] must be finite, got {gate}"
+                ));
+            }
+            let gate_sq = gate * gate;
+            if gate_sq == 0.0 {
+                continue;
+            }
+            for (basis_row, sensitivity) in row_sensitivity.iter_mut().enumerate() {
+                let value = phi[[row, basis_row]];
+                *sensitivity += gate_sq * value * value;
+            }
+        }
+        for sensitivity in &mut row_sensitivity {
+            *sensitivity /= n_rows as f64;
+        }
+        let coefficient_range = if decoder.is_empty() {
+            0.0
+        } else {
+            let (low, high) = decoder
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), &value| {
+                    (low.min(value), high.max(value))
+                });
+            high - low
+        };
+        blocks.push(DecoderBlockCode {
+            coefficient_range,
+            p_out,
+            row_sensitivity,
+        });
+    }
+    let plan_bytes = serde_json::to_vec(geometry_plans)
+        .map_err(|error| format!("persisted decoder dictionary code: plan encoding failed: {error}"))?;
+    let header_bits = f64::from(u8::BITS) * plan_bytes.len() as f64
+        + f64::from(f64::BITS) * (2 * k_atoms + output_side_scalars) as f64;
+    Ok(DictionaryCode::Quantized {
+        blocks,
+        header_bits,
+    })
+}
+
 /// The fit-level description length of a manifold-SAE reconstruction, in bits,
 /// decomposed into three ledgers: CODE (the coordinates transmitted per firing),
 /// SELECTION (naming which atoms fired), and DICTIONARY (the amortised decoder).
 ///
-/// # Currency (reuses [`reverse_water_filling`] + [`SparseAtomCodes::support_entropy`])
+/// # Currency (a Gaussian rate–distortion surrogate)
 ///
 /// A token is coded by (1) naming which atoms fired — priced at the empirical
 /// support-distribution universal code `H(S)` (cardinality entropy plus
 /// conditional co-firing prices), a decodable code that does NOT overpay a
 /// predictable tiling dictionary the way the combinatorial worst case
-/// `log₂ C(G, k)` does — and (2) transmitting each firing's latent coordinates
-/// at the reverse-water-filling rate of the actual coordinate variance spectrum
-/// at the achieved distortion. The decoder is stored once,
-/// `n_params · l_param_bits`, amortised across the `n_tokens` corpus.
+/// `log₂ C(G, k)` does — and (2) transmitting each firing atom's coordinates.
+/// Atom `k` fires on a fraction `p_k` of tokens, so its code distortion and its
+/// rate both enter the per-token budget with weight `p_k`. The allocation
+/// solves `Σ_k p_k Σ_j min(λ_kj, θ) (+ dictionary distortion) = D` with
+/// [`weighted_reverse_water_filling`], and atom `k` charges
+/// `p_k Σ_j ½log₂(λ_kj/θ)⁺` bits per token. Each rate stays attached to the atom
+/// that incurs it and is never averaged across atoms.
 ///
 /// `bits_per_token = total_bits / n_tokens` is the headline. It is the code
 /// length per token of the WHOLE representation (codes + amortised dictionary),
-/// so two fits at matched EV but different topologies are finally comparable in
+/// so two fits at matched EV but different topologies are comparable in
 /// the currency the manifold thesis is stated in.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ManifoldFitDl {
     /// Explained variance the reconstruction achieves (the demoted EV line).
     pub ev: f64,
@@ -483,27 +719,37 @@ pub struct ManifoldFitDl {
     pub coord_dim: f64,
     /// Dictionary size `G` (atom count) the selection cost names into.
     pub g_dict: i64,
-    /// Decoder scalar count `n_params = Σ_k M_k·p` charged at `l_param_bits`.
+    /// Decoder scalar count `n_params = Σ_k M_k·p` the dictionary codes.
     pub n_params: i64,
-    /// Per-coordinate code rate: the reverse-water-filling mean rate of the
-    /// actual coordinate variance spectrum at the achieved distortion (bits).
+    /// Occupancy `p_k` of each atom (its weight in the shared allocation).
+    pub atom_occupancy: Vec<f64>,
+    /// Code bits per token contributed by each atom, `p_k Σ_j ½log₂(λ_kj/θ)⁺`.
+    pub atom_code_bits_per_token: Vec<f64>,
+    /// Firing-weighted mean bits per transmitted coordinate,
+    /// `code_bits / Σ_k firings(k)·d_k` (zero when nothing is transmitted).
     pub coordinate_rate_bits: f64,
-    /// Bits per stored dictionary scalar (`l_param_bits`); defaults to the
-    /// distortion-matched precision `coordinate_rate_bits`.
+    /// Which dictionary code priced `dict_bits`.
+    pub dictionary_code: DictionaryCodeKind,
+    /// Mean bits per stored decoder scalar: the declared precision, or the
+    /// quantized coefficient bits over `n_params`.
     pub l_param_bits: f64,
+    /// Declared decoder side-information bits inside `dict_bits`.
+    pub dictionary_header_bits: f64,
+    /// Expected per-token output distortion the quantized decoder spends from the
+    /// shared budget (zero for a declared precision).
+    pub dictionary_distortion: f64,
     /// Selection bits per token: the empirical support-entropy universal code
     /// `H(S)` ([`SparseAtomCodes::support_entropy`]`.tree_bits`).
     pub selection_bits_per_token: f64,
-    /// Code bits per token: firing-weighted coded scalars per token times the
-    /// per-coordinate rate, `(Σ_k firings(k)·d_k / N) · coordinate_rate_bits`.
+    /// Code bits per token, `Σ_k atom_code_bits_per_token[k]`.
     pub code_bits_per_token: f64,
-    /// Amortised dictionary bits per token, `n_params · l_param_bits / N`.
+    /// Amortised dictionary bits per token, `dict_bits / N`.
     pub dict_bits_per_token: f64,
     /// Total code bits over the corpus, `N · code_bits_per_token`.
     pub code_bits: f64,
     /// Total selection bits over the corpus, `N · selection_bits_per_token`.
     pub selection_bits: f64,
-    /// Total dictionary bits (not per token), `n_params · l_param_bits`.
+    /// Total dictionary bits (not per token).
     pub dict_bits: f64,
     /// Total description length in bits, `code + selection + dict`.
     pub total_bits: f64,
@@ -511,8 +757,7 @@ pub struct ManifoldFitDl {
     pub bits_per_token: f64,
 }
 
-/// Assemble the fit-level [`ManifoldFitDl`] as a VALID code length from a fit's
-/// own empirical byproducts.
+/// Assemble the fit-level [`ManifoldFitDl`] from a fit's own empirical byproducts.
 ///
 /// * `codes` — the empirical binary support matrix `S_n ⊆ {0,…,G−1}` (which
 ///   atoms fired per token). The SELECTION price is charged as the empirical
@@ -520,37 +765,48 @@ pub struct ManifoldFitDl {
 ///   universal code: variable per-token cardinality plus conditional co-firing
 ///   prices), NOT the invalid rounded-mean combinatorial `log₂ C(G, round k̄)`
 ///   (which is not even an upper bound — a uniform support over all `2^G`
-///   subsets carries `G` bits, yet `log₂ C(G, G/2) < G`). Reading the support
-///   off `codes` also fixes the uniform-row edge case at its source: a token's
-///   active set is whatever the assignment recorded, so a maximally-spread row
-///   is priced at its true (high) support cost instead of being miscounted as
-///   zero active atoms.
-/// * `coord_variances` / `delta2` — the per-coordinate signal variances of the
-///   coded latent coordinates and the achieved total coding distortion. The
-///   per-coordinate CODE rate is the reverse-water-filling rate
-///   [`reverse_water_filling`] of that actual spectrum at that distortion, not a
-///   unit-variance rate read off the scalar output EV.
-/// * `atom_coord_dims` — the coded-coordinate dimension `d_k` of each atom
-///   (length `G`). The code term charges every coded scalar, weighted by which
-///   atoms ACTUALLY fire (`Σ_k firings(k)·d_k`), instead of `E[K]·d̄` with an
-///   unweighted mean dimension.
-/// * `ev` — the achieved output explained variance, reported alongside.
-/// * `n_params` / `l_param_bits` — the decoder scalar count and per-scalar
-///   precision (`None` ⇒ the distortion-matched precision = the per-coordinate
-///   code rate).
+///   subsets carries `G` bits, yet `log₂ C(G, G/2) < G`). Occupancies `p_k` are
+///   read off the same matrix ([`atom_occupancy`]).
+/// * `atom_code_spectra` — one variance spectrum per atom (length `G`), in the
+///   distortion metric of `distortion_budget`. Its length is the atom's coded
+///   dimension `d_k`.
+/// * `distortion_budget` — the expected per-token distortion `D` the codes and a
+///   quantized dictionary share. `D = 0` gives the legitimate `+∞` rate.
+/// * `ev` — the achieved output explained variance, reported alongside. It may
+///   be negative (held-out data) but never exceeds one.
+/// * `dictionary` — the decoder message ([`DictionaryCode`]).
 ///
-/// Every quantity is READ OFF an existing fit; nothing is re-fit.
+/// Every quantity is READ OFF an existing fit; nothing is re-fit. Malformed
+/// input (no tokens, a spectrum count that disagrees with `G`, nonfinite values,
+/// EV above one, materially negative eigenvalues, negative precision) is an `Err`.
 pub fn manifold_fit_description_length(
     codes: &SparseAtomCodes,
-    coord_variances: &[f64],
-    delta2: f64,
-    atom_coord_dims: &[f64],
+    atom_code_spectra: &[Vec<f64>],
+    distortion_budget: f64,
     ev: f64,
-    n_params: i64,
-    l_param_bits: Option<f64>,
-) -> ManifoldFitDl {
-    let n_tokens = codes.n_obs() as i64;
-    let g_dict = codes.k_atoms() as i64;
+    dictionary: &DictionaryCode,
+) -> Result<ManifoldFitDl, String> {
+    let n_obs = codes.n_obs();
+    let k_atoms = codes.k_atoms();
+    if n_obs == 0 {
+        return Err("manifold fit description length requires at least one token".to_string());
+    }
+    if atom_code_spectra.len() != k_atoms {
+        return Err(format!(
+            "manifold fit description length expected {k_atoms} atom code spectra, got {}",
+            atom_code_spectra.len()
+        ));
+    }
+    if !ev.is_finite() || ev > 1.0 {
+        return Err(format!(
+            "manifold fit description length ev must be finite and at most one, got {ev}"
+        ));
+    }
+    let n = n_obs as f64;
+    let n_tokens = i64::try_from(n_obs)
+        .map_err(|_| "manifold fit description length token count exceeds i64".to_string())?;
+    let g_dict = i64::try_from(k_atoms)
+        .map_err(|_| "manifold fit description length atom count exceeds i64".to_string())?;
 
     // SELECTION: the empirical support-distribution universal code per token
     // (cardinality entropy + conditional co-firing prices), a decodable code
@@ -559,64 +815,168 @@ pub fn manifold_fit_description_length(
     let selection_bits_per_token = support.tree_bits;
     let k_active = support.mean_support;
 
-    // CODE: the per-coordinate rate is the reverse-water-filling rate of the
-    // ACTUAL coordinate spectrum at the achieved distortion — the mean bits a
-    // coded scalar costs at this operating point.
-    let (coord_total_bits, _per_coord) = reverse_water_filling(coord_variances, delta2);
-    let n_coords = coord_variances.len();
-    let coordinate_rate_bits = if n_coords > 0 {
-        coord_total_bits / n_coords as f64
+    let atom_occupancy = atom_occupancy(codes);
+    let occupied_scalars: f64 = atom_occupancy
+        .iter()
+        .zip(atom_code_spectra)
+        .map(|(&occupancy, spectrum)| occupancy * spectrum.len() as f64)
+        .sum();
+    let occupancy_total: f64 = atom_occupancy.iter().sum();
+    let coord_dim = if occupancy_total > 0.0 {
+        occupied_scalars / occupancy_total
     } else {
         0.0
     };
 
-    // Every coded scalar, weighted by which atoms actually fired: Σ_k firings(k)·d_k.
-    let mut coded_scalars = 0.0_f64;
-    let mut total_firings = 0.0_f64;
-    for code in codes.iter() {
-        for atom in code.active_mask.iter_ones() {
-            total_firings += 1.0;
-            coded_scalars += atom_coord_dims.get(atom).copied().unwrap_or(0.0);
+    // CODE components: atom k enters with weight p_k on its own spectrum.
+    let mut components: Vec<(f64, Vec<f64>)> = atom_occupancy
+        .iter()
+        .zip(atom_code_spectra)
+        .map(|(&occupancy, spectrum)| (occupancy, spectrum.clone()))
+        .collect();
+
+    // DICTIONARY: a declared precision is priced directly; a quantized decoder
+    // joins the same allocation. The decoder is sent once for N tokens, so a
+    // block of P-channel coefficients of output variance v_m enters as weight
+    // P/N on spectrum N·v_m: it spends P·Σ_m min(v_m, θ/N) distortion per token
+    // and P·Σ_m ½log₂(N v_m/θ)⁺ bits over the corpus.
+    match dictionary {
+        DictionaryCode::DeclaredPrecision {
+            bits_per_scalar, ..
+        } => {
+            if !bits_per_scalar.is_finite() || *bits_per_scalar < 0.0 {
+                return Err(format!(
+                    "declared dictionary precision must be finite and nonnegative, got {bits_per_scalar}"
+                ));
+            }
+        }
+        DictionaryCode::Quantized {
+            blocks,
+            header_bits,
+        } => {
+            if !header_bits.is_finite() || *header_bits < 0.0 {
+                return Err(format!(
+                    "dictionary header bits must be finite and nonnegative, got {header_bits}"
+                ));
+            }
+            for (index, block) in blocks.iter().enumerate() {
+                let range = block.coefficient_range;
+                if !range.is_finite() || range < 0.0 {
+                    return Err(format!(
+                        "decoder block {index} coefficient range must be finite and nonnegative, got {range}"
+                    ));
+                }
+                let spectrum = block
+                    .row_sensitivity
+                    .iter()
+                    .enumerate()
+                    .map(|(row, &sensitivity)| {
+                        if !sensitivity.is_finite() || sensitivity < 0.0 {
+                            Err(format!(
+                                "decoder block {index} row {row} sensitivity must be finite and nonnegative, got {sensitivity}"
+                            ))
+                        } else {
+                            Ok(n * sensitivity * range * range / 12.0)
+                        }
+                    })
+                    .collect::<Result<Vec<f64>, String>>()?;
+                components.push((block.p_out as f64 / n, spectrum));
+            }
         }
     }
-    let coord_dim = if total_firings > 0.0 {
-        coded_scalars / total_firings
+
+    let allocation = solve_weighted_allocation(&components, distortion_budget)?;
+    let atom_code_bits_per_token = allocation.rates[..k_atoms].to_vec();
+    let code_bits_per_token: f64 = atom_code_bits_per_token.iter().sum();
+
+    let (n_params, dictionary_code, l_param_bits, dictionary_header_bits, dictionary_distortion, dict_bits) =
+        match dictionary {
+            DictionaryCode::DeclaredPrecision {
+                n_params,
+                bits_per_scalar,
+            } => (
+                *n_params,
+                DictionaryCodeKind::DeclaredPrecision,
+                *bits_per_scalar,
+                0.0,
+                0.0,
+                *n_params as f64 * bits_per_scalar,
+            ),
+            DictionaryCode::Quantized {
+                blocks,
+                header_bits,
+            } => {
+                let n_params = blocks.iter().try_fold(0_usize, |total, block| {
+                    block
+                        .row_sensitivity
+                        .len()
+                        .checked_mul(block.p_out)
+                        .and_then(|count| total.checked_add(count))
+                });
+                let n_params = n_params
+                    .ok_or_else(|| "decoder coefficient count overflowed".to_string())?;
+                let coefficient_bits = n * allocation.rates[k_atoms..].iter().sum::<f64>();
+                let distortion: f64 = allocation.spectra[k_atoms..]
+                    .iter()
+                    .map(|(weight, variances)| {
+                        weight
+                            * variances
+                                .iter()
+                                .map(|&variance| variance.min(allocation.water_level))
+                                .sum::<f64>()
+                    })
+                    .sum();
+                let l_param_bits = if n_params > 0 {
+                    coefficient_bits / n_params as f64
+                } else {
+                    0.0
+                };
+                (
+                    n_params,
+                    DictionaryCodeKind::Quantized,
+                    l_param_bits,
+                    *header_bits,
+                    distortion,
+                    coefficient_bits + header_bits,
+                )
+            }
+        };
+    let n_params = i64::try_from(n_params)
+        .map_err(|_| "manifold fit description length parameter count exceeds i64".to_string())?;
+
+    let code_bits = n * code_bits_per_token;
+    let selection_bits = n * selection_bits_per_token;
+    let total_bits = code_bits + selection_bits + dict_bits;
+    let transmitted_scalars = n * occupied_scalars;
+    let coordinate_rate_bits = if transmitted_scalars > 0.0 {
+        code_bits / transmitted_scalars
     } else {
         0.0
     };
 
-    let l_param = l_param_bits.unwrap_or(coordinate_rate_bits).max(0.0);
-    let dict_bits = n_params.max(0) as f64 * l_param;
-
-    let n = n_tokens.max(0) as f64;
-    let code_bits = coded_scalars * coordinate_rate_bits;
-    let code_bits_per_token = if n > 0.0 { code_bits / n } else { 0.0 };
-    let selection_bits_total = n * selection_bits_per_token;
-    let total_bits = code_bits + selection_bits_total + dict_bits;
-    let (bits_per_token, dict_bits_per_token) = if n_tokens > 0 {
-        (total_bits / n, dict_bits / n)
-    } else {
-        (f64::INFINITY, f64::INFINITY)
-    };
-
-    ManifoldFitDl {
+    Ok(ManifoldFitDl {
         ev,
         n_tokens,
         k_active,
         coord_dim,
         g_dict,
         n_params,
+        atom_occupancy,
+        atom_code_bits_per_token,
         coordinate_rate_bits,
-        l_param_bits: l_param,
+        dictionary_code,
+        l_param_bits,
+        dictionary_header_bits,
+        dictionary_distortion,
         selection_bits_per_token,
         code_bits_per_token,
-        dict_bits_per_token,
+        dict_bits_per_token: dict_bits / n,
         code_bits,
-        selection_bits: selection_bits_total,
+        selection_bits,
         dict_bits,
         total_bits,
-        bits_per_token,
-    }
+        bits_per_token: total_bits / n,
+    })
 }
 
 #[cfg(test)]
