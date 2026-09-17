@@ -212,6 +212,11 @@ pub struct SaeSupportLogdetUncertainty {
     pub probes: usize,
     /// Standard error of `criterion`, `½·SE(log|S|)`, in nats.
     pub criterion_std_err: f64,
+    /// `‖Pσ_seen‖`, the standard error of the gradient the search certified, from the
+    /// half of `probes` the search descended. The certified point minimizes that
+    /// surrogate, so the criterion's own gradient there is claimed only to within the
+    /// certificate band plus this resolution.
+    pub seen_gradient_std_err_norm: f64,
     /// `‖Pg‖` at the certified point, re-estimated from the half of `probes` the search
     /// never saw.
     pub unseen_projected_gradient_norm: f64,
@@ -1236,14 +1241,18 @@ struct SupportOuterSearch {
 /// per-probe gradient samples give an unselected estimate `g'`, with standard error
 /// `σ'` measured from their own spread.
 ///
-/// If the criterion is stationary to the certificate's band `b`, then
-/// `‖Pg'‖ ≤ b + ‖Pσ'‖` to within one standard error of `g'`, and that is the
-/// acceptance: the threshold dominates the uncertainty of the gradient it judges. A
-/// disagreement says the surrogate put its optimum more than a band from the
-/// criterion's. The search then resumes from the certified point on the doubled plan,
-/// whose probe noise is `1/√2` of its predecessor's. Doubling ends where the host
-/// cannot store a larger plan ([`admit_logdet_probe_plan`]) or the caller's outer
-/// budget is spent, and either ending is a typed refusal, never an unchecked fit.
+/// What the certificate can claim about the criterion is not `‖Pg‖ ≤ b`. The point
+/// minimizes the surrogate, so the criterion's gradient there is the search probes'
+/// own gradient error, of size `‖Pσ_seen‖`, measured from the first half's per-probe
+/// spread. The claim is `‖Pg‖ ≤ b + ‖Pσ_seen‖`, and the unseen block can contradict it
+/// only by more than its own noise: `‖Pg'‖ ≤ b + ‖Pσ_seen‖ + ‖Pσ'‖`, each term to one
+/// standard error. That is the acceptance, and every uncertainty in the gradient it
+/// judges sits inside the threshold. A disagreement says the surrogate put its optimum
+/// further from the criterion's than its measured resolution allows. The search then
+/// resumes from the certified point on the doubled plan, whose probe noise is `1/√2`
+/// of its predecessor's. Doubling ends where the host cannot store a larger plan
+/// ([`admit_logdet_probe_plan`]) or the caller's outer budget is spent, and either
+/// ending is a typed refusal, never an unchecked fit.
 fn run_support_outer_search(
     objective: &mut SaeSupportOuterObjective,
     rho_lower: &Array1<f64>,
@@ -1288,6 +1297,7 @@ fn run_support_outer_search(
                 uncertainty: SaeSupportLogdetUncertainty {
                     probes: 0,
                     criterion_std_err: 0.0,
+                    seen_gradient_std_err_norm: 0.0,
                     unseen_projected_gradient_norm: 0.0,
                     unseen_gradient_std_err_norm: 0.0,
                     plans,
@@ -1313,8 +1323,9 @@ fn run_support_outer_search(
                     validation.logdet_probes
                 ))
             })?;
-        let (mut unseen_gradient, mut unseen_std_err) =
-            unseen_probe_gradient(&validation.gradient, samples, seen)?;
+        let blocks = probe_block_gradients(&validation.gradient, samples, seen)?;
+        let (mut unseen_gradient, mut unseen_std_err, mut seen_std_err) =
+            (blocks.unseen_gradient, blocks.unseen_std_err, blocks.seen_std_err);
         for &coordinate in &certificate.lambdas_railed {
             if coordinate >= unseen_gradient.len() {
                 continue;
@@ -1331,23 +1342,26 @@ fn run_support_outer_search(
             if outward {
                 unseen_gradient[coordinate] = 0.0;
                 unseen_std_err[coordinate] = 0.0;
+                seen_std_err[coordinate] = 0.0;
             }
         }
         let gradient_norm = unseen_gradient.dot(&unseen_gradient).sqrt();
         let std_err_norm = unseen_std_err.dot(&unseen_std_err).sqrt();
+        let seen_std_err_norm = seen_std_err.dot(&seen_std_err).sqrt();
         let band = certificate.stationarity.bound();
         log::info!(
             "support LAML certified point re-scored on {seen} unseen probes: |Pg| = \
-             {gradient_norm:.6e}, standard error {std_err_norm:.6e}, certificate band \
-             {band:.6e} (plan {plans})"
+             {gradient_norm:.6e}, standard error {std_err_norm:.6e}; certificate band \
+             {band:.6e}, search-probe resolution {seen_std_err_norm:.6e} (plan {plans})"
         );
-        if gradient_norm <= band + std_err_norm {
+        if gradient_norm <= band + seen_std_err_norm + std_err_norm {
             return Ok(SupportOuterSearch {
                 rho: outer.rho,
                 certificate,
                 uncertainty: SaeSupportLogdetUncertainty {
                     probes: doubled,
                     criterion_std_err: 0.5 * validation.logdet_std_err,
+                    seen_gradient_std_err_norm: seen_std_err_norm,
                     unseen_projected_gradient_norm: gradient_norm,
                     unseen_gradient_std_err_norm: std_err_norm,
                     plans,
@@ -1360,8 +1374,8 @@ fn run_support_outer_search(
             return Err(outer_error(format!(
                 "support LAML certified a point whose gradient, re-estimated on {seen} probes \
                  the search never saw, is |Pg| = {gradient_norm:.6e} against band {band:.6e} \
-                 plus standard error {std_err_norm:.6e}, and the outer budget of {budget} \
-                 iterations is spent"
+                 plus search-probe resolution {seen_std_err_norm:.6e} plus standard error \
+                 {std_err_norm:.6e}, and the outer budget of {budget} iterations is spent"
             )));
         }
         start = outer.rho;
@@ -1369,15 +1383,25 @@ fn run_support_outer_search(
     }
 }
 
-/// The criterion gradient re-estimated from the probes `samples[seen..]` alone, with
-/// its Hutchinson standard error. `samples` are one evaluation's per-probe samples of
-/// the gradient's log-determinant half. The rest of `gradient` is deterministic and
+/// One evaluation's gradient split by probe block: the search's probes `[..seen]` and
+/// the unseen rest.
+struct ProbeBlockGradients {
+    /// The gradient re-estimated from the unseen probes alone.
+    unseen_gradient: Array1<f64>,
+    /// Its Hutchinson standard error, from the unseen probes' spread.
+    unseen_std_err: Array1<f64>,
+    /// The Hutchinson standard error of a gradient taken from the seen probes alone.
+    seen_std_err: Array1<f64>,
+}
+
+/// Split one evaluation's per-probe samples of the gradient's log-determinant half at
+/// `seen` (see [`ProbeBlockGradients`]). The rest of `gradient` is deterministic and
 /// common to every probe.
-fn unseen_probe_gradient(
+fn probe_block_gradients(
     gradient: &Array1<f64>,
     samples: &Array2<f64>,
     seen: usize,
-) -> Result<(Array1<f64>, Array1<f64>), EstimationError> {
+) -> Result<ProbeBlockGradients, EstimationError> {
     let probes = samples.nrows();
     if seen >= probes || samples.ncols() != gradient.len() {
         return Err(outer_error(format!(
@@ -1387,22 +1411,31 @@ fn unseen_probe_gradient(
             gradient.len()
         )));
     }
+    let groups = gradient.len();
     let mut unseen_gradient = gradient.clone();
-    let mut std_err = Array1::<f64>::zeros(gradient.len());
-    for group in 0..gradient.len() {
+    let mut unseen_std_err = Array1::<f64>::zeros(groups);
+    let mut seen_std_err = Array1::<f64>::zeros(groups);
+    let unmeasurable = |count: usize| {
+        outer_error(format!(
+            "support LAML cannot measure a gradient standard error from {count} probes"
+        ))
+    };
+    for group in 0..groups {
         let column = samples.column(group).to_vec();
         let mean = column.iter().sum::<f64>() / probes as f64;
-        let unseen = &column[seen..];
-        let unseen_mean = unseen.iter().sum::<f64>() / unseen.len() as f64;
+        let (seen_block, unseen_block) = column.split_at(seen);
+        let unseen_mean = unseen_block.iter().sum::<f64>() / unseen_block.len() as f64;
         unseen_gradient[group] += unseen_mean - mean;
-        std_err[group] = hutchinson_standard_error(unseen).ok_or_else(|| {
-            outer_error(format!(
-                "support LAML cannot measure a gradient standard error from {} unseen probes",
-                unseen.len()
-            ))
-        })?;
+        unseen_std_err[group] = hutchinson_standard_error(unseen_block)
+            .ok_or_else(|| unmeasurable(unseen_block.len()))?;
+        seen_std_err[group] =
+            hutchinson_standard_error(seen_block).ok_or_else(|| unmeasurable(seen_block.len()))?;
     }
-    Ok((unseen_gradient, std_err))
+    Ok(ProbeBlockGradients {
+        unseen_gradient,
+        unseen_std_err,
+        seen_std_err,
+    })
 }
 
 /// Refuse a frozen plan the host cannot store: `probes` probe vectors, plus one
@@ -2400,10 +2433,13 @@ mod tests {
         assert!(uncertainty.probes >= 2 * SCHUR_SLQ_LOGDET_PROBES);
         assert_eq!(search.terminal.logdet_probes, uncertainty.probes);
         assert!(uncertainty.unseen_gradient_std_err_norm > 0.0);
+        assert!(uncertainty.seen_gradient_std_err_norm > 0.0);
         assert!(uncertainty.criterion_std_err > 0.0);
         assert!(
             uncertainty.unseen_projected_gradient_norm
-                <= band + uncertainty.unseen_gradient_std_err_norm
+                <= band
+                    + uncertainty.seen_gradient_std_err_norm
+                    + uncertainty.unseen_gradient_std_err_norm
         );
 
         let mut dense = build_objective();
@@ -2418,7 +2454,10 @@ mod tests {
             &lower,
             &upper,
         );
-        let allowance = band + 3.0 * uncertainty.unseen_gradient_std_err_norm;
+        let allowance = band
+            + 3.0
+                * (uncertainty.seen_gradient_std_err_norm
+                    + uncertainty.unseen_gradient_std_err_norm);
         eprintln!(
             "#2933 F29 search: exact |Pg| {exact_norm:.6e} at the certified point, \
              {start_norm:.6e} at the start, allowance {allowance:.6e}"

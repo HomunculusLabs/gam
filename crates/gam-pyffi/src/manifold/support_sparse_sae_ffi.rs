@@ -760,6 +760,7 @@ pub(crate) fn fit_support_sparse_manifold_sae(
         "stochastic_log_det": {
             "probes": logdet.probes,
             "criterion_std_err": logdet.criterion_std_err,
+            "seen_gradient_std_err_norm": logdet.seen_gradient_std_err_norm,
             "unseen_projected_gradient_norm": logdet.unseen_projected_gradient_norm,
             "unseen_gradient_std_err_norm": logdet.unseen_gradient_std_err_norm,
             "plans": logdet.plans,
