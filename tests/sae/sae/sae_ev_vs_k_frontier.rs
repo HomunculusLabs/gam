@@ -466,7 +466,10 @@ fn run_production_fit(
         SMOOTHNESS.ln(),
         vec![Array1::<f64>::zeros(0); k_atoms],
     );
-    let init_rho_flat = init_rho.to_flat();
+    let init_rho = init_rho.for_assignment(&term.assignment);
+    let init_rho_flat = init_rho
+        .to_flat(&term.assignment)
+        .expect("the seed rho is bound to the term's assignment");
     let n_params = init_rho_flat.len();
     let mut objective = SaeManifoldOuterObjective::new(
         term,

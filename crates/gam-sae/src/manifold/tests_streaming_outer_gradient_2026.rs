@@ -204,7 +204,7 @@ fn production_objective_forced_streaming_value_gradient_matches_dense() {
     // the correct two-coordinate layout.  Drive each route from that owned
     // authority; retaining the pre-construction seed here would test a phantom
     // parameter that the production objective correctly refuses.
-    let rho_flat = dense.baseline_rho.to_flat();
+    let rho_flat = dense.baseline_rho.flat_coordinates();
     let rho = streaming
         .baseline_rho
         .from_flat(rho_flat.view())
@@ -481,7 +481,7 @@ fn row_hessian_fingerprint_is_a_function_of_the_operator_2515() {
 fn fixed_point_certificate_covers_non_ordered_beta_bernoulli_exact_gradient() {
     let make_objective = || {
         let (term, target, rho) = small_two_atom_periodic_term();
-        let rho_flat = rho.to_flat();
+        let rho_flat = rho.flat_coordinates();
         (
             SaeManifoldOuterObjective::new(term, target, None, rho, 2, 0.25, 1.0e-4, 1.0e-4),
             rho_flat,
@@ -547,7 +547,7 @@ fn fixed_point_certificate_covers_ordered_beta_bernoulli_complete_gradient() {
         let (mut term, target, mut rho) = small_two_atom_periodic_term();
         term.assignment.mode = AssignmentMode::ordered_beta_bernoulli(0.8, 1.0, true);
         rho.log_lambda_sparse = 0.7_f64.ln();
-        let rho_flat = rho.to_flat();
+        let rho_flat = rho.flat_coordinates();
         (
             SaeManifoldOuterObjective::new(term, target, None, rho, 2, 0.25, 1.0e-4, 1.0e-4),
             rho_flat,

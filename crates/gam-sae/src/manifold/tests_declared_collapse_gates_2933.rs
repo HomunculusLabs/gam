@@ -101,7 +101,7 @@ fn shifted(centre: &Array1<f64>, coordinate: usize, step: f64) -> Array1<f64> {
 #[test]
 fn outer_gradient_is_the_derivative_of_the_value_production_reports_2933() {
     let mut objective = co_firing_collinear_two_atom_objective();
-    let centre = objective.baseline_rho.to_flat();
+    let centre = objective.baseline_rho.flat_coordinates();
     let evaluation = objective
         .eval(&centre)
         .expect("the centre evaluation must return a (value, gradient) pair");
@@ -271,7 +271,7 @@ fn a_term_handed_in_with_frozen_gates_declares_them_2933() {
 #[test]
 fn one_objective_holds_one_gate_set_across_rho_reset_and_waypoint_rollback_2933() {
     let mut objective = co_firing_collinear_two_atom_objective();
-    let centre = objective.baseline_rho.to_flat();
+    let centre = objective.baseline_rho.flat_coordinates();
     let first = objective
         .eval(&centre)
         .expect("the centre evaluation must return a (value, gradient) pair");

@@ -311,7 +311,7 @@ fn fit_real_chart(
     // (#2933 F45), so the sparse entry is an unread placeholder.
     let init_rho = SaeManifoldRho::new(0.0, 1.0_f64.ln(), vec![Array1::zeros(1)])
         .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &term.assignment)?;
-    let seed = init_rho.to_flat();
+    let seed = init_rho.to_flat(&term.assignment)?;
     let n_params = seed.len();
     let mut objective = SaeManifoldOuterObjective::new(
         term,

@@ -151,7 +151,7 @@ pub(crate) fn planted_circle_multi_atom_threshold_gate_clears_startup_validation
     let init_rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; k_atoms])
         .seed_scaled_by_dispersion_for_assignment(1.0, &term.assignment)
         .unwrap();
-    let init_rho_flat = init_rho.to_flat();
+    let init_rho_flat = init_rho.to_flat(&term.assignment).expect("the seed rho is bound to the term's assignment");
     let n_params = init_rho_flat.len();
     let mut objective =
         SaeManifoldOuterObjective::new(term, z.clone(), None, init_rho, 8, 0.04, 1.0e-6, 1.0e-6);

@@ -142,7 +142,7 @@ fn planted_circle_fit_returns_with_analytic_certificate() {
         .expect("the analytic OuterResult certifies the installed state");
     let fitted = objective.into_fitted().expect("outer fit was evaluated");
     assert_eq!(
-        fitted.rho.to_flat(),
+        fitted.rho.flat_coordinates(),
         certified_rho,
         "fit extraction must preserve the exact certified outer coordinate"
     );

@@ -203,7 +203,7 @@ fn forced_streaming_admits_a_deflating_state_and_matches_dense_2515() {
     );
     let mut streaming =
         SaeManifoldOuterObjective::new(term, target, None, rho.clone(), 40, 0.4, 1.0e-6, 1.0e-6);
-    let rho_flat = dense.baseline_rho.to_flat();
+    let rho_flat = dense.baseline_rho.flat_coordinates();
     let route_rho = streaming
         .baseline_rho
         .from_flat(rho_flat.view())
@@ -335,7 +335,7 @@ fn forced_streaming_has_a_gradient_wherever_the_dense_route_does_2515() {
             1.0e-6,
             1.0e-6,
         );
-        let rho_flat = dense.baseline_rho.to_flat();
+        let rho_flat = dense.baseline_rho.flat_coordinates();
         let route_rho = streaming
             .baseline_rho
             .from_flat(rho_flat.view())

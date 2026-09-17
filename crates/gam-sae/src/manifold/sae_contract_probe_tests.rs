@@ -716,7 +716,7 @@ fn sae_k1_circle_penalized_quasi_laplace_criterion_ranks_fixed_point_2226() {
 #[test]
 fn ranking_and_gradient_lanes_match_bare_reml() {
     let mut objective = warmstart_test_objective_with_evaluator();
-    let rho_flat = objective.current_rho.to_flat();
+    let rho_flat = objective.current_rho.flat_coordinates();
 
     // Value-probe lane: the comparand the cascade uses for seed validation and
     // cross-seed ranking.

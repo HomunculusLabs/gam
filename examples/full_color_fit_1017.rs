@@ -172,7 +172,8 @@ fn run() -> Result<(), String> {
     }
 
     let registry = AnalyticPenaltyRegistry::new();
-    let initial_rho_flat = initial_rho.to_flat();
+    let initial_rho = initial_rho.for_assignment(&term.assignment);
+    let initial_rho_flat = initial_rho.to_flat(&term.assignment)?;
     let mut objective = SaeManifoldOuterObjective::new(
         term,
         target.clone(),

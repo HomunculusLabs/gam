@@ -58,9 +58,10 @@
 //!
 //! No `let _`, no `#[allow(...)]`, no env vars, no `#[cfg(feature=...)]`.
 
-use ndarray::Array1;
+use ndarray::{Array1, Array2};
 
-use gam::terms::{sae::manifold::SaeManifoldRho};
+use gam::terms::latent::LatentManifold;
+use gam::terms::sae::manifold::{AssignmentMode, SaeAssignment, SaeManifoldRho};
 
 const D: usize = 1; // latent dim per atom (circle)
 const K: usize = 2; // atoms
@@ -88,7 +89,7 @@ fn ard_rho() -> SaeManifoldRho {
 #[test]
 fn rho_flat_coordinate_space_is_n_invariant_1033() {
     let rho = ard_rho();
-    let flat = rho.to_flat();
+    let flat = rho.to_flat(&gate_assignment()).expect("a threshold-gate layout carries the sparse coordinate");
     assert_eq!(
         flat.len(),
         RHO_FLAT_LEN,
@@ -98,10 +99,25 @@ fn rho_flat_coordinate_space_is_n_invariant_1033() {
     );
     // Round-trip is the exact inverse and stays k-dim.
     let back = rho.from_flat(flat.view()).unwrap();
-    assert_eq!(back.to_flat().len(), RHO_FLAT_LEN);
+    assert_eq!(
+        back.to_flat(&gate_assignment()).expect("a threshold-gate layout carries the sparse coordinate").len(),
+        RHO_FLAT_LEN
+    );
     assert!(
         flat.iter().all(|v| v.is_finite()),
         "k-dim outer coordinate must be finite"
     );
 }
 
+
+/// A one-row threshold-gate assignment of the `K` atoms: its layout carries the sparse
+/// coordinate that [`RHO_FLAT_LEN`] counts.
+fn gate_assignment() -> SaeAssignment {
+    SaeAssignment::from_blocks_with_mode_and_manifolds(
+        Array2::<f64>::zeros((1, K)),
+        vec![Array2::<f64>::zeros((1, D)); K],
+        vec![LatentManifold::Euclidean; K],
+        AssignmentMode::threshold_gate(1.0, 0.0),
+    )
+    .expect("one logit column, coordinate block and manifold per atom")
+}

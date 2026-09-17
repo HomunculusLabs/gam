@@ -1195,7 +1195,7 @@ pub(crate) fn seed_inner_state_installs_and_reuses_matching_beta() {
     // Freeze the inner solve at zero Newton iterations: β cannot move off
     // the warm-start, so the published hint must equal the seed exactly.
     obj.inner_max_iter = 0;
-    let rho_flat = obj.baseline_rho.to_flat();
+    let rho_flat = obj.baseline_rho.flat_coordinates();
     let eval =
         OuterObjective::eval(&mut obj, &rho_flat).expect("eval at the warm-started β must succeed");
     let hint = eval

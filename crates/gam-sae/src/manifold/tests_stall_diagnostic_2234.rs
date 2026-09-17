@@ -148,7 +148,7 @@ fn zz_planted_circle_plain_engine_stall_diagnostic_2234() {
     })
     .expect("fit seed");
 
-    let initial_flat = seed.initial_rho.to_flat();
+    let initial_flat = seed.initial_rho.flat_coordinates();
     let n_params = initial_flat.len();
     let mut objective = SaeManifoldOuterObjective::new(
         seed.base_term,

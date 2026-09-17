@@ -156,7 +156,10 @@ fn sae_manifold_euclidean_k2_fit_terminates() {
     let (z, s_true, owner) = planted_two_lines();
     let term = build_cold_k2_term(&s_true, &owner, &z);
     let init_rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(1); K]);
-    let init_rho_flat = init_rho.to_flat();
+    let init_rho = init_rho.for_assignment(&term.assignment);
+    let init_rho_flat = init_rho
+        .to_flat(&term.assignment)
+        .expect("the seed rho is bound to the term's assignment");
     let n_params = init_rho_flat.len();
     let mut objective = SaeManifoldOuterObjective::new(
         term,

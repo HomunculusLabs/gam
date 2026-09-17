@@ -121,7 +121,7 @@ mod amortized_encoder_tests {
         }
         rho_eval.log_ard = vec![array![-1.2_f64], array![-1.0_f64]];
         let rho = rho_eval;
-        let base = rho.to_flat();
+        let base = rho.flat_coordinates();
         let h = 1.0e-5;
 
         let mut coords: Vec<usize> = Vec::new();

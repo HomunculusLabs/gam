@@ -964,7 +964,11 @@ fn run(shape: Shape) -> Result<(), String> {
         }
     }
 
-    let init_rho_flat = fixture.rho.to_flat();
+    let init_rho_flat = fixture
+        .rho
+        .clone()
+        .for_assignment(&fixture.term.assignment)
+        .to_flat(&fixture.term.assignment)?;
     let n_params = init_rho_flat.len();
     let outer = SaeManifoldOuterObjective::new(
         fixture.term.clone(),

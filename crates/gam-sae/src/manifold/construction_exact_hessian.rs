@@ -3075,7 +3075,7 @@ impl SaeManifoldTerm {
                 )));
             }
         }
-        let n_params = rho.to_flat().len();
+        let n_params = rho.flat_coordinates().len();
         let mut explicit = Array1::<f64>::zeros(n_params);
         let mut logdet_trace = Array1::<f64>::zeros(n_params);
         let mut occam = Array1::<f64>::zeros(n_params);
@@ -4601,7 +4601,7 @@ impl SaeManifoldTerm {
                 }
             }
         }
-        let mut delta_trace = Array1::<f64>::zeros(rho.to_flat().len());
+        let mut delta_trace = Array1::<f64>::zeros(rho.flat_coordinates().len());
         let mut delta_gamma_t = Array1::<f64>::zeros(total_t);
         for r in 0..total_t {
             let weight = pricing.clamp_diagonal_derivative[r];
@@ -4623,7 +4623,7 @@ impl SaeManifoldTerm {
         loss: &SaeManifoldLoss,
         cache: &ArrowFactorCache,
     ) -> Result<DenseExactALogdetChannels, String> {
-        let n_params = rho.to_flat().len();
+        let n_params = rho.flat_coordinates().len();
         let geometry = self.materialize_exact_hessian_quotient_geometry(rho, target, cache)?;
         // The common basin owner includes the negative-subspace response in
         // dA. Chain its remaining explicit dE term to rho and theta here.

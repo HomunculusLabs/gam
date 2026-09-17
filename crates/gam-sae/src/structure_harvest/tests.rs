@@ -2913,7 +2913,7 @@ fn every_registered_d2_topology_fits_at_least_once_2604() {
                     let old_len = curvature_free_rho
                         .clone()
                         .for_assignment(&term.assignment)
-                        .to_flat()
+                        .flat_coordinates()
                         .len();
                     let outer = crate::manifold::SaeManifoldOuterObjective::new(
                         term,

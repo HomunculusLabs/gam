@@ -12,7 +12,7 @@ use ndarray::{Array1, arr1};
 #[test]
 fn empty_block_flat_is_plain_sae_layout() {
     let rho = SaeManifoldRho::new(0.0, 0.0, vec![arr1(&[0.0_f64])]);
-    let flat: Array1<f64> = rho.to_flat();
+    let flat: Array1<f64> = rho.flat_coordinates();
     assert_eq!(flat.len(), 1 + 1 + 1);
     let back = rho.from_flat(flat.view()).unwrap();
     assert!(back.log_lambda_block.is_empty());

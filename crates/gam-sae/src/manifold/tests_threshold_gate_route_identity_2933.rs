@@ -108,7 +108,7 @@ fn threshold_gate_route_gradients_differentiate_the_reconverged_criterion_2933()
         let (term, target, rho) = threshold_gate_tiny_fixture(straddle);
         let mut production = outer_objective(term, &target, &rho, INNER_MAX_ITER);
         let layout = production.baseline_rho.clone();
-        let flat = layout.to_flat();
+        let flat = layout.flat_coordinates();
         let centre_rho = layout
             .from_flat(flat.view())
             .expect("#2933 F03: the objective owns its typed rho layout");

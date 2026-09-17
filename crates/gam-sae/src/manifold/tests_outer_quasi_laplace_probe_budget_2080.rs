@@ -482,7 +482,7 @@ fn run_wide_outer_fit(
     let init_rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; k])
         .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &term.assignment)
         .expect("seed dispersion is finite and strictly positive");
-    let seed = init_rho.to_flat();
+    let seed = init_rho.to_flat(&term.assignment).expect("the seed rho is bound to the term's assignment");
     let n_params = seed.len();
     let mut objective =
         SaeManifoldOuterObjective::new(term, z.clone(), None, init_rho, 8, 0.04, 1.0e-6, 1.0e-6);
@@ -528,7 +528,7 @@ fn run_k1_generated_seed_outer_fit(
     let init_rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]])
         .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &term.assignment)
         .expect("seed dispersion is finite and strictly positive");
-    let n_params = init_rho.to_flat().len();
+    let n_params = init_rho.to_flat(&term.assignment).expect("the seed rho is bound to the term's assignment").len();
     let mut objective =
         SaeManifoldOuterObjective::new(term, z.clone(), None, init_rho, 8, 0.04, 1.0e-6, 1.0e-6);
     let result = OuterProblem::new(n_params)
@@ -628,7 +628,7 @@ fn seeded_k1_circle_objective(
     let init_rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]])
         .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &term.assignment)
         .expect("seed dispersion is finite and strictly positive");
-    let seed = init_rho.to_flat();
+    let seed = init_rho.to_flat(&term.assignment).expect("the seed rho is bound to the term's assignment");
     let objective = SaeManifoldOuterObjective::new(
         term,
         z.clone(),
@@ -989,7 +989,7 @@ fn entangled_two_circle_outer_reml_separates_2080() {
     let init_rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; k])
         .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &term.assignment)
         .expect("seed dispersion is finite and strictly positive");
-    let seed = init_rho.to_flat();
+    let seed = init_rho.to_flat(&term.assignment).expect("the seed rho is bound to the term's assignment");
     let n_params = seed.len();
     let mut objective =
         SaeManifoldOuterObjective::new(term, z.clone(), None, init_rho, 8, 0.04, 1.0e-6, 1.0e-6);
@@ -1416,7 +1416,7 @@ fn saturating_gate_specimen_prices_a_finite_root_2080() {
         }
     }
 
-    let rho_flat = rho.to_flat();
+    let rho_flat = rho.flat_coordinates();
     let mut objective = SaeManifoldOuterObjective::new(
         term,
         z,
@@ -1578,7 +1578,7 @@ fn zz_measure_2439_value_vs_gradient_inner_mode() {
     let rho = SaeManifoldRho::new(0.02_f64.ln(), 4.0_f64, vec![array![0.0]])
         .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &term.assignment)
         .expect("seed dispersion is finite and strictly positive");
-    let rho_flat = rho.to_flat();
+    let rho_flat = rho.flat_coordinates();
 
     let report = |tag: &str, a: &OuterEval, b: &OuterEval| {
         let diff = (a.cost - b.cost).abs();
@@ -2994,7 +2994,7 @@ fn value_lane_prices_at_shared_fixed_point_2228() {
     let rho = SaeManifoldRho::new(0.02_f64.ln(), 4.0_f64, vec![array![0.0]])
         .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &term.assignment)
         .expect("seed dispersion is finite and strictly positive");
-    let rho_flat = rho.to_flat();
+    let rho_flat = rho.flat_coordinates();
 
     // Sanity: the COARSE (false) refine budget must be demonstrably inadequate at
     // this rho, else the invariant assertion below would pass vacuously on any

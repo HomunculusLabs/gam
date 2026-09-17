@@ -635,7 +635,10 @@ fn shared_ard_collapses_outer_param_count_at_large_k() {
         // Per-atom: 1 + K + Σ_k d_k = 1 + K + K (d=1) — the sparse coord, the K
         // per-atom smoothness coords (#1556), and one ARD precision per atom.
         assert_eq!(
-            per_atom.to_flat().len(),
+            per_atom
+                .to_flat(&gate_assignment(k))
+                .expect("a threshold-gate layout carries the sparse coordinate")
+                .len(),
             1 + k + k * d_per_atom,
             "per-atom ARD must keep 1 + K + Σ d_k outer coords (K={k})"
         );
@@ -646,7 +649,10 @@ fn shared_ard_collapses_outer_param_count_at_large_k() {
         // vector is 1 + K + max_d (= 1 + K + d here) — the Σ_k d_k ARD blow-up
         // is gone; only the K per-atom smoothness coords scale with K (#1556).
         assert_eq!(
-            shared.to_flat().len(),
+            shared
+                .to_flat(&gate_assignment(k))
+                .expect("a threshold-gate layout carries the sparse coordinate")
+                .len(),
             1 + k + d_per_atom,
             "shared ARD must collapse the ARD block to a per-axis max_d (got K={k})"
         );
@@ -660,7 +666,7 @@ fn shared_ard_collapses_outer_param_count_at_large_k() {
         ndarray::Array1::<f64>::zeros(2), // another 2-axis atom
     ];
     let shared = SaeManifoldRho::new_shared_ard(0.0, 0.0, log_ard);
-    let flat = shared.to_flat();
+    let flat = shared.to_flat(&gate_assignment(3)).expect("a threshold-gate layout carries the sparse coordinate");
     // K = 3 atoms, max_d = 2 → 1 + K + max_d = 1 + 3 + 2 = 6 outer coords. The
     // shared ARD block (the two per-axis strengths) occupies indices
     // 1 + K .. 1 + K + max_d = 4..6.
@@ -681,7 +687,7 @@ fn shared_ard_collapses_outer_param_count_at_large_k() {
 
     // to_flat is the exact inverse of the broadcast (read-back is exact when the
     // table is uniform across owners, which the broadcast guarantees).
-    let reflat = rebuilt.to_flat();
+    let reflat = rebuilt.to_flat(&gate_assignment(3)).expect("a threshold-gate layout carries the sparse coordinate");
     for (a, b) in moved.iter().zip(reflat.iter()) {
         assert!(
             (a - b).abs() <= 1e-12,
@@ -727,14 +733,18 @@ fn shared_ard_is_a_convergent_outer_coordinate_1026() {
     // = 5; shared flat = 1 + K + max_d = 1 + 2 + 1 = 4. The ARD-block collapse
     // is real even at K=2; it widens as K→∞.
     let log_ard = vec![Array1::<f64>::from_elem(1, (1.0e-1_f64).ln()); 2];
-    let per_atom = SaeManifoldRho::new((1.0e-2_f64).ln(), (1.0e-2_f64).ln(), log_ard.clone());
-    let shared = SaeManifoldRho::new_shared_ard((1.0e-2_f64).ln(), (1.0e-2_f64).ln(), log_ard);
+    let per_atom = SaeManifoldRho::new((1.0e-2_f64).ln(), (1.0e-2_f64).ln(), log_ard.clone())
+        .for_assignment(&term.assignment);
+    let shared = SaeManifoldRho::new_shared_ard((1.0e-2_f64).ln(), (1.0e-2_f64).ln(), log_ard)
+        .for_assignment(&term.assignment);
+    let per_atom_len = per_atom.to_flat(&term.assignment).expect("the rho is bound to the term's assignment").len();
+    let shared_len = shared.to_flat(&term.assignment).expect("the rho is bound to the term's assignment").len();
     assert_eq!(shared.ard_sharing, ArdSharing::Shared);
     assert!(
-        shared.to_flat().len() < per_atom.to_flat().len(),
+        shared_len < per_atom_len,
         "shared ARD outer coordinate ({}) must be strictly shorter than per-atom ({})",
-        shared.to_flat().len(),
-        per_atom.to_flat().len()
+        shared_len,
+        per_atom_len
     );
 
     // Inner-solve knobs mirroring the production outer objective's defaults.
@@ -753,4 +763,16 @@ fn shared_ard_is_a_convergent_outer_coordinate_1026() {
         cost.is_finite(),
         "shared-ARD inner fit must reach a finite quasi-Laplace criterion; got {cost}"
     );
+}
+
+/// A one-row threshold-gate assignment of `k` atoms. Its layout carries the sparse coordinate,
+/// so the flat counts below are `1 + K + ...` whatever the ARD sharing.
+fn gate_assignment(k: usize) -> SaeAssignment {
+    SaeAssignment::from_blocks_with_mode_and_manifolds(
+        Array2::<f64>::zeros((1, k)),
+        vec![Array2::<f64>::zeros((1, 1)); k],
+        vec![LatentManifold::Euclidean; k],
+        AssignmentMode::threshold_gate(1.0, 0.0),
+    )
+    .expect("one logit column, coordinate block and manifold per atom")
 }

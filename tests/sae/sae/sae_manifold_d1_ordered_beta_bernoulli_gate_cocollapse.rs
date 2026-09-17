@@ -139,7 +139,10 @@ fn sae_manifold_d1_ordered_beta_bernoulli_gate_cocollapse() {
     let z = planted_curve();
     let term = build_cold_d1_term(&z);
     let init_rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(D); 1]);
-    let init_rho_flat = init_rho.to_flat();
+    let init_rho = init_rho.for_assignment(&term.assignment);
+    let init_rho_flat = init_rho
+        .to_flat(&term.assignment)
+        .expect("the seed rho is bound to the term's assignment");
     let n_params = init_rho_flat.len();
     let mut objective = SaeManifoldOuterObjective::new(
         term,

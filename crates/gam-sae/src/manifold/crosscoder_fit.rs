@@ -846,7 +846,7 @@ pub fn run_sae_crosscoder_fit(
         .assignment
         .validate_rho_domain(&request.initial_rho)
         .map_err(SaeFitError::Fit)?;
-    let initial_flat = request.initial_rho.to_flat();
+    let initial_flat = request.initial_rho.flat_coordinates();
     let n_params = initial_flat.len();
     let cancel = request
         .cancel

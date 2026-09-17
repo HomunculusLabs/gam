@@ -794,7 +794,7 @@ pub(crate) fn scad_no_origin_pinning_occupancy_on_circle() {
 #[test]
 pub(crate) fn shared_ard_flat_index_aliases_in_bounds_1026() {
     let shared = SaeManifoldRho::new_shared_ard(0.0, 0.0, vec![array![0.1_f64], array![0.2_f64]]);
-    let shared_len = shared.to_flat().len();
+    let shared_len = shared.flat_coordinates().len();
     assert_eq!(shared_len, 4, "shared flat len = 1+K+max_d");
     assert_eq!(shared.ard_flat_index(0, 0), 3);
     assert_eq!(
@@ -808,7 +808,7 @@ pub(crate) fn shared_ard_flat_index_aliases_in_bounds_1026() {
     );
 
     let per_atom = SaeManifoldRho::new(0.0, 0.0, vec![array![0.1_f64], array![0.2_f64]]);
-    assert_eq!(per_atom.to_flat().len(), 5, "per-atom flat len = 1+K+Σ d_k");
+    assert_eq!(per_atom.flat_coordinates().len(), 5, "per-atom flat len = 1+K+Σ d_k");
     assert_eq!(per_atom.ard_flat_index(0, 0), 3);
     assert_eq!(
         per_atom.ard_flat_index(1, 0),
@@ -2775,7 +2775,7 @@ pub(crate) fn planted_circle_ordered_beta_bernoulli_n40_sigma018_reaches_high_ev
     let init_rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]])
         .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &term.assignment)
         .unwrap();
-    let init_rho_flat = init_rho.to_flat();
+    let init_rho_flat = init_rho.to_flat(&term.assignment).expect("the seed rho is bound to the term's assignment");
     let n_params = init_rho_flat.len();
     let mut objective =
         SaeManifoldOuterObjective::new(term, z.clone(), None, init_rho, 50, 0.04, 1.0e-6, 1.0e-6);
@@ -2817,7 +2817,7 @@ pub(crate) fn planted_circle_noise_scale_sweep_reaches_high_ev_with_dimensionles
                         &term.assignment,
                     )
                     .unwrap();
-                let init_rho_flat = init_rho.to_flat();
+                let init_rho_flat = init_rho.to_flat(&term.assignment).expect("the seed rho is bound to the term's assignment");
                 let n_params = init_rho_flat.len();
                 let mut objective = SaeManifoldOuterObjective::new(
                     term,
@@ -3020,7 +3020,7 @@ pub(crate) fn outer_value_and_ranking_lanes_share_pure_penalized_quasi_laplace_c
     use gam_solve::rho_optimizer::{OuterEvalOrder, OuterObjective};
 
     // A fixed ρ at which all three lanes converge from the same fixture state.
-    let rho_flat = warmstart_test_objective().baseline_rho.to_flat();
+    let rho_flat = warmstart_test_objective().baseline_rho.flat_coordinates();
 
     // Gradient lane (ValueAndGradient): the consistent `(f, ∇f)` pair. This
     // objective is intentionally fresh, so its empty envelope bundle exercises
@@ -4635,7 +4635,7 @@ fn solve_exact_stationarity_is_self_adjoint_2080() {
     let options = ArrowSolveOptions::direct().with_positive_definite_evidence();
     let (_delta_t, _delta_beta, cache) =
         solve_arrow_newton_step_with_options(&sys, 0.0, 0.0, &options).unwrap();
-    let n_params = rho.to_flat().len();
+    let n_params = rho.flat_coordinates().len();
     assert!(n_params >= 2, "fixture must expose ≥2 outer coordinates");
     // Two production IFT right-hand sides (the sparse coordinate and the smooth
     // coordinate), so the test exercises A⁺ on genuine, distinct arrow vectors.

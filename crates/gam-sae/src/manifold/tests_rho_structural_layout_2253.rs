@@ -45,7 +45,7 @@ fn invalid_constructor_rho_is_refused_before_bounds_or_fixed_fit_2253() {
     );
 
     let mut fixed = planted_periodic_outer_objective_2253();
-    let mut flat = fixed.baseline_rho.to_flat();
+    let mut flat = fixed.baseline_rho.flat_coordinates();
     flat[fixed.baseline_rho.ard_flat_index(0, 0)] = LOG_STRENGTH_MIN - 1.0;
     let error = fixed
         .fit_at_fixed_rho(flat.view())
@@ -75,14 +75,14 @@ fn fixed_assignment_strength_is_absent_from_flat_rho_layout_2253() {
     assert_eq!(softmax.sparse_flat_index(), None);
     assert_eq!(softmax.smooth_flat_index(0), 0);
     assert_eq!(softmax.ard_flat_index(0, 0), 1);
-    assert_eq!(softmax.to_flat(), array![0.4, -0.2]);
+    assert_eq!(softmax.flat_coordinates(), array![0.4, -0.2]);
 
     // Reconstitution moves only the two mathematical coordinates and retains
     // the stored (inner-state) sparse value without emitting it into the outer
     // vector.
     let moved = array![0.7, -0.5];
     let restored = softmax.from_flat(moved.view()).unwrap();
-    assert_eq!(restored.to_flat(), moved);
+    assert_eq!(restored.flat_coordinates(), moved);
     assert_abs_diff_eq!(restored.log_lambda_sparse, -1.7, epsilon = 0.0);
 
     // TopK has no assignment-strength penalty at any K: the fixed support is
@@ -90,7 +90,7 @@ fn fixed_assignment_strength_is_absent_from_flat_rho_layout_2253() {
     let topk = SaeManifoldRho::new(-0.9, 0.1, vec![array![0.2], array![0.3]])
         .for_assignment(&layout_assignment(AssignmentMode::top_k_support(1), 2));
     assert_eq!(topk.sparse_flat_index(), None);
-    assert_eq!(topk.to_flat(), array![0.1, 0.1, 0.2, 0.3]);
+    assert_eq!(topk.flat_coordinates(), array![0.1, 0.1, 0.2, 0.3]);
 
     // Softmax regains the assignment-strength coordinate automatically when a
     // second atom makes entropy non-constant.
@@ -110,7 +110,7 @@ fn ordered_beta_bernoulli_sparse_coordinate_follows_the_effective_concentration_
     let learnable = layout_assignment(AssignmentMode::ordered_beta_bernoulli(0.8, 1.7, true), 2);
     let learned = SaeManifoldRho::new(-0.9, 0.1, smooth_and_ard.clone()).for_assignment(&learnable);
     assert_eq!(learned.sparse_flat_index(), Some(0));
-    assert_eq!(learned.to_flat(), array![-0.9, 0.1, 0.1, 0.2, 0.3]);
+    assert_eq!(learned.flat_coordinates(), array![-0.9, 0.1, 0.1, 0.2, 0.3]);
 
     let fixed = layout_assignment(AssignmentMode::ordered_beta_bernoulli(0.8, 1.7, false), 2);
     let mut overridden = learnable.clone();
@@ -118,7 +118,7 @@ fn ordered_beta_bernoulli_sparse_coordinate_follows_the_effective_concentration_
     for (label, assignment) in [("fixed mode", &fixed), ("override", &overridden)] {
         let rho = SaeManifoldRho::new(-0.9, 0.1, smooth_and_ard.clone()).for_assignment(assignment);
         assert_eq!(rho.sparse_flat_index(), None, "{label}");
-        assert_eq!(rho.to_flat(), array![0.1, 0.1, 0.2, 0.3], "{label}");
+        assert_eq!(rho.flat_coordinates(), array![0.1, 0.1, 0.2, 0.3], "{label}");
         let restored = rho
             .from_flat(array![0.4, -0.2, 0.5, 0.6].view())
             .expect("the four present coordinates rebuild");

@@ -835,7 +835,7 @@ fn ard_face_for(n: usize, p: usize, radius: f64, sigma: f64) -> (f64, f64, f64) 
     )
     .for_assignment(&term.assignment);
     let ard_index = rho.ard_flat_index(0, 0);
-    let seed = rho.to_flat()[ard_index];
+    let seed = rho.flat_coordinates()[ard_index];
     let objective =
         SaeManifoldOuterObjective::new(term, z.clone(), None, rho, 40, 1.0, 1.0e-6, 1.0e-6);
     let upper = objective
@@ -1089,7 +1089,7 @@ fn zz_2691_bounded_sigma_witness_returns_an_answer_at_every_sigma() {
         )
         .for_assignment(&term.assignment);
         let ard_index = rho.ard_flat_index(0, 0);
-        let rho_flat = rho.to_flat();
+        let rho_flat = rho.to_flat(&term.assignment).expect("the seed rho is bound to the term's assignment");
         let n_params = rho_flat.len();
         let mut objective =
             SaeManifoldOuterObjective::new(term, z.clone(), None, rho, 40, 1.0, 1.0e-6, 1.0e-6);

@@ -6818,7 +6818,7 @@ impl SaeManifoldTerm {
     ) -> Result<SaeArrowVector, String> {
         self.assignment.validate_rho_domain(rho)?;
         let ard_precisions = self.validated_ard_precisions(rho)?;
-        let n_params = rho.to_flat().len();
+        let n_params = rho.flat_coordinates().len();
         if j >= n_params {
             return Err(format!(
                 "outer_rho_gradient_ift_rhs: coordinate {j} outside rho dim {n_params}"

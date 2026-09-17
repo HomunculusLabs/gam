@@ -77,7 +77,7 @@ fn fixed_rho_objective(
         1.0e-6,
     );
     objective
-        .fit_at_fixed_rho(rho.to_flat().view())
+        .fit_at_fixed_rho(rho.flat_coordinates().view())
         .unwrap_or_else(|error| panic!("fixed-rho fit must converge: {error}"));
     objective
 }
@@ -168,8 +168,8 @@ fn assert_finalization_preserves_the_objective(learnable: bool, override_alpha: 
         );
     }
     assert_eq!(
-        fitted.rho.to_flat(),
-        rho_before.to_flat(),
+        fitted.rho.flat_coordinates(),
+        rho_before.flat_coordinates(),
         "{label}: the certified rho coordinates must leave finalization unchanged"
     );
     assert_eq!(
@@ -312,7 +312,7 @@ fn fixed_concentration_fits_expose_no_sparse_coordinate_2933() {
              a sparse coordinate exactly while the concentration is learned"
         );
         assert_eq!(
-            objective.baseline_rho.to_flat().len(),
+            objective.baseline_rho.flat_coordinates().len(),
             usize::from(learned) + 2 * k,
             "learnable_alpha={learnable}, override={override_alpha:?}: flat layout is \
              sparse + K smoothness + K ARD"
@@ -489,7 +489,7 @@ fn reactive_sparse_face(
         .unwrap_or_else(|error| panic!("reactive box for override={override_alpha:?}: {error}"));
     let face = rho
         .sparse_flat_index()
-        .map(|index| (rho.to_flat()[index], upper[index]));
+        .map(|index| (rho.flat_coordinates()[index], upper[index]));
     (face, upper)
 }
 

@@ -62,13 +62,13 @@ mod log_strength_domain_tests {
         irrelevant_placeholder
             .validate_log_strength_domain()
             .expect("a non-coordinate placeholder is outside the objective domain");
-        assert_eq!(rho.to_flat(), array![0.0]);
+        assert_eq!(rho.flat_coordinates(), array![0.0]);
 
         let scaled = rho
             .seed_scaled_by_dispersion_for_assignment(1.0e300, &softmax)
             .expect("dispersion scaling must not touch an absent sparse coordinate");
         assert_eq!(scaled.log_lambda_sparse, 17.0);
-        assert_eq!(scaled.to_flat().len(), 1);
+        assert_eq!(scaled.flat_coordinates().len(), 1);
         scaled
             .validate_log_strength_domain()
             .expect("the active smooth coordinate remains valid");
@@ -107,6 +107,22 @@ pub enum AssignmentStrengthLayout {
 }
 
 impl AssignmentStrengthLayout {
+    /// The layout `assignment`'s family and effective concentration predicate call for.
+    pub(crate) fn of(assignment: &SaeAssignment) -> Self {
+        match assignment.mode {
+            AssignmentMode::Softmax { .. } => Self::SoftmaxEntropy,
+            AssignmentMode::TopK { .. } => Self::FixedSupport,
+            AssignmentMode::ThresholdGate { .. } => Self::PenaltyWeight,
+            AssignmentMode::OrderedBetaBernoulli { .. } => {
+                if assignment.effective_alpha_is_learnable() {
+                    Self::ConcentrationOffset
+                } else {
+                    Self::FixedConcentration
+                }
+            }
+        }
+    }
+
     fn has_outer_coordinate(self, k_atoms: usize) -> bool {
         match self {
             Self::PenaltyWeight | Self::ConcentrationOffset => true,
@@ -340,19 +356,48 @@ impl SaeManifoldRho {
     /// ([`SaeAssignment::effective_alpha_is_learnable`], #2933 F45).
     #[must_use]
     pub fn for_assignment(mut self, assignment: &SaeAssignment) -> Self {
-        self.assignment_strength_layout = match assignment.mode {
-            AssignmentMode::Softmax { .. } => AssignmentStrengthLayout::SoftmaxEntropy,
-            AssignmentMode::TopK { .. } => AssignmentStrengthLayout::FixedSupport,
-            AssignmentMode::ThresholdGate { .. } => AssignmentStrengthLayout::PenaltyWeight,
-            AssignmentMode::OrderedBetaBernoulli { .. } => {
-                if assignment.effective_alpha_is_learnable() {
-                    AssignmentStrengthLayout::ConcentrationOffset
-                } else {
-                    AssignmentStrengthLayout::FixedConcentration
-                }
-            }
-        };
+        self.assignment_strength_layout = AssignmentStrengthLayout::of(assignment);
         self
+    }
+
+    /// The flat outer-coordinate vector of this ρ for `assignment`: the only public
+    /// flatten entry, and the one an outer problem's parameter count and seed come from.
+    ///
+    /// The constructors tag a ρ [`AssignmentStrengthLayout::PenaltyWeight`] until
+    /// [`Self::for_assignment`] binds it, and the outer objective binds its own copy. A ρ whose
+    /// layout disagrees with the assignment about the sparse coordinate would size the outer
+    /// problem one coordinate away from the objective, so it is refused here, before any
+    /// optimizer sees the vector (#2933 F45). The same holds for an ordered Beta--Bernoulli
+    /// layout bound for the other concentration or for another family.
+    pub fn to_flat(&self, assignment: &SaeAssignment) -> Result<Array1<f64>, String> {
+        let bound = self.assignment_strength_layout;
+        let expected = AssignmentStrengthLayout::of(assignment);
+        let k_atoms = self.k_atoms();
+        let ordered_contradiction = matches!(
+            bound,
+            AssignmentStrengthLayout::ConcentrationOffset
+                | AssignmentStrengthLayout::FixedConcentration
+        ) && bound != expected;
+        if bound.has_outer_coordinate(k_atoms) != expected.has_outer_coordinate(k_atoms)
+            || ordered_contradiction
+        {
+            let carries = |layout: AssignmentStrengthLayout| {
+                if layout.has_outer_coordinate(k_atoms) {
+                    "carries"
+                } else {
+                    "has no"
+                }
+            };
+            return Err(format!(
+                "SaeManifoldRho::to_flat: the rho layout {bound:?} {} sparse coordinate, but the \
+                 {} assignment's layout {expected:?} {} one; bind the rho with \
+                 `for_assignment(&assignment)` before flattening it (#2933 F45)",
+                carries(bound),
+                assignment.mode.family_label(),
+                carries(expected)
+            ));
+        }
+        Ok(self.flat_coordinates())
     }
 
     /// Flat index of `log_lambda_sparse`, or `None` when assignment strength is
@@ -725,7 +770,7 @@ impl SaeManifoldRho {
     /// share this exact endpoint; the owning SAE objective replaces raw `kappa`
     /// placeholders with scale-derived geometry rails.
     pub(crate) fn flat_domain_lower_bound(&self) -> Option<Array1<f64>> {
-        let len = self.to_flat().len();
+        let len = self.flat_coordinates().len();
         if len == 0 {
             return None;
         }
@@ -735,7 +780,7 @@ impl SaeManifoldRho {
     /// Objective-domain upper face in flat-rho layout; see
     /// [`Self::flat_domain_lower_bound`].
     pub(crate) fn flat_domain_upper_bound(&self) -> Option<Array1<f64>> {
-        let len = self.to_flat().len();
+        let len = self.flat_coordinates().len();
         if len == 0 {
             return None;
         }
@@ -768,7 +813,7 @@ impl SaeManifoldRho {
     ///
     /// [`Self::from_flat`] is the exact inverse and reads the same layout from
     /// `self` (its `log_ard` shape + `ard_sharing`).
-    pub fn to_flat(&self) -> Array1<f64> {
+    pub(crate) fn flat_coordinates(&self) -> Array1<f64> {
         let smooth_start = self.smooth_flat_start();
         match self.ard_sharing {
             ArdSharing::PerAtom => {
@@ -976,12 +1021,12 @@ mod curvature_coordinate_tests {
     #[test]
     fn curvature_tail_round_trips_and_is_absent_when_empty() {
         let base = SaeManifoldRho::new(-1.0, -2.0, vec![Array1::zeros(2), Array1::zeros(2)]);
-        let without = base.to_flat();
+        let without = base.flat_coordinates();
 
         let with_kappa = base
             .clone()
             .with_curvature(vec![(0, 0.75), (1, -1.25)]);
-        let flat = with_kappa.to_flat();
+        let flat = with_kappa.flat_coordinates();
         assert_eq!(
             flat.len(),
             without.len() + 2,
@@ -1005,7 +1050,7 @@ mod curvature_coordinate_tests {
         let flat_zero = base
             .clone()
             .with_curvature(vec![(0, 0.0), (1, 0.0)])
-            .to_flat();
+            .flat_coordinates();
         let zero_rebuilt = base
             .clone()
             .with_curvature(vec![(0, 0.0), (1, 0.0)])

@@ -306,7 +306,10 @@ fn fit_via_engine(term: SaeManifoldTerm, z: &Array2<f64>, label: &str) -> (SaeMa
     let k = term.atoms.len();
     let init_rho =
         SaeManifoldRho::new(1.0_f64.ln(), 1.0_f64.ln(), vec![Array1::<f64>::zeros(0); k]);
-    let init_rho_flat = init_rho.to_flat();
+    let init_rho = init_rho.for_assignment(&term.assignment);
+    let init_rho_flat = init_rho
+        .to_flat(&term.assignment)
+        .expect("the seed rho is bound to the term's assignment");
     let n_params = init_rho_flat.len();
     let mut objective = SaeManifoldOuterObjective::new(
         term,

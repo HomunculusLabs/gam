@@ -119,7 +119,11 @@ fn run_outer_fit(term: SaeManifoldTerm, z: &Array2<f64>, label: &str) -> SaeMani
     // engine refused with `outer objective-domain lower-bound dimension
     // mismatch: parameters=3, lower=2` before taking a step. Canonicalize here,
     // exactly as the production entry point does.
-    let init_rho_flat = init_rho.clone().for_assignment(&term.assignment).to_flat();
+    let init_rho_flat = init_rho
+        .clone()
+        .for_assignment(&term.assignment)
+        .to_flat(&term.assignment)
+        .expect("the seed rho is bound to the term's assignment");
     let n_params = init_rho_flat.len();
     let mut seed_config = SeedConfig::default();
     seed_config.max_seeds = 1;

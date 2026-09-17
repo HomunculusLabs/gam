@@ -220,7 +220,10 @@ fn run_production_fit(arm: Arm, z: &Array2<f64>, frac: &[f64], label: &str) -> S
         SMOOTHNESS.ln(),
         vec![Array1::<f64>::zeros(0)],
     );
-    let init_flat = init_rho.to_flat();
+    let init_rho = init_rho.for_assignment(&term.assignment);
+    let init_flat = init_rho
+        .to_flat(&term.assignment)
+        .expect("the seed rho is bound to the term's assignment");
     let n_params = init_flat.len();
     let mut objective = SaeManifoldOuterObjective::new(
         term,

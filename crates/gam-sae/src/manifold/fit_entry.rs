@@ -2028,7 +2028,7 @@ pub fn run_sae_manifold_certify(
     // Construct the ordinary native outer objective in frozen installed-state
     // mode. The audit evaluates the exact supplied point once; it runs neither
     // an inner update nor an outer optimization loop.
-    let rho_flat = rho.to_flat();
+    let rho_flat = rho.flat_coordinates();
     let mut objective = SaeManifoldOuterObjective::new(
         term,
         z.clone(),

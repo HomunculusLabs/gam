@@ -973,7 +973,7 @@ impl SaeManifoldOuterObjective {
     }
 
     pub(crate) fn current_rho_flat(&self) -> Array1<f64> {
-        self.current_rho.to_flat()
+        self.current_rho.flat_coordinates()
     }
 
     /// Re-evaluate one committed terminal coordinate with the idempotent dense
@@ -1612,7 +1612,7 @@ impl SaeManifoldOuterObjective {
         if self.last_loss.is_none() {
             return Err("outer result has no installed converged inner loss".to_string());
         }
-        let installed_rho = self.current_rho.to_flat();
+        let installed_rho = self.current_rho.flat_coordinates();
         let rho_matches = installed_rho.len() == result.rho.len()
             && installed_rho
                 .iter()
@@ -1679,7 +1679,7 @@ impl SaeManifoldOuterObjective {
         if self.last_loss.is_none() {
             return Err("installed-state audit has no evaluated inner loss".to_string());
         }
-        let installed_rho = self.current_rho.to_flat();
+        let installed_rho = self.current_rho.flat_coordinates();
         if installed_rho.len() != result.rho.len()
             || installed_rho
                 .iter()
@@ -2023,7 +2023,7 @@ impl SaeManifoldOuterObjective {
             Err(SaeCriterionError::VanishedAtoms(atoms)) => {
                 log::debug!(
                     "SAE criterion reached fixed-K structural boundary at rho={:?}: {atoms}",
-                    rho.to_flat()
+                    rho.flat_coordinates()
                 );
                 let loss = self.term.loss(self.target.view(), &rho)?;
                 let beta_hat = self.term.flatten_beta();
@@ -2452,7 +2452,7 @@ impl SaeManifoldOuterObjective {
         self.fit_verdict = None;
         self.probe_telemetry.criterion_calls += 1;
         let rho = self.baseline_rho.from_flat(rho_flat)?;
-        let n_params = rho.to_flat().len();
+        let n_params = rho.flat_coordinates().len();
         // #2231 Inc-B — scale the block columns for this ρ before the EFS inner
         // solve reads `self.target` (idempotent; no-op for a plain SAE).
         self.apply_block_scaling(&rho)?;
@@ -3174,7 +3174,7 @@ pub(super) fn reactive_rho_domain_upper(
         .set_temperature(entry_temperature)?;
     entry_term.temperature_schedule = None;
     let assignments = entry_term.assignment.try_assignments()?;
-    let target = rho.to_flat();
+    let target = rho.flat_coordinates();
     let mut upper = target.clone();
     let mut largest_native_scale = 0.0_f64;
 
@@ -3385,7 +3385,7 @@ impl OuterObjective for SaeManifoldOuterObjective {
             // production derivative contract. An exact fixed-stratum HVP can
             // replace this declaration when its adjoint derivative is implemented.
             hessian: DeclaredHessianForm::Unavailable,
-            n_params: self.baseline_rho.to_flat().len(),
+            n_params: self.baseline_rho.flat_coordinates().len(),
             // Softmax/threshold fits have one non-FS coordinate: assignment
             // strength. Mark it as the Hybrid-EFS analytic-gradient block so
             // scalable EFS updates still own smoothness/ARD while this coordinate
@@ -3898,7 +3898,7 @@ impl OuterObjective for SaeManifoldOuterObjective {
         // inside the box (`target_strength.max(scale)`); this one does the same,
         // so a caller-installed ARD entry can never be made infeasible by a
         // domain query.
-        let target = self.baseline_rho.to_flat();
+        let target = self.baseline_rho.flat_coordinates();
         let Some(contract) = self.reactive_domain_scalar_contract()? else {
             if let Some(bounds) = log_strength_upper.as_mut() {
                 for &(index, _, upper) in &resolvability_faces {
@@ -3984,7 +3984,7 @@ impl OuterObjective for SaeManifoldOuterObjective {
                 .assignment
                 .try_assignments()
                 .map_err(EstimationError::RemlOptimizationFailed)?;
-            let target = self.baseline_rho.to_flat();
+            let target = self.baseline_rho.flat_coordinates();
             for (index, face, _) in
                 resolvability_domain_faces(&self.baseline_term, &self.baseline_rho, &assignments)
                     .map_err(EstimationError::RemlOptimizationFailed)?
@@ -4749,7 +4749,7 @@ mod linear_parity_anchor_1026_tests {
         );
         let mut obj =
             SaeManifoldOuterObjective::new(term, target, None, init_rho, 60, 0.5, 1e-4, 1e-4);
-        let rho_flat = obj.baseline_rho.to_flat();
+        let rho_flat = obj.baseline_rho.flat_coordinates();
         let cap = obj.capability();
         assert_eq!(
             cap.gradient,

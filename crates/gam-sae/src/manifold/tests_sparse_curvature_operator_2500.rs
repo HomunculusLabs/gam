@@ -334,7 +334,7 @@ fn threshold_gate_sparse_operator_is_the_installed_exact_a_derivative_2500() {
             let count = deflated_direction_count(&term, &c);
             (a, count)
         };
-        let base = rho.to_flat();
+        let base = rho.flat_coordinates();
         let h = 1.0e-5;
         let mut plus_flat = base.clone();
         plus_flat[sparse] += h;
@@ -406,7 +406,7 @@ fn threshold_gate_dense_exact_a_sparse_logdet_trace_matches_finite_difference_25
             term.exact_observed_information_log_dets(r, target.view(), &c)
                 .expect("production exact-A log det")
         };
-        let base = rho.to_flat();
+        let base = rho.flat_coordinates();
         let h = 1.0e-5;
         let mut plus_flat = base.clone();
         plus_flat[sparse] += h;
@@ -520,7 +520,7 @@ fn ard_curvature_derivative_matches_the_dense_exact_a_on_a_deflating_fixture_250
         .expect("#2500: the ARD coordinate must own a curvature operator");
     let total_t = cache.delta_t_len();
 
-    let base = rho.to_flat();
+    let base = rho.flat_coordinates();
     let h = 1.0e-5;
     let base_deflated = deflated_direction_count(&term, &cache);
     let dense_a = |flat: &Array1<f64>| -> (Array2<f64>, usize) {
@@ -580,7 +580,7 @@ fn threshold_gate_outer_solve_is_not_aborted_by_an_unmodelled_sparse_operator_25
     use gam_solve::seeding::SeedConfig;
 
     let (term, target, rho) = threshold_gate_tiny_fixture(true);
-    let init_flat = rho.to_flat();
+    let init_flat = rho.to_flat(&term.assignment).expect("the seed rho is bound to the term's assignment");
     let n_params = init_flat.len();
     let mut objective =
         SaeManifoldOuterObjective::new(term, target, None, rho, 8, 0.04, 1.0e-6, 1.0e-6);

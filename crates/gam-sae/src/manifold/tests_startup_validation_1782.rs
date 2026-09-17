@@ -159,7 +159,7 @@ pub(crate) fn objective_and_seed(
     let init_rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; k])
         .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &term.assignment)
         .unwrap();
-    let init_rho_flat = init_rho.to_flat();
+    let init_rho_flat = init_rho.flat_coordinates();
     let objective =
         SaeManifoldOuterObjective::new(term, z.to_owned(), None, init_rho, 8, 0.04, 1.0e-6, 1.0e-6);
     (objective, init_rho_flat)

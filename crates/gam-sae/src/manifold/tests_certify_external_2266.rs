@@ -201,7 +201,7 @@ mod tests {
         &'static str,
     ) {
         let (target, term, rho, pin, provenance) = seeded_external_fixture();
-        let rho_flat = rho.to_flat();
+        let rho_flat = rho.to_flat(&term.assignment).expect("the seed rho is bound to the term's assignment");
         let registry = AnalyticPenaltyRegistry::new();
         let mut objective = SaeManifoldOuterObjective::new(
             term,

@@ -185,7 +185,7 @@ pub(crate) fn e_attributable_ard_saddle_prices_finite_2336() {
     );
 
     let (term, target, rho) = ard_saddle_state();
-    let rho_flat = rho.to_flat();
+    let rho_flat = rho.flat_coordinates();
     let mut objective =
         SaeManifoldOuterObjective::new(term, target, None, rho, 40, 0.4, 1.0e-6, 1.0e-6);
     match objective.eval(&rho_flat) {

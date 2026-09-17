@@ -500,7 +500,9 @@ fn efs_ard_fixed_point_recovers_cost_criterion_argmin_and_stays_finite() {
 
     // Iterate the EFS fixed point: rho_new = rho + steps (additive in log
     // space = multiplicative FS). Converge when the step norm is tiny.
-    let mut rho_flat = init_rho.to_flat();
+    let mut rho_flat = init_rho
+        .to_flat(&term.assignment)
+        .expect("the seed rho is bound to the term's assignment");
     let mut converged_log_alpha1 = f64::NAN;
     for _ in 0..60 {
         let efs = obj.eval_efs(&rho_flat).expect("EFS eval should succeed");

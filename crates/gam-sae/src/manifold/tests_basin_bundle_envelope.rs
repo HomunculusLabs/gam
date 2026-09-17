@@ -167,7 +167,7 @@ fn two_circle_objective(
     let init_rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; k])
         .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &term.assignment)
         .expect("the seed rho scales for this assignment mode");
-    let seed = init_rho.to_flat();
+    let seed = init_rho.flat_coordinates();
     let objective = SaeManifoldOuterObjective::new(
         term,
         z.clone(),

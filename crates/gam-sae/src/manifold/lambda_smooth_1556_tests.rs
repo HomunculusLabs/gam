@@ -29,7 +29,7 @@ pub(crate) fn sae_manifold_lambda_smooth_is_per_atom_and_roundtrips_1556() {
 
     // The flat vector reflects K smoothness coordinates: layout is
     // [sparse, <K smooth>, <ARD = 1 + 2 + 1 = 4>], so length = 1 + 3 + 4 = 8.
-    let flat = rho.to_flat();
+    let flat = rho.flat_coordinates();
     let ard_len: usize = rho.log_ard.iter().map(|a| a.len()).sum();
     assert_eq!(ard_len, 4);
     assert_eq!(
