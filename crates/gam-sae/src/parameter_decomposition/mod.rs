@@ -77,7 +77,7 @@
 // [unlanded: bounds]
 
 // Prefix, subset and graph codes for the global artifact and local packets.
-// [unlanded: codec]
+pub mod codec;
 
 // Matrix-valued parameter fields over GAM bases, with anchored pullbacks.
 // [unlanded: field]
