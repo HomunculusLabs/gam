@@ -689,6 +689,120 @@ pub(crate) fn apply_cached_arrow_hessian(
     })
 }
 
+/// `‖Φ‖_F` of the operator [`apply_cached_arrow_hessian`] applies, read off its entries
+/// (#2267), with the border optionally pulled back by `lift`: `diag(I, liftᵀ)·Φ·diag(I, lift)`.
+///
+/// ```text
+///   Φ = [ T    C    ]     T = ⊕ᵢ LᵢLᵢᵀ,   Φ_ββ = L_S L_Sᵀ + Σᵢ GᵢᵀGᵢ,   Gᵢ = Lᵢ⁻¹Cᵢ
+///       [ Cᵀ   Φ_ββ ]
+///   ‖Φ‖_F² = Σᵢ ‖LᵢLᵢᵀ‖_F² + 2 Σᵢ ‖Cᵢ‖_F² + ‖Φ_ββ‖_F²
+/// ```
+///
+/// `T` is block diagonal, the cross block `Cᵢ = H_tβ^(i)` sits on both sides of the diagonal,
+/// and `Φ_ββ` is the reduced Schur complement plus the restoration `Σᵢ H_βt^(i) Tᵢ⁻¹ H_tβ^(i)`
+/// the apply adds back. A lift replaces `Cᵢ` by `Cᵢ·lift` and `Φ_ββ` by `liftᵀ·Φ_ββ·lift`. The
+/// cross block is read through the transpose accessor the apply uses, so both name one
+/// operator. This costs `O(n·q·k² + k³)`; the `dim` unit applies it replaces cost
+/// `O(dim·(n·q·k + k²))`.
+pub(crate) fn cached_arrow_hessian_frobenius(
+    cache: &ArrowFactorCache,
+    lift: Option<&Array2<f64>>,
+) -> Result<f64, String> {
+    let k = cache.k;
+    if let Some(lift) = lift {
+        if lift.nrows() != k {
+            return Err(format!(
+                "cached_arrow_hessian_frobenius: lift has {} rows for a border of {k}",
+                lift.nrows()
+            ));
+        }
+    }
+    let mut norm_sq = 0.0_f64;
+    let mut restoration = Array2::<f64>::zeros((k, k));
+    for row in 0..cache.n_rows() {
+        let q = cache.row_dims[row];
+        let factor = cache.undamped_factor(row);
+        // `LLᵀ` from the lower triangle; each strict off-diagonal entry occurs twice.
+        for i in 0..q {
+            for j in 0..=i {
+                let mut entry = 0.0_f64;
+                for m in 0..=j {
+                    entry += factor[[i, m]] * factor[[j, m]];
+                }
+                norm_sq += if i == j { entry * entry } else { 2.0 * entry * entry };
+            }
+        }
+        if k == 0 {
+            continue;
+        }
+        // `Cᵢ` row by row: row `c` of `H_tβ^(i)` is `H_βt^(i)·e_c`.
+        let mut cross = Array2::<f64>::zeros((q, k));
+        let mut unit = Array1::<f64>::zeros(q);
+        for c in 0..q {
+            unit[c] = 1.0;
+            let mut read = Array1::<f64>::zeros(k);
+            if !cache.apply_htbeta_row_transpose(row, unit.view(), &mut read, None) {
+                return Err(format!(
+                    "cached_arrow_hessian_frobenius: H_βt^({row}) apply failed"
+                ));
+            }
+            cross.row_mut(c).assign(&read);
+            unit[c] = 0.0;
+        }
+        norm_sq += 2.0
+            * match lift {
+                None => cross.iter().map(|value| value * value).sum::<f64>(),
+                Some(lift) => cross.dot(lift).iter().map(|value| value * value).sum::<f64>(),
+            };
+        let mut whitened = Array2::<f64>::zeros((q, k));
+        for a in 0..k {
+            whitened.column_mut(a).assign(
+                &gam_linalg::triangular::forward_substitution_lower_vector(factor, cross.column(a)),
+            );
+        }
+        ndarray::linalg::general_mat_mul(1.0, &whitened.t(), &whitened, 1.0, &mut restoration);
+    }
+    if k == 0 {
+        return Ok(norm_sq.sqrt());
+    }
+    let Some(schur_factor) = cache.schur_factor.as_ref() else {
+        return Err(
+            "cached_arrow_hessian_frobenius: dense Schur factor is required".to_string(),
+        );
+    };
+    if !cache.schur_factor_is_undamped {
+        return Err(
+            "cached_arrow_hessian_frobenius: Schur factor was not built from the undamped evidence \
+             row factors"
+                .to_string(),
+        );
+    }
+    let mut border = restoration;
+    for a in 0..k {
+        for b in 0..=a {
+            let mut entry = 0.0_f64;
+            for m in 0..=b {
+                entry += schur_factor[[a, m]] * schur_factor[[b, m]];
+            }
+            border[[a, b]] += entry;
+            if a != b {
+                border[[b, a]] += entry;
+            }
+        }
+    }
+    norm_sq += match lift {
+        None => border.iter().map(|value| value * value).sum::<f64>(),
+        Some(lift) => lift
+            .t()
+            .dot(&border)
+            .dot(lift)
+            .iter()
+            .map(|value| value * value)
+            .sum::<f64>(),
+    };
+    Ok(norm_sq.sqrt())
+}
+
 /// Apply the RAW majorizer represented by an evidence cache.
 ///
 /// [`apply_cached_arrow_hessian`] deliberately applies the operator installed in

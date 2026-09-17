@@ -178,6 +178,8 @@ pub(crate) trait ExactAPencilMetric {
     fn lower_transpose_solve(&self, v: ArrayView1<'_, f64>) -> Result<Array1<f64>, String>;
     /// `log|Φ|`.
     fn log_det(&self) -> Result<f64, String>;
+    /// `‖Φ‖_F`, read off the metric's own entries rather than `dim` applies (#2267).
+    fn frobenius_norm(&self) -> Result<f64, String>;
 }
 
 /// The `Φ` metric one spectral block is classified in (#2673).
@@ -453,6 +455,10 @@ impl ExactAPencilMetric for PreparedArrowMetric<'_> {
         }
         add_factor(self.border_lower.view(), "border Schur")?;
         Ok(total)
+    }
+
+    fn frobenius_norm(&self) -> Result<f64, String> {
+        cached_arrow_hessian_frobenius(self.cache, self.lift)
     }
 }
 
@@ -4761,15 +4767,7 @@ impl SaeManifoldTerm {
             &|v| metric.substituted_image(v.view()),
         )?;
         let operator_frobenius = operator.iter().map(|value| value * value).sum::<f64>().sqrt();
-        let mut metric_frobenius_sq = 0.0_f64;
-        let mut unit = Array1::<f64>::zeros(dimension);
-        for column in 0..dimension {
-            unit[column] = 1.0;
-            let image = metric.apply(unit.view())?;
-            metric_frobenius_sq += image.dot(&image);
-            unit[column] = 0.0;
-        }
-        let metric_frobenius = metric_frobenius_sq.sqrt();
+        let metric_frobenius = metric.frobenius_norm()?;
         let mut substituted_stiffness = Array1::<f64>::zeros(dimension);
         let mut resolution = Array1::<f64>::zeros(dimension);
         for index in 0..dimension {

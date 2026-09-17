@@ -62,6 +62,10 @@ impl ExactAPencilMetric for DensePencilMetric {
             .map(|index| 2.0 * self.lower[[index, index]].ln())
             .sum())
     }
+
+    fn frobenius_norm(&self) -> Result<f64, String> {
+        Ok(self.metric.iter().map(|value| value * value).sum::<f64>().sqrt())
+    }
 }
 
 /// Every coordinate on the border, so the whole pencil is one dense block.
@@ -758,6 +762,13 @@ fn the_prepared_metric_factors_the_metric_it_applies_2933() {
         assert!(
             (factored_log_det - dense_log_det).abs() <= f64::EPSILON.sqrt() * (1.0 + dense_log_det.abs()),
             "{label}: log|Φ| from the factor {factored_log_det:.12e} != dense {dense_log_det:.12e}"
+        );
+        // #2267: the block builder reads ‖Φ‖_F off the metric's entries, not `dim` applies.
+        let dense_frobenius = dense.iter().map(|value| value * value).sum::<f64>().sqrt();
+        let entries_frobenius = prepared.frobenius_norm().expect("metric Frobenius norm");
+        assert!(
+            (entries_frobenius - dense_frobenius).abs() <= f64::EPSILON.sqrt() * dense_frobenius,
+            "{label}: ‖Φ‖_F from the entries {entries_frobenius:.12e} != dense {dense_frobenius:.12e}"
         );
         let expected = &dense - &embedding.t().dot(&raw).dot(&embedding);
         let scale = dense.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
