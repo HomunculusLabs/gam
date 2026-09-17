@@ -2181,6 +2181,7 @@ fn interchange_swap_backward<'py>(
     tensor_knots_concat = None,
     tensor_knot_offsets = None,
     tensor_degrees = None,
+    analytic_penalties = None,
 ))]
 fn gaussian_reml_fit_latent_backward<'py>(
     py: Python<'py>,
@@ -2207,6 +2208,7 @@ fn gaussian_reml_fit_latent_backward<'py>(
     tensor_knots_concat: Option<PyReadonlyArray1<'py, f64>>,
     tensor_knot_offsets: Option<Vec<usize>>,
     tensor_degrees: Option<Vec<usize>>,
+    analytic_penalties: Option<String>,
 ) -> PyResult<Py<PyDict>> {
     let family = match aux_family.to_ascii_lowercase().as_str() {
         "ridge" => AuxPriorFamily::Ridge,
@@ -2217,11 +2219,6 @@ fn gaussian_reml_fit_latent_backward<'py>(
             )));
         }
     };
-    let basis_kind_normalized = latent_basis_kind(&basis_kind).map_err(py_value_error)?;
-    let centers_view = centers.as_array();
-    let t_view = t.as_array();
-    let y_view = y.as_array();
-    let penalty_view = penalty.as_array();
     let dim_selection_precision = dim_selection_log_precision
         .as_ref()
         .map(|values| ValidatedDimSelectionPrecisions::new(values.as_array(), latent_dim))
@@ -2233,64 +2230,144 @@ fn gaussian_reml_fit_latent_backward<'py>(
         fisher_w.as_ref().map(|w| w.as_array()),
     )
     .map_err(py_value_error)?;
-    let weights_view = effective_weights.as_ref().map(|w| w.view());
-
-    // Forward design (Φ), t-matrix, and input-location jet share one dispatcher.
-    let (design, t_mat, jet) = build_latent_forward_design(
-        basis_kind_normalized,
-        t_view,
+    let registry =
+        latent_analytic_penalty_registry(n_obs, latent_dim, analytic_penalties.as_deref())
+            .map_err(py_value_error)?;
+    let backward = gaussian_reml_fit_latent_backward_impl(
+        t.as_array(),
+        y.as_array(),
         n_obs,
         latent_dim,
-        centers_view,
-        m,
-        tensor_knots_concat.as_ref().map(|a| a.as_array()),
-        tensor_knot_offsets.as_deref(),
-        tensor_degrees.as_deref(),
-        // Standalone Python backward/gradient entrypoint: no manifold/chart
-        // concept here (the Rust outer optimizer routes through
-        // `LatentOuterProblem`), so the latent design stays the open Euclidean
-        // basis — byte-identical to prior behavior.
-        None,
-    )
-    .map_err(py_value_error)?;
-    let fit = gaussian_reml_multi_closed_form_with_cache(
-        design.view(),
-        y_view,
-        penalty_view,
-        weights_view,
-        init_lambda,
-        None,
-    )
-    .map_err(|err| py_value_error(err.to_string()))?;
-    // Every output lane uses the same core REML adjoint, including its
-    // determinant, dispersion, and implicit smoothing-strength derivatives.
-    let backward = gaussian_reml_multi_closed_form_backward_from_fit(
-        design.view(),
-        y_view,
-        penalty_view,
-        weights_view,
-        &fit,
+        centers.as_array(),
+        penalty.as_array(),
         grad_lambda,
         grad_coefficients.as_ref().map(|g| g.as_array()),
         grad_fitted.as_ref().map(|g| g.as_array()),
         grad_reml_score,
         grad_edf,
+        m,
+        effective_weights.as_ref().map(|w| w.view()),
+        init_lambda,
+        aux_u.as_ref().map(|a| a.as_array()),
+        family,
+        aux_strength,
+        dim_selection_precision.as_ref(),
+        &basis_kind,
+        tensor_knots_concat.as_ref().map(|a| a.as_array()),
+        tensor_knot_offsets.as_deref(),
+        tensor_degrees.as_deref(),
+        &registry,
     )
-    .map_err(|err| py_value_error(err.to_string()))?;
-    let mut grad_t = contract_input_loc_gradient(backward.grad_x.view(), &jet)
-        .map_err(basis_error_to_pyerr)?;
+    .map_err(py_value_error)?;
+    let out = PyDict::new(py);
+    out.set_item("grad_t", backward.grad_t.into_pyarray(py))?;
+    out.set_item("grad_y", backward.reml.grad_y.into_pyarray(py))?;
+    out.set_item("grad_penalty", backward.reml.grad_penalty.into_pyarray(py))?;
+    out.set_item("grad_weights", backward.reml.grad_weights.into_pyarray(py))?;
+    if let Some(grad) = backward.grad_aux_log_strength {
+        out.set_item("grad_aux_log_strength", grad)?;
+        out.set_item("grad_log_mu", grad)?;
+    } else {
+        out.set_item("grad_aux_log_strength", py.None())?;
+        out.set_item("grad_log_mu", py.None())?;
+    }
+    if let Some(grad) = backward.grad_dim_selection_log_precision {
+        out.set_item("grad_dim_selection_log_precision", grad.into_pyarray(py))?;
+    } else {
+        out.set_item("grad_dim_selection_log_precision", py.None())?;
+    }
+    Ok(out.unbind())
+}
+
+/// Outputs of [`gaussian_reml_fit_latent_backward_impl`].
+struct LatentGaussianBackward {
+    reml: gam::solver::gaussian_reml::GaussianRemlBackwardResult,
+    grad_t: Array2<f64>,
+    grad_aux_log_strength: Option<f64>,
+    grad_dim_selection_log_precision: Option<Array1<f64>>,
+}
+
+/// The core of [`gaussian_reml_fit_latent_backward`]: the REML adjoint through the
+/// latent design, the identifiability priors, and every analytic penalty the
+/// forward prices into `reml_score` (#2933 F02).
+fn gaussian_reml_fit_latent_backward_impl(
+    t: ArrayView1<'_, f64>,
+    y: ArrayView2<'_, f64>,
+    n_obs: usize,
+    latent_dim: usize,
+    centers: ArrayView2<'_, f64>,
+    penalty: ArrayView2<'_, f64>,
+    grad_lambda: f64,
+    grad_coefficients: Option<ArrayView2<'_, f64>>,
+    grad_fitted: Option<ArrayView2<'_, f64>>,
+    grad_reml_score: f64,
+    grad_edf: f64,
+    m: usize,
+    weights: Option<ArrayView1<'_, f64>>,
+    init_lambda: Option<f64>,
+    aux_u: Option<ArrayView2<'_, f64>>,
+    family: AuxPriorFamily,
+    aux_strength: Option<f64>,
+    dim_selection_precision: Option<&ValidatedDimSelectionPrecisions>,
+    basis_kind: &str,
+    tensor_knots_concat: Option<ArrayView1<'_, f64>>,
+    tensor_knot_offsets: Option<&[usize]>,
+    tensor_degrees: Option<&[usize]>,
+    analytic_penalties: &AnalyticPenaltyRegistry,
+) -> Result<LatentGaussianBackward, String> {
+    let basis_kind_normalized = latent_basis_kind(basis_kind)?;
+    // Forward design (Φ), t-matrix, and input-location jet share one dispatcher.
+    let (design, t_mat, jet) = build_latent_forward_design(
+        basis_kind_normalized,
+        t,
+        n_obs,
+        latent_dim,
+        centers,
+        m,
+        tensor_knots_concat,
+        tensor_knot_offsets,
+        tensor_degrees,
+        // Standalone Python backward/gradient entrypoint: no manifold/chart
+        // concept here (the Rust outer optimizer routes through
+        // `LatentOuterProblem`), so the latent design stays the open Euclidean
+        // basis — byte-identical to prior behavior.
+        None,
+    )?;
+    let fit = gaussian_reml_multi_closed_form_with_cache(
+        design.view(),
+        y,
+        penalty,
+        weights,
+        init_lambda,
+        None,
+    )
+    .map_err(|err| err.to_string())?;
+    // Every output lane uses the same core REML adjoint, including its
+    // determinant, dispersion, and implicit smoothing-strength derivatives.
+    let reml = gaussian_reml_multi_closed_form_backward_from_fit(
+        design.view(),
+        y,
+        penalty,
+        weights,
+        &fit,
+        grad_lambda,
+        grad_coefficients,
+        grad_fitted,
+        grad_reml_score,
+        grad_edf,
+    )
+    .map_err(|err| err.to_string())?;
+    let mut grad_t =
+        contract_input_loc_gradient(reml.grad_x.view(), &jet).map_err(|err| err.to_string())?;
     // Identifiability-mode additive contributions to grad_t plus log-normalizer
     // adjoints. Fixes audit-revised claim that REML ARD/AuxPrior selection
     // needs the normalized prior terms, not only raw quadratic gradients.
     let mut grad_aux_log_strength: Option<f64> = None;
     let mut grad_dim_selection_log_precision: Option<Array1<f64>> = None;
-    if let Some(u_arr) = aux_u.as_ref() {
-        let u_view = u_arr.as_array();
-        let stats = latent_aux_prior_stats(t_mat.view(), u_view, family, aux_strength)
-            .map_err(py_value_error)?;
+    if let Some(u_view) = aux_u {
+        let stats = latent_aux_prior_stats(t_mat.view(), u_view, family, aux_strength)?;
         let residual = &t_mat - &stats.targets;
-        let projected_residual =
-            aux_prior_targets(residual.view(), u_view, family).map_err(py_value_error)?;
+        let projected_residual = aux_prior_targets(residual.view(), u_view, family)?;
         let grad_base = residual - projected_residual;
         for n in 0..n_obs {
             for a in 0..latent_dim {
@@ -2305,7 +2382,7 @@ fn gaussian_reml_fit_latent_backward<'py>(
                 * (0.5 * stats.strength.mu * stats.residual_sq - 0.5 * (n_obs * latent_dim) as f64),
         );
     }
-    if let Some(precisions) = dim_selection_precision.as_ref() {
+    if let Some(precisions) = dim_selection_precision {
         let mut grad_log_prec = Array1::<f64>::zeros(latent_dim);
         for n in 0..n_obs {
             for a in 0..latent_dim {
@@ -2316,37 +2393,29 @@ fn gaussian_reml_fit_latent_backward<'py>(
             }
         }
         for a in 0..latent_dim {
-            let energy = precisions
-                .axis_energy(t_mat.view(), a)
-                .map_err(py_value_error)?;
+            let energy = precisions.axis_energy(t_mat.view(), a)?;
             grad_log_prec[a] = grad_reml_score * (energy - 0.5 * n_obs as f64);
         }
         grad_dim_selection_log_precision = Some(grad_log_prec);
     }
+    // #2933 F02 — the forward prices every analytic penalty into `reml_score`,
+    // so its gradient enters here too.
+    grad_t.scaled_add(
+        grad_reml_score,
+        &latent_analytic_penalty_grad(analytic_penalties, t)?,
+    );
     let mut grad_t_matrix = Array2::<f64>::zeros((n_obs, latent_dim));
     for n in 0..n_obs {
         for a in 0..latent_dim {
             grad_t_matrix[[n, a]] = grad_t[n * latent_dim + a];
         }
     }
-    let out = PyDict::new(py);
-    out.set_item("grad_t", grad_t_matrix.into_pyarray(py))?;
-    out.set_item("grad_y", backward.grad_y.into_pyarray(py))?;
-    out.set_item("grad_penalty", backward.grad_penalty.into_pyarray(py))?;
-    out.set_item("grad_weights", backward.grad_weights.into_pyarray(py))?;
-    if let Some(grad) = grad_aux_log_strength {
-        out.set_item("grad_aux_log_strength", grad)?;
-        out.set_item("grad_log_mu", grad)?;
-    } else {
-        out.set_item("grad_aux_log_strength", py.None())?;
-        out.set_item("grad_log_mu", py.None())?;
-    }
-    if let Some(grad) = grad_dim_selection_log_precision {
-        out.set_item("grad_dim_selection_log_precision", grad.into_pyarray(py))?;
-    } else {
-        out.set_item("grad_dim_selection_log_precision", py.None())?;
-    }
-    Ok(out.unbind())
+    Ok(LatentGaussianBackward {
+        reml,
+        grad_t: grad_t_matrix,
+        grad_aux_log_strength,
+        grad_dim_selection_log_precision,
+    })
 }
 
 /// Owned inputs for the latent outer-optimization objective.

@@ -641,8 +641,7 @@ fn glm_reml_fit_latent_impl(
         dim_selection_precision,
     )?;
     if let Some(registry) = analytic_penalties {
-        latent_prior_score +=
-            analytic_penalty_value_for_targets(registry, t_flat, Some(fit.beta.view()))?;
+        latent_prior_score += latent_analytic_penalty_value(registry, t_flat)?;
     }
     // The latent prior is an additive term on the criterion, so it moves a
     // criterion that exists and does not create one that does not (#2595).
@@ -819,8 +818,8 @@ fn glm_reml_fit_latent<'py>(
             dim_selection_values.as_ref(),
         )
         .map_err(py_value_error)?;
-        let analytic_score = analytic_penalty_value_for_targets(&registry, t_values.view(), None)
-            .map_err(py_value_error)?;
+        let analytic_score =
+            latent_analytic_penalty_value(&registry, t_values.view()).map_err(py_value_error)?;
         return latent_multi_output_fit_to_pydict(
             py,
             design.view(),
@@ -891,6 +890,7 @@ fn glm_reml_fit_latent<'py>(
     tweedie_p = None,
     negbin_theta = None,
     beta_phi = None,
+    analytic_penalties = None,
 ))]
 fn glm_reml_fit_latent_backward<'py>(
     py: Python<'py>,
@@ -913,6 +913,7 @@ fn glm_reml_fit_latent_backward<'py>(
     tweedie_p: Option<f64>,
     negbin_theta: Option<f64>,
     beta_phi: Option<f64>,
+    analytic_penalties: Option<String>,
 ) -> PyResult<Py<PyDict>> {
     let family = latent_family_spec(&family, tweedie_p, negbin_theta, beta_phi)?;
     let aux_family = match aux_family.to_ascii_lowercase().as_str() {
@@ -935,7 +936,10 @@ fn glm_reml_fit_latent_backward<'py>(
         fisher_w.as_ref().map(|w| w.as_array()),
     )
     .map_err(py_value_error)?;
-    let (fit, design, t_mat, _) = glm_reml_fit_latent_impl(
+    let registry =
+        latent_analytic_penalty_registry(n_obs, latent_dim, analytic_penalties.as_deref())
+            .map_err(py_value_error)?;
+    let backward = glm_reml_fit_latent_backward_impl(
         t.as_array(),
         y.as_array(),
         n_obs,
@@ -946,40 +950,151 @@ fn glm_reml_fit_latent_backward<'py>(
         effective_weights.as_ref().map(|w| w.view()),
         init_lambda,
         family,
+        grad_reml_score,
         aux_u.as_ref().map(|a| a.as_array()),
         aux_family,
         aux_strength,
         dim_selection_precision.as_ref(),
-        None,
+        &registry,
     )
     .map_err(py_value_error)?;
-    let pirls = fit.artifacts.pirls.as_ref().ok_or_else(|| {
-        py_value_error("latent GLM fit did not return PIRLS artifacts".to_string())
-    })?;
+    let out = PyDict::new(py);
+    out.set_item("grad_t", backward.grad_t.into_pyarray(py))?;
+    if let Some(grad) = backward.grad_aux_log_strength {
+        out.set_item("grad_aux_log_strength", grad)?;
+        out.set_item("grad_log_mu", grad)?;
+    } else {
+        out.set_item("grad_aux_log_strength", py.None())?;
+        out.set_item("grad_log_mu", py.None())?;
+    }
+    Ok(out.unbind())
+}
+
+/// The analytic-penalty registry a latent REML fit prices, built from the
+/// descriptor JSON over the fit's single latent block `t`.
+fn latent_analytic_penalty_registry(
+    n_obs: usize,
+    latent_dim: usize,
+    descriptors: Option<&str>,
+) -> Result<AnalyticPenaltyRegistry, String> {
+    let descriptors = descriptors
+        .map(serde_json::from_str::<serde_json::Value>)
+        .transpose()
+        .map_err(|err| format!("invalid analytic_penalties json: {err}"))?;
+    let latent_payload = serde_json::json!({"t": {"name": "t", "n": n_obs, "d": latent_dim}});
+    build_analytic_penalty_registry_from_json(Some(&latent_payload), descriptors.as_ref())
+}
+
+/// The registry energy a latent REML score adds, at descriptor-pinned weights
+/// (ρ = 0 on every owned axis).
+///
+/// #2933 F02 — these fits declare only the latent block `t` and install no
+/// decoder jets. A β-tier penalty would be priced on the fitted coefficients,
+/// whose layout none of the β-tier kinds describes here (each self-disables to
+/// 0 on the mismatch), so it is refused instead of scored as zero; an isometry
+/// penalty has no `J` and refuses through the registry precondition.
+fn latent_analytic_penalty_value(
+    registry: &AnalyticPenaltyRegistry,
+    t: ArrayView1<'_, f64>,
+) -> Result<f64, String> {
+    if let Some((_, _, name)) = registry
+        .rho_layout()
+        .into_iter()
+        .find(|(_, tier, _)| matches!(tier, PenaltyTier::Beta))
+    {
+        return Err(format!(
+            "analytic penalty `{name}` is β-tier, but a latent REML fit declares only the latent \
+             block t, so it has no coefficient block to price; refused instead of scored as zero"
+        ));
+    }
+    registry.isometry_evaluation_precondition(IsometryEvaluationOrder::Value, t.len())?;
+    let rho = Array1::<f64>::zeros(registry.total_rho_count());
+    registry.validate_rho(rho.view())?;
+    let mut value = 0.0_f64;
+    for (penalty, (rho_slice, tier, _name)) in registry.penalties.iter().zip(registry.rho_layout())
+    {
+        if matches!(tier, PenaltyTier::Psi) {
+            value += penalty.value(t, rho.slice(s![rho_slice]));
+        }
+    }
+    Ok(value)
+}
+
+/// `∂/∂t` of [`latent_analytic_penalty_value`], which both latent backward
+/// companions add into `grad_t` so it stays the gradient of the reported
+/// `reml_score` (#2933 F02).
+fn latent_analytic_penalty_grad(
+    registry: &AnalyticPenaltyRegistry,
+    t: ArrayView1<'_, f64>,
+) -> Result<Array1<f64>, String> {
+    let rho = Array1::<f64>::zeros(registry.total_rho_count());
+    registry.target_grad(t, rho.view())
+}
+
+/// Outputs of [`glm_reml_fit_latent_backward_impl`].
+struct GlmLatentBackward {
+    grad_t: Array2<f64>,
+    grad_aux_log_strength: Option<f64>,
+}
+
+/// `grad_reml_score · ∂(reml_score)/∂t` for [`glm_reml_fit_latent`]'s
+/// single-output fit: the PIRLS adjoint through the latent design, the
+/// identifiability priors, and every analytic penalty the forward prices.
+fn glm_reml_fit_latent_backward_impl(
+    t: ArrayView1<'_, f64>,
+    y: ArrayView2<'_, f64>,
+    n_obs: usize,
+    latent_dim: usize,
+    centers: ArrayView2<'_, f64>,
+    m: usize,
+    penalty: ArrayView2<'_, f64>,
+    weights: Option<ArrayView1<'_, f64>>,
+    init_lambda: Option<f64>,
+    family: LikelihoodSpec,
+    grad_reml_score: f64,
+    aux_u: Option<ArrayView2<'_, f64>>,
+    aux_family: AuxPriorFamily,
+    aux_strength: Option<f64>,
+    dim_selection_precision: Option<&ValidatedDimSelectionPrecisions>,
+    analytic_penalties: &AnalyticPenaltyRegistry,
+) -> Result<GlmLatentBackward, String> {
+    let (fit, design, t_mat, _) = glm_reml_fit_latent_impl(
+        t,
+        y,
+        n_obs,
+        latent_dim,
+        centers,
+        m,
+        penalty,
+        weights,
+        init_lambda,
+        family,
+        aux_u,
+        aux_family,
+        aux_strength,
+        dim_selection_precision,
+        None,
+    )?;
+    let pirls = fit
+        .artifacts
+        .pirls
+        .as_ref()
+        .ok_or_else(|| "latent GLM fit did not return PIRLS artifacts".to_string())?;
     let h = pirls
         .dense_stabilizedhessian_transformed("latent GLM backward")
-        .map_err(|err| py_value_error(err.to_string()))?;
+        .map_err(|err| err.to_string())?;
     let factor = factorize_symmetricwith_fallback(
         gam::linalg::faer_ndarray::FaerArrayView::new(&h).as_ref(),
         Side::Lower,
     )
-    .map_err(|err| py_value_error(format!("latent GLM Hessian factorization failed: {err}")))?;
+    .map_err(|err| format!("latent GLM Hessian factorization failed: {err}"))?;
     let qs = &pirls.reparam_result.qs;
     let beta_t = pirls.beta_transformed.as_ref();
     let q = beta_t.len();
     let p = design.ncols();
-    let jet = latent_input_location_jet(
-        "duchon",
-        t_mat.view(),
-        centers.as_array(),
-        m,
-        None,
-        None,
-        None,
-    )
-    .map_err(py_value_error)?;
+    let jet = latent_input_location_jet("duchon", t_mat.view(), centers, m, None, None, None)?;
     if jet.shape()[0] != n_obs || jet.shape()[1] != p || jet.shape()[2] != latent_dim {
-        return Err(py_value_error(format!(
+        return Err(format!(
             "latent input-location jet shape mismatch: expected {}x{}x{}, got {}x{}x{}",
             n_obs,
             p,
@@ -987,7 +1102,7 @@ fn glm_reml_fit_latent_backward<'py>(
             jet.shape()[0],
             jet.shape()[1],
             jet.shape()[2],
-        )));
+        ));
     }
     let mut grad_t = Array1::<f64>::zeros(n_obs * latent_dim);
     let mut rhs = Array2::<f64>::zeros((q, 1));
@@ -1028,13 +1143,10 @@ fn glm_reml_fit_latent_backward<'py>(
     }
 
     let mut grad_aux_log_strength: Option<f64> = None;
-    if let Some(u_arr) = aux_u.as_ref() {
-        let u_view = u_arr.as_array();
-        let stats = latent_aux_prior_stats(t_mat.view(), u_view, aux_family, aux_strength)
-            .map_err(py_value_error)?;
+    if let Some(u_view) = aux_u {
+        let stats = latent_aux_prior_stats(t_mat.view(), u_view, aux_family, aux_strength)?;
         let residual = &t_mat - &stats.targets;
-        let projected_residual =
-            aux_prior_targets(residual.view(), u_view, aux_family).map_err(py_value_error)?;
+        let projected_residual = aux_prior_targets(residual.view(), u_view, aux_family)?;
         let grad_base = residual - projected_residual;
         for n in 0..n_obs {
             for a in 0..latent_dim {
@@ -1047,7 +1159,7 @@ fn glm_reml_fit_latent_backward<'py>(
                 * (0.5 * stats.strength.mu * stats.residual_sq - 0.5 * (n_obs * latent_dim) as f64),
         );
     }
-    if let Some(precisions) = dim_selection_precision.as_ref() {
+    if let Some(precisions) = dim_selection_precision {
         for n in 0..n_obs {
             for a in 0..latent_dim {
                 let prec = precisions.physical[a];
@@ -1055,22 +1167,22 @@ fn glm_reml_fit_latent_backward<'py>(
             }
         }
     }
+    // #2933 F02 — the forward prices every analytic penalty into `reml_score`,
+    // so its gradient enters here too.
+    grad_t.scaled_add(
+        grad_reml_score,
+        &latent_analytic_penalty_grad(analytic_penalties, t)?,
+    );
     let mut grad_t_matrix = Array2::<f64>::zeros((n_obs, latent_dim));
     for n in 0..n_obs {
         for a in 0..latent_dim {
             grad_t_matrix[[n, a]] = grad_t[n * latent_dim + a];
         }
     }
-    let out = PyDict::new(py);
-    out.set_item("grad_t", grad_t_matrix.into_pyarray(py))?;
-    if let Some(grad) = grad_aux_log_strength {
-        out.set_item("grad_aux_log_strength", grad)?;
-        out.set_item("grad_log_mu", grad)?;
-    } else {
-        out.set_item("grad_aux_log_strength", py.None())?;
-        out.set_item("grad_log_mu", py.None())?;
-    }
-    Ok(out.unbind())
+    Ok(GlmLatentBackward {
+        grad_t: grad_t_matrix,
+        grad_aux_log_strength,
+    })
 }
 
 fn set_ok_gaussian_reml_items<'py>(
@@ -5213,6 +5325,333 @@ mod latent_glm_family_validation_tests {
             ResponseFamily::Beta { phi } => assert_eq!(phi, 7.5),
             other => panic!("expected Beta family, got {other:?}"),
         }
+    }
+}
+
+/// #2933 F02 — the latent REML forwards price every analytic-penalty descriptor
+/// into `reml_score`, so their backward companions must carry its gradient:
+/// `grad_t` is the gradient of the score production reports.
+#[cfg(test)]
+mod latent_analytic_penalty_gradient_tests {
+    use super::*;
+    use gam::families::fit_orchestration::{FamilyNuisanceOverrides, scalar_family_from_name};
+
+    const N_OBS: usize = 12;
+    const LATENT_DIM: usize = 2;
+    const N_CENTERS: usize = 5;
+    const ARD: &str = r#"{"kind": "ard", "target": "t", "weight": 0.7}"#;
+    const SPARSITY: &str =
+        r#"{"kind": "sparsity", "target": "t", "sparsity_kind": "smooth_l1", "weight": 0.4, "eps": 0.01}"#;
+    const SCAD: &str =
+        r#"{"kind": "scad_mcp", "target": "t", "variant": "scad", "weight": 0.3, "gamma": 3.7}"#;
+
+    struct Fixture {
+        t: Array1<f64>,
+        y: Array2<f64>,
+        counts: Array2<f64>,
+        centers: Array2<f64>,
+        penalty: Array2<f64>,
+    }
+
+    /// Latents lie in `[0.35, 0.95)`: strictly inside the SCAD middle region
+    /// `(λ, γλ) = (0.3, 1.11)` and far from the smoothed-ℓ¹ kink at 0, so every
+    /// descriptor kind is smooth at `t` with a nonzero gradient.
+    fn fixture() -> Fixture {
+        let golden = |i: usize, shift: f64| ((i as f64 + shift) * 0.618_033_988_75).fract();
+        let t = Array1::from_shape_fn(N_OBS * LATENT_DIM, |i| 0.35 + 0.6 * golden(i, 1.0));
+        let centers = Array2::from_shape_fn((N_CENTERS, LATENT_DIM), |(k, a)| {
+            0.1 + 0.8 * golden(k * LATENT_DIM + a, 0.37)
+        });
+        let y = Array2::from_shape_fn((N_OBS, 1), |(n, _)| {
+            (3.0 * t[n * LATENT_DIM]).sin()
+                + 0.5 * t[n * LATENT_DIM + 1]
+                + 0.2 * (golden(n, 0.5) - 0.5)
+        });
+        let counts = Array2::from_shape_fn((N_OBS, 1), |(n, _)| {
+            (0.3 + (2.0 * t[n * LATENT_DIM]).sin() + t[n * LATENT_DIM + 1])
+                .exp()
+                .round()
+        });
+        Fixture {
+            t,
+            y,
+            counts,
+            centers,
+            penalty: Array2::eye(N_CENTERS),
+        }
+    }
+
+    fn registry(descriptors: Option<&str>) -> AnalyticPenaltyRegistry {
+        latent_analytic_penalty_registry(N_OBS, LATENT_DIM, descriptors)
+            .expect("latent analytic-penalty registry")
+    }
+
+    fn poisson() -> LikelihoodSpec {
+        scalar_family_from_name("poisson", FamilyNuisanceOverrides::default())
+            .expect("poisson family")
+            .0
+    }
+
+    fn gaussian_forward(
+        f: &Fixture,
+        t: ArrayView1<'_, f64>,
+        registry: &AnalyticPenaltyRegistry,
+    ) -> Result<f64, String> {
+        gaussian_reml_fit_latent_impl(
+            t,
+            f.y.view(),
+            N_OBS,
+            LATENT_DIM,
+            f.centers.view(),
+            2,
+            "duchon",
+            None,
+            None,
+            None,
+            f.penalty.view(),
+            None,
+            None,
+            None,
+            AuxPriorFamily::Ridge,
+            None,
+            None,
+            Some(registry),
+            None,
+        )
+        .map(|(fit, _, _)| fit.reml_score)
+    }
+
+    fn gaussian_backward(
+        f: &Fixture,
+        registry: &AnalyticPenaltyRegistry,
+    ) -> Result<Array1<f64>, String> {
+        gaussian_reml_fit_latent_backward_impl(
+            f.t.view(),
+            f.y.view(),
+            N_OBS,
+            LATENT_DIM,
+            f.centers.view(),
+            f.penalty.view(),
+            0.0,
+            None,
+            None,
+            1.0,
+            0.0,
+            2,
+            None,
+            None,
+            None,
+            AuxPriorFamily::Ridge,
+            None,
+            None,
+            "duchon",
+            None,
+            None,
+            None,
+            registry,
+        )
+        .map(|backward| Array1::from_iter(backward.grad_t.iter().copied()))
+    }
+
+    fn glm_forward(
+        f: &Fixture,
+        t: ArrayView1<'_, f64>,
+        registry: &AnalyticPenaltyRegistry,
+    ) -> Result<f64, String> {
+        glm_reml_fit_latent_impl(
+            t,
+            f.counts.view(),
+            N_OBS,
+            LATENT_DIM,
+            f.centers.view(),
+            2,
+            f.penalty.view(),
+            None,
+            None,
+            poisson(),
+            None,
+            AuxPriorFamily::Ridge,
+            None,
+            None,
+            Some(registry),
+        )?
+        .0
+        .reml_score
+        .ok_or_else(|| "poisson latent fit reported no REML score".to_string())
+    }
+
+    fn glm_backward(
+        f: &Fixture,
+        registry: &AnalyticPenaltyRegistry,
+    ) -> Result<Array1<f64>, String> {
+        glm_reml_fit_latent_backward_impl(
+            f.t.view(),
+            f.counts.view(),
+            N_OBS,
+            LATENT_DIM,
+            f.centers.view(),
+            2,
+            f.penalty.view(),
+            None,
+            None,
+            poisson(),
+            1.0,
+            None,
+            AuxPriorFamily::Ridge,
+            None,
+            None,
+            registry,
+        )
+        .map(|backward| Array1::from_iter(backward.grad_t.iter().copied()))
+    }
+
+    type Forward = fn(&Fixture, ArrayView1<'_, f64>, &AnalyticPenaltyRegistry) -> Result<f64, String>;
+    type Backward = fn(&Fixture, &AnalyticPenaltyRegistry) -> Result<Array1<f64>, String>;
+
+    /// Central difference of `score` in coordinate `i` at steps `h` and `2h`, with a
+    /// tolerance on its error: the truncation `|fd(h) − fd(2h)|/3` bounded with a
+    /// factor-3 margin, plus `rel_floor·max(1, |fd|)` for roundoff.
+    fn central_difference(
+        score: &dyn Fn(&Array1<f64>) -> f64,
+        t: &Array1<f64>,
+        i: usize,
+        h: f64,
+        rel_floor: f64,
+    ) -> (f64, f64) {
+        let at = |step: f64| {
+            let mut plus = t.clone();
+            plus[i] += step;
+            let mut minus = t.clone();
+            minus[i] -= step;
+            (score(&plus) - score(&minus)) / (2.0 * step)
+        };
+        let (fine, coarse) = (at(h), at(2.0 * h));
+        (fine, (fine - coarse).abs() + rel_floor * fine.abs().max(1.0))
+    }
+
+    /// Per descriptor kind, the leg the backward adds (`grad_t` with the descriptor
+    /// minus without) equals the central difference of what the forward adds
+    /// (`reml_score` with minus without). The inner fit never sees the penalty, so
+    /// both differences isolate it from the REML adjoint; the leg must also be
+    /// resolvable against that tolerance.
+    fn assert_penalty_legs_are_score_gradients(family: &str, forward: Forward, backward: Backward) {
+        let f = fixture();
+        let bare = registry(None);
+        let bare_grad = backward(&f, &bare).expect("latent backward without descriptors");
+        for (kind, descriptor) in [("ard", ARD), ("sparsity", SPARSITY), ("scad_mcp", SCAD)] {
+            let priced = registry(Some(&format!("[{descriptor}]")));
+            let leg = &backward(&f, &priced).expect("latent backward with a descriptor") - &bare_grad;
+            let penalty_score = |t: &Array1<f64>| {
+                forward(&f, t.view(), &priced).expect("priced latent forward")
+                    - forward(&f, t.view(), &bare).expect("bare latent forward")
+            };
+            let rows: Vec<(f64, f64, f64)> = (0..f.t.len())
+                .map(|i| {
+                    let (fd, tolerance) = central_difference(&penalty_score, &f.t, i, 1.0e-5, 1.0e-6);
+                    (leg[i], fd, tolerance)
+                })
+                .collect();
+            let leg_scale = leg.iter().fold(0.0_f64, |acc, value| acc.max(value.abs()));
+            let worst_tolerance = rows.iter().fold(0.0_f64, |acc, row| acc.max(row.2));
+            let worst_gap = rows.iter().fold(0.0_f64, |acc, row| acc.max((row.0 - row.1).abs()));
+            eprintln!(
+                "[#2933 F02 latent penalty leg] {family} {kind}: max|leg| = {leg_scale:.6e}, \
+                 max|leg − fd| = {worst_gap:.3e}, worst tol = {worst_tolerance:.3e}; \
+                 leg[0..3] = {:?}, fd[0..3] = {:?}",
+                rows.iter().take(3).map(|row| row.0).collect::<Vec<_>>(),
+                rows.iter().take(3).map(|row| row.1).collect::<Vec<_>>()
+            );
+            for (i, (leg_i, fd, tolerance)) in rows.iter().enumerate() {
+                assert!(
+                    (leg_i - fd).abs() <= *tolerance,
+                    "{family} {kind}: grad_t penalty leg [{i}] = {leg_i:.9e}, but the central \
+                     difference of the reml_score it prices is {fd:.9e} (tol {tolerance:.3e})"
+                );
+            }
+            assert!(
+                leg_scale > 100.0 * worst_tolerance,
+                "{family} {kind}: the penalty leg must be resolvable: max|leg| = {leg_scale:.3e}, \
+                 tol {worst_tolerance:.3e}"
+            );
+        }
+    }
+
+    #[test]
+    fn gaussian_latent_backward_carries_every_penalty_the_forward_prices_2933() {
+        assert_penalty_legs_are_score_gradients("gaussian", gaussian_forward, gaussian_backward);
+    }
+
+    #[test]
+    fn glm_latent_backward_carries_every_penalty_the_forward_prices_2933() {
+        assert_penalty_legs_are_score_gradients("poisson", glm_forward, glm_backward);
+    }
+
+    /// With ARD, sparsity and SCAD priced together, the whole Gaussian `grad_t` is
+    /// the central difference of the `reml_score` the forward reports. The floor
+    /// `1e-4·max(1, |fd|)` matches the relative tolerance the #2833 adjoint test
+    /// holds this score to.
+    #[test]
+    fn gaussian_latent_grad_t_is_the_gradient_of_its_priced_reml_score_2933() {
+        let f = fixture();
+        let priced = registry(Some(&format!("[{ARD}, {SPARSITY}, {SCAD}]")));
+        let grad = gaussian_backward(&f, &priced).expect("priced latent backward");
+        let score = |t: &Array1<f64>| gaussian_forward(&f, t.view(), &priced).expect("priced forward");
+        let rows: Vec<(f64, f64, f64)> = (0..f.t.len())
+            .map(|i| {
+                let (fd, tolerance) = central_difference(&score, &f.t, i, 1.0e-5, 1.0e-4);
+                (grad[i], fd, tolerance)
+            })
+            .collect();
+        let worst_gap = rows.iter().fold(0.0_f64, |acc, row| acc.max((row.0 - row.1).abs()));
+        eprintln!(
+            "[#2933 F02 latent grad_t] gaussian priced: max|grad − fd| = {worst_gap:.3e}; \
+             grad[0..3] = {:?}, fd[0..3] = {:?}",
+            rows.iter().take(3).map(|row| row.0).collect::<Vec<_>>(),
+            rows.iter().take(3).map(|row| row.1).collect::<Vec<_>>()
+        );
+        for (i, (grad_i, fd, tolerance)) in rows.iter().enumerate() {
+            assert!(
+                (grad_i - fd).abs() <= *tolerance,
+                "gaussian grad_t[{i}] = {grad_i:.9e}, central difference of its reml_score \
+                 {fd:.9e} (tol {tolerance:.3e})"
+            );
+        }
+    }
+
+    /// A β-tier descriptor has no coefficient block on a latent REML fit and an
+    /// isometry descriptor no decoder jet: the forwards refuse them instead of
+    /// scoring zero, and the backward refuses the β-tier gradient it cannot form.
+    #[test]
+    fn latent_fits_refuse_penalties_they_cannot_price_2933() {
+        let f = fixture();
+        let beta_tier = registry(Some(
+            r#"[{"kind": "nested_prefix", "target": "t", "prefix_sizes": [1], "shell_weights": [1.0], "tier": "beta"}]"#,
+        ));
+        let isometry = registry(Some(r#"[{"kind": "isometry", "target": "t", "weight": 1.0}]"#));
+        let beta_gaussian = gaussian_forward(&f, f.t.view(), &beta_tier);
+        let beta_poisson = glm_forward(&f, f.t.view(), &beta_tier);
+        let beta_backward = gaussian_backward(&f, &beta_tier);
+        let isometry_gaussian = gaussian_forward(&f, f.t.view(), &isometry);
+        eprintln!(
+            "[#2933 F02 latent refusals] β-tier gaussian = {beta_gaussian:?}; β-tier poisson = \
+             {beta_poisson:?}; β-tier backward = {:?}; isometry gaussian = {isometry_gaussian:?}",
+            beta_backward.as_ref().map(|grad| grad.len())
+        );
+        for (label, result) in [("gaussian", &beta_gaussian), ("poisson", &beta_poisson)] {
+            assert!(
+                result.as_ref().is_err_and(|reason| reason.contains("β-tier")),
+                "{label}: a β-tier descriptor must be refused, not priced; got {result:?}"
+            );
+        }
+        assert!(
+            beta_backward.as_ref().is_err_and(|reason| reason.contains("β-tier")),
+            "the backward must refuse a β-tier gradient it cannot form; got {:?}",
+            beta_backward.as_ref().map(|grad| grad.len())
+        );
+        assert!(
+            isometry_gaussian.as_ref().is_err_and(|reason| reason.contains("decoder Jacobian J")),
+            "an isometry descriptor must be refused on a latent fit; got {isometry_gaussian:?}"
+        );
     }
 }
 

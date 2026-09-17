@@ -1338,35 +1338,6 @@ fn multinomial_model_metadata_pyfunc<'py>(
     Ok(out.unbind())
 }
 
-fn analytic_penalty_value_for_targets(
-    registry: &AnalyticPenaltyRegistry,
-    target_t: ArrayView1<'_, f64>,
-    target_beta: Option<ArrayView1<'_, f64>>,
-) -> Result<f64, String> {
-    // The latent fits evaluate the analytic penalties on the latent coordinates alone
-    // and install no decoder jets, so an isometry penalty is refused by name.
-    registry.isometry_evaluation_precondition(IsometryEvaluationOrder::Value, target_t.len())?;
-    let rho = Array1::<f64>::zeros(registry.total_rho_count());
-    registry.validate_rho(rho.view())?;
-    let mut value = 0.0_f64;
-    for (penalty, (rho_slice, tier, _name)) in registry.penalties.iter().zip(registry.rho_layout())
-    {
-        let rho_local = rho.slice(s![rho_slice]);
-        let target = match (tier, penalty) {
-            (PenaltyTier::Psi, _) => target_t.view(),
-            (PenaltyTier::Beta, _) => {
-                let Some(target_beta) = target_beta.as_ref() else {
-                    continue;
-                };
-                target_beta.view()
-            }
-            (PenaltyTier::Rho, _) => continue,
-        };
-        value += penalty.value(target, rho_local);
-    }
-    Ok(value)
-}
-
 fn gaussian_reml_fit_latent_impl(
     t_flat: ArrayView1<'_, f64>,
     y: ArrayView2<'_, f64>,
@@ -1436,7 +1407,7 @@ fn gaussian_reml_fit_latent_impl(
         dim_selection_precision,
     )?;
     if let Some(registry) = analytic_penalties {
-        latent_prior_score += analytic_penalty_value_for_targets(registry, t_flat, None)?;
+        latent_prior_score += latent_analytic_penalty_value(registry, t_flat)?;
     }
     fit.reml_score += latent_prior_score;
     Ok((fit, design, aux_strength_state))
@@ -1553,8 +1524,7 @@ fn gaussian_reml_fit_latent<'py>(
             )
             .map_err(py_value_error)?;
             let analytic_score =
-                analytic_penalty_value_for_targets(&registry, t_values.view(), None)
-                    .map_err(py_value_error)?;
+                latent_analytic_penalty_value(&registry, t_values.view()).map_err(py_value_error)?;
             return dense_fisher_gaussian_fit_to_pydict(
                 py,
                 design.view(),

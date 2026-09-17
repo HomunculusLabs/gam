@@ -508,7 +508,9 @@ def _normalize_penalties(
     return out
 
 
-def _normalize_penalty_descriptors(penalties: Sequence[Any] | None) -> list[dict[str, Any]] | None:
+def _normalize_penalty_descriptors(penalties: Sequence[Any] | None) -> str | None:
+    """JSON text of the analytic-penalty descriptors, the form the latent fit
+    entry points take as ``analytic_penalties``."""
     if penalties is None:
         return None
     if isinstance(penalties, (str, bytes)) or not isinstance(penalties, Sequence):
@@ -2879,6 +2881,7 @@ def gaussian_reml_fit_latent_backward(
     tensor_knots_concat: Any | None = None,
     tensor_knot_offsets: Sequence[int] | None = None,
     tensor_degrees: Sequence[int] | None = None,
+    penalties: Sequence[Any] | None = None,
 ) -> dict[str, Any]:
     """Backward / adjoint companion to :func:`gaussian_reml_fit_latent`.
 
@@ -2889,7 +2892,9 @@ def gaussian_reml_fit_latent_backward(
     ``grad_t`` includes the additive identifiability-mode contributions
     (auxiliary-prior pullback and/or ARD per-axis ridge); the outer
     driver may walk ``t`` directly under this combined gradient without
-    re-applying the gauge fix.
+    re-applying the gauge fix. Pass the same ``penalties`` as the forward:
+    their energy is part of the forward ``reml_score``, so their gradient is
+    part of ``grad_t``.
 
     ``basis_kind`` currently supports ``"duchon"`` and ``"tensor_bspline"``
     for this backward path.
@@ -2931,6 +2936,7 @@ def gaussian_reml_fit_latent_backward(
             else _numeric_vector(tensor_knots_concat, "tensor_knots_concat"),
             None if tensor_knot_offsets is None else [int(v) for v in tensor_knot_offsets],
             None if tensor_degrees is None else [int(v) for v in tensor_degrees],
+            _normalize_penalty_descriptors(penalties),
         )
     except Exception as exc:
         raise map_exception(exc) from exc
@@ -3207,6 +3213,7 @@ def glm_reml_fit_latent_backward(
     aux_family: str = "ridge",
     aux_strength: float | str | None = None,
     dim_selection_log_precision: Any | None = None,
+    penalties: Sequence[Any] | None = None,
 ) -> dict[str, Any]:
     """Return the analytic Duchon latent gradient for ``glm_reml_fit_latent``.
 
@@ -3215,6 +3222,9 @@ def glm_reml_fit_latent_backward(
     IRLS weight. This backward path is scalar-only; the multi-output
     ``(N, K, K)`` multinomial/binomial-multi override is exposed on the
     forward :func:`glm_reml_fit_latent`. ``None`` uses the analytic weight.
+
+    Pass the same ``penalties`` as the forward: their energy is part of the
+    forward ``reml_score``, so their gradient is part of ``grad_t``.
     """
     import numpy as np
 
@@ -3246,6 +3256,7 @@ def glm_reml_fit_latent_backward(
             None if tweedie_p is None else float(tweedie_p),
             None if negbin_theta is None else float(negbin_theta),
             None if beta_phi is None else float(beta_phi),
+            _normalize_penalty_descriptors(penalties),
         )
     except Exception as exc:
         raise map_exception(exc) from exc

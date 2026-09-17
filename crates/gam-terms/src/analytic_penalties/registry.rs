@@ -231,6 +231,37 @@ impl AnalyticPenaltyRegistry {
         Ok(())
     }
 
+    /// Gradient `Σ_p ∂P_p/∂target_t` of every ψ-tier penalty, with `rho` the global
+    /// vector: the derivative of the ψ-tier registry energy a latent score adds.
+    ///
+    /// #2933 F02 — a β-tier penalty is priced on coefficients, so its `target_t`
+    /// derivative runs through the fitted decoder, which this sum does not carry; it is
+    /// refused. An isometry penalty must hold the jets its gradient reads
+    /// ([`Self::isometry_evaluation_precondition`]).
+    pub fn target_grad(
+        &self,
+        target_t: ArrayView1<'_, f64>,
+        rho: ArrayView1<'_, f64>,
+    ) -> Result<Array1<f64>, String> {
+        self.validate_rho(rho)?;
+        self.isometry_evaluation_precondition(IsometryEvaluationOrder::Gradient, target_t.len())?;
+        let mut out = Array1::<f64>::zeros(target_t.len());
+        for (penalty, (rho_slice, tier, name)) in self.penalties.iter().zip(self.rho_layout()) {
+            match tier {
+                PenaltyTier::Rho => continue,
+                PenaltyTier::Beta => {
+                    return Err(format!(
+                        "analytic penalty `{name}` is β-tier: its target gradient runs through the \
+                         fitted coefficients, which a ψ-tier gradient does not carry"
+                    ));
+                }
+                PenaltyTier::Psi => {}
+            }
+            out += &penalty.grad_target(target_t, rho.slice(s![rho_slice]));
+        }
+        Ok(out)
+    }
+
     /// Returns `(local_rho_slice, target_tier, name)` for each registered
     /// penalty so the outer driver can wire its ρ-views.
     pub fn rho_layout(&self) -> Vec<(std::ops::Range<usize>, PenaltyTier, &str)> {
