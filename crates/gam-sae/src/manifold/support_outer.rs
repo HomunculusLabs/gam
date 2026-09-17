@@ -2301,76 +2301,190 @@ mod tests {
     }
 
     /// #2933 F29 — the rational-route search publishes a certified point only after
-    /// probes it never saw agree with the certificate, and what it publishes holds for
-    /// the exact criterion. At the published point the exact dense-route gradient must
-    /// lie within the certificate band plus a few published standard errors, while at
-    /// the starting point it must not, so an idle search cannot pass.
+    /// probes it never saw agree with the certificate, and what it publishes about the
+    /// exact criterion must hold. The point minimizes the search probes' surrogate, so
+    /// the exact gradient there is those probes' own error, and the published claim is
+    /// `‖Pg‖ ≤ b + ‖Pσ_seen‖`. Over independent probe sets the exact dense-route excess
+    /// `max(‖Pg‖ − b, 0)` must be the size `‖Pσ_seen‖` reports, above the deterministic
+    /// floor, and within three of it in nine realizations of ten. An idle search would
+    /// score the starting point's exact gradient at every seed, so that gradient must
+    /// exceed twice the RMS resolution, the calibration's upper edge. Each search and
+    /// each exact reference certifies its inner fixed point to the tolerance production
+    /// derives ([`SaeSupportSparseTerm::fixed_point_tolerance`]), as
+    /// [`run_sae_support_outer`] does: the fixture's `1e-9` sits below this objective's
+    /// resolution (`√(√2·ε) ≈ 1.8e-8` for two response cells), and job 1144425 saw seed
+    /// 3 refuse there on a Newton displacement of `4.2e-8` against a bound of `4.9e-9`
+    /// with decrement² `2.9e-17`.
+    ///
+    /// The fixture's border is 6, so a probe's gradient sample takes only a few values,
+    /// and an unseen block can land on the exact gradient by sign balance alone. Job
+    /// 1129657 found exactly that at the former single seed: one group's 64 samples took
+    /// one value, the other's two, the unseen block balanced, and its estimate matched
+    /// the exact gradient to 1e-9. The exact check was then a consequence of the
+    /// acceptance, and its allowance `b + 3(‖Pσ_seen‖ + ‖Pσ'‖)` was wider than any error
+    /// the samples could produce. The calibration here compares the exact gradient with
+    /// the SEEN resolution, which the unseen block does not enter, and the test counts
+    /// the realizations whose unseen estimate differs from the exact gradient.
+    ///
+    /// The claim concerns published points. A search whose inner fixed point stops at a
+    /// resolved stationary saddle it cannot leave publishes nothing, and that typed
+    /// refusal is the inner solve's policy (#2634), not this lane's. Job 1148238 saw seed
+    /// 3 end there on this two-row fixture (generalized curvature `-1.07e-7`, no
+    /// representable decrease along either sign of the mode). Such seeds are printed and
+    /// counted against an allowance of `seeds − 10`, because the nine-in-ten coverage bar
+    /// admits a miss only from ten published points; every other error fails the test.
+    /// Job 1155191 printed the escape mode at each of the four refusals (seeds 3, 13, 14,
+    /// 27; curvature `-1.06e-7` to `-1.12e-7`): 97% of it is the plane atom's decoder and
+    /// 24% the plane's coordinate, and its share inside the one rotation generator with a
+    /// minimum-norm decoder compensation (rank 1/3 on the plane's single active row) is
+    /// 0.24.
     #[test]
     fn rational_route_search_checks_its_certified_point_on_unseen_probes_2933() {
-        let mut objective = build_objective();
-        objective.in_core_budget_bytes = 0;
-        let (lower, upper) = support_smoothing_domain(&objective.term, &objective.layout)
-            .expect("smoothing domain");
+        let (lower, upper, border) = {
+            let objective = build_objective();
+            let (lower, upper) = support_smoothing_domain(&objective.term, &objective.layout)
+                .expect("smoothing domain");
+            let (_, border) = objective.beta_layout().expect("beta layout");
+            (lower, upper, border)
+        };
+        let floor = 1.0e3 * border as f64 * sae_surrogate_lane_config().rel_tol;
         let initial = Array1::from_shape_fn(lower.len(), |group| {
             0.0_f64.max(lower[group]).min(upper[group])
         });
-        let scale = objective.target.len() as f64;
-        let search = run_support_outer_search(
-            &mut objective,
-            &lower,
-            &upper,
-            initial.clone(),
-            scale,
-            256,
-        )
-        .expect("the rational-route search must certify and check its point");
-        let uncertainty = &search.uncertainty;
-        let band = search.certificate.stationarity.bound();
-        eprintln!(
-            "#2933 F29 search: rho {:?}, band {band:.6e}, railed {:?}, {uncertainty:?}",
-            search.rho, search.certificate.lambdas_railed
-        );
-        assert!(uncertainty.probes >= 2 * SCHUR_SLQ_LOGDET_PROBES);
-        assert_eq!(search.terminal.logdet_probes, uncertainty.probes);
-        assert!(uncertainty.unseen_gradient_std_err_norm > 0.0);
-        assert!(uncertainty.seen_gradient_std_err_norm > 0.0);
-        assert!(uncertainty.criterion_std_err > 0.0);
-        assert!(
-            uncertainty.unseen_projected_gradient_norm
-                <= band
-                    + uncertainty.seen_gradient_std_err_norm
-                    + uncertainty.unseen_gradient_std_err_norm
-        );
-
-        let mut dense = build_objective();
-        let at_start = dense.evaluate(&initial).expect("dense route at the start");
+        let derived_tolerance = |objective: &mut SaeSupportOuterObjective| {
+            objective.inner_tolerance = objective.term.fixed_point_tolerance();
+        };
+        let mut start_route = build_objective();
+        derived_tolerance(&mut start_route);
+        let at_start = start_route.evaluate(&initial).expect("dense route at the start");
         let start_norm = railed_projected_norm(&at_start.gradient, &initial, &[], &lower, &upper);
-        let mut dense = build_objective();
-        let exact = dense.evaluate(&search.rho).expect("dense route at the certified point");
-        let exact_norm = railed_projected_norm(
-            &exact.gradient,
-            &search.rho,
-            &search.certificate.lambdas_railed,
-            &lower,
-            &upper,
+        let seeds = 32u64;
+        let mut pairs = Vec::<(f64, f64)>::with_capacity(seeds as usize);
+        let mut distinct_unseen = 0usize;
+        let inner_saddle_refusal = "support fixed point reached a resolved stationary saddle";
+        let mut inner_saddle_refusals = 0usize;
+        for seed in 0..seeds {
+            let mut objective = build_objective();
+            derived_tolerance(&mut objective);
+            objective.random_state = seed;
+            objective.in_core_budget_bytes = 0;
+            let scale = objective.target.len() as f64;
+            let search = match run_support_outer_search(
+                &mut objective,
+                &lower,
+                &upper,
+                initial.clone(),
+                scale,
+                256,
+            ) {
+                Ok(search) => search,
+                Err(error) if format!("{error:?}").contains(inner_saddle_refusal) => {
+                    eprintln!("#2933 F29 search seed {seed}: no published point: {error:?}");
+                    inner_saddle_refusals += 1;
+                    continue;
+                }
+                Err(error) => panic!(
+                    "seed {seed}: the rational-route search must certify and check its point: \
+                     {error:?}"
+                ),
+            };
+            let uncertainty = &search.uncertainty;
+            let band = search.certificate.stationarity.bound();
+            assert!(uncertainty.probes >= 2 * SCHUR_SLQ_LOGDET_PROBES);
+            assert_eq!(search.terminal.logdet_probes, uncertainty.probes);
+            assert!(uncertainty.criterion_std_err > 0.0);
+            assert!(
+                uncertainty.unseen_projected_gradient_norm
+                    <= band
+                        + uncertainty.seen_gradient_std_err_norm
+                        + uncertainty.unseen_gradient_std_err_norm,
+                "seed {seed}: the published point fails its own acceptance, band {band:.6e}, \
+                 {uncertainty:?}"
+            );
+            let mut exact_route = build_objective();
+            derived_tolerance(&mut exact_route);
+            let exact = exact_route
+                .evaluate(&search.rho)
+                .expect("dense route at the certified point");
+            let exact_norm = railed_projected_norm(
+                &exact.gradient,
+                &search.rho,
+                &search.certificate.lambdas_railed,
+                &lower,
+                &upper,
+            );
+            if (uncertainty.unseen_projected_gradient_norm - exact_norm).abs()
+                > 1.0e-6 * (1.0 + exact_norm)
+            {
+                distinct_unseen += 1;
+            }
+            eprintln!(
+                "#2933 F29 search seed {seed}: rho {:?}, railed {:?}, band {band:.3e}, exact \
+                 |Pg| {exact_norm:.6e}, seen resolution {:.6e}, unseen |Pg'| {:.6e} ± {:.6e}, \
+                 probes {}, plans {}",
+                search.rho.to_vec(),
+                search.certificate.lambdas_railed,
+                uncertainty.seen_gradient_std_err_norm,
+                uncertainty.unseen_projected_gradient_norm,
+                uncertainty.unseen_gradient_std_err_norm,
+                uncertainty.probes,
+                uncertainty.plans
+            );
+            pairs.push((
+                (exact_norm - band).max(0.0),
+                uncertainty.seen_gradient_std_err_norm,
+            ));
+        }
+        let refusal_allowance = seeds as usize - 10;
+        assert!(
+            inner_saddle_refusals <= refusal_allowance,
+            "{inner_saddle_refusals} of {seeds} searches refused at an inner saddle against an \
+             allowance of {refusal_allowance}: the nine-in-ten coverage bar tolerates a miss only \
+             from ten published points, and {} published",
+            pairs.len()
         );
-        let allowance = band
-            + 3.0
-                * (uncertainty.seen_gradient_std_err_norm
-                    + uncertainty.unseen_gradient_std_err_norm);
+        let count = pairs.len() as f64;
+        let rms_excess = (pairs.iter().map(|(excess, _)| excess * excess).sum::<f64>() / count).sqrt();
+        let rms_resolution =
+            (pairs.iter().map(|(_, resolution)| resolution * resolution).sum::<f64>() / count).sqrt();
+        let covered = pairs
+            .iter()
+            .filter(|(excess, resolution)| *excess <= 3.0 * resolution)
+            .count();
         eprintln!(
-            "#2933 F29 search: exact |Pg| {exact_norm:.6e} at the certified point, \
-             {start_norm:.6e} at the start, allowance {allowance:.6e}"
+            "#2933 F29 search: start |Pg| {start_norm:.6e}; RMS exact excess {rms_excess:.4e}, \
+             RMS seen resolution {rms_resolution:.4e}, {covered}/{} within 3 resolutions; \
+             {distinct_unseen}/{} unseen estimates distinct from the exact gradient; \
+             {inner_saddle_refusals}/{seeds} searches refused at an inner saddle",
+            pairs.len(),
+            pairs.len()
         );
         assert!(
-            start_norm > allowance,
-            "the starting point's exact gradient {start_norm:.6e} is already inside the \
-             allowance {allowance:.6e}, so this fixture cannot tell a search from none"
+            start_norm > 2.0 * rms_resolution,
+            "the starting point's exact gradient {start_norm:.6e} is inside twice the RMS \
+             search-probe resolution {rms_resolution:.4e}, so the calibration cannot tell a \
+             search from none"
         );
         assert!(
-            exact_norm <= allowance,
-            "the exact gradient at the certified point {exact_norm:.6e} exceeds the band \
-             {band:.6e} plus three published standard errors ({allowance:.6e})"
+            2 * distinct_unseen >= pairs.len(),
+            "only {distinct_unseen} of {} unseen estimates differ from the exact gradient, so \
+             the exact check mostly repeats the acceptance",
+            pairs.len()
+        );
+        assert!(
+            rms_excess > floor,
+            "RMS exact excess {rms_excess:.3e} is not above the deterministic floor {floor:.3e}"
+        );
+        assert!(
+            (0.5..=2.0).contains(&(rms_excess / rms_resolution)),
+            "RMS exact excess {rms_excess:.4e} at the certified points is not the size of the \
+             published search-probe resolution {rms_resolution:.4e}"
+        );
+        assert!(
+            10 * covered >= 9 * pairs.len(),
+            "only {covered} of {} certified points have an exact excess within three published \
+             search-probe resolutions",
+            pairs.len()
         );
     }
 
