@@ -278,27 +278,53 @@ pub fn decomposition_parallelism() -> Par {
     Par::Seq
 }
 
-/// #2627/#2267 — the one degree every self-adjoint eigendecomposition runs at.
+/// #2627/#2267 — the degree every self-adjoint eigendecomposition is
+/// partitioned at: the named deployment cap [`EVD_DEPLOYMENT_DEGREE`], passed
+/// to faer per call.
 ///
-/// Why it is a constant: faer's EVD words follow the degree its arithmetic is
-/// partitioned at, not the number of threads that execute it. At `n = 7692`
-/// degree 24 gave the same words on pools of width 24, 8 and 1 (job 1161259,
-/// EPYC 9534), and the same words on EPYC 7702 (job 1159471). So the degree
-/// has to be a constant of the algorithm. A runtime quantity such as the pool
-/// width (`Par::rayon(0)`) would make the words change with the thread count.
-///
-/// Why 24: a measured choice, not a derived one. Above the pool width the degree
-/// costs little where it was measured:
-/// - n=3000 on pool 8: 2.50 s at 24 against 2.48 s at 8 (job 1159471);
-/// - on pool 1 against sequential: 0.483 s against 0.467 s at n=1024 and 1.383 s
-///   against 1.348 s at n=1500 (job 1161804), 101.8 s against 99.7 s at n=7692
-///   (job 1161259).
-/// At n=7692, the dense exact-A dimension of the manifold-SAE criterion, it
-/// bought 8.5× over sequential on 24 threads and 5.7× on 8.
+/// **Invariance.** faer's EVD words follow the degree its arithmetic is
+/// partitioned at, not the number of threads that execute it, so the degree has
+/// to be a constant of the call and never a runtime quantity such as the pool
+/// width (`Par::rayon(0)`). At n = 7692 degree 24 gave identical words on pools
+/// of width 24, 8 and 1 on EPYC 9534 (job 1161259), EPYC 7702 (job 1159471) and
+/// EPYC 7763 (job 1180582), which also shows identical words across pools at
+/// n = 1500 and 3000 for every fixed degree it measured.
 #[inline]
 pub fn evd_parallelism() -> Par {
-    Par::rayon(24)
+    Par::rayon(EVD_DEPLOYMENT_DEGREE)
 }
+
+/// #2627/#2267 — the degree the self-adjoint EVD is partitioned at: a named
+/// deployment choice, not a tolerance.
+///
+/// **Why it is a constant.** Eigen words must be identical across pool widths,
+/// so the degree cannot depend on the pool. faer 0.24's tridiagonal reduction
+/// (`linalg::evd::tridiag::tridiag_in_place`) splits the trailing symmetric
+/// matvec into exactly `degree` column chunks of equal triangular area. It
+/// falls back to sequential only once `rem²/2 < par_threshold = 192·256`. The
+/// split count is the degree at every dimension, so no size saturates it. The
+/// one pool-independent degree faer's structure offers is the one whose chunks
+/// each carry faer's grain at the first reduction step,
+/// `max(1, ⌊n²/(2·192·256)⌋)`. It loses to task-spawn overhead at production
+/// size (job 1180582, EPYC 7763, faer 0.24.4, median wall time):
+///
+/// | n    | pool | degree 24 | grain degree        |
+/// |------|------|-----------|---------------------|
+/// | 3000 | 24   | 3.55 s    | 4.76 s (degree 91)  |
+/// | 7692 | 8    | 42.7 s    | 76.1 s (degree 601) |
+/// | 7692 | 24   | 27.8 s    | 79.6 s (degree 601) |
+///
+/// **Why 24.** Measured on EPYC 7763 with faer 0.24.4 (job 1180582), at n = 7692,
+/// the dense exact-A dimension of the manifold-SAE criterion: 4.67× faster than
+/// sequential on a pool of 24 threads, 3.03× on 8, and +0.3% on one thread
+/// (129.9 s against 129.5 s). Earlier cells: +3.5% at n = 1024 and +2.6% at
+/// n = 1500 on one thread (job 1161804), and 8.5× and 5.7× on 24 and 8 threads on
+/// EPYC 9534 (job 1161259). A pool wider than 24 runs the EVD at 24.
+///
+/// **A deployment choice.** Nothing numerical depends on the value; the words
+/// pin and `evd_deployment_degree_reaches_faer_as_its_chunk_count_2627` gate it.
+/// Re-measure it whenever faer is bumped.
+const EVD_DEPLOYMENT_DEGREE: usize = 24;
 
 /// Process-global depth counter + saved parallelism for [`FaerSequentialScope`].
 ///
@@ -4598,6 +4624,58 @@ mod evd_degree_2627_tests {
             single,
             sequential_words(a.as_ref()),
             "at n={n} the degree must change the words, or this pin is vacuous"
+        );
+    }
+
+    /// The deployment degree reaches faer as the chunk count of its tridiagonal
+    /// reduction. At n = 1500, above faer's parallel grain, a neighbouring degree
+    /// partitions the trailing matvec differently and gives different words (degree
+    /// 22 against 24 in job 1180582). If a faer change stopped reading the degree,
+    /// or capped its split count below it, these words would agree, and the words
+    /// pin above could keep passing with the deployment degree inert.
+    #[test]
+    fn evd_deployment_degree_reaches_faer_as_its_chunk_count_2627() {
+        assert!(
+            matches!(evd_parallelism(), Par::Rayon(degree) if degree.get() == EVD_DEPLOYMENT_DEGREE),
+            "the self-adjoint EVD must hand faer the deployment degree"
+        );
+        let n = 1500usize;
+        let mut state = 0x2627_E7D0_u64;
+        let mut a = Mat::<f64>::zeros(n, n);
+        for j in 0..n {
+            for i in j..n {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let value = (state >> 11) as f64 / (1_u64 << 53) as f64 - 0.5;
+                a[(i, j)] = value;
+                a[(j, i)] = value;
+            }
+        }
+        let words_at = |par: Par| {
+            let mut s = Diag::<f64>::zeros(n);
+            let mut u = Mat::<f64>::zeros(n, n);
+            let mut mem = MemBuffer::new(faer::linalg::evd::self_adjoint_evd_scratch::<f64>(
+                n,
+                faer::linalg::evd::ComputeEigenvectors::Yes,
+                par,
+                Default::default(),
+            ));
+            faer::linalg::evd::self_adjoint_evd(
+                a.as_ref(),
+                s.as_mut(),
+                Some(u.as_mut()),
+                par,
+                MemStack::new(&mut mem),
+                Default::default(),
+            )
+            .expect("EVD at a fixed degree");
+            words(&s, &u)
+        };
+        assert_ne!(
+            words_at(Par::rayon(EVD_DEPLOYMENT_DEGREE)),
+            words_at(Par::rayon(EVD_DEPLOYMENT_DEGREE - 2)),
+            "at n={n} a neighbouring degree must change the words: the degree is faer's chunk count"
         );
     }
 }
