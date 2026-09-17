@@ -1034,8 +1034,17 @@ fn fit_latent_baseline_axes<F: LatentBaselineChartFamily + crate::custom_family:
             theta.slice(s![rho_dim..]).to_owned(),
         )
     };
-    let exact_warm_start =
-        std::cell::RefCell::new(None::<crate::custom_family::CustomFamilyWarmStart>);
+    // The coefficient mode every evaluation starts from is the certified mode of
+    // the accepted outer iterate, never the last trial's (#2714). This used to
+    // be a slot every successful evaluation overwrote, including a BFGS trial
+    // the line search then rejected. Job 657828 measured the cost on
+    // `latent_loaded_vs_unloaded_fit_selects_its_background_with_rho_2714`: seed
+    // 0's first trial at shape 0.70 solved at a higher cost, and every
+    // backtracking probe toward shape 0.01 then started from that trial's mode.
+    // The profiled criterion depended on probe order, the way #2668 and #2765
+    // measured on the other exact-joint drivers.
+    let exact_mode_branch =
+        std::cell::RefCell::new(crate::exact_mode_branch::ExactCoefficientModeBranch::default());
     // Outer ρ-cache β-seed staging slot: promoted once the per-block widths of the
     // realized blocks are known (the survival location-scale contract).
     let pending_beta_seed = std::cell::RefCell::new(None::<Array1<f64>>);
@@ -1045,7 +1054,11 @@ fn fit_latent_baseline_axes<F: LatentBaselineChartFamily + crate::custom_family:
             match crate::custom_family::CustomFamilyWarmStart::from_cached_beta(&widths, &beta_seed)
             {
                 Ok(warm_start) => {
-                    exact_warm_start.replace(Some(warm_start));
+                    if !exact_mode_branch.borrow_mut().install_seed(warm_start) {
+                        log::debug!(
+                            "[latent] ignored a late outer ρ-cache β seed: an accepted outer iterate already owns the coefficient-mode anchor"
+                        );
+                    }
                 }
                 Err(error) => {
                     log::warn!(
@@ -1112,21 +1125,36 @@ fn fit_latent_baseline_axes<F: LatentBaselineChartFamily + crate::custom_family:
                 other => other,
             };
             let eval_options = crate::outer_subsample::exact_outer_options(options);
+            let (first_iterate, candidates) =
+                exact_mode_branch
+                    .borrow_mut()
+                    .candidates(effective_mode, theta, &rho);
+            if first_iterate {
+                log::info!(
+                    "[latent] first derivative-bearing outer evaluation: its certified mode becomes the coefficient-mode anchor every later probe starts from"
+                );
+            }
+            let warm_start = candidates.into_iter().next().flatten();
             let owned = crate::custom_family::evaluate_custom_family_joint_hyper_owned(
                 &family,
                 &blocks,
                 &eval_options,
                 &rho,
                 &hyper_layout,
-                exact_warm_start.borrow().as_ref(),
+                warm_start.as_ref(),
                 effective_mode,
             )
             .map_err(|error| error.to_string())?;
+            exact_mode_branch.borrow_mut().record_value(
+                eval_mode,
+                theta,
+                owned.result.warm_start.clone(),
+                owned.result.inner_converged,
+            );
             // An unconverged inner state is neither a fit nor a seed (#2902).
             if !owned.result.inner_converged {
                 return Err("latent exact joint inner solve did not converge".to_string());
             }
-            exact_warm_start.replace(Some(owned.result.warm_start.clone()));
             Ok(ExactJointEvaluation {
                 objective: owned.result.objective,
                 gradient: owned.result.gradient,
@@ -1134,32 +1162,14 @@ fn fit_latent_baseline_axes<F: LatentBaselineChartFamily + crate::custom_family:
                 mode: owned.mode,
             })
         },
-        |theta,
-         specs: &[TermCollectionSpec],
-         designs: &[TermCollectionDesign]| {
-            check_designs(specs, designs)?;
-            let (family, blocks) = realize(theta)?;
-            promote_pending_seed(&blocks);
-            let rho = theta.slice(s![..rho_dim]).to_owned();
-            let hyper_layout = family_hyper_layout(&blocks, theta)?;
-            let eval_options = crate::outer_subsample::exact_outer_options(options);
-            let owned = crate::custom_family::evaluate_custom_family_joint_hyper_efs_owned(
-                &family,
-                &blocks,
-                &eval_options,
-                &rho,
-                &hyper_layout,
-                exact_warm_start.borrow().as_ref(),
+        // The latent route disables the fixed-point optimizer (the call above
+        // passes `disable_fixed_point = true`), so an EFS evaluation is a contract
+        // violation. It is refused here rather than served from a second seed
+        // policy.
+        |_, _: &[TermCollectionSpec], _: &[TermCollectionDesign]| {
+            Err::<ExactJointEfsEvaluation<crate::custom_family::CustomFamilyOwnedMode>, String>(
+                "latent survival EFS callback invoked even though fixed-point optimization is disabled for this exact joint route".to_string(),
             )
-            .map_err(|error| error.to_string())?;
-            if !owned.result.inner_converged {
-                return Err("latent exact joint EFS inner solve did not converge".to_string());
-            }
-            exact_warm_start.replace(Some(owned.result.warm_start.clone()));
-            Ok(ExactJointEfsEvaluation {
-                evaluation: owned.result.efs_eval,
-                mode: owned.mode,
-            })
         },
         crate::marginal_slope_shared::make_beta_seed_validator(&pending_beta_seed),
     )?;
