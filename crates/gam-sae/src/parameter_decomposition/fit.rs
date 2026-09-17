@@ -167,6 +167,11 @@ pub enum GaussianBlockError {
         required_bytes: Option<usize>,
         budget_bytes: usize,
     },
+    /// A design cotangent's width is not the design's.
+    DesignCotangentWidth {
+        columns: usize,
+        expected: usize,
+    },
     Reml(EstimationError),
 }
 
@@ -267,6 +272,11 @@ impl fmt::Display for GaussianBlockError {
                 f,
                 "conditionally Gaussian block refused: its dense byte count overflows usize \
                  (host in-core budget {budget_bytes} bytes)"
+            ),
+            Self::DesignCotangentWidth { columns, expected } => write!(
+                f,
+                "conditionally Gaussian block refused: the design cotangent has {columns} columns \
+                 but the design has {expected}"
             ),
             Self::Reml(error) => write!(f, "conditionally Gaussian block REML failed: {error}"),
         }
@@ -532,6 +542,112 @@ fn left_factors_from_design_order(
             })
         })
         .collect()
+}
+
+/// Cotangents of the block's design with respect to what built it.
+///
+/// For a scalar criterion `V(X)` with `G = ∂V/∂X` (`n × p`, design order), these
+/// are `∂V/∂β` (`n × K`), `∂V/∂h` (`n × d_in`) and `∂V/∂R_j` (`d_in × r_j`) through
+/// the design alone. A criterion whose penalties also depend on the right factors
+/// (`S_jk R_jᵀ R_k`) adds that penalty chain, which this struct does not carry.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BlockDesignCotangents {
+    /// `∂V/∂β[r, j] = Σ_a G[r, offset_j + a] (R_jᵀ h_r)_a`.
+    pub moments: Array2<f64>,
+    /// `∂V/∂h[r, i] = Σ_j β[r, j] Σ_a G[r, offset_j + a] R_j[i, a]`.
+    pub inputs: Array2<f64>,
+    /// `∂V/∂R_j[i, a] = Σ_r β[r, j] h[r, i] G[r, offset_j + a]`.
+    pub right_factors: Vec<Array2<f64>>,
+}
+
+/// The exact adjoint of the block's design. It pulls a design cotangent (e.g. the
+/// REML owner's `data_gradient`) back to the moments, the inputs and the right
+/// factors.
+///
+/// Block `j` of design row `r` is `β_j(m_r) R_jᵀ h_r`. That is linear in `β`, in
+/// `h` and in `R_j` separately, so each pullback is the transpose of one linear map.
+/// Labels and weights reach `β` through the anchor moment, and upstream parameters
+/// reach `h` through the executed network. Those chains belong to their owners.
+pub fn block_design_adjoint(
+    design_cotangent: ArrayView2<'_, f64>,
+    moments: ArrayView2<'_, f64>,
+    inputs: ArrayView2<'_, f64>,
+    right_factors: &[ArrayView2<'_, f64>],
+) -> Result<BlockDesignCotangents, GaussianBlockError> {
+    let n = moments.nrows();
+    let basis = moments.ncols();
+    let input_dim = inputs.ncols();
+    for (what, count) in [
+        ("inputs", inputs.nrows()),
+        ("design cotangent", design_cotangent.nrows()),
+    ] {
+        if count != n {
+            return Err(GaussianBlockError::RowCountMismatch {
+                what,
+                rows: count,
+                expected: n,
+            });
+        }
+    }
+    if right_factors.len() != basis {
+        return Err(GaussianBlockError::RightFactorCount {
+            basis,
+            right_factors: right_factors.len(),
+        });
+    }
+    for (index, factor) in right_factors.iter().enumerate() {
+        if factor.nrows() != input_dim || factor.ncols() == 0 {
+            return Err(GaussianBlockError::RightFactorShape {
+                basis: index,
+                rows: factor.nrows(),
+                rank: factor.ncols(),
+                input_dim,
+            });
+        }
+    }
+    let offsets = design_offsets(right_factors);
+    if design_cotangent.ncols() != offsets[basis] {
+        return Err(GaussianBlockError::DesignCotangentWidth {
+            columns: design_cotangent.ncols(),
+            expected: offsets[basis],
+        });
+    }
+    for (what, values) in [
+        ("design cotangent", design_cotangent),
+        ("moments", moments),
+        ("inputs", inputs),
+    ] {
+        if values.iter().any(|value| !value.is_finite()) {
+            return Err(GaussianBlockError::NonFinite { what });
+        }
+    }
+    if right_factors
+        .iter()
+        .any(|factor| factor.iter().any(|value| !value.is_finite()))
+    {
+        return Err(GaussianBlockError::NonFinite {
+            what: "right factors",
+        });
+    }
+    let mut moment_cotangents = Array2::<f64>::zeros((n, basis));
+    let mut input_cotangents = Array2::<f64>::zeros((n, input_dim));
+    let mut right_cotangents = Vec::with_capacity(basis);
+    for (j, factor) in right_factors.iter().enumerate() {
+        let block = design_cotangent.slice(s![.., offsets[j]..offsets[j + 1]]);
+        let projected = inputs.dot(factor);
+        for row in 0..n {
+            moment_cotangents[[row, j]] = block.row(row).dot(&projected.row(row));
+        }
+        let scaled =
+            Array2::from_shape_fn(block.dim(), |(row, a)| moments[[row, j]] * block[[row, a]]);
+        input_cotangents += &scaled.dot(&factor.t());
+        right_cotangents.push(inputs.t().dot(&scaled));
+    }
+    Ok(BlockDesignCotangents {
+        moments: moment_cotangents,
+        inputs: input_cotangents,
+        right_factors: right_cotangents,
+    })
 }
 
 /// A lower bound on the block's peak dense state in bytes, or `None` on overflow.
@@ -1235,6 +1351,160 @@ mod tests {
             ),
             "an overflowing ledger must refuse, got {overflow:?}"
         );
+    }
+
+    /// A deterministic design cotangent in design order, standing in for a criterion's ∂V/∂X.
+    fn design_cotangent(rows: usize, columns: usize) -> Array2<f64> {
+        Array2::from_shape_fn((rows, columns), |(r, a)| (0.37 * r as f64 + 1.3 * a as f64 + 0.2).sin())
+    }
+
+    /// `Σ_ij left_ij right_ij`.
+    fn frobenius(left: &Array2<f64>, right: &Array2<f64>) -> f64 {
+        left.iter().zip(right.iter()).map(|(a, b)| a * b).sum()
+    }
+
+    /// `Σ |G[r, j·r + a] β[r, j] h[r, i] R_j[i, a]|` over every monomial of the pairing.
+    fn monomial_absolute_sum(
+        cotangent: &Array2<f64>,
+        moments: &Array2<f64>,
+        inputs: &Array2<f64>,
+        right: &[Array2<f64>],
+    ) -> f64 {
+        let mut total = 0.0;
+        for row in 0..moments.nrows() {
+            for (j, factor) in right.iter().enumerate() {
+                for a in 0..factor.ncols() {
+                    for i in 0..inputs.ncols() {
+                        total += (cotangent[[row, j * RANK + a]]
+                            * moments[[row, j]]
+                            * inputs[[row, i]]
+                            * factor[[i, a]])
+                            .abs();
+                    }
+                }
+            }
+        }
+        total
+    }
+
+    #[test]
+    fn block_design_adjoint_pulls_back_moments_inputs_and_right_factors_exactly() {
+        let data = fixture(&SUFFICIENCY_MASKS, generic_right_factors());
+        let right = data.right_views();
+        let rows = data.moments.nrows();
+        let cotangent = design_cotangent(rows, BASIS * RANK);
+        let adjoint =
+            block_design_adjoint(cotangent.view(), data.moments.view(), data.inputs.view(), &right)
+                .expect("a well-shaped cotangent is pulled back");
+        // Every pairing sums n·K·d_in·r monomials G·β·h·R, each with three
+        // multiplications, so every rounding path has depth at most n·K·d_in·r + 3.
+        let growth = accumulation_growth(rows * BASIS * INPUT_DIM * RANK + 3);
+
+        // Moments: X is linear in β, so <G, X(dβ)> = <∂V/∂β, dβ>.
+        let direction_moments =
+            Array2::from_shape_fn((rows, BASIS), |(r, j)| (0.9 * r as f64 + 0.5 * j as f64).cos());
+        let design_side = frobenius(
+            &cotangent,
+            &block_design(direction_moments.view(), data.inputs.view(), &right),
+        );
+        let adjoint_side = frobenius(&adjoint.moments, &direction_moments);
+        let band =
+            2.0 * growth * monomial_absolute_sum(&cotangent, &direction_moments, &data.inputs, &data.right);
+        assert!(
+            (design_side - adjoint_side).abs() <= band,
+            "moments: <G, X(dβ)> = {design_side} vs <∂V/∂β, dβ> = {adjoint_side} beyond the band {band}"
+        );
+        let reversed =
+            Array2::from_shape_fn((rows, BASIS), |(r, j)| adjoint.moments[[r, BASIS - 1 - j]]);
+        assert!(
+            (design_side - frobenius(&reversed, &direction_moments)).abs() > band,
+            "negative control: the moment cotangents in reverse basis order must be refuted"
+        );
+
+        // Inputs: X is linear in h, so <G, X(dh)> = <∂V/∂h, dh>.
+        let direction_inputs = Array2::from_shape_fn((rows, INPUT_DIM), |(r, i)| {
+            (0.4 * r as f64 - 0.7 * i as f64 + 0.1).sin()
+        });
+        let design_side = frobenius(
+            &cotangent,
+            &block_design(data.moments.view(), direction_inputs.view(), &right),
+        );
+        let adjoint_side = frobenius(&adjoint.inputs, &direction_inputs);
+        let band =
+            2.0 * growth * monomial_absolute_sum(&cotangent, &data.moments, &direction_inputs, &data.right);
+        assert!(
+            (design_side - adjoint_side).abs() <= band,
+            "inputs: <G, X(dh)> = {design_side} vs <∂V/∂h, dh> = {adjoint_side} beyond the band {band}"
+        );
+        let unscaled = block_design_adjoint(
+            cotangent.view(),
+            Array2::<f64>::ones((rows, BASIS)).view(),
+            data.inputs.view(),
+            &right,
+        )
+        .expect("a well-shaped cotangent is pulled back");
+        assert!(
+            (design_side - frobenius(&unscaled.inputs, &direction_inputs)).abs() > band,
+            "negative control: an input cotangent that drops the moment scale must be refuted"
+        );
+
+        // Right factors: X is linear in each R_j, so <G, X(dR)> = Σ_j <∂V/∂R_j, dR_j>.
+        let direction_right: Vec<Array2<f64>> = (0..BASIS)
+            .map(|j| {
+                Array2::from_shape_fn((INPUT_DIM, RANK), |(i, a)| {
+                    (0.3 * i as f64 + 1.1 * a as f64 + 0.6 * j as f64).cos()
+                })
+            })
+            .collect();
+        let direction_views: Vec<ArrayView2<'_, f64>> =
+            direction_right.iter().map(|factor| factor.view()).collect();
+        let design_side = frobenius(
+            &cotangent,
+            &block_design(data.moments.view(), data.inputs.view(), &direction_views),
+        );
+        let adjoint_side: f64 = adjoint
+            .right_factors
+            .iter()
+            .zip(&direction_right)
+            .map(|(pullback, direction)| frobenius(pullback, direction))
+            .sum();
+        let band =
+            2.0 * growth * monomial_absolute_sum(&cotangent, &data.moments, &data.inputs, &direction_right);
+        assert!(
+            (design_side - adjoint_side).abs() <= band,
+            "right factors: <G, X(dR)> = {design_side} vs Σ<∂V/∂R_j, dR_j> = {adjoint_side} beyond the \
+             band {band}"
+        );
+        let shifted: f64 = (0..BASIS)
+            .map(|j| frobenius(&adjoint.right_factors[(j + 1) % BASIS], &direction_right[j]))
+            .sum();
+        assert!(
+            (design_side - shifted).abs() > band,
+            "negative control: pairing R_j with the next basis matrix's cotangent must be refuted"
+        );
+    }
+
+    #[test]
+    fn block_design_adjoint_refuses_a_cotangent_of_the_wrong_width() {
+        let data = fixture(&SUFFICIENCY_MASKS, generic_right_factors());
+        let right = data.right_views();
+        let rows = data.moments.nrows();
+        let narrow = design_cotangent(rows, BASIS * RANK - 1);
+        let refused =
+            block_design_adjoint(narrow.view(), data.moments.view(), data.inputs.view(), &right);
+        assert!(
+            matches!(
+                refused,
+                Err(GaussianBlockError::DesignCotangentWidth { columns, expected })
+                    if columns == BASIS * RANK - 1 && expected == BASIS * RANK
+            ),
+            "a cotangent one column short must be refused, got {refused:?}"
+        );
+        // Positive control: the design's own width is admitted.
+        let wide = design_cotangent(rows, BASIS * RANK);
+        let admitted =
+            block_design_adjoint(wide.view(), data.moments.view(), data.inputs.view(), &right);
+        assert!(admitted.is_ok(), "the design's own width must be admitted, got {admitted:?}");
     }
 }
 
