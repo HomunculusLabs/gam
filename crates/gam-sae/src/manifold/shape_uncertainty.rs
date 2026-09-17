@@ -716,7 +716,7 @@ mod robust_shape_band_tests {
     }
 
     fn converged_tiny_state(
-        install: impl FnOnce(&mut SaeManifoldTerm),
+        install: Option<Box<dyn FnOnce(&mut SaeManifoldTerm)>>,
     ) -> (
         SaeManifoldTerm,
         Array2<f64>,
@@ -735,7 +735,9 @@ mod robust_shape_band_tests {
                 *v = -1.0;
             }
         }
-        install(&mut term);
+        if let Some(install) = install {
+            install(&mut term);
+        }
         let (_cost, loss, cache) = term
             .penalized_quasi_laplace_criterion_with_cache(
                 target.view(),
@@ -928,7 +930,7 @@ mod robust_shape_band_tests {
 
     #[test]
     fn robust_shape_band_matches_finite_difference_row_sandwich() {
-        let (term, target, rho, cache, dispersion) = converged_tiny_state(|_| {});
+        let (term, target, rho, cache, dispersion) = converged_tiny_state(None);
         assert_robust_band_matches_oracle(&term, target.view(), &rho, &cache, dispersion);
     }
 
@@ -936,7 +938,7 @@ mod robust_shape_band_tests {
     /// the score contracts `w_i M_i r_i`, which couples output channels.
     #[test]
     fn weighted_whitened_robust_shape_band_matches_finite_difference_row_sandwich() {
-        let (term, target, rho, cache, dispersion) = converged_tiny_state(|term| {
+        let (term, target, rho, cache, dispersion) = converged_tiny_state(Some(Box::new(|term: &mut SaeManifoldTerm| {
             let n = term.n_obs();
             let p = term.output_dim();
             term.set_row_loss_weights((0..n).map(|row| 0.5 + 0.5 * (row % 4) as f64).collect())
@@ -957,7 +959,7 @@ mod robust_shape_band_tests {
                     .expect("whitening metric"),
             )
             .expect("metric matches the term");
-        });
+        })));
         assert_robust_band_matches_oracle(&term, target.view(), &rho, &cache, dispersion);
     }
 
