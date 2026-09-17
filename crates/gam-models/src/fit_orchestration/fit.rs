@@ -3229,31 +3229,22 @@ pub(crate) fn fit_survival_transformation_model(
             // `λ βᵀSβ`; a non-zero centering would need an offset the survival
             // PenaltyBlock does not model, so such a block is not mis-applied
             // and its columns stay unpenalized.
-            for (penalty_idx, cov_penalty) in covariate_design.penalties.iter().enumerate() {
-                let cr = &cov_penalty.col_range;
-                let block_dim = cr.end - cr.start;
-                let matches_dims = cov_penalty.local.nrows() == block_dim
-                    && cov_penalty.local.ncols() == block_dim;
-                let zero_prior = matches!(
-                    cov_penalty.prior_mean,
-                    gam_problem::CoefficientPriorMean::Zero
-                );
-                if block_dim > 0 && matches_dims && zero_prior && cr.end <= p_cov {
-                    let log_lambda = crate::survival::marginal_slope::block_log_lambda_seeds(
-                        &covariate_design.design,
-                        [&cov_penalty.local],
-                    )?[0];
-                    penalty_blocks.push(PenaltyBlock {
-                        matrix: cov_penalty.local.clone(),
-                        lambda: log_lambda.exp(),
-                        range: (p_time_total + cr.start)..(p_time_total + cr.end),
-                        nullspace_dim: covariate_design
-                            .nullspace_dims
-                            .get(penalty_idx)
-                            .copied()
-                            .unwrap_or(0),
-                    });
-                }
+            for block in crate::survival::covariate_penalty_blocks(
+                &covariate_design.penalties,
+                &covariate_design.nullspace_dims,
+                p_cov,
+                p_time_total,
+            ) {
+                let log_lambda = crate::survival::marginal_slope::block_log_lambda_seeds(
+                    &covariate_design.design,
+                    [block.matrix],
+                )?[0];
+                penalty_blocks.push(PenaltyBlock {
+                    matrix: block.matrix.clone(),
+                    lambda: log_lambda.exp(),
+                    range: block.range,
+                    nullspace_dim: block.nullspace_dim,
+                });
             }
             // The penalty set is exactly the time + covariate smoothing blocks
             // above, every one of them REML-selected. No fixed-λ identity ridge is

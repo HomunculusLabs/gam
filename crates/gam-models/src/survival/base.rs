@@ -136,6 +136,46 @@ pub struct PenaltyBlock {
     pub nullspace_dim: usize,
 }
 
+/// One covariate smoothing block of a flattened survival fit: its local matrix, the joint
+/// coefficient range it penalizes, and its structural nullspace dimension.
+#[derive(Debug, Clone)]
+pub struct CovariatePenaltyBlock<'a> {
+    pub matrix: &'a Array2<f64>,
+    pub range: Range<usize>,
+    pub nullspace_dim: usize,
+}
+
+/// The covariate term collection's smoothing blocks a flattened survival fit penalizes, placed
+/// at `offset + col_range` in the joint coefficient vector: every non-empty block inside the
+/// covariate width whose prior mean is zero. A non-zero centering would need an offset the
+/// survival `PenaltyBlock` does not model, so such a block is not a plain quadratic `λ βᵀSβ` and
+/// is left out. The fit and the saved-model sampler both read the penalty set from here, so a
+/// rebuild carries exactly the covariate blocks the fit optimized, in the fit's order.
+pub fn covariate_penalty_blocks<'a>(
+    penalties: &'a [gam_terms::smooth::BlockwisePenalty],
+    nullspace_dims: &[usize],
+    p_cov: usize,
+    offset: usize,
+) -> Vec<CovariatePenaltyBlock<'a>> {
+    penalties
+        .iter()
+        .enumerate()
+        .filter(|(_, penalty)| {
+            let block_dim = penalty.col_range.len();
+            block_dim > 0
+                && penalty.local.nrows() == block_dim
+                && penalty.local.ncols() == block_dim
+                && matches!(penalty.prior_mean, gam_problem::CoefficientPriorMean::Zero)
+                && penalty.col_range.end <= p_cov
+        })
+        .map(|(penalty_idx, penalty)| CovariatePenaltyBlock {
+            matrix: &penalty.local,
+            range: (offset + penalty.col_range.start)..(offset + penalty.col_range.end),
+            nullspace_dim: nullspace_dims.get(penalty_idx).copied().unwrap_or(0),
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct PenaltyBlocks {
     pub blocks: Vec<PenaltyBlock>,

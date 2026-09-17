@@ -3010,6 +3010,251 @@ mod tests {
     }
 
     #[test]
+    fn survival_hmc_log_posterior_is_the_potential_its_gradient_differentiates_2627() {
+        // NUTS integrates the returned gradient and scores the returned value, so the value
+        // must be the potential the gradient differentiates (#2627). The smoothing prior's
+        // share of the pair is the difference against the same target without the block: a
+        // value `V` and a gradient `g`. The prior `½βᵀS_λβ` is homogeneous of degree two in β,
+        // so Euler's theorem gives `V = ½ βᵀg` exactly, whatever the prior's strength. With a
+        // zero mode and an identity mode Hessian the whitened position is β itself.
+        let age_entry = array![1.0];
+        let age_exit = array![2.0];
+        let event_target = array![1u8];
+        let event_competing = array![0u8];
+        let sampleweight = array![1.0];
+        let x_entry = array![[1.0, 0.2]];
+        let x_exit = array![[1.0, 0.6]];
+        let x_derivative = array![[1.0, 0.0]];
+        let monotonicity = SurvivalMonotonicityPenalty { tolerance: 0.0 };
+        let mode = array![0.0, 0.0];
+        let hessian = Array2::<f64>::eye(2);
+        let block = || gam_models::survival::PenaltyBlock {
+            matrix: array![[1.0]],
+            lambda: 4.0,
+            range: 1..2,
+            nullspace_dim: 0,
+        };
+        let posterior = |blocks: Vec<gam_models::survival::PenaltyBlock>| {
+            super::survival_hmc::SurvivalPosterior::new(
+                age_entry.view(),
+                age_exit.view(),
+                event_target.view(),
+                event_competing.view(),
+                sampleweight.view(),
+                x_entry.view(),
+                x_exit.view(),
+                x_derivative.view(),
+                None,
+                None,
+                None,
+                PenaltyBlocks::new(blocks),
+                monotonicity,
+                SurvivalSpec::Net,
+                false,
+                0,
+                mode.view(),
+                hessian.view(),
+            )
+            .expect("construct survival posterior")
+        };
+        let penalized = posterior(vec![block()]);
+        let unpenalized = posterior(Vec::new());
+
+        let beta = array![1.1, 1.3];
+        let mut grad_penalized = Array1::<f64>::zeros(2);
+        let mut grad_unpenalized = Array1::<f64>::zeros(2);
+        let logp_penalized =
+            HamiltonianTarget::logp_and_grad(&penalized, &beta, &mut grad_penalized);
+        let logp_unpenalized =
+            HamiltonianTarget::logp_and_grad(&unpenalized, &beta, &mut grad_unpenalized);
+        assert!(
+            logp_penalized.is_finite() && logp_unpenalized.is_finite(),
+            "the fixture point must be inside the survival support: {logp_penalized} {logp_unpenalized}"
+        );
+
+        let prior_value = logp_unpenalized - logp_penalized;
+        let prior_gradient = &grad_unpenalized - &grad_penalized;
+        let euler_value = 0.5 * beta.dot(&prior_gradient);
+        // Both targets evaluate the same likelihood pieces at the same β, so the two sides
+        // differ only by the rounding of the operations separating them. The value side
+        // rounds the prior's three products, its subtraction from ℓ and the difference; the
+        // Euler side rounds the penalty gradient's two products, its sum with the score, the
+        // difference and the p-term dot product. The longer chain is p + 4 operations, over
+        // every operand either side touches.
+        let operand_magnitude = logp_penalized.abs()
+            + logp_unpenalized.abs()
+            + prior_value.abs()
+            + 0.5
+                * beta
+                    .iter()
+                    .zip(grad_penalized.iter().zip(grad_unpenalized.iter()))
+                    .map(|(b, (gp, gu))| b.abs() * (gp.abs() + gu.abs()))
+                    .sum::<f64>();
+        // `accumulation_growth(n)` is Wilkinson's `γ_n = n·u / (1 − n·u)`; it carries u itself.
+        let band = gam_linalg::roundoff::accumulation_growth(beta.len() + 4) * operand_magnitude;
+        assert!(
+            band < 0.5 * euler_value.abs(),
+            "the prior's share must dwarf the rounding band, or a factor-two error could hide in it: \
+             band {band:e}, prior {euler_value:e}"
+        );
+        assert!(
+            (prior_value - euler_value).abs() <= band,
+            "the returned value is not the potential the returned gradient differentiates: the \
+             prior contributes {prior_value:e} to the value and ½βᵀg = {euler_value:e} (band {band:e})"
+        );
+
+        // The gradient's prior is the fit's own penalty, `S_λβ` from the saved blocks. The sampled
+        // side rounds the penalty's two products, its sum with the score and the difference; the
+        // fitted side rounds the same two products.
+        let fitted_prior_gradient = PenaltyBlocks::new(vec![block()]).gradient(&beta);
+        let gradient_magnitude = grad_penalized
+            .iter()
+            .chain(grad_unpenalized.iter())
+            .fold(0.0_f64, |acc, v| acc.max(v.abs()));
+        for (sampled, fitted) in prior_gradient.iter().zip(fitted_prior_gradient.iter()) {
+            let gradient_band = gam_linalg::roundoff::accumulation_growth(4)
+                * (gradient_magnitude + fitted.abs());
+            assert!(
+                (sampled - fitted).abs() <= gradient_band,
+                "the sampler's prior gradient {sampled:e} is not the fit's penalty gradient {fitted:e}"
+            );
+        }
+    }
+
+    #[test]
+    fn survival_hmc_log_posterior_value_matches_its_gradient_along_random_directions_2627() {
+        // Along every whitened direction v the derivative of the returned value must be v·g, the
+        // returned gradient: NUTS integrates g and scores the value (#2627). Central differences D
+        // at h and h/2 give the Richardson value D_R = (4·D(h/2) − D(h))/3, whose remainder is
+        // O(h⁴), below the h² term |D(h) − D(h/2)|. Each value is rounded within γ_k times the
+        // absolute sum M of its pieces, so D_R carries at most 3·γ_k·M/h of rounding.
+        // h = u^{1/3} balances that O(u/h) rounding against the O(h²) truncation.
+        use rand::SeedableRng;
+        let age_entry = array![1.0];
+        let age_exit = array![2.0];
+        let event_target = array![1u8];
+        let event_competing = array![0u8];
+        let sampleweight = array![1.0];
+        let x_entry = array![[1.0, 0.2]];
+        let x_exit = array![[1.0, 0.6]];
+        let x_derivative = array![[1.0, 0.0]];
+        let monotonicity = SurvivalMonotonicityPenalty { tolerance: 0.0 };
+        let mode = array![1.0, 1.0];
+        let hessian = array![[2.0, 0.3], [0.3, 1.5]];
+        let block = || gam_models::survival::PenaltyBlock {
+            matrix: array![[1.0]],
+            lambda: 4.0,
+            range: 1..2,
+            nullspace_dim: 0,
+        };
+        let posterior = super::survival_hmc::SurvivalPosterior::new(
+            age_entry.view(),
+            age_exit.view(),
+            event_target.view(),
+            event_competing.view(),
+            sampleweight.view(),
+            x_entry.view(),
+            x_exit.view(),
+            x_derivative.view(),
+            None,
+            None,
+            None,
+            PenaltyBlocks::new(vec![block()]),
+            monotonicity,
+            SurvivalSpec::Net,
+            false,
+            0,
+            mode.view(),
+            hessian.view(),
+        )
+        .expect("construct survival posterior");
+        // The same survival objective, read for the absolute sum of the value's pieces.
+        let objective = gam_models::survival::WorkingModelSurvival::from_engine_inputswith_offsets(
+            gam_models::survival::SurvivalEngineInputs {
+                age_entry: age_entry.view(),
+                age_exit: age_exit.view(),
+                event_target: event_target.view(),
+                event_competing: event_competing.view(),
+                sampleweight: sampleweight.view(),
+                x_entry: x_entry.view(),
+                x_exit: x_exit.view(),
+                x_derivative: x_derivative.view(),
+                monotonicity_constraint_rows: None,
+                monotonicity_constraint_offsets: None,
+            },
+            None,
+            PenaltyBlocks::new(vec![block()]),
+            monotonicity,
+            SurvivalSpec::Net,
+        )
+        .expect("construct survival objective");
+        let chol = posterior.chol().clone();
+        let value_at = |z: &Array1<f64>| -> (f64, f64) {
+            let mut scratch = Array1::<f64>::zeros(2);
+            let value = HamiltonianTarget::logp_and_grad(&posterior, z, &mut scratch);
+            let state = objective
+                .update_state(&(&mode + &chol.dot(z)))
+                .expect("the fixture point lies inside the survival support");
+            (value, 0.5 * state.deviance_magnitude + 0.5 * state.penalty_term)
+        };
+
+        let z0 = array![0.1, -0.05];
+        let mut grad0 = Array1::<f64>::zeros(2);
+        let logp0 = HamiltonianTarget::logp_and_grad(&posterior, &z0, &mut grad0);
+        assert!(
+            logp0.is_finite() && grad0.iter().all(|v| v.is_finite()),
+            "the fixture point must be inside the survival support: {logp0} {grad0}"
+        );
+        let beta0 = &mode + &chol.dot(&z0);
+        // A prior counted twice in the value makes its derivative exceed v·g by v·Lᵀ(S_λβ); the
+        // direction along Lᵀ(S_λβ) carries that gap undiluted, and seeded random directions follow.
+        let prior_gradient = chol.t().dot(&PenaltyBlocks::new(vec![block()]).gradient(&beta0));
+        let prior_gap = prior_gradient.dot(&prior_gradient).sqrt();
+        let mut directions = vec![&prior_gradient / prior_gap];
+        let mut rng = rand::rngs::StdRng::seed_from_u64(2627);
+        for _ in 0..3 {
+            let raw = Array1::from_shape_fn(2, |_| super::sample_standard_normal(&mut rng));
+            directions.push(&raw / raw.dot(&raw).sqrt());
+        }
+        // One evaluation rounds, per row, three predictor products of p terms and an offset, the
+        // interval's two exponentials and their difference, the event's logarithm and sum; then
+        // the whitening product, the prior's three products and the final subtraction.
+        let rows = age_exit.len();
+        let p = mode.len();
+        let growth = gam_linalg::roundoff::accumulation_growth(rows * (3 * (p + 1) + 5) + p + 4);
+        let h = gam_linalg::roundoff::UNIT_ROUNDOFF.cbrt();
+
+        for (index, v) in directions.iter().enumerate() {
+            let at = |step: f64| value_at(&(&z0 + &(step * v)));
+            let (plus_h, magnitude_plus_h) = at(h);
+            let (minus_h, magnitude_minus_h) = at(-h);
+            let (plus_half, magnitude_plus_half) = at(0.5 * h);
+            let (minus_half, magnitude_minus_half) = at(-0.5 * h);
+            let coarse = (plus_h - minus_h) / (2.0 * h);
+            let fine = (plus_half - minus_half) / h;
+            let richardson = (4.0 * fine - coarse) / 3.0;
+            let magnitude = magnitude_plus_h
+                .max(magnitude_minus_h)
+                .max(magnitude_plus_half)
+                .max(magnitude_minus_half);
+            let band = (coarse - fine).abs() + 3.0 * growth * magnitude / h;
+            let directional = v.dot(&grad0);
+            if index == 0 {
+                assert!(
+                    band < 0.5 * prior_gap,
+                    "the band must stay below the doubled prior's gap along Lᵀ(S_λβ), or that \
+                     defect could hide in it: band {band:e}, gap {prior_gap:e}"
+                );
+            }
+            assert!(
+                (richardson - directional).abs() <= band,
+                "direction {index}: the returned value's derivative {richardson:e} is not the \
+                 returned gradient's v·g {directional:e} (band {band:e})"
+            );
+        }
+    }
+
+    #[test]
     fn survival_hmc_fallback_barrier_rejects_offsets_below_monotonicity_threshold() {
         let age_entry = array![1.0];
         let age_exit = array![2.0];
@@ -5696,7 +5941,11 @@ mod survival_hmc {
                 .base_model
                 .update_state(&sampler_position)
                 .map_err(|e| format!("Survival state update failed: {:?}", e))?;
-            let logp = state.log_likelihood - state.penalty_term;
+            // `penalty_term` is the full quadratic form `βᵀS_λβ` (the WorkingState
+            // contract, #2301). The prior's potential is half of it, the energy whose
+            // gradient `S_λβ` enters `state.gradient`, so the value and the gradient
+            // NUTS integrates describe one Hamiltonian (#2627).
+            let logp = state.log_likelihood - 0.5 * state.penalty_term;
             let grad_beta = state.gradient.mapv(|g| -g);
             fast_av_into(&self.chol_t, &grad_beta, grad);
             Ok(logp)

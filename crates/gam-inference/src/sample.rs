@@ -41,6 +41,7 @@ use gam_models::survival::predict::{
 use gam_models::survival::royston_parmar::{self, RoystonParmarInputs};
 use gam_models::survival::{
     PenaltyBlock, PenaltyBlocks, SurvivalMonotonicityPenalty, SurvivalSpec,
+    covariate_penalty_blocks,
 };
 use gam_models::wiggle::{buildwiggle_block_input_from_orders, split_wiggle_penalty_orders};
 use gam_problem::types::{LikelihoodSpec, ResponseFamily};
@@ -1461,6 +1462,18 @@ fn sample_survival(
             .slice_mut(s![.., cov_range.clone()])
             .assign(&x_entry.slice(s![.., cov_range]));
     }
+    // The covariate collection's smoothing blocks at the joint range the fit stacked the covariate
+    // columns at. The fit penalizes them after the time stack, so they follow the time and
+    // timewiggle blocks below.
+    let covariate_penalty_specs: Vec<_> = covariate_penalty_blocks(
+        &cov_design.penalties,
+        &cov_design.nullspace_dims,
+        p_cov,
+        p_time + p_timewiggle,
+    )
+    .into_iter()
+    .map(|block| (block.matrix.clone(), block.range, block.nullspace_dim))
+    .collect();
     // The final assembly now owns every covariate column needed by sampling.
     // Release the rebuilt term collection before allocating model-owned copies.
     drop(cov_design);
@@ -1526,6 +1539,7 @@ fn sample_survival(
             }
         }
     }
+    penalty_specs.extend(covariate_penalty_specs);
     // Wiggle columns and their penalty blocks have been copied into their final
     // owners; the three source matrices must not overlap the sampler copies.
     drop(saved_timewiggle);
