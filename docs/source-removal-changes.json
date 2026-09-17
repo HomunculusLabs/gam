@@ -128,7 +128,7 @@
     "evidence": "Read-only source report https://github.com/SauersML/gam/actions/runs/34631844294 compares immutable base 994668d561f1c71d075ad388974e86aed7f4b971 with e6b2b97539c74ebdb62d86db29154165b077601a. Native acceptance https://github.com/SauersML/gam/actions/runs/34631210886 passes recipe fitting, frozen CTN attachment, explicit transform/outcome equivalence, save/load, row order, batching and finite monotone survival at f4fbeae8929183c3ef4acfd75113bee73ddf4418 in 3.42 seconds. tests/test_ctn_predictor_native.py replaces Python-only composition mocks; inference/ctn.rs adds group/fold/schema tests. The latest structural-validation changes are checked separately; no orthogonality, clustered-PC convergence, or AoU success is asserted."
   },
   {
-    "base": "5e559abe4630fcda15e2e1ea7dfde6307f2eb698",
+    "base": "74804405cbd4f94f5a87069dfc1fb20f7a4419b7",
     "items": [
       "crates/gam-sae/src/inference/steering.rs:fn:record_readout_probe",
       "crates/gam-sae/src/inference/steering.rs:struct:TargetDoseConfig",
