@@ -1375,6 +1375,12 @@ fn banned_substrings() -> &'static [(&'static str, &'static str, bool)] {
         // the same panic family — propagate via `Result` or restructure so
         // the impossible branch is not expressible.
         ("unreachable!(", "unreachable!", true),
+        // faer's high-level sparse Cholesky reads faer's process-global
+        // parallelism, whose default is the calling pool's width, and its
+        // words change with that degree (#2627, job 1149501). Sparse SPD
+        // systems factor and solve through `gam_linalg::sparse_exact`, whose
+        // simplicial factor takes no degree. Banned everywhere.
+        ("sp_cholesky(", "sp_cholesky (faer's global-degree sparse LLT)", false),
         // Direct panics are handled by `scan_for_panic_without_safety`
         // (a dedicated scanner that requires a `// SAFETY:` justification
         // for non-test panics), not by the lexical substring ban.
@@ -1620,6 +1626,11 @@ fn enforce_banned_substring_matcher_invariants() {
     ));
     assert!(line_has_banned_code_fragment("print!(\"x\")", "print!("));
     assert!(!line_has_banned_code_fragment("eprint!(\"x\")", "print!("));
+    assert!(line_has_banned_code_fragment(
+        "h_upper.as_ref().sp_cholesky(Side::Upper)",
+        "sp_cholesky("
+    ));
+    assert!(!line_has_banned_code_fragment("self.my_sp_cholesky(h)", "sp_cholesky("));
 }
 
 /// Join the stripped lines into a single code stream with every run of

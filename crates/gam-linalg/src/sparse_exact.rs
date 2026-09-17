@@ -1,8 +1,5 @@
 use crate::LinalgError;
-use crate::faer_ndarray::{FaerArrayView, FaerColView};
 use faer::Side;
-use faer::linalg::solvers::Solve;
-use faer::sparse::linalg::solvers::Llt as SparseLlt;
 use faer::sparse::{SparseColMat, SymbolicSparseColMat, Triplet};
 use ndarray::{Array1, Array2, ArrayBase, ArrayView2, Data, Ix1, Ix2};
 use rayon::prelude::*;
@@ -19,7 +16,6 @@ macro_rules! bail_invalid_linalg {
 
 #[derive(Clone)]
 pub struct SparseExactFactor {
-    factor: SparseLlt<usize, f64>,
     simplicial: Arc<SimplicialFactor>,
     n: usize,
     logdet: f64,
@@ -197,14 +193,11 @@ pub fn factorize_sparse_spd(
     let t_start = std::time::Instant::now();
     let n_input = h.ncols();
     let h_upper = canonicalize_sparse_symmetric_upper(h)?;
-    let factor = h_upper.as_ref().sp_cholesky(Side::Upper).map_err(|_| {
-        LinalgError::ModelIsIllConditioned {
-            condition_number: f64::INFINITY,
-        }
-    })?;
-    // Keep an explicit simplicial LLᵀ factor in addition to faer's solver
-    // object. The raw L is needed by callers that must reconstruct H in a
-    // changed basis, such as active-constraint tangent projection.
+    // One explicit simplicial LLᵀ factor serves every solve, the log
+    // determinant and the callers that must reconstruct H in a changed basis
+    // (active-constraint tangent projection). Its numeric factorization and
+    // triangular solves take no parallelism degree, so their words do not
+    // depend on the pool width (#2627).
     let simplicial = factorize_simplicial_canonical_upper(&h_upper)?;
     let logdet = simplicial.logdet;
     let elapsed_ms = t_start.elapsed().as_secs_f64() * 1000.0;
@@ -216,7 +209,6 @@ pub fn factorize_sparse_spd(
         );
     }
     Ok(SparseExactFactor {
-        factor,
         simplicial: Arc::new(simplicial),
         n: h_upper.ncols(),
         logdet,
@@ -267,11 +259,6 @@ pub fn factorize_sparse_spd_strict(
         }
     }
 
-    let factor = h_upper.as_ref().sp_cholesky(Side::Upper).map_err(|_| {
-        LinalgError::ModelIsIllConditioned {
-            condition_number: f64::INFINITY,
-        }
-    })?;
     let simplicial = factorize_simplicial_canonical_upper(h_upper)?;
     // Each Schur-complement pivot forms a length-n dot product and subtracts
     // it: at most 2n rounded operations, hence Wilkinson's gamma_(2n). The
@@ -297,7 +284,6 @@ pub fn factorize_sparse_spd_strict(
     }
     let logdet = simplicial.logdet;
     Ok(SparseExactFactor {
-        factor,
         simplicial: Arc::new(simplicial),
         n: h_upper.ncols(),
         logdet,
@@ -457,10 +443,19 @@ where
     I: IntoIterator<Item = (usize, usize)>,
     F: FnMut(&mut R, usize, usize, f64),
 {
-    let rhsview = FaerArrayView::new(&rhs);
-    let solved = factor.factor.solve(rhsview.as_ref());
+    let mut solved = rhs.to_owned();
+    let mut column = vec![0.0; factor.n];
+    for mut target in solved.columns_mut() {
+        for (entry, value) in column.iter_mut().zip(target.iter()) {
+            *entry = *value;
+        }
+        factor.simplicial.solve_in_place(&mut column);
+        for (value, entry) in target.iter_mut().zip(column.iter()) {
+            *value = *entry;
+        }
+    }
     for (row, col) in indices {
-        let value = solved[(row, col)];
+        let value = solved[[row, col]];
         if !value.is_finite() {
             bail_invalid_linalg!("{}", non_finite_message.to_string());
         }
@@ -514,10 +509,10 @@ where
             factor.n
         );
     }
-    let rhsview = FaerColView::new(rhs);
-    let solved = factor.factor.solve(rhsview.as_ref());
+    let mut solved = rhs.to_vec();
+    factor.simplicial.solve_in_place(&mut solved);
     for i in 0..factor.n {
-        let value = solved[(i, 0)];
+        let value = solved[i];
         if !value.is_finite() {
             bail_invalid_linalg!("sparse SPD solve produced non-finite values");
         }
@@ -854,6 +849,37 @@ fn factorize_simplicial_canonical_upper(
 }
 
 impl SimplicialFactor {
+    /// `rhs ← H⁻¹ rhs` through `P H Pᵀ = L Lᵀ` (`perm_inv[original] = permuted`,
+    /// each column of `L` storing its diagonal first): a forward solve over the
+    /// columns of `L`, then a backward solve over the same columns. Sequential
+    /// by construction, so the words do not depend on the pool width.
+    fn solve_in_place(&self, rhs: &mut [f64]) {
+        let n = self.n;
+        let mut permuted = vec![0.0; n];
+        for (original, value) in rhs.iter().enumerate() {
+            permuted[self.perm_inv[original]] = *value;
+        }
+        for j in 0..n {
+            let start = self.l_col_ptr[j];
+            permuted[j] /= self.l_values[start];
+            let pivot = permuted[j];
+            for idx in start + 1..self.l_col_ptr[j + 1] {
+                permuted[self.l_row_idx[idx]] -= self.l_values[idx] * pivot;
+            }
+        }
+        for j in (0..n).rev() {
+            let start = self.l_col_ptr[j];
+            let mut sum = permuted[j];
+            for idx in start + 1..self.l_col_ptr[j + 1] {
+                sum -= self.l_values[idx] * permuted[self.l_row_idx[idx]];
+            }
+            permuted[j] = sum / self.l_values[start];
+        }
+        for (original, value) in rhs.iter_mut().enumerate() {
+            *value = permuted[self.perm_inv[original]];
+        }
+    }
+
     /// Reconstruct the original-order dense SPD matrix represented by this
     /// permuted sparse Cholesky factor.
     ///
@@ -1206,6 +1232,108 @@ mod tests {
     }
 
     // ── solve_sparse_spd / logdet_from_factor ─────────────────────────────
+
+    /// The sparse SPD solve's words do not depend on the pool width, and the
+    /// solution meets its system to roundoff, on two 3D Laplacians and a
+    /// penalized spline normal system. Before the solve went through the explicit
+    /// simplicial factor, faer's high-level sparse LLT read the process-global
+    /// degree, so pools of different width gave different words (#2627, job
+    /// 1149501).
+    #[test]
+    fn sparse_spd_solve_words_do_not_depend_on_the_pool_width_2627() {
+        let laplacian = |side: usize| {
+            let index = |i: usize, j: usize, k: usize| (i * side + j) * side + k;
+            let n = side * side * side;
+            let mut triplets = Vec::new();
+            for i in 0..side {
+                for j in 0..side {
+                    for k in 0..side {
+                        let row = index(i, j, k);
+                        triplets.push(Triplet::new(row, row, 6.1));
+                        for neighbour in [
+                            (i + 1 < side).then(|| index(i + 1, j, k)),
+                            (j + 1 < side).then(|| index(i, j + 1, k)),
+                            (k + 1 < side).then(|| index(i, j, k + 1)),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        {
+                            triplets.push(Triplet::new(row.min(neighbour), row.max(neighbour), -1.0));
+                        }
+                    }
+                }
+            }
+            SparseColMat::try_new_from_triplets(n, n, &triplets).expect("laplacian")
+        };
+        // `XᵀWX + λDᵀD` for a cubic B-spline basis (four nonzeros per row) over
+        // 400 coefficients and 5000 weighted rows, with a second-difference
+        // penalty: the banded shape a penalized spline's PIRLS system has.
+        let spline = {
+            let (rows, p) = (5000usize, 400usize);
+            let mut h = Array2::<f64>::zeros((p, p));
+            for r in 0..rows {
+                let position = r as f64 * (p - 3) as f64 / rows as f64;
+                let knot = (position.floor() as usize).min(p - 4);
+                let u = position - knot as f64;
+                let basis = [
+                    (1.0 - u).powi(3) / 6.0,
+                    (3.0 * u.powi(3) - 6.0 * u * u + 4.0) / 6.0,
+                    (-3.0 * u.powi(3) + 3.0 * u * u + 3.0 * u + 1.0) / 6.0,
+                    u.powi(3) / 6.0,
+                ];
+                let weight = 0.5 + ((r % 7) as f64) / 7.0;
+                for (k, bk) in basis.iter().enumerate() {
+                    for (l, bl) in basis.iter().enumerate() {
+                        h[[knot + k, knot + l]] += weight * bk * bl;
+                    }
+                }
+            }
+            for j in 0..p - 2 {
+                let difference = [1.0, -2.0, 1.0];
+                for (a, da) in difference.iter().enumerate() {
+                    for (b, db) in difference.iter().enumerate() {
+                        h[[j + a, j + b]] += 1e-2 * da * db;
+                    }
+                }
+            }
+            dense_to_sparse_symmetric_upper(&h, 0.0).expect("spline normal system")
+        };
+        for (label, h) in [("laplacian side 12", laplacian(12)), ("laplacian side 20", laplacian(20)), ("spline normal system", spline)] {
+            let n = h.nrows();
+            let rhs = Array1::from_iter((0..n).map(|i| ((i % 13) as f64) - 6.0));
+            let words = |width: usize| {
+                let pool = rayon::ThreadPoolBuilder::new().num_threads(width).build().expect("pool");
+                pool.install(|| {
+                    let factor = factorize_sparse_spd(&h).expect("factor");
+                    solve_sparse_spd(&factor, &rhs).expect("solve")
+                })
+            };
+            let single = words(1);
+            let wide = words(4);
+            assert!(
+                single.iter().zip(wide.iter()).all(|(a, b)| a.to_bits() == b.to_bits()),
+                "{label}: pools of width 1 and 4 gave different words"
+            );
+            let upper = canonicalize_sparse_symmetric_upper(&h).expect("upper");
+            let residual = sparse_symmetric_upper_matvec_public(&upper, &single) - &rhs;
+            let worst = residual.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+            let (symbolic, values) = upper.parts();
+            let mut row_sums = vec![0.0_f64; n];
+            for col in 0..n {
+                for idx in symbolic.col_ptr()[col]..symbolic.col_ptr()[col + 1] {
+                    let row = symbolic.row_idx()[idx];
+                    row_sums[row] += values[idx].abs();
+                    if row != col {
+                        row_sums[col] += values[idx].abs();
+                    }
+                }
+            }
+            let h_norm = row_sums.iter().copied().fold(0.0_f64, f64::max);
+            let x_norm = single.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+            let scale = h_norm * x_norm + 6.0;
+            assert!(worst <= 1e-12 * scale, "{label}: residual {worst} against scale {scale}");
+        }
+    }
 
     #[test]
     fn solve_sparse_spd_recovers_known_solution() {
