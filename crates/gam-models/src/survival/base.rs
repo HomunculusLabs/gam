@@ -1689,16 +1689,17 @@ impl WorkingModelSurvival {
     }
 
     /// Per-row rounding bands of the three linear predictors at `beta`:
-    /// `(exit, entry, derivative)`, each `γ_{p+1}·u·(Σ_j |x_ij·β_j| + |offset_i|)`
+    /// `(exit, entry, derivative)`, each `γ_{p+1}·(Σ_j |x_ij·β_j| + |offset_i|)`
     /// — the accumulated rounding of the dot product and its offset, the
     /// quantity every monotonicity and increment guard below is stated
-    /// against. One `O(n·p)` pass per state evaluation, the cost of one more
-    /// design product.
+    /// against. `γ_{p+1} = (p+1)·u/(1−(p+1)·u)` already carries the unit
+    /// roundoff; multiplying it by `u` again made every band `~u²·magnitude`,
+    /// so each guard compared against zero. One `O(n·p)` pass per state
+    /// evaluation, the cost of one more design product.
     fn predictor_bands(&self, beta: &Array1<f64>) -> (Array1<f64>, Array1<f64>, Array1<f64>) {
         let n = self.nrows();
         let p = self.coefficient_dim();
-        let growth = gam_linalg::roundoff::accumulation_growth(p + 1)
-            * gam_linalg::roundoff::UNIT_ROUNDOFF;
+        let growth = gam_linalg::roundoff::accumulation_growth(p + 1);
         let mut exit = Array1::<f64>::zeros(n);
         let mut entry = Array1::<f64>::zeros(n);
         let mut derivative = Array1::<f64>::zeros(n);
@@ -3561,7 +3562,7 @@ impl PirlsWorkingModel for WorkingModelSurvival {
     /// `Observed` is the exact Hessian of the penalized negative log-likelihood,
     /// the matrix the LAML criterion's `log|H|` is taken of. It is refused — so
     /// the inner loop steps on `Fisher` — when it is not positive definite to
-    /// within its own rounding band (`γ_p·u·‖H‖₂`): a Newton direction on an
+    /// within its own rounding band (`γ_p·‖H‖₂`, [`observed_information_band`]): a Newton direction on an
     /// indefinite matrix is not a descent direction, and a heterogeneous-entry
     /// Weibull cohort spent the whole 400-iteration budget on damped non-steps
     /// at `|g| ≈ 1.3` on every seed.
@@ -3593,10 +3594,7 @@ impl PirlsWorkingModel for WorkingModelSurvival {
                     "survival observed information eigendecomposition failed: {error:?}"
                 ))
             })?;
-        let spectral_radius = eigenvalues.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
-        let band = gam_linalg::roundoff::accumulation_growth(dense.nrows())
-            * gam_linalg::roundoff::UNIT_ROUNDOFF
-            * spectral_radius;
+        let band = observed_information_band(dense.nrows(), &eigenvalues);
         let min_eig = eigenvalues.iter().copied().fold(f64::INFINITY, f64::min);
         match curvature {
             gam_solve::pirls::HessianCurvatureKind::Observed => {
@@ -3616,6 +3614,16 @@ impl PirlsWorkingModel for WorkingModelSurvival {
             }
         }
     }
+}
+
+/// The rounding band of the eigenvalues of a symmetric `n×n` observed information:
+/// `γ_n·‖H‖₂`, with `‖H‖₂` the spectral radius. An eigenvalue inside `±band` is
+/// indistinguishable from zero in the arithmetic that formed the matrix. `γ_n` already
+/// carries the unit roundoff; this band used to multiply it by `u` a second time, so it
+/// was `~u²·ρ` and refused informations whose most negative eigenvalue was rounding.
+fn observed_information_band(dimension: usize, eigenvalues: &Array1<f64>) -> f64 {
+    let spectral_radius = eigenvalues.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
+    gam_linalg::roundoff::accumulation_growth(dimension) * spectral_radius
 }
 
 #[cfg(test)]
@@ -5010,6 +5018,107 @@ mod tests {
             err.to_string()
                 .contains("structural monotonicity requires nonnegative derivative offsets"),
             "unexpected error: {err}"
+        );
+    }
+
+    /// The predictor rounding bands are `γ_{p+1}·magnitude`, the Higham bound of a
+    /// length-`p` dot product plus its offset. They used to multiply `γ_{p+1}` by `u`
+    /// a second time, so every band was `~u²·magnitude` and each monotonicity and
+    /// increment guard compared against zero.
+    #[test]
+    fn predictor_bands_are_the_accumulation_growth_of_the_predictor_magnitude() {
+        // p = 2 columns, row magnitudes exact in binary:
+        //   exit  |3·10| + |−4·5| + |7|  = 57
+        //   entry |1·10| + |2·5|  + |−2| = 22
+        //   deriv |1·10| + |0·5|  + |50| = 60
+        let age_entry = array![1.0_f64];
+        let age_exit = array![2.0_f64];
+        let event_target = array![1u8];
+        let event_competing = array![0u8];
+        let sampleweight = array![1.0];
+        let x_entry = array![[1.0, 2.0]];
+        let x_exit = array![[3.0, -4.0]];
+        let x_derivative = array![[1.0, 0.0]];
+        let eta_entry = array![-2.0];
+        let eta_exit = array![7.0];
+        let derivative_exit = array![50.0];
+        let offsets = SurvivalBaselineOffsets {
+            eta_entry: eta_entry.view(),
+            eta_exit: eta_exit.view(),
+            derivative_exit: derivative_exit.view(),
+        };
+        let mut model = survival_model_with_offsets(
+            survival_inputs(
+                &age_entry,
+                &age_exit,
+                &event_target,
+                &event_competing,
+                &sampleweight,
+                &x_entry,
+                &x_exit,
+                &x_derivative,
+            ),
+            Some(offsets),
+            PenaltyBlocks::new(Vec::new()),
+            SurvivalMonotonicityPenalty { tolerance: 0.0 },
+            SurvivalSpec::Net,
+        )
+        .expect("construct structural survival model");
+        model
+            .set_structural_monotonicity(true, 1)
+            .expect("nonnegative derivative design and offsets");
+        let beta = array![10.0, 5.0];
+        let growth = gam_linalg::roundoff::accumulation_growth(3);
+        let (exit, entry, derivative) = model.predictor_bands(&beta);
+        for (label, band, magnitude) in [
+            ("exit", exit[0], 57.0),
+            ("entry", entry[0], 22.0),
+            ("derivative", derivative[0], 60.0),
+        ] {
+            assert!(
+                band >= growth * magnitude && band <= 2.0 * growth * magnitude,
+                "{label} band {band:.3e} must be γ_3·magnitude = {:.3e}",
+                growth * magnitude
+            );
+        }
+        // A structural derivative negative by half the DERIVED band `γ_3·60` is
+        // rounding, so the guard resolves it as a flat baseline. The probe value comes
+        // from the formula, never from the band under test: a band that is too small
+        // would shrink the probe with it and pass.
+        let derived_band = growth * 60.0;
+        assert_eq!(
+            model.stabilized_structural_derivative(-0.5 * derived_band, derivative[0]),
+            Some((derivative[0], 0.0)),
+            "a derivative inside its band must resolve flat"
+        );
+        assert_eq!(
+            model.stabilized_structural_derivative(-2.0 * derived_band, derivative[0]),
+            None,
+            "a derivative beyond its band must still be refused"
+        );
+    }
+
+    /// The observed information is refused only when an eigenvalue is negative beyond
+    /// `γ_n·‖H‖₂`. The band used to carry a second factor of `u` (`~u²·ρ`), which
+    /// refused an information whose most negative eigenvalue was rounding.
+    #[test]
+    fn observed_information_band_resolves_roundoff_level_indefiniteness() {
+        let growth = gam_linalg::roundoff::accumulation_growth(5);
+        let inside = array![1.0, 0.5, 0.2, 0.1, -0.5 * growth];
+        let band = observed_information_band(5, &inside);
+        assert!(
+            band >= growth && band <= 2.0 * growth,
+            "band {band:.3e} must be γ_5·ρ = {growth:.3e} for ρ = 1"
+        );
+        assert!(
+            inside[4] > -band,
+            "λ_min = {:.3e} is rounding inside the band {band:.3e}",
+            inside[4]
+        );
+        let beyond = array![1.0, 0.5, 0.2, 0.1, -2.0 * growth];
+        assert!(
+            !(beyond[4] > -observed_information_band(5, &beyond)),
+            "an eigenvalue beyond the band must still be refused"
         );
     }
 
