@@ -20,6 +20,7 @@ use super::precision::{
     DecodableArtifact, DeclaredPrecision, LatticeCode, PeriodicQuotient, QuotientCode,
     decode_then_evaluate,
 };
+use super::supports::{EvidenceStatus, ExactBasis};
 use gam_linalg::faer_ndarray::{FaerArrayView, col_piv_qr_solve_lstsq};
 use gam_linalg::roundoff::UNIT_ROUNDOFF;
 use ndarray::Array2;
@@ -139,19 +140,37 @@ fn score<A: DecodableArtifact>(
         artifact,
         |decoded| Ok(states.dot(&operator(decoded).t())),
         reference,
-        |images, native| {
-            images
+        |images: &Array2<f64>, native: &Array2<f64>| {
+            let largest = images
                 .iter()
                 .zip(native.iter())
-                .fold(0.0_f64, |largest, (image, target)| largest.max((image - target).abs()))
+                .fold(0.0_f64, |largest, (image, target)| largest.max((image - target).abs()));
+            EvidenceStatus::exact(
+                largest,
+                (UNIT_ROUNDOFF * largest).next_up(),
+                ExactBasis::Exhaustive {
+                    cardinality: STATES as u64,
+                },
+                None::<()>,
+                "the declared cycle states",
+            )
+            .map_err(|error| format!("{error:?}"))
         },
         tolerance,
     )
     .expect("the artifact decodes and evaluates");
+    let EvidenceStatus::Exact {
+        value,
+        numerical_error,
+        ..
+    } = fidelity.status()
+    else {
+        panic!("an exhaustive distortion over the declared states is an exact figure");
+    };
     DecodedArtifactScore {
         code_bits,
-        decoded_distortion: fidelity.distortion,
-        distortion_roundoff: (UNIT_ROUNDOFF * fidelity.distortion).next_up(),
+        decoded_distortion: *value,
+        distortion_roundoff: *numerical_error,
     }
 }
 
