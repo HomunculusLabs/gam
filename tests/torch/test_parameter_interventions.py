@@ -268,6 +268,11 @@ def test_use_sites_are_tensor_returning_reads_in_execution_order() -> None:
         "scale.weight",
         "embed.weight",
     ]
+    # Only the F.linear weights are multiplied by a linear map; the lookup, the
+    # biases and the element-wise scale are stored reads.
+    assert [site.linear for site in sites] == [
+        False, True, False, True, False, True, False, True, False, False, True
+    ]
     embedding, head = _sites_of(sites, "embed.weight")
     assert (embedding.use_site_id, embedding.transposed, embedding.op, embedding.module) == (
         "embed.weight#0",
@@ -297,9 +302,11 @@ def test_a_transpose_view_multiplied_by_matmul_is_an_identity_use_of_the_same_te
     sites = discover_parameter_use_sites(model, _TOKENS)
     # ``x @ W.t()`` applies ``A = W`` in ``y = x · Aᵀ``: the ``.t()`` call implements
     # the read, and the matmul consuming the view decides the orientation.
-    assert [(site.use_site_id, site.transposed, site.op, site.module) for site in sites] == [
-        ("embed.weight#0", False, resolve_name(F.embedding), "embed"),
-        ("embed.weight#1", False, resolve_name(torch.Tensor.t), ""),
+    assert [
+        (site.use_site_id, site.linear, site.transposed, site.op, site.module) for site in sites
+    ] == [
+        ("embed.weight#0", False, False, resolve_name(F.embedding), "embed"),
+        ("embed.weight#1", True, False, resolve_name(torch.Tensor.t), ""),
     ]
     original = _original(model, "embed.weight")
     delta = _ramp((7, 4))
@@ -708,6 +715,7 @@ def test_use_site_orientation_follows_how_the_op_multiplies_the_tensor(
 ) -> None:
     model = _seeded(fixture())
     discovered = {site.use_site_id: site for site in discover_parameter_use_sites(model, _TOKENS)}
+    assert discovered[use_site_id].linear is True
     assert discovered[use_site_id].transposed is transposed
     native = execute_native(model, _TOKENS).values
     cotangent = _ramp(native.shape) - 0.1
@@ -862,8 +870,13 @@ def test_use_cotangents_refuse_what_they_cannot_factor_or_pair() -> None:
         run(sites=("embed.weight#0",))
     with pytest.raises(ValueError, match="has factored cotangent rows"):
         run(sites=("body.0.bias#0",))
-    # A transpose view consumed by a copy is not multiplied by the use.
+    # A transpose view consumed by a copy is not multiplied by the use: discovery
+    # reports a stored read, and a cotangent request refuses.
     copied = _seeded(_TransposeCopied())
+    copied_view = {
+        site.use_site_id: site for site in discover_parameter_use_sites(copied, _TOKENS)
+    }["embed.weight#1"]
+    assert (copied_view.linear, copied_view.transposed) == (False, False)
     with pytest.raises(ValueError, match="reads a transpose view consumed by"):
         run(
             target=copied,

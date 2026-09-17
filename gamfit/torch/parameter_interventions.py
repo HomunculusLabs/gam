@@ -14,8 +14,8 @@ This module only
   exact float64 widening;
 * discovers use sites: within one forward, every torch function call that
   reads a registered parameter and returns a tensor, keyed
-  ``{tensor_id}#{ordinal}`` in execution order, with the orientation of the
-  linear map that multiplies it;
+  ``{tensor_id}#{ordinal}`` in execution order, with whether a linear map
+  multiplies it and, if so, that map's orientation;
 * executes a forward in which a tensor reads ``W + ΔW`` at every use (a global
   edit, which moves every tied use) or at exactly one use site (a use-specific
   edit), at every position or only at declared positions, and returns the
@@ -151,16 +151,21 @@ class ParameterUseSite:
         ``k`` for the ``k``-th (from 0) torch function call in the forward that
         read this tensor and returned a tensor. Calls that return no tensor,
         such as dtype or shape queries, are not uses.
+    linear
+        True when ``F.linear`` or matmul multiplies this read, directly or through
+        its transpose view (followed to the op that consumes the view). False for
+        a read that applies no linear map: an embedding, a bias, an element-wise
+        use, or a view consumed by anything else.
     transposed
-        The orientation of the linear map that multiplies this read. Writing the
-        consuming op as ``y = x · Aᵀ``, True means ``A = Wᵀ`` (``x @ W``,
-        ``F.linear(x, W.t())``) and False means ``A = W`` (``F.linear(x, W)``,
-        ``x @ W.t()``). A transpose view such as ``W.t()`` is how a read is
-        implemented, not the map's orientation, so the op consuming the view
-        decides. A read that no ``F.linear`` or matmul multiplies (an embedding,
-        a bias, an element-wise use) applies no linear map and reports False.
+        Meaningful only when ``linear``: the orientation of the map that
+        multiplies this read. Writing the consuming op as ``y = x · Aᵀ``, True
+        means ``A = Wᵀ`` (``x @ W``, ``F.linear(x, W.t())``) and False means
+        ``A = W`` (``F.linear(x, W)``, ``x @ W.t()``). A transpose view such as
+        ``W.t()`` is how a read is implemented, not the map's orientation, so the
+        op consuming the view decides. A read with ``linear`` False reports False.
     op
-        :func:`torch.overrides.resolve_name` of the function that read it.
+        :func:`torch.overrides.resolve_name` of the function that read it;
+        informative only.
     module
         Qualified name of the innermost executing module (``""`` for the root
         module).
@@ -168,6 +173,7 @@ class ParameterUseSite:
 
     tensor_id: str
     ordinal: int
+    linear: bool
     transposed: bool
     op: str
     module: str
@@ -641,6 +647,7 @@ class _ParameterUseMode(TorchFunctionMode):
             site = ParameterUseSite(
                 tensor_id=tensor_id,
                 ordinal=ordinal,
+                linear=transposes is not None,
                 transposed=bool(transposes),
                 op=op,
                 module=module,
@@ -675,7 +682,7 @@ class _ParameterUseMode(TorchFunctionMode):
             site = self.use_sites[index]
             if transposes is not None:
                 # Multiplying the transpose view flips the orientation of the stored tensor.
-                updated = replace(site, transposed=not transposes)
+                updated = replace(site, linear=True, transposed=not transposes)
                 self.use_sites[index] = updated
                 self.substituted = [updated if entry is site else entry for entry in self.substituted]
                 site = updated
