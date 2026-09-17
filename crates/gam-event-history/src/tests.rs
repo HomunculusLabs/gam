@@ -3101,6 +3101,203 @@ fn terminal_forecasts_match_the_constant_hazard_solution() {
     }
 }
 
+/// The intercept-only competing-risks fit and its fitted rates. The model is
+/// rank zero with constant hazards, so every forecast from it has a closed form
+/// in the fitted rates, to roundoff, at any horizon.
+fn constant_hazard_fit() -> (EventHistoryCohort, EventHistoryFit, Vec<f64>) {
+    let mut cohort = competing_risks_cohort(64);
+    let spec = EventHistorySpec::new(vec![intercept_only_spec()]);
+    let fit = fit_event_history(&mut cohort, &spec).expect("intercept-only fit");
+    assert_eq!(fit.rank(), 0, "the constant-hazard fixture must be rank zero: {:?}", fit.rank_path);
+    let rates = (0..3).map(|d| fit.mark_coefficients(d)[0].exp()).collect();
+    (cohort, fit, rates)
+}
+
+/// A population forecast of the constant-hazard fixture from time zero.
+fn constant_hazard_population(
+    fit: &EventHistoryFit,
+    cohort: &EventHistoryCohort,
+    horizons: &[f64],
+) -> super::forecast::Forecast {
+    population_forecast(
+        fit,
+        cohort,
+        &PopulationForecastRequest {
+            start: 0.0,
+            horizons,
+            future: &[FutureSegment {
+                start: 0.0,
+                covariates: vec![0.0],
+            }],
+            stratum: 0,
+        },
+    )
+    .expect("population forecast")
+}
+
+/// The rounding a closed-form oracle carries: `ε · |value| · depth`, with
+/// `depth` the longest chain of floating-point operations that forms it
+/// (Higham, *Accuracy and Stability*, ch. 3). The forecast route's rounding
+/// is already in its reported error, as every accepted cell's roundoff floor.
+fn oracle_rounding(value: f64, depth: usize) -> f64 {
+    f64::EPSILON * value.abs() * depth as f64
+}
+
+#[test]
+fn a_long_forecast_window_keeps_survival_and_terminal_incidence_summing_to_one() {
+    install_test_logger();
+    let (cohort, fit, rates) = constant_hazard_fit();
+    let total_terminal = rates[0] + rates[1];
+    // The window's integrated terminal hazard is one hundred. The survival
+    // is e^-100 and the terminal incidences carry the rest of the mass.
+    let horizon = 100.0 / total_terminal;
+    let f = constant_hazard_population(&fit, &cohort, &[horizon]);
+    let decrement = -(-100.0_f64).exp_m1();
+    let mass = f.survival[0] + f.expected_counts[[0, 0]] + f.expected_counts[[0, 1]];
+    emit(&format!(
+        "[2963 mass] horizon {horizon:.6} survival {:e} (closed {:e}) terminal {:.12} {:.12} recurrent {:.12} (closed {:.12} {:.12} {:.12}) S+F-1 {:e}",
+        f.survival[0],
+        (-100.0_f64).exp(),
+        f.expected_counts[[0, 0]],
+        f.expected_counts[[0, 1]],
+        f.expected_counts[[0, 2]],
+        rates[0] / total_terminal * decrement,
+        rates[1] / total_terminal * decrement,
+        rates[2] / total_terminal * decrement,
+        mass - 1.0
+    ));
+    // The identity is exact per cell to roundoff. The forecast's checked errors
+    // carry every accepted cell's roundoff floor as well as its gaps, and the
+    // test's own sum adds two operations.
+    let bar = f.survival_error[0]
+        + f.expected_count_errors[[0, 0]]
+        + f.expected_count_errors[[0, 1]]
+        + oracle_rounding(mass, 2);
+    assert!(bar < 1.0, "the checked error {bar} does not resolve a probability");
+    assert!(
+        (mass - 1.0).abs() <= bar,
+        "survival plus terminal incidence at integrated hazard 100 is {mass}, not one within {bar}"
+    );
+    for d in 0..3 {
+        // The terminal incidences share the survival decrement, exact at any
+        // mesh; the recurrent count is a quadrature, within its checked error.
+        // The closed form is five operations deep (exp, add, expm1, div, mul).
+        let closed = rates[d] / total_terminal * decrement;
+        let bar = f.expected_count_errors[[0, d]] + oracle_rounding(closed, 5);
+        assert!(closed > bar, "mark {d}: closed form {closed} is not above its bar {bar}");
+        assert!(
+            (f.expected_counts[[0, d]] - closed).abs() <= bar,
+            "mark {d}: expected count {} vs closed form {closed}, bar {bar}",
+            f.expected_counts[[0, d]]
+        );
+    }
+}
+
+#[test]
+fn reporting_horizons_do_not_change_an_existing_forecast() {
+    install_test_logger();
+    let (cohort, fit, rates) = constant_hazard_fit();
+    let total_terminal = rates[0] + rates[1];
+    let two = [50.0 / total_terminal, 100.0 / total_terminal];
+    let dense: Vec<f64> = (1..=100).map(|k| k as f64 / total_terminal).collect();
+    let alone = constant_hazard_population(&fit, &cohort, &two[..1]);
+    let sparse = constant_hazard_population(&fit, &cohort, &two);
+    let full = constant_hazard_population(&fit, &cohort, &dense);
+    for (i, k) in [(0usize, 49usize), (1, 99)] {
+        emit(&format!(
+            "[2963 horizons] integrated hazard {}: survival {:e} vs {:e}; counts {:?} vs {:?}",
+            k + 1,
+            sparse.survival[i],
+            full.survival[k],
+            sparse.expected_counts.row(i).to_vec(),
+            full.expected_counts.row(k).to_vec()
+        ));
+        // Both requests end at the same horizon, so the window's mesh and the
+        // integration to every shared horizon are one computation, bit for bit.
+        assert_eq!(sparse.survival[i].to_bits(), full.survival[k].to_bits());
+        for d in 0..3 {
+            assert_eq!(
+                sparse.expected_counts[[i, d]].to_bits(),
+                full.expected_counts[[k, d]].to_bits(),
+                "mark {d} at integrated hazard {}: {} with two horizons, {} with one hundred",
+                k + 1,
+                sparse.expected_counts[[i, d]],
+                full.expected_counts[[k, d]]
+            );
+        }
+    }
+    // A window that ends at the shared horizon is a different integration,
+    // and agrees within the two forecasts' checked errors.
+    for d in 0..3 {
+        let bar = alone.expected_count_errors[[0, d]] + full.expected_count_errors[[49, d]];
+        assert!(full.expected_counts[[49, d]] > bar, "mark {d}: count below its bar {bar}");
+        assert!(
+            (alone.expected_counts[[0, d]] - full.expected_counts[[49, d]]).abs() <= bar,
+            "mark {d} at integrated hazard 50: {} alone, {} among one hundred horizons",
+            alone.expected_counts[[0, d]],
+            full.expected_counts[[49, d]]
+        );
+    }
+}
+
+#[test]
+fn constant_hazard_forecasts_are_exact_at_every_horizon() {
+    install_test_logger();
+    let (cohort, fit, rates) = constant_hazard_fit();
+    let total_terminal = rates[0] + rates[1];
+    let censored = cohort
+        .subjects
+        .iter()
+        .find(|s| s.terminal_event(&cohort.mark_kinds).is_none())
+        .expect("a censored subject");
+    // Long windows are the mass test's. Here every compared value stays above
+    // its bar: the magnitude floor a two-route comparison needs.
+    let hazards = [0.5, 2.0, 10.0];
+    let horizons: Vec<f64> = hazards.iter().map(|h| censored.exit + h / total_terminal).collect();
+    let f = forecast(
+        &fit,
+        &cohort,
+        &ForecastRequest {
+            history: censored,
+            horizons: &horizons,
+            future: &[],
+            stratum: 0,
+        },
+    )
+    .expect("forecast");
+    for (i, &h) in horizons.iter().enumerate() {
+        let hazard = total_terminal * (h - censored.exit);
+        let decrement = -(-hazard).exp_m1();
+        emit(&format!(
+            "[2963 exact] integrated hazard {hazard:.6}: survival {:e} (closed {:e}) counts {:?} (closed {:?})",
+            f.survival[i],
+            (-hazard).exp(),
+            f.expected_counts.row(i).to_vec(),
+            (0..3).map(|d| rates[d] / total_terminal * decrement).collect::<Vec<_>>()
+        ));
+        // The closed survival is five operations deep (exp, add, sub, mul, exp),
+        // the closed counts seven (then expm1, div, mul).
+        let survival = (-hazard).exp();
+        let bar = f.survival_error[i] + oracle_rounding(survival, 5);
+        assert!(survival > bar, "survival {survival} is not above its bar {bar}");
+        assert!(
+            (f.survival[i] - survival).abs() <= bar,
+            "survival at integrated hazard {hazard}: {} vs {survival}, bar {bar}",
+            f.survival[i]
+        );
+        for d in 0..3 {
+            let closed = rates[d] / total_terminal * decrement;
+            let bar = f.expected_count_errors[[i, d]] + oracle_rounding(closed, 7);
+            assert!(closed > bar, "mark {d}: closed form {closed} is not above its bar {bar}");
+            assert!(
+                (f.expected_counts[[i, d]] - closed).abs() <= bar,
+                "mark {d} at integrated hazard {hazard}: {} vs closed form {closed}, bar {bar}",
+                f.expected_counts[[i, d]]
+            );
+        }
+    }
+}
+
 #[test]
 fn forecast_probabilities_are_coherent_under_a_latent_state() {
     install_test_logger();

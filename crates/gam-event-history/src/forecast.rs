@@ -17,8 +17,19 @@
 //! Gauss-Legendre integral over the elapsed time up to that point, computed
 //! by its own filter chain from the state at the start of the mesh cell, so
 //! every reported probability is a proper quadrature of a well-defined
-//! integral, and the identity `Σ_{d terminal} F_d(h) = 1 − S(h)` holds to
-//! quadrature accuracy.
+//! integral. The terminal marks share each cell's survival decrement in
+//! proportion to their sub-densities, so survival and terminal incidence are
+//! one evolution and `Σ_{d terminal} F_d(h) = 1 − S(h)` holds to roundoff.
+//!
+//! A window's accuracy is its own, not the fit's. A training certificate
+//! says the fitted coefficients are stationary under refinement; it says
+//! nothing about a different integral over a future window. So the window's
+//! mesh is refined until the time error of what it returns no longer
+//! dominates the other measured components of its error (under a latent
+//! state, the Gauss-Hermite quadrature against its next rung) or its
+//! roundoff, and that total error is returned with it. The horizons are
+//! output times, never mesh breakpoints, so requesting more of them cannot
+//! move a prediction (see `integrator`).
 //!
 //! The same window run from the stationary prior instead of a filtered
 //! state ([`population_forecast`]) gives the lower tiers of the information
@@ -68,7 +79,7 @@
 //! a forecast made at a cutoff sees exactly what was known then and cannot
 //! change when later records are appended.
 
-use super::chain::Grid;
+use super::chain::{GaussHermite, Grid, product_grid_size};
 use super::cohort::{
     CohortNodes, CovariateSegment, EventHistoryCohort, EventHistoryError, MarkKind, SubjectHistory,
     SubjectNodes, cell_rule, expand_nodes, mesh_cells,
@@ -79,6 +90,14 @@ use super::marginal::{
 };
 use gam_terms::smooth::build_term_collection_design;
 use ndarray::{Array2, ArrayView2};
+use std::sync::Arc;
+
+pub(crate) mod integrator;
+
+use integrator::{
+    CellIntegral, CellSums, KilledProcess, KilledRun, RunGaps, coupled, integral_gaps,
+    integrate_window,
+};
 
 /// One piece of a forecast window during which the covariates are
 /// constant: from `start` until the next segment's start (or the last
@@ -139,12 +158,19 @@ pub struct HistoryForecastRequest<'a> {
 
 /// A forecast: per horizon, the probability that no terminal event has
 /// fired, and the expected count of every mark (its cumulative incidence
-/// when terminal, its first-occurrence probability when once-only).
+/// when terminal, its first-occurrence probability when once-only), each
+/// with the numerical error its integration checked.
 #[derive(Clone, Debug)]
 pub struct Forecast {
     pub horizons: Vec<f64>,
     pub survival: Vec<f64>,
     pub expected_counts: Array2<f64>,
+    /// The refinement discrepancies the window's integration accepted,
+    /// accumulated to each horizon: the checked numerical error of
+    /// `survival`.
+    pub survival_error: Vec<f64>,
+    /// The same for every entry of `expected_counts`.
+    pub expected_count_errors: Array2<f64>,
 }
 
 /// The predictive PIT of one spell of a subject's follow-up: from the
@@ -488,7 +514,267 @@ struct Window<'a> {
     label: String,
 }
 
-/// The killed-process integration of one forecast window.
+/// A filtered latent state carried from rule `from` onto rule `to` at the
+/// same centres and scales. The state is the grid's Gaussian envelope times
+/// a polynomial of degree `G − 1` through its nodal values, so its value at
+/// a node `x'` of `to` is `Σ_i L_i(x') e^{x_i² − x'²} α_i` along each axis,
+/// and rule `to` integrates that polynomial against the envelope exactly:
+/// the mass is carried without loss.
+fn resample_state(state: &LatentState, from: &GaussHermite, to: &GaussHermite) -> LatentState {
+    let centres: Vec<f64> = state.grid.axes.iter().map(|axis| axis.mu).collect();
+    let scales: Vec<f64> = state.grid.axes.iter().map(|axis| axis.sigma).collect();
+    let grid = Grid::new(to, &centres, &scales, &0.0);
+    let (source, target) = (from.order, to.order);
+    let mut matrix = vec![0.0; target * source];
+    for (j, &x) in to.nodes.iter().enumerate() {
+        let basis = from.lagrange_basis(&x);
+        for (i, &node) in from.nodes.iter().enumerate() {
+            matrix[j * source + i] = basis[i] * (node * node - x * x).exp();
+        }
+    }
+    let atoms = grid.dimension();
+    let mut values = state.alpha.clone();
+    // Axis by axis: the axes below `axis` are already on `to`, the rest still
+    // on `from`, and axis 0 is the fastest.
+    for axis in 0..atoms {
+        let below = target.pow(axis as u32);
+        let above = source.pow((atoms - axis - 1) as u32);
+        let mut out = vec![0.0; below * target * above];
+        for upper in 0..above {
+            for j in 0..target {
+                for lower in 0..below {
+                    let mut acc = 0.0;
+                    for i in 0..source {
+                        acc += matrix[j * source + i] * values[lower + below * (i + source * upper)];
+                    }
+                    out[lower + below * (j + target * upper)] = acc;
+                }
+            }
+        }
+        values = out;
+    }
+    LatentState {
+        grid,
+        alpha: values,
+        time: state.time,
+    }
+}
+
+/// Refuse a Gauss-Hermite rung whose filter chain over one cell would not
+/// fit this machine's materialisation budget: every node of a chain keeps its
+/// grid weights and its predicted and filtered densities.
+fn chain_fits(order: usize, atoms: usize, chain_nodes: usize) -> Result<(), EventHistoryError> {
+    let points = product_grid_size(order, atoms)?;
+    let bytes = 3.0 * chain_nodes as f64 * points as f64 * std::mem::size_of::<f64>() as f64;
+    let budget = gam_runtime::resource::ResourcePolicy::default_library()
+        .max_single_materialization_bytes as f64;
+    if bytes > budget {
+        return Err(EventHistoryError::NumericalFailure {
+            reason: format!(
+                "measuring a forecast's latent quadrature needs Gauss-Hermite order {order} over {atoms} atoms ({points} grid points), about {:.1} GiB per filter chain, above this machine's {:.1} GiB materialisation budget",
+                bytes / f64::from(1u32 << 30),
+                budget / f64::from(1u32 << 30)
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// The grid-filter engine of a forecast window: the fit, the covariate path
+/// over the window, the latent parameters, the Gauss-Legendre rule per cell,
+/// the Gauss-Hermite rule and its next rung, and the window's killed runs.
+struct WindowIntegrand<'a> {
+    fit: &'a EventHistoryFit,
+    stratum: usize,
+    pseudo: SubjectHistory,
+    table: Array2<f64>,
+    loadings: Vec<f64>,
+    rates: Vec<f64>,
+    gl_nodes: Vec<f64>,
+    gl_weights: Vec<f64>,
+    gh: Arc<GaussHermite>,
+    /// The certificate's next rung `2·order − 1`, against which a latent
+    /// forecast measures its quadrature error; `None` at rank zero.
+    rung: Option<GaussHermite>,
+    runs: Vec<KilledRun>,
+}
+
+impl WindowIntegrand<'_> {
+    /// Every run's cell sums over `[left, right]` from `from` under rule `gh`.
+    /// The survival at every outer node is its own filter chain from the
+    /// cell's start, and every at-risk mark's sub-density
+    /// `S(t) E[λ_d(t) | alive]` is summed on the outer rule.
+    fn cell_under(
+        &self,
+        gh: &GaussHermite,
+        left: f64,
+        right: f64,
+        from: &[Option<LatentState>],
+    ) -> Result<Vec<CellSums<Option<LatentState>>>, EventHistoryError> {
+        let fit = self.fit;
+        let marks = fit.marks();
+        let atoms = fit.rank();
+        let q = self.gl_nodes.len();
+        let outer: Vec<(f64, f64)> = cell_rule(left, right, &self.gl_nodes, &self.gl_weights).collect();
+        let inner: Vec<Vec<(f64, f64)>> = outer
+            .iter()
+            .map(|&(t, _)| cell_rule(left, t, &self.gl_nodes, &self.gl_weights).collect())
+            .collect();
+        // Evaluation points: the outer nodes, then every outer node's own
+        // chronological rule from the cell's start.
+        let times: Vec<f64> = outer.iter().chain(inner.iter().flatten()).map(|&(t, _)| t).collect();
+        let n_cov = self.table.ncols();
+        let mut rows = Array2::<f64>::zeros((times.len(), n_cov + 1));
+        for (i, &t) in times.iter().enumerate() {
+            let row = self.pseudo.covariate_row_at(t, false);
+            for j in 0..n_cov {
+                rows[[i, j]] = self.table[[row, j]];
+            }
+            rows[[i, n_cov]] = t;
+        }
+        let eta0 = node_eta0(fit, rows.view())?;
+        let outer_times: Vec<f64> = times[..q].to_vec();
+        let outer_weights: Vec<f64> = outer.iter().map(|&(_, w)| w).collect();
+        let mut sums = Vec::with_capacity(self.runs.len());
+        for (run, state) in self.runs.iter().zip(from) {
+            let state = state.as_ref();
+            let filter = |times: &[f64], weights: &[f64], eta: &[f64]| -> Result<ForwardPass<f64>, EventHistoryError> {
+                let nodes = future_chain(times, weights, &run.exposed, marks);
+                let normaliser = forecast_normaliser(fit, self.stratum, times)?;
+                forward_filter(
+                    &SubjectInputs {
+                        nodes: &nodes,
+                        eta0: eta,
+                        loadings: &self.loadings,
+                        rates: &self.rates,
+                        time_scale: fit.time_scale,
+                        gh,
+                        continuation_gap: state.map_or(0.0, |s| times[0] - s.time),
+                        designs: None,
+                        log_normaliser: normaliser.as_deref(),
+                    },
+                    state.map(|s| (&s.grid, s.alpha.as_slice())),
+                    &run.exposed,
+                )
+            };
+            let mut sub_densities = vec![0.0; marks];
+            for j in 0..q {
+                let first = q + j * q;
+                let mut chain_times = times[first..first + q].to_vec();
+                let mut chain_weights: Vec<f64> = inner[j].iter().map(|&(_, w)| w).collect();
+                chain_times.push(outer_times[j]);
+                chain_weights.push(0.0);
+                let mut chain_eta = eta0[first * marks..(first + q) * marks].to_vec();
+                chain_eta.extend_from_slice(&eta0[j * marks..(j + 1) * marks]);
+                let pass = filter(&chain_times, &chain_weights, &chain_eta)?;
+                let survival = pass.log_normalisers.iter().sum::<f64>().exp();
+                let at_j = forecast_normaliser(fit, self.stratum, &outer_times[j..j + 1])?;
+                let intensities = expected_intensities(
+                    &pass.grids[q],
+                    &pass.predicted[q],
+                    &eta0[j * marks..(j + 1) * marks],
+                    &self.loadings,
+                    at_j.as_deref(),
+                    marks,
+                    atoms,
+                );
+                for d in 0..marks {
+                    if run.reported[d] || run.exposed[d] {
+                        sub_densities[d] += outer_weights[j] * survival * intensities[d];
+                    }
+                }
+            }
+            // Advance the state across the cell along its own rule.
+            let mut pass = filter(&outer_times, &outer_weights, &eta0[..q * marks])?;
+            sums.push(CellSums {
+                log_decrement: pass.log_normalisers.iter().sum(),
+                sub_densities,
+                state: Some(LatentState {
+                    grid: pass.grids.pop().expect("cell has nodes"),
+                    alpha: pass.alpha.pop().expect("cell has nodes"),
+                    time: outer_times[q - 1],
+                }),
+            });
+        }
+        Ok(sums)
+    }
+}
+
+impl KilledProcess for WindowIntegrand<'_> {
+    type State = Option<LatentState>;
+
+    fn runs(&self) -> &[KilledRun] {
+        &self.runs
+    }
+
+    fn cell(
+        &self,
+        left: f64,
+        right: f64,
+        from: &[Option<LatentState>],
+    ) -> Result<Vec<CellSums<Option<LatentState>>>, EventHistoryError> {
+        self.cell_under(&self.gh, left, right, from)
+    }
+
+    /// The cell under the next Gauss-Hermite rung, from the entering states
+    /// carried onto it: the forecast's latent quadrature error. A static
+    /// factor's continuation grid is measured the same way.
+    fn other_error(
+        &self,
+        left: f64,
+        right: f64,
+        from: &[Option<LatentState>],
+        coarse: &[CellIntegral<Option<LatentState>>],
+    ) -> Result<Option<Vec<RunGaps>>, EventHistoryError> {
+        let Some(rung) = self.rung.as_ref() else {
+            return Ok(None);
+        };
+        let resampled: Vec<Option<LatentState>> = from
+            .iter()
+            .map(|state| state.as_ref().map(|s| resample_state(s, &self.gh, rung)))
+            .collect();
+        // The carried interpolant can go negative beyond the old rule's hull.
+        // A cell under the rung that loses positivity is a failure of the
+        // check itself, which no finer time cell cures, so it is refused as
+        // such rather than read as a coarse cell.
+        let sums = match self.cell_under(rung, left, right, &resampled) {
+            Ok(sums) => sums,
+            Err(EventHistoryError::LostPositivity { reason }) => {
+                return Err(EventHistoryError::NumericalFailure {
+                    reason: format!(
+                        "the forecast's latent quadrature check at Gauss-Hermite order {} lost positivity carrying the state onto that rule: {reason}",
+                        rung.order
+                    ),
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        let refined: Vec<CellIntegral<Option<LatentState>>> = self
+            .runs
+            .iter()
+            .zip(sums)
+            .map(|(run, sums)| coupled(run, sums))
+            .collect();
+        Ok(Some(integral_gaps(coarse, &refined, self.fit.marks())))
+    }
+
+    /// `ε · Λ_G · nodes`. The Gauss-Hermite interpolant amplifies nodal
+    /// roundoff by its Lebesgue constant (the bound the fit's certificate
+    /// reads, taken at the rung, the larger of the two rules compared), over the
+    /// nodes a halved cell's chronology filters. At rank zero nothing is
+    /// interpolated.
+    fn roundoff(&self) -> f64 {
+        let amplification = self.rung.as_ref().map_or(1.0, |rung| rung.lebesgue_constant);
+        f64::EPSILON * amplification * (2 * self.gl_nodes.len() + 1) as f64
+    }
+}
+
+/// The killed-process integration of one forecast window, on the grid
+/// filter under the fit's parameters. The window's level-0 breakpoints are
+/// its start, the covariate path's changes and the last horizon; the mesh,
+/// its acceptance and the horizons are `integrator::integrate_window`'s. The
+/// fit's quadrature order serves only as the rule per cell, and its mesh
+/// refinement not at all.
 fn run_window(window: Window<'_>) -> Result<Forecast, EventHistoryError> {
     let Window {
         fit,
@@ -502,207 +788,83 @@ fn run_window(window: Window<'_>) -> Result<Forecast, EventHistoryError> {
         at_risk,
         label,
     } = window;
-    let at_risk = at_risk.as_slice();
     let marks = fit.marks();
-    let atoms = fit.rank();
     let kinds = &cohort.mark_kinds;
-    let n_cov = cohort.covariates.ncols();
-    let (loadings, rates) = latent_parameters(fit);
-    let last_horizon = horizons[horizons.len() - 1];
-    // Every horizon is a mesh breakpoint, so cell ends land on horizons.
-    let mut segments = segments;
-    for &h in &horizons[..horizons.len() - 1] {
-        if !segments.iter().any(|s| s.start == h) {
-            let row = segments
-                .iter()
-                .rev()
-                .find(|s| s.start <= h)
-                .map(|s| s.row)
-                .expect("a segment starts at the window's start");
-            segments.push(CovariateSegment { start: h, row });
-        }
-    }
-    segments.sort_by(|a, b| a.start.total_cmp(&b.start));
-    let pseudo = SubjectHistory {
-        id: label,
-        entry: start,
-        exit: last_horizon,
-        events: Vec::new(),
-        segments,
-    };
-    let (gl_nodes, gl_weights) = gam_math::special::gauss_legendre(fit.quadrature_order);
-    let cells = mesh_cells(&pseudo, false, fit.mesh_refinement);
-    let q = fit.quadrature_order;
-    // Evaluation points: the outer nodes of every cell, then the inner nodes
-    // of every outer node's own chronological rule from the cell's start.
-    let mut point_times: Vec<f64> = Vec::new();
-    let mut point_rows: Vec<usize> = Vec::new();
-    let mut outer: Vec<Vec<(f64, f64, usize)>> = Vec::with_capacity(cells.len());
-    let mut inner: Vec<Vec<Vec<(f64, f64, usize)>>> = Vec::with_capacity(cells.len());
-    let mut push_point = |t: f64| -> usize {
-        point_times.push(t);
-        point_rows.push(pseudo.covariate_row_at(t, false));
-        point_times.len() - 1
-    };
-    for &(left, right) in &cells {
-        let outer_rule: Vec<(f64, f64)> = cell_rule(left, right, &gl_nodes, &gl_weights).collect();
-        let outer_nodes: Vec<(f64, f64, usize)> = outer_rule
-            .iter()
-            .map(|&(t, w)| (t, w, push_point(t)))
-            .collect();
-        let mut inner_cell = Vec::with_capacity(q);
-        for &(t_j, _, _) in &outer_nodes {
-            let rule: Vec<(f64, f64)> = cell_rule(left, t_j, &gl_nodes, &gl_weights).collect();
-            let chain: Vec<(f64, f64, usize)> =
-                rule.iter().map(|&(s, v)| (s, v, push_point(s))).collect();
-            inner_cell.push(chain);
-        }
-        outer.push(outer_nodes);
-        inner.push(inner_cell);
-    }
-    let mut rows = Array2::<f64>::zeros((point_times.len(), n_cov + 1));
-    for (i, (&t, &row)) in point_times.iter().zip(point_rows.iter()).enumerate() {
-        for j in 0..n_cov {
-            rows[[i, j]] = table[[row, j]];
-        }
-        rows[[i, n_cov]] = t;
-    }
-    let eta0 = node_eta0(fit, rows.view())?;
-    let eta_at = |point: usize| -> &[f64] { &eta0[point * marks..(point + 1) * marks] };
-    let gh = fit.family.gauss_hermite();
-
-    // One killed run under a killing set: the survival at the end of every
-    // cell and the sub-density `m_d(t) = S(t) E[λ_d(t)]` at every outer node.
-    let killed_run = |killing: &[bool]| -> Result<(Vec<f64>, Vec<Vec<f64>>), EventHistoryError> {
-        let exposed: Vec<bool> = (0..marks).map(|d| killing[d] && at_risk[d]).collect();
-        let mut state: Option<LatentState> = initial.cloned();
-        let mut log_s = 0.0_f64;
-        let mut cell_log_s = Vec::with_capacity(cells.len());
-        let mut sub_density: Vec<Vec<f64>> = Vec::with_capacity(cells.len() * q);
-        let filter = |state: &Option<LatentState>,
-                      times: &[f64],
-                      weights: &[f64],
-                      eta: &[f64]|
-         -> Result<ForwardPass<f64>, EventHistoryError> {
-            let nodes = future_chain(times, weights, &exposed, marks);
-            let normaliser = forecast_normaliser(fit, stratum, times)?;
-            forward_filter(
-                &SubjectInputs {
-                    nodes: &nodes,
-                    eta0: eta,
-                    loadings: &loadings,
-                    rates: &rates,
-                    time_scale: fit.time_scale,
-                    gh,
-                    continuation_gap: state.as_ref().map_or(0.0, |s| times[0] - s.time),
-                    designs: None,
-                    log_normaliser: normaliser.as_deref(),
-                },
-                state.as_ref().map(|s| (&s.grid, s.alpha.as_slice())),
-                &exposed,
-            )
-        };
-        for (c, outer_nodes) in outer.iter().enumerate() {
-            for (j, &(t_j, _, point_j)) in outer_nodes.iter().enumerate() {
-                let chain = &inner[c][j];
-                let mut times: Vec<f64> = chain.iter().map(|&(s, _, _)| s).collect();
-                let mut weights: Vec<f64> = chain.iter().map(|&(_, v, _)| v).collect();
-                times.push(t_j);
-                weights.push(0.0);
-                let mut chain_eta = Vec::with_capacity(times.len() * marks);
-                for &(_, _, point) in chain {
-                    chain_eta.extend_from_slice(eta_at(point));
-                }
-                chain_eta.extend_from_slice(eta_at(point_j));
-                let pass = filter(&state, &times, &weights, &chain_eta)?;
-                let log_s_j: f64 = log_s + pass.log_normalisers.iter().sum::<f64>();
-                let last = times.len() - 1;
-                let at_j = forecast_normaliser(fit, stratum, &[t_j])?;
-                let intensities = expected_intensities(
-                    &pass.grids[last],
-                    &pass.predicted[last],
-                    eta_at(point_j),
-                    &loadings,
-                    at_j.as_deref(),
-                    marks,
-                    atoms,
-                );
-                sub_density.push(
-                    (0..marks)
-                        .map(|d| {
-                            if at_risk[d] {
-                                log_s_j.exp() * intensities[d]
-                            } else {
-                                0.0
-                            }
-                        })
-                        .collect(),
-                );
-            }
-            // Advance the state across the cell along its own rule.
-            let times: Vec<f64> = outer_nodes.iter().map(|&(t, _, _)| t).collect();
-            let weights: Vec<f64> = outer_nodes.iter().map(|&(_, w, _)| w).collect();
-            let mut chain_eta = Vec::with_capacity(times.len() * marks);
-            for &(_, _, point) in outer_nodes {
-                chain_eta.extend_from_slice(eta_at(point));
-            }
-            let mut pass = filter(&state, &times, &weights, &chain_eta)?;
-            log_s += pass.log_normalisers.iter().sum::<f64>();
-            state = Some(LatentState {
-                grid: pass.grids.pop().expect("cell has nodes"),
-                alpha: pass.alpha.pop().expect("cell has nodes"),
-                time: times[times.len() - 1],
-            });
-            cell_log_s.push(log_s);
-        }
-        Ok((cell_log_s, sub_density))
-    };
-
     let terminal: Vec<bool> = kinds.iter().map(|k| *k == MarkKind::Terminal).collect();
-    let (cell_log_s, base_density) = killed_run(&terminal)?;
-    // Once-only marks are killed by their own hazard as well.
-    let mut once_density: Vec<Option<Vec<Vec<f64>>>> = vec![None; marks];
+    let mut runs = vec![KilledRun {
+        exposed: (0..marks).map(|d| terminal[d] && at_risk[d]).collect(),
+        reported: (0..marks)
+            .map(|d| at_risk[d] && kinds[d] != MarkKind::Once)
+            .collect(),
+    }];
     for d in 0..marks {
         if kinds[d] == MarkKind::Once && at_risk[d] {
-            let mut killing = terminal.clone();
-            killing[d] = true;
-            once_density[d] = Some(killed_run(&killing)?.1);
+            runs.push(KilledRun {
+                exposed: (0..marks).map(|k| (terminal[k] || k == d) && at_risk[k]).collect(),
+                reported: (0..marks).map(|k| k == d).collect(),
+            });
         }
     }
+    let (loadings, rates) = latent_parameters(fit);
+    let (gl_nodes, gl_weights) = gam_math::special::gauss_legendre(fit.quadrature_order);
+    let gh = Arc::clone(fit.family.gauss_hermite());
+    let rung = if fit.rank() > 0 {
+        let order = 2 * gh.order - 1;
+        chain_fits(order, fit.rank(), fit.quadrature_order + 1)?;
+        Some(GaussHermite::new(order)?)
+    } else {
+        None
+    };
+    let integrand = WindowIntegrand {
+        fit,
+        stratum,
+        pseudo: SubjectHistory {
+            id: label,
+            entry: start,
+            exit: horizons[horizons.len() - 1],
+            events: Vec::new(),
+            segments,
+        },
+        table,
+        loadings,
+        rates,
+        gl_nodes,
+        gl_weights,
+        gh,
+        rung,
+        runs,
+    };
+    let mut breakpoints = vec![start];
+    breakpoints.extend(
+        mesh_cells(&integrand.pseudo, false, 0)
+            .iter()
+            .map(|&(_, right)| right),
+    );
+    let opening = vec![initial.cloned(); integrand.runs.len()];
+    let reached = integrate_window(&integrand, opening, &breakpoints, horizons)?;
     let n_h = horizons.len();
     let mut survival = vec![0.0; n_h];
+    let mut survival_error = vec![0.0; n_h];
     let mut expected = Array2::<f64>::zeros((n_h, marks));
-    let mut counts = vec![0.0; marks];
-    let mut horizon = 0usize;
-    let mut point = 0usize;
-    for (c, &(_, right)) in cells.iter().enumerate() {
-        for &(_, w_j, _) in outer[c].iter() {
+    let mut expected_errors = Array2::<f64>::zeros((n_h, marks));
+    for (i, positions) in reached.iter().enumerate() {
+        survival[i] = positions[0].log_survival.exp();
+        survival_error[i] = positions[0].survival_error;
+        for (run, p) in integrand.runs.iter().zip(positions) {
             for d in 0..marks {
-                let density = match &once_density[d] {
-                    Some(run) => run[point][d],
-                    None => base_density[point][d],
-                };
-                counts[d] += w_j * density;
+                if run.reported[d] {
+                    expected[[i, d]] = p.counts[d];
+                    expected_errors[[i, d]] = p.count_errors[d];
+                }
             }
-            point += 1;
         }
-        if horizon < n_h && right == horizons[horizon] {
-            survival[horizon] = cell_log_s[c].exp();
-            for d in 0..marks {
-                expected[[horizon, d]] = counts[d];
-            }
-            horizon += 1;
-        }
-    }
-    if horizon != n_h {
-        return Err(EventHistoryError::NumericalFailure {
-            reason: format!("forecast mesh reached {horizon} of {n_h} horizons"),
-        });
     }
     Ok(Forecast {
         horizons: horizons.to_vec(),
         survival,
         expected_counts: expected,
+        survival_error,
+        expected_count_errors: expected_errors,
     })
 }
 
@@ -828,6 +990,8 @@ fn forecast_on_table(
             horizons: horizons.to_vec(),
             survival: vec![0.0; horizons.len()],
             expected_counts: Array2::zeros((horizons.len(), marks)),
+            survival_error: vec![0.0; horizons.len()],
+            expected_count_errors: Array2::zeros((horizons.len(), marks)),
         });
     }
     let (loadings, rates) = latent_parameters(fit);
