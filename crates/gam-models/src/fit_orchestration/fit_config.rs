@@ -119,6 +119,19 @@ impl FitConfig {
             .transpose()
     }
 
+    /// Whether this request is a marginal-slope fit, by the predicate
+    /// materialization dispatches on: a survival marginal-slope likelihood, or
+    /// the Bernoulli marginal-slope request `requests_bernoulli_marginal_slope`
+    /// recognizes (an explicit family, `slope_formula`, `z_column` or
+    /// `ctn_stage1`). The latent-measure controls are legal exactly where this
+    /// holds, and it is the materializer's own predicate rather than a copy of
+    /// it, so `resolve` cannot refuse a request the materializer would fit as
+    /// marginal slope (gam#2956).
+    pub(crate) fn requests_marginal_slope(&self) -> bool {
+        self.survival_likelihood.as_deref() == Some("marginal-slope")
+            || super::materialize::requests_bernoulli_marginal_slope(self)
+    }
+
     pub(crate) fn marginal_slope_latent_policy(&self) -> crate::bms::LatentZPolicy {
         let mut policy = crate::bms::LatentZPolicy::default();
         if self.frozen_score {
@@ -179,8 +192,7 @@ impl FitConfig {
         if self.frozen_score
             && (self.z_column.is_none()
                 || self.ctn_stage1.is_some()
-                || !(self.survival_likelihood.as_deref() == Some("marginal-slope")
-                    || self.family.as_deref() == Some("bernoulli-marginal-slope")))
+                || !self.requests_marginal_slope())
         {
             return Err("frozen_score requires a marginal-slope fit with an explicit z_column and no integrated CTN recipe".to_string());
         }
@@ -212,9 +224,7 @@ impl FitConfig {
         }
         if let Some(measure) = self.latent_measure.as_deref() {
             parse_latent_measure_spec(measure)?;
-            if !(self.survival_likelihood.as_deref() == Some("marginal-slope")
-                || self.family.as_deref() == Some("bernoulli-marginal-slope"))
-            {
+            if !self.requests_marginal_slope() {
                 return Err("latent_measure applies to marginal-slope fits only".to_string());
             }
             if self.frozen_score && measure != "standard-normal" {
@@ -314,6 +324,51 @@ mod tests {
             }
             .resolve()
             .is_err()
+        );
+    }
+
+    #[test]
+    fn latent_measure_controls_follow_the_materialization_marginal_slope_predicate_2956() {
+        // With the family left to inference, `slope_formula` and `z_column`
+        // select a Bernoulli marginal-slope fit in materialization, so the
+        // latent-measure controls must resolve on that request.
+        let selected = FitConfig {
+            slope_formula: Some("1".to_string()),
+            z_column: Some("z".to_string()),
+            latent_measure: Some("Global-Empirical".to_string()),
+            ..FitConfig::default()
+        };
+        assert!(super::super::materialize::requests_bernoulli_marginal_slope(&selected));
+        let resolved = selected
+            .resolve()
+            .expect("a z_column-selected marginal-slope fit accepts latent_measure");
+        assert_eq!(resolved.latent_measure.as_deref(), Some("global-empirical"));
+        FitConfig {
+            z_column: Some("z".to_string()),
+            frozen_score: true,
+            ..FitConfig::default()
+        }
+        .resolve()
+        .expect("a z_column-selected marginal-slope fit accepts frozen_score");
+
+        // A request that is not a marginal-slope fit is still refused, by name.
+        let refused = FitConfig {
+            family: Some("gaussian".to_string()),
+            latent_measure: Some("global-empirical".to_string()),
+            ..FitConfig::default()
+        }
+        .resolve()
+        .expect_err("latent_measure outside a marginal-slope fit");
+        assert_eq!(refused, "latent_measure applies to marginal-slope fits only");
+        let refused_frozen = FitConfig {
+            frozen_score: true,
+            ..FitConfig::default()
+        }
+        .resolve()
+        .expect_err("frozen_score outside a marginal-slope fit");
+        assert!(
+            refused_frozen.starts_with("frozen_score requires a marginal-slope fit"),
+            "{refused_frozen}"
         );
     }
 }
