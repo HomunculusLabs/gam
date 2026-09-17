@@ -1979,60 +1979,58 @@ impl SaeManifoldTerm {
         }
 
         // ARD: C_{k,axis} = w_row·max(α cos κt, 0) (periodic) / w_row·α (Euclidean)
-        // on the row-local t-slot for (atom k, axis).
+        // on the row-local t-slot for (atom k, axis). An axis on an embedded sphere
+        // differentiates the row's Riemannian block instead (#2933 F24, see
+        // `ard_sphere_log_precision_derivative`).
         let ard_precisions = self.validated_ard_precisions(rho)?;
         let row_w = self.row_loss_weights.as_deref();
         let coord_offsets = self.assignment.coord_offsets();
         let periods: Vec<Vec<Option<f64>>> = self.all_ard_axis_periods();
+        let sphere_factors = self.all_ard_embedded_sphere_factors();
         for row in 0..self.n_obs() {
             let w_row = row_w.map_or(1.0, |w| w[row]);
             let base = cache.row_offsets[row];
-            match self.last_row_layout {
-                Some(ref layout) => {
-                    for (pos, &kk) in layout.active_atoms[row].iter().enumerate() {
-                        if rho.log_ard[kk].is_empty() {
-                            continue;
-                        }
-                        let start = layout.coord_starts[row][pos];
-                        let coord = &self.assignment.coords[kk];
-                        for axis in 0..coord.latent_dim() {
-                            let alpha = ard_precisions[kk][axis];
-                            let t = coord.row(row)[axis];
-                            let hess = w_row
-                                * ArdAxisPrior::eval(alpha, t, periods[kk][axis])
-                                    .psd_majorizer_hess();
-                            if hess == 0.0 {
-                                continue;
-                            }
-                            let flat = rho.ard_flat_index(kk, axis);
-                            let c = c_by_flat
-                                .entry(flat)
-                                .or_insert_with(|| Array2::<f64>::zeros((dim, dim)));
-                            let g_idx = base + start + axis;
-                            c[[g_idx, g_idx]] += hess;
-                        }
-                    }
+            let q = cache.row_dims[row];
+            let row_atoms: Vec<(usize, usize)> = match self.last_row_layout {
+                Some(ref layout) => layout.active_atoms[row]
+                    .iter()
+                    .copied()
+                    .zip(layout.coord_starts[row].iter().copied())
+                    .collect(),
+                None => (0..self.k_atoms()).map(|kk| (kk, coord_offsets[kk])).collect(),
+            };
+            for (kk, start) in row_atoms {
+                if rho.log_ard[kk].is_empty() {
+                    continue;
                 }
-                None => {
-                    for kk in 0..self.k_atoms() {
-                        if rho.log_ard[kk].is_empty() {
-                            continue;
+                let coord = &self.assignment.coords[kk];
+                let point = coord.row(row);
+                for axis in 0..coord.latent_dim() {
+                    let alpha = ard_precisions[kk][axis];
+                    let prior = ArdAxisPrior::eval(alpha, point[axis], periods[kk][axis]);
+                    let hess = w_row * prior.psd_majorizer_hess();
+                    if hess == 0.0 {
+                        continue;
+                    }
+                    let flat = rho.ard_flat_index(kk, axis);
+                    let c = c_by_flat
+                        .entry(flat)
+                        .or_insert_with(|| Array2::<f64>::zeros((dim, dim)));
+                    match Self::ard_sphere_log_precision_derivative(
+                        &sphere_factors[kk],
+                        point,
+                        axis,
+                        start,
+                        q,
+                        hess,
+                        w_row * prior.grad,
+                    ) {
+                        Some(derivative) => {
+                            let mut block = c.slice_mut(ndarray::s![base..base + q, base..base + q]);
+                            block += &derivative;
                         }
-                        let coord = &self.assignment.coords[kk];
-                        for axis in 0..coord.latent_dim() {
-                            let alpha = ard_precisions[kk][axis];
-                            let t = coord.row(row)[axis];
-                            let hess = w_row
-                                * ArdAxisPrior::eval(alpha, t, periods[kk][axis])
-                                    .psd_majorizer_hess();
-                            if hess == 0.0 {
-                                continue;
-                            }
-                            let flat = rho.ard_flat_index(kk, axis);
-                            let c = c_by_flat
-                                .entry(flat)
-                                .or_insert_with(|| Array2::<f64>::zeros((dim, dim)));
-                            let g_idx = base + coord_offsets[kk] + axis;
+                        None => {
+                            let g_idx = base + start + axis;
                             c[[g_idx, g_idx]] += hess;
                         }
                     }

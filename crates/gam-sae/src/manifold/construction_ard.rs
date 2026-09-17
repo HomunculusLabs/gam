@@ -159,6 +159,97 @@ impl SaeManifoldTerm {
             .collect()
     }
 
+    /// Embedded unit-sphere factors `(offset, dim)` of every atom's coordinate
+    /// block, in the axis order `apply_sae_riemannian_geometry` walks the block's
+    /// manifold, hoisted out of row loops.
+    pub(crate) fn all_ard_embedded_sphere_factors(&self) -> Vec<Vec<(usize, usize)>> {
+        self.assignment
+            .coords
+            .iter()
+            .map(|coord| {
+                let mut factors = Vec::new();
+                Self::collect_embedded_sphere_factors(coord.manifold(), 0, &mut factors);
+                factors
+            })
+            .collect()
+    }
+
+    fn collect_embedded_sphere_factors(
+        manifold: &LatentManifold,
+        offset: usize,
+        factors: &mut Vec<(usize, usize)>,
+    ) {
+        match manifold {
+            LatentManifold::Sphere { dim } => factors.push((offset, *dim)),
+            LatentManifold::Product(parts)
+            | LatentManifold::ProductWithMetric {
+                manifolds: parts, ..
+            } => {
+                let mut part_offset = offset;
+                for part in parts {
+                    Self::collect_embedded_sphere_factors(part, part_offset, factors);
+                    part_offset += part.ambient_dim(1);
+                }
+            }
+            LatentManifold::Euclidean | LatentManifold::Circle { .. } | LatentManifold::Interval { .. } => {}
+        }
+    }
+
+    /// Row-local `∂H_tt/∂log α` of one ARD axis that lies on an embedded unit
+    /// sphere, as the `q×q` block of a row whose atom block starts at
+    /// `block_start`. `None` for an axis on a flat factor (line, circle, interval),
+    /// whose derivative stays the slot entry `curvature·e_s e_sᵀ`.
+    ///
+    /// The assembly writes the ambient prior curvature `h = w·V''` on the axis
+    /// slot and the ambient gradient `g = w·V'` into the row, then converts the row
+    /// to its Riemannian block (`apply_sae_riemannian_geometry`). On a sphere at
+    /// `x`, with `P = I − xxᵀ`, that block is `P H P − (gᵀx)·P + xxᵀ`. Both
+    /// operands are degree one in `α`, so `∂/∂log α_a` is `h·P e_a e_aᵀ P −
+    /// g_a x_a·P`, not the ambient slot `h·e_a e_aᵀ`. The slot adds the normal
+    /// pin's inverse `x_a²` to the trace and drops the connection term (#2933 F24).
+    pub(crate) fn ard_sphere_log_precision_derivative(
+        sphere_factors: &[(usize, usize)],
+        point: &[f64],
+        axis: usize,
+        block_start: usize,
+        q: usize,
+        curvature: f64,
+        gradient: f64,
+    ) -> Option<Array2<f64>> {
+        let (offset, dim) = Self::ard_sphere_factor_containing(sphere_factors, axis)?;
+        let x = &point[offset..offset + dim];
+        let local = axis - offset;
+        let start = block_start + offset;
+        let mut derivative = Array2::<f64>::zeros((q, q));
+        for i in 0..dim {
+            let tangent_i = Self::sphere_tangent_of_axis(x, local, i);
+            for j in 0..dim {
+                let tangent_j = Self::sphere_tangent_of_axis(x, local, j);
+                let projector = (if i == j { 1.0 } else { 0.0 }) - x[i] * x[j];
+                derivative[[start + i, start + j]] =
+                    curvature * tangent_i * tangent_j - gradient * x[local] * projector;
+            }
+        }
+        Some(derivative)
+    }
+
+    /// The embedded unit-sphere factor `(offset, dim)` holding `axis`, if any.
+    pub(crate) fn ard_sphere_factor_containing(
+        sphere_factors: &[(usize, usize)],
+        axis: usize,
+    ) -> Option<(usize, usize)> {
+        sphere_factors
+            .iter()
+            .copied()
+            .find(|&(offset, dim)| offset <= axis && axis < offset + dim)
+    }
+
+    /// Component `i` of the tangent projection `P e_local = e_local − x_local·x` at
+    /// the unit vector `x`.
+    pub(crate) fn sphere_tangent_of_axis(x: &[f64], local: usize, i: usize) -> f64 {
+        (if i == local { 1.0 } else { 0.0 }) - x[local] * x[i]
+    }
+
     /// Validate the ARD table against this term's atom geometry and materialize
     /// each physical precision exactly once. This is the structural choke point
     /// shared by assembly, value, traces, exact-Hessian, and IFT channels.
@@ -669,9 +760,12 @@ impl SaeManifoldTerm {
         // RAW selected-inverse diagonal: the per-axis diagonal contraction uses
         // the DEFLATED inverse; the full kept-subspace + rotation deflation
         // correction `tr(inv_vv·(D − DΦ[D]))` is subtracted per (row, axis)
-        // afterwards via the Daleckii–Krein helper. Each ARD ρ-component
-        // `(atom k, axis)` differentiates a SINGLE coordinate-slot diagonal entry,
-        // so its `D` is the rank-one `hess·e_s e_sᵀ` at that local slot `s`.
+        // afterwards via the Daleckii–Krein helper. An ARD ρ-component
+        // `(atom k, axis)` on a flat factor differentiates a SINGLE coordinate-slot
+        // diagonal entry, so its `D` is the rank-one `hess·e_s e_sᵀ` at that local
+        // slot `s`. On an embedded sphere `D` is the Riemannian block derivative
+        // (`ard_sphere_log_precision_derivative`), contracted against the row's
+        // whole selected-inverse block (#2933 F24).
         let inv_diag = solver
             .latent_inverse_diagonal()
             .map_err(|err| ArrowSchurError::SchurFactorFailed { reason: err })?;
@@ -705,6 +799,7 @@ impl SaeManifoldTerm {
         // (O(n) per col ⇒ O(n²) redundant zeroing across the block build).
         let mut rhs_t_scratch = Array1::<f64>::zeros(total_t);
         let rhs_beta_zero = Array1::<f64>::zeros(cache.k);
+        let sphere_factors = self.all_ard_embedded_sphere_factors();
         for row in 0..n {
             let w_row = row_w.map_or(1.0, |w| w[row]);
             let row_base = cache.row_offsets[row];
@@ -718,8 +813,20 @@ impl SaeManifoldTerm {
                 .deflation_row_spectra
                 .get(row)
                 .and_then(Option::as_ref);
-            // Per-row selected-inverse t-block, built once (only when deflated).
-            let inv_vv = if !Self::row_deflation_is_live(dirs, spectrum) {
+            let row_atoms: Vec<(usize, usize)> = match self.last_row_layout {
+                Some(ref layout) => layout.active_atoms[row]
+                    .iter()
+                    .copied()
+                    .zip(layout.coord_starts[row].iter().copied())
+                    .collect(),
+                None => (0..self.k_atoms()).map(|k| (k, coord_offsets[k])).collect(),
+            };
+            let sphere_row = row_atoms
+                .iter()
+                .any(|&(k, _)| !rho.log_ard[k].is_empty() && !sphere_factors[k].is_empty());
+            // Per-row selected-inverse t-block, built once (only when deflated, or
+            // when a sphere axis contracts a whole block).
+            let inv_vv = if !Self::row_deflation_is_live(dirs, spectrum) && !sphere_row {
                 None
             } else {
                 let mut m = Array2::<f64>::zeros((q, q));
@@ -747,46 +854,46 @@ impl SaeManifoldTerm {
                 d[[s, s]] = hess;
                 Self::deflation_block_correction(iv, &d, dirs, spectrum)
             };
-            match self.last_row_layout {
-                Some(ref layout) => {
-                    let active = &layout.active_atoms[row];
-                    let starts = &layout.coord_starts[row];
-                    for (pos, &k) in active.iter().enumerate() {
-                        if rho.log_ard[k].is_empty() {
-                            continue;
-                        }
-                        let coord = &self.assignment.coords[k];
-                        let d = coord.latent_dim();
-                        let block_start = starts[pos];
-                        for axis in 0..d {
-                            let alpha = ard_precisions[k][axis];
-                            let t = coord.row(row)[axis];
-                            let prior = ArdAxisPrior::eval(alpha, t, ard_axis_periods[k][axis]);
-                            let hess = w_row * prior.log_precision_curvature(operator);
-                            let s = block_start + axis;
-                            traces[k][axis] += 0.5 * inv_diag[row_base + s] * hess;
-                            traces[k][axis] -= 0.5 * slot_correction(s, hess);
-                        }
-                    }
+            for (k, block_start) in row_atoms {
+                if rho.log_ard[k].is_empty() {
+                    continue;
                 }
-                None => {
-                    for k in 0..self.k_atoms() {
-                        if rho.log_ard[k].is_empty() {
-                            continue;
-                        }
-                        let coord = &self.assignment.coords[k];
-                        let d = coord.latent_dim();
-                        let block_start = coord_offsets[k];
-                        for axis in 0..d {
-                            let alpha = ard_precisions[k][axis];
-                            let t = coord.row(row)[axis];
-                            let prior = ArdAxisPrior::eval(alpha, t, ard_axis_periods[k][axis]);
-                            let hess = w_row * prior.log_precision_curvature(operator);
-                            let s = block_start + axis;
-                            traces[k][axis] += 0.5 * inv_diag[row_base + s] * hess;
-                            traces[k][axis] -= 0.5 * slot_correction(s, hess);
-                        }
+                let coord = &self.assignment.coords[k];
+                let point = coord.row(row);
+                for axis in 0..coord.latent_dim() {
+                    let alpha = ard_precisions[k][axis];
+                    let prior = ArdAxisPrior::eval(alpha, point[axis], ard_axis_periods[k][axis]);
+                    let hess = w_row * prior.log_precision_curvature(operator);
+                    if let Some(derivative) = Self::ard_sphere_log_precision_derivative(
+                        &sphere_factors[k],
+                        point,
+                        axis,
+                        block_start,
+                        q,
+                        hess,
+                        w_row * prior.grad,
+                    ) {
+                        let Some(inverse) = inv_vv.as_ref() else {
+                            return Err(ArrowSchurError::SchurFactorFailed {
+                                reason: format!(
+                                    "ard_log_precision_hessian_trace: row {row} holds a sphere ARD \
+                                     axis but its selected-inverse block was not built"
+                                ),
+                            });
+                        };
+                        traces[k][axis] += 0.5
+                            * ((inverse * &derivative).sum()
+                                - Self::deflation_block_correction(
+                                    inverse,
+                                    &derivative,
+                                    dirs,
+                                    spectrum,
+                                ));
+                        continue;
                     }
+                    let s = block_start + axis;
+                    traces[k][axis] += 0.5 * inv_diag[row_base + s] * hess;
+                    traces[k][axis] -= 0.5 * slot_correction(s, hess);
                 }
             }
         }
@@ -911,6 +1018,7 @@ impl SaeManifoldTerm {
             .map_err(|reason| ArrowSchurError::SchurFactorFailed { reason })?,
             None => None,
         };
+        let sphere_factors = self.all_ard_embedded_sphere_factors();
         for row in 0..n {
             let w_row = row_w.map_or(1.0, |w| w[row]);
             let q = cache.row_dims[row];
@@ -961,21 +1069,48 @@ impl SaeManifoldTerm {
                     return;
                 }
                 let coord = &self.assignment.coords[k];
-                let d = coord.latent_dim();
-                for axis in 0..d {
+                let point = coord.row(row);
+                for axis in 0..coord.latent_dim() {
                     let alpha = ard_precisions[k][axis];
-                    let t = coord.row(row)[axis];
-                    let prior = ArdAxisPrior::eval(alpha, t, ard_axis_periods[k][axis]);
+                    let prior = ArdAxisPrior::eval(alpha, point[axis], ard_axis_periods[k][axis]);
                     let hess = w_row * prior.log_precision_curvature(operator);
                     let s = block_start + axis;
-                    traces[k][axis] += 0.5 * inv_diag_local[s] * hess;
-                    traces[k][axis] -= 0.5 * slot_correction(s, hess);
+                    // A sphere axis contracts its Riemannian block derivative against
+                    // the whole row block (#2933 F24); a flat axis its slot entry.
+                    let sphere_derivative = Self::ard_sphere_log_precision_derivative(
+                        &sphere_factors[k],
+                        point,
+                        axis,
+                        block_start,
+                        q,
+                        hess,
+                        w_row * prior.grad,
+                    );
+                    match sphere_derivative.as_ref() {
+                        Some(derivative) => {
+                            traces[k][axis] += 0.5 * (&inv_vv * derivative).sum();
+                            if Self::row_deflation_is_live(dirs, spectrum) {
+                                traces[k][axis] -= 0.5
+                                    * Self::deflation_block_correction(
+                                        &inv_vv, derivative, dirs, spectrum,
+                                    );
+                            }
+                        }
+                        None => {
+                            traces[k][axis] += 0.5 * inv_diag_local[s] * hess;
+                            traces[k][axis] -= 0.5 * slot_correction(s, hess);
+                        }
+                    }
                     if let (Some((explicit, response)), Some(clamp)) = (price.as_ref(), clamp.as_ref())
                     {
                         if s < q {
                             // `∂E/∂ρ_ard` at slot `s` is the ARD clamp itself: degree one in `α`.
-                            traces[k][axis] += 0.5
-                                * (explicit[s] * clamp[row_base + s] + response[[s, s]] * hess);
+                            let response_trace = match sphere_derivative.as_ref() {
+                                Some(derivative) => (response * derivative).sum(),
+                                None => response[[s, s]] * hess,
+                            };
+                            traces[k][axis] +=
+                                0.5 * (explicit[s] * clamp[row_base + s] + response_trace);
                         }
                     }
                     if let (Some(weights), Some(clamp)) = (beta_price.as_ref(), clamp.as_ref()) {

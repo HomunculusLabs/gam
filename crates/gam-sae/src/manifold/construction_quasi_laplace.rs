@@ -6879,6 +6879,7 @@ impl SaeManifoldTerm {
             // slots of `t`, so accumulate every matching atom rather than
             // returning on the first. In `PerAtom` mode exactly one `(atom, axis)`
             // matches, reproducing the historical single-atom RHS.
+            let sphere_factors = self.all_ard_embedded_sphere_factors();
             for atom in 0..rho.log_ard.len() {
                 for axis in 0..rho.log_ard[atom].len() {
                     if rho.ard_flat_index(atom, axis) != j {
@@ -6887,12 +6888,16 @@ impl SaeManifoldTerm {
                     let alpha = ard_precisions[atom][axis];
                     let periods = self.ard_axis_periods(atom);
                     let row_w = self.row_loss_weights.as_deref();
+                    let sphere = Self::ard_sphere_factor_containing(&sphere_factors[atom], axis);
                     for row in 0..self.n_obs() {
                         let row_t = self.assignment.coords[atom].row(row);
                         let prior = ArdAxisPrior::eval(alpha, row_t[axis], periods[axis]);
-                        let Some(pos) = sae_coord_penalty_offset(
+                        // The atom's block start in this row: the dense coordinate
+                        // offset, or the compact TopK start. Every sibling caller
+                        // adds the axis to that start.
+                        let Some(block_start) = sae_coord_penalty_offset(
                             self.last_row_layout.as_ref(),
-                            self.assignment.coord_offsets()[atom] + axis,
+                            self.assignment.coord_offsets()[atom],
                             row,
                             atom,
                         ) else {
@@ -6907,7 +6912,21 @@ impl SaeManifoldTerm {
                         // is linear in α so `∂(w·V')/∂log α = w·V'`. `None` ⇒ w_row = 1,
                         // bit-for-bit the historical RHS.
                         let w_row = row_w.map_or(1.0, |w| w[row]);
-                        t[cache.row_offsets[row] + pos] += w_row * prior.grad;
+                        let base = cache.row_offsets[row] + block_start;
+                        match sphere {
+                            // On an embedded unit sphere at `x` the assembled gradient
+                            // is its tangent projection `P g`, so the RHS is
+                            // `w·V'·P e_a` (#2933 F24).
+                            Some((offset, dim)) => {
+                                let x = &row_t[offset..offset + dim];
+                                for i in 0..dim {
+                                    t[base + offset + i] += w_row
+                                        * prior.grad
+                                        * Self::sphere_tangent_of_axis(x, axis - offset, i);
+                                }
+                            }
+                            None => t[base + axis] += w_row * prior.grad,
+                        }
                     }
                 }
             }

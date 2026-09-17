@@ -325,6 +325,8 @@ mod tests_deck_invariant_ard_prior_2933;
 mod tests_ard_constrained_partition_2933;
 #[cfg(test)]
 mod tests_topk_ard_active_slots_2933;
+#[cfg(test)]
+mod tests_sphere_ard_logdet_trace_2933;
 
 #[cfg(test)]
 mod tests_streaming_materialize_chunk_1801;
