@@ -368,6 +368,11 @@ impl CertifiedSpdFactor<'_> {
             certificate,
         })
     }
+
+    /// `log|A|` of the retained SPD matrix, read off the strict Cholesky pivots.
+    pub fn log_det(&self) -> f64 {
+        crate::matrix::FactorizedSystem::logdet(&self.factor)
+    }
 }
 
 impl CertifiedSpdInverse {
@@ -2035,6 +2040,63 @@ mod condition_number_tests {
         assert!(
             cond > 1.0e14,
             "expected unfloored ratio ~4e14, got {cond:e}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod certified_log_det_tests {
+    use super::certified_spd_factorize;
+    use crate::faer_ndarray::FaerEigh;
+    use crate::roundoff::accumulation_growth;
+    use faer::Side;
+    use ndarray::{Array2, array};
+
+    /// First-order forward-error band of `log|A|` read off a strict Cholesky of an SPD `dim × dim` matrix. The backward
+    /// error `‖ΔA‖₂ ≤ dim·γ_{3·dim+1}·‖A‖₂` (Higham, ASNA 2nd ed., Thm 10.3, with `‖|L||Lᵀ|‖₂ ≤ tr A ≤ dim·‖A‖₂`) moves
+    /// `log|A|` by `|tr(A⁻¹ΔA)| ≤ dim·‖ΔA‖₂/λ_min`, and summing `dim` pivot logarithms, each pivot in `[λ_min, λ_max]`,
+    /// accumulates `γ_{2·dim}·dim·max|ln λ|`.
+    fn log_det_band(matrix: &Array2<f64>) -> f64 {
+        let values = matrix.eigh(Side::Lower).expect("fixture is symmetric").0;
+        let smallest = values.iter().copied().fold(f64::INFINITY, f64::min);
+        let largest = values.iter().copied().fold(0.0_f64, f64::max);
+        let dim = matrix.nrows();
+        (dim * dim) as f64 * accumulation_growth(3 * dim + 1) * largest / smallest
+            + accumulation_growth(2 * dim) * dim as f64 * smallest.ln().abs().max(largest.ln().abs())
+    }
+
+    #[test]
+    fn log_det_matches_an_exact_integer_determinant() {
+        // Cofactor expansion along the first row: 4·(5·6 − 3·3) − 2·(2·6 − 3·1) + 1·(2·3 − 5·1) = 84 − 18 + 1 = 67.
+        let matrix = array![[4.0, 2.0, 1.0], [2.0, 5.0, 3.0], [1.0, 3.0, 6.0]];
+        let log_det = certified_spd_factorize(&matrix, "integer fixture")
+            .expect("SPD fixture")
+            .log_det();
+        let reference = 67.0_f64.ln();
+        let band = log_det_band(&matrix) + accumulation_growth(1) * reference;
+        assert!(
+            (log_det - reference).abs() <= band,
+            "log|A| {log_det:e} against ln 67 = {reference:e}, band {band:e}"
+        );
+
+        // Positive control: raising A₃₃ by 2⁻¹⁰ raises the determinant by its cofactor 4·5 − 2·2 = 16 times 2⁻¹⁰, to
+        // exactly 67.015625. The band resolves that change, and the factor reads the new value.
+        let mut raised = matrix.clone();
+        raised[[2, 2]] += 1.0 / 1024.0;
+        let raised_log_det = certified_spd_factorize(&raised, "raised integer fixture")
+            .expect("SPD fixture")
+            .log_det();
+        let raised_reference = 67.015625_f64.ln();
+        let raised_band = log_det_band(&raised) + accumulation_growth(1) * raised_reference;
+        assert!(
+            (raised_log_det - reference).abs() > band + raised_band,
+            "a determinant change of 2⁻⁶ moved log|A| by only {:e}, inside {:e}",
+            (raised_log_det - reference).abs(),
+            band + raised_band
+        );
+        assert!(
+            (raised_log_det - raised_reference).abs() <= raised_band,
+            "raised log|A| {raised_log_det:e} against ln 67.015625 = {raised_reference:e}, band {raised_band:e}"
         );
     }
 }
