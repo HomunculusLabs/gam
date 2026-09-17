@@ -21,7 +21,7 @@ from ._binding import rust_module
 _SMOOTH_TERM_COLUMNS: tuple[str, ...] = ("name", "edf", "ref_df", "chi_sq", "p_value")
 
 # Canonical schema mirrors ``SummaryPayload`` in
-# ``crates/gam-pyffi/src/lib.rs::summary_json_impl``. Adding a new field on the
+# ``crates/gam-models/src/inference/saved_summary.rs``. Adding a new field on the
 # Rust side that should be a typed Summary attribute means adding it here too;
 # unknown keys land in :attr:`Summary.extras` rather than silently going
 # missing.

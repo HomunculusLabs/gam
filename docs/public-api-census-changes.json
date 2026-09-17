@@ -2389,6 +2389,18 @@
     "evidence": "scripts/public_api_census.py over probe commit 385f0b1f2 on base d2968d715 (MSI acn112, python3.12; sliceI.census.out) reports exactly these fifteen crates/gam-terms/src/grid_spline_2d.rs identities, one declaration each. Seven are #2829 restored-in-place rows relabeled retired-no-product-user in docs/public-api-2829-disposition.tsv in the same commit."
   },
   {
+    "base": "9e3b7625be1681e1c8aa90e6d3cac57504aaa83d",
+    "removed": {
+      "crates/gam-cli/src/main/run_fit.rs::block_role_label": 1,
+      "crates/gam-cli/src/main/run_sample_generate_report.rs::run_report_residual_cascade": 1,
+      "crates/gam-cli/src/main/run_sample_generate_report.rs::run_report_spline_scan": 1,
+      "crates/gam-cli/src/main/smooth_warnings.rs::build_anisotropic_scales_rows": 1,
+      "crates/gam-cli/src/main/smooth_warnings.rs::measure_jet_spectrum_rows_from_spec": 1
+    },
+    "reason": "#2899 F3 (SPEC rule 9): a saved model's report card has one owner, gam-models inference::saved_summary::saved_model_report_input, which gam report and gamfit's Model.report() both render. The CLI's spline-scan, residual-cascade, anisotropic-scale and measure-jet card builders move there, and block_role_label duplicated BlockRole::name label for label.",
+    "evidence": "At the base, git grep -n finds each of the five only in crates/gam-cli/src/main: its definition and the calls in run_report (block_role_label: three calls in run_sample_generate_report.rs). No example, test, Python or FFI source names them. Census job 1191746 (pool-gx5, acn20) at 38e4ec216c refused exactly these five without the entry."
+  },
+  {
     "base": "1105c048f7c180f95cc76db43b2b07f3ffc2b8f0",
     "removed": {
       "crates/gam-solve/src/reml/jeffreys_subspace/mixed.rs::completion_second_drift_frozen": 1

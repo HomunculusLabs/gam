@@ -3,7 +3,7 @@ use super::*;
 // The per-term effective-degrees-of-freedom decomposition lives on
 // `UnifiedFitResult::per_term_edf` (in the library crate) so that BOTH this
 // in-process CLI/report summary and the persisted-model summary the Python API
-// reads (`crates/gam-pyffi` → `summary_smooth_terms`) resolve it identically.
+// reads (gam-models `inference::saved_summary`) resolve it identically.
 // A previous copy here meant the #1219 influence-trace fix shipped only on the
 // in-process path while the persisted path kept double-counting shared tensor
 // coefficients (#1277).

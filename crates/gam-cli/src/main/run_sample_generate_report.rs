@@ -1,26 +1,6 @@
 use super::*;
+use gam::families::inference::saved_summary::saved_model_report_input;
 
-
-/// Map a fitted model's persisted #2774 basis-adequacy rows onto the renderer's
-/// plain row type. A pure read: the report shows what the FIT measured, and
-/// shows nothing when it measured nothing.
-fn report_basis_checks(model: &SavedModel) -> Vec<report::BasisCheckRow> {
-    model
-        .payload()
-        .basis_adequacy
-        .iter()
-        .map(|row| report::BasisCheckRow {
-            name: row.name.clone(),
-            basis_dim: row.basis_dim,
-            nullspace_dim: row.nullspace_dim,
-            edf: row.edf,
-            enrichment_rank: row.enrichment_rank,
-            statistic: row.statistic,
-            p_value: row.p_value,
-            provenance: row.provenance.label().to_string(),
-        })
-        .collect()
-}
 
 fn saved_alo_report_data(
     alo: gam_predict::SavedModelAloDiagnostics,
@@ -376,308 +356,39 @@ pub(crate) fn run_generate_unified(
     .map_err(|error| error.to_string())
 }
 
-fn smoothing_forensics_rows(
-    fit: &UnifiedFitResult,
-    edf_blocks: &[report::EdfBlockRow],
-) -> Vec<report::SmoothingForensicsRow> {
-    let sigma2 = (fit.standard_deviation * fit.standard_deviation).max(0.0);
-    let assembly_edfs = fit.edf_by_block();
-    fit.blocks
-        .iter()
-        .enumerate()
-        .map(|(block_idx, block)| {
-            let lambda_path = block.lambdas.iter().copied().collect::<Vec<_>>();
-            let edf_criterion = edf_blocks
-                .iter()
-                .find(|row| row.index == block_idx)
-                .map(|row| row.edf)
-                .or(Some(block.edf));
-            let edf_assembly = assembly_edfs.get(block_idx).copied().or(Some(block.edf));
-            let role = block_role_label(&block.role);
-            report::SmoothingForensicsRow {
-                term: format!("block {block_idx} ({role})"),
-                lambda_path,
-                sigma2_path: vec![sigma2],
-                edf_criterion,
-                edf_assembly,
-                double_penalty_range: None,
-                double_penalty_null_space: fit.artifacts.null_space_dim.and_then(|dim| {
-                    if dim > 0 && block_idx == 0 {
-                        Some(dim as f64)
-                    } else {
-                        None
-                    }
-                }),
-                seed_screening: Vec::new(),
-            }
-        })
-        .collect()
-}
-
-/// Render the report for a spline-scan model (#1046) from its reconstructed
-/// scalar quantities and the single smooth's EDF block, reusing the standard
-/// `report::write_report` renderer. A scan model retains no dense design/Gram,
-/// so there is no coefficient table or data-dependent diagnostics surface here
-/// — the headline EDF / λ / REML / deviance are recovered exactly from the
-/// saved `SplineScanFit`, matching the FFI `summary()` path.
-pub(crate) fn run_report_spline_scan(
-    args: &ReportArgs,
-    model: &SavedModel,
-    feature_column: &str,
-    scan: &gam::solver::spline_scan::SplineScanFit,
-) -> Result<(), String> {
-    let mut notes = vec![format!(
-        "Exact O(n) state-space spline scan for s({feature_column}): \
-         λ={:.4e}, EDF={:.3}, knots={}. The smoother retains the per-knot \
-         posterior, not a dense design/Gram, so no coefficient table is shown.",
-        scan.lambda(),
-        scan.edf(),
-        scan.knots.len(),
-    )];
-    if args.data.is_some() {
-        notes.push(
-            "Data provided, but held-out diagnostics for spline-scan models are \
-             served through the Python diagnose() / predict() path; the CLI \
-             report shows the fitted scalar quantities only."
-                .to_string(),
-        );
-    }
-    let input = report::ReportInput {
-        model_path: args.model.display().to_string(),
-        family_name: model.likelihood().pretty_name().to_string(),
-        model_class: format!("{:?}", model.predict_model_class()),
-        formula: model.formula.clone(),
-        n_obs: Some(scan.training_sample_size()),
-        deviance: scan.deviance(),
-        // The scan has no penalty null-space metadata, so it has no comparable
-        // criterion; its raw criterion is shown as raw (#2627).
-        reml_score: None,
-        raw_reml_score: Some(-scan.restricted_loglik),
-        iterations: 0,
-        convergence_status: "exact (state-space spline scan)".to_string(),
-        converged: true,
-        outer_gradient_norm: None,
-        criterion_certificate: None,
-        smoothing_forensics: Vec::new(),
-        edf_total: scan.edf(),
-        r_squared: None,
-        coefficients: Vec::new(),
-        edf_blocks: vec![report::EdfBlockRow {
-            index: 0,
-            edf: scan.edf(),
-            role: Some("smooth".to_string()),
-        }],
-        continuous_order: Vec::new(),
-        anisotropic_scales: Vec::new(),
-        measure_jet_spectra: Vec::new(),
-        diagnostics: None,
-        smooth_plots: Vec::new(),
-        alo: None,
-        basis_checks: report_basis_checks(model),
-        notes,
-    };
-    let out = report::write_report(&input, args.out.as_deref(), &args.model)?;
-    cli_out!("wrote report: {}", out.display());
-    Ok(())
-}
-
-pub(crate) fn run_report_residual_cascade(
-    args: &ReportArgs,
-    model: &SavedModel,
-    feature_columns: &[String],
-    fit: &gam::solver::residual_cascade::ResidualCascadeFit,
-) -> Result<(), String> {
-    let lambda = fit.lambda();
-    let mut notes = vec![format!(
-        "Exact O(n log n) multiresolution residual cascade for s({features}): \
-         λ={lambda:.4e}, σ²={sigma2:.4e}, levels={levels}, centers={centers}, \
-         coeffs={coeffs}. CG backward error={cg_resid:.2e} over {cg_iters} \
-         iterations. The cascade retains the multilevel Wendland posterior, not \
-         a dense design/Gram, so no coefficient table is shown.",
-        features = feature_columns.join(", "),
-        sigma2 = fit.sigma2,
-        levels = fit.num_levels(),
-        centers = fit.num_centers(),
-        coeffs = fit.num_coeffs(),
-        cg_resid = fit.certificate.solve_rel_residual,
-        cg_iters = fit.certificate.solve_iters,
-    )];
-    // Which machinery selected λ is a property of the fit a reader cannot infer
-    // from the numbers above: past the dense sizing cap the profiled residual and
-    // its λ derivatives come from a Golub–Meurant quadrature whose own convergence
-    // admitted it, or — when none did — from a solve at every λ. Those are
-    // different criteria and the report says which one this fit was selected on.
-    match fit.certificate.logdet_method {
-        gam::solver::residual_cascade::LogdetMethod::DenseExact => notes.push(
-            "The log-determinant came from exact dense linear algebra — a dense              Cholesky at the fitted lambda, or the lambda-independent Schur              eigendecomposition the certified selection is built from: exact,              with no stochastic estimate anywhere in the criterion."
-                .to_string(),
-        ),
-        gam::solver::residual_cascade::LogdetMethod::SparseExact => notes.push(
-            "The log-determinant came from an exact sparse direct Cholesky of the              normal equations at the fitted lambda: exact, with no stochastic              estimate anywhere in the criterion."
-                .to_string(),
-        ),
-        gam::solver::residual_cascade::LogdetMethod::Slq => notes.push(
-            "The log-determinant came from a diagonal control variate plus              stochastic Lanczos quadrature on fixed deterministic probes; the              coefficient solve's backward error above is the accompanying              solve certificate."
-                .to_string(),
-        ),
-    }
-    if let Some(refinement) = fit.refinement.as_ref() {
-        notes.push(format!(
-            "Refinement stopped where one more level stopped earning its own Occam \
-             factor: the complete candidate level buys {:.2e} of penalized objective \
-             against a break-even of {:.2e}, for {:+.2e} of restricted log-likelihood.",
-            refinement.gain, refinement.tolerance, refinement.evidence,
-        ));
-    }
-    if args.data.is_some() {
-        notes.push(
-            "Data provided, but held-out diagnostics for residual-cascade models \
-             are served through the predict() path; the CLI report shows the \
-             fitted scalar quantities only."
-                .to_string(),
-        );
-    }
-    let input = report::ReportInput {
-        model_path: args.model.display().to_string(),
-        family_name: model.likelihood().pretty_name().to_string(),
-        model_class: format!("{:?}", model.predict_model_class()),
-        formula: model.formula.clone(),
-        n_obs: Some(fit.training_sample_size()),
-        // Gaussian-identity deviance ≡ the penalized residual quadratic
-        // `y'Wy − ĉ'X'Wy` the fit profiles σ² from.
-        deviance: fit.rss_pen,
-        // The cascade has no penalty null-space metadata, so it has no comparable
-        // criterion; its raw criterion is shown as raw (#2627).
-        reml_score: None,
-        raw_reml_score: Some(-fit.restricted_loglik),
-        iterations: 0,
-        convergence_status: "exact (multiresolution residual cascade)".to_string(),
-        converged: true,
-        outer_gradient_norm: None,
-        criterion_certificate: None,
-        smoothing_forensics: Vec::new(),
-        edf_total: 0.0,
-        r_squared: None,
-        coefficients: Vec::new(),
-        edf_blocks: Vec::new(),
-        continuous_order: Vec::new(),
-        anisotropic_scales: Vec::new(),
-        measure_jet_spectra: Vec::new(),
-        diagnostics: None,
-        smooth_plots: Vec::new(),
-        alo: None,
-        basis_checks: report_basis_checks(model),
-        notes,
-    };
-    let out = report::write_report(&input, args.out.as_deref(), &args.model)?;
-    cli_out!("wrote report: {}", out.display());
-    Ok(())
-}
-
 pub(crate) fn run_report(args: ReportArgs) -> Result<(), String> {
     reject_multinomial_model(&args.model, "report")?;
     let model = SavedModel::load_from_path(&args.model)?;
-    // Spline-scan model (#1030/#1034/#1046): no dense fit_result exists — the
-    // exact O(n) state-space smoother keeps only the per-knot posterior. Render
-    // the report from the reconstructed scalar quantities (the same EDF / λ /
-    // REML the fit log prints) and return, instead of demanding a dense fit.
-    if let Some((feature_column, scan)) = model
-        .saved_spline_scan()
-        .map_err(|e| e.to_string())?
-        .map(|(c, f)| (c.to_string(), f))
-    {
-        return run_report_spline_scan(&args, &model, &feature_column, &scan);
-    }
-    // Residual-cascade model (#1032): the multi-resolution analogue of the
-    // spline scan. The exact O(n log n) multilevel Wendland smoother keeps only
-    // the nested ε-net posterior (no dense fit_result), so render the report
-    // from its reconstructed scalar quantities and return.
-    if let Some((feature_columns, fit)) = model
-        .saved_residual_cascade()
-        .map_err(|e| e.to_string())?
-        .map(|(c, f)| (c.to_vec(), f))
-    {
-        return run_report_residual_cascade(&args, &model, &feature_columns, &fit);
+    // The report card of the saved model has one owner, which gamfit's
+    // `Model.report()` renders too. This command adds only what the data it is
+    // given can show.
+    let mut input = saved_model_report_input(&model, args.model.display().to_string())?;
+    // Spline-scan (#1030/#1034/#1046) and residual-cascade (#1032) models keep
+    // only their exact smoother's posterior, not a dense fit_result, so the card
+    // shows the reconstructed scalar quantities and nothing is computed from data.
+    if model.spline_scan.is_some() || model.residual_cascade.is_some() {
+        if args.data.is_some() {
+            input.notes.push(
+                "Data provided, but held-out diagnostics for exact state-space smoother \
+                 models are served through the predict() path; the CLI report shows the \
+                 fitted scalar quantities only."
+                    .to_string(),
+            );
+        }
+        let out = report::write_report(&input, args.out.as_deref(), &args.model)?;
+        cli_out!("wrote report: {}", out.display());
+        return Ok(());
     }
     let family = model.likelihood();
     let fit = fit_result_from_saved_model_for_prediction(&model)?;
-    // Total EDF: shown on the summary card and used as the residual degrees
-    // of freedom in the dispersion estimates behind the report residuals.
-    let edf_total = model
-        .unified()
-        .and_then(|u| u.edf_total())
-        .unwrap_or_else(|| fit.edf_total().unwrap_or(0.0));
-
-    // Definition-consistent SE column (#2296): corrected-preferred, but never
-    // an unlabeled mix of covariance definitions.
-    let display_uncertainty = fit.display_coefficient_uncertainty();
-    let beta_se = display_uncertainty
-        .as_ref()
-        .map(|view| view.standard_errors);
-
-    let coefficients: Vec<report::CoefficientRow> = fit
-        .beta
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(i, b)| report::CoefficientRow {
-            index: i,
-            estimate: b,
-            std_error: beta_se.and_then(|s| s.get(i).copied()),
-        })
-        .collect();
-
-    let edf_blocks: Vec<report::EdfBlockRow> = if let Some(unified) = model.unified() {
-        unified
-            .blocks
-            .iter()
-            .enumerate()
-            .map(|(i, block)| report::EdfBlockRow {
-                index: i,
-                edf: block.edf,
-                role: Some(block_role_label(&block.role).to_string()),
-            })
-            .collect()
-    } else {
-        fit.edf_by_block()
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(i, edf)| report::EdfBlockRow {
-                index: i,
-                edf,
-                role: None,
-            })
-            .collect()
-    };
-
+    // The residual degrees of freedom behind the report residuals' dispersion.
+    let edf_total = input.edf_total;
     let mut notes = Vec::new();
-    if let Some(unified) = model.unified() {
-        if unified.blocks.len() > 1 {
-            let role_labels: Vec<&str> = unified
-                .blocks
-                .iter()
-                .map(|b| block_role_label(&b.role))
-                .collect();
-            notes.push(format!("Block roles: {}", role_labels.join(", ")));
-        }
-        notes.push(format!(
-            "Outer iterations: {} (status: {})",
-            unified.outer_iterations,
-            unified.convergence_evidence().inner_status().label()
-        ));
-        notes.push(format!(
-            "Log-likelihood: {:.4}, penalized objective: {}",
-            unified.log_likelihood,
-            gam::report::criterion_display(unified.penalized_objective())
-        ));
-    }
     let mut diagnostics = None;
     let mut smooth_plots = Vec::new();
     let mut continuous_order = Vec::new();
     let mut measure_jet_spectra = Vec::new();
     let mut alo_data = None;
-    let mut n_obs = None;
     let mut r_squared = None;
 
     if let Some(data_path) = args.data.as_ref() {
@@ -733,7 +444,6 @@ pub(crate) fn run_report(args: ReportArgs) -> Result<(), String> {
 
             if model.predict_model_class() == PredictModelClass::BernoulliMarginalSlope {
                 let y = ds.values.column(y_col).to_owned();
-                n_obs = Some(y.len());
                 if let Some(predictor) = model.predictor() {
                     let (report_offset, report_noise_offset) = resolve_predict_offsets(
                         &model,
@@ -805,7 +515,6 @@ pub(crate) fn run_report(args: ReportArgs) -> Result<(), String> {
                 )
                 .map_err(|e| format!("prediction for report diagnostics failed: {e}"))?;
                 let y = ds.values.column(y_col).to_owned();
-                n_obs = Some(y.len());
 
                 // R-squared for Gaussian
                 if family.is_gaussian_identity() {
@@ -1007,108 +716,18 @@ pub(crate) fn run_report(args: ReportArgs) -> Result<(), String> {
         );
     }
 
-    // The realized band is frozen onto the saved spec, so the measure-jet
-    // spectrum line still prints when the report runs without a dataset (or
-    // for model classes that skip the design rebuild). Per-scale λ̂_ℓ need the
-    // rebuilt penalty layout, so only band + spec order are available here.
-    if measure_jet_spectra.is_empty() {
-        measure_jet_spectra = measure_jet_spectrum_rows_from_spec(model.resolved_termspec.as_ref());
+    // The card carries the realized measure-jet band from the frozen spec. A
+    // design rebuilt from the data also has the penalty layout the per-scale
+    // λ̂_ℓ come from, and those rows replace the spec-only ones.
+    if !measure_jet_spectra.is_empty() {
+        input.measure_jet_spectra = measure_jet_spectra;
     }
-
-    let input = report::ReportInput {
-        model_path: args.model.display().to_string(),
-        family_name: family.pretty_name().to_string(),
-        model_class: format!("{:?}", model.predict_model_class()),
-        formula: model.formula.clone(),
-        n_obs,
-        deviance: fit.deviance,
-        reml_score: fit
-            .comparable_reml_score()
-            .map_err(|err| format!("failed to compute comparable REML score: {err}"))?,
-        raw_reml_score: fit.reml_score(),
-        iterations: fit.outer_iterations,
-        convergence_status: fit
-            .convergence_evidence()
-            .inner_status()
-            .label()
-            .to_string(),
-        converged: true,
-        outer_gradient_norm: fit.outer_gradient_norm,
-        criterion_certificate: fit.artifacts.criterion_certificate.as_ref().map(|cert| {
-            let stationarity = match &cert.stationarity {
-                gam::model_types::OuterStationarityCertificate::AnalyticGradient {
-                    grad_norm,
-                    projected_grad_norm,
-                    bound,
-                    rung,
-                } => report::CriterionStationarityRow::AnalyticGradient {
-                    grad_norm: *grad_norm,
-                    projected_grad_norm: *projected_grad_norm,
-                    bound: *bound,
-                    rung: (rung.label.clone(), rung.derived_standard),
-                },
-                gam::model_types::OuterStationarityCertificate::FixedPoint {
-                    residual_inf_norm,
-                    projected_residual_inf_norm,
-                    bound,
-                    rung,
-                    covered_coordinates,
-                } => report::CriterionStationarityRow::FixedPoint {
-                    residual_inf_norm: *residual_inf_norm,
-                    projected_residual_inf_norm: *projected_residual_inf_norm,
-                    bound: *bound,
-                    rung: (rung.label.clone(), rung.derived_standard),
-                    covered_coordinates: *covered_coordinates,
-                },
-                gam::model_types::OuterStationarityCertificate::AsymptoteRail {
-                    interior_projected_grad_norm,
-                    bound,
-                    rung,
-                    rails,
-                } => report::CriterionStationarityRow::AsymptoteRail {
-                    interior_projected_grad_norm: *interior_projected_grad_norm,
-                    bound: *bound,
-                    rung: (rung.label.clone(), rung.derived_standard),
-                    rails: rails
-                        .iter()
-                        .map(|r| report::AsymptoteRailRow {
-                            index: r.index,
-                            upper: r.side
-                                == gam::solver::rho_optimizer::asymptote_certificate::AsymptoteSide::Upper,
-                            tail_constant: r.tail_constant,
-                            value_gap: r.value_gap,
-                            estimand_travel_bound: r.estimand_travel_bound,
-                        })
-                        .collect(),
-                },
-            };
-            report::CriterionCertificateRow {
-                stationarity,
-                hessian_psd: cert.hessian_psd(),
-                lambdas_railed: cert.lambdas_railed.clone(),
-                railed_facts: cert
-                    .railed_facts
-                    .iter()
-                    .map(|fact| (fact.index, fact.theta, fact.lower, fact.upper, fact.margin))
-                    .collect(),
-                stationary: cert.is_stationary(),
-                clean: cert.is_clean(),
-            }
-        }),
-        smoothing_forensics: smoothing_forensics_rows(&fit, &edf_blocks),
-        edf_total,
-        r_squared,
-        coefficients,
-        edf_blocks,
-        continuous_order,
-        anisotropic_scales: build_anisotropic_scales_rows(model.resolved_termspec.as_ref()),
-        measure_jet_spectra,
-        diagnostics,
-        smooth_plots,
-        alo: alo_data,
-        basis_checks: report_basis_checks(&model),
-        notes,
-    };
+    input.r_squared = r_squared;
+    input.continuous_order = continuous_order;
+    input.diagnostics = diagnostics;
+    input.smooth_plots = smooth_plots;
+    input.alo = alo_data;
+    input.notes.extend(notes);
     let out = report::write_report(&input, args.out.as_deref(), &args.model)?;
 
     cli_out!("wrote report: {}", out.display());

@@ -24,6 +24,7 @@ opt.workspace = true
 gam-model-api = { path = "../gam-model-api", version = "=0.3.157" }
 gam-model-kernels = { path = "../gam-model-kernels", version = "=0.3.157" }
 gam-problem = { path = "../gam-problem", version = "=0.3.157" }
+gam-report = { path = "../gam-report", version = "=0.3.157" }
 gam-runtime = { path = "../gam-runtime", version = "=0.3.157" }
 gam-solve = { path = "../gam-solve", version = "=0.3.157" }
 gam-spec = { path = "../gam-spec", version = "=0.3.157" }

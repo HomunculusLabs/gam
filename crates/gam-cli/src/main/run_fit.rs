@@ -417,17 +417,6 @@ fn run_library_formula_fit(
     write_payload_json(out, payload)
 }
 
-pub(crate) fn block_role_label(role: &gam::estimate::BlockRole) -> &'static str {
-    match role {
-        gam::estimate::BlockRole::Mean => "mean",
-        gam::estimate::BlockRole::Location => "location",
-        gam::estimate::BlockRole::Scale => "scale",
-        gam::estimate::BlockRole::Time => "time",
-        gam::estimate::BlockRole::Threshold => "threshold",
-        gam::estimate::BlockRole::LinkWiggle => "link-wiggle",
-    }
-}
-
 /// Refuse survival-only settings on a response that is not `Surv(...)`. Only the
 /// survival fit path reads them, so on any other response they would be dropped
 /// without a word. Both entry points check the resolved configuration, so a
