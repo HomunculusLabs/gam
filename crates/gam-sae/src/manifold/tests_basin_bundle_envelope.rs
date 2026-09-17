@@ -197,20 +197,27 @@ fn reactive_rho_upper_face_comes_from_live_penalty_geometry() {
             .all(|(entry, target)| entry >= target),
         "the legal entry {upper:?} must contain the literal target {seed:?}"
     );
+    // Indices come from the objective's own layout: a fixed-concentration ordered
+    // Beta--Bernoulli prior has no assignment-strength coordinate at all (#2933 F45), so the
+    // flat vector is `[smoothing ×K, ARD]`.
+    let layout = &objective.baseline_rho;
     assert_eq!(
-        upper[0].to_bits(),
-        seed[0].to_bits(),
+        layout.sparse_flat_index(),
+        None,
         "fixed-alpha ordered Beta--Bernoulli has no live assignment-strength coordinate to anneal"
     );
-    for index in 3..upper.len() {
-        assert_eq!(
-            upper[index].to_bits(),
-            seed[index].to_bits(),
-            "periodic von-Mises ARD is sign-indefinite and must stay at its literal target"
-        );
+    for atom in 0..layout.k_atoms() {
+        for axis in 0..layout.log_ard[atom].len() {
+            let index = layout.ard_flat_index(atom, axis);
+            assert_eq!(
+                upper[index].to_bits(),
+                seed[index].to_bits(),
+                "periodic von-Mises ARD is sign-indefinite and must stay at its literal target"
+            );
+        }
     }
     assert!(
-        upper.iter().skip(1).all(|value| *value < 30.0),
+        upper.iter().all(|value| *value < 30.0),
         "live smoothing/ARD bounds must come from curvature geometry, not generic +30: {upper:?}"
     );
 }
