@@ -85,7 +85,7 @@ def tokens(source):
         position = token.end()
 
 
-def test_names(source):
+def rust_test_names(source):
     stream = iter(tokens(source))
     pending_test = False
     for token in stream:
@@ -203,7 +203,7 @@ def census(root, revision, parsed=None):
         if oid not in parsed:
             source = objects[start:offset - 1].decode("utf-8")
             try:
-                parsed[oid] = list(test_names(source))
+                parsed[oid] = list(rust_test_names(source))
             except ValueError as error:
                 raise ValueError(f"{revision}:{path}: {error}") from error
         found = parsed[oid]

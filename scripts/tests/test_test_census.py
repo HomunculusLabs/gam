@@ -28,12 +28,12 @@ class TestCensus(unittest.TestCase):
         fn actual_17() { let s = "#[test] fn fake_18() {}"; }
         #[cfg_attr(feature = "oracle", test)] fn conditional_19() {}
         '''
-        self.assertEqual(list(census.test_names(source)), ["actual_17", "conditional_19"])
+        self.assertEqual(list(census.rust_test_names(source)), ["actual_17", "conditional_19"])
 
     def test_annotated_missing_function_is_a_failure_2818(self):
         for source in ("#[test]", "#[test] mod empty {}", "#[test] #[test] fn x() {}"):
             with self.subTest(source=source), self.assertRaises(ValueError):
-                list(census.test_names(source))
+                list(census.rust_test_names(source))
 
     def test_removing_a_pin_is_reported_when_total_count_grows_2818(self):
         before = snapshot(3, {"critical_2818": 1}, {"crates/gam-sae": 3})

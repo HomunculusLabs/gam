@@ -221,7 +221,18 @@ def _tracked_python_files() -> list[Path]:
 
 
 def _collectible_test_files(patterns: tuple[str, ...]) -> list[Path]:
-    return [p for p in _tracked_python_files() if _is_collectible_name(p.name, patterns)]
+    """Tracked files named collectibly that define tests.
+
+    A module whose name matches ``python_files`` but that defines no
+    ``def test...`` holds nothing a step could run, so it owes no coverage; the
+    same content rule decides ``test_no_test_file_is_uncollectible_by_name``.
+    """
+    return [
+        p
+        for p in _tracked_python_files()
+        if _is_collectible_name(p.name, patterns)
+        and _TEST_FUNCTION.search((_REPO_ROOT / p).read_text(encoding="utf-8"))
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +241,7 @@ def _collectible_test_files(patterns: tuple[str, ...]) -> list[Path]:
 
 
 class Invocation:
-    """One pytest command line found in a workflow."""
+    """One pytest or ``unittest discover`` command line found in a workflow."""
 
     def __init__(self, workflow: str, automatic: bool, targets: list[str], markers: str | None):
         self.workflow = workflow
@@ -335,6 +346,65 @@ def _manifest_invocations(text: str, workflow: str, automatic: bool) -> list[Inv
     return out
 
 
+_UNITTEST_DISCOVER_OPTIONS = {
+    "-s": "start",
+    "--start-directory": "start",
+    "-p": "pattern",
+    "--pattern": "pattern",
+    "-t": "top",
+    "--top-level-directory": "top",
+}
+
+
+def _parse_unittest_discover(line: str, workflow: str, automatic: bool) -> Invocation | None:
+    """A ``python -m unittest discover`` command line, as the files it loads.
+
+    Discovery loads the modules in its start directory whose basenames match
+    its pattern (default ``test*.py``), so its targets are exactly those files,
+    resolved against the tree at check time: a directory-level discovery covers
+    a module on the day it lands, and a single-file pattern covers that file.
+    """
+    try:
+        tokens = shlex.split(line)
+    except ValueError:
+        tokens = line.split()
+    if "unittest" not in tokens or "discover" not in tokens:
+        return None
+    tokens = tokens[tokens.index("discover") + 1 :]
+    for stop, token in enumerate(tokens):
+        if token in _SHELL_OPERATORS or token.startswith(">") or token.endswith(">&1"):
+            tokens = tokens[:stop]
+            break
+    values = {"start": ".", "pattern": "test*.py"}
+    positional: list[str] = []
+    skip_next = False
+    for index, token in enumerate(tokens):
+        if skip_next:
+            skip_next = False
+            continue
+        if token.startswith("-"):
+            flag, _, inline = token.partition("=")
+            if flag in _UNITTEST_DISCOVER_OPTIONS:
+                if inline:
+                    values[_UNITTEST_DISCOVER_OPTIONS[flag]] = inline
+                elif index + 1 < len(tokens):
+                    values[_UNITTEST_DISCOVER_OPTIONS[flag]] = tokens[index + 1]
+                    skip_next = True
+            continue
+        positional.append(token)
+    for key, value in zip(("start", "pattern", "top"), positional):
+        values[key] = value
+    start = _normalise_target(values["start"])
+    if start is None or "$" in values["pattern"] or "{{" in values["pattern"]:
+        return None
+    targets = sorted(
+        p.relative_to(_REPO_ROOT).as_posix()
+        for p in (_REPO_ROOT / start).glob(values["pattern"])
+        if p.is_file()
+    )
+    return Invocation(workflow, automatic, targets, None)
+
+
 def _ci_invocations() -> list[Invocation]:
     assert _WORKFLOW_DIR.is_dir(), f"no workflow directory at {_WORKFLOW_DIR}"
     invocations: list[Invocation] = []
@@ -345,9 +415,14 @@ def _ci_invocations() -> list[Invocation]:
         folded = text.replace("\\\n", " ")
         for raw in folded.splitlines():
             stripped = raw.strip()
-            if stripped.startswith("#") or "pytest" not in stripped:
+            if stripped.startswith("#"):
                 continue
-            inv = _parse_command(stripped, workflow.name, automatic)
+            if "pytest" in stripped:
+                inv = _parse_command(stripped, workflow.name, automatic)
+            elif "unittest" in stripped:
+                inv = _parse_unittest_discover(stripped, workflow.name, automatic)
+            else:
+                continue
             if inv is not None and inv.targets:
                 invocations.append(inv)
         invocations.extend(_manifest_invocations(text, workflow.name, automatic))

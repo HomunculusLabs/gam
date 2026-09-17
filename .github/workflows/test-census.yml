@@ -24,12 +24,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Verify the census detects planted losses
-        run: python -m unittest discover -s scripts/tests -p test_test_census.py -v
-      - name: Verify source reachability removal policy
-        run: python -m unittest discover -s scripts/tests -p test_source_removal_guard.py -v
-      - name: Verify public API removals are source-graph decisions
-        run: python -m unittest discover -s scripts/tests -p test_public_api_census.py -v
       - name: Positive control against the public-function sweep
         run: |
           set -euo pipefail
@@ -62,8 +56,14 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --no-tags --depth=1 origin a1d610d212a2ba5f2b4c2097260c814bdc45d579
-      - name: Verify the assertion-less-test detector
-        run: python -m unittest discover -s scripts/tests -p test_assertionless_tests.py -v
+      - name: Unit-test every scripts/tests module
+        # One directory-level discovery instead of one step per file, so a module
+        # added to scripts/tests runs on the day it lands. While each file had to
+        # be named here, the #1561 quality-gate tests and the test-only src-item
+        # scanner's tests ran in no job (#1512). It runs after the #2110 blob
+        # fetch because the assertion-less detector's positive-control case reads
+        # that blob.
+        run: python -m unittest discover -s scripts/tests -v
       - name: Positive control against the #2110 incident
         # Same reasoning as the census control above, for the other instrument:
         # a detector that has stopped detecting anything prints exactly what a
