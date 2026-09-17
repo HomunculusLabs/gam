@@ -186,11 +186,47 @@ impl SaeManifoldTerm {
         rho.ard_precisions()
     }
 
+    /// Rows on which each atom's coordinate is a variable of the model (#2933 F27).
+    ///
+    /// A hard-TopK row block holds only the selected atoms' coordinates
+    /// ([`SaeRowLayout::from_topk_gates`]). So `½·log|A|` integrates a coordinate only
+    /// on the rows that select its atom, and the inner solve never moves it on the
+    /// others. The ARD prior's energy, its log partition and their precision
+    /// derivatives are priced on that same slot set, as the support-sparse route
+    /// prices them on its active slots. Entry `k` lists atom `k`'s selecting rows in
+    /// row order. Every other assignment family holds every atom's coordinate on
+    /// every row, which is `None`.
+    pub(crate) fn coordinate_prior_rows(&self) -> Result<Option<Vec<Vec<usize>>>, String> {
+        let AssignmentMode::TopK { k } = self.assignment.mode else {
+            return Ok(None);
+        };
+        let n = self.n_obs();
+        let layout = SaeRowLayout::from_topk_gates(
+            &self.assignments_all_parallel(n)?,
+            k,
+            self.assignment
+                .coords
+                .iter()
+                .map(|coord| coord.latent_dim())
+                .collect(),
+            self.assignment.coord_offsets(),
+        )?;
+        let mut rows = vec![Vec::new(); self.k_atoms()];
+        for (row, active) in layout.active_atoms.iter().enumerate() {
+            for &atom in active {
+                rows[atom].push(row);
+            }
+        }
+        Ok(Some(rows))
+    }
+
     /// Per-atom, per-axis coordinate sum-of-squares `‖t_kj‖² = Σ_i t_{i,k,j}²`.
     ///
     /// This is the data-fit sufficient statistic for the ARD precision update
     /// (the numerator-side `‖t‖²` of the deleted `α = n/‖t‖²` rule). Returned
-    /// per atom as an `Array1` of length `d_k`.
+    /// per atom as an `Array1` of length `d_k`. The sum runs over the rows that hold
+    /// the coordinate ([`Self::coordinate_prior_rows`]), the slot set `ard_value`
+    /// prices and `ard_inverse_traces` sums `tr H⁻¹` over.
     ///
     /// On a *periodic* (Circle) axis the relevant statistic is the von-Mises
     /// energy-equivalent `Σ_i 2/α·V(t_i) = Σ_i (2/κ²)(1−cos κ t_i)` (independent
@@ -198,7 +234,7 @@ impl SaeManifoldTerm {
     /// the Mackay/Fellner–Schall fixed point `α ← n / (sumsq + tr H⁻¹)`
     /// consistent with the actual periodic prior energy rather than the
     /// origin-dependent raw `t²`.
-    pub(crate) fn ard_coord_sumsq(&self) -> Vec<Array1<f64>> {
+    pub(crate) fn ard_coord_sumsq(&self) -> Result<Vec<Array1<f64>>, String> {
         // Horvitz–Thompson row weighting: the `‖t‖²` sufficient statistic is the
         // numerator of the same `α ← n_eff / (Σ sq_equiv + tr H⁻¹)` fixed point the
         // (now weight-aware) `ard_value` energy defines, so it MUST carry the SAME
@@ -206,12 +242,16 @@ impl SaeManifoldTerm {
         // step ranks a different precision than the criterion's energy. `None` ⇒
         // `w_row = 1`, bit-for-bit the historical sum.
         let row_w = self.row_loss_weights.as_deref();
+        let prior_rows = self.coordinate_prior_rows()?;
         let mut out = Vec::with_capacity(self.k_atoms());
         for (atom_idx, coord) in self.assignment.coords.iter().enumerate() {
             let d = coord.latent_dim();
             let periods = self.ard_axis_periods(atom_idx);
+            let atom_rows = prior_rows.as_ref().map(|rows| rows[atom_idx].as_slice());
+            let slots = atom_rows.map_or(coord.n_obs(), <[usize]>::len);
             let mut sq = Array1::<f64>::zeros(d);
-            for row in 0..coord.n_obs() {
+            for slot in 0..slots {
+                let row = atom_rows.map_or(slot, |rows| rows[slot]);
                 let w_row = row_w.map_or(1.0, |w| w[row]);
                 let t = coord.row(row);
                 for axis in 0..d {
@@ -221,7 +261,7 @@ impl SaeManifoldTerm {
             }
             out.push(sq);
         }
-        out
+        Ok(out)
     }
 
     /// Per-atom, per-axis posterior-variance trace `tr_kj(H⁻¹) =
@@ -563,14 +603,14 @@ impl SaeManifoldTerm {
     ) -> Result<Vec<Array1<f64>>, String> {
         self.assignment.validate_rho_domain(rho)?;
         let ard_precisions = self.validated_ard_precisions(rho)?;
-        let n = self.n_obs() as f64;
         // HT row weighting: this is the ρ-derivative of `ard_value` (the `explicit`
         // outer-gradient channel), so it carries the identical per-row inclusion
-        // weight and effective row count `n_eff = Σᵢ wᵢ` as the energy — otherwise
-        // the analytic gradient desyncs from the (now weight-aware) criterion value
-        // on the subsample. `None` ⇒ `w_row = 1`, `n_eff = n`, historical exactly.
+        // weight on the energy and the identical slot count on the normalizer as the
+        // value — otherwise the analytic gradient desyncs from the criterion value.
+        // Both run over the rows that hold the coordinate (#2933 F27,
+        // `Self::coordinate_prior_rows`).
         let row_w = self.row_loss_weights.as_deref();
-        let n_eff = row_w.map_or(n, |w| w.iter().sum::<f64>());
+        let prior_rows = self.coordinate_prior_rows()?;
         let mut out = Vec::with_capacity(self.k_atoms());
         for (atom_idx, coord) in self.assignment.coords.iter().enumerate() {
             let d = coord.latent_dim();
@@ -588,16 +628,20 @@ impl SaeManifoldTerm {
                 rho.log_ard[atom_idx].view(),
                 ard_precisions[atom_idx].view(),
             )?;
+            let atom_rows = prior_rows.as_ref().map(|rows| rows[atom_idx].as_slice());
+            let slots = atom_rows.map_or(coord.n_obs(), <[usize]>::len);
             for axis in 0..d {
                 let alpha = ard_precisions[atom_idx][axis];
                 let period = periods[axis];
                 let mut energy_deriv = 0.0_f64;
-                for row in 0..coord.n_obs() {
+                for slot in 0..slots {
+                    let row = atom_rows.map_or(slot, |rows| rows[slot]);
                     let w_row = row_w.map_or(1.0, |w| w[row]);
                     let t = coord.row(row)[axis];
                     energy_deriv += w_row * ArdAxisPrior::eval(alpha, t, period).value;
                 }
-                atom_out[axis] = energy_deriv + n_eff * partition.log_precision_gradient[axis];
+                atom_out[axis] =
+                    energy_deriv + slots as f64 * partition.log_precision_gradient[axis];
             }
             out.push(atom_out);
         }

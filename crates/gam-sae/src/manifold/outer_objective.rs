@@ -2594,7 +2594,7 @@ impl SaeManifoldOuterObjective {
             ));
         }
 
-        let sumsq = self.term.ard_coord_sumsq();
+        let sumsq = self.term.ard_coord_sumsq()?;
         // Every coordinate below proposes from the COMPLETE analytic derivative of
         // the scalar returned as `cost`: explicit, trace, Occam, rank-response and
         // single-adjoint IFT channels, assembled by the authority the fixed-point

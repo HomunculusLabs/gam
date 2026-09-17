@@ -5242,18 +5242,23 @@ impl SaeManifoldTerm {
         // Design-honesty weights change the relative contribution of rows while
         // preserving total sample mass: `set_row_loss_weights` normalizes them to
         // mean one. The ARD energy therefore uses the per-row weights, while its
-        // log-partition normalizer remains the observed row count exactly.
+        // log-partition normalizer counts the priced coordinate slots exactly.
         let row_w = self.row_loss_weights.as_deref();
-        let n_eff = n as f64;
+        // A hard-TopK coordinate exists only on the rows that select its atom, where
+        // `½·log|A|` integrates it (#2933 F27, see `Self::coordinate_prior_rows`).
+        let prior_rows = self.coordinate_prior_rows()?;
         let mut acc = 0.0;
         for (atom_idx, coord) in self.assignment.coords.iter().enumerate() {
             if rho.log_ard[atom_idx].is_empty() {
                 continue;
             }
+            let atom_rows = prior_rows.as_ref().map(|rows| rows[atom_idx].as_slice());
+            let slots = atom_rows.map_or(n, <[usize]>::len);
+            let slot_count = slots as f64;
             // A reflection-only deck group leaves the prior family and partition
             // unchanged, so the quotient normalizer divides out its sheet count per
-            // row (#2933 F25; see `SaeAtomBasisKind::ard_quotient_log_sheets`).
-            acc -= n_eff
+            // slot (#2933 F25; see `SaeAtomBasisKind::ard_quotient_log_sheets`).
+            acc -= slot_count
                 * self.atoms[atom_idx]
                     .basis_kind()
                     .ard_quotient_log_sheets(coord.latent_dim());
@@ -5280,13 +5285,14 @@ impl SaeManifoldTerm {
                 for factor_axis in axis..axis + support.ambient_axes() {
                     let alpha = ard_precisions[atom_idx][factor_axis];
                     let period = periods[factor_axis];
-                    for row in 0..n {
+                    for slot in 0..slots {
+                        let row = atom_rows.map_or(slot, |rows| rows[slot]);
                         let w_row = row_w.map_or(1.0, |w| w[row]);
                         let v = coord.row(row)[factor_axis];
                         energy += w_row * ArdAxisPrior::eval(alpha, v, period).value;
                     }
                 }
-                acc += energy + n_eff * log_partition;
+                acc += energy + slot_count * log_partition;
                 axis += support.ambient_axes();
             }
         }
