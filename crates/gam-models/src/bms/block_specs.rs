@@ -3113,6 +3113,27 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
     // declined inference (so there is no covariance to begin with) would be told
     // one was *withheld*, which is a different claim and a false one: `Some` on
     // this field must always mean "a covariance existed and was taken away".
+    // gam#2943: the decision is logged from the classification itself, so the
+    // log cannot claim a refusal the classifier did not make. A withheld
+    // covariance says why through `CovarianceDeclined::explain` below.
+    if solved_fit.covariance_conditional.is_some() && latent_z_conditional_calibration.is_some() {
+        let corrected_through = match &empirical_channel {
+            EmpiricalGeneratedRegressorChannel::ClosedForm => {
+                Some("the closed-form standard-normal channel".to_string())
+            }
+            EmpiricalGeneratedRegressorChannel::Empirical(build) => Some(format!(
+                "the global-empirical measure's direct and cross-row channels ({} nodes)",
+                build.grid.nodes.len()
+            )),
+            EmpiricalGeneratedRegressorChannel::Unavailable { .. } => None,
+        };
+        if let Some(channel) = corrected_through {
+            log::info!(
+                "[BMS latent-z] Murphy–Topel generated-regressor covariance: corrected through \
+                 {channel}"
+            );
+        }
+    }
     if solved_fit.covariance_conditional.is_some()
         && latent_z_conditional_calibration.is_some()
         && let EmpiricalGeneratedRegressorChannel::Unavailable {
@@ -3268,12 +3289,11 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
             calibration_marginal_dense.view(),
             vb.view(),
         )?;
-        if let Some(cov) = solved_fit.covariance_conditional.as_mut() {
-            *cov = &*cov + &correction;
-        }
-        if let Some(cov) = solved_fit.covariance_corrected.as_mut() {
-            *cov = &*cov + &correction;
-        }
+        // gam#2943: the correction reaches the inference block's copies and
+        // their standard errors in the same step as the top-level matrices.
+        solved_fit
+            .add_coefficient_covariance_correction(&correction)
+            .map_err(|err| format!("bms generated-regressor: {err}"))?;
         log::info!(
             "[BMS latent-z] Murphy–Topel generated-regressor SE correction applied: \
              p_beta={p_beta} flex_active={flex_active} theta1_dim={} max_diag_inflation={:.3e}",

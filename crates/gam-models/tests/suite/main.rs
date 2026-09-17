@@ -2,6 +2,7 @@
 //! standalone tests/*.rs crate and therefore its own link of gam-models and
 //! its dependency tree. One binary, same tests, same names.
 
+mod bms_generated_regressor_covariance_2943;
 mod bspline_nonzero_anchor_affine_2297;
 mod duchon_grid_fit_and_rotation_2319;
 mod exact_gaussian_boundary_2663;

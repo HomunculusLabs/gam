@@ -191,12 +191,10 @@ pub(crate) fn apply_survival_generated_regressor_correction(
         a_block,
         naive.view(),
     )?;
-    if let Some(covariance) = fit.covariance_conditional.as_mut() {
-        *covariance = &*covariance + &correction;
-    }
-    if let Some(covariance) = fit.covariance_corrected.as_mut() {
-        *covariance = &*covariance + &correction;
-    }
+    // gam#2943: the correction reaches the inference block's copies and their
+    // standard errors in the same step as the top-level matrices.
+    fit.add_coefficient_covariance_correction(&correction)
+        .map_err(|err| format!("survival marginal-slope generated-regressor: {err}"))?;
     log::info!(
         "[survival-marginal-slope latent-z] Murphy–Topel generated-regressor SE correction \
          applied: p_beta={p_beta} theta1_dim={} max_diag_inflation={:.3e}",

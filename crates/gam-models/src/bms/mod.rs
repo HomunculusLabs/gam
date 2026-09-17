@@ -2136,18 +2136,21 @@ pub(crate) fn build_latent_measure_decision(
                 }
                 if !residual_is_standard_normal {
                     // gam#2484: this pair is a legitimate POINT-ESTIMATION
-                    // state, so it is minted rather than refused here -- but a
-                    // later Murphy-Topel generated-regressor covariance request
-                    // is already determined to fail, and it used to fail three
-                    // stages away with no reference back to the decision that
-                    // caused it. Say so at the decision, with the evidence.
+                    // state, so it is minted rather than refused here. Whether
+                    // its Murphy-Topel generated-regressor covariance can be
+                    // corrected is not known at this decision: it depends on the
+                    // fitted measure's build record and on any score-warp or
+                    // link-deviation block, so the covariance step classifies it
+                    // (`classify_empirical_generated_regressor_channel`) and logs
+                    // the outcome from that value. This warning used to predict a
+                    // refusal that gam#2484 removed for the ordinary rigid fit
+                    // (gam#2943).
                     log::warn!(
                         "[{context} latent-z] the calibrated residual FAILED the standard-normal \
                          adequacy gate, so the second-stage latent measure is global-empirical. \
-                         Point estimation is unaffected; a Murphy-Topel generated-regressor \
-                         covariance will be REFUSED for this fit, because that correction needs \
-                         a per-row mixed derivative and an empirical measure built from the \
-                         whole calibrated-residual vector does not have one (gam#2484). \
+                         Point estimation is unaffected; whether the Murphy-Topel \
+                         generated-regressor covariance is corrected or withheld is decided from \
+                         the fitted measure at the covariance step, which logs that decision. \
                          Adequacy ledger (x = statistic / bound, x<=1 passed): {}",
                         residual_adequacy.ledger(),
                     );

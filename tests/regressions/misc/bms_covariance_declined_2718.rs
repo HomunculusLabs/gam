@@ -445,6 +445,52 @@ fn bms_publishes_the_corrected_covariance_on_a_global_empirical_measure_2484() {
             "gam#2484: published standard errors must be finite and non-negative, got {ses:?}"
         );
     }
+
+    // 5. gam#2943: the published standard errors are the published covariance's,
+    //    for both pairs. The correction used to reach only the top-level matrices,
+    //    so the standard errors kept the uncorrected diagonal and every load of the
+    //    saved model refused the fit.
+    for (label, standard_errors, covariance) in [
+        ("conditional", out.fit.beta_standard_errors(), out.fit.beta_covariance()),
+        (
+            "corrected",
+            out.fit.beta_standard_errors_corrected(),
+            out.fit.beta_covariance_corrected(),
+        ),
+    ] {
+        if let Some(standard_errors) = standard_errors {
+            let covariance = covariance.unwrap_or_else(|| {
+                panic!("gam#2943: {label} standard errors are published without their covariance")
+            });
+            for (i, (se, diagonal)) in standard_errors.iter().zip(covariance.diag().iter()).enumerate() {
+                assert!(
+                    (se * se - diagonal).abs() <= 1.0e-12 * diagonal.abs().max(1.0),
+                    "gam#2943: {label} standard error {i} squares to {:.17e} against the covariance \
+                     diagonal {diagonal:.17e}",
+                    se * se
+                );
+            }
+        }
+    }
+
+    // 6. gam#2943: each inference copy equals its top-level matrix bit for bit,
+    //    the condition `UnifiedFitResult::try_from_parts` enforces on every load.
+    if let Some(inference) = out.fit.inference.as_ref() {
+        if let Some(copy) = inference.beta_covariance.as_ref() {
+            assert_eq!(
+                Some(copy.as_array()),
+                out.fit.covariance_conditional.as_ref(),
+                "gam#2943: the inference conditional covariance must equal the top-level matrix"
+            );
+        }
+        if let Some(copy) = inference.beta_covariance_corrected.as_ref() {
+            assert_eq!(
+                Some(copy),
+                out.fit.covariance_corrected.as_ref(),
+                "gam#2943: the inference corrected covariance must equal the top-level matrix"
+            );
+        }
+    }
 }
 
 #[test]

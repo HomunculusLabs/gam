@@ -3484,6 +3484,80 @@ mod assembly_inner_status_gate_tests {
         );
     }
 
+    /// gam#2943: a covariance correction reaches every published copy in one
+    /// step. The marginal-slope Murphy–Topel correction used to add to the
+    /// top-level matrices only, so the inference copies kept the uncorrected
+    /// matrix and every saved-model load refused the fit.
+    #[test]
+    fn covariance_correction_reaches_every_published_copy_2943() {
+        let conditional = Array2::from_shape_vec((2, 2), vec![2.0, 0.3, 0.3, 3.0]).expect("2x2");
+        let corrected = Array2::from_shape_vec((2, 2), vec![2.5, 0.4, 0.4, 3.5]).expect("2x2");
+        let correction = Array2::from_shape_vec((2, 2), vec![0.5, -0.1, -0.1, 0.25]).expect("2x2");
+        let mut parts = parts_with_inner_status(PirlsStatus::Converged);
+        parts.covariance_conditional = Some(conditional.clone());
+        parts.covariance_corrected = Some(corrected.clone());
+        if let Some(inference) = parts.inference.as_mut() {
+            inference.beta_covariance = Some(gam_problem::dispersion_cov::PhiScaledCovariance::wrap(
+                conditional.clone(),
+            ));
+            inference.beta_standard_errors = Some(conditional.diag().mapv(f64::sqrt));
+            inference.beta_covariance_corrected = Some(corrected.clone());
+            inference.beta_standard_errors_corrected = Some(corrected.diag().mapv(f64::sqrt));
+        }
+        let mut fit = UnifiedFitResult::try_from_parts(parts).expect("a consistent fit mints");
+
+        let wrong_shape = Array2::<f64>::zeros((3, 3));
+        assert!(
+            fit.add_coefficient_covariance_correction(&wrong_shape).is_err(),
+            "a correction of the wrong shape must be refused"
+        );
+        fit.add_coefficient_covariance_correction(&correction)
+            .expect("the correction applies");
+
+        let top_conditional = fit.covariance_conditional.clone().expect("conditional covariance");
+        let top_corrected = fit.covariance_corrected.clone().expect("corrected covariance");
+        assert_eq!(top_conditional, &conditional + &correction);
+        assert_eq!(top_corrected, &corrected + &correction);
+        let inference = fit.inference.as_ref().expect("inference block");
+        assert_eq!(
+            inference.beta_covariance.as_ref().expect("inference conditional copy").as_array(),
+            &top_conditional,
+            "the inference conditional copy must equal the top-level matrix bit for bit"
+        );
+        assert_eq!(
+            inference.beta_covariance_corrected.as_ref().expect("inference corrected copy"),
+            &top_corrected,
+            "the inference corrected copy must equal the top-level matrix bit for bit"
+        );
+        for (label, standard_errors, covariance) in [
+            ("conditional", fit.beta_standard_errors(), fit.beta_covariance()),
+            ("corrected", fit.beta_standard_errors_corrected(), fit.beta_covariance_corrected()),
+        ] {
+            let standard_errors = standard_errors.expect("published standard errors");
+            let covariance = covariance.expect("published covariance");
+            for (i, (se, diagonal)) in standard_errors.iter().zip(covariance.diag().iter()).enumerate() {
+                assert!(
+                    (se * se - diagonal).abs() <= 1.0e-12 * diagonal.abs().max(1.0),
+                    "{label} standard error {i} squares to {:.17e} against the diagonal {diagonal:.17e}",
+                    se * se
+                );
+            }
+        }
+
+        // The corrected state mints again under the strict invariant.
+        let mut round_trip = parts_with_inner_status(PirlsStatus::Converged);
+        round_trip.covariance_conditional = fit.covariance_conditional.clone();
+        round_trip.covariance_corrected = fit.covariance_corrected.clone();
+        if let (Some(target), Some(source)) = (round_trip.inference.as_mut(), fit.inference.as_ref()) {
+            target.beta_covariance = source.beta_covariance.clone();
+            target.beta_standard_errors = source.beta_standard_errors.clone();
+            target.beta_covariance_corrected = source.beta_covariance_corrected.clone();
+            target.beta_standard_errors_corrected = source.beta_standard_errors_corrected.clone();
+        }
+        UnifiedFitResult::try_from_parts(round_trip)
+            .expect("the corrected covariance copies must mint again under try_from_parts");
+    }
+
     #[test]
     fn zero_dimensional_outer_artifacts_canonicalize_to_fixed_evidence() {
         let mut parts = parts_with_inner_status(PirlsStatus::Converged);
@@ -4933,6 +5007,91 @@ impl UnifiedFitResult {
         self.inference
             .as_ref()
             .and_then(|inf| inf.beta_standard_errors_corrected.as_ref())
+    }
+
+    /// Add one correction matrix to every published coefficient covariance in
+    /// a single step: the top-level `covariance_conditional` and
+    /// `covariance_corrected`, and their copies in the inference block, whose
+    /// standard errors are re-derived from the corrected matrices.
+    ///
+    /// [`Self::try_from_parts`] requires each inference copy to equal its
+    /// top-level matrix bit for bit. A correction added to the top-level
+    /// matrices alone (gam#2943: the marginal-slope Murphy–Topel
+    /// generated-regressor correction) produced fits that every saved-model
+    /// load refused, and published uncorrected standard errors in the
+    /// meantime. Each copy here is a clone of the one corrected matrix. The
+    /// frequentist covariance and the smoothing-correction matrix are separate
+    /// estimators and stay as they are.
+    pub fn add_coefficient_covariance_correction(
+        &mut self,
+        correction: &Array2<f64>,
+    ) -> Result<(), EstimationError> {
+        for (label, covariance) in [
+            ("conditional", self.covariance_conditional.as_ref()),
+            ("corrected", self.covariance_corrected.as_ref()),
+        ] {
+            if let Some(covariance) = covariance
+                && covariance.dim() != correction.dim()
+            {
+                crate::bail_invalid_estim!(
+                    "covariance correction of shape {:?} does not match the {label} covariance of shape {:?}",
+                    correction.dim(),
+                    covariance.dim()
+                );
+            }
+        }
+        if let Some(covariance) = self.covariance_conditional.as_mut() {
+            *covariance = &*covariance + correction;
+        }
+        if let Some(covariance) = self.covariance_corrected.as_mut() {
+            *covariance = &*covariance + correction;
+        }
+        let Some(inference) = self.inference.as_mut() else {
+            return Ok(());
+        };
+        let standard_errors = |covariance: &Array2<f64>, label: &str| {
+            gam_problem::dispersion_cov::se_from_covariance(covariance).map_err(|reason| {
+                EstimationError::InvalidInput(format!(
+                    "corrected {label} covariance has an invalid diagonal: {reason}"
+                ))
+            })
+        };
+        match self.covariance_conditional.as_ref() {
+            Some(conditional) => {
+                if inference.beta_covariance.is_some() {
+                    inference.beta_covariance = Some(
+                        gam_problem::dispersion_cov::PhiScaledCovariance::wrap(conditional.clone()),
+                    );
+                }
+                if inference.beta_standard_errors.is_some() {
+                    inference.beta_standard_errors = Some(standard_errors(conditional, "conditional")?);
+                }
+            }
+            None if inference.beta_covariance.is_some() => {
+                crate::bail_invalid_estim!(
+                    "UnifiedFitResult inference conditional covariance requires top-level covariance_conditional"
+                );
+            }
+            None => {}
+        }
+        match self.covariance_corrected.as_ref() {
+            Some(corrected) => {
+                if inference.beta_covariance_corrected.is_some() {
+                    inference.beta_covariance_corrected = Some(corrected.clone());
+                }
+                if inference.beta_standard_errors_corrected.is_some() {
+                    inference.beta_standard_errors_corrected =
+                        Some(standard_errors(corrected, "smoothing-corrected")?);
+                }
+            }
+            None if inference.beta_covariance_corrected.is_some() => {
+                crate::bail_invalid_estim!(
+                    "UnifiedFitResult inference corrected covariance requires top-level covariance_corrected"
+                );
+            }
+            None => {}
+        }
+        Ok(())
     }
 
     /// Corrected-preferred, definition-consistent coefficient uncertainty for
