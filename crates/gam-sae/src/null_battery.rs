@@ -125,17 +125,17 @@ pub fn label_shuffle_permutation(n_rows: usize, seed: u64, draw: u64) -> Vec<usi
 /// Marchenko–Pastur reconstruction-rank edge (#2262): the per-observation
 /// reconstruction energy `R·(1+√(p/n_eff))²` that the production rank charge
 /// uses to count a decoder direction in the hard reconstruction rank at
-/// `(n_eff, p, R)`. This is the
-/// identical closed-form noise edge the production rank charge thresholds on
-/// (`crate::manifold::construction::realised_rank_charge_dof`, and its
-/// audit twin
-/// `crate::manifold::wbic_audit::ReconSpectrum::mp_reconstruction_rank_edge`) —
+/// `(n_eff, p, R)` (`crate::manifold::construction::realised_rank_charge_dof`),
 /// surfaced standalone so a caller can report the rank-charge diagnostic
-/// alongside a shape verdict without needing a fitted decoder Gram. It is not
-/// an information-theoretic detection limit and the predictive 2-D shape race
-/// does not threshold on it: a direction below this edge is omitted from the
-/// hard reconstruction-rank count, but that fact neither negates nor overrides
-/// a shape verdict.
+/// alongside a shape verdict without needing a fitted decoder Gram. It is the
+/// upper Marchenko–Pastur edge of the sample covariance of an `n_eff × p` matrix
+/// of independent variance-`R` noise. A fitted, basis-projected, gated
+/// reconstruction spectrum is not such a matrix, so this edge is a rank
+/// diagnostic, not a calibrated false-rank boundary (the conditional noise-only
+/// law is in `crate::manifold::wbic_audit`), and not an information-theoretic
+/// detection limit. The predictive 2-D shape race does not threshold on it: a
+/// direction below this edge is omitted from the hard reconstruction-rank
+/// count, but that fact neither negates nor overrides a shape verdict.
 pub fn mp_reconstruction_rank_edge(n_eff: f64, p: f64, r_floor: f64) -> Result<f64, String> {
     if !n_eff.is_finite() || n_eff <= 0.0 {
         return Err(format!(

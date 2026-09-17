@@ -1,114 +1,57 @@
-//! WBIC audit for the singular manifold-atom model-selection charge (Part-2
-//! statistical-debt closure).
+//! Reconstruction spectrum behind the production rank charge (#2933 F30–F32).
 //!
-//! WHY. The production birth/death charge is the Laplace/BIC rank charge
-//! `½·d_eff·log N_eff` (see [`super::construction::realised_rank_charge_dof`]; #2a:
-//! the occupancy-aware `N_eff = Σ_row a²`, not the global `n`), with
-//! `d_eff = rank_chargeable · basis_edf`. Two integer ranks must not be
-//! conflated. `rank_mp` is the Marchenko–Pastur hard count of reconstruction-
-//! Gram eigenvalues above the noise edge. Production uses `rank_chargeable`:
-//! it equals `rank_mp` when any direction clears the edge, promotes an MP-rank-zero
-//! but positive spectrum to rank one, and leaves only an exactly zero spectrum
-//! at zero (#2258). Stronger state-aware disappearance is certified upstream.
-//! The `½·(·)·log n` Laplace charge is the correct
-//! free-energy penalty ONLY for a
-//! REGULAR statistical model, where the log-likelihood has a non-degenerate
-//! Hessian at the MLE and the marginal likelihood expands as
-//! `−log Z = n·L_n(ŵ) + (d/2)·log n + O(1)`. Manifold atoms are SINGULAR: gauge
-//! orbits (the harmonic/rotation freedom of a chart), rank deficiencies (a
-//! decoder direction collapsing toward the noise floor), and boundary solutions
-//! (an amplitude pinned at zero) all break Hessian non-degeneracy. Watanabe's
-//! singular-learning theory replaces the `d/2` coefficient with the LEARNING
-//! COEFFICIENT (real log-canonical threshold) `λ ≤ d/2`, and the free energy is
-//! `−log Z = n·L_n(ŵ) + λ·log n + o(log n)`. The hard MP charge can
-//! over-price a barely resolved direction, but there is no universal finite-sample
-//! ordering: WBIC also sums fractional mass from every sub-edge direction, while
-//! production separately applies the #2258 minimum-rank promotion.
-//!
-//! THE ESTIMATOR (WBIC at inverse temperature `β = 1/log n`). Watanabe's Widely
-//! Applicable BIC is the tempered-posterior expected log loss
+//! WHAT PRODUCTION CHARGES. The penalized quasi-Laplace criterion adds, per atom `k`,
 //!
 //! ```text
-//! WBIC = E_β[ n·L_n(w) ],   posterior ∝ exp(−β·n·L_n(w))·π(w),   β = 1/log n,
+//! C_k    = ½ · r_k · edf_k · log max(N_eff,k, 1)
+//! N_eff,k = Σ_i a_ik²,   G_k = Φ_kᵀ diag(a_k²) Φ_k,   edf_k = tr((G_k + λ_k S_k)⁻¹ G_k)
+//! μ_j    = σ_j(G_k^½ B_k)² / N_eff,k,   e = R · (1 + √(p / N_eff,k))²
+//! r_k    = #{j : μ_j > e}, promoted to 1 when that count is 0 but some μ_j > 0 (#2258)
 //! ```
 //!
-//! which satisfies `E[WBIC] = n·L_n(ŵ) + λ·log n + o(log n)` for ANY model,
-//! regular or singular. The implied complexity charge is `WBIC − n·L_n(ŵ) =
-//! λ̂·log n`. We estimate `λ̂` in closed form (no MCMC) by a Laplace-at-temperature
-//! expansion that is EXACT for the decoder model, because the reconstruction loss
-//! is quadratic in the decoder coefficients:
+//! This is a named criterion convention: a BIC-shaped charge on a thresholded
+//! reconstruction rank. It is not a WBIC value, and nothing in this crate proves that
+//! `r_k · edf_k` equals a real log-canonical threshold. The physical reconstruction
+//! rank `#{μ_j > e}`, the chargeable rank `r_k`, the storage dimension `m · p`, the
+//! basis EDF `edf_k`, the intrinsic manifold dimension and the RLCT are different
+//! quantities.
 //!
-//!   Take one reconstruction direction `k` with reconstruction-Gram eigenvalue
-//!   `μ_k` (per-observation signal+noise energy, `= sv_k²/n_eff`) against the MP
-//!   noise edge `e = R·(1 + √(p/n_eff))²`. Its scalar amplitude `α_k` has
-//!   tempered-LIKELIHOOD precision `h_k = β·g_k/R` with design energy
-//!   `g_k = n_eff·μ_k`. The stated WBIC posterior tempers ONLY the likelihood —
-//!   `π(w)` enters at full strength — so the REML "toward no effect" Gaussian
-//!   prior keeps its UNtempered precision, fixed (with NO new constant) to the
-//!   SAME noise edge the hard count uses: `τ_k = g_edge/R`, `g_edge = n_eff·e`.
-//!   The tempered-Gaussian learning-coefficient contribution is
+//! WHAT THE EDGE IS. `e` is the upper Marchenko–Pastur edge of the sample covariance
+//! of an `N_eff × p` matrix of independent variance-`R` noise. The spectrum it
+//! thresholds is not such a matrix. Conditional on coordinates, gates, dispersion and
+//! the other atoms, a noise-only target `E` with independent `N(0, R)` entries gives
+//! the ridge decoder `B̂ = (G + λS)⁻¹ Φᵀ diag(a) E`, so `M = G^½ B̂` has `p`
+//! independent `N(0, R·C)` columns with `C = G^½ (G+λS)⁻¹ G (G+λS)⁻¹ G^½`, and
+//! `M Mᵀ ~ Wishart_m(p, R·C)`. That law is scaled by `m`, `p` and `C`, not by
+//! `N_eff`, and coordinate/gate fitting and selection add dependence it omits. `e`
+//! is therefore a rank diagnostic, not a calibrated false-rank boundary or an
+//! evidence dimension.
 //!
-//! ```text
-//! λ̂_k = ½ · h_k / (h_k + τ_k) = ½ · β·g_k/(β·g_k + g_edge)
-//!      = ½ · μ_k/(μ_k + e·log n_eff).
-//! ```
+//! BRANCHES. `r_k` is an integer, so `C_k` is piecewise smooth in the fitted state:
+//! it jumps by `½ · edf_k · log N_eff,k` for every unit change of `r_k` when a
+//! direction crosses `μ_j = e`. `production_rank_charge_derivative` differentiates
+//! one fixed branch; it is not a derivative across a crossing.
 //!
-//!   `R` and the raw `n_eff` cancel; the `log n_eff` from `β = 1/log n_eff` does
-//!   NOT — it is exactly Watanabe's temperature and dropping it (by tempering the
-//!   prior too, as this module once did) silently forfeits the WBIC theorem the
-//!   estimator's name invokes, over-counting every near-edge direction by up to
-//!   `log n_eff`. The soft count is a SIGMOID in `μ_k/(e·log n_eff)` replacing
-//!   the hard step `1[μ_k > e]`. It recovers the regular limit exactly (a
-//!   direction far above the tempered edge contributes `½`, so a full-rank atom
-//!   recovers `½·d_eff·log n = BIC`) and discounts singular directions smoothly
-//!   (`μ_k → 0 ⇒ 0`). The soft COUNT has its midpoint at
-//!   `μ_k = e·log n_eff` (`λ̂_k = ¼` there); this is not a crossing with
-//!   the discontinuous hard step. `n_eff` is floored at Euler's number so
-//!   `log n_eff ≥ 1` and the tempered edge is never softer than the hard MP edge.
-//!
-//! CHARGES.
-//! ```text
-//! rank_mp = Σ_k 1[μ_k > e]                         (integer MP reconstruction count)
-//! rank_chargeable = rank_mp,                         if rank_mp > 0
-//!                 = 1,                               if max μ > 0
-//!                 = 0,                               if every μ = 0
-//! rank_soft = Σ_k μ_k/(μ_k + e·log n_eff)          (WBIC tempered count)
-//! C_mp   = ½ · rank_mp         · basis_edf · log N_eff (diagnostic)
-//! C_prod = ½ · rank_chargeable · basis_edf · log N_eff (production)
-//! C_wbic = ½ · rank_soft       · basis_edf · log N_eff (diagnostic)
-//! ```
-//! #2a — the log-sample-size is the atom's OCCUPANCY-aware effective sample size
-//! `N_eff = Σ_row a²` (the same `n_eff` the MP edge already uses), NOT the global
-//! row count `n`. `N_eff` is the Fisher information the gated atom actually
-//! accumulates, so it is the honest BIC scale and it makes the charge invariant to
-//! appending rows on which the atom's gate is OFF (inert-row invariance); `log n`
-//! over-charges every atom by `½·d_eff·log(n/N_eff)`, worst for sparse selective
-//! atoms.
-//! `basis_edf = tr(G(G+λS)⁻¹)` is ALREADY a graded (Watanabe-compatible) effective
-//! count of basis functions. The audit reports both integer ranks, both hard
-//! charges, and the signed `C_prod − C_wbic` delta. The sign is not assumed:
-//! either charge can be larger near the MP edge.
-//!
-//! This module is an AUDIT: it does NOT change the default charge. It computes the
-//! reconstruction spectrum the SAME way the production core does and classifies
-//! reconstruction rank versus chargeability through the SAME shared primitive (verified
-//! against [`super::construction::realised_rank_charge_dof`] for both resolved
-//! and weak-signal atoms in the tests).
+//! A RETIRED DERIVATION. This module once documented a tempered soft count
+//! `½ μ / (μ + e · log N_eff)` as an exact closed-form WBIC coefficient. It is not
+//! one. For a quadratic loss `L(w) = L(ŵ) + ½ h (w − ŵ)²`, a fixed prior
+//! `N(0, 1/τ)` and inverse temperature `β`, the tempered posterior has mean
+//! `m_β = β h ŵ / (β h + τ)` and variance `v_β = 1 / (β h + τ)`, and
+//! `E_β[L(w)] − L(ŵ) = ½ h [(m_β − ŵ)² + v_β]`. The soft count kept only `v_β`: at
+//! `h = τ = β = 1`, `ŵ = 2` it gives 0.25 where the expectation is 0.75. Its prior
+//! precision also grew with `N_eff`, and a likelihood that is quadratic conditional
+//! on coordinates does not make the joint decoder/coordinate model Gaussian.
 
 use gam_linalg::faer_ndarray::{FaerEigh, FaerSvd};
 use ndarray::Array2;
 
 use super::Side;
 
-/// The reconstruction spectrum of ONE atom — the shared substrate both charges
-/// price. `mu` are the reconstruction-Gram eigenvalues `sv(diag(√λ)·Uᵀ·D)²/n_eff`
-/// (with `(λ,U)=eigh(G)`), `edge` the Marchenko–Pastur reconstruction-rank edge
-/// `R·(1+√(p/n_eff))²`, `dispersion` is `R`, and
-/// `basis_edf = tr(G(G+λS)⁻¹)` is the ridge-trace effective basis count. This
-/// is exactly the decomposition inside
-/// `super::construction::realised_rank_charge_dof`, surfaced so the WBIC soft
-/// count, hard MP reconstruction count, and production chargeable count can be
-/// inspected without changing the production criterion.
+/// The reconstruction spectrum of ONE atom. `mu` are the reconstruction-Gram
+/// eigenvalues `sv(diag(√λ)·Uᵀ·D)²/n_eff` (with `(λ,U)=eigh(G)`) and `edge` the
+/// Marchenko–Pastur reconstruction-rank edge `R·(1+√(p/n_eff))²`. This is the
+/// decomposition inside `super::construction::realised_rank_charge_dof`, surfaced
+/// so the rank-charge derivative classifies the same branch the value prices.
 #[derive(Clone, Debug)]
 pub struct ReconSpectrum {
     /// Reconstruction-Gram eigenvalues (per-observation signal+noise energy).
@@ -142,10 +85,9 @@ impl ReconSpectrum {
 /// Build the reconstruction spectrum from an atom's weighted basis Gram
 /// `gram = Φᵀdiag(a²)Φ` (`m×m`), decoder `D` (`m×p`), effective sample size
 /// `n_eff = Σ_row a²`, output dim `p_out`, noise floor `r_floor` (dispersion R),
-/// and smoothness `(lam_smooth, smooth_penalty)`. Mirrors
-/// `super::construction::realised_rank_charge_dof` byte-for-byte on the shared
-/// quantities (checked in the parity test), returning the spectrum instead of the
-/// collapsed `rank_eff · basis_edf`.
+/// and smoothness `(lam_smooth, smooth_penalty)`. Repeats the spectrum arithmetic
+/// of `super::construction::realised_rank_charge_dof`, returning the spectrum
+/// instead of the collapsed `rank_eff · basis_edf`.
 pub(crate) fn recon_spectrum(
     gram: &Array2<f64>,
     decoder: &Array2<f64>,

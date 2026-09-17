@@ -32,10 +32,11 @@
 //!   transport of an elliptical atom is forced to be a phase shift `+-theta+phi`;
 //!   the residual gauge obstruction is the atom's linear stabilizer.
 //!   Grounding in `chart_canonicalization`, `certificate`.
-//! * **Symmetry is charge.** The rank charge is a running complexity
-//!   `lambda(n) = d(-log Z)/d(log n)`; hard rank, the WBIC soft count, and the
-//!   RLCT are three regimes of one object, scaled by the atom's occupancy
-//!   `n_eff`. Grounding in `construction`, `wbic_audit`.
+//! * **Rank is charged.** The rank charge `1/2 * r * edf * ln(n_eff)` prices a
+//!   thresholded reconstruction rank on the atom's occupancy scale `n_eff`. It is
+//!   a named criterion convention: hard rank, basis EDF and a singular learning
+//!   coefficient are distinct quantities and are not identified with one another.
+//!   Grounding in `construction`, `wbic_audit`.
 //!
 //! Learnability trichotomy: structure resolves in the strict order existence ->
 //! dimension -> topology, and *fidelity cannot buy topology, only occupancy can*

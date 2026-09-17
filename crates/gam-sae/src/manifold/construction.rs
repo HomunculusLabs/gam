@@ -11,40 +11,26 @@ use gam_linalg::faer_ndarray::FaerEigh;
 use gam_math::special::bessel_i0_centered_terms_from_log_abs;
 use super::fit_drivers::GaugeOrbitDescent;
 
-// ── Theorem K: the rank charge is a RUNNING COMPLEXITY λ(n) ──────────────────
+// ── The rank charge is a named criterion convention (#2933 F30–F32) ──────────
 //
-// The birth/death evidence charge on an atom is not an ad-hoc penalty; it is one
-// evaluation of the running (marginal-likelihood) complexity
-//
-//     λ(n) := d(−log Z_n) / d(log n),
-//
-// the local slope of the log marginal likelihood in log sample size. Watanabe's
-// singular-learning theory says −log Z_n = n·L_n(ŵ) + λ·log n + o(log n), so λ IS
-// the coefficient of log n in the evidence. Theorem K observes that the THREE
-// quantities this code juggles are the SAME object λ evaluated in three regimes:
-//
-//   • HARD MP reconstruction rank (n → ∞ limit, atom well above the noise edge):
-//     every resolved decoder direction is a regular parameter,
-//     λ → ½·rank_reconstructed·basis_edf = ½·d_eff.
-//   • WBIC SOFT count (finite n, atom NEAR the Marchenko–Pastur edge): the
-//     audit-only `wbic_audit` report records the tempered fractional count. It
-//     is diagnostic, not an alternative production criterion.
-//   • RLCT (SINGULAR truth, a symmetry orbit or a null atom): λ drops below ½·d
-//     to the real log-canonical threshold. The null atom (truth B*=0) has λ=½ from
-//     the amplitude singularity of a²‖B‖² — see the veto in `penalized_quasi_laplace_criterion`.
-//
-// Soft → hard away from the edge (every sigmoid → 1) and soft → RLCT at singular
-// truths (sigmoids → 0), so the single ledger `λ(n_eff)·ln n_eff` interpolates all
-// three regimes continuously. The log-scale is the OCCUPANCY-corrected `ln n_eff`
-// (Fisher information actually accumulated by a gated atom), never the global row
-// count — see the #2a inert-row axiom in `penalized_quasi_laplace_criterion`.
+// Each atom's birth/death evidence charge is `½·r_k·edf_k·ln max(N_eff,k, 1)`,
+// where `r_k` is the chargeable reconstruction rank thresholded at the
+// Marchenko–Pastur edge and `edf_k` is the ridge-trace basis EDF. It has the shape
+// of the regular-model BIC term `(d/2)·ln n` with `d = r_k·edf_k` on the
+// occupancy-corrected log scale `ln N_eff,k` (the #2a inert-row axiom in
+// `penalized_quasi_laplace_criterion`). Singular learning theory replaces `d/2` by
+// a learning coefficient, but nothing in this crate proves that `½·r_k·edf_k` is
+// that coefficient for the joint decoder/coordinate/gate model, and the MP edge is
+// not a calibrated boundary for the fitted, projected, gated reconstruction it
+// thresholds. `wbic_audit` states what the edge is and what the noise-only law of
+// that spectrum looks like. Physical rank, chargeable rank, storage dimension, EDF,
+// intrinsic dimension and RLCT stay distinct quantities.
 //
 // The production criterion has one charge currency: the chargeable-rank branch.
 // It equals the hard MP reconstruction rank when at least one direction clears the edge;
 // #2258 promotes an MP-rank-zero but numerically alive decoder to the minimum
-// chargeable rank one. Keeping an un-differentiated soft alternative would make
-// value and analytic gradient describe different objectives, so the fractional
-// WBIC count remains audit-only.
+// chargeable rank one. The charge is integer-branched, so its analytic derivative
+// holds the branch fixed and is not a derivative across an edge crossing.
 
 /// #9 streaming rank-charge inputs, accumulated in a SINGLE pass through
 /// `SaeManifoldTerm::streaming_exact_arrow_log_det_with_lane_and_system`: the

@@ -188,7 +188,7 @@ impl KSelectionMode {
 /// Adding an atom lowers the code term by the reconstruction it buys and raises
 /// the dictionary term by exactly one atom's storage, `d_eff,atom · ln n_eff`
 /// nats. That storage is `2·` the per-atom rank charge `½·d_eff·ln n_eff` the
-/// WBIC / rank-charge accounting prices (the factor of two is the
+/// rank-charge accounting prices (the factor of two is the
 /// storage-vs-evidence convention). One nat of log-persistence per active row
 /// buys one nat of model evidence per unit codimension — persistence IS bits,
 /// and the LOG-length is the unique parameterisation in which storage is
