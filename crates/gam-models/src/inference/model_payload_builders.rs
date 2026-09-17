@@ -2126,6 +2126,12 @@ fn payload_for_survival_marginal_slope(
                         .to_string(),
                 );
             }
+            if let Some(reason) = joint_latent_law_calibration_save_refusal(
+                persisted_rank_int.as_ref(),
+                persisted_conditional.as_ref(),
+            ) {
+                return Err(reason.to_string());
+            }
             if law.conditional.is_some() && !ms_result.latent_conditioning_reproducible {
                 return Err(
                     "survival marginal-slope joint latent law transports its law by a conditional \
@@ -2215,6 +2221,22 @@ fn payload_for_survival_marginal_slope(
         payload.survival_marginal_slope_joint_latent_law = Some(law);
     }
     Ok(payload)
+}
+
+/// Why a fit anchored on the joint latent law of `K ≥ 2` scores cannot be saved
+/// with the latent-score calibrations it persisted, or `None` when it can
+/// (gam#2929). The saved joint-law contract replays the anchor on the raw score
+/// columns, so a model whose scores were calibrated before the fit would predict
+/// on scores other than the ones it was fitted on.
+fn joint_latent_law_calibration_save_refusal(
+    rank_int: Option<&crate::bms::LatentZRankIntCalibration>,
+    conditional: Option<&crate::bms::LatentZConditionalCalibration>,
+) -> Option<&'static str> {
+    (rank_int.is_some() || conditional.is_some()).then_some(
+        "survival marginal-slope K ≥ 2 model calibrated its scores before the fit, and the joint \
+         latent law's saved contract replays the anchor on the raw score columns: saving is \
+         refused rather than writing a model whose prediction evaluates different scores",
+    )
 }
 
 fn payload_for_survival_transformation(
@@ -2780,6 +2802,55 @@ fn payload_for_latent_window(
             noise_offset_column: fit_config.noise_offset_column.clone(),
         },
     ))
+}
+
+#[cfg(test)]
+mod joint_latent_law_save_tests {
+    use super::*;
+
+    /// A joint-law model refuses to save by name when its score column carries a
+    /// persisted rank-INT or conditional location-scale calibration, and saves
+    /// when it carries neither.
+    #[test]
+    fn joint_law_model_with_a_calibrated_score_refuses_to_save_2929() {
+        assert!(
+            joint_latent_law_calibration_save_refusal(None, None).is_none(),
+            "an uncalibrated joint-law model must save"
+        );
+        let z = ndarray::Array1::from_vec(vec![-1.3, -0.4, 0.2, 0.9, 1.7, 2.8]);
+        let weights = ndarray::Array1::from_elem(z.len(), 1.0);
+        let rank_int = crate::bms::LatentZRankIntCalibration::fit(&z, &weights)
+            .expect("rank-INT calibration");
+        let conditional = crate::bms::LatentZConditionalCalibration {
+            mean_coeffs: vec![0.1, 0.4],
+            var_coeffs: Vec::new(),
+            basis_ncols: 1,
+            var_floor: 1e-6,
+            homoskedastic_var: 1.0,
+            post_mean: 0.0,
+            post_sd: 1.0,
+            theta1_cov: ndarray::Array2::zeros((0, 0)),
+        };
+        for (label, reason) in [
+            (
+                "rank-INT",
+                joint_latent_law_calibration_save_refusal(Some(&rank_int), None),
+            ),
+            (
+                "conditional location-scale",
+                joint_latent_law_calibration_save_refusal(None, Some(&conditional)),
+            ),
+        ] {
+            let reason = reason.unwrap_or_else(|| {
+                panic!("a {label} calibration must refuse the joint-law save")
+            });
+            assert!(
+                reason.contains("model calibrated its scores before the fit")
+                    && reason.contains("saving is refused"),
+                "{label}: unexpected refusal {reason}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

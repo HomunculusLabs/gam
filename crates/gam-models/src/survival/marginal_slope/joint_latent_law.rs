@@ -602,6 +602,32 @@ fn compress_joint_sample(
     Ok((nodes, node_weights))
 }
 
+/// Why a per-score fit over `K ≥ 2` scores cannot anchor on the joint latent
+/// law under the latent measures the gate settled on, or `None` when it can.
+///
+/// The joint law transports one pooled residual law by `μ + L(a)·ε`: a moving
+/// covariance reaches each row's law, a moving mean or shape does not. A
+/// local-empirical measure is the gate's finding that a score's conditional law
+/// moves on the span, so the joint law would anchor on a law other than the one
+/// the measure estimated.
+pub(crate) fn joint_latent_law_measure_refusal(
+    score_dim: usize,
+    per_score_measure: &[crate::bms::LatentMeasureKind],
+) -> Option<String> {
+    per_score_measure
+        .iter()
+        .any(|measure| matches!(measure, crate::bms::LatentMeasureKind::LocalEmpirical { .. }))
+        .then(|| {
+            format!(
+                "a local-empirical latent law on a score of a per-score slope over K={score_dim} \
+                 scores is refused: the joint law transports one pooled residual law by \
+                 μ + L(a)·ε, which follows a moving covariance but not a moving mean or shape of \
+                 a score's conditional law, so it would anchor on a law other than the one the \
+                 latent measure estimated"
+            )
+        })
+}
+
 /// Build the joint law of the score vector the fit consumes and its runtime.
 ///
 /// `scores` are the calibrated scores the row program sees; `covariance` is the
@@ -3272,6 +3298,43 @@ mod joint_latent_law_tests {
             }
             eprintln!(
                 "[2929 dH vs FD] K=12 anchored={anchored} max|dH|={scale:.3e} worst relative gap={worst:.3e}"
+            );
+        }
+    }
+
+    /// A local-empirical measure on any score of a `K ≥ 2` per-score fit refuses
+    /// the joint law by name; standard-normal and global-empirical measures do
+    /// not. The measures are read through their persisted serde form.
+    #[test]
+    fn joint_law_refuses_a_local_empirical_score_measure_2929() {
+        use crate::bms::LatentMeasureKind;
+        let grid = r#"{"nodes": [-1.0, 1.0], "weights": [0.5, 0.5]}"#;
+        let local: LatentMeasureKind = serde_json::from_str(&format!(
+            r#"{{"kind": "local-empirical", "feature_cols": [0], "centers": [[0.0], [1.0]], "grids": [{grid}, {grid}], "top_k": 1, "bandwidth": 1.0}}"#
+        ))
+        .expect("local-empirical measure");
+        let global: LatentMeasureKind =
+            serde_json::from_str(&format!(r#"{{"kind": "global-empirical", "grid": {grid}}}"#))
+                .expect("global-empirical measure");
+        assert!(matches!(local, LatentMeasureKind::LocalEmpirical { .. }));
+        assert!(matches!(global, LatentMeasureKind::GlobalEmpirical { .. }));
+        for k in [2, 3, 12] {
+            let mut measures = vec![global.clone(); k];
+            measures[0] = LatentMeasureKind::StandardNormal;
+            assert!(
+                joint_latent_law_measure_refusal(k, &measures).is_none(),
+                "K={k}: standard-normal and global-empirical scores anchor on the joint law"
+            );
+            measures[k - 1] = local.clone();
+            let reason = joint_latent_law_measure_refusal(k, &measures).unwrap_or_else(|| {
+                panic!("K={k}: a local-empirical score must refuse the joint law")
+            });
+            assert!(
+                reason.starts_with(&format!(
+                    "a local-empirical latent law on a score of a per-score slope over K={k} \
+                     scores is refused"
+                )) && reason.contains("moving mean or shape"),
+                "K={k}: unexpected refusal {reason}"
             );
         }
     }

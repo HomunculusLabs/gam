@@ -354,6 +354,12 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             .iter()
             .any(|measure| measure.is_empirical())
         {
+            if let Some(reason) = joint_latent_law_measure_refusal(
+                spec.z.ncols(),
+                &latent_calibration.per_score_measure,
+            ) {
+                return Err(SurvivalMarginalSlopeError::UnsupportedConfiguration { reason }.into());
+            }
             let (persisted, runtime) = build_joint_latent_law(
                 spec.z.view(),
                 spec.weights.view(),
