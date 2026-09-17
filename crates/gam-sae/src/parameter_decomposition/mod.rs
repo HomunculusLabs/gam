@@ -92,7 +92,7 @@ pub mod families;
 pub mod fit;
 
 // Exact masked rewrites of gated units, norms, biases and residual edges.
-// [unlanded: gated_rewrite]
+pub mod gated_rewrite;
 
 // Tensor registry and the exact residual anchor.
 // [unlanded: lift]
