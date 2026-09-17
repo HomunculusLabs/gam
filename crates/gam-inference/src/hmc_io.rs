@@ -3128,7 +3128,7 @@ mod tests {
         // at h and h/2 give the Richardson value D_R = (4·D(h/2) − D(h))/3, whose remainder is
         // O(h⁴), below the h² term |D(h) − D(h/2)|. Each value is rounded within γ_k times the
         // absolute sum M of its pieces, so D_R carries at most 3·γ_k·M/h of rounding.
-        // h = u^{1/3} balances that O(u/h) rounding against the O(h²) truncation.
+        // h = u^{1/3}·max(1, ‖z0‖) balances that O(u/h) rounding against the O(h²) truncation.
         use rand::SeedableRng;
         let age_entry = array![1.0];
         let age_exit = array![2.0];
@@ -3222,7 +3222,10 @@ mod tests {
         let rows = age_exit.len();
         let p = mode.len();
         let growth = gam_linalg::roundoff::accumulation_growth(rows * (3 * (p + 1) + 5) + p + 4);
-        let h = gam_linalg::roundoff::UNIT_ROUNDOFF.cbrt();
+        // u^{1/3} balances the rounding against the truncation at unit scale. The step scales with
+        // max(1, ‖z0‖) because z0 + h·v is itself rounded within u·‖z0‖, so a step of fixed absolute
+        // size stops resolving the position once ‖z0‖ is large.
+        let h = gam_linalg::roundoff::UNIT_ROUNDOFF.cbrt() * z0.dot(&z0).sqrt().max(1.0);
 
         for (index, v) in directions.iter().enumerate() {
             let at = |step: f64| value_at(&(&z0 + &(step * v)));
