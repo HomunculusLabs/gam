@@ -425,6 +425,7 @@ pub(crate) fn manifold_description_length_to_pydict<'py>(
     out.set_item("coordinate_rate_bits", dl.coordinate_rate_bits)?;
     out.set_item("atom_occupancy", dl.atom_occupancy.clone())?;
     out.set_item("atom_code_bits_per_token", dl.atom_code_bits_per_token.clone())?;
+    out.set_item("gate_amplitude_bits_per_token", dl.gate_amplitude_bits_per_token)?;
     out.set_item("dictionary_code", dl.dictionary_code.as_str())?;
     out.set_item("dictionary_header_bits", dl.dictionary_header_bits)?;
     out.set_item("dictionary_distortion", dl.dictionary_distortion)?;

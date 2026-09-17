@@ -1,11 +1,13 @@
 #![cfg(test)]
-//! #2933 F11/F12: the native code sources are measured in the output metric,
-//! over transmitted coordinates only, and are invariant to representations that
+//! #2933 F10/F11/F12: the native code sources are measured in the output metric,
+//! over transmitted codes only, and are invariant to representations that
 //! preserve the decoded model.
 
 use ndarray::{Array1, Array2, ArrayView2, array};
 
-use super::{ActiveCodeSource, native_active_code_sources};
+use super::{
+    ActiveCodeSource, NativeGateModel, native_active_code_sources, native_gate_amplitude_code,
+};
 use crate::atom_codes::SparseAtomCodes;
 use crate::description_length::{
     DictionaryCode, ManifoldFitDl, NativeDescriptionLengthRequest,
@@ -86,7 +88,8 @@ fn views(blocks: &[Array2<f64>]) -> Vec<ArrayView2<'_, f64>> {
 }
 
 /// The native ledger with a declared zero-width dictionary, so every bit and all
-/// of the budget belong to the codes.
+/// of the budget belong to the codes. The fixtures' gates vary independently per
+/// atom and are not simplex rows.
 fn try_describe(
     assignments: &Array2<f64>,
     plans: &[SaeAtomGeometryPlan],
@@ -103,6 +106,7 @@ fn try_describe(
     };
     native_manifold_description_length(NativeDescriptionLengthRequest {
         assignments: assignments.view(),
+        gate_model: NativeGateModel::Independent,
         geometry_plans: plans,
         decoder_blocks: &decoder_views,
         coords: &coord_views,
@@ -841,4 +845,351 @@ fn native_code_source_is_invariant_to_deck_representatives_2933_f11() {
         mobius_twinned[[row, 1]] = -mobius[[row, 1]];
     }
     check(mobius_plan(), mobius, mobius_twinned, "Möbius band");
+}
+
+#[test]
+fn native_description_length_charges_gate_amplitudes_on_a_fixed_support_2933_f10() {
+    // Audit check 4. One atom fires on every row with a constant chart coordinate,
+    // and its decoder keeps only the constant basis column with value 3, so the
+    // decoded curve is the constant 3 and the output is 3·a. The support and the
+    // coordinate are fixed; only the amplitudes change. For a = 0.1, 0.2, …, 0.9 the
+    // output has unbiased variance 9 · 0.075 = 0.675 while the coordinate code is
+    // free. At EV 0.9 the budget is (1 − 0.9) · 0.675, so the amplitude costs
+    // ½log₂(0.675 / 0.0675) = ½log₂10 bits per token. A constant gate on the same
+    // support transmits nothing.
+    let n = 9;
+    let plans = [periodic_plan()];
+    let width = plans[0].basis_size().expect("plan width");
+    let mut decoder = Array2::<f64>::zeros((width, 1));
+    decoder[[0, 0]] = 3.0;
+    let decoders = [decoder];
+    let coords = [Array2::from_elem((n, 1), 0.25)];
+    let varying = Array2::from_shape_fn((n, 1), |(i, _)| 0.1 + 0.1 * i as f64);
+    let constant = Array2::from_elem((n, 1), 0.5);
+    let output = decoded(&plans, &decoders, &coords, &varying);
+    let mean = output.sum() / n as f64;
+    let output_variance =
+        output.iter().map(|value| (value - mean) * (value - mean)).sum::<f64>() / (n - 1) as f64;
+    assert!(
+        (output_variance - 0.675).abs() < 1.0e-12,
+        "fixture: the decoded output varies ({output_variance})"
+    );
+
+    let varying_dl = describe(&varying, &plans, &decoders, &coords, None, 0.9);
+    let constant_dl = describe(&constant, &plans, &decoders, &coords, None, 0.9);
+    assert_eq!(
+        varying_dl.atom_code_bits_per_token,
+        vec![0.0],
+        "the constant coordinate is free"
+    );
+    let expected = 0.5 * 10.0_f64.log2();
+    assert!(
+        (varying_dl.gate_amplitude_bits_per_token - expected).abs() < 1.0e-12,
+        "the amplitude costs {expected} bits per token, got {}",
+        varying_dl.gate_amplitude_bits_per_token
+    );
+    assert!((varying_dl.code_bits_per_token - expected).abs() < 1.0e-12);
+    assert_eq!(constant_dl.code_bits_per_token, 0.0);
+    assert_eq!(
+        varying_dl.selection_bits, constant_dl.selection_bits,
+        "the support is unchanged"
+    );
+    assert!(
+        (varying_dl.total_bits - constant_dl.total_bits - n as f64 * expected).abs() < 1.0e-9,
+        "{} vs {}",
+        varying_dl.total_bits,
+        constant_dl.total_bits
+    );
+}
+
+#[test]
+fn native_gate_amplitude_code_prices_the_amplitude_given_the_support_2933_f10() {
+    // The receiver already knows the support, so a gate's amplitude information is
+    // its spread over the rows where it fires, paid only on those rows. Atom 0 fires
+    // with gate 0.75 on rows 0..4 of 8. Its on/off column has variance 0.140625 over
+    // all rows, but that pattern is the support, so its amplitude is free. Atom 1
+    // fires on rows 1, 4 and 6 with gates 0.2, 0.5 and 0.8, whose unbiased variance is
+    // 0.09. Its decoded curve is the constant (2, −1) with ‖γ‖² = 5, so its source
+    // is 5 · 0.09 = 0.45 with weight 3/8.
+    let n = 8;
+    let plans = [linear_plan(1), linear_plan(1)];
+    let width = plans[1].basis_size().expect("plan width");
+    let mut constant_curve = Array2::<f64>::zeros((width, 2));
+    constant_curve[[0, 0]] = 2.0;
+    constant_curve[[0, 1]] = -1.0;
+    let decoders = [dense_decoder(&plans[0], 2, 0.4), constant_curve];
+    let coords = [
+        Array2::from_shape_fn((n, 1), |(i, _)| (0.8 * i as f64).sin()),
+        Array2::from_shape_fn((n, 1), |(i, _)| 0.3 * i as f64 - 1.0),
+    ];
+    let gates = Array2::from_shape_fn((n, 2), |(i, atom)| match (atom, i) {
+        (0, 0..=3) => 0.75,
+        (1, 1) => 0.2,
+        (1, 4) => 0.5,
+        (1, 6) => 0.8,
+        _ => 0.0,
+    });
+    // Control: over all rows, atom 0's column does vary.
+    let column_mean = gates.column(0).sum() / n as f64;
+    let unconditional = gates
+        .column(0)
+        .iter()
+        .map(|gate| (gate - column_mean) * (gate - column_mean))
+        .sum::<f64>()
+        / n as f64;
+    assert_eq!(unconditional, 0.140625);
+
+    let code_of = |gates: &Array2<f64>, coords: &[Array2<f64>]| {
+        native_gate_amplitude_code(
+            &support(gates),
+            NativeGateModel::Independent,
+            &plans,
+            &views(&decoders),
+            &views(coords),
+            None,
+        )
+    };
+    let code = code_of(&gates, &coords).expect("amplitude code");
+    assert_eq!(code.representation_distortion, 0.0);
+    assert_eq!(code.components.len(), 2);
+    assert_eq!(code.components[0], (0.5, vec![0.0]), "the support carries atom 0");
+    assert_eq!(code.components[1].0, 3.0 / 8.0);
+    assert!(
+        (code.components[1].1[0] - 0.45).abs() < 1.0e-12,
+        "atom 1's conditional amplitude source: {:?}",
+        code.components
+    );
+    assert!((code.decoded_variance() - 3.0 / 8.0 * 0.45).abs() < 1.0e-12);
+
+    // Rows appended where neither atom fires leave each conditional source
+    // unchanged; only the weights move.
+    let extra = 4;
+    let longer_gates = Array2::from_shape_fn((n + extra, 2), |(i, atom)| {
+        if i < n { gates[[i, atom]] } else { 0.0 }
+    });
+    let longer_coords: Vec<Array2<f64>> = coords
+        .iter()
+        .map(|block| {
+            Array2::from_shape_fn((n + extra, 1), |(i, _)| {
+                if i < n { block[[i, 0]] } else { 40.0 * i as f64 }
+            })
+        })
+        .collect();
+    let longer = code_of(&longer_gates, &longer_coords).expect("longer amplitude code");
+    assert_eq!(longer.components[0], (4.0 / 12.0, vec![0.0]));
+    assert_eq!(longer.components[1].0, 3.0 / 12.0);
+    assert_eq!(longer.components[1].1, code.components[1].1);
+
+    // One firing cannot estimate an amplitude variance: unavailable, not free.
+    let once = Array2::from_shape_fn((n, 2), |(i, atom)| {
+        if atom == 1 && i != 4 { 0.0 } else { gates[[i, atom]] }
+    });
+    let refusal = code_of(&once, &coords).expect_err("one firing of an amplitude");
+    assert!(refusal.contains("unavailable"), "{refusal}");
+}
+
+#[test]
+fn native_gate_amplitude_code_codes_softmax_rows_on_reference_free_simplex_axes_2933_f10() {
+    // Three atoms with softmax gates, whose rows sum to one. The simplex code carries
+    // two amplitude axes, and they equal the spectrum computed in an explicit
+    // orthonormal (Helmert) chart of the simplex, with each chart axis decoded atom by
+    // atom. Relabelling the atoms, which changes any "reference" atom, leaves the
+    // spectrum unchanged. Gates off the simplex are reconstructed on it, and the
+    // departure is charged as decoded distortion.
+    let n = 8;
+    let plans = [periodic_plan(), periodic_plan(), periodic_plan()];
+    let coords: Vec<Array2<f64>> = (0..3)
+        .map(|atom| {
+            Array2::from_shape_fn((n, 1), |(row, _)| {
+                (0.13 * row as f64 + 0.29 * atom as f64).fract()
+            })
+        })
+        .collect();
+    let decoders: Vec<Array2<f64>> = (0..3)
+        .map(|atom| dense_decoder(&plans[atom], 3, 0.5 + 1.7 * atom as f64))
+        .collect();
+    let logits = [
+        [0.3, -1.2, 0.8],
+        [1.5, 0.1, -0.4],
+        [-0.6, 0.9, 0.2],
+        [0.0, 0.0, 1.1],
+        [2.0, -0.5, -1.0],
+        [-1.3, 1.4, 0.6],
+        [0.7, 0.7, -0.2],
+        [-0.1, -0.9, 1.6],
+    ];
+    let gates = Array2::from_shape_fn((n, 3), |(row, atom)| {
+        let total: f64 = logits[row].iter().map(|value: &f64| value.exp()).sum();
+        logits[row][atom].exp() / total
+    });
+    let code_of = |gates: &Array2<f64>,
+                   plans: &[SaeAtomGeometryPlan],
+                   decoders: &[Array2<f64>],
+                   coords: &[Array2<f64>]| {
+        native_gate_amplitude_code(
+            &support(gates),
+            NativeGateModel::Simplex,
+            plans,
+            &views(decoders),
+            &views(coords),
+            None,
+        )
+        .expect("simplex amplitude code")
+    };
+    let code = code_of(&gates, &plans, &decoders, &coords);
+    assert_eq!(code.components.len(), 1);
+    let (weight, spectrum) = &code.components[0];
+    assert_eq!(*weight, 1.0);
+    assert_eq!(spectrum.len(), 3);
+    assert!(spectrum[1] > 1.0e-4, "two free simplex axes: {spectrum:?}");
+    assert!(
+        spectrum[2] <= 1.0e-12 * spectrum[0],
+        "the sum direction carries no information: {spectrum:?}"
+    );
+    assert!(code.representation_distortion <= 1.0e-24, "{}", code.representation_distortion);
+
+    // Oracle: the Helmert chart z = H a, whose orthonormal rows are orthogonal to 1.
+    let helmert = [
+        [1.0 / 2.0_f64.sqrt(), -1.0 / 2.0_f64.sqrt(), 0.0],
+        [1.0 / 6.0_f64.sqrt(), 1.0 / 6.0_f64.sqrt(), -2.0 / 6.0_f64.sqrt()],
+    ];
+    let unit = Array2::from_elem((n, 1), 1.0);
+    let curves: Vec<Array2<f64>> = (0..3)
+        .map(|atom| {
+            decoded(
+                std::slice::from_ref(&plans[atom]),
+                std::slice::from_ref(&decoders[atom]),
+                std::slice::from_ref(&coords[atom]),
+                &unit,
+            )
+        })
+        .collect();
+    let chart = Array2::from_shape_fn((n, 2), |(row, axis)| {
+        (0..3).map(|atom| helmert[axis][atom] * gates[[row, atom]]).sum::<f64>()
+    });
+    let chart_mean = [chart.column(0).sum() / n as f64, chart.column(1).sum() / n as f64];
+    let mut sigma = [[0.0_f64; 2]; 2];
+    let mut metric = [[0.0_f64; 2]; 2];
+    for row in 0..n {
+        let centered = [chart[[row, 0]] - chart_mean[0], chart[[row, 1]] - chart_mean[1]];
+        // The output direction of chart axis u: Σ_k H[u][k]·γ_k(t_ik).
+        let direction = |axis: usize| -> Vec<f64> {
+            (0..3)
+                .map(|channel| {
+                    (0..3)
+                        .map(|atom| helmert[axis][atom] * curves[atom][[row, channel]])
+                        .sum::<f64>()
+                })
+                .collect()
+        };
+        let directions = [direction(0), direction(1)];
+        for u in 0..2 {
+            for v in 0..2 {
+                sigma[u][v] += centered[u] * centered[v] / (n - 1) as f64;
+                let dot: f64 = directions[u].iter().zip(&directions[v]).map(|(x, y)| x * y).sum();
+                metric[u][v] += dot / n as f64;
+            }
+        }
+    }
+    // Eigenvalues of Σ_z·G_z, similar to G_z^{1/2} Σ_z G_z^{1/2}.
+    let product = [
+        [
+            sigma[0][0] * metric[0][0] + sigma[0][1] * metric[1][0],
+            sigma[0][0] * metric[0][1] + sigma[0][1] * metric[1][1],
+        ],
+        [
+            sigma[1][0] * metric[0][0] + sigma[1][1] * metric[1][0],
+            sigma[1][0] * metric[0][1] + sigma[1][1] * metric[1][1],
+        ],
+    ];
+    let trace = product[0][0] + product[1][1];
+    let det = product[0][0] * product[1][1] - product[0][1] * product[1][0];
+    let disc = (trace * trace / 4.0 - det).max(0.0).sqrt();
+    let oracle = [trace / 2.0 + disc, trace / 2.0 - disc];
+    for axis in 0..2 {
+        assert!(
+            (spectrum[axis] - oracle[axis]).abs() <= 1.0e-9 * oracle[0],
+            "simplex spectrum {spectrum:?} must match the Helmert-chart spectrum {oracle:?}"
+        );
+    }
+
+    // Relabel the atoms: a cyclic shift changes every "reference" choice.
+    let order = [2_usize, 0, 1];
+    let shifted_plans: Vec<SaeAtomGeometryPlan> =
+        order.iter().map(|&atom| plans[atom].clone()).collect();
+    let shifted_decoders: Vec<Array2<f64>> =
+        order.iter().map(|&atom| decoders[atom].clone()).collect();
+    let shifted_coords: Vec<Array2<f64>> = order.iter().map(|&atom| coords[atom].clone()).collect();
+    let shifted_gates = Array2::from_shape_fn((n, 3), |(row, column)| gates[[row, order[column]]]);
+    let shifted = code_of(&shifted_gates, &shifted_plans, &shifted_decoders, &shifted_coords);
+    for axis in 0..2 {
+        assert!(
+            (shifted.components[0].1[axis] - spectrum[axis]).abs() <= 1.0e-9 * spectrum[0],
+            "relabelled atoms changed the simplex spectrum: {:?} vs {spectrum:?}",
+            shifted.components[0].1
+        );
+    }
+
+    // Every row scaled to sum 1.5: the receiver reconstructs the gates on the
+    // simplex, so each gate is off by 0.5/3 and that decoded departure is charged.
+    // The projected innovations scale by 1.5, so the spectrum scales by 2.25.
+    let off_simplex = gates.mapv(|gate| 1.5 * gate);
+    let off = code_of(&off_simplex, &plans, &decoders, &coords);
+    let departure = decoded(&plans, &decoders, &coords, &Array2::from_elem((n, 3), 0.5 / 3.0));
+    let expected = departure.iter().map(|value| value * value).sum::<f64>() / n as f64;
+    assert!(expected > 1.0e-3, "fixture: the departure decodes to a visible output");
+    assert!(
+        (off.representation_distortion - expected).abs() <= 1.0e-12 * expected,
+        "off-simplex gates must be charged {expected}, got {}",
+        off.representation_distortion
+    );
+    for axis in 0..2 {
+        assert!(
+            (off.components[0].1[axis] - 2.25 * spectrum[axis]).abs() <= 1.0e-9 * spectrum[0],
+            "{:?} vs 2.25 · {spectrum:?}",
+            off.components[0].1
+        );
+    }
+}
+
+#[test]
+fn native_gate_amplitude_code_charges_a_non_unit_topk_gate_as_decoded_distortion_2933_f10() {
+    // Unit-support gates transmit no amplitude, and a gate of one costs nothing. A
+    // transmitted gate of 0.5 decodes half the curve, and the receiver's unit gate is
+    // off by 0.5·γ. With constant curves γ_0 = (2, 0) and γ_1 = (0, −1), the row
+    // supports {0}, {1}, {0, 1} and {} give departures of squared norm 1, 0.25, 1.25
+    // and 0, so the distortion is (1 + 0.25 + 1.25 + 0) / 4.
+    let n = 4;
+    let plans = [periodic_plan(), periodic_plan()];
+    let width = plans[0].basis_size().expect("plan width");
+    let mut decoder_0 = Array2::<f64>::zeros((width, 2));
+    decoder_0[[0, 0]] = 2.0;
+    let mut decoder_1 = Array2::<f64>::zeros((width, 2));
+    decoder_1[[0, 1]] = -1.0;
+    let decoders = [decoder_0, decoder_1];
+    let coords = [Array2::from_elem((n, 1), 0.4), Array2::from_elem((n, 1), 0.7)];
+    let unit = array![[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [0.0, 0.0]];
+    let half = unit.mapv(|gate| 0.5 * gate);
+    let code_of = |gates: &Array2<f64>| {
+        native_gate_amplitude_code(
+            &support(gates),
+            NativeGateModel::UnitSupport,
+            &plans,
+            &views(&decoders),
+            &views(&coords),
+            None,
+        )
+        .expect("unit-support amplitude code")
+    };
+    let unit_code = code_of(&unit);
+    assert!(unit_code.components.is_empty());
+    assert_eq!(unit_code.representation_distortion, 0.0);
+    let half_code = code_of(&half);
+    assert!(half_code.components.is_empty());
+    let expected = (1.0 + 0.25 + 1.25 + 0.0) / 4.0;
+    assert!(
+        (half_code.representation_distortion - expected).abs() < 1.0e-12,
+        "non-unit gates must be charged {expected}, got {}",
+        half_code.representation_distortion
+    );
 }

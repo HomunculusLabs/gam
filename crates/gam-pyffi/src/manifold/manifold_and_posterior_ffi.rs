@@ -5684,6 +5684,10 @@ impl ManifoldSaeCore {
         gam::terms::sae::description_length::native_manifold_description_length(
             gam::terms::sae::description_length::NativeDescriptionLengthRequest {
                 assignments: assignments.view(),
+                gate_model: gam::terms::sae::native_code_source::NativeGateModel::from_assignment_tag(
+                    &self.inner.assignment,
+                )
+                .map_err(py_value_error)?,
                 geometry_plans: &self.inner.geometry_plans,
                 decoder_blocks: &decoder_views,
                 coords: &coord_views,

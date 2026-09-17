@@ -25,7 +25,9 @@
 
 use crate::atom_codes::SparseAtomCodes;
 use crate::manifold::SaeAtomGeometryPlan;
-use crate::native_code_source::native_active_code_sources;
+use crate::native_code_source::{
+    NativeGateModel, native_active_code_sources, native_gate_amplitude_code,
+};
 use ndarray::{ArrayView1, ArrayView2};
 
 /// Which mathematical object a description-length figure is (#2933 F21).
@@ -1041,8 +1043,13 @@ pub struct ManifoldFitDl {
     pub atom_occupancy: Vec<f64>,
     /// Code bits per token contributed by each atom, `p_k Σ_j ½log₂(λ_kj/θ)⁺`.
     pub atom_code_bits_per_token: Vec<f64>,
+    /// Code bits per token of the continuous gate amplitudes (#2933 F10),
+    /// `Σ_c w_c Σ_u ½log₂(μ_cu/θ)⁺` over the amplitude components of the same
+    /// allocation.
+    pub gate_amplitude_bits_per_token: f64,
     /// Firing-weighted mean bits per transmitted coordinate,
-    /// `code_bits / Σ_k firings(k)·d_k` (zero when nothing is transmitted).
+    /// `N·Σ_k atom_code_bits_per_token[k] / Σ_k firings(k)·d_k` (zero when
+    /// nothing is transmitted).
     pub coordinate_rate_bits: f64,
     /// Which dictionary code priced `dict_bits`.
     pub dictionary_code: DictionaryCodeKind,
@@ -1057,7 +1064,8 @@ pub struct ManifoldFitDl {
     /// Selection bits per token: the empirical support-entropy universal code
     /// `H(S)` ([`SparseAtomCodes::support_entropy`]`.tree_bits`).
     pub selection_bits_per_token: f64,
-    /// Code bits per token, `Σ_k atom_code_bits_per_token[k]`.
+    /// Code bits per token,
+    /// `Σ_k atom_code_bits_per_token[k] + gate_amplitude_bits_per_token`.
     pub code_bits_per_token: f64,
     /// Amortised dictionary bits per token, `dict_bits / N`.
     pub dict_bits_per_token: f64,
@@ -1102,6 +1110,28 @@ pub struct ManifoldFitDl {
 pub fn manifold_fit_description_length(
     codes: &SparseAtomCodes,
     atom_code_spectra: &[Vec<f64>],
+    distortion_budget: f64,
+    ev: f64,
+    dictionary: &DictionaryCode,
+) -> Result<ManifoldFitDl, String> {
+    manifold_fit_description_length_with_gate_amplitudes(
+        codes,
+        atom_code_spectra,
+        &[],
+        distortion_budget,
+        ev,
+        dictionary,
+    )
+}
+
+/// [`manifold_fit_description_length`] with the continuous gate-amplitude
+/// components ([`crate::native_code_source::GateAmplitudeCode::components`],
+/// #2933 F10) in the same allocation. Each is a `(weight, spectrum)` pair in the
+/// distortion metric of `distortion_budget`; none transmits no amplitudes.
+pub fn manifold_fit_description_length_with_gate_amplitudes(
+    codes: &SparseAtomCodes,
+    atom_code_spectra: &[Vec<f64>],
+    gate_amplitude_components: &[(f64, Vec<f64>)],
     distortion_budget: f64,
     ev: f64,
     dictionary: &DictionaryCode,
@@ -1154,6 +1184,9 @@ pub fn manifold_fit_description_length(
         .zip(atom_code_spectra)
         .map(|(&occupancy, spectrum)| (occupancy, spectrum.clone()))
         .collect();
+    // GATE AMPLITUDES: each amplitude source enters with its own weight.
+    components.extend_from_slice(gate_amplitude_components);
+    let amplitude_end = k_atoms + gate_amplitude_components.len();
 
     // DICTIONARY: a declared precision is priced directly; a quantized decoder
     // joins the same allocation. The decoder is sent once for N tokens, so a
@@ -1207,7 +1240,9 @@ pub fn manifold_fit_description_length(
 
     let allocation = solve_weighted_allocation(&components, distortion_budget)?;
     let atom_code_bits_per_token = allocation.rates[..k_atoms].to_vec();
-    let code_bits_per_token: f64 = atom_code_bits_per_token.iter().sum();
+    let coordinate_bits_per_token: f64 = atom_code_bits_per_token.iter().sum();
+    let gate_amplitude_bits_per_token: f64 = allocation.rates[k_atoms..amplitude_end].iter().sum();
+    let code_bits_per_token = coordinate_bits_per_token + gate_amplitude_bits_per_token;
 
     let (n_params, dictionary_code, l_param_bits, dictionary_header_bits, dictionary_distortion, dict_bits) =
         match dictionary {
@@ -1235,8 +1270,8 @@ pub fn manifold_fit_description_length(
                 });
                 let n_params = n_params
                     .ok_or_else(|| "decoder coefficient count overflowed".to_string())?;
-                let coefficient_bits = n * allocation.rates[k_atoms..].iter().sum::<f64>();
-                let distortion: f64 = allocation.spectra[k_atoms..]
+                let coefficient_bits = n * allocation.rates[amplitude_end..].iter().sum::<f64>();
+                let distortion: f64 = allocation.spectra[amplitude_end..]
                     .iter()
                     .map(|(weight, variances)| {
                         weight
@@ -1269,7 +1304,7 @@ pub fn manifold_fit_description_length(
     let total_bits = code_bits + selection_bits + dict_bits;
     let transmitted_scalars = n * occupied_scalars;
     let coordinate_rate_bits = if transmitted_scalars > 0.0 {
-        code_bits / transmitted_scalars
+        n * coordinate_bits_per_token / transmitted_scalars
     } else {
         0.0
     };
@@ -1283,6 +1318,7 @@ pub fn manifold_fit_description_length(
         n_params,
         atom_occupancy,
         atom_code_bits_per_token,
+        gate_amplitude_bits_per_token,
         coordinate_rate_bits,
         dictionary_code,
         l_param_bits,
@@ -1318,6 +1354,9 @@ pub struct NativeDescriptionLengthRequest<'a> {
     /// `(N, K)` gates. An atom is transmitted on a row exactly when its gate is
     /// nonzero ([`gate_is_transmitted`]).
     pub assignments: ArrayView2<'a, f64>,
+    /// The gate family, which decides the free amplitude information a row
+    /// carries once its support is known.
+    pub gate_model: NativeGateModel,
     /// One persisted geometry plan per atom.
     pub geometry_plans: &'a [SaeAtomGeometryPlan],
     /// One physical-frame `M_k × P` decoder per atom.
@@ -1333,22 +1372,27 @@ pub struct NativeDescriptionLengthRequest<'a> {
 }
 
 /// The fit-level [`ManifoldFitDl`] of a persisted manifold-SAE artifact (#2933
-/// F11, F12, F15).
+/// F10, F11, F12, F15).
 ///
 /// The transmitted support is exactly the nonzero gates ([`gate_is_transmitted`]):
 /// no gate is dropped, so no decoded output escapes the code, and a gate rescaled
 /// against its decoder is priced the same. Each atom's code spectrum is
 /// its conditional active-code source in the output metric
 /// ([`native_active_code_sources`]): moments over the rows where the atom
-/// fires, whitened by the mean pullback metric of its gated decoder. The budget
-/// `D = (1 − ev)·Σ_k p_k Σ_j λ_kj` leaves the transmitted codes the same relative
-/// output fidelity the fit leaves unexplained, measured in their own decoded
-/// variance, and the ledger is [`manifold_fit_description_length`].
+/// fires, whitened by the mean pullback metric of its gated decoder. The gate
+/// amplitudes the support does not determine are further sources in the same
+/// metric ([`native_gate_amplitude_code`]). The budget
+/// `D = (1 − ev)·(Σ_k p_k Σ_j λ_kj + Σ_c w_c Σ_u μ_cu)` leaves the transmitted
+/// codes the same relative output fidelity the fit leaves unexplained, measured
+/// in their own decoded variance. The decoded distortion of reconstructing the
+/// gates under the gate model is spent from `D` before the codes are allocated,
+/// and the ledger is [`manifold_fit_description_length_with_gate_amplitudes`].
 pub fn native_manifold_description_length(
     request: NativeDescriptionLengthRequest<'_>,
 ) -> Result<ManifoldFitDl, String> {
     let NativeDescriptionLengthRequest {
         assignments,
+        gate_model,
         geometry_plans,
         decoder_blocks,
         coords,
@@ -1410,15 +1454,40 @@ pub fn native_manifold_description_length(
         .iter()
         .map(|source| source.output_spectrum.clone())
         .collect();
+    let amplitudes = native_gate_amplitude_code(
+        &codes,
+        gate_model,
+        geometry_plans,
+        decoder_blocks,
+        coords,
+        tier0_scale,
+    )?;
     let decoded_code_variance: f64 = sources
         .iter()
         .map(|source| source.firing_probability * source.output_spectrum.iter().sum::<f64>())
-        .sum();
+        .sum::<f64>()
+        + amplitudes.decoded_variance();
     // A reconstruction with ev = 1 leaves no distortion, and the water-filling
     // rate of a continuous coordinate at zero distortion is infinite: that is its
     // description length, not a value to floor away.
-    let distortion_budget = (1.0 - ev) * decoded_code_variance;
-    manifold_fit_description_length(&codes, &atom_code_spectra, distortion_budget, ev, dictionary)
+    let budget = (1.0 - ev) * decoded_code_variance;
+    let distortion_budget = budget - amplitudes.representation_distortion;
+    if distortion_budget < 0.0 {
+        return Err(format!(
+            "manifold description length: reconstructing the fitted gates under the \
+             {gate_model:?} gate model costs output distortion {}, more than the budget {budget} \
+             the fit leaves unexplained",
+            amplitudes.representation_distortion
+        ));
+    }
+    manifold_fit_description_length_with_gate_amplitudes(
+        &codes,
+        &atom_code_spectra,
+        &amplitudes.components,
+        distortion_budget,
+        ev,
+        dictionary,
+    )
 }
 
 #[cfg(test)]

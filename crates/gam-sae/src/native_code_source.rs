@@ -1,11 +1,13 @@
 //! Conditional active-code sources for the native manifold-SAE description
-//! length (#2933 F11, F12).
+//! length (#2933 F10, F11, F12).
 //!
 //! A token is reconstructed as `f_i = μ + Σ_k a_ik γ_k(t_ik)` with
 //! `γ_k(t) = Φ_k(t) B_k`. The native code transmits, for every atom `k` in a
-//! row's support, that atom's chart coordinate. This module builds one Gaussian
-//! rate–distortion source per atom for that transmitted coordinate, measured in
-//! the output metric in which the fit's explained variance is defined.
+//! row's support, that atom's chart coordinate and the free information in its
+//! gate. This module builds one Gaussian rate–distortion source per atom for
+//! that transmitted coordinate, and the gate-amplitude sources of
+//! [`native_gate_amplitude_code`], all measured in the output metric in which
+//! the fit's explained variance is defined.
 //!
 //! # Only transmitted coordinates (F12)
 //!
@@ -48,6 +50,39 @@
 //! rate–distortion function of every source with that covariance (maximum
 //! entropy). This is a declared surrogate for the linearized source, not a
 //! certificate for the nonlinear one.
+//!
+//! # Gate amplitudes (F10)
+//!
+//! The support fixes which gates are nonzero, not their values: with a constant
+//! chart and a constant curve `γ = 3`, the output `3·a_i` still varies with the
+//! gate, and neither the support code nor the coordinate code carries it. The
+//! receiver already knows the support, so the amplitude information is the
+//! spread of a gate over the rows where it fires. The gate family decides how
+//! much of it is free:
+//!
+//! * [`NativeGateModel::Independent`]: atom `k` transmits `a_ik` on `R_k`.
+//!   Quantize it with an independent dithered error of variance `e_k`. The decoded
+//!   error is `e_k·‖γ_k(t_ik)‖²_M`, and its cross terms with the coordinate errors
+//!   and other atoms vanish as above, so the per-token distortion is
+//!   `p_k ḡ_k e_k` with `ḡ_k = mean_{i∈R_k} ‖γ_k(t_ik)‖²_M`. The source is the
+//!   scalar `ḡ_k v_k` with weight `p_k`, where `v_k` is the unbiased variance of
+//!   the gate over `R_k` (two firings are needed). Rescaling a gate against its
+//!   decoder leaves `ḡ_k v_k` unchanged, and a gate that is constant where it
+//!   fires is free.
+//! * [`NativeGateModel::Simplex`]: a row's transmitted gates sum to one, so a
+//!   row with support `S` carries `|S| − 1` free amplitudes. Its innovation
+//!   `e_ik = a_ik − m_k` (`m_k` the mean over `R_k`) is projected by
+//!   `P_S = I − 1_S 1_Sᵀ/|S|`. The discarded component is known to the receiver
+//!   from the constraint, which names no reference atom. The source covariance is
+//!   `Σ = Σ_i P_S e_i e_iᵀ P_S / (N − 1)`. The sensitivity is
+//!   `Ḡ_jk = (1/N) Σ_i 1[j,k ∈ S_i] γ_j(t_ij)ᵀ M γ_k(t_ik)`, because the projected
+//!   error couples atoms. The source is `eig(Ḡ^{1/2} Σ Ḡ^{1/2})` with weight one.
+//!   A row whose gates do not sum to one is reconstructed on the simplex, and that
+//!   departure `(Σ_S a_ik − 1)/|S|` per gate is charged exactly as decoded
+//!   distortion.
+//! * [`NativeGateModel::UnitSupport`]: a transmitted gate is one, so nothing is
+//!   sent. A transmitted gate other than one is charged exactly as the decoded
+//!   distortion of `(a_ik − 1)·γ_k(t_ik)`.
 //!
 //! # Code coordinates independent of the representation
 //!
@@ -323,7 +358,8 @@ fn atom_source(
             0.5 * (metric_sum[[i, j]] + metric_sum[[j, i]]) * inv_n
         });
     let code_covariance = unbiased_covariance(chart.code.view());
-    let output_spectrum = output_metric_spectrum(atom, &code_covariance, &mean_pullback_metric)?;
+    let output_spectrum =
+        output_metric_spectrum(&format!("atom {atom}"), &code_covariance, &mean_pullback_metric)?;
     Ok(ActiveCodeSource {
         firing_rows: n,
         firing_probability: n as f64 / firing.n_obs as f64,
@@ -366,7 +402,7 @@ fn unbiased_covariance(code: ArrayView2<'_, f64>) -> Array2<f64> {
 }
 
 fn symmetric_eigen(
-    atom: usize,
+    source: &str,
     what: &str,
     matrix: &Array2<f64>,
 ) -> Result<(Vec<f64>, Vec<f64>), String> {
@@ -376,7 +412,7 @@ fn symmetric_eigen(
     let mut vectors = vec![0.0_f64; d * d];
     if !jacobi_eigh(&flat, d, &mut values, &mut vectors) {
         return Err(format!(
-            "native active-code sources: atom {atom} {what} did not diagonalize within the \
+            "native active-code sources: {source} {what} did not diagonalize within the \
              Jacobi sweep budget"
         ));
     }
@@ -386,12 +422,12 @@ fn symmetric_eigen(
 /// Eigenvalues of `Ḡ^{1/2} Σ Ḡ^{1/2}`, computed as those of the similar
 /// `Σ^{1/2} Ḡ Σ^{1/2}` so a measured-rank-deficient `Σ` needs no inverse.
 fn output_metric_spectrum(
-    atom: usize,
+    source: &str,
     covariance: &Array2<f64>,
     metric: &Array2<f64>,
 ) -> Result<Vec<f64>, String> {
     let d = covariance.nrows();
-    let (values, vectors) = symmetric_eigen(atom, "code covariance", covariance)?;
+    let (values, vectors) = symmetric_eigen(source, "code covariance", covariance)?;
     let root = Array2::from_shape_fn((d, d), |(r, c)| {
         (0..d)
             .map(|i| vectors[i * d + r] * values[i].max(0.0).sqrt() * vectors[i * d + c])
@@ -400,12 +436,320 @@ fn output_metric_spectrum(
     let whitened = root.dot(metric).dot(&root);
     let symmetric =
         Array2::from_shape_fn((d, d), |(r, c)| 0.5 * (whitened[[r, c]] + whitened[[c, r]]));
-    let (mut spectrum, _) = symmetric_eigen(atom, "output-metric code covariance", &symmetric)?;
+    let (mut spectrum, _) = symmetric_eigen(source, "output-metric code covariance", &symmetric)?;
     for value in &mut spectrum {
         *value = value.max(0.0);
     }
     spectrum.sort_by(|left, right| right.total_cmp(left));
     Ok(spectrum)
+}
+
+/// Which continuous gate information a receiver still needs once it knows the
+/// support (#2933 F10). The gate family, not the atom count, decides how many
+/// free amplitudes a row carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeGateModel {
+    /// Row-wise softmax responsibilities. A row's transmitted gates sum to one,
+    /// so a row with support `S` carries `|S| − 1` free amplitudes.
+    Simplex,
+    /// Independent sigmoid gates (ordered Beta–Bernoulli, threshold gate): one
+    /// free amplitude per transmitted gate.
+    Independent,
+    /// Hard top-k gates: a transmitted gate is one, so the support determines
+    /// every amplitude.
+    UnitSupport,
+}
+
+impl NativeGateModel {
+    /// Resolve a public assignment token through the shared strict schema.
+    pub fn from_assignment_tag(tag: &str) -> Result<Self, String> {
+        match crate::atom_schema::canonical_assignment_kind(tag)? {
+            "softmax" => Ok(Self::Simplex),
+            "ordered_beta_bernoulli" | "threshold_gate" => Ok(Self::Independent),
+            "topk" => Ok(Self::UnitSupport),
+            canonical => Err(format!(
+                "native gate amplitudes: the assignment schema returned token {canonical:?}, \
+                 which has no gate model"
+            )),
+        }
+    }
+}
+
+/// The gate-amplitude sources of the native message (#2933 F10).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GateAmplitudeCode {
+    /// Weighted output-metric spectra `(w, μ)`, in the metric of
+    /// [`ActiveCodeSource::output_spectrum`]: `(p_k, [ḡ_k v_k])` per atom for
+    /// independent gates, one `(1, eig(Ḡ^{1/2} Σ Ḡ^{1/2}))` for the simplex, and
+    /// none for unit support.
+    pub components: Vec<(f64, Vec<f64>)>,
+    /// Per-token output distortion of the gates the receiver reconstructs from the
+    /// gate model in place of the fitted gates. Zero for independent gates.
+    pub representation_distortion: f64,
+}
+
+impl GateAmplitudeCode {
+    /// Decoded output variance of the transmitted amplitudes, `Σ_c w_c Σ_u μ_cu`.
+    pub fn decoded_variance(&self) -> f64 {
+        self.components
+            .iter()
+            .map(|(weight, spectrum)| weight * spectrum.iter().sum::<f64>())
+            .sum()
+    }
+}
+
+/// Build the [`GateAmplitudeCode`] of the transmitted support `codes` under
+/// `gate_model` (see the module section on gate amplitudes), from the persisted
+/// geometry plans, the `M_k × p` decoders and the `N × latent_dim` coordinate
+/// blocks, in the output metric of [`native_active_code_sources`].
+pub fn native_gate_amplitude_code(
+    codes: &SparseAtomCodes,
+    gate_model: NativeGateModel,
+    geometry_plans: &[SaeAtomGeometryPlan],
+    decoder_blocks: &[ArrayView2<'_, f64>],
+    coords: &[ArrayView2<'_, f64>],
+    tier0_scale: Option<ArrayView1<'_, f64>>,
+) -> Result<GateAmplitudeCode, String> {
+    let n_obs = codes.n_obs();
+    let k_atoms = codes.k_atoms();
+    if geometry_plans.len() != k_atoms || decoder_blocks.len() != k_atoms || coords.len() != k_atoms
+    {
+        return Err(format!(
+            "native gate amplitudes: a support over {k_atoms} atoms needs as many geometry \
+             plans, decoders and coordinate blocks; got {}, {} and {}",
+            geometry_plans.len(),
+            decoder_blocks.len(),
+            coords.len()
+        ));
+    }
+    if k_atoms == 0 {
+        return Ok(GateAmplitudeCode {
+            components: Vec::new(),
+            representation_distortion: 0.0,
+        });
+    }
+    if n_obs == 0 {
+        return Err("native gate amplitudes: the support has no rows".to_string());
+    }
+    let p_out = decoder_blocks[0].ncols();
+    if p_out == 0 {
+        return Err("native gate amplitudes: decoders have no output channels".to_string());
+    }
+    let metric = output_metric_weights(tier0_scale, p_out)?;
+    let mut firing: Vec<(Vec<usize>, Vec<f64>)> = vec![(Vec::new(), Vec::new()); k_atoms];
+    for row in 0..n_obs {
+        let code = codes.row(row);
+        for (atom, (rows, gates)) in firing.iter_mut().enumerate() {
+            if code.active_mask.get(atom) {
+                let gate = code.weights[atom];
+                if !gate.is_finite() {
+                    return Err(format!(
+                        "native gate amplitudes: atom {atom} has a non-finite gate on firing row \
+                         {row}"
+                    ));
+                }
+                rows.push(row);
+                gates.push(gate);
+            }
+        }
+    }
+    let basis_of = |atom: usize| {
+        firing_basis(
+            atom,
+            &geometry_plans[atom],
+            decoder_blocks[atom],
+            coords[atom],
+            &firing[atom].0,
+            n_obs,
+            p_out,
+        )
+    };
+    let n = n_obs as f64;
+
+    match gate_model {
+        NativeGateModel::Independent => {
+            let mut components = Vec::with_capacity(k_atoms);
+            for (atom, (rows, gates)) in firing.iter().enumerate() {
+                let firings = rows.len();
+                if firings == 0 {
+                    components.push((0.0, vec![0.0]));
+                    continue;
+                }
+                if firings == 1 {
+                    return Err(format!(
+                        "native gate amplitudes: atom {atom} is transmitted on one row, but its \
+                         amplitude variance needs at least two firings for an unbiased estimate; \
+                         its Gaussian rate is unavailable, not zero"
+                    ));
+                }
+                let count = firings as f64;
+                let mean = gates.iter().sum::<f64>() / count;
+                let variance = gates
+                    .iter()
+                    .map(|gate| (gate - mean) * (gate - mean))
+                    .sum::<f64>()
+                    / (count - 1.0);
+                let curves = basis_of(atom)?.dot(&decoder_blocks[atom]);
+                let sensitivity = squared_output_norms(&curves, &metric) / count;
+                components.push((count / n, vec![sensitivity * variance]));
+            }
+            Ok(GateAmplitudeCode {
+                components,
+                representation_distortion: 0.0,
+            })
+        }
+        NativeGateModel::UnitSupport => {
+            let mut departure = Array2::<f64>::zeros((n_obs, p_out));
+            for (atom, (rows, gates)) in firing.iter().enumerate() {
+                if gates.iter().all(|&gate| gate == 1.0) {
+                    continue;
+                }
+                let curves = basis_of(atom)?.dot(&decoder_blocks[atom]);
+                for (slot, (&row, &gate)) in rows.iter().zip(gates).enumerate() {
+                    for channel in 0..p_out {
+                        departure[[row, channel]] += (gate - 1.0) * curves[[slot, channel]];
+                    }
+                }
+            }
+            Ok(GateAmplitudeCode {
+                components: Vec::new(),
+                representation_distortion: squared_output_norms(&departure, &metric) / n,
+            })
+        }
+        NativeGateModel::Simplex => {
+            let means: Vec<f64> = firing
+                .iter()
+                .map(|(rows, gates)| {
+                    if rows.is_empty() {
+                        0.0
+                    } else {
+                        gates.iter().sum::<f64>() / rows.len() as f64
+                    }
+                })
+                .collect();
+            let mut support_size = vec![0_usize; n_obs];
+            let mut row_sum = vec![0.0_f64; n_obs];
+            let mut innovation_sum = vec![0.0_f64; n_obs];
+            for (atom, (rows, gates)) in firing.iter().enumerate() {
+                for (&row, &gate) in rows.iter().zip(gates) {
+                    support_size[row] += 1;
+                    row_sum[row] += gate;
+                    innovation_sum[row] += gate - means[atom];
+                }
+            }
+            let mut departure = Array2::<f64>::zeros((n_obs, p_out));
+            let mut innovations = Array2::<f64>::zeros((n_obs, k_atoms));
+            let mut masked_basis = Vec::with_capacity(k_atoms);
+            for (atom, (rows, gates)) in firing.iter().enumerate() {
+                let basis = basis_of(atom)?;
+                let curves = basis.dot(&decoder_blocks[atom]);
+                let mut masked = Array2::<f64>::zeros((n_obs, basis.ncols()));
+                for (slot, (&row, &gate)) in rows.iter().zip(gates).enumerate() {
+                    let size = support_size[row] as f64;
+                    let drift = (row_sum[row] - 1.0) / size;
+                    for channel in 0..p_out {
+                        departure[[row, channel]] += drift * curves[[slot, channel]];
+                    }
+                    innovations[[row, atom]] = gate - means[atom] - innovation_sum[row] / size;
+                    masked.row_mut(row).assign(&basis.row(slot));
+                }
+                masked_basis.push(masked);
+            }
+            let representation_distortion = squared_output_norms(&departure, &metric) / n;
+            if support_size.iter().all(|&size| size < 2) {
+                return Ok(GateAmplitudeCode {
+                    components: Vec::new(),
+                    representation_distortion,
+                });
+            }
+            if n_obs < 2 {
+                return Err(
+                    "native gate amplitudes: one row cannot estimate the simplex amplitude \
+                     covariance; its Gaussian rate is unavailable, not zero"
+                        .to_string(),
+                );
+            }
+            let covariance = innovations.t().dot(&innovations) / (n - 1.0);
+            let weights = ndarray::Array1::from(metric);
+            let mut sensitivity = Array2::<f64>::zeros((k_atoms, k_atoms));
+            for j in 0..k_atoms {
+                let weighted_decoder = &decoder_blocks[j] * &weights;
+                for k in j..k_atoms {
+                    let basis_cross = masked_basis[j].t().dot(&masked_basis[k]);
+                    let decoder_cross = weighted_decoder.dot(&decoder_blocks[k].t());
+                    let value = (&basis_cross * &decoder_cross).sum() / n;
+                    sensitivity[[j, k]] = value;
+                    sensitivity[[k, j]] = value;
+                }
+            }
+            let spectrum =
+                output_metric_spectrum("the simplex gate amplitudes", &covariance, &sensitivity)?;
+            Ok(GateAmplitudeCode {
+                components: vec![(1.0, spectrum)],
+                representation_distortion,
+            })
+        }
+    }
+}
+
+/// The basis `Φ_k(t_ik)` of one atom on its firing rows, `(|R_k|, M_k)`, evaluated
+/// at the stored coordinates exactly as the persisted reconstruction evaluates it.
+fn firing_basis(
+    atom: usize,
+    plan: &SaeAtomGeometryPlan,
+    decoder: ArrayView2<'_, f64>,
+    coords: ArrayView2<'_, f64>,
+    rows: &[usize],
+    n_obs: usize,
+    p_out: usize,
+) -> Result<Array2<f64>, String> {
+    let width = plan.basis_size()?;
+    if decoder.dim() != (width, p_out) {
+        return Err(format!(
+            "native gate amplitudes: atom {atom} decoder shape {:?} must equal the plan-derived \
+             ({width}, {p_out})",
+            decoder.dim()
+        ));
+    }
+    if coords.dim() != (n_obs, plan.latent_dim()) {
+        return Err(format!(
+            "native gate amplitudes: atom {atom} coordinates {:?} must be ({n_obs}, {})",
+            coords.dim(),
+            plan.latent_dim()
+        ));
+    }
+    if rows.is_empty() {
+        return Ok(Array2::zeros((0, width)));
+    }
+    let firing_coords = coords.select(Axis(0), rows);
+    if firing_coords.iter().any(|value| !value.is_finite()) {
+        return Err(format!(
+            "native gate amplitudes: atom {atom} has a non-finite coordinate on a firing row"
+        ));
+    }
+    let (basis, _) = plan.build_evaluator()?.evaluate(firing_coords.view())?;
+    if basis.dim() != (rows.len(), width) {
+        return Err(format!(
+            "native gate amplitudes: atom {atom} basis {:?} must be ({}, {width})",
+            basis.dim(),
+            rows.len()
+        ));
+    }
+    Ok(basis)
+}
+
+/// `Σ_i ‖values_i‖²_M` over the rows of `values` for the diagonal metric `metric`.
+fn squared_output_norms(values: &Array2<f64>, metric: &[f64]) -> f64 {
+    values
+        .rows()
+        .into_iter()
+        .map(|row| {
+            row.iter()
+                .zip(metric)
+                .map(|(value, weight)| weight * value * value)
+                .sum::<f64>()
+        })
+        .sum()
 }
 
 /// Intrinsic code coordinates of the firing rows and the point each row's basis

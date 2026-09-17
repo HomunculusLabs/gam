@@ -12,6 +12,7 @@ use super::{
     weighted_reverse_water_filling,
 };
 use crate::atom_codes::SparseAtomCodes;
+use crate::native_code_source::NativeGateModel;
 use crate::manifold::{
     SaeAtomBasisKind, SaeAtomGeometryPlan, SaeBasisResolution, SaeReferenceMetricPlan,
 };
@@ -1990,10 +1991,11 @@ fn periodic_first_harmonic_plan() -> SaeAtomGeometryPlan {
 fn native_description_length_gains_nothing_by_moving_a_gate_below_a_threshold_2933_f15() {
     // The native kernel end to end. Atom 0's gates are multiplied by 1e-9 and its
     // decoder by 1e9, so every decoded product is unchanged while every gate of
-    // atom 0 falls below 1e-8. The support, the occupancy, the coordinate codes and
-    // the decoder-aware dictionary (its output sensitivity scales by 1e-18 and its
-    // coefficient range by 1e9) are all unchanged, so the whole message must cost
-    // the same number of bits.
+    // atom 0 falls below 1e-8. The support, the occupancy, the coordinate codes, the
+    // gate-amplitude code (its gate variance scales by 1e-18 and its decoded
+    // sensitivity by 1e18) and the decoder-aware dictionary (its output sensitivity
+    // scales by 1e-18 and its coefficient range by 1e9) are all unchanged, so the
+    // whole message must cost the same number of bits.
     let n = 6;
     let plans = [periodic_first_harmonic_plan(), periodic_first_harmonic_plan()];
     let coords_0 = Array2::from_shape_vec((n, 1), vec![0.05, 0.2, 0.33, 0.5, 0.71, 0.9]).unwrap();
@@ -2038,6 +2040,7 @@ fn native_description_length_gains_nothing_by_moving_a_gate_below_a_threshold_29
                 .expect("decoder dictionary code");
         native_manifold_description_length(NativeDescriptionLengthRequest {
             assignments: gates.view(),
+            gate_model: NativeGateModel::Independent,
             geometry_plans: &plans,
             decoder_blocks: &decoders,
             coords: &coords,
@@ -2054,10 +2057,12 @@ fn native_description_length_gains_nothing_by_moving_a_gate_below_a_threshold_29
         vec![1.0, 1.0],
         "a rescaled gate is still transmitted"
     );
+    assert!(original.gate_amplitude_bits_per_token > 0.0, "the gates vary, so they cost bits");
     assert!(original.total_bits.is_finite() && original.total_bits > 0.0);
     for (ledger, left, right) in [
         ("selection", original.selection_bits, rescaled.selection_bits),
         ("coordinate", original.atom_code_bits_per_token[0], rescaled.atom_code_bits_per_token[0]),
+        ("amplitude", original.gate_amplitude_bits_per_token, rescaled.gate_amplitude_bits_per_token),
         ("dictionary", original.dict_bits, rescaled.dict_bits),
         ("total", original.total_bits, rescaled.total_bits),
     ] {
