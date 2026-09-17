@@ -257,19 +257,41 @@ impl HessianSpectrumMotion {
 /// step (#2901 V22).
 ///
 /// Along `ρ ↦ ρ + δρ` with `|δρ_k| ≤ t_k` the criterion's Hessian is
-/// `H' = XᵀW'X + Σ_k e^{δρ_k}·λ_k S_k`. Every `λ_k S_k ⪰ 0` is scaled by a factor
+/// `H' = XᵀW'X + Σ_k e^{δρ_k}·λ_k S̃_k`. Every `λ_k S̃_k ⪰ 0` is scaled by a factor
 /// in `[e^{−t_k}, e^{t_k}]`, exactly, for any finite step, and the curvature
-/// weights move as [`HessianSpectrumMotion`] bounds them. With
-/// `G = H − S_λ = XᵀWX`,
+/// weights move as [`HessianSpectrumMotion`] bounds them. With `G = XᵀWX`,
 ///
 /// ```text
 ///   H₋ ⪯ H' ⪯ H₊,
-///   H₋ = (1 − m)·G − V + Σ_k e^{−t_k}·λ_k S_k,   H₊ = (1 + m)·G + V + Σ_k e^{t_k}·λ_k S_k,
+///   H₋ = (1 − m)·G − V + Σ_k e^{−t_k}·λ_k S̃_k,   H₊ = (1 + m)·G + V + Σ_k e^{t_k}·λ_k S̃_k,
 /// ```
 ///
 /// so by Weyl's monotonicity theorem `σ_i(H₋) ≤ σ_i(H') ≤ σ_i(H₊)` for every
 /// `i`. Each coordinate's step is charged to its own penalty, and each row's
-/// motion to its own row, so only to the directions they reach.
+/// motion to its own row, so only to the directions they reach. The premise is
+/// that every `λ_k S̃_k` is positive semidefinite and that the step moves only the
+/// `λ_k`: every penalty registered here is a root product `λ_k·RᵀR`.
+///
+/// The penalty PIRLS put in `H` is the engine's `S̃ = EᵀE`, built on the
+/// λ-invariant penalized block, so it is exactly zero on the structural null
+/// space the engine declares. The blocks are the engine's own projections
+/// `S̃_k = Π S_k Π` onto that block
+/// ([`gam_terms::construction::PenaltyNullSplit`]): then `Σ_k λ_k S̃_k = S̃` in
+/// exact arithmetic, and `Π` does not move with ρ. A root rotated into the
+/// transformed frame keeps a relative leakage onto the null coordinates, which
+/// the raw `S_k` carry. On `y ~ s(x) + s(x, g, bs='fs')` (n=120, seed 0) that
+/// leakage reached 8.9e4 at λ = 1.98e12, H's smallest eigenvalue was 0.996, and
+/// the raw blocks let it "fall to −99".
+///
+/// `G` is taken as `Ĝ = H − B` with `B = Σ_k λ_k S̃_k`, and whatever the
+/// arithmetic leaves of that identity is charged rather than assumed. With
+/// `R = S̃ − B`, `Ĝ = G + R`, so `(1 − m)·G ⪰ (1 − m)·Ĝ − |1 − m|·‖R‖₂·I` and
+/// `(1 + m)·G ⪯ (1 + m)·Ĝ + (1 + m)·‖R‖₂·I`. The charge is `‖R‖_F ≥ ‖R‖₂`, and a
+/// shift by a multiple of `I` moves every eigenvalue by exactly that multiple. On
+/// the fs fit `R`'s largest entry was 9.8e-4, rounding at ‖S̃‖ = 1.9e12. An engine
+/// penalty the blocks do not reproduce, such as a floored range eigenvalue or a
+/// reordered split, is charged its whole residual, so the certificate refuses
+/// rather than vouching for a spectrum it did not bound.
 ///
 /// Scaling all of `H` by `e^{±max_k t_k}` bounds the same motion, but it charges
 /// one coordinate's step to every eigenvalue and to the band together. On a
@@ -289,32 +311,36 @@ pub(crate) struct HessianSpectrumBounds {
 }
 
 impl HessianSpectrumBounds {
-    /// The bounds for the penalized `hessian` over a step of at most `step[k]` in
-    /// coordinate `k`, for the curvature weights' `motion` over that step.
-    /// `penalties` yields one `(range, block)` per coordinate, in coordinate
-    /// order: `block` is `λ_k S_k` on `hessian`'s rows and columns `range`, zero
-    /// elsewhere.
+    /// The bounds for the penalized `hessian`, which carries the engine's
+    /// `penalty` `S̃`, over a step of at most `step[k]` in coordinate `k`, for the
+    /// curvature weights' `motion` over that step. `penalties` yields one
+    /// `(range, block)` per coordinate, in coordinate order: `block` is
+    /// `λ_k S̃_k` on `hessian`'s rows and columns `range`, zero elsewhere.
     pub(crate) fn over_step(
         hessian: &Array2<f64>,
+        penalty: &Array2<f64>,
         penalties: impl IntoIterator<Item = (std::ops::Range<usize>, Array2<f64>)>,
         step: ArrayView1<'_, f64>,
         motion: HessianSpectrumMotion,
     ) -> Result<Self, EstimationError> {
         let dimension = hessian.nrows();
         if hessian.ncols() != dimension
+            || penalty.dim() != (dimension, dimension)
             || step.iter().any(|&radius| !(radius.is_finite() && radius >= 0.0))
         {
             return Err(EstimationError::InvalidInput(format!(
-                "Hessian spectrum bounds need a square Hessian and finite nonnegative steps: \
-                 {}x{} Hessian, steps {step}",
+                "Hessian spectrum bounds need a square Hessian, a penalty of its shape and \
+                 finite nonnegative steps: {}x{} Hessian, {}x{} penalty, steps {step}",
                 hessian.nrows(),
-                hessian.ncols()
+                hessian.ncols(),
+                penalty.nrows(),
+                penalty.ncols()
             )));
         }
         let m = motion.relative_weight_motion;
-        // `H₋ = (1 − m)·H + Σ_k (e^{−t_k} − (1 − m))·λ_k S_k`, and `H₊` likewise.
-        let mut lower = hessian * (1.0 - m);
-        let mut upper = hessian * (1.0 + m);
+        let mut total = Array2::<f64>::zeros((dimension, dimension));
+        let mut shrunk = Array2::<f64>::zeros((dimension, dimension));
+        let mut grown = Array2::<f64>::zeros((dimension, dimension));
         let mut upper_unbounded = false;
         let mut coordinates = 0usize;
         for (range, block) in penalties {
@@ -334,14 +360,17 @@ impl HessianSpectrumBounds {
                     range.end
                 )));
             }
-            lower
+            total
                 .slice_mut(s![range.clone(), range.clone()])
-                .scaled_add((-radius).exp() - (1.0 - m), &block);
+                .scaled_add(1.0, &block);
+            shrunk
+                .slice_mut(s![range.clone(), range.clone()])
+                .scaled_add((-radius).exp(), &block);
             let growth = radius.exp();
             if growth.is_finite() {
-                upper
+                grown
                     .slice_mut(s![range.clone(), range])
-                    .scaled_add(growth - (1.0 + m), &block);
+                    .scaled_add(growth, &block);
             } else {
                 upper_unbounded = true;
             }
@@ -353,6 +382,28 @@ impl HessianSpectrumBounds {
                 step.len()
             )));
         }
+        let difference = penalty - &total;
+        let scale = difference
+            .iter()
+            .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+        let residual = if scale > 0.0 {
+            scale
+                * difference
+                    .iter()
+                    .fold(0.0_f64, |acc, value| acc + (value / scale).powi(2))
+                    .sqrt()
+        } else {
+            0.0
+        };
+        if !residual.is_finite() {
+            return Err(EstimationError::InvalidInput(format!(
+                "Hessian spectrum bounds: the engine penalty's residual against the per-coordinate \
+                 blocks is not finite: {residual:.4e}"
+            )));
+        }
+        let data = hessian - &total;
+        let mut lower = &data * (1.0 - m) + &shrunk;
+        let mut upper = &data * (1.0 + m) + &grown;
         if let Some(rows) = motion.nonpositive_rows.as_ref() {
             if rows.dim() != (dimension, dimension) {
                 return Err(EstimationError::InvalidInput(format!(
@@ -365,12 +416,20 @@ impl HessianSpectrumBounds {
             lower -= rows;
             upper += rows;
         }
+        let lower_charge = (1.0 - m).abs() * residual;
+        let upper_charge = (1.0 + m) * residual;
         Ok(Self {
-            lower: descending_spectrum(lower)?,
+            lower: descending_spectrum(lower)?
+                .into_iter()
+                .map(|value| value - lower_charge)
+                .collect(),
             upper: if upper_unbounded {
                 vec![f64::INFINITY; dimension]
             } else {
                 descending_spectrum(upper)?
+                    .into_iter()
+                    .map(|value| value + upper_charge)
+                    .collect()
             },
             weights_stay_nonnegative: motion.weights_stay_nonnegative,
         })
@@ -601,7 +660,9 @@ impl FittedHessianSpectrum {
 /// subspace the criterion priced, so row `i` moves by at most
 /// `|c_i|·Σ_k |δρ_k|·|x_iᵀ∂β̂/∂ρ_k|`. Rows whose weight is not positive are
 /// charged by their own weighted rank-one sum, in PIRLS's transformed basis. The
-/// bounds are taken at this certified state, the one the criterion priced.
+/// bounds are taken at this certified state, the one the criterion priced. Both
+/// channels read the same penalties: the engine's projections `S̃_k = Π S_k Π`
+/// that sum to the `S̃` in `H` ([`HessianSpectrumBounds`]).
 pub(crate) fn certify_fitted_identified_rank(
     pirls: &crate::pirls::PirlsResult,
     spectrum: &FittedHessianSpectrum,
@@ -613,6 +674,7 @@ pub(crate) fn certify_fitted_identified_rank(
 ) -> Result<(IdentifiedRankCertificate, f64), EstimationError> {
     let displacement = certificate_newton_displacement(hessian_rho, gradient, railed)?;
     let step_radius = displacement.iter().fold(0.0_f64, |acc, value| acc.max(*value));
+    let penalties = applied_transformed_penalties(&pirls.reparam_result)?;
     let eigenvalues = &spectrum.eigenvalues;
     let eigenvectors = &spectrum.eigenvectors;
     let penalty_rank = spectrum.penalty_rank;
@@ -624,9 +686,7 @@ pub(crate) fn certify_fitted_identified_rank(
         let beta: &Array1<f64> = pirls.beta_transformed.as_ref();
         let qs = &pirls.reparam_result.qs;
         let mut eta_motion = Array1::<f64>::zeros(rows);
-        for ((penalty, &lambda), &step) in pirls
-            .reparam_result
-            .canonical_transformed
+        for ((penalty, &lambda), &step) in penalties
             .iter()
             .zip(lambdas.iter())
             .zip(displacement.iter())
@@ -682,22 +742,41 @@ pub(crate) fn certify_fitted_identified_rank(
     )?;
     let bounds = HessianSpectrumBounds::over_step(
         &spectrum.hessian,
-        pirls
-            .reparam_result
-            .canonical_transformed
-            .iter()
-            .zip(lambdas.iter())
-            .map(|(penalty, &lambda)| {
-                (
-                    penalty.col_range.clone(),
-                    penalty.root.t().dot(&penalty.root) * lambda,
-                )
-            }),
+        &pirls.reparam_result.s_transformed,
+        penalties.iter().zip(lambdas.iter()).map(|(penalty, &lambda)| {
+            (
+                penalty.col_range.clone(),
+                penalty.root.t().dot(&penalty.root) * lambda,
+            )
+        }),
         displacement.view(),
         motion,
     )?;
     certify_identified_rank_locally_constant(eigenvalues, penalty_rank, &bounds)
         .map(|certificate| (certificate, step_radius))
+}
+
+/// The penalties a smoothing-parameter step scales, coordinate by coordinate:
+/// the engine's projections `S̃_k = Π S_k Π` of `canonical_transformed` through
+/// the split it declared (#2454), so that `Σ_k λ_k S̃_k` is the `S̃` PIRLS put in
+/// `H`, rather than raw roots that leak onto the null coordinates.
+fn applied_transformed_penalties(
+    reparam: &gam_terms::construction::ReparamResult,
+) -> Result<Vec<gam_terms::construction::CanonicalPenalty>, EstimationError> {
+    let split = reparam.null_split();
+    reparam
+        .canonical_transformed
+        .iter()
+        .map(|penalty| {
+            split.project_canonical(penalty, gam_terms::construction::PenaltyFrame::Transformed)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            EstimationError::LayoutError(format!(
+                "projecting the rank certificate's penalty blocks onto the reparameterization's \
+                 penalized subspace failed: {error}"
+            ))
+        })
 }
 
 #[cfg(test)]
@@ -754,8 +833,13 @@ mod tests {
     /// each over its own step, with still weights.
     fn diagonal_bounds(hessian: &[f64], penalties: &[(&[f64], f64)]) -> HessianSpectrumBounds {
         let steps = Array1::from_iter(penalties.iter().map(|entry| entry.1));
+        let engine = penalties.iter().fold(
+            Array2::<f64>::zeros((hessian.len(), hessian.len())),
+            |sum, entry| sum + diagonal(entry.0),
+        );
         HessianSpectrumBounds::over_step(
             &diagonal(hessian),
+            &engine,
             penalties
                 .iter()
                 .map(|entry| (0..hessian.len(), diagonal(entry.0))),
@@ -879,6 +963,206 @@ mod tests {
         );
     }
 
+    /// #2901 V22: a rotated penalty root can leak onto the structural null
+    /// coordinates, where the engine's penalty is exactly zero. With null
+    /// coordinate 1, root `r = (1, 1e-4)` and `λ = 1e8`, the raw block `λ·rᵀr`
+    /// carries 1e4 onto the null coordinate. Projected through the engine's
+    /// primitive, the block is the engine's penalty `diag(1e8, 0)` and a unit step
+    /// certifies. The raw block over the same step refuses a Hessian whose rank
+    /// cannot change: it sends the data part indefinite and leaves a residual of
+    /// 1.4e4 against the engine's penalty.
+    #[test]
+    fn a_leaking_penalty_root_is_restricted_to_the_penalized_block_2901() {
+        let spectrum = [1.0e8 + 1.0, 1.0];
+        let hessian = diagonal(&spectrum);
+        let engine = diagonal(&[1.0e8, 0.0]);
+        let leaking =
+            gam_terms::construction::CanonicalPenalty::from_dense_root(array![[1.0, 1.0e-4]], 2);
+        let projected = leaking
+            .project_out_null_directions(array![[0.0], [1.0]].view())
+            .unwrap();
+        let bounds_for = |penalty: &gam_terms::construction::CanonicalPenalty| {
+            HessianSpectrumBounds::over_step(
+                &hessian,
+                &engine,
+                [(
+                    penalty.col_range.clone(),
+                    penalty.root.t().dot(&penalty.root) * 1.0e8,
+                )],
+                array![1.0].view(),
+                still_weights(),
+            )
+            .unwrap()
+        };
+        let certificate =
+            certify_identified_rank_locally_constant(&spectrum, 1, &bounds_for(&projected)).unwrap();
+        assert_eq!(certificate.rank, 2);
+        let refusal =
+            certify_identified_rank_locally_constant(&spectrum, 1, &bounds_for(&leaking)).unwrap_err();
+        assert!(
+            matches!(
+                refusal,
+                EstimationError::IdentifiedRankNotLocallyConstant { rank: 2, .. }
+            ),
+            "{refusal}"
+        );
+    }
+
+    /// #2901 V22: what the per-coordinate blocks do not reproduce of the engine's
+    /// penalty is charged to every eigenvalue. With `H = diag(1, 0.3)`, blocks
+    /// `diag(0, 0.2)` and an engine penalty `diag(0, 0.6)`, `R = diag(0, 0.4)`, so a
+    /// still step bounds the spectrum by `σ_i ∓ 0.4` and the identified direction
+    /// at 0.3 can reach −0.1. The same blocks against the engine penalty they
+    /// reproduce certify: the charge, not the spectrum, is what refuses.
+    #[test]
+    fn an_engine_penalty_the_blocks_do_not_reproduce_is_charged_its_residual_2901() {
+        let spectrum = [1.0, 0.3];
+        let bounds_for = |engine: &[f64]| {
+            HessianSpectrumBounds::over_step(
+                &diagonal(&spectrum),
+                &diagonal(engine),
+                [(0..2, diagonal(&[0.0, 0.2]))],
+                array![0.0].view(),
+                still_weights(),
+            )
+            .unwrap()
+        };
+        let matching = certify_identified_rank_locally_constant(&spectrum, 1, &bounds_for(&[0.0, 0.2]))
+            .unwrap();
+        assert_eq!(matching.rank, 2);
+        let charged = bounds_for(&[0.0, 0.6]);
+        let charge = 0.6 - 0.2;
+        let band = gam_linalg::roundoff::symmetric_spectrum_rounding_band(&charged.upper);
+        for (index, &value) in spectrum.iter().enumerate() {
+            assert!(
+                (charged.lower[index] - (value - charge)).abs() <= band
+                    && (charged.upper[index] - (value + charge)).abs() <= band,
+                "eigenvalue {index} ({value}) is bounded by [{:.6e}, {:.6e}], not by ±{charge}",
+                charged.lower[index],
+                charged.upper[index]
+            );
+        }
+        let refusal =
+            certify_identified_rank_locally_constant(&spectrum, 1, &charged).unwrap_err();
+        assert!(
+            matches!(
+                refusal,
+                EstimationError::IdentifiedRankNotLocallyConstant { rank: 2, .. }
+            ),
+            "{refusal}"
+        );
+    }
+
+    /// #2901 V22: the certificate charges a step against the engine's own split.
+    /// On a fixture with a structural null (first differences on coefficients
+    /// 0..12 and second differences on 8..20 leave only the constant), the
+    /// engine's `S̃` is exactly zero on the coordinate its null basis spans, and
+    /// the blocks projected through its split reproduce `S̃` to rounding. The two
+    /// sides are two formations of one exact matrix. The engine takes `S̃ = EᵀE`
+    /// from a backward-stable decomposition of the stacked roots, and a Gram of a
+    /// factor perturbed by `η` relative is perturbed by `2η + η²`, so `S̃` carries
+    /// twice the band `p·ε·‖·‖₂` of a `p`-dimensional decomposition. The block sum
+    /// carries its own band. The control is a basis that is not the engine's, the
+    /// same basis with its coordinates reversed: `S̃` does not vanish there, and
+    /// blocks projected through it miss `S̃` far outside that rounding. An engine
+    /// that reorders its split fails here, where the certificate would only charge
+    /// the residual and refuse.
+    #[test]
+    fn the_engines_split_is_where_its_penalty_vanishes_2901() {
+        use gam_terms::construction::{
+            CanonicalPenalty, precompute_reparam_invariant_from_canonical,
+            stable_reparameterizationwith_invariant,
+        };
+        let p = 20;
+        let difference_root = |start: usize, end: usize, stencil: &[f64]| {
+            let rows = end - start + 1 - stencil.len();
+            let mut root = Array2::<f64>::zeros((rows, p));
+            for row in 0..rows {
+                for (offset, &weight) in stencil.iter().enumerate() {
+                    root[[row, start + row + offset]] = weight;
+                }
+            }
+            CanonicalPenalty::from_dense_root(root, p)
+        };
+        let canonical = vec![
+            difference_root(0, 12, &[-1.0, 1.0]),
+            difference_root(8, 20, &[1.0, -2.0, 1.0]),
+        ];
+        let lambdas = [1.0e6, 3.0];
+        let invariant = precompute_reparam_invariant_from_canonical(&canonical, p).unwrap();
+        let reparam =
+            stable_reparameterizationwith_invariant(&canonical, &lambdas, p, &invariant).unwrap();
+        assert_eq!(reparam.null_split().declared_null_dim(), 1);
+        let engine = &reparam.s_transformed;
+        let engine_band = gam_linalg::roundoff::symmetric_spectrum_rounding_band(
+            &descending_spectrum(engine.clone()).unwrap(),
+        );
+        // The residual's spectral norm, against the rounding both formations carry.
+        let residual_for = |penalties: &[CanonicalPenalty]| {
+            let mut sum = Array2::<f64>::zeros(engine.dim());
+            for (penalty, &lambda) in penalties.iter().zip(lambdas.iter()) {
+                sum.slice_mut(s![penalty.col_range.clone(), penalty.col_range.clone()])
+                    .scaled_add(lambda, &penalty.root.t().dot(&penalty.root));
+            }
+            let sum_band = gam_linalg::roundoff::symmetric_spectrum_rounding_band(
+                &descending_spectrum(sum.clone()).unwrap(),
+            );
+            let residual = descending_spectrum(engine - &sum)
+                .unwrap()
+                .iter()
+                .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+            (residual, 2.0 * engine_band + sum_band)
+        };
+        // An orthonormal basis of m columns carries total mass m over its rows; a
+        // basis aligned with coordinates puts one unit on each of m rows and only
+        // rounding elsewhere, so the rows holding more than half a unit are its
+        // coordinates.
+        let spanned_coordinates = |basis: &Array2<f64>| -> Vec<usize> {
+            (0..basis.nrows())
+                .filter(|&row| basis.row(row).dot(&basis.row(row)) > 0.5)
+                .collect()
+        };
+        let null_coordinates = spanned_coordinates(&reparam.u_truncated);
+        assert_eq!(null_coordinates.len(), 1, "{}", reparam.u_truncated);
+        for &coordinate in &null_coordinates {
+            assert!(
+                engine
+                    .row(coordinate)
+                    .iter()
+                    .chain(engine.column(coordinate).iter())
+                    .all(|&value| value == 0.0),
+                "the engine's penalty does not vanish on its null coordinate {coordinate}"
+            );
+        }
+        let applied = applied_transformed_penalties(&reparam).unwrap();
+        let (residual, band) = residual_for(&applied);
+        assert!(
+            residual <= band,
+            "the engine's split: blocks miss S̃ by {residual:.4e}, rounding {band:.4e}"
+        );
+
+        let reversed = reparam.u_truncated.slice(s![..;-1, ..]).to_owned();
+        let reversed_coordinates = spanned_coordinates(&reversed);
+        assert!(
+            reversed_coordinates
+                .iter()
+                .any(|&coordinate| engine.row(coordinate).iter().any(|&value| value != 0.0)),
+            "the reversed basis must name a penalized coordinate"
+        );
+        let misprojected = reparam
+            .canonical_transformed
+            .iter()
+            .map(|penalty| penalty.project_out_null_directions(reversed.view()))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let (misprojected_residual, misprojected_band) = residual_for(&misprojected);
+        assert!(
+            misprojected_residual > misprojected_band,
+            "a basis that is not the engine's: blocks miss S̃ by {misprojected_residual:.4e}, \
+             rounding {misprojected_band:.4e}"
+        );
+    }
+
     /// The bounds hold the spectrum wherever the step reaches: a rotated data
     /// block and two overlapping penalties, re-assembled at every corner of the
     /// step and at interior points, keep each eigenvalue inside
@@ -894,6 +1178,7 @@ mod tests {
         let steps = array![1.3, 0.4];
         let bounds = HessianSpectrumBounds::over_step(
             &hessian,
+            &(&first + &second),
             [(0..3, first.clone()), (0..3, second.clone())],
             steps.view(),
             still_weights(),
@@ -973,6 +1258,7 @@ mod tests {
                 .unwrap();
             HessianSpectrumBounds::over_step(
                 &diagonal(&spectrum),
+                &diagonal(&[0.0, 0.5]),
                 [penalty.clone()],
                 array![0.0].view(),
                 motion,

@@ -1,3 +1,4 @@
 mod by_factor_spatial_freeze_replay;
 mod factor_intercept_issue_157;
+mod factor_smooth_identified_rank_2901;
 mod monotonicity_hvp_extra_eps_factor;
