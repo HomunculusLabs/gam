@@ -314,17 +314,66 @@ prediction and in leave-one-out diagnostics, because the fitted
 coefficients live on the calibrated axis: a predictor that rebuilt the
 score differently would be evaluating a different model.
 
-Two family differences are worth knowing. The Bernoulli kernel owns an
-empirical-grid branch, so when no transform makes the score adequately
-normal it falls back to the exact empirical latent measure. The survival
-kernel is the closed-form standard-normal probit lowering and has no such
-branch, so it keeps the closest available transform and *says* — through
-the fit's `LatentZCheckMode` — that the residual shape is unmodelled.
-And when the conditional branch fires, the score becomes a generated
-regressor: the coefficient covariance carries a Murphy–Topel correction
-for the first stage's estimation error, or is withheld with a typed reason
-if the fit's shape cannot supply the correction. It is never published
-uncorrected.
+Both kernels own an empirical-grid branch, so when no transform makes the
+score adequately normal the fit falls back to the exact empirical latent
+measure of the (calibrated) score instead of pretending it is Gaussian —
+see the next section for what that means on the survival side. When the
+conditional branch fires, the score becomes a generated regressor: the
+coefficient covariance carries a Murphy–Topel correction for the first
+stage's estimation error, or is withheld with a typed reason if the fit's
+shape cannot supply the correction (an empirical measure built from the
+calibrated residual is one such shape: the law itself then moves with the
+first stage). It is never published uncorrected.
+
+### The survival kernel anchors on a declared law
+
+The identity above is the closed-form standard-normal lowering: with
+`z | a ~ N(0, 1)` the row index is `η = q·√(1 + b²) + b·z` and `q` is the
+marginal index. That lowering is exact only for a Gaussian score. On a
+declared finite law `F_a` — nodes `u_k` with weights `w_k` — the survival
+kernel instead solves the defining equation itself, per row and per time:
+
+```text
+Σ_k w_k Φ(−(α(t, a) + b(a)·u_k)) = Φ(−q(t, a)) ,        η = α + b·z .
+```
+
+The left side is continuous and strictly decreasing in `α` with limits
+`1` and `0`, so `α` exists and is unique; it is found by a bracketed
+Newton–Halley solve, and its derivatives for the score, Hessian and the
+higher-order towers come from implicit differentiation of the same
+equation (`α_θ = −Σ_k w_k φ(η_k) ∂_θ(b·u_k) / Σ_k w_k φ(η_k)`, and so on).
+Gaussian is the special case: on a Gauss–Hermite law the anchored fit
+reproduces the closed-form fit — coefficients, log-likelihood and the
+fitted survival index — to quadrature tolerance, which the acceptance
+test `declared_latent_law_2923` pins. On a skewed law the two are
+different models: the closed form still fits the conditional law (a
+flexible baseline absorbs `α`), but its `q̂` stops being the marginal
+index, so `Φ(−q̂(t))` is off from the marginal survival by a measurable
+amount; the anchored `q̂` is the marginal index, as the identity says.
+
+Three ways to get there:
+
+- the automatic gate (default): when no pre-transform makes the score
+  adequately normal, the fit anchors on the global empirical law of the
+  calibrated score, exactly as the Bernoulli family does;
+- `config={"latent_measure": "global-empirical"}`: always anchor on the
+  global empirical law of the score;
+- `config={"declared_latent_law": {"nodes": [...], "weights": [...]}}`:
+  anchor on exactly this law. The score is then taken as supplied — no
+  pre-transform is fitted to it, because the law is your statement about
+  that very score.
+
+Whichever way, the law is **persisted with the model** as its latent
+measure and replayed at prediction and in leave-one-out diagnostics by
+the same anchoring equation; the saved coefficients are defined against
+that law's anchor and mean nothing under another.
+
+Current boundaries, refused with a message rather than silently
+reinterpreted: one latent score (`K = 1`); no score-warp or link-deviation
+flex block, no CTN Stage-1 influence absorber, no time-wiggle baseline,
+and a time-constant slope. The Jeffreys/Firth arming's closed-form fifth
+and sixth derivatives are the Gaussian lowering's and are not served on a
+declared law; the fit runs without them.
 
 ### Several scores at once, and the covariance between them
 
@@ -385,7 +434,10 @@ Two limits are worth stating plainly:
 - **A fit that used a conditional `Σ(a)` cannot be saved yet.** It needs
   `K ≥ 2`, and the saved-model contract carries one score column and one
   score covariance. Saving is refused at the point of loss with the reason
-  attached, rather than failing later as a shape mismatch on load.
+  attached, rather than failing later as a shape mismatch on load. On the
+  declared-law path the object that would have to be persisted is the law
+  itself rather than `Σ(a)`; that path is `K = 1` today, so the multi-score
+  contract is still the open end.
 
 ## Fixed external baseline (slope-only fit)
 

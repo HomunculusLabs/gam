@@ -141,6 +141,17 @@ path = "issue-1082.xml"
 filter = 'test(/hifreq_tensor_k(8|10)/)'
 slow-timeout = { period = "600s", terminate-after = 4 }
 
+# The gam#2923 declared-law acceptance probes each run two full survival
+# marginal-slope fits, one of them on the anchored frame, whose row program
+# solves a root per row and location channel on a 41- to 65-node law and
+# lifts it through the fourth-order towers. On 24 cores a probe takes
+# 120-290 s; a small CI runner needs the same headroom the survival
+# integration probes below get, and terminate-after = 4 still kills a genuine
+# hang far inside the job backstop.
+[[profile.default.overrides]]
+filter = 'test(/declared_latent_law_2923::/)'
+slow-timeout = { period = "600s", terminate-after = 4 }
+
 # Two survival integration probes carry a per-test wall-clock that exceeds the
 # default 600s SIGKILL by construction, so at the default budget nextest kills
 # them BEFORE their assertion runs — turning a designed verdict into an opaque

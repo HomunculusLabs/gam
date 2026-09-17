@@ -2,6 +2,8 @@
 //! The mathematical inference registrations match the public facade's startup;
 //! the CPU lane does not require a GPU dispatch registration.
 
+#[path = "survival_acceptance/declared_latent_law_2923.rs"]
+mod declared_latent_law_2923;
 #[path = "survival_acceptance/follow_up_mode_response_fd_2765.rs"]
 mod follow_up_mode_response_fd_2765;
 #[path = "survival_acceptance/follow_up_varying_slope_2765.rs"]
