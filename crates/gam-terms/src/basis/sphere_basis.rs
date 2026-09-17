@@ -882,17 +882,13 @@ pub(crate) fn build_matern_basis_seeded(
     ) {
         selected_centers
     } else {
-        let reduce_aniso = resolve_matern_forward_aniso(
-            aniso_seed_mode,
-            selected_centers.view(),
-            spec.aniso_log_scales.as_deref(),
-        );
-        matern_rank_reduce_centers(
+        matern_realized_centers(
             data,
             &selected_centers,
             length_scale,
             spec.nu,
-            reduce_aniso.as_deref(),
+            aniso_seed_mode,
+            spec.aniso_log_scales.as_deref(),
         )?
     };
     let centers = expand_periodic_centers(&original_centers, spec.periodic.as_deref())?;

@@ -440,3 +440,94 @@ fn aniso_collision_limit_is_finite_and_zero_gradient() {
         );
     }
 }
+
+/// #755: one center reduction feeds the forward design, the jet and the Hessian.
+///
+/// A duplicated center makes the realized kernel block rank-deficient, so the
+/// forward design drops it. The jet differentiated the reduced columns, but the
+/// Hessian evaluated every requested center, so its width disagreed with the
+/// jet's and the torch boundary's second-order contraction failed on the shape.
+/// Here the forward, jet and Hessian widths all equal the reduced count. The jet
+/// matches central differences of the forward design, and the Hessian matches
+/// central differences of the jet, column by column.
+#[test]
+fn duplicated_center_reduces_forward_jet_and_hessian_to_one_width() {
+    let h = 1e-5;
+    let points = array![
+        [0.27, 0.61],
+        [0.83, 0.14],
+        [0.55, 0.49],
+        [-0.31, 0.72],
+        [0.12, -0.44],
+        [-0.66, -0.18]
+    ];
+    let centers = array![
+        [0.0, 0.0],
+        [1.0, 0.2],
+        [0.3, 1.1],
+        [-0.5, 0.4],
+        [1.0, 0.2]
+    ];
+    let aniso = [0.4_f64, -0.4];
+    for nu in [MaternNu::ThreeHalves, MaternNu::FiveHalves] {
+        let ls = 0.8;
+        let forward = forward_kernel(points.view(), &centers, ls, nu, Some(&aniso));
+        assert_eq!(
+            forward.ncols(),
+            centers.nrows() - 1,
+            "ν={}: the forward design must drop the duplicated center",
+            nu_label(nu)
+        );
+        let jet = matern_input_location_jet_nd(points.view(), centers.view(), ls, nu, Some(&aniso))
+            .expect("jet should evaluate");
+        let hess =
+            matern_input_location_hessian_nd(points.view(), centers.view(), ls, nu, Some(&aniso))
+                .expect("Hessian should evaluate");
+        assert_eq!(
+            jet.dim(),
+            (points.nrows(), forward.ncols(), 2),
+            "ν={}: jet width must equal the forward design's",
+            nu_label(nu)
+        );
+        assert_eq!(
+            hess.dim(),
+            (points.nrows(), forward.ncols(), 2, 2),
+            "ν={}: Hessian width must equal the forward design's",
+            nu_label(nu)
+        );
+        for axis in 0..2 {
+            let fd = fd_first(&points, &centers, ls, nu, Some(&aniso), axis, h);
+            let mut plus = points.clone();
+            let mut minus = points.clone();
+            plus.column_mut(axis).mapv_inplace(|v| v + h);
+            minus.column_mut(axis).mapv_inplace(|v| v - h);
+            let jet_plus =
+                matern_input_location_jet_nd(plus.view(), centers.view(), ls, nu, Some(&aniso))
+                    .expect("jet at +h");
+            let jet_minus =
+                matern_input_location_jet_nd(minus.view(), centers.view(), ls, nu, Some(&aniso))
+                    .expect("jet at -h");
+            for n in 0..points.nrows() {
+                for k in 0..forward.ncols() {
+                    let numeric = fd[[n, k]];
+                    let analytic = jet[[n, k, axis]];
+                    assert!(
+                        (analytic - numeric).abs() < 1e-6 + 1e-5 * numeric.abs(),
+                        "ν={} axis={axis} (n={n},k={k}): jet {analytic} vs forward FD {numeric}",
+                        nu_label(nu)
+                    );
+                    for a in 0..2 {
+                        let numeric =
+                            (jet_plus[[n, k, a]] - jet_minus[[n, k, a]]) / (2.0 * h);
+                        let analytic = hess[[n, k, a, axis]];
+                        assert!(
+                            (analytic - numeric).abs() < 1e-6 + 1e-5 * numeric.abs(),
+                            "ν={} (n={n},k={k},a={a},c={axis}): Hessian {analytic} vs jet FD {numeric}",
+                            nu_label(nu)
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

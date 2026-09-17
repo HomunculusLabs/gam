@@ -3151,6 +3151,36 @@ pub(crate) fn matern_rank_reduce_centers(
     Ok(reduced)
 }
 
+/// The Matérn centers a cold forward build realizes over `data`: the selected
+/// centers reduced to the kernel's data-supported numerical rank (#755), with
+/// the rank Gram under the anisotropy contrasts the forward design resolves for
+/// `aniso_seed_mode`.
+///
+/// This is the one reduction. The forward builder realizes its basis columns
+/// from it, and the input-location jet and Hessian differentiate those same
+/// columns through it, so `Φ`, `∂Φ/∂t` and `∂²Φ/∂t∂tᵀ` share one center set and
+/// one column layout. A Hessian that skipped it returned `K` columns against the
+/// jet's reduced `K'`, and the torch boundary's second-order contraction failed
+/// on the shape.
+pub(crate) fn matern_realized_centers(
+    data: ArrayView2<'_, f64>,
+    selected_centers: &Array2<f64>,
+    length_scale: f64,
+    nu: MaternNu,
+    aniso_seed_mode: AnisoSeedMode,
+    aniso_log_scales: Option<&[f64]>,
+) -> Result<Array2<f64>, BasisError> {
+    let reduce_aniso =
+        resolve_matern_forward_aniso(aniso_seed_mode, selected_centers.view(), aniso_log_scales);
+    matern_rank_reduce_centers(
+        data,
+        selected_centers,
+        length_scale,
+        nu,
+        reduce_aniso.as_deref(),
+    )
+}
+
 pub(crate) fn build_matern_kernel_penalty(
     centers: ArrayView2<'_, f64>,
     length_scale: f64,
