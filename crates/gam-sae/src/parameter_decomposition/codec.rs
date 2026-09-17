@@ -38,9 +38,11 @@
 //!
 //! [`code_saving_at_declared_fidelity`] compares two decoded artifacts that both
 //! meet one declared fidelity tolerance. Take `P_c = (2/C) v(t_c) v(t_c)ᵀ` at equally
-//! spaced `t_c ∈ [0, π)`, so `Σ_c P_c = I₂`. For a unit `x`,
-//! `‖x − P_S x‖ ≥ xᵀ(x − P_S x) ≥ 1 − 2|S|/C`, so reconstruction error `ε` needs
-//! `|S| ≥ C(1 − ε)/2` on every input. Each packet then costs at least the least
+//! spaced `t_c ∈ [0, π)` with `C ≥ 2`, so `Σ_c P_c = I₂` (at `C = 1` the family sums to
+//! `diag(2, 0)`). For a unit `x`, `‖x − P_S x‖ ≥ xᵀ(x − P_S x) ≥ 1 − 2|S|/C`, so
+//! reconstruction error `‖x − P_S x‖ ≤ ε` needs `|S| ≥ C(1 − ε)/2` on every input, and
+//! a squared-error tolerance `‖x − P_S x‖² ≤ ε` needs `|S| ≥ C(1 − √ε)/2`. Each packet
+//! then costs at least the least
 //! subset code over those cardinalities, while the identity program needs no
 //! packet at all. A smooth parameter family is not a good decomposition by itself.
 
@@ -581,6 +583,9 @@ pub fn encode_subset(
 }
 
 /// Read one subset of `{0, …, universe − 1}` ([`encode_subset`]), ascending.
+///
+/// A cardinality whose rank field cannot fit in the remaining bits is refused before the
+/// binomial is formed, so a short hostile message cannot force a large computation.
 pub fn decode_subset(
     reader: &mut BitReader<'_>,
     universe: usize,
@@ -589,6 +594,16 @@ pub fn decode_subset(
     if cardinality > universe as u64 {
         return Err(CodecError::InvalidCodeword(format!(
             "a {cardinality}-subset of {universe} elements does not exist"
+        )));
+    }
+    // With `j = min(k, n − k) ≥ 1`, `C(n, k) = Π_{i=1..j} (n − j + i)/i` and every factor is at
+    // least 2 (because `n − j ≥ j ≥ i`), so the rank field holds at least `j` bits.
+    let smaller = cardinality.min(universe as u64 - cardinality);
+    if smaller > reader.remaining_bits() {
+        return Err(CodecError::InvalidCodeword(format!(
+            "a {cardinality}-subset of {universe} elements needs at least {smaller} rank bits, \
+             {} remain",
+            reader.remaining_bits()
         )));
     }
     let count = binomial(universe as u64, cardinality);
@@ -615,8 +630,11 @@ pub struct DagNode {
 /// The codeword is the node count plus one in the prefix integer code, then per node
 /// its label as a fixed index into `label_alphabet`, and for every node after the
 /// first its arity plus one in the prefix integer code and each argument as a fixed
-/// index into the `i` nodes before it. The first node has no earlier node, so its
-/// empty argument list costs nothing.
+/// index into `max(i, 2)` symbols, where `i` is the number of nodes before it. The
+/// first node has no earlier node, so its empty argument list costs nothing. The
+/// second node can only read the first, yet each of its arguments still spends one
+/// bit: every argument then costs at least one bit, which lets a decoder bound an
+/// arity by the bits left in the message.
 pub fn encode_ordered_dag(
     out: &mut BitString,
     label_alphabet: usize,
@@ -640,7 +658,7 @@ pub fn encode_ordered_dag(
                     "node {position} reads node {argument}, which is not before it"
                 )));
             }
-            encode_fixed_index(out, argument, position)?;
+            encode_fixed_index(out, argument, position.max(2))?;
         }
     }
     Ok(())
@@ -648,11 +666,9 @@ pub fn encode_ordered_dag(
 
 /// Read one program graph ([`encode_ordered_dag`]).
 ///
-/// Every node after the first spends at least its one-bit arity codeword, so a node
-/// count above the remaining bits plus one is refused before any allocation. From
-/// the third node on every argument spends at least one bit, so an arity above the
-/// remaining bits is refused too. The second node's arguments can only name the
-/// first node and cost no bits, so its arity is bounded by nothing in the message.
+/// Every node after the first spends at least its one-bit arity codeword and every
+/// argument at least one bit, so a node count above the remaining bits plus one, or an
+/// arity above the remaining bits, is refused before any allocation.
 pub fn decode_ordered_dag(
     reader: &mut BitReader<'_>,
     label_alphabet: usize,
@@ -670,14 +686,20 @@ pub fn decode_ordered_dag(
         let mut arguments = Vec::new();
         if position > 0 {
             let arity = decode_prefix_integer(reader)? - 1;
-            if position > 1 && arity > reader.remaining_bits() {
+            if arity > reader.remaining_bits() {
                 return Err(CodecError::InvalidCodeword(format!(
                     "node {position} announces {arity} arguments in {} remaining bits",
                     reader.remaining_bits()
                 )));
             }
             for _ in 0..arity {
-                arguments.push(decode_fixed_index(reader, position)?);
+                let argument = decode_fixed_index(reader, position.max(2))?;
+                if argument >= position {
+                    return Err(CodecError::InvalidCodeword(format!(
+                        "node {position} reads node {argument}, which is not before it"
+                    )));
+                }
+                arguments.push(argument);
             }
         }
         nodes.push(DagNode { label, arguments });
@@ -1086,6 +1108,15 @@ mod tests {
             decode_support_packet(5, &packet),
             Err(CodecError::TrailingBits { remaining: 1 })
         );
+        // A cardinality the message cannot back is refused before the binomial is formed:
+        // the rank of a 500 000-subset of 10^6 elements needs at least 500 000 bits, and this
+        // packet holds none after its cardinality codeword.
+        let mut hostile = BitString::new();
+        encode_prefix_integer(&mut hostile, 500_001).expect("encode");
+        assert!(matches!(
+            decode_support_packet(1_000_000, &hostile),
+            Err(CodecError::InvalidCodeword(_))
+        ));
     }
 
     #[test]
@@ -1098,12 +1129,13 @@ mod tests {
         ];
         let mut out = BitString::new();
         encode_ordered_dag(&mut out, 4, &nodes).expect("encode");
-        // L_int(5) + 4 labels·2 + arities L_int(3)+L_int(3)+L_int(2) + argument widths 0+0 + 1+1 + 2.
+        // L_int(5) + 4 labels·2 + arities L_int(3)+L_int(3)+L_int(2) + argument widths
+        // ⌈log₂ max(i, 2)⌉: 1+1 at node 1, 1+1 at node 2, 2 at node 3.
         let expected = prefix_integer_len_bits(5).expect("length")
             + 8
             + prefix_integer_len_bits(3).expect("length") * 2
             + prefix_integer_len_bits(2).expect("length")
-            + 4;
+            + 6;
         assert_eq!(out.len_bits(), expected);
         let mut reader = out.reader();
         assert_eq!(decode_ordered_dag(&mut reader, 4), Ok(nodes.clone()));
@@ -1118,6 +1150,41 @@ mod tests {
         encode_prefix_integer(&mut oversized, 1 << 40).expect("encode");
         assert!(matches!(
             decode_ordered_dag(&mut oversized.reader(), 4),
+            Err(CodecError::InvalidCodeword(_))
+        ));
+        // The second node can only read the first, yet its arguments spend a bit each, so
+        // a message announcing 2^40 of them in a few dozen bits is refused before any
+        // argument is allocated (mpd-verify, #2951).
+        let mut announced = BitString::new();
+        encode_prefix_integer(&mut announced, 3).expect("encode");
+        encode_fixed_index(&mut announced, 0, 4).expect("encode");
+        encode_fixed_index(&mut announced, 0, 4).expect("encode");
+        encode_prefix_integer(&mut announced, (1 << 40) + 1).expect("encode");
+        assert!(matches!(
+            decode_ordered_dag(&mut announced.reader(), 4),
+            Err(CodecError::InvalidCodeword(_))
+        ));
+        // Positive control: the same header with arity 2 and two one-bit arguments decodes.
+        let pair = vec![
+            DagNode { label: 0, arguments: vec![] },
+            DagNode { label: 0, arguments: vec![0, 0] },
+        ];
+        let mut small = BitString::new();
+        encode_ordered_dag(&mut small, 4, &pair).expect("encode");
+        assert_eq!(
+            small.len_bits(),
+            prefix_integer_len_bits(3).expect("length") * 2 + 4 + 2
+        );
+        assert_eq!(decode_ordered_dag(&mut small.reader(), 4), Ok(pair));
+        // The unused codeword 1 at the second node names no earlier node and is refused.
+        let mut forward_read = BitString::new();
+        encode_prefix_integer(&mut forward_read, 3).expect("encode");
+        encode_fixed_index(&mut forward_read, 0, 4).expect("encode");
+        encode_fixed_index(&mut forward_read, 0, 4).expect("encode");
+        encode_prefix_integer(&mut forward_read, 2).expect("encode");
+        forward_read.push_bit(true);
+        assert!(matches!(
+            decode_ordered_dag(&mut forward_read.reader(), 4),
             Err(CodecError::InvalidCodeword(_))
         ));
     }
@@ -1209,6 +1276,9 @@ mod tests {
             library: identity_library,
             packets: vec![BitString::new(); inputs.len()],
         };
+        // Hand-derived: node count L_int(3) = 3, two labels at 2 bits, the second node's
+        // arity L_int(2) = 3, and its one argument at ⌈log₂ max(1, 2)⌉ = 1 bit.
+        assert_eq!(identity.library.len_bits(), 11);
         let mut reader = identity.library.reader();
         assert_eq!(decode_ordered_dag(&mut reader, LABELS), Ok(identity_nodes));
         assert_eq!(reader.finish(), Ok(()));
@@ -1268,6 +1338,10 @@ mod tests {
             library: family_library,
             packets: encode_support_packets(instances, &library.supports).expect("packets"),
         };
+        // Hand-derived: node count L_int(19) = 11, 18 labels at 2 bits = 36, instance arities
+        // 16·L_int(2) = 48, instance arguments Σ_{i=1..16}⌈log₂ max(i, 2)⌉ = 50, and the
+        // masked sum's L_int(17) = 11 plus 16 arguments at ⌈log₂ 17⌉ = 5 bits = 80.
+        assert_eq!(family.library.len_bits(), 236);
 
         // Decode the library, then each packet alone and in reverse order, and
         // measure distortion on the decoded program.
