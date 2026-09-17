@@ -122,7 +122,8 @@ impl From<BivariateNormalError> for String {
 ///   - The numerator `(k − h) + h(1 − ρ)` errs by `u|num| + u|k − h| + 3u|h(1 − ρ)|`, and `√(1 − ρ²)` by `3u`. So `t`
 ///     errs by at most `6u|t| + 4u|h|√((1 − ρ)/(1 + ρ)) ≤ 6u|t| + 4u|h|` (mirrored for `ρ < 0`).
 ///   - `Φ(t)` adds `2uΦ + 2u|t|φ(t)`, `φ(h)` adds `5u` of itself and the product `u`.
-///   - With `|t|φ(t) ≤ 1/√(2πe)` and `φ(t) ≤ 1/√(2π)`, the bound is `u·(8 ∂_hΦ₂ + φ(h)·(8·0.2420 + 4·0.3990·|h|))`.
+///   - The bound is `u·(8 ∂_hΦ₂ + φ(h)·φ(t)·(8|t| + 4|h|√((1 − ρ)/(1 + ρ))))`, with the computed `φ(t)`. It scales with the
+///     partial: for `t ≤ 0` it is at most `u·(8 + (|t| + 1)(8|t| + 4|h|))` of it, because `φ(t)/Φ(t) ≤ |t| + 1` there.
 /// - `∂_ρ Φ₂ = φ₂(h, k; ρ) = exp(−E)/(2π√(1 − ρ²))` (Plackett).
 ///   - The exponent `E = a/(1 − ρ²) + b/(1 ± ρ)` errs by `8uE`: `a` by `3u`, `b` by `u`, `1 − ρ²` by `3u`, the factor
 ///     by `2u`, the quotients and the addition.
@@ -152,9 +153,6 @@ const SMALLEST_SUBNORMAL: f64 = f64::from_bits(1);
 
 /// `sup |x| φ(x) = 1/√(2πe) = 0.241970…`, rounded up.
 const ARGUMENT_SENSITIVITY: f64 = 0.2420;
-
-/// `sup φ(x) = 1/√(2π) = 0.398942…`, rounded up.
-const DENSITY_MAXIMUM: f64 = 0.3990;
 
 /// `sup φ₂(x, y; ρ) = 1/(2π√(1 − ρ²))` over `|ρ| ≤ ½`, which is `1/(π√3) = 0.183776…`, rounded up.
 const CORE_DENSITY_MAXIMUM: f64 = 0.1838;
@@ -490,10 +488,20 @@ fn conditional_partial(x: f64, y: f64, correlation: Correlation) -> (f64, f64) {
     } else {
         (y + x) - x * correlation.one_plus
     };
-    let value = weight * normal_cdf(numerator / correlation.complement().sqrt());
-    let rounding = UNIT_ROUNDOFF
-        * (8.0 * value + weight * (8.0 * ARGUMENT_SENSITIVITY + 4.0 * DENSITY_MAXIMUM * x.abs()))
-        + SMALLEST_SUBNORMAL;
+    let t = numerator / correlation.complement().sqrt();
+    let value = weight * normal_cdf(t);
+    // `Φ(t)` moves by `φ(t)` per unit of the argument's rounding. An infinite argument gives `Φ` exactly.
+    let argument = if t.is_finite() {
+        let (near, far) = if correlation.rho >= 0.0 {
+            (correlation.one_minus, correlation.one_plus)
+        } else {
+            (correlation.one_plus, correlation.one_minus)
+        };
+        normal_pdf(t) * (8.0 * t.abs() + 4.0 * x.abs() * (near / far).sqrt())
+    } else {
+        0.0
+    };
+    let rounding = UNIT_ROUNDOFF * (8.0 * value + weight * argument) + SMALLEST_SUBNORMAL;
     (value, rounding)
 }
 
@@ -681,9 +689,10 @@ mod tests {
                 .sub(DoubleDouble::from(x).mul(one_plus))
         };
         let t = numerator.div(complement.sqrt());
-        let cdf = normal_cdf(t.hi) + normal_pdf(t.hi) * t.lo;
+        let density = normal_pdf(t.hi);
+        let cdf = normal_cdf(t.hi) + density * t.lo;
         let value = weight * cdf;
-        let allowance = weight * 2.0 * UNIT_ROUNDOFF * (cdf + ARGUMENT_SENSITIVITY) + 2.0 * UNIT_ROUNDOFF * value;
+        let allowance = weight * 2.0 * UNIT_ROUNDOFF * (cdf + density * t.hi.abs()) + 2.0 * UNIT_ROUNDOFF * value;
         (value, allowance)
     }
 
@@ -1253,5 +1262,41 @@ mod tests {
             bivariate_normal_cdf_with_complement(x, y, 1.0, complement).unwrap(),
             normal_cdf(y)
         );
+    }
+
+    #[test]
+    fn partial_rounding_bounds_scale_with_the_partials_in_the_lower_tail() {
+        // At the cells where fr-kernel's biased kernels need relative accuracy (ρ ≤ 0 with both constraints active),
+        // t = (k − ρh)/√(1 − ρ²) ≤ 0 and φ(t)/Φ(t) ≤ |t| + 1. So each bound is at most u·(8 + (|t| + 1)(8|t| + 4|h|))
+        // of its partial, plus the smallest subnormal.
+        let cells = [
+            (-3.0_f64, -3.0_f64, -0.9_f64),
+            (-3.0, -3.0, -0.5),
+            (-5.0, -5.0, -0.5),
+            (-8.0, -8.0, -0.5),
+            (-6.0, 1.0, -0.8),
+            (-4.2426, 0.7071, -0.4),
+        ];
+        let mut sup_scale_certifies_nothing = false;
+        for &(h, k, rho) in &cells {
+            let partials = bivariate_normal_cdf_partials(h, k, rho).unwrap();
+            let sigma = ((1.0 - rho) * (1.0 + rho)).sqrt();
+            for (partial, rounding, x, y) in [
+                (partials.d_h, partials.d_h_rounding, h, k),
+                (partials.d_k, partials.d_k_rounding, k, h),
+            ] {
+                let t = (y - rho * x) / sigma;
+                assert!(t <= 0.0, "cell ({h}, {k}, {rho}) is outside the lower-tail regime");
+                let relative = UNIT_ROUNDOFF * (8.0 + (t.abs() + 1.0) * (8.0 * t.abs() + 4.0 * x.abs()));
+                assert!(
+                    rounding <= relative * partial + SMALLEST_SUBNORMAL,
+                    "({h}, {k}, {rho}) partial={partial:e} rounding={rounding:e} relative={relative:e}"
+                );
+                // Positive control: the previous sup-scale bound u·φ(x)·8·sup|t|φ(t) exceeds the partial itself here,
+                // so it certified no relative digit.
+                sup_scale_certifies_nothing |= UNIT_ROUNDOFF * normal_pdf(x) * 8.0 * ARGUMENT_SENSITIVITY > partial;
+            }
+        }
+        assert!(sup_scale_certifies_nothing, "the sup-scale bound must exceed some lower-tail partial");
     }
 }

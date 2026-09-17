@@ -1019,6 +1019,14 @@
     "evidence": "git grep -nw at the base finds each name only at its own definition and in doc prose. The two chi-square wrappers forward to weighted_chi_square_sf_with_bound and signed_weighted_chi_square_sf_to_tolerance, which production (smooth_term_lr.rs) calls; their documentation moved onto those entry points. cone_boundary_log_factor was referenced only by cone_boundary_log_factor_and_derivatives. KernelChannels is constructed nowhere."
   },
   {
+    "base": "b9f2fa98886a5ce96fb3cb9d6e24a1613ce7c2b1",
+    "items": [
+      "crates/gam-math/src/bivariate_normal.rs:const:DENSITY_MAXIMUM"
+    ],
+    "reason": "#2946 (fr-bvn): the bivariate normal partials' rounding bounds now scale with the partials: they read the computed phi(t) instead of the density's supremum 1/sqrt(2 pi). DENSITY_MAXIMUM held that supremum, and conditional_partial's sup-scale bound was its only reader, so the const is deleted with that bound.",
+    "evidence": "In crates/gam-math/src/bivariate_normal.rs at the base, DENSITY_MAXIMUM is a private const read once, by conditional_partial's rounding bound, which this change replaces. Lane sw2a job 1205180 on 5cbb785e8f plus the code patch (md5 2435a68c1ccaca567337dcb5a95e8ba8): cargo nextest -p gam-math 'bivariate_normal::|gaussian_activation::' ran 41 tests, 41 passed. gx7 job 1205181: touch build.rs; cargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited RC_CHECK=0."
+  },
+  {
     "base": "8e3de85af931a3dc880046c9be775a50bbd0a1c2",
     "items": [
       "crates/gam-runtime/src/process_monitor.rs:fn:inc",
