@@ -6579,6 +6579,110 @@ mod tests {
         );
     }
 
+    /// Counts the inner calls `CoefficientTransformOperator` makes. Its `to_dense`
+    /// panics, so any densification of the inner fails the test that uses it.
+    struct MatvecCountingOperator {
+        values: Array2<f64>,
+        apply_calls: AtomicUsize,
+        apply_transpose_calls: AtomicUsize,
+        row_chunk_calls: AtomicUsize,
+    }
+
+    impl LinearOperator for MatvecCountingOperator {
+        fn nrows(&self) -> usize {
+            self.values.nrows()
+        }
+
+        fn ncols(&self) -> usize {
+            self.values.ncols()
+        }
+
+        fn apply(&self, vector: &Array1<f64>) -> Array1<f64> {
+            self.apply_calls.fetch_add(1, Ordering::SeqCst);
+            self.values.dot(vector)
+        }
+
+        fn apply_transpose(&self, vector: &Array1<f64>) -> Array1<f64> {
+            self.apply_transpose_calls.fetch_add(1, Ordering::SeqCst);
+            self.values.t().dot(vector)
+        }
+
+        fn diag_xtw_x(&self, weights: &Array1<f64>) -> Result<Array2<f64>, String> {
+            let weighted = &self.values * &weights.view().insert_axis(Axis(1));
+            Ok(self.values.t().dot(&weighted))
+        }
+    }
+
+    impl DenseDesignOperator for MatvecCountingOperator {
+        fn row_chunk_into(
+            &self,
+            rows: Range<usize>,
+            mut out: ArrayViewMut2<'_, f64>,
+        ) -> Result<(), MatrixMaterializationError> {
+            self.row_chunk_calls.fetch_add(1, Ordering::SeqCst);
+            out.assign(&self.values.slice(s![rows, ..]));
+            Ok(())
+        }
+
+        fn to_dense(&self) -> Array2<f64> {
+            // SAFETY: test-only mock; reaching to_dense means the transform densified its inner design.
+            panic!("MatvecCountingOperator::to_dense must not be used")
+        }
+    }
+
+    /// Over an operator-backed inner design (the sparse arm of the smooth
+    /// transform wraps its `SparseDesignMatrix` this way), each outer matvec is
+    /// exactly one inner matvec through `T`, with no row chunks and no cached `X · T`.
+    #[test]
+    fn coefficient_transform_operator_takes_one_inner_matvec_per_outer_matvec() {
+        let values = array![[1.0, 0.0, 2.0], [0.0, -1.5, 0.5], [3.0, 0.25, 0.0], [0.0, 1.0, -2.0]];
+        let transform = array![[0.5, -1.0], [1.0, 0.25], [-0.75, 2.0]];
+        let expected = values.dot(&transform);
+        let inner = Arc::new(MatvecCountingOperator {
+            values,
+            apply_calls: AtomicUsize::new(0),
+            apply_transpose_calls: AtomicUsize::new(0),
+            row_chunk_calls: AtomicUsize::new(0),
+        });
+        let op = CoefficientTransformOperator::new(DenseDesignMatrix::from(Arc::clone(&inner)), transform)
+            .expect("coefficient transform operator");
+        let dense_design = DenseDesignMatrix::from(Arc::new(op));
+
+        let beta = array![0.5, -2.0];
+        for _ in 0..3 {
+            let got = dense_design.apply(&beta);
+            for (got_i, want_i) in got.iter().zip(expected.dot(&beta).iter()) {
+                assert!((got_i - want_i).abs() < 1e-12);
+            }
+        }
+        let residual = array![1.0, -1.0, 0.5, 2.0];
+        for _ in 0..2 {
+            let got = dense_design.apply_transpose(&residual);
+            for (got_i, want_i) in got.iter().zip(expected.t().dot(&residual).iter()) {
+                assert!((got_i - want_i).abs() < 1e-12);
+            }
+        }
+        assert_eq!(
+            inner.apply_calls.load(Ordering::SeqCst),
+            3,
+            "each X · T β must be one inner X (T β)"
+        );
+        assert_eq!(
+            inner.apply_transpose_calls.load(Ordering::SeqCst),
+            2,
+            "each (X · T)ᵀ r must be one inner Xᵀ r followed by Tᵀ"
+        );
+        assert_eq!(
+            inner.row_chunk_calls.load(Ordering::SeqCst),
+            0,
+            "a matvec over an operator-backed inner must not stream its rows"
+        );
+        assert!(
+            dense_design.as_dense_ref().is_none(),
+            "an operator-backed inner must never populate the X · T cache"
+        );
+    }
+
     #[test]
     fn sparse_factorized_solve_matches_dense_operator_solve() {
         let triplets = vec![

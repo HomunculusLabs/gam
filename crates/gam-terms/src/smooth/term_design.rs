@@ -2158,13 +2158,20 @@ pub fn apply_smooth_transform_to_design(
             ))
         }
         DesignMatrix::Sparse(inner) => {
-            let dense = inner
-                .try_to_dense_arc("smooth identifiability sparse transform")
-                .map_err(BasisError::InvalidInput)?
-                .as_ref()
-                .dot(transform);
+            // The same lazy `X · T` as the dense arm, over the sparse inner: `apply` is
+            // `X (T v)` through the sparse matvec and `diag_xtw_x` is `Tᵀ (XᵀWX) T` from
+            // the sparse cross-product, so no n×p dense copy exists. An operator-backed
+            // inner never populates the operator's `X · T` cache.
+            let inner = gam_linalg::matrix::DenseDesignMatrix::from(Arc::new(DesignMatrix::Sparse(
+                inner,
+            )));
+            let op = CoefficientTransformOperator::new(inner, transform.clone()).map_err(|e| {
+                BasisError::InvalidInput(format!(
+                    "smooth identifiability transform failed for term '{termname}': {e}"
+                ))
+            })?;
             Ok(DesignMatrix::Dense(
-                gam_linalg::matrix::DenseDesignMatrix::from(dense),
+                gam_linalg::matrix::DenseDesignMatrix::from(Arc::new(op)),
             ))
         }
     }
@@ -2930,6 +2937,132 @@ pub fn orthogonality_relative_residual_for_design(
         return Ok(0.0);
     }
     Ok(num / denom)
+}
+
+#[cfg(test)]
+mod sparse_transform_tests {
+    use super::*;
+    use faer::sparse::{SparseColMat, Triplet};
+    use gam_linalg::matrix::{LinearOperator, SparseDesignMatrix};
+    use ndarray::{Array1, Array2, array};
+
+    /// A 7×5 design with two nonzeros per row, the local-support shape of a
+    /// B-spline Khatri-Rao design, returned with its dense copy for the oracle.
+    fn two_per_row_sparse() -> (SparseColMat<usize, f64>, Array2<f64>) {
+        let (n, p) = (7usize, 5usize);
+        let mut dense = Array2::<f64>::zeros((n, p));
+        let mut triplets = Vec::new();
+        for i in 0..n {
+            for (offset, value) in [(0usize, 1.0 + i as f64 * 0.25), (1usize, -0.5 + i as f64 * 0.125)] {
+                let j = (i + offset) % p;
+                dense[[i, j]] = value;
+                triplets.push(Triplet::new(i, j, value));
+            }
+        }
+        let sparse = SparseColMat::try_new_from_triplets(n, p, &triplets).expect("sparse design");
+        (sparse, dense)
+    }
+
+    /// The joint-null rotation reaches a sparse tensor design through this arm. It
+    /// must stay an operator over the sparse inner: no materialized `X` and no
+    /// cached `X · T`, before or after the matvec and cross-product a solver calls,
+    /// while agreeing with the dense `X · T` to rounding.
+    #[test]
+    fn a_sparse_design_takes_its_coefficient_transform_by_operator_without_a_dense_copy() {
+        let (sparse, dense) = two_per_row_sparse();
+        let transform = array![
+            [1.0, 0.5, 0.0, -0.25],
+            [0.0, 1.0, 0.75, 0.0],
+            [-0.5, 0.0, 1.0, 0.5],
+            [0.25, -0.75, 0.0, 1.0],
+            [0.0, 0.25, -0.5, 0.75]
+        ];
+        let design = apply_smooth_transform_to_design(
+            DesignMatrix::Sparse(SparseDesignMatrix::new(sparse)),
+            &transform,
+            "sparse_probe",
+        )
+        .expect("transform a sparse design");
+        let expected = dense.dot(&transform);
+        let DesignMatrix::Dense(lazy) = &design else {
+            panic!("a transformed sparse design is the dense-shaped operator X · T; got {design:?}");
+        };
+        assert!(
+            !lazy.is_materialized_dense(),
+            "the transformed sparse design must be operator-backed, not a materialized n×p copy"
+        );
+
+        let beta = array![0.5, -1.0, 2.0, 0.25];
+        let got = design.apply(&beta);
+        let want = expected.dot(&beta);
+        for (got_i, want_i) in got.iter().zip(want.iter()) {
+            assert!(
+                (got_i - want_i).abs() <= 1e-13 * (1.0 + want_i.abs()),
+                "X·T·β: operator {got_i} against dense {want_i}"
+            );
+        }
+        let weights = Array1::from_shape_fn(dense.nrows(), |i| 0.5 + i as f64 * 0.1);
+        let got_xtwx = design.diag_xtw_x(&weights).expect("XᵀWX through the operator");
+        let want_xtwx = expected.t().dot(&Array2::from_diag(&weights)).dot(&expected);
+        for ((r, c), want_rc) in want_xtwx.indexed_iter() {
+            assert!(
+                (got_xtwx[[r, c]] - want_rc).abs() <= 1e-12 * (1.0 + want_rc.abs()),
+                "(X·T)ᵀW(X·T)[{r},{c}]: operator {} against dense {want_rc}",
+                got_xtwx[[r, c]]
+            );
+        }
+        assert!(
+            lazy.as_dense_ref().is_none(),
+            "after X·β and XᵀWX the sparse inner must still carry no dense X · T copy"
+        );
+    }
+
+    /// The inner the operator wraps is the Khatri-Rao tensor design itself: a cubic ⊗
+    /// cubic `te(x, h)` with no identifiability chart and no double penalty (the case
+    /// whose joint penalty null space yields a rotation) stores at most
+    /// ∏(degree + 1) = 16 nonzeros per row.
+    #[test]
+    fn a_cubic_te_design_stores_at_most_sixteen_nonzeros_per_row() {
+        let n = 400usize;
+        let data = Array2::from_shape_fn((n, 2), |(i, j)| {
+            let phi = [0.6180339887498949_f64, 0.7548776662466927][j];
+            ((i as f64 + 0.5) * phi).fract()
+        });
+        let marginal = |num_internal_knots: usize| crate::basis::BSplineBasisSpec {
+            degree: 3,
+            penalty_order: 2,
+            knotspec: crate::basis::BSplineKnotSpec::Generate {
+                data_range: (0.0, 1.0),
+                num_internal_knots,
+            },
+            double_penalty: false,
+            identifiability: crate::basis::BSplineIdentifiability::None,
+            boundary: Default::default(),
+            boundary_conditions: Default::default(),
+        };
+        let spec = crate::smooth::TensorBSplineSpec {
+            marginalspecs: vec![marginal(6), marginal(5)],
+            periods: vec![None, None],
+            double_penalty: false,
+            identifiability: crate::smooth::TensorBSplineIdentifiability::None,
+            penalty_decomposition: Default::default(),
+        };
+        let built = crate::smooth::build_tensor_bspline_basis(data.view(), &[0, 1], &spec)
+            .expect("te(x, h) basis");
+        let DesignMatrix::Sparse(sparse) = &built.design else {
+            panic!("te(x, h) with no identifiability chart must build the sparse Khatri-Rao design; got {:?}", built.design);
+        };
+        let csc: &SparseColMat<usize, f64> = sparse.as_ref();
+        let mut per_row = vec![0usize; n];
+        for &row in csc.symbolic().row_idx() {
+            per_row[row] += 1;
+        }
+        let widest = per_row.iter().copied().max().unwrap_or(0);
+        assert!(
+            widest <= 16 && per_row.iter().all(|&count| count > 0),
+            "every row of the cubic ⊗ cubic Khatri-Rao design must store between 1 and 16 nonzeros; widest row stores {widest}"
+        );
+    }
 }
 
 #[cfg(test)]

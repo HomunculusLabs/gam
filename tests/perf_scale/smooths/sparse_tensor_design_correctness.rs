@@ -10,8 +10,12 @@
 //!
 //!   1. Non-periodic 2D `te(x, h)` with `identifiability = None`. Both
 //!      marginals come back as `SparseDesignMatrix` from the 1D builder, so
-//!      the new sparse path fires. Cross-validated against a direct dense
-//!      `tensor_product_design_from_marginals` reference.
+//!      the sparse path fires. With no null-function ridge the tensor penalty
+//!      has a joint null space, and the collection applies the joint-null
+//!      rotation Q by operator over the sparse inner. The contract pinned is
+//!      that the term design is never materialized dense, before and after use,
+//!      and that it equals the dense Khatri-Rao reference times the realized
+//!      coefficient transform recorded in the term's metadata.
 //!   2. Cylinder `te(theta, h, periodic=[0])` with the default `SumToZero`
 //!      identifiability. The periodic theta marginal is dense and the
 //!      identifiability transform is non-trivial, so the sparse path is
@@ -196,12 +200,11 @@ fn build_non_periodic_design(n: usize) -> (DesignMatrix, Array2<f64>) {
     let design =
         build_term_collection_design(data.view(), &spec).expect("non-periodic te(x, h) build");
 
-    // The candidate is the smooth term's design as built (should be Sparse).
+    // The candidate is the smooth term's design as built: the sparse Khatri-Rao
+    // design, possibly under the realized coefficient transform, and never a
+    // materialized dense copy.
     let candidate = design.smooth.term_designs[0].clone();
-    assert!(
-        matches!(candidate, DesignMatrix::Sparse(_)),
-        "non-periodic te(x, h) with identifiability=None should take the new sparse path; got {candidate:?}"
-    );
+    assert_never_materialized_dense("non-periodic te(x, h) as built", &candidate);
 
     let x_basis = build_bspline_basis_1d(data.column(0), &spec_x)
         .expect("dense reference x marginal")
@@ -211,9 +214,35 @@ fn build_non_periodic_design(n: usize) -> (DesignMatrix, Array2<f64>) {
         .expect("dense reference h marginal")
         .design
         .to_dense();
-    let reference = khatri_rao_dense(&[x_basis, h_basis]);
+    let khatri_rao = khatri_rao_dense(&[x_basis, h_basis]);
+    // The collection folds every realized coefficient transform (here the
+    // joint-null rotation) into the term's metadata, so the reference is the raw
+    // Khatri-Rao design times that recorded transform.
+    let reference = match &design.smooth.terms[0].metadata {
+        gam::basis::BasisMetadata::TensorBSpline {
+            identifiability_transform,
+            ..
+        } => match identifiability_transform {
+            Some(transform) => khatri_rao.dot(transform),
+            None => khatri_rao,
+        },
+        other => panic!("te(x, h) must record tensor B-spline metadata; got {other:?}"),
+    };
 
     (candidate, reference)
+}
+
+/// The sparse path's storage contract: the design is `Sparse`, or an
+/// operator-backed `Dense` with neither a materialized `X` nor a cached `X · Q`.
+fn assert_never_materialized_dense(label: &str, design: &DesignMatrix) {
+    match design {
+        DesignMatrix::Sparse(_) => {}
+        DesignMatrix::Dense(dense) => assert!(
+            !dense.is_materialized_dense() && dense.as_dense_ref().is_none(),
+            "{label}: the te(x, h) design must stay sparse, with any coefficient transform applied by \
+             operator, instead of a materialized n×p copy; got {design:?}"
+        ),
+    }
 }
 
 fn build_cylinder_design(n: usize) -> (DesignMatrix, Array2<f64>) {
@@ -314,6 +343,14 @@ fn khatri_rao_dense(marginals: &[Array2<f64>]) -> Array2<f64> {
 fn sparse_tensor_design_matches_dense_non_periodic() {
     let n = 1000;
     let (candidate, reference) = build_non_periodic_design(n);
+    // Use it the way a solver does, then re-check storage before the oracle below
+    // densifies it for the entrywise comparison.
+    let probe = Array1::from_elem(candidate.ncols(), 1.0);
+    assert!(
+        candidate.apply(&probe).iter().all(|value| value.is_finite()),
+        "non-periodic te(x, h): X·1 must be finite"
+    );
+    assert_never_materialized_dense("non-periodic te(x, h) after X·β", &candidate);
     cross_check_designs(
         "non-periodic te(x, h) sparse path",
         &candidate,

@@ -309,15 +309,18 @@ fn large_scale_perf_binomial_cylinder_n100k() {
 // These tests time `build_term_collection_design` for a 2D `te(x, h)` smooth at
 // large-scale N. The same problem is built twice:
 //
-//   * `identifiability = None`  → triggers the new sparse Khatri-Rao path
-//     (`build_tensor_bspline_basis` returns `DesignMatrix::Sparse`).
+//   * `identifiability = None`  → triggers the sparse Khatri-Rao path
+//     (`build_tensor_bspline_basis` returns `DesignMatrix::Sparse`). With no
+//     null-function ridge the tensor penalty has a joint null space, so the
+//     collection applies the joint-null rotation Q; it is applied by operator
+//     over the sparse inner, and the term design is never materialized dense.
 //   * `identifiability = SumToZero` → forces the existing dense fall-back
 //     (the identifiability transform requires a fully materialized basis).
 //
-// Both runs eagerly densify nothing else: the sparse run completes when the
-// `SparseColMat` is assembled; the dense run completes when the
-// `n × ∏ q_j` `Array2` is filled. Times are reported via eprintln so they
-// show up in CI logs without gating CI on a hard latency budget.
+// The contract the sparse run pins is storage, not the enum variant: after the
+// timed `X·β` loop the term design is either `Sparse` or an operator-backed
+// `Dense` with no materialized `X` or `X·Q` copy. Times are reported via
+// eprintln so they show up in CI logs without gating CI on a hard latency budget.
 
 fn te_xh_design_spec(
     num_x: usize,
@@ -400,7 +403,6 @@ fn time_design_build_and_apply(
     let ms_build = t_build.elapsed().as_secs_f64() * 1e3;
     let term = &design.smooth.term_designs[0];
     let p = term.ncols();
-    let is_sparse = matches!(term, DesignMatrix::Sparse(_));
 
     // Build a fixed RNG so both sparse and dense runs see identical β draws.
     let mut rng = StdRng::seed_from_u64(0xDEAD_BEEF_BAD_C0DE);
@@ -422,7 +424,13 @@ fn time_design_build_and_apply(
         accum_sum.is_finite(),
         "apply loop produced non-finite accumulator"
     );
-    (ms_build, ms_apply, p, is_sparse)
+    // Read after the timed loop, so a lazy operator that materialized on first use
+    // is counted as materialized.
+    let never_materialized = match term {
+        DesignMatrix::Sparse(_) => true,
+        DesignMatrix::Dense(dense) => !dense.is_materialized_dense() && dense.as_dense_ref().is_none(),
+    };
+    (ms_build, ms_apply, p, never_materialized)
 }
 
 #[test]
@@ -433,18 +441,19 @@ fn large_scale_perf_sparse_vs_dense_te_n1m_p128() {
     let data = quasi_random_2d(n);
 
     let spec_sparse = te_xh_design_spec(8, 16, TensorBSplineIdentifiability::None);
-    let (ms_build_s, ms_apply_s, p_sparse, is_sparse) =
+    let (ms_build_s, ms_apply_s, p_sparse, never_materialized) =
         time_design_build_and_apply(&spec_sparse, &data, 8);
     assert!(
-        is_sparse,
-        "identifiability=None on B-spline marginals must trigger the sparse Khatri-Rao path"
+        never_materialized,
+        "identifiability=None on B-spline marginals must keep the sparse Khatri-Rao design \
+         unmaterialized, with the joint-null rotation applied by operator"
     );
 
     let spec_dense = te_xh_design_spec(8, 16, TensorBSplineIdentifiability::SumToZero);
-    let (ms_build_d, ms_apply_d, p_dense, is_sparse_dense) =
+    let (ms_build_d, ms_apply_d, p_dense, dense_never_materialized) =
         time_design_build_and_apply(&spec_dense, &data, 8);
     assert!(
-        !is_sparse_dense,
+        !dense_never_materialized,
         "SumToZero identifiability must take the dense fall-back path"
     );
 
@@ -468,9 +477,13 @@ fn large_scale_perf_sparse_vs_dense_te_n100k_p128() {
     let data = quasi_random_2d(n);
 
     let spec_sparse = te_xh_design_spec(8, 16, TensorBSplineIdentifiability::None);
-    let (ms_build_s, ms_apply_s, p_sparse, is_sparse) =
+    let (ms_build_s, ms_apply_s, p_sparse, never_materialized) =
         time_design_build_and_apply(&spec_sparse, &data, 8);
-    assert!(is_sparse);
+    assert!(
+        never_materialized,
+        "identifiability=None on B-spline marginals must keep the sparse Khatri-Rao design \
+         unmaterialized, with the joint-null rotation applied by operator"
+    );
 
     let spec_dense = te_xh_design_spec(8, 16, TensorBSplineIdentifiability::SumToZero);
     let (ms_build_d, ms_apply_d, p_dense, _) = time_design_build_and_apply(&spec_dense, &data, 8);
