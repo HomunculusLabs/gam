@@ -76,19 +76,20 @@ impl SaeFitLane {
 ///   dispersion. The curvature is the joint observed information with the
 ///   coordinate block integrated, alongside the ARD normalizer `loss.ard` carries.
 ///   A realised-rank charge is added. Smoothing and ARD coordinates are per atom.
-///   Only the `ρ`-dependent part of the penalty normalizer enters: no base
-///   `log|S|₊`, no `2π`.
+///   The penalty normalizer is the complete `½·Σ_k r_k·log|λ_k S_k|₊`, base
+///   pseudo-determinant included (#2933 F26), and there is no `2π` constant.
 /// * [`Self::ProfiledGaussianLaml`]: the support-sparse grouped LAML
 ///   (`crate::manifold::run_sae_support_outer`),
 ///   `2V = log|S_red| − log|λS|₊ + df·(1 + ln(2π·D_p/df))`. `S_red` is the
 ///   Gauss–Newton reduced decoder Schur complement with the row coordinate block
 ///   `Σ_i log|H_tt^(i)|` profiled out. The Gaussian dispersion is profiled out of
-///   the penalized deviance `D_p`. The penalty pseudo-determinant is complete,
-///   base included. There is no rank charge. Smoothing is shared per
-///   `(basis kind, latent dimension)` family, and the ARD precisions are fixed.
+///   the penalized deviance `D_p`, which brings the `2π` constant. The penalty
+///   pseudo-determinant is complete, base included. There is no rank charge.
+///   Smoothing is shared per `(basis kind, latent dimension)` family, and the ARD
+///   precisions are fixed.
 ///
 /// They differ in scale convention, curvature operator, coordinate treatment,
-/// prior normalization, rank pricing and hyperparameter layout, so neither value
+/// rank pricing, constants and hyperparameter layout, so neither value
 /// approximates the other and their difference measures nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SaeCriterionKind {
