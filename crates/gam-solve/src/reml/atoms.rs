@@ -100,11 +100,12 @@
 //! desyncing term in the error. The #901 hunt — weeks of triangulating
 //! which of {object, kernel, drift, splice} disagreed — becomes
 //! `certificate: atom "hessian_logdet" frozen_d1 mismatch on ψ[0]`.
-//! Atoms must also declare their smoothness stratum (rank set, active
-//! eigenvalue gaps, gate states) so the certifier refuses to FD across a
-//! genuine non-differentiability instead of reporting it as a bug: rank
-//! changes of the pseudo-logdet, eigenvalue crossings in the #784 frame
-//! channel, and trust-gate flips are strata boundaries, not desyncs.
+//! Atoms also declare their smoothness stratum (rank set, active eigenvalue
+//! gaps, gate states), for a certifier to refuse FD across a genuine
+//! non-differentiability instead of reporting it as a bug: rank changes of the
+//! pseudo-logdet, eigenvalue crossings in the #784 frame channel, and trust-gate
+//! flips are strata boundaries, not desyncs. The declaration has no production
+//! consumer yet (#2933).
 //!
 //! # Migration law
 //!
@@ -171,7 +172,8 @@ pub struct ThetaDirection {
 /// Pseudo-logdets, eigenframe channels (#784 Q_c), and gate splices are C¹
 /// only on constant-rank / gap-bounded strata. Atoms DECLARE their stratum
 /// instead of letting consumers discover non-differentiability as
-/// "mysterious FD noise"; the certifier and the line search both read it.
+/// "mysterious FD noise". The declaration is for a certifier; no production
+/// consumer reads it yet (#2933).
 pub struct StratumFingerprint {
     /// Number of kept (above-threshold) eigenvalues.
     pub kept_rank: usize,
@@ -202,9 +204,9 @@ pub struct BetaChannel {
 ///    contract it with the shared β̇. (An atom with no inner-state
 ///    dependence — e.g. log|S|₊ — returns `None`.)
 /// 3. Non-smooth machinery (rank thresholds, eigenframes, trust gates,
-///    sampled splices) MUST be reflected in `stratum()` so the certifier
-///    and the outer line search can distinguish strata boundaries from
-///    bugs.
+///    sampled splices) MUST be reflected in `stratum()`, declared for a
+///    certifier to distinguish strata boundaries from bugs. No production
+///    consumer reads it yet (#2933).
 /// 4. Deleting the atom's legacy value+gradient code lands in the SAME
 ///    commit that ports it. No parallel layers.
 pub trait CriterionAtom {

@@ -4393,7 +4393,6 @@ impl SaeManifoldTerm {
             manifold_for,
             delta_ev_for,
             total_centered_variance,
-            n,
             dispersion_r,
         )
     }

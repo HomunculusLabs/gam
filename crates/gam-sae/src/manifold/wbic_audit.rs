@@ -26,9 +26,13 @@
 //! `M Mᵀ ~ Wishart_m(p, R·C)`. That law is scaled by `m`, `p` and `C`, not by
 //! `N_eff`, and coordinate/gate fitting and selection add dependence it omits. `e`
 //! is therefore a rank diagnostic, not a calibrated false-rank boundary or an
-//! evidence dimension. [`conditional_noise_null`] evaluates the law's exact expected
-//! total energy and an upper bound on its expected top energy, so `e` can be read
-//! against the scale that noise reaches.
+//! evidence dimension. [`conditional_noise_null`] evaluates the law for any output
+//! noise covariance `Σ` through `tr Σ` and `‖Σ‖`: its exact expected total energy,
+//! an upper bound on its expected top energy, and
+//! [`ConditionalNoiseNull::false_rank_probability_bound`], a Gaussian-concentration
+//! bound on `P(max_j μ_j > τ)`. At `τ = e` that is a calibrated upper bound on the
+//! conditional false-rank probability, the one calibration statement available
+//! without modelling coordinate and gate fitting.
 //!
 //! BRANCHES. `r_k` is an integer, so `C_k` is piecewise smooth in the fitted state:
 //! it jumps by `½ · edf_k · log N_eff,k` for every unit change of `r_k` when a
@@ -270,42 +274,130 @@ fn penalized_gram(
     penalized
 }
 
+/// Trace and largest eigenvalue of the per-row output noise covariance `Σ`, the
+/// only two summaries of `Σ` the conditional noise-only law reads.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OutputNoiseSpectrum {
+    /// `tr Σ`.
+    pub trace: f64,
+    /// `‖Σ‖`, the largest eigenvalue of `Σ`.
+    pub largest_eigenvalue: f64,
+}
+
+impl OutputNoiseSpectrum {
+    /// `Σ = R·I_p`: independent variance-`R` noise in each of `p` output channels.
+    pub fn isotropic(variance: f64, width: usize) -> Self {
+        Self {
+            trace: variance * width as f64,
+            largest_eigenvalue: variance,
+        }
+    }
+}
+
 /// The conditional noise-only law of an atom's reconstruction energies.
 ///
-/// Hold the design `Φ`, gates `a`, smoothing `(λ, S)` and dispersion `R` fixed,
-/// and let the target be independent `N(0, R)` noise in every output channel.
-/// The ridge decoder gives `M = G^½ B̂ = √R · Q Z` with standard normal `Z` and
-/// `Q Qᵀ = C`, so `M Mᵀ ~ Wishart_m(p, R·C)` and `μ_j = σ_j(M)² / N_eff`. With
-/// `K = G^½ (G+λS)⁻¹ G^½` one has `C = K²`.
+/// Hold the design `Φ`, gates `a` and smoothing `(λ, S)` fixed, and let the target
+/// rows be independent `N(0, Σ)` noise. The ridge decoder
+/// `B̂ = (G+λS)⁻¹ Φᵀ diag(a) E` gives `M = G^½ B̂ = L E` with `L Lᵀ = C`, so
+/// `M = C^½ Z Σ^½` in law with an `m×p` standard normal `Z`, and
+/// `μ_j = σ_j(M)² / N_eff`. With `K = G^½ (G+λS)⁻¹ G^½` one has `C = K²`. For
+/// `Σ = R·I` this is `M Mᵀ ~ Wishart_m(p, R·C)`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ConditionalNoiseNull {
-    /// `E[Σ_j μ_j] = R · p · tr(C) / N_eff`, exact because `E[M Mᵀ] = R · p · C`.
+    /// `E[Σ_j μ_j] = tr C · tr Σ / N_eff`, exact because `E[M Mᵀ] = tr Σ · C`.
     pub expected_total_energy: f64,
-    /// `R · [(√(p‖C‖) + √tr C)² + ‖C‖] / N_eff ≥ E[max_j μ_j]`. Gordon's comparison
-    /// inequality gives `E σ_max(Q Z) ≤ ‖Q‖ √p + ‖Q‖_F`, and `σ_max(Q Z)` is
-    /// `‖Q‖`-Lipschitz in `Z`, so its variance is at most `‖Q‖²` (Gaussian Poincaré
-    /// inequality), with `‖Q‖² = ‖C‖` and `‖Q‖_F² = tr C`.
+    /// `(s² + ‖C‖·‖Σ‖) / N_eff ≥ E[max_j μ_j]` with `s = √(‖C‖·tr Σ) + √(tr C·‖Σ‖)`.
+    /// Chevet's inequality gives `E σ_max(C^½ Z Σ^½) ≤ s`, and `σ_max` is
+    /// `√(‖C‖·‖Σ‖)`-Lipschitz in `Z`, so its variance is at most `‖C‖·‖Σ‖`
+    /// (Gaussian Poincaré inequality).
     pub top_energy_expectation_bound: f64,
+    /// `‖C‖`.
+    pub shrinkage_norm: f64,
+    /// `tr C`.
+    pub shrinkage_trace: f64,
+    /// The output noise the law is conditional on.
+    pub output_noise: OutputNoiseSpectrum,
+    /// `N_eff`.
+    pub effective_sample_size: f64,
+}
+
+impl ConditionalNoiseNull {
+    /// Upper bound on `P(max_j μ_j > τ)` under this law,
+    /// `exp(−(√(N_eff·τ) − s)₊² / (2‖C‖·‖Σ‖))`. `σ_max(C^½ Z Σ^½)` concentrates
+    /// about its mean like a `√(‖C‖·‖Σ‖)`-Lipschitz function of a standard normal,
+    /// `P(σ_max ≥ E σ_max + t) ≤ exp(−t² / (2‖C‖·‖Σ‖))`, and Chevet's `s` bounds
+    /// that mean. At the MP edge this bounds the conditional false-rank
+    /// probability of the reconstruction rank.
+    pub fn false_rank_probability_bound(&self, threshold: f64) -> Result<f64, String> {
+        if !(threshold.is_finite() && threshold >= 0.0) {
+            return Err(format!(
+                "conditional noise null: the threshold must be finite and non-negative; got {threshold}"
+            ));
+        }
+        let lipschitz_squared = self.shrinkage_norm * self.output_noise.largest_eigenvalue;
+        if lipschitz_squared == 0.0 {
+            // `M = 0` almost surely, so no energy exceeds a non-negative threshold.
+            return Ok(0.0);
+        }
+        let gap = (self.effective_sample_size * threshold).sqrt() - self.chevet_mean_bound();
+        if gap <= 0.0 {
+            return Ok(1.0);
+        }
+        Ok((-(gap * gap) / (2.0 * lipschitz_squared)).exp())
+    }
+
+    /// Chevet's `s = √(‖C‖·tr Σ) + √(tr C·‖Σ‖) ≥ E σ_max(M)`.
+    fn chevet_mean_bound(&self) -> f64 {
+        (self.shrinkage_norm * self.output_noise.trace).sqrt()
+            + (self.shrinkage_trace * self.output_noise.largest_eigenvalue).sqrt()
+    }
+}
+
+fn validate_output_noise(output_noise: OutputNoiseSpectrum, width: usize) -> Result<(), String> {
+    let OutputNoiseSpectrum {
+        trace,
+        largest_eigenvalue,
+    } = output_noise;
+    if !(trace.is_finite() && trace >= 0.0 && largest_eigenvalue.is_finite()) {
+        return Err(format!(
+            "conditional noise null: the output noise trace and largest eigenvalue must be \
+             finite and non-negative; got trace {trace}, largest eigenvalue {largest_eigenvalue}"
+        ));
+    }
+    // A PSD p×p covariance has ‖Σ‖ ≤ tr Σ ≤ p·‖Σ‖, up to the roundoff of the
+    // arithmetic that produced them.
+    let tolerance = 64.0 * width.max(1) as f64 * f64::EPSILON * trace.max(f64::MIN_POSITIVE);
+    if largest_eigenvalue < 0.0
+        || largest_eigenvalue > trace + tolerance
+        || trace > width as f64 * largest_eigenvalue + tolerance
+    {
+        return Err(format!(
+            "conditional noise null: trace {trace} and largest eigenvalue {largest_eigenvalue} \
+             are not the spectrum of a PSD {width}×{width} covariance"
+        ));
+    }
+    Ok(())
 }
 
 /// Evaluate [`ConditionalNoiseNull`] for one atom from its weighted basis Gram
-/// `gram = Φᵀdiag(a²)Φ`, occupancy `n_eff`, output width `p_out`, dispersion
-/// `r_floor` and smoothing `(lam_smooth, smooth_penalty)`.
+/// `gram = Φᵀdiag(a²)Φ`, occupancy `n_eff`, output width `p_out`, output noise
+/// spectrum and smoothing `(lam_smooth, smooth_penalty)`.
 pub fn conditional_noise_null(
     gram: &Array2<f64>,
     n_eff: f64,
     p_out: usize,
-    r_floor: f64,
+    output_noise: OutputNoiseSpectrum,
     lam_smooth: f64,
     smooth_penalty: Option<&Array2<f64>>,
 ) -> Result<ConditionalNoiseNull, String> {
     let m = gram.nrows();
+    validate_output_noise(output_noise, p_out)?;
     validate_rank_charge_problem(
         gram,
         &Array2::<f64>::zeros((m, p_out)),
         n_eff,
         p_out as f64,
-        r_floor,
+        output_noise.largest_eigenvalue,
         lam_smooth,
         smooth_penalty,
     )?;
@@ -318,6 +410,10 @@ pub fn conditional_noise_null(
         return Ok(ConditionalNoiseNull {
             expected_total_energy: 0.0,
             top_energy_expectation_bound: 0.0,
+            shrinkage_norm: 0.0,
+            shrinkage_trace: 0.0,
+            output_noise,
+            effective_sample_size: n_eff,
         });
     }
     let (evals, u) = gram
@@ -344,12 +440,20 @@ pub fn conditional_noise_null(
     let norm_c = kappa
         .iter()
         .fold(0.0_f64, |largest, &value| largest.max(value * value));
-    let p = p_out as f64;
+    let law = ConditionalNoiseNull {
+        expected_total_energy: trace_c * output_noise.trace / n_eff,
+        top_energy_expectation_bound: 0.0,
+        shrinkage_norm: norm_c,
+        shrinkage_trace: trace_c,
+        output_noise,
+        effective_sample_size: n_eff,
+    };
+    let mean_bound = law.chevet_mean_bound();
     Ok(ConditionalNoiseNull {
-        expected_total_energy: r_floor * p * trace_c / n_eff,
-        top_energy_expectation_bound: r_floor
-            * (((p * norm_c).sqrt() + trace_c.sqrt()).powi(2) + norm_c)
+        top_energy_expectation_bound: (mean_bound * mean_bound
+            + norm_c * output_noise.largest_eigenvalue)
             / n_eff,
+        ..law
     })
 }
 
@@ -595,8 +699,13 @@ pub struct AtomRankChargeAudit {
     pub stratum: RankChargeStratum,
     /// The direction closest to the edge and the jump its crossing adds.
     pub nearest_mp_boundary: Option<MpEdgeBoundary>,
-    /// Conditional noise-only law of the reconstruction energies.
+    /// Conditional noise-only law of the reconstruction energies, for isotropic
+    /// output noise of variance [`Self::dispersion`].
     pub noise_null: ConditionalNoiseNull,
+    /// `noise_null.false_rank_probability_bound(e)` at the MP edge `e`: an upper
+    /// bound on the probability that noise alone gives this atom MP rank ≥ 1,
+    /// conditional on the design, gates, smoothing and isotropic noise.
+    pub mp_false_rank_probability_bound: f64,
     /// Exact conditional tempered posterior excess loss of the decoder block.
     pub tempered_posterior: TemperedGaussianExcessLoss,
     /// Signed `stratum.production_charge() − tempered_posterior.total()`, both in

@@ -775,9 +775,9 @@ fn build_atom_candidates(
     curved_phi: Option<ArrayView2<'_, f64>>,
     fitted_turning: Option<f64>,
     // #16 DEMOTE: price both arms in the joint fit's canonical currency —
-    // ½·d_eff·log(n_obs) on the realised decoder rank. `n_obs` is the term's full
-    // row count; `dispersion_r` is its reconstruction φ̂ (the MP-edge noise floor).
-    n_obs: usize,
+    // ½·d_eff·ln max(N_eff, 1) on the realised decoder rank, with the atom's
+    // occupancy N_eff = Σa². `dispersion_r` is the reconstruction φ̂ (the MP-edge
+    // noise floor).
     dispersion_r: f64,
 ) -> Result<
     (
@@ -845,18 +845,21 @@ fn build_atom_candidates(
         return Err(AtomCandidateRefusal::Unadjudicable);
     }
     let (linear_nle, curved_nle) = {
-        // #16 DEMOTE currency swap: charge ½·d_eff·log(n_obs) (realised decoder rank,
-        // the SAME quantity the joint REML PROMOTE gate charges) in place of the
-        // ½log|H| Laplace det (the #5-mispriced term + its column-symmetric ·p
+        // #16 DEMOTE currency swap: charge ½·d_eff·ln max(N_eff, 1) (realised decoder
+        // rank on the atom's occupancy N_eff = Σa², the SAME charge the joint PROMOTE
+        // criterion prices in `rank_adjusted_quasi_laplace_complexity`) in place of
+        // the ½log|H| Laplace det (the #5-mispriced term + its column-symmetric ·p
         // over-count). d_eff = realised_rank_charge_dof(G, B, N_eff, p, R): a real
         // rank-2 circle → ~2×basis_edf, a vanishing decoder → 0. The migration gate
-        // (curve earns Tier-2 iff Δloss > ½·Δd_eff·log n) then falls out of the SAME
-        // select_hybrid_atom NLE comparison — one currency, no separate margin.
-        if n_obs == 0 || !(dispersion_r.is_finite() && dispersion_r > 0.0) {
+        // (curve earns Tier-2 iff Δloss > ½·Δd_eff·ln N_eff) then falls out of the
+        // SAME select_hybrid_atom NLE comparison — one currency, no separate margin.
+        // A row on which the atom's gate is off adds nothing to N_eff, so it moves
+        // neither gate's charge (#2a, #2933).
+        if !(dispersion_r.is_finite() && dispersion_r > 0.0) {
             return Err(AtomCandidateRefusal::Unadjudicable);
         }
-        let n_obs_ln = (n_obs as f64).ln();
         let n_eff = w_sum; // effective sample size Σa² (MP-edge aspect)
+        let occupancy_ln = n_eff.max(1.0).ln();
         // Linear arm: decoder B=[b₀;b₁] (2×p), Gram G=diag(w_sum, s_tt) (2×2).
         let mut b_lin = Array2::<f64>::zeros((2, p));
         for j in 0..p {
@@ -889,20 +892,23 @@ fn build_atom_candidates(
             None,
         )
         .map_err(|_| AtomCandidateRefusal::Unadjudicable)?;
-        // DEVIANCE, not raw SSE (#2124 units fix): the rank charge `½·d_eff·ln n`
+        // DEVIANCE, not raw SSE (#2124 units fix): the rank charge `½·d_eff·ln N_eff`
         // is dimensionless, so trading it against the bare `½·RSS` makes the
         // linear↔curved decision depend on the response scale (exactly the
         // sensitivity `reduced_laplace_nle`'s SCALE CAVEAT documents). Divide the
         // residual objective by the term's reconstruction dispersion φ̂
-        // (`dispersion_r`) so the boundary is `Δ(½RSS)/φ̂ vs ½·Δd_eff·ln n` —
+        // (`dispersion_r`) so the boundary is `Δ(½RSS)/φ̂ vs ½·Δd_eff·ln N_eff` —
         // scale-invariant, the BIC large-n limit of the Laplace evidence in
         // proper units.
         let inv_dispersion = dispersion_r.recip();
         (
-            reduced_laplace_nle(linear_residual_objective * inv_dispersion, d_lin * n_obs_ln),
+            reduced_laplace_nle(
+                linear_residual_objective * inv_dispersion,
+                d_lin * occupancy_ln,
+            ),
             reduced_laplace_nle(
                 curved_residual_objective * inv_dispersion,
-                d_curved * n_obs_ln,
+                d_curved * occupancy_ln,
             ),
         )
     };
@@ -1250,10 +1256,8 @@ pub fn build_hybrid_split_report<'a, C, W, D, R, M, E>(
     // fixed denominator of the EV-preservation gate. `≤ 0` / non-finite disables
     // the gate (a degenerate, varianceless target has no EV to preserve).
     total_centered_variance: f64,
-    // #16 DEMOTE rank-charge currency. `n_obs` is the term's row count (the log-n
-    // BIC scale, matching PROMOTE); `dispersion_r` is the reconstruction noise
-    // floor φ̂ for the MP edge.
-    n_obs: usize,
+    // #16 DEMOTE rank-charge noise floor: the reconstruction φ̂ for the MP edge.
+    // The log scale is each atom's own occupancy N_eff, as in PROMOTE.
     dispersion_r: f64,
 ) -> Result<Option<SaeHybridSplitReport>, String>
 where
@@ -1344,7 +1348,6 @@ where
             curved_num_params,
             curved_phi.as_ref().map(|phi| phi.view()),
             fitted_turning,
-            n_obs,
             dispersion_r,
         ) {
             Ok((linear, curved, (t_bar, b0, b1))) => {
@@ -1685,7 +1688,6 @@ mod tests {
             10,
             Some(phi.view()),
             Some(0.0),
-            coords.len(),
             0.0025,
         )
         .expect("straight residual yields a candidate pair");
@@ -1738,7 +1740,6 @@ mod tests {
             5,
             Some(phi.view()),
             Some(2.0 * PI),
-            coords.len(),
             0.0025,
         )
         .expect("turning residual yields a candidate pair");
@@ -1796,7 +1797,6 @@ mod tests {
             6,
             Some(phi.view()),
             Some(2.0 * PI),
-            n,
             0.0025,
         )
         .expect("circle candidate pair");
@@ -1825,7 +1825,6 @@ mod tests {
             6,
             Some(phi.view()),
             Some(0.0),
-            n,
             0.0025,
         )
         .expect("line candidate pair");
@@ -1835,6 +1834,80 @@ mod tests {
             choice2.param,
             gam_solve::evidence::HybridAtomParam::Linear,
             "rank charge must stay LINEAR on a straight-line residual"
+        );
+    }
+
+    /// #2933 — the DEMOTE gate prices ½·d_eff·ln max(N_eff, 1), the charge the joint
+    /// PROMOTE criterion prices. A row on which the atom's gate is off adds nothing
+    /// to N_eff, and it adds the same ‖y‖²/2φ̂ to both arms' deviance, so appending
+    /// such rows must leave the curved-minus-linear evidence difference unchanged.
+    /// Pricing the log scale on the row count instead shifts it by
+    /// ½·Δd_eff·ln((n + k)/n).
+    #[test]
+    fn demote_charge_is_invariant_to_rows_the_atom_does_not_fire_on_2933() {
+        let n = 60usize;
+        let inert = 60usize;
+        let dispersion = 0.0025_f64;
+        let candidates = |rows: usize| {
+            let coords = Array1::from_shape_fn(rows, |i| {
+                if i < n {
+                    i as f64 / (n - 1) as f64
+                } else {
+                    // Inert rows sit at their own coordinates with their own residual.
+                    0.37 * (i - n) as f64 / inert as f64
+                }
+            });
+            let assign = Array1::from_shape_fn(rows, |i| {
+                if i < n {
+                    0.4 + 0.6 * ((i * 7) % n) as f64 / n as f64
+                } else {
+                    0.0
+                }
+            });
+            let mut residual = Array2::<f64>::zeros((rows, 2));
+            let mut phi = Array2::<f64>::zeros((rows, 3));
+            for i in 0..rows {
+                let th = 2.0 * PI * coords[i];
+                phi[[i, 0]] = 1.0;
+                phi[[i, 1]] = th.cos();
+                phi[[i, 2]] = th.sin();
+                if i < n {
+                    residual[[i, 0]] = assign[i] * th.cos();
+                    residual[[i, 1]] = assign[i] * th.sin();
+                } else {
+                    residual[[i, 0]] = 0.3 * (0.91 * i as f64).sin();
+                    residual[[i, 1]] = 0.2 * (0.53 * i as f64).cos();
+                }
+            }
+            build_atom_candidates(
+                coords.view(),
+                assign.view(),
+                residual.view(),
+                residual.view(),
+                6,
+                Some(phi.view()),
+                Some(2.0 * PI),
+                dispersion,
+            )
+            .expect("circle candidate pair")
+        };
+        let (linear, curved, _) = candidates(n);
+        let (linear_padded, curved_padded, _) = candidates(n + inert);
+        let difference = curved.negative_log_evidence - linear.negative_log_evidence;
+        let padded_difference =
+            curved_padded.negative_log_evidence - linear_padded.negative_log_evidence;
+        let scale = linear_padded
+            .negative_log_evidence
+            .abs()
+            .max(curved_padded.negative_log_evidence.abs());
+        assert!(
+            (padded_difference - difference).abs() <= 1.0e-9 * scale,
+            "appending {inert} rows the atom never fires on moved the demote evidence \
+             difference from {difference} to {padded_difference}"
+        );
+        assert!(
+            difference.abs() > 1.0,
+            "the fixture must separate the two arms materially: difference {difference}"
         );
     }
 
@@ -1982,7 +2055,6 @@ mod tests {
             6,
             None,
             Some(0.0),
-            coords.len(),
             0.0,
         ) else {
             panic!("a degenerate coordinate span must be refused, not accepted (#2362)");

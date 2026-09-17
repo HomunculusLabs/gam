@@ -123,16 +123,20 @@ pub enum SaeLikelihoodFrame {
 /// the dimensionless metric-frame dispersion, never the raw one.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SaeReconstructionDispersion {
-    /// Raw output-frame noise variance per scalar observation,
-    /// `Σ_{i,c} r_{ic}² / (n·p − EDF)`, in squared output units whatever
-    /// metric the likelihood uses. Consumers that compare against unwhitened
-    /// output quantities read this: the Marchenko–Pastur rank edge (against the
-    /// raw decoder Gram), the incoherence SNR and the per-atom inner fits.
+    /// Raw output-frame noise variance per scalar observation, `RSS/ν` with
+    /// `ν = ‖I − R‖²_F` over the raw frame's scalars of positive weight and
+    /// `R = ∂f̂/∂y` the fitted response (#2933 F40, see
+    /// `SaeManifoldTerm::reconstruction_dispersion`), in squared output units
+    /// whatever metric the likelihood uses. Consumers that compare against
+    /// unwhitened output quantities read this: the Marchenko–Pastur rank edge
+    /// (against the raw decoder Gram), the incoherence SNR and the per-atom inner
+    /// fits.
     pub raw_output_noise_variance: f64,
     /// Dispersion `φ̂` of the working likelihood `exp(−½ Σ w_n r_nᵀ M_n r_n / φ)`,
-    /// `2·data_fit / (n_likelihood − EDF)` in the frame named by
-    /// [`Self::likelihood_frame`]. Equal to [`Self::raw_output_noise_variance`]
-    /// when that frame is [`SaeLikelihoodFrame::RawOutput`].
+    /// `RSS/ν` in the frame named by [`Self::likelihood_frame`], with `RSS` and
+    /// `ν = ‖I − R‖²_F` in that frame's norm. Equal to
+    /// [`Self::raw_output_noise_variance`] when that frame is
+    /// [`SaeLikelihoodFrame::RawOutput`].
     pub likelihood_dispersion: f64,
     /// Units and scalar-observation count of [`Self::likelihood_dispersion`].
     pub likelihood_frame: SaeLikelihoodFrame,

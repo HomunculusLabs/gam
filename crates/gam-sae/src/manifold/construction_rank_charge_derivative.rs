@@ -325,10 +325,12 @@ impl SaeManifoldTerm {
                 gram,
                 occupancy,
                 p,
-                dispersion,
+                OutputNoiseSpectrum::isotropic(dispersion, p),
                 lambda[atom_idx],
                 Some(atom.smooth_penalty()),
             )?;
+            let mp_false_rank_probability_bound =
+                noise_null.false_rank_probability_bound(stratum.mp_reconstruction_rank_edge())?;
             let log_occupancy = occupancy.ln();
             if !(log_occupancy.is_finite() && log_occupancy > 0.0) {
                 return Err(format!(
@@ -375,6 +377,7 @@ impl SaeManifoldTerm {
                 nearest_mp_boundary: stratum.nearest_mp_boundary(),
                 stratum,
                 noise_null,
+                mp_false_rank_probability_bound,
                 tempered_posterior,
             });
         }

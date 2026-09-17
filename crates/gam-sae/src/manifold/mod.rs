@@ -17,9 +17,11 @@
 //! `Diff(M) x Sym(F)`. Circles are the optimizer's equilibrium response to
 //! superposition, not curiosities. Four faces of the same moduli-geometric object:
 //!
-//! * **Curvature is identifiability.** Realized-rank / Marchenko-Pastur per atom
-//!   is an *empirical Terracini certificate* (border-block Jacobian rank =
-//!   `sum_k (d_k+1)`); the `rank_eff==0` veto is the degenerate-tangent exclusion.
+//! * **Curvature is identifiability.** The per-atom realized rank at the
+//!   Marchenko-Pastur edge is an uncalibrated diagnostic of the border-block
+//!   Jacobian rank `sum_k (d_k+1)`, not a certificate: a fitted, gated
+//!   reconstruction spectrum is not an iid noise matrix (#2933 F32). The
+//!   `rank_eff==0` veto is the degenerate-tangent exclusion.
 //!   A *centered* circle's cone is the plane, so
 //!   it is measure-level identifiable only through its radial law — the `(kappa-2)^2`
 //!   ISA producer (support vs measure are complementary halves). Grounding in

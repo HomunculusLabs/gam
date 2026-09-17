@@ -310,6 +310,19 @@ fn rank_charge_audit_fills_every_field_from_one_state_2933() {
     // Conditional noise law: a positive expected total energy, and a top-energy
     // bound no smaller than the average over the two nonzero energies.
     assert!(audit.noise_null.expected_total_energy > 0.0);
+    assert_eq!(
+        audit.noise_null.output_noise,
+        OutputNoiseSpectrum::isotropic(dispersion, 2)
+    );
+    let edge_false_rank_bound = audit
+        .noise_null
+        .false_rank_probability_bound(edge)
+        .expect("the MP edge is a finite non-negative threshold");
+    assert_eq!(
+        audit.mp_false_rank_probability_bound.to_bits(),
+        edge_false_rank_bound.to_bits()
+    );
+    assert!((0.0..=1.0).contains(&audit.mp_false_rank_probability_bound));
     assert!(
         audit.noise_null.top_energy_expectation_bound
             >= 0.5 * audit.noise_null.expected_total_energy
@@ -532,8 +545,15 @@ fn mp_edge_false_rank_rate_under_a_fitted_noise_only_null_2933() {
         let n_eff = gates.iter().map(|gate| gate * gate).sum::<f64>();
         let edge = crate::null_battery::mp_reconstruction_rank_edge(n_eff, p as f64, dispersion)
             .expect("positive occupancy, width and dispersion give a finite edge");
-        let null = conditional_noise_null(&gram, n_eff, p, dispersion, lambda, Some(&penalty))
-            .expect("conditional noise-only law");
+        let null = conditional_noise_null(
+            &gram,
+            n_eff,
+            p,
+            OutputNoiseSpectrum::isotropic(dispersion, p),
+            lambda,
+            Some(&penalty),
+        )
+        .expect("conditional noise-only law");
         let ridge = (&gram + &(&penalty * lambda))
             .cholesky(Side::Lower)
             .expect("penalized Gram is positive definite");
@@ -600,6 +620,154 @@ fn mp_edge_false_rank_rate_under_a_fitted_noise_only_null_2933() {
         );
         // Every alive noise decoder is charged at least rank one (#2258).
         assert_eq!(chargeable_false_ranks, draws);
+    }
+}
+
+/// Bernstein's one-sided excess: a binomial count of `count` trials with success
+/// probability at most `probability` exceeds `count·probability + t` with
+/// probability at most `exp(−t² / (2(count·p(1−p) + t/3)))`. Returns the rate
+/// excess `t / count` at which that tail probability is `exp(−log_inverse_level)`.
+fn bernstein_rate_excess(count: usize, probability: f64, log_inverse_level: f64) -> f64 {
+    let variance = count as f64 * probability * (1.0 - probability);
+    let third = log_inverse_level / 3.0;
+    (third + (third * third + 2.0 * variance * log_inverse_level).sqrt()) / count as f64
+}
+
+/// Thresholds at the `quantiles` of a pilot sample of top energies.
+fn pilot_thresholds(pilot: &[f64], quantiles: &[f64]) -> Vec<f64> {
+    let mut sorted = pilot.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    quantiles
+        .iter()
+        .map(|&quantile| {
+            let index = ((sorted.len() as f64 * quantile).floor() as usize).min(sorted.len() - 1);
+            sorted[index]
+        })
+        .collect()
+}
+
+#[test]
+fn conditional_false_rank_probability_bound_covers_the_noise_only_tail_2933() {
+    let n = 160usize;
+    let m = 5usize;
+    let pilot_draws = 1000usize;
+    let draws = 3000usize;
+    // Each assertion may fail by chance with probability at most e^-14 ≈ 8e-7.
+    let log_inverse_level = 14.0_f64;
+    let dispersion = 0.7_f64;
+    let phi = Array2::from_shape_fn((n, m), |(row, col)| {
+        let t = (row as f64 + 0.5) / n as f64;
+        (std::f64::consts::PI * col as f64 * t).cos()
+    });
+    let mut difference = Array2::<f64>::zeros((m - 2, m));
+    for i in 0..m - 2 {
+        difference[[i, i]] = 1.0;
+        difference[[i, i + 1]] = -2.0;
+        difference[[i, i + 2]] = 1.0;
+    }
+    let penalty = difference.t().dot(&difference);
+    let gates = Array1::from_shape_fn(n, |row| 0.25 + 0.75 * ((row * 37) % n) as f64 / n as f64);
+    let design = Array2::from_shape_fn((n, m), |(row, col)| gates[row] * phi[[row, col]]);
+    let gram = design.t().dot(&design);
+    let n_eff = gates.iter().map(|gate| gate * gate).sum::<f64>();
+    let quantiles = [0.5, 0.9, 0.99, 0.999];
+    let mut state = 0x2933_3032_b0_u64;
+    // (label, output width, equicorrelation c, smoothing λ). Row noise is
+    // N(0, R[(1 − c)I + c·11ᵀ]): trace p·R, largest eigenvalue R(1 − c + c·p).
+    for (label, p, correlation, lambda) in [
+        ("isotropic unpenalized", 6usize, 0.0_f64, 0.0_f64),
+        ("isotropic", 6, 0.0, 3.0),
+        ("isotropic heavily smoothed", 6, 0.0, 300.0),
+        ("equicorrelated", 12, 0.9, 3.0),
+    ] {
+        let covariance_spectrum = OutputNoiseSpectrum {
+            trace: p as f64 * dispersion,
+            largest_eigenvalue: dispersion * (1.0 - correlation + correlation * p as f64),
+        };
+        let law = conditional_noise_null(
+            &gram,
+            n_eff,
+            p,
+            covariance_spectrum,
+            lambda,
+            Some(&penalty),
+        )
+        .expect("conditional noise-only law");
+        // What the audit assumes from the scalar raw dispersion alone.
+        let scalar_law = conditional_noise_null(
+            &gram,
+            n_eff,
+            p,
+            OutputNoiseSpectrum::isotropic(dispersion, p),
+            lambda,
+            Some(&penalty),
+        )
+        .expect("scalar conditional noise-only law");
+        let ridge = (&gram + &(&penalty * lambda))
+            .cholesky(Side::Lower)
+            .expect("penalized Gram is positive definite");
+        let top_energy = |state: &mut u64| {
+            let mut noise = Array2::<f64>::zeros((n, p));
+            for row in 0..n {
+                let shared = standard_normal(state);
+                for col in 0..p {
+                    noise[[row, col]] = dispersion.sqrt()
+                        * ((1.0 - correlation).sqrt() * standard_normal(state)
+                            + correlation.sqrt() * shared);
+                }
+            }
+            let decoder = ridge.solve_mat(&design.t().dot(&noise));
+            rank_charge_stratum(
+                &gram,
+                &decoder,
+                n_eff,
+                p as f64,
+                dispersion,
+                lambda,
+                Some(&penalty),
+            )
+            .expect("noise decoder stratum")
+            .top_reconstruction_energy()
+        };
+        // Thresholds come from an independent pilot sample, so each tail count
+        // below is binomial.
+        let pilot: Vec<f64> = (0..pilot_draws).map(|_| top_energy(&mut state)).collect();
+        let thresholds = pilot_thresholds(&pilot, &quantiles);
+        let tops: Vec<f64> = (0..draws).map(|_| top_energy(&mut state)).collect();
+        let mut informative = false;
+        let mut scalar_law_violated = false;
+        for &threshold in &thresholds {
+            let rate = tops.iter().filter(|&&top| top > threshold).count() as f64 / draws as f64;
+            let bound = law
+                .false_rank_probability_bound(threshold)
+                .expect("finite threshold");
+            let scalar_bound = scalar_law
+                .false_rank_probability_bound(threshold)
+                .expect("finite threshold");
+            eprintln!(
+                "#2933 F32 conditional false-rank bound [{label}]: N_eff={n_eff:.4} \
+                 tau={threshold:.6e} mc_rate={rate:.4} bound={bound:.6e} \
+                 scalar_R_bound={scalar_bound:.6e}"
+            );
+            assert!(
+                rate <= bound + bernstein_rate_excess(draws, bound, log_inverse_level),
+                "[{label}] tau={threshold}: noise-only rate {rate} exceeds the conditional \
+                 bound {bound}"
+            );
+            informative |= rate > 0.0 && bound < 1.0;
+            scalar_law_violated |=
+                rate > scalar_bound + bernstein_rate_excess(draws, scalar_bound, log_inverse_level);
+        }
+        assert!(
+            informative,
+            "[{label}]: the bound must be below one at a threshold noise actually crosses"
+        );
+        if correlation > 0.0 {
+            assert!(
+                scalar_law_violated,
+                "[{label}]: correlated output noise must exceed what the scalar-R law permits"
+            );
+        }
     }
 }
 

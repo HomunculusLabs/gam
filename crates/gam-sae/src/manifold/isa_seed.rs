@@ -131,9 +131,12 @@ pub struct IsaEigenParts {
     /// Indices into `evals` above the MP edge, sorted strongest first.
     pub above: Vec<usize>,
     /// `λ₊ = σ̂²·(1 + √(p/n))²` — the analytic top edge of the Marchenko–Pastur
-    /// law at aspect `p/n`: the largest eigenvalue white noise produces, so a
-    /// direction above it is real structure, not a fluctuation. `σ̂²` is the
-    /// median eigenvalue — robust while signal directions are a minority.
+    /// law at aspect `p/n`, the limit of the largest white-noise eigenvalue as
+    /// `n, p → ∞` at that aspect. At finite `n` the top noise eigenvalue fluctuates
+    /// about it on the `n^(-2/3)` Tracy–Widom scale and can exceed it, and `σ̂²` is
+    /// itself estimated, so a direction above it is a candidate, not a certified
+    /// signal (#2933). `σ̂²` is the median eigenvalue — robust while signal
+    /// directions are a minority.
     pub mp_edge: f64,
     /// Noise scale for the κ certificate: the SAME monotone MP fixed-point
     /// estimate that sets [`Self::mp_edge`], i.e. `mp_edge / (1 + √(p/n))²`.
