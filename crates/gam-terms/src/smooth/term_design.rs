@@ -3072,34 +3072,63 @@ mod frozen_linear_term_mass_rebuild_tests {
     /// The scratch allowance is the final n*p design plus two n-row columns
     /// (one live realization and one allocator-retained column). The previous
     /// collect-then-copy path needed two complete n*p payloads.
+    ///
+    /// `VmHWM` is the high-water mark of the whole process, and libtest runs this
+    /// crate's lib tests on parallel threads in one process, so another test's
+    /// allocation during the build would count as the build's growth (#2958). The
+    /// build is measured in a child run of this test binary that runs only this
+    /// test. A `--skip` filter that matches no test carries the child role through
+    /// libtest's argument parser.
     #[cfg(target_os = "linux")]
     #[test]
     fn million_row_linear_design_stays_below_derived_peak_rss() {
-        fn hwm() -> usize {
-            std::fs::read_to_string("/proc/self/status")
-                .expect("Linux status")
-                .lines()
-                .find_map(|line| line.strip_prefix("VmHWM:")?.split_whitespace().next()?.parse::<usize>().ok())
-                .expect("VmHWM") * 1024
+        const CHILD_ROLE: &str = "__gam_terms_isolated_design_rss_child";
+        const REPORT: &str = "isolated peak RSS growth";
+        if std::env::args().any(|argument| argument == CHILD_ROLE) {
+            fn hwm() -> usize {
+                std::fs::read_to_string("/proc/self/status")
+                    .expect("Linux status")
+                    .lines()
+                    .find_map(|line| line.strip_prefix("VmHWM:")?.split_whitespace().next()?.parse::<usize>().ok())
+                    .expect("VmHWM") * 1024
+            }
+            let (n, p) = (1_000_000usize, 16usize);
+            let data = Array2::from_shape_fn((n, p), |(i, j)| ((i + j) % 19) as f64);
+            let spec = TermCollectionSpec {
+                linear_terms: (0..p).map(|j| LinearTermSpec {
+                    name: format!("x{j}"), feature_col: j, feature_cols: vec![j],
+                    categorical_levels: vec![], double_penalty: false,
+                    coefficient_geometry: LinearCoefficientGeometry::Unconstrained,
+                    coefficient_min: None, coefficient_max: None, frozen_function_mass: None,
+                }).collect(),
+                random_effect_terms: vec![], smooth_terms: vec![],
+            };
+            let before = hwm();
+            let built = build_term_collection_design(data.view(), &spec).expect("million-row design");
+            let growth = hwm().saturating_sub(before);
+            let column_bytes = n * std::mem::size_of::<f64>();
+            let derived_limit = n * p * std::mem::size_of::<f64>() + 2 * column_bytes;
+            assert!(growth <= derived_limit, "peak RSS growth {growth} exceeded derived {derived_limit}");
+            assert_eq!(built.design.nrows(), n);
+            println!("{REPORT} {growth} within derived {derived_limit}");
+            return;
         }
-        let (n, p) = (1_000_000usize, 16usize);
-        let data = Array2::from_shape_fn((n, p), |(i, j)| ((i + j) % 19) as f64);
-        let spec = TermCollectionSpec {
-            linear_terms: (0..p).map(|j| LinearTermSpec {
-                name: format!("x{j}"), feature_col: j, feature_cols: vec![j],
-                categorical_levels: vec![], double_penalty: false,
-                coefficient_geometry: LinearCoefficientGeometry::Unconstrained,
-                coefficient_min: None, coefficient_max: None, frozen_function_mass: None,
-            }).collect(),
-            random_effect_terms: vec![], smooth_terms: vec![],
-        };
-        let before = hwm();
-        let built = build_term_collection_design(data.view(), &spec).expect("million-row design");
-        let growth = hwm().saturating_sub(before);
-        let column_bytes = n * std::mem::size_of::<f64>();
-        let derived_limit = n * p * std::mem::size_of::<f64>() + 2 * column_bytes;
-        assert!(growth <= derived_limit, "peak RSS growth {growth} exceeded derived {derived_limit}");
-        assert_eq!(built.design.nrows(), n);
+        let test_name = format!(
+            "{}::million_row_linear_design_stays_below_derived_peak_rss",
+            module_path!().split_once("::").expect("a crate-qualified module path").1
+        );
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", &test_name, "--test-threads=1", "--nocapture", "--skip", CHILD_ROLE])
+            .output()
+            .expect("run the isolated design-build child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("running 1 test") && stdout.contains(REPORT),
+            "the isolated design-build child must run this test alone and report its growth; \
+             status {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            output.status
+        );
     }
 
     /// One `double_penalty=true` linear term named `x`, no smooth/random-effect
