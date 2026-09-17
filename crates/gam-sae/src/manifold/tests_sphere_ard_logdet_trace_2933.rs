@@ -68,7 +68,7 @@ fn sphere_atom(
     .with_basis_second_jet(evaluator)
 }
 
-fn sphere_logdet_fixture() -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho) {
+pub(crate) fn sphere_logdet_fixture() -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho) {
     let n = 10_usize;
     let p = 3_usize;
     let coords = spiral_rows(n, 0.0);
@@ -139,7 +139,7 @@ fn topk_layout(term: &SaeManifoldTerm) -> SaeRowLayout {
     .expect("hard TopK support-one layout")
 }
 
-fn fixed_state_cache(
+pub(crate) fn fixed_state_cache(
     term: &SaeManifoldTerm,
     target: &Array2<f64>,
     rho: &SaeManifoldRho,
@@ -163,7 +163,7 @@ fn fixed_state_cache(
 /// and the exact information are indefinite. Converge once at `rho` and hold that
 /// mode fixed for every stencil point, so the oracles are fixed-state differences
 /// at a positive-definite mode.
-fn converged_anchor(
+pub(crate) fn converged_anchor(
     term: &SaeManifoldTerm,
     target: &Array2<f64>,
     rho: &SaeManifoldRho,

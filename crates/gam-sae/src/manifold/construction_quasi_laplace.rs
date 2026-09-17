@@ -7158,270 +7158,6 @@ impl SaeManifoldTerm {
         Ok(())
     }
 
-    pub(crate) fn outer_rho_gradient_ift_rhs(
-        &self,
-        rho: &SaeManifoldRho,
-        j: usize,
-        cache: &ArrowFactorCache,
-    ) -> Result<SaeArrowVector, String> {
-        self.assignment.validate_rho_domain(rho)?;
-        let ard_precisions = self.validated_ard_precisions(rho)?;
-        let n_params = rho.flat_coordinates().len();
-        if j >= n_params {
-            return Err(format!(
-                "outer_rho_gradient_ift_rhs: coordinate {j} outside rho dim {n_params}"
-            ));
-        }
-        let mut t = Array1::<f64>::zeros(cache.delta_t_len());
-        let mut beta = Array1::<f64>::zeros(cache.k);
-        if rho.sparse_flat_index() == Some(j) {
-            let assignment_grad =
-                crate::assignment::assignment_prior_log_strength_target_mixed_weighted(
-                    &self.assignment,
-                    rho,
-                    self.row_loss_weights.as_deref(),
-                )?;
-            let k_atoms = self.k_atoms();
-            let assignment_dim = self.assignment.assignment_coord_dim();
-            for row in 0..self.n_obs() {
-                let base = cache.row_offsets[row];
-                let assignment_base = row * k_atoms;
-                match self.last_row_layout {
-                    Some(_) => {}
-                    None => {
-                        for free_idx in 0..assignment_dim {
-                            t[base + free_idx] = assignment_grad[assignment_base + free_idx];
-                        }
-                    }
-                }
-            }
-        } else if (rho.smooth_flat_start()..rho.smooth_flat_start() + rho.log_lambda_smooth.len())
-            .contains(&j)
-        {
-            // #1556: this layout-derived coordinate is one atom's smoothness
-            // strength. `∂(penalty)/∂log λ_k = λ_k·S_k C_k` touches ONLY
-            // atom `k`'s decoder block; every other atom's RHS is zero.
-            let target_atom = j - rho.smooth_flat_start();
-            let lambda = rho.lambda_smooth_for(target_atom)?;
-            let penalty = self.atoms[target_atom].smooth_penalty();
-            self.decoder_penalty_ift_rhs_block(cache, target_atom, lambda, penalty, &mut beta)?;
-        } else if let Some(target_atom) = rho
-            .kappa_atoms
-            .iter()
-            .copied()
-            .find(|&atom| rho.kappa_flat_index(atom) == Some(j))
-        {
-            // #2935 — raw sectional curvature enters the inner gradient only through
-            // the penalty Gram: `∂g/∂κ_k = λ_k·(½(∂S_k/∂κ + ∂S_k/∂κᵀ) ⊗ I) C_k` on atom
-            // `k`'s decoder block. An atom without `∂S/∂κ` has no curvature to move.
-            if let Some(ds) = self.atoms[target_atom].smooth_penalty_kappa_derivative() {
-                let lambda = rho.lambda_smooth_for(target_atom)?;
-                self.decoder_penalty_ift_rhs_block(cache, target_atom, lambda, ds, &mut beta)?;
-            }
-        } else {
-            // ARD coordinate `j`. `ard_flat_index` maps `(atom, axis)` onto the
-            // flat coordinate for both parameterizations; a shared axis is owned
-            // by SEVERAL atoms, and the RHS for that one outer coordinate is the
-            // SUM of each owning atom's `∂g/∂log α_{atom,axis}` block (chain rule
-            // through the broadcast). Those blocks land in disjoint per-atom row
-            // slots of `t`, so accumulate every matching atom rather than
-            // returning on the first. In `PerAtom` mode exactly one `(atom, axis)`
-            // matches, reproducing the historical single-atom RHS.
-            let sphere_factors = self.all_ard_embedded_sphere_factors();
-            for atom in 0..rho.log_ard.len() {
-                for axis in 0..rho.log_ard[atom].len() {
-                    if rho.ard_flat_index(atom, axis) != j {
-                        continue;
-                    }
-                    let alpha = ard_precisions[atom][axis];
-                    let periods = self.ard_axis_periods(atom);
-                    let row_w = self.row_loss_weights.as_deref();
-                    let sphere = Self::ard_sphere_factor_containing(&sphere_factors[atom], axis);
-                    for row in 0..self.n_obs() {
-                        let row_t = self.assignment.coords[atom].row(row);
-                        let prior = ArdAxisPrior::eval(alpha, row_t[axis], periods[axis]);
-                        // The atom's block start in this row: the dense coordinate
-                        // offset, or the compact TopK start. Every sibling caller
-                        // adds the axis to that start.
-                        let Some(block_start) = sae_coord_penalty_offset(
-                            self.last_row_layout.as_ref(),
-                            self.assignment.coord_offsets()[atom],
-                            row,
-                            atom,
-                        ) else {
-                            continue;
-                        };
-                        // HT row weighting: this RHS is `∂g/∂log α` of the inner-MAP
-                        // stationarity gradient `g`, and the assembly writes that
-                        // gradient as `w_row·V'` (full `w_row`, `construction_arrow_schur_assembly.rs`
-                        // gt seam). The IFT operator `H` it feeds carries full `w_row`
-                        // on this coordinate diagonal (`w·(D_data + prior'')`), so the
-                        // RHS must carry the SAME full `w_row` to stay consistent — `V`
-                        // is linear in α so `∂(w·V')/∂log α = w·V'`. `None` ⇒ w_row = 1,
-                        // bit-for-bit the historical RHS.
-                        let w_row = row_w.map_or(1.0, |w| w[row]);
-                        let base = cache.row_offsets[row] + block_start;
-                        match sphere {
-                            // On an embedded unit sphere at `x` the assembled gradient
-                            // is its tangent projection `P g`, so the RHS is
-                            // `w·V'·P e_a` (#2933 F24).
-                            Some((offset, dim)) => {
-                                let x = &row_t[offset..offset + dim];
-                                for i in 0..dim {
-                                    t[base + offset + i] += w_row
-                                        * prior.grad
-                                        * Self::sphere_tangent_of_axis(x, axis - offset, i);
-                                }
-                            }
-                            None => t[base + axis] += w_row * prior.grad,
-                        }
-                    }
-                }
-            }
-        }
-        Ok(SaeArrowVector { t, beta })
-    }
-
-    /// #2231 — the crosscoder block coordinate's IFT RHS
-    /// `∂g/∂log λ_ℓ = −½·Jᵀ_M Z̃^{(ℓ)}`, where `g` is the inner stationarity
-    /// gradient, `Z̃^{(ℓ)}` is the CURRENTLY-SCALED stacked target masked to
-    /// block `ℓ`'s columns, and `Jᵀ_M` is the same metric-whitened,
-    /// `√w`-weighted data Jacobian the assembly's `gt = J̃ᵀẽ` uses (the target
-    /// enters `g` only through the data residual `r̃ = f − Z̃`, and
-    /// `∂Z̃_ℓ/∂log λ_ℓ = ½·Z̃_ℓ`). Feeding this RHS through
-    /// `solve_exact_stationarity` gives the block coordinate the SAME
-    /// `−½·Γᵀθ̂_ρ` Laplace adjoint every other ρ coordinate carries — without
-    /// it the block gradient differentiates a fictitious criterion in which
-    /// the fitted state is held fixed (#2087 desync class).
-    pub(crate) fn crosscoder_block_ift_rhs(
-        &self,
-        cache: &ArrowFactorCache,
-        target: ArrayView2<'_, f64>,
-        col_range: std::ops::Range<usize>,
-    ) -> Result<SaeArrowVector, String> {
-        let n = self.n_obs();
-        let p = self.output_dim();
-        if target.nrows() != n || target.ncols() != p {
-            return Err(format!(
-                "crosscoder_block_ift_rhs: target shape ({}, {}) != ({n}, {p})",
-                target.nrows(),
-                target.ncols()
-            ));
-        }
-        if col_range.end > p || col_range.start >= col_range.end {
-            return Err(format!(
-                "crosscoder_block_ift_rhs: block columns {col_range:?} outside output dim {p}"
-            ));
-        }
-        let mut t = Array1::<f64>::zeros(cache.delta_t_len());
-        let mut beta = Array1::<f64>::zeros(cache.k);
-        let second_jets = self.atom_second_jets()?;
-        let border = self.border_channels_for_cache(cache)?;
-        let whiten = self.whiten_logdet_row_jets();
-        if matches!(self.assignment.mode, AssignmentMode::Softmax { .. }) {
-            // #2304 resident path: the packed channel tensors are reduced in
-            // place (on device when the plan admits it) and only the per-row
-            // t/β coefficients return.
-            //
-            // The probe is `−½·√w·Z̃` on the block's columns, zero elsewhere
-            // (the −½ applied at emit time). With a whitening metric, the
-            // historical consumer whitened BOTH the jets and this vector to
-            // rank space and dotted there; `⟨Uᵀa, Uᵀv⟩ = ⟨a, U(Uᵀv)⟩`
-            // exactly, so the metric folds into the probe as `M_n v` and the
-            // raw jets are contracted directly.
-            let probe_for_row = |row: usize| -> Result<Vec<f64>, String> {
-                let sqrt_w = self
-                    .row_loss_weights
-                    .as_deref()
-                    .map_or(1.0, |w| w[row].sqrt());
-                let v: Vec<f64> = (0..p)
-                    .map(|col| {
-                        if col_range.contains(&col) {
-                            sqrt_w * target[[row, col]]
-                        } else {
-                            0.0
-                        }
-                    })
-                    .collect();
-                if whiten {
-                    let metric = self.row_metric.as_ref().ok_or_else(|| {
-                        "crosscoder_block_ift_rhs: whitening metric absent".to_string()
-                    })?;
-                    Ok(metric.apply_metric_row(row, ndarray::aview1(&v)))
-                } else {
-                    Ok(v)
-                }
-            };
-            self.contracted_softmax_linear_rhs(
-                cache,
-                &second_jets,
-                &border,
-                probe_for_row,
-                |row, q, t_row, beta_row| {
-                    let base = cache.row_offsets[row];
-                    for (var_idx, &value) in t_row.iter().enumerate().take(q) {
-                        t[base + var_idx] = -0.5 * value;
-                    }
-                    for (channel, &value) in border.iter().zip(beta_row) {
-                        beta[channel.index] += -0.5 * value;
-                    }
-                    Ok(())
-                },
-            )?;
-            return Ok(SaeArrowVector { t, beta });
-        }
-        let mut jet_window: std::collections::VecDeque<SaeRowJets> =
-            std::collections::VecDeque::new();
-        let mut jet_window_next = 0usize;
-        for row in 0..n {
-            let base = cache.row_offsets[row];
-            if jet_window.is_empty() {
-                jet_window_next = self.refill_jet_window(
-                    jet_window_next,
-                    cache,
-                    &second_jets,
-                    &border,
-                    &mut jet_window,
-                )?;
-            }
-            let mut jets = jet_window
-                .pop_front()
-                .ok_or_else(|| "crosscoder_block_ift_rhs: empty jet window".to_string())?;
-            if whiten {
-                self.apply_whiten_to_logdet_row_jets(row, &mut jets)?;
-            }
-            // The non-softmax rank-space dot: jets are whitened to `Uᵀ·`
-            // channels, so the vector is whitened the same way (never
-            // `M_n v` here — that fold belongs to the contracted path above).
-            let sqrt_w = self
-                .row_loss_weights
-                .as_deref()
-                .map_or(1.0, |w| w[row].sqrt());
-            let mut v: Vec<f64> = (0..p)
-                .map(|col| {
-                    if col_range.contains(&col) {
-                        sqrt_w * target[[row, col]]
-                    } else {
-                        0.0
-                    }
-                })
-                .collect();
-            if whiten {
-                let metric = self.row_metric.as_ref().ok_or_else(|| {
-                    "crosscoder_block_ift_rhs: whitening metric absent".to_string()
-                })?;
-                Self::whiten_logdet_metric_vec(metric, row, p, &mut v)?;
-            }
-            for var_idx in 0..jets.vars.len() {
-                t[base + var_idx] = -0.5 * sae_dot(jets.first(var_idx), &v);
-            }
-            for (channel_pos, channel) in border.iter().enumerate() {
-                beta[channel.index] += -0.5 * sae_dot(jets.beta(channel_pos), &v);
-            }
-        }
-        Ok(SaeArrowVector { t, beta })
-    }
-
     fn whiten_logdet_metric_vec(
         metric: &gam_problem::RowMetric,
         row: usize,
@@ -7747,6 +7483,10 @@ impl SaeManifoldTerm {
             std::collections::VecDeque::new();
         let mut jet_window_next = 0usize;
         let mut ordered_beta_bernoulli_logit_sites: Vec<(usize, usize, usize, f64)> = Vec::new();
+        // #2933 F24 — rows holding an embedded-sphere block factor the Riemannian
+        // conversion of their ambient row, which moves with θ too (`SphereRowConversion`).
+        let sphere_blocks = self.sphere_tangent_blocks_by_row(&cache.row_dims)?;
+        let sphere_axis_periods = self.all_ard_axis_periods();
 
         for row in 0..n {
             let q = cache.row_dims[row];
@@ -7935,6 +7675,64 @@ impl SaeManifoldTerm {
             // θ-derivative does too.
             let w_row_prior = self.row_loss_weights.as_deref().map_or(1.0, |w| w[row]);
             let simplex_count = crate::assignment::simplex_gate_free_count(&self.assignment);
+            // #2933 F24 — on a sphere row the tower keeps its ambient derivatives as
+            // matrices, converts them (`SphereRowConversion`), contracts the converted
+            // block, and projects the slot functional to the tangent after the loop.
+            let sphere_conversion = if sphere_blocks[row].is_empty() {
+                None
+            } else {
+                let target = residual_target.ok_or_else(|| {
+                    format!(
+                        "logdet_theta_adjoint_from_probes: row {row} holds an embedded-sphere \
+                         block, whose Riemannian conversion reads the row residual, but no \
+                         target was supplied"
+                    )
+                })?;
+                let error_metric = self.patchd_row_error_metric(
+                    row,
+                    patchd_w_row,
+                    target,
+                    &assignments,
+                    whiten_row_jets,
+                );
+                SphereRowConversion::for_row(
+                    self,
+                    row,
+                    &sphere_blocks[row],
+                    &jets,
+                    border.len(),
+                    &error_metric,
+                    &ard_precisions,
+                    &sphere_axis_periods,
+                    exact_a,
+                )
+            };
+            let collect_matrices = defl_live || sphere_conversion.is_some();
+            let contract_converted = |d_tt: &Array2<f64>, d_tbeta: &Array2<f64>| -> f64 {
+                let mut converted = 0.0_f64;
+                for a in 0..q {
+                    for b in 0..q {
+                        converted += inv_vv[[b, a]] * d_tt[[a, b]];
+                    }
+                }
+                if defl_live {
+                    converted -= Self::deflation_block_correction(
+                        &inv_vv,
+                        d_tt,
+                        defl_dirs,
+                        defl_spectrum,
+                    );
+                }
+                for a in 0..q {
+                    for (beta_pos, channel) in border.iter().enumerate() {
+                        converted +=
+                            2.0 * inv_vbeta[[a, channel.index]] * d_tbeta[[a, beta_pos]];
+                    }
+                }
+                converted
+            };
+            let mut sphere_slot_functional =
+                Array1::<f64>::zeros(if sphere_conversion.is_some() { q } else { 0 });
             for w in 0..q {
                 let mut gamma = 0.0_f64;
                 let softmax_d_dw: Option<(&[f64], f64, f64, f64, usize)> =
@@ -7956,11 +7754,17 @@ impl SaeManifoldTerm {
                 // per-slot derivative is retained as a matrix so the Daleckii–Krein
                 // correction can be applied to it after the loop; on a PD row the
                 // matrix stays `0×0` and nothing is allocated.
-                let mut deflated_base_dh_mat = if !defl_live {
+                let mut deflated_base_dh_mat = if !collect_matrices {
                     Array2::<f64>::zeros((0, 0))
                 } else {
                     Array2::<f64>::zeros((q, q))
                 };
+                let mut dh_border = if sphere_conversion.is_some() {
+                    Array2::<f64>::zeros((q, border.len()))
+                } else {
+                    Array2::<f64>::zeros((0, 0))
+                };
+                let mut beta_beta = 0.0_f64;
                 for a in 0..q {
                     for b in 0..q {
                         let mut dh = match (softmax_d_dw, jets.vars[a], jets.vars[b]) {
@@ -8077,7 +7881,7 @@ impl SaeManifoldTerm {
                                 _ => 0.0,
                             };
                         }
-                        if defl_live {
+                        if collect_matrices {
                             deflated_base_dh_mat[[a, b]] = dh;
                         }
                         gamma += inv_vv[[b, a]] * dh;
@@ -8130,6 +7934,9 @@ impl SaeManifoldTerm {
                                 channel,
                             );
                         }
+                        if sphere_conversion.is_some() {
+                            dh_border[[a, beta_pos]] = dh;
+                        }
                         gamma += 2.0 * inv_vbeta[[a, channel.index]] * dh;
                     }
                 }
@@ -8147,26 +7954,60 @@ impl SaeManifoldTerm {
                                 rd_l[c] += sc * bd[c];
                             }
                         }
-                        gamma += inv_m * (sae_dot(&rd_l, &p_probe[l]) + sae_dot(&r_probe[l], &q_l));
+                        let contribution =
+                            inv_m * (sae_dot(&rd_l, &p_probe[l]) + sae_dot(&r_probe[l], &q_l));
+                        gamma += contribution;
+                        beta_beta += contribution;
                     }
                 }
                 if let Some(fold) = beta_fold.as_ref() {
                     for (beta_pos, channel) in border.iter().enumerate() {
                         let bd = jets.beta_deriv(w, beta_pos);
                         for c in 0..bjet_len {
-                            gamma += 2.0 * bd[c] * fold[[c, channel.index]];
+                            let contribution = 2.0 * bd[c] * fold[[c, channel.index]];
+                            gamma += contribution;
+                            beta_beta += contribution;
                         }
                     }
                 }
-                gamma_t[base + w] = gamma;
+                match sphere_conversion.as_ref() {
+                    None => gamma_t[base + w] = gamma,
+                    Some(conversion) => {
+                        let (d_tt, d_tbeta) =
+                            conversion.slot_derivative(w, &deflated_base_dh_mat, &dh_border);
+                        let mut converted = contract_converted(&d_tt, &d_tbeta) + beta_beta;
+                        if let (Some((explicit, response)), Some((_, clamp_dt))) =
+                            (clamp_price.as_ref(), clamp_price_inputs.as_ref())
+                        {
+                            converted += explicit[w] * clamp_dt[base + w] + (response * &d_tt).sum();
+                        }
+                        if let (Some((row_weights, _)), Some((_, clamp_dt))) =
+                            (beta_basin.as_ref(), clamp_price_inputs.as_ref())
+                        {
+                            converted += row_weights[row].1[w] * clamp_dt[base + w];
+                        }
+                        sphere_slot_functional[w] = converted;
+                    }
+                }
+            }
+            if let Some(conversion) = sphere_conversion.as_ref() {
+                let projected = conversion.project_slot_functional(&sphere_slot_functional);
+                for w in 0..q {
+                    gamma_t[base + w] = projected[w];
+                }
             }
 
             for (w_beta_pos, w_channel) in border.iter().enumerate() {
                 let mut gamma = 0.0_f64;
-                let mut dh_mat = if !defl_live {
+                let mut dh_mat = if !collect_matrices {
                     Array2::<f64>::zeros((0, 0))
                 } else {
                     Array2::<f64>::zeros((q, q))
+                };
+                let mut dh_border = if sphere_conversion.is_some() {
+                    Array2::<f64>::zeros((q, border.len()))
+                } else {
+                    Array2::<f64>::zeros((0, 0))
                 };
                 for a in 0..q {
                     for b in 0..q {
@@ -8180,7 +8021,7 @@ impl SaeManifoldTerm {
                                 ctx, jets.vars[a], jets.vars[b], w_channel,
                             );
                         }
-                        if defl_live {
+                        if collect_matrices {
                             dh_mat[[a, b]] = dh;
                         }
                         gamma += inv_vv[[b, a]] * dh;
@@ -8207,10 +8048,24 @@ impl SaeManifoldTerm {
                         if exact_a {
                             dh += sae_dot(jets.beta(w_beta_pos), jets.beta_deriv(a, beta_pos));
                         }
+                        if sphere_conversion.is_some() {
+                            dh_border[[a, beta_pos]] = dh;
+                        }
                         gamma += 2.0 * inv_vbeta[[a, channel.index]] * dh;
                     }
                 }
-                gamma_beta[w_channel.index] += gamma;
+                match sphere_conversion.as_ref() {
+                    None => gamma_beta[w_channel.index] += gamma,
+                    Some(conversion) => {
+                        let (d_tt, d_tbeta) =
+                            conversion.border_derivative(w_beta_pos, &dh_mat, &dh_border);
+                        let mut converted = contract_converted(&d_tt, &d_tbeta);
+                        if let Some((_, response)) = clamp_price.as_ref() {
+                            converted += (response * &d_tt).sum();
+                        }
+                        gamma_beta[w_channel.index] += converted;
+                    }
+                }
             }
         }
 
