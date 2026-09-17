@@ -75,7 +75,7 @@ mod teacher_tests;
 // [unlanded: adversary]
 
 // Matrix-free structured edits applied to the current intervened input.
-// [unlanded: apply]
+pub mod apply;
 
 // Component query-key kernel under the source's joint softmax and causal mask.
 pub mod attention;
