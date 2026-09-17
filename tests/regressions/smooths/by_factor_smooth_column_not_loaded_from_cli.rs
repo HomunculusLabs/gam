@@ -6,7 +6,7 @@
 //! it from there, so the column is genuinely required at fit time.
 //!
 //! The defect this test was written for: the CLI's required-column walk
-//! (`collect_term_column_names`) collected only a smooth's `vars` (here `["x"]`)
+//! (then gam-cli's `collect_term_column_names`) collected only a smooth's `vars` (here `["x"]`)
 //! and ignored `by=`, so the CLI loaded the file with only `{x, y}` and the fit
 //! aborted before any numerics:
 //!
@@ -18,10 +18,10 @@
 //! ```
 //!
 //! A numeric `by=z` varying-coefficient smooth had the same gap.
-//! `collect_term_column_names` (`crates/gam-cli/src/main/dataset_io.rs`) now
-//! delegates to the shared formula walk `parsed_term_column_names`
-//! (`crates/gam-terms/src/inference/formula_dsl.rs`), which adds a smooth's `by`
-//! column.
+//! The fit's input contract is now gam-models `fit_orchestration::formula_columns`
+//! / `fit_required_columns`, which walk the formula through
+//! `parsed_term_column_names` (`crates/gam-terms/src/inference/formula_dsl.rs`),
+//! including a smooth's `by` column.
 //!
 //! This test fits the by-smooth from the CLI, then predicts each level at a point
 //! where the two true curves have opposite sign, and asserts the recovered

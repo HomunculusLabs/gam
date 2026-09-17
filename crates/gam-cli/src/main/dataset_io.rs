@@ -1,36 +1,5 @@
 use super::*;
 
-pub(crate) fn collect_term_column_names(terms: &[ParsedTerm], out: &mut BTreeSet<String>) {
-    // Delegate to the single shared authority on the formula→columns walk
-    // (`s(x, by=g)`'s `by` column is included there) so the fit-time required
-    // columns, the predict-time required columns, and the PyFFI surface all
-    // agree.
-    parsed_term_column_names(terms, out);
-}
-
-pub(crate) fn required_columns_for_formula(parsed: &ParsedFormula) -> Result<Vec<String>, String> {
-    let mut out = BTreeSet::<String>::new();
-    if let Some((entry, exit, event)) = parse_surv_response(&parsed.response)? {
-        if let Some(entry) = entry {
-            out.insert(entry);
-        }
-        out.insert(exit);
-        out.insert(event);
-    } else if let Some((left, right, event)) = parse_surv_interval_response(&parsed.response)? {
-        out.insert(left);
-        out.insert(right);
-        out.insert(event);
-    } else {
-        out.insert(parsed.response.clone());
-    }
-    collect_term_column_names(&parsed.terms, &mut out);
-    for surface in &parsed.slope_surfaces {
-        out.insert(surface.z_column.clone());
-        collect_term_column_names(&surface.terms, &mut out);
-    }
-    Ok(out.into_iter().collect())
-}
-
 pub(crate) fn load_dataset_projected(
     path: &Path,
     requested_columns: &[String],

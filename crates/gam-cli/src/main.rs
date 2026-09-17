@@ -28,8 +28,8 @@ pub(crate) use gam::data::{
 pub(crate) use gam::inference::formula_dsl::{
     LinkChoice, LinkMode, ParsedFormula, ParsedTerm,
     parse_formula,
-    parse_matching_auxiliary_formula, parse_surv_interval_response, parse_surv_response,
-    parsed_term_column_names, };
+    parse_surv_response,
+};
 
 pub(crate) use gam::inference::model::{
     FittedFamily, FittedModel as SavedModel, FittedModelPayload, PredictModelClass,
@@ -110,8 +110,8 @@ pub(crate) use gam::types::{
 pub(crate) use gam::families::fit_orchestration::{
     FitConfig, FitResult,
     PreparedSurvivalTimeStack, WorkflowError,
-    fit_from_formula_with_notes, is_binary_response, prepare_survival_time_stack,
-    resolve_offset_column, resolve_weight_column,
+    fit_from_formula_with_notes, fit_required_columns, formula_columns, is_binary_response,
+    prepare_survival_time_stack, resolve_offset_column, resolve_weight_column,
 };
 
 pub(crate) use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};

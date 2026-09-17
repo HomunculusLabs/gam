@@ -418,12 +418,22 @@ impl EncodedDataset {
     /// and Python fits all carry an `EncodedDataset` through that seam, so a
     /// degenerate design can never acquire frontend-specific behaviour.
     ///
+    /// The table-level checks (columns, duplicate names, observations, width)
+    /// cover the whole table. The column checks (a factor with fewer than two
+    /// levels, a single non-missing value, a non-finite cell) cover only
+    /// `consumed`, the columns the fit reads (`fit_required_columns`): a column
+    /// no term, response, weight or offset reads cannot refuse, change or block
+    /// a fit, just as `gam fit` never loads it.
+    ///
     /// Constancy is NOT a boundary rule: a constant column is legitimate input
     /// for many designs (an all-zero left-truncation entry time, an event
     /// indicator, a scalar term the model prunes) and the layers that judge it
     /// carry the specific message (an all-zero count response, #2255; a
     /// constant calibrated score column in a marginal-slope fit).
-    pub fn validate_fit_boundary(&self) -> Result<(), DataError> {
+    pub fn validate_fit_boundary(
+        &self,
+        consumed: &std::collections::BTreeSet<String>,
+    ) -> Result<(), DataError> {
         if self.headers.is_empty() {
             return Err(DataError::DegenerateColumn {
                 column: "<table>".to_string(),
@@ -455,6 +465,9 @@ impl EncodedDataset {
             });
         }
         for (index, name) in self.headers.iter().enumerate() {
+            if !consumed.contains(name) {
+                continue;
+            }
             if self.column_kinds.get(index) == Some(&ColumnKindTag::Categorical)
                 && self
                     .schema
@@ -3911,7 +3924,8 @@ mod tests {
                 },
                 column_kinds: vec![ColumnKindTag::Continuous],
             };
-            let error = dataset.validate_fit_boundary().unwrap_err();
+            let consumed = std::collections::BTreeSet::from(["temperature".to_string()]);
+            let error = dataset.validate_fit_boundary(&consumed).unwrap_err();
             assert!(matches!(error, DataError::DegenerateColumn { .. }));
             assert_eq!(
                 error.to_string(),
@@ -3959,11 +3973,60 @@ mod tests {
             "column 'x' has a duplicate name",
             "column 'group' is a factor with fewer than two levels",
         ];
+        let consumed = std::collections::BTreeSet::from(["x".to_string(), "group".to_string()]);
         for (dataset, expected) in cases.into_iter().zip(expected) {
             assert_eq!(
-                dataset.validate_fit_boundary().unwrap_err().to_string(),
+                dataset.validate_fit_boundary(&consumed).unwrap_err().to_string(),
                 expected
             );
         }
+    }
+
+    #[test]
+    fn fit_boundary_checks_only_the_columns_the_fit_reads() {
+        // `unused` is all missing and `label` is a one-level factor, but no term
+        // reads either, so they cannot block the fit. A NaN in the consumed `x`
+        // is still refused by name.
+        let dataset = |x: [f64; 3]| EncodedDataset {
+            headers: vec!["x".into(), "unused".into(), "label".into()],
+            values: Array2::from_shape_vec(
+                (3, 3),
+                vec![x[0], f64::NAN, 0.0, x[1], f64::NAN, 0.0, x[2], f64::NAN, 0.0],
+            )
+            .unwrap(),
+            schema: DataSchema {
+                columns: vec![
+                    SchemaColumn {
+                        name: "x".into(),
+                        kind: ColumnKindTag::Continuous,
+                        levels: vec![],
+                    },
+                    SchemaColumn {
+                        name: "unused".into(),
+                        kind: ColumnKindTag::Continuous,
+                        levels: vec![],
+                    },
+                    SchemaColumn {
+                        name: "label".into(),
+                        kind: ColumnKindTag::Categorical,
+                        levels: vec!["only".into()],
+                    },
+                ],
+            },
+            column_kinds: vec![
+                ColumnKindTag::Continuous,
+                ColumnKindTag::Continuous,
+                ColumnKindTag::Categorical,
+            ],
+        };
+        let consumed = std::collections::BTreeSet::from(["x".to_string()]);
+        assert!(dataset([0.5, 1.0, 1.5]).validate_fit_boundary(&consumed).is_ok());
+        assert_eq!(
+            dataset([0.5, f64::NAN, 1.5])
+                .validate_fit_boundary(&consumed)
+                .unwrap_err()
+                .to_string(),
+            "column 'x' has non-finite value NaN at row 2"
+        );
     }
 }

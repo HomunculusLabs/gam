@@ -4068,5 +4068,15 @@
     },
     "reason": "#2899/#2900 macOS release red: SphereSpectralKernelKind::tag was read only by the Linux NVRTC compile-error message, so every non-Linux target refused gam-terms with `method tag is never used`. The module cache key it labelled keys only what the compiled module depends on (compute capability and LMAX), so the tag is deleted rather than hidden.",
     "evidence": "At the base, git grep -n finds one call, key.kind.tag() in SphereGpuBackend::module_for (cfg(target_os = \"linux\")). No other crate, test, example, Python or FFI source names it. Scheduled macOS release run 35185548302 at b1b723c65 reports `method tag is never used`."
+  },
+  {
+    "base": "481e03923ebc9f6e55bfb70be34e84ee11539749",
+    "removed": {
+      "crates/gam-cli/src/main/dataset_io.rs::collect_term_column_names": 1,
+      "crates/gam-cli/src/main/dataset_io.rs::required_columns_for_formula": 1,
+      "crates/gam-cli/src/main/run_fit.rs::required_columns_for_resolved_fit": 1
+    },
+    "reason": "#2899 F7: the columns a fit reads now have one owner, gam-models fit_orchestration::fit_required_columns and formula_columns. The fit boundary applies them, so an unused column cannot block a fit on any front door. gam-cli's copies of that derivation are deleted.",
+    "evidence": "At the base, git grep -n finds these three only in crates/gam-cli/src/main (dataset_io.rs, run_fit.rs and multinomial_cli.rs), each called only by the others or by the four call sites this commit moves to the gam-models functions. The gam-cli binary tests in tests/src_modules/misc/cli_tests.rs imported two of them and now call the gam-models functions. No example, Python or FFI source names them."
   }
 ]

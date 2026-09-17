@@ -5,9 +5,9 @@ use super::{
     SurvivalLikelihoodMode, build_survival_time_basis,
     compact_fit_result_for_batch,
     covariance_from_model, family_arg_canonical_name,
-    load_dataset_projected, parse_formula, parse_matching_auxiliary_formula,
+    fit_required_columns, formula_columns, load_dataset_projected, parse_formula,
     parse_surv_response, parse_survival_time_basis_config, predict_gam,
-    prepend_id_column_to_prediction_csv, required_columns_for_formula, required_columns_for_resolved_fit,
+    prepend_id_column_to_prediction_csv,
     validate_cli_firth_configuration, validate_fit_args_preflight,
     write_estimand_explicit_prediction_csv, write_prediction_csv,
     write_survival_binary_prediction_csv, write_survival_prediction_csv,
@@ -20,6 +20,7 @@ use crate::config_resolve::{
     SurvivalInverseLinkInput, parse_survival_inverse_link as parse_config_survival_inverse_link,
 };
 use clap::Parser;
+use gam::inference::formula_dsl::parse_matching_auxiliary_formula;
 use gam::term_builder::build_termspec;
 use gam::families::fit_orchestration::route_marginal_slope_deviation_blocks;
 use gam::smooth::collect_smooth_structure_warnings;
@@ -1356,8 +1357,10 @@ fn required_columns_for_fit_includes_auxiliary_formula_columns() {
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "resolve fit invocation", e))
         .fit_config;
 
-    let required = required_columns_for_resolved_fit(&parsed, &fit_config)
-        .unwrap_or_else(|e| panic!("{} failed: {:?}", "required columns", e));
+    let required = fit_required_columns(&parsed, &fit_config)
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "required columns", e))
+        .into_iter()
+        .collect::<Vec<_>>();
 
     assert_eq!(
         required,
@@ -7855,7 +7858,7 @@ fn required_columns_include_the_by_smooth_grouping_variable() {
     // forms — all share the ParsedTerm::Smooth representation.
     let factor = parse_formula("y ~ s(x, by=g)")
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "parse factor by-smooth", e));
-    let cols = required_columns_for_formula(&factor)
+    let cols = formula_columns(&factor)
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "required columns", e));
     assert!(
         cols.contains(&"g".to_string()),
@@ -7865,7 +7868,7 @@ fn required_columns_include_the_by_smooth_grouping_variable() {
 
     let tensor = parse_formula("y ~ te(x, z, by=w)")
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "parse tensor by-smooth", e));
-    let tcols = required_columns_for_formula(&tensor)
+    let tcols = formula_columns(&tensor)
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "required columns", e));
     for needed in ["x", "y", "z", "w"] {
         assert!(

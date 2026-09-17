@@ -2617,7 +2617,6 @@ fn materialize_impl<'a>(
     config: &FitConfig,
     structural_only: bool,
 ) -> Result<MaterializedModel<'a>, WorkflowError> {
-    data.validate_fit_boundary()?;
     let config = config
         .clone()
         .resolve()
@@ -2625,6 +2624,7 @@ fn materialize_impl<'a>(
     let config = &config;
     gam_gpu::configure_global_policy(config.gpu_policy);
     let parsed = parse_formula(formula)?;
+    data.validate_fit_boundary(&fit_required_columns(&parsed, config)?)?;
     let col_map = data.column_map();
     let family_transformation_normal =
         family_requests_transformation_normal(config.family.as_deref());

@@ -1,8 +1,8 @@
 //! Regression for #807, numeric-`by` angle.
 //!
 //! The companion test `bug_hunt_by_factor_smooth_column_not_loaded_from_cli`
-//! covers a *factor* `by=` smooth. The same root cause — `collect_term_column_names`
-//! / `parsed_terms_reference_column` reading only a smooth's positional `vars`
+//! covers a *factor* `by=` smooth. The same root cause — the CLI's then column walk
+//! and `parsed_terms_reference_column` reading only a smooth's positional `vars`
 //! and ignoring `options["by"]` — equally broke a **numeric** (continuous)
 //! varying-coefficient smooth `s(x, by=z)`, where the by-variable scales the
 //! smooth rather than splitting it into per-level curves. This test exercises

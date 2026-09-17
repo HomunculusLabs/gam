@@ -120,6 +120,28 @@ def test_fit_ignores_missing_values_in_unreferenced_columns(
     )
 
 
+def test_an_all_missing_unreferenced_column_fits_bitwise_identically() -> None:
+    """The fit's input contract is the columns it reads; an extra all-NaN column is not among them."""
+    reference, grid, expected = _reference_fit()
+    padded = {**_clean_data(), "unused": np.full(_clean_data()["x"].size, np.nan)}
+    model = gamfit.fit(padded, "y ~ s(x)", family="gaussian")
+
+    assert model.summary().deviance == reference.summary().deviance
+    got = np.asarray(
+        model.predict({"x": grid}, return_type="dict")["posterior_mean"], dtype=float
+    )
+    np.testing.assert_array_equal(got, expected)
+
+
+def test_a_missing_value_in_a_used_column_is_still_refused_by_name() -> None:
+    """The contract narrows what is validated, never what a used column may hold."""
+    data = _clean_data()
+    data["x"] = data["x"].copy()
+    data["x"][7] = np.nan
+    with pytest.raises(Exception, match="column 'x' has non-finite value NaN at row 8"):
+        gamfit.fit(data, "y ~ s(x)", family="gaussian")
+
+
 def test_predict_ignores_missing_values_in_unreferenced_columns() -> None:
     """Serving frames routinely carry extra, partly-missing columns."""
     model, grid, expected = _reference_fit()

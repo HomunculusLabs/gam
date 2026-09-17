@@ -160,7 +160,10 @@ pub(crate) fn run_fit_multinomial(
         );
     };
 
-    let mut requested_columns = required_columns_for_formula(parsed)?;
+    let mut requested_columns = formula_columns(parsed)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .collect::<Vec<_>>();
     // The weight column is consumed by the fit, not the formula; it must ride
     // along in the projected dataset for the driver to resolve it by name.
     requested_columns.extend(fit_config.weight_column.iter().cloned());
@@ -204,7 +207,10 @@ pub(crate) fn run_predict_multinomial(args: &PredictArgs) -> Result<(), String> 
     // columns but not the response (which the predictor never references), and
     // force the same grouping-factor roles the fit used so by-factor encodings
     // line up with the frozen training basis.
-    let mut requested_columns = required_columns_for_formula(&parsed)?;
+    let mut requested_columns = formula_columns(&parsed)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .collect::<Vec<_>>();
     requested_columns.retain(|c| c != &parsed.response);
     let ds = load_fit_dataset_with_roles(&args.new_data, &requested_columns, &parsed, false)?;
     require_dataset_rows("predict", &args.new_data, ds.values.nrows())?;

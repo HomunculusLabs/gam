@@ -88,68 +88,6 @@ pub(crate) fn resolve_fit_invocation(
     }
 }
 
-pub(crate) fn required_columns_for_resolved_fit(
-    parsed: &ParsedFormula,
-    fit_config: &FitConfig,
-) -> Result<Vec<String>, String> {
-    let mut required = required_columns_for_formula(parsed)?
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-
-    if let Some(noise_formula) = fit_config.noise_formula.as_deref() {
-        let (_, parsed_noise) =
-            parse_matching_auxiliary_formula(noise_formula, &parsed.response, "noise_formula")?;
-        required.extend(required_columns_for_formula(&parsed_noise)?);
-    }
-    if let Some(slope_formula) = fit_config.slope_formula.as_deref() {
-        let (_, parsed_slope) = parse_matching_auxiliary_formula(
-            slope_formula,
-            &parsed.response,
-            "slope_formula",
-        )?;
-        required.extend(required_columns_for_formula(&parsed_slope)?);
-    }
-    required.extend(fit_config.z_column.iter().cloned());
-    required.extend(fit_config.weight_column.iter().cloned());
-    required.extend(fit_config.offset_column.iter().cloned());
-    required.extend(fit_config.noise_offset_column.iter().cloned());
-
-    if let Some(stage1) = fit_config.ctn_stage1.as_ref() {
-        let stage1_formula = format!(
-            "{} ~ {}",
-            stage1.response_column, stage1.covariate_formula_rhs
-        );
-        let parsed_stage1 = parse_formula(&stage1_formula)?;
-        required.extend(required_columns_for_formula(&parsed_stage1)?);
-        required.extend(stage1.weight_column.iter().cloned());
-        required.extend(stage1.offset_column.iter().cloned());
-    }
-
-    if let Some(descriptors) = fit_config
-        .smooth_overrides
-        .as_ref()
-        .and_then(serde_json::Value::as_object)
-    {
-        for descriptor in descriptors
-            .values()
-            .filter_map(serde_json::Value::as_object)
-        {
-            if let Some(vars) = descriptor.get("vars").and_then(serde_json::Value::as_array) {
-                required.extend(
-                    vars.iter()
-                        .filter_map(serde_json::Value::as_str)
-                        .map(str::to_string),
-                );
-            }
-            if let Some(by) = descriptor.get("by").and_then(serde_json::Value::as_str) {
-                required.insert(by.to_string());
-            }
-        }
-    }
-
-    Ok(required.into_iter().collect())
-}
-
 pub(crate) fn run_fit(args: FitArgs) -> Result<(), String> {
     let resolved_invocation = resolve_fit_invocation(&args)?;
     let formula_text = resolved_invocation.formula;
@@ -234,7 +172,10 @@ pub(crate) fn run_fit(args: FitArgs) -> Result<(), String> {
                 .to_string(),
         );
     }
-    let requested_columns = required_columns_for_resolved_fit(&parsed, &fit_config)?;
+    let requested_columns = fit_required_columns(&parsed, &fit_config)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .collect::<Vec<_>>();
     // Force `group(g)` / `factor(g)` / `re(g)` grouping columns to a factor
     // encoding even when their labels are numeric. An untyped CSV cannot carry
     // the typed-frame categorical sentinel the Python path uses, so without this
@@ -416,7 +357,10 @@ fn run_library_formula_fit(
         .out
         .as_ref()
         .ok_or("fit requires --out; refusing to run a training job that writes no model")?;
-    let requested_columns = required_columns_for_resolved_fit(parsed, fit_config)?;
+    let requested_columns = fit_required_columns(parsed, fit_config)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .collect::<Vec<_>>();
     let dataset = load_fit_dataset_with_roles(&args.data, &requested_columns, parsed, false)?;
     require_dataset_rows("fit", &args.data, dataset.values.nrows())?;
     let phase_start = std::time::Instant::now();

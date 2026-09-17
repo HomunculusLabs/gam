@@ -1,4 +1,91 @@
 use super::*;
+use std::collections::BTreeSet;
+
+/// The columns a parsed formula reads: the response (or a survival response's
+/// entry, exit and event columns), each term's variables and `by=` column, and
+/// each slope surface's z column and terms.
+pub fn formula_columns(parsed: &ParsedFormula) -> Result<BTreeSet<String>, WorkflowError> {
+    let mut out = BTreeSet::<String>::new();
+    if let Some((entry, exit, event)) =
+        gam_terms::inference::formula_dsl::parse_surv_response(&parsed.response)?
+    {
+        out.extend(entry);
+        out.insert(exit);
+        out.insert(event);
+    } else if let Some((left, right, event)) =
+        gam_terms::inference::formula_dsl::parse_surv_interval_response(&parsed.response)?
+    {
+        out.insert(left);
+        out.insert(right);
+        out.insert(event);
+    } else {
+        out.insert(parsed.response.clone());
+    }
+    gam_terms::inference::formula_dsl::parsed_term_column_names(&parsed.terms, &mut out);
+    for surface in &parsed.slope_surfaces {
+        out.insert(surface.z_column.clone());
+        gam_terms::inference::formula_dsl::parsed_term_column_names(&surface.terms, &mut out);
+    }
+    Ok(out)
+}
+
+/// Every column a formula fit reads: [`formula_columns`] of the main, noise and
+/// slope formulas and of a CTN stage-1 recipe, the z, weight, offset and
+/// noise-offset columns, the recipe's weight and offset columns, and the
+/// variables and `by=` columns of smooth overrides.
+///
+/// This is the fit's input contract. `gam fit` loads exactly these columns and
+/// the fit boundary validates exactly these, so a column the model never reads
+/// cannot refuse, change or block a fit on any front door.
+pub fn fit_required_columns(
+    parsed: &ParsedFormula,
+    config: &FitConfig,
+) -> Result<BTreeSet<String>, WorkflowError> {
+    use gam_terms::inference::formula_dsl::{parse_formula, parse_matching_auxiliary_formula};
+    let mut required = formula_columns(parsed)?;
+    if let Some(noise_formula) = config.noise_formula.as_deref() {
+        let (_, parsed_noise) =
+            parse_matching_auxiliary_formula(noise_formula, &parsed.response, "noise_formula")?;
+        required.extend(formula_columns(&parsed_noise)?);
+    }
+    if let Some(slope_formula) = config.slope_formula.as_deref() {
+        let (_, parsed_slope) =
+            parse_matching_auxiliary_formula(slope_formula, &parsed.response, "slope_formula")?;
+        required.extend(formula_columns(&parsed_slope)?);
+    }
+    required.extend(config.z_column.iter().cloned());
+    required.extend(config.weight_column.iter().cloned());
+    required.extend(config.offset_column.iter().cloned());
+    required.extend(config.noise_offset_column.iter().cloned());
+    if let Some(stage1) = config.ctn_stage1.as_ref() {
+        let parsed_stage1 = parse_formula(&format!(
+            "{} ~ {}",
+            stage1.response_column, stage1.covariate_formula_rhs
+        ))?;
+        required.extend(formula_columns(&parsed_stage1)?);
+        required.extend(stage1.weight_column.iter().cloned());
+        required.extend(stage1.offset_column.iter().cloned());
+    }
+    if let Some(descriptors) = config
+        .smooth_overrides
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+    {
+        for descriptor in descriptors.values().filter_map(serde_json::Value::as_object) {
+            if let Some(vars) = descriptor.get("vars").and_then(serde_json::Value::as_array) {
+                required.extend(
+                    vars.iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_string),
+                );
+            }
+            if let Some(by) = descriptor.get("by").and_then(serde_json::Value::as_str) {
+                required.insert(by.to_string());
+            }
+        }
+    }
+    Ok(required)
+}
 
 pub(crate) fn resolve_continuous_column(
     data: &Dataset,
