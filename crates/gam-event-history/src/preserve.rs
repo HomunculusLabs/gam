@@ -204,6 +204,23 @@ fn kill<S: JetField>(
     Ok((out, masses))
 }
 
+/// The pairwise rounding resolution of two evaluations of the midpoint map at
+/// one state (#2627).
+///
+/// One evaluation first conditions each risk set over `grid_points` nodes
+/// (`condition`: a left fold of that many products, then the normaliser's
+/// reciprocal). It then forms each moment as the log of a left fold of the same
+/// length over the conditioned density, once for the numerator and once for the
+/// denominator. A term of a fold passes through at most `grid_points + 1`
+/// rounded operations, so each fold carries a relative error of at most
+/// `γ_{grid_points+1}`. The moment is the log-ratio of two folds of a
+/// conditioned density, so its absolute error collects four such relative
+/// errors. Adding the shift rounds once more, relative to its magnitude.
+fn midpoint_map_rounding_band(grid_points: usize, magnitude: f64) -> f64 {
+    4.0 * gam_linalg::roundoff::accumulation_growth(grid_points + 1)
+        + gam_linalg::roundoff::UNIT_ROUNDOFF * (1.0 + magnitude)
+}
+
 /// Evolve from the reference entry to each endpoint, reporting the law AT
 /// that time. Every coefficient derivative propagates through the same steps.
 pub(crate) fn stratum_normalisers<S: JetField>(
@@ -252,20 +269,42 @@ pub(crate) fn stratum_normalisers<S: JetField>(
         let eta_mid: Vec<S> = (0..marks).map(|d|
             eta0[n * marks + d].add(&eta0[(n + 1) * marks + d]).scale(0.5)).collect();
         let mut shift = moments(&middle, &of_mark, loadings, atoms, like)?;
-        let mut residual = f64::INFINITY;
-        // Fixed arithmetic depth: derivative channels follow every iteration.
-        // Refinement, not clipping, handles an unresolved midpoint equation.
-        for _ in 0..12 {
+        // The midpoint shift is the fixed point of `shift ↦ moments(kill(middle, shift))`,
+        // iterated until the value is resolved. Derivative channels follow every
+        // iteration, so at a contraction they converge with the value. Two evaluations
+        // of the map agree only to their pairwise rounding `2·band`: below it they have
+        // converged, and a contraction ratio formed from changes inside it is noise.
+        // Above it, a ratio ≥ 1 is a map that does not contract at this step length,
+        // the one refusal, which a finer reference grid answers. A ratio below 1
+        // stops once the geometric remainder `change·q/(1 − q)` is within the band.
+        let grid_points = middle.iter().map(|(grid, _)| grid.size()).max().unwrap_or(1);
+        let mut previous: Option<f64> = None;
+        loop {
             let (selected, _) = kill(&middle, &masks, &eta_mid, loadings, &shift, 0.5 * dt, atoms)?;
             let next = moments(&selected, &of_mark, loadings, atoms, like)?;
-            residual = shift.iter().zip(&next).map(|(a, b)|
+            let change = shift.iter().zip(&next).map(|(a, b)|
                 (a.value() - b.value()).abs()).fold(0.0, f64::max);
+            let magnitude = next.iter().map(|value| value.value().abs()).fold(0.0_f64, f64::max);
             shift = next;
-        }
-        if !(residual.is_finite() && residual <= 1e-10) {
-            return Err(EventHistoryError::NumericalFailure {
-                reason: format!("reference midpoint unresolved on interval {n}: {residual:.3e}; refine the reference grid"),
-            });
+            if !change.is_finite() {
+                return Err(EventHistoryError::NumericalFailure {
+                    reason: format!("reference midpoint on interval {n}: non-finite change {change}"),
+                });
+            }
+            let band = midpoint_map_rounding_band(grid_points, magnitude);
+            if change <= 2.0 * band { break; }
+            if let Some(prior) = previous
+                && prior > 2.0 * band
+            {
+                let contraction = change / prior;
+                if contraction >= 1.0 {
+                    return Err(EventHistoryError::ReferenceStep {
+                        interval: n, change, contraction, band,
+                    });
+                }
+                if change * contraction / (1.0 - contraction) <= band { break; }
+            }
+            previous = Some(change);
         }
         let (selected, masses) = kill(&middle, &masks, &eta_mid, loadings, &shift, dt, atoms)?;
         for (mass, increment) in carried.iter_mut().zip(masses) { *mass = mass.add(&increment); }

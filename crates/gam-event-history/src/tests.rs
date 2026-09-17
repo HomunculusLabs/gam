@@ -4055,3 +4055,150 @@ fn production_reference_grid_converges_to_the_survival_identity() {
     assert!(errors[2] < 0.4 * errors[1], "{errors:?}");
     assert!(errors[2] < 2e-5, "{errors:?}");
 }
+
+/// The documented cohort (docs/event-history.md) fits under risk-set centring (#2627). The midpoint iteration's former
+/// fixed cap of twelve iterations with a literal 1e-10 refused it (job 1180863) where the map contracts; the stop is now
+/// derived from the map's rounding band.
+#[test]
+fn reference_midpoint_resolves_the_documented_cohort_2627() {
+    let n = 200usize;
+    let mut state = 0x2627_0000_0000_0001_u64;
+    let mut uniform = move || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((state >> 11) as f64 + 0.5) / (1_u64 << 53) as f64
+    };
+    let mut covariates = Array2::<f64>::zeros((n, 1));
+    let mut subjects = Vec::with_capacity(n);
+    for i in 0..n {
+        let (u1, u2) = (uniform(), uniform());
+        let prs = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+        let death = -uniform().ln() / 0.15;
+        let disease = -uniform().ln() / (0.25 * (0.5 * prs).exp());
+        let exit = death.min(4.0);
+        covariates[[i, 0]] = prs;
+        let mut events = Vec::new();
+        if disease < exit {
+            events.push(Event { time: disease, mark: 0 });
+        }
+        if death < 4.0 {
+            events.push(Event { time: death, mark: 1 });
+        }
+        subjects.push(SubjectHistory {
+            id: format!("s{i}"),
+            entry: 0.0,
+            exit,
+            events,
+            segments: vec![CovariateSegment { start: 0.0, row: i }],
+        });
+    }
+    let mut cohort = EventHistoryCohort {
+        mark_names: vec!["disease".to_string(), "death".to_string()],
+        mark_kinds: vec![MarkKind::Once, MarkKind::Terminal],
+        covariate_names: vec!["prs".to_string()],
+        covariate_levels: vec![Vec::new()],
+        covariates,
+        subjects,
+    };
+    cohort.validate().expect("the documented cohort is valid");
+    let fit = fit_event_history_formulas(
+        &mut cohort,
+        &["s(time, by=prs)", "s(time)"],
+        BlockwiseFitOptions::default(),
+        Some(ReferenceStrata::single(0, n)),
+    )
+    .unwrap_or_else(|error| panic!("the documented cohort must fit under risk-set centring: {error}"));
+    assert!(fit.reference_certificate.is_some(), "a risk-set centred fit publishes its reference certificate");
+}
+
+/// The reference midpoint step refuses exactly where its map does not contract (#2627). One once-only mark and one
+/// latent atom at log baseline 0 over six time units: at step 3 a loading of 2 makes successive changes of the midpoint
+/// shift grow (ratio 1.302 in job 1186034), while a loading of 1 contracts at the same step and a loading of 2
+/// contracts at steps 1 and 0.5.
+#[test]
+fn reference_midpoint_refuses_only_a_step_that_does_not_contract_2627() {
+    let gh = GaussHermite::new(9).expect("rule");
+    let evolve = |intervals: usize, loading: f64| {
+        let times: Vec<f64> = (0..=intervals).map(|n| 6.0 * n as f64 / intervals as f64).collect();
+        let grid = ReferenceGrid { gaps: times.windows(2).map(|w| w[1] - w[0]).collect(), times };
+        stratum_normalisers(&grid, &vec![0.0; intervals + 1], &[loading], &[1e-6], 1.0, &gh, &[MarkKind::Once], 1)
+    };
+    match evolve(2, 2.0) {
+        Err(super::cohort::EventHistoryError::ReferenceStep { interval, change, contraction, band }) => {
+            assert_eq!(interval, 0, "the first step is the one that does not contract");
+            assert!(
+                contraction >= 1.0 && change > 2.0 * band,
+                "refused at ratio {contraction} and change {change} against rounding band {band}"
+            );
+        }
+        other => panic!(
+            "a midpoint step that does not contract must refuse typed: {:?}",
+            other.map(|out| out.log_risk_mass)
+        ),
+    }
+    for (intervals, loading) in [(2, 1.0), (6, 2.0), (12, 2.0)] {
+        let out = evolve(intervals, loading).unwrap_or_else(|error| {
+            panic!("step {} at loading {loading} contracts: {error}", 6.0 / intervals as f64)
+        });
+        assert!(out.log_normaliser.iter().chain(&out.log_risk_mass).all(|x| x.is_finite()));
+    }
+}
+
+/// At a contraction the midpoint iteration stops on the value, and the derivative channels it carries have converged
+/// with it (#2627): the seeded tangent of every log normaliser matches its central difference along the baseline and
+/// along the loading, at step 1, where a loading of 2 contracts (it refuses at step 3). The bar is the Richardson
+/// estimate `|D(h) − D(h/2)|`, three times the truncation error of `D(h/2)` for a smooth normaliser, plus the rounding
+/// of `D(h/2)`: two values, each resolved to the midpoint map's rounding band on every interval, divided by `h`.
+#[test]
+fn reference_midpoint_derivative_channels_converge_with_the_value_2627() {
+    use super::scalar::Tangent;
+    use gam_linalg::roundoff::{UNIT_ROUNDOFF, accumulation_growth};
+    let gh = GaussHermite::new(9).expect("rule");
+    let intervals = 6usize;
+    let times: Vec<f64> = (0..=intervals).map(|n| 6.0 * n as f64 / intervals as f64).collect();
+    let grid = ReferenceGrid { gaps: times.windows(2).map(|w| w[1] - w[0]).collect(), times };
+    let evolve = |baseline: Tangent<1>, loading: Tangent<1>| -> Vec<Tangent<1>> {
+        stratum_normalisers(
+            &grid,
+            &vec![baseline; intervals + 1],
+            &[loading],
+            &[Tangent::seeded(1e-6, [0.0])],
+            1.0,
+            &gh,
+            &[MarkKind::Once],
+            1,
+        )
+        .expect("a loading of 2 contracts at step 1")
+        .log_normaliser
+    };
+    let at = |baseline: f64, loading: f64| -> Vec<f64> {
+        evolve(Tangent::seeded(baseline, [0.0]), Tangent::seeded(loading, [0.0]))
+            .iter()
+            .map(|x| x.value)
+            .collect()
+    };
+    let h = 1e-3;
+    for (name, direction) in [("baseline", [1.0, 0.0]), ("loading", [0.0, 1.0])] {
+        let jets = evolve(Tangent::seeded(0.0, [direction[0]]), Tangent::seeded(2.0, [direction[1]]));
+        let central = |step: f64| -> Vec<f64> {
+            let plus = at(step * direction[0], 2.0 + step * direction[1]);
+            let minus = at(-step * direction[0], 2.0 - step * direction[1]);
+            plus.iter().zip(&minus).map(|(p, m)| (p - m) / (2.0 * step)).collect()
+        };
+        let (coarse, fine) = (central(h), central(0.5 * h));
+        let mut moves = false;
+        for (n, jet) in jets.iter().enumerate() {
+            let band = 4.0 * accumulation_growth(gh.order + 1) + UNIT_ROUNDOFF * (1.0 + jet.value.abs());
+            let bar = (coarse[n] - fine[n]).abs() + 2.0 * (2.0 * intervals as f64 * band) / h;
+            assert!(
+                (jet.grad[0] - fine[n]).abs() <= bar,
+                "log normaliser {n} along the {name}: tangent {} vs central difference {} (bar {bar:.3e})",
+                jet.grad[0],
+                fine[n]
+            );
+            moves |= jet.grad[0].abs() > bar;
+        }
+        assert!(moves, "no log normaliser moves along the {name} by more than its bar, so the agreement is vacuous");
+    }
+}

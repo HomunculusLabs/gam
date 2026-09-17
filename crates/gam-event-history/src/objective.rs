@@ -27,8 +27,19 @@ impl EventHistoryFamily {
                     eta0.push(value);
                 }
             }
-            let out = stratum_normalisers(&tables.grid, &eta0, loadings, rates,
-                self.time_scale, &self.gh, &tables.kinds, self.atoms)?;
+            let out = match stratum_normalisers(&tables.grid, &eta0, loadings, rates,
+                self.time_scale, &self.gh, &tables.kinds, self.atoms) {
+                Ok(out) => out,
+                // Kept typed on the family, because the engine sees this
+                // refusal only as text.
+                Err(refusal @ EventHistoryError::ReferenceStep { .. }) => {
+                    if let Ok(mut slot) = self.reference_refusal.lock() {
+                        *slot = Some(refusal.clone());
+                    }
+                    return Err(refusal);
+                }
+                Err(error) => return Err(error),
+            };
             masks = out.masks;
             normalisers.extend(out.log_normaliser);
             risk_mass.extend(out.log_risk_mass);
@@ -38,16 +49,17 @@ impl EventHistoryFamily {
         })
     }
 
-    pub(super) fn computed_reference(&self, states: &[ParameterBlockState]) -> Result<RiskSetCentring, String> {
-        self.validate_states(states)?;
+    pub(super) fn computed_reference(&self, states: &[ParameterBlockState]) -> Result<RiskSetCentring, EventHistoryError> {
+        self.validate_states(states).map_err(|reason| EventHistoryError::InvalidInput { reason })?;
         let beta: Vec<f64> = states.iter().flat_map(|s| s.beta.iter().copied()).collect();
         let latent_offset = self.block_offsets()[self.marks()];
         let latent = Array1::from(beta[latent_offset..].to_vec());
         let rates = self.atom_rates(&latent);
         let out = self.reference_values(&beta,
             &beta[latent_offset..latent_offset + self.marks() * self.atoms], &rates)?;
-        let tables = self.reference.as_ref()
-            .ok_or_else(|| "reference centring requires reference tables".to_string())?;
+        let tables = self.reference.as_ref().ok_or_else(|| EventHistoryError::InvalidInput {
+            reason: "reference centring requires reference tables".to_string(),
+        })?;
         let (_, mask_of_mark) = crate::preserve::killing_masks(&tables.kinds);
         Ok(RiskSetCentring { grid: tables.grid.clone(), profiles: tables.profiles.clone(),
             coefficients: beta, node_stratum: tables.node_stratum.clone(),
@@ -141,6 +153,15 @@ mod tests {
     use ndarray::array;
 
     fn single_event() -> (EventHistoryFamily, Vec<ParameterBlockState>) {
+        single_event_on(144, 15, 1e-8, [-1.2, 0.9])
+    }
+
+    /// One subject with one event at six time units, on a reference grid of
+    /// `intervals` equal steps, at Gauss-Hermite `order`, a held atom `rate`,
+    /// and the log baseline and loading in `coefficients`.
+    fn single_event_on(
+        intervals: usize, order: usize, rate: f64, coefficients: [f64; 2],
+    ) -> (EventHistoryFamily, Vec<ParameterBlockState>) {
         let mut cohort = EventHistoryCohort {
             mark_names: vec!["disease".to_string()], mark_kinds: vec![MarkKind::Once],
             covariate_names: Vec::new(), covariate_levels: Vec::new(),
@@ -153,7 +174,6 @@ mod tests {
         };
         cohort.validate().unwrap();
         let nodes = Arc::new(expand_nodes(&cohort, 9, 3).unwrap());
-        let intervals = 144;
         let times: Vec<f64> = (0..=intervals).map(|n| 6.0 * n as f64 / intervals as f64).collect();
         let grid = ReferenceGrid { gaps: times.windows(2).map(|w| w[1] - w[0]).collect(), times };
         let locations: Vec<(usize, f64)> = nodes.subjects[0].times.iter().map(|&t| grid.locate(t).unwrap()).collect();
@@ -165,12 +185,13 @@ mod tests {
             node_lower: locations.iter().map(|x| x.0).collect(),
             node_weight: locations.iter().map(|x| x.1).collect(), grid,
         };
+        let [baseline, loading] = coefficients;
         let states = vec![
-            ParameterBlockState { beta: array![-1.2], eta: Array1::from_elem(nodes.total_nodes, -1.2) },
-            ParameterBlockState { beta: array![0.9], eta: Array1::zeros(nodes.total_nodes) },
+            ParameterBlockState { beta: array![baseline], eta: Array1::from_elem(nodes.total_nodes, baseline) },
+            ParameterBlockState { beta: array![loading], eta: Array1::zeros(nodes.total_nodes) },
         ];
         let family = EventHistoryFamily::new(nodes.clone(), vec![Arc::new(Array2::ones((nodes.total_nodes, 1)))],
-            1, 15, 1.0, vec![Some(1e-8)]).unwrap().with_reference(Some(Arc::new(tables)));
+            1, order, 1.0, vec![Some(rate)]).unwrap().with_reference(Some(Arc::new(tables)));
         (family, states)
     }
 
@@ -214,6 +235,29 @@ mod tests {
         assert_eq!(reference.mask_of_mark, restored.mask_of_mark);
         assert!(reference.log_normaliser.last().unwrap() < &reference.log_normaliser[0]);
         assert!((reference.log_risk_mass.last().unwrap() + 6.0 * (-1.2_f64).exp()).abs() < 2e-4);
+    }
+
+    /// The reference refusal the engine's text cannot carry is read back typed,
+    /// and never outlives the evaluation that raised it (#2627): evaluation k
+    /// refuses, evaluation k + 1 succeeds, and an unrelated engine failure after
+    /// them surfaces as a fit failure. At step 3 and log baseline 0 a loading of
+    /// 2 does not contract (ratio 1.302 in job 1186034), a loading of 1 does.
+    #[test]
+    fn reference_refusal_is_typed_and_never_outlives_its_evaluation_2627() {
+        let (family, refusing) = single_event_on(2, 9, 1e-6, [0.0, 2.0]);
+        let contracting = moved(&refusing, 1, -1.0);
+        let refused = family.evaluate(&refusing).err().expect("evaluation k refuses");
+        assert!(refused.contains("does not contract"), "evaluation k must refuse the reference step: {refused}");
+        family.evaluate(&contracting).expect("evaluation k + 1 contracts");
+        match typed_failure(&family, "an unrelated engine failure".to_string()) {
+            EventHistoryError::Fit { reason } => assert_eq!(reason, "an unrelated engine failure"),
+            other => panic!("a refusal outlived its evaluation: {other}"),
+        }
+        // Positive control: straight after a refusal the failure is read back
+        // typed, and only once.
+        assert!(family.evaluate(&refusing).is_err());
+        assert!(matches!(typed_failure(&family, "engine".to_string()), EventHistoryError::ReferenceStep { .. }));
+        assert!(matches!(typed_failure(&family, "engine".to_string()), EventHistoryError::Fit { .. }));
     }
 
     #[test]

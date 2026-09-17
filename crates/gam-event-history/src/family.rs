@@ -142,6 +142,13 @@ pub struct EventHistoryFamily {
     reference: Option<Arc<ReferenceTables>>,
     /// The last joint evaluation, keyed on the exact state it was made at.
     cache: Arc<Mutex<Option<(Vec<f64>, Arc<JointEvaluation>)>>>,
+    /// The reference step the latest evaluation refused, typed. Evaluations
+    /// hand their errors to the custom-family engine as text, which cannot
+    /// carry [`EventHistoryError::ReferenceStep`] back to the fit driver, so
+    /// the driver takes the refusal from here when an evaluation fails. Every
+    /// evaluation clears it on entry, so no refusal outlives the evaluation
+    /// that raised it.
+    reference_refusal: Arc<Mutex<Option<EventHistoryError>>>,
 }
 
 /// A reference-law snapshot evaluated at one coefficient state. The grid,
@@ -316,6 +323,7 @@ impl EventHistoryFamily {
             time_scale,
             reference: None,
             cache: Arc::new(Mutex::new(None)),
+            reference_refusal: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -324,12 +332,25 @@ impl EventHistoryFamily {
     pub(crate) fn with_reference(mut self, reference: Option<Arc<ReferenceTables>>) -> Self {
         self.reference = reference;
         self.cache = Arc::new(Mutex::new(None));
+        self.reference_refusal = Arc::new(Mutex::new(None));
         self
     }
 
     /// The reference law at exactly the supplied coefficient state.
-    pub(crate) fn refresh_normaliser(&self, states: &[ParameterBlockState]) -> Result<RiskSetCentring, String> {
+    pub(crate) fn refresh_normaliser(&self, states: &[ParameterBlockState]) -> Result<RiskSetCentring, EventHistoryError> {
         self.computed_reference(states)
+    }
+
+    /// Start of an evaluation: a refusal an earlier evaluation left is gone.
+    fn clear_reference_refusal(&self) {
+        if let Ok(mut refusal) = self.reference_refusal.lock() {
+            *refusal = None;
+        }
+    }
+
+    /// The reference refusal of the evaluation that just failed, taken.
+    fn take_reference_refusal(&self) -> Option<EventHistoryError> {
+        self.reference_refusal.lock().ok().and_then(|mut refusal| refusal.take())
     }
 
     /// Per atom, the offset within the latent block of its rate coefficient,
@@ -710,6 +731,7 @@ impl EventHistoryFamily {
     /// trust-region Newton with a value-based acceptance test cannot converge
     /// on a gradient that is not the derivative of the value it tests.
     fn exact_gradient(&self, states: &[ParameterBlockState]) -> Result<Vec<f64>, String> {
+        self.clear_reference_refusal();
         let total = self.total_width();
         let mut gradient = vec![0.0; total];
         self.exact_gradient_chunks::<8>(states, &mut gradient)?;
@@ -858,6 +880,7 @@ impl EventHistoryFamily {
         &self,
         states: &[ParameterBlockState],
     ) -> Result<Arc<JointEvaluation>, String> {
+        self.clear_reference_refusal();
         let key = Self::state_key(states);
         if let Ok(guard) = self.cache.lock()
             && let Some((k, value)) = guard.as_ref()
@@ -887,6 +910,7 @@ impl EventHistoryFamily {
 
     /// Log-likelihood only (forward filter, no derivatives).
     pub fn log_likelihood(&self, states: &[ParameterBlockState]) -> Result<f64, String> {
+        self.clear_reference_refusal();
         let (loglik, _, _) = self.evaluate_generic::<f64>(states, None, None, false)?;
         Ok(loglik)
     }
@@ -897,6 +921,7 @@ impl EventHistoryFamily {
         states: &[ParameterBlockState],
         u: &Array1<f64>,
     ) -> Result<Array2<f64>, String> {
+        self.clear_reference_refusal();
         let total = self.total_width();
         let (_, _, hessian) = self.evaluate_generic::<OneSeed<0>>(states, Some(u), None, true)?;
         let mut out = Array2::<f64>::zeros((total, total));
@@ -915,6 +940,7 @@ impl EventHistoryFamily {
         u: &Array1<f64>,
         v: &Array1<f64>,
     ) -> Result<Array2<f64>, String> {
+        self.clear_reference_refusal();
         let total = self.total_width();
         let (_, _, hessian) =
             self.evaluate_generic::<TwoSeed<0>>(states, Some(u), Some(v), true)?;
@@ -1985,7 +2011,7 @@ fn fit_at_rank(
         let refined_gradient = candidate
             .family
             .exact_gradient(&states)
-            .map_err(|reason| EventHistoryError::Fit { reason })?;
+            .map_err(|reason| typed_failure(&candidate.family, reason))?;
         if refined_gradient.len() != current_gradient.len() {
             return Err(EventHistoryError::Fit {
                 reason: format!(
@@ -2010,7 +2036,7 @@ fn fit_at_rank(
         let log_likelihood = candidate
             .family
             .log_likelihood(&states)
-            .map_err(|reason| EventHistoryError::Fit { reason })?;
+            .map_err(|reason| typed_failure(&candidate.family, reason))?;
         Ok(RefinementCheck {
             candidate: 0,
             coefficient_shift: shift,
@@ -2032,6 +2058,20 @@ fn fit_at_rank(
         let fit = match fit_custom_family(&built.family, &built.specs, &options) {
             Ok(fit) => fit,
             Err(error) => {
+                // The engine carries the family's errors as text, so a
+                // reference step the reference grid cannot take is read back
+                // typed from the family, for `fit_event_history` to answer by
+                // refining that grid.
+                let message = error.to_string();
+                let failure = typed_failure(
+                    &built.family,
+                    format!(
+                        "event-history LAML fit at Gauss-Hermite order {order}, mesh refinement {refinement}: {message}"
+                    ),
+                );
+                if matches!(failure, EventHistoryError::ReferenceStep { .. }) {
+                    return Err(failure);
+                }
                 // A posterior the grid cannot represent (its interpolant goes
                 // negative where the mass is) is answered by resolving the
                 // grid, which is the ladder this driver already owns — not by
@@ -2042,7 +2082,6 @@ fn fit_at_rank(
                 // it must stay at the incumbent's setting, so the loss is the
                 // caller's, typed, to answer by raising the incumbent.
                 // Anything else is the caller's to see.
-                let message = error.to_string();
                 if message.contains(LOST_POSITIVITY) {
                     if pinned.is_some() {
                         return Err(EventHistoryError::LostPositivity {
@@ -2065,11 +2104,7 @@ fn fit_at_rank(
                         continue;
                     }
                 }
-                return Err(EventHistoryError::Fit {
-                    reason: format!(
-                        "event-history LAML fit at Gauss-Hermite order {order}, mesh refinement {refinement}: {message}"
-                    ),
-                });
+                return Err(failure);
             }
         };
         let total = built.family.total_width();
@@ -2100,7 +2135,7 @@ fn fit_at_rank(
         let current_gradient = built
             .family
             .exact_gradient(&fit.block_states)
-            .map_err(|reason| EventHistoryError::Fit { reason })?;
+            .map_err(|reason| typed_failure(&built.family, reason))?;
         // Gauss-Hermite refinement: admissible while the interpolant's
         // roundoff amplification stays below the certificate's tolerance.
         // Without a latent block there is no latent integral to certify.
@@ -2383,7 +2418,7 @@ fn assemble(
         ..
     } = built;
     let centring = if family.reference.is_some() {
-        Some(family.refresh_normaliser(&fit.block_states).map_err(|reason| EventHistoryError::Fit { reason })?)
+        Some(family.refresh_normaliser(&fit.block_states)?)
     } else { None };
     Ok(EventHistoryFit {
         nodes,
@@ -3027,6 +3062,10 @@ fn fit_event_history_on_grid(
                     }
                 }
             }
+            // A reference step the reference grid cannot take is answered by
+            // refining that grid for the whole selection, not by stopping the
+            // path at this rank.
+            Err(refusal @ EventHistoryError::ReferenceStep { .. }) => return Err(refusal),
             Err(error) => {
                 // No certified optimum at the next rank: the path stops with
                 // the reason recorded rather than failing the whole fit.
@@ -3042,6 +3081,14 @@ fn fit_event_history_on_grid(
     fit.rank_path = rank_path;
     fit.atom_evidence = atom_evidence;
     Ok(fit)
+}
+
+/// What a family evaluation that failed as text surfaces as: the reference
+/// refusal that evaluation left on the family, taken, or else the text as a fit
+/// failure. Every evaluation clears the refusal on entry, so a refusal an
+/// earlier evaluation raised never types a later, unrelated failure.
+fn typed_failure(family: &EventHistoryFamily, reason: String) -> EventHistoryError {
+    family.take_reference_refusal().unwrap_or(EventHistoryError::Fit { reason })
 }
 
 /// The model at `atoms` from `start`, certified by [`fit_at_rank`]'s refinement
@@ -3120,13 +3167,23 @@ pub(crate) fn fit_event_history(
     let mut fitting_spec = spec.clone();
     let mut refinement = 2;
     for _ in 0..16 {
-        let mut fit = fit_event_history_on_grid(cohort, &fitting_spec, refinement)?;
+        let mut fit = match fit_event_history_on_grid(cohort, &fitting_spec, refinement) {
+            Ok(fit) => fit,
+            // The reference midpoint map does not contract at this grid's step
+            // length, and a finer grid shortens the step.
+            Err(refusal @ EventHistoryError::ReferenceStep { .. }) => {
+                log::info!("[event-history] reference refinement {refinement}: {refusal}; refining the reference grid");
+                refinement += 1;
+                if refinement > 10 { return Err(refusal); }
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let Some(strata) = spec.reference.as_ref() else { return Ok(fit); };
         let refined = reference_tables(cohort, strata, &fit.frozen_specs,
             spec.quadrature_order, refinement + 1, &fit.nodes)?;
         let fine_family = fit.family.clone().with_reference(Some(Arc::new(refined)));
-        let fine = fine_family.refresh_normaliser(&fit.fit.block_states)
-            .map_err(|reason| EventHistoryError::Fit { reason })?;
+        let fine = fine_family.refresh_normaliser(&fit.fit.block_states)?;
         let coarse_centring = fit.centring.as_ref().ok_or_else(|| EventHistoryError::Fit {
             reason: "reference fit is missing its centring values".to_string(),
         })?;
@@ -3142,8 +3199,7 @@ pub(crate) fn fit_event_history(
                 return Err(EventHistoryError::NumericalFailure { reason:
                     "reference latent quadrature cannot be refined within its interpolation roundoff bound".to_string() });
             }
-            let latent = latent_family.refresh_normaliser(&fit.fit.block_states)
-                .map_err(|reason| EventHistoryError::Fit { reason })?;
+            let latent = latent_family.refresh_normaliser(&fit.fit.block_states)?;
             fine.discrepancy(&latent, fit.marks())?
         };
         let gap = time_gap + latent_gap;

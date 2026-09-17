@@ -53,10 +53,15 @@ pub enum EventHistoryError {
         #[source]
         source: Box<EventHistoryError>,
     },
+    /// The implicit-midpoint killing step of the reference evolution does not
+    /// contract on one reference interval: successive changes of the midpoint
+    /// shift stopped shrinking while they still exceeded the map's rounding
+    /// band. The step length sets the contraction, so the fit driver answers by
+    /// refining the reference time grid.
     #[error(
-        "joint reference event step is unresolved (log hazard {log_hazard}, limit {maximum}); refine the reference time grid"
+        "reference midpoint step does not contract on interval {interval}: change {change:.3e}, ratio {contraction:.3}, rounding band {band:.3e}; refine the reference time grid"
     )]
-    ReferenceStep { log_hazard: f64, maximum: f64 },
+    ReferenceStep { interval: usize, change: f64, contraction: f64, band: f64 },
     #[error("{reason}")]
     Fit { reason: String },
 }
