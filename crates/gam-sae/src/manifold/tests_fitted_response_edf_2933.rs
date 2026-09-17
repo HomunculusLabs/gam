@@ -318,6 +318,230 @@ impl NormalStream {
     }
 }
 
+/// Largest number of majorizer descent steps a fixture root may take.
+const DESCENT_STEPS: usize = 400;
+
+/// Gradient norm at which descent hands the state to the exact-A polish, whose
+/// undamped steps contract quadratically from there.
+const POLISH_HANDOFF_GRADIENT: f64 = 1.0e-6;
+
+/// #2933 F39 — two coordinate-free atoms routed by one free softmax gate, whose
+/// fit is identified. The routing contrast is strong (the generating gate runs
+/// from `σ(−11)` to `σ(11)` across the rows), and only the "wave" atom carries a
+/// constant column, so the atoms cannot trade an intercept along the simplex. The
+/// chart coordinates carry no data jets, so beyond the decoder border the only
+/// fitted response is the gate logits'. The state starts at the generating
+/// decoders and gate.
+fn identified_gated_state(
+    log_lambda_sparse: f64,
+) -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho) {
+    let n = 16usize;
+    let p = 3usize;
+    let centre = (n as f64 - 1.0) / 2.0;
+    let theta = |row: usize| std::f64::consts::TAU * row as f64 / n as f64;
+    let phi_wave = Array2::<f64>::from_shape_fn((n, 3), |(row, basis)| match basis {
+        0 => 1.0,
+        1 => theta(row).cos(),
+        _ => theta(row).sin(),
+    });
+    let phi_ramp = Array2::<f64>::from_shape_fn((n, 3), |(row, basis)| {
+        let x = (row as f64 - centre) / centre;
+        [x, x * x - 0.4, x * x * x][basis]
+    });
+    let truth_wave = Array2::<f64>::from_shape_fn((3, p), |(basis, out)| {
+        0.9 * ((2 * basis + out) as f64 * 0.8 + 0.3).sin()
+    });
+    let truth_ramp = Array2::<f64>::from_shape_fn((3, p), |(basis, out)| {
+        0.8 * ((basis + 2 * out) as f64 * 1.1 + 0.6).cos()
+    });
+    let decoded_wave = phi_wave.dot(&truth_wave);
+    let decoded_ramp = phi_ramp.dot(&truth_ramp);
+    let logit = |row: usize| 1.5 * (row as f64 - centre);
+    let target = Array2::<f64>::from_shape_fn((n, p), |(row, out)| {
+        let gate = 1.0 / (1.0 + (-logit(row)).exp());
+        gate * decoded_wave[[row, out]]
+            + (1.0 - gate) * decoded_ramp[[row, out]]
+            + 0.05 * (1.3 * row as f64 + 2.9 * out as f64).cos()
+    });
+    let atoms = vec![
+        fixed_basis_atom("wave", phi_wave, truth_wave),
+        fixed_basis_atom("ramp", phi_ramp, truth_ramp),
+    ];
+    let logits = Array2::<f64>::from_shape_fn((n, 2), |(row, atom)| {
+        if atom == 0 { logit(row) } else { 0.0 }
+    });
+    let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
+        logits,
+        vec![Array2::<f64>::zeros((n, 1)), Array2::<f64>::zeros((n, 1))],
+        vec![
+            LatentManifold::Circle { period: 1.0 },
+            LatentManifold::Circle { period: 1.0 },
+        ],
+        AssignmentMode::softmax(1.0),
+    )
+    .expect("assignment: two logit columns and one coordinate block per atom");
+    let term = SaeManifoldTerm::new(atoms, assignment).expect("the atoms match their blocks");
+    let rho = SaeManifoldRho::new(
+        log_lambda_sparse,
+        -1.0,
+        vec![Array1::<f64>::zeros(1), Array1::<f64>::zeros(1)],
+    )
+    .for_assignment(&term.assignment);
+    (term, target, rho)
+}
+
+/// Reach and certify a fixture root under production's collapse-gate lifecycle.
+///
+/// While the term's gates are not declared, every assembly refreshes them from
+/// its iterate, as the inner fit does before the outer objective adopts a root's
+/// gates, and each step is priced under the gates its assembly read. Descent is
+/// by majorizer arrow Newton steps halved until the objective decreases: the
+/// observed information can be indefinite away from the root, so undamped exact-A
+/// steps do not globalize. At the handoff the state's gates are adopted and held,
+/// as the outer objective holds the gates of its first root, and exact-A Newton
+/// steps polish that root to its arithmetic floor. A term whose gates are already
+/// declared descends and polishes under them. The certificate is printed.
+fn certify_production_root(
+    label: &str,
+    term: &mut SaeManifoldTerm,
+    target: &Array2<f64>,
+    rho: &SaeManifoldRho,
+) -> ArrowFactorCache {
+    let refreshing = !term.streaming_gates_frozen;
+    let options = term.evidence_factor_options();
+    let mut descent_steps = 0usize;
+    let mut handoff_gradient = f64::INFINITY;
+    while descent_steps < DESCENT_STEPS {
+        let system = term
+            .assemble_arrow_schur(target.view(), rho, None)
+            .unwrap_or_else(|error| panic!("{label}: the descent iterate assembles: {error}"));
+        let gates = term.collapse_prevention_gates();
+        let g = gradient(&system);
+        handoff_gradient = (g.t.dot(&g.t) + g.beta.dot(&g.beta)).sqrt();
+        if handoff_gradient <= POLISH_HANDOFF_GRADIENT {
+            break;
+        }
+        let (delta_t, delta_beta, _) =
+            solve_arrow_newton_step_with_options(&system, 0.0, 0.0, &options).unwrap_or_else(
+                |error| panic!("{label}: the majorizer factors at a descent iterate: {error}"),
+            );
+        let slope = g.t.dot(&delta_t) + g.beta.dot(&delta_beta);
+        let start = term
+            .penalized_objective_total(target.view(), rho, None, 1.0)
+            .unwrap_or_else(|error| panic!("{label}: the descent iterate has a value: {error}"));
+        let mut step = if slope < 0.0 { 1.0 } else { -1.0 };
+        let accepted = loop {
+            let mut trial = term.clone();
+            trial.declare_collapse_prevention_gates(&gates);
+            trial
+                .apply_newton_step(delta_t.view(), delta_beta.view(), step)
+                .unwrap_or_else(|error| panic!("{label}: the descent step applies: {error}"));
+            let value = trial
+                .penalized_objective_total(target.view(), rho, None, 1.0)
+                .unwrap_or_else(|error| panic!("{label}: the descent trial has a value: {error}"));
+            if value < start {
+                break Some(trial);
+            }
+            step *= 0.5;
+            if step.abs() < f64::EPSILON {
+                break None;
+            }
+        };
+        let Some(mut trial) = accepted else {
+            break;
+        };
+        if refreshing {
+            trial.streaming_gates_frozen = false;
+        }
+        *term = trial;
+        descent_steps += 1;
+    }
+    let adopted = term.collapse_prevention_gates();
+    term.declare_collapse_prevention_gates(&adopted);
+    let (cache, trajectory) = polish_to_root(term, target.view(), rho);
+    let norm = root_norm(&trajectory);
+    eprintln!(
+        "[#2933 F39 {label}] root certificate: gates {} then held; {descent_steps} descent \
+         steps to ‖g‖={handoff_gradient:.3e}; repulsion {:?}; amplitude ε² {:?}; exact-A polish \
+         ‖g‖ {} against the floor {ROOT_GRADIENT_CEILING:.0e}",
+        if refreshing { "refreshed per assembly" } else { "declared" },
+        adopted.decoder_repulsion,
+        adopted.amplitude_barrier,
+        trajectory
+            .iter()
+            .map(|value| format!("{value:.3e}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    assert!(
+        norm <= ROOT_GRADIENT_CEILING,
+        "{label}: the fixture's root stopped at ‖g‖={norm:.3e} after {descent_steps} descent steps"
+    );
+    cache
+}
+
+/// #2933 F39 — free gate logits are fitted directions. With the chart
+/// coordinates carrying no data jets, the response beyond the decoder border is
+/// the gates'. The priced response must match the re-solved one.
+#[test]
+fn free_gate_logits_enter_the_priced_response_2933_f39() {
+    let (mut term, target, rho) = identified_gated_state(-2.0);
+    let cache = certify_production_root("free gates", &mut term, &target, &rho);
+    assert_prices_resolved_response("free gates", &term, &target, &rho, &cache);
+}
+
+/// #2933 F39 — every active penalty enters the response through the observed
+/// information, not as a separately subtracted trace. From the decoder smoothness
+/// and the collapse gates the production lifecycle adopted at the first root, add
+/// the assignment sparsity, then an amplitude barrier, then a decoder repulsion
+/// pair. After each addition the root is re-certified under the declared gates;
+/// the priced response must match the re-solved one, and each penalty must move
+/// the response by a hundred times the resolution the comparison is held to, so a
+/// priced value that ignored it would fail.
+#[test]
+fn each_added_penalty_moves_the_priced_response_with_the_resolved_one_2933_f39() {
+    let (mut term, target, mut rho) = identified_gated_state(-6.0);
+    certify_production_root("adopted gates", &mut term, &target, &rho);
+    let mut gates = term.collapse_prevention_gates();
+    let mut previous: Option<(String, f64)> = None;
+    let stages = [
+        "smoothness and the adopted collapse gates",
+        "+ assignment sparsity",
+        "+ amplitude barrier",
+        "+ decoder repulsion",
+    ];
+    for (stage, label) in stages.into_iter().enumerate() {
+        if stage == 1 {
+            rho.log_lambda_sparse = 1.0;
+        } else if stage == 2 {
+            let smallest_energy = term
+                .atoms
+                .iter()
+                .map(|atom| atom.decoder_coefficients().iter().map(|v| v * v).sum::<f64>())
+                .fold(f64::INFINITY, f64::min);
+            gates.amplitude_barrier = Some(0.5 * smallest_energy);
+        } else if stage == 3 {
+            let adopted_weight = gates
+                .decoder_repulsion
+                .as_ref()
+                .and_then(|pairs| pairs.first())
+                .map_or(0.0, |&(_, _, weight)| weight);
+            gates.decoder_repulsion = Some(vec![(0, 1, adopted_weight + 5.0)]);
+        }
+        term.declare_collapse_prevention_gates(&gates);
+        let cache = certify_production_root(label, &mut term, &target, &rho);
+        let trace = assert_prices_resolved_response(label, &term, &target, &rho, &cache);
+        if let Some((previous_label, previous_trace)) = previous.as_ref() {
+            assert!(
+                (trace - previous_trace).abs() > 100.0 * RELATIVE_TOLERANCE * previous_trace,
+                "{label}: the added penalty must move the response materially; tr R {trace} \
+                 against {previous_trace} at '{previous_label}'"
+            );
+        }
+        previous = Some((label.to_string(), trace));
+    }
+}
+
 /// #2933 F40 — for a linear smoother `X̂ = RX` with `X = μ + ε`,
 /// `E‖X − X̂‖² = ‖(I − R)μ‖² + σ²·‖I − R‖²_F`, so `RSS/(N − tr R)` has expectation
 /// `σ²·(N − 2 tr R + ‖R‖²_F)/(N − tr R) < σ²` for any shrinking smoother, even with
