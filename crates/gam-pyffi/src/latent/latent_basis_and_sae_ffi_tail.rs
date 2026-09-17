@@ -601,6 +601,8 @@ fn sae_manifold_fit_model<'py>(
     let strength = gam::terms::sae::manifold::resolve_public_assignment_strength(
         gam::terms::sae::manifold::SaeFitAssignmentKind::from_tag(&assignment)
             .map_err(py_value_error)?,
+        n_obs,
+        p_out,
         k_atoms,
         alpha,
         sparsity_strength,

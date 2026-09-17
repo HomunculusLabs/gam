@@ -103,12 +103,38 @@ pub struct SaePublicAssignmentStrength {
 /// fixed prior is the complete Beta--Bernoulli prior with no strength coordinate, so an
 /// explicit `sparsity_weight` is refused rather than silently dropped. Softmax,
 /// threshold-gate and TopK fits keep their strength coordinate and ignore concentration.
+///
+/// A TopK dictionary off the dense lane (`K > P`, [`crate::front_door::admit_sae_fit`]) is
+/// fitted by the support-sparse lane, whose sparsity is the hard per-row support and which
+/// carries no coordinate-shrinkage coordinate. Its default strength resolves to zero, so the
+/// public default builds no coordinate penalty that lane refuses (#2627), and an explicit
+/// `sparsity_weight` is refused rather than silently dropped.
 pub fn resolve_public_assignment_strength(
     assignment_kind: SaeFitAssignmentKind,
+    n_obs: usize,
+    output_dim: usize,
     k_atoms: usize,
     alpha: Option<f64>,
     sparsity_strength: Option<f64>,
 ) -> Result<SaePublicAssignmentStrength, String> {
+    if assignment_kind == SaeFitAssignmentKind::TopK
+        && crate::front_door::admit_sae_fit(n_obs, output_dim, k_atoms)?.lane
+            != crate::front_door::SaeFitLane::DenseCertification
+    {
+        return match sparsity_strength {
+            Some(strength) => Err(format!(
+                "sae_manifold_fit: sparsity_weight={strength} has no coordinate to scale on the \
+                 overcomplete (K={k_atoms} > P={output_dim}) support-sparse TopK lane: its \
+                 sparsity is the hard per-row support top_k, and it accepts no coordinate-shrinkage \
+                 penalty (#2627). Omit sparsity_weight."
+            )),
+            None => Ok(SaePublicAssignmentStrength {
+                alpha: alpha.unwrap_or(1.0),
+                learnable_alpha: false,
+                sparsity_strength: 0.0,
+            }),
+        };
+    }
     let default_strength = sparsity_strength.unwrap_or(DEFAULT_SAE_SPARSITY_STRENGTH);
     if assignment_kind != SaeFitAssignmentKind::OrderedBetaBernoulli {
         return Ok(SaePublicAssignmentStrength {
@@ -491,8 +517,9 @@ mod tests {
     fn public_assignment_strength_learns_concentration_and_refuses_a_fixed_strength_2933() {
         let obb = SaeFitAssignmentKind::OrderedBetaBernoulli;
         let expected_base = 1.0 / ((1.0_f64 / 64.0).exp() - 1.0);
+        // K = 64 atoms on P = 128 outputs: every family is on the dense lane.
         assert_eq!(
-            resolve_public_assignment_strength(obb, 64, None, None),
+            resolve_public_assignment_strength(obb, 256, 128, 64, None, None),
             Ok(SaePublicAssignmentStrength {
                 alpha: expected_base,
                 learnable_alpha: true,
@@ -500,7 +527,7 @@ mod tests {
             })
         );
         assert_eq!(
-            resolve_public_assignment_strength(obb, 64, None, Some(0.25)),
+            resolve_public_assignment_strength(obb, 256, 128, 64, None, Some(0.25)),
             Ok(SaePublicAssignmentStrength {
                 alpha: expected_base,
                 learnable_alpha: true,
@@ -508,22 +535,24 @@ mod tests {
             })
         );
         assert_eq!(
-            resolve_public_assignment_strength(obb, 64, Some(2.5), None),
+            resolve_public_assignment_strength(obb, 256, 128, 64, Some(2.5), None),
             Ok(SaePublicAssignmentStrength {
                 alpha: 2.5,
                 learnable_alpha: false,
                 sparsity_strength: 1.0,
             })
         );
-        let refusal = resolve_public_assignment_strength(obb, 64, Some(2.5), Some(0.25))
-            .expect_err("a fixed concentration must refuse an explicit strength");
+        let refusal =
+            resolve_public_assignment_strength(obb, 256, 128, 64, Some(2.5), Some(0.25))
+                .expect_err("a fixed concentration must refuse an explicit strength");
         assert!(
             refusal.contains("sparsity_weight") && refusal.contains("#2933 F45"),
             "the refusal must name the dropped option and the finding: {refusal}"
         );
         for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
             assert!(
-                resolve_public_assignment_strength(obb, 64, Some(invalid), None).is_err(),
+                resolve_public_assignment_strength(obb, 256, 128, 64, Some(invalid), None)
+                    .is_err(),
                 "alpha={invalid} is outside the concentration domain"
             );
         }
@@ -533,7 +562,7 @@ mod tests {
             SaeFitAssignmentKind::TopK,
         ] {
             assert_eq!(
-                resolve_public_assignment_strength(kind, 64, Some(3.0), Some(0.5)),
+                resolve_public_assignment_strength(kind, 256, 128, 64, Some(3.0), Some(0.5)),
                 Ok(SaePublicAssignmentStrength {
                     alpha: 3.0,
                     learnable_alpha: false,
@@ -542,6 +571,55 @@ mod tests {
                 "{kind:?}"
             );
         }
+    }
+
+    /// #2627 — an overcomplete TopK request is fitted by the support-sparse lane, which has no
+    /// coordinate-shrinkage coordinate. The public default resolves to zero strength, so no
+    /// coordinate penalty the lane refuses is built, and an explicit strength is refused by
+    /// name. `K = P` stays on the dense lane, and a penalty-gated family keeps its strength
+    /// off the dense lane (admission refuses it elsewhere), so only the TopK support lane moves.
+    #[test]
+    fn overcomplete_topk_default_strength_is_what_the_support_lane_accepts_2627() {
+        let topk = SaeFitAssignmentKind::TopK;
+        assert_eq!(
+            resolve_public_assignment_strength(topk, 24, 4, 6, None, None),
+            Ok(SaePublicAssignmentStrength {
+                alpha: 1.0,
+                learnable_alpha: false,
+                sparsity_strength: 0.0,
+            })
+        );
+        let refusal = resolve_public_assignment_strength(topk, 24, 4, 6, None, Some(0.5))
+            .expect_err("an explicit strength has nothing to scale on the support-sparse lane");
+        assert!(
+            refusal.contains("sparsity_weight") && refusal.contains("#2627"),
+            "the refusal must name the option and the finding: {refusal}"
+        );
+        assert_eq!(
+            resolve_public_assignment_strength(topk, 24, 6, 6, None, None),
+            Ok(SaePublicAssignmentStrength {
+                alpha: 1.0,
+                learnable_alpha: false,
+                sparsity_strength: DEFAULT_SAE_SPARSITY_STRENGTH,
+            }),
+            "K = P stays on the dense lane"
+        );
+        assert_eq!(
+            resolve_public_assignment_strength(
+                SaeFitAssignmentKind::Softmax,
+                24,
+                4,
+                6,
+                None,
+                Some(0.5)
+            ),
+            Ok(SaePublicAssignmentStrength {
+                alpha: 1.0,
+                learnable_alpha: false,
+                sparsity_strength: 0.5,
+            }),
+            "a penalty-gated family keeps its strength"
+        );
     }
 
     #[test]
