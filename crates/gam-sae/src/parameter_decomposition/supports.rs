@@ -470,36 +470,64 @@ impl<W, D> EvidenceStatus<W, D> {
         }
     }
 
-    /// The order of what two statuses prove about an extremum: exact above a
-    /// uniform bound above an unresolved bracket. A statistical estimate is about a
-    /// different number and a counterexample refutes rather than bounds, so each
-    /// compares only with its own kind; `None` means incomparable. The weakest
-    /// status along a path of results is the minimum where every pair compares.
-    pub fn compare_strength<V, E>(&self, other: &EvidenceStatus<V, E>) -> Option<Ordering> {
-        match (self.bound_rank(), other.bound_rank()) {
-            (Some(left), Some(right)) => Some(left.cmp(&right)),
-            (Some(..), None) | (None, Some(..)) => None,
-            (None, None) => match (self, other) {
-                (Self::StatisticalEstimate { .. }, EvidenceStatus::StatisticalEstimate { .. })
-                | (Self::Counterexample { .. }, EvidenceStatus::Counterexample { .. }) => {
-                    Some(Ordering::Equal)
-                }
-                (Self::StatisticalEstimate { .. } | Self::Counterexample { .. }, ..)
-                | (Self::Exact { .. } | Self::UniformBound { .. } | Self::Unresolved { .. }, ..) => {
-                    None
-                }
-            },
+    /// The order of what two statuses about one quantity prove. `self` is stronger
+    /// when the interval it proves, `[lower_bound or -inf, upper_bound or +inf]`,
+    /// lies inside `other`'s: every threshold the weaker status certifies or refutes,
+    /// the stronger one certifies or refutes too. The kind of evidence does not
+    /// order anything by itself: an exact value with a wide numerical error proves
+    /// less about `<= t` than a tight uniform bound at `t`. Statuses over different
+    /// domains, about different extrema, or involving a statistical estimate (a
+    /// different number) or a counterexample (which states no domain) compare as
+    /// `None`, incomparable, as do intervals neither of which contains the other.
+    pub fn compare_strength(&self, other: &Self) -> Option<Ordering>
+    where
+        D: PartialEq,
+    {
+        if matches!(self, Self::StatisticalEstimate { .. })
+            || matches!(other, Self::StatisticalEstimate { .. })
+        {
+            return None;
+        }
+        let (Some(domain), Some(other_domain)) = (self.domain(), other.domain()) else {
+            return None;
+        };
+        if domain != other_domain {
+            return None;
+        }
+        if let (Some(extremum), Some(other_extremum)) =
+            (self.bounded_extremum(), other.bounded_extremum())
+            && extremum != other_extremum
+        {
+            return None;
+        }
+        let (lower, upper) = self.proven_interval();
+        let (other_lower, other_upper) = other.proven_interval();
+        let inside = lower >= other_lower && upper <= other_upper;
+        let contains = lower <= other_lower && upper >= other_upper;
+        match (inside, contains) {
+            (true, true) => Some(Ordering::Equal),
+            (true, false) => Some(Ordering::Greater),
+            (false, true) => Some(Ordering::Less),
+            (false, false) => None,
         }
     }
 
-    /// The rank of a status in the bound order, or `None` for an estimate or a
-    /// counterexample.
-    fn bound_rank(&self) -> Option<u8> {
+    /// The interval this status proves the extremum lies in, with an unproved side
+    /// infinite.
+    fn proven_interval(&self) -> (f64, f64) {
+        (
+            self.lower_bound().unwrap_or(f64::NEG_INFINITY),
+            self.upper_bound().unwrap_or(f64::INFINITY),
+        )
+    }
+
+    /// The extremum a status names: a uniform bound and a counterexample are about a
+    /// supremum, an unresolved bracket states its own, and an exact value is either.
+    fn bounded_extremum(&self) -> Option<Extremum> {
         match self {
-            Self::Exact { .. } => Some(2),
-            Self::UniformBound { .. } => Some(1),
-            Self::Unresolved { .. } => Some(0),
-            Self::StatisticalEstimate { .. } | Self::Counterexample { .. } => None,
+            Self::UniformBound { .. } | Self::Counterexample { .. } => Some(Extremum::Supremum),
+            Self::Unresolved { extremum, .. } => Some(*extremum),
+            Self::Exact { .. } | Self::StatisticalEstimate { .. } => None,
         }
     }
 }
@@ -1834,20 +1862,39 @@ mod tests {
     }
 
     #[test]
-    fn strength_orders_bounds_and_leaves_estimates_and_counterexamples_incomparable() {
-        let exact = Status::exact(1.0, 0.0, ExactBasis::Algebraic, None, "d").expect("exact");
-        let bound = Status::uniform_bound(1.0, 0.0, "d").expect("a bound");
-        let bracket = Status::unresolved(0.5, 1.0, Extremum::Supremum, None, "d").expect("an interval");
-        let estimate = Status::statistical_estimate(0.5, 0.1, 10, "law").expect("an estimate");
+    fn strength_is_containment_of_the_proven_interval_on_one_domain() {
+        // mpd-verify's two counterexamples to ordering by kind. An exact value with a
+        // wide numerical error proves less about `<= 0.45` than a uniform bound at
+        // 0.45, and that bound proves less than the bracket [0.3, 0.4].
+        let exact = Status::exact(0.5, 0.1, ExactBasis::Algebraic, None, "d").expect("exact");
+        let bound = Status::uniform_bound(0.45, 0.0, "d").expect("a bound");
+        let bracket =
+            Status::unresolved(0.3, 0.4, Extremum::Supremum, None, "d").expect("an interval");
+        assert!(bound.certifies_at_most(0.45) && !exact.certifies_at_most(0.45));
+        assert_eq!(exact.compare_strength(&bound), None);
+        assert_eq!(bound.compare_strength(&exact), None);
+        assert!(bracket.certifies_at_most(0.4) && !bound.certifies_at_most(0.4));
+        assert!(bracket.refutes_at_most(0.29) && !bound.refutes_at_most(0.29));
+        assert_eq!(bound.compare_strength(&bracket), Some(Ordering::Less));
+        assert_eq!(bracket.compare_strength(&bound), Some(Ordering::Greater));
+        // Positive controls: a tight exact value inside the bracket is stronger, and a
+        // status equals itself.
+        let tight = Status::exact(0.35, 0.0, ExactBasis::Algebraic, None, "d").expect("exact");
+        assert_eq!(tight.compare_strength(&bracket), Some(Ordering::Greater));
+        assert_eq!(bracket.compare_strength(&tight), Some(Ordering::Less));
+        assert_eq!(bracket.compare_strength(&bracket), Some(Ordering::Equal));
+        // Another domain, another extremum, an estimate and a counterexample are
+        // incomparable.
+        let elsewhere = Status::uniform_bound(0.45, 0.0, "other").expect("a bound");
+        assert_eq!(bound.compare_strength(&elsewhere), None);
+        let infimum =
+            Status::unresolved(0.3, 0.4, Extremum::Infimum, None, "d").expect("an interval");
+        assert_eq!(bracket.compare_strength(&infimum), None);
+        let estimate = Status::statistical_estimate(0.35, 0.01, 10, "d").expect("an estimate");
+        assert_eq!(estimate.compare_strength(&estimate), None);
+        assert_eq!(bracket.compare_strength(&estimate), None);
         let found = Status::counterexample(1.0, 0.0, 0.5, vec![0]).expect("a violation");
-        assert_eq!(exact.compare_strength(&bound), Some(Ordering::Greater));
-        assert_eq!(bound.compare_strength(&bracket), Some(Ordering::Greater));
-        assert_eq!(bracket.compare_strength(&exact), Some(Ordering::Less));
-        assert_eq!(estimate.compare_strength(&estimate), Some(Ordering::Equal));
-        assert_eq!(found.compare_strength(&found), Some(Ordering::Equal));
-        assert_eq!(estimate.compare_strength(&bound), None);
-        assert_eq!(exact.compare_strength(&found), None);
-        assert_eq!(estimate.compare_strength(&found), None);
+        assert_eq!(found.compare_strength(&found), None);
     }
 
     #[test]
