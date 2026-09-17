@@ -82,7 +82,7 @@ pub(crate) trait SlopeRowGeometry<const P: usize>: Copy + Send + Sync + 'static 
     /// The order-≤3 tower the all-axes first-directional path builds once per
     /// row. Static sparsity is a property of the FRAME: the Gaussian frames are
     /// affine in the three location primaries and elide those blocks, the
-    /// anchored frame is not and may elide nothing.
+    /// anchored frame is affine in `q̇₁` alone and elides only those blocks.
     type Tower3: JetScalar<P> + SparseThird<P> + Send + Sync;
 
     /// The order-≤4 tower of the second-directional all-axes path.
@@ -598,10 +598,10 @@ impl GaussianFeatureMap<DYNAMIC_SLOPE_PRIMARIES> for DynamicSlopeGeometry {
 /// tolerance and the frame IS [`StaticSlopeGeometry`]; on any other law the
 /// closed form is wrong by exactly the amount the anchoring equation says.
 ///
-/// The map is nonlinear in every primary — `α` in `q` as well as in `g` — so
-/// this frame declares no affine primaries: its towers are dense, and its
-/// `η′₁ > 0` still follows from `q̇₁ > 0` because `α_q = φ(q)/Σ_k w_k φ(η_k)`
-/// is strictly positive.
+/// The map is nonlinear in `q₀`, `q₁` and `g` — `α` in `q` as well as in `g` —
+/// so of the location channels only `q̇₁` stays affine
+/// ([`ANCHORED_LINEAR_MASK`]), and `η′₁ > 0` still follows from `q̇₁ > 0`
+/// because `α_q = φ(q)/Σ_k w_k φ(η_k)` is strictly positive.
 #[derive(Clone, Copy)]
 pub(crate) struct AnchoredStaticSlopeGeometry;
 
@@ -624,20 +624,90 @@ struct AnchoredRowState {
 
 impl AnchoredStaticSlopeGeometry {
     #[inline]
-    fn grid<'a>(inputs: &RigidRowInputs<'a>) -> AnchorGrid<'a> {
+    fn context<'a>(inputs: &RigidRowInputs<'a>) -> AnchorRowContext<'a> {
         inputs
             .anchor
             .expect("the anchored slope frame is only constructed with a declared latent law")
+    }
+
+    /// Solve one location channel's anchor through the row's slot.
+    #[inline]
+    fn anchor(
+        q: f64,
+        observed_slope: f64,
+        inputs: &RigidRowInputs,
+        slot: SurvivalInterceptSlotKind,
+    ) -> Result<f64, String> {
+        solve_anchor_in_slot(q, observed_slope, Self::context(inputs), inputs.row, slot)
+    }
+
+    /// `[α(q₀, b), α(q₁, b), α_q(q₁, b)·q̇₁]` over any jet (gam#2928).
+    ///
+    /// The roots are solved on the real values. A carrier with derivative
+    /// channels then receives each anchor's Taylor table through order five
+    /// ([`AnchorTaylor`]) composed with its own primaries: a few carrier
+    /// products per anchor, where Newton's iteration in the jet algebra (the
+    /// test oracle `anchor_jet`) walked the whole law three times.
+    fn anchored_channels<T: JetField + Clone>(
+        primaries: &[T; STATIC_SLOPE_PRIMARIES],
+        observed: &T,
+        inputs: &RigidRowInputs,
+    ) -> Result<[T; 3], String> {
+        let grid = Self::context(inputs).grid;
+        let q0 = &primaries[PRIMARY_Q0];
+        let q1 = &primaries[PRIMARY_Q1];
+        let qd1 = &primaries[PRIMARY_QD1];
+        let b = observed.value();
+        let alpha0 = Self::anchor(q0.value(), b, inputs, SurvivalInterceptSlotKind::Entry)?;
+        let alpha1 = Self::anchor(q1.value(), b, inputs, SurvivalInterceptSlotKind::Exit)?;
+        if std::mem::size_of::<T>() == std::mem::size_of::<f64>() {
+            // A carrier the size of one `f64` has no derivative channel: the
+            // roots and `α_q(q₁, b)` are the whole answer.
+            let rate_factor = anchor_q_derivative(alpha1, q1.value(), b, grid)?;
+            return Ok([
+                q0.constant_like(alpha0),
+                q1.constant_like(alpha1),
+                qd1.scale(rate_factor),
+            ]);
+        }
+        let delta_b = observed.compose_unary([0.0, 1.0, 0.0, 0.0, 0.0]);
+        let entry = AnchorTaylor::at(alpha0, q0.value(), b, grid)?;
+        let exit = AnchorTaylor::at(alpha1, q1.value(), b, grid)?;
+        Ok([
+            entry.lift(q0, &delta_b),
+            exit.lift(q1, &delta_b),
+            exit.lift_q_derivative(q1, &delta_b).mul(qd1),
+        ])
     }
 
     fn solve_row(
         primaries: &[f64; STATIC_SLOPE_PRIMARIES],
         inputs: &RigidRowInputs,
     ) -> Result<AnchoredRowState, String> {
-        let grid = Self::grid(inputs);
+        let grid = Self::context(inputs).grid;
         let observed_slope = inputs.probit_scale * primaries[PRIMARY_SLOPE];
-        let entry = AnchorDerivatives::solve(primaries[PRIMARY_Q0], observed_slope, grid)?;
-        let exit = AnchorDerivatives::solve(primaries[PRIMARY_Q1], observed_slope, grid)?;
+        let entry = AnchorDerivatives::at(
+            Self::anchor(
+                primaries[PRIMARY_Q0],
+                observed_slope,
+                inputs,
+                SurvivalInterceptSlotKind::Entry,
+            )?,
+            primaries[PRIMARY_Q0],
+            observed_slope,
+            grid,
+        )?;
+        let exit = AnchorDerivatives::at(
+            Self::anchor(
+                primaries[PRIMARY_Q1],
+                observed_slope,
+                inputs,
+                SurvivalInterceptSlotKind::Exit,
+            )?,
+            primaries[PRIMARY_Q1],
+            observed_slope,
+            grid,
+        )?;
         Ok(AnchoredRowState {
             entry,
             exit,
@@ -788,47 +858,45 @@ impl AnchoredStaticSlopeGeometry {
     }
 }
 
+/// The anchored frame's affine primaries: `q̇₁` alone (gam#2928). `α(q, b)` is
+/// nonlinear in both location channels, but the rate feature `α_q(q₁, b)·q̇₁`
+/// is degree one in `q̇₁` and nothing else the frame builds reads `q̇₁`, so
+/// every block with two `q̇₁` legs is structurally zero exactly as in
+/// [`RIGID_LINEAR_MASK`].
+pub(crate) const ANCHORED_LINEAR_MASK: u32 = 1 << PRIMARY_QD1;
+
 impl SlopeRowGeometry<STATIC_SLOPE_PRIMARIES> for AnchoredStaticSlopeGeometry {
     const FOLLOW_UP_VARYING: bool = false;
     const ANCHORED: bool = true;
     const NAME: &'static str = "time-constant slope on a declared latent law";
-    type Tower3 = SparseTower3<STATIC_SLOPE_PRIMARIES, 0>;
-    type Tower4 = SparseTower4<STATIC_SLOPE_PRIMARIES, 0>;
+    type Tower3 = SparseTower3<STATIC_SLOPE_PRIMARIES, ANCHORED_LINEAR_MASK>;
+    type Tower4 = SparseTower4<STATIC_SLOPE_PRIMARIES, ANCHORED_LINEAR_MASK>;
 
-    /// The anchored frame over any jet. Each anchor is solved on the real
-    /// values and lifted by Newton's iteration in the jet algebra
-    /// ([`anchor_jet`]); the rate channel carries `α_q(q₁, b)` as a jet of its
-    /// own. A failed solve leaves the location channels `NaN`, which the row
+    /// The anchored frame over any jet. Both anchors are solved on the real
+    /// values through the row's slots, and a jet carrier receives each one's
+    /// Taylor table composed with its own primaries
+    /// ([`AnchoredStaticSlopeGeometry::anchored_channels`]). A failed solve or
+    /// an underflowed table leaves the location channels `NaN`, which the row
     /// program's admission rejects as a non-finite signed margin.
     #[inline]
     fn feature_frame<T: JetField + Clone>(
         primaries: &[T; STATIC_SLOPE_PRIMARIES],
         inputs: &RigidRowInputs,
     ) -> [T; RIGID_FEATURE_DIMENSION] {
-        let grid = Self::grid(inputs);
-        let q0 = &primaries[PRIMARY_Q0];
-        let q1 = &primaries[PRIMARY_Q1];
-        let qd1 = &primaries[PRIMARY_QD1];
         let slope = &primaries[PRIMARY_SLOPE];
         let observed = slope.scale(inputs.probit_scale);
         let zero = slope.constant_like(0.0);
         let linear = observed.scale(inputs.z_sum);
-        let lift = |q: &T| -> T {
-            match solve_anchor(q.value(), observed.value(), grid) {
-                Ok(root) => anchor_jet(root, q, &observed, grid),
-                Err(reason) => {
-                    log::debug!(
-                        "[survival-marginal-slope anchor] row {}: {reason}; the row is refused \
-                         through its non-finite signed margin",
-                        inputs.row
-                    );
-                    q.constant_like(f64::NAN)
-                }
-            }
-        };
-        let alpha0 = lift(q0);
-        let alpha1 = lift(q1);
-        let rate = anchor_q_derivative_jet(&alpha1, q1, &observed, grid).mul(qd1);
+        let [alpha0, alpha1, rate] =
+            Self::anchored_channels(primaries, &observed, inputs).unwrap_or_else(|reason| {
+                log::debug!(
+                    "[survival-marginal-slope anchor] row {}: {reason}; the row is refused \
+                     through its non-finite signed margin",
+                    inputs.row
+                );
+                let refused = slope.constant_like(f64::NAN);
+                [refused.clone(), refused.clone(), refused]
+            });
         [
             alpha0,
             alpha1,
@@ -1290,7 +1358,10 @@ mod anchored_frame_tests {
             covariance_ones: 1.0,
             probit_scale,
             qd1_lower: 1e-6,
-            anchor: Some(law.view()),
+            anchor: Some(AnchorRowContext {
+                grid: law.view(),
+                roots: None,
+            }),
         }
     }
 
@@ -1473,9 +1544,13 @@ mod anchored_frame_tests {
                 0.8 + grid.next().abs() * 1.5,
                 grid.next() * 0.8,
             ];
+            // The frame's own production tower, with its `q̇₁` mask: a wrong
+            // linearity declaration panics in `check_contract` here.
             let tower_at = |point: &[f64; STATIC_SLOPE_PRIMARIES]| {
-                let vars: [SparseTower4<STATIC_SLOPE_PRIMARIES, 0>; STATIC_SLOPE_PRIMARIES] =
-                    std::array::from_fn(|axis| SparseTower4::variable(point[axis], axis));
+                let vars: [<AnchoredStaticSlopeGeometry as SlopeRowGeometry<
+                    STATIC_SLOPE_PRIMARIES,
+                >>::Tower4; STATIC_SLOPE_PRIMARIES] =
+                    std::array::from_fn(|axis| JetScalar::variable(point[axis], axis));
                 rigid_row_nll::<STATIC_SLOPE_PRIMARIES, AnchoredStaticSlopeGeometry, _>(
                     &vars, &row,
                 )

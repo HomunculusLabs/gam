@@ -776,7 +776,7 @@ pub(crate) struct RigidRowInputs<'a> {
     /// `Some` exactly when the family runs the anchored frame, in which case
     /// the marginal identity is solved on it instead of lowered in closed
     /// form. `None` is the standard-normal law and the Gaussian closed form.
-    pub(crate) anchor: Option<AnchorGrid<'a>>,
+    pub(crate) anchor: Option<AnchorRowContext<'a>>,
 }
 
 /// Resolve the row's scalar inputs (shared-score summary, probit scale,
@@ -796,7 +796,7 @@ pub(crate) fn rigid_row_inputs<'a>(
         covariance_ones,
         probit_scale: family.probit_frailty_scale(),
         qd1_lower: family.time_derivative_lower_bound(),
-        anchor: family.latent_law.as_ref().map(|law| law.row(row)),
+        anchor: family.latent_law.as_ref().map(|law| law.row_context(row)),
     })
 }
 
