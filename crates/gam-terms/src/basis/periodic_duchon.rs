@@ -1763,12 +1763,20 @@ fn reject_nonpsd_then_clamp_noise(matrix: &Array2<f64>) -> Result<Array2<f64>, B
     // of its formula could disagree with the rank it is later assigned.
     let tol = spectral_tolerance(&evals);
     if min_ev < -tol {
-        crate::bail_invalid_basis!(
-            "Duchon constrained penalty is not positive semidefinite: λ_min={min_ev:.6e} \
-             (tol=−{tol:.6e}, λ_max={max_abs_ev:.6e}). The hybrid kernel's spectral density is \
-             nonnegative, so a materially-negative mode indicates the kernel evaluation lost \
-             positive-definiteness numerically (see gam#1424)."
-        );
+        // Typed like the Matérn kernel penalty's refusal. The incremental κ realizer
+        // retreats from `IndefinitePenalty` at a trial ψ and aborts the fit on any other
+        // basis error, so an `InvalidInput` here killed a joint ψ search at a trial
+        // point it had merely proposed (gam#2735).
+        return Err(BasisError::IndefinitePenalty {
+            context: "Duchon constrained bending penalty".to_string(),
+            min_eigenvalue: min_ev,
+            tolerance: tol,
+            guidance: format!(
+                "λ_max={max_abs_ev:.6e}. The hybrid kernel's spectral density is nonnegative, so a \
+                 materially-negative mode indicates the kernel evaluation lost \
+                 positive-definiteness numerically (see gam#1424)."
+            ),
+        });
     }
     // λ_min is at the noise floor: clamp the harmless negative residue to zero.
     Ok(project_penalty_to_psd_cone(&sym))
@@ -2709,6 +2717,27 @@ mod hybrid_high_dim_psd_tests {
                  λ_min/λ_max = {lambda_min_rel:.6e} (tol = −{tol:.6e}) (gam#1424)"
             );
         }
+    }
+
+    #[test]
+    fn a_materially_negative_constrained_spectrum_is_refused_as_an_indefinite_penalty_2735() {
+        // The incremental κ realizer retreats from `IndefinitePenalty` and aborts the
+        // fit on any other basis error, so the variant is the contract this refusal owes.
+        let indefinite = Array2::from_diag(&ndarray::arr1(&[1.0, 0.5, -0.25]));
+        let refused = reject_nonpsd_then_clamp_noise(&indefinite);
+        assert!(
+            matches!(refused, Err(BasisError::IndefinitePenalty { .. })),
+            "a materially-negative mode must be refused as IndefinitePenalty, got {refused:?}"
+        );
+        // Control: a negative mode inside the noise floor dim·1e-10·λ_max is clamped.
+        let noise = Array2::from_diag(&ndarray::arr1(&[1.0, 0.5, -1e-12]));
+        let clamped = reject_nonpsd_then_clamp_noise(&noise)
+            .expect("a noise-floor negative mode is clamped, not refused");
+        let (evals, _) = FaerEigh::eigh(&clamped, Side::Lower).expect("eigh");
+        assert!(
+            evals.iter().all(|&v| v >= -3.0 * f64::EPSILON),
+            "clamped spectrum {evals:?}"
+        );
     }
 }
 
