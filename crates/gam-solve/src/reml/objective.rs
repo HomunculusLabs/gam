@@ -1751,7 +1751,7 @@ impl<'a> RemlState<'a> {
         let hessian_op: std::sync::Arc<dyn super::reml_outer_engine::HessianFactorization> = {
             use super::reml_outer_engine::HessianFactorization as _;
             let build_spectral = || -> Result<std::sync::Arc<DenseSpectralOperator>, EstimationError> {
-                let op = if let Some(rank) = structural_rank {
+                let assembled = if let Some(rank) = structural_rank {
                     DenseSpectralOperator::from_symmetric_with_structural_rank(
                         &h_total_original,
                         rank,
@@ -1761,12 +1761,38 @@ impl<'a> RemlState<'a> {
                         &h_total_original,
                         penalty_rank,
                     )
-                }
-                .map_err(|e| {
+                };
+                let refused = |e: String| {
                     EstimationError::InvalidInput(format!(
                         "DenseSpectralOperator from original-basis PIRLS Hessian: {e}"
                     ))
-                })?;
+                };
+                let op = match assembled {
+                    Ok(op) => op,
+                    // `XᵀWX + S_λ` is PSD by construction. When the identified-subspace
+                    // route refuses it as materially indefinite, either a term outside
+                    // that sum is present or the assembled spectrum carries error beyond
+                    // the band it is judged at. A root that reproduces this `H` and
+                    // resolves every mode shows it is the second case (gam#2735). A
+                    // Firth term lies outside the sum, so a refusal with one present
+                    // stands.
+                    Err(e) if structural_rank.is_none() => {
+                        return bundle
+                            .root_scale_hessian_operator
+                            .get_or_init(|| {
+                                super::laml_logdet::root_scale_hessian_operator_for_refused_assembly(
+                                    &root_inputs,
+                                    &h_total_original,
+                                    PseudoLogdetMode::PositiveDefinite,
+                                )
+                                .map(std::sync::Arc::new)
+                            })
+                            .as_ref()
+                            .map(std::sync::Arc::clone)
+                            .ok_or_else(|| refused(e));
+                    }
+                    Err(e) => return Err(refused(e)),
+                };
                 if let Some(lift) = op.logdet_regularization_lift()
                     && lift.abs() <= f64::EPSILON.sqrt() * (1.0 + op.logdet().abs())
                     && let Some(exact) = bundle.root_scale_hessian_operator.get_or_init(|| {

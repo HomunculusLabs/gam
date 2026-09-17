@@ -155,7 +155,12 @@ pub(crate) fn root_scale_hessian_operator(
     assembled_logdet: f64,
     mode: PseudoLogdetMode,
 ) -> Option<DenseSpectralOperator> {
-    match root_scale_hessian_operator_inner(inputs, h_assembled, spectrum, assembled_logdet, mode) {
+    match root_scale_hessian_operator_inner(
+        inputs,
+        h_assembled,
+        Some((spectrum, assembled_logdet)),
+        mode,
+    ) {
         Ok(value) => Some(value),
         Err(reason) => {
             log::debug!("[2644-logdet] declined: {reason}");
@@ -164,19 +169,59 @@ pub(crate) fn root_scale_hessian_operator(
     }
 }
 
+/// The root-scale operator for an `H` that the assembled identified-subspace
+/// route REFUSED as materially indefinite (gam#2735).
+///
+/// `XᵀWX + Σ_k λ_k S_k` is PSD by construction. An assembled eigenvalue below
+/// `−p·ε·‖H‖₂` is therefore either curvature from a term outside that sum or
+/// error in the assembled spectrum that the band does not cover. The band
+/// accounts only for the eigensolver's backward error on the matrix it was
+/// handed, not for the error that assembly put into that matrix. Measured on
+/// `large_scale_reml_stress_main` (spec-scale job 658032, p = 500,
+/// λ₀ = 1.4e12, ‖H‖₂ = 1.73e11): the refused eigenvalue was −3.69e1 against a
+/// band of 1.92e-2. The same eigenvector's quadratic form on the assembled `H`
+/// was +8.82, and `‖√W·X·v‖² + ‖E·Qsᵀ·v‖²` reproduced it to 7e-6.
+///
+/// The root settles which case it is. If `B` reproduces the caller's `H` to
+/// roundoff and resolves every singular value, then `H = BᵀB` is positive
+/// definite, the refusal came from the assembly's error, and the operator is
+/// priced from `B`. Otherwise this returns `None` and the refusal stands. A
+/// refused assembly priced no log-determinant, so there is none to agree with.
+pub(crate) fn root_scale_hessian_operator_for_refused_assembly(
+    inputs: &HessianRootInputs<'_>,
+    h_assembled: &Array2<f64>,
+    mode: PseudoLogdetMode,
+) -> Option<DenseSpectralOperator> {
+    match root_scale_hessian_operator_inner(inputs, h_assembled, None, mode) {
+        Ok(value) => Some(value),
+        Err(reason) => {
+            log::debug!("[2644-logdet] refused assembly stands: {reason}");
+            None
+        }
+    }
+}
+
+/// `assembled` is the assembled route's raw spectrum and log-determinant, when
+/// that route priced this `H` at all.
 fn root_scale_hessian_operator_inner(
     inputs: &HessianRootInputs<'_>,
     h_assembled: &Array2<f64>,
-    spectrum: &[f64],
-    assembled_logdet: f64,
+    assembled: Option<(&[f64], f64)>,
     mode: PseudoLogdetMode,
 ) -> Result<DenseSpectralOperator, String> {
     let p = h_assembled.nrows();
-    if p == 0 || h_assembled.ncols() != p || spectrum.len() != p {
+    if p == 0 || h_assembled.ncols() != p {
         return Err(format!(
-            "shape mismatch: p={p}, H is {}x{}, spectrum has {} entries",
+            "shape mismatch: p={p}, H is {}x{}",
             h_assembled.nrows(),
             h_assembled.ncols(),
+        ));
+    }
+    if let Some((spectrum, _)) = assembled
+        && spectrum.len() != p
+    {
+        return Err(format!(
+            "the assembled spectrum has {} entries for p={p}",
             spectrum.len()
         ));
     }
@@ -313,11 +358,21 @@ fn root_scale_hessian_operator_inner(
             singular.len()
         ));
     }
+    // Every mode must be resolved from zero by the SVD that produced it. A
+    // backward-stable SVD of the `m×p` root perturbs it by `O(max(m,p)·ε·σ_max)`,
+    // so a singular value inside that band is roundoff. `2·log σ` would price it
+    // as curvature, and the root would call an `H` positive definite when it
+    // cannot tell that `H`'s smallest mode from zero.
+    let sigma_max = singular.iter().fold(0.0_f64, |acc, &sigma| acc.max(sigma));
+    let root_band = (rows.len().max(p) as f64) * f64::EPSILON * sigma_max;
     let mut logdet = 0.0_f64;
     for i in 0..p {
         let sigma = singular[i];
-        if !(sigma.is_finite() && sigma > 0.0) {
-            return Err(format!("singular value {i} of the root is {sigma:.3e}"));
+        if !(sigma.is_finite() && sigma > root_band) {
+            return Err(format!(
+                "singular value {i} of the root is {sigma:.3e}, not resolved above the root's \
+                 rounding band {root_band:.3e}"
+            ));
         }
         logdet += 2.0 * sigma.ln();
     }
@@ -326,21 +381,29 @@ fn root_scale_hessian_operator_inner(
     }
 
     // ── The correction must be explicable as the assembled route's own error.
-    let bound = assembled_logdet_error_bound(spectrum);
-    let allowed = 16.0 * bound.max(f64::EPSILON.sqrt() * (1.0 + assembled_logdet.abs()));
-    if (logdet - assembled_logdet).abs() > allowed {
-        return Err(format!(
-            "root={logdet:.9e} vs assembled={assembled_logdet:.9e}, gap {:.3e} exceeds the \
-             assembled route's own error budget {allowed:.3e}; that is a different quantity, \
-             not a sharper one",
-            (logdet - assembled_logdet).abs(),
-        ));
+    //    A refused assembly priced nothing, so there is nothing to agree with.
+    if let Some((spectrum, assembled_logdet)) = assembled {
+        let bound = assembled_logdet_error_bound(spectrum);
+        let allowed = 16.0 * bound.max(f64::EPSILON.sqrt() * (1.0 + assembled_logdet.abs()));
+        if (logdet - assembled_logdet).abs() > allowed {
+            return Err(format!(
+                "root={logdet:.9e} vs assembled={assembled_logdet:.9e}, gap {:.3e} exceeds the \
+                 assembled route's own error budget {allowed:.3e}; that is a different quantity, \
+                 not a sharper one",
+                (logdet - assembled_logdet).abs(),
+            ));
+        }
+        log::debug!(
+            "[2644-logdet] installed: {logdet:.12e} (assembled {assembled_logdet:.12e}, \
+             correction {:.3e}, assembled error bound {bound:.3e})",
+            logdet - assembled_logdet,
+        );
+    } else {
+        log::debug!(
+            "[2644-logdet] installed over a refused assembly: {logdet:.12e} (root rounding band \
+             {root_band:.3e})"
+        );
     }
-    log::debug!(
-        "[2644-logdet] installed: {logdet:.12e} (assembled {assembled_logdet:.12e}, correction \
-         {:.3e}, assembled error bound {bound:.3e})",
-        logdet - assembled_logdet,
-    );
     DenseSpectralOperator::from_eigenpairs(
         singular.mapv(|sigma| sigma * sigma),
         vectors_t
@@ -522,5 +585,141 @@ mod tests {
         let logdet: f64 = spectrum.iter().map(|s| s.ln()).sum();
         assert!(assembled_logdet_is_resolved(&spectrum, logdet));
         assert!(assembled_logdet_error_bound(&spectrum) < 1.0e-14);
+    }
+
+    /// `Q·diag(d)·Qᵀ` over the leading `d.len()` columns of `Q`, symmetrized.
+    fn rotated_diagonal(q: &Array2<f64>, d: &[f64]) -> Array2<f64> {
+        let p = q.nrows();
+        let mut m = Array2::<f64>::zeros((p, p));
+        for (i, &di) in d.iter().enumerate() {
+            for r in 0..p {
+                for c in 0..p {
+                    m[[r, c]] += di * q[[r, i]] * q[[c, i]];
+                }
+            }
+        }
+        let mt = m.t().to_owned();
+        m += &mt;
+        m *= 0.5;
+        m
+    }
+
+    /// Rows `√d_i·q_iᵀ`, whose Gram is `Q·diag(d)·Qᵀ` over the leading columns.
+    fn scaled_mode_rows(q: &Array2<f64>, d: &[f64]) -> Array2<f64> {
+        let p = q.nrows();
+        let mut rows = Array2::<f64>::zeros((d.len(), p));
+        for (i, &di) in d.iter().enumerate() {
+            let scale = di.sqrt();
+            for c in 0..p {
+                rows[[i, c]] = scale * q[[c, i]];
+            }
+        }
+        rows
+    }
+
+    /// gam#2735. The assembled identified-subspace route refuses an `H` whose
+    /// spectrum shows a negative eigenvalue outside its rounding band. When a
+    /// root reproduces that `H` to roundoff and resolves every mode, `H = BᵀB`
+    /// is positive definite. The refusal then came from the assembly's error, and
+    /// the operator must be priced from the root.
+    ///
+    /// The perturbation `E = −0.015·q₅q₅ᵀ` stands in for that assembly error. It
+    /// moves the weak mode from `+0.005` to `−0.010`, twelve times the band
+    /// `6·ε·‖H‖₂ ≈ 8.3e-4`. Every entry of `E` stays below the root's
+    /// reconstruction tolerance `64·p·ε·max|H|`: `max|H| ≥ tr(H)/p ≈ 2.2e11`
+    /// puts that tolerance at 1.9e-2 or more. At a thousand times that size, `E`
+    /// is not roundoff, and the refusal must stand.
+    #[test]
+    fn a_refused_assembly_that_a_root_reproduces_is_priced_from_the_root_2735() {
+        use super::super::reml_outer_engine::HessianFactorization;
+        let p = 6usize;
+        let q = dense_orthogonal(p);
+        let d_pen = [1.0_f64, 0.7, 0.44];
+        let d_data = [105.0_f64, 15.5, 8.1, 3.3, 1.03, 0.005];
+        let lambda = 6.193e11_f64;
+        let exact_h =
+            rotated_diagonal(&q, &d_data) + rotated_diagonal(&q, &d_pen).mapv(|v| v * lambda);
+        let exact_logdet: f64 = (0..p)
+            .map(|i| (d_data[i] + lambda * d_pen.get(i).copied().unwrap_or(0.0)).ln())
+            .sum();
+        let weak = q.column(5).to_owned();
+        let along_weak_mode =
+            |scale: f64| Array2::from_shape_fn((p, p), |(a, b)| scale * weak[a] * weak[b]);
+
+        let design = gam_linalg::matrix::DesignMatrix::from(scaled_mode_rows(&q, &d_data));
+        let weights = Array1::<f64>::ones(p);
+        let penalty = CanonicalPenalty::from_dense_root(scaled_mode_rows(&q, &d_pen), p);
+        let inputs = HessianRootInputs {
+            design: &design,
+            weights: weights.view(),
+            penalties: std::slice::from_ref(&penalty),
+            lambdas: &[lambda],
+        };
+
+        let perturbed_h = &exact_h + &along_weak_mode(-0.015);
+        let refusal =
+            DenseSpectralOperator::from_symmetric_on_identified_subspace(&perturbed_h, d_pen.len())
+                .err()
+                .expect("the assembled route must refuse the perturbed H, or nothing is measured");
+        assert!(
+            refusal.contains("resolved curvature"),
+            "unexpected refusal: {refusal}"
+        );
+
+        let operator = root_scale_hessian_operator_for_refused_assembly(
+            &inputs,
+            &perturbed_h,
+            PseudoLogdetMode::PositiveDefinite,
+        )
+        .expect("the root reproduces H to roundoff and resolves every mode");
+        assert!(
+            (operator.logdet() - exact_logdet).abs() <= 1.0e-9 * exact_logdet.abs(),
+            "root-scale log|H| {} against exact {exact_logdet}",
+            operator.logdet()
+        );
+
+        let different_h = &exact_h + &along_weak_mode(-15.0);
+        assert!(
+            root_scale_hessian_operator_for_refused_assembly(
+                &inputs,
+                &different_h,
+                PseudoLogdetMode::PositiveDefinite,
+            )
+            .is_none(),
+            "a root that does not reproduce H must leave the refusal standing"
+        );
+    }
+
+    /// gam#2735. A root whose smallest singular value is inside its own rounding
+    /// band cannot call `H` positive definite, so it must decline rather than
+    /// price that roundoff as `2·log σ`. Here the sixth mode carries neither data
+    /// nor penalty, so `B·q₅` is roundoff, of order `ε·√λ ≈ 1e-10` against a band of
+    /// `8·ε·σ_max(B) ≈ 1.4e-9`.
+    #[test]
+    fn a_root_with_an_unresolved_mode_declines_2735() {
+        let p = 6usize;
+        let q = dense_orthogonal(p);
+        let d_pen = [1.0_f64, 0.7, 0.44];
+        let d_data = [105.0_f64, 15.5, 8.1, 3.3, 1.03];
+        let lambda = 6.193e11_f64;
+        let h = rotated_diagonal(&q, &d_data) + rotated_diagonal(&q, &d_pen).mapv(|v| v * lambda);
+        let design = gam_linalg::matrix::DesignMatrix::from(scaled_mode_rows(&q, &d_data));
+        let weights = Array1::<f64>::ones(d_data.len());
+        let penalty = CanonicalPenalty::from_dense_root(scaled_mode_rows(&q, &d_pen), p);
+        let inputs = HessianRootInputs {
+            design: &design,
+            weights: weights.view(),
+            penalties: std::slice::from_ref(&penalty),
+            lambdas: &[lambda],
+        };
+        assert!(
+            root_scale_hessian_operator_for_refused_assembly(
+                &inputs,
+                &h,
+                PseudoLogdetMode::PositiveDefinite,
+            )
+            .is_none(),
+            "a root with an unresolved mode must not install a positive-definite operator"
+        );
     }
 }
