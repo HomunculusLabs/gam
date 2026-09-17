@@ -295,6 +295,13 @@ pub struct CauseSpecificRoystonParmarBlock {
 #[derive(Debug, Clone)]
 pub struct CauseSpecificRoystonParmarFamily {
     blocks: Vec<CauseSpecificRoystonParmarBlock>,
+    /// Each block's inequality system (`time_block_linear_constraint_system`), built
+    /// once at construction and charged on the memory governor's ledger for the life
+    /// of the family. The feasible-step ratio test borrows it on every trial step, and
+    /// the constrained solve's owned copy is taken from it, instead of each call copying
+    /// the block's `n × p` derivative design again (#2900 row 10.3).
+    constraint_systems:
+        Vec<std::sync::Arc<gam_runtime::resource::Governed<LinearInequalityConstraints>>>,
     /// Whether this member's Jeffreys/Firth prior is armed. A fit arms it only
     /// on the unarmed fit's own evidence, through
     /// `fit_custom_family_arming_on_evidence_with_rho_prior` (#979).
@@ -318,8 +325,30 @@ impl CauseSpecificRoystonParmarFamily {
                 .to_string()
             })?;
         }
+        let mut constraint_systems = Vec::with_capacity(blocks.len());
+        for (idx, block) in blocks.iter().enumerate() {
+            let cols = block.x_derivative.ncols();
+            let rows = block.x_derivative.nrows() + block.structural_time_columns.min(cols);
+            let charge = gam_runtime::resource::MemoryGovernor::global()
+                .try_reserve_dense_f64(
+                    rows,
+                    cols,
+                    "cause-specific survival time-block constraint system",
+                )
+                .map_err(|error| {
+                    format!(
+                        "cause-specific survival block {}: refusing the {rows}x{cols} constraint \
+                         system: {error}",
+                        idx + 1
+                    )
+                })?;
+            constraint_systems.push(std::sync::Arc::new(
+                charge.bind(time_block_linear_constraint_system(block)),
+            ));
+        }
         Ok(Self {
             blocks,
+            constraint_systems,
             jeffreys_armed: true,
         })
     }
@@ -908,8 +937,10 @@ impl CustomFamily for CauseSpecificRoystonParmarFamily {
             }
             .into());
         }
+        // The constrained solve takes an owned system; it is copied from the one built
+        // and charged at construction.
         Ok(Some(ConstraintSet::Dense(
-            time_block_linear_constraint_system(block),
+            (**self.constraint_systems[block_idx]).clone(),
         )))
     }
 
@@ -947,9 +978,13 @@ impl CustomFamily for CauseSpecificRoystonParmarFamily {
         // The same rows the constrained joint Newton solves against, judged by
         // the same contract (unit-row-scaled ratio test at the primal-feasibility
         // tolerance) and landing ON the blocking face so the row can enter the
-        // working face — see `time_block_linear_constraint_system`.
-        let system = time_block_linear_constraint_system(block);
-        crate::marginal_slope_shared::feasible_step_fraction(&system, &state.beta, delta)
+        // working face — see `time_block_linear_constraint_system`. The system is the one
+        // built and charged at construction, borrowed on every trial step.
+        crate::marginal_slope_shared::feasible_step_fraction(
+            &self.constraint_systems[block_idx],
+            &state.beta,
+            delta,
+        )
             .map(Some)
             .map_err(|error| {
                 SurvivalError::InvalidInput {
@@ -3630,6 +3665,82 @@ fn observed_information_band(dimension: usize, eigenvalues: &Array1<f64>) -> f64
 mod tests {
     use super::*;
     use ndarray::{Array1, Array2, Array3, array, s};
+
+    /// #2900 row 10.3 — the family builds each block's inequality system once, on the
+    /// memory governor, and both consumers read it. The constrained solve's rows must be
+    /// `[x_derivative ; I_s | 0]` with `b = [floor − offset ; 0]`, and the feasible-step
+    /// fraction must equal the ratio test over those explicit rows on a step a row clips.
+    #[test]
+    fn constraint_system_built_once_matches_the_explicit_rows_2900() {
+        let (n, p, structural) = (6usize, 3usize, 2usize);
+        let x_derivative =
+            Array2::from_shape_fn((n, p), |(i, j)| 0.2 + 0.1 * ((i + 2 * j) % 5) as f64);
+        let offset_derivative = Array1::from_shape_fn(n, |i| 0.05 * i as f64);
+        let floor = 1.0e-3;
+        let block = CauseSpecificRoystonParmarBlock {
+            age_entry: Array1::zeros(n),
+            age_exit: Array1::ones(n),
+            event_target: Array1::from_shape_fn(n, |i| u8::from(i % 2 == 0)),
+            sampleweight: Array1::ones(n),
+            x_entry: Arc::new(Array2::ones((n, p))),
+            x_exit: Arc::new(Array2::ones((n, p))),
+            x_derivative: Arc::new(x_derivative.clone()),
+            offset_eta_entry: Array1::zeros(n),
+            offset_eta_exit: Array1::zeros(n),
+            offset_derivative_exit: offset_derivative.clone(),
+            derivative_floor: floor,
+            structural_time_columns: structural,
+        };
+        let family =
+            CauseSpecificRoystonParmarFamily::new(vec![block]).expect("cause-specific family");
+        let spec = crate::custom_family::ParameterBlockSpec {
+            name: "time_cause_1".to_string(),
+            design: gam_linalg::matrix::DesignMatrix::from(Array2::<f64>::ones((n, p))),
+            offset: Array1::zeros(n),
+            penalties: Vec::new(),
+            nullspace_dims: Vec::new(),
+            initial_log_lambdas: Array1::zeros(0),
+            initial_beta: None,
+            gauge_priority: 0,
+            jacobian_callback: None,
+            stacked_design: None,
+            stacked_offset: None,
+        };
+        let states = vec![ParameterBlockState {
+            beta: array![0.5, 0.4, 0.3],
+            eta: Array1::zeros(n),
+        }];
+
+        let mut a = Array2::<f64>::zeros((n + structural, p));
+        a.slice_mut(s![..n, ..]).assign(&x_derivative);
+        for j in 0..structural {
+            a[[n + j, j]] = 1.0;
+        }
+        let mut b = Array1::<f64>::zeros(n + structural);
+        for i in 0..n {
+            b[i] = floor - offset_derivative[i];
+        }
+        let Some(ConstraintSet::Dense(shared)) = family
+            .block_linear_constraints(&states, 0, &spec)
+            .expect("time-block constraints")
+        else {
+            panic!("the time block must carry explicit rows");
+        };
+        assert_eq!(shared.a, a, "the solve's rows must be [x_derivative ; I_s | 0]");
+        assert_eq!(shared.b, b, "the solve's bounds must be [floor − offset ; 0]");
+
+        let delta = array![-0.9, -0.1, 0.2];
+        let explicit = LinearInequalityConstraints { a, b };
+        let expected =
+            crate::marginal_slope_shared::feasible_step_fraction(&explicit, &states[0].beta, &delta)
+                .expect("explicit ratio test");
+        let got = family
+            .max_feasible_step_size(&states, 0, &delta)
+            .expect("family ratio test")
+            .expect("a step fraction");
+        assert_eq!(got, expected, "the step fraction must come from the same rows");
+        assert!(expected < 1.0, "a row must clip this step, got fraction {expected}");
+    }
 
     #[test]
     fn saved_cause_specific_alo_matches_independent_closed_form() {
