@@ -284,7 +284,7 @@ pub struct Tier2SupportFit {
     pub term: SaeSupportSparseTerm,
     /// Per-atom smoothing strengths selected by the grouped-LAML outer engine.
     pub lambda_smooth: Vec<f64>,
-    /// Terminal profiled-Gaussian LAML criterion at the certified smoothing optimum
+    /// Terminal support quasi-Laplace criterion at the certified smoothing optimum
     /// (#2933 F27: not comparable with a dense quasi-Laplace score).
     pub criterion: crate::front_door::SaeCriterionScore,
     /// Inner fixed-point certificate (raw, undamped recurrence at stationarity).

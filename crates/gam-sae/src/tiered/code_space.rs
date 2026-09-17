@@ -771,7 +771,7 @@ pub fn harvest_code_space_pair_promotions(
 pub struct PairChartFit {
     /// Per-retained-atom smoothing strengths selected by the outer engine.
     pub lambda_smooth: Vec<f64>,
-    /// Terminal profiled-Gaussian LAML criterion at the certified smoothing optimum
+    /// Terminal support quasi-Laplace criterion at the certified smoothing optimum
     /// (#2933 F27: not comparable with a dense quasi-Laplace score).
     pub criterion: crate::front_door::SaeCriterionScore,
     /// Chart explained variance of the centered cloud (`1 − RSS/TSS`).

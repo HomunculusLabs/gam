@@ -1188,6 +1188,52 @@ impl SaeSupportSparseTerm {
         &self.atom_ard_axis_periods[atom]
     }
 
+    /// Negative log normalizer of the ARD coordinate prior, summed over every
+    /// active slot (#2933 F27 S1).
+    ///
+    /// Per slot this is `Σ_factors log Z_ard(α) − log(sheets)`: the per-row partition
+    /// over the coordinate's actual support, its Laplace constant, and the quotient
+    /// sheet count, as in the dense criterion's `loss.ard` (#2933 F24, F25, F26). A
+    /// TopK coordinate exists only on a row's active support, so an atom pays its
+    /// normalizer once per row that selects it. A zero precision is the typed
+    /// exemption for an embedded-sphere axis, whose Bingham partition stays finite.
+    /// On any other support it leaves no normalizer and is refused.
+    pub(crate) fn ard_log_partition_total(
+        &self,
+        ard_precisions: &[Vec<f64>],
+    ) -> Result<f64, String> {
+        self.validate_ard(ard_precisions)?;
+        let mut total = 0.0_f64;
+        for atom in 0..self.k_atoms() {
+            let slots = self.atom_rows[atom].len();
+            if slots == 0 {
+                continue;
+            }
+            let alpha = Array1::from(ard_precisions[atom].clone());
+            let log_alpha = alpha.mapv(f64::ln);
+            let supports = self.assignment.atom_prior_supports(atom);
+            let partition = SaeManifoldTerm::ard_log_partition(
+                &supports,
+                self.atom_ard_axis_periods(atom),
+                log_alpha.view(),
+                alpha.view(),
+            )?;
+            let per_slot = partition.per_factor.iter().sum::<f64>()
+                - self.atoms[atom]
+                    .basis_kind()
+                    .ard_quotient_log_sheets(self.assignment.atom_coord_dim(atom));
+            if !per_slot.is_finite() {
+                return Err(format!(
+                    "SaeSupportSparseTerm::ard_log_partition_total: atom {atom} has no finite ARD \
+                     partition at precisions {:?} on supports {supports:?}",
+                    ard_precisions[atom]
+                ));
+            }
+            total += slots as f64 * per_slot;
+        }
+        Ok(total)
+    }
+
     /// Total width of the compact coordinate state `T` — the concatenation of
     /// every row's active coordinate block.
     pub(crate) fn coordinate_state_len(&self) -> usize {

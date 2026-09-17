@@ -7,23 +7,26 @@
 //! sees the number of heterogeneous families, while the inner model still has
 //! distinct decoder functions and coordinates for every occupied atom.
 //!
-//! ## The criterion is ONE functional (#2576), and it is not the dense one (#2933 F27)
+//! ## The criterion is ONE functional (#2576), converging on the dense one (#2933 F27)
 //!
-//! `2·cost(ρ) = log|S| − log|S_ρ|₊ + df·(1 + ln(τ·D_p/df))`, where
-//! `S = H_ββ − Σ_i H_βt^(i) H_tt^(ⁱ)⁻¹ H_tβ^(ⁱ)` is the reduced decoder Schur
-//! complement of the Gauss–Newton system. The row-coordinate normalizer
-//! `Σ_i log|H_tt^(ⁱ)|` is removed, so the coordinates are profiled rather than
-//! integrated. The Gaussian dispersion is profiled out of the penalized deviance
-//! `D_p`, and the penalty pseudo-determinant `log|S_ρ|₊` carries its base term.
+//! `cost(ρ) = ℓ_pen + Σ log Z_ard + ½·(log|S| − log|S_ρ|₊)`. Here `ℓ_pen` is the
+//! penalized objective at unit dispersion, `log Z_ard` is the ARD coordinate prior's
+//! normalizer on every active slot, and `S = H_ββ − Σ_i H_βt^(i) H_tt^(ⁱ)⁻¹ H_tβ^(ⁱ)`
+//! is the reduced decoder Schur complement of the Gauss–Newton system.
 //!
-//! The dense SAE criterion is a different statistical objective. It keeps the
-//! coordinate block inside the observed information `log|A|` (#2668), scores the
-//! penalized loss at unit dispersion, adds a realised-rank charge, and has no
-//! `2π` constant. Both price the base pseudo-determinant (#2933 F26). A hard-TopK
-//! request that crosses `K = P`
-//! therefore changes criteria. The report carries a [`SaeCriterionScore`] of kind
-//! [`SaeCriterionKind::ProfiledGaussianLaml`], [`SaeCriterionScore::difference`]
-//! refuses a dense score, and [`SaeSupportLamlComponents`] names every term.
+//! The data term and both prior normalizers are the dense SAE criterion's
+//! (#2933 F24–F26, F27 S1). The value still departs from the dense criterion in five ways:
+//! - the curvature is the majorizer, not the exact observed information `log|A|`;
+//! - the row-coordinate normalizer `Σ_i log|H_tt^(ⁱ)|` is removed rather than
+//!   integrated (#2668 keeps it in the dense value);
+//! - no realised-rank charge and no collapse-prevention energy enter;
+//! - smoothing is shared per family;
+//! - the ARD precisions are fixed.
+//!
+//! So a hard-TopK request that crosses `K = P` still changes criteria. The report
+//! carries a [`SaeCriterionScore`] of kind [`SaeCriterionKind::SupportQuasiLaplace`],
+//! [`SaeCriterionScore::difference`] refuses a dense score, and
+//! [`SaeSupportCriterionComponents`] names every term.
 //!
 //! The normalizer comes from the evidence lane ([`SurrogateLaneState`]) the dense
 //! manifold criterion also runs. Where the dense `k × k` reduced Schur's complete
@@ -185,11 +188,11 @@ pub struct SaeSupportOuterReport {
     pub log_lambda_groups: Array1<f64>,
     pub lambda_smooth: Vec<f64>,
     pub ard_precisions: Vec<Vec<f64>>,
-    /// The terminal criterion, typed as the profiled-Gaussian LAML this lane
+    /// The terminal criterion, typed as the support quasi-Laplace score this lane
     /// minimizes. It does not compare with a dense quasi-Laplace score (#2933 F27).
     pub criterion: SaeCriterionScore,
     /// The named terms `criterion` is assembled from.
-    pub criterion_components: SaeSupportLamlComponents,
+    pub criterion_components: SaeSupportCriterionComponents,
     pub fixed_point: SaeSupportFixedPointReport,
     pub outer_iterations: usize,
     pub outer_certificate: OuterCriterionCertificate,
@@ -229,54 +232,43 @@ pub struct SaeSupportLogdetUncertainty {
 struct PenaltySpectrum {
     rank_by_group: Vec<usize>,
     log_pdet_base_by_group: Vec<f64>,
-    total_rank: usize,
 }
 
-/// The named terms of one support LAML value (#2933 F27):
-/// `2·cost = reduced_log_det − penalty_log_pdet
-///   + residual_df·(1 + ln(2π·penalized_deviance/residual_df))`.
+/// The named terms of one support criterion value (#2933 F27):
+/// `cost = penalized_objective + ard_log_partition + ½·(reduced_log_det − penalty_log_pdet)`.
 ///
-/// The terms show where this criterion departs from the dense quasi-Laplace score.
-/// The curvature is the Gauss–Newton reduced Schur with the row block profiled
-/// out. The scale is profiled out of the penalized deviance rather than held at
-/// one, which brings `2π`. No realised-rank charge enters.
+/// The data term and both prior normalizers are the dense quasi-Laplace score's.
+/// The departures show in `reduced_log_det`: it is the Gauss–Newton reduced Schur
+/// with the row block removed. No realised-rank charge or collapse-prevention
+/// energy enters.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SaeSupportLamlComponents {
+pub struct SaeSupportCriterionComponents {
+    /// `½‖y − ŷ‖² + ½·Σ_k λ_k β̂ᵀS_kβ̂` plus the ARD energy and every other penalty
+    /// the inner solve descends, at unit dispersion.
+    pub penalized_objective: f64,
+    /// The ARD prior's log partition summed over active slots, with its Laplace
+    /// constant and quotient sheet count.
+    pub ard_log_partition: f64,
     /// `log|S|` of the Gauss–Newton reduced decoder Schur complement.
     /// `Σ_i log|H_tt^(i)|` is not in it.
     pub reduced_log_det: f64,
     /// `log|λS|₊ = Σ_g (log|S_g|₊ + rank_g·ρ_g)`, base pseudo-determinant included.
     pub penalty_log_pdet: f64,
-    /// Response cells less the estimated unpenalized decoder directions.
-    pub residual_df: f64,
-    /// `D_p = 2·penalized_objective`: the residual sum of squares plus every
-    /// penalty the inner solve descends.
-    pub penalized_deviance: f64,
 }
 
-impl SaeSupportLamlComponents {
-    /// `½·df·(1 + ln(2π·D_p/df))`: the Gaussian likelihood with its dispersion
-    /// profiled out.
-    pub fn profiled_dispersion_term(&self) -> f64 {
-        0.5 * self.residual_df
-            * (1.0
-                + (std::f64::consts::TAU * self.penalized_deviance / self.residual_df).ln())
-    }
-
-    /// The support LAML value these terms assemble.
+impl SaeSupportCriterionComponents {
+    /// The support criterion value these terms assemble.
     pub fn value(&self) -> f64 {
-        0.5 * (self.reduced_log_det - self.penalty_log_pdet
-            + self.residual_df
-                * (1.0
-                    + (std::f64::consts::TAU * self.penalized_deviance / self.residual_df)
-                        .ln()))
+        self.penalized_objective
+            + self.ard_log_partition
+            + 0.5 * (self.reduced_log_det - self.penalty_log_pdet)
     }
 }
 
 #[derive(Clone)]
 struct SupportOuterEvaluation {
     cost: f64,
-    components: SaeSupportLamlComponents,
+    components: SaeSupportCriterionComponents,
     gradient: Array1<f64>,
     lambda_smooth: Vec<f64>,
     fixed_point: SaeSupportFixedPointReport,
@@ -395,11 +387,9 @@ fn penalty_spectrum(
             log_pdet_base_by_group[group] += term.output_dim() as f64 * value.ln();
         }
     }
-    let total_rank = rank_by_group.iter().sum();
     Ok(PenaltySpectrum {
         rank_by_group,
         log_pdet_base_by_group,
-        total_rank,
     })
 }
 
@@ -410,11 +400,10 @@ fn penalty_spectrum(
 /// The quotient pins those directions, where they add `log 1 = 0`. On its range the
 /// atom adds p times the log pseudo-determinant of `λS` to `log|S|`, and the penalty
 /// log pseudo-determinant adds the same amount, so it cancels. Null modes are counted on the rule
-/// `penalty_spectrum` counts rank on, so the returned count is exactly what
-/// `beta_nullity` has to drop.
+/// `penalty_spectrum` counts rank on.
 fn unused_atom_null_quotient(
     term: &SaeSupportSparseTerm,
-) -> Result<Option<(gam_solve::arrow_schur::ArrowBetaGaugeQuotient, usize)>, String> {
+) -> Result<Option<gam_solve::arrow_schur::ArrowBetaGaugeQuotient>, String> {
     let unused = term.atoms_without_rows();
     if unused.is_empty() {
         return Ok(None);
@@ -465,8 +454,7 @@ fn unused_atom_null_quotient(
             directions.push(direction);
         }
     }
-    gam_solve::arrow_schur::ArrowBetaGaugeQuotient::new(directions)
-        .map(|quotient| Some((quotient, pinned)))
+    gam_solve::arrow_schur::ArrowBetaGaugeQuotient::new(directions).map(Some)
 }
 
 impl SaeSupportOuterObjective {
@@ -785,67 +773,42 @@ impl SaeSupportOuterObjective {
             .assemble_arrow_schur(self.target.view(), &lambda_smooth, &self.ard_precisions)
             .map_err(outer_error)?;
         // #2576: atoms no row selects leave border directions nothing identifies. The
-        // evidence prices the quotient without them (`unused_atom_null_quotient`),
-        // and `beta_nullity` below drops the same count.
-        let pinned_dims = match unused_atom_null_quotient(&self.term).map_err(outer_error)? {
-            Some((quotient, pinned)) => {
-                system.set_beta_gauge_quotient(quotient).map_err(outer_error)?;
-                pinned
-            }
-            None => 0,
-        };
+        // evidence prices the quotient without them (`unused_atom_null_quotient`).
+        if let Some(quotient) = unused_atom_null_quotient(&self.term).map_err(outer_error)? {
+            system.set_beta_gauge_quotient(quotient).map_err(outer_error)?;
+        }
         let (reduced_logdet, logdet_derivative) = self.evidence_log_det(&system)?;
-        // Gaussian dispersion argument = the PENALIZED deviance
-        //   D_p(ρ) = ‖y − ŷ‖² + β̂ᵀ S_ρ β̂ + (every other penalty the inner solve descends),
-        // NOT the raw residual sum of squares. This mirrors the canonical dense
-        // manifold path, whose profiled-scale data term ranks `loss.total()`
-        // (data_fit + smoothness + ard + sparsity) — the full penalized loss —
-        // precisely so the envelope theorem makes the analytic outer gradient
-        // exact (construction_quasi_laplace.rs:357). `penalized_objective` returns
-        // ½·D_p (½‖y−ŷ‖² + ½Σ_k λ_k β̂ᵀS_kβ̂ + ARD), so 2× recovers D_p. At the inner
-        // optimum β̂ minimizes the full penalized objective, hence the envelope
-        // theorem gives d D_p/dρ_g = ∂_ρ_g D_p|_{β̂} = Σ_{k∈g} λ_k β̂ᵀS_kβ̂ = energy[g]
-        // — the exact numerator the gradient below already forms. With the RAW rss
-        // instead, d(rss)/dρ_g carries an implicit H⁻¹ envelope term ≠ energy[g],
-        // so value and gradient would descend different functions (the desync bug).
-        let deviance = 2.0
-            * self
-                .term
-                .penalized_objective(self.target.view(), &lambda_smooth, &self.ard_precisions)
-                .map_err(outer_error)?;
-        if !(deviance.is_finite() && deviance > 0.0) {
-            return Err(outer_error(format!(
-                "support LAML requires positive finite penalized deviance; got {deviance}"
-            )));
-        }
-        let (beta_offsets, beta_dim) = self.beta_layout()?;
-        // The pinned directions of atoms no row selects are not estimated, so they are
-        // not charged as fitted unpenalized coefficients.
-        let beta_nullity = beta_dim
-            .checked_sub(self.spectrum.total_rank)
-            .and_then(|nullity| nullity.checked_sub(pinned_dims))
-            .ok_or_else(|| outer_error("support smooth penalty rank exceeds beta dimension"))?;
-        let data_dim = self
+        // The data and prior energy at unit dispersion, the dense criterion's
+        // `loss.total()` on this representation (#2933 F27 S1):
+        //   ℓ_pen = ½‖y − ŷ‖² + ½·Σ_k λ_k β̂ᵀS_kβ̂ + ARD energy (+ every other penalty the inner solve descends).
+        // At the inner optimum θ̂ minimizes ℓ_pen, so the envelope theorem gives
+        // dℓ_pen/dρ_g = ∂_ρ_g ℓ_pen|_θ̂ = ½·Σ_{k∈g} λ_k β̂ᵀS_kβ̂ = ½·energy[g], the numerator
+        // the gradient below forms. The raw residual sum of squares would carry an
+        // implicit response instead, so value and gradient would describe different
+        // functions (#2576).
+        let penalized_objective = self
             .term
-            .n_obs()
-            .checked_mul(self.term.output_dim())
-            .ok_or_else(|| outer_error("support LAML data dimension overflow"))?;
-        if data_dim <= beta_nullity {
-            return Err(outer_error(format!(
-                "support LAML requires more response cells than unpenalized decoder coefficients; got {data_dim} <= {beta_nullity}"
-            )));
-        }
-        let residual_df = (data_dim - beta_nullity) as f64;
+            .penalized_objective(self.target.view(), &lambda_smooth, &self.ard_precisions)
+            .map_err(outer_error)?;
+        // The ARD prior's normalizer on every active slot: the partition, Laplace
+        // constant and quotient sheets the dense criterion's `loss.ard` carries
+        // (#2933 F24–F26). The precisions are fixed here, so it has no smoothing
+        // derivative.
+        let ard_log_partition = self
+            .term
+            .ard_log_partition_total(&self.ard_precisions)
+            .map_err(outer_error)?;
+        let (beta_offsets, beta_dim) = self.beta_layout()?;
         let mut penalty_logdet = 0.0;
         for group in 0..self.layout.group_keys.len() {
             penalty_logdet += self.spectrum.log_pdet_base_by_group[group]
                 + self.spectrum.rank_by_group[group] as f64 * rho[group];
         }
-        let components = SaeSupportLamlComponents {
+        let components = SaeSupportCriterionComponents {
+            penalized_objective,
+            ard_log_partition,
             reduced_log_det: reduced_logdet,
             penalty_log_pdet: penalty_logdet,
-            residual_df,
-            penalized_deviance: deviance,
         };
         let cost = components.value();
         // The surrogate's directional derivative is the exact FIXED-STATE
@@ -917,7 +880,7 @@ impl SaeSupportOuterObjective {
             }
             gradient[group] = 0.5
                 * (logdet_group_derivative - self.spectrum.rank_by_group[group] as f64
-                    + residual_df * energy[group] / deviance
+                    + energy[group]
                     - profile_response);
         }
         if !cost.is_finite() || gradient.iter().any(|value| !value.is_finite()) {
@@ -1208,7 +1171,7 @@ pub fn run_sae_support_outer(
         log_lambda_groups: search.rho,
         lambda_smooth: terminal.lambda_smooth,
         ard_precisions: request.ard_precisions,
-        criterion: SaeCriterionScore::new(SaeCriterionKind::ProfiledGaussianLaml, terminal.cost),
+        criterion: SaeCriterionScore::new(SaeCriterionKind::SupportQuasiLaplace, terminal.cost),
         criterion_components: terminal.components,
         fixed_point: terminal.fixed_point,
         outer_iterations: search.iterations,
@@ -1958,12 +1921,12 @@ mod tests {
         (deviance, rss)
     }
 
-    /// Decisive oracle for the value↔gradient desync. The outer value feeds the
-    /// penalized deviance `D_p` into the Gaussian dispersion term, and the
-    /// analytic gradient's dispersion channel is `½·residual_df·energy[g]/D_p`
-    /// with `energy[g] = Σ_{k∈g} λ_k β̂ᵀ S_k β̂ = penalty_energy_by_group`. Since
-    /// `residual_df` and `D_p` are common factors, value/gradient consistency of
-    /// that channel is EXACTLY the envelope identity `d D_p/dρ_g = energy[g]`.
+    /// Decisive oracle for the value↔gradient desync. The outer value carries the
+    /// penalized objective `½·D_p` at unit dispersion, and the analytic gradient's
+    /// energy channel is `½·energy[g]` with
+    /// `energy[g] = Σ_{k∈g} λ_k β̂ᵀ S_k β̂ = penalty_energy_by_group`. Value/gradient
+    /// consistency of that channel is EXACTLY the envelope identity
+    /// `d D_p/dρ_g = energy[g]`.
     /// Central-differencing the production `D_p` (with a full clean inner re-solve
     /// at each ρ±h) must reproduce the production `energy[g]` — this is the FD
     /// oracle the SPEC allows in tests. The same test also confirms that the RAW
@@ -2031,75 +1994,6 @@ mod tests {
             "raw-RSS derivative must visibly differ from the penalty energy so the \
              desync is caught (max gap {max_raw_gap:.3e}, energy scale {energy_scale:.3e})"
         );
-    }
-
-    /// Full-production oracle: the analytic gradient returned by `evaluate` must
-    /// match a central difference of the production value `cost`, restricted to
-    /// the dispersion channel that the desync corrupted. The joint log-det term is
-    /// a fixed-probe Hutchinson estimate (deterministic but not exact), so we
-    /// isolate the dispersion channel by subtracting the exact analytic log-det
-    /// and penalty-log-det contributions — both computed from the same production
-    /// quantities — leaving `½·residual_df·(1+ln(τ·D_p/df))`, whose FD must equal
-    /// the analytic `½·residual_df·energy[g]/D_p`.
-    #[test]
-    fn support_outer_value_dispersion_channel_matches_gradient() {
-        let mut objective = build_objective();
-        let base = array![0.4_f64.ln(), 2.2_f64.ln()];
-        let groups = objective.layout.group_keys.len();
-
-        // residual_df is a ρ-independent constant of the fixture.
-        let (_, beta_dim) = objective.beta_layout().expect("beta layout");
-        let beta_nullity = beta_dim - objective.spectrum.total_rank;
-        let data_dim = objective.term.n_obs() * objective.term.output_dim();
-        let residual_df = (data_dim - beta_nullity) as f64;
-        assert!(residual_df > 0.0);
-
-        let dispersion_value =
-            |objective: &mut SaeSupportOuterObjective, rho: &Array1<f64>| -> f64 {
-                let (deviance, _) = deviance_and_rss(objective, rho);
-                0.5 * residual_df * (1.0 + (std::f64::consts::TAU * deviance / residual_df).ln())
-            };
-
-        // Analytic dispersion-channel gradient from production quantities.
-        objective.reset();
-        let lambda_base = objective.layout.expand(&base).expect("expand");
-        objective
-            .term
-            .solve_fixed_point(
-                objective.target.view(),
-                &lambda_base,
-                &objective.ard_precisions,
-                objective.max_inner_iter,
-                objective.inner_tolerance,
-                objective.trust_radius,
-            )
-            .expect("base inner fixed point");
-        let deviance_base = 2.0
-            * objective
-                .term
-                .penalized_objective(
-                    objective.target.view(),
-                    &lambda_base,
-                    &objective.ard_precisions,
-                )
-                .expect("penalized objective");
-        let energy = objective.penalty_energy_by_group(&lambda_base);
-
-        let h = 1.0e-4;
-        for g in 0..groups {
-            let analytic = 0.5 * residual_df * energy[g] / deviance_base;
-            let mut plus = base.clone();
-            let mut minus = base.clone();
-            plus[g] += h;
-            minus[g] -= h;
-            let fd = (dispersion_value(&mut objective, &plus)
-                - dispersion_value(&mut objective, &minus))
-                / (2.0 * h);
-            assert!(
-                (analytic - fd).abs() <= 1.0e-6 * (1.0 + analytic.abs()),
-                "group {g}: analytic dispersion gradient {analytic:.9e} != FD {fd:.9e}"
-            );
-        }
     }
 
     /// #2576 regression, the blunt one: the criterion must PRODUCE A NUMBER.
@@ -2589,7 +2483,6 @@ mod tests {
         let components = evaluation.components;
 
         // Support value at the FROZEN state, rebuilt from production pieces.
-        let residual_df = components.residual_df;
         let support_frozen = |objective: &mut SaeSupportOuterObjective, rho: &Array1<f64>| {
             let lambda = objective.layout.expand(rho).expect("expand");
             let system = objective
@@ -2603,20 +2496,19 @@ mod tests {
                         + objective.spectrum.rank_by_group[group] as f64 * rho[group]
                 })
                 .sum::<f64>();
-            let penalized_deviance = 2.0
-                * objective
-                    .term
-                    .penalized_objective(
-                        objective.target.view(),
-                        &lambda,
-                        &objective.ard_precisions,
-                    )
-                    .expect("penalized objective");
-            SaeSupportLamlComponents {
+            let penalized_objective = objective
+                .term
+                .penalized_objective(objective.target.view(), &lambda, &objective.ard_precisions)
+                .expect("penalized objective");
+            let ard_log_partition = objective
+                .term
+                .ard_log_partition_total(&objective.ard_precisions)
+                .expect("ARD log partition");
+            SaeSupportCriterionComponents {
+                penalized_objective,
+                ard_log_partition,
                 reduced_log_det,
                 penalty_log_pdet,
-                residual_df,
-                penalized_deviance,
             }
             .value()
         };
@@ -2733,16 +2625,15 @@ mod tests {
 
         eprintln!(
             "[#2933 F27] support: cost={:.12e} rebuilt={support_rebuilt:.12e} \
-             reduced_log_det={:.9e} penalty_log_pdet={:.9e} base_pdet={:?} residual_df={} \
-             D_p={:.9e} profiled_dispersion_term={:.9e} rss={rss:.9e} smooth_energy={smooth_energy:.9e} \
+             penalized_objective={:.9e} ard_log_partition={:.9e} reduced_log_det={:.9e} \
+             penalty_log_pdet={:.9e} base_pdet={:?} rss={rss:.9e} smooth_energy={smooth_energy:.9e} \
              explicit_gradient={support_gradient:?} profiled_gradient={:?}",
             evaluation.cost,
+            components.penalized_objective,
+            components.ard_log_partition,
             components.reduced_log_det,
             components.penalty_log_pdet,
             objective.spectrum.log_pdet_base_by_group,
-            components.residual_df,
-            components.penalized_deviance,
-            components.profiled_dispersion_term(),
             evaluation.gradient,
         );
         match &dense_value {
@@ -2808,5 +2699,84 @@ mod tests {
         let dense_score = SaeCriterionScore::new(dense_kind, dense_value);
         let support_score = SaeCriterionScore::new(support_kind, evaluation.cost);
         assert!(dense_score.difference(&support_score).is_err());
+    }
+
+    /// #2933 F27 S1 — the support value prices the ARD prior's normalizer on every
+    /// active slot, as the dense criterion's `loss.ard` does, and holds the
+    /// dispersion at one.
+    ///
+    /// The fixture has one periodic slot (period 1) and one plane slot with two line
+    /// axes. Expected normalizers:
+    /// - periodic: a trapezoid quadrature of `∫₀¹ exp[−(α/κ²)(1 − cos κt)] dt`
+    ///   (spectrally exact for a smooth periodic integrand), not the Bessel closed
+    ///   form production evaluates, less the Laplace constant `½·log 2π`;
+    /// - line axes: `½·log(2π/α)` from the Gaussian integral, less the same
+    ///   constant, i.e. `−½·log α`.
+    /// The precisions are chosen so neither normalizer is zero. The value must be
+    /// assembled from the penalized objective at unit dispersion, that normalizer
+    /// and the two log-determinants, with no profiled dispersion.
+    #[test]
+    fn support_value_prices_the_ard_partition_on_active_slots_2933_f27() {
+        let mut objective = build_objective();
+        objective.ard_precisions = vec![vec![1.7], vec![3.0, 1.5]];
+        let rho = array![0.4_f64.ln(), 2.2_f64.ln()];
+        let evaluation = objective.evaluate(&rho).expect("support value evaluates");
+        let components = evaluation.components;
+
+        let kappa = std::f64::consts::TAU;
+        let nodes = 512usize;
+        let integral = (0..nodes)
+            .map(|node| {
+                let t = node as f64 / nodes as f64;
+                (-(1.7 / (kappa * kappa)) * (1.0 - (kappa * t).cos())).exp()
+            })
+            .sum::<f64>()
+            / nodes as f64;
+        let laplace = 0.5 * std::f64::consts::TAU.ln();
+        let circle_slot = integral.ln() - laplace;
+        let plane_slot = -0.5 * 3.0_f64.ln() - 0.5 * 1.5_f64.ln();
+        let expected = circle_slot + plane_slot;
+        let penalized_objective = objective
+            .term
+            .penalized_objective(
+                objective.target.view(),
+                &evaluation.lambda_smooth,
+                &objective.ard_precisions,
+            )
+            .expect("penalized objective");
+        eprintln!(
+            "[#2933 F27 S1] ard_log_partition={:.12e} expected={expected:.12e} \
+             penalized_objective={:.12e} reference={penalized_objective:.12e} \
+             reduced_log_det={:.9e} penalty_log_pdet={:.9e} cost={:.12e}",
+            components.ard_log_partition,
+            components.penalized_objective,
+            components.reduced_log_det,
+            components.penalty_log_pdet,
+            evaluation.cost,
+        );
+        assert!(
+            expected.abs() > 1.0e-2,
+            "the fixture must exercise a non-zero normalizer, got {expected:.3e}"
+        );
+        assert!(
+            (components.ard_log_partition - expected).abs() <= 1.0e-10 * (1.0 + expected.abs()),
+            "ARD normalizer {:.12e} != quadrature and Gaussian reference {expected:.12e}",
+            components.ard_log_partition
+        );
+        assert!(
+            (components.penalized_objective - penalized_objective).abs()
+                <= 1.0e-12 * (1.0 + penalized_objective.abs()),
+            "data term {:.12e} is not the penalized objective {penalized_objective:.12e} at unit \
+             dispersion",
+            components.penalized_objective
+        );
+        let assembled = penalized_objective
+            + expected
+            + 0.5 * (components.reduced_log_det - components.penalty_log_pdet);
+        assert!(
+            (evaluation.cost - assembled).abs() <= 1.0e-9 * (1.0 + assembled.abs()),
+            "support value {:.12e} != ℓ_pen + Σ log Z_ard + ½(log|S| − log|λS|₊) = {assembled:.12e}",
+            evaluation.cost
+        );
     }
 }

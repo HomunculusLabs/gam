@@ -37,7 +37,7 @@ pub(crate) const SUPPORT_SCHEMA_TAG: &str = "gamfit.ManifoldSAE/support-v2";
 /// The criterion every support fit reports. The representation fixes it, so a
 /// payload carries the tag for its readers and loading re-derives it.
 const SUPPORT_CRITERION_KIND: gam::terms::sae::front_door::SaeCriterionKind =
-    gam::terms::sae::front_door::SaeCriterionKind::ProfiledGaussianLaml;
+    gam::terms::sae::front_door::SaeCriterionKind::SupportQuasiLaplace;
 
 fn required_field<'py>(
     payload: &Bound<'py, PyDict>,
@@ -688,8 +688,8 @@ impl SupportSparseManifoldSaeCore {
     fn reconstruction_r2(&self) -> f64 {
         self.reconstruction_r2
     }
-    /// The terminal support LAML value. It is a profiled-Gaussian LAML on the
-    /// Gauss–Newton reduced Schur, not the dense fit's
+    /// The terminal support criterion value. It is the support route's
+    /// quasi-Laplace score on the Gauss–Newton reduced Schur, not the dense fit's
     /// `penalized_quasi_laplace_criterion`, and the two do not compare (#2933 F27).
     #[getter]
     fn criterion(&self) -> f64 {

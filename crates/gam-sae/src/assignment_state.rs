@@ -316,6 +316,20 @@ impl SaeAssignmentState {
         periods
     }
 
+    /// Coordinate-prior supports for one atom, resolved on the same declared
+    /// manifold and retraction override as [`Self::atom_axis_periods`].
+    pub fn atom_prior_supports(
+        &self,
+        atom: usize,
+    ) -> Vec<gam_terms::latent::CoordinatePriorSupport> {
+        let meta = &self.atom_coord_meta[atom];
+        gam_terms::latent::coordinate_prior_supports(
+            &meta.manifold,
+            &meta.retraction,
+            meta.latent_dim,
+        )
+    }
+
     /// Coordinate block for one active support slot.
     pub fn coords_for_slot(&self, row: usize, slot: usize) -> &[f64] {
         let start: usize = self.indices[row][..slot]

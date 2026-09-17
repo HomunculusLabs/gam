@@ -262,6 +262,37 @@ impl CoordinatePriorSupport {
     }
 }
 
+/// Coordinate-prior supports of a `latent_dim`-axis coordinate block with declared
+/// `manifold` and override `retraction_registry` (see [`LatentManifold::prior_supports`]).
+/// A non-Euclidean declared manifold is authoritative. On a Euclidean one an explicit
+/// override retraction, if any, decides. The factors tile `latent_dim` axes. Every
+/// coordinate representation (the dense per-atom block and the support-sparse slots)
+/// reads its prior supports here.
+pub fn coordinate_prior_supports(
+    manifold: &LatentManifold,
+    retraction_registry: &LatentRetractionRegistry,
+    latent_dim: usize,
+) -> Vec<CoordinatePriorSupport> {
+    let supports = if manifold.is_euclidean() {
+        match retraction_registry.kind() {
+            Some(kind) => {
+                let mut out = Vec::new();
+                CoordinatePriorSupport::push_retraction_supports(kind, &mut out);
+                out
+            }
+            None => vec![CoordinatePriorSupport::Line; latent_dim],
+        }
+    } else {
+        manifold.prior_supports(latent_dim)
+    };
+    let width: usize = supports.iter().map(CoordinatePriorSupport::ambient_axes).sum();
+    assert_eq!(
+        width, latent_dim,
+        "coordinate_prior_supports span {width} axes != latent_dim {latent_dim}"
+    );
+    supports
+}
+
 impl LatentManifold {
     pub fn is_euclidean(&self) -> bool {
         matches!(self, Self::Euclidean)
@@ -1114,25 +1145,7 @@ impl LatentCoordValues {
     /// is authoritative, and on a Euclidean one an explicit override retraction
     /// (if any) decides. The factors tile `latent_dim` axes.
     pub fn effective_prior_supports(&self) -> Vec<CoordinatePriorSupport> {
-        let supports = if self.manifold.is_euclidean() {
-            match self.retraction_registry.kind() {
-                Some(kind) => {
-                    let mut out = Vec::new();
-                    CoordinatePriorSupport::push_retraction_supports(kind, &mut out);
-                    out
-                }
-                None => vec![CoordinatePriorSupport::Line; self.latent_dim],
-            }
-        } else {
-            self.manifold.prior_supports(self.latent_dim)
-        };
-        let width: usize = supports.iter().map(CoordinatePriorSupport::ambient_axes).sum();
-        assert_eq!(
-            width, self.latent_dim,
-            "effective_prior_supports span {width} axes != latent_dim {}",
-            self.latent_dim
-        );
-        supports
+        coordinate_prior_supports(&self.manifold, &self.retraction_registry, self.latent_dim)
     }
 
     pub fn with_manifold(&self, manifold: LatentManifold) -> Self {

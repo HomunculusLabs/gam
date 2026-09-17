@@ -8,7 +8,7 @@
 //! they do NOT all minimize one criterion. The hard-TopK request crosses a
 //! criterion boundary at `K = P`: [`SaeFitLane::DenseCertification`] scores a
 //! [`SaeCriterionKind::PenalizedQuasiLaplace`] value and
-//! [`SaeFitLane::CurvedStreaming`] a [`SaeCriterionKind::ProfiledGaussianLaml`]
+//! [`SaeFitLane::CurvedStreaming`] a [`SaeCriterionKind::SupportQuasiLaplace`]
 //! one. The admission names the kind ([`SaeFitLane::criterion_kind`]), and
 //! [`SaeCriterionScore::difference`] refuses to compare the two (#2933 F27):
 //!
@@ -59,7 +59,7 @@ impl SaeFitLane {
         match self {
             Self::DenseCertification => Some(SaeCriterionKind::PenalizedQuasiLaplace),
             Self::SparseCodes => None,
-            Self::CurvedStreaming => Some(SaeCriterionKind::ProfiledGaussianLaml),
+            Self::CurvedStreaming => Some(SaeCriterionKind::SupportQuasiLaplace),
         }
     }
 }
@@ -84,25 +84,28 @@ impl SaeFitLane {
 ///   An outer objective declares its collapse-prevention weights once
 ///   (#2933 F05), so two values of this kind compare only under one declared
 ///   gate set.
-/// * [`Self::ProfiledGaussianLaml`]: the support-sparse grouped LAML
+/// * [`Self::SupportQuasiLaplace`]: the support-sparse route
 ///   (`crate::manifold::run_sae_support_outer`),
-///   `2V = log|S_red| − log|λS|₊ + df·(1 + ln(2π·D_p/df))`. `S_red` is the
+///   `V = ℓ_pen + Σ log Z_ard + ½·log|S_red| − ½·log|λS|₊`. It shares the dense data
+///   term at unit dispersion, the ARD normalizer on each active slot, and the
+///   complete penalty pseudo-determinant (#2933 F27 S1). `S_red` is the
 ///   Gauss–Newton reduced decoder Schur complement with the row coordinate block
-///   `Σ_i log|H_tt^(i)|` profiled out. The Gaussian dispersion is profiled out of
-///   the penalized deviance `D_p`, which brings the `2π` constant. The penalty
-///   pseudo-determinant is complete, base included. There is no rank charge.
+///   `Σ_i log|H_tt^(i)|` removed. So the curvature is the majorizer rather than
+///   the exact observed information, and the coordinates are profiled rather
+///   than integrated. There is no rank charge and no collapse-prevention energy.
 ///   Smoothing is shared per `(basis kind, latent dimension)` family, and the ARD
 ///   precisions are fixed.
 ///
-/// They differ in scale convention, curvature operator, coordinate treatment,
-/// rank pricing, constants and hyperparameter layout, so neither value
-/// approximates the other and their difference measures nothing.
+/// The two kinds differ in curvature operator, coordinate treatment, rank
+/// pricing, prevention energy and hyperparameter layout. Neither value
+/// approximates the other, and their difference measures nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SaeCriterionKind {
     /// Unit-dispersion penalized quasi-Laplace score on the observed information.
     PenalizedQuasiLaplace,
-    /// Profiled-dispersion Gaussian LAML on the Gauss–Newton reduced Schur.
-    ProfiledGaussianLaml,
+    /// Unit-dispersion quasi-Laplace score on the support representation's
+    /// Gauss–Newton reduced Schur.
+    SupportQuasiLaplace,
 }
 
 impl SaeCriterionKind {
@@ -110,7 +113,7 @@ impl SaeCriterionKind {
     pub const fn tag(self) -> &'static str {
         match self {
             Self::PenalizedQuasiLaplace => "penalized_quasi_laplace",
-            Self::ProfiledGaussianLaml => "profiled_gaussian_laml",
+            Self::SupportQuasiLaplace => "support_quasi_laplace",
         }
     }
 }
@@ -523,25 +526,25 @@ mod tests {
         );
         assert_eq!(
             past_p.lane.criterion_kind(),
-            Some(SaeCriterionKind::ProfiledGaussianLaml)
+            Some(SaeCriterionKind::SupportQuasiLaplace)
         );
         assert_eq!(SaeFitLane::SparseCodes.criterion_kind(), None);
         assert_ne!(
             SaeCriterionKind::PenalizedQuasiLaplace.tag(),
-            SaeCriterionKind::ProfiledGaussianLaml.tag()
+            SaeCriterionKind::SupportQuasiLaplace.tag()
         );
 
         let dense = SaeCriterionScore::new(SaeCriterionKind::PenalizedQuasiLaplace, 12.5);
-        let support = SaeCriterionScore::new(SaeCriterionKind::ProfiledGaussianLaml, 12.5);
+        let support = SaeCriterionScore::new(SaeCriterionKind::SupportQuasiLaplace, 12.5);
         let err = dense
             .difference(&support)
             .expect_err("equal numbers of different kinds must not compare as equal scores");
         assert!(
-            err.contains("penalized_quasi_laplace") && err.contains("profiled_gaussian_laml"),
+            err.contains("penalized_quasi_laplace") && err.contains("support_quasi_laplace"),
             "refusal must name both kinds; got: {err}"
         );
         assert!(support.difference(&dense).is_err());
-        let later = SaeCriterionScore::new(SaeCriterionKind::ProfiledGaussianLaml, 10.0);
+        let later = SaeCriterionScore::new(SaeCriterionKind::SupportQuasiLaplace, 10.0);
         assert_eq!(later.difference(&support), Ok(-2.5));
     }
 
