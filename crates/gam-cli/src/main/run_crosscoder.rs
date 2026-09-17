@@ -111,7 +111,6 @@ pub(crate) fn run_crosscoder(args: CrosscoderArgs) -> CliResult<()> {
         .collect::<Result<Vec<_>, String>>()?;
     let config = SaeCrosscoderAutoFitOverrides {
         random_state: args.random_state,
-        ..SaeCrosscoderAutoFitOverrides::default()
     }
     .resolve(args.atoms, args.harmonics);
     let fit = run_auto_sae_crosscoder_fit(SaeCrosscoderAutoFitRequest {

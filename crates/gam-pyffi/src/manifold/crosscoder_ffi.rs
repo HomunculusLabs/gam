@@ -103,12 +103,6 @@ impl ManifoldCrosscoderCore {
     targets,
     n_atoms,
     n_harmonics,
-    sparsity_strength = None,
-    smoothness = None,
-    max_iter = None,
-    learning_rate = None,
-    ridge_ext_coord = None,
-    ridge_beta = None,
     random_state = None,
 ))]
 fn sae_crosscoder_fit<'py>(
@@ -119,12 +113,6 @@ fn sae_crosscoder_fit<'py>(
     targets: Vec<PyReadonlyArray2<'py, f64>>,
     n_atoms: usize,
     n_harmonics: usize,
-    sparsity_strength: Option<f64>,
-    smoothness: Option<f64>,
-    max_iter: Option<usize>,
-    learning_rate: Option<f64>,
-    ridge_ext_coord: Option<f64>,
-    ridge_beta: Option<f64>,
     random_state: Option<u64>,
 ) -> PyResult<Py<ManifoldCrosscoderCore>> {
     use gam::terms::sae::manifold::{
@@ -142,16 +130,7 @@ fn sae_crosscoder_fit<'py>(
             .collect(),
     )
     .map_err(py_value_error)?;
-    let config = SaeCrosscoderAutoFitOverrides {
-        sparsity_strength,
-        smoothness,
-        max_iter,
-        learning_rate,
-        ridge_ext_coord,
-        ridge_beta,
-        random_state,
-    }
-    .resolve(n_atoms, n_harmonics);
+    let config = SaeCrosscoderAutoFitOverrides { random_state }.resolve(n_atoms, n_harmonics);
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let request = SaeCrosscoderAutoFitRequest {
         anchor_label,
@@ -204,12 +183,6 @@ impl ManifoldBehaviorCore {
     probabilities,
     n_atoms,
     n_harmonics,
-    sparsity_strength = None,
-    smoothness = None,
-    max_iter = None,
-    learning_rate = None,
-    ridge_ext_coord = None,
-    ridge_beta = None,
     random_state = None,
 ))]
 fn sae_behavior_fit<'py>(
@@ -218,28 +191,13 @@ fn sae_behavior_fit<'py>(
     probabilities: PyReadonlyArray2<'py, f64>,
     n_atoms: usize,
     n_harmonics: usize,
-    sparsity_strength: Option<f64>,
-    smoothness: Option<f64>,
-    max_iter: Option<usize>,
-    learning_rate: Option<f64>,
-    ridge_ext_coord: Option<f64>,
-    ridge_beta: Option<f64>,
     random_state: Option<u64>,
 ) -> PyResult<Py<ManifoldBehaviorCore>> {
     use gam::terms::sae::manifold::{
         SaeBehaviorAutoFitRequest, SaeCrosscoderAutoFitOverrides, run_auto_sae_behavior_fit,
     };
 
-    let config = SaeCrosscoderAutoFitOverrides {
-        sparsity_strength,
-        smoothness,
-        max_iter,
-        learning_rate,
-        ridge_ext_coord,
-        ridge_beta,
-        random_state,
-    }
-    .resolve(n_atoms, n_harmonics);
+    let config = SaeCrosscoderAutoFitOverrides { random_state }.resolve(n_atoms, n_harmonics);
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let request = SaeBehaviorAutoFitRequest {
         activation: activation.as_array().to_owned(),

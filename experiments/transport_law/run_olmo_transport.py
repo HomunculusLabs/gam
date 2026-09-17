@@ -29,7 +29,7 @@ Launch (MSI)
 ------------
     python experiments/transport_law/run_olmo_transport.py \
         --activations /projects/standard/hsiehph/sauer354/olmo_data/<rev>/activations.npy \
-        --layer 25 --rows 635 --n-atoms 32 --grid-resolution 512 \
+        --layer 25 --rows 635 --n-atoms 32 \
         --out $PWD/transport_law_L25
 
 The public call is a thin array marshaller. Target stacking, shared-chart seed,
@@ -80,7 +80,6 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--rows", type=int, default=None, help="max prompts/rows to use (default: all)")
     ap.add_argument("--n-atoms", type=int, default=32, help="number of shared circle atoms K")
     ap.add_argument("--n-harmonics", type=int, default=3, help="Fourier order per circle atom")
-    ap.add_argument("--inner-max-iter", type=int, default=80, help="inner arrow-Schur iterations")
     ap.add_argument("--out", required=True, help="output directory for the JSON report")
     args = ap.parse_args(argv)
 
@@ -95,9 +94,7 @@ def main(argv: list[str] | None = None) -> int:
     from gamfit import sae_crosscoder_fit  # noqa: E402  (import after data load)
 
     controls = {
-        "max_iter": args.inner_max_iter,
-        "ridge_ext_coord": 1e-6,
-        "ridge_beta": 1e-6,
+        "n_atoms": args.n_atoms,
         "n_harmonics": args.n_harmonics,
     }
     model = sae_crosscoder_fit(
@@ -106,9 +103,6 @@ def main(argv: list[str] | None = None) -> int:
         anchor_label=f"L{args.layer}",
         n_atoms=args.n_atoms,
         n_harmonics=args.n_harmonics,
-        max_iter=args.inner_max_iter,
-        ridge_ext_coord=1e-6,
-        ridge_beta=1e-6,
     )
     fit = model.to_dict()
     reports = list(fit["transport"])

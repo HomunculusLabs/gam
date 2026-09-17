@@ -41,6 +41,5 @@ def test_crosscoder_facade_marshals_named_targets_without_math(monkeypatch):
     assert rust.args[1] == "early"
     assert rust.args[2] == ["late"]
     assert rust.args[4:6] == (2, 1)
-    assert rust.args[6:13] == (None,) * 7
-    assert rust.args[13:15] == (None, None)
-    assert len(rust.args) == 15
+    assert rust.args[6] is None
+    assert len(rust.args) == 7

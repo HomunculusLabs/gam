@@ -16,12 +16,6 @@ def sae_crosscoder_fit(
     anchor_label: str = "anchor",
     n_atoms: int,
     n_harmonics: int,
-    sparsity_strength: float | None = None,
-    smoothness: float | None = None,
-    max_iter: int | None = None,
-    learning_rate: float | None = None,
-    ridge_ext_coord: float | None = None,
-    ridge_beta: float | None = None,
     random_state: int | None = None,
 ) -> Any:
     """Fit one shared-chart manifold dictionary across row-aligned layers.
@@ -56,12 +50,6 @@ def sae_crosscoder_fit(
         arrays,
         int(n_atoms),
         int(n_harmonics),
-        sparsity_strength,
-        smoothness,
-        max_iter,
-        learning_rate,
-        ridge_ext_coord,
-        ridge_beta,
         random_state,
     )
 

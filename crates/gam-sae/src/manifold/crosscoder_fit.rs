@@ -149,40 +149,17 @@ impl SaeCrosscoderAutoFitConfig {
     }
 }
 
-/// Optional binding/CLI overrides. Resolution onto the Rust-owned standard
-/// config happens here so every front door has identical defaults.
+/// The one front-door choice over the Rust-owned standard config: the random
+/// seed. `gam crosscoder`, gamfit and the bindings all resolve through here, so
+/// no front door can fit with controls another one cannot reach.
 #[derive(Clone, Debug, Default)]
 pub struct SaeCrosscoderAutoFitOverrides {
-    pub sparsity_strength: Option<f64>,
-    pub smoothness: Option<f64>,
-    pub max_iter: Option<usize>,
-    pub learning_rate: Option<f64>,
-    pub ridge_ext_coord: Option<f64>,
-    pub ridge_beta: Option<f64>,
     pub random_state: Option<u64>,
 }
 
 impl SaeCrosscoderAutoFitOverrides {
     pub fn resolve(self, n_atoms: usize, n_harmonics: usize) -> SaeCrosscoderAutoFitConfig {
         let mut config = SaeCrosscoderAutoFitConfig::standard(n_atoms, n_harmonics);
-        if let Some(value) = self.sparsity_strength {
-            config.sparsity_strength = value;
-        }
-        if let Some(value) = self.smoothness {
-            config.smoothness = value;
-        }
-        if let Some(value) = self.max_iter {
-            config.max_iter = value;
-        }
-        if let Some(value) = self.learning_rate {
-            config.learning_rate = value;
-        }
-        if let Some(value) = self.ridge_ext_coord {
-            config.ridge_ext_coord = value;
-        }
-        if let Some(value) = self.ridge_beta {
-            config.ridge_beta = value;
-        }
         if let Some(value) = self.random_state {
             config.random_state = value;
         }

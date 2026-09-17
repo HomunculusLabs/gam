@@ -15,12 +15,6 @@ def sae_behavior_fit(
     *,
     n_atoms: int,
     n_harmonics: int,
-    sparsity_strength: float | None = None,
-    smoothness: float | None = None,
-    max_iter: int | None = None,
-    learning_rate: float | None = None,
-    ridge_ext_coord: float | None = None,
-    ridge_beta: float | None = None,
     random_state: int | None = None,
 ) -> Any:
     """Fit joint activation/behavior atoms through one converged REML objective.
@@ -49,12 +43,6 @@ def sae_behavior_fit(
         probability_array,
         int(n_atoms),
         int(n_harmonics),
-        sparsity_strength,
-        smoothness,
-        max_iter,
-        learning_rate,
-        ridge_ext_coord,
-        ridge_beta,
         random_state,
     )
 
