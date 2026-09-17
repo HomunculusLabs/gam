@@ -1,5 +1,6 @@
 pub mod constrained_partition;
 pub mod fast_channel;
+pub mod gaussian_activation;
 mod jet_algebra;
 pub mod jet_partitions;
 pub mod jet_scalar;
