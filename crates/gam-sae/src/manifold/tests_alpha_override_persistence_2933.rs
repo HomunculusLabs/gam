@@ -404,3 +404,56 @@ fn prior_parameters_name_the_concentration_and_the_weight_2933() {
         }
     }
 }
+
+/// `(sparse target, sparse upper face, whole upper face)` of the reactive entry box for
+/// one ordered Beta--Bernoulli configuration on a fixed Euclidean fixture.
+fn reactive_sparse_face(
+    mode: AssignmentMode,
+    override_alpha: Option<f64>,
+) -> (f64, f64, Array1<f64>) {
+    let z = planted_circle_embedded(24, 4, 0.03);
+    let k = 2;
+    let (mut term, _) = build_term(z.view(), k, Topo::Euclidean, mode);
+    let config = term.fit_config();
+    term.set_fit_config(SaeFitConfig {
+        ordered_beta_bernoulli_alpha_override: override_alpha,
+        ..config
+    });
+    let rho = SaeManifoldRho::new(0.01_f64.ln(), 0.0, vec![array![0.0]; k]).for_assignment(mode);
+    let index = rho
+        .sparse_flat_index()
+        .expect("an ordered Beta--Bernoulli prior owns a sparse coordinate");
+    let upper = super::outer_objective::reactive_rho_domain_upper(&term, &rho, TEMPERATURE)
+        .unwrap_or_else(|error| panic!("reactive box for override={override_alpha:?}: {error}"));
+    (rho.to_flat()[index], upper[index], upper)
+}
+
+/// The reactive entry box follows what the sparse coordinate carries. An override-pinned
+/// learnable mode and its fixed-concentration twin define one objective, so they must
+/// receive one box. The learnable mode without an override, which keeps the
+/// native-curvature cap, shows that the cap is live on this fixture.
+#[test]
+fn overridden_learnable_alpha_reactive_box_matches_the_fixed_twin_2933() {
+    let (control_target, control_face, _) = reactive_sparse_face(
+        AssignmentMode::ordered_beta_bernoulli(TEMPERATURE, BASE_ALPHA, true),
+        None,
+    );
+    assert!(
+        control_face > control_target + 1.0,
+        "the native-curvature cap must be live on this fixture: sparse target \
+         {control_target:.6}, capped face {control_face:.6}"
+    );
+    let (_, twin_face, twin_box) = reactive_sparse_face(
+        AssignmentMode::ordered_beta_bernoulli(TEMPERATURE, OVERRIDE_ALPHA, false),
+        None,
+    );
+    let (_, pinned_face, pinned_box) = reactive_sparse_face(
+        AssignmentMode::ordered_beta_bernoulli(TEMPERATURE, BASE_ALPHA, true),
+        Some(OVERRIDE_ALPHA),
+    );
+    assert_eq!(
+        pinned_box, twin_box,
+        "override-pinned learnable mode (sparse face {pinned_face:.6}) and its fixed twin \
+         (sparse face {twin_face:.6}) define one objective and must receive one reactive box"
+    );
+}

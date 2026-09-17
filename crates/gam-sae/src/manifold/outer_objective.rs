@@ -3149,7 +3149,7 @@ fn resolvability_domain_faces(
 /// convexifying heavy-entry direction. Every bound is at least the literal
 /// target strength. No criterion probe or fitted-state trial participates in
 /// constructing the box.
-fn reactive_rho_domain_upper(
+pub(super) fn reactive_rho_domain_upper(
     term: &SaeManifoldTerm,
     rho: &SaeManifoldRho,
     entry_temperature: f64,
@@ -3185,18 +3185,17 @@ fn reactive_rho_domain_upper(
         }
     }
 
-    // Fixed-alpha ordered Beta--Bernoulli carries no assignment-strength dependence. Every other
-    // present assignment coordinate is capped on the same largest observed
-    // native-curvature scale, rather than inheriting the unrelated generic
-    // `exp(30)` strength.
+    // An ordered Beta--Bernoulli prior whose concentration is effectively fixed keeps the
+    // literal target on its sparse coordinate. Every other present assignment coordinate
+    // is capped on the same largest observed native-curvature scale, rather than
+    // inheriting the unrelated generic `exp(30)` strength. The exemption reads the
+    // resolved concentration, not the raw `learnable_alpha` flag, so an override and its
+    // fixed-concentration twin (one objective) receive one box (#2933 F06).
     if let Some(index) = rho.sparse_flat_index()
-        && !matches!(
+        && !(matches!(
             entry_term.assignment.mode,
-            AssignmentMode::OrderedBetaBernoulli {
-                learnable_alpha: false,
-                ..
-            }
-        )
+            AssignmentMode::OrderedBetaBernoulli { .. }
+        ) && !entry_term.assignment.effective_alpha_is_learnable())
         && largest_native_scale > 0.0
     {
         let target_strength = target[index].exp();
