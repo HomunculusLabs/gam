@@ -53,7 +53,7 @@ fn rescaling_the_latent_score_leaves_the_row_likelihood_invariant() {
     let field = covariance.clone().into();
     let workspace = RigidVectorValueWorkspace::new(&field);
     let reference = survival_marginal_slope_vector_neglog(
-        0, 0.31, 0.62, 0.44, &slopes, &z, &workspace, 1.3, 1.0, GUARD, PROBIT_SCALE,
+        0, 0.31, 0.62, 0.44, &slopes, &z, &workspace, 1.3, 1.3, 1.0, GUARD, PROBIT_SCALE,
     )
     .expect("reference row");
 
@@ -72,6 +72,7 @@ fn rescaling_the_latent_score_leaves_the_row_likelihood_invariant() {
             &rescaled_slopes,
             &rescaled_z,
             &rescaled_workspace,
+            1.3,
             1.3,
             1.0,
             GUARD,

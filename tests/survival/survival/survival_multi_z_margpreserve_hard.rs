@@ -192,6 +192,7 @@ fn survival_multi_z_neglog_finite_under_random_shapes() {
             &z,
             &RigidVectorValueWorkspace::new(&cov.clone().into()),
             1.0,
+            1.0,
             0.0,
             1e-6,
             1.0,

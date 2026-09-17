@@ -116,6 +116,7 @@ fn total_neglog(
             &z_row,
             &RigidVectorValueWorkspace::new(&covariance.clone().into()),
             data.weights[i],
+            data.weights[i],
             data.event[i],
             DERIV_GUARD,
             PROBIT_SCALE,

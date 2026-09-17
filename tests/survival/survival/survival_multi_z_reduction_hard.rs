@@ -227,6 +227,7 @@ fn survival_neglog_k1_matches_closed_form_20_fixtures() {
             &z,
             &RigidVectorValueWorkspace::new(&cov.clone().into()),
             weight,
+            weight,
             event,
             derivative_guard,
             probit_scale,

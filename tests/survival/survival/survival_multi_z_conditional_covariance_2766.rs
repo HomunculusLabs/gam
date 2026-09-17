@@ -170,6 +170,7 @@ fn the_row_program_consumes_the_rows_own_conditional_covariance() {
             &workspace,
             1.0,
             1.0,
+            1.0,
             1.0e-8,
             PROBIT_SCALE,
         )
