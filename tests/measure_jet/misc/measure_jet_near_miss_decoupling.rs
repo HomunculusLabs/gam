@@ -87,16 +87,86 @@ fn quadratic_form(q: &Array2<f64>, v: &Array1<f64>) -> f64 {
     v.dot(&q.dot(v))
 }
 
-/// The parallel two-level energy at the fitted defaults — shared by both
-/// tests so the crossing contrast compares against exactly the quantity the
-/// decoupling test bounds.
-fn parallel_two_level_energy_at_defaults() -> f64 {
+/// The parallel near miss's two-level and checkerboard energies at the fitted
+/// defaults, read off one form. The crossing gate uses the offset energy as its
+/// decoupled reference and bounds it by the checkerboard.
+fn parallel_two_level_and_checkerboard_energies_at_defaults() -> (f64, f64) {
     let (centers, masses) = parallel_strand_centers();
     let band = band_for(&centers);
     let q = measure_jet_energy_form(centers.view(), masses.view(), &band, ORDER_S, ALPHA)
         .expect("energy form");
-    let offset = two_level_vector(M1, 2 * M1);
-    quadratic_form(&q, &offset)
+    let m = 2 * M1;
+    let offset = two_level_vector(M1, m);
+    let checker = Array1::<f64>::from_shape_fn(m, |i| {
+        let parity = (i % M1) + (i / M1);
+        if parity % 2 == 0 { 1.0 } else { -1.0 }
+    });
+    (quadratic_form(&q, &offset), quadratic_form(&q, &checker))
+}
+
+/// A derived lower bound on the two-level energy of an X whose strands each
+/// carry a center at the crossing.
+///
+/// The coincident crossing centers `a` and `b` hold c1 and c2. No function,
+/// affine or not, takes both values at one point, so every local fit that sees
+/// both leaves at least
+///
+///   w_a·(c1 − ℓ(0))² + w_b·(c2 − ℓ(0))²  ≥  Δc²·w_a·w_b/(w_a + w_b)  ≥  Δc²·min(w_a, w_b)/2
+///
+/// of residual on them. The energy scatters
+/// `log_step·ε^(−η)·net_mass_o·q_o^(1−2α)·vᵀR_o v` over a greedy ε/2-net `o` of
+/// the centers, each center's mass aggregated to its nearest net member, and
+/// every term is nonnegative.
+/// - A center within ε of the crossing aggregates to a member within 1.5ε of
+///   it. That member's local fit sees both crossing centers (the kernel cutoff
+///   is 3ε) with weights at least m₀·e^(−1.5²/2), where m₀ is the smaller
+///   crossing mass.
+/// - For α ≥ 1/2, q^(1−2α) is at least (Σ masses)^(1−2α), because q is a
+///   truncated, kernel-damped sum of the masses.
+///
+/// Summing over the band,
+///
+///   vᵀQv  ≥  Σ_ℓ log_step·ε_ℓ^(−η)·M(ε_ℓ)·(Σ masses)^(1−2α)·Δc²·m₀·e^(−9/8)/2,
+///
+/// with M(ε) the mass within ε of the crossing. Projecting Q onto the PSD cone
+/// only raises vᵀQv.
+fn coincident_crossing_floor(
+    centers: &Array2<f64>,
+    masses: &Array1<f64>,
+    band: &MeasureJetBand,
+    a: usize,
+    b: usize,
+) -> f64 {
+    assert!(ALPHA >= 0.5, "the q-factor bound needs 1 − 2α ≤ 0");
+    assert!(
+        1.5 <= PROFILE_CUTOFF,
+        "the net member must see the crossing inside the kernel cutoff"
+    );
+    assert_eq!(
+        centers.row(a),
+        centers.row(b),
+        "the crossing centers must coincide"
+    );
+    let dc2 = (C2 - C1) * (C2 - C1);
+    let m0 = masses[a].min(masses[b]);
+    let q_factor = masses.sum().powf(1.0 - 2.0 * ALPHA);
+    let eta = 2.0 * ORDER_S + centers.ncols() as f64 * (2.0 - 2.0 * ALPHA);
+    band.eps
+        .iter()
+        .map(|&eps| {
+            let near_mass: f64 = (0..centers.nrows())
+                .filter(|&j| {
+                    let dx = centers[(j, 0)] - centers[(a, 0)];
+                    let dy = centers[(j, 1)] - centers[(a, 1)];
+                    dx * dx + dy * dy <= eps * eps
+                })
+                .map(|j| masses[j])
+                .sum();
+            band.log_step * eps.powf(-eta) * near_mass * q_factor * dc2 * m0
+                * (-9.0_f64 / 8.0).exp()
+                / 2.0
+        })
+        .sum()
 }
 
 /// Gate 3 proper. On the support {y = 0} ∪ {y = δ} the two-level vector
@@ -215,20 +285,18 @@ fn parallel_strands_share_no_value_coupling_at_affine_order() {
 }
 
 /// The counter-gate: strands that CROSS in an X, each contributing its own
-/// center at the crossing, force value compatibility at the shared points.
-/// No affine function can be c1 on one full line through the crossing and
-/// c2 on the other (at the crossing it would have to take both values, and
-/// the symmetric arms kill every slope: by the x → −x / y → −y symmetry the
-/// local fit at the crossing is the constant (c1+c2)/2, leaving the FULL
-/// two-point variance (Δc²/4)·q as residual). The same two-level vector
-/// that rode free across the near-miss gap must now pay two orders of
-/// magnitude more than the parallel case.
+/// center at the crossing, force value compatibility at the shared point. No
+/// function can be c1 on one full line through the crossing and c2 on the
+/// other, because at the crossing it would have to take both values.
+/// `coincident_crossing_floor` turns that into a derived lower bound on the X's
+/// two-level energy. The same two-level vector that rode free across the
+/// near-miss gap pays only roundoff there, which is below that bound.
 #[test]
 fn true_crossing_couples_values() {
-    let e_parallel = parallel_two_level_energy_at_defaults();
+    let (e_parallel, e_checker) = parallel_two_level_and_checkerboard_energies_at_defaults();
     assert!(
-        e_parallel > 0.0,
-        "parallel near-miss energy must be positive; got {e_parallel:.3e}"
+        e_parallel.abs() <= 1e-8 * e_checker,
+        "parallel offset energy {e_parallel:.3e} vs 1e-8 × checkerboard {e_checker:.3e}"
     );
 
     let (centers, masses) = crossing_strand_centers();
@@ -238,10 +306,16 @@ fn true_crossing_couples_values() {
     let q = measure_jet_energy_form(centers.view(), masses.view(), &band, ORDER_S, ALPHA)
         .expect("crossing energy form");
     let e_cross = quadratic_form(&q, &offset);
+    let floor = coincident_crossing_floor(&centers, &masses, &band, N_ARM, per_strand + N_ARM);
 
+    // Positive control: the bar refuses what a decoupled geometry pays.
     assert!(
-        e_cross >= 100.0 * e_parallel,
-        "a true crossing must couple the strand values: e_cross = {e_cross:.3e} \
-         vs 100 × parallel near-miss {e_parallel:.3e}"
+        e_parallel < floor,
+        "the crossing floor {floor:.3e} does not separate a decoupled near miss ({e_parallel:.3e})"
+    );
+    assert!(
+        e_cross >= floor,
+        "a true crossing must pay at least the coincident-value floor: e_cross = {e_cross:.3e} \
+         vs floor {floor:.3e}"
     );
 }

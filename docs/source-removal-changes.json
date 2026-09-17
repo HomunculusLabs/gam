@@ -55,5 +55,13 @@
     ],
     "reason": "#2951 P11, P18, MPD one-owner rule (mpd-spec NOTE 12, #2951 comment 5719561962): the A8 identity-versus-projector-family test now measures fidelity through precision.rs's owner, decode_then_evaluate with a proven Meets/Violates/Unresolved verdict, and sends the family's labels once through the RP^1 QuotientCode so the library pays for them. The grid-label test helpers family_direction and projector_distortion computed the projector outputs from undecoded labels and an unrounded distortion. They are replaced by projector_output, distance and distortion_roundoff over the labels decoded from the artifact.",
     "evidence": "source_removal_guard.py on a probe commit of this codec.rs at 34c1afc046 without this entry names exactly these two items, each test-scoped with production_occurrences 0. The landing refuses unless source_removal_guard.py and public_api_census.py both return RC 0 on a probe commit of the landing patch at the parent. The rewritten A8 test asserts both artifacts Meets through decode_then_evaluate, the P11 floor on every decoded packet and the refusal of single-instance packets that Violate. Gate: Slurm job 1212329 on lane sw0w at 84177774ee, main's tip when the job started."
+  },
+  {
+    "base": "91473e08ebf943945b4f45a2b79eacd0e46e8efe",
+    "items": [
+      "tests/measure_jet/misc/measure_jet_near_miss_decoupling.rs:fn:parallel_two_level_energy_at_defaults"
+    ],
+    "reason": "#2902 (#2933 argument-free bar): true_crossing_couples_values asserted e_parallel > 0 and e_cross >= 100·e_parallel. The exact weighted affine projection leaves e_parallel at roundoff, so the first assertion tests roundoff's sign and the second has no magnitude floor. The crossing gate now reads the parallel offset and checkerboard energies from one form, bounds the offset by 1e-8·checkerboard, and bounds e_cross below by the derived coincident_crossing_floor. parallel_two_level_energy_at_defaults returned only the offset energy. It is restated as parallel_two_level_and_checkerboard_energies_at_defaults, which returns both from one form.",
+    "evidence": "At the base, measure_jet_near_miss_decoupling.rs names parallel_two_level_energy_at_defaults at its declaration and its one call in true_crossing_couples_values. The identity was derived by reading the change against source_removal_guard.py's item rule, and the gate job runs the guard against this entry."
   }
 ]
