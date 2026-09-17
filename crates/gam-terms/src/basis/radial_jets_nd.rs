@@ -1484,7 +1484,9 @@ fn mixed_periodicity_additive_design_and_jets(
 ///
 /// All radial derivatives are obtained in closed form from the half-integer
 /// Matérn polynomial-times-exponential representation; the underlying scalar
-/// arithmetic is `matern_kernel_radial_tripletwith_safe_ratio`.
+/// arithmetic is `matern_kernel_radial_tripletwith_safe_ratio`. For ν = 1/2 a
+/// row on a center refuses with [`BasisError::DegenerateAtCollision`]: the
+/// kernel has a cusp there, so `φ'(r)·(t − c)/r` has no value.
 pub fn matern_radial_first_derivative_nd(
     t: ArrayView2<'_, f64>,
     centers: ArrayView2<'_, f64>,
@@ -1515,6 +1517,15 @@ pub fn matern_radial_first_derivative_nd(
                 r2 += dv * dv;
             }
             let r = r2.sqrt();
+            if r <= 0.0 && matches!(nu, MaternNu::Half) {
+                return Err(BasisError::DegenerateAtCollision {
+                    kernel: "Matérn nu=1/2 (exponential)",
+                    dim,
+                    m: 0.0,
+                    message: "phi(r) = exp(-r/length_scale) has a cusp at r = 0, so the input \
+                              gradient phi'(r)(t - c)/r has no value at a center",
+                });
+            }
             let (_phi, phi_r, _phi_rr, _ratio) =
                 matern_kernel_radial_tripletwith_safe_ratio(r, length_scale, nu)?;
             out[[n, k]] = phi_r;
@@ -1636,10 +1647,10 @@ pub fn matern_input_location_jet_nd(
 /// H_{ac} = φ''(r_A) · (w_a h_a / r_A)(w_c h_c / r_A)
 ///        + (φ'(r_A)/r_A) · (w_a δ_{ac} − w_a h_a w_c h_c / r_A²),
 /// ```
-/// with `h = t − c`. At `r_A = 0` the smooth limit collapses to the diagonal
-/// `(φ'/r)|_0 · w_a δ_{ac}` (the regularized ratio from
-/// `matern_kernel_radial_tripletwith_safe_ratio`, which equals `φ''(0)` for
-/// ν ≥ 3/2 and carries the genuine ν = 1/2 singularity floor).
+/// with `h = t − c`. At `r_A = 0` the limit for ν ≥ 3/2 collapses to the
+/// diagonal `(φ'/r)|_0 · w_a δ_{ac}`, with `(φ'/r)|_0 = φ''(0)`. For ν = 1/2 the
+/// kernel has a cusp at `r = 0`, `φ'/r` diverges, and no Hessian exists at a
+/// center: the call refuses with [`BasisError::DegenerateAtCollision`].
 pub fn matern_input_location_hessian_nd(
     t: ArrayView2<'_, f64>,
     centers: ArrayView2<'_, f64>,
@@ -1681,6 +1692,15 @@ pub fn matern_input_location_hessian_nd(
                 r2 += weights[a] * h * h;
             }
             let r = r2.sqrt();
+            if r <= 0.0 && matches!(nu, MaternNu::Half) {
+                return Err(BasisError::DegenerateAtCollision {
+                    kernel: "Matérn nu=1/2 (exponential)",
+                    dim,
+                    m: 0.0,
+                    message: "phi(r) = exp(-r/length_scale) has a cusp at r = 0, so phi'(r)/r \
+                              diverges and the input-location Hessian has no value at a center",
+                });
+            }
             let (_phi, phi_r, phi_rr, phi_r_over_r) =
                 matern_kernel_radial_tripletwith_safe_ratio(r, length_scale, nu)?;
             if r <= 0.0 {

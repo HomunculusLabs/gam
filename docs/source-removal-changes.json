@@ -4709,6 +4709,14 @@
     "evidence": "At the base, git grep -n -w tower_score_info finds only its declaration and its four calls in dispersion_row_kernel (crates/gam-models/src/gamlss/dispersion_family.rs), and all four are replaced here. dispersion_beta_nll_order2, dispersion_gamma_disp_order2 and dispersion_tweedie_disp_order2 keep their declarations in the same file, so the guard sees no removal for them. The new test row_kernel_closed_form_dispersion_channels_match_the_towers checks the hand-derived working sets against the towers. The item list applies source_removal_guard.py's ITEM regex to the base and changed blobs by hand, and tower_score_info is pub(crate), so it is guarded. Compile is covered by the lead's shared tip check."
   },
   {
+    "base": "8e0b7267ed13cea3972aefe25a0d05fdeba71f84",
+    "items": [
+      "tests/src_modules/smooths/basis_duchon_matern_jet_derivative_tests.rs:fn:test_matern_safe_ratio_half_is_finitewith_floor"
+    ],
+    "reason": "#2469: matern_kernel_radial_tripletwith_safe_ratio returned phi_r / r.max(1e-12) for nu=1/2, which manufactured -s*1e12 at a center collision although its own doc says phi'(r)/r is singular there and must not be regularized. test_matern_safe_ratio_half_is_finitewith_floor asserted only that the floored ratio at r = 0 was finite and negative, so it pinned the manufactured value. The ratio is now exact for r > 0 and refuses at r == 0, and matern_input_location_hessian_nd and matern_radial_first_derivative_nd refuse a nu=1/2 collision with DegenerateAtCollision. The test is replaced in the same commit by test_matern_ratio_half_is_exact_at_small_r_and_refuses_at_collision, which checks the exact ratio at r = 1e-3, 1e-13 and 1e-200, the refusal at r = 0, DegenerateAtCollision from the Hessian on a center, and a finite Hessian off it.",
+    "evidence": "At the base, git grep -n test_matern_safe_ratio_half_is_finitewith_floor finds only its declaration in tests/src_modules/smooths/basis_duchon_matern_jet_derivative_tests.rs, which gam-terms basis/tests.rs includes. No other test, bench or source names it. Receipt: MSI job 1103377 (lane sw0d) at fb17ed6de with the landing patch applied: cargo check -p gam-terms --all-targets exited 0, and cargo nextest -p gam-terms --lib ran the replacement test and the two remaining triplet tests, 3 passed (/scratch.global/sauer354/pool/const2469/matern.1103377.log)."
+  },
+  {
     "base": "53d420d79d102e86898b8ce9f9f32a04aef101cc",
     "items": [
       "crates/gam-solve/src/cone_reduction.rs:fn:constrained_cone_mode",

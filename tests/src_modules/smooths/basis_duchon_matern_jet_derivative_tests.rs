@@ -445,13 +445,44 @@ fn test_matern_safe_ratio_matches_closed_form_limits_atzero() {
     assert!((r92 - (-(9.0 / 7.0) * kappa * kappa)).abs() < 1e-12);
 }
 
+/// `φ(r) = exp(−r/ℓ)` has a cusp at a center, so `φ'(r)/r = −s·exp(−s r)/r` has
+/// no limit as `r → 0⁺` (#2469). The ratio is exact at every positive `r`,
+/// including below the retired `r.max(1e-12)` floor, and a collision refuses
+/// instead of returning the floor's `−s·1e12`.
 #[test]
-fn test_matern_safe_ratio_half_is_finitewith_floor() {
+fn test_matern_ratio_half_is_exact_at_small_r_and_refuses_at_collision() {
     let ls = 1.3;
-    let (_, _, _, ratio) =
-        matern_kernel_radial_tripletwith_safe_ratio(0.0, ls, MaternNu::Half).expect("half");
-    assert!(ratio.is_finite());
-    assert!(ratio < 0.0);
+    let s = 1.0 / ls;
+    for r in [1.0e-3_f64, 1.0e-13, 1.0e-200] {
+        let (_, _, _, ratio) = matern_kernel_radial_tripletwith_safe_ratio(r, ls, MaternNu::Half)
+            .expect("nu=1/2 triplet at r > 0");
+        let exact = -s * (-(s * r)).exp() / r;
+        assert!(
+            (ratio - exact).abs() <= 1e-12 * exact.abs(),
+            "nu=1/2 ratio at r={r:e} must be -s exp(-s r)/r = {exact:e}, got {ratio:e}"
+        );
+    }
+    assert!(
+        matern_kernel_radial_tripletwith_safe_ratio(0.0, ls, MaternNu::Half).is_err(),
+        "nu=1/2 has no radial ratio at a collision"
+    );
+    let center = ndarray::array![[0.4_f64, -0.2]];
+    let refused =
+        matern_input_location_hessian_nd(center.view(), center.view(), ls, MaternNu::Half, None);
+    assert!(
+        matches!(refused, Err(BasisError::DegenerateAtCollision { dim: 2, .. })),
+        "the nu=1/2 input-location Hessian at a center must refuse with DegenerateAtCollision"
+    );
+    let off_center = ndarray::array![[0.9_f64, 0.1]];
+    let hessian = matern_input_location_hessian_nd(
+        off_center.view(),
+        center.view(),
+        ls,
+        MaternNu::Half,
+        None,
+    )
+    .expect("nu=1/2 input-location Hessian off a center");
+    assert!(hessian.iter().all(|value| value.is_finite()));
 }
 
 #[test]

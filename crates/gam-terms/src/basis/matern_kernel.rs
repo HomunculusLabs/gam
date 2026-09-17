@@ -735,7 +735,8 @@ pub(crate) fn matern_kernel_radial_tripletwith_safe_ratio(
     // nu=1/2:
     //   phi'    = -s E
     //   phi''   =  s^2 E
-    //   phi'/r  diverges as -s/r (regularized via r floor).
+    //   phi'/r  = -s E / r for r > 0, with no limit at r = 0: a caller at a
+    //             collision refuses, or takes its own exact branch, first.
     // nu=3/2:
     //   phi'    = -s E a
     //   phi''   =  s^2 E (a-1)
@@ -754,16 +755,15 @@ pub(crate) fn matern_kernel_radial_tripletwith_safe_ratio(
     //   phi'/r  = -(s^2/105) E (a^3+6a^2+15a+15).
     let (phi, phi_r, phi_rr, phi_r_over_r) = match nu {
         MaternNu::Half => {
+            if r == 0.0 {
+                crate::bail_invalid_basis!(
+                    "Matérn nu=1/2 has no radial ratio phi'(r)/r at a center collision: \
+                     phi(r) = exp(-r/length_scale) has a cusp at r = 0"
+                );
+            }
             let s = 1.0 / length_scale;
-            let a = s * r;
-            let e = (-a).exp();
-            let phi = e;
-            let phi_r = -s * e;
-            let phi_rr = s * s * e;
-            // Safe ratio regularization at r=0 to keep operator assembly finite.
-            let r_eff = r.max(1e-12);
-            let ratio = phi_r / r_eff;
-            (phi, phi_r, phi_rr, ratio)
+            let e = (-(s * r)).exp();
+            (e, -s * e, s * s * e, -s * e / r)
         }
         MaternNu::ThreeHalves => {
             let s = 3.0_f64.sqrt() / length_scale;
@@ -3512,8 +3512,7 @@ pub(crate) fn build_matern_collocation_operator_matrices(
         for k in 0..p {
             let scale_k = row_scales[k];
             for j in 0..p {
-                let (phi, _, _, _) =
-                    matern_kernel_radial_tripletwith_safe_ratio(0.0, length_scale, nu)?;
+                let phi = matern_kernel_from_distance(0.0, length_scale, nu)?;
                 d0_raw[[k, j]] = scale_k * phi;
                 if !d0_raw[[k, j]].is_finite() {
                     crate::bail_invalid_basis!(
