@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! #2933 F24 — the ARD coordinate prior is normalized over each coordinate's
 //! actual support.
 //!
