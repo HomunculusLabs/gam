@@ -6,7 +6,7 @@
 //! lot of memory — run under `--release` if iteration time matters:
 //!
 //! ```text
-//! cargo test --release -p gam-models --test large_scale_reml_stress
+//! cargo test -p gam-predict --lib large_scale_reml_stress
 //! ```
 //!
 //! It exercises the full Duchon-on-PC GAM pipeline end-to-end:
@@ -22,8 +22,8 @@
 //!     and finite.
 //!   * 95% prediction-interval coverage on held-out samples must
 //!     exceed 0.85 across `N_COVERAGE_SIMS` independent simulations.
-//!   * Each fit must terminate on convergence, strictly inside the outer
-//!     iteration budget it was configured with.
+//!   * Each fit exists only because its REML outer optimization converged
+//!     (SPEC 20). The fixture configures no iteration budget of its own.
 //!
 //! All randomness is seeded; failures are reproducible.
 
@@ -76,18 +76,21 @@ const N_COVERAGE_HOLDOUT: usize = 400;
 const K_COVERAGE: usize = 80;
 const PC_DIM_COVERAGE: usize = 4;
 
-// Work ceilings. These replace the wall-clock ceilings this file used to
-// assert (1800s for the main fit, 120s per coverage fit). A wall-clock
-// assertion on a shared CI runner measures the runner, not the solver, so it
-// flakes in both directions; and the 1800s one could never fire at all,
-// because the harness SIGKILLs the target long before half an hour elapses —
-// dead code wearing the shape of a budget. What the fits are actually
-// supposed to demonstrate is that the REML outer loop CONVERGES rather than
-// grinding to its cap, and `max_iter` (the cap the fit is configured with)
-// is the machine-independent statement of exactly that. No new magic
-// constants: the ceiling is the fit's own configured budget.
-const MAIN_MAX_ITER: usize = 40;
-const COVERAGE_MAX_ITER: usize = 30;
+// No work ceiling of the fixture's own (gam#2735). This file first asserted
+// wall-clock ceilings. It then replaced them with `MAIN_MAX_ITER = 40` and
+// `COVERAGE_MAX_ITER = 30`, configured as `FitOptions::max_iter` and asserted as
+// `fit.outer_iterations < max_iter`. That comparison mixes units.
+// `FitOptions::max_iter` caps EACH solver run (`run_plan.rs`
+// `with_max_iterations`). `outer_iterations` is `OuterResult::iterations`,
+// "total outer iterations across all solver restarts", summed over every
+// started seed and every reseed retry. Three seeds that each converge in 15
+// iterations carry a total of 45 when no run came near a cap of 40. The coverage
+// twin read "35 of 30" in census 597798, consistent with one seed exhausting 30
+// iterations and a later seed converging in 5. That total counted a run which
+// minted nothing. A run that exhausts its cap cannot mint a fit (SPEC 20): it
+// ends `Exhausted`, and the seed cascade moves on. So the fit's existence is the
+// convergence proof, and the fixture takes the library's default per-run cap
+// instead of a smaller number of its own.
 const NORMAL_95_TWO_SIDED_Z: f64 = 1.959_963_984_540_054;
 
 /// The two-sided standard-normal mass inside `NORMAL_95_TWO_SIDED_Z`. Bound to
@@ -292,23 +295,10 @@ fn duchon_aniso_pc_spec(name: &str, pc_dim: usize, k_centers: usize) -> TermColl
     }
 }
 
-fn fit_options(max_iter: usize) -> FitOptions {
+fn fit_options() -> FitOptions {
     FitOptions {
-        resource_policy: gam_runtime::resource::ResourcePolicy::default_library(),
-        latent_cloglog: None,
-        mixture_link: None,
-        optimize_mixture: false,
-        sas_link: None,
-        optimize_sas: false,
-        compute_inference: true,
-        skip_rho_posterior_inference: false,
-        max_iter,
         tol: 1e-5,
-        nullspace_dims: vec![],
-        linear_constraints: None,
-        firth_bias_reduction: false,
-        rho_prior: Default::default(),
-        persistent_warm_start_store: None,
+        ..FitOptions::default()
     }
 }
 
@@ -502,7 +492,7 @@ fn large_scale_reml_stress_main() {
         offset.clone(),
         &spec,
         gaussian_identity_likelihood(),
-        &fit_options(MAIN_MAX_ITER),
+        &fit_options(),
         &kappa_options,
     )
     .expect("large-scale Duchon-on-PC fit should succeed");
@@ -586,7 +576,7 @@ fn large_scale_reml_stress_main() {
     // other number.
     eprintln!(
         "[large_scale_reml_stress_main] n={N_TRAIN}, K={K_CENTERS}, pc_dim={PC_DIM} \
-         | wall_clock={:.2}s, outer_iter={} (cap {MAIN_MAX_ITER}), \
+         | wall_clock={:.2}s, outer_iter_ledger={} (all started seeds and restarts), \
          rel_l2_holdout={rel_l2:.4} (bar {RECONSTRUCTION_REL_L2_MAX:.2}), \
          linear_only_rel_l2={linear_only_rel_l2:.4}, \
          nonlinear_variance_captured={:.1}%, {aniso_report}",
@@ -624,17 +614,6 @@ fn large_scale_reml_stress_main() {
         (&pred_unc_mean - &pred_mean)
             .iter()
             .all(|v| v.abs() < f64::EPSILON.sqrt())
-    );
-
-    // (4) The outer loop converged inside its configured budget rather than
-    //     stopping because it ran out of iterations.
-    assert!(
-        fitted.fit.outer_iterations < MAIN_MAX_ITER,
-        "main large-scale stress fit ran {} outer iterations, exhausting its \
-         configured {MAIN_MAX_ITER}-iteration REML budget (elapsed {:.1}s): the \
-         outer loop is grinding to its cap instead of converging",
-        fitted.fit.outer_iterations,
-        elapsed.as_secs_f64(),
     );
 }
 
@@ -831,7 +810,7 @@ fn large_scale_reml_stress_coverage() {
         offset_tr.view(),
         &pilot_spec,
         gaussian_identity_likelihood(),
-        &fit_options(COVERAGE_MAX_ITER),
+        &fit_options(),
     )
     .expect("coverage pilot Duchon-on-PC fit should succeed");
     let frozenspec = freeze_term_collection_from_design(&pilot_spec, &pilot.design)
@@ -882,7 +861,6 @@ fn large_scale_reml_stress_coverage() {
             *value += noise.sample(&mut rng);
         }
 
-        let start = Instant::now();
         let fitted = fit_term_collection_forspec(
             x_tr.view(),
             y_tr.view(),
@@ -890,18 +868,9 @@ fn large_scale_reml_stress_coverage() {
             offset_tr.view(),
             &frozenspec,
             gaussian_identity_likelihood(),
-            &fit_options(COVERAGE_MAX_ITER),
+            &fit_options(),
         )
         .expect("coverage-sim Duchon-on-PC fit should succeed");
-        let elapsed = start.elapsed();
-        assert!(
-            fitted.fit.outer_iterations < COVERAGE_MAX_ITER,
-            "coverage-sim fit {sim_idx} ran {} outer iterations, exhausting its \
-             configured {COVERAGE_MAX_ITER}-iteration REML budget (elapsed \
-             {:.1}s): the outer loop is grinding to its cap instead of converging",
-            fitted.fit.outer_iterations,
-            elapsed.as_secs_f64(),
-        );
         // Fit existence is the sealed convergence proof (SPEC 20).
 
         let covariance_conditional = fitted
