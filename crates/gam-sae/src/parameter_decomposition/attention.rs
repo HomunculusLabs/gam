@@ -49,9 +49,13 @@
 //! removes part of a bias; that is a different experiment, and this program does
 //! not execute it.
 //!
-//! The kernel identity needs the projection to feed the rotary embedding
-//! directly. A per-head norm between them (Qwen3's `q_norm`/`k_norm`) is a
-//! native nonlinearity on the summed query and is not represented here.
+//! A per-head norm between the projection and the rotary embedding (Qwen3's
+//! `q_norm`/`k_norm`, [`NativeAttention::with_query_key_norm`]) is a native
+//! nonlinearity. It runs on each token's summed head rows, never per component,
+//! through gam-sae's gated-rewrite owner. Because `w ⊙ (ν q) = ν (w ⊙ q)`, the gains
+//! fold into the component outputs, and the score is
+//! `ν^Q_{t,h} ν^K_{s,g(h)} a_tᵀ C^w(Δ) b_s`, where [`ComponentAttention::kernel`]
+//! returns `C^w` and each `ν` is evaluated natively on the current input.
 //!
 //! # All-on and roundoff
 //!
@@ -80,6 +84,8 @@ use gam_math::categorical::{CategoricalError, log_softmax_with_error};
 use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2, ShapeBuilder};
 use serde::{Deserialize, Serialize};
 
+use crate::parameter_decomposition::gated_rewrite::{GatedRewriteError, MaskedNorm, rms_normalizers};
+
 /// Largest position magnitude whose differences stay exact in `f64`:
 /// `|p_s − p_t| ≤ 2^53` is representable, so `Δ as f64` rounds nothing.
 const EXACT_POSITION_LIMIT: i64 = 1 << 52;
@@ -104,6 +110,8 @@ pub enum AttentionProgramError {
     HeadOutOfRange { head: usize, n_heads: usize },
     /// A score row that names no categorical distribution.
     Categorical(CategoricalError),
+    /// The source's per-head query/key norm refused its rows.
+    Norm(GatedRewriteError),
 }
 
 impl fmt::Display for AttentionProgramError {
@@ -133,6 +141,7 @@ impl fmt::Display for AttentionProgramError {
                 write!(f, "head {head} is out of range for {n_heads} heads")
             }
             Self::Categorical(error) => write!(f, "attention score row: {error}"),
+            Self::Norm(error) => write!(f, "attention query/key norm: {error}"),
         }
     }
 }
@@ -250,6 +259,15 @@ pub struct RotaryCausalAttention {
     score_scale: f64,
 }
 
+/// The source's per-head query/key RMS norm: its declared epsilon and the
+/// `head_dim` gains of `q_norm` and `k_norm`.
+#[derive(Clone, Debug)]
+struct QueryKeyNorm {
+    epsilon: f64,
+    query_gain: Array1<f64>,
+    key_gain: Array1<f64>,
+}
+
 /// The source's causal self-attention block on its original tensors.
 #[derive(Clone, Debug)]
 pub struct NativeAttention {
@@ -258,6 +276,7 @@ pub struct NativeAttention {
     key: AffineProjection,
     value: AffineProjection,
     output: AffineProjection,
+    query_key_norm: Option<QueryKeyNorm>,
 }
 
 fn expect_shape(
@@ -354,6 +373,66 @@ fn project_affine(projection: &AffineProjection, x: ArrayView2<f64>) -> (Array2<
         }
     }
     (value, radius)
+}
+
+/// The source's per-head RMS norm (Qwen3 `q_norm`, `k_norm`) on every head of
+/// `tokens × heads·head_dim` rows, evaluated by the gated-rewrite owner on the
+/// current summed rows.
+///
+/// For one head row `x` with radius `r`, `y = w ⊙ x ν` with
+/// `ν = (mean x² + ε)^{-1/2}`. Since `∂ν/∂x_d = −ν³ x_d / d`, to first order
+/// `|δy_c| ≤ |w_c| ν (r_c + ν² |x_c| Σ_d |x_d| r_d / d)`. Evaluating `ν` from the
+/// stored row costs `γ_{d+4}` relative (the owner's bound) and the two products
+/// `γ_2`, so the radius adds `γ_{d+6} |y_c|`.
+fn normalize_heads(
+    (values, radius): (Array2<f64>, Array2<f64>),
+    heads: usize,
+    head_dim: usize,
+    epsilon: f64,
+    gain: ArrayView1<'_, f64>,
+) -> Result<(Array2<f64>, Array2<f64>), GatedRewriteError> {
+    let (tokens, width) = values.dim();
+    let mismatch = GatedRewriteError::ShapeMismatch {
+        what: "per-head query/key rows",
+        expected: (tokens * heads, head_dim),
+        found: (tokens, width),
+    };
+    let per_head = values
+        .into_shape_with_order((tokens * heads, head_dim))
+        .ok()
+        .ok_or(mismatch.clone())?;
+    let per_head_radius = radius
+        .into_shape_with_order((tokens * heads, head_dim))
+        .ok()
+        .ok_or(mismatch.clone())?;
+    let normalized = MaskedNorm::Rms { epsilon, gain }.apply(per_head.view())?;
+    let normalizers = rms_normalizers(per_head.view(), epsilon)?;
+    let evaluation = accumulation_growth(head_dim + 6);
+    let mut normalized_radius = Array2::zeros(normalized.dim());
+    for (row, &nu) in normalizers.iter().enumerate() {
+        let weighted = per_head
+            .row(row)
+            .iter()
+            .zip(per_head_radius.row(row).iter())
+            .map(|(x, r)| x.abs() * r)
+            .sum::<f64>()
+            / head_dim as f64;
+        for c in 0..head_dim {
+            normalized_radius[[row, c]] = gain[c].abs()
+                * nu
+                * (per_head_radius[[row, c]] + nu * nu * per_head[[row, c]].abs() * weighted)
+                + evaluation * normalized[[row, c]].abs();
+        }
+    }
+    let values = normalized
+        .into_shape_with_order((tokens, width))
+        .ok()
+        .ok_or(mismatch.clone())?;
+    let radius = normalized_radius
+        .into_shape_with_order((tokens, width))
+        .ok()
+        .ok_or(mismatch)?;
+    Ok((values, radius))
 }
 
 /// `W x_t` for every token, with the absolute sum of each inner product's terms.
@@ -566,7 +645,66 @@ impl NativeAttention {
             key,
             value,
             output,
+            query_key_norm: None,
         })
+    }
+
+    /// The source's per-head query/key RMS norm between the projections and the
+    /// rotary embedding (Qwen3 `q_norm`, `k_norm`): `w ⊙ h (mean(h²) + ε)^{-1/2}` on
+    /// each head's rows, with the source's declared `ε` and gains.
+    pub fn with_query_key_norm(
+        self,
+        epsilon: f64,
+        query_gain: Array1<f64>,
+        key_gain: Array1<f64>,
+    ) -> Result<Self, AttentionProgramError> {
+        let head_dim = self.attention.geometry.head_dim;
+        expect_shape("query norm gain", (query_gain.len(), 1), (head_dim, 1))?;
+        expect_shape("key norm gain", (key_gain.len(), 1), (head_dim, 1))?;
+        Ok(Self {
+            query_key_norm: Some(QueryKeyNorm {
+                epsilon,
+                query_gain,
+                key_gain,
+            }),
+            ..self
+        })
+    }
+
+    /// The source's per-head query norm, when the source has one.
+    fn normalize_queries(
+        &self,
+        rows: (Array2<f64>, Array2<f64>),
+    ) -> Result<(Array2<f64>, Array2<f64>), AttentionProgramError> {
+        match &self.query_key_norm {
+            None => Ok(rows),
+            Some(norm) => normalize_heads(
+                rows,
+                self.attention.geometry.n_heads,
+                self.attention.geometry.head_dim,
+                norm.epsilon,
+                norm.query_gain.view(),
+            )
+            .map_err(AttentionProgramError::Norm),
+        }
+    }
+
+    /// The source's per-head key norm, when the source has one.
+    fn normalize_keys(
+        &self,
+        rows: (Array2<f64>, Array2<f64>),
+    ) -> Result<(Array2<f64>, Array2<f64>), AttentionProgramError> {
+        match &self.query_key_norm {
+            None => Ok(rows),
+            Some(norm) => normalize_heads(
+                rows,
+                self.attention.geometry.n_kv_heads,
+                self.attention.geometry.head_dim,
+                norm.epsilon,
+                norm.key_gain.view(),
+            )
+            .map_err(AttentionProgramError::Norm),
+        }
     }
 
     fn check_input(&self, x: ArrayView2<f64>, positions: &[i64]) -> Result<(), AttentionProgramError> {
@@ -586,8 +724,8 @@ impl NativeAttention {
         positions: &[i64],
     ) -> Result<AttentionExecution, AttentionProgramError> {
         self.check_input(x, positions)?;
-        let (queries, query_radius) = project_affine(&self.query, x);
-        let (keys, key_radius) = project_affine(&self.key, x);
+        let (queries, query_radius) = self.normalize_queries(project_affine(&self.query, x))?;
+        let (keys, key_radius) = self.normalize_keys(project_affine(&self.key, x))?;
         let (values, value_radius) = project_affine(&self.value, x);
         let projected = self.attention.attend_projected(
             ProjectedRows {
@@ -761,8 +899,12 @@ impl ComponentAttention {
             return self.native.execute(x, positions);
         }
         self.native.check_input(x, positions)?;
-        let queries = masked_head_rows(&self.query, &self.native.query.bias, masks.query.view(), x);
-        let keys = masked_head_rows(&self.key, &self.native.key.bias, masks.key.view(), x);
+        let HeadRows { value, radius } = masked_head_rows(&self.query, &self.native.query.bias, masks.query.view(), x);
+        let (value, radius) = self.native.normalize_queries((value, radius))?;
+        let queries = HeadRows { value, radius };
+        let HeadRows { value, radius } = masked_head_rows(&self.key, &self.native.key.bias, masks.key.view(), x);
+        let (value, radius) = self.native.normalize_keys((value, radius))?;
+        let keys = HeadRows { value, radius };
         let (values, value_radius) = project_affine(&self.native.value, x);
         let g = self.native.attention.geometry;
         let rotary = &self.native.attention.rotary;
@@ -852,21 +994,25 @@ impl ComponentAttention {
             .iter()
             .map(|&frequency| plane_trig(displacement as f64, frequency))
             .collect();
-        // The coordinate product, the in-plane sum, the `cos`/`sin` product and
-        // the plane's sum (4), at most `head_dim` plane additions, `α·α` and its
-        // product (2), the pass-through addition (1) and σ (1).
-        let growth = accumulation_growth(hd + 8);
+        // The gain products (1), the coordinate product, the in-plane sum, the
+        // `cos`/`sin` product and the plane's sum (4), at most `head_dim` plane
+        // additions, `α·α` and its product (2), the pass-through addition (1) and σ (1).
+        let growth = accumulation_growth(hd + 9);
+        let (query_gain, key_gain) = match &self.native.query_key_norm {
+            Some(norm) => (norm.query_gain.clone(), norm.key_gain.clone()),
+            None => (Array1::ones(hd), Array1::ones(hd)),
+        };
         let (rows, cols) = (self.query.components(), self.key.components());
         let mut values = Array2::zeros((rows, cols));
         let mut radius = Array2::zeros((rows, cols));
         for i in 0..rows {
-            let u = self.query.outputs.column(i);
+            let u: Array1<f64> = (0..hd).map(|c| query_gain[c] * self.query.outputs[[qo + c, i]]).collect();
             for j in 0..cols {
-                let w = self.key.outputs.column(j);
+                let w: Array1<f64> = (0..hd).map(|c| key_gain[c] * self.key.outputs[[ko + c, j]]).collect();
                 let (mut planes, mut planes_abs, mut planes_trig) = (0.0, 0.0, 0.0);
                 for (plane, &(cos, sin, eta)) in trig.iter().enumerate() {
                     let (a, b) = rotary.plane(plane);
-                    let (ua, ub, wa, wb) = (u[qo + a], u[qo + b], w[ko + a], w[ko + b]);
+                    let (ua, ub, wa, wb) = (u[a], u[b], w[a], w[b]);
                     planes += cos * (ua * wa + ub * wb) + sin * (ub * wa - ua * wb);
                     planes_abs += cos.abs() * (ua * wa).abs()
                         + cos.abs() * (ub * wb).abs()
@@ -875,8 +1021,8 @@ impl ComponentAttention {
                 }
                 let (mut pass, mut pass_abs) = (0.0, 0.0);
                 for c in rotated..hd {
-                    pass += u[qo + c] * w[ko + c];
-                    pass_abs += (u[qo + c] * w[ko + c]).abs();
+                    pass += u[c] * w[c];
+                    pass_abs += (u[c] * w[c]).abs();
                 }
                 values[[i, j]] = self.native.attention.score_scale * (alpha2 * planes + pass);
                 radius[[i, j]] = self.native.attention.score_scale.abs()
@@ -936,6 +1082,7 @@ mod tests {
         key_bias: Array1<f64>,
         value_bias: Array1<f64>,
         output_bias: Array1<f64>,
+        query_key_norm: Option<(f64, Array1<f64>, Array1<f64>)>,
     }
 
     const QUERY_COMPONENTS: usize = 5;
@@ -971,6 +1118,20 @@ mod tests {
                 key_bias: Array1::zeros(6),
                 value_bias: Array1::zeros(6),
                 output_bias: Array1::zeros(4),
+                query_key_norm: None,
+            }
+        }
+
+        /// Qwen3's per-head query/key RMS norm, with dyadic gains in `[1/2, 3/2]`
+        /// and a declared epsilon of `1/64`.
+        fn normalized(self) -> Self {
+            Self {
+                query_key_norm: Some((
+                    0.015625,
+                    dyadic(6, 1, 12, 8.0).column(0).mapv(|gain| gain + 1.0),
+                    dyadic(6, 1, 13, 8.0).column(0).mapv(|gain| gain + 1.0),
+                )),
+                ..self
             }
         }
 
@@ -991,7 +1152,7 @@ mod tests {
                 weight,
                 bias: bias.clone(),
             };
-            NativeAttention::new(
+            let native = NativeAttention::new(
                 self.geometry,
                 self.rotary.clone(),
                 self.score_scale,
@@ -1000,7 +1161,13 @@ mod tests {
                 affine(self.value.clone(), &self.value_bias),
                 affine(self.output.clone(), &self.output_bias),
             )
-            .expect("fixture tensors match the geometry")
+            .expect("fixture tensors match the geometry");
+            match &self.query_key_norm {
+                None => native,
+                Some((epsilon, query_gain, key_gain)) => native
+                    .with_query_key_norm(*epsilon, query_gain.clone(), key_gain.clone())
+                    .expect("norm gains match the head dimension"),
+            }
         }
 
         /// Direct execution with the edited tensors `U diag(m) R`.
@@ -1536,5 +1703,104 @@ mod tests {
             }
         }
         assert!(checked > 0, "the libm check must evaluate at least one point");
+    }
+
+    /// Qwen3's per-head query/key norm. The component program still equals direct
+    /// execution with the edited tensors within the summed radii, because the norm
+    /// runs natively on the same summed head rows. Dropping the norm leaves the radii.
+    #[test]
+    fn component_program_with_query_key_norm_equals_edited_tensor_execution() {
+        let fixture = Fixture::new(RotaryPairing::HalfSplit).biased().normalized();
+        let masks = continuous_masks();
+        let component = fixture
+            .program()
+            .execute(&masks, fixture.x.view(), &fixture.positions)
+            .expect("component execution with the norm");
+        let edited = fixture
+            .edited(&masks)
+            .execute(fixture.x.view(), &fixture.positions)
+            .expect("edited-tensor execution with the norm");
+        let agreement = worst_ratio(&component, &edited);
+        assert!(
+            agreement <= 1.0,
+            "with the query/key norm the component program leaves edited-tensor execution by {agreement} of the summed radii"
+        );
+        let unnormalized = Fixture::new(RotaryPairing::HalfSplit)
+            .biased()
+            .edited(&masks)
+            .execute(fixture.x.view(), &fixture.positions)
+            .expect("execution without the norm");
+        let separation = worst_ratio(&component, &unnormalized);
+        assert!(
+            separation > 1.0,
+            "dropping the query/key norm must leave the radii, got {separation}"
+        );
+    }
+
+    /// With the query/key norm the score is `ν^Q ν^K a_tᵀ C^w(p_s − p_t) b_s`: the
+    /// kernel folds the gains into the outputs, and each `ν` is the owner's normalizer
+    /// of a summed head row. Omitting the normalizers leaves the tolerance.
+    #[test]
+    fn kernel_with_query_key_norm_reads_normalized_scores() {
+        let fixture = Fixture::new(RotaryPairing::HalfSplit).normalized();
+        let program = fixture.program();
+        let masks = continuous_masks();
+        let executed = program
+            .execute(&masks, fixture.x.view(), &fixture.positions)
+            .expect("component execution with the norm");
+        let epsilon = fixture
+            .query_key_norm
+            .as_ref()
+            .map(|norm| norm.0)
+            .expect("normalized fixture");
+        let hd = fixture.geometry.head_dim;
+        let normalizer = |row: ArrayView1<f64>| -> f64 {
+            rms_normalizers(row.insert_axis(ndarray::Axis(0)), epsilon).expect("finite head row")[0]
+        };
+        // Two products per kernel term and the additions, then the two normalizer products.
+        let growth = accumulation_growth(QUERY_COMPONENTS * KEY_COMPONENTS + 4);
+        // Each normalizer is within the owner's `γ_{d+4}` of its real value.
+        let normalizer_error = 2.0 * accumulation_growth(hd + 4);
+        let (mut forward_worst, mut unnormalized_worst) = (0.0_f64, 0.0_f64);
+        for head in 0..fixture.geometry.n_heads {
+            let (qo, ko) = (head * hd, fixture.geometry.key_value_head(head) * hd);
+            for t in 0..fixture.positions.len() {
+                let a = coordinates(&fixture.query_readins, &masks.query, fixture.x.row(t));
+                let query = fixture.query_outputs.dot(&a);
+                let query_normalizer = normalizer(query.slice(ndarray::s![qo..qo + hd]));
+                for s in 0..=t {
+                    let b = coordinates(&fixture.key_readins, &masks.key, fixture.x.row(s));
+                    let key = fixture.key_outputs.dot(&b);
+                    let key_normalizer = normalizer(key.slice(ndarray::s![ko..ko + hd]));
+                    let kernel = program
+                        .kernel(head, fixture.positions[s] - fixture.positions[t])
+                        .expect("kernel");
+                    let (mut value, mut abs, mut propagated) = (0.0, 0.0, 0.0);
+                    for i in 0..QUERY_COMPONENTS {
+                        for j in 0..KEY_COMPONENTS {
+                            value += a[i] * kernel.values[[i, j]] * b[j];
+                            abs += (a[i] * kernel.values[[i, j]] * b[j]).abs();
+                            propagated += (a[i] * b[j]).abs() * kernel.radius[[i, j]];
+                        }
+                    }
+                    let scale = query_normalizer * key_normalizer;
+                    let normalized = scale * value;
+                    let tolerance = scale * (propagated + growth * abs)
+                        + normalizer_error * normalized.abs()
+                        + executed.score_radius[[head, t, s]];
+                    let score = executed.scores[[head, t, s]];
+                    forward_worst = forward_worst.max((normalized - score).abs() / tolerance);
+                    unnormalized_worst = unnormalized_worst.max((value - score).abs() / tolerance);
+                }
+            }
+        }
+        assert!(
+            forward_worst <= 1.0,
+            "ν^Q ν^K aᵀ C^w b leaves the executed scores by {forward_worst} of the tolerance"
+        );
+        assert!(
+            unnormalized_worst > 1.0,
+            "the kernel without the normalizers must leave the executed scores, got {unnormalized_worst}"
+        );
     }
 }
