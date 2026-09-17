@@ -305,10 +305,17 @@ impl NuclearNormPenalty {
         let (evals, q) = gh.eigh(Side::Lower).map_err(|err| {
             format!("NuclearNormPenalty right-Gram eigendecomposition failed: {err}")
         })?;
-        let trace_scale = evals
-            .iter()
-            .fold(0.0_f64, |acc, &lambda| acc.max(lambda.abs()));
-        let psd_tol = 1.0e-10 * trace_scale;
+        // `T S` forms each entry as a `d`-term inner product and `Sᵀ G S` forms an
+        // `m`-term one over those, so entrywise `|δ(SᵀGS)| ≤ (γ_m + 2γ_d)·(BᵀB)` with
+        // `B = |T||S|`. That Frobenius norm plus the eigensolver's own
+        // `s·ε·‖SᵀGS‖₂` bounds how far each computed eigenvalue sits from the
+        // spectrum of the Gram it stands for (#2469).
+        let abs_ts = t.mapv(f64::abs).dot(&s.mapv(f64::abs));
+        let formation = (gam_linalg::roundoff::accumulation_growth(m)
+            + 2.0 * gam_linalg::roundoff::accumulation_growth(d))
+            * abs_ts.t().dot(&abs_ts).iter().map(|value| value * value).sum::<f64>().sqrt();
+        let band =
+            gam_linalg::roundoff::symmetric_spectrum_rounding_band(&evals.to_vec()) + formation;
         let mut raw_evals = Array1::<f64>::zeros(s_dim);
         for i in 0..s_dim {
             let lambda = evals[i];
@@ -317,10 +324,10 @@ impl NuclearNormPenalty {
                     "NuclearNormPenalty expected finite right-Gram eigenvalue; got {lambda}"
                 ));
             }
-            if lambda < -psd_tol {
+            if lambda < -band {
                 return Err(format!(
                     "NuclearNormPenalty expected PSD right Gram; eigenvalue {lambda:.3e} \
-                     is below numerical tolerance {psd_tol:.3e}"
+                     is below its rounding band {band:.3e}"
                 ));
             }
             raw_evals[i] = lambda.max(0.0);
@@ -353,8 +360,10 @@ impl NuclearNormPenalty {
             } else {
                 (0.0, evals[0])
             };
-            let scale = left.abs() + right.abs();
-            if (right - left).abs() <= 1.0e-12 * scale {
+            // Two computed eigenvalues whose exact values tie can sit up to twice
+            // the band apart. The top of the S⊥ zero class is exact and adds none.
+            let computed_endpoints = if active_start_s > 0 { 2.0 } else { 1.0 };
+            if (right - left).abs() <= computed_endpoints * band {
                 return Err(format!(
                     "NuclearNormPenalty HVP is undefined: max_rank splits a tied \
                      right-Gram eigenvalue at the active/inactive cutoff \
@@ -459,10 +468,15 @@ impl NuclearNormPenalty {
         let (evals, q) = gram.eigh(Side::Lower).map_err(|err| {
             format!("NuclearNormPenalty right-Gram eigendecomposition failed: {err}")
         })?;
-        let trace_scale = evals
-            .iter()
-            .fold(0.0_f64, |acc, &lambda| acc.max(lambda.abs()));
-        let psd_tol = 1.0e-10 * trace_scale;
+        // Each Gram entry is an `m`-term inner product, so `|δG| ≤ γ_m·(|T|ᵀ|T|)`
+        // entrywise. That Frobenius norm plus the eigensolver's own `d·ε·‖G‖₂`
+        // bounds how far each computed eigenvalue sits from the exact spectrum
+        // (#2469).
+        let abs_t = t.mapv(f64::abs);
+        let formation = gam_linalg::roundoff::accumulation_growth(t.nrows())
+            * abs_t.t().dot(&abs_t).iter().map(|value| value * value).sum::<f64>().sqrt();
+        let band =
+            gam_linalg::roundoff::symmetric_spectrum_rounding_band(&evals.to_vec()) + formation;
         let mut raw_evals = Array1::<f64>::zeros(d);
         for i in 0..d {
             let lambda = evals[i];
@@ -471,10 +485,10 @@ impl NuclearNormPenalty {
                     "NuclearNormPenalty expected finite right-Gram eigenvalue; got {lambda}"
                 ));
             }
-            if lambda < -psd_tol {
+            if lambda < -band {
                 return Err(format!(
                     "NuclearNormPenalty expected PSD right Gram; eigenvalue {lambda:.3e} \
-                     is below numerical tolerance {psd_tol:.3e}"
+                     is below its rounding band {band:.3e}"
                 ));
             }
             raw_evals[i] = lambda.max(0.0);
@@ -482,8 +496,9 @@ impl NuclearNormPenalty {
         if self.max_rank.is_some() && active_count < d && active_start > 0 {
             let left = evals[active_start - 1];
             let right = evals[active_start];
-            let scale = left.abs() + right.abs();
-            if (right - left).abs() <= 1.0e-12 * scale {
+            // Two computed eigenvalues whose exact values tie can sit up to twice
+            // the band apart.
+            if (right - left).abs() <= 2.0 * band {
                 return Err(format!(
                     "NuclearNormPenalty HVP is undefined: max_rank splits a tied \
                      right-Gram eigenvalue at the active/inactive cutoff \

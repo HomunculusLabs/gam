@@ -1929,6 +1929,46 @@ fn nuclear_norm_wide_zero_joint_rowspace_rejects_biting_zero_tie() {
     );
 }
 
+/// #2469: the tie guard at a biting `max_rank` refuses only a gap the right
+/// Gram's spectrum cannot resolve: twice the eigensolver band `p·ε·‖G‖₂` plus the
+/// `m`-term formation band `γ_m·‖|T|ᵀ|T|‖_F`. `G = diag(1, 1 + 1e-12, 4)` with
+/// `max_rank = 2` puts the cutoff between eigenvalues `1e-12` apart, about ninety
+/// times twice that band. The `1e-12·(|λ₀| + |λ₁|)` guard it replaced refused it.
+/// An exact tie `diag(1, 1, 4)` is still refused.
+#[test]
+fn nuclear_norm_tie_guard_refuses_only_an_unresolved_gap_2469() {
+    let n_eff = 3usize;
+    let p = 3usize;
+    let pen = |max_rank| {
+        let target = PsiSlice {
+            range: 0..n_eff * p,
+            latent_dim: Some(p),
+        };
+        NuclearNormPenalty::new(target, 0.8, n_eff, 1.0e-3, max_rank, false).unwrap()
+    };
+    let v = array![[0.1_f64, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]];
+    let gap = 1.0e-12_f64;
+    let near = array![[1.0_f64, 0.0, 0.0], [0.0, (1.0_f64 + gap).sqrt(), 0.0], [0.0, 0.0, 2.0]];
+    let gram_absolute = near.mapv(f64::abs).t().dot(&near.mapv(f64::abs));
+    let band = p as f64 * f64::EPSILON * 4.0
+        + gam_linalg::roundoff::accumulation_growth(n_eff)
+            * gram_absolute.iter().map(|value| value * value).sum::<f64>().sqrt();
+    assert!(
+        gap > 10.0 * 2.0 * band && gap <= 1.0e-12 * 2.0,
+        "fixture premise: the gap {gap:.1e} is resolved (2·band = {:.3e}) and inside the \
+         replaced 1e-12·(|λ₀| + |λ₁|) guard",
+        2.0 * band
+    );
+    pen(Some(2))
+        .right_spectral_inverse_sqrt_derivative(near.view(), v.view())
+        .expect("a resolved gap at the cutoff is not a tie");
+    let tied = array![[1.0_f64, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 2.0]];
+    let err = pen(Some(2))
+        .right_spectral_inverse_sqrt_derivative(tied.view(), v.view())
+        .expect_err("an exact tie at the cutoff is refused");
+    assert!(err.contains("splits a tied"), "got: {err}");
+}
+
 #[test]
 fn nuclear_norm_hvp_truncated_rank_matches_gradient_directional_derivative() {
     let n_eff = 4usize;

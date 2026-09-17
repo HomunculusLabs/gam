@@ -2642,12 +2642,21 @@ impl StandardizedCeiling {
             ));
         }
         let mut coefficients = Array1::<f64>::zeros(q);
+        // Each coefficient is an inner product of `q − j` products, known only to
+        // the rounding band of its own summands (#2469). A coefficient inside that
+        // band is not resolved from zero; one above it carries the wall whatever
+        // the other coordinates' magnitudes are.
+        let mut bands = Array1::<f64>::zeros(q);
         for j in 0..q {
             let mut total = 0.0;
+            let mut magnitude = 0.0;
             for k in j..q {
-                total += factor[[k, j]] * normal[k];
+                let term = factor[[k, j]] * normal[k];
+                total += term;
+                magnitude += term.abs();
             }
             coefficients[j] = total;
+            bands[j] = gam_linalg::roundoff::accumulation_band(q - j, magnitude);
         }
         let scale = coefficients
             .iter()
@@ -2658,11 +2667,13 @@ impl StandardizedCeiling {
                  constrains no cubature coordinate"
             ));
         }
-        let floor = 8.0 * f64::EPSILON * scale;
         let pivot = (0..q)
             .rev()
-            .find(|j| coefficients[*j].abs() > floor)
-            .ok_or_else(|| "affine ceiling: no coordinate clears the pivot floor".to_string())?;
+            .find(|j| coefficients[*j].abs() > bands[*j])
+            .ok_or_else(|| {
+                "affine ceiling: no standardized coefficient is resolved above its rounding band"
+                    .to_string()
+            })?;
         let offset = normal.dot(mean);
         if !(bound - offset).is_finite() {
             return Err(format!(
@@ -6534,6 +6545,23 @@ mod affine_ceiling_tests {
             early.pivot, 0,
             "a normal on coordinate 0 cannot reach a later coordinate through a lower-triangular factor"
         );
+    }
+
+    /// #2469: the pivot is the last coefficient resolved above its own inner
+    /// product's rounding band. With `L = diag(1e20, 1)` and `a = (1, 1)`,
+    /// `Lᵀa = (1e20, 1)`. The last coefficient is one exact product, so the wall
+    /// constrains coordinate 1. The `8·ε·max|Lᵀa|` floor this replaced (≈1.8e5)
+    /// called it zero and pivoted on coordinate 0.
+    #[test]
+    fn the_pivot_is_read_at_each_coefficient_rounding_band_not_the_largest_2469() {
+        let mean = array![0.0, 0.0];
+        let factor = diagonal_factor(&array![1.0e20, 1.0]);
+        let wall = StandardizedCeiling::new(&array![1.0, 1.0], 1.0, &mean, factor.view())
+            .expect("both coordinates are touched");
+        assert_eq!(wall.pivot, 1);
+        let tail_only = StandardizedCeiling::new(&array![1.0, 0.0], 1.0, &mean, factor.view())
+            .expect("an exactly-zero last coefficient leaves coordinate 0");
+        assert_eq!(tail_only.pivot, 0);
     }
 }
 
