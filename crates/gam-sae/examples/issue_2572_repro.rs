@@ -88,7 +88,7 @@ fn one_cell(target: &Array2<f64>, k_atoms: usize, top_k: usize, budget: &Budget)
     }) {
         Ok(report) => format!(
             "Ok: criterion={:.6e} outer_iters={} inner_iters={} retained={}",
-            report.criterion,
+            report.criterion.value(),
             report.outer_iterations,
             report.fixed_point.iterations,
             retained.len()

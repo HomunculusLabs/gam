@@ -34,6 +34,11 @@ pub(crate) struct SupportSparseFitRequest<'a> {
 /// test routes dense payloads here and support payloads there (#2567).
 pub(crate) const SUPPORT_SCHEMA_TAG: &str = "gamfit.ManifoldSAE/support-v2";
 
+/// The criterion every support fit reports. The representation fixes it, so a
+/// payload carries the tag for its readers and loading re-derives it.
+const SUPPORT_CRITERION_KIND: gam::terms::sae::front_door::SaeCriterionKind =
+    gam::terms::sae::front_door::SaeCriterionKind::ProfiledGaussianLaml;
+
 fn required_field<'py>(
     payload: &Bound<'py, PyDict>,
     key: &str,
@@ -430,6 +435,7 @@ impl SupportSparseManifoldSaeCore {
         out.set_item("log_lambda_smooth", self.log_lambda_smooth.clone())?;
         out.set_item("ard_precisions", self.ard_precisions.clone())?;
         out.set_item("criterion", self.criterion)?;
+        out.set_item("criterion_kind", SUPPORT_CRITERION_KIND.tag())?;
         out.set_item(
             "certificates",
             json_value_to_py(py, self.certificates.clone())?,
@@ -605,6 +611,7 @@ impl SupportSparseManifoldSaeCore {
             "log_lambda_smooth": self.log_lambda_smooth,
             "ard_precisions": self.ard_precisions,
             "criterion": require_finite_for_json("criterion", self.criterion)?,
+            "criterion_kind": SUPPORT_CRITERION_KIND.tag(),
             "certificates": self.certificates,
             "termination": self.termination,
             "reconstruction_r2": require_finite_for_json(
@@ -677,9 +684,16 @@ impl SupportSparseManifoldSaeCore {
     fn reconstruction_r2(&self) -> f64 {
         self.reconstruction_r2
     }
+    /// The terminal support LAML value. It is a profiled-Gaussian LAML on the
+    /// Gauss–Newton reduced Schur, not the dense fit's
+    /// `penalized_quasi_laplace_criterion`, and the two do not compare (#2933 F27).
     #[getter]
-    fn penalized_quasi_laplace_criterion(&self) -> f64 {
+    fn criterion(&self) -> f64 {
         self.criterion
+    }
+    #[getter]
+    fn criterion_kind(&self) -> &'static str {
+        SUPPORT_CRITERION_KIND.tag()
     }
     #[getter]
     fn support_indices<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<u32>>> {
@@ -763,7 +777,7 @@ pub(crate) fn fit_support_sparse_manifold_sae(
         reconstruction_r2,
         log_lambda_smooth,
         ard_precisions: outer.ard_precisions,
-        criterion: outer.criterion,
+        criterion: outer.criterion.value(),
         certificates,
         termination,
         trust_radius: request.trust_radius,

@@ -5889,6 +5889,10 @@ impl ManifoldSaeCore {
             "penalized_quasi_laplace_criterion",
             self.inner.penalized_quasi_laplace_criterion,
         )?;
+        out.set_item(
+            "criterion_kind",
+            gam::terms::sae::front_door::SaeCriterionKind::PenalizedQuasiLaplace.tag(),
+        )?;
         out.set_item("reconstruction_r2", self.inner.reconstruction_r2)?;
         out.set_item("dispersion", self.inner.dispersion)?;
         out.set_item("avg_active_atoms", avg_active_atoms)?;
@@ -6706,6 +6710,12 @@ impl ManifoldSaeCore {
     #[getter]
     fn penalized_quasi_laplace_criterion(&self) -> f64 {
         self.inner.penalized_quasi_laplace_criterion
+    }
+    /// Which criterion `penalized_quasi_laplace_criterion` is. An overcomplete
+    /// support fit reports a different kind that does not compare (#2933 F27).
+    #[getter]
+    fn criterion_kind(&self) -> &'static str {
+        gam::terms::sae::front_door::SaeCriterionKind::PenalizedQuasiLaplace.tag()
     }
     #[getter]
     fn selected_log_lambda_sparse(&self) -> Option<f64> {

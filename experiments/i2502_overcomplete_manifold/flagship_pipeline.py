@@ -116,7 +116,7 @@ def main():
                test_mean_l0=float(active.sum(1).mean()),
                alive_atoms_train=alive, topology_census=topo_census,
                alive_by_topology=alive_by_topo, usage_by_topology=usage_by_topo,
-               laml=float(model.penalized_quasi_laplace_criterion))
+               laml=float(model.criterion), criterion_kind=str(model.criterion_kind))
     with open(out_jsonl, "a") as f:
         f.write(json.dumps(rec) + "\n")
     print("[flag]", json.dumps(rec), flush=True)

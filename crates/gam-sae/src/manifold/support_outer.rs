@@ -7,14 +7,22 @@
 //! sees the number of heterogeneous families, while the inner model still has
 //! distinct decoder functions and coordinates for every occupied atom.
 //!
-//! ## The criterion is ONE functional (#2576)
+//! ## The criterion is ONE functional (#2576), and it is not the dense one (#2933 F27)
 //!
 //! `2·cost(ρ) = log|S| − log|S_ρ|₊ + df·(1 + ln(τ·D_p/df))`, where
-//! `S = H_ββ − Σ_i H_βt^(i) H_tt^(ⁱ)⁻¹ H_tβ^(ⁱ)` is the reduced
-//! decoder Schur complement. This is the same coordinate-profiled Laplace
-//! complexity as the dense SAE criterion: the row-coordinate normalizer
-//! `Σ_i log|H_tt^(ⁱ)|` is removed rather than charging a decoder-scale-
-//! dependent quantity for nuisance coordinates.
+//! `S = H_ββ − Σ_i H_βt^(i) H_tt^(ⁱ)⁻¹ H_tβ^(ⁱ)` is the reduced decoder Schur
+//! complement of the Gauss–Newton system. The row-coordinate normalizer
+//! `Σ_i log|H_tt^(ⁱ)|` is removed, so the coordinates are profiled rather than
+//! integrated. The Gaussian dispersion is profiled out of the penalized deviance
+//! `D_p`, and the penalty pseudo-determinant `log|S_ρ|₊` carries its base term.
+//!
+//! The dense SAE criterion is a different statistical objective. It keeps the
+//! coordinate block inside the observed information `log|A|` (#2668), scores the
+//! penalized loss at unit dispersion, adds a realised-rank charge, and drops the
+//! base pseudo-determinant and `2π`. A hard-TopK request that crosses `K = P`
+//! therefore changes criteria. The report carries a [`SaeCriterionScore`] of kind
+//! [`SaeCriterionKind::ProfiledGaussianLaml`], [`SaeCriterionScore::difference`]
+//! refuses a dense score, and [`SaeSupportLamlComponents`] names every term.
 //!
 //! The normalizer comes from the evidence lane ([`SurrogateLaneState`]) the dense
 //! manifold criterion also runs. Where the dense `k × k` reduced Schur's complete
@@ -42,6 +50,7 @@ use gam_solve::rho_optimizer::{
 use ndarray::{Array1, Array2, ArrayView1};
 
 use super::*;
+use crate::front_door::{SaeCriterionKind, SaeCriterionScore};
 use crate::migration_ledger::{
     BirthSeed, MoveEvidence, MoveReason, MoveStage, SaeMigrationLedger,
 };
@@ -294,7 +303,11 @@ pub struct SaeSupportOuterReport {
     pub log_lambda_groups: Array1<f64>,
     pub lambda_smooth: Vec<f64>,
     pub ard_precisions: Vec<Vec<f64>>,
-    pub criterion: f64,
+    /// The terminal criterion, typed as the profiled-Gaussian LAML this lane
+    /// minimizes. It does not compare with a dense quasi-Laplace score (#2933 F27).
+    pub criterion: SaeCriterionScore,
+    /// The named terms `criterion` is assembled from.
+    pub criterion_components: SaeSupportLamlComponents,
     pub fixed_point: SaeSupportFixedPointReport,
     pub outer_iterations: usize,
     pub outer_certificate: OuterCriterionCertificate,
@@ -310,9 +323,51 @@ struct PenaltySpectrum {
     total_rank: usize,
 }
 
+/// The named terms of one support LAML value (#2933 F27):
+/// `2·cost = reduced_log_det − penalty_log_pdet
+///   + residual_df·(1 + ln(2π·penalized_deviance/residual_df))`.
+///
+/// Each term is where this criterion departs from the dense quasi-Laplace score:
+/// the curvature is the Gauss–Newton reduced Schur with the row block profiled
+/// out, the prior normalizer includes its base pseudo-determinant, and the scale
+/// is profiled out of the penalized deviance rather than held at one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SaeSupportLamlComponents {
+    /// `log|S|` of the Gauss–Newton reduced decoder Schur complement.
+    /// `Σ_i log|H_tt^(i)|` is not in it.
+    pub reduced_log_det: f64,
+    /// `log|λS|₊ = Σ_g (log|S_g|₊ + rank_g·ρ_g)`, base pseudo-determinant included.
+    pub penalty_log_pdet: f64,
+    /// Response cells less the estimated unpenalized decoder directions.
+    pub residual_df: f64,
+    /// `D_p = 2·penalized_objective`: the residual sum of squares plus every
+    /// penalty the inner solve descends.
+    pub penalized_deviance: f64,
+}
+
+impl SaeSupportLamlComponents {
+    /// `½·df·(1 + ln(2π·D_p/df))`: the Gaussian likelihood with its dispersion
+    /// profiled out.
+    pub fn profiled_dispersion_term(&self) -> f64 {
+        0.5 * self.residual_df
+            * (1.0
+                + (std::f64::consts::TAU * self.penalized_deviance / self.residual_df).ln())
+    }
+
+    /// The support LAML value these terms assemble.
+    pub fn value(&self) -> f64 {
+        0.5 * (self.reduced_log_det - self.penalty_log_pdet
+            + self.residual_df
+                * (1.0
+                    + (std::f64::consts::TAU * self.penalized_deviance / self.residual_df)
+                        .ln()))
+    }
+}
+
 #[derive(Clone)]
 struct SupportOuterEvaluation {
     cost: f64,
+    components: SaeSupportLamlComponents,
     gradient: Array1<f64>,
     lambda_smooth: Vec<f64>,
     fixed_point: SaeSupportFixedPointReport,
@@ -846,9 +901,13 @@ impl SaeSupportOuterObjective {
             penalty_logdet += self.spectrum.log_pdet_base_by_group[group]
                 + self.spectrum.rank_by_group[group] as f64 * rho[group];
         }
-        let cost = 0.5
-            * (reduced_logdet - penalty_logdet
-                + residual_df * (1.0 + (std::f64::consts::TAU * deviance / residual_df).ln()));
+        let components = SaeSupportLamlComponents {
+            reduced_log_det: reduced_logdet,
+            penalty_log_pdet: penalty_logdet,
+            residual_df,
+            penalized_deviance: deviance,
+        };
+        let cost = components.value();
         // The surrogate's directional derivative is the exact FIXED-STATE
         // derivative of the very `log|S|` that entered `cost` above — same
         // probes, quadrature nodes, frozen deflation basis and shifted solves.
@@ -928,6 +987,7 @@ impl SaeSupportOuterObjective {
         }
         Ok(SupportOuterEvaluation {
             cost,
+            components,
             gradient,
             lambda_smooth,
             fixed_point,
@@ -1121,7 +1181,8 @@ pub fn run_sae_support_outer(
         log_lambda_groups: outer.rho,
         lambda_smooth: terminal.lambda_smooth,
         ard_precisions: request.ard_precisions,
-        criterion: terminal.cost,
+        criterion: SaeCriterionScore::new(SaeCriterionKind::ProfiledGaussianLaml, terminal.cost),
+        criterion_components: terminal.components,
         fixed_point: terminal.fixed_point,
         outer_iterations: outer.iterations,
         outer_certificate: certificate,
@@ -1280,7 +1341,7 @@ pub fn fit_sae_support_sparse(
         retained_atom_indices.len(),
         Some(0),
         MoveEvidence::none(),
-        outer.criterion,
+        outer.criterion.value(),
     );
     let pruned = requested_atoms - retained_atom_indices.len();
     if pruned > 0 {
@@ -1290,7 +1351,7 @@ pub fn fit_sae_support_sparse(
             pruned,
             Some(0),
             MoveEvidence::none(),
-            outer.criterion,
+            outer.criterion.value(),
         );
     }
     // A support move re-routes rows among the retained atoms and keeps every atom
@@ -1309,7 +1370,7 @@ pub fn fit_sae_support_sparse(
             emptied,
             None,
             MoveEvidence::none(),
-            outer.criterion,
+            outer.criterion.value(),
         );
     }
     log::info!(

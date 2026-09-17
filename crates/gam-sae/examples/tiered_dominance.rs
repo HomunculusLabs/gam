@@ -93,7 +93,10 @@ fn main() -> Result<(), String> {
     if let Some(tier2) = hybrid.tier2.as_ref() {
         println!(
             "  tier2: requested {} atoms, retained {}, outer iters {}, criterion {:.6e}",
-            tier2.requested_atoms, tier2.retained_atoms, tier2.outer_iterations, tier2.criterion
+            tier2.requested_atoms,
+            tier2.retained_atoms,
+            tier2.outer_iterations,
+            tier2.criterion.value()
         );
     }
     println!(

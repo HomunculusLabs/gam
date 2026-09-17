@@ -3,9 +3,14 @@
 //!
 //! There is one SAE fit engine: the inner arrow-Schur Newton over per-row
 //! active sets `(indices, gates, coords)`, the outer REML evidence loop, and
-//! the birth/death migration ledger. The lanes this door selects are NOT
-//! different models — they are memory-layout admissions and solver
-//! specializations of that engine:
+//! the birth/death migration ledger. The lanes this door selects are
+//! memory-layout admissions and solver specializations of that engine, but
+//! they do NOT all minimize one criterion. The hard-TopK request crosses a
+//! criterion boundary at `K = P`: [`SaeFitLane::DenseCertification`] scores a
+//! [`SaeCriterionKind::PenalizedQuasiLaplace`] value and
+//! [`SaeFitLane::CurvedStreaming`] a [`SaeCriterionKind::ProfiledGaussianLaml`]
+//! one. The admission names the kind ([`SaeFitLane::criterion_kind`]), and
+//! [`SaeCriterionScore::difference`] refuses to compare the two (#2933 F27):
 //!
 //! * [`SaeFitLane::DenseCertification`] — the full-support materialization
 //!   (`N×K` assignment state), admitted only while it is no larger than the
@@ -42,6 +47,100 @@ pub enum SaeFitLane {
     /// dense `N×K` live Newton state. Budget arithmetic:
     /// [`crate::manifold::SaeTopKCurvedBudget`].
     CurvedStreaming,
+}
+
+impl SaeFitLane {
+    /// The criterion a fit admitted to this lane minimizes over its smoothing
+    /// coordinates and reports as its terminal score (#2933 F27).
+    ///
+    /// `None` for [`Self::SparseCodes`]: the linear sparse-code trainer's
+    /// variance-component schedule is neither of the manifold criteria.
+    pub const fn criterion_kind(self) -> Option<SaeCriterionKind> {
+        match self {
+            Self::DenseCertification => Some(SaeCriterionKind::PenalizedQuasiLaplace),
+            Self::SparseCodes => None,
+            Self::CurvedStreaming => Some(SaeCriterionKind::ProfiledGaussianLaml),
+        }
+    }
+}
+
+/// Which scalar an SAE manifold fit route minimizes and reports (#2933 F27).
+///
+/// The two routes a hard-TopK request can be admitted to compute DIFFERENT
+/// statistical objectives, not two factorizations of one scalar:
+///
+/// * [`Self::PenalizedQuasiLaplace`]: the `SaeManifoldTerm`
+///   `penalized_quasi_laplace_criterion*` family,
+///   `V = ℓ_pen(θ̂; ρ) + E_extra + ½·log|A| + Σ_k ½·d_eff,k·log max(N_eff,k, 1)
+///   − Σ_k ½·r_k·rank(S_k)·log λ_k`. The data term is the penalized loss at unit
+///   dispersion. The curvature is the joint observed information with the
+///   coordinate block integrated, alongside the ARD normalizer `loss.ard` carries.
+///   A realised-rank charge is added. Smoothing and ARD coordinates are per atom.
+///   Only the `ρ`-dependent part of the penalty normalizer enters: no base
+///   `log|S|₊`, no `2π`.
+/// * [`Self::ProfiledGaussianLaml`]: the support-sparse grouped LAML
+///   (`crate::manifold::run_sae_support_outer`),
+///   `2V = log|S_red| − log|λS|₊ + df·(1 + ln(2π·D_p/df))`. `S_red` is the
+///   Gauss–Newton reduced decoder Schur complement with the row coordinate block
+///   `Σ_i log|H_tt^(i)|` profiled out. The Gaussian dispersion is profiled out of
+///   the penalized deviance `D_p`. The penalty pseudo-determinant is complete,
+///   base included. There is no rank charge. Smoothing is shared per
+///   `(basis kind, latent dimension)` family, and the ARD precisions are fixed.
+///
+/// They differ in scale convention, curvature operator, coordinate treatment,
+/// prior normalization, rank pricing and hyperparameter layout, so neither value
+/// approximates the other and their difference measures nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SaeCriterionKind {
+    /// Unit-dispersion penalized quasi-Laplace score on the observed information.
+    PenalizedQuasiLaplace,
+    /// Profiled-dispersion Gaussian LAML on the Gauss–Newton reduced Schur.
+    ProfiledGaussianLaml,
+}
+
+impl SaeCriterionKind {
+    /// The public token the Python fits carry as `criterion_kind`.
+    pub const fn tag(self) -> &'static str {
+        match self {
+            Self::PenalizedQuasiLaplace => "penalized_quasi_laplace",
+            Self::ProfiledGaussianLaml => "profiled_gaussian_laml",
+        }
+    }
+}
+
+/// A terminal criterion value together with the kind of scalar it is (#2933 F27).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SaeCriterionScore {
+    kind: SaeCriterionKind,
+    value: f64,
+}
+
+impl SaeCriterionScore {
+    pub const fn new(kind: SaeCriterionKind, value: f64) -> Self {
+        Self { kind, value }
+    }
+
+    pub const fn kind(&self) -> SaeCriterionKind {
+        self.kind
+    }
+
+    pub const fn value(&self) -> f64 {
+        self.value
+    }
+
+    /// `self − other`, defined only between two values of one criterion kind.
+    pub fn difference(&self, other: &Self) -> Result<f64, String> {
+        if self.kind != other.kind {
+            return Err(format!(
+                "SaeCriterionScore::difference: a {} value cannot be compared with a {} value; \
+                 they are different statistical objectives, not two representations of one \
+                 (#2933 F27)",
+                self.kind.tag(),
+                other.kind.tag()
+            ));
+        }
+        Ok(self.value - other.value)
+    }
 }
 
 /// Auditable admission decision at a fit entry point.
@@ -398,6 +497,45 @@ mod tests {
         // Degenerate support sizes are caller errors.
         assert!(admit_topk_manifold_with_budget(64, 8, 16, 1, 0, bytes).is_err());
         assert!(admit_topk_manifold_with_budget(64, 8, 16, 1, 17, bytes).is_err());
+    }
+
+    /// #2933 F27: one hard-TopK request, one atom past `K = P`, is admitted to a
+    /// lane that minimizes a different criterion, and the admission says so. Two
+    /// scores of different kinds refuse to subtract, while two scores of one kind
+    /// still compare.
+    #[test]
+    fn topk_admission_crossing_k_eq_p_names_a_different_criterion_kind_2933_f27() {
+        let bytes = usize::MAX / 2;
+        let at_p = admit_topk_manifold_with_budget(64, 8, 8, 1, 2, bytes).expect("K = P");
+        let past_p = admit_topk_manifold_with_budget(64, 8, 9, 1, 2, bytes).expect("K = P + 1");
+        assert_eq!(at_p.lane, SaeFitLane::DenseCertification);
+        assert_eq!(past_p.lane, SaeFitLane::CurvedStreaming);
+        assert_eq!(
+            at_p.lane.criterion_kind(),
+            Some(SaeCriterionKind::PenalizedQuasiLaplace)
+        );
+        assert_eq!(
+            past_p.lane.criterion_kind(),
+            Some(SaeCriterionKind::ProfiledGaussianLaml)
+        );
+        assert_eq!(SaeFitLane::SparseCodes.criterion_kind(), None);
+        assert_ne!(
+            SaeCriterionKind::PenalizedQuasiLaplace.tag(),
+            SaeCriterionKind::ProfiledGaussianLaml.tag()
+        );
+
+        let dense = SaeCriterionScore::new(SaeCriterionKind::PenalizedQuasiLaplace, 12.5);
+        let support = SaeCriterionScore::new(SaeCriterionKind::ProfiledGaussianLaml, 12.5);
+        let err = dense
+            .difference(&support)
+            .expect_err("equal numbers of different kinds must not compare as equal scores");
+        assert!(
+            err.contains("penalized_quasi_laplace") && err.contains("profiled_gaussian_laml"),
+            "refusal must name both kinds; got: {err}"
+        );
+        assert!(support.difference(&dense).is_err());
+        let later = SaeCriterionScore::new(SaeCriterionKind::ProfiledGaussianLaml, 10.0);
+        assert_eq!(later.difference(&support), Ok(-2.5));
     }
 
     /// The public overcomplete route is admitted solely by its support-shaped
