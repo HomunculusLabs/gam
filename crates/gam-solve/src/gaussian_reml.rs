@@ -979,6 +979,9 @@ struct GaussianRemlPrepared {
     ywy: Array1<f64>,
     projected_rhs_squared: Array2<f64>,
     projected_rhs: Array2<f64>,
+    /// `r0_j = ‖tail(Qᵀ·W½y_j)‖²` per output: the unpenalized residual deviance as a
+    /// sum of squares (see [`rotated_weighted_response`]).
+    unpenalized_residual: Array1<f64>,
     /// Number of rows with a strictly positive prior weight — the effective
     /// sample size that enters the REML residual degrees of freedom `ν`. Rows
     /// with weight `0` are excluded (see [`effective_observation_count`]).
@@ -1223,9 +1226,11 @@ fn gaussian_reml_logdet_term(
 ///
 /// is exact algebra, and the right-hand form is a SUM OF NON-NEGATIVES: `r0_j`
 /// is the ρ-independent unpenalized residual deviance (`≥ 0`, exactly `0` for a
-/// saturated design) and every `u_i ≥ 0`. The cancellation is confined to `r0_j`,
-/// which no longer depends on ρ and therefore cannot differ between two cells of
-/// the ρ search.
+/// saturated design) and every `u_i ≥ 0`. Nor is `r0_j` formed as `ywy_j − Σ_i c²_ij`:
+/// that difference is only as accurate as `Σc²`, and `Σc²` carries the design's
+/// condition number times `eps·ywy` when `c` comes from the semi-normal equations
+/// (#2280). The caller supplies `r0_j` as the sum of squares
+/// [`rotated_weighted_response`] returns, so nothing in `dp_j` cancels.
 ///
 /// Shared by the evaluator, the domain check, the profiled dispersion and the
 /// interval enclosure: a bound that encloses a different expression than the
@@ -1234,7 +1239,7 @@ fn gaussian_reml_logdet_term(
 #[inline]
 fn dispersion_residual_parts(
     cache: &GaussianRemlEigenCache,
-    ywy: ArrayView1<'_, f64>,
+    unpenalized_residual: ArrayView1<'_, f64>,
     projected_rhs_squared: ArrayView2<'_, f64>,
     output: usize,
     rho: f64,
@@ -1252,10 +1257,7 @@ fn dispersion_residual_parts(
         dp_grad += c2 * mode.w;
         dp_hess += c2 * mode.k;
     }
-    // `r0 ≥ 0` mathematically (it is the residual deviance of the unpenalized
-    // weighted least-squares fit), so clamping at zero only removes roundoff
-    // that has no sign information left in it.
-    let unpenalized_residual = (ywy[output] - total_c2).max(0.0);
+    let unpenalized_residual = unpenalized_residual[output];
     DispersionResidualParts {
         unpenalized_residual,
         penalized_residual,
@@ -1266,12 +1268,12 @@ fn dispersion_residual_parts(
 }
 
 /// The `dp = r0 + Σ c²·u` decomposition of one output's profiled residual
-/// deviance, plus the `Σ c²` whose cancellation against `ywy` produced `r0`.
+/// deviance, plus `Σ c²`, the response energy inside the design's column space.
 ///
-/// `total_c2` is not an extra output for convenience: `r0` is a DIFFERENCE of
-/// two same-signed accumulations, so the only honest scale for its absolute
-/// error is `|ywy| + Σ c²` — the magnitudes that cancelled — and that scale is
-/// unrecoverable once the difference has been taken (#2729).
+/// `total_c2` is not an extra output for convenience: `r0` and every `c` are
+/// components of the rotated response `Qᵀ·W½y`, and that rotation rounds relative
+/// to the whole response. So the honest scale for `dp`'s absolute error is
+/// `|ywy| + Σ c²`, not `dp` itself (#2729).
 #[derive(Clone, Copy)]
 struct DispersionResidualParts {
     unpenalized_residual: f64,
@@ -1290,18 +1292,20 @@ struct DispersionResidualParts {
 fn gaussian_reml_dispersion_term(
     cache: &GaussianRemlEigenCache,
     ywy: ArrayView1<'_, f64>,
+    unpenalized_residual: ArrayView1<'_, f64>,
     projected_rhs_squared: ArrayView2<'_, f64>,
     output: usize,
     nu: f64,
     rho: f64,
 ) -> TermDerivs {
-    let parts = dispersion_residual_parts(cache, ywy, projected_rhs_squared, output, rho);
+    let parts =
+        dispersion_residual_parts(cache, unpenalized_residual, projected_rhs_squared, output, rho);
     let dp = parts.unpenalized_residual + parts.penalized_residual;
     let value = 0.5 * nu * (1.0 + (2.0 * std::f64::consts::PI * dp / nu).ln());
-    // #2729. `dp` is formed by cancelling `Σ c²` against `ywy` and then adding a
-    // sum of non-negatives, so its ABSOLUTE error is set by the magnitudes that
-    // cancelled, not by `dp` itself. Two multiplies and one accumulation per
-    // eigendirection, the final subtraction, the clamp and one addition.
+    // #2729. `dp` is built from components of the rotated response, whose rounding is
+    // relative to the whole response, so its ABSOLUTE error is set by `ywy + Σ c²`,
+    // not by `dp` itself. Two multiplies and one accumulation per eigendirection, the
+    // residual's accumulation and one addition.
     let operation_count = cache
         .penalty_eigenvalues
         .len()
@@ -1419,6 +1423,8 @@ pub fn gaussian_reml_multi_shared_dispersion_closed_form(
     let d = prepared.n_outputs;
     let mut pooled_ywy = Array1::<f64>::zeros(1);
     pooled_ywy[0] = prepared.ywy.iter().copied().sum();
+    let mut pooled_unpenalized_residual = Array1::<f64>::zeros(1);
+    pooled_unpenalized_residual[0] = prepared.unpenalized_residual.iter().copied().sum();
     let mut pooled_projected_rhs_squared =
         Array2::<f64>::zeros((prepared.cache.penalty_eigenvalues.len(), 1));
     for eig in 0..prepared.cache.penalty_eigenvalues.len() {
@@ -1435,6 +1441,7 @@ pub fn gaussian_reml_multi_shared_dispersion_closed_form(
     validate_reml_profile_residuals(
         &prepared.cache,
         pooled_ywy.view(),
+        pooled_unpenalized_residual.view(),
         pooled_projected_rhs_squared.view(),
         prepared.n_effective,
         rho_lower,
@@ -1443,6 +1450,7 @@ pub fn gaussian_reml_multi_shared_dispersion_closed_form(
         let mut value = evaluate_reml_profile(
             &prepared.cache,
             pooled_ywy.view(),
+            pooled_unpenalized_residual.view(),
             pooled_projected_rhs_squared.view(),
             d,
             shared_nu,
@@ -1457,7 +1465,7 @@ pub fn gaussian_reml_multi_shared_dispersion_closed_form(
         let enclose = |a: f64, b: f64| {
             reml_deriv_enclosure_profile(
                 &prepared.cache,
-                pooled_ywy.view(),
+                pooled_unpenalized_residual.view(),
                 pooled_projected_rhs_squared.view(),
                 d,
                 shared_nu,
@@ -1479,16 +1487,21 @@ pub fn gaussian_reml_multi_shared_dispersion_closed_form(
         .map_err(|error| EstimationError::InvalidInput(error.to_string()))?;
     let coefficients = prepared.coefficients(lambda);
     let fitted = dense_ab(x, coefficients.view());
-    let mut fitted_quadratic = 0.0_f64;
-    // Same classified spectrum the objective's `dp` uses — `σ̂²·ν` and `dp(ρ̂)`
-    // are the same quantity computed two ways and must not read the spectrum
-    // through two different range/null tests (#2740).
-    let spectrum = PenaltyRangeSpectrum::of(&prepared.cache);
-    for eig in 0..spectrum.len() {
-        let denom = 1.0 + lambda * spectrum.get(eig);
-        fitted_quadratic += pooled_projected_rhs_squared[[eig, 0]] / denom;
-    }
-    let shared_sigma2 = (pooled_ywy[0] - fitted_quadratic) / shared_nu;
+    // `σ̂²·ν` is `dp(ρ̂)` through the decomposition the objective reads, so the two share
+    // one range/null classification of the spectrum (#2740) and neither subtracts `Σc²`
+    // from `ywy`.
+    let DispersionResidualParts {
+        unpenalized_residual,
+        penalized_residual,
+        ..
+    } = dispersion_residual_parts(
+        &prepared.cache,
+        pooled_unpenalized_residual.view(),
+        pooled_projected_rhs_squared.view(),
+        0,
+        rho,
+    );
+    let shared_sigma2 = (unpenalized_residual + penalized_residual) / shared_nu;
     let (reml_grad_lambda, reml_hess_lambda) =
         rho_derivatives_to_lambda(lambda, objective.grad, objective.hess);
     Ok(GaussianRemlMultiResult {
@@ -2511,7 +2524,7 @@ pub fn gaussian_reml_multi_shared_dispersion_penalty_gradient_from_fit(
     let shared_nu = (d as f64) * (per_output_nu as f64);
     // Use the deviance represented by the forward fit itself.  Reconstructing
     // the mathematically equivalent quantity as RSS + lambda * beta' S beta
-    // follows a different floating-point path from the modal subtraction used
+    // follows a different floating-point path from the modal decomposition used
     // by `gaussian_reml_multi_shared_dispersion_closed_form`.  On a nearly
     // interpolating chart the two paths lose different low bits, making this
     // gradient disagree with value probes even though both formulas are exact
@@ -2531,23 +2544,21 @@ pub fn gaussian_reml_multi_shared_dispersion_penalty_gradient_from_fit(
     }
     let pooled_deviance = shared_sigma2 * shared_nu;
     // DENOMINATE THE BAR IN WHAT PRODUCED THE QUANTITY.  The forward fit forms
-    // this pooled deviance by cancellation: `pooled_ywy - sum_k c_k^2/(1 +
-    // lambda*delta_k)` (see `gaussian_reml_multi_shared_dispersion_closed_form`),
-    // a difference of two accumulations that are individually bounded in
-    // magnitude by the pooled weighted response energy.  On the nearly
-    // interpolating chart the comment above describes, that difference is the
-    // roundoff residue of its own summation, and a bare `> 0.0` accepts it: a
-    // positive value at the arithmetic floor is indistinguishable from a real
-    // deviance to that predicate, and it then enters `deviance_scale` as a
-    // DENOMINATOR, so the accepted debris is amplified by `1/floor` into every
-    // entry the nested metric optimizer follows.
+    // this pooled deviance as `r0 + sum_k c_k^2*u_k` from the components of the
+    // rotated response `Q'W^(1/2)y` (see `rotated_weighted_response`), whose
+    // squares sum to the pooled weighted response energy.  That rotation rounds
+    // relative to the whole energy, so on the nearly interpolating chart the
+    // comment above describes, a deviance at the arithmetic floor carries no
+    // digit, and a bare `> 0.0` accepts it: a positive value at the floor is
+    // indistinguishable from a real deviance to that predicate, and it then
+    // enters `deviance_scale` as a DENOMINATOR, so the accepted debris is
+    // amplified by `1/floor` into every entry the nested metric optimizer follows.
     //
-    // The floor below is the standard `gamma_m` forward-error bound for the way
-    // the quantity is actually formed, exactly as
-    // `validate_weighted_block_orthogonality` bounds its own cancellation: two
-    // multiplications and one accumulation per weighted response entry
+    // The floor below is the standard `gamma_m` forward-error bound on those
+    // accumulations, in the form `validate_weighted_block_orthogonality` uses:
+    // two multiplications and one accumulation per weighted response entry
     // (`n*d` of them), one reciprocal-scale multiply and one accumulation per
-    // penalty eigendirection (`p` of them), and the final subtraction.  It is
+    // penalty eigendirection (`p` of them), and the final addition.  It is
     // derived from the machine epsilon, the problem dimensions and the measured
     // response energy; there is no tolerance to tune.  Below it, the pooled
     // deviance carries no significant digit, `1/pooled_deviance` has no
@@ -2579,7 +2590,7 @@ pub fn gaussian_reml_multi_shared_dispersion_penalty_gradient_from_fit(
         && pooled_deviance > deviance_roundoff)
     {
         crate::bail_invalid_estim!(
-            "shared-dispersion REML penalty gradient requires a forward deviance resolved above the roundoff of its own formation; the chart is interpolating to arithmetic precision: pooled deviance {pooled_deviance:.6e} does not exceed the forward bound {deviance_roundoff:.6e} on the cancellation that produced it from pooled response energy {pooled_response_energy:.6e}"
+            "shared-dispersion REML penalty gradient requires a forward deviance resolved above the roundoff of its own formation; the chart is interpolating to arithmetic precision: pooled deviance {pooled_deviance:.6e} does not exceed the forward bound {deviance_roundoff:.6e} on its formation from pooled response energy {pooled_response_energy:.6e}"
         );
     }
 
@@ -3915,8 +3926,29 @@ pub(crate) fn build_gaussian_reml_eigen_cache_with_nullspace_dim(
     let weight = gaussian_reml_weights(n, weights)?;
 
     let xtwx = dense_xt_diag_x(x, weight.view());
-    // Factor the weighted design before squaring its condition number in X'WX.
     // The Gram matrix remains the cache identity, never the factorization input.
+    let factor = weighted_design_qr(x, weight.view())?;
+    gaussian_reml_eigen_cache_from_lower(
+        factor.upper.t().to_owned(), penalty, nullspace_dim, matrix_fingerprint(xtwx.view()),
+    )
+}
+
+/// Householder QR `W½X = Q·R` of the weighted design, with the row signs `D` that give
+/// `D·R` a positive diagonal. `D·R` is the Cholesky factor of `XᵀWX` the cache is built
+/// on, so `Q·D` is the orthonormal basis its `coefficient_basis = (D·R)⁻¹·V` speaks in.
+struct WeightedDesignQr {
+    qr: faer::linalg::solvers::Qr<f64>,
+    /// `D·R`: upper triangular with a positive diagonal.
+    upper: Array2<f64>,
+    /// The diagonal of `D`.
+    row_signs: Vec<f64>,
+}
+
+fn weighted_design_qr(
+    x: ArrayView2<'_, f64>,
+    weight: ArrayView1<'_, f64>,
+) -> Result<WeightedDesignQr, EstimationError> {
+    // Factor the weighted design before squaring its condition number in X'WX.
     let weighted_design = Array2::from_shape_fn(x.dim(), |(row, col)| {
         weight[row].sqrt() * x[[row, col]]
     });
@@ -3929,14 +3961,66 @@ pub(crate) fn build_gaussian_reml_eigen_cache_with_nullspace_dim(
     if upper.nrows() != x.ncols() || upper.diag().iter().any(|v| !v.is_finite() || *v == 0.0) {
         return Err(EstimationError::ModelIsIllConditioned { condition_number: f64::INFINITY });
     }
+    let mut row_signs = vec![1.0; upper.nrows()];
     for row in 0..upper.nrows() {
         if upper[[row, row]] < 0.0 {
             upper.row_mut(row).mapv_inplace(|value| -value);
+            row_signs[row] = -1.0;
         }
     }
-    gaussian_reml_eigen_cache_from_lower(
-        upper.t().to_owned(), penalty, nullspace_dim, matrix_fingerprint(xtwx.view()),
-    )
+    Ok(WeightedDesignQr { qr, upper, row_signs })
+}
+
+/// The weighted response rotated by the design's orthogonal factor, `Qᵀ·W½Y`, split at
+/// the design's `p` columns.
+///
+/// The leading block, sign-corrected by `D`, is `(D·R)⁻ᵀ·XᵀWY`: the response's
+/// coordinates in the design's column space. Forming it as that triangular solve
+/// instead (the semi-normal equations) amplifies the rounding of `XᵀWY` by the
+/// design's condition number, which on a condition-`1.4e12` Duchon chart put `Σc²`
+/// tens of units off a true residual of `6.3e-3` and clamped `r0` to zero (#2280).
+/// Householder reflections are backward stable, so each rotated component carries
+/// only `eps`-relative rounding of `W½y`.
+///
+/// The trailing `n − p` rows are the part of the response no column reaches, so
+/// `r0_j = ‖tail(Qᵀ·W½y_j)‖²` is the unpenalized residual deviance as a sum of
+/// squares, with nothing left to cancel. Returns `(leading block, r0)`.
+fn rotated_weighted_response(
+    factor: &WeightedDesignQr,
+    weight: ArrayView1<'_, f64>,
+    y: ArrayView2<'_, f64>,
+) -> (Array2<f64>, Array1<f64>) {
+    let (n, d) = y.dim();
+    let p = factor.upper.ncols();
+    let mut rotated =
+        faer::Mat::<f64>::from_fn(n, d, |row, col| weight[row].sqrt() * y[[row, col]]);
+    let householder_basis = factor.qr.Q_basis();
+    let householder_factor = factor.qr.Q_coeff();
+    faer::linalg::householder::apply_block_householder_sequence_transpose_on_the_left_in_place_with_conj(
+        householder_basis,
+        householder_factor,
+        faer::Conj::No,
+        rotated.as_mut(),
+        faer::get_global_parallelism(),
+        dyn_stack::MemStack::new(&mut dyn_stack::MemBuffer::new(
+            faer::linalg::householder::apply_block_householder_sequence_transpose_on_the_left_in_place_scratch::<f64>(
+                householder_basis.nrows(),
+                householder_factor.nrows(),
+                d,
+            ),
+        )),
+    );
+    let head = Array2::from_shape_fn((p, d), |(row, col)| {
+        factor.row_signs[row] * rotated[(row, col)]
+    });
+    let unpenalized_residual = Array1::from_iter((0..d).map(|col| {
+        let mut accumulated = 0.0;
+        for row in p..n {
+            accumulated += rotated[(row, col)] * rotated[(row, col)];
+        }
+        accumulated
+    }));
+    (head, unpenalized_residual)
 }
 
 fn validate_gaussian_reml_design(
@@ -4283,7 +4367,6 @@ fn prepare_gaussian_reml(
     let weight = gaussian_reml_weights(n, weights)?;
     let n_effective = effective_observation_count(weight.view());
 
-    let xtwy = dense_xt_diag_y(x, weight.view(), y);
     let ywy = Array1::from_iter((0..d).map(|j| {
         let mut value = 0.0;
         for row in 0..n {
@@ -4293,53 +4376,44 @@ fn prepare_gaussian_reml(
     }));
     let xtwx = dense_xt_diag_x(x, weight.view());
 
-    if let Some(cache) = eigen_cache {
-        validate_gaussian_reml_eigen_cache(cache, p)?;
-        let xtwx_fingerprint = matrix_fingerprint(xtwx.view());
-        if cache.xtwx_fingerprint != xtwx_fingerprint {
-            crate::bail_invalid_estim!("Gaussian REML eigen cache X'WX mismatch");
+    // A supplied cache and a built one read the response through the same Householder
+    // factor of `W½X` (see [`rotated_weighted_response`]). A supplied cache built from
+    // `XᵀWX` holds that factor's `D·R` as its Cholesky factor.
+    let factor = weighted_design_qr(x, weight.view())?;
+    let cache = match eigen_cache {
+        Some(cache) => {
+            validate_gaussian_reml_eigen_cache(cache, p)?;
+            let xtwx_fingerprint = matrix_fingerprint(xtwx.view());
+            if cache.xtwx_fingerprint != xtwx_fingerprint {
+                crate::bail_invalid_estim!("Gaussian REML eigen cache X'WX mismatch");
+            }
+            let penalty_fingerprint = matrix_fingerprint(penalty);
+            if cache.penalty_fingerprint != penalty_fingerprint {
+                crate::bail_invalid_estim!("Gaussian REML eigen cache penalty mismatch");
+            }
+            if let Some(expected_nullity) = nullspace_dim
+                && expected_nullity != cache.nullity
+            {
+                crate::bail_invalid_estim!(
+                    "Gaussian REML eigen cache nullspace mismatch: expected {expected_nullity}, got {}",
+                    cache.nullity
+                );
+            }
+            cache.clone()
         }
-        let penalty_fingerprint = matrix_fingerprint(penalty);
-        if cache.penalty_fingerprint != penalty_fingerprint {
-            crate::bail_invalid_estim!("Gaussian REML eigen cache penalty mismatch");
-        }
-        if let Some(expected_nullity) = nullspace_dim
-            && expected_nullity != cache.nullity
-        {
-            crate::bail_invalid_estim!(
-                "Gaussian REML eigen cache nullspace mismatch: expected {expected_nullity}, got {}",
-                cache.nullity
-            );
-        }
-        if n_effective <= cache.nullity {
-            crate::bail_invalid_estim!(
-                "Gaussian REML requires more positive-weight rows than the nullspace dimension; got n_effective={n_effective}, nullity={}",
-                cache.nullity
-            );
-        }
-        let projected_rhs = dense_atb(cache.coefficient_basis.view(), xtwy.view());
-        let projected_rhs_squared = projected_rhs.mapv(|value| value * value);
-        return Ok(GaussianRemlPrepared {
-            cache: cache.clone(),
-            ywy,
-            projected_rhs_squared,
-            projected_rhs,
-            n_effective,
-            n_outputs: d,
-            observation_measure: gaussian_reml_observation_measure(weight.view(), d),
-        });
-    }
-
-    let cache = build_gaussian_reml_eigen_cache_with_nullspace_dim(
-        x, penalty, nullspace_dim, Some(weight.view()),
-    )?;
+        None => gaussian_reml_eigen_cache_from_lower(
+            factor.upper.t().to_owned(), penalty, nullspace_dim, matrix_fingerprint(xtwx.view()),
+        )?,
+    };
     if n_effective <= cache.nullity {
         crate::bail_invalid_estim!(
             "Gaussian REML requires more positive-weight rows than the nullspace dimension; got n_effective={n_effective}, nullity={}",
             cache.nullity
         );
     }
-    let projected_rhs = dense_atb(cache.coefficient_basis.view(), xtwy.view());
+    // `c = Vᵀ·(D·R)⁻ᵀ·XᵀWy`, read off the rotated response rather than solved for.
+    let (rotated_head, unpenalized_residual) = rotated_weighted_response(&factor, weight.view(), y);
+    let projected_rhs = dense_atb(cache.eigenvectors.view(), rotated_head.view());
     let projected_rhs_squared = projected_rhs.mapv(|value| value * value);
 
     Ok(GaussianRemlPrepared {
@@ -4347,6 +4421,7 @@ fn prepare_gaussian_reml(
         ywy,
         projected_rhs_squared,
         projected_rhs,
+        unpenalized_residual,
         n_effective,
         n_outputs: d,
         observation_measure: gaussian_reml_observation_measure(weight.view(), d),
@@ -4362,6 +4437,7 @@ impl GaussianRemlPrepared {
         let mut value = evaluate_reml_parts(
             &self.cache,
             self.ywy.view(),
+            self.unpenalized_residual.view(),
             self.projected_rhs_squared.view(),
             self.n_effective,
             self.n_outputs,
@@ -4397,7 +4473,7 @@ impl GaussianRemlPrepared {
                 ..
             } = dispersion_residual_parts(
                 &self.cache,
-                self.ywy.view(),
+                self.unpenalized_residual.view(),
                 self.projected_rhs_squared.view(),
                 j,
                 rho,
@@ -4411,11 +4487,11 @@ impl GaussianRemlPrepared {
 /// the magnitude at or below which `dp_j` carries no significant digit and is
 /// indistinguishable from exactly zero.
 ///
-/// `dp_j = (ywy_j − Σ_i c²_ij) + Σ_i c²_ij·u_i` is accumulated in
-/// nearest-rounded arithmetic. The absolute sum of its contributing terms is
-/// `ywy_j + Σ_i c²_ij ≤ 2·ywy_j`, because `Σ_i c²_ij ≤ ywy_j` — the discarded
-/// remainder `r0_j` is a squared weighted residual norm and therefore
-/// non-negative (see [`dispersion_residual_parts`]). Under the standard
+/// `dp_j = r0_j + Σ_i c²_ij·u_i` is accumulated in nearest-rounded arithmetic from
+/// the components of the rotated response `Qᵀ·W½y_j`, whose squares sum to `ywy_j`
+/// (see [`rotated_weighted_response`]). The absolute sum of its contributing terms
+/// is at most `ywy_j + Σ_i c²_ij ≤ 2·ywy_j`, because `Σ_i c²_ij = ywy_j − r0_j` and
+/// `r0_j ≥ 0` is a squared residual norm. Under the standard
 /// `γ_m = m·eps/(1 − m·eps)` model the accumulated error is bounded by
 /// `γ_m · 2·ywy_j`, so that product is the resolution.
 ///
@@ -4445,8 +4521,8 @@ fn profile_residual_resolution(cache: &GaussianRemlEigenCache, ywy_output: f64) 
 ///
 /// #2723: the bar used to be the absolute `residual > 0.0`, and on a perfect fit
 /// that predicate reads the sign of the last rounding rather than the design.
-/// `dp = max(ywy − Σc², 0) + Σc²·u` is a sum of clamped non-negatives, so it can
-/// only reach exactly `0.0` when the cancellation `ywy − Σc²` happens to land
+/// `dp` was then `max(ywy − Σc², 0) + Σc²·u`, a sum of clamped non-negatives, so it
+/// could only reach exactly `0.0` when the cancellation `ywy − Σc²` happened to land
 /// non-positive AND no penalized direction carries any mass. Measured on four
 /// designs whose true residual is EXACTLY zero, that bar refused two and
 /// accepted two — the discriminator being whether the debris landed at `+1.8e-15`
@@ -4472,21 +4548,19 @@ fn profile_residual_resolution(cache: &GaussianRemlEigenCache, ywy_output: f64) 
 fn validate_reml_profile_residuals(
     cache: &GaussianRemlEigenCache,
     ywy: ArrayView1<'_, f64>,
+    unpenalized_residual: ArrayView1<'_, f64>,
     projected_rhs_squared: ArrayView2<'_, f64>,
     observations: usize,
     rho: f64,
 ) -> Result<(), EstimationError> {
     for output in 0..ywy.len() {
         // Same `r0 + Σ c²·u` decomposition the evaluator and the enclosure use.
-        // Checking the domain through the cancelling form while the search
-        // evaluates the stable one lets a fit be refused for a residual that is
-        // strictly positive, or admitted for one that is not.
-        let DispersionResidualParts {
-            unpenalized_residual,
-            penalized_residual,
-            ..
-        } = dispersion_residual_parts(cache, ywy, projected_rhs_squared, output, rho);
-        let residual = unpenalized_residual + penalized_residual;
+        // Checking the domain through a different form while the search evaluates
+        // this one lets a fit be refused for a residual that is strictly positive,
+        // or admitted for one that is not.
+        let parts =
+            dispersion_residual_parts(cache, unpenalized_residual, projected_rhs_squared, output, rho);
+        let residual = parts.unpenalized_residual + parts.penalized_residual;
         let resolution = profile_residual_resolution(cache, ywy[output]);
         if !(residual.is_finite() && residual > resolution) {
             return Err(EstimationError::ProfiledResidualUnresolved {
@@ -4790,7 +4864,7 @@ fn kernel_ranges(log_t_lo: f64, log_t_hi: f64) -> KernelRange {
 /// tighter children cannot certify the cell.
 fn reml_deriv_enclosure(
     cache: &GaussianRemlEigenCache,
-    ywy: ArrayView1<'_, f64>,
+    unpenalized_residual: ArrayView1<'_, f64>,
     projected_rhs_squared: ArrayView2<'_, f64>,
     n_effective: usize,
     n_outputs: usize,
@@ -4799,7 +4873,7 @@ fn reml_deriv_enclosure(
 ) -> (Interval, Interval) {
     reml_deriv_enclosure_profile(
         cache,
-        ywy,
+        unpenalized_residual,
         projected_rhs_squared,
         n_outputs,
         n_effective as f64 - cache.nullity as f64,
@@ -4811,12 +4885,12 @@ fn reml_deriv_enclosure(
 /// Derivative enclosure for an arbitrary response-dispersion profile.
 /// `logdet_output_count` prices the independent coefficient columns, while
 /// `dispersion_dof` is the degrees of freedom of each pooled deviance column in
-/// `ywy` / `projected_rhs_squared`.  The ordinary multi-response objective uses
-/// `d` separate columns each with `n-q` degrees of freedom; shared-dispersion
-/// REML supplies one pooled column with `d(n-q)` degrees of freedom.
+/// `unpenalized_residual` / `projected_rhs_squared`.  The ordinary multi-response
+/// objective uses `d` separate columns each with `n-q` degrees of freedom;
+/// shared-dispersion REML supplies one pooled column with `d(n-q)` degrees of freedom.
 fn reml_deriv_enclosure_profile(
     cache: &GaussianRemlEigenCache,
-    ywy: ArrayView1<'_, f64>,
+    unpenalized_residual: ArrayView1<'_, f64>,
     projected_rhs_squared: ArrayView2<'_, f64>,
     logdet_output_count: usize,
     dispersion_dof: f64,
@@ -4856,16 +4930,11 @@ fn reml_deriv_enclosure_profile(
     let mut g2_hi = 0.0;
     let mut vpp_disp_lo = 0.0;
     let mut vpp_disp_hi = 0.0;
-    for j in 0..ywy.len() {
+    for j in 0..unpenalized_residual.len() {
         let mut num_lo = 0.0; // Σ c² · w   (= dp′, ≥ 0)
         let mut num_hi = 0.0;
         let mut su_lo = 0.0; // Σ c² · u   (the ρ-dependent part of dp, ≥ 0)
         let mut su_hi = 0.0;
-        // Σ c², the ρ-INDEPENDENT half of dp's decomposition. Accumulated as a
-        // PLAIN sum in the same order as `dispersion_residual_parts`' `total_c2`,
-        // so `r0` below is bit-identical to the evaluator's — see the comment at
-        // `r0` for why this term must be a point rather than an interval.
-        let mut c2_point = 0.0;
         let mut dph_lo = 0.0; // Σ c² · k   (= dp″, sign-indefinite)
         let mut dph_hi = 0.0;
         for eig in 0..spectrum.len() {
@@ -4899,7 +4968,6 @@ fn reml_deriv_enclosure_profile(
             num_hi = add_up(num_hi, w_product.hi);
             su_lo = add_down(su_lo, u_product.lo);
             su_hi = add_up(su_hi, u_product.hi);
-            c2_point += c2;
             dph_lo = add_down(dph_lo, round_down(c2 * kr.k_lo));
             dph_hi = add_up(dph_hi, round_up(c2 * kr.k_hi));
         }
@@ -4912,8 +4980,8 @@ fn reml_deriv_enclosure_profile(
         // there, the bound goes non-positive, and the enclosure collapses to the
         // entire line — a cell that can be neither pruned nor certified monotone
         // and therefore must split. In the summed form the ρ-dependent part is a
-        // sum of non-negatives and the only cancellation left sits in `r0`,
-        // which is ρ-independent and therefore identical in every cell.
+        // sum of non-negatives, and `r0` is ρ-independent and therefore identical
+        // in every cell.
         // `r0` is a KNOWN CONSTANT here, not an unknown to be bracketed.
         //
         // #2694/#2703. Bracketing it as `[max(ywy − c2_hi, 0), ywy − c2_lo]`
@@ -4938,13 +5006,13 @@ fn reml_deriv_enclosure_profile(
         // brackets sign changes of the computed gradient, and the returned ρ̂
         // builds the computed fit. So the enclosure owes a bound on the
         // evaluator's `V′`, and for that `r0` is the single value
-        // `dispersion_residual_parts` uses — same plain accumulation, same
-        // order, same clamp, hence bit-identical. Forming it any other way is
-        // precisely the objective↔enclosure desync this file exists to prevent.
+        // `dispersion_residual_parts` reads: the caller's own array entry. Forming it
+        // any other way is precisely the objective↔enclosure desync this file exists
+        // to prevent.
         //
         // Roundoff is still priced: `conservative_interval` at the end of this
         // function pads the accumulated bounds by the operation-count budget.
-        let r0 = (ywy[j] - c2_point).max(0.0);
+        let r0 = unpenalized_residual[j];
         let dp_lo = add_down(r0, su_lo);
         let dp_hi = add_up(r0, su_hi);
         if !(dp_lo.is_finite() && dp_hi.is_finite() && dp_lo > 0.0 && dp_hi >= dp_lo) {
@@ -4993,7 +5061,7 @@ fn reml_deriv_enclosure_profile(
             cache
                 .penalty_eigenvalues
                 .len()
-                .saturating_mul(ywy.len().max(1)),
+                .saturating_mul(unpenalized_residual.len().max(1)),
         ),
     );
     let vp_magnitude = g1_lo.abs() + g1_hi.abs() + half_nu.abs() * (g2_lo.abs() + g2_hi.abs());
@@ -5477,6 +5545,7 @@ fn optimize_rho(
     validate_reml_profile_residuals(
         &prepared.cache,
         prepared.ywy.view(),
+        prepared.unpenalized_residual.view(),
         prepared.projected_rhs_squared.view(),
         prepared.n_effective,
         rho_lower,
@@ -5488,7 +5557,7 @@ fn optimize_rho(
     let enclose = |a: f64, b: f64| {
         reml_deriv_enclosure(
             &prepared.cache,
-            prepared.ywy.view(),
+            prepared.unpenalized_residual.view(),
             prepared.projected_rhs_squared.view(),
             prepared.n_effective,
             prepared.n_outputs,
@@ -5509,6 +5578,7 @@ fn optimize_rho(
 fn evaluate_reml_parts(
     cache: &GaussianRemlEigenCache,
     ywy: ArrayView1<'_, f64>,
+    unpenalized_residual: ArrayView1<'_, f64>,
     projected_rhs_squared: ArrayView2<'_, f64>,
     n_effective: usize,
     n_outputs: usize,
@@ -5517,6 +5587,7 @@ fn evaluate_reml_parts(
     evaluate_reml_profile(
         cache,
         ywy,
+        unpenalized_residual,
         projected_rhs_squared,
         n_outputs,
         n_effective as f64 - cache.nullity as f64,
@@ -5530,6 +5601,7 @@ fn evaluate_reml_parts(
 fn evaluate_reml_profile(
     cache: &GaussianRemlEigenCache,
     ywy: ArrayView1<'_, f64>,
+    unpenalized_residual: ArrayView1<'_, f64>,
     projected_rhs_squared: ArrayView2<'_, f64>,
     logdet_output_count: usize,
     dispersion_dof: f64,
@@ -5552,6 +5624,7 @@ fn evaluate_reml_profile(
         eval += gaussian_reml_dispersion_term(
             cache,
             ywy,
+            unpenalized_residual,
             projected_rhs_squared,
             output,
             dispersion_dof,
@@ -5788,7 +5861,7 @@ mod tests {
             let exact = prepared.evaluate(rho);
             let (dv, _) = reml_deriv_enclosure(
                 &prepared.cache,
-                prepared.ywy.view(),
+                prepared.unpenalized_residual.view(),
                 prepared.projected_rhs_squared.view(),
                 prepared.n_effective,
                 prepared.n_outputs,
@@ -5900,7 +5973,7 @@ mod tests {
             ..
         } = dispersion_residual_parts(
             &witness.cache,
-            witness.ywy.view(),
+            witness.unpenalized_residual.view(),
             witness.projected_rhs_squared.view(),
             0,
             witness.cache.resolvability_rho_domain().0,
@@ -6060,7 +6133,7 @@ mod tests {
             ..
         } = dispersion_residual_parts(
             &witness.cache,
-            witness.ywy.view(),
+            witness.unpenalized_residual.view(),
             witness.projected_rhs_squared.view(),
             0,
             witness.cache.resolvability_rho_domain().0,
@@ -6080,7 +6153,7 @@ mod tests {
         let witness_enclose = |a: f64, b: f64| {
             reml_deriv_enclosure(
                 &witness.cache,
-                witness.ywy.view(),
+                witness.unpenalized_residual.view(),
                 witness.projected_rhs_squared.view(),
                 witness.n_effective,
                 witness.n_outputs,
@@ -6415,7 +6488,7 @@ mod tests {
         let b = a + 1.0e-3;
         let (dv, dvv) = reml_deriv_enclosure(
             &prepared.cache,
-            prepared.ywy.view(),
+            prepared.unpenalized_residual.view(),
             prepared.projected_rhs_squared.view(),
             prepared.n_effective,
             prepared.n_outputs,
@@ -7539,12 +7612,29 @@ mod tests {
         let n_effective = 10usize;
         let cache = synthetic_cache(&[delta]);
         let ywy = array![q + irreducible_residual];
+        let unpenalized_residual = array![irreducible_residual];
         let projected = array![[q]];
         let eval = |rho: f64| {
-            evaluate_reml_parts(&cache, ywy.view(), projected.view(), n_effective, 1, rho)
+            evaluate_reml_parts(
+                &cache,
+                ywy.view(),
+                unpenalized_residual.view(),
+                projected.view(),
+                n_effective,
+                1,
+                rho,
+            )
         };
         let enclose = |a: f64, b: f64| {
-            reml_deriv_enclosure(&cache, ywy.view(), projected.view(), n_effective, 1, a, b)
+            reml_deriv_enclosure(
+                &cache,
+                unpenalized_residual.view(),
+                projected.view(),
+                n_effective,
+                1,
+                a,
+                b,
+            )
         };
         let expected_t =
             irreducible_residual / (((n_effective - 1) as f64) * q - irreducible_residual);
@@ -7616,6 +7706,7 @@ mod tests {
     fn profiled_modal_evaluation_is_finite_beyond_exp_range() {
         let cache = synthetic_cache(&[4.0]);
         let ywy = array![5.0];
+        let unpenalized_residual = array![3.0];
         let projected = array![[2.0]];
         for rho in [-1_000.0, 1_000.0] {
             let mode = modal_kernels(rho, 4.0);
@@ -7624,7 +7715,15 @@ mod tests {
             assert!(mode.v.is_finite());
             assert!(mode.w.is_finite());
             assert!(mode.k.is_finite());
-            let value = evaluate_reml_parts(&cache, ywy.view(), projected.view(), 10, 1, rho);
+            let value = evaluate_reml_parts(
+                &cache,
+                ywy.view(),
+                unpenalized_residual.view(),
+                projected.view(),
+                10,
+                1,
+                rho,
+            );
             assert!(value.cost.is_finite(), "non-finite cost at rho={rho}");
             assert!(value.grad.is_finite(), "non-finite gradient at rho={rho}");
             assert!(value.hess.is_finite(), "non-finite Hessian at rho={rho}");
@@ -7648,14 +7747,33 @@ mod tests {
                 .collect();
             let sum_c2: f64 = c2.iter().sum();
             let prs = Array2::from_shape_vec((n_eig, 1), c2).unwrap();
-            let ywy = Array1::from(vec![sum_c2 + rng.range(0.05, 2.0)]);
+            let residual = rng.range(0.05, 2.0);
+            let unpenalized_residual = Array1::from(vec![residual]);
+            let ywy = Array1::from(vec![sum_c2 + residual]);
             let n_eff = 80usize;
             let n_out = 1usize;
 
-            let eval =
-                |rho: f64| evaluate_reml_parts(&cache, ywy.view(), prs.view(), n_eff, n_out, rho);
+            let eval = |rho: f64| {
+                evaluate_reml_parts(
+                    &cache,
+                    ywy.view(),
+                    unpenalized_residual.view(),
+                    prs.view(),
+                    n_eff,
+                    n_out,
+                    rho,
+                )
+            };
             let enclose = |a: f64, b: f64| {
-                reml_deriv_enclosure(&cache, ywy.view(), prs.view(), n_eff, n_out, a, b)
+                reml_deriv_enclosure(
+                    &cache,
+                    unpenalized_residual.view(),
+                    prs.view(),
+                    n_eff,
+                    n_out,
+                    a,
+                    b,
+                )
             };
             let mut roots = Vec::new();
             let selection = {
@@ -8629,7 +8747,7 @@ mod perfect_fit_refusal_tests {
                 ..
             } = dispersion_residual_parts(
                 &prepared.cache,
-                prepared.ywy.view(),
+                prepared.unpenalized_residual.view(),
                 prepared.projected_rhs_squared.view(),
                 0,
                 rho_min,
@@ -8639,7 +8757,7 @@ mod perfect_fit_refusal_tests {
             assert!(
                 unpenalized_residual <= resolution,
                 "scale {scale:e}: the unpenalized residual {unpenalized_residual:.6e} must be \
-                 cancellation debris (resolution {resolution:.6e}); the response interpolates"
+                 unresolvable from zero (resolution {resolution:.6e}); the response interpolates"
             );
             assert!(
                 penalized_residual > resolution,
@@ -8649,6 +8767,7 @@ mod perfect_fit_refusal_tests {
             let verdict = validate_reml_profile_residuals(
                 &prepared.cache,
                 prepared.ywy.view(),
+                prepared.unpenalized_residual.view(),
                 prepared.projected_rhs_squared.view(),
                 prepared.n_effective,
                 rho_min,
@@ -8685,7 +8804,7 @@ mod perfect_fit_refusal_tests {
                 ..
             } = dispersion_residual_parts(
                 &prepared.cache,
-                prepared.ywy.view(),
+                prepared.unpenalized_residual.view(),
                 prepared.projected_rhs_squared.view(),
                 0,
                 prepared.cache.resolvability_rho_domain().0,
@@ -8704,6 +8823,7 @@ mod perfect_fit_refusal_tests {
             let verdict = validate_reml_profile_residuals(
                 &prepared.cache,
                 prepared.ywy.view(),
+                prepared.unpenalized_residual.view(),
                 prepared.projected_rhs_squared.view(),
                 prepared.n_effective,
                 prepared.cache.resolvability_rho_domain().0,
@@ -8751,7 +8871,7 @@ mod perfect_fit_refusal_tests {
                 ..
             } = dispersion_residual_parts(
                 &prepared.cache,
-                prepared.ywy.view(),
+                prepared.unpenalized_residual.view(),
                 prepared.projected_rhs_squared.view(),
                 0,
                 prepared.cache.resolvability_rho_domain().0,
@@ -8766,6 +8886,7 @@ mod perfect_fit_refusal_tests {
             let verdict = validate_reml_profile_residuals(
                 &prepared.cache,
                 prepared.ywy.view(),
+                prepared.unpenalized_residual.view(),
                 prepared.projected_rhs_squared.view(),
                 prepared.n_effective,
                 prepared.cache.resolvability_rho_domain().0,
@@ -8798,6 +8919,7 @@ mod perfect_fit_refusal_tests {
                 let verdict = validate_reml_profile_residuals(
                     &prepared.cache,
                     prepared.ywy.view(),
+                    prepared.unpenalized_residual.view(),
                     prepared.projected_rhs_squared.view(),
                     prepared.n_effective,
                     prepared.cache.resolvability_rho_domain().0,
@@ -8809,6 +8931,99 @@ mod perfect_fit_refusal_tests {
                 );
             }
         }
+    }
+
+    /// #2280: the unpenalized residual must survive a design at condition `1e12`.
+    ///
+    /// The response is `X·β` plus a known component `ρ·e` outside the design's column
+    /// space. The semi-normal route `c = coefficient_basisᵀ·XᵀWy` rounds `XᵀWy` at
+    /// `eps·‖X‖·‖y‖`, and the triangular solve amplifies that by the condition number.
+    /// So `ywy − Σc²` misses the residual by about `2·κ·eps·ywy`, far above `ρ²`. That
+    /// miss is asserted first, as the positive control that the fixture reaches the regime.
+    ///
+    /// The rotated residual must then agree with an independent SVD residual
+    /// `‖y − U·Uᵀy‖²` inside the least-squares residual perturbation band. A backward
+    /// error `γ` on the design moves the residual by `γ·‖X‖·‖β‖` along itself and by
+    /// `γ·κ·‖r‖` inside the column space. The second part is orthogonal to `r`, so it
+    /// enters `‖r‖²` only at second order. Both residuals carry the band, so their
+    /// difference is allowed it twice.
+    #[test]
+    fn the_unpenalized_residual_survives_a_condition_number_of_1e12_2280() {
+        let n = 40usize;
+        let p = 8usize;
+        // DCT-IV columns are orthonormal: the leading `p` span the design, and column `p`
+        // is the residual direction, orthogonal to all of them.
+        let dct = |size: usize, row: usize, col: usize| {
+            (2.0 / size as f64).sqrt()
+                * (std::f64::consts::PI * (row as f64 + 0.5) * (col as f64 + 0.5) / size as f64)
+                    .cos()
+        };
+        let singular: Vec<f64> =
+            (0..p).map(|k| 10.0_f64.powf(-12.0 * k as f64 / (p - 1) as f64)).collect();
+        // `X = U·Σ·Vᵀ` with a dense `V`, so every column carries the smallest directions.
+        let x = Array2::from_shape_fn((n, p), |(row, col)| {
+            (0..p).map(|k| dct(n, row, k) * singular[k] * dct(p, col, k)).sum::<f64>()
+        });
+        // `y = X·β + ρ·e` with `β = V·1`, so `X·β = U·Σ·1` and `‖β‖ = √p`.
+        let residual_norm = 1.0e-4;
+        let y = Array2::from_shape_fn((n, 1), |(row, _)| {
+            (0..p).map(|k| dct(n, row, k) * singular[k]).sum::<f64>()
+                + residual_norm * dct(n, row, p)
+        });
+        let penalty = Array2::<f64>::eye(p);
+        let prepared = prepare_gaussian_reml(x.view(), y.view(), penalty.view(), None, None, None)
+            .expect("the conditioned design is finite and full rank");
+
+        let (u, sigma, _) = x.svd(true, false).expect("design SVD");
+        let u = u.expect("left singular vectors");
+        let basis = u.slice(s![.., 0..p]).to_owned();
+        let sigma_max = sigma.iter().copied().fold(0.0_f64, f64::max);
+        let sigma_min = sigma.iter().copied().fold(f64::INFINITY, f64::min);
+        let condition = sigma_max / sigma_min;
+        let svd_residual = (&y - &basis.dot(&basis.t().dot(&y)))
+            .iter()
+            .map(|value| value * value)
+            .sum::<f64>();
+
+        let weight = Array1::<f64>::ones(n);
+        let semi_normal = dense_atb(
+            prepared.cache.coefficient_basis.view(),
+            dense_xt_diag_y(x.view(), weight.view(), y.view()).view(),
+        );
+        let semi_normal_residual =
+            prepared.ywy[0] - semi_normal.iter().map(|value| value * value).sum::<f64>();
+        let rotated_residual = prepared.unpenalized_residual[0];
+
+        let gamma = roundoff_growth(n * p);
+        let residual_scale = svd_residual.sqrt();
+        let along = gamma * sigma_max * (p as f64).sqrt();
+        let first_order = 2.0 * along * residual_scale;
+        let second_order = (gamma * condition * residual_scale + along).powi(2);
+        let band = 2.0 * (first_order + second_order);
+        println!(
+            "[2280-residual] condition={condition:.3e} planted={:.9e} svd={svd_residual:.9e} \
+             rotated={rotated_residual:.9e} semi_normal={semi_normal_residual:.9e} band={band:.3e}",
+            residual_norm * residual_norm
+        );
+
+        assert!(
+            (svd_residual - residual_norm * residual_norm).abs() <= band,
+            "the SVD instrument must recover the planted residual {:.9e}: got {svd_residual:.9e} \
+             (band {band:.3e})",
+            residual_norm * residual_norm
+        );
+        assert!(
+            (semi_normal_residual - svd_residual).abs() > svd_residual,
+            "REGIME: at condition {condition:.3e} the semi-normal residual {semi_normal_residual:.9e} \
+             must miss the SVD residual {svd_residual:.9e} by more than the residual itself, or \
+             this fixture does not reach the defect"
+        );
+        assert!(
+            (rotated_residual - svd_residual).abs() <= band,
+            "the rotated residual {rotated_residual:.9e} must match the SVD residual \
+             {svd_residual:.9e} within the perturbation band {band:.3e} at condition \
+             {condition:.3e}"
+        );
     }
 }
 
