@@ -2069,21 +2069,10 @@ pub(crate) fn run_outer_with_plan(
                             }
                         }
                         Err(ArcError::ObjectiveFailed { message }) => {
-                            let error = last_objective_error
-                                .lock()
-                                .expect("ARC objective error publication lock poisoned")
-                                .take()
-                                .expect(
-                                    "ArcError::ObjectiveFailed must follow a failed classified objective evaluation",
-                                );
-                            assert_eq!(
-                                error.message(),
-                                message,
-                                "ARC returned a different objective error than the bridge published"
-                            );
-                            Err(EstimationError::fatal_objective_evaluation(
+                            Err(objective_failure_from_publication(
                                 "outer ARC evaluation",
-                                error,
+                                message,
+                                &last_objective_error,
                             ))
                         }
                         Err(e) => Err(EstimationError::RemlOptimizationFailed(format!(
@@ -2827,21 +2816,10 @@ pub(crate) fn run_outer_with_plan(
                             )))
                         }
                         Err(BfgsError::ObjectiveFailed { message }) => {
-                            let error = last_objective_error
-                                .lock()
-                                .expect("BFGS objective error publication lock poisoned")
-                                .take()
-                                .expect(
-                                    "BfgsError::ObjectiveFailed must follow a failed classified objective evaluation",
-                                );
-                            assert_eq!(
-                                error.message(),
-                                message,
-                                "BFGS returned a different objective error than the bridge published"
-                            );
-                            Err(EstimationError::fatal_objective_evaluation(
+                            Err(objective_failure_from_publication(
                                 "outer BFGS evaluation",
-                                error,
+                                message,
+                                &last_objective_error,
                             ))
                         }
                         Err(e) => Err(EstimationError::RemlOptimizationFailed(format!(
@@ -3417,6 +3395,45 @@ pub(crate) fn run_outer_with_plan(
             EstimationError::RemlOptimizationFailed(format!("{header}\n{body}"))
         }
     })
+}
+
+/// An outer solver's `ObjectiveFailed`, read against the objective error its bridge published.
+///
+/// `RetainingObjective` writes the publication slot on every evaluation and clears it on
+/// success, so a solver that stops on a failed evaluation hands back exactly the error the
+/// producer classified, and that maps as a fatal objective evaluation. A solver can also report
+/// `ObjectiveFailed` without having evaluated anything: a refused seed or initial metric, or a
+/// solver-internal exit. The slot can also disagree with the solver's message, hold a recoverable
+/// verdict, or be poisoned. Each of those is a typed fatal outer-evaluation failure naming the
+/// solver context and both messages, never a panic (#1561).
+fn objective_failure_from_publication(
+    context: &str,
+    solver_message: String,
+    publication: &Mutex<Option<ObjectiveEvalError>>,
+) -> EstimationError {
+    match publication.lock().ok().and_then(|mut slot| slot.take()) {
+        Some(published) if published.is_fatal() && published.message() == solver_message => {
+            EstimationError::fatal_objective_evaluation(context, published)
+        }
+        Some(published) => EstimationError::fatal_outer_evaluation(
+            context,
+            EstimationError::RemlOptimizationFailed(format!(
+                "the solver reported `{solver_message}`, but the objective bridge published {} error `{}`",
+                if published.is_fatal() {
+                    "a fatal"
+                } else {
+                    "a recoverable"
+                },
+                published.message()
+            )),
+        ),
+        None => EstimationError::fatal_outer_evaluation(
+            context,
+            EstimationError::RemlOptimizationFailed(format!(
+                "the solver reported `{solver_message}` with no published objective evaluation"
+            )),
+        ),
+    }
 }
 
 #[cfg(test)]

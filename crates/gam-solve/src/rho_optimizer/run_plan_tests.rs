@@ -6182,3 +6182,9 @@ mod run_plan_stationarity_band_tests;
 // budget.
 #[path = "arc_curvature_stationary_2817_tests.rs"]
 mod arc_curvature_stationary_2817_tests;
+
+// An outer solver's `ObjectiveFailed` read against the objective error its bridge
+// published: typed propagation instead of a panicking invariant (#1561). Split out
+// for the source-file length budget.
+#[path = "typed_objective_failure_propagation_1561_tests.rs"]
+mod typed_objective_failure_propagation_1561_tests;
