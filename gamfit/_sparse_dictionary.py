@@ -997,6 +997,11 @@ class BlockSparseDictStream:
                 break
         art = stream.finalize()
 
+    Every epoch must stream the same rows in the same order. The native state keeps
+    each row's support from the last committed pass, a row adopts a routed support
+    only when that lowers its loss beyond rounding, and ``partial_fit`` raises when a
+    row differs from the one streamed at its position in the previous pass.
+
     Parameters
     ----------
     seed:
@@ -1052,7 +1057,7 @@ class BlockSparseDictStream:
         gamma_residual, frame_residual, frame_displacement_residual,
         frame_gradient_residual, frame_binding_block, frame_binding_block_rows,
         frame_blocks_above_tolerance, frame_residual_median, rerouted_rows,
-        mean_admitted_blocks, converged, epoch}``."""
+        support_changes, mean_admitted_blocks, converged, epoch}``."""
         return dict(self._handle.end_epoch())
 
     def block_rank_charges(self, n_obs: int) -> dict[str, Any]:

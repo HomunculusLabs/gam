@@ -41,6 +41,14 @@
 //! separately. One-shot uses sequential block updates; the streaming trajectory
 //! is different.
 //!
+//! Each row carries its support out of the last committed pass. A routed support
+//! replaces it only when that lowers the row's tied loss beyond both losses'
+//! rounding, so the support step descends the objective the γ and frame steps
+//! descend and a row changes support only finitely often (#2502, the atom lane's
+//! #2283 rule). Supports are kept by position, so every epoch must stream the same
+//! rows in the same order, and a pass that does not is refused. They cost `N·k`
+//! u32 slots and one u64 fingerprint per row.
+//!
 //! EV describes the pass's measured frames with their profiled γ. Proposed frames
 //! remain an uncertified checkpoint until a paired pass reroutes both proposal
 //! and baseline and profiles a gamma for each. Only a strict full-objective
@@ -60,6 +68,7 @@ use super::update::DecoderSolveStats;
 use gam_linalg::faer_ndarray::with_faer_sequential;
 use ndarray::{Array2, ArrayView1, ArrayView2, Axis};
 use rayon::prelude::*;
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 /// One minibatch row's gamma-free reconstruction and scalar moments. Keeping
 /// only the sum avoids retaining a P-vector for every selected block.
@@ -74,59 +83,214 @@ struct RowProjection {
     projection_mass: f64,
 }
 
-fn project_coded_rows(
-    rows: ArrayView2<'_, f32>,
+fn row_projection(
+    row: ArrayView1<'_, f32>,
     decoder: ArrayView2<'_, f32>,
-    codes: &[RowBlockCode],
+    code: &RowBlockCode,
     b: usize,
     gamma: f32,
-) -> Vec<RowProjection> {
-    codes
-        .par_iter()
+) -> RowProjection {
+    let p = row.len();
+    let mut sum = vec![0.0; p];
+    let mut projection = vec![0.0; p];
+    let mut live_terms = 0usize;
+    let mut projection_mass = 0.0f64;
+    for (slot, &block) in code.blocks.iter().enumerate() {
+        if code.gates[slot] == 0.0 {
+            continue;
+        }
+        projection.fill(0.0);
+        let w = &code.projections[slot * b..(slot + 1) * b];
+        for (axis, &weight) in w.iter().enumerate() {
+            live_terms += 1;
+            projection_mass += weight.abs();
+            let atom = decoder.row(block as usize * b + axis);
+            for (value, &direction) in projection.iter_mut().zip(atom.iter()) {
+                *value += weight * direction as f64;
+            }
+        }
+        for (value, contribution) in sum.iter_mut().zip(&projection) {
+            *value += contribution;
+        }
+    }
+    let mut rss = 0.0;
+    let mut gamma_num = 0.0;
+    let mut gamma_den = 0.0;
+    for (&x, &projected) in row.iter().zip(&sum) {
+        let residual = x as f64 - gamma as f64 * projected;
+        rss += residual * residual;
+        gamma_num += x as f64 * projected;
+        gamma_den += projected * projected;
+    }
+    RowProjection {
+        sum,
+        rss,
+        gamma_num,
+        gamma_den,
+        live_terms,
+        projection_mass,
+    }
+}
+
+/// A retained-support slot that holds no block.
+const NO_BLOCK: u32 = u32::MAX;
+
+/// A row's identity across passes: a hash of its stored bits. A retained support
+/// belongs to the row streamed at the same position only when the hashes match.
+fn row_fingerprint(row: ArrayView1<'_, f32>) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for value in row {
+        value.to_bits().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Append each code's admitted blocks, in slot order, as one `k`-slot support
+/// padded with [`NO_BLOCK`].
+fn append_supports(supports: &mut Vec<u32>, codes: &[RowBlockCode], k: usize) {
+    for code in codes {
+        let start = supports.len();
+        supports.extend(
+            code.blocks
+                .iter()
+                .zip(&code.gates)
+                .filter(|(_, gate)| **gate != 0.0)
+                .map(|(block, _)| *block),
+        );
+        supports.resize(start + k, NO_BLOCK);
+    }
+}
+
+/// The tied code of a row's retained support `prior` at `decoder` and `gamma`:
+/// each retained block's projections `w_g = U_g x`, in the retained slot order and
+/// padded to `k` slots. A retained block the row no longer projects onto takes a
+/// zero gate and is not admitted.
+fn kept_block_code(
+    row: ArrayView1<'_, f32>,
+    decoder: ArrayView2<'_, f32>,
+    gamma: f32,
+    b: usize,
+    k: usize,
+    prior: &[u32],
+) -> RowBlockCode {
+    let gamma64 = gamma as f64;
+    let mut blocks = Vec::with_capacity(k);
+    let mut gates = Vec::with_capacity(k);
+    let mut codes = Vec::with_capacity(k * b);
+    let mut projections = Vec::with_capacity(k * b);
+    for &block in prior.iter().take_while(|&&block| block != NO_BLOCK) {
+        let base = block as usize * b;
+        let mut energy = 0.0f64;
+        for axis in 0..b {
+            let mut projection = 0.0f64;
+            for (value, direction) in row.iter().zip(decoder.row(base + axis).iter()) {
+                projection += *value as f64 * *direction as f64;
+            }
+            energy += projection * projection;
+            projections.push(projection);
+            codes.push((gamma64 * projection) as f32);
+        }
+        blocks.push(block);
+        gates.push(energy.sqrt() as f32);
+    }
+    while blocks.len() < k {
+        blocks.push(0);
+        gates.push(0.0);
+        for _ in 0..b {
+            codes.push(0.0);
+            projections.push(0.0);
+        }
+    }
+    RowBlockCode {
+        blocks,
+        gates,
+        codes,
+        projections,
+    }
+}
+
+/// The code a row carries through a pass, with its projection: the freshly routed
+/// `fresh` code when its tied loss lies below that of the row's retained support
+/// `prior`, re-coded at `decoder`, by more than both losses' rounding; that re-coded
+/// retained support otherwise. An empty `prior` (no committed pass yet) adopts
+/// `fresh`.
+///
+/// Greedy admission from the gate shortlist is not the loss minimizer among
+/// overlapping blocks, so near-tied blocks can trade a row between them pass after
+/// pass while every frame step still descends at fixed supports, and the frames of
+/// the small blocks those rows move between never settle (#2502). Keeping a support
+/// unless a routed one lowers the row's loss by an amount its arithmetic resolves
+/// makes the support step descend the same tied objective as the frame and γ steps,
+/// so a row changes support only finitely often: #2283's rule for the atom lane.
+fn descend_block_support(
+    row: ArrayView1<'_, f32>,
+    decoder: ArrayView2<'_, f32>,
+    gamma: f32,
+    b: usize,
+    k: usize,
+    fresh: RowBlockCode,
+    prior: &[u32],
+) -> (RowBlockCode, RowProjection) {
+    let fresh_projection = row_projection(row, decoder, &fresh, b, gamma);
+    if prior.first().is_none_or(|&block| block == NO_BLOCK) {
+        return (fresh, fresh_projection);
+    }
+    let kept = kept_block_code(row, decoder, gamma, b, k, prior);
+    let kept_projection = row_projection(row, decoder, &kept, b, gamma);
+    if same_admitted_blocks(&fresh, &kept) {
+        return (kept, kept_projection);
+    }
+    let row_norm = row
+        .iter()
+        .map(|&x| x as f64 * x as f64)
+        .sum::<f64>()
+        .sqrt();
+    // Each loss is `‖r‖²` of a residual whose entries round within the band
+    // `residual_rounding_energy` bounds (the reservoir's currency for the same
+    // residual), so the loss itself rounds within `2‖r‖·band + band²`.
+    let rounding = |projection: &RowProjection| {
+        let band_energy = residual_rounding_energy(
+            gam_linalg::roundoff::UNIT_ROUNDOFF,
+            3 * projection.live_terms + 2,
+            row_norm,
+            (gamma as f64).abs() * projection.projection_mass,
+        );
+        2.0 * projection.rss.sqrt() * band_energy.sqrt() + band_energy
+    };
+    if fresh_projection.rss + rounding(&fresh_projection)
+        < kept_projection.rss - rounding(&kept_projection)
+    {
+        (fresh, fresh_projection)
+    } else {
+        (kept, kept_projection)
+    }
+}
+
+/// [`descend_block_support`] for every routed row of one minibatch whose first row
+/// is the pass's `offset`-th. `retained` holds the last committed pass's `k`-slot
+/// supports and is empty before any pass has committed.
+fn descend_supports(
+    rows: ArrayView2<'_, f32>,
+    decoder: ArrayView2<'_, f32>,
+    gamma: f32,
+    b: usize,
+    k: usize,
+    routed: Vec<RowBlockCode>,
+    retained: &[u32],
+    offset: usize,
+) -> (Vec<RowBlockCode>, Vec<RowProjection>) {
+    routed
+        .into_par_iter()
         .enumerate()
-        .map(|(row, code)| {
-            let p = rows.ncols();
-            let mut sum = vec![0.0; p];
-            let mut projection = vec![0.0; p];
-            let mut live_terms = 0usize;
-            let mut projection_mass = 0.0f64;
-            for (slot, &block) in code.blocks.iter().enumerate() {
-                if code.gates[slot] == 0.0 {
-                    continue;
-                }
-                projection.fill(0.0);
-                let w = &code.projections[slot * b..(slot + 1) * b];
-                for (axis, &weight) in w.iter().enumerate() {
-                    live_terms += 1;
-                    projection_mass += weight.abs();
-                    let atom = decoder.row(block as usize * b + axis);
-                    for (value, &direction) in projection.iter_mut().zip(atom.iter()) {
-                        *value += weight * direction as f64;
-                    }
-                }
-                for (value, contribution) in sum.iter_mut().zip(&projection) {
-                    *value += contribution;
-                }
-            }
-            let mut rss = 0.0;
-            let mut gamma_num = 0.0;
-            let mut gamma_den = 0.0;
-            for (&x, &projected) in rows.row(row).iter().zip(&sum) {
-                let residual = x as f64 - gamma as f64 * projected;
-                rss += residual * residual;
-                gamma_num += x as f64 * projected;
-                gamma_den += projected * projected;
-            }
-            RowProjection {
-                sum,
-                rss,
-                gamma_num,
-                gamma_den,
-                live_terms,
-                projection_mass,
-            }
+        .map(|(row, fresh)| {
+            let prior = if retained.is_empty() {
+                &[][..]
+            } else {
+                &retained[(offset + row) * k..(offset + row + 1) * k]
+            };
+            descend_block_support(rows.row(row), decoder, gamma, b, k, fresh, prior)
         })
-        .collect()
+        .unzip()
 }
 
 /// Stable sparse incidence lists let one worker own each block's moments.
@@ -325,6 +489,11 @@ pub struct BlockEpochStats {
     /// adjudicated no frame trial. The frame step holds supports fixed, so these
     /// rows are the support change it cannot see (#2502).
     pub rerouted_rows: Option<usize>,
+    /// Rows whose committed support this pass differs from the one they carried
+    /// out of the last committed pass (every row on the first pass). A row adopts
+    /// a routed support only on a loss decrease beyond rounding, so this reaches
+    /// zero, and `converged` requires it.
+    pub support_changes: usize,
     /// Mean admitted blocks per row this pass, at most `k`: the per-row
     /// multiplier the frame step's simultaneous-update majorizer charges.
     pub mean_admitted_blocks: f64,
@@ -353,6 +522,8 @@ struct PendingBlockBirth {
     baseline_rows: usize,
     baseline_usage: Vec<usize>,
     baseline_second: Vec<Array2<f64>>,
+    /// The baseline pass's `k`-slot supports, committed if the candidate is rejected.
+    baseline_supports: Vec<u32>,
 }
 
 /// A frame refresh is not committed until a second, paired streaming pass has
@@ -369,6 +540,8 @@ struct PendingFrameTrial {
     baseline_rows: usize,
     baseline_usage: Vec<usize>,
     baseline_second: Vec<Array2<f64>>,
+    /// The baseline pass's `k`-slot supports, committed if the proposal is rejected.
+    baseline_supports: Vec<u32>,
     /// Rows whose admitted block set differs between the proposal and the
     /// baseline on the paired pass.
     rerouted_rows: usize,
@@ -429,6 +602,14 @@ pub struct BlockSparseStreamState {
     // Ritz residual and the part of the old frame outside its proposal. The next
     // pass accumulates the surrogate's operator on them alongside U.
     search_directions: Array2<f32>,
+    // Each row's `k`-slot support out of the last committed pass (`rows·k`, padded
+    // with `NO_BLOCK`) and the fingerprint of the row it belongs to (`rows`); both are
+    // empty before the first pass commits. The live pass's arbitrated supports and
+    // fingerprints accumulate beside them until `end_epoch` commits one support set.
+    retained_supports: Vec<u32>,
+    retained_fingerprints: Vec<u64>,
+    pass_supports: Vec<u32>,
+    pass_fingerprints: Vec<u64>,
 }
 
 /// Per-block honest-charge ledger over the last closed epoch, as parallel
@@ -533,6 +714,10 @@ impl BlockSparseStreamState {
             pending_birth: None,
             pending_frame: None,
             search_directions: Array2::<f32>::zeros((g * 2 * b, p)),
+            retained_supports: Vec::new(),
+            retained_fingerprints: Vec::new(),
+            pass_supports: Vec::new(),
+            pass_fingerprints: Vec::new(),
         })
     }
 
@@ -610,6 +795,10 @@ impl BlockSparseStreamState {
             pending_birth: None,
             pending_frame: None,
             search_directions: Array2::<f32>::zeros((g * 2 * b, p)),
+            retained_supports: Vec::new(),
+            retained_fingerprints: Vec::new(),
+            pass_supports: Vec::new(),
+            pass_fingerprints: Vec::new(),
         })
     }
 
@@ -656,51 +845,67 @@ impl BlockSparseStreamState {
         // lists are live. Parallel workers own disjoint existing block moments;
         // there are no per-worker K×P copies and no shard-sized score/code store.
         for rows in shard.axis_chunks_iter(Axis(0), self.config.minibatch.max(1)) {
-            let codes = route_and_code_all(
-                rows,
-                self.decoder.view(),
-                gamma,
-                self.g,
-                b,
-                self.k,
-                self.config.minibatch,
-                self.config.block_tile,
-            )?;
+            let k = self.k;
+            let offset = self.row_count;
+            let fingerprints: Vec<u64> = rows
+                .axis_iter(Axis(0))
+                .into_par_iter()
+                .map(row_fingerprint)
+                .collect();
+            if !self.retained_fingerprints.is_empty() {
+                let end = offset + rows.nrows();
+                if self.retained_fingerprints.get(offset..end) != Some(&fingerprints[..]) {
+                    return Err(format!(
+                        "BlockSparseStream.partial_fit: rows {offset}..{end} of this pass are not \
+                         the rows the last committed pass streamed at those positions; the stream \
+                         keeps each row's support, so every epoch must stream the same rows in the \
+                         same order"
+                    ));
+                }
+            }
+            // Route, then let each row keep its committed support unless the routed
+            // one lowers its loss beyond rounding (`descend_block_support`).
+            let route_descending = |decoder: ArrayView2<'_, f32>, scale: f32| {
+                route_and_code_all(
+                    rows,
+                    decoder,
+                    scale,
+                    self.g,
+                    b,
+                    k,
+                    self.config.minibatch,
+                    self.config.block_tile,
+                )
+                .map(|routed| {
+                    descend_supports(
+                        rows,
+                        decoder,
+                        scale,
+                        b,
+                        k,
+                        routed,
+                        &self.retained_supports,
+                        offset,
+                    )
+                })
+            };
+            let (codes, projected) = route_descending(self.decoder.view(), gamma)?;
             // Route the complete pre-birth model on these same rows before
             // mutating moments. Birth evidence uses a true paired full pass.
             let baseline_codes = self
                 .pending_birth
                 .as_ref()
                 .map(|pending| {
-                    route_and_code_all(
-                        rows,
-                        pending.baseline_decoder.view(),
-                        pending.baseline_gamma,
-                        self.g,
-                        b,
-                        self.k,
-                        self.config.minibatch,
-                        self.config.block_tile,
-                    )
+                    route_descending(pending.baseline_decoder.view(), pending.baseline_gamma)
                 })
                 .transpose()?;
             let frame_baseline_codes = self
                 .pending_frame
                 .as_ref()
                 .map(|pending| {
-                    route_and_code_all(
-                        rows,
-                        pending.baseline_decoder.view(),
-                        pending.baseline_gamma,
-                        self.g,
-                        b,
-                        self.k,
-                        self.config.minibatch,
-                        self.config.block_tile,
-                    )
+                    route_descending(pending.baseline_decoder.view(), pending.baseline_gamma)
                 })
                 .transpose()?;
-            let projected = project_coded_rows(rows, self.decoder.view(), &codes, b, gamma);
             let postings = block_row_postings(&codes, self.g);
             self.admitted_slots += postings.iter().map(Vec::len).sum::<usize>();
             // Each row's admitted-block count: the multiplier of the simultaneous
@@ -835,19 +1040,13 @@ impl BlockSparseStreamState {
                     },
                 );
 
-            if let (Some(pending), Some(baseline_codes)) =
+            if let (Some(pending), Some((baseline_codes, baseline))) =
                 (self.pending_birth.as_mut(), baseline_codes.as_ref())
             {
-                let baseline = project_coded_rows(
-                    rows,
-                    pending.baseline_decoder.view(),
-                    baseline_codes,
-                    b,
-                    pending.baseline_gamma,
-                );
-                for projection in &baseline {
+                for projection in baseline {
                     pending.baseline_rss += projection.rss;
                 }
+                append_supports(&mut pending.baseline_supports, baseline_codes, k);
                 let baseline_postings = block_row_postings(baseline_codes, self.g);
                 pending
                     .baseline_second
@@ -869,21 +1068,15 @@ impl BlockSparseStreamState {
                     });
                 pending.baseline_rows += rows.nrows();
             }
-            if let (Some(pending), Some(baseline_codes)) =
+            if let (Some(pending), Some((baseline_codes, baseline))) =
                 (self.pending_frame.as_mut(), frame_baseline_codes.as_ref())
             {
-                let baseline = project_coded_rows(
-                    rows,
-                    pending.baseline_decoder.view(),
-                    baseline_codes,
-                    b,
-                    pending.baseline_gamma,
-                );
-                for projection in &baseline {
+                for projection in baseline {
                     pending.baseline_rss += projection.rss;
                     pending.baseline_gamma_num += projection.gamma_num;
                     pending.baseline_gamma_den += projection.gamma_den;
                 }
+                append_supports(&mut pending.baseline_supports, baseline_codes, k);
                 let postings = block_row_postings(baseline_codes, self.g);
                 pending
                     .baseline_second
@@ -908,6 +1101,8 @@ impl BlockSparseStreamState {
                     .filter(|(candidate, baseline)| !same_admitted_blocks(candidate, baseline))
                     .count();
             }
+            append_supports(&mut self.pass_supports, &codes, k);
+            self.pass_fingerprints.extend(fingerprints);
             self.row_count += rows.nrows();
             // Every completed minibatch leaves coherent accumulated state,
             // including when a later minibatch's router returns an error.
@@ -949,6 +1144,20 @@ impl BlockSparseStreamState {
         }
         let p = self.p;
         let b = self.b;
+        if !self.retained_fingerprints.is_empty()
+            && self.row_count != self.retained_fingerprints.len()
+        {
+            return Err(format!(
+                "BlockSparseStream.end_epoch: this pass streamed {} rows but the last committed \
+                 pass streamed {}; the stream keeps each row's support, so every epoch must \
+                 stream the same rows in the same order",
+                self.row_count,
+                self.retained_fingerprints.len()
+            ));
+        }
+        // The supports the state carries out of this pass: the live pass's, unless an
+        // adjudication below restores a baseline together with its supports.
+        let mut committed_supports = std::mem::take(&mut self.pass_supports);
 
         // EV of the frames routed against this epoch, from the streamed moments.
         let n = self.row_count as f64;
@@ -989,6 +1198,7 @@ impl BlockSparseStreamState {
                 self.rss = baseline_rss;
                 self.usage = std::mem::take(&mut trial.baseline_usage);
                 self.second = std::mem::take(&mut trial.baseline_second);
+                committed_supports = std::mem::take(&mut trial.baseline_supports);
                 // The paired baseline pass accumulated its code second moments
                 // without γ, as the live pass does, and the frame step below is what
                 // applies γ² to them. A rejected trial skips that step, so the restored
@@ -1015,6 +1225,7 @@ impl BlockSparseStreamState {
                         baseline_second: (0..self.g)
                             .map(|_| Array2::<f64>::zeros((b, b)))
                             .collect(),
+                        baseline_supports: Vec::new(),
                         rerouted_rows: 0,
                     });
                 }
@@ -1057,6 +1268,7 @@ impl BlockSparseStreamState {
                 self.rss = pending.baseline_rss;
                 self.usage = pending.baseline_usage;
                 self.second = pending.baseline_second;
+                committed_supports = pending.baseline_supports;
                 self.alive_count = self.usage.iter().filter(|&&count| count > 0).count();
                 rejected_birth = true;
             }
@@ -1226,10 +1438,27 @@ impl BlockSparseStreamState {
             self.last_stable[gg] = stable_rank_symmetric(self.second[gg].view());
         }
 
+        // Rows whose committed support differs from the one they carried out of the
+        // last committed pass. A kept support is re-coded in its retained slot order and
+        // an adopted one differs as a set, so comparing slots counts exactly the rows
+        // whose admitted blocks changed.
+        let support_changes = if self.retained_supports.is_empty() {
+            self.row_count
+        } else {
+            committed_supports
+                .chunks_exact(self.k)
+                .zip(self.retained_supports.chunks_exact(self.k))
+                .filter(|(committed, retained)| committed != retained)
+                .count()
+        };
+        self.retained_supports = committed_supports;
+        self.retained_fingerprints = std::mem::take(&mut self.pass_fingerprints);
+
         let improve = ev - self.prev_ev;
         let stationary = !rejected_birth
             && !rejected_frame
             && accepted_births == 0
+            && support_changes == 0
             && improve.abs() <= self.config.tolerance
             && gamma_residual <= self.config.tolerance
             && frame_residual <= frame_bar
@@ -1251,6 +1480,7 @@ impl BlockSparseStreamState {
                     baseline_rows: 0,
                     baseline_usage: vec![0; self.g],
                     baseline_second: (0..self.g).map(|_| Array2::<f64>::zeros((b, b))).collect(),
+                    baseline_supports: Vec::new(),
                     rerouted_rows: 0,
                 });
             }
@@ -1296,6 +1526,7 @@ impl BlockSparseStreamState {
             frame_blocks_above_tolerance,
             frame_residual_median,
             rerouted_rows,
+            support_changes,
             mean_admitted_blocks,
             converged,
             epoch,
@@ -1351,6 +1582,7 @@ impl BlockSparseStreamState {
             baseline_rows: 0,
             baseline_usage: vec![0; self.g],
             baseline_second: (0..self.g).map(|_| Array2::<f64>::zeros((b, b))).collect(),
+            baseline_supports: Vec::new(),
         });
         true
     }

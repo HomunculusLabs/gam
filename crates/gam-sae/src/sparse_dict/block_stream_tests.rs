@@ -172,6 +172,7 @@ fn parallel_stream_moments_match_dense_reference_across_batches_and_shards() {
                         baseline_rows: 0,
                         baseline_usage: vec![0; 3],
                         baseline_second: (0..3).map(|_| Array2::zeros((2, 2))).collect(),
+                        baseline_supports: Vec::new(),
                     });
                     for shard in x.axis_chunks_iter(ndarray::Axis(0), shard_rows) {
                         state.partial_fit(shard).unwrap();
@@ -521,6 +522,7 @@ fn parallel_stream_rejects_selected_duplicate_birth_using_complete_baseline() {
         baseline_rows: 0,
         baseline_usage: vec![0; 2],
         baseline_second: (0..2).map(|_| Array2::zeros((1, 1))).collect(),
+        baseline_supports: Vec::new(),
     });
     state.partial_fit(x.view()).unwrap();
     assert_eq!(
@@ -942,6 +944,7 @@ fn a_rejected_frame_trial_stashes_gamma_scaled_moments_for_rank_charges() {
         baseline_rows: 0,
         baseline_usage: vec![0; 2],
         baseline_second: vec![Array2::zeros((1, 1)); 2],
+        baseline_supports: Vec::new(),
         rerouted_rows: 0,
     });
     state.partial_fit(x.view()).unwrap();
@@ -971,4 +974,61 @@ fn a_rejected_frame_trial_stashes_gamma_scaled_moments_for_rank_charges() {
             "block {block}: stashed {stashed:e}, expected the gamma^2-scaled {target:e}"
         );
     }
+}
+
+#[test]
+fn a_row_keeps_its_retained_support_unless_the_routed_support_lowers_its_loss_2502() {
+    // Blocks 0 and 1 are the same line and block 2 sits at 60 degrees to it. The
+    // routed support of x = e0 is one of the duplicates. Keeping the other duplicate
+    // costs nothing a rounding band resolves, so the row keeps it. Keeping block 2
+    // leaves 3/4 of the row's energy unexplained, so the row adopts the routed support.
+    let x = array![[1.0_f32, 0.0]];
+    let decoder = array![[1.0_f32, 0.0], [1.0, 0.0], [0.5, 3.0_f32.sqrt() / 2.0]];
+    let route = || {
+        crate::sparse_dict::block::route_and_code_all(x.view(), decoder.view(), 1.0, 3, 1, 1, 1, 3)
+            .expect("route the row")
+            .remove(0)
+    };
+    let routed = route().blocks[0];
+    assert!(routed < 2, "the router must pick a duplicate, got block {routed}");
+    let duplicate = 1 - routed;
+    let (kept, kept_projection) =
+        super::descend_block_support(x.row(0), decoder.view(), 1.0, 1, 1, route(), &[duplicate]);
+    assert_eq!(kept.blocks, vec![duplicate]);
+    assert_ne!(kept.gates[0], 0.0);
+    assert_eq!(kept_projection.rss, 0.0);
+    let (adopted, adopted_projection) =
+        super::descend_block_support(x.row(0), decoder.view(), 1.0, 1, 1, route(), &[2]);
+    assert_eq!(adopted.blocks, vec![routed]);
+    assert_eq!(adopted_projection.rss, 0.0);
+    // A row no committed pass has seen takes its routed support.
+    let (first, _) = super::descend_block_support(
+        x.row(0),
+        decoder.view(),
+        1.0,
+        1,
+        1,
+        route(),
+        &[super::NO_BLOCK],
+    );
+    assert_eq!(first.blocks, vec![routed]);
+}
+
+#[test]
+fn a_pass_that_streams_different_rows_is_refused_2502() {
+    let (x, decoder, config) = coupled_fixture();
+    let mut state = BlockSparseStreamState::new_with_decoder(decoder.clone(), &config).unwrap();
+    state.partial_fit(x.view()).unwrap();
+    state.end_epoch().unwrap();
+    let mut reordered = x.clone();
+    reordered.invert_axis(ndarray::Axis(0));
+    let error = state.partial_fit(reordered.view()).unwrap_err();
+    assert!(error.contains("same rows in the same order"), "{error}");
+
+    let mut shortened = BlockSparseStreamState::new_with_decoder(decoder, &config).unwrap();
+    shortened.partial_fit(x.view()).unwrap();
+    shortened.end_epoch().unwrap();
+    shortened.partial_fit(x.slice(ndarray::s![..2, ..])).unwrap();
+    let error = shortened.end_epoch().unwrap_err();
+    assert!(error.contains("same rows in the same order"), "{error}");
 }

@@ -6699,7 +6699,7 @@ impl BlockSparseDictStream {
     /// gamma_residual, frame_residual, frame_displacement_residual,
     /// frame_gradient_residual, frame_binding_block, frame_binding_block_rows,
     /// frame_blocks_above_tolerance, frame_residual_median, rerouted_rows,
-    /// mean_admitted_blocks, converged, epoch}`.
+    /// support_changes, mean_admitted_blocks, converged, epoch}`.
     fn end_epoch(&mut self, py: Python<'_>) -> PyResult<Py<PyDict>> {
         let stats = py
             .detach(|| self.inner.end_epoch())
@@ -6725,6 +6725,7 @@ impl BlockSparseDictStream {
         )?;
         out.set_item("frame_residual_median", stats.frame_residual_median)?;
         out.set_item("rerouted_rows", stats.rerouted_rows)?;
+        out.set_item("support_changes", stats.support_changes)?;
         out.set_item("mean_admitted_blocks", stats.mean_admitted_blocks)?;
         out.set_item("converged", stats.converged)?;
         out.set_item("epoch", stats.epoch)?;
