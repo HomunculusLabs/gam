@@ -122,6 +122,10 @@ pub(crate) struct SurvivalLatentLaw {
 enum LawGrids {
     Global(AnchorGridOwned),
     PerRow(Vec<AnchorGridOwned>),
+    /// The joint law of a `K ≥ 2` score vector (gam#2929). It has no scalar
+    /// grid: each row projects it onto its own slope vector, and only the
+    /// per-score vector program reads it.
+    Joint(Arc<super::JointLatentLawRuntime>),
 }
 
 impl SurvivalLatentLaw {
@@ -159,6 +163,29 @@ impl SurvivalLatentLaw {
         }))
     }
 
+    /// A joint law of the score vector (gam#2929). `kind` is the primary
+    /// score's measure, which is what named the law's configuration. It carries
+    /// no root slots: the per-score vector program solves its own roots.
+    pub(crate) fn from_joint(
+        kind: crate::bms::LatentMeasureKind,
+        runtime: super::JointLatentLawRuntime,
+    ) -> Self {
+        Self {
+            kind,
+            grids: LawGrids::Joint(Arc::new(runtime)),
+            roots: Arc::new(AnchorRootCache::new(0, false)),
+        }
+    }
+
+    /// The joint law, when this is one.
+    #[inline]
+    pub(crate) fn joint(&self) -> Option<&super::JointLatentLawRuntime> {
+        match &self.grids {
+            LawGrids::Joint(runtime) => Some(runtime),
+            LawGrids::Global(_) | LawGrids::PerRow(_) => None,
+        }
+    }
+
     /// Row `row`'s law with the roots already solved on it.
     #[inline]
     pub(crate) fn row_context(&self, row: usize) -> AnchorRowContext<'_> {
@@ -169,11 +196,21 @@ impl SurvivalLatentLaw {
     }
 
     /// The law of row `row`.
+    ///
+    /// A joint law has no scalar grid. The per-score vector lanes that read it
+    /// never ask for one, and every consumer of the scalar frames refuses a
+    /// per-score family before solving on a row's grid, so the empty grid only
+    /// keeps this match total without inventing a law the fit did not declare.
     #[inline]
     pub(crate) fn row(&self, row: usize) -> AnchorGrid<'_> {
         match &self.grids {
             LawGrids::Global(grid) => grid.view(),
             LawGrids::PerRow(grids) => grids[row].view(),
+            LawGrids::Joint(_) => AnchorGrid {
+                nodes: &[],
+                weights: &[],
+                log_weights: &[],
+            },
         }
     }
 }

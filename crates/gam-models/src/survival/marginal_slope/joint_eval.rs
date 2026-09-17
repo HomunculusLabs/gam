@@ -1997,7 +1997,7 @@ impl SurvivalMarginalSlopeFamily {
                 self.n,
                 |range| -> Result<_, String> {
                     let mut acc = make_per_z_acc();
-                    let mut row_jet_arena = RigidVectorRowWorkspace::new(&self.score_covariance)?;
+                    let mut row_jet_arena = VectorRowWorkspace::for_family(self)?;
                     let mut slope_workspace = self.slope_row_workspace()?;
                     for row in range {
                         let q0 = self.design_entry.dot_row(row, beta_time)
@@ -2017,7 +2017,7 @@ impl SurvivalMarginalSlopeFamily {
                         let z = z_row.as_slice().ok_or_else(|| {
                             "per-score blockwise score row must be contiguous".to_string()
                         })?;
-                        let nll = row_primary_closed_form_vector_into(
+                        let nll = row_jet_arena.evaluate_row(
                             row,
                             q0,
                             q1,
@@ -2028,7 +2028,6 @@ impl SurvivalMarginalSlopeFamily {
                             self.event[row],
                             self.derivative_guard,
                             probit_scale,
-                            &mut row_jet_arena,
                         )?;
                         let (f_pi, f_pipi) = row_jet_arena.derivatives();
                         acc.0 -= nll;
@@ -2143,7 +2142,7 @@ impl SurvivalMarginalSlopeFamily {
                 self.n,
                 |range| -> Result<_, String> {
                     let mut acc = make_per_z_joint_acc();
-                    let mut row_jet_arena = RigidVectorRowWorkspace::new(&self.score_covariance)?;
+                    let mut row_jet_arena = VectorRowWorkspace::for_family(self)?;
                     let mut slope_workspace = self.slope_row_workspace()?;
                     let mut j = Array2::<f64>::zeros((dim, total));
                     for row in range {
@@ -2164,7 +2163,7 @@ impl SurvivalMarginalSlopeFamily {
                         let z = z_row.as_slice().ok_or_else(|| {
                             "per-score dense-joint score row must be contiguous".to_string()
                         })?;
-                        let nll = row_primary_closed_form_vector_into(
+                        let nll = row_jet_arena.evaluate_row(
                             row,
                             q0,
                             q1,
@@ -2175,7 +2174,6 @@ impl SurvivalMarginalSlopeFamily {
                             self.event[row],
                             self.derivative_guard,
                             probit_scale,
-                            &mut row_jet_arena,
                         )?;
                         let (f_pi, f_pipi) = row_jet_arena.derivatives();
                         acc.0 -= nll;

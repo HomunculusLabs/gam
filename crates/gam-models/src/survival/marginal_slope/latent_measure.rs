@@ -94,12 +94,29 @@ impl SurvivalLatentScoreCalibration {
 pub(crate) fn anchored_kernel_unavailable_reason(
     spec: &SurvivalMarginalSlopeTermSpec,
 ) -> Option<&'static str> {
-    if spec.z.ncols() != 1 {
-        return Some(
-            "a declared latent law needs a single latent score: with K ≥ 2 scores the law \
-             the identity is anchored on is a joint law of the score vector, which the finite \
-             per-column grid does not carry",
-        );
+    let score_dim = spec.z.ncols();
+    if score_dim != 1 {
+        // gam#2929: with K ≥ 2 scores the anchor reads the law of the drive
+        // `rᵀz`, which the fit builds as the joint law of the score vector and
+        // projects onto each row's own slope vector.
+        if spec.declared_latent_law.is_some() {
+            return Some(
+                "a declared latent law is a finite law of ONE score: with K ≥ 2 scores the \
+                 anchor needs the joint law of the score vector, which latent_measure = \
+                 global-empirical builds from the training scores",
+            );
+        }
+        let per_score = spec
+            .slopespecs
+            .as_ref()
+            .is_some_and(|specs| specs.len() == score_dim);
+        if !per_score {
+            return Some(
+                "a latent law over K ≥ 2 scores is served on the per-score slope topology (one \
+                 slope surface per score): a slope shared across the scores reads only their \
+                 sum, and the anchored scalar frame does not build that sum's law",
+            );
+        }
     }
     if spec.score_warp.is_some() || spec.link_dev.is_some() {
         return Some(

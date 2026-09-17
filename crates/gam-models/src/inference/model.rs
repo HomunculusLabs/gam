@@ -561,6 +561,15 @@ pub struct FittedModelPayload {
     /// Exact latent-score covariance used by the fitted survival
     /// marginal-slope preservation map. Mandatory in the current schema.
     pub survival_marginal_slope_score_covariance: Option<Vec<Vec<f64>>>,
+    /// The joint latent law a `K ≥ 2` per-score survival marginal-slope fit
+    /// anchored its index on (gam#2929). When present the model's latent object
+    /// is this law of the score vector — `z_columns` names its coordinates and
+    /// `resolved_slopespecs` one slope surface per coordinate — and prediction
+    /// replays its anchor; `latent_measure` then describes the primary score
+    /// alone and no single-score predictor may serve the model.
+    #[serde(default)]
+    pub survival_marginal_slope_joint_latent_law:
+        Option<crate::survival::marginal_slope::SurvivalJointLatentLaw>,
     #[serde(default)]
     pub survival_entry: Option<String>,
     #[serde(default)]
@@ -901,6 +910,7 @@ impl FittedModelPayload {
             influence_absorber_width: None,
             influence_absorber_design: None,
             survival_marginal_slope_score_covariance: None,
+            survival_marginal_slope_joint_latent_law: None,
             survival_entry: None,
             survival_exit: None,
             survival_event: None,
@@ -1716,7 +1726,35 @@ fn validate_survival_marginal_slope_replay_state(
                 "survival marginal-slope saved {fit_label} is missing its exact latent-score covariance"
             ),
         })?;
-    if score_covariance.len() != 1
+    if let Some(law) = payload.survival_marginal_slope_joint_latent_law.as_ref() {
+        // gam#2929: a K ≥ 2 per-score model anchored on the joint law of its
+        // score vector names K score columns, K slope surfaces and a K×K pooled
+        // covariance, and its law must be admissible on its own terms.
+        law.validate(&format!("survival marginal-slope saved {fit_label} joint latent law"))
+            .map_err(|reason| FittedModelError::SchemaMismatch { reason })?;
+        let k = law.score_dim;
+        let names = payload.z_columns.as_ref().map_or(0, Vec::len);
+        let surfaces = payload.resolved_slopespecs.as_ref().map_or(0, Vec::len);
+        if names != k || surfaces != k {
+            return Err(FittedModelError::SchemaMismatch {
+                reason: format!(
+                    "survival marginal-slope saved {fit_label} joint latent law is K={k} but the \
+                     model names {names} score columns and {surfaces} slope surfaces"
+                ),
+            });
+        }
+        if score_covariance.len() != k
+            || score_covariance
+                .iter()
+                .any(|row| row.len() != k || row.iter().any(|value| !value.is_finite()))
+        {
+            return Err(FittedModelError::SchemaMismatch {
+                reason: format!(
+                    "survival marginal-slope saved {fit_label} latent-score covariance must be a finite {k}x{k} matrix for its K={k} joint latent law"
+                ),
+            });
+        }
+    } else if score_covariance.len() != 1
         || score_covariance[0].len() != 1
         || !score_covariance[0][0].is_finite()
         || score_covariance[0][0] < 0.0

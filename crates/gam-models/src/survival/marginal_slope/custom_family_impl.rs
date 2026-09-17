@@ -542,7 +542,11 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
         d_beta_flat: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
         if self.per_z_slope_active() {
-            return Ok(None);
+            // gam#2929: the per-score frame's contracted third, closed form or
+            // anchored on the joint latent law.
+            return self
+                .exact_newton_joint_hessian_directional_derivative_per_z(block_states, d_beta_flat)
+                .map(Some);
         }
         if self.effective_flex_active(block_states)? {
             return if self.flex_timewiggle_active() {

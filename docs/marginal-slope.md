@@ -382,9 +382,10 @@ the same anchoring equation; the saved coefficients are defined against
 that law's anchor and mean nothing under another.
 
 Current boundaries, refused with a message rather than silently
-reinterpreted: one latent score (`K = 1`); no score-warp or link-deviation
-flex block, no CTN Stage-1 influence absorber, no time-wiggle baseline,
-and a time-constant slope. The Jeffreys/Firth arming's closed-form fifth
+reinterpreted: a declared law is a law of one score (several scores anchor
+on their joint law, below); no score-warp or
+link-deviation flex block, no CTN Stage-1 influence absorber, no
+time-wiggle baseline, and a time-constant slope. The Jeffreys/Firth arming's closed-form fifth
 and sixth derivatives are the Gaussian lowering's and are not served on a
 declared law; the fit runs without them.
 
@@ -444,13 +445,25 @@ Two limits are worth stating plainly:
 - **`K = 1` is unaffected.** There is no off-diagonal, and `Var(z | a)` is
   already the per-coordinate gate's business. A single-score fit is
   bit-for-bit what it was.
-- **A fit that used a conditional `Σ(a)` cannot be saved yet.** It needs
-  `K ≥ 2`, and the saved-model contract carries one score column and one
-  score covariance. Saving is refused at the point of loss with the reason
-  attached, rather than failing later as a shape mismatch on load. On the
-  declared-law path the object that would have to be persisted is the law
-  itself rather than `Σ(a)`; that path is `K = 1` today, so the multi-score
-  contract is still the open end.
+- **A closed-form fit that used a conditional `Σ(a)` is refused at save
+  time.** The closed-form contract carries one score column and one score
+  covariance, so saving is refused at the point of loss with the reason
+  attached.
+- **The declared-law path saves `K ≥ 2`.** With one `slope(z_k, ...)`
+  surface per score and `config={"latent_measure": "global-empirical"}`,
+  the anchor reads only the law of the drive `rᵀz`, so the fit declares the
+  joint law of the score vector: the pooled law of the whitened training
+  residuals `ε = L(a)⁻¹(z − μ)`, compressed to 128 nodes with its mean and
+  covariance kept exactly, and transported to each row's context as
+  `μ + L(a)ε` — `L(a)` the factor of the conditional `Σ(a)` above when the
+  pair gate fires, of the pooled `Σ̄` otherwise. On Gaussian scores this is
+  the conditional closed form; on any other residual shape it is that
+  shape's anchor. The law, its transport, one score column and one slope
+  surface per score are persisted, and prediction replays the same anchor
+  per row. Refused by name on this path: a shared slope over several scores,
+  a spatial length scale on a slope surface or in the marginal formula, a
+  learned frailty, per-score pre-transforms, uncertainty bands, the
+  posterior-mean estimand, and leave-one-out replay.
 
 ## Fixed external baseline (slope-only fit)
 

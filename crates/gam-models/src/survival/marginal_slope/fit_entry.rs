@@ -190,6 +190,48 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     // search hands them a freshly rebuilt covariate design on every probe), so
     // handing them the already-tensored design would tensor it twice.
     let slope_cov_design = slope_design;
+    // Per-score slope surfaces are combined above from their own specs, one
+    // intercept per surface. The joint optimizer rebuilds each block from ONE
+    // spec, and the concatenation of the surface specs builds a single intercept
+    // where the surfaces own K, so the design it hands back is not the one the
+    // per-score coefficients live against. With no spatial term on the surfaces
+    // (refused below otherwise) the combined design never moves, so every
+    // consumer reads it instead of the rebuilt one (gam#2929). The surface specs
+    // travel with the fit so a saved model can rebuild each surface.
+    let per_score_slope_design: Option<TermCollectionDesign> = slope_topology
+        .is_per_score()
+        .then(|| slope_cov_design.clone());
+    let slope_surface_specs: Option<Vec<TermCollectionSpec>> =
+        slope_topology.is_per_score().then(|| joint_specs.clone());
+    if slope_topology.is_per_score() {
+        // The log σ and design-ψ terms are formed on the shared-slope row
+        // program, so a per-score slope refuses a learned frailty and a spatial
+        // marginal term rather than differentiate a likelihood other than the
+        // one it fits. Both are checked here, before the pilot solve.
+        if learned_sigma_initial.is_some() {
+            return Err(SurvivalMarginalSlopeError::UnsupportedConfiguration {
+                reason: format!(
+                    "a learned Gaussian frailty on a per-score slope over K={} scores is \
+                     refused: its log-σ derivatives are formed on the shared-slope row program, \
+                     not on the per-score likelihood this fit optimises (gam#2938)",
+                    spec.z.ncols()
+                ),
+            }
+            .into());
+        }
+        if !spatial_length_scale_term_indices(&marginalspec_boot).is_empty() {
+            return Err(SurvivalMarginalSlopeError::UnsupportedConfiguration {
+                reason: format!(
+                    "a spatial length-scale term in the marginal formula of a per-score slope \
+                     over K={} scores is refused: its length-scale derivatives are formed on the \
+                     shared-slope row program, not on the per-score likelihood this fit \
+                     optimises (gam#2938)",
+                    spec.z.ncols()
+                ),
+            }
+            .into());
+        }
+    }
     let (slope_design, slope_follow_up) = tensorize_slope_design_over_time(
         slope_cov_design.clone(),
         &spec.slope_template,
@@ -281,24 +323,6 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     // every kernel evaluation — is therefore sequenced after it, so no consumer
     // can see the uncalibrated axis.
     let latent_calibration = resolve_survival_latent_score_calibration(&mut spec, &marginal_design)?;
-    // gam#2923: the measure the gate settled on. An empirical measure means the
-    // fit runs the anchored frame — the marginal identity solved on that law per
-    // row — instead of the Gaussian closed form; the law is materialised once
-    // here and every family the search builds shares it.
-    let latent_law: Option<Arc<SurvivalLatentLaw>> =
-        SurvivalLatentLaw::from_kind(latent_calibration.primary_measure(), n)?.map(Arc::new);
-    if let Some(law) = latent_law.as_ref()
-        && let Some(reason) = anchored_kernel_unavailable_reason(&spec)
-    {
-        return Err(format!(
-            "survival marginal-slope latent-measure gate produced a {} latent law, but {reason}",
-            match &law.kind {
-                crate::bms::LatentMeasureKind::GlobalEmpirical { .. } => "global-empirical",
-                crate::bms::LatentMeasureKind::LocalEmpirical { .. } => "local-empirical",
-                crate::bms::LatentMeasureKind::StandardNormal => "standard-normal",
-            }
-        ));
-    }
     // gam#2766: `Σ` in this family's defining identity is `Var(z | a)`, so the
     // pooled matrix above is only the right object when that conditional
     // covariance does not move. One robust Rao score test per score PAIR, on the
@@ -314,6 +338,59 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             .as_ref()
             .map(|design| design.view()),
     )?;
+    // gam#2923: the measure the gate settled on. An empirical measure means the
+    // fit runs the anchored frame — the marginal identity solved on that law per
+    // row — instead of the Gaussian closed form; the law is materialised once
+    // here and every family the search builds shares it.
+    //
+    // gam#2929: with K ≥ 2 scores the anchor reads the law of the drive `rᵀz`,
+    // so what the fit declares is the joint law of the score vector, transported
+    // to each context by the covariance field resolved just above. Sequenced
+    // after that field because its conditional model IS the transport.
+    let mut joint_latent_law: Option<SurvivalJointLatentLaw> = None;
+    let latent_law: Option<Arc<SurvivalLatentLaw>> = if spec.z.ncols() >= 2 {
+        if latent_calibration
+            .per_score_measure
+            .iter()
+            .any(|measure| measure.is_empirical())
+        {
+            let (persisted, runtime) = build_joint_latent_law(
+                spec.z.view(),
+                spec.weights.view(),
+                &score_covariance,
+                latent_calibration
+                    .conditioning
+                    .as_ref()
+                    .map(|design| design.view()),
+                DEFAULT_JOINT_LATENT_NODES,
+            )?;
+            joint_latent_law = Some(persisted);
+            Some(Arc::new(SurvivalLatentLaw::from_joint(
+                latent_calibration.primary_measure().clone(),
+                runtime,
+            )))
+        } else {
+            None
+        }
+    } else {
+        SurvivalLatentLaw::from_kind(latent_calibration.primary_measure(), n)?.map(Arc::new)
+    };
+    if let Some(law) = latent_law.as_ref()
+        && let Some(reason) = anchored_kernel_unavailable_reason(&spec)
+    {
+        return Err(format!(
+            "survival marginal-slope latent-measure gate produced a {} latent law, but {reason}",
+            if law.joint().is_some() {
+                "joint"
+            } else {
+                match &law.kind {
+                    crate::bms::LatentMeasureKind::GlobalEmpirical { .. } => "global-empirical",
+                    crate::bms::LatentMeasureKind::LocalEmpirical { .. } => "local-empirical",
+                    crate::bms::LatentMeasureKind::StandardNormal => "standard-normal",
+                }
+            }
+        ));
+    }
     let z_primary = spec.z.column(0).to_owned();
     let baseline_started = std::time::Instant::now();
     let baseline_slope = pooled_survival_baseline(
@@ -942,6 +1019,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
                        theta: &Array1<f64>,
                        flex: FlexActivation|
      -> Result<SurvivalMarginalSlopeFamily, String> {
+        let slope_design = per_score_slope_design.as_ref().unwrap_or(slope_design);
         let family_hyper = family_hyper_from_theta(theta)?;
         let sigma = sigma_from_theta(theta)?;
         let (family_offset_entry, family_offset_exit, family_derivative_offset_exit) =
@@ -1012,6 +1090,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
                         flex: FlexActivation|
      -> Result<Vec<ParameterBlockSpec>, String> {
         let hints = hints.borrow();
+        let slope_design = per_score_slope_design.as_ref().unwrap_or(slope_design);
         let (owned_slope_design, slope_follow_up) = tensorize_slope(slope_design)?;
         let slope_design = &owned_slope_design;
         let block_slope_layout = attach_slope_follow_up(
@@ -1397,6 +1476,15 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     let slope_terms = spatial_length_scale_term_indices(&slopespec_boot);
     let marginal_has_spatial = !marginal_terms.is_empty();
     let slope_has_spatial = !slope_terms.is_empty();
+    if slope_has_spatial && per_score_slope_design.is_some() {
+        return Err(SurvivalMarginalSlopeError::UnsupportedConfiguration {
+            reason: "a spatial length-scale term on a per-score slope surface is refused: the \
+                     length-scale search rebuilds the slope block from one concatenated spec, \
+                     which cannot rebuild one surface per score"
+                .to_string(),
+        }
+        .into());
+    }
     let analytic_joint_derivatives_available =
         marginal_has_spatial || slope_has_spatial || setup.log_kappa_dim() == 0;
 
@@ -1911,8 +1999,15 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     // before the spatial length-scale search: if that search moved the design,
     // the map at predict is not the map at fit, and the model must not be saved
     // claiming otherwise.
+    // A joint latent law with a conditional transport evaluates `L(a)` on the
+    // same span (gam#2929), so it is the same reproducibility question.
+    let joint_law_conditions = joint_latent_law
+        .as_ref()
+        .is_some_and(|law| law.conditional.is_some());
     let latent_conditioning_reproducible = match latent_calibration.conditioning.as_ref() {
-        Some(conditioning) if latent_calibration.primary_conditional().is_some() => {
+        Some(conditioning)
+            if latent_calibration.primary_conditional().is_some() || joint_law_conditions =>
+        {
             let resolved = designs[0]
                 .design
                 .try_to_dense_arc("survival marginal-slope resolved conditioning check")?;
@@ -1949,10 +2044,11 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         fit: solved_fit,
         marginalspec_resolved: resolved_specs.remove(0),
         slopespec_resolved: resolved_specs.remove(0),
+        slope_surface_specs,
         marginal_design: designs[0].clone(),
         // The tensor product, not the covariate factor: this is the design the
         // fitted coefficients live against.
-        slope_design: tensorize_slope(&designs[1])?.0,
+        slope_design: tensorize_slope(per_score_slope_design.as_ref().unwrap_or(&designs[1]))?.0,
         slope_time_basis: spec
             .slope_template
             .resolved_time_basis()
@@ -1969,6 +2065,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         latent_conditioning_reproducible,
         score_covariance: score_covariance.pooled_covariance().to_dense(),
         conditional_score_covariance: score_covariance.model().cloned(),
+        joint_latent_law,
         time_block_penalties_len: time_penalties_len,
         time_wiggle_knots: spec
             .timewiggle_block

@@ -2816,6 +2816,13 @@ fn compute_saved_marginal_slope_survival_alo(
         .beta_baseline_timewiggle
         .as_ref()
         .map_or(0, Vec::len);
+    if payload.survival_marginal_slope_joint_latent_law.is_some() {
+        return Err(invalid(
+            "saved survival marginal-slope ALO does not replay a model anchored on the joint \
+             latent law of K ≥ 2 scores: its row program is the per-score anchored vector \
+             program, which this single-score replay does not build (gam#2929)",
+        ));
+    }
     let saved_score_covariance = payload
         .survival_marginal_slope_score_covariance
         .as_ref()

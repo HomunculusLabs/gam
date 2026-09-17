@@ -231,6 +231,13 @@ impl SurvivalMarginalSlopeFamily {
         self.latent_law.is_some()
     }
 
+    /// The joint latent law of the score vector a per-score `K ≥ 2` fit
+    /// anchors on (gam#2929), when it runs the anchored vector program.
+    #[inline]
+    pub(crate) fn joint_latent_law(&self) -> Option<&JointLatentLawRuntime> {
+        self.latent_law.as_ref().and_then(|law| law.joint())
+    }
+
     /// How many primaries the family's CORE (non-flex) row frame carries. The
     /// runtime counterpart of the `SlopeRowGeometry` const parameter, for the
     /// `ndarray`-shaped surfaces that carry the frame dynamically.

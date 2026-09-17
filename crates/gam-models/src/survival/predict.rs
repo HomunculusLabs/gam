@@ -2373,7 +2373,26 @@ pub fn predict_survival(
     // predictor and only assembles the per-cell q-design slice. Without this,
     // the library skipped link-deviation and score-warp replay entirely and
     // disagreed with the CLI's `gam predict` on every flex model.
-    let marginal_slope_ctx = if saved_likelihood_mode == SurvivalLikelihoodMode::MarginalSlope {
+    // gam#2929: a model anchored on the joint latent law of K ≥ 2 scores replays
+    // that law's anchor per row; the single-score predictor below refuses it.
+    let joint_marginal_slope_ctx = if saved_likelihood_mode
+        == SurvivalLikelihoodMode::MarginalSlope
+        && model.survival_marginal_slope_joint_latent_law.is_some()
+    {
+        Some(build_joint_marginal_slope_predict_context(
+            model,
+            data,
+            col_map,
+            training_headers,
+            &cov_design.design,
+            noise_offset,
+        )?)
+    } else {
+        None
+    };
+    let marginal_slope_ctx = if saved_likelihood_mode == SurvivalLikelihoodMode::MarginalSlope
+        && joint_marginal_slope_ctx.is_none()
+    {
         // Baseline offsets at the predict-data's age_entry / age_exit. Used to
         // build the predictor's `pred_input` (which we discard) — the actual
         // per-(row, t) offset is rebuilt inside `evaluate_marginal_slope_row`.
@@ -2477,6 +2496,16 @@ pub fn predict_survival(
 
                 match saved_likelihood_mode {
                     SurvivalLikelihoodMode::MarginalSlope => {
+                        if let Some(joint) = joint_marginal_slope_ctx.as_ref() {
+                            return evaluate_joint_marginal_slope_row(
+                                i,
+                                joint,
+                                &row_time,
+                                &r_eta_exit,
+                                &r_deriv_exit,
+                                effective_primary_offset[i],
+                            );
+                        }
                         let ctx = marginal_slope_ctx.as_ref().ok_or_else(|| {
                             "internal error: marginal-slope context missing for marginal-slope mode"
                                 .to_string()
@@ -3311,6 +3340,227 @@ fn build_marginal_slope_predict_context(
         z_raw,
         noise_offset: effective_noise_offset,
     })
+}
+
+/// Precomputed context for a saved survival marginal-slope model anchored on
+/// the joint latent law of `K ≥ 2` scores (gam#2929): the per-row slope vector,
+/// the per-row score vector, and the law transported to every row's context.
+struct JointMarginalSlopePredictContext {
+    /// Time-block coefficients; a joint-law model carries no time wiggle.
+    beta_time: Array1<f64>,
+    /// Per-row covariate eta `cov_design[i] · beta_marginal`.
+    cov_eta: Array1<f64>,
+    /// `n × K` raw per-score slopes `g_k`, offsets and baseline included.
+    slopes: Array2<f64>,
+    /// `n × K` scores as the fit consumed them.
+    scores: Array2<f64>,
+    probit_scale: f64,
+    law: crate::survival::marginal_slope::JointLatentLawRuntime,
+}
+
+fn build_joint_marginal_slope_predict_context(
+    model: &SavedModel,
+    data: ArrayView2<'_, f64>,
+    col_map: &HashMap<String, usize>,
+    training_headers: Option<&Vec<String>>,
+    cov_design: &DesignMatrix,
+    noise_offset: &Array1<f64>,
+) -> Result<JointMarginalSlopePredictContext, SurvivalPredictError> {
+    let law = model
+        .survival_marginal_slope_joint_latent_law
+        .as_ref()
+        .ok_or_else(|| "saved survival marginal-slope model lacks its joint latent law".to_string())?;
+    let k = law.score_dim;
+    let saved_runtime = model.saved_prediction_runtime()?;
+    if saved_runtime.score_warp.is_some()
+        || saved_runtime.link_deviation.is_some()
+        || saved_runtime.baseline_time_wiggle.is_some()
+        || saved_runtime.influence_absorber_width.is_some()
+        || model.slope_time_basis.is_some()
+        || model.score_transform.is_some()
+    {
+        return Err(SurvivalPredictError::UnsupportedConfiguration {
+            reason: "saved survival marginal-slope joint latent law serves rigid time-constant \
+                     per-score slopes on external scores only; this model also names a flex \
+                     block, time wiggle, influence absorber, follow-up margin or score transform"
+                .to_string(),
+        });
+    }
+    if model.latent_z_rank_int_calibration.is_some()
+        || model.latent_z_conditional_calibration.is_some()
+    {
+        return Err(SurvivalPredictError::UnsupportedConfiguration {
+            reason: "saved survival marginal-slope joint latent law was fitted on uncalibrated \
+                     scores; this model also carries a per-score calibration"
+                .to_string(),
+        });
+    }
+    let normalization = model
+        .latent_z_normalization
+        .ok_or_else(|| "saved survival marginal-slope model missing latent_z_normalization".to_string())?;
+    if !(normalization.mean == 0.0 && normalization.sd == 1.0) {
+        return Err(SurvivalPredictError::UnsupportedConfiguration {
+            reason: "saved survival marginal-slope joint latent law requires the identity score \
+                     normalisation it was saved under"
+                .to_string(),
+        });
+    }
+    let z_columns = model
+        .z_columns
+        .as_ref()
+        .filter(|names| names.len() == k)
+        .ok_or_else(|| format!("saved K={k} survival marginal-slope model must name {k} score columns"))?;
+    let surface_specs = model
+        .resolved_slopespecs
+        .as_ref()
+        .filter(|specs| specs.len() == k)
+        .ok_or_else(|| format!("saved K={k} survival marginal-slope model must carry {k} slope surfaces"))?;
+    let n = data.nrows();
+    let mut scores = Array2::<f64>::zeros((n, k));
+    for (column, name) in z_columns.iter().enumerate() {
+        let index = *col_map
+            .get(name)
+            .ok_or_else(|| format!("missing score column '{name}'"))?;
+        scores.column_mut(column).assign(&data.column(index));
+    }
+
+    let fit_saved = fit_result_from_saved_model_for_prediction(model)?;
+    if fit_saved.blocks.len() != 3 {
+        return Err(SurvivalPredictError::IncompatibleSchema {
+            reason: format!(
+                "saved survival marginal-slope joint-law model requires 3 blocks [time, marginal, slope], got {}",
+                fit_saved.blocks.len()
+            ),
+        });
+    }
+    let beta_time = fit_saved.blocks[0].beta.clone();
+    let beta_marginal = &fit_saved.blocks[1].beta;
+    let beta_slope = &fit_saved.blocks[2].beta;
+    if beta_marginal.len() != cov_design.ncols() {
+        return Err(SurvivalPredictError::IncompatibleSchema {
+            reason: format!(
+                "saved survival marginal-slope marginal coefficient mismatch: beta has {} entries but baseline design has {} columns",
+                beta_marginal.len(),
+                cov_design.ncols()
+            ),
+        });
+    }
+    let baseline_slope = model
+        .baseline_slope
+        .ok_or_else(|| "saved survival marginal-slope model missing baseline_slope".to_string())?;
+    let slope_clipped = model.axis_clip_to_training_ranges(data, col_map);
+    let slope_input = slope_clipped.as_ref().map_or(data, |arr| arr.view());
+    let mut slopes = Array2::<f64>::zeros((n, k));
+    let mut cursor = 0usize;
+    for (surface, saved_spec) in surface_specs.iter().enumerate() {
+        let spec = resolve_termspec_for_prediction(
+            &Some(saved_spec.clone()),
+            training_headers,
+            col_map,
+            "resolved_slopespecs",
+        )?;
+        let design = build_term_collection_design(slope_input, &spec).map_err(|e| {
+            format!("failed to build survival marginal-slope slope surface {surface} design: {e}")
+        })?;
+        let width = design.design.ncols();
+        if cursor + width > beta_slope.len() {
+            return Err(SurvivalPredictError::IncompatibleSchema {
+                reason: format!(
+                    "saved survival marginal-slope slope surfaces are wider than the {} slope coefficients",
+                    beta_slope.len()
+                ),
+            });
+        }
+        let offset = design
+            .compose_offset(noise_offset.view(), "survival marginal-slope slope surface")
+            .map_err(|error| error.to_string())?;
+        let values = design
+            .design
+            .dot(&beta_slope.slice(s![cursor..cursor + width]).to_owned());
+        slopes
+            .column_mut(surface)
+            .assign(&(values + &offset + baseline_slope));
+        cursor += width;
+    }
+    if cursor != beta_slope.len() {
+        return Err(SurvivalPredictError::IncompatibleSchema {
+            reason: format!(
+                "saved survival marginal-slope slope surfaces span {cursor} columns but the slope block has {} coefficients",
+                beta_slope.len()
+            ),
+        });
+    }
+    let cov_eta = cov_design.dot(beta_marginal);
+    let conditioning = law.conditional.is_some().then(|| cov_design.to_dense());
+    let runtime = law.runtime(conditioning.as_ref().map(|block| block.view()), n)?;
+    let sigma = match model.family_state.frailty() {
+        None | Some(FrailtySpec::None) => None,
+        Some(FrailtySpec::GaussianShift {
+            scale: crate::survival::lognormal_kernel::FrailtyScale::Fixed { sigma },
+        }) => Some(*sigma),
+        Some(other) => {
+            return Err(SurvivalPredictError::UnsupportedConfiguration {
+                reason: format!(
+                    "saved survival marginal-slope joint-law model has a frailty state the marginal-slope schema forbids: {}",
+                    match other {
+                        FrailtySpec::HazardMultiplier { .. } => "hazard multiplier",
+                        _ => "learned Gaussian shift",
+                    }
+                ),
+            });
+        }
+    };
+    Ok(JointMarginalSlopePredictContext {
+        beta_time,
+        cov_eta,
+        slopes,
+        scores,
+        probit_scale: crate::marginal_slope_shared::probit_frailty_scale(sigma),
+        law: runtime,
+    })
+}
+
+/// One `(row, t)` cell of a saved joint-law model: `η = α(q(t), r) + rᵀz` on
+/// the row's transported law, `η′ = α_q·q′(t)`, and the probit survival and
+/// hazard they define.
+fn evaluate_joint_marginal_slope_row(
+    row_index: usize,
+    ctx: &JointMarginalSlopePredictContext,
+    row_time: &SurvivalTimeBuildOutput,
+    r_eta_exit: &Array1<f64>,
+    r_deriv_exit: &Array1<f64>,
+    primary_offset_row: f64,
+) -> Result<(f64, f64, f64), SurvivalPredictError> {
+    if ctx.beta_time.len() != row_time.x_exit_time.ncols() {
+        return Err(SurvivalPredictError::IncompatibleSchema {
+            reason: format!(
+                "saved survival marginal-slope time coefficient mismatch: beta has {} entries but the time basis has {}",
+                ctx.beta_time.len(),
+                row_time.x_exit_time.ncols()
+            ),
+        });
+    }
+    let q = row_time.x_exit_time.dot(&ctx.beta_time)[0]
+        + ctx.cov_eta[row_index]
+        + r_eta_exit[0]
+        + primary_offset_row;
+    let qd = row_time.x_derivative_time.dot(&ctx.beta_time)[0] + r_deriv_exit[0];
+    let slopes = ctx.slopes.row(row_index).to_vec();
+    let scores = ctx.scores.row(row_index).to_vec();
+    let mut workspace = crate::survival::marginal_slope::JointAnchorRowWorkspace::new(&ctx.law);
+    let (eta, eta_t) = crate::survival::marginal_slope::joint_anchored_index_and_rate(
+        row_index,
+        q,
+        qd,
+        &slopes,
+        &scores,
+        ctx.probit_scale,
+        &ctx.law,
+        &mut workspace,
+    )?;
+    let eta_derivative = clamp_marginal_slope_index_derivative_at_horizon(eta_t);
+    let (cum, haz) = probit_survival_hazard_components(eta, eta_derivative)?;
+    Ok((eta, cum, haz))
 }
 
 /// Evaluate one (row, t) cell for the saved survival marginal-slope kernel.
@@ -4908,6 +5158,17 @@ pub fn build_saved_survival_marginal_slope_predictor(
     ),
     SurvivalPredictError,
 > {
+    if model.survival_marginal_slope_joint_latent_law.is_some() {
+        // gam#2929: the model's latent object is a joint law of K ≥ 2 scores.
+        // This predictor carries one score and one scalar law, so serving it
+        // would replay a different model; the joint replay lives in
+        // `build_joint_marginal_slope_predict_context`.
+        return Err(SurvivalPredictError::UnsupportedConfiguration {
+            reason: "saved survival marginal-slope model is anchored on the joint latent law of \
+                     K ≥ 2 scores; the single-score predictor cannot replay it"
+                .to_string(),
+        });
+    }
     let saved_runtime = model.saved_prediction_runtime()?;
     if saved_runtime.link_wiggle.is_some() {
         return Err(SurvivalPredictError::MissingFitMetadata {

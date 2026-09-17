@@ -132,6 +132,19 @@ impl SurvivalMarginalSlopeFamily {
         row: usize,
         block_states: &[ParameterBlockState],
     ) -> Result<(f64, Array1<f64>, Array2<f64>), String> {
+        if self.per_z_slope_active() {
+            // The shared-slope frames read `Σ_k z_k` against one slope; a
+            // per-score family's row program is the per-score vector frame,
+            // closed form or anchored on its joint latent law (gam#2929).
+            return Err(SurvivalMarginalSlopeError::UnsupportedConfiguration {
+                reason: format!(
+                    "survival marginal-slope row {row}: the shared-slope primary frame does not \
+                     serve a per-score slope over K={} scores",
+                    self.score_dim()
+                ),
+            }
+            .into());
+        }
         in_slope_frame!(self, P, Frame, {
             self.row_primary_gradient_hessian_in_frame::<P, Frame>(row, block_states)
         })
@@ -189,6 +202,9 @@ impl SurvivalMarginalSlopeFamily {
         &self,
         block_states: &[ParameterBlockState],
     ) -> Result<(OffsetChannelResiduals, OffsetChannelCurvatures), String> {
+        if self.per_z_slope_active() {
+            return self.offset_channel_geometry_per_z(block_states);
+        }
         let flex_active = self.effective_flex_active(block_states)?;
         let primary = flex_active.then(|| flex_primary_slices(self));
         let rows = (0..self.n)
@@ -224,6 +240,79 @@ impl SurvivalMarginalSlopeFamily {
                 },
             )
             .collect::<Result<Vec<_>, String>>()?;
+        Ok(self.assemble_offset_channels(rows))
+    }
+
+    /// The offset channels of a per-score family (gam#2929): the row program's
+    /// derivatives in `(q₀, q₁, q̇₁)` are the leading primaries of the per-score
+    /// vector frame, closed form or anchored on the joint latent law.
+    fn offset_channel_geometry_per_z(
+        &self,
+        block_states: &[ParameterBlockState],
+    ) -> Result<(OffsetChannelResiduals, OffsetChannelCurvatures), String> {
+        let beta_time = &block_states[0].beta;
+        let probit_scale = self.probit_frailty_scale();
+        let rows = (0..self.n)
+            .into_par_iter()
+            .map_init(
+                || {
+                    (
+                        VectorRowWorkspace::for_family(self),
+                        self.slope_row_workspace(),
+                    )
+                },
+                |(row_workspace, slope_workspace),
+                 row|
+                 -> Result<(usize, f64, f64, f64, [[f64; 3]; 3]), String> {
+                    if self.weights[row] <= 0.0 {
+                        return Ok((row, 0.0, 0.0, 0.0, [[0.0; 3]; 3]));
+                    }
+                    let row_workspace = row_workspace.as_mut().map_err(|error| error.clone())?;
+                    let slope_workspace =
+                        slope_workspace.as_mut().map_err(|error| error.clone())?;
+                    let q0 = self.design_entry.dot_row(row, beta_time)
+                        + self.offset_entry[row]
+                        + block_states[1].eta[row];
+                    let q1 = self.design_exit.dot_row(row, beta_time)
+                        + self.offset_exit[row]
+                        + block_states[1].eta[row];
+                    let qd1 = self.design_derivative_exit.dot_row(row, beta_time)
+                        + self.derivative_offset_exit[row];
+                    self.fill_slope_values_for_row(row, block_states, slope_workspace)?;
+                    let z_row = self.z.row(row);
+                    let z = z_row.as_slice().ok_or_else(|| {
+                        "per-score offset-channel score row must be contiguous".to_string()
+                    })?;
+                    row_workspace.evaluate_row(
+                        row,
+                        q0,
+                        q1,
+                        qd1,
+                        slope_workspace.values(),
+                        z,
+                        self.weights[row],
+                        self.event[row],
+                        self.derivative_guard,
+                        probit_scale,
+                    )?;
+                    let (gradient, hessian) = row_workspace.derivatives();
+                    let mut curvature = [[0.0; 3]; 3];
+                    for a in 0..3 {
+                        for b in 0..3 {
+                            curvature[a][b] = hessian[[a, b]];
+                        }
+                    }
+                    Ok((row, gradient[1], gradient[0], gradient[2], curvature))
+                },
+            )
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(self.assemble_offset_channels(rows))
+    }
+
+    fn assemble_offset_channels(
+        &self,
+        rows: Vec<(usize, f64, f64, f64, [[f64; 3]; 3])>,
+    ) -> (OffsetChannelResiduals, OffsetChannelCurvatures) {
         let mut exit = Array1::<f64>::zeros(self.n);
         let mut entry = Array1::<f64>::zeros(self.n);
         let mut derivative = Array1::<f64>::zeros(self.n);
@@ -234,7 +323,7 @@ impl SurvivalMarginalSlopeFamily {
             derivative[row] = r_derivative;
             curvatures[row] = curvature;
         }
-        Ok((
+        (
             OffsetChannelResiduals {
                 exit,
                 entry,
@@ -243,7 +332,7 @@ impl SurvivalMarginalSlopeFamily {
                 right: Array1::<f64>::zeros(self.n),
             },
             OffsetChannelCurvatures { rows: curvatures },
-        ))
+        )
     }
 }
 

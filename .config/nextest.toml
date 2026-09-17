@@ -152,6 +152,13 @@ slow-timeout = { period = "600s", terminate-after = 4 }
 filter = 'test(/declared_latent_law_2923::/)'
 slow-timeout = { period = "600s", terminate-after = 4 }
 
+# The gam#2929 K = 2 joint-law acceptance probes each run two or three full
+# survival marginal-slope fits on 3 000 rows, the anchored ones solving two
+# roots per row on a 128-node joint law at every row evaluation.
+[[profile.default.overrides]]
+filter = 'test(/joint_latent_law_2929::/)'
+slow-timeout = { period = "600s", terminate-after = 4 }
+
 # The gam#2927 survival marginal-slope posterior-mean measurement fits the
 # #2765 follow-up-varying-slope fixture once (n = 800, a quadratic time margin
 # on the slope) and then runs 2 × 20,000 full plug-in survival predictions as

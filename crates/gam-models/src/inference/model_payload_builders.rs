@@ -2232,13 +2232,73 @@ fn payload_for_survival_marginal_slope(
         survival_marginal_slope_offset_baseline_config(&age_exit, &baseline_cfg);
     let (persisted_rank_int, persisted_conditional) =
         ms_result.persisted_latent_z_calibrations()?;
+    // gam#2929: a K ≥ 2 per-score fit anchored on the joint law of its score
+    // vector persists that law, one score column and one slope surface per
+    // coordinate. What the single-score contract cannot carry is refused here.
+    let joint_state = match ms_result.joint_latent_law.as_ref() {
+        None => None,
+        Some(law) => {
+            let k = law.score_dim;
+            let surface_specs = ms_result
+                .slope_surface_specs
+                .as_ref()
+                .filter(|specs| specs.len() == k)
+                .ok_or_else(|| {
+                    format!(
+                        "survival marginal-slope joint latent law is K={k} but the fit carries no \
+                         per-score slope surface specs to rebuild its surfaces"
+                    )
+                })?;
+            if !(ms_result.z_normalization.mean == 0.0 && ms_result.z_normalization.sd == 1.0) {
+                return Err(
+                    "survival marginal-slope K ≥ 2 model normalised its scores before the fit, \
+                     and the saved contract records one normalisation, not one per score: \
+                     supply already-standardised scores if this model must be saved"
+                        .to_string(),
+                );
+            }
+            if law.conditional.is_some() && !ms_result.latent_conditioning_reproducible {
+                return Err(
+                    "survival marginal-slope joint latent law transports its law by a conditional \
+                     covariance fitted on the marginal design frozen before the spatial \
+                     length-scale search, and that search then moved the design: prediction \
+                     would rebuild a different span. Pin the marginal formula's spatial \
+                     length_scale= if this model must be saved"
+                        .to_string(),
+                );
+            }
+            let (_, parsed_slope) = gam_terms::inference::formula_dsl::parse_matching_auxiliary_formula(
+                &slope_formula,
+                &parsed.response,
+                "slope_formula",
+            )
+            .map_err(|err| format!("failed to re-parse survival slope formula: {err}"))?;
+            let surfaces =
+                gam_terms::inference::formula_dsl::marginal_slope_surfaces(&parsed_slope, &z_column)?;
+            if surfaces.len() != k {
+                return Err(format!(
+                    "survival marginal-slope joint latent law is K={k} but the slope formula \
+                     declares {} surfaces",
+                    surfaces.len()
+                ));
+            }
+            Some((
+                law.clone(),
+                surfaces
+                    .into_iter()
+                    .map(|surface| surface.z_column)
+                    .collect::<Vec<_>>(),
+                surface_specs.clone(),
+            ))
+        }
+    };
 
     // Thin adapter over the shared core assembler. The FFI's source-specific
     // work is re-deriving the survival response columns, baseline config, and
     // time basis from the formula + FitConfig and freezing its term collections
     // from their designs; the semantic payload is assembled by the same core
     // path the CLI uses, so the two save routes produce identical contracts.
-    assemble_survival_marginal_slope_payload(
+    let mut payload = assemble_survival_marginal_slope_payload(
         SurvivalMarginalSlopeInputs {
             formula,
             data_schema: dataset.schema.clone(),
@@ -2277,7 +2337,15 @@ fn payload_for_survival_marginal_slope(
             offset_column: fit_config.offset_column.clone(),
             noise_offset_column: fit_config.noise_offset_column.clone(),
         },
-    )
+    )?;
+    if let Some((law, z_columns, surface_specs)) = joint_state {
+        let k = law.score_dim;
+        payload.z_columns = Some(z_columns);
+        payload.resolved_slopespecs = Some(surface_specs);
+        payload.baseline_slopes = Some(vec![ms_result.baseline_slope; k]);
+        payload.survival_marginal_slope_joint_latent_law = Some(law);
+    }
+    Ok(payload)
 }
 
 fn payload_for_survival_transformation(

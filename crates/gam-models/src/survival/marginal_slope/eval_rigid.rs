@@ -34,6 +34,26 @@ impl SurvivalMarginalSlopeFamily {
         let z = z_row.as_slice().ok_or_else(|| {
             "survival marginal-slope vector value score row must be contiguous".to_string()
         })?;
+        if let Some(law) = self.joint_latent_law() {
+            // The value the trust region scores a trial on is the value of the
+            // frame whose gradient and Hessian proposed it: the anchor of the
+            // joint law, not the closed form (gam#2929).
+            let mut workspace = JointAnchorRowWorkspace::new(law);
+            return row_primary_anchored_vector_into(
+                row,
+                q_geom.q0,
+                q_geom.q1,
+                q_geom.qd1,
+                slope_workspace.values(),
+                z,
+                self.weights[row],
+                self.event[row],
+                self.derivative_guard,
+                probit_scale,
+                law,
+                &mut workspace,
+            );
+        }
         survival_marginal_slope_vector_neglog(
             row,
             q_geom.q0,

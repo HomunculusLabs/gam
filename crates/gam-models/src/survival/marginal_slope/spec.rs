@@ -151,6 +151,12 @@ pub struct SurvivalMarginalSlopeFitResult {
     pub fit: UnifiedFitResult,
     pub marginalspec_resolved: TermCollectionSpec,
     pub slopespec_resolved: TermCollectionSpec,
+    /// One frozen spec per slope surface when the slope is per-score (`K ≥ 2`
+    /// surfaces, one per latent-score column); `None` for a shared slope.
+    /// `slopespec_resolved` is their concatenation, which names the terms but
+    /// builds one intercept where the surfaces own one each, so it cannot
+    /// rebuild `slope_design`; these can, surface by surface (gam#2929).
+    pub slope_surface_specs: Option<Vec<TermCollectionSpec>>,
     pub marginal_design: TermCollectionDesign,
     /// Learned or fixed Gaussian-shift frailty SD.  `None` = no frailty.
     pub gaussian_frailty_sd: Option<f64>,
@@ -238,6 +244,13 @@ pub struct SurvivalMarginalSlopeFitResult {
     /// is a fit-time object with a refusal rather than a serialization — see
     /// [`Self::persisted_latent_z_calibrations`].
     pub conditional_score_covariance: Option<crate::bms::ConditionalScoreCovariance>,
+    /// The joint latent law of the score vector a `K ≥ 2` per-score fit anchored
+    /// its index on (gam#2929): the pooled whitened residual law and its
+    /// transport `μ + L(a)·ε`, with the conditional covariance inside it when the
+    /// gam#2766 gate escalated. Fit state prediction must replay, for the same
+    /// reason [`Self::latent_measure`] is; `None` whenever the fit ran the closed
+    /// form or a single score.
+    pub joint_latent_law: Option<SurvivalJointLatentLaw>,
     pub time_block_penalties_len: usize,
     pub time_wiggle_knots: Option<Array1<f64>>,
     pub time_wiggle_degree: Option<usize>,
@@ -299,7 +312,10 @@ impl SurvivalMarginalSlopeFitResult {
     /// arrives at save time with the reason attached rather than at load time as
     /// a shape mismatch.
     pub fn persistable_score_covariance(&self) -> Result<&Array2<f64>, String> {
-        if self.conditional_score_covariance.is_some() {
+        // On the joint-law path the conditional covariance is not a per-row `c(a)`
+        // the row program consumed: it is the transport of the joint law, and it
+        // travels inside that law (gam#2929).
+        if self.conditional_score_covariance.is_some() && self.joint_latent_law.is_none() {
             return Err(
                 "survival marginal-slope fit consumed a CONDITIONAL score covariance Σ(a) \
                  (gam#2766), and the saved-model contract carries only a single pooled matrix: \
