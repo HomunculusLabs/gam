@@ -772,7 +772,8 @@ struct SupportOuterDifferentialRow {
 /// `A v_j = mu_j B v_j` and `v_j^T B v_j = 1`.
 struct SupportOuterDensePencil {
     exact: Array2<f64>,
-    majorizer: Array2<f64>,
+    majorizer_eigenvectors: Array2<f64>,
+    majorizer_stiffness: Array1<f64>,
     curvatures: Array1<f64>,
     generalized_vectors: Array2<f64>,
     minimum_backward_error: f64,
@@ -3557,27 +3558,12 @@ impl SaeSupportSparseTerm {
         // The stored majorizer must be the one the eigenrelation was solved
         // against: the pseudoinverse builds its range right-hand side as `B v`
         // and certifies `A x` against it, so a `B` disagreeing with the
-        // whitening would fail that certificate by construction.
-        let mut stiffened_majorizer = Array2::<f64>::zeros((dim, dim));
-        for mode in 0..dim {
-            let stiffness = stiffened[mode];
-            for row in 0..dim {
-                let scaled = stiffness * b_eigenvectors[[row, mode]];
-                for column in 0..dim {
-                    stiffened_majorizer[[row, column]] +=
-                        scaled * b_eigenvectors[[column, mode]];
-                }
-            }
-        }
-        for row in 0..dim {
-            for column in 0..row {
-                let symmetric = 0.5
-                    * (stiffened_majorizer[[row, column]]
-                        + stiffened_majorizer[[column, row]]);
-                stiffened_majorizer[[row, column]] = symmetric;
-                stiffened_majorizer[[column, row]] = symmetric;
-            }
-        }
+        // whitening would fail that certificate by construction. The pencil
+        // keeps that `B = V·diag(s)·Vᵀ` as its eigenvectors `V` and the stiffness
+        // `s` the whitener used, and never forms it: the pseudoinverse only
+        // applies `B` to a vector, and the negative-mode classifier does not read
+        // it (#2634). Forming it was a scalar `dim³` loop, 1716 s of a single core
+        // at dim 7392.
         let mut whitened_exact = whitener.t().dot(&exact).dot(&whitener);
         for row in 0..dim {
             for column in 0..row {
@@ -3607,7 +3593,8 @@ impl SaeSupportSparseTerm {
         }
         Ok(SupportOuterDensePencil {
             exact,
-            majorizer: stiffened_majorizer,
+            majorizer_eigenvectors: b_eigenvectors,
+            majorizer_stiffness: Array1::from(stiffened),
             curvatures,
             generalized_vectors: whitener.dot(&curvature_vectors),
             minimum_backward_error,
@@ -3713,7 +3700,7 @@ impl SaeSupportSparseTerm {
                 .slice_mut(ndarray::s![t_len..])
                 .assign(&rhs.beta);
             let mut solution = Array1::<f64>::zeros(dim);
-            let mut range_rhs = Array1::<f64>::zeros(dim);
+            let mut range_direction = Array1::<f64>::zeros(dim);
             for mode in 0..dim {
                 let curvature = pencil.curvatures[mode];
                 if curvature <= quotient_floor {
@@ -3722,9 +3709,19 @@ impl SaeSupportSparseTerm {
                 let vector = pencil.generalized_vectors.column(mode);
                 let projection = vector.dot(&flat_rhs);
                 solution.scaled_add(projection / curvature, &vector);
-                let b_vector = pencil.majorizer.dot(&vector);
-                range_rhs.scaled_add(projection, &b_vector);
+                range_direction.scaled_add(projection, &vector);
             }
+            // `Σ_j (v_jᵀb)·B v_j = B·Σ_j (v_jᵀb)·v_j`, so the range right-hand side is
+            // one application of `B = V·diag(s)·Vᵀ`, `V·(s ⊙ (Vᵀ·w))`, per right-hand
+            // side: `O(dim²)`, with `B` never formed.
+            let mut majorizer_coordinates = gam_linalg::faer_ndarray::fast_atv(
+                &pencil.majorizer_eigenvectors,
+                &range_direction,
+            );
+            majorizer_coordinates
+                .zip_mut_with(&pencil.majorizer_stiffness, |value, &stiffness| *value *= stiffness);
+            let range_rhs =
+                gam_linalg::faer_ndarray::fast_av(&pencil.majorizer_eigenvectors, &majorizer_coordinates);
             let residual = &pencil.exact.dot(&solution) - &range_rhs;
             let residual_norm = residual.dot(&residual).sqrt();
             let range_norm = range_rhs.dot(&range_rhs).sqrt();
