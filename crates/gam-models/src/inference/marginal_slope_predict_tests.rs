@@ -470,3 +470,143 @@ fn conditional_latent_calibration_conditions_on_the_named_design_block() {
         "the refusal must name the width mismatch; got {wrong}"
     );
 }
+
+/// Under a declared empirical law the intercept root of a row with a small
+/// marginal probability sits at the log-sum-exp roundoff floor of its
+/// calibration residual — measured `3e-13` at `μ★ = 3e-6` and `1.7e-10` at the
+/// `1e-12` link clamp with `a ≈ −17.8` — and production prediction accepted a
+/// root only within the fit's `1e3·1e-13 = 1e-10`, so it refused such rows
+/// although the root was correct to every representable digit (gam#2932). Both
+/// production kernels must accept them: `final_eta_and_gradient_from_theta`,
+/// which `final_eta_from_theta` and the #1049 Laplace-draw path map every draw
+/// through, and `predict_eta_and_time_tangent`, which the survival
+/// marginal-slope prediction replays. Every row is predicted on its own so that
+/// every refusal is reported; each accepted root is checked against an
+/// independent bisection of `Σ wᵢ Φ(a + s·b·zᵢ) = μ★` in linear space; and
+/// wherever the fit's own tolerance is attainable the production row must carry
+/// the fit's root, so accepting the tail cannot move a moderate row.
+#[test]
+fn empirical_law_prediction_accepts_deep_tail_intercept_roots() {
+    // The 41-node heavy-tailed law the roundoff floors were measured on.
+    let nodes: Vec<f64> = (0..41).map(|i| -4.0 + 0.2 * i as f64).collect();
+    let raw: Vec<f64> = nodes
+        .iter()
+        .map(|&z| (1.0 + z * z / 4.0).powf(-3.0))
+        .collect();
+    let total: f64 = raw.iter().sum();
+    let grid = EmpiricalZGrid {
+        nodes,
+        weights: raw.iter().map(|w| w / total).collect(),
+    };
+    // Marginal indices from moderate rows down past the link clamp
+    // (`Φ(−7.5) ≈ 3e-14` is clamped to `μ★ = 1e-12`), each at slopes 0.5 to 3.1
+    // in steps of 0.1; on this law the clamp root reaches `a ≈ −17.8` near
+    // `b = 3`, where the floor was measured.
+    let marginal_indices = [
+        -0.5, -1.2, -2.3, -3.1, -4.15, -4.5, -5.2, -5.8, -6.4, -6.7, -7.03, -7.5,
+    ];
+    let slopes: Vec<f64> = (0..27).map(|i| 0.5 + 0.1 * i as f64).collect();
+    let z = 0.5;
+    let predictor = BernoulliMarginalSlopePredictor {
+        beta_marginal: array![1.0],
+        beta_slope: array![1.0],
+        beta_score_warp: None,
+        beta_link_dev: None,
+        base_link: InverseLink::Standard(gam_problem::types::StandardLink::Probit),
+        z_column: "z".to_string(),
+        latent_z_normalization: SavedLatentZNormalization { mean: 0.0, sd: 1.0 },
+        latent_measure: LatentMeasureKind::GlobalEmpirical { grid: grid.clone() },
+        baseline_marginal: 0.0,
+        baseline_slope: 0.0,
+        covariance: None,
+        score_warp_runtime: None,
+        link_deviation_runtime: None,
+        gaussian_frailty_sd: None,
+        latent_z_calibration: None,
+        latent_conditioning_span: LatentConditioningSpan::PrimaryDesign,
+        latent_z_conditional_calibration: None,
+    };
+    let theta = predictor.theta();
+    let scale = predictor.probit_frailty_scale();
+    let mut refusals = Vec::new();
+    let mut accepted = 0usize;
+    let mut worst_root_gap = 0.0_f64;
+    for &q in &marginal_indices {
+        for &b in &slopes {
+            let input = PredictInput {
+                design: DesignMatrix::from(Array2::from_elem((1, 1), q)),
+                offset: Array1::zeros(1),
+                design_noise: Some(DesignMatrix::from(Array2::from_elem((1, 1), b))),
+                offset_noise: Some(Array1::zeros(1)),
+                auxiliary_scalar: Some(Array1::from_elem(1, z)),
+                auxiliary_matrix: None,
+            };
+            let marginal = crate::bms::bernoulli_marginal_link_map(&predictor.base_link, q)
+                .expect("probit link map");
+            let target_mu = marginal.mu;
+            let production = predictor.final_eta_and_gradient_from_theta(&input, &theta, false);
+            let replay =
+                predictor.predict_eta_and_time_tangent(&input, &Array1::ones(1), &Array1::zeros(1));
+            let (eta, chain_eta) = match (production, replay) {
+                (Ok((eta, _)), Ok((chain_eta, _))) => (eta[0], chain_eta[0]),
+                (production, replay) => {
+                    let reason = [production.err(), replay.err()]
+                        .into_iter()
+                        .flatten()
+                        .map(|e| e.to_string())
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    eprintln!("[gam#2932] mu*={target_mu:.3e} b={b:.1}: REFUSED: {reason}");
+                    refusals.push(format!("mu*={target_mu:e}, b={b:.1}: {reason}"));
+                    continue;
+                }
+            };
+            accepted += 1;
+            let calibrated = |a: f64| -> f64 {
+                grid.nodes
+                    .iter()
+                    .zip(grid.weights.iter())
+                    .map(|(&node, &weight)| weight * normal_cdf(a + scale * b * node))
+                    .sum()
+            };
+            let (mut low, mut high) = (-80.0_f64, 20.0_f64);
+            for _ in 0..200 {
+                let mid = 0.5 * (low + high);
+                if calibrated(mid) < target_mu {
+                    low = mid;
+                } else {
+                    high = mid;
+                }
+            }
+            let reference_intercept = 0.5 * (low + high);
+            let intercept = eta - scale * b * z;
+            let root_gap = (intercept - reference_intercept).abs();
+            eprintln!(
+                "[gam#2932] mu*={target_mu:.3e} b={b:.1}: intercept {intercept:.12} vs bisection \
+                 {reference_intercept:.12} (|Δa| {root_gap:.2e})"
+            );
+            worst_root_gap = worst_root_gap.max(root_gap);
+            assert!(
+                root_gap <= 1e-11,
+                "mu*={target_mu:e}, b={b}: production intercept {intercept} is not the calibration \
+                 root {reference_intercept}"
+            );
+            assert!(
+                (chain_eta - eta).abs() <= 1e-12,
+                "mu*={target_mu:e}, b={b}: the time-tangent replay η {chain_eta} differs from the \
+                 production η {eta}"
+            );
+        }
+    }
+    let rows = marginal_indices.len() * slopes.len();
+    eprintln!(
+        "[gam#2932] {accepted} of {rows} rows predicted; worst |Δa| against bisection \
+         {worst_root_gap:.2e}"
+    );
+    assert!(
+        refusals.is_empty(),
+        "production prediction refused {} of {rows} deep-tail empirical-law rows:\n{}",
+        refusals.len(),
+        refusals.join("\n")
+    );
+}
