@@ -8,7 +8,6 @@ use crate::identifiability::{
     TriangularRootAccumulator,
 };
 use gam_linalg::faer_ndarray::FaerEigh;
-use gam_math::special::bessel_i0_centered_terms_from_log_abs;
 use super::fit_drivers::GaugeOrbitDescent;
 
 // ── The rank charge is a named criterion convention (#2933 F30–F32) ──────────
@@ -5282,70 +5281,40 @@ impl SaeManifoldTerm {
         let n_eff = n as f64;
         let mut acc = 0.0;
         for (atom_idx, coord) in self.assignment.coords.iter().enumerate() {
-            let d = coord.latent_dim();
             if rho.log_ard[atom_idx].is_empty() {
                 continue;
             }
             // Per-axis prior period selects the smooth von-Mises energy on
-            // wrapped (Circle) axes and the Gaussian on Euclidean axes. A
-            // quotient atom's half-turned axis carries its deck-invariant half
+            // wrapped (Circle) axes and the quadratic energy on every other axis.
+            // A quotient atom's half-turned axis carries its deck-invariant half
             // period, so this normalizer is over the quotient (#2933 F25).
             let periods = self.ard_axis_periods(atom_idx);
-            for axis in 0..d {
-                let log_alpha = rho.log_ard[atom_idx][axis];
-                let alpha = ard_precisions[atom_idx][axis];
-                let period = periods[axis];
+            // Negative-log prior for precision alpha: the data-dependent energy plus
+            // the per-row log partition of that energy over the coordinate's actual
+            // support (line, circle, interval or embedded sphere), paired with the
+            // Laplace constant `−½·log 2π` per integrated dimension that `½·log|A|`
+            // leaves out (#2933 F24, F26). See `Self::ard_log_partition`.
+            let supports = coord.effective_prior_supports();
+            let partition = Self::ard_log_partition(
+                &supports,
+                &periods,
+                rho.log_ard[atom_idx].view(),
+                ard_precisions[atom_idx].view(),
+            )?;
+            let mut axis = 0;
+            for (support, &log_partition) in supports.iter().zip(partition.per_factor.iter()) {
                 let mut energy = 0.0;
-                for row in 0..n {
-                    let w_row = row_w.map_or(1.0, |w| w[row]);
-                    let v = coord.row(row)[axis];
-                    energy += w_row * ArdAxisPrior::eval(alpha, v, period).value;
-                }
-                // Negative-log prior for precision alpha. The data-dependent
-                // energy is the (Gaussian or von-Mises) coordinate prior; the
-                // accompanying normaliser is the precision log-partition `log Z(α)`
-                // paired with the Laplace integration constant `−½·log 2π` of the
-                // coordinate it normalizes, which `½·log|A|` leaves out (#2933 F26).
-                // Every axis family enters the criterion in that one convention, so
-                // a periodic axis prices a concentrated prior exactly as a Euclidean
-                // axis does.
-                //
-                // Euclidean axes: `log Z = ½·log(2π/α)`, paired normaliser `-0.5 n log α`.
-                // Periodic (von-Mises) axes use the EXACT von-Mises precision
-                // log-partition `n[-η + log I0(η)]`, η = α/κ², κ = 2π/P, rather
-                // than the Gaussian surrogate: the von-Mises partition function
-                // is `2π I0(η)` (up to the κ Jacobian), so the per-observation
-                // normaliser is `-η + log I0(η)` and is exact across the cut.
-                match period {
-                    None => {
-                        acc += energy - 0.5 * n_eff * log_alpha;
-                    }
-                    Some(p) => {
-                        // Evaluate η = αP²/(2π)² in log space: both η and the
-                        // intermediate κ² can leave the float range even when
-                        // the centered log-partition remains representable.
-                        let log_eta = log_alpha + 2.0 * (p.ln() - std::f64::consts::TAU.ln());
-                        let centered_log_i0 = bessel_i0_centered_terms_from_log_abs(log_eta).0;
-                        // EXACT von-Mises precision log-partition. The partition over
-                        // one period is `Z(α) = ∫₀ᴾ exp[-V] dt = P·e^{-η}·I0(η)` (sub
-                        // `u=κt`, `dt = P/(2π) du`), so `log Z = log P − η + log I0(η)`.
-                        // The `log P` period-Jacobian was previously dropped: harmless
-                        // for unit-period axes (`P=1 ⇒ ln P = 0`, e.g. Circle{period:1}),
-                        // but it under-counts non-unit periodic axes (sphere longitude,
-                        // `P=2π`) by `n_eff·ln P` in the absolute prior evidence that
-                        // cross-topology/K model comparison consumes. `ln P` is
-                        // ρ-independent, so no inner gradient / FD channel is affected.
-                        //
-                        // #2933 F26 — `log Z → ½·log(2π/α)` as η → ∞, the Euclidean
-                        // partition. The Euclidean branch writes it with its `½·log 2π`
-                        // already paired against the coordinate's Laplace `−½·log 2π`;
-                        // this branch carried the full `log Z` unpaired, pricing every
-                        // periodic row `½·log 2π` (0.919 nats) above a Euclidean row at a
-                        // matched distribution. It is paired here the same way.
-                        acc += energy
-                            + n_eff * (p.ln() + centered_log_i0 - 0.5 * std::f64::consts::TAU.ln());
+                for factor_axis in axis..axis + support.ambient_axes() {
+                    let alpha = ard_precisions[atom_idx][factor_axis];
+                    let period = periods[factor_axis];
+                    for row in 0..n {
+                        let w_row = row_w.map_or(1.0, |w| w[row]);
+                        let v = coord.row(row)[factor_axis];
+                        energy += w_row * ArdAxisPrior::eval(alpha, v, period).value;
                     }
                 }
+                acc += energy + n_eff * log_partition;
+                axis += support.ambient_axes();
             }
         }
         Ok(acc)

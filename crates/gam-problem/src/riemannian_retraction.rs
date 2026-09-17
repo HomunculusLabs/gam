@@ -199,6 +199,11 @@ impl LatentRetractionRegistry {
         self.block.is_none()
     }
 
+    /// The installed override retraction, or `None` when every axis is Euclidean.
+    pub fn kind(&self) -> Option<&RetractionKind> {
+        self.block.as_ref()
+    }
+
     /// Whether the override retraction moves the point by the tangent step itself (see
     /// [`RetractionKind::adds_the_step`]). With no override installed this is `true`, and
     /// the caller's own latent manifold decides.

@@ -318,6 +318,8 @@ mod tests_sparse_curvature_operator_2500;
 mod tests_threshold_gate_majorizer_2520;
 #[cfg(test)]
 mod tests_deck_invariant_ard_prior_2933;
+#[cfg(test)]
+mod tests_ard_constrained_partition_2933;
 
 #[cfg(test)]
 mod tests_streaming_materialize_chunk_1801;

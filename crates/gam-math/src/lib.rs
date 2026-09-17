@@ -1,3 +1,4 @@
+pub mod constrained_partition;
 pub mod fast_channel;
 mod jet_algebra;
 pub mod jet_partitions;

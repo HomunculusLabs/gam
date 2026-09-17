@@ -66,6 +66,7 @@ use crate::basis::{BasisError, RadialScalarKind};
 use faer::Side;
 use gam_linalg::faer_ndarray::FaerEigh;
 use gam_problem::LatentRetractionRegistry;
+use gam_problem::riemannian_retraction::RetractionKind;
 use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2, ArrayView3};
 use std::sync::atomic::{AtomicU64, Ordering};
 const SPHERE_NORMAL_PIN: f64 = 1.0;
@@ -216,6 +217,51 @@ pub enum LatentManifold {
     },
 }
 
+/// The integration support of one factor of a coordinate prior.
+///
+/// A prior's partition function is an integral over the coordinate's actual
+/// support, so one quadratic energy normalizes differently on each support:
+/// `√(2π/α)` on the line, a von Mises Bessel expression on a circle, a truncated
+/// normal mass on an interval, and a Bingham surface integral on an embedded
+/// sphere. Periodicity ([`LatentManifold::axis_periods`]) cannot select among
+/// these, because an interval axis and a sphere axis are both non-periodic.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CoordinatePriorSupport {
+    /// One unconstrained real axis (Lebesgue measure on `R`).
+    Line,
+    /// One periodic axis (arc length on `[0, period)`).
+    Circle { period: f64 },
+    /// One bounded axis (Lebesgue measure on `[lo, hi]`).
+    Interval { lo: f64, hi: f64 },
+    /// `dim` ambient axes holding a unit vector (surface measure on `S^(dim-1)`).
+    Sphere { dim: usize },
+}
+
+impl CoordinatePriorSupport {
+    /// Number of ambient coordinate axes this factor spans.
+    pub fn ambient_axes(&self) -> usize {
+        match self {
+            Self::Sphere { dim } => *dim,
+            Self::Line | Self::Circle { .. } | Self::Interval { .. } => 1,
+        }
+    }
+
+    fn push_retraction_supports(kind: &RetractionKind, out: &mut Vec<Self>) {
+        match kind {
+            RetractionKind::Euclidean { dim } => out.extend(std::iter::repeat_n(Self::Line, *dim)),
+            RetractionKind::Circle => out.push(Self::Circle {
+                period: std::f64::consts::TAU,
+            }),
+            RetractionKind::Sphere { dim } => out.push(Self::Sphere { dim: *dim }),
+            RetractionKind::Product(product) => {
+                for part in &product.parts {
+                    Self::push_retraction_supports(part, out);
+                }
+            }
+        }
+    }
+}
+
 impl LatentManifold {
     pub fn is_euclidean(&self) -> bool {
         matches!(self, Self::Euclidean)
@@ -329,7 +375,9 @@ impl LatentManifold {
     /// Euclidean `½α t²` to a smooth von-Mises energy on periodic axes. The
     /// embedded `Sphere` is deliberately reported as non-periodic: its
     /// retraction `(t+ξ)/‖t+ξ‖` is globally smooth, so the ambient `½α‖t‖²`
-    /// prior has no discontinuity there.
+    /// prior has no discontinuity there. Periodicity selects only the energy;
+    /// the prior's normalizer depends on the support, which
+    /// [`Self::prior_supports`] reports.
     pub fn axis_periods(&self) -> Vec<Option<f64>> {
         match self {
             Self::Euclidean => vec![None],
@@ -355,6 +403,35 @@ impl LatentManifold {
                     out.extend(part.axis_periods());
                 }
                 out
+            }
+        }
+    }
+
+    /// Integration supports of the coordinate-prior factors, in ambient axis
+    /// order. Their [`CoordinatePriorSupport::ambient_axes`] tile the ambient
+    /// width. A top-level `Euclidean` is `R^latent_dim`, i.e. `latent_dim` lines;
+    /// inside a product it is one line.
+    pub fn prior_supports(&self, latent_dim: usize) -> Vec<CoordinatePriorSupport> {
+        let mut out = Vec::with_capacity(self.ambient_dim(latent_dim));
+        self.push_prior_supports(latent_dim, &mut out);
+        out
+    }
+
+    fn push_prior_supports(&self, fallback_dim: usize, out: &mut Vec<CoordinatePriorSupport>) {
+        match self {
+            Self::Euclidean => {
+                out.extend(std::iter::repeat_n(CoordinatePriorSupport::Line, fallback_dim));
+            }
+            Self::Circle { period } => out.push(CoordinatePriorSupport::Circle { period: *period }),
+            Self::Interval { lo, hi } => out.push(CoordinatePriorSupport::Interval { lo: *lo, hi: *hi }),
+            Self::Sphere { dim } => out.push(CoordinatePriorSupport::Sphere { dim: *dim }),
+            Self::Product(parts)
+            | Self::ProductWithMetric {
+                manifolds: parts, ..
+            } => {
+                for part in parts {
+                    part.push_prior_supports(1, out);
+                }
             }
         }
     }
@@ -1032,6 +1109,32 @@ impl LatentCoordValues {
         periods
     }
 
+    /// Effective coordinate-prior supports (see [`LatentManifold::prior_supports`]).
+    /// As for [`Self::effective_axis_periods`], a non-Euclidean declared manifold
+    /// is authoritative, and on a Euclidean one an explicit override retraction
+    /// (if any) decides. The factors tile `latent_dim` axes.
+    pub fn effective_prior_supports(&self) -> Vec<CoordinatePriorSupport> {
+        let supports = if self.manifold.is_euclidean() {
+            match self.retraction_registry.kind() {
+                Some(kind) => {
+                    let mut out = Vec::new();
+                    CoordinatePriorSupport::push_retraction_supports(kind, &mut out);
+                    out
+                }
+                None => vec![CoordinatePriorSupport::Line; self.latent_dim],
+            }
+        } else {
+            self.manifold.prior_supports(self.latent_dim)
+        };
+        let width: usize = supports.iter().map(CoordinatePriorSupport::ambient_axes).sum();
+        assert_eq!(
+            width, self.latent_dim,
+            "effective_prior_supports span {width} axes != latent_dim {}",
+            self.latent_dim
+        );
+        supports
+    }
+
     pub fn with_manifold(&self, manifold: LatentManifold) -> Self {
         Self::from_flat_with_manifold_and_retraction_and_id(
             self.values.clone(),
@@ -1509,6 +1612,48 @@ fn solve_spd(a: ArrayView2<'_, f64>, b: ArrayView2<'_, f64>) -> Result<Array2<f6
 mod tests {
     use super::*;
     use ndarray::array;
+
+    /// #2933 F24: the prior normalizer needs the support, which periodicity alone
+    /// cannot supply — an interval axis and a sphere axis are both non-periodic.
+    #[test]
+    fn prior_supports_separate_line_interval_circle_and_sphere() {
+        assert_eq!(
+            LatentManifold::Euclidean.prior_supports(3),
+            vec![CoordinatePriorSupport::Line; 3]
+        );
+        let sphere = LatentManifold::Sphere { dim: 3 };
+        assert_eq!(sphere.axis_periods(), vec![None; 3]);
+        assert_eq!(
+            sphere.prior_supports(3),
+            vec![CoordinatePriorSupport::Sphere { dim: 3 }]
+        );
+        let mobius = LatentManifold::Product(vec![
+            LatentManifold::Circle { period: 2.0 },
+            LatentManifold::Interval { lo: -1.0, hi: 1.0 },
+        ]);
+        assert_eq!(mobius.axis_periods(), vec![Some(2.0), None]);
+        assert_eq!(
+            mobius.prior_supports(2),
+            vec![
+                CoordinatePriorSupport::Circle { period: 2.0 },
+                CoordinatePriorSupport::Interval { lo: -1.0, hi: 1.0 },
+            ]
+        );
+        let patch = LatentManifold::ProductWithMetric {
+            manifolds: vec![LatentManifold::Euclidean, LatentManifold::Euclidean],
+            weights: vec![1.0, 1.0],
+        };
+        assert_eq!(patch.prior_supports(2), vec![CoordinatePriorSupport::Line; 2]);
+        let coords = LatentCoordValues::from_matrix_with_manifold(
+            array![[0.0_f64, 0.6, 0.8]].view(),
+            LatentIdMode::None,
+            sphere,
+        );
+        assert_eq!(
+            coords.effective_prior_supports(),
+            vec![CoordinatePriorSupport::Sphere { dim: 3 }]
+        );
+    }
 
     #[test]
     fn from_matrix_with_manifold_roundtrip() {

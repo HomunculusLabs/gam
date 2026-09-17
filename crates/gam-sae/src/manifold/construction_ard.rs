@@ -2,9 +2,144 @@
 //! helpers for `SaeManifoldTerm`, split out of `construction.rs` to keep that
 //! file under the 10k-line ban gate.
 use super::*;
+use gam_math::constrained_partition::{
+    bingham_sphere_log_partition_and_second_moments,
+    normal_interval_log_mass_and_log_precision_score,
+};
 use gam_math::special::bessel_i0_centered_terms_from_log_abs;
+use gam_terms::latent::CoordinatePriorSupport;
+
+/// Per-row log partition of one atom's ARD coordinate prior and its
+/// log-precision derivatives (see [`SaeManifoldTerm::ard_log_partition`]).
+pub(crate) struct ArdLogPartition {
+    /// One log partition per support factor, in axis order.
+    pub(crate) per_factor: Vec<f64>,
+    /// `∂/∂log α_axis` of the summed log partition, one entry per axis.
+    pub(crate) log_precision_gradient: Array1<f64>,
+}
 
 impl SaeManifoldTerm {
+    /// Per-row log partition of an atom's ARD coordinate prior over the
+    /// coordinate's actual support, with its log-precision derivatives.
+    ///
+    /// Each factor enters paired with the Laplace integration constant
+    /// `−½·log 2π` per integrated dimension, which `½·log|A|` leaves out
+    /// (#2933 F26):
+    ///
+    /// * a line axis: `−½ log α`, from the Gaussian `√(2π/α)`;
+    /// * a periodic axis: the von Mises partition `log P − η + log I0(η) − ½ log 2π`
+    ///   with `η = αP²/(2π)²`, where `P` is the PRIOR period `prior_periods` gives
+    ///   (a quotient atom's half-turned axis uses the half period, #2933 F25);
+    /// * an interval `[lo, hi]`: `−½ log α + log[Φ(hi√α) − Φ(lo√α)]`. The mass
+    ///   factor reaches one only as the interval covers the line. On `[−1, 1]` at
+    ///   `α = 1` the log-precision derivative is `−0.1456`, not the line's `−½`
+    ///   (#2933 F24).
+    /// * an embedded unit sphere `S^(d−1)` holding `d` axes: the Bingham partition
+    ///   of `Σ_a ½α_a x_a²` against the surface measure, less `((d−1)/2)·log 2π`,
+    ///   with `∂/∂log α_a = −½α_a·E[x_a²]`. Since `‖x‖ = 1`, adding one constant to
+    ///   every `α_a` leaves the normalized prior unchanged, and an isotropic
+    ///   precision carries no score. The three independent line normalizers this
+    ///   replaces scored `−1` per row at `α = 1` (#2933 F24).
+    pub(crate) fn ard_log_partition(
+        supports: &[CoordinatePriorSupport],
+        prior_periods: &[Option<f64>],
+        log_alpha: ndarray::ArrayView1<'_, f64>,
+        alpha: ndarray::ArrayView1<'_, f64>,
+    ) -> Result<ArdLogPartition, String> {
+        if prior_periods.len() != log_alpha.len() {
+            return Err(format!(
+                "ARD log partition: {} prior periods for {} ARD axes",
+                prior_periods.len(),
+                log_alpha.len()
+            ));
+        }
+        let mut per_factor = Vec::with_capacity(supports.len());
+        let mut log_precision_gradient = Array1::<f64>::zeros(log_alpha.len());
+        let mut axis = 0;
+        for support in supports {
+            let width = support.ambient_axes();
+            if axis + width > log_alpha.len() {
+                return Err(format!(
+                    "ARD log partition: support factors span more than the {} ARD axes",
+                    log_alpha.len()
+                ));
+            }
+            let periodic = matches!(support, CoordinatePriorSupport::Circle { .. });
+            if prior_periods[axis..axis + width].iter().any(|period| period.is_some() != periodic) {
+                return Err(format!(
+                    "ARD log partition: support {support:?} at axis {axis} disagrees with the \
+                     prior periods {:?}",
+                    &prior_periods[axis..axis + width]
+                ));
+            }
+            let log_partition = match *support {
+                CoordinatePriorSupport::Line => {
+                    log_precision_gradient[axis] = -0.5;
+                    -0.5 * log_alpha[axis]
+                }
+                CoordinatePriorSupport::Circle { .. } => {
+                    let Some(period) = prior_periods[axis] else {
+                        return Err(format!("ARD log partition: periodic axis {axis} has no prior period"));
+                    };
+                    // Evaluate η = αP²/(2π)² in log space: both η and the
+                    // intermediate κ² can leave the float range even when the
+                    // centered log-partition remains representable. The partition
+                    // over one period is `Z(α) = ∫₀ᴾ exp[-V] dt = P·e^{-η}·I0(η)`
+                    // (sub `u=κt`, `dt = P/(2π) du`), so `log Z = log P − η + log I0(η)`,
+                    // which tends to `½·log(2π/α)` as η → ∞ and is paired the way the
+                    // line's `½·log 2π` is. The constants are ρ-independent.
+                    let log_eta =
+                        log_alpha[axis] + 2.0 * (period.ln() - std::f64::consts::TAU.ln());
+                    let (centered_log_i0, _, scaled_derivative) =
+                        bessel_i0_centered_terms_from_log_abs(log_eta);
+                    // d/d(log α) of `-η + log I0(η)` is `η·(I1/I0−1)`. The centered
+                    // primitive evaluates the complete product, so its `−½` large-η
+                    // limit survives after the ordinary ratio has rounded to one and
+                    // even when η itself is not representable.
+                    log_precision_gradient[axis] = scaled_derivative;
+                    period.ln() + centered_log_i0 - 0.5 * std::f64::consts::TAU.ln()
+                }
+                CoordinatePriorSupport::Interval { lo, hi } => {
+                    let root = alpha[axis].sqrt();
+                    let (log_mass, score) =
+                        normal_interval_log_mass_and_log_precision_score(lo * root, hi * root)
+                            .map_err(|error| {
+                                format!(
+                                    "ARD interval log partition on [{lo}, {hi}] at precision {}: {error}",
+                                    alpha[axis]
+                                )
+                            })?;
+                    log_precision_gradient[axis] = -0.5 + score;
+                    -0.5 * log_alpha[axis] + log_mass
+                }
+                CoordinatePriorSupport::Sphere { dim } => {
+                    let lambda: Vec<f64> = (axis..axis + width).map(|a| 0.5 * alpha[a]).collect();
+                    let (log_z, second_moments) =
+                        bingham_sphere_log_partition_and_second_moments(&lambda)
+                            .map_err(|error| format!("ARD sphere log partition: {error}"))?;
+                    for (offset, (&energy_coefficient, &moment)) in
+                        lambda.iter().zip(second_moments.iter()).enumerate()
+                    {
+                        log_precision_gradient[axis + offset] = -energy_coefficient * moment;
+                    }
+                    log_z - 0.5 * (dim as f64 - 1.0) * std::f64::consts::TAU.ln()
+                }
+            };
+            per_factor.push(log_partition);
+            axis += width;
+        }
+        if axis != log_alpha.len() {
+            return Err(format!(
+                "ARD log partition: support factors span {axis} axes but the atom has {} ARD axes",
+                log_alpha.len()
+            ));
+        }
+        Ok(ArdLogPartition {
+            per_factor,
+            log_precision_gradient,
+        })
+    }
+
     /// Per-axis period of atom `atom`'s ARD coordinate prior: the kind's
     /// [`SaeAtomBasisKind::ard_axis_periods`] of the coordinate block's wrap
     /// periods, so a quotient atom's half-turned axis carries its deck-invariant
@@ -651,8 +786,15 @@ impl SaeManifoldTerm {
                 continue;
             }
             let periods = self.ard_axis_periods(atom_idx);
+            // The log partition over the coordinate's support; its derivative is
+            // the normalizer channel of `∂ ard_value/∂log α`.
+            let partition = Self::ard_log_partition(
+                &coord.effective_prior_supports(),
+                &periods,
+                rho.log_ard[atom_idx].view(),
+                ard_precisions[atom_idx].view(),
+            )?;
             for axis in 0..d {
-                let log_alpha = rho.log_ard[atom_idx][axis];
                 let alpha = ard_precisions[atom_idx][axis];
                 let period = periods[axis];
                 let mut energy_deriv = 0.0_f64;
@@ -661,19 +803,7 @@ impl SaeManifoldTerm {
                     let t = coord.row(row)[axis];
                     energy_deriv += w_row * ArdAxisPrior::eval(alpha, t, period).value;
                 }
-                let normalizer_deriv = match period {
-                    None => -0.5 * n_eff,
-                    Some(p) => {
-                        let log_eta = log_alpha + 2.0 * (p.ln() - std::f64::consts::TAU.ln());
-                        // d/d(log α) of `n[-η + log I0(η)]` is
-                        // `n·η·(I1/I0−1)`. The centered primitive evaluates the
-                        // complete product, so its `−½` large-η limit survives
-                        // after the ordinary ratio has rounded to one and even
-                        // when η itself is not representable.
-                        n_eff * bessel_i0_centered_terms_from_log_abs(log_eta).2
-                    }
-                };
-                atom_out[axis] = energy_deriv + normalizer_deriv;
+                atom_out[axis] = energy_deriv + n_eff * partition.log_precision_gradient[axis];
             }
             out.push(atom_out);
         }
