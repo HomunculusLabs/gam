@@ -1061,10 +1061,10 @@ pub(crate) struct ExactAReducedClassification {
     pub(crate) clamp_metric: Array2<f64>,
 }
 
-pub(crate) fn exact_a_reduced_classification(
+/// The installed exact-A carrier, checked against the system's row count.
+fn exact_a_geometry(
     sys: &ArrowSchurSystem,
-    htt_factors: &ArrowFactorSlab,
-) -> Result<Option<ExactAReducedClassification>, ArrowSchurError> {
+) -> Result<Option<&ExactAClassificationGeometry>, ArrowSchurError> {
     let Some(geometry) = sys.exact_a_classification.as_ref() else {
         return Ok(None);
     };
@@ -1077,66 +1077,118 @@ pub(crate) fn exact_a_reduced_classification(
             ),
         });
     }
+    Ok(Some(geometry))
+}
+
+/// #2828 — `delta_beta = A_ββ − B_ββ` materialized on the border, when installed.
+fn exact_a_border_remainder(
+    geometry: &ExactAClassificationGeometry,
+    k: usize,
+) -> Result<Option<Array2<f64>>, ArrowSchurError> {
+    let Some(remainder) = geometry.border_remainder.as_ref() else {
+        return Ok(None);
+    };
+    if remainder.dim() != k {
+        return Err(ArrowSchurError::SchurFactorFailed {
+            reason: format!(
+                "exact-A classification border remainder has width {} for border width {k}",
+                remainder.dim(),
+            ),
+        });
+    }
+    Ok(Some(remainder.to_dense()))
+}
+
+/// One row's operands on the exact-A Schur graph: `graph = −A_tt⁻¹A_tβ` (`q × k`), the
+/// materialized cross block `A_tβ`, and the majorizer blocks `B_tβ = A_tβ − ΔC_tβ` and
+/// `B_tt = A_tt − ΔC_tt`.
+struct ExactARowLift {
+    graph: Array2<f64>,
+    a_tbeta: Array2<f64>,
+    b_tbeta: Array2<f64>,
+    b_tt: Array2<f64>,
+}
+
+fn exact_a_row_lift(
+    sys: &ArrowSchurSystem,
+    htt_factors: &ArrowFactorSlab,
+    geometry: &ExactAClassificationGeometry,
+    row_idx: usize,
+) -> Result<ExactARowLift, ArrowSchurError> {
+    let k = sys.k;
+    let row = &sys.rows[row_idx];
+    let q = sys.row_dims[row_idx];
+    let operands = &geometry.rows[row_idx];
+    if operands.delta_tt.dim() != (q, q)
+        || operands.delta_tbeta.nrows() != q
+        || operands.delta_tbeta.ncols() != operands.border_columns.len()
+        || operands.clamp_diag.len() != q
+    {
+        return Err(ArrowSchurError::SchurFactorFailed {
+            reason: format!(
+                "exact-A classification row {row_idx} is incompatible with row width {q} and border width {k}",
+            ),
+        });
+    }
+    let a_tbeta = sys_htbeta_materialize_row(sys, row_idx, row)?;
+    let mut b_tbeta = a_tbeta.clone();
+    for (carrier_col, &system_col) in operands.border_columns.iter().enumerate() {
+        if system_col >= k {
+            return Err(ArrowSchurError::SchurFactorFailed {
+                reason: format!(
+                    "exact-A classification border index {system_col} exceeds width {k}",
+                ),
+            });
+        }
+        for local in 0..q {
+            b_tbeta[[local, system_col]] -= operands.delta_tbeta[[local, carrier_col]];
+        }
+    }
+    let b_tt = &row.htt - &operands.delta_tt;
+    let mut graph = Array2::<f64>::zeros((q, k));
+    for col in 0..k {
+        let solved = cholesky_solve_vector(htt_factors.factor(row_idx), a_tbeta.column(col));
+        for local in 0..q {
+            graph[[local, col]] = -solved[local];
+        }
+    }
+    Ok(ExactARowLift {
+        graph,
+        a_tbeta,
+        b_tbeta,
+        b_tt,
+    })
+}
+
+pub(crate) fn exact_a_reduced_classification(
+    sys: &ArrowSchurSystem,
+    htt_factors: &ArrowFactorSlab,
+) -> Result<Option<ExactAReducedClassification>, ArrowSchurError> {
+    let Some(geometry) = exact_a_geometry(sys)? else {
+        return Ok(None);
+    };
     let k = sys.k;
     let mut majorizer_metric = sys.effective_penalty_op().to_dense();
     let mut clamp_metric = Array2::<f64>::zeros((k, k));
     // #2828 — the shared block is `A_ββ = B_ββ + delta_beta`: the majorizer
     // metric is `B`'s, and `E_ββ = -delta_beta` is border clamp curvature.
-    if let Some(remainder) = geometry.border_remainder.as_ref() {
-        if remainder.dim() != k {
-            return Err(ArrowSchurError::SchurFactorFailed {
-                reason: format!(
-                    "exact-A classification border remainder has width {} for border width {k}",
-                    remainder.dim(),
-                ),
-            });
-        }
-        let remainder = remainder.to_dense();
+    if let Some(remainder) = exact_a_border_remainder(geometry, k)? {
         majorizer_metric -= &remainder;
         clamp_metric -= &remainder;
     }
-    for (row_idx, row) in sys.rows.iter().enumerate() {
-        let q = sys.row_dims[row_idx];
-        let operands = &geometry.rows[row_idx];
-        if operands.delta_tt.dim() != (q, q)
-            || operands.delta_tbeta.nrows() != q
-            || operands.delta_tbeta.ncols() != operands.border_columns.len()
-            || operands.clamp_diag.len() != q
-        {
-            return Err(ArrowSchurError::SchurFactorFailed {
-                reason: format!(
-                    "exact-A classification row {row_idx} is incompatible with row width {q} and border width {k}",
-                ),
-            });
-        }
-        let a_tbeta = sys_htbeta_materialize_row(sys, row_idx, row)?;
-        let mut b_tbeta = a_tbeta.clone();
-        for (carrier_col, &system_col) in operands.border_columns.iter().enumerate() {
-            if system_col >= k {
-                return Err(ArrowSchurError::SchurFactorFailed {
-                    reason: format!(
-                        "exact-A classification border index {system_col} exceeds width {k}",
-                    ),
-                });
-            }
-            for local in 0..q {
-                b_tbeta[[local, system_col]] -=
-                    operands.delta_tbeta[[local, carrier_col]];
-            }
-        }
-        let b_tt = &row.htt - &operands.delta_tt;
-        let mut graph = Array2::<f64>::zeros((q, k));
-        for col in 0..k {
-            let solved = cholesky_solve_vector(htt_factors.factor(row_idx), a_tbeta.column(col));
-            for local in 0..q {
-                graph[[local, col]] = -solved[local];
-            }
-        }
+    for row_idx in 0..sys.rows.len() {
+        let ExactARowLift {
+            graph,
+            b_tbeta,
+            b_tt,
+            ..
+        } = exact_a_row_lift(sys, htt_factors, geometry, row_idx)?;
         majorizer_metric += &graph.t().dot(&b_tt.dot(&graph));
         majorizer_metric += &graph.t().dot(&b_tbeta);
         majorizer_metric += &b_tbeta.t().dot(&graph);
-        let weighted_graph = Array2::from_shape_fn((q, k), |(local, col)| {
-            operands.clamp_diag[local] * graph[[local, col]]
+        let clamp_diag = &geometry.rows[row_idx].clamp_diag;
+        let weighted_graph = Array2::from_shape_fn(graph.dim(), |(local, col)| {
+            clamp_diag[local] * graph[[local, col]]
         });
         clamp_metric += &graph.t().dot(&weighted_graph);
     }
@@ -1144,6 +1196,182 @@ pub(crate) fn exact_a_reduced_classification(
         majorizer_metric,
         clamp_metric,
     }))
+}
+
+/// The operands of the exact-`A` pencil on the reduced border (#2933 F07).
+///
+/// A route that eliminates the coordinate block classifies the Ritz pencil of `(A, Φ)` on
+/// the `A`-lift `z(v) = (graph·v, v)`, `graph = −A_tt⁻¹A_tβ`, where `Φ` is the evidence
+/// factor of the majorizer `B_raw`: its rows are what the evidence row factorization
+/// returns for `B_tt`, gauge and spectral pins included, and its cross and border blocks
+/// are `B`'s. The four forms are `k × k`:
+///
+/// * `metric`: `Y = zᵀΦz`;
+/// * `substituted_metric`: `zᵀ(Φ − B_raw)z` over the rows' SPECTRAL pins, which raise the
+///   positive band edge ([`exact_a_band_edge`]). Gauge pins and the border quotient enter
+///   `Y` only. This route has no border spectral pin, so the border part is zero;
+/// * `clamp_metric`: `zᵀEz`, the clamp curvature the majorizer omits;
+/// * `lift_gram`: `I + Σ graphᵢᵀgraphᵢ`, so `‖z(v)‖² = vᵀ·lift_gram·v`.
+///
+/// With a border quotient `Q` installed the reduced operator is `P S_A P + QQᵀ`, so
+/// `metric` and `lift_gram` are pinned the same way and the other two forms are projected:
+/// a declared quotient direction reads `μ = 1` with no substituted stiffness.
+/// `joint_dimension` and the Frobenius norms of the unpinned joint `A`, `Φ` and `E` are
+/// the operands of [`exact_a_pencil_resolution`].
+#[derive(Debug, Clone)]
+pub struct ExactAReducedPencilOperands {
+    pub metric: Array2<f64>,
+    pub substituted_metric: Array2<f64>,
+    pub clamp_metric: Array2<f64>,
+    pub lift_gram: Array2<f64>,
+    pub joint_dimension: usize,
+    pub operator_frobenius: f64,
+    pub metric_frobenius: f64,
+    pub clamp_frobenius: f64,
+}
+
+/// [`ExactAReducedPencilOperands`] of an exact-`A` system, lifted through `htt_factors`,
+/// the row factors its reduced Schur is eliminated with. A system without the raw
+/// `B`/`ΔC`/clamp carrier is refused.
+pub fn exact_a_reduced_pencil_operands(
+    sys: &ArrowSchurSystem,
+    htt_factors: &ArrowFactorSlab,
+) -> Result<ExactAReducedPencilOperands, ArrowSchurError> {
+    let Some(geometry) = exact_a_geometry(sys)? else {
+        return Err(ArrowSchurError::SchurFactorFailed {
+            reason: "the exact-A reduced pencil requires the raw B/delta/clamp classification \
+                     carrier"
+                .to_string(),
+        });
+    };
+    let k = sys.k;
+    let frobenius_sq = |block: &Array2<f64>| block.iter().map(|value| value * value).sum::<f64>();
+    let exact_border = sys.effective_penalty_op().to_dense();
+    let mut operator_frobenius_sq = frobenius_sq(&exact_border);
+    let mut metric = exact_border;
+    let mut clamp_metric = Array2::<f64>::zeros((k, k));
+    let mut clamp_frobenius_sq = 0.0_f64;
+    if let Some(remainder) = exact_a_border_remainder(geometry, k)? {
+        metric -= &remainder;
+        clamp_metric -= &remainder;
+        clamp_frobenius_sq += frobenius_sq(&remainder);
+    }
+    let mut metric_frobenius_sq = frobenius_sq(&metric);
+    let mut substituted_metric = Array2::<f64>::zeros((k, k));
+    let mut lift_gram = Array2::<f64>::eye(k);
+    let mut joint_dimension = k;
+    for row_idx in 0..sys.rows.len() {
+        let q = sys.row_dims[row_idx];
+        let ExactARowLift {
+            graph,
+            a_tbeta,
+            b_tbeta,
+            b_tt,
+        } = exact_a_row_lift(sys, htt_factors, geometry, row_idx)?;
+        joint_dimension += q;
+        operator_frobenius_sq +=
+            frobenius_sq(&sys.rows[row_idx].htt) + 2.0 * frobenius_sq(&a_tbeta);
+        // The arguments `factor_blocks_for_system` factors a majorizer row with on the
+        // evidence path, so `Φ_tt = LLᵀ` carries exactly the pins the evidence factor does.
+        let pinned = factor_one_row_result(
+            &ArrowRowBlock {
+                htt: b_tt,
+                htbeta: Array2::<f64>::zeros((q, 0)),
+                gt: Array1::<f64>::zeros(q),
+            },
+            0.0,
+            q,
+            row_idx,
+            true,
+            sys.row_gauge_deflation
+                .as_ref()
+                .map_or(&[], |deflation| deflation.row(row_idx)),
+            true,
+            false,
+            None,
+        )?;
+        let metric_tt = pinned.factor.dot(&pinned.factor.t());
+        metric_frobenius_sq += frobenius_sq(&metric_tt) + 2.0 * frobenius_sq(&b_tbeta);
+        metric += &graph.t().dot(&metric_tt.dot(&graph));
+        metric += &graph.t().dot(&b_tbeta);
+        metric += &b_tbeta.t().dot(&graph);
+        if let Some(spectrum) = pinned.deflation_spectrum.as_ref() {
+            // `Φ_tt − B_tt = Σₘ (λ̃ₘ − λₘ) uₘuₘᵀ` on the spectral branch.
+            let mut substituted_tt = Array2::<f64>::zeros((q, q));
+            for mode in 0..spectrum.raw_evals.len() {
+                let shift = spectrum.cond_evals[mode] - spectrum.raw_evals[mode];
+                let direction = spectrum.evecs.column(mode);
+                for i in 0..q {
+                    for j in 0..q {
+                        substituted_tt[[i, j]] += shift * direction[i] * direction[j];
+                    }
+                }
+            }
+            substituted_metric += &graph.t().dot(&substituted_tt.dot(&graph));
+        }
+        lift_gram += &graph.t().dot(&graph);
+        let clamp_diag = &geometry.rows[row_idx].clamp_diag;
+        clamp_frobenius_sq += clamp_diag.iter().map(|value| value * value).sum::<f64>();
+        let weighted_graph = Array2::from_shape_fn(graph.dim(), |(local, col)| {
+            clamp_diag[local] * graph[[local, col]]
+        });
+        clamp_metric += &graph.t().dot(&weighted_graph);
+    }
+    if let Some(quotient) = sys.beta_gauge_quotient.as_ref() {
+        let project = |form: &Array2<f64>| {
+            let mut right = Array2::<f64>::zeros((k, k));
+            for column in 0..k {
+                right
+                    .column_mut(column)
+                    .assign(&quotient.project_complement(form.column(column)));
+            }
+            let mut both = Array2::<f64>::zeros((k, k));
+            for row in 0..k {
+                both.row_mut(row)
+                    .assign(&quotient.project_complement(right.row(row)));
+            }
+            both
+        };
+        let pin = |form: &Array2<f64>| {
+            let mut pinned = project(form);
+            for direction in quotient.directions.iter() {
+                for row in 0..k {
+                    for column in 0..k {
+                        pinned[[row, column]] += direction[row] * direction[column];
+                    }
+                }
+            }
+            pinned
+        };
+        metric = pin(&metric);
+        lift_gram = pin(&lift_gram);
+        substituted_metric = project(&substituted_metric);
+        clamp_metric = project(&clamp_metric);
+    }
+    for form in [
+        &mut metric,
+        &mut substituted_metric,
+        &mut clamp_metric,
+        &mut lift_gram,
+    ] {
+        for row in 0..k {
+            for column in (row + 1)..k {
+                let mean = 0.5 * (form[[row, column]] + form[[column, row]]);
+                form[[row, column]] = mean;
+                form[[column, row]] = mean;
+            }
+        }
+    }
+    Ok(ExactAReducedPencilOperands {
+        metric,
+        substituted_metric,
+        clamp_metric,
+        lift_gram,
+        joint_dimension,
+        operator_frobenius: operator_frobenius_sq.sqrt(),
+        metric_frobenius: metric_frobenius_sq.sqrt(),
+        clamp_frobenius: clamp_frobenius_sq.sqrt(),
+    })
 }
 
 /// Matrix-free scalar sibling of [`exact_a_reduced_classification`].
@@ -2332,6 +2560,13 @@ pub struct SurrogateLaneState {
     /// gradient.
     request_logdet_derivative_bundle: bool,
     logdet_derivative_bundle: Option<RationalLogdetDerivativeBundle>,
+    /// The band directions the most recent derivative bundle carries (#2933 F07): the
+    /// reduced-Schur directions the dense exact-A lane priced at the metric's own curvature
+    /// `μ̃ = 1`. Along each, the bundle contracts `wᵀ dS_A w` while the value's derivative is
+    /// `wᵀ dY w`, so the channel `Σ_band wᵀ(dY − dS_A)w` is missing from every derivative
+    /// taken off that bundle. Empty when the bundle came from any other lane, none of which
+    /// classifies a pencil.
+    logdet_derivative_band_directions: Vec<ReducedBandDirection>,
     /// The previous ρ's `S⁻¹ v_j` solves, kept as the CG warm-start for the next
     /// bundle solve. `S⁻¹` is smooth in ρ, so a neighbouring-ρ solution is a near
     /// seed (common-random-numbers reuse — the discipline that makes the
@@ -2351,6 +2586,7 @@ impl SurrogateLaneState {
             inverse_probes: None,
             request_logdet_derivative_bundle: false,
             logdet_derivative_bundle: None,
+            logdet_derivative_band_directions: Vec::new(),
             warm_inverse_probes: None,
         }
     }
@@ -2382,6 +2618,14 @@ impl SurrogateLaneState {
     pub fn request_logdet_derivative_bundle(&mut self) {
         self.request_logdet_derivative_bundle = true;
         self.logdet_derivative_bundle = None;
+        self.logdet_derivative_band_directions.clear();
+    }
+
+    /// The band directions the most recent derivative bundle carries at unit curvature,
+    /// along which its derivative is missing the channel `wᵀ(dY − dS_A)w` (#2933 F07). The
+    /// count is the slice's length; empty unless the dense exact-A lane emitted the bundle.
+    pub fn logdet_derivative_band_directions(&self) -> &[ReducedBandDirection] {
+        &self.logdet_derivative_band_directions
     }
 
     /// Consume the derivative representation produced by the most recent
@@ -2416,7 +2660,7 @@ pub fn matrix_free_arrow_evidence_log_det_surrogate(
     slq_seed: u64,
     lane: Option<&mut SurrogateLaneState>,
 ) -> Result<(f64, f64), ArrowSchurError> {
-    let (log_det_tt, log_det_schur, _factors, _clamp_basin) = matrix_free_arrow_evidence_log_det_surrogate_core(
+    let (log_det_tt, log_det_schur, _factors, _clamp_basin, _band) = matrix_free_arrow_evidence_log_det_surrogate_core(
         sys,
         ridge_t,
         ridge_beta,
@@ -2446,6 +2690,38 @@ pub struct MatrixFreeArrowEvidenceEvaluation {
     /// differentiates the value with the conditioning held fixed reads this to know
     /// whether it may (#2933 F27).
     pub exact_a_clamp_basin_directions: usize,
+    /// The reduced-Schur directions the dense exact-A lane priced at the metric's own
+    /// curvature: pencil directions inside their band edge and basin directions inside
+    /// their floor (#2933 F07). Empty on every other route, none of which classifies a
+    /// pencil.
+    pub exact_a_reduced_band_directions: Vec<ReducedBandDirection>,
+}
+
+/// Which spectrum of the dense exact-A lane a [`ReducedBandDirection`] came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReducedBandOrigin {
+    /// A pencil direction `S_A w = μ Y w` with `|μ|` at or under its band edge.
+    Pencil,
+    /// A direction of the priced basin `C = W_NᵀS_A W_N + W_NᵀE W_N` whose curvature lies
+    /// inside its floor once the clamp is restored.
+    Basin,
+}
+
+/// One reduced-Schur direction the dense exact-A lane priced at the metric's own
+/// curvature `μ̃ = 1` (#2933 F07), with the operands of its verdict.
+#[derive(Debug, Clone)]
+pub struct ReducedBandDirection {
+    /// The border direction `w`, normalized in the pencil metric: `wᵀYw = 1`.
+    pub direction: Array1<f64>,
+    /// `μ` for a pencil direction, the basin curvature `κ` for a basin direction.
+    pub curvature: f64,
+    /// The edge [`exact_a_band_edge`] returned, which `|curvature|` did not clear.
+    pub edge: f64,
+    /// The numerical resolution [`exact_a_pencil_resolution`] of `curvature`.
+    pub resolution: f64,
+    /// `s = wᵀ(Φ − B_raw)w` over the spectral pins; zero for a basin direction.
+    pub substituted_stiffness: f64,
+    pub origin: ReducedBandOrigin,
 }
 
 impl MatrixFreeArrowEvidenceEvaluation {
@@ -2485,8 +2761,13 @@ pub fn matrix_free_arrow_evidence_evaluation(
             ),
         });
     }
-    let (log_det_tt, log_det_schur, factorization, reduced_clamp_basin_directions) =
-        matrix_free_arrow_evidence_log_det_surrogate_core(
+    let (
+        log_det_tt,
+        log_det_schur,
+        factorization,
+        reduced_clamp_basin_directions,
+        exact_a_reduced_band_directions,
+    ) = matrix_free_arrow_evidence_log_det_surrogate_core(
             sys,
             ridge_t,
             ridge_beta,
@@ -2533,6 +2814,7 @@ pub fn matrix_free_arrow_evidence_evaluation(
         log_det_schur,
         factor_cache,
         exact_a_clamp_basin_directions,
+        exact_a_reduced_band_directions,
     })
 }
 
@@ -2546,7 +2828,16 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
     slq_seed: u64,
     lane: Option<&mut SurrogateLaneState>,
     dense_reduced_schur_admitted: bool,
-) -> Result<(f64, f64, ArrowBlockFactorization, Option<usize>), ArrowSchurError> {
+) -> Result<
+    (
+        f64,
+        f64,
+        ArrowBlockFactorization,
+        Option<usize>,
+        Vec<ReducedBandDirection>,
+    ),
+    ArrowSchurError,
+> {
     let backend = CpuBatchedBlockSolver;
     let factorization = factor_blocks_for_system(
         sys,
@@ -2590,8 +2881,11 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
     // inside its quadrature.  Build the low-rank Ritz correction once per
     // evaluation on the raw reduced operator, then install it on an
     // evaluation-local system clone consumed by every power/CG/value/derivative
-    // apply.  Plain-SPD lanes retain the original system exactly.
+    // apply.  Plain-SPD lanes retain the original system exactly. A lane the caller
+    // admits dense classifies every eigenvalue of the raw operator in its exact-A
+    // pencil, so the Ritz pass is the rational ladder's alone (#2933 F07).
     let rational_exact_a = lane.is_some()
+        && !dense_reduced_schur_admitted
         && matches!(
             options.evidence_policy,
             ArrowEvidencePolicy::UnitDeflationRefusingIndefinite { .. }
@@ -2664,6 +2958,7 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
     };
 
     let lane_present = lane.is_some();
+    let mut dense_pencil_verdict = None;
     let log_det_schur = match lane {
         None => {
             let slq = slq_reduced_schur_log_det(
@@ -2680,18 +2975,36 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
             );
             slq?.estimate
         }
-        Some(state) if dense_reduced_schur_admitted => dense_lane_reduced_schur_log_det(
-            sys,
-            classified_system.as_mut(),
-            &htt_factors,
-            ridge_beta,
-            &backend,
-            resident.as_ref(),
-            gpu_matvec,
-            slq_seed,
-            options.evidence_policy,
-            state,
-        )?,
+        Some(state) if dense_reduced_schur_admitted => {
+            if matches!(
+                options.evidence_policy,
+                ArrowEvidencePolicy::UnitDeflationRefusingIndefinite { .. }
+            ) {
+                let verdict = dense_lane_exact_a_pencil_log_det(
+                    sys,
+                    &htt_factors,
+                    ridge_beta,
+                    &backend,
+                    resident.as_ref(),
+                    gpu_matvec,
+                    state,
+                )?;
+                let log_det = verdict.log_det;
+                dense_pencil_verdict = Some(verdict);
+                log_det
+            } else {
+                dense_lane_reduced_schur_log_det(
+                    sys,
+                    &htt_factors,
+                    ridge_beta,
+                    &backend,
+                    resident.as_ref(),
+                    gpu_matvec,
+                    options.evidence_policy,
+                    state,
+                )?
+            }
+        }
         Some(state) => {
             let dim = sys.k;
             // (Re)build the frozen plan when absent or dimension-mismatched (a
@@ -2908,17 +3221,29 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
         }
     };
     // The reduced-Schur directions the shared exact-A classifier priced at their clamp
-    // basin, read off the conditioning both lane routes accumulate (its Ritz
-    // conditioning plus any missed bottom mode priced afterwards). The lane-free SLQ
-    // route classifies inside its quadrature and surfaces no verdict, so it reports none
-    // rather than a zero.
-    let reduced_clamp_basin_directions = lane_present.then(|| {
-        classified_system
-            .as_ref()
-            .and_then(|system| system.exact_a_reduced_conditioning.as_ref())
-            .map_or(0, |conditioning| conditioning.clamp_basin_directions)
-    });
-    Ok((log_det_tt, log_det_schur, factorization, reduced_clamp_basin_directions))
+    // basin. The dense exact-A lane counts them off its pencil; the rational lane reads
+    // them off the conditioning it accumulates (its Ritz conditioning plus any missed
+    // bottom mode priced afterwards). The lane-free SLQ route classifies inside its
+    // quadrature and surfaces no verdict, so it reports none rather than a zero.
+    let (reduced_clamp_basin_directions, reduced_band_directions) = match dense_pencil_verdict {
+        Some(verdict) => (Some(verdict.clamp_basin_directions), verdict.band_directions),
+        None => (
+            lane_present.then(|| {
+                classified_system
+                    .as_ref()
+                    .and_then(|system| system.exact_a_reduced_conditioning.as_ref())
+                    .map_or(0, |conditioning| conditioning.clamp_basin_directions)
+            }),
+            Vec::new(),
+        ),
+    };
+    Ok((
+        log_det_tt,
+        log_det_schur,
+        factorization,
+        reduced_clamp_basin_directions,
+        reduced_band_directions,
+    ))
 }
 
 /// #2731 — the host bytes a caller admits `dense_lane_reduced_schur_log_det` at, for
@@ -2930,11 +3255,34 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
 /// own internal storage is not bounded here, so two more blocks are reserved for it:
 /// the same six-block eigensystem workspace the support lane's dense eigensystems
 /// are admitted at. `None` when the byte count overflows `usize`.
+///
+/// This is the admission of the majorizer policies' lane. An evaluation under
+/// [`ArrowEvidencePolicy::UnitDeflationRefusingIndefinite`] takes the exact-A pencil lane
+/// instead, admitted at [`dense_lane_exact_a_pencil_peak_bytes`] (#2933 F07).
 pub fn dense_lane_reduced_schur_peak_bytes(k: usize) -> Option<usize> {
     const DENSE_LANE_BLOCKS: usize = 6;
     k.checked_mul(k)?
         .checked_mul(std::mem::size_of::<f64>())?
         .checked_mul(DENSE_LANE_BLOCKS)
+}
+
+/// #2933 F07 — the host bytes a caller admits `dense_lane_exact_a_pencil_log_det` at, the
+/// lane an evaluation under [`ArrowEvidencePolicy::UnitDeflationRefusingIndefinite`] takes
+/// when admitted, for a reduced Schur of dimension `k`. The lane holds its four pencil
+/// operands and the materialized operator, and frees each block once it is replaced: the
+/// metric once factored, the operator once whitened, the half-whitened product once
+/// whitened again. While it eigendecomposes, six `k × k` blocks own storage: the
+/// substituted, clamp and lift forms, the metric factor, the whitened operator and its
+/// eigenvectors. While it emits, at most five do: the pencil directions, the derivative
+/// bundle, the priced inverse, and the EFS probes with their inverse images. Two more
+/// blocks are reserved for the eigendecomposition's internal storage, as
+/// [`dense_lane_reduced_schur_peak_bytes`] reserves them. `None` when the byte count
+/// overflows `usize`.
+pub fn dense_lane_exact_a_pencil_peak_bytes(k: usize) -> Option<usize> {
+    const DENSE_PENCIL_LANE_BLOCKS: usize = 8;
+    k.checked_mul(k)?
+        .checked_mul(std::mem::size_of::<f64>())?
+        .checked_mul(DENSE_PENCIL_LANE_BLOCKS)
 }
 
 /// #2731 — the lane's reduced-Schur `log|S|` when the caller's memory planner
@@ -2947,13 +3295,12 @@ pub fn dense_lane_reduced_schur_peak_bytes(k: usize) -> Option<usize> {
 /// the value is one exact function of ρ, with no probe or quadrature error to
 /// hold fixed across the search.
 ///
-/// An operator that is not positive definite reaches the shared bottom-mode
-/// classifier exactly as a refused rational build does: a saddle is refused with
-/// the typed marker, a clamp basin or numerical null is priced into the
-/// conditioning and the block rebuilt, and an operator with no certified mode is
-/// refused with its spectrum. Jobs 578261 and 581909 (`p = 2048, charts = 32`,
-/// reduced Schur dim 288, a 0.63 MiB block) refused the criterion at the rational
-/// ladder's former rank ceiling 128.
+/// This lane serves the majorizer policies: an operator that is not positive definite
+/// and not unit-deflated is refused with its spectrum. Under the exact-A policy the lane
+/// classifies the raw operator in its pencil instead, in
+/// [`dense_lane_exact_a_pencil_log_det`] (#2933 F07). Jobs 578261 and 581909
+/// (`p = 2048, charts = 32`, reduced Schur dim 288, a 0.63 MiB block) refused the
+/// criterion at the rational ladder's former rank ceiling 128.
 ///
 /// Under [`ArrowEvidencePolicy::UnitDeflation`] the evidence operator is a PSD
 /// majorizer, so an eigenvalue under the policy's floor, negative ones included, is
@@ -2965,117 +3312,70 @@ pub fn dense_lane_reduced_schur_peak_bytes(k: usize) -> Option<usize> {
 /// spectrum `[-6.161538e-16, 2.584721e1]` (dim 24) before this.
 fn dense_lane_reduced_schur_log_det<B: BatchedBlockSolver + Sync>(
     sys: &ArrowSchurSystem,
-    mut classified: Option<&mut ArrowSchurSystem>,
     htt_factors: &ArrowFactorSlab,
     ridge_beta: f64,
     backend: &B,
     resident: Option<&SaeResidentReducedSchur>,
     gpu_matvec: Option<&GpuSchurMatvec>,
-    seed: u64,
     evidence_policy: ArrowEvidencePolicy,
     state: &mut SurrogateLaneState,
 ) -> Result<f64, ArrowSchurError> {
     let dim = sys.k;
-    let rel_tol = state.cfg.rel_tol;
-    let mut priced_missed_modes = 0usize;
-    let (eigenvalues, eigenvectors) = loop {
-        let mut schur = {
-            let op = ReducedSchurOperator::new(
-                classified.as_deref().unwrap_or(sys),
-                htt_factors,
-                ridge_beta,
-                backend,
-                resident,
-            )
-            .with_gpu_matvec(gpu_matvec);
-            let mut applied = Array2::<f64>::zeros((dim, dim));
-            let mut unit = Array1::<f64>::zeros(dim);
-            let mut image = Array1::<f64>::zeros(dim);
-            for column in 0..dim {
-                unit[column] = 1.0;
-                op.apply_into(&unit, &mut image);
-                unit[column] = 0.0;
-                applied.column_mut(column).assign(&image);
-            }
-            applied
-        };
-        for row in 0..dim {
-            for column in row + 1..dim {
-                let mean = 0.5 * (schur[[row, column]] + schur[[column, row]]);
-                schur[[row, column]] = mean;
-                schur[[column, row]] = mean;
-            }
-        }
-        if schur.iter().any(|value| !value.is_finite()) {
-            return Err(ArrowSchurError::SchurFactorFailed {
-                reason: format!("the dense lane reduced Schur (dim {dim}) has a non-finite entry"),
-            });
-        }
-        let (eigenvalues, eigenvectors) = match schur.eigh(Side::Lower) {
-            Ok(decomposition) => decomposition,
-            Err(error) => {
-                return Err(ArrowSchurError::SchurFactorFailed {
-                    reason: format!(
-                        "the dense lane reduced Schur (dim {dim}) did not eigendecompose: {error}"
-                    ),
-                });
-            }
-        };
-        if let ArrowEvidencePolicy::UnitDeflation { relative_floor } = evidence_policy {
-            let max_abs = eigenvalues
-                .iter()
-                .fold(0.0_f64, |acc, &lambda| acc.max(lambda.abs()));
-            if !(relative_floor.is_finite() && relative_floor > 0.0 && max_abs > 0.0) {
-                return Err(ArrowSchurError::SchurFactorFailed {
-                    reason: format!(
-                        "the dense lane reduced Schur (dim {dim}) cannot be unit-deflated: \
-                         relative floor {relative_floor:.3e}, spectral radius {max_abs:.3e}"
-                    ),
-                });
-            }
-            let floor = relative_floor * max_abs * (1.0 - SPECTRAL_DEFLATION_HYSTERESIS_FRACTION);
-            let conditioned = eigenvalues.mapv(|lambda| {
-                if lambda.is_finite() && lambda >= floor {
-                    lambda
-                } else {
-                    1.0
-                }
-            });
-            break (conditioned, eigenvectors);
-        }
-        if eigenvalues.iter().all(|&lambda| lambda > 0.0) {
-            break (eigenvalues, eigenvectors);
-        }
-        let priced = match classified.as_deref_mut() {
-            Some(conditioned) if priced_missed_modes < dim => price_certified_bottom_mode(
-                sys,
-                conditioned,
-                htt_factors,
-                ridge_beta,
-                backend,
-                resident,
-                gpu_matvec,
-                rel_tol,
-                dim,
-                seed,
-                evidence_policy,
-            )?,
-            _ => false,
-        };
-        if !priced {
-            let (lambda_min, lambda_max) = eigenvalues.iter().fold(
-                (f64::INFINITY, f64::NEG_INFINITY),
-                |(low, high), &lambda| (low.min(lambda), high.max(lambda)),
-            );
+    let schur = dense_lane_materialize_reduced_schur(
+        sys,
+        htt_factors,
+        ridge_beta,
+        backend,
+        resident,
+        gpu_matvec,
+    )?;
+    let (eigenvalues, eigenvectors) = match schur.eigh(Side::Lower) {
+        Ok(decomposition) => decomposition,
+        Err(error) => {
             return Err(ArrowSchurError::SchurFactorFailed {
                 reason: format!(
-                    "the dense lane reduced Schur is not positive definite, so log|S| is not \
-                     defined at this iterate: spectrum [{lambda_min:.6e}, {lambda_max:.6e}] \
-                     (dim {dim}), and no certified bottom mode was priced"
+                    "the dense lane reduced Schur (dim {dim}) did not eigendecompose: {error}"
                 ),
             });
         }
-        priced_missed_modes += 1;
+    };
+    drop(schur);
+    let eigenvalues = if let ArrowEvidencePolicy::UnitDeflation { relative_floor } =
+        evidence_policy
+    {
+        let max_abs = eigenvalues
+            .iter()
+            .fold(0.0_f64, |acc, &lambda| acc.max(lambda.abs()));
+        if !(relative_floor.is_finite() && relative_floor > 0.0 && max_abs > 0.0) {
+            return Err(ArrowSchurError::SchurFactorFailed {
+                reason: format!(
+                    "the dense lane reduced Schur (dim {dim}) cannot be unit-deflated: \
+                     relative floor {relative_floor:.3e}, spectral radius {max_abs:.3e}"
+                ),
+            });
+        }
+        let floor = relative_floor * max_abs * (1.0 - SPECTRAL_DEFLATION_HYSTERESIS_FRACTION);
+        eigenvalues.mapv(|lambda| {
+            if lambda.is_finite() && lambda >= floor {
+                lambda
+            } else {
+                1.0
+            }
+        })
+    } else if eigenvalues.iter().all(|&lambda| lambda > 0.0) {
+        eigenvalues
+    } else {
+        let (lambda_min, lambda_max) = eigenvalues.iter().fold(
+            (f64::INFINITY, f64::NEG_INFINITY),
+            |(low, high), &lambda| (low.min(lambda), high.max(lambda)),
+        );
+        return Err(ArrowSchurError::SchurFactorFailed {
+            reason: format!(
+                "the dense lane reduced Schur is not positive definite, so log|S| is not \
+                 defined at this iterate: spectrum [{lambda_min:.6e}, {lambda_max:.6e}] \
+                 (dim {dim})"
+            ),
+        });
     };
     let log_det = eigenvalues.iter().map(|&lambda| lambda.ln()).sum::<f64>();
     if !log_det.is_finite() {
@@ -3109,6 +3409,323 @@ fn dense_lane_reduced_schur_log_det<B: BatchedBlockSolver + Sync>(
         state.request_inverse_probes = false;
     }
     Ok(log_det)
+}
+
+/// The dense lane's materialized reduced operator: `k` applies of the operator `sys`
+/// represents, symmetrized (#2731).
+fn dense_lane_materialize_reduced_schur<B: BatchedBlockSolver + Sync>(
+    sys: &ArrowSchurSystem,
+    htt_factors: &ArrowFactorSlab,
+    ridge_beta: f64,
+    backend: &B,
+    resident: Option<&SaeResidentReducedSchur>,
+    gpu_matvec: Option<&GpuSchurMatvec>,
+) -> Result<Array2<f64>, ArrowSchurError> {
+    let dim = sys.k;
+    let op = ReducedSchurOperator::new(sys, htt_factors, ridge_beta, backend, resident)
+        .with_gpu_matvec(gpu_matvec);
+    let mut schur = Array2::<f64>::zeros((dim, dim));
+    let mut unit = Array1::<f64>::zeros(dim);
+    let mut image = Array1::<f64>::zeros(dim);
+    for column in 0..dim {
+        unit[column] = 1.0;
+        op.apply_into(&unit, &mut image);
+        unit[column] = 0.0;
+        schur.column_mut(column).assign(&image);
+    }
+    for row in 0..dim {
+        for column in row + 1..dim {
+            let mean = 0.5 * (schur[[row, column]] + schur[[column, row]]);
+            schur[[row, column]] = mean;
+            schur[[column, row]] = mean;
+        }
+    }
+    if schur.iter().any(|value| !value.is_finite()) {
+        return Err(ArrowSchurError::SchurFactorFailed {
+            reason: format!("the dense lane reduced Schur (dim {dim}) has a non-finite entry"),
+        });
+    }
+    Ok(schur)
+}
+
+/// What the dense exact-A lane priced: its value, the directions it priced at a clamp
+/// basin, and its band.
+struct DenseLanePencilVerdict {
+    log_det: f64,
+    clamp_basin_directions: usize,
+    band_directions: Vec<ReducedBandDirection>,
+}
+
+/// #2933 F07 — the dense lane's reduced-Schur `log|S_A|` under
+/// [`ArrowEvidencePolicy::UnitDeflationRefusingIndefinite`]. EVERY eigenvalue of the raw
+/// reduced exact-A operator is classified in the pencil `S_A w = μ Y w`, on the band the
+/// dense joint route classifies on, so no Krylov or Ritz pass decides a pin.
+///
+/// `Y`, the substituted form and the clamp form `E` are the Ritz forms of `(A, Φ)` on the
+/// `A`-lift, [`ExactAReducedPencilOperands`]. With `Y = LLᵀ` the lane diagonalizes
+/// `L⁻¹S_A L⁻ᵀ = UΛUᵀ`, so `W = L⁻ᵀU` satisfies `WᵀYW = I`. Once repeated eigenspaces
+/// are resolved against the substitution ([`canonicalize_exact_a_rank_clusters`]), each
+/// direction reads its edge [`exact_a_band_edge`] on its substituted stiffness
+/// `s = wᵀ(Φ − B_raw)w` and its resolution `τ` from the joint operands:
+///
+/// * `μ > edge` is retained;
+/// * `|μ| ≤ edge` is in the band, priced at the metric's own curvature `μ̃ = 1` and
+///   returned as a typed [`ReducedBandDirection`];
+/// * `μ < −edge` joins the negative subspace `W_N`, which is priced as a whole: the basin
+///   `C = diag(μ_N) + W_NᵀEW_N` is diagonalized, a basin curvature `κ` above its floor is
+///   priced, one inside it is in the band, and one below it refuses the evaluation with
+///   the typed indefinite-evidence marker.
+///
+/// The value is `log|Y| + Σ ln μ + Σ ln κ`, the log-determinant of the priced operator
+/// `S̃ = W⁻ᵀ diag(μ̃) W⁻¹`. With an empty band and no negative direction it is `log|S_A|`,
+/// since `det S_A = det Y · Π μ`. The derivative bundle carries `√(k/μ̃)·w`, so
+/// `(1/k) Σ x xᵀ = W diag(1/μ̃) Wᵀ = S̃⁻¹`. `W` is not orthonormal, so the EFS pairs are
+/// `(√k·eᵢ, S̃⁻¹·√k·eᵢ)`. Along a band direction the value's derivative is `wᵀ dY w`, a
+/// channel this crate has no `dY` for; the bundle contracts `wᵀ dS_A w` there, as a unit
+/// pin does on the other lanes.
+fn dense_lane_exact_a_pencil_log_det<B: BatchedBlockSolver + Sync>(
+    sys: &ArrowSchurSystem,
+    htt_factors: &ArrowFactorSlab,
+    ridge_beta: f64,
+    backend: &B,
+    resident: Option<&SaeResidentReducedSchur>,
+    gpu_matvec: Option<&GpuSchurMatvec>,
+    state: &mut SurrogateLaneState,
+) -> Result<DenseLanePencilVerdict, ArrowSchurError> {
+    let dim = sys.k;
+    let refusal = |reason: String| ArrowSchurError::SchurFactorFailed { reason };
+    let ExactAReducedPencilOperands {
+        metric,
+        substituted_metric,
+        clamp_metric,
+        lift_gram,
+        joint_dimension,
+        operator_frobenius,
+        metric_frobenius,
+        clamp_frobenius,
+    } = exact_a_reduced_pencil_operands(sys, htt_factors)?;
+    let schur = dense_lane_materialize_reduced_schur(
+        sys,
+        htt_factors,
+        ridge_beta,
+        backend,
+        resident,
+        gpu_matvec,
+    )?;
+    let lower = cholesky_lower(&metric).map_err(|reason| {
+        refusal(format!(
+            "the dense lane exact-A pencil metric (dim {dim}) is not positive definite: {reason}"
+        ))
+    })?;
+    drop(metric);
+    let metric_log_det = (0..dim)
+        .map(|axis| 2.0 * lower[[axis, axis]].ln())
+        .sum::<f64>();
+    let half = forward_substitution_lower_matrix(&lower, &schur);
+    drop(schur);
+    let mut whitened = forward_substitution_lower_matrix(&lower, half.t());
+    drop(half);
+    for row in 0..dim {
+        for column in (row + 1)..dim {
+            let mean = 0.5 * (whitened[[row, column]] + whitened[[column, row]]);
+            whitened[[row, column]] = mean;
+            whitened[[column, row]] = mean;
+        }
+    }
+    let (mut curvatures, rotation) = whitened.eigh(Side::Lower).map_err(|error| {
+        refusal(format!(
+            "the dense lane exact-A pencil (dim {dim}) did not eigendecompose: {error}"
+        ))
+    })?;
+    drop(whitened);
+    let mut directions = Array2::<f64>::zeros((dim, dim));
+    for column in 0..dim {
+        directions
+            .column_mut(column)
+            .assign(&gam_linalg::triangular::back_substitution_lower_transpose(
+                &lower,
+                rotation.column(column),
+            ));
+    }
+    drop(rotation);
+    drop(lower);
+    let spectral_norm = curvatures
+        .iter()
+        .fold(0.0_f64, |acc, &curvature| acc.max(curvature.abs()));
+    canonicalize_exact_a_rank_clusters(
+        &mut curvatures,
+        &mut directions,
+        spectral_norm,
+        &|direction| Ok(substituted_metric.dot(direction)),
+    )
+    .map_err(|reason| refusal(format!("the dense lane exact-A pencil (dim {dim}): {reason}")))?;
+
+    let mut priced = Array1::<f64>::ones(dim);
+    let mut log_det = metric_log_det;
+    let mut band_directions = Vec::new();
+    let mut negative = Vec::new();
+    let mut resolution_crossings = 0usize;
+    for index in 0..dim {
+        let curvature = curvatures[index];
+        let direction = directions.column(index);
+        let substituted = direction.dot(&substituted_metric.dot(&direction));
+        if !(curvature.is_finite() && substituted.is_finite()) {
+            return Err(refusal(format!(
+                "the dense lane exact-A pencil direction {index} (dim {dim}) has curvature \
+                 {curvature:e} and substituted stiffness {substituted:e}"
+            )));
+        }
+        // A direction whose pins lower curvature more than they raise it carries no
+        // substituted stiffness, so the total is clamped at zero.
+        let substituted_stiffness = substituted.max(0.0);
+        let resolution = exact_a_pencil_resolution(
+            joint_dimension,
+            direction.dot(&lift_gram.dot(&direction)),
+            operator_frobenius,
+            metric_frobenius,
+            curvature,
+        );
+        if curvature.abs() > exact_a_pencil_floor() && curvature.abs() <= resolution {
+            resolution_crossings += 1;
+        }
+        let edge = exact_a_band_edge(curvature, resolution, substituted_stiffness);
+        if curvature > edge {
+            priced[index] = curvature;
+            log_det += curvature.ln();
+        } else if curvature < -edge {
+            negative.push(index);
+        } else {
+            band_directions.push(ReducedBandDirection {
+                direction: direction.to_owned(),
+                curvature,
+                edge,
+                resolution,
+                substituted_stiffness,
+                origin: ReducedBandOrigin::Pencil,
+            });
+        }
+    }
+    drop(substituted_metric);
+
+    let mut clamp_basin_directions = 0usize;
+    if !negative.is_empty() {
+        let width = negative.len();
+        let basis = Array2::from_shape_fn((dim, width), |(row, column)| {
+            directions[[row, negative[column]]]
+        });
+        let mut basin = basis.t().dot(&clamp_metric.dot(&basis));
+        for (position, &index) in negative.iter().enumerate() {
+            basin[[position, position]] += curvatures[index];
+        }
+        for row in 0..width {
+            for column in (row + 1)..width {
+                let mean = 0.5 * (basin[[row, column]] + basin[[column, row]]);
+                basin[[row, column]] = mean;
+                basin[[column, row]] = mean;
+            }
+        }
+        let (basin_curvatures, basin_rotation) = basin.eigh(Side::Lower).map_err(|error| {
+            refusal(format!(
+                "the dense lane exact-A basin (width {width}) did not eigendecompose: {error}"
+            ))
+        })?;
+        let basin_directions = basis.dot(&basin_rotation);
+        let mut refused: Vec<(f64, f64)> = Vec::new();
+        for (position, &curvature) in basin_curvatures.iter().enumerate() {
+            let direction = basin_directions.column(position);
+            if !curvature.is_finite() {
+                return Err(refusal(format!(
+                    "the dense lane exact-A basin direction {position} (width {width}) has \
+                     curvature {curvature:e}"
+                )));
+            }
+            // `E` enters the basin at its own scale, so its norm joins the operator's in
+            // the resolution, as on the dense joint route.
+            let resolution = exact_a_pencil_resolution(
+                joint_dimension,
+                direction.dot(&lift_gram.dot(&direction)),
+                operator_frobenius + clamp_frobenius,
+                metric_frobenius,
+                curvature,
+            );
+            let edge = exact_a_band_edge(curvature, resolution, 0.0);
+            let index = negative[position];
+            directions.column_mut(index).assign(&direction);
+            if curvature < -edge {
+                refused.push((curvature, edge));
+            } else if curvature > edge {
+                priced[index] = curvature;
+                log_det += curvature.ln();
+                clamp_basin_directions += 1;
+            } else {
+                band_directions.push(ReducedBandDirection {
+                    direction: direction.to_owned(),
+                    curvature,
+                    edge,
+                    resolution,
+                    substituted_stiffness: 0.0,
+                    origin: ReducedBandOrigin::Basin,
+                });
+            }
+        }
+        if let Some(&(curvature, edge)) = refused.first() {
+            return Err(refusal(format!(
+                "the dense lane reduced Schur {}: {} of the {width} directions of its exact-A \
+                 pencil's negative subspace keep negative basin curvature once the clamp is \
+                 restored (most negative {curvature:.6e} against floor {edge:.6e}, dim {dim}); \
+                 the shared majorizer-metric classifier declares a genuine saddle (#2933 F07)",
+                ArrowSchurError::indefinite_evidence_marker(),
+                refused.len(),
+            )));
+        }
+    }
+    drop(clamp_metric);
+    drop(lift_gram);
+    if !log_det.is_finite() {
+        return Err(refusal(format!(
+            "the dense lane exact-A log|S_A| is non-finite (dim {dim})"
+        )));
+    }
+    if resolution_crossings > 0 {
+        log::warn!(
+            "[dense lane exact-A] numerical resolution limit: {resolution_crossings} of {dim} \
+             pencil directions clear √ε but not their own numerical resolution; the band \
+             prices them at the metric's curvature"
+        );
+    }
+    if state.request_logdet_derivative_bundle {
+        let bundle = RationalLogdetDerivativeBundle::from_positive_spectrum(&priced, &directions)
+            .ok_or_else(|| {
+                refusal(format!(
+                    "the dense lane exact-A log|S_A| derivative bundle is not representable: a \
+                     priced curvature's inverse square root is non-finite (dim {dim})"
+                ))
+            })?;
+        state.logdet_derivative_band_directions = band_directions.clone();
+        state.logdet_derivative_bundle = Some(bundle);
+        state.request_logdet_derivative_bundle = false;
+    }
+    if state.request_inverse_probes {
+        let scale = (dim as f64).sqrt();
+        let inverse = (&directions * &priced.mapv(f64::recip)).dot(&directions.t());
+        let probes: Vec<Array1<f64>> = (0..dim)
+            .map(|index| {
+                let mut probe = Array1::<f64>::zeros(dim);
+                probe[index] = scale;
+                probe
+            })
+            .collect();
+        let inverse_probes = (0..dim)
+            .map(|index| inverse.column(index).mapv(|value| value * scale))
+            .collect();
+        state.inverse_probes = Some((probes, inverse_probes));
+        state.request_inverse_probes = false;
+    }
+    Ok(DenseLanePencilVerdict {
+        log_det,
+        clamp_basin_directions,
+        band_directions,
+    })
 }
 
 /// #2731 — find and price ONE bottom mode of the conditioned rational exact-A

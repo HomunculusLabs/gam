@@ -88,6 +88,143 @@ pub(crate) fn classify_exact_a_direction(
     }
 }
 
+/// The null-band floor of the exact-`A` pencil `A w = μ Φ w`, in `μ` units (#2933 F07):
+/// `√ε`. The pencil is congruence-covariant, so the floor needs no operator scale. Its
+/// numerical resolution is the separate floor [`exact_a_pencil_resolution`].
+#[must_use]
+pub fn exact_a_pencil_floor() -> f64 {
+    f64::EPSILON.sqrt()
+}
+
+/// The numerical resolution of one computed pencil eigenvalue, in `μ` units (#2933 F07):
+///
+/// ```text
+///   τ = dim · ε · ‖w‖₂² · ( ‖A‖_F + |μ| · ‖Φ‖_F )
+/// ```
+///
+/// A backward-stable reduction returns the exact eigenpairs of a nearby pencil, and to
+/// first order a simple eigenvalue moves by `wᵀ(δA − μ δΦ)w`, which `τ` bounds. `‖w‖₂²`
+/// is where the working coordinates enter. A route that eliminates the coordinate block
+/// passes the joint dimension, `‖z‖²` of the `Φ`-normalized lift and the joint norms.
+#[must_use]
+pub fn exact_a_pencil_resolution(
+    dim: usize,
+    vector_norm_sq: f64,
+    operator_frobenius: f64,
+    metric_frobenius: f64,
+    curvature: f64,
+) -> f64 {
+    (dim as f64)
+        * f64::EPSILON
+        * vector_norm_sq
+        * (operator_frobenius + curvature.abs() * metric_frobenius)
+}
+
+/// The null-band edge on the side of one pencil direction's curvature (#2267, #2933 F07):
+///
+/// ```text
+///   floor = max( √ε , τ )
+///   μ ≤ 0:  floor
+///   μ > 0:  max( floor ,  s ),     s = wᵀ(Φ − B_raw)w
+/// ```
+///
+/// `s` is the part of the direction's unit metric the evidence factor's spectral pins
+/// substituted rather than measured. A positive direction whose exact curvature does not
+/// exceed `s` is resolved by the substitution alone, so the value prices it the way the
+/// factor prices the pin. The price is continuous across the edge only at a full pin,
+/// `s = 1`, where the edge is `μ = 1` and `ln μ = 0`. A direction crossing a partial pin's
+/// edge `s < 1` moves `log|A|` by `ln s`, and one crossing the bare floor by `ln √ε`: changes
+/// of stratum, which an outer search comparing values across them reads (#2933 F07; job
+/// 1163608, `a_band_edge_crossing_moves_the_value_by_the_log_of_its_edge_2933_f07`). The
+/// negative side keeps the bare floor: a resolved negative
+/// direction is a basin or saddle verdict (#2330/#2336), and a pin does not turn it into a
+/// null.
+///
+/// # One convention on every route
+///
+/// A state's directions are classified once, by the joint pencil `(A, Φ)` in `μ` units, so
+/// `√ε` needs no operator scale. A route that eliminates the coordinate block classifies the
+/// Ritz pencil of `(A, Φ)` on the `A`-lift `z(v) = (−A_tt⁻¹A_tβ v, v)`: curvature
+/// `vᵀS_A v = zᵀAz`, metric `zᵀΦz`, the same `√ε`, `s = zᵀ(Φ − B_raw)z`, and `τ` from the
+/// joint operands (the joint dimension, `‖z‖²` of the `Φ`-normalized lift, the joint `‖A‖_F`
+/// and `‖Φ‖_F`). On a joint null the lift is the eigenvector and the Ritz value is exact;
+/// elsewhere in the band the eigenvector's `t` part departs from the lift by `μ·A_tt⁻¹(Φw)_t`,
+/// so the two values differ at second order. A route whose own arithmetic resolves fewer
+/// digits than `τ` reports a resolution crossing rather than widening the shared floor.
+#[must_use]
+pub fn exact_a_band_edge(curvature: f64, resolution: f64, substituted_stiffness: f64) -> f64 {
+    let floor = exact_a_pencil_floor().max(resolution);
+    if curvature > 0.0 {
+        floor.max(substituted_stiffness)
+    } else {
+        floor
+    }
+}
+
+/// Resolve numerically repeated pencil eigenspaces against the substitution operator
+/// before the direction-dependent band edge is applied (#2267, #2933 F07). Every
+/// direction of a repeated eigenspace carries the same `μ`, but the positive edge also
+/// reads its substituted stiffness, so without this step an arbitrary rotation of the
+/// eigenspace could change which directions the band retains. A cluster is replaced by
+/// its mean within the arithmetic envelope `4γ‖μ‖`, `γ = nε/(1 − nε)`, which accounts for
+/// projection, its transpose product, eigendecomposition and lifting, so replacing it
+/// changes the pencil only within that envelope and distinct resolved eigenvalues keep
+/// their eigenvectors. The cluster is rotated to diagonalize the substitution restricted
+/// to it; the rotation is orthogonal, so it preserves `WᵀΦW = I`.
+pub fn canonicalize_exact_a_rank_clusters<B>(
+    values: &mut Array1<f64>,
+    vectors: &mut Array2<f64>,
+    spectral_norm: f64,
+    apply_edge: &B,
+) -> Result<(), String>
+where
+    B: Fn(&Array1<f64>) -> Result<Array1<f64>, String>,
+{
+    let n = vectors.nrows();
+    let gamma = n as f64 * f64::EPSILON / (1.0 - n as f64 * f64::EPSILON);
+    let envelope = 4.0 * gamma * spectral_norm;
+    let mut start = 0;
+    while start < values.len() {
+        let mut end = start + 1;
+        while end < values.len() && values[end] - values[start] <= envelope {
+            end += 1;
+        }
+        if end - start > 1 {
+            let block = vectors.slice(ndarray::s![.., start..end]).to_owned();
+            let width = end - start;
+            let mut restriction = Array2::zeros((width, width));
+            for col in 0..width {
+                let image = apply_edge(&block.column(col).to_owned())?;
+                if image.len() != n || image.iter().any(|x| !x.is_finite()) {
+                    return Err("exact-A cluster edge operator returned an invalid vector".into());
+                }
+                for row in 0..=col {
+                    let value = block.column(row).dot(&image);
+                    restriction[[row, col]] = value;
+                    restriction[[col, row]] = value;
+                }
+            }
+            let (_, rotation) = restriction
+                .eigh(Side::Lower)
+                .map_err(|e| format!("exact-A repeated-space edge decomposition: {e:?}"))?;
+            vectors
+                .slice_mut(ndarray::s![.., start..end])
+                .assign(&block.dot(&rotation));
+            let anchor = values[start];
+            let mean = anchor
+                + values
+                    .slice(ndarray::s![start..end])
+                    .iter()
+                    .map(|value| value - anchor)
+                    .sum::<f64>()
+                    / width as f64;
+            values.slice_mut(ndarray::s![start..end]).fill(mean);
+        }
+        start = end;
+    }
+    Ok(())
+}
+
 /// BA Schur solve variant for the reduced shared `β` system.
 ///
 /// * [`ArrowSolverMode::Direct`] is BA's dense reduced-camera-system solve:

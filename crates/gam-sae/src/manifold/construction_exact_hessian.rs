@@ -8,7 +8,9 @@
 
 /// The pencil floor for directions of the exact observed information `A = B_raw + ΔC`,
 /// in `μ` units (#2673, #2933 F07). ONE predicate for the value path and the gradient
-/// path alike (#2080 defect 4, #2253 x #2330).
+/// path alike (#2080 defect 4, #2253 x #2330). Its owner is gam-solve's
+/// [`gam_solve::arrow_schur::exact_a_pencil_floor`], which the reduced exact-A lane reads
+/// as well.
 ///
 /// `Φ = Φ(B_raw)` is the positive-definite evidence factor: the conditioned arrow
 /// majorizer the inner Newton solve, the IFT solve and the evidence factor are all
@@ -52,22 +54,14 @@
 /// per-direction floor, [`sae_exact_a_pencil_resolution`], reported separately when it
 /// binds: it can pin a direction whose digits were lost, never resolve one.
 pub(crate) fn sae_exact_a_pencil_floor() -> f64 {
-    f64::EPSILON.sqrt()
+    gam_solve::arrow_schur::exact_a_pencil_floor()
 }
 
-/// The numerical resolution of one computed pencil eigenvalue, in `μ` units
-/// (#2933 F07).
-///
-/// ```text
-///   τ = dim · ε · ‖w‖₂² · ( ‖A‖_F + |μ| · ‖Φ‖_F )
-/// ```
-///
-/// A backward-stable reduction returns the exact eigenpairs of a nearby pencil
-/// `(A + δA, Φ + δΦ)` with `‖δA‖₂ ≲ dim·ε·‖A‖₂` and `‖δΦ‖₂ ≲ dim·ε·‖Φ‖₂`, and to first
-/// order a simple eigenvalue moves by `wᵀ(δA − μ δΦ)w`, which `τ` bounds (a Frobenius norm
-/// bounds the spectral one). `‖w‖₂²` is where the working coordinates enter: the same
-/// pencil written in worse-conditioned coordinates resolves fewer digits of `μ`, and this
-/// floor pins the directions that lost them instead of classifying round-off.
+/// The numerical resolution of one computed pencil eigenvalue, in `μ` units (#2933 F07).
+/// Its owner is gam-solve's [`gam_solve::arrow_schur::exact_a_pencil_resolution`]:
+/// `‖w‖₂²` is where the working coordinates enter, so the same pencil written in
+/// worse-conditioned coordinates resolves fewer digits of `μ`, and this floor pins the
+/// directions that lost them instead of classifying round-off.
 pub(crate) fn sae_exact_a_pencil_resolution(
     dim: usize,
     vector_norm_sq: f64,
@@ -75,61 +69,37 @@ pub(crate) fn sae_exact_a_pencil_resolution(
     metric_frobenius: f64,
     curvature: f64,
 ) -> f64 {
-    (dim as f64)
-        * f64::EPSILON
-        * vector_norm_sq
-        * (operator_frobenius + curvature.abs() * metric_frobenius)
+    gam_solve::arrow_schur::exact_a_pencil_resolution(
+        dim,
+        vector_norm_sq,
+        operator_frobenius,
+        metric_frobenius,
+        curvature,
+    )
 }
 
 /// The null-band edge on the side of one pencil direction's curvature, for the dense
-/// and the matrix-free exact-`A` routes (#2267, #2933 F07), in `μ` units.
+/// and the matrix-free exact-`A` routes (#2267, #2933 F07), in `μ` units. Its owner is
+/// gam-solve's [`gam_solve::arrow_schur::exact_a_band_edge`], which also states the
+/// convention a route that eliminates the coordinate block classifies on.
 ///
-/// ```text
-///   floor = max( √ε , τ )
-///   μ ≤ 0:  floor
-///   μ > 0:  max( floor ,  s ),     s = wᵀ(Φ − B_raw)w
-/// ```
-///
-/// `τ` is [`sae_exact_a_pencil_resolution`]. Where the majorizer has no resolved
-/// curvature the evidence factor pins a direction at unit stiffness (`log 1 = 0`), and
-/// `s` is the part of the direction's unit metric that pin substituted rather than
-/// measured. A positive direction whose exact curvature does not exceed `s` is resolved
-/// by the substitution alone, so the value prices it the way the factor prices the pin.
-/// At a full pin the edge is `μ = 1`, where `½·ln μ = 0`: the price is continuous across
-/// it, where the bare floor put a step of `½·ln √ε ≈ −9` per direction.
-///
-/// Pool job 598561 (`sae_manifold_euclidean_k2_fit_terminates`) read that step. At
-/// one ρ, two evaluations whose loss differed by 1.8e-6 priced `½log|A|` at
-/// −3.630e3 (all 996 directions retained, the smallest at 1.457× its floor) and at
-/// +5.859e2 (480 in band, the largest at 0.614×), and the outer search's halvings
-/// compared values from both strata.
-///
-/// The negative side keeps the bare floor. A resolved negative direction is a basin
-/// or saddle verdict (#2330/#2336) that the #2080 descent reads, and a pin does not
-/// turn it into a null.
-///
-/// # One convention on every route
-///
-/// A state's directions are classified once, by the joint pencil `(A, Φ)` in `μ` units, so
-/// `√ε` needs no operator scale. A route that eliminates the coordinate block classifies the
-/// Ritz pencil of `(A, Φ)` on the `A`-lift `z(v) = (−A_tt⁻¹A_tβ v, v)`: curvature
-/// `vᵀS_A v = zᵀAz`, metric `zᵀΦz`, the same `√ε`, `s = zᵀ(Φ − B_raw)z`, and `τ` from the
-/// joint operands (the joint dimension, `‖z‖²` of the `Φ`-normalized lift, the joint `‖A‖_F`
-/// and `‖Φ‖_F`). On a joint null the lift is the eigenvector and the Ritz value is exact;
-/// elsewhere in the band the eigenvector's `t` part departs from the lift by `μ·A_tt⁻¹(Φw)_t`,
-/// so the two values differ at second order. A route whose own arithmetic resolves fewer
-/// digits than `τ` reports a resolution crossing rather than widening the shared floor.
+/// The price is continuous across the edge only at a full pin, `s = 1`, where the edge is
+/// `μ = 1` and `½·ln μ = 0`. A direction crossing a partial pin's edge `s < 1` moves
+/// `½log|A|` by `½·ln s`, and one crossing the bare floor by `½·ln √ε ≈ −9`: changes of
+/// stratum, which an outer search comparing values across them reads. Job 1163608 measured
+/// all three on the reduced lane (`a_band_edge_crossing_moves_the_value_by_the_log_of_its_edge_2933_f07`,
+/// jumps in `log|S|`): `1.221e-4 = ln(1 + step)` at `s = 1`, `−0.6930` against
+/// `ln 0.5 = −0.6931` at `s = 0.5`, and `−18.0217` against `ln √ε = −18.0218` at `s = 0`.
+/// Pool job 598561 (`sae_manifold_euclidean_k2_fit_terminates`) read the bare-floor step. At one ρ, two evaluations
+/// whose loss differed by 1.8e-6 priced `½log|A|` at −3.630e3 (all 996 directions
+/// retained, the smallest at 1.457× its floor) and at +5.859e2 (480 in band, the largest
+/// at 0.614×), and the outer search's halvings compared values from both strata.
 pub(crate) fn sae_exact_a_band_edge(
     curvature: f64,
     resolution: f64,
     substituted_stiffness: f64,
 ) -> f64 {
-    let floor = sae_exact_a_pencil_floor().max(resolution);
-    if curvature > 0.0 {
-        floor.max(substituted_stiffness)
-    } else {
-        floor
-    }
+    gam_solve::arrow_schur::exact_a_band_edge(curvature, resolution, substituted_stiffness)
 }
 
 /// One row's assembled `ΔC = A − B` blocks, in the arrow layout the streaming
@@ -8043,6 +8013,10 @@ mod tests_clamp_basin_deflation_2333;
 #[cfg(test)]
 #[path = "tests_residual_curvature_rows_2731.rs"]
 mod tests_residual_curvature_rows_2731;
+
+#[cfg(test)]
+#[path = "tests_reduced_pencil_operands_2933.rs"]
+mod tests_reduced_pencil_operands_2933;
 
 #[cfg(test)]
 #[path = "tests_pencil_classification_2933.rs"]

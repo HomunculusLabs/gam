@@ -1,16 +1,9 @@
 // Included by construction_exact_hessian.rs in the construction module.
 
 /// Resolve numerically repeated pencil eigenspaces against the substitution operator
-/// before applying the direction-dependent band edge (#2267, #2933 F07). Every direction
-/// of a repeated eigenspace carries the same `μ`, but the positive band edge also reads
-/// its substituted stiffness `wᵀ(Φ − B_raw)w`, so without this step an arbitrary rotation
-/// of the eigenspace can change which directions the band retains.
-///
-/// The cluster envelope accounts for projection, its transpose product,
-/// eigendecomposition, and lifting. Replacing a cluster by its mean changes the pencil
-/// only within that arithmetic envelope; distinct resolved eigenvalues keep their
-/// eigenvectors. The rotation is orthogonal, so it preserves `WᵀΦW = I`. Both
-/// representations use this same convention.
+/// before applying the direction-dependent band edge (#2267, #2933 F07). Its owner is
+/// gam-solve's [`gam_solve::arrow_schur::canonicalize_exact_a_rank_clusters`], the one
+/// convention the dense, Krylov and reduced exact-A routes apply.
 fn canonicalize_exact_a_rank_clusters<B>(
     values: &mut Array1<f64>,
     vectors: &mut Array2<f64>,
@@ -20,49 +13,12 @@ fn canonicalize_exact_a_rank_clusters<B>(
 where
     B: Fn(&Array1<f64>) -> Result<Array1<f64>, String>,
 {
-    let n = vectors.nrows();
-    let gamma = n as f64 * f64::EPSILON / (1.0 - n as f64 * f64::EPSILON);
-    let envelope = 4.0 * gamma * spectral_norm;
-    let mut start = 0;
-    while start < values.len() {
-        let mut end = start + 1;
-        while end < values.len() && values[end] - values[start] <= envelope {
-            end += 1;
-        }
-        if end - start > 1 {
-            let block = vectors.slice(s![.., start..end]).to_owned();
-            let width = end - start;
-            let mut restriction = Array2::zeros((width, width));
-            for col in 0..width {
-                let image = apply_edge(&block.column(col).to_owned())?;
-                if image.len() != n || image.iter().any(|x| !x.is_finite()) {
-                    return Err("exact-A cluster edge operator returned an invalid vector".into());
-                }
-                for row in 0..=col {
-                    let value = block.column(row).dot(&image);
-                    restriction[[row, col]] = value;
-                    restriction[[col, row]] = value;
-                }
-            }
-            let (_, rotation) = restriction
-                .eigh(Side::Lower)
-                .map_err(|e| format!("exact-A repeated-space edge decomposition: {e:?}"))?;
-            vectors
-                .slice_mut(s![.., start..end])
-                .assign(&block.dot(&rotation));
-            let anchor = values[start];
-            let mean = anchor
-                + values
-                    .slice(s![start..end])
-                    .iter()
-                    .map(|value| value - anchor)
-                    .sum::<f64>()
-                    / width as f64;
-            values.slice_mut(s![start..end]).fill(mean);
-        }
-        start = end;
-    }
-    Ok(())
+    gam_solve::arrow_schur::canonicalize_exact_a_rank_clusters(
+        values,
+        vectors,
+        spectral_norm,
+        apply_edge,
+    )
 }
 
 /// Covariant spectral pseudoinverse of the pencil `(A, Φ)`, with the dense route's band

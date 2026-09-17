@@ -110,6 +110,8 @@ mod system;
 #[cfg(test)]
 mod exact_a_clamp_basin_count_2933_tests;
 #[cfg(test)]
+mod exact_a_reduced_pencil_2933_tests;
+#[cfg(test)]
 mod exact_a_sparse_carrier_2933_tests;
 #[cfg(test)]
 mod negative_curvature_2731_tests;
