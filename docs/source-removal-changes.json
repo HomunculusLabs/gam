@@ -1205,6 +1205,15 @@
     "evidence": "At base f0b44f77ca the only consumers of the copy were cubic_cell_kernel.rs itself and bench/cargo_benches/bvn_large_scale_shape.rs, which now imports gam_math::bivariate_normal::bivariate_normal_cdf (git grep over crates, src, bench, tests and scripts). Gate job 1173202 (gx1) on base + patch db175183a866e2870748d6ed543bf1de: touch build.rs; cargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited RC_CHECK=0. source_removal_guard.py --base f0b44f77ca at lane commit f73b3f6d7b reported exactly these 16 identities. Lane sw2a job 1173203: cargo nextest run -p gam-model-kernels ran 94 tests, 94 passed."
   },
   {
+    "base": "c248e5218d32218dad1bd5e9cb251ab6c916d738",
+    "items": [
+      "crates/gam-sae/src/manifold/construction_quasi_laplace.rs:fn:refine_accepted_root",
+      "crates/gam-sae/src/manifold/construction_quasi_laplace.rs:fn:refine_evidence_root"
+    ],
+    "reason": "#2822 move, not deletion. With the gauge-projected root step, construction_quasi_laplace.rs reached 10234 lines, over the root build.rs #780 10k-line limit. So the #2228 root refinement moves to construction_evidence_root.rs, which construction_quasi_laplace.rs include!s at module level. An include!d file is the same module: both methods keep their names, their impl SaeManifoldTerm receiver, their signatures and their privacy, and no caller changes. refine_accepted_root moves verbatim. refine_evidence_root changes in this commit: its root step and its trial gate project the evidence factor's unit-stiffened row directions out.",
+    "evidence": "At base acdf183fe6, git grep -w over *.rs names these methods only in construction_quasi_laplace.rs. refine_accepted_root appears 9 times: its declaration (:3188), its error label (:3226), a comment (:1158) and six calls (:1160, :1478, :1757, :1786, :2048, :2137). refine_evidence_root appears 4 times: its declaration (:3040), its error label (:3052), a doc link (:3182) and its one call inside refine_accepted_root (:3206). After this commit the six calls and the comment stay in construction_quasi_laplace.rs, and the two declarations, the labels, the doc link and the inner call are in construction_evidence_root.rs. Gate gx1 1190972 on base acdf183fe6 + patch a5a4ea7307075d4aaf3a24e6fee52381: touch build.rs; cargo check --workspace --all-targets --exclude gam-pyffi --keep-going RC_CHECK=0, RC_PUBLIC_API=0. source_removal_guard.py reported exactly these two identities (private, not test-scoped, removed_declarations 1, production_occurrences 9 and 4)."
+  },
+  {
     "base": "fea430c0c45c5f04a70bd18410d47f8ab7197dac",
     "items": [
       "crates/gam-predict/src/affine_design.rs:fn:eta_gradient_matrix",
