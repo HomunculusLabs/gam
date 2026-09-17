@@ -1497,7 +1497,16 @@ pub(crate) fn assignment_prior_value_weighted(
                 temperature,
                 row_weights,
             )?;
-            penalty.value(target.view(), rho_view.view())
+            let energy = penalty.value(target.view(), rho_view.view());
+            // #2933 F45 — with a learnable concentration the prior is `exp(−L)`, a density over
+            // relaxed gates only with its partition `C(a_k, N)`. The fixed-concentration branch
+            // scores `λ_sparse·L`, whose normalizer is not computed, so it stays an
+            // unnormalized energy.
+            if penalty.learnable_alpha {
+                energy + penalty.log_partition(target.view(), rho_view.view())?.0
+            } else {
+                energy
+            }
         }
         AssignmentMode::ThresholdGate {
             temperature,
@@ -1577,6 +1586,7 @@ pub(crate) fn assignment_prior_log_strength_derivative_weighted(
             )?;
             if penalty.learnable_alpha {
                 penalty.grad_rho(target.view(), rho_view.view())[0]
+                    + penalty.log_partition(target.view(), rho_view.view())?.1[0]
             } else {
                 penalty.value(target.view(), rho_view.view())
             }
@@ -3148,6 +3158,233 @@ mod threshold_gate_partition_2933_tests {
         assert!(
             (derivative - difference).abs() <= 1.0e-7 * (1.0 + derivative.abs()),
             "log-strength derivative {derivative:.12e} vs central difference {difference:.12e}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod ordered_beta_bernoulli_partition_2933_tests {
+    //! #2933 F45 — with a learnable concentration the ordered Beta--Bernoulli prior `exp(−L)` is
+    //! a density over the relaxed gates only with its partition `C(a, N)`. Through the logit
+    //! change of variables the production prior value must integrate to one over the logits,
+    //! and its log-concentration derivative must have zero mean under that prior. Before the
+    //! partition the no-data mass of one gate was `C(α, 1)`: `0.1977`, `0.4263` and `0.3267` at
+    //! `α = 0.1, 1, 10`.
+    use super::*;
+
+    fn learnable_assignment(logits: Array2<f64>, temperature: f64) -> SaeAssignment {
+        let (n, k) = logits.dim();
+        SaeAssignment::from_blocks_with_mode_and_manifolds(
+            logits,
+            vec![Array2::<f64>::zeros((n, 1)); k],
+            vec![LatentManifold::Euclidean; k],
+            AssignmentMode::ordered_beta_bernoulli(temperature, 1.0, true),
+        )
+        .expect("one logit column, coordinate block and manifold per atom")
+    }
+
+    /// `ρ = ln α` against the unit base concentration.
+    fn concentration_rho(assignment: &SaeAssignment, alpha: f64) -> SaeManifoldRho {
+        SaeManifoldRho::new(alpha.ln(), 0.0, vec![Array1::zeros(1); assignment.k_atoms()])
+            .for_assignment(assignment.mode)
+    }
+
+    fn negative_log_prior(assignment: &SaeAssignment, rho: &SaeManifoldRho) -> f64 {
+        assignment_prior_value_weighted(assignment, rho, None).expect("admitted prior value")
+            + gate_logit_jacobian_value_weighted(assignment, None)
+    }
+
+    /// `Σ h·f(x)` over `x = ℓ/τ ∈ [−range, range]`. The integrand `q_a(σ(x))σ(x)σ(−x)/C` is
+    /// analytic in `|Im x| < π/2`, where `Re σ ∈ [0, 1]` keeps both Gamma arguments of `q_a` in
+    /// the right half-plane, and it decays like `e^{−|x|}/C`: at `h = 1/16`, `range = 60` (and
+    /// `h = 1/8`, `range = 40` per axis in two dimensions) the rule's error and the dropped tails
+    /// are far below the bars, which are set by rounding.
+    fn trapezoid(range: f64, h: f64, mut f: impl FnMut(f64) -> f64) -> f64 {
+        let count = (range / h).round() as i64;
+        (-count..=count).map(|i| h * f(i as f64 * h)).sum()
+    }
+
+    #[test]
+    fn learnable_ordered_beta_bernoulli_prior_integrates_to_one_over_its_logit_2933() {
+        for temperature in [0.5_f64, 1.7] {
+            let mut assignment = learnable_assignment(Array2::zeros((1, 1)), temperature);
+            for alpha in [0.1_f64, 1.0, 10.0] {
+                let rho = concentration_rho(&assignment, alpha);
+                let mass = temperature
+                    * trapezoid(60.0, 1.0 / 16.0, |x| {
+                        assignment.logits[[0, 0]] = temperature * x;
+                        (-negative_log_prior(&assignment, &rho)).exp()
+                    });
+                assert!(
+                    (mass - 1.0).abs() <= 1.0e-10,
+                    "learnable ordered Beta--Bernoulli prior at α={alpha}, τ={temperature} has \
+                     no-data mass {mass:.15e}, not one"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn learnable_log_concentration_derivative_has_zero_prior_mean_2933() {
+        for temperature in [0.5_f64, 1.7] {
+            let mut assignment = learnable_assignment(Array2::zeros((1, 1)), temperature);
+            for alpha in [0.1_f64, 1.0, 10.0] {
+                let rho = concentration_rho(&assignment, alpha);
+                let mean = temperature
+                    * trapezoid(60.0, 1.0 / 16.0, |x| {
+                        assignment.logits[[0, 0]] = temperature * x;
+                        let derivative =
+                            assignment_prior_log_strength_derivative_weighted(&assignment, &rho, None)
+                                .expect("admitted log-concentration derivative");
+                        derivative * (-negative_log_prior(&assignment, &rho)).exp()
+                    });
+                assert!(
+                    mean.abs() <= 1.0e-10 * (1.0 + alpha),
+                    "log-concentration derivative at α={alpha}, τ={temperature} has prior mean \
+                     {mean:.15e}, not zero"
+                );
+            }
+        }
+    }
+
+    /// Two rows share one column rate, so the prior does not factor over rows. The normalizer
+    /// the production value adds beyond the energy must not depend on the logits, and the
+    /// energy, that normalizer and the Jacobian must integrate to one over both logits.
+    #[test]
+    fn two_row_learnable_prior_integrates_to_one_over_its_logits_2933() {
+        let temperature = 0.8_f64;
+        for alpha in [0.5_f64, 1.7, 6.0] {
+            let mut assignment = learnable_assignment(Array2::zeros((2, 1)), temperature);
+            let rho = concentration_rho(&assignment, alpha);
+            let (penalty, rho_view) =
+                ordered_beta_bernoulli_prior_penalty(&assignment, &rho, 1.0, temperature, None)
+                    .expect("learnable ordered Beta--Bernoulli penalty");
+            let energy = |assignment: &SaeAssignment| {
+                penalty.value(flat_logits(assignment.logits.view()).view(), rho_view.view())
+            };
+            let normalizer = |assignment: &SaeAssignment| {
+                assignment_prior_value_weighted(assignment, &rho, None)
+                    .expect("admitted prior value")
+                    - energy(assignment)
+            };
+            let log_partition = normalizer(&assignment);
+            let mut moved = assignment.clone();
+            moved.logits[[0, 0]] = 1.3;
+            moved.logits[[1, 0]] = -2.1;
+            assert!(
+                (normalizer(&moved) - log_partition).abs() <= 1.0e-12 * (1.0 + log_partition.abs()),
+                "the prior normalizer must not depend on the logits: {} vs {log_partition}",
+                normalizer(&moved)
+            );
+            let h = 1.0 / 8.0;
+            let mut mass = 0.0;
+            let count = (40.0 / h) as i64;
+            for i in -count..=count {
+                assignment.logits[[0, 0]] = temperature * i as f64 * h;
+                for j in -count..=count {
+                    assignment.logits[[1, 0]] = temperature * j as f64 * h;
+                    let jacobian = gate_logit_jacobian_value_weighted(&assignment, None);
+                    mass += h * h * (-(energy(&assignment) + jacobian + log_partition)).exp();
+                }
+            }
+            mass *= temperature * temperature;
+            assert!(
+                (mass - 1.0).abs() <= 1.0e-10,
+                "two-row learnable ordered Beta--Bernoulli prior at α={alpha} has no-data mass \
+                 {mass:.15e}, not one"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod ordered_beta_bernoulli_partition_columns_2933_tests {
+    //! #2933 F45 — the learnable ordered Beta--Bernoulli normalizer is `Σ_k log C(a_k, N)` over
+    //! exactly the free columns at the effective row count `N = Σ w_i`, its log-concentration
+    //! derivative is a central difference of the value, and the fixed-concentration branch
+    //! (`λ_sparse·L`, whose normalizer is not computed) is left an unnormalized energy.
+    use super::*;
+    use gam_terms::analytic_penalties::ordered_beta_bernoulli_log_partition;
+    use ndarray::array;
+
+    #[test]
+    fn learnable_partition_follows_free_columns_and_effective_rows_2933() {
+        let logits = array![[1.1, -0.3, 0.6], [-1.8, 2.0, -0.2], [0.4, 0.9, -2.5]];
+        let weights = [0.5, 1.0, 2.0];
+        let temperature = 0.7_f64;
+        let alpha = 1.3_f64;
+        let mut assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
+            logits,
+            vec![Array2::<f64>::zeros((3, 1)); 3],
+            vec![LatentManifold::Euclidean; 3],
+            AssignmentMode::ordered_beta_bernoulli(temperature, 1.0, true),
+        )
+        .expect("one logit column, coordinate block and manifold per atom");
+        assignment.ungated = vec![false, true, false];
+        let rho = SaeManifoldRho::new(alpha.ln(), 0.0, vec![Array1::zeros(1); 3])
+            .for_assignment(assignment.mode);
+        let (penalty, rho_view) = ordered_beta_bernoulli_prior_penalty(
+            &assignment,
+            &rho,
+            1.0,
+            temperature,
+            Some(&weights),
+        )
+        .expect("learnable ordered Beta--Bernoulli penalty");
+        let target = flat_logits(assignment.logits.view());
+        let energy = penalty.value(target.view(), rho_view.view());
+        let value = assignment_prior_value_weighted(&assignment, &rho, Some(&weights))
+            .expect("admitted prior value");
+        let rows: f64 = weights.iter().sum();
+        let expected: f64 = [0usize, 2]
+            .iter()
+            .map(|&k| {
+                let mean = (alpha / (alpha + 1.0)).powi(k as i32 + 1);
+                ordered_beta_bernoulli_log_partition(mean / (1.0 - mean), rows)
+                    .expect("a, N > 0")
+                    .value
+            })
+            .sum();
+        assert!(
+            (value - energy - expected).abs() <= 1.0e-12 * (1.0 + expected.abs()),
+            "normalizer {} vs Σ over free columns of log C(a_k, {rows}) = {expected}",
+            value - energy
+        );
+        let h = 1.0e-4;
+        let shifted = |delta: f64| {
+            let mut moved = rho.clone();
+            moved.log_lambda_sparse += delta;
+            assignment_prior_value_weighted(&assignment, &moved, Some(&weights))
+                .expect("admitted prior value")
+        };
+        let difference = (shifted(h) - shifted(-h)) / (2.0 * h);
+        let derivative =
+            assignment_prior_log_strength_derivative_weighted(&assignment, &rho, Some(&weights))
+                .expect("admitted log-concentration derivative");
+        assert!(
+            (derivative - difference).abs() <= 1.0e-7 * (1.0 + derivative.abs()),
+            "log-concentration derivative {derivative:.12e} vs central difference \
+             {difference:.12e}"
+        );
+
+        let mut fixed = assignment.clone();
+        fixed.mode = AssignmentMode::ordered_beta_bernoulli(temperature, alpha, false);
+        let strength_rho = SaeManifoldRho::new(2.0_f64.ln(), 0.0, vec![Array1::zeros(1); 3])
+            .for_assignment(fixed.mode);
+        let (tempered, tempered_view) = ordered_beta_bernoulli_prior_penalty(
+            &fixed,
+            &strength_rho,
+            alpha,
+            temperature,
+            Some(&weights),
+        )
+        .expect("fixed ordered Beta--Bernoulli penalty");
+        assert_eq!(
+            assignment_prior_value_weighted(&fixed, &strength_rho, Some(&weights))
+                .expect("admitted prior value"),
+            tempered.value(target.view(), tempered_view.view()),
+            "the tempered fixed-concentration branch has no computed normalizer and must score \
+             only its energy"
         );
     }
 }

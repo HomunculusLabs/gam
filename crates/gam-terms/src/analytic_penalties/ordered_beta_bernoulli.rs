@@ -22,6 +22,14 @@ use statrs::function::gamma::{digamma, ln_gamma};
 /// channels below are all derivatives of this one integrated scalar.  Ordered
 /// shrinkage is scored here exactly once and is never multiplied into the
 /// reconstructed function as a second prior factor.
+///
+/// `exp(−L_k)` is a probability at binary gates, but it is not a density over the
+/// relaxed gates `z_ik ∈ (0, 1)`: its mass there is `C(a_k, N) < 1` and depends on
+/// `a_k` (#2933 F45). [`AnalyticPenalty::value`] is therefore the unnormalized
+/// energy, and [`Self::log_partition`] is its normalizer, so that
+/// `value + log_partition` is the normalized negative log prior of the untempered
+/// penalty. A tempered energy `weight·L` has a different normalizer that is not
+/// computed, and is refused there.
 #[derive(Debug, Clone)]
 pub struct OrderedBetaBernoulliPenalty {
     pub k_max: usize,
@@ -432,6 +440,64 @@ impl OrderedBetaBernoulliPenalty {
         }
         out
     }
+
+    /// `Σ_k log C(a_k, N)` over the free columns ([`ordered_beta_bernoulli_log_partition`]),
+    /// and its derivative in the learnable log concentration (empty when α is fixed).
+    ///
+    /// `N = Σ_i w_i` is the effective row count the integrated scalar already scores its
+    /// weighted active mass against. The partition depends on neither the logits nor the
+    /// gates, so the logit gradient, Hessian and third channels are unchanged by it. Only
+    /// the untempered energy has this normalizer, so a penalty whose `weight` is not one, or
+    /// that carries a weight schedule, is refused.
+    pub fn log_partition(
+        &self,
+        target: ArrayView1<'_, f64>,
+        rho: ArrayView1<'_, f64>,
+    ) -> Result<(f64, Array1<f64>), String> {
+        if self.weight != 1.0 || self.weight_schedule.is_some() {
+            return Err(format!(
+                "ordered Beta--Bernoulli log partition: the tempered energy weight·L (weight {}, \
+                 schedule {}) has no computed partition function; only the untempered prior is \
+                 normalized",
+                self.weight,
+                self.weight_schedule.is_some()
+            ));
+        }
+        assert_eq!(
+            target.len() % self.k_max,
+            0,
+            "ordered Beta--Bernoulli target length must be divisible by k_max"
+        );
+        let n = target.len() / self.k_max;
+        if let Some(weights) = self.row_weights.as_ref() {
+            assert_eq!(
+                weights.len(),
+                n,
+                "ordered Beta--Bernoulli row-weight length must equal the row count"
+            );
+        }
+        let n_eff: f64 = (0..n).map(|row| self.row_weight(row)).sum();
+        let alpha = self.resolved_alpha(rho);
+        let a_col = self.column_beta_shapes(alpha);
+        let mut value = 0.0;
+        let mut log_alpha_derivative = 0.0;
+        for k in 0..self.k_max {
+            if self.column_is_fixed(k) {
+                continue;
+            }
+            let partition = ordered_beta_bernoulli_log_partition(a_col[k], n_eff)?;
+            value += partition.value;
+            // `da_k/dρ = (k + 1)·a_k(a_k + 1)/(α + 1)` and the partition carries `a_k·∂_a log C`.
+            log_alpha_derivative += partition.log_shape_derivative * ((k + 1) as f64) * (a_col[k] + 1.0)
+                / (alpha + 1.0);
+        }
+        let rho_derivative = if self.learnable_alpha {
+            Array1::from_vec(vec![log_alpha_derivative])
+        } else {
+            Array1::zeros(0)
+        };
+        Ok((value, rho_derivative))
+    }
 }
 
 /// #2330 Patch D — ordered-Beta--Bernoulli prior curvature `∂ΔC_obb/∂ℓ`
@@ -667,4 +733,485 @@ impl AnalyticPenalty for OrderedBetaBernoulliPenalty {
 //
 // The local copies asserted `x > 0`; `gam_math` returns `NaN` off-domain
 // instead, which is the same contract the `gam-solve` copy already used.
-use gam_math::special::{tetragamma, trigamma};
+use gam_math::special::{gauss_legendre, log_exprel, tetragamma, trigamma};
+use std::f64::consts::LN_2;
+
+/// The log partition function of the relaxed ordered Beta--Bernoulli prior on one column; see
+/// [`ordered_beta_bernoulli_log_partition`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OrderedBetaBernoulliLogPartition {
+    /// `log C(a, N)`.
+    pub value: f64,
+    /// `a·∂_a log C(a, N)`.
+    pub log_shape_derivative: f64,
+}
+
+/// `ln ∫₀¹ π^z (1 − π)^{1−z} dz` at the rate `π = e^{−t}`, `t = e^τ`.
+///
+/// With `u = logit π = −ln expm1(t)` the mass is `(2π − 1)/u = tanh(u/2)/u`, at most `1/2`
+/// (at `t = ln 2`). `ln(tanh(x)/x)` has an absolute error of a few `ε` for every `x = |u|/2 > 0`.
+/// Once `t` overflows, `u = −t` to within `e^{−t}` and the logarithm is `−τ`.
+fn log_relaxed_gate_mass(tau: f64) -> f64 {
+    let t = tau.exp();
+    if t.is_infinite() {
+        return -tau;
+    }
+    let u = -(tau + log_exprel(t));
+    let x = 0.5 * u.abs();
+    if x == 0.0 {
+        -LN_2
+    } else {
+        (x.tanh() / x).ln() - LN_2
+    }
+}
+
+/// `d/dτ` of [`log_relaxed_gate_mass`]: `(1/sinh u − 1/u)·du/dτ`, with
+/// `du/dτ = −t/(1 − e^{−t}) = −1/exprel(−t)`, which is `−1` once `t` overflows.
+fn log_relaxed_gate_mass_slope(tau: f64) -> f64 {
+    let t = tau.exp();
+    if t.is_infinite() {
+        return -1.0;
+    }
+    let u = -(tau + log_exprel(t));
+    let log_mass_slope = if u == 0.0 {
+        0.0
+    } else {
+        u.sinh().recip() - u.recip()
+    };
+    -log_mass_slope * (-log_exprel(-t)).exp()
+}
+
+/// Gauss--Legendre order of each panel rule in [`ordered_beta_bernoulli_log_partition`].
+const LOG_PARTITION_PANEL_ORDER: usize = 16;
+
+/// Panel count at which [`ordered_beta_bernoulli_log_partition`] refuses instead of
+/// returning an unconverged value.
+const LOG_PARTITION_MAX_PANELS: usize = 1 << 12;
+
+/// One panel `[left, right]` of the partition integral, priced by the panel rule on the
+/// panel and on its two halves. The halves' sum is kept; the difference is its indicator.
+struct LogPartitionPanel {
+    left: f64,
+    right: f64,
+    mass: f64,
+    moment: f64,
+    mass_gap: f64,
+    moment_gap: f64,
+}
+
+/// `log C(a, N)` and `a·∂_a log C`: the log partition function of the relaxed ordered
+/// Beta--Bernoulli prior on one column with shape `a` and effective row count `N`.
+///
+/// #2933 F45. The integrated scalar is `exp(−L) = a·B(M + a, N − M + 1)
+/// = E_{π∼Beta(a,1)}[π^M (1 − π)^{N−M}]` with `M = Σ_i z_i`. At binary gates it sums to one;
+/// over relaxed gates `z ∈ (0, 1)^N` its mass factorizes over rows inside the rate integral,
+/// `∫₀¹ π^z (1 − π)^{1−z} dz = (2π − 1)/logit π =: g(π)`, so
+///
+/// ```text
+/// C(a, N) = ∫_{(0,1)^N} exp(−L) dz = E_{π∼Beta(a,1)}[g(π)^N] ≤ 2^{−N},
+/// ```
+///
+/// `0.197662`, `0.426278` and `0.326664` at `N = 1`, `a = 0.1, 1, 10`. The normalized negative
+/// log prior is `L + log C`, and the logit change of variables leaves the mass unchanged. A
+/// design-weighted scalar scores `M = Σ w_i z_i` against `N = Σ w_i`, the population it stands
+/// in for, and its partition is `C(a, N)` at that `N`.
+///
+/// Coordinates. With `π = e^{−t}`, `t ∼ Exp(a)`; with `w = ln(a·t)`,
+///
+/// ```text
+/// C(a, N) = ∫_ℝ exp(w − e^w)·G(e^{w − ln a})^N dw,   ln G(e^τ) = log_relaxed_gate_mass(τ),
+/// a·∂_a log C = a·(1/a + E[ln π]) = 1 − E[e^w],
+/// ```
+///
+/// where the expectation is under the normalized integrand. For every `a` in `(0, f64::MAX]`
+/// the whole integrand stays representable: the prior factor lives at `w = O(1)`, the peak of
+/// `G^N` at `w = ln(a·ln 2)`, and between them the integrand varies on unit scales in `w`.
+///
+/// Quadrature. The interval `[w_lo, w_hi]` is cut at the mode of the log integrand (found by
+/// bisection on its slope, which is `1` as `w → −∞` and `−∞` as `w → ∞`) and outward at widths
+/// `2^j/√(1 + N)`, so the first rules already sample the peak, whose width in `w` is of order
+/// `1/√N`. Each panel carries the 16-point rule on its two halves, with the difference from
+/// the whole-panel rule as its indicator. For an integrand analytic around a panel, halving
+/// the panel scales the rule's error by roughly `2^{−32}`, so indicators summing below `√ε` of
+/// the mass and of the moment `∫ e^w·integrand` leave errors far below `ε` of both. The panel
+/// with the largest relative indicator is bisected until then. With `G ≤ 1/2`, the tails are
+/// bounded by `2^{−N}e^{w_lo}` and `2^{−N}e^{2w_lo}` on the left and by `2^{−N}e^{−e^{w_hi}}`
+/// and `2^{−N}(1 + e^{w_hi})e^{−e^{w_hi}}` on the right; the interval is widened until each
+/// bound is below `ε` of the computed mass or moment. Exhausting
+/// [`LOG_PARTITION_MAX_PANELS`] is a refusal, not a value.
+pub fn ordered_beta_bernoulli_log_partition(
+    shape: f64,
+    rows: f64,
+) -> Result<OrderedBetaBernoulliLogPartition, String> {
+    if !(shape.is_finite() && shape > 0.0 && rows.is_finite() && rows > 0.0) {
+        return Err(format!(
+            "ordered Beta--Bernoulli log partition needs a finite positive shape and row count; \
+             got a={shape}, N={rows}"
+        ));
+    }
+    let log_shape = shape.ln();
+    let log_integrand = |w: f64| w - w.exp() + rows * log_relaxed_gate_mass(w - log_shape);
+    let slope = |w: f64| 1.0 - w.exp() + rows * log_relaxed_gate_mass_slope(w - log_shape);
+    let unbracketed = || {
+        format!(
+            "ordered Beta--Bernoulli log partition: no mode bracket for a={shape}, N={rows}"
+        )
+    };
+    let mut lower = -1.0_f64;
+    while !(slope(lower) > 0.0) {
+        lower *= 2.0;
+        if !lower.is_finite() {
+            return Err(unbracketed());
+        }
+    }
+    let mut upper = 1.0_f64;
+    while !(slope(upper) < 0.0) {
+        upper *= 2.0;
+        if !upper.is_finite() {
+            return Err(unbracketed());
+        }
+    }
+    loop {
+        let middle = 0.5 * (lower + upper);
+        if middle <= lower || middle >= upper {
+            break;
+        }
+        if slope(middle) > 0.0 {
+            lower = middle;
+        } else {
+            upper = middle;
+        }
+    }
+    let mode = 0.5 * (lower + upper);
+    let peak = log_integrand(mode);
+    let width = (1.0 + rows).sqrt().recip();
+    let (nodes, weights) = gauss_legendre(LOG_PARTITION_PANEL_ORDER);
+    // The integrand divided by its value at the mode, so no mass underflows as `N` grows.
+    let rule = |left: f64, right: f64| {
+        let centre = 0.5 * (left + right);
+        let half = 0.5 * (right - left);
+        let mut mass = 0.0;
+        let mut moment = 0.0;
+        for (node, weight) in nodes.iter().zip(&weights) {
+            let w = centre + half * node;
+            let f = (log_integrand(w) - peak).exp();
+            mass += weight * f;
+            moment += weight * w.exp() * f;
+        }
+        (half * mass, half * moment)
+    };
+    let priced = |left: f64, right: f64| -> Result<LogPartitionPanel, String> {
+        let middle = 0.5 * (left + right);
+        if !(middle > left && middle < right) {
+            return Err(format!(
+                "ordered Beta--Bernoulli log partition: panel [{left}, {right}] cannot be halved \
+                 for a={shape}, N={rows}"
+            ));
+        }
+        let (coarse_mass, coarse_moment) = rule(left, right);
+        let (left_mass, left_moment) = rule(left, middle);
+        let (right_mass, right_moment) = rule(middle, right);
+        let mass = left_mass + right_mass;
+        let moment = left_moment + right_moment;
+        Ok(LogPartitionPanel {
+            left,
+            right,
+            mass,
+            moment,
+            mass_gap: (coarse_mass - mass).abs(),
+            moment_gap: (coarse_moment - moment).abs(),
+        })
+    };
+    let integrate = |left: f64, right: f64| -> Result<(f64, f64), String> {
+        let mut cuts = vec![left, mode, right];
+        let mut step = width;
+        while mode - step > left {
+            cuts.push(mode - step);
+            step *= 2.0;
+        }
+        step = width;
+        while mode + step < right {
+            cuts.push(mode + step);
+            step *= 2.0;
+        }
+        cuts.sort_by(f64::total_cmp);
+        cuts.dedup();
+        let mut panels = cuts
+            .windows(2)
+            .map(|pair| priced(pair[0], pair[1]))
+            .collect::<Result<Vec<_>, _>>()?;
+        loop {
+            let mass: f64 = panels.iter().map(|panel| panel.mass).sum();
+            let moment: f64 = panels.iter().map(|panel| panel.moment).sum();
+            let mass_gap: f64 = panels.iter().map(|panel| panel.mass_gap).sum();
+            let moment_gap: f64 = panels.iter().map(|panel| panel.moment_gap).sum();
+            if !(mass > 0.0 && moment > 0.0 && mass.is_finite() && moment.is_finite()) {
+                return Err(format!(
+                    "ordered Beta--Bernoulli log partition: non-positive or non-finite mass \
+                     {mass} / moment {moment} for a={shape}, N={rows}"
+                ));
+            }
+            let tolerance = f64::EPSILON.sqrt();
+            if mass_gap <= tolerance * mass && moment_gap <= tolerance * moment {
+                return Ok((mass, moment));
+            }
+            if panels.len() >= LOG_PARTITION_MAX_PANELS {
+                return Err(format!(
+                    "ordered Beta--Bernoulli log partition did not converge within \
+                     {LOG_PARTITION_MAX_PANELS} panels for a={shape}, N={rows}: relative \
+                     indicators {:.3e} (mass), {:.3e} (moment)",
+                    mass_gap / mass,
+                    moment_gap / moment
+                ));
+            }
+            let indicator =
+                |panel: &LogPartitionPanel| panel.mass_gap / mass + panel.moment_gap / moment;
+            let mut worst = 0;
+            for (index, panel) in panels.iter().enumerate() {
+                if indicator(panel) > indicator(&panels[worst]) {
+                    worst = index;
+                }
+            }
+            let panel = panels.swap_remove(worst);
+            let middle = 0.5 * (panel.left + panel.right);
+            panels.push(priced(panel.left, middle)?);
+            panels.push(priced(middle, panel.right)?);
+        }
+    };
+    let log_epsilon = f64::EPSILON.ln();
+    let log_mass_ceiling = -rows * LN_2;
+    let mut left = mode - width;
+    let mut right = mode + width;
+    loop {
+        let (mass, moment) = integrate(left, right)?;
+        let log_mass = mass.ln() + peak;
+        let log_moment = moment.ln() + peak;
+        let need_left = (log_epsilon + log_mass - log_mass_ceiling)
+            .min(0.5 * (log_epsilon + log_moment - log_mass_ceiling));
+        let reach = (-log_epsilon + log_mass_ceiling - log_mass.min(log_moment)).max(0.0);
+        let need_right = (reach + reach.ln_1p() + 1.0).ln();
+        if !(need_left.is_finite() && need_right.is_finite()) {
+            return Err(format!(
+                "ordered Beta--Bernoulli log partition: tail bound is not finite for a={shape}, \
+                 N={rows}"
+            ));
+        }
+        if left <= need_left && right >= need_right {
+            return Ok(OrderedBetaBernoulliLogPartition {
+                value: log_mass,
+                log_shape_derivative: 1.0 - moment / mass,
+            });
+        }
+        // Widening only adds mass, so the bounds recomputed on the wider interval are no
+        // tighter; the extra `width` keeps rounding in the totals from asking again.
+        left = left.min(need_left - width);
+        right = right.max(need_right + width);
+    }
+}
+
+#[cfg(test)]
+mod log_partition_2933_tests {
+    //! #2933 F45 — the relaxed ordered Beta--Bernoulli energy `L` has mass `C(a, N)` over the
+    //! relaxed gates, and `L + log C` must integrate to one. These pin the production partition
+    //! against integrals it does not share: tensor Gauss--Legendre over the gates of the
+    //! production energy (`N ≤ 2`), the audit's independent values, a rate-space integral at
+    //! larger `N`, and the closed-form leading behaviour at extreme shapes.
+    use super::*;
+
+    /// `∫_{(0,1)^dim} f` by tensor Gauss--Legendre of order `order`.
+    fn legendre_cube(order: usize, dim: usize, mut f: impl FnMut(&[f64]) -> f64) -> f64 {
+        let (nodes, weights) = gauss_legendre(order);
+        let mut index = vec![0usize; dim];
+        let mut point = vec![0.0; dim];
+        let mut total = 0.0;
+        loop {
+            let mut weight = 1.0;
+            for axis in 0..dim {
+                point[axis] = 0.5 * (nodes[index[axis]] + 1.0);
+                weight *= 0.5 * weights[index[axis]];
+            }
+            total += weight * f(&point);
+            let mut axis = 0;
+            loop {
+                if axis == dim {
+                    return total;
+                }
+                index[axis] += 1;
+                if index[axis] < order {
+                    break;
+                }
+                index[axis] = 0;
+                axis += 1;
+            }
+        }
+    }
+
+    fn logit(z: f64) -> f64 {
+        (z / (1.0 - z)).ln()
+    }
+
+    /// The production energy of one row-major `(N, K)` gate matrix at unit temperature.
+    fn energy(penalty: &OrderedBetaBernoulliPenalty, gates: &[f64], rho: &[f64]) -> f64 {
+        let target = Array1::from_iter(gates.iter().map(|&z| logit(z)));
+        penalty.value(target.view(), ArrayView1::from(rho))
+    }
+
+    #[test]
+    fn relaxed_mass_matches_the_audit_and_gate_space_integrals_2933() {
+        // Audit §12 check 34 (Gauss--Legendre orders 128 and 256 over z, independently).
+        for (shape, audit) in [(0.1, 0.197661809898), (1.0, 0.426278398818), (10.0, 0.326663966267)]
+        {
+            let partition = ordered_beta_bernoulli_log_partition(shape, 1.0).expect("a, N > 0");
+            let penalty = OrderedBetaBernoulliPenalty::new(1, shape, 1.0, false);
+            let gate_space = legendre_cube(256, 1, |z| (-energy(&penalty, z, &[])).exp());
+            for (label, reference, bar) in
+                [("audit", audit, 1.0e-11), ("gate-space", gate_space, 1.0e-10)]
+            {
+                assert!(
+                    (partition.value.exp() / reference - 1.0).abs() <= bar,
+                    "C({shape}, 1) = {:.12e}, {label} reference {reference:.12e}",
+                    partition.value.exp()
+                );
+            }
+        }
+        for shape in [0.5, 1.7, 6.0] {
+            let partition = ordered_beta_bernoulli_log_partition(shape, 2.0).expect("a, N > 0");
+            let penalty = OrderedBetaBernoulliPenalty::new(1, shape, 1.0, false);
+            let gate_space = legendre_cube(128, 2, |z| (-energy(&penalty, z, &[])).exp());
+            assert!(
+                (partition.value.exp() / gate_space - 1.0).abs() <= 1.0e-9,
+                "C({shape}, 2) = {:.12e}, gate-space reference {gate_space:.12e}",
+                partition.value.exp()
+            );
+        }
+    }
+
+    /// At larger `N` against `a·∫₀¹ π^{a−1} g(π)^N dπ` by composite Gauss--Legendre over the rate.
+    #[test]
+    fn relaxed_mass_matches_a_rate_space_integral_at_larger_row_counts_2933() {
+        let (nodes, weights) = gauss_legendre(16);
+        let panels = 512;
+        for shape in [1.0, 3.0] {
+            for rows in [50.0, 400.0] {
+                let mut reference = 0.0;
+                for panel in 0..panels {
+                    let left = panel as f64 / panels as f64;
+                    let half = 0.5 / panels as f64;
+                    for (node, weight) in nodes.iter().zip(&weights) {
+                        let rate = left + half * (node + 1.0);
+                        let mass = (2.0 * rate - 1.0) / logit(rate);
+                        reference +=
+                            half * weight * shape * rate.powf(shape - 1.0) * mass.powf(rows);
+                    }
+                }
+                let partition = ordered_beta_bernoulli_log_partition(shape, rows).expect("a, N > 0");
+                assert!(
+                    (partition.value - reference.ln()).abs() <= 1.0e-10,
+                    "log C({shape}, {rows}) = {:.12e}, rate-space reference {:.12e}",
+                    partition.value,
+                    reference.ln()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn log_shape_derivative_is_a_central_difference_of_the_log_partition_2933() {
+        let h = 1.0e-4;
+        for shape in [1.0e-6, 0.3, 7.0, 1.0e5] {
+            for rows in [0.4, 1.0, 37.5, 1.0e4] {
+                let at = |log_shape: f64| {
+                    ordered_beta_bernoulli_log_partition(log_shape.exp(), rows)
+                        .expect("a, N > 0")
+                        .value
+                };
+                let difference = (at(shape.ln() + h) - at(shape.ln() - h)) / (2.0 * h);
+                let derivative = ordered_beta_bernoulli_log_partition(shape, rows)
+                    .expect("a, N > 0")
+                    .log_shape_derivative;
+                assert!(
+                    (derivative - difference).abs() <= 1.0e-7 * (1.0 + derivative.abs()),
+                    "a·∂_a log C at a={shape}, N={rows}: {derivative:.12e} vs central difference \
+                     {difference:.12e}"
+                );
+            }
+        }
+    }
+
+    /// Extreme shapes stay representable and meet `C ≤ 2^{−N}` and the leading behaviour
+    /// `C ≈ a·ln(1/a)` as `a → 0` and `C ≈ 1/ln a` as `a → ∞` at `N = 1`.
+    #[test]
+    fn extreme_shapes_keep_the_partition_finite_and_bounded_2933() {
+        for shape in [1.0e-300, 1.0e300] {
+            for rows in [1.0e-3, 1.0, 1.0e5] {
+                let partition = ordered_beta_bernoulli_log_partition(shape, rows).expect("a, N > 0");
+                assert!(
+                    partition.value.is_finite() && partition.log_shape_derivative.is_finite(),
+                    "a={shape}, N={rows}: {partition:?}"
+                );
+                assert!(
+                    partition.value <= -rows * LN_2 + 1.0e-12 * (1.0 + rows),
+                    "a={shape}, N={rows}: log C = {} exceeds −N ln 2",
+                    partition.value
+                );
+            }
+        }
+        let small = ordered_beta_bernoulli_log_partition(1.0e-300, 1.0).expect("a, N > 0");
+        let log_leading_small = (1.0e-300_f64).ln() + (-(1.0e-300_f64).ln()).ln();
+        assert!(
+            (small.value - log_leading_small).abs() <= 1.0e-2,
+            "log C(1e-300, 1) = {}, leading {log_leading_small}",
+            small.value
+        );
+        let large = ordered_beta_bernoulli_log_partition(1.0e300, 1.0).expect("a, N > 0");
+        let log_leading_large = -(1.0e300_f64).ln().ln();
+        assert!(
+            (large.value - log_leading_large).abs() <= 1.0e-2,
+            "log C(1e300, 1) = {}, leading {log_leading_large}",
+            large.value
+        );
+    }
+
+    /// With a learnable concentration over two columns, the energy plus the penalty's
+    /// partition integrates to one over the gates, and the complete log-concentration
+    /// derivative (energy plus partition) has zero mean under it.
+    #[test]
+    fn learnable_penalty_normalizes_and_its_score_has_zero_mean_2933() {
+        for alpha in [0.6, 1.3, 4.0] {
+            let penalty = OrderedBetaBernoulliPenalty::new(2, 1.0, 1.0, true);
+            let rho = [alpha.ln()];
+            let placeholder = Array1::<f64>::zeros(2);
+            let rho_view = ArrayView1::from(&rho[..]);
+            let (log_partition, partition_slope) = penalty
+                .log_partition(placeholder.view(), rho_view)
+                .expect("untempered penalty");
+            let density = |z: &[f64]| {
+                let target = Array1::from_iter(z.iter().map(|&gate| logit(gate)));
+                let p = (-penalty.value(target.view(), rho_view) - log_partition).exp();
+                let score = penalty.grad_rho(target.view(), rho_view)[0] + partition_slope[0];
+                (p, score)
+            };
+            let mass = legendre_cube(128, 2, |z| density(z).0);
+            let score = legendre_cube(128, 2, |z| {
+                let (p, score) = density(z);
+                p * score
+            });
+            assert!(
+                (mass - 1.0).abs() <= 1.0e-9,
+                "learnable ordered Beta--Bernoulli prior at α={alpha} has mass {mass:.12e}"
+            );
+            assert!(
+                score.abs() <= 1.0e-9,
+                "log-concentration score at α={alpha} has prior mean {score:.12e}"
+            );
+        }
+        let mut tempered = OrderedBetaBernoulliPenalty::new(2, 1.0, 1.0, false);
+        tempered.weight = 3.0;
+        assert!(
+            tempered
+                .log_partition(Array1::<f64>::zeros(2).view(), Array1::<f64>::zeros(0).view())
+                .is_err(),
+            "a tempered energy has no computed partition and must be refused"
+        );
+    }
+}
