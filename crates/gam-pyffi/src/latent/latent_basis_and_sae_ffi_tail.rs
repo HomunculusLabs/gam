@@ -1611,12 +1611,11 @@ fn steer_delta_with_metric_from_arrays(
 /// chart direction realizing a TARGET output-KL dose (gh#2263). Mirrors
 /// [`steer_delta_with_metric_from_arrays`] but drives the target-dose entry; the
 /// optional `probe` (a patched-forward KL callback) drives the closed-loop
-/// correction and the readout-KL radius.
+/// correction.
 struct SteerToTargetArraysRequest<'a> {
     atom_k: usize,
     metric_row: usize,
     target_nats: f64,
-    config: gam::inference::steering::TargetDoseConfig,
     t_from: ndarray::ArrayView1<'a, f64>,
     direction: ndarray::ArrayView1<'a, f64>,
     geometry_plans: &'a [SaeAtomGeometryPlan],
@@ -1632,15 +1631,14 @@ struct SteerToTargetArraysRequest<'a> {
 }
 
 /// Typed extraction of the public `ManifoldSaeCore.steer_to_target` mapping.
-/// Every dose and solver field is required; optionality belongs only to the
-/// separate plan-aware applied-dose probe.
+/// Every field is required and no other key is accepted; optionality belongs
+/// only to the separate plan-aware applied-dose probe.
 struct ManifoldSteerToTargetRequest {
     atom_k: usize,
     metric_row: usize,
     target_nats: f64,
     t_from: Array1<f64>,
     direction: Array1<f64>,
-    config: gam::inference::steering::TargetDoseConfig,
 }
 
 fn required_steer_to_target_item<'py>(
@@ -1656,19 +1654,35 @@ fn required_steer_to_target_item<'py>(
 
 impl ManifoldSteerToTargetRequest {
     fn from_pydict(request: &Bound<'_, PyDict>) -> PyResult<Self> {
+        // A key the solve does not read would be silently ignored. The landing
+        // coordinate is what a target-dose solve returns, and the solve has no
+        // accuracy, probe-budget or readout option, so a request naming one of
+        // those was written under a retired contract.
+        for key in request.keys() {
+            let key = key.extract::<String>()?;
+            match key.as_str() {
+                "atom_k" | "metric_row" | "target_nats" | "t_from" | "direction" => {}
+                "t_to" => {
+                    return Err(py_value_error(
+                        "ManifoldSaeCore.steer_to_target: 't_to' is solved, not requested; pass \
+                         the chart 'direction' to move along instead"
+                            .to_string(),
+                    ));
+                }
+                other => {
+                    return Err(py_value_error(format!(
+                        "ManifoldSaeCore.steer_to_target: request key '{other}' is not read; the \
+                         request is atom_k, metric_row, target_nats, t_from and direction, and \
+                         the solve resolves the displacement to its representation limit with \
+                         no accuracy or probe-budget option"
+                    )));
+                }
+            }
+        }
         let t_from = required_steer_to_target_item(request, "t_from")?
             .extract::<PyReadonlyArray1<'_, f64>>()?
             .as_array()
             .to_owned();
-        // The landing coordinate is what a target-dose solve returns. A request
-        // that still names one would be read under the retired chord contract.
-        if request.get_item("t_to")?.is_some() {
-            return Err(py_value_error(
-                "ManifoldSaeCore.steer_to_target: 't_to' is solved, not requested; pass the \
-                 chart 'direction' to move along instead"
-                    .to_string(),
-            ));
-        }
         let direction = required_steer_to_target_item(request, "direction")?
             .extract::<PyReadonlyArray1<'_, f64>>()?
             .as_array()
@@ -1679,12 +1693,6 @@ impl ManifoldSteerToTargetRequest {
             target_nats: required_steer_to_target_item(request, "target_nats")?.extract()?,
             t_from,
             direction,
-            config: gam::inference::steering::TargetDoseConfig {
-                tol_rel: required_steer_to_target_item(request, "tol_rel")?.extract()?,
-                max_iter: required_steer_to_target_item(request, "max_iter")?.extract()?,
-                readout_tol_rel: required_steer_to_target_item(request, "readout_tol_rel")?
-                    .extract()?,
-            },
         })
     }
 }
@@ -1697,7 +1705,6 @@ fn steer_to_target_from_arrays(
         atom_k,
         metric_row,
         target_nats,
-        config,
         t_from,
         direction,
         geometry_plans,
@@ -1754,7 +1761,6 @@ fn steer_to_target_from_arrays(
         t_from: t_from.to_vec(),
         direction: direction.to_vec(),
         target_nats,
-        config,
     };
     gam::terms::sae::manifold::run_sae_manifold_steer_to_target(request, probe)
         .map_err(py_value_error)
@@ -1772,7 +1778,6 @@ fn target_dose_plan_to_pydict(
         steer,
         applied_probe,
         iterations,
-        readout_kl_radius,
         certified_attainable_upper_nats,
     } = plan;
     let resident_metric_nats = steer.predicted_nats;
@@ -1804,7 +1809,6 @@ fn target_dose_plan_to_pydict(
             bound.set_item("validation", "exact_factor_model")?;
         }
     }
-    bound.set_item("readout_kl_radius", readout_kl_radius)?;
     bound.set_item(
         "certified_attainable_upper_nats",
         certified_attainable_upper_nats,

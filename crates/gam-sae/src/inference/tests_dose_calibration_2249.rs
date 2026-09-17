@@ -40,7 +40,7 @@
 #[cfg(test)]
 mod tests {
     use crate::inference::steering::{
-        AppliedDoseObservation, SteerPlan, TargetDoseConfig, TargetDoseRequest, steer_delta,
+        AppliedDoseObservation, SteerPlan, TargetDoseRequest, steer_delta,
         steer_to_target_nats,
     };
     use crate::manifold::{
@@ -394,11 +394,11 @@ mod tests {
     }
 
     /// #2263 — [`steer_to_target_nats`] moves the row's coordinate along its chart to
-    /// land a requested in-radius nats dose. Without a probe the exact categorical
-    /// Fisher dose is solved to the representation limit; with an exact-KL probe the
-    /// dose lands in a couple of probes and a readout-KL radius is recorded. Either
-    /// way the move is the chord to the solved coordinate at the row's own gate,
-    /// checked against an independent decode rather than read back from the plan.
+    /// land a requested nats dose. Without a probe the exact categorical Fisher dose
+    /// is solved to the representation limit, and with an exact-KL probe so is the
+    /// measured KL. Either way the move is the chord to the solved coordinate at the
+    /// row's own gate, checked against an independent decode rather than read back
+    /// from the plan.
     #[test]
     fn target_dose_loop_lands_requested_nats() {
         let (term, metric, angles) = build_calibrated_term();
@@ -434,11 +434,6 @@ mod tests {
             t_from: &t_from,
             direction: &direction,
             target_nats,
-            config: TargetDoseConfig {
-                tol_rel: 1.0e-2,
-                max_iter: 12,
-                readout_tol_rel: 1.0e-1,
-            },
         };
 
         let uncertified_metric = metric
@@ -495,7 +490,10 @@ mod tests {
         // Model-in-the-loop probe: exact categorical KL of the applied chord.
         let z_from_probe = z_from.clone();
         let p_from_probe = p_from.clone();
+        let probe_count = std::cell::Cell::new(0_usize);
+        let counter = &probe_count;
         let mut probe = move |plan: &SteerPlan| -> Result<AppliedDoseObservation, String> {
+            counter.set(counter.get() + 1);
             let z_to: Vec<f64> = z_from_probe
                 .iter()
                 .zip(plan.delta.iter())
@@ -518,18 +516,20 @@ mod tests {
             .as_ref()
             .expect("applied probe")
             .measured_nats;
-        assert!(
-            (measured - target_nats).abs() / target_nats <= 2.0e-2,
-            "measured KL {measured} must land within 2% of target {target_nats}"
+        println!(
+            "[#2263 2249] probed solve: measured {measured:.12e} vs target {target_nats:.12e} \
+             after {} probes, displacement {:.6e}",
+            plan.iterations, plan.displacement
         );
         assert!(
-            plan.iterations <= 4,
-            "an in-radius target must converge in a couple of probes; took {}",
-            plan.iterations
+            (measured - target_nats).abs() <= 1e-9 * target_nats,
+            "the probed solve resolves the displacement to its representation limit, so measured \
+             KL {measured} must equal target {target_nats} to the exact-factor arm's bar"
         );
-        assert!(
-            plan.readout_kl_radius.is_some(),
-            "an in-radius probe must record a readout-KL radius"
+        assert_eq!(
+            plan.iterations,
+            probe_count.get(),
+            "the plan must count every patched forward the solve spent"
         );
     }
 }

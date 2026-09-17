@@ -52,10 +52,10 @@ def test_realized_shift_accounts_for_the_prompt_asking_for_the_next_label() -> N
     assert PRODUCER.realized_shift(4, 3, 12) == 0
 
 
-def test_a_plan_lands_only_within_its_relative_tolerance() -> None:
-    assert PRODUCER.lands(1.009, 1.0, 0.01)
-    assert not PRODUCER.lands(1.011, 1.0, 0.01)
-    assert PRODUCER.lands(0.991, 1.0, 0.01)
+def test_the_relative_landing_error_is_symmetric_about_the_target() -> None:
+    assert PRODUCER.relative_landing_error(1.25, 1.0) == 0.25
+    assert PRODUCER.relative_landing_error(0.75, 1.0) == 0.25
+    assert PRODUCER.relative_landing_error(0.5, 0.5) == 0.0
 
 
 def test_nearest_fitted_row_wraps_on_a_circle() -> None:

@@ -7,10 +7,11 @@ steered through the public ``ManifoldSAE.steer_to_target`` along both chart
 directions to each requested dose. The applied-dose probe patches the base
 prompt's label-position residual with the lifted move, measures
 ``KL(p_base || p_patched)`` over the full vocabulary, and reports the exact
-directional Fisher dose ``½ (Jδ)ᵀ F (Jδ)`` of the same move by one JVP. Every call
-that returns a plan must land its measured dose within ``tol_rel`` of the target.
-A call the chart cannot satisfy must end in a typed refusal, which is recorded,
-never dropped.
+directional Fisher dose ``½ (Jδ)ᵀ F (Jδ)`` of the same move by one JVP. The solve
+takes no accuracy or probe budget: every call that returns a plan has resolved the
+displacement to its representation limit, and the report publishes each plan's
+relative landing error and probe count. A call the chart cannot satisfy must end in
+a typed refusal, which is recorded, never dropped.
 
 Gate 4, the month semantic replay. Each held-out month base is moved by +1..+6
 months through the public ``ManifoldSAE.steer``, using the fitted chart's own
@@ -102,8 +103,8 @@ def realized_shift(realized_label: int, source_label: int, n_labels: int) -> int
     return (realized_label - source_label - 1) % n_labels
 
 
-def lands(measured_nats: float, target_nats: float, tol_rel: float) -> bool:
-    return abs(measured_nats - target_nats) <= tol_rel * target_nats
+def relative_landing_error(measured_nats: float, target_nats: float) -> float:
+    return abs(measured_nats - target_nats) / target_nats
 
 
 def nearest_fitted_row(fit_coord: np.ndarray, coordinate: float, period: float) -> int:
@@ -347,9 +348,6 @@ def run_feature(args: argparse.Namespace, model: Any, tokenizer: Any, layer: Any
                     "target_nats": target,
                     "t_from": [float(base_coord[b])],
                     "direction": [direction],
-                    "tol_rel": args.tol_rel,
-                    "max_iter": args.max_iter,
-                    "readout_tol_rel": args.readout_tol_rel,
                 }
                 try:
                     plan = sae.steer_to_target(request, probe)
@@ -364,8 +362,9 @@ def run_feature(args: argparse.Namespace, model: Any, tokenizer: Any, layer: Any
                     predicted_nats_kind=plan["predicted_nats_kind"],
                     iterations=int(plan["iterations"]),
                     displacement=float(plan["displacement"]),
-                    readout_kl_radius=plan["readout_kl_radius"],
-                    lands=lands(float(plan["measured_nats"]), target, args.tol_rel),
+                    relative_landing_error=relative_landing_error(
+                        float(plan["measured_nats"]), target
+                    ),
                 )
                 dose_records.append(record)
 
@@ -381,7 +380,9 @@ def run_feature(args: argparse.Namespace, model: Any, tokenizer: Any, layer: Any
             "calls": len(dose_records),
             "plans": len(plans),
             "typed_refusals": len(dose_records) - len(plans),
-            "all_plans_land": all(record["lands"] for record in plans),
+            "max_relative_landing_error": max(
+                (record["relative_landing_error"] for record in plans), default=None
+            ),
             "probe_counts": sorted({record["iterations"] for record in plans}),
         },
         "dose_records": dose_records,
@@ -440,9 +441,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-iter", type=int, required=True)
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--target-nats", type=lambda s: [float(v) for v in s.split(",")], required=True)
-    parser.add_argument("--tol-rel", type=float, required=True)
-    parser.add_argument("--max-iter", type=int, required=True)
-    parser.add_argument("--readout-tol-rel", type=float, required=True)
     parser.add_argument("--out", type=Path, required=True)
     return parser.parse_args()
 
@@ -476,9 +474,6 @@ def main() -> int:
             "n_iter": args.n_iter,
             "seed": args.seed,
             "target_nats": args.target_nats,
-            "tol_rel": args.tol_rel,
-            "max_iter": args.max_iter,
-            "readout_tol_rel": args.readout_tol_rel,
             "prompt_bank_sha256": prompt_bank_sha256(tasks),
             "torch": torch.__version__,
             "transformers": transformers.__version__,

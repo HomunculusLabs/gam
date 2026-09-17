@@ -335,31 +335,14 @@ pub struct AppliedDoseObservation {
 pub type AppliedDoseProbe<'a> =
     dyn FnMut(&SteerPlan) -> Result<AppliedDoseObservation, String> + 'a;
 
-/// Tuning for the closed-loop correction in [`steer_to_target_nats`].
-///
-/// There is no library default. Every probe is a patched forward of the
-/// caller's model, so the accuracy the loop stops at and the number of forwards
-/// it may spend are the caller's decisions, stated in each request (the Python
-/// surface already requires all three).
-#[derive(Clone, Copy, Debug)]
-pub struct TargetDoseConfig {
-    /// Relative tolerance on measured KL vs the target that stops the loop. An
-    /// exact-factor solve (no probe) resolves the displacement to its
-    /// representation limit instead.
-    pub tol_rel: f64,
-    /// Hard cap on patched-forward probes, including bracket construction.
-    pub max_iter: usize,
-    /// A probed displacement counts as inside the readout-KL radius while its
-    /// measured KL matches the probe's exact directional local-Fisher dose
-    /// within this relative tolerance.
-    pub readout_tol_rel: f64,
-}
-
 /// One target-dose solve along one atom's chart.
 ///
 /// The model and row metric remain explicit execution context; everything that
-/// identifies and tunes the requested dose is carried together so callers
-/// cannot accidentally reorder a train of homogeneous scalar/slice arguments.
+/// identifies the requested dose is carried together so callers cannot
+/// accidentally reorder a train of homogeneous scalar/slice arguments. There is
+/// no accuracy or probe-budget option: the solve resolves the displacement to its
+/// representation limit, and the safeguarded bracket bounds how many
+/// observations that takes (see [`steer_to_target_nats`]).
 #[derive(Clone, Copy, Debug)]
 pub struct TargetDoseRequest<'a> {
     /// The atom whose coordinate is being steered.
@@ -376,8 +359,6 @@ pub struct TargetDoseRequest<'a> {
     pub direction: &'a [f64],
     /// Requested output-KL dose in nats.
     pub target_nats: f64,
-    /// Closed-loop correction tuning.
-    pub config: TargetDoseConfig,
 }
 
 /// A target output-KL dose reached by moving one atom's coordinate along its
@@ -405,12 +386,6 @@ pub struct TargetDosePlan {
     pub applied_probe: Option<AppliedDoseObservation>,
     /// Number of patched-forward probes consumed (0 without a callback).
     pub iterations: usize,
-    /// **READOUT-KL radius**: the largest probed displacement whose measured KL
-    /// still matched its exact directional local-Fisher dose within
-    /// `readout_tol_rel` before the first probed failure. A later accidental match
-    /// cannot extend the radius past a failed point. `None` without a callback or
-    /// when the first probe failed.
-    pub readout_kl_radius: Option<f64>,
     /// Tightest global attainable-dose upper bound certified by any applied
     /// probe in this solve. `None` means no global envelope was certified.
     pub certified_attainable_upper_nats: Option<f64>,
@@ -445,18 +420,12 @@ pub enum TargetDoseError {
         extent: f64,
         max_observed_nats: f64,
     },
+    /// Along a direction with no chart boundary, doubling the displacement left
+    /// the finite `f64` range before any observation reached the target.
     UnbracketedTarget {
         target_nats: f64,
         max_probed_displacement: f64,
         max_measured_nats: f64,
-        probes: usize,
-    },
-    BracketResolutionExhausted {
-        target_nats: f64,
-        lower_displacement: f64,
-        lower_nats: f64,
-        upper_displacement: f64,
-        upper_nats: f64,
         probes: usize,
     },
 }
@@ -503,23 +472,11 @@ impl std::fmt::Display for TargetDoseError {
                 probes,
             } => write!(
                 f,
-                "steer_to_target_nats: could not bracket target {target_nats} nats after \
-                 {probes} probes through displacement {max_probed_displacement}; the largest \
-                 observed dose was {max_measured_nats} nats and no global attainable \
+                "steer_to_target_nats: could not bracket target {target_nats} nats: along a \
+                 direction with no chart boundary the displacement left the finite range \
+                 after {probes} probes through displacement {max_probed_displacement}; the \
+                 largest observed dose was {max_measured_nats} nats and no global attainable \
                  envelope certified the target unreachable"
-            ),
-            Self::BracketResolutionExhausted {
-                target_nats,
-                lower_displacement,
-                lower_nats,
-                upper_displacement,
-                upper_nats,
-                probes,
-            } => write!(
-                f,
-                "steer_to_target_nats: exhausted {probes} probes before resolving target \
-                 {target_nats} nats inside measured bracket \
-                 ({lower_displacement}, {lower_nats})..({upper_displacement}, {upper_nats})"
             ),
         }
     }
@@ -604,48 +561,21 @@ fn merge_attainable_envelope(
     Ok(())
 }
 
-fn record_readout_probe(
-    displacement: f64,
-    measured: f64,
-    predicted: f64,
-    tolerance: f64,
-    first_failure: &mut Option<f64>,
-    radius: &mut Option<f64>,
-) {
-    let agrees = predicted > 0.0 && (measured - predicted).abs() / predicted <= tolerance;
-    if agrees {
-        if (*first_failure).is_none_or(|failed| displacement < failed) {
-            *radius = Some((*radius).map_or(displacement, |current| current.max(displacement)));
-        }
-    } else {
-        *first_failure =
-            Some((*first_failure).map_or(displacement, |failed| failed.min(displacement)));
-        if (*radius).is_some_and(|current| current >= displacement) {
-            *radius = None;
-        }
-    }
-}
-
 /// Solve-wide bookkeeping over the observations one target-dose solve makes.
 #[derive(Default)]
 struct DoseObservations {
     probes: usize,
     max_observed_nats: f64,
     certified_attainable_upper_nats: Option<f64>,
-    first_readout_failure: Option<f64>,
-    readout_kl_radius: Option<f64>,
 }
 
 impl DoseObservations {
-    /// Observe the dose of `plan`, the move `displacement` along the direction: a
-    /// patched forward when a probe is supplied, otherwise the exact resident dose
-    /// the plan already carries.
+    /// Observe the dose of `plan`: a patched forward when a probe is supplied,
+    /// otherwise the exact resident dose the plan already carries.
     fn observe(
         &mut self,
         probe: Option<&mut AppliedDoseProbe<'_>>,
         plan: &SteerPlan,
-        displacement: f64,
-        readout_tol_rel: f64,
     ) -> Result<(f64, Option<AppliedDoseObservation>), TargetDoseError> {
         let Some(probe) = probe else {
             let nats = plan.predicted_nats.ok_or_else(|| {
@@ -665,14 +595,6 @@ impl DoseObservations {
             self.max_observed_nats,
             &mut self.certified_attainable_upper_nats,
         )?;
-        record_readout_probe(
-            displacement,
-            observation.measured_nats,
-            observation.exact_directional_nats,
-            readout_tol_rel,
-            &mut self.first_readout_failure,
-            &mut self.readout_kl_radius,
-        );
         Ok((observation.measured_nats, Some(observation)))
     }
 }
@@ -763,20 +685,23 @@ fn chart_extent(manifold: &LatentManifold, t_from: &[f64], u: &[f64]) -> Result<
 /// Illinois weighting: an endpoint retained twice in a row has its residual halved
 /// for the next secant, so a stale endpoint is pulled in and the bracket shrinks
 /// superlinearly from both sides. A secant that is not strictly inside the bracket
-/// falls back to bisection. A local decrease is only
-/// another point observation, so expansion continues through it, but never past
-/// the chart's extent along the direction (`chart_extent`): past an interval
-/// boundary the retraction would clamp, and past a full turn the points repeat.
-/// Running out of chart is [`TargetDoseError::ChartExtentExhausted`]; a plan is
-/// never clamped to fit.
+/// falls back to bisection, and so does any candidate once two observations have
+/// not halved the bracket, so the bracket halves at least once every three
+/// observations. A local decrease is only another point observation, so expansion
+/// continues through it, but never past the chart's extent along the direction
+/// (`chart_extent`): past an interval boundary the retraction would clamp, and past
+/// a full turn the points repeat. Running out of chart is
+/// [`TargetDoseError::ChartExtentExhausted`]; a plan is never clamped to fit.
 ///
-/// With `probe = None` each observation is the exact resident dose (an `ExactFull`
-/// factor is required), so the displacement is resolved to the representation
-/// limit of `s` and `tol_rel` does not apply. With a probe each observation is a
-/// patched forward: `tol_rel` stops the solve, `max_iter` caps the probes, the
-/// contiguous readout-KL radius is recorded, and `UnreachableTarget` is possible
-/// only when a probe certifies a global attainable-dose upper bound below the
-/// requested tolerance band.
+/// Every solve resolves the displacement to the representation limit of `s`: it
+/// returns the observation whose dose equals the target or, once no representable
+/// displacement lies strictly inside the bracket, the endpoint whose observed dose
+/// is closer. There is no accuracy option and no probe budget. The safeguarded
+/// bracket bounds the observations by the expansion plus three per halving from
+/// the first bracket down to one ulp. With `probe = None` each observation is the
+/// exact resident dose (an `ExactFull` factor is required). With a probe each
+/// observation is a patched forward, and `UnreachableTarget` is possible only when
+/// a probe certifies a global attainable-dose upper bound below the target.
 pub fn steer_to_target_nats(
     model: &SaeManifoldTerm,
     metric: &RowMetric,
@@ -789,21 +714,10 @@ pub fn steer_to_target_nats(
         t_from,
         direction,
         target_nats,
-        config,
     } = request;
     if !(target_nats.is_finite() && target_nats > 0.0) {
         return Err(TargetDoseError::InvalidRequest(format!(
             "steer_to_target_nats: target_nats must be finite and positive, got {target_nats}"
-        )));
-    }
-    if !(config.tol_rel.is_finite() && (0.0..1.0).contains(&config.tol_rel))
-        || config.max_iter == 0
-        || !(config.readout_tol_rel.is_finite() && (0.0..1.0).contains(&config.readout_tol_rel))
-    {
-        return Err(TargetDoseError::InvalidRequest(format!(
-            "steer_to_target_nats: config must have finite 0<=tol_rel<1, max_iter>0, \
-             finite 0<=readout_tol_rel<1; \
-             got {config:?}"
         )));
     }
     let k = model.k_atoms();
@@ -902,14 +816,6 @@ pub fn steer_to_target_nats(
         });
     }
 
-    let lands = |nats: f64| {
-        if exact {
-            nats == target_nats
-        } else {
-            (nats - target_nats).abs() / target_nats <= config.tol_rel
-        }
-    };
-    let accepted_lower_nats = target_nats * (1.0 - config.tol_rel);
     let finish = |displacement: f64,
                   steer: SteerPlan,
                   applied_probe: Option<AppliedDoseObservation>,
@@ -920,7 +826,6 @@ pub fn steer_to_target_nats(
         steer,
         applied_probe,
         iterations: observations.probes,
-        readout_kl_radius: observations.readout_kl_radius,
         certified_attainable_upper_nats: observations.certified_attainable_upper_nats,
     };
     let mut observations = DoseObservations::default();
@@ -935,13 +840,12 @@ pub fn steer_to_target_nats(
     let (mut lo_s, mut lo_nats, mut lo_plan, mut lo_applied) = (0.0_f64, 0.0_f64, origin, None);
     let mut hi_s = seed_displacement.min(0.5 * extent);
     let mut hi_plan = plan_at(hi_s)?;
-    let (mut hi_nats, mut hi_applied) =
-        observations.observe(probe.as_deref_mut(), &hi_plan, hi_s, config.readout_tol_rel)?;
-    if lands(hi_nats) {
+    let (mut hi_nats, mut hi_applied) = observations.observe(probe.as_deref_mut(), &hi_plan)?;
+    if hi_nats == target_nats {
         return Ok(finish(hi_s, hi_plan, hi_applied, &observations));
     }
     if let Some(upper) = observations.certified_attainable_upper_nats
-        && upper < accepted_lower_nats
+        && upper < target_nats
     {
         return Err(TargetDoseError::UnreachableTarget {
             target_nats,
@@ -957,7 +861,7 @@ pub fn steer_to_target_nats(
             });
         }
         let next_s = (2.0 * hi_s).min(extent);
-        if (!exact && observations.probes >= config.max_iter) || !next_s.is_finite() {
+        if !next_s.is_finite() {
             return Err(TargetDoseError::UnbracketedTarget {
                 target_nats,
                 max_probed_displacement: hi_s,
@@ -974,17 +878,12 @@ pub fn steer_to_target_nats(
                 max_observed_nats: observations.max_observed_nats,
             });
         }
-        let (next_nats, next_applied) = observations.observe(
-            probe.as_deref_mut(),
-            &next_plan,
-            next_s,
-            config.readout_tol_rel,
-        )?;
-        if lands(next_nats) {
+        let (next_nats, next_applied) = observations.observe(probe.as_deref_mut(), &next_plan)?;
+        if next_nats == target_nats {
             return Ok(finish(next_s, next_plan, next_applied, &observations));
         }
         if let Some(upper) = observations.certified_attainable_upper_nats
-            && upper < accepted_lower_nats
+            && upper < target_nats
         {
             return Err(TargetDoseError::UnreachableTarget {
                 target_nats,
@@ -997,48 +896,52 @@ pub fn steer_to_target_nats(
 
     // Resolve the bracket by false position with the Illinois weighting. Plain false
     // position keeps re-using a far endpoint whenever the root sits next to the
-    // other one, so the bracket shrinks from one side only and a tight tolerance
-    // runs out of probes. Halving the residual of an endpoint each time it is
-    // retained twice in a row pulls it in, which restores superlinear convergence
-    // with the bracket still guaranteed.
+    // other one, so the bracket shrinks from one side only. Halving the residual of
+    // an endpoint each time it is retained twice in a row pulls it in, which restores
+    // superlinear convergence with the bracket still guaranteed. A dose that is not
+    // smooth at the bracket's scale (a patched forward whose applied move is
+    // quantized is a step function there) can still make even the weighted secant
+    // creep, so once the last two observations have not halved the bracket the next
+    // candidate is the midpoint. If a candidate at width `w_k` finds the bracket
+    // wider than half of `w_{k-2}`, it bisects, giving `w_{k+1} ≤ w_{k-2}/2`: the
+    // bracket halves at least once every three observations, and the loop reaches
+    // the representation limit after finitely many observations with no budget.
     let mut lo_weight = 1.0_f64;
     let mut hi_weight = 1.0_f64;
     // `Some(true)`: the lower endpoint moved last. `Some(false)`: the upper one did.
     let mut lower_moved_last: Option<bool> = None;
+    // Bracket widths before the previous observation and the one before it;
+    // infinite until those observations exist.
+    let mut width_one_back = f64::INFINITY;
+    let mut width_two_back = f64::INFINITY;
     loop {
+        let width = hi_s - lo_s;
         let lo_residual = lo_weight * (lo_nats - target_nats);
         let hi_residual = hi_weight * (hi_nats - target_nats);
         let secant = hi_s - hi_residual * (hi_s - lo_s) / (hi_residual - lo_residual);
-        let candidate = if secant.is_finite() && secant > lo_s && secant < hi_s {
-            secant
-        } else {
-            0.5 * (lo_s + hi_s)
-        };
+        let candidate =
+            if 2.0 * width <= width_two_back && secant.is_finite() && secant > lo_s && secant < hi_s
+            {
+                secant
+            } else {
+                0.5 * (lo_s + hi_s)
+            };
         if !(candidate > lo_s && candidate < hi_s) {
-            // The bracket is one representable step wide.
-            if exact {
-                let hi_closer = (hi_nats - target_nats).abs() <= (target_nats - lo_nats).abs();
-                return Ok(if hi_closer {
-                    finish(hi_s, hi_plan, hi_applied, &observations)
-                } else {
-                    finish(lo_s, lo_plan, lo_applied, &observations)
-                });
-            }
-            break;
-        }
-        if !exact && observations.probes >= config.max_iter {
-            break;
+            // The bracket is one representable step wide: return the endpoint whose
+            // observed dose is closer to the target.
+            let hi_closer = (hi_nats - target_nats).abs() <= (target_nats - lo_nats).abs();
+            return Ok(if hi_closer {
+                finish(hi_s, hi_plan, hi_applied, &observations)
+            } else {
+                finish(lo_s, lo_plan, lo_applied, &observations)
+            });
         }
         let plan = plan_at(candidate)?;
-        let (nats, applied) = observations.observe(
-            probe.as_deref_mut(),
-            &plan,
-            candidate,
-            config.readout_tol_rel,
-        )?;
-        if lands(nats) {
+        let (nats, applied) = observations.observe(probe.as_deref_mut(), &plan)?;
+        if nats == target_nats {
             return Ok(finish(candidate, plan, applied, &observations));
         }
+        (width_two_back, width_one_back) = (width_one_back, width);
         if nats < target_nats {
             (lo_s, lo_nats, lo_plan, lo_applied) = (candidate, nats, plan, applied);
             lo_weight = 1.0;
@@ -1055,14 +958,6 @@ pub fn steer_to_target_nats(
             lower_moved_last = Some(false);
         }
     }
-    Err(TargetDoseError::BracketResolutionExhausted {
-        target_nats,
-        lower_displacement: lo_s,
-        lower_nats: lo_nats,
-        upper_displacement: hi_s,
-        upper_nats: hi_nats,
-        probes: observations.probes,
-    })
 }
 
 /// Does this provenance carry behavioral (output-Fisher) information? Euclidean

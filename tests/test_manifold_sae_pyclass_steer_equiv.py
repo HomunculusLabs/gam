@@ -182,18 +182,16 @@ def test_target_dose_probe_is_wired_through_the_public_model() -> None:
             "target_nats": target,
             "t_from": t_from,
             "direction": direction,
-            "tol_rel": 1.0e-12,
-            "max_iter": 4,
-            "readout_tol_rel": 0.1,
         },
         patched_forward_kl,
     )
 
     assert plan["validation"] == "applied_dose_probe"
-    assert plan["iterations"] == 1
-    assert len(probe_calls) == 1
-    assert probe_calls[0]["amplitude"] == plan["amplitude"] == 1.0
-    assert probe_calls[0]["t_to"] == plan["t_to"]
+    assert plan["iterations"] == len(probe_calls) >= 1
+    assert plan["amplitude"] == 1.0
+    assert all(call["amplitude"] == 1.0 for call in probe_calls)
+    # The plan is one of the moves the probe executed, never an unprobed point.
+    assert any(call["t_to"] == plan["t_to"] for call in probe_calls)
     assert plan["measured_nats"] == pytest.approx(target, rel=1.0e-12)
     assert plan["predicted_nats"] == pytest.approx(target, rel=1.0e-12)
     assert plan["predicted_nats_kind"] == "exact_directional"
@@ -224,11 +222,23 @@ def test_target_dose_request_names_a_direction_not_a_landing_coordinate() -> Non
         "target_nats": 0.5 * _unit_target_nats(model),
         "t_from": TARGET_T_FROM,
         "t_to": TARGET_T_FROM + 0.25 * TARGET_DIRECTION,
-        "tol_rel": 1.0e-2,
-        "max_iter": 12,
-        "readout_tol_rel": 0.1,
     }
     with pytest.raises(ValueError, match="'t_to' is solved"):
+        model.steer_to_target(request)
+
+
+@pytest.mark.parametrize("retired_key", ["tol_rel", "max_iter", "readout_tol_rel"])
+def test_target_dose_request_refuses_a_retired_accuracy_or_budget_key(retired_key: str) -> None:
+    model = _model()
+    request = {
+        "atom_k": TARGET_ATOM,
+        "metric_row": 0,
+        "target_nats": 0.5 * _unit_target_nats(model),
+        "t_from": TARGET_T_FROM,
+        "direction": TARGET_DIRECTION,
+        retired_key: 1,
+    }
+    with pytest.raises(ValueError, match=f"request key '{retired_key}' is not read"):
         model.steer_to_target(request)
 
 
@@ -244,9 +254,6 @@ def test_target_dose_refuses_an_atom_outside_the_rows_support() -> None:
                 "target_nats": 1.0e-3,
                 "t_from": np.array([0.1], dtype=np.float64),
                 "direction": np.array([1.0], dtype=np.float64),
-                "tol_rel": 1.0e-2,
-                "max_iter": 12,
-                "readout_tol_rel": 0.1,
             }
         )
 
@@ -260,9 +267,6 @@ def test_target_dose_rejects_scalar_and_malformed_probe_results() -> None:
         "target_nats": target,
         "t_from": TARGET_T_FROM,
         "direction": TARGET_DIRECTION,
-        "tol_rel": 1.0e-12,
-        "max_iter": 4,
-        "readout_tol_rel": 0.1,
     }
 
     with pytest.raises(ValueError, match="must return a mapping"):
@@ -328,9 +332,6 @@ def test_target_dose_local_decrease_does_not_claim_unreachable() -> None:
             "target_nats": target,
             "t_from": TARGET_T_FROM,
             "direction": TARGET_DIRECTION,
-            "tol_rel": 0.0,
-            "max_iter": 3,
-            "readout_tol_rel": 0.1,
         },
         nonmonotone_probe,
     )
@@ -348,9 +349,6 @@ def test_target_dose_unreachable_requires_a_global_envelope_certificate() -> Non
         "target_nats": target,
         "t_from": TARGET_T_FROM,
         "direction": TARGET_DIRECTION,
-        "tol_rel": 1.0e-12,
-        "max_iter": 2,
-        "readout_tol_rel": 0.1,
     }
 
     def plateau(plan: dict[str, object], upper: float | None) -> dict[str, object]:
@@ -361,10 +359,22 @@ def test_target_dose_unreachable_requires_a_global_envelope_certificate() -> Non
             "certified_attainable_upper_nats": upper,
         }
 
-    with pytest.raises(ValueError, match="could not bracket.*no global attainable"):
-        model.steer_to_target(request, lambda plan: plateau(plan, None))
     with pytest.raises(ValueError, match="outside the certified attainable envelope"):
         model.steer_to_target(request, lambda plan: plateau(plan, observed))
+
+    # Without a certificate the same plateau is only point observations. Along the
+    # cylinder's periodic axis the expansion ends at one full turn and is refused by
+    # the chart's end, never reported as an unreachable dose.
+    cylinder = _analytic_topology_model(CYLINDER_PLAN, 6, atom_k=1)
+    cylinder_request = {
+        "atom_k": 1,
+        "metric_row": 0,
+        "target_nats": target,
+        "t_from": np.asarray([0.15, -0.2], dtype=np.float64),
+        "direction": np.asarray([1.0, 0.0], dtype=np.float64),
+    }
+    with pytest.raises(ValueError, match=r"not reached before the chart ended .*\(extent 1\)"):
+        cylinder.steer_to_target(cylinder_request, lambda plan: plateau(plan, None))
 
 
 @pytest.mark.parametrize(
@@ -458,9 +468,6 @@ def test_public_target_dose_rebuilds_cylinder_metadata() -> None:
             "target_nats": target,
             "t_from": t_from,
             "direction": t_to - t_from,
-            "tol_rel": 1.0e-12,
-            "max_iter": 12,
-            "readout_tol_rel": 0.1,
         },
         patched_forward_kl,
     )

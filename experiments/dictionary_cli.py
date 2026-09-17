@@ -93,9 +93,6 @@ def steer_atom(
     target_nats: float,
     patched_forward_kl: Any,
     metric_row: int = 0,
-    tol_rel: float = 1.0e-2,
-    max_probes: int = 12,
-    readout_tol_rel: float = 1.0e-1,
 ) -> dict[str, Any]:
     """Apply a measured target-KL chart move on one atom.
 
@@ -110,8 +107,9 @@ def steer_atom(
     adapter can prove a global measured-KL upper bound over every displacement
     along this direction. The Rust solver validates the atomic observation,
     expands through local decreases until it finds a genuine sign-change bracket,
-    and reports "unreachable" only from that global certificate; an unresolved
-    unbracketed solve is a distinct error.
+    resolves it to the representation limit of the displacement with no accuracy
+    option or probe budget, and reports "unreachable" only from that global
+    certificate.
     """
     plan = fit.steer_to_target(
         {
@@ -120,9 +118,6 @@ def steer_atom(
             "target_nats": float(target_nats),
             "t_from": np.atleast_1d(np.asarray(t_from, dtype=float)),
             "direction": np.atleast_1d(np.asarray(direction, dtype=float)),
-            "tol_rel": float(tol_rel),
-            "max_iter": int(max_probes),
-            "readout_tol_rel": float(readout_tol_rel),
         },
         patched_forward_kl,
     )

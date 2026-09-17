@@ -79,8 +79,9 @@ log = MATRIX.log
 # MAXTPL=6, NBASES=10, NITER=40 at layer 17, bfloat16 weights and float32 harvest
 # math. The historical ledger held 300 edits over three features and ten bases, so
 # FRACS is ten fractions, spaced geometrically across its stated range. The chart
-# dimension and the dose-solve tolerances belong to this restatement, and every
-# ledger records them.
+# dimension belongs to this restatement, and every ledger records it. The dose solve
+# takes no accuracy or probe budget: it lands each dose at the representation limit
+# of the displacement.
 FROZEN_PROTOCOL: dict[str, Any] = {
     "model": "Qwen/Qwen3.6-35B-A3B",
     "layer": 17,
@@ -96,9 +97,6 @@ FROZEN_PROTOCOL: dict[str, Any] = {
     "bases": 10,
     "fit_iterations": 40,
     "chart_dim": 8,
-    "tol_rel": 0.01,
-    "max_iter": 16,
-    "readout_tol_rel": 0.1,
 }
 
 
@@ -218,7 +216,6 @@ def ledger_row(
         "resident_metric_nats_kind": str(plan["resident_metric_nats_kind"]),
         "iterations": int(plan["iterations"]),
         "displacement": float(plan["displacement"]),
-        "readout_kl_radius": plan["readout_kl_radius"],
     }
 
 
@@ -450,9 +447,6 @@ def run_feature(
                 "target_nats": target_nats,
                 "t_from": [coord],
                 "direction": [1.0],
-                "tol_rel": protocol["tol_rel"],
-                "max_iter": protocol["max_iter"],
-                "readout_tol_rel": protocol["readout_tol_rel"],
             }
             try:
                 plan = sae.steer_to_target(request, probe)
@@ -547,9 +541,6 @@ def main() -> int:
             "features": list(protocol["features"]),
             "rank": protocol["rank"],
             "chart_dim": protocol["chart_dim"],
-            "tol_rel": protocol["tol_rel"],
-            "max_iter": protocol["max_iter"],
-            "readout_tol_rel": protocol["readout_tol_rel"],
             "torch": torch.__version__,
             "transformers": transformers.__version__,
             "gamfit_file": gamfit.__file__,

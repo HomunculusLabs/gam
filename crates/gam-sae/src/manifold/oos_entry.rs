@@ -12,7 +12,7 @@ use ndarray::{Array1, Array2, Array3, ArrayView2, s};
 
 use crate::hybrid_split::AtomLinearImage;
 use crate::inference::steering::{
-    AppliedDoseProbe, SteerPlan, TargetDoseConfig, TargetDosePlan, TargetDoseRequest, steer_delta,
+    AppliedDoseProbe, SteerPlan, TargetDosePlan, TargetDoseRequest, steer_delta,
     steer_to_target_nats,
 };
 
@@ -732,8 +732,6 @@ pub struct SaeSteerToTargetRequest {
     pub direction: Vec<f64>,
     /// Requested output-KL dose in nats.
     pub target_nats: f64,
-    /// Closed-loop correction tuning.
-    pub config: TargetDoseConfig,
 }
 
 /// Solve for the displacement along `direction` that realizes `target_nats` on
@@ -759,7 +757,6 @@ pub fn run_sae_manifold_steer_to_target(
         t_from,
         direction,
         target_nats,
-        config,
     } = request;
     let term = build_steer_term(SteerTermRequest {
         caller: "run_sae_manifold_steer_to_target",
@@ -785,7 +782,6 @@ pub fn run_sae_manifold_steer_to_target(
             t_from: &t_from,
             direction: &direction,
             target_nats,
-            config,
         },
         probe,
     )

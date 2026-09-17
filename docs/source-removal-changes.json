@@ -128,6 +128,19 @@
     "evidence": "Read-only source report https://github.com/SauersML/gam/actions/runs/34631844294 compares immutable base 994668d561f1c71d075ad388974e86aed7f4b971 with e6b2b97539c74ebdb62d86db29154165b077601a. Native acceptance https://github.com/SauersML/gam/actions/runs/34631210886 passes recipe fitting, frozen CTN attachment, explicit transform/outcome equivalence, save/load, row order, batching and finite monotone survival at f4fbeae8929183c3ef4acfd75113bee73ddf4418 in 3.42 seconds. tests/test_ctn_predictor_native.py replaces Python-only composition mocks; inference/ctn.rs adds group/fold/schema tests. The latest structural-validation changes are checked separately; no orthogonality, clustered-PC convergence, or AoU success is asserted."
   },
   {
+    "base": "5e559abe4630fcda15e2e1ea7dfde6307f2eb698",
+    "items": [
+      "crates/gam-sae/src/inference/steering.rs:fn:record_readout_probe",
+      "crates/gam-sae/src/inference/steering.rs:struct:TargetDoseConfig",
+      "tests/sae/misc/steering_dosimetry.rs:fn:dose_config",
+      "tests/sae/misc/steering_dosimetry.rs:fn:target_dose_apparent_plateau_without_certificate_is_only_unbracketed",
+      "tests/sae/misc/steering_dosimetry.rs:fn:target_dose_probe_exhaustion_never_returns_an_unconverged_plan",
+      "tests/sae/misc/steering_dosimetry.rs:fn:target_dose_relative_tolerances_have_fractional_finite_domain"
+    ],
+    "reason": "#2263 (SPEC rules 23 and 25): steer_to_target_nats took three caller-stated knobs through TargetDoseConfig. tol_rel stopped the probed solve at a relative band, max_iter capped the patched forwards, and readout_tol_rel defined the diagnostic readout_kl_radius by an agreement band; the drivers and docs fixed them at 0.01, 12 to 16 and 0.1, and none was derived. The solve now resolves the bracket to the representation limit of the displacement, with a bisection safeguard that halves the bracket at least once every three observations, so it needs no budget. TargetDoseConfig is deleted with its request fields. record_readout_probe only fed readout_kl_radius, which is deleted. dose_config was the tests' shared knob literal. target_dose_apparent_plateau_without_certificate_is_only_unbracketed and target_dose_probe_exhaustion_never_returns_an_unconverged_plan pinned UnbracketedTarget as the outcome of running out of max_iter on the planted circle (probes 3 and 1). With no budget the same uncertified plateau expands to the chart's end, which target_dose_chart_end_is_a_typed_refusal_never_a_clamp pins, and UnbracketedTarget now means only that doubling left the finite range along a direction with no chart boundary. target_dose_relative_tolerances_have_fractional_finite_domain pinned the domain of tol_rel and readout_tol_rel, which no longer exist.",
+    "evidence": "At the base, git grep -n -w finds TargetDoseConfig in steering.rs (its declaration and the TargetDoseRequest field), in oos_entry.rs (the import and the SaeSteerToTargetRequest field), in the two pyffi request structs of latent_basis_and_sae_ffi_tail.rs, in tests_dose_calibration_2249.rs and in tests/sae/misc/steering_dosimetry.rs; every one is removed or rewritten in this commit. record_readout_probe is declared at steering.rs:607 and called once, at steering.rs:668, which this commit deletes. dose_config and the three test functions are declared in tests/sae/misc/steering_dosimetry.rs and used only there. No bench, example, Python or FFI source names any of them."
+  },
+  {
     "base": "4249f82e62ffb0949bed239248006e68994a3242",
     "items": [
       "crates/gam-event-history/src/joint/category_prior.rs:fn:oracle",

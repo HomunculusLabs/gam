@@ -39,8 +39,8 @@ use ndarray::{Array1, Array2};
 
 use gam::inference::row_metric::{MetricProvenance, RowMetric};
 use gam::inference::steering::{
-    AppliedDoseObservation, AppliedDoseProbe, SteerPlan, TargetDoseConfig, TargetDoseError,
-    TargetDoseRequest, steer_delta, steer_to_target_nats,
+    AppliedDoseObservation, AppliedDoseProbe, SteerPlan, TargetDoseError, TargetDoseRequest,
+    steer_delta, steer_to_target_nats,
 };
 use gam::terms::latent::{LatentCoordValues, LatentIdMode, LatentManifold};
 use gam::terms::{
@@ -51,16 +51,6 @@ use gam::terms::{
 
 const R: f64 = 1.3;
 const TWO_PI: f64 = 2.0 * std::f64::consts::PI;
-
-/// The dose-loop tuning these fixtures run under, stated explicitly: the library
-/// carries no default accuracy or probe budget.
-fn dose_config() -> TargetDoseConfig {
-    TargetDoseConfig {
-        tol_rel: 1.0e-2,
-        max_iter: 12,
-        readout_tol_rel: 1.0e-1,
-    }
-}
 
 /// The closed-form KL of the quadratic readout for a latent move of `delta`
 /// (amplitude 1, `F = I₂`): `R² (1 − cos(2π Δ))`.
@@ -468,6 +458,22 @@ fn displacement_rounding_bar(expected_s: f64) -> f64 {
         + 4.0 * f64::EPSILON * expected_s
 }
 
+/// The observation count the safeguarded bracket guarantees for a dose that rises
+/// through `landing`. Expansion observes the seed and doubles past the landing, so
+/// the first bracket is at most `max(seed, landing)` wide. A candidate bisects
+/// whenever two observations have not halved the bracket, so the width after
+/// observation `3m + 1` is at most `2⁻ᵐ` of the first. The loop stops once its ends
+/// are adjacent floats, which a width of `ε·landing/2`, at most one ulp at the
+/// landing, already forces.
+fn safeguard_observation_bound(seed: f64, landing: f64) -> usize {
+    let expansion = 1 + (landing / seed).log2().ceil().max(0.0) as usize;
+    let first_width = seed.max(landing);
+    let halvings = (first_width / (0.5 * f64::EPSILON * landing))
+        .log2()
+        .ceil() as usize;
+    expansion + 3 * halvings + 1
+}
+
 /// gh#2263 target-dose API with no model in the loop (`probe = None`): the solve
 /// moves the row's coordinate along its chart until the exact resident dose equals
 /// the target, and returns the landing coordinate. Along `+1` the planted circle's
@@ -489,7 +495,6 @@ fn target_dose_exact_factor_lands_the_dose_on_the_chart() {
             t_from: &[t0],
             direction: &[1.0],
             target_nats: target,
-            config: dose_config(),
         },
         None,
     )
@@ -536,20 +541,19 @@ fn target_dose_exact_factor_lands_the_dose_on_the_chart() {
     );
     assert!(plan.applied_probe.is_none());
     assert_eq!(plan.iterations, 0);
-    assert!(plan.readout_kl_radius.is_none());
 }
 
 /// gh#2263 target-dose API — with an EXACT-quadratic patched forward the closed
-/// loop lands the requested dose to `1e-9` and stamps the readout-KL radius, since
-/// every probe matches its directional dose. The first-order seed is not exact on
-/// a circle (its dose falls short by about `q*/(6R²)`), so the correction is a real
-/// secant solve over the displacement rather than a confirmation of the seed.
+/// loop lands the requested dose to the exact-factor solve's rounding bar, since
+/// both resolve the displacement to its representation limit. The first-order seed
+/// is not exact on a circle (its dose falls short by about `q*/(6R²)`), so the
+/// correction is a real bracket solve over the displacement rather than a
+/// confirmation of the seed.
 #[test]
 fn target_dose_exact_probe_lands_to_a_tight_tolerance() {
     let t0 = 0.0;
     let (term, metric) = planted_circle(t0);
     let target = 0.5 * analytic_kl(0.02);
-    let tol_rel = 1.0e-9;
 
     // Exact-quadratic probe: measured KL == the endpoint Fisher quadratic (the
     // planted readout IS a quadratic, so the second-order dose is the true KL).
@@ -571,10 +575,6 @@ fn target_dose_exact_probe_lands_to_a_tight_tolerance() {
             t_from: &[t0],
             direction: &[1.0],
             target_nats: target,
-            config: TargetDoseConfig {
-                tol_rel,
-                ..dose_config()
-            },
         },
         Some(&mut probe as &mut AppliedDoseProbe<'_>),
     )
@@ -582,40 +582,40 @@ fn target_dose_exact_probe_lands_to_a_tight_tolerance() {
 
     let observation = plan.applied_probe.as_ref().expect("applied probe");
     let measured = observation.measured_nats;
+    let expected_s = analytic_displacement(target);
+    let bound = safeguard_observation_bound(plan.seed_displacement, expected_s);
     println!(
-        "exact probe: {} probes, measured {measured:.12e} vs target {target:.12e}, \
-         displacement {:.6e} vs seed {:.6e}",
+        "exact probe: {} probes (guaranteed at most {bound}), measured {measured:.12e} vs \
+         target {target:.12e}, displacement {:.12e} vs analytic {expected_s:.12e}, seed {:.6e}",
         plan.iterations, plan.displacement, plan.seed_displacement
     );
     assert_eq!(observation.effective_delta, plan.steer.delta);
     assert!(
-        (measured - target).abs() / target <= tol_rel,
-        "measured KL {measured} must equal target {target} to {tol_rel:e}"
+        (measured - target).abs() <= dose_rounding_bar(),
+        "measured KL {measured} must equal target {target} to the rounding bar {:.3e}",
+        dose_rounding_bar()
     );
     assert!(
-        plan.iterations <= dose_config().max_iter,
-        "an exact probe must land within the probe budget; took {}",
+        (plan.displacement - expected_s).abs() <= displacement_rounding_bar(expected_s),
+        "displacement {} must be the analytic crossing {expected_s} (bar {:.3e})",
+        plan.displacement,
+        displacement_rounding_bar(expected_s)
+    );
+    assert!(
+        plan.iterations <= bound,
+        "the safeguarded bracket guarantees at most {bound} probes; took {}",
         plan.iterations
     );
     assert_eq!(
         plan.steer.amplitude, 1.0,
         "the move is written at the row's own gate"
     );
-    // Every probe matched its directional dose, so the readout-KL radius covers the
-    // solved displacement.
-    let rr = plan.readout_kl_radius.expect("readout radius established");
-    assert!(
-        rr >= plan.displacement,
-        "readout radius {rr} must cover the solved displacement {}",
-        plan.displacement
-    );
 }
 
 /// gh#2263 target-dose API — with a SATURATING patched forward (true KL bounded
 /// while the quadratic grows) the first-order seed under-delivers KL, and the
-/// secant loop moves the coordinate FURTHER onto the measured curve. The seed sits
-/// past the readout-KL radius (measured departs from the quadratic there), so the
-/// radius is reported as unestablished — exactly the diagnostic #2249 asks for.
+/// bracket solve moves the coordinate FURTHER onto the measured curve, landing the
+/// measured dose to its rounding bar.
 #[test]
 fn target_dose_saturating_probe_secant_corrects_upward() {
     let t0 = 0.0;
@@ -643,7 +643,6 @@ fn target_dose_saturating_probe_secant_corrects_upward() {
             t_from: &[t0],
             direction: &[1.0],
             target_nats: target,
-            config: dose_config(),
         },
         Some(&mut probe as &mut AppliedDoseProbe<'_>),
     )
@@ -654,13 +653,21 @@ fn target_dose_saturating_probe_secant_corrects_upward() {
         .as_ref()
         .expect("applied probe")
         .measured_nats;
+    let bound = safeguard_observation_bound(plan.seed_displacement, plan.displacement);
     println!(
-        "saturating probe: {} probes, measured {measured:.6e}, displacement {:.6e} vs seed {:.6e}",
+        "saturating probe: {} probes (guaranteed at most {bound}), measured {measured:.12e}, \
+         displacement {:.6e} vs seed {:.6e}",
         plan.iterations, plan.displacement, plan.seed_displacement
     );
     assert!(
-        (measured - target).abs() / target <= dose_config().tol_rel,
-        "corrected measured KL {measured} must reach target {target}"
+        (measured - target).abs() <= dose_rounding_bar(),
+        "corrected measured KL {measured} must reach target {target} to the rounding bar {:.3e}",
+        dose_rounding_bar()
+    );
+    assert!(
+        plan.iterations <= bound,
+        "the safeguarded bracket guarantees at most {bound} probes; took {}",
+        plan.iterations
     );
     // Saturation ⇒ the quadratic over-predicts, so the realized move is longer than
     // the first-order seed (had to move further to realize the same measured KL).
@@ -677,13 +684,6 @@ fn target_dose_saturating_probe_secant_corrects_upward() {
     assert!(
         plan.iterations >= 2,
         "correction must take at least one secant step"
-    );
-    // At the seed the exact dose (≈ 0.476) already departs from the saturating
-    // measured (≈ 0.379, 20% > 10% readout tol), so no probed displacement was in
-    // readout tolerance ⇒ the readout-KL radius is honestly unestablished here.
-    assert!(
-        plan.readout_kl_radius.is_none(),
-        "seed is past the readout-KL radius; radius must be reported unestablished"
     );
 }
 
@@ -709,7 +709,6 @@ fn target_dose_plateau_is_an_explicit_unreachable_error() {
             t_from: &[t0],
             direction: &[1.0],
             target_nats: target,
-            config: dose_config(),
         },
         Some(&mut probe),
     )
@@ -722,46 +721,6 @@ fn target_dose_plateau_is_an_explicit_unreachable_error() {
         panic!("expected a certified unreachable-target error");
     };
     assert_eq!(certified_attainable_upper_nats, 0.1);
-}
-
-#[test]
-fn target_dose_apparent_plateau_without_certificate_is_only_unbracketed() {
-    let t0 = 0.0;
-    let (term, metric) = planted_circle(t0);
-    let target = 0.5_f64;
-    let mut probe = |plan: &SteerPlan| -> Result<AppliedDoseObservation, String> {
-        Ok(AppliedDoseObservation {
-            effective_delta: plan.delta.clone(),
-            exact_directional_nats: plan.predicted_nats.expect("exact local dose"),
-            measured_nats: 0.1,
-            certified_attainable_upper_nats: None,
-        })
-    };
-    let error = steer_to_target_nats(
-        &term,
-        &metric,
-        TargetDoseRequest {
-            atom_k: 0,
-            metric_row: 0,
-            t_from: &[t0],
-            direction: &[1.0],
-            target_nats: target,
-            config: TargetDoseConfig {
-                max_iter: 3,
-                ..dose_config()
-            },
-        },
-        Some(&mut probe),
-    )
-    .expect_err("three equal samples cannot certify a global attainable envelope");
-    assert!(matches!(
-        error,
-        TargetDoseError::UnbracketedTarget {
-            probes: 3,
-            max_measured_nats: 0.1,
-            ..
-        }
-    ));
 }
 
 /// gh#2263: the solve never moves past the chart. On the planted circle the extent
@@ -792,7 +751,6 @@ fn target_dose_chart_end_is_a_typed_refusal_never_a_clamp() {
             t_from: &[t0],
             direction: &[1.0],
             target_nats: target,
-            config: dose_config(),
         },
         Some(&mut probe),
     )
@@ -808,10 +766,16 @@ fn target_dose_chart_end_is_a_typed_refusal_never_a_clamp() {
     };
     assert_eq!(extent, 1.0, "the circle's extent along +1 is one period");
     assert_eq!(max_observed_nats, 0.1);
-    assert!(
-        probed.len() < dose_config().max_iter,
-        "the refusal must come from the chart's end, not from the probe budget: {} probes",
-        probed.len()
+    // Expansion observes the seed, doubles through `ceil(log2(extent/seed)) − 1` more
+    // interior points, then observes the chart's end once. There is no probe budget
+    // the refusal could have come from instead.
+    let seed = (target / (0.5 * (TWO_PI * R).powi(2))).sqrt();
+    let expected_probes = (1.0 / seed).log2().ceil() as usize + 1;
+    assert_eq!(
+        probed.len(),
+        expected_probes,
+        "the refusal must follow the doubling ladder from the seed {seed} to the chart's end: \
+         probed {probed:?}"
     );
     assert_eq!(
         probed.last().copied(),
@@ -852,11 +816,6 @@ fn target_dose_expansion_continues_through_a_local_decrease() {
             t_from: &[t0],
             direction: &[1.0],
             target_nats: target,
-            config: TargetDoseConfig {
-                tol_rel: 0.0,
-                max_iter: 3,
-                ..dose_config()
-            },
         },
         Some(&mut probe),
     )
@@ -868,21 +827,34 @@ fn target_dose_expansion_continues_through_a_local_decrease() {
     );
 }
 
+/// gh#2263: a patched forward whose applied move is quantized sees a step function
+/// of the displacement. When the target sits just above one plateau, the Illinois
+/// weighted secant creeps towards the far endpoint: each same-side observation
+/// halves that endpoint's weight, and it takes about `log2` of the residual ratio
+/// such observations before a candidate can cross the jump. The solve must still
+/// stop at the representation limit, on the plateau closer to the target, within
+/// the observation bound its bisection safeguard guarantees. Here one quantum of
+/// displacement is `2⁻³⁰` and the target sits `2⁻²⁰` of one jump above the lower
+/// plateau.
 #[test]
-fn target_dose_probe_exhaustion_never_returns_an_unconverged_plan() {
+fn target_dose_quantized_probe_ends_on_the_closer_plateau_within_the_safeguard_bound() {
     let t0 = 0.0;
     let (term, metric) = planted_circle(t0);
-    let target = 0.5_f64;
+    let quantum = 2.0_f64.powi(-30);
+    let quantized_kl = |s: f64| analytic_kl(quantum * (s / quantum).floor());
+    let cell = (0.02 / quantum).floor();
+    let lower = quantized_kl(cell * quantum);
+    let upper = quantized_kl((cell + 1.0) * quantum);
+    let target = lower + (upper - lower) * 2.0_f64.powi(-20);
     let mut probe = |plan: &SteerPlan| -> Result<AppliedDoseObservation, String> {
-        let exact = plan.predicted_nats.expect("exact local dose");
         Ok(AppliedDoseObservation {
             effective_delta: plan.delta.clone(),
-            exact_directional_nats: exact,
-            measured_nats: 0.5 * exact,
+            exact_directional_nats: plan.predicted_nats.expect("exact local dose"),
+            measured_nats: quantized_kl(plan.t_to[0] - t0),
             certified_attainable_upper_nats: None,
         })
     };
-    let error = steer_to_target_nats(
+    let plan = steer_to_target_nats(
         &term,
         &metric,
         TargetDoseRequest {
@@ -891,77 +863,43 @@ fn target_dose_probe_exhaustion_never_returns_an_unconverged_plan() {
             t_from: &[t0],
             direction: &[1.0],
             target_nats: target,
-            config: TargetDoseConfig {
-                max_iter: 1,
-                ..dose_config()
-            },
         },
         Some(&mut probe),
     )
-    .expect_err("one below-target probe cannot certify a target-dose plan");
-    assert!(matches!(
-        error,
-        TargetDoseError::UnbracketedTarget { probes: 1, .. }
-    ));
-}
+    .expect("a quantized readout must still be resolved");
 
-/// gh#2263: a relative tolerance is a fraction, not an arbitrary non-negative
-/// scalar. Values at or above one can certify zero realized KL for a positive
-/// target, while NaN/infinity make every comparison meaningless. Zero remains
-/// a valid exact-agreement request.
-#[test]
-fn target_dose_relative_tolerances_have_fractional_finite_domain() {
-    let t0 = 0.0;
-    let (term, metric) = planted_circle(t0);
-    let target = analytic_kl(0.02);
-
-    steer_to_target_nats(
-        &term,
-        &metric,
-        TargetDoseRequest {
-            atom_k: 0,
-            metric_row: 0,
-            t_from: &[t0],
-            direction: &[1.0],
-            target_nats: target,
-            config: TargetDoseConfig {
-                tol_rel: 0.0,
-                readout_tol_rel: 0.0,
-                ..dose_config()
-            },
-        },
-        None,
-    )
-    .expect("zero requests exact agreement and is a valid relative tolerance");
-
-    for invalid in [1.0, f64::INFINITY, f64::NAN] {
-        for config in [
-            TargetDoseConfig {
-                tol_rel: invalid,
-                ..dose_config()
-            },
-            TargetDoseConfig {
-                readout_tol_rel: invalid,
-                ..dose_config()
-            },
-        ] {
-            let error = steer_to_target_nats(
-                &term,
-                &metric,
-                TargetDoseRequest {
-                    atom_k: 0,
-                    metric_row: 0,
-                    t_from: &[t0],
-                    direction: &[1.0],
-                    target_nats: target,
-                    config,
-                },
-                None,
-            )
-            .expect_err("a non-fractional/non-finite tolerance must fail closed");
-            assert!(matches!(error, TargetDoseError::InvalidRequest(_)));
-        }
-    }
+    let measured = plan
+        .applied_probe
+        .as_ref()
+        .expect("applied probe")
+        .measured_nats;
+    let jump = (cell + 1.0) * quantum;
+    let bound = safeguard_observation_bound(plan.seed_displacement, jump);
+    println!(
+        "quantized probe: {} probes (guaranteed at most {bound}), measured {measured:.15e}, \
+         plateaus {lower:.15e}..{upper:.15e}, target {target:.15e}, displacement {:.15e}, \
+         jump at {jump:.15e}",
+        plan.iterations, plan.displacement
+    );
+    assert_eq!(
+        measured, lower,
+        "the solve must end on the plateau closer to the target"
+    );
+    assert!(
+        cell * quantum <= plan.displacement && plan.displacement < jump,
+        "the landing must lie in the lower plateau's cell [{}, {jump}); got {}",
+        cell * quantum,
+        plan.displacement
+    );
+    assert!(
+        plan.iterations <= bound,
+        "the safeguarded bracket guarantees at most {bound} probes; took {}",
+        plan.iterations
+    );
+    assert!(
+        lower < target && target < upper,
+        "precondition: the target {target} must sit inside the jump {lower}..{upper}"
+    );
 }
 
 /// gh#2263: the request names a direction to move along, not a target coordinate.
@@ -979,7 +917,6 @@ fn target_dose_direction_must_be_a_finite_nonzero_chart_vector() {
         t_from: &[0.0],
         direction,
         target_nats: target,
-        config: dose_config(),
     };
     for direction in [&[0.0][..], &[f64::NAN][..], &[1.0, 0.0][..]] {
         let error = steer_to_target_nats(&term, &metric, request(direction), None)
@@ -1055,7 +992,6 @@ fn applied_dose_probe_payload_fails_closed() {
                 t_from: &[t0],
                 direction: &[1.0],
                 target_nats: target,
-                config: dose_config(),
             },
             Some(&mut probe),
         )
@@ -1093,7 +1029,6 @@ fn target_dose_moves_the_coordinate_and_refuses_what_the_chart_cannot_produce_22
         t_from: &[0.0],
         direction: &[1.0],
         target_nats,
-        config: dose_config(),
     };
 
     let reachable = 4.0 * unit_month;

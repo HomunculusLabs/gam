@@ -96,7 +96,6 @@ def _plan(predicted: float, measured: float) -> dict[str, object]:
         "resident_metric_nats_kind": "uncertified_approximation",
         "iterations": 3,
         "displacement": 0.1,
-        "readout_kl_radius": 0.2,
     }
 
 

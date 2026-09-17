@@ -484,7 +484,7 @@ def patched_forward_kl(steer_plan):
     }
 ```
 
-The request then controls the bracket solve:
+The request names only what to steer and how large a dose to land:
 
 ```python no-exec
 plan = fit.steer_to_target(
@@ -494,9 +494,6 @@ plan = fit.steer_to_target(
         "target_nats": 0.05,
         "t_from": np.array([0.1]),
         "direction": np.array([1.0]),
-        "tol_rel": 0.01,
-        "max_iter": 12,
-        "readout_tol_rel": 0.1,
     },
     patched_forward_kl,
 )
@@ -504,8 +501,8 @@ plan["delta"]             # exact (p,) activation-space move to apply
 plan["t_to"]              # solved landing coordinate on the atom's chart
 plan["displacement"]      # how far along the direction the solve moved
 plan["measured_nats"]     # patched-forward KL at the solved coordinate
+plan["iterations"]        # patched forwards the solve spent
 plan["validation"]        # "applied_dose_probe"
-plan["readout_kl_radius"] # contiguous calibrated displacement radius, or None
 plan["certified_attainable_upper_nats"] # global envelope certificate, or None
 plan["off_manifold_norm"] # component of the move off the atom's local tangents (≈0 on-manifold)
 plan["metric_provenance"] # "OutputFisher" if a Fisher metric was installed, else "Euclidean"
@@ -516,13 +513,18 @@ the downstream effect is this large, where does it land, and how far can I trust
 that?" The move stays on the atom's fitted shape at the row's own intensity, while
 the patched forward—not a universal raw amplitude—certifies intervention strength.
 Target-dose solving requires an output-Fisher metric (`fisher_factors=` supplied to
-`sae_manifold_fit`) and fails explicitly when the target cannot be bracketed or
-resolved within the probe budget, when the atom is not expressed at `metric_row`,
-or when the direction runs off the chart before the dose is reached. Ordered
-displacement expansion continues through isolated equal or decreasing KL probes:
-no finite collection of point observations proves a plateau. The dedicated
-"unreachable" error is emitted only when the callback supplies a certified global
-attainable-dose upper bound that lies below the request's accepted tolerance band.
+`sae_manifold_fit`). There is no accuracy option and no probe budget: the bracket
+is resolved to the representation limit of the displacement, and the plan is the
+probed move whose measured dose equals the target or, once no representable
+displacement lies inside the bracket, the closer of its two ends. A secant step
+that has not halved the bracket over two probes is followed by a bisection, so the
+bracket halves at least once every three probes and the solve always terminates.
+It fails explicitly when the atom is not expressed at `metric_row` or when the
+direction runs off the chart before the dose is reached. Ordered displacement
+expansion continues through isolated equal or decreasing KL probes: no finite
+collection of point observations proves a plateau. The dedicated "unreachable"
+error is emitted only when the callback supplies a certified global attainable-dose
+upper bound that lies below the target.
 
 ## Certified structure (anytime-valid)
 

@@ -6410,8 +6410,9 @@ impl ManifoldSaeCore {
     /// dose. The move is written at the row's own fitted gate, so it stays a chord
     /// of the atom's decoded image; the landing coordinate `t_to` is returned, never
     /// requested. The required `request` mapping contains `atom_k`, `metric_row`,
-    /// `target_nats`, `t_from`, `direction`, `tol_rel`, `max_iter`, and
-    /// `readout_tol_rel`. Returns the plan with `seed_displacement` and the solved
+    /// `target_nats`, `t_from`, and `direction`, and no other key: the solve
+    /// resolves the displacement to its representation limit with no accuracy or
+    /// probe-budget option. Returns the plan with `seed_displacement` and the solved
     /// `displacement` plus, when a plan-aware `probe` is supplied, one atomic
     /// observation mapping with `effective_delta`, `exact_directional_nats`,
     /// `measured_nats`, and required optional `certified_attainable_upper_nats`.
@@ -6433,7 +6434,6 @@ impl ManifoldSaeCore {
             target_nats,
             t_from,
             direction,
-            config,
         } = ManifoldSteerToTargetRequest::from_pydict(request)?;
         let inner = &self.inner;
         // Same frozen-dictionary marshalling as `steer` (kept inline so the two
@@ -6541,7 +6541,6 @@ impl ManifoldSaeCore {
                 atom_k,
                 metric_row,
                 target_nats,
-                config,
                 t_from: t_from.view(),
                 direction: direction.view(),
                 geometry_plans: &inner.geometry_plans,
