@@ -36,7 +36,7 @@
 //!
 //! # Identity versus a projector family (P11, A8)
 //!
-//! [`code_saving_at_declared_fidelity`] compares two decoded artifacts that both
+//! [`code_saving_at_proven_fidelity`] compares two decoded artifacts that both
 //! meet one declared fidelity tolerance. Take `P_c = (2/C) v(t_c) v(t_c)ᵀ` at equally
 //! spaced `t_c ∈ [0, π)` with `C ≥ 2`, so `Σ_c P_c = I₂` (at `C = 1` the family sums to
 //! `diag(2, 0)`). For a unit `x`, `‖x − P_S x‖ ≥ xᵀ(x − P_S x) ≥ 1 − 2|S|/C`, so
@@ -49,6 +49,7 @@
 use std::cmp::Ordering;
 use std::fmt;
 
+use super::precision::{DecodedFidelity, FidelityVerdict};
 use super::supports::CardinalityCode;
 
 /// Why a message could not be written or read.
@@ -830,6 +831,10 @@ pub fn decode_support_packet(
 }
 
 /// A decoded artifact's score over one declared finite input family.
+///
+/// Superseded by [`code_saving_at_proven_fidelity`], which reads precision.rs's proven verdict.
+/// This type and [`code_saving_at_declared_fidelity`] are deleted once their last consumers
+/// (fit.rs, families.rs, teacher_tests.rs) have migrated (#2951).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DecodedArtifactScore {
     /// The exact artifact length ([`LibraryPacketArtifact::total_bits`]).
@@ -850,6 +855,10 @@ pub struct DecodedArtifactScore {
 /// different fidelities are not a model comparison. The tolerance is an experiment
 /// declaration with no default. The verdict is exhaustive over the declared input
 /// family and says nothing about inputs outside it.
+///
+/// Superseded by [`code_saving_at_proven_fidelity`]: this predicate has no rounding band,
+/// so a figure within its band of the tolerance reads as a miss here and as `Unresolved`
+/// in precision.rs. Deleted once its last consumers have migrated.
 pub fn code_saving_at_declared_fidelity(
     tolerance: f64,
     reference: &DecodedArtifactScore,
@@ -887,6 +896,44 @@ pub fn code_saving_at_declared_fidelity(
     Ok(i128::from(reference.code_bits) - i128::from(candidate.code_bits))
 }
 
+/// `reference − candidate` in bits between two decoded artifacts, each given with its exact
+/// code length ([`LibraryPacketArtifact::total_bits`]) and the fidelity evidence of its decoded
+/// outputs (positive means the candidate is shorter).
+///
+/// The comparison is refused unless both verdicts are [`FidelityVerdict::Meets`] under one
+/// declared tolerance. Lengths at different fidelities are not a model comparison, and a figure
+/// within its rounding band of the tolerance is `Unresolved`: it proves neither side, so it is
+/// refused rather than read as a pass or a violation. Each verdict is stated over the inputs its
+/// evaluation executed and says nothing beyond them.
+pub fn code_saving_at_proven_fidelity<W, D, V, E>(
+    reference: (u64, &DecodedFidelity<W, D>),
+    candidate: (u64, &DecodedFidelity<V, E>),
+) -> Result<i128, String> {
+    let (reference_bits, reference_fidelity) = reference;
+    let (candidate_bits, candidate_fidelity) = candidate;
+    if reference_fidelity.tolerance().to_bits() != candidate_fidelity.tolerance().to_bits() {
+        return Err(format!(
+            "code comparison refused: the reference is scored at tolerance {} and the candidate \
+             at {}, not one declared tolerance",
+            reference_fidelity.tolerance(),
+            candidate_fidelity.tolerance()
+        ));
+    }
+    for (role, verdict) in [
+        ("reference", reference_fidelity.verdict()),
+        ("candidate", candidate_fidelity.verdict()),
+    ] {
+        if verdict != FidelityVerdict::Meets {
+            return Err(format!(
+                "code comparison refused: the {role} artifact's decoded fidelity is {verdict:?} \
+                 at tolerance {}, not Meets",
+                reference_fidelity.tolerance()
+            ));
+        }
+    }
+    Ok(i128::from(reference_bits) - i128::from(candidate_bits))
+}
+
 /// The enumerative subset code `L(S) = L_int(k + 1) + ⌈log₂ C(n, k)⌉` as the support code the
 /// P12 minimum-code support search minimizes ([`super::supports::minimum_code_support`]).
 ///
@@ -907,6 +954,10 @@ impl CardinalityCode for EnumerativeSubsetCode {
 mod tests {
     use super::*;
     use crate::description_length::selection_bits;
+    use crate::parameter_decomposition::precision::{
+        DecodableArtifact, DecodedFidelity, FidelityVerdict, PeriodicQuotient, QuotientCode,
+        decode_then_evaluate,
+    };
     use crate::parameter_decomposition::supports::{
         CardinalityCode, ComponentSet, EvidenceStatus, EvidenceStatusError, ExactBasis,
         FailureHypergraph, SeparationOracle, minimum_code_support,
@@ -1321,6 +1372,64 @@ mod tests {
         assert!(code_saving_at_declared_fidelity(0.25, &undefined, &short).is_err());
     }
 
+    /// A test artifact whose decoder returns a stored figure, so each fidelity fixture states its
+    /// evidence directly and the comparison's refusals are exercised one verdict at a time.
+    struct StoredFigure(f64);
+
+    impl DecodableArtifact for StoredFigure {
+        type Decoded = f64;
+
+        fn decode(&self) -> Result<f64, String> {
+            Ok(self.0)
+        }
+    }
+
+    fn stored_fidelity(
+        value: f64,
+        numerical_error: f64,
+        tolerance: f64,
+    ) -> DecodedFidelity<(), &'static str> {
+        decode_then_evaluate(
+            &StoredFigure(value),
+            |decoded: &f64| Ok(*decoded),
+            &0.0,
+            |output: &f64, reference: &f64| {
+                EvidenceStatus::exact(
+                    (output - reference).abs(),
+                    numerical_error,
+                    ExactBasis::Algebraic,
+                    None,
+                    "stored figure",
+                )
+                .map_err(|error| error.to_string())
+            },
+            tolerance,
+        )
+        .expect("a finite figure under a finite tolerance")
+    }
+
+    #[test]
+    fn code_comparison_refuses_artifacts_that_do_not_meet_one_tolerance() {
+        let short = stored_fidelity(0.0, 0.0, 0.25);
+        let long = stored_fidelity(0.2, 1e-15, 0.25);
+        assert_eq!(short.verdict(), FidelityVerdict::Meets);
+        assert_eq!(long.verdict(), FidelityVerdict::Meets);
+        assert_eq!(code_saving_at_proven_fidelity((300, &long), (10, &short)), Ok(290));
+        // A proven violation is refused.
+        let violating = stored_fidelity(0.3, 0.0, 0.25);
+        assert_eq!(violating.verdict(), FidelityVerdict::Violates);
+        assert!(code_saving_at_proven_fidelity((300, &long), (10, &violating)).is_err());
+        // A figure within its rounding band of the tolerance proves neither side and is refused.
+        let unresolved = stored_fidelity(0.25, 1e-16, 0.25);
+        assert_eq!(unresolved.verdict(), FidelityVerdict::Unresolved);
+        assert!(code_saving_at_proven_fidelity((300, &long), (10, &unresolved)).is_err());
+        // Two artifacts that each meet their own tolerance are still not one comparison when the
+        // tolerances differ, here by one unit in the last place.
+        let looser = stored_fidelity(0.0, 0.0, f64::from_bits(0.25_f64.to_bits() + 1));
+        assert_eq!(looser.verdict(), FidelityVerdict::Meets);
+        assert!(code_saving_at_proven_fidelity((300, &long), (10, &looser)).is_err());
+    }
+
     // The A8 fixture's label alphabet: an input read, the native identity primitive,
     // one instance of the projector family, and a sum masked by the input's packet.
     const INPUT: usize = 0;
@@ -1328,30 +1437,152 @@ mod tests {
     const FAMILY_INSTANCE: usize = 2;
     const MASKED_SUM: usize = 3;
     const LABELS: usize = 4;
+    // The declared resolution of each projector label on RP^1, in bits.
+    const LABEL_RESOLUTION_BITS: u32 = 8;
 
-    fn family_direction(instance: usize, instances: usize) -> [f64; 2] {
-        let angle = std::f64::consts::PI * instance as f64 / instances as f64;
-        [angle.cos(), angle.sin()]
-    }
-
-    /// `‖x − Σ_{c∈S} (2/C)(v_c·x) v_c‖` and a derived bound on its rounding error.
-    ///
-    /// Every partial sum and the output stay within norm 2 (`‖P_S x‖ ≤ 2|S|/C ≤ 2`).
-    /// Each output coordinate is at most `2|S| + 12` rounded operations from exact
-    /// inputs (direction, dot product, scale, accumulate, subtract, norm), so its
-    /// relative error is at most Higham's `γ_m = m·u/(1 − m·u)` of that count
-    /// ([`accumulation_growth`], `u = ε/2`), and the distortion, a norm of magnitude at
-    /// most 3, moves by at most `3·γ_m`.
-    fn projector_distortion(x: [f64; 2], support: &[usize], instances: usize) -> (f64, f64) {
+    /// `Σ_{c∈S} (2/C)(v(t_c)·x) v(t_c)` over the decoded labels `t_c`, with `C` labels.
+    fn projector_output(x: [f64; 2], support: &[usize], labels: &[f64]) -> [f64; 2] {
+        let weight_scale = 2.0 / labels.len() as f64;
         let mut output = [0.0_f64; 2];
         for &instance in support {
-            let direction = family_direction(instance, instances);
-            let weight = 2.0 / instances as f64 * (direction[0] * x[0] + direction[1] * x[1]);
-            output[0] += weight * direction[0];
-            output[1] += weight * direction[1];
+            let (sine, cosine) = labels[instance].sin_cos();
+            let weight = weight_scale * (cosine * x[0] + sine * x[1]);
+            output[0] += weight * cosine;
+            output[1] += weight * sine;
         }
-        let distortion = ((x[0] - output[0]).powi(2) + (x[1] - output[1]).powi(2)).sqrt();
-        (distortion, 3.0 * accumulation_growth(2 * support.len() + 12))
+        output
+    }
+
+    fn distance(output: [f64; 2], x: [f64; 2]) -> f64 {
+        ((x[0] - output[0]).powi(2) + (x[1] - output[1]).powi(2)).sqrt()
+    }
+
+    /// A derived bound on the rounding error of one executed distortion over `instances` labels.
+    ///
+    /// Every partial sum and the output stay within norm 2 (`‖P_S x‖ ≤ 2|S|/C ≤ 2`). Each output
+    /// coordinate is at most `2C + 12` rounded operations from the decoded labels and the input
+    /// (direction, dot product, scale, accumulate, subtract, norm), so its relative error is at
+    /// most Higham's `γ_m = m·u/(1 − m·u)` of that count ([`accumulation_growth`], `u = ε/2`), and
+    /// the distortion, a norm of magnitude at most 3, moves by at most `3·γ_m`.
+    fn distortion_roundoff(instances: usize) -> f64 {
+        3.0 * accumulation_growth(2 * instances + 12)
+    }
+
+    /// What an A8 artifact decodes to: the native identity, or a projector family with its
+    /// decoded labels and each input's decoded support.
+    enum DecodedProgram {
+        Identity,
+        ProjectorFamily {
+            labels: Vec<f64>,
+            supports: Vec<Vec<usize>>,
+        },
+    }
+
+    impl DecodedProgram {
+        fn family_parts(&self) -> Option<(&[f64], &[Vec<usize>])> {
+            match self {
+                Self::ProjectorFamily { labels, supports } => {
+                    Some((labels.as_slice(), supports.as_slice()))
+                }
+                Self::Identity => None,
+            }
+        }
+    }
+
+    /// An A8 artifact as transmitted: the library (the program graph, then a projector family's
+    /// label message) and one packet per input.
+    struct A8Artifact(LibraryPacketArtifact);
+
+    impl DecodableArtifact for A8Artifact {
+        type Decoded = DecodedProgram;
+
+        fn decode(&self) -> Result<DecodedProgram, String> {
+            let mut reader = self.0.library.reader();
+            let nodes = decode_ordered_dag(&mut reader, LABELS).map_err(|error| error.to_string())?;
+            let instances = nodes.iter().filter(|node| node.label == FAMILY_INSTANCE).count();
+            if instances == 0 {
+                reader.finish().map_err(|error| error.to_string())?;
+                if self.0.packets.iter().any(|packet| !packet.is_empty()) {
+                    return Err("the identity program reads no packet".to_string());
+                }
+                return Ok(DecodedProgram::Identity);
+            }
+            let quotient = PeriodicQuotient::new(std::f64::consts::PI)?;
+            let labels = QuotientCode::read(&mut reader, quotient)?.decode()?;
+            reader.finish().map_err(|error| error.to_string())?;
+            if labels.len() != instances {
+                return Err(format!("{} labels for {instances} instances", labels.len()));
+            }
+            let supports = self
+                .0
+                .packets
+                .iter()
+                .map(|packet| {
+                    decode_support_packet(instances, packet).map_err(|error| error.to_string())
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(DecodedProgram::ProjectorFamily { labels, supports })
+        }
+    }
+
+    /// Execute a decoded A8 program on every input.
+    fn execute(program: &DecodedProgram, inputs: &[[f64; 2]]) -> Result<Vec<[f64; 2]>, String> {
+        match program {
+            DecodedProgram::Identity => Ok(inputs.to_vec()),
+            DecodedProgram::ProjectorFamily { labels, supports } => {
+                if supports.len() != inputs.len() {
+                    return Err(format!(
+                        "{} packets for {} inputs",
+                        supports.len(),
+                        inputs.len()
+                    ));
+                }
+                Ok(inputs
+                    .iter()
+                    .zip(supports)
+                    .map(|(&x, support)| projector_output(x, support, labels))
+                    .collect())
+            }
+        }
+    }
+
+    /// The declared distortion of executed outputs against the native reference: the largest
+    /// `‖y − x‖` over every executed input, exhaustive, with its derived rounding bound and the
+    /// worst input as witness.
+    fn worst_distortion(
+        outputs: &Vec<[f64; 2]>,
+        reference: &Vec<[f64; 2]>,
+        instances: usize,
+    ) -> Result<EvidenceStatus<usize, &'static str>, String> {
+        if outputs.len() != reference.len() || outputs.is_empty() {
+            return Err(format!(
+                "{} outputs for {} reference inputs",
+                outputs.len(),
+                reference.len()
+            ));
+        }
+        let (worst, value) = outputs
+            .iter()
+            .zip(reference)
+            .map(|(&output, &x)| distance(output, x))
+            .enumerate()
+            .fold((0_usize, 0.0_f64), |(worst, largest), (input, distortion)| {
+                if distortion > largest {
+                    (input, distortion)
+                } else {
+                    (worst, largest)
+                }
+            });
+        EvidenceStatus::exact(
+            value,
+            distortion_roundoff(instances),
+            ExactBasis::Exhaustive {
+                cardinality: outputs.len() as u64,
+            },
+            Some(worst),
+            "the declared unit inputs",
+        )
+        .map_err(|error| error.to_string())
     }
 
     #[test]
@@ -1364,6 +1595,7 @@ mod tests {
                 [angle.cos(), angle.sin()]
             })
             .collect();
+        let roundoff = distortion_roundoff(instances);
 
         // Identity program: read the input, apply the native identity. No packet.
         let identity_nodes = vec![
@@ -1372,43 +1604,68 @@ mod tests {
         ];
         let mut identity_library = BitString::new();
         encode_ordered_dag(&mut identity_library, LABELS, &identity_nodes).expect("identity library");
-        let identity = LibraryPacketArtifact {
-            library: identity_library,
-            packets: vec![BitString::new(); inputs.len()],
-        };
         // Hand-derived: node count L_int(3) = 3, two labels at 2 bits, the second node's
         // arity L_int(2) = 3, and its one argument at ⌈log₂ max(1, 2)⌉ = 1 bit.
-        assert_eq!(identity.library.len_bits(), 11);
-        let mut reader = identity.library.reader();
-        assert_eq!(decode_ordered_dag(&mut reader, LABELS), Ok(identity_nodes));
-        assert_eq!(reader.finish(), Ok(()));
-        // The decoded identity returns its input bit for bit.
-        let identity_score = DecodedArtifactScore {
-            code_bits: identity.total_bits(),
-            decoded_distortion: 0.0,
-            distortion_roundoff: 0.0,
-        };
+        assert_eq!(identity_library.len_bits(), 11);
+        let identity = A8Artifact(LibraryPacketArtifact {
+            library: identity_library,
+            packets: vec![BitString::new(); inputs.len()],
+        });
+        let identity_fidelity = decode_then_evaluate(
+            &identity,
+            |program: &DecodedProgram| execute(program, &inputs),
+            &inputs,
+            |outputs: &Vec<[f64; 2]>, reference: &Vec<[f64; 2]>| {
+                worst_distortion(outputs, reference, instances)
+            },
+            tolerance,
+        )
+        .expect("the identity artifact decodes and executes");
+        assert_eq!(identity_fidelity.verdict(), FidelityVerdict::Meets);
 
-        // Projector family: the instance labels are determined by position on the
-        // equally spaced grid of RP^1, so the library spends zero bits on them. Any
-        // declared-precision label code costs at least that much, so this is the
-        // cheapest library the family can have.
+        // Projector family: the program graph, then the labels t_c = πc/C sent once on RP^1 at
+        // the declared resolution through precision.rs. The decoder executes the decoded labels.
         let mut family_nodes = vec![DagNode { label: INPUT, arguments: vec![] }];
         family_nodes.extend((0..instances).map(|_| DagNode { label: FAMILY_INSTANCE, arguments: vec![0] }));
         family_nodes.push(DagNode { label: MASKED_SUM, arguments: (1..=instances).collect() });
         let mut family_library = BitString::new();
-        encode_ordered_dag(&mut family_library, LABELS, &family_nodes).expect("family library");
+        encode_ordered_dag(&mut family_library, LABELS, &family_nodes).expect("family graph");
+        // Hand-derived: node count L_int(19) = 11, 18 labels at 2 bits = 36, instance arities
+        // 16·L_int(2) = 48, instance arguments Σ_{i=1..16}⌈log₂ max(i, 2)⌉ = 50, and the
+        // masked sum's L_int(17) = 11 plus 16 arguments at ⌈log₂ 17⌉ = 5 bits = 80.
+        assert_eq!(family_library.len_bits(), 236);
+        let true_labels: Vec<f64> = (0..instances)
+            .map(|instance| std::f64::consts::PI * instance as f64 / instances as f64)
+            .collect();
+        let label_code = QuotientCode::encode(
+            &true_labels,
+            PeriodicQuotient::new(std::f64::consts::PI).expect("the RP^1 period"),
+            LABEL_RESOLUTION_BITS,
+        )
+        .expect("the labels encode");
+        label_code.write(&mut family_library).expect("the labels write");
+        // Hand-derived label message: count L_int(17) = 11, resolution L_int(9) = 7, and 16
+        // indices at 8 bits = 128.
+        assert_eq!(family_library.len_bits(), 236 + 146);
+        let decoded_labels = label_code.decode().expect("the labels decode");
+        for (&decoded_label, &true_label) in decoded_labels.iter().zip(&true_labels) {
+            assert!(
+                (decoded_label - true_label).abs() <= label_code.worst_case_error(),
+                "label {true_label} decoded to {decoded_label}"
+            );
+        }
 
-        // Per input, the fewest largest-overlap instances that meet the tolerance
-        // with their roundoff counted.
+        // Per input, the fewest largest-overlap instances whose decoded output meets the
+        // tolerance with its roundoff counted, rounded up the way `EvidenceStatus::certifies_at_most`
+        // rounds, so the executed figures below reach the same verdict.
         let supports: Vec<Vec<usize>> = inputs
             .iter()
             .map(|&x| {
                 let mut order: Vec<usize> = (0..instances).collect();
                 order.sort_by(|&left, &right| {
-                    let overlap = |instance| {
-                        let direction = family_direction(instance, instances);
-                        (direction[0] * x[0] + direction[1] * x[1]).powi(2)
+                    let overlap = |instance: usize| {
+                        let (sine, cosine) = decoded_labels[instance].sin_cos();
+                        (cosine * x[0] + sine * x[1]).powi(2)
                     };
                     overlap(right).total_cmp(&overlap(left))
                 });
@@ -1419,10 +1676,11 @@ mod tests {
                         support
                     })
                     .find(|support| {
-                        let (distortion, roundoff) = projector_distortion(x, support, instances);
-                        distortion + roundoff <= tolerance
+                        (distance(projector_output(x, support, &decoded_labels), x) + roundoff)
+                            .next_up()
+                            <= tolerance
                     })
-                    .expect("the all-on sum is the identity, so some support meets the tolerance")
+                    .expect("the all-on sum is the identity to rounding, so some support meets the tolerance")
             })
             .collect();
         let library = union_support_library(&supports).expect("union library");
@@ -1434,87 +1692,88 @@ mod tests {
             library.summed_support as f64 / inputs.len() as f64,
             library.components.len()
         );
-        let family = LibraryPacketArtifact {
+        let family = A8Artifact(LibraryPacketArtifact {
             library: family_library,
             packets: encode_support_packets(instances, &library.supports).expect("packets"),
-        };
-        // Hand-derived: node count L_int(19) = 11, 18 labels at 2 bits = 36, instance arities
-        // 16·L_int(2) = 48, instance arguments Σ_{i=1..16}⌈log₂ max(i, 2)⌉ = 50, and the
-        // masked sum's L_int(17) = 11 plus 16 arguments at ⌈log₂ 17⌉ = 5 bits = 80.
-        assert_eq!(family.library.len_bits(), 236);
+        });
 
-        // Decode the library, then each packet alone and in reverse order, and
-        // measure distortion on the decoded program.
-        let mut reader = family.library.reader();
-        let decoded_nodes = decode_ordered_dag(&mut reader, LABELS).expect("decode family library");
-        assert_eq!(reader.finish(), Ok(()));
-        let decoded_instances = decoded_nodes.iter().filter(|node| node.label == FAMILY_INSTANCE).count();
-        assert_eq!(decoded_instances, instances);
+        // The decoder rebuilds the labels and every packet from the artifact alone.
+        let decoded = family.decode().expect("the family artifact decodes");
+        let (labels, decoded_supports) = decoded
+            .family_parts()
+            .expect("a library with family instances decodes to a projector family");
+        assert_eq!(labels, decoded_labels.as_slice());
         let minimum_cardinality = (instances as f64 * (1.0 - tolerance) / 2.0).ceil() as usize;
-        let mut decoded_distortion = 0.0_f64;
-        let mut distortion_roundoff = 0.0_f64;
-        for (input, packet) in family.packets.iter().enumerate().rev() {
-            let support = decode_support_packet(decoded_instances, packet).expect("decode packet");
-            assert_eq!(support, library.supports[input]);
+        for (input, support) in decoded_supports.iter().enumerate() {
+            assert_eq!(support, &library.supports[input]);
             // P11: error ε on a unit input needs |S| ≥ C(1 − ε)/2.
             assert!(
                 support.len() >= minimum_cardinality,
                 "input {input} met the tolerance with {} of {instances} instances, below the P11 bound {minimum_cardinality}",
                 support.len()
             );
-            let (distortion, roundoff) = projector_distortion(inputs[input], &support, decoded_instances);
-            decoded_distortion = decoded_distortion.max(distortion);
-            distortion_roundoff = distortion_roundoff.max(roundoff);
         }
-        let family_score = DecodedArtifactScore {
-            code_bits: family.total_bits(),
-            decoded_distortion,
-            distortion_roundoff,
-        };
+        let family_fidelity = decode_then_evaluate(
+            &family,
+            |program: &DecodedProgram| execute(program, &inputs),
+            &inputs,
+            |outputs: &Vec<[f64; 2]>, reference: &Vec<[f64; 2]>| {
+                worst_distortion(outputs, reference, instances)
+            },
+            tolerance,
+        )
+        .expect("the family artifact decodes and executes");
+        assert_eq!(family_fidelity.verdict(), FidelityVerdict::Meets);
 
-        let saving = code_saving_at_declared_fidelity(tolerance, &family_score, &identity_score)
-            .expect("both artifacts meet the declared tolerance");
+        let saving = code_saving_at_proven_fidelity(
+            (family.0.total_bits(), &family_fidelity),
+            (identity.0.total_bits(), &identity_fidelity),
+        )
+        .expect("both artifacts meet one declared tolerance");
         assert!(
             saving > 0,
             "identity ({} bits) must be shorter than the projector family ({} bits)",
-            identity_score.code_bits,
-            family_score.code_bits
+            identity.0.total_bits(),
+            family.0.total_bits()
         );
-        // A bound free of the packet choice: every faithful packet costs at least the
-        // least subset code over the admissible cardinalities.
+        // A bound free of the packet choice: every faithful packet costs at least the least
+        // subset code over the admissible cardinalities.
         let least_packet = (minimum_cardinality..=instances)
             .map(|cardinality| subset_code_len_bits(instances, cardinality).expect("length"))
             .min()
             .expect("admissible cardinalities");
-        let family_floor = family.library.len_bits() + inputs.len() as u64 * least_packet;
-        assert!(family_score.code_bits >= family_floor);
+        let family_floor = family.0.library.len_bits() + inputs.len() as u64 * least_packet;
+        assert!(family.0.total_bits() >= family_floor);
         assert!(
-            identity_score.code_bits < family_floor,
+            identity.0.total_bits() < family_floor,
             "identity ({} bits) must beat every faithful projector artifact (at least {family_floor} bits)",
-            identity_score.code_bits
+            identity.0.total_bits()
         );
 
-        // Positive control: single-instance packets miss the tolerance, and the
-        // comparison refuses them instead of reporting their shorter packets.
+        // Positive control: single-instance packets leave ‖x − P_c x‖ ≥ 1 − 2/C = 0.875 on every
+        // input, a proven violation, and the comparison refuses them instead of reporting their
+        // shorter packets.
         let single: Vec<Vec<usize>> = supports.iter().map(|support| vec![support[0]]).collect();
-        let (worst, roundoff) = single
-            .iter()
-            .zip(&inputs)
-            .map(|(support, &x)| projector_distortion(x, support, instances))
-            .fold((0.0_f64, 0.0_f64), |(worst, bound), (distortion, roundoff)| {
-                (worst.max(distortion), bound.max(roundoff))
-            });
-        let unfaithful = LibraryPacketArtifact {
-            library: family.library.clone(),
+        let unfaithful = A8Artifact(LibraryPacketArtifact {
+            library: family.0.library.clone(),
             packets: encode_support_packets(instances, &single).expect("packets"),
-        };
-        let unfaithful_score = DecodedArtifactScore {
-            code_bits: unfaithful.total_bits(),
-            decoded_distortion: worst,
-            distortion_roundoff: roundoff,
-        };
-        assert!(worst > tolerance, "single-instance distortion {worst} must miss {tolerance}");
-        assert!(code_saving_at_declared_fidelity(tolerance, &unfaithful_score, &identity_score).is_err());
+        });
+        let unfaithful_fidelity = decode_then_evaluate(
+            &unfaithful,
+            |program: &DecodedProgram| execute(program, &inputs),
+            &inputs,
+            |outputs: &Vec<[f64; 2]>, reference: &Vec<[f64; 2]>| {
+                worst_distortion(outputs, reference, instances)
+            },
+            tolerance,
+        )
+        .expect("the single-instance artifact decodes and executes");
+        assert_eq!(unfaithful_fidelity.verdict(), FidelityVerdict::Violates);
+        assert!(code_saving_at_proven_fidelity(
+            (unfaithful.0.total_bits(), &unfaithful_fidelity),
+            (identity.0.total_bits(), &identity_fidelity),
+        )
+        .is_err());
     }
 
     // The P12 fixture's declared fidelity tolerance: a certified risk of 0 meets it and a refuted
