@@ -9397,7 +9397,7 @@
     "evidence": "At the base, git grep -n for coordinate_sure_deflation_correction and SURE_DIVERGENCE_PD_FLOOR finds only their declarations and doc comments in construction_ard.rs, the single call in reconstruction_dispersion (construction_reconstruction.rs), and tests_sure_dispersion_2133.rs. This commit removes that call, the test module and its mod declaration in manifold/mod.rs. No bench, example, Python or FFI source names either. fitted_circle, hand_correction, lcg, lcg_normal and the two test functions are declared in tests_sure_dispersion_2133.rs and used only there. The replacement tests are in crates/gam-sae/src/manifold/tests_fitted_response_divergence_2933.rs."
   },
   {
-    "base": "3e50efdea7dfe172d7187d1548771aaff3bc2f36",
+    "base": "f04687ae096303b269508fd0ab80ae88dd223604",
     "items": [
       "crates/gam-sae/src/description_length.rs:fn:circle_coding_gain_bits",
       "crates/gam-sae/src/description_length.rs:fn:predicted_birth_dl_bits",

@@ -4014,7 +4014,7 @@
     "evidence": "It is the file's only pub fn len. The removed map was derived by reading the change, not by running the script. Receipt: guarded job 657442 (agsmall, lane sw0m, node acn04) at 814808c53 with\nHEAD==PIN, dirty=0 and the 13 files of the s36 and s37 slices overlaid:\ncargo check --workspace --all-targets --exclude gam-pyffi --keep-going exited 0\n(75 s) and cargo check -p gam-pyffi --lib exited 0 (40 s), with no error line.\nLog /scratch.global/sauer354/pool/prune-api-d/s36s37.657442.log. The first pass\non the s36 overlay (655090) stopped at the gam_custom_family import in\ngenerative.rs that only the deleted trait read, which this change removes."
   },
   {
-    "base": "3e50efdea7dfe172d7187d1548771aaff3bc2f36",
+    "base": "f04687ae096303b269508fd0ab80ae88dd223604",
     "removed": {
       "crates/gam-sae/src/description_length.rs::circle_coding_gain_bits": 1,
       "crates/gam-sae/src/description_length.rs::predicted_birth_dl_bits": 1

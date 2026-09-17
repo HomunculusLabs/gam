@@ -992,9 +992,30 @@ mod fit_tests {
             proposal.dl_old
         );
         assert_eq!(census.n_accepted, usize::from(proposal.accept));
-        // Ledger provenance: the census verdict is recorded as a Curved admission
-        // or refusal, and the linear rung accounts for the one block.
-        assert_eq!(stage_tally(&report.ledger, MoveStage::Curved).0, census.n_accepted);
+        // Ledger provenance: the census mutates nothing, so an accepted verdict is a
+        // Curved ADMISSION and never a curved birth, a refused one is a Curved
+        // refusal, and the linear rung accounts for the one block.
+        let curved_admissions: usize = report
+            .ledger
+            .moves
+            .iter()
+            .filter(|mv| {
+                matches!(
+                    mv.kind,
+                    SaeMove::Admit {
+                        stage: MoveStage::Curved,
+                        ..
+                    }
+                )
+            })
+            .map(|mv| mv.count)
+            .sum();
+        assert_eq!(curved_admissions, census.n_accepted);
+        assert_eq!(
+            stage_tally(&report.ledger, MoveStage::Curved).0,
+            0,
+            "an admitted census proposal installs no curved atom"
+        );
         assert_eq!(report.ledger.n_admitted, census.n_accepted);
         assert_linear_blocks_accounted(&report);
         if !proposal.accept {

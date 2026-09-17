@@ -181,11 +181,16 @@ pub struct Eq4DescriptionLength {
     /// The featurizer's own native bits/token, echoed through when supplied.
     pub native_bits_per_token: Option<f64>,
     /// Always [`DescriptionLengthScoreKind::GaussianSurrogate`] (#2933 F21): every
-    /// code and residual term is the joint reverse-water-filling rate of covariance
-    /// spectra under squared error, treating the components as independent
-    /// Gaussian sources whose distortions add. No encoder runs and no
-    /// reconstruction is measured, so the total is not an operational message
-    /// length and compares only with other Gaussian-surrogate figures.
+    /// code and residual term is a joint weighted reverse-water-filling rate of RAW
+    /// second-moment spectra (nothing centered, so means are paid per token) over
+    /// each atom's full ambient contribution spectrum — its top `d_g` modes as code
+    /// bits, the rest residual-coded as truncation bits — under squared error, with
+    /// the components treated as independent Gaussian sources whose distortions add.
+    /// It is a linear transform-code surrogate with no intrinsic chart credit, and
+    /// the dictionary term is a declared BIC-inspired count penalty, not a codec. No
+    /// encoder runs and no reconstruction is measured, so the total is not an
+    /// operational message length and compares only with other Gaussian-surrogate
+    /// figures.
     pub score_kind: DescriptionLengthScoreKind,
 }
 
