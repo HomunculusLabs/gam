@@ -2101,6 +2101,264 @@ fn ring_mixture_m_step(
     })
 }
 
+/// Unconstrained coordinates of a ring-mixture state, in the order the Newton
+/// polish differentiates them: `k − 1` weight logits against the last component,
+/// the center (2), the radius, the `k` component angles, and the log shared
+/// variance. These are the `2k + 3` free parameters the BIC counts.
+fn ring_state_parameters(state: &RingMixtureState) -> Result<Array1<f64>, String> {
+    let k = state.weights.len();
+    let mut parameters = Array1::<f64>::zeros(2 * k + 3);
+    let reference = state.weights[k - 1].ln();
+    for component in 0..k - 1 {
+        parameters[component] = state.weights[component].ln() - reference;
+    }
+    parameters[k - 1] = state.center[0];
+    parameters[k] = state.center[1];
+    parameters[k + 1] = state.radius;
+    for component in 0..k {
+        parameters[k + 2 + component] =
+            state.directions[[component, 1]].atan2(state.directions[[component, 0]]);
+    }
+    parameters[2 * k + 2] = state.variance.ln();
+    if parameters.iter().any(|value| !value.is_finite()) {
+        return Err("ring-of-clusters state has no finite unconstrained coordinates".to_string());
+    }
+    Ok(parameters)
+}
+
+/// The ring-mixture state at unconstrained coordinates, or `None` outside the
+/// model's domain: a weight that underflows, a zero or non-finite radius, or a
+/// shared variance below the covariance floor the M-step enforces. A negative
+/// radius is the same density with every direction reversed.
+fn ring_state_from_parameters(
+    parameters: &Array1<f64>,
+    k: usize,
+    covariance_floor: f64,
+    completed_iterations: usize,
+) -> Option<RingMixtureState> {
+    if parameters.len() != 2 * k + 3 || parameters.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+    let mut logits = parameters.iter().take(k - 1).copied().collect::<Vec<_>>();
+    logits.push(0.0);
+    let max_logit = logits.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let log_normalizer = log_sum_exp(&logits, max_logit);
+    let weights = Array1::from_shape_fn(k, |component| (logits[component] - log_normalizer).exp());
+    if weights
+        .iter()
+        .any(|weight| !(weight.is_finite() && *weight > 0.0))
+    {
+        return None;
+    }
+    let signed_radius = parameters[k + 1];
+    let orientation = if signed_radius < 0.0 { -1.0 } else { 1.0 };
+    let radius = signed_radius.abs();
+    if !(radius.is_finite() && radius > 0.0) {
+        return None;
+    }
+    let directions = Array2::from_shape_fn((k, 2), |(component, axis)| {
+        let angle = parameters[k + 2 + component];
+        orientation * if axis == 0 { angle.cos() } else { angle.sin() }
+    });
+    let variance = parameters[2 * k + 2].exp();
+    if !(variance.is_finite() && variance >= covariance_floor) {
+        return None;
+    }
+    Some(RingMixtureState {
+        weights,
+        center: Array1::from_vec(vec![parameters[k - 1], parameters[k]]),
+        radius,
+        directions,
+        variance,
+        mean_log_likelihood: f64::NAN,
+        completed_iterations,
+    })
+}
+
+/// Gradient and Hessian of the total observed log likelihood
+/// `ℓ = Σ_i log Σ_j π_j N(x_i | c + R u_j, s I_2)` in the coordinates of
+/// [`ring_state_parameters`], at the state whose E-step produced
+/// `responsibilities`.
+///
+/// Per row, with `a_ij = log π_j + log N(x_i | μ_j, s I_2)` and `γ_ij` its
+/// responsibility, `∇ℓ_i = Σ_j γ_ij ∇a_ij` and
+/// `∇²ℓ_i = Σ_j γ_ij (∇²a_ij + ∇a_ij ∇a_ijᵀ) − ∇ℓ_i ∇ℓ_iᵀ`. Writing
+/// `g = (x_i − μ_j)/s`, `u⊥ = (−sin φ_j, cos φ_j)`, `d = ‖x_i − μ_j‖²` and
+/// `t = log s`, the nonzero first derivatives of `a_ij` are `∂η_m = δ_jm − π_m`,
+/// `∂c = g`, `∂R = g·u_j`, `∂φ_j = R g·u⊥` and `∂t = d/(2s) − 1`. The second
+/// derivatives are `∂η_m∂η_l = −(π_m δ_ml − π_m π_l)`, `∂c∂c = −I/s`,
+/// `∂c∂R = −u_j/s`, `∂c∂φ_j = −R u⊥/s`, `∂R∂R = −1/s`, `∂R∂φ_j = g·u⊥`,
+/// `∂φ_j∂φ_j = −R²/s − R g·u_j`, `∂c∂t = −g`, `∂R∂t = −g·u_j`,
+/// `∂φ_j∂t = −R g·u⊥` and `∂t∂t = −d/(2s)`.
+fn ring_mixture_log_likelihood_derivatives(
+    data: ArrayView2<'_, f64>,
+    responsibilities: ArrayView2<'_, f64>,
+    state: &RingMixtureState,
+) -> Result<(Array1<f64>, Array2<f64>), String> {
+    let n = data.nrows();
+    let k = state.weights.len();
+    if data.ncols() != 2 || responsibilities.dim() != (n, k) {
+        return Err(
+            "ring-of-clusters derivatives need (n, k) responsibilities for two-column data"
+                .to_string(),
+        );
+    }
+    let dim = 2 * k + 3;
+    let center_index = k - 1;
+    let radius_index = k + 1;
+    let variance_index = 2 * k + 2;
+    let variance = state.variance;
+    let radius = state.radius;
+    let means = ring_component_means(&state.center, radius, &state.directions);
+    let mut gradient = Array1::<f64>::zeros(dim);
+    let mut hessian = Array2::<f64>::zeros((dim, dim));
+    // The logit block of ∇²a_ij is the same for every (i, j), and each row's
+    // responsibilities sum to one.
+    for left in 0..k - 1 {
+        for right in 0..k - 1 {
+            let diagonal = if left == right {
+                state.weights[left]
+            } else {
+                0.0
+            };
+            hessian[[left, right]] -=
+                n as f64 * (diagonal - state.weights[left] * state.weights[right]);
+        }
+    }
+    let mut row_gradient = Array1::<f64>::zeros(dim);
+    let mut term_gradient = Array1::<f64>::zeros(dim);
+    for row in 0..n {
+        row_gradient.fill(0.0);
+        for component in 0..k {
+            let responsibility = responsibilities[[row, component]];
+            if responsibility == 0.0 {
+                continue;
+            }
+            let ux = state.directions[[component, 0]];
+            let uy = state.directions[[component, 1]];
+            let perp_x = -uy;
+            let perp_y = ux;
+            let gx = (data[[row, 0]] - means[[component, 0]]) / variance;
+            let gy = (data[[row, 1]] - means[[component, 1]]) / variance;
+            let squared_distance = variance * variance * (gx * gx + gy * gy);
+            let g_dot_u = gx * ux + gy * uy;
+            let g_dot_perp = gx * perp_x + gy * perp_y;
+            let angle_index = k + 2 + component;
+            term_gradient.fill(0.0);
+            for logit in 0..k - 1 {
+                let indicator = if logit == component { 1.0 } else { 0.0 };
+                term_gradient[logit] = indicator - state.weights[logit];
+            }
+            term_gradient[center_index] = gx;
+            term_gradient[center_index + 1] = gy;
+            term_gradient[radius_index] = g_dot_u;
+            term_gradient[angle_index] = radius * g_dot_perp;
+            term_gradient[variance_index] = 0.5 * squared_distance / variance - 1.0;
+            for left in 0..dim {
+                let scaled = responsibility * term_gradient[left];
+                if scaled == 0.0 {
+                    continue;
+                }
+                row_gradient[left] += scaled;
+                for right in 0..dim {
+                    hessian[[left, right]] += scaled * term_gradient[right];
+                }
+            }
+            let second_derivatives = [
+                (center_index, center_index, -1.0 / variance),
+                (center_index + 1, center_index + 1, -1.0 / variance),
+                (center_index, radius_index, -ux / variance),
+                (center_index + 1, radius_index, -uy / variance),
+                (center_index, angle_index, -radius * perp_x / variance),
+                (center_index + 1, angle_index, -radius * perp_y / variance),
+                (radius_index, radius_index, -1.0 / variance),
+                (radius_index, angle_index, g_dot_perp),
+                (
+                    angle_index,
+                    angle_index,
+                    -radius * radius / variance - radius * g_dot_u,
+                ),
+                (center_index, variance_index, -gx),
+                (center_index + 1, variance_index, -gy),
+                (radius_index, variance_index, -g_dot_u),
+                (angle_index, variance_index, -radius * g_dot_perp),
+                (variance_index, variance_index, -0.5 * squared_distance / variance),
+            ];
+            for (left, right, value) in second_derivatives {
+                hessian[[left, right]] += responsibility * value;
+                if left != right {
+                    hessian[[right, left]] += responsibility * value;
+                }
+            }
+        }
+        for left in 0..dim {
+            for right in 0..dim {
+                hessian[[left, right]] -= row_gradient[left] * row_gradient[right];
+            }
+        }
+        gradient += &row_gradient;
+    }
+    if gradient
+        .iter()
+        .chain(hessian.iter())
+        .any(|value| !value.is_finite())
+    {
+        return Err("ring-of-clusters log-likelihood derivatives are non-finite".to_string());
+    }
+    Ok((gradient, hessian))
+}
+
+/// One Newton ascent proposal on the observed log likelihood from `state`, whose
+/// E-step produced `responsibilities`, taken on the eigenspace where the observed
+/// information `−∇²ℓ` is resolvably positive: eigenvalues above the symmetric
+/// eigensolver's backward-error band `dim·ε·‖∇²ℓ‖₂`. The quadratic model has no
+/// maximum along the other directions, so the step leaves them to the EM update.
+/// At an over-fitted order that is not a corner case: the two components sharing
+/// one cluster give the information one negative eigenvalue (−7.4e-3 after one
+/// update, −3.9e-9 after ten, at k = 8 on seven planted ring clusters), so a
+/// proposal that required the whole matrix to be positive definite was refused at
+/// every iteration. `None` where no eigenvalue is resolvably positive or the step
+/// leaves the model's domain.
+fn ring_mixture_newton_proposal(
+    data: ArrayView2<'_, f64>,
+    responsibilities: ArrayView2<'_, f64>,
+    state: &RingMixtureState,
+    covariance_floor: f64,
+) -> Result<Option<RingMixtureState>, String> {
+    let (gradient, hessian) =
+        ring_mixture_log_likelihood_derivatives(data, responsibilities, state)?;
+    let dim = gradient.len();
+    let information = hessian.mapv(|value| -value);
+    let (eigenvalues, eigenvectors) = information.eigh(Side::Lower).map_err(|error| {
+        format!("ring-of-clusters observed information eigendecomposition failed: {error}")
+    })?;
+    let largest = eigenvalues
+        .iter()
+        .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+    let resolution = dim as f64 * f64::EPSILON * largest;
+    if !eigenvalues.iter().any(|&value| value > resolution) {
+        return Ok(None);
+    }
+    let projected = eigenvectors.t().dot(&gradient);
+    let mut step = Array1::<f64>::zeros(dim);
+    for index in 0..dim {
+        if !(eigenvalues[index] > resolution) {
+            continue;
+        }
+        let coefficient = projected[index] / eigenvalues[index];
+        for coordinate in 0..dim {
+            step[coordinate] += eigenvectors[[coordinate, index]] * coefficient;
+        }
+    }
+    let parameters = ring_state_parameters(state)? + &step;
+    Ok(ring_state_from_parameters(
+        &parameters,
+        state.weights.len(),
+        covariance_floor,
+        state.completed_iterations + 1,
+    ))
+}
+
 /// Fit a deterministic, certified `k`-component isotropic Gaussian mixture
 /// whose component centers are constrained to a common circle.
 pub(crate) fn fit_ring_gaussian_mixture(
@@ -2242,7 +2500,30 @@ pub(crate) fn fit_ring_gaussian_mixture(
                 config.parameter_tol,
             ));
         }
-        state = next;
+        // #2822 — at an over-fitted order two components share one cluster, and the
+        // EM map contracts along that split only at its fraction of missing
+        // information: 0.9995 per update at k = 8 on seven planted ring clusters,
+        // which no update budget certifies. A Newton step on the observed likelihood
+        // does not slow down along that direction. It replaces the EM update only
+        // when it climbs above it, so every accepted state still ascends and is
+        // certified by the same one-application EM residual above. A proposal whose
+        // density is not representable is a rejected proposal, not a failure of the
+        // current state.
+        state = match ring_mixture_newton_proposal(
+            data,
+            current.responsibilities.view(),
+            &state,
+            config.covariance_floor,
+        )? {
+            Some(mut proposal) => match ring_mixture_e_step(data, &proposal) {
+                Ok(proposal_e_step) if proposal_e_step.mean_log_likelihood > next_mean => {
+                    proposal.mean_log_likelihood = proposal_e_step.mean_log_likelihood;
+                    proposal
+                }
+                _ => next,
+            },
+            None => next,
+        };
     }
     Err("ring-of-clusters generalized EM exhausted without a terminal certificate".to_string())
 }
@@ -4216,6 +4497,125 @@ mod tests {
         )
         .unwrap();
         assert!(residual <= 4.0 * f64::EPSILON);
+    }
+
+    /// #2822 — the Newton polish's analytic gradient and Hessian of the observed
+    /// ring-mixture log likelihood agree with central differences of the likelihood
+    /// the E-step evaluates, at a state away from the optimum where every block is
+    /// live.
+    #[test]
+    fn ring_mixture_newton_derivatives_match_central_differences_2822() {
+        let data = seven_clusters_on_a_circle_2262();
+        let floor = GaussianMixtureConfig::default().covariance_floor;
+        let k = 4usize;
+        let angles = [0.3_f64, 1.9, 3.4, 5.0];
+        let state = RingMixtureState {
+            weights: array![0.1, 0.2, 0.3, 0.4],
+            center: array![0.3, -0.1],
+            radius: 1.7,
+            directions: Array2::from_shape_fn((k, 2), |(component, axis)| {
+                if axis == 0 {
+                    angles[component].cos()
+                } else {
+                    angles[component].sin()
+                }
+            }),
+            variance: 0.6,
+            mean_log_likelihood: f64::NAN,
+            completed_iterations: 0,
+        };
+        let total_log_likelihood = |parameters: &Array1<f64>| -> f64 {
+            let at = ring_state_from_parameters(parameters, k, floor, 0).unwrap();
+            ring_mixture_e_step(data.view(), &at)
+                .unwrap()
+                .mean_log_likelihood
+                * data.nrows() as f64
+        };
+        let analytic_gradient = |parameters: &Array1<f64>| -> Array1<f64> {
+            let at = ring_state_from_parameters(parameters, k, floor, 0).unwrap();
+            let e_step = ring_mixture_e_step(data.view(), &at).unwrap();
+            ring_mixture_log_likelihood_derivatives(
+                data.view(),
+                e_step.responsibilities.view(),
+                &at,
+            )
+            .unwrap()
+            .0
+        };
+        let parameters = ring_state_parameters(&state).unwrap();
+        let e_step = ring_mixture_e_step(data.view(), &state).unwrap();
+        let (gradient, hessian) = ring_mixture_log_likelihood_derivatives(
+            data.view(),
+            e_step.responsibilities.view(),
+            &state,
+        )
+        .unwrap();
+        let dim = parameters.len();
+        assert_eq!(dim, 2 * k + 3);
+        // Central differences at h = 1e-5: truncation O(h²·|ℓ'''|) and rounding
+        // O(ε·|ℓ|/h) ≈ 1e-8 on |ℓ| ≈ 500 sit far below the relative bar.
+        let h = 1.0e-5;
+        let mut worst_gradient = 0.0_f64;
+        let mut worst_hessian = 0.0_f64;
+        for coordinate in 0..dim {
+            let mut plus = parameters.clone();
+            let mut minus = parameters.clone();
+            plus[coordinate] += h;
+            minus[coordinate] -= h;
+            let difference =
+                (total_log_likelihood(&plus) - total_log_likelihood(&minus)) / (2.0 * h);
+            worst_gradient = worst_gradient
+                .max((difference - gradient[coordinate]).abs() / (1.0 + gradient[coordinate].abs()));
+            let column = (analytic_gradient(&plus) - analytic_gradient(&minus)) / (2.0 * h);
+            for row in 0..dim {
+                worst_hessian = worst_hessian.max(
+                    (column[row] - hessian[[row, coordinate]]).abs()
+                        / (1.0 + hessian[[row, coordinate]].abs()),
+                );
+            }
+        }
+        let gradient_scale = gradient
+            .iter()
+            .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+        let hessian_scale = hessian
+            .iter()
+            .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+        assert!(
+            gradient_scale > 1.0 && hessian_scale > 1.0,
+            "the probe state must carry live derivatives: |g|={gradient_scale:.3e} |H|={hessian_scale:.3e}"
+        );
+        assert!(
+            worst_gradient <= 1.0e-6,
+            "analytic gradient disagrees with central differences: worst scaled error {worst_gradient:.3e}"
+        );
+        assert!(
+            worst_hessian <= 1.0e-6,
+            "analytic Hessian disagrees with central differences of the gradient: worst scaled error {worst_hessian:.3e}"
+        );
+    }
+
+    /// #2822 — the order above the planted one certifies. An over-fitted order's EM
+    /// contracts along the split component only at its fraction of missing
+    /// information; the Newton polish replaces those updates where it climbs
+    /// higher, so k = 8 on seven planted ring clusters meets the same certificate
+    /// as k = 7 instead of exhausting its update bound, and the BIC then prefers
+    /// the planted order.
+    #[test]
+    fn ring_of_clusters_over_fitted_order_certifies_2822() {
+        let data = seven_clusters_on_a_circle_2262();
+        let config = GaussianMixtureConfig::default();
+        let planted = fit_ring_gaussian_mixture(data.view(), 7, config).unwrap();
+        let over_fitted = fit_ring_gaussian_mixture(data.view(), 8, config)
+            .expect("the over-fitted order must certify");
+        let certificate = over_fitted.certificate();
+        assert!(certificate.objective_residual <= certificate.objective_tolerance);
+        assert!(certificate.parameter_residual <= certificate.parameter_tolerance);
+        assert!(
+            over_fitted.bic() > planted.bic(),
+            "seven planted clusters: BIC(8)={} must exceed BIC(7)={}",
+            over_fitted.bic(),
+            planted.bic()
+        );
     }
 
     // -----------------------------------------------------------------------
