@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -11,7 +12,15 @@ import pytest
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-EXAMPLES = tuple(sorted((REPOSITORY_ROOT / "examples").glob("*.py")))
+# An example that imports torch belongs to the torch population: it runs in
+# tests/torch/test_torch_examples_run.py, which is collected where torch is
+# installed, instead of failing here on every worker without torch.
+IMPORTS_TORCH = re.compile(r"^\s*(?:import|from)\s+torch\b", re.MULTILINE)
+EXAMPLES = tuple(
+    path
+    for path in sorted((REPOSITORY_ROOT / "examples").glob("*.py"))
+    if not IMPORTS_TORCH.search(path.read_text(encoding="utf-8"))
+)
 
 
 @pytest.mark.parametrize("example", EXAMPLES, ids=lambda path: path.name)
