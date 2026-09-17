@@ -86,25 +86,23 @@ impl SaeFitLane {
 ///   gate set.
 /// * [`Self::SupportQuasiLaplace`]: the support-sparse route
 ///   (`crate::manifold::run_sae_support_outer`),
-///   `V = ℓ_pen + Σ log Z_ard + ½·log|S_red| − ½·log|λS|₊`. It shares the dense data
-///   term at unit dispersion, the ARD normalizer on each active slot, and the
-///   complete penalty pseudo-determinant (#2933 F27 S1). `S_red` is the
-///   Gauss–Newton reduced decoder Schur complement with the row coordinate block
-///   `Σ_i log|H_tt^(i)|` removed. So the curvature is the majorizer rather than
-///   the exact observed information, and the coordinates are profiled rather
-///   than integrated. There is no rank charge and no collapse-prevention energy.
-///   Smoothing is shared per `(basis kind, latent dimension)` family, and the ARD
-///   precisions are fixed.
+///   `V = ℓ_pen + Σ log Z_ard + ½·(Σ_i log|H_tt^(i)| + log|S_red|) − ½·log|λS|₊`. It
+///   shares the dense data term at unit dispersion, the ARD normalizer on each active
+///   slot, the complete penalty pseudo-determinant (#2933 F27 S1), and the integrated
+///   coordinate block (S2). Both log-determinants factor the Gauss–Newton majorizer
+///   rather than the exact observed information. There is no rank charge and no
+///   collapse-prevention energy. Smoothing is shared per `(basis kind, latent
+///   dimension)` family, and the ARD precisions are fixed.
 ///
-/// The two kinds differ in curvature operator, coordinate treatment, rank
-/// pricing, prevention energy and hyperparameter layout. Neither value
-/// approximates the other, and their difference measures nothing.
+/// The two kinds differ in curvature operator, rank pricing, prevention energy and
+/// hyperparameter layout. Neither value approximates the other, and their
+/// difference measures nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SaeCriterionKind {
     /// Unit-dispersion penalized quasi-Laplace score on the observed information.
     PenalizedQuasiLaplace,
     /// Unit-dispersion quasi-Laplace score on the support representation's
-    /// Gauss–Newton reduced Schur.
+    /// Gauss–Newton arrow.
     SupportQuasiLaplace,
 }
 

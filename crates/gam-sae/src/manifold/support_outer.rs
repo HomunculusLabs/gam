@@ -9,16 +9,17 @@
 //!
 //! ## The criterion is ONE functional (#2576), converging on the dense one (#2933 F27)
 //!
-//! `cost(ρ) = ℓ_pen + Σ log Z_ard + ½·(log|S| − log|S_ρ|₊)`. Here `ℓ_pen` is the
-//! penalized objective at unit dispersion, `log Z_ard` is the ARD coordinate prior's
-//! normalizer on every active slot, and `S = H_ββ − Σ_i H_βt^(i) H_tt^(ⁱ)⁻¹ H_tβ^(ⁱ)`
-//! is the reduced decoder Schur complement of the Gauss–Newton system.
+//! `cost(ρ) = ℓ_pen + Σ log Z_ard + ½·(log|H| − log|S_ρ|₊)`, with
+//! `log|H| = Σ_i log|H_tt^(ⁱ)| + log|S|`. Here `ℓ_pen` is the penalized objective at
+//! unit dispersion, and `log Z_ard` is the ARD coordinate prior's normalizer on every
+//! active slot. `H_tt^(ⁱ)` is row `i`'s coordinate block, and
+//! `S = H_ββ − Σ_i H_βt^(i) H_tt^(ⁱ)⁻¹ H_tβ^(ⁱ)` is the reduced decoder Schur complement,
+//! both of the Gauss–Newton system.
 //!
-//! The data term and both prior normalizers are the dense SAE criterion's
-//! (#2933 F24–F26, F27 S1). The value still departs from the dense criterion in five ways:
+//! The data term, both prior normalizers and the integrated coordinate block are the
+//! dense SAE criterion's (#2933 F24–F26, F27 S1–S2). The value still departs from the
+//! dense criterion in four ways:
 //! - the curvature is the majorizer, not the exact observed information `log|A|`;
-//! - the row-coordinate normalizer `Σ_i log|H_tt^(ⁱ)|` is removed rather than
-//!   integrated (#2668 keeps it in the dense value);
 //! - no realised-rank charge and no collapse-prevention energy enter;
 //! - smoothing is shared per family;
 //! - the ARD precisions are fixed.
@@ -235,12 +236,13 @@ struct PenaltySpectrum {
 }
 
 /// The named terms of one support criterion value (#2933 F27):
-/// `cost = penalized_objective + ard_log_partition + ½·(reduced_log_det − penalty_log_pdet)`.
+/// `cost = penalized_objective + ard_log_partition
+///   + ½·(row_log_det + reduced_log_det − penalty_log_pdet)`.
 ///
-/// The data term and both prior normalizers are the dense quasi-Laplace score's.
-/// The departures show in `reduced_log_det`: it is the Gauss–Newton reduced Schur
-/// with the row block removed. No realised-rank charge or collapse-prevention
-/// energy enters.
+/// The data term, both prior normalizers and the integrated coordinate block are the
+/// dense quasi-Laplace score's. The departure shows in the two log-determinants: they
+/// factor the Gauss–Newton majorizer rather than the exact observed information. No
+/// realised-rank charge or collapse-prevention energy enters.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SaeSupportCriterionComponents {
     /// `½‖y − ŷ‖² + ½·Σ_k λ_k β̂ᵀS_kβ̂` plus the ARD energy and every other penalty
@@ -249,8 +251,10 @@ pub struct SaeSupportCriterionComponents {
     /// The ARD prior's log partition summed over active slots, with its Laplace
     /// constant and quotient sheet count.
     pub ard_log_partition: f64,
+    /// `Σ_i log|H_tt^(i)|` of the Gauss–Newton row coordinate blocks, from their
+    /// undamped Cholesky factors.
+    pub row_log_det: f64,
     /// `log|S|` of the Gauss–Newton reduced decoder Schur complement.
-    /// `Σ_i log|H_tt^(i)|` is not in it.
     pub reduced_log_det: f64,
     /// `log|λS|₊ = Σ_g (log|S_g|₊ + rank_g·ρ_g)`, base pseudo-determinant included.
     pub penalty_log_pdet: f64,
@@ -261,7 +265,7 @@ impl SaeSupportCriterionComponents {
     pub fn value(&self) -> f64 {
         self.penalized_objective
             + self.ard_log_partition
-            + 0.5 * (self.reduced_log_det - self.penalty_log_pdet)
+            + 0.5 * (self.row_log_det + self.reduced_log_det - self.penalty_log_pdet)
     }
 }
 
@@ -562,7 +566,7 @@ impl SaeSupportOuterObjective {
     fn evidence_log_det(
         &mut self,
         system: &ArrowSchurSystem,
-    ) -> Result<(f64, RationalLogdetDerivativeBundle), EstimationError> {
+    ) -> Result<(f64, f64, RationalLogdetDerivativeBundle), EstimationError> {
         if system.k == 0 {
             return Err(outer_error(
                 "support LAML requires a decoder border to select smoothing against; the \
@@ -669,13 +673,12 @@ impl SaeSupportOuterObjective {
                 timer.elapsed().as_secs_f64(),
             );
         }
-        // Coordinates are nuisance parameters profiled by the inner solve. As
-        // in `rank_adjusted_quasi_laplace_complexity`, their row-block
-        // determinant is removed from the criterion; retaining it here would
-        // charge arbitrary decoder scaling and, worse, would pair a moving row
-        // value with a derivative that differentiates only the reduced Schur
-        // operator.
-        Ok((schur_log_det, bundle))
+        // The row coordinate blocks are integrated, as the dense criterion keeps them
+        // inside `½·log|A|` (#2668, #2933 F27 S2). The value carries
+        // `Σ_i log|H_tt^(i)|` beside `log|S|`, and the profile adjoint differentiates
+        // both through the fitted state (`support_row_logdet_theta_derivative_add`),
+        // so value and gradient describe one `log|H|`.
+        Ok((row_log_det, schur_log_det, bundle))
     }
 
     fn evaluate_for_order(
@@ -777,7 +780,7 @@ impl SaeSupportOuterObjective {
         if let Some(quotient) = unused_atom_null_quotient(&self.term).map_err(outer_error)? {
             system.set_beta_gauge_quotient(quotient).map_err(outer_error)?;
         }
-        let (reduced_logdet, logdet_derivative) = self.evidence_log_det(&system)?;
+        let (row_logdet, reduced_logdet, logdet_derivative) = self.evidence_log_det(&system)?;
         // The data and prior energy at unit dispersion, the dense criterion's
         // `loss.total()` on this representation (#2933 F27 S1):
         //   ℓ_pen = ½‖y − ŷ‖² + ½·Σ_k λ_k β̂ᵀS_kβ̂ + ARD energy (+ every other penalty the inner solve descends).
@@ -807,6 +810,7 @@ impl SaeSupportOuterObjective {
         let components = SaeSupportCriterionComponents {
             penalized_objective,
             ard_log_partition,
+            row_log_det: row_logdet,
             reduced_log_det: reduced_logdet,
             penalty_log_pdet: penalty_logdet,
         };
@@ -814,9 +818,10 @@ impl SaeSupportOuterObjective {
         // The surrogate's directional derivative is the exact FIXED-STATE
         // derivative of the very `log|S|` that entered `cost` above — same
         // probes, quadrature nodes, frozen deflation basis and shifted solves.
-        // A profiled criterion needs one more term: S also moves because the
+        // A profiled criterion needs one more term: H also moves because the
         // converged decoder/coordinates move with rho. The support term forms
-        // `Gamma = d log|S|/d theta` from this same bundle and solves the exact
+        // `Gamma = d log|H|/d theta`, the row blocks' part in closed form and the
+        // reduced Schur's part from this same bundle, and solves the exact
         // inner stationarity adjoint once; omitting that IFT response is the
         // value/gradient split that made every descent direction point uphill.
         // The lane used to estimate this trace with a SECOND, independent
@@ -1842,9 +1847,10 @@ mod tests {
     /// #2634 root gate: a smoothing gradient is the derivative of the fully
     /// profiled production criterion, not the partial derivative obtained by
     /// freezing the coordinates and decoder at the centre point. The latter
-    /// dropped the `Gamma^T theta_hat_rho` Laplace response and, together with
-    /// the spurious row-coordinate determinant, reported an uphill direction
-    /// as descent on the filed Tier-2 route.
+    /// dropped the `Gamma^T theta_hat_rho` Laplace response and, together with a
+    /// row-coordinate determinant priced without its derivative, reported an uphill
+    /// direction as descent on the filed Tier-2 route. The row determinant now
+    /// enters with its implicit response (#2933 F27 S2), and this oracle checks both.
     #[test]
     fn profiled_support_outer_gradient_matches_refitted_value_fd_2634() {
         let mut objective = build_objective();
@@ -2055,11 +2061,11 @@ mod tests {
         let first = objective
             .evidence_log_det(&system)
             .expect("frozen surrogate")
-            .0;
+            .1;
         let second = objective
             .evidence_log_det(&system)
             .expect("frozen surrogate")
-            .0;
+            .1;
         assert_eq!(
             first, second,
             "the frozen log|S| surrogate must be bit-reproducible on one operator"
@@ -2142,7 +2148,7 @@ mod tests {
         };
 
         let (base_system, _) = assemble(&objective, &base);
-        let (base_logdet, bundle) = objective
+        let (_, base_logdet, bundle) = objective
             .evidence_log_det(&base_system)
             .expect("base evidence log-determinant");
         assert!(base_logdet.is_finite());
@@ -2175,11 +2181,11 @@ mod tests {
             let value_plus = objective
                 .evidence_log_det(&system_plus)
                 .expect("perturbed evidence log-determinant")
-                .0;
+                .1;
             let value_minus = objective
                 .evidence_log_det(&system_minus)
                 .expect("perturbed evidence log-determinant")
-                .0;
+                .1;
             let fd = (value_plus - value_minus) / (2.0 * h);
             let gap = (analytic[group] - fd).abs();
             assert!(
@@ -2489,7 +2495,8 @@ mod tests {
                 .term
                 .assemble_arrow_schur(objective.target.view(), &lambda, &objective.ard_precisions)
                 .expect("assemble");
-            let reduced_log_det = objective.evidence_log_det(&system).expect("evidence").0;
+            let (row_log_det, reduced_log_det, _) =
+                objective.evidence_log_det(&system).expect("evidence");
             let penalty_log_pdet = (0..rho.len())
                 .map(|group| {
                     objective.spectrum.log_pdet_base_by_group[group]
@@ -2507,6 +2514,7 @@ mod tests {
             SaeSupportCriterionComponents {
                 penalized_objective,
                 ard_log_partition,
+                row_log_det,
                 reduced_log_det,
                 penalty_log_pdet,
             }
@@ -2625,12 +2633,14 @@ mod tests {
 
         eprintln!(
             "[#2933 F27] support: cost={:.12e} rebuilt={support_rebuilt:.12e} \
-             penalized_objective={:.9e} ard_log_partition={:.9e} reduced_log_det={:.9e} \
-             penalty_log_pdet={:.9e} base_pdet={:?} rss={rss:.9e} smooth_energy={smooth_energy:.9e} \
-             explicit_gradient={support_gradient:?} profiled_gradient={:?}",
+             penalized_objective={:.9e} ard_log_partition={:.9e} row_log_det={:.9e} \
+             reduced_log_det={:.9e} penalty_log_pdet={:.9e} base_pdet={:?} rss={rss:.9e} \
+             smooth_energy={smooth_energy:.9e} explicit_gradient={support_gradient:?} \
+             profiled_gradient={:?}",
             evaluation.cost,
             components.penalized_objective,
             components.ard_log_partition,
+            components.row_log_det,
             components.reduced_log_det,
             components.penalty_log_pdet,
             objective.spectrum.log_pdet_base_by_group,
@@ -2772,10 +2782,91 @@ mod tests {
         );
         let assembled = penalized_objective
             + expected
-            + 0.5 * (components.reduced_log_det - components.penalty_log_pdet);
+            + 0.5
+                * (components.row_log_det + components.reduced_log_det
+                    - components.penalty_log_pdet);
         assert!(
             (evaluation.cost - assembled).abs() <= 1.0e-9 * (1.0 + assembled.abs()),
-            "support value {:.12e} != ℓ_pen + Σ log Z_ard + ½(log|S| − log|λS|₊) = {assembled:.12e}",
+            "support value {:.12e} != ℓ_pen + Σ log Z_ard + ½(log|H_tt| + log|S| − log|λS|₊) \
+             = {assembled:.12e}",
+            evaluation.cost
+        );
+    }
+
+    /// #2933 F27 S2 — the support value integrates each row's coordinate block,
+    /// `½·Σ_i log|H_tt^(i)|`, as the dense criterion keeps it inside `½·log|A|` (#2668).
+    ///
+    /// Each row block is rebuilt from the atom's own basis evaluator at the converged
+    /// state: `H_tt = J Jᵀ + D`, with `J_a = Σ_m ∂_aφ_m B_m` and `D` the prior majorizer
+    /// diagonal. Its determinant is taken in closed form, for a 1×1 circle row and a
+    /// 2×2 plane row. The rebuilt normalizer must be the value's `row_log_det`, it must
+    /// be material, and the value must carry it. The refitted-value central difference
+    /// (`profiled_support_outer_gradient_matches_refitted_value_fd_2634`) checks the
+    /// matching implicit response in the gradient.
+    #[test]
+    fn support_value_integrates_the_row_coordinate_block_2933_f27() {
+        let mut objective = build_objective();
+        let rho = array![0.4_f64.ln(), 2.2_f64.ln()];
+        let evaluation = objective.evaluate(&rho).expect("support value evaluates");
+        let components = evaluation.components;
+
+        let evaluators: [Arc<dyn SaeBasisSecondJet>; 2] = [
+            Arc::new(PeriodicHarmonicEvaluator::new(3).expect("periodic")),
+            Arc::new(EuclideanPatchEvaluator::new(2, 1).expect("patch")),
+        ];
+        let term = &objective.term;
+        let mut expected = 0.0_f64;
+        for row in 0..term.n_obs() {
+            let atom = term.assignment.support_indices(row)[0] as usize;
+            let coords = term.assignment.coords_for_slot(row, 0).to_vec();
+            let d = coords.len();
+            assert!(d == 1 || d == 2, "fixture rows hold one or two coordinates, got {d}");
+            let point = Array2::from_shape_vec((1, d), coords.clone()).expect("coordinate row");
+            let (_, jet) = evaluators[atom].evaluate(point.view()).expect("basis jet");
+            let decoder = term.atoms[atom].decoder_coefficients();
+            let periods = term.assignment.atom_axis_periods(atom);
+            let jacobian = Array2::from_shape_fn((d, term.output_dim()), |(axis, output)| {
+                (0..decoder.nrows())
+                    .map(|basis| jet[[0, basis, axis]] * decoder[[basis, output]])
+                    .sum::<f64>()
+            });
+            let mut block = jacobian.dot(&jacobian.t());
+            for axis in 0..d {
+                block[[axis, axis]] += ArdAxisPrior::eval(
+                    objective.ard_precisions[atom][axis],
+                    coords[axis],
+                    periods[axis],
+                )
+                .psd_majorizer_hess();
+            }
+            let determinant = if d == 1 {
+                block[[0, 0]]
+            } else {
+                block[[0, 0]] * block[[1, 1]] - block[[0, 1]] * block[[1, 0]]
+            };
+            assert!(determinant > 0.0, "row {row} block determinant {determinant:.3e}");
+            expected += determinant.ln();
+        }
+        eprintln!(
+            "[#2933 F27 S2] row_log_det={:.12e} rebuilt={expected:.12e} reduced_log_det={:.9e} \
+             cost={:.12e}",
+            components.row_log_det, components.reduced_log_det, evaluation.cost,
+        );
+        assert!(
+            expected.abs() > 1.0e-2,
+            "the fixture's row normalizer must be material, got {expected:.3e}"
+        );
+        assert!(
+            (components.row_log_det - expected).abs() <= 1.0e-10 * (1.0 + expected.abs()),
+            "row normalizer {:.12e} != rebuilt Σ_i log|J Jᵀ + D| {expected:.12e}",
+            components.row_log_det
+        );
+        let assembled = components.penalized_objective
+            + components.ard_log_partition
+            + 0.5 * (expected + components.reduced_log_det - components.penalty_log_pdet);
+        assert!(
+            (evaluation.cost - assembled).abs() <= 1.0e-10 * (1.0 + assembled.abs()),
+            "support value {:.12e} does not carry ½·Σ_i log|H_tt^(i)|: assembled {assembled:.12e}",
             evaluation.cost
         );
     }

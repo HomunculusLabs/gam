@@ -3740,11 +3740,13 @@ impl SaeSupportSparseTerm {
     }
 
     /// Return `A^+ Gamma`, the one adjoint needed for the implicit derivative of
-    /// the profiled reduced-Schur log determinant. `Gamma` is the exact
-    /// derivative of the frozen rational surrogate with respect to the fitted
-    /// inner state, assembled from the surrogate's own low-rank derivative
-    /// vectors. `A` is the exact stationarity Jacobian of the penalized inner
-    /// objective, not its Gauss--Newton majorizer.
+    /// the Gauss--Newton arrow's log determinant
+    /// `log|H| = Σ_i log|H_tt^(i)| + log|S|` (#2933 F27 S2). `Gamma` is the exact
+    /// derivative, with respect to the fitted inner state, of the row blocks' log
+    /// determinants and of the frozen rational surrogate of `log|S|`. The latter is
+    /// assembled from the surrogate's own low-rank derivative vectors. `A` is the
+    /// exact stationarity Jacobian of the penalized inner objective, not its
+    /// Gauss--Newton majorizer.
     pub(crate) fn support_reduced_logdet_profile_adjoint(
         &self,
         target: ArrayView2<'_, f64>,
@@ -3807,7 +3809,7 @@ impl SaeSupportSparseTerm {
             }
             Ok(gamma)
         };
-        let gamma = gam_linalg::pairwise_reduce::par_deterministic_try_block_fold(
+        let mut gamma = gam_linalg::pairwise_reduce::par_deterministic_try_block_fold(
             derivative_vectors.len(),
             accumulate,
             |mut left: SaeArrowVector, right: SaeArrowVector| -> Result<SaeArrowVector, String> {
@@ -3820,6 +3822,10 @@ impl SaeSupportSparseTerm {
             "support reduced-logdet profile adjoint requires a non-empty derivative bundle"
                 .to_string()
         })?;
+        // The value integrates the row coordinate block as well (#2933 F27 S2), so
+        // `Gamma` carries its derivative too, and the one adjoint prices the implicit
+        // response of the whole `log|H|`.
+        self.support_row_logdet_theta_derivative_add(system, &rows, &factors, &mut gamma)?;
         if gamma
             .t
             .iter()
@@ -3983,6 +3989,76 @@ impl SaeSupportSparseTerm {
                 })
                 .collect()
         }
+    }
+
+    /// Add `Σ_i ∂log|H_tt^(i)|/∂θ` to `gamma` (#2933 F27 S2).
+    ///
+    /// Row `i`'s Gauss--Newton block is `H_tt = J Jᵀ + D`. Here `J_a = Σ_m ∂_aφ_m B_m`
+    /// is the model's coordinate Jacobian and `D` the prior majorizer diagonal. With
+    /// `M = H_tt⁻¹` and `G = M J`, `∂log|H_tt| = tr(M ∂H_tt) = 2⟨G, ∂J⟩ + Σ_a M_aa ∂D_aa`:
+    /// - along a slot's coordinate `t_w`, `∂J_a = Σ_m ∂²_{aw}φ_m B_m` on the slot's
+    ///   axes `a`, and `∂D_ww` is the majorizer derivative;
+    /// - along a decoder entry `B_{m,o}` of the slot's atom, `∂J_{a,o} = ∂_aφ_m`.
+    ///
+    /// `H_tt` does not depend on the smoothing strengths, so this is the row
+    /// normalizer's whole contribution to the gradient, through the fitted state.
+    fn support_row_logdet_theta_derivative_add(
+        &self,
+        system: &ArrowSchurSystem,
+        rows: &[SupportOuterDifferentialRow],
+        factors: &ArrowFactorSlab,
+        gamma: &mut SaeArrowVector,
+    ) -> Result<(), String> {
+        for (row_index, row) in rows.iter().enumerate() {
+            let row_start = system.row_offsets[row_index];
+            let q = system.row_dims[row_index];
+            if row.jacobian.nrows() != q {
+                return Err(format!(
+                    "support row log-det derivative: row {row_index} Jacobian spans {} \
+                     coordinates but its block has {q}",
+                    row.jacobian.nrows()
+                ));
+            }
+            let inverse = CpuBatchedBlockSolver
+                .solve_block_matrix(factors.factor(row_index), Array2::<f64>::eye(q).view());
+            let weighted = inverse.dot(&row.jacobian);
+            for slot in &row.slots {
+                let atom = &self.atoms[slot.atom];
+                let d = atom.latent_dim();
+                let m = atom.basis_size();
+                let decoder = atom.decoder_coefficients();
+                for axis_w in 0..d {
+                    let local_w = slot.coordinate_offset + axis_w;
+                    let mut derivative =
+                        inverse[[local_w, local_w]] * row.prior_majorizer_derivative[local_w];
+                    for axis_a in 0..d {
+                        let local_a = slot.coordinate_offset + axis_a;
+                        for basis in 0..m {
+                            let curvature = slot.second_jet[[basis, axis_a, axis_w]];
+                            for output in 0..self.output_dim {
+                                derivative += 2.0
+                                    * weighted[[local_a, output]]
+                                    * curvature
+                                    * decoder[[basis, output]];
+                            }
+                        }
+                    }
+                    gamma.t[row_start + local_w] += derivative;
+                }
+                for basis in 0..m {
+                    for output in 0..self.output_dim {
+                        let mut derivative = 0.0_f64;
+                        for axis_a in 0..d {
+                            derivative += weighted[[slot.coordinate_offset + axis_a, output]]
+                                * slot.jet[[basis, axis_a]];
+                        }
+                        gamma.beta[slot.beta_offset + basis * self.output_dim + output] +=
+                            2.0 * derivative;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Add `weight·Γ(z)` to `gamma` for one border vector `z` of a `log|S|`
