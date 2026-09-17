@@ -1340,10 +1340,11 @@ pub fn manifold_fit_description_length_with_gate_amplitudes(
 ///
 /// This is the support the native coder prices, the rule
 /// [`crate::manifold::reconstruct_persisted_atom_set`] uses to skip an atom, and
-/// the firing predicate of the Eq. 4 scorer and the inference audit, whose gates
-/// are nonnegative. No magnitude threshold is applied: a gate of `1e-9` in front
-/// of a decoder of norm `1e9` contributes an output of order one, so dropping it
-/// by magnitude alone would discard output that no code pays for.
+/// the firing predicate the Eq. 4 scorer and the inference audit call, so every
+/// reported support is this one definition. No magnitude threshold is applied: a
+/// gate of `1e-9` in front of a decoder of norm `1e9` contributes an output of
+/// order one, so dropping it by magnitude alone would discard output that no code
+/// pays for.
 pub fn gate_is_transmitted(gate: f64) -> bool {
     gate != 0.0
 }

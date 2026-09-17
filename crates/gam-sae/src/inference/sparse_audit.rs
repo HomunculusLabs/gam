@@ -237,7 +237,7 @@ pub fn atlas_nerve_from_sparse_route(
             let unit = route.indices[[row, slot]] as usize;
             if let Some(&chart_idx) = chart_positions.get(&unit) {
                 let gate = route.gate(row, slot);
-                if gate > 0.0 {
+                if crate::description_length::gate_is_transmitted(gate) {
                     chart_rows[chart_idx].push(row);
                     chart_weights[chart_idx].push(gate);
                     live_charts.push(chart_idx);
