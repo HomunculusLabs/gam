@@ -11,10 +11,9 @@
 //!   size fired, `log₂(G+1) + mean_i log₂ C(G, |S_i|)` per token. That is the
 //!   WORST CASE among support models (every subset of a given size is equally
 //!   likely), but it is a complete prefix code over all `2^G` supports. The
-//!   plug-in entropy of an independent support at the measured firing rates is
-//!   reported alongside it and never charged (it is not a code), so a comparison
-//!   whose whole margin lives in the support term can be read against how
-//!   predictable the firing is (#2283);
+//!   native independent Krichevsky–Trofimov support code is reported alongside it
+//!   and never charged, so a comparison whose whole margin lives in the support
+//!   term can be read against how predictable the firing is (#2283);
 //! * **code** bits — a JOINT reverse-water-filling of every atom's per-firing
 //!   contribution spectrum, each spectrum weighted by that atom's firing
 //!   probability `p_g`, sharing ONE water level across all components with the
@@ -84,7 +83,8 @@ use ndarray::{Array1, Array2, ArrayView2};
 
 use gam_linalg::faer_ndarray::{FaerEigh, FaerSvd};
 
-use crate::description_length::{selection_bits, weighted_reverse_water_filling};
+use crate::atom_codes::{combinatorial_support_bits, kt_code_bits};
+use crate::description_length::weighted_reverse_water_filling;
 
 /// Standard fixed-distortion reporting points shared by every front-end.
 pub const DEFAULT_EQ4_R2_TARGETS: &[f64] = &[0.99, 0.95, 0.90, 0.80];
@@ -131,14 +131,15 @@ pub struct Eq4DescriptionLength {
     /// no decodable support: one atom firing on half the rows cost zero bits
     /// (#2933 F09).
     pub support_bits: f64,
-    /// The plug-in entropy `Σ_g H₂(p̂_g)` of an INDEPENDENT support at the
-    /// measured per-atom firing rates, in bits per token. Reported alongside
-    /// [`Self::support_bits`], never charged. It is the entropy of the estimated
-    /// marginals, not a decodable code: it omits the cost of learning the rates
-    /// (a never-firing atom contributes zero), so it is a reference line for how
-    /// predictable the firing is, never a price a receiver could pay. On a real
-    /// K=32768 TopK dictionary the gap to the charged code measured 46.0 bits,
-    /// against a predicted margin of 20.1 (#2283, before the complete support code).
+    /// The independent Krichevsky–Trofimov support code of the native coder
+    /// ([`crate::atom_codes::SupportEntropy::independent_bits`]) over the
+    /// estimation rows, in bits per token. Reported alongside
+    /// [`Self::support_bits`], never charged. Unlike the plug-in `Σ_g H₂(p̂_g)` it
+    /// replaced, it is a decodable code: it pays for learning every atom's firing
+    /// rate, about `(½·log₂ n + 1)/n` bits per token per atom, so a never-firing
+    /// atom is not free and the value approaches the plug-in entropy only as `n`
+    /// grows. That regret is denominated in estimation rows, which is why this
+    /// code is reported and never charged.
     pub independent_support_bits: f64,
     /// Achieved mean per-token support cardinality `L0` (mean active atoms per
     /// row). Reported only: the support code prices each row's own cardinality,
@@ -450,25 +451,16 @@ where
     // Rounding the MEAN cardinality and pricing `log₂ C(G, round L0)` names no
     // decodable support (#2933 F09): one atom firing on half the rows rounds to
     // `C(1, 0)` and costs zero bits, against the one bit per token a receiver needs.
-    let subset_bits: f64 = cardinality_counts
+    let support_bits = combinatorial_support_bits(n_atoms, &cardinality_counts);
+    // The same support under the native coder's independent Krichevsky–Trofimov
+    // code over the estimation rows. Never charged. KT probabilities depend only on
+    // each atom's firing count, and the code pays for learning every rate, so a
+    // never-firing atom is not free (the plug-in `Σ_g H₂(p̂_g)` it replaces said zero).
+    let independent_support_bits = firings_per_atom
         .iter()
-        .enumerate()
-        .filter(|&(_, &count)| count > 0)
-        .map(|(cardinality, &count)| {
-            count as f64 * selection_bits(n_atoms as i64, cardinality as i64)
-        })
-        .sum();
-    let support_bits = (n_atoms as f64 + 1.0).log2() + subset_bits / n as f64;
-    // The plug-in entropy of an independent support at the measured firing rates.
-    // Never charged, and not a decodable code: it omits the cost of learning the
-    // rates, so a never-firing atom contributes nothing.
-    let independent_support_bits: f64 = p_g
-        .iter()
-        .filter(|&&probability| probability > 0.0 && probability < 1.0)
-        .map(|&probability| {
-            -(probability * probability.log2() + (1.0 - probability) * (1.0 - probability).log2())
-        })
-        .sum();
+        .map(|&fired| kt_code_bits((n - fired) as u64, fired as u64))
+        .sum::<f64>()
+        / n as f64;
 
     // Residual raw second-moment spectrum (no residual mean is transmitted, so a
     // bias is paid) and the centered reference variance that defines R².
@@ -757,9 +749,24 @@ mod tests {
             // One atom firing on exactly half the rows. The combinatorial code
             // transmits each row's cardinality among {0, 1}: exactly one bit per
             // token at every estimation size (the rounded-mean price was zero,
-            // #2933 F09). The uncharged plug-in entropy at p = 1/2 is also one bit.
+            // #2933 F09). The uncharged independent KT code also pays to learn the
+            // firing rate, so it lies strictly above the plug-in entropy of one bit,
+            // by the exact KT regret of this count pair.
             assert_eq!(run.support_bits, 1.0);
-            assert_eq!(run.independent_support_bits, 1.0);
+            let rows = run.estimation_rows as usize;
+            let half = rows / 2;
+            let kt_log2_probability = 2.0
+                * (0..half)
+                    .map(|index| (index as f64 + 0.5).log2())
+                    .sum::<f64>()
+                - (1..=rows).map(|index| (index as f64).log2()).sum::<f64>();
+            let expected_kt = -kt_log2_probability / rows as f64;
+            assert!(expected_kt > 1.0);
+            assert!(
+                (run.independent_support_bits - expected_kt).abs() <= 1.0e-10 * expected_kt,
+                "{rows} rows: KT support {} != closed form {expected_kt}",
+                run.independent_support_bits
+            );
         }
         assert_eq!(small.estimation_rows, 256);
         assert_eq!(medium.estimation_rows, 1024);

@@ -1,6 +1,7 @@
 //! Support-code, rare-atom and spectrum-sampling contracts of the Eq. 4 scorer
-//! (#2933 F09, F16, F19). The support oracles are exact integer combinatorics and
-//! the Kraft sum, never the scorer's own helpers; the spectrum oracles are row
+//! (#2933 F09, F16, F19). The support oracles are exact integer combinatorics, the
+//! Kraft sum and explicit Krichevsky–Trofimov products, never the scorer's own
+//! helpers; the spectrum oracles are row
 //! permutations and closed-form raw second moments of the contributions.
 
 use super::*;
@@ -118,6 +119,37 @@ fn eq4_support_prices_each_row_cardinality_not_the_rounded_mean() {
     });
     let expected = 9.0_f64.log2() + (binomial(8, 3) as f64).log2();
     assert!((support_only(&gate).support_bits - expected).abs() <= 1.0e-12);
+}
+
+/// The reported independent support code is the native Krichevsky–Trofimov code,
+/// not plug-in Bernoulli entropy. Over `n` rows, an atom firing `m` times has KT
+/// probability `Π_{j<m}(j+½)·Π_{j<n−m}(j+½) / n!`, evaluated here as a product
+/// rather than through `lnΓ`. A dead atom is therefore NOT free (the plug-in says
+/// zero), and a rare atom costs more than its plug-in entropy.
+#[test]
+fn eq4_independent_support_is_the_kt_code_not_plug_in_entropy() {
+    const ROWS: usize = 8;
+    // Atom 0 fires once, atom 1 never fires.
+    let gate = Array2::from_shape_fn((ROWS, 2), |(row, atom)| {
+        if atom == 0 && row == 5 { 1.0 } else { 0.0 }
+    });
+    let kt_bits = |fired: usize| -> f64 {
+        let half_counts = |count: usize| (0..count).map(|j| (j as f64 + 0.5).log2()).sum::<f64>();
+        let log2_factorial: f64 = (1..=ROWS).map(|t| (t as f64).log2()).sum();
+        log2_factorial - half_counts(fired) - half_counts(ROWS - fired)
+    };
+    let expected = (kt_bits(1) + kt_bits(0)) / ROWS as f64;
+    let report = support_only(&gate);
+    assert!(
+        (report.independent_support_bits - expected).abs() <= 1.0e-10 * expected,
+        "KT support {} != closed form {expected}",
+        report.independent_support_bits
+    );
+    let p = 1.0 / ROWS as f64;
+    let plug_in = -(p * p.log2() + (1.0 - p) * (1.0 - p).log2());
+    // The dead atom alone costs 2.35 bits over eight rows.
+    assert!(kt_bits(0) > 2.3);
+    assert!(report.independent_support_bits > plug_in + 0.25);
 }
 
 /// Rare atoms are priced from the firings they have (#2933 F16). Atom 0 fires on
