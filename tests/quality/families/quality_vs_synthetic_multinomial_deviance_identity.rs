@@ -1,26 +1,31 @@
 //! Objective quality of gam's penalized multinomial-logit (softmax) GAM, judged
-//! by **held-out predictive accuracy against a known generating rule**, not by
-//! agreement with any reference tool's fitted output.
+//! by **held-out predictive accuracy and log-loss against a known generating
+//! rule**, not by agreement with any reference tool's fitted output.
 //!
-//! The data is generated from a fully deterministic categorical rule: each row's
-//! class is the `argmax` of the softmax logits `[1.5·sin(x1), −0.8·cos(x1)·x2, 0]`
-//! over the rectangle `[0, 2π] × [-3, 3]`. Because the labels are the hard argmax
-//! of a smooth logit field, the Bayes-optimal classifier here has *zero* error —
-//! the only thing standing between a fitted model and perfect held-out accuracy
-//! is whether its smooths recover the true decision boundary. That makes
-//! held-out accuracy a genuine, tool-independent quality metric: a model that
-//! recovers the truth scores ~1.0; a model that under/over-smooths the boundary
-//! loses accuracy.
+//! The data is generated from a known categorical rule: each row's class is
+//! SAMPLED from the softmax of the logits `[1.5·sin(x1), −0.8·cos(x1)·x2, 0]` over
+//! the rectangle `[0, 2π] × [-3, 3]`, with a deterministic LCG so the labels are
+//! byte-identical run to run. The labels used to be the hard `argmax` of those
+//! logits. That separates the classes completely: the unpenalized MLE diverges,
+//! and mgcv's `gam.fit5` stops with "non finite values in Hessian" (pool job
+//! 646273). Sampled labels overlap across classes, the same fixture choice
+//! `quality_vs_statsmodels_multinomial` makes (#1082).
 //!
-//! OBJECTIVE METRIC (the pass/fail claim):
-//!   * Train gam on a deterministic 70% slice, predict the held-out 30%, and
-//!     assert **held-out classification accuracy ≥ 0.90** (truth recovery: the
-//!     boundary is learnable to near-perfection, so 0.90 is a principled,
-//!     un-weakened bar that still fails a mis-fit boundary).
-//!   * Assert the held-out **multinomial log-loss ≤ 0.45 nats/row** — a proper
-//!     scoring rule that additionally penalizes over-confident wrong calls and
-//!     under-confident right ones (a hard-accuracy-only model can pass accuracy
-//!     while being badly calibrated; log-loss closes that gap).
+//! OBJECTIVE METRIC (the pass/fail claim): train gam on a deterministic 70%
+//! slice, predict the held-out 30%, and score multiclass accuracy and multinomial
+//! log-loss (a proper scoring rule, which also penalizes over- and
+//! under-confident calls that accuracy cannot see). Because the generating field
+//! `p*` is known, the best any classifier can do on these rows is computed
+//! exactly:
+//!   * the Bayes classifier's expected accuracy `A* = mean_i max_c p*_c(x_i)`,
+//!     whose per-row sampling variance is `m_i (1 − m_i)` with `m_i = max_c p*_c`;
+//!   * the true field's expected log-loss `H* = mean_i H(p*(x_i))`, whose per-row
+//!     sampling variance is `Σ_c p*_c (ln p*_c)² − H(p*(x_i))²`.
+//! gam must reach accuracy `A* − z·σ_A` and log-loss at most `H* + z·σ_L`, where
+//! `σ` is the exact standard deviation of the realized mean over the held-out
+//! rows and `z` the one-sided normal quantile at `GATE_FALSE_ALARM_RATE`. The true
+//! field itself, scored on the same realized labels, must clear both bars: that
+//! positive control shows the band describes this draw.
 //!
 //! BASELINE TO MATCH-OR-BEAT (the reference is demoted, never the pass gate):
 //!   mgcv's `multinom(K=2)` GAM is fit on the *identical* train rows and scored
@@ -48,6 +53,7 @@ use gam::data::EncodedDataset;
 use gam::families::multinomial::{
     MultinomialFitRequest, fit_penalized_multinomial_formula, predict_multinomial_formula,
 };
+use gam::test_support::calibration::{COVERAGE_FALSE_POSITIVE_RATE, standard_normal_quantile};
 use gam::test_support::reference::{Column, run_r};
 use gam::{FitConfig, encode_recordswith_inferred_schema, init_parallelism};
 
@@ -55,19 +61,44 @@ use csv::StringRecord;
 use ndarray::Array2;
 use std::f64::consts::PI;
 
-/// One generated observation: covariates plus the deterministic hard class.
+/// The gate's error rate: the probability that a fit exactly as good as the
+/// generating field fails the Bayes bars below by label sampling alone. It is the
+/// same 1% budget the calibration gates share.
+const GATE_FALSE_ALARM_RATE: f64 = COVERAGE_FALSE_POSITIVE_RATE;
+
+/// Seed of the label draw.
+const LABEL_SEED: u64 = 0x1082_0085;
+
+/// The class labels, in the order of the generating logits.
+const LABELS: [&str; 3] = ["A", "B", "C"];
+
+/// Deterministic seeded uniform in [0,1) (Numerical Recipes LCG, high bits).
+struct Lcg(u64);
+impl Lcg {
+    fn unit(&mut self) -> f64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((self.0 >> 11) as f64) / ((1u64 << 53) as f64)
+    }
+}
+
+/// One generated observation: covariates, the sampled class, and the generating
+/// field's class probabilities there (in `LABELS` order).
 struct Obs {
     x1: f64,
     x2: f64,
     label: String,
+    true_probs: [f64; 3],
 }
 
-/// Synthetic, fully deterministic (RNG-free) categorical dataset.
+/// Synthetic categorical dataset with a known generating field.
 ///
 /// `(x1, x2)` sweep the rectangle `[0, 2π] × [-3, 3]` on a deterministic
-/// space-filling lattice; the class is the `argmax` of the softmax logits
-/// `[1.5·sin(x1), −0.8·cos(x1)·x2, 0]`, encoded as the string labels
-/// `"A"/"B"/"C"`.
+/// space-filling lattice; the class is sampled from the softmax of the logits
+/// `[1.5·sin(x1), −0.8·cos(x1)·x2, 0]` with a seeded LCG, encoded as the string
+/// labels `"A"/"B"/"C"`.
 fn make_observations(n: usize) -> Vec<Obs> {
     // Two coprime irrational strides give a deterministic, well-spread
     // additive-recurrence (Weyl) sequence over the unit square — no RNG, no
@@ -76,6 +107,7 @@ fn make_observations(n: usize) -> Vec<Obs> {
     let stride2 = (3.0_f64).sqrt().fract(); // ≈ 0.73205081
     let mut u1 = 0.12_f64;
     let mut u2 = 0.37_f64;
+    let mut draw = Lcg(LABEL_SEED);
 
     let mut obs = Vec::with_capacity(n);
     for _ in 0..n {
@@ -86,22 +118,26 @@ fn make_observations(n: usize) -> Vec<Obs> {
         let b = -3.0 + 6.0 * u2;
 
         // Softmax logits with the reference class (index 2) pinned at 0.
-        let l0 = 1.5 * a.sin();
-        let l1 = -0.8 * a.cos() * b;
-        let l2 = 0.0;
-        // Deterministic hard class = argmax of the logits.
-        let label = if l0 >= l1 && l0 >= l2 {
-            "A"
-        } else if l1 >= l0 && l1 >= l2 {
-            "B"
+        let logits = [1.5 * a.sin(), -0.8 * a.cos() * b, 0.0];
+        let shift = logits.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let weights = logits.map(|logit| (logit - shift).exp());
+        let total: f64 = weights.iter().sum();
+        let true_probs = weights.map(|weight| weight / total);
+        // Inverse-CDF draw of the class from the generating softmax.
+        let u = draw.unit();
+        let class = if u < true_probs[0] {
+            0
+        } else if u < true_probs[0] + true_probs[1] {
+            1
         } else {
-            "C"
+            2
         };
 
         obs.push(Obs {
             x1: a,
             x2: b,
-            label: label.to_string(),
+            label: LABELS[class].to_string(),
+            true_probs,
         });
     }
     obs
@@ -255,6 +291,50 @@ fn multinomial_recovers_decision_boundary_on_held_out_split() {
     let gam_acc = accuracy(&probs_test, &test_idx);
     let gam_ll = log_loss(&probs_test, &test_idx);
 
+    // ---- the generating field's exact Bayes scores on the held-out rows -------
+    // `A*` and `H*` are the expectations, over the label draw, of the Bayes
+    // classifier's accuracy and the true field's log-loss on these covariates; the
+    // variances are each row's own sampling variance, summed exactly. The field is
+    // also scored on the realized labels, as the positive control.
+    let n_test = test.len() as f64;
+    let mut bayes_accuracy_sum = 0.0_f64;
+    let mut bayes_accuracy_variance = 0.0_f64;
+    let mut bayes_log_loss_sum = 0.0_f64;
+    let mut bayes_log_loss_variance = 0.0_f64;
+    let mut field_correct = 0usize;
+    let mut field_log_loss_sum = 0.0_f64;
+    for o in &test {
+        let p = o.true_probs;
+        let mut best = 0usize;
+        for class in 1..LABELS.len() {
+            if p[class] > p[best] {
+                best = class;
+            }
+        }
+        let largest = p[best];
+        bayes_accuracy_sum += largest;
+        bayes_accuracy_variance += largest * (1.0 - largest);
+        let entropy: f64 = p.iter().map(|&value| -value * value.ln()).sum();
+        let second_moment: f64 = p.iter().map(|&value| value * value.ln().powi(2)).sum();
+        bayes_log_loss_sum += entropy;
+        bayes_log_loss_variance += second_moment - entropy * entropy;
+        let realized = LABELS
+            .iter()
+            .position(|label| *label == o.label)
+            .expect("every label is drawn from LABELS");
+        if best == realized {
+            field_correct += 1;
+        }
+        field_log_loss_sum -= p[realized].ln();
+    }
+    let bayes_accuracy = bayes_accuracy_sum / n_test;
+    let bayes_log_loss = bayes_log_loss_sum / n_test;
+    let z = standard_normal_quantile(1.0 - GATE_FALSE_ALARM_RATE);
+    let accuracy_bar = bayes_accuracy - z * bayes_accuracy_variance.sqrt() / n_test;
+    let log_loss_bar = bayes_log_loss + z * bayes_log_loss_variance.sqrt() / n_test;
+    let field_accuracy = field_correct as f64 / n_test;
+    let field_log_loss = field_log_loss_sum / n_test;
+
     // ---- structural identity on TRAIN rows (internal consistency only) ------
     // The stored unpenalized deviance must equal an independent softmax
     // recompute `-2·Σ log p̂` over the training rows — no penalty leakage, no
@@ -307,24 +387,61 @@ fn multinomial_recovers_decision_boundary_on_held_out_split() {
     // and that used to take gam's numbers down with it (#1082).
     eprintln!(
         "[multinomial-quality] n_train={} n_test={} K={}\n  \
-         gam:  acc={gam_acc:.4} logloss={gam_ll:.4}\n  \
+         gam:   acc={gam_acc:.4} logloss={gam_ll:.4}\n  \
+         field: acc={field_accuracy:.4} logloss={field_log_loss:.4} (positive control)\n  \
+         Bayes: A*={bayes_accuracy:.4} H*={bayes_log_loss:.4} z={z:.4} \
+         bars: acc>={accuracy_bar:.4} logloss<={log_loss_bar:.4}\n  \
          stored-deviance identity: abs={dev_abs:.3e} rel={dev_rel:.3e}",
         train.len(),
         test.len(),
         model.class_levels.len(),
     );
+    // The selected smoothing parameters and each penalty's EDF, block-major. Every λ
+    // on the upper rail with EDF near zero is an intercept-only collapse, which a
+    // held-out accuracy near the class shares cannot tell apart from a weak fit.
+    let scientific = |values: &[f64]| -> String {
+        values
+            .iter()
+            .map(|value| format!("{value:.3e}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    eprintln!(
+        "[multinomial-quality] lambda [{}] edf_per_penalty [{}] jeffreys_armed={}",
+        scientific(&model.lambdas),
+        model
+            .edf_per_penalty
+            .as_deref()
+            .map_or_else(|| "not reported".to_string(), scientific),
+        model.separation_evidence.is_some(),
+    );
 
     // ── OBJECTIVE PASS/FAIL ────────────────────────────────────────────────
-    // 1. Absolute truth-recovery bars on the held-out split.
+    // 0. Positive control: the generating field itself, on the same realized
+    //    labels, clears both bars. A field that fails them means the band does not
+    //    describe this draw, so gam's result against it would say nothing.
     assert!(
-        gam_acc >= 0.90,
-        "held-out accuracy {gam_acc:.4} below the 0.90 truth-recovery bar \
-         (the Bayes-optimal boundary is learnable to ~1.0)"
+        field_accuracy >= accuracy_bar,
+        "positive control: the generating field's held-out accuracy {field_accuracy:.4} is \
+         below its own Bayes bar {accuracy_bar:.4} (A* = {bayes_accuracy:.4})"
     );
     assert!(
-        gam_ll <= 0.45,
-        "held-out multinomial log-loss {gam_ll:.4} nats/row above the 0.45 bar \
-         (model is mis-calibrated even if argmax accuracy is acceptable)"
+        field_log_loss <= log_loss_bar,
+        "positive control: the generating field's held-out log-loss {field_log_loss:.4} is \
+         above its own Bayes bar {log_loss_bar:.4} (H* = {bayes_log_loss:.4})"
+    );
+
+    // 1. gam against the exact Bayes bars on the held-out split.
+    assert!(
+        gam_acc >= accuracy_bar,
+        "held-out accuracy {gam_acc:.4} below the Bayes bar {accuracy_bar:.4} \
+         (A* = {bayes_accuracy:.4}, one-sided false-alarm rate {GATE_FALSE_ALARM_RATE})"
+    );
+    assert!(
+        gam_ll <= log_loss_bar,
+        "held-out multinomial log-loss {gam_ll:.4} nats/row above the Bayes bar \
+         {log_loss_bar:.4} (H* = {bayes_log_loss:.4}, one-sided false-alarm rate \
+         {GATE_FALSE_ALARM_RATE})"
     );
 
     // 2. Structural bookkeeping invariant (internal consistency).
