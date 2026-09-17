@@ -116,7 +116,7 @@ pub mod spectral;
 pub mod state;
 
 // Evidence status, failure hypergraph and robust supports.
-// [unlanded: supports]
+pub mod supports;
 
 // Versioned request and report document shared by pyffi and the CLI.
 // [unlanded: surface]
