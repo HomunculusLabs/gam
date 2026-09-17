@@ -67,7 +67,7 @@ After loading, every method works as on the original model:
 ```python
 loaded.predict(test, interval=0.95)
 loaded.summary()
-loaded.diagnose(test)
+loaded.diagnose(train)             # diagnostics need the response column
 loaded.sample(test, seed=42)
 ```
 
@@ -89,6 +89,7 @@ long-term archival, pin the `gamfit` version or refit after upgrades.
 ### Inspect a model without the training data
 
 ```python
+model.save("model.gam")            # a model saved earlier
 m = gamfit.load("model.gam")
 print(m.summary())
 print(m.model_class, m.formula)

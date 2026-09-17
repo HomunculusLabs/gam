@@ -32,26 +32,45 @@ def examples(language: str):
 
 
 def synthetic_data() -> pd.DataFrame:
-    """One small, deterministic frame covering names used by introductory snippets."""
-    n = 40
+    """One small, deterministic frame covering names used by introductory snippets.
+
+    Every response carries signal and noise, so a snippet's fit has something to
+    identify. A noiseless response, a binary label with no covariate effect or a
+    constant composition makes an example refuse because of the data, not because
+    of the API it documents.
+    """
+    n = 120
+    rng = np.random.default_rng(20260917)
     x = np.linspace(0.1, 4.0, n)
+    theta = np.linspace(0, 2 * np.pi, n, endpoint=False)
+    risk = 1.0 / (1.0 + np.exp(-(x - 2.0)))
+    sand = 0.2 + 0.08 * np.sin(x) + rng.uniform(0.0, 0.02, n)
+    silt = 0.3 + 0.08 * np.cos(x) + rng.uniform(0.0, 0.02, n)
+    direction = np.column_stack([np.sin(theta), np.cos(theta), 0.4 * np.sin(x)])
+    direction /= np.linalg.norm(direction, axis=1, keepdims=True)
     frame = pd.DataFrame({
         "x": x, "x1": x, "x2": np.sin(x), "x3": np.cos(x), "x4": x / 4,
         "age": 30 + x * 10, "bmi": 20 + x, "hba1c": 4 + x / 2,
         "dose": x / 4, "prop": x / 5, "dow": np.arange(n) % 7,
-        "hour": np.arange(n) % 24, "theta": np.linspace(0, 2 * np.pi, n, endpoint=False),
+        "hour": np.arange(n) % 24, "theta": theta, "h": x / 4,
+        "u": theta, "v": np.resize(theta[::-1], n), "space": x, "time": np.arange(n) % 12,
         "lat": np.linspace(-1, 1, n), "lon": np.linspace(-3, 3, n),
         "pc1": x, "pc2": np.sin(x), "pc3": np.cos(x), "pc4": x * x / 16,
-        "raw_score": np.sin(x) + x / 4, "PGS": np.sin(x) + x / 4,
-        "pgs": np.sin(x) + x / 4, "z": np.sin(x), "prev": np.linspace(.1, .9, n),
-        "entry": np.zeros(n), "exit": np.arange(1, n + 1, dtype=float),
-        "event": (np.arange(n) % 3 == 0).astype(float),
-        "case": (np.arange(n) % 2).astype(float), "disease": (np.arange(n) % 2).astype(float),
-        "y": 1 + np.sin(x) + x / 3, "outcome": 1 + np.sin(x),
+        "raw_score": np.sin(x) + x / 4 + rng.normal(0.0, 0.3, n),
+        "PGS": np.sin(x) + x / 4 + rng.normal(0.0, 0.3, n),
+        "pgs": np.sin(x) + x / 4 + rng.normal(0.0, 0.3, n),
+        "z": np.sin(x) + rng.normal(0.0, 0.2, n), "prev": np.linspace(.1, .9, n),
+        "entry": np.zeros(n), "exit": 1.0 + rng.exponential(8.0 / (0.5 + risk)),
+        "event": (rng.uniform(size=n) < 0.7).astype(float),
+        "case": (rng.uniform(size=n) < risk).astype(float),
+        "disease": (rng.uniform(size=n) < risk).astype(float),
+        "y": 1 + np.sin(x) + x / 3 + rng.normal(0.0, 0.3, n),
+        "outcome": 1 + np.sin(x) + rng.normal(0.0, 0.3, n),
         "site": np.resize(["A", "B", "C"], n), "site_id": np.resize(["A", "B"], n),
+        "family_id": np.arange(n) % 10,
         "group": np.resize(["control", "treated"], n), "treatment": np.arange(n) % 2,
-        "sand": np.full(n, .2), "silt": np.full(n, .3), "clay": np.full(n, .5),
-        "nx": np.sin(x), "ny": np.cos(x), "nz": np.zeros(n),
+        "sand": sand, "silt": silt, "clay": 1.0 - sand - silt,
+        "nx": direction[:, 0], "ny": direction[:, 1], "nz": direction[:, 2],
     })
     return frame
 
@@ -69,7 +88,8 @@ def python_context():
     return {
         "gamfit": gamfit, "np": np, "pd": pd, "df": df, "data": df,
         "train": train, "train_df": train, "test": test, "test_df": test,
-        "cal_df": train.head(10), "model": model, "model_a": model, "model_b": model,
+        "cal_df": train.head(10), "held_out": train.head(10),
+        "model": model, "model_a": model, "model_b": model,
         "loaded": model, "posterior": posterior,
         "X": x_matrix, "X_train": x_matrix.to_numpy(), "X_test": x_matrix.head(4).to_numpy(),
         "y": train["y"].to_numpy(),

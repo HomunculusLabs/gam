@@ -146,7 +146,7 @@ S = pred.survival_at([1, 5, 10])
 
 An already fitted external CTN can be passed through the same native composition:
 
-```python
+```python no-exec
 reference = gamfit.load("reference.gamfit")
 model = gamfit.fit(
     df, "Surv(entry, exit, event) ~ s(age) + sex + duchon(pc1, pc2)",
@@ -507,6 +507,7 @@ gamfit.fit(df,
 ## Detecting marginal-slope models after loading
 
 ```python
+model.save("model.gam")            # a model saved earlier
 model = gamfit.load("model.gam")
 model.is_marginal_slope            # True if a marginal-slope family
 model.is_survival                  # True if survival

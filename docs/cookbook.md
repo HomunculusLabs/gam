@@ -237,6 +237,7 @@ model = gamfit.fit(
     transformation_normal_stage1=gamfit.CtnStage1(
         response="PGS",
         covariates="matern(pc1, pc2, pc3, pc4, centers=20)",
+        group_column="family_id", folds=2,
     ),
     scale_dimensions=True,
 )
@@ -254,6 +255,7 @@ gamfit.fit(
     transformation_normal_stage1=gamfit.CtnStage1(
         response="PGS",
         covariates="s(bmi) + s(hba1c)",
+        group_column="family_id", folds=2,
     ),
 )
 ```
