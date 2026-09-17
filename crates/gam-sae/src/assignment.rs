@@ -1462,6 +1462,9 @@ mod ordered_beta_bernoulli_exact_hessian_tests {
 /// `None` gives the unit-weight path. Softmax/threshold gate are row-separable;
 /// ordered Beta--Bernoulli instead forms weighted active mass and effective row
 /// count inside its integrated scalar. Every derivative uses that same measure.
+///
+/// The ThresholdGate value is the normalized negative log density `λz + log Z(λ)` per free
+/// gate ([`ThresholdGateLogPartition`]), so its strength derivative carries `∂_ρ log Z`.
 pub(crate) fn assignment_prior_value_weighted(
     assignment: &SaeAssignment,
     rho: &SaeManifoldRho,
@@ -1511,19 +1514,15 @@ pub(crate) fn assignment_prior_value_weighted(
             // Sparsity penalty and reconstruction use the same smooth
             // threshold-centered logistic gate as the gradient and Hessian.
             let sparsity_strength = rho.lambda_sparse()?;
-            let k = assignment.k_atoms();
-            let mut acc = 0.0;
-            for (idx, &logit) in target.iter().enumerate() {
-                // #Bug4: skip ungated (inert) atoms' logits.
-                if assignment.logit_is_fixed(idx % k) {
-                    continue;
-                }
-                // #991 — this row stands in for `w_i` population rows.
-                let w_row = row_weights.map_or(1.0, |w| w[idx / k]);
-                acc +=
-                    w_row * gam_linalg::utils::stable_logistic((logit - threshold) / temperature);
-            }
-            sparsity_strength * acc
+            let gates = threshold_gate_free_gates(
+                assignment,
+                target.view(),
+                threshold,
+                temperature,
+                row_weights,
+            );
+            sparsity_strength * gates.weighted_activation
+                + gates.weight * ThresholdGateLogPartition::eval(sparsity_strength).value()
         }
         // Sparsity by construction: the fixed-|S| support IS the sparsity — there
         // is no penalty term, so the prior contributes exactly zero.
@@ -1551,8 +1550,26 @@ pub(crate) fn assignment_prior_log_strength_derivative_weighted(
         return Ok(0.0);
     }
     Ok(match assignment.mode {
-        AssignmentMode::Softmax { .. } | AssignmentMode::ThresholdGate { .. } => {
+        AssignmentMode::Softmax { .. } => {
             return assignment_prior_value_weighted(assignment, rho, row_weights);
+        }
+        AssignmentMode::ThresholdGate {
+            temperature,
+            threshold,
+        } => {
+            // `∂_ρ[λ·Σ w·z + Σ w·log Z(λ)]`: the energy is degree one in `λ = e^ρ`, the
+            // partition is not.
+            let sparsity_strength = rho.lambda_sparse()?;
+            let gates = threshold_gate_free_gates(
+                assignment,
+                target.view(),
+                threshold,
+                temperature,
+                row_weights,
+            );
+            sparsity_strength * gates.weighted_activation
+                + gates.weight
+                    * ThresholdGateLogPartition::eval(sparsity_strength).log_strength_derivative()
         }
         AssignmentMode::OrderedBetaBernoulli {
             temperature, alpha, ..
@@ -1674,6 +1691,86 @@ pub(crate) fn assignment_prior_log_strength_hdiag_weighted(
         // No prior term ⇒ zero curvature everywhere (mirrors the frozen-routing
         // early return; the support carries no free logits at all).
         AssignmentMode::TopK { .. } => Ok(Array1::<f64>::zeros(target.len())),
+    }
+}
+
+/// The free gates of a ThresholdGate assignment: `Σ w_row·z` over every free logit with
+/// `z = σ((ℓ − θ)/τ)`, and `Σ w_row` over the same logits.
+struct ThresholdGateFreeGates {
+    weighted_activation: f64,
+    weight: f64,
+}
+
+fn threshold_gate_free_gates(
+    assignment: &SaeAssignment,
+    target: ArrayView1<'_, f64>,
+    threshold: f64,
+    temperature: f64,
+    row_weights: Option<&[f64]>,
+) -> ThresholdGateFreeGates {
+    let k = assignment.k_atoms();
+    let mut gates = ThresholdGateFreeGates {
+        weighted_activation: 0.0,
+        weight: 0.0,
+    };
+    for (idx, &logit) in target.iter().enumerate() {
+        // #Bug4: skip ungated (inert) atoms' logits.
+        if assignment.logit_is_fixed(idx % k) {
+            continue;
+        }
+        // #991 — this row stands in for `w_i` population rows.
+        let w_row = row_weights.map_or(1.0, |w| w[idx / k]);
+        gates.weighted_activation +=
+            w_row * gam_linalg::utils::stable_logistic((logit - threshold) / temperature);
+        gates.weight += w_row;
+    }
+    gates
+}
+
+/// The log partition function of the ThresholdGate prior on one gate, and its derivative in
+/// the log strength `ρ = ln λ`.
+///
+/// #2933 F45. The energy `λz` on `z ∈ (0, 1)` is a density only after dividing by
+/// `Z(λ) = ∫₀¹ e^{−λz} dz = (1 − e^{−λ})/λ`, so each free gate's negative log prior is
+/// `λz + log Z(λ)`, and with the change of variables [`GateLogitJacobian`] it integrates to one
+/// over the logit for every `λ`, `θ` and `τ`. Without `log Z` the no-data mass is `Z(λ) < 1`
+/// and the strength derivative lacks `λ·∂_λ log Z = λ/(e^λ − 1) − 1 = −λ·E[z]`, which is the
+/// term that lets the criterion balance the fitted mean gate against the prior mean instead of
+/// always lowering `λ`. A design-weighted row carries `w·log Z(λ)` beside its `w·λz`, as the
+/// Jacobian carries `w·J`: it stands in for `w` population rows, each a normalized density.
+///
+/// `Z(λ) = exprel(−λ)`, evaluated by [`gam_math::special::log_exprel`]. The derivative is
+/// `−(e^λ − 1 − λ)/(e^λ − 1)` through [`gam_math::special::expm1_minus_x`] up to `λ = 1/2`,
+/// which never subtracts two terms near one as `λ → 0` (where it is `−λ/2`); above that it is
+/// `λe^{−λ}/(1 − e^{−λ}) − 1`, which never forms `e^λ`. Both forms are accurate at the branch
+/// point, the same one `gam_math` uses for its small-argument series.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ThresholdGateLogPartition {
+    value: f64,
+    log_strength_derivative: f64,
+}
+
+impl ThresholdGateLogPartition {
+    pub(crate) fn eval(strength: f64) -> Self {
+        let log_strength_derivative = if strength <= 0.5 {
+            -gam_math::special::expm1_minus_x(strength) / strength.exp_m1()
+        } else {
+            strength * (-strength).exp() / -(-strength).exp_m1() - 1.0
+        };
+        Self {
+            value: gam_math::special::log_exprel(-strength),
+            log_strength_derivative,
+        }
+    }
+
+    /// `log Z(λ) = ln[(1 − e^{−λ})/λ]`.
+    pub(crate) fn value(self) -> f64 {
+        self.value
+    }
+
+    /// `∂ log Z/∂ ln λ = λ/(e^λ − 1) − 1`.
+    pub(crate) fn log_strength_derivative(self) -> f64 {
+        self.log_strength_derivative
     }
 }
 
@@ -2899,5 +2996,166 @@ mod ungated_background_jvp_2933_tests {
         assert_eq!(refused.try_assignments_row(0), Err(expected.clone()));
         let rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::zeros(1); 3]).for_assignment(softmax);
         assert_eq!(refused.validate_rho_domain(&rho), Err(expected));
+    }
+}
+
+#[cfg(test)]
+mod threshold_gate_partition_2933_tests {
+    //! #2933 F45 — the ThresholdGate energy `λz` on a gate `z ∈ (0, 1)` is a density only with
+    //! its partition `Z(λ) = (1 − e^{−λ})/λ`. With the logit change of variables, the production
+    //! prior value must integrate to one over the logit for every strength, threshold and
+    //! temperature, and its log-strength derivative must have zero mean under that prior: the
+    //! score identity `E[∂_ρ(−log p)] = 0` holds for a normalized density and fails for an
+    //! energy whose normalizer depends on `ρ`. A derivative check against the same unnormalized
+    //! scalar cannot see the difference, so these integrate instead.
+    use super::*;
+    use ndarray::array;
+
+    /// Strengths from the small-`λ` series regime through deep saturation.
+    const STRENGTHS: [f64; 5] = [1.0e-11, 0.05, 2.0, 30.0, 150.0];
+    /// `(θ, τ)` gate frames.
+    const FRAMES: [(f64, f64); 3] = [(0.0, 1.0), (0.7, 0.35), (-1.2, 2.5)];
+
+    fn gate_assignment(logits: Array2<f64>, threshold: f64, temperature: f64) -> SaeAssignment {
+        let (n, k) = logits.dim();
+        SaeAssignment::from_blocks_with_mode_and_manifolds(
+            logits,
+            vec![Array2::<f64>::zeros((n, 1)); k],
+            vec![LatentManifold::Euclidean; k],
+            AssignmentMode::threshold_gate(temperature, threshold),
+        )
+        .expect("one logit column, coordinate block and manifold per atom")
+    }
+
+    fn strength_rho(assignment: &SaeAssignment, strength: f64) -> SaeManifoldRho {
+        SaeManifoldRho::new(strength.ln(), 0.0, vec![Array1::zeros(1); assignment.k_atoms()])
+            .for_assignment(assignment.mode)
+    }
+
+    /// The production negative log prior in logit coordinates: prior value plus Jacobian.
+    fn negative_log_prior(assignment: &SaeAssignment, rho: &SaeManifoldRho) -> f64 {
+        assignment_prior_value_weighted(assignment, rho, None).expect("admitted prior value")
+            + gate_logit_jacobian_value_weighted(assignment, None)
+    }
+
+    /// `Σ h·f(x)` over `x = (ℓ − θ)/τ ∈ [−60, 60]` at `h = 1/16`. Each integrand below is
+    /// `e^{−λσ(x)}σ(x)σ(−x)/Z` times a factor bounded by `1 + λ`, with `1/Z ≤ 1 + λ`. It is
+    /// analytic in `|Im x| < π`, and on `|Im x| ≤ π/2` `Re σ ≥ 0` keeps `|e^{−λσ}| ≤ 1`, so the
+    /// trapezoid error is below `(1 + λ)²·e^{−2π(π/2)·16}` and the dropped tails below
+    /// `2(1 + λ)²e^{−60}`: both far under the bars, which are set by rounding in the sum.
+    fn trapezoid(mut f: impl FnMut(f64) -> f64) -> f64 {
+        let h = 1.0 / 16.0;
+        (-960_i32..=960).map(|i| h * f(f64::from(i) * h)).sum()
+    }
+
+    /// With no data, prior plus Jacobian is a normalized density over the logit. Before the
+    /// partition its mass was `Z(λ)`: `0.9754` at `λ = 0.05`, `0.4323` at `λ = 2`, `1/30` and
+    /// `1/150` above.
+    #[test]
+    fn threshold_gate_prior_integrates_to_one_over_its_logit_2933() {
+        for (threshold, temperature) in FRAMES {
+            let mut assignment = gate_assignment(Array2::zeros((1, 1)), threshold, temperature);
+            for strength in STRENGTHS {
+                let rho = strength_rho(&assignment, strength);
+                let mass = temperature
+                    * trapezoid(|x| {
+                        assignment.logits[[0, 0]] = threshold + temperature * x;
+                        (-negative_log_prior(&assignment, &rho)).exp()
+                    });
+                assert!(
+                    (mass - 1.0).abs() <= 1.0e-11,
+                    "ThresholdGate prior at λ={strength}, θ={threshold}, τ={temperature} has \
+                     no-data mass {mass:.15e}, not one"
+                );
+            }
+        }
+    }
+
+    /// The log-strength derivative has zero mean under the prior at every strength and frame,
+    /// and its partition part is `λ·∂_λ log Z = λ/(e^λ − 1) − 1`: `2·(−0.3434823572503343)` at
+    /// `λ = 2` (audit §12 check 35), and `−λ/2 + λ²/12` near zero, where the difference form
+    /// `λ/expm1(λ) − 1` would carry an absolute error of `ε`, i.e. a relative error of `2ε/λ`.
+    #[test]
+    fn threshold_gate_log_strength_derivative_has_zero_prior_mean_2933() {
+        for (threshold, temperature) in FRAMES {
+            let mut assignment = gate_assignment(Array2::zeros((1, 1)), threshold, temperature);
+            for strength in STRENGTHS {
+                let rho = strength_rho(&assignment, strength);
+                let mean = temperature
+                    * trapezoid(|x| {
+                        assignment.logits[[0, 0]] = threshold + temperature * x;
+                        let derivative =
+                            assignment_prior_log_strength_derivative_weighted(&assignment, &rho, None)
+                                .expect("admitted log-strength derivative");
+                        derivative * (-negative_log_prior(&assignment, &rho)).exp()
+                    });
+                assert!(
+                    mean.abs() <= 1.0e-11 * (1.0 + strength),
+                    "ThresholdGate log-strength derivative at λ={strength}, θ={threshold}, \
+                     τ={temperature} has prior mean {mean:.15e}, not zero"
+                );
+            }
+        }
+        let assignment = gate_assignment(array![[0.4]], 0.0, 1.0);
+        let gate = 1.0 / (1.0 + (-0.4_f64).exp());
+        let partition_slope = |strength: f64| {
+            let rho = strength_rho(&assignment, strength);
+            let derivative =
+                assignment_prior_log_strength_derivative_weighted(&assignment, &rho, None)
+                    .expect("admitted log-strength derivative");
+            (derivative - strength * gate) / strength
+        };
+        let at_two = partition_slope(2.0);
+        assert!(
+            (at_two + 0.3434823572503343).abs() <= 1.0e-13,
+            "∂_λ log Z(2) = {at_two:.16e}, expected −0.3434823572503343"
+        );
+        let small = 1.0e-11;
+        let at_small = partition_slope(small);
+        assert!(
+            (at_small + 0.5 - small / 12.0).abs() <= 1.0e-9,
+            "∂_λ log Z({small:e}) = {at_small:.16e}, expected −1/2 + λ/12"
+        );
+    }
+
+    /// Under row weights and an ungated atom, the value carries `Σ w·log Z(λ)` over exactly the
+    /// free gates, and the log-strength derivative is a central difference of that value.
+    #[test]
+    fn threshold_gate_partition_follows_free_gates_and_row_weights_2933() {
+        let logits = array![[1.3, -0.4], [-2.2, 0.8], [0.1, 4.0]];
+        let weights = [0.5, 1.0, 2.0];
+        let (threshold, temperature) = (0.3_f64, 0.6_f64);
+        let mut assignment = gate_assignment(logits.clone(), threshold, temperature);
+        assignment.ungated = vec![false, true];
+        let strength = 1.7_f64;
+        let rho = strength_rho(&assignment, strength);
+        let activation: f64 = (0..3)
+            .map(|row| weights[row] / (1.0 + (-(logits[[row, 0]] - threshold) / temperature).exp()))
+            .sum();
+        let free_weight: f64 = weights.iter().sum();
+        let log_partition = (-(-strength).exp_m1() / strength).ln();
+        let value = assignment_prior_value_weighted(&assignment, &rho, Some(&weights))
+            .expect("admitted prior value");
+        let expected = strength * activation + free_weight * log_partition;
+        assert!(
+            (value - expected).abs() <= 1.0e-13 * (1.0 + expected.abs()),
+            "weighted ThresholdGate prior value {value:.15e}, expected λ·Σw·z + Σw·log Z = \
+             {expected:.15e}"
+        );
+        let h = 1.0e-4;
+        let shifted = |delta: f64| {
+            let mut moved = rho.clone();
+            moved.log_lambda_sparse += delta;
+            assignment_prior_value_weighted(&assignment, &moved, Some(&weights))
+                .expect("admitted prior value")
+        };
+        let difference = (shifted(h) - shifted(-h)) / (2.0 * h);
+        let derivative =
+            assignment_prior_log_strength_derivative_weighted(&assignment, &rho, Some(&weights))
+                .expect("admitted log-strength derivative");
+        assert!(
+            (derivative - difference).abs() <= 1.0e-7 * (1.0 + derivative.abs()),
+            "log-strength derivative {derivative:.12e} vs central difference {difference:.12e}"
+        );
     }
 }
