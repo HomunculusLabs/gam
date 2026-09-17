@@ -1,5 +1,15 @@
 [
   {
+    "base": "885de8a9124907eeefe11fc2e886ca12d790659a",
+    "items": [
+      "crates/gam-sae/src/manifold/support_outer.rs:fn:support_laml_coarsest_quadrature_tolerance",
+      "crates/gam-sae/src/manifold/support_outer.rs:fn:support_laml_deflation_target_std_err_rel",
+      "crates/gam-sae/src/manifold/support_outer.rs:fn:support_laml_measured_quadrature_tolerance"
+    ],
+    "reason": "#2933 F28/F29: the three functions set the support LAML surrogate's deflation bar and quadrature budget from a worst-case relative Hutchinson bound sqrt(2/m) that holds only for a positive semidefinite operator, while log(S/c) is signed, and from the false claim that a frozen plan's probe and quadrature errors are constant in rho. The lane now asks for no value bar (support_laml_surrogate_config, deflation target +inf) and measures absolute per-probe standard errors (hutchinson_standard_error, RationalLogdetDerivativeBundle::per_probe_directional_derivatives). run_support_outer_search checks the certified point on probes the search never saw.",
+    "evidence": "At the base, git grep finds each name only in crates/gam-sae/src/manifold/support_outer.rs. The occurrences are its declaration; the calls from support_laml_coarsest_quadrature_tolerance (line 108), support_laml_measured_quadrature_tolerance (line 163) and SaeSupportOuterObjective::evidence_log_det (lines 679 and 686); and one doc link (line 105). Every one of those sites is deleted or rewritten in this commit. No test, example, bench or other crate names any of the three."
+  },
+  {
     "base": "ef1e74ddd242cee2055463b00a0accddc505bff4",
     "items": [
       "crates/gam-models/src/survival/marginal_slope/timepoint_exact/flex_jet.rs:fn:base_moment_jets_first_derivative_matches_fd_932",

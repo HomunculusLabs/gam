@@ -752,10 +752,18 @@ pub(crate) fn fit_support_sparse_manifold_sae(
     let fixed = fixed_point_json(&outer.fixed_point, outer.inner_tolerance);
     let outer_certificate = serde_json::to_value(&outer.outer_certificate)
         .map_err(|error| py_value_error(error.to_string()))?;
+    let logdet = &outer.logdet_uncertainty;
     let certificates = serde_json::json!({
         "representation": "support_sparse",
         "inner_fixed_point": fixed,
         "outer_stationarity": outer_certificate,
+        "stochastic_log_det": {
+            "probes": logdet.probes,
+            "criterion_std_err": logdet.criterion_std_err,
+            "unseen_projected_gradient_norm": logdet.unseen_projected_gradient_norm,
+            "unseen_gradient_std_err_norm": logdet.unseen_gradient_std_err_norm,
+            "plans": logdet.plans,
+        },
         "migration": migration.to_json(),
         "linear_bulk_census": linear_bulk_census,
     });

@@ -2204,7 +2204,9 @@ pub(crate) fn maybe_build_evidence_gpu_matvec(
 /// count, seeds, quadrature/CG tolerances, and derived-rank deflation schedule the
 /// [`SurrogateLaneState`] plan is (re)built with. The caller (the SAE streaming
 /// criterion) supplies these once; `deflation_target_std_err_rel` is the derived
-/// bar `0.1 · STALL_REL_TOL` (see `rational_reduced_schur_plan_derived`). The
+/// bar `0.1 · STALL_REL_TOL` (see `rational_reduced_schur_plan_derived`), or `+∞`
+/// where a caller consumes no value bar. The support LAML lane validates its
+/// certified point on independent probes instead (#2933 F28). The
 /// deflation rank has no requested ceiling: the ladder may climb to the
 /// operator's own dimension (#2731).
 #[derive(Clone)]
@@ -3505,12 +3507,13 @@ pub(crate) fn rational_reduced_schur_plan_derived<B: BatchedBlockSolver + Sync>(
     let k = sys.k;
     if k == 0
         || !(cg_rel_tol.is_finite() && cg_rel_tol > 0.0 && cg_rel_tol < 1.0)
-        || !(deflation_target_std_err_rel.is_finite() && deflation_target_std_err_rel >= 0.0)
+        // `+∞` is admissible: it asks for no value bar, so the pilot is the plan.
+        || !(deflation_target_std_err_rel >= 0.0)
     {
         return Err(format!(
             "inadmissible surrogate request: reduced Schur dim {k}, cg_rel_tol {cg_rel_tol:.3e} \
              (needs 0 < tol < 1), deflation target {deflation_target_std_err_rel:.3e} (needs \
-             finite and non-negative)"
+             non-negative; +∞ asks for no deflation)"
         ));
     }
     let lambda_max = reduced_schur_lambda_max(

@@ -3569,22 +3569,40 @@ impl SaeSupportSparseTerm {
     /// scalar-derived IFT quotient boundary used by the dense SAE lane;
     /// materially negative curvature is refused because a stationary saddle is
     /// not a fitted inner optimum.
+    ///
+    /// One pencil serves every right-hand side in `rhs`: the eigensystem is the
+    /// expensive half, and the per-probe responses of #2933 F29 need one solve per
+    /// smoothing group against the same operator.
     fn support_outer_dense_pseudoinverse_apply(
         &self,
         system: &ArrowSchurSystem,
         rows: &[SupportOuterDifferentialRow],
-        rhs: &SaeArrowVector,
-    ) -> Result<SaeArrowVector, String> {
-        let t_len = rhs.t.len();
-        let beta_len = rhs.beta.len();
+        rhs: &[SaeArrowVector],
+    ) -> Result<Vec<SaeArrowVector>, String> {
+        let Some(first) = rhs.first() else {
+            return Ok(Vec::new());
+        };
+        let t_len = first.t.len();
+        let beta_len = first.beta.len();
+        if rhs
+            .iter()
+            .any(|vector| vector.t.len() != t_len || vector.beta.len() != beta_len)
+        {
+            return Err(
+                "support outer adjoint right-hand sides disagree in block shape".to_string(),
+            );
+        }
         let dim = t_len
             .checked_add(beta_len)
             .ok_or_else(|| "support outer adjoint dimension overflow".to_string())?;
         if dim == 0 {
-            return Ok(SaeArrowVector {
-                t: Array1::zeros(0),
-                beta: Array1::zeros(0),
-            });
+            return Ok(rhs
+                .iter()
+                .map(|_| SaeArrowVector {
+                    t: Array1::zeros(0),
+                    beta: Array1::zeros(0),
+                })
+                .collect());
         }
         let pencil = self.support_outer_dense_hessian_pencil(system, rows, t_len, beta_len)?;
         let quotient_floor = f64::EPSILON
@@ -3600,68 +3618,72 @@ impl SaeSupportSparseTerm {
                 "support outer adjoint has resolved generalized negative curvature {negative:.6e} below the IFT quotient floor {negative_floor:.6e}"
             ));
         }
-        let mut flat_rhs = Array1::<f64>::zeros(dim);
-        flat_rhs.slice_mut(ndarray::s![..t_len]).assign(&rhs.t);
-        flat_rhs
-            .slice_mut(ndarray::s![t_len..])
-            .assign(&rhs.beta);
-        let mut solution = Array1::<f64>::zeros(dim);
-        let mut range_rhs = Array1::<f64>::zeros(dim);
-        for mode in 0..dim {
-            let curvature = pencil.curvatures[mode];
-            if curvature <= quotient_floor {
-                continue;
-            }
-            let vector = pencil.generalized_vectors.column(mode);
-            let projection = vector.dot(&flat_rhs);
-            solution.scaled_add(projection / curvature, &vector);
-            let b_vector = pencil.majorizer.dot(&vector);
-            range_rhs.scaled_add(projection, &b_vector);
-        }
-        let residual = &pencil.exact.dot(&solution) - &range_rhs;
-        let residual_norm = residual.dot(&residual).sqrt();
-        let range_norm = range_rhs.dot(&range_rhs).sqrt();
-        // Backward-error certificate for a linear solve, denominated in the
-        // quantity it bounds: `||A x - b|| <= dim * EPSILON * (||A|| ||x|| + ||b||)`.
-        //
-        // The previous form was `sqrt(EPSILON) * ||b||`, which drops the
-        // `||A|| ||x||` term entirely and carries no dependence on the
-        // operator's scale. Measured at this site on two peel fixtures, the
-        // dropped term is worth 5.5736e8x and 4.0229e7x of `||b||` -- a
-        // different factor each time, so no constant can stand in for it. Over
-        // the SAME two fixtures the achieved residual is
-        // `5.0748` and `5.0492` times `EPSILON * (||A|| ||x|| + ||b||)`:
-        // agreement to three significant figures across two problems whose
-        // overshoot against the old bound differed by 14x. The solve is
-        // backward stable; only the yardstick was wrong.
-        //
-        // This is not a widened tolerance. Where `||A|| ||x|| ~ ||b||` -- a well
-        // conditioned solve -- it is TIGHTER than the old bound by the
-        // `sqrt(EPSILON)`-versus-`EPSILON` factor. It admits more only where the
-        // operator's own scale says it must.
         let exact_scale = pencil
             .exact
             .iter()
             .fold(0.0_f64, |current, &value| current.max(value.abs()));
-        let solution_norm = solution.dot(&solution).sqrt();
-        let backward_error_bound = dim.max(1) as f64
-            * f64::EPSILON
-            * (exact_scale * solution_norm + range_norm);
-        if !(residual_norm.is_finite() && residual_norm <= backward_error_bound) {
-            return Err(format!(
-                "support outer adjoint pseudoinverse residual {residual_norm:.6e} exceeds its \
-                 backward-error certificate {backward_error_bound:.6e} \
-                 (dim={dim}, ||A||={exact_scale:.6e}, ||x||={solution_norm:.6e}, \
-                 ||b||={range_norm:.6e})"
-            ));
+        let mut solutions = Vec::with_capacity(rhs.len());
+        for rhs in rhs {
+            let mut flat_rhs = Array1::<f64>::zeros(dim);
+            flat_rhs.slice_mut(ndarray::s![..t_len]).assign(&rhs.t);
+            flat_rhs
+                .slice_mut(ndarray::s![t_len..])
+                .assign(&rhs.beta);
+            let mut solution = Array1::<f64>::zeros(dim);
+            let mut range_rhs = Array1::<f64>::zeros(dim);
+            for mode in 0..dim {
+                let curvature = pencil.curvatures[mode];
+                if curvature <= quotient_floor {
+                    continue;
+                }
+                let vector = pencil.generalized_vectors.column(mode);
+                let projection = vector.dot(&flat_rhs);
+                solution.scaled_add(projection / curvature, &vector);
+                let b_vector = pencil.majorizer.dot(&vector);
+                range_rhs.scaled_add(projection, &b_vector);
+            }
+            let residual = &pencil.exact.dot(&solution) - &range_rhs;
+            let residual_norm = residual.dot(&residual).sqrt();
+            let range_norm = range_rhs.dot(&range_rhs).sqrt();
+            // Backward-error certificate for a linear solve, denominated in the
+            // quantity it bounds: `||A x - b|| <= dim * EPSILON * (||A|| ||x|| + ||b||)`.
+            //
+            // The previous form was `sqrt(EPSILON) * ||b||`, which drops the
+            // `||A|| ||x||` term entirely and carries no dependence on the
+            // operator's scale. Measured at this site on two peel fixtures, the
+            // dropped term is worth 5.5736e8x and 4.0229e7x of `||b||` -- a
+            // different factor each time, so no constant can stand in for it. Over
+            // the SAME two fixtures the achieved residual is
+            // `5.0748` and `5.0492` times `EPSILON * (||A|| ||x|| + ||b||)`:
+            // agreement to three significant figures across two problems whose
+            // overshoot against the old bound differed by 14x. The solve is
+            // backward stable; only the yardstick was wrong.
+            //
+            // This is not a widened tolerance. Where `||A|| ||x|| ~ ||b||` -- a well
+            // conditioned solve -- it is TIGHTER than the old bound by the
+            // `sqrt(EPSILON)`-versus-`EPSILON` factor. It admits more only where the
+            // operator's own scale says it must.
+            let solution_norm = solution.dot(&solution).sqrt();
+            let backward_error_bound = dim.max(1) as f64
+                * f64::EPSILON
+                * (exact_scale * solution_norm + range_norm);
+            if !(residual_norm.is_finite() && residual_norm <= backward_error_bound) {
+                return Err(format!(
+                    "support outer adjoint pseudoinverse residual {residual_norm:.6e} exceeds its \
+                     backward-error certificate {backward_error_bound:.6e} \
+                     (dim={dim}, ||A||={exact_scale:.6e}, ||x||={solution_norm:.6e}, \
+                     ||b||={range_norm:.6e})"
+                ));
+            }
+            if solution.iter().any(|value| !value.is_finite()) {
+                return Err("support outer adjoint pseudoinverse is non-finite".to_string());
+            }
+            solutions.push(SaeArrowVector {
+                t: solution.slice(ndarray::s![..t_len]).to_owned(),
+                beta: solution.slice(ndarray::s![t_len..]).to_owned(),
+            });
         }
-        if solution.iter().any(|value| !value.is_finite()) {
-            return Err("support outer adjoint pseudoinverse is non-finite".to_string());
-        }
-        Ok(SaeArrowVector {
-            t: solution.slice(ndarray::s![..t_len]).to_owned(),
-            beta: solution.slice(ndarray::s![t_len..]).to_owned(),
-        })
+        Ok(solutions)
     }
 
     /// Return `A^+ Gamma`, the one adjoint needed for the implicit derivative of
@@ -3721,86 +3743,14 @@ impl SaeSupportSparseTerm {
                 beta: Array1::<f64>::zeros(beta_dim),
             };
             for border_vector in &derivative_vectors[range] {
-            for (row_index, row) in rows.iter().enumerate() {
-                let row_start = system.row_offsets[row_index];
-                let q = system.row_dims[row_index];
-                let cross = support_arrow_cross_forward(system, row_index, border_vector.view())?;
-                let mut local_t = CpuBatchedBlockSolver.solve_block_vector(
-                    factors.factor(row_index),
-                    cross.view(),
-                );
-                local_t.mapv_inplace(|value| -value);
-
-                // Directional model response `df[z] = J z_t + D z_beta` for
-                // the Schur envelope vector `z_t = -H_tt^-1 H_tbeta z_beta`.
-                let mut directional_fit = row.jacobian.t().dot(&local_t);
-                for slot in &row.slots {
-                    let atom = &self.atoms[slot.atom];
-                    for basis in 0..atom.basis_size() {
-                        let weight = slot.phi[basis];
-                        for output in 0..self.output_dim {
-                            directional_fit[output] += weight
-                                * border_vector
-                                    [slot.beta_offset + basis * self.output_dim + output];
-                        }
-                    }
-                }
-
-                for slot in &row.slots {
-                    let atom = &self.atoms[slot.atom];
-                    let d = atom.latent_dim();
-                    let m = atom.basis_size();
-                    for axis_w in 0..d {
-                        let mut derivative_fit = Array1::<f64>::zeros(self.output_dim);
-                        // Coordinate derivative of `J^T z_t`.
-                        for axis_a in 0..d {
-                            let coefficient_t = local_t[slot.coordinate_offset + axis_a];
-                            for basis in 0..m {
-                                let coefficient =
-                                    coefficient_t * slot.second_jet[[basis, axis_a, axis_w]];
-                                for output in 0..self.output_dim {
-                                    derivative_fit[output] += coefficient
-                                        * atom.decoder_coefficients()[[basis, output]];
-                                }
-                            }
-                        }
-                        // Coordinate derivative of `D z_beta`.
-                        for basis in 0..m {
-                            let derivative = slot.jet[[basis, axis_w]];
-                            for output in 0..self.output_dim {
-                                derivative_fit[output] += derivative
-                                    * border_vector
-                                        [slot.beta_offset + basis * self.output_dim + output];
-                            }
-                        }
-                        let local_index = slot.coordinate_offset + axis_w;
-                        gamma.t[row_start + local_index] += inverse_rank
-                            * (2.0 * directional_fit.dot(&derivative_fit)
-                                + row.prior_majorizer_derivative[local_index]
-                                    * local_t[local_index]
-                                    * local_t[local_index]);
-                    }
-
-                    // Decoder derivative of `J^T z_t`; `D z_beta` is
-                    // decoder-independent.
-                    for basis in 0..m {
-                        let mut jet_direction = 0.0_f64;
-                        for axis in 0..d {
-                            jet_direction += slot.jet[[basis, axis]]
-                                * local_t[slot.coordinate_offset + axis];
-                        }
-                        for output in 0..self.output_dim {
-                            gamma.beta
-                                [slot.beta_offset + basis * self.output_dim + output] +=
-                                inverse_rank * 2.0 * directional_fit[output] * jet_direction;
-                        }
-                    }
-                }
-                // `assert_eq!` rather than `debug_assert_eq!`: the scanner bans the
-                // debug form, and a length invariant that only holds in debug builds
-                // is not an invariant. Integer compare, negligible in release.
-                assert_eq!(local_t.len(), q);
-            }
+                self.support_reduced_logdet_theta_derivative_add(
+                    system,
+                    &rows,
+                    &factors,
+                    border_vector.view(),
+                    inverse_rank,
+                    &mut gamma,
+                )?;
             }
             Ok(gamma)
         };
@@ -3828,29 +3778,250 @@ impl SaeSupportSparseTerm {
                     .to_string(),
             );
         }
+        self.support_reduced_logdet_adjoint_solves(
+            system,
+            &rows,
+            &factors,
+            std::slice::from_ref(&gamma),
+            derivative_vectors.len(),
+        )?
+        .pop()
+        .ok_or_else(|| {
+            "support reduced-logdet profile adjoint solve returned no solution".to_string()
+        })
+    }
+
+    /// Per-probe implicit responses of a surrogate `log|S|` derivative bundle
+    /// (#2933 F29). Entry `[j, d]` is `w·⟨Σ_{z ∈ probe j} Γ(z), A⁺ directions[d]⟩`,
+    /// with `w` the bundle's [`RationalLogdetDerivativeBundle::probe_sample_weight`]
+    /// and `Γ(z)` one vector's inner-state derivative
+    /// ([`Self::support_reduced_logdet_theta_derivative_add`]). `A⁺` is symmetric, so
+    /// the mean over probes is the probe share of `⟨A⁺Γ, directions[d]⟩`, the implicit
+    /// response [`Self::support_reduced_logdet_profile_adjoint`] feeds the gradient,
+    /// and the spread over probes is that response's Hutchinson standard error. The
+    /// cost is one adjoint per direction, not one per probe.
+    pub(crate) fn support_reduced_logdet_probe_responses(
+        &self,
+        target: ArrayView2<'_, f64>,
+        ard_precisions: &[Vec<f64>],
+        system: &ArrowSchurSystem,
+        bundle: &RationalLogdetDerivativeBundle,
+        directions: &[SaeArrowVector],
+    ) -> Result<Array2<f64>, String> {
+        let probes = bundle.hutchinson_probe_count();
+        if probes == 0 || directions.is_empty() {
+            return Err(format!(
+                "support reduced-logdet probe responses need Hutchinson probes and a \
+                 direction; got {probes} probes and {} directions",
+                directions.len()
+            ));
+        }
+        let (beta_offsets, beta_dim) = self.beta_layout()?;
+        if beta_dim != system.k {
+            return Err(format!(
+                "support reduced-logdet probe responses beta layout {beta_dim} != system border {}",
+                system.k
+            ));
+        }
+        let rows = self.support_outer_differential_rows(target, ard_precisions, &beta_offsets)?;
+        let factors = CpuBatchedBlockSolver
+            .factor_blocks(&system.rows, 0.0, system.d, true)
+            .map_err(|error| {
+                format!("support reduced-logdet probe responses row factorization: {error}")
+            })?;
+        let coordinate_dim = *system.row_offsets.last().unwrap_or(&0);
+        let adjoints = self.support_reduced_logdet_adjoint_solves(
+            system,
+            &rows,
+            &factors,
+            directions,
+            bundle.vectors.len(),
+        )?;
+        let weight = bundle.probe_sample_weight();
+        let accumulate = |range: Range<usize>| -> Result<Vec<f64>, String> {
+            let mut responses = Vec::with_capacity(range.len() * adjoints.len());
+            let mut gamma = SaeArrowVector {
+                t: Array1::<f64>::zeros(coordinate_dim),
+                beta: Array1::<f64>::zeros(beta_dim),
+            };
+            for probe in range {
+                gamma.t.fill(0.0);
+                gamma.beta.fill(0.0);
+                let vectors = bundle.probe_vectors(probe).ok_or_else(|| {
+                    format!("support reduced-logdet probe responses: probe {probe} has no vectors")
+                })?;
+                for vector in vectors {
+                    if vector.len() != system.k || vector.iter().any(|value| !value.is_finite()) {
+                        return Err(format!(
+                            "support reduced-logdet probe responses require finite vectors of \
+                             border width {}",
+                            system.k
+                        ));
+                    }
+                    self.support_reduced_logdet_theta_derivative_add(
+                        system,
+                        &rows,
+                        &factors,
+                        vector.view(),
+                        weight,
+                        &mut gamma,
+                    )?;
+                }
+                for adjoint in &adjoints {
+                    responses.push(gamma.t.dot(&adjoint.t) + gamma.beta.dot(&adjoint.beta));
+                }
+            }
+            Ok(responses)
+        };
+        let responses = gam_linalg::pairwise_reduce::par_deterministic_try_block_fold(
+            probes,
+            accumulate,
+            |mut left: Vec<f64>, right: Vec<f64>| -> Result<Vec<f64>, String> {
+                left.extend(right);
+                Ok(left)
+            },
+        )?
+        .ok_or_else(|| "support reduced-logdet probe responses folded no probe".to_string())?;
+        if responses.iter().any(|value| !value.is_finite()) {
+            return Err("support reduced-logdet probe responses are non-finite".to_string());
+        }
+        Array2::from_shape_vec((probes, adjoints.len()), responses)
+            .map_err(|error| format!("support reduced-logdet probe responses shape: {error}"))
+    }
+
+    /// `A⁺ b` for every right-hand side `b` in `rhs`, with `A` the exact stationarity
+    /// Jacobian of the penalized inner objective.
+    ///
+    /// A dense pseudoinverse is admitted only when assembling all `dim` analytic
+    /// columns costs no more operator directions than the derivative bundle's
+    /// `derivative_vector_count` vectors already paid for, and its complete
+    /// eigensystem workspace fits the cgroup-aware in-core ledger. This is a scale
+    /// transition derived from work and storage, not a dimension knob.
+    fn support_reduced_logdet_adjoint_solves(
+        &self,
+        system: &ArrowSchurSystem,
+        rows: &[SupportOuterDifferentialRow],
+        factors: &ArrowFactorSlab,
+        rhs: &[SaeArrowVector],
+        derivative_vector_count: usize,
+    ) -> Result<Vec<SaeArrowVector>, String> {
+        let coordinate_dim = *system.row_offsets.last().unwrap_or(&0);
         let full_dim = coordinate_dim
-            .checked_add(beta_dim)
+            .checked_add(system.k)
             .ok_or_else(|| "support reduced-logdet profile adjoint dimension overflow".to_string())?;
-        // A dense pseudoinverse is admitted only when assembling all `dim`
-        // analytic columns costs no more operator directions than the rational
-        // derivative bundle already paid for, and its complete eigensystem
-        // workspace fits the cgroup-aware in-core ledger.  This is a scale
-        // transition derived from work and storage, not a dimension knob.
         let dense_workspace = (full_dim as u128)
             .saturating_mul(full_dim as u128)
             .saturating_mul(std::mem::size_of::<f64>() as u128)
             .saturating_mul(6);
         let in_core_budget = crate::manifold::sae_host_in_core_budget_bytes().0 as u128;
-        if full_dim <= derivative_vectors.len() && dense_workspace <= in_core_budget {
-            self.support_outer_dense_pseudoinverse_apply(system, &rows, &gamma)
+        if full_dim <= derivative_vector_count && dense_workspace <= in_core_budget {
+            self.support_outer_dense_pseudoinverse_apply(system, rows, rhs)
         } else {
-            solve_b_preconditioned_gmres_with(
-                &gamma,
-                |vector| self.support_outer_exact_hessian_apply(system, &rows, vector),
-                |rhs| support_arrow_majorizer_inverse(system, &factors, rhs),
-            )
-            .map_err(|error| format!("support reduced-logdet profile adjoint solve: {error}"))
+            rhs.iter()
+                .map(|rhs| {
+                    solve_b_preconditioned_gmres_with(
+                        rhs,
+                        |vector| self.support_outer_exact_hessian_apply(system, rows, vector),
+                        |residual| support_arrow_majorizer_inverse(system, factors, residual),
+                    )
+                    .map_err(|error| {
+                        format!("support reduced-logdet profile adjoint solve: {error}")
+                    })
+                })
+                .collect()
         }
+    }
+
+    /// Add `weight·Γ(z)` to `gamma` for one border vector `z` of a `log|S|`
+    /// derivative bundle. `Γ(z)` is the derivative, with respect to the fitted
+    /// coordinates and decoder, of the Schur quadratic form along `z` with the row
+    /// block eliminated, `z_t = −H_tt⁻¹ H_tβ z_β`. Summed over a bundle with weight
+    /// `1/r`, it is the inner-state derivative of the surrogate the bundle represents.
+    fn support_reduced_logdet_theta_derivative_add(
+        &self,
+        system: &ArrowSchurSystem,
+        rows: &[SupportOuterDifferentialRow],
+        factors: &ArrowFactorSlab,
+        border_vector: ndarray::ArrayView1<'_, f64>,
+        weight: f64,
+        gamma: &mut SaeArrowVector,
+    ) -> Result<(), String> {
+        for (row_index, row) in rows.iter().enumerate() {
+            let row_start = system.row_offsets[row_index];
+            let q = system.row_dims[row_index];
+            let cross = support_arrow_cross_forward(system, row_index, border_vector)?;
+            let mut local_t =
+                CpuBatchedBlockSolver.solve_block_vector(factors.factor(row_index), cross.view());
+            local_t.mapv_inplace(|value| -value);
+
+            // Directional model response `df[z] = J z_t + D z_beta` for
+            // the Schur envelope vector `z_t = -H_tt^-1 H_tbeta z_beta`.
+            let mut directional_fit = row.jacobian.t().dot(&local_t);
+            for slot in &row.slots {
+                let atom = &self.atoms[slot.atom];
+                for basis in 0..atom.basis_size() {
+                    let phi = slot.phi[basis];
+                    for output in 0..self.output_dim {
+                        directional_fit[output] += phi
+                            * border_vector[slot.beta_offset + basis * self.output_dim + output];
+                    }
+                }
+            }
+
+            for slot in &row.slots {
+                let atom = &self.atoms[slot.atom];
+                let d = atom.latent_dim();
+                let m = atom.basis_size();
+                for axis_w in 0..d {
+                    let mut derivative_fit = Array1::<f64>::zeros(self.output_dim);
+                    // Coordinate derivative of `J^T z_t`.
+                    for axis_a in 0..d {
+                        let coefficient_t = local_t[slot.coordinate_offset + axis_a];
+                        for basis in 0..m {
+                            let coefficient =
+                                coefficient_t * slot.second_jet[[basis, axis_a, axis_w]];
+                            for output in 0..self.output_dim {
+                                derivative_fit[output] +=
+                                    coefficient * atom.decoder_coefficients()[[basis, output]];
+                            }
+                        }
+                    }
+                    // Coordinate derivative of `D z_beta`.
+                    for basis in 0..m {
+                        let derivative = slot.jet[[basis, axis_w]];
+                        for output in 0..self.output_dim {
+                            derivative_fit[output] += derivative
+                                * border_vector[slot.beta_offset + basis * self.output_dim + output];
+                        }
+                    }
+                    let local_index = slot.coordinate_offset + axis_w;
+                    gamma.t[row_start + local_index] += weight
+                        * (2.0 * directional_fit.dot(&derivative_fit)
+                            + row.prior_majorizer_derivative[local_index]
+                                * local_t[local_index]
+                                * local_t[local_index]);
+                }
+
+                // Decoder derivative of `J^T z_t`; `D z_beta` is
+                // decoder-independent.
+                for basis in 0..m {
+                    let mut jet_direction = 0.0_f64;
+                    for axis in 0..d {
+                        jet_direction +=
+                            slot.jet[[basis, axis]] * local_t[slot.coordinate_offset + axis];
+                    }
+                    for output in 0..self.output_dim {
+                        gamma.beta[slot.beta_offset + basis * self.output_dim + output] +=
+                            weight * 2.0 * directional_fit[output] * jet_direction;
+                    }
+                }
+            }
+            // `assert_eq!` rather than `debug_assert_eq!`: the scanner bans the
+            // debug form, and a length invariant that only holds in debug builds
+            // is not an invariant. Integer compare, negligible in release.
+            assert_eq!(local_t.len(), q);
+        }
+        Ok(())
     }
 
     /// Solve `A Δ = g` at the installed state: the exact Newton displacement the

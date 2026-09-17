@@ -141,7 +141,7 @@ pub(crate) use gam_solve::arrow_schur::{
 pub(crate) use gam_solve::arrow_schur::{
     ArrowFactorSlab, BatchedBlockSolver, CpuBatchedBlockSolver, RationalLogdetDerivativeBundle,
     SurrogateLaneConfig, SurrogateLaneState, hutchinson_reduced_schur_inverse_trace,
-    matrix_free_arrow_evidence_log_det_surrogate, rational_reduced_schur_log_det,
+    hutchinson_standard_error, matrix_free_arrow_evidence_log_det_surrogate,
 };
 
 pub(crate) use gam_solve::estimate::EstimationError;

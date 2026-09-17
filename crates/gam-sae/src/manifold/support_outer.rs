@@ -58,155 +58,36 @@ use crate::migration_ledger::{
 
 const SUPPORT_LAML_CONTEXT: &str = "support-sparse TopK grouped LAML";
 
-/// The one field of the shared SAE evidence-surrogate policy this lane may not
-/// inherit: the bar the frozen `log|S|` plan's Hutchinson error must clear
-/// before its deflation rank stops growing.
+/// The frozen evidence surrogate one outer search descends: `probes` Hutchinson
+/// probes from the caller's `seed` (#2933 F28, F29).
 ///
-/// The shared value is `0.1 · SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL` = 1e-9
-/// of `|log|S|| + 1`. **That is unreachable at overcomplete border widths, and
-/// unreachable here means REFUSED**, not merely slow:
-/// `rational_reduced_schur_plan_derived` doubles the deflation rank until the
-/// bar clears and refuses with `Err` when its ceiling is exhausted, which this
-/// lane turns into a typed evidence failure. Measured on a small overcomplete
-/// chart (N=2000, P=32, K=59, border 5056, `log|S| ≈ 1.4e4`): the bare
-/// estimator's relative error bar is 3.7e-3 at 8 probes and 1.9e-3 at 16, so the
-/// shared bar asks for roughly a hundredfold variance reduction that peeling 128
-/// of 5056 directions, the ladder's ceiling when this was measured, could not
-/// deliver. The ceiling is now the border itself, lowered only by the plan
-/// storage memory admits (#2731), so the bar is either refused there or bought
-/// with a basis spanning nearly the whole border.
+/// A frozen rational plan is a RANDOM surrogate `L̃(ρ)` of `log|S(ρ)|`, not the
+/// criterion plus a constant. Its probe error `tr[(C_Z − I)·r(S(ρ))]`, with `C_Z`
+/// the probes' sample second moment and `r ≈ log` the plan's rational function,
+/// moves with ρ. `log S(ρ) = [[0, ρ], [ρ, 0]]` has `log|S| = 0` at every ρ, while
+/// the probe `z = (1, 1)` reports `2ρ`: a slope of two on a flat criterion. The
+/// quadrature error moves as well, because the nodes are sized for the spectrum at
+/// the point the plan was built. Common probes still make `L̃` one smooth function
+/// that the search can descend, but its minimizer is not the criterion's.
 ///
-/// The reachable bar, derived from the probe count rather than borrowed from an
-/// inner-solve stall tolerance: `√(2/m)`, the relative standard error a
-/// `±1`-Rademacher Hutchinson estimator has in the WORST case
-/// (`Var(zᵀAz) = 2‖A_off‖_F²`, attained when the off-diagonal mass matches the
-/// trace). Asking for exactly that says "deflate only when this operator's
-/// spectrum is worse than the theory says an `m`-probe estimator can be" — the
-/// bar fires on a pathological spectrum and stays out of the way otherwise,
-/// which is the only thing a variance-reduction ladder should be doing.
-///
-/// This does not weaken the criterion's usable accuracy, because a FROZEN plan
-/// draws the SAME probes at every ρ: the estimator's error is a nearly constant
-/// offset across the smoothing search, not per-ρ jitter, and the search ranks
-/// differences. That common-random-numbers property is the whole reason the
-/// plan is frozen, and it is what makes a worst-case-bound bar the right one
-/// here rather than an accuracy compromise.
-fn support_laml_deflation_target_std_err_rel() -> f64 {
-    (2.0 / SCHUR_SLQ_LOGDET_PROBES as f64).sqrt()
-}
-
-/// The coarsest quadrature this lane will ever ask for, and the accuracy its
-/// one-off pilot runs at.
-///
-/// `√(2/m)/m`: the worst-case relative standard error a `±1`-Rademacher
-/// Hutchinson estimator can have (`√(2/m)`, attained when the off-diagonal
-/// Frobenius mass matches the trace) divided by the probe count. It is a
-/// CEILING, not the working value — see
-/// [`support_laml_measured_quadrature_tolerance`] for why an a-priori bound
-/// cannot produce a safe working value here.
-fn support_laml_coarsest_quadrature_tolerance() -> f64 {
-    support_laml_deflation_target_std_err_rel() / SCHUR_SLQ_LOGDET_PROBES as f64
-}
-
-/// Accuracy asked of the surrogate's QUADRATURE — and of the quadrature only —
-/// derived from this operator's MEASURED Hutchinson resolution.
-///
-/// The two deterministic knobs in this surrogate look alike and are not. Both
-/// read `1.0e-8` in the shared policy, and only one of them should move:
-///
-/// * The **quadrature** truncation and step are fixed once, in the frozen plan.
-///   Their error is a smooth, ρ-independent BIAS in `log|S|` — the same
-///   displacement at every ρ the outer search visits. A bias the estimator's
-///   own variance swamps is a bias nobody can measure, and asking for one five
-///   orders under that variance is not free: the node count grows like
-///   `log(1/tol)` and the surrogate's cost is `m × nodes` shifted solves.
-///   Measured on a small overcomplete chart (border 5056, `λ_min/λ_max = 1e-8`
-///   by the deflation-floor convention, hence a twelve-decade padded window):
-///   `1e-8` sizes **81** nodes.
-/// * The **shifted-CG residual** is not bias. Each solve's iteration count
-///   varies with ρ, so its error is JITTER — a non-smooth `O(δ)` wobble in a
-///   criterion the outer quasi-Newton differentiates and line-searches. What
-///   that must beat is the outer search's step sizes, not the probe count, so
-///   `cg_rel_tol` stays at the shared lane's value.
-///   (`support_outer_logdet_gradient_matches_fd_of_its_own_surrogate` is the
-///   gate that catches loosening it: a central difference at `h = 1e-5`
-///   amplifies value jitter by `1/2h = 5e4`.)
-///
-/// **Why the bias budget has to be measured.** The requirement is
-/// `m·δ ≲ σ/√m`: the bias, which the average does not shrink because it is
-/// identical in every term, must stay under the stochastic error, which the
-/// average does shrink. Substituting the a-priori worst case for `σ` moves the
-/// bound the WRONG WAY — it is an upper bound on `σ`, so it yields an upper
-/// bound on the ALLOWED `δ`, and a safe working value needs a lower bound on
-/// `σ` instead. There is none: `σ` is zero for a diagonal operator. Measured
-/// here, `σ/√m` is 1.9e-3 at 16 probes, two orders under the `√(2/m)` bound —
-/// so the bound-derived `√(2/m)/m = 7.8e-3` sits ABOVE the noise it was meant
-/// to hide under, not below it.
-///
-/// So measure it. The surrogate reports `std_err` — its own realized error bar
-/// — and a rank-0 pilot is cheap at the ceiling tolerance (18 nodes rather than
-/// 81). Crucially the pilot's COARSE quadrature does not corrupt the number it
-/// is measuring: a quadrature bias is common to every probe and cancels out of
-/// the across-probe spread that `std_err` is. The pilot's shifted solves DO run
-/// at the working `cg_rel_tol`, because per-probe solve jitter would not cancel.
-///
-/// The working budget is then `σ̂/m`, clamped to `[shared rel_tol, ceiling]` so
-/// it is never tighter than the shared policy would have asked nor looser than
-/// the worst case admits. Measured: `σ̂ ≈ 1.4e-3` at 32 probes gives `4.4e-5`
-/// and 39 nodes, against 81.
-fn support_laml_measured_quadrature_tolerance(
-    system: &ArrowSchurSystem,
-    htt_factors: &ArrowFactorSlab,
-    seed: u64,
-) -> Result<f64, EstimationError> {
-    let shared = sae_surrogate_lane_config();
-    let ceiling = support_laml_coarsest_quadrature_tolerance();
-    let timer = std::time::Instant::now();
-    let (plan, pilot) = rational_reduced_schur_log_det(
-        system,
-        htt_factors,
-        0.0,
-        &CpuBatchedBlockSolver,
-        None,
-        None,
-        shared.num_probes,
+/// So nothing here asks the plan for a relative value bar. `Var(zᵀCz) =
+/// 2‖C_off‖²_F` has no bound relative to `tr C` for the signed `C = log(S/c)`
+/// ([`hutchinson_standard_error`] names the counterexample). The value's error at
+/// one ρ is also not what any decision of this lane consumes: the search stops on
+/// a gradient, and a comparison across fits reads the criterion's reported
+/// standard error. `deflation_target_std_err_rel = +∞` takes the pilot as the plan.
+/// The stationarity claim is checked where it is made instead.
+/// [`run_support_outer_search`] re-estimates the terminal gradient on probes the
+/// search never saw, from a plan sized for the terminal spectrum, and doubles the
+/// probes until that estimate agrees with the certificate. The quadrature and CG
+/// tolerances are the shared SAE policy's.
+fn support_laml_surrogate_config(seed: u64, probes: usize) -> SurrogateLaneConfig {
+    SurrogateLaneConfig {
         seed,
-        ceiling,
-        shared.cg_rel_tol,
-    )
-    .ok_or_else(|| {
-        outer_error(format!(
-            "support LAML could not measure its reduced-Schur log-determinant resolution: the \
-             rank-0 pilot surrogate did not evaluate on a border of width {}",
-            system.k
-        ))
-    })?;
-    let measured_relative_std_err = pilot.std_err / (pilot.estimate.abs() + 1.0);
-    if !(measured_relative_std_err.is_finite() && measured_relative_std_err >= 0.0) {
-        return Err(outer_error(format!(
-            "support LAML pilot surrogate reported a non-finite error bar {} against estimate {}",
-            pilot.std_err, pilot.estimate
-        )));
+        num_probes: probes,
+        deflation_target_std_err_rel: f64::INFINITY,
+        ..sae_surrogate_lane_config()
     }
-    let budget = (measured_relative_std_err / shared.num_probes as f64)
-        .clamp(shared.rel_tol.min(ceiling), ceiling);
-    log::info!(
-        "support LAML quadrature budget: pilot log|S| = {:.6e}, measured relative error bar \
-         {:.3e} at {} probes -> quadrature tolerance {:.3e} (shared policy {:.3e}, ceiling \
-         {:.3e}); pilot {} total shifted-CG iterations, {} rational nodes, deflation rank {}, \
-         {:.1}s",
-        pilot.estimate,
-        measured_relative_std_err,
-        shared.num_probes,
-        budget,
-        shared.rel_tol,
-        ceiling,
-        pilot.cg_iterations,
-        plan.nodes.len(),
-        pilot.deflation_basis.len(),
-        timer.elapsed().as_secs_f64(),
-    );
-    Ok(budget)
 }
 
 fn outer_error(message: impl Into<String>) -> EstimationError {
@@ -312,10 +193,32 @@ pub struct SaeSupportOuterReport {
     pub fixed_point: SaeSupportFixedPointReport,
     pub outer_iterations: usize,
     pub outer_certificate: OuterCriterionCertificate,
+    /// How well the stochastic `log|S|` behind `criterion` and `outer_certificate`
+    /// is known (#2933 F28, F29).
+    pub logdet_uncertainty: SaeSupportLogdetUncertainty,
     /// The relative tolerance the inner fixed point certified to:
     /// [`SaeSupportSparseTerm::fixed_point_tolerance`] of the term the search started
     /// from.
     pub inner_tolerance: f64,
+}
+
+/// What a support fit's rational `log|S|` surrogate is known to within (#2933 F28,
+/// F29). Every number is an absolute, measured Hutchinson standard error. None is
+/// a relative bound, because a signed log operator has none.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SaeSupportLogdetUncertainty {
+    /// Hutchinson probes behind `criterion`. Zero where the lane took the exact dense
+    /// `log|S|`, and then every other field is zero too.
+    pub probes: usize,
+    /// Standard error of `criterion`, `½·SE(log|S|)`, in nats.
+    pub criterion_std_err: f64,
+    /// `‖Pg‖` at the certified point, re-estimated from the half of `probes` the search
+    /// never saw.
+    pub unseen_projected_gradient_norm: f64,
+    /// `‖Pσ‖`, the standard error of that re-estimate from its own per-probe spread.
+    pub unseen_gradient_std_err_norm: f64,
+    /// Frozen plans the search descended, each drawing twice its predecessor's probes.
+    pub plans: usize,
 }
 
 struct PenaltySpectrum {
@@ -372,6 +275,15 @@ struct SupportOuterEvaluation {
     gradient: Array1<f64>,
     lambda_smooth: Vec<f64>,
     fixed_point: SaeSupportFixedPointReport,
+    /// Hutchinson probes behind `components.reduced_log_det`; zero on the exact route.
+    logdet_probes: usize,
+    /// Quadrature nodes of the plan that scored it; zero on the exact route.
+    logdet_nodes: usize,
+    /// Hutchinson standard error of `components.reduced_log_det`.
+    logdet_std_err: f64,
+    /// Per-probe samples `[probe, group]` of the log-determinant half of `gradient`,
+    /// present where the evaluation was asked to measure them on the rational route.
+    probe_gradient_samples: Option<Array2<f64>>,
 }
 
 #[derive(Clone)]
@@ -430,13 +342,22 @@ struct SaeSupportOuterObjective {
     /// The FROZEN reduced-Schur log-determinant surrogate for this outer solve
     /// — the same #2080 lane the dense manifold criterion runs on.
     ///
-    /// Built once, on the first evaluation, and reused at every subsequent ρ.
-    /// The plan is the criterion's identity: its probes, quadrature nodes, and
-    /// deflation basis fix WHICH function of ρ the outer search descends.
-    /// Rebuilding it per ρ would evaluate a different function at every point,
-    /// and the exact directional derivative the gradient contracts would then
-    /// be the exact gradient of something nobody evaluated twice.
+    /// Built on the first evaluation of a search and reused at every subsequent ρ
+    /// of that search. The plan fixes WHICH function of ρ the search descends: its
+    /// probes, quadrature nodes, and deflation basis. Rebuilding it per ρ would
+    /// evaluate a different function at every point, and the exact directional
+    /// derivative the gradient contracts would then be the exact gradient of
+    /// something nobody evaluated twice. That function is still a random surrogate
+    /// of `log|S|`, not the criterion (#2933 F29). A plan with more probes, sized for
+    /// the spectrum where it is built, starts a new search
+    /// ([`run_support_outer_search`]).
     logdet_surrogate: Option<SurrogateLaneState>,
+    /// Hutchinson probes the next frozen plan draws. The first search takes the shared
+    /// SAE policy's count, and each new plan doubles it.
+    logdet_probes: usize,
+    /// The host's in-core ledger, read once. The dense `k × k` route is admitted
+    /// against it, and every other border walks the rational surrogate.
+    in_core_budget_bytes: usize,
 }
 
 fn penalty_spectrum(
@@ -655,38 +576,19 @@ impl SaeSupportOuterObjective {
                  assembled arrow system has none",
             ));
         }
-        // One SAE evidence-surrogate policy, shared with the dense manifold
-        // lane, with exactly two fields DERIVED rather than inherited — and the
-        // derivation happens ONCE, here, at the first ρ, so the whole outer
-        // search descends a single functional.
-        let seed = self.random_state;
+        // One SAE evidence-surrogate policy, shared with the dense manifold lane,
+        // with this lane's probe count and value bar (`support_laml_surrogate_config`).
+        // The plan freezes at the first ρ a search evaluates, so that search
+        // descends one functional.
         if self.logdet_surrogate.is_none() {
-            // `evidence_factorization = true` must match what the lane itself
-            // will use, or the pilot would measure a different operator from
-            // the one the frozen plan is built on. It does: the lane runs
-            // `ArrowEvidencePolicy::UnitDeflation`
-            // (`with_evidence_unit_deflation` below), and
-            // `factors_undamped_evidence()` is `!matches!(self, Strict)` — true
-            // for every policy except `Strict`, which this lane never selects.
-            let htt_factors = CpuBatchedBlockSolver
-                .factor_blocks(&system.rows, 0.0, system.d, true)
-                .map_err(|error| {
-                    outer_error(format!(
-                        "support LAML undamped evidence row factorization: {error}"
-                    ))
-                })?;
-            let rel_tol =
-                support_laml_measured_quadrature_tolerance(system, &htt_factors, seed)?;
-            self.logdet_surrogate = Some(SurrogateLaneState::new(SurrogateLaneConfig {
-                // The seed is the caller's: a support fit's `random_state` is
-                // what makes ITS criterion bit-reproducible, and two fits of the
-                // same data at different seeds must be able to disagree about
-                // their probes without disagreeing about their policy.
-                seed,
-                deflation_target_std_err_rel: support_laml_deflation_target_std_err_rel(),
-                rel_tol,
-                ..sae_surrogate_lane_config()
-            }));
+            // The seed is the caller's: a support fit's `random_state` is
+            // what makes ITS criterion bit-reproducible, and two fits of the
+            // same data at different seeds must be able to disagree about
+            // their probes without disagreeing about their policy.
+            self.logdet_surrogate = Some(SurrogateLaneState::new(support_laml_surrogate_config(
+                self.random_state,
+                self.logdet_probes,
+            )));
         }
         let lane = self
             .logdet_surrogate
@@ -712,7 +614,7 @@ impl SaeSupportOuterObjective {
         // lane uses as well.
         let dense_reduced_schur_admitted =
             gam_solve::arrow_schur::dense_lane_reduced_schur_peak_bytes(system.k)
-                .is_some_and(|bytes| bytes <= crate::manifold::sae_host_in_core_budget_bytes().0);
+                .is_some_and(|bytes| bytes <= self.in_core_budget_bytes);
         let evaluated = gam_solve::arrow_schur::matrix_free_arrow_evidence_evaluation(
             system,
             0.0,
@@ -788,8 +690,39 @@ impl SaeSupportOuterObjective {
         rho: &Array1<f64>,
         requested_order: OuterEvalOrder,
     ) -> Result<SupportOuterEvaluation, EstimationError> {
+        self.evaluate_at(rho, requested_order, false)
+    }
+
+    /// Evaluate at `rho` together with the per-probe samples of the gradient's
+    /// log-determinant half (#2933 F29). A cached entry without them is not reused.
+    fn evaluate_measured(
+        &mut self,
+        rho: &Array1<f64>,
+    ) -> Result<SupportOuterEvaluation, EstimationError> {
+        self.evaluate_at(rho, OuterEvalOrder::ValueAndGradient, true)
+    }
+
+    /// Replace the frozen plan with one drawing `probes` probes. It is built at the
+    /// next evaluation, on that point's own spectrum, and no entry cached against
+    /// the old plan survives.
+    fn install_logdet_plan(&mut self, probes: usize) {
+        self.logdet_probes = probes;
+        self.logdet_surrogate = None;
+        self.last_evaluation = None;
+        self.state_revision = self.state_revision.wrapping_add(1);
+    }
+
+    fn evaluate_at(
+        &mut self,
+        rho: &Array1<f64>,
+        requested_order: OuterEvalOrder,
+        measure: bool,
+    ) -> Result<SupportOuterEvaluation, EstimationError> {
         if let Some(cached) = &self.last_evaluation
             && cached.matches(rho, self.state_revision, requested_order)
+            && (!measure
+                || cached.evaluation.logdet_probes == 0
+                || cached.evaluation.probe_gradient_samples.is_some())
         {
             return Ok(cached.evaluation.clone());
         }
@@ -801,7 +734,7 @@ impl SaeSupportOuterObjective {
         self.last_evaluation = None;
         self.state_revision = self.state_revision.wrapping_add(1);
         self.uncached_evaluations += 1;
-        let evaluation = self.evaluate_uncached(rho)?;
+        let evaluation = self.evaluate_uncached(rho, measure)?;
         // The implementation always computes the analytic gradient alongside
         // the value. A value request therefore populates a gradient-capable
         // entry; a declared VGH request additionally establishes that the
@@ -828,6 +761,7 @@ impl SaeSupportOuterObjective {
     fn evaluate_uncached(
         &mut self,
         rho: &Array1<f64>,
+        measure: bool,
     ) -> Result<SupportOuterEvaluation, EstimationError> {
         let lambda_smooth = self.layout.expand(rho).map_err(outer_error)?;
         let fixed_point = self
@@ -986,13 +920,110 @@ impl SaeSupportOuterObjective {
                 "support LAML produced a non-finite value or gradient",
             ));
         }
+        let probe_gradient_samples = if measure && logdet_derivative.hutchinson_probe_count() > 0
+        {
+            Some(self.logdet_gradient_probe_samples(
+                &system,
+                &lambda_smooth,
+                &beta_offsets,
+                beta_dim,
+                &logdet_derivative,
+            )?)
+        } else {
+            None
+        };
         Ok(SupportOuterEvaluation {
             cost,
             components,
             gradient,
             lambda_smooth,
             fixed_point,
+            logdet_probes: logdet_derivative.hutchinson_probe_count(),
+            logdet_nodes: logdet_derivative.evaluation_metrics().node_count,
+            logdet_std_err: logdet_derivative.value_std_err(),
+            probe_gradient_samples,
         })
+    }
+
+    /// Per-probe samples of the log-determinant half of the criterion gradient
+    /// (#2933 F29). Row `j`, column `g` is probe `j`'s own
+    /// `½(∂log|S|/∂ρ_g − profile response)`. Their mean is the probe share of the
+    /// gradient `evaluate_uncached` reports, and their spread is that share's
+    /// Hutchinson standard error. Every other term of the gradient is deterministic.
+    fn logdet_gradient_probe_samples(
+        &self,
+        system: &ArrowSchurSystem,
+        lambda_smooth: &[f64],
+        beta_offsets: &[usize],
+        beta_dim: usize,
+        bundle: &RationalLogdetDerivativeBundle,
+    ) -> Result<Array2<f64>, EstimationError> {
+        let groups = self.layout.group_keys.len();
+        let output_dim = self.term.output_dim();
+        let coordinate_dim = *system.row_offsets.last().unwrap_or(&0);
+        // `g_ρ = d(∇_θ L)/dρ_g`: the group penalty applied to the decoder, zero in the
+        // coordinate block. The profile response `evaluate_uncached` contracts is
+        // `⟨A⁺Γ, g_ρ⟩`.
+        let directions = (0..groups)
+            .map(|group| {
+                let mut beta = Array1::<f64>::zeros(beta_dim);
+                for atom in 0..self.term.k_atoms() {
+                    if self.layout.atom_group[atom] != group {
+                        continue;
+                    }
+                    let offset = beta_offsets[atom];
+                    let lambda = lambda_smooth[atom];
+                    let sb = self.term.atoms[atom]
+                        .smooth_penalty()
+                        .dot(self.term.atoms[atom].decoder_coefficients());
+                    for basis in 0..self.term.atoms[atom].basis_size() {
+                        for output in 0..output_dim {
+                            beta[offset + basis * output_dim + output] =
+                                lambda * sb[[basis, output]];
+                        }
+                    }
+                }
+                SaeArrowVector {
+                    t: Array1::<f64>::zeros(coordinate_dim),
+                    beta,
+                }
+            })
+            .collect::<Vec<_>>();
+        let responses = self
+            .term
+            .support_reduced_logdet_probe_responses(
+                self.target.view(),
+                &self.ard_precisions,
+                system,
+                bundle,
+                &directions,
+            )
+            .map_err(outer_error)?;
+        let probes = bundle.hutchinson_probe_count();
+        let mut samples = Array2::<f64>::zeros((probes, groups));
+        for group in 0..groups {
+            let explicit = bundle
+                .per_probe_directional_derivatives(&|vector: ArrayView1<f64>| {
+                    self.schur_derivative_matvec(
+                        group,
+                        lambda_smooth,
+                        beta_offsets,
+                        beta_dim,
+                        vector,
+                    )
+                })
+                .ok_or_else(|| {
+                    outer_error(format!(
+                        "support LAML surrogate produced no per-probe derivative for smoothing \
+                         group {group} ({})",
+                        self.layout.group_keys[group]
+                    ))
+                })?;
+            for probe in 0..probes {
+                samples[[probe, group]] = 0.5 * (explicit[probe] - responses[[probe, group]]);
+            }
+        }
+        Ok(samples)
     }
 }
 
@@ -1144,33 +1175,23 @@ pub fn run_sae_support_outer(
         state_revision: 0,
         uncached_evaluations: 0,
         logdet_surrogate: None,
+        logdet_probes: SCHUR_SLQ_LOGDET_PROBES,
+        in_core_budget_bytes: crate::manifold::sae_host_in_core_budget_bytes().0,
     };
     // The caller's smoothness, placed in the domain the search has.
     let initial_log_smoothness = request.initial_smoothness.ln();
     let initial_rho = Array1::from_shape_fn(layout.group_keys.len(), |group| {
         initial_log_smoothness.max(rho_lower[group]).min(rho_upper[group])
     });
-    let problem = OuterProblem::new(layout.group_keys.len())
-        .with_gradient(Derivative::Analytic)
-        .with_hessian(DeclaredHessianForm::Unavailable)
-        .with_prefer_gradient_only(true)
-        .with_disable_fixed_point(true)
-        .with_objective_scale(Some(objective_scale))
-        .with_bounds(rho_lower, rho_upper)
-        .with_initial_rho(initial_rho)
-        .with_max_iter(request.max_outer_iter.max(1));
-    let outer = problem.run(&mut objective, SUPPORT_LAML_CONTEXT)?;
-    let certificate = outer
-        .criterion_certificate
-        .clone()
-        .filter(OuterCriterionCertificate::certifies)
-        .ok_or_else(|| {
-            outer_error(format!(
-                "support outer returned without an analytic stationarity certificate after {} iterations",
-                outer.iterations
-            ))
-        })?;
-    let terminal = objective.evaluate(&outer.rho)?;
+    let search = run_support_outer_search(
+        &mut objective,
+        &rho_lower,
+        &rho_upper,
+        initial_rho,
+        objective_scale,
+        request.max_outer_iter,
+    )?;
+    let terminal = search.terminal;
     if !terminal.fixed_point.recurred {
         return Err(outer_error(
             "support outer terminal inner state did not recur",
@@ -1179,16 +1200,235 @@ pub fn run_sae_support_outer(
     Ok(SaeSupportOuterReport {
         term: objective.term,
         smoothing_layout: layout,
-        log_lambda_groups: outer.rho,
+        log_lambda_groups: search.rho,
         lambda_smooth: terminal.lambda_smooth,
         ard_precisions: request.ard_precisions,
         criterion: SaeCriterionScore::new(SaeCriterionKind::ProfiledGaussianLaml, terminal.cost),
         criterion_components: terminal.components,
         fixed_point: terminal.fixed_point,
-        outer_iterations: outer.iterations,
-        outer_certificate: certificate,
+        outer_iterations: search.iterations,
+        outer_certificate: search.certificate,
+        logdet_uncertainty: search.uncertainty,
         inner_tolerance,
     })
+}
+
+/// The certified end of one support LAML search, and what checked it.
+struct SupportOuterSearch {
+    rho: Array1<f64>,
+    certificate: OuterCriterionCertificate,
+    terminal: SupportOuterEvaluation,
+    iterations: usize,
+    uncertainty: SaeSupportLogdetUncertainty,
+}
+
+/// Search the grouped LAML criterion to a certified point, then check that point on
+/// probes the search never saw (#2933 F29).
+///
+/// On the exact dense route the certificate is the answer. On the rational route the
+/// search descends a frozen random surrogate, and the certified point is where THAT
+/// surrogate's gradient is within the band. The probe error the search was free to
+/// follow is exactly what a gradient taken from the same probes cannot show. So the
+/// point is scored again on a plan with twice the probes, rebuilt there on its own
+/// spectral bracket. Probes come off one sequential stream per seed
+/// (`rademacher_block`), so the new plan's first half repeats the search's probes and
+/// its second half is independent of everything the search did. The second half's
+/// per-probe gradient samples give an unselected estimate `g'`, with standard error
+/// `σ'` measured from their own spread.
+///
+/// If the criterion is stationary to the certificate's band `b`, then
+/// `‖Pg'‖ ≤ b + ‖Pσ'‖` to within one standard error of `g'`, and that is the
+/// acceptance: the threshold dominates the uncertainty of the gradient it judges. A
+/// disagreement says the surrogate put its optimum more than a band from the
+/// criterion's. The search then resumes from the certified point on the doubled plan,
+/// whose probe noise is `1/√2` of its predecessor's. Doubling ends where the host
+/// cannot store a larger plan ([`admit_logdet_probe_plan`]) or the caller's outer
+/// budget is spent, and either ending is a typed refusal, never an unchecked fit.
+fn run_support_outer_search(
+    objective: &mut SaeSupportOuterObjective,
+    rho_lower: &Array1<f64>,
+    rho_upper: &Array1<f64>,
+    initial_rho: Array1<f64>,
+    objective_scale: f64,
+    max_outer_iter: usize,
+) -> Result<SupportOuterSearch, EstimationError> {
+    let budget = max_outer_iter.max(1);
+    let mut start = initial_rho;
+    let mut iterations = 0usize;
+    let mut plans = 1usize;
+    loop {
+        let problem = OuterProblem::new(objective.layout.group_keys.len())
+            .with_gradient(Derivative::Analytic)
+            .with_hessian(DeclaredHessianForm::Unavailable)
+            .with_prefer_gradient_only(true)
+            .with_disable_fixed_point(true)
+            .with_objective_scale(Some(objective_scale))
+            .with_bounds(rho_lower.clone(), rho_upper.clone())
+            .with_initial_rho(start)
+            .with_max_iter(budget - iterations);
+        let outer = problem.run(&mut *objective, SUPPORT_LAML_CONTEXT)?;
+        iterations = iterations.saturating_add(outer.iterations);
+        let certificate = outer
+            .criterion_certificate
+            .clone()
+            .filter(OuterCriterionCertificate::certifies)
+            .ok_or_else(|| {
+                outer_error(format!(
+                    "support outer returned without an analytic stationarity certificate after {} iterations",
+                    outer.iterations
+                ))
+            })?;
+        let terminal = objective.evaluate(&outer.rho)?;
+        if terminal.logdet_probes == 0 {
+            return Ok(SupportOuterSearch {
+                rho: outer.rho,
+                certificate,
+                terminal,
+                iterations,
+                uncertainty: SaeSupportLogdetUncertainty {
+                    probes: 0,
+                    criterion_std_err: 0.0,
+                    unseen_projected_gradient_norm: 0.0,
+                    unseen_gradient_std_err_norm: 0.0,
+                    plans,
+                },
+            });
+        }
+        let seen = terminal.logdet_probes;
+        let doubled = seen
+            .checked_mul(2)
+            .ok_or_else(|| outer_error("support LAML probe count overflow"))?;
+        let (_, border) = objective.beta_layout()?;
+        admit_logdet_probe_plan(doubled, terminal.logdet_nodes, border)?;
+        objective.install_logdet_plan(doubled);
+        let validation = objective.evaluate_measured(&outer.rho)?;
+        let samples = validation
+            .probe_gradient_samples
+            .as_ref()
+            .filter(|samples| validation.logdet_probes == doubled && samples.nrows() == doubled)
+            .ok_or_else(|| {
+                outer_error(format!(
+                    "support LAML re-scored its certified point without {doubled} per-probe \
+                     gradient samples (plan drew {})",
+                    validation.logdet_probes
+                ))
+            })?;
+        let (mut unseen_gradient, mut unseen_std_err) =
+            unseen_probe_gradient(&validation.gradient, samples, seen)?;
+        for &coordinate in &certificate.lambdas_railed {
+            if coordinate >= unseen_gradient.len() {
+                continue;
+            }
+            // The engine judges stationarity on the gradient projected onto the box, so
+            // a railed coordinate's outward component is not a descent direction here.
+            let at_lower = outer.rho[coordinate] - rho_lower[coordinate]
+                <= rho_upper[coordinate] - outer.rho[coordinate];
+            let outward = if at_lower {
+                unseen_gradient[coordinate] > 0.0
+            } else {
+                unseen_gradient[coordinate] < 0.0
+            };
+            if outward {
+                unseen_gradient[coordinate] = 0.0;
+                unseen_std_err[coordinate] = 0.0;
+            }
+        }
+        let gradient_norm = unseen_gradient.dot(&unseen_gradient).sqrt();
+        let std_err_norm = unseen_std_err.dot(&unseen_std_err).sqrt();
+        let band = certificate.stationarity.bound();
+        log::info!(
+            "support LAML certified point re-scored on {seen} unseen probes: |Pg| = \
+             {gradient_norm:.6e}, standard error {std_err_norm:.6e}, certificate band \
+             {band:.6e} (plan {plans})"
+        );
+        if gradient_norm <= band + std_err_norm {
+            return Ok(SupportOuterSearch {
+                rho: outer.rho,
+                certificate,
+                uncertainty: SaeSupportLogdetUncertainty {
+                    probes: doubled,
+                    criterion_std_err: 0.5 * validation.logdet_std_err,
+                    unseen_projected_gradient_norm: gradient_norm,
+                    unseen_gradient_std_err_norm: std_err_norm,
+                    plans,
+                },
+                terminal: validation,
+                iterations,
+            });
+        }
+        if iterations >= budget {
+            return Err(outer_error(format!(
+                "support LAML certified a point whose gradient, re-estimated on {seen} probes \
+                 the search never saw, is |Pg| = {gradient_norm:.6e} against band {band:.6e} \
+                 plus standard error {std_err_norm:.6e}, and the outer budget of {budget} \
+                 iterations is spent"
+            )));
+        }
+        start = outer.rho;
+        plans += 1;
+    }
+}
+
+/// The criterion gradient re-estimated from the probes `samples[seen..]` alone, with
+/// its Hutchinson standard error. `samples` are one evaluation's per-probe samples of
+/// the gradient's log-determinant half. The rest of `gradient` is deterministic and
+/// common to every probe.
+fn unseen_probe_gradient(
+    gradient: &Array1<f64>,
+    samples: &Array2<f64>,
+    seen: usize,
+) -> Result<(Array1<f64>, Array1<f64>), EstimationError> {
+    let probes = samples.nrows();
+    if seen >= probes || samples.ncols() != gradient.len() {
+        return Err(outer_error(format!(
+            "support LAML per-probe gradient samples {probes}x{} cannot hold {seen} seen probes \
+             and {} smoothing groups",
+            samples.ncols(),
+            gradient.len()
+        )));
+    }
+    let mut unseen_gradient = gradient.clone();
+    let mut std_err = Array1::<f64>::zeros(gradient.len());
+    for group in 0..gradient.len() {
+        let column = samples.column(group).to_vec();
+        let mean = column.iter().sum::<f64>() / probes as f64;
+        let unseen = &column[seen..];
+        let unseen_mean = unseen.iter().sum::<f64>() / unseen.len() as f64;
+        unseen_gradient[group] += unseen_mean - mean;
+        std_err[group] = hutchinson_standard_error(unseen).ok_or_else(|| {
+            outer_error(format!(
+                "support LAML cannot measure a gradient standard error from {} unseen probes",
+                unseen.len()
+            ))
+        })?;
+    }
+    Ok((unseen_gradient, std_err))
+}
+
+/// Refuse a frozen plan the host cannot store: `probes` probe vectors, plus one
+/// shifted solve per probe per quadrature node, each of border width. The ceiling is
+/// the host's single-materialization cap, the one the rational ladder's deflation
+/// rank is admitted against.
+fn admit_logdet_probe_plan(
+    probes: usize,
+    nodes: usize,
+    border: usize,
+) -> Result<(), EstimationError> {
+    let cap = gam_runtime::resource::ResourcePolicy::default_library()
+        .max_single_materialization_bytes;
+    let bytes = probes
+        .checked_mul(nodes.saturating_add(1))
+        .and_then(|count| count.checked_mul(border))
+        .and_then(|count| count.checked_mul(std::mem::size_of::<f64>()));
+    match bytes {
+        Some(bytes) if bytes <= cap => Ok(()),
+        _ => Err(outer_error(format!(
+            "support LAML cannot check its certified point on {probes} probes: a plan of \
+             {nodes} nodes on border {border} needs {} bytes against the host's \
+             single-materialization cap of {cap}",
+            bytes.map_or_else(|| "more than usize::MAX".to_string(), |bytes| bytes.to_string())
+        ))),
+    }
 }
 
 /// Request for [`fit_sae_support_sparse`]: one overcomplete hard-TopK
@@ -1560,6 +1800,8 @@ mod tests {
             state_revision: 0,
             uncached_evaluations: 0,
             logdet_surrogate: None,
+            logdet_probes: SCHUR_SLQ_LOGDET_PROBES,
+            in_core_budget_bytes: crate::manifold::sae_host_in_core_budget_bytes().0,
         }
     }
 
@@ -2031,6 +2273,168 @@ mod tests {
         }
     }
 
+    /// The projected-gradient norm the outer engine judges stationarity on: outward
+    /// components at railed coordinates do not count.
+    fn railed_projected_norm(
+        gradient: &Array1<f64>,
+        rho: &Array1<f64>,
+        railed: &[usize],
+        lower: &Array1<f64>,
+        upper: &Array1<f64>,
+    ) -> f64 {
+        let mut projected = gradient.clone();
+        for &coordinate in railed {
+            let at_lower = rho[coordinate] - lower[coordinate] <= upper[coordinate] - rho[coordinate];
+            if (at_lower && projected[coordinate] > 0.0) || (!at_lower && projected[coordinate] < 0.0)
+            {
+                projected[coordinate] = 0.0;
+            }
+        }
+        projected.dot(&projected).sqrt()
+    }
+
+    /// #2933 F29 — on the rational route the frozen probes leave an error in the
+    /// criterion GRADIENT, the quantity the search stops on, and the per-probe samples
+    /// measure it. The fixture's border is small enough that the dense route gives the
+    /// exact gradient at the same point. Over independent probe sets the rational
+    /// route's realized gradient error must be the size its samples report, and the
+    /// samples carry the implicit profile response through their own adjoints.
+    #[test]
+    fn rational_route_gradient_error_is_the_size_its_probe_samples_report_2933() {
+        let rho = array![0.4_f64.ln(), 2.2_f64.ln()];
+        let mut dense = build_objective();
+        let exact = dense.evaluate_measured(&rho).expect("exact dense route");
+        assert_eq!(exact.logdet_probes, 0, "the fixture's border admits the exact dense route");
+        assert!(exact.probe_gradient_samples.is_none());
+        let (_, border) = dense.beta_layout().expect("beta layout");
+        let floor = 1.0e3 * border as f64 * sae_surrogate_lane_config().rel_tol;
+        let groups = exact.gradient.len();
+        let seeds = 64u64;
+        let mut pairs = vec![Vec::<(f64, f64)>::with_capacity(seeds as usize); groups];
+        for seed in 0..seeds {
+            let mut objective = build_objective();
+            objective.random_state = seed;
+            objective.in_core_budget_bytes = 0;
+            let evaluation = objective.evaluate_measured(&rho).expect("rational route");
+            assert_eq!(evaluation.logdet_probes, SCHUR_SLQ_LOGDET_PROBES);
+            let samples = evaluation
+                .probe_gradient_samples
+                .as_ref()
+                .expect("per-probe gradient samples");
+            for group in 0..groups {
+                pairs[group].push((
+                    evaluation.gradient[group] - exact.gradient[group],
+                    hutchinson_standard_error(&samples.column(group).to_vec())
+                        .expect("32 probes"),
+                ));
+            }
+        }
+        for (group, pairs) in pairs.iter().enumerate() {
+            let count = pairs.len() as f64;
+            let rms_error = (pairs.iter().map(|(error, _)| error * error).sum::<f64>() / count).sqrt();
+            let rms_bar = (pairs.iter().map(|(_, bar)| bar * bar).sum::<f64>() / count).sqrt();
+            let covered = pairs
+                .iter()
+                .filter(|(error, bar)| error.abs() <= 3.0 * bar)
+                .count();
+            eprintln!(
+                "#2933 F29 gradient group {group} ({}): exact {:.6e}, RMS error {rms_error:.4e}, \
+                 RMS reported bar {rms_bar:.4e}, {covered}/{} within 3 bars",
+                objective_group_key(group),
+                exact.gradient[group],
+                pairs.len()
+            );
+            assert!(
+                rms_error > floor,
+                "group {group}: RMS gradient error {rms_error:.3e} is not above the \
+                 deterministic floor {floor:.3e}"
+            );
+            assert!(
+                (0.5..=2.0).contains(&(rms_error / rms_bar)),
+                "group {group}: RMS gradient error {rms_error:.4e} is not the size of the \
+                 reported bar {rms_bar:.4e}"
+            );
+            assert!(
+                10 * covered >= 9 * pairs.len(),
+                "group {group}: only {covered} of {} gradient errors lie within three \
+                 reported bars",
+                pairs.len()
+            );
+        }
+    }
+
+    fn objective_group_key(group: usize) -> String {
+        build_objective().layout.group_keys[group].clone()
+    }
+
+    /// #2933 F29 — the rational-route search publishes a certified point only after
+    /// probes it never saw agree with the certificate, and what it publishes holds for
+    /// the exact criterion. At the published point the exact dense-route gradient must
+    /// lie within the certificate band plus a few published standard errors, while at
+    /// the starting point it must not, so an idle search cannot pass.
+    #[test]
+    fn rational_route_search_checks_its_certified_point_on_unseen_probes_2933() {
+        let mut objective = build_objective();
+        objective.in_core_budget_bytes = 0;
+        let (lower, upper) = support_smoothing_domain(&objective.term, &objective.layout)
+            .expect("smoothing domain");
+        let initial = Array1::from_shape_fn(lower.len(), |group| {
+            0.0_f64.max(lower[group]).min(upper[group])
+        });
+        let scale = objective.target.len() as f64;
+        let search = run_support_outer_search(
+            &mut objective,
+            &lower,
+            &upper,
+            initial.clone(),
+            scale,
+            256,
+        )
+        .expect("the rational-route search must certify and check its point");
+        let uncertainty = &search.uncertainty;
+        let band = search.certificate.stationarity.bound();
+        eprintln!(
+            "#2933 F29 search: rho {:?}, band {band:.6e}, railed {:?}, {uncertainty:?}",
+            search.rho, search.certificate.lambdas_railed
+        );
+        assert!(uncertainty.probes >= 2 * SCHUR_SLQ_LOGDET_PROBES);
+        assert_eq!(search.terminal.logdet_probes, uncertainty.probes);
+        assert!(uncertainty.unseen_gradient_std_err_norm > 0.0);
+        assert!(uncertainty.criterion_std_err > 0.0);
+        assert!(
+            uncertainty.unseen_projected_gradient_norm
+                <= band + uncertainty.unseen_gradient_std_err_norm
+        );
+
+        let mut dense = build_objective();
+        let at_start = dense.evaluate(&initial).expect("dense route at the start");
+        let start_norm = railed_projected_norm(&at_start.gradient, &initial, &[], &lower, &upper);
+        let mut dense = build_objective();
+        let exact = dense.evaluate(&search.rho).expect("dense route at the certified point");
+        let exact_norm = railed_projected_norm(
+            &exact.gradient,
+            &search.rho,
+            &search.certificate.lambdas_railed,
+            &lower,
+            &upper,
+        );
+        let allowance = band + 3.0 * uncertainty.unseen_gradient_std_err_norm;
+        eprintln!(
+            "#2933 F29 search: exact |Pg| {exact_norm:.6e} at the certified point, \
+             {start_norm:.6e} at the start, allowance {allowance:.6e}"
+        );
+        assert!(
+            start_norm > allowance,
+            "the starting point's exact gradient {start_norm:.6e} is already inside the \
+             allowance {allowance:.6e}, so this fixture cannot tell a search from none"
+        );
+        assert!(
+            exact_norm <= allowance,
+            "the exact gradient at the certified point {exact_norm:.6e} exceeds the band \
+             {band:.6e} plus three published standard errors ({allowance:.6e})"
+        );
+    }
+
     /// #2933 F27 — force the dense and the support-sparse route on ONE hard-TopK
     /// model at ONE fitted state and compare what each scores.
     ///
@@ -2137,6 +2541,8 @@ mod tests {
             state_revision: 0,
             uncached_evaluations: 0,
             logdet_surrogate: None,
+            logdet_probes: SCHUR_SLQ_LOGDET_PROBES,
+            in_core_budget_bytes: crate::manifold::sae_host_in_core_budget_bytes().0,
         };
         let rho = array![0.4_f64.ln(), 2.2_f64.ln()];
         let evaluation = objective.evaluate(&rho).expect("support route evaluates");

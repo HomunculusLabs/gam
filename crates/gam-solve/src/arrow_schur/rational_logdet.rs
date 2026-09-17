@@ -31,10 +31,13 @@
 //!
 //! — computable from the SAME shifted solves as the value. The outer optimizer
 //! therefore descends a function whose gradient is its own: the desync class is
-//! closed by construction, not by tolerance tuning. Probe-set bias is a
-//! terminal concern (the fluctuation is a fixed smooth `O(m^{-1/2})`
-//! perturbation of the criterion surface), certified once at the accepted ρ̂
-//! by an independent probe block or one dense factorization.
+//! closed by construction, not by tolerance tuning. It is not closed against the
+//! criterion itself. The probe fluctuation is a smooth `O(m^{-1/2})` random
+//! function of ρ whose gradient does not vanish, so the surrogate's stationary
+//! point is not the criterion's (#2933 F29). A consumer that certifies
+//! stationarity measures that gradient's error from the per-probe samples
+//! ([`RationalLogdetDerivativeBundle::per_probe_directional_derivatives`]) and
+//! checks the point on probes its search never saw, as the support LAML lane does.
 //!
 //! Quadrature: the half-line integral is mapped by the exp-sinh
 //! double-exponential substitution `t = c·exp(sinh(u)·π/2)` and truncated
@@ -121,9 +124,16 @@ pub struct RationalLogdetEval {
     /// `L̃ ≈ log det S` (surrogate value; deterministic given the plan).
     pub estimate: f64,
     /// Hutchinson standard error: sample sd of the per-probe estimates over
-    /// `√m`. Zero for a single probe. The QUADRATURE part of the error is not
-    /// in this bar (it is deterministic and bounded by the plan's `rel_tol`).
+    /// `√m` ([`hutchinson_standard_error`]). Zero for a single probe. The
+    /// QUADRATURE part of the error is not in this bar. It is deterministic, sized
+    /// for the spectral bracket the plan was built on, and grows for an operator
+    /// whose spectrum has left that bracket.
     pub std_err: f64,
+    /// Each probe's own estimate of `log det S`; `estimate` is their mean. On one
+    /// plan, the spread of the per-probe differences between two operators is the
+    /// paired difference's standard error. Common probes shrink that error; they
+    /// do not remove it (#2933 F29).
+    pub probe_estimates: Vec<f64>,
     /// `y_{jℓ} = (S + t_ℓ I)⁻¹ u_j`, outer index `ℓ` (node), inner `j` (probe).
     /// `u_j = P v_j` are the deflation-PROJECTED probes when the plan carries a
     /// [`DeflationSpec`] (`u_j = v_j` — the raw probes — otherwise).
@@ -173,9 +183,42 @@ pub struct RationalLogdetEvaluationMetrics {
 /// not an estimator of the derivative of the exact log determinant, except when
 /// `from_positive_spectrum` builds it: that one carries the exact derivative of
 /// an exact dense log determinant (#2731).
+///
+/// A surrogate bundle keeps its Hutchinson probes apart (#2933 F29). Its first
+/// `probe_count · node_count` vectors are probe-major, `vectors[j·node_count + ℓ]`
+/// for probe `j` at node `ℓ`, and the deflation block follows. Contracting one
+/// probe's vectors gives that probe's own derivative sample, so a consumer can
+/// measure the uncertainty of any derivative it takes from the bundle instead of
+/// assuming a frozen probe set makes the error constant in ρ.
 pub struct RationalLogdetDerivativeBundle {
     pub vectors: Vec<Array1<f64>>,
     metrics: RationalLogdetEvaluationMetrics,
+    probe_count: usize,
+    value_std_err: f64,
+}
+
+/// Standard error of the mean of `samples`, taken as independent draws of one
+/// estimator: the sample standard deviation over `√m`. `None` below two samples,
+/// where the spread measures nothing.
+///
+/// This is the only error bar a Hutchinson estimate of a SIGNED operator has.
+/// `Var(zᵀCz) = 2‖C_off‖²_F` for Rademacher `z`, and nothing bounds that relative
+/// to `tr C` once `C` has eigenvalues of both signs, as `log S` does for an SPD `S`
+/// with eigenvalues on both sides of one. `C = [[ε, L], [L, ε]]` with `ε = 1e-3`,
+/// `L = 1` and 16 probes has relative standard error 250, against the `√(2/m) ≈
+/// 0.354` that holds only for a positive semidefinite `C` (#2933 F28).
+pub fn hutchinson_standard_error(samples: &[f64]) -> Option<f64> {
+    let m = samples.len();
+    if m < 2 {
+        return None;
+    }
+    let mean = samples.iter().sum::<f64>() / m as f64;
+    let variance = samples
+        .iter()
+        .map(|sample| (sample - mean) * (sample - mean))
+        .sum::<f64>()
+        / (m as f64 - 1.0);
+    Some((variance / m as f64).sqrt())
 }
 
 impl RationalLogdetDerivativeBundle {
@@ -208,6 +251,8 @@ impl RationalLogdetDerivativeBundle {
                 node_count: 0,
                 deflation_rank: dim,
             },
+            probe_count: 0,
+            value_std_err: 0.0,
         })
     }
 
@@ -217,6 +262,67 @@ impl RationalLogdetDerivativeBundle {
     #[must_use]
     pub fn evaluation_metrics(&self) -> RationalLogdetEvaluationMetrics {
         self.metrics
+    }
+
+    /// Hutchinson probes behind this bundle. Zero on the exact dense route, whose
+    /// value and derivative carry no probe error.
+    #[must_use]
+    pub fn hutchinson_probe_count(&self) -> usize {
+        self.probe_count
+    }
+
+    /// Hutchinson standard error of the value this bundle's evaluation produced,
+    /// from the spread of its per-probe estimates. Zero on the exact route and for a
+    /// single probe, where no spread exists to measure.
+    #[must_use]
+    pub fn value_std_err(&self) -> f64 {
+        self.value_std_err
+    }
+
+    /// The vectors probe `probe` contributes, one per quadrature node.
+    pub fn probe_vectors(&self, probe: usize) -> Option<&[Array1<f64>]> {
+        if probe >= self.probe_count {
+            return None;
+        }
+        let nodes = self.metrics.node_count;
+        self.vectors.get(probe * nodes..(probe + 1) * nodes)
+    }
+
+    /// The weight `w = m/r` that turns one probe's contraction into that probe's
+    /// own sample. For a direction `D`, `s_j = w·Σ_{z ∈ probe j} zᵀ D z`, and the
+    /// mean of the `s_j` is the probe share of [`Self::directional_derivative`].
+    #[must_use]
+    pub fn probe_sample_weight(&self) -> f64 {
+        if self.vectors.is_empty() {
+            0.0
+        } else {
+            self.probe_count as f64 / self.vectors.len() as f64
+        }
+    }
+
+    /// Per-probe samples `s_j` of the derivative along `D` (see
+    /// [`Self::probe_sample_weight`]). The deterministic deflation share is common
+    /// to every sample and is left out, so [`hutchinson_standard_error`] of the
+    /// result is the derivative's Hutchinson standard error. `None` on the exact
+    /// route.
+    pub fn per_probe_directional_derivatives(
+        &self,
+        dmatvec: &(impl Fn(ArrayView1<f64>) -> Array1<f64> + Sync),
+    ) -> Option<Vec<f64>> {
+        let weight = self.probe_sample_weight();
+        let samples = (0..self.probe_count)
+            .map(|probe| {
+                self.probe_vectors(probe).map(|vectors| {
+                    weight
+                        * vectors
+                            .iter()
+                            .map(|vector| vector.dot(&dmatvec(vector.view())))
+                            .sum::<f64>()
+                })
+            })
+            .collect::<Option<Vec<f64>>>()?;
+        (!samples.is_empty() && samples.iter().all(|sample| sample.is_finite()))
+            .then_some(samples)
     }
 
     /// Apply the represented derivative to a symmetric operator direction.
@@ -604,22 +710,15 @@ impl RationalLogdetPlan {
         }
         let term2 = per_probe.iter().sum::<f64>() / m as f64;
         let estimate = k * self.log_center + term1 + term2;
-        let std_err = if m > 1 {
-            let var = per_probe
-                .iter()
-                .map(|e| (e - term2) * (e - term2))
-                .sum::<f64>()
-                / (m as f64 - 1.0);
-            (var / m as f64).sqrt()
-        } else {
-            0.0
-        };
+        let std_err = hutchinson_standard_error(&per_probe).unwrap_or(0.0);
         if !(estimate.is_finite() && std_err.is_finite()) {
             return None;
         }
+        let deterministic = k * self.log_center + term1;
         Some(RationalLogdetEval {
             estimate,
             std_err,
+            probe_estimates: per_probe.iter().map(|share| deterministic + share).collect(),
             shifted_solves: shifted,
             deflation_solves,
             deflation_basis: basis.to_vec(),
@@ -670,14 +769,21 @@ impl RationalLogdetPlan {
         if term_count == 0 {
             return None;
         }
-        let mut vectors = Vec::with_capacity(term_count);
         let rank = term_count as f64;
         let probes = probe_count as f64;
+        let value_std_err = eval.std_err;
         let mut deflation_by_node = eval.deflation_solves;
         if deflation_by_node.is_empty() {
             deflation_by_node.resize_with(self.nodes.len(), Vec::new);
         }
-        for ((mut probe_solves, mut deflation_solves), &(_, weight)) in eval
+        // Probe-major, so each probe's vectors stay contiguous and the bundle can
+        // hand out per-probe samples (#2933 F29).
+        let mut by_probe: Vec<Vec<Array1<f64>>> = (0..probe_count)
+            .map(|_| Vec::with_capacity(self.nodes.len()))
+            .collect();
+        let mut deflation_vectors =
+            Vec::with_capacity(term_count - probe_count * self.nodes.len());
+        for ((probe_solves, deflation_solves), &(_, weight)) in eval
             .shifted_solves
             .into_iter()
             .zip(deflation_by_node)
@@ -691,22 +797,32 @@ impl RationalLogdetPlan {
             if !(probe_scale.is_finite() && deflation_scale.is_finite()) {
                 return None;
             }
-            for mut solve in probe_solves.drain(..) {
+            for (probe, mut solve) in probe_solves.into_iter().enumerate() {
                 if solve.len() != self.dim {
                     return None;
                 }
                 solve *= probe_scale;
-                vectors.push(solve);
+                by_probe[probe].push(solve);
             }
-            for mut solve in deflation_solves.drain(..) {
+            for mut solve in deflation_solves {
                 if solve.len() != self.dim {
                     return None;
                 }
                 solve *= deflation_scale;
-                vectors.push(solve);
+                deflation_vectors.push(solve);
             }
         }
-        Some(RationalLogdetDerivativeBundle { vectors, metrics })
+        let mut vectors = Vec::with_capacity(term_count);
+        for probe_vectors in by_probe {
+            vectors.extend(probe_vectors);
+        }
+        vectors.extend(deflation_vectors);
+        Some(RationalLogdetDerivativeBundle {
+            vectors,
+            metrics,
+            probe_count,
+            value_std_err,
+        })
     }
 }
 
@@ -1574,5 +1690,265 @@ mod tests {
             "returned shifted solve must satisfy its true-residual contract"
         );
         assert_eq!(iterations, 2);
+    }
+
+    /// Over `seeds` independent probe sets, how the realized errors compare with the
+    /// error bars reported beside them: `(rms error, rms bar, errors within 3 bars)`.
+    fn calibration(pairs: &[(f64, f64)]) -> (f64, f64, usize) {
+        let count = pairs.len() as f64;
+        let rms_error = (pairs.iter().map(|(error, _)| error * error).sum::<f64>() / count).sqrt();
+        let rms_bar = (pairs.iter().map(|(_, bar)| bar * bar).sum::<f64>() / count).sqrt();
+        let covered = pairs
+            .iter()
+            .filter(|(error, bar)| error.abs() <= 3.0 * bar)
+            .count();
+        (rms_error, rms_bar, covered)
+    }
+
+    /// The realized errors must be the size the bars say, and a material size: well
+    /// above the deterministic quadrature and CG error, so the calibration is about
+    /// the probes and nothing else.
+    fn assert_calibrated(label: &str, pairs: &[(f64, f64)], floor: f64) {
+        let (rms_error, rms_bar, covered) = calibration(pairs);
+        eprintln!(
+            "#2933 {label}: RMS error {rms_error:.4e}, RMS reported bar {rms_bar:.4e}, \
+             {covered}/{} within 3 bars",
+            pairs.len()
+        );
+        assert!(
+            rms_error > floor,
+            "{label}: RMS error {rms_error:.3e} is not above the deterministic floor {floor:.3e}"
+        );
+        assert!(
+            (0.5..=2.0).contains(&(rms_error / rms_bar)),
+            "{label}: RMS error {rms_error:.4e} is not the size of the reported bar {rms_bar:.4e}"
+        );
+        assert!(
+            10 * covered >= 9 * pairs.len(),
+            "{label}: only {covered} of {} errors lie within three reported bars",
+            pairs.len()
+        );
+    }
+
+    /// Eigenvalue pairs `e^{±a}`, `a ∈ [0.5, 8]`: an SPD spectrum on both sides of one
+    /// with log-determinant exactly zero and a log-spectral spread of up to sixteen.
+    fn paired_log_spectrum(dim: usize, seed: u64) -> Vec<f64> {
+        let mut state = seed;
+        let mut lambdas = Vec::with_capacity(dim);
+        for _ in 0..dim / 2 {
+            let a = next_uniform(&mut state, 0.5, 8.0);
+            lambdas.push(a.exp());
+            lambdas.push((-a).exp());
+        }
+        lambdas
+    }
+
+    /// #2933 F28 — `C = log S` of an SPD `S` need not be positive semidefinite, and
+    /// then nothing bounds the Hutchinson error relative to `tr C`. The audit's
+    /// `C = [[ε, L], [L, ε]]` with `ε = 1e-3`, `L = 1` and 16 probes has relative
+    /// standard error `2L/(2ε·√16) = 250`, against the `√(2/m) ≈ 0.354` that holds
+    /// only for a positive semidefinite `C`. What does hold is the absolute bar the
+    /// estimator measures from its own probes. Over independent probe sets the
+    /// realized error must be the size `std_err` reports, on that operator and on a
+    /// 24-dimensional one with eigenvalues on both sides of one, log-determinant
+    /// zero, log-spectral spread sixteen, and random eigenvectors.
+    #[test]
+    fn a_signed_log_operator_has_no_relative_error_bar_but_its_measured_bar_holds_2933() {
+        let probes = 16usize;
+        let seeds = 256u64;
+        let quadrature_tol = 1.0e-10;
+        let (epsilon, coupling) = (1.0e-3_f64, 1.0_f64);
+        let (high, low) = ((epsilon + coupling).exp(), (epsilon - coupling).exp());
+        let audit = array![
+            [0.5 * (high + low), 0.5 * (high - low)],
+            [0.5 * (high - low), 0.5 * (high + low)]
+        ];
+        let lambdas = paired_log_spectrum(24, 2933);
+        let (wide, wide_logdet) = spd_with_spectrum(24, &lambdas, 29330);
+        let wide_min = lambdas.iter().copied().fold(f64::INFINITY, f64::min);
+        let wide_max = lambdas.iter().copied().fold(0.0_f64, f64::max);
+        for (label, operator, exact, bracket) in [
+            ("F28 audit 2x2", &audit, 2.0 * epsilon, (low, high)),
+            ("F28 paired 24-dim", &wide, wide_logdet, (wide_min, wide_max)),
+        ] {
+            let dim = operator.nrows();
+            let pairs = (0..seeds)
+                .map(|seed| {
+                    let plan = RationalLogdetPlan::build(
+                        dim, probes, seed, bracket.0, bracket.1, quadrature_tol,
+                    )
+                    .expect("plan");
+                    let eval = plan
+                        .evaluate(&|v: ArrayView1<f64>| operator.dot(&v), 1.0e-12, 50_000)
+                        .expect("eval");
+                    (eval.estimate - exact, eval.std_err)
+                })
+                .collect::<Vec<_>>();
+            let (rms_error, _, _) = calibration(&pairs);
+            let relative_worst_case = (2.0 / probes as f64).sqrt();
+            eprintln!(
+                "#2933 {label}: exact log|S| {exact:.3e}, RMS relative error {:.3e} against \
+                 sqrt(2/m) = {relative_worst_case:.3e}",
+                rms_error / exact.abs()
+            );
+            assert!(
+                rms_error > 100.0 * relative_worst_case * exact.abs(),
+                "{label}: RMS error {rms_error:.3e} is inside a hundred times the relative \
+                 bar sqrt(2/m)·|log|S|| = {:.3e}, so this operator is no counterexample",
+                relative_worst_case * exact.abs()
+            );
+            assert_calibrated(label, &pairs, 1.0e3 * dim as f64 * quadrature_tol);
+        }
+    }
+
+    /// `G(ρ)·A·G(ρ)ᵀ` for the product `G(ρ)` of plane rotations by `θ_i·ρ` in the
+    /// coordinate planes `(i, i+1)`: the spectrum of `A` at every ρ, with eigenvectors
+    /// that turn as ρ moves.
+    fn rotated_operator(a: &Array2<f64>, angles: &[f64], rho: f64) -> Array2<f64> {
+        let dim = a.nrows();
+        let mut rotation = Array2::<f64>::eye(dim);
+        for (plane, &theta) in angles.iter().enumerate() {
+            let (cos, sin) = ((theta * rho).cos(), (theta * rho).sin());
+            for row in 0..dim {
+                let (x, y) = (rotation[[row, plane]], rotation[[row, plane + 1]]);
+                rotation[[row, plane]] = cos * x - sin * y;
+                rotation[[row, plane + 1]] = sin * x + cos * y;
+            }
+        }
+        rotation.dot(a).dot(&rotation.t())
+    }
+
+    /// #2933 F29 — a frozen probe set does not turn the estimator's error into a
+    /// constant offset in ρ. `log S(ρ) = [[0, ρ], [ρ, 0]]` has `log|S(ρ)| = 0` at every
+    /// ρ, while each probe reports `zᵀ log S(ρ) z = 2ρ·z₁z₂`. On one frozen plan the
+    /// error therefore moves with ρ, and its slope is the probes' mean of `±2`, not
+    /// zero. A 24-dimensional family whose eigenvectors turn with ρ while its
+    /// two-sided spectrum stays fixed does the same. What holds is the per-probe
+    /// measurement. Over independent probe sets, the paired error `e(ρ₁) − e(ρ₀)` must
+    /// be the size the differences of `probe_estimates` report, and the slope error
+    /// the size the bundle's per-probe derivative samples report.
+    #[test]
+    fn frozen_probes_leave_an_error_that_moves_with_rho_and_is_measured_2933() {
+        let probes = 16usize;
+        let seeds = 256u64;
+        let quadrature_tol = 1.0e-10;
+        let (rho0, rho1) = (0.5_f64, 1.0_f64);
+        let swap = array![[0.0, 1.0], [1.0, 0.0]];
+        let audit = |rho: f64| Array2::<f64>::eye(2) * rho.cosh() + &swap * rho.sinh();
+        let audit_slope = |rho: f64| Array2::<f64>::eye(2) * rho.sinh() + &swap * rho.cosh();
+        let lambdas = paired_log_spectrum(24, 29331);
+        let (base, _) = spd_with_spectrum(24, &lambdas, 29332);
+        let mut state = 29333u64;
+        let angles = (0..23)
+            .map(|_| next_uniform(&mut state, 0.5, 2.0))
+            .collect::<Vec<_>>();
+        let rotating = |rho: f64| rotated_operator(&base, &angles, rho);
+        // Test-only central difference of the rotating family's operator in ρ.
+        let rotating_slope = |rho: f64| {
+            let h = 1.0e-6;
+            (rotating(rho + h) - rotating(rho - h)) / (2.0 * h)
+        };
+        let families: [(&str, &dyn Fn(f64) -> Array2<f64>, &dyn Fn(f64) -> Array2<f64>, (f64, f64)); 2] = [
+            ("F29 audit 2x2", &audit, &audit_slope, ((-rho1).exp(), rho1.exp())),
+            (
+                "F29 rotating 24-dim",
+                &rotating,
+                &rotating_slope,
+                (
+                    lambdas.iter().copied().fold(f64::INFINITY, f64::min),
+                    lambdas.iter().copied().fold(0.0_f64, f64::max),
+                ),
+            ),
+        ];
+        for (label, operator, slope, bracket) in families {
+            let (at0, at1, slope0) = (operator(rho0), operator(rho1), slope(rho0));
+            let dim = at0.nrows();
+            let mut paired = Vec::with_capacity(seeds as usize);
+            let mut slopes = Vec::with_capacity(seeds as usize);
+            for seed in 0..seeds {
+                let plan =
+                    RationalLogdetPlan::build(dim, probes, seed, bracket.0, bracket.1, quadrature_tol)
+                        .expect("plan");
+                let eval0 = plan
+                    .evaluate(&|v: ArrayView1<f64>| at0.dot(&v), 1.0e-12, 50_000)
+                    .expect("eval at rho0");
+                let eval1 = plan
+                    .evaluate(&|v: ArrayView1<f64>| at1.dot(&v), 1.0e-12, 50_000)
+                    .expect("eval at rho1");
+                // Both exact log-determinants are zero, so the estimates are the errors.
+                let differences = eval1
+                    .probe_estimates
+                    .iter()
+                    .zip(&eval0.probe_estimates)
+                    .map(|(one, zero)| one - zero)
+                    .collect::<Vec<_>>();
+                paired.push((
+                    eval1.estimate - eval0.estimate,
+                    hutchinson_standard_error(&differences).expect("16 probes"),
+                ));
+                let bundle = plan
+                    .into_directional_derivative_bundle(eval0)
+                    .expect("derivative bundle");
+                let matvec = |v: ArrayView1<f64>| slope0.dot(&v);
+                let samples = bundle
+                    .per_probe_directional_derivatives(&matvec)
+                    .expect("per-probe derivative samples");
+                assert_eq!(samples.len(), probes);
+                let derivative = bundle.directional_derivative(&matvec).expect("derivative");
+                let mean = samples.iter().sum::<f64>() / probes as f64;
+                assert!(
+                    (derivative - mean).abs() <= 1.0e-10 * (1.0 + derivative.abs()),
+                    "{label}: an undeflated bundle's derivative {derivative:.12e} must be the \
+                     mean of its per-probe samples {mean:.12e}"
+                );
+                slopes.push((
+                    derivative,
+                    hutchinson_standard_error(&samples).expect("16 probes"),
+                ));
+            }
+            let floor = 1.0e3 * dim as f64 * quadrature_tol;
+            assert_calibrated(&format!("{label} paired difference"), &paired, floor);
+            assert_calibrated(&format!("{label} slope"), &slopes, floor);
+        }
+    }
+
+    /// #2933 F29 — the quadrature is sized for the spectral bracket a plan was built on,
+    /// so its error is not a fixed offset in ρ either. It stays at the design tolerance
+    /// for eigenvalues inside the bracket and grows for eigenvalues an operator reaches
+    /// later. A scalar operator isolates it, because every Rademacher probe of a 1×1
+    /// operator is exact.
+    #[test]
+    fn a_frozen_quadrature_is_accurate_only_on_the_bracket_it_was_sized_for_2933() {
+        let (low, high, tol) = (1.0e-3_f64, 1.0e3_f64, 1.0e-8_f64);
+        let plan = RationalLogdetPlan::build(1, 1, 7, low, high, tol).expect("plan");
+        let error_at = |x: f64| {
+            let a = Array2::from_elem((1, 1), x);
+            let eval = plan
+                .evaluate(&|v: ArrayView1<f64>| a.dot(&v), 1.0e-14, 10_000)
+                .expect("eval");
+            (eval.estimate - x.ln()).abs()
+        };
+        let inside = [low, 1.0e-2, 0.37, 1.0, 2.9, 1.0e2, high]
+            .into_iter()
+            .map(error_at)
+            .fold(0.0_f64, f64::max);
+        let outside = [high * 1.0e4, low * 1.0e-4]
+            .into_iter()
+            .map(error_at)
+            .fold(0.0_f64, f64::max);
+        eprintln!(
+            "#2933 F29 quadrature: worst error {inside:.3e} inside [{low:e}, {high:e}] at tol \
+             {tol:e}, {outside:.3e} four decades outside"
+        );
+        assert!(
+            inside <= 10.0 * tol,
+            "inside its bracket the quadrature error {inside:.3e} exceeds ten times its design \
+             tolerance {tol:e}"
+        );
+        assert!(
+            outside > 1.0e2 * inside.max(tol),
+            "four decades outside its bracket the quadrature error {outside:.3e} did not grow \
+             past a hundred times the in-bracket error {inside:.3e}"
+        );
     }
 }
