@@ -264,20 +264,22 @@ pub(crate) fn should_screen_seeds(
 /// The cascade evaluates seeds at successive caps until at least one
 /// produces a finite cost — at which point it ranks them and exits. The
 /// geometric ×4 progression keeps each escalation step cheap relative to
-/// the next while still letting the cap reach the full inner budget if
-/// needed: `initial × {1, 4, 16}` followed by uncapped (`0` interpreted
-/// by the inner solver as "use the full `pirls_config.max_iterations`").
+/// the next: `initial × {1, 4, 16}`.
 ///
-/// Worst-case extra work bounds: every seed pays at most
+/// Declared budget (gam#2943): every seed pays at most
 /// `initial × (1 + 4 + 16)` = 21 × initial inner iterations across the
-/// three capped stages before falling through to the uncapped pass —
-/// negligible overhead compared to a full P-IRLS solve, paid only when
-/// every cap stage collapsed all seeds to non-finite cost.
+/// three capped stages, and screening never runs an uncapped inner solve.
+/// When no seed reaches a finite cost at `16 × initial`, the seeds keep
+/// their generated order. The seed loop's full outer solves are the
+/// uncapped evaluation; running a full inner solve at every seed first,
+/// only to rank them, was the multi-minute no-iteration-log stall of
+/// #736/#735/#721.
 pub(crate) const SEED_SCREENING_CASCADE_MULTIPLIERS: [usize; 3] = [1, 4, 16];
 
 /// Sentinel cap value passed to the inner solver to mean "no cap — use
-/// the full `pirls_config.max_iterations`". Always the final cascade
-/// stage after the geometric escalation exhausts.
+/// the full `pirls_config.max_iterations`". The bridges store it to lift a
+/// screening cap before a full evaluation; the screening cascade itself never
+/// runs a stage at it (gam#2943).
 pub(crate) const SEED_SCREENING_UNCAPPED: usize = 0;
 
 pub(crate) fn rank_seeds_with_screening(
@@ -294,29 +296,12 @@ pub(crate) fn rank_seeds_with_screening(
     let previous_cap = screening_cap.swap(initial_cap, Ordering::Relaxed);
 
     // Geometric cap cascade: each stage exits the moment any seed produces
-    // a finite cost. The original two-stage protocol (initial cap → fully
-    // uncapped on every seed) has a degenerate worst case at large scale
-    // — when every seed at the shallow cap collapses, we re-evaluate every
-    // seed at the *full* inner budget, costing `N_seeds × full_pirls_work`
-    // just to pick a starting point. The cascade replaces that all-or-
-    // nothing jump with a geometric escalation: the typical case stays at
-    // the initial cap (one pass), and the rare uniform-failure case pays
-    // only `21 × initial` extra inner iterations before the uncapped
-    // fallback.
-    let cascade_caps = [
-        PriorityBudgetStage {
-            cap: initial_cap.saturating_mul(SEED_SCREENING_CASCADE_MULTIPLIERS[0]),
-        },
-        PriorityBudgetStage {
-            cap: initial_cap.saturating_mul(SEED_SCREENING_CASCADE_MULTIPLIERS[1]),
-        },
-        PriorityBudgetStage {
-            cap: initial_cap.saturating_mul(SEED_SCREENING_CASCADE_MULTIPLIERS[2]),
-        },
-        PriorityBudgetStage {
-            cap: SEED_SCREENING_UNCAPPED,
-        },
-    ];
+    // a finite cost, so the typical case stays at the initial cap (one pass).
+    // It ends after the capped stages; see `SEED_SCREENING_CASCADE_MULTIPLIERS`
+    // for the declared budget.
+    let cascade_caps = SEED_SCREENING_CASCADE_MULTIPLIERS.map(|multiplier| PriorityBudgetStage {
+        cap: initial_cap.saturating_mul(multiplier),
+    });
 
     let cascade_start = std::time::Instant::now();
     log::info!(
@@ -333,6 +318,15 @@ pub(crate) fn rank_seeds_with_screening(
             screening_cap.store(cap, Ordering::Relaxed);
             obj.reset();
             screening_cap.store(cap, Ordering::Relaxed);
+            // Announce the evaluation before it runs: a slow inner solve is
+            // otherwise silent until it ends (gam#2943).
+            log::info!(
+                "[STAGE] {context}: seed-screen START stage={} seed={}/{} cap={}",
+                stage,
+                idx + 1,
+                seeds.len(),
+                cap,
+            );
             let seed_started = std::time::Instant::now();
             let result = obj.eval_screening_proxy(&seeds[idx]);
             let seed_elapsed = seed_started.elapsed().as_secs_f64();
@@ -343,11 +337,7 @@ pub(crate) fn rank_seeds_with_screening(
                         stage,
                         idx + 1,
                         seeds.len(),
-                        if cap == 0 {
-                            "uncapped".to_string()
-                        } else {
-                            cap.to_string()
-                        },
+                        cap,
                         seed_elapsed,
                         cost,
                     );
@@ -359,27 +349,34 @@ pub(crate) fn rank_seeds_with_screening(
                         stage,
                         idx + 1,
                         seeds.len(),
-                        if cap == 0 {
-                            "uncapped".to_string()
-                        } else {
-                            cap.to_string()
-                        },
+                        cap,
                         seed_elapsed,
                         cost,
                     );
                     Ok(cost)
                 }
-                Err(error) => {
+                // A refusal at this seed is a statement about this seed, like a
+                // non-finite cost: reject it and keep ranking the others, so one
+                // refused seed does not discard every finished screening solve
+                // (gam#2943). Any other error still ends the fit.
+                Err(error) if error.is_trial_point_infeasible() => {
                     log::info!(
-                        "[STAGE] {context}: seed-screen stage={} seed={}/{} cap={} elapsed={:.3}s fatal evaluator error",
+                        "[STAGE] {context}: seed-screen stage={} seed={}/{} cap={} elapsed={:.3}s rejected: {error}",
                         stage,
                         idx + 1,
                         seeds.len(),
-                        if cap == 0 {
-                            "uncapped".to_string()
-                        } else {
-                            cap.to_string()
-                        },
+                        cap,
+                        seed_elapsed,
+                    );
+                    Ok(f64::NAN)
+                }
+                Err(error) => {
+                    log::info!(
+                        "[STAGE] {context}: seed-screen stage={} seed={}/{} cap={} elapsed={:.3}s fatal evaluator error: {error}",
+                        stage,
+                        idx + 1,
+                        seeds.len(),
+                        cap,
                         seed_elapsed,
                     );
                     Err(error)
@@ -395,26 +392,17 @@ pub(crate) fn rank_seeds_with_screening(
             log::info!(
                 "[STAGE] {context}: seed-screen stage={} cap={} elapsed={:.3}s ranked={} rejected={}",
                 stage,
-                if cap == 0 {
-                    "uncapped".to_string()
-                } else {
-                    cap.to_string()
-                },
+                cap,
                 cascade_start.elapsed().as_secs_f64(),
                 ranked,
                 rejected,
             );
             if ranked > 0 && stage > 0 {
-                let final_cap = if cap == 0 {
-                    "uncapped".to_string()
-                } else {
-                    cap.to_string()
-                };
                 log::info!(
                     "[OUTER] {context}: seed screening cap escalated from {} to {} \
                      (initial cap was too shallow for this problem; {}/{} seeds ranked)",
                     initial_cap,
-                    final_cap,
+                    cap,
                     ranked,
                     seeds.len(),
                 );
@@ -433,22 +421,20 @@ pub(crate) fn rank_seeds_with_screening(
         "[OUTER] {context}: seed screening cascade complete elapsed={:.3}s stages_used={} final_cap={} ranked={}/{}",
         cascade_start.elapsed().as_secs_f64(),
         stages_consumed,
-        if final_cap_used == 0 {
-            "uncapped".to_string()
-        } else {
-            final_cap_used.to_string()
-        },
+        final_cap_used,
         ranked.len(),
         seeds.len(),
     );
 
     if ranked.is_empty() {
-        log::info!(
-            "[OUTER] {context}: no finite seed cost even with full inner budget \
-             ({} seeds, {} rejected, {} cascade stages tried); keeping heuristic order",
+        log::warn!(
+            "[OUTER] {context}: no seed reached a finite screening cost within the declared \
+             screening budget ({} seeds, {} rejected, {} capped stages up to cap {}); \
+             keeping the generated order",
             seeds.len(),
             rejected,
             stages_consumed,
+            final_cap_used,
         );
         return Ok(seeds.to_vec());
     }
@@ -608,11 +594,7 @@ pub(crate) fn rank_seeds_with_screening(
          (initial cap={}, stages used={}); rejected={}",
         ordered.len() - rejected,
         seeds.len(),
-        if final_cap_used == 0 {
-            "uncapped".to_string()
-        } else {
-            final_cap_used.to_string()
-        },
+        final_cap_used,
         initial_cap,
         stages_consumed,
         rejected,
@@ -814,3 +796,7 @@ pub(crate) fn candidate_improves_best_parsimonious(
         Some(best) => candidate.final_value < best.final_value,
     }
 }
+
+#[cfg(test)]
+#[path = "seed_screening_tests.rs"]
+mod seed_screening_tests;

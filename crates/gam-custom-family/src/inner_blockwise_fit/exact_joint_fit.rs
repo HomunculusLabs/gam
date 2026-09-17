@@ -6947,7 +6947,8 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             last_cycle_obj_change_below_tol,
             lastobjective,
         );
-        if converged {
+        // A seed-screening solve that stops at its cap is expected (gam#2943).
+        if converged || options.seed_screening {
             log::info!("{verdict}");
         } else {
             log::warn!("{verdict}");
@@ -7180,8 +7181,17 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     )
                 })
                 .unwrap_or_else(|| "last_newton_math=<none>".to_string());
-            log::warn!(
-                "[PIRLS/joint-Newton] cycle={} budget-exhausted without KKT: objective_start={:.6e} objective_end={:.6e} objective_drop={:+.3e} beta_inf={:.3e} exit_unprojected_kkt_inf={:.3e} total_p={} total_n={} block_widths={:?} block_beta_inf={:?} block_grad_inf={:?} block_diag_hessian_default={} {}; rejecting this outer REML/LAML evaluation",
+            // A seed-screening solve stops at its deliberate cap: that is the
+            // expected end of a ranking probe, not a failure to report at warn
+            // (gam#2943).
+            let exhaustion_level = if options.seed_screening {
+                log::Level::Info
+            } else {
+                log::Level::Warn
+            };
+            log::log!(
+                exhaustion_level,
+                "[PIRLS/joint-Newton] cycle={} budget-exhausted without KKT:objective_start={:.6e} objective_end={:.6e} objective_drop={:+.3e} beta_inf={:.3e} exit_unprojected_kkt_inf={:.3e} total_p={} total_n={} block_widths={:?} block_beta_inf={:?} block_grad_inf={:?} block_diag_hessian_default={} {}; rejecting this outer REML/LAML evaluation",
                 cycles_done,
                 initial_joint_objective,
                 lastobjective,
@@ -7236,7 +7246,8 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     );
                     report.format_bubbled_error()
                 };
-                log::warn!(
+                log::log!(
+                    exhaustion_level,
                     "coupled exact-joint inner solve exhausted the joint Newton budget without KKT convergence after {cycles_done} cycle(s) — {block_diag}; returning a non-converged inner mode for outer-rho rejection"
                 );
             }
