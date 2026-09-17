@@ -127,6 +127,9 @@ def test_geometry_log_map_resolves_simplex_aliases() -> None:
 
 def test_response_geometry_model_predict_projects_back_to_manifold() -> None:
     class DummyCoordinateModel:
+        """A coordinate model's predict table: the estimand-explicit schema a
+        plain Gaussian tangent ``Model`` publishes, point under ``posterior_mean``."""
+
         def __init__(self, values: list[float]) -> None:
             self.values = values
 
@@ -136,7 +139,11 @@ def test_response_geometry_model_predict_projects_back_to_manifold() -> None:
             return_type: str | None = None,
             **kwargs: object,
         ) -> dict[str, list[float]]:
-            return {"mean": self.values}
+            return {
+                "linear_predictor_plugin": self.values,
+                "mean_plugin": self.values,
+                "posterior_mean": self.values,
+            }
 
         def summary(self) -> dict[str, str]:
             return {"ok": "yes"}
