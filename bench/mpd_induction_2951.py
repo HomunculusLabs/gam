@@ -1,13 +1,25 @@
 """#2951 mpd-induction: a small attention-only transformer trained on induction, the second trained
 end-to-end benchmark for manifold parameter decomposition (plan: #2951 comment 5718467859).
 
-Stage S0 is torch only.
+Stage S0 is torch only; ``registry`` is the torch end of S1.
 
 * ``train`` fits a 2-layer attention-only transformer on repeated-segment sequences, or on iid
   random labels over the same split (control C2). Config, data, curves and checkpoints go into ONE
   file; the step-0 checkpoint is control C1, the random init of the same run.
 * ``s0`` runs the executor controls and the benchmark oracle on stored checkpoints and writes one
   JSON receipt.
+* ``registry`` exports one checkpoint for the native lift: the parameter registry and every use site
+  of one unedited float64 forward (``gamfit.torch.parameter_interventions``), one ``.npy`` per
+  stored tensor in its trained dtype (float32, which a reader widens to binary64 exactly), a float64
+  ``.npy`` of the native logits (rows over sequence then position), and ``registry.json`` with the
+  input tokens and every file's md5. Every array has two axes, so
+  ``crates/gam-sae/examples/mpd_induction_registry.rs`` reads it through
+  ``examples/support/npy_header.rs``.
+
+Every weight is one matrix per layer: ``W_Q.l``, ``W_K.l`` and ``W_V.l`` of shape
+``(heads x d_head, d_model)`` and ``W_O.l`` of shape ``(d_model, heads x d_head)``, applied by
+``torch.nn.functional.linear`` to rows that keep their (batch, seq) axes. So every read is a linear
+use site of a matrix, and an edit can be scoped to declared positions.
 
 Every tensor is used at all T positions. ``forward`` gathers W_E per group of positions, so a
 position-scoped relabel and a global one are different experiments, and gathering the rows of
@@ -21,26 +33,39 @@ stages call it through the gamfit surface.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
 
+import numpy as np
 import torch
+import torch.nn.functional as F
 
 
 class InductionTransformer(torch.nn.Module):
     def __init__(self, vocab, seq_len, d_model, n_layers, n_heads, d_head):
         super().__init__()
         scale = d_model ** -0.5
+        self.n_heads = n_heads
         self.d_head = d_head
+
+        def per_layer(rows, cols):
+            return torch.nn.ParameterList(
+                [torch.nn.Parameter(torch.randn(rows, cols) * scale) for _ in range(n_layers)])
+
         self.W_E = torch.nn.Parameter(torch.randn(vocab, d_model) * scale)
         self.W_pos = torch.nn.Parameter(torch.randn(seq_len, d_model) * scale)
-        self.W_Q = torch.nn.Parameter(torch.randn(n_layers, n_heads, d_head, d_model) * scale)
-        self.W_K = torch.nn.Parameter(torch.randn(n_layers, n_heads, d_head, d_model) * scale)
-        self.W_V = torch.nn.Parameter(torch.randn(n_layers, n_heads, d_head, d_model) * scale)
-        self.W_O = torch.nn.Parameter(torch.randn(n_layers, d_model, n_heads * d_head) * scale)
+        self.W_Q = per_layer(n_heads * d_head, d_model)
+        self.W_K = per_layer(n_heads * d_head, d_model)
+        self.W_V = per_layer(n_heads * d_head, d_model)
+        self.W_O = per_layer(d_model, n_heads * d_head)
         self.W_U = torch.nn.Parameter(torch.randn(vocab, d_model) * scale)
         self.register_buffer("causal", torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool)))
+
+    def heads(self, rows):
+        """(batch, seq, heads x d_head) -> (batch, heads, seq, d_head)."""
+        return rows.reshape(rows.shape[0], rows.shape[1], self.n_heads, self.d_head).transpose(1, 2)
 
     def forward(self, tokens, embed_at=None, head_mask=None, return_patterns=False):
         """Logits at every position.
@@ -54,18 +79,18 @@ class InductionTransformer(torch.nn.Module):
             x[:, idx] = table[tokens[:, idx]]
         x = x + self.W_pos
         patterns = []
-        for layer in range(self.W_Q.shape[0]):
-            q = torch.einsum("hkd,npd->nhpk", self.W_Q[layer], x)
-            k = torch.einsum("hkd,npd->nhpk", self.W_K[layer], x)
-            v = torch.einsum("hkd,npd->nhpk", self.W_V[layer], x)
+        for layer in range(len(self.W_Q)):
+            q = self.heads(F.linear(x, self.W_Q[layer]))
+            k = self.heads(F.linear(x, self.W_K[layer]))
+            v = self.heads(F.linear(x, self.W_V[layer]))
             scores = (q @ k.transpose(-1, -2)) / math.sqrt(self.d_head)
             pattern = torch.softmax(scores.masked_fill(~self.causal, float("-inf")), dim=-1)
             z = pattern @ v
             if head_mask is not None:
                 z = z * head_mask[layer][None, :, :, None]
-            x = x + z.transpose(1, 2).reshape(x.shape[0], x.shape[1], -1) @ self.W_O[layer].T
+            x = x + F.linear(z.transpose(1, 2).reshape(x.shape[0], x.shape[1], -1), self.W_O[layer])
             patterns.append(pattern)
-        logits = x @ self.W_U.T
+        logits = F.linear(x, self.W_U)
         return (logits, patterns) if return_patterns else logits
 
 
@@ -270,7 +295,7 @@ def relabel_battery(model, state, config, tokens, targets, permutations, device)
 
 
 def head_mask_executor(model, state, config, tokens, device):
-    """E3: a global head mask against the parameter edit W_O[:, block h] = 0 executed without a mask."""
+    """E3: a global head mask against the parameter edit W_O.l[:, block h] = 0 executed without a mask."""
     n_layers, n_heads, d_head, seq_len = config["n_layers"], config["n_heads"], config["d_head"], config["seq_len"]
     zeroed = build_model(config)
     rows = mismatched = 0
@@ -280,9 +305,10 @@ def head_mask_executor(model, state, config, tokens, device):
                 mask = torch.ones(n_layers, n_heads, seq_len, device=device)
                 mask[layer, head] = 0
                 masked = model(tokens, head_mask=mask)
+                name = f"W_O.{layer}"
                 edited_state = dict(state)
-                edited_state["W_O"] = state["W_O"].clone()
-                edited_state["W_O"][layer, :, head * d_head : (head + 1) * d_head] = 0
+                edited_state[name] = state[name].clone()
+                edited_state[name][:, head * d_head : (head + 1) * d_head] = 0
                 zeroed.load_state_dict(edited_state)
                 zeroed = zeroed.to(device).eval()
                 rows += tokens.shape[0] * seq_len
@@ -353,8 +379,8 @@ def cut_heads(state, config, heads, rank, variant, rotations):
     edited = {name: t.clone() for name, t in state.items()}
     for layer, head in heads:
         block = slice(head * d_head, (head + 1) * d_head)
-        W_Q, W_K = state["W_Q"][layer, head].double(), state["W_K"][layer, head].double()
-        W_V, W_O = state["W_V"][layer, head].double(), state["W_O"][layer, :, block].double()
+        W_Q, W_K = state[f"W_Q.{layer}"][block].double(), state[f"W_K.{layer}"][block].double()
+        W_V, W_O = state[f"W_V.{layer}"][block].double(), state[f"W_O.{layer}"][:, block].double()
         if variant == "random":
             rot_qk, rot_ov = rotations[(layer, head)]
             q, k = (rot_qk @ W_Q)[:rank], (rot_qk @ W_K)[:rank]
@@ -363,10 +389,10 @@ def cut_heads(state, config, heads, rank, variant, rotations):
             keep = list(range(rank)) if variant == "top" else list(range(d_head - rank, d_head))
             q, k = refactor(W_Q.T @ W_K, keep)
             o_rows, v = refactor(W_O @ W_V, keep)
-        edited["W_Q"][layer, head] = pad_rows(q, d_head).float()
-        edited["W_K"][layer, head] = pad_rows(k, d_head).float()
-        edited["W_V"][layer, head] = pad_rows(v, d_head).float()
-        edited["W_O"][layer, :, block] = pad_rows(o_rows, d_head).T.float()
+        edited[f"W_Q.{layer}"][block] = pad_rows(q, d_head).float()
+        edited[f"W_K.{layer}"][block] = pad_rows(k, d_head).float()
+        edited[f"W_V.{layer}"][block] = pad_rows(v, d_head).float()
+        edited[f"W_O.{layer}"][:, block] = pad_rows(o_rows, d_head).T.float()
     return edited
 
 
@@ -420,10 +446,10 @@ def shuffled_connections(state, config, generator):
         for head in range(config["n_heads"]):
             block = slice(head * d_head, (head + 1) * d_head)
             perms = [torch.randperm(d_head, generator=generator) for _ in range(4)]
-            shuffled["W_Q"][layer, head] = state["W_Q"][layer, head][perms[0]]
-            shuffled["W_K"][layer, head] = state["W_K"][layer, head][perms[1]]
-            shuffled["W_V"][layer, head] = state["W_V"][layer, head][perms[2]]
-            shuffled["W_O"][layer, :, block] = state["W_O"][layer, :, block][:, perms[3]]
+            shuffled[f"W_Q.{layer}"][block] = state[f"W_Q.{layer}"][block][perms[0]]
+            shuffled[f"W_K.{layer}"][block] = state[f"W_K.{layer}"][block][perms[1]]
+            shuffled[f"W_V.{layer}"][block] = state[f"W_V.{layer}"][block][perms[2]]
+            shuffled[f"W_O.{layer}"][:, block] = state[f"W_O.{layer}"][:, block][:, perms[3]]
     return shuffled
 
 
@@ -497,6 +523,72 @@ def s0(args):
     print(f"RECEIPT {args.out}", flush=True)
 
 
+def md5_of(path):
+    digest = hashlib.md5()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 24), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def registry(args):
+    """The torch end of S1: one checkpoint in float64 with its registry, use sites, weights and native logits."""
+    from gamfit.torch.parameter_interventions import (
+        discover_parameter_use_sites,
+        execute_native,
+        parameter_registry,
+    )
+
+    run = torch.load(args.run, map_location="cpu", weights_only=True)
+    config = run["config"]
+    if not 0 < args.sequences <= config["n_test"]:
+        raise SystemExit(f"--sequences must lie in 1..{config['n_test']}; got {args.sequences}")
+    state = run["checkpoints"][args.checkpoint]
+    # Float32 checkpoint values widen exactly, so the teacher executes its trained numbers in binary64.
+    model = load_model(config, state, torch.device("cpu")).double()
+    n_train = config["n_train"]
+    tokens = run["tokens"][n_train : n_train + args.sequences]
+    os.makedirs(args.out_dir, exist_ok=True)
+    files = {}
+
+    def save(array_id, values):
+        path = os.path.join(args.out_dir, f"{array_id}.npy")
+        np.save(path, values)
+        files[array_id] = {"path": path, "md5": md5_of(path)}
+
+    tensors = parameter_registry(model)
+    uses = discover_parameter_use_sites(model, tokens)
+    for tensor in tensors:
+        # The trained values in their stored dtype; a reader widens them to binary64 exactly.
+        save(tensor.tensor_id, state[tensor.tensor_id].numpy())
+    native = execute_native(model, tokens)
+    if native.dtype != "float64":
+        raise SystemExit(f"the native forward ran in {native.dtype}, not float64")
+    # Two axes, as examples/support/npy_header.rs reads: rows are (sequence, position) in row-major order.
+    save("native_logits", native.values.reshape(args.sequences * config["seq_len"], config["vocab"]))
+    document = {
+        "stage": "registry",
+        "run": args.run,
+        "checkpoint": args.checkpoint,
+        "trained_dtype": str(state["W_E"].dtype).removeprefix("torch."),
+        "sequences": args.sequences,
+        "tokens": tokens.tolist(),
+        "config": config,
+        "tensors": [
+            {"tensor_id": t.tensor_id, "aliases": list(t.aliases), "shape": list(t.shape), "dtype": t.dtype}
+            for t in tensors
+        ],
+        "use_sites": [
+            {"tensor_id": u.tensor_id, "ordinal": u.ordinal, "transposed": u.transposed, "op": u.op, "module": u.module}
+            for u in uses
+        ],
+        "files": files,
+    }
+    with open(os.path.join(args.out_dir, "registry.json"), "w") as handle:
+        json.dump(document, handle, indent=2)
+    print(f"REGISTRY {len(tensors)} tensors, {len(uses)} use sites, {len(files)} arrays in {args.out_dir}", flush=True)
+
+
 def int_list(text):
     return [int(v) for v in text.split(",") if v]
 
@@ -530,11 +622,18 @@ def main():
     receipt.add_argument("--permutations", type=int, required=True)
     receipt.add_argument("--device", required=True)
     receipt.add_argument("--out", required=True)
+    export = commands.add_parser("registry")
+    export.add_argument("--run", required=True)
+    export.add_argument("--checkpoint", type=int, required=True)
+    export.add_argument("--sequences", type=int, required=True)
+    export.add_argument("--out-dir", required=True)
     args = parser.parse_args()
     if args.command == "train":
         train(args)
-    else:
+    elif args.command == "s0":
         s0(args)
+    else:
+        registry(args)
 
 
 if __name__ == "__main__":
