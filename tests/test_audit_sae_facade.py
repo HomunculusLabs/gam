@@ -104,6 +104,5 @@ def test_audit_sae_surfaces_atlas_nerve_covering_side_next_to_betti():
     }
     assert all(entry["required_inference_rows"] is None for entry in prescriptions)
     assert atlas_nerve["certified_orientability"] is None
-    assert atlas_nerve["topology_promotion"]["certified"] is False
     assert "null_pvalue" in atlas_nerve
     assert "spikein_power" in atlas_nerve

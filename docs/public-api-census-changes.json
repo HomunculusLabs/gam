@@ -4021,5 +4021,15 @@
     },
     "reason": "#2933 F22 F23: predicted_birth_dl_bits called a spectra-only heuristic a theorem and returned NaN on degenerate inputs. It is replaced by birth_proposal_priority, which returns a typed Bits or Inconclusive priority. circle_coding_gain_bits called a small-cell expansion exact. It is replaced by circle_phase_code, a finite angular codec with an exact distortion.",
     "evidence": "Both are declared only in description_length.rs. At the base their callers are structure_harvest.rs, curve_promotion.rs, description_length_tests.rs and tests_prescreen_geometry_2749.rs, and this commit moves every one to the replacements. No gam-cli, gam-pyffi, Python or example source names either function. The removed map was derived by reading the change, not by running the script."
+  },
+  {
+    "base": "1cd3417b195424705168e88613a0acc1a7baa284",
+    "removed": {
+      "crates/gam-sae/src/inference/atlas_nerve.rs::certified_compression": 1,
+      "crates/gam-sae/src/manifold/graph_atom.rs::earns_standard_name": 1,
+      "crates/gam-sae/src/manifold/graph_atom.rs::unnamed": 1
+    },
+    "reason": "#2899 (SPEC rules 9 and 25): the atlas nerve's topology_promotion report is deleted, because it could only ever say one thing. AtlasNerveDiagram::certified_compression always returned GraphCompressionReport::unnamed: naming a surface needs the good-cover premise, which the diagram has not carried since 6874b6d21. So every pyffi and gamfit atlas nerve reported certified=False, kind='graph', bits_saved=0, whatever the data. certified_compression and GraphCompressionReport's unnamed and earns_standard_name are deleted, along with the pyffi dict entry, the gamfit field and the facade asserts on the constant.",
+    "evidence": "public_api_census.py over e4a2051e6 and a private commit of the change (dcf2265e7, lane sw0e) counted 11594 -> 11591 public function declarations and reported exactly these as removed. At the base, git grep -n -w finds each name only at its definition, in certified_compression, and in the pyffi atlas_nerve_dict, apart from earlier ledger text. Gate job 1113845 (lane sw0e, node n36) stacked this slice on 196300a52: public_api_census.py over the base and the code-only commit refused exactly these three declarations, and verified the same commit carrying this entry."
   }
 ]

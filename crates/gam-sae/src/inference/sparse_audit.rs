@@ -276,8 +276,7 @@ pub fn atlas_nerve_from_sparse_route(
             gates.push(gate);
         }
     }
-    let preliminary =
-        crate::inference::atlas_nerve::build_atlas_nerve(&charts, &gates, None)?;
+    let preliminary = crate::inference::atlas_nerve::build_atlas_nerve(&charts, &gates, None)?;
     let admitted_edges: Vec<_> = preliminary
         .edges
         .iter()

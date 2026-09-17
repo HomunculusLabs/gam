@@ -14,9 +14,7 @@ use crate::chart_transfer::TransferCertificate;
 use crate::inference::atlas_holonomy::{
     AtlasEulerCharacteristic, AtlasHolonomyCertificate, AtlasHolonomyEdgeId,
 };
-use crate::manifold::{
-    AtlasOrientability, BettiSignature, GraphCompressionKind, GraphCompressionReport,
-};
+use crate::manifold::{AtlasOrientability, BettiSignature, GraphCompressionKind};
 use crate::null_battery::ClaimNullCalibration;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
@@ -25,7 +23,8 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
 ///
 /// This says only whether the observed support count is at least the number of
 /// charts.  It is useful for spotting an obviously under-sampled atlas, but is
-/// neither a contractibility test nor a Nerve-theorem premise.
+/// neither a contractibility test nor a Nerve-theorem premise, and nothing here
+/// establishes the good-cover precondition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AtlasCoveringSide {
     BelowCoveringNumber,
@@ -222,21 +221,6 @@ impl AtlasNerveDiagram {
             .as_ref()
             .and_then(AtlasHolonomyCertificate::certified_euler_characteristic)
     }
-
-    /// Graph compression of the atlas nerve: the generic codebook cost of its
-    /// admitted simplices. Naming a surface needs the Nerve theorem's good-cover
-    /// premise, which this diagram does not carry, so the report is unnamed.
-    pub fn certified_compression(&self) -> GraphCompressionReport {
-        let generic = self
-            .simplex_counts
-            .iter()
-            .enumerate()
-            .map(|(dimension, &present)| {
-                simplex_selection_bits(self.n_vertices, dimension + 1, present)
-            })
-            .sum();
-        GraphCompressionReport::unnamed(generic)
-    }
 }
 
 /// The closed-form classification of compact surfaces, read off the exact
@@ -244,7 +228,7 @@ impl AtlasNerveDiagram {
 ///
 /// `(χ, orientability, boundary)` is a COMPLETE invariant of a compact surface,
 /// so this is a table lookup on measured invariants — not a search over a
-/// candidate menu. It is the single surface table in the crate; the observed
+/// candidate menu. It is the single surface table in the crate, and the observed
 /// local-chart stack reaches it through `manifold::atlas_topology`.
 ///
 /// It deliberately does NOT cover the one-manifolds. A circle and a cylinder are
@@ -296,35 +280,6 @@ pub(crate) fn surface_from_invariants(
         }
         _ => None,
     }
-}
-
-fn binomial_usize(n: usize, k: usize) -> Option<usize> {
-    if k > n {
-        return Some(0);
-    }
-    let k = k.min(n - k);
-    let mut value = 1usize;
-    for divisor in 1..=k {
-        value = value.checked_mul(n - k + divisor)? / divisor;
-    }
-    Some(value)
-}
-
-fn simplex_selection_bits(vertices: usize, cardinality: usize, present: usize) -> f64 {
-    let Some(slots) = binomial_usize(vertices, cardinality) else {
-        return f64::INFINITY;
-    };
-    if present > slots {
-        return f64::INFINITY;
-    }
-    let Ok(slots_i64) = i64::try_from(slots) else {
-        return f64::INFINITY;
-    };
-    let selected = present.min(slots - present);
-    let Ok(selected_i64) = i64::try_from(selected) else {
-        return f64::INFINITY;
-    };
-    crate::description_length::selection_bits(slots_i64, selected_i64)
 }
 
 fn validate_charts(charts: &[AtlasChart]) -> Result<usize, String> {
@@ -634,10 +589,7 @@ pub(crate) struct SimplexInventory {
     pub(crate) euler_characteristic: i128,
 }
 
-fn record_simplex(
-    simplex: &[usize],
-    inventory: &mut SimplexInventory,
-) -> Result<(), String> {
+fn record_simplex(simplex: &[usize], inventory: &mut SimplexInventory) -> Result<(), String> {
     let cardinality = simplex.len();
     inventory.counts[cardinality - 1] = inventory.counts[cardinality - 1]
         .checked_add(1)
@@ -685,13 +637,7 @@ fn enumerate_simplices_from(
                 .copied()
                 .filter(|candidate| adjacency[vertex].contains(candidate))
                 .collect();
-            enumerate_simplices_from(
-                nonempty_intersection,
-                adjacency,
-                prefix,
-                &next,
-                inventory,
-            )?;
+            enumerate_simplices_from(nonempty_intersection, adjacency, prefix, &next, inventory)?;
         }
         prefix.pop();
     }

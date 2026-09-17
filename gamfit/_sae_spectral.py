@@ -852,7 +852,6 @@ class AtlasNerveDiagram:
     holonomy_unavailable_reason: str | None = None
     holonomy_analysis: dict[str, Any] | None = None
     certified_orientability: str | None = None
-    topology_promotion: dict[str, bool | str | float] | None = None
     sampled_support_size: int | None = None
     covering_side: str | None = None
     max_filtration: float | None = None
@@ -880,8 +879,8 @@ def atlas_nerve_diagram(
     from, one row per route row) together with ``familywise_alpha`` runs the
     cross-fitted Gaussian-PCA holonomy producer and threads a real finite-sample
     certificate through the diagram. Both must be given together, since a
-    topology promotion must state the error probability it spends; omitting both
-    keeps the pure combinatorial nerve.
+    certified holonomy claim must state the error probability it spends; omitting
+    both keeps the pure combinatorial nerve.
     """
     if (observations is None) != (familywise_alpha is None):
         raise ValueError(
@@ -950,14 +949,6 @@ def atlas_nerve_diagram(
             if payload["certified_orientability"] is None
             else str(payload["certified_orientability"])
         ),
-        topology_promotion={
-            "certified": bool(payload["topology_promotion"]["certified"]),
-            "kind": str(payload["topology_promotion"]["kind"]),
-            "name": str(payload["topology_promotion"]["name"]),
-            "generic_bits": float(payload["topology_promotion"]["generic_bits"]),
-            "named_bits": float(payload["topology_promotion"]["named_bits"]),
-            "bits_saved": float(payload["topology_promotion"]["bits_saved"]),
-        },
         sampled_support_size=int(payload["sampled_support_size"]),
         covering_side=str(payload["covering_side"]),
         max_filtration=float(payload["max_filtration"]),

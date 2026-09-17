@@ -22,29 +22,3 @@ pub enum GraphCompressionKind {
     KleinBottle,
     Graph,
 }
-
-/// MDL read-out for whether the learned edge set earns a standard name.
-#[derive(Debug, Clone, PartialEq)]
-pub struct GraphCompressionReport {
-    pub kind: GraphCompressionKind,
-    pub name: &'static str,
-    pub generic_edge_bits: f64,
-    pub named_bits: f64,
-    pub bits_saved: f64,
-}
-
-impl GraphCompressionReport {
-    pub fn unnamed(generic_edge_bits: f64) -> Self {
-        Self {
-            kind: GraphCompressionKind::Graph,
-            name: "structure without a standard name",
-            generic_edge_bits,
-            named_bits: generic_edge_bits,
-            bits_saved: 0.0,
-        }
-    }
-
-    pub fn earns_standard_name(&self) -> bool {
-        self.kind != GraphCompressionKind::Graph && self.bits_saved > 0.0
-    }
-}

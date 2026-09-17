@@ -203,8 +203,6 @@ def test_atlas_nerve_diagram_smoke():
     assert report.holonomy_unavailable_reason is not None
     assert report.holonomy_analysis is None
     assert report.certified_orientability is None
-    assert report.topology_promotion["certified"] is False
-    assert report.topology_promotion["kind"] == "graph"
     assert math.isfinite(report.max_filtration)
     assert isinstance(report.note, str)
     # A scalar (block_size == 1) shape is not applicable: computed is False.

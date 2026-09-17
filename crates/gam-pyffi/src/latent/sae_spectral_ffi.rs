@@ -715,30 +715,6 @@ fn atlas_nerve_dict<'py>(
         }
         None => out.set_item("certified_orientability", py.None())?,
     }
-    let promotion = diagram.certified_compression();
-    let promotion_dict = PyDict::new(py);
-    promotion_dict.set_item("certified", promotion.earns_standard_name())?;
-    promotion_dict.set_item(
-        "kind",
-        match promotion.kind {
-            gam::terms::sae::manifold::GraphCompressionKind::Circle => "circle",
-            gam::terms::sae::manifold::GraphCompressionKind::Interval => "interval",
-            gam::terms::sae::manifold::GraphCompressionKind::FiniteSet => "finite_set",
-            gam::terms::sae::manifold::GraphCompressionKind::Disk => "disk",
-            gam::terms::sae::manifold::GraphCompressionKind::Cylinder => "cylinder",
-            gam::terms::sae::manifold::GraphCompressionKind::MobiusStrip => "mobius_strip",
-            gam::terms::sae::manifold::GraphCompressionKind::Torus => "torus",
-            gam::terms::sae::manifold::GraphCompressionKind::Sphere => "sphere",
-            gam::terms::sae::manifold::GraphCompressionKind::ProjectivePlane => "projective_plane",
-            gam::terms::sae::manifold::GraphCompressionKind::KleinBottle => "klein_bottle",
-            gam::terms::sae::manifold::GraphCompressionKind::Graph => "graph",
-        },
-    )?;
-    promotion_dict.set_item("name", promotion.name)?;
-    promotion_dict.set_item("generic_bits", promotion.generic_edge_bits)?;
-    promotion_dict.set_item("named_bits", promotion.named_bits)?;
-    promotion_dict.set_item("bits_saved", promotion.bits_saved)?;
-    out.set_item("topology_promotion", promotion_dict)?;
     out.set_item("sampled_support_size", diagram.sampled_support_size)?;
     out.set_item("covering_side", diagram.covering_side.as_str())?;
     out.set_item("max_filtration", diagram.max_filtration)?;
@@ -763,8 +739,8 @@ fn atlas_nerve_dict<'py>(
 /// cross-fitted Gaussian-PCA holonomy producer and threads the resulting
 /// finite-sample certificate — projected-PCA patches, disjoint-inference-row
 /// error model, and every typed refusal — through the diagram. The two arguments
-/// travel together because a topology promotion must state the error probability
-/// it spends; omitting both keeps the pure combinatorial reduction.
+/// travel together because a certified holonomy claim must state the error
+/// probability it spends; omitting both keeps the pure combinatorial reduction.
 #[pyfunction(signature = (
     indices,
     values,
@@ -796,7 +772,7 @@ fn atlas_nerve_diagram<'py>(
     // from together with a familywise level, run the cross-fitted Gaussian-PCA
     // holonomy producer and thread a real finite-sample certificate through the
     // nerve. Without both, the front door stays a combinatorial-only nerve; the
-    // two travel together because a topology promotion must always state the
+    // two travel together because a certified holonomy claim must always state the
     // error probability it is willing to spend.
     let observations = observations.map(|array| array.as_array().to_owned());
     let report = detach_py_result(py, "atlas_nerve_diagram", move || {
@@ -1497,20 +1473,6 @@ mod sae_spectral_ffi_tests {
                     .unwrap()
                     .unwrap()
                     .is_none()
-            );
-            let promotion = dict
-                .get_item("topology_promotion")
-                .unwrap()
-                .unwrap()
-                .cast_into::<PyDict>()
-                .unwrap();
-            assert!(
-                !promotion
-                    .get_item("certified")
-                    .unwrap()
-                    .unwrap()
-                    .extract::<bool>()
-                    .unwrap()
             );
         });
     }
