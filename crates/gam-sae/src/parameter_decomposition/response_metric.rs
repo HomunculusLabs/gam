@@ -74,11 +74,31 @@
 //! separation above the declared fidelity refutes the chart at those states.
 //! Agreement is a bound over the stated states only. The states and the fidelity
 //! are experiment declarations with no default.
+//!
+//! # Categorical responses compared in KL
+//!
+//! When a response is a logit vector `z_α(h)` whose fidelity is declared in KL,
+//! the finite check is the weighted divergence
+//! `Σ_α ν_α KL(softmax z_α(h) ‖ softmax z_α(D(E h)))`
+//! ([`CategoricalFamily::divergence_check`]). To second order in `v = h − D(E h)`
+//! it is `½ vᵀ G v` for the output metric `F(z) = diag p − p pᵀ`, the Hessian of
+//! `z′ ↦ KL(softmax z ‖ softmax z′)` at `z′ = z`, which does not charge a common
+//! logit shift.
+//!
+//! Each divergence comes from
+//! [`categorical_kl_from_logits_with_error`](gam_math::categorical::categorical_kl_from_logits_with_error),
+//! whose bound covers the evaluation of the stored logits. The logits' own
+//! roundoff `e` (sup norm, at both ends) adds `e(2 + osc(δ̂) + 4e)` with
+//! `δ̂ = ẑ′ − ẑ`. Along the segment to the exact pair, `∇_{z′} KL = p′ − p` has
+//! `ℓ₁` norm at most 2, and `∇_z KL = −F(z) δ` has `ℓ₁` norm
+//! `Σᵢ pᵢ|δᵢ − E_p δ| ≤ osc(δ)`, where `δ` moves by at most `2e` per coordinate
+//! and so its oscillation by at most `4e`.
 
 use std::fmt;
 
 use gam_linalg::decision::projector_error_bar;
 use gam_linalg::roundoff::{accumulation_band, accumulation_growth};
+use gam_math::categorical::{CategoricalError, categorical_kl_from_logits_with_error};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 
 use super::state::{
@@ -86,7 +106,7 @@ use super::state::{
     LocalQuotient, NativeMap, StateChart, StateDomain, StateError, StateRow, constant_rank_check,
     fiber_test,
 };
-use super::supports::{EvidenceStatus, EvidenceStatusError};
+use super::supports::{EvidenceStatus, EvidenceStatusError, Extremum};
 
 /// One declared intervention of the family: its native response, its mass under
 /// the declared finite measure, and the factor of its output metric.
@@ -349,6 +369,21 @@ pub struct MetricEigenvalue {
     pub upper: f64,
 }
 
+impl MetricEigenvalue {
+    /// The bracket as the evidence status of the eigenvalue at its one stated
+    /// state. Both sides are derived by Weyl, so it stays unresolved until they
+    /// meet.
+    pub fn evidence(&self) -> Result<EvidenceStatus<StateRow, StateDomain>, EvidenceStatusError> {
+        EvidenceStatus::unresolved(
+            self.lower,
+            self.upper,
+            Extremum::Supremum,
+            None,
+            StateDomain::States { count: 1 },
+        )
+    }
+}
+
 /// The eigenvalues of `G` at a resolved state, largest first, read off the
 /// factor's computed singular values: by Weyl each exact `σᵢ(A)` lies within the
 /// band of `σ̂ᵢ`, and `λᵢ(G) = σᵢ(A)²`. When the factor has fewer rows than `d`,
@@ -583,6 +618,21 @@ impl LocalStateCoordinates {
         self.rank.rank_evidence(0)
     }
 
+    /// The direction bound as the evidence status of the sine of the largest
+    /// principal angle at the anchor: a uniform bound (rounded up, since the
+    /// quotient rounds) where the band separates the resolved singular values,
+    /// and unresolved with no upper side where it does not.
+    pub fn direction_evidence(
+        &self,
+    ) -> Result<EvidenceStatus<StateRow, StateDomain>, EvidenceStatusError> {
+        let domain = StateDomain::States { count: 1 };
+        if self.subspace_error_bar.is_finite() {
+            EvidenceStatus::uniform_bound(rounded_up(self.subspace_error_bar), 0.0, domain)
+        } else {
+            EvidenceStatus::unresolved(0.0, f64::INFINITY, Extremum::Supremum, None, domain)
+        }
+    }
+
     /// Test the chart at the declared finite states, the rows of `states`, on the
     /// whitened members of `family` at the declared `fidelity` (sup norm of the
     /// whitened responses).
@@ -622,6 +672,305 @@ impl LocalStateCoordinates {
     }
 }
 
+/// One declared intervention whose response is a logit vector, compared in KL.
+pub struct CategoricalMember<'a> {
+    /// `z_α : ℝᵈ → ℝ^{K_α}`: finite logits, `K_α ≥ 1`, with an analytic Jacobian.
+    pub logits: &'a dyn DifferentiableNativeMap,
+    /// `ν_α`, finite and positive.
+    pub weight: f64,
+}
+
+/// A declared family of categorical responses under a finite measure, compared
+/// in KL.
+pub struct CategoricalFamily<'a> {
+    members: Vec<CategoricalMember<'a>>,
+    dimension: usize,
+}
+
+impl<'a> CategoricalFamily<'a> {
+    /// Validate the declared family.
+    ///
+    /// Refusals: an empty family, members on different state spaces, a weight
+    /// that is not finite and positive, and a response with no categories.
+    pub fn new(members: Vec<CategoricalMember<'a>>) -> Result<Self, ResponseMetricError> {
+        let dimension = members
+            .first()
+            .ok_or(ResponseMetricError::EmptyFamily)?
+            .logits
+            .input_dimension();
+        for (index, member) in members.iter().enumerate() {
+            let found = member.logits.input_dimension();
+            if found != dimension {
+                return Err(ResponseMetricError::StateDimension {
+                    member: index,
+                    expected: dimension,
+                    found,
+                });
+            }
+            if !(member.weight.is_finite() && member.weight > 0.0) {
+                return Err(ResponseMetricError::InvalidWeight {
+                    member: index,
+                    weight: member.weight,
+                });
+            }
+            if member.logits.output_dimension() == 0 {
+                return Err(ResponseMetricError::EmptyCategories { member: index });
+            }
+        }
+        Ok(Self { members, dimension })
+    }
+
+    /// Dimension `d` of the state space.
+    pub fn input_dimension(&self) -> usize {
+        self.dimension
+    }
+
+    /// Test `coordinates`' chart at the declared finite states, the rows of
+    /// `states`, in KL: each tested state `h` against
+    /// `Σ_α ν_α KL(softmax z_α(h) ‖ softmax z_α(D(E h)))` and the declared
+    /// `fidelity` (nats).
+    ///
+    /// The chart's section is exact (`E∘D = id` through its polar factor), so no
+    /// section refusal is needed. A state within the decoder's roundoff of its
+    /// representative tests nothing, and a sample of such states is refused.
+    pub fn divergence_check(
+        &self,
+        coordinates: &LocalStateCoordinates,
+        states: ArrayView2<'_, f64>,
+        fidelity: f64,
+    ) -> Result<DivergenceVerdict, ResponseMetricError> {
+        if !fidelity.is_finite() || fidelity < 0.0 {
+            return Err(StateError::InvalidFidelity { value: fidelity }.into());
+        }
+        let chart = &coordinates.chart;
+        let dimension = chart.directions.ncols();
+        if self.dimension != dimension {
+            return Err(StateError::DimensionMismatch {
+                context: "divergence check: family on the chart's state space",
+                expected: dimension,
+                found: self.dimension,
+            }
+            .into());
+        }
+        if states.nrows() == 0 {
+            return Err(StateError::EmptyFamily {
+                context: "divergence check: states",
+            }
+            .into());
+        }
+        let encoder = chart.encoder();
+        let decoder = chart.decoder();
+        let mut tested_states = 0_usize;
+        let mut vacuous_states = 0_usize;
+        let mut largest_upper = 0.0_f64;
+        let mut largest_roundoff = 0.0_f64;
+        // The state with the largest computed `divergence − roundoff`: if it is not
+        // certified above the fidelity, no state is.
+        let mut strongest: Option<(usize, f64, f64, f64)> = None;
+        for (index, state) in states.rows().into_iter().enumerate() {
+            let code = encoder.evaluate(state, 0.0)?;
+            let representative = decoder.evaluate(code.value.view(), 0.0)?;
+            if sup_distance(state, representative.value.view()) <= representative.roundoff {
+                vacuous_states += 1;
+                continue;
+            }
+            tested_states += 1;
+            let (divergence, roundoff) = self.weighted_divergence(state, &representative)?;
+            largest_upper = largest_upper.max(certified_sum(divergence, roundoff));
+            largest_roundoff = largest_roundoff.max(roundoff);
+            let larger = match strongest {
+                Some((_, best, best_roundoff, _)) => divergence - roundoff > best - best_roundoff,
+                None => true,
+            };
+            if larger {
+                strongest = Some((index, divergence, roundoff, code.roundoff));
+            }
+        }
+        let (state, divergence, roundoff, merge_bound) = match strongest {
+            Some(strongest) => strongest,
+            None => {
+                return Err(StateError::VacuousFiberTest {
+                    states: vacuous_states,
+                }
+                .into());
+            }
+        };
+        let futures = self.members.len();
+        Ok(if excess_over(divergence, roundoff, fidelity) {
+            DivergenceVerdict::Separated {
+                state: StateRow(state),
+                divergence,
+                roundoff,
+                fidelity,
+                merge_bound,
+            }
+        } else if largest_upper <= fidelity {
+            DivergenceVerdict::WithinFidelity {
+                tested_states,
+                vacuous_states,
+                futures,
+                divergence_upper_bound: largest_upper,
+                roundoff: largest_roundoff,
+            }
+        } else {
+            DivergenceVerdict::Unresolved {
+                tested_states,
+                vacuous_states,
+                futures,
+                divergence_lower_bound: rounded_down(divergence, roundoff).max(0.0),
+                divergence_upper_bound: largest_upper,
+                witness: StateRow(state),
+            }
+        })
+    }
+
+    /// `Σ_α ν_α KL(softmax z_α(h) ‖ softmax z_α(r̂))` and a bound on its distance
+    /// from the exact divergence between the exact logits at `h` and at the exact
+    /// representative the decoder's roundoff covers.
+    ///
+    /// Per member the bound is the owner's evaluation error plus the logit drift
+    /// `e(2 + osc(δ̂) + 4e)`, weighted, plus `γ₁` for each weighted product and
+    /// `γ_m` for the sum of `m` non-negative terms. The last factor covers the
+    /// bound's own arithmetic.
+    fn weighted_divergence(
+        &self,
+        state: ArrayView1<'_, f64>,
+        representative: &Evaluation,
+    ) -> Result<(f64, f64), ResponseMetricError> {
+        let mut divergence = 0.0_f64;
+        let mut roundoff = 0.0_f64;
+        for member in &self.members {
+            let categories = member.logits.output_dimension();
+            let native = member.logits.evaluate(state, 0.0)?;
+            let represented = member
+                .logits
+                .evaluate(representative.value.view(), representative.roundoff)?;
+            require_logits(&native, categories, "divergence check: logits at the state")?;
+            require_logits(
+                &represented,
+                categories,
+                "divergence check: logits at the representative",
+            )?;
+            let native_logits = native.value.to_vec();
+            let represented_logits = represented.value.to_vec();
+            let (kl, evaluation_error) =
+                categorical_kl_from_logits_with_error(&native_logits, &represented_logits)
+                    .map_err(ResponseMetricError::Categorical)?;
+            let radius = native.roundoff.max(represented.roundoff);
+            let (lowest, highest) = native_logits.iter().zip(&represented_logits).fold(
+                (f64::INFINITY, f64::NEG_INFINITY),
+                |(low, high), (reference, moved)| {
+                    let gap = moved - reference;
+                    (low.min(gap), high.max(gap))
+                },
+            );
+            // Each gap rounds within `u` of its exact value, and the difference once more.
+            let oscillation = rounded_up(
+                (highest - lowest) * growth_factor(1)
+                    + accumulation_growth(2) * (highest.abs() + lowest.abs()),
+            );
+            let drift = radius * (2.0 + oscillation + 4.0 * radius);
+            divergence += member.weight * kl;
+            roundoff += member.weight * (evaluation_error + drift)
+                + accumulation_growth(1) * member.weight * kl;
+        }
+        let members = self.members.len();
+        Ok((
+            divergence,
+            rounded_up(
+                (roundoff + accumulation_growth(members) * divergence)
+                    * growth_factor(4 * members + 2),
+            ),
+        ))
+    }
+}
+
+/// What [`CategoricalFamily::divergence_check`] resolved over the stated states.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DivergenceVerdict {
+    /// At `state` the weighted divergence from its section representative exceeds
+    /// the declared fidelity by more than its roundoff: the chart is refuted at
+    /// that state. The chart merges the pair within `merge_bound` in code space.
+    /// This is the state with the largest certified excess.
+    Separated {
+        state: StateRow,
+        divergence: f64,
+        roundoff: f64,
+        fidelity: f64,
+        merge_bound: f64,
+    },
+    /// At every tested state the exact weighted divergence is at most
+    /// `divergence_upper_bound`, roundoff included, and that bound is within the
+    /// declared fidelity. `roundoff` is the largest, kept for audit.
+    WithinFidelity {
+        tested_states: usize,
+        vacuous_states: usize,
+        futures: usize,
+        divergence_upper_bound: f64,
+        roundoff: f64,
+    },
+    /// No separation is certified above the declared fidelity, and the upper
+    /// bound does not reach it. `witness` attains `divergence_lower_bound`.
+    Unresolved {
+        tested_states: usize,
+        vacuous_states: usize,
+        futures: usize,
+        divergence_lower_bound: f64,
+        divergence_upper_bound: f64,
+        witness: StateRow,
+    },
+}
+
+impl DivergenceVerdict {
+    /// The verdict as the evidence status of
+    /// `sup_h Σ_α ν_α KL(softmax z_α(h) ‖ softmax z_α(D(E h)))` over the tested
+    /// states.
+    pub fn evidence(&self) -> Result<EvidenceStatus<StateRow, StateDomain>, EvidenceStatusError> {
+        match self {
+            Self::Separated {
+                state,
+                divergence,
+                roundoff,
+                fidelity,
+                ..
+            } => EvidenceStatus::counterexample(*divergence, *roundoff, *fidelity, *state),
+            Self::WithinFidelity {
+                tested_states,
+                vacuous_states,
+                futures,
+                divergence_upper_bound,
+                roundoff,
+            } => EvidenceStatus::uniform_bound(
+                *divergence_upper_bound,
+                *roundoff,
+                StateDomain::FiberPairs {
+                    tested_states: *tested_states,
+                    vacuous_states: *vacuous_states,
+                    futures: *futures,
+                },
+            ),
+            Self::Unresolved {
+                tested_states,
+                vacuous_states,
+                futures,
+                divergence_lower_bound,
+                divergence_upper_bound,
+                witness,
+            } => EvidenceStatus::unresolved(
+                *divergence_lower_bound,
+                *divergence_upper_bound,
+                Extremum::Supremum,
+                Some(*witness),
+                StateDomain::FiberPairs {
+                    tested_states: *tested_states,
+                    vacuous_states: *vacuous_states,
+                    futures: *futures,
+                },
+            ),
+        }
+    }
+}
+
 /// Errors and refusals of the response metric.
 #[derive(Debug)]
 pub enum ResponseMetricError {
@@ -647,6 +996,10 @@ pub enum ResponseMetricError {
     /// The bound on `‖V Vᵀ − I‖₂` is not below 1, so no polar factor of the
     /// chart's directions is certified within it.
     NotOrthonormal { defect: f64 },
+    /// A categorical response has no categories.
+    EmptyCategories { member: usize },
+    /// A divergence between logit vectors was refused.
+    Categorical(CategoricalError),
     /// A state check failed or refused.
     State(StateError),
 }
@@ -691,6 +1044,11 @@ impl fmt::Display for ResponseMetricError {
                 formatter,
                 "linear chart: the orthonormality defect bound {defect:e} is not below 1"
             ),
+            Self::EmptyCategories { member } => write!(
+                formatter,
+                "categorical family: member {member} has no categories"
+            ),
+            Self::Categorical(source) => write!(formatter, "{source}"),
             Self::State(source) => write!(formatter, "{source}"),
         }
     }
@@ -699,6 +1057,7 @@ impl fmt::Display for ResponseMetricError {
 impl std::error::Error for ResponseMetricError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Categorical(source) => Some(source),
             Self::State(source) => Some(source),
             _ => None,
         }
@@ -750,6 +1109,56 @@ fn require_input(
         return Err(StateError::NonFinite { context });
     }
     Ok(())
+}
+
+fn require_logits(
+    evaluation: &Evaluation,
+    categories: usize,
+    context: &'static str,
+) -> Result<(), StateError> {
+    if evaluation.value.len() != categories {
+        return Err(StateError::DimensionMismatch {
+            context,
+            expected: categories,
+            found: evaluation.value.len(),
+        });
+    }
+    if !evaluation.roundoff.is_finite()
+        || evaluation.roundoff < 0.0
+        || evaluation.value.iter().any(|value| !value.is_finite())
+    {
+        return Err(StateError::NonFinite { context });
+    }
+    Ok(())
+}
+
+fn sup_distance(left: ArrayView1<'_, f64>, right: ArrayView1<'_, f64>) -> f64 {
+    left.iter()
+        .zip(right.iter())
+        .fold(0.0_f64, |largest, (a, b)| largest.max((a - b).abs()))
+}
+
+/// `value + err`, rounded up when `err` is nonzero, so it bounds the exact sum.
+fn certified_sum(value: f64, err: f64) -> f64 {
+    let sum = value + err;
+    if err == 0.0 { sum } else { sum.next_up() }
+}
+
+/// `value − err`, rounded down when `err` is nonzero, so the exact difference
+/// bounds it from above.
+fn rounded_down(value: f64, err: f64) -> f64 {
+    let difference = value - err;
+    if err == 0.0 {
+        difference
+    } else {
+        difference.next_down()
+    }
+}
+
+/// Whether `value` exceeds `threshold` by more than `err`: the predicate
+/// [`EvidenceStatus::counterexample`] reads, so a separation always converts.
+fn excess_over(value: f64, err: f64, threshold: f64) -> bool {
+    rounded_down(value, err) > threshold
 }
 
 #[cfg(test)]
@@ -1002,6 +1411,19 @@ mod tests {
             "a resolved rank at its ceiling has a finite direction bound, found {}",
             coordinates.subspace_error_bar
         );
+        let directions = coordinates
+            .direction_evidence()
+            .expect("a finite bar is a uniform bound");
+        assert!(matches!(directions, EvidenceStatus::UniformBound { .. }));
+        assert!(directions.certifies_at_most(coordinates.subspace_error_bar.next_up()));
+        // Control: an unseparated band has no derived upper side.
+        let mut unseparated = coordinates.clone();
+        unseparated.subspace_error_bar = f64::INFINITY;
+        let open = unseparated
+            .direction_evidence()
+            .expect("an infinite bar is unresolved");
+        assert!(matches!(open, EvidenceStatus::Unresolved { upper, .. } if upper == f64::INFINITY));
+        assert!(!open.certifies_at_most(1.0));
         let verdict = coordinates
             .finite_check(&metric, array![[1.0, 0.5]].view(), 0.0)
             .expect("finite check");
@@ -1044,6 +1466,12 @@ mod tests {
         ));
         let quarter = metric_eigenvalues(&coordinates.rank.states[0])[0];
         assert!(quarter.lower <= 0.25 && 0.25 <= quarter.upper, "{quarter:?}");
+        let bracket = quarter.evidence().expect("a Weyl bracket is unresolved");
+        assert!(matches!(
+            bracket,
+            EvidenceStatus::Unresolved { lower, upper, .. } if lower <= 0.25 && 0.25 <= upper
+        ));
+        assert!(bracket.certifies_at_most(quarter.upper) && bracket.refutes_at_most(0.0));
         match coordinates
             .finite_check(&shift_blind, array![[0.5, 3.0], [-1.0, -2.0]].view(), 0.0)
             .expect("finite check")
@@ -1244,6 +1672,230 @@ mod tests {
         match LinearStateChart::new(array![0.0, 0.0], array![[1.0, 1.0]]).err() {
             Some(ResponseMetricError::NotOrthonormal { defect }) => assert!(defect >= 1.0),
             other => panic!("directions of norm √2 must be refused, got {other:?}"),
+        }
+    }
+
+    fn categorical(logits: &dyn DifferentiableNativeMap, weight: f64) -> CategoricalMember<'_> {
+        CategoricalMember { logits, weight }
+    }
+
+    /// Logits `z(t) = (t², 0)`. One product rounds once; moving `t` by `δ` moves the
+    /// first logit by at most `(2|t| + δ)δ`.
+    fn squared_logit() -> Closed {
+        Closed {
+            input: 1,
+            output: 2,
+            evaluate: |h, delta| {
+                let t = h[0];
+                (
+                    array![t * t, 0.0],
+                    accumulation_growth(1) * t * t + (2.0 * t.abs() + delta) * delta,
+                )
+            },
+            jacobian: |h| array![[2.0 * h[0]], [0.0]],
+        }
+    }
+
+    /// A response with no categories.
+    fn no_categories() -> Closed {
+        Closed {
+            input: 1,
+            output: 0,
+            evaluate: |h, delta| (Array1::from_elem(0, h[0]), delta),
+            jacobian: |h| Array2::from_elem((0, h.len()), 0.0),
+        }
+    }
+
+    /// A common logit shift costs no divergence. Two logits `(a + b, b)` under the
+    /// shift-blind factor `[½, −½]` give a chart on `e_a`, and states moved along
+    /// `b` shift both logits equally: no divergence is certified at fidelity 0,
+    /// and the check passes at the upper bound it reported. Control: the chart of
+    /// a zero factor has no directions, so the state `(1.5, −1)` is merged with the
+    /// anchor, whose first logit differs by 1, and the check refutes that chart.
+    #[test]
+    fn a_common_logit_shift_costs_no_divergence_2951() {
+        let logits = shifted_logits();
+        let anchor = array![0.5, -1.0];
+        let shift_blind = ResponseMetric::new(vec![declared(&logits, 1.0, array![[0.5, -0.5]])])
+            .expect("metric");
+        let coordinates = shift_blind
+            .local_coordinates(anchor.view())
+            .expect("coordinates");
+        assert_eq!(coordinates.chart.rank(), 1);
+        let family = CategoricalFamily::new(vec![categorical(&logits, 1.0)]).expect("family");
+        let states = array![[0.5, 2.0], [0.5, -3.0]];
+        let upper = match family
+            .divergence_check(&coordinates, states.view(), 0.0)
+            .expect("divergence check")
+        {
+            DivergenceVerdict::Unresolved {
+                tested_states,
+                divergence_upper_bound,
+                ..
+            } => {
+                assert_eq!(tested_states, 2);
+                divergence_upper_bound
+            }
+            other => panic!("a common logit shift costs no divergence, got {other:?}"),
+        };
+        assert!(upper > 0.0 && upper.is_finite(), "found {upper}");
+        let passed = family
+            .divergence_check(&coordinates, states.view(), upper)
+            .expect("divergence check");
+        assert!(
+            matches!(passed, DivergenceVerdict::WithinFidelity { .. }),
+            "the check passes at its own upper bound, got {passed:?}"
+        );
+        assert!(passed.evidence().expect("a bound").certifies_at_most(upper));
+
+        let blind = ResponseMetric::new(vec![declared(&logits, 1.0, array![[0.0, 0.0]])])
+            .expect("metric");
+        let anchored = blind.local_coordinates(anchor.view()).expect("coordinates");
+        assert_eq!(anchored.chart.rank(), 0);
+        let refuted = family
+            .divergence_check(&anchored, array![[1.5, -1.0]].view(), 0.0)
+            .expect("divergence check");
+        assert!(
+            matches!(refuted, DivergenceVerdict::Separated { .. }),
+            "merging a moved first logit must be refuted, got {refuted:?}"
+        );
+        assert!(refuted.evidence().expect("a counterexample").refutes_at_most(0.0));
+    }
+
+    /// The singular-point caveat in KL. `z(t) = (t², 0)` has `J(0) = 0`, so the
+    /// chart at 0 has no directions and the whole line is kernel. Yet
+    /// `KL(softmax(¼, 0) ‖ softmax(0, 0)) ≈ 7.75e-3`, and the check refutes the
+    /// chart. Two analytic bounds bracket the certified divergence with no
+    /// tolerance of the test's own: P15's `osc(δ)²/8 = 1/128` above, and Pinsker's
+    /// `½‖p − q‖₁² = 2(σ(¼) − ½)²` below.
+    #[test]
+    fn the_kernel_at_a_singular_point_is_refuted_in_kl_2951() {
+        let logits = squared_logit();
+        let euclidean = ResponseMetric::new(vec![declared(
+            &logits,
+            1.0,
+            array![[1.0, 0.0], [0.0, 1.0]],
+        )])
+        .expect("metric");
+        let coordinates = euclidean
+            .local_coordinates(array![0.0].view())
+            .expect("coordinates");
+        assert_eq!(
+            (
+                coordinates.rank.states[0].resolved_rank,
+                coordinates.rank.states[0].rank_ceiling
+            ),
+            (0, 1)
+        );
+        let family = CategoricalFamily::new(vec![categorical(&logits, 1.0)]).expect("family");
+        let verdict = family
+            .divergence_check(&coordinates, array![[0.5]].view(), 0.0)
+            .expect("divergence check");
+        match &verdict {
+            DivergenceVerdict::Separated {
+                state,
+                divergence,
+                roundoff,
+                ..
+            } => {
+                assert_eq!(*state, StateRow(0));
+                // P15: KL(softmax z ‖ softmax z′) ≤ osc(z′ − z)²/8, and osc = ¼ exactly.
+                let oscillation_bound = 0.0625 / 8.0;
+                assert!(
+                    divergence - roundoff <= oscillation_bound,
+                    "{divergence} ± {roundoff} above the P15 bound {oscillation_bound}"
+                );
+                // Pinsker: KL ≥ ½‖p − q‖₁² = 2(σ(¼) − ½)². σ(¼) rounds within γ₃
+                // relative, σ(¼)/(σ(¼) − ½) < 10 turns that into at most 30u relative
+                // on the difference, and the square with its products stays below 64u.
+                let probability = 1.0 / (1.0 + (-0.25_f64).exp());
+                let pinsker = 2.0 * (probability - 0.5) * (probability - 0.5);
+                let pinsker_floor = pinsker * (1.0 - accumulation_growth(64));
+                assert!(
+                    divergence + roundoff >= pinsker_floor,
+                    "{divergence} ± {roundoff} below the Pinsker bound {pinsker_floor}"
+                );
+            }
+            other => panic!("t² is not constant along its kernel at 0, got {other:?}"),
+        }
+        assert!(verdict.evidence().expect("a counterexample").refutes_at_most(0.0));
+    }
+
+    /// The declared categorical family and the check's inputs are validated: an
+    /// empty family, a weight that is not a finite positive mass, members on
+    /// different state spaces, a response with no categories, a chart on another
+    /// state space, and an invalid declared fidelity are refused. Control: the valid
+    /// family and chart of the other tests are accepted.
+    #[test]
+    fn categorical_family_refusals_2951() {
+        let squared = squared_logit();
+        let pair = shifted_logits();
+        let empty = no_categories();
+        assert!(matches!(
+            CategoricalFamily::new(Vec::new()).err(),
+            Some(ResponseMetricError::EmptyFamily)
+        ));
+        for weight in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            match CategoricalFamily::new(vec![categorical(&squared, weight)]).err() {
+                Some(ResponseMetricError::InvalidWeight {
+                    member,
+                    weight: found,
+                }) => {
+                    assert_eq!(member, 0);
+                    assert!(found.to_bits() == weight.to_bits());
+                }
+                other => panic!("weight {weight} must be refused, got {other:?}"),
+            }
+        }
+        match CategoricalFamily::new(vec![categorical(&squared, 1.0), categorical(&pair, 1.0)]).err()
+        {
+            Some(ResponseMetricError::StateDimension {
+                member,
+                expected,
+                found,
+            }) => assert_eq!((member, expected, found), (1, 1, 2)),
+            other => panic!("members on different state spaces must be refused, got {other:?}"),
+        }
+        match CategoricalFamily::new(vec![categorical(&empty, 1.0)]).err() {
+            Some(ResponseMetricError::EmptyCategories { member }) => assert_eq!(member, 0),
+            other => panic!("a response with no categories must be refused, got {other:?}"),
+        }
+
+        let euclidean = ResponseMetric::new(vec![declared(
+            &squared,
+            1.0,
+            array![[1.0, 0.0], [0.0, 1.0]],
+        )])
+        .expect("metric");
+        let coordinates = euclidean
+            .local_coordinates(array![0.0].view())
+            .expect("coordinates");
+        let family = CategoricalFamily::new(vec![categorical(&squared, 1.0)]).expect("family");
+        assert_eq!(family.input_dimension(), 1);
+        for fidelity in [-1.0, f64::NAN] {
+            match family
+                .divergence_check(&coordinates, array![[0.5]].view(), fidelity)
+                .err()
+            {
+                Some(ResponseMetricError::State(StateError::InvalidFidelity { value })) => {
+                    assert!(value.to_bits() == fidelity.to_bits())
+                }
+                other => panic!("fidelity {fidelity} must be refused, got {other:?}"),
+            }
+        }
+        let planar = ResponseMetric::new(vec![declared(&pair, 1.0, array![[0.5, -0.5]])])
+            .expect("metric");
+        let planar_coordinates = planar
+            .local_coordinates(array![0.0, 0.0].view())
+            .expect("coordinates");
+        match family
+            .divergence_check(&planar_coordinates, array![[0.5, 0.5]].view(), 0.0)
+            .err()
+        {
+            Some(ResponseMetricError::State(StateError::DimensionMismatch { expected, found, .. })) => {
+                assert_eq!((expected, found), (2, 1))
+            }
+            other => panic!("a chart on another state space must be refused, got {other:?}"),
         }
     }
 }
