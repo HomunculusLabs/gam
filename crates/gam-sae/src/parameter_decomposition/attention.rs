@@ -41,10 +41,17 @@
 //!
 //! # Validity domain
 //!
+//! The source's projection biases are executed unmasked. `q_t = U^Q (m^Q ⊙ R^Q x_t) + b_Q`
+//! equals edited-tensor execution with `W_Q(m)` and the source `b_Q`, and a
+//! bias-free source carries zero biases. The score then gains the bias terms
+//! `b_Qᵀ R_Δ k`, `qᵀ R_Δ b_K` and `b_Qᵀ R_Δ b_K`, while [`ComponentAttention::kernel`]
+//! covers the component coordinates only. Masking bias reads through components
+//! removes part of a bias; that is a different experiment, and this program does
+//! not execute it.
+//!
 //! The kernel identity needs the projection to feed the rotary embedding
 //! directly. A per-head norm between them (Qwen3's `q_norm`/`k_norm`) is a
-//! native nonlinearity on the summed query, and biases on the projections are
-//! components this program does not carry; neither is represented here.
+//! native nonlinearity on the summed query and is not represented here.
 //!
 //! # All-on and roundoff
 //!
@@ -234,16 +241,24 @@ pub fn joint_softmax_with_radius(
     Ok((weights, radius))
 }
 
+/// A source projection `W x + b`, as the source module stores it. A bias-free
+/// source carries a zero bias, and adding `0.0` is exact.
+#[derive(Clone, Debug)]
+pub struct AffineProjection {
+    pub weight: Array2<f64>,
+    pub bias: Array1<f64>,
+}
+
 /// The source's causal self-attention block on its original tensors.
 #[derive(Clone, Debug)]
 pub struct NativeAttention {
     geometry: AttentionGeometry,
     rotary: RotaryEmbedding,
     score_scale: f64,
-    query: Array2<f64>,
-    key: Array2<f64>,
-    value: Array2<f64>,
-    output: Array2<f64>,
+    query: AffineProjection,
+    key: AffineProjection,
+    value: AffineProjection,
+    output: AffineProjection,
 }
 
 fn expect_shape(
@@ -283,12 +298,50 @@ pub struct AttentionExecution {
     pub output_radius: Array2<f64>,
 }
 
-/// Per-token head-space vectors: the computed values, the absolute sums of their
-/// monomials, and the first-order effect of the trigonometric input error.
-struct HeadVectors {
+/// Already-projected rows, `tokens × width`, with a per-entry forward-error
+/// radius against their exact values.
+#[derive(Clone, Copy, Debug)]
+pub struct ProjectedRows<'a> {
+    pub values: ArrayView2<'a, f64>,
+    pub radius: ArrayView2<'a, f64>,
+}
+
+/// The attention block before the output projection, each quantity with its
+/// forward-error radius.
+#[derive(Clone, Debug)]
+pub struct ProjectedAttention {
+    /// `heads × tokens × tokens` scores; `s > t` is causally masked to `−∞`.
+    pub scores: Array3<f64>,
+    pub score_radius: Array3<f64>,
+    pub weights: Array3<f64>,
+    pub weight_radius: Array3<f64>,
+    /// `tokens × n_heads·head_dim`: each head's weighted value read, before the
+    /// output projection.
+    pub mixed: Array2<f64>,
+    pub mixed_radius: Array2<f64>,
+}
+
+/// Per-token head-space rows with a per-entry forward-error radius.
+struct HeadRows {
     value: Array2<f64>,
-    abs: Array2<f64>,
-    trig: Array2<f64>,
+    radius: Array2<f64>,
+}
+
+/// `W x_t + b` for every token. The `model_dim`-term inner product and the bias
+/// addition give the radius `γ_{d+1}` times the absolute sum of the terms.
+fn project_affine(projection: &AffineProjection, x: ArrayView2<f64>) -> (Array2<f64>, Array2<f64>) {
+    let growth = accumulation_growth(x.ncols() + 1);
+    let mut value = Array2::zeros((x.nrows(), projection.weight.nrows()));
+    let mut radius = Array2::zeros((x.nrows(), projection.weight.nrows()));
+    for (t, token) in x.outer_iter().enumerate() {
+        for (row, w) in projection.weight.outer_iter().enumerate() {
+            let (inner, abs) = inner_with_abs(w, token);
+            let bias = projection.bias[row];
+            value[[t, row]] = inner + bias;
+            radius[[t, row]] = growth * (abs + bias.abs());
+        }
+    }
+    (value, radius)
 }
 
 /// `W x_t` for every token, with the absolute sum of each inner product's terms.
@@ -308,10 +361,10 @@ impl NativeAttention {
         geometry: AttentionGeometry,
         rotary: RotaryEmbedding,
         score_scale: f64,
-        query: Array2<f64>,
-        key: Array2<f64>,
-        value: Array2<f64>,
-        output: Array2<f64>,
+        query: AffineProjection,
+        key: AffineProjection,
+        value: AffineProjection,
+        output: AffineProjection,
     ) -> Result<Self, AttentionProgramError> {
         if geometry.n_kv_heads == 0 || geometry.n_heads % geometry.n_kv_heads != 0 {
             return Err(AttentionProgramError::KeyValueHeadsDoNotDivide {
@@ -330,10 +383,15 @@ impl NativeAttention {
             geometry.query_dim(),
             geometry.key_value_dim(),
         );
-        expect_shape("query", query.dim(), (query_dim, model))?;
-        expect_shape("key", key.dim(), (kv_dim, model))?;
-        expect_shape("value", value.dim(), (kv_dim, model))?;
-        expect_shape("output", output.dim(), (model, query_dim))?;
+        for (weight_name, bias_name, projection, rows, cols) in [
+            ("query weight", "query bias", &query, query_dim, model),
+            ("key weight", "key bias", &key, kv_dim, model),
+            ("value weight", "value bias", &value, kv_dim, model),
+            ("output weight", "output bias", &output, model, query_dim),
+        ] {
+            expect_shape(weight_name, projection.weight.dim(), (rows, cols))?;
+            expect_shape(bias_name, (projection.bias.len(), 1), (rows, 1))?;
+        }
         Ok(Self {
             geometry,
             rotary,
@@ -345,12 +403,7 @@ impl NativeAttention {
         })
     }
 
-    fn check_input(&self, x: ArrayView2<f64>, positions: &[i64]) -> Result<(), AttentionProgramError> {
-        expect_shape(
-            "input",
-            x.dim(),
-            (positions.len(), self.geometry.model_dim),
-        )?;
+    fn check_positions(&self, positions: &[i64]) -> Result<(), AttentionProgramError> {
         match positions
             .iter()
             .find(|p| p.unsigned_abs() > EXACT_POSITION_LIMIT as u64)
@@ -360,83 +413,133 @@ impl NativeAttention {
         }
     }
 
-    /// The source block on its original tensors: rotate queries and keys at their
-    /// absolute positions, score, mask causally, softmax jointly, read the values
-    /// and project the output.
+    fn check_input(&self, x: ArrayView2<f64>, positions: &[i64]) -> Result<(), AttentionProgramError> {
+        expect_shape(
+            "input",
+            x.dim(),
+            (positions.len(), self.geometry.model_dim),
+        )?;
+        self.check_positions(positions)
+    }
+
+    /// The source block on its original tensors: project queries, keys and
+    /// values, attend, and project the output.
     pub fn execute(
         &self,
         x: ArrayView2<f64>,
         positions: &[i64],
     ) -> Result<AttentionExecution, AttentionProgramError> {
         self.check_input(x, positions)?;
-        let queries = self.rotate(project(self.query.view(), x), positions, self.geometry.n_heads);
-        let keys = self.rotate(project(self.key.view(), x), positions, self.geometry.n_kv_heads);
-        // One side's rounded operations: the `model_dim`-term projection, then
-        // `α·cos`, the product with the coordinate and the difference. The score
-        // multiplies the two sides (1), sums `head_dim` products and scales by σ (1).
-        let depth = 2 * (self.geometry.model_dim + 3) + self.geometry.head_dim + 1;
-        let growth = accumulation_growth(depth);
-        let (heads, tokens, hd) = (self.geometry.n_heads, x.nrows(), self.geometry.head_dim);
+        let (queries, query_radius) = project_affine(&self.query, x);
+        let (keys, key_radius) = project_affine(&self.key, x);
+        let (values, value_radius) = project_affine(&self.value, x);
+        let projected = self.attend_projected(
+            ProjectedRows {
+                values: queries.view(),
+                radius: query_radius.view(),
+            },
+            ProjectedRows {
+                values: keys.view(),
+                radius: key_radius.view(),
+            },
+            ProjectedRows {
+                values: values.view(),
+                radius: value_radius.view(),
+            },
+            positions,
+        )?;
+        Ok(self.project_output(projected))
+    }
+
+    /// The source's attention on already-projected rows: rotate queries and keys
+    /// at their absolute positions, score, mask causally, softmax jointly and read
+    /// the values. Queries are `tokens × n_heads·head_dim`; keys and values are
+    /// `tokens × n_kv_heads·head_dim`. Each input radius enters to first order.
+    pub fn attend_projected(
+        &self,
+        queries: ProjectedRows<'_>,
+        keys: ProjectedRows<'_>,
+        values: ProjectedRows<'_>,
+        positions: &[i64],
+    ) -> Result<ProjectedAttention, AttentionProgramError> {
+        self.check_positions(positions)?;
+        let g = self.geometry;
+        let (heads, tokens, hd) = (g.n_heads, positions.len(), g.head_dim);
+        // Dimensions only: an array of `&ProjectedRows` would tie the three
+        // arguments' lifetimes together, and `ArrayView` is invariant in its lifetime.
+        for (name, values_dim, radius_dim, width) in [
+            ("query rows", queries.values.dim(), queries.radius.dim(), g.query_dim()),
+            ("key rows", keys.values.dim(), keys.radius.dim(), g.key_value_dim()),
+            ("value rows", values.values.dim(), values.radius.dim(), g.key_value_dim()),
+        ] {
+            expect_shape(name, values_dim, (tokens, width))?;
+            expect_shape(name, radius_dim, (tokens, width))?;
+        }
+        let queries = self.rotate(queries, positions, heads);
+        let keys = self.rotate(keys, positions, g.n_kv_heads);
+        // The `head_dim` products and their additions, then σ.
+        let growth = accumulation_growth(hd + 1);
         let mut scores = Array3::from_elem((heads, tokens, tokens), f64::NEG_INFINITY);
         let mut radius = Array3::zeros((heads, tokens, tokens));
         for head in 0..heads {
-            let (qo, ko) = (head * hd, self.geometry.key_value_head(head) * hd);
+            let (qo, ko) = (head * hd, g.key_value_head(head) * hd);
             for t in 0..tokens {
                 for s in 0..=t {
-                    let (mut value, mut abs, mut trig) = (0.0, 0.0, 0.0);
+                    let (mut value, mut abs, mut propagated) = (0.0, 0.0, 0.0);
                     for c in 0..hd {
                         let (q, k) = ((t, qo + c), (s, ko + c));
                         value += queries.value[q] * keys.value[k];
-                        abs += queries.abs[q] * keys.abs[k];
-                        trig += queries.trig[q] * keys.abs[k] + queries.abs[q] * keys.trig[k];
+                        abs += (queries.value[q] * keys.value[k]).abs();
+                        propagated +=
+                            queries.radius[q] * keys.value[k].abs() + queries.value[q].abs() * keys.radius[k];
                     }
                     scores[[head, t, s]] = self.score_scale * value;
-                    radius[[head, t, s]] = self.score_scale.abs() * (growth * abs + trig);
+                    radius[[head, t, s]] = self.score_scale.abs() * (propagated + growth * abs);
                 }
             }
         }
-        self.attend(ScoredHeads { scores, radius }, x)
+        self.mix(ScoredHeads { scores, radius }, values)
     }
 
-    /// The source's rotation of every head of `projected` at each token's absolute
-    /// position.
-    fn rotate(
-        &self,
-        (mut value, mut abs): (Array2<f64>, Array2<f64>),
-        positions: &[i64],
-        heads: usize,
-    ) -> HeadVectors {
+    /// The source's rotation of every head of `rows` at each token's absolute
+    /// position. The radius carries the rows' own radius, the trigonometric input
+    /// error and the rotation's rounding (`α·cos`, the product and the in-plane sum).
+    fn rotate(&self, rows: ProjectedRows<'_>, positions: &[i64], heads: usize) -> HeadRows {
         let alpha = self.rotary.attention_scaling;
-        let mut trig = Array2::zeros(value.dim());
+        let growth = accumulation_growth(3);
+        let mut value = rows.values.to_owned();
+        let mut radius = rows.radius.to_owned();
         for (t, &position) in positions.iter().enumerate() {
             for (plane, &frequency) in self.rotary.inverse_frequencies.iter().enumerate() {
                 let (cos, sin, eta) = plane_trig(position as f64, frequency);
                 let (cos, sin) = (alpha * cos, alpha * sin);
                 let (a, b) = self.rotary.plane(plane);
                 for head in 0..heads {
-                    let (a, b) = ((t, head * self.geometry.head_dim + a), (t, head * self.geometry.head_dim + b));
-                    let (xa, xb) = (value[a], value[b]);
-                    let (abs_a, abs_b) = (abs[a], abs[b]);
+                    let offset = head * self.geometry.head_dim;
+                    let (a, b) = ((t, offset + a), (t, offset + b));
+                    let (xa, xb, ra, rb) = (value[a], value[b], radius[a], radius[b]);
                     value[a] = xa * cos - xb * sin;
                     value[b] = xb * cos + xa * sin;
-                    abs[a] = abs_a * cos.abs() + abs_b * sin.abs();
-                    abs[b] = abs_b * cos.abs() + abs_a * sin.abs();
-                    let perturbation = alpha.abs() * eta * (abs_a + abs_b);
-                    trig[a] = perturbation;
-                    trig[b] = perturbation;
+                    let trig = alpha.abs() * eta * (xa.abs() + xb.abs());
+                    radius[a] = ra * cos.abs()
+                        + rb * sin.abs()
+                        + trig
+                        + growth * (xa.abs() * cos.abs() + xb.abs() * sin.abs());
+                    radius[b] = rb * cos.abs()
+                        + ra * sin.abs()
+                        + trig
+                        + growth * (xb.abs() * cos.abs() + xa.abs() * sin.abs());
                 }
             }
         }
-        HeadVectors { value, abs, trig }
+        HeadRows { value, radius }
     }
 
-    /// Causal mask, joint softmax per query row, the value read and the output
-    /// projection, propagating the score radius.
-    fn attend(&self, scored: ScoredHeads, x: ArrayView2<f64>) -> Result<AttentionExecution, AttentionProgramError> {
+    /// Causal mask, joint softmax per query row and the value read, propagating
+    /// the score and value radii.
+    fn mix(&self, scored: ScoredHeads, values: ProjectedRows<'_>) -> Result<ProjectedAttention, AttentionProgramError> {
         let g = self.geometry;
-        let (tokens, hd) = (x.nrows(), g.head_dim);
-        let (values, value_abs) = project(self.value.view(), x);
-        let value_growth = accumulation_growth(g.model_dim);
+        let (tokens, hd) = (values.values.nrows(), g.head_dim);
         let mut weights = Array3::zeros((g.n_heads, tokens, tokens));
         let mut weight_radius = Array3::zeros((g.n_heads, tokens, tokens));
         let mut mixed = Array2::zeros((tokens, g.query_dim()));
@@ -456,40 +559,55 @@ impl NativeAttention {
                 for c in 0..hd {
                     let (mut value, mut abs, mut propagated) = (0.0, 0.0, 0.0);
                     for s in 0..=t {
-                        let v = values[[s, vo + c]];
+                        let v = values.values[[s, vo + c]];
                         value += row[s] * v;
                         abs += (row[s] * v).abs();
-                        propagated +=
-                            row_radius[s] * v.abs() + row[s] * value_growth * value_abs[[s, vo + c]];
+                        propagated += row_radius[s] * v.abs() + row[s] * values.radius[[s, vo + c]];
                     }
                     mixed[[t, qo + c]] = value;
                     mixed_radius[[t, qo + c]] = propagated + mix_growth * abs;
                 }
             }
         }
-        let output_growth = accumulation_growth(g.query_dim());
-        let mut output = Array2::zeros((tokens, g.model_dim));
-        let mut output_radius = Array2::zeros((tokens, g.model_dim));
-        for t in 0..tokens {
-            for (d, w) in self.output.outer_iter().enumerate() {
-                let (value, abs) = inner_with_abs(w, mixed.row(t));
-                let propagated: f64 = w
-                    .iter()
-                    .zip(mixed_radius.row(t).iter())
-                    .map(|(o, r)| o.abs() * r)
-                    .sum();
-                output[[t, d]] = value;
-                output_radius[[t, d]] = propagated + output_growth * abs;
-            }
-        }
-        Ok(AttentionExecution {
+        Ok(ProjectedAttention {
             scores: scored.scores,
             score_radius: scored.radius,
             weights,
             weight_radius,
+            mixed,
+            mixed_radius,
+        })
+    }
+
+    /// The source's output projection `W_O h_t + b_O` of the head-mixed rows.
+    fn project_output(&self, projected: ProjectedAttention) -> AttentionExecution {
+        let g = self.geometry;
+        let tokens = projected.mixed.nrows();
+        // The `n_heads·head_dim`-term inner product and the bias addition.
+        let growth = accumulation_growth(g.query_dim() + 1);
+        let mut output = Array2::zeros((tokens, g.model_dim));
+        let mut output_radius = Array2::zeros((tokens, g.model_dim));
+        for t in 0..tokens {
+            for (d, w) in self.output.weight.outer_iter().enumerate() {
+                let (inner, abs) = inner_with_abs(w, projected.mixed.row(t));
+                let bias = self.output.bias[d];
+                let propagated: f64 = w
+                    .iter()
+                    .zip(projected.mixed_radius.row(t).iter())
+                    .map(|(o, r)| o.abs() * r)
+                    .sum();
+                output[[t, d]] = inner + bias;
+                output_radius[[t, d]] = propagated + growth * (abs + bias.abs());
+            }
+        }
+        AttentionExecution {
+            scores: projected.scores,
+            score_radius: projected.score_radius,
+            weights: projected.weights,
+            weight_radius: projected.weight_radius,
             output,
             output_radius,
-        })
+        }
     }
 }
 
@@ -542,20 +660,25 @@ pub struct ComponentAttention {
     key: ComponentProjection,
 }
 
-/// Masked component coordinates contracted into head space. The absolute sums
-/// bound every monomial `|U_ci| |m_i| |R_ij x_j|`.
-fn masked_head_vectors(
+/// Masked component coordinates contracted into head space, plus the source
+/// bias, unmasked. The radius is `γ_k` times the absolute sum of the monomials
+/// `|U_ci| |m_i| |R_ij x_j|` and `|b_c|`, where `k` counts the readin inner
+/// product, the mask product, the contraction and the bias addition.
+fn masked_head_rows(
     projection: &ComponentProjection,
+    bias: &Array1<f64>,
     mask: ArrayView1<f64>,
     x: ArrayView2<f64>,
-) -> HeadVectors {
+) -> HeadRows {
     let (coordinates, coordinate_abs) = project(projection.readins.view(), x);
     let masked = &coordinates * &mask;
     let masked_abs = &coordinate_abs * &mask.mapv(f64::abs);
-    let value = project(projection.outputs.view(), masked.view()).0;
-    let abs = project(projection.outputs.mapv(f64::abs).view(), masked_abs.view()).0;
-    let trig = Array2::zeros(value.dim());
-    HeadVectors { value, abs, trig }
+    let contracted = project(projection.outputs.view(), masked.view()).0;
+    let contracted_abs = project(projection.outputs.mapv(f64::abs).view(), masked_abs.view()).0;
+    let growth = accumulation_growth(x.ncols() + 1 + projection.components() + 1);
+    let value = &contracted + bias;
+    let radius = (&contracted_abs + &bias.mapv(f64::abs)) * growth;
+    HeadRows { value, radius }
 }
 
 impl ComponentAttention {
@@ -610,22 +733,16 @@ impl ComponentAttention {
             return self.native.execute(x, positions);
         }
         self.native.check_input(x, positions)?;
-        let queries = masked_head_vectors(&self.query, masks.query.view(), x);
-        let keys = masked_head_vectors(&self.key, masks.key.view(), x);
+        let queries = masked_head_rows(&self.query, &self.native.query.bias, masks.query.view(), x);
+        let keys = masked_head_rows(&self.key, &self.native.key.bias, masks.key.view(), x);
+        let (values, value_radius) = project_affine(&self.native.value, x);
         let g = self.native.geometry;
         let rotary = &self.native.rotary;
         let alpha2 = rotary.attention_scaling * rotary.attention_scaling;
-        // Per side: the `model_dim`-term readin, the mask product and the
-        // component contraction. Per plane: the coordinate product, the in-plane
-        // sum, the `cos`/`sin` product and the plane's sum (4), then at most
-        // `head_dim` plane additions, `α·α` and its product (2), the pass-through
-        // addition (1) and σ (1).
-        let depth = (g.model_dim + 1 + self.query.components())
-            + (g.model_dim + 1 + self.key.components())
-            + 4
-            + g.head_dim
-            + 4;
-        let growth = accumulation_growth(depth);
+        // Per plane: the coordinate product, the in-plane sum, the `cos`/`sin`
+        // product and the plane's sum (4), then at most `head_dim` plane additions,
+        // `α·α` and its product (2), the pass-through addition (1) and σ (1).
+        let growth = accumulation_growth(g.head_dim + 8);
         let (heads, tokens, hd) = (g.n_heads, x.nrows(), g.head_dim);
         let rotated = rotary.rotary_dim();
         let mut trig_by_displacement: BTreeMap<i64, Vec<(f64, f64, f64)>> = BTreeMap::new();
@@ -643,29 +760,45 @@ impl ComponentAttention {
                             .map(|&frequency| plane_trig(displacement as f64, frequency))
                             .collect()
                     });
-                    let (mut planes, mut planes_abs, mut planes_trig) = (0.0, 0.0, 0.0);
+                    let (mut planes, mut planes_abs, mut planes_propagated, mut planes_trig) = (0.0, 0.0, 0.0, 0.0);
                     for (plane, &(cos, sin, eta)) in trig.iter().enumerate() {
                         let (a, b) = rotary.plane(plane);
                         let (qa, qb) = (queries.value[(t, qo + a)], queries.value[(t, qo + b)]);
                         let (ka, kb) = (keys.value[(s, ko + a)], keys.value[(s, ko + b)]);
-                        let (aqa, aqb) = (queries.abs[(t, qo + a)], queries.abs[(t, qo + b)]);
-                        let (aka, akb) = (keys.abs[(s, ko + a)], keys.abs[(s, ko + b)]);
+                        let (rqa, rqb) = (queries.radius[(t, qo + a)], queries.radius[(t, qo + b)]);
+                        let (rka, rkb) = (keys.radius[(s, ko + a)], keys.radius[(s, ko + b)]);
                         planes += cos * (qa * ka + qb * kb) + sin * (qb * ka - qa * kb);
-                        planes_abs += cos.abs() * (aqa * aka + aqb * akb) + sin.abs() * (aqb * aka + aqa * akb);
-                        planes_trig += eta * (aqa + aqb) * (aka + akb);
+                        planes_abs += cos.abs() * ((qa * ka).abs() + (qb * kb).abs())
+                            + sin.abs() * ((qb * ka).abs() + (qa * kb).abs());
+                        let direct = rqa * ka.abs() + qa.abs() * rka + rqb * kb.abs() + qb.abs() * rkb;
+                        let crossed = rqb * ka.abs() + qb.abs() * rka + rqa * kb.abs() + qa.abs() * rkb;
+                        planes_propagated += cos.abs() * direct + sin.abs() * crossed;
+                        planes_trig += eta * (qa.abs() + qb.abs()) * (ka.abs() + kb.abs());
                     }
-                    let (mut pass, mut pass_abs) = (0.0, 0.0);
+                    let (mut pass, mut pass_abs, mut pass_propagated) = (0.0, 0.0, 0.0);
                     for c in rotated..hd {
-                        pass += queries.value[(t, qo + c)] * keys.value[(s, ko + c)];
-                        pass_abs += queries.abs[(t, qo + c)] * keys.abs[(s, ko + c)];
+                        let (q, k) = ((t, qo + c), (s, ko + c));
+                        pass += queries.value[q] * keys.value[k];
+                        pass_abs += (queries.value[q] * keys.value[k]).abs();
+                        pass_propagated +=
+                            queries.radius[q] * keys.value[k].abs() + queries.value[q].abs() * keys.radius[k];
                     }
                     scores[[head, t, s]] = self.native.score_scale * (alpha2 * planes + pass);
                     radius[[head, t, s]] = self.native.score_scale.abs()
-                        * (growth * (alpha2.abs() * planes_abs + pass_abs) + alpha2.abs() * planes_trig);
+                        * (alpha2.abs() * (planes_propagated + planes_trig)
+                            + pass_propagated
+                            + growth * (alpha2.abs() * planes_abs + pass_abs));
                 }
             }
         }
-        self.native.attend(ScoredHeads { scores, radius }, x)
+        let projected = self.native.mix(
+            ScoredHeads { scores, radius },
+            ProjectedRows {
+                values: values.view(),
+                radius: value_radius.view(),
+            },
+        )?;
+        Ok(self.native.project_output(projected))
     }
 
     /// `C_ij(Δ) = σ u^Q_{h,i}ᵀ R_Δ u^K_{g(h),j}`, evaluated plane by plane:
@@ -770,6 +903,10 @@ mod tests {
         output: Array2<f64>,
         x: Array2<f64>,
         positions: Vec<i64>,
+        query_bias: Array1<f64>,
+        key_bias: Array1<f64>,
+        value_bias: Array1<f64>,
+        output_bias: Array1<f64>,
     }
 
     const QUERY_COMPONENTS: usize = 5;
@@ -801,18 +938,38 @@ mod tests {
                 output: dyadic(4, 12, 6, 8.0),
                 x: dyadic(5, 4, 7, 4.0),
                 positions: vec![2, 3, 5, 6, 9],
+                query_bias: Array1::zeros(12),
+                key_bias: Array1::zeros(6),
+                value_bias: Array1::zeros(6),
+                output_bias: Array1::zeros(4),
+            }
+        }
+
+        /// Source projection biases, as on Pythia's `query_key_value` and `dense`.
+        /// They are dyadic, so the edited-tensor route stays exact.
+        fn biased(self) -> Self {
+            Self {
+                query_bias: dyadic(12, 1, 8, 8.0).column(0).to_owned(),
+                key_bias: dyadic(6, 1, 9, 8.0).column(0).to_owned(),
+                value_bias: dyadic(6, 1, 10, 8.0).column(0).to_owned(),
+                output_bias: dyadic(4, 1, 11, 8.0).column(0).to_owned(),
+                ..self
             }
         }
 
         fn native_with(&self, query: Array2<f64>, key: Array2<f64>) -> NativeAttention {
+            let affine = |weight: Array2<f64>, bias: &Array1<f64>| AffineProjection {
+                weight,
+                bias: bias.clone(),
+            };
             NativeAttention::new(
                 self.geometry,
                 self.rotary.clone(),
                 self.score_scale,
-                query,
-                key,
-                self.value.clone(),
-                self.output.clone(),
+                affine(query, &self.query_bias),
+                affine(key, &self.key_bias),
+                affine(self.value.clone(), &self.value_bias),
+                affine(self.output.clone(), &self.output_bias),
             )
             .expect("fixture tensors match the geometry")
         }
@@ -875,7 +1032,7 @@ mod tests {
     /// derived radii of the two routes; moving one key mask by 1/8 leaves them.
     #[test]
     fn component_program_equals_edited_tensor_execution_within_derived_radii() {
-        let fixture = Fixture::new(RotaryPairing::HalfSplit);
+        let fixture = Fixture::new(RotaryPairing::HalfSplit).biased();
         let program = fixture.program();
         let families = [
             ("continuous", continuous_masks()),
@@ -919,6 +1076,18 @@ mod tests {
                 "{label} masks: a key mask moved by 1/8 must leave the radii, got {separation}"
             );
         }
+        let biased = program
+            .execute(&continuous_masks(), fixture.x.view(), &fixture.positions)
+            .expect("biased component execution");
+        let unbiased = Fixture::new(RotaryPairing::HalfSplit)
+            .edited(&continuous_masks())
+            .execute(fixture.x.view(), &fixture.positions)
+            .expect("bias-free execution");
+        let bias_separation = worst_ratio(&biased, &unbiased);
+        assert!(
+            bias_separation > 1.0,
+            "dropping the source biases must leave the radii, got {bias_separation}"
+        );
     }
 
     /// A1: all-on executes the original tensors bit for bit; a query entry moved by
@@ -1020,6 +1189,10 @@ mod tests {
         let (frequency, score_scale, attention_scaling) = (0.75_f64, 0.5, 1.25);
         let x = array![[0.0, 1.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]];
         let positions = [0_i64, 1];
+        let identity = || AffineProjection {
+            weight: Array2::eye(4),
+            bias: Array1::zeros(4),
+        };
         let score = |pairing: RotaryPairing| -> (f64, f64) {
             let executed = NativeAttention::new(
                 geometry,
@@ -1029,10 +1202,10 @@ mod tests {
                     attention_scaling,
                 },
                 score_scale,
-                Array2::eye(4),
-                Array2::eye(4),
-                Array2::eye(4),
-                Array2::eye(4),
+                identity(),
+                identity(),
+                identity(),
+                identity(),
             )
             .expect("identity block")
             .execute(x.view(), &positions)
