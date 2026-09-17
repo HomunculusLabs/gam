@@ -2286,13 +2286,33 @@ fn load_parquet_with_schema(
     unseen_policy: UnseenCategoryPolicy,
     requested_columns: &[String],
 ) -> Result<EncodedDataset, DataError> {
-    // Load with inference first, then validate/re-encode against provided schema.
     // No formula roles are threaded here: the saved schema already records each
-    // column's categorical kind, and the re-encode pass below pins kinds to it.
+    // column's categorical kind, and the projection pins kinds to it.
     let inferred = load_parquet_inferred(path, requested_columns, &HashSet::new())?;
+    project_encoded_to_schema(inferred, schema, &unseen_policy)
+}
+
+/// Re-encode an already-typed table against a frozen training schema.
+///
+/// This is the one projection for tables that arrive typed: Parquet files here,
+/// and Arrow and NumPy tables through gam-pyffi. The caller selects the columns
+/// the model consumes, so every cell here is one the model will read. A column
+/// the schema names takes the schema's kind. A string column cannot fill a
+/// numeric schema column, and a numeric column cannot fill a categorical one. A
+/// numeric column refuses a missing or non-finite cell, naming the row and the
+/// column, as the delimited reader refuses a literal `nan` or `inf`. A binary
+/// column also refuses a value that is not [`is_binary_value`]. A categorical
+/// column is re-coded by level label onto the training levels; a label the
+/// training data never had, or a missing label, takes the policy's unseen code
+/// or is refused, because a missing label is not a level. A column the schema
+/// does not name keeps its inferred kind.
+pub fn project_encoded_to_schema(
+    inferred: EncodedDataset,
+    schema: &DataSchema,
+    unseen_policy: &UnseenCategoryPolicy,
+) -> Result<EncodedDataset, DataError> {
     let p = inferred.headers.len();
     let n = inferred.values.nrows();
-
     let schema_byname: HashMap<&str, &SchemaColumn> = schema
         .columns
         .iter()
@@ -2305,104 +2325,96 @@ fn load_parquet_with_schema(
 
     for j in 0..p {
         let name = &inferred.headers[j];
-        if let Some(sc) = schema_byname.get(name.as_str()) {
-            column_kinds.push(sc.kind);
-            schema_cols.push((*sc).clone());
-
-            match sc.kind {
-                ColumnKindTag::Continuous => {
-                    if matches!(inferred.column_kinds[j], ColumnKindTag::Categorical) {
-                        return Err(DataError::SchemaMismatch {
-                            reason: format!(
-                                "column '{}' is continuous in schema but parquet column is string/categorical",
-                                name
-                            ),
-                        });
-                    }
-                }
-                ColumnKindTag::Binary => {
-                    if matches!(inferred.column_kinds[j], ColumnKindTag::Categorical) {
-                        return Err(DataError::SchemaMismatch {
-                            reason: format!(
-                                "column '{}' is binary in schema but parquet column is string/categorical",
-                                name
-                            ),
-                        });
-                    }
-                    // NaN marks a missing cell (#2495), not a 0/1 violation.
-                    if let Some(row) = values.column(j).iter().position(|value| {
-                        value.is_finite()
-                            && *value != 0.0
-                            && *value != 1.0
-                    }) {
-                        return Err(DataError::SchemaMismatch {
-                            reason: format!(
-                                "column '{}' is binary in schema but row {} has value {}; expected 0 or 1",
-                                name,
-                                row + 1,
-                                values[[row, j]]
-                            ),
-                        });
-                    }
-                }
-                ColumnKindTag::Categorical => {
-                    if !matches!(inferred.column_kinds[j], ColumnKindTag::Categorical) {
-                        return Err(DataError::SchemaMismatch {
-                            reason: format!(
-                                "column '{}' is categorical in schema but parquet column is numeric",
-                                name
-                            ),
-                        });
-                    }
-                    let inferred_col = &inferred.schema.columns[j];
-                    // Build mapping: inferred_level_name -> schema_level_index.
-                    let schema_level_map: HashMap<&str, f64> = sc
-                        .levels
-                        .iter()
-                        .enumerate()
-                        .map(|(idx, v)| (v.as_str(), idx as f64))
-                        .collect();
-                    let inferred_to_schema: Vec<f64> = inferred_col
-                        .levels
-                        .iter()
-                        .map(|lv| {
-                            schema_level_map
-                                .get(lv.as_str())
-                                .copied()
-                                .or_else(|| unseen_policy.unseen_code_for(name, sc.levels.len()))
-                                .ok_or_else(|| DataError::SchemaMismatch {
-                                    reason: format!(
-                                        "unseen level '{}' in categorical column '{}'",
-                                        lv, name
-                                    ),
-                                })
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    for i in 0..n {
-                        let old_code = values[[i, j]] as usize;
-                        if old_code >= inferred_to_schema.len() {
-                            let Some(unseen_code) =
-                                unseen_policy.unseen_code_for(name, sc.levels.len())
-                            else {
-                                return Err(DataError::SchemaMismatch {
-                                    reason: format!(
-                                        "unseen categorical code at row {}, column '{}'",
-                                        i + 1,
-                                        name
-                                    ),
-                                });
-                            };
-                            values[[i, j]] = unseen_code;
-                            continue;
+        let inferred_kind = inferred.column_kinds[j];
+        let Some(sc) = schema_byname.get(name.as_str()) else {
+            column_kinds.push(inferred_kind);
+            schema_cols.push(inferred.schema.columns[j].clone());
+            continue;
+        };
+        column_kinds.push(sc.kind);
+        schema_cols.push((*sc).clone());
+        match (sc.kind, inferred_kind) {
+            (ColumnKindTag::Continuous | ColumnKindTag::Binary, ColumnKindTag::Categorical) => {
+                return Err(DataError::SchemaMismatch {
+                    reason: format!(
+                        "column '{name}' is {} in schema but the data column is categorical",
+                        if sc.kind == ColumnKindTag::Binary {
+                            "binary"
+                        } else {
+                            "continuous"
                         }
-                        values[[i, j]] = inferred_to_schema[old_code];
-                    }
+                    ),
+                });
+            }
+            (ColumnKindTag::Categorical, ColumnKindTag::Continuous | ColumnKindTag::Binary) => {
+                return Err(DataError::SchemaMismatch {
+                    reason: format!(
+                        "column '{name}' is categorical in schema but the data column is numeric"
+                    ),
+                });
+            }
+            (ColumnKindTag::Continuous | ColumnKindTag::Binary, _) => {
+                if let Some(row) = values.column(j).iter().position(|value| !value.is_finite()) {
+                    return Err(DataError::InvalidValue {
+                        reason: format!("non-finite value at row {}, column '{name}'", row + 1),
+                    });
+                }
+                if sc.kind == ColumnKindTag::Binary
+                    && let Some(row) = values
+                        .column(j)
+                        .iter()
+                        .position(|value| !is_binary_value(*value))
+                {
+                    return Err(DataError::SchemaMismatch {
+                        reason: format!(
+                            "column '{name}' is binary in schema but row {} has value {}; expected 0 or 1",
+                            row + 1,
+                            values[[row, j]]
+                        ),
+                    });
                 }
             }
-        } else {
-            // Column not in schema — keep inferred.
-            column_kinds.push(inferred.column_kinds[j]);
-            schema_cols.push(inferred.schema.columns[j].clone());
+            (ColumnKindTag::Categorical, ColumnKindTag::Categorical) => {
+                let inferred_levels = &inferred.schema.columns[j].levels;
+                let schema_level_map: HashMap<&str, f64> = sc
+                    .levels
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, v)| (v.as_str(), idx as f64))
+                    .collect();
+                for i in 0..n {
+                    let code = values[[i, j]];
+                    let unseen = || unseen_policy.unseen_code_for(name, sc.levels.len());
+                    values[[i, j]] = if code.is_nan() {
+                        unseen().ok_or_else(|| DataError::SchemaMismatch {
+                            reason: format!(
+                                "missing value at row {}, categorical column '{name}'",
+                                i + 1
+                            ),
+                        })?
+                    } else if code < 0.0 || code.fract() != 0.0 || code >= inferred_levels.len() as f64
+                    {
+                        return Err(DataError::EncodingFailure {
+                            reason: format!(
+                                "categorical column '{name}' has invalid encoded value {code} at row {}",
+                                i + 1
+                            ),
+                        });
+                    } else {
+                        let label = inferred_levels[code as usize].as_str();
+                        schema_level_map
+                            .get(label)
+                            .copied()
+                            .or_else(unseen)
+                            .ok_or_else(|| DataError::SchemaMismatch {
+                                reason: format!(
+                                    "unseen level '{label}' in categorical column '{name}' at row {}",
+                                    i + 1
+                                ),
+                            })?
+                    };
+                }
+            }
         }
     }
 
@@ -3377,6 +3389,147 @@ mod tests {
         assert_eq!(
             schema_loaded.values.column(0).to_vec(),
             vec![5.0, 7.0, 5.0, 7.0, 5.0]
+        );
+    }
+
+    #[test]
+    fn a_missing_categorical_parquet_cell_takes_the_unseen_code_or_is_refused() {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+
+        // Row 2's label is null. The inferred Parquet encoder stores it as NaN,
+        // and the schema pass used to cast that NaN to code 0, so the row
+        // silently took a training level instead of being refused.
+        let arrow_schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, true),
+            Field::new("x", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            arrow_schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec![Some("b"), None, Some("a")])),
+                Arc::new(Float64Array::from(vec![0.5, 1.5, 2.5])),
+            ],
+        )
+        .expect("record batch with a null categorical cell");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("null_label.parquet");
+        {
+            let file = std::fs::File::create(&path).expect("create parquet");
+            let mut writer =
+                ArrowWriter::try_new(file, arrow_schema, None).expect("arrow parquet writer");
+            writer.write(&batch).expect("write batch");
+            writer.close().expect("close writer");
+        }
+        let schema = DataSchema {
+            columns: vec![
+                SchemaColumn {
+                    name: "g".to_string(),
+                    kind: ColumnKindTag::Categorical,
+                    levels: vec!["a".to_string(), "b".to_string()],
+                },
+                SchemaColumn {
+                    name: "x".to_string(),
+                    kind: ColumnKindTag::Continuous,
+                    levels: Vec::new(),
+                },
+            ],
+        };
+
+        let err = load_parquet_with_schema(&path, &schema, UnseenCategoryPolicy::Error, &[])
+            .expect_err("a missing label must not take a training level");
+        let message = err.to_string();
+        assert!(message.contains("row 2") && message.contains("'g'"), "{message}");
+
+        let policy =
+            UnseenCategoryPolicy::encode_unknown_for_columns(HashSet::from(["g".to_string()]));
+        let loaded = load_parquet_with_schema(&path, &schema, policy, &[])
+            .expect("the random-effect policy gives the missing label the unknown-level code");
+        assert_eq!(loaded.values.column(0).to_vec(), vec![1.0, 2.0, 0.0]);
+        assert_eq!(loaded.values.column(1).to_vec(), vec![0.5, 1.5, 2.5]);
+    }
+
+    #[test]
+    fn projection_re_codes_labels_and_refuses_what_the_schema_cannot_hold() {
+        let schema = DataSchema {
+            columns: vec![
+                SchemaColumn {
+                    name: "g".to_string(),
+                    kind: ColumnKindTag::Categorical,
+                    levels: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+                },
+                SchemaColumn {
+                    name: "b".to_string(),
+                    kind: ColumnKindTag::Binary,
+                    levels: Vec::new(),
+                },
+            ],
+        };
+        let table = |g_levels: &[&str], g: &[f64], b: &[f64]| EncodedDataset {
+            headers: vec!["g".to_string(), "b".to_string()],
+            values: Array2::from_shape_fn((g.len(), 2), |(i, j)| {
+                if j == 0 { g[i] } else { b[i] }
+            }),
+            schema: DataSchema {
+                columns: vec![
+                    SchemaColumn {
+                        name: "g".to_string(),
+                        kind: ColumnKindTag::Categorical,
+                        levels: g_levels.iter().map(|level| level.to_string()).collect(),
+                    },
+                    SchemaColumn {
+                        name: "b".to_string(),
+                        kind: ColumnKindTag::Binary,
+                        levels: Vec::new(),
+                    },
+                ],
+            },
+            column_kinds: vec![ColumnKindTag::Categorical, ColumnKindTag::Binary],
+        };
+        let strict = UnseenCategoryPolicy::Error;
+
+        let projected = project_encoded_to_schema(
+            table(&["b", "c"], &[0.0, 1.0], &[1.0, 0.0]),
+            &schema,
+            &strict,
+        )
+        .expect("b and c are training levels");
+        assert_eq!(projected.values.column(0).to_vec(), vec![1.0, 2.0]);
+        assert_eq!(projected.values.column(1).to_vec(), vec![1.0, 0.0]);
+
+        let missing = project_encoded_to_schema(
+            table(&["b", "c"], &[0.0, 1.0], &[1.0, f64::NAN]),
+            &schema,
+            &strict,
+        )
+        .expect_err("the model consumes b, so its missing cell is refused");
+        assert!(
+            missing.to_string().contains("non-finite value at row 2, column 'b'"),
+            "{missing}"
+        );
+
+        let unseen =
+            project_encoded_to_schema(table(&["z"], &[0.0, 0.0], &[0.0, 1.0]), &schema, &strict)
+                .expect_err("z is not a training level");
+        assert!(unseen.to_string().contains("unseen level 'z'"), "{unseen}");
+        let near_code = project_encoded_to_schema(
+            table(&["a"], &[0.0, 0.0], &[0.0, 1.0e-13]),
+            &schema,
+            &strict,
+        )
+        .expect_err("1e-13 is not a binary code");
+        assert!(
+            near_code.to_string().contains("expected 0 or 1"),
+            "{near_code}"
+        );
+        let invalid_code =
+            project_encoded_to_schema(table(&["a"], &[0.0, 3.0], &[0.0, 1.0]), &schema, &strict)
+                .expect_err("code 3 names no inferred level");
+        assert!(
+            invalid_code.to_string().contains("invalid encoded value 3"),
+            "{invalid_code}"
         );
     }
 

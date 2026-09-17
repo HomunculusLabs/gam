@@ -970,12 +970,15 @@ fn encoded_table_from_arrow(
     Ok(PyEncodedTable { dataset })
 }
 
-/// Project and re-encode a typed prediction table against a saved model schema.
+/// Project a typed prediction table onto the model's input columns and re-encode
+/// it against the saved training schema.
 ///
-/// Both sides are already numeric/categorical columns, so matching a category
-/// means mapping its source level label to the frozen training-level code. No
-/// cell is rendered to a string and numeric columns are copied exactly once
-/// into the projected dense matrix.
+/// The column set is the model's input contract ([`prediction_consumable_columns`]),
+/// and a required column the table lacks is refused. The cell rules are gam-data's
+/// [`gam::data::project_encoded_to_schema`], the projection `gam predict` applies
+/// to a Parquet file: labels map onto training levels, a random-effect group's
+/// unseen or missing label takes the unknown-level code, and a missing or
+/// non-finite numeric cell is refused naming its column.
 fn dataset_with_model_schema_from_encoded(
     model: &FittedModel,
     source: &EncodedDataset,
@@ -997,116 +1000,35 @@ fn dataset_with_model_schema_from_encoded(
         .filter(|(_, name)| consumable.contains(name.as_str()))
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
-
-    let training_schema = model.require_data_schema()?;
-    let training_by_name = training_schema
-        .columns
-        .iter()
-        .map(|column| (column.name.as_str(), column))
-        .collect::<HashMap<_, _>>();
-    let encode_unknown = model.random_effect_group_columns();
-    let n_rows = source.values.nrows();
-    let mut headers = Vec::with_capacity(keep.len());
-    let mut values = Array2::<f64>::zeros((n_rows, keep.len()));
-    let mut schema_columns = Vec::with_capacity(keep.len());
-    let mut column_kinds = Vec::with_capacity(keep.len());
-
-    for (destination, &source_index) in keep.iter().enumerate() {
-        let name = &source.headers[source_index];
-        if let Some(row) = source
-            .values
-            .column(source_index)
+    let selected = EncodedDataset {
+        headers: keep
             .iter()
-            .position(|value| !value.is_finite())
-        {
-            return Err(format!(
-                "non-finite value at row {}, column '{name}'",
-                row + 1
-            ));
-        }
-        let source_schema = source
-            .schema
-            .columns
-            .get(source_index)
-            .ok_or_else(|| format!("encoded table column '{name}' has no source schema"))?;
-        let target_schema = training_by_name
-            .get(name.as_str())
-            .ok_or_else(|| format!("column '{name}' was not present in the training schema"))?;
-        match (source_schema.kind, target_schema.kind) {
-            (ColumnKindTag::Categorical, ColumnKindTag::Categorical) => {
-                let target_levels = target_schema
-                    .levels
-                    .iter()
-                    .enumerate()
-                    .map(|(index, level)| (level.as_str(), index))
-                    .collect::<HashMap<_, _>>();
-                for row in 0..n_rows {
-                    let raw_code = source.values[[row, source_index]];
-                    let code = raw_code as usize;
-                    if raw_code < 0.0
-                        || raw_code.fract() != 0.0
-                        || code >= source_schema.levels.len()
-                    {
-                        return Err(format!(
-                            "categorical column '{name}' has invalid encoded value {raw_code} at row {}",
-                            row + 1
-                        ));
-                    }
-                    let label = &source_schema.levels[code];
-                    values[[row, destination]] = match target_levels.get(label.as_str()) {
-                        Some(index) => *index as f64,
-                        None if encode_unknown.contains(name) => target_schema.levels.len() as f64,
-                        None => {
-                            return Err(format!(
-                                "unseen level '{}' in categorical column '{}' at row {}",
-                                label,
-                                name,
-                                row + 1
-                            ));
-                        }
-                    };
-                }
-            }
-            (ColumnKindTag::Categorical, _) => {
-                return Err(format!(
-                    "column '{name}' is categorical in prediction data but numeric in the training schema"
-                ));
-            }
-            (_, ColumnKindTag::Categorical) => {
-                return Err(format!(
-                    "column '{name}' is numeric in prediction data but categorical in the training schema"
-                ));
-            }
-            (_, ColumnKindTag::Binary) => {
-                for row in 0..n_rows {
-                    let value = source.values[[row, source_index]];
-                    if !gam::data::is_binary_value(value) {
-                        return Err(format!(
-                            "column '{name}' is binary in schema but row {} has value {value}; expected 0 or 1",
-                            row + 1
-                        ));
-                    }
-                    values[[row, destination]] = value;
-                }
-            }
-            (_, ColumnKindTag::Continuous) => {
-                values
-                    .column_mut(destination)
-                    .assign(&source.values.column(source_index));
-            }
-        }
-        headers.push(name.clone());
-        schema_columns.push((*target_schema).clone());
-        column_kinds.push(target_schema.kind);
-    }
-    Ok(EncodedDataset {
-        headers,
-        values,
+            .map(|&index| source.headers[index].clone())
+            .collect(),
+        values: source.values.select(ndarray::Axis(1), &keep),
         schema: DataSchema {
-            columns: schema_columns,
+            columns: keep
+                .iter()
+                .map(|&index| {
+                    source.schema.columns.get(index).cloned().ok_or_else(|| {
+                        format!(
+                            "encoded table column '{}' has no source schema",
+                            source.headers[index]
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
         },
-        column_kinds,
-    })
+        column_kinds: keep
+            .iter()
+            .map(|&index| source.column_kinds[index])
+            .collect(),
+    };
+    let policy = gam::data::UnseenCategoryPolicy::encode_unknown_for_columns(
+        model.random_effect_group_columns(),
+    );
+    gam::data::project_encoded_to_schema(selected, model.require_data_schema()?, &policy)
+        .map_err(|error| error.to_string())
 }
 
 fn schema_check_encoded(

@@ -3145,54 +3145,17 @@ fn dataset_from_numeric_array(
     })
 }
 
+/// Re-encode a positional prediction matrix against the training schema through
+/// gam-data's [`gam::data::project_encoded_to_schema`], the projection every
+/// typed front door uses.
 fn dataset_from_numeric_array_with_schema(
     headers: Vec<String>,
     values: Array2<f64>,
     schema: &DataSchema,
 ) -> Result<EncodedDataset, String> {
-    ensure_unique_headers(&headers)?;
-    validate_numeric_array_values(&headers, values.view())?;
-    let schema_byname = schema
-        .columns
-        .iter()
-        .map(|column| (column.name.as_str(), column))
-        .collect::<HashMap<_, _>>();
-    let mut schema_cols = Vec::<SchemaColumn>::with_capacity(headers.len());
-    let mut column_kinds = Vec::<ColumnKindTag>::with_capacity(headers.len());
-    for (j, name) in headers.iter().enumerate() {
-        let column = schema_byname.get(name.as_str()).ok_or_else(|| {
-            format!("array column '{name}' was not present in the training schema")
-        })?;
-        match column.kind {
-            ColumnKindTag::Categorical => {
-                return Err(format!(
-                    "array FFI only supports numeric continuous/binary columns; column '{name}' is categorical in the training schema"
-                ));
-            }
-            ColumnKindTag::Binary => {
-                for (row, value) in values.column(j).iter().enumerate() {
-                    if !gam::data::is_binary_value(*value) {
-                        return Err(format!(
-                            "column '{name}' is binary in schema but row {} has value {}; expected 0 or 1",
-                            row + 1,
-                            value
-                        ));
-                    }
-                }
-            }
-            ColumnKindTag::Continuous => {}
-        }
-        column_kinds.push(column.kind);
-        schema_cols.push((*column).clone());
-    }
-    Ok(EncodedDataset {
-        headers,
-        values,
-        schema: DataSchema {
-            columns: schema_cols,
-        },
-        column_kinds,
-    })
+    let inferred = dataset_from_numeric_array(headers, values)?;
+    gam::data::project_encoded_to_schema(inferred, schema, &gam::data::UnseenCategoryPolicy::Error)
+        .map_err(|error| error.to_string())
 }
 
 fn ensure_unique_headers(headers: &[String]) -> Result<(), String> {
