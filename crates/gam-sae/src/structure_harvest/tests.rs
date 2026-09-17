@@ -304,28 +304,81 @@ fn klein_r4_embedding_beats_the_unrestricted_torus_cover() {
     );
 }
 
-/// #2238 — a genuinely two-dimensional primary factor must not be pinned to
-/// the old one-dimensional circle. A full 8x8 planar grid is represented
-/// exactly by the flat 2-D candidate, while phase alone discards radius.
+/// Add a deterministic Gaussian perturbation with standard deviation `scale` to every entry of
+/// `target`, as every birth residual carries observation noise. A candidate design that
+/// reproduces a noiseless image leaves no finite profiled dispersion, so Gaussian REML refuses
+/// it and the race is undecided (`birth_topology_race_d2_is_undecided_on_an_interpolated_target`).
+/// SplitMix64 uniforms feed Box-Muller in row order under the fixed `seed`.
+fn add_observation_noise(target: &mut Array2<f64>, seed: u64, scale: f64) {
+    let mut state = seed;
+    let mut unit = || {
+        let bits = gam_linalg::utils::splitmix64(&mut state);
+        ((bits >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+    };
+    for value in target.iter_mut() {
+        let (u1, u2) = (unit(), unit());
+        *value += scale * (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos();
+    }
+}
+
+/// #2238 claims per-atom dimension discovery at fit entry: a genuinely two-dimensional
+/// primary factor races 1-D against 2-D charts on evidence and resolves to a 2-D chart,
+/// instead of being pinned to the one-dimensional circle. The factor here is a full 8x8
+/// planar grid.
+///
+/// The grid as a 2-column target cannot exercise that claim. Discovery charts the target
+/// by at most four of its principal coordinates, so a 2-column target is an exact affine
+/// image of its own chart. Every candidate with affine columns reproduces it exactly,
+/// noise included, so no candidate has a finite profiled dispersion and the race is
+/// undecided (#2280). The `EuclideanPatch` winner this test used to expect was decided by
+/// dispersions of pure rounding, not by evidence. The 2-column arm pins that refusal.
+///
+/// The claim is exercised in six ambient coordinates, with noise at a twentieth of the
+/// lattice step on every coordinate, so part of every observation lies outside any chart.
+/// That race must decide, and it must decide a 2-D sheet. Which sheet, flat patch or Duchon
+/// sheet, is not part of the claim.
+///
+/// Measured at fad378bbf8 (probe job 1161391), on the six-coordinate grid:
+/// - The circle is offered and loses: raw REML +311.5 against the Duchon sheet's −550.6.
+///   Sphere, torus, Möbius, projective plane and Klein bottle all score positive.
+/// - The Duchon sheet beats the flat patch (−534.3) by 16.3, far above either's rounding
+///   bound (≤ 5.1e-9). That margin belongs to this fixture, not to the claim.
 #[test]
 fn auto_primary_topology_selects_two_dimensional_factor_2238() {
     let side = 8usize;
-    let target = Array2::<f64>::from_shape_fn((side * side, 2), |(row, col)| {
-        let i = row / side;
-        let j = row % side;
-        if col == 0 {
-            i as f64 - 0.5 * (side - 1) as f64
-        } else {
-            j as f64 - 0.5 * (side - 1) as f64
+    let lattice = |row: usize, col: usize| -> f64 {
+        match col {
+            0 => (row / side) as f64 - 0.5 * (side - 1) as f64,
+            1 => (row % side) as f64 - 0.5 * (side - 1) as f64,
+            _ => 0.0,
         }
-    });
-    let labels = vec![0usize; target.nrows()];
-    let choices = discover_primary_atom_topologies(target.view(), &labels, 1, &[2])
-        .expect("the supported planar race must produce a winner");
+    };
+    let labels = vec![0usize; side * side];
 
+    let mut planar = Array2::<f64>::from_shape_fn((side * side, 2), |(row, col)| lattice(row, col));
+    add_observation_noise(&mut planar, 0x2238_0311_u64, 0.05);
+    let Err(refusal) = discover_primary_atom_topologies(planar.view(), &labels, 1, &[2]) else {
+        panic!("a target that is an affine image of its own chart leaves nothing to score, yet the race decided");
+    };
+    assert!(
+        refusal.contains("race undecided") && refusal.contains("interpolates its response"),
+        "the 2-column grid must be refused as an undecided race naming interpolation: {refusal}"
+    );
+
+    let mut target = Array2::<f64>::from_shape_fn((side * side, 6), |(row, col)| lattice(row, col));
+    add_observation_noise(&mut target, 0x2238_0311_u64, 0.05);
+    let choices = discover_primary_atom_topologies(target.view(), &labels, 1, &[2])
+        .expect("the six-coordinate grid leaves variance off every chart, so the race must decide");
     assert_eq!(choices.len(), 1);
-    assert_eq!(choices[0].latent_dim, 2);
-    assert_eq!(choices[0].basis_kind, SaeAtomBasisKind::EuclideanPatch);
+    assert_eq!(choices[0].latent_dim, 2, "a planar factor resolves to a 2-D chart");
+    assert!(
+        matches!(
+            choices[0].basis_kind,
+            SaeAtomBasisKind::EuclideanPatch | SaeAtomBasisKind::Duchon
+        ),
+        "a planar factor resolves to a 2-D sheet, not {:?}",
+        choices[0].basis_kind
+    );
 }
 
 /// #2238/#2239 — a genuinely CURVED 2-D primary factor (a 2-sphere) must be
@@ -2076,21 +2129,7 @@ fn birth_topology_race_d2_includes_and_selects_cylinder() {
     // (`birth_topology_race_d2_is_undecided_on_an_interpolated_target`). A deterministic
     // Gaussian perturbation at a twentieth of the channel scale gives every candidate a finite
     // dispersion, and the cylinder has to win on evidence.
-    let mut state = 0x2280_2027_u64;
-    let mut unit = || {
-        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut mixed = state;
-        mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        mixed ^= mixed >> 31;
-        ((mixed >> 11) as f64 + 0.5) / (1u64 << 53) as f64
-    };
-    for row in 0..n {
-        for column in 0..p {
-            let (u1, u2) = (unit(), unit());
-            cyl_target[[row, column]] += 0.05 * (-2.0 * u1.ln()).sqrt() * (TAU * u2).cos();
-        }
-    }
+    add_observation_noise(&mut cyl_target, 0x2280_2027_u64, 0.05);
     let weights = Array1::<f64>::ones(n);
     let cyl_fit = race_birth_topology(coords.view(), cyl_target.view(), weights.view(), 2)
         .expect("cylinder race runs")
