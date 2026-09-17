@@ -2982,42 +2982,18 @@ fn value_lane_prices_at_shared_fixed_point_2228() {
     // arm refuses at EVERY budget with its ‖g‖ pinned at ~1.9032e-1 from 16 through 128
     // — a 16× budget increase moves it by 4e-7 relative, i.e. the coarse path is at a
     // floor and no budget rescues it. So 8 no longer buys this fixture the converged
-    // root its own precondition needs, and raising it cannot cost the coarse-inadequacy
-    // premise the assertion below rests on. The stability check after `v_true` turns
+    // root its own precondition needs. The stability check after `v_true` turns
     // "16 is enough" from an assumption into an assertion.
     let imi = 16usize;
     let (lr, re, rb) = (0.04_f64, 1.0e-6_f64, 1.0e-6_f64);
-    // Over-smoothed rho: the undamped Laplace log-det is worst-conditioned here, so
-    // the inner (t,beta) solve needs progress-extension refinement beyond the
-    // coarse probe budget to reach the fixed point. The sanity check below asserts
-    // the fixture actually exercises that regime (else the invariant is vacuous).
+    // Over-smoothed rho: the undamped Laplace log-det is worst-conditioned here, so the
+    // inner (t,beta) solve accepts off its root. The premise check below asserts the
+    // criterion prices that root rather than where the acceptance stopped.
     let rho = SaeManifoldRho::new(0.02_f64.ln(), 4.0_f64, vec![array![0.0]])
         .seed_scaled_by_dispersion_for_assignment(seed_dispersion, &term.assignment)
         .expect("seed dispersion is finite and strictly positive");
     let rho_flat = rho.flat_coordinates();
 
-    // Sanity: the COARSE (false) refine budget must be demonstrably inadequate at
-    // this rho, else the invariant assertion below would pass vacuously on any
-    // fixture. Inadequacy has two admissible forms and the fixture is pinned to
-    // whichever it lands in:
-    //
-    //   (a) the coarse budget returns a value that differs from the full-budget
-    //       root by more than the certification roundoff bound, or
-    //   (b) the coarse budget REFUSES with the typed non-convergence error — the
-    //       STRONGER form of the same statement, since no value at all is further
-    //       from the root than any finite disagreement.
-    //
-    // (b) is the DESIGNED raw coarse-policy behaviour, not a defect: per #2080 a
-    // reduced-budget probe may return a typed verdict instead of grinding. No
-    // production outer value/ranking entry point consumes that policy: they all
-    // route through `authoritative_envelope_value_probe`, whose full-refine drive
-    // either reaches the shared fixed point or refuses. This assertion is the
-    // only caller that observes the raw coarse policy.
-    //
-    // Landing in (b) makes the Value-lane invariant below STRICTLY harder to
-    // satisfy, not easier: a Value lane wrongly rebuilt on the coarse budget would
-    // surface `OuterEval::infeasible` (+inf) rather than a merely-~1%-off value,
-    // so the regression this test exists to catch still goes red.
     // The full budget must be ADEQUATE, not merely non-erroring: the Value lane prices
     // a converged root, and a converged root does not move when the drive continues
     // from it with twice the budget. Doubling the budget on a FRESH clone asks a
@@ -3069,37 +3045,118 @@ fn value_lane_prices_at_shared_fixed_point_2228() {
         )
         .map(|evaluated| evaluated.0)
     };
+    // Premise, restated (#2228). This pin used to rest on the coarse budget being
+    // inadequate here: a value off the full-budget root by more than the certification
+    // bound, or a typed refusal. Pool job 1110184 at `ebc458ca11` read neither form, with
+    // and without root pricing: the coarse budget (64 inner iterations, limit-boundary
+    // certificate) and the full budget (80, stall-branch KKT) accept the SAME stalled
+    // state, ‖g‖ = 5.253425e-5 against tol 2.599377e-4, and price it to the bit. What
+    // this fixture does exercise is an acceptance OFF its root. Priced where the
+    // acceptance stopped, V = 1.7497734462024462e3; priced at the root that state
+    // converges to (‖g‖ = 7.88e-13), V = 1.7497732142210552e3, about nine certification
+    // bounds lower. `½log|A|` is first order in the state error the band admits; the
+    // loss is only second order.
+    //
+    // So the premise this pin needs is that the criterion prices the root, not where its
+    // acceptance stopped, and it is checked directly: re-pricing from the priced state
+    // moved one exact Newton step toward its root must recover `v_true` within the
+    // bound. A criterion that prices wherever its acceptance stopped re-accepts nearer
+    // the root there and moves the value, so the check fails for it.
+    let stepped_bound = f64::EPSILON.sqrt() * v_true.abs().max(1.0);
+    let (stepped_value, priced_gate, newton_norm) = {
+        use gam_linalg::faer_ndarray::strict_symmetric_eigh;
+        let options = ArrowSolveOptions::direct().with_positive_definite_evidence();
+        let sys = root_term
+            .assemble_arrow_schur(z.view(), &rho, None)
+            .expect("the priced state assembles");
+        let cache = solve_arrow_newton_step_with_options(&sys, 0.0, 0.0, &options)
+            .expect("the undamped arrow factorization succeeds at the priced state")
+            .2;
+        let total_t = cache.delta_t_len();
+        let mut gradient = Array1::<f64>::zeros(total_t + cache.k);
+        let mut offset = 0usize;
+        for row in &sys.rows {
+            for (axis, &g) in row.gt.iter().enumerate() {
+                gradient[offset + axis] = g;
+            }
+            offset += row.gt.len();
+        }
+        for (index, &g) in sys.gb.iter().enumerate() {
+            gradient[total_t + index] = g;
+        }
+        let a = root_term
+            .materialize_exact_hessian_dense(&rho, z.view(), &cache)
+            .expect("dense exact observed information at the priced state");
+        let symmetric = (&a + &a.t()) * 0.5;
+        let (eigenvalues, vectors) =
+            strict_symmetric_eigh(&symmetric, Side::Lower).expect("the exact A spectrum");
+        // The pseudoinverse on the resolvable spectrum: the rank cutoff is the standard
+        // `ε · dim · max|λ|`, below which an eigenvalue is indistinguishable from zero.
+        let lambda_max = eigenvalues.iter().fold(0.0_f64, |acc, value| acc.max(value.abs()));
+        let cutoff = f64::EPSILON * eigenvalues.len() as f64 * lambda_max;
+        let mut delta = Array1::<f64>::zeros(gradient.len());
+        for index in 0..eigenvalues.len() {
+            if eigenvalues[index].abs() > cutoff {
+                let v = vectors.column(index);
+                delta.scaled_add(-v.dot(&gradient) / eigenvalues[index], &v);
+            }
+        }
+        let mut stepped = root_term.clone();
+        stepped
+            .apply_newton_step(delta.slice(s![..total_t]), delta.slice(s![total_t..]), 1.0)
+            .expect("the exact Newton step applies");
+        let evaluated = stepped
+            .penalized_quasi_laplace_criterion_with_cache(z.view(), &rho, None, imi, lr, re, rb)
+            .expect("re-pricing one exact Newton step toward the root evaluates");
+        (evaluated.0, gradient.dot(&gradient).sqrt(), delta.dot(&delta).sqrt())
+    };
+    eprintln!(
+        "[#2228] priced state ‖g‖={priced_gate:.6e} exact Newton ‖Δ‖={newton_norm:.6e}: \
+         v_true={v_true:.16e} v(one Newton step toward the root)={stepped_value:.16e} \
+         diff={:.3e} bound={stepped_bound:.3e}",
+        (stepped_value - v_true).abs()
+    );
+    assert!(
+        (stepped_value - v_true).abs() <= stepped_bound,
+        "#2228: the criterion must price the root, not where its acceptance stopped: \
+         re-pricing from the priced state (‖g‖={priced_gate:.6e}) moved one exact Newton step \
+         (‖Δ‖={newton_norm:.6e}) toward its root moved the value: v_true={v_true:.16e}, \
+         v(stepped)={stepped_value:.16e}, diff={:.3e} > {stepped_bound:.3e}",
+        (stepped_value - v_true).abs()
+    );
+
+    // A coarse budget that reaches an acceptance prices that same root. Its other admissible
+    // outcome is the typed non-convergence refusal: per #2080 a reduced-budget probe may
+    // return a typed verdict instead of grinding. No production outer value/ranking entry
+    // point consumes that policy: they all route through `authoritative_envelope_value_probe`,
+    // whose full-refine drive either reaches the shared fixed point or refuses.
     match &coarse {
         Ok(v_false) => {
-            let regime_bound = f64::EPSILON.sqrt() * v_false.abs().max(v_true.abs()).max(1.0);
+            let coarse_bound = f64::EPSILON.sqrt() * v_false.abs().max(v_true.abs()).max(1.0);
             eprintln!(
                 "[#2228] coarse budget returned a value: v_false={v_false:.16e} \
-                 v_true={v_true:.16e} diff={:.3e} regime_bound={regime_bound:.3e}",
+                 v_true={v_true:.16e} diff={:.3e} bound={coarse_bound:.3e}",
                 (v_false - v_true).abs()
             );
             assert!(
-                (v_false - v_true).abs() > regime_bound,
-                "fixture must exercise the coarse-vs-full under-refinement regime, else this \
-                 test is vacuous: v_false={v_false:.16e}, v_true={v_true:.16e}, diff={:.3e} \
-                 <= regime_bound={regime_bound:.3e} (strengthen the fixture)",
+                (v_false - v_true).abs() <= coarse_bound,
+                "#2228: a coarse budget that reaches an acceptance must price the full budget's \
+                 root: v_false={v_false:.16e}, v_true={v_true:.16e}, diff={:.3e} > {coarse_bound:.3e}",
                 (v_false - v_true).abs()
             );
         }
         Err(err) => {
             let super::construction::SaeCriterionError::Numerical(message) = err else {
                 panic!(
-                    "the coarse budget may only be inadequate via the typed NUMERICAL \
-                     non-convergence refusal; got a different typed refusal: {err:?}"
+                    "the coarse budget may only refuse via the typed NUMERICAL non-convergence \
+                     refusal; got a different typed refusal: {err:?}"
                 )
             };
-            eprintln!(
-                "[#2228] coarse budget REFUSED (the stronger form of coarse-vs-full \
-                 disagreement); v_true={v_true:.16e}; refusal: {message}"
-            );
+            eprintln!("[#2228] coarse budget REFUSED; v_true={v_true:.16e}; refusal: {message}");
             assert!(
                 message.contains("inner solve did not converge at fixed \u{3c1}"),
-                "the coarse budget must be inadequate here via the typed non-convergence \
-                 refusal, not some other numerical failure; got: {message}"
+                "the coarse budget must refuse via the typed non-convergence refusal, not some \
+                 other numerical failure; got: {message}"
             );
         }
     }
@@ -3180,7 +3237,8 @@ fn value_lane_prices_at_shared_fixed_point_2228() {
 /// at 16 and 32, and their roots sit about 1 apart in loss. A continuation from the
 /// 16-root separates what that comparison cannot: a 16-root the 32-budget drive
 /// descends from was a state its movers could not leave, and a 16-root it recurs at
-/// is a different basin. Prints only; nothing asserts.
+/// is a different basin. Pool job 633684 at `eff77dea3` read the 16-root recurring
+/// bit-for-bit under both drives, and the test asserts that verdict.
 #[test]
 fn zz_measure_value_lane_root_continuation_2228() {
     gam_runtime::test_support::install_diagnostic_logger();
@@ -3218,5 +3276,14 @@ fn zz_measure_value_lane_root_continuation_2228() {
         then32.1.total(),
         root32.0,
         root32.1.total(),
+    );
+    let bound = f64::EPSILON.sqrt() * root16.0.abs().max(1.0);
+    assert!(
+        (again16.0 - root16.0).abs() <= bound && (then32.0 - root16.0).abs() <= bound,
+        "#2228: the imi=16 root must recur when the same term is driven again at 16 and continued \
+         at 32: v16={:.16e} v16again={:.16e} v16then32={:.16e} bound={bound:.3e}",
+        root16.0,
+        again16.0,
+        then32.0,
     );
 }

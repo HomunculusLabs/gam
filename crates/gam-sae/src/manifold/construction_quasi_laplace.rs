@@ -1177,6 +1177,48 @@ impl SaeManifoldTerm {
             // progress-paid grant reaches the true no-descent recurrence, or the
             // existing non-convergence refusal wins.
             if gradient_stationary && *criterion_fixed_point {
+                // #2228 — price the root, not wherever the band admitted the state
+                // (`refine_accepted_root`). The refined root keeps this arm's witnesses: a
+                // non-finite undamped step, or a failed quotient-step projection, refuses.
+                if let Some(refined) = self.refine_accepted_root(
+                    target,
+                    Some(rho),
+                    rho_fixed,
+                    registry,
+                    &lambda_smooth,
+                    options,
+                    inner_max_iter,
+                    learning_rate,
+                    ridge_ext_coord,
+                    ridge_beta,
+                    loss,
+                    criterion_fixed_point,
+                    &mut total_inner_iter,
+                )? {
+                    let step_norm_sq = refined.delta_t.dot(&refined.delta_t)
+                        + refined.delta_beta.dot(&refined.delta_beta);
+                    if !step_norm_sq.is_finite() {
+                        return Err(format!(
+                            "SaeManifoldTerm::penalized_quasi_laplace_criterion: undamped inner residual \
+                             is non-finite at the refined root (‖Δ‖²={step_norm_sq}); the joint Hessian \
+                             factorisation is degenerate at this ρ"
+                        ));
+                    }
+                    let quotient_step_norm_sq = self.quotient_newton_step_norm_sq(
+                        refined.delta_t.view(),
+                        refined.delta_beta.view(),
+                        step_norm_sq,
+                        &lambda_smooth,
+                    )?;
+                    log::info!(
+                        "[SAE-ACCEPT] kkt fixed point at the refined root: ‖Δ‖={:.6e} \
+                         ‖Π⊥null Δ‖={:.6e} after {total_inner_iter} inner iterations",
+                        step_norm_sq.sqrt(),
+                        quotient_step_norm_sq.sqrt(),
+                    );
+                    drop(criterion_scope);
+                    return Ok(refined.cache);
+                }
                 // #1095/#2228 — decouple this ACCEPT from undamped-factor success,
                 // the same acceptance-local pattern as the stall path below. A
                 // cleanly-fit over-parametrized chart (d_atom=2 on intrinsic 1-D
@@ -1456,8 +1498,23 @@ impl SaeManifoldTerm {
                              (tol {grad_tolerance:.6e}) ½λ²/scale={predicted_relative_decrease:.6e} \
                              after {total_inner_iter} inner iterations"
                         );
+                        let refined = self.refine_accepted_root(
+                            target,
+                            Some(rho),
+                            rho_fixed,
+                            registry,
+                            &lambda_smooth,
+                            options,
+                            inner_max_iter,
+                            learning_rate,
+                            ridge_ext_coord,
+                            ridge_beta,
+                            loss,
+                            criterion_fixed_point,
+                            &mut total_inner_iter,
+                        )?;
                         drop(criterion_scope);
-                        return Ok(limit_factor.cache);
+                        return Ok(refined.map_or(limit_factor.cache, |factor| factor.cache));
                     }
                     // #2267 — try the superlinear finish before paying for the first
                     // majorized window it would replace. On the shipped example's K=8
@@ -1720,8 +1777,23 @@ impl SaeManifoldTerm {
                                      \u{2192} {best_g:.6e}, ½λ²/scale {excursion_cert:.6e} \
                                      \u{2192} {best_cert:.6e} after {total_inner_iter} iters"
                                 );
+                                let refined = self.refine_accepted_root(
+                                    target,
+                                    Some(rho),
+                                    rho_fixed,
+                                    registry,
+                                    &lambda_smooth,
+                                    options,
+                                    inner_max_iter,
+                                    learning_rate,
+                                    ridge_ext_coord,
+                                    ridge_beta,
+                                    loss,
+                                    criterion_fixed_point,
+                                    &mut total_inner_iter,
+                                )?;
                                 drop(criterion_scope);
-                                return Ok(best_factor.cache);
+                                return Ok(refined.map_or(best_factor.cache, |factor| factor.cache));
                             }
                             // Re-factor at best-seen failed: restore the
                             // excursion so state + final_cache stay consistent,
@@ -1734,8 +1806,23 @@ impl SaeManifoldTerm {
                                  ½λ²/scale={excursion_cert:.6e} after \
                                  {total_inner_iter} inner iterations"
                             );
+                            let refined = self.refine_accepted_root(
+                                target,
+                                Some(rho),
+                                rho_fixed,
+                                registry,
+                                &lambda_smooth,
+                                options,
+                                inner_max_iter,
+                                learning_rate,
+                                ridge_ext_coord,
+                                ridge_beta,
+                                loss,
+                                criterion_fixed_point,
+                                &mut total_inner_iter,
+                            )?;
                             drop(criterion_scope);
-                            return Ok(final_cache);
+                            return Ok(refined.map_or(final_cache, |factor| factor.cache));
                         }
                     }
                     // Inner solve did not converge; the returned Err carries
@@ -1981,8 +2068,23 @@ impl SaeManifoldTerm {
                              ‖Π⊥null g‖={stationary_quotient_grad_norm:.6e} tol={grad_tolerance:.6e} \
                              after {total_inner_iter} inner iterations"
                         );
+                        let refined = self.refine_accepted_root(
+                            target,
+                            None,
+                            rho_fixed,
+                            registry,
+                            &lambda_smooth,
+                            options,
+                            inner_max_iter,
+                            learning_rate,
+                            ridge_ext_coord,
+                            ridge_beta,
+                            loss,
+                            criterion_fixed_point,
+                            &mut total_inner_iter,
+                        )?;
                         drop(criterion_scope);
-                        return Ok(stationary_cache);
+                        return Ok(refined.map_or(stationary_cache, |factor| factor.cache));
                     }
                     // Affine-invariant stationarity certificate (#2226). The raw and
                     // quotient KKT gradient norms above are measured in the ambient
@@ -2055,8 +2157,23 @@ impl SaeManifoldTerm {
                              ½λ²/scale={predicted_relative_decrease:.6e} tol={grad_tolerance:.6e} \
                              after {total_inner_iter} inner iterations"
                         );
+                        let refined = self.refine_accepted_root(
+                            target,
+                            None,
+                            rho_fixed,
+                            registry,
+                            &lambda_smooth,
+                            options,
+                            inner_max_iter,
+                            learning_rate,
+                            ridge_ext_coord,
+                            ridge_beta,
+                            loss,
+                            criterion_fixed_point,
+                            &mut total_inner_iter,
+                        )?;
                         drop(criterion_scope);
-                        return Ok(stationary_cache);
+                        return Ok(refined.map_or(stationary_cache, |factor| factor.cache));
                     }
                     // #2267/#2283 — permitted at every armed plateau. What re-arms
                     // the polish is a materially descending refine round (the stall
@@ -2920,6 +3037,251 @@ impl SaeManifoldTerm {
     ) -> bool {
         previous_grad_norm
             .is_some_and(|prev| prev.is_finite() && grad_norm.is_finite() && grad_norm < prev)
+    }
+
+    /// #2228 — carry a state the KKT band admitted to the numerical root of its own
+    /// stationarity residual before the criterion prices it.
+    ///
+    /// The band admits any state with `‖g‖ ≤ tol`, so it admits a state error `A⁺g`
+    /// as large as `‖A⁺‖·tol`. The loss is second order in that error, but `½log|A|`
+    /// is first order in it, so where the band stopped a trajectory moved the value.
+    /// Pool job 642871 at `55e561270` read
+    /// `value_probe_refine_policy_ranks_same_criterion_as_full_policy`'s two lanes
+    /// accept at `‖g‖` 3.8e-6 and 5.0e-6 (tol 3.0e-5, `‖Δ‖ ≈ 2e-6`) with losses
+    /// 3.2e-11 apart and `½log|A|` 1.4e-5 apart.
+    ///
+    /// Inside the band the objective cannot verify a step: the predicted decrease
+    /// `½gᵀA⁺g` is under the Armijo round-off floor where the polish's ladder ends.
+    /// The residual still resolves the root. Each step is the exact Newton step on
+    /// the route the polish takes (the dense geometry's pseudoinverse, on the
+    /// operator and null band the value prices, for ordered Beta–Bernoulli; the arrow
+    /// exact-A solve with no ridge escalation otherwise). A step commits only if it
+    /// strictly contracts the gate norm and does not raise the penalized objective
+    /// past its round-off cushion. On a nonsingular `A` the contraction is quadratic
+    /// and the phase ends at the first step round-off cannot contract, so no step
+    /// count is chosen. Returns whether the state moved.
+    fn refine_evidence_root(
+        &mut self,
+        target: ArrayView2<'_, f64>,
+        rho_fixed: &SaeManifoldRho,
+        registry: Option<&AnalyticPenaltyRegistry>,
+        lambda_smooth: &[f64],
+        options: &ArrowSolveOptions,
+    ) -> Result<bool, String> {
+        let mut moved = false;
+        loop {
+            let mut sys = self
+                .assemble_arrow_schur(target, rho_fixed, registry)
+                .map_err(|err| format!("SaeManifoldTerm::refine_evidence_root: {err}"))?;
+            let grad_norm_sq = Self::system_grad_norm_sq(&sys);
+            let gate = self.quotient_gradient_norm_from_system(&sys, grad_norm_sq, lambda_smooth);
+            if !(gate.is_finite() && gate > 0.0) {
+                return Ok(moved);
+            }
+            let factor =
+                match self.factor_deflated_evidence_with_grad_norms(&mut sys, lambda_smooth, options)
+                {
+                    Ok(factor) => factor,
+                    Err(err) => {
+                        log::debug!("[SAE-ROOT] no root step: deflated evidence factor: {err}");
+                        return Ok(moved);
+                    }
+                };
+            let cache = factor.cache;
+            let exact_dim = sae_exact_stationarity_dim(cache.delta_t_len(), cache.k);
+            let dense_geometry_route = matches!(
+                self.assignment.mode,
+                AssignmentMode::OrderedBetaBernoulli { .. }
+            ) && sae_exact_stationarity_admitted(exact_dim, self.host_available_bytes);
+            let step = if dense_geometry_route {
+                let mut residual_t = Array1::<f64>::zeros(cache.delta_t_len());
+                let mut offset = 0usize;
+                for row in &sys.rows {
+                    for (axis, &g) in row.gt.iter().enumerate() {
+                        residual_t[offset + axis] = g;
+                    }
+                    offset += row.gt.len();
+                }
+                let residual = SaeArrowVector {
+                    t: residual_t,
+                    beta: sys.gb.clone(),
+                };
+                let solution = match self
+                    .materialize_exact_stationarity_geometry(rho_fixed, target, &cache)
+                    .and_then(|geometry| geometry.solve_stationarity(&residual))
+                {
+                    Ok(solution) => solution,
+                    Err(err) => {
+                        log::debug!("[SAE-ROOT] no root step: dense exact-A pseudoinverse: {err}");
+                        return Ok(moved);
+                    }
+                };
+                SaeArrowVector {
+                    t: -&solution.t,
+                    beta: -&solution.beta,
+                }
+            } else {
+                let exact = match self.exact_a_evidence_system(target, rho_fixed, &sys, 1.0) {
+                    Ok(exact) => exact,
+                    Err(err) => {
+                        log::debug!("[SAE-ROOT] no root step: arrow exact-A system: {err}");
+                        return Ok(moved);
+                    }
+                };
+                let mut exact_options = options.clone();
+                exact_options.sae_resident_frame = None;
+                match gam_solve::arrow_schur::solve_with_lm_escalation_inner(
+                    &exact,
+                    0.0,
+                    0.0,
+                    &exact_options,
+                ) {
+                    Ok((delta_t, delta_beta, diagnostics)) if diagnostics.ridge_escalations == 0 => {
+                        SaeArrowVector {
+                            t: delta_t,
+                            beta: delta_beta,
+                        }
+                    }
+                    Ok((_, _, diagnostics)) => {
+                        log::debug!(
+                            "[SAE-ROOT] no root step: the arrow exact-A solve escalated its ridge {} \
+                             time(s), so its step is not the Newton step",
+                            diagnostics.ridge_escalations
+                        );
+                        return Ok(moved);
+                    }
+                    Err(err) => {
+                        log::debug!("[SAE-ROOT] no root step: arrow exact-A solve: {err}");
+                        return Ok(moved);
+                    }
+                }
+            };
+            if !(step.t.iter().all(|v| v.is_finite()) && step.beta.iter().all(|v| v.is_finite())) {
+                log::debug!("[SAE-ROOT] no root step: the exact Newton step is not finite");
+                return Ok(moved);
+            }
+            let pre_objective = self.penalized_objective_total(target, rho_fixed, registry, 1.0)?;
+            let snapshot = self.snapshot_mutable_state();
+            let trial = match self.apply_newton_step(step.t.view(), step.beta.view(), 1.0) {
+                Ok(()) => match self.assemble_arrow_schur(target, rho_fixed, registry) {
+                    Ok(trial_sys) => {
+                        let trial_sq = Self::system_grad_norm_sq(&trial_sys);
+                        let trial_gate =
+                            self.quotient_gradient_norm_from_system(&trial_sys, trial_sq, lambda_smooth);
+                        let trial_objective = self
+                            .penalized_objective_total(target, rho_fixed, registry, 1.0)
+                            .unwrap_or(f64::INFINITY);
+                        Some((trial_gate, trial_objective))
+                    }
+                    Err(err) => {
+                        log::debug!("[SAE-ROOT] root step trial assembly: {err}");
+                        None
+                    }
+                },
+                Err(err) => {
+                    log::debug!("[SAE-ROOT] root step application: {err}");
+                    None
+                }
+            };
+            match trial {
+                Some((trial_gate, trial_objective))
+                    if trial_gate < gate
+                        && trial_objective.is_finite()
+                        && trial_objective
+                            <= pre_objective + opt::armijo_roundoff_cushion(pre_objective) =>
+                {
+                    log::info!(
+                        "[SAE-ROOT] committed: gate ‖g‖ {gate:.6e} → {trial_gate:.6e}, penalized \
+                         objective {pre_objective:.16e} → {trial_objective:.16e}"
+                    );
+                    moved = true;
+                }
+                other => {
+                    self.restore_mutable_state(&snapshot)?;
+                    log::info!(
+                        "[SAE-ROOT] root at gate ‖g‖ {gate:.6e}: the exact Newton trial left \
+                         (gate, objective) = {other:?} against objective {pre_objective:.16e}"
+                    );
+                    return Ok(moved);
+                }
+            }
+        }
+    }
+
+    /// #2228 — the state an acceptance certificate admitted, carried to its root before
+    /// the criterion prices it ([`Self::refine_evidence_root`]). A moved state takes one
+    /// evidence re-entry that must recur exactly, and the undamped deflated evidence
+    /// factor is then taken at the refined root, assembled under the caller's own
+    /// assembly ρ (`None` for `rho_fixed`). `None` means nothing moved, or the accepted
+    /// state and its loss have been restored, so the caller returns the factor it
+    /// already holds: a refinement never turns an acceptance into a refusal.
+    fn refine_accepted_root(
+        &mut self,
+        target: ArrayView2<'_, f64>,
+        assembly_rho: Option<&SaeManifoldRho>,
+        rho_fixed: &mut SaeManifoldRho,
+        registry: Option<&AnalyticPenaltyRegistry>,
+        lambda_smooth: &[f64],
+        options: &ArrowSolveOptions,
+        inner_max_iter: usize,
+        learning_rate: f64,
+        ridge_ext_coord: f64,
+        ridge_beta: f64,
+        loss: &mut SaeManifoldLoss,
+        criterion_fixed_point: &mut bool,
+        total_inner_iter: &mut usize,
+    ) -> Result<Option<DeflatedEvidenceFactor>, String> {
+        let accepted_state = self.snapshot_mutable_state();
+        let accepted_loss = *loss;
+        if !self.refine_evidence_root(target, rho_fixed, registry, lambda_smooth, options)? {
+            return Ok(None);
+        }
+        let refine_iter = inner_max_iter.max(1);
+        let refine = self.run_joint_fit_arrow_schur_for_quasi_laplace(
+            target,
+            rho_fixed,
+            registry,
+            refine_iter,
+            learning_rate,
+            ridge_ext_coord,
+            ridge_beta,
+        )?;
+        *total_inner_iter += refine_iter;
+        if refine.fixed_point {
+            let assembled = match assembly_rho {
+                Some(rho) => self.assemble_arrow_schur(target, rho, registry),
+                None => self.assemble_arrow_schur(target, rho_fixed, registry),
+            };
+            let mut system =
+                assembled.map_err(|err| format!("SaeManifoldTerm::refine_accepted_root: {err}"))?;
+            match self.factor_deflated_evidence_with_grad_norms(&mut system, lambda_smooth, options)
+            {
+                Ok(factor) => {
+                    log::info!(
+                        "[SAE-ROOT] accepted at the refined root: ‖g‖={:.6e} ‖Π⊥null g‖={:.6e} \
+                         after {} inner iterations",
+                        factor.grad_norm,
+                        factor.quotient_grad_norm,
+                        *total_inner_iter,
+                    );
+                    *loss = refine.loss;
+                    *criterion_fixed_point = true;
+                    return Ok(Some(factor));
+                }
+                Err(err) => log::info!(
+                    "[SAE-ROOT] the deflated evidence factor at the refined root failed ({err}); \
+                     pricing the accepted state"
+                ),
+            }
+        } else {
+            log::info!(
+                "[SAE-ROOT] the evidence re-entry at the refined state did not recur; pricing \
+                 the accepted state"
+            );
+        }
+        self.restore_mutable_state(&accepted_state)?;
+        *loss = accepted_loss;
+        Ok(None)
     }
 
     /// #2228 Stage-2 TERMINAL NEWTON PHASE — the superlinear tail the majorized
