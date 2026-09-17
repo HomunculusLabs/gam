@@ -14,16 +14,28 @@
 //! The declared inputs are the lattice precision, the angle resolution and the fidelity
 //! tolerance. The regime `p > d`, where random states admit no linear realizer, needs a
 //! derived lower bound on the least-squares residual and lands separately.
+//!
+//! # The cancelling pair (P10, A6 at block level)
+//!
+//! Appending `(+P, −P)` to a decomposition leaves the all-on tensor exact, so all-on fidelity
+//! has no power against it. Deleting one member moves the tensor by `P`. The support of the
+//! admissible zonotope in the direction `vec(P)` names that witness mask (P8), and executing the
+//! block there refutes a fidelity claim with an `EvidenceStatus::Counterexample`. The uniform-mask
+//! mean of the same pairing is zero: a stochastic average is reported beside the counterexample
+//! and never as a bound.
 
 use super::codec::{BitString, DecodedArtifactScore, code_saving_at_declared_fidelity};
+use super::moments::{GeneratorPart, MaskDomain, MaskMomentSystem, MomentBlock, MomentVector};
 use super::precision::{
     DecodableArtifact, DeclaredPrecision, LatticeCode, PeriodicQuotient, QuotientCode,
     decode_then_evaluate,
 };
+use super::rewrite::{ComponentMask, ComponentMlp, ComponentRead, MlpMask, NativeMlp};
 use super::supports::{EvidenceStatus, ExactBasis};
 use gam_linalg::faer_ndarray::{FaerArrayView, col_piv_qr_solve_lstsq};
 use gam_linalg::roundoff::UNIT_ROUNDOFF;
-use ndarray::Array2;
+use gam_math::gaussian_activation::GaussianActivation;
+use ndarray::{Array1, Array2, Axis, concatenate};
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 use std::f64::consts::TAU;
@@ -261,5 +273,154 @@ fn a_planted_rotation_wins_on_code_where_fidelity_alone_accepts_a_random_connect
         code_saving_at_declared_fidelity(tolerance, &random_generic, &random_rotation).is_err(),
         "the planted rotation does not realize a random connection, so no code comparison stands: \
          {random_rotation:?}"
+    );
+}
+
+const HIDDEN: usize = 8;
+const ROWS: usize = 5;
+
+fn uniform_matrix(rng: &mut StdRng, rows: usize, cols: usize) -> Array2<f64> {
+    Array2::from_shape_simple_fn((rows, cols), || rng.random_range(-1.0..1.0))
+}
+
+/// The largest `|a − b|` entry, and one unit roundoff of it rounded up: each entry is one
+/// rounded subtraction of two executed floats.
+fn executed_distortion(left: &Array2<f64>, right: &Array2<f64>) -> (f64, f64) {
+    let largest = left
+        .iter()
+        .zip(right.iter())
+        .fold(0.0_f64, |largest, (a, b)| largest.max((a - b).abs()));
+    (largest, (UNIT_ROUNDOFF * largest).next_up())
+}
+
+/// A residual GELU block with the cancelling pair `(+P, −P)`, `P = U Vᵀ` of rank two, appended
+/// to its read-in weight as two mask groups.
+///
+/// The read stacks `I_d` over `Vᵀ` twice (`C = d + 4`, full column rank through `I_d`). The
+/// candidate write stacks `W₁`, `+U` and `−U`, so `N R = W₁` exactly in reals. Each pair member
+/// is one group whose two coordinates share one control (P1's `cI`).
+///
+/// The declared experiment:
+/// - the mask domain is `[0, 1]` per member;
+/// - the fidelity claim is `sup_m max |f_{Θ(m)}(x) − f_{θ*}(x)| ≤ ε` over the executed block;
+/// - ε = 2⁻¹⁰.
+///
+/// The support in direction `vec(P)` names the witness that deletes one member and keeps the
+/// other. The executed distortion there refutes the claim.
+///
+/// Positive controls:
+/// - the all-on and both-deleted masks do not refute it, so all-on fidelity has no power here;
+/// - the uniform-mask mean of `⟨vec(P), q⟩` is zero within its band, while the support is `‖P‖²`.
+#[test]
+fn a_cancelling_pair_is_refuted_at_its_support_witness_through_the_executed_block() {
+    let mut rng = StdRng::seed_from_u64(2951);
+    let read_in = uniform_matrix(&mut rng, HIDDEN, WIDTH);
+    let write_out = uniform_matrix(&mut rng, WIDTH, HIDDEN);
+    let bias_in = Array1::from_shape_simple_fn(HIDDEN, || rng.random_range(-1.0..1.0));
+    let bias_out = Array1::from_shape_simple_fn(WIDTH, || rng.random_range(-1.0..1.0));
+    let inputs = uniform_matrix(&mut rng, ROWS, WIDTH);
+    let left = uniform_matrix(&mut rng, HIDDEN, 2);
+    let right = uniform_matrix(&mut rng, WIDTH, 2);
+    let tolerance = 2.0_f64.powi(-10);
+
+    let native = NativeMlp::new(
+        read_in.clone(),
+        bias_in,
+        write_out.clone(),
+        bias_out,
+        GaussianActivation::ExactGelu,
+    )
+    .expect("the block's shapes compose");
+    let native_output = native.execute(inputs.view()).expect("the native block executes");
+
+    let identity_read = Array2::<f64>::eye(WIDTH);
+    let read = concatenate![Axis(0), identity_read, right.t(), right.t()];
+    let candidate_write = concatenate![Axis(1), read_in, left, left.mapv(|value| -value)];
+    let hidden_identity = Array2::<f64>::eye(HIDDEN);
+    let program = ComponentMlp::new(
+        native.clone(),
+        ComponentRead {
+            read: read.view(),
+            candidate_write: candidate_write.view(),
+        },
+        ComponentRead {
+            read: hidden_identity.view(),
+            candidate_write: write_out.view(),
+        },
+    )
+    .expect("both weights factor exactly");
+
+    let pair = left.dot(&right.t());
+    let generator = |sign: f64| {
+        vec![GeneratorPart {
+            block: 0,
+            vector: Array1::from_iter(pair.iter().map(|value| sign * value)),
+        }]
+    };
+    let system = MaskMomentSystem::new(
+        vec![MomentBlock {
+            dimension: HIDDEN * WIDTH,
+        }],
+        vec![generator(1.0), generator(-1.0)],
+    )
+    .expect("the moment system is well formed");
+    let domain = MaskDomain::new(vec![(0.0, 1.0), (0.0, 1.0)]).expect("the declared mask domain");
+    let kept = [false, false];
+    let direction = MomentVector {
+        blocks: vec![Array1::from_iter(pair.iter().copied())],
+    };
+    let support = system
+        .support(&domain, &kept, &direction)
+        .expect("the support evaluates");
+    let witness = domain.mask_at(&support.witness).expect("the witness names a mask");
+
+    let execute_at = |masks: &[f64]| {
+        let mut component_masks = vec![1.0; WIDTH + 4];
+        component_masks[WIDTH] = masks[0];
+        component_masks[WIDTH + 1] = masks[0];
+        component_masks[WIDTH + 2] = masks[1];
+        component_masks[WIDTH + 3] = masks[1];
+        let component_masks = Array1::from_vec(component_masks);
+        program
+            .execute(
+                inputs.view(),
+                MlpMask {
+                    read_in: ComponentMask::Components(component_masks.view()),
+                    write_out: ComponentMask::AllOn,
+                },
+            )
+            .expect("the component block executes")
+    };
+
+    let (value, numerical_error) = executed_distortion(&execute_at(&witness), &native_output);
+    let refutation =
+        EvidenceStatus::<Vec<f64>, ()>::counterexample(value, numerical_error, tolerance, witness)
+            .expect("the witness refutes the fidelity claim");
+    assert!(
+        matches!(refutation, EvidenceStatus::Counterexample { .. }),
+        "the support witness must carry a counterexample at distortion {value:e}"
+    );
+
+    for control in [[1.0, 1.0], [0.0, 0.0]] {
+        let (control_value, control_error) =
+            executed_distortion(&execute_at(&control), &native_output);
+        assert!(
+            EvidenceStatus::<Vec<f64>, ()>::counterexample(
+                control_value,
+                control_error,
+                tolerance,
+                control.to_vec(),
+            )
+            .is_err(),
+            "the mask {control:?} keeps the pair balanced and must not refute: {control_value:e}"
+        );
+    }
+
+    let law = system
+        .uniform_mask_law_moments(&domain, &kept, &direction)
+        .expect("the uniform-mask moments evaluate");
+    assert!(
+        law.mean.abs() <= law.mean_band && support.value - support.band > law.mean_band,
+        "the uniform-mask mean {law:?} must sit at zero while the support {support:?} does not"
     );
 }
