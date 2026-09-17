@@ -17,10 +17,13 @@
 //!
 //!   so `weights[k]` is meaningful only when `active_mask.get(k) == true`.
 //!   We store `weights` densely (`Vec<f64>` of length `K`) rather than
-//!   sparsely; for the typical SAE workload `K` is small (tens to low
-//!   hundreds), and the dense layout lets us reuse [`ndarray`] views and
-//!   simple BLAS-shaped loops downstream. The mask carries the discrete
-//!   active-set information; the weights carry the soft amplitudes.
+//!   sparsely, so the codes of `N` rows hold `O(N·K)` words: the same order as
+//!   the dense `N × K` assignment matrix the production producers read them
+//!   from, so the container adds no new order of memory. What must not grow
+//!   faster is what is computed from it: the support code
+//!   ([`SparseAtomCodes::support_entropy`]) is never sized `K²` (#2933 F43).
+//!   The mask carries the discrete active-set information; the weights carry
+//!   the soft amplitudes.
 //!
 //! ## Per-point block locality (arrow structure)
 //!
@@ -608,7 +611,7 @@ impl SupportCounts {
     /// cycles). A never-co-firing pair `(u, x)` is an edge too, with information
     /// `I₀(n_u, n_x)`. For firing rates `a, b` with `a + b ≤ 1`,
     /// `I₀ = φ(1−a−b) − φ(1−a) − φ(1−b)` with `φ(t) = t ln t`, so
-    /// `∂I₀/∂b = ln((1−a)/(1−a−b)) ≥ 0`: the information does not decrease in the
+    /// `∂I₀/∂b = ln((1−b)/(1−a−b)) ≥ 0`: the information does not decrease in the
     /// partner's firing count, and on equal information the rank tie-break
     /// prefers the higher-ranked partner. Hence the best never-co-firing edge
     /// from `u` out of its component goes to the FIRST atom in rank order that
