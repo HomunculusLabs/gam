@@ -3138,7 +3138,23 @@ pub(crate) fn run_outer_with_plan(
             install_matching_initial_inner_seed(obj, config, &incumbent_rho, context)?;
             let incumbent_value = match obj.eval_cost(&incumbent_rho) {
                 Ok(value) => value,
-                Err(error) if error.is_trial_point_infeasible() => f64::INFINITY,
+                // The stored checkpoint cannot be re-evaluated at its own ρ, so the
+                // gap cannot be judged and the certified winner is published. This
+                // warning is the only trace the branch leaves (#2953).
+                Err(error) if error.is_trial_point_infeasible() => {
+                    log::warn!(
+                        "[OUTER] {context}: certified winner rho={:?} cost={:.6e} sits above a stored \
+                         checkpoint rho={:?} cost={:.6e} by more than the criterion's rounding envelope \
+                         {:.3e}, but re-evaluating that checkpoint was refused ({error}); the dominance is \
+                         unresolved and the winner is published (#2953)",
+                        certified.result().rho.to_vec(),
+                        winner_value,
+                        incumbent_rho.to_vec(),
+                        incumbent.final_value,
+                        cached_band,
+                    );
+                    f64::INFINITY
+                }
                 Err(error) => return Err(error),
             };
             obj.reset();
