@@ -1,23 +1,42 @@
 #![cfg(test)]
-//! #2933 F40 — the reconstruction dispersion's scale equation uses the residual
-//! degrees of freedom `‖I − R‖²_F` of its fitted response, not `N − tr R`.
+//! #2933 F39/F40 — the fitted response the reconstruction dispersion prices.
 //!
-//! A ridge smoother with a known response is fitted repeatedly to noise around a
-//! zero mean and around a mean it reproduces. The production dispersion must be
-//! unbiased for the noise variance and its 95% bands must cover near nominal.
-//! Each fit is certified as the root of the assembled stationarity by exact-A
-//! Newton steps before its dispersion is read.
+//! F39: the effective degrees of freedom are `tr R` for the response
+//! `R = ∂f̂/∂y` of the whole identified fit, gates and constrained coordinates
+//! included. The oracle here measures `R` directly. It perturbs one target entry
+//! by `±h`, drives the penalized stationarity `∇L(θ; y ± h·e) = 0` from the
+//! fitted state to its roundoff plateau with exact-A Newton steps, and differences
+//! every fitted scalar. The root is fixed by the assembled (tangent-projected)
+//! gradient alone, so the oracle does not score the operator against itself. Each
+//! re-solve declares the fitted state's collapse-prevention gates, so it
+//! differentiates the same frozen-gate objective the operator describes.
+//!
+//! F40: the dispersion's scale equation uses the residual degrees of freedom
+//! `‖I − R‖²_F` of that response, not `N − tr R`. A ridge smoother with a known
+//! response is fitted repeatedly to noise around a zero mean and around a mean it
+//! reproduces; the production dispersion must be unbiased and its 95% bands must
+//! cover near nominal.
 use super::*;
 use crate::manifold::arrow_solver::SaeArrowVector;
+use crate::manifold::construction::FittedResponseDivergence;
 use gam_terms::latent::LatentManifold;
 use ndarray::{Array1, Array2, ArrayView2};
 
 /// Largest number of exact-A Newton steps one re-solve may take.
-const ROOT_POLISH_STEPS: usize = 40;
+pub(super) const ROOT_POLISH_STEPS: usize = 40;
 
 /// A root is admitted only once its gradient has reached the arithmetic floor
 /// of an order-one objective on a few dozen scalar observations.
-const ROOT_GRADIENT_CEILING: f64 = 1.0e-10;
+pub(super) const ROOT_GRADIENT_CEILING: f64 = 1.0e-10;
+
+/// Central-difference step on a target entry. The targets are of order one, so
+/// the truncation error `h²·f'''/6` sits far below the tolerance below.
+const FD_STEP: f64 = 1.0e-4;
+
+/// Relative agreement required between a priced quantity and its re-solved
+/// value. The truncation error at `FD_STEP` and the roundoff of a root driven to
+/// its plateau are both orders of magnitude smaller.
+const RELATIVE_TOLERANCE: f64 = 1.0e-4;
 
 fn gradient(system: &ArrowSchurSystem) -> SaeArrowVector {
     SaeArrowVector {
@@ -31,15 +50,17 @@ fn gradient(system: &ArrowSchurSystem) -> SaeArrowVector {
 }
 
 /// Drive `∇L(θ; target) = 0` by exact-A Newton steps until the gradient norm
-/// stops halving; return the undamped evidence factorization and the norm.
-fn polish_to_root(
+/// stops decreasing or [`ROOT_POLISH_STEPS`] iterates are spent. Returns the
+/// undamped evidence factorization at the last iterate and the gradient-norm
+/// trajectory, whose last entry is that iterate's norm.
+pub(super) fn polish_to_root(
     term: &mut SaeManifoldTerm,
     target: ArrayView2<'_, f64>,
     rho: &SaeManifoldRho,
-) -> (ArrowFactorCache, f64) {
+) -> (ArrowFactorCache, Vec<f64>) {
     let options = term.evidence_factor_options();
-    let mut previous = f64::INFINITY;
-    for _ in 0..ROOT_POLISH_STEPS {
+    let mut trajectory: Vec<f64> = Vec::with_capacity(ROOT_POLISH_STEPS);
+    loop {
         let system = term
             .assemble_arrow_schur(target, rho, None)
             .expect("the arrow system assembles at every re-solve iterate");
@@ -47,17 +68,156 @@ fn polish_to_root(
         let norm = (g.t.dot(&g.t) + g.beta.dot(&g.beta)).sqrt();
         let (_, _, cache) = solve_arrow_newton_step_with_options(&system, 0.0, 0.0, &options)
             .expect("the majorizer factors undamped at every re-solve iterate");
-        if !(norm < 0.5 * previous) {
-            return (cache, norm);
+        let decreased = trajectory.last().is_none_or(|&previous| norm < previous);
+        trajectory.push(norm);
+        if !decreased || trajectory.len() == ROOT_POLISH_STEPS {
+            return (cache, trajectory);
         }
         let step = term
             .solve_exact_stationarity(rho, target, &cache, &g)
             .expect("the exact stationarity pseudoinverse solves at every re-solve iterate");
         term.apply_newton_step((-&step.t).view(), (-&step.beta).view(), 1.0)
             .expect("the exact Newton step applies to the term state");
-        previous = norm;
     }
-    panic!("the exact-A Newton re-solve did not reach its plateau in {ROOT_POLISH_STEPS} steps");
+}
+
+/// The gradient norm a polish trajectory ended at.
+pub(super) fn root_norm(trajectory: &[f64]) -> f64 {
+    trajectory.last().copied().unwrap_or(f64::INFINITY)
+}
+
+/// `R = ∂f̂/∂y` over the `n·p` scalars (row-major), by central differences of fits
+/// re-solved to their roots under the base term's declared gates.
+pub(super) fn resolved_response(
+    base: &SaeManifoldTerm,
+    target: &Array2<f64>,
+    rho: &SaeManifoldRho,
+) -> Array2<f64> {
+    let (n, p) = target.dim();
+    let gates = base.collapse_prevention_gates();
+    let mut response = Array2::<f64>::zeros((n * p, n * p));
+    for row in 0..n {
+        for col in 0..p {
+            let mut fitted = Vec::with_capacity(2);
+            for sign in [1.0_f64, -1.0] {
+                let mut term = base.clone();
+                term.declare_collapse_prevention_gates(&gates);
+                let mut perturbed = target.clone();
+                perturbed[[row, col]] += sign * FD_STEP;
+                let (_, trajectory) = polish_to_root(&mut term, perturbed.view(), rho);
+                let norm = root_norm(&trajectory);
+                assert!(
+                    norm <= ROOT_GRADIENT_CEILING,
+                    "the re-solve at entry ({row}, {col}), side {sign} stalled at ‖g‖={norm:.3e}"
+                );
+                fitted.push(
+                    term.try_fitted_for_rho(rho)
+                        .expect("the re-solved fit reconstructs"),
+                );
+            }
+            for (index, (plus, minus)) in fitted[0].iter().zip(fitted[1].iter()).enumerate() {
+                response[[index, row * p + col]] = (plus - minus) / (2.0 * FD_STEP);
+            }
+        }
+    }
+    response
+}
+
+/// `(tr R, ‖I − R‖²_F)` of a response matrix.
+pub(super) fn trace_and_residual_dof(response: &Array2<f64>) -> (f64, f64) {
+    let trace = (0..response.nrows()).map(|i| response[[i, i]]).sum();
+    let residual_dof = response
+        .indexed_iter()
+        .map(|((i, j), &value)| {
+            let entry = if i == j { 1.0 - value } else { -value };
+            entry * entry
+        })
+        .sum();
+    (trace, residual_dof)
+}
+
+fn assert_agrees(label: &str, value: f64, resolved: f64) {
+    let gap = (value - resolved).abs();
+    assert!(
+        gap <= RELATIVE_TOLERANCE * resolved.abs().max(1.0),
+        "{label}: {value:.9e} against the re-solved response {resolved:.9e} (gap {gap:.3e})"
+    );
+}
+
+/// What the production operator and the dispersion report at a fitted state.
+struct PricedResponse {
+    response: FittedResponseDivergence,
+    /// `RSS/φ̂` on the raw output frame: the residual dof the scale equation used.
+    priced_residual_dof: f64,
+}
+
+fn priced_response(
+    term: &SaeManifoldTerm,
+    target: &Array2<f64>,
+    rho: &SaeManifoldRho,
+    cache: &ArrowFactorCache,
+) -> PricedResponse {
+    let response = term
+        .fitted_response_divergence(target.view(), rho, cache)
+        .expect("the fitted state admits a fitted-response divergence");
+    let loss = term.loss(target.view(), rho).expect("the fitted state has a loss");
+    let residual = term
+        .reconstruction_residual(target.view(), rho)
+        .expect("the fitted state has a residual");
+    let dispersion = term
+        .reconstruction_dispersion(&loss, cache, rho, residual.view())
+        .expect("the fitted state prices a dispersion");
+    PricedResponse {
+        response,
+        priced_residual_dof: 2.0 * loss.data_fit / dispersion.raw_output_noise_variance,
+    }
+}
+
+/// Require the exact spectral divergence, its residual dof, and the residual dof
+/// the dispersion prices to match the re-solved response; return `tr R`.
+pub(super) fn assert_prices_resolved_response(
+    label: &str,
+    term: &SaeManifoldTerm,
+    target: &Array2<f64>,
+    rho: &SaeManifoldRho,
+    cache: &ArrowFactorCache,
+) -> f64 {
+    let (trace, residual_dof) = trace_and_residual_dof(&resolved_response(term, target, rho));
+    let priced = priced_response(term, target, rho, cache);
+    eprintln!(
+        "[#2933 F39 {label}] N={} resolved tr R={trace:.9e} ‖I−R‖²={residual_dof:.9e}; divergence \
+         {:.9e} ({:?}), residual dof {:.9e}, dispersion RSS/φ {:.9e}",
+        target.len(),
+        priced.response.divergence,
+        priced.response.estimator,
+        priced.response.likelihood_residual_dof,
+        priced.priced_residual_dof
+    );
+    assert!(
+        matches!(
+            priced.response.estimator,
+            FittedResponseDivergenceEstimator::ExactSpectral
+        ),
+        "{label}: a fixture this small is on the exact spectral route, got {:?}",
+        priced.response.estimator
+    );
+    assert!(
+        trace > 1.0 && residual_dof > 1.0,
+        "{label}: the re-solved response (tr R {trace}, ‖I−R‖² {residual_dof}) must be material \
+         and leave residual dof"
+    );
+    assert_agrees(&format!("{label} divergence"), priced.response.divergence, trace);
+    assert_agrees(
+        &format!("{label} residual dof"),
+        priced.response.likelihood_residual_dof,
+        residual_dof,
+    );
+    assert_agrees(
+        &format!("{label} residual dof the dispersion prices"),
+        priced.priced_residual_dof,
+        residual_dof,
+    );
+    trace
 }
 
 /// A basis with fixed per-row values that do not depend on the coordinate: every
@@ -110,6 +270,29 @@ impl SaeBasisEvaluator for FixedRowBasis {
         }
         Ok(SaeBasisThirdJetCapability::CertifiedZero)
     }
+}
+
+fn fixed_basis_atom(name: &str, phi: Array2<f64>, decoder: Array2<f64>) -> SaeManifoldAtom {
+    let width = phi.ncols();
+    let evaluator = Arc::new(FixedRowBasis { phi });
+    let coords = Array2::<f64>::zeros((evaluator.phi.nrows(), 1));
+    let (basis, jet) = evaluator
+        .evaluate(coords.view())
+        .expect("fixed basis evaluates");
+    let penalty = Array2::<f64>::from_diag(&Array1::from_shape_fn(width, |basis| {
+        if basis == 0 { 0.0 } else { 1.0 }
+    }));
+    SaeManifoldAtom::new_with_provided_function_gram(
+        name.to_string(),
+        SaeAtomBasisKind::Periodic,
+        1,
+        basis,
+        jet,
+        decoder,
+        penalty,
+    )
+    .expect("fixed-basis atom: basis width, latent dimension and decoder shape agree")
+    .with_basis_evaluator(evaluator)
 }
 
 /// Deterministic standard normal draws (splitmix64, Box–Muller).
@@ -195,24 +378,11 @@ fn ridge_smoother_scale_is_unbiased_and_covers_2933_f40() {
         * ((n - width) as f64 + shrink.iter().map(|s| (1.0 - s) * (1.0 - s)).sum::<f64>());
     assert!((trace - 28.0).abs() < 1e-12 && (residual_dof - 42.0).abs() < 1e-12);
 
-    let coords = Array2::<f64>::zeros((n, 1));
-    let evaluator = Arc::new(FixedRowBasis { phi: phi.clone() });
     let base_term = {
-        let (basis, jet) = evaluator.evaluate(coords.view()).expect("fixed basis evaluates");
-        let atom = SaeManifoldAtom::new_with_provided_function_gram(
-            "ridge".to_string(),
-            SaeAtomBasisKind::Periodic,
-            1,
-            basis,
-            jet,
-            Array2::<f64>::zeros((width, p)),
-            penalty.clone(),
-        )
-        .expect("ridge atom: basis width, latent dimension and decoder shape agree")
-        .with_basis_evaluator(evaluator);
+        let atom = fixed_basis_atom("ridge", phi.clone(), Array2::<f64>::zeros((width, p)));
         let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
             Array2::<f64>::zeros((n, 1)),
-            vec![coords.clone()],
+            vec![Array2::<f64>::zeros((n, 1))],
             vec![LatentManifold::Circle { period: 1.0 }],
             AssignmentMode::softmax(1.0),
         )
@@ -243,7 +413,8 @@ fn ridge_smoother_scale_is_unbiased_and_covers_2933_f40() {
                 shrink[basis] * (0..n).map(|row| phi[[row, basis]] * target[[row, out]]).sum::<f64>()
             });
             term.atoms[0].decoder_coefficients_mut().assign(&decoder);
-            let (cache, norm) = polish_to_root(&mut term, target.view(), &rho);
+            let (cache, trajectory) = polish_to_root(&mut term, target.view(), &rho);
+            let norm = root_norm(&trajectory);
             assert!(norm <= ROOT_GRADIENT_CEILING, "{case}: the ridge root stalled at ‖g‖={norm:.3e}");
             let fitted = term.try_fitted_for_rho(&rho).expect("the ridge fit reconstructs");
             let oracle_fitted = smoother.dot(&target);
