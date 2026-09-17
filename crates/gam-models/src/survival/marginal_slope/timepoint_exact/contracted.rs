@@ -176,6 +176,7 @@ impl SurvivalMarginalSlopeFamily {
             Some((row, SurvivalInterceptSlotKind::Exit)),
         )?;
         let entry_cached = self.build_cached_partition_with_moment_order(
+            row,
             primary,
             a0,
             g,
@@ -184,6 +185,7 @@ impl SurvivalMarginalSlopeFamily {
             moment_order,
         )?;
         let exit_cached = self.build_cached_partition_with_moment_order(
+            row,
             primary,
             a1,
             g,

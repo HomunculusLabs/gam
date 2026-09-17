@@ -13,11 +13,25 @@ impl SurvivalMarginalSlopeFamily {
         beta_w: Option<&Array1<f64>>,
         slot: Option<(usize, SurvivalInterceptSlotKind)>,
     ) -> Result<(f64, f64), String> {
+        // gam#2948: a family anchored on a declared finite law solves the
+        // identity on that law's nodes; on the Gaussian law the de-nested cells
+        // integrate it.
+        let law = self.flex_law_grid(slot.map(|(row, _)| row))?;
         let eval = |a: f64| -> Result<(f64, f64, f64), String> {
-            self.evaluate_denested_survival_calibration(a, q, slope, beta_h, beta_w)
+            match law {
+                Some(grid) => {
+                    self.evaluate_law_survival_calibration(grid, a, q, slope, beta_h, beta_w)
+                }
+                None => self.evaluate_denested_survival_calibration(a, q, slope, beta_h, beta_w),
+            }
         };
         let probit_scale = self.probit_frailty_scale();
-        let a_closed_form = q * rigid_observed_scale(slope, probit_scale) / probit_scale;
+        // The rigid root, with no warp and no deviation, on the row's own law:
+        // the closed form on the Gaussian law, the solved anchor on a finite one.
+        let a_closed_form = match law {
+            Some(grid) => solve_anchor(q, probit_scale * slope, grid)? / probit_scale,
+            None => q * rigid_observed_scale(slope, probit_scale) / probit_scale,
+        };
 
         // Prefer the previous PIRLS iter's converged intercept as the initial
         // guess; β changes only a little between consecutive PIRLS iterations,
