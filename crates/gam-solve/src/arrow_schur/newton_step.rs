@@ -86,6 +86,8 @@ pub fn solve_arrow_newton_step_with_options(
     // nulls and must surface the corresponding gradient metadata.
     let htt_factors = step.htt_factors;
     let mut schur_factor = step.schur_factor;
+    let step_schur = step.step_schur;
+    let step_ridge_escalated_rows = step.step_ridge_escalated_rows;
     let mut beta_schur_conditioning = None;
     let schur_log_det_override = step.schur_log_det_override;
     // The per-row deflated directions describe exactly the independently-built
@@ -112,19 +114,45 @@ pub fn solve_arrow_newton_step_with_options(
     };
     let mut schur_factor_is_undamped = sys.k == 0;
     let mut beta_gauge_factor_is_pinned = false;
-    // A step factor is never an evidence factor, even at ridge zero: its
-    // collapsed directions follow Newton/Tikhonov policy. Rebuild the dense
-    // undamped Schur explicitly so value, inverse, and gradients share the
-    // evidence unit-deflation convention and its exact null-space metadata.
+    // The evidence Schur is assembled from the evidence row factors, whose
+    // collapsed directions follow the evidence unit-deflation convention rather
+    // than Newton/Tikhonov policy, so value, inverse, and gradients share its
+    // exact null-space metadata. The Direct step already assembled the dense
+    // Schur from its own row factors; it is the same matrix exactly when the step
+    // ran at ridge zero on both blocks, no step row was ridge-escalated, and the
+    // evidence factorization deflated nothing, because both factorizations then
+    // take `factor_row_block_cholesky(row, 0, d)` for every row. Then it is carried
+    // forward by value instead of assembled a second time, which was half of this
+    // call at k = 4096 (#2900, job 1148662). A backend that cannot report its
+    // escalations (`None`) never takes this route.
     if sys.k > 0 && schur_factor.is_some() {
         let evidence_htt_factors = match &htt_factors_undamped {
             ArrowUndampedFactors::SameAsDamped => &htt_factors,
             ArrowUndampedFactors::Owned(factors) => factors,
         };
-        let evidence_schur = pin_evidence_beta_schur(
-            sys,
-            build_dense_schur_direct(sys, evidence_htt_factors, 0.0, &backend, options.gpu_policy)?,
-        );
+        let evidence_rows_undeflated = gauge_deflated_directions == 0
+            && deflated_row_directions.iter().all(Vec::is_empty)
+            && deflation_row_spectra.iter().all(Option::is_none);
+        let evidence_schur = match step_schur {
+            Some(schur)
+                if ridge_t == 0.0
+                    && ridge_beta == 0.0
+                    && step_ridge_escalated_rows == Some(0)
+                    && evidence_rows_undeflated =>
+            {
+                schur
+            }
+            _ => pin_evidence_beta_schur(
+                sys,
+                build_dense_schur_direct(
+                    sys,
+                    evidence_htt_factors,
+                    0.0,
+                    &backend,
+                    options.gpu_policy,
+                )?,
+            ),
+        };
         let exact_a_classification =
             exact_a_reduced_classification(sys, evidence_htt_factors)?;
         let DenseReducedSchurFactorization {
@@ -1180,6 +1208,13 @@ pub(crate) struct ArrowNewtonStepArtifacts {
     /// the bit-identical Cholesky log-determinant.
     pub(crate) schur_log_det_override: Option<f64>,
     pub(crate) pcg_diagnostics: ArrowPcgDiagnostics,
+    /// The dense reduced Schur the Direct step factored, after the β-gauge pin,
+    /// kept by value so the evidence factorization can reuse it when it is the same
+    /// matrix. `None` on every route that does not assemble the Direct Schur.
+    pub(crate) step_schur: Option<Array2<f64>>,
+    /// How many rows of `htt_factors` the step factored with the ridge lifted past
+    /// `ridge_t`; `None` when the block backend does not report it.
+    pub(crate) step_ridge_escalated_rows: Option<usize>,
 }
 
 pub(crate) struct ArrowBlockFactorization {
@@ -1200,6 +1235,9 @@ pub(crate) struct ArrowBlockFactorization {
     /// Row-block directions the shared exact-A classifier priced at their clamp basin,
     /// summed over rows (#2933 F27).
     pub(crate) clamp_basin_directions: usize,
+    /// How many rows were factored with the ridge lifted past `ridge_t`; `None` when
+    /// the block backend does not report it.
+    pub(crate) ridge_escalated_rows: Option<usize>,
 }
 
 pub(crate) fn factor_blocks_for_system<B: BatchedBlockSolver>(
@@ -1222,24 +1260,27 @@ pub(crate) fn factor_blocks_for_system<B: BatchedBlockSolver>(
         });
     }
     if sys.row_gauge_deflation.is_none() && sys.exact_a_classification.is_none() {
+        let factorization = backend.factor_blocks_with_policy(
+            &sys.rows,
+            ridge_t,
+            sys.d,
+            evidence_factorization,
+            gpu_policy,
+        )?;
         return Ok(ArrowBlockFactorization {
-            factors: backend.factor_blocks_with_policy(
-                &sys.rows,
-                ridge_t,
-                sys.d,
-                evidence_factorization,
-                gpu_policy,
-            )?,
+            factors: factorization.factors,
             gauge_deflated_directions: 0,
             deflated_row_directions: Vec::new(),
             deflation_row_spectra: Vec::new(),
             clamp_basin_directions: 0,
+            ridge_escalated_rows: factorization.ridge_escalated_rows,
         });
     }
     let n = sys.rows.len();
     let mut blocks = Vec::with_capacity(n);
     let mut count = 0usize;
     let mut clamp_basin_directions = 0usize;
+    let mut ridge_escalated_rows = 0usize;
     let mut deflated_row_directions: Vec<Vec<Array1<f64>>> = Vec::with_capacity(n);
     let mut deflation_row_spectra: Vec<Option<RowDeflationSpectrum>> = Vec::with_capacity(n);
     // The presence of an installed `row_gauge_deflation` marks this as the SAE
@@ -1302,6 +1343,9 @@ pub(crate) fn factor_blocks_for_system<B: BatchedBlockSolver>(
     for result in results {
         count += result.gauge_deflated_directions;
         clamp_basin_directions += result.clamp_basin_directions;
+        if result.ridge_escalated {
+            ridge_escalated_rows += 1;
+        }
         deflated_row_directions.push(result.deflated_directions);
         deflation_row_spectra.push(result.deflation_spectrum);
         blocks.push(result.factor);
@@ -1312,6 +1356,7 @@ pub(crate) fn factor_blocks_for_system<B: BatchedBlockSolver>(
         deflated_row_directions,
         deflation_row_spectra,
         clamp_basin_directions,
+        ridge_escalated_rows: Some(ridge_escalated_rows),
     })
 }
 
@@ -2006,6 +2051,8 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
             schur_factor,
             schur_log_det_override: None,
             pcg_diagnostics: ArrowPcgDiagnostics::default(),
+            step_schur: None,
+            step_ridge_escalated_rows: None,
         });
     }
     let backend = CpuBatchedBlockSolver;
@@ -2013,7 +2060,7 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
     // 1. BA point elimination: per-row Cholesky factors of
     // (H_tt^(i) + ridge_t · I).  `factor_blocks` reads the actual row
     // dimension from `row.htt.nrows()` so heterogeneous systems work.
-    let htt_factors =
+    let step_factorization =
         factor_blocks_for_system(
             sys,
             ridge_t,
@@ -2023,8 +2070,9 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
             ArrowEvidencePolicy::Strict,
             &backend,
             options.gpu_policy,
-        )?
-        .factors;
+        )?;
+    let htt_factors = step_factorization.factors;
+    let step_ridge_escalated_rows = step_factorization.ridge_escalated_rows;
 
     // 2. Reduced RHS r_β = -g_β + Σ_i H_βt^(i) (H_tt^(i))⁻¹ g_t^(i).
     let rhs_beta = reduced_rhs_beta(sys, &htt_factors, &backend);
@@ -2051,7 +2099,7 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
 
     // 3. Solve reduced shared system using the selected BA mode.
     let mut mixed_precision_status = MixedPrecisionStatus::Off;
-    let (delta_beta, schur_factor, mut pcg_diagnostics) = match options.mode {
+    let (delta_beta, schur_factor, mut pcg_diagnostics, step_schur) = match options.mode {
         ArrowSolverMode::Direct => {
             // #2660 — Direct has one numerical owner. Automatic mode selects it
             // only for `k <= DIRECT_SOLVE_MAX_K`, where the exact dense Schur is
@@ -2103,6 +2151,8 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
                             schur_factor: Some(schur_factor),
                             schur_log_det_override: None,
                             pcg_diagnostics,
+                            step_schur: Some(schur),
+                            step_ridge_escalated_rows,
                         });
                     }
                     MixedPrecisionAttempt::Fallback { reason } => {
@@ -2117,7 +2167,7 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
                 options,
                 trust_metric_weights,
             )?;
-            (db, sf, diag)
+            (db, sf, diag, Some(schur))
         }
         ArrowSolverMode::SqrtBA => {
             let schur = build_dense_schur_sqrt_ba(
@@ -2159,6 +2209,8 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
                             schur_factor: Some(schur_factor),
                             schur_log_det_override: None,
                             pcg_diagnostics,
+                            step_schur: None,
+                            step_ridge_escalated_rows,
                         });
                     }
                     MixedPrecisionAttempt::Fallback { reason } => {
@@ -2173,7 +2225,7 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
                 options,
                 trust_metric_weights,
             )?;
-            (db, sf, diag)
+            (db, sf, diag, None)
         }
         ArrowSolverMode::InexactPCG => {
             // #2228 — the wide-`p` InexactPCG Newton step gauge-fixes exactly like
@@ -2273,6 +2325,8 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
                                 schur_factor: None,
                                 schur_log_det_override: None,
                                 pcg_diagnostics: diag,
+                                step_schur: None,
+                                step_ridge_escalated_rows,
                             });
                         }
                         // Non-PD per-row block → surface the matching CPU error so
@@ -2327,7 +2381,7 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
                 options.newton_schur_tikhonov_rel_floor,
             )?;
             diag.selected_matrix_free_pcg = true;
-            (delta, None, diag)
+            (delta, None, diag, None)
         }
     };
     if mixed_precision_status != MixedPrecisionStatus::Off {
@@ -2352,6 +2406,8 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
         schur_factor,
         schur_log_det_override: None,
         pcg_diagnostics,
+        step_schur,
+        step_ridge_escalated_rows,
     })
 }
 

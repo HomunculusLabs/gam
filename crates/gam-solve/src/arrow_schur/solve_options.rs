@@ -640,6 +640,18 @@ impl ArrowSolveOptions {
     }
 }
 
+/// The per-row point-block factors, and how many rows the factorization lifted past
+/// the caller's base ridge.
+///
+/// `ridge_escalated_rows` is `None` when the backend does not report it. A consumer
+/// that relies on the factors being taken at the base ridge (the evidence build
+/// reusing a step's dense Schur) must then treat them as possibly escalated.
+#[derive(Debug, Clone)]
+pub struct ArrowRowFactorization {
+    pub factors: ArrowFactorSlab,
+    pub ridge_escalated_rows: Option<usize>,
+}
+
 /// CPU/GPU seam for BA point-block work.
 ///
 /// BA systems spend most time in independent point-block factorizations,
@@ -663,7 +675,9 @@ pub trait BatchedBlockSolver {
 
     /// Factor under an explicit request policy. Backends without a device path
     /// may ignore the policy; the production CPU/GPU hybrid honors it before
-    /// any runtime probe.
+    /// any runtime probe. A backend that only implements [`Self::factor_blocks`]
+    /// cannot say whether it escalated any row's ridge, so this default reports
+    /// `ridge_escalated_rows: None`.
     fn factor_blocks_with_policy(
         &self,
         rows: &[ArrowRowBlock],
@@ -671,13 +685,14 @@ pub trait BatchedBlockSolver {
         d: usize,
         evidence_factorization: bool,
         gpu_policy: gam_gpu::GpuPolicy,
-    ) -> Result<ArrowFactorSlab, ArrowSchurError> {
+    ) -> Result<ArrowRowFactorization, ArrowSchurError> {
         match gpu_policy {
             gam_gpu::GpuPolicy::Auto
             | gam_gpu::GpuPolicy::Off
-            | gam_gpu::GpuPolicy::Required => {
-                self.factor_blocks(rows, ridge_t, d, evidence_factorization)
-            }
+            | gam_gpu::GpuPolicy::Required => Ok(ArrowRowFactorization {
+                factors: self.factor_blocks(rows, ridge_t, d, evidence_factorization)?,
+                ridge_escalated_rows: None,
+            }),
         }
     }
 
@@ -889,6 +904,7 @@ impl BatchedBlockSolver for CpuBatchedBlockSolver {
             evidence_factorization,
             gam_gpu::global_policy(),
         )
+        .map(|factorization| factorization.factors)
     }
 
     fn factor_blocks_with_policy(
@@ -898,11 +914,16 @@ impl BatchedBlockSolver for CpuBatchedBlockSolver {
         d: usize,
         evidence_factorization: bool,
         gpu_policy: gam_gpu::GpuPolicy,
-    ) -> Result<ArrowFactorSlab, ArrowSchurError> {
+    ) -> Result<ArrowRowFactorization, ArrowSchurError> {
+        // The batched device factorization succeeds only when every block factors
+        // at the base ridge, so it escalates no row.
         if let Some(batched) =
             try_factor_blocks_batched(rows, ridge_t, d, evidence_factorization, gpu_policy)?
         {
-            return Ok(batched);
+            return Ok(ArrowRowFactorization {
+                factors: batched,
+                ridge_escalated_rows: Some(0),
+            });
         }
         // Per-row Cholesky factorizations are INDEPENDENT (each reads only its own
         // read-only `rows[i]` block), so factor rows in parallel then collect in
@@ -912,20 +933,26 @@ impl BatchedBlockSolver for CpuBatchedBlockSolver {
         let n = rows.len();
         let parallel =
             n >= SCHUR_MATVEC_PARALLEL_ROW_MIN && rayon::current_thread_index().is_none();
-        let out = if parallel {
+        let results = if parallel {
             use rayon::prelude::*;
             (0..n)
                 .into_par_iter()
                 .map(|row_idx| {
                     gam_problem::with_nested_parallel(|| {
-                        factor_one_row(&rows[row_idx], ridge_t, d, row_idx, evidence_factorization)
+                        factor_one_row_with_escalation(
+                            &rows[row_idx],
+                            ridge_t,
+                            d,
+                            row_idx,
+                            evidence_factorization,
+                        )
                     })
                 })
                 .collect::<Result<Vec<_>, ArrowSchurError>>()?
         } else {
-            let mut out = Vec::with_capacity(n);
+            let mut results = Vec::with_capacity(n);
             for (row_idx, row) in rows.iter().enumerate() {
-                out.push(factor_one_row(
+                results.push(factor_one_row_with_escalation(
                     row,
                     ridge_t,
                     d,
@@ -933,9 +960,15 @@ impl BatchedBlockSolver for CpuBatchedBlockSolver {
                     evidence_factorization,
                 )?);
             }
-            out
+            results
         };
-        Ok(ArrowFactorSlab::from_blocks(out))
+        let ridge_escalated_rows = results.iter().filter(|result| result.ridge_escalated).count();
+        Ok(ArrowRowFactorization {
+            factors: ArrowFactorSlab::from_blocks(
+                results.into_iter().map(|result| result.factor).collect(),
+            ),
+            ridge_escalated_rows: Some(ridge_escalated_rows),
+        })
     }
 
     fn solve_block_vector(

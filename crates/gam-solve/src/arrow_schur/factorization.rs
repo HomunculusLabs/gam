@@ -30,6 +30,10 @@ pub(crate) struct ArrowRowFactorResult {
     /// basin, counted where it returned (#2933 F27). The spectrum's conditioning tags
     /// leave such a direction `Raw`, so the count is the only record of the verdict.
     pub(crate) clamp_basin_directions: usize,
+    /// Whether the row factor is of `H_tt + ridge_eff·I` with `ridge_eff` lifted past
+    /// the caller's base ridge to make the block positive-definite and safely
+    /// invertible. `false` for every factor taken at the base ridge, deflated or not.
+    pub(crate) ridge_escalated: bool,
 }
 
 /// Attempt the per-row block factorization as one device batch spread across
@@ -440,6 +444,7 @@ pub(crate) fn factor_gauge_deflated_evidence_row(
         // term fully captures them and no raw spectrum is needed.
         deflation_spectrum: None,
         clamp_basin_directions: 0,
+        ridge_escalated: false,
     })
 }
 
@@ -721,6 +726,7 @@ pub(crate) fn factor_spectral_deflated_criterion_row_with_geometry(
             conditioning: conditioning.into(),
         }),
         clamp_basin_directions,
+        ridge_escalated: false,
     }))
 }
 
@@ -884,6 +890,19 @@ pub(crate) fn factor_one_row(
     row_idx: usize,
     evidence_factorization: bool,
 ) -> Result<Array2<f64>, ArrowSchurError> {
+    factor_one_row_with_escalation(row, ridge_t, d, row_idx, evidence_factorization)
+        .map(|result| result.factor)
+}
+
+/// [`factor_one_row`] with the whole row result, so a caller can read whether the
+/// row's ridge was escalated.
+pub(crate) fn factor_one_row_with_escalation(
+    row: &ArrowRowBlock,
+    ridge_t: f64,
+    d: usize,
+    row_idx: usize,
+    evidence_factorization: bool,
+) -> Result<ArrowRowFactorResult, ArrowSchurError> {
     // Generic / non-evidence callers (CPU/GPU `factor_blocks`, the system.rs
     // assembly loops) supply no gauge directions AND do not install a row-gauge
     // deflation, so they must NOT spectrally discover-and-deflate a flat
@@ -902,7 +921,6 @@ pub(crate) fn factor_one_row(
         false,
         None,
     )
-        .map(|result| result.factor)
 }
 
 pub(crate) fn factor_one_row_result(
@@ -1097,6 +1115,7 @@ pub(crate) fn factor_one_row_result(
                         deflated_directions: Vec::new(),
                         deflation_spectrum: None,
                         clamp_basin_directions: 0,
+                        ridge_escalated: false,
                     };
                 }
                 // Diagonal-ratio condition-number proxy κ(LLᵀ) ≈
@@ -1113,6 +1132,7 @@ pub(crate) fn factor_one_row_result(
                         deflated_directions: Vec::new(),
                         deflation_spectrum: None,
                         clamp_basin_directions: 0,
+                        ridge_escalated: ridge_eff > ridge_t,
                     };
                 }
                 let next = if ridge_eff > 0.0 {
