@@ -6,10 +6,10 @@
 //! whole reconstruction `f = Σ_k a_k(ℓ)·γ_k(t_k)`, cross-atom gate terms included.
 //!
 //! `patchd_residual_third_leg` returned zero for any triple with mixed atom labels
-//! and for any logit unless the gate was ordered Beta–Bernoulli. Meanwhile
-//! `dense_exact_a_theta_adjoint_is_modelled` admits Softmax, and both production
-//! θ-adjoints (`dense_exact_a_logdet_channels` and the bundle's
-//! `logdet_theta_adjoint_from_probes`) pass the data target that switches the leg
+//! and for any logit unless the gate was ordered Beta–Bernoulli, while the outer
+//! gradient of a softmax fit reaches both production θ-adjoints
+//! (`dense_exact_a_logdet_channels` and the bundle's
+//! `logdet_theta_adjoint_from_probes`) with the data target that switches the leg
 //! on. So `∂_ℓj ∂²_tk f = ∂a_k/∂ℓ_j·γ_k''`, nonzero for `j ≠ k`, never reached `dA`.
 //!
 //! The arbiters are central differences of the MATERIALIZED dense `A` at endpoints
@@ -20,7 +20,7 @@
 //! side is allowed to.
 
 use super::*;
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, s};
 
 /// Softmax temperature, deliberately not one.
 const TAU: f64 = 0.7;
@@ -28,12 +28,27 @@ const TAU: f64 = 0.7;
 const STEP: f64 = 1.0e-3;
 /// Rows whose `t` slots are differenced.
 const PROBE_ROWS: [usize; 2] = [0, 3];
+/// Amplitude of the target's offset from the fixture's reconstruction.
+const RESIDUAL_AMPLITUDE: f64 = 0.05;
 
 /// Four periodic atoms under a softmax gate: three free logits per row (so a triple
 /// of three DISTINCT logits exists), unequal gates, harmonic curves whose third
-/// coordinate derivative does not vanish, a target with a component no
-/// reconstruction reaches (so `M r ≠ 0`), and live sparsity, smoothness and ARD
-/// priors.
+/// coordinate derivative does not vanish, a target offset from the reconstruction
+/// (so `M r ≠ 0`), and live sparsity, smoothness and ARD priors.
+///
+/// Every row factor stays off the deflation stratum by construction:
+/// - Every coordinate lies within a sixth of a period of the chart origin, where the
+///   periodic ARD curvature `α·cos(2πt) ≥ α/2` is positive and its majorizer
+///   `α·softplus_{τ₀}(cos 2πt)` equals it, so every coordinate direction carries
+///   prior curvature whatever the data rank. On the concave half that majorizer is
+///   numerically zero, and a row with more such coordinates than its data Jacobian
+///   resolves has an exactly singular `H_tt`.
+/// - The decoders' phase frequency in the output column depends on the basis
+///   column, so the decoded curves do not all lie in one plane of the outputs, as
+///   they would for a decoder that is a sum of two outer products.
+/// - The residual is small beside that curvature.
+///
+/// The premises in the tests check the outcome instead of assuming it.
 fn softmax_residual_fixture() -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho) {
     let n = 6usize;
     let p = 3usize;
@@ -48,15 +63,22 @@ fn softmax_residual_fixture() -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho) 
         (0..k_atoms).map(|_| Array2::<f64>::zeros((n, 1))).collect();
     for row in 0..n {
         for atom in 0..k_atoms {
-            coords[atom][[row, 0]] =
-                ((row as f64 + 0.35) / n as f64 + 0.23 * atom as f64).fract();
+            let t = (0.2 * (row as f64 + 0.35) / n as f64 + 0.04 * atom as f64 - 0.15)
+                .rem_euclid(1.0);
+            assert!(
+                (2.0 * std::f64::consts::PI * t).cos() > 0.0,
+                "#2933 F01 premise: coordinate {t} of atom {atom} in row {row} must sit on the \
+                 convex half of the periodic ARD prior"
+            );
+            coords[atom][[row, 0]] = t;
             logits[[row, atom]] = 0.9 * (1.3 * row as f64 + 0.8 * atom as f64 + 0.2).sin();
         }
     }
     let mut target = Array2::<f64>::zeros((n, p));
     for row in 0..n {
         for out_col in 0..p {
-            target[[row, out_col]] = 0.2 * (((row * 7 + out_col * 3) as f64) * 0.7).sin();
+            target[[row, out_col]] =
+                RESIDUAL_AMPLITUDE * (((row * 7 + out_col * 3) as f64) * 0.7).sin();
         }
     }
     let mut atoms = Vec::with_capacity(k_atoms);
@@ -64,8 +86,12 @@ fn softmax_residual_fixture() -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho) 
         let (phi, jet) = evaluator
             .evaluate(coords[atom].view())
             .expect("fixture coords are finite points of the unit-period circle chart");
+        // The phase's frequency in `out_col` depends on `basis_col`, so the rows of
+        // the decoder are not confined to one plane of the outputs.
         let decoder = Array2::from_shape_fn((m, p), |(basis_col, out_col)| {
-            0.4 * (1.7 * atom as f64 + 1.1 * basis_col as f64 + 0.6 * out_col as f64 + 0.3).sin()
+            let (basis_col, out_col) = (basis_col as f64, out_col as f64);
+            0.4 * (1.7 * atom as f64 + 1.1 * basis_col + (0.6 + 0.8 * basis_col) * out_col + 0.3)
+                .sin()
         });
         let decoded = phi.dot(&decoder);
         for row in 0..n {
@@ -137,6 +163,39 @@ fn deflated_direction_count(term: &SaeManifoldTerm, cache: &ArrowFactorCache) ->
     (0..term.n_obs())
         .map(|row| cache.deflated_row_directions[row].len())
         .sum()
+}
+
+/// #2933 F01 premise — every row block of the materialized exact `A` is positive
+/// definite, the property the fixture builds in. The deflation premises at the
+/// anchor and at every finite-difference endpoint separately check that no row
+/// factor changes stratum.
+fn assert_exact_row_blocks_positive_definite(
+    anchor: &SaeManifoldTerm,
+    target: &Array2<f64>,
+    rho: &SaeManifoldRho,
+    cache: &ArrowFactorCache,
+) {
+    let a = anchor
+        .materialize_exact_hessian_dense(rho, target.view(), cache)
+        .expect("dense exact A at the anchor");
+    for row in 0..anchor.n_obs() {
+        let q = cache.row_dims[row];
+        let base = cache.row_offsets[row];
+        let block = a.slice(s![base..base + q, base..base + q]).to_owned();
+        let (eigenvalues, _) = block
+            .eigh(Side::Lower)
+            .expect("a row block of the symmetric exact A");
+        let smallest = eigenvalues.iter().copied().fold(f64::INFINITY, f64::min);
+        let largest = eigenvalues.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        eprintln!(
+            "[#2933 F01 premise] row={row} exact A_tt eigenvalues in [{smallest:.6e}, {largest:.6e}]"
+        );
+        assert!(
+            smallest > 0.0,
+            "#2933 F01 premise: row {row}'s exact A_tt must be positive definite by construction \
+             (eigenvalues in [{smallest:.3e}, {largest:.3e}])"
+        );
+    }
 }
 
 fn log_abs_det(a: &Array2<f64>) -> f64 {
@@ -300,6 +359,7 @@ fn softmax_exact_a_derivative_entries_match_finite_difference_2933() {
         0,
         "#2933 F01 premise: the anchor must be deflation-free"
     );
+    assert_exact_row_blocks_positive_definite(&anchor, &target, &rho, &cache);
     let dim = cache.delta_t_len() + cache.k;
     let mut readouts: Vec<(TripleKind, CategoryReadout)> = Vec::new();
     for row in PROBE_ROWS {
@@ -422,6 +482,7 @@ fn softmax_exact_a_logdet_theta_adjoint_matches_finite_difference_2933() {
         0,
         "#2933 F01 premise: the anchor must be deflation-free"
     );
+    assert_exact_row_blocks_positive_definite(&anchor, &target, &rho, &cache);
     let a = anchor
         .materialize_exact_hessian_dense(&rho, target.view(), &cache)
         .expect("dense exact A at the anchor");
@@ -502,6 +563,7 @@ fn from_probes_theta_adjoint_carries_the_softmax_residual_third_jet_2933() {
         0,
         "#2933 F01 premise: the anchor must be deflation-free"
     );
+    assert_exact_row_blocks_positive_definite(&anchor, &target, &rho, &cache);
     assert!(
         cache.beta_schur_conditioning.is_none(),
         "#2933 F01 premise: a reduced-Schur basin reweights the from-probes row inverse, so the \
@@ -567,16 +629,38 @@ fn from_probes_theta_adjoint_carries_the_softmax_residual_third_jet_2933() {
             .expect("from-probes exact-A θ-adjoint without the data target"),
     );
     let largest = dense_leg.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+    // Every triple contracted into a logit slot holds a logit, so a leg that drops
+    // the logit triples reads exactly zero there.
+    let mut logit_leg_largest = 0.0_f64;
+    for row in 0..anchor.n_obs() {
+        let base = cache.row_offsets[row];
+        let vars = anchor
+            .row_vars_for_cache_row(row, &cache)
+            .expect("row variables of a fixture row");
+        for (position, var) in vars.iter().enumerate() {
+            if matches!(var, SaeLocalRowVar::Logit { .. }) {
+                logit_leg_largest = logit_leg_largest.max(dense_leg[base + position].abs());
+            }
+        }
+    }
     let gap = dense_leg
         .iter()
         .zip(&probes_leg)
         .map(|(x, y)| (x - y).abs())
         .fold(0.0_f64, f64::max);
-    eprintln!("[#2933 F01 probes] max|dense leg|={largest:.6e} max|probes − dense|={gap:.6e}");
+    eprintln!(
+        "[#2933 F01 probes] max|dense leg|={largest:.6e} max|dense leg on logit slots|=\
+         {logit_leg_largest:.6e} max|probes − dense|={gap:.6e}"
+    );
     assert!(
         largest >= 1.0e-3,
         "#2933 F01: the residual third leg must carry real weight on this fixture \
          (max|leg|={largest:.3e}), or the parity below is a zero-vs-zero comparison"
+    );
+    assert!(
+        logit_leg_largest >= 1.0e-3,
+        "#2933 F01: the residual third leg must carry real weight on the logit slots \
+         (max|leg|={logit_leg_largest:.3e}), or the parity below cannot see the logit triples"
     );
     assert!(
         gap <= 1.0e-9 * (1.0 + largest),
