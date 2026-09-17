@@ -301,12 +301,18 @@ def s0_checkpoint(run, step, args):
         omegas = [2 * math.pi * (int(k) + 1) / p for k in top]
         null_omegas = [2 * math.pi * (int(k) + 1) / p for k in bottom]
         top_basis = torch.stack([v for k in top for v in (cos_coef[k], sin_coef[k])], dim=1)
-        bottom_basis = torch.stack([v for k in bottom for v in (cos_coef[k], sin_coef[k])], dim=1)
+        # The bottom planes are projected off span(top planes): U_null^T vanishes on every key
+        # direction, so the null edit is the identity there and moves only off-key content.
+        key_projector = top_basis @ torch.linalg.pinv(top_basis)
+        bottom_basis = (torch.eye(table.shape[1], dtype=torch.float64) - key_projector) @ torch.stack(
+            [v for k in bottom for v in (cos_coef[k], sin_coef[k])], dim=1)
         random_basis = torch.linalg.qr(torch.randn(table.shape[1], 2 * kept, generator=generator, dtype=torch.float64)).Q
         svals = torch.linalg.svdvals(top_basis)
+        null_svals = torch.linalg.svdvals(bottom_basis)
         entry = {"K": kept, "frequencies": [int(k) + 1 for k in top],
                  "plane_basis_condition": (svals[0] / svals[-1]).item(), "sites": {}}
-        null_entry = {"K": kept, "bottom_frequencies": [int(k) + 1 for k in bottom], "sites": {}}
+        null_entry = {"K": kept, "bottom_frequencies": [int(k) + 1 for k in bottom],
+                      "bottom_basis_condition": (null_svals[0] / null_svals[-1]).item(), "sites": {}}
 
         def edited_tables(basis, angles, sites):
             def tables_of(s):
@@ -327,7 +333,7 @@ def s0_checkpoint(run, step, args):
             entry["sites"][name] = run_edits(
                 model, rows, shifted_reference, edited_tables(top_basis, omegas, sites), shifts, device)
             null_entry["sites"][name] = {
-                "bottom_planes_vs_unshifted": run_edits(
+                "bottom_planes_off_key_span_vs_unshifted": run_edits(
                     model, rows, unshifted_reference, edited_tables(bottom_basis, null_omegas, sites), shifts, device),
                 "random_planes_top_angles_vs_shifted": run_edits(
                     model, rows, shifted_reference, edited_tables(random_basis, omegas, sites), shifts, device),
