@@ -71,9 +71,11 @@
 //! Each code is also one self-delimiting message through `codec`'s integer codes, so
 //! a library appends it and a decoder reads it back without a real-valued field:
 //!
-//! * [`LatticeCode::write`] sends the coordinate count as `count + 1`, the declared
-//!   precision `p` as `zigzag(p) + 1`, and each index `k` as `zigzag(k) + 1`, all in
-//!   the prefix integer code. `zigzag` maps `0, −1, 1, −2, …` onto `0, 1, 2, 3, …`.
+//! * [`LatticeCode::write`] sends the coordinate count as `count + 1` in the prefix
+//!   integer code, then the declared precision `p` and each index `k` in `codec`'s
+//!   signed prefix integer code.
+//!   [`LatticeCode::index_bits`] is the length of the index codewords alone, without
+//!   that header.
 //! * [`QuotientCode::write`] sends the count as `count + 1` and the resolution as
 //!   `b + 1` in the prefix integer code, then each index as a fixed index into the
 //!   `2^b` cells: exactly [`QuotientCode::index_bits`] after the header. The period
@@ -85,8 +87,9 @@
 //! to the same representative and carry no coordinate, so it is refused.
 
 use super::codec::{
-    BitReader, BitString, decode_fixed_index, decode_prefix_integer, encode_fixed_index,
-    encode_prefix_integer,
+    BitReader, BitString, decode_fixed_index, decode_prefix_integer, decode_signed_prefix_integer,
+    encode_fixed_index, encode_prefix_integer, encode_signed_prefix_integer,
+    signed_prefix_integer_len_bits,
 };
 use super::supports::EvidenceStatus;
 use gam_linalg::roundoff::UNIT_ROUNDOFF;
@@ -377,29 +380,17 @@ impl DecodableArtifact for QuotientCode {
     }
 }
 
-/// `k -> 2k` for `k >= 0` and `2|k| - 1` for `k < 0`: a bijection of the integers onto
-/// the naturals, so `zigzag(k) + 1` is a positive integer the prefix code sends. Every
-/// index and exponent here has magnitude at most `2^53`, whose image is at most `2^54`.
-fn zigzag(value: i64) -> u64 {
-    ((value << 1) ^ (value >> 63)) as u64
-}
-
-/// The inverse of [`zigzag`].
-fn unzigzag(value: u64) -> i64 {
-    ((value >> 1) as i64) ^ -((value & 1) as i64)
-}
-
 impl LatticeCode {
-    /// Append the code as one message in the prefix integer code: the count as
-    /// `count + 1`, the declared precision as `zigzag(p) + 1`, then each index as
-    /// `zigzag(k) + 1` (see the module note).
+    /// Append the code as one message. The count goes as `count + 1` in the prefix integer
+    /// code; the declared precision and each index go in the signed prefix integer code
+    /// (see the module note).
     pub fn write(&self, out: &mut BitString) -> Result<(), String> {
         encode_prefix_integer(out, self.indices.len() as u64 + 1)
             .map_err(|error| format!("LatticeCode::write: count: {error}"))?;
-        encode_prefix_integer(out, zigzag(i64::from(self.precision.fraction_bits)) + 1)
+        encode_signed_prefix_integer(out, i64::from(self.precision.fraction_bits))
             .map_err(|error| format!("LatticeCode::write: precision: {error}"))?;
         for (position, &index) in self.indices.iter().enumerate() {
-            encode_prefix_integer(out, zigzag(index) + 1)
+            encode_signed_prefix_integer(out, index)
                 .map_err(|error| format!("LatticeCode::write: index {position}: {error}"))?;
         }
         Ok(())
@@ -412,11 +403,8 @@ impl LatticeCode {
         let count = decode_prefix_integer(reader)
             .map_err(|error| format!("LatticeCode::read: count: {error}"))?
             - 1;
-        let exponent = unzigzag(
-            decode_prefix_integer(reader)
-                .map_err(|error| format!("LatticeCode::read: precision: {error}"))?
-                - 1,
-        );
+        let exponent = decode_signed_prefix_integer(reader)
+            .map_err(|error| format!("LatticeCode::read: precision: {error}"))?;
         let fraction_bits = i32::try_from(exponent).map_err(|error| {
             format!("LatticeCode::read: precision exponent {exponent}: {error}")
         })?;
@@ -429,11 +417,24 @@ impl LatticeCode {
         }
         let mut indices = Vec::with_capacity(count as usize);
         for position in 0..count {
-            let value = decode_prefix_integer(reader)
+            let index = decode_signed_prefix_integer(reader)
                 .map_err(|error| format!("LatticeCode::read: index {position}: {error}"))?;
-            indices.push(unzigzag(value - 1));
+            indices.push(index);
         }
         Self::from_indices(precision, indices)
+    }
+
+    /// The exact length of the index codewords in the signed prefix integer code. It counts
+    /// the indices only, not the count and precision header that [`Self::write`] adds,
+    /// mirroring [`QuotientCode::index_bits`]. A written message is its header plus this
+    /// many bits.
+    pub fn index_bits(&self) -> Result<u64, String> {
+        let mut bits = 0_u64;
+        for (position, &index) in self.indices.iter().enumerate() {
+            bits += signed_prefix_integer_len_bits(index)
+                .map_err(|error| format!("LatticeCode::index_bits: index {position}: {error}"))?;
+        }
+        Ok(bits)
     }
 }
 
@@ -920,17 +921,10 @@ mod tests {
             .expect("a positive integer has a prefix codeword")
     }
 
-    #[test]
-    fn zigzag_maps_the_integers_onto_the_naturals_and_back() {
-        let limit = INDEX_LIMIT as i64;
-        for value in [-limit, -2, -1, 0, 1, 2, limit] {
-            assert_eq!(unzigzag(zigzag(value)), value);
-        }
-        assert_eq!(
-            [zigzag(0), zigzag(-1), zigzag(1), zigzag(-2), zigzag(2)],
-            [0_u64, 1, 2, 3, 4]
-        );
-        assert_eq!(zigzag(limit), 1_u64 << 54);
+    /// `L_s(value)`: the signed prefix code length of a lattice index or precision exponent.
+    fn signed_bits(value: i64) -> u64 {
+        signed_prefix_integer_len_bits(value)
+            .expect("a representable integer has a signed codeword")
     }
 
     #[test]
@@ -948,17 +942,33 @@ mod tests {
             let mut message = BitString::new();
             code.write(&mut message).expect("a lattice code writes");
             let expected_bits = prefix_bits(indices.len() as u64 + 1)
-                + prefix_bits(zigzag(i64::from(fraction_bits)) + 1)
-                + indices
-                    .iter()
-                    .map(|&index| prefix_bits(zigzag(index) + 1))
-                    .sum::<u64>();
+                + signed_bits(i64::from(fraction_bits))
+                + indices.iter().map(|&index| signed_bits(index)).sum::<u64>();
             assert_eq!(message.len_bits(), expected_bits);
+            // The header is the count and the declared precision. index_bits is the rest.
+            let header =
+                prefix_bits(indices.len() as u64 + 1) + signed_bits(i64::from(fraction_bits));
+            assert_eq!(message.len_bits(), header + code.index_bits().expect("index bits"));
             let mut reader = message.reader();
             let decoded = LatticeCode::read(&mut reader).expect("the message reads back");
             assert!(reader.finish().is_ok());
             assert_eq!(decoded, code);
         }
+    }
+
+    #[test]
+    fn lattice_index_bits_count_the_index_codewords_and_not_the_header() {
+        let unit = DeclaredPrecision::new(0).expect("unit step");
+        // Hand pin: the omega lengths of zigzag(k) + 1 for k = 0, -1, 1, -2 are 1, 3, 3, 6.
+        let code = LatticeCode::from_indices(unit, vec![0, -1, 1, -2]).expect("indices decode");
+        assert_eq!(code.index_bits(), Ok(13));
+        // An empty code has no index bits, but its message still carries its header: count 0
+        // as omega(1), 1 bit, and precision 0 as omega(zigzag(0) + 1), 1 bit.
+        let empty = LatticeCode::from_indices(unit, Vec::new()).expect("an empty code");
+        assert_eq!(empty.index_bits(), Ok(0));
+        let mut message = BitString::new();
+        empty.write(&mut message).expect("an empty code writes");
+        assert_eq!(message.len_bits(), 2);
     }
 
     #[test]
@@ -980,7 +990,7 @@ mod tests {
         // A header announcing 1000 indices followed by 8 bits is refused before allocating.
         let mut hostile = BitString::new();
         encode_prefix_integer(&mut hostile, 1000 + 1).expect("count codeword");
-        encode_prefix_integer(&mut hostile, zigzag(2) + 1).expect("precision codeword");
+        encode_signed_prefix_integer(&mut hostile, 2).expect("precision codeword");
         hostile.push_bits(0xFF, 8).expect("eight bits");
         let refusal = LatticeCode::read(&mut hostile.reader()).expect_err("count beyond the message");
         assert!(refusal.contains("remain"), "{refusal}");
