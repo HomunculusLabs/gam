@@ -291,34 +291,16 @@ fn standard_null_space_metadata(
         ));
     }
     let p = topology.coefficient_dim;
-    if topology.penalties.is_empty() {
-        return Ok((0, 0.0));
-    }
-    let mut penalty = Array2::<f64>::zeros((p, p));
-    for (idx, block) in topology.penalties.iter().enumerate() {
-        let range = block.col_range.clone();
-        if range.start > range.end
-            || range.end > p
-            || block.local.nrows() != range.len()
-            || block.local.ncols() != range.len()
-        {
-            return Err(format!(
-                "null-space Hessian logdet penalty {idx} shape mismatch: range {}..{}, local {}x{}, p={p}",
-                range.start,
-                range.end,
-                block.local.nrows(),
-                block.local.ncols()
-            ));
-        }
-        penalty
-            .slice_mut(s![range.clone(), range])
-            .scaled_add(1.0, &block.local);
-    }
-    let (null_basis, _) = gam_linalg::faer_ndarray::rrqr_nullspace_basis(
-        &penalty,
-        gam_linalg::faer_ndarray::default_rrqr_rank_alpha(),
-    )
-    .map_err(|err| format!("failed to compute penalty null-space basis: {err}"))?;
+    let null_basis = if topology.penalties.is_empty() {
+        // No penalty block touches any coefficient, so the whole raw space is the
+        // penalty null space and the normalizer runs over every direction. This
+        // used to return q = 0, which switched the normalizer off for exactly the
+        // fits whose null space is largest: `y ~ 1` scored without the intercept
+        // direction that `y ~ x` carries.
+        Array2::<f64>::eye(p)
+    } else {
+        standard_penalty_null_basis(topology, p)?
+    };
     let q = null_basis.ncols();
     if q == 0 {
         return Ok((0, 0.0));
@@ -392,6 +374,39 @@ fn standard_null_space_metadata(
     } else {
         Err(format!("null-space Hessian logdet is not finite: {logdet}"))
     }
+}
+
+/// A basis for the raw null space of the summed realized penalty blocks.
+fn standard_penalty_null_basis(
+    topology: &RealizedRawPenaltyTopology,
+    p: usize,
+) -> Result<Array2<f64>, String> {
+    let mut penalty = Array2::<f64>::zeros((p, p));
+    for (idx, block) in topology.penalties.iter().enumerate() {
+        let range = block.col_range.clone();
+        if range.start > range.end
+            || range.end > p
+            || block.local.nrows() != range.len()
+            || block.local.ncols() != range.len()
+        {
+            return Err(format!(
+                "null-space Hessian logdet penalty {idx} shape mismatch: range {}..{}, local {}x{}, p={p}",
+                range.start,
+                range.end,
+                block.local.nrows(),
+                block.local.ncols()
+            ));
+        }
+        penalty
+            .slice_mut(s![range.clone(), range])
+            .scaled_add(1.0, &block.local);
+    }
+    let (null_basis, _) = gam_linalg::faer_ndarray::rrqr_nullspace_basis(
+        &penalty,
+        gam_linalg::faer_ndarray::default_rrqr_rank_alpha(),
+    )
+    .map_err(|err| format!("failed to compute penalty null-space basis: {err}"))?;
+    Ok(null_basis)
 }
 
 fn response_for_standard_payload(formula: &str, dataset: &EncodedDataset) -> Option<Array1<f64>> {
@@ -2999,6 +3014,70 @@ mod standard_payload_penalty_topology_tests {
     #[test]
     fn flexible_probit_payload_preserves_its_binomial_response_scale_2748() {
         check_flexible_binomial_payload(StandardLink::Probit, "probit");
+    }
+
+    /// A deterministic Gaussian fixture: `n = 300`, `y = sin(1.5 x)` plus an
+    /// irrational-rotation perturbation, so no RNG state is involved.
+    fn gaussian_sine_fixture() -> EncodedDataset {
+        const N: usize = 300;
+        let headers = ["y", "x"].into_iter().map(String::from).collect();
+        let rows = (0..N)
+            .map(|row| {
+                let x = -3.0 + 6.0 * row as f64 / (N - 1) as f64;
+                let perturbation = ((row + 1) as f64 * 0.618_033_988_749_894_9).fract() - 0.5;
+                let y = (1.5 * x).sin() + perturbation;
+                StringRecord::from(vec![y.to_string(), x.to_string()])
+            })
+            .collect();
+        encode_recordswith_inferred_schema(headers, rows).expect("encode gaussian sine fixture")
+    }
+
+    /// `y ~ 1` has no penalty block, so its one coefficient is unpenalized and the
+    /// null-space normalizer must run over it exactly as it runs over the
+    /// intercept direction of `y ~ x`, whose slope carries the default ridge. Both
+    /// report `q = 1` and, with unit weights, `log|H_null| = log n`. The empty-
+    /// penalty branch used to report `q = 0` and switch the normalizer off.
+    #[test]
+    fn empty_penalty_fit_normalizes_over_its_unpenalized_intercept_2627() {
+        let dataset = gaussian_sine_fixture();
+        let config = FitConfig::default();
+        let n = dataset.values.nrows() as f64;
+        for formula in ["y ~ 1", "y ~ x"] {
+            let FitResult::Standard(result) = fit_from_formula(formula, &dataset, &config)
+                .unwrap_or_else(|error| panic!("{formula} must fit: {error}"))
+            else {
+                panic!("{formula} did not produce a standard fit");
+            };
+            let raw_dim = result.design.design.ncols();
+            let payload = assemble_standard_payload(StandardPayloadInputs {
+                formula: formula.to_string(),
+                dataset: &dataset,
+                fit_config: &config,
+                result,
+            })
+            .unwrap_or_else(|error| panic!("{formula} payload must assemble: {error}"));
+            let fit = payload
+                .fit_result
+                .expect("standard payload must retain its canonical fit result");
+            assert_eq!(
+                fit.artifacts.null_space_dim,
+                Some(1),
+                "{formula}: only the intercept is unpenalized"
+            );
+            let logdet = fit
+                .artifacts
+                .null_space_logdet
+                .expect("null-space Hessian log-determinant must be published");
+            // The restriction is accepted up to the pullback's own backward-error
+            // limit, sqrt(eps) per raw column, so that is the resolution of the value.
+            let resolution = f64::EPSILON.sqrt() * raw_dim as f64 * n.ln();
+            assert!(
+                (logdet - n.ln()).abs() <= resolution,
+                "{formula}: null-space log-determinant {logdet} is not log n = {} \
+                 (resolution {resolution:e})",
+                n.ln()
+            );
+        }
     }
 }
 
