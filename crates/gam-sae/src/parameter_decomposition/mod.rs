@@ -110,7 +110,7 @@ pub mod operators;
 pub mod precision;
 
 // The typed mechanism program graph and its versioned serialization.
-// [unlanded: program]
+pub mod program;
 
 // Exact component-coordinate MLP program under masks.
 pub mod rewrite;
