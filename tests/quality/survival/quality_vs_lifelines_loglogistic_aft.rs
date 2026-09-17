@@ -179,7 +179,6 @@ fn gam_loglogistic_aft_matches_lifelines_on_haberman_ages() {
         // baseline-shape directions that are unnecessary for an affine
         // log-time AFT surface and can dominate small-time survivor error.
         time_num_internal_knots: 2,
-        outer_max_iter: Some(80),
         ..FitConfig::default()
     };
     let result =

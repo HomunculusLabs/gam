@@ -211,7 +211,6 @@ fn encode_poisson_training(points: &[WebPoint], seed: u64) -> gam::data::Encoded
 fn web_fit_config(family: &str) -> FitConfig {
     FitConfig {
         family: Some(family.to_string()),
-        outer_max_iter: Some(35),
         ..FitConfig::default()
     }
 }

@@ -67,7 +67,12 @@ pub fn canonical_standard_fit_options(
         // benchmarks. Lower-level callers that explicitly need the escalation opt
         // in elsewhere (`skip_rho_posterior_inference: false`).
         skip_rho_posterior_inference: true,
-        max_iter: config.outer_max_iter.unwrap_or(200),
+        // The count for the loops that still take one: the negative-binomial
+        // alternation, the expectile LAWS iterations, the bounded-effect
+        // custom-family search and the latent-coordinate joint search. Each
+        // refuses with a typed error when it runs out without its certificate.
+        // The standard REML/LAML search takes no count (#2817).
+        max_iter: 200,
         // Outer REML/LAML smoothing-selection tolerance. `1e-10` (effective
         // projected-gradient threshold ≈ 1e-7) resolves λ̂ to optimiser
         // precision and restores the `w=c ⇔ c-fold replication` invariance in

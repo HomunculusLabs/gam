@@ -249,9 +249,6 @@ impl FitConfig {
             .survival_time_anchor
             .map(crate::survival::validate_survival_time_anchor_override)
             .transpose()?;
-        if self.outer_max_iter == Some(0) {
-            return Err("outer_max_iter must be >= 1".to_string());
-        }
         self.frailty.validate().map_err(|error| error.to_string())?;
         self.spatial_optimization.validate()?;
         let likelihood_mode = parse_survival_likelihood_mode(self.resolved_survival_likelihood())?;
@@ -309,14 +306,6 @@ mod tests {
 
     #[test]
     fn resolve_rejects_invalid_shared_fields() {
-        assert!(
-            FitConfig {
-                outer_max_iter: Some(0),
-                ..FitConfig::default()
-            }
-            .resolve()
-            .is_err()
-        );
         assert!(
             FitConfig {
                 weight_column: Some("   ".to_string()),

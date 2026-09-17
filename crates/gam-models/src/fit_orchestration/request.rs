@@ -609,13 +609,6 @@ pub struct FitConfig {
 
     /// Enable Firth bias reduction for standard single-parameter families.
     pub firth: bool,
-    /// Optional iteration cap for the fitting loops that still take one: the
-    /// custom-family outer search, the negative-binomial alternation, the law
-    /// iterations and the latent-coordinate joint search. `None` uses the
-    /// production default. Since #2817 the standard REML/LAML smoothing-parameter
-    /// search takes no count: it stops on its stationarity and progress
-    /// certificates.
-    pub outer_max_iter: Option<usize>,
 
     /// GPU backend selection policy. `Auto` uses supported device kernels for
     /// large workloads, `Off` pins execution to CPU kernels, and `Required` fails
@@ -773,7 +766,6 @@ impl Default for FitConfig {
             spatial_optimization: SpatialLengthScaleOptimizationOptions::default(),
             transformation_normal: false,
             firth: false,
-            outer_max_iter: None,
             gpu_policy: gam_gpu::GpuPolicy::Auto,
             resource_policy: None,
             group_metadata: None,

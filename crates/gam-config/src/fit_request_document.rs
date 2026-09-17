@@ -124,8 +124,6 @@ pub struct FitRequestConfigDocument {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offset: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub outer_max_iter: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub analytic_penalties: Option<AnalyticPenaltiesDocument>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub precision_hyperpriors: Option<BTreeMap<String, PrecisionHyperpriorDocument>>,

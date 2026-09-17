@@ -1,6 +1,5 @@
 //! Regression for #874: `fit()` must TERMINATE on a cyclic spline
-//! (`s(x, bs='cc')`) whose period is left to default to the data range, even
-//! with a small `outer_max_iter`.
+//! (`s(x, bs='cc')`) whose period is left to default to the data range.
 //!
 //! ## The bug
 //!
@@ -16,13 +15,10 @@
 //! `periodic_formula_integration.rs`) always fits cyclic smooths with an
 //! EXPLICIT period (`period_start=…, period_end=…`) and the production default
 //! outer-iteration budget. This repro exercises the previously-untested
-//! combination that hangs:
-//!
-//!   1. `s(x, bs='cc')` with **no** period option, so the period defaults to the
-//!      data range `[min(x), max(x)]` (mgcv `bs="cc"` semantics). The data point
-//!      at `x = max` then wraps onto `x = min`.
-//!   2. an explicit small `outer_max_iter`, which must be an unconditional
-//!      termination backstop regardless of basis.
+//! regime that hangs: `s(x, bs='cc')` with **no** period option, so the period
+//! defaults to the data range `[min(x), max(x)]` (mgcv `bs="cc"` semantics). The
+//! data point at `x = max` then wraps onto `x = min`. The `outer_max_iter` option
+//! of the original repro is deleted (#2957).
 //!
 //! ## What this test asserts
 //!
@@ -86,12 +82,10 @@ fn cyclic_bs_cc_default_period_fit_terminates_and_is_periodic() {
             (lo.min(x), hi.max(x))
         });
 
-    // Exactly the failing repro: cyclic basis via the mgcv `bs='cc'` idiom, NO
-    // explicit period (defaults to the data range), and a small outer-iteration
-    // budget that must guarantee termination.
+    // The failing repro: cyclic basis via the mgcv `bs='cc'` idiom and NO
+    // explicit period (defaults to the data range).
     let cfg = FitConfig {
         family: Some("gaussian".to_string()),
-        outer_max_iter: Some(12),
         ..FitConfig::default()
     };
 
@@ -133,7 +127,7 @@ fn cyclic_bs_cc_default_period_fit_terminates_and_is_periodic() {
 fn noncyclic_control_on_same_data_terminates() {
     // Control arm: the SAME data fit with an ordinary (non-cyclic) smooth must
     // also return. This isolates #874 to the cyclic path — the data is
-    // well-posed and the small outer budget is honored by the non-cyclic route.
+    // well-posed.
     init_parallelism();
 
     let n = 120usize;
@@ -141,7 +135,6 @@ fn noncyclic_control_on_same_data_terminates() {
 
     let cfg = FitConfig {
         family: Some("gaussian".to_string()),
-        outer_max_iter: Some(12),
         ..FitConfig::default()
     };
 

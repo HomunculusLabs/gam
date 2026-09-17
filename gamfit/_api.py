@@ -881,8 +881,7 @@ def fit(
                        constraints={"s(x)": "monotone_increasing"})
     config:
         Request fields that have no dedicated keyword, such as
-        ``outer_max_iter`` (a positive integer cap on outer
-        smoothing-parameter iterations) or ``group_metadata``. A key that
+        ``group_metadata`` or ``precompute_conformal``. A key that
         duplicates a dedicated keyword is refused.
     latents:
         Mapping from formula symbol to :class:`gamfit.LatentCoord`. This is

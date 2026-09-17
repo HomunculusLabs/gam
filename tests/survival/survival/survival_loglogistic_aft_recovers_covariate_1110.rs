@@ -112,7 +112,6 @@ fn loglogistic_aft_recovers_location_slope_not_pinned_to_zero() {
         // time-penalty null space rank > 1, so the reduced warp took the GENERAL
         // (free-warp + derivative-guard) path rather than the clean rank-1 gauge.
         time_num_internal_knots: 2,
-        outer_max_iter: Some(80),
         ..FitConfig::default()
     };
     let result =

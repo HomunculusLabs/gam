@@ -132,7 +132,6 @@ fn survival_location_scale_constant_scale_fit_terminates_1389() {
         survival_likelihood: Some("location-scale".to_string()),
         survival_distribution: "gaussian".to_string(),
         time_num_internal_knots: 2,
-        outer_max_iter: Some(80),
         ..FitConfig::default()
     };
 

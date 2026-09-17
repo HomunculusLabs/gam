@@ -201,7 +201,6 @@ fn gam_lognormal_location_scale_aft_smooth_matches_survreg() {
         // gauge-degenerate orbit to certify even though an affine log-time
         // transform is enough for the reference-quality comparison.
         time_num_internal_knots: 2,
-        outer_max_iter: Some(80),
         ..FitConfig::default()
     };
     let result = fit_from_formula(r#"Surv(t, event) ~ x + s(z, bs="tp", k=10)"#, &ds, &cfg)

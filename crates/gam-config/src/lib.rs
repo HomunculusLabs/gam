@@ -244,9 +244,6 @@ pub(crate) fn resolve_fit_request_config(
     if let Some(flag) = json_config.firth {
         fit_config.firth = flag;
     }
-    if let Some(value) = json_config.outer_max_iter {
-        fit_config.outer_max_iter = Some(value);
-    }
     if let Some(root) = json_config.persistent_warm_start_root {
         fit_config = fit_config.with_persistent_warm_start_root(root);
     }
@@ -409,6 +406,22 @@ mod tests {
 
     fn canonical_fit_config(config: FitConfig) -> String {
         format!("{config:#?}")
+    }
+
+    /// #2957: `config={"outer_max_iter": 1}` was accepted, yet the standard
+    /// REML/LAML search takes no count (#2817) and the loops that read it could
+    /// only refuse on exhausting it. The option is deleted, so the document
+    /// refuses the key by name instead of accepting a cap nothing honors.
+    #[test]
+    fn outer_max_iter_is_refused_by_the_wire_document_2957() {
+        let error = serde_json::from_value::<FitRequestConfigDocument>(json!({
+            "outer_max_iter": 1
+        }))
+        .expect_err("the wire document must refuse outer_max_iter");
+        assert!(
+            error.to_string().contains("unknown field `outer_max_iter`"),
+            "{error}"
+        );
     }
 
     /// #2633: the conformal-precompute switch must reach `FitConfig` through the
@@ -635,18 +648,16 @@ mod tests {
                 }),
             },
             ParityCase {
-                name: "firth transformation normal outer iterations and adaptive regularization",
+                name: "firth transformation normal",
                 cli: {
                     let mut input = base_cli();
                     input.firth = true;
                     input.transformation_normal = true;
-                    input.outer_max_iter = Some(7);
                     input
                 },
                 json: json!({
                     "firth": true,
-                    "transformation_normal": true,
-                    "outer_max_iter": 7
+                    "transformation_normal": true
                 }),
             },
             ParityCase {

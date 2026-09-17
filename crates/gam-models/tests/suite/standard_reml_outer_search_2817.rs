@@ -20,7 +20,8 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand_distr::{Distribution, Normal, Uniform};
 
-/// The outer iteration budget handed to the fit, and the bar its total is held to.
+/// The 200-iteration budget every seed ran before #2817, and the bar the fit's
+/// total is held to.
 const MAX_ITER: usize = 200;
 const NOISE_SD: f64 = 0.3;
 
@@ -57,7 +58,6 @@ fn gaussian_additive_fit_outer_search_stops_within_one_budget_2817() {
     let data = encode_recordswith_inferred_schema(headers, rows).expect("encode the #2817 fixture");
     let config = FitConfig {
         family: Some("gaussian".to_string()),
-        outer_max_iter: Some(MAX_ITER),
         ..FitConfig::default()
     };
     let fit = match fit_from_formula(
