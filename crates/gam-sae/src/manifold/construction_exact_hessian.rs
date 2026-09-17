@@ -4697,7 +4697,7 @@ impl SaeManifoldTerm {
     /// and smoothing priors are not invariant along it. Where the orbit really is flat
     /// for the penalized operator its `μ` lands in `[−floor(i), floor(i)]` and the
     /// pseudoinverse discards it, which is what the independent oracle in
-    /// `exact_observed_information_log_det_matches_eigendecomposition_2330` reads.
+    /// `exact_observed_information_log_det_matches_the_pencil_oracle_at_a_pd_root_2330` reads.
     fn exact_hessian_spectral_block(
         operator: Array2<f64>,
         metric: &dyn ExactAPencilMetric,

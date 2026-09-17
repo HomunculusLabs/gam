@@ -101,240 +101,16 @@ mod exact_hessian_fixture_tests {
 mod amortized_encoder_tests {
     use crate::manifold::tests::small_two_atom_periodic_term;
 
-    /// PATH C (#2253) / #2339 DIAGNOSTIC — NAME the FD-kink site the softplus did
-    /// not heal. fix-2253 attributed the smooth×ARD FD instability to the periodic
-    /// `max(V'',0)` cos-basis majorizer clamp; #2339 smoothed that clamp and the
-    /// two FD gates stayed red. This dumps, at the failing tests' frozen-θ̂ eval ρ,
-    /// the per-row SPECTRAL-DEFLATION set (`cache.deflated_row_directions`) and the
-    /// criterion value at ρ−h and ρ+h for every ρ coordinate, so the branch that
-    /// flips across the ±h stencil is named directly. Pure diagnostic — asserts
-    /// only that the caches build and the coord set is non-empty.
-    #[test]
-    fn kink_site_deflation_flip_diagnostic_2339() {
-        use ndarray::{Array1, array};
-        let (term, target, rho, _sc) =
-            super::exact_hessian_fixture_tests::converged_state_with_residual();
-        let mut rho_eval = rho.clone();
-        rho_eval.log_lambda_sparse = -0.5;
-        for v in rho_eval.log_lambda_smooth.iter_mut() {
-            *v = -1.5;
-        }
-        rho_eval.log_ard = vec![array![-1.2_f64], array![-1.0_f64]];
-        let rho = rho_eval;
-        let base = rho.flat_coordinates();
-        let h = 1.0e-5;
-
-        let mut coords: Vec<usize> = Vec::new();
-        for a in 0..rho.log_lambda_smooth.len() {
-            coords.push(rho.smooth_flat_index(a));
-        }
-        for kk in 0..rho.log_ard.len() {
-            for axis in 0..rho.log_ard[kk].len() {
-                let idx = rho.ard_flat_index(kk, axis);
-                if !coords.contains(&idx) {
-                    coords.push(idx);
-                }
-            }
-        }
-        if let Some(sparse) = rho.sparse_flat_index() {
-            coords.push(sparse);
-        }
-        let label = |idx: usize| -> String {
-            if rho.sparse_flat_index() == Some(idx) {
-                "sparse".to_string()
-            } else if (rho.smooth_flat_start()
-                ..rho.smooth_flat_start() + rho.log_lambda_smooth.len())
-                .contains(&idx)
-            {
-                format!("smooth{}", idx - rho.smooth_flat_start())
-            } else {
-                format!("ard@{idx}")
-            }
-        };
-
-        // (value, per-row deflated-direction counts, total deflated, spectrally
-        // deflated rows with their min raw eigenvalue).
-        let dump = |flat: &Array1<f64>| -> (f64, Vec<usize>, usize, Vec<(usize, f64)>) {
-            let r = rho.from_flat(flat.view()).unwrap();
-            let mut t = term.clone();
-            let (value, _loss, cache) = t
-                .penalized_quasi_laplace_criterion_with_cache(
-                    target.view(),
-                    &r,
-                    None,
-                    0,
-                    0.4,
-                    1.0e-6,
-                    1.0e-6,
-                )
-                .expect("diagnostic cache");
-            let per_row: Vec<usize> = cache.deflated_row_directions.iter().map(Vec::len).collect();
-            let total: usize = per_row.iter().sum();
-            let spectra: Vec<(usize, f64)> = cache
-                .deflation_row_spectra
-                .iter()
-                .enumerate()
-                .filter_map(|(i, s)| {
-                    s.as_ref().map(|sp| {
-                        (
-                            i,
-                            sp.raw_evals.iter().copied().fold(f64::INFINITY, f64::min),
-                        )
-                    })
-                })
-                .collect();
-            (value, per_row, total, spectra)
-        };
-
-        for &j in &coords {
-            let mut fm = base.clone();
-            fm[j] -= h;
-            let mut fp = base.clone();
-            fp[j] += h;
-            let (vm, prm, tm, spm) = dump(&fm);
-            let (vp, prp, tp, spp) = dump(&fp);
-            let flipped: Vec<usize> = (0..prm.len().min(prp.len()))
-                .filter(|&i| prm[i] != prp[i])
-                .collect();
-            eprintln!(
-                "KINKDIAG coord {}: value(-h)={vm:.9e} value(+h)={vp:.9e} d(value)={:.3e} | deflated_total {tm}->{tp} | rows_flipped={flipped:?}",
-                label(j),
-                vp - vm
-            );
-            if !spm.is_empty() || !spp.is_empty() {
-                eprintln!("    spectrally-deflated rows (row,min_raw_eval): -h={spm:?} +h={spp:?}");
-            }
-        }
-        assert!(!coords.is_empty(), "coord set must be non-empty");
-    }
-
-    /// #2330 — IFT-residual arbiter. The θ-adjoint `Γ_joint` is exact (arbiter
-    /// green), so the g3 non-conservation lives in `θ̂_ρ,j = −A⁺ g_ρ,j`. This
-    /// tests the leading hypothesis: the #2080-d4 pencil deflation drops the
-    /// near-null component of the DEFLATED t-block `g_ρ` (ARD) while the β-block
-    /// `g_ρ` (smooth) is fully resolved — a built-in smooth↔ARD asymmetry.
-    ///
-    /// `x = A⁺ g_ρ,j`; since `A⁺` deflates, `A·x = P·g_ρ,j` and the residual
-    /// `A·x − g_ρ,j = −(deflated component of g_ρ,j)`. A LARGE ARD residual with a
-    /// ~0 smooth residual is the asymmetry root (`θ̂_ρ,ard` drops a response that
-    /// `θ̂_ρ,smooth` keeps). Also confirms the solve uses the EXACT stationarity
-    /// operator `A = H + ΔC` (`|A·x − g|` small) and not the cached majorizer `H`
-    /// (`|H·x − g|` would then be the small one). Diagnostic: prints the norms.
-    #[test]
-    fn third_order_ift_deflation_residual_2330() {
-        use crate::manifold::arrow_solver::{SaeArrowVector, apply_cached_arrow_hessian};
-        use ndarray::array;
-        let (mut term, target, rho, _stationary_cache) =
-            super::exact_hessian_fixture_tests::converged_state_with_residual();
-        let mut rho_eval = rho.clone();
-        rho_eval.log_lambda_sparse = -0.5;
-        for v in rho_eval.log_lambda_smooth.iter_mut() {
-            *v = -1.5;
-        }
-        rho_eval.log_ard = vec![array![-1.2_f64], array![-1.0_f64]];
-        let rho = rho_eval;
-        let (_value, _loss, cache) = term
-            .penalized_quasi_laplace_criterion_with_cache(
-                target.view(),
-                &rho,
-                None,
-                0,
-                0.4,
-                1.0e-6,
-                1.0e-6,
-            )
-            .expect("deflated fixed-state cache");
-        assert!(
-            cache
-                .deflated_row_directions
-                .iter()
-                .any(|dirs| !dirs.is_empty()),
-            "IFT residual arbiter requires per-row deflation to be present"
-        );
-        let norm = |v: &SaeArrowVector| (v.t.dot(&v.t) + v.beta.dot(&v.beta)).sqrt();
-        let smooth0 = rho.smooth_flat_index(0);
-        let ard0 = rho.ard_flat_index(0, 0);
-        for (name, j) in [("smooth0", smooth0), ("ard0", ard0)] {
-            let g_rho = term
-                .outer_rho_gradient_ift_rhs(&rho, j, &cache)
-                .expect("ift rhs");
-            let x = term
-                .solve_exact_stationarity(&rho, target.view(), &cache, &g_rho)
-                .expect("A+ g_rho");
-            let hx = apply_cached_arrow_hessian(&cache, x.t.view(), x.beta.view()).expect("H x");
-            let dc = term
-                .apply_exact_hessian_minus_b(&rho, target.view(), &cache, &x)
-                .expect("dC x");
-            // A·x = H·x + ΔC·x (the exact stationarity operator A = B + ΔC, B = H).
-            let ax = SaeArrowVector {
-                t: &hx.t + &dc.t,
-                beta: &hx.beta + &dc.beta,
-            };
-            let r_exact = SaeArrowVector {
-                t: &ax.t - &g_rho.t,
-                beta: &ax.beta - &g_rho.beta,
-            };
-            let r_maj = SaeArrowVector {
-                t: &hx.t - &g_rho.t,
-                beta: &hx.beta - &g_rho.beta,
-            };
-            eprintln!(
-                "IFT[{name}] |g_rho|={:.6e} |x|={:.6e} |A.x-g|={:.6e} |H.x-g|={:.6e}",
-                norm(&g_rho),
-                norm(&x),
-                norm(&r_exact),
-                norm(&r_maj)
-            );
-            assert!(
-                norm(&r_exact).is_finite() && norm(&r_maj).is_finite(),
-                "IFT residual arbiter [{name}] produced a non-finite residual"
-            );
-        }
-    }
-
-    /// #2330 — the EXACT observed-information Laplace log-det `log|A|`
-    /// from the strict-Cholesky production path (`exact_observed_information_log_dets`)
-    /// equal the independent dense eigendecomposition oracle `Σ ln λ_i(A)`, and `A`
-    /// is certified positive definite (min eigenvalue > 0) at the converged mode.
-    /// This pins the `log|A|` VALUE the dense capability route ranks against the
-    /// exact observed information `A = ∇²_θθ L`, NOT the majorized surrogate `B`.
-    #[test]
-    fn exact_observed_information_log_det_matches_eigendecomposition_2330() {
-        use ndarray::{Array1, Array2, array};
-        // This module does not `use super::*`; the arbiter is the first test here
-        // to build a `SaeArrowVector`, call `.eigh` (FaerEigh), and name `Side`.
-        use super::{
-            FaerEigh, SaeArrowVector, SaeCriterionError, Side, sae_exact_a_band_edge,
-            sae_exact_a_pencil_resolution,
-        };
-        let (mut term, target, rho, _stationary_cache) =
-            super::exact_hessian_fixture_tests::converged_state_with_residual();
-        let mut rho_eval = rho.clone();
-        rho_eval.log_lambda_sparse = -0.5;
-        for v in rho_eval.log_lambda_smooth.iter_mut() {
-            *v = -1.5;
-        }
-        rho_eval.log_ard = vec![array![-1.2_f64], array![-1.0_f64]];
-        let rho = rho_eval;
-        let (_value, _loss, cache) = term
-            .penalized_quasi_laplace_criterion_with_cache(
-                target.view(),
-                &rho,
-                None,
-                0,
-                0.4,
-                1.0e-6,
-                1.0e-6,
-            )
-            .expect("fixed-theta cache");
-        // Independent oracle: materialize A densely via the exact-Hessian apply,
-        // then eigendecompose FIRST. The eigen spectrum decides which parity to
-        // assert — because a majorizer-converged fixture mode need NOT be an
-        // exact-A maximum. `B`-Newton stops where `B`'s gradient vanishes; in the
-        // ARD negative-curvature region the exact `A = B + ΔC` (ΔC subtracts the
-        // clamped `min(V'',0)` the majorizer drops) can be INDEFINITE there. That
-        // indefinite point is exactly the #2330 mispricing made visible — not a
-        // true max — so `½log|A|` is undefined and the typed refusal MUST fire.
+    /// The exact observed information `A` materialized by columns of the production apply,
+    /// symmetrized, for the pencil oracles below.
+    fn dense_exact_hessian(
+        term: &super::SaeManifoldTerm,
+        rho: &super::SaeManifoldRho,
+        target: ndarray::ArrayView2<'_, f64>,
+        cache: &super::ArrowFactorCache,
+    ) -> ndarray::Array2<f64> {
+        use super::SaeArrowVector;
+        use ndarray::{Array1, Array2};
         let total_t = cache.delta_t_len();
         let k = cache.k;
         let dim = total_t + k;
@@ -350,7 +126,7 @@ mod amortized_encoder_tests {
                 unit.beta[col - total_t] = 1.0;
             }
             let av = term
-                .apply_exact_hessian(&rho, target.view(), &cache, &unit)
+                .apply_exact_hessian(rho, target, cache, &unit)
                 .expect("exact-Hessian apply");
             if col < total_t {
                 unit.t[col] = 0.0;
@@ -364,113 +140,205 @@ mod amortized_encoder_tests {
                 a[[total_t + r, col]] = av.beta[r];
             }
         }
-        let sym = (&a + &a.t()) * 0.5;
-        let result = term.exact_observed_information_log_dets(&rho, target.view(), &cache);
-        // #2933 F07 — the value classifies the PENCIL `(A, Φ)`, `Φ` the evidence factor. This
-        // oracle keeps its own operands: its own dense `A` from column applies, its own dense
-        // `Φ` and `Φ − B_raw` from metric applies, and a symmetric square-root reduction
-        // `Φ^{-1/2}AΦ^{-1/2}` where production whitens with the cache's block Cholesky factor.
-        // It shares only the scalar band rule, so a second copy of the rule cannot drift.
+        (&a + &a.t()) * 0.5
+    }
+
+    /// #2330 / #2933 F07 — at a root whose pencil has no resolved negative direction, the
+    /// exact observed-information Laplace log-det equals the independent pencil oracle
+    /// `log|A| = log|Φ| + Σ_retained ln μ`, with `A w = μΦw` and `Φ` the evidence factor.
+    /// This pins the `log|A|` VALUE the dense route ranks against the exact observed
+    /// information, not the majorized surrogate `B`.
+    ///
+    /// Evaluated at the fixture's own converged root and ρ. The oracle keeps its own
+    /// operands (dense `A` from column applies, dense `Φ` from metric applies, a symmetric
+    /// square-root reduction) and shares only the scalar band rule. The refusal half of the
+    /// contract is `exact_observed_information_refuses_a_genuinely_indefinite_frozen_state_2330`.
+    #[test]
+    fn exact_observed_information_log_det_matches_the_pencil_oracle_at_a_pd_root_2330() {
+        let (term, target, rho, cache) =
+            super::exact_hessian_fixture_tests::converged_state_with_residual();
+        let sym = dense_exact_hessian(&term, &rho, target.view(), &cache);
         let oracle = crate::manifold::tests::PencilOracle::new(&sym, &cache);
-        let (mu, vectors) = (&oracle.values, &oracle.vectors);
+        let (mu, floors) = (&oracle.values, &oracle.floors);
+        let most_negative = (0..mu.len())
+            .min_by(|&a, &b| mu[a].total_cmp(&mu[b]))
+            .expect("the pencil has directions");
         eprintln!(
-            "pencil spectrum: min μ={:.6e} max μ={:.6e} log|Φ|={:.6e}",
-            mu.iter().copied().fold(f64::INFINITY, f64::min),
-            mu.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            "PD root pencil: dim={} min μ={:.6e} edge={:.6e} retained={} in_band={} log|Φ|={:.6e}",
+            mu.len(),
+            mu[most_negative],
+            floors[most_negative],
+            oracle.retained().len(),
+            oracle.in_band(),
             oracle.metric_log_det,
         );
+        assert!(
+            oracle.negative().is_empty(),
+            "fixture: the root must carry no resolved negative pencil direction \
+             (min μ={:.6e}, edge {:.6e})",
+            mu[most_negative],
+            floors[most_negative],
+        );
+        let retained = oracle.retained();
+        let oracle_log_a = oracle.metric_log_det
+            + retained.iter().map(|&index| mu[index].ln()).sum::<f64>();
+        let log_a = term
+            .exact_observed_information_log_dets(&rho, target.view(), &cache)
+            .expect("the pencil has no resolved negative direction, so the log-det must be Ok");
+        let gap = (log_a - oracle_log_a).abs();
+        eprintln!("PD root log|A|: production={log_a:.12e} oracle={oracle_log_a:.12e} gap={gap:.3e}");
+        assert!(
+            gap <= 1.0e-9 * (1.0 + oracle_log_a.abs()),
+            "log|A| {log_a:.12e} != pencil oracle {oracle_log_a:.12e} (gap {gap:.3e})"
+        );
+    }
+
+    /// #2330 / #2336 / #2933 F07 — a frozen state whose exact observed information carries a
+    /// genuinely indefinite basin refuses typed on the joint block.
+    ///
+    /// The fixture's root is frozen and re-assembled at ρ_eval = (sparse −0.5, smooth −1.5,
+    /// ARD [−1.2, −1.0]). There `A` has one resolved negative direction that the bounded ARD
+    /// concave clamp does not explain. Probe job 1157737 (pre-F07 Euclidean classifier) read
+    /// λ = −5.010035e-2 against edge 3.846366e-9 and basin curvature −5.034747e-2 with a zero
+    /// clamp diagonal. The cache is factored through the production freeze lane
+    /// (`inner_max_iter == 0`), which neither converges nor prices, so the verdict is read from
+    /// `exact_observed_information_log_dets` itself. The criterion prices `½log|A|` while it
+    /// builds its cache, so a cache taken from the criterion at this state refuses before any
+    /// oracle can run.
+    #[test]
+    fn exact_observed_information_refuses_a_genuinely_indefinite_frozen_state_2330() {
+        use super::{FaerEigh, SaeCriterionError, Side, sae_exact_a_band_edge, sae_exact_a_pencil_resolution};
+        use ndarray::{Array2, array};
+        let (mut term, target, root_rho, _root_cache) =
+            super::exact_hessian_fixture_tests::converged_state_with_residual();
+        let mut rho = root_rho.clone();
+        rho.log_lambda_sparse = -0.5;
+        for v in rho.log_lambda_smooth.iter_mut() {
+            *v = -1.5;
+        }
+        rho.log_ard = vec![array![-1.2_f64], array![-1.0_f64]];
+        let mut rho_fixed = rho.clone();
+        let refresh = term
+            .run_joint_fit_arrow_schur_for_quasi_laplace(
+                target.view(),
+                &mut rho_fixed,
+                None,
+                crate::manifold::tests::FROZEN_INNER_STATE,
+                0.4,
+                1.0e-6,
+                1.0e-6,
+            )
+            .expect("freeze-lane refresh at the frozen root");
+        let mut loss = refresh.loss;
+        let mut fixed_point = refresh.fixed_point;
+        let options = term.evidence_factor_options();
+        let cache = term
+            .converge_inner_for_undamped_logdet(
+                target.view(),
+                &rho,
+                &mut rho_fixed,
+                None,
+                crate::manifold::tests::FROZEN_INNER_STATE,
+                0.4,
+                1.0e-6,
+                1.0e-6,
+                &mut loss,
+                &mut fixed_point,
+                &options,
+                true,
+            )
+            .expect("freeze-lane factorization at the frozen root");
+        let total_t = cache.delta_t_len();
+        let dim = total_t + cache.k;
+        let sym = dense_exact_hessian(&term, &rho, target.view(), &cache);
+        let oracle = crate::manifold::tests::PencilOracle::new(&sym, &cache);
+        let (mu, vectors) = (&oracle.values, &oracle.vectors);
         let negative = oracle.negative();
-        let retained_price = oracle.metric_log_det
-            + oracle
-                .retained()
-                .iter()
-                .map(|&index| mu[index].ln())
-                .sum::<f64>();
-        if negative.is_empty() {
-            // Every in-band direction is priced at `Φ`'s curvature through `log|Φ|`, every
-            // retained one adds `ln μ`.
-            let log_a = result.expect("the pencil has no resolved negative direction, so the log-det must be Ok");
-            assert!(
-                (log_a - retained_price).abs() <= 1.0e-9 * (1.0 + retained_price.abs()),
-                "log|A| {log_a} != pencil oracle {retained_price}"
+        let most_negative = (0..mu.len())
+            .min_by(|&a, &b| mu[a].total_cmp(&mu[b]))
+            .expect("the pencil has directions");
+        eprintln!(
+            "frozen state pencil: dim={dim} min μ={:.6e} edge={:.6e} negative={}",
+            mu[most_negative],
+            oracle.floors[most_negative],
+            negative.len(),
+        );
+        assert!(
+            !negative.is_empty(),
+            "fixture: the frozen state must carry a resolved negative pencil direction \
+             (min μ={:.6e}, edge {:.6e})",
+            mu[most_negative],
+            oracle.floors[most_negative],
+        );
+        // #2336 — the negative subspace is priced at its basin curvature
+        // `C = W_NᵀAW_N + W_NᵀEW_N`; only a genuinely indefinite `C` refuses.
+        let e_diag = term
+            .materialize_ard_concave_clamp_diagonal(&rho, &cache)
+            .expect("ARD concave-clamp diagonal");
+        let e_beta = term
+            .decoder_prior_majorizer_gap_border(&cache)
+            .expect("decoder-prior majorization gap");
+        let q = negative.len();
+        let mut basin = Array2::<f64>::zeros((q, q));
+        for (i, &ni) in negative.iter().enumerate() {
+            for (j, &nj) in negative.iter().enumerate() {
+                let (wi, wj) = (vectors.column(ni), vectors.column(nj));
+                let mut value = (0..total_t)
+                    .map(|row| e_diag[row] * wi[row] * wj[row])
+                    .sum::<f64>();
+                if let Some(gap) = e_beta.as_ref() {
+                    value += wi
+                        .slice(ndarray::s![total_t..])
+                        .dot(&gap.dot(&wj.slice(ndarray::s![total_t..])));
+                }
+                if i == j {
+                    value += mu[ni];
+                }
+                basin[[i, j]] = value;
+            }
+        }
+        let basin = (&basin + &basin.t()) * 0.5;
+        let (kappa, basin_rotation) = basin.eigh(Side::Lower).expect("basin eigendecomposition");
+        let negative_basis =
+            Array2::from_shape_fn((dim, q), |(row, col)| vectors[[row, negative[col]]]);
+        let basin_vectors = negative_basis.dot(&basin_rotation);
+        let e_frobenius = (e_diag.iter().take(total_t).map(|x| x * x).sum::<f64>()
+            + e_beta.as_ref().map_or(0.0, |gap| gap.iter().map(|x| x * x).sum::<f64>()))
+        .sqrt();
+        let mut genuinely_indefinite = 0usize;
+        for j in 0..q {
+            let direction = basin_vectors.column(j);
+            let resolution = sae_exact_a_pencil_resolution(
+                dim,
+                direction.dot(&direction),
+                oracle.operator_frobenius + e_frobenius,
+                oracle.metric_frobenius,
+                kappa[j],
             );
-        } else {
-            // Under #2336 value-side E-attributability the negative subspace is priced at its
-            // basin curvature `C = W_NᵀAW_N + W_NᵀEW_N` and refuses only a genuinely
-            // indefinite `C`. #2267's inner-solve step fix moves this fixture's converged
-            // state, so it lands here, and the split is written out rather than assumed.
-            let e_diag = term
-                .materialize_ard_concave_clamp_diagonal(&rho, &cache)
-                .expect("ARD concave-clamp diagonal");
-            let e_beta = term
-                .decoder_prior_majorizer_gap_border(&cache)
-                .expect("decoder-prior majorization gap");
-            let q = negative.len();
-            let mut basin = Array2::<f64>::zeros((q, q));
-            for (i, &ni) in negative.iter().enumerate() {
-                for (j, &nj) in negative.iter().enumerate() {
-                    let (wi, wj) = (vectors.column(ni), vectors.column(nj));
-                    let mut value = (0..total_t).map(|row| e_diag[row] * wi[row] * wj[row]).sum::<f64>();
-                    if let Some(gap) = e_beta.as_ref() {
-                        value += wi
-                            .slice(ndarray::s![total_t..])
-                            .dot(&gap.dot(&wj.slice(ndarray::s![total_t..])));
-                    }
-                    if i == j {
-                        value += mu[ni];
-                    }
-                    basin[[i, j]] = value;
-                }
-            }
-            let basin = (&basin + &basin.t()) * 0.5;
-            let (kappa, basin_rotation) = basin.eigh(Side::Lower).expect("basin eigendecomposition");
-            let negative_basis = Array2::from_shape_fn((dim, q), |(row, col)| vectors[[row, negative[col]]]);
-            let basin_vectors = negative_basis.dot(&basin_rotation);
-            let e_frobenius = (e_diag.iter().take(total_t).map(|x| x * x).sum::<f64>()
-                + e_beta.as_ref().map_or(0.0, |gap| gap.iter().map(|x| x * x).sum::<f64>()))
-            .sqrt();
-            let mut all_attributable = true;
-            let mut priced_log_a = retained_price;
-            for j in 0..q {
-                let direction = basin_vectors.column(j);
-                let resolution = sae_exact_a_pencil_resolution(
-                    dim,
-                    direction.dot(&direction),
-                    oracle.operator_frobenius + e_frobenius,
-                    oracle.metric_frobenius,
-                    kappa[j],
-                );
-                let floor = sae_exact_a_band_edge(kappa[j], resolution, 0.0);
-                if kappa[j] < -floor {
-                    all_attributable = false;
-                } else if kappa[j] > floor {
-                    priced_log_a += kappa[j].ln();
-                }
-            }
+            let floor = sae_exact_a_band_edge(kappa[j], resolution, 0.0);
             eprintln!(
-                "pencil non-PD: {q} negative directions, all_attributable={all_attributable} \
-                 priced_log|A|={priced_log_a:.9e}"
+                "frozen state basin mode {j}: κ={:.6e} floor={floor:.6e} max|E diag|={:.6e}",
+                kappa[j],
+                e_diag.iter().take(total_t).map(|x| x.abs()).fold(0.0_f64, f64::max),
             );
-            if all_attributable {
-                let log_a = result.expect(
-                    "every negative pencil direction is clamp attributable, so the value path must \
-                     PRICE the basin curvature instead of refusing",
-                );
-                assert!(
-                    (log_a - priced_log_a).abs() <= 1.0e-9 * (1.0 + priced_log_a.abs()),
-                    "priced log|A| {log_a} != attributability oracle {priced_log_a}"
-                );
-            } else {
-                match result {
-                    Err(SaeCriterionError::IndefiniteObservedInformation { block }) => {
-                        assert_eq!(block, "joint", "refusal fired on the wrong block: {block}");
-                    }
-                    other => panic!(
-                        "the pencil has a genuinely indefinite basin, not clamp-attributable, but \
-                         exact_observed_information_log_dets did not refuse: {other:?}"
-                    ),
-                }
+            if kappa[j] < -floor {
+                genuinely_indefinite += 1;
             }
+        }
+        assert!(
+            genuinely_indefinite > 0,
+            "fixture: the frozen state's basin must carry a curvature below its floor that the \
+             clamp does not explain; every one of its {q} basin curvatures is attributable"
+        );
+        match term.exact_observed_information_log_dets(&rho, target.view(), &cache) {
+            Err(SaeCriterionError::IndefiniteObservedInformation { block }) => {
+                assert_eq!(block, "joint", "refusal fired on the wrong block: {block}");
+            }
+            other => panic!(
+                "the pencil has {genuinely_indefinite} genuinely indefinite basin direction(s), \
+                 not clamp-attributable, but exact_observed_information_log_dets did not refuse: \
+                 {other:?}"
+            ),
         }
     }
 
