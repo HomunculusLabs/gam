@@ -60,6 +60,12 @@
 //! the evaluation executes and certifies nothing beyond them (#2946 fr-census
 //! overclaim audit, comment 5716123817).
 //!
+//! The declared distortion returns an [`EvidenceStatus`]. The status names the family
+//! it evaluated, its witness and its derived rounding bound.
+//! [`DecodedFidelity::verdict`] reports only what that status proves about the
+//! tolerance. A figure within its rounding of the tolerance is unresolved, not a pass.
+//! A statistical estimate never certifies.
+//!
 //! # Messages
 //!
 //! Each code is also one self-delimiting message through `codec`'s integer codes, so
@@ -82,6 +88,7 @@ use super::codec::{
     BitReader, BitString, decode_fixed_index, decode_prefix_integer, encode_fixed_index,
     encode_prefix_integer,
 };
+use super::supports::EvidenceStatus;
 use gam_linalg::roundoff::UNIT_ROUNDOFF;
 
 /// Largest `|p|` for which both `2^p` and `2^-p` are normal `f64` powers of two: the
@@ -478,44 +485,72 @@ impl QuotientCode {
     }
 }
 
-/// The declared distortion of a decoded artifact's outputs against the native
-/// reference, under the declared fidelity tolerance.
-///
-/// This is a measurement over the inputs the evaluation executed and bounds nothing
-/// beyond them (#2946 fr-census overclaim audit, comment 5716123817).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct DecodedFidelity {
-    /// The declared distortion of the decoded artifact's outputs against the native
-    /// reference.
-    pub distortion: f64,
-    /// The declared fidelity tolerance.
-    pub tolerance: f64,
+/// What a decoded artifact's distortion evidence proves about the declared tolerance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FidelityVerdict {
+    /// The status proves the distortion is at most the tolerance.
+    Meets,
+    /// The status proves the distortion exceeds the tolerance.
+    Violates,
+    /// Neither is proven. Either the tolerance lies inside the figure's rounding band, or
+    /// the status proves no bound on that side (a statistical estimate proves none).
+    Unresolved,
 }
 
-impl DecodedFidelity {
-    /// Whether the measured distortion is within the declared tolerance.
-    pub fn meets_tolerance(&self) -> bool {
-        self.distortion <= self.tolerance
+/// The evidence a decoded artifact's declared distortion carries, under the declared
+/// fidelity tolerance.
+///
+/// The status is stated over the inputs the evaluation executed and bounds nothing
+/// beyond them (#2946 fr-census overclaim audit, comment 5716123817).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DecodedFidelity<W, D> {
+    status: EvidenceStatus<W, D>,
+    tolerance: f64,
+}
+
+impl<W, D> DecodedFidelity<W, D> {
+    /// The evidence the distortion measurement carries.
+    pub fn status(&self) -> &EvidenceStatus<W, D> {
+        &self.status
+    }
+
+    /// The declared fidelity tolerance.
+    pub fn tolerance(&self) -> f64 {
+        self.tolerance
+    }
+
+    /// What the status proves about the tolerance. The owner of the rounding is
+    /// [`EvidenceStatus`]: an exact figure with no numerical error is never unresolved.
+    pub fn verdict(&self) -> FidelityVerdict {
+        if self.status.certifies_at_most(self.tolerance) {
+            FidelityVerdict::Meets
+        } else if self.status.refutes_at_most(self.tolerance) {
+            FidelityVerdict::Violates
+        } else {
+            FidelityVerdict::Unresolved
+        }
     }
 }
 
-/// Decode `artifact`, execute the decoded artifact with `evaluate`, and measure
-/// `distortion(outputs, native_reference)` under the declared `tolerance`.
+/// Decode `artifact`, execute the decoded artifact with `evaluate`, and state the
+/// declared distortion of its outputs against the native reference as evidence under
+/// the declared `tolerance`.
 ///
-/// The evaluation receives only what the decoder rebuilt. The tolerance is a required
-/// experiment declaration and is refused unless finite and non-negative. A distortion
-/// that is not finite and non-negative is refused rather than compared.
-pub fn decode_then_evaluate<A, O, E, D>(
+/// The evaluation receives only what the decoder rebuilt. `distortion` names what it
+/// evaluated (its family, witness and domain) and its derived rounding bound through
+/// the [`EvidenceStatus`] it returns. The tolerance is a required experiment
+/// declaration and is refused unless finite and non-negative.
+pub fn decode_then_evaluate<A, O, E, M, W, D>(
     artifact: &A,
     evaluate: E,
     native_reference: &O,
-    distortion: D,
+    distortion: M,
     tolerance: f64,
-) -> Result<DecodedFidelity, String>
+) -> Result<DecodedFidelity<W, D>, String>
 where
     A: DecodableArtifact,
     E: FnOnce(&A::Decoded) -> Result<O, String>,
-    D: FnOnce(&O, &O) -> f64,
+    M: FnOnce(&O, &O) -> Result<EvidenceStatus<W, D>, String>,
 {
     if !(tolerance.is_finite() && tolerance >= 0.0) {
         return Err(format!(
@@ -525,17 +560,8 @@ where
     }
     let decoded = artifact.decode()?;
     let outputs = evaluate(&decoded)?;
-    let measured = distortion(&outputs, native_reference);
-    if !(measured.is_finite() && measured >= 0.0) {
-        return Err(format!(
-            "decode_then_evaluate: the declared distortion returned {measured}, not a finite \
-             non-negative figure"
-        ));
-    }
-    Ok(DecodedFidelity {
-        distortion: measured,
-        tolerance,
-    })
+    let status = distortion(&outputs, native_reference)?;
+    Ok(DecodedFidelity { status, tolerance })
 }
 
 #[cfg(test)]
@@ -724,6 +750,63 @@ mod tests {
         }
     }
 
+    use crate::parameter_decomposition::supports::ExactBasis;
+    use gam_linalg::roundoff::accumulation_growth;
+
+    /// A derived bound on the rounding in
+    /// `frobenius_distance(&projector_sum(angles), &identity)` for `components` angles.
+    /// - Each entry sums `components` terms `weight·x·y`. `x` and `y` are libm sine or
+    ///   cosine values, at most one ulp off, so two roundings each. `weight` rounds once
+    ///   and each product once: seven roundings per term, plus `components − 1` additions.
+    ///   The terms have absolute sum at most `weight · components = 2`.
+    /// - Subtracting the identity rounds once over magnitudes of at most 3.
+    /// - The entrywise error bounds the norm's error through its Frobenius norm, at most
+    ///   twice the entry bound for 4 entries. Four squares, three additions and the root
+    ///   add at most `γ_8` relative to the figure.
+    fn projector_distance_roundoff(components: usize, distortion: f64) -> f64 {
+        let entry = accumulation_growth(components + 6) * 2.0 + accumulation_growth(1) * 3.0;
+        2.0 * entry + accumulation_growth(8) * distortion
+    }
+
+    /// The three-projector sum's distance from the identity, as exact evidence over the one
+    /// artifact evaluated, with its derived rounding bound.
+    fn projector_evidence(
+        outputs: &[f64; 4],
+        native: &[f64; 4],
+    ) -> Result<EvidenceStatus<(), &'static str>, String> {
+        let value = frobenius_distance(outputs, native);
+        EvidenceStatus::exact(
+            value,
+            projector_distance_roundoff(3, value),
+            ExactBasis::Exhaustive { cardinality: 1 },
+            None,
+            "P11 projector sum of one decoded artifact",
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    fn squared_distance(outputs: &[f64], native: &[f64]) -> f64 {
+        outputs
+            .iter()
+            .zip(native)
+            .map(|(a, b)| (a - b) * (a - b))
+            .sum::<f64>()
+    }
+
+    fn lattice_evidence(
+        value: f64,
+        numerical_error: f64,
+    ) -> Result<EvidenceStatus<usize, &'static str>, String> {
+        EvidenceStatus::exact(
+            value,
+            numerical_error,
+            ExactBasis::Exhaustive { cardinality: 2 },
+            None,
+            "two lattice coordinates",
+        )
+        .map_err(|error| error.to_string())
+    }
+
     #[test]
     fn fidelity_is_measured_on_the_decoded_artifact_not_on_the_parameters_it_came_from() {
         // P11: (2/C) v(t_c) v(t_c)^T at t_c = c·pi/C sums to I_2 on RP1.
@@ -732,56 +815,55 @@ mod tests {
         let tolerance = 0.1;
         let quotient = PeriodicQuotient::new(PI).expect("the RP1 period is admissible");
         let evaluate = |decoded: &Vec<f64>| Ok::<[f64; 4], String>(projector_sum(decoded));
-        let distortion =
-            |outputs: &[f64; 4], native: &[f64; 4]| frobenius_distance(outputs, native);
 
         // Positive control: the parameters before coding reproduce the identity, so an
-        // evaluation that read them would pass.
-        assert!(frobenius_distance(&projector_sum(&angles), &identity) <= tolerance);
+        // evaluation that read them would be certified.
+        let undecoded =
+            projector_evidence(&projector_sum(&angles), &identity).expect("undecoded evidence");
+        assert!(undecoded.certifies_at_most(tolerance), "{undecoded:?}");
 
         // At 2 bits the decoded angles are 0, pi/4 and 3pi/4, whose projector sum
         // misses the identity by sqrt(2)/3.
         let coarse = QuotientCode::encode(&angles, quotient, 2).expect("angles encode");
         assert_eq!(coarse.indices(), &[0_u64, 1, 3]);
         let coarse_fidelity =
-            decode_then_evaluate(&coarse, evaluate, &identity, distortion, tolerance)
+            decode_then_evaluate(&coarse, evaluate, &identity, projector_evidence, tolerance)
                 .expect("the coarse artifact evaluates");
-        assert!(
-            !coarse_fidelity.meets_tolerance(),
-            "the decoded coarse artifact passed with distortion {}",
-            coarse_fidelity.distortion
+        assert_eq!(
+            coarse_fidelity.verdict(),
+            FidelityVerdict::Violates,
+            "{:?}",
+            coarse_fidelity.status()
         );
 
         let fine = QuotientCode::encode(&angles, quotient, 20).expect("angles encode");
-        let fine_fidelity = decode_then_evaluate(&fine, evaluate, &identity, distortion, tolerance)
-            .expect("the fine artifact evaluates");
-        assert!(
-            fine_fidelity.meets_tolerance(),
-            "the decoded fine artifact failed with distortion {}",
-            fine_fidelity.distortion
+        let fine_fidelity =
+            decode_then_evaluate(&fine, evaluate, &identity, projector_evidence, tolerance)
+                .expect("the fine artifact evaluates");
+        assert_eq!(
+            fine_fidelity.verdict(),
+            FidelityVerdict::Meets,
+            "{:?}",
+            fine_fidelity.status()
         );
     }
 
     #[test]
-    fn decode_then_evaluate_refuses_an_undeclared_tolerance_or_an_invalid_distortion() {
+    fn decode_then_evaluate_refuses_an_undeclared_tolerance_or_a_refused_distortion() {
         let precision = DeclaredPrecision::new(2).expect("precision in range");
         let code = LatticeCode::encode(&[0.25, -1.5], precision).expect("values encode");
         let reference = vec![0.25, -1.5];
         let evaluate = |decoded: &Vec<f64>| Ok::<Vec<f64>, String>(decoded.clone());
+        // Both values lie on the lattice and decode exactly, so the squared error is exact.
         let squared_error = |outputs: &Vec<f64>, native: &Vec<f64>| {
-            outputs
-                .iter()
-                .zip(native)
-                .map(|(a, b)| (a - b) * (a - b))
-                .sum::<f64>()
+            lattice_evidence(squared_distance(outputs, native), 0.0)
         };
 
-        // Positive control: both values lie on the lattice, so the decoded artifact is
-        // exact and meets a zero tolerance.
+        // Positive control: an exact zero figure meets a zero tolerance.
         let exact = decode_then_evaluate(&code, evaluate, &reference, squared_error, 0.0)
             .expect("a declared tolerance evaluates");
-        assert_eq!(exact.distortion, 0.0);
-        assert!(exact.meets_tolerance());
+        assert_eq!(exact.status().upper_bound(), Some(0.0));
+        assert_eq!(exact.verdict(), FidelityVerdict::Meets);
 
         for tolerance in [f64::NAN, -1.0, f64::INFINITY] {
             assert!(
@@ -789,16 +871,47 @@ mod tests {
                 "tolerance {tolerance} was admitted"
             );
         }
-        let not_a_number =
-            |outputs: &Vec<f64>, native: &Vec<f64>| squared_error(outputs, native) + f64::NAN;
+        // The status constructor refuses a NaN figure and a negative rounding bound, and the
+        // refusal propagates instead of being compared.
+        let not_a_number = |outputs: &Vec<f64>, native: &Vec<f64>| {
+            lattice_evidence(squared_distance(outputs, native) + f64::NAN, 0.0)
+        };
         assert!(decode_then_evaluate(&code, evaluate, &reference, not_a_number, 0.0).is_err());
-        let negative =
-            |outputs: &Vec<f64>, native: &Vec<f64>| squared_error(outputs, native) - 1.0;
-        assert!(decode_then_evaluate(&code, evaluate, &reference, negative, 0.0).is_err());
+        let negative_error = |outputs: &Vec<f64>, native: &Vec<f64>| {
+            lattice_evidence(squared_distance(outputs, native), -1.0)
+        };
+        assert!(decode_then_evaluate(&code, evaluate, &reference, negative_error, 0.0).is_err());
         let refused = |decoded: &Vec<f64>| {
             Err::<Vec<f64>, String>(format!("native execution refused {} values", decoded.len()))
         };
         assert!(decode_then_evaluate(&code, refused, &reference, squared_error, 0.0).is_err());
+    }
+
+    #[test]
+    fn a_verdict_is_only_what_the_status_proves_about_the_tolerance() {
+        let fidelity =
+            |status: EvidenceStatus<usize, &'static str>| DecodedFidelity { status, tolerance: 0.25 };
+        let exact = |value: f64, numerical_error: f64| {
+            lattice_evidence(value, numerical_error).expect("a finite figure and error")
+        };
+        // An exact figure at the tolerance meets it. The same figure with a rounding band
+        // neither meets nor violates it.
+        assert_eq!(fidelity(exact(0.25, 0.0)).verdict(), FidelityVerdict::Meets);
+        assert_eq!(
+            fidelity(exact(0.25, UNIT_ROUNDOFF * 0.25)).verdict(),
+            FidelityVerdict::Unresolved
+        );
+        assert_eq!(fidelity(exact(0.3, 0.01)).verdict(), FidelityVerdict::Violates);
+        assert_eq!(fidelity(exact(0.2, 0.01)).verdict(), FidelityVerdict::Meets);
+        // A derived uniform bound certifies from above.
+        let bound = EvidenceStatus::uniform_bound(0.2, 0.0, "two lattice coordinates")
+            .expect("a finite bound");
+        assert_eq!(fidelity(bound).verdict(), FidelityVerdict::Meets);
+        // Negative control: a statistical estimate proves no bound, so even a zero estimate
+        // is unresolved.
+        let estimate = EvidenceStatus::statistical_estimate(0.0, 0.0, 10, "two lattice coordinates")
+            .expect("an estimate");
+        assert_eq!(fidelity(estimate).verdict(), FidelityVerdict::Unresolved);
     }
 
     /// `L_int(value)` for a positive integer: the prefix code length a message pays.
