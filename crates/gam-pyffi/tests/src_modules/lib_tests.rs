@@ -1562,85 +1562,6 @@ fn batched_state_round_trip_matches_refit() {
     }
 }
 
-/// CV-fold partitioning contract used by the benchmark suite:
-/// every row appears in exactly one test fold and not in its own
-/// train set, both partitions are non-empty per fold, and the
-/// stratified path balances class counts across folds.
-#[test]
-fn make_folds_indices_kfold_partitions_unstratified() {
-    let n = 50usize;
-    let y: Vec<f64> = (0..n).map(|i| i as f64).collect();
-    let folds = make_folds_indices(y, 5, 7, false).expect("5-fold should succeed");
-    assert_eq!(folds.len(), 5);
-
-    let mut seen = vec![0usize; n];
-    for (train, test) in &folds {
-        assert!(!train.is_empty(), "every fold has a non-empty train set");
-        assert!(!test.is_empty(), "every fold has a non-empty test set");
-        let train_set: std::collections::HashSet<usize> = train.iter().copied().collect();
-        for &i in test {
-            assert!(
-                !train_set.contains(&i),
-                "row {i} appears in both train and test of a fold"
-            );
-            seen[i] += 1;
-        }
-        assert_eq!(
-            train.len() + test.len(),
-            n,
-            "train + test must cover the full row set"
-        );
-    }
-    for (i, &count) in seen.iter().enumerate() {
-        assert_eq!(count, 1, "row {i} must appear in exactly one test fold");
-    }
-}
-
-#[test]
-fn make_folds_indices_stratified_balances_classes() {
-    // 30 positives, 20 negatives.
-    let mut y = vec![1.0; 30];
-    y.extend(std::iter::repeat(0.0).take(20));
-    let folds = make_folds_indices(y, 5, 11, true).expect("stratified 5-fold");
-    assert_eq!(folds.len(), 5);
-
-    for (_, test) in &folds {
-        let positives = test.iter().filter(|&&i| i < 30).count();
-        let negatives = test.iter().filter(|&&i| i >= 30).count();
-        // 30 / 5 = 6 positives per fold, 20 / 5 = 4 negatives.
-        assert_eq!(positives, 6, "stratified fold positive count");
-        assert_eq!(negatives, 4, "stratified fold negative count");
-    }
-}
-
-#[test]
-fn make_folds_indices_holdout_partitions_with_split() {
-    let n = 25usize;
-    let y: Vec<f64> = (0..n).map(|i| i as f64).collect();
-    let folds = make_folds_indices(y, 1, 42, false).expect("holdout split");
-    assert_eq!(folds.len(), 1);
-    let (train, test) = &folds[0];
-    assert!(!train.is_empty());
-    assert!(!test.is_empty());
-    assert_eq!(train.len() + test.len(), n);
-    // 1/5 holdout convention: n/5 = 5 rows in test.
-    assert_eq!(test.len(), 5);
-    // Train and test must be disjoint.
-    let train_set: std::collections::HashSet<usize> = train.iter().copied().collect();
-    assert!(test.iter().all(|&i| !train_set.contains(&i)));
-}
-
-#[test]
-fn make_folds_indices_seed_determinism_and_variation() {
-    let n = 40usize;
-    let y: Vec<f64> = (0..n).map(|i| i as f64).collect();
-    let a = make_folds_indices(y.clone(), 5, 17, false).expect("seed=17");
-    let b = make_folds_indices(y.clone(), 5, 17, false).expect("seed=17 (repeat)");
-    let c = make_folds_indices(y, 5, 18, false).expect("seed=18");
-    assert_eq!(a, b, "same seed must reproduce the same fold layout");
-    assert_ne!(a, c, "different seeds should produce different layouts");
-}
-
 #[test]
 fn gaussian_log_loss_value_matches_closed_form() {
     // log-loss = mean of 0.5·log(2π σ²) + 0.5·((y-μ)/σ)²
@@ -1668,19 +1589,6 @@ fn gaussian_log_loss_value_rejects_invalid_sigma_length() {
     let mu = vec![0.0, 1.0, 2.0];
     let bad_sigma = vec![1.0, 2.0]; // length 2 with n=3
     assert!(gaussian_log_loss_value(&y, &mu, &bad_sigma).is_err());
-}
-
-#[test]
-fn make_folds_indices_rejects_invalid_inputs() {
-    // n_splits == 0
-    assert!(make_folds_indices(vec![0.0, 1.0], 0, 0, false).is_err());
-    // empty y
-    assert!(make_folds_indices(Vec::<f64>::new(), 5, 0, false).is_err());
-    // n < n_splits (kfold)
-    assert!(make_folds_indices(vec![0.0, 1.0], 5, 0, false).is_err());
-    // non-finite y
-    assert!(make_folds_indices(vec![0.0, f64::NAN, 1.0], 2, 0, false).is_err());
-    assert!(make_folds_indices(vec![0.0, f64::INFINITY, 1.0], 2, 0, false).is_err());
 }
 
 /// Ordinary least squares R^2 of fitting `design @ beta ~= y` (single output),

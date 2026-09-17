@@ -62,7 +62,8 @@ use std::time::Instant;
 
 /// SplitMix64 → uniform/normal, byte-identical in behaviour to
 /// `gam_test_support::synthetic::SplitMixNormalRng` so the fixture matches the
-/// bench's `synthetic_geo_disease_columns(4000, 20260226)`.
+/// bench's `geo-disease-columns` fixture,
+/// `gam_test_support::synthetic::geo_disease_columns(4000, 20260226)`.
 struct Rng {
     state: u64,
     spare: Option<f64>,

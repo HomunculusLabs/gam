@@ -171,6 +171,7 @@ jobs:
         with:
           path: |
             bench/runtime/gam
+            bench/runtime/bench_fixtures
             bench/runtime/_rust*.so
           key: ${{ runner.os }}-${{ steps.binary-abi.outputs.key }}-bench-binaries-${{ env.BENCH_BINARY_CACHE_VERSION }}-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'Cargo.lock', 'Cargo.toml', 'pyproject.toml', 'build.rs', 'src/**/*.rs', 'src/**/*.pest', 'crates/**/Cargo.toml', 'crates/**/*.rs') }}
 
@@ -293,14 +294,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Build both benchmark entry points in one Cargo invocation. Running
+          # Build every benchmark entry point in one Cargo invocation. Running
           # `cargo build` for the CLI and then asking maturin to launch Cargo a
           # second time serialized two release/LTO roots and made every source
           # cache miss pay roughly twice. The PyO3 crate is already an abi3
           # `cdylib`; benchmark shards need that shared object, not a wheel.
-          cargo build --release -p gam-cli -p gam-pyffi
+          # `bench_fixtures` (gam-test-support) serves the seeded synthetic
+          # panels, CV folds and per-fold z-scores, which the production
+          # extension does not carry.
+          cargo build --release -p gam-cli -p gam-pyffi -p gam-test-support
           cp target/release/gam bench/runtime/gam
           chmod +x bench/runtime/gam
+          cp target/release/bench_fixtures bench/runtime/bench_fixtures
+          chmod +x bench/runtime/bench_fixtures
           cp target/release/libgam_pyffi.so bench/runtime/_rust.abi3.so
           cp bench/runtime/_rust.abi3.so gamfit/_rust.abi3.so
           # This step certifies the compiled artifact, not the Python facade.
@@ -323,6 +329,7 @@ jobs:
         with:
           path: |
             bench/runtime/gam
+            bench/runtime/bench_fixtures
             bench/runtime/_rust*.so
           key: ${{ steps.binary-cache.outputs.cache-primary-key }}
 

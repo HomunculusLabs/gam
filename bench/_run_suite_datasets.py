@@ -32,6 +32,7 @@ def configure(context: dict[str, typing.Any]) -> None:
 
 
 _BENCH_RUST_LOADER: typing.Any = None
+_BENCH_FIXTURES: typing.Any = None
 _SURVIVAL_CALIBRATION: typing.Any = None
 
 
@@ -64,6 +65,22 @@ def _gamfit_rust() -> typing.Any:
     # package (the source-tree shadow case) or only in the
     # pip-installed wheel's site-packages directory.
     return _load_bench_rust_loader().load_gamfit_rust_module(ROOT)
+
+
+def _bench_fixtures() -> typing.Any:
+    # Folds, per-fold z-scores and the seeded synthetic panels come from the
+    # bench-only `bench_fixtures` binary, not from the production extension.
+    global _BENCH_FIXTURES
+    if _BENCH_FIXTURES is not None:
+        return _BENCH_FIXTURES
+    module_path = Path(__file__).resolve().parent / "_bench_fixtures.py"
+    spec = importlib.util.spec_from_file_location("bench_fixtures", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"failed to load bench fixtures from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _BENCH_FIXTURES = module
+    return module
 
 
 def _survival_calibration() -> typing.Any:
@@ -468,15 +485,17 @@ def run_cmd(cmd: typing.Any, cwd: typing.Any=None, timeout_sec: typing.Any=None)
 
 
 def make_folds(y: np.ndarray, n_splits: int = 5, seed: int = 42, stratified: bool = False) -> typing.Any:
-    raw_folds = _gamfit_rust().make_folds_indices(
-        np.asarray(y, dtype=float).reshape(-1).tolist(),
-        int(n_splits),
-        int(seed),
-        bool(stratified),
+    n_splits = int(n_splits)
+    folds = _bench_fixtures().run_fixture(
+        "cv-folds",
+        arrays={"y": np.asarray(y, dtype=float).reshape(-1)},
+        n_splits=n_splits,
+        seed=int(seed),
+        stratified=bool(stratified),
     )
     return [
-        Fold(train_idx=np.asarray(train_idx, dtype=int), test_idx=np.asarray(test_idx, dtype=int))
-        for train_idx, test_idx in raw_folds
+        Fold(train_idx=np.asarray(folds[f"train_{k}"], dtype=int), test_idx=np.asarray(folds[f"test_{k}"], dtype=int))
+        for k in range(n_splits)
     ]
 
 
@@ -525,7 +544,7 @@ def _survival_score_grid(train_df: pd.DataFrame, time_col: str) -> np.ndarray:
 
 
 def _repeat_survival_curve(surv: np.ndarray, n_rows: int) -> np.ndarray:
-    return np.asarray(_gamfit_rust().repeat_survival_curve(_flat_float_list(surv), int(n_rows)), dtype=float)
+    return np.tile(np.asarray(surv, dtype=float).reshape(1, -1), (int(n_rows), 1))
 
 
 def _survival_matrix_from_risk_calibration(
@@ -650,12 +669,15 @@ def zscore_train_test(train_df: pd.DataFrame, test_df: pd.DataFrame, feature_col
     tr = train_df.copy()
     te = test_df.copy()
     if feature_cols:
-        tr_values, te_values = _gamfit_rust().zscore_train_test_arrays(
-            tr[feature_cols].to_numpy(dtype=float),
-            te[feature_cols].to_numpy(dtype=float),
+        scaled = _bench_fixtures().run_fixture(
+            "zscore",
+            arrays={
+                "train": tr[feature_cols].to_numpy(dtype=float),
+                "test": te[feature_cols].to_numpy(dtype=float),
+            },
         )
-        tr.loc[:, feature_cols] = np.asarray(tr_values, dtype=float)
-        te.loc[:, feature_cols] = np.asarray(te_values, dtype=float)
+        tr.loc[:, feature_cols] = np.asarray(scaled["train"], dtype=float)
+        te.loc[:, feature_cols] = np.asarray(scaled["test"], dtype=float)
     return tr, te
 
 
@@ -1167,7 +1189,7 @@ def _load_heart_failure_survival_dataset() -> typing.Any:
 
 
 def _synthetic_binomial_dataset(n: typing.Any, p: typing.Any, seed: typing.Any) -> typing.Any:
-    columns = _gamfit_rust().synthetic_binomial_columns(int(n), max(int(p), 3), int(seed))
+    columns = _bench_fixtures().run_fixture("binomial-columns", n=int(n), p=max(int(p), 3), seed=int(seed))
     return _xy_payload(columns, prefix="x")
 
 
@@ -1179,7 +1201,7 @@ _CANONICAL_SYNTHETIC_BINOMIAL_SCENARIOS = {
 
 
 def _synthetic_geo_disease_dataset(n: typing.Any=4000, seed: typing.Any=20260226) -> typing.Any:
-    columns = _gamfit_rust().synthetic_geo_disease_columns(int(n), int(seed))
+    columns = _bench_fixtures().run_fixture("geo-disease-columns", n=int(n), seed=int(seed))
     return _xy_payload(columns, prefix="pc")
 
 
@@ -1191,12 +1213,13 @@ def _synthetic_continuous_order_dataset(
     true_nu: float | None = None,
     true_kappa2: float | None = None,
 ) -> dict[str, typing.Any]:
-    columns = _gamfit_rust().synthetic_continuous_order_columns(
-        str(mode),
-        int(n),
-        int(seed),
-        None if true_nu is None else float(true_nu),
-        None if true_kappa2 is None else float(true_kappa2),
+    optional = {
+        key: float(value)
+        for key, value in (("true_nu", true_nu), ("true_kappa2", true_kappa2))
+        if value is not None
+    }
+    columns = _bench_fixtures().run_fixture(
+        "continuous-order-columns", mode=str(mode), n=int(n), seed=int(seed), **optional
     )
     x = np.asarray(columns["x"], dtype=float).reshape(-1)
     y = np.asarray(columns["y"], dtype=float).reshape(-1)
@@ -1225,7 +1248,7 @@ def _synthetic_continuous_order_dataset(
 def _synthetic_thread3_admixture_cliff_dataset(n: typing.Any=6000, seed: typing.Any=20260601) -> typing.Any:
     coeffs = np.array([1.0, 0.35, -0.20, 0.10], dtype=float)
     out = _xy_payload(
-        _gamfit_rust().synthetic_thread3_admixture_cliff_columns(int(n), int(seed)),
+        _bench_fixtures().run_fixture("thread3-admixture-cliff-columns", n=int(n), seed=int(seed)),
         prefix="pc",
     )
     out.update({
@@ -1243,7 +1266,7 @@ def _synthetic_thread3_admixture_cliff_dataset(n: typing.Any=6000, seed: typing.
 
 def _synthetic_geo_disease_eas_dataset(n: typing.Any=6000, seed: typing.Any=20260301, n_pcs: typing.Any=16) -> typing.Any:
     n_pcs = int(max(3, n_pcs))
-    columns = _gamfit_rust().synthetic_geo_disease_eas_columns(int(n), int(seed), n_pcs)
+    columns = _bench_fixtures().run_fixture("geo-disease-eas-columns", n=int(n), seed=int(seed), n_pcs=n_pcs)
     return _xy_payload(columns, prefix="pc")
 
 
@@ -1361,7 +1384,7 @@ def _papuan_oce_scenario_cfg(name: typing.Any) -> typing.Any:
 
 
 def _synthetic_papuan_oce_dataset(n: typing.Any=6000, seed: typing.Any=20260315, n_pcs: typing.Any=16) -> typing.Any:
-    columns = _gamfit_rust().synthetic_papuan_oce_columns(int(n), int(seed), max(3, int(n_pcs)))
+    columns = _bench_fixtures().run_fixture("papuan-oce-columns", n=int(n), seed=int(seed), n_pcs=max(3, int(n_pcs)))
     return _xy_payload(columns, prefix="pc")
 
 
@@ -1431,16 +1454,16 @@ def _synthetic_hgdp_1kg_pc_panel() -> typing.Any:
     if _SYNTHETIC_PC_PANEL is not None:
         return _SYNTHETIC_PC_PANEL.copy()
 
-    columns = _gamfit_rust().synthetic_hgdp_pc_panel_columns(_SYNTHETIC_PC_PANEL_SEED)
+    columns = _bench_fixtures().run_fixture("hgdp-pc-panel", seed=_SYNTHETIC_PC_PANEL_SEED)
     pc = np.asarray(columns["pc"], dtype=float)
     pc_cols = [f"PC{i}" for i in range(1, 17)]
     panel = pd.DataFrame(
         {
             "sample_id": list(columns["sample_id"]),
-            "Superpopulation": list(columns["Superpopulation"]),
-            "Subpopulation": list(columns["Subpopulation"]),
-            "Latitude": np.asarray(columns["Latitude"], dtype=float),
-            "Longitude": np.asarray(columns["Longitude"], dtype=float),
+            "Superpopulation": list(columns["superpopulation"]),
+            "Subpopulation": list(columns["subpopulation"]),
+            "Latitude": np.asarray(columns["latitude"], dtype=float),
+            "Longitude": np.asarray(columns["longitude"], dtype=float),
             **{col: pc[:, i] for i, col in enumerate(pc_cols)},
         }
     )
@@ -1521,15 +1544,18 @@ def _geo_latlon_dataset(mode_code: typing.Any, seed: typing.Any=20260401, preval
     superpops = sorted(d["Superpopulation"].astype(str).unique().tolist())
     superpop_code = {name: idx for idx, name in enumerate(superpops)}
     y = np.asarray(
-        _gamfit_rust().synthetic_geo_latlon_response(
-            mode_code,
-            d["Superpopulation"].astype(str).map(superpop_code).to_numpy(dtype=int).tolist(),
-            d["lat_imputed"].to_numpy(dtype=float).tolist(),
-            d["lon_imputed"].to_numpy(dtype=float).tolist(),
-            int(seed),
-            float(prevalence_min),
-            float(prevalence_max),
-        ),
+        _bench_fixtures().run_fixture(
+            "geo-latlon-response",
+            arrays={
+                "superpop_codes": d["Superpopulation"].astype(str).map(superpop_code).to_numpy(dtype=np.int64),
+                "latitudes": d["lat_imputed"].to_numpy(dtype=float),
+                "longitudes": d["lon_imputed"].to_numpy(dtype=float),
+            },
+            mode=mode_code,
+            seed=int(seed),
+            prevalence_min=float(prevalence_min),
+            prevalence_max=float(prevalence_max),
+        )["y"],
         dtype=float,
     )
 
@@ -1565,15 +1591,16 @@ def _geo_subpop16_dataset(seed: typing.Any=20260330, prevalence_min: typing.Any=
 
     subpop_code = {name: idx for idx, name in enumerate(subpops)}
     d["y"] = np.asarray(
-        _gamfit_rust().synthetic_geo_subpop_response(
-            d["Subpopulation"].map(subpop_code).to_numpy(dtype=int).tolist(),
-            int(seed),
-            float(prevalence_min),
-            float(prevalence_max),
-            0.25,
-            0.85,
-            False,
-        ),
+        _bench_fixtures().run_fixture(
+            "geo-subpop-response",
+            arrays={"subpop_codes": d["Subpopulation"].map(subpop_code).to_numpy(dtype=np.int64)},
+            seed=int(seed),
+            prevalence_min=float(prevalence_min),
+            prevalence_max=float(prevalence_max),
+            noise_scale_min=0.25,
+            noise_scale_max=0.85,
+            random_scale=False,
+        )["y"],
         dtype=float,
     )
 
@@ -1616,15 +1643,16 @@ def _geo_subpop16_randomprev_randomscale_dataset(
 
     subpop_code = {name: idx for idx, name in enumerate(subpops)}
     d["y"] = np.asarray(
-        _gamfit_rust().synthetic_geo_subpop_response(
-            d["Subpopulation"].map(subpop_code).to_numpy(dtype=int).tolist(),
-            int(seed),
-            float(prevalence_min),
-            float(prevalence_max),
-            float(noise_scale_min),
-            float(noise_scale_max),
-            True,
-        ),
+        _bench_fixtures().run_fixture(
+            "geo-subpop-response",
+            arrays={"subpop_codes": d["Subpopulation"].map(subpop_code).to_numpy(dtype=np.int64)},
+            seed=int(seed),
+            prevalence_min=float(prevalence_min),
+            prevalence_max=float(prevalence_max),
+            noise_scale_min=float(noise_scale_min),
+            noise_scale_max=float(noise_scale_max),
+            random_scale=True,
+        )["y"],
         dtype=float,
     )
 

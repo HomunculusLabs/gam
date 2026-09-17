@@ -67,6 +67,7 @@ runs:
         PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/bench/runtime/pydeps
         R_LIBS_USER: ${{ github.workspace }}/bench/runtime/r-lib
         BENCH_GAM_BIN: ${{ github.workspace }}/bench/runtime/gam
+        BENCH_FIXTURES_BIN: ${{ github.workspace }}/bench/runtime/bench_fixtures
         BENCH_SCENARIO: ${{ inputs.scenario }}
         BENCH_SHARD_TIMEOUT_SEC: ${{ inputs.wall-budget-seconds }}
         BENCH_CONTENDER_FILTER: ${{ inputs.contender-filter }}
@@ -100,6 +101,10 @@ runs:
         ls -l "${BENCH_GAM_BIN}" || true
         file "${BENCH_GAM_BIN}" || true
         test -x "${BENCH_GAM_BIN}"
+        echo "BENCH_FIXTURES_BIN=${BENCH_FIXTURES_BIN}"
+        chmod +x "${BENCH_FIXTURES_BIN}" || true
+        ls -l "${BENCH_FIXTURES_BIN}" || true
+        test -x "${BENCH_FIXTURES_BIN}"
         echo "smoke-import python deps"
         python3 .github/scripts/workflow_tasks.py check_python_deps
         echo "smoke-import gamfit extension"

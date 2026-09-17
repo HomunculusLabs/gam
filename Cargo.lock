@@ -3911,7 +3911,6 @@ dependencies = [
  "gam-math",
  "gam-predict",
  "gam-runtime",
- "gam-test-support",
  "ndarray 0.17.2",
  "numpy",
  "pyo3",
@@ -4069,6 +4068,8 @@ dependencies = [
  "gam-runtime",
  "gam-terms",
  "ndarray 0.17.2",
+ "npyz 0.9.1",
+ "rand 0.10.2",
 ]
 
 [[package]]

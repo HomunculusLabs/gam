@@ -6,6 +6,7 @@
 //! test-support dependency cycle. Leaf fixtures remain with their owning
 //! crates and are re-exported below for this harness's consumers.
 
+pub mod bench_fixtures;
 pub mod calibration;
 pub mod cli_harness;
 pub mod fd_derivative;

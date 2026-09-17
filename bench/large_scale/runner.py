@@ -989,7 +989,7 @@ def _survival_score_grid(train_times: np.ndarray) -> np.ndarray:
 
 
 def _repeat_survival_curve(curve: np.ndarray, n_rows: int) -> np.ndarray:
-    return np.asarray(_rust().repeat_survival_curve(_f64_list(curve), int(n_rows)), dtype=float)
+    return np.tile(np.asarray(curve, dtype=float).reshape(1, -1), (int(n_rows), 1))
 
 
 def survival_concordance(

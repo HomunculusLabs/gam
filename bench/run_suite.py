@@ -1461,12 +1461,12 @@ def _thread3_cliff_gradient_magnitude(
     )
     jump = float(ds.get("thread3_cliff_jump", 0.0))
     sharpness = float(ds.get("thread3_cliff_sharpness", 1.0))
-    values = _gamfit_rust().thread3_cliff_gradient_magnitude(
-        np.asarray(collocation_points, dtype=float),
-        coeff_vec.reshape(-1).tolist(),
-        jump,
-        sharpness,
-    )
+    values = _bench_fixtures().run_fixture(
+        "cliff-gradient-magnitude",
+        arrays={"points": np.asarray(collocation_points, dtype=float), "coefficients": coeff_vec.reshape(-1)},
+        jump=jump,
+        sharpness=sharpness,
+    ).get("magnitude")
     return None if values is None else np.asarray(values, dtype=float)
 
 

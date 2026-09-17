@@ -5121,7 +5121,6 @@ fn rust_extension(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(brier_from_predictions, module)?)?;
     module.add_function(wrap_pyfunction!(log_loss_from_predictions, module)?)?;
     module.add_function(wrap_pyfunction!(nagelkerke_r2_from_predictions, module)?)?;
-    module.add_function(wrap_pyfunction!(make_folds_indices, module)?)?;
     module.add_function(wrap_pyfunction!(
         gaussian_log_loss_from_predictions,
         module
@@ -5130,11 +5129,9 @@ fn rust_extension(module: &Bound<'_, PyModule>) -> PyResult<()> {
         gaussian_prediction_scores_from_predictions,
         module
     )?)?;
-    module.add_function(wrap_pyfunction!(zscore_train_test_arrays, module)?)?;
     module.add_function(wrap_pyfunction!(classification_metrics, module)?)?;
     module.add_function(wrap_pyfunction!(survival_concordance, module)?)?;
     module.add_function(wrap_pyfunction!(survival_score_grid_from_times, module)?)?;
-    module.add_function(wrap_pyfunction!(repeat_survival_curve, module)?)?;
     module.add_function(wrap_pyfunction!(survival_null_curve_from_train, module)?)?;
     module.add_function(wrap_pyfunction!(
         survival_matrix_from_risk_calibration,
@@ -5144,22 +5141,6 @@ fn rust_extension(module: &Bound<'_, PyModule>) -> PyResult<()> {
         survival_lifted_metrics_from_predictions,
         module
     )?)?;
-    module.add_function(wrap_pyfunction!(synthetic_binomial_columns, module)?)?;
-    module.add_function(wrap_pyfunction!(synthetic_geo_disease_columns, module)?)?;
-    module.add_function(wrap_pyfunction!(
-        synthetic_continuous_order_columns,
-        module
-    )?)?;
-    module.add_function(wrap_pyfunction!(
-        synthetic_thread3_admixture_cliff_columns,
-        module
-    )?)?;
-    module.add_function(wrap_pyfunction!(synthetic_geo_disease_eas_columns, module)?)?;
-    module.add_function(wrap_pyfunction!(synthetic_papuan_oce_columns, module)?)?;
-    module.add_function(wrap_pyfunction!(synthetic_hgdp_pc_panel_columns, module)?)?;
-    module.add_function(wrap_pyfunction!(synthetic_geo_subpop_response, module)?)?;
-    module.add_function(wrap_pyfunction!(synthetic_geo_latlon_response, module)?)?;
-    module.add_function(wrap_pyfunction!(thread3_cliff_gradient_magnitude, module)?)?;
     // LatentCoord input-location derivative helpers (one per basis kind).
     // The Duchon descriptor differentiates the *built* design (kernel-nullspace
     // projection + polynomial columns + amplification) via `duchon_basis_with_jets`,

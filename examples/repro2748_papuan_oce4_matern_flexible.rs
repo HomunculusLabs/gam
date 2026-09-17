@@ -23,7 +23,7 @@
 //! walked to a corner and stopped while descent remained.
 //!
 //! This binary reproduces that cell without a wheel, a venv or
-//! `bench/run_suite.py`: `synthetic_papuan_oce_columns(6000, 20260315, 4)` — the
+//! `bench/run_suite.py`: `papuan_oce_columns(6000, 20260315, 4)` — the
 //! bench's own generator, called directly rather than inlined — one joint Matern
 //! smooth over all four PCs with `length_scale=auto` (which is what turns on the
 //! exact-joint `[ρ, ψ]` spatial route the failing message comes from), binomial

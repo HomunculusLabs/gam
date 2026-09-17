@@ -9505,5 +9505,32 @@
     ],
     "reason": "#2899 F7 (SPEC rule 9): gam-pyffi typed a NumPy column Binary within 1e-12 of {0, 1}, while gam-data's text and Arrow encoders required the codes exactly, so the same numbers trained different column kinds through gamfit and gam fit. gam_data::infer_numeric_column_kind replaces it, through the one is_binary_value rule every encoder now uses.",
     "evidence": "At ba5b2a6b1, infer_numeric_array_column_kind is defined in manifold_and_posterior_ffi.rs and called by dataset_from_numeric_array in that file and by encoded_table_from_columns in model_ffi.rs, which is include!d into the same crate root. Both callers now call gam::data::infer_numeric_column_kind. Gate job 1102058 (lane sw0e, node n42): source_removal_guard.py refused exactly this identity for this file. Gate job 1113845 (lane sw0e, node n36) stacked this slice on 196300a52 and refused exactly this identity without this entry, then verified with it; re-gate job 1115266 on f9c289480 did the same."
+  },
+  {
+    "base": "156f278acd7621cb607f498b034511ab485f4b85",
+    "items": [
+      "crates/gam-pyffi/src/latent/reml_latent_fit_ffi.rs:const:HOLDOUT_DENOMINATOR",
+      "crates/gam-pyffi/src/latent/reml_latent_fit_ffi.rs:fn:make_folds_indices",
+      "crates/gam-pyffi/src/latent/reml_latent_fit_ffi.rs:fn:repeat_survival_curve",
+      "crates/gam-pyffi/src/latent/reml_latent_fit_ffi.rs:fn:synthetic_binomial_columns",
+      "crates/gam-pyffi/src/latent/reml_latent_fit_ffi.rs:fn:synthetic_continuous_order_columns",
+      "crates/gam-pyffi/src/latent/reml_latent_fit_ffi.rs:fn:synthetic_geo_disease_columns",
+      "crates/gam-pyffi/src/latent/reml_latent_fit_ffi.rs:fn:synthetic_geo_disease_eas_columns",
+      "crates/gam-pyffi/src/latent/reml_latent_fit_ffi.rs:fn:synthetic_geo_latlon_response",
+      "crates/gam-pyffi/src/latent/reml_latent_fit_ffi.rs:fn:synthetic_geo_subpop_response",
+      "crates/gam-pyffi/src/latent/reml_latent_fit_ffi.rs:fn:synthetic_hgdp_pc_panel_columns",
+      "crates/gam-pyffi/src/latent/reml_latent_fit_ffi.rs:fn:synthetic_papuan_oce_columns",
+      "crates/gam-pyffi/src/latent/reml_latent_fit_ffi.rs:fn:synthetic_thread3_admixture_cliff_columns",
+      "crates/gam-pyffi/src/latent/reml_latent_fit_ffi.rs:fn:thread3_cliff_gradient_magnitude",
+      "crates/gam-pyffi/src/latent/reml_latent_fit_ffi.rs:fn:xy_dict",
+      "crates/gam-pyffi/src/latent/reml_latent_fit_ffi.rs:fn:zscore_train_test_arrays",
+      "crates/gam-pyffi/tests/src_modules/lib_tests.rs:fn:make_folds_indices_holdout_partitions_with_split",
+      "crates/gam-pyffi/tests/src_modules/lib_tests.rs:fn:make_folds_indices_kfold_partitions_unstratified",
+      "crates/gam-pyffi/tests/src_modules/lib_tests.rs:fn:make_folds_indices_rejects_invalid_inputs",
+      "crates/gam-pyffi/tests/src_modules/lib_tests.rs:fn:make_folds_indices_seed_determinism_and_variation",
+      "crates/gam-pyffi/tests/src_modules/lib_tests.rs:fn:make_folds_indices_stratified_balances_classes"
+    ],
+    "reason": "#2899 F1 bench half and F2 (SPEC rules 8, 9): the production extension carried the benchmark harness. make_folds_indices assigned CV folds (HOLDOUT_DENOMINATOR sized its holdout), zscore_train_test_arrays standardized each fold, repeat_survival_curve tiled a curve, and nine synthetic_* pyfunctions with xy_dict and thread3_cliff_gradient_magnitude served gam_test_support::synthetic through a normal gam-test-support dependency. The fold and z-score code moves unchanged into gam_test_support::bench_fixtures (cv_folds, zscore_train_test), and the bench_fixtures binary serves it and the synthetic panels to bench/ through bench/_bench_fixtures.py. repeat_survival_curve becomes np.tile in bench, and gam-pyffi drops gam-test-support. The five lib_tests.rs fold tests move to bench_fixtures unit tests with the same fixtures and assertions.",
+    "evidence": "At the base, git grep -n -w finds make_folds_indices only in reml_latent_fit_ffi.rs, its registration in geometry_ffi.rs, bench/_run_suite_datasets.py and the five lib_tests.rs tests. zscore_train_test_arrays and repeat_survival_curve appear only in pyffi and bench/_run_suite_datasets.py or bench/large_scale/runner.py. The synthetic_* pyfunctions and thread3_cliff_gradient_magnitude appear only in pyffi, bench/_run_suite_datasets.py, bench/run_suite.py and two comments in examples/. xy_dict and HOLDOUT_DENOMINATOR appear only inside reml_latent_fit_ffi.rs. Gate job 1117217 (lane sw0e, node n36) refused exactly these 20 identities on the code-only commit and verified the commit carrying this entry."
   }
 ]
