@@ -774,8 +774,7 @@ pub(super) fn run_seeded(
     let s = config.active.min(k).max(1);
 
     let fit_start = Instant::now();
-    let mut decoder = seed_decoder(x, k);
-    unit_norm_rows(&mut decoder)?;
+    let decoder = seeded_decoder(x, k)?;
     // Coarse phase heartbeat on the same channel as the score-router DECLINE
     // (log::warn survives the RUST_LOG=warn harnesses that drop log::info), so a
     // multi-hour host fit is never silent. Emitted at seed / initial-route /
@@ -1504,6 +1503,25 @@ pub fn run_linear_reml_schedule(
     run_linear_reml_schedule_with_recycle(x, config, &mut decoder_recycle, None)
 }
 
+/// [`run_linear_reml_schedule`] from a seed the caller already holds. The first inner
+/// run starts from `seed` at the shared default ridge, where the seeded entry computes
+/// [`seed_linear_reml_schedule`] itself and then runs the same [`run_from_decoder`]
+/// alternation. So given that seed for the same `x` and `config`, the fit is the one
+/// [`run_linear_reml_schedule`] returns (#2283).
+pub(super) fn run_linear_reml_schedule_from_seed(
+    x: ArrayView2<'_, f32>,
+    config: &SparseDictConfig,
+    seed: Array2<f32>,
+) -> Result<SparseDictFit, SparseDictionaryError> {
+    let mut decoder_recycle = DecoderRecycleSpace::new(config.n_atoms);
+    run_linear_reml_schedule_with_recycle(
+        x,
+        config,
+        &mut decoder_recycle,
+        Some((seed, config.decoder_ridge as f64)),
+    )
+}
+
 /// Grow a fitted dictionary's capacity from its learned directions and
 /// evidence-selected ridge. New capacity first splits learned atoms along their members'
 /// spread ([`split_decoder_seed`]). Any capacity beyond the splittable atoms covers the
@@ -1918,9 +1936,65 @@ pub(super) fn seed_decoder(x: ArrayView2<'_, f32>, k: usize) -> Array2<f32> {
     decoder
 }
 
+/// [`seed_decoder`] with unit-norm rows: the start of every seeded inner run.
+fn seeded_decoder(x: ArrayView2<'_, f32>, k: usize) -> Result<Array2<f32>, SparseDictionaryError> {
+    let mut decoder = seed_decoder(x, k);
+    unit_norm_rows(&mut decoder)?;
+    Ok(decoder)
+}
+
+/// The seed [`run_linear_reml_schedule`] starts its first inner run from, for a
+/// caller that seeds on one allocation and fits on another (#2283).
+pub(super) fn seed_linear_reml_schedule(
+    x: ArrayView2<'_, f32>,
+    config: &SparseDictConfig,
+) -> Result<Array2<f32>, SparseDictionaryError> {
+    validate(x, config)?;
+    seeded_decoder(x, config.n_atoms)
+}
+
+/// `Σ_c a_c·b_c` in f64, accumulated in four interleaved lanes (the f64 width of a
+/// 256-bit register) and combined in one fixed order. No sum is reassociated, so the
+/// loop vectorizes without changing with the thread count, and `interleaved_dot(v, v)`
+/// and `interleaved_dot(−v, v)` stay exact negatives.
+fn interleaved_dot(a: &[f32], b: &[f32]) -> f64 {
+    let (a_blocks, a_tail) = a.as_chunks::<4>();
+    let (b_blocks, b_tail) = b.as_chunks::<4>();
+    let mut lanes = [0.0_f64; 4];
+    for (block_a, block_b) in a_blocks.iter().zip(b_blocks) {
+        for lane in 0..4 {
+            lanes[lane] += block_a[lane] as f64 * block_b[lane] as f64;
+        }
+    }
+    let mut total = lanes[0] + lanes[1] + lanes[2] + lanes[3];
+    for (&value_a, &value_b) in a_tail.iter().zip(b_tail) {
+        total += value_a as f64 * value_b as f64;
+    }
+    total
+}
+
+/// `Σ_c (x_c − projection·line_c)²` in the lanes of [`interleaved_dot`]: the energy of
+/// the residual coordinates themselves, never a difference of two energies.
+fn interleaved_residual_energy(x: &[f32], line: &[f32], projection: f64) -> f64 {
+    let (x_blocks, x_tail) = x.as_chunks::<4>();
+    let (line_blocks, line_tail) = line.as_chunks::<4>();
+    let mut lanes = [0.0_f64; 4];
+    for (block_x, block_line) in x_blocks.iter().zip(line_blocks) {
+        for lane in 0..4 {
+            let residual = block_x[lane] as f64 - projection * block_line[lane] as f64;
+            lanes[lane] += residual * residual;
+        }
+    }
+    let mut total = lanes[0] + lanes[1] + lanes[2] + lanes[3];
+    for (&value_x, &value_line) in x_tail.iter().zip(line_tail) {
+        let residual = value_x as f64 - projection * value_line as f64;
+        total += residual * residual;
+    }
+    total
+}
+
 fn complete_decoder_seed(x: ArrayView2<'_, f32>, decoder: &mut Array2<f32>, prefix: usize) {
     let n = x.nrows();
-    let p = x.ncols();
     let k = decoder.nrows();
 
     // f64 reductions keep every finite f32 row energy representable.
@@ -1928,6 +2002,17 @@ fn complete_decoder_seed(x: ArrayView2<'_, f32>, decoder: &mut Array2<f32>, pref
         .axis_iter(Axis(0))
         .into_par_iter()
         .map(|row| row.iter().map(|&v| (v as f64) * (v as f64)).sum())
+        .collect();
+    // A row lying on an admitted line to the data's resolution is represented, not a
+    // new direction. An f32 scaled copy of a line is rounded by at most half an ulp per
+    // coordinate, so its residual energy is at most `(ε₃₂/2)²‖xᵢ‖²`. Evaluating that
+    // residual in f64 moves its norm by about `2γ_P‖xᵢ‖` (`γ_P = Pε₆₄/(1 − Pε₆₄)`,
+    // Higham Lemma 3.1), which is below `ε₃₂/2·‖xᵢ‖` for every `P` under 1.3e8. So a
+    // residual energy at or below `(ε₃₂‖xᵢ‖)²` is that rounding, and it counts as zero.
+    // Without this floor, an exhausted support admits rounded copies as new lines.
+    let represented_floor: Vec<f64> = norm2
+        .iter()
+        .map(|&energy| energy * (f32::EPSILON as f64).powi(2))
         .collect();
     // Update only against the newly admitted line, retaining the nearest-line
     // residual across the preceding atoms. Rows are independent; ties choose
@@ -1949,30 +2034,48 @@ fn complete_decoder_seed(x: ArrayView2<'_, f32>, decoder: &mut Array2<f32>, pref
             decoder.row_mut(atom).assign(&x.row(chosen));
             min_dist2[chosen] = 0.0;
         }
-        let prev = decoder.row(atom);
-        let previous_norm2: f64 = prev.iter().map(|&v| (v as f64).powi(2)).sum();
+        let prev_row = decoder.row(atom);
+        let prev_buffer;
+        let prev = match prev_row.as_slice() {
+            Some(slice) => slice,
+            None => {
+                prev_buffer = prev_row.to_vec();
+                &prev_buffer[..]
+            }
+        };
+        let previous_norm2 = interleaved_dot(prev, prev);
         if previous_norm2 == 0.0 {
             continue;
         }
-        min_dist2.par_iter_mut().enumerate().for_each(|(i, md)| {
-            let xi = x.row(i);
-            let mut dot = 0.0_f64;
-            for c in 0..p {
-                dot += xi[c] as f64 * prev[c] as f64;
-            }
-            // Evaluate the residual itself rather than subtracting two
-            // large energies. The latter can invent a positive residual
-            // even for an exact antipode and seed the same line twice.
-            let projection = dot / previous_norm2;
-            let mut d2 = 0.0_f64;
-            for c in 0..p {
-                let residual = (-projection).mul_add(prev[c] as f64, xi[c] as f64);
-                d2 += residual * residual;
-            }
-            if d2 < *md {
-                *md = d2;
-            }
-        });
+        min_dist2
+            .par_iter_mut()
+            .zip(represented_floor.par_iter())
+            .enumerate()
+            .for_each(|(i, (md, &floor))| {
+                // A non-contiguous row is copied, so every layout runs the same sums.
+                let row = x.row(i);
+                let row_buffer;
+                let xi = match row.as_slice() {
+                    Some(slice) => slice,
+                    None => {
+                        row_buffer = row.to_vec();
+                        &row_buffer[..]
+                    }
+                };
+                // Evaluate the residual itself rather than subtracting two
+                // large energies. The latter can invent a positive residual
+                // even for an exact antipode and seed the same line twice. At an
+                // exact antipode the dot product and `previous_norm2` are the same
+                // interleaved sum, so `projection` is exactly −1 and every residual
+                // coordinate is exactly zero. A fused multiply-add adds nothing to
+                // that, and without an `fma` target feature it was a libm call per
+                // coordinate (#2283, job 1101752).
+                let projection = interleaved_dot(xi, prev) / previous_norm2;
+                let d2 = interleaved_residual_energy(xi, prev, projection);
+                if d2 < *md {
+                    *md = if d2 <= floor { 0.0 } else { d2 };
+                }
+            });
     }
 }
 
@@ -1980,6 +2083,26 @@ fn complete_decoder_seed(x: ArrayView2<'_, f32>, decoder: &mut Array2<f32>, pref
 mod seed_geometry_tests {
     use super::{complete_decoder_seed, seed_decoder};
     use ndarray::array;
+
+    /// #2283 — rows that are f32 scaled copies of two lines sit off those lines only by
+    /// rounding. Once both lines are admitted the rows are represented, so the capacity
+    /// beyond them stays dormant instead of admitting a rounded copy as a third line.
+    #[test]
+    fn rounded_scaled_copies_do_not_consume_atom_capacity() {
+        let line_a = [0.3_f32, -1.7, 0.45, 2.2];
+        let line_b = [1.1_f32, 0.6, -0.35, -0.8];
+        let scales = [1.0_f32, 0.37, -2.9, 1.3];
+        let x = ndarray::Array2::from_shape_fn((8, 4), |(row, col)| {
+            let line = if row % 2 == 0 { &line_a } else { &line_b };
+            scales[row / 2] * line[col]
+        });
+        let seed = seed_decoder(x.view(), 4);
+        let admitted = seed
+            .outer_iter()
+            .filter(|row| row.iter().any(|&v| v != 0.0))
+            .count();
+        assert_eq!(admitted, 2, "two lines admitted and two atoms dormant: {seed:?}");
+    }
 
     #[test]
     fn antipodes_do_not_consume_distinct_atom_capacity() {

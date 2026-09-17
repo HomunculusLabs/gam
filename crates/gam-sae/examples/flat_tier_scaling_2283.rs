@@ -26,14 +26,22 @@
 //! | `--epochs` | 200 | inner epoch cap (the cell's `--max-epochs`) |
 //! | `--score-mode` | required | `off` / `auto` / `required` |
 //! | `--log` | warn | `warn` / `info` / `debug` |
+//! | `--seed-out` | none | seed only: write the decoder seed as `<f4` `.npy` and exit |
+//! | `--seed-in` | none | fit from a seed written by `--seed-out` for the same rows and `--atoms` |
+//!
+//! Seeding is `O(K·N·P)` host work, over 41 minutes at the acceptance shape, so a device
+//! run seeds on a CPU allocation with `--seed-out` and fits on the GPU with `--seed-in`.
 //!
 //! One machine-readable `[2283-flat-scaling]` line is printed on stdout, for a fit or a
-//! typed refusal alike.
+//! typed refusal alike, and one `[2283-flat-seed]` line for a seed-only run.
 
 use std::path::Path;
 use std::time::Instant;
 
-use gam_sae::sparse_dict::{SparseDictConfig, fit_sparse_dictionary};
+use gam_sae::sparse_dict::{
+    SparseDictConfig, fit_sparse_dictionary, fit_sparse_dictionary_from_seed,
+    seed_sparse_dictionary_decoder,
+};
 use ndarray::Array2;
 
 #[path = "support/f16.rs"]
@@ -85,6 +93,28 @@ fn read_npy(path: &Path) -> Result<Array2<f32>, String> {
     Array2::from_shape_vec((n, p), values).map_err(|error| format!("{}: {error}", path.display()))
 }
 
+/// Write a little-endian `<f4` `.npy` matrix (format version 1.0).
+fn write_npy(path: &Path, matrix: &Array2<f32>) -> Result<(), String> {
+    let (rows, cols) = matrix.dim();
+    let mut header =
+        format!("{{'descr': '<f4', 'fortran_order': False, 'shape': ({rows}, {cols}), }}");
+    // The magic, version and length take 10 bytes; the newline-terminated header pads
+    // the data offset to a multiple of 64, as the format specifies.
+    let data_offset = (10 + header.len() + 1).div_ceil(64) * 64;
+    header.push_str(&" ".repeat(data_offset - 10 - header.len() - 1));
+    header.push('\n');
+    let header_len = u16::try_from(header.len())
+        .map_err(|error| format!("{}: npy header length: {error}", path.display()))?;
+    let mut bytes = Vec::with_capacity(data_offset + rows * cols * 4);
+    bytes.extend_from_slice(b"\x93NUMPY\x01\x00");
+    bytes.extend_from_slice(&header_len.to_le_bytes());
+    bytes.extend_from_slice(header.as_bytes());
+    for value in matrix.iter() {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    std::fs::write(path, bytes).map_err(|error| format!("write {}: {error}", path.display()))
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let npy = arg_value("npy").ok_or("--npy=<path> is required")?;
     let atoms = arg_usize("atoms", 32_672)?;
@@ -113,12 +143,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     config.max_epochs = epochs;
     config.score_mode = score_mode;
 
+    if let Some(out) = arg_value("seed-out") {
+        let seed_started = Instant::now();
+        let seed =
+            seed_sparse_dictionary_decoder(x.view(), &config).map_err(|error| error.to_string())?;
+        let seed_secs = seed_started.elapsed().as_secs_f64();
+        write_npy(Path::new(&out), &seed)?;
+        println!(
+            "[2283-flat-seed] n={n} p={p} atoms={atoms} load_s={load_secs:.1} \
+             seed_s={seed_secs:.1} out={out}"
+        );
+        return Ok(());
+    }
+    let seed_in = arg_value("seed-in");
+    let seed_load_started = Instant::now();
+    let seed = seed_in.as_deref().map(|path| read_npy(Path::new(path))).transpose()?;
+    let seed_load_secs = seed_load_started.elapsed().as_secs_f64();
+
     let fit_started = Instant::now();
-    let outcome = fit_sparse_dictionary(x.view(), &config);
+    let outcome = match seed {
+        Some(seed) => fit_sparse_dictionary_from_seed(x.view(), &config, seed),
+        None => fit_sparse_dictionary(x.view(), &config),
+    };
     let fit_secs = fit_started.elapsed().as_secs_f64();
     let shape = format!(
         "n={n} p={p} atoms={atoms} active={active} minibatch={minibatch} epochs_cap={epochs} \
-         score_mode={mode} load_s={load_secs:.1} fit_s={fit_secs:.1}"
+         score_mode={mode} seed_in={} load_s={load_secs:.1} seed_load_s={seed_load_secs:.1} \
+         fit_s={fit_secs:.1}",
+        seed_in.as_deref().unwrap_or("none")
     );
     match outcome {
         Ok(fit) => println!(

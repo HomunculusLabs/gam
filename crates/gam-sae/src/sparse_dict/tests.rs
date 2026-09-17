@@ -1,5 +1,8 @@
 use super::scoring::{TileScorer, top_s_online};
-use super::{SparseDictConfig, fit_sparse_dictionary, sparse_dictionary_transform_with_mode};
+use super::{
+    SparseDictConfig, fit_sparse_dictionary, fit_sparse_dictionary_from_seed,
+    seed_sparse_dictionary_decoder, sparse_dictionary_transform_with_mode,
+};
 use ndarray::{Array2, ArrayView2};
 
 /// Build an exact rank-1 mixture: `K` orthonormal planted atoms (rows of an
@@ -236,6 +239,47 @@ fn sparse_trainer_recovers_planted_dictionary_beats_pca_baseline() {
         "sparse trainer EV {} must match-or-beat rank-{k} PCA baseline {}",
         fit.explained_variance,
         baseline
+    );
+}
+
+/// #2283 — seeding on one allocation and fitting from the saved seed on another is the
+/// one-shot fit, bit for bit. A seed with its rows reversed is still a valid seed and must
+/// give a different decoder, so a fit that ignored its seed and reseeded cannot pass.
+#[test]
+fn fit_from_the_saved_seed_is_the_one_shot_fit_2283() {
+    let (k, p, n) = (8usize, 12usize, 480usize);
+    let (x, _atoms) = planted(k, p, n, 0.2);
+    let config = SparseDictConfig {
+        n_atoms: k,
+        active: 2,
+        minibatch: 128,
+        max_epochs: 40,
+        score_tile: 16,
+        code_ridge: 1.0e-6,
+        decoder_ridge: 1.0e-6,
+        tolerance: 1.0e-9,
+        score_mode: gam_gpu::GpuPolicy::Off,
+    };
+    let one_shot = fit_sparse_dictionary(x.view(), &config).expect("one-shot fit");
+    let seed = seed_sparse_dictionary_decoder(x.view(), &config).expect("seed");
+    let reversed = seed.slice(ndarray::s![..;-1, ..]).to_owned();
+    let split = fit_sparse_dictionary_from_seed(x.view(), &config, seed).expect("fit from seed");
+    assert_eq!(split.decoder, one_shot.decoder, "decoder");
+    assert_eq!(split.indices, one_shot.indices, "routing indices");
+    assert_eq!(split.codes, one_shot.codes, "codes");
+    assert_eq!(split.epochs, one_shot.epochs, "inner epochs");
+    assert_eq!(
+        split.convergence.selected_rho.to_bits(),
+        one_shot.convergence.selected_rho.to_bits(),
+        "selected rho {} vs {}",
+        split.convergence.selected_rho,
+        one_shot.convergence.selected_rho
+    );
+    let from_reversed =
+        fit_sparse_dictionary_from_seed(x.view(), &config, reversed).expect("fit from reversed seed");
+    assert_ne!(
+        from_reversed.decoder, one_shot.decoder,
+        "a reversed seed must move the decoder, or the seed is not what the fit starts from"
     );
 }
 

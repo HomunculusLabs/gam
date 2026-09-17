@@ -352,3 +352,30 @@ pub fn fit_sparse_dictionary(
 ) -> Result<SparseDictFit, SparseDictionaryError> {
     update::run_linear_reml_schedule(x, config)
 }
+
+/// The decoder seed [`fit_sparse_dictionary`] starts from: one signed line per atom,
+/// chosen by the largest remaining one-atom reconstruction residual, with unit-norm
+/// rows.
+///
+/// Seeding makes one pass over every row per atom, `O(K·N·P)` host work with no device
+/// stage. At the #2283 acceptance shape (N = 96,000, K = 32,672, P = 2,048) it was still
+/// running after 41 minutes on 16 cores (job 1101752). A device fit therefore starts
+/// from a saved seed through [`fit_sparse_dictionary_from_seed`] instead of holding an
+/// accelerator while the seed runs.
+pub fn seed_sparse_dictionary_decoder(
+    x: ArrayView2<'_, f32>,
+    config: &SparseDictConfig,
+) -> Result<Array2<f32>, SparseDictionaryError> {
+    update::seed_linear_reml_schedule(x, config)
+}
+
+/// [`fit_sparse_dictionary`] started from `seed`. Given the seed that
+/// [`seed_sparse_dictionary_decoder`] returns for the same `x` and `config`, the fit is
+/// the one [`fit_sparse_dictionary`] returns.
+pub fn fit_sparse_dictionary_from_seed(
+    x: ArrayView2<'_, f32>,
+    config: &SparseDictConfig,
+    seed: Array2<f32>,
+) -> Result<SparseDictFit, SparseDictionaryError> {
+    update::run_linear_reml_schedule_from_seed(x, config, seed)
+}
