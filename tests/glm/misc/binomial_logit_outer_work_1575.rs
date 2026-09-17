@@ -168,31 +168,26 @@ fn binomial_logit_reml_outer_work_bounded_1575() {
     );
 
     // Fit existence is the sealed convergence proof (SPEC 20).
-    // Stationarity is certified RELATIVE TO THE SCORE SCALE, matching the
-    // solver's own outer-convergence contract (the score-relative flat-valley
-    // bound in `rho_optimizer::bridges`: a cost-stalled optimum converges when
-    // the projected gradient clears `FLAT_VALLEY_CONVERGED_REL_GRAD·(1+|score|)`,
-    // capped at `FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP = 1.0`). This binomial/logit
-    // fit is genuinely weakly identified in some ρ coordinates (near-collinear
-    // monomial bases): the REML surface flattens and the residual outer gradient
-    // floors at O(0.1) on a score of ~390, exactly as mgcv's score-relative
-    // convergence certifies. An ABSOLUTE 1e-3 bound is therefore the WRONG
-    // correctness check here — weakly-identified coordinates cannot reach the
-    // solver's own score-relative floor. We keep a REAL correctness check by
-    // asserting against `flat_valley_converged_grad_bound`, the very function
-    // the solver certifies with, rather than restating its constant (#2519): this still REJECTS a genuinely non-stationary stuck
-    // mode (e.g. the #1426-class overfit at |g|≈11, far above this bound),
-    // while certifying the true flat-valley optimum.
+    // The fit's projected outer gradient must clear the bound its own terminal
+    // certificate judged it by, read off the certificate the fit carries rather
+    // than restated (#2519). The guard used to publish claims through a
+    // score-relative `1e-3·(1 + |score|)` term the certificate never applied;
+    // since #2817 a stall claims only inside the certificate's band, so the
+    // certificate's bound is the one standard this fit was minted against. It
+    // still rejects a non-stationary stuck mode (the #1426 |g|≈11 overfit).
     if let Some(g) = fit.outer_gradient_norm {
-        let score_relative_stationarity_bound =
-            gam::solver::rho_optimizer::flat_valley_converged_grad_bound(fit.reml_score().expect("the fit reports a REML/LAML criterion"));
+        let certificate = fit
+            .artifacts
+            .criterion_certificate
+            .as_ref()
+            .expect("a minted fit carries its terminal criterion certificate");
+        let bound = certificate.stationarity.bound();
         assert!(
-            g <= score_relative_stationarity_bound,
-            "final outer gradient norm {g} exceeds the score-relative stationarity \
-             bound {score_relative_stationarity_bound} (= min(1e-3·(1+|score|), 1.0), \
-             score={}) — the converged optimum is NOT stationary even by the \
-             score-relative criterion, so the optimum changed / the fit is stuck",
-            fit.reml_score().expect("the fit reports a REML/LAML criterion")
+            g <= bound,
+            "final outer gradient norm {g} exceeds the stationarity bound {bound} its own \
+             certificate applied ({}) — the minted optimum is not stationary by the standard \
+             it was certified against",
+            certificate.summary()
         );
     }
 
@@ -299,11 +294,17 @@ fn binomial_logit_reml_firth_on_outer_work_bounded_1575() {
     );
     // Fit existence is the sealed convergence proof (SPEC 20).
     if let Some(g) = fit.outer_gradient_norm {
-        let bound = gam::solver::rho_optimizer::flat_valley_converged_grad_bound(fit.reml_score().expect("the fit reports a REML/LAML criterion"));
+        let certificate = fit
+            .artifacts
+            .criterion_certificate
+            .as_ref()
+            .expect("a minted Firth-ON fit carries its terminal criterion certificate");
+        let bound = certificate.stationarity.bound();
         assert!(
             g <= bound,
-            "Firth-ON final outer gradient norm {g} exceeds score-relative \
-             stationarity bound {bound}"
+            "Firth-ON final outer gradient norm {g} exceeds the stationarity bound {bound} its \
+             own certificate applied ({})",
+            certificate.summary()
         );
     }
 

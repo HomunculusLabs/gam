@@ -71,7 +71,7 @@ fn strict_saddle_facts_separate_the_free_set_from_the_interior_1082() {
     );
     let facts = incumbent_curvature(&x, &gradient, &hessian, bounds, resolution)
         .expect("facts at a strict-saddle verdict");
-    let rendered = facts.to_string();
+    let rendered = facts.render(None);
     assert!(rendered.contains("free-set λ_min=-1.000e-2"), "{rendered}");
     assert!(rendered.contains("interior λ_min=1.000e0"), "{rendered}");
     assert!(rendered.contains("railed=[#1 ρ=3.0000e1"), "{rendered}");

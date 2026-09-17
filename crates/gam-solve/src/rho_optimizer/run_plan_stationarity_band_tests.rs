@@ -209,7 +209,7 @@ fn drive_first_order_bridge_2613(
         None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
     );
     let exit: Arc<Mutex<Option<CostStallExit>>> = Arc::new(Mutex::new(None));
-    let mut guard = CostStallGuard::new(1.0e-7, COST_STALL_WINDOW, 1.0e-3, exit.clone());
+    let mut guard = CostStallGuard::new(1.0e-7, COST_STALL_WINDOW, &claim_band_config(1.0e-3), exit.clone());
     guard.observe_seed(&seed_rho, seed_cost, seed_grad);
     let mut bridge = OuterFirstOrderBridge {
         obj: &mut obj,
@@ -602,10 +602,8 @@ fn declared_objective_scale_preserves_the_score_relative_magnitude_2613() {
     );
     // Without a declared scale gam does not know the criterion's magnitude, and
     // says so by falling back to the absolute tolerance rather than
-    // substituting a trajectory point for it. The cost-stall guard's
-    // `flat_valley_converged_grad_bound(best_value)` — anchored at the BEST
-    // iterate, i.e. the correctly-anchored version of the same idea — is what
-    // covers that case.
+    // substituting a trajectory point for it. Since #2817 the cost-stall guard
+    // claims by this same band at its best iterate, so it falls back the same way.
     let undeclared = OuterConfig {
         tolerance: 1.0e-5,
         objective_scale: None,
@@ -792,7 +790,6 @@ fn exactly_one_rung_is_the_derived_standard_2458() {
     let rungs = [
         StationarityBoundSource::SolverBand,
         StationarityBoundSource::CertificateScoreRelative,
-        StationarityBoundSource::ProbeNoiseFloor,
         StationarityBoundSource::CurvatureResolvability,
         StationarityBoundSource::GradientReproducibility,
         StationarityBoundSource::FixedPointResidual,
@@ -829,7 +826,6 @@ fn exactly_one_rung_is_the_derived_standard_2458() {
     for rung in rungs {
         let (StationarityBoundSource::SolverBand
         | StationarityBoundSource::CertificateScoreRelative
-        | StationarityBoundSource::ProbeNoiseFloor
         | StationarityBoundSource::CurvatureResolvability
         | StationarityBoundSource::GradientReproducibility
         | StationarityBoundSource::FixedPointResidual

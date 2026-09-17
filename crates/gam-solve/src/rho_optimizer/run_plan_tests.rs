@@ -2936,10 +2936,23 @@ fn analytic_route_unavailable_hessian_is_fatal() {
 /// (escape granted, streak reset) so cubic regularization keeps exploiting the
 /// negative curvature, and once a PSD improving iterate replaces the saddle as
 /// best, the next filled window certifies THAT point.
+/// A configuration whose certificate band is exactly `band` at every criterion
+/// value: the absolute tolerance with no point-anchored relative widening and no
+/// declared scale. The guard judges a stall's claim by the certificate's band
+/// (#2817), so a guard fixture that means "stationary below `band`" builds this.
+fn claim_band_config(band: f64) -> OuterConfig {
+    OuterConfig {
+        tolerance: band,
+        rel_cost_tolerance: Some(0.0),
+        objective_scale: None,
+        ..OuterConfig::default()
+    }
+}
+
 #[test]
 fn finite_cost_stall_refuses_to_certify_strict_saddle_incumbent_2357() {
     let exit: Arc<Mutex<Option<CostStallExit>>> = Arc::new(Mutex::new(None));
-    let mut guard = CostStallGuard::new(1.0e-6, 3, 1.0e-3, exit.clone());
+    let mut guard = CostStallGuard::new(1.0e-6, 3, &claim_band_config(1.0e-3), exit.clone());
 
     // Best-so-far: low cost, gradient inside the certification band, but a
     // certified strict saddle (the #2357 eval#5 analogue at ρ₂≈5.4).
@@ -3055,7 +3068,7 @@ fn arc_bridge_finite_cost_stall_defers_at_bound_separation() {
     let exit: Arc<Mutex<Option<CostStallExit>>> = Arc::new(Mutex::new(None));
     // Threshold the projected residual (0 here) must clear; any positive value
     // certifies the at-bound stall as converged.
-    let guard = CostStallGuard::new(1.0e-6, COST_STALL_WINDOW, 1.0e-3, exit.clone());
+    let guard = CostStallGuard::new(1.0e-6, COST_STALL_WINDOW, &claim_band_config(1.0e-3), exit.clone());
     let mut bridge = OuterSecondOrderBridge {
         obj: &mut obj,
         layout: OuterThetaLayout::new(1, 0),
@@ -3121,7 +3134,7 @@ fn arc_bridge_finite_stall_delivers_interior_negative_curvature() {
         None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
     );
     let exit: Arc<Mutex<Option<CostStallExit>>> = Arc::new(Mutex::new(None));
-    let guard = CostStallGuard::new(1.0e-6, 3, 1.0e-3, exit.clone());
+    let guard = CostStallGuard::new(1.0e-6, 3, &claim_band_config(1.0e-3), exit.clone());
     let mut bridge = OuterSecondOrderBridge {
         obj: &mut obj,
         layout: OuterThetaLayout::new(1, 0),
@@ -3198,7 +3211,7 @@ fn arc_bridge_finite_stall_defers_kkt_stationary_bound_descent() {
         None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
     );
     let exit: Arc<Mutex<Option<CostStallExit>>> = Arc::new(Mutex::new(None));
-    let guard = CostStallGuard::new(1.0e-6, COST_STALL_WINDOW, 1.0e-3, exit.clone());
+    let guard = CostStallGuard::new(1.0e-6, COST_STALL_WINDOW, &claim_band_config(1.0e-3), exit.clone());
     let mut bridge = OuterSecondOrderBridge {
         obj: &mut obj,
         layout: OuterThetaLayout::new(1, 0),
@@ -3278,7 +3291,7 @@ fn arc_bridge_cost_stall_halts_on_infeasible_separation_run() {
         None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
     );
     let exit: Arc<Mutex<Option<CostStallExit>>> = Arc::new(Mutex::new(None));
-    let guard = CostStallGuard::new(1.0e-6, COST_STALL_WINDOW, 1.0e-3, exit.clone());
+    let guard = CostStallGuard::new(1.0e-6, COST_STALL_WINDOW, &claim_band_config(1.0e-3), exit.clone());
     let mut bridge = OuterSecondOrderBridge {
         obj: &mut obj,
         layout: OuterThetaLayout::new(1, 0),
@@ -3343,7 +3356,7 @@ fn arc_bridge_cost_stall_halts_on_infeasible_separation_run() {
 #[test]
 fn arc_cost_stall_guard_uses_cached_initial_sample_as_feasible_best() {
     let exit: Arc<Mutex<Option<CostStallExit>>> = Arc::new(Mutex::new(None));
-    let mut guard = CostStallGuard::new(1.0e-6, 3, 1.0e-3, exit.clone());
+    let mut guard = CostStallGuard::new(1.0e-6, 3, &claim_band_config(1.0e-3), exit.clone());
     let seed = array![0.0, 0.0];
     guard.observe_seed(&seed, 10.0, 5.0e-4);
 
@@ -3384,7 +3397,7 @@ fn arc_cost_stall_guard_uses_cached_initial_sample_as_feasible_best() {
 #[test]
 fn arc_infeasible_stall_refuses_cached_strict_saddle_2316() {
     let exit: Arc<Mutex<Option<CostStallExit>>> = Arc::new(Mutex::new(None));
-    let mut guard = CostStallGuard::new(1.0e-6, 3, 1.0e-3, exit);
+    let mut guard = CostStallGuard::new(1.0e-6, 3, &claim_band_config(1.0e-3), exit);
     let seed = array![0.0, 0.0];
     guard.observe_second_order_seed(&seed, 10.0, 5.0e-2, Some(false));
 
@@ -3436,7 +3449,7 @@ fn bfgs_bridge_halts_infeasible_probe_run_back_to_cached_seed() {
         None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
     );
     let exit: Arc<Mutex<Option<CostStallExit>>> = Arc::new(Mutex::new(None));
-    let mut guard = CostStallGuard::new(1.0e-6, COST_STALL_WINDOW, 1.0e-3, exit.clone());
+    let mut guard = CostStallGuard::new(1.0e-6, COST_STALL_WINDOW, &claim_band_config(1.0e-3), exit.clone());
     guard.observe_seed(&seed, 10.0, 5.0e-4);
     let lo = array![-10.0];
     let hi = array![10.0];
@@ -3498,7 +3511,7 @@ fn bfgs_bridge_halts_infeasible_probe_run_back_to_cached_seed() {
 #[test]
 fn constrained_stationary_probe_replaces_stale_nonstationary_best() {
     let exit: Arc<Mutex<Option<CostStallExit>>> = Arc::new(Mutex::new(None));
-    let mut guard = CostStallGuard::new(1.0e-6, 3, 1.0e-3, exit.clone());
+    let mut guard = CostStallGuard::new(1.0e-6, 3, &claim_band_config(1.0e-3), exit.clone());
     let stale_seed = array![0.0, 0.0];
     guard.observe_seed(&stale_seed, 1.0, 2.0);
 
@@ -3541,14 +3554,12 @@ fn constrained_stationary_probe_replaces_stale_nonstationary_best() {
 #[test]
 fn constrained_stationary_probe_keeps_better_incumbent() {
     let exit: Arc<Mutex<Option<CostStallExit>>> = Arc::new(Mutex::new(None));
-    let mut guard = CostStallGuard::new(1.0e-6, 3, 1.0e-3, exit.clone());
-    // A good interior fit (the prepass seed): low cost on a genuinely flat
-    // valley floor — a residual outer gradient modestly above tolerance but
-    // below FLAT_VALLEY_STALL_GRAD_CEILING (not yet certified stationary, yet a
-    // legitimate flat-valley floor rather than a #1426 stuck stall, so the guard
-    // halts-and-publishes it rather than escaping to keep descending).
+    let mut guard = CostStallGuard::new(1.0e-6, 3, &claim_band_config(1.0e-3), exit.clone());
+    // A good interior fit (the prepass seed): low cost on a flat valley floor,
+    // with a residual outer gradient above the claim band, so it is not certified
+    // stationary but it is the incumbent every later publish must keep.
     let good_seed = array![3.0, 30.0, 3.0, 3.0];
-    let good_seed_grad = FLAT_VALLEY_STALL_GRAD_CEILING * 0.5;
+    let good_seed_grad = 2.5;
     guard.observe_seed(&good_seed, -231.86, good_seed_grad);
 
     // The collapse corner: two axes pinned at the λ→0 lower bound (looks like a
@@ -3578,20 +3589,21 @@ fn constrained_stationary_probe_keeps_better_incumbent() {
         );
     }
 
-    // Driving the no-improvement window to its limit halts on the GOOD
-    // incumbent, never on the collapse corner.
+    // Driving the no-improvement window to its limit ends the window on the GOOD
+    // incumbent, never on the collapse corner. Its residual is above the band, so
+    // the verdict is an escape and the exit cell keeps tracking that incumbent.
     guard.observe_constrained_stationary(&collapse_corner, 587.84, 0.0, true, None);
     let final_verdict =
         guard.observe_constrained_stationary(&collapse_corner, 587.84, 0.0, true, None);
     assert!(
         !matches!(final_verdict, CostStallVerdict::Continue),
-        "the stall window should eventually fill and halt"
+        "the stall window should eventually fill and reach a verdict"
     );
     let published = exit
         .lock()
         .unwrap()
         .take()
-        .expect("incumbent best published on stall");
+        .expect("incumbent best tracked on stall");
     assert_eq!(
         published.rho, good_seed,
         "halt back to the good interior incumbent, not the collapse corner"
@@ -3613,14 +3625,14 @@ fn constrained_stationary_probe_keeps_better_incumbent() {
 #[test]
 fn cost_stall_far_above_tolerance_keeps_descending_not_flat_valley() {
     let exit: Arc<Mutex<Option<CostStallExit>>> = Arc::new(Mutex::new(None));
-    let mut guard = CostStallGuard::new(1.0e-6, 3, 1.0e-3, exit.clone());
+    let mut guard = CostStallGuard::new(1.0e-6, 3, &claim_band_config(1.0e-3), exit.clone());
     let seed = array![0.0, 0.0];
     // Best iterate has a HUGE residual gradient (the #1426 |g|≈11 signature),
-    // orders of magnitude above the ceiling — the inner solve did not converge.
+    // orders of magnitude above the claim band — the inner solve did not converge.
     let stuck_grad = 10.9;
     assert!(
-        stuck_grad > FLAT_VALLEY_STALL_GRAD_CEILING,
-        "test premise: the stuck residual must exceed the flat-valley ceiling"
+        stuck_grad > guard.stationarity_band(10.0),
+        "test premise: the stuck residual must exceed the certificate band the guard judges by"
     );
     guard.observe_seed(&seed, 10.0, stuck_grad);
 
@@ -3639,7 +3651,7 @@ fn cost_stall_far_above_tolerance_keeps_descending_not_flat_valley() {
     let verdict = guard.observe_infeasible(&probe);
     assert!(
         matches!(verdict, CostStallVerdict::StuckKeepDescending { .. }),
-        "a cost stall with |g|≈11 ≫ ceiling must NOT be classified as a \
+        "a cost stall with |g|≈11 ≫ band must NOT be classified as a \
          flat-valley floor and halted (#1426); it must keep descending. Got {:?}",
         std::mem::discriminant(&verdict)
     );
@@ -3694,7 +3706,7 @@ fn cost_stall_far_above_tolerance_keeps_descending_not_flat_valley() {
 #[test]
 fn cost_stall_productive_descent_replenishes_escape_budget_2253() {
     let exit: Arc<Mutex<Option<CostStallExit>>> = Arc::new(Mutex::new(None));
-    let mut guard = CostStallGuard::new(1.0e-6, 3, 1.0e-3, exit.clone());
+    let mut guard = CostStallGuard::new(1.0e-6, 3, &claim_band_config(1.0e-3), exit.clone());
     let seed = array![0.0, 0.0];
     let stuck_grad = 10.9;
     guard.observe_seed(&seed, 10.0, stuck_grad);
@@ -3775,75 +3787,78 @@ fn cost_stall_productive_descent_replenishes_escape_budget_2253() {
     assert!(!best.converged);
 }
 
-/// #1426 companion (revised for the #509 score-relative escape gate): a GENUINE
-/// flat-valley floor — cost flatlined AND the projected gradient has floored at
-/// its irreducible band, i.e. only modestly above the SCORE-RELATIVE
-/// certified-stationary bound — must still halt as a `FlatValleyStall` (the
-/// legitimately-flat REML surface of #1082/#1237). The keep-descending escape
-/// must not weaken that path.
-///
-/// The discriminator is now score-relative, not the legacy fixed absolute
-/// `FLAT_VALLEY_STALL_GRAD_CEILING`: a stall whose residual is within
-/// `FLAT_VALLEY_STALL_ESCAPE_MARGIN` of `score_relative_grad_bound` is "essentially
-/// at the band" and halts directly. With a realistic REML score (`|value| ≈ 1e3`)
-/// the band caps at `FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP = 1.0`, so a residual of
-/// `1.2` sits just above the certify band (not converged) yet within `1.5×` of it
-/// (a true floor) and must halt. This is the legitimately-flat case; the #509
-/// monotone seed-park instead floors WELL clear of the band (|g| ≈ 2 on a band ≈
-/// 0.6) and is granted escapes — covered by
-/// `cost_stall_above_score_relative_band_keeps_descending`.
+/// #2817: a stall only modestly above the certificate's band has no "close enough"
+/// halt. The guard used to halt it directly as a `FlatValleyStall` when its
+/// residual sat within 1.5× of the score-relative term, capped at 5.0; neither
+/// number had a derivation, and the halt ended non-stationary searches. Now the
+/// first filled window grants an escape, exactly as for any residual above the
+/// band, and termination comes from the bit-identity replay cut: the incumbent
+/// did not move, so reopening the window again provably replays it, the guard
+/// halts non-converged, and no continuation licence reopens a proven replay.
 #[test]
-fn cost_stall_modestly_above_tolerance_still_halts_as_flat_valley() {
+fn a_stall_modestly_above_the_band_escapes_then_halts_on_the_replay_cut_2817() {
     let exit: Arc<Mutex<Option<CostStallExit>>> = Arc::new(Mutex::new(None));
-    let mut guard = CostStallGuard::new(1.0e-6, 3, 1.0e-3, exit.clone());
+    let mut guard = CostStallGuard::new(1.0e-6, 3, &claim_band_config(1.0e-3), exit.clone());
     let seed = array![0.0, 0.0];
-    // Realistic REML score scale so the score-relative band caps at 1.0.
     let score = -1.0e3;
-    // Residual just above the certified band (1.0) but within the 1.5× escape
-    // margin (1.5): a real flat-valley floor — the surface has genuinely
-    // flattened and no escape will drive the residual lower.
-    let valley_grad = 1.2;
+    // Just above the band the certificate applies (1e-3 here, at every value).
+    let valley_grad = 1.2e-3;
     assert!(
-        valley_grad > FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP
-            && valley_grad < FLAT_VALLEY_STALL_ESCAPE_MARGIN * FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP,
-        "test premise: a flat-valley floor sits just above the certify band, within the escape margin"
+        valley_grad > guard.stationarity_band(score),
+        "test premise: the residual sits above the certificate's band"
     );
     guard.observe_seed(&seed, score, valley_grad);
 
     let probe = array![-10.0, -10.0];
     guard.observe_infeasible(&probe);
     guard.observe_infeasible(&probe);
-    let verdict = guard.observe_infeasible(&probe);
+    let first = guard.observe_infeasible(&probe);
     assert!(
-        matches!(verdict, CostStallVerdict::FlatValleyStall { .. }),
-        "a residual at the score-relative band is a genuine flat-valley floor and \
-         must halt as before (#1082/#1237 unaffected). Got {:?}",
-        std::mem::discriminant(&verdict)
+        matches!(first, CostStallVerdict::StuckKeepDescending { .. }),
+        "a residual above the band is non-stationary and must be granted an escape, \
+         not halted on a margin. Got {:?}",
+        std::mem::discriminant(&first)
+    );
+    guard.observe_infeasible(&probe);
+    guard.observe_infeasible(&probe);
+    let second = guard.observe_infeasible(&probe);
+    assert!(
+        matches!(second, CostStallVerdict::FlatValleyStall { .. }),
+        "the bit-identical incumbent makes the next window a proven replay, which must \
+         halt. Got {:?}",
+        std::mem::discriminant(&second)
+    );
+    assert!(
+        !guard.license_continuation(),
+        "no continuation licence may reopen a proven replay"
     );
     let published = exit.lock().unwrap().take().expect("best published");
     assert!(!published.converged);
 }
 
 /// #509 regression: a cost stall at an INTERIOR ρ whose projected gradient is
-/// well clear of the score-relative certified-stationary band still has a genuine
-/// feasible descent direction and must NOT be halted as a flat valley — it must
-/// keep descending. A shape-constrained (box-reparam β=Tγ) smooth whose inequality
-/// is non-binding stalls this way near the integer seed: the cumulative-sum
-/// coordinate change makes per-step cost progress fall below the relative floor for
-/// a window even though the projected gradient (|g| ≈ 2 on a score ≈ 600, band ≈
-/// 0.6) still descends strongly toward the well-penalized REML optimum. The legacy
-/// fixed `FLAT_VALLEY_STALL_GRAD_CEILING = 5.0` halted it (2 < 5) and parked the
-/// fit at its seed; the score-relative escape gate keeps it descending.
+/// well clear of the certificate's band still has a genuine feasible descent
+/// direction and must NOT be halted as a flat valley — it must keep descending.
+/// A shape-constrained (box-reparam β=Tγ) smooth whose inequality is non-binding
+/// stalls this way near the integer seed: the cumulative-sum coordinate change
+/// makes per-step cost progress fall below the relative floor for a window even
+/// though the projected gradient (|g| ≈ 2 on a score ≈ 600) still descends
+/// strongly toward the well-penalized REML optimum. A fixed ceiling of 5.0 once
+/// halted it (2 < 5) and parked the fit at its seed; since #2817 every residual
+/// above the band is granted an escape.
 #[test]
 fn cost_stall_above_score_relative_band_keeps_descending() {
     let exit: Arc<Mutex<Option<CostStallExit>>> = Arc::new(Mutex::new(None));
-    let mut guard = CostStallGuard::new(1.0e-6, 3, 1.0e-3, exit.clone());
+    let mut guard = CostStallGuard::new(1.0e-6, 3, &claim_band_config(1.0e-3), exit.clone());
     let seed = array![3.0, -3.0];
     let score = -6.0e2;
-    // Well above the certified band (≈ 0.6 = 1e-3·600) and above the 1.5× escape
-    // margin (≈ 0.9), but BELOW the legacy fixed ceiling (5.0) — exactly the band
-    // the old gate falsely halted.
+    // Far above the band the certificate applies, and below the fixed 5.0 ceiling
+    // that used to halt exactly this stall.
     let descending_grad = 2.0;
+    assert!(
+        descending_grad > guard.stationarity_band(score),
+        "test premise: the residual sits above the certificate's band"
+    );
     guard.observe_seed(&seed, score, descending_grad);
 
     let probe = array![-10.0, -10.0];
@@ -3852,109 +3867,103 @@ fn cost_stall_above_score_relative_band_keeps_descending() {
     let verdict = guard.observe_infeasible(&probe);
     assert!(
         matches!(verdict, CostStallVerdict::StuckKeepDescending { .. }),
-        "an interior stall well clear of the score-relative band has feasible \
+        "an interior stall well clear of the certificate's band has feasible \
          descent left and must keep descending, not halt (#509). Got {:?}",
         std::mem::discriminant(&verdict)
     );
 }
 
-/// #2241 — the probe-noise-floor certificate: a stalled walk whose residual
-/// projected gradient is BELOW σ̂/Δ (the criterion's measured evaluation-noise
-/// floor over the stall window, divided by the radius the accepted steps
-/// actually probed) is flat relative to its own noise scale and must halt
-/// CONVERGED, even when the residual sits above both the absolute tolerance
-/// and the score-relative band.
+/// #2241, restated by #2817: a stalled walk whose residual projected gradient is
+/// below σ̂/Δ (the window's evaluation-noise scale over the radius its accepted
+/// steps probed) is NOT claimed at the guard. The guard used to certify it
+/// through a probe-noise-floor rung. The terminal certificate never applied that
+/// rung, so each such claim was either refused or certified by a band the stall
+/// had not met. σ̂/Δ says how finely the criterion resolves a gradient at this
+/// step scale; it is a fact about the instrument, not about the point. A stall
+/// above the certificate's band has feasible descent left and is granted an
+/// escape.
 #[test]
-fn cost_stall_certifies_converged_below_probe_noise_floor_2241() {
+fn a_stall_inside_its_probe_noise_floor_is_not_claimed_2241() {
     let exit: Arc<Mutex<Option<CostStallExit>>> = Arc::new(Mutex::new(None));
-    // Tight absolute threshold and a small score, so neither the absolute nor
-    // the score-relative band (1e-3·(1+10) = 0.011) can certify |g| = 0.5:
-    // only the noise-floor certificate can.
-    let mut guard = CostStallGuard::new(1.0e-6, 3, 1.0e-9, exit.clone());
+    let mut guard = CostStallGuard::new(1.0e-6, 3, &claim_band_config(1.0e-9), exit.clone());
     let residual_grad = 0.5;
-    guard.observe_seed(&array![0.0, 0.0], 10.0, residual_grad);
+    let score = 10.0;
+    assert!(
+        residual_grad > guard.stationarity_band(score),
+        "test premise: the residual sits above the certificate's band"
+    );
+    guard.observe_seed(&array![0.0, 0.0], score, residual_grad);
     // Three accepted, trusted iterates with O(1e-3) probe steps whose values
     // scatter by O(1e-3) around the incumbent: no improvement beyond the
-    // relative floor, so the window fills, and the measured noise floor is
-    // σ̂ = median{8e-4, 4e-4, 6e-4} = 6e-4 over a probed radius Δ = 1e-3
-    // ⇒ certified gradient band σ̂/Δ = 0.6 > 0.5 = |g|.
-    guard.observe(&array![1.0e-3, 0.0], 10.0 + 8.0e-4, residual_grad, true);
-    guard.observe(&array![2.0e-3, 0.0], 10.0 + 4.0e-4, residual_grad, true);
-    let verdict = guard.observe(&array![3.0e-3, 0.0], 10.0 + 1.0e-3, residual_grad, true);
+    // relative floor, so the window fills, and σ̂ = median{8e-4, 4e-4, 6e-4} =
+    // 6e-4 over Δ = 1e-3 gives σ̂/Δ = 0.6 > 0.5 = |g|, the regime the deleted
+    // rung certified.
+    guard.observe(&array![1.0e-3, 0.0], score + 8.0e-4, residual_grad, true);
+    guard.observe(&array![2.0e-3, 0.0], score + 4.0e-4, residual_grad, true);
+    let verdict = guard.observe(&array![3.0e-3, 0.0], score + 1.0e-3, residual_grad, true);
     assert!(
-        matches!(verdict, CostStallVerdict::Converged),
-        "a stall whose residual gradient cannot move the criterion beyond its \
-         own evaluation-noise floor over the probed radius is flat relative to \
-         its noise scale and must certify (#2241). Got {:?}",
+        matches!(verdict, CostStallVerdict::StuckKeepDescending { .. }),
+        "a residual inside the window's noise scale but above the certificate's band \
+         must be granted an escape, not claimed (#2817). Got {:?}",
         std::mem::discriminant(&verdict)
     );
-    let published = exit.lock().unwrap().take().expect("halt published");
-    assert!(published.converged);
-    let noise_bound = published
-        .noise_grad_bound
-        .expect("the halt must carry the measured noise-floor bound");
     assert!(
-        residual_grad <= noise_bound && noise_bound <= FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP,
-        "the certifying bound must cover the residual and respect the absolute \
-         cap; got {noise_bound}"
+        exit.lock().unwrap().as_ref().is_none_or(|published| !published.converged),
+        "no converged exit may be published for a point above the band"
     );
 }
 
-/// #2456 — when the probe-noise measurement exceeds the resolution ceiling the
-/// rung must DECLINE, not clamp to the ceiling and certify against the clamp.
-///
-/// Deliberately the same fixture as
-/// `cost_stall_certifies_converged_below_probe_noise_floor_2241` with ONE
-/// change: the probed radius collapses from `1e-3` to `1e-4`. Nothing about the
-/// point improved — the search got worse — and yet under the old
-/// `(σ̂/Δ).min(CAP)` the certified band ROSE, from `0.6` to the `1.0` ceiling,
-/// which covers `|g| = 0.5` and accepted. That is the whole defect in one step:
-/// the acceptance threshold reaches its maximum exactly as the search stops
-/// making progress, because a saturating `min` is scale-invariant and the
-/// regime it saturates in is the stalled one.
-///
-/// `σ̂/Δ = 6.0` is a statement that the criterion resolves NO gradient below
-/// `6.0` at this step scale. That is evidence about the instrument, not about
-/// the point, so it licenses nothing and the stall falls back to the
-/// score-relative band (`1e-3·(1+10) = 0.011`), which `|g| = 0.5` does not
-/// clear.
+/// #2456, restated by #2817: the same fixture as
+/// `a_stall_inside_its_probe_noise_floor_is_not_claimed_2241` with the probed
+/// radius collapsed from `1e-3` to `1e-4`. The defect was that under
+/// `(σ̂/Δ).min(CAP)` the band the guard claimed by ROSE as the search stopped
+/// making progress, from `0.6` to the `1.0` ceiling, and then covered
+/// `|g| = 0.5`. With the claim read off the certificate's band at the incumbent's
+/// value, nothing the window measured about its steps can move that band, so the
+/// verdict at both radii is the same escape.
 #[test]
-fn collapsed_probe_radius_declines_the_noise_rung_instead_of_certifying_at_the_cap_2456() {
-    let exit: Arc<Mutex<Option<CostStallExit>>> = Arc::new(Mutex::new(None));
-    let mut guard = CostStallGuard::new(1.0e-6, 3, 1.0e-9, exit.clone());
+fn collapsed_probe_radius_leaves_the_claim_band_unchanged_2456() {
     let residual_grad = 0.5;
     let score = 10.0;
-    guard.observe_seed(&array![0.0, 0.0], score, residual_grad);
-    // σ̂ = median{8e-4, 4e-4, 6e-4} = 6e-4 over a probed radius Δ = 1e-4.
-    guard.observe(&array![1.0e-4, 0.0], score + 8.0e-4, residual_grad, true);
-    guard.observe(&array![2.0e-4, 0.0], score + 4.0e-4, residual_grad, true);
-    let verdict = guard.observe(&array![3.0e-4, 0.0], score + 1.0e-3, residual_grad, true);
-
-    // The fixture is only an exhibit of the clamp if the CEILING would have
-    // covered the residual. Assert that, rather than trusting the arithmetic.
+    let verdict_at_radius = |radius: f64| {
+        let exit: Arc<Mutex<Option<CostStallExit>>> = Arc::new(Mutex::new(None));
+        let mut guard =
+            CostStallGuard::new(1.0e-6, 3, &claim_band_config(1.0e-9), exit.clone());
+        guard.observe_seed(&array![0.0, 0.0], score, residual_grad);
+        // σ̂ = median{8e-4, 4e-4, 6e-4} = 6e-4 over a probed radius Δ = radius.
+        guard.observe(&array![radius, 0.0], score + 8.0e-4, residual_grad, true);
+        guard.observe(&array![2.0 * radius, 0.0], score + 4.0e-4, residual_grad, true);
+        let verdict = guard.observe(&array![3.0 * radius, 0.0], score + 1.0e-3, residual_grad, true);
+        let band = guard.stationarity_band(score);
+        let claimed = exit.lock().unwrap().as_ref().is_some_and(|published| published.converged);
+        (std::mem::discriminant(&verdict), band, claimed)
+    };
+    let (wide_verdict, wide_band, wide_claimed) = verdict_at_radius(1.0e-3);
+    let (collapsed_verdict, collapsed_band, collapsed_claimed) = verdict_at_radius(1.0e-4);
     assert!(
-        residual_grad <= FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP,
-        "fixture proves nothing about the clamp unless the ceiling covers |g|"
+        residual_grad > wide_band,
+        "test premise: the residual sits above the certificate's band"
     );
-    // ...and if no surviving rung does.
-    assert!(
-        flat_valley_converged_grad_bound(score) < residual_grad,
-        "fixture must not be certifiable by the score-relative band"
+    assert_eq!(
+        wide_band.to_bits(),
+        collapsed_band.to_bits(),
+        "the claim band is a function of the incumbent's value, never of the probed radius"
     );
-
-    assert!(
-        !matches!(verdict, CostStallVerdict::Converged),
-        "a stall whose own probe-noise measurement exceeds the resolution ceiling \
-         has measured that the criterion resolves nothing here; it must not then \
-         certify against the ceiling (#2456). Got {:?}",
-        std::mem::discriminant(&verdict)
+    assert_eq!(
+        wide_verdict,
+        std::mem::discriminant(&CostStallVerdict::StuckKeepDescending {
+            residual_grad_norm: residual_grad,
+            escape_threshold: wide_band,
+        }),
+        "the wide-radius stall above the band must be granted an escape"
+    );
+    assert_eq!(
+        collapsed_verdict, wide_verdict,
+        "collapsing the probed radius must not change the verdict (#2456)"
     );
     assert!(
-        exit.lock()
-            .unwrap()
-            .as_ref()
-            .is_none_or(|published| !published.converged && published.noise_grad_bound.is_none()),
-        "an unresolvable probe-noise measurement must not publish a certified bound"
+        !wide_claimed && !collapsed_claimed,
+        "neither radius may publish a converged exit above the band"
     );
 }
 
@@ -3975,18 +3984,14 @@ fn collapsed_probe_radius_declines_the_noise_rung_instead_of_certifying_at_the_c
 /// certified. It must now be refused, and refused by the ladder rather than by
 /// the constant.
 ///
-/// #2519: the bound the fixture must NOT be graded against is expressed by
-/// CALLING `flat_valley_converged_grad_bound`, never by restating
-/// `1e-3·(1 + |score|)` as a literal.
+/// #2817 deleted the constant's function together with the guard's copy of the
+/// rung, so no production item can install it again. The fixture's residual sat
+/// inside that deleted band, and the test asserts the band the ladder applies
+/// instead, read from the helper (#2519: never a restated literal).
 #[test]
 fn criterion_flat_halt_is_refused_by_the_ladder_not_rescued_by_a_constant_2458() {
     let score = -982.0_f64;
     let residual = 0.042_f64;
-    assert!(
-        residual > 1.0e-6 && residual < flat_valley_converged_grad_bound(score),
-        "fixture must sit INSIDE the deleted rung's band, or the old constant \
-         would not have certified it either and this test discriminates nothing"
-    );
     let problem = OuterProblem::new(1)
         .with_gradient(Derivative::Analytic)
         .with_hessian(DeclaredHessianForm::Either)
@@ -4037,15 +4042,11 @@ fn criterion_flat_halt_is_refused_by_the_ladder_not_rescued_by_a_constant_2458()
         "the ladder, not the flat-valley constant, must decide this point; got rung {}",
         band.source.label()
     );
-    // The whole point: the applied band is far BELOW the constant the deleted
-    // rung would have installed. Asserted by calling the shared function, per
-    // #2519 — no literal restates it.
-    let deleted_rung_bound = flat_valley_converged_grad_bound(score);
+    // The applied band sits below the residual, so the refusal is the band's.
     assert!(
-        band.bound < deleted_rung_bound,
-        "fixture no longer discriminates: the applied band {:.6e} is not below the \
-         constant {deleted_rung_bound:.6e} the #2458 rung would have installed, so \
-         restoring that rung would not change this test's verdict",
+        band.bound < residual,
+        "fixture no longer discriminates: the applied band {:.6e} covers the residual \
+         {residual:.6e}, so a refusal here would not come from the ladder",
         band.bound
     );
     // A linear objective is stationary nowhere, so the refusal is the correct
@@ -4067,22 +4068,19 @@ fn criterion_flat_halt_is_refused_by_the_ladder_not_rescued_by_a_constant_2458()
     );
 }
 
-/// #2241 companion — the noise certificate must be un-gameable by collapsed
-/// step sizes: Δ → 0 inflates the raw σ̂/Δ arbitrarily, so a genuinely steep
-/// point (|g| = 2) can never be certified through the noise route; it keeps
-/// descending exactly as the score-relative escape gate (#509) demands.
+/// #2241 companion — collapsed step sizes cannot game a claim: Δ → 0 inflates
+/// the raw σ̂/Δ arbitrarily, so a genuinely steep point (|g| = 2) is never
+/// claimed; it keeps descending exactly as the escape gate (#509) demands.
 ///
-/// SCOPE, so this is not read as covering more than it does: `|g| = 2` sits
-/// ABOVE `FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP`, and above the ceiling clamping
-/// the ratio and declining it give the SAME answer. This fixture therefore
-/// could not have caught #2456, whose entire defect lives at `|g| <= cap` —
-/// where the clamp returned the ceiling and the ceiling was then certified
-/// against. The `..._declines_the_noise_rung_instead_of_certifying_at_the_cap`
-/// fixture below is the missing half.
+/// SCOPE, so this is not read as covering more than it does: `|g| = 2` sat above
+/// the deleted 1.0 ceiling, where clamping the ratio and declining it gave the
+/// same answer, so this fixture could not have caught #2456.
+/// `collapsed_probe_radius_leaves_the_claim_band_unchanged_2456` is the half
+/// that lives below that ceiling.
 #[test]
 fn probe_noise_floor_capped_never_certifies_steep_point_2241() {
     let exit: Arc<Mutex<Option<CostStallExit>>> = Arc::new(Mutex::new(None));
-    let mut guard = CostStallGuard::new(1.0e-6, 3, 1.0e-9, exit.clone());
+    let mut guard = CostStallGuard::new(1.0e-6, 3, &claim_band_config(1.0e-9), exit.clone());
     let steep_grad = 2.0;
     guard.observe_seed(&array![0.0, 0.0], 10.0, steep_grad);
     // Degenerate 1e-9 probe steps with O(1e-3) value scatter: raw σ̂/Δ ≈ 1e6,
@@ -4092,8 +4090,8 @@ fn probe_noise_floor_capped_never_certifies_steep_point_2241() {
     let verdict = guard.observe(&array![3.0e-9, 0.0], 10.0 + 1.0e-3, steep_grad, true);
     assert!(
         !matches!(verdict, CostStallVerdict::Converged),
-        "collapsed probe steps must never manufacture a noise-floor convergence \
-         at a genuinely steep point (#2241 anti-gaming cap)"
+        "collapsed probe steps must never manufacture a convergence claim at a \
+         genuinely steep point (#2241)"
     );
 }
 

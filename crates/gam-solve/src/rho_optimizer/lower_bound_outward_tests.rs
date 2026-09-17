@@ -18,8 +18,8 @@
 use super::{LOWER_BOUND_SEPARATION_ACTIVE_MIN, lower_bound_outward_active_count};
 use ndarray::{Array1, array};
 
-// `outward_floor = grad_threshold.max(COST_STALL_PROJECTED_GRAD_FLOOR)` with
-// `COST_STALL_PROJECTED_GRAD_FLOOR = 1e-3`, so this pins the floor at 1e-3.
+// `outward_floor` is the stationarity band the caller passes (the certificate's
+// band at the incumbent's value on the ARC bridge); these tests pass 1e-3.
 const GRAD_THRESHOLD: f64 = 1.0e-3;
 
 fn bounds(lower: Array1<f64>, upper: Array1<f64>) -> (Array1<f64>, Array1<f64>) {

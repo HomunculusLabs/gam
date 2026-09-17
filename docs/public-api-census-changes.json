@@ -2325,6 +2325,18 @@
     "evidence": "At the base, git grep finds the three names re-exported from crates/gam-terms/src/smooth.rs. Their callers are crates/gam-terms/src/smooth/term_specs.rs (spatial_term_seed_psi, in SpatialLogKappaCoords::from_length_scales and from_length_scales_aniso), crates/gam-models/src/fit_orchestration/drivers/spatial_optimization.rs (project_spatial_length_scales_in_spec, in spatial_kappa_incumbent), crates/gam-terms/src/smooth/spatial_length_scale_projection_2726_tests.rs, and tests/regressions/misc/regression_2726_joint_psi_seed_shares_theta0.rs. All of them are removed or rewritten in the same commit. scripts/public_api_census.py was not run locally (user directive: no local runs)."
   },
   {
+    "base": "496fa214c15425860b3fcdfda7464a5d74ee9c2a",
+    "removed": {
+      "crates/gam-solve/src/rho_optimizer/bridges.rs::certified_bound": 1,
+      "crates/gam-solve/src/rho_optimizer/bridges.rs::flat_valley_converged_grad_bound": 1,
+      "crates/gam-solve/src/rho_optimizer/bridges.rs::label": 1,
+      "crates/gam-solve/src/rho_optimizer/bridges.rs::measured_scale": 1,
+      "crates/gam-solve/src/rho_optimizer/bridges.rs::score_relative_saturated": 1
+    },
+    "reason": "#2817 the cost-stall guard's score-relative bound flat_valley_converged_grad_bound, re-exported from rho_optimizer, and the probe-noise rung's accessors are deleted with the guard's old claim rule; a stall now claims by the terminal certificate's band.",
+    "evidence": "The removed map is the census's own output: scripts/public_api_census.py --base 3d2170a9cb against probe commit 386d28e268 on DRY tree 1fe443118965. At the base, git grep -w names flat_valley_converged_grad_bound in bridges.rs, the rho_optimizer.rs facade, run.rs, run_plan_stationarity_band_tests.rs, run_plan_tests.rs and the #1575 and #1690 integration tests, all edited here (the tests now read the fit's own criterion certificate bound); certified_bound, measured_scale and score_relative_saturated (ProbeNoiseVerdict and FlatValleyGradBound methods) and label (FlatValleyBoundTerm::label) appear only in bridges.rs."
+  },
+  {
     "base": "01ba62af58ec5046743f877b96d6cdb7ded8a6fa",
     "removed": {
       "crates/gam-sae/src/corpus/ledger_store.rs::deserialize_ledger": 1,

@@ -308,7 +308,8 @@ fn eval_seed_restoring_rays(
                 capped
                     .iter()
                     .map(|(j, current, ceiling)| format!(
-                        "rho[{j}]={current:.4} vs ceiling {ceiling:.4}"
+                        "rho[{}]={current:.4} vs ceiling {ceiling:.4}",
+                        native_coordinate(config.native_coordinate_order.as_deref(), *j)
                     ))
                     .collect::<Vec<_>>()
                     .join(", ")
@@ -325,7 +326,8 @@ fn eval_seed_restoring_rays(
                 capped
                     .iter()
                     .map(|(j, current, ceiling)| format!(
-                        "rho[{j}]={current:.4} vs ceiling {ceiling:.4}"
+                        "rho[{}]={current:.4} vs ceiling {ceiling:.4}",
+                        native_coordinate(config.native_coordinate_order.as_deref(), *j)
                     ))
                     .collect::<Vec<_>>()
                     .join(", "),
@@ -334,9 +336,11 @@ fn eval_seed_restoring_rays(
         }
         log::warn!(
             "[OUTER] {context}: seed {seed_idx} is under-penalized, not failed — {ray}; \
-             restoring rho[{}..{}] from {:?} to {:?} and re-evaluating",
-            ray.rho_first,
-            ray.rho_first + ray.rho_count,
+             restoring rho{:?} from {:?} to {:?} and re-evaluating",
+            native_coordinates(
+                config.native_coordinate_order.as_deref(),
+                &ray.rho_indices().collect::<Vec<_>>()
+            ),
             ray.rho_indices().map(|j| seed[j]).collect::<Vec<_>>(),
             ray.rho_indices().map(|j| restored[j]).collect::<Vec<_>>(),
         );
@@ -1498,7 +1502,7 @@ pub(crate) fn run_outer_with_plan(
                             .unwrap_or(config.tolerance * 1.0e-2)
                             .max(COST_STALL_REL_TOL_FLOOR),
                         ARC_COST_STALL_WINDOW,
-                        grad_tol.abs.max(COST_STALL_PROJECTED_GRAD_FLOOR),
+                        config,
                         Arc::new(Mutex::new(None)),
                     );
                     cost_stall_guard.observe_seed(
@@ -1731,14 +1735,6 @@ pub(crate) fn run_outer_with_plan(
                         .rel_cost_tolerance
                         .unwrap_or(config.tolerance * 1.0e-2)
                         .max(COST_STALL_REL_TOL_FLOOR);
-                    // `grad_tol.abs` IS the whole band since #2613: the
-                    // cost-relative component is no longer anchored on a
-                    // trajectory point, so there is nothing left for
-                    // `threshold(seed_cost, ‖g₀‖)` to resolve. Using the field
-                    // directly keeps this site from reading as if the seed
-                    // still decided the guard's stationarity gate.
-                    let cost_stall_grad_threshold =
-                        grad_tol.abs.max(COST_STALL_PROJECTED_GRAD_FLOOR);
 
                     // Build the exact seed Hessian before enrolling the seed in
                     // the stall guard. The guard must know whether its incumbent
@@ -1778,7 +1774,7 @@ pub(crate) fn run_outer_with_plan(
                     let mut cost_stall_guard = CostStallGuard::new(
                         cost_stall_rel_tol,
                         ARC_COST_STALL_WINDOW,
-                        cost_stall_grad_threshold,
+                        config,
                         cost_stall_exit.clone(),
                     );
                     cost_stall_guard.observe_second_order_seed(
@@ -1973,11 +1969,8 @@ pub(crate) fn run_outer_with_plan(
                                     );
                                     result.origin =
                                         OuterResultOrigin::ArcInfeasibleStallCheckpoint;
-                                    // #2241 — carry the guard's measured probe-
-                                    // noise-floor bound so the final analytic
-                                    // certificate honors the same flat band the
-                                    // guard certified in the loop.
-                                    result.flat_noise_grad_bound = exit.noise_grad_bound;
+                                    // The stall window's evidence travels with the
+                                    // checkpoint as reported text only (#2817).
                                     result.cost_stall_probe_scale = exit.probe_scale;
                                     // Preserve HOW ARC stopped so the mandatory
                                     // final analytic certificate can report the
@@ -2159,9 +2152,12 @@ pub(crate) fn run_outer_with_plan(
                             .rel_cost_tolerance
                             .unwrap_or(config.tolerance * 1.0e-2)
                             .max(COST_STALL_REL_TOL_FLOOR),
-                        cost_stall_projected_grad_tol: grad_tol_dev
-                            .abs
-                            .max(COST_STALL_PROJECTED_GRAD_FLOOR),
+                        // opt's cost stall takes one number before the walk
+                        // starts, so it gets the solver band this walk was driven
+                        // to; the 1e-3 floor it used to add had no derivation, and
+                        // the terminal certificate judges the point it stops at
+                        // regardless (#2817).
+                        cost_stall_projected_grad_tol: grad_tol_dev.abs,
                         axis_step_caps: axis_caps_dev,
                         admission,
                         seed_objective: seed_eval_dev.cost,
@@ -2384,27 +2380,17 @@ pub(crate) fn run_outer_with_plan(
                             .rel_cost_tolerance
                             .unwrap_or(config.tolerance * 1.0e-2)
                             .max(COST_STALL_REL_TOL_FLOOR);
-                        // Stationarity gate for the cost-stall exit. Convergence must
-                        // mean stationarity, not cost-flatness: a cost stall only
-                        // counts as a converged optimum when the projected gradient
-                        // norm at the best iterate clears the SAME outer gradient
-                        // tolerance the genuine BFGS convergence path uses, with
-                        // the same practical floor the ARC guard uses for
-                        // bound-pinned separation fits.
+                        // Convergence must mean stationarity, not cost-flatness: a
+                        // cost stall claims a converged optimum only when the
+                        // projected gradient at its best iterate is inside the
+                        // band the terminal certificate applies at that value
+                        // (`CostStallGuard::stationarity_band`, #2817).
                         let seed_grad_norm =
                             stratum_eval.gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
-                        // `grad_tol.abs` IS the whole band since #2613: the
-                        // cost-relative component is no longer anchored on a
-                        // trajectory point, so there is nothing left for
-                        // `threshold(seed_cost, ‖g₀‖)` to resolve. Using the field
-                        // directly keeps this site from reading as if the seed
-                        // still decided the guard's stationarity gate.
-                        let cost_stall_grad_threshold =
-                            grad_tol.abs.max(COST_STALL_PROJECTED_GRAD_FLOOR);
                         let mut cost_stall_guard = CostStallGuard::new(
                             cost_stall_rel_tol,
                             COST_STALL_WINDOW,
-                            cost_stall_grad_threshold,
+                            config,
                             cost_stall_exit.clone(),
                         );
                         cost_stall_guard.observe_seed(&stratum_start, stratum_eval.cost, seed_grad_norm);
@@ -2757,29 +2743,21 @@ pub(crate) fn run_outer_with_plan(
                                         *the_plan,
                                     );
                                     result.origin = OuterResultOrigin::BfgsCostStallExit;
-                                    // #2241 — carry the guard's measured probe-
-                                    // noise-floor bound so the final analytic
-                                    // certificate honors the same flat band the
-                                    // guard certified in the loop.
-                                    result.flat_noise_grad_bound = exit.noise_grad_bound;
+                                    // The stall window's evidence travels with the
+                                    // result as reported text only (#2817).
                                     result.cost_stall_probe_scale = exit.probe_scale;
-                                    // Preserve HOW BFGS stopped even when the
-                                    // guard already certified the stalled score
-                                    // surface (mirrors the ARC branch above).
                                     // The mandatory final analytic certificate
-                                    // uses this provenance to apply the same
-                                    // score-relative flat-valley band as the
-                                    // guard; gating the marker on
-                                    // `!exit.converged` made the final pass
-                                    // silently revert to the much tighter raw
-                                    // solver bound and reject the identical
-                                    // point the guard certified (#1689 in ARC;
-                                    // reproduced live on the BFGS route by the
-                                    // GPT-2 E1 structured pass: guard accepted
-                                    // |g|=4.97e-1 under the flat band on a
+                                    // judges this point by its own ladder, and
+                                    // the guard claimed it only inside that
+                                    // ladder's band at the incumbent (#2817).
+                                    // The two used to disagree: the guard
+                                    // claimed through a score-relative band the
+                                    // certificate never applied (#1689 in ARC;
+                                    // the GPT-2 E1 structured pass on the BFGS
+                                    // route: guard accepted |g|=4.97e-1 on a
                                     // score of 2.7e3, certificate refused at
-                                    // its raw 4.4e-2 bound and the fit died
-                                    // with RemlConvergenceError).
+                                    // its 4.4e-2 bound and the fit died with
+                                    // RemlConvergenceError).
                                     Ok(result)
                                 }
                                 None => Err(EstimationError::RemlOptimizationFailed(format!(

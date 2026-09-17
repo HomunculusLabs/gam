@@ -5646,6 +5646,34 @@
     "evidence": "The prune-api-c census v2 over cc3ae0022 (/scratch.global/sauer354/pool/prune-api-c/census2.tsv) classes all three DELETE, with gam-solve unit-test references and the root facade re-export only. At the base, git grep -w finds the three names only in crates/gam-solve/src/reml/atoms.rs, the src/lib.rs re-export and its comment, and one reml_outer_engine/objective.rs comment, all changed in this commit. The item list comes from emulating source_removal_guard.py's ITEM rule over the before and after blobs: beta_channel, frozen_d1, name and stratum 9 to 7; value 10 to 8; the removed test 1 to 0; HessianLogdetAtom and SampledBlockAtom 1 to 0."
   },
   {
+    "base": "496fa214c15425860b3fcdfda7464a5d74ee9c2a",
+    "items": [
+      "crates/gam-solve/src/rho_optimizer/arc_curvature_stationary_2817_tests.rs:fn:a_stall_at_a_certified_strict_saddle_keeps_moving_2817",
+      "crates/gam-solve/src/rho_optimizer/bridges.rs:const:COST_STALL_PROJECTED_GRAD_FLOOR",
+      "crates/gam-solve/src/rho_optimizer/bridges.rs:const:FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP",
+      "crates/gam-solve/src/rho_optimizer/bridges.rs:const:FLAT_VALLEY_CONVERGED_REL_GRAD",
+      "crates/gam-solve/src/rho_optimizer/bridges.rs:const:FLAT_VALLEY_STALL_ESCAPE_MARGIN",
+      "crates/gam-solve/src/rho_optimizer/bridges.rs:const:FLAT_VALLEY_STALL_GRAD_CEILING",
+      "crates/gam-solve/src/rho_optimizer/bridges.rs:enum:FlatValleyBoundTerm",
+      "crates/gam-solve/src/rho_optimizer/bridges.rs:enum:ProbeNoiseVerdict",
+      "crates/gam-solve/src/rho_optimizer/bridges.rs:fn:certified_bound",
+      "crates/gam-solve/src/rho_optimizer/bridges.rs:fn:certified_grad_bound",
+      "crates/gam-solve/src/rho_optimizer/bridges.rs:fn:flat_valley_converged_grad_bound",
+      "crates/gam-solve/src/rho_optimizer/bridges.rs:fn:fmt",
+      "crates/gam-solve/src/rho_optimizer/bridges.rs:fn:label",
+      "crates/gam-solve/src/rho_optimizer/bridges.rs:fn:measured_scale",
+      "crates/gam-solve/src/rho_optimizer/bridges.rs:fn:new",
+      "crates/gam-solve/src/rho_optimizer/bridges.rs:fn:probe_noise_verdict",
+      "crates/gam-solve/src/rho_optimizer/bridges.rs:fn:score_relative_saturated",
+      "crates/gam-solve/src/rho_optimizer/bridges.rs:struct:FlatValleyGradBound",
+      "crates/gam-solve/src/rho_optimizer/run_plan_tests.rs:fn:collapsed_probe_radius_declines_the_noise_rung_instead_of_certifying_at_the_cap_2456",
+      "crates/gam-solve/src/rho_optimizer/run_plan_tests.rs:fn:cost_stall_certifies_converged_below_probe_noise_floor_2241",
+      "crates/gam-solve/src/rho_optimizer/run_plan_tests.rs:fn:cost_stall_modestly_above_tolerance_still_halts_as_flat_valley"
+    ],
+    "reason": "#2817 the cost-stall guard now claims convergence only inside the band the terminal certificate applies at its incumbent (outer_stationarity_band_and_rung_at). Its underived constants, the score-relative term, the probe-noise-floor rung and their helpers have no reader left and are deleted. The three guard tests that pinned the deleted halts and the rung are restated against the new rule under new names.",
+    "evidence": "The items list is the guard's own output: scripts/source_removal_guard.py --base 3d2170a9cb against probe commit 386d28e268 on DRY tree 1fe443118965 refused exactly these 20 identities. At the base, git grep -w finds them only in files this change edits: COST_STALL_PROJECTED_GRAD_FLOOR in bridges.rs, run_plan.rs, lower_bound_outward_tests.rs and arc_curvature_stationary_2817_tests.rs; FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP and FLAT_VALLEY_CONVERGED_REL_GRAD in bridges.rs, the rho_optimizer.rs facade, run.rs and tests/glm/misc/binomial_logit_outer_work_1575.rs and tests/perf_scale/families/poisson_gamma_outer_work_1690.rs, and the cap also in run_plan_tests.rs; FLAT_VALLEY_STALL_ESCAPE_MARGIN and FLAT_VALLEY_STALL_GRAD_CEILING in bridges.rs and run_plan_tests.rs; flat_valley_converged_grad_bound in bridges.rs, the facade, run.rs, run_plan_stationarity_band_tests.rs, run_plan_tests.rs and both integration tests; ProbeNoiseVerdict in bridges.rs and run.rs; FlatValleyBoundTerm, FlatValleyGradBound, certified_bound, certified_grad_bound, measured_scale, probe_noise_verdict and score_relative_saturated only in bridges.rs. fn:fmt covers the three Display impls bridges.rs declared at the base (ProbeNoiseVerdict, FlatValleyGradBound, and IncumbentCurvature, now rendered by IncumbentCurvature::render with the native coordinate order); fn:new is FlatValleyGradBound::new and fn:label is FlatValleyBoundTerm::label. The restated tests are a_stall_modestly_above_the_band_escapes_then_halts_on_the_replay_cut_2817, a_stall_inside_its_probe_noise_floor_is_not_claimed_2241 and collapsed_probe_radius_leaves_the_claim_band_unchanged_2456; the strict-saddle ARC test is restated as a_strict_saddle_stall_escapes_then_stops_on_its_proven_replay_2817, because a proven bit-identical replay no longer licenses continuation. The first 20 identities are the guard's own output at --base 3d2170a9cb against probe commit 386d28e268 on DRY tree 1fe443118965; the 21st is the renamed ARC test."
+  },
+  {
     "base": "0d2d677b5ed5862ed9605de945e03385d6ec4fc1",
     "items": [
       "crates/gam-solve/src/reml/reml_outer_engine/sparse_cholesky_backends.rs:const:EXACT_DENSE_SPECTRAL_MAX_BYTES"

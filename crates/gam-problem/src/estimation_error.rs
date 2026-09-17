@@ -1391,11 +1391,11 @@ mod tests {
     /// produced it, and a route with neither reports neither.
     #[test]
     fn the_bound_and_its_rung_are_one_field() {
-        let standard = measured("probe-noise-floor", false);
+        let standard = measured("solver-band", false);
         assert_eq!(standard.bound(), Some(1.0e-2));
         assert_eq!(
             standard.rung().map(|rung| rung.label),
-            Some("probe-noise-floor")
+            Some("solver-band")
         );
         assert_eq!(StationarityStandard::NoComparison.bound(), None);
         assert_eq!(StationarityStandard::NoComparison.rung(), None);

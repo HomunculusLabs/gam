@@ -1611,6 +1611,29 @@ fn permute_to_canonical(native: &Array1<f64>, perm: &[usize]) -> Array1<f64> {
     Array1::from_iter(perm.iter().map(|&i| native[i]))
 }
 
+/// The native coordinate a canonical slot names: `order[c]` (#2817).
+///
+/// `order` is the canonical run's `perm`, the same map [`permute_to_native`]
+/// applies to ρ, carried as `OuterConfig::native_coordinate_order`. Every
+/// coordinate index a refusal or a log line names inside the outer run is
+/// rendered through this, so the text reads in the caller's native order the
+/// moment it is written. `None` is a native-order run; an index past the
+/// permuted ρ block names a trailing coordinate the permutation does not cover
+/// and keeps its position.
+pub(crate) fn native_coordinate(order: Option<&[usize]>, canonical: usize) -> usize {
+    order
+        .and_then(|order| order.get(canonical).copied())
+        .unwrap_or(canonical)
+}
+
+/// [`native_coordinate`] over a list of canonical slots, in the list's order.
+pub(crate) fn native_coordinates(order: Option<&[usize]>, canonical: &[usize]) -> Vec<usize> {
+    canonical
+        .iter()
+        .map(|&slot| native_coordinate(order, slot))
+        .collect()
+}
+
 /// Reorder a canonical-layout ρ vector back into native order:
 /// `out[perm[c]] = canonical[c]`.
 fn permute_to_native(canonical: &Array1<f64>, perm: &[usize]) -> Array1<f64> {
@@ -1678,8 +1701,10 @@ pub(crate) fn outer_result_to_native(mut result: OuterResult, perm: &[usize]) ->
 /// checkpoint is the point a caller resumes from (`init_rhos`,
 /// `with_initial_rho`), so a checkpoint left in canonical order seeds the
 /// permuted point, and the resumed search starts at a criterion value other
-/// than the one the refusal reported. Coordinate indices already rendered into
-/// `reason` name canonical slots, so the slot map is appended to it.
+/// than the one the refusal reported. Every coordinate `reason` names was
+/// rendered in native order when the text was written, through
+/// [`native_coordinate`] on `OuterConfig::native_coordinate_order` (#2817), so
+/// only the checkpoint is permuted here.
 pub(crate) fn outer_error_to_native(error: EstimationError, perm: &[usize]) -> EstimationError {
     match error {
         EstimationError::RemlDidNotConverge {
@@ -1698,11 +1723,7 @@ pub(crate) fn outer_error_to_native(error: EstimationError, perm: &[usize]) -> E
             };
             EstimationError::RemlDidNotConverge {
                 context,
-                reason: format!(
-                    "{reason}; the search ran in canonical coordinate order, so a coordinate \
-                     index named above is a canonical slot c naming native coordinate perm[c], \
-                     perm={perm:?}; rho_checkpoint is in native order"
-                ),
+                reason,
                 iterations,
                 final_value,
                 projected_grad_norm,
@@ -1720,11 +1741,11 @@ pub(crate) fn outer_error_to_native(error: EstimationError, perm: &[usize]) -> E
 /// railed λ names a different smoothing parameter than the fit's native λ
 /// vector (#2735). An index past the permuted ρ block names a trailing
 /// coordinate the permutation does not cover and keeps its position.
-fn criterion_certificate_to_native(
+pub(crate) fn criterion_certificate_to_native(
     certificate: &mut crate::model_types::OuterCriterionCertificate,
     perm: &[usize],
 ) {
-    let native = |canonical: usize| perm.get(canonical).copied().unwrap_or(canonical);
+    let native = |canonical: usize| native_coordinate(Some(perm), canonical);
     for index in certificate.lambdas_railed.iter_mut() {
         *index = native(*index);
     }

@@ -97,26 +97,29 @@ fn poisson_gamma_single_smooth_outer_work_1690() {
 
         // Fit existence is the sealed convergence proof (SPEC 20).
 
-        // #1690 stationarity contract: a minted (certified) fit must
-        // carry an authoritative outer gradient that actually clears the
-        // score-relative stationarity bound the optimizer certifies against
-        // (`FLAT_VALLEY_CONVERGED_REL_GRAD·(1+|score|)`, capped at
-        // `FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP` — mirrored here as 1e-3 / 1.0).
-        // This is the heart of the bug: the Gamma fit reached the optimum
-        // (|g|=0.2297 < bound≈0.330) but was mislabelled non-converged off a noisy
-        // in-loop gradient readout. Asserting the reported gradient clears the
-        // bound locks the fix to a real stationarity certificate, not a flag flip.
+        // #1690 stationarity contract: a minted (certified) fit must carry an
+        // authoritative outer gradient that clears the bound its own terminal
+        // certificate applied. The Gamma fit reached the optimum but was
+        // mislabelled non-converged off a noisy in-loop readout; asserting the
+        // reported gradient against the certificate the fit carries locks the fix
+        // to a real stationarity certificate, not a flag flip. It used to restate
+        // the guard's score-relative `1e-3·(1 + |score|)` term, which #2817
+        // deleted: the certificate's bound is the one standard a fit is minted by.
         let grad_norm = fit.outer_gradient_norm.unwrap_or_else(|| {
             panic!("{family}: converged fit must report an outer gradient norm")
         });
-        let score_relative_bound =
-            gam::solver::rho_optimizer::flat_valley_converged_grad_bound(fit.reml_score().expect("the fit reports a REML/LAML criterion"));
+        let certificate = fit
+            .artifacts
+            .criterion_certificate
+            .as_ref()
+            .unwrap_or_else(|| panic!("{family}: a minted fit carries its criterion certificate"));
+        let bound = certificate.stationarity.bound();
         assert!(
-            grad_norm.is_finite() && grad_norm <= score_relative_bound,
+            grad_norm.is_finite() && grad_norm <= bound,
             "{family}: converged fit reports |g|={grad_norm:.6e} that does NOT clear the \
-             score-relative stationarity bound {score_relative_bound:.6e} (score={:.6}) — \
-             a converged flag without a stationarity certificate",
-            fit.reml_score().expect("the fit reports a REML/LAML criterion"),
+             stationarity bound {bound:.6e} its own certificate applied ({}) — a converged \
+             flag without a stationarity certificate",
+            certificate.summary(),
         );
 
         // Outer-work upper bound. A plain 1-parameter smooth must not explode the

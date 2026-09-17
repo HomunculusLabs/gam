@@ -102,9 +102,14 @@ fn a_permuted_search_refusal_resumes_at_its_own_criterion_value_2902() {
     else {
         panic!("expected typed REML non-convergence, got {refusal}");
     };
+    // #2817: a coordinate the reason names is rendered in native order when the
+    // text is written, so the refusal carries no canonical slot map for the caller
+    // to decode (the native naming itself is pinned by
+    // `native_coordinate_order_tests`).
     assert!(
-        reason.contains("perm=[1, 0]"),
-        "the refusal must name the slot map its coordinate indices use; got: {reason}"
+        !reason.contains("canonical slot"),
+        "the refusal must name coordinates natively, not append a canonical slot map; got: \
+         {reason}"
     );
     let checkpoint = Array1::from_vec(rho_checkpoint);
     assert_eq!(checkpoint.len(), 2);

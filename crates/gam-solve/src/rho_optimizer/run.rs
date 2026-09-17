@@ -231,6 +231,14 @@ pub(crate) struct OuterConfig {
     /// reach the same λ̂ and the same fitted surface. `None` (or an identity
     /// permutation) leaves the legacy native-order path byte-for-byte unchanged.
     pub(crate) rho_canonical_keys: Option<Vec<u64>>,
+    /// The canonical run's coordinate map, `order[c]` = the native coordinate at
+    /// canonical slot `c` (#2817). Set only by `canonicalize_outer_config`, on the
+    /// config of the recursive canonical run, and read only through
+    /// [`native_coordinate`](super::objective::native_coordinate): every
+    /// coordinate a refusal or log line names inside that run is rendered in the
+    /// caller's native order when the text is written, rather than patched after
+    /// the run returns.
+    pub(crate) native_coordinate_order: Option<Vec<usize>>,
     /// A CALLER'S absolute requirement on the projected outer gradient norm,
     /// honoured by the search and not merely checked at the end (#2568).
     ///
@@ -352,6 +360,7 @@ impl Default for OuterConfig {
                 crate::rho_uncertainty::RhoUncertaintyProblemSize::default(),
             warm_start_outer_hessian: None,
             rho_canonical_keys: None,
+            native_coordinate_order: None,
             curvature_search_latched: false,
         }
     }
@@ -543,6 +552,11 @@ impl OuterProblem {
     /// candidates even when the effective seed budget is one. The default keeps
     /// a user-provided initial point authoritative and avoids a separate
     /// screening pass.
+    ///
+    /// "Authoritative" governs where the cascade starts, not whose refusal is
+    /// reported: a refused seed falls through to the generated seeds
+    /// (`should_start_next_seed`), and the cascade reports its lowest-value
+    /// refused checkpoint (`retain_best_outer_checkpoint`).
     pub fn with_screen_initial_rho(mut self, screen_initial_rho: bool) -> Self {
         self.screen_initial_rho = screen_initial_rho;
         self
@@ -794,6 +808,8 @@ impl OuterProblem {
             // a warm-start hit decodes a converged outer Hessian.
             warm_start_outer_hessian: None,
             rho_canonical_keys: self.rho_canonical_keys.clone(),
+            // Set only on the recursive canonical run's config (#2817).
+            native_coordinate_order: None,
             // Latched only by the certify-last reseed loop (#2939).
             curvature_search_latched: false,
         }
@@ -1208,9 +1224,7 @@ pub enum OuterConvergedVia {
     GradientStationary,
     /// Criterion-flat certificate (#2241/#2253): the criterion stalled over the
     /// cost-stall window and the residual projected gradient sits inside the
-    /// flat certificate band — the score-relative stationarity bound
-    /// (`flat_valley_converged_grad_bound`), the probe-noise-floor bound
-    /// measured from the stall window's own value scatter, and/or the
+    /// flat certificate band — the point-anchored band and/or the
     /// curvature-scaled Newton-decrement bound (`newton_predicted_decrease`),
     /// under which a residual above the gradient-magnitude bands is still
     /// stationary when the second-order-predicted improvement `½·gᵀH⁻¹g` is below
@@ -1479,7 +1493,6 @@ pub struct OuterResult {
     /// `None` means no line search failed (or no `opt` solver produced this
     /// result at all).
     pub line_search_failure: Option<(LineSearchFailureReason, usize)>,
-    pub flat_noise_grad_bound: Option<f64>,
     /// Post-fit PSIS diagnostic for whether sampled smoothing-parameter weights
     /// show evidence that plug-in REML/LAML intervals are unreliable. Populated
     /// once by `run_outer` when the exact rho Hessian is cheap enough to use.
@@ -1533,12 +1546,11 @@ pub struct OuterResult {
     /// wanting the rail).
     pub active_set_reseed: Option<ActiveSetReseed>,
     /// `(noise_floor σ̂, probe_radius Δ)` the cost-stall guard measured over its
-    /// stall window, when a stall produced this result. Present whether or not
-    /// their ratio licensed a `flat_noise_grad_bound`: σ̂ is the per-step
-    /// objective change the no-improvement window judged and Δ is the radius the
-    /// accepted steps moved, and a window that filled because the search took
-    /// microscopic steps is told from one that filled because the surface is
-    /// flat by Δ, not by the verdict.
+    /// stall window, when a stall produced this result. Reported as evidence and
+    /// licensing no bound (#2817): σ̂ is the per-step objective change the
+    /// no-improvement window judged and Δ is the radius the accepted steps moved,
+    /// and a window that filled because the search took microscopic steps is told
+    /// from one that filled because the surface is flat by Δ.
     pub cost_stall_probe_scale: Option<(f64, f64)>,
     /// Which lane produced this result. See [`OuterResultOrigin`].
     pub origin: OuterResultOrigin,
@@ -1599,7 +1611,6 @@ impl OuterResult {
             solver_termination: None,
             criterion_certificate: None,
             line_search_failure: None,
-            flat_noise_grad_bound: None,
             rho_uncertainty_diagnostic: None,
             tail_snap_reseed: None,
             saddle_escape_reseed: None,
@@ -3134,6 +3145,10 @@ pub(crate) struct RailTest {
     /// The width-capped margin in force for THIS coordinate, from
     /// [`coordinate_rail_margin`]. Zero when the box does not cover it.
     pub(crate) margin: f64,
+    /// The coordinate `index` names in the caller's native order, which is what a
+    /// refusal prints: a test taken inside a canonical run is rendered through
+    /// [`native_coordinate`] (#2817).
+    pub(crate) native_index: usize,
 }
 
 impl RailTest {
@@ -3151,6 +3166,7 @@ impl RailTest {
             // un-railed.
             theta: theta[k],
             index: k,
+            native_index: native_coordinate(config.native_coordinate_order.as_deref(), k),
             margin: box_bounds.map_or(0.0, |(lo, hi)| coordinate_rail_margin(lo, hi)),
             box_bounds,
         }
@@ -3174,7 +3190,7 @@ impl std::fmt::Display for RailTest {
             Some((lo, hi)) => write!(
                 f,
                 "#{} theta={:.6e} box=[{:.6e}, {:.6e}] margin={:.3e} railed_at=(<={:.6e} or >={:.6e})",
-                self.index,
+                self.native_index,
                 self.theta,
                 lo,
                 hi,
@@ -3185,7 +3201,7 @@ impl std::fmt::Display for RailTest {
             None => write!(
                 f,
                 "#{} theta={:.6e} box=NOT-COVERED-BY-CONFIGURED-BOUNDS",
-                self.index, self.theta,
+                self.native_index, self.theta,
             ),
         }
     }
@@ -3328,9 +3344,6 @@ pub(crate) enum StationarityBoundSource {
     /// (#2613). Both were `solver-band` until #2688, so a `N× over bound` ratio
     /// could not be read as a ratio against a resolution standard.
     CertificateScoreRelative,
-    /// The cost-stall guard's measured probe-noise floor `σ̂/Δ` (#2241). Diverges
-    /// as the step collapses, which is the regime it fires in.
-    ProbeNoiseFloor,
     /// `|Pg|·√(τ/Δpred)` = `√(2·h·τ)` (#2253/#2249/#2015/#2091) -- the only rung
     /// with a derivation from the criterion's own resolution.
     CurvatureResolvability,
@@ -3365,7 +3378,6 @@ impl StationarityBoundSource {
         match self {
             Self::SolverBand => "solver-band",
             Self::CertificateScoreRelative => "certificate-score-relative",
-            Self::ProbeNoiseFloor => "probe-noise-floor",
             Self::CurvatureResolvability => "curvature-resolvability",
             Self::GradientReproducibility => "gradient-reproducibility",
             Self::FixedPointResidual => "fixed-point-residual",
@@ -3465,6 +3477,21 @@ impl From<StationarityBound> for StationarityStandard {
     }
 }
 
+/// The certificate's one-line summary with every coordinate named in the caller's
+/// native order (#2817). Inside a canonical run the certificate's railed facts and
+/// rails hold canonical slots; this renders a copy renamed by the same owner
+/// `outer_result_to_native` uses, so a refusal never prints a canonical slot.
+fn native_certificate_summary(certificate: &OuterCriterionCertificate, config: &OuterConfig) -> String {
+    match config.native_coordinate_order.as_deref() {
+        Some(order) => {
+            let mut native = certificate.clone();
+            criterion_certificate_to_native(&mut native, order);
+            native.summary()
+        }
+        None => certificate.summary(),
+    }
+}
+
 fn outer_nonconvergence_error(
     context: &str,
     reason: &str,
@@ -3525,20 +3552,13 @@ fn outer_nonconvergence_error(
     // #2465: the line search's own verdict, when one failed. `StepSizeTooSmall`
     // and `MaxAttempts` are different defects with different repairs, and
     // "line_search_failed" alone distinguishes neither.
-    // The cost-stall guard's measured probe-noise floor, when it published one.
-    // A stall halted against a noise bound and a stall halted against the
-    // score-relative flat band are different verdicts, and only the first
-    // carries this.
+    // The stall window's evidence, when a stall produced this result: σ̂ and Δ,
+    // reported and licensing no bound (#2817).
     let reason = match result.cost_stall_probe_scale {
         Some((noise_floor, probe_radius)) => format!(
             "{reason}, cost_stall_window=[noise_floor={noise_floor:.6e}, \
-             probe_radius={probe_radius:.6e}, ratio={:.6e}]",
-            noise_floor / probe_radius
+             probe_radius={probe_radius:.6e}]"
         ),
-        None => reason,
-    };
-    let reason = match result.flat_noise_grad_bound {
-        Some(bound) => format!("{reason}, flat_noise_grad_bound={bound:.6e}"),
         None => reason,
     };
     let reason = match result.line_search_failure {
@@ -3788,12 +3808,16 @@ fn certify_fixed_point_optimality(
             }
             FixedPointCoordinateCertificate::Covered { update, scale } => {
                 uncovered.push(format!(
-                    "coordinate {index} has invalid covered residual update={update} scale={scale}"
+                    "coordinate {} has invalid covered residual update={update} scale={scale}",
+                    native_coordinate(config.native_coordinate_order.as_deref(), index)
                 ));
                 normalized_updates.push(f64::NAN);
             }
             FixedPointCoordinateCertificate::Uncovered { reason } => {
-                uncovered.push(format!("coordinate {index}: {reason}"));
+                uncovered.push(format!(
+                    "coordinate {}: {reason}",
+                    native_coordinate(config.native_coordinate_order.as_deref(), index)
+                ));
                 normalized_updates.push(f64::NAN);
             }
         }
@@ -3868,7 +3892,7 @@ fn certify_fixed_point_optimality(
     if !certificate.certifies() {
         return Err(outer_nonconvergence_error(
             context,
-            &certificate.summary(),
+            &native_certificate_summary(&certificate, config),
             result,
             Some(projected_inf),
             StationarityBound::fixed_point_residual(config),
@@ -3883,7 +3907,7 @@ fn certify_fixed_point_optimality(
         },
     };
     result.termination.certify(via);
-    log::info!("[CERTIFICATE] {context}: {}", certificate.summary());
+    log::info!("[CERTIFICATE] {context}: {}", native_certificate_summary(&certificate, config));
     Ok(certificate)
 }
 
@@ -4298,9 +4322,9 @@ fn certify_outer_optimality_at_terminal_fidelity(
         );
     }
     // #2458: this used to open with a rung gated on
-    // `operator_stop_reason == CostStallFlatValley` that installed
-    // `flat_valley_converged_grad_bound(cost)` — `1e-3·(1 + |score|)` capped at
-    // `1.0`. Two things were wrong with it, and they compound.
+    // `operator_stop_reason == CostStallFlatValley` that installed the guard's
+    // score-relative term — `1e-3·(1 + |score|)` capped at `1.0`, deleted with the
+    // guard's own copy by #2817. Two things were wrong with it, and they compound.
     //
     // First, the gate is an EXIT REASON and the bound is a pure function of the
     // criterion value. The same point, with the same criterion, the same
@@ -4310,76 +4334,29 @@ fn certify_outer_optimality_at_terminal_fidelity(
     // "how did the loop stop?" consumed where a property of the objective is
     // needed.
     //
-    // Second, and worse, the constant was redundant with a MEASUREMENT taken in
-    // the same regime, and won exactly where the measurement had declined. A
-    // cost-stall exit carries the guard's probe-noise floor `σ̂/Δ`
-    // (`flat_noise_grad_bound`, applied just below) — the criterion's own
-    // demonstrated gradient resolution at the step scale the search actually
-    // probed. When `σ̂/Δ` exceeds `FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP` the guard
-    // reports `ProbeNoiseVerdict::Unresolvable` and licenses NO bound, because
-    // "the criterion resolves no gradient at this step scale" (`bridges.rs`).
-    // The deleted rung then supplied `min(1e-3·(1+|score|), 1.0)` anyway. So at
-    // precisely the points where the instrument measured itself too noisy to
-    // certify anything, the certificate substituted a constant and certified.
-    // A measurement that declines must make the certificate decline, not be
-    // replaced by a number that was never measured.
+    // Second, and worse, the constant overruled the measurement taken in the same
+    // regime exactly where that measurement had declined: the certificate
+    // substituted a number that was never measured.
+    //
+    // #2817 then deleted the measurement's own rung. A cost-stall exit used to
+    // carry the guard's `σ̂/Δ` here as a widening (#2241), but that ratio bounds
+    // the gradient only along the directions the window's steps spanned, and
+    // the directional version needs a Hessian no route publishing a guard claim
+    // holds. Census on #2817 and #2241: every fit the rung certified certifies
+    // through curvature resolvability instead.
     //
     // What remains in the ladder below is, in every rung: the configured band,
-    // a measurement (`flat_noise_grad_bound`, gradient reproducibility), a
-    // derivation (`|Pg|·√(τ/Δpred)`), or the caller's own requirement. No rung
-    // is a magic relative constant, and none is selected by how the search
-    // exited. `FLAT_VALLEY_CONVERGED_REL_GRAD` / `_ABS_GRAD_CAP` are retained
-    // because the cost-stall guard itself still uses the cap as its resolution
-    // ceiling — that use is a measured ratio compared against a declared
-    // ceiling, which is a different thing from a bound built out of one.
+    // a measurement (gradient reproducibility), a derivation (`|Pg|·√(τ/Δpred)`),
+    // or the caller's own requirement. No rung is a magic relative constant, and
+    // none is selected by how the search exited.
     let mut stationarity_bound = solver_bound;
-    // #2241 — a cost-stall exit carries the guard's measured probe-noise-floor
-    // gradient bound σ̂/Δ. The certificate must judge the re-measured final
-    // gradient against the same flat band the guard certified, or the guard's
-    // noise-scale convergence would be granted in the loop and revoked here.
-    if let Some(noise_bound) = result.flat_noise_grad_bound
-        && noise_bound.is_finite()
-    {
-        if noise_bound > stationarity_bound {
-            bound_source = StationarityBoundSource::ProbeNoiseFloor;
-            stationarity_bound = noise_bound;
-        }
-    }
-    // #2568 -- the caller's requirement caps the ladder's TOP. Every rung above
-    // widens, so capping here is the only placement that cannot be defeated by a
-    // rung that fires later; in particular the score-relative widening is what
-    // produced the saturated `bound = 1.000e0` this issue was filed against.
-    //
-    // #2688 -- this is now the SECOND cap, not the only one, and it says so.
-    // `outer_stationarity_band_and_rung_at` already capped the engine's own
-    // band and labelled the result; what reaches here is a bound that a
-    // widening ABOVE (today: the probe-noise floor) pushed back past the
-    // requirement. Before #2688 `required < stationarity_bound` was false by
-    // construction on every exit where nothing widened the already-capped
-    // value, which is why this audit line had never been observed to print.
-    //
-    // No new refusal path is needed and none is added: the acceptance test below
-    // already compares `projected_grad_norm` against `stationarity_bound`, so
-    // tightening the bound refuses the fit through the machinery that was always
-    // there, with the rung naming who decided.
-    //
-    // Both numbers are reported. The engine's own bound is what the fit would
-    // have been held to and is the quantity a reader needs to judge whether the
-    // requirement was reasonable; the requirement is what actually decided. A
-    // refusal that named only one of them would be unauditable in exactly the
-    // way #2465 is about.
-    if let Some(required) = config.required_projected_gradient_norm
-        && required < stationarity_bound
-    {
-        log::info!(
-            "[2568-REQUIREMENT] {context}: caller requires |Pg| <= {required:.6e}; \
-             engine bound was {stationarity_bound:.6e} (rung {}); measured |Pg| = \
-             {projected_grad_norm:.6e}",
-            bound_source.label(),
-        );
-        bound_source = StationarityBoundSource::CallerRequirement;
-        stationarity_bound = required;
-    }
+    // #2568/#2688 -- the caller's requirement is applied once, inside
+    // `outer_stationarity_band_and_rung_at`, which labels the band it capped
+    // (audited just above). A second cap used to sit here for a bound that a
+    // widening between the two pushed back past the requirement; the only such
+    // widening was the probe-noise rung, and with it deleted (#2817) nothing
+    // above this point can widen the already-capped band, so that cap could
+    // never fire and was removed.
     audit_outer_value_agreement(
         context,
         value_only,
@@ -4569,8 +4546,8 @@ fn certify_outer_optimality_at_terminal_fidelity(
     // typed inability to certify rather than a silently different standard.
 
     // Curvature-scaled stationarity (#2253/#2249/#2015/#2091). The re-measured
-    // projected gradient can sit modestly ABOVE the score-relative / probe-noise
-    // bands even though NO step reduces the objective by more than the outer
+    // projected gradient can sit modestly ABOVE the gradient-magnitude bands even
+    // though NO step reduces the objective by more than the outer
     // tolerance — a weakly-identified small-n fit reaches this by a flat-valley
     // cost-stall, and an *already-stationary* fit reaches it at iteration 0 when
     // the plan search exhausts without stepping (a 2-parameter Gaussian-linear
@@ -4810,6 +4787,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                     stationarity_bound: StationarityBound::from_ladder(stationarity_bound, bound_source),
                     objective_tol: asymptote_objective_tol,
                     context,
+                    native_coordinate_order: config.native_coordinate_order.as_deref(),
                 },
             )?)
         }
@@ -4885,7 +4863,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                 if !certificate.certifies() {
                     return Err(outer_nonconvergence_error(
                         context,
-                        &certificate.summary(),
+                        &native_certificate_summary(&certificate, config),
                         result,
                         Some(interior_projected_grad_norm),
                         StationarityBound::from_ladder(stationarity_bound, bound_source),
@@ -4896,7 +4874,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                     .certify(OuterConvergedVia::AsymptoteStationary {
                         rails: certificate.stationarity.rails().len(),
                     });
-                log::info!("[CERTIFICATE] {context}: {}", certificate.summary());
+                log::info!("[CERTIFICATE] {context}: {}", native_certificate_summary(&certificate, config));
                 return Ok(certificate);
             }
         }
@@ -4968,7 +4946,10 @@ fn certify_outer_optimality_at_terminal_fidelity(
             let down = (cost_minus - evaluation.cost).abs();
             if up <= objective_tol && down <= objective_tol {
                 saturated_flat.push(k);
-                probe_reports.push(format!("k={k} |ΔV|+={up:.3e} |ΔV|-={down:.3e}"));
+                probe_reports.push(format!(
+                    "k={} |ΔV|+={up:.3e} |ΔV|-={down:.3e}",
+                    native_coordinate(config.native_coordinate_order.as_deref(), k)
+                ));
             }
         }
         if !probe_failed && !saturated_flat.is_empty() {
@@ -4983,7 +4964,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
             certified_projected_grad_norm = reduced_sq.sqrt();
             let flat_list = saturated_flat
                 .iter()
-                .map(usize::to_string)
+                .map(|&k| native_coordinate(config.native_coordinate_order.as_deref(), k).to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
             let probe_summary = probe_reports.join("; ");
@@ -5093,6 +5074,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                 stationarity_bound: StationarityBound::from_ladder(stationarity_bound, bound_source),
                 objective_tol: asymptote_objective_tol,
                 context,
+                native_coordinate_order: config.native_coordinate_order.as_deref(),
             },
         )? {
             TailSnapOutcome::TailStationaryAtPoint {
@@ -5162,7 +5144,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                 if !certificate.certifies() {
                     return Err(outer_nonconvergence_error(
                         context,
-                        &certificate.summary(),
+                        &native_certificate_summary(&certificate, config),
                         result,
                         Some(interior_projected_grad_norm),
                         effective_interior_bound,
@@ -5176,7 +5158,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                 log::info!(
                     "[CERTIFICATE] {context}: tail-stationary at the checkpoint \
                      (#2348 Inc 2c): {}",
-                    certificate.summary()
+                    native_certificate_summary(&certificate, config)
                 );
                 return Ok(certificate);
             }
@@ -5501,10 +5483,11 @@ fn certify_outer_optimality_at_terminal_fidelity(
                             .is_some_and(|component| *component != 0.0)
                         {
                             log::info!(
-                                "[ACTIVE-SET] {context}: coordinate {k} is within the rail \
+                                "[ACTIVE-SET] {context}: coordinate {} is within the rail \
                                  margin of its bound but its projected gradient is \
                                  {:.6e} (feasible descent remains), so it is INTERIOR and \
                                  stays free rather than being frozen (#2454)",
+                                native_coordinate(config.native_coordinate_order.as_deref(), k),
                                 projected_gradient[k],
                             );
                             continue;
@@ -5531,7 +5514,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
         // Carry the railed-mint and tail-snap decline evidence into the
         // refusal so a railed or budget-exhausted crawl explains which
         // certificate gate refused instead of failing silently.
-        let mut summary = certificate.summary();
+        let mut summary = native_certificate_summary(&certificate, config);
         if !curvature_requirement_met {
             // This gate refuses on two OPPOSITE grounds and used to report both
             // with one sentence, which reads as an optimizer failure in either
@@ -5611,6 +5594,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                 .filter(|&k| search_lower[k] == search_upper[k])
                 .collect();
             if !pinned.is_empty() {
+                let pinned = native_coordinates(config.native_coordinate_order.as_deref(), &pinned);
                 summary = format!(
                     "{summary}; NOTE the run that produced this point searched a REDUCED box \
                      with coordinate(s) {pinned:?} pinned (active-set reduction), so the \
@@ -5687,7 +5671,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
         },
     };
     result.termination.certify(via);
-    log::info!("[CERTIFICATE] {context}: {}", certificate.summary());
+    log::info!("[CERTIFICATE] {context}: {}", native_certificate_summary(&certificate, config));
     Ok(certificate)
 }
 
@@ -5751,6 +5735,9 @@ struct AsymptoteRailInputs<'a> {
     /// full matrix non-PD).
     objective_tol: f64,
     context: &'a str,
+    /// The canonical run's coordinate map, so every decline this certificate
+    /// writes names native coordinates ([`native_coordinate`], #2817).
+    native_coordinate_order: Option<&'a [usize]>,
 }
 
 impl AsymptoteRailInputs<'_> {
@@ -5857,7 +5844,7 @@ fn try_certify_asymptote_rail(
             "no railed coordinate parameterizes log λ; {} bound-active ψ coordinate(s) {:?} carry \
              no exponential tail to certify",
             box_railed.len(),
-            box_railed,
+            native_coordinates(inputs.native_coordinate_order, &box_railed),
         )));
     }
     if !box_railed.is_empty() {
@@ -5867,8 +5854,8 @@ fn try_certify_asymptote_rail(
              runs on log-λ coordinate(s) {:?}",
             inputs.context,
             box_railed.len(),
-            box_railed,
-            tail_railed,
+            native_coordinates(inputs.native_coordinate_order, &box_railed),
+            native_coordinates(inputs.native_coordinate_order, &tail_railed),
         );
     }
 
@@ -5914,7 +5901,10 @@ fn try_certify_asymptote_rail(
     let mut probed_any = false;
     for &k in tail_railed.iter() {
         if k >= rho.len() || k >= lower.len() || k >= upper.len() {
-            decline = Some(format!("railed coordinate {k} outside the box layout"));
+            decline = Some(format!(
+                "railed coordinate {} outside the box layout",
+                native_coordinate(inputs.native_coordinate_order, k)
+            ));
             break;
         }
         // Which rail: the box endpoint the coordinate sits nearest. `Upper`
@@ -5925,7 +5915,15 @@ fn try_certify_asymptote_rail(
             AsymptoteSide::Lower
         };
         probed_any = true;
-        match build_and_assess_rail_coordinate(obj, rho, k, side, &tol, (lower[k], upper[k]))? {
+        match build_and_assess_rail_coordinate(
+            obj,
+            rho,
+            k,
+            side,
+            &tol,
+            (lower[k], upper[k]),
+            native_coordinate(inputs.native_coordinate_order, k),
+        )? {
             Ok(rail) => rails.push(rail),
             Err(reason) => {
                 decline = Some(reason);
@@ -6012,8 +6010,9 @@ fn try_certify_face_analytically(
         }
         if (upper[k] - rho[k]).abs() > (rho[k] - lower[k]).abs() {
             return Ok(Err(format!(
-                "coordinate {k} rails at the zero-smoothing bound; the analytic face limit \
-                 covers λ→∞ only"
+                "coordinate {} rails at the zero-smoothing bound; the analytic face limit \
+                 covers λ→∞ only",
+                native_coordinate(inputs.native_coordinate_order, k)
             )));
         }
     }
@@ -6375,7 +6374,8 @@ fn try_tail_snap_to_rail(
         // would manufacture an optimum out of an arithmetic coincidence.
         if !inputs.layout.coordinate_is_log_smoothing(k) {
             rejected.push(format!(
-                "k={k}: psi coordinate (rho_dim={}), no exponential tail law",
+                "k={}: psi coordinate (rho_dim={}), no exponential tail law",
+                native_coordinate(inputs.native_coordinate_order, k),
                 inputs.layout.rho_dim()
             ));
             continue;
@@ -6399,7 +6399,8 @@ fn try_tail_snap_to_rail(
         };
         if !deep_enough {
             rejected.push(format!(
-                "k={k}: ρ={:.2} more than {probe_span:.0} e-folds inside the box",
+                "k={}: ρ={:.2} more than {probe_span:.0} e-folds inside the box",
+                native_coordinate(inputs.native_coordinate_order, k),
                 rho[k]
             ));
             continue;
@@ -6416,7 +6417,8 @@ fn try_tail_snap_to_rail(
         let ratio = h_kk.abs() / g_k.abs();
         if !(TAIL_SNAP_CURVATURE_BAND.0..=TAIL_SNAP_CURVATURE_BAND.1).contains(&ratio) {
             rejected.push(format!(
-                "k={k}: g={g_k:.3e} H_kk={h_kk:.3e} |ratio|={ratio:.3e} outside tie band"
+                "k={}: g={g_k:.3e} H_kk={h_kk:.3e} |ratio|={ratio:.3e} outside tie band",
+                native_coordinate(inputs.native_coordinate_order, k)
             ));
             continue;
         }
@@ -6511,7 +6513,10 @@ fn try_tail_snap_to_rail(
             )),
         };
         if let Some(reason) = verdict {
-            decline = Some(format!("candidate k={k} tail unconfirmed: {reason}"));
+            decline = Some(format!(
+                "candidate k={} tail unconfirmed: {reason}",
+                native_coordinate(inputs.native_coordinate_order, *k)
+            ));
             break;
         }
     }
@@ -6684,12 +6689,13 @@ fn build_and_assess_rail_coordinate(
     side: AsymptoteSide,
     tol: &AsymptoteTolerances,
     domain: (f64, f64),
+    native: usize,
 ) -> Result<Result<RailCoordinate, String>, EstimationError> {
     let window = match probe_tail_window(obj, rho, coord, side, tol, domain)? {
         (Some(window), _) => window,
         (None, rows) => {
             return Ok(Err(format!(
-                "k={coord}: no finite-difference-clean tail window; probes {rows}"
+                "k={native}: no finite-difference-clean tail window; probes {rows}"
             )));
         }
     };
@@ -6710,7 +6716,7 @@ fn build_and_assess_rail_coordinate(
                 drift_band: tol.tail_drift_rel,
             },
         })),
-        other => Ok(Err(format!("k={coord}: tail verdict {other:?}"))),
+        other => Ok(Err(format!("k={native}: tail verdict {other:?}"))),
     }
 }
 
@@ -7787,6 +7793,7 @@ fn canonicalize_outer_config(config: &OuterConfig, perm: &[usize]) -> OuterConfi
     };
     let mut canonical = config.clone();
     canonical.rho_canonical_keys = None;
+    canonical.native_coordinate_order = Some(perm.to_vec());
     if let Some(initial) = config.initial_rho.as_ref() {
         canonical.initial_rho = Some(permute_arr(initial));
     }
@@ -7871,23 +7878,24 @@ pub(crate) fn run_outer_uncertified(
             )));
         }
         for i in 0..cap.n_params {
+            let native = native_coordinate(config.native_coordinate_order.as_deref(), i);
             if !(model_lo[i].is_finite() && model_hi[i].is_finite())
                 || model_lo[i] > model_hi[i]
             {
                 return Err(EstimationError::InvalidInput(format!(
-                    "{context}: outer model-domain bounds are invalid at coordinate {i}:                      lower={}, upper={}",
+                    "{context}: outer model-domain bounds are invalid at coordinate {native}:                      lower={}, upper={}",
                     model_lo[i], model_hi[i]
                 )));
             }
             if bound_lo[i] < model_lo[i] || bound_hi[i] > model_hi[i] {
                 return Err(EstimationError::InvalidInput(format!(
-                    "{context}: outer search bounds escape the model domain at coordinate {i}:                      model=[{}, {}], search=[{}, {}]",
+                    "{context}: outer search bounds escape the model domain at coordinate {native}:                      model=[{}, {}], search=[{}, {}]",
                     model_lo[i], model_hi[i], bound_lo[i], bound_hi[i]
                 )));
             }
             if !(bound_lo[i].is_finite() && bound_hi[i].is_finite()) {
                 return Err(EstimationError::InvalidInput(format!(
-                    "{context}: outer rho bounds are non-finite at coordinate {i}: \
+                    "{context}: outer rho bounds are non-finite at coordinate {native}: \
                      lower={}, upper={}",
                     bound_lo[i], bound_hi[i]
                 )));
@@ -7908,7 +7916,7 @@ pub(crate) fn run_outer_uncertified(
             // both numeric walls. Keep both when rewording.
             if bound_lo[i] > bound_hi[i] {
                 return Err(EstimationError::InvalidInput(format!(
-                    "{context}: outer rho bounds are inverted at coordinate {i}: \
+                    "{context}: outer rho bounds are inverted at coordinate {native}: \
                      lower bound {} exceeds upper bound {}",
                     bound_lo[i], bound_hi[i]
                 )));
@@ -8415,11 +8423,12 @@ pub(super) fn install_objective_domain(
         )));
     }
     for index in 0..n_params {
+        let native = native_coordinate(config.native_coordinate_order.as_deref(), index);
         if let Some(domain) = objective_lower.as_ref() {
             let value = domain[index];
             if !value.is_finite() {
                 return Err(EstimationError::InvalidInput(format!(
-                    "outer objective-domain lower bound[{index}] must be finite; got {value}"
+                    "outer objective-domain lower bound[{native}] must be finite; got {value}"
                 )));
             }
             lower[index] = lower[index].max(value);
@@ -8428,14 +8437,14 @@ pub(super) fn install_objective_domain(
             let value = domain[index];
             if !value.is_finite() {
                 return Err(EstimationError::InvalidInput(format!(
-                    "outer objective-domain upper bound[{index}] must be finite; got {value}"
+                    "outer objective-domain upper bound[{native}] must be finite; got {value}"
                 )));
             }
             upper[index] = upper[index].min(value);
         }
         if !(lower[index].is_finite() && upper[index].is_finite() && lower[index] < upper[index]) {
             return Err(EstimationError::InvalidInput(format!(
-                "outer objective-domain intersection is empty or non-finite at coordinate {index}: lower={}, upper={}",
+                "outer objective-domain intersection is empty or non-finite at coordinate {native}: lower={}, upper={}",
                 lower[index], upper[index]
             )));
         }
@@ -8586,9 +8595,8 @@ fn outer_arithmetic_gradient_floor(config: &OuterConfig) -> f64 {
 /// silently substitute a trajectory point for the thing it does not know. The
 /// consequence — an outer loop that keeps stepping past the point a
 /// score-relative band would have stopped at — is bounded by the cost-stall
-/// guard, whose own score-relative rung
-/// (`flat_valley_converged_grad_bound(best_value)`) is anchored at the BEST
-/// iterate and is therefore the correctly-anchored version of the same idea.
+/// guard, which judges a stall's claim by the certificate's band at the BEST
+/// iterate's value (`CostStallGuard::stationarity_band`, #2817).
 ///
 /// The certificate keeps the point-anchored form, which is what mgcv means:
 /// see [`outer_stationarity_band_and_rung_at`].
@@ -9253,3 +9261,6 @@ mod criterion_curvature_ladder_2748_tests;
 #[cfg(test)]
 #[path = "canonical_checkpoint_order_tests.rs"]
 mod canonical_checkpoint_order_tests;
+#[cfg(test)]
+#[path = "native_coordinate_order_tests.rs"]
+mod native_coordinate_order_tests;

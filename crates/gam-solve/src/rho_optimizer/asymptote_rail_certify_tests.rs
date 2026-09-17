@@ -44,6 +44,7 @@ fn asymptote_rail_mints_on_exact_tail_law() {
         AsymptoteSide::Upper,
         &tol,
         (f64::NEG_INFINITY, f64::INFINITY),
+        0,
     )
     .expect("probing the tail-law objective must not error")
     .expect("an exact exponential tail must certify a rail");
@@ -72,6 +73,7 @@ fn asymptote_rail_refuses_on_drifting_constant() {
         AsymptoteSide::Upper,
         &tol,
         (f64::NEG_INFINITY, f64::INFINITY),
+        0,
     )
     .expect("probing must not error");
     assert!(
@@ -204,6 +206,7 @@ fn coupled_coordinate_stationary_before_snap_still_reseeds_2358() {
             stationarity_bound: StationarityBound::from_ladder(1.0e-3, StationarityBoundSource::SolverBand),
             objective_tol: 1.0e-8,
             context: "coupled pre-snap stationarity guard",
+            native_coordinate_order: None,
         },
     )
     .expect("tail snap must not error");
@@ -511,6 +514,7 @@ fn joint_face_tail_certifies_where_single_coordinate_law_drifts_2349() {
             stationarity_bound: StationarityBound::from_ladder(1.0e-3, StationarityBoundSource::SolverBand),
             objective_tol: 1.0e-8,
             context: "joint-face guard test",
+            native_coordinate_order: None,
         },
     )
     .expect("tail snap must not error");
@@ -575,6 +579,7 @@ fn joint_face_with_unsettled_estimand_snaps_for_reoptimization_2349() {
             stationarity_bound: StationarityBound::from_ladder(1.0e-3, StationarityBoundSource::SolverBand),
             objective_tol: 1.0e-8,
             context: "joint-face unsettled-estimand guard test",
+            native_coordinate_order: None,
         },
     )
     .expect("tail snap must not error");
@@ -642,6 +647,7 @@ fn joint_face_fallback_refuses_a_non_face_2349() {
             stationarity_bound: StationarityBound::from_ladder(1.0e-9, StationarityBoundSource::SolverBand),
             objective_tol: 1.0e-8,
             context: "non-face guard test",
+            native_coordinate_order: None,
         },
     )
     .expect("tail snap must not error");
@@ -706,6 +712,7 @@ fn tail_probe_ladder_never_leaves_the_coordinate_box_2388() {
         AsymptoteSide::Upper,
         &tol,
         (box_lower, 30.0),
+        0,
     )
     .expect("probing must not error")
     .expect("the in-domain rows alone must certify the exact tail");
@@ -765,6 +772,7 @@ fn asymptote_rail_requires_psd_interior_sub_block() {
         stationarity_bound: StationarityBound::from_ladder(1.0e-6, StationarityBoundSource::SolverBand),
         objective_tol: 1.0e-5,
         context: "asymptote-rail psd test",
+        native_coordinate_order: None,
     };
     let minted = try_certify_asymptote_rail(&mut obj, &inputs_psd)
         .expect("certification must not error");
@@ -832,6 +840,7 @@ fn asymptote_rail_refuses_a_psi_coordinate_with_a_perfect_tail() {
         ),
         objective_tol: 1.0e-5,
         context: "asymptote-rail psi-identity test",
+        native_coordinate_order: None,
     };
     let refused =
         try_certify_asymptote_rail(&mut obj, &as_psi).expect("certification must not error");
@@ -886,6 +895,7 @@ fn tail_snap_refuses_a_psi_coordinate() {
             ),
             objective_tol: 1.0e-8,
             context: "tail-snap psi-identity test",
+            native_coordinate_order: None,
         },
     )
     .expect("tail snap must not error");

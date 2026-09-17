@@ -33,6 +33,20 @@ const COST_2817: f64 = 1.0e3;
 /// `objective_tol` at [`COST_2817`]: `1.001e-4`.
 const RESOLUTION_2817: f64 = FLOOR_2817 * (1.0 + COST_2817);
 
+/// The certificate band these fixtures' guards judge claims by (#2817). The guard
+/// reads its band from the run's configuration; this one is the absolute
+/// tolerance with no relative widening, so the band is the same at every value.
+const CLAIM_BAND_2817: f64 = 1.0e-3;
+
+fn claim_band_config_2817(band: f64) -> OuterConfig {
+    OuterConfig {
+        tolerance: band,
+        rel_cost_tolerance: Some(0.0),
+        objective_scale: None,
+        ..OuterConfig::default()
+    }
+}
+
 /// The residual the paired fixtures sit at.
 ///
 /// Chosen to satisfy three things at once, which is what makes the pair sharp:
@@ -40,7 +54,7 @@ const RESOLUTION_2817: f64 = FLOOR_2817 * (1.0 + COST_2817);
 /// resolution `1.001e-4` (so the certificate accepts the point); it is three
 /// orders ABOVE the default absolute outer band `1e-5` (so the solver's own
 /// stopping test never reaches it, which is the whole defect); and it is above
-/// [`COST_STALL_PROJECTED_GRAD_FLOOR`] (so the guard does not read the point as
+/// [`CLAIM_BAND_2817`] (so the guard does not read the point as
 /// KKT-stationary-at-bound, which would fill its window from the gradient
 /// rather than from the criterion and make the descending control vacuous).
 const STOP_GRAD_2817: f64 = 1.3e-2;
@@ -118,7 +132,7 @@ fn drive_arc_oracle_valued_2817(
     let guard = CostStallGuard::new(
         FLOOR_2817,
         ARC_COST_STALL_WINDOW,
-        COST_STALL_PROJECTED_GRAD_FLOOR,
+        &claim_band_config_2817(CLAIM_BAND_2817),
         exit.clone(),
     );
     let mut bridge = OuterSecondOrderBridge {
@@ -226,6 +240,58 @@ fn a_flatlined_arc_stall_is_adjudicated_by_the_certificates_own_test_2817() {
         "the fixture is only meaningful while the stop sits ABOVE the absolute \
          gradient band: |Pg|={} vs 1e-5",
         published.grad_norm
+    );
+}
+
+/// The wall the escape's adjudication exists for (#2817). A flat valley whose
+/// incumbent keeps creeping by less than the criterion's resolution, while its
+/// residual keeps contracting, never replays a bit-identical window, and every
+/// window is licensed by that contraction. So a stall above the band that
+/// escapes WITHOUT adjudication runs until the iteration count ends it: the
+/// 200-iteration wall measured on the gaussian n=50 000 fit. Every stall above
+/// the band now escapes. The escape is adjudicated by the certificate's own
+/// decrement test, so this one stops at its first filled window, at a point the
+/// certificate accepts.
+#[test]
+fn a_creeping_flat_valley_stops_at_its_first_window_by_adjudication_2817() {
+    const WALL_2817: usize = 200;
+    // Each evaluation improves by 1e-9, far under the resolution `1.001e-4`, so
+    // every one counts toward the window while the incumbent still moves.
+    const CREEP_2817: f64 = 1.0e-9;
+    // The residual contracts by 1e-4 of itself per evaluation, so each window's
+    // incumbent carries a smaller gradient than the last one did.
+    const CONTRACTION_2817: f64 = 1.0e-4;
+    let schedule: Vec<(f64, Array1<f64>)> = (0..WALL_2817)
+        .map(|index| {
+            let step = index as f64;
+            (
+                COST_2817 - CREEP_2817 * step,
+                array![STOP_GRAD_2817 * (1.0 - CONTRACTION_2817 * step)],
+            )
+        })
+        .collect();
+    let (outcomes, published) = drive_arc_oracle_2817(
+        array![0.5],
+        schedule,
+        array![[1.0]],
+        wide_box_2817(1),
+        Some(FLOOR_2817),
+    );
+    assert_eq!(
+        outcomes.last().expect("ran").clone().err().as_deref(),
+        Some(ARC_CURVATURE_STATIONARY_SENTINEL),
+        "a creeping flat valley the certificate accepts must stop by adjudication, not run \
+         the wall: {} evaluation(s)",
+        outcomes.len()
+    );
+    assert!(
+        outcomes.len() <= ARC_COST_STALL_WINDOW + 1,
+        "the stop must come at the first filled window: {} evaluation(s)",
+        outcomes.len()
+    );
+    assert!(
+        published.is_some_and(|exit| exit.converged),
+        "the adjudicated stop publishes its point as converged"
     );
 }
 
@@ -377,7 +443,7 @@ fn a_strict_saddle_is_never_adjudicated_stationary_2817() {
 /// criterion changes. It does not move along the reported negative eigenvector,
 /// so no trial of the adjudication ladder lowers it, the claim is
 /// `Contradicted`, and with `|Pg| = 1.4e-6` inside the solver band
-/// ([`COST_STALL_PROJECTED_GRAD_FLOOR`] here) the bridge stops ARC where the
+/// ([`CLAIM_BAND_2817`] here) the bridge stops ARC where the
 /// certificate would accept.
 #[test]
 fn a_strict_saddle_claim_the_criterion_contradicts_stops_at_the_incumbent_1082() {
@@ -816,7 +882,7 @@ fn drive_operator_oracle_2817(
     let guard = CostStallGuard::new(
         FLOOR_2817,
         ARC_COST_STALL_WINDOW,
-        COST_STALL_PROJECTED_GRAD_FLOOR,
+        &claim_band_config_2817(CLAIM_BAND_2817),
         Arc::new(Mutex::new(None)),
     );
     let mut bridge = OuterOperatorBridge {
@@ -882,22 +948,24 @@ fn an_operator_route_stall_that_bought_resolved_descent_keeps_moving_2817() {
     assert!(published.is_none(), "a licensed run publishes no stop");
 }
 
-/// A stall at a certified strict saddle keeps the search moving: resolvable
-/// negative curvature at the incumbent is descent still available (#2817, #2668
-/// row 30).
+/// A stall at a certified strict saddle is granted its escape, and a proven
+/// replay of that escape stops the run non-converged (#2817, #2668 row 30).
 ///
 /// `H = diag(1, −1)`, so λ_min = −1 is far outside the criterion's curvature
 /// resolution `2·1e-7·(1 + 1e3) ≈ 2e-4`, and the bridge calls the incumbent a
-/// strict saddle. `|g| = 2` sits above the solver band, so the criterion's
-/// negative-curvature adjudication does not stop the run. The first window
-/// grants the saddle escape. The second is cut as a bit-identical replay and
-/// licensed as the first continuation. The third bought no descent and no
-/// smaller residual. Before, that third window stopped the run at the saddle,
-/// which is how row 30 ended at λ_min = −3.7e5. The saddle licence keeps it
-/// running, and ARC's regularization ceiling still ends a saddle it cannot
-/// exploit.
+/// strict saddle. `|g| = 2` sits above the band, and the decrement exit refuses a
+/// saddle, so neither ends the run. The first filled window grants the saddle
+/// escape and the run keeps going. The fixture evaluates one point, so the next
+/// window leaves the incumbent bit-identical: reopening it provably replays the
+/// same procedure, and no licence reopens a proven replay. The saddle licence
+/// used to continue past that cut on the premise that ARC's regularization
+/// ceiling ends a saddle it cannot exploit. opt at the pinned rev has no such exit
+/// on its pre-evaluation failure paths, and parity1561's curved-acceleration
+/// Weibull fit spun there until a test timeout. A real ARC run at a saddle moves
+/// along the negative curvature, so its incumbent changes and the saddle licence
+/// still applies (row 30).
 #[test]
-fn a_stall_at_a_certified_strict_saddle_keeps_moving_2817() {
+fn a_strict_saddle_stall_escapes_then_stops_on_its_proven_replay_2817() {
     let (outcomes, published) = drive_arc_oracle_valued_2817(
         array![0.5, 0.5],
         flatlined_2817(array![2.0, 0.0], 3 * ARC_COST_STALL_WINDOW + 3),
@@ -906,14 +974,26 @@ fn a_stall_at_a_certified_strict_saddle_keeps_moving_2817() {
         Some(FLOOR_2817),
         |_| COST_2817,
     );
+    let replay_window_end = 2 * ARC_COST_STALL_WINDOW;
     assert!(
-        outcomes.iter().all(|outcome| outcome.is_ok()),
-        "a stall at a strict saddle whose negative curvature the criterion resolves must \
-         keep the search running: {outcomes:?}"
+        outcomes.len() > replay_window_end
+            && outcomes[..replay_window_end].iter().all(|outcome| outcome.is_ok()),
+        "the escape at a strict saddle must keep the search running through its first \
+         window and the replayed one: {outcomes:?}"
+    );
+    assert_eq!(
+        outcomes.len(),
+        replay_window_end + 1,
+        "the proven replay must stop the run at the evaluation that closes it: {outcomes:?}"
+    );
+    assert_eq!(
+        outcomes.last().expect("ran").clone().err().as_deref(),
+        Some(ARC_UNPROGRESSING_STALL_SENTINEL),
+        "the stop at a proven replay is the unprogressing-stall sentinel: {outcomes:?}"
     );
     assert!(
-        published.is_none_or(|exit| !exit.converged),
-        "a strict saddle must never be published as converged"
+        published.is_some_and(|exit| !exit.converged),
+        "the stop must publish its incumbent, and a strict saddle is never converged"
     );
 }
 
