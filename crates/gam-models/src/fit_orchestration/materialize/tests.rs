@@ -4033,3 +4033,119 @@ fn marginal_slope_base_link_rejects_flexible_and_unbounded_links() {
         "a log link must be the typed probit-only refusal, got {err:?}"
     );
 }
+
+/// #2677 B0: every materialized request whose custom-family solver options come
+/// from `blockwise_fit_options` computes the conditional covariance unless the
+/// caller declines it.
+///
+/// The latent survival and latent binary requests used to spread
+/// `BlockwiseFitOptions::default()`, whose `compute_covariance` is `false`, and
+/// never read `FitConfig::compute_covariance`. `compute_joint_posterior`
+/// publishes the conditional covariance only under that flag, so a latent fit
+/// whose cone moments were available (probe 1201712: moment status
+/// `Available`) published none. Every builder the resolver serves is covered,
+/// so a builder that bypasses it shows here. Materializing these requests runs
+/// no fit (#2714 moved the latent baseline chart into the fit), so this reads
+/// the request itself.
+#[test]
+fn materialized_requests_carry_the_callers_covariance_request_2677() {
+    use crate::fit_orchestration::request::FitRequest;
+    use crate::survival::lognormal_kernel::{FrailtyScale, FrailtySpec, HazardLoading};
+
+    let carried = |label: &str, request: &FitRequest<'_>| match request {
+        FitRequest::SurvivalMarginalSlope(request) => request.options.compute_covariance,
+        FitRequest::LatentSurvival(request) => request.options.compute_covariance,
+        FitRequest::LatentBinary(request) => request.options.compute_covariance,
+        FitRequest::BernoulliMarginalSlope(request) => request.options.compute_covariance,
+        FitRequest::TransformationNormal(request) => request.options.compute_covariance,
+        _ => panic!("{label} must materialize its own custom-family request"),
+    };
+    let requests = [(None, true), (Some(false), false), (Some(true), true)];
+
+    let workflow = workflow_test_dataset();
+    for (label, formula, family, slope_formula, z_column) in [
+        ("bernoulli marginal-slope", "event ~ bmi", None, Some("1"), Some("z")),
+        ("transformation-normal", "bmi ~ s(age_entry, k=4)", Some("transformation-normal"), None, None),
+    ] {
+        for (requested, expected) in requests {
+            let config = FitConfig {
+                family: family.map(str::to_string),
+                slope_formula: slope_formula.map(str::to_string),
+                z_column: z_column.map(str::to_string),
+                compute_covariance: requested,
+                ..FitConfig::default()
+            };
+            let materialized = materialize(formula, &workflow, &config)
+                .unwrap_or_else(|error| panic!("{label} should materialize: {error}"));
+            assert_eq!(
+                carried(label, &materialized.request),
+                expected,
+                "#2677 B0: {label} with compute_covariance={requested:?} must carry \
+                 compute_covariance={expected} to the fit"
+            );
+        }
+    }
+
+    let td = tempdir().expect("tempdir");
+    let data_path = td.path().join("survival_covariance_request_2677.csv");
+    fs::write(
+        &data_path,
+        "entry,exit,event,x,z\n\
+         0.0,0.4,1,-0.9,0.3\n\
+         0.0,0.7,0,-0.6,-1.1\n\
+         0.0,0.9,1,-0.3,0.8\n\
+         0.0,1.2,1,-0.1,-0.4\n\
+         0.0,1.5,0,0.2,1.3\n\
+         0.0,1.8,1,0.4,-0.7\n\
+         0.0,2.2,0,0.6,0.1\n\
+         0.0,2.6,1,0.8,-1.5\n\
+         0.0,3.1,1,0.9,0.6\n\
+         0.0,3.7,0,-0.4,-0.2\n\
+         0.0,4.2,1,0.1,1.0\n\
+         0.0,4.8,0,-0.7,-0.9\n",
+    )
+    .expect("write survival covariance request csv");
+    let data = load_dataset_projected(
+        &data_path,
+        &[
+            "entry".to_string(),
+            "exit".to_string(),
+            "event".to_string(),
+            "x".to_string(),
+            "z".to_string(),
+        ],
+    )
+    .expect("load survival covariance request dataset");
+
+    for mode in ["marginal-slope", "latent", "latent-binary"] {
+        for (requested, expected) in requests {
+            let config = if mode == "marginal-slope" {
+                FitConfig {
+                    survival_likelihood: Some(mode.to_string()),
+                    z_column: Some("z".to_string()),
+                    compute_covariance: requested,
+                    ..FitConfig::default()
+                }
+            } else {
+                FitConfig {
+                    survival_likelihood: Some(mode.to_string()),
+                    baseline_target: "weibull".to_string(),
+                    frailty: FrailtySpec::HazardMultiplier {
+                        scale: FrailtyScale::Fixed { sigma: 0.5 },
+                        loading: HazardLoading::Full,
+                    },
+                    compute_covariance: requested,
+                    ..FitConfig::default()
+                }
+            };
+            let materialized = materialize("Surv(entry, exit, event) ~ x", &data, &config)
+                .unwrap_or_else(|error| panic!("{mode} should materialize: {error}"));
+            assert_eq!(
+                carried(mode, &materialized.request),
+                expected,
+                "#2677 B0: survival {mode} with compute_covariance={requested:?} must carry \
+                 compute_covariance={expected} to the fit"
+            );
+        }
+    }
+}

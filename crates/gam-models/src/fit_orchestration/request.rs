@@ -711,9 +711,11 @@ pub struct FitConfig {
     /// told callers to "fit without inference if only point estimates are
     /// needed", while `materialize/marginal_slope.rs` set
     /// `compute_covariance = true` unconditionally, so there was no way to
-    /// comply. The mechanism was never missing — the latent survival/binary CLI
-    /// path has been passing `compute_covariance: false` in production all
-    /// along — only a way for a caller to reach it.
+    /// comply. The latent survival and latent binary requests also ignored
+    /// this field and computed no covariance at all, which withheld the
+    /// conditional covariance of every latent fit (#2677 B0). The materialized
+    /// custom-family requests now read it through one resolver,
+    /// `materialize::blockwise_fit_options`.
     ///
     /// Declining inference is not a way to make a bad covariance acceptable: a
     /// fit that WOULD have withheld its covariance still withholds it and still

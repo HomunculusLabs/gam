@@ -42,5 +42,27 @@ use latent::*;
 use secondary::*;
 use validation::*;
 
+/// The custom-family solver options a materialized request takes from the
+/// caller's configuration, resolved once.
+///
+/// A request builder that spread `..BlockwiseFitOptions::default()` had to
+/// restate every caller field it meant to keep, and one that forgot a field
+/// dropped it silently. The latent survival and latent binary requests never
+/// read `FitConfig::compute_covariance`, so the default `false` withheld the
+/// conditional covariance of every latent fit, including fits whose truncated
+/// cone moments were available (#2677 B0). `None` computes the covariance,
+/// which the default posterior-mean prediction reads (SPEC rule 3).
+///
+/// Location-scale and the binomial link-wiggle refit do not take their options
+/// from here: their model is incomplete without the joint posterior, so their
+/// fit drivers force covariance at the final fit and keep the pilots cheap.
+fn blockwise_fit_options(config: &FitConfig) -> BlockwiseFitOptions {
+    BlockwiseFitOptions {
+        compute_covariance: config.compute_covariance.unwrap_or(true),
+        persistent_warm_start_store: config.persistent_warm_start_store.clone(),
+        ..BlockwiseFitOptions::default()
+    }
+}
+
 #[cfg(test)]
 mod tests;
