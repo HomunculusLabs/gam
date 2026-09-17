@@ -1197,6 +1197,9 @@ pub(crate) struct ArrowBlockFactorization {
     /// per row except for spectrally-deflated rows; see
     /// [`ArrowFactorCache::deflation_row_spectra`].
     pub(crate) deflation_row_spectra: Vec<Option<RowDeflationSpectrum>>,
+    /// Row-block directions the shared exact-A classifier priced at their clamp basin,
+    /// summed over rows (#2933 F27).
+    pub(crate) clamp_basin_directions: usize,
 }
 
 pub(crate) fn factor_blocks_for_system<B: BatchedBlockSolver>(
@@ -1230,11 +1233,13 @@ pub(crate) fn factor_blocks_for_system<B: BatchedBlockSolver>(
             gauge_deflated_directions: 0,
             deflated_row_directions: Vec::new(),
             deflation_row_spectra: Vec::new(),
+            clamp_basin_directions: 0,
         });
     }
     let n = sys.rows.len();
     let mut blocks = Vec::with_capacity(n);
     let mut count = 0usize;
+    let mut clamp_basin_directions = 0usize;
     let mut deflated_row_directions: Vec<Vec<Array1<f64>>> = Vec::with_capacity(n);
     let mut deflation_row_spectra: Vec<Option<RowDeflationSpectrum>> = Vec::with_capacity(n);
     // The presence of an installed `row_gauge_deflation` marks this as the SAE
@@ -1296,6 +1301,7 @@ pub(crate) fn factor_blocks_for_system<B: BatchedBlockSolver>(
     };
     for result in results {
         count += result.gauge_deflated_directions;
+        clamp_basin_directions += result.clamp_basin_directions;
         deflated_row_directions.push(result.deflated_directions);
         deflation_row_spectra.push(result.deflation_spectrum);
         blocks.push(result.factor);
@@ -1305,6 +1311,7 @@ pub(crate) fn factor_blocks_for_system<B: BatchedBlockSolver>(
         gauge_deflated_directions: count,
         deflated_row_directions,
         deflation_row_spectra,
+        clamp_basin_directions,
     })
 }
 

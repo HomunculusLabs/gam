@@ -2333,7 +2333,7 @@ pub fn matrix_free_arrow_evidence_log_det_surrogate(
     slq_seed: u64,
     lane: Option<&mut SurrogateLaneState>,
 ) -> Result<(f64, f64), ArrowSchurError> {
-    let (log_det_tt, log_det_schur, _factors) = matrix_free_arrow_evidence_log_det_surrogate_core(
+    let (log_det_tt, log_det_schur, _factors, _clamp_basin) = matrix_free_arrow_evidence_log_det_surrogate_core(
         sys,
         ridge_t,
         ridge_beta,
@@ -2356,6 +2356,13 @@ pub struct MatrixFreeArrowEvidenceEvaluation {
     pub log_det_tt: f64,
     pub log_det_schur: f64,
     pub factor_cache: ArrowFactorCache,
+    /// Directions of this evaluation's operator that the shared exact-A classifier
+    /// priced at their clamp basin: the row blocks' and the reduced Schur's, counted
+    /// where the classifier returned. Zero under a majorizer policy, which has no
+    /// classifier. A basin price moves with the fitted state, so a consumer that
+    /// differentiates the value with the conditioning held fixed reads this to know
+    /// whether it may (#2933 F27).
+    pub exact_a_clamp_basin_directions: usize,
 }
 
 impl MatrixFreeArrowEvidenceEvaluation {
@@ -2395,7 +2402,7 @@ pub fn matrix_free_arrow_evidence_evaluation(
             ),
         });
     }
-    let (log_det_tt, log_det_schur, factorization) =
+    let (log_det_tt, log_det_schur, factorization, reduced_clamp_basin_directions) =
         matrix_free_arrow_evidence_log_det_surrogate_core(
             sys,
             ridge_t,
@@ -2407,6 +2414,14 @@ pub fn matrix_free_arrow_evidence_evaluation(
             Some(lane),
             dense_reduced_schur_admitted,
         )?;
+    let reduced_clamp_basin_directions =
+        reduced_clamp_basin_directions.ok_or_else(|| ArrowSchurError::SchurFactorFailed {
+            reason: "matrix-free evidence evaluation surfaced no reduced-Schur classifier \
+                     verdicts although it ran on a surrogate lane"
+                .to_string(),
+        })?;
+    let exact_a_clamp_basin_directions =
+        factorization.clamp_basin_directions + reduced_clamp_basin_directions;
     let factor_cache = ArrowFactorCache {
         htt_factors: factorization.factors,
         htt_factors_undamped: ArrowUndampedFactors::SameAsDamped,
@@ -2434,6 +2449,7 @@ pub fn matrix_free_arrow_evidence_evaluation(
         log_det_tt,
         log_det_schur,
         factor_cache,
+        exact_a_clamp_basin_directions,
     })
 }
 
@@ -2447,7 +2463,7 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
     slq_seed: u64,
     lane: Option<&mut SurrogateLaneState>,
     dense_reduced_schur_admitted: bool,
-) -> Result<(f64, f64, ArrowBlockFactorization), ArrowSchurError> {
+) -> Result<(f64, f64, ArrowBlockFactorization, Option<usize>), ArrowSchurError> {
     let backend = CpuBatchedBlockSolver;
     let factorization = factor_blocks_for_system(
         sys,
@@ -2564,6 +2580,7 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
         None
     };
 
+    let lane_present = lane.is_some();
     let log_det_schur = match lane {
         None => {
             let slq = slq_reduced_schur_log_det(
@@ -2807,7 +2824,18 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
             estimate
         }
     };
-    Ok((log_det_tt, log_det_schur, factorization))
+    // The reduced-Schur directions the shared exact-A classifier priced at their clamp
+    // basin, read off the conditioning both lane routes accumulate (its Ritz
+    // conditioning plus any missed bottom mode priced afterwards). The lane-free SLQ
+    // route classifies inside its quadrature and surfaces no verdict, so it reports none
+    // rather than a zero.
+    let reduced_clamp_basin_directions = lane_present.then(|| {
+        classified_system
+            .as_ref()
+            .and_then(|system| system.exact_a_reduced_conditioning.as_ref())
+            .map_or(0, |conditioning| conditioning.clamp_basin_directions)
+    });
+    Ok((log_det_tt, log_det_schur, factorization, reduced_clamp_basin_directions))
 }
 
 /// #2731 — the host bytes a caller admits `dense_lane_reduced_schur_log_det` at, for
@@ -3055,12 +3083,18 @@ fn price_certified_bottom_mode<B: BatchedBlockSolver + Sync>(
     ) else {
         return Ok(false);
     };
-    let (mut directions, mut shifts) = classified
+    let (mut directions, mut shifts, mut clamp_basin_directions) = classified
         .exact_a_reduced_conditioning
         .as_ref()
         .map_or_else(
-            || (Vec::new(), Vec::new()),
-            |conditioning| (conditioning.directions.to_vec(), conditioning.shifts.to_vec()),
+            || (Vec::new(), Vec::new(), 0usize),
+            |conditioning| {
+                (
+                    conditioning.directions.to_vec(),
+                    conditioning.shifts.to_vec(),
+                    conditioning.clamp_basin_directions,
+                )
+            },
         );
     // Ritz vectors of one symmetric operator are orthogonal, but this mode comes
     // from a different Krylov run, so remove what the priced span already carries
@@ -3110,7 +3144,10 @@ fn price_certified_bottom_mode<B: BatchedBlockSolver + Sync>(
             clamp,
         ) {
             ExactADirectionClassification::NumericalNull => 1.0,
-            ExactADirectionClassification::ClampBasin { curvature } => curvature,
+            ExactADirectionClassification::ClampBasin { curvature } => {
+                clamp_basin_directions += 1;
+                curvature
+            }
             ExactADirectionClassification::Saddle { curvature, basin } => {
                 return Err(ArrowSchurError::SchurFactorFailed {
                     reason: format!(
@@ -3147,6 +3184,7 @@ fn price_certified_bottom_mode<B: BatchedBlockSolver + Sync>(
     classified.exact_a_reduced_conditioning = Some(ExactAReducedRitzConditioning {
         directions: directions.into(),
         shifts: shifts.into(),
+        clamp_basin_directions,
     });
     Ok(true)
 }

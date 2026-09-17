@@ -538,6 +538,7 @@ pub(crate) fn exact_a_ritz_conditioning(
         return Ok(ExactAReducedRitzConditioning {
             directions: Arc::from([] as [Array1<f64>; 0]),
             shifts: Arc::from([] as [f64; 0]),
+            clamp_basin_directions: 0,
         });
     }
     let options = slq_lanczos_options(lanczos_steps.max(1).min(dim));
@@ -557,6 +558,7 @@ pub(crate) fn exact_a_ritz_conditioning(
     }
     let mut directions = Vec::new();
     let mut shifts = Vec::new();
+    let mut clamp_basin_directions = 0usize;
     for ritz in 0..pairs.eigenvalues.len() {
         let direction = original.column(ritz);
         let raw = pairs.eigenvalues[ritz];
@@ -570,7 +572,10 @@ pub(crate) fn exact_a_ritz_conditioning(
         ) {
             ExactADirectionClassification::ResolvedPositive { .. } => None,
             ExactADirectionClassification::NumericalNull => Some(1.0),
-            ExactADirectionClassification::ClampBasin { curvature } => Some(curvature),
+            ExactADirectionClassification::ClampBasin { curvature } => {
+                clamp_basin_directions += 1;
+                Some(curvature)
+            }
             ExactADirectionClassification::Saddle { curvature, basin } => {
                 return Err(format!(
                     "matrix-free reduced-Schur {}: rational-ladder Ritz direction {ritz} \
@@ -589,6 +594,7 @@ pub(crate) fn exact_a_ritz_conditioning(
     Ok(ExactAReducedRitzConditioning {
         directions: directions.into(),
         shifts: shifts.into(),
+        clamp_basin_directions,
     })
 }
 
@@ -613,6 +619,7 @@ pub(crate) fn unit_deflation_ritz_conditioning(
         return Ok(ExactAReducedRitzConditioning {
             directions: Arc::from([] as [Array1<f64>; 0]),
             shifts: Arc::from([] as [f64; 0]),
+            clamp_basin_directions: 0,
         });
     }
     if !(relative_floor.is_finite() && relative_floor > 0.0) {
@@ -650,9 +657,11 @@ pub(crate) fn unit_deflation_ritz_conditioning(
             shifts.push(1.0 - raw);
         }
     }
+    // A majorizer policy has no classifier, so nothing here is a clamp basin.
     Ok(ExactAReducedRitzConditioning {
         directions: directions.into(),
         shifts: shifts.into(),
+        clamp_basin_directions: 0,
     })
 }
 

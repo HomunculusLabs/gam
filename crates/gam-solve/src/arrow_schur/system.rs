@@ -90,6 +90,12 @@ impl std::fmt::Debug for ExactAClassificationGeometry {
 pub struct ExactAReducedRitzConditioning {
     pub directions: Arc<[Array1<f64>]>,
     pub shifts: Arc<[f64]>,
+    /// How many of `directions` the shared classifier priced at their clamp basin
+    /// (`ExactADirectionClassification::ClampBasin`), counted where the classifier
+    /// returned rather than read off the shifts. A basin price moves with the fitted
+    /// state through the clamp and its direction, so a derivative that holds this
+    /// conditioning fixed is exact only when the count is zero (#2933 F27).
+    pub clamp_basin_directions: usize,
 }
 
 /// Bordered (t, β) Newton system with arrow structure.

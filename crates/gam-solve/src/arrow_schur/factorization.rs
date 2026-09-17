@@ -26,6 +26,10 @@ pub(crate) struct ArrowRowFactorResult {
     /// the outer ρ/θ-gradient traces. `None` for PD blocks and gauge-only
     /// deflation (ρ-independent structural null — the within-row term suffices).
     pub(crate) deflation_spectrum: Option<RowDeflationSpectrum>,
+    /// Directions of this block the shared exact-A classifier priced at their clamp
+    /// basin, counted where it returned (#2933 F27). The spectrum's conditioning tags
+    /// leave such a direction `Raw`, so the count is the only record of the verdict.
+    pub(crate) clamp_basin_directions: usize,
 }
 
 /// Attempt the per-row block factorization as one device batch spread across
@@ -435,6 +439,7 @@ pub(crate) fn factor_gauge_deflated_evidence_row(
         // deflation-map derivative is exactly zero — the within-row kept-subspace
         // term fully captures them and no raw spectrum is needed.
         deflation_spectrum: None,
+        clamp_basin_directions: 0,
     })
 }
 
@@ -595,6 +600,7 @@ pub(crate) fn factor_spectral_deflated_criterion_row_with_geometry(
     let mut conditioning = vec![RowSpectralConditioning::Raw; d];
     let mut deflated_count = 0usize;
     let mut classification_changed = false;
+    let mut clamp_basin_directions = 0usize;
     // The unit-stiffness deflated eigenvectors `vᵢ` (columns of `evecs`), in
     // this row's `d`-dim block coordinates — surfaced so the outer ρ/θ-gradient
     // can subtract the spurious `½ vᵢᵀ ∂H_raw/∂ρ vᵢ` the deflated inverse adds.
@@ -633,6 +639,7 @@ pub(crate) fn factor_spectral_deflated_criterion_row_with_geometry(
                     // classified; `curvature` is only the coarse-grained basin
                     // price used after the clamp has explained its negative sign.
                     classification_changed = true;
+                    clamp_basin_directions += 1;
                     curvature
                 }
                 ExactADirectionClassification::Saddle { curvature, basin } => {
@@ -713,6 +720,7 @@ pub(crate) fn factor_spectral_deflated_criterion_row_with_geometry(
             cond_evals,
             conditioning: conditioning.into(),
         }),
+        clamp_basin_directions,
     }))
 }
 
@@ -1088,6 +1096,7 @@ pub(crate) fn factor_one_row_result(
                         gauge_deflated_directions: 0,
                         deflated_directions: Vec::new(),
                         deflation_spectrum: None,
+                        clamp_basin_directions: 0,
                     };
                 }
                 // Diagonal-ratio condition-number proxy κ(LLᵀ) ≈
@@ -1103,6 +1112,7 @@ pub(crate) fn factor_one_row_result(
                         gauge_deflated_directions: 0,
                         deflated_directions: Vec::new(),
                         deflation_spectrum: None,
+                        clamp_basin_directions: 0,
                     };
                 }
                 let next = if ridge_eff > 0.0 {
