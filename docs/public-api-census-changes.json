@@ -422,6 +422,14 @@
     "evidence": "Backfilled: dc325f190 (jets' first gam-terms slop deletion) removed these public functions and landed its source-removal entry but omitted this acknowledgement. scripts/public_api_census.py on MSI over 0b5288b44..dc325f190 measured exactly this removed map (/scratch.global/sauer354/sw5-logs/backfill.dc325f190.pubapi.txt)."
   },
   {
+    "base": "7d10039e9e51459a3a62a1617b5ddd076dd46b35",
+    "removed": {
+      "crates/gam-model-kernels/src/cubic_cell_kernel.rs::bivariate_normal_cdf": 1
+    },
+    "reason": "#2946 one owner for the bivariate normal distribution function (fr-bvn): the cubic-cell copy is deleted in favour of gam_math::bivariate_normal::bivariate_normal_cdf (landed 444d8f8798), which carries a derived error contract over every correlation.",
+    "evidence": "Its consumers were cubic_cell_kernel.rs and the bvn_large_scale_shape bench, which now imports the gam-math owner. public_api_census.py --base f0b44f77ca at lane commit f73b3f6d7b (gate job 1173202, gx1) reported exactly this removal. The workspace all-targets check at that tree exited RC_CHECK=0."
+  },
+  {
     "base": "fe18f802abd6a0aa8eccb856b6ddb13392b90115",
     "removed": {
       "crates/gam-terms/src/analytic_penalties/ard.rs::as_blockwise": 1,

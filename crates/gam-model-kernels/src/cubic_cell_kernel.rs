@@ -1,3 +1,4 @@
+use gam_math::bivariate_normal::bivariate_normal_interval_probability;
 use gam_math::probability::normal_cdf;
 use gam_runtime::resource::{ByteLruCache, ResidentBytes};
 use smallvec::{SmallVec, smallvec};
@@ -26,9 +27,6 @@ pub enum CubicCellKernelError {
     /// Reduced moment vector (or polynomial-convolution scratch) is shorter
     /// than the polynomial degree the leaf needs to evaluate.
     InsufficientMoments { reason: String },
-    /// Bivariate-normal CDF domain validation (non-finite/non-infinite
-    /// argument, non-finite correlation).
-    BivariateNormalDomain { reason: String },
 }
 
 impl_reason_error_boilerplate! {
@@ -36,7 +34,6 @@ impl_reason_error_boilerplate! {
         InvalidInterval,
         InvalidCellShape,
         InsufficientMoments,
-        BivariateNormalDomain,
     }
 }
 
@@ -56,12 +53,6 @@ impl CubicCellKernelError {
     #[inline]
     fn insufficient_moments(reason: impl Into<String>) -> Self {
         CubicCellKernelError::InsufficientMoments {
-            reason: reason.into(),
-        }
-    }
-    #[inline]
-    fn bivariate_normal_domain(reason: impl Into<String>) -> Self {
-        CubicCellKernelError::BivariateNormalDomain {
             reason: reason.into(),
         }
     }
@@ -1400,58 +1391,6 @@ impl ResidentBytes for CellDerivativeMomentState {
         std::mem::size_of::<Self>().saturating_add(spilled_bytes)
     }
 }
-
-/// Canonical 20-point Gauss–Legendre nodes on [-1, 1] (Abramowitz & Stegun
-/// 25.4), tabulated to f64 precision. Used here for the Drezner–Wesolowsky
-/// bivariate normal CDF representation — 20 points give >30-digit accuracy for
-/// the smooth arcsin-transformed integrand, ensuring the BVN value is exact to
-/// f64 precision for all (h, k, ρ).
-pub(crate) const GL20_NODES: [f64; 20] = [
-    -0.993_128_599_185_094_9,
-    -0.963_971_927_277_913_8,
-    -0.912_234_428_251_326,
-    -0.839_116_971_822_218_8,
-    -0.746_331_906_460_150_8,
-    -0.636_053_680_726_515,
-    -0.510_867_001_950_827_1,
-    -0.373_706_088_715_419_6,
-    -0.227_785_851_141_645_1,
-    -0.076_526_521_133_497_33,
-    0.076_526_521_133_497_33,
-    0.227_785_851_141_645_1,
-    0.373_706_088_715_419_6,
-    0.510_867_001_950_827_1,
-    0.636_053_680_726_515,
-    0.746_331_906_460_150_8,
-    0.839_116_971_822_218_8,
-    0.912_234_428_251_326,
-    0.963_971_927_277_913_8,
-    0.993_128_599_185_094_9,
-];
-
-/// Companion weights to `GL20_NODES`. Symmetric, summing to 2.
-pub(crate) const GL20_WEIGHTS: [f64; 20] = [
-    0.017_614_007_139_152_12,
-    0.040_601_429_800_386_94,
-    0.062_672_048_334_109_06,
-    0.083_276_741_576_704_75,
-    0.101_930_119_817_240_4,
-    0.118_194_531_961_518_4,
-    0.131_688_638_449_176_6,
-    0.142_096_109_318_382_1,
-    0.149_172_986_472_603_7,
-    0.152_753_387_130_725_9,
-    0.152_753_387_130_725_9,
-    0.149_172_986_472_603_7,
-    0.142_096_109_318_382_1,
-    0.131_688_638_449_176_6,
-    0.118_194_531_961_518_4,
-    0.101_930_119_817_240_4,
-    0.083_276_741_576_704_75,
-    0.062_672_048_334_109_06,
-    0.040_601_429_800_386_94,
-    0.017_614_007_139_152_12,
-];
 
 /// Provenance-tagged breakpoint dedup: sorts ascending and merges equal
 /// entries, but when a fixed score break and a link-knot
@@ -2907,173 +2846,6 @@ pub fn branch_cell(cell: DenestedCubicCell) -> Result<ExactCellBranch, String> {
     }
 }
 
-#[inline]
-fn validate_bvn_args(h: f64, k: f64, rho: f64) -> Result<(), String> {
-    if !h.is_finite() && !h.is_infinite() {
-        return Err(CubicCellKernelError::bivariate_normal_domain(
-            "bivariate normal cdf requires finite or infinite h",
-        )
-        .into());
-    }
-    if !k.is_finite() && !k.is_infinite() {
-        return Err(CubicCellKernelError::bivariate_normal_domain(
-            "bivariate normal cdf requires finite or infinite k",
-        )
-        .into());
-    }
-    if !rho.is_finite() || !(-1.0..=1.0).contains(&rho) {
-        return Err(CubicCellKernelError::bivariate_normal_domain(format!(
-            "bivariate normal cdf requires correlation in [-1, 1], got {rho}"
-        ))
-        .into());
-    }
-    Ok::<(), _>(())
-}
-
-#[inline]
-fn bvn_gl_sum(h: f64, k: f64, rho: f64, asr: f64) -> f64 {
-    // The Drezner-Wesolowsky arcsin representation is integrated with the
-    // same 20-point Gauss-Legendre rule as before, but mirrored node pairs are
-    // evaluated with one sin_cos for the half-angle offset rather than two
-    // independent sin calls.  This preserves the quadrature rule (and hence
-    // the accuracy envelope) while reducing the transcendental work in the
-    // dominant finite-bound path from 20 sin calls to 11 sin/cos evaluations.
-    if rho == 0.0 {
-        return 0.0;
-    }
-    let hs = 0.5 * (h * h + k * k);
-    let hk = h * k;
-    let half_asr = 0.5 * asr;
-    let (sin_mid, cos_mid) = half_asr.sin_cos();
-    let mut sum = 0.0;
-    for i in 0..10 {
-        let node = GL20_NODES[i].abs();
-        let weight = GL20_WEIGHTS[i];
-        let (sin_delta, cos_delta) = (half_asr * node).sin_cos();
-
-        let sn_lo = sin_mid * cos_delta - cos_mid * sin_delta;
-        let one_minus_lo = 1.0 - sn_lo * sn_lo;
-        let expo_lo = ((sn_lo * hk) - hs) / one_minus_lo;
-
-        let sn_hi = sin_mid * cos_delta + cos_mid * sin_delta;
-        let one_minus_hi = 1.0 - sn_hi * sn_hi;
-        let expo_hi = ((sn_hi * hk) - hs) / one_minus_hi;
-
-        sum += weight * (expo_lo.exp() + expo_hi.exp());
-    }
-    sum
-}
-
-pub fn bivariate_normal_cdf(h: f64, k: f64, rho: f64) -> Result<f64, String> {
-    validate_bvn_args(h, k, rho)?;
-    if h == f64::NEG_INFINITY || k == f64::NEG_INFINITY {
-        return Ok(0.0);
-    }
-    if h == f64::INFINITY {
-        return Ok(normal_cdf(k));
-    }
-    if k == f64::INFINITY {
-        return Ok(normal_cdf(h));
-    }
-
-    if rho == 1.0 {
-        return Ok(normal_cdf(h.min(k)));
-    }
-    if rho == -1.0 {
-        return Ok(normal_interval_probability(-k, h));
-    }
-    if rho == 0.0 {
-        return Ok((normal_cdf(h) * normal_cdf(k)).clamp(0.0, 1.0));
-    }
-    if h == 0.0 && k == 0.0 {
-        return Ok((0.25 + rho.asin() / std::f64::consts::TAU).clamp(0.0, 1.0));
-    }
-
-    let asr = rho.asin();
-    let sum = bvn_gl_sum(h, k, rho, asr);
-    Ok((normal_cdf(h) * normal_cdf(k) + asr * sum / (4.0 * std::f64::consts::PI)).clamp(0.0, 1.0))
-}
-
-#[inline]
-fn bvn_gl_sum_interval(h: f64, left: f64, right: f64, rho: f64, asr: f64) -> f64 {
-    if rho == 0.0 {
-        return 0.0;
-    }
-    let h2 = h * h;
-    let right_hs = 0.5 * (h2 + right * right);
-    let left_hs = 0.5 * (h2 + left * left);
-    let half_asr = 0.5 * asr;
-    let (sin_mid, cos_mid) = half_asr.sin_cos();
-    let mut sum = 0.0;
-    for i in 0..10 {
-        let node = GL20_NODES[i].abs();
-        let weight = GL20_WEIGHTS[i];
-        let (sin_delta, cos_delta) = (half_asr * node).sin_cos();
-
-        let sn_lo = sin_mid * cos_delta - cos_mid * sin_delta;
-        let one_minus_lo = 1.0 - sn_lo * sn_lo;
-        let lo_right = (((sn_lo * h * right) - right_hs) / one_minus_lo).exp();
-        let lo_left = (((sn_lo * h * left) - left_hs) / one_minus_lo).exp();
-
-        let sn_hi = sin_mid * cos_delta + cos_mid * sin_delta;
-        let one_minus_hi = 1.0 - sn_hi * sn_hi;
-        let hi_right = (((sn_hi * h * right) - right_hs) / one_minus_hi).exp();
-        let hi_left = (((sn_hi * h * left) - left_hs) / one_minus_hi).exp();
-
-        sum += weight * ((lo_right - lo_left) + (hi_right - hi_left));
-    }
-    sum
-}
-
-fn bivariate_normal_cdf_interval(h: f64, left: f64, right: f64, rho: f64) -> Result<f64, String> {
-    validate_bvn_args(h, left, rho)?;
-    validate_bvn_args(h, right, rho)?;
-    if right <= left {
-        return Ok(0.0);
-    }
-    if left == f64::NEG_INFINITY && right == f64::INFINITY {
-        return Ok(normal_cdf(h));
-    }
-    if left == f64::NEG_INFINITY {
-        return bivariate_normal_cdf(h, right, rho);
-    }
-    if right == f64::INFINITY {
-        // Reflect the second variate: P(X≤h,Y>left)=Φ₂(h,-left;-ρ).
-        // Subtracting from P(X≤h) would erase a small upper-tail interval.
-        return bivariate_normal_cdf(h, -left, -rho);
-    }
-    if h == f64::NEG_INFINITY {
-        return Ok(0.0);
-    }
-    if h == f64::INFINITY {
-        return Ok(normal_interval_probability(left, right));
-    }
-
-    if rho == 1.0 {
-        return Ok(normal_interval_probability(left, right.min(h)));
-    }
-    if rho == -1.0 {
-        return Ok(normal_interval_probability(left.max(-h), right));
-    }
-
-    let cdf_h = normal_cdf(h);
-    let normal_part = cdf_h * normal_interval_probability(left, right);
-    if rho == 0.0 {
-        return Ok(normal_part.clamp(0.0, 1.0));
-    }
-    let asr = rho.asin();
-    let sum = bvn_gl_sum_interval(h, left, right, rho, asr);
-    Ok((normal_part + asr * sum / (4.0 * std::f64::consts::PI)).clamp(0.0, 1.0))
-}
-
-#[inline]
-fn normal_interval_probability(left: f64, right: f64) -> f64 {
-    if right <= left {
-        return 0.0;
-    }
-    truncated_gaussian_zeroth_moment(left, right) / std::f64::consts::TAU.sqrt()
-}
-
 fn exp_neg_half_square(x: f64) -> f64 {
     if x.is_infinite() {
         0.0
@@ -3340,13 +3112,13 @@ fn affine_value_from_moment_primitive(
     //
     // with h = α/√(1+β²) and ρ = −β/√(1+β²).
     //
-    // This is exact to floating-point precision via the high-accuracy
-    // Drezner-Wesolowsky BVN routine, replacing the previous fixed 20-point
-    // Gauss-Legendre numerical integration of the derivative primitive.
+    // The one owner, gam_math::bivariate_normal, carries a derived error
+    // contract over every correlation. That includes the steep-slope limit
+    // |β| → ∞, where ρ → ∓1 and a fixed-order rule loses digits.
     let s = beta.hypot(1.0);
     let h = alpha / s;
     let rho = -beta / s;
-    bivariate_normal_cdf_interval(h, left, right, rho)
+    bivariate_normal_interval_probability(h, left, right, rho).map_err(String::from)
 }
 
 fn validate_cell_inputs(cell: DenestedCubicCell) -> Result<(), String> {
@@ -4342,36 +4114,6 @@ mod tests {
         );
     }
 
-    fn reference_bivariate_normal_cdf_20(h: f64, k: f64, rho: f64) -> f64 {
-        if h == f64::NEG_INFINITY || k == f64::NEG_INFINITY {
-            return 0.0;
-        }
-        if h == f64::INFINITY {
-            return normal_cdf(k);
-        }
-        if k == f64::INFINITY {
-            return normal_cdf(h);
-        }
-        let rho_clamped = rho.clamp(-1.0, 1.0);
-        if rho_clamped == 1.0 {
-            return normal_cdf(h.min(k));
-        }
-        if rho_clamped == -1.0 {
-            return (normal_cdf(h) - normal_cdf(-k)).clamp(0.0, 1.0);
-        }
-
-        let hs = 0.5 * (h * h + k * k);
-        let asr = rho_clamped.asin();
-        let mut sum = 0.0;
-        for (&node, &weight) in GL20_NODES.iter().zip(GL20_WEIGHTS.iter()) {
-            let sn = (0.5 * asr * (node + 1.0)).sin();
-            let one_minus = 1.0 - sn * sn;
-            let expo = ((sn * h * k) - hs) / one_minus;
-            sum += weight * expo.exp();
-        }
-        (normal_cdf(h) * normal_cdf(k) + asr * sum / (4.0 * std::f64::consts::PI)).clamp(0.0, 1.0)
-    }
-
     #[test]
     fn non_affine_cell_state_reference_grid_matches_public_moments() {
         let c0s = [-0.4, 0.0, 0.35];
@@ -4428,94 +4170,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn bivariate_normal_cdf_matches_reference_grid_to_1e_minus_10() {
-        let hs = [-8.0, -5.0, -3.0, -1.5, -0.5, 0.0, 0.25, 1.0, 2.5, 5.0, 8.0];
-        let ks = [-8.0, -4.0, -2.0, -0.75, 0.0, 0.4, 1.25, 3.0, 6.0, 8.0];
-        let rhos = [
-            -0.999_999_999_999,
-            -0.999,
-            -0.95,
-            -0.7,
-            -0.3,
-            -1.0e-12,
-            0.0,
-            1.0e-12,
-            0.3,
-            0.7,
-            0.95,
-            0.999,
-            0.999_999_999_999,
-        ];
-        for &h in &hs {
-            for &k in &ks {
-                for &rho in &rhos {
-                    let actual = bivariate_normal_cdf(h, k, rho).expect("bvn");
-                    let expected = reference_bivariate_normal_cdf_20(h, k, rho);
-                    let scale = expected.abs().max(1.0e-300);
-                    let rel = (actual - expected).abs() / scale;
-                    assert!(
-                        rel < 1.0e-10 || (actual - expected).abs() < 1.0e-14,
-                        "h={h} k={k} rho={rho} actual={actual:.17e} expected={expected:.17e} rel={rel:.3e}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn bivariate_normal_cdf_matches_reference_lcg_property_samples() {
-        let mut seed = 0x5eed_cafe_f00d_u64;
-        let mut next_unit = || {
-            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-            ((seed >> 11) as f64) * (1.0 / ((1_u64 << 53) as f64))
-        };
-        for _ in 0..4096 {
-            let h = -8.0 + 16.0 * next_unit();
-            let k = -8.0 + 16.0 * next_unit();
-            let rho = -0.999 + 1.998 * next_unit();
-            let actual = bivariate_normal_cdf(h, k, rho).expect("bvn");
-            let expected = reference_bivariate_normal_cdf_20(h, k, rho);
-            let scale = expected.abs().max(1.0e-300);
-            let rel = (actual - expected).abs() / scale;
-            assert!(
-                rel < 1.0e-10 || (actual - expected).abs() < 1.0e-14,
-                "h={h} k={k} rho={rho} actual={actual:.17e} expected={expected:.17e} rel={rel:.3e}"
-            );
-        }
-    }
-
-    #[test]
-    fn affine_bvn_interval_primitive_matches_two_cdf_difference() {
-        let hs = [-6.0, -2.0, -0.25, 0.0, 0.8, 3.0, 6.0];
-        let bounds = [
-            (-5.0, -2.0),
-            (-3.0, -0.1),
-            (-1.0, 0.0),
-            (-0.25, 0.75),
-            (0.2, 3.5),
-            (2.0, 7.0),
-        ];
-        let rhos = [-0.98, -0.8, -0.25, 0.0, 0.25, 0.8, 0.98];
-        for &h in &hs {
-            for &(left, right) in &bounds {
-                for &rho in &rhos {
-                    let actual =
-                        bivariate_normal_cdf_interval(h, left, right, rho).expect("interval");
-                    let expected = (reference_bivariate_normal_cdf_20(h, right, rho)
-                        - reference_bivariate_normal_cdf_20(h, left, rho))
-                    .clamp(0.0, 1.0);
-                    let scale = expected.abs().max(1.0e-300);
-                    let rel = (actual - expected).abs() / scale;
-                    assert!(
-                        rel < 1.0e-10 || (actual - expected).abs() < 1.0e-12,
-                        "h={h} left={left} right={right} rho={rho} actual={actual:.17e} expected={expected:.17e} rel={rel:.3e}"
-                    );
-                }
-            }
-        }
-    }
-
     fn simpson_integral<F>(left: f64, right: f64, steps: usize, f: F) -> f64
     where
         F: Fn(f64) -> f64,
@@ -4551,43 +4205,6 @@ mod tests {
             let global = g0 + g1 * x + g2 * x * x + g3 * x * x * x;
             assert!((local - global).abs() < 1e-12);
         }
-    }
-
-    #[test]
-    fn bivariate_normal_cdf_independent_factorizes() {
-        let h = -0.35;
-        let k = 0.8;
-        let out = bivariate_normal_cdf(h, k, 0.0).expect("bvn");
-        let target = normal_cdf(h) * normal_cdf(k);
-        assert!((out - target).abs() < 1e-12);
-    }
-
-    #[test]
-    fn bivariate_normal_intervals_retain_upper_tail_mass() {
-        let expected = normal_cdf(-10.0) - normal_cdf(-12.0);
-        for (h, rho, fraction) in [(f64::INFINITY, 0.3, 1.0), (0.0, 0.0, 0.5),
-            (12.0, 1.0, 1.0), (0.0, -1.0, 1.0)] {
-            let actual = bivariate_normal_cdf_interval(h, 10.0, 12.0, rho).unwrap();
-            assert!((actual / (fraction * expected) - 1.0).abs() < 3.0e-14);
-        }
-        let semi_infinite = bivariate_normal_cdf_interval(0.0, 10.0, f64::INFINITY, 0.0)
-            .unwrap();
-        assert!((semi_infinite / (0.5 * normal_cdf(-10.0)) - 1.0).abs() < 3.0e-14);
-        let singular = bivariate_normal_cdf(12.0, -10.0, -1.0).unwrap();
-        assert!((singular / expected - 1.0).abs() < 3.0e-14);
-    }
-
-    #[test]
-    fn bivariate_normal_preserves_nearly_singular_correlation() {
-        for rho in [1.0 - 5.0e-13, -1.0 + 5.0e-13] {
-            let actual = bivariate_normal_cdf(0.0, 0.0, rho).unwrap();
-            let expected = 0.25 + rho.asin() / std::f64::consts::TAU;
-            assert_eq!(actual, expected);
-            assert!(actual > 0.0 && actual < 0.5);
-        }
-        assert!(bivariate_normal_cdf(0.0, 0.0, 1.01).is_err());
-        assert!(bivariate_normal_cdf_interval(0.0, f64::NEG_INFINITY, f64::INFINITY, 1.01)
-            .is_err());
     }
 
     #[test]

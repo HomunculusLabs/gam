@@ -4,7 +4,7 @@
 //! Run with: `cargo bench --bench bvn_large_scale_shape`
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use gam::families::cubic_cell_kernel::bivariate_normal_cdf;
+use gam_math::bivariate_normal::bivariate_normal_cdf;
 use std::hint::black_box;
 
 fn large_scale_shape_args() -> Vec<(f64, f64, f64)> {
