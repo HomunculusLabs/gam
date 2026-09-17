@@ -274,10 +274,10 @@ fn the_rational_lane_prices_or_refuses_a_bottom_mode_its_fixed_step_conditioning
             rows: vec![ExactAClassificationRow {
                 delta_tt: ndarray::array![[-2.0_f64]],
                 delta_tbeta: Array2::<f64>::zeros((1, 0)),
+                border_columns: std::sync::Arc::from([] as [usize; 0]),
                 clamp_diag: ndarray::array![clamp_value],
             }]
             .into(),
-            border_indices: std::sync::Arc::from([] as [usize; 0]),
             border_remainder: None,
         });
         system

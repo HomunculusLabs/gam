@@ -1017,7 +1017,7 @@ pub(crate) fn exact_a_reduced_classification(
         let operands = &geometry.rows[row_idx];
         if operands.delta_tt.dim() != (q, q)
             || operands.delta_tbeta.nrows() != q
-            || operands.delta_tbeta.ncols() != geometry.border_indices.len()
+            || operands.delta_tbeta.ncols() != operands.border_columns.len()
             || operands.clamp_diag.len() != q
         {
             return Err(ArrowSchurError::SchurFactorFailed {
@@ -1028,7 +1028,7 @@ pub(crate) fn exact_a_reduced_classification(
         }
         let a_tbeta = sys_htbeta_materialize_row(sys, row_idx, row)?;
         let mut b_tbeta = a_tbeta.clone();
-        for (carrier_col, &system_col) in geometry.border_indices.iter().enumerate() {
+        for (carrier_col, &system_col) in operands.border_columns.iter().enumerate() {
             if system_col >= k {
                 return Err(ArrowSchurError::SchurFactorFailed {
                     reason: format!(
@@ -1153,14 +1153,14 @@ pub(crate) fn exact_a_reduced_direction_metrics(
         let operands = &geometry.rows[row_index];
         if operands.delta_tt.dim() != (q, q)
             || operands.delta_tbeta.nrows() != q
-            || operands.delta_tbeta.ncols() != geometry.border_indices.len()
+            || operands.delta_tbeta.ncols() != operands.border_columns.len()
             || operands.clamp_diag.len() != q
         {
             return Err(ArrowSchurError::SchurFactorFailed {
                 reason: format!(
                     "exact-A reduced direction classification row {row_index} is incompatible \
                      with latent width {q} and border carrier width {}",
-                    geometry.border_indices.len(),
+                    operands.border_columns.len(),
                 ),
             });
         }
@@ -1175,7 +1175,7 @@ pub(crate) fn exact_a_reduced_direction_metrics(
         let mut graph = cholesky_solve_vector(htt_factors.factor(row_index), a_cross.view());
         graph.mapv_inplace(|value| -value);
         let mut b_cross = a_cross;
-        for (carrier_column, &system_column) in geometry.border_indices.iter().enumerate() {
+        for (carrier_column, &system_column) in operands.border_columns.iter().enumerate() {
             if system_column >= sys.k {
                 return Err(ArrowSchurError::SchurFactorFailed {
                     reason: format!(

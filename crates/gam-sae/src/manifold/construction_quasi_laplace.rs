@@ -4685,6 +4685,12 @@ impl SaeManifoldTerm {
         // full arrow system; the clamp diagonal is assembled before any
         // conditioning, from the same row layout as ΔC.
         let clamp = self.materialize_ard_concave_clamp_diagonal_for_rows(rho, &row_dims)?;
+        let border = self.border_channels_for_border_dim(border_dim)?;
+        let classification_indices: std::sync::Arc<[usize]> = border
+            .iter()
+            .map(|channel| channel.index)
+            .collect::<Vec<_>>()
+            .into();
         let mut clamp_base = 0usize;
         let classification_rows: std::sync::Arc<[gam_solve::arrow_schur::ExactAClassificationRow]> =
             delta
@@ -4696,17 +4702,12 @@ impl SaeManifoldTerm {
                     gam_solve::arrow_schur::ExactAClassificationRow {
                         delta_tt: block.tt,
                         delta_tbeta: block.tbeta,
+                        border_columns: std::sync::Arc::clone(&classification_indices),
                         clamp_diag,
                     }
                 })
                 .collect::<Vec<_>>()
                 .into();
-        let border = self.border_channels_for_border_dim(border_dim)?;
-        let classification_indices: std::sync::Arc<[usize]> = border
-            .iter()
-            .map(|channel| channel.index)
-            .collect::<Vec<_>>()
-            .into();
         let mut system = majorizer.clone();
         // The CUDA descriptor describes `B`'s cross-block sparsity, so it cannot
         // stand in for `A`; the generic closures are the authoritative path.
@@ -4852,7 +4853,6 @@ impl SaeManifoldTerm {
         system.exact_a_classification =
             Some(gam_solve::arrow_schur::ExactAClassificationGeometry {
                 rows: classification_rows,
-                border_indices: classification_indices,
                 border_remainder,
             });
         system.refresh_row_hessian_fingerprint();

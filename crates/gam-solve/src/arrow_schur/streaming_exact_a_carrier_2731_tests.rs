@@ -17,10 +17,10 @@ fn streaming_chunk_carries_exact_a_operands_from_the_source_system() {
         rows: vec![ExactAClassificationRow {
             delta_tt: array![[0.0]],
             delta_tbeta: array![[0.0]],
+            border_columns: vec![0].into(),
             clamp_diag: array![0.0],
         }]
         .into(),
-        border_indices: vec![0].into(),
         border_remainder: None,
     });
 
