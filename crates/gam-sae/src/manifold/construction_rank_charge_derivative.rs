@@ -46,8 +46,15 @@ impl SaeManifoldTerm {
     /// `C = Σ_k ½ rank_chargeable,k · basis_edf,k · log(max(N_eff,k, 1))`
     /// on one fixed production-rank branch.
     ///
-    /// The chargeable rank is integer-valued and therefore locally constant away
-    /// from an MP-edge crossing or the vanished/alive threshold. The smooth pieces are
+    /// The chargeable rank is integer-valued, so `C` is piecewise smooth: constant
+    /// in the rank away from an MP-edge crossing or the vanished/alive threshold,
+    /// and discontinuous at them. This is the within-branch differential on the
+    /// branch `wbic_audit::rank_charge_stratum` classifies at this state, the same
+    /// producer the value calls; `RankChargeStratum::nearest_mp_boundary` names the
+    /// direction closest to the edge and the jump its crossing adds. The generic
+    /// outer contract (`OuterEval`) carries a value and this gradient but no branch
+    /// identity, so a trial point across a boundary shows its jump only through the
+    /// value. The smooth pieces are
     /// `basis_edf = tr(G(G+λS)⁻¹)` and `N_eff = Σ_i a_i²`, with
     /// `G = Σ_i a_i² φ_i φ_iᵀ`. Their exact differential supplies both the
     /// direct `log λ_smooth` channel and the implicit `(logit, t)` response.
@@ -78,7 +85,7 @@ impl SaeManifoldTerm {
             let gram = &grams[atom_idx];
             let m = atom.basis_size();
             let n_atom = n_eff[atom_idx];
-            let spectrum = super::wbic_audit::recon_spectrum(
+            let stratum = super::wbic_audit::rank_charge_stratum(
                 gram,
                 atom.decoder_coefficients(),
                 n_atom,
@@ -94,7 +101,7 @@ impl SaeManifoldTerm {
             // is unchanged). Only a genuinely VANISHED decoder — the
             // Laplace-invalid regime the veto prices +∞ — remains an error
             // here, matching the value side's categorical veto.
-            let rank = spectrum.production_chargeable_rank() as f64;
+            let rank = stratum.production_chargeable_rank() as f64;
             if !(rank > 0.0) {
                 return Err(format!(
                     "production_rank_charge_derivative: atom {atom_idx} is on the rank-zero \
@@ -219,5 +226,144 @@ impl SaeManifoldTerm {
                 beta: theta_beta,
             },
         })
+    }
+
+    /// Rank-charge audit of every atom at one evaluated state (#2933 F31).
+    ///
+    /// Each [`AtomRankChargeAudit`] reads the same residual, dispersion, decoder
+    /// Grams and occupancies that `production_rank_charge_derivative` and
+    /// the criterion price, and classifies through the same stratum producer, so
+    /// its stratum is the priced branch. Beside it the audit reports the
+    /// conditional noise-only law of the reconstruction energies and the exact
+    /// tempered posterior of the decoder block at `β = 1/ln N_eff,k`, with the
+    /// conditional score `b = Φᵀdiag(a)·(target − other atoms) = G·B − Φᵀdiag(a)·r`
+    /// for the residual `r = fitted − target`.
+    ///
+    /// That decoder likelihood is the data fit only when rows are unweighted, the
+    /// row metric does not whiten, frames are inactive and no behavior block
+    /// augments the output. Other configurations are refused, and an atom with
+    /// `N_eff ≤ 1` has no inverse temperature `1/ln N_eff` and is refused too.
+    pub fn rank_charge_audit(
+        &self,
+        target: ArrayView2<'_, f64>,
+        rho: &SaeManifoldRho,
+        loss: &SaeManifoldLoss,
+        cache: &ArrowFactorCache,
+    ) -> Result<Vec<AtomRankChargeAudit>, String> {
+        self.assignment.validate_rho_domain(rho)?;
+        if self
+            .row_metric
+            .as_ref()
+            .is_some_and(|metric| metric.whitens_likelihood())
+        {
+            return Err("SaeManifoldTerm::rank_charge_audit: a whitening row metric makes the \
+                        decoder likelihood non-isotropic; the conditional tempered posterior \
+                        assumes the identity output metric"
+                .to_string());
+        }
+        if self
+            .row_loss_weights
+            .as_deref()
+            .is_some_and(|weights| weights.iter().any(|&weight| weight != 1.0))
+        {
+            return Err("SaeManifoldTerm::rank_charge_audit: row loss weights reweight the \
+                        decoder likelihood; the conditional tempered posterior assumes unit \
+                        row weights"
+                .to_string());
+        }
+        if self.frames_active() {
+            return Err("SaeManifoldTerm::rank_charge_audit: an active Grassmann frame constrains \
+                        the decoder; the conditional tempered posterior integrates the full \
+                        decoder block"
+                .to_string());
+        }
+        if self.behavior.is_some() {
+            return Err("SaeManifoldTerm::rank_charge_audit: a behavior block augments the output; \
+                        the conditional tempered posterior assumes the reconstruction target \
+                        alone"
+                .to_string());
+        }
+        let residual = self.reconstruction_residual(target, rho)?;
+        let dispersion = self.reconstruction_dispersion(loss, cache, rho, Some(residual.view()))?;
+        let mut grams = self.empty_decoder_gram_accumulator();
+        self.accumulate_decoder_gram(&mut grams)?;
+        let n_eff = self.per_atom_effective_sample_size();
+        let lambda = rho.lambda_smooth_vec()?;
+        let assignments = self.assignment.assignments();
+        let p = self.output_dim();
+        let mut audits = Vec::with_capacity(self.k_atoms());
+        for atom_idx in 0..self.k_atoms() {
+            let atom = &self.atoms[atom_idx];
+            let gram = &grams[atom_idx];
+            let decoder = atom.decoder_coefficients();
+            let m = atom.basis_size();
+            let occupancy = n_eff[atom_idx];
+            let stratum = super::wbic_audit::rank_charge_stratum(
+                gram,
+                decoder,
+                occupancy,
+                p as f64,
+                dispersion,
+                lambda[atom_idx],
+                Some(atom.smooth_penalty()),
+            )?;
+            let noise_null = conditional_noise_null(
+                gram,
+                occupancy,
+                p,
+                dispersion,
+                lambda[atom_idx],
+                Some(atom.smooth_penalty()),
+            )?;
+            let log_occupancy = occupancy.ln();
+            if !(log_occupancy.is_finite() && log_occupancy > 0.0) {
+                return Err(format!(
+                    "SaeManifoldTerm::rank_charge_audit: atom {atom_idx} has N_eff={occupancy}; \
+                     the inverse temperature 1/ln N_eff needs N_eff > 1"
+                ));
+            }
+            let inverse_temperature = log_occupancy.recip();
+            let mut score = gram.dot(decoder);
+            for row in 0..self.n_obs() {
+                let gate = assignments[[row, atom_idx]];
+                if gate == 0.0 {
+                    continue;
+                }
+                for basis_col in 0..m {
+                    let weight = gate * atom.basis_values[[row, basis_col]];
+                    if weight == 0.0 {
+                        continue;
+                    }
+                    for out_col in 0..p {
+                        score[[basis_col, out_col]] -= weight * residual[[row, out_col]];
+                    }
+                }
+            }
+            let tempered_posterior = conditional_decoder_tempered_posterior(
+                gram,
+                &score,
+                dispersion,
+                lambda[atom_idx],
+                Some(atom.smooth_penalty()),
+                inverse_temperature,
+            )?;
+            audits.push(AtomRankChargeAudit {
+                atom: atom_idx,
+                basis_dim: m,
+                output_dim: p,
+                storage_dim: m * p,
+                intrinsic_dim: atom.latent_dim(),
+                dispersion,
+                lambda_smooth: lambda[atom_idx],
+                inverse_temperature,
+                production_minus_tempered: stratum.production_charge()
+                    - tempered_posterior.total(),
+                nearest_mp_boundary: stratum.nearest_mp_boundary(),
+                stratum,
+                noise_null,
+                tempered_posterior,
+            });
+        }
+        Ok(audits)
     }
 }

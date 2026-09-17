@@ -19,8 +19,8 @@
 //!
 //! * **Curvature is identifiability.** Realized-rank / Marchenko-Pastur per atom
 //!   is an *empirical Terracini certificate* (border-block Jacobian rank =
-//!   `sum_k (d_k+1)`); the `rank_eff==0` veto is the degenerate-tangent exclusion
-//!   (and the null atom's RLCT `1/2`). A *centered* circle's cone is the plane, so
+//!   `sum_k (d_k+1)`); the `rank_eff==0` veto is the degenerate-tangent exclusion.
+//!   A *centered* circle's cone is the plane, so
 //!   it is measure-level identifiable only through its radial law — the `(kappa-2)^2`
 //!   ISA producer (support vs measure are complementary halves). Grounding in
 //!   [`crate::identifiability`], `isa_seed`, [`crate::structure_harvest`].
@@ -411,6 +411,9 @@ mod tests_threshold_gate_route_identity_2933;
 
 #[cfg(test)]
 mod tests_third_jet_capability_2933;
+
+#[cfg(test)]
+mod tests_wbic_rank_charge_2933;
 
 #[cfg(test)]
 mod tests_pen_fd_780;

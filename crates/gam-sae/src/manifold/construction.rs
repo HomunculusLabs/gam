@@ -372,7 +372,7 @@ fn floating_point_accumulation_gamma(rounded_operations: usize) -> Option<f64> {
 /// Callers supply the per-observation reconstruction-Gram eigenvalues `mu`, the
 /// MP reconstruction-rank `edge`. Inputs are validated by
 /// [`validate_rank_charge_problem`] before production reaches this helper;
-/// [`super::wbic_audit::ReconSpectrum`] stores the same validated values.
+/// `super::wbic_audit::rank_charge_stratum` is the one producer that calls it.
 pub(super) fn classify_reconstruction_rank(
     mu: &[f64],
     edge: f64,
@@ -584,8 +584,9 @@ pub(crate) fn realised_rank_charge_dof(
     lam_smooth: f64,
     smooth_penalty: Option<&Array2<f64>>,
 ) -> Result<f64, String> {
-    let m = gram.nrows();
-    validate_rank_charge_problem(
+    // One stratum producer for the value, its analytic derivative and the audit,
+    // so all three classify the same branch of the same state (#2933 F32).
+    let stratum = super::wbic_audit::rank_charge_stratum(
         gram,
         decoder,
         n_eff,
@@ -594,35 +595,7 @@ pub(crate) fn realised_rank_charge_dof(
         lam_smooth,
         smooth_penalty,
     )?;
-    if m == 0 || n_eff == 0.0 {
-        return Ok(0.0);
-    }
-    // MP reconstruction rank on the reconstruction Gram. U orthogonal ⇒ svd of
-    // diag(√λ)·Uᵀ·D equals svd of the reconstruction square root G^½·D.
-    let (evals, u) = gram
-        .eigh(super::Side::Lower)
-        .map_err(|e| format!("realised_rank_charge_dof: eigh(G): {e}"))?;
-    let evals = certified_psd_spectrum(evals.view(), "rank-charge Gram")?;
-    let mut scaled = u.t().dot(decoder);
-    let cols = scaled.ncols();
-    for i in 0..m {
-        let s = evals[i].sqrt();
-        for j in 0..cols {
-            scaled[[i, j]] *= s;
-        }
-    }
-    let sv = match scaled.svd(false, false) {
-        Ok((_, sv, _)) => sv,
-        Err(e) => return Err(format!("realised_rank_charge_dof: recon svd: {e}")),
-    };
-    let edge = crate::null_battery::mp_reconstruction_rank_edge(n_eff, p_out, r_floor)
-        .map_err(|error| format!("realised_rank_charge_dof: {error}"))?;
-    let mu = sv
-        .iter()
-        .map(|&singular_value| normalized_reconstruction_energy(singular_value, n_eff))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("realised_rank_charge_dof: {error}"))?;
-    let rank = classify_reconstruction_rank(&mu, edge);
+    let rank = stratum.production_chargeable_rank();
     // RECONSTRUCTION RANK vs DEGENERACY (#2258 real-activation class). MP rank zero
     // conflated two regimes with opposite correct handling:
     //   · EXACT zero reconstruction spectrum: the β-mode is degenerate, the
@@ -643,37 +616,23 @@ pub(crate) fn realised_rank_charge_dof(
     //     featureless-residual birth must now pay ½·basis_edf·ln n it cannot
     //     earn), and the fit minted for the user carries its honest weak
     //     evidence instead of no model at all.
-    if rank.mp_reconstruction_rank == 0 && rank.production_chargeable_rank == 1 {
+    if stratum.mp_reconstruction_rank() == 0 && rank == 1 {
         log::debug!(
             "realised_rank_charge_dof: below-reconstruction-rank-edge atom promoted to rank 1 — \
-             top sv²/n_eff={:.6e} vs MP edge={edge:.6e} \
+             top sv²/n_eff={:.6e} vs MP edge={:.6e} \
              (R={r_floor:.6e}, n_eff={n_eff:.3e}, p_out={p_out})",
-            rank.top_signal
+            stratum.top_reconstruction_energy(),
+            stratum.mp_reconstruction_rank_edge()
         );
-    } else if rank.production_chargeable_rank == 0 {
+    } else if rank == 0 && !stratum.reconstruction_energies().is_empty() {
         log::debug!(
             "realised_rank_charge_dof: exactly zero reconstruction spectrum \
              (categorical vanished-atom certificate belongs upstream) — \
              top sv²/n_eff={:.6e} (R={r_floor:.6e}, n_eff={n_eff:.3e}, p_out={p_out})",
-            rank.top_signal
+            stratum.top_reconstruction_energy()
         );
     }
-    // basis_edf = tr(gram·(gram+λS)⁻¹).
-    let mut mmat = gram.clone();
-    if let Some(pen) = smooth_penalty {
-        for i in 0..m {
-            for j in 0..m {
-                mmat[[i, j]] += lam_smooth * pen[[i, j]];
-            }
-        }
-    }
-    let factor = mmat.cholesky(super::Side::Lower).map_err(|error| {
-        format!("realised_rank_charge_dof: G + lambda*S is not positive definite: {error}")
-    })?;
-    let x = factor.solve_mat(gram); // X = (G+λS)⁻¹ G
-    let raw_basis_edf = (0..m).map(|i| x[[i, i]]).sum::<f64>();
-    let basis_edf = certified_basis_edf(raw_basis_edf, m, "realised_rank_charge_dof")?;
-    Ok(rank.production_chargeable_rank as f64 * basis_edf)
+    Ok(stratum.production_dof())
 }
 
 /// The one production Laplace-complexity scalar:
