@@ -101,7 +101,7 @@ pub mod moments;
 // [unlanded: operators]
 
 // Declared-precision real codes and decode-then-evaluate distortion.
-// [unlanded: precision]
+pub mod precision;
 
 // The typed mechanism program graph and its versioned serialization.
 // [unlanded: program]
