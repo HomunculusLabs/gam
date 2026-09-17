@@ -379,6 +379,174 @@ impl ManifoldSpec {
             }
         }
     }
+
+    /// The descriptor every frontend exchanges for this manifold: `{"kind": …}` with the fields the Python descriptor
+    /// classes carry (`euclidean` `dim`, `sphere` `intrinsic_dim`, `torus` `dim`, `grassmann`/`stiefel` `k` and `n`,
+    /// `spd` `n`, `product` `parts`). [`Self::from_descriptor`] reads it back as the same spec.
+    pub fn descriptor(&self) -> serde_json::Value {
+        match self {
+            Self::Euclidean(dim) => serde_json::json!({ "kind": "euclidean", "dim": dim }),
+            Self::Circle => serde_json::json!({ "kind": "circle" }),
+            Self::Sphere { intrinsic_dim } => {
+                serde_json::json!({ "kind": "sphere", "intrinsic_dim": intrinsic_dim })
+            }
+            Self::Torus { dim } => serde_json::json!({ "kind": "torus", "dim": dim }),
+            Self::Grassmann { k, n } => serde_json::json!({ "kind": "grassmann", "k": k, "n": n }),
+            Self::Stiefel { k, n } => serde_json::json!({ "kind": "stiefel", "k": k, "n": n }),
+            Self::Spd { n } => serde_json::json!({ "kind": "spd", "n": n }),
+            Self::Product(parts) => serde_json::json!({
+                "kind": "product",
+                "parts": parts.iter().map(Self::descriptor).collect::<Vec<_>>(),
+            }),
+        }
+    }
+
+    /// Read a manifold descriptor. This is the one reader of the descriptor contract; every consumer that accepts a
+    /// descriptor maps the spec it returns. It accepts `kind` or `type`, the field spellings the Python descriptor
+    /// classes emit, and their aliases (`d` for a Euclidean or torus dimension, `n` or `dim` for a sphere's intrinsic
+    /// dimension, `components` for a product's parts). Dimensions must be positive, and `Gr(k, n)` / `St(n, k)` require
+    /// `k <= n`.
+    pub fn from_descriptor(value: &serde_json::Value) -> Result<Self, String> {
+        if let Some(name) = value.as_str() {
+            return match name.to_ascii_lowercase().as_str() {
+                "circle" | "s1" => Ok(Self::Circle),
+                other => Err(format!("unknown manifold string {other:?}")),
+            };
+        }
+        let obj = value
+            .as_object()
+            .ok_or_else(|| "manifold must be a string or object".to_string())?;
+        let kind = obj
+            .get("kind")
+            .or_else(|| obj.get("type"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "manifold.kind is required".to_string())?
+            .to_ascii_lowercase();
+        let positive = |keys: &[&str], context: &str| -> Result<usize, String> {
+            let value = keys
+                .iter()
+                .find_map(|key| obj.get(*key))
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| format!("{context} is required"))?;
+            if value == 0 {
+                return Err(format!("{context} must be > 0"));
+            }
+            usize::try_from(value).map_err(|_| format!("{context} exceeds usize::MAX"))
+        };
+        let frame = |family: &str, set: &str| -> Result<(usize, usize), String> {
+            let k = positive(&["k"], &format!("{family}.k"))?;
+            let n = positive(&["n"], &format!("{family}.n"))?;
+            if k > n {
+                return Err(format!(
+                    "{family} manifold requires k <= n (got k={k}, n={n}): {set}"
+                ));
+            }
+            Ok((k, n))
+        };
+        match kind.as_str() {
+            "euclidean" => Ok(Self::Euclidean(positive(&["dim", "d"], "euclidean.dim")?)),
+            "circle" | "s1" => Ok(Self::Circle),
+            "sphere" => Ok(Self::Sphere {
+                intrinsic_dim: positive(&["intrinsic_dim", "n", "dim"], "sphere.intrinsic_dim")?,
+            }),
+            "torus" => Ok(Self::Torus {
+                dim: positive(&["dim", "d"], "torus.dim")?,
+            }),
+            "grassmann" => {
+                let (k, n) = frame("grassmann", "Gr(k, n) is the set of k-dimensional subspaces of R^n")?;
+                Ok(Self::Grassmann { k, n })
+            }
+            "stiefel" => {
+                let (k, n) = frame(
+                    "stiefel",
+                    "St(n, k) is the set of k-frames (orthonormal columns) in R^n",
+                )?;
+                Ok(Self::Stiefel { k, n })
+            }
+            "spd" => Ok(Self::Spd {
+                n: positive(&["n"], "spd.n")?,
+            }),
+            "product" => {
+                let parts = obj
+                    .get("parts")
+                    .or_else(|| obj.get("components"))
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or_else(|| "product manifold requires parts".to_string())?;
+                parts
+                    .iter()
+                    .map(Self::from_descriptor)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(Self::Product)
+            }
+            other => Err(format!("unknown manifold kind {other:?}")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::ManifoldSpec;
+
+    fn every_variant() -> Vec<ManifoldSpec> {
+        vec![
+            ManifoldSpec::Euclidean(3),
+            ManifoldSpec::Circle,
+            ManifoldSpec::Sphere { intrinsic_dim: 2 },
+            ManifoldSpec::Torus { dim: 3 },
+            ManifoldSpec::Grassmann { k: 2, n: 5 },
+            ManifoldSpec::Stiefel { k: 2, n: 4 },
+            ManifoldSpec::Spd { n: 3 },
+            ManifoldSpec::Product(vec![
+                ManifoldSpec::Circle,
+                ManifoldSpec::Euclidean(2),
+                ManifoldSpec::Product(vec![ManifoldSpec::Sphere { intrinsic_dim: 1 }]),
+            ]),
+        ]
+    }
+
+    /// Every variant's descriptor reads back as the same spec, nested products included, so the emitter and the
+    /// reader cannot drift apart without this test failing.
+    #[test]
+    fn descriptor_round_trips_every_variant() {
+        for spec in every_variant() {
+            let descriptor = spec.descriptor();
+            assert_eq!(
+                ManifoldSpec::from_descriptor(&descriptor),
+                Ok(spec.clone()),
+                "descriptor {descriptor} did not read back as {spec:?}"
+            );
+        }
+    }
+
+    /// The spellings `gamfit._manifold` emits (`torus` `d`, a cylinder as a circle-plus-Euclidean product) read as the
+    /// same specs as the canonical descriptor.
+    #[test]
+    fn descriptor_aliases_read_as_the_canonical_spec() {
+        let torus = serde_json::json!({ "kind": "torus", "d": 3 });
+        assert_eq!(ManifoldSpec::from_descriptor(&torus), Ok(ManifoldSpec::Torus { dim: 3 }));
+        let cylinder = serde_json::json!({
+            "type": "product",
+            "components": [{ "kind": "circle" }, { "kind": "euclidean", "dim": 2 }],
+        });
+        assert_eq!(
+            ManifoldSpec::from_descriptor(&cylinder),
+            Ok(ManifoldSpec::Product(vec![ManifoldSpec::Circle, ManifoldSpec::Euclidean(2)]))
+        );
+    }
+
+    /// A zero dimension, an empty frame domain and an unknown kind are refused by name.
+    #[test]
+    fn descriptor_refuses_out_of_domain_and_unknown_kinds() {
+        let zero = ManifoldSpec::from_descriptor(&serde_json::json!({ "kind": "euclidean", "dim": 0 }));
+        assert_eq!(zero, Err("euclidean.dim must be > 0".to_string()));
+        let frame = ManifoldSpec::from_descriptor(&serde_json::json!({ "kind": "grassmann", "k": 3, "n": 2 }));
+        assert!(
+            frame.as_ref().is_err_and(|message| message.contains("requires k <= n")),
+            "Gr(3, 2) must be refused; got {frame:?}"
+        );
+        let unknown = ManifoldSpec::from_descriptor(&serde_json::json!({ "kind": "hyperbolic" }));
+        assert_eq!(unknown, Err("unknown manifold kind \"hyperbolic\"".to_string()));
+    }
 }
 
 pub(crate) const fn check_len(

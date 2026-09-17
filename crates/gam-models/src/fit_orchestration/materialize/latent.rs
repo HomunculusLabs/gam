@@ -195,13 +195,19 @@ fn parse_latent_manifold(
                 }
                 LatentManifold::Interval { lo, hi }
             }
-            other => parse_named(other)?,
+            _ => latent_manifold_from_descriptor(value, d, context)?,
         }
     } else if let Some(items) = value.as_array() {
         let mut parts = Vec::with_capacity(items.len());
         for (idx, item) in items.iter().enumerate() {
-            parts
-                .push(parse_latent_manifold(Some(item), 1, &format!("{context}[{idx}]"))?.manifold);
+            let item_context = format!("{context}[{idx}]");
+            if item.is_string() || latent_only_object(item) {
+                parts.push(parse_latent_manifold(Some(item), 1, &item_context)?.manifold);
+            } else {
+                let spec = gam_geometry::ManifoldSpec::from_descriptor(item)
+                    .map_err(|message| format!("{item_context}: {message}"))?;
+                push_latent_descriptor_parts(&spec, &item_context, &mut parts)?;
+            }
         }
         LatentManifold::Product(parts)
     } else {
@@ -258,55 +264,229 @@ fn parse_retraction_kind(
         }
         return Ok(RetractionKind::Product(ProductRetraction { parts }));
     }
-    let obj = value
-        .as_object()
-        .ok_or_else(|| format!("{context} must be a string, object, or product array"))?;
-    let kind = obj
-        .get("type")
-        .or_else(|| obj.get("kind"))
+    let spec = gam_geometry::ManifoldSpec::from_descriptor(value)
+        .map_err(|message| format!("{context}: {message}"))?;
+    retraction_from_spec(&spec, context)
+}
+
+/// Whether an array item is an object the latent parser owns (`interval`, `auto`) rather than a manifold descriptor.
+fn latent_only_object(item: &JsonValue) -> bool {
+    item.get("type")
+        .or_else(|| item.get("kind"))
         .and_then(JsonValue::as_str)
-        .unwrap_or("euclidean");
-    match kind.to_ascii_lowercase().as_str() {
-        "euclidean" | "r" | "real" => {
-            let dim = obj
-                .get("dim")
-                .or_else(|| obj.get("d"))
-                .and_then(JsonValue::as_u64)
-                .map_or(fallback_dim, |value| value as usize);
-            if dim == 0 {
-                return Err(format!("{context}.dim must be positive"));
-            }
-            Ok(RetractionKind::euclidean(dim))
+        .is_some_and(|kind| kind.eq_ignore_ascii_case("interval") || kind.eq_ignore_ascii_case("auto"))
+}
+
+/// The latent manifold a manifold descriptor names for a `d`-dimensional latent. The descriptor is read by
+/// [`gam_geometry::ManifoldSpec::from_descriptor`], the one reader of the contract every manifold class emits through
+/// `ManifoldSpec::descriptor`, so an emitter and this parser cannot disagree about a field.
+fn latent_manifold_from_descriptor(
+    value: &JsonValue,
+    d: usize,
+    context: &str,
+) -> Result<LatentManifold, String> {
+    let spec = gam_geometry::ManifoldSpec::from_descriptor(value)
+        .map_err(|message| format!("{context}: {message}"))?;
+    let mut parts = Vec::new();
+    push_latent_descriptor_parts(&spec, context, &mut parts)?;
+    if parts.iter().all(LatentManifold::is_euclidean) {
+        if parts.len() != d {
+            return Err(format!(
+                "{context} ambient dimension {} does not match latent d={d}",
+                parts.len()
+            ));
         }
-        "circle" | "s1" | "periodic" => Ok(RetractionKind::Circle),
-        "sphere" | "sn" => {
-            let dim = obj
-                .get("dim")
-                .or_else(|| obj.get("d"))
-                .and_then(JsonValue::as_u64)
-                .map_or(fallback_dim, |value| value as usize);
-            if dim == 0 {
-                return Err(format!("{context}.dim must be positive"));
+        return Ok(LatentManifold::Euclidean);
+    }
+    if parts.len() == 1 {
+        return Ok(parts.swap_remove(0));
+    }
+    Ok(LatentManifold::Product(parts))
+}
+
+/// Append the latent axes a descriptor spans. Inside a product `Euclidean` is one scalar axis, so a `k`-dimensional
+/// Euclidean part spans `k` axes and a `k`-torus spans `k` circles; an intrinsic `S^n` is the unit sphere in `R^(n+1)`.
+/// Nested products flatten.
+fn push_latent_descriptor_parts(
+    spec: &gam_geometry::ManifoldSpec,
+    context: &str,
+    parts: &mut Vec<LatentManifold>,
+) -> Result<(), String> {
+    use gam_geometry::ManifoldSpec as Spec;
+    let radians = LatentManifold::Circle {
+        period: std::f64::consts::TAU,
+    };
+    match spec {
+        Spec::Euclidean(dim) => parts.extend(std::iter::repeat_n(LatentManifold::Euclidean, *dim)),
+        Spec::Circle => parts.push(radians),
+        Spec::Sphere { intrinsic_dim } => parts.push(LatentManifold::Sphere {
+            dim: intrinsic_dim + 1,
+        }),
+        Spec::Torus { dim } => parts.extend(std::iter::repeat_n(radians, *dim)),
+        Spec::Product(inner) => {
+            for part in inner {
+                push_latent_descriptor_parts(part, context, parts)?;
             }
-            Ok(RetractionKind::Sphere { dim })
         }
-        "product" => {
-            let items = obj
-                .get("parts")
-                .or_else(|| obj.get("components"))
-                .and_then(JsonValue::as_array)
-                .ok_or_else(|| format!("{context}.parts is required for product retraction"))?;
-            let mut parts = Vec::with_capacity(items.len());
-            for (idx, item) in items.iter().enumerate() {
-                parts.push(parse_retraction_kind(
-                    item,
-                    1,
-                    &format!("{context}.parts[{idx}]"),
-                )?);
-            }
-            Ok(RetractionKind::Product(ProductRetraction { parts }))
+        Spec::Grassmann { .. } => return Err(not_a_latent_manifold(context, "grassmann")),
+        Spec::Stiefel { .. } => return Err(not_a_latent_manifold(context, "stiefel")),
+        Spec::Spd { .. } => return Err(not_a_latent_manifold(context, "spd")),
+    }
+    Ok(())
+}
+
+/// The retraction a descriptor names: a `k`-dimensional Euclidean retraction, one circle retraction per torus axis, an
+/// intrinsic `S^n` as the unit sphere in `R^(n+1)`, and a product part by part.
+fn retraction_from_spec(
+    spec: &gam_geometry::ManifoldSpec,
+    context: &str,
+) -> Result<RetractionKind, String> {
+    use gam_geometry::ManifoldSpec as Spec;
+    match spec {
+        Spec::Euclidean(dim) => Ok(RetractionKind::euclidean(*dim)),
+        Spec::Circle => Ok(RetractionKind::Circle),
+        Spec::Sphere { intrinsic_dim } => Ok(RetractionKind::Sphere {
+            dim: intrinsic_dim + 1,
+        }),
+        Spec::Torus { dim } => Ok(RetractionKind::Product(ProductRetraction {
+            parts: vec![RetractionKind::Circle; *dim],
+        })),
+        Spec::Product(inner) => inner
+            .iter()
+            .map(|part| retraction_from_spec(part, context))
+            .collect::<Result<Vec<_>, _>>()
+            .map(|parts| RetractionKind::Product(ProductRetraction { parts })),
+        Spec::Grassmann { .. } => Err(not_a_latent_manifold(context, "grassmann")),
+        Spec::Stiefel { .. } => Err(not_a_latent_manifold(context, "stiefel")),
+        Spec::Spd { .. } => Err(not_a_latent_manifold(context, "spd")),
+    }
+}
+
+fn not_a_latent_manifold(context: &str, kind: &str) -> String {
+    format!(
+        "{context}: a {kind} descriptor is not a latent coordinate manifold; latent coordinates take euclidean, \
+         circle, sphere, torus, interval, or a product of them"
+    )
+}
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+    use gam_geometry::ManifoldSpec;
+
+    fn latent_cases() -> Vec<(ManifoldSpec, usize, LatentManifold, RetractionKind)> {
+        let radians = LatentManifold::Circle {
+            period: std::f64::consts::TAU,
+        };
+        let circles = RetractionKind::Product(ProductRetraction {
+            parts: vec![RetractionKind::Circle; 3],
+        });
+        vec![
+            (
+                ManifoldSpec::Euclidean(3),
+                3,
+                LatentManifold::Euclidean,
+                RetractionKind::euclidean(3),
+            ),
+            (ManifoldSpec::Circle, 1, radians.clone(), RetractionKind::Circle),
+            (
+                ManifoldSpec::Sphere { intrinsic_dim: 2 },
+                3,
+                LatentManifold::Sphere { dim: 3 },
+                RetractionKind::Sphere { dim: 3 },
+            ),
+            (
+                ManifoldSpec::Torus { dim: 3 },
+                3,
+                LatentManifold::Product(vec![radians.clone(); 3]),
+                circles.clone(),
+            ),
+            (
+                ManifoldSpec::Product(vec![ManifoldSpec::Circle; 3]),
+                3,
+                LatentManifold::Product(vec![radians.clone(); 3]),
+                circles,
+            ),
+            (
+                ManifoldSpec::Product(vec![ManifoldSpec::Circle, ManifoldSpec::Euclidean(2)]),
+                3,
+                LatentManifold::Product(vec![
+                    radians,
+                    LatentManifold::Euclidean,
+                    LatentManifold::Euclidean,
+                ]),
+                RetractionKind::Product(ProductRetraction {
+                    parts: vec![RetractionKind::Circle, RetractionKind::euclidean(2)],
+                }),
+            ),
+        ]
+    }
+
+    /// Every latent-admissible manifold descriptor, as the manifold classes emit it through
+    /// `ManifoldSpec::descriptor`, reads through both latent parsers as the manifold and retraction it names. This pins
+    /// the emitter/parser drift that refused `ProductManifold(...).to_json()` as a latent manifold (#2627).
+    #[test]
+    fn every_latent_descriptor_reads_through_both_parsers() {
+        for (spec, d, manifold, retraction) in latent_cases() {
+            let descriptor = spec.descriptor();
+            assert_eq!(
+                parse_latent_manifold(Some(&descriptor), d, "latents['t'].manifold")
+                    .map(|parsed| (parsed.manifold, parsed.auto)),
+                Ok((manifold, false)),
+                "manifold descriptor {descriptor} at d={d}"
+            );
+            assert_eq!(
+                parse_retraction_kind(&descriptor, d, "latents['t'].retraction"),
+                Ok(retraction),
+                "retraction descriptor {descriptor} at d={d}"
+            );
         }
-        other => parse_named(other),
+    }
+
+    /// A product's parts passed as a bare array read as the same product.
+    #[test]
+    fn descriptor_parts_array_reads_as_the_product() {
+        let parts = serde_json::Value::Array(vec![ManifoldSpec::Circle.descriptor(); 3]);
+        let radians = LatentManifold::Circle {
+            period: std::f64::consts::TAU,
+        };
+        assert_eq!(
+            parse_latent_manifold(Some(&parts), 3, "latents['t'].manifold").map(|parsed| parsed.manifold),
+            Ok(LatentManifold::Product(vec![radians; 3]))
+        );
+    }
+
+    /// Frame and SPD descriptors are refused by name, and a Euclidean descriptor must span the latent's dimension.
+    #[test]
+    fn non_latent_descriptors_and_mismatched_dimensions_are_refused() {
+        for spec in [
+            ManifoldSpec::Grassmann { k: 2, n: 3 },
+            ManifoldSpec::Stiefel { k: 1, n: 3 },
+            ManifoldSpec::Spd { n: 2 },
+        ] {
+            let descriptor = spec.descriptor();
+            let manifold = parse_latent_manifold(Some(&descriptor), 3, "latents['t'].manifold")
+                .map(|parsed| parsed.manifold);
+            assert!(
+                manifold
+                    .as_ref()
+                    .is_err_and(|message| message.contains("not a latent coordinate manifold")),
+                "{descriptor}: {manifold:?}"
+            );
+            let retraction = parse_retraction_kind(&descriptor, 3, "latents['t'].retraction");
+            assert!(
+                retraction
+                    .as_ref()
+                    .is_err_and(|message| message.contains("not a latent coordinate manifold")),
+                "{descriptor}: {retraction:?}"
+            );
+        }
+        let flat = ManifoldSpec::Euclidean(2).descriptor();
+        let mismatch = parse_latent_manifold(Some(&flat), 3, "latents['t'].manifold").map(|parsed| parsed.manifold);
+        assert_eq!(
+            mismatch,
+            Err("latents['t'].manifold ambient dimension 2 does not match latent d=3".to_string())
+        );
     }
 }
 

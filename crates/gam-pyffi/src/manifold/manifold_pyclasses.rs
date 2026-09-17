@@ -11,10 +11,11 @@
 //! `py_value_error` and the crate-local `PyObject` alias. Registration stays in
 //! the `#[pymodule]` block via a focused re-import.
 
+use gam::geometry::ManifoldSpec;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
-use crate::{PyObject, py_value_error};
+use crate::{PyObject, json_value_to_py, py_value_error};
 
 #[pyclass(
     module = "gam_pyffi._rust",
@@ -51,10 +52,8 @@ impl EuclideanManifold {
     }
 
     fn to_json(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let out = PyDict::new(py);
-        out.set_item("kind", "euclidean")?;
-        out.set_item("dim", self.dim)?;
-        Ok(out.into_any().unbind())
+        let dim = descriptor_dimension("EuclideanManifold.dim", self.dim)?;
+        json_value_to_py(py, ManifoldSpec::Euclidean(dim).descriptor())
     }
 }
 
@@ -82,9 +81,7 @@ impl CircleManifold {
     }
 
     fn to_json(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let out = PyDict::new(py);
-        out.set_item("kind", "circle")?;
-        Ok(out.into_any().unbind())
+        json_value_to_py(py, ManifoldSpec::Circle.descriptor())
     }
 }
 
@@ -123,10 +120,8 @@ impl SphereManifold {
     }
 
     fn to_json(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let out = PyDict::new(py);
-        out.set_item("kind", "sphere")?;
-        out.set_item("intrinsic_dim", self.intrinsic_dim)?;
-        Ok(out.into_any().unbind())
+        let intrinsic_dim = descriptor_dimension("SphereManifold.intrinsic_dim", self.intrinsic_dim)?;
+        json_value_to_py(py, ManifoldSpec::Sphere { intrinsic_dim }.descriptor())
     }
 }
 
@@ -165,10 +160,8 @@ impl TorusManifold {
     }
 
     fn to_json(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let out = PyDict::new(py);
-        out.set_item("kind", "torus")?;
-        out.set_item("dim", self.dim)?;
-        Ok(out.into_any().unbind())
+        let dim = descriptor_dimension("TorusManifold.dim", self.dim)?;
+        json_value_to_py(py, ManifoldSpec::Torus { dim }.descriptor())
     }
 }
 
@@ -179,6 +172,14 @@ fn validate_positive_dimension(name: &str, dimension: i64) -> PyResult<()> {
         )));
     }
     Ok(())
+}
+
+/// A positive Python dimension as the `usize` the manifold descriptor carries. Every leaf class emits its descriptor
+/// through [`ManifoldSpec::descriptor`], the same owner [`ManifoldSpec::from_descriptor`] reads back.
+fn descriptor_dimension(name: &str, dimension: i64) -> PyResult<usize> {
+    validate_positive_dimension(name, dimension)?;
+    usize::try_from(dimension)
+        .map_err(|_| py_value_error(format!("{name} exceeds usize::MAX (got {dimension})")))
 }
 
 /// Validate the `1 <= k <= n` domain shared by the constrained-frame
@@ -245,11 +246,9 @@ impl GrassmannManifold {
     }
 
     fn to_json(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let out = PyDict::new(py);
-        out.set_item("kind", "grassmann")?;
-        out.set_item("k", self.k)?;
-        out.set_item("n", self.n)?;
-        Ok(out.into_any().unbind())
+        let k = descriptor_dimension("GrassmannManifold.k", self.k)?;
+        let n = descriptor_dimension("GrassmannManifold.n", self.n)?;
+        json_value_to_py(py, ManifoldSpec::Grassmann { k, n }.descriptor())
     }
 }
 
@@ -301,11 +300,9 @@ impl StiefelManifold {
     }
 
     fn to_json(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let out = PyDict::new(py);
-        out.set_item("kind", "stiefel")?;
-        out.set_item("k", self.k)?;
-        out.set_item("n", self.n)?;
-        Ok(out.into_any().unbind())
+        let k = descriptor_dimension("StiefelManifold.k", self.k)?;
+        let n = descriptor_dimension("StiefelManifold.n", self.n)?;
+        json_value_to_py(py, ManifoldSpec::Stiefel { k, n }.descriptor())
     }
 }
 
@@ -332,10 +329,8 @@ impl SpdManifold {
     }
 
     fn to_json(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let out = PyDict::new(py);
-        out.set_item("kind", "spd")?;
-        out.set_item("n", self.n)?;
-        Ok(out.into_any().unbind())
+        let n = descriptor_dimension("SpdManifold.n", self.n)?;
+        json_value_to_py(py, ManifoldSpec::Spd { n }.descriptor())
     }
 }
 
