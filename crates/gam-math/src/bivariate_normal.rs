@@ -56,6 +56,10 @@
 //! - **Error bound.** [`BIVARIATE_NORMAL_CDF_ERROR_BOUND`] bounds truncation plus rounding of one evaluation at
 //!   the computed arguments. [`BivariateNormalPartials`] carries a per-evaluation rounding bound next to each
 //!   partial. Neither includes the caller's own argument error.
+//! - **Rounding model.** Under round-to-nearest every `+ − × ÷ √` errs by at most `u = ε/2` of its result. The model
+//!   adds one ulp, `2u`, per libm `exp`, `sin`, `asin` or `erfc`: the contract `gaussian_activation` states for its own
+//!   bounds. A count of `k` rounded operations is carried as Wilkinson's `γ_k` ([`accumulation_growth`]), which sits
+//!   above the first-order `k·u` and agrees with it to `O(u²)`.
 //! - **Exact branches.** Infinite bounds and `ρ ∈ {−1, 0, 1}` are exact special cases.
 //! - **Correlation input.** A caller who resolves `1 − ρ²` more finely than `ρ` passes it to the `_with_complement`
 //!   entry points. Every `1 ∓ ρ` is then derived from it, and the input conditioning `φ₂·δρ` of a rounded `ρ`
@@ -66,6 +70,7 @@
 //!   lower tails, and so do the `ρ < −½` difference and the negative-correlation pieces of `ρ > ½`.
 
 use crate::probability::{normal_cdf, normal_pdf};
+use crate::roundoff::{UNIT_ROUNDOFF, accumulation_growth};
 use crate::special::gauss_legendre;
 use libm::{erf, erfc};
 use std::f64::consts::{E, FRAC_PI_6, PI, SQRT_2};
@@ -143,10 +148,6 @@ pub struct BivariateNormalPartials {
 /// The largest `|asin ρ|` the core rule evaluates: `asin ½`.
 const CORE_MAX_ANGLE: f64 = FRAC_PI_6;
 
-/// `u = ε/2`. Under round-to-nearest every `+ − × ÷ √` errs by at most `u` of its result. The model adds one ulp,
-/// `2u`, per libm `exp`, `sin`, `asin` or `erfc`: the contract `gaussian_activation` states for its own bounds.
-const UNIT_ROUNDOFF: f64 = f64::EPSILON / 2.0;
-
 /// The smallest positive subnormal. It bounds any result that gradual underflow quantizes or rounds to zero, where the
 /// relative model no longer applies.
 const SMALLEST_SUBNORMAL: f64 = f64::from_bits(1);
@@ -171,9 +172,9 @@ const CORE_RULE_WEIGHT_ERROR: f64 = 1.0e-14;
 ///   quotients and the addition.
 /// - `f` errs by `2uf + f·δE ≤ 2u + (19u/3 + 2δs)/e`, since `f ≤ 1` and `fE ≤ 1/e`.
 const NODE_VALUE_ERROR: f64 = {
-    let angle = 4.0 * UNIT_ROUNDOFF * CORE_MAX_ANGLE + CORE_MAX_ANGLE * CORE_RULE_NODE_ERROR / 2.0;
-    let sine = UNIT_ROUNDOFF + angle;
-    2.0 * UNIT_ROUNDOFF + (19.0 * UNIT_ROUNDOFF / 3.0 + 2.0 * sine) / E
+    let angle = accumulation_growth(4) * CORE_MAX_ANGLE + CORE_MAX_ANGLE * CORE_RULE_NODE_ERROR / 2.0;
+    let sine = accumulation_growth(2) / 2.0 + angle;
+    accumulation_growth(2) + (accumulation_growth(19) / 3.0 + 2.0 * sine) / E
 };
 
 /// One core evaluation at computed `(h, k, ρ)` with `|ρ| ≤ ½`.
@@ -184,10 +185,10 @@ const NODE_VALUE_ERROR: f64 = {
 ///   multiplies the sum's error.
 /// - The truncation adds at most `u/6`, and the final addition `u`.
 const CORE_EVALUATION_ERROR: f64 = {
-    let product = UNIT_ROUNDOFF * (5.0 + 4.0 * ARGUMENT_SENSITIVITY);
-    let sum = 2.0 * NODE_VALUE_ERROR + 2.0 * (CORE_RULE_WEIGHT_ERROR + 9.0 * UNIT_ROUNDOFF);
-    let integral = 5.0 * UNIT_ROUNDOFF / 12.0 + sum / 24.0;
-    product + integral + UNIT_ROUNDOFF / 6.0 + UNIT_ROUNDOFF
+    let product = accumulation_growth(5) + accumulation_growth(4) * ARGUMENT_SENSITIVITY;
+    let sum = 2.0 * NODE_VALUE_ERROR + 2.0 * (CORE_RULE_WEIGHT_ERROR + accumulation_growth(9));
+    let integral = accumulation_growth(5) / 12.0 + sum / 24.0;
+    product + integral + UNIT_ROUNDOFF / 6.0 + accumulation_growth(1)
 };
 
 /// The absolute error of one [`bivariate_normal_cdf`] or [`bivariate_normal_cdf_with_complement`] evaluation at its
@@ -202,8 +203,10 @@ const CORE_EVALUATION_ERROR: f64 = {
 /// The exact branches err by less. The projection onto `[0, 1]` never increases the error. The caller's own argument
 /// error is not included.
 pub const BIVARIATE_NORMAL_CDF_ERROR_BOUND: f64 = 2.0
-    * (CORE_EVALUATION_ERROR + UNIT_ROUNDOFF * (4.0 * ARGUMENT_SENSITIVITY + CORE_DENSITY_MAXIMUM))
-    + UNIT_ROUNDOFF;
+    * (CORE_EVALUATION_ERROR
+        + accumulation_growth(4) * ARGUMENT_SENSITIVITY
+        + accumulation_growth(2) / 2.0 * CORE_DENSITY_MAXIMUM)
+    + accumulation_growth(1);
 
 /// A Gauss-Legendre rule stored on `[0, 1]`: nodes `(1 + x)/2` and the weights of `[−1, 1]`.
 struct CoreRule {
@@ -460,7 +463,7 @@ fn density(h: f64, k: f64, correlation: Correlation) -> (f64, f64) {
     let value = (-exponent).exp() / scale;
     // A positive value has a finite exponent. A vanished one errs by at most the smallest subnormal over the scale.
     let relative = if value > 0.0 {
-        UNIT_ROUNDOFF * value * (8.0 + 8.0 * exponent)
+        accumulation_growth(8) * value * (1.0 + exponent)
     } else {
         0.0
     };
@@ -497,11 +500,11 @@ fn conditional_partial(x: f64, y: f64, correlation: Correlation) -> (f64, f64) {
         } else {
             (correlation.one_plus, correlation.one_minus)
         };
-        normal_pdf(t) * (8.0 * t.abs() + 4.0 * x.abs() * (near / far).sqrt())
+        normal_pdf(t) * (accumulation_growth(8) * t.abs() + accumulation_growth(4) * x.abs() * (near / far).sqrt())
     } else {
         0.0
     };
-    let rounding = UNIT_ROUNDOFF * (8.0 * value + weight * argument) + SMALLEST_SUBNORMAL;
+    let rounding = accumulation_growth(8) * value + weight * argument + SMALLEST_SUBNORMAL;
     (value, rounding)
 }
 

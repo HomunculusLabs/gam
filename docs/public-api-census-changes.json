@@ -4188,5 +4188,13 @@
     },
     "reason": "#2902: τ is deleted from the measure-jet spec and energy, which never read it. The in-module test energy_form_annihilates_affine_at_default_tau was named after that dial; it is renamed energy_form_annihilates_affine_exactly, and its assertions are unchanged. This census counts function identities. The removed pub field MeasureJetBasisSpec::tau0 and the tau0 parameters of the pub measure_jet_energy_form and the pub(crate) measure_jet_energy_forms_per_scale and assemble_weighted_forms are not function identities, so they appear here only as described. The source-removal entry at this base records the same change.",
     "evidence": "At a07a79095f, git grep -w finds energy_form_annihilates_affine_at_default_tau only at its declaration, a pub(crate) fn, which public_api_census.py counts. The removed map was derived by reading the change against the census rule, and the gate job runs the census against this entry."
+  },
+  {
+    "base": "aa61f826cc08f4190137e231dd1cda55b03fd211",
+    "removed": {
+      "crates/gam-linalg/src/roundoff.rs::accumulation_growth": 1
+    },
+    "reason": "#2946 L-0 (gam-21 ruling): gam_linalg::roundoff::accumulation_growth is re-exported from its new owner gam_math::roundoff, where it is a pub const fn, instead of declared in gam-linalg. The public path is unchanged. The census counts the declaration gam-linalg no longer holds.",
+    "evidence": "Gate 1217155 (pool-gx7) ran scripts/public_api_census.py --base 666558f622 over this commit's tree (8162f1d1b2) and measured exactly this removal. The count goes from 12424 to 12425 public function declarations: this one removed, and gam_math::roundoff's accumulation_growth and inflated added. The same gate's workspace --all-targets --locked check is RC 0, so every gam_linalg::roundoff::accumulation_growth caller compiles through the re-export."
   }
 ]

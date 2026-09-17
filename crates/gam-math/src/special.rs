@@ -4,6 +4,8 @@
 //! dependencies, so they live in the lowest crate (`gam-math`) and can be
 //! consumed by any term/basis/inference code without inducing an SCC edge.
 
+use crate::roundoff::{UNIT_ROUNDOFF, accumulation_growth, inflated};
+
 /// Numerically stable `C(n,k) = n! / (k!·(n−k)!)` as `f64`.  Uses the
 /// symmetry `C(n,k) = C(n, n−k)` to keep the loop count `min(k, n−k)`
 /// and the multiplicative recurrence `C(n,j+1) = C(n,j)·(n−j)/(j+1)`,
@@ -583,7 +585,7 @@ pub struct CertifiedGaussLegendreRule {
 /// - **Rounding the bound itself.** Each bound quantity is a positive expression evaluated in `f64`, so it is
 ///   inflated by `1 + γ_{k+3}` for its `k` rounded operations.
 ///
-/// `γ_k` is the quantity `gam_linalg::roundoff::accumulation_growth` owns. This crate cannot depend on that one.
+/// `γ_k` is [`accumulation_growth`].
 pub fn gauss_legendre_certified(n: usize) -> CertifiedGaussLegendreRule {
     let seeds = gauss_legendre(n).0;
     let roots: Vec<DoubleDouble> = seeds.iter().map(|&seed| refine_legendre_root(n, seed)).collect();
@@ -691,21 +693,6 @@ fn refine_legendre_root(n: usize, seed: f64) -> DoubleDouble {
     root
 }
 
-/// Wilkinson's `γ_k = k·u/(1 − k·u)`, infinite once `k·u ≥ 1`.
-fn wilkinson_growth(operations: usize) -> f64 {
-    let scaled = operations as f64 * (f64::EPSILON / 2.0);
-    if !(scaled < 1.0) {
-        return f64::INFINITY;
-    }
-    scaled / (1.0 - scaled)
-}
-
-/// An upper bound on a positive expression whose computed value is `value` after `operations` rounded operations:
-/// `exact ≤ value·(1 − u)^−k ≤ value·(1 + γ_k)`. The three extra operations cover forming the factor and the product.
-fn inflated(value: f64, operations: usize) -> f64 {
-    value * (1.0 + wilkinson_growth(operations + 3))
-}
-
 /// The smallest positive subnormal, `η = 2^−1074`.
 const SMALLEST_SUBNORMAL: f64 = f64::from_bits(1);
 
@@ -729,7 +716,7 @@ fn accurate_sum(parts: &mut [f64], products: usize) -> (f64, f64) {
     if count == 0 {
         return (0.0, 0.0);
     }
-    let gamma = wilkinson_growth(count - 1);
+    let gamma = accumulation_growth(count - 1);
     let magnitude = parts.iter().fold(0.0, |total, part| total + part.abs());
     let magnitude_bound = inflated(magnitude, count) / (1.0 - gamma);
     for index in 1..count {
@@ -739,7 +726,7 @@ fn accurate_sum(parts: &mut [f64], products: usize) -> (f64, f64) {
     }
     let tail = parts[..count - 1].iter().fold(0.0, |total, part| total + part);
     let res = tail + parts[count - 1];
-    let unit = f64::EPSILON / 2.0;
+    let unit = UNIT_ROUNDOFF;
     let error = (unit * res.abs() + gamma * gamma * magnitude_bound + 5.0 * SMALLEST_SUBNORMAL * products as f64)
         / (1.0 - unit);
     (res, inflated(error, 6))
@@ -748,7 +735,7 @@ fn accurate_sum(parts: &mut [f64], products: usize) -> (f64, f64) {
 /// The residual certificate of a Gauss-Legendre rule at the double-double roots `roots` (see
 /// [`gauss_legendre_certified`]). A failed separation declines with infinite errors.
 fn certify_legendre_rule(n: usize, roots: &[DoubleDouble]) -> CertifiedGaussLegendreRule {
-    let unit = f64::EPSILON / 2.0;
+    let unit = UNIT_ROUNDOFF;
     let declined = |nodes: Vec<f64>, weights: Vec<f64>| CertifiedGaussLegendreRule {
         nodes,
         weights,
@@ -808,7 +795,7 @@ fn certify_legendre_rule(n: usize, roots: &[DoubleDouble]) -> CertifiedGaussLege
             }
         }
         let (norm_squared, norm_error) = accurate_sum(&mut parts, products);
-        let norm_lower = (norm_squared - norm_error) * (1.0 - wilkinson_growth(3));
+        let norm_lower = (norm_squared - norm_error) * (1.0 - accumulation_growth(3));
         let norm_upper = inflated(norm_squared + norm_error, 1);
         if !(norm_lower > 0.0) {
             return declined(nodes, weights);
@@ -835,7 +822,7 @@ fn certify_legendre_rule(n: usize, roots: &[DoubleDouble]) -> CertifiedGaussLege
         let mut gap = f64::INFINITY;
         for i in [j.wrapping_sub(1), j + 1] {
             if i < n {
-                let separation = (nodes[i] - nodes[j]).abs() * (1.0 - wilkinson_growth(2));
+                let separation = (nodes[i] - nodes[j]).abs() * (1.0 - accumulation_growth(2));
                 let distance = separation - inflated(radii[i] + offsets[j], 1);
                 if !(distance > inflated(radii[j], 1)) {
                     return declined(nodes, weights);
@@ -845,7 +832,7 @@ fn certify_legendre_rule(n: usize, roots: &[DoubleDouble]) -> CertifiedGaussLege
         }
         let t = inflated(std::f64::consts::SQRT_2 * residual_radii[j] / gap, 3);
         let (norm_lower, norm_upper) = norm_bounds[j];
-        let first_lower = (1.0 / norm_upper.sqrt()) * (1.0 - wilkinson_growth(3));
+        let first_lower = (1.0 / norm_upper.sqrt()) * (1.0 - accumulation_growth(3));
         let first_upper = inflated(1.0 / norm_lower.sqrt(), 2);
         if !(first_lower > t) {
             return declined(nodes, weights);
@@ -2067,7 +2054,7 @@ mod tests {
                 let exact = 2.0 / (degree as f64 + 1.0);
                 let allowance = e_w * magnitude * (1.0 + e_w)
                     + total_weight * (1.0 + e_w) * degree as f64 * e_x * (1.0 + e_x).powi(d)
-                    + wilkinson_growth(degree + n + 2) * magnitude;
+                    + accumulation_growth(degree + n + 2) * magnitude;
                 assert!(
                     (quadrature - exact).abs() <= allowance,
                     "n={n} degree={degree}: quadrature={quadrature:.17e} exact={exact:.17e} allowance={allowance:e}"

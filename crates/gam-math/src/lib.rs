@@ -23,6 +23,7 @@ pub mod nested_dual;
 pub mod paired_timing;
 pub mod probability;
 pub mod quadrature;
+pub mod roundoff;
 pub mod score_opt;
 pub mod serial_dependence;
 pub mod special;

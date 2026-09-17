@@ -39,28 +39,8 @@
 //! * A **compensated (Kahan/Neumaier) sum** has a bound with no `n` in it at
 //!   all — [`compensated_band`].
 
-/// Unit roundoff `u = EPSILON/2`.
-///
-/// `EPSILON` is the gap between `1.0` and the next representable `f64`; the
-/// error of a single correctly-rounded operation is at most half that gap
-/// relative to the result, which is the quantity every backward-error bound is
-/// stated in. The factor of two between the two is the single most common
-/// source of "the same tolerance, twice, 2× apart".
-pub const UNIT_ROUNDOFF: f64 = f64::EPSILON / 2.0;
-
-/// Wilkinson's growth factor `γ_n = n·u / (1 − n·u)` for an `n`-operation
-/// accumulation.
-///
-/// Returns infinity once `n·u ≥ 1`, where the bound carries no information —
-/// an accumulation that long has no useful error bound, and reporting an
-/// infinite band is the honest answer rather than a negative or wrapped one.
-pub fn accumulation_growth(operations: usize) -> f64 {
-    let scaled = operations as f64 * UNIT_ROUNDOFF;
-    if !(scaled < 1.0) {
-        return f64::INFINITY;
-    }
-    scaled / (1.0 - scaled)
-}
+// Owned by gam-math, the lowest crate, so the math crate's bounds read the same definitions.
+pub use gam_math::roundoff::{UNIT_ROUNDOFF, accumulation_growth};
 
 /// Backward-error band of an inner product of length `terms` whose summands
 /// have absolute sum `absolute_sum`: `γ_terms · absolute_sum`.
