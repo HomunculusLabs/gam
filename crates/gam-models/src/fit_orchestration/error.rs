@@ -276,7 +276,9 @@ impl WorkflowError {
             | Self::MissingDependency { .. }
             | Self::InvalidData { .. }
             | Self::FormulaDsl { .. }
-            | Self::ColumnNotFound { .. } => FailureCategory::Input,
+            | Self::ColumnNotFound { .. }
+            // A marginal-slope link the fit cannot declare: a configuration refusal.
+            | Self::MarginalSlopeLink { .. } => FailureCategory::Input,
         }
     }
 
@@ -301,6 +303,7 @@ impl WorkflowError {
             Self::InvalidData { .. } => "WorkflowError::InvalidData",
             Self::FormulaDsl { .. } => "WorkflowError::FormulaDsl",
             Self::ColumnNotFound { .. } => "WorkflowError::ColumnNotFound",
+            Self::MarginalSlopeLink { .. } => "WorkflowError::MarginalSlopeLink",
         }
     }
 }
