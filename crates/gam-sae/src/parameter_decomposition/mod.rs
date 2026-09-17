@@ -121,6 +121,9 @@ pub mod spectral;
 // Sufficient-state quotient and realization contracts.
 pub mod state;
 
+// Finite-intervention response metric and local state coordinates with finite checks.
+pub mod response_metric;
+
 // Evidence status, failure hypergraph and robust supports.
 pub mod supports;
 
