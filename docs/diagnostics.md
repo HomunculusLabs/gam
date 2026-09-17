@@ -205,7 +205,8 @@ Returns a `FormulaValidation` dataclass that wraps the parsed payload.
 
 Accepts these parser/materialization keyword arguments from `gamfit.fit`,
 with the same semantics, and does no fitting:
-`family`, `offset`, `weights`, `persistent_warm_start_root`,
+`family`, `negative_binomial_theta`, `expectile_tau`, `offset`, `weights`,
+`persistent_warm_start_root`,
 `transformation_normal`, `transformation_normal_stage1`,
 `survival_likelihood`, `survival_time_anchor`, `baseline_target`,
 `baseline_scale`, `baseline_shape`, `baseline_rate`, `baseline_makeham`,
