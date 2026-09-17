@@ -263,19 +263,41 @@ pub fn pool_parallelism() -> Par {
     }
 }
 
-/// #2627 — the degree every decomposition and triangular solve runs at:
-/// sequential, passed to faer per call.
+/// #2627 — the degree every decomposition and triangular solve runs at, except
+/// the self-adjoint EVD ([`evd_parallelism`]): sequential, passed to faer per
+/// call.
 ///
 /// A decomposition's arithmetic partition follows its degree — thin QR and SVD
 /// split at `min(degree, K, 4)`, the self-adjoint EVD at every degree ≥ 2 (pool
 /// jobs 1101442 and 1120486) — so a degree read from the pool made a fit a
 /// function of `RAYON_NUM_THREADS`. On one core sequential is also the fastest
-/// degree; at production sizes it costs up to 2.4× on the EVD (1500: 1.70 s
-/// against 0.71 s at the best parallel degree on four threads), 1.2× on QR
-/// (50k×200) and nothing on the SVD.
+/// degree; at production sizes it costs 1.2× on QR (50k×200) and nothing on
+/// the SVD.
 #[inline]
 pub fn decomposition_parallelism() -> Par {
     Par::Seq
+}
+
+/// #2627/#2267 — the one degree every self-adjoint eigendecomposition runs at.
+///
+/// Why it is a constant: faer's EVD words follow the degree its arithmetic is
+/// partitioned at, not the number of threads that execute it. At `n = 7692`
+/// degree 24 gave the same words on pools of width 24, 8 and 1 (job 1161259,
+/// EPYC 9534), and the same words on EPYC 7702 (job 1159471). So the degree
+/// has to be a constant of the algorithm. A runtime quantity such as the pool
+/// width (`Par::rayon(0)`) would make the words change with the thread count.
+///
+/// Why 24: a measured choice, not a derived one. Above the pool width the degree
+/// costs little where it was measured:
+/// - n=3000 on pool 8: 2.50 s at 24 against 2.48 s at 8 (job 1159471);
+/// - on pool 1 against sequential: 0.483 s against 0.467 s at n=1024 and 1.383 s
+///   against 1.348 s at n=1500 (job 1161804), 101.8 s against 99.7 s at n=7692
+///   (job 1161259).
+/// At n=7692, the dense exact-A dimension of the manifold-SAE criterion, it
+/// bought 8.5× over sequential on 24 threads and 5.7× on 8.
+#[inline]
+pub fn evd_parallelism() -> Par {
+    Par::rayon(24)
 }
 
 /// Process-global depth counter + saved parallelism for [`FaerSequentialScope`].
@@ -2831,10 +2853,10 @@ pub trait FaerEigh {
 }
 
 /// Self-adjoint eigendecomposition `A = U diag(S) Uᵀ` of the triangle `side`
-/// names, at [`decomposition_parallelism`].
+/// names, at [`evd_parallelism`].
 pub fn self_adjoint_evd(a: MatRef<'_, f64>, side: Side) -> Result<(Diag<f64>, Mat<f64>), solvers::EvdError> {
     let n = a.nrows();
-    let par = decomposition_parallelism();
+    let par = evd_parallelism();
     let lower = match side {
         Side::Lower => a,
         Side::Upper => a.transpose(),
@@ -2922,7 +2944,7 @@ impl<S: Data<Elem = f64>> FaerEigh for ArrayBase<S, Ix2> {
             // duration and its parallelism; the count makes "one slow call or
             // many?" answerable without a second run.
             let eigh_started = std::time::Instant::now();
-            let eigh_par = decomposition_parallelism();
+            let eigh_par = evd_parallelism();
             let (s, u) = catch_unwind(AssertUnwindSafe(|| self_adjoint_evd(faerview.as_ref(), side)))
                 .map_err(|_| FaerLinalgError::FactorizationFailed {
                     context: "self-adjoint eigendecomposition panic boundary",
@@ -4506,6 +4528,80 @@ mod tests {
 /// merely printed. These tests never read a log line: no logger is installed
 /// under `cargo test`, so a probe that only logs is byte-identical to one that
 /// never ran.
+#[cfg(test)]
+mod evd_degree_2627_tests {
+    use super::*;
+
+    fn words(values: &Diag<f64>, vectors: &Mat<f64>) -> Vec<u64> {
+        let mut out: Vec<u64> = values.as_ref().column_vector().iter().map(|v| v.to_bits()).collect();
+        for j in 0..vectors.ncols() {
+            for i in 0..vectors.nrows() {
+                out.push(vectors[(i, j)].to_bits());
+            }
+        }
+        out
+    }
+
+    fn sequential_words(a: MatRef<'_, f64>) -> Vec<u64> {
+        let n = a.nrows();
+        let mut s = Diag::<f64>::zeros(n);
+        let mut u = Mat::<f64>::zeros(n, n);
+        let mut mem = MemBuffer::new(faer::linalg::evd::self_adjoint_evd_scratch::<f64>(
+            n,
+            faer::linalg::evd::ComputeEigenvectors::Yes,
+            Par::Seq,
+            Default::default(),
+        ));
+        faer::linalg::evd::self_adjoint_evd(
+            a,
+            s.as_mut(),
+            Some(u.as_mut()),
+            Par::Seq,
+            MemStack::new(&mut mem),
+            Default::default(),
+        )
+        .expect("sequential EVD");
+        words(&s, &u)
+    }
+
+    /// Every self-adjoint EVD carries the same words on pools of width 1, 4 and
+    /// 24, because its degree is [`evd_parallelism`] rather than the pool's.
+    /// The positive control shows that at this dimension a different degree
+    /// gives different words, so the pin cannot pass below faer's parallel
+    /// threshold.
+    #[test]
+    fn self_adjoint_evd_words_do_not_depend_on_the_pool_width_2627() {
+        let n = 1500usize;
+        let mut state = 0x2627_E7D0_u64;
+        let mut a = Mat::<f64>::zeros(n, n);
+        for j in 0..n {
+            for i in j..n {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let value = (state >> 11) as f64 / (1_u64 << 53) as f64 - 0.5;
+                a[(i, j)] = value;
+                a[(j, i)] = value;
+            }
+        }
+        let at_width = |width: usize| {
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(width).build().expect("pool");
+            pool.install(|| {
+                let (values, vectors) = self_adjoint_evd(a.as_ref(), Side::Lower).expect("EVD");
+                words(&values, &vectors)
+            })
+        };
+        let single = at_width(1);
+        assert_eq!(single, at_width(4));
+        assert_eq!(single, at_width(24));
+        assert_ne!(
+            single,
+            sequential_words(a.as_ref()),
+            "at n={n} the degree must change the words, or this pin is vacuous"
+        );
+    }
+}
+
 #[cfg(test)]
 mod parallelism_snapshot_2738_tests {
     use super::*;
