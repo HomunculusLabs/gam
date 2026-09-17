@@ -90,6 +90,19 @@ pub fn symmetric_spectrum_rounding_band(eigenvalues: &[f64]) -> f64 {
     eigenvalues.len() as f64 * f64::EPSILON * spectral_radius
 }
 
+/// The rank of a symmetric Gram, read off its eigenvalues: those above
+/// [`symmetric_spectrum_rounding_band`] plus `assembly_band`.
+///
+/// `assembly_band` is the caller's bound, in eigenvalue units, on the error the
+/// Gram's formation left in the matrix (zero for exact input). A frozen rank and
+/// every later trial of the same block read this one predicate. An eigenvalue
+/// inside the band is not resolved from zero by the decomposition that produced
+/// it, and its sign carries no information.
+pub fn resolved_eigenvalue_count(eigenvalues: &[f64], assembly_band: f64) -> usize {
+    let band = symmetric_spectrum_rounding_band(eigenvalues) + assembly_band;
+    eigenvalues.iter().filter(|&&value| value > band).count()
+}
+
 /// Forward-error band of a **compensated** summation (Kahan–Babuška–Neumaier)
 /// whose summands have absolute sum `absolute_sum`, where building each summand
 /// cost `formation_roundings` floating-point operations.
@@ -107,9 +120,131 @@ pub fn compensated_band(formation_roundings: usize, absolute_sum: f64) -> f64 {
     (2.0 + formation_roundings as f64) * UNIT_ROUNDOFF * absolute_sum
 }
 
+/// Backward-error band on the singular values of an `m × n` factor with largest
+/// singular value `sigma_max`.
+///
+/// A backward-stable SVD returns the exact singular values of `A + δA` with
+/// `‖δA‖₂ ≤ max(m, n)·ε·‖A‖₂`, and by Weyl each computed `σᵢ` is within that of
+/// the true one. A singular value above the band is resolved. At or below it the
+/// decomposition has not separated it from zero.
+pub fn factor_singular_band(rows: usize, cols: usize, sigma_max: f64) -> f64 {
+    rows.max(cols) as f64 * f64::EPSILON * sigma_max
+}
+
+/// Rank partition of a quadratic `S = AᵀA`, read off its energy factor `A`.
+///
+/// `λᵢ(S) = σᵢ(A)²`, so `A` carries `S`'s spectrum at `A`'s own conditioning, and
+/// the rank counts the singular values above [`factor_singular_band`]. Forming
+/// `AᵀA` first squares the conditioning: a mode with `σᵢ/σ₁ = 1e-10` is resolved
+/// here, but its eigenvalue lies below the Gram's rounding band, where it comes
+/// back as roundoff of either sign.
+pub struct FactorRankPartition {
+    /// Singular values of `A`, descending.
+    pub singular_values: Vec<f64>,
+    /// The right singular vectors as rows, in the same order (`n × n`).
+    pub right_vectors: ndarray::Array2<f64>,
+    /// Number of singular values above the backward-error band.
+    pub rank: usize,
+}
+
+impl FactorRankPartition {
+    /// The root rows `σᵢ·vᵢᵀ` for the leading `rank` modes, so `RᵀR` equals `S`
+    /// on the resolved range.
+    pub fn root_rows(&self, rank: usize) -> ndarray::Array2<f64> {
+        let mut root = self.right_vectors.slice(ndarray::s![..rank, ..]).to_owned();
+        for (mut row, &sigma) in root.rows_mut().into_iter().zip(self.singular_values.iter()) {
+            row.mapv_inplace(|value| value * sigma);
+        }
+        root
+    }
+}
+
+/// Partition `S = AᵀA` by the singular values of `A` (see [`FactorRankPartition`]).
+pub fn factor_rank_partition(
+    factor: &ndarray::Array2<f64>,
+) -> Result<FactorRankPartition, crate::faer_ndarray::FaerLinalgError> {
+    use crate::faer_ndarray::FaerSvd;
+    let (rows, cols) = factor.dim();
+    // A thin SVD of an `m × n` factor with `m < n` omits part of the null space
+    // of `AᵀA`. Zero rows add no energy and complete the right singular basis.
+    let completed;
+    let square = if rows < cols {
+        let mut padded = ndarray::Array2::<f64>::zeros((cols, cols));
+        padded.slice_mut(ndarray::s![..rows, ..]).assign(factor);
+        completed = padded;
+        &completed
+    } else {
+        factor
+    };
+    let (_, sigma, vt) = square.svd(false, true)?;
+    let vt = vt.ok_or(crate::faer_ndarray::FaerLinalgError::SvdNoConvergence {
+        context: "factor_rank_partition: right singular vectors",
+    })?;
+    let mut order: Vec<usize> = (0..sigma.len()).collect();
+    order.sort_by(|&i, &j| sigma[j].total_cmp(&sigma[i]));
+    let singular_values: Vec<f64> = order.iter().map(|&i| sigma[i]).collect();
+    let mut right_vectors = ndarray::Array2::<f64>::zeros((order.len(), cols));
+    for (row, &i) in order.iter().enumerate() {
+        right_vectors.row_mut(row).assign(&vt.row(i));
+    }
+    let sigma_max = singular_values.first().copied().unwrap_or(0.0);
+    let band = factor_singular_band(rows, cols, sigma_max);
+    let rank = singular_values.iter().filter(|&&value| value > band).count();
+    Ok(FactorRankPartition {
+        singular_values,
+        right_vectors,
+        rank,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One Gram-side predicate: eigenvalues above the eigensolver band plus the
+    /// caller's assembly band are resolved, and roundoff of either sign is not.
+    #[test]
+    fn resolved_eigenvalue_count_reads_the_band_not_the_sign() {
+        let spectrum = [1.0, 1.0e-8, 1.0e-17, -1.0e-17];
+        assert_eq!(resolved_eigenvalue_count(&spectrum, 0.0), 2);
+        assert_eq!(resolved_eigenvalue_count(&spectrum, 1.0e-7), 1);
+        let band = symmetric_spectrum_rounding_band(&spectrum);
+        assert!(1.0e-17 <= band, "the roundoff pair must sit inside the eigensolver band");
+    }
+
+    /// A graded factor whose small singular value is resolved from `A` though its
+    /// eigenvalue lies below the Gram's rounding band. A wide factor returns a
+    /// complete right singular basis, including the directions of `AᵀA`'s null
+    /// space that a thin SVD omits.
+    #[test]
+    fn factor_rank_partition_resolves_below_the_gram_band_and_completes_wide_factors() {
+        let graded = ndarray::array![[1.0, 0.0, 0.0], [0.0, 1.0e-10, 0.0], [0.0, 0.0, 0.0]];
+        let partition = factor_rank_partition(&graded).expect("graded factor");
+        assert_eq!(partition.rank, 2);
+        let gram_band = symmetric_spectrum_rounding_band(&[1.0, 1.0e-20, 0.0]);
+        assert!(
+            1.0e-20 <= gram_band,
+            "the second mode's eigenvalue must lie inside the Gram's band"
+        );
+        let root = partition.root_rows(partition.rank);
+        let rebuilt = root.t().dot(&root);
+        assert!((rebuilt[[0, 0]] - 1.0).abs() <= 4.0 * f64::EPSILON);
+        assert!((rebuilt[[1, 1]] - 1.0e-20).abs() <= 1.0e-30);
+
+        let wide = ndarray::array![[1.0, 2.0, 0.0, 0.0]];
+        let wide_partition = factor_rank_partition(&wide).expect("wide factor");
+        assert_eq!(wide_partition.rank, 1);
+        assert_eq!(wide_partition.right_vectors.dim(), (4, 4));
+        let gram = wide_partition
+            .right_vectors
+            .dot(&wide_partition.right_vectors.t());
+        for i in 0..4 {
+            for j in 0..4 {
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!((gram[[i, j]] - expected).abs() <= 8.0 * f64::EPSILON);
+            }
+        }
+    }
 
     #[test]
     fn unit_roundoff_is_half_an_epsilon_gap() {

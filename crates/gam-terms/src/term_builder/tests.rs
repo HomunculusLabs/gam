@@ -4350,3 +4350,164 @@ fn col_minmax_refuses_a_constant_column_and_keeps_a_tiny_real_range_2469() {
     let tiny = array![1.0, 1.0 + 4.0e-13, 1.0 + 2.0e-13];
     assert_eq!(col_minmax(tiny.view()), Ok((1.0, 1.0 + 4.0e-13)));
 }
+
+/// #2469 (1b): the gam-linalg partition owner reproduces today's ranks wherever
+/// they are already correct, and resolves the blocks a builder cutoff decides.
+/// - Unframed blocks across the basis families: `resolved_eigenvalue_count` equals
+///   the builder's rank exactly, on a population whose gaps are clean.
+/// - Frame-declared blocks: the declared frame is the nullity, unchanged.
+/// - The Matérn operator mass penalty: at a short length scale the builder's
+///   rank is full, and the collocation factor agrees. At a long one the factor
+///   still resolves every mode, while the builder's dense Gram has lost some.
+/// - A dimension-4 Gram whose smallest eigenvalue straddles the builder cutoff
+///   `dim·1e-10·λmax` (the hybrid-Duchon Primary regime) is resolved by the
+///   owner, and `try_from_dense_psd` truncates it.
+#[test]
+fn partition_owner_keeps_todays_ranks_where_they_are_correct_and_resolves_the_rest_2469() {
+    use gam_linalg::roundoff::{factor_rank_partition, resolved_eigenvalue_count};
+    let n = 240;
+    let spatial = continuous_dataset(
+        &["y", "x", "z", "w"],
+        (0..n)
+            .map(|i| {
+                let x = i as f64 / (n as f64 - 1.0);
+                let z = ((i * 37) % n) as f64 / (n as f64 - 1.0);
+                let w = ((i * 53) % n) as f64 / (n as f64 - 1.0);
+                vec![(6.0 * x).sin() + z * z - w, x, z, w]
+            })
+            .collect(),
+    );
+    let factor = continuous_x_factor_dataset(180, 4);
+    let cases: Vec<(&Dataset, &str)> = vec![
+        (&spatial, "y ~ s(x, bs=ps, k=40)"),
+        (&spatial, "y ~ s(x, bs=cr, k=30)"),
+        (&spatial, "y ~ s(x, bs=cc, k=30)"),
+        (&spatial, "y ~ s(x, z, w, bs=tp)"),
+        (&spatial, "y ~ duchon(x)"),
+        (&spatial, "y ~ duchon(x, z)"),
+        (&spatial, "y ~ s(x, bs=matern, nu=3/2)"),
+        (&spatial, "y ~ te(x, z, w, k=5)"),
+        (&factor, "y ~ s(x, g, bs=fs, k=8)"),
+        (&factor, "y ~ s(x, by=g, k=10)"),
+    ];
+    let mut unframed_blocks = 0_usize;
+    for (ds, formula) in cases {
+        let col_map = ds.column_map();
+        let parsed = parse_formula(formula).expect("partition owner formula");
+        let mut notes = Vec::new();
+        let spec = build_termspec(&parsed.terms, ds, &col_map, &mut notes).expect("termspec");
+        let design = crate::smooth::build_term_collection_design(ds.values.view(), &spec)
+            .expect("design");
+        for term in &design.smooth.terms {
+            for penalty in &term.active_penalties {
+                match penalty.info.structural_null_frame.as_ref() {
+                    Some(frame) => assert_eq!(
+                        frame.ncols(),
+                        penalty.nullity,
+                        "{formula}: the declared frame is the nullity"
+                    ),
+                    None => {
+                        let analysis = crate::basis::analyze_penalty_block(&penalty.matrix)
+                            .expect("penalty spectrum");
+                        assert_eq!(
+                            resolved_eigenvalue_count(&analysis.eigenvalues.to_vec(), 0.0),
+                            penalty.info.effective_rank,
+                            "{formula} {:?}: the owner must reproduce the builder's rank on a clean gap",
+                            penalty.info.source
+                        );
+                        unframed_blocks += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        unframed_blocks >= 12,
+        "the population must exercise the unframed partition, got {unframed_blocks} blocks"
+    );
+
+    let side = 7;
+    let dim = side * side;
+    let mut centers = Array2::<f64>::zeros((dim, 2));
+    for i in 0..side {
+        for j in 0..side {
+            centers[[i * side + j, 0]] = i as f64 / (side - 1) as f64;
+            centers[[i * side + j, 1]] = j as f64 / (side - 1) as f64;
+        }
+    }
+    let mut builder_lost_modes = false;
+    for length_scale in [0.25, 5.0] {
+        let ops = crate::basis::build_matern_collocation_operator_matrices(
+            centers.view(),
+            None,
+            length_scale,
+            crate::basis::MaternNu::FiveHalves,
+            false,
+            None,
+            None,
+        )
+        .expect("collocation operators");
+        let partition = factor_rank_partition(&ops.d0).expect("mass factor partition");
+        assert_eq!(
+            partition.rank, dim,
+            "ℓ={length_scale}: the collocation factor resolves every mass mode"
+        );
+        let filtered = crate::smooth::matern_operator_penalty_triplet_at_length_scale(
+            centers.view(),
+            None,
+            None,
+            crate::basis::MaternNu::FiveHalves,
+            false,
+            None,
+            length_scale,
+        )
+        .expect("Matérn operator triplet");
+        let mass = filtered
+            .active
+            .iter()
+            .find(|penalty| matches!(penalty.info.source, PenaltySource::OperatorMass))
+            .expect("mass block");
+        if length_scale < 1.0 {
+            assert_eq!(
+                mass.info.effective_rank, dim,
+                "short ℓ: today's builder rank is already correct"
+            );
+        } else {
+            builder_lost_modes = mass.info.effective_rank < dim;
+        }
+    }
+    assert!(
+        builder_lost_modes,
+        "long ℓ: the builder's dense Gram must have lost modes the factor resolves"
+    );
+
+    let angle = 0.4_f64;
+    let (cos, sin) = (angle.cos(), angle.sin());
+    let rotation = array![
+        [cos, -sin, 0.0, 0.0],
+        [sin, cos, 0.0, 0.0],
+        [0.0, 0.0, cos, -sin],
+        [0.0, 0.0, sin, cos]
+    ];
+    let spectrum = array![
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 3.0e-4, 0.0, 0.0],
+        [0.0, 0.0, 9.0e-7, 0.0],
+        [0.0, 0.0, 0.0, 3.9e-10]
+    ];
+    let straddle = rotation.dot(&spectrum).dot(&rotation.t());
+    let analysis = crate::basis::analyze_penalty_block(&straddle).expect("straddle spectrum");
+    assert_eq!(
+        resolved_eigenvalue_count(&analysis.eigenvalues.to_vec(), 0.0),
+        4,
+        "the owner resolves the eigenvalue straddling dim·1e-10·λmax"
+    );
+    let truncated =
+        crate::basis::ConstructiveQuadratic::try_from_dense_psd(straddle, "straddle Gram")
+            .expect("PSD straddle Gram");
+    assert_eq!(
+        truncated.factor().nrows(),
+        3,
+        "try_from_dense_psd's dim·1e-10·λmax cutoff truncates a resolved eigenvalue"
+    );
+}
