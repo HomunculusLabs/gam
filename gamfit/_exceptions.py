@@ -106,6 +106,18 @@ MapUniquenessError: type = _rust.MapUniquenessError
 UnsupportedLinkError: type = _rust.UnsupportedLinkError
 InvalidConfigurationError: type = _rust.InvalidConfigurationError
 MissingDependencyError: type = _rust.MissingDependencyError
+
+# Fit-failure categories (#2937). A failure of a fit's solve raises the class of
+# its category; instances carry `variant`, `category` and `causes`. `FitError`
+# itself is a failure with no category to claim. `PirlsConvergenceError` and
+# `RemlConvergenceError` are `FitConvergenceError` subclasses, and
+# `IntegrationError` is now raised only for genuine quadrature failures.
+FitError: type = _rust.FitError
+FitConvergenceError: type = _rust.FitConvergenceError
+FitSeedError: type = _rust.FitSeedError
+FitInvariantError: type = _rust.FitInvariantError
+FitInputError: type = _rust.FitInputError
+FitNumericalError: type = _rust.FitNumericalError
 IntegrationError: type = _rust.IntegrationError
 
 

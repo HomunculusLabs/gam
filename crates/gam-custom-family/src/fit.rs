@@ -3224,6 +3224,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     });
                     Box::new(refusal)
                 }),
+                outer_error: std::sync::Arc::new(e),
             });
         }
     };

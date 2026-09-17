@@ -3395,7 +3395,7 @@ pub(crate) fn run_outer_with_plan(
             String::new()
         };
         if started_seeds == 0 {
-            EstimationError::RemlOptimizationFailed(format_no_seeds_passed(
+            EstimationError::StartupSeedsRefused(format_no_seeds_passed(
                 context,
                 &stats,
                 &seed_rejections,

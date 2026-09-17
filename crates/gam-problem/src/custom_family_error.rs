@@ -685,6 +685,11 @@ pub enum CustomFamilyError {
     OuterSmoothingFailed {
         reason: String,
         last_refusal: Option<Box<CustomFamilyError>>,
+        /// The outer search's own typed verdict, which `reason` renders. It is
+        /// what decides the failure's category: a search whose every seed was
+        /// refused and one that started and did not converge render into the
+        /// same sentence here (#2937).
+        outer_error: std::sync::Arc<crate::EstimationError>,
     },
 }
 
@@ -1374,6 +1379,55 @@ impl CustomFamilyError {
             // The whole search refused; its last refusal is carried for the
             // caller to read, not re-graded here.
             | Self::OuterSmoothingFailed { .. } => false,
+        }
+    }
+
+    /// The fixed category of this failure (#2937). Exhaustive with no wildcard
+    /// arm, for the reason [`Self::is_trial_point_infeasible`] is.
+    #[must_use]
+    pub fn failure_category(&self) -> crate::FailureCategory {
+        use crate::FailureCategory;
+        match self {
+            // "custom-family optimization error in {context}": the outer or
+            // inner optimizer of a context ended without its certificate.
+            Self::Optimization { .. }
+            | Self::InnerSolveNotConverged { .. }
+            // Reaching the boundary, a trial-point refusal means the search
+            // never found a point it could evaluate.
+            | Self::TrialPointRefused { .. } => FailureCategory::Convergence,
+            Self::OuterSmoothingFailed { outer_error, .. } => outer_error.failure_category(),
+            Self::InvalidInput { .. }
+            | Self::UnsupportedConfiguration { .. }
+            // Its producers refuse block specifications (duplicate names, bound
+            // layouts) before any solve.
+            | Self::ConstraintViolation { .. }
+            | Self::IdentifiabilityFailure { .. }
+            | Self::MapUniquenessFailure { .. } => FailureCategory::Input,
+            Self::DimensionMismatch { .. } => FailureCategory::Invariant,
+            Self::NumericalFailure { .. } | Self::BasisDecompositionFailed { .. } => {
+                FailureCategory::Numerical
+            }
+        }
+    }
+
+    /// The `Enum::Variant` name of this error, the one a front end prints
+    /// beside the message (#2937). A whole-search refusal is named by the
+    /// outer search's verdict it carries.
+    #[must_use]
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            Self::InvalidInput { .. } => "CustomFamilyError::InvalidInput",
+            Self::Optimization { .. } => "CustomFamilyError::Optimization",
+            Self::DimensionMismatch { .. } => "CustomFamilyError::DimensionMismatch",
+            Self::NumericalFailure { .. } => "CustomFamilyError::NumericalFailure",
+            Self::ConstraintViolation { .. } => "CustomFamilyError::ConstraintViolation",
+            Self::UnsupportedConfiguration { .. } => "CustomFamilyError::UnsupportedConfiguration",
+            Self::InnerSolveNotConverged { .. } => "CustomFamilyError::InnerSolveNotConverged",
+            Self::BasisDecompositionFailed { .. } => "CustomFamilyError::BasisDecompositionFailed",
+            Self::IdentifiabilityFailure { .. } => "CustomFamilyError::IdentifiabilityFailure",
+            Self::MapUniquenessFailure { .. } => "CustomFamilyError::MapUniquenessFailure",
+            Self::TrialPointRefused { .. } => "CustomFamilyError::TrialPointRefused",
+            Self::OuterSmoothingFailed { outer_error, .. } => outer_error.variant_name(),
         }
     }
 }

@@ -242,7 +242,8 @@ pub use solver::estimate::reml::reml_outer_engine::PenaltySubspaceTrace;
 // `SharedBorderTopology` (`new` for a named border set, `disjoint` /
 // `fully_coupled` for the two extremes).
 pub use gam_problem::{
-    DeclaredHessianForm, Derivative, EfsEval, HessianMaterialization, HessianOperator,
+    DeclaredHessianForm, Derivative, EfsEval, FailureCategory, HessianMaterialization,
+    HessianOperator,
     HessianValue, IndexedResponseError, ObjectiveEvalError, OuterEval, OuterStrategyError,
     SeparableCellMeasure, checked_exp_log_strength, checked_log_strength,
 };

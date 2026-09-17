@@ -1,3 +1,9 @@
+use std::sync::Arc;
+
+use gam_problem::{CustomFamilyError, EstimationError, FailureCategory};
+
+use crate::survival::marginal_slope::SurvivalMarginalSlopeError;
+
 pub(crate) trait WorkflowCauseCountResult {
     fn into_workflow_result(self) -> Result<usize, String>;
 }
@@ -73,10 +79,9 @@ pub enum WorkflowError {
     /// cause count is missing for the requested mode (e.g. cause-specific
     /// fit with one cause, latent-cloglog without a fixed sigma).
     MissingDependency { reason: String },
-    /// An underlying numerical step (PIRLS / smoothing-parameter
-    /// optimizer / profile-cost evaluation) failed to converge or
-    /// produced a non-finite value that downstream code cannot consume.
-    IntegrationFailed { reason: String },
+    /// A fit's solve failed. The typed engine error that stopped it is kept
+    /// whole, under the context each orchestration layer added (#2937).
+    Fit(FitFailure),
     /// Training data failed the shared fit-boundary contract.
     InvalidData { column: String, problem: String },
     /// A spatial basis could not be certified at its current resolution and
@@ -88,6 +93,9 @@ pub enum WorkflowError {
         current_centers: usize,
         attempted_centers: usize,
         reason: String,
+        /// The certification refit's own failure, when a refit is what failed.
+        /// It decides the failure's category; `reason` renders it (#2937).
+        refit_failure: Option<Box<WorkflowError>>,
     },
     /// Formula parsing / term-resolution failed before materialization; the
     /// source retains the parser-layer category and argument context.
@@ -124,8 +132,8 @@ impl std::fmt::Display for WorkflowError {
         match self {
             WorkflowError::InvalidConfig { reason }
             | WorkflowError::SchemaMismatch { reason }
-            | WorkflowError::MissingDependency { reason }
-            | WorkflowError::IntegrationFailed { reason } => f.write_str(reason),
+            | WorkflowError::MissingDependency { reason } => f.write_str(reason),
+            WorkflowError::Fit(failure) => std::fmt::Display::fmt(failure, f),
             WorkflowError::InvalidData { column, problem } => {
                 write!(f, "column '{column}' {problem}")
             }
@@ -134,6 +142,7 @@ impl std::fmt::Display for WorkflowError {
                 current_centers,
                 attempted_centers,
                 reason,
+                ..
             } => write!(
                 f,
                 "spatial term '{term}' remains under-resolution-uncertain at {current_centers} \
@@ -214,10 +223,11 @@ impl std::error::Error for WorkflowError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             WorkflowError::FormulaDsl { source, .. } => Some(source),
+            // Renders exactly its failure, so it is transparent to the chain.
+            WorkflowError::Fit(failure) => failure.source(),
             WorkflowError::InvalidConfig { .. }
             | WorkflowError::SchemaMismatch { .. }
             | WorkflowError::MissingDependency { .. }
-            | WorkflowError::IntegrationFailed { .. }
             | WorkflowError::InvalidData { .. }
             | WorkflowError::SpatialUnderresolved { .. }
             | WorkflowError::ColumnNotFound { .. }
@@ -248,6 +258,448 @@ impl WorkflowError {
             ),
             _ => None,
         }
+    }
+
+    /// The fixed category of this failure (#2937). Exhaustive with no wildcard
+    /// arm: a new variant is categorized by whoever adds it.
+    #[must_use]
+    pub fn failure_category(&self) -> FailureCategory {
+        match self {
+            Self::Fit(failure) => failure.category(),
+            Self::SpatialUnderresolved { refit_failure, .. } => refit_failure
+                .as_deref()
+                // No refit failed: the resolution search ran out of admissible
+                // centers without certifying the basis.
+                .map_or(FailureCategory::Convergence, Self::failure_category),
+            Self::InvalidConfig { .. }
+            | Self::SchemaMismatch { .. }
+            | Self::MissingDependency { .. }
+            | Self::InvalidData { .. }
+            | Self::FormulaDsl { .. }
+            | Self::ColumnNotFound { .. } => FailureCategory::Input,
+        }
+    }
+
+    /// The `Enum::Variant` name of the error that decided this failure, the one
+    /// a front end prints beside the message (#2937). A failure that only
+    /// wraps another is named by what it wraps.
+    #[must_use]
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            Self::Fit(failure) => failure.variant_name(),
+            Self::SpatialUnderresolved {
+                refit_failure: Some(refit_failure),
+                ..
+            } => refit_failure.variant_name(),
+            Self::SpatialUnderresolved {
+                refit_failure: None,
+                ..
+            } => "WorkflowError::SpatialUnderresolved",
+            Self::InvalidConfig { .. } => "WorkflowError::InvalidConfig",
+            Self::SchemaMismatch { .. } => "WorkflowError::SchemaMismatch",
+            Self::MissingDependency { .. } => "WorkflowError::MissingDependency",
+            Self::InvalidData { .. } => "WorkflowError::InvalidData",
+            Self::FormulaDsl { .. } => "WorkflowError::FormulaDsl",
+            Self::ColumnNotFound { .. } => "WorkflowError::ColumnNotFound",
+        }
+    }
+}
+
+/// A fit's solve failure with the typed error that stopped it (#2937).
+///
+/// The `fit_*_model` helpers returned `Result<_, String>`, and `fit_model`
+/// wrapped every one of those strings as an integration failure, so a refused
+/// start, a stalled outer search and a numerical refusal all reached Python as
+/// `IntegrationError`. A `FitFailure` keeps the engine error whole under the
+/// context the layers above it add, so a front end can name the variant and
+/// select an exception class from its category without reading the text.
+#[derive(Debug, Clone)]
+pub enum FitFailure {
+    /// A typed estimation error from the solver.
+    Estimation(Arc<EstimationError>),
+    /// A typed custom-family error.
+    CustomFamily(CustomFamilyError),
+    /// A typed survival marginal-slope error.
+    SurvivalMarginalSlope(SurvivalMarginalSlopeError),
+    /// A nested fit through the workflow boundary failed, e.g. a CTN stage fit.
+    Workflow(Box<WorkflowError>),
+    /// A failure raised in orchestration code, categorized where it is raised.
+    /// A `String` converted without a category lands here as
+    /// [`FailureCategory::Unclassified`], which is what it honestly is.
+    Raised {
+        category: FailureCategory,
+        reason: String,
+    },
+    /// Context a layer put in front of a failure it did not produce. Renders
+    /// `"{context}: {source}"`, the text those layers used to `format!`.
+    Context {
+        context: String,
+        source: Box<FitFailure>,
+    },
+    /// Evidence a layer appended after a failure it did not produce, such as a
+    /// rescue that was attempted. Renders `"{source}; {note}"`.
+    Annotated {
+        source: Box<FitFailure>,
+        note: String,
+    },
+}
+
+impl FitFailure {
+    /// A failure raised in orchestration code under the category it belongs to.
+    #[must_use]
+    pub fn raised(category: FailureCategory, reason: impl Into<String>) -> Self {
+        Self::Raised {
+            category,
+            reason: reason.into(),
+        }
+    }
+
+    /// Put `context` in front of this failure without changing what it is.
+    #[must_use]
+    pub fn context(self, context: impl Into<String>) -> Self {
+        Self::Context {
+            context: context.into(),
+            source: Box::new(self),
+        }
+    }
+
+    /// Append `note` after this failure without changing what it is.
+    #[must_use]
+    pub fn annotated(self, note: impl Into<String>) -> Self {
+        Self::Annotated {
+            source: Box::new(self),
+            note: note.into(),
+        }
+    }
+
+    /// The fixed category of the error this failure ends in.
+    #[must_use]
+    pub fn category(&self) -> FailureCategory {
+        match self {
+            Self::Context { source, .. } | Self::Annotated { source, .. } => source.category(),
+            Self::Estimation(err) => err.failure_category(),
+            Self::CustomFamily(err) => err.failure_category(),
+            Self::SurvivalMarginalSlope(err) => err.failure_category(),
+            Self::Workflow(err) => err.failure_category(),
+            Self::Raised { category, .. } => *category,
+        }
+    }
+
+    /// The `Enum::Variant` name of the error this failure ends in.
+    #[must_use]
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            Self::Context { source, .. } | Self::Annotated { source, .. } => source.variant_name(),
+            Self::Estimation(err) => err.variant_name(),
+            Self::CustomFamily(err) => err.variant_name(),
+            Self::SurvivalMarginalSlope(err) => err.variant_name(),
+            Self::Workflow(err) => err.variant_name(),
+            Self::Raised { category, .. } => match category {
+                FailureCategory::Convergence => "FitFailure::Convergence",
+                FailureCategory::StartupSeeds => "FitFailure::StartupSeeds",
+                FailureCategory::Invariant => "FitFailure::Invariant",
+                FailureCategory::Input => "FitFailure::Input",
+                FailureCategory::Numerical => "FitFailure::Numerical",
+                FailureCategory::Integration => "FitFailure::Integration",
+                FailureCategory::Unclassified => "FitFailure::Unclassified",
+            },
+        }
+    }
+
+    /// The typed estimation error this failure ends in, when it ends in one,
+    /// seen through the wrappers that only carry it.
+    #[must_use]
+    pub fn estimation_error(&self) -> Option<&EstimationError> {
+        match self {
+            Self::Context { source, .. } | Self::Annotated { source, .. } => {
+                source.estimation_error()
+            }
+            Self::Estimation(err) => Some(err.innermost_estimation_error()),
+            Self::CustomFamily(CustomFamilyError::OuterSmoothingFailed { outer_error, .. }) => {
+                Some(outer_error.innermost_estimation_error())
+            }
+            Self::Workflow(err) => match err.as_ref() {
+                WorkflowError::Fit(failure) => failure.estimation_error(),
+                _ => None,
+            },
+            Self::CustomFamily(_) | Self::SurvivalMarginalSlope(_) | Self::Raised { .. } => None,
+        }
+    }
+
+    /// The message chain, outermost first: each layer's context, then the
+    /// message of the error that stopped the fit, then the notes appended after
+    /// it, innermost first.
+    #[must_use]
+    pub fn causes(&self) -> Vec<String> {
+        let mut causes = Vec::new();
+        let mut notes = Vec::new();
+        let mut current = self;
+        loop {
+            match current {
+                Self::Context { context, source } => {
+                    causes.push(context.clone());
+                    current = source;
+                }
+                Self::Annotated { source, note } => {
+                    notes.push(note.clone());
+                    current = source;
+                }
+                Self::Workflow(err) => match err.as_ref() {
+                    WorkflowError::Fit(failure) => current = failure,
+                    other => {
+                        causes.push(other.to_string());
+                        break;
+                    }
+                },
+                leaf => {
+                    causes.push(leaf.to_string());
+                    break;
+                }
+            }
+        }
+        causes.extend(notes.into_iter().rev());
+        causes
+    }
+}
+
+impl std::fmt::Display for FitFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Estimation(err) => std::fmt::Display::fmt(err, f),
+            Self::CustomFamily(err) => std::fmt::Display::fmt(err, f),
+            Self::SurvivalMarginalSlope(err) => std::fmt::Display::fmt(err, f),
+            Self::Workflow(err) => std::fmt::Display::fmt(err, f),
+            Self::Raised { reason, .. } => f.write_str(reason),
+            Self::Context { context, source } => write!(f, "{context}: {source}"),
+            Self::Annotated { source, note } => write!(f, "{source}; {note}"),
+        }
+    }
+}
+
+impl std::error::Error for FitFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Context { source, .. } | Self::Annotated { source, .. } => Some(source.as_ref()),
+            // The leaf wrappers render exactly their error, so they are
+            // transparent to the chain.
+            Self::Estimation(err) => err.source(),
+            Self::CustomFamily(err) => err.source(),
+            Self::SurvivalMarginalSlope(err) => err.source(),
+            Self::Workflow(err) => err.source(),
+            Self::Raised { .. } => None,
+        }
+    }
+}
+
+/// Legacy `Result<_, String>` helpers inside a fit convert through `?`. A
+/// string names no category, so it is recorded as unclassified rather than
+/// guessed.
+impl From<String> for FitFailure {
+    fn from(reason: String) -> Self {
+        Self::raised(FailureCategory::Unclassified, reason)
+    }
+}
+
+impl From<&str> for FitFailure {
+    fn from(reason: &str) -> Self {
+        Self::raised(FailureCategory::Unclassified, reason)
+    }
+}
+
+impl From<EstimationError> for FitFailure {
+    fn from(err: EstimationError) -> Self {
+        Self::Estimation(Arc::new(err))
+    }
+}
+
+impl From<CustomFamilyError> for FitFailure {
+    fn from(err: CustomFamilyError) -> Self {
+        Self::CustomFamily(err)
+    }
+}
+
+impl From<SurvivalMarginalSlopeError> for FitFailure {
+    fn from(err: SurvivalMarginalSlopeError) -> Self {
+        Self::SurvivalMarginalSlope(err)
+    }
+}
+
+impl From<WorkflowError> for FitFailure {
+    fn from(err: WorkflowError) -> Self {
+        match err {
+            WorkflowError::Fit(failure) => failure,
+            other => Self::Workflow(Box::new(other)),
+        }
+    }
+}
+
+impl From<FitFailure> for WorkflowError {
+    fn from(failure: FitFailure) -> Self {
+        match failure {
+            FitFailure::Workflow(err) => *err,
+            failure => Self::Fit(failure),
+        }
+    }
+}
+
+#[cfg(test)]
+mod fit_failure_tests {
+    use super::*;
+
+    fn seeds_refused() -> EstimationError {
+        EstimationError::StartupSeedsRefused(
+            "no candidate seeds passed outer startup validation (custom family):".to_string(),
+        )
+    }
+
+    #[test]
+    fn every_category_keeps_its_variant_through_the_fit_model_boundary_2937() {
+        let cases = vec![
+            (
+                FitFailure::from(EstimationError::RemlOptimizationFailed("stalled".to_string())),
+                FailureCategory::Convergence,
+                "EstimationError::RemlOptimizationFailed",
+            ),
+            (
+                FitFailure::from(seeds_refused()),
+                FailureCategory::StartupSeeds,
+                "EstimationError::StartupSeedsRefused",
+            ),
+            (
+                FitFailure::from(EstimationError::FitResultInvariantViolated(
+                    "UnifiedFitResult inference conditional covariance must match top-level \
+                     covariance_conditional"
+                        .to_string(),
+                )),
+                FailureCategory::Invariant,
+                "EstimationError::FitResultInvariantViolated",
+            ),
+            (
+                FitFailure::from(EstimationError::InvalidInput("bad weights".to_string())),
+                FailureCategory::Input,
+                "EstimationError::InvalidInput",
+            ),
+            (
+                FitFailure::from(EstimationError::HessianNotPositiveDefinite {
+                    min_eigenvalue: -1.0,
+                }),
+                FailureCategory::Numerical,
+                "EstimationError::HessianNotPositiveDefinite",
+            ),
+            (
+                FitFailure::from(SurvivalMarginalSlopeError::RootSolveFailed {
+                    reason: "survival marginal-slope intercept solve failed".to_string(),
+                }),
+                FailureCategory::Numerical,
+                "SurvivalMarginalSlopeError::RootSolveFailed",
+            ),
+            (
+                FitFailure::from(SurvivalMarginalSlopeError::IntegrationFailed {
+                    reason: "quadrature missed its tolerance".to_string(),
+                }),
+                FailureCategory::Integration,
+                "SurvivalMarginalSlopeError::IntegrationFailed",
+            ),
+            (
+                FitFailure::from("a helper's prose".to_string()),
+                FailureCategory::Unclassified,
+                "FitFailure::Unclassified",
+            ),
+        ];
+        for (failure, category, variant) in cases {
+            let message = failure.to_string();
+            // `fit_model` hands each helper's failure over as `WorkflowError::from`.
+            let boundary = WorkflowError::from(failure);
+            assert!(matches!(boundary, WorkflowError::Fit(_)), "{boundary}");
+            assert_eq!(boundary.failure_category(), category, "{message}");
+            assert_eq!(boundary.variant_name(), variant, "{message}");
+            assert_eq!(boundary.to_string(), message, "the boundary rewrote the message");
+        }
+    }
+
+    #[test]
+    fn a_custom_family_search_failure_is_categorized_by_its_outer_verdict_2937() {
+        let failure = FitFailure::from(CustomFamilyError::OuterSmoothingFailed {
+            reason: format!(
+                "outer smoothing optimization failed certified-fit validation after exhausting \
+                 strategy fallbacks: {}",
+                seeds_refused()
+            ),
+            last_refusal: None,
+            outer_error: Arc::new(seeds_refused()),
+        });
+        assert_eq!(failure.category(), FailureCategory::StartupSeeds);
+        assert_eq!(failure.variant_name(), "EstimationError::StartupSeedsRefused");
+        assert!(matches!(
+            failure.estimation_error(),
+            Some(EstimationError::StartupSeedsRefused(_))
+        ));
+    }
+
+    #[test]
+    fn context_and_notes_keep_the_category_and_the_old_text_2937() {
+        let failure = FitFailure::from(seeds_refused())
+            .context("exact two-block spatial optimization failed")
+            .annotated("the automatic Firth/Jeffreys rescue WAS attempted");
+        assert_eq!(
+            failure.to_string(),
+            format!(
+                "exact two-block spatial optimization failed: {}; the automatic Firth/Jeffreys \
+                 rescue WAS attempted",
+                seeds_refused()
+            )
+        );
+        assert_eq!(failure.category(), FailureCategory::StartupSeeds);
+        assert_eq!(
+            failure.causes(),
+            vec![
+                "exact two-block spatial optimization failed".to_string(),
+                seeds_refused().to_string(),
+                "the automatic Firth/Jeffreys rescue WAS attempted".to_string(),
+            ]
+        );
+        assert!(std::error::Error::source(&failure).is_some());
+    }
+
+    #[test]
+    fn a_spatial_certification_refit_is_categorized_by_the_refit_failure_2937() {
+        let refit = WorkflowError::from(FitFailure::from(seeds_refused()));
+        let refused = WorkflowError::SpatialUnderresolved {
+            term: "s(x)".to_string(),
+            current_centers: 8,
+            attempted_centers: 16,
+            reason: refit.to_string(),
+            refit_failure: Some(Box::new(refit)),
+        };
+        assert_eq!(refused.failure_category(), FailureCategory::StartupSeeds);
+        assert_eq!(refused.variant_name(), "EstimationError::StartupSeedsRefused");
+        let exhausted = WorkflowError::SpatialUnderresolved {
+            term: "s(x)".to_string(),
+            current_centers: 8,
+            attempted_centers: 8,
+            reason: "term EDF remains at its realized basis ceiling".to_string(),
+            refit_failure: None,
+        };
+        assert_eq!(exhausted.failure_category(), FailureCategory::Convergence);
+        assert_eq!(exhausted.variant_name(), "WorkflowError::SpatialUnderresolved");
+    }
+
+    #[test]
+    fn nested_workflow_failures_do_not_stack_wrappers_2937() {
+        let config = WorkflowError::InvalidConfig {
+            reason: "unknown family".to_string(),
+        };
+        let lifted = FitFailure::from(config);
+        assert_eq!(lifted.category(), FailureCategory::Input);
+        assert!(matches!(
+            WorkflowError::from(lifted),
+            WorkflowError::InvalidConfig { .. }
+        ));
+        let failure = FitFailure::from(seeds_refused());
+        assert!(matches!(
+            FitFailure::from(WorkflowError::Fit(failure)),
+            FitFailure::Estimation(_)
+        ));
     }
 }
 

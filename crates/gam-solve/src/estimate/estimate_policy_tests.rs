@@ -1120,6 +1120,33 @@ fn unified_fit_decode_validation_rejects_beta_drift_from_blocks() {
 }
 
 #[test]
+fn conditional_covariance_disagreement_is_a_typed_fit_result_invariant_2937() {
+    // gam#1789's landmine: the inference block's conditional covariance drifted
+    // from the top-level one. It is the engine breaking its own contract, and it
+    // must say so in its type rather than as `InvalidInput` (#2937).
+    let mut parts = decode_invariant_test_parts();
+    parts
+        .inference
+        .as_mut()
+        .expect("fixture inference")
+        .beta_covariance = Some(array![[1.0, 0.1], [0.1, 3.0]].into());
+    let err = UnifiedFitResult::try_from_parts(parts)
+        .expect_err("a drifted inference covariance must be refused");
+    assert!(
+        matches!(err, EstimationError::FitResultInvariantViolated(_)),
+        "unexpected variant: {err}"
+    );
+    assert_eq!(err.failure_category(), gam_problem::FailureCategory::Invariant);
+    assert_eq!(err.variant_name(), "EstimationError::FitResultInvariantViolated");
+    assert_eq!(
+        err.to_string(),
+        "Invalid input: UnifiedFitResult inference conditional covariance must match \
+         top-level covariance_conditional",
+        "the refusal keeps the text it had as InvalidInput"
+    );
+}
+
+#[test]
 fn unified_fit_validation_rejects_edf_smoothing_parameter_drift() {
     let mut fit = decode_invariant_test_fit();
     fit.inference

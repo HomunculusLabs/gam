@@ -28,6 +28,7 @@ pub mod dispersion;
 pub mod dispersion_cov;
 pub mod estimation_error;
 pub mod execution_path;
+pub mod failure_category;
 pub mod family_options;
 pub mod finite_validation;
 pub mod fisher_rao;
@@ -133,6 +134,7 @@ pub use estimation_error::{
 };
 pub use estimation_error::FitStationarityEvidence;
 pub use execution_path::ExecutionPath;
+pub use failure_category::FailureCategory;
 pub use family_options::{ExactNewtonOuterObjective, ExactOuterDerivativeOrder};
 pub use finite_validation::{
     bail_if_cached_beta_non_finite,

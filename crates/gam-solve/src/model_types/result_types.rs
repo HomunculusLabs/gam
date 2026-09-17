@@ -4175,6 +4175,19 @@ pub fn is_zero_dispersion_boundary(
         && standard_deviation == 0.0
 }
 
+/// Refuse a fit result that violates its own consistency contract. These
+/// checks describe the engine's assembly, not the caller's data, so they carry
+/// [`EstimationError::FitResultInvariantViolated`] rather than `InvalidInput`
+/// (#2937).
+macro_rules! bail_fit_result_invariant {
+    ($fmt:literal $(, $($arg:tt)*)?) => {
+        return Err(EstimationError::FitResultInvariantViolated(format!($fmt $(, $($arg)*)?)))
+    };
+    ($msg:expr $(,)?) => {
+        return Err(EstimationError::FitResultInvariantViolated($msg))
+    };
+}
+
 impl UnifiedFitResult {
     /// Proof carried by every fitted model. Callers never need to re-check a
     /// convergence boolean; construction has already consumed and validated
@@ -4386,15 +4399,15 @@ impl UnifiedFitResult {
 
         let training_sample_size =
             std::num::NonZeroUsize::new(training_sample_size).ok_or_else(|| {
-                EstimationError::InvalidInput(
+                EstimationError::FitResultInvariantViolated(
                     "UnifiedFitResult training_sample_size must be positive".to_string(),
                 )
             })?;
         if blocks.is_empty() {
-            crate::bail_invalid_estim!("UnifiedFitResult requires at least one coefficient block");
+            bail_fit_result_invariant!("UnifiedFitResult requires at least one coefficient block");
         }
         if log_lambdas.len() != lambdas.len() {
-            crate::bail_invalid_estim!(
+            bail_fit_result_invariant!(
                 "UnifiedFitResult lambda mismatch: log_lambdas={}, lambdas={}",
                 log_lambdas.len(),
                 lambdas.len()
@@ -4414,13 +4427,13 @@ impl UnifiedFitResult {
         let beta = flatten_block_betas(&blocks);
         let block_lambdas = flatten_block_lambdas(&blocks);
         if block_lambdas != lambdas {
-            crate::bail_invalid_estim!("UnifiedFitResult top-level lambdas must match block lambdas concatenated in block order"
+            bail_fit_result_invariant!("UnifiedFitResult top-level lambdas must match block lambdas concatenated in block order"
                     .to_string(),);
         }
         validate_all_finite_estimation("fit_result.log_lambdas", log_lambdas.iter().copied())?;
         validate_all_finite_estimation("fit_result.lambdas", lambdas.iter().copied())?;
         if !log_lambdas_match_lambdas(&log_lambdas, &lambdas) {
-            crate::bail_invalid_estim!(
+            bail_fit_result_invariant!(
                 "UnifiedFitResult log_lambdas must equal ln(lambdas) elementwise"
             );
         }
@@ -4449,7 +4462,7 @@ impl UnifiedFitResult {
         // disagree on presence would let a consumer that reads only one of them
         // silently recover the value the other declined to state.
         if reml_score.is_none() != penalized_objective.is_none() {
-            crate::bail_invalid_estim!(
+            bail_fit_result_invariant!(
                 "UnifiedFitResult reml_score and penalized_objective must be present or absent \
                  together; got reml_score={reml_score:?}, penalized_objective={penalized_objective:?}"
             );
@@ -4466,7 +4479,7 @@ impl UnifiedFitResult {
             standard_deviation,
         );
         if at_boundary && let Some(reml_score) = reml_score {
-            crate::bail_invalid_estim!(
+            bail_fit_result_invariant!(
                 "UnifiedFitResult reports a REML/LAML criterion {reml_score} at the exact-fit \
                  Gaussian boundary (profiled scale sigma_hat = 0), where the restricted \
                  likelihood is unbounded and no finite criterion exists; report `None`"
@@ -4493,7 +4506,7 @@ impl UnifiedFitResult {
             if let Some(working) = geom.working.as_ref()
                 && working.response.len() != training_sample_size.get()
             {
-                crate::bail_invalid_estim!(
+                bail_fit_result_invariant!(
                     "UnifiedFitResult working row count {} must match training_sample_size {}",
                     working.response.len(),
                     training_sample_size.get()
@@ -4516,7 +4529,7 @@ impl UnifiedFitResult {
         if let Some(cov) = covariance_conditional.as_ref()
             && (cov.nrows() != p || cov.ncols() != p)
         {
-            crate::bail_invalid_estim!(
+            bail_fit_result_invariant!(
                 "UnifiedFitResult conditional covariance shape mismatch: got {}x{}, expected {}x{}",
                 cov.nrows(),
                 cov.ncols(),
@@ -4527,7 +4540,7 @@ impl UnifiedFitResult {
         if let Some(cov) = covariance_corrected.as_ref()
             && (cov.nrows() != p || cov.ncols() != p)
         {
-            crate::bail_invalid_estim!(
+            bail_fit_result_invariant!(
                 "UnifiedFitResult corrected covariance shape mismatch: got {}x{}, expected {}x{}",
                 cov.nrows(),
                 cov.ncols(),
@@ -4538,7 +4551,7 @@ impl UnifiedFitResult {
         let penalized_hessian_dim = if let Some(geom) = geometry.as_ref() {
             let gauge = &geom.coefficient_gauge;
             if gauge.n_blocks() != blocks.len() {
-                crate::bail_invalid_estim!(
+                bail_fit_result_invariant!(
                     "UnifiedFitResult geometry coefficient gauge block count mismatch: gauge={}, fitted blocks={}",
                     gauge.n_blocks(),
                     blocks.len(),
@@ -4551,7 +4564,7 @@ impl UnifiedFitResult {
                 .enumerate()
             {
                 if raw_width != block.beta.len() {
-                    crate::bail_invalid_estim!(
+                    bail_fit_result_invariant!(
                         "UnifiedFitResult geometry coefficient gauge raw block {block_index} has width {raw_width}, expected saved beta width {}",
                         block.beta.len(),
                     );
@@ -4569,7 +4582,7 @@ impl UnifiedFitResult {
         };
         if let Some(inf) = inference.as_ref() {
             if !inf.edf_by_block.is_empty() && inf.edf_by_block.len() != lambdas.len() {
-                crate::bail_invalid_estim!(
+                bail_fit_result_invariant!(
                     "UnifiedFitResult EDF smoothing-parameter count mismatch: edf_by_block={}, lambdas={}",
                     inf.edf_by_block.len(),
                     lambdas.len()
@@ -4577,7 +4590,7 @@ impl UnifiedFitResult {
             }
             if !inf.penalty_block_trace.is_empty() && inf.penalty_block_trace.len() != lambdas.len()
             {
-                crate::bail_invalid_estim!(
+                bail_fit_result_invariant!(
                     "UnifiedFitResult EDF smoothing-parameter count mismatch: penalty_block_trace={}, lambdas={}",
                     inf.penalty_block_trace.len(),
                     lambdas.len()
@@ -4590,7 +4603,7 @@ impl UnifiedFitResult {
             )?;
             if let Some(cov) = inf.beta_covariance.as_ref() {
                 if cov.nrows() != p || cov.ncols() != p {
-                    crate::bail_invalid_estim!(
+                    bail_fit_result_invariant!(
                         "UnifiedFitResult inference conditional covariance shape mismatch: got {}x{}, expected {}x{}",
                         cov.nrows(),
                         cov.ncols(),
@@ -4601,11 +4614,11 @@ impl UnifiedFitResult {
                 match covariance_conditional.as_ref() {
                     Some(top) if **cov == *top => {}
                     Some(_) => {
-                        crate::bail_invalid_estim!("UnifiedFitResult inference conditional covariance must match top-level covariance_conditional"
+                        bail_fit_result_invariant!("UnifiedFitResult inference conditional covariance must match top-level covariance_conditional"
                                 .to_string(),);
                     }
                     None => {
-                        crate::bail_invalid_estim!("UnifiedFitResult inference conditional covariance requires top-level covariance_conditional"
+                        bail_fit_result_invariant!("UnifiedFitResult inference conditional covariance requires top-level covariance_conditional"
                                 .to_string(),);
                     }
                 }
@@ -4613,7 +4626,7 @@ impl UnifiedFitResult {
             if let Some(se) = inf.beta_standard_errors.as_ref()
                 && se.len() != p
             {
-                crate::bail_invalid_estim!(
+                bail_fit_result_invariant!(
                     "UnifiedFitResult beta standard error length mismatch: got {}, expected {}",
                     se.len(),
                     p
@@ -4621,7 +4634,7 @@ impl UnifiedFitResult {
             }
             if let Some(cov) = inf.beta_covariance_corrected.as_ref() {
                 if cov.nrows() != p || cov.ncols() != p {
-                    crate::bail_invalid_estim!(
+                    bail_fit_result_invariant!(
                         "UnifiedFitResult inference corrected covariance shape mismatch: got {}x{}, expected {}x{}",
                         cov.nrows(),
                         cov.ncols(),
@@ -4632,11 +4645,11 @@ impl UnifiedFitResult {
                 match covariance_corrected.as_ref() {
                     Some(top) if **cov == *top => {}
                     Some(_) => {
-                        crate::bail_invalid_estim!("UnifiedFitResult inference corrected covariance must match top-level covariance_corrected"
+                        bail_fit_result_invariant!("UnifiedFitResult inference corrected covariance must match top-level covariance_corrected"
                                 .to_string(),);
                     }
                     None => {
-                        crate::bail_invalid_estim!("UnifiedFitResult inference corrected covariance requires top-level covariance_corrected"
+                        bail_fit_result_invariant!("UnifiedFitResult inference corrected covariance requires top-level covariance_corrected"
                                 .to_string(),);
                     }
                 }
@@ -4644,7 +4657,7 @@ impl UnifiedFitResult {
             if let Some(se) = inf.beta_standard_errors_corrected.as_ref()
                 && se.len() != p
             {
-                crate::bail_invalid_estim!(
+                bail_fit_result_invariant!(
                     "UnifiedFitResult corrected beta standard error length mismatch: got {}, expected {}",
                     se.len(),
                     p
@@ -4653,7 +4666,7 @@ impl UnifiedFitResult {
             if let Some(cov) = inf.beta_covariance_frequentist.as_ref()
                 && (cov.nrows() != p || cov.ncols() != p)
             {
-                crate::bail_invalid_estim!(
+                bail_fit_result_invariant!(
                     "UnifiedFitResult frequentist covariance shape mismatch: got {}x{}, expected {}x{}",
                     cov.nrows(),
                     cov.ncols(),
@@ -4664,7 +4677,7 @@ impl UnifiedFitResult {
             if let Some(f_mat) = inf.coefficient_influence.as_ref()
                 && (f_mat.nrows() != p || f_mat.ncols() != p)
             {
-                crate::bail_invalid_estim!(
+                bail_fit_result_invariant!(
                     "UnifiedFitResult coefficient influence shape mismatch: got {}x{}, expected {}x{}",
                     f_mat.nrows(),
                     f_mat.ncols(),
@@ -4675,7 +4688,7 @@ impl UnifiedFitResult {
             if let Some(corr) = inf.smoothing_correction.as_ref()
                 && (corr.nrows() != p || corr.ncols() != p)
             {
-                crate::bail_invalid_estim!(
+                bail_fit_result_invariant!(
                     "UnifiedFitResult smoothing correction shape mismatch: got {}x{}, expected {}x{}",
                     corr.nrows(),
                     corr.ncols(),
@@ -4686,7 +4699,7 @@ impl UnifiedFitResult {
             if let Some(qs) = inf.reparam_qs.as_ref()
                 && (qs.nrows() != p || qs.ncols() != p)
             {
-                crate::bail_invalid_estim!(
+                bail_fit_result_invariant!(
                     "UnifiedFitResult reparam_qs shape mismatch: got {}x{}, expected {}x{}",
                     qs.nrows(),
                     qs.ncols(),
@@ -4698,13 +4711,13 @@ impl UnifiedFitResult {
         if let Some(geom) = geometry.as_ref() {
             if let Some(inf) = inference.as_ref() {
                 if geom.penalized_hessian != inf.penalized_hessian {
-                    crate::bail_invalid_estim!("UnifiedFitResult geometry penalized Hessian must match inference.penalized_hessian"
+                    bail_fit_result_invariant!("UnifiedFitResult geometry penalized Hessian must match inference.penalized_hessian"
                             .to_string(),);
                 }
             }
         }
         if !block_states.is_empty() && block_states.len() != blocks.len() {
-            crate::bail_invalid_estim!(
+            bail_fit_result_invariant!(
                 "UnifiedFitResult block state count mismatch: blocks={}, block_states={}",
                 blocks.len(),
                 block_states.len()
@@ -4751,13 +4764,13 @@ impl UnifiedFitResult {
     }
     pub fn validate_numeric_finiteness(&self) -> Result<(), EstimationError> {
         if self.outer_iterations != self.convergence.outer_iterations() {
-            crate::bail_invalid_estim!(
+            bail_fit_result_invariant!(
                 "UnifiedFitResult outer iteration count does not match its sealed convergence evidence"
             );
         }
         let expected_beta = flatten_block_betas(&self.blocks);
         if self.beta != expected_beta {
-            crate::bail_invalid_estim!("UnifiedFitResult decoded beta must match coefficient blocks concatenated in block order"
+            bail_fit_result_invariant!("UnifiedFitResult decoded beta must match coefficient blocks concatenated in block order"
                     .to_string(),);
         }
         let reconstructed = Self::try_from_parts(UnifiedFitResultParts {
@@ -4793,7 +4806,7 @@ impl UnifiedFitResult {
         if self.convergence.outer_certificate().is_some()
             != reconstructed.convergence.outer_certificate().is_some()
         {
-            crate::bail_invalid_estim!(
+            bail_fit_result_invariant!(
                 "UnifiedFitResult convergence evidence kind does not match its smoothing-coordinate geometry"
             );
         }

@@ -28,6 +28,12 @@ def _rust_exception_instance(name):
         "InvalidInputError",
         "SurvivalMarginalSlopeError",
         "IntegrationError",
+        "FitError",
+        "FitConvergenceError",
+        "FitSeedError",
+        "FitInvariantError",
+        "FitInputError",
+        "FitNumericalError",
     ],
 )
 def test_rust_exception_classes_are_importably_picklable(name):
@@ -44,6 +50,8 @@ def test_rust_exception_classes_are_importably_picklable(name):
         "InvalidInputError",
         "SurvivalMarginalSlopeError",
         "IntegrationError",
+        "FitError",
+        "FitSeedError",
     ],
 )
 def test_rust_exception_instances_are_importably_picklable(name):

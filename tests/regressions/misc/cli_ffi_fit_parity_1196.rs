@@ -220,11 +220,8 @@ fn cli_and_ffi_standard_fit_paths_are_identical_by_construction() {
 
     // Touch the module path so the import is exercised even if the inner asserts
     // are ever feature-gated; keeps the shared-entry symbol load-bearing.
-    let touch = fit_orchestration::WorkflowError::IntegrationFailed {
-        reason: String::new(),
-    };
-    assert!(matches!(
-        touch,
-        fit_orchestration::WorkflowError::IntegrationFailed { .. }
+    let touch = fit_orchestration::WorkflowError::from(fit_orchestration::FitFailure::from(
+        String::new(),
     ));
+    assert!(matches!(touch, fit_orchestration::WorkflowError::Fit(_)));
 }

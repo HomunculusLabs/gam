@@ -16,10 +16,10 @@ outside that tree is `RustExtensionUnavailableError`, which inherits
 from `ImportError`.
 
 The tree below is exhaustive — it lists every exception class the
-package exposes. The four classes that have their own children
-(`FormulaError`, `PredictionError`, `InvalidSpecificationError`, and the
-`GamError` root) show those children indented beneath them; every other
-class is a direct `GamError` subclass.
+package exposes. The classes that have their own children
+(`FormulaError`, `PredictionError`, `InvalidSpecificationError`, `FitError`,
+`FitConvergenceError`, and the `GamError` root) show those children indented
+beneath them; every other class is a direct `GamError` subclass.
 
 ```
 Exception
@@ -40,10 +40,17 @@ Exception
 │       ├── EigendecompositionError
 │       ├── PenaltySpectrumError
 │       ├── ParameterConstraintError
-│       ├── PirlsConvergenceError
+│       ├── FitError
+│       │   ├── FitConvergenceError
+│       │   │   ├── PirlsConvergenceError
+│       │   │   └── RemlConvergenceError
+│       │   ├── FitSeedError
+│       │   ├── FitInvariantError
+│       │   ├── FitInputError
+│       │   ├── FitNumericalError
+│       │   └── IntegrationError
 │       ├── PerfectSeparationError
 │       ├── HessianNotPositiveDefiniteError
-│       ├── RemlConvergenceError
 │       ├── GradientUnavailableError
 │       ├── LayoutError
 │       ├── ModelOverparameterizedError
@@ -80,8 +87,7 @@ Exception
 │       ├── JointPenaltyError
 │       ├── SurvivalLocationScaleError
 │       ├── MapUniquenessError
-│       ├── MissingDependencyError
-│       └── IntegrationError
+│       └── MissingDependencyError
 └── ImportError
     └── RustExtensionUnavailableError
 ```
@@ -136,6 +142,47 @@ if not check.ok:
     for issue in check.issues:
         print(issue.kind, issue.column, issue.message)
 ```
+
+### `FitError` and its subclasses
+
+A model fit's solve failed. The class names the failure's category, chosen
+from the typed engine error that stopped the fit, never from its message:
+
+| Class | Category | Raised when |
+| --- | --- | --- |
+| `FitConvergenceError` | `convergence` | An outer smoothing search or an inner coefficient solve ended without its convergence certificate. `PirlsConvergenceError` and `RemlConvergenceError` are its subclasses. |
+| `FitSeedError` | `startup_seeds` | Outer startup validation refused every candidate seed, so no outer solver started. |
+| `FitInvariantError` | `invariant` | The engine's own consistency contract was violated, e.g. an inference covariance disagreeing with the top-level covariance (gam#1789). An engine defect; please report it. |
+| `FitInputError` | `input` | The solve refused the configuration, the data or the problem's size (separation, rank deficiency, an unsupported option). |
+| `FitNumericalError` | `numerical` | A factorization, eigendecomposition or root solve failed, or a row quantity could not be represented in float64. |
+| `IntegrationError` | `integration` | A quadrature or numerical integration did not reach its tolerance. |
+| `FitError` itself | `unclassified` | The failure reached the Python boundary as prose, so no category can be claimed. |
+
+Every instance carries three attributes, and the message ends with the same
+facts after the unchanged engine message:
+
+- `variant`: the typed engine variant that decided the failure, e.g.
+  `EstimationError::StartupSeedsRefused` or
+  `SurvivalMarginalSlopeError::RootSolveFailed`.
+- `category`: the label in the table above.
+- `causes`: the message chain, outermost first: each orchestration layer's
+  context (such as `CTN fold 2 failed`), then the engine message.
+
+```python
+try:
+    model = gamfit.fit(df, "y ~ s(x)", family="bernoulli-marginal-slope", ...)
+except gamfit.FitSeedError as e:
+    print("no admissible start:", e.variant, e.causes[-1])
+except gamfit.FitConvergenceError as e:
+    print("did not converge:", e.variant)
+except gamfit.FitError as e:
+    print(e.category, e.variant, str(e))
+```
+
+Before gam#2937 every fit failure raised `IntegrationError`. Code that
+caught `IntegrationError` to handle any fit failure should catch `FitError`
+instead; `IntegrationError` is now raised only for genuine integration
+failures.
 
 ### `PredictionError`
 

@@ -475,12 +475,12 @@ mod standard_convergence_gate_tests {
 
 pub(crate) fn fit_standard_model(
     mut request: StandardFitRequest<'_>,
-) -> Result<StandardFitResult, String> {
+) -> Result<StandardFitResult, FitFailure> {
     if request.estimate_tweedie_p {
-        return Err(
-            "automatic Tweedie power profiling is derivative-free hyperparameter search and is forbidden by SPEC.md; supply an explicit p strictly between 1 and 2"
-                .to_string(),
-        );
+        return Err(FitFailure::raised(
+            gam_problem::FailureCategory::Input,
+            "automatic Tweedie power profiling is derivative-free hyperparameter search and is forbidden by SPEC.md; supply an explicit p strictly between 1 and 2",
+        ));
     }
     // #2750: resolve every AUTO measure-jet representer range against the
     // response, once, before anything reads the spec.
@@ -603,15 +603,15 @@ pub(crate) fn fit_standard_model(
                     // message. The typed original is still what was raised; what
                     // changes is that the refusal stops recommending a remedy it
                     // has already tried without saying so.
-                    return Err(format!(
-                        "{original_error}; the automatic Firth/Jeffreys rescue WAS attempted \
+                    return Err(FitFailure::from(original_error).annotated(format!(
+                        "the automatic Firth/Jeffreys rescue WAS attempted \
                          and also failed to certify, so enabling Firth explicitly will not \
                          change this outcome: {retry_report}"
-                    ));
+                    )));
                 }
             }
         }
-        Err(error) => return Err(error.to_string()),
+        Err(error) => return Err(error.into()),
     };
 
     let adaptive_spatial_terms = adaptive_spatial_term_mask(&request.spec);
@@ -714,20 +714,20 @@ pub(crate) fn fit_standard_model(
             // adaptive-link paths now report startup-validation failures
             // (#1571/#1572). The fit is NOT silently downgraded.
             log::warn!("[linkwiggle] binomial mean link-wiggle joint solve did not converge ({e})");
-            return Err(format!(
+            return Err(FitFailure::raised(gam_problem::FailureCategory::Convergence, format!(
                 "flexible/learnable link requested via link(type=flexible(...)) / \
                  linkwiggle(...), but the binomial mean link-wiggle joint solve did not \
                  converge ({e}). The fit was NOT silently downgraded to the fixed base \
                  link. Refit with a fixed link (e.g. logit/probit/cloglog) or adjust the \
                  wiggle spec (linkwiggle(internal_knots=...)). See gam#1596."
-            ));
+            )));
         }
     };
     if solved.fit.beta_covariance().is_none() {
-        return Err(
-            "link-wiggle fit reached assembly without its joint [Mean, LinkWiggle] posterior covariance; no model was minted"
-                .to_string(),
-        );
+        return Err(FitFailure::raised(
+            gam_problem::FailureCategory::Invariant,
+            "link-wiggle fit reached assembly without its joint [Mean, LinkWiggle] posterior covariance; no model was minted",
+        ));
     }
     // The joint link-wiggle solver is a custom block family and therefore does
     // not infer the observation-law metadata stored by the generic likelihood
@@ -1485,7 +1485,7 @@ pub(crate) fn rescale_gaussian_location_scale_to_raw_with_units(
 
 pub(crate) fn fit_gaussian_location_scale_model(
     mut request: GaussianLocationScaleFitRequest<'_>,
-) -> Result<GaussianLocationScaleFitResult, String> {
+) -> Result<GaussianLocationScaleFitResult, FitFailure> {
     // Standardize the response so the fixed log-σ soft floor
     // `LOGB_SIGMA_FLOOR = 0.01` is scale-relative (≈ 1 % of the response
     // spread) rather than absolute. Without this the link σ = 0.01 + exp(η)
@@ -1498,9 +1498,12 @@ pub(crate) fn fit_gaussian_location_scale_model(
     // location-scale model either: refuse it rather than fit `y / 1e-6`
     // (#2469).
     if !(response_scale > 0.0) || !response_scale.is_finite() {
-        return Err(format!(
-            "gaussian location-scale fit: the response has no finite positive spread \
-             (sample std = {response_scale:.3e}); a location-scale model needs one"
+        return Err(FitFailure::raised(
+            gam_problem::FailureCategory::Input,
+            format!(
+                "gaussian location-scale fit: the response has no finite positive spread \
+                 (sample std = {response_scale:.3e}); a location-scale model needs one"
+            ),
         ));
     }
     if response_scale != 1.0 {
@@ -1523,7 +1526,7 @@ pub(crate) fn fit_gaussian_location_scale_model(
 
 pub(crate) fn fit_dispersion_location_scale_model(
     request: DispersionLocationScaleFitRequest<'_>,
-) -> Result<DispersionLocationScaleFitResult, String> {
+) -> Result<DispersionLocationScaleFitResult, FitFailure> {
     let kind = request.spec.kind;
     // The joint (mean + log-precision) posterior covariance / EDF is requested
     // unconditionally inside `fit_dispersion_glm_location_scale_terms`, which is
@@ -1540,8 +1543,9 @@ pub(crate) fn fit_dispersion_location_scale_model(
 
 pub(crate) fn fit_binomial_location_scale_model(
     request: BinomialLocationScaleFitRequest<'_>,
-) -> Result<BinomialLocationScaleFitResult, String> {
+) -> Result<BinomialLocationScaleFitResult, FitFailure> {
     fit_location_scale_with_optional_wiggle::<BinomialLocationScaleWorkflow>(request)
+        .map_err(FitFailure::from)
 }
 
 /// Penalized effective degrees of freedom for a survival transformation fit.
@@ -3708,7 +3712,7 @@ pub(crate) fn fit_survival_location_scale_model(
 
 pub(crate) fn fit_bernoulli_marginal_slope_model(
     request: BernoulliMarginalSlopeFitRequest<'_>,
-) -> Result<BernoulliMarginalSlopeFitResult, String> {
+) -> Result<BernoulliMarginalSlopeFitResult, FitFailure> {
     fit_bernoulli_marginal_slope_terms(
         request.data,
         request.spec,
@@ -3716,44 +3720,48 @@ pub(crate) fn fit_bernoulli_marginal_slope_model(
         &request.kappa_options,
         &request.policy,
     )
+    .map_err(FitFailure::from)
 }
 
 pub(crate) fn fit_survival_marginal_slope_model(
     request: SurvivalMarginalSlopeFitRequest<'_>,
-) -> Result<SurvivalMarginalSlopeFitResult, String> {
+) -> Result<SurvivalMarginalSlopeFitResult, FitFailure> {
     fit_survival_marginal_slope_terms(
         request.data,
         request.spec,
         &request.options,
         &request.kappa_options,
     )
+    .map_err(FitFailure::from)
 }
 
 pub(crate) fn fit_latent_survival_model(
     request: LatentSurvivalFitRequest<'_>,
-) -> Result<LatentSurvivalTermFitResult, String> {
+) -> Result<LatentSurvivalTermFitResult, FitFailure> {
     fit_latent_survival_terms(
         request.data,
         request.spec,
         request.frailty,
         &request.options,
     )
+    .map_err(FitFailure::from)
 }
 
 pub(crate) fn fit_latent_binary_model(
     request: LatentBinaryFitRequest<'_>,
-) -> Result<LatentBinaryTermFitResult, String> {
+) -> Result<LatentBinaryTermFitResult, FitFailure> {
     fit_latent_binary_terms(
         request.data,
         request.spec,
         request.frailty,
         &request.options,
     )
+    .map_err(FitFailure::from)
 }
 
 pub(crate) fn fit_transformation_normal_model(
     request: TransformationNormalFitRequest<'_>,
-) -> Result<TransformationNormalFitResult, String> {
+) -> Result<TransformationNormalFitResult, FitFailure> {
     fit_transformation_normal(
         &request.response,
         &request.weights,
@@ -3764,6 +3772,7 @@ pub(crate) fn fit_transformation_normal_model(
         &request.options,
         &request.kappa_options,
     )
+    .map_err(FitFailure::from)
 }
 
 

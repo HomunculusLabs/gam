@@ -392,7 +392,7 @@ jobs:
             # sites share the literal phrase `REML optimum is value-resolved`,
             # which is gam's own prose and cannot be produced by a test
             # describing its reference tool, so that phrase is the key.
-            gamfit_re='IntegrationFailed|InvalidConfig|IdentifiabilityFailure|LayoutError|identifiability audit|Invalid input|could not broadcast|Newton step|transformation fit failed|workflow survival baseline failed|RemlOptimizationFailed|REML smoothing optimization|Optimization \{ context:|OrderFailures \{|NonConvergence \{|REML optimum is value-resolved'
+            gamfit_re='IntegrationFailed|InvalidConfig|IdentifiabilityFailure|LayoutError|identifiability audit|Invalid input|could not broadcast|Newton step|transformation fit failed|workflow survival baseline failed|RemlOptimizationFailed|REML smoothing optimization|Optimization \{ context:|OrderFailures \{|NonConvergence \{|REML optimum is value-resolved|Fit\((Raised|Estimation|Context|Annotated|CustomFamily|SurvivalMarginalSlope|Workflow)'
             if [ "$outcome" = TEST_ERROR ]; then
               testerr=$((testerr+1))
             elif [ "$outcome" = BUILDFAIL ]; then

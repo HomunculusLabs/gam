@@ -1,3 +1,27 @@
+## Unreleased
+
+- **A failed fit raises the class of what failed, not `IntegrationError`** (#2937).
+  Every fit-solver failure used to reach Python as `IntegrationError`, so a
+  refused start, a stalled outer search and a numerical refusal could not be
+  told apart; gnomon#2335 and gnomon#2336 were diagnosed from generic errors
+  for days. Fits now raise a `FitError` subclass chosen from the typed engine
+  error: `FitConvergenceError` (with `PirlsConvergenceError` and
+  `RemlConvergenceError` beneath it), `FitSeedError`, `FitInvariantError`,
+  `FitInputError`, `FitNumericalError`, and `IntegrationError` only for genuine
+  quadrature failures. A failure that reaches the boundary as prose raises
+  `FitError` itself. Instances carry `variant`, `category` and `causes`, and
+  the message ends with the variant and category after the unchanged engine
+  text. **Migration:** code that caught `IntegrationError` to handle any fit
+  failure should catch `FitError`.
+- Rust: `WorkflowError::IntegrationFailed` is replaced by `WorkflowError::Fit(FitFailure)`,
+  which keeps the engine error whole under each layer's context.
+  `EstimationError` gains `StartupSeedsRefused` (every seed refused before a
+  solver started, formerly `RemlOptimizationFailed`) and
+  `FitResultInvariantViolated` (the `UnifiedFitResult` consistency checks,
+  formerly `InvalidInput`); both keep their previous text.
+  `SurvivalMarginalSlopeError::RootSolveFailed` replaces `IntegrationFailed` for
+  the per-row intercept solve.
+
 ## gamfit 0.1.268 (2026-09-11)
 
 - Existing CTN composition now lives in Rust, shared by the library, CLI and Python.

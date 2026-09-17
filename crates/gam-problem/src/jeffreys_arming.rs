@@ -318,6 +318,9 @@ mod tests {
             CustomFamilyError::OuterSmoothingFailed {
                 reason: "outer smoothing optimization failed".to_string(),
                 last_refusal: last_refusal.map(Box::new),
+                outer_error: std::sync::Arc::new(crate::EstimationError::RemlOptimizationFailed(
+                    "outer smoothing optimization failed".to_string(),
+                )),
             }
         };
         assert_eq!(

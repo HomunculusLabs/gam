@@ -23,9 +23,12 @@ pub enum SurvivalMarginalSlopeError {
     /// derivative disagrees with the direct evaluation, transformed
     /// derivative not strictly positive).
     NumericalFailure { reason: String },
-    /// An integration / outer-optimization step failed to converge to
-    /// the requested tolerance (intercept residual, REML outer loop).
+    /// A quadrature or numerical integration did not reach its tolerance.
     IntegrationFailed { reason: String },
+    /// A root solve stopped with a residual above its tolerance, e.g. the
+    /// per-row intercept solve. It was reported as `IntegrationFailed`, which
+    /// sent a reader after quadrature that was never involved (#2937).
+    RootSolveFailed { reason: String },
     /// The requested combination of options is not implemented (non-
     /// probit base link, flexible row calculus with K > 1, spatial psi
     /// for unsupported block roles, ...).
@@ -39,7 +42,45 @@ impl_reason_error_boilerplate! {
         MonotonicityViolation,
         NumericalFailure,
         IntegrationFailed,
+        RootSolveFailed,
         UnsupportedConfiguration,
+    }
+}
+
+impl SurvivalMarginalSlopeError {
+    /// The fixed category of this failure (#2937). Exhaustive with no wildcard
+    /// arm: a new variant is categorized by whoever adds it.
+    #[must_use]
+    pub fn failure_category(&self) -> gam_problem::FailureCategory {
+        use gam_problem::FailureCategory;
+        match self {
+            Self::InvalidInput { .. } | Self::UnsupportedConfiguration { .. } => {
+                FailureCategory::Input
+            }
+            Self::IncompatibleDimensions { .. } => FailureCategory::Invariant,
+            Self::MonotonicityViolation { .. }
+            | Self::NumericalFailure { .. }
+            | Self::RootSolveFailed { .. } => FailureCategory::Numerical,
+            Self::IntegrationFailed { .. } => FailureCategory::Integration,
+        }
+    }
+
+    /// The `Enum::Variant` name a front end prints beside the message (#2937).
+    #[must_use]
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            Self::InvalidInput { .. } => "SurvivalMarginalSlopeError::InvalidInput",
+            Self::IncompatibleDimensions { .. } => {
+                "SurvivalMarginalSlopeError::IncompatibleDimensions"
+            }
+            Self::MonotonicityViolation { .. } => "SurvivalMarginalSlopeError::MonotonicityViolation",
+            Self::NumericalFailure { .. } => "SurvivalMarginalSlopeError::NumericalFailure",
+            Self::IntegrationFailed { .. } => "SurvivalMarginalSlopeError::IntegrationFailed",
+            Self::RootSolveFailed { .. } => "SurvivalMarginalSlopeError::RootSolveFailed",
+            Self::UnsupportedConfiguration { .. } => {
+                "SurvivalMarginalSlopeError::UnsupportedConfiguration"
+            }
+        }
     }
 }
 

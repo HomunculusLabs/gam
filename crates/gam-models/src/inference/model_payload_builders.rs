@@ -1491,8 +1491,7 @@ pub fn fit_formula_to_payload(
     fit_config: &FitConfig,
 ) -> Result<FittedModelPayload, WorkflowError> {
     if fit_config.ctn_stage1.is_some() || fit_config.frozen_ctn.is_some() {
-        return crate::inference::ctn::fit_chain(formula, dataset, fit_config)
-            .map_err(|reason| WorkflowError::IntegrationFailed { reason });
+        return crate::inference::ctn::fit_chain(formula, dataset, fit_config);
     }
     // Expectile (Newey–Powell LAWS) family (#1777): the expectile estimator is an
     // OUTER driver that wraps the standard Gaussian-identity GAM with iterative
@@ -1643,7 +1642,12 @@ pub fn fit_formula_to_payload(
                         dataset.headers.clone(),
                         dataset.feature_ranges(),
                     )
-                    .map_err(|reason| WorkflowError::IntegrationFailed { reason })?;
+                    .map_err(|reason| {
+                        WorkflowError::Fit(crate::fit_orchestration::FitFailure::raised(
+                            gam_problem::FailureCategory::Invariant,
+                            reason,
+                        ))
+                    })?;
                     apply_request_metadata(&mut cascade_payload, fit_config, inference_notes);
                     return Ok(cascade_payload);
                 }

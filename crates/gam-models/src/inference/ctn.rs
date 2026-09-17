@@ -8,7 +8,7 @@ use gam_terms::inference::formula_dsl::{parse_formula, parse_surv_response, pars
 use ndarray::{Array1, Array2, Axis};
 use rand::{SeedableRng, rngs::SmallRng, seq::SliceRandom};
 
-use crate::fit_orchestration::{CtnStage1Recipe, FitConfig};
+use crate::fit_orchestration::{CtnStage1Recipe, FitConfig, FitFailure, WorkflowError};
 use super::model::{FittedModel, FittedModelPayload, PredictModelClass};
 use super::model_payload_builders::fit_formula_to_payload;
 use super::predict_input::build_transformation_normal_observed_scores;
@@ -246,8 +246,16 @@ pub fn structural_inputs(formula: &str, dataset: &EncodedDataset, config: &FitCo
     Ok(outcome_inputs(dataset, config, &z))
 }
 
+/// A cross-fitted CTN stage's failure under the fold it came from, kept whole.
+fn stage_fold_failure(fold: usize, error: WorkflowError) -> WorkflowError {
+    WorkflowError::Fit(FitFailure::from(error).context(format!("CTN fold {fold} failed")))
+}
+
 /// Fit a shared native CTN/outcome payload, or attach an externally fitted CTN.
-pub(crate) fn fit_chain(formula: String, dataset: &EncodedDataset, config: &FitConfig) -> Result<FittedModelPayload, String> {
+///
+/// A stage or outcome fit's failure is returned whole under the fold it came
+/// from, so the chain reports what failed rather than one generic class (#2937).
+pub(crate) fn fit_chain(formula: String, dataset: &EncodedDataset, config: &FitConfig) -> Result<FittedModelPayload, WorkflowError> {
     validate_chain_inputs(dataset, config)?;
     let columns = dataset.column_map();
     let (transform, z, folds) = if let Some(frozen) = config.frozen_ctn.as_ref() {
@@ -273,17 +281,19 @@ pub(crate) fn fit_chain(formula: String, dataset: &EncodedDataset, config: &FitC
             let train: Vec<_> = folds.iter().enumerate().filter(|(_, f)| **f != fold).map(|(i, _)| i).collect();
             let held: Vec<_> = folds.iter().enumerate().filter(|(_, f)| **f == fold).map(|(i, _)| i).collect();
             let payload = fit_formula_to_payload(stage_formula.clone(), &subset(&stage_data, &train), &stage)
-                .map_err(|error| format!("CTN fold {fold} failed: {error}"))?;
+                .map_err(|error| stage_fold_failure(fold, error))?;
             let model = FittedModel::from_payload(payload);
             let values = observed_scores(&model, subset(&stage_data, &held).values.view(), &stage_columns)?;
             for (local, &row) in held.iter().enumerate() { z[row] = values[local]; }
         }
-        let transform = fit_formula_to_payload(stage_formula, &stage_data, &stage).map_err(|error| error.to_string())?;
+        let transform = fit_formula_to_payload(stage_formula, &stage_data, &stage)?;
         (transform, z, Some(folds))
     };
-    if !z.iter().all(|value| value.is_finite()) { return Err("CTN produced nonfinite scores".into()); }
+    if !z.iter().all(|value| value.is_finite()) {
+        return Err(WorkflowError::Fit(FitFailure::raised(gam_problem::FailureCategory::Numerical, "CTN produced nonfinite scores")));
+    }
     let (outcome_data, outcome_config) = outcome_inputs(dataset, config, &z);
-    let mut payload = fit_formula_to_payload(formula, &outcome_data, &outcome_config).map_err(|error| error.to_string())?;
+    let mut payload = fit_formula_to_payload(formula, &outcome_data, &outcome_config)?;
     payload.score_transform = Some(Box::new(transform));
     payload.score_crossfit_folds = folds;
     payload.inference_notes.push("CTN is frozen at prediction. Uncertainty is conditional on that fitted transform; standard normality is assumed, not certified.".into());
@@ -309,6 +319,23 @@ mod tests {
         recipe.group_column = Some("group".into());
         recipe.folds = 3;
         (data, recipe)
+    }
+
+    #[test]
+    fn a_failed_stage_fold_keeps_its_typed_cause_under_the_fold_context_2937() {
+        let refused = gam_problem::EstimationError::StartupSeedsRefused(
+            "no candidate seeds passed outer startup validation (custom family):".to_string(),
+        );
+        let engine_text = refused.to_string();
+        let chained = stage_fold_failure(2, WorkflowError::Fit(FitFailure::from(refused)));
+        assert_eq!(chained.failure_category(), gam_problem::FailureCategory::StartupSeeds);
+        assert_eq!(chained.variant_name(), "EstimationError::StartupSeedsRefused");
+        assert_eq!(chained.to_string(), format!("CTN fold 2 failed: {engine_text}"));
+        let WorkflowError::Fit(failure) = &chained else {
+            panic!("a stage failure must stay a fit failure: {chained}");
+        };
+        assert_eq!(failure.causes(), vec!["CTN fold 2 failed".to_string(), engine_text]);
+        assert!(failure.estimation_error().is_some());
     }
 
     #[test]

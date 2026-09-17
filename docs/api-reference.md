@@ -734,6 +734,36 @@ topical guides for narrative explanations.
       show_root_heading: true
       heading_level: 3
 
+::: gamfit.FitConvergenceError
+    options:
+      show_root_heading: true
+      heading_level: 3
+
+::: gamfit.FitError
+    options:
+      show_root_heading: true
+      heading_level: 3
+
+::: gamfit.FitInputError
+    options:
+      show_root_heading: true
+      heading_level: 3
+
+::: gamfit.FitInvariantError
+    options:
+      show_root_heading: true
+      heading_level: 3
+
+::: gamfit.FitNumericalError
+    options:
+      show_root_heading: true
+      heading_level: 3
+
+::: gamfit.FitSeedError
+    options:
+      show_root_heading: true
+      heading_level: 3
+
 ::: gamfit.FittedModelError
     options:
       show_root_heading: true

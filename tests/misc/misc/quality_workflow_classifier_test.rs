@@ -102,6 +102,17 @@ echo "$outcome,$cause"
     assert_eq!(out, "GAM_ERROR");
     assert_eq!(cause, "gam_fit_failed");
 
+    // Test 2b: GAM_ERROR from a typed fit failure's Debug form (#2937), which
+    // replaced `IntegrationFailed { reason: .. }` in panic messages.
+    let (out, cause) = run_case(
+        "",
+        101,
+        "thread 'main' panicked at tests/quality/foo.rs:10:\n:: gam fit: Fit(Raised { category: Convergence, reason: \"expectile LAWS exhausted its safety cap\" })",
+        "test2b",
+    );
+    assert_eq!(out, "GAM_ERROR");
+    assert_eq!(cause, "gam_fit_failed");
+
     // Test 3: METRIC_OFF
     let (out, cause) = run_case("", 1, "Failed to fit", "test3");
     assert_eq!(out, "METRIC_OFF");

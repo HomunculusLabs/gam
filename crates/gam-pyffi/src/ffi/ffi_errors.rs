@@ -123,10 +123,65 @@ create_exception!(
     "Parameter constraint violation."
 );
 
+// Fit-failure categories (#2937). Every failure of a fit's solve used to reach
+// Python as `IntegrationError`; each now raises the class of its category,
+// selected from the typed engine error (`FailureCategory`), never from text.
+
+create_exception!(
+    _rust,
+    FitError,
+    GamError,
+    "A model fit's solve failed. Subclasses name the failure's category; an \
+     instance of `FitError` itself is a failure that reached the boundary as \
+     prose, with no category to claim. Instances carry `variant` (str, the typed \
+     engine variant, e.g. `EstimationError::StartupSeedsRefused`), `category` \
+     (str) and `causes` (list[str], the message chain, outermost first)."
+);
+
+create_exception!(
+    _rust,
+    FitConvergenceError,
+    FitError,
+    "An outer smoothing search or an inner coefficient solve ended without its \
+     convergence certificate."
+);
+
+create_exception!(
+    _rust,
+    FitSeedError,
+    FitError,
+    "Outer startup validation refused every candidate seed, so no outer solver \
+     started."
+);
+
+create_exception!(
+    _rust,
+    FitInvariantError,
+    FitError,
+    "A fit result or intermediate state violated the engine's own consistency \
+     contract. An engine defect, not a property of the data; please report it."
+);
+
+create_exception!(
+    _rust,
+    FitInputError,
+    FitError,
+    "The fit's solve refused the configuration, the data or the problem's size \
+     (separation, rank deficiency, an unsupported option)."
+);
+
+create_exception!(
+    _rust,
+    FitNumericalError,
+    FitError,
+    "A numerical step of the fit failed: a factorization, an eigendecomposition, \
+     a root solve, or a row quantity that float64 cannot represent."
+);
+
 create_exception!(
     _rust,
     PirlsConvergenceError,
-    GamError,
+    FitConvergenceError,
     "The P-IRLS inner loop did not converge within its iteration budget."
 );
 
@@ -147,7 +202,7 @@ create_exception!(
 create_exception!(
     _rust,
     RemlConvergenceError,
-    GamError,
+    FitConvergenceError,
     "REML smoothing optimization failed to converge."
 );
 
@@ -520,10 +575,10 @@ create_exception!(
 create_exception!(
     _rust,
     IntegrationError,
-    GamError,
-    "An underlying numerical step (PIRLS / smoothing-parameter \
-     optimizer / profile-cost evaluation) failed to converge or \
-     produced a non-finite value."
+    FitError,
+    "A quadrature or numerical integration did not reach its tolerance. \
+     Every fit failure used to raise this class; since gam#2937 other failures \
+     raise their own `FitError` subclass."
 );
 
 // -------------------------------------------------------------------------
@@ -604,6 +659,7 @@ fn estimation_error_to_pyerr_with_message(err: &EstimationError, message: String
             HessianNotPositiveDefiniteError::new_err(message)
         }
         EstimationError::RemlOptimizationFailed(_) => RemlConvergenceError::new_err(message),
+        EstimationError::StartupSeedsRefused(_) => FitSeedError::new_err(message),
         // The outer certificate at the fitted point describes a criterion whose
         // identified rank can change inside its own Newton step, so what the
         // caller holds is an uncertified outer optimum.
@@ -626,10 +682,10 @@ fn estimation_error_to_pyerr_with_message(err: &EstimationError, message: String
                 // An opt client may attach a typed error that is not an engine
                 // `EstimationError`. It is still an evaluator-construction
                 // failure, not evidence that REML merely exhausted its
-                // convergence budget. Preserve the complete boundary message
-                // and expose the integration-class failure without guessing a
-                // class from that source's prose.
-                IntegrationError::new_err(message)
+                // convergence budget, and nothing about it says integration.
+                // Preserve the complete boundary message under the `FitError`
+                // base without guessing a category from that source's prose.
+                FitError::new_err(message)
             }
         }
         EstimationError::GradientUnavailable { .. } => GradientUnavailableError::new_err(message),
@@ -644,6 +700,7 @@ fn estimation_error_to_pyerr_with_message(err: &EstimationError, message: String
         EstimationError::InvalidInput(_) | EstimationError::ProfiledResidualUnresolved { .. } => {
             InvalidInputError::new_err(message)
         }
+        EstimationError::FitResultInvariantViolated(_) => FitInvariantError::new_err(message),
         EstimationError::InverseLinkDomainViolation { .. }
         | EstimationError::PirlsRowGeometryUnrepresentable { .. }
         | EstimationError::LogStrengthDomainViolation { .. } => InvalidInputError::new_err(message),
@@ -889,17 +946,113 @@ pub(crate) fn workflow_error_to_pyerr(py: Python<'_>, err: WorkflowError) -> PyE
             SchemaMismatchError::new_err(message_with_advice(&err, advice))
         }
         WorkflowError::MissingDependency { reason } => MissingDependencyError::new_err(reason),
-        WorkflowError::IntegrationFailed { reason } => IntegrationError::new_err(reason),
+        WorkflowError::Fit(failure) => fit_failure_to_pyerr(
+            py,
+            FitFailureReport {
+                message: failure.to_string(),
+                variant: failure.variant_name(),
+                category: failure.category(),
+                causes: failure.causes(),
+                estimation_error: failure.estimation_error(),
+            },
+        ),
         WorkflowError::InvalidData { column, problem } => {
             DataError::new_err(format!("column '{column}' {problem}"))
         }
-        WorkflowError::SpatialUnderresolved { .. } => IntegrationError::new_err(err.to_string()),
+        // The certification refit's failure, when one failed, decides the
+        // category; otherwise the resolution search itself did not converge.
+        WorkflowError::SpatialUnderresolved {
+            ref refit_failure, ..
+        } => fit_failure_to_pyerr(
+            py,
+            FitFailureReport {
+                message: err.to_string(),
+                variant: err.variant_name(),
+                category: err.failure_category(),
+                causes: vec![err.to_string()],
+                estimation_error: match refit_failure.as_deref() {
+                    Some(WorkflowError::Fit(failure)) => failure.estimation_error(),
+                    _ => None,
+                },
+            },
+        ),
         WorkflowError::FormulaDsl { .. } => FormulaError::new_err(err.to_string()),
         WorkflowError::MarginalSlopeLink { .. } => InvalidConfigurationError::new_err(err.to_string()),
         WorkflowError::TransformationNormalConflict { .. } => {
             InvalidConfigurationError::new_err(err.to_string())
         }
     }
+}
+
+/// What the boundary reads off a fit failure to raise it.
+struct FitFailureReport<'a> {
+    message: String,
+    variant: &'static str,
+    category: gam::FailureCategory,
+    causes: Vec<String>,
+    estimation_error: Option<&'a EstimationError>,
+}
+
+/// The exception class of a fit failure's category. `Unclassified` raises the
+/// `FitError` base: that failure reached the boundary as prose, so no subclass
+/// can be claimed for it.
+fn fit_category_error(category: gam::FailureCategory, message: String) -> PyErr {
+    use gam::FailureCategory as Category;
+    match category {
+        Category::Convergence => FitConvergenceError::new_err(message),
+        Category::StartupSeeds => FitSeedError::new_err(message),
+        Category::Invariant => FitInvariantError::new_err(message),
+        Category::Input => FitInputError::new_err(message),
+        Category::Numerical => FitNumericalError::new_err(message),
+        Category::Integration => IntegrationError::new_err(message),
+        Category::Unclassified => FitError::new_err(message),
+    }
+}
+
+/// Raise a fit's solve failure as the class of its category (#2937).
+///
+/// The message is the failure's complete rendered chain, unchanged, followed by
+/// the typed variant and category, and by the `help:` line when the engine
+/// error declares one. When the failure ends in an `EstimationError` whose own
+/// class already names a fit category (`RemlConvergenceError` is a
+/// `FitConvergenceError`), that more specific class is raised, so a fit and a
+/// direct estimation entry point raise the same class for the same variant.
+/// The variant, category and message chain are also set as attributes, so a
+/// caller branches on them without parsing the message.
+fn fit_failure_to_pyerr(py: Python<'_>, report: FitFailureReport<'_>) -> PyErr {
+    let FitFailureReport {
+        message,
+        variant,
+        category,
+        causes,
+        estimation_error,
+    } = report;
+    let mut message = format!(
+        "{message}\nvariant: {variant}\ncategory: {}",
+        category.label()
+    );
+    if let Some(advice) = estimation_error.and_then(EstimationError::advice) {
+        message.push_str("\nhelp: ");
+        message.push_str(&advice);
+    }
+    let specific = estimation_error
+        .map(|source| estimation_error_to_pyerr_with_message(source, message.clone()))
+        .filter(|candidate| candidate.is_instance_of::<FitError>(py));
+    let exc = specific.unwrap_or_else(|| fit_category_error(category, message));
+    let bound = exc.value(py);
+    // As for `ColumnNotFoundError`: the class is the contract, the attributes
+    // are enrichment, so an attribute that cannot be set is reported as
+    // unraisable rather than replacing the typed exception.
+    let attach_result: PyResult<()> = (|| {
+        bound.setattr("variant", variant)?;
+        bound.setattr("category", category.label())?;
+        bound.setattr("causes", causes)?;
+        Ok(())
+    })();
+    if let Err(attach_err) = attach_result {
+        attach_err.write_unraisable(py, Some(&bound));
+    }
+    exc
 }
 
 pub(crate) fn detach_workflow_result<T, F>(
@@ -991,3 +1144,122 @@ error_to_pyerr!(
 );
 error_to_pyerr!(shape_error_to_pyerr, ndarray::ShapeError, GamError);
 error_to_pyerr!(serde_json_error_to_pyerr, serde_json::Error, GamError);
+
+#[cfg(test)]
+mod fit_failure_dispatch_tests {
+    use super::*;
+    use gam::FailureCategory;
+    use gam::families::fit_orchestration::FitFailure;
+
+    fn raise(failure: FitFailure) -> PyErr {
+        Python::attach(|py| workflow_error_to_pyerr(py, WorkflowError::Fit(failure)))
+    }
+
+    #[test]
+    fn each_fit_failure_category_raises_its_own_class_2937() {
+        Python::attach(|py| {
+            let seeds = raise(FitFailure::from(EstimationError::StartupSeedsRefused(
+                "no candidate seeds passed outer startup validation (custom family):".to_string(),
+            )));
+            assert!(seeds.is_instance_of::<FitSeedError>(py));
+
+            let reml = raise(FitFailure::from(EstimationError::RemlOptimizationFailed(
+                "stalled".to_string(),
+            )));
+            assert!(reml.is_instance_of::<RemlConvergenceError>(py));
+            assert!(reml.is_instance_of::<FitConvergenceError>(py));
+
+            let laws = raise(FitFailure::raised(
+                FailureCategory::Convergence,
+                "expectile LAWS exhausted its safety cap",
+            ));
+            assert!(laws.is_instance_of::<FitConvergenceError>(py));
+            assert!(!laws.is_instance_of::<RemlConvergenceError>(py));
+
+            let invariant = raise(FitFailure::from(EstimationError::FitResultInvariantViolated(
+                "UnifiedFitResult inference conditional covariance must match top-level \
+                 covariance_conditional"
+                    .to_string(),
+            )));
+            assert!(invariant.is_instance_of::<FitInvariantError>(py));
+
+            let input = raise(FitFailure::raised(
+                FailureCategory::Input,
+                "gaussian location-scale fit: the response has no finite positive spread",
+            ));
+            assert!(input.is_instance_of::<FitInputError>(py));
+
+            let numerical = raise(FitFailure::raised(
+                FailureCategory::Numerical,
+                "survival marginal-slope intercept solve failed",
+            ));
+            assert!(numerical.is_instance_of::<FitNumericalError>(py));
+
+            let integration = raise(FitFailure::raised(
+                FailureCategory::Integration,
+                "quadrature missed its tolerance",
+            ));
+            assert!(integration.is_instance_of::<IntegrationError>(py));
+
+            let prose = raise(FitFailure::from("a helper's prose".to_string()));
+            assert!(prose.is_instance_of::<FitError>(py));
+            for subclass_check in [
+                prose.is_instance_of::<FitConvergenceError>(py),
+                prose.is_instance_of::<FitSeedError>(py),
+                prose.is_instance_of::<FitInvariantError>(py),
+                prose.is_instance_of::<FitInputError>(py),
+                prose.is_instance_of::<FitNumericalError>(py),
+                prose.is_instance_of::<IntegrationError>(py),
+            ] {
+                assert!(!subclass_check, "prose must not claim a category");
+            }
+
+            for err in [&seeds, &reml, &laws, &invariant, &input, &numerical, &prose] {
+                assert!(err.is_instance_of::<FitError>(py));
+                assert!(err.is_instance_of::<GamError>(py));
+                assert!(
+                    !err.is_instance_of::<IntegrationError>(py),
+                    "only a genuine integration failure is an IntegrationError"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn a_fit_exception_carries_the_variant_category_and_full_chain_2937() {
+        Python::attach(|py| {
+            let seeds = EstimationError::StartupSeedsRefused(
+                "no candidate seeds passed outer startup validation (custom family):".to_string(),
+            );
+            let engine_text = seeds.to_string();
+            let err = raise(FitFailure::from(seeds).context("CTN fold 1 failed"));
+            let value = err.value(py);
+            assert_eq!(
+                value.to_string(),
+                format!(
+                    "CTN fold 1 failed: {engine_text}\nvariant: \
+                     EstimationError::StartupSeedsRefused\ncategory: startup_seeds"
+                )
+            );
+            let variant: String = value.getattr("variant").unwrap().extract().unwrap();
+            assert_eq!(variant, "EstimationError::StartupSeedsRefused");
+            let category: String = value.getattr("category").unwrap().extract().unwrap();
+            assert_eq!(category, "startup_seeds");
+            let causes: Vec<String> = value.getattr("causes").unwrap().extract().unwrap();
+            assert_eq!(causes, vec!["CTN fold 1 failed".to_string(), engine_text]);
+        });
+    }
+
+    #[test]
+    fn a_direct_estimation_invariant_raises_the_invariant_class_2937() {
+        Python::attach(|py| {
+            let err = estimation_error_to_pyerr(EstimationError::FitResultInvariantViolated(
+                "UnifiedFitResult inference conditional covariance must match top-level \
+                 covariance_conditional"
+                    .to_string(),
+            ));
+            assert!(err.is_instance_of::<FitInvariantError>(py));
+            assert!(!err.is_instance_of::<InvalidInputError>(py));
+        });
+    }
+}

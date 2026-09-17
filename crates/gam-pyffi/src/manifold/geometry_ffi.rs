@@ -4702,6 +4702,21 @@ fn rust_extension(module: &Bound<'_, PyModule>) -> PyResult<()> {
         "IntegrationError",
         module.py().get_type::<IntegrationError>(),
     )?;
+    module.add("FitError", module.py().get_type::<FitError>())?;
+    module.add(
+        "FitConvergenceError",
+        module.py().get_type::<FitConvergenceError>(),
+    )?;
+    module.add("FitSeedError", module.py().get_type::<FitSeedError>())?;
+    module.add(
+        "FitInvariantError",
+        module.py().get_type::<FitInvariantError>(),
+    )?;
+    module.add("FitInputError", module.py().get_type::<FitInputError>())?;
+    module.add(
+        "FitNumericalError",
+        module.py().get_type::<FitNumericalError>(),
+    )?;
 
     // #773: `create_exception!` stamps every gamfit exception with
     // `__module__ = "_rust"`, but the compiled extension is importable only as
@@ -6908,10 +6923,15 @@ fn fit_dataset_impl(
         &fit_config,
     )?;
     let model = FittedModel::from_payload(payload);
+    // A fitted model the engine cannot serialize breaks its own persistence
+    // contract; it is not a solver failure of the fit (#2937).
     serde_json::to_vec(&model).map_err(|err| {
-        gam::families::fit_orchestration::WorkflowError::IntegrationFailed {
-            reason: format!("failed to serialize model: {err}"),
-        }
+        gam::families::fit_orchestration::WorkflowError::Fit(
+            gam::families::fit_orchestration::FitFailure::raised(
+                gam::FailureCategory::Invariant,
+                format!("failed to serialize model: {err}"),
+            ),
+        )
     })
 }
 

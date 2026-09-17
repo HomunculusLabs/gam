@@ -1,5 +1,6 @@
 use super::*;
 use gam_linalg::matrix::LinearOperator;
+use gam_problem::FailureCategory;
 use gam_solve::estimate::reml::reml_outer_engine::penalty_matrix_root;
 
 /// Request-specific inputs to the canonical standard-fit `FitOptions`.
@@ -83,13 +84,57 @@ pub fn canonical_standard_fit_options(
     }
 }
 
+/// A fit failure raised in this module under the category it belongs to.
+fn raised_fit_failure(category: FailureCategory, reason: impl Into<String>) -> WorkflowError {
+    WorkflowError::Fit(FitFailure::raised(category, reason))
+}
+
+/// An exact smoothing-spline scan refusal, under its category.
+fn spline_scan_failure(error: gam_solve::spline_scan::SplineScoreProofError) -> WorkflowError {
+    use gam_solve::spline_scan::SplineScoreProofError as E;
+    let category = match &error {
+        E::InnovationContainsZero { .. }
+        | E::NonPositiveInnovation { .. }
+        | E::NonPositiveProfileResidual { .. }
+        | E::InvalidArithmetic { .. }
+        | E::AccumulatorDiverged { .. } => FailureCategory::Numerical,
+        E::InvalidInput(_) => FailureCategory::Input,
+        E::MissingEndpointCertificate { .. }
+        | E::GlobalValueOrderingUnresolved { .. }
+        | E::OptimumKktUncertified { .. }
+        | E::Search(_) => FailureCategory::Convergence,
+        // Prose from several kinds of computation.
+        E::Computation(_) => FailureCategory::Unclassified,
+    };
+    raised_fit_failure(category, error.to_string())
+}
+
+/// A residual-cascade proof or convergence refusal, under its category.
+fn residual_cascade_failure(error: gam_solve::residual_cascade::ResidualCascadeError) -> WorkflowError {
+    use gam_solve::residual_cascade::ResidualCascadeError as E;
+    let category = match &error {
+        // "Invalid input or a numerical failure": prose from two kinds.
+        E::Computation(_) => FailureCategory::Unclassified,
+        E::RemlScoreProofUnavailable { .. }
+        | E::RemlOptimumResolutionFlat { .. }
+        | E::RemlScoreSearchUndecomposable { .. }
+        | E::RemlValueOrderingUnresolved { .. }
+        | E::Underresolved { .. } => FailureCategory::Convergence,
+    };
+    raised_fit_failure(category, error.to_string())
+}
+
 pub fn fit_model(request: FitRequest<'_>) -> Result<FitResult, WorkflowError> {
     let request = request;
-    // Each `fit_*_model` helper still returns `Result<_, String>` internally;
-    // the boundary conversion happens here so the public API returns
-    // `WorkflowError::IntegrationFailed` carrying the underlying solver text.
-    let wrap_solver_err =
-        |reason: String| -> WorkflowError { WorkflowError::IntegrationFailed { reason } };
+    // Every arm hands back the helper's `FitFailure` whole. This boundary used
+    // to wrap each helper's text as `IntegrationFailed`, so every solver
+    // failure reached Python as `IntegrationError` whatever had failed (#2937).
+    let wrap_solver_err = |failure: FitFailure| -> WorkflowError { WorkflowError::from(failure) };
+    // The survival transformation and location-scale helpers still hand back
+    // text; it is recorded as unclassified rather than given a category it
+    // does not carry.
+    let wrap_untyped_solver_err =
+        |reason: String| -> WorkflowError { WorkflowError::from(FitFailure::from(reason)) };
     match request {
         FitRequest::Standard(request) => {
             if let Some(fitted) = try_deterministic_gaussian_standard_fit(&request)? {
@@ -113,10 +158,10 @@ pub fn fit_model(request: FitRequest<'_>) -> Result<FitResult, WorkflowError> {
         }
         FitRequest::SurvivalLocationScale(request) => fit_survival_location_scale_model(request)
             .map(FitResult::SurvivalLocationScale)
-            .map_err(wrap_solver_err),
+            .map_err(wrap_untyped_solver_err),
         FitRequest::SurvivalTransformation(request) => fit_survival_transformation_model(request)
             .map(FitResult::SurvivalTransformation)
-            .map_err(wrap_solver_err),
+            .map_err(wrap_untyped_solver_err),
         FitRequest::BernoulliMarginalSlope(request) => fit_bernoulli_marginal_slope_model(request)
             .map(FitResult::BernoulliMarginalSlope)
             .map_err(wrap_solver_err),
@@ -468,14 +513,15 @@ fn deterministic_gaussian_standard_fit(
     let (beta, penalty_faces) = match exact_boundary {
         Some(boundary) => {
             if boundary.beta.len() != p || boundary.penalty_faces.len() != n_penalties {
-                return Err(WorkflowError::IntegrationFailed {
-                    reason: format!(
+                return Err(raised_fit_failure(
+                    FailureCategory::Invariant,
+                    format!(
                         "deterministic Gaussian boundary shape changed while rebuilding: \
                          coefficients {} vs {p}, penalty faces {} vs {n_penalties}",
                         boundary.beta.len(),
                         boundary.penalty_faces.len(),
                     ),
-                });
+                ));
             }
             (boundary.beta, boundary.penalty_faces)
         }
@@ -525,29 +571,32 @@ fn deterministic_gaussian_standard_fit(
             || block.local.nrows() != r.len()
             || block.local.ncols() != r.len()
         {
-            return Err(WorkflowError::IntegrationFailed {
-                reason: format!(
+            return Err(raised_fit_failure(
+                FailureCategory::Invariant,
+                format!(
                     "deterministic Gaussian shortcut received malformed penalty {penalty_index}: \
                      range={r:?}, local={}x{}, design width={p}",
                     block.local.nrows(),
                     block.local.ncols()
                 ),
-            });
+            ));
         }
         if block.local.iter().any(|value| !value.is_finite()) {
-            return Err(WorkflowError::IntegrationFailed {
-                reason: format!(
+            return Err(raised_fit_failure(
+                FailureCategory::Numerical,
+                format!(
                     "deterministic Gaussian shortcut received non-finite penalty {penalty_index}"
                 ),
-            });
+            ));
         }
         if !matches!(&block.prior_mean, gam_problem::CoefficientPriorMean::Zero) {
-            return Err(WorkflowError::IntegrationFailed {
-                reason: format!(
+            return Err(raised_fit_failure(
+                FailureCategory::Input,
+                format!(
                     "deterministic Gaussian shortcut does not admit a nonzero coefficient \
                      prior mean on penalty {penalty_index}"
                 ),
-            });
+            ));
         }
         if penalty_faces[penalty_index] == DeterministicPenaltyFace::Infinite {
             infinite_face_penalty
@@ -587,21 +636,21 @@ fn deterministic_gaussian_standard_fit(
             (&infinite_face_penalty + &infinite_face_penalty.t().to_owned()) * 0.5;
         let (penalty_eigenvalues, penalty_eigenvectors) =
             symmetric_penalty.eigh(faer::Side::Lower).map_err(|error| {
-                WorkflowError::IntegrationFailed {
-                    reason: format!(
+                raised_fit_failure(
+                    FailureCategory::Numerical,
+                    format!(
                         "deterministic Gaussian shortcut could not resolve the penalty spectrum: {error}"
                     ),
-                }
+                )
             })?;
         let largest_penalty = penalty_eigenvalues
             .iter()
             .fold(0.0_f64, |largest, &value| largest.max(value.abs()));
         if !(largest_penalty.is_finite() && largest_penalty > 0.0) {
-            return Err(WorkflowError::IntegrationFailed {
-                reason:
-                    "deterministic Gaussian shortcut received penalties with zero numerical rank"
-                        .to_string(),
-            });
+            return Err(raised_fit_failure(
+                FailureCategory::Numerical,
+                "deterministic Gaussian shortcut received penalties with zero numerical rank",
+            ));
         }
         let rank_floor = f64::EPSILON * (p.max(1) as f64) * largest_penalty;
         if let Some(&negative) = penalty_eigenvalues
@@ -609,21 +658,24 @@ fn deterministic_gaussian_standard_fit(
             .filter(|&&value| value < -rank_floor)
             .min_by(|left, right| left.total_cmp(right))
         {
-            return Err(WorkflowError::IntegrationFailed {
-                reason: format!(
+            return Err(raised_fit_failure(
+                FailureCategory::Numerical,
+                format!(
                     "deterministic Gaussian shortcut received a non-PSD penalty \
                      (minimum eigenvalue {negative:.6e}, numerical floor {rank_floor:.6e})"
                 ),
-            });
+            ));
         }
         let weakest_penalty = penalty_eigenvalues
             .iter()
             .copied()
             .filter(|&value| value > rank_floor)
             .min_by(|left, right| left.total_cmp(right))
-            .ok_or_else(|| WorkflowError::IntegrationFailed {
-                reason: "deterministic Gaussian shortcut could not identify a penalized direction"
-                    .to_string(),
+            .ok_or_else(|| {
+                raised_fit_failure(
+                    FailureCategory::Numerical,
+                    "deterministic Gaussian shortcut could not identify a penalized direction",
+                )
             })?;
         // The induced infinity norm bounds the spectral norm of symmetric
         // X'WX. A diagonal-only scale can underestimate a highly correlated
@@ -635,20 +687,22 @@ fn deterministic_gaussian_standard_fit(
             .map(|row| row.iter().map(|value| value.abs()).sum::<f64>())
             .fold(0.0_f64, f64::max);
         if !(information_scale.is_finite() && information_scale > 0.0) {
-            return Err(WorkflowError::IntegrationFailed {
-                reason: format!(
+            return Err(raised_fit_failure(
+                FailureCategory::Input,
+                format!(
                     "deterministic Gaussian shortcut: the weighted design carries no information \
                      (‖X'WX‖∞ = {information_scale:e}), so the λ→∞ boundary has no scale"
                 ),
-            });
+            ));
         }
         let lambda = information_scale / (f64::EPSILON.sqrt() * weakest_penalty);
         if !(lambda.is_finite() && lambda > 0.0) {
-            return Err(WorkflowError::IntegrationFailed {
-                reason: format!(
+            return Err(raised_fit_failure(
+                FailureCategory::Numerical,
+                format!(
                     "deterministic Gaussian shortcut produced invalid boundary precision {lambda}"
                 ),
-            });
+            ));
         }
         let range_indices: Vec<usize> = penalty_eigenvalues
             .iter()
@@ -691,24 +745,26 @@ fn deterministic_gaussian_standard_fit(
     };
     let lambda_infinite = if has_infinite_face {
         gam_problem::checked_exp_log_strength(log_lambda_infinite).map_err(|error| {
-            WorkflowError::IntegrationFailed {
-                reason: format!(
+            raised_fit_failure(
+                FailureCategory::Numerical,
+                format!(
                     "deterministic Gaussian shortcut produced a boundary precision outside the \
                      log-strength domain: {error}"
                 ),
-            }
+            )
         })?
     } else {
         0.0
     };
     let log_lambda_zero = gam_problem::LOG_STRENGTH_MIN;
     let lambda_zero = gam_problem::checked_exp_log_strength(log_lambda_zero).map_err(|error| {
-        WorkflowError::IntegrationFailed {
-            reason: format!(
+        raised_fit_failure(
+            FailureCategory::Invariant,
+            format!(
                 "deterministic Gaussian shortcut could not represent the zero-strength \
                  boundary: {error}"
             ),
-        }
+        )
     })?;
     let log_lambdas = Array1::from_iter(penalty_faces.iter().map(|face| match face {
         DeterministicPenaltyFace::Infinite => log_lambda_infinite,
@@ -814,11 +870,14 @@ fn deterministic_gaussian_standard_fit(
                 // (#2470). This path previously measured against `block_cols`
                 // and so reported each block with its penalty nullity added.
                 block_ranks[kk] = penalty_matrix_root(&block.local)
-                    .map_err(|reason| WorkflowError::IntegrationFailed {
-                        reason: format!(
-                            "deterministic Gaussian shortcut penalty {kk} rank factorization \
-                             failed: {reason}"
-                        ),
+                    .map_err(|reason| {
+                        raised_fit_failure(
+                            FailureCategory::Numerical,
+                            format!(
+                                "deterministic Gaussian shortcut penalty {kk} rank factorization \
+                                 failed: {reason}"
+                            ),
+                        )
                     })?
                     .nrows();
                 if penalty_faces[kk] == DeterministicPenaltyFace::Infinite {
@@ -851,12 +910,13 @@ fn deterministic_gaussian_standard_fit(
             if joint_penalty_rank > 0
                 && !(measured_infinite_trace.is_finite() && measured_infinite_trace > 0.0)
             {
-                return Err(WorkflowError::IntegrationFailed {
-                    reason: format!(
+                return Err(raised_fit_failure(
+                    FailureCategory::Numerical,
+                    format!(
                         "deterministic Gaussian shortcut could not allocate joint boundary rank \
                          {joint_penalty_rank} across trace {measured_infinite_trace:?}"
                     ),
-                });
+                ));
             }
             let trace_scale = if joint_penalty_rank > 0 {
                 joint_penalty_rank as f64 / measured_infinite_trace
@@ -976,8 +1036,10 @@ fn deterministic_gaussian_standard_fit(
             inner_cycles: 0,
         },
     )
-    .map_err(|err| WorkflowError::IntegrationFailed {
-        reason: format!("deterministic Gaussian shortcut produced invalid fit: {err}"),
+    .map_err(|err| {
+        WorkflowError::Fit(
+            FitFailure::from(err).context("deterministic Gaussian shortcut produced invalid fit"),
+        )
     })?;
     let resolvedspec =
         freeze_term_collection_from_design(&request.spec, &design).map_err(|err| {
@@ -1276,14 +1338,15 @@ fn exact_gaussian_boundary(
             || block.local.ncols() != r.len()
             || block.local.iter().any(|value| !value.is_finite())
         {
-            return Err(WorkflowError::IntegrationFailed {
-                reason: format!(
+            return Err(raised_fit_failure(
+                FailureCategory::Invariant,
+                format!(
                     "deterministic Gaussian candidate received malformed penalty \
                      {penalty_index}: range={r:?}, local={}x{}, design width={p}",
                     block.local.nrows(),
                     block.local.ncols(),
                 ),
-            });
+            ));
         }
         // Classify every face against the ONE exact coefficient certified by
         // the full design. Asking whether each penalty null space can reproduce
@@ -1322,12 +1385,13 @@ fn exact_gaussian_boundary(
         let reproduced_on_null_space = !annihilates && {
             let (null_basis, rotation_radius) =
                 embedded_penalty_null_basis(p, r.clone(), &block.local).map_err(|reason| {
-                    WorkflowError::IntegrationFailed {
-                        reason: format!(
+                    raised_fit_failure(
+                        FailureCategory::Numerical,
+                        format!(
                             "deterministic Gaussian candidate could not resolve penalty \
                              {penalty_index}'s null space: {reason}"
                         ),
-                    }
+                    )
                 })?;
             exact_gaussian_coefficients(
                 &x,
@@ -1354,12 +1418,13 @@ fn exact_gaussian_boundary(
     let beta = if restricted_certification {
         let (joint_null_basis, joint_rotation_radius) =
             embedded_penalty_null_basis(p, 0..p, &infinite_face_penalty).map_err(|reason| {
-                WorkflowError::IntegrationFailed {
-                    reason: format!(
+                raised_fit_failure(
+                    FailureCategory::Numerical,
+                    format!(
                         "deterministic Gaussian candidate could not resolve the joint \
                          infinite-face null space: {reason}"
                     ),
-                }
+                )
             })?;
         let Some(tangent_beta) = exact_gaussian_coefficients(
             &x,
@@ -1580,6 +1645,7 @@ fn finish_adaptive_spatial_fit(
                 current_centers: candidate.current_centers,
                 attempted_centers: candidate.proposed_centers,
                 reason: error.to_string(),
+                refit_failure: Some(Box::new(error)),
             })?;
         if standard_result(&candidate_outcome).is_none() {
             return Err(WorkflowError::SpatialUnderresolved {
@@ -1587,6 +1653,7 @@ fn finish_adaptive_spatial_fit(
                 current_centers: candidate.current_centers,
                 attempted_centers: candidate.proposed_centers,
                 reason: "the certification refit changed estimator representation".to_string(),
+                refit_failure: None,
             });
         }
 
@@ -1676,15 +1743,16 @@ fn adaptive_spatial_candidates(
         || result.adaptive_spatial_center_counts.len() != term_count
         || result.design.smooth.terms.len() != term_count
     {
-        return Err(WorkflowError::IntegrationFailed {
-            reason: format!(
+        return Err(raised_fit_failure(
+            FailureCategory::Invariant,
+            format!(
                 "adaptive spatial provenance mismatch: resolved terms={term_count}, mask={}, \
                  requested counts={}, realized terms={}",
                 result.adaptive_spatial_terms.len(),
                 result.adaptive_spatial_center_counts.len(),
                 result.design.smooth.terms.len(),
             ),
-        });
+        ));
     }
 
     let smooth_offset = result
@@ -1707,24 +1775,28 @@ fn adaptive_spatial_candidates(
             let penalty_range = result
                 .design
                 .smooth_term_penalty_range(term_index)
-                .map_err(|reason| WorkflowError::IntegrationFailed { reason })?
-                .ok_or_else(|| WorkflowError::IntegrationFailed {
-                    reason: format!(
-                        "adaptive spatial term '{}' emitted no penalty block",
-                        result.resolvedspec.smooth_terms[term_index].name,
-                    ),
+                .map_err(|reason| raised_fit_failure(FailureCategory::Invariant, reason))?
+                .ok_or_else(|| {
+                    raised_fit_failure(
+                        FailureCategory::Invariant,
+                        format!(
+                            "adaptive spatial term '{}' emitted no penalty block",
+                            result.resolvedspec.smooth_terms[term_index].name,
+                        ),
+                    )
                 })?;
             let spatial_dimension = result.resolvedspec.smooth_terms[term_index]
                 .basis
                 .structural_feature_cols()
                 .len();
             if spatial_dimension == 0 {
-                return Err(WorkflowError::IntegrationFailed {
-                    reason: format!(
+                return Err(raised_fit_failure(
+                    FailureCategory::Invariant,
+                    format!(
                         "adaptive spatial term '{}' has no structural feature columns",
                         result.resolvedspec.smooth_terms[term_index].name,
                     ),
-                });
+                ));
             }
             // Tiny samples can force the materializer's exact polynomial floor
             // above the generic `n / 4` conditioning ceiling. The realized
@@ -1767,6 +1839,7 @@ fn adaptive_spatial_candidates(
                             "term EDF {edf:.6} remains at its realized basis ceiling with all \
                              {ceiling_centers} validated default centers already requested"
                         ),
+                        refit_failure: None,
                     });
                 }
             }
@@ -1897,9 +1970,7 @@ fn fit_materialized_once_with_notes(
                 &inputs.w,
                 inputs.order,
             )
-            .map_err(|reason| WorkflowError::IntegrationFailed {
-                reason: reason.to_string(),
-            })?;
+            .map_err(spline_scan_failure)?;
             return Ok(FormulaFitResult {
                 result: FitResult::SplineScan(scan),
                 inference_notes,
@@ -1926,9 +1997,7 @@ fn fit_materialized_once_with_notes(
                 &inputs.metric,
                 inputs.sobolev_s,
             )
-            .map_err(|reason| WorkflowError::IntegrationFailed {
-                reason: reason.to_string(),
-            })?;
+            .map_err(residual_cascade_failure)?;
             return Ok(FormulaFitResult {
                 result: FitResult::ResidualCascade(fit),
                 inference_notes,
@@ -2157,8 +2226,7 @@ fn fit_expectile_laws(
             penalty_block_gamma_priors: penalty_block_gamma_priors.clone(),
             latent_coord: None,
         };
-        let result = fit_standard_model(request)
-            .map_err(|reason| WorkflowError::IntegrationFailed { reason })?;
+        let result = fit_standard_model(request).map_err(WorkflowError::from)?;
         // Training-scale fitted mean μ = X·β (identity link, zero-checked
         // offset folded by the design path). The design columns match the
         // combined coefficient vector exactly (the same contract `predict`
@@ -2166,16 +2234,20 @@ fn fit_expectile_laws(
         let mu = result
             .design
             .apply(result.fit.beta.view())
-            .map_err(|error| WorkflowError::IntegrationFailed {
-                reason: format!("expectile LAWS could not evaluate fitted design: {error}"),
+            .map_err(|error| {
+                raised_fit_failure(
+                    FailureCategory::Invariant,
+                    format!("expectile LAWS could not evaluate fitted design: {error}"),
+                )
             })?;
         if mu.len() != n {
-            return Err(WorkflowError::IntegrationFailed {
-                reason: format!(
+            return Err(raised_fit_failure(
+                FailureCategory::Invariant,
+                format!(
                     "expectile LAWS: fitted mean length {} disagrees with response length {n}",
                     mu.len()
                 ),
-            });
+            ));
         }
         // `design.apply` already folds the design's fixed affine channel
         // (non-zero endpoint anchor, #2297) into `X·β`, so only the user offset
@@ -2207,12 +2279,15 @@ fn fit_expectile_laws(
             weights.view(),
             next_weights.view(),
         )
-        .map_err(|reason| WorkflowError::IntegrationFailed {
-            reason: format!(
-                "expectile LAWS KKT audit failed at iteration {iteration} \
-                 (rho_checkpoint={:?}): {reason}",
-                result.fit.log_lambdas.to_vec(),
-            ),
+        .map_err(|reason| {
+            raised_fit_failure(
+                FailureCategory::Numerical,
+                format!(
+                    "expectile LAWS KKT audit failed at iteration {iteration} \
+                     (rho_checkpoint={:?}): {reason}",
+                    result.fit.log_lambdas.to_vec(),
+                ),
+            )
         })?;
         let kkt_bound = options.tol;
         if kkt <= kkt_bound {
@@ -2221,8 +2296,9 @@ fn fit_expectile_laws(
         last_kkt = (kkt, kkt_bound);
         last_rho_checkpoint = result.fit.log_lambdas.to_vec();
         if let Some(cycle_length) = sign_cycle.observe(&sign) {
-            return Err(WorkflowError::IntegrationFailed {
-                reason: format!(
+            return Err(raised_fit_failure(
+                FailureCategory::Convergence,
+                format!(
                     "expectile LAWS entered a deterministic sign-pattern cycle without \
                      reaching the KKT fixed point of the convex asymmetric least-squares \
                      problem (tau={tau}, iterations={iteration}, cycle_length={cycle_length}, \
@@ -2233,13 +2309,14 @@ fn fit_expectile_laws(
                     kkt_bound,
                     result.fit.log_lambdas.to_vec(),
                 ),
-            });
+            ));
         }
         weights = Arc::new(next_weights);
     }
 
-    Err(WorkflowError::IntegrationFailed {
-        reason: format!(
+    Err(raised_fit_failure(
+        FailureCategory::Convergence,
+        format!(
             "expectile LAWS exhausted its {max_laws_iters}-iteration safety cap without a \
              KKT certificate for the convex asymmetric least-squares problem (tau={tau}, \
              final KKT residual={:.3e} vs scaled tolerance {:.3e}, \
@@ -2247,7 +2324,7 @@ fn fit_expectile_laws(
              never selects the estimator — non-convergence is a typed error",
             last_kkt.0, last_kkt.1,
         ),
-    })
+    ))
 }
 /// Detection seam for the exact O(n) cubic-smoothing-spline fast path.
 ///
@@ -2970,9 +3047,7 @@ pub fn fit_residual_cascade_from_formula(
         inputs.sobolev_s,
     )
     .map(Some)
-    .map_err(|reason| WorkflowError::IntegrationFailed {
-        reason: reason.to_string(),
-    })
+    .map_err(residual_cascade_failure)
 }
 
 /// Formula-level direct entry for the exact O(n) smoothing-spline scan.
@@ -3007,7 +3082,5 @@ pub fn fit_spline_scan_from_formula(
     };
     gam_solve::spline_scan::fit_spline_scan(&inputs.x, &inputs.y, &inputs.w, inputs.order)
         .map(Some)
-        .map_err(|reason| WorkflowError::IntegrationFailed {
-            reason: reason.to_string(),
-        })
+        .map_err(spline_scan_failure)
 }

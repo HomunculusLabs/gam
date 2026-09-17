@@ -2,7 +2,7 @@ use gam_linalg::LinalgError;
 use gam_linalg::faer_ndarray::FaerLinalgError;
 use serde::{Deserialize, Serialize};
 
-use crate::{BasisError, CustomFamilyError, MonotoneRootError};
+use crate::{BasisError, CustomFamilyError, FailureCategory, MonotoneRootError};
 
 /// Which rung of the stationarity ladder produced the bound a refusal was
 /// measured against (#2458).
@@ -731,6 +731,17 @@ pub enum EstimationError {
     #[error("REML smoothing optimization failed to converge: {0}")]
     RemlOptimizationFailed(String),
 
+    /// Outer startup validation refused every candidate seed, so no outer solver
+    /// started (#2937).
+    ///
+    /// This travelled as [`Self::RemlOptimizationFailed`], so a caller could not
+    /// tell "no start was admissible" from "a started search did not converge",
+    /// and the remedies differ: a refused start asks for a different start or
+    /// problem, a stalled search for a longer or looser one. It renders the same
+    /// text as before, so no message a user or a test reads changes.
+    #[error("REML smoothing optimization failed to converge: {0}")]
+    StartupSeedsRefused(String),
+
     /// A numerical refusal evaluated AT ONE TRIAL POINT of the outer smoothing
     /// search: no Laplace mode at this rho, an inner solve that missed its KKT
     /// bar at this rho, an indefinite trial Hessian at this rho.
@@ -848,6 +859,16 @@ pub enum EstimationError {
 
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+
+    /// An assembled fit result violated its own consistency contract, e.g. an
+    /// inference block whose conditional covariance disagrees with the top-level
+    /// one (gam#1789). An engine defect, not a property of the caller's input.
+    ///
+    /// It used to be [`Self::InvalidInput`], which told the caller to look at
+    /// their data (#2937). It keeps that variant's text, so no message a user or
+    /// a test reads changes.
+    #[error("Invalid input: {0}")]
+    FitResultInvariantViolated(String),
 
     /// Gaussian REML's profiled residual for output `output` does not clear its own arithmetic
     /// resolution at `rho`: the design reproduces its response, so the profiled dispersion has
@@ -1072,12 +1093,14 @@ impl EstimationError {
             | Self::EdfTraceOutsideRank { .. }
             | Self::PredictiveIntervalsDeclined { .. }
             | Self::RemlOptimizationFailed { .. }
+            | Self::StartupSeedsRefused { .. }
             | Self::OuterObjectiveEvaluationFailed { .. }
             | Self::RemlDidNotConverge { .. }
             | Self::FitDidNotConverge { .. }
             | Self::GradientUnavailable { .. }
             | Self::LayoutError { .. }
             | Self::InvalidInput { .. }
+            | Self::FitResultInvariantViolated { .. }
             | Self::ProfiledResidualUnresolved { .. }
             | Self::InverseLinkDomainViolation { .. }
             | Self::PirlsRowGeometryUnrepresentable { .. }
@@ -1179,6 +1202,175 @@ impl EstimationError {
         // retreat is an infeasibility; not every infeasibility arrives as one
         // of the five inner-solve shapes.
         self.is_trial_point_infeasible()
+    }
+
+    /// The typed error that decided this failure: the innermost engine error a
+    /// wrapper variant carries, or `self`.
+    ///
+    /// A custom-family fit and a fatal outer evaluation both wrap the error
+    /// that actually stopped the fit, and that wrapped error is what a caller
+    /// needs to see named and categorized (#2937).
+    #[must_use]
+    pub fn innermost_estimation_error(&self) -> &EstimationError {
+        match self {
+            Self::OuterObjectiveEvaluationFailed { source, .. } => source
+                .estimation_error()
+                .map_or(self, Self::innermost_estimation_error),
+            Self::CustomFamily(CustomFamilyError::OuterSmoothingFailed { outer_error, .. }) => {
+                outer_error.innermost_estimation_error()
+            }
+            _ => self,
+        }
+    }
+
+    /// The fixed category of this failure (#2937).
+    ///
+    /// Exhaustive with no wildcard arm, for the reason
+    /// [`Self::is_trial_point_infeasible`] is: a new variant gets a category
+    /// from whoever adds it, not from the absence of a decision. A variant that
+    /// carries prose from producers of different kinds answers for the kind
+    /// its producers share, and says so.
+    #[must_use]
+    pub fn failure_category(&self) -> FailureCategory {
+        match self {
+            Self::CustomFamily(err) => err.failure_category(),
+            Self::OuterObjectiveEvaluationFailed { source, .. } => source
+                .estimation_error()
+                .map_or(FailureCategory::Unclassified, Self::failure_category),
+            Self::PirlsDidNotConverge { .. }
+            | Self::FixedLambdaNewtonDidNotConverge { .. }
+            | Self::BlockOrthogonalRemlDidNotConverge { .. }
+            | Self::NegativeBinomialAlternationDidNotConverge { .. }
+            | Self::BetaPrecisionRefinementDidNotConverge { .. }
+            | Self::IdentifiedRankNotLocallyConstant { .. }
+            | Self::RemlOptimizationFailed(_)
+            | Self::TrialPointRefused { .. }
+            | Self::RemlDidNotConverge { .. }
+            | Self::FitDidNotConverge { .. }
+            // The exact Tweedie series refusing its term budget is a
+            // convergence-class refusal of the likelihood evaluation.
+            | Self::ExactTweedieSeriesWorkLimit { .. } => FailureCategory::Convergence,
+            Self::StartupSeedsRefused(_) => FailureCategory::StartupSeeds,
+            Self::FitResultInvariantViolated(_)
+            | Self::GradientUnavailable { .. }
+            | Self::LayoutError(_) => FailureCategory::Invariant,
+            Self::InvalidStabilization(_)
+            | Self::BasisError(_)
+            | Self::PerfectSeparationDetected { .. }
+            | Self::PrefitPerfectSeparationDetected { .. }
+            | Self::PrefitLinearSeparationDetected { .. }
+            | Self::PrefitRankDeficientDesignDetected { .. }
+            | Self::PrefitNearDegenerateDesignDetected { .. }
+            | Self::MultinomialSeparationDetected { .. }
+            | Self::PredictiveIntervalsDeclined { .. }
+            | Self::ModelIsIllConditioned { .. }
+            | Self::InvalidInput(_)
+            | Self::ProfiledResidualUnresolved { .. }
+            // A statement about the size of the data the caller supplied.
+            | Self::DenseMaterializationRefused { .. }
+            | Self::InvalidSpecification(_)
+            | Self::PredictionError => FailureCategory::Input,
+            Self::LinearSystemSolveFailed(_)
+            | Self::EigendecompositionFailed(_)
+            | Self::PenaltySpectrumNonFinite { .. }
+            | Self::PenaltySpectrumIndefinite { .. }
+            // Its producers are row-level survival monotonicity refusals at
+            // the current coefficients.
+            | Self::ParameterConstraintViolation(_)
+            | Self::HessianNotPositiveDefinite { .. }
+            | Self::LaplacePrecisionIndefinite { .. }
+            | Self::InverseLinkDomainViolation { .. }
+            | Self::PirlsRowGeometryUnrepresentable { .. }
+            | Self::LogStrengthDomainViolation { .. }
+            | Self::MonotoneRoot(_) => FailureCategory::Numerical,
+            // Prose from the calibrator's own trainer; no producer names a kind.
+            Self::CalibratorTrainingFailed(_) => FailureCategory::Unclassified,
+        }
+    }
+
+    /// The `Enum::Variant` name of this error, the one a front end prints
+    /// beside the message (#2937). Wrappers are named by what they wrap; see
+    /// [`Self::innermost_estimation_error`].
+    #[must_use]
+    pub fn variant_name(&self) -> &'static str {
+        match self.innermost_estimation_error() {
+            Self::CustomFamily(err) => err.variant_name(),
+            Self::InvalidStabilization(_) => "EstimationError::InvalidStabilization",
+            Self::BasisError(_) => "EstimationError::BasisError",
+            Self::LinearSystemSolveFailed(_) => "EstimationError::LinearSystemSolveFailed",
+            Self::EigendecompositionFailed(_) => "EstimationError::EigendecompositionFailed",
+            Self::PenaltySpectrumNonFinite { .. } => "EstimationError::PenaltySpectrumNonFinite",
+            Self::PenaltySpectrumIndefinite { .. } => "EstimationError::PenaltySpectrumIndefinite",
+            Self::ParameterConstraintViolation(_) => {
+                "EstimationError::ParameterConstraintViolation"
+            }
+            Self::PirlsDidNotConverge { .. } => "EstimationError::PirlsDidNotConverge",
+            Self::FixedLambdaNewtonDidNotConverge { .. } => {
+                "EstimationError::FixedLambdaNewtonDidNotConverge"
+            }
+            Self::BlockOrthogonalRemlDidNotConverge { .. } => {
+                "EstimationError::BlockOrthogonalRemlDidNotConverge"
+            }
+            Self::NegativeBinomialAlternationDidNotConverge { .. } => {
+                "EstimationError::NegativeBinomialAlternationDidNotConverge"
+            }
+            Self::BetaPrecisionRefinementDidNotConverge { .. } => {
+                "EstimationError::BetaPrecisionRefinementDidNotConverge"
+            }
+            Self::PerfectSeparationDetected { .. } => "EstimationError::PerfectSeparationDetected",
+            Self::PrefitPerfectSeparationDetected { .. } => {
+                "EstimationError::PrefitPerfectSeparationDetected"
+            }
+            Self::PrefitLinearSeparationDetected { .. } => {
+                "EstimationError::PrefitLinearSeparationDetected"
+            }
+            Self::PrefitRankDeficientDesignDetected { .. } => {
+                "EstimationError::PrefitRankDeficientDesignDetected"
+            }
+            Self::PrefitNearDegenerateDesignDetected { .. } => {
+                "EstimationError::PrefitNearDegenerateDesignDetected"
+            }
+            Self::MultinomialSeparationDetected { .. } => {
+                "EstimationError::MultinomialSeparationDetected"
+            }
+            Self::HessianNotPositiveDefinite { .. } => "EstimationError::HessianNotPositiveDefinite",
+            Self::LaplacePrecisionIndefinite { .. } => "EstimationError::LaplacePrecisionIndefinite",
+            Self::PredictiveIntervalsDeclined { .. } => {
+                "EstimationError::PredictiveIntervalsDeclined"
+            }
+            Self::IdentifiedRankNotLocallyConstant { .. } => {
+                "EstimationError::IdentifiedRankNotLocallyConstant"
+            }
+            Self::RemlOptimizationFailed(_) => "EstimationError::RemlOptimizationFailed",
+            Self::StartupSeedsRefused(_) => "EstimationError::StartupSeedsRefused",
+            Self::TrialPointRefused { .. } => "EstimationError::TrialPointRefused",
+            Self::OuterObjectiveEvaluationFailed { .. } => {
+                "EstimationError::OuterObjectiveEvaluationFailed"
+            }
+            Self::RemlDidNotConverge { .. } => "EstimationError::RemlDidNotConverge",
+            Self::FitDidNotConverge { .. } => "EstimationError::FitDidNotConverge",
+            Self::GradientUnavailable { .. } => "EstimationError::GradientUnavailable",
+            Self::LayoutError(_) => "EstimationError::LayoutError",
+            Self::ModelIsIllConditioned { .. } => "EstimationError::ModelIsIllConditioned",
+            Self::InvalidInput(_) => "EstimationError::InvalidInput",
+            Self::FitResultInvariantViolated(_) => "EstimationError::FitResultInvariantViolated",
+            Self::ProfiledResidualUnresolved { .. } => "EstimationError::ProfiledResidualUnresolved",
+            Self::InverseLinkDomainViolation { .. } => "EstimationError::InverseLinkDomainViolation",
+            Self::PirlsRowGeometryUnrepresentable { .. } => {
+                "EstimationError::PirlsRowGeometryUnrepresentable"
+            }
+            Self::ExactTweedieSeriesWorkLimit { .. } => {
+                "EstimationError::ExactTweedieSeriesWorkLimit"
+            }
+            Self::DenseMaterializationRefused { .. } => {
+                "EstimationError::DenseMaterializationRefused"
+            }
+            Self::LogStrengthDomainViolation { .. } => "EstimationError::LogStrengthDomainViolation",
+            Self::MonotoneRoot(_) => "EstimationError::MonotoneRoot",
+            Self::CalibratorTrainingFailed(_) => "EstimationError::CalibratorTrainingFailed",
+            Self::InvalidSpecification(_) => "EstimationError::InvalidSpecification",
+            Self::PredictionError => "EstimationError::PredictionError",
+        }
     }
 }
 

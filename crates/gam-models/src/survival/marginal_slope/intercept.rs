@@ -124,7 +124,7 @@ impl SurvivalMarginalSlopeFamily {
             let log_tail_detail = log_tail_residual
                 .map(|value| format!(", log_tail_residual={value:.3e}"))
                 .unwrap_or_default();
-            return Err(SurvivalMarginalSlopeError::IntegrationFailed {
+            return Err(SurvivalMarginalSlopeError::RootSolveFailed {
                 reason: format!(
                     "survival marginal-slope intercept solve failed: \
                      residual={residual:.3e} at a={a:.6}, target survival={target_survival:.6e}, \
