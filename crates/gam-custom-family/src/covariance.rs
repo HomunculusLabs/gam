@@ -1973,17 +1973,46 @@ pub(crate) fn compute_joint_posterior<F: CustomFamily + Clone + Send + Sync + 's
     })
 }
 
+/// Publish the constrained posterior mean as the returned coefficients, and
+/// re-evaluate the log-likelihood at them (gam#2921).
+///
+/// The truncated posterior's mean is not the mode the inner solve returned, so
+/// the log-likelihood the inner solve recorded belongs to different
+/// coefficients than the ones installed here. The fit's deviance is already
+/// read at the installed states; leaving the log-likelihood at the mode made a
+/// constrained fit report a log-likelihood its own returned model does not
+/// reproduce (7.9e-6 on gnomon's 48-row Gaussian location-scale wiggle fit).
+/// The profiled objective is untouched: it is the certified criterion at the
+/// mode, not a property of the published coefficients. The mode's
+/// log-likelihood is kept on the constrained-posterior geometry beside the mode
+/// itself, for the statistics that belong to the mode.
 pub(crate) fn install_reported_posterior_mean<F: CustomFamily + Clone + Send + Sync + 'static>(
     family: &F,
     specs: &[ParameterBlockSpec],
-    states: &mut [ParameterBlockState],
+    inner: &mut BlockwiseInnerResult,
+    geometry: &mut FitGeometry,
     reported_beta: Option<&Array1<f64>>,
 ) -> Result<(), CustomFamilyError> {
     let Some(reported_beta) = reported_beta else {
         return Ok(());
     };
-    set_states_from_flat_beta(states, specs, reported_beta)?;
-    refresh_all_block_etas(family, specs, states)
+    let constrained = geometry.constrained_posterior.as_mut().ok_or_else(|| {
+        CustomFamilyError::Optimization {
+            context: "reported posterior mean",
+            reason: "a published posterior mean carries no constrained-posterior geometry"
+                .to_string(),
+        }
+    })?;
+    constrained.mode_log_likelihood = Some(inner.log_likelihood);
+    set_states_from_flat_beta(&mut inner.block_states, specs, reported_beta)?;
+    refresh_all_block_etas(family, specs, &mut inner.block_states)?;
+    inner.log_likelihood = family
+        .log_likelihood_only(&inner.block_states)
+        .map_err(|reason| CustomFamilyError::Optimization {
+            context: "reported posterior mean log-likelihood",
+            reason,
+        })?;
+    Ok(())
 }
 
 pub(crate) fn joint_penalty_subspace_trace_parts(

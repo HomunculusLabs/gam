@@ -697,6 +697,14 @@ pub struct ConstrainedPosteriorGeometry {
     correction: Option<ConstrainedPosteriorCorrection>,
     /// Whether reportable moments exist, with typed evidence when they do not.
     pub moment_status: ConstrainedPosteriorMomentStatus,
+    /// The log-likelihood at [`Self::mode`], kept when the fit publishes this
+    /// posterior's mean as its coefficients (gam#2921). The fit's reported
+    /// `log_likelihood` is evaluated at the published coefficients, so the
+    /// returned model reproduces it; a statistic that belongs to the mode, such
+    /// as a profile cost paired with the mode's envelope gradient, reads this.
+    /// `None` when no mean was published and on geometry saved before it existed.
+    #[serde(default)]
+    pub mode_log_likelihood: Option<f64>,
 }
 
 impl ConstrainedPosteriorGeometry {
@@ -712,6 +720,7 @@ impl ConstrainedPosteriorGeometry {
             unconstrained_center: Some(unconstrained_center),
             correction,
             moment_status: ConstrainedPosteriorMomentStatus::Available,
+            mode_log_likelihood: None,
         }
     }
 
@@ -726,6 +735,7 @@ impl ConstrainedPosteriorGeometry {
             unconstrained_center: None,
             correction: None,
             moment_status: ConstrainedPosteriorMomentStatus::Declined(decline),
+            mode_log_likelihood: None,
         }
     }
 
@@ -747,6 +757,7 @@ impl ConstrainedPosteriorGeometry {
                 decline,
                 approximation,
             },
+            mode_log_likelihood: None,
         }
     }
 
@@ -4113,6 +4124,7 @@ mod tests {
             unconstrained_center: Some(center),
             correction: Some(correction),
             moment_status: ConstrainedPosteriorMomentStatus::Available,
+            mode_log_likelihood: None,
         };
         let (lower, upper) = constrained_projection_equal_tailed_interval(
             &covariance,
@@ -4168,6 +4180,7 @@ mod tests {
                 unconstrained_center: Some(center),
                 correction: Some(correction),
                 moment_status: ConstrainedPosteriorMomentStatus::Available,
+                mode_log_likelihood: None,
             };
             let (lower, upper) = constrained_projection_equal_tailed_interval(
                 &covariance,
@@ -5558,6 +5571,7 @@ mod tests {
             unconstrained_center: Some(centre),
             correction: Some(correction),
             moment_status: ConstrainedPosteriorMomentStatus::Available,
+            mode_log_likelihood: None,
         };
         let (low, high) = constrained_projection_equal_tailed_interval(
             &covariance,

@@ -1466,6 +1466,16 @@ pub(crate) fn rescale_gaussian_location_scale_to_raw_with_units(
     {
         let ln_s = s.ln();
         result.fit.fit.log_likelihood -= n_obs * ln_s;
+        if let Some(mode_log_likelihood) = result
+            .fit
+            .fit
+            .geometry
+            .as_mut()
+            .and_then(|geometry| geometry.constrained_posterior.as_mut())
+            .and_then(|constrained| constrained.mode_log_likelihood.as_mut())
+        {
+            *mode_log_likelihood -= n_obs * ln_s;
+        }
         result.fit.fit.shift_criterion(n_obs * ln_s);
     }
 

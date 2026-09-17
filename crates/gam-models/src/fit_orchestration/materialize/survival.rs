@@ -1232,14 +1232,17 @@ pub(crate) fn materialize_survival<'a>(
                 // log-determinant terms have their own θ-dependence through
                 // H(β̂, θ). Use the matching profile-NLL cost here; the final
                 // model refit downstream still picks ρ via the full REML
-                // surface at the converged baseline θ.
-                let profile_cost = -fit_result.fit.fit.log_likelihood
-                    + 0.5 * fit_result.fit.fit.stable_penalty_term;
+                // surface at the converged baseline θ. The gradient belongs to
+                // the mode, so the cost reads the mode's log-likelihood, not the
+                // one at a published posterior mean (gam#2921).
+                let log_likelihood_at_mode = fit_result.fit.fit.log_likelihood_at_mode();
+                let profile_cost =
+                    -log_likelihood_at_mode + 0.5 * fit_result.fit.fit.stable_penalty_term;
                 if !profile_cost.is_finite() {
                     return Err(format!(
                         "workflow survival location-scale baseline: non-finite profile cost \
-                         (log_likelihood={}, stable_penalty_term={}, cost={})",
-                        fit_result.fit.fit.log_likelihood,
+                         (log_likelihood_at_mode={}, stable_penalty_term={}, cost={})",
+                        log_likelihood_at_mode,
                         fit_result.fit.fit.stable_penalty_term,
                         profile_cost
                     ));

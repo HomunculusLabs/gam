@@ -4256,6 +4256,21 @@ impl UnifiedFitResult {
         (!self.at_zero_dispersion_boundary()).then_some(self.log_likelihood)
     }
 
+    /// The log-likelihood at the fitted coefficient mode (gam#2921).
+    ///
+    /// A constrained custom-family fit publishes its truncated posterior mean as
+    /// the coefficients, and [`Self::log_likelihood`] is evaluated there, so the
+    /// returned model reproduces it. The mode's value is kept on the
+    /// constrained-posterior geometry for statistics that belong to the mode.
+    /// Every fit that publishes its mode returns `log_likelihood` itself.
+    pub fn log_likelihood_at_mode(&self) -> f64 {
+        self.geometry
+            .as_ref()
+            .and_then(|geometry| geometry.constrained_posterior.as_ref())
+            .and_then(|constrained| constrained.mode_log_likelihood)
+            .unwrap_or(self.log_likelihood)
+    }
+
     /// Public objective value reported for the fit; absent exactly when
     /// [`Self::reml_score`] is absent.
     pub fn penalized_objective(&self) -> Option<f64> {

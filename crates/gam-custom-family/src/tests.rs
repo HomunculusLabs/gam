@@ -5181,6 +5181,84 @@ pub(crate) fn fixed_constrained_fit_reports_truncated_mean_and_retains_boundary_
         "an inequality cannot become either a zero-variance equality or an ignored ambient \
          direction, got {variance}",
     );
+    assert_published_mean_log_likelihood_identity(&family, &fit, "fixed-smoothing constrained fit");
+}
+
+/// gam#2921: a constrained fit publishes its truncated posterior mean as the
+/// coefficients, so the reported log-likelihood must be the family's
+/// log-likelihood at the returned states, and the mode's log-likelihood must be
+/// kept beside the mode on the constrained-posterior geometry.
+fn assert_published_mean_log_likelihood_identity(
+    family: &OneBlockConstrainedExactFamily,
+    fit: &gam_solve::model_types::UnifiedFitResult,
+    label: &str,
+) {
+    let constrained = fit
+        .geometry
+        .as_ref()
+        .and_then(|geometry| geometry.constrained_posterior.as_ref())
+        .unwrap_or_else(|| panic!("{label}: no constrained-posterior geometry"));
+    let at_returned = family
+        .log_likelihood_only(&fit.block_states)
+        .expect("log-likelihood at the returned states");
+    assert_eq!(
+        fit.log_likelihood.to_bits(),
+        at_returned.to_bits(),
+        "{label}: reported log-likelihood {} is not the one at the returned states {}",
+        fit.log_likelihood,
+        at_returned,
+    );
+    let mode_states = vec![ParameterBlockState {
+        beta: constrained.mode.clone(),
+        eta: constrained.mode.clone(),
+    }];
+    let at_mode = family
+        .log_likelihood_only(&mode_states)
+        .expect("log-likelihood at the mode");
+    assert_eq!(
+        constrained.mode_log_likelihood.map(f64::to_bits),
+        Some(at_mode.to_bits()),
+        "{label}: the kept mode log-likelihood {:?} is not the one at the mode {}",
+        constrained.mode_log_likelihood,
+        at_mode,
+    );
+    assert_eq!(fit.log_likelihood_at_mode().to_bits(), at_mode.to_bits());
+    assert!(
+        at_returned < at_mode,
+        "{label}: the interior posterior mean must score below the boundary mode, got {at_returned} vs {at_mode}",
+    );
+}
+
+#[test]
+fn no_smoothing_constrained_fit_reports_log_likelihood_at_published_mean_2921() {
+    let family = OneBlockConstrainedExactFamily {
+        target: -1.0,
+        lower: 0.0,
+    };
+    let specs = vec![ParameterBlockSpec {
+        name: "lower_bounded_quadratic".to_string(),
+        design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(array![[1.0]])),
+        offset: array![0.0],
+        penalties: Vec::new(),
+        nullspace_dims: Vec::new(),
+        initial_log_lambdas: Array1::zeros(0),
+        initial_beta: Some(array![0.0]),
+        gauge_priority: 100,
+        jacobian_callback: None,
+        stacked_design: None,
+        stacked_offset: None,
+    }];
+    let fit = fit_custom_family(
+        &family,
+        &specs,
+        &BlockwiseFitOptions {
+            use_remlobjective: false,
+            compute_covariance: true,
+            ..BlockwiseFitOptions::default()
+        },
+    )
+    .expect("certified lower-truncated quadratic fit without smoothing parameters");
+    assert_published_mean_log_likelihood_identity(&family, &fit, "no-smoothing constrained fit");
 }
 
 /// #2366 fixture: two coefficients, quadratic likelihood `−½‖β − target‖²`,

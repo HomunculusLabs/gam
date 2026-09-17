@@ -2294,10 +2294,9 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         })?;
         let JointPosteriorAssembly {
             covariance_conditional,
-            geometry,
+            mut geometry,
             reported_beta,
         } = posterior;
-        let geometry = Some(geometry);
         let reml_term = if options.use_remlobjective {
             let logdet_h = inner
                 .block_logdet_h
@@ -2345,13 +2344,15 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         install_reported_posterior_mean(
             family,
             specs,
-            &mut inner.block_states,
+            &mut inner,
+            &mut geometry,
             reported_beta.as_ref(),
         )
         .map_err(|reason| CustomFamilyError::Optimization {
             context: "fit_custom_family no-smoothing reported posterior mean",
             reason: reason.to_string(),
         })?;
+        let geometry = Some(geometry);
         let deviance = classical_deviance_at_mode(
             family,
             &inner.block_states,
@@ -3330,7 +3331,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     })?;
     let JointPosteriorAssembly {
         covariance_conditional,
-        geometry,
+        mut geometry,
         reported_beta,
     } = posterior;
     // Cross-fit FitArtifact capture (Phase 0/1) for the converged smoothing
@@ -3457,7 +3458,8 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     install_reported_posterior_mean(
         family,
         specs,
-        &mut inner.block_states,
+        &mut inner,
+        &mut geometry,
         reported_beta.as_ref(),
     )
     .map_err(|reason| CustomFamilyError::Optimization {
@@ -3703,13 +3705,14 @@ fn fit_custom_family_user_fixed_log_lambdas_impl<
     })?;
     let JointPosteriorAssembly {
         covariance_conditional,
-        geometry,
+        mut geometry,
         reported_beta,
     } = posterior;
     install_reported_posterior_mean(
         family,
         specs,
-        &mut inner.block_states,
+        &mut inner,
+        &mut geometry,
         reported_beta.as_ref(),
     )
     .map_err(|reason| CustomFamilyError::Optimization {
@@ -3954,13 +3957,14 @@ fn fit_custom_family_fixed_log_lambdas_from_owned_mode_with_provenance<
     })?;
     let JointPosteriorAssembly {
         covariance_conditional,
-        geometry,
+        mut geometry,
         reported_beta,
     } = posterior;
     install_reported_posterior_mean(
         family,
         specs,
-        &mut inner.block_states,
+        &mut inner,
+        &mut geometry,
         reported_beta.as_ref(),
     )
     .map_err(|reason| CustomFamilyError::Optimization {

@@ -176,6 +176,9 @@ mod gaussian_reml_near_linear_offset_plateau_2299_tests;
 #[cfg(test)]
 mod curv_fixed_kappa_2152_tests;
 
+#[cfg(test)]
+mod gaussian_location_scale_link_wiggle_startup_2921_tests;
+
 pub use deviation::*;
 pub use entry::*;
 pub use error::*;
