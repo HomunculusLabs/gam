@@ -4,7 +4,7 @@ use crate::estimate::evaluation::{
     sas_log_delta_edge_barriercostgrad, sas_log_delta_edge_barriercostgradhess,
     sas_log_deltaridgeweight,
 };
-use crate::estimate::edf_accounting::penalized_edf_bundle;
+use crate::estimate::edf_accounting::penalized_edf_bundle_within_bands;
 use crate::estimate::penalty::{REML_SEED_SCREENING_RHO_CAP, scaled_covariance};
 use crate::estimate::prefit::{
     reject_prefit_binomial_separation, reject_prefit_unpenalized_rank_deficiency,
@@ -138,6 +138,37 @@ impl InferenceHessianFactor {
             Self::Identified(inverse) => Some(inverse),
         }
     }
+
+    /// The right-hand side a solve is certified against: `B` for the strict
+    /// factor, `U·Uᵀ·B` for the identified inverse.
+    fn solved_rhs(&self, rhs: &Array2<f64>) -> Array2<f64> {
+        match self {
+            Self::Strict(_) => rhs.clone(),
+            Self::Identified(inverse) => inverse.project(rhs),
+        }
+    }
+
+    /// Hager–Higham estimate of `‖H⁻¹‖₁` from this factor's own solves, for the
+    /// EDF trace bands (#2901). It is a lower bound, so the bands' second-order
+    /// term is an estimate.
+    fn inverse_one_norm_estimate(&self, dimension: usize) -> Result<f64, EstimationError> {
+        let solve = |values: &mut [f64]| -> Result<(), EstimationError> {
+            let rhs = Array2::from_shape_fn((dimension, 1), |(row, _)| values[row]);
+            let solution = match self {
+                Self::Strict(factor) => factor.solvemulti(&rhs).map_err(|reason| {
+                    EstimationError::RemlOptimizationFailed(format!(
+                        "EDF trace band: exact factorized solve failed: {reason}"
+                    ))
+                })?,
+                Self::Identified(inverse) => inverse.apply(&rhs),
+            };
+            for (slot, value) in values.iter_mut().zip(solution.iter()) {
+                *slot = *value;
+            }
+            Ok(())
+        };
+        gam_linalg::condition::estimate_inverse_one_norm(dimension, solve, solve)
+    }
 }
 
 /// The original-basis penalized Hessian's factor for the dense inference
@@ -194,6 +225,33 @@ impl<'a> OriginalBasisHessianFactor<'a> {
                 label,
             } => inverse.certified_inverse(hessian, label),
         }
+    }
+
+    /// The right-hand side a solve is certified against: `B` for the strict
+    /// factor, `U·Uᵀ·B` for the identified inverse.
+    fn solved_rhs(&self, rhs: &Array2<f64>) -> Array2<f64> {
+        match self {
+            Self::Strict(_) => rhs.clone(),
+            Self::Identified { inverse, .. } => inverse.project(rhs),
+        }
+    }
+
+    /// Hager–Higham estimate of `‖H⁻¹‖₁` from this factor's own solves, for the
+    /// EDF reconciliation's trace bands (#2901). It is a lower bound, so the bands'
+    /// second-order term is an estimate.
+    fn inverse_one_norm_estimate(
+        &self,
+        dimension: usize,
+    ) -> Result<f64, gam_linalg::utils::CertifiedSymmetricSolveError> {
+        let solve = |values: &mut [f64]| -> Result<(), gam_linalg::utils::CertifiedSymmetricSolveError> {
+            let rhs = Array2::from_shape_fn((dimension, 1), |(row, _)| values[row]);
+            let solution = self.solve_matrix(&rhs)?;
+            for (slot, value) in values.iter_mut().zip(solution.iter()) {
+                *slot = *value;
+            }
+            Ok(())
+        };
+        gam_linalg::condition::estimate_inverse_one_norm(dimension, solve, solve)
     }
 }
 
@@ -2515,13 +2573,22 @@ where
                 }
             },
         };
+        // The per-block traces read the penalties `H` carries, `λ_k S̃_k` with
+        // `S̃_k = Π S_k Π` (#2454, #2901). The raw rotated roots leak onto the
+        // structural null coordinates: on `y ~ s(x) + s(x, g, bs='fs')` (n=120,
+        // seed 0) the fs block's raw trace was 6.09e4 against its rank of 22, the
+        // admission clamped it to 22, and `edf_total` read 7.322 where
+        // `tr(H⁻¹(H − S̃))` is 9.309.
+        let applied_penalties = pirls_res.reparam_result.applied_penalties().map_err(|error| {
+            EstimationError::LayoutError(format!(
+                "projecting the EDF penalty blocks onto the reparameterization's penalized \
+                 subspace failed: {error}"
+            ))
+        })?;
         let mut traces = vec![0.0f64; k];
-        for (kk, cp) in pirls_res
-            .reparam_result
-            .canonical_transformed
-            .iter()
-            .enumerate()
-        {
+        let mut trace_bands = vec![0.0f64; k];
+        let inverse_one_norm = factor.inverse_one_norm_estimate(p_dim)?;
+        for (kk, cp) in applied_penalties.iter().enumerate() {
             // Build the p × rank RHS with nonzeros only in [start..end] rows.
             let r = &cp.col_range;
             let rank = cp.rank();
@@ -2539,42 +2606,34 @@ where
                     frob += sol[[r.start + row, col]] * rhs[[r.start + row, col]];
                 }
             }
-            // The per-block penalty trace `tr_kk = λ_kk·tr(H⁻¹ S_kk)` is the
-            // penalized effective d.f. of block `kk`, mathematically confined to
-            // `[0, rank_kk]` (a PSD penalty can absorb at most its own rank). When
-            // the outer REML / spatial-κ optimizer drives a redundant block's
-            // `λ_kk = exp(ρ_kk)` to the finite ceiling (gam#1379: the Matérn kernel
-            // already controls the smoothness a redundant operator block also
-            // penalizes, so REML wants `λ → ∞`), the raw product `λ_kk · frob`
-            // can overflow to `+∞` on the ridge-stabilized inference Hessian even
-            // though the true value is just `rank_kk` — poisoning
-            // `penalty_block_trace[kk]` and tripping the fit-result finiteness
-            // validator (`fit_result.penalty_block_trace[kk] must be finite, got
-            // inf`). Clamp to the valid `[0, rank]` interval so a fully-penalized
-            // direction reads its exact saturated trace `rank_kk` instead of `+∞`.
-            // Ordinary finite traces are inside `[0, rank]` and pass through
-            // unchanged, so non-degenerate fits and their recorded EDF accounting
-            // are bit-identical (the `edf_by_block` channel already clamps the
-            // complementary `rank − trace` to `[0, rank]`).
-            // Raw product: the `[0, rank]` admission, the non-finite
-            // resolution and the `[mp, p]` floor are all owned by
-            // `penalized_edf_bundle`, which every fitting route shares (#2470).
-            // A `+inf` overflow of a ceiling-λ block saturates at `rank`
-            // (gam#1379); a NaN (e.g. inf*0 from a poisoned solve) is NOT
-            // saturation and is deliberately left to trip the
-            // penalty_block_trace finiteness validator rather than being
-            // resolved to a plausible number.
+            // The per-block penalty trace `tr_kk = λ_kk·tr(H⁻¹ S_kk)` is confined
+            // to `[0, rank_kk]` when the data curvature is PSD. It is published
+            // only inside that interval within the rounding band of this solve
+            // (#2901), which the shared accounting reads. A trace outside it by
+            // more, including a `+∞` overflow of a ceiling-λ block (gam#1379), is
+            // refused by name rather than clamped to a plausible rank.
+            let solved_rhs = factor.solved_rhs(&rhs);
+            let residual = h.dot_matrix(&sol) - &solved_rhs;
+            trace_bands[kk] = gam_linalg::roundoff::solved_penalty_trace_band(
+                lambdas[kk],
+                solved_rhs.view(),
+                sol.view(),
+                residual.view(),
+                h.max_abs_entry(),
+                inverse_one_norm,
+            )
+            .map_err(EstimationError::InvalidInput)?;
             traces[kk] = lambdas[kk] * frob;
         }
-        let block_ranks: Vec<usize> = pirls_res
-            .reparam_result
-            .canonical_transformed
-            .iter()
-            .map(|cp| cp.rank())
-            .collect();
+        let block_ranks: Vec<usize> = applied_penalties.iter().map(|cp| cp.rank()).collect();
         let (edf_coefficients, edf_penalty_nullity) = factor.edf_dimensions(p_dim, mp);
-        let bundle =
-            penalized_edf_bundle(&traces, &block_ranks, edf_coefficients, edf_penalty_nullity);
+        let bundle = penalized_edf_bundle_within_bands(
+            &traces,
+            &trace_bands,
+            &block_ranks,
+            edf_coefficients,
+            edf_penalty_nullity,
+        )?;
         edf_total = bundle.edf_total;
         penalty_block_trace.clone_from(&bundle.penalty_block_trace);
         edf_by_block.clone_from(&bundle.edf_by_block);
@@ -2634,12 +2693,14 @@ where
                     let qs = &pirls_res.reparam_result.qs;
                     let p_t = qs.ncols();
                     let mut traces_f = vec![0.0f64; k];
-                    for (kk, cp) in pirls_res
-                        .reparam_result
-                        .canonical_transformed
-                        .iter()
-                        .enumerate()
-                    {
+                    let mut trace_bands_f = vec![0.0f64; k];
+                    let inverse_one_norm_f =
+                        h_factor.inverse_one_norm_estimate(p_orig).map_err(|error| {
+                            EstimationError::RemlOptimizationFailed(format!(
+                                "EDF reconciliation trace band solve did not certify: {error}"
+                            ))
+                        })?;
+                    for (kk, cp) in applied_penalties.iter().enumerate() {
                         if kk >= lambdas.len() {
                             continue;
                         }
@@ -2664,32 +2725,35 @@ where
                                 frob += sol[[row, col]] * root_orig[[row, col]];
                             }
                         }
-                        // Same `[0, rank]` clamp as the trace-channel path above
-                        // (gam#1379): a ceiling-`λ` redundant block's
-                        // `λ_kk·tr(H⁻¹ S_kk)` can overflow to `+∞` here too; the
-                        // penalized trace is bounded by the block rank, so clamp to
-                        // keep `penalty_block_trace` finite and the EDF accounting
-                        // consistent. Finite in-range traces are untouched.
-                        // NaN-safe (gam#1379): f64::clamp leaves NaN as NaN, so
-                        // map any non-finite product to the saturated `rank`.
-                        // Raw product; admitted by the shared accounting below,
-                        // exactly as the trace-channel path above (#2470).
+                        // Admitted by the shared accounting within this solve's own
+                        // rounding band, exactly as the trace-channel path above
+                        // (#2470, #2901).
+                        let solved_rhs = h_factor.solved_rhs(&root_orig);
+                        let residual = h_orig.dot(&sol) - &solved_rhs;
+                        let h_orig_max_abs =
+                            h_orig.iter().fold(0.0_f64, |acc, value| acc.max(value.abs()));
+                        trace_bands_f[kk] = gam_linalg::roundoff::solved_penalty_trace_band(
+                            lambdas[kk],
+                            solved_rhs.view(),
+                            sol.view(),
+                            residual.view(),
+                            h_orig_max_abs,
+                            inverse_one_norm_f,
+                        )
+                        .map_err(EstimationError::InvalidInput)?;
                         traces_f[kk] = lambdas[kk] * frob;
                     }
-                    let block_ranks_f: Vec<usize> = pirls_res
-                        .reparam_result
-                        .canonical_transformed
-                        .iter()
-                        .map(|cp| cp.rank())
-                        .collect();
+                    let block_ranks_f: Vec<usize> =
+                        applied_penalties.iter().map(|cp| cp.rank()).collect();
                     let (edf_coefficients_f, edf_penalty_nullity_f) =
                         factor.edf_dimensions(p_orig, mp);
-                    let bundle_f = penalized_edf_bundle(
+                    let bundle_f = penalized_edf_bundle_within_bands(
                         &traces_f,
+                        &trace_bands_f,
                         &block_ranks_f,
                         edf_coefficients_f,
                         edf_penalty_nullity_f,
-                    );
+                    )?;
                     edf_total = bundle_f.edf_total;
                     penalty_block_trace.clone_from(&bundle_f.penalty_block_trace);
                     edf_by_block.clone_from(&bundle_f.edf_by_block);
@@ -3188,14 +3252,19 @@ where
             // Hessian (`S_orig = Qs·S_t·Qsᵀ`, issue #1027). Pairing the
             // transformed-frame S directly with the original-frame inverse made
             // `F` (and everything reconstructed from it) frame-inconsistent.
+            // `S(λ)` is assembled from the penalties `H` carries, `λ_k S̃_k`
+            // (#2454, #2901): the raw rotated roots made `H − S` indefinite on
+            // `y ~ s(x) + s(x, g, bs='fs')`, spectrum [−1.12e5, 7.94e4] against
+            // [−1.2e-15, 121] for the engine's `S̃`.
             let p_t = qs.ncols();
+            let applied_penalties = pirls_res.reparam_result.applied_penalties().map_err(|error| {
+                EstimationError::LayoutError(format!(
+                    "projecting the influence-matrix penalty blocks onto the \
+                     reparameterization's penalized subspace failed: {error}"
+                ))
+            })?;
             let mut s_t = Array2::<f64>::zeros((p_t, p_t));
-            for (kk, cp) in pirls_res
-                .reparam_result
-                .canonical_transformed
-                .iter()
-                .enumerate()
-            {
+            for (kk, cp) in applied_penalties.iter().enumerate() {
                 if kk >= lambdas.len() {
                     continue;
                 }

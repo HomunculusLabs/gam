@@ -706,6 +706,28 @@ pub enum EstimationError {
         reachable_band: (f64, f64),
     },
 
+    /// A penalty block's trace `λ_k·tr(H⁻¹S_k)` came out of `[0, rank_k]` by more
+    /// than the rounding band of the solve that produced it (#2901).
+    ///
+    /// With a positive-semidefinite data curvature, `H ⪰ λ_k S_k` bounds that
+    /// trace by `rank_k`, so a larger value means the Hessian and the penalty it
+    /// was contracted against are not one operator. Clamping such a trace to its
+    /// rank published a plausible effective dimension from an inconsistent
+    /// operator: on `y ~ s(x) + s(x, g, bs='fs')` a raw trace of 6.09e4 against a
+    /// rank of 22 became `edf = 7.322` where the operator's own value is 9.309.
+    #[error(
+        "penalty block {block}'s trace {trace:.6e} lies outside [0, {rank}] by more than the \
+         rounding band {band:.4e} of the solve that produced it: the Hessian and this penalty \
+         are not one operator, so no effective degrees of freedom are published. The band's \
+         second-order term rests on a lower-bound estimate of the inverse's norm"
+    )]
+    EdfTraceOutsideRank {
+        block: usize,
+        trace: f64,
+        rank: usize,
+        band: f64,
+    },
+
     #[error("REML smoothing optimization failed to converge: {0}")]
     RemlOptimizationFailed(String),
 
@@ -1047,6 +1069,7 @@ impl EstimationError {
             | Self::HessianNotPositiveDefinite { .. }
             | Self::LaplacePrecisionIndefinite { .. }
             | Self::IdentifiedRankNotLocallyConstant { .. }
+            | Self::EdfTraceOutsideRank { .. }
             | Self::PredictiveIntervalsDeclined { .. }
             | Self::RemlOptimizationFailed { .. }
             | Self::OuterObjectiveEvaluationFailed { .. }

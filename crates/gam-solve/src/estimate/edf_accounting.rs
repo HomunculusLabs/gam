@@ -103,6 +103,74 @@ pub fn penalized_edf_bundle(
         .zip(block_ranks.iter())
         .map(|(&raw, &rank)| admit_trace(raw, rank))
         .collect();
+    assemble_bundle(
+        penalty_block_trace,
+        block_ranks,
+        coefficient_count,
+        joint_penalty_nullity,
+    )
+}
+
+/// Assemble the EDF bundle from per-block traces, each admitted only when it lies
+/// in `[0, rank_k]` within the rounding band of the solve that produced it
+/// (#2901).
+///
+/// A positive-semidefinite data curvature gives `H ⪰ λ_k S_k`, so the exact trace
+/// `λ_k·tr(H⁻¹S_k)` lies in `[0, rank_k]`. A computed trace outside that interval
+/// by at most its band is rounding and is admitted at the interval's edge. One
+/// outside by more means the Hessian and the penalty were not one operator, and it
+/// is refused. So is a non-finite trace, including the `+∞` of an overflowing
+/// product. Clamping those instead published a plausible effective dimension from
+/// an inconsistent operator. On `y ~ s(x) + s(x, g, bs='fs')` a raw fs trace of
+/// 6.09e4 against a rank of 22 became `edf = 7.322`, where the operator's own
+/// value is 9.309.
+///
+/// `trace_bands` is aligned 1:1 with the traces. Each band comes from
+/// [`gam_linalg::roundoff::solved_penalty_trace_band`] on the solve that formed
+/// its trace.
+pub fn penalized_edf_bundle_within_bands(
+    raw_block_traces: &[f64],
+    trace_bands: &[f64],
+    block_ranks: &[usize],
+    coefficient_count: usize,
+    joint_penalty_nullity: f64,
+) -> Result<EdfBundle, super::EstimationError> {
+    assert_blocks_aligned(raw_block_traces.len(), block_ranks.len());
+    assert_blocks_aligned(trace_bands.len(), block_ranks.len());
+    let mut penalty_block_trace = Vec::with_capacity(raw_block_traces.len());
+    for (block, ((&raw, &band), &rank)) in raw_block_traces
+        .iter()
+        .zip(trace_bands.iter())
+        .zip(block_ranks.iter())
+        .enumerate()
+    {
+        let ceiling = rank as f64;
+        if raw.is_finite() && band.is_finite() && raw >= -band && raw <= ceiling + band {
+            penalty_block_trace.push(raw.clamp(0.0, ceiling));
+        } else {
+            return Err(super::EstimationError::EdfTraceOutsideRank {
+                block,
+                trace: raw,
+                rank,
+                band,
+            });
+        }
+    }
+    Ok(assemble_bundle(
+        penalty_block_trace,
+        block_ranks,
+        coefficient_count,
+        joint_penalty_nullity,
+    ))
+}
+
+/// The accounting both admissions share once every trace is admitted.
+fn assemble_bundle(
+    penalty_block_trace: Vec<f64>,
+    block_ranks: &[usize],
+    coefficient_count: usize,
+    joint_penalty_nullity: f64,
+) -> EdfBundle {
     let edf_by_block: Vec<f64> = penalty_block_trace
         .iter()
         .zip(block_ranks.iter())
@@ -233,6 +301,59 @@ mod tests {
             );
             assert!(bundle.edf_by_block[0].is_nan());
             assert!(bundle.edf_total.is_nan());
+        }
+    }
+
+    /// #2901: the fs seed-0 fit's per-block traces (probe 1147204 state C). The raw
+    /// rotated roots give the fs block 6.09e4 against a rank of 22. That is refused
+    /// by name, where the clamp published `edf = 7.322`. The projected blocks give
+    /// 20.013 inside the interval, and publish `39 − Σ = 9.309`.
+    #[test]
+    fn a_trace_outside_its_rank_beyond_its_band_refuses_and_the_projected_one_publishes_2901() {
+        let ranks = [10, 1, 22, 3, 3];
+        let bands = [1.0e-9; 5];
+        let raw = [4.472975313998, 0.2178209581733, 6.088685603962e4, 2.147964574147, 2.839105270806];
+        let refusal = penalized_edf_bundle_within_bands(&raw, &bands, &ranks, 39, 3.0).unwrap_err();
+        assert!(
+            matches!(
+                refusal,
+                super::super::EstimationError::EdfTraceOutsideRank { block: 2, rank: 22, .. }
+            ),
+            "{refusal}"
+        );
+        let clamped = penalized_edf_bundle(&raw, &ranks, 39, 3.0).edf_total;
+        assert!(
+            (clamped - 7.322).abs() <= 5.0e-4,
+            "the clamp published edf {clamped}"
+        );
+        let projected = [4.472975313998, 0.2178209581733, 2.001294300186e1, 2.147963642435, 2.839078039171];
+        let bundle = penalized_edf_bundle_within_bands(&projected, &bands, &ranks, 39, 3.0).unwrap();
+        assert!(
+            (bundle.edf_total - 9.309).abs() <= 5.0e-4,
+            "the projected blocks publish edf {}",
+            bundle.edf_total
+        );
+        assert_eq!(bundle.penalty_block_trace, projected.to_vec());
+    }
+
+    /// #2901: a railed block whose solve is conditioned near 1e15 can compute a
+    /// trace a little above its rank. Its band is then wide, and the trace
+    /// publishes at the rank: vacuous, but honest. An overflowed `+∞` trace and a
+    /// NaN trace carry no value and are refused.
+    #[test]
+    fn a_railed_trace_within_its_band_publishes_and_a_non_finite_trace_refuses_2901() {
+        let railed = penalized_edf_bundle_within_bands(&[22.3], &[189.0], &[22], 39, 3.0).unwrap();
+        assert_eq!(railed.penalty_block_trace, vec![22.0]);
+        for raw in [f64::INFINITY, f64::NAN] {
+            let refusal =
+                penalized_edf_bundle_within_bands(&[raw], &[189.0], &[22], 39, 3.0).unwrap_err();
+            assert!(
+                matches!(
+                    refusal,
+                    super::super::EstimationError::EdfTraceOutsideRank { block: 0, rank: 22, .. }
+                ),
+                "{refusal}"
+            );
         }
     }
 

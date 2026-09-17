@@ -1165,7 +1165,8 @@ fn a_fits_identified_rank_refuses_over_a_step_that_reaches_its_band_2901() {
             let mut total_penalty = Array2::<f64>::zeros(hessian.dim());
             for (penalty, &lambda) in pirls
                 .reparam_result
-                .canonical_transformed
+                .applied_penalties()
+                .expect("the engine's penalties project onto its penalized block")
                 .iter()
                 .zip(fit.lambdas.iter())
             {

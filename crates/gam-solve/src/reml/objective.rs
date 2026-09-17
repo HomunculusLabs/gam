@@ -1050,7 +1050,7 @@ impl<'a> RemlState<'a> {
         >,
         free_basis: Option<&Array2<f64>>,
         inner_kkt_residual: Option<crate::model_types::ProjectedKktResidual>,
-    ) -> super::assembly::InnerAssembly<'static> {
+    ) -> Result<super::assembly::InnerAssembly<'static>, EstimationError> {
         // When a linear-inequality active set reduces the inner solve to the
         // free subspace `β = z β_f`, the penalty coordinates must be restricted
         // onto the same subspace so each `coord.dim()` matches the reduced
@@ -1068,10 +1068,9 @@ impl<'a> RemlState<'a> {
         // stabilizing `Qs` for a monotone box-reparam smooth) desyncs the outer
         // gradient from the cost (analytic ≠ central-difference) and the Arc
         // trust-region rejects every step. `build_penalty_coords()` returns the
-        // ORIGINAL-frame (pre-Qs) roots; under an active set, project the
-        // TRANSFORMED-frame `reparam_result.canonical_transformed` roots instead
-        // (the same per-component roots the projected `log|S|₊` derivatives now
-        // read). When `Qs = I` (no reparameterization) the two frames coincide,
+        // ORIGINAL-frame (pre-Qs) roots; under an active set, read the
+        // TRANSFORMED-frame `ReparamResult::applied_penalties` instead (the same
+        // per-component penalties the projected `log|S|₊` derivatives read). When `Qs = I` (no reparameterization) the two frames coincide,
         // so this is a no-op for the ordinary active-set paths.
         //
         // Null-split consistency (#2454). The reparameterization splits the
@@ -1094,27 +1093,29 @@ impl<'a> RemlState<'a> {
         let penalty_coords = match free_basis {
             Some(z) => {
                 let original_coords = self.build_penalty_coords();
-                let transformed = &pirls_result.reparam_result.canonical_transformed;
-                let (base_coords, frame): (Vec<_>, _) =
-                    if transformed.len() == original_coords.len() {
-                        (
-                            transformed
-                                .iter()
-                                .map(|cp| cp.to_penalty_coordinate())
-                                .collect(),
-                            PenaltyFrame::Transformed,
-                        )
-                    } else {
-                        (original_coords, PenaltyFrame::Original)
-                    };
-                base_coords
-                    .iter()
-                    .map(|coord| {
-                        null_split
-                            .project_coordinate(coord, frame)
-                            .project_into_subspace(z)
-                    })
-                    .collect()
+                if pirls_result.reparam_result.canonical_transformed.len() == original_coords.len() {
+                    pirls_result
+                        .reparam_result
+                        .applied_penalties()
+                        .map_err(|error| {
+                            EstimationError::LayoutError(format!(
+                                "projecting the constraint-reduced penalty coordinates onto the \
+                                 reparameterization's penalized subspace failed: {error}"
+                            ))
+                        })?
+                        .iter()
+                        .map(|cp| cp.to_penalty_coordinate().project_into_subspace(z))
+                        .collect()
+                } else {
+                    original_coords
+                        .iter()
+                        .map(|coord| {
+                            null_split
+                                .project_coordinate(coord, PenaltyFrame::Original)
+                                .project_into_subspace(z)
+                        })
+                        .collect()
+                }
             }
             None => self
                 .build_penalty_coords()
@@ -1220,7 +1221,7 @@ impl<'a> RemlState<'a> {
                 },
             );
         }
-        super::assembly::InnerAssembly {
+        Ok(super::assembly::InnerAssembly {
             // The single-eta GLM lane prices its logdet on the same operator its
             // inner solve converged against, so the mode response has nothing to
             // separate from (#2612).
@@ -1268,7 +1269,7 @@ impl<'a> RemlState<'a> {
             contracted_psi_second_order: None,
             kkt_residual: inner_kkt_residual,
             active_constraints: None,
-        }
+        })
     }
 
     /// Build an `InnerAssembly` using the dense-transformed backend.
@@ -1482,7 +1483,7 @@ impl<'a> RemlState<'a> {
         } else {
             None
         };
-        Ok(self.finish_assembly(
+        self.finish_assembly(
             pirls_result,
             ctx,
             hessian_op,
@@ -1494,7 +1495,7 @@ impl<'a> RemlState<'a> {
             None,
             free_basis_opt.as_ref(),
             inner_kkt_residual,
-        ))
+        )
     }
 
     /// Build an `InnerAssembly` using the sparse-exact backend.
@@ -1574,7 +1575,7 @@ impl<'a> RemlState<'a> {
         } else {
             None
         };
-        Ok(self.finish_assembly(
+        self.finish_assembly(
             pirls_result,
             ctx,
             hessian_op,
@@ -1586,7 +1587,7 @@ impl<'a> RemlState<'a> {
             None,
             None,
             inner_kkt_residual,
-        ))
+        )
     }
 
     /// Build an `InnerAssembly` using the dense original-basis backend.
@@ -1934,7 +1935,7 @@ impl<'a> RemlState<'a> {
         } else {
             None
         };
-        Ok(self.finish_assembly(
+        self.finish_assembly(
             pirls_result,
             ctx,
             hessian_op,
@@ -1946,7 +1947,7 @@ impl<'a> RemlState<'a> {
             None,
             None,
             inner_kkt_residual,
-        ))
+        )
     }
 
     /// Build an `InnerAssembly` by auto-detecting the backend.

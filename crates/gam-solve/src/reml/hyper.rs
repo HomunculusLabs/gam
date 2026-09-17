@@ -1563,21 +1563,25 @@ impl<'a> RemlState<'a> {
         } else {
             None
         };
+        let applied_penalties = reparam_result.applied_penalties().map_err(|error| {
+            EstimationError::LayoutError(format!(
+                "projecting the τ-coordinate penalty blocks onto the reparameterization's \
+                 penalized subspace failed: {error}"
+            ))
+        })?;
         let ct_eval: Vec<gam_terms::construction::CanonicalPenalty> =
             if let Some(z) = free_basis_opt.as_ref() {
-                reparam_result
-                    .canonical_transformed
+                applied_penalties
                     .iter()
                     .map(|cp| {
-                        let projected_root = cp.root.dot(z);
                         gam_terms::construction::CanonicalPenalty::from_dense_root(
-                            projected_root,
+                            cp.full_width_root().dot(z),
                             z.ncols(),
                         )
                     })
                     .collect()
             } else {
-                reparam_result.canonical_transformed.clone()
+                applied_penalties
             };
         let penalty_logdet = super::penalty_logdet::PenaltyPseudologdet::from_penalties(
             &ct_eval,
@@ -2854,21 +2858,25 @@ impl<'a> RemlState<'a> {
         // direction matrices it is contracted against live in that frame. A
         // genuinely different matrix is a different atom, not a duplicate of
         // the original-frame factorization.
+        let applied_penalties = reparam_result.applied_penalties().map_err(|error| {
+            EstimationError::LayoutError(format!(
+                "projecting the τ-coordinate penalty blocks onto the reparameterization's \
+                 penalized subspace failed: {error}"
+            ))
+        })?;
         let ct_eval: Vec<gam_terms::construction::CanonicalPenalty> =
             if let Some(z) = free_basis_opt.as_ref() {
-                reparam_result
-                    .canonical_transformed
+                applied_penalties
                     .iter()
                     .map(|cp| {
-                        let projected_root = cp.root.dot(z);
                         gam_terms::construction::CanonicalPenalty::from_dense_root(
-                            projected_root,
+                            cp.full_width_root().dot(z),
                             z.ncols(),
                         )
                     })
                     .collect()
             } else {
-                reparam_result.canonical_transformed.clone()
+                applied_penalties
             };
         let pld = super::penalty_logdet::PenaltyPseudologdet::from_penalties(
             &ct_eval,

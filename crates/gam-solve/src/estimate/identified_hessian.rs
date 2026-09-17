@@ -276,7 +276,7 @@ impl HessianSpectrumMotion {
 /// λ-invariant penalized block, so it is exactly zero on the structural null
 /// space the engine declares. The blocks are the engine's own projections
 /// `S̃_k = Π S_k Π` onto that block
-/// ([`gam_terms::construction::PenaltyNullSplit`]): then `Σ_k λ_k S̃_k = S̃` in
+/// ([`gam_terms::construction::ReparamResult::applied_penalties`]): then `Σ_k λ_k S̃_k = S̃` in
 /// exact arithmetic, and `Π` does not move with ρ. A root rotated into the
 /// transformed frame keeps a relative leakage onto the null coordinates, which
 /// the raw `S_k` carry. On `y ~ s(x) + s(x, g, bs='fs')` (n=120, seed 0) that
@@ -674,7 +674,12 @@ pub(crate) fn certify_fitted_identified_rank(
 ) -> Result<(IdentifiedRankCertificate, f64), EstimationError> {
     let displacement = certificate_newton_displacement(hessian_rho, gradient, railed)?;
     let step_radius = displacement.iter().fold(0.0_f64, |acc, value| acc.max(*value));
-    let penalties = applied_transformed_penalties(&pirls.reparam_result)?;
+    let penalties = pirls.reparam_result.applied_penalties().map_err(|error| {
+        EstimationError::LayoutError(format!(
+            "projecting the rank certificate's penalty blocks onto the reparameterization's \
+             penalized subspace failed: {error}"
+        ))
+    })?;
     let eigenvalues = &spectrum.eigenvalues;
     let eigenvectors = &spectrum.eigenvectors;
     let penalty_rank = spectrum.penalty_rank;
@@ -754,29 +759,6 @@ pub(crate) fn certify_fitted_identified_rank(
     )?;
     certify_identified_rank_locally_constant(eigenvalues, penalty_rank, &bounds)
         .map(|certificate| (certificate, step_radius))
-}
-
-/// The penalties a smoothing-parameter step scales, coordinate by coordinate:
-/// the engine's projections `S̃_k = Π S_k Π` of `canonical_transformed` through
-/// the split it declared (#2454), so that `Σ_k λ_k S̃_k` is the `S̃` PIRLS put in
-/// `H`, rather than raw roots that leak onto the null coordinates.
-fn applied_transformed_penalties(
-    reparam: &gam_terms::construction::ReparamResult,
-) -> Result<Vec<gam_terms::construction::CanonicalPenalty>, EstimationError> {
-    let split = reparam.null_split();
-    reparam
-        .canonical_transformed
-        .iter()
-        .map(|penalty| {
-            split.project_canonical(penalty, gam_terms::construction::PenaltyFrame::Transformed)
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| {
-            EstimationError::LayoutError(format!(
-                "projecting the rank certificate's penalty blocks onto the reparameterization's \
-                 penalized subspace failed: {error}"
-            ))
-        })
 }
 
 #[cfg(test)]
@@ -1134,7 +1116,7 @@ mod tests {
                 "the engine's penalty does not vanish on its null coordinate {coordinate}"
             );
         }
-        let applied = applied_transformed_penalties(&reparam).unwrap();
+        let applied = reparam.applied_penalties().unwrap();
         let (residual, band) = residual_for(&applied);
         assert!(
             residual <= band,

@@ -610,6 +610,10 @@ fn estimation_error_to_pyerr_with_message(err: &EstimationError, message: String
         EstimationError::IdentifiedRankNotLocallyConstant { .. } => {
             RemlConvergenceError::new_err(message)
         }
+        // A penalty trace outside its rank beyond its solve's band says the
+        // Hessian and the penalty were not one operator: an evaluator-construction
+        // failure, not a convergence budget.
+        EstimationError::EdfTraceOutsideRank { .. } => IntegrationError::new_err(message),
         // A trial-point refusal only reaches Python when the outer smoothing
         // search never found a rho it could evaluate — so what the caller is
         // holding is an outer non-convergence, and the remedy (reseed, widen

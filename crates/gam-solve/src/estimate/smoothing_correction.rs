@@ -1469,7 +1469,27 @@ pub(crate) fn compute_smoothing_correction(
     }
 
     let n_coeffs_trans = final_fit.beta_transformed.len();
-    let ct = &final_fit.reparam_result.canonical_transformed;
+    // The mode response `dβ̂/dρ_k = −H⁻¹λ_k S̃_k(β̂ − μ_k)` and the penalty map's
+    // invariance read the penalties `H` carries, `S̃_k = Π S_k Π` (#2454, #2901).
+    // On `y ~ s(x) + s(x, g, bs='fs')` (seed 0) the raw roots moved the fs
+    // coordinate's response by 1.79e4 against a response of 1.09e-6.
+    let applied_penalties = match final_fit.reparam_result.applied_penalties() {
+        Ok(penalties) => penalties,
+        Err(error) => {
+            return SmoothingCorrectionComputation {
+                correction: None,
+                rho_covariance: None,
+                active_rank: None,
+                spectrum: None,
+                status: SmoothingCorrectionStatus::Unavailable(
+                    SmoothingCorrectionUnavailable::PenaltyStructure {
+                        error: error.to_string(),
+                    },
+                ),
+            };
+        }
+    };
+    let ct = &applied_penalties;
     if lambdas.len() != n_rho || ct.len() != n_rho {
         return SmoothingCorrectionComputation {
             correction: None,
@@ -1845,7 +1865,7 @@ pub(crate) fn compute_smoothing_correction(
             dump_indefinite_rho_hessian_diagnostic(
                 &hessian_rho,
                 final_rho,
-                &final_fit.reparam_result.canonical_transformed,
+                ct,
                 None,
                 outer_gradient,
             );
@@ -1874,7 +1894,7 @@ pub(crate) fn compute_smoothing_correction(
         dump_indefinite_rho_hessian_diagnostic(
             &hessian_rho,
             final_rho,
-            &final_fit.reparam_result.canonical_transformed,
+            ct,
             Some(&inverted),
             outer_gradient,
         );
@@ -1903,7 +1923,7 @@ pub(crate) fn compute_smoothing_correction(
         dump_indefinite_rho_hessian_diagnostic(
             &hessian_rho,
             final_rho,
-            &final_fit.reparam_result.canonical_transformed,
+            ct,
             Some(&inverted),
             outer_gradient,
         );

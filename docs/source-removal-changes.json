@@ -583,6 +583,14 @@
     "evidence": "Measured 2026-09-09 with scripts/source_removal_guard.py: e29e4da1b..8130620c7 = 426 guarded removals; 0ef82308d..8130620c7 = 68. Replacements named per family above; the tree compiles with cargo check --workspace --all-targets --locked at 87c355b12 and after."
   },
   {
+    "base": "e6d32432e8b20075857e28e858051be09f9e1161",
+    "items": [
+      "crates/gam-solve/src/estimate/identified_hessian.rs:fn:applied_transformed_penalties"
+    ],
+    "reason": "#2901: ReparamResult::applied_penalties() in gam-terms is now the one owner of the engine's projected penalty blocks S̃_k = Π S_k Π. applied_transformed_penalties computed the same projection privately for the V22 rank certificate. Its production call and its test call now read the accessor, so the private copy is deleted.",
+    "evidence": "At the base, git grep -n applied_transformed_penalties finds it only in crates/gam-solve/src/estimate/identified_hessian.rs: its definition, its one production call in the identified-rank certificate, and one test call. This commit replaces both calls with applied_penalties() and deletes the definition."
+  },
+  {
     "base": "71c38292fbfd4b9fe4db8af3401ffc398f111439",
     "items": [
       "crates/gam-solve/src/mixture_link.rs:const:BETA_LOGISTIC_LOG_SHAPE_BOUND",

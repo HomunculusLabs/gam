@@ -284,34 +284,33 @@ impl<'a> RemlState<'a> {
             // the two projections compose, `Zᵀ Π S_k Π Z`, and both must be
             // applied for the LAML pair to live on one subspace.
             let reparam = &bundle.pirls_result.reparam_result;
-            let null_split = reparam.null_split();
-            let transformed = &reparam.canonical_transformed;
-            let (base, frame): (&[gam_terms::construction::CanonicalPenalty], _) =
-                if transformed.len() == rho.len() {
-                    (
-                        transformed.as_slice(),
-                        gam_terms::construction::PenaltyFrame::Transformed,
-                    )
-                } else {
-                    (
-                        self.canonical_penalties.as_slice(),
-                        gam_terms::construction::PenaltyFrame::Original,
-                    )
-                };
-            let projected_roots: Vec<Array2<f64>> = base
-                .iter()
-                .map(|penalty| {
-                    null_split
-                        .project_canonical(penalty, frame)
-                        .map(|applied| applied.full_width_root().dot(z))
-                })
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| {
+            let applied = if reparam.canonical_transformed.len() == rho.len() {
+                reparam.applied_penalties().map_err(|error| {
                     EstimationError::LayoutError(format!(
                         "projecting the constraint-reduced penalty roots onto the \
                          reparameterization's penalized subspace failed: {error}"
                     ))
-                })?;
+                })?
+            } else {
+                let null_split = reparam.null_split();
+                self.canonical_penalties
+                    .iter()
+                    .map(|penalty| {
+                        null_split
+                            .project_canonical(penalty, gam_terms::construction::PenaltyFrame::Original)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| {
+                        EstimationError::LayoutError(format!(
+                            "projecting the constraint-reduced original-frame penalty roots onto \
+                             the reparameterization's penalized subspace failed: {error}"
+                        ))
+                    })?
+            };
+            let projected_roots: Vec<Array2<f64>> = applied
+                .iter()
+                .map(|penalty| penalty.full_width_root().dot(z))
+                .collect();
             let (value, penalty_rank, det1, det2_full) = self
                 .structural_penalty_logdet_value_and_derivatives(&projected_roots, &lambdas)?;
             log::info!(
@@ -2459,10 +2458,9 @@ impl<'a> RemlState<'a> {
         // case, so the #1575 batched hot path pays only a comparison. The
         // sparse-native original-basis arm reads the bundle's cached applied
         // set (`Π` is λ-invariant, so it is built once per bundle); the
-        // transformed arms project the transformed-frame roots against the
-        // transformed-frame basis, and the active-set arm composes the two
-        // projections in the order `Zᵀ (Π S_k Π) Z`.
-        let null_split = pirls_result.reparam_result.null_split();
+        // transformed arms read the engine's `applied_penalties`, and the
+        // active-set arm composes the two projections in the order
+        // `Zᵀ (Π S_k Π) Z`.
         let tk_penalties: Vec<gam_terms::construction::CanonicalPenalty> = if use_original_basis {
             bundle
                 .applied_canonical_penalties(&self.canonical_penalties)?
@@ -2471,13 +2469,7 @@ impl<'a> RemlState<'a> {
         } else {
             let transformed = pirls_result
                 .reparam_result
-                .canonical_transformed
-                .iter()
-                .map(|cp| {
-                    null_split
-                        .project_canonical(cp, gam_terms::construction::PenaltyFrame::Transformed)
-                })
-                .collect::<Result<Vec<_>, _>>()
+                .applied_penalties()
                 .map_err(|error| {
                     EstimationError::LayoutError(format!(
                         "projecting the Tierney-Kadane penalty blocks onto the \

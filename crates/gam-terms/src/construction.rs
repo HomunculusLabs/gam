@@ -546,10 +546,11 @@ pub struct ReparamResult {
     pub det1: Array1<f64>,
     /// Orthogonal transformation matrix Qs
     pub qs: Array2<f64>,
-    /// Canonical penalties in the TRANSFORMED coordinate frame.
-    /// The single source of truth for penalty roots in the transformed frame.
-    /// Downstream consumers use these for block-local `PenaltyCoordinate`
-    /// construction, TK correction, and ext-coord paths.
+    /// The canonical penalty roots rotated into the TRANSFORMED frame, before the
+    /// split's projection. They describe each canonical `S_k`, not the `S̃` the
+    /// engine put in `H`: a rotated root keeps a relative leakage onto the null
+    /// coordinates, so a consumer whose Hessian carries `s_transformed` reads
+    /// [`ReparamResult::applied_penalties`] instead.
     pub canonical_transformed: Vec<CanonicalPenalty>,
     /// Lambda-dependent penalty square root in TRANSFORMED coordinates (rank x p matrix).
     /// This is used for applying the actual penalty in the least squares solve.
@@ -698,6 +699,26 @@ impl ReparamResult {
             transformed: Some(u.clone()),
             original: Some(original),
         }
+    }
+
+    /// The penalties the criterion applies, one per smoothing coordinate, in the
+    /// transformed frame: `S̃_k = Π S_k Π`, the rotated roots projected onto the
+    /// λ-invariant penalized block this reparameterization declared (#2454).
+    /// `Σ_k λ_k S̃_k` is the `S̃ = EᵀE` in `s_transformed`, and because `Π` does not
+    /// move with ρ, `∂S̃/∂ρ_k = λ_k S̃_k` exactly.
+    ///
+    /// Every consumer whose Hessian carries `s_transformed` reads its per-block
+    /// penalties here: traces `λ_k tr(H⁻¹S̃_k)`, the Gram `H − S̃`, the mode
+    /// response `H⁻¹λ_k S̃_k β̂`, `log|S̃|₊` and its derivatives. On
+    /// `y ~ s(x) + s(x, g, bs='fs')` at λ = 1.98e12, the raw roots' leakage onto
+    /// the null coordinates reached 8.9e4 against a data curvature of 121, and
+    /// the raw fs block's trace was 6.09e4 against 20.01 here (#2901).
+    pub fn applied_penalties(&self) -> Result<Vec<CanonicalPenalty>, EstimationError> {
+        let split = self.null_split();
+        self.canonical_transformed
+            .iter()
+            .map(|penalty| split.project_canonical(penalty, PenaltyFrame::Transformed))
+            .collect()
     }
 }
 

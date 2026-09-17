@@ -197,9 +197,138 @@ pub fn factor_rank_partition(
     })
 }
 
+/// Forward-error band of a penalty trace `t = λ·Σ_c r_cᵀ H⁻¹ r_c` for a symmetric
+/// `H`, computed as `t̂ = λ·Σ_c r_cᵀ x̂_c` from solved columns `x̂_c ≈ H⁻¹ r_c`
+/// (#2901).
+///
+/// With the true residual `ρ_c = H·x̂_c − r_c`, exactly `x_c = x̂_c − H⁻¹ρ_c`, so
+///
+/// ```text
+///   t − t̂ = −λ·Σ_c r_cᵀ H⁻¹ ρ_c = −λ·Σ_c x_cᵀ ρ_c,
+///   |t − t̂| ≤ λ·Σ_c ‖ρ_c‖₂·(‖x̂_c‖₂ + ‖H⁻¹‖₂·‖ρ_c‖₂).
+/// ```
+///
+/// - **Residual.** The computed residual `residual` differs from `ρ_c` by its own
+///   formation. Each entry is an inner product of `rows + 1` terms bounded by
+///   `rows·‖H‖_max·‖x̂_c‖_max + |r_ic|`, so `‖ρ_c‖₂` is charged the computed norm
+///   plus that band.
+/// - **Inverse norm.** For symmetric `H`, `‖H⁻¹‖₂ ≤ ‖H⁻¹‖₁`. That norm is
+///   `inverse_one_norm_estimate`, the Hager–Higham lower-bound estimate
+///   ([`crate::condition::estimate_inverse_one_norm`]), so the second-order term
+///   is an estimate, not a certificate.
+/// - **Formation of `t̂`.** Forming `t̂` is an inner product of `rows·columns`
+///   terms, which adds `accumulation_band(rows·columns, λ·Σ|r_ic·x̂_ic|)`.
+///
+/// The band measures the solve that produced the trace. A trace published
+/// outside `[0, rank]` by more than this band is not rounding.
+pub fn solved_penalty_trace_band(
+    lambda: f64,
+    rhs: ndarray::ArrayView2<'_, f64>,
+    solution: ndarray::ArrayView2<'_, f64>,
+    residual: ndarray::ArrayView2<'_, f64>,
+    matrix_max_abs: f64,
+    inverse_one_norm_estimate: f64,
+) -> Result<f64, String> {
+    let (rows, columns) = rhs.dim();
+    if solution.dim() != (rows, columns) || residual.dim() != (rows, columns) {
+        return Err(format!(
+            "solved_penalty_trace_band: a {rows}x{columns} right-hand side against a {}x{} solution \
+             and a {}x{} residual",
+            solution.nrows(),
+            solution.ncols(),
+            residual.nrows(),
+            residual.ncols()
+        ));
+    }
+    let residual_growth = accumulation_growth(rows + 1);
+    let mut solve_band = 0.0_f64;
+    let mut absolute_sum = 0.0_f64;
+    for column in 0..columns {
+        let solution_max = solution
+            .column(column)
+            .iter()
+            .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+        let product_bound = rows as f64 * matrix_max_abs * solution_max;
+        let mut solution_norm_sq = 0.0_f64;
+        let mut residual_norm_sq = 0.0_f64;
+        let mut formation_norm_sq = 0.0_f64;
+        for row in 0..rows {
+            let x = solution[[row, column]];
+            let r = rhs[[row, column]];
+            solution_norm_sq += x * x;
+            residual_norm_sq += residual[[row, column]] * residual[[row, column]];
+            let formation = residual_growth * (product_bound + r.abs());
+            formation_norm_sq += formation * formation;
+            absolute_sum += (r * x).abs();
+        }
+        let charged_residual = residual_norm_sq.sqrt() + formation_norm_sq.sqrt();
+        solve_band +=
+            charged_residual * (solution_norm_sq.sqrt() + inverse_one_norm_estimate * charged_residual);
+    }
+    Ok(lambda.abs() * (solve_band + accumulation_growth(rows * columns) * absolute_sum))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #2901: a solve left inexact by a known perturbation moves the trace by
+    /// `−λ·Σ x_cᵀρ_c`, and the band carries it. `H = diag(4, 0.5)`, `r = (1, 1)`,
+    /// `λ = 3`: the exact trace is `3·(1/4 + 2) = 6.75`. A solution off by
+    /// `δ = (1e-3, −2e-3)` has residual `Hδ` and moves the trace by `3·(1e-3 − 2e-3)`.
+    /// The control passes a zero residual and shows the residual term is what
+    /// covers the error.
+    #[test]
+    fn a_solved_trace_band_covers_the_error_its_residual_carries_2901() {
+        let lambda = 3.0;
+        let rhs = ndarray::array![[1.0], [1.0]];
+        let exact = ndarray::array![[0.25], [2.0]];
+        let offset = ndarray::array![[1.0e-3], [-2.0e-3]];
+        let solution = &exact + &offset;
+        let residual = ndarray::array![[4.0 * 1.0e-3], [0.5 * -2.0e-3]];
+        let exact_trace = lambda * (0.25 + 2.0);
+        let computed_trace = lambda * (solution[[0, 0]] + solution[[1, 0]]);
+        let inverse_one_norm = 2.0;
+        let band = solved_penalty_trace_band(
+            lambda,
+            rhs.view(),
+            solution.view(),
+            residual.view(),
+            4.0,
+            inverse_one_norm,
+        )
+        .unwrap();
+        assert!(
+            (computed_trace - exact_trace).abs() <= band,
+            "the trace error {:.4e} escaped its band {band:.4e}",
+            (computed_trace - exact_trace).abs()
+        );
+        let unmeasured = solved_penalty_trace_band(
+            lambda,
+            rhs.view(),
+            solution.view(),
+            ndarray::Array2::<f64>::zeros((2, 1)).view(),
+            4.0,
+            inverse_one_norm,
+        )
+        .unwrap();
+        assert!(
+            (computed_trace - exact_trace).abs() > unmeasured,
+            "without the residual the band {unmeasured:.4e} must not cover {:.4e}",
+            (computed_trace - exact_trace).abs()
+        );
+        assert!(
+            solved_penalty_trace_band(
+                lambda,
+                rhs.view(),
+                solution.view(),
+                ndarray::Array2::<f64>::zeros((3, 1)).view(),
+                4.0,
+                inverse_one_norm
+            )
+            .is_err()
+        );
+    }
 
     /// One Gram-side predicate: eigenvalues above the eigensolver band plus the
     /// caller's assembly band are resolved, and roundoff of either sign is not.
