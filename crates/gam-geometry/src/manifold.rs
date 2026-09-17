@@ -920,7 +920,7 @@ pub(crate) fn thin_svd_gram(
 /// standard, exact algorithm; no eigendecomposition is assumed (the inputs here
 /// are the non-normal canonical-metric block matrices on Stiefel, which are
 /// skew-like but not symmetric, so `spectral_map_*` does not apply).
-pub(crate) fn matrix_exp(a: &Array2<f64>) -> GeometryResult<Array2<f64>> {
+pub fn matrix_exp(a: &Array2<f64>) -> GeometryResult<Array2<f64>> {
     let n = a.nrows();
     if n != a.ncols() {
         return Err(GeometryError::InvalidPoint(
@@ -1001,7 +1001,7 @@ pub(crate) fn matrix_exp(a: &Array2<f64>) -> GeometryResult<Array2<f64>> {
 /// not unique (it is the cut locus / beyond the injectivity radius), so the
 /// principal logarithm does not exist. We refuse rather than return a value
 /// that silently picks one of the two equal-length geodesics.
-pub(crate) fn skew_log_orthogonal(v: &Array2<f64>) -> GeometryResult<Array2<f64>> {
+pub fn skew_log_orthogonal(v: &Array2<f64>) -> GeometryResult<Array2<f64>> {
     use faer::Side;
     use gam_linalg::faer_ndarray::{FaerEigh, fast_ab, fast_abt, fast_atb};
 
