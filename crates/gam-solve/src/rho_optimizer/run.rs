@@ -811,7 +811,6 @@ impl OuterProblem {
             fixed_point_certificate_fn: None,
             exact_polish_fn: None,
             rail_face_limit_fn: None,
-            soft_rho_guard_gradient_fn: None,
             criterion_invariance_fn: None,
             criterion_rank_fn: None,
             screening_proxy_fn: None::<fn(&mut S, &Array1<f64>) -> Result<f64, EstimationError>>,
@@ -853,7 +852,6 @@ impl OuterProblem {
             fixed_point_certificate_fn: None,
             exact_polish_fn: None,
             rail_face_limit_fn: None,
-            soft_rho_guard_gradient_fn: None,
             criterion_invariance_fn: None,
             criterion_rank_fn: None,
             screening_proxy_fn: None::<fn(&mut S, &Array1<f64>) -> Result<f64, EstimationError>>,
@@ -897,7 +895,6 @@ impl OuterProblem {
             fixed_point_certificate_fn: None,
             exact_polish_fn: None,
             rail_face_limit_fn: None,
-            soft_rho_guard_gradient_fn: None,
             criterion_invariance_fn: None,
             criterion_rank_fn: None,
             screening_proxy_fn: Some(screening_proxy_fn),
@@ -3866,73 +3863,6 @@ fn certify_fixed_point_optimality(
 /// reads `hessian_psd != Some(false)`, so a `None` curvature verdict certifies
 /// on stationarity alone. The one order-four evaluation belongs to the winner,
 /// once, and its verdict is the one that mints.
-/// Remove the soft rho-guard BARRIER's gradient from the coordinates the KKT
-/// projection is about to treat as sitting AT a box bound (#2545).
-///
-/// # The defect this closes
-///
-/// The REML criterion carries an unconditional `log cosh` barrier whose only job
-/// is to keep the outer SEARCH off the `ρ → ±RHO_BOUND` walls. A `log cosh`
-/// gradient SATURATES — `w·a·tanh(a·ρ̃) → w·a = 1.3333e-7` at `RHO_BOUND = 30`
-/// — instead of decaying. At an upper rail [`project_gradient_vector`] keeps
-/// exactly the positive part (`gi.max(0.0)`), and the barrier's contribution
-/// there IS positive, so `|Pg| ≥ 1.3333e-7` at every upper rail no matter how
-/// clean the fit: a λ=∞ face could never register as a constrained stationary
-/// point. Measured on the #2450 fixture at ρ=30, the barrier was `1.332439e-7`
-/// of a total `1.332521e-7` — 99.999% of the residual — with the criterion's own
-/// `87.51·e^{−ρ}` face tail underneath it.
-///
-/// # Why removing it is not "judging a different function"
-///
-/// Only at an ACTIVE bound, and that is the whole argument. The barrier is a
-/// numerical device, structurally separate from `configured_rho_prior_atom` (the
-/// prior the user DECLARED), added unconditionally at `w = 1e-6`. At a
-/// coordinate pinned to its bound the bound is enforced EXACTLY by the box
-/// projection — the barrier's job is already done by something else — so its
-/// surviving gradient is a KKT multiplier against a constraint the projection
-/// already accounts for, counted twice. INTERIOR coordinates keep the full
-/// gradient: there the optimizer descends criterion-plus-barrier and halts where
-/// their SUM vanishes, so subtracting the barrier from an interior stationarity
-/// test would judge a function nothing optimized and manufacture
-/// "solver converged, certificate refused".
-///
-/// `guard` is the barrier gradient the objective published
-/// ([`OuterObjective::soft_rho_guard_gradient`]) — the same atom's emission the
-/// criterion ADDED, so the subtraction cannot drift from the addition, and it
-/// carries the weight anchor `ρ̃ = ρ − log g(w)` that a re-derived raw-ρ closed
-/// form would drop on every weighted fit (#877). `None`, or any shape the
-/// coordinates do not line up with, returns the gradient untouched.
-///
-/// `bounds` MUST be the same box the subsequent [`project_gradient_vector`] call
-/// uses (the rail-relaxed one at certificate time), and the active test here is
-/// the same `>= upper` / `<= lower` test, so "railed" means one thing to the
-/// subtraction and to the projection.
-pub(crate) fn gradient_with_rail_barrier_removed(
-    rho: &Array1<f64>,
-    gradient: &Array1<f64>,
-    bounds: &(Array1<f64>, Array1<f64>),
-    guard: Option<&Array1<f64>>,
-) -> Array1<f64> {
-    let (lower, upper) = bounds;
-    let Some(guard) = guard else {
-        return gradient.clone();
-    };
-    if guard.len() != gradient.len()
-        || rho.len() != gradient.len()
-        || lower.len() != gradient.len()
-        || upper.len() != gradient.len()
-    {
-        return gradient.clone();
-    }
-    Array1::from_iter((0..gradient.len()).map(|i| {
-        if (rho[i] >= upper[i] || rho[i] <= lower[i]) && guard[i].is_finite() {
-            gradient[i] - guard[i]
-        } else {
-            gradient[i]
-        }
-    }))
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CertificationFidelity {
     /// Per-candidate multi-start gate. Never spends order four.
@@ -4251,38 +4181,9 @@ fn certify_outer_optimality_at_terminal_fidelity(
     // stationarity certificate below, and the vector feeds the curvature-scaled
     // flat-valley Newton decrement (#2253/#2249/#2015) once the analytic Hessian
     // is in hand.
-    //
-    // #2545: at a coordinate the projection is about to treat as AT its bound,
-    // the criterion's unconditional `log cosh` barrier contributes a saturated
-    // `+w·a = 1.3333e-7` that `gi.max(0.0)` retains — a standing residual no fit
-    // can clear, so a λ=∞ face could never certify. Remove exactly that term,
-    // exactly on those coordinates, from the certificate's VIEW of the gradient
-    // (`gradient_with_rail_barrier_removed` documents why an interior coordinate
-    // must keep it). `result.final_gradient` and `grad_norm` below stay the raw
-    // criterion gradient — this is what the certificate JUDGES, not what the
-    // criterion IS.
-    let rail_barrier_gradient = obj.soft_rho_guard_gradient(&result.rho);
-    let certificate_gradient = gradient_with_rail_barrier_removed(
-        &result.rho,
-        &evaluation.gradient,
-        &rail_projection_bounds,
-        rail_barrier_gradient.as_ref(),
-    );
-    if log::log_enabled!(log::Level::Info) && certificate_gradient != evaluation.gradient {
-        let removed = (&evaluation.gradient - &certificate_gradient)
-            .iter()
-            .map(|v| v * v)
-            .sum::<f64>()
-            .sqrt();
-        log::info!(
-            "[CERTIFICATE-BARRIER] {context}: removed the soft rho-guard barrier from the \
-             railed coordinates of the certificate's gradient view (#2545), \
-             ||removed||={removed:.6e}"
-        );
-    }
     let projected_gradient = project_gradient_vector(
         &result.rho,
-        &certificate_gradient,
+        &evaluation.gradient,
         Some(&rail_projection_bounds),
     );
     let projected_grad_norm = projected_gradient.iter().map(|v| v * v).sum::<f64>().sqrt();
@@ -4731,19 +4632,9 @@ fn certify_outer_optimality_at_terminal_fidelity(
             .max(COST_STALL_REL_TOL_FLOOR)
             * (1.0 + evaluation.cost.abs());
         let cost_drift = (run_recorded_value - evaluation.cost).abs();
-        // The spread must compare two measurements of the SAME quantity, so the
-        // run-recorded gradient gets the identical #2545 barrier removal the
-        // certificate-time one got. Comparing a barrier-removed view against a
-        // barrier-bearing one would inject a deterministic `w·a` into a number
-        // whose entire meaning is "how much of |Pg| is instrument noise".
         let prior_projected = project_gradient_vector(
             &result.rho,
-            &gradient_with_rail_barrier_removed(
-                &result.rho,
-                prior_gradient,
-                &rail_projection_bounds,
-                rail_barrier_gradient.as_ref(),
-            ),
+            prior_gradient,
             Some(&rail_projection_bounds),
         );
         let spread = (&prior_projected - &projected_gradient)
@@ -4911,12 +4802,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                 result.final_value = restored.cost;
                 let restored_projected = project_gradient_vector(
                     &result.rho,
-                    &gradient_with_rail_barrier_removed(
-                        &result.rho,
-                        &restored.gradient,
-                        &rail_projection_bounds,
-                        rail_barrier_gradient.as_ref(),
-                    ),
+                    &restored.gradient,
                     Some(&rail_projection_bounds),
                 );
                 result.final_grad_norm = Some(
@@ -5199,12 +5085,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                 result.final_value = restored.cost;
                 let restored_projected = project_gradient_vector(
                     &result.rho,
-                    &gradient_with_rail_barrier_removed(
-                        &result.rho,
-                        &restored.gradient,
-                        &rail_projection_bounds,
-                        rail_barrier_gradient.as_ref(),
-                    ),
+                    &restored.gradient,
                     Some(&rail_projection_bounds),
                 );
                 result.final_grad_norm = Some(
@@ -5732,12 +5613,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
         result.final_value = restored.cost;
         let restored_projected = project_gradient_vector(
             &result.rho,
-            &gradient_with_rail_barrier_removed(
-                &result.rho,
-                &restored.gradient,
-                &rail_projection_bounds,
-                rail_barrier_gradient.as_ref(),
-            ),
+            &restored.gradient,
             Some(&rail_projection_bounds),
         );
         result.final_grad_norm = Some(
@@ -6768,45 +6644,8 @@ fn build_and_assess_rail_coordinate(
     let window = match probe_tail_window(obj, rho, coord, side, tol, domain)? {
         (Some(window), _) => window,
         (None, rows) => {
-            // #2450: name the floor instead of leaving the reader to find it.
-            // The criterion ALWAYS carries the soft rho-guard barrier
-            // (`soft_rho_guard_prior_atom`), and a `log cosh` barrier's gradient
-            // SATURATES to `w*a` rather than decaying, so once the REML tail
-            // falls below it, `c_hat = -e^rho * dV/drho` diverges and no tail is
-            // observable THROUGH the guard at any box width or probe count. That
-            // is a different failure from a noisy or truncated window, and
-            // reporting both as "no finite-difference-clean tail window" cost
-            // real time: it reads as a fixture/conditioning problem when it is a
-            // property of the objective. Measured: the floor is exactly
-            // `w*a*tanh(a*rho)` = 1.3324e-7 at rho=30 against a predicted
-            // 1.3324e-7 (five significant figures, every coordinate).
-            let guard_floor = crate::estimate::RHO_SOFT_PRIOR_WEIGHT
-                * (crate::estimate::RHO_SOFT_PRIOR_SHARPNESS / crate::estimate::RHO_BOUND);
-            // #2545: say WHICH of the two failures this is. The probe ladder now
-            // subtracts the barrier when the objective publishes it, so a
-            // refusal from a publishing objective is genuinely about the window;
-            // a refusal from a non-publishing one may still be the barrier.
-            let barrier_note = match obj
-                .soft_rho_guard_gradient(rho)
-                .and_then(|guard| guard.get(coord).copied())
-            {
-                Some(value) => format!(
-                    "this objective PUBLISHES its soft rho-guard barrier gradient \
-                     ({value:.4e} here, saturating at w*a={guard_floor:.4e} instead of \
-                     decaying) and every probe below already has it SUBTRACTED (#2545), \
-                     so the window is what failed, not the barrier"
-                ),
-                None => format!(
-                    "this objective publishes NO soft rho-guard barrier gradient, so if \
-                     its criterion carries the barrier the probes below still include it; \
-                     that gradient saturates at w*a={guard_floor:.4e} rather than decaying, \
-                     and any tail whose |dV/drho| is at or below that is unobservable \
-                     THROUGH the barrier rather than merely unclean (#2450/#2545)"
-                ),
-            };
             return Ok(Err(format!(
-                "k={coord}: no finite-difference-clean tail window; {barrier_note}; \
-                 probes {rows}"
+                "k={coord}: no finite-difference-clean tail window; probes {rows}"
             )));
         }
     };
@@ -7031,29 +6870,7 @@ fn probe_tail_window_at_resolution(
         {
             break;
         }
-        // #2545: the tail law `ĉ = −e^ρ·∂V/∂ρ` is a statement about the
-        // CRITERION's λ→∞ face. The objective may also carry an unconditional
-        // `log cosh` numerical barrier whose gradient SATURATES at `w·a` rather
-        // than decaying (`RHO_SOFT_PRIOR_*`, 1.3333e-7 at `RHO_BOUND = 30`), so
-        // once the face's own `c·e^{−ρ}` falls below it the measured ĉ diverges
-        // and NO coordinate can be certified at an asymptote — measured on the
-        // #2450 fixture, the barrier is 99.999% of the ρ-gradient at ρ=30
-        // (1.332439e-7 of 1.332521e-7) and the tail underneath it is a clean
-        // `87.51·e^{−ρ}`. Subtract the barrier's own gradient, published by the
-        // objective from the SAME atom that ADDED it (so it cannot drift, and so
-        // it carries the weight anchor `ρ̃ = ρ − log g(w)` that a re-derived
-        // `w·a·tanh(a·ρ)` would silently drop on every weighted fit). Objectives
-        // that publish no barrier are unaffected: the subtrahend is 0.
-        let barrier = obj
-            .soft_rho_guard_gradient(&probe)
-            .and_then(|guard| guard.get(coord).copied())
-            .filter(|value| value.is_finite())
-            .unwrap_or(0.0);
-        rows.push((
-            probe[coord],
-            eval.gradient[coord] - barrier,
-            eval.inner_beta_hint,
-        ));
+        rows.push((probe[coord], eval.gradient[coord], eval.inner_beta_hint));
     }
     let rows_summary = rows
         .iter()
@@ -9343,10 +9160,6 @@ pub(crate) fn run_fixed_point_outer_solver(
 #[cfg(test)]
 #[path = "asymptote_rail_certify_tests.rs"]
 mod asymptote_rail_certify_tests;
-
-#[cfg(test)]
-#[path = "rail_barrier_removal_tests.rs"]
-mod rail_barrier_removal_tests;
 
 #[cfg(test)]
 #[path = "certify_resume_progress_tests.rs"]

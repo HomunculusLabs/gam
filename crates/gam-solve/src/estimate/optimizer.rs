@@ -1677,28 +1677,12 @@ where
                  rho: &Array1<f64>,
                  face: &[usize]| { state.rail_face_limit(rho, face) },
             );
-            // #2545: publish the soft rho-guard BARRIER's own ρ-gradient so the
-            // certificate can subtract it where the barrier is not part of the
-            // optimality condition (a railed coordinate, and the tail probes).
-            // The `log cosh` barrier's gradient saturates at `w·a = 1.3333e-7`
-            // rather than decaying, and `project_gradient_vector` keeps exactly
-            // that positive part at an upper rail — so before this hook existed,
-            // |Pg| ≥ 1.3333e-7 at every upper rail and a λ=∞ face could never
-            // certify however clean the fit. It reads the SAME atom `build_prior`
-            // reads, at the SAME weight-anchored coordinate, so the subtraction
-            // cannot drift from the addition.
-            let obj = obj.with_soft_rho_guard_gradient(
-                |state: &mut &mut crate::estimate::reml::RemlState<'_>, rho: &Array1<f64>| {
-                    state.soft_rho_guard_gradient(rho)
-                },
-            );
             // #2676: publish the criterion's EXACT invariance — the directions
             // of rho along which the penalty map, and therefore the criterion,
             // does not move at all. The outer certificate deflates them instead
-            // of judging a chain-rule term against its own absolute value. Same
-            // seam as the barrier hook above: the closure speaks rho, and
-            // `ClosureObjective` applies the theta embedding from the declared
-            // layout.
+            // of judging a chain-rule term against its own absolute value. The
+            // closure speaks rho, and `ClosureObjective` applies the theta
+            // embedding from the declared layout.
             let obj = obj.with_criterion_invariance(
                 |state: &mut &mut crate::estimate::reml::RemlState<'_>, rho: &Array1<f64>| {
                     state.criterion_invariant_directions(rho)
@@ -2065,34 +2049,11 @@ where
         );
             // #2629: this objective is built on the SAME `&mut RemlState` as the
             // standard-REML arm above and evaluates through
-            // `evaluate_unified_with_link_ext` → `assemble_and_evaluate` →
-            // `build_prior`, so it carries the IDENTICAL `log cosh` barrier —
-            // measured on the SAS ladder, the barrier is 99.998% of the outer
-            // ρ-gradient at ρ=30 (`1.332439e-7` of `1.332418e-7`) with a clean
-            // `−22.82·e^{−ρ}` face tail underneath it, and the total is positive,
-            // which is exactly the sign `project_gradient_vector` retains at an
-            // upper bound. Publishing nothing left a standing `|Pg| ≥ w·a` on
-            // every railed coordinate of every flexible-link fit.
-            //
-            // The closure is BYTE-IDENTICAL to the standard arm's, which is the
-            // point of #2629's seam change: this objective's outer coordinate is
-            // `θ = [ρ (k entries), mixture/SAS link coordinates]`, and the
-            // θ-embedding (barrier in the leading `k`, exact zeros in the link
-            // slots) is applied once by `ClosureObjective` from the declared
-            // `psi_dim` rather than hand-written here. A hand-written version is
-            // the failure this issue exists to prevent: every coordinate's
-            // barrier is the same order of magnitude, so a misalignment is
-            // invisible in the norm.
-            let obj = obj.with_soft_rho_guard_gradient(
-                |state: &mut &mut crate::estimate::reml::RemlState<'_>, rho: &Array1<f64>| {
-                    state.soft_rho_guard_gradient(rho)
-                },
-            );
             // #2676: publish the criterion's EXACT invariance — the directions
             // of rho along which the penalty map, and therefore the criterion,
             // does not move at all. The outer certificate deflates them instead
-            // of judging a chain-rule term against its own absolute value. Same
-            // seam as the barrier hook above: the closure speaks rho, and
+            // of judging a chain-rule term against its own absolute value. The
+            // closure speaks rho, and
             // `ClosureObjective` applies the theta embedding from the declared
             // layout.
             let obj = obj.with_criterion_invariance(
@@ -2208,24 +2169,10 @@ where
             // it must be projected against the box that certificate used
             // (#2412) — otherwise a railed coordinate's outward pull is scored
             // against a bound derived without it.
-            // #2545: this residual is weighed against the CERTIFICATE's own
-            // bound two lines down, so it must be the quantity the certificate
-            // judged. The criterion's `log cosh` barrier leaves a saturated
-            // `+w*a = 1.3333e-7` at every rail that the KKT projection retains,
-            // and the certificate now removes it on exactly the railed
-            // coordinates — leaving it in here would refuse a fit the
-            // certificate just certified, which is the same two-spellings-of-one-
-            // tolerance failure in a different place.
-            let rho_barrier = reml_state.soft_rho_guard_gradient(&final_rho);
             let rail_bounds = (rho_lower, rho_upper);
             let rho_residual = crate::rho_optimizer::rail_projected_gradient_norm(
                 &final_rho,
-                &crate::rho_optimizer::gradient_with_rail_barrier_removed(
-                    &final_rho,
-                    &rho_gradient,
-                    &crate::rho_optimizer::rail_relaxed_bounds(&rail_bounds),
-                    Some(&rho_barrier),
-                ),
+                &rho_gradient,
                 Some(&rail_bounds),
             );
             let rho_bound = outer_result
@@ -2972,23 +2919,9 @@ where
         // refusal below, so it uses the certificate's rail-relaxed box (#2412)
         // -- the same projection the certified |Pg| was measured with, even
         // though this gate never weighs one against the other.
-        // #2545: "the same projection the certified |Pg| was measured with" now
-        // includes the certificate's removal of the soft rho-guard barrier on
-        // railed coordinates, so the shipped number keeps meaning the same thing
-        // as the certified one. `finalgrad` itself stays the raw criterion
-        // gradient — this is the projected residual, not the gradient.
         let bounds = (lower, upper);
-        let barrier = reml_state.soft_rho_guard_gradient(&final_rho);
-        let projected = crate::rho_optimizer::rail_projected_gradient_norm(
-            &final_rho,
-            &crate::rho_optimizer::gradient_with_rail_barrier_removed(
-                &final_rho,
-                &gradient,
-                &crate::rho_optimizer::rail_relaxed_bounds(&bounds),
-                Some(&barrier),
-            ),
-            Some(&bounds),
-        );
+        let projected =
+            crate::rho_optimizer::rail_projected_gradient_norm(&final_rho, &gradient, Some(&bounds));
         (value, gradient, projected)
     };
     let shipped_point_is_certified = shipped_joint_point_is_certified(

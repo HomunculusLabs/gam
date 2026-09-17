@@ -6997,8 +6997,10 @@ pub(crate) fn ift_correction_vanishes_at_exact_kkt() {
 /// removed, which is why the second is here.
 #[test]
 pub(crate) fn rho_gradient_at_upper_bound_is_zero_envelope_and_ift_consistent_issue_197() {
-    // Coord 0 pinned at +RHO_BOUND, coord 1 free.
-    let rho: Vec<f64> = vec![crate::estimate::RHO_BOUND, -0.5];
+    // Coord 0 pinned at the fixture's upper face, coord 1 free. The face is a
+    // fixture choice: the projection rule under test holds at any recorded face.
+    const FIXTURE_FACE: f64 = 30.0;
+    let rho: Vec<f64> = vec![FIXTURE_FACE, -0.5];
 
     // Use a β perturbed away from β* so that the with-residual path
     // exercises a non-zero IFT correction on the free coordinate, but
@@ -7012,7 +7014,7 @@ pub(crate) fn rho_gradient_at_upper_bound_is_zero_envelope_and_ift_consistent_is
         &ndarray::Array1::from_vec(rho.clone()),
     );
     crate::estimate::reml::outer_eval::record_current_outer_rho_model_upper_bounds_for_ift(
-        &ndarray::Array1::from_elem(rho.len(), crate::estimate::RHO_BOUND),
+        &ndarray::Array1::from_elem(rho.len(), FIXTURE_FACE),
     );
 
     // Envelope path (no residual attached).
@@ -7064,10 +7066,10 @@ pub(crate) fn rho_gradient_at_upper_bound_is_zero_envelope_and_ift_consistent_is
 
     // The other half of the rule: at the LOWER bound the feasible directions
     // are INCREASING ρ, so a positive entry there is the infeasible multiplier
-    // and must be projected to exactly 0.0. Pinning coordinate 0 at −RHO_BOUND
-    // with the same fixture flips which sign is infeasible, so this exercises
-    // the projection branch rather than the preservation branch.
-    let rho_low: Vec<f64> = vec![-crate::estimate::RHO_BOUND, -0.5];
+    // and must be projected to exactly 0.0. Pinning coordinate 0 at the lower
+    // face −FIXTURE_FACE with the same fixture flips which sign is infeasible, so
+    // this exercises the projection branch rather than the preservation branch.
+    let rho_low: Vec<f64> = vec![-FIXTURE_FACE, -0.5];
     let sol_low = build_gaussian_solution_at_beta(&rho_low, array![0.7, -0.4, 0.2], false);
     let grad_low = reml_laml_evaluate(&sol_low, &rho_low, EvalMode::ValueAndGradient, None)
         .unwrap()

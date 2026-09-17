@@ -208,53 +208,6 @@ pub trait OuterObjective {
         })
     }
 
-    /// The ρ-gradient of the soft numerical-guard BARRIER this objective adds
-    /// to its criterion, if it adds one (#2545).
-    ///
-    /// `None` — the default — means "this objective carries no such barrier",
-    /// and every consumer then behaves exactly as it did before this seam
-    /// existed. `Some(g)` must be the barrier's own gradient at `rho`, in the
-    /// same coordinate order as [`Self::eval`]'s gradient and of the same
-    /// length, computed by the SAME code path the criterion used to ADD it. It
-    /// must not be re-derived from the policy constants: the REML barrier is
-    /// evaluated at the weight-anchored coordinate `ρ̃ = ρ − log g(w)`, so a
-    /// closed form written against raw ρ agrees with the criterion only on
-    /// unweighted fits and disagrees on every weighted one.
-    ///
-    /// "Same length as [`Self::eval`]'s gradient" means the full θ, including
-    /// any trailing ψ/link block. The barrier acts on ρ only, so those entries
-    /// are EXACTLY zero — never omitted, and never filled with the ρ block
-    /// shifted along. [`ClosureObjective`] does that embedding from the
-    /// declared [`OuterThetaLayout`] so no implementor writes the arithmetic
-    /// (#2629).
-    ///
-    /// # What this is for, and the line it must not cross
-    ///
-    /// A `log cosh` barrier's gradient SATURATES at `w·a` instead of decaying,
-    /// so at an upper rail the KKT projection (`gi.max(0.0)`) retains exactly
-    /// that positive part and `|Pg| ≥ w·a` however clean the fit — a λ=∞ face
-    /// can never register as stationary. The certificate therefore subtracts
-    /// this term where the barrier provably is not part of the optimality
-    /// condition: at coordinates pinned to a box bound (the box enforces the
-    /// bound exactly, which is the barrier's entire job) and along the tail
-    /// probes (where the `ĉ = −e^ρ·∂V/∂ρ` law is a statement about the
-    /// criterion's data term, and the barrier is a known additive analytic
-    /// term on top of it).
-    ///
-    /// It deliberately does NOT subtract at an INTERIOR stationarity test.
-    /// There the optimizer descends the criterion WITH the barrier and stops
-    /// where their sum vanishes; a certificate that judged the sum minus the
-    /// barrier would judge a different function than was optimized and
-    /// manufacture "solver converged, certificate refused" out of the
-    /// disagreement.
-    fn soft_rho_guard_gradient(&mut self, rho: &Array1<f64>) -> Option<Array1<f64>> {
-        log::trace!(
-            "[#2545] this objective declares no soft rho-guard barrier (rho_dim={})",
-            rho.len()
-        );
-        None
-    }
-
     /// Directions of the outer coordinate along which this criterion is EXACTLY
     /// constant by construction, at `theta` (#2676).
     ///
@@ -1015,12 +968,6 @@ impl<'a> OuterObjective for CheckpointingObjective<'a> {
         self.inner.rail_face_limit(rho, face)
     }
 
-    fn soft_rho_guard_gradient(&mut self, rho: &Array1<f64>) -> Option<Array1<f64>> {
-        // A barrier gradient is a property of the wrapped criterion; the
-        // checkpoint layer neither adds nor persists one.
-        self.inner.soft_rho_guard_gradient(rho)
-    }
-
     fn criterion_invariant_directions(&mut self, theta: &Array1<f64>) -> Option<Array2<f64>> {
         // The invariance is a property of the wrapped criterion's penalty map;
         // the checkpoint layer neither adds nor persists one.
@@ -1149,11 +1096,6 @@ pub struct ClosureObjective<
             ) -> Result<RailFaceLimitOutcome, EstimationError>,
         >,
     >,
-    /// Optional soft rho-guard barrier gradient hook (#2545). Installed by
-    /// objectives whose criterion carries the unconditional `log cosh` barrier;
-    /// `None` means "no barrier", and the certificate subtracts nothing.
-    pub(crate) soft_rho_guard_gradient_fn:
-        Option<Box<dyn FnMut(&mut S, &Array1<f64>) -> Array1<f64>>>,
     /// Optional criterion-invariance hook (#2676). Installed by objectives whose
     /// penalty map carries an exact linear redundancy; `None` means "no
     /// invariance", and the certificate deflates nothing — the pre-#2676
@@ -1271,61 +1213,9 @@ where
         }
     }
 
-    fn soft_rho_guard_gradient(&mut self, theta: &Array1<f64>) -> Option<Array1<f64>> {
-        // The hook speaks ρ; the seam speaks θ. The barrier acts on ρ only —
-        // `RemlState::build_prior` adds it to `grad[..k]` and to nothing else —
-        // so on an objective whose outer coordinate is
-        // `θ = [ρ (rho_dim), ψ/link (psi_dim)]` the publication must be
-        // θ-length with EXACT zeros in the trailing block. Doing that
-        // arithmetic here, from the DECLARED layout, rather than at each
-        // construction site is what makes the two REML arms install a
-        // byte-identical hook: standard REML (`psi_dim = 0`) sees the embedding
-        // collapse to the identity, and the mixture/SAS arm gets the zeros it
-        // needs without writing a single index (#2629).
-        //
-        // Why the layout and not `theta.len()`: a misalignment here is silent.
-        // Every coordinate's barrier is the same order of magnitude, so
-        // subtracting one coordinate's from another's is invisible in the norm
-        // and surfaces only as a coordinate that never certifies.
-        let layout = self.cap.theta_layout();
-        if theta.len() != layout.n_params {
-            log::trace!(
-                "[#2545/#2629] barrier publication declined: theta length {} is not the \
-                 declared n_params {} (rho_dim={}, psi_dim={})",
-                theta.len(),
-                layout.n_params,
-                layout.rho_dim(),
-                layout.psi_dim
-            );
-            return None;
-        }
-        let rho_dim = layout.rho_dim();
-        let rho = theta.slice(ndarray::s![..rho_dim]).to_owned();
-        let guard = self.soft_rho_guard_gradient_fn.as_mut()?(&mut self.state, &rho);
-        // A hook that answers in the wrong shape is reported as an ABSENCE, not
-        // spliced in at whatever length it returned: the consumers index this
-        // array by outer coordinate, and a length mismatch would subtract one
-        // coordinate's barrier from another's gradient. Reporting `None` costs
-        // only the pre-#2545 behavior (the barrier stays in the residual).
-        if guard.len() != rho_dim || !guard.iter().all(|v| v.is_finite()) {
-            log::trace!(
-                "[#2545/#2629] barrier publication declined: the hook returned {} entries \
-                 for a rho block of {rho_dim}, or a non-finite one",
-                guard.len()
-            );
-            return None;
-        }
-        if layout.psi_dim == 0 {
-            return Some(guard);
-        }
-        let mut published = Array1::<f64>::zeros(layout.n_params);
-        published.slice_mut(ndarray::s![..rho_dim]).assign(&guard);
-        Some(published)
-    }
-
     fn criterion_invariant_directions(&mut self, theta: &Array1<f64>) -> Option<Array2<f64>> {
-        // Same seam discipline as the barrier hook above (#2629): the closure
-        // speaks rho, the certificate speaks theta, and the psi/link block is
+        // #2629 seam discipline: the closure speaks rho, the certificate speaks
+        // theta, and the psi/link block is
         // EXACTLY zero because the invariance lives entirely in the penalty
         // map. Doing the embedding here, from the declared layout, is what lets
         // the standard-REML and the exact-joint spatial arms install a
@@ -1453,36 +1343,6 @@ impl<S, Fc, Fe, Fr, Fefs, Feo, Fsp, Fseed> ClosureObjective<S, Fc, Fe, Fr, Fefs,
         self
     }
 
-    /// Install the soft rho-guard barrier gradient hook (#2545).
-    ///
-    /// The closure must PROJECT the barrier gradient the criterion already
-    /// added (for REML: `RemlState::soft_rho_guard_gradient`, which reads the
-    /// same `SoftRhoGuardPriorAtom` `build_prior` reads), never recompute it
-    /// from the policy constants — the barrier is evaluated at the
-    /// weight-anchored coordinate, so a raw-ρ closed form is a different
-    /// function on any weighted fit.
-    ///
-    /// The closure speaks **ρ**, not θ: it receives the leading `rho_dim`
-    /// entries of the outer point and returns one entry per ρ-coordinate.
-    /// [`OuterObjective::soft_rho_guard_gradient`] embeds that into the full θ
-    /// with exact zeros in the ψ/link block, so an objective with auxiliary
-    /// outer coordinates installs the SAME closure as one without — the layout
-    /// arithmetic that the mixture/SAS arm would otherwise have had to
-    /// hand-write (and that #2629 records as invisible when wrong) lives in one
-    /// place, driven by the declared [`OuterThetaLayout`].
-    ///
-    /// A closure whose criterion is NOT built on `RemlState` must not install
-    /// this hook at all: `None` is the correct answer for an objective that
-    /// carries no barrier, and publishing a zero array would be indistinguishable
-    /// from publishing a real one at the consumers.
-    pub(crate) fn with_soft_rho_guard_gradient<Fguard>(mut self, guard: Fguard) -> Self
-    where
-        Fguard: FnMut(&mut S, &Array1<f64>) -> Array1<f64> + 'static,
-    {
-        self.soft_rho_guard_gradient_fn = Some(Box::new(guard));
-        self
-    }
-
     /// Publish the criterion's exact invariance directions (#2676).
     ///
     /// The closure receives the FULL outer point and returns orthonormal
@@ -1542,7 +1402,6 @@ where
             fixed_point_certificate_fn: self.fixed_point_certificate_fn,
             exact_polish_fn: self.exact_polish_fn,
             rail_face_limit_fn: self.rail_face_limit_fn,
-            soft_rho_guard_gradient_fn: self.soft_rho_guard_gradient_fn,
             criterion_invariance_fn: self.criterion_invariance_fn,
             criterion_rank_fn: self.criterion_rank_fn,
             screening_proxy_fn: self.screening_proxy_fn,
@@ -2112,19 +1971,6 @@ impl<'a> OuterObjective for CanonicalizedObjective<'a> {
         }
         limit.face = canonical_face;
         Ok(RailFaceLimitOutcome::Available(limit))
-    }
-
-    fn soft_rho_guard_gradient(&mut self, rho: &Array1<f64>) -> Option<Array1<f64>> {
-        // The barrier gradient is one entry per ρ-coordinate, so it permutes
-        // exactly like `eval`'s gradient does in `eval_to_canonical`. Forgetting
-        // this permutation would subtract a DIFFERENT coordinate's barrier
-        // whenever the canonical layout is not the identity — and because every
-        // coordinate's barrier is the same order of magnitude, the error would
-        // be invisible in the norm and visible only as a coordinate that never
-        // certifies.
-        let native = self.to_native(rho);
-        let guard = self.inner.soft_rho_guard_gradient(&native)?;
-        (guard.len() == self.perm.len()).then(|| permute_to_canonical(&guard, &self.perm))
     }
 
     fn criterion_rank(&self) -> Option<usize> {

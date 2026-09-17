@@ -459,8 +459,17 @@ mod rail_face_limit_tests {
     /// constant to reproduce it. If the closed form had the wrong dispersion
     /// convention, a missing Schur term, or a sign error, this test would miss
     /// by orders of magnitude rather than by a rounding.
-    /// One `(n, ρ_0)` row: the analytic constant against the production one.
-    fn measured_against_analytic(n: usize, rho_0: f64) -> (f64, f64) {
+    /// One `(n, ρ_0)` row: the analytic constant, the production pencil
+    /// `−e^{ρ_0}·∂V/∂ρ_0`, and the pencil's rounding band. The band is Wilkinson's
+    /// `γ_k·Σ|terms|` with `k` the three `dim × dim` accumulations that form the
+    /// gradient entry, scaled by the pencil's `e^{ρ_0}`. On the face the entry is
+    /// what is left of the log-determinant pair `½tr(H⁻¹λS) → rank/2` against
+    /// `½∂log|λS|₊ = rank/2` after they cancel, so the terms are that pair
+    /// (`rank`) plus the audited parts (`fixed_beta`, `logdet_h`, `logdet_s` and
+    /// the KKT remainder). The audited parts alone are already `O(e^{−ρ_0})`, and a
+    /// band over them left an allowance of 3.0e-11 against a measured ratio
+    /// deviation of 1.7e-6.
+    fn measured_against_analytic(n: usize, rho_0: f64) -> (f64, f64, f64) {
         let (y, weights, x) = cubic_fixture_sized(NULL_CURVATURE, n);
         let offset = Array1::<f64>::zeros(y.len());
         let config = gaussian_config();
@@ -490,17 +499,74 @@ mod rail_face_limit_tests {
                 panic!("the fixture face should certify at n={n}, rho_0={rho_0}: {reason}")
             }
         };
+        crate::estimate::outer_eval_capture::enable_rho_outer_audit();
         let eval = state
             .compute_outer_eval_with_order(&rho, OuterEvalOrder::ValueAndGradient)
             .expect("the production REML gradient must evaluate");
-        (analytic, -(rho_0.exp()) * eval.gradient[0])
+        let audit = crate::estimate::outer_eval_capture::take_rho_outer_audit()
+            .expect("the ρ-block audit was armed for this evaluation");
+        let parts = audit
+            .parts
+            .first()
+            .copied()
+            .expect("the production gradient publishes its coordinate-0 parts");
+        let kkt = parts.total - (parts.fixed_beta + parts.logdet_h + parts.logdet_s);
+        let absolute_sum = parts.rank as f64
+            + parts.fixed_beta.abs()
+            + parts.logdet_h.abs()
+            + parts.logdet_s.abs()
+            + kkt.abs();
+        let band = rho_0.exp()
+            * gam_linalg::roundoff::accumulation_growth(3 * parts.dim * parts.dim)
+            * absolute_sum;
+        (analytic, -(rho_0.exp()) * eval.gradient[0], band)
+    }
+
+    /// The historical soft ρ-guard barrier, `w·log cosh(a·ρ)` with `w = 1e-6`
+    /// and `a = 4/30`, which the criterion no longer carries (#2902 row 8).
+    /// The tail test re-adds its gradient to the pencil as a positive control.
+    const RETIRED_BARRIER_WEIGHT: f64 = 1.0e-6;
+    const RETIRED_BARRIER_SHARPNESS: f64 = 4.0 / 30.0;
+
+    /// On the tail the measured pencil approaches the analytic constant as
+    /// `c − m(ρ_0) = C·e^{−ρ_0} + O(e^{−2ρ_0})`, so the signed gap contracts by
+    /// exactly `e^{−Δ}` across a depth step `Δ`. The allowance is the two pencils'
+    /// rounding bands relative to their gaps. A gap below its own band carries no
+    /// sign or magnitude, so it is refused rather than compared. Returns the
+    /// measured ratio.
+    fn gap_contracts_like_the_tail(
+        analytic: f64,
+        (rho_shallow, measured_shallow, band_shallow): (f64, f64, f64),
+        (rho_deep, measured_deep, band_deep): (f64, f64, f64),
+    ) -> Result<f64, String> {
+        let (gap_shallow, gap_deep) = (analytic - measured_shallow, analytic - measured_deep);
+        if !(gap_shallow.abs() > band_shallow && gap_deep.abs() > band_deep) {
+            return Err(format!(
+                "a gap lies inside its rounding band: {gap_shallow:.4e} (band {band_shallow:.4e}) \
+                 at rho_0={rho_shallow}, {gap_deep:.4e} (band {band_deep:.4e}) at rho_0={rho_deep}"
+            ));
+        }
+        let ratio = gap_deep / gap_shallow;
+        let expected = (rho_shallow - rho_deep).exp();
+        let allowance = expected * (band_deep / gap_deep.abs() + band_shallow / gap_shallow.abs());
+        if (ratio - expected).abs() <= allowance {
+            Ok(ratio)
+        } else {
+            Err(format!(
+                "the gap ratio {ratio:.6e} is not the tail contraction e^(-{:.1}) = {expected:.6e} \
+                 within {allowance:.3e}: gaps {gap_shallow:.6e} at rho_0={rho_shallow} and \
+                 {gap_deep:.6e} at rho_0={rho_deep}",
+                rho_deep - rho_shallow
+            ))
+        }
     }
 
     #[test]
     fn analytic_face_constant_reproduces_the_production_rho_gradient() {
-        let (analytic_shallow, measured_shallow) = measured_against_analytic(96, 10.0);
-        let (analytic_deep, measured_deep) = measured_against_analytic(96, 14.0);
-        let (analytic_wide, measured_wide) = measured_against_analytic(384, 10.0);
+        let (analytic_shallow, measured_shallow, band_shallow) =
+            measured_against_analytic(96, 10.0);
+        let (analytic_deep, measured_deep, band_deep) = measured_against_analytic(96, 14.0);
+        let (analytic_wide, measured_wide, _) = measured_against_analytic(384, 10.0);
         for (label, measured) in [
             ("n=96 rho_0=10", measured_shallow),
             ("n=96 rho_0=14", measured_deep),
@@ -532,19 +598,40 @@ mod rail_face_limit_tests {
             "the analytic pencil constant must not depend on rho at all"
         );
 
-        // The measured one does depend on ρ, and that is the defect this
-        // certificate removes: the pencil is `e^rho` times a gradient whose
-        // assembly error is fixed, so the instrument's error grows by the same
-        // factor while the law does not move. Asserting the divergence keeps
-        // the fixture honest — if the production gradient ever became exact at
-        // depth, this test would say so instead of silently passing.
-        let deep = (analytic_deep - measured_deep).abs() / measured_deep;
+        // The criterion carries no soft ρ-guard barrier (#2902 row 8), so the
+        // measured pencil at depth is the criterion's own tail law, and its gap to
+        // the analytic constant is that law's truncated tail. Measured before the
+        // restatement: 1.79e-4 relative at ρ₀ = 10 and 3.28e-6 at ρ₀ = 14, a ratio
+        // of 54.6 = e⁴. The divergence this test used to assert was the barrier's
+        // saturated gradient `w·a·tanh(a·ρ)` times `e^ρ`.
+        let shallow_row = (10.0, measured_shallow, band_shallow);
+        let deep_row = (14.0, measured_deep, band_deep);
+        let contraction = gap_contracts_like_the_tail(analytic_shallow, shallow_row, deep_row);
         assert!(
-            deep > 4.0 * shallow,
-            "the measured pencil should degrade with depth while the analytic \
-             one does not: rel at rho_0=10 is {shallow:.4e}, at rho_0=14 is {deep:.4e} \
-             (measured {measured_shallow:.9e} then {measured_deep:.9e} against a \
-             constant analytic {analytic_shallow:.9e})"
+            contraction.is_ok(),
+            "the production pencil must approach the analytic face constant as the tail law \
+             does: {contraction:?} (measured {measured_shallow:.9e} then {measured_deep:.9e} \
+             against a constant analytic {analytic_shallow:.9e})"
+        );
+
+        // Positive control: the same pencils with the retired barrier's gradient
+        // put back. Its term grows like `e^ρ·w·a` instead of contracting, so the
+        // contraction check must refuse it.
+        let with_barrier = |(rho_0, measured, band): (f64, f64, f64)| {
+            let guard = RETIRED_BARRIER_WEIGHT
+                * RETIRED_BARRIER_SHARPNESS
+                * (RETIRED_BARRIER_SHARPNESS * rho_0).tanh();
+            (rho_0, measured - rho_0.exp() * guard, band)
+        };
+        let barrier_contraction = gap_contracts_like_the_tail(
+            analytic_shallow,
+            with_barrier(shallow_row),
+            with_barrier(deep_row),
+        );
+        assert!(
+            barrier_contraction.is_err(),
+            "the contraction check must refuse a pencil carrying the retired barrier, but it \
+             accepted ratio {barrier_contraction:?}"
         );
     }
 

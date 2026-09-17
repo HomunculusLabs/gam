@@ -2165,6 +2165,23 @@
     "evidence": "At the base, git grep -w finds CriterionSum only in atoms.rs, the root facade re-export and one comment, all changed in this commit. Emulating public_api_census.py's pub fn predicate over the before and after atoms.rs blobs gives d1 1 to 0, value 1 to 0, and hessian_logdet_atom_emits_closed_form_value_and_directional_derivative 1 to 0."
   },
   {
+    "base": "b046e69b1023cd7c5c797e27f36cf68787278e4b",
+    "removed": {
+      "crates/gam-solve/src/reml/atoms.rs::cost": 1,
+      "crates/gam-solve/src/reml/atoms.rs::evaluate_anchored": 1,
+      "crates/gam-solve/src/reml/atoms.rs::gradient": 1,
+      "crates/gam-solve/src/reml/atoms.rs::hessian": 1,
+      "crates/gam-solve/src/reml/atoms.rs::soft_rho_guard_prior_atom_value_gradient_hessian_are_one_chain": 1,
+      "crates/gam-solve/src/reml/gradient_hessian.rs::soft_rho_guard_gradient": 1,
+      "crates/gam-solve/src/reml/gradient_hessian.rs::soft_rho_guard_prior_atom": 1,
+      "crates/gam-solve/src/reml/mod.rs::soft_rho_guard_gradient_is_evaluated_at_the_weight_anchor": 1,
+      "crates/gam-solve/src/rho_optimizer/objective.rs::with_soft_rho_guard_gradient": 1,
+      "crates/gam-solve/src/rho_optimizer/run.rs::gradient_with_rail_barrier_removed": 1
+    },
+    "reason": "#2902 row 8: the public functions of the deleted soft rho-guard barrier (SoftRhoGuardPriorAtom::{evaluate_anchored, cost, gradient, hessian}, RemlState::{soft_rho_guard_prior_atom, soft_rho_guard_gradient}, ClosureObjective::with_soft_rho_guard_gradient, gradient_with_rail_barrier_removed) and its two pub test names (soft_rho_guard_prior_atom_value_gradient_hessian_are_one_chain, soft_rho_guard_gradient_is_evaluated_at_the_weight_anchor). The barrier kept the outer search off +-RHO_BOUND walls no outer route has since 04726d916, and every production outer route declares a derived domain.",
+    "evidence": "The removed map is what scripts/public_api_census.py printed for this change on the lane (gate job 1121497 on gx2 at 10043352cf). At the base git grep -w finds these names outside test files only in gam-solve estimate/optimizer.rs, reml/{atoms,gradient_hessian,mod,objective}.rs and rho_optimizer/{objective,run}.rs, and every one of those occurrences is deleted in this commit. cargo check --workspace --all-targets --exclude gam-pyffi on the patched tree names none of them."
+  },
+  {
     "base": "70defacd8d2f0704a266cc2bc407f3af1f6e3034",
     "removed": {
       "crates/gam-linalg/src/test_support.rs::advantage_upper_bound": 1,

@@ -103,13 +103,10 @@ pub(crate) use penalty::{
 pub(crate) use prefit::validate_penalty_specs;
 pub(crate) use smoothing_correction::{
     AUTO_CUBATURE_BOUNDARY_MARGIN, AUTO_CUBATURE_MAX_BETA_DIM, AUTO_CUBATURE_MAX_EIGENVECTORS,
-    AUTO_CUBATURE_MAX_RHO_DIM, AUTO_CUBATURE_TARGET_VAR_FRAC, RHO_SOFT_PRIOR_SHARPNESS,
-    RHO_SOFT_PRIOR_WEIGHT, RemlConfig, SmoothingCorrectionStatus,
-    SmoothingCorrectionUnavailable, compute_smoothing_correction, smooth_floor_dp,
+    AUTO_CUBATURE_MAX_RHO_DIM, AUTO_CUBATURE_TARGET_VAR_FRAC, RemlConfig,
+    SmoothingCorrectionStatus, SmoothingCorrectionUnavailable, compute_smoothing_correction,
+    smooth_floor_dp,
 };
-// #1521 carve: the spatial-optimization driver reads the unified rho bound as
-// `gam_solve::estimate::RHO_BOUND`.
-pub use smoothing_correction::RHO_BOUND;
 // The identified ρ-Hessian inverse is the one owner of the first-order
 // smoothing correction's `V_ρ`, including on the custom-family and single-cause
 // survival lanes (#2346, #2912).
@@ -132,8 +129,6 @@ mod continuous_order_tests;
 mod estimate_policy_tests;
 #[cfg(test)]
 mod link_ext_hessian_2665_tests;
-#[cfg(test)]
-mod mixture_sas_rho_guard_2629_tests;
 #[cfg(test)]
 mod gaussian_high_edf_scale_tests;
 #[cfg(test)]

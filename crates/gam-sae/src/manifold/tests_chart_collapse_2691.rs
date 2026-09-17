@@ -864,7 +864,7 @@ fn ard_face_for(n: usize, p: usize, radius: f64, sigma: f64) -> (f64, f64, f64) 
 /// would fail first if anyone replaced this with a literal.
 ///
 /// Both one-sided halves are pinned too: the face must bind (strictly below
-/// `RHO_BOUND` and `LOG_STRENGTH_MAX`) and must still admit the seeded entry.
+/// `LOG_STRENGTH_MAX`) and must still admit the seeded entry.
 #[test]
 fn zz_2691_the_ard_domain_face_moves_with_the_data_not_with_binary64() {
     let n: usize = 70;
@@ -881,18 +881,12 @@ fn zz_2691_the_ard_domain_face_moves_with_the_data_not_with_binary64() {
     let resolution_face = 2.0 * ((2.0 * n as f64) / period).ln();
     eprintln!(
         "[2691-face] period={period} seed_log_ard={seed:.4} face(r=2.086)={face_r1:.6} \
-         face(r=4.172)={face_r2:.6} resolution_face={resolution_face:.6} RHO_BOUND={} \
+         face(r=4.172)={face_r2:.6} resolution_face={resolution_face:.6} \
          LOG_STRENGTH_MAX={}",
-        gam_solve::estimate::RHO_BOUND,
         gam_problem::LOG_STRENGTH_MAX,
     );
 
     // REJECT half — it binds, and the representability constant is gone.
-    assert!(
-        face_r1 < gam_solve::estimate::RHO_BOUND,
-        "#2691: a face at or above the generic ρ box ({}) constrains nothing; got {face_r1:.6}",
-        gam_solve::estimate::RHO_BOUND
-    );
     assert!(
         face_r1 < gam_problem::LOG_STRENGTH_MAX,
         "#2691: the ARD face must not be the binary64 representability policy ({}); got {face_r1:.6}",
@@ -1061,11 +1055,11 @@ fn zz_2691_the_face_excludes_every_precision_this_chart_cannot_carry() {
 /// the one in force.
 ///
 /// The assertion is the one this issue was filed on and it is now checkable at
-/// every σ: the terminal ARD log-precision must lie inside the installed face,
-/// and must NOT sit on the generic `RHO_BOUND = 30` the issue measured it
-/// railing to. The printed `moved` column is the mute-fixture guard: if the
-/// search never left the seed at any σ, the run proved nothing and the test says
-/// so rather than passing quietly.
+/// every σ: the terminal ARD log-precision must lie inside the installed face
+/// (the issue measured it railing to the ±30 box that no outer search has any
+/// more). The printed `moved` column is the mute-fixture guard: if the search
+/// never left the seed at any σ, the run proved nothing and the test says so
+/// rather than passing quietly.
 #[test]
 fn zz_2691_bounded_sigma_witness_returns_an_answer_at_every_sigma() {
     let n: usize = 70;
@@ -1073,7 +1067,6 @@ fn zz_2691_bounded_sigma_witness_returns_an_answer_at_every_sigma() {
     let radius: f64 = 2.086;
     let sigmas: Vec<f64> = vec![0.352, 1.0, 1.5];
     let mut any_moved = false;
-    let mut on_generic_box: Vec<f64> = Vec::new();
     let mut outside_face: Vec<(f64, f64, f64)> = Vec::new();
 
     eprintln!("[2691-sigma] sigma\tface\tseed\tterminal_log_ard\tmoved\tconverged\tsecs");
@@ -1117,9 +1110,6 @@ fn zz_2691_bounded_sigma_witness_returns_an_answer_at_every_sigma() {
         eprintln!(
             "[2691-sigma] {sigma:.3}\t{face:.4}\t{seed:.4}\t{terminal:.4}\t{moved}\t{converged}\t{secs:.1}"
         );
-        if (terminal - gam_solve::estimate::RHO_BOUND).abs() <= 1.0e-6 {
-            on_generic_box.push(sigma);
-        }
         if terminal > face + 1.0e-9 {
             outside_face.push((sigma, terminal, face));
         }
@@ -1129,12 +1119,6 @@ fn zz_2691_bounded_sigma_witness_returns_an_answer_at_every_sigma() {
         any_moved,
         "#2691: the bounded σ witness never moved the ARD coordinate off its seed at any σ, so \
          it cannot say anything about railing — raise the iteration budget or the fixture is mute"
-    );
-    assert!(
-        on_generic_box.is_empty(),
-        "#2691: the terminal ARD log-precision sat on the generic ρ box ({}) at σ {on_generic_box:?} \
-         — that is the rail this issue was filed on",
-        gam_solve::estimate::RHO_BOUND
     );
     assert!(
         outside_face.is_empty(),

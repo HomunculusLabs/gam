@@ -221,9 +221,9 @@ impl<'a> RemlState<'a> {
             );
             return Ok(eval.cost);
         }
-        // Cost-order short-circuit (#778). The configured/soft ρ-prior cost is
-        // the *cheapest* additive term in the objective — `O(K)`, a function of
-        // ρ alone, with no dependence on the inner P-IRLS solve. The unified
+        // Cost-order short-circuit (#778). The configured ρ-prior cost is the
+        // *cheapest* additive term in the objective — `O(K)`, a function of ρ
+        // alone, with no dependence on the inner P-IRLS solve. The unified
         // evaluator forms the final cost as
         //   V(ρ) = data_term(ρ) + prior_cost(ρ) + barrier_cost(β̂),
         // where `data_term` (the inner solve + the `O(K³)` penalty/Hessian
@@ -236,10 +236,8 @@ impl<'a> RemlState<'a> {
         // without paying for the inner P-IRLS solve or the log-determinant
         // assembly. This is exact, not an approximation: it reproduces the value
         // the full path would return (`build_prior` projects the identical
-        // configured-prior cost from `ConfiguredRhoPriorAtom` and adds the soft
-        // guard prior).
-        let prior_cost =
-            self.soft_rho_guard_prior_atom(p).cost() + self.configured_rho_prior_atom(p).cost();
+        // configured-prior cost from `ConfiguredRhoPriorAtom`).
+        let prior_cost = self.configured_rho_prior_atom(p).cost();
         if !prior_cost.is_finite() {
             log::debug!(
                 "[REML] eval#{} prior short-circuit | prior_cost {:.6e} | rejecting step \
@@ -249,10 +247,10 @@ impl<'a> RemlState<'a> {
                 t_eval_start.elapsed().as_secs_f64() * 1000.0
             );
             // Out-of-support ρ saturates the prior to `+∞` (never `−∞`/`NaN`,
-            // since the soft prior is finite and non-negative and the configured
-            // prior's Saturate policy folds to `+∞`); return the `+∞` retreat
-            // signal explicitly to match the `obtain_eval_bundle` failure paths
-            // below that also return `f64::INFINITY` on an infeasible step.
+            // since the configured prior's Saturate policy folds to `+∞`); return
+            // the `+∞` retreat signal explicitly to match the `obtain_eval_bundle`
+            // failure paths below that also return `f64::INFINITY` on an
+            // infeasible step.
             return Ok(f64::INFINITY);
         }
         let t_pirls = std::time::Instant::now();
@@ -2033,21 +2031,17 @@ impl<'a> RemlState<'a> {
         mode: super::reml_outer_engine::EvalMode,
     ) -> Option<(f64, Array1<f64>, Option<Array2<f64>>)> {
         let configured = self.configured_rho_prior_atom(rho);
-        let soft = self.soft_rho_guard_prior_atom(rho);
-        let cost = soft.cost() + configured.cost();
+        let cost = configured.cost();
         if mode == super::reml_outer_engine::EvalMode::ValueOnly {
             return (cost.abs() > 0.0).then(|| (cost, Array1::zeros(rho.len()), None));
         }
 
-        let gradient = soft.gradient() + configured.gradient();
+        let gradient = configured.gradient().clone();
         let hessian = if mode == super::reml_outer_engine::EvalMode::ValueGradientHessian {
-            let mut hess = soft
+            configured
                 .hessian()
-                .unwrap_or_else(|| Array2::<f64>::zeros((rho.len(), rho.len())));
-            if let Some(configured_hess) = configured.hessian() {
-                hess += configured_hess;
-            }
-            hess.iter().any(|&v| v != 0.0).then_some(hess)
+                .filter(|hess| hess.iter().any(|&v| v != 0.0))
+                .cloned()
         } else {
             None
         };

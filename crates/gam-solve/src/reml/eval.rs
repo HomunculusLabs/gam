@@ -2041,7 +2041,7 @@ mod smoothing_correction_outcome_tests {
             // correction path is written for, rather than pick a ρ and hope.
             // `n_rho == 1`, so stationarity is a scalar root and bisection
             // brackets it with no derivative and no tuning; the bracket is the
-            // ρ domain itself. What makes this a fixture rather than a
+            // fixture's own ρ window. What makes this a fixture rather than a
             // reimplemented optimizer is that the result is CERTIFIED below:
             // the gradient at the returned ρ̂ is asserted small, so a
             // mis-converged root fails loudly instead of silently reproducing
@@ -2059,8 +2059,11 @@ mod smoothing_correction_outcome_tests {
                     .compute_gradient(&probe)
                     .unwrap_or_else(|err| panic!("outer gradient at rho={candidate}: {err}"))[0]
             };
-            let mut lo_rho = 1.0 - RHO_BOUND;
-            let mut hi_rho = RHO_BOUND - 1.0;
+            // The fixture's own ρ box. The sign assertion below checks that this
+            // design's profile turns over inside it.
+            const FIXTURE_RHO_BOX: f64 = 30.0;
+            let mut lo_rho = 1.0 - FIXTURE_RHO_BOX;
+            let mut hi_rho = FIXTURE_RHO_BOX - 1.0;
             let g_lo = outer_gradient_at(lo_rho);
             let g_hi = outer_gradient_at(hi_rho);
             assert!(
@@ -2152,7 +2155,10 @@ mod smoothing_correction_outcome_tests {
             let outcome = state
                 .compute_smoothing_correction_auto(
                     &final_rho,
-                    &(Array1::from_elem(1, -RHO_BOUND), Array1::from_elem(1, RHO_BOUND)),
+                    &(
+                        Array1::from_elem(1, -FIXTURE_RHO_BOX),
+                        Array1::from_elem(1, FIXTURE_RHO_BOX),
+                    ),
                     &final_lambdas,
                     final_fit.as_ref(),
                     Some(&base_cov),

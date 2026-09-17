@@ -31,8 +31,8 @@ use ndarray::{Array1, Array2};
 use gam_problem::EvalMode;
 
 /// The saturated-ρ ladder #2450 established and #2545/#2629 measure on. `ρ ≥ 21`
-/// is past the REML part's own tail on the reference fixture, and `RHO_BOUND = 30`
-/// is the deepest point the box admits. Four rungs make the pencil's constancy
+/// is past the REML part's own tail on the reference fixture, and `ρ = 30` is
+/// where the retired ±30 box ended. Four rungs make the pencil's constancy
 /// three independent ratios, an observation rather than a definition.
 const SATURATED_RHO_LADDER: [f64; 4] = [21.0, 24.0, 27.0, 30.0];
 
@@ -160,8 +160,8 @@ fn render(ladder: &[(f64, f64)]) -> String {
 
 /// **The measurement.** The shared custom-family outer evaluator — the route
 /// `gamlss mean-wiggle`, `spatial-adaptive`, and `custom family` all take — does
-/// NOT carry the soft ρ-guard barrier, so `None` is the correct answer for all
-/// three at [`OuterObjective::soft_rho_guard_gradient`].
+/// NOT carry a soft ρ-guard barrier: its outer gradient at a saturated ρ is the
+/// bare λ→∞ face.
 ///
 /// The engine's outer gradient on the saturated ladder IS a bare face: its pencil
 /// is one constant to `1e-4`. Measured c = 2.230365e3 with a pencil spread of
@@ -176,8 +176,6 @@ fn render(ladder: &[(f64, f64)]) -> String {
 /// into `evaluate_custom_family_hyper_internal` unconditionally, and the
 /// ρ-prior machinery it reaches (`psi_hyper`'s `has_configured_rho_prior`) is the
 /// CONFIGURED prior only. The soft guard has no path into it.
-///
-/// [`OuterObjective::soft_rho_guard_gradient`]: gam_solve::rho_optimizer::OuterObjective::soft_rho_guard_gradient
 #[test]
 fn the_custom_family_engine_carries_no_soft_rho_guard_floor_2629() {
     let ladder = custom_family_rho_ladder(&SATURATED_RHO_LADDER);
@@ -204,7 +202,7 @@ fn the_custom_family_engine_carries_no_soft_rho_guard_floor_2629() {
     // Add a constant floor equal to the deepest rung's own gradient, about 600 times
     // smaller than the barrier's w·a, to the same measurements, and require the
     // pencil test to refuse it.
-    let floor = ladder.last().expect("the ladder reaches RHO_BOUND").1.abs();
+    let floor = ladder.last().expect("the ladder has a deepest rung").1.abs();
     let floored: Vec<(f64, f64)> = ladder.iter().map(|&(rho, g)| (rho, g + floor)).collect();
     let floored_pencil = face_pencil(&floored);
     eprintln!(
