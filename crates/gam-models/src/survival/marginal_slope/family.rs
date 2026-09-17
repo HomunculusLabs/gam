@@ -186,6 +186,11 @@ pub(crate) struct SurvivalMarginalSlopeFamily {
     /// on the unarmed fit's own evidence, through
     /// `fit_custom_family_arming_on_evidence` (#979).
     pub(crate) jeffreys_armed: bool,
+    /// The declared latent law the row index is anchored on (gam#2923), when
+    /// the fit runs the anchored frame instead of the Gaussian closed form.
+    /// `None` is the standard-normal law, on which the closed form is exact and
+    /// every model built before this existed takes exactly the path it did.
+    pub(crate) latent_law: Option<Arc<SurvivalLatentLaw>>,
 }
 
 impl SurvivalMarginalSlopeFamily {
@@ -216,6 +221,14 @@ impl SurvivalMarginalSlopeFamily {
     #[inline]
     pub(crate) fn slope_is_follow_up_varying(&self) -> bool {
         self.slope_layout.is_follow_up_varying()
+    }
+
+    /// Whether this family anchors its index on a declared latent law
+    /// (gam#2923). Selects the anchored four-primary frame over the Gaussian
+    /// closed-form one.
+    #[inline]
+    pub(crate) fn anchored_law_active(&self) -> bool {
+        self.latent_law.is_some()
     }
 
     /// How many primaries the family's CORE (non-flex) row frame carries. The

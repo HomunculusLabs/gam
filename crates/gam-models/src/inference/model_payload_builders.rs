@@ -1192,6 +1192,11 @@ pub struct SurvivalMarginalSlopeInputs<'a> {
     /// Mutually exclusive; both `None` when the gate did not fire.
     pub latent_z_rank_int_calibration: Option<LatentZRankIntCalibration>,
     pub latent_z_conditional_calibration: Option<LatentZConditionalCalibration>,
+    /// The latent measure the fit's row program integrated against
+    /// (gam#2923): the standard-normal law of the closed form, or the declared
+    /// finite law the index was anchored on. Replayed by the shared
+    /// marginal-slope predictor through the same anchoring equation.
+    pub latent_measure: LatentMeasureKind,
     pub baseline_slope: f64,
     /// Frozen nonlinear time-wiggle authority, including the raw fitted tail.
     pub timewiggle: Option<SurvivalTimewiggle>,
@@ -1287,14 +1292,11 @@ pub fn assemble_survival_marginal_slope_payload(
     payload.z_column = Some(inputs.z_column.clone());
     payload.z_columns = Some(vec![inputs.z_column]);
     payload.latent_z_normalization = Some(inputs.latent_z_normalization);
-    // Not an assumption: the survival marginal-slope row program is the
-    // closed-form standard-normal probit lowering and owns no empirical-grid
-    // branch, so its latent-measure gate is asked for
-    // `EmpiricalLatentMeasureSupport::StandardNormalOnly` and the invariant is
-    // enforced at the gate's call site in
-    // `survival/marginal_slope/latent_measure.rs`. What the gate CAN vary is the
-    // pre-transform applied to z before that kernel, and that is the pair below.
-    payload.latent_measure = Some(LatentMeasureKind::StandardNormal);
+    // The measure the fit integrated against (gam#2923): the closed form's
+    // standard-normal law, or the declared finite law the anchored frame solved
+    // the marginal identity on. The pair below is the pre-transform applied to z
+    // before either kernel.
+    payload.latent_measure = Some(inputs.latent_measure);
     payload.latent_z_rank_int_calibration = inputs.latent_z_rank_int_calibration;
     payload.latent_z_conditional_calibration = inputs.latent_z_conditional_calibration;
     payload.baseline_slope = Some(inputs.baseline_slope);
@@ -2245,6 +2247,7 @@ fn payload_for_survival_marginal_slope(
             },
             latent_z_rank_int_calibration: persisted_rank_int,
             latent_z_conditional_calibration: persisted_conditional,
+            latent_measure: ms_result.latent_measure.clone(),
             baseline_slope: ms_result.baseline_slope,
             timewiggle,
             score_warp_runtime: ms_result.score_warp_runtime.as_ref(),

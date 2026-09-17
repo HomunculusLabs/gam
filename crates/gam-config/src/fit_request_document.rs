@@ -205,6 +205,22 @@ pub struct FitRequestConfigDocument {
     /// The supplied z column is already transformed by a frozen external model.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frozen_score: Option<bool>,
+    /// The latent measure a marginal-slope kernel integrates against:
+    /// `"auto"`, `"standard-normal"`, or `"global-empirical"` (gam#2923).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latent_measure: Option<String>,
+    /// A declared finite law of the latent score for a survival marginal-slope
+    /// fit (gam#2923): `{"nodes": [...], "weights": [...]}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declared_latent_law: Option<DeclaredLatentLawDocument>,
+}
+
+/// Ascending nodes and positive weights summing to one.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeclaredLatentLawDocument {
+    pub nodes: Vec<f64>,
+    pub weights: Vec<f64>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

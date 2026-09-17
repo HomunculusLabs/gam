@@ -4,6 +4,13 @@
 
 use super::*;
 
+/// The order-≤3 row tower of whichever time-constant frame the family runs:
+/// the two frames share the primary count but not the tower's static sparsity.
+enum TimeConstantThirdTower {
+    Gaussian(<StaticSlopeGeometry as SlopeRowGeometry<STATIC_SLOPE_PRIMARIES>>::Tower3),
+    Anchored(<AnchoredStaticSlopeGeometry as SlopeRowGeometry<STATIC_SLOPE_PRIMARIES>>::Tower3),
+}
+
 impl SurvivalMarginalSlopeFamily {
     /// Accumulate block-local score from a primary-space vector (replaces
     /// pullback_primary_vector + score += for score accumulation).
@@ -440,11 +447,21 @@ impl SurvivalMarginalSlopeFamily {
 
                 // The row program is direction-independent through order three.
                 // Evaluate its exact statically sparse tower once, then contract
-                // each ψ axis without repeating any transcendental algebra.
-                let third_tower = self.build_row_primary_third_tower::<
-                    STATIC_SLOPE_PRIMARIES,
-                    StaticSlopeGeometry,
-                >(row, block_states)?;
+                // each ψ axis without repeating any transcendental algebra. Both
+                // time-constant frames are four-primary, so the tower is dense
+                // `4×4×4` either way; only its static sparsity differs, and the
+                // contraction below reads it through the frame's own type.
+                let third_tower = if self.anchored_law_active() {
+                    TimeConstantThirdTower::Anchored(self.build_row_primary_third_tower::<
+                        STATIC_SLOPE_PRIMARIES,
+                        AnchoredStaticSlopeGeometry,
+                    >(row, block_states)?)
+                } else {
+                    TimeConstantThirdTower::Gaussian(self.build_row_primary_third_tower::<
+                        STATIC_SLOPE_PRIMARIES,
+                        StaticSlopeGeometry,
+                    >(row, block_states)?)
+                };
 
                 for axis_idx in 0..k {
                     let axis = &axes[axis_idx];
@@ -454,9 +471,20 @@ impl SurvivalMarginalSlopeFamily {
                         .map_err(|e| format!("survival rowwise psi map (batched): {e}"))?;
                     let dir =
                         primary_direction_from_psi_row(self, axis.block_idx, &psi_row, axis.beta_psi)?;
-                    let third_stack = Self::contract_row_primary_third_tower::<
-                        STATIC_SLOPE_PRIMARIES,
-                    >(&third_tower, &dir)?;
+                    let third_stack = match &third_tower {
+                        TimeConstantThirdTower::Gaussian(tower) => {
+                            Self::contract_row_primary_third_tower::<
+                                STATIC_SLOPE_PRIMARIES,
+                                StaticSlopeGeometry,
+                            >(tower, &dir)?
+                        }
+                        TimeConstantThirdTower::Anchored(tower) => {
+                            Self::contract_row_primary_third_tower::<
+                                STATIC_SLOPE_PRIMARIES,
+                                AnchoredStaticSlopeGeometry,
+                            >(tower, &dir)?
+                        }
+                    };
                     let mut third = Array2::from_shape_fn(
                         (N_PRIMARY, N_PRIMARY),
                         |(a, b)| third_stack[a][b],

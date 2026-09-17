@@ -86,6 +86,11 @@ enum SlopeFrame {
     Static,
     /// Six primaries `(q₀, q₁, q̇₁, g₀, g₁, ġ₁)` — a follow-up-varying slope.
     FollowUpVarying,
+    /// Four primaries on a DECLARED skewed latent law (gam#2923): the location
+    /// channels are anchored by the marginal identity instead of lowered in
+    /// closed form, so the frame is nonlinear in every primary and every
+    /// pullback below reads the implicit-function derivatives.
+    Anchored,
 }
 
 impl SlopeFrame {
@@ -93,8 +98,34 @@ impl SlopeFrame {
         match self {
             Self::Static => "static-slope",
             Self::FollowUpVarying => "follow-up-varying-slope",
+            Self::Anchored => "anchored-slope",
         }
     }
+}
+
+/// The declared law of the anchored frame: a two-component skewed law on 41
+/// nodes, nothing a Gaussian describes.
+fn anchored_law(n: usize) -> Arc<SurvivalLatentLaw> {
+    let nodes: Vec<f64> = (0..41).map(|k| -2.5 + 0.15 * k as f64).collect();
+    let raw: Vec<f64> = nodes
+        .iter()
+        .map(|&u| {
+            (-0.5 * ((u + 0.9) / 0.5).powi(2)).exp()
+                + 0.35 * (-0.5 * ((u - 1.4) / 0.9).powi(2)).exp()
+        })
+        .collect();
+    let total: f64 = raw.iter().sum();
+    let grid = crate::bms::EmpiricalZGrid::new(
+        nodes,
+        raw.into_iter().map(|w| w / total).collect(),
+        "psi fd anchored law",
+    )
+    .expect("a valid declared law");
+    Arc::new(
+        SurvivalLatentLaw::from_kind(&crate::bms::LatentMeasureKind::GlobalEmpirical { grid }, n)
+            .expect("materialise the declared law")
+            .expect("an empirical law is a law"),
+    )
 }
 
 // ── The fixture, as explicit functions of the displacement ──────────────────
@@ -259,7 +290,7 @@ fn family_at(axis: PsiAxis, frame: SlopeFrame, t: f64) -> SurvivalMarginalSlopeF
     }
 
     let slope_layout: SlopeLayout = match frame {
-        SlopeFrame::Static => (DesignMatrix::from(slope_exit)).into(),
+        SlopeFrame::Static | SlopeFrame::Anchored => (DesignMatrix::from(slope_exit)).into(),
         SlopeFrame::FollowUpVarying => {
             let layout: SlopeLayout = (DesignMatrix::from(slope_exit)).into();
             layout
@@ -273,6 +304,10 @@ fn family_at(axis: PsiAxis, frame: SlopeFrame, t: f64) -> SurvivalMarginalSlopeF
 
     SurvivalMarginalSlopeFamily {
         jeffreys_armed: true,
+        latent_law: match frame {
+            SlopeFrame::Anchored => Some(anchored_law(n)),
+            SlopeFrame::Static | SlopeFrame::FollowUpVarying => None,
+        },
         n,
         event: Arc::new(event),
         weights: Arc::new(weights),
@@ -693,6 +728,39 @@ fn baseline_psi_terms_match_finite_difference_follow_up_axis2_2765() {
     run_first_order_gate(PsiAxis::Baseline(2), SlopeFrame::FollowUpVarying);
 }
 
+// ── The anchored frame (gam#2923): every ψ lane on a declared skewed law ─────
+//
+// The anchored frame's feature map is nonlinear in every primary — `α(q, b)`
+// in the location channels as well as the slope — so each pullback below reads
+// the implicit-function derivatives of the anchoring equation rather than a
+// constant curvature. A ψ calculus that is right on the Gaussian frame says
+// nothing about this one.
+
+#[test]
+fn marginal_design_psi_terms_match_finite_difference_anchored_2923() {
+    run_first_order_gate(PsiAxis::MarginalDesign, SlopeFrame::Anchored);
+}
+
+#[test]
+fn slope_design_psi_terms_match_finite_difference_anchored_2923() {
+    run_first_order_gate(PsiAxis::SlopeDesign, SlopeFrame::Anchored);
+}
+
+#[test]
+fn baseline_psi_terms_match_finite_difference_anchored_axis0_2923() {
+    run_first_order_gate(PsiAxis::Baseline(0), SlopeFrame::Anchored);
+}
+
+#[test]
+fn baseline_psi_terms_match_finite_difference_anchored_axis1_2923() {
+    run_first_order_gate(PsiAxis::Baseline(1), SlopeFrame::Anchored);
+}
+
+#[test]
+fn baseline_psi_terms_match_finite_difference_anchored_axis2_2923() {
+    run_first_order_gate(PsiAxis::Baseline(2), SlopeFrame::Anchored);
+}
+
 // ── The frame reduction: no finite difference required ──────────────────────
 
 /// A follow-up-varying layout whose margin is CONSTANT in time **is** a
@@ -1078,7 +1146,7 @@ fn dense_psi_hessian(
 fn log_sigma_psi_terms_match_finite_difference_2767() {
     let options = BlockwiseFitOptions::default();
     let log_sigma = 0.6_f64.ln();
-    for frame in [SlopeFrame::Static, SlopeFrame::FollowUpVarying] {
+    for frame in [SlopeFrame::Static, SlopeFrame::FollowUpVarying, SlopeFrame::Anchored] {
         let (family, beta) = frailty_family_at(frame, log_sigma);
         let states = states_at_beta(&family, &beta);
         let terms = family
@@ -1106,7 +1174,7 @@ fn log_sigma_psi_terms_match_finite_difference_2767() {
 fn log_sigma_psi_second_order_terms_match_finite_difference_2767() {
     let options = BlockwiseFitOptions::default();
     let log_sigma = 0.6_f64.ln();
-    for frame in [SlopeFrame::Static, SlopeFrame::FollowUpVarying] {
+    for frame in [SlopeFrame::Static, SlopeFrame::FollowUpVarying, SlopeFrame::Anchored] {
         let (family, beta) = frailty_family_at(frame, log_sigma);
         let states = states_at_beta(&family, &beta);
         let terms = family
@@ -1342,7 +1410,7 @@ fn beta_hessian_drift_matches_finite_difference_follow_up_2765() {
 /// pullback cannot mask (or be masked by) one in the marginal pullback.
 #[test]
 fn beta_hessian_drift_matches_finite_difference_marginal_direction_2765() {
-    for frame in [SlopeFrame::Static, SlopeFrame::FollowUpVarying] {
+    for frame in [SlopeFrame::Static, SlopeFrame::FollowUpVarying, SlopeFrame::Anchored] {
         run_beta_drift_gate(
             frame,
             ndarray::array![0.0, 0.0, 0.55, -0.31, 0.0, 0.0],
@@ -1355,7 +1423,7 @@ fn beta_hessian_drift_matches_finite_difference_marginal_direction_2765() {
 /// one channel to three.
 #[test]
 fn beta_hessian_drift_matches_finite_difference_slope_direction_2765() {
-    for frame in [SlopeFrame::Static, SlopeFrame::FollowUpVarying] {
+    for frame in [SlopeFrame::Static, SlopeFrame::FollowUpVarying, SlopeFrame::Anchored] {
         run_beta_drift_gate(
             frame,
             ndarray::array![0.0, 0.0, 0.0, 0.0, 0.47, 0.23],
@@ -1369,7 +1437,7 @@ fn beta_hessian_drift_matches_finite_difference_slope_direction_2765() {
 /// slope block is the only one that isolates it.
 #[test]
 fn beta_hessian_drift_matches_finite_difference_time_direction_2765() {
-    for frame in [SlopeFrame::Static, SlopeFrame::FollowUpVarying] {
+    for frame in [SlopeFrame::Static, SlopeFrame::FollowUpVarying, SlopeFrame::Anchored] {
         run_beta_drift_gate(
             frame,
             ndarray::array![0.29, -0.21, 0.0, 0.0, 0.0, 0.0],
@@ -1529,11 +1597,23 @@ fn beta_hessian_second_drift_matches_finite_difference_follow_up_2765() {
     );
 }
 
+/// The anchored frame's joint second drift (gam#2923): the dense fourth-order
+/// tower of the anchored feature map, contracted with two joint directions.
+#[test]
+fn beta_hessian_second_drift_matches_finite_difference_anchored_2923() {
+    run_beta_second_drift_gate(
+        SlopeFrame::Anchored,
+        ndarray::array![0.23, 0.17, 0.41, -0.27, 0.33, 0.19],
+        ndarray::array![-0.11, 0.31, 0.19, 0.24, -0.28, 0.14],
+        "joint-anchored",
+    );
+}
+
 /// A slope-only pair, so a defect in the slope channels' fourth-order
 /// contraction cannot be masked by the time/marginal blocks.
 #[test]
 fn beta_hessian_second_drift_matches_finite_difference_slope_pair_2765() {
-    for frame in [SlopeFrame::Static, SlopeFrame::FollowUpVarying] {
+    for frame in [SlopeFrame::Static, SlopeFrame::FollowUpVarying, SlopeFrame::Anchored] {
         run_beta_second_drift_gate(
             frame,
             ndarray::array![0.0, 0.0, 0.0, 0.0, 0.47, 0.23],

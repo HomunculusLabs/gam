@@ -118,6 +118,7 @@ pub(crate) use std::sync::Arc;
 
 mod accumulate;
 mod alo_replay;
+mod anchor;
 mod block_jacobians;
 mod block_layout;
 mod calibration;
@@ -160,6 +161,7 @@ mod timewiggle_geometry;
 mod timewiggle_third;
 
 pub use alo_replay::*;
+pub(crate) use anchor::*;
 pub use block_jacobians::*;
 pub(crate) use block_layout::*;
 pub use error::*;

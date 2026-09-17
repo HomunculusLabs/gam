@@ -575,6 +575,7 @@ pub fn survival_marginal_slope_vector_neglog(
         covariance_ones: 0.0,
         probit_scale,
         qd1_lower: derivative_guard,
+        anchor: None,
     };
     validate_vector_probit_scale(&inputs)?;
     let mut linear_dot = 0.0;
@@ -1841,6 +1842,7 @@ pub(crate) fn row_primary_closed_form_vector_into(
         covariance_ones: 0.0,
         probit_scale,
         qd1_lower: derivative_guard,
+        anchor: None,
     })?;
     if z.iter().any(|value| !value.is_finite()) || slopes.iter().any(|value| !value.is_finite()) {
         return Err(SurvivalMarginalSlopeError::InvalidInput {
@@ -1883,6 +1885,7 @@ pub(crate) fn row_primary_closed_form_vector_into(
         covariance_ones: 0.0,
         probit_scale,
         qd1_lower: derivative_guard,
+        anchor: None,
     };
     let features = static_slope_feature_frame(q0, q1, qd1, linear, raw_variance, 0.0);
     let (value, feature_gradient, feature_hessian, [neg_eta0, neg_eta1, adjusted_derivative]) =
@@ -1988,6 +1991,7 @@ pub(crate) fn row_primary_closed_form(
         covariance_ones: 1.0,
         probit_scale,
         qd1_lower: derivative_guard,
+        anchor: None,
     };
     rigid_row_order2::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(&[q0, q1, qd1, g], &inputs)
 }

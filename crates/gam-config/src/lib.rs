@@ -203,6 +203,13 @@ pub(crate) fn resolve_fit_request_config(
     }
     fit_config.z_column = json_config.z_column;
     fit_config.frozen_score = json_config.frozen_score.unwrap_or(false);
+    fit_config.latent_measure = json_config.latent_measure;
+    fit_config.declared_latent_law = json_config.declared_latent_law.map(|law| {
+        gam_models::fit_orchestration::DeclaredLatentLaw {
+            nodes: law.nodes,
+            weights: law.weights,
+        }
+    });
     if let Some(config) = json_config.transformation_normal_config {
         fit_config.transformation_normal_config = Some(resolve_ctn_config(Some(config))?);
     }

@@ -23,6 +23,7 @@
 
 use super::*;
 
+use gam_math::jet_scalar::JetScalar;
 use gam_math::nested_dual::JetField;
 
 /// Entry-time location channel.
@@ -62,17 +63,30 @@ pub(crate) const RIGID_LINEAR_MASK: u32 =
 /// A primary frame for the survival marginal-slope row program.
 ///
 /// Implementors own only the *feature map* — the likelihood itself is the one
-/// `row_program!` declaration in [`super::row_math`]. Everything a consumer
-/// needs to pull derivatives back from feature space into primary space is
-/// declared here, so a new frame cannot forget a channel: the Jacobian, the
-/// per-axis active-feature schedule the sparse pullback walks, and the feature
-/// map's own curvature.
+/// `row_program!` declaration in [`super::row_math`]. A frame declares its
+/// features over any jet, the two direct second-order lowerings every consumer
+/// reads, and the towers its higher-order paths are built on.
 pub(crate) trait SlopeRowGeometry<const P: usize>: Copy + Send + Sync + 'static {
     /// Whether the frame lets `b` move along follow-up.
     const FOLLOW_UP_VARYING: bool;
 
+    /// Whether the frame anchors the index on a declared latent law
+    /// (gam#2923) instead of the Gaussian closed form. An anchored frame reads
+    /// [`RigidRowInputs::anchor`], is nonlinear in every primary, and has no
+    /// device lowering.
+    const ANCHORED: bool;
+
     /// Human-readable name used in diagnostics.
     const NAME: &'static str;
+
+    /// The order-≤3 tower the all-axes first-directional path builds once per
+    /// row. Static sparsity is a property of the FRAME: the Gaussian frames are
+    /// affine in the three location primaries and elide those blocks, the
+    /// anchored frame is not and may elide nothing.
+    type Tower3: JetScalar<P> + SparseThird<P> + Send + Sync;
+
+    /// The order-≤4 tower of the second-directional all-axes path.
+    type Tower4: JetScalar<P> + SparseThird<P> + SparseFourth<P> + Send + Sync;
 
     /// The nine semantic features at this frame's primaries.
     ///
@@ -86,6 +100,38 @@ pub(crate) trait SlopeRowGeometry<const P: usize>: Copy + Send + Sync + 'static 
         inputs: &RigidRowInputs,
     ) -> [T; RIGID_FEATURE_DIMENSION];
 
+    /// `∂feature/∂z_sum` at fixed primaries, and `∂/∂z_sum` of the Jacobian
+    /// column of primary `axis`. Together these are everything the Murphy–Topel
+    /// generated-regressor correction needs from the frame (gam#2768).
+    fn score_sensitivity(
+        primaries: &[f64; P],
+        inputs: &RigidRowInputs,
+    ) -> ScoreSensitivity<P>;
+
+    /// Direct value/gradient/Hessian lowering of the canonical nine-feature row
+    /// program followed by the second-order pullback into this frame.
+    fn row_order2(
+        primaries: &[f64; P],
+        inputs: &RigidRowInputs,
+    ) -> Result<(f64, [f64; P], [[f64; P]; P]), String>;
+
+    /// `∂/∂z` of the rigid row NLL's PRIMARY gradient: the mixed `(primary,
+    /// latent score)` second derivative, before any block-Jacobian scatter
+    /// (gam#2768) — the row channel the Murphy–Topel generated-regressor
+    /// covariance correction contracts against.
+    fn row_primary_mixed_in_z(
+        primaries: &[f64; P],
+        inputs: &RigidRowInputs,
+    ) -> Result<[f64; P], String>;
+}
+
+/// The feature map of a GAUSSIAN frame: one whose features are at most
+/// quadratic in the primaries, so the order-two pullback needs only a Jacobian
+/// and a constant curvature. Everything the pullback needs is declared here, so
+/// a new frame cannot forget a channel: the Jacobian, the per-axis
+/// active-feature schedule the sparse pullback walks, and the feature map's
+/// own curvature.
+pub(crate) trait GaussianFeatureMap<const P: usize>: SlopeRowGeometry<P> {
     /// `∂feature/∂primary`, one row per feature, exactly as
     /// [`order2_feature_pullback_into`] indexes it.
     fn feature_jacobian(
@@ -109,14 +155,136 @@ pub(crate) trait SlopeRowGeometry<const P: usize>: Copy + Send + Sync + 'static 
         inputs: &RigidRowInputs,
         hessian: &mut [[f64; P]; P],
     );
+}
 
-    /// `∂feature/∂z_sum` at fixed primaries, and `∂/∂z_sum` of the Jacobian
-    /// column of primary `axis`. Together these are everything the Murphy–Topel
-    /// generated-regressor correction needs from the frame (gam#2768).
-    fn score_sensitivity(
-        primaries: &[f64; P],
-        inputs: &RigidRowInputs,
-    ) -> ScoreSensitivity<P>;
+/// Direct value/gradient/Hessian lowering of the canonical nine-feature row
+/// program followed by the universal second-order pullback into a Gaussian
+/// frame `G`. The fixed stack buffers and active-feature map expose only the
+/// channels the frame's slope primaries actually reach.
+#[inline(always)]
+pub(crate) fn gaussian_row_order2<const P: usize, G: GaussianFeatureMap<P>>(
+    primaries: &[f64; P],
+    inputs: &RigidRowInputs,
+) -> Result<(f64, [f64; P], [[f64; P]; P]), String> {
+    let features = G::feature_frame(primaries, inputs);
+    let (value, feature_gradient, feature_hessian, [neg_eta0, neg_eta1, adjusted_derivative]) =
+        rigid_feature_frame_order2(
+            &features,
+            inputs.wi,
+            inputs.di,
+            inputs.probit_scale,
+            follow_up_varying_flag::<P, G>(),
+        );
+    validate_rigid_row_admission::<P, G>(
+        primaries[PRIMARY_QD1],
+        inputs,
+        neg_eta0,
+        neg_eta1,
+        adjusted_derivative,
+    )?;
+
+    let jacobian = G::feature_jacobian(primaries, inputs);
+    let mut gradient = [0.0; P];
+    let mut hessian = [[0.0; P]; P];
+    order2_feature_pullback_into(
+        &feature_gradient,
+        &feature_hessian,
+        &jacobian,
+        G::active_feature_count,
+        G::active_feature,
+        &mut gradient,
+        &mut hessian,
+        |gradient, hessian| G::add_feature_curvature(gradient, inputs, hessian),
+    );
+    Ok((value, gradient, hessian))
+}
+
+/// `∂/∂z` of the rigid row NLL's PRIMARY gradient on a Gaussian frame: the
+/// mixed `(primary, latent score)` second derivative, before any block-Jacobian
+/// scatter (gam#2768).
+///
+/// This is the row channel the Murphy–Topel generated-regressor covariance
+/// correction contracts against — `s_i = ∂(score_β,i)/∂ζ_i` is exactly this
+/// vector pushed through the same primary→β Jacobian the gradient uses — and it
+/// is derived MECHANICALLY from the sole `rigid_feature_program` declaration
+/// rather than by hand, in the spirit of the single-source contract on
+/// [`rigid_row_nll`].
+///
+/// Differentiating the pullback `∂ℓ/∂p_a = Σ_f g_f·J_{f a}` gives
+///
+/// ```text
+///     ∂²ℓ/∂p_a ∂z_sum = Σ_f (Σ_h H_{f h}·∂h/∂z)·J_{f a}  +  Σ_f g_f·∂J_{f a}/∂z,
+/// ```
+///
+/// and both `∂h/∂z` and `∂J/∂z` are owned by the frame
+/// ([`SlopeRowGeometry::score_sensitivity`]) — for a static slope the score
+/// reaches the entry AND exit location channels, which is what the single
+/// `linear` feature used to be. For `K = 1` (`z_sum = z`, the only shape the
+/// conditional latent calibration is persisted for) this is the row's exact
+/// `∂/∂z`.
+#[inline]
+pub(crate) fn gaussian_row_primary_mixed_in_z<const P: usize, G: GaussianFeatureMap<P>>(
+    primaries: &[f64; P],
+    inputs: &RigidRowInputs,
+) -> Result<[f64; P], String> {
+    let features = G::feature_frame(primaries, inputs);
+    let (_, feature_gradient, feature_hessian, [neg_eta0, neg_eta1, adjusted_derivative]) =
+        rigid_feature_frame_order2(
+            &features,
+            inputs.wi,
+            inputs.di,
+            inputs.probit_scale,
+            follow_up_varying_flag::<P, G>(),
+        );
+    validate_rigid_row_admission::<P, G>(
+        primaries[PRIMARY_QD1],
+        inputs,
+        neg_eta0,
+        neg_eta1,
+        adjusted_derivative,
+    )?;
+    let jacobian = G::feature_jacobian(primaries, inputs);
+    Ok(mixed_in_z_from_feature_derivatives(
+        &feature_gradient,
+        &feature_hessian,
+        &jacobian,
+        G::active_feature_count,
+        G::active_feature,
+        &G::score_sensitivity(primaries, inputs),
+    ))
+}
+
+/// The `∂/∂z_sum` contraction of [`SlopeRowGeometry::row_primary_mixed_in_z`]
+/// once the feature derivatives, the Jacobian, the active-feature schedule and
+/// the frame's score sensitivity are in hand.
+#[inline]
+pub(crate) fn mixed_in_z_from_feature_derivatives<const P: usize>(
+    feature_gradient: &[f64; RIGID_FEATURE_DIMENSION],
+    feature_hessian: &[[f64; RIGID_FEATURE_DIMENSION]; RIGID_FEATURE_DIMENSION],
+    jacobian: &[[f64; P]; RIGID_FEATURE_DIMENSION],
+    active_feature_count: impl Fn(usize) -> usize,
+    active_feature: impl Fn(usize, usize) -> usize,
+    sensitivity: &ScoreSensitivity<P>,
+) -> [f64; P] {
+    // `Σ_h H_{f h}·∂h/∂z_sum`, one entry per feature.
+    let hessian_in_z: [f64; RIGID_FEATURE_DIMENSION] = std::array::from_fn(|feature| {
+        let mut channel = 0.0;
+        for other in 0..RIGID_FEATURE_DIMENSION {
+            channel += feature_hessian[feature][other] * sensitivity.feature[other];
+        }
+        channel
+    });
+    let mut mixed = [0.0; P];
+    for axis in 0..P {
+        let mut channel = 0.0;
+        for slot in 0..active_feature_count(axis) {
+            let feature = active_feature(axis, slot);
+            channel += hessian_in_z[feature] * jacobian[feature][axis]
+                + feature_gradient[feature] * sensitivity.jacobian[feature][axis];
+        }
+        mixed[axis] = channel;
+    }
+    mixed
 }
 
 /// The frame's dependence on the latent score value itself.
@@ -142,7 +310,10 @@ pub(crate) struct StaticSlopeGeometry;
 
 impl SlopeRowGeometry<STATIC_SLOPE_PRIMARIES> for StaticSlopeGeometry {
     const FOLLOW_UP_VARYING: bool = false;
+    const ANCHORED: bool = false;
     const NAME: &'static str = "time-constant slope";
+    type Tower3 = SparseTower3<STATIC_SLOPE_PRIMARIES, RIGID_LINEAR_MASK>;
+    type Tower4 = SparseTower4<STATIC_SLOPE_PRIMARIES, RIGID_LINEAR_MASK>;
 
     #[inline(always)]
     fn feature_frame<T: JetField + Clone>(
@@ -164,6 +335,47 @@ impl SlopeRowGeometry<STATIC_SLOPE_PRIMARIES> for StaticSlopeGeometry {
         )
     }
 
+    #[inline(always)]
+    fn score_sensitivity(
+        primaries: &[f64; STATIC_SLOPE_PRIMARIES],
+        inputs: &RigidRowInputs,
+    ) -> ScoreSensitivity<STATIC_SLOPE_PRIMARIES> {
+        const P: usize = STATIC_SLOPE_PRIMARIES;
+        let observed_slope = inputs.probit_scale * primaries[PRIMARY_SLOPE];
+        let mut feature = [0.0; RIGID_FEATURE_DIMENSION];
+        feature[FEATURE_LINEAR0] = observed_slope;
+        feature[FEATURE_LINEAR1] = observed_slope;
+        let mut jacobian = [[0.0; P]; RIGID_FEATURE_DIMENSION];
+        jacobian[FEATURE_LINEAR0][PRIMARY_SLOPE] = inputs.probit_scale;
+        jacobian[FEATURE_LINEAR1][PRIMARY_SLOPE] = inputs.probit_scale;
+        ScoreSensitivity { feature, jacobian }
+    }
+
+    #[inline(always)]
+    fn row_order2(
+        primaries: &[f64; STATIC_SLOPE_PRIMARIES],
+        inputs: &RigidRowInputs,
+    ) -> Result<
+        (
+            f64,
+            [f64; STATIC_SLOPE_PRIMARIES],
+            [[f64; STATIC_SLOPE_PRIMARIES]; STATIC_SLOPE_PRIMARIES],
+        ),
+        String,
+    > {
+        gaussian_row_order2::<STATIC_SLOPE_PRIMARIES, Self>(primaries, inputs)
+    }
+
+    #[inline]
+    fn row_primary_mixed_in_z(
+        primaries: &[f64; STATIC_SLOPE_PRIMARIES],
+        inputs: &RigidRowInputs,
+    ) -> Result<[f64; STATIC_SLOPE_PRIMARIES], String> {
+        gaussian_row_primary_mixed_in_z::<STATIC_SLOPE_PRIMARIES, Self>(primaries, inputs)
+    }
+}
+
+impl GaussianFeatureMap<STATIC_SLOPE_PRIMARIES> for StaticSlopeGeometry {
     #[inline(always)]
     fn feature_jacobian(
         primaries: &[f64; STATIC_SLOPE_PRIMARIES],
@@ -212,22 +424,6 @@ impl SlopeRowGeometry<STATIC_SLOPE_PRIMARIES> for StaticSlopeGeometry {
             * 2.0
             * inputs.covariance_ones;
     }
-
-    #[inline(always)]
-    fn score_sensitivity(
-        primaries: &[f64; STATIC_SLOPE_PRIMARIES],
-        inputs: &RigidRowInputs,
-    ) -> ScoreSensitivity<STATIC_SLOPE_PRIMARIES> {
-        const P: usize = STATIC_SLOPE_PRIMARIES;
-        let observed_slope = inputs.probit_scale * primaries[PRIMARY_SLOPE];
-        let mut feature = [0.0; RIGID_FEATURE_DIMENSION];
-        feature[FEATURE_LINEAR0] = observed_slope;
-        feature[FEATURE_LINEAR1] = observed_slope;
-        let mut jacobian = [[0.0; P]; RIGID_FEATURE_DIMENSION];
-        jacobian[FEATURE_LINEAR0][PRIMARY_SLOPE] = inputs.probit_scale;
-        jacobian[FEATURE_LINEAR1][PRIMARY_SLOPE] = inputs.probit_scale;
-        ScoreSensitivity { feature, jacobian }
-    }
 }
 
 // ── The follow-up-varying slope frame ──────────────────────────────────
@@ -247,7 +443,10 @@ impl DynamicSlopeGeometry {
 
 impl SlopeRowGeometry<DYNAMIC_SLOPE_PRIMARIES> for DynamicSlopeGeometry {
     const FOLLOW_UP_VARYING: bool = true;
+    const ANCHORED: bool = false;
     const NAME: &'static str = "follow-up-varying slope";
+    type Tower3 = SparseTower3<DYNAMIC_SLOPE_PRIMARIES, RIGID_LINEAR_MASK>;
+    type Tower4 = SparseTower4<DYNAMIC_SLOPE_PRIMARIES, RIGID_LINEAR_MASK>;
 
     #[inline(always)]
     fn feature_frame<T: JetField + Clone>(
@@ -271,6 +470,48 @@ impl SlopeRowGeometry<DYNAMIC_SLOPE_PRIMARIES> for DynamicSlopeGeometry {
         ]
     }
 
+    #[inline(always)]
+    fn score_sensitivity(
+        primaries: &[f64; DYNAMIC_SLOPE_PRIMARIES],
+        inputs: &RigidRowInputs,
+    ) -> ScoreSensitivity<DYNAMIC_SLOPE_PRIMARIES> {
+        const P: usize = DYNAMIC_SLOPE_PRIMARIES;
+        let mut feature = [0.0; RIGID_FEATURE_DIMENSION];
+        feature[FEATURE_LINEAR0] = inputs.probit_scale * primaries[PRIMARY_SLOPE];
+        feature[FEATURE_LINEAR1] = inputs.probit_scale * primaries[PRIMARY_SLOPE_EXIT];
+        feature[FEATURE_DLINEAR1] = inputs.probit_scale * primaries[PRIMARY_SLOPE_RATE];
+        let mut jacobian = [[0.0; P]; RIGID_FEATURE_DIMENSION];
+        jacobian[FEATURE_LINEAR0][PRIMARY_SLOPE] = inputs.probit_scale;
+        jacobian[FEATURE_LINEAR1][PRIMARY_SLOPE_EXIT] = inputs.probit_scale;
+        jacobian[FEATURE_DLINEAR1][PRIMARY_SLOPE_RATE] = inputs.probit_scale;
+        ScoreSensitivity { feature, jacobian }
+    }
+
+    #[inline(always)]
+    fn row_order2(
+        primaries: &[f64; DYNAMIC_SLOPE_PRIMARIES],
+        inputs: &RigidRowInputs,
+    ) -> Result<
+        (
+            f64,
+            [f64; DYNAMIC_SLOPE_PRIMARIES],
+            [[f64; DYNAMIC_SLOPE_PRIMARIES]; DYNAMIC_SLOPE_PRIMARIES],
+        ),
+        String,
+    > {
+        gaussian_row_order2::<DYNAMIC_SLOPE_PRIMARIES, Self>(primaries, inputs)
+    }
+
+    #[inline]
+    fn row_primary_mixed_in_z(
+        primaries: &[f64; DYNAMIC_SLOPE_PRIMARIES],
+        inputs: &RigidRowInputs,
+    ) -> Result<[f64; DYNAMIC_SLOPE_PRIMARIES], String> {
+        gaussian_row_primary_mixed_in_z::<DYNAMIC_SLOPE_PRIMARIES, Self>(primaries, inputs)
+    }
+}
+
+impl GaussianFeatureMap<DYNAMIC_SLOPE_PRIMARIES> for DynamicSlopeGeometry {
     #[inline(always)]
     fn feature_jacobian(
         primaries: &[f64; DYNAMIC_SLOPE_PRIMARIES],
@@ -337,22 +578,330 @@ impl SlopeRowGeometry<DYNAMIC_SLOPE_PRIMARIES> for DynamicSlopeGeometry {
         hessian[PRIMARY_SLOPE_EXIT][PRIMARY_SLOPE_RATE] += mixed;
         hessian[PRIMARY_SLOPE_RATE][PRIMARY_SLOPE_EXIT] += mixed;
     }
+}
 
-    #[inline(always)]
-    fn score_sensitivity(
-        primaries: &[f64; DYNAMIC_SLOPE_PRIMARIES],
+// ── The anchored time-constant slope frame (gam#2923) ──────────────────
+
+/// The four-primary `(q₀, q₁, q̇₁, g)` frame whose location channels are
+/// anchored on a declared finite law instead of lowered in closed form.
+///
+/// The row program is unchanged: it still computes `η = q·√(1 + s²V) + L` and
+/// `η′₁ = q̇₁·√(1 + s²V₁) + …`. This frame feeds it `q_j := α(q_j, b)`,
+/// `V_j := 0` and `q̇₁ := α_q(q₁, b)·q̇₁`, so that what it evaluates is
+///
+/// ```text
+///     η_j = α(q_j, b) + b·z,        η′₁ = ∂α/∂q (q₁, b) · q̇₁,
+/// ```
+///
+/// with `α` the root of `Σ_k w_k Φ(−(α + b u_k)) = Φ(−q)` on the row's law
+/// ([`super::anchor`]). On a Gaussian law `α = q·√(1 + b²)` to quadrature
+/// tolerance and the frame IS [`StaticSlopeGeometry`]; on any other law the
+/// closed form is wrong by exactly the amount the anchoring equation says.
+///
+/// The map is nonlinear in every primary — `α` in `q` as well as in `g` — so
+/// this frame declares no affine primaries: its towers are dense, and its
+/// `η′₁ > 0` still follows from `q̇₁ > 0` because `α_q = φ(q)/Σ_k w_k φ(η_k)`
+/// is strictly positive.
+#[derive(Clone, Copy)]
+pub(crate) struct AnchoredStaticSlopeGeometry;
+
+/// The anchored frame's active-feature schedule for the slope primary: it
+/// reaches every anchored channel and both linear channels.
+const ANCHORED_SLOPE_ACTIVE_FEATURES: [usize; 5] = [
+    FEATURE_Q0,
+    FEATURE_Q1,
+    FEATURE_QD1,
+    FEATURE_LINEAR0,
+    FEATURE_LINEAR1,
+];
+
+/// Both anchors of a row, solved and differentiated once.
+struct AnchoredRowState {
+    entry: AnchorDerivatives,
+    exit: AnchorDerivatives,
+    observed_slope: f64,
+}
+
+impl AnchoredStaticSlopeGeometry {
+    #[inline]
+    fn grid<'a>(inputs: &RigidRowInputs<'a>) -> AnchorGrid<'a> {
+        inputs
+            .anchor
+            .expect("the anchored slope frame is only constructed with a declared latent law")
+    }
+
+    fn solve_row(
+        primaries: &[f64; STATIC_SLOPE_PRIMARIES],
         inputs: &RigidRowInputs,
-    ) -> ScoreSensitivity<DYNAMIC_SLOPE_PRIMARIES> {
-        const P: usize = DYNAMIC_SLOPE_PRIMARIES;
-        let mut feature = [0.0; RIGID_FEATURE_DIMENSION];
-        feature[FEATURE_LINEAR0] = inputs.probit_scale * primaries[PRIMARY_SLOPE];
-        feature[FEATURE_LINEAR1] = inputs.probit_scale * primaries[PRIMARY_SLOPE_EXIT];
-        feature[FEATURE_DLINEAR1] = inputs.probit_scale * primaries[PRIMARY_SLOPE_RATE];
+    ) -> Result<AnchoredRowState, String> {
+        let grid = Self::grid(inputs);
+        let observed_slope = inputs.probit_scale * primaries[PRIMARY_SLOPE];
+        let entry = AnchorDerivatives::solve(primaries[PRIMARY_Q0], observed_slope, grid)?;
+        let exit = AnchorDerivatives::solve(primaries[PRIMARY_Q1], observed_slope, grid)?;
+        Ok(AnchoredRowState {
+            entry,
+            exit,
+            observed_slope,
+        })
+    }
+
+    #[inline]
+    fn features_from(
+        state: &AnchoredRowState,
+        primaries: &[f64; STATIC_SLOPE_PRIMARIES],
+        inputs: &RigidRowInputs,
+    ) -> [f64; RIGID_FEATURE_DIMENSION] {
+        let linear = state.observed_slope * inputs.z_sum;
+        [
+            state.entry.alpha,
+            state.exit.alpha,
+            state.exit.a_q * primaries[PRIMARY_QD1],
+            linear,
+            linear,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ]
+    }
+
+    /// `∂feature/∂primary` of the anchored map, one row per feature.
+    #[inline]
+    fn jacobian_from(
+        state: &AnchoredRowState,
+        primaries: &[f64; STATIC_SLOPE_PRIMARIES],
+        inputs: &RigidRowInputs,
+    ) -> [[f64; STATIC_SLOPE_PRIMARIES]; RIGID_FEATURE_DIMENSION] {
+        const P: usize = STATIC_SLOPE_PRIMARIES;
+        let s = inputs.probit_scale;
+        let qd1 = primaries[PRIMARY_QD1];
         let mut jacobian = [[0.0; P]; RIGID_FEATURE_DIMENSION];
-        jacobian[FEATURE_LINEAR0][PRIMARY_SLOPE] = inputs.probit_scale;
-        jacobian[FEATURE_LINEAR1][PRIMARY_SLOPE_EXIT] = inputs.probit_scale;
-        jacobian[FEATURE_DLINEAR1][PRIMARY_SLOPE_RATE] = inputs.probit_scale;
-        ScoreSensitivity { feature, jacobian }
+        jacobian[FEATURE_Q0][PRIMARY_Q0] = state.entry.a_q;
+        jacobian[FEATURE_Q0][PRIMARY_SLOPE] = state.entry.a_b * s;
+        jacobian[FEATURE_Q1][PRIMARY_Q1] = state.exit.a_q;
+        jacobian[FEATURE_Q1][PRIMARY_SLOPE] = state.exit.a_b * s;
+        // α̇₁ = α_q(q₁, b)·q̇₁.
+        jacobian[FEATURE_QD1][PRIMARY_Q1] = state.exit.a_qq * qd1;
+        jacobian[FEATURE_QD1][PRIMARY_QD1] = state.exit.a_q;
+        jacobian[FEATURE_QD1][PRIMARY_SLOPE] = state.exit.a_qb * s * qd1;
+        let d_linear = s * inputs.z_sum;
+        jacobian[FEATURE_LINEAR0][PRIMARY_SLOPE] = d_linear;
+        jacobian[FEATURE_LINEAR1][PRIMARY_SLOPE] = d_linear;
+        jacobian
+    }
+
+    /// `Σ_f g_f · ∂²f/∂p_a∂p_b` for the anchored map: the two anchors'
+    /// curvature in `(q, b)` and the rate feature's, which is a third
+    /// derivative of `α`.
+    #[inline]
+    fn add_curvature_from(
+        state: &AnchoredRowState,
+        primaries: &[f64; STATIC_SLOPE_PRIMARIES],
+        inputs: &RigidRowInputs,
+        feature_gradient: &[f64; RIGID_FEATURE_DIMENSION],
+        hessian: &mut [[f64; STATIC_SLOPE_PRIMARIES]; STATIC_SLOPE_PRIMARIES],
+    ) {
+        let s = inputs.probit_scale;
+        let s2 = s * s;
+        let qd1 = primaries[PRIMARY_QD1];
+        let mut add = |a: usize, b: usize, value: f64| {
+            hessian[a][b] += value;
+            if a != b {
+                hessian[b][a] += value;
+            }
+        };
+        let g0 = feature_gradient[FEATURE_Q0];
+        if g0 != 0.0 {
+            add(PRIMARY_Q0, PRIMARY_Q0, g0 * state.entry.a_qq);
+            add(PRIMARY_Q0, PRIMARY_SLOPE, g0 * state.entry.a_qb * s);
+            add(PRIMARY_SLOPE, PRIMARY_SLOPE, g0 * state.entry.a_bb * s2);
+        }
+        let g1 = feature_gradient[FEATURE_Q1];
+        if g1 != 0.0 {
+            add(PRIMARY_Q1, PRIMARY_Q1, g1 * state.exit.a_qq);
+            add(PRIMARY_Q1, PRIMARY_SLOPE, g1 * state.exit.a_qb * s);
+            add(PRIMARY_SLOPE, PRIMARY_SLOPE, g1 * state.exit.a_bb * s2);
+        }
+        let gd = feature_gradient[FEATURE_QD1];
+        if gd != 0.0 {
+            add(PRIMARY_Q1, PRIMARY_Q1, gd * state.exit.a_qqq * qd1);
+            add(PRIMARY_Q1, PRIMARY_QD1, gd * state.exit.a_qq);
+            add(PRIMARY_Q1, PRIMARY_SLOPE, gd * state.exit.a_qqb * s * qd1);
+            add(PRIMARY_QD1, PRIMARY_SLOPE, gd * state.exit.a_qb * s);
+            add(PRIMARY_SLOPE, PRIMARY_SLOPE, gd * state.exit.a_qbb * s2 * qd1);
+        }
+    }
+
+    /// How many features primary `axis` reaches.
+    #[inline(always)]
+    fn active_feature_count(axis: usize) -> usize {
+        match axis {
+            PRIMARY_Q1 => 2,
+            PRIMARY_SLOPE => ANCHORED_SLOPE_ACTIVE_FEATURES.len(),
+            _ => 1,
+        }
+    }
+
+    /// The `slot`-th feature primary `axis` reaches.
+    #[inline(always)]
+    fn active_feature(axis: usize, slot: usize) -> usize {
+        match (axis, slot) {
+            (PRIMARY_Q1, 0) => FEATURE_Q1,
+            (PRIMARY_Q1, _) => FEATURE_QD1,
+            (PRIMARY_SLOPE, _) => ANCHORED_SLOPE_ACTIVE_FEATURES[slot],
+            (identity, _) => identity,
+        }
+    }
+
+    /// The f64 features and the feature-space derivatives of the row program
+    /// at a solved row state, admission included.
+    #[inline]
+    fn program_order2(
+        state: &AnchoredRowState,
+        primaries: &[f64; STATIC_SLOPE_PRIMARIES],
+        inputs: &RigidRowInputs,
+    ) -> Result<
+        (
+            f64,
+            [f64; RIGID_FEATURE_DIMENSION],
+            [[f64; RIGID_FEATURE_DIMENSION]; RIGID_FEATURE_DIMENSION],
+        ),
+        String,
+    > {
+        let features = Self::features_from(state, primaries, inputs);
+        let (value, feature_gradient, feature_hessian, [neg_eta0, neg_eta1, adjusted_derivative]) =
+            rigid_feature_frame_order2(
+                &features,
+                inputs.wi,
+                inputs.di,
+                inputs.probit_scale,
+                follow_up_varying_flag::<STATIC_SLOPE_PRIMARIES, Self>(),
+            );
+        validate_rigid_row_admission::<STATIC_SLOPE_PRIMARIES, Self>(
+            primaries[PRIMARY_QD1],
+            inputs,
+            neg_eta0,
+            neg_eta1,
+            adjusted_derivative,
+        )?;
+        Ok((value, feature_gradient, feature_hessian))
+    }
+}
+
+impl SlopeRowGeometry<STATIC_SLOPE_PRIMARIES> for AnchoredStaticSlopeGeometry {
+    const FOLLOW_UP_VARYING: bool = false;
+    const ANCHORED: bool = true;
+    const NAME: &'static str = "time-constant slope on a declared latent law";
+    type Tower3 = SparseTower3<STATIC_SLOPE_PRIMARIES, 0>;
+    type Tower4 = SparseTower4<STATIC_SLOPE_PRIMARIES, 0>;
+
+    /// The anchored frame over any jet. Each anchor is solved on the real
+    /// values and lifted by Newton's iteration in the jet algebra
+    /// ([`anchor_jet`]); the rate channel carries `α_q(q₁, b)` as a jet of its
+    /// own. A failed solve leaves the location channels `NaN`, which the row
+    /// program's admission rejects as a non-finite signed margin.
+    #[inline]
+    fn feature_frame<T: JetField + Clone>(
+        primaries: &[T; STATIC_SLOPE_PRIMARIES],
+        inputs: &RigidRowInputs,
+    ) -> [T; RIGID_FEATURE_DIMENSION] {
+        let grid = Self::grid(inputs);
+        let q0 = &primaries[PRIMARY_Q0];
+        let q1 = &primaries[PRIMARY_Q1];
+        let qd1 = &primaries[PRIMARY_QD1];
+        let slope = &primaries[PRIMARY_SLOPE];
+        let observed = slope.scale(inputs.probit_scale);
+        let zero = slope.constant_like(0.0);
+        let linear = observed.scale(inputs.z_sum);
+        let lift = |q: &T| -> T {
+            match solve_anchor(q.value(), observed.value(), grid) {
+                Ok(root) => anchor_jet(root, q, &observed, grid),
+                Err(reason) => {
+                    log::debug!(
+                        "[survival-marginal-slope anchor] row {}: {reason}; the row is refused \
+                         through its non-finite signed margin",
+                        inputs.row
+                    );
+                    q.constant_like(f64::NAN)
+                }
+            }
+        };
+        let alpha0 = lift(q0);
+        let alpha1 = lift(q1);
+        let rate = anchor_q_derivative_jet(&alpha1, q1, &observed, grid).mul(qd1);
+        [
+            alpha0,
+            alpha1,
+            rate,
+            linear.clone(),
+            linear,
+            zero.clone(),
+            zero.clone(),
+            zero.clone(),
+            zero,
+        ]
+    }
+
+    #[inline]
+    fn score_sensitivity(
+        primaries: &[f64; STATIC_SLOPE_PRIMARIES],
+        inputs: &RigidRowInputs,
+    ) -> ScoreSensitivity<STATIC_SLOPE_PRIMARIES> {
+        // The anchor is a functional of the LAW, not of the row's own score,
+        // so the score reaches the frame exactly as it does the Gaussian one:
+        // through the two linear channels.
+        StaticSlopeGeometry::score_sensitivity(primaries, inputs)
+    }
+
+    fn row_order2(
+        primaries: &[f64; STATIC_SLOPE_PRIMARIES],
+        inputs: &RigidRowInputs,
+    ) -> Result<
+        (
+            f64,
+            [f64; STATIC_SLOPE_PRIMARIES],
+            [[f64; STATIC_SLOPE_PRIMARIES]; STATIC_SLOPE_PRIMARIES],
+        ),
+        String,
+    > {
+        const P: usize = STATIC_SLOPE_PRIMARIES;
+        let state = Self::solve_row(primaries, inputs)?;
+        let (value, feature_gradient, feature_hessian) =
+            Self::program_order2(&state, primaries, inputs)?;
+        let jacobian = Self::jacobian_from(&state, primaries, inputs);
+        let mut gradient = [0.0; P];
+        let mut hessian = [[0.0; P]; P];
+        order2_feature_pullback_into(
+            &feature_gradient,
+            &feature_hessian,
+            &jacobian,
+            Self::active_feature_count,
+            Self::active_feature,
+            &mut gradient,
+            &mut hessian,
+            |gradient, hessian| {
+                Self::add_curvature_from(&state, primaries, inputs, gradient, hessian)
+            },
+        );
+        Ok((value, gradient, hessian))
+    }
+
+    fn row_primary_mixed_in_z(
+        primaries: &[f64; STATIC_SLOPE_PRIMARIES],
+        inputs: &RigidRowInputs,
+    ) -> Result<[f64; STATIC_SLOPE_PRIMARIES], String> {
+        let state = Self::solve_row(primaries, inputs)?;
+        let (_, feature_gradient, feature_hessian) =
+            Self::program_order2(&state, primaries, inputs)?;
+        let jacobian = Self::jacobian_from(&state, primaries, inputs);
+        Ok(mixed_in_z_from_feature_derivatives(
+            &feature_gradient,
+            &feature_hessian,
+            &jacobian,
+            Self::active_feature_count,
+            Self::active_feature,
+            &Self::score_sensitivity(primaries, inputs),
+        ))
     }
 }
 
@@ -365,7 +914,14 @@ impl SlopeRowGeometry<DYNAMIC_SLOPE_PRIMARIES> for DynamicSlopeGeometry {
 /// letting a four-primary assumption leak downstream.
 macro_rules! in_slope_frame {
     ($family:expr, $primaries:ident, $geometry:ident, $body:block) => {{
-        if $family.slope_is_follow_up_varying() {
+        if $family.anchored_law_active() {
+            // A declared latent law runs the anchored frame (gam#2923). The
+            // family refuses to combine it with a follow-up-varying slope at
+            // construction, so this branch is the time-constant frame only.
+            const $primaries: usize = STATIC_SLOPE_PRIMARIES;
+            type $geometry = AnchoredStaticSlopeGeometry;
+            $body
+        } else if $family.slope_is_follow_up_varying() {
             const $primaries: usize = DYNAMIC_SLOPE_PRIMARIES;
             type $geometry = DynamicSlopeGeometry;
             $body
@@ -385,7 +941,7 @@ mod tests {
     use gam_linalg::matrix::DesignMatrix;
     use ndarray::array;
 
-    fn inputs(probit_scale: f64, z_sum: f64, covariance_ones: f64, di: f64) -> RigidRowInputs {
+    fn inputs(probit_scale: f64, z_sum: f64, covariance_ones: f64, di: f64) -> RigidRowInputs<'static> {
         RigidRowInputs {
             row: 0,
             wi: 0.75,
@@ -394,6 +950,7 @@ mod tests {
             covariance_ones,
             probit_scale,
             qd1_lower: -1.0,
+            anchor: None,
         }
     }
 
@@ -696,5 +1253,329 @@ mod tests {
             );
         };
         assert!(error.contains("per-score"), "{error}");
+    }
+}
+
+/// The anchored frame's derivative blocks (gam#2923), every one against an
+/// independent witness: the Gaussian frame on a Gaussian law, central
+/// differences on a skewed one, and the jet towers against the direct
+/// lowering.
+#[cfg(test)]
+mod anchored_frame_tests {
+    use super::super::anchor::test_support::{gauss_hermite_probabilists, skewed_grid};
+    use super::*;
+    use gam_math::jet_scalar::JetScalar;
+
+    fn gaussian_law() -> AnchorGridOwned {
+        let (nodes, weights) = gauss_hermite_probabilists(65).expect("Gauss–Hermite law");
+        AnchorGridOwned::new(nodes, weights)
+    }
+
+    fn skewed_law() -> AnchorGridOwned {
+        skewed_grid()
+    }
+
+    fn inputs<'a>(
+        law: &'a AnchorGridOwned,
+        probit_scale: f64,
+        z_sum: f64,
+        wi: f64,
+        di: f64,
+    ) -> RigidRowInputs<'a> {
+        RigidRowInputs {
+            row: 0,
+            wi,
+            di,
+            z_sum,
+            covariance_ones: 1.0,
+            probit_scale,
+            qd1_lower: 1e-6,
+            anchor: Some(law.view()),
+        }
+    }
+
+    struct Grid(u64);
+
+    impl Grid {
+        fn next(&mut self) -> f64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            ((self.0 >> 11) as f64) / ((1u64 << 53) as f64) * 2.0 - 1.0
+        }
+    }
+
+    fn close(left: f64, right: f64, tol: f64) -> bool {
+        (left - right).abs() <= tol * (1.0 + left.abs().max(right.abs()))
+    }
+
+    /// Gaussian is the special case: on a Gauss–Hermite law the anchored frame
+    /// reproduces the closed-form frame's value, gradient and Hessian to
+    /// quadrature tolerance, on event and censored rows, with and without a
+    /// frailty scale.
+    #[test]
+    fn anchored_frame_on_a_gaussian_law_is_the_gaussian_frame() {
+        let law = gaussian_law();
+        let mut grid = Grid(0x2923_0001);
+        let mut worst = 0.0_f64;
+        for _ in 0..300 {
+            let probit_scale = if grid.next() > 0.0 { 1.0 } else { 0.85 };
+            let z_sum = grid.next() * 1.5;
+            let wi = 0.6 + grid.next().abs();
+            let di = if grid.next() > 0.0 { 1.0 } else { 0.0 };
+            let anchored = inputs(&law, probit_scale, z_sum, wi, di);
+            let gaussian = RigidRowInputs {
+                anchor: None,
+                covariance_ones: 1.0,
+                ..anchored
+            };
+            let primaries = [
+                grid.next() * 1.5,
+                grid.next() * 1.5,
+                0.5 + grid.next().abs() * 2.0,
+                grid.next() * 1.2,
+            ];
+            let (value_a, gradient_a, hessian_a) =
+                rigid_row_order2::<STATIC_SLOPE_PRIMARIES, AnchoredStaticSlopeGeometry>(
+                    &primaries, &anchored,
+                )
+                .expect("anchored frame admits the row");
+            let (value_g, gradient_g, hessian_g) =
+                rigid_row_order2::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(
+                    &primaries, &gaussian,
+                )
+                .expect("Gaussian frame admits the row");
+            let mut check = |left: f64, right: f64, what: &str| {
+                let scale = 1.0 + left.abs().max(right.abs());
+                worst = worst.max((left - right).abs() / scale);
+                assert!(
+                    close(left, right, 1e-7),
+                    "{what}: anchored {left:+.12e} vs Gaussian {right:+.12e}"
+                );
+            };
+            check(value_a, value_g, "value");
+            for axis in 0..STATIC_SLOPE_PRIMARIES {
+                check(gradient_a[axis], gradient_g[axis], "gradient");
+                for other in 0..STATIC_SLOPE_PRIMARIES {
+                    check(hessian_a[axis][other], hessian_g[axis][other], "Hessian");
+                }
+            }
+        }
+        assert!(worst <= 1e-7, "worst relative disagreement {worst:.3e}");
+    }
+
+    /// On a skewed law the anchored gradient and Hessian match central
+    /// differences of the anchored value, and the closed form is measurably
+    /// NOT the same model.
+    #[test]
+    fn anchored_frame_derivatives_match_central_differences() {
+        let law = skewed_law();
+        let mut grid = Grid(0x2923_0002);
+        let mut worst = 0.0_f64;
+        let mut gaussian_gap = 0.0_f64;
+        for _ in 0..200 {
+            let row = inputs(
+                &law,
+                if grid.next() > 0.0 { 1.0 } else { 0.9 },
+                grid.next() * 1.2,
+                0.7 + grid.next().abs() * 0.3,
+                if grid.next() > 0.0 { 1.0 } else { 0.0 },
+            );
+            let primaries = [
+                grid.next() * 1.2,
+                grid.next() * 1.2,
+                0.8 + grid.next().abs() * 2.0,
+                grid.next() * 0.9,
+            ];
+            let value_at = |point: &[f64; STATIC_SLOPE_PRIMARIES]| -> f64 {
+                rigid_row_value::<STATIC_SLOPE_PRIMARIES, AnchoredStaticSlopeGeometry>(point, &row)
+                    .expect("anchored value")
+            };
+            let (value, gradient, hessian) =
+                rigid_row_order2::<STATIC_SLOPE_PRIMARIES, AnchoredStaticSlopeGeometry>(
+                    &primaries, &row,
+                )
+                .expect("anchored frame admits the row");
+            assert!(close(value, value_at(&primaries), 1e-13), "value paths agree");
+            let gaussian = RigidRowInputs {
+                anchor: None,
+                ..row
+            };
+            let (closed_form, _, _) =
+                rigid_row_order2::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(
+                    &primaries, &gaussian,
+                )
+                .expect("Gaussian frame admits the row");
+            gaussian_gap = gaussian_gap.max((closed_form - value).abs());
+
+            let step = 1e-5;
+            for axis in 0..STATIC_SLOPE_PRIMARIES {
+                let mut up = primaries;
+                let mut down = primaries;
+                up[axis] += step;
+                down[axis] -= step;
+                let finite = (value_at(&up) - value_at(&down)) / (2.0 * step);
+                let error = (finite - gradient[axis]).abs() / (1.0 + finite.abs());
+                worst = worst.max(error);
+                assert!(
+                    error <= 5e-6,
+                    "gradient axis {axis}: analytic {:+.12e} vs central difference {finite:+.12e}",
+                    gradient[axis]
+                );
+                // Hessian rows from central differences of the analytic gradient.
+                let (_, gradient_up, _) =
+                    rigid_row_order2::<STATIC_SLOPE_PRIMARIES, AnchoredStaticSlopeGeometry>(
+                        &up, &row,
+                    )
+                    .expect("up");
+                let (_, gradient_down, _) =
+                    rigid_row_order2::<STATIC_SLOPE_PRIMARIES, AnchoredStaticSlopeGeometry>(
+                        &down, &row,
+                    )
+                    .expect("down");
+                for other in 0..STATIC_SLOPE_PRIMARIES {
+                    let finite = (gradient_up[other] - gradient_down[other]) / (2.0 * step);
+                    let error = (finite - hessian[axis][other]).abs() / (1.0 + finite.abs());
+                    worst = worst.max(error);
+                    assert!(
+                        error <= 5e-6,
+                        "Hessian [{axis}][{other}]: analytic {:+.12e} vs central difference {finite:+.12e}",
+                        hessian[axis][other]
+                    );
+                }
+            }
+        }
+        assert!(worst <= 5e-6, "worst relative disagreement {worst:.3e}");
+        assert!(
+            gaussian_gap > 1e-3,
+            "on a skewed law the closed form must be a different likelihood; largest row gap {gaussian_gap:.3e}"
+        );
+    }
+
+    /// The dense towers the all-axes paths build carry the same gradient and
+    /// Hessian as the direct lowering, and their third and fourth tensors are
+    /// the finite differences of the orders below.
+    #[test]
+    fn anchored_frame_towers_match_the_direct_lowering_and_finite_differences() {
+        let law = skewed_law();
+        let mut grid = Grid(0x2923_0003);
+        for _ in 0..60 {
+            let row = inputs(
+                &law,
+                1.0,
+                grid.next() * 1.2,
+                0.7 + grid.next().abs() * 0.3,
+                if grid.next() > 0.0 { 1.0 } else { 0.0 },
+            );
+            let primaries = [
+                grid.next() * 1.0,
+                grid.next() * 1.0,
+                0.8 + grid.next().abs() * 1.5,
+                grid.next() * 0.8,
+            ];
+            let tower_at = |point: &[f64; STATIC_SLOPE_PRIMARIES]| {
+                let vars: [SparseTower4<STATIC_SLOPE_PRIMARIES, 0>; STATIC_SLOPE_PRIMARIES] =
+                    std::array::from_fn(|axis| SparseTower4::variable(point[axis], axis));
+                rigid_row_nll::<STATIC_SLOPE_PRIMARIES, AnchoredStaticSlopeGeometry, _>(
+                    &vars, &row,
+                )
+                .expect("anchored tower")
+            };
+            let tower = tower_at(&primaries);
+            let (value, gradient, hessian) =
+                rigid_row_order2::<STATIC_SLOPE_PRIMARIES, AnchoredStaticSlopeGeometry>(
+                    &primaries, &row,
+                )
+                .expect("direct lowering");
+            assert!(close(tower.v, value, 1e-12), "tower value {} vs {value}", tower.v);
+            for a in 0..STATIC_SLOPE_PRIMARIES {
+                assert!(
+                    close(tower.g[a], gradient[a], 1e-9),
+                    "tower gradient [{a}] {} vs direct {}",
+                    tower.g[a],
+                    gradient[a]
+                );
+                for b in 0..STATIC_SLOPE_PRIMARIES {
+                    assert!(
+                        close(tower.h[a][b], hessian[a][b], 1e-8),
+                        "tower Hessian [{a}][{b}] {} vs direct {}",
+                        tower.h[a][b],
+                        hessian[a][b]
+                    );
+                }
+            }
+            let step = 1e-4;
+            for c in 0..STATIC_SLOPE_PRIMARIES {
+                let mut up = primaries;
+                let mut down = primaries;
+                up[c] += step;
+                down[c] -= step;
+                let tower_up = tower_at(&up);
+                let tower_down = tower_at(&down);
+                for a in 0..STATIC_SLOPE_PRIMARIES {
+                    for b in 0..STATIC_SLOPE_PRIMARIES {
+                        let finite = (tower_up.h[a][b] - tower_down.h[a][b]) / (2.0 * step);
+                        assert!(
+                            close(tower.t3[a][b][c], finite, 2e-5),
+                            "t3 [{a}][{b}][{c}] {} vs central difference {finite}",
+                            tower.t3[a][b][c]
+                        );
+                        for d in 0..STATIC_SLOPE_PRIMARIES {
+                            let finite =
+                                (tower_up.t3[a][b][d] - tower_down.t3[a][b][d]) / (2.0 * step);
+                            assert!(
+                                close(tower.t4[a][b][d][c], finite, 5e-5),
+                                "t4 [{a}][{b}][{d}][{c}] {} vs central difference {finite}",
+                                tower.t4[a][b][d][c]
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The generated-regressor channel `∂(∇ℓ)/∂z` of the anchored frame is the
+    /// finite difference of its gradient in the row's score.
+    #[test]
+    fn anchored_frame_mixed_in_z_matches_central_differences() {
+        let law = skewed_law();
+        let mut grid = Grid(0x2923_0004);
+        for _ in 0..100 {
+            let z_sum = grid.next() * 1.2;
+            let wi = 0.7 + grid.next().abs() * 0.3;
+            let di = if grid.next() > 0.0 { 1.0 } else { 0.0 };
+            let primaries = [
+                grid.next() * 1.0,
+                grid.next() * 1.0,
+                0.8 + grid.next().abs() * 1.5,
+                grid.next() * 0.8,
+            ];
+            let row = inputs(&law, 0.95, z_sum, wi, di);
+            let mixed = rigid_row_primary_mixed_in_z::<
+                STATIC_SLOPE_PRIMARIES,
+                AnchoredStaticSlopeGeometry,
+            >(&primaries, &row)
+            .expect("mixed channel");
+            let step = 1e-5;
+            let gradient_at = |z: f64| {
+                let row = inputs(&law, 0.95, z, wi, di);
+                rigid_row_order2::<STATIC_SLOPE_PRIMARIES, AnchoredStaticSlopeGeometry>(
+                    &primaries, &row,
+                )
+                .expect("gradient")
+                .1
+            };
+            let up = gradient_at(z_sum + step);
+            let down = gradient_at(z_sum - step);
+            for axis in 0..STATIC_SLOPE_PRIMARIES {
+                let finite = (up[axis] - down[axis]) / (2.0 * step);
+                assert!(
+                    close(mixed[axis], finite, 5e-6),
+                    "mixed [{axis}] {} vs central difference {finite}",
+                    mixed[axis]
+                );
+            }
+        }
     }
 }

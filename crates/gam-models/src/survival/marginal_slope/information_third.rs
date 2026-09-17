@@ -410,6 +410,81 @@ impl SurvivalMarginalSlopeRowKernel<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>
 /// the fourth derivatives contract with.
 pub(crate) type PrimaryThirdDirections<const P: usize> = ([f64; P], [f64; P], Option<[f64; P]>);
 
+/// The anchored frame has no closed-form fifth derivative: the anchor is an
+/// implicit function of a declared law and its higher derivatives exist only
+/// through the jet lift, which stops at order four. Every third-information
+/// entry is therefore refused by name here, and the family's
+/// `rigid_third_information_available` routes the armed-Jeffreys machinery
+/// away from it before any of these is reached (gam#2923).
+impl SurvivalMarginalSlopeRowKernel<STATIC_SLOPE_PRIMARIES, AnchoredStaticSlopeGeometry> {
+    fn no_fifth(&self, context: &str, request: String) -> String {
+        format!(
+            "survival marginal-slope {context} ({request}, n={}) needs the closed-form fifth \
+             likelihood derivatives of the Gaussian lowering, which a declared latent law does \
+             not have",
+            self.family.n,
+        )
+    }
+
+    pub(crate) fn third_information_all_axes(
+        &self,
+        u: &[f64],
+        v: &[f64],
+    ) -> Result<Vec<Array2<f64>>, String> {
+        Err(self.no_fifth(
+            "third information derivative",
+            format!("|u|={}, |v|={}", u.len(), v.len()),
+        ))
+    }
+
+    pub(crate) fn primary_third_information_all_axes(
+        &self,
+        row_weights: &[f64],
+        directions: impl Fn(usize) -> Result<PrimaryThirdDirections<STATIC_SLOPE_PRIMARIES>, String>,
+    ) -> Result<Vec<Array2<f64>>, String> {
+        let first_row = directions(0).map(|(x, _, _)| x[PRIMARY_Q0]).unwrap_or(f64::NAN);
+        Err(self.no_fifth(
+            "baseline third information derivative",
+            format!("{} row weights, first direction q₀ = {first_row:e}", row_weights.len()),
+        ))
+    }
+
+    pub(crate) fn design_psi_third_information_all_axes(
+        &self,
+        derivative_blocks: &[Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>],
+        psi_index: usize,
+        d_beta: &[f64],
+        row_weights: &[f64],
+    ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        Err(self.no_fifth(
+            "design ψ third information derivative",
+            format!(
+                "ψ axis {psi_index} of {} blocks, |d_beta|={}, {} row weights",
+                derivative_blocks.len(),
+                d_beta.len(),
+                row_weights.len()
+            ),
+        ))
+    }
+
+    pub(crate) fn design_psi_pair_third_information_all_axes(
+        &self,
+        derivative_blocks: &[Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>],
+        psi_i: usize,
+        psi_j: usize,
+        row_weights: &[f64],
+    ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        Err(self.no_fifth(
+            "design ψ-pair third information derivative",
+            format!(
+                "ψ axes ({psi_i}, {psi_j}) of {} blocks, {} row weights",
+                derivative_blocks.len(),
+                row_weights.len()
+            ),
+        ))
+    }
+}
+
 impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G> {
     pub(super) fn third_information_all_axes_from(
         &self,
@@ -480,14 +555,15 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
                     }
                 }
                 if let Some(z) = z {
-                    let vars: [SparseTower4<P, RIGID_LINEAR_MASK>; P] =
-                        std::array::from_fn(|axis| SparseTower4::variable(primaries[axis], axis));
+                    let vars: [G::Tower4; P] =
+                        std::array::from_fn(|axis| G::Tower4::variable(primaries[axis], axis));
                     let tower = rigid_row_nll::<P, G, _>(&vars, &inputs)?;
+                    let t4 = tower.t4();
                     for a in 0..P {
                         for b in 0..P {
                             for c in 0..P {
                                 for d in 0..P {
-                                    tensor[a][b][c] += tower.t4[a][b][c][d] * z[d];
+                                    tensor[a][b][c] += t4[a][b][c][d] * z[d];
                                 }
                             }
                         }
@@ -608,9 +684,10 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
                 )?;
                 let primaries =
                     rigid_row_kernel_primaries::<P, G>(family, &self.block_states, row)?;
-                let vars: [SparseTower4<P, RIGID_LINEAR_MASK>; P] =
-                    std::array::from_fn(|axis| SparseTower4::variable(primaries[axis], axis));
+                let vars: [G::Tower4; P] =
+                    std::array::from_fn(|axis| G::Tower4::variable(primaries[axis], axis));
                 let tower = rigid_row_nll::<P, G, _>(&vars, &inputs)?;
+                let t4 = tower.t4();
                 let jv = self.jacobian_action(row, d_beta);
                 let channels = channels_at(row)?;
                 // `K_c[k, γ] = w·T⁴[L_c, e_k, e_γ, Jv]` for each channel: the J_ψ-sided
@@ -627,7 +704,7 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
                                     continue;
                                 }
                                 for delta in 0..P {
-                                    sum += loading[alpha] * tower.t4[alpha][k][gamma][delta] * jv[delta];
+                                    sum += loading[alpha] * t4[alpha][k][gamma][delta] * jv[delta];
                                 }
                             }
                             weight * sum
@@ -827,9 +904,10 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
                 )?;
                 let primaries =
                     rigid_row_kernel_primaries::<P, G>(family, &self.block_states, row)?;
-                let vars: [SparseTower4<P, RIGID_LINEAR_MASK>; P] =
-                    std::array::from_fn(|axis| SparseTower4::variable(primaries[axis], axis));
+                let vars: [G::Tower4; P] =
+                    std::array::from_fn(|axis| G::Tower4::variable(primaries[axis], axis));
                 let tower = rigid_row_nll::<P, G, _>(&vars, &inputs)?;
+                let t4 = tower.t4();
                 let (channels_i, channels_j, channels_ij) = channels_at(row)?;
                 let d_i = primary_array(&channels_i.direction(beta_i.view()))?;
                 let d_j = primary_array(&channels_j.direction(beta_j.view()))?;
@@ -843,7 +921,7 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
                     Array2::from_shape_fn((P, P), |(k, gamma)| {
                         let mut third = 0.0;
                         for alpha in 0..P {
-                            third += loading[alpha] * tower.t3[alpha][k][gamma];
+                            third += loading[alpha] * tower.t3()[alpha][k][gamma];
                         }
                         weight * third
                     })
@@ -854,7 +932,7 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
                         for alpha in 0..P {
                             for delta in 0..P {
                                 fourth += loading[alpha]
-                                    * tower.t4[alpha][k][gamma][delta]
+                                    * t4[alpha][k][gamma][delta]
                                     * direction[delta];
                             }
                         }
@@ -1009,6 +1087,7 @@ mod tests {
                     covariance_ones: 1.2,
                     probit_scale: 0.9,
                     qd1_lower: 1e-8,
+                    anchor: None,
                 };
                 let point = [-0.9, 0.4, 1.1, slope];
                 let exact = static_row_fifth(&point, &inputs).expect("admitted row");
@@ -1056,6 +1135,7 @@ mod tests {
                     covariance_ones: 1.2,
                     probit_scale: 0.9,
                     qd1_lower: 1e-8,
+                    anchor: None,
                 };
                 let point = [-0.9, 0.4, 1.1, slope];
                 let exact = static_row_sixth(&point, &inputs).expect("admitted row");

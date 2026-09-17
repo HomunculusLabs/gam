@@ -291,6 +291,24 @@ impl SurvivalMarginalSlopeFamily {
                             )?;
                         continue;
                     }
+                    if self.anchored_law_active() {
+                        let inputs = rigid_row_inputs(
+                            self,
+                            block_states,
+                            i,
+                            "survival marginal-slope value-only row",
+                        )?;
+                        let primaries = rigid_row_kernel_primaries::<
+                            STATIC_SLOPE_PRIMARIES,
+                            AnchoredStaticSlopeGeometry,
+                        >(self, block_states, i)?;
+                        let nll = rigid_row_value::<
+                            STATIC_SLOPE_PRIMARIES,
+                            AnchoredStaticSlopeGeometry,
+                        >(&primaries, &inputs)?;
+                        ll -= weighted.weight * nll;
+                        continue;
+                    }
                     let g = block_states[2].eta[i];
                     let (nll, _, _) = row_primary_closed_form(
                         q_geom.q0,
@@ -364,42 +382,45 @@ impl SurvivalMarginalSlopeFamily {
         second_sigma: bool,
     ) -> Result<crate::marginal_slope_shared::DirectionalPrimaryTerms, String> {
         let scale = self.sigma_scale_derivatives()?;
-        if self.slope_is_follow_up_varying() {
-            // The compiled lowering below is written for the four-primary frame.
-            // The follow-up frame differentiates the same row program in log σ
-            // through parameter jets.
-            let primaries = rigid_row_kernel_primaries::<
-                DYNAMIC_SLOPE_PRIMARIES,
-                DynamicSlopeGeometry,
-            >(self, block_states, row)?;
-            return if second_sigma {
-                crate::marginal_slope_shared::second_parameter_order2_terms(
-                    primaries,
-                    scale.s,
-                    scale.ds,
-                    scale.d2s,
-                    |variables, parameter| {
-                        self.row_neglog_canonical_scale_jet::<
-                            DYNAMIC_SLOPE_PRIMARIES,
-                            DynamicSlopeGeometry,
-                            _,
-                        >(row, block_states, variables, parameter)
-                    },
-                )
-            } else {
-                crate::marginal_slope_shared::first_parameter_order2_terms(
-                    primaries,
-                    scale.s,
-                    scale.ds,
-                    |variables, parameter| {
-                        self.row_neglog_canonical_scale_jet::<
-                            DYNAMIC_SLOPE_PRIMARIES,
-                            DynamicSlopeGeometry,
-                            _,
-                        >(row, block_states, variables, parameter)
-                    },
-                )
-            };
+        if self.slope_is_follow_up_varying() || self.anchored_law_active() {
+            // The compiled lowering below is written for the four-primary
+            // Gaussian frame. The follow-up frame and the anchored frame
+            // (gam#2923) differentiate the same row program in log σ through
+            // parameter jets: the scale rides into the observed slope as a jet,
+            // and the anchor's lift carries its σ-derivatives with it.
+            return in_slope_frame!(self, P, Frame, {
+                let primaries = rigid_row_kernel_primaries::<P, Frame>(self, block_states, row)?;
+                if second_sigma {
+                    crate::marginal_slope_shared::second_parameter_order2_terms(
+                        primaries,
+                        scale.s,
+                        scale.ds,
+                        scale.d2s,
+                        |variables, parameter| {
+                            self.row_neglog_canonical_scale_jet::<P, Frame, _>(
+                                row,
+                                block_states,
+                                variables,
+                                parameter,
+                            )
+                        },
+                    )
+                } else {
+                    crate::marginal_slope_shared::first_parameter_order2_terms(
+                        primaries,
+                        scale.s,
+                        scale.ds,
+                        |variables, parameter| {
+                            self.row_neglog_canonical_scale_jet::<P, Frame, _>(
+                                row,
+                                block_states,
+                                variables,
+                                parameter,
+                            )
+                        },
+                    )
+                }
+            });
         }
         let primaries = rigid_row_kernel_primaries::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(
             self,
@@ -739,7 +760,7 @@ mod sigma_parameter_jet_release_tests {
     // raw time derivative so the monotonicity guard admits. `probit_scale = 1.0`
     // mirrors `row_neglog_canonical_scale_jet`, which folds the frailty scale
     // into the observed slope primary rather than a second in-kernel scaling.
-    fn synthetic_inputs(wi: f64, di: f64, z_sum: f64) -> RigidRowInputs {
+    fn synthetic_inputs(wi: f64, di: f64, z_sum: f64) -> RigidRowInputs<'static> {
         RigidRowInputs {
             row: 0,
             wi,
@@ -748,6 +769,7 @@ mod sigma_parameter_jet_release_tests {
             covariance_ones: 1.0,
             probit_scale: 1.0,
             qd1_lower: 0.0,
+            anchor: None,
         }
     }
 

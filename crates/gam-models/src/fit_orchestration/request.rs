@@ -415,6 +415,14 @@ pub struct CtnStage1Recipe {
     pub offset_column: Option<String>,
 }
 
+/// A declared finite law of a latent score: ascending nodes and positive
+/// weights summing to one (gam#2923).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeclaredLatentLaw {
+    pub nodes: Vec<f64>,
+    pub weights: Vec<f64>,
+}
+
 impl CtnStage1Recipe {
     /// Build a Stage-1 CTN recipe from the Stage-1 description. This is the public
     /// way to populate [`FitConfig::ctn_stage1`]. Supply fold/group columns and
@@ -552,6 +560,18 @@ pub struct FitConfig {
     /// conditional or rank-based transform. This assumes a standard-normal
     /// latent law; freezing an input does not certify its conditional law.
     pub frozen_score: bool,
+    /// The latent measure a marginal-slope kernel integrates against
+    /// (gam#2923): `"auto"` (the default gate: standard-normal where the score
+    /// is adequately normal, the exact empirical law where no pre-transform
+    /// makes it so), `"standard-normal"`, or `"global-empirical"` (always
+    /// anchor on the declared global empirical law of the score). `None` is
+    /// `"auto"`; `frozen_score` pins `"standard-normal"`.
+    pub latent_measure: Option<String>,
+    /// A declared finite law of the latent score for a survival marginal-slope
+    /// fit (gam#2923): the index is anchored on exactly these nodes and
+    /// weights, the score is taken as supplied, and the law travels with the
+    /// saved model. `None` leaves the measure to `latent_measure`.
+    pub declared_latent_law: Option<DeclaredLatentLaw>,
     /// Standalone CTN response-basis options, also used by predictive cross-fitting.
     pub transformation_normal_config: Option<TransformationNormalConfig>,
     /// Optional non-negative per-row training weights column.
@@ -742,6 +762,8 @@ impl Default for FitConfig {
             slope_formula: None,
             z_column: None,
             frozen_score: false,
+            latent_measure: None,
+            declared_latent_law: None,
             transformation_normal_config: None,
             weight_column: None,
             expectile_tau: None,

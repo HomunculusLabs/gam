@@ -29,7 +29,10 @@ impl crate::custom_family::JeffreysThirdInformationDerivative for SurvivalMargin
                 Ok(None)
             };
         }
-        if self.per_z_slope_active() || self.influence_absorber.is_some() {
+        if self.per_z_slope_active()
+            || self.influence_absorber.is_some()
+            || self.anchored_law_active()
+        {
             return Ok(None);
         }
         if self.effective_flex_active(states)? {
@@ -74,6 +77,7 @@ impl crate::custom_family::JeffreysCompletionOuterDerivatives for SurvivalMargin
             || self.effective_flex_active(states)?
             || self.flex_timewiggle_active()
             || self.slope_is_follow_up_varying()
+            || self.anchored_law_active()
         {
             return Ok(None);
         }
@@ -113,6 +117,7 @@ impl crate::custom_family::JeffreysCompletionOuterDerivatives for SurvivalMargin
             || self.effective_flex_active(states)?
             || self.flex_timewiggle_active()
             || self.slope_is_follow_up_varying()
+            || self.anchored_law_active()
         {
             return Ok(None);
         }
@@ -870,10 +875,15 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
     fn jeffreys_third_information_derivative(
         &self,
     ) -> Option<&dyn crate::custom_family::JeffreysThirdInformationDerivative> {
+        // The closed-form fifth and sixth derivatives are the Gaussian
+        // lowering's; a declared latent law (gam#2923) has no such closed form
+        // and opts out exactly as the per-score and absorber frames do.
         let served = if self.flex_timewiggle_active() {
             self.timewiggle_zeta_available()
         } else {
-            !self.per_z_slope_active() && self.influence_absorber.is_none()
+            !self.per_z_slope_active()
+                && self.influence_absorber.is_none()
+                && !self.anchored_law_active()
         };
         if served { Some(self) } else { None }
     }
@@ -888,6 +898,7 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
             || self.flex_active()
             || self.flex_timewiggle_active()
             || self.slope_is_follow_up_varying()
+            || self.anchored_law_active()
         {
             None
         } else {

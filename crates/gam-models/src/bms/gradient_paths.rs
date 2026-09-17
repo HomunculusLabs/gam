@@ -1643,7 +1643,14 @@ pub(crate) fn empirical_intercept_from_marginal(
             })?
         }
     };
-    if f_best.abs() > abs_tol {
+    // The shared solver also stops on bracket width, so a converged root can
+    // carry a residual a few multiples of `abs_tol·|F′|` above the target it
+    // refined to (a 41-node law at slope 1.6 returned `−1.2e-13` against the
+    // `1e-13` target, gam#2923). What this guards against is a root handed
+    // back with a residual that is not small at all: `1e-10` in log space is
+    // a relative error of `1e-10` on the calibrated probability, three orders
+    // above the refinement target and far below anything a fit can resolve.
+    if f_best.abs() > 1e3 * abs_tol {
         return Err(format!(
             "empirical latent intercept solve failed: log-residual={f_best:.3e} at a={root:.6}, target mu={target_mu:.6}"
         ));

@@ -588,6 +588,40 @@ impl<const K: usize, const LIN: u32> gam_math::nested_dual::JetField for SparseT
     }
 }
 
+/// Read access to the third tensor of whichever order-≤3 tower a frame
+/// declares, so the all-axes paths are generic over the tower's static
+/// sparsity: the Gaussian frames elide the affine location blocks
+/// ([`RIGID_LINEAR_MASK`]), the anchored frame is dense (gam#2923).
+pub(crate) trait SparseThird<const K: usize> {
+    fn t3(&self) -> &[[[f64; K]; K]; K];
+}
+
+/// Read access to the fourth tensor of a frame's order-≤4 tower.
+pub(crate) trait SparseFourth<const K: usize> {
+    fn t4(&self) -> &[[[[f64; K]; K]; K]; K];
+}
+
+impl<const K: usize, const LIN: u32> SparseThird<K> for SparseTower3<K, LIN> {
+    #[inline(always)]
+    fn t3(&self) -> &[[[f64; K]; K]; K] {
+        &self.t3
+    }
+}
+
+impl<const K: usize, const LIN: u32> SparseThird<K> for SparseTower4<K, LIN> {
+    #[inline(always)]
+    fn t3(&self) -> &[[[f64; K]; K]; K] {
+        &self.t3
+    }
+}
+
+impl<const K: usize, const LIN: u32> SparseFourth<K> for SparseTower4<K, LIN> {
+    #[inline(always)]
+    fn t4(&self) -> &[[[[f64; K]; K]; K]; K] {
+        &self.t4
+    }
+}
+
 /// Contract a `Tower3` third tensor with one primary-space direction —
 /// `out[a][b] = Σ_c t3[a][b][c]·dir[c]` — exactly `Tower4::third_contracted`'s
 /// arithmetic (same accumulation order), used by the build-once first-directional
@@ -629,6 +663,11 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
             G::FOLLOW_UP_VARYING,
             "row kernel primary frame does not match the family's slope layout",
         );
+        assert_eq!(
+            family.anchored_law_active(),
+            G::ANCHORED,
+            "row kernel primary frame does not match the family's latent law",
+        );
         let slices = block_slices(&family, &block_states);
         Self {
             family,
@@ -649,7 +688,7 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
 mod rigid_row_admission_tests {
     use super::*;
 
-    fn inputs(wi: f64, di: f64) -> RigidRowInputs {
+    fn inputs(wi: f64, di: f64) -> RigidRowInputs<'static> {
         RigidRowInputs {
             row: 7,
             wi,
@@ -658,6 +697,7 @@ mod rigid_row_admission_tests {
             covariance_ones: 1.0,
             probit_scale: 1.0,
             qd1_lower: 0.0,
+            anchor: None,
         }
     }
 
@@ -724,7 +764,7 @@ pub(crate) fn rigid_row_kernel_primaries<const P: usize, G: SlopeRowGeometry<P>>
 /// ([`rigid_row_nll`]) consumes: the f64 quantities computed ONCE per row and
 /// reused across every [`JetScalar`] instantiation (value/grad/Hessian, the
 /// contracted third/fourth, and the dense tower oracle/all-axes path).
-pub(crate) struct RigidRowInputs {
+pub(crate) struct RigidRowInputs<'a> {
     pub(crate) row: usize,
     pub(crate) wi: f64,
     pub(crate) di: f64,
@@ -732,16 +772,21 @@ pub(crate) struct RigidRowInputs {
     pub(crate) covariance_ones: f64,
     pub(crate) probit_scale: f64,
     pub(crate) qd1_lower: f64,
+    /// The declared finite law this row's index is anchored on (gam#2923):
+    /// `Some` exactly when the family runs the anchored frame, in which case
+    /// the marginal identity is solved on it instead of lowered in closed
+    /// form. `None` is the standard-normal law and the Gaussian closed form.
+    pub(crate) anchor: Option<AnchorGrid<'a>>,
 }
 
 /// Resolve the row's scalar inputs (shared-score summary, probit scale,
-/// monotonicity floor). Pure f64 — no jet arithmetic.
-pub(crate) fn rigid_row_inputs(
-    family: &SurvivalMarginalSlopeFamily,
+/// monotonicity floor, declared law). Pure f64 — no jet arithmetic.
+pub(crate) fn rigid_row_inputs<'a>(
+    family: &'a SurvivalMarginalSlopeFamily,
     block_states: &[ParameterBlockState],
     row: usize,
     context: &str,
-) -> Result<RigidRowInputs, String> {
+) -> Result<RigidRowInputs<'a>, String> {
     let (z_sum, covariance_ones) = family.exact_shared_score_summary(row, block_states, context)?;
     Ok(RigidRowInputs {
         row,
@@ -751,6 +796,7 @@ pub(crate) fn rigid_row_inputs(
         covariance_ones,
         probit_scale: family.probit_frailty_scale(),
         qd1_lower: family.time_derivative_lower_bound(),
+        anchor: family.latent_law.as_ref().map(|law| law.row(row)),
     })
 }
 
@@ -813,109 +859,26 @@ pub(crate) fn rigid_row_nll<const P: usize, G: SlopeRowGeometry<P>, S: JetScalar
 /// `∂/∂z` of the rigid row NLL's PRIMARY gradient: the mixed `(primary, latent
 /// score)` second derivative, before any block-Jacobian scatter (gam#2768).
 ///
-/// This is the row channel the Murphy–Topel generated-regressor covariance
-/// correction contracts against — `s_i = ∂(score_β,i)/∂ζ_i` is exactly this
-/// vector pushed through the same primary→β Jacobian the gradient uses — and it
-/// is derived MECHANICALLY from the sole `rigid_feature_program` declaration
-/// rather than by hand, in the spirit of the single-source contract on
-/// [`rigid_row_nll`].
-///
-/// Differentiating the pullback `∂ℓ/∂p_a = Σ_f g_f·J_{f a}` gives
-///
-/// ```text
-///     ∂²ℓ/∂p_a ∂z_sum = Σ_f (Σ_h H_{f h}·∂h/∂z)·J_{f a}  +  Σ_f g_f·∂J_{f a}/∂z,
-/// ```
-///
-/// and both `∂h/∂z` and `∂J/∂z` are owned by the frame
-/// ([`SlopeRowGeometry::score_sensitivity`]) — for a static slope the score
-/// reaches the entry AND exit location channels, which is what the single
-/// `linear` feature used to be. For `K = 1` (`z_sum = z`, the only shape the
-/// conditional latent calibration is persisted for) this is the row's exact
-/// `∂/∂z`.
+/// Owned by the frame ([`SlopeRowGeometry::row_primary_mixed_in_z`]); this is
+/// the frame-generic entry every caller reads it through.
 #[inline]
 pub(crate) fn rigid_row_primary_mixed_in_z<const P: usize, G: SlopeRowGeometry<P>>(
     primaries: &[f64; P],
     inputs: &RigidRowInputs,
 ) -> Result<[f64; P], String> {
-    let features = G::feature_frame(primaries, inputs);
-    let (_, feature_gradient, feature_hessian, [neg_eta0, neg_eta1, adjusted_derivative]) =
-        rigid_feature_frame_order2(
-            &features,
-            inputs.wi,
-            inputs.di,
-            inputs.probit_scale,
-            follow_up_varying_flag::<P, G>(),
-        );
-    validate_rigid_row_admission::<P, G>(
-        primaries[PRIMARY_QD1],
-        inputs,
-        neg_eta0,
-        neg_eta1,
-        adjusted_derivative,
-    )?;
-    let jacobian = G::feature_jacobian(primaries, inputs);
-    let sensitivity = G::score_sensitivity(primaries, inputs);
-    // `Σ_h H_{f h}·∂h/∂z_sum`, one entry per feature.
-    let hessian_in_z: [f64; RIGID_FEATURE_DIMENSION] = std::array::from_fn(|feature| {
-        let mut channel = 0.0;
-        for other in 0..RIGID_FEATURE_DIMENSION {
-            channel += feature_hessian[feature][other] * sensitivity.feature[other];
-        }
-        channel
-    });
-    let mut mixed = [0.0; P];
-    for axis in 0..P {
-        let mut channel = 0.0;
-        for slot in 0..G::active_feature_count(axis) {
-            let feature = G::active_feature(axis, slot);
-            channel += hessian_in_z[feature] * jacobian[feature][axis]
-                + feature_gradient[feature] * sensitivity.jacobian[feature][axis];
-        }
-        mixed[axis] = channel;
-    }
-    Ok(mixed)
+    G::row_primary_mixed_in_z(primaries, inputs)
 }
 
 /// Direct value/gradient/Hessian lowering of the canonical nine-feature row
 /// program followed by the universal second-order pullback into the frame `G`.
-/// The fixed stack buffers and active-feature map expose only the channels the
-/// frame's slope primaries actually reach.
+/// Owned by the frame ([`SlopeRowGeometry::row_order2`]); this is the
+/// frame-generic entry every caller reads it through.
 #[inline(always)]
 pub(crate) fn rigid_row_order2<const P: usize, G: SlopeRowGeometry<P>>(
     primaries: &[f64; P],
     inputs: &RigidRowInputs,
 ) -> Result<(f64, [f64; P], [[f64; P]; P]), String> {
-    let features = G::feature_frame(primaries, inputs);
-    let (value, feature_gradient, feature_hessian, [neg_eta0, neg_eta1, adjusted_derivative]) =
-        rigid_feature_frame_order2(
-            &features,
-            inputs.wi,
-            inputs.di,
-            inputs.probit_scale,
-            follow_up_varying_flag::<P, G>(),
-        );
-    validate_rigid_row_admission::<P, G>(
-        primaries[PRIMARY_QD1],
-        inputs,
-        neg_eta0,
-        neg_eta1,
-        adjusted_derivative,
-    )?;
-
-    let jacobian = G::feature_jacobian(primaries, inputs);
-    let mut gradient = [0.0; P];
-    let mut hessian = [[0.0; P]; P];
-    order2_feature_pullback_into(
-        &feature_gradient,
-        &feature_hessian,
-        &jacobian,
-        G::active_feature_count,
-        G::active_feature,
-        &mut gradient,
-        &mut hessian,
-        |gradient, hessian| G::add_feature_curvature(gradient, inputs, hessian),
-    );
-    Ok((value, gradient, hessian))
+    G::row_order2(primaries, inputs)
 }
 
 /// Apply the scalar domain contract shared by the ordinary row evaluator and
@@ -970,10 +933,10 @@ pub(crate) fn validate_rigid_row_admission<const P: usize, G: SlopeRowGeometry<P
     // A weighted margin must be finite or `+inf`; that is `margin > -inf`,
     // one compare, false for NaN as every comparison with NaN is.
     if wi != 0.0 && !(neg_eta0 > f64::NEG_INFINITY) {
-        return Err(nonfinite_signed_margin(row, neg_eta0));
+        return Err(nonfinite_signed_margin(row, G::NAME, neg_eta0));
     }
     if wi * (1.0 - di) != 0.0 && !(neg_eta1 > f64::NEG_INFINITY) {
-        return Err(nonfinite_signed_margin(row, neg_eta1));
+        return Err(nonfinite_signed_margin(row, G::NAME, neg_eta1));
     }
     Ok(())
 }
@@ -1007,10 +970,10 @@ fn nonpositive_transformed_derivative(
 
 #[cold]
 #[inline(never)]
-fn nonfinite_signed_margin(row: usize, margin: f64) -> String {
+fn nonfinite_signed_margin(row: usize, frame: &str, margin: f64) -> String {
     SurvivalMarginalSlopeError::NumericalFailure {
         reason: format!(
-            "non-finite signed margin in rigid survival marginal-slope row tower at row {row}: {margin}"
+            "non-finite signed margin in rigid survival marginal-slope row tower at row {row} on the {frame} frame: {margin} (on a declared latent law this is an anchor solve that did not converge)"
         ),
     }
     .into()
@@ -1082,10 +1045,10 @@ impl<const P: usize, G: SlopeRowGeometry<P>> RowKernel<P>
     ) -> Option<Result<(Vec<f64>, Vec<[f64; P]>, Vec<[[f64; P]; P]>), String>> {
         use crate::gpu_kernels::survival_rowjet::survival_rigid_row_vgh_device_selected;
 
-        // The device pullback is written for the four-primary frame. A
-        // follow-up-varying slope takes the ordinary per-row CPU path rather
-        // than a silently different lowering.
-        if G::FOLLOW_UP_VARYING {
+        // The device pullback is written for the four-primary Gaussian frame. A
+        // follow-up-varying slope, or a declared latent law, takes the ordinary
+        // per-row CPU path rather than a silently different lowering.
+        if G::FOLLOW_UP_VARYING || G::ANCHORED {
             return None;
         }
         let n = self.family.n;
@@ -1757,7 +1720,7 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
     /// is therefore bit-for-bit what `program_full_tower(row)` would produce, so the
     /// build-once batched override contracts against it without changing any
     /// downstream arithmetic.
-    fn build_row_towers(&self) -> Result<Vec<SparseTower4<P, RIGID_LINEAR_MASK>>, String> {
+    fn build_row_towers(&self) -> Result<Vec<G::Tower4>, String> {
         let n = gam_math::jet_tower::RowProgram::n_rows(self);
         (0..n)
             .into_par_iter()
@@ -1770,8 +1733,8 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
                 )?;
                 let p =
                     rigid_row_kernel_primaries::<P, G>(&self.family, &self.block_states, row)?;
-                let vars: [SparseTower4<P, RIGID_LINEAR_MASK>; P] =
-                    std::array::from_fn(|a| SparseTower4::variable(p[a], a));
+                let vars: [G::Tower4; P] =
+                    std::array::from_fn(|a| G::Tower4::variable(p[a], a));
                 rigid_row_nll::<P, G, _>(&vars, &inputs)
             })
             .collect()
@@ -1789,7 +1752,7 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
     /// 5000/5000 rows `to_bits`-identical to the engine `Tower3<4>` / `Tower4<4>`
     /// `t3` channel). The cached `t3` is bit-for-bit what the dense tower would
     /// produce.
-    fn build_row_third_towers(&self) -> Result<Vec<SparseTower3<P, RIGID_LINEAR_MASK>>, String> {
+    fn build_row_third_towers(&self) -> Result<Vec<G::Tower3>, String> {
         let n = gam_math::jet_tower::RowProgram::n_rows(self);
         (0..n)
             .into_par_iter()
@@ -1802,8 +1765,8 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
                 )?;
                 let p =
                     rigid_row_kernel_primaries::<P, G>(&self.family, &self.block_states, row)?;
-                let vars: [SparseTower3<P, RIGID_LINEAR_MASK>; P] =
-                    std::array::from_fn(|a| SparseTower3::variable(p[a], a));
+                let vars: [G::Tower3; P] =
+                    std::array::from_fn(|a| G::Tower3::variable(p[a], a));
                 rigid_row_nll::<P, G, _>(&vars, &inputs)
             })
             .collect()
@@ -1849,7 +1812,7 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
         // so build the order-≤3 `Tower3<4>` per row — bit-identical on the read
         // channels to the dense `Tower4<4>` but without the discarded `t4` tensor.
         let towers = self.build_row_third_towers()?;
-        let tensors: Vec<_> = towers.into_iter().map(|tower| tower.t3).collect();
+        let tensors: Vec<_> = towers.iter().map(|tower| *tower.t3()).collect();
         self.all_axes_primary_tensor_pullback(&tensors)
     }
 
@@ -1948,17 +1911,18 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
     fn second_directional_derivative_all_axes_from_towers(
         &self,
         d_beta_u: &[f64],
-        towers: &[SparseTower4<P, RIGID_LINEAR_MASK>],
+        towers: &[G::Tower4],
     ) -> Result<Vec<Array2<f64>>, String> {
         let tensors: Vec<_> = towers
             .iter()
             .enumerate()
             .map(|(row, tower)| {
                 let direction = self.jacobian_action(row, d_beta_u);
+                let t4 = tower.t4();
                 std::array::from_fn(|a| {
                     std::array::from_fn(|b| {
                         std::array::from_fn(|c| {
-                            (0..P).map(|d| tower.t4[a][b][d][c] * direction[d]).sum()
+                            (0..P).map(|d| t4[a][b][d][c] * direction[d]).sum()
                         })
                     })
                 })
@@ -2037,7 +2001,7 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
         let towers = self.build_row_towers()?;
         self.chunked_pullback_reduce(p, |row, acc| -> Result<(), String> {
             let w_row = self.primary_trace_weight(row, weight)?;
-            let t4 = &towers[row].t4;
+            let t4 = towers[row].t4();
             let mut coeff = [[0.0_f64; P]; P];
             for c in 0..P {
                 for d in 0..P {

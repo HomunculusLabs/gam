@@ -21,11 +21,18 @@
 //!
 //! This module is the survival caller of the *shared* gate
 //! ([`build_latent_measure_decision`]), not a second copy of it. The one thing
-//! it declares that BMS does not is the family's kernel capability: the survival
-//! row program is the closed-form standard-normal probit lowering and owns no
-//! empirical-grid branch, so it asks for
-//! [`EmpiricalLatentMeasureSupport::StandardNormalOnly`] and routes the gate's
-//! residual verdict through the spec's own [`LatentZCheckMode`].
+//! it declares that BMS does not is the family's kernel capability. Since
+//! gam#2923 the survival row program owns a declared-law branch — the anchored
+//! frame ([`AnchoredStaticSlopeGeometry`]), which solves the marginal identity
+//! on a finite law instead of lowering it in closed form — so on every
+//! configuration that frame serves the gate is asked for
+//! [`EmpiricalLatentMeasureSupport::Available`] exactly as the Bernoulli family
+//! asks, and a sample no pre-transform makes adequately normal reaches the
+//! kernel as the exact empirical latent measure. On the configurations the
+//! anchored frame does not yet serve (listed by
+//! [`anchored_kernel_unavailable_reason`]) the gate is still asked for
+//! [`EmpiricalLatentMeasureSupport::StandardNormalOnly`] and its residual
+//! verdict is routed through the spec's own [`LatentZCheckMode`].
 
 use super::*;
 
@@ -47,6 +54,10 @@ use crate::bms::{
 pub(crate) struct SurvivalLatentScoreCalibration {
     /// One decision per latent-score column, in column order.
     pub(crate) per_score: Vec<LatentMeasureCalibration>,
+    /// The measure the kernel integrates against, one per latent-score column
+    /// (gam#2923). `StandardNormal` is the Gaussian closed form; an empirical
+    /// kind is the declared law the anchored frame solves the identity on.
+    pub(crate) per_score_measure: Vec<LatentMeasureKind>,
     /// The (normalised, pre-calibration) latent scores the gate was handed.
     pub(crate) raw_scores: Array2<f64>,
     /// The conditioning span `a(C)` the conditional branch used, when it was
@@ -65,6 +76,66 @@ impl SurvivalLatentScoreCalibration {
             _ => None,
         }
     }
+
+    /// The measure of the PRIMARY score: the object the fit persists and the
+    /// anchored frame is built on.
+    pub(crate) fn primary_measure(&self) -> &LatentMeasureKind {
+        self.per_score_measure
+            .first()
+            .expect("a latent-score calibration carries at least one column")
+    }
+}
+
+/// Why the anchored frame cannot serve a term spec, if it cannot.
+///
+/// Each item is a real combination to support and a separate piece of chain
+/// rule; refusing by name is honest, whereas running the closed form under a
+/// declared law would silently fit a different model from the one requested.
+pub(crate) fn anchored_kernel_unavailable_reason(
+    spec: &SurvivalMarginalSlopeTermSpec,
+) -> Option<&'static str> {
+    if spec.z.ncols() != 1 {
+        return Some(
+            "a declared latent law needs a single latent score: with K ≥ 2 scores the law \
+             the identity is anchored on is a joint law of the score vector, which the finite \
+             per-column grid does not carry",
+        );
+    }
+    if spec.score_warp.is_some() || spec.link_dev.is_some() {
+        return Some(
+            "a declared latent law is not yet supported together with a score-warp or \
+             link-deviation flex block: those surfaces run the flex row program, which lowers \
+             the identity in closed form",
+        );
+    }
+    if spec
+        .score_influence_jacobian
+        .as_ref()
+        .is_some_and(|jacobian| jacobian.ncols() > 0)
+    {
+        return Some(
+            "a declared latent law is not yet supported together with a CTN Stage-1 \
+             influence absorber: the absorber shifts the de-nested index through the \
+             closed-form frame's trailing primary",
+        );
+    }
+    if !matches!(
+        spec.slope_template,
+        SurvivalCovariateTermBlockTemplate::Static
+    ) {
+        return Some(
+            "a declared latent law is not yet supported together with a follow-up-varying \
+             slope: the anchored frame carries the slope on one channel, and the rate of the \
+             anchor along follow-up under a moving slope is its own piece of chain rule",
+        );
+    }
+    if spec.timewiggle_block.is_some() {
+        return Some(
+            "a declared latent law is not yet supported together with a time-wiggle \
+             baseline: the wiggle's coefficient calculus runs the flex row program",
+        );
+    }
+    None
 }
 
 /// Run the automatic latent-measure gate over every latent-score coordinate and
@@ -98,16 +169,58 @@ pub(crate) fn resolve_survival_latent_score_calibration(
         .score_influence_jacobian
         .as_ref()
         .is_some_and(|jacobian| jacobian.ncols() > 0);
+    // gam#2923: the anchored frame carries an empirical latent measure; where
+    // it serves the spec the gate may fall back to one, exactly as BMS's does.
+    // An EXPLICIT request for one on a configuration the frame does not serve
+    // is refused here by its own reason rather than by the gate's generic one.
+    let explicit_empirical = spec.declared_latent_law.is_some()
+        || matches!(
+            spec.latent_z_policy.latent_measure,
+            crate::bms::LatentMeasureSpec::GlobalEmpirical { .. }
+        );
+    let support = match anchored_kernel_unavailable_reason(spec) {
+        None => EmpiricalLatentMeasureSupport::Available,
+        Some(reason) => {
+            if explicit_empirical {
+                return Err(format!(
+                    "survival marginal-slope was asked to anchor on a declared latent law, \
+                     but {reason}"
+                ));
+            }
+            EmpiricalLatentMeasureSupport::StandardNormalOnly
+        }
+    };
+    if let Some(grid) = spec.declared_latent_law.as_ref() {
+        // A declared law is the caller's statement about the score AS GIVEN:
+        // the gate does not run, no pre-transform is fitted, and the law is
+        // what the fit anchors on and persists.
+        let kind = LatentMeasureKind::GlobalEmpirical { grid: grid.clone() };
+        kind.validate("survival marginal-slope declared latent law")?;
+        log::info!(
+            "[survival-marginal-slope latent-z] the row index is anchored on a DECLARED latent \
+             law of {} nodes; the automatic gate is not run (gam#2923)",
+            grid.nodes.len(),
+        );
+        let k = spec.z.ncols();
+        return Ok(SurvivalLatentScoreCalibration {
+            per_score: vec![LatentMeasureCalibration::None; k],
+            per_score_measure: vec![kind; k],
+            raw_scores: spec.z.clone(),
+            conditioning: None,
+        });
+    }
     let resolved = resolve_latent_score_calibration_from_parts(
         &spec.z,
         &spec.weights,
         &spec.latent_z_policy,
         absorber_active,
         &marginal_design.design,
+        support,
     )?;
     spec.z = resolved.calibrated_scores;
     Ok(SurvivalLatentScoreCalibration {
         per_score: resolved.per_score,
+        per_score_measure: resolved.per_score_measure,
         raw_scores: resolved.raw_scores,
         conditioning: resolved.conditioning,
     })
@@ -121,6 +234,7 @@ pub(crate) fn resolve_survival_latent_score_calibration(
 /// spec bears on it.
 pub(crate) struct ResolvedLatentScoreCalibration {
     pub(crate) per_score: Vec<LatentMeasureCalibration>,
+    pub(crate) per_score_measure: Vec<LatentMeasureKind>,
     pub(crate) raw_scores: Array2<f64>,
     pub(crate) calibrated_scores: Array2<f64>,
     pub(crate) conditioning: Option<std::sync::Arc<Array2<f64>>>,
@@ -132,6 +246,7 @@ pub(crate) fn resolve_latent_score_calibration_from_parts(
     policy: &LatentZPolicy,
     absorber_active: bool,
     marginal_design: &DesignMatrix,
+    support: EmpiricalLatentMeasureSupport,
 ) -> Result<ResolvedLatentScoreCalibration, String> {
     let k = scores.ncols();
     let raw_scores = scores.clone();
@@ -142,6 +257,7 @@ pub(crate) fn resolve_latent_score_calibration_from_parts(
     };
 
     let mut calibrations = Vec::with_capacity(k);
+    let mut measures = Vec::with_capacity(k);
     let mut calibrated_scores = scores.clone();
     for col in 0..k {
         let raw = scores.column(col).to_owned();
@@ -150,17 +266,26 @@ pub(crate) fn resolve_latent_score_calibration_from_parts(
             weights,
             policy,
             conditioning.as_ref().map(|design| design.view()),
-            EmpiricalLatentMeasureSupport::StandardNormalOnly,
+            support,
             "survival-marginal-slope",
         )?;
-        if !matches!(decision.kind, LatentMeasureKind::StandardNormal) {
+        if support == EmpiricalLatentMeasureSupport::StandardNormalOnly
+            && !matches!(decision.kind, LatentMeasureKind::StandardNormal)
+        {
             // Unreachable by construction — `StandardNormalOnly` never returns
-            // another kind — but this family's whole kernel rests on it, so the
+            // another kind — but the closed-form kernel rests on it, so the
             // invariant is checked rather than assumed.
             return Err(
                 "survival marginal-slope latent-measure gate returned a non-standard-normal \
                  measure for a standard-normal-only kernel"
                     .to_string(),
+            );
+        }
+        if let LatentMeasureKind::GlobalEmpirical { grid } = &decision.kind {
+            log::info!(
+                "[survival-marginal-slope latent-z] score column {col}: the row index is \
+                 anchored on a declared global-empirical latent law of {} nodes (gam#2923)",
+                grid.nodes.len(),
             );
         }
         if let Some(adequacy) = decision.unmodelled_residual.as_ref() {
@@ -204,9 +329,11 @@ pub(crate) fn resolve_latent_score_calibration_from_parts(
         }
         calibrated_scores.column_mut(col).assign(&calibrated);
         calibrations.push(decision.calibration);
+        measures.push(decision.kind);
     }
     Ok(ResolvedLatentScoreCalibration {
         per_score: calibrations,
+        per_score_measure: measures,
         raw_scores,
         calibrated_scores,
         conditioning,
@@ -348,6 +475,7 @@ mod tests {
             &auto_policy(LatentZCheckMode::WarnOnly),
             false,
             &design,
+            EmpiricalLatentMeasureSupport::Available,
         )
         .expect("gate");
 
@@ -414,6 +542,7 @@ mod tests {
             &auto_policy(LatentZCheckMode::WarnOnly),
             false,
             &design,
+            EmpiricalLatentMeasureSupport::Available,
         )
         .expect("gate");
         assert!(
@@ -542,6 +671,7 @@ mod tests {
             &auto_policy(LatentZCheckMode::WarnOnly),
             true,
             &design,
+            EmpiricalLatentMeasureSupport::Available,
         )
         .expect("gate");
         assert!(
@@ -583,6 +713,7 @@ mod tests {
             &auto_policy(LatentZCheckMode::WarnOnly),
             false,
             &design,
+            EmpiricalLatentMeasureSupport::Available,
         )
         .expect("gate");
         assert_eq!(resolved.per_score.len(), 2);

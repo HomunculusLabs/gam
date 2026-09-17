@@ -109,6 +109,7 @@ fn family(frame_is_follow_up_varying: bool) -> SurvivalMarginalSlopeFamily {
     };
     SurvivalMarginalSlopeFamily {
         jeffreys_armed: true,
+        latent_law: None,
         n: N_ROWS,
         event: Arc::new(events()),
         weights: Arc::new(Array1::from_elem(N_ROWS, 1.0)),

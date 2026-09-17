@@ -329,6 +329,7 @@ mod tests {
                     covariance_ones: 1.2,
                     probit_scale: 0.9,
                     qd1_lower: 1e-8,
+                    anchor: None,
                 };
                 let point = [-0.9, 0.4, 1.1, -0.7, 0.8, rate];
                 let exact = dynamic_row_fifth(&point, &inputs).expect("admitted dynamic row");

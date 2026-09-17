@@ -2908,6 +2908,7 @@ fn compute_saved_marginal_slope_survival_alo(
             link_deviation_runtime: runtime.link_deviation.as_ref(),
             influence_design: influence_design.as_ref(),
             gaussian_frailty_sd,
+            latent_measure: payload.latent_measure.as_ref(),
         })
         .map_err(|reason| {
             invalid(format!(

@@ -49,6 +49,10 @@ pub struct SurvivalMarginalSlopeSavedAloReplayInput<'a> {
     pub link_deviation_runtime: Option<&'a SavedCompiledFlexBlock>,
     pub influence_design: Option<&'a Array2<f64>>,
     pub gaussian_frailty_sd: Option<f64>,
+    /// The latent measure the saved fit integrated against (gam#2923). A
+    /// declared empirical law is replayed by the anchored frame, exactly as the
+    /// fit ran it; `None` or `StandardNormal` is the Gaussian closed form.
+    pub latent_measure: Option<&'a crate::bms::LatentMeasureKind>,
 }
 
 #[derive(Clone, Debug)]
@@ -352,8 +356,33 @@ pub fn replay_saved_survival_marginal_slope_alo(
             }
         }
     };
+    // gam#2923: the coefficients of a fit on a declared latent law are defined
+    // against that law's anchor, so the replay runs the same anchored frame. A
+    // local law's training mixtures do not travel with the model, so it cannot
+    // be replayed and says so.
+    let latent_law = match input.latent_measure {
+        None | Some(crate::bms::LatentMeasureKind::StandardNormal) => None,
+        Some(kind @ crate::bms::LatentMeasureKind::GlobalEmpirical { .. }) => {
+            SurvivalLatentLaw::from_kind(kind, n)?.map(Arc::new)
+        }
+        Some(crate::bms::LatentMeasureKind::LocalEmpirical { .. }) => {
+            return Err(
+                "saved survival marginal-slope ALO cannot replay a local-empirical latent \
+                 law: its per-row training mixtures are not persisted"
+                    .to_string(),
+            );
+        }
+    };
+    if latent_law.is_some() && (score_warp.is_some() || link_dev.is_some()) {
+        return Err(
+            "saved survival marginal-slope ALO: a declared latent law is not supported \
+             together with a score-warp or link-deviation flex block"
+                .to_string(),
+        );
+    }
     let family = SurvivalMarginalSlopeFamily {
         jeffreys_armed: true,
+        latent_law,
         n,
         event: Arc::new(input.event.clone()),
         weights: Arc::new(input.prior_weights.clone()),
@@ -539,6 +568,7 @@ mod tests {
                 link_deviation_runtime: None,
                 influence_design: None,
                 gaussian_frailty_sd: None,
+                latent_measure: None,
             })
             .expect("rigid saved survival row replays");
         let row = &replay.rows[1];

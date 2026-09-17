@@ -949,6 +949,7 @@ pub(crate) fn materialize_survival<'a>(
                 score_warp: marginal_slope_score_warp.clone(),
                 link_dev: marginal_slope_link_dev.clone(),
                 latent_z_policy: config.marginal_slope_latent_policy(),
+                declared_latent_law: config.declared_latent_law_grid()?,
                 score_influence_jacobian: None,
             },
             options: BlockwiseFitOptions {

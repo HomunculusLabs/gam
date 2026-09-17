@@ -5633,6 +5633,7 @@ mod moment_engine_tests {
         });
         SurvivalMarginalSlopeFamily {
             jeffreys_armed: true,
+            latent_law: None,
             n,
             event: Arc::new(event),
             weights: Arc::new(weights),

@@ -96,6 +96,13 @@ pub struct SurvivalMarginalSlopeTermSpec {
     /// therefore NOT the whole of what happens to `z` on this path;
     /// `LatentMeasureSpec::StandardNormal` is what switches the gate off.
     pub latent_z_policy: LatentZPolicy,
+    /// A DECLARED finite law of the latent score (gam#2923): nodes and weights
+    /// the row index is anchored on as given, in place of anything the
+    /// automatic gate would decide. The score is taken as supplied — no
+    /// pre-transform is fitted to it, because the law is the caller's
+    /// statement about that very score — and the fit persists the law as its
+    /// latent measure. `None` leaves the measure to `latent_z_policy`.
+    pub declared_latent_law: Option<crate::bms::EmpiricalZGrid>,
 }
 
 pub(crate) const DEFAULT_SURVIVAL_MARGINAL_SLOPE_DERIVATIVE_GUARD: f64 = 1e-6;
@@ -166,6 +173,13 @@ pub struct SurvivalMarginalSlopeFitResult {
     pub baseline_slope: f64,
     pub baseline_offset_residuals: OffsetChannelResiduals,
     pub baseline_offset_curvatures: OffsetChannelCurvatures,
+    /// The fitted marginal survival index `q̂(t_i, a_i)` at every training
+    /// row's exit time (gam#2923). Under the family's defining identity this
+    /// is the probit of the row's marginal survival at exit — on the
+    /// standard-normal law by the closed-form lowering, on a declared law by
+    /// the anchoring equation — so it is the quantity a calibration check of
+    /// the marginal index reads.
+    pub fitted_exit_index: Array1<f64>,
     pub z_normalization: LatentZNormalization,
     /// The automatic latent-measure gate's decision, one entry per latent-score
     /// column in column order (gam#2768). `LatentMeasureCalibration::None` means
@@ -176,13 +190,19 @@ pub struct SurvivalMarginalSlopeFitResult {
     /// map from its own sample — or skipped it — would evaluate a different
     /// model. The saved payload carries it for exactly that reason.
     ///
-    /// The measure itself is always `LatentMeasureKind::StandardNormal` here and
-    /// is not stored: this family's row program is the closed-form
-    /// standard-normal probit lowering and owns no empirical-grid branch, so the
-    /// gate is asked for `EmpiricalLatentMeasureSupport::StandardNormalOnly` and
-    /// the invariant is *checked* at the call site rather than carried as a
-    /// field that could only ever hold one value.
+    /// The measure itself is [`Self::latent_measure`].
     pub latent_z_calibrations: Vec<crate::bms::LatentMeasureCalibration>,
+    /// The latent measure the row program integrated against (gam#2923).
+    ///
+    /// `StandardNormal` is the Gaussian closed form `c(a) = √(1 + r(a)ᵀΣ(a)r(a))`.
+    /// An empirical kind is the declared finite law the fit anchored the index
+    /// on — `Σ_k w_k Φ(−(α + rᵀz_k)) = Φ(−q)` solved per row — and it is *fit
+    /// state prediction must replay*: the coefficients are defined against that
+    /// law's anchor, so a predictor lowering the same coefficients in closed
+    /// form would evaluate a different model. Persisted as the payload's
+    /// `latent_measure`, which the shared marginal-slope predictor already
+    /// replays by the same anchoring equation.
+    pub latent_measure: crate::bms::LatentMeasureKind,
     /// Whether the conditioning span `a(C)` the conditional calibration was fit
     /// against is the span prediction will rebuild (gam#2768).
     ///

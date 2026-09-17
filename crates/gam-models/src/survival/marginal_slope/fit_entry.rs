@@ -281,6 +281,24 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     // every kernel evaluation — is therefore sequenced after it, so no consumer
     // can see the uncalibrated axis.
     let latent_calibration = resolve_survival_latent_score_calibration(&mut spec, &marginal_design)?;
+    // gam#2923: the measure the gate settled on. An empirical measure means the
+    // fit runs the anchored frame — the marginal identity solved on that law per
+    // row — instead of the Gaussian closed form; the law is materialised once
+    // here and every family the search builds shares it.
+    let latent_law: Option<Arc<SurvivalLatentLaw>> =
+        SurvivalLatentLaw::from_kind(latent_calibration.primary_measure(), n)?.map(Arc::new);
+    if let Some(law) = latent_law.as_ref()
+        && let Some(reason) = anchored_kernel_unavailable_reason(&spec)
+    {
+        return Err(format!(
+            "survival marginal-slope latent-measure gate produced a {} latent law, but {reason}",
+            match &law.kind {
+                crate::bms::LatentMeasureKind::GlobalEmpirical { .. } => "global-empirical",
+                crate::bms::LatentMeasureKind::LocalEmpirical { .. } => "local-empirical",
+                crate::bms::LatentMeasureKind::StandardNormal => "standard-normal",
+            }
+        ));
+    }
     // gam#2766: `Σ` in this family's defining identity is `Var(z | a)`, so the
     // pooled matrix above is only the right object when that conditional
     // covariance does not move. One robust Rao score test per score PAIR, on the
@@ -960,6 +978,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         slope_layout.validate_for(spec.z.ncols())?;
         Ok(SurvivalMarginalSlopeFamily {
             jeffreys_armed: true,
+            latent_law: latent_law.clone(),
             n,
             event: Arc::clone(&event),
             weights: Arc::clone(&weights),
@@ -1825,7 +1844,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         solved.certified_outer.as_ref(),
     )?;
     let final_sigma = sigma_from_theta(&certified_theta)?;
-    let (baseline_offset_residuals, baseline_offset_curvatures, final_baseline_config) = {
+    let (baseline_offset_residuals, baseline_offset_curvatures, final_baseline_config, fitted_exit_index) = {
         let final_family = make_family(
             &solved.designs[0],
             &solved.designs[1],
@@ -1856,7 +1875,22 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         };
         let (residuals, curvatures) =
             final_family.offset_channel_geometry(&solved.fit.block_states)?;
-        (residuals, curvatures, selected_baseline)
+        // The fitted marginal survival index at every training row's exit time
+        // (gam#2923): the quantity the anchoring identity makes the marginal
+        // survival index, read exactly as the row program reads it.
+        let fitted_exit_index = (0..n)
+            .map(|row| {
+                final_family
+                    .row_dynamic_q_values(row, &solved.fit.block_states)
+                    .map(|values| values.q1)
+            })
+            .collect::<Result<Vec<f64>, String>>()?;
+        (
+            residuals,
+            curvatures,
+            selected_baseline,
+            Array1::from_vec(fitted_exit_index),
+        )
     };
 
     let mut resolved_specs = solved.resolved_specs;
@@ -1928,7 +1962,9 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         baseline_slope,
         baseline_offset_residuals,
         baseline_offset_curvatures,
+        fitted_exit_index,
         z_normalization,
+        latent_measure: latent_calibration.primary_measure().clone(),
         latent_z_calibrations: latent_calibration.per_score,
         latent_conditioning_reproducible,
         score_covariance: score_covariance.pooled_covariance().to_dense(),

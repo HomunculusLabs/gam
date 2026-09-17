@@ -66,6 +66,28 @@ impl SurvivalMarginalSlopeFamily {
                 self.score_dim()
             ));
         }
+        if let Some(law) = self.latent_law.as_ref() {
+            // The declared law was compressed from the calibrated residual ζ
+            // itself, so it moves with the first stage θ₁ through every row at
+            // once; the per-row mixed derivative ∂/∂ζ_i is not the whole of
+            // ∂(score_β)/∂θ₁, and a correction built from it alone would
+            // understate the first-stage uncertainty exactly as gam#2484 names
+            // for the Bernoulli family.
+            return Err(format!(
+                "survival marginal-slope generated-regressor sensitivity is defined for the \
+                 standard-normal latent measure only; the row index is anchored on a declared \
+                 {} latent law built from the calibrated residual, so the law itself moves with \
+                 the first stage and the per-row mixed derivative does not account for that \
+                 channel (gam#2484)",
+                match &law.kind {
+                    crate::bms::LatentMeasureKind::GlobalEmpirical { grid } =>
+                        format!("global-empirical ({} nodes)", grid.nodes.len()),
+                    crate::bms::LatentMeasureKind::LocalEmpirical { grids, .. } =>
+                        format!("local-empirical ({} grids)", grids.len()),
+                    crate::bms::LatentMeasureKind::StandardNormal => "standard-normal".to_string(),
+                }
+            ));
+        }
         let slices = block_slices(self, block_states);
         if slices.total != p_beta {
             return Err(format!(

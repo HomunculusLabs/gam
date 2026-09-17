@@ -734,7 +734,10 @@ impl SurvivalMarginalSlopeFamily {
     /// row program only: no per-score slope, score warp, link deviation, influence
     /// absorber or time wiggle.
     pub(crate) fn rigid_third_information_available(&self) -> bool {
-        !(self.per_z_slope_active() || self.flex_active() || self.flex_timewiggle_active())
+        !(self.per_z_slope_active()
+            || self.flex_active()
+            || self.flex_timewiggle_active()
+            || self.anchored_law_active())
     }
 
     /// Refuse a frame without closed-form fifth likelihood derivatives; see
@@ -746,7 +749,7 @@ impl SurvivalMarginalSlopeFamily {
     ) -> Result<(), String> {
         if self.effective_flex_active(block_states)? || !self.rigid_third_information_available() {
             return Err(format!(
-                "survival marginal-slope {context} has closed-form fifth likelihood derivatives on the rigid shared-slope row program only; FLEX, time-wiggle and per-score slopes have none"
+                "survival marginal-slope {context} has closed-form fifth likelihood derivatives on the rigid shared-slope Gaussian row program only; FLEX, time-wiggle, per-score slopes and a declared latent law have none"
             ));
         }
         Ok(())

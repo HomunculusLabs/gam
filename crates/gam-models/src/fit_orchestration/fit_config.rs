@@ -80,11 +80,57 @@ pub fn validate_survival_baseline_config(
     Ok(())
 }
 
+/// The `latent_measure` spellings a request may carry. `None` is the automatic
+/// gate (the default policy), so the caller need not construct one.
+pub(crate) fn parse_latent_measure_spec(
+    value: &str,
+) -> Result<Option<crate::bms::LatentMeasureSpec>, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(None),
+        "standard-normal" | "standard_normal" | "gaussian" => {
+            Ok(Some(crate::bms::LatentMeasureSpec::StandardNormal))
+        }
+        "global-empirical" | "global_empirical" | "empirical" => {
+            Ok(Some(crate::bms::LatentMeasureSpec::GlobalEmpirical {
+                grid_size: crate::bms::DEFAULT_EMPIRICAL_LATENT_GRID_SIZE,
+            }))
+        }
+        other => Err(format!(
+            "unsupported latent_measure '{other}'; use auto, standard-normal, or global-empirical"
+        )),
+    }
+}
+
 impl FitConfig {
+    /// The declared latent law as the validated grid the survival
+    /// marginal-slope family anchors on (gam#2923).
+    pub(crate) fn declared_latent_law_grid(
+        &self,
+    ) -> Result<Option<crate::bms::EmpiricalZGrid>, String> {
+        self.declared_latent_law
+            .as_ref()
+            .map(|law| {
+                crate::bms::EmpiricalZGrid::new(
+                    law.nodes.clone(),
+                    law.weights.clone(),
+                    "declared latent law",
+                )
+            })
+            .transpose()
+    }
+
     pub(crate) fn marginal_slope_latent_policy(&self) -> crate::bms::LatentZPolicy {
         let mut policy = crate::bms::LatentZPolicy::default();
         if self.frozen_score {
             policy.latent_measure = crate::bms::LatentMeasureSpec::StandardNormal;
+        }
+        if let Some(measure) = self.latent_measure.as_deref() {
+            // Validated by `resolve`; an unresolved config falls back to the
+            // gate rather than panicking on a spelling.
+            match parse_latent_measure_spec(measure) {
+                Ok(Some(spec)) => policy.latent_measure = spec,
+                Ok(None) | Err(_) => {}
+            }
         }
         policy
     }
@@ -136,6 +182,45 @@ impl FitConfig {
                     || self.family.as_deref() == Some("bernoulli-marginal-slope")))
         {
             return Err("frozen_score requires a marginal-slope fit with an explicit z_column and no integrated CTN recipe".to_string());
+        }
+        self.latent_measure = self
+            .latent_measure
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty());
+        if self.declared_latent_law.is_some() {
+            if self.survival_likelihood.as_deref() != Some("marginal-slope") {
+                return Err(
+                    "declared_latent_law applies to survival marginal-slope fits only".to_string(),
+                );
+            }
+            if self.z_column.is_none() || self.ctn_stage1.is_some() {
+                return Err(
+                    "declared_latent_law is a statement about an explicit z_column and cannot be \
+                     combined with an integrated CTN recipe"
+                        .to_string(),
+                );
+            }
+            if self.frozen_score || self.latent_measure.is_some() {
+                return Err(
+                    "declared_latent_law already fixes the latent measure; do not combine it with \
+                     frozen_score or latent_measure"
+                        .to_string(),
+                );
+            }
+            self.declared_latent_law_grid()?;
+        }
+        if let Some(measure) = self.latent_measure.as_deref() {
+            parse_latent_measure_spec(measure)?;
+            if !(self.survival_likelihood.as_deref() == Some("marginal-slope")
+                || self.family.as_deref() == Some("bernoulli-marginal-slope"))
+            {
+                return Err("latent_measure applies to marginal-slope fits only".to_string());
+            }
+            if self.frozen_score && measure != "standard-normal" {
+                return Err(format!(
+                    "frozen_score pins the standard-normal latent measure; it cannot be combined with latent_measure = '{measure}'"
+                ));
+            }
         }
         if self
             .persistent_warm_start_store

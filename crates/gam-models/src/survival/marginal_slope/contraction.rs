@@ -15,7 +15,7 @@ impl SurvivalMarginalSlopeFamily {
         &self,
         row: usize,
         block_states: &[ParameterBlockState],
-    ) -> Result<SparseTower3<P, RIGID_LINEAR_MASK>, String> {
+    ) -> Result<G::Tower3, String> {
         let inputs = rigid_row_inputs(
             self,
             block_states,
@@ -23,15 +23,14 @@ impl SurvivalMarginalSlopeFamily {
             "survival marginal-slope rigid row helper third",
         )?;
         let p = rigid_row_kernel_primaries::<P, G>(self, block_states, row)?;
-        let vars: [SparseTower3<P, RIGID_LINEAR_MASK>; P] =
-            std::array::from_fn(|a| SparseTower3::variable(p[a], a));
+        let vars: [G::Tower3; P] = std::array::from_fn(|a| G::Tower3::variable(p[a], a));
         rigid_row_nll::<P, G, _>(&vars, &inputs)
     }
 
     /// Contract a previously evaluated sparse row tower with one direction,
     /// preserving the dense tower's exact accumulation order.
-    pub(crate) fn contract_row_primary_third_tower<const P: usize>(
-        tower: &SparseTower3<P, RIGID_LINEAR_MASK>,
+    pub(crate) fn contract_row_primary_third_tower<const P: usize, G: SlopeRowGeometry<P>>(
+        tower: &G::Tower3,
         dir: &Array1<f64>,
     ) -> Result<[[f64; P]; P], String> {
         if dir.len() != P {
@@ -47,7 +46,7 @@ impl SurvivalMarginalSlopeFamily {
         dir_arr.copy_from_slice(dir.as_slice().ok_or_else(|| {
             "survival rigid third contracted: non-contiguous direction".to_string()
         })?);
-        Ok(tower3_third_contracted(&tower.t3, &dir_arr))
+        Ok(tower3_third_contracted(tower.t3(), &dir_arr))
     }
 
     /// Build one rigid row's third-order directional contraction without
@@ -133,17 +132,9 @@ impl SurvivalMarginalSlopeFamily {
         row: usize,
         block_states: &[ParameterBlockState],
     ) -> Result<(f64, Array1<f64>, Array2<f64>), String> {
-        if self.slope_is_follow_up_varying() {
-            self.row_primary_gradient_hessian_in_frame::<
-                DYNAMIC_SLOPE_PRIMARIES,
-                DynamicSlopeGeometry,
-            >(row, block_states)
-        } else {
-            self.row_primary_gradient_hessian_in_frame::<
-                STATIC_SLOPE_PRIMARIES,
-                StaticSlopeGeometry,
-            >(row, block_states)
-        }
+        in_slope_frame!(self, P, Frame, {
+            self.row_primary_gradient_hessian_in_frame::<P, Frame>(row, block_states)
+        })
     }
 
     fn row_primary_gradient_hessian_in_frame<const P: usize, G: SlopeRowGeometry<P>>(
@@ -274,16 +265,10 @@ impl SurvivalMarginalSlopeFamily {
             }
             out
         }
-        if self.slope_is_follow_up_varying() {
-            Ok(to_array(self.row_primary_third_contracted_tower::<
-                DYNAMIC_SLOPE_PRIMARIES,
-                DynamicSlopeGeometry,
-            >(row, block_states, dir)?))
-        } else {
-            Ok(to_array(self.row_primary_third_contracted_tower::<
-                STATIC_SLOPE_PRIMARIES,
-                StaticSlopeGeometry,
-            >(row, block_states, dir)?))
-        }
+        in_slope_frame!(self, P, Frame, {
+            Ok(to_array(
+                self.row_primary_third_contracted_tower::<P, Frame>(row, block_states, dir)?,
+            ))
+        })
     }
 }
