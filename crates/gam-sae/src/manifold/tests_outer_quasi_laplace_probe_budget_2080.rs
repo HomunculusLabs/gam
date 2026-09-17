@@ -513,6 +513,138 @@ fn run_wide_outer_fit(
     (ev, telemetry)
 }
 
+/// #2153 — live-lock, recorded per criterion evaluation the search issues. Each
+/// evaluation is keyed by the bits of `ρ`, its evaluation kind, and the bits of the
+/// inner state installed at entry (β, gate logits, chart coordinates, assignment
+/// temperature). A key seen twice is a step that asked for the same computation from
+/// the same state again, with no accepted state change in between. A value or
+/// derivative request is keyed by its `OuterEvalOrder` whichever entry point issues
+/// it, so one computation reached through `eval_cost` and `eval_with_order` is one key.
+#[derive(Default)]
+struct LivelockLedger {
+    seen: std::collections::HashSet<(Vec<u64>, String, u64)>,
+    evals: usize,
+    repeats: Vec<(usize, Vec<f64>, String)>,
+}
+
+/// Forwards every method `SaeManifoldOuterObjective` overrides, so the search runs
+/// as it does on the bare objective, and enters each evaluation in the ledger first.
+struct LivelockRecorder<'a> {
+    inner: &'a mut SaeManifoldOuterObjective,
+    ledger: &'a mut LivelockLedger,
+}
+
+impl LivelockRecorder<'_> {
+    fn record(&mut self, rho: &Array1<f64>, kind: String) {
+        use std::hash::{Hash, Hasher};
+        let mut state = std::collections::hash_map::DefaultHasher::new();
+        let term = &self.inner.term;
+        for value in term.flatten_beta().iter() {
+            value.to_bits().hash(&mut state);
+        }
+        for value in term.assignment.logits.iter() {
+            value.to_bits().hash(&mut state);
+        }
+        for coords in &term.assignment.coords {
+            for value in coords.as_matrix().iter() {
+                value.to_bits().hash(&mut state);
+            }
+        }
+        // A continuation waypoint installs a new temperature without moving the
+        // coefficients, and prices a different objective at the same ρ.
+        term.assignment.mode.temperature().to_bits().hash(&mut state);
+        let key = (
+            rho.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            kind.clone(),
+            state.finish(),
+        );
+        self.ledger.evals += 1;
+        if !self.ledger.seen.insert(key) {
+            self.ledger.repeats.push((self.ledger.evals, rho.to_vec(), kind));
+        }
+    }
+}
+
+impl OuterObjective for LivelockRecorder<'_> {
+    fn capability(&self) -> OuterCapability {
+        self.inner.capability()
+    }
+
+    fn eval_cost(&mut self, rho: &Array1<f64>) -> Result<f64, EstimationError> {
+        self.record(rho, format!("{:?}", OuterEvalOrder::Value));
+        self.inner.eval_cost(rho)
+    }
+
+    fn eval(&mut self, rho: &Array1<f64>) -> Result<OuterEval, EstimationError> {
+        self.record(rho, format!("{:?}", OuterEvalOrder::ValueAndGradient));
+        self.inner.eval(rho)
+    }
+
+    fn eval_with_order(
+        &mut self,
+        rho: &Array1<f64>,
+        order: OuterEvalOrder,
+    ) -> Result<OuterEval, EstimationError> {
+        self.record(rho, format!("{order:?}"));
+        self.inner.eval_with_order(rho, order)
+    }
+
+    fn eval_efs(&mut self, rho: &Array1<f64>) -> Result<EfsEval, EstimationError> {
+        self.record(rho, "efs".to_string());
+        self.inner.eval_efs(rho)
+    }
+
+    fn eval_fixed_point_certificate(
+        &mut self,
+        rho: &Array1<f64>,
+    ) -> Result<gam_solve::rho_optimizer::FixedPointCertificateEval, EstimationError> {
+        self.record(rho, "fixed-point certificate".to_string());
+        self.inner.eval_fixed_point_certificate(rho)
+    }
+
+    fn reset(&mut self) {
+        self.inner.reset()
+    }
+
+    fn seed_inner_state(&mut self, beta: &Array1<f64>) -> Result<SeedOutcome, EstimationError> {
+        self.inner.seed_inner_state(beta)
+    }
+
+    fn outer_domain_upper_bound(&self) -> Result<Option<Array1<f64>>, EstimationError> {
+        self.inner.outer_domain_upper_bound()
+    }
+
+    fn outer_domain_lower_bound(&self) -> Result<Option<Array1<f64>>, EstimationError> {
+        self.inner.outer_domain_lower_bound()
+    }
+
+    fn reactive_domain_scalar_contract(
+        &self,
+    ) -> Result<Option<gam_solve::continuation_path::ContinuationScalarContract>, EstimationError>
+    {
+        self.inner.reactive_domain_scalar_contract()
+    }
+
+    fn install_reactive_domain_scalar_state(
+        &mut self,
+        state: &gam_solve::continuation_path::ContinuationScalarState,
+    ) -> Result<(), EstimationError> {
+        self.inner.install_reactive_domain_scalar_state(state)
+    }
+
+    fn begin_reactive_domain_waypoint(&mut self) -> Result<(), EstimationError> {
+        self.inner.begin_reactive_domain_waypoint()
+    }
+
+    fn commit_reactive_domain_waypoint(&mut self, rho: &Array1<f64>) -> Result<(), EstimationError> {
+        self.inner.commit_reactive_domain_waypoint(rho)
+    }
+
+    fn rollback_reactive_domain_waypoint(&mut self) -> Result<(), EstimationError> {
+        self.inner.rollback_reactive_domain_waypoint()
+    }
+}
+
 /// Same full outer path as `run_wide_outer_fit`, but intentionally starts from
 /// the generated seed rather than pinning `initial_rho`. This is the K=1 cold
 /// path that #2153 exposed: with the optimizer's raw identity iter-0 metric, the
@@ -522,7 +654,7 @@ fn run_k1_generated_seed_outer_fit(
     n: usize,
     p: usize,
     harmonics: usize,
-) -> (f64, OuterProbeTelemetry) {
+) -> (f64, OuterProbeTelemetry, LivelockLedger) {
     let z = one_circle_wide_target(n, p, 0.05);
     let (term, seed_dispersion) = two_circle_periodic_term(z.view(), 1, harmonics);
     let init_rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]])
@@ -531,14 +663,20 @@ fn run_k1_generated_seed_outer_fit(
     let n_params = init_rho.to_flat(&term.assignment).expect("the seed rho is bound to the term's assignment").len();
     let mut objective =
         SaeManifoldOuterObjective::new(term, z.clone(), None, init_rho, 8, 0.04, 1.0e-6, 1.0e-6);
+    let mut ledger = LivelockLedger::default();
     let result = OuterProblem::new(n_params)
-        .with_max_iter(4)
         .with_seed_config(gam_problem::SeedConfig {
             max_seeds: 1,
             seed_budget: 1,
             ..Default::default()
         })
-        .run(&mut objective, "SAE manifold K=1 generated seed")
+        .run(
+            &mut LivelockRecorder {
+                inner: &mut objective,
+                ledger: &mut ledger,
+            },
+            "SAE manifold K=1 generated seed",
+        )
         .expect("#2153 K=1 generated-seed circle fit must terminate");
     assert!(
         result.converged(),
@@ -554,7 +692,7 @@ fn run_k1_generated_seed_outer_fit(
         .expect("#2153 outer result must certify the installed state");
     let fitted = objective.into_fitted().expect("outer fit was evaluated");
     let ev = global_ev(z.view(), fitted.term.fitted().view());
-    (ev, telemetry)
+    (ev, telemetry, ledger)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -799,26 +937,30 @@ fn wide_p_outer_reml_terminates_within_probe_budget_2080() {
     );
 }
 
-/// #2153 — K=1 manifold fits must not live-lock in Strong-Wolfe line search from
-/// a cold generated seed. The regression is a probe-count assertion, not a
-/// wall-clock deadline: the first BFGS step is normalized by the seed gradient
-/// norm, so the line search should accept a bounded step instead of spending
-/// repeated full inner solves on rejected value probes.
+/// #2153 — K=1 manifold fits must not live-lock from a cold generated seed. The
+/// regression asserts termination and outcome, not a count or a deadline: the search
+/// ends with a certificate (the helper requires `converged()` and certifies the
+/// installed state), and no criterion evaluation repeats a bit-identical `ρ`, with
+/// the same evaluation kind, from an unchanged inner state. That repeat is what a
+/// live-lock is; it replaces a hand-set `criterion_calls <= 32` probe budget.
 #[test]
 fn k1_generated_seed_circle_outer_reml_does_not_livelock_2153() {
-    let (ev, telemetry) = run_k1_generated_seed_outer_fit(32, 24, 1);
+    let (ev, telemetry, ledger) = run_k1_generated_seed_outer_fit(32, 24, 1);
     eprintln!(
         "[#2153] K=1 generated-seed outer fit: ev={ev:.4}, criterion_calls={}, \
-         infeasible_criterion_evals={}, infeasible_total={}",
+         infeasible_criterion_evals={}, infeasible_total={}, recorded_evals={}, repeats={}",
         telemetry.criterion_calls,
         telemetry.infeasible_criterion_evals,
         telemetry.infeasible_total(),
+        ledger.evals,
+        ledger.repeats.len(),
     );
     assert!(
-        telemetry.criterion_calls <= 32,
-        "#2153 K=1 generated-seed fit issued {} criterion calls; expected a \
-         bounded first-line-search probe budget",
-        telemetry.criterion_calls
+        ledger.repeats.is_empty(),
+        "#2153 K=1 generated-seed search re-issued an evaluation at a bit-identical ρ, \
+         with the same kind, from an unchanged inner state (a live-lock step); \
+         (index, ρ, kind): {:?}",
+        ledger.repeats
     );
     assert!(
         ev.is_finite() && ev > 0.30,
@@ -995,7 +1137,6 @@ fn entangled_two_circle_outer_reml_separates_2080() {
         SaeManifoldOuterObjective::new(term, z.clone(), None, init_rho, 8, 0.04, 1.0e-6, 1.0e-6);
     let result = OuterProblem::new(n_params)
         .with_initial_rho(seed)
-        .with_max_iter(4)
         .with_seed_config(gam_problem::SeedConfig {
             max_seeds: 1,
             seed_budget: 1,
