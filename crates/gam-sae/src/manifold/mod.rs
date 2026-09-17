@@ -383,6 +383,11 @@ mod tests_fitted_response_edf_2933;
 #[cfg(test)]
 mod tests_fitted_response_sphere_2933;
 
+/// #2933 F39 — a learned decoder frame prices its integrated response, against a
+/// re-solved response matrix.
+#[cfg(test)]
+mod tests_fitted_response_frames_2933;
+
 /// #2933 F37/F38 — the dispersion is conditional on the fitted routing and its
 /// scale equation is explicit.
 #[cfg(test)]

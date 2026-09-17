@@ -64,6 +64,9 @@ pub(crate) struct FittedResponseDivergence {
     /// It equals the likelihood value unless the metric whitens.
     pub(crate) raw_residual_dof: f64,
     pub(crate) estimator: FittedResponseDivergenceEstimator,
+    /// Whether the response moves the learned decoder frames with the data, or
+    /// holds them at their fitted orientation (#2933 F39).
+    pub(crate) frame_conditioning: SaeFrameConditioning,
 }
 
 /// The output inner product a dense data curvature is assembled with, over the
@@ -136,10 +139,13 @@ impl SaeManifoldTerm {
     /// through the one operator, never as a sum of separately inverted diagonal
     /// entries.
     ///
-    /// The decoder frames are held at their fitted orientation, so on a framed
-    /// term this is the divergence conditional on the fitted frames. The TopK
-    /// support and the converged basin are held fixed in the same way, so the trace
-    /// carries no selection degrees of freedom (#2933 F37).
+    /// A learned decoder frame is estimated from the data, so where its tangent
+    /// operator is admitted the response integrates it
+    /// ([`Self::frame_integrated_fitted_response_divergence`], #2933 F39). Where
+    /// [`Self::frame_marginal_admission`] refuses, the frames are held at their
+    /// fitted orientation and the divergence is conditional on them, tagged with
+    /// the refusal. The TopK support and the converged basin are always held fixed,
+    /// so the trace carries no selection degrees of freedom (#2933 F37).
     pub(crate) fn fitted_response_divergence(
         &self,
         target: ArrayView2<'_, f64>,
@@ -148,12 +154,16 @@ impl SaeManifoldTerm {
     ) -> Result<FittedResponseDivergence, FittedResponseDivergenceRefusal> {
         let numerical = |reason: String| FittedResponseDivergenceRefusal::Numerical { reason };
         self.admit_fitted_response_divergence(target)?;
+        let frame_conditioning = self.fitted_response_frame_conditioning().map_err(numerical)?;
+        if frame_conditioning == SaeFrameConditioning::MarginalOverLearnedFrames {
+            return self.frame_integrated_fitted_response_divergence(rho, target);
+        }
         let dim = sae_exact_stationarity_dim(cache.delta_t_len(), cache.k);
         if sae_exact_stationarity_admitted(dim, self.host_available_bytes) {
             let geometry = self
                 .materialize_exact_stationarity_geometry(rho, target, cache)
                 .map_err(numerical)?;
-            self.fitted_response_divergence_exact_spectral(&geometry, cache)
+            self.fitted_response_divergence_exact_spectral(&geometry, cache, frame_conditioning)
         } else {
             // The divergence shares the ARD trace lane's probe budget and seed: both
             // are grouped Hutchinson traces of an arrow inverse at the same scale.
@@ -200,6 +210,7 @@ impl SaeManifoldTerm {
                     probes,
                     standard_error,
                 },
+                frame_conditioning,
             })
         }
     }
@@ -209,15 +220,105 @@ impl SaeManifoldTerm {
     /// eigensystem once for the divergence and the covariance (#2933 F33). The
     /// estimator is the exact spectral trace, whatever the admission would have
     /// routed, because the eigensystem is already paid for. Resolved negative
-    /// modes are inverted exactly as on the admission-routed path.
+    /// modes are inverted exactly as on the admission-routed path. Where the learned
+    /// frames admit integration, the fixed-frame geometry describes a different
+    /// response, and the frame-integrated operator is formed instead.
     pub(crate) fn fitted_response_divergence_from_geometry(
         &self,
         geometry: &ExactHessianSpectralBlock,
+        rho: &SaeManifoldRho,
         target: ArrayView2<'_, f64>,
         cache: &ArrowFactorCache,
     ) -> Result<FittedResponseDivergence, FittedResponseDivergenceRefusal> {
         self.admit_fitted_response_divergence(target)?;
-        self.fitted_response_divergence_exact_spectral(geometry, cache)
+        let frame_conditioning = self
+            .fitted_response_frame_conditioning()
+            .map_err(|reason| FittedResponseDivergenceRefusal::Numerical { reason })?;
+        if frame_conditioning == SaeFrameConditioning::MarginalOverLearnedFrames {
+            return self.frame_integrated_fitted_response_divergence(rho, target);
+        }
+        self.fitted_response_divergence_exact_spectral(geometry, cache, frame_conditioning)
+    }
+
+    /// Which frame conditioning the fitted response takes at this state: none
+    /// without learned frames, integrated where [`Self::frame_marginal_admission`]
+    /// admits the tangent operator, conditional on the fitted frames otherwise.
+    fn fitted_response_frame_conditioning(&self) -> Result<SaeFrameConditioning, String> {
+        if !self.frames_active() {
+            return Ok(SaeFrameConditioning::NoLearnedFrames);
+        }
+        Ok(match self.frame_marginal_admission()? {
+            None => SaeFrameConditioning::MarginalOverLearnedFrames,
+            Some(reason) => SaeFrameConditioning::ConditionalOnFittedFrames(reason),
+        })
+    }
+
+    /// The fitted-response divergence integrated over every learned frame (#2933
+    /// F39).
+    ///
+    /// A framed decoder moves along `vec B = T·ξ`, `ξ = (vec δC, vec W)`, and its
+    /// stationarity in `(t, ξ)` has Jacobian
+    /// `A_ξ = [[A_tt, A_tB·T], [Tᵀ·A_Bt, Tᵀ·A_BB·T + E]]`
+    /// ([`Self::frame_marginal_information`]). The data reach that stationarity
+    /// through `∂F_ξ/∂y = −diag(I, T)ᵀ·JᵀΩ` at `ξ = 0`, with no `E`, so
+    /// `R = J·diag(I, T)·A_ξ⁺·diag(I, T)ᵀ·JᵀΩ` and every trace of
+    /// [`Self::spectral_fitted_response_traces`] reads the lifted curvature
+    /// `G_ξ = diag(I, T)ᵀ·G·diag(I, T)` of the unframed `(t, vec B)` data curvature,
+    /// over the retained directions of `A_ξ`. The frame orientations then carry
+    /// their actual response instead of a count of fully determined directions.
+    fn frame_integrated_fitted_response_divergence(
+        &self,
+        rho: &SaeManifoldRho,
+        target: ArrayView2<'_, f64>,
+    ) -> Result<FittedResponseDivergence, FittedResponseDivergenceRefusal> {
+        let numerical = |reason: String| FittedResponseDivergenceRefusal::Numerical { reason };
+        let information = self
+            .frame_marginal_information(rho, target, None)
+            .map_err(numerical)?;
+        let total_t = information.total_t;
+        let lift = &information.tangent.lift;
+        let (beta_dim, xi_dim) = lift.dim();
+        let lifted_curvature = |gram: ResponseOutputGram| -> Result<Array2<f64>, String> {
+            let curvature = information
+                .unframed
+                .materialize_data_gauss_newton_dense(&information.cache, gram)?;
+            if curvature.dim() != (total_t + beta_dim, total_t + beta_dim) {
+                return Err(format!(
+                    "frame-integrated divergence: data curvature {:?} does not match t dimension \
+                     {total_t} plus beta dimension {beta_dim}",
+                    curvature.dim()
+                ));
+            }
+            let coupling = curvature.slice(ndarray::s![..total_t, total_t..]).dot(lift);
+            let border = information
+                .tangent
+                .congruence(&curvature.slice(ndarray::s![total_t.., total_t..]).to_owned());
+            let mut lifted = Array2::<f64>::zeros((total_t + xi_dim, total_t + xi_dim));
+            lifted
+                .slice_mut(ndarray::s![..total_t, ..total_t])
+                .assign(&curvature.slice(ndarray::s![..total_t, ..total_t]));
+            lifted
+                .slice_mut(ndarray::s![..total_t, total_t..])
+                .assign(&coupling);
+            lifted
+                .slice_mut(ndarray::s![total_t.., ..total_t])
+                .assign(&coupling.t());
+            lifted
+                .slice_mut(ndarray::s![total_t.., total_t..])
+                .assign(&border);
+            Ok(lifted)
+        };
+        let (divergence, likelihood_residual_dof, raw_residual_dof) = information
+            .unframed
+            .spectral_fitted_response_traces(&information.joint, lifted_curvature)
+            .map_err(numerical)?;
+        Ok(FittedResponseDivergence {
+            divergence,
+            likelihood_residual_dof,
+            raw_residual_dof,
+            estimator: FittedResponseDivergenceEstimator::ExactSpectral,
+            frame_conditioning: SaeFrameConditioning::MarginalOverLearnedFrames,
+        })
     }
 
     /// What every divergence estimator needs: a target of the fitted shape, and
@@ -247,20 +348,25 @@ impl SaeManifoldTerm {
         &self,
         geometry: &ExactHessianSpectralBlock,
         cache: &ArrowFactorCache,
+        frame_conditioning: SaeFrameConditioning,
     ) -> Result<FittedResponseDivergence, FittedResponseDivergenceRefusal> {
         let (divergence, likelihood_residual_dof, raw_residual_dof) = self
-            .exact_spectral_fitted_response(geometry, cache)
+            .spectral_fitted_response_traces(geometry, |gram| {
+                self.materialize_data_gauss_newton_dense(cache, gram)
+            })
             .map_err(|reason| FittedResponseDivergenceRefusal::Numerical { reason })?;
         Ok(FittedResponseDivergence {
             divergence,
             likelihood_residual_dof,
             raw_residual_dof,
             estimator: FittedResponseDivergenceEstimator::ExactSpectral,
+            frame_conditioning,
         })
     }
 
-    /// `tr(A⁺G)` and each frame's residual dof off the materialized exact
-    /// stationarity eigensystem.
+    /// `tr(A⁺G)` and each frame's residual dof off a materialized stationarity
+    /// eigensystem, with `curvature` materializing each output Gram's data
+    /// curvature in the eigensystem's coordinates.
     ///
     /// With the retained generalized eigenpairs `(μᵢ, wᵢ)` of the pencil `(A, Φ)`, so that
     /// `A⁺ = Σ_retained wᵢwᵢᵀ/μᵢ` (#2933 F07), and `W_x = WᵀG_xW`,
@@ -268,10 +374,10 @@ impl SaeManifoldTerm {
     /// likelihood frame's `‖Ω^{½}RΩ^{−½}‖²_F` is `tr(A⁺GA⁺G)`. Under a whitening metric
     /// the raw frame's `‖R‖²_F` for `R = JA⁺JᵀΩ` is `tr(A⁺G_aA⁺G_b)` with
     /// `G_a = JᵀΩ²J` and `G_b = JᵀJ`.
-    fn exact_spectral_fitted_response(
+    fn spectral_fitted_response_traces(
         &self,
         geometry: &ExactHessianSpectralBlock,
-        cache: &ArrowFactorCache,
+        curvature: impl Fn(ResponseOutputGram) -> Result<Array2<f64>, String>,
     ) -> Result<(f64, f64, f64), String> {
         let dim = geometry.eigenvalues.len();
         if geometry.eigenvectors.dim() != (dim, dim) {
@@ -290,7 +396,7 @@ impl SaeManifoldTerm {
             .map(|&index| 1.0 / geometry.eigenvalues[index])
             .collect();
         let project = |gram: ResponseOutputGram| -> Result<Array2<f64>, String> {
-            let curvature = self.materialize_data_gauss_newton_dense(cache, gram)?;
+            let curvature = curvature(gram)?;
             if curvature.dim() != (dim, dim) {
                 return Err(format!(
                     "exact spectral divergence: data curvature {:?} does not match the \

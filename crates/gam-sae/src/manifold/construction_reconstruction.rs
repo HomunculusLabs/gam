@@ -227,13 +227,15 @@ impl SaeManifoldTerm {
     /// every observation has `ν = 0`, leaves no residual to estimate a scale from,
     /// and is refused.
     ///
-    /// The divergence holds the profiled decoder frames at their fitted
-    /// orientation. Each frame's `r·(p − r)` unpenalized tangent dimensions are
-    /// charged as fully determined response directions, so `tr R` and `‖R‖²_F`
-    /// each gain that count and `ν` loses it. When the frame block carries
+    /// Learned decoder frames are estimated, so where their tangent operator is
+    /// admitted the divergence and both residual dofs integrate them
+    /// ([`SaeFrameConditioning::MarginalOverLearnedFrames`], #2933 F39). Where
+    /// [`Self::frame_marginal_admission`] refuses, the response holds the frames at
+    /// their fitted orientation, and each frame's `r·(p − r)` unpenalized tangent
+    /// dimensions are charged as fully determined response directions: `tr R` and
+    /// `‖R‖²_F` each gain that count and `ν` loses it. When the frame block carries
     /// Gauss–Newton curvature and no prior, that count bounds the frame-coupled
-    /// divergence from above, which makes the scale conservative. The coupled
-    /// frame-tangent response is not assembled yet.
+    /// divergence from above, which makes that scale conservative.
     ///
     /// # Selection is conditioned on, not charged
     ///
@@ -310,7 +312,7 @@ impl SaeManifoldTerm {
         let target = &fitted - &residual;
         let response = match geometry {
             Some(geometry) => {
-                self.fitted_response_divergence_from_geometry(geometry, target.view(), cache)
+                self.fitted_response_divergence_from_geometry(geometry, rho, target.view(), cache)
             }
             None => self.fitted_response_divergence(target.view(), rho, cache),
         }
@@ -335,10 +337,12 @@ impl SaeManifoldTerm {
                 response.raw_residual_dof
             ),
         }
-        let frame_dimension = if self.frames_active() {
-            self.grassmann_evidence_dimension() as f64
-        } else {
-            0.0
+        let frame_dimension = match response.frame_conditioning {
+            SaeFrameConditioning::ConditionalOnFittedFrames(_) => {
+                self.grassmann_evidence_dimension() as f64
+            }
+            SaeFrameConditioning::NoLearnedFrames
+            | SaeFrameConditioning::MarginalOverLearnedFrames => 0.0,
         };
         let scale = |label: &str, rss: f64, residual_dof: f64| -> Result<f64, String> {
             if !(residual_dof.is_finite() && residual_dof > 0.0) {
