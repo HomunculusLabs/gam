@@ -3834,6 +3834,49 @@ fn an_uncertified_fixed_lambda_fit_records_its_cycle_budget_2943() {
     );
 }
 
+#[test]
+fn a_later_refusal_or_reset_keeps_the_search_inner_refusal_2943() {
+    // gam#2943: `last_error` is the last evaluation's refusal, which a finite trial
+    // clears and any later refusal replaces. The search's most recent uncertified
+    // inner solve is kept apart, so the fit boundary can still name it.
+    let mut outer = crate::warm_start::CustomOuterState::new_with_cold_signal(
+        None,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    outer.record_refusal(CustomFamilyError::InnerSolveNotConverged {
+        cycles: 8,
+        terminal: None,
+        kkt_residual: Some(1.081e3),
+        kkt_tol: Some(5.352e-2),
+        theta_dim: 2,
+        rho_dim: 2,
+        psi_dim: 0,
+        cycle_budget: Some(8),
+        carrying_block: Some("slope_surface".to_string()),
+    });
+    outer.record_refusal(CustomFamilyError::trial_point("non-finite value probe"));
+    assert!(
+        matches!(outer.last_error, Some(CustomFamilyError::TrialPointRefused { .. })),
+        "the last evaluation's refusal replaces the earlier one"
+    );
+    // A finite trial clears the last evaluation's refusal, and a reseed resets.
+    outer.last_error = None;
+    outer.reset();
+    assert!(
+        matches!(
+            outer.last_inner_refusal,
+            Some(CustomFamilyError::InnerSolveNotConverged {
+                cycles: 8,
+                cycle_budget: Some(8),
+                ..
+            })
+        ),
+        "neither a later refusal, a finite trial nor a reset clears the search's last \
+         uncertified inner solve"
+    );
+}
+
 #[derive(Clone)]
 struct OneBlockQuarticExactFamily {
     linear: f64,

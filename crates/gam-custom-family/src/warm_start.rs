@@ -1172,6 +1172,14 @@ pub(crate) struct CustomOuterState {
     /// downstream classifiers inspect exact inner convergence fields without
     /// parsing text.
     pub(crate) last_error: Option<CustomFamilyError>,
+    /// The most recent uncertified inner solve any evaluation of this search
+    /// raised, recorded by [`Self::record_refusal`].
+    ///
+    /// Unlike [`Self::last_error`], no later evaluation, reset or reseed clears
+    /// it. When the search ends uncertified it becomes
+    /// `OuterSmoothingFailed::search_inner_refusal`, which the fit boundary names
+    /// even when finite trials ran after it (#2943).
+    pub(crate) last_inner_refusal: Option<CustomFamilyError>,
     pub(crate) outer_derivative_pilot: Option<OuterDerivativePilotSchedule>,
     /// #2349 — one-shot "re-evaluate COLD" pulse shared with the outer
     /// cost-stall guard (via `OuterProblem::with_stuck_stall_cold_reeval_signal`).
@@ -1215,6 +1223,7 @@ impl CustomOuterState {
             reset_warm_cache: warm_start,
             terminal_mode: None,
             last_error: None,
+            last_inner_refusal: None,
             outer_derivative_pilot: None,
             force_cold_signal,
             force_cold_latched: false,
@@ -1269,6 +1278,16 @@ impl CustomOuterState {
             self.warm_cache = Some(mode);
             self.incumbent_established = true;
         }
+    }
+
+    /// Record the typed refusal of one objective evaluation. An uncertified
+    /// inner solve is also kept as the search's whole-search record, which
+    /// neither a later evaluation nor a reset clears (#2943).
+    pub(crate) fn record_refusal(&mut self, refusal: CustomFamilyError) {
+        if matches!(refusal, CustomFamilyError::InnerSolveNotConverged { .. }) {
+            self.last_inner_refusal = Some(refusal.clone());
+        }
+        self.last_error = Some(refusal);
     }
 
     pub(crate) fn with_outer_derivative_pilot(

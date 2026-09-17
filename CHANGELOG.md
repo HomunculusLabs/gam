@@ -30,7 +30,10 @@
   `CustomFamilyError::FitEndedWithoutCertifiedInnerMode` wraps the refusal a fit
   ended with, and `fit_ended_without_certified_inner_mode` is its only
   constructor; inside a trial the refusal stays `InnerSolveNotConverged`, which
-  the outer search steps away from.
+  the outer search steps away from. `CustomFamilyError::OuterSmoothingFailed`
+  gains `search_inner_refusal`, the search's most recent uncertified inner
+  solve, which the fit boundary names even when finite trials ran after it;
+  `last_refusal` stays the last evaluation's refusal, which Jeffreys arming reads.
 
 ## gamfit 0.1.268 (2026-09-11)
 

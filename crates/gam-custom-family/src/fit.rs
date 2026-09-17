@@ -2795,7 +2795,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     };
                     // A value probe never seeds the next evaluation (#2668), and an
                     // unconverged solve never does either (#2902).
-                    outer.last_error = Some(failure);
+                    outer.record_refusal(failure);
                     Ok(OuterEval::infeasible(rho.len()))
                 }
                 Err(e) => {
@@ -2829,7 +2829,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     // re-wrapped -- re-wrapping rendered it to text and prefixed
                     // it a second time (gam#2667).
                     let failure = e.into_trial_point();
-                    outer.last_error = Some(failure.clone());
+                    outer.record_refusal(failure.clone());
                     Err(EstimationError::CustomFamily(failure))
                 }
             };
@@ -2862,7 +2862,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             Ok(eval) if !eval.inner_converged => {
                 let failure = inner_solve_not_converged_error(&eval.inner, &outer_options, rho.len(), 0);
                 // An unconverged solve never seeds the next evaluation (#2902).
-                outer.last_error = Some(failure);
+                outer.record_refusal(failure);
                 // Recoverable at the trial level: the outer optimizer may
                 // retreat to another rho, but this state can never certify the
                 // outer solve or reach result assembly.
@@ -2906,7 +2906,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                 } else {
                     "the outer Hessian is non-finite or does not match the outer dimension"
                 };
-                outer.last_error = Some(CustomFamilyError::trial_point(format!(
+                outer.record_refusal(CustomFamilyError::trial_point(format!(
                     "custom-family outer evaluation refused: {channel} (objective={})",
                     eval.objective
                 )));
@@ -2923,7 +2923,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                 // why the boundary owns that classification (#2590), and why a
                 // typed error that already says so is passed through (#2667).
                 let failure = e.into_trial_point();
-                outer.last_error = Some(failure.clone());
+                outer.record_refusal(failure.clone());
                 return Err(EstimationError::CustomFamily(failure));
             }
         };
@@ -3018,7 +3018,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     };
                     // A value probe never seeds the next evaluation (#2668), and an
                     // unconverged solve never does either (#2902).
-                    outer.last_error = Some(failure);
+                    outer.record_refusal(failure);
                     // Recoverable (data-driven): this value-only probe is the
                     // line-search cost the outer optimizer calls most often. A
                     // non-converged inner solve / non-finite objective at this trial
@@ -3034,7 +3034,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     // already says so is passed through, not re-prefixed
                     // (#2667).
                     let failure = e.into_trial_point();
-                    outer.last_error = Some(failure.clone());
+                    outer.record_refusal(failure.clone());
                     Err(EstimationError::CustomFamily(failure))
                 }
             }
@@ -3063,7 +3063,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                          penalty-coordinate layout with no fixed, tied, or joint penalties"
                         .to_string(),
                 };
-                outer.last_error = Some(failure.clone());
+                outer.record_refusal(failure.clone());
                 return Err(EstimationError::CustomFamily(failure));
             }
             let warm_ref = screened_outer_warm_start(outer.warm_cache.as_ref(), rho);
@@ -3085,7 +3085,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     let failure =
                         inner_solve_not_converged_error(&inner, &outer_options, rho.len(), 0);
                     // An unconverged solve never seeds the next evaluation (#2902).
-                    outer.last_error = Some(failure.clone());
+                    outer.record_refusal(failure.clone());
                     // EFS cannot form a valid fixed-point update away from an
                     // inner mode. Returning an error lets the outer strategy
                     // runner try an analytically valid alternative; exhaustion
@@ -3096,7 +3096,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     // A failure to build the EFS update at this rho is a
                     // statement about this rho (#2590).
                     let failure = e.into_trial_point();
-                    outer.last_error = Some(failure.clone());
+                    outer.record_refusal(failure.clone());
                     Err(EstimationError::CustomFamily(failure))
                 }
             }
@@ -3124,7 +3124,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     let failure = CustomFamilyError::trial_point(format!(
                         "custom-family seed-screening proxy produced non-finite score {score}"
                     ));
-                    outer.last_error = Some(failure.clone());
+                    outer.record_refusal(failure.clone());
                     // Screening RANKS seeds; it does not decide whether the
                     // problem is fittable. `rank_seeds_with_screening`
                     // propagates this `Err` verbatim, and the seed loop then
@@ -3143,7 +3143,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     // A failure to screen this seed is a statement about this
                     // seed's rho (#2590).
                     let failure = e.into_trial_point();
-                    outer.last_error = Some(failure.clone());
+                    outer.record_refusal(failure.clone());
                     Err(EstimationError::CustomFamily(failure))
                 }
             }
@@ -3220,6 +3220,15 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                      {last_error_detail}"
                 ),
                 last_refusal: obj.state.last_error.take().map(|mut refusal| {
+                    refusal.map_descending_ray_direction(&|reduced| {
+                        lift_direction_to_raw(&canonical.gauge, reduced)
+                    });
+                    Box::new(refusal)
+                }),
+                // The search's most recent uncertified inner solve, which a finite
+                // trial after it does not clear. Only the fit boundary reads it
+                // (#2943).
+                search_inner_refusal: obj.state.last_inner_refusal.take().map(|mut refusal| {
                     refusal.map_descending_ray_direction(&|reduced| {
                         lift_direction_to_raw(&canonical.gauge, reduced)
                     });

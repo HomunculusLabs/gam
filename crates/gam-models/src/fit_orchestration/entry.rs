@@ -134,7 +134,10 @@ pub fn fit_model(request: FitRequest<'_>) -> Result<FitResult, WorkflowError> {
     // Every arm hands back the helper's `FitFailure` whole. This boundary used
     // to wrap each helper's text as `IntegrationFailed`, so every solver
     // failure reached Python as `IntegrationError` whatever had failed (#2937).
-    let wrap_solver_err = |failure: FitFailure| -> WorkflowError { WorkflowError::from(failure) };
+    // A fit that ended holding an uncertified inner solve is named here, where
+    // no outer search is left to step away from it (#2943).
+    let wrap_solver_err =
+        |failure: FitFailure| -> WorkflowError { WorkflowError::from(failure.ending_the_fit()) };
     // The survival transformation and location-scale helpers still hand back
     // text; it is recorded as unclassified rather than given a category it
     // does not carry.
