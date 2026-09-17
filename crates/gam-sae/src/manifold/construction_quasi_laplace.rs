@@ -8428,7 +8428,7 @@ fn orthonormal_frame_complement(frame: ArrayView2<'_, f64>) -> Result<Array2<f64
 }
 
 #[cfg(test)]
-mod shape_covariance_observed_information_tests_2933_f33 {
+mod shape_covariance_observed_information_2933_f33_tests {
     use super::*;
     use crate::manifold::arrow_solver::apply_cached_arrow_hessian;
     use crate::manifold::{FaerEigh, Side};
