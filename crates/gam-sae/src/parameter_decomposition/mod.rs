@@ -107,7 +107,7 @@
 // [unlanded: program]
 
 // Exact component-coordinate MLP program under masks.
-// [unlanded: rewrite]
+pub mod rewrite;
 
 // Plane-rotation and response-projector recovery with derived eigengaps.
 // [unlanded: spectral]
