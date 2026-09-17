@@ -6,13 +6,15 @@
 //! at a stated per-token distortion (fixed R², a matched-EV operating point),
 //! decomposing the code length into
 //!
-//! * **support** bits — the combinatorial `log₂ C(G, ⌊L0⌉)` cost of naming which
-//!   of the `G` atoms fired, at the mean per-token support cardinality `L0`
-//!   (formed from `lgamma`, so it never overflows a factorial). That is the
-//!   WORST CASE: it assumes every `⌊L0⌉`-subset is equally likely. The exact
-//!   independent-support cost `Σ_g H₂(p_g)` at the measured firing rates is
-//!   reported alongside it and never charged, so a comparison whose whole margin
-//!   lives in the support term can be read in both currencies (#2283);
+//! * **support** bits — the combinatorial support code of the native coder: each
+//!   token transmits its own support cardinality and then which subset of that
+//!   size fired, `log₂(G+1) + mean_i log₂ C(G, |S_i|)` per token. That is the
+//!   WORST CASE among support models (every subset of a given size is equally
+//!   likely), but it is a complete prefix code over all `2^G` supports. The
+//!   plug-in entropy of an independent support at the measured firing rates is
+//!   reported alongside it and never charged (it is not a code), so a comparison
+//!   whose whole margin lives in the support term can be read against how
+//!   predictable the firing is (#2283);
 //! * **code** bits — a JOINT reverse-water-filling of every atom's per-firing
 //!   contribution spectrum, each spectrum weighted by that atom's firing
 //!   probability `p_g`, sharing ONE water level across all components with the
@@ -73,12 +75,10 @@
 //! closure the Python surface supplies — so [`eq4_fixed_distortion_description_length`]
 //! is generic over a `fetch_contribution` callback that returns the
 //! `(take, d)` contribution matrix for the selected firing rows. Rust owns the
-//! firing-row selection, the subsampling cap, the skip rule for under-fired
-//! atoms, the certified rank-one / SVD contribution spectrum, the residual
-//! second-moment eigendecomposition, the water-filling and the bit assembly; the
-//! callback ONLY materialises the atom's rows. This keeps peak memory to one
-//! atom's contribution at a time (the caller may fetch lazily), exactly as the
-//! reference NumPy loop did.
+//! firing-row selection, the certified rank-one / SVD contribution spectrum, the
+//! residual second-moment eigendecomposition, the water-filling and the bit
+//! assembly; the callback ONLY materialises the atom's rows. This keeps peak
+//! memory to one atom's contribution at a time (the caller may fetch lazily).
 
 use ndarray::{Array1, Array2, ArrayView2};
 
@@ -88,11 +88,6 @@ use crate::description_length::{selection_bits, weighted_reverse_water_filling};
 
 /// Standard fixed-distortion reporting points shared by every front-end.
 pub const DEFAULT_EQ4_R2_TARGETS: &[f64] = &[0.99, 0.95, 0.90, 0.80];
-
-/// The subsampling cap on the number of firing rows used to estimate an atom's
-/// per-firing coordinate spectrum. When an atom fires on more than this many
-/// rows, the rows are strided down to (at most) this count before the SVD.
-const SPECTRUM_ROW_CAP: usize = 4096;
 
 /// The bits at one R² operating point: total description length plus the code
 /// and residual sub-terms (support and dictionary bits are the same at every
@@ -122,25 +117,32 @@ pub struct Eq4TargetBits {
 /// The Eq. 4 fixed-distortion description-length report of one featurizer.
 #[derive(Clone, Debug)]
 pub struct Eq4DescriptionLength {
-    /// Combinatorial support cost `log₂ C(G, ⌊L0⌉)` (bits) — independent of the
-    /// distortion target. This is the CHARGED price and the worst case: it assumes
-    /// every `⌊L0⌉`-subset of the `G` atoms is equally likely.
+    /// The CHARGED support price, in bits per token, independent of the distortion
+    /// target: the combinatorial support code of the native coder
+    /// ([`crate::atom_codes::SupportEntropy::combinatorial_bits`]),
+    /// `log₂(G+1) + mean_i log₂ C(G, |S_i|)`. Every row transmits its own
+    /// cardinality (uniform over `0..=G`) and then its subset (uniform among the
+    /// subsets of that size), so each support has probability
+    /// `1 / ((G+1)·C(G, |S|))` and the code is Kraft-complete. It has no learned
+    /// parameters, so it never depends on the estimation subsample. It is the worst
+    /// case among support models: it gives no credit for predictable firing, and a
+    /// fixed-TopK dictionary still pays `log₂(G+1)` for its constant cardinality.
+    /// Pricing the rounded MEAN cardinality instead, `log₂ C(G, round L0)`, names
+    /// no decodable support: one atom firing on half the rows cost zero bits
+    /// (#2933 F09).
     pub support_bits: f64,
-    /// The exact cost `Σ_g H₂(p_g)` of naming an INDEPENDENT support with the
-    /// measured per-atom firing rates. Reported alongside [`Self::support_bits`],
-    /// never charged, so a dictionary with predictable firing is visibly, not
-    /// silently, overpaid by the charged worst case.
-    ///
-    /// It upper-bounds the true support entropy `H(S)` (dependence between
-    /// firings only lowers it) and, being maximised at uniform firing rates,
-    /// tracks the combinatorial line only while the dictionary fires evenly; dead
-    /// and dominant atoms pull it strictly below. That gap is not a detail when a
-    /// comparison's dictionary and code terms are matched by construction and the
-    /// whole predicted margin sits in the support term (#2283): on a real K=32768
-    /// TopK dictionary it measured 46.0 bits, against a predicted margin of 20.1.
+    /// The plug-in entropy `Σ_g H₂(p̂_g)` of an INDEPENDENT support at the
+    /// measured per-atom firing rates, in bits per token. Reported alongside
+    /// [`Self::support_bits`], never charged. It is the entropy of the estimated
+    /// marginals, not a decodable code: it omits the cost of learning the rates
+    /// (a never-firing atom contributes zero), so it is a reference line for how
+    /// predictable the firing is, never a price a receiver could pay. On a real
+    /// K=32768 TopK dictionary the gap to the charged code measured 46.0 bits,
+    /// against a predicted margin of 20.1 (#2283, before the complete support code).
     pub independent_support_bits: f64,
     /// Achieved mean per-token support cardinality `L0` (mean active atoms per
-    /// row), the un-rounded value that the support cardinality rounds.
+    /// row). Reported only: the support code prices each row's own cardinality,
+    /// never this mean.
     pub achieved_block_l0: f64,
     /// BIC-inspired amortised parameter penalty
     /// `0.5 * dictionary_params / amortization_horizon * log2(amortization_horizon)`,
@@ -308,7 +310,7 @@ fn atom_code_spectrum(
 /// * `test_x` / `recon` — the held-out activations and the featurizer's
 ///   reconstruction of them; same shape `(N, d)`, both finite.
 /// * `gate` — the `(N, G)` per-atom firing gate; an atom fires on a row when its
-///   gate there exceeds `1e-10`.
+///   gate there is strictly positive.
 /// * `code_dims` — the number `d_g` of scalars each of the `G` atoms transmits
 ///   per firing (length `G`, nonnegative). The top `d_g` modes of the atom's raw
 ///   contribution spectrum are priced as code bits, and every further mode as
@@ -334,14 +336,16 @@ fn atom_code_spectrum(
 /// * `native_bits_per_token` — echoed onto the report when present.
 /// * `fetch_contribution` — a callback returning the `(take.len, d)` contribution
 ///   matrix of atom `g` restricted to the supplied firing-row indices `take`.
-///   Invoked only for atoms that clear the skip rule, one atom at a time.
+///   Invoked once for every atom that fires at least once, with all of its firing
+///   rows, one atom at a time.
 ///
 /// The number of rows of `test_x` / `recon` / `gate` is the `estimation_rows`
 /// Monte-Carlo estimator size: it drives ONLY the variance of the support / code
-/// / residual expectations, never the dictionary code. The firing-row selection,
-/// the `4096`-row subsampling cap, the skip rule for atoms firing on fewer than
-/// `max(d_g + 1, 4)` rows, and every numerical term live here; the callback only
-/// materialises rows.
+/// / residual expectations, never the dictionary code. The firing-row selection
+/// and every numerical term live here; the callback only materialises rows. Every
+/// firing atom's spectrum is estimated from ALL of its firing rows, however few or
+/// many: there is neither a subsampling stride (#2933 F19) nor a low-count branch
+/// that declares a rarely firing atom free (#2933 F16).
 pub fn eq4_fixed_distortion_description_length<F>(
     test_x: ArrayView2<f64>,
     recon: ArrayView2<f64>,
@@ -419,26 +423,45 @@ where
         return Err("native_bits_per_token must be finite and nonnegative".to_string());
     }
 
-    // Support: firing probability per atom and mean per-token support cardinality.
-    let mut active_per_atom = vec![0.0_f64; n_atoms];
-    let mut total_active = 0.0_f64;
+    // Support: firing count per atom and the histogram of per-row support
+    // cardinalities. Both are counts, so the support terms are invariant to row
+    // order.
+    let mut firings_per_atom = vec![0_usize; n_atoms];
+    let mut cardinality_counts = vec![0_usize; n_atoms + 1];
     for row in 0..n {
+        let mut cardinality = 0_usize;
         for atom in 0..n_atoms {
             // Any positive gate value is a firing.
             if gate[[row, atom]] > 0.0 {
-                active_per_atom[atom] += 1.0;
-                total_active += 1.0;
+                firings_per_atom[atom] += 1;
+                cardinality += 1;
             }
         }
+        cardinality_counts[cardinality] += 1;
     }
-    let p_g: Vec<f64> = active_per_atom.iter().map(|&c| c / n as f64).collect();
-    let l0 = total_active / n as f64;
-    // Python `round(L0)` rounds half to even; clamp to `[0, G]`.
-    let support_cardinality = (l0.round_ties_even() as i64).clamp(0, n_atoms as i64);
-    let support_bits = selection_bits(n_atoms as i64, support_cardinality);
-    // The same support, priced as an independent Bernoulli field at the measured
-    // rates. Never charged; reported so the combinatorial worst case can be read
-    // against the cost a receiver would actually pay for THIS firing distribution.
+    let p_g: Vec<f64> = firings_per_atom
+        .iter()
+        .map(|&count| count as f64 / n as f64)
+        .collect();
+    let l0 = firings_per_atom.iter().sum::<usize>() as f64 / n as f64;
+    // Each row transmits its own cardinality `k ∈ {0,…,G}` uniformly and then its
+    // subset uniformly among the `C(G, k)` subsets of that size: the combinatorial
+    // support code of the native coder (`SupportEntropy::combinatorial_bits`).
+    // Rounding the MEAN cardinality and pricing `log₂ C(G, round L0)` names no
+    // decodable support (#2933 F09): one atom firing on half the rows rounds to
+    // `C(1, 0)` and costs zero bits, against the one bit per token a receiver needs.
+    let subset_bits: f64 = cardinality_counts
+        .iter()
+        .enumerate()
+        .filter(|&(_, &count)| count > 0)
+        .map(|(cardinality, &count)| {
+            count as f64 * selection_bits(n_atoms as i64, cardinality as i64)
+        })
+        .sum();
+    let support_bits = (n_atoms as f64 + 1.0).log2() + subset_bits / n as f64;
+    // The plug-in entropy of an independent support at the measured firing rates.
+    // Never charged, and not a decodable code: it omits the cost of learning the
+    // rates, so a never-firing atom contributes nothing.
     let independent_support_bits: f64 = p_g
         .iter()
         .filter(|&&probability| probability > 0.0 && probability < 1.0)
@@ -466,19 +489,26 @@ where
         let rows: Vec<usize> = (0..n)
             .filter(|&row| gate[[row, atom]] > 0.0)
             .collect();
-        if rows.len() < (code_dim + 1).max(4) {
+        if rows.is_empty() {
+            // A never-firing atom has weight `p_g = 0`: it transmits nothing and
+            // its spectrum never reaches the water-fill.
             code_spectra.push(AtomSpectrum {
-                coded: vec![0.0; code_dim],
+                coded: Vec::new(),
                 tail: Vec::new(),
             });
             continue;
         }
-        let take: Vec<usize> = if rows.len() <= SPECTRUM_ROW_CAP {
-            rows
-        } else {
-            let step = rows.len().div_ceil(SPECTRUM_ROW_CAP);
-            rows.iter().step_by(step).copied().collect()
-        };
+        // Every firing row enters the spectrum, however few or many. A rare atom
+        // is priced from the firings it has: with no mean transmitted, even a
+        // single firing's raw second moment is its squared contribution, never
+        // the free zero spectrum a low-count branch used to substitute (#2933
+        // F16). A deterministic stride over the firing rows is not a representative
+        // sample: an ordering periodic in the stride hands the SVD a constant
+        // sub-sequence and erases a varying atom's whole spectrum (#2933 F19). The
+        // singular values of the full firing matrix are exact and invariant to row
+        // order, and the one-atom matrix is bounded by the `(N, d)` residual the
+        // scorer already holds.
+        let take = rows;
         let contribution = fetch_contribution(atom, &take)?;
         if contribution.dim() != (take.len(), d) {
             return Err(format!(
@@ -541,6 +571,10 @@ where
 }
 
 #[cfg(test)]
+#[path = "eq4_description_length_support_tests.rs"]
+mod support_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use ndarray::array;
@@ -585,7 +619,9 @@ mod tests {
     #[test]
     fn production_eq4_fixture_reconciles_report_terms() {
         let result = fixture(&[1], 4).unwrap();
-        assert_eq!(result.support_bits, selection_bits(1, 1));
+        // The one atom fires on every row, but the combinatorial support code still
+        // transmits each row's cardinality among {0, 1}: one bit per token.
+        assert_eq!(result.support_bits, 1.0);
         assert_eq!(result.achieved_block_l0, 1.0);
         assert_eq!(result.native_bits_per_token, Some(1.25));
         assert_eq!(result.per_target.len(), 1);
@@ -710,19 +746,19 @@ mod tests {
             .expect("balanced Eq. 4 fixture must score")
         };
 
-        // Exactly three scorer calls. At N=8192 the atom fires 4096 times, so
-        // the production 4096-row spectrum cap is reached but never crossed.
+        // Exactly three scorer calls. At N=8192 the atom fires 4096 times, and
+        // every firing row enters its spectrum.
         let small = score_at(256);
         let medium = score_at(1024);
         let large = score_at(FULL_ROWS);
         for run in [&small, &medium, &large] {
             assert_eq!(run.amortization_horizon, horizon);
             assert_eq!(run.achieved_block_l0, 0.5);
-            // One atom firing on exactly half the rows: the combinatorial price of
-            // naming a 1-of-1 support is zero, while an independent support at
-            // p = 1/2 costs exactly one bit. The two currencies are genuinely
-            // different quantities, and this fixture pins both (#2283).
-            assert_eq!(run.support_bits, 0.0);
+            // One atom firing on exactly half the rows. The combinatorial code
+            // transmits each row's cardinality among {0, 1}: exactly one bit per
+            // token at every estimation size (the rounded-mean price was zero,
+            // #2933 F09). The uncharged plug-in entropy at p = 1/2 is also one bit.
+            assert_eq!(run.support_bits, 1.0);
             assert_eq!(run.independent_support_bits, 1.0);
         }
         assert_eq!(small.estimation_rows, 256);
@@ -914,7 +950,9 @@ mod tests {
                     )
                     .expect("harmonic fixture must score");
                     for (row, &target) in report.per_target.iter().zip(targets.iter()) {
-                        let expected = 0.5 * modes * (1.0 / (1.0 - target)).log2();
+                        // One always-firing atom: the complete support code sends one
+                        // cardinality bit per token (#2933 F09).
+                        let expected = 1.0 + 0.5 * modes * (1.0 / (1.0 - target)).log2();
                         assert!(
                             (row.bits - expected).abs() <= 1.0e-10 * expected,
                             "{label} order {order} ({embedding}) at R²={target}: \
@@ -945,7 +983,7 @@ mod tests {
         let phase = |i: usize| std::f64::consts::TAU * i as f64 / rows as f64;
         let gate = Array2::ones((rows, 1));
         let score = |values: &Array2<f64>, code_dim: i64| -> f64 {
-            eq4_fixed_distortion_description_length(
+            let report = eq4_fixed_distortion_description_length(
                 values.view(),
                 values.view(),
                 gate.view(),
@@ -956,9 +994,11 @@ mod tests {
                 None,
                 serve_rows(vec![values.clone()]),
             )
-            .expect("contract fixture must score")
-            .per_target[0]
-                .bits
+            .expect("contract fixture must score");
+            // One always-firing atom: the complete support code sends one
+            // cardinality bit per token (#2933 F09). The spectral terms are the rest.
+            assert_eq!(report.support_bits, 1.0);
+            report.per_target[0].bits - report.support_bits
         };
         let log_inverse_budget = (1.0 / (1.0 - target)).log2();
 
@@ -1019,7 +1059,7 @@ mod tests {
         let atom = Array2::from_shape_fn((rows, 2), |(i, j)| if j == 0 { code(i) } else { 0.0 });
         let gate = Array2::ones((rows, 1));
         let score = |test_x: &Array2<f64>, recon: &Array2<f64>| -> f64 {
-            eq4_fixed_distortion_description_length(
+            let report = eq4_fixed_distortion_description_length(
                 test_x.view(),
                 recon.view(),
                 gate.view(),
@@ -1030,9 +1070,11 @@ mod tests {
                 None,
                 serve_rows(vec![atom.clone()]),
             )
-            .expect("bias fixture must score")
-            .per_target[0]
-                .bits
+            .expect("bias fixture must score");
+            // One always-firing atom: the complete support code sends one
+            // cardinality bit per token (#2933 F09). The spectral terms are the rest.
+            assert_eq!(report.support_bits, 1.0);
+            report.per_target[0].bits - report.support_bits
         };
 
         let test_x = Array2::from_shape_fn((rows, 2), |(i, j)| {
