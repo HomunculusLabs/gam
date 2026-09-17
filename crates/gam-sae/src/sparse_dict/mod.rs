@@ -72,7 +72,7 @@ pub use block_scoring_gpu::{
 };
 pub use block_stream::{
     BlockEpochStats, BlockShardStats, BlockSparseStreamArtifact, BlockSparseStreamConvergence,
-    BlockSparseStreamState,
+    BlockSparseStreamState, FrameTrialMeasurement,
 };
 pub use codes::SparseCode;
 pub use coordinate::{

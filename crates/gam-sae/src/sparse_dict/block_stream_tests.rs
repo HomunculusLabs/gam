@@ -946,6 +946,7 @@ fn a_rejected_frame_trial_stashes_gamma_scaled_moments_for_rank_charges() {
         baseline_second: vec![Array2::zeros((1, 1)); 2],
         baseline_supports: Vec::new(),
         rerouted_rows: 0,
+        moves: super::TrialMoves::default(),
     });
     state.partial_fit(x.view()).unwrap();
     let pending = state.pending_frame.as_ref().unwrap();

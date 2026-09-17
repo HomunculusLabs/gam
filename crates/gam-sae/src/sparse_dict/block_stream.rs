@@ -466,6 +466,35 @@ pub struct BlockShardStats {
     pub alive_blocks: usize,
 }
 
+/// What an adjudicated frame trial measured (#2502). The proposal commits when
+/// `decrease` exceeds `resolution`, both over the whole corpus. The `moved_*` fields
+/// repeat the comparison over the rows whose admitted blocks, in either pass, include a
+/// block the proposal moved. Every other row routes and codes against identical frames
+/// at the shared pass γ, so the passes' difference at that γ lives in the moved rows.
+#[derive(Clone, Copy, Debug)]
+pub struct FrameTrialMeasurement {
+    /// Whether the proposal committed.
+    pub committed: bool,
+    /// Baseline RSS minus proposal RSS, each at its own profiled γ.
+    pub decrease: f64,
+    /// The bar `decrease` had to exceed: `√(rows·p)·ε` times the baseline RSS.
+    pub resolution: f64,
+    /// The baseline's profiled γ.
+    pub baseline_gamma: f32,
+    /// The proposal's profiled γ.
+    pub proposal_gamma: f32,
+    /// Blocks whose stored frames differ between baseline and proposal.
+    pub moved_blocks: usize,
+    /// The largest relative projector distance among the moved blocks.
+    pub moved_displacement: f64,
+    /// Rows whose admitted blocks, in either pass, include a moved block.
+    pub moved_rows: usize,
+    /// Baseline RSS minus proposal RSS over the moved rows, at the pass γ.
+    pub moved_decrease: f64,
+    /// `√(moved_rows·p)·ε` times the baseline RSS over the moved rows.
+    pub moved_resolution: f64,
+}
+
 /// Per-epoch summary returned by [`BlockSparseStreamState::end_epoch`].
 #[derive(Clone, Copy, Debug)]
 pub struct BlockEpochStats {
@@ -515,6 +544,9 @@ pub struct BlockEpochStats {
     /// adjudicated no frame trial. The frame step holds supports fixed, so these
     /// rows are the support change it cannot see (#2502).
     pub rerouted_rows: Option<usize>,
+    /// What the frame trial this pass adjudicated measured; `None` on a pass that
+    /// adjudicated no frame trial.
+    pub frame_trial: Option<FrameTrialMeasurement>,
     /// Rows whose committed support this pass differs from the one they carried
     /// out of the last committed pass (every row on the first pass). A row adopts
     /// a routed support only on a loss decrease beyond rounding, so this reaches
@@ -579,6 +611,21 @@ struct PendingFrameTrial {
     /// Rows whose admitted block set differs between the proposal and the
     /// baseline on the paired pass.
     rerouted_rows: usize,
+    /// The blocks the proposal moved and the rows they reach, from the paired pass.
+    moves: TrialMoves,
+}
+
+/// The part of a paired frame trial a proposal can change: the blocks whose stored
+/// frames differ between baseline and proposal, and the rows whose admitted blocks
+/// include one of them, with their baseline and proposal RSS at the pass γ.
+#[derive(Default)]
+struct TrialMoves {
+    /// Per block, whether the proposal moved its frame; set on the first paired minibatch.
+    blocks: Option<Vec<bool>>,
+    displacement: f64,
+    rows: usize,
+    baseline_rss: f64,
+    proposal_rss: f64,
 }
 
 /// Resumable state for a streaming block-sparse fit. Construct with [`Self::new`]
@@ -1143,6 +1190,51 @@ impl BlockSparseStreamState {
                     .zip(baseline_codes)
                     .filter(|(candidate, baseline)| !same_admitted_blocks(candidate, baseline))
                     .count();
+                if pending.moves.blocks.is_none() {
+                    let mut moved = vec![false; self.g];
+                    for (block, flag) in moved.iter_mut().enumerate() {
+                        let baseline_frame = pending
+                            .baseline_decoder
+                            .slice(ndarray::s![block * b..(block + 1) * b, ..]);
+                        let proposal_frame =
+                            self.decoder.slice(ndarray::s![block * b..(block + 1) * b, ..]);
+                        if baseline_frame != proposal_frame {
+                            *flag = true;
+                            let distance =
+                                stored_projector_distance(baseline_frame, proposal_frame).map_err(
+                                    |error| format!("frame trial projector block {block}: {error}"),
+                                )?;
+                            pending.moves.displacement = pending.moves.displacement.max(distance);
+                        }
+                    }
+                    pending.moves.blocks = Some(moved);
+                }
+                if let Some(moved) = pending.moves.blocks.as_ref() {
+                    let reaches_moved_block = |code: &RowBlockCode| {
+                        code.blocks
+                            .iter()
+                            .zip(&code.gates)
+                            .any(|(block, gate)| *gate != 0.0 && moved[*block as usize])
+                    };
+                    let mut moved_rows = 0usize;
+                    let mut moved_baseline_rss = 0.0f64;
+                    let mut moved_proposal_rss = 0.0f64;
+                    for ((candidate, baseline_code), (proposal_projection, baseline_projection)) in
+                        codes
+                            .iter()
+                            .zip(baseline_codes)
+                            .zip(projected.iter().zip(baseline))
+                    {
+                        if reaches_moved_block(candidate) || reaches_moved_block(baseline_code) {
+                            moved_rows += 1;
+                            moved_baseline_rss += baseline_projection.rss;
+                            moved_proposal_rss += proposal_projection.rss;
+                        }
+                    }
+                    pending.moves.rows += moved_rows;
+                    pending.moves.baseline_rss += moved_baseline_rss;
+                    pending.moves.proposal_rss += moved_proposal_rss;
+                }
             }
             append_supports(&mut self.pass_supports, &codes, k);
             self.pass_fingerprints.extend(fingerprints);
@@ -1219,6 +1311,7 @@ impl BlockSparseStreamState {
         };
         let mut rejected_frame = false;
         let mut rerouted_rows = None;
+        let mut frame_trial = None;
         if let Some(mut trial) = self.pending_frame.take() {
             rerouted_rows = Some(trial.rerouted_rows);
             if trial.baseline_rows != self.row_count {
@@ -1227,7 +1320,7 @@ impl BlockSparseStreamState {
                     self.row_count, trial.baseline_rows,
                 ));
             }
-            let (_, candidate_rss) =
+            let (proposal_gamma, candidate_rss) =
                 profiled_scalar(self.gamma, self.rss, self.gamma_num, self.gamma_den);
             let (baseline_gamma, baseline_rss) = profiled_scalar(
                 trial.baseline_gamma,
@@ -1242,6 +1335,23 @@ impl BlockSparseStreamState {
             // carries no directional information and is handled by backtracking.
             let cells = (self.row_count * p).max(1) as f64;
             let resolution = cells.sqrt() * f64::EPSILON * baseline_rss.abs();
+            let moves = &trial.moves;
+            let moved_cells = (moves.rows * p) as f64;
+            frame_trial = Some(FrameTrialMeasurement {
+                committed: baseline_rss - candidate_rss > resolution,
+                decrease: baseline_rss - candidate_rss,
+                resolution,
+                baseline_gamma,
+                proposal_gamma,
+                moved_blocks: moves
+                    .blocks
+                    .as_ref()
+                    .map_or(0, |moved| moved.iter().filter(|&&flag| flag).count()),
+                moved_displacement: moves.displacement,
+                moved_rows: moves.rows,
+                moved_decrease: moves.baseline_rss - moves.proposal_rss,
+                moved_resolution: moved_cells.sqrt() * f64::EPSILON * moves.baseline_rss.abs(),
+            });
             if !(baseline_rss - candidate_rss > resolution) {
                 let midpoint =
                     bisect_frame_trial(&trial.baseline_decoder, &trial.proposed_decoder, b);
@@ -1279,6 +1389,7 @@ impl BlockSparseStreamState {
                             .collect(),
                         baseline_supports: Vec::new(),
                         rerouted_rows: 0,
+                        moves: TrialMoves::default(),
                     });
                 }
                 rejected_frame = true;
@@ -1534,6 +1645,7 @@ impl BlockSparseStreamState {
                     baseline_second: (0..self.g).map(|_| Array2::<f64>::zeros((b, b))).collect(),
                     baseline_supports: Vec::new(),
                     rerouted_rows: 0,
+                    moves: TrialMoves::default(),
                 });
             }
         }
@@ -1578,6 +1690,7 @@ impl BlockSparseStreamState {
             frame_blocks_above_tolerance,
             frame_residual_median,
             rerouted_rows,
+            frame_trial,
             support_changes,
             declined_routes,
             declined_route_ev_cost,

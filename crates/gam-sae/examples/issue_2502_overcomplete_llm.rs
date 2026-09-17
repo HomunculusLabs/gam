@@ -726,6 +726,26 @@ fn main() -> Result<(), String> {
         // A held-out checkpoint at every power-of-two epoch and at the last one: the eval
         // rows encoded by the greedy router at the frames the next pass routes against.
         // It measures the trajectory, not a fitted dictionary.
+        if let Some(trial) = stats.frame_trial {
+            println!(
+                "[a5] arm={} epoch {} frame_trial committed={} decrease={:.3e} resolution={:.3e} \
+                 baseline_gamma={:.9} proposal_gamma={:.9} moved_blocks={} \
+                 moved_displacement={:.3e} moved_rows={} moved_decrease={:.3e} \
+                 moved_resolution={:.3e}",
+                args.arm,
+                epoch + 1,
+                trial.committed,
+                trial.decrease,
+                trial.resolution,
+                trial.baseline_gamma,
+                trial.proposal_gamma,
+                trial.moved_blocks,
+                trial.moved_displacement,
+                trial.moved_rows,
+                trial.moved_decrease,
+                trial.moved_resolution,
+            );
+        }
         let epochs_closed = epoch + 1;
         let checkpoint_heldout_ev =
             if epochs_closed.is_power_of_two() || epochs_closed == args.epochs || stats.converged {
@@ -798,6 +818,18 @@ fn main() -> Result<(), String> {
             "frame_blocks_above_tolerance": stats.frame_blocks_above_tolerance,
             "frame_residual_median": stats.frame_residual_median,
             "rerouted_rows": stats.rerouted_rows,
+            "frame_trial": stats.frame_trial.map(|trial| json!({
+                "committed": trial.committed,
+                "decrease": trial.decrease,
+                "resolution": trial.resolution,
+                "baseline_gamma": trial.baseline_gamma,
+                "proposal_gamma": trial.proposal_gamma,
+                "moved_blocks": trial.moved_blocks,
+                "moved_displacement": trial.moved_displacement,
+                "moved_rows": trial.moved_rows,
+                "moved_decrease": trial.moved_decrease,
+                "moved_resolution": trial.moved_resolution,
+            })),
             "support_changes": stats.support_changes,
             "support_reverts": support_reverts,
             "changed_rows_max_changes": changed_rows_max_changes,
