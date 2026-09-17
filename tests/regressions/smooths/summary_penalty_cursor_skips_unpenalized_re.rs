@@ -19,11 +19,19 @@
 // ridge block for a random effect when `spec.random_effect_terms[i].penalized`
 // (line ~233: `if range.is_empty() || !...penalized { continue; }`).
 //
-// A factor-`by` smooth `s(x, by=g)` adds an UNPENALIZED treatment-coded
-// random-effect main effect for `g` (term_builder.rs ~640, `penalized: false`)
-// so that `g` appears in `random_effect_ranges` but contributes NO penalty
-// block. The summary's cursor then over-counts by one and every following
-// smooth term reads a penalty-block trace shifted by +1.
+// A factor-`by` smooth `s(x, by=g)` used to add an UNPENALIZED treatment-coded
+// random-effect main effect for `g` (`penalized: false`, `drop_first_level:
+// true`), so that `g` appeared in `random_effect_ranges` but contributed NO
+// penalty block. The summary's cursor then over-counted by one and every
+// following smooth term read a penalty-block trace shifted by +1.
+//
+// Since 35c8b53864 (SPEC rules 12 and 14) the by= main effect is a penalized
+// full-level random block, so a fresh formula fit no longer produces that
+// range. Saved models fitted before it still carry the unpenalized
+// treatment-coded spec, and predict and summary must honour it. So the fixture
+// rebuilds the fitted design from the fit's own resolved spec with the `g`
+// block set back to that saved-model representation, and checks the invariant
+// on both designs.
 //
 // This corrupts per-term EDF / ref_df / p-value whenever the influence matrix
 // is unavailable so `per_term_edf` falls through to its
@@ -38,6 +46,7 @@
 // for the first smooth term points past the smooth's own penalty block.
 
 use csv::StringRecord;
+use gam::smooth::{TermCollectionDesign, build_term_collection_design};
 use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
 };
@@ -47,7 +56,7 @@ use rand_distr::{Distribution, Normal, Uniform};
 
 /// `y = sin(4x) + group offset + noise`, with a two-level factor `g` and an
 /// independent covariate `z`. The formula `y ~ s(x, by=g) + s(z)` makes gam add
-/// an UNPENALIZED treatment-coded main effect for the `by` factor `g`.
+/// a random-effect main effect for the `by` factor `g`.
 fn factor_by_dataset(seed: u64, n: usize) -> gam::data::EncodedDataset {
     let mut rng = StdRng::seed_from_u64(seed);
     let unit = Uniform::new(0.0_f64, 1.0).expect("uniform");
@@ -74,18 +83,11 @@ fn factor_by_dataset(seed: u64, n: usize) -> gam::data::EncodedDataset {
     .expect("encode")
 }
 
-#[test]
-fn summary_penalty_cursor_matches_actual_penalty_layout() {
-    init_parallelism();
-    let data = factor_by_dataset(7, 400);
-    let fit = fit_from_formula("y ~ s(x, by=g) + s(z)", &data, &FitConfig::default())
-        .expect("fit y ~ s(x, by=g) + s(z)");
-
-    let FitResult::Standard(std_fit) = &fit else {
-        panic!("expected a standard Gaussian fit");
-    };
-    let design = &std_fit.design;
-
+/// Checks the summary penalty cursor against `design`'s actual penalty layout
+/// and walks every smooth term's penalty window from it. Returns the old
+/// one-slot-per-range cursor and the number of leading penalty blocks the random
+/// effects actually own.
+fn assert_cursor_matches_layout(design: &TermCollectionDesign, label: &str) -> (usize, usize) {
     // How many leading penalty blocks actually belong to random effects, read
     // straight from the built global penalty metadata. The global layout is
     // [linear ridge?, penalized-RE ridges, smooth penalties...]. None of the
@@ -118,13 +120,8 @@ fn summary_penalty_cursor_matches_actual_penalty_layout() {
     // Sanity: the `by=g` factor really did introduce a random-effect range.
     assert!(
         !design.random_effect_ranges.is_empty(),
-        "expected an unpenalized random-effect main effect for the by= factor; \
+        "{label}: expected a random-effect main effect for the by= factor; \
          random_effect_ranges was empty \u{2014} formula plumbing changed"
-    );
-    assert_ne!(
-        buggy_cursor_skips, leading_re_penalty_blocks,
-        "regression fixture no longer contains an unpenalized random-effect \
-         range; the old one-slot-per-range cursor would not desync"
     );
 
     // The invariant the summary RELIES ON: the number of leading penalty blocks
@@ -132,7 +129,7 @@ fn summary_penalty_cursor_matches_actual_penalty_layout() {
     // random effects own, not the number of random-effect coefficient ranges.
     assert_eq!(
         summary_cursor_skips, leading_re_penalty_blocks,
-        "summary penalty-cursor desync: the summary advances the penalty cursor by \
+        "{label}: summary penalty-cursor desync: the summary advances the penalty cursor by \
          {summary_cursor_skips} before the first smooth, but \
          {leading_re_penalty_blocks} leading penalty blocks actually belong to \
          random effects. The first smooth's per_term_edf will read \
@@ -151,7 +148,7 @@ fn summary_penalty_cursor_matches_actual_penalty_layout() {
         let k = term.active_penalties.len();
         assert!(
             penalty_cursor + k <= design.penaltyinfo.len(),
-            "smooth term '{}' penalty window [{penalty_cursor}..{}] runs past the \
+            "{label}: smooth term '{}' penalty window [{penalty_cursor}..{}] runs past the \
              {} global penalty blocks \u{2014} penalty-cursor desync (#1883)",
             term.name,
             penalty_cursor + k,
@@ -162,8 +159,44 @@ fn summary_penalty_cursor_matches_actual_penalty_layout() {
     assert_eq!(
         penalty_cursor,
         design.penaltyinfo.len(),
-        "the reconstructed penalty cursor must consume every global penalty block \
+        "{label}: the reconstructed penalty cursor must consume every global penalty block \
          exactly once; a leftover/overshoot means the per-term windows are \
          mis-aligned (#1883)"
+    );
+    (buggy_cursor_skips, leading_re_penalty_blocks)
+}
+
+#[test]
+fn summary_penalty_cursor_matches_actual_penalty_layout() {
+    init_parallelism();
+    let data = factor_by_dataset(7, 400);
+    let fit = fit_from_formula("y ~ s(x, by=g) + s(z)", &data, &FitConfig::default())
+        .expect("fit y ~ s(x, by=g) + s(z)");
+
+    let FitResult::Standard(std_fit) = &fit else {
+        panic!("expected a standard Gaussian fit");
+    };
+    assert_cursor_matches_layout(&std_fit.design, "fitted design");
+
+    // The saved-model representation of the same fit: the by= main effect as the
+    // unpenalized treatment-coded block it was before 35c8b53864, unfrozen as it
+    // was at fit time, so the build derives its kept levels from the data again.
+    let mut saved_spec = std_fit.resolvedspec.clone();
+    let main_effect = saved_spec
+        .random_effect_terms
+        .iter_mut()
+        .find(|term| term.name == "g")
+        .expect("the by= factor main effect `g` must be a random-effect term");
+    main_effect.penalized = false;
+    main_effect.drop_first_level = true;
+    main_effect.frozen_levels = None;
+    let saved_design = build_term_collection_design(data.values.view(), &saved_spec)
+        .expect("rebuild the design with the saved-model unpenalized main effect");
+    let (buggy_cursor_skips, leading_re_penalty_blocks) =
+        assert_cursor_matches_layout(&saved_design, "saved-model design");
+    assert_ne!(
+        buggy_cursor_skips, leading_re_penalty_blocks,
+        "saved-model design: the unpenalized random-effect range must add columns but no \
+         penalty block, or the old one-slot-per-range cursor would not desync"
     );
 }

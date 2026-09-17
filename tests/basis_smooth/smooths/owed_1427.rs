@@ -79,13 +79,29 @@ fn grouped_dataset(seed: u64, labels: &[&str], n_per_group: usize) -> gam::data:
     .expect("encode")
 }
 
-/// Number of smoothing-parameter (λ) coordinates of a fit — one per penalty
-/// block in the joint penalized least-squares system.
-fn n_lambdas(fit: &FitResult) -> usize {
+/// Number of smoothing-parameter (λ) coordinates the smooth terms own: one per
+/// active smooth penalty block in the joint penalized least-squares system.
+/// Since 35c8b53864 (SPEC rules 12 and 14) the by= factor's auto-added main
+/// effect is a penalized full-level random block. Its REML variance is a λ
+/// coordinate of its own and says nothing about how the level smooths are
+/// penalized, so it is not counted here.
+fn n_smooth_lambdas(fit: &FitResult) -> usize {
     let FitResult::Standard(std_fit) = fit else {
         panic!("expected a Standard Gaussian fit");
     };
-    std_fit.fit.lambdas.len()
+    let design = &std_fit.design;
+    let smooth_blocks: usize = design
+        .smooth
+        .terms
+        .iter()
+        .map(|term| term.active_penalties.len())
+        .sum();
+    assert_eq!(
+        std_fit.fit.lambdas.len(),
+        design.leading_penalty_blocks_before_smooth() + smooth_blocks,
+        "every λ coordinate must be a leading linear/random-effect ridge or a smooth penalty block"
+    );
+    smooth_blocks
 }
 
 fn gaussian_cfg() -> FitConfig {
@@ -114,7 +130,7 @@ fn factor_by_emits_independent_per_level_lambda_1427() {
     let data3 = grouped_dataset(1427, &["a", "b", "c"], 200);
     let single = fit_from_formula(&format!("y ~ s(x, k={K})"), &data2, &cfg)
         .expect("standalone s(x) fit ok");
-    let per_smooth_lambdas = n_lambdas(&single);
+    let per_smooth_lambdas = n_smooth_lambdas(&single);
     assert!(
         per_smooth_lambdas >= 1,
         "a standalone s(x) must have at least one smoothing parameter"
@@ -126,12 +142,11 @@ fn factor_by_emits_independent_per_level_lambda_1427() {
     let by3 = fit_from_formula(&format!("y ~ s(x, by=g, k={K})"), &data3, &cfg)
         .expect("by-factor L=3 fit ok");
 
-    let n_lambda2 = n_lambdas(&by2);
-    let n_lambda3 = n_lambdas(&by3);
+    let n_lambda2 = n_smooth_lambdas(&by2);
+    let n_lambda3 = n_smooth_lambdas(&by3);
 
-    // The auto-added treatment-coded factor main effect is UNPENALIZED, so the
-    // only λ coordinates come from the L level-blocks' smooths. Independent
-    // per-level emission ⇒ count = per_smooth_lambdas * n_levels.
+    // The smooth-owned λ coordinates come from the L level-blocks' smooths.
+    // Independent per-level emission ⇒ count = per_smooth_lambdas * n_levels.
     assert_eq!(
         n_lambda2,
         per_smooth_lambdas * 2,

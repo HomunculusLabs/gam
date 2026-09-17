@@ -50,7 +50,7 @@ fn dataset() -> EncodedDataset {
 }
 
 #[test]
-fn unordered_by_factor_expands_to_level_smooths_and_fixed_main_effect() {
+fn unordered_by_factor_expands_to_level_smooths_and_random_main_effect() {
     let parsed = parse_formula("y ~ s(x, by=group, k=5)").expect("parse");
     let ds = dataset();
     let mut notes = Vec::new();
@@ -62,10 +62,18 @@ fn unordered_by_factor_expands_to_level_smooths_and_fixed_main_effect() {
     )
     .expect("termspec");
     assert_eq!(spec.smooth_terms.len(), 2);
+    // The auto-added factor main effect is the penalized full-level random block a
+    // bare `+ group` lowers to (35c8b53864, SPEC rules 12 and 14), so REML can
+    // shrink every level offset to the null.
     assert!(
         spec.random_effect_terms
             .iter()
-            .any(|term| term.name == "group" && !term.penalized && term.drop_first_level)
+            .any(|term| term.name == "group" && term.penalized && !term.drop_first_level),
+        "`s(x, by=group)` must add `group` as a penalized full-level random block; got {:?}",
+        spec.random_effect_terms
+            .iter()
+            .map(|term| (&term.name, term.penalized, term.drop_first_level))
+            .collect::<Vec<_>>()
     );
     assert!(spec.smooth_terms.iter().all(|term| matches!(
         term.basis,

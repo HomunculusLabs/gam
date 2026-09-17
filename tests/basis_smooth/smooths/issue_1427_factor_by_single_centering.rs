@@ -71,19 +71,34 @@ fn factor_by_level_keeps_k_minus_one_smooth_columns() {
         ..FitConfig::default()
     };
 
-    // `y ~ s(x, by=g)` auto-adds a treatment-coded factor main effect, so the
-    // non-smooth part is `intercept + (L-1) contrasts = L` columns, and each of
-    // the L level blocks contributes its centered smooth. Hence
-    //   total = L + L*(smooth columns per level).
+    // `y ~ s(x, by=g)` auto-adds the factor main effect as a penalized full-level
+    // random block (35c8b53864, SPEC rules 12 and 14), so the non-smooth part is
+    // `intercept + L level offsets = 1 + L` columns, and each of the L level
+    // blocks contributes its centered smooth. Hence
+    //   total = 1 + L + L*(smooth columns per level).
     // Correct centering (one constraint) gives K-1 smooth columns per level, so
-    //   total = L + L*(K-1) = L*K.
-    // The #1427 double-centering bug gives K-2 per level, i.e. total = L*(K-1).
+    //   total = 1 + L*K.
+    // The #1427 double-centering bug gives K-2 per level, i.e. total = 1 + L*(K-1).
     const L: usize = 3;
     let byfit =
         fit_from_formula(&format!("y ~ s(x, by=g, k={K})"), &data, &cfg).expect("by-factor fit ok");
     let total = ncols(&byfit);
 
-    let non_smooth = L; // intercept + (L-1) treatment contrasts
+    let FitResult::Standard(std_fit) = &byfit else {
+        panic!("expected a Standard Gaussian fit");
+    };
+    let main_effect_cols: usize = std_fit
+        .design
+        .random_effect_ranges
+        .iter()
+        .filter(|(name, _)| name == "g")
+        .map(|(_, range)| range.len())
+        .sum();
+    assert_eq!(
+        main_effect_cols, L,
+        "the by= factor main effect must be the full-level block, one offset column per level"
+    );
+    let non_smooth = std_fit.design.intercept_range.len() + main_effect_cols;
     let smooth_cols = total
         .checked_sub(non_smooth)
         .expect("by-factor design has fewer columns than the factor main effect");
@@ -99,10 +114,10 @@ fn factor_by_level_keeps_k_minus_one_smooth_columns() {
         per_level,
         K - 1,
         "factor-by level block must keep k-1={} smooth columns, got {per_level} \
-         (double-centering bug gives k-2={}); total={total} (fixed=L*K={}, buggy=L*(K-1)={})",
+         (double-centering bug gives k-2={}); total={total} (fixed=1+L*K={}, buggy=1+L*(K-1)={})",
         K - 1,
         K - 2,
-        L * K,
-        L * (K - 1),
+        1 + L * K,
+        1 + L * (K - 1),
     );
 }
