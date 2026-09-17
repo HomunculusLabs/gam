@@ -1682,12 +1682,16 @@ pub(crate) fn empirical_intercept_from_marginal_within(
     // closed-form seed, which depends only on the current `(target_q, slope)`
     // and is bounded by the analytic rigid-probit geometry, so the cache
     // remains a pure speedup that cannot poison correctness.
-    let solved = match solve_from(seed) {
-        Ok(v) => Ok(v),
-        Err(first_err) if seed == closed_form_seed => Err(first_err),
-        Err(first_err) => solve_from(closed_form_seed).map_err(|retry_err| {
-            format!("{first_err}; closed-form retry from a={closed_form_seed:.6}: {retry_err}")
-        }),
+    let (root, _, f_best) = match solve_from(seed) {
+        Ok(v) => v,
+        Err(first_err) => {
+            if seed == closed_form_seed {
+                return Err(first_err);
+            }
+            solve_from(closed_form_seed).map_err(|retry_err| {
+                format!("{first_err}; closed-form retry from a={closed_form_seed:.6}: {retry_err}")
+            })?
+        }
     };
     // The shared solver also stops on bracket width, so a converged root can
     // carry a residual a few multiples of `abs_tol·|F′|` above the target it
@@ -1696,86 +1700,12 @@ pub(crate) fn empirical_intercept_from_marginal_within(
     // back with a residual that is not small at all: `1e-10` in log space is
     // a relative error of `1e-10` on the calibrated probability, three orders
     // above the refinement target and far below anything a fit can resolve.
-    let refusal = match solved {
-        Ok((root, _, f_best)) if f_best.abs() <= 1e3 * abs_tol => return Ok(root),
-        Ok((root, _, f_best)) => format!(
+    if f_best.abs() > 1e3 * abs_tol {
+        return Err(format!(
             "empirical latent intercept solve failed: log-residual={f_best:.3e} at a={root:.6}, target mu={target_mu:.6}"
-        ),
-        Err(reason) => reason,
-    };
-    // The warm-started refinement can stop short of a root the calibration
-    // equation certainly has: on the 12-node law of the gam-cli marginal-slope
-    // fixture, at a posterior-integration node with a steep slope, it returned
-    // log-residual −4.5e-3 at a ≈ 10. The analytic bracket cannot stall.
-    empirical_intercept_in_analytic_bracket(target_mu, slope, probit_scale, nodes, weights, abs_tol)
-        .map_err(|bracket_refusal| format!("{refusal}; analytic-bracket retry: {bracket_refusal}"))
-}
-
-/// The calibrated intercept solved inside the interval that must contain it.
-///
-/// `Σ wᵢ Φ(a + β·zᵢ)` is increasing in `a` and, with `β = s·b`, `m` and `M` the
-/// least and greatest `β·zᵢ` over the weighted nodes and `W = Σ wᵢ`, lies
-/// between `W·Φ(a + m)` and `W·Φ(a + M)`. The root of `Σ wᵢ Φ(a + β·zᵢ) = μ★`
-/// therefore lies in `[Φ⁻¹(μ★/W) − M, Φ⁻¹(μ★/W) − m]` whatever the sign of `b`,
-/// and a bracketed solve inside that interval cannot stall. When `m = M`, as at
-/// `b = 0`, the interval is the single point `Φ⁻¹(μ★/W) − M`, which is the root.
-///
-/// The interval is widened by one probit unit on each side before the solve:
-/// the quantile is evaluated in floating point, and monotonicity keeps the sign
-/// change on any wider interval. The root is accepted under the same
-/// `1e3·abs_tol` log-space residual as [`empirical_intercept_from_marginal_within`].
-pub(super) fn empirical_intercept_in_analytic_bracket(
-    target_mu: f64,
-    slope: f64,
-    probit_scale: f64,
-    nodes: &[f64],
-    weights: &[f64],
-    abs_tol: f64,
-) -> Result<f64, String> {
-    let observed_slope = rigid_observed_slope(slope, probit_scale);
-    let mut total_weight = 0.0_f64;
-    let (mut least, mut greatest) = (f64::INFINITY, f64::NEG_INFINITY);
-    for (&node, &weight) in nodes.iter().zip(weights.iter()) {
-        if !(weight.is_finite() && weight > 0.0) {
-            continue;
-        }
-        total_weight += weight;
-        least = least.min(observed_slope * node);
-        greatest = greatest.max(observed_slope * node);
-    }
-    let level = target_mu / total_weight;
-    if !(least.is_finite() && greatest.is_finite() && level > 0.0 && level < 1.0) {
-        return Err(format!(
-            "empirical latent calibration has no analytic bracket: target mu={target_mu:.6}, \
-             total weight {total_weight}, slope shifts [{least}, {greatest}]"
         ));
     }
-    let quantile = gam_math::probability::standard_normal_quantile(level)?;
-    if least == greatest {
-        return Ok(quantile - greatest);
-    }
-    let (lower, upper) = (quantile - greatest - 1.0, quantile - least + 1.0);
-    let log_target_mu = target_mu.ln();
-    let solution = opt::find_root_bracketed(
-        |a: f64| {
-            empirical_rigid_calibration_eval(a, log_target_mu, slope, probit_scale, nodes, weights)
-                .map(|(value, _, _)| value)
-        },
-        lower,
-        upper,
-        &opt::BracketedRootConfig::new(4.0 * f64::EPSILON, abs_tol, 256),
-    )
-    .map_err(|err| {
-        format!("empirical latent intercept bracketed solve on [{lower:.6}, {upper:.6}]: {err}")
-    })?;
-    if solution.value.abs() > 1e3 * abs_tol {
-        return Err(format!(
-            "empirical latent intercept bracketed solve failed: log-residual={:.3e} at a={:.6} \
-             on [{lower:.6}, {upper:.6}], target mu={target_mu:.6}",
-            solution.value, solution.root
-        ));
-    }
-    Ok(solution.root)
+    Ok(root)
 }
 
 #[inline]
