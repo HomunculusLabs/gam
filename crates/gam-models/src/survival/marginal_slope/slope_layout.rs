@@ -272,6 +272,16 @@ impl SlopeLayout {
         self.follow_up.as_ref()
     }
 
+    /// The coefficient design of a time-constant slope, whose single primary
+    /// channel reads this design directly. A follow-up-varying layout feeds its
+    /// channels from its own tensor designs and returns `None`.
+    #[inline]
+    pub(crate) fn static_coefficient_design(&self) -> Option<&DesignMatrix> {
+        self.follow_up
+            .is_none()
+            .then_some(&self.coefficient_design)
+    }
+
     /// Whether this layout lets the slope move along the follow-up axis.
     #[inline]
     pub(crate) fn is_follow_up_varying(&self) -> bool {

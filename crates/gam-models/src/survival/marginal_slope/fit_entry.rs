@@ -1060,7 +1060,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             slope_follow_up.as_ref(),
         )?;
         slope_layout.validate_for(spec.z.ncols())?;
-        Ok(SurvivalMarginalSlopeFamily {
+        let family = SurvivalMarginalSlopeFamily {
             jeffreys_armed: true,
             latent_law: latent_law.clone(),
             n,
@@ -1087,7 +1087,9 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             time_wiggle_degree: spec.timewiggle_block.as_ref().map(|w| w.degree),
             time_wiggle_ncols: derived_time_wiggle_ncols.unwrap_or(0),
             intercept_warm_starts: Some(Arc::clone(&intercept_warm_starts)),
-        })
+        };
+        family.memoize_operator_backed_designs();
+        Ok(family)
     };
 
     let build_blocks = |rho: &Array1<f64>,

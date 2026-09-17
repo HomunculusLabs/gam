@@ -269,6 +269,43 @@ impl SurvivalMarginalSlopeFamily {
     pub(crate) fn rigid_psi_jeffreys_third_served(&self) -> bool {
         self.rigid_third_information_available() && self.family_hyper.log_sigma_axis.is_none()
     }
+
+    /// Memoize the dense form of each operator-backed covariate design the
+    /// rigid row kernel reads one row at a time (gnomon#2337).
+    ///
+    /// Every gradient, Hessian-vector product and Hessian diagonal pass reads
+    /// the marginal and time-constant slope designs row by row
+    /// (`jacobian_action`, `jacobian_transpose_action`,
+    /// `add_diagonal_quadratic`). A gauged Duchon design is a coefficient
+    /// transform over a stacked block operator, so each of those reads streams
+    /// one row through the operator stack — allocations and a one-row GEMM per
+    /// row, per design, per pass — and the allocator serializes the row-parallel
+    /// passes. The governed memo keeps one ledger-charged dense copy shared by
+    /// every clone of the design, so this family and every workspace built from
+    /// it read rows from that copy. A refusal (construction policy, byte cap or
+    /// joint-ledger pressure) keeps the streamed storage the design already had.
+    pub(crate) fn memoize_operator_backed_designs(&self) {
+        let designs = std::iter::once(("marginal", &self.marginal_design)).chain(
+            self.slope_layout
+                .static_coefficient_design()
+                .map(|design| ("slope", design)),
+        );
+        for (label, design) in designs {
+            if design.is_sparse() || design.as_dense_ref().is_some() {
+                continue;
+            }
+            if let Err(reason) =
+                design.try_to_dense_arc("survival marginal-slope row-kernel design memo")
+            {
+                log::warn!(
+                    "[survival-marginal-slope] {label} design stays streamed ({}x{}), so every \
+                     row-kernel pass reads it one row at a time through its operator: {reason}",
+                    design.nrows(),
+                    design.ncols(),
+                );
+            }
+        }
+    }
 }
 
 impl SurvivalMarginalSlopeFamily {

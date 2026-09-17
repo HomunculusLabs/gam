@@ -299,6 +299,261 @@ fn make_closed_form_test_family(n: usize) -> SurvivalMarginalSlopeFamily {
     }
 }
 
+/// gnomon#2337: the rigid row kernel reads the marginal and time-constant slope
+/// designs one row at a time. An operator-backed design is memoized once
+/// through the governed chunked path (`no_densify_design` panics if anything
+/// densifies it through `to_dense` instead), and every row read afterwards
+/// returns what the streamed read returned.
+#[test]
+fn operator_backed_covariate_designs_are_memoized_and_read_the_same_rows_2337() {
+    let n = 37;
+    let marginal = Array2::from_shape_fn((n, 3), |(row, col)| {
+        ((row * 7 + col * 3) % 11) as f64 * 0.25 - 1.0
+    });
+    let slope = Array2::from_shape_fn((n, 2), |(row, col)| {
+        ((row * 5 + col) % 13) as f64 * 0.1 - 0.4
+    });
+    let mut family = make_closed_form_test_family(n);
+    family.marginal_design = gam_linalg_test_support::no_densify_design(marginal.clone());
+    family.slope_layout = gam_linalg_test_support::no_densify_design(slope.clone()).into();
+    let beta = array![0.3, -1.2, 0.7];
+    let streamed: Vec<f64> = (0..n)
+        .map(|row| family.marginal_design.dot_row_view(row, beta.view()))
+        .collect();
+    assert!(family.marginal_design.as_dense_ref().is_none());
+
+    family.memoize_operator_backed_designs();
+
+    assert_eq!(family.marginal_design.as_dense_ref(), Some(&marginal));
+    let slope_design = family
+        .slope_layout
+        .static_coefficient_design()
+        .expect("a time-constant slope layout exposes its coefficient design");
+    assert_eq!(slope_design.as_dense_ref(), Some(&slope));
+    for (row, expected) in streamed.iter().enumerate() {
+        assert_eq!(
+            family.marginal_design.dot_row_view(row, beta.view()),
+            *expected
+        );
+    }
+}
+
+/// Operator-backed design whose construction policy requires streamed storage.
+struct StreamedOnlyDesignOperator {
+    dense: Array2<f64>,
+}
+
+impl gam_linalg::matrix::LinearOperator for StreamedOnlyDesignOperator {
+    fn nrows(&self) -> usize {
+        self.dense.nrows()
+    }
+
+    fn ncols(&self) -> usize {
+        self.dense.ncols()
+    }
+
+    fn apply(&self, vector: &Array1<f64>) -> Array1<f64> {
+        self.dense.dot(vector)
+    }
+
+    fn apply_transpose(&self, vector: &Array1<f64>) -> Array1<f64> {
+        self.dense.t().dot(vector)
+    }
+
+    fn diag_xtw_x(&self, weights: &Array1<f64>) -> Result<Array2<f64>, String> {
+        let weighted = &self.dense * &weights.view().insert_axis(Axis(1));
+        Ok(self.dense.t().dot(&weighted))
+    }
+}
+
+impl gam_linalg::matrix::DenseDesignOperator for StreamedOnlyDesignOperator {
+    fn row_chunk_into(
+        &self,
+        rows: std::ops::Range<usize>,
+        mut out: ndarray::ArrayViewMut2<'_, f64>,
+    ) -> Result<(), gam_runtime::resource::MatrixMaterializationError> {
+        out.assign(&self.dense.slice(ndarray::s![rows, ..]));
+        Ok(())
+    }
+
+    fn materialization_policy(&self) -> Option<gam_runtime::resource::MaterializationPolicy> {
+        Some(gam_runtime::resource::MaterializationPolicy {
+            max_single_dense_bytes: 0,
+            max_cached_dense_bytes: 0,
+            row_chunk_target_bytes: 1024,
+            allow_operator_materialization: false,
+            allow_diagnostic_materialization: false,
+        })
+    }
+
+    fn to_dense(&self) -> Array2<f64> {
+        // SAFETY: the construction policy above forbids densifying this
+        // operator; a call here is the regression the test exists to catch.
+        panic!("StreamedOnlyDesignOperator must stay streamed")
+    }
+}
+
+/// gnomon#2337: a design whose construction policy requires streamed storage
+/// is refused by the memo and keeps serving row reads from the operator.
+#[test]
+fn a_design_whose_construction_policy_requires_streaming_stays_streamed_2337() {
+    let n = 11;
+    let marginal = Array2::from_shape_fn((n, 2), |(row, col)| (row + 2 * col) as f64 * 0.5);
+    let mut family = make_closed_form_test_family(n);
+    family.marginal_design = DesignMatrix::from(DenseDesignMatrix::from(Arc::new(
+        StreamedOnlyDesignOperator {
+            dense: marginal.clone(),
+        },
+    )));
+
+    family.memoize_operator_backed_designs();
+
+    assert!(family.marginal_design.as_dense_ref().is_none());
+    let beta = array![1.0, -1.0];
+    assert_eq!(
+        family.marginal_design.dot_row_view(4, beta.view()),
+        marginal.row(4).dot(&beta)
+    );
+}
+
+/// gnomon#2337 exactness gate: a memoized gauged design reproduces the lazy
+/// operator in every per-row action the rigid row kernel takes.
+///
+/// The designs are built the way a Duchon term under a collection gauge is: a
+/// `CoefficientTransformOperator` over a lazy `BlockDesignOperator[X, Q]` with
+/// transform `[I; −R]`. The streamed path multiplies each row by the transform
+/// through `fast_ab` over a one-row block; the memo multiplies whole row chunks
+/// through the same `fast_ab`, which may select a different product kernel for
+/// the larger block. Everything after the design row (`dot_row_view`,
+/// `axpy_row_into`, their squared and cross forms) reduces in the same order on
+/// both paths, so the only difference is the rounding of each design row:
+/// `|streamed − memoized| ≤ 1e-14 · max(|streamed|, |memoized|, 1)`.
+#[test]
+fn memoized_gauged_designs_reproduce_the_operator_in_every_row_action_2337() {
+    use crate::row_kernel::RowKernel;
+    use gam_linalg::matrix::{BlockDesignOperator, CoefficientTransformOperator, DesignBlock};
+
+    const PRIMARIES: usize = STATIC_SLOPE_PRIMARIES;
+
+    fn noise(i: usize, j: usize, salt: f64) -> f64 {
+        ((i as f64 * 12.9898 + j as f64 * 78.233 + salt).sin() * 43758.5453).fract() - 0.5
+    }
+
+    fn gauged(x: &Array2<f64>, q: &Array2<f64>, r: &Array2<f64>) -> DesignMatrix {
+        let stacked = BlockDesignOperator::new(vec![
+            DesignBlock::Dense(DenseDesignMatrix::from(x.clone())),
+            DesignBlock::Dense(DenseDesignMatrix::from(q.clone())),
+        ])
+        .expect("stacked gauge block");
+        let p = x.ncols();
+        let mut transform = Array2::<f64>::zeros((p + q.ncols(), p));
+        for column in 0..p {
+            transform[[column, column]] = 1.0;
+        }
+        for range_column in 0..q.ncols() {
+            for column in 0..p {
+                transform[[p + range_column, column]] = -r[[range_column, column]];
+            }
+        }
+        let operator = CoefficientTransformOperator::new(
+            DenseDesignMatrix::from(Arc::new(stacked)),
+            transform,
+        )
+        .expect("gauge coefficient transform");
+        DesignMatrix::Dense(DenseDesignMatrix::from(Arc::new(operator)))
+    }
+
+    fn assert_rows_agree(streamed: &[f64], memoized: &[f64], label: &str, row: usize) {
+        assert_eq!(streamed.len(), memoized.len());
+        for (index, (&a, &b)) in streamed.iter().zip(memoized).enumerate() {
+            let bound = 1e-14 * a.abs().max(b.abs()).max(1.0);
+            assert!(
+                (a - b).abs() <= bound,
+                "{label} row {row} entry {index}: streamed={a:.17e} memoized={b:.17e}"
+            );
+        }
+    }
+
+    let n = 96;
+    let (marginal_cols, slope_cols, gauge_rank) = (7, 4, 3);
+    let q = Array2::from_shape_fn((n, gauge_rank), |(i, j)| noise(i, j, 1.0));
+    let marginal_x = Array2::from_shape_fn((n, marginal_cols), |(i, j)| noise(i, j, 2.0));
+    let marginal_r = Array2::from_shape_fn((gauge_rank, marginal_cols), |(i, j)| noise(i, j, 3.0));
+    let slope_x = Array2::from_shape_fn((n, slope_cols), |(i, j)| noise(i, j, 4.0));
+    let slope_r = Array2::from_shape_fn((gauge_rank, slope_cols), |(i, j)| noise(i, j, 5.0));
+    // Two independent design objects: clones share one memo, so the streamed
+    // family must be built from scratch rather than cloned.
+    let build_family = || {
+        let mut family = make_closed_form_test_family(n);
+        family.marginal_design = gauged(&marginal_x, &q, &marginal_r);
+        family.slope_layout = gauged(&slope_x, &q, &slope_r).into();
+        family
+    };
+    let streamed_family = build_family();
+    let memoized_family = build_family();
+    memoized_family.memoize_operator_backed_designs();
+    assert!(streamed_family.marginal_design.as_dense_ref().is_none());
+    assert!(memoized_family.marginal_design.as_dense_ref().is_some());
+
+    let states = || {
+        vec![
+            ParameterBlockState {
+                beta: Array1::zeros(0),
+                eta: Array1::zeros(n),
+            },
+            ParameterBlockState {
+                beta: Array1::zeros(marginal_cols),
+                eta: Array1::zeros(n),
+            },
+            ParameterBlockState {
+                beta: Array1::zeros(slope_cols),
+                eta: Array1::zeros(n),
+            },
+        ]
+    };
+    let streamed =
+        SurvivalMarginalSlopeRowKernel::<PRIMARIES, StaticSlopeGeometry>::new(streamed_family, states());
+    let memoized =
+        SurvivalMarginalSlopeRowKernel::<PRIMARIES, StaticSlopeGeometry>::new(memoized_family, states());
+    let total = marginal_cols + slope_cols;
+
+    for row in 0..n {
+        let direction: Vec<f64> = (0..total).map(|j| noise(row, j, 6.0)).collect();
+        assert_rows_agree(
+            &streamed.jacobian_action(row, &direction),
+            &memoized.jacobian_action(row, &direction),
+            "jacobian_action",
+            row,
+        );
+
+        let primary: [f64; PRIMARIES] = std::array::from_fn(|a| noise(row, a, 7.0));
+        let mut streamed_pullback = vec![0.0; total];
+        let mut memoized_pullback = vec![0.0; total];
+        streamed.jacobian_transpose_action(row, &primary, &mut streamed_pullback);
+        memoized.jacobian_transpose_action(row, &primary, &mut memoized_pullback);
+        assert_rows_agree(
+            &streamed_pullback,
+            &memoized_pullback,
+            "jacobian_transpose_action",
+            row,
+        );
+
+        let hessian: [[f64; PRIMARIES]; PRIMARIES] = std::array::from_fn(|a| {
+            std::array::from_fn(|b| noise(row, a.min(b) * PRIMARIES + a.max(b), 8.0))
+        });
+        let mut streamed_diagonal = vec![0.0; total];
+        let mut memoized_diagonal = vec![0.0; total];
+        streamed.add_diagonal_quadratic(row, &hessian, &mut streamed_diagonal);
+        memoized.add_diagonal_quadratic(row, &hessian, &mut memoized_diagonal);
+        assert_rows_agree(
+            &streamed_diagonal,
+            &memoized_diagonal,
+            "add_diagonal_quadratic",
+            row,
+        );
+    }
+}
+
 #[test]
 fn k1_shared_slope_uses_cached_arbitrary_variance_932() {
     let mut family = make_closed_form_test_family(3);
