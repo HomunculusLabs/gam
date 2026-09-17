@@ -63,6 +63,7 @@ from .manifold_sae import (
     CircularPairConcordance,
     CircularReplicateCoverage,
     ManifoldSAE,
+    ManifoldSAEFitMetadata,
     ManifoldSAEOutput,
     circular_concordance,
 )
@@ -142,6 +143,7 @@ __all__ = [
     "CircularPairConcordance",
     "CircularReplicateCoverage",
     "ManifoldSAE",
+    "ManifoldSAEFitMetadata",
     "ManifoldSAEOutput",
     "circular_concordance",
     "PoincareAtoms",

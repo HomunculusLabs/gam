@@ -123,7 +123,7 @@ replacement for either top-eigenfactor/dosimetry harvest.
 | Basis evaluations | `bspline_basis`, `bspline_basis_derivative`, `duchon_basis`, `periodic_spline_curve_basis`, `sphere_basis` |
 | Penalty / ridge | `smoothness_penalty`, `gaussian_weighted_ridge`, `gaussian_weighted_ridge_batch` |
 | Analytic penalty modules | `ARDPenalty`, `BlockOrthogonalityPenalty`, `GumbelTemperatureSchedule`, `OrderedBetaBernoulliPenalty`, `IsometryPenalty`, `IvaeRidgeMeanGauge`, `LazyPcaBasis`, `MechanismSparsityPenalty`, `MonotonicityPenalty`, `RiemannianGradientDescent`, `SmoothThresholdPenalty`, `TopologyAutoSelector` |
-| Fitted manifold SAE | `ManifoldSAE`, `ManifoldSAEOutput`, `circular_concordance`, `CircularConcordanceReport` |
+| Fitted manifold SAE | `ManifoldSAE`, `ManifoldSAEOutput`, `ManifoldSAEFitMetadata`, `circular_concordance`, `CircularConcordanceReport` |
 | Harvest / Fisher factors | `HarvestShard`, `harvest_output_fisher_factors`, `harvest_downstream_output_fisher_factors`, `save_harvest_shard`, `load_harvest_shard` |
 | Hyperbolic / interchange | `PoincareAtoms`, `InterchangeSwapDecoder` |
 | Skip transcoder | `SkipAffineSmooth`, `skip_transcoder`, `select_skip_transcoder`, `SkipTranscoderSelectionResult` |

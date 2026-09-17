@@ -23,23 +23,43 @@ from ._coerce import from_numpy_like, to_numpy_f64
 
 
 @dataclass(frozen=True, slots=True)
-class ManifoldSAEOutput:
-    """Tensor view of one converged native manifold-SAE inference.
+class ManifoldSAEFitMetadata:
+    """Scalars of the converged training fit behind the adapter.
 
-    ``reconstruction``, ``codes``, and ``coordinates`` are all emitted by the
-    same frozen Rust fit. ``penalized_loss_score`` is the inner fit-quality
-    diagnostic; ``penalized_quasi_laplace_criterion`` is the terminal custom
+    None of these values depends on the batch passed to ``forward``; every
+    batch inferred through one module carries the same fit metadata.
+    ``penalized_loss_score`` is the training fit's negative inner penalized
+    loss. ``penalized_quasi_laplace_criterion`` is the terminal custom
     PSD/Gauss--Newton quasi-Laplace scalar with rank charges. It is not LAML,
-    REML, or normalized model evidence. No encoder logits,
-    surrogate gates, or eager-only smoothing parameters are exposed.
+    REML, or normalized model evidence, and it has no per-batch counterpart: a
+    batch Laplace criterion would need its own inference state and curvature.
+    ``selected_smooth_lambdas`` are the smoothing precisions the fit selected.
+    """
+
+    penalized_loss_score: torch.Tensor | None
+    penalized_quasi_laplace_criterion: torch.Tensor
+    selected_smooth_lambdas: torch.Tensor | None
+
+
+@dataclass(frozen=True, slots=True)
+class ManifoldSAEOutput:
+    """Tensor view of one converged native manifold-SAE inference on a batch.
+
+    ``reconstruction``, ``codes``, ``coordinates``, and
+    ``batch_penalized_loss_score`` all come from the same frozen-decoder native
+    solve on the input batch. ``batch_penalized_loss_score`` is that solve's
+    native ``oos_penalized_loss``: the negative penalized loss (data fit,
+    assignment sparsity, smoothness, ARD) at the batch's converged latents.
+    Training-fit scalars are in ``fit`` and do not change with the batch. No
+    encoder logits, surrogate gates, or eager-only smoothing parameters are
+    exposed.
     """
 
     reconstruction: torch.Tensor
     codes: torch.Tensor
     coordinates: tuple[torch.Tensor, ...]
-    penalized_loss_score: torch.Tensor | None
-    penalized_quasi_laplace_criterion: torch.Tensor
-    selected_smooth_lambdas: torch.Tensor | None
+    batch_penalized_loss_score: torch.Tensor
+    fit: ManifoldSAEFitMetadata
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,6 +252,10 @@ class ManifoldSAE(nn.Module):
             for coords in latents["coords"]
         )
 
+        batch_penalized_loss_score = torch.as_tensor(
+            latents["oos_penalized_loss"], dtype=x.dtype, device=x.device
+        )
+
         score_value = self._fitted.penalized_loss_score
         penalized_loss_score = (
             None
@@ -253,9 +277,12 @@ class ManifoldSAE(nn.Module):
             reconstruction=reconstruction,
             codes=codes,
             coordinates=coordinates,
-            penalized_loss_score=penalized_loss_score,
-            penalized_quasi_laplace_criterion=penalized_quasi_laplace_criterion,
-            selected_smooth_lambdas=selected_smooth_lambdas,
+            batch_penalized_loss_score=batch_penalized_loss_score,
+            fit=ManifoldSAEFitMetadata(
+                penalized_loss_score=penalized_loss_score,
+                penalized_quasi_laplace_criterion=penalized_quasi_laplace_criterion,
+                selected_smooth_lambdas=selected_smooth_lambdas,
+            ),
         )
 
     def _load_from_state_dict(
@@ -304,6 +331,7 @@ __all__ = [
     "CircularPairConcordance",
     "CircularReplicateCoverage",
     "ManifoldSAE",
+    "ManifoldSAEFitMetadata",
     "ManifoldSAEOutput",
     "circular_concordance",
 ]

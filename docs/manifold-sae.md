@@ -428,6 +428,8 @@ latents["fitted"]                     # (N, p)
 latents["assignments"]                # (N, K), exactly the applied codes
 latents["logits"]                     # (N, K)
 latents["coords"]                     # [ (N, d_k) ]
+latents["oos_penalized_loss"]         # this solve's negative penalized loss on X
+latents["penalized_loss_breakdown"]   # its data_fit / assignment_sparsity / smoothness / ard
 ```
 
 Call `converged_latents` when several outputs are needed; separate
@@ -833,11 +835,16 @@ module = ManifoldSAE(fit)
 out = module(torch.as_tensor(new_activations, dtype=torch.float64))
 ```
 
-`out.reconstruction`, `out.codes`, and `out.coordinates` come from one native
-converged-latent solve. `out.penalized_loss_score` is the inner fit diagnostic,
-while `out.penalized_quasi_laplace_criterion` is the terminal custom native
-quasi-Laplace criterion. It is not relabeled as LAML, REML, or model evidence.
-`out.selected_smooth_lambdas` reports the smoothing
-precisions selected by that fit. The adapter has no trainable parameters and
+`out.reconstruction`, `out.codes`, `out.coordinates`, and
+`out.batch_penalized_loss_score` come from one native converged-latent solve on
+the input batch. `out.batch_penalized_loss_score` is that solve's native
+`oos_penalized_loss`: the negative penalized loss (data fit, assignment
+sparsity, smoothness, ARD) at the batch's converged latents. Training-fit
+values are in `out.fit` and are the same for every batch:
+`out.fit.penalized_loss_score` is the fit's inner penalized-loss diagnostic,
+`out.fit.penalized_quasi_laplace_criterion` is the terminal custom native
+quasi-Laplace criterion (not LAML, REML, or model evidence, and with no
+per-batch counterpart), and `out.fit.selected_smooth_lambdas` reports the
+smoothing precisions selected by that fit. The adapter has no trainable parameters and
 rejects inputs requiring gradients. Its state dict serializes the complete
 native fit, so loading it restores the same inference model.

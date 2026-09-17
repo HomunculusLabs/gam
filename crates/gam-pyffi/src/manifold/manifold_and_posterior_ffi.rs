@@ -6338,8 +6338,8 @@ impl ManifoldSaeCore {
     ///
     /// With no input, this returns the state persisted by the training fit.
     /// With `x_new`, it runs one frozen-decoder OOS solve and returns its
-    /// reconstruction, assignments, logits, and coordinates together; no field
-    /// is recomputed by a separate inference call.
+    /// reconstruction, assignments, logits, coordinates, and penalized loss
+    /// together; no field is recomputed by a separate inference call.
     #[pyo3(signature = (x_new=None))]
     fn converged_latents<'py>(
         &self,
@@ -6358,6 +6358,13 @@ impl ManifoldSaeCore {
             let logits = raw
                 .get_item("logits")?
                 .ok_or_else(|| py_value_error("OOS payload missing 'logits'".to_string()))?;
+            let penalized_loss = raw.get_item("oos_penalized_loss")?.ok_or_else(|| {
+                py_value_error("OOS payload missing 'oos_penalized_loss'".to_string())
+            })?;
+            let penalized_loss_breakdown =
+                raw.get_item("penalized_loss_breakdown")?.ok_or_else(|| {
+                    py_value_error("OOS payload missing 'penalized_loss_breakdown'".to_string())
+                })?;
             let atoms = raw
                 .get_item("atoms")?
                 .ok_or_else(|| py_value_error("OOS payload missing 'atoms'".to_string()))?;
@@ -6380,6 +6387,12 @@ impl ManifoldSaeCore {
             out.set_item("assignments", assignments)?;
             out.set_item("logits", logits)?;
             out.set_item("coords", coords)?;
+            // The frozen-decoder solve's own negative penalized loss on these rows
+            // and its components (#2933 F42). They belong to this batch, unlike the
+            // training fit's `penalized_loss_score` and
+            // `penalized_quasi_laplace_criterion` getters.
+            out.set_item("oos_penalized_loss", penalized_loss)?;
+            out.set_item("penalized_loss_breakdown", penalized_loss_breakdown)?;
             // Native, unweighted per-atom decoded images g_k(t_ik). Consumers
             // obtain the additive contribution as a_ik * g_k(t_ik).
             // Exposing the already-materialized OOS report prevents Python
