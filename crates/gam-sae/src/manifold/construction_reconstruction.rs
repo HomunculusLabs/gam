@@ -376,11 +376,17 @@ pub fn reconstruct_persisted_atom_set(
 }
 
 impl SaeManifoldTerm {
-    fn reconstruction_residual_sum_squares(
+    /// Residual energies in the two frames of [`SaeReconstructionDispersion`]:
+    /// `(raw_rss, likelihood_rss, likelihood_frame)`.
+    ///
+    /// `likelihood_rss = 2·data_fit` is the energy the likelihood sums, whitened
+    /// when the metric whitens. Under a whitening metric the raw energy is not
+    /// recoverable from the loss, so the raw residual is then required.
+    fn reconstruction_residual_energies(
         &self,
         loss: &SaeManifoldLoss,
         residual: Option<ArrayView2<'_, f64>>,
-    ) -> Result<f64, String> {
+    ) -> Result<(f64, f64, SaeLikelihoodFrame), String> {
         if let Some(residual) = residual.as_ref() {
             if residual.dim() != (self.n_obs(), self.output_dim()) {
                 return Err(format!(
@@ -394,35 +400,95 @@ impl SaeManifoldTerm {
                 return Err("reconstruction residual must be finite".to_string());
             }
         }
-        let metric_whitens = self
+        let likelihood_rss = 2.0 * loss.data_fit;
+        let (raw_rss, frame) = match self
             .row_metric
             .as_ref()
-            .is_some_and(|metric| metric.whitens_likelihood());
-        let rss = if metric_whitens {
-            residual
-                .as_ref()
-                .map(|values| values.iter().map(|value| value * value).sum::<f64>())
-                .unwrap_or(2.0 * loss.data_fit)
-        } else {
-            2.0 * loss.data_fit
+            .filter(|metric| metric.whitens_likelihood())
+        {
+            Some(metric) => {
+                let residual = residual.as_ref().ok_or_else(|| {
+                    "the raw output noise variance under a whitening row metric needs the raw \
+                     reconstruction residual"
+                        .to_string()
+                })?;
+                (
+                    residual.iter().map(|value| value * value).sum::<f64>(),
+                    SaeLikelihoodFrame::Whitened {
+                        metric_rank: metric.metric_rank(),
+                    },
+                )
+            }
+            None => (likelihood_rss, SaeLikelihoodFrame::RawOutput),
         };
-        if rss.is_finite() && rss >= 0.0 {
-            Ok(rss)
-        } else {
-            Err(format!(
-                "reconstruction residual sum of squares must be finite and non-negative; got {rss}"
-            ))
+        for (label, rss) in [("raw", raw_rss), ("likelihood", likelihood_rss)] {
+            if !(rss.is_finite() && rss >= 0.0) {
+                return Err(format!(
+                    "{label} reconstruction residual sum of squares must be finite and \
+                     non-negative; got {rss}"
+                ));
+            }
+        }
+        Ok((raw_rss, likelihood_rss, frame))
+    }
+
+    /// Scalar observations the likelihood frame sums over: `n·p` raw, or
+    /// `n·metric_rank` whitened coordinates.
+    fn likelihood_scalar_count(&self, frame: SaeLikelihoodFrame) -> f64 {
+        match frame {
+            SaeLikelihoodFrame::RawOutput => (self.n_obs() * self.output_dim()) as f64,
+            SaeLikelihoodFrame::Whitened { metric_rank } => (self.n_obs() * metric_rank) as f64,
         }
     }
 
-    /// Gaussian reconstruction dispersion `φ̂`, the scale that turns the
-    /// unscaled inverse-Hessian β-block `S_β⁻¹` into a posterior covariance
-    /// `Cov(β) = φ̂·S_β⁻¹` — the same `Vb = φ·H⁻¹` convention the main GAM
-    /// inference path uses.
+    /// Both noise scales with no effective-dof correction, for execution plans
+    /// that expose no Schur factor to price the EDF. An exact fit reports zero.
+    pub(crate) fn unfactored_reconstruction_dispersion(
+        &self,
+        target: ArrayView2<'_, f64>,
+        rho: &SaeManifoldRho,
+    ) -> Result<SaeReconstructionDispersion, String> {
+        let loss = self.loss(target, rho)?;
+        let whitens = self
+            .row_metric
+            .as_ref()
+            .is_some_and(|metric| metric.whitens_likelihood());
+        let residual = if whitens {
+            Some(self.reconstruction_residual(target, rho)?)
+        } else {
+            None
+        };
+        let (raw_rss, likelihood_rss, likelihood_frame) =
+            self.reconstruction_residual_energies(&loss, residual.as_ref().map(|r| r.view()))?;
+        let n_scalar = (self.n_obs().saturating_mul(self.output_dim())).max(1) as f64;
+        Ok(SaeReconstructionDispersion {
+            raw_output_noise_variance: raw_rss / n_scalar,
+            likelihood_dispersion: likelihood_rss
+                / self.likelihood_scalar_count(likelihood_frame).max(1.0),
+            likelihood_frame,
+        })
+    }
+
+    /// The two Gaussian reconstruction noise scales of
+    /// [`SaeReconstructionDispersion`], sharing one effective-dof count.
     ///
-    /// `RSS = Σ_{i,c} (z_{ic} − ẑ_{ic})² = 2·data_fit` (the loss stores the
-    /// half-sum `½Σr²`). The residual degrees of freedom subtract the effective
-    /// parameter count from the `N·p` scalar observations:
+    /// * `likelihood_dispersion = 2·data_fit / (n_likelihood − EDF)` is the
+    ///   dispersion of the likelihood the fit minimizes, in its own frame. It
+    ///   turns the metric-weighted inverse-Hessian β-block `S_β⁻¹` into a
+    ///   posterior covariance `Cov(β) = φ̂·S_β⁻¹` — the same `Vb = φ·H⁻¹`
+    ///   convention the main GAM inference path uses. Under a whitening metric
+    ///   `S_β` already carries the metric's variance scale, so this multiplier is
+    ///   dimensionless and counts the `n·metric_rank` whitened observations.
+    /// * `raw_output_noise_variance = Σ_{i,c} r_{ic}² / (n·p − EDF)` is the raw
+    ///   output-frame noise per scalar, whatever the metric. Under a whitening
+    ///   metric `data_fit` is ≈ n·p by construction, so the Marchenko–Pastur rank
+    ///   edge, which compares against the unwhitened decoder Gram, must read this
+    ///   one (#2228/#2258: the whitened value vetoed a fitted EV = 0.998 circle as
+    ///   rank zero). On the isotropic frame the two coincide exactly.
+    ///
+    /// The loss stores the half-sum, so `RSS = 2·data_fit` on the isotropic
+    /// frame. The residual degrees of freedom subtract the effective
+    /// parameter count from the scalar observations:
     ///   * decoder β: `beta_dim − tr(λ_smooth · S_β⁻¹ · ⊕_k S_k⊗I_p)`, the
     ///     smoothness effective-dof already assembled for the Fellner-Schall
     ///     step (penalty-shrunk directions do not cost a full parameter);
@@ -463,26 +529,18 @@ impl SaeManifoldTerm {
         cache: &ArrowFactorCache,
         rho: &SaeManifoldRho,
         residual: Option<ArrayView2<'_, f64>>,
-    ) -> Result<f64, String> {
+    ) -> Result<SaeReconstructionDispersion, String> {
         self.assignment.validate_rho_domain(rho)?;
         let n = self.n_obs();
         let p = self.output_dim();
         // Design-honesty weights are normalized to mean one, so they redistribute
         // residual mass without changing the scalar observation count.
         let n_scalar = (n * p) as f64;
-        // FRAME CONSISTENCY (#2228/#2258 tier-0 root cause): under an active
-        // WHITENING row metric the likelihood's `loss.data_fit` is the
-        // WHITENED residual energy — ≈ n·p BY CONSTRUCTION (whitening
-        // normalizes residuals to unit scale) — so a φ̂ built from it prices
-        // the noise floor at ~n·p/resid_dof ≈ 2 REGARDLESS of the actual fit
-        // quality. Every consumer of this dispersion lives in the RAW output
-        // frame: the rank-charge MP edge compares against the unwhitened
-        // reconstruction Gram (measured veto: R=2.16 vs top signal 1.01 on a
-        // fitted EV=0.998 circle → rank_eff=0 → categorical +∞ → 'infeasible
-        // at the requested rho' for every structured pass), and the shape
-        // bands are φ-scaled output-frame covariances. Price φ from the RAW
-        // residual whenever the caller supplied it and the metric whitens.
-        let rss = self.reconstruction_residual_sum_squares(loss, residual)?;
+        // FRAME CONSISTENCY: the raw energy prices the output-frame noise the MP
+        // edge compares against; the likelihood energy prices the covariance
+        // multiplier of the metric-weighted Hessian. See the fn doc.
+        let (raw_rss, likelihood_rss, likelihood_frame) =
+            self.reconstruction_residual_energies(loss, residual)?;
         let smooth_edf: f64 = self
             .decoder_smoothness_effective_dof_per_atom(cache, &rho.lambda_smooth_vec()?)
             .map_err(|e| format!("reconstruction_dispersion: smooth edf: {e}"))?
@@ -559,19 +617,33 @@ impl SaeManifoldTerm {
             // is decreasing in σ̂ through the margin z, so one pass contracts). It is
             // identically 0 for single-basin / hard-frozen / genuinely-soft rows, so
             // w=None + non-selecting fits are bit-for-bit today's φ̂.
-            let phi_seed = rss / (n_scalar - beta_edf - coord_edf).max(1.0);
+            let phi_seed = raw_rss / (n_scalar - beta_edf - coord_edf).max(1.0);
             let df_search = self.basin_selection_deflation_correction(residual, phi_seed)?;
             coord_edf = (coord_edf + df_search).clamp(0.0, n_scalar);
         }
         let resid_dof = (n_scalar - beta_edf - coord_edf).max(1.0);
-        let phi = rss / resid_dof;
-        if !phi.is_finite() || phi < 0.0 {
-            return Err(format!(
-                "reconstruction_dispersion: non-finite/negative φ̂={phi} \
-                 (RSS={rss}, resid_dof={resid_dof}, beta_edf={beta_edf}, coord_edf={coord_edf})"
-            ));
+        let raw_output_noise_variance = raw_rss / resid_dof;
+        let likelihood_resid_dof =
+            (self.likelihood_scalar_count(likelihood_frame) - beta_edf - coord_edf).max(1.0);
+        let likelihood_dispersion = likelihood_rss / likelihood_resid_dof;
+        for (label, phi) in [
+            ("raw output noise variance", raw_output_noise_variance),
+            ("likelihood dispersion", likelihood_dispersion),
+        ] {
+            if !phi.is_finite() || phi < 0.0 {
+                return Err(format!(
+                    "reconstruction_dispersion: non-finite/negative {label} {phi} \
+                     (raw RSS={raw_rss}, likelihood RSS={likelihood_rss}, resid_dof={resid_dof}, \
+                     likelihood resid_dof={likelihood_resid_dof}, beta_edf={beta_edf}, \
+                     coord_edf={coord_edf})"
+                ));
+            }
         }
-        Ok(phi.max(f64::MIN_POSITIVE))
+        Ok(SaeReconstructionDispersion {
+            raw_output_noise_variance: raw_output_noise_variance.max(f64::MIN_POSITIVE),
+            likelihood_dispersion: likelihood_dispersion.max(f64::MIN_POSITIVE),
+            likelihood_frame,
+        })
     }
 
     /// Posterior covariance and ambient shape band for every atom — the
@@ -592,12 +664,19 @@ impl SaeManifoldTerm {
     /// A near-degenerate atom has a near-singular Schur block, so `Cov(β_k)` —
     /// and the band — fans out automatically: the band width is a
     /// per-coordinate visual of how well each atom is identified.
+    ///
+    /// `φ` is [`SaeReconstructionDispersion::posterior_covariance_scale`], the
+    /// likelihood-frame dispersion. `S_β` is assembled through the same row
+    /// metric as the likelihood, so under a whitening metric it already carries
+    /// the metric's variance scale and the multiplier is dimensionless: scaling
+    /// every observation unit by `c` (with `Σ → c²Σ`) scales `Cov(β)` by `c²`.
     pub fn assemble_shape_uncertainty(
         &self,
         cache: &ArrowFactorCache,
-        dispersion: f64,
+        dispersion: SaeReconstructionDispersion,
     ) -> Result<SaeShapeUncertainty, String> {
         let p = self.output_dim();
+        let covariance_scale = dispersion.posterior_covariance_scale();
         // #972 / #977 T1: the cache β block is the FACTORED border when frames
         // are active, so each atom's Schur inverse block is the `(M_k·r_k)`
         // coordinate covariance `Cov(vec C_k)`. We LIFT it to the full
@@ -652,7 +731,7 @@ impl SaeManifoldTerm {
                 // which is the r×r quadratic form `u_cᵀ Y u_c` with
                 //   Y = Σ_{b1,b2} φ[b1] φ[b2] Cov(C)[(b1,·),(b2,·)].
                 let mut cov_c = cov_block;
-                cov_c.mapv_inplace(|v| v * dispersion);
+                cov_c.mapv_inplace(|v| v * covariance_scale);
                 for (gi, &row) in eval_rows.iter().enumerate() {
                     let basis = atom.basis_values.row(row);
                     for c in 0..p {
@@ -670,7 +749,7 @@ impl SaeManifoldTerm {
                 } else {
                     cov_block
                 };
-                cov.mapv_inplace(|v| v * dispersion);
+                cov.mapv_inplace(|v| v * covariance_scale);
                 for (gi, &row) in eval_rows.iter().enumerate() {
                     // Var_c = Σ_{b1,b2} Φ[b1]Φ[b2] Cov[(b1,c),(b2,c)]; the flat
                     // decoder index is basis·p + channel (row-major (M_k, p)).
@@ -742,10 +821,7 @@ impl SaeManifoldTerm {
         if !plan.direct_logdet_admitted() {
             // No exact Direct Schur factor at this scale: report explicit
             // unavailability rather than substituting a different covariance.
-            let loss = self.loss(target, rho)?;
-            let n_scalar = (self.n_obs().saturating_mul(self.output_dim())).max(1) as f64;
-            // An exact fit reports zero dispersion.
-            let dispersion = 2.0 * loss.data_fit / n_scalar;
+            let dispersion = self.unfactored_reconstruction_dispersion(target, rho)?;
             return Ok(self.unavailable_shape_uncertainty(dispersion));
         }
         let (_cost, loss, cache) = self
@@ -767,7 +843,10 @@ impl SaeManifoldTerm {
 
     /// Explicitly unavailable joint shape uncertainty for a streaming fit whose
     /// execution plan cannot expose the exact joint Schur factor.
-    pub(crate) fn unavailable_shape_uncertainty(&self, dispersion: f64) -> SaeShapeUncertainty {
+    pub(crate) fn unavailable_shape_uncertainty(
+        &self,
+        dispersion: SaeReconstructionDispersion,
+    ) -> SaeShapeUncertainty {
         let atoms = self
             .atoms
             .iter()

@@ -66,13 +66,67 @@ pub struct SaeAtomShapeUncertainty {
     pub band_sd_robust: Option<Array2<f64>>,
 }
 
+/// The frame in which the reconstruction likelihood measures its residuals,
+/// which fixes the units of [`SaeReconstructionDispersion::likelihood_dispersion`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaeLikelihoodFrame {
+    /// Isotropic data fit `½‖r_n‖²` (no metric, or a gauge-only metric): the
+    /// dispersion is in squared output units over `n·p` scalar observations.
+    RawOutput,
+    /// Whitened data fit `½ r_nᵀ M_n r_n` with `M_n = U_n U_nᵀ` of rank
+    /// `metric_rank`: the dispersion is dimensionless over `n·metric_rank`
+    /// whitened scalar observations.
+    Whitened { metric_rank: usize },
+}
+
+/// The two reconstruction noise scales of a fit, which answer different
+/// questions and need not share units or values.
+///
+/// With an inverse-noise metric `M_n = Σ_n⁻¹` the joint Hessian
+/// `H = JᵀMJ + P` already carries `Σ`'s variance scale: for `M = σ⁻²I` and a
+/// linear decoder `H⁻¹ = σ²(XᵀX + σ²λS)⁻¹`. Multiplying that inverse by a raw
+/// residual variance `≈ σ²` produces `σ⁴(…)⁻¹`, so the covariance multiplier is
+/// the dimensionless metric-frame dispersion, never the raw one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SaeReconstructionDispersion {
+    /// Raw output-frame noise variance per scalar observation,
+    /// `Σ_{i,c} r_{ic}² / (n·p − EDF)`, in squared output units whatever
+    /// metric the likelihood uses. Consumers that compare against unwhitened
+    /// output quantities read this: the Marchenko–Pastur rank edge (against the
+    /// raw decoder Gram), the incoherence SNR and the per-atom inner fits.
+    pub raw_output_noise_variance: f64,
+    /// Dispersion `φ̂` of the working likelihood `exp(−½ Σ w_n r_nᵀ M_n r_n / φ)`,
+    /// `2·data_fit / (n_likelihood − EDF)` in the frame named by
+    /// [`Self::likelihood_frame`]. Equal to [`Self::raw_output_noise_variance`]
+    /// when that frame is [`SaeLikelihoodFrame::RawOutput`].
+    pub likelihood_dispersion: f64,
+    /// Units and scalar-observation count of [`Self::likelihood_dispersion`].
+    pub likelihood_frame: SaeLikelihoodFrame,
+}
+
+impl SaeReconstructionDispersion {
+    /// Multiplier turning the metric-weighted inverse joint Hessian `H⁻¹` into
+    /// the posterior covariance, `Cov = φ̂·H⁻¹`.
+    ///
+    /// The inner objective is `½ Σ w_n r_nᵀ M_n r_n + P(θ; λ)` with no `φ`, so
+    /// each fitted penalty strength is the product `λ = φ·λ′` of a prior
+    /// precision `λ′` and the likelihood dispersion. The posterior
+    /// `exp(−½ rᵀMr/φ − P(θ; λ′))` then has Hessian `H/φ` and covariance exactly
+    /// `φ·H⁻¹`: the prior scales with the dispersion. Holding `λ′ = λ` fixed
+    /// instead would give `(JᵀMJ/φ + P″)⁻¹`, which is not a multiple of `H⁻¹`.
+    pub fn posterior_covariance_scale(&self) -> f64 {
+        self.likelihood_dispersion
+    }
+}
+
 /// Posterior shape uncertainty for a whole SAE-manifold fit: one band per atom
-/// plus the shared Gaussian reconstruction dispersion `φ̂` used to scale every
+/// plus the reconstruction noise scales, of which
+/// [`SaeReconstructionDispersion::posterior_covariance_scale`] scales every
 /// covariance. See [`SaeManifoldTerm::assemble_shape_uncertainty`].
 #[derive(Debug, Clone)]
 pub struct SaeShapeUncertainty {
-    /// Gaussian reconstruction scale `φ̂ = RSS / residual-dof`.
-    pub dispersion: f64,
+    /// Raw and likelihood-frame reconstruction noise scales.
+    pub dispersion: SaeReconstructionDispersion,
     /// One entry per atom, in atom order.
     pub atoms: Vec<SaeAtomShapeUncertainty>,
 }

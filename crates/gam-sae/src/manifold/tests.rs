@@ -3277,7 +3277,8 @@ pub(crate) fn reconstruction_dispersion_uses_ard_shrunk_coordinate_edf() {
 
     let dispersion = term
         .reconstruction_dispersion(&loss, &cache, &rho, None)
-        .unwrap();
+        .unwrap()
+        .raw_output_noise_variance;
     let smooth_edf: f64 = term
         .decoder_smoothness_effective_dof_per_atom(&cache, &rho.lambda_smooth_vec().unwrap())
         .unwrap()

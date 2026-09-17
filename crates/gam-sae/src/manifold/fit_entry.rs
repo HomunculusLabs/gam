@@ -1308,12 +1308,17 @@ fn finalize_sae_fit_report(
             ridge_beta,
         )?;
     }
-    term.set_certificate_dispersion(shape_uncertainty.dispersion)?;
+    // The certificate SNR and the inner channel smooths compare against raw
+    // output quantities, so they read the raw output noise variance.
+    term.set_certificate_dispersion(shape_uncertainty.dispersion.raw_output_noise_variance)?;
 
     // #1097 / #1103 — harvest each atom's fixed inner-decoder-smooth snapshot at
     // the settled state, so the diagnostics report can produce per-atom
     // Riesz-debiased functionals and the split-LRT smooth-structure e-value.
-    term.set_atom_inner_fits(z.view(), shape_uncertainty.dispersion)?;
+    term.set_atom_inner_fits(
+        z.view(),
+        shape_uncertainty.dispersion.raw_output_noise_variance,
+    )?;
 
     if shape_uncertainty.atoms.len() != k_atoms {
         return Err(SaeFitError::Fit(
@@ -1397,7 +1402,7 @@ fn finalize_sae_fit_report(
     let fit_diagnostics = term.fit_diagnostics_report(
         Some(&ard_variances),
         isometry_pin_active,
-        Some(shape_uncertainty.dispersion),
+        Some(shape_uncertainty.dispersion.raw_output_noise_variance),
         fitted.view(),
         Some(assignments.view()),
     )?;
@@ -1716,7 +1721,7 @@ fn run_sae_manifold_fit_on_target(request: SaeFitRequest) -> Result<SaeFitOutcom
             let installed_label = metric_provenance_label(metric.provenance());
             let factor_energy = model.factor().iter().map(|v| v * v).sum::<f64>();
             let diagonal_mean = model.diagonal().iter().copied().sum::<f64>() / p_out as f64;
-            let dispersion_before = shape_uncertainty.dispersion;
+            let dispersion_before = shape_uncertainty.dispersion.raw_output_noise_variance;
             let log_lambda_smooth_before = rho.log_lambda_smooth.clone();
             term.set_row_metric(metric)?;
             let stage = SaeFitStage::StructuredResidual {
@@ -1760,7 +1765,7 @@ fn run_sae_manifold_fit_on_target(request: SaeFitRequest) -> Result<SaeFitOutcom
                 factor_energy,
                 diagonal_mean,
                 dispersion_before,
-                dispersion_after: shape_uncertainty.dispersion,
+                dispersion_after: shape_uncertainty.dispersion.raw_output_noise_variance,
                 log_lambda_smooth_before,
                 log_lambda_smooth_after: rho.log_lambda_smooth.clone(),
             });

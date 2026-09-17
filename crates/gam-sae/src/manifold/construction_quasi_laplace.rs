@@ -583,7 +583,8 @@ impl SaeManifoldTerm {
                     format!(
                         "SaeManifoldTerm::penalized_quasi_laplace_criterion: rank-charge dispersion is required: {e}"
                     )
-                })?;
+                })?
+                .raw_output_noise_variance;
             let d_eff = self.rank_dof_from_grams(&grams, &n_eff, rho, disp)?;
             // Occupancy-aware effective sample size N_eff,k = Σ_i a_{ik}², the #2a
             // per-atom BIC log-scale (same quantity `rank_dof_from_grams` uses
@@ -4502,7 +4503,8 @@ impl SaeManifoldTerm {
                     format!(
                         "SaeManifoldTerm::penalized_quasi_laplace_criterion_streaming_exact_with_lane: rank-charge dispersion is required: {e}"
                     )
-                })?;
+                })?
+                .raw_output_noise_variance;
             let d_eff = self.rank_dof_from_grams(&ri.grams, &ri.n_eff, rho, disp)?;
             // #5/#2498: the typed gated-signal proof above is the sole
             // disappearance verdict. The scalar rank-charge seam only prices the

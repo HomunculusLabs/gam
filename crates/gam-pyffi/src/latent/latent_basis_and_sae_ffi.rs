@@ -2280,9 +2280,13 @@ fn sae_fit_report_into_dict<'py>(
         "diagnostics",
         sae_trust_diagnostics_dict(py, &trust_diagnostics)?,
     )?;
-    // Gaussian reconstruction scale φ̂ used to scale every per-atom decoder
-    // covariance (Cov(β_k) = φ̂·S_β⁻¹[block]).
-    out.set_item("dispersion", shape_uncertainty.dispersion)?;
+    // Raw output-frame reconstruction noise variance per scalar observation. The
+    // decoder covariances above are scaled by the likelihood-frame dispersion,
+    // which under a whitening metric is dimensionless and differs from this.
+    out.set_item(
+        "dispersion",
+        shape_uncertainty.dispersion.raw_output_noise_variance,
+    )?;
     // Provenance of the per-row inner product the fit installed (#980). Object 4
     // reads this to certify which metric the gauge pulled back through:
     // "Euclidean" (no shard, bit-identical isotropic path) or "OutputFisher"

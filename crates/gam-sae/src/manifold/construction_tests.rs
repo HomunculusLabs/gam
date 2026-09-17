@@ -1436,7 +1436,10 @@ mod shape_uncertainty_joint_recompute_tests {
         let dispersion = term
             .reconstruction_dispersion(&loss, &cache, &rho, Some(residual.view()))
             .expect("dispersion");
-        assert!(dispersion > 0.0, "a real residual ⇒ positive dispersion");
+        assert!(
+            dispersion.posterior_covariance_scale() > 0.0,
+            "a real residual ⇒ positive dispersion"
+        );
         let joint = term
             .assemble_shape_uncertainty(&cache, dispersion)
             .expect("direct joint bands");
@@ -1481,6 +1484,165 @@ mod shape_uncertainty_joint_recompute_tests {
             "the JOINT band must carry per-output-channel variance (relative spread \
              {joint_channel_spread:.3e}); a constant-across-channel band is the per-atom \
              marginal the fix replaced"
+        );
+    }
+
+    /// Joint shape bands of the tiny fixture with every observation unit scaled
+    /// by `unit`, optionally under the known whitening covariance
+    /// `Σ = unit²·diag(sd²)` (`M_n = Σ⁻¹`, installed as `U_n = Σ^{-1/2}`).
+    ///
+    /// Scaling the target and decoders by `unit`, `Σ` by `unit²` and
+    /// `λ_smooth` by `unit⁻²` leaves the whitened inner objective unchanged, so
+    /// the coordinates and gates are the same state and only the decoder moves
+    /// to `unit·B`. The transformation law of a covariance is therefore
+    /// `Cov(unit·B) = unit²·Cov(B)` exactly.
+    fn scaled_whitened_shape_uncertainty_2933_f34(
+        unit: f64,
+        sd: Option<&[f64]>,
+    ) -> crate::manifold::SaeShapeUncertainty {
+        let (mut term, target, mut rho) =
+            crate::manifold::tests_recovery_split_780::gamma_fd_tiny_fixture();
+        rho.log_lambda_sparse = 0.0;
+        for v in rho.log_lambda_smooth.iter_mut() {
+            *v = -1.0 - 2.0 * unit.ln();
+        }
+        for axis in rho.log_ard.iter_mut() {
+            for v in axis.iter_mut() {
+                *v = -1.0;
+            }
+        }
+        for atom in term.atoms.iter_mut() {
+            atom.decoder_coefficients_mut().mapv_inplace(|v| unit * v);
+        }
+        let target = target.mapv(|v| unit * v);
+        let (n, p) = target.dim();
+        if let Some(sd) = sd {
+            let factors = ndarray::Array2::<f64>::from_shape_fn((n, p * p), |(_, flat)| {
+                let (i, k) = (flat / p, flat % p);
+                if i == k { 1.0 / (unit * sd[i]) } else { 0.0 }
+            });
+            let metric = gam_problem::RowMetric::whitened_structured(
+                std::sync::Arc::new(factors),
+                p,
+                p,
+            )
+            .expect("diagonal whitening factors");
+            term.set_row_metric(metric).expect("conformable whitening metric");
+        }
+        term.recompute_joint_shape_uncertainty(target.view(), &rho, None, 40, 0.4, 1.0e-6, 1.0e-6)
+            .expect("joint shape uncertainty")
+    }
+
+    /// `scaled` must be the covariance of `factor·B` when `base` is that of `B`:
+    /// every band sd times `factor`, every decoder covariance times `factor²`.
+    fn assert_shape_covariance_law_2933_f34(
+        base: &crate::manifold::SaeShapeUncertainty,
+        scaled: &crate::manifold::SaeShapeUncertainty,
+        factor: f64,
+        label: &str,
+    ) {
+        assert_eq!(base.atoms.len(), scaled.atoms.len(), "{label}: atom count");
+        let mut max_base_sd = 0.0_f64;
+        for (k, (a, b)) in base.atoms.iter().zip(scaled.atoms.iter()).enumerate() {
+            let a_sd = a.band_sd.as_ref().expect("base band");
+            let b_sd = b.band_sd.as_ref().expect("scaled band");
+            assert_eq!(a_sd.dim(), b_sd.dim(), "{label}: atom {k} band shape");
+            for (x, y) in a_sd.iter().zip(b_sd.iter()) {
+                max_base_sd = max_base_sd.max(*x);
+                assert!(
+                    (y - factor * x).abs() <= 1.0e-3 * factor * x.abs() + 1.0e-12,
+                    "{label}: atom {k} band sd {y:.6e} must be {factor}×{x:.6e} = {:.6e}",
+                    factor * x
+                );
+            }
+            let a_cov = a.decoder_covariance.as_ref().expect("base covariance");
+            let b_cov = b.decoder_covariance.as_ref().expect("scaled covariance");
+            let norm = a_cov.mapv(|v| v * v).sum().sqrt();
+            let miss = (b_cov - &a_cov.mapv(|v| v * factor * factor))
+                .mapv(|v| v * v)
+                .sum()
+                .sqrt();
+            assert!(
+                miss <= 1.0e-3 * factor * factor * norm,
+                "{label}: atom {k} covariance must scale by {}; ‖Cov′ − {}·Cov‖_F = {miss:.3e} \
+                 against ‖Cov‖_F = {norm:.3e}",
+                factor * factor,
+                factor * factor
+            );
+        }
+        assert!(
+            max_base_sd > 1.0e-6,
+            "{label}: the base band must be materially nonzero (max sd {max_base_sd:.3e})"
+        );
+    }
+
+    /// #2933 F34 — with `M = σ⁻²I` the joint Hessian is `H = XᵀX/σ² + …`, so
+    /// `H⁻¹` already carries `σ²` and the covariance multiplier must be the
+    /// dimensionless whitened dispersion. The isotropic fit on `z` and the
+    /// `Σ = 4I` fit on `2z` describe the same model in units differing by 2, so
+    /// the covariance must grow by exactly 4. Multiplying the whitened inverse
+    /// by the raw residual variance (≈ 4× the unit-scale one) gave 16.
+    #[test]
+    fn isotropic_known_whitening_counts_the_noise_variance_once_2933_f34() {
+        let euclidean = scaled_whitened_shape_uncertainty_2933_f34(1.0, None);
+        let unit_whitened = scaled_whitened_shape_uncertainty_2933_f34(1.0, Some(&[1.0; 3]));
+        let doubled_whitened = scaled_whitened_shape_uncertainty_2933_f34(2.0, Some(&[1.0; 3]));
+
+        // `M = I` is the isotropic likelihood routed through the whitening seam.
+        assert_shape_covariance_law_2933_f34(&euclidean, &unit_whitened, 1.0, "Σ = I vs isotropic");
+        assert_shape_covariance_law_2933_f34(&euclidean, &doubled_whitened, 2.0, "Σ = 4I on 2z");
+
+        assert_eq!(
+            euclidean.dispersion.likelihood_frame,
+            crate::manifold::SaeLikelihoodFrame::RawOutput
+        );
+        assert_eq!(
+            doubled_whitened.dispersion.likelihood_frame,
+            crate::manifold::SaeLikelihoodFrame::Whitened { metric_rank: 3 }
+        );
+        let raw = euclidean.dispersion.raw_output_noise_variance;
+        assert!(raw > 0.0, "the fixture carries a genuine residual");
+        assert!(
+            (euclidean.dispersion.likelihood_dispersion - raw).abs() <= 1.0e-12 * raw,
+            "on the isotropic frame the two scales coincide"
+        );
+        assert!(
+            (doubled_whitened.dispersion.raw_output_noise_variance - 4.0 * raw).abs()
+                <= 1.0e-3 * 4.0 * raw,
+            "the raw noise variance is in squared output units: {} vs 4·{raw}",
+            doubled_whitened.dispersion.raw_output_noise_variance
+        );
+        assert!(
+            (doubled_whitened.dispersion.likelihood_dispersion - raw).abs() <= 1.0e-3 * raw,
+            "the whitened dispersion is dimensionless: {} vs {raw}",
+            doubled_whitened.dispersion.likelihood_dispersion
+        );
+    }
+
+    /// #2933 F34 — rescaling every observation unit by 3 under a known
+    /// ANISOTROPIC noise covariance `Σ = diag(1, 4, 1/4)` must scale each band
+    /// sd by 3 and every decoder covariance by 9, while the whitened dispersion
+    /// is unchanged and the raw noise variance scales by 9. Double counting
+    /// the scale gives band ratio 9 and covariance ratio 81.
+    #[test]
+    fn whitened_shape_covariance_obeys_the_observation_unit_law_2933_f34() {
+        let sd = [1.0, 2.0, 0.5];
+        let base = scaled_whitened_shape_uncertainty_2933_f34(1.0, Some(&sd));
+        let tripled = scaled_whitened_shape_uncertainty_2933_f34(3.0, Some(&sd));
+        assert_shape_covariance_law_2933_f34(&base, &tripled, 3.0, "Σ = 9·diag(1, 4, 1/4) on 3z");
+        let base_likelihood = base.dispersion.likelihood_dispersion;
+        let base_raw = base.dispersion.raw_output_noise_variance;
+        assert!(
+            (tripled.dispersion.likelihood_dispersion - base_likelihood).abs()
+                <= 1.0e-3 * base_likelihood,
+            "whitened dispersion must be unit-free: {} vs {base_likelihood}",
+            tripled.dispersion.likelihood_dispersion
+        );
+        assert!(
+            (tripled.dispersion.raw_output_noise_variance - 9.0 * base_raw).abs()
+                <= 1.0e-3 * 9.0 * base_raw,
+            "raw noise variance must scale by 9: {} vs 9·{base_raw}",
+            tripled.dispersion.raw_output_noise_variance
         );
     }
 }
