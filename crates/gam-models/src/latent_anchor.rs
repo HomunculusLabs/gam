@@ -516,7 +516,24 @@ fn solve_anchor_with(
     for _ in 0..ANCHOR_SOLVE_MAX_EVALUATIONS {
         let (value, first, second) = residual(alpha, observed_slope, grid, survival_side, log_target)?;
         if value.abs() <= anchor_residual_resolution(alpha, first, rounding) {
-            return Ok(alpha);
+            // The accepted `α` still carries a residual up to the tolerance,
+            // and where it stops depends on the seed, so it moves irregularly
+            // with the coefficients: summed over 3e5 rows it floored the inner
+            // solver's KKT residual at ~3e-11 against its 1e-11 target, and
+            // the joint Newton spun its whole cycle budget (gam#2928). Newton's
+            // step from the accepted point costs no evaluation and removes it
+            // to second order; it is taken only where Newton's model holds
+            // (`|F·F″| ≤ F′²`, the rule the step below uses) and inside the
+            // bracket, else the accepted point stands.
+            let polished = alpha - value / first;
+            let in_model = (value * second).abs() <= first * first;
+            return Ok(
+                if in_model && polished.is_finite() && polished > below && polished < above {
+                    polished
+                } else {
+                    alpha
+                },
+            );
         }
         let root_is_above = if increasing { value < 0.0 } else { value > 0.0 };
         if root_is_above {
