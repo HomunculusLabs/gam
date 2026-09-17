@@ -122,6 +122,9 @@ pub mod program;
 // Exact component-coordinate MLP program under masks.
 pub mod rewrite;
 
+// Exact initial decomposition from native tensors through rank-revealing reads.
+pub mod seed;
+
 // Plane-rotation and response-projector recovery with derived eigengaps.
 pub mod spectral;
 
