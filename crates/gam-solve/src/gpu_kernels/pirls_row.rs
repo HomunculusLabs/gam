@@ -47,7 +47,9 @@ use std::sync::OnceLock;
 use gam_gpu::gpu_error::GpuError;
 #[cfg(target_os = "linux")]
 use gam_gpu::gpu_error::GpuResultExt;
+#[cfg(target_os = "linux")]
 use gam_math::special::{bd0, bernoulli_kl_from_logits, softplus};
+#[cfg(target_os = "linux")]
 use gam_problem::EstimationError;
 
 #[cfg(target_os = "linux")]
@@ -198,12 +200,13 @@ pub mod status_codes {
 // These functions reproduce, byte-for-byte in f64, the formulas in
 // `src/solver/pirls.rs`'s `update_glmvectors` / `write_poisson_log_working_state`
 // / `write_gamma_log_working_state` / `write_identityworking_state`. Stage 1
-// parity tests compare the GPU buffers to these on the V100; mac builds
-// exercise only the CPU reference (the GPU launcher returns
-// `DriverLibraryUnavailable` without a CUDA runtime).
+// parity tests compare the GPU buffers to these on the V100, and the host
+// replays them to type a device refusal. Both consumers exist only where the
+// CUDA launcher does, so the evaluator is Linux-only as well.
 // ────────────────────────────────────────────────────────────────────────
 
 /// Per-row inputs in scalar form.
+#[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RowInput {
     pub eta: f64,
@@ -225,6 +228,7 @@ pub struct RowOutput {
 /// Reference CPU evaluator for one row, indexed so a device refusal reports the
 /// correct row in its typed error. `mode` selects `w_hessian` curvature, and
 /// `gamma_shape` (α > 0) is read only when `family == GammaLog`.
+#[cfg(target_os = "linux")]
 pub(crate) fn row_reweight_cpu_at(
     row: usize,
     family: PirlsRowFamily,
@@ -246,6 +250,7 @@ pub(crate) fn row_reweight_cpu_at(
 /// threads write one code per row, so scanning in index order makes concurrent
 /// failures deterministic.  The scalar CPU replay supplies the exact
 /// quantity/value payload without expanding the hot GPU ABI.
+#[cfg(target_os = "linux")]
 pub(crate) fn replay_first_refusal(
     family: PirlsRowFamily,
     mode: CurvatureMode,
@@ -293,6 +298,7 @@ pub(crate) fn replay_first_refusal(
 /// even for non-canonical links); Stage 5 will switch the `Observed` arm to
 /// `w_fisher + observed_correction` and the call sites stay unchanged.
 #[inline]
+#[cfg(target_os = "linux")]
 fn select_w_hessian(mode: CurvatureMode, w_fisher: f64, observed_correction: f64) -> f64 {
     match mode {
         CurvatureMode::Fisher => w_fisher,
@@ -302,6 +308,7 @@ fn select_w_hessian(mode: CurvatureMode, w_fisher: f64, observed_correction: f64
 
 
 #[inline]
+#[cfg(target_os = "linux")]
 fn finite_eta(link: &'static str, eta: f64) -> Result<(), EstimationError> {
     if eta.is_finite() {
         Ok(())
@@ -316,6 +323,7 @@ fn finite_eta(link: &'static str, eta: f64) -> Result<(), EstimationError> {
 }
 
 #[inline]
+#[cfg(target_os = "linux")]
 fn prior_weight(row: usize, input: RowInput) -> Result<f64, EstimationError> {
     if input.prior_weight.is_finite() && input.prior_weight >= 0.0 {
         Ok(input.prior_weight)
@@ -330,6 +338,7 @@ fn prior_weight(row: usize, input: RowInput) -> Result<f64, EstimationError> {
 }
 
 #[inline]
+#[cfg(target_os = "linux")]
 fn certify_output(row: usize, eta: f64, output: RowOutput) -> Result<RowOutput, EstimationError> {
     for (quantity, value) in [
         ("mean", output.mu),
@@ -351,6 +360,7 @@ fn certify_output(row: usize, eta: f64, output: RowOutput) -> Result<RowOutput, 
 /// is normally representable whenever the final positive f64 is; all three are
 /// tried in a fixed order so CPU/device refusal and rounding stay deterministic.
 #[inline]
+#[cfg(target_os = "linux")]
 fn positive_mul_div(a: f64, b: f64, c: f64) -> f64 {
     let product = a * b;
     if product.is_finite() && product > 0.0 {
@@ -378,6 +388,7 @@ fn positive_mul_div(a: f64, b: f64, c: f64) -> f64 {
 
 /// `u - log1p(u)` without cancellation around zero.
 #[inline]
+#[cfg(target_os = "linux")]
 fn gamma_unit_deviance_near_one(u: f64) -> f64 {
     if u.abs() > 0.125 {
         return u - u.ln_1p();
@@ -402,6 +413,7 @@ fn gamma_unit_deviance_near_one(u: f64) -> f64 {
 
 /// `(1+u)log1p(u)-u` without cancellation around zero.
 #[inline]
+#[cfg(target_os = "linux")]
 fn poisson_unit_deviance_near_one(u: f64) -> f64 {
     if u.abs() > 0.125 {
         return (1.0 + u) * u.ln_1p() - u;
@@ -422,6 +434,7 @@ fn poisson_unit_deviance_near_one(u: f64) -> f64 {
 }
 
 #[inline]
+#[cfg(target_os = "linux")]
 fn row_gaussian_identity(
     row: usize,
     input: RowInput,
@@ -455,6 +468,7 @@ fn row_gaussian_identity(
 }
 
 #[inline]
+#[cfg(target_os = "linux")]
 fn row_poisson_log(
     row: usize,
     input: RowInput,
@@ -513,6 +527,7 @@ fn row_poisson_log(
 }
 
 #[inline]
+#[cfg(target_os = "linux")]
 fn row_gamma_log(
     row: usize,
     input: RowInput,
@@ -613,6 +628,7 @@ fn row_gamma_log(
 }
 
 #[inline]
+#[cfg(target_os = "linux")]
 fn bernoulli_response(row: usize, input: RowInput, w: f64) -> Result<(), EstimationError> {
     if w == 0.0 || (input.y.is_finite() && (0.0..=1.0).contains(&input.y)) {
         Ok(())
@@ -622,6 +638,7 @@ fn bernoulli_response(row: usize, input: RowInput, w: f64) -> Result<(), Estimat
 }
 
 #[inline]
+#[cfg(target_os = "linux")]
 fn row_bernoulli_logit(
     row: usize,
     input: RowInput,
@@ -685,6 +702,7 @@ fn row_bernoulli_logit(
 }
 
 #[inline]
+#[cfg(target_os = "linux")]
 fn row_bernoulli_probit(
     row: usize,
     input: RowInput,
@@ -703,6 +721,7 @@ fn row_bernoulli_probit(
 }
 
 #[inline]
+#[cfg(target_os = "linux")]
 fn row_bernoulli_cloglog(
     row: usize,
     input: RowInput,
@@ -717,6 +736,7 @@ fn row_bernoulli_cloglog(
 }
 
 #[inline]
+#[cfg(target_os = "linux")]
 fn row_bernoulli_noncanonical(
     row: usize,
     input: RowInput,
@@ -787,6 +807,7 @@ fn row_bernoulli_noncanonical(
 }
 
 #[inline]
+#[cfg(target_os = "linux")]
 fn bernoulli_logit_deviance(y: f64, eta: f64, w: f64) -> f64 {
     let unit = if y == 0.0 {
         softplus(eta)
@@ -800,6 +821,7 @@ fn bernoulli_logit_deviance(y: f64, eta: f64, w: f64) -> f64 {
 }
 
 #[inline]
+#[cfg(target_os = "linux")]
 fn bernoulli_deviance(y: f64, mu: f64, w: f64) -> f64 {
     2.0 * w * (bd0(y, mu) + bd0(1.0 - y, 1.0 - mu))
 }
@@ -807,11 +829,13 @@ fn bernoulli_deviance(y: f64, mu: f64, w: f64) -> f64 {
 /// Stable Φ(x) using the complementary error function with the same identity
 /// `erfc(-x/√2)/2 = Φ(x)` used by libstd. Keeps mass at the tails accurate.
 #[inline]
+#[cfg(target_os = "linux")]
 fn standard_normal_cdf(x: f64) -> f64 {
     0.5 * gam_gpu::numerics_host::erfc(-x * std::f64::consts::FRAC_1_SQRT_2)
 }
 
 #[inline]
+#[cfg(target_os = "linux")]
 fn standard_normal_pdf(x: f64) -> f64 {
     const COEFF: f64 = 0.398_942_280_401_432_7; // 1 / sqrt(2π)
     COEFF * (-0.5 * x * x).exp()
@@ -1072,9 +1096,11 @@ impl SolveRowBuffers {
 }
 
 /// Number of alpha step sizes in the fused alpha ladder.
+#[cfg(target_os = "linux")]
 pub(crate) const ALPHA_LADDER_LEN: usize = 7;
 
 /// The fixed alpha step-size ladder: `[1, 0.5, 0.25, 0.125, 0.0625, 0.03125, 0.015625]`.
+#[cfg(target_os = "linux")]
 pub(crate) const ALPHA_LADDER: [f64; ALPHA_LADDER_LEN] =
     [1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125, 0.015625];
 
@@ -2103,6 +2129,6 @@ extern "C" __global__ void {kernel_name}(
 // Tests
 // ────────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 #[path = "pirls_row_tests.rs"]
 mod pirls_row_tests;

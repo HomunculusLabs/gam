@@ -1787,6 +1787,7 @@ pub fn solve_arrow_newton_step_dense_reference(
 /// accumulation order matches the device kernels exactly.
 ///
 /// `out` is OVERWRITTEN: first set to `ρ_β·x`, then the penalty blocks add in.
+#[cfg(target_os = "linux")]
 pub(crate) fn sae_framed_penalty_matvec_cpu(
     data: &DeviceSaePcgData,
     ridge_beta: f64,

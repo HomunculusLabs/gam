@@ -82,6 +82,7 @@ pub struct PirlsGpuStep {
 /// only changes `weights`, `penalty_hessian` (with the current Sλ sum),
 /// `gradient`, and the LM ridge — these are the small per-step uploads the
 /// stream-pool path streams to the device.
+#[cfg(target_os = "linux")]
 #[derive(Clone, Debug)]
 pub(crate) struct PirlsStepStreamInput<'a> {
     pub weights: ArrayView1<'a, f64>,

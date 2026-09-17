@@ -1,6 +1,7 @@
-// `pirls_row.rs` declares this file as `#[cfg(test)] mod pirls_row_tests;`;
-// declaring the test scope in-file makes that a claim the compiler enforces.
-#![cfg(test)]
+// `pirls_row.rs` declares this file as `#[cfg(all(test, target_os = "linux"))] mod pirls_row_tests;`;
+// declaring the test scope in-file makes that a claim the compiler enforces. Both tests exercise
+// Linux-only items: the CPU refusal replay the CUDA launcher consumes, and the generated CUDA sources.
+#![cfg(all(test, target_os = "linux"))]
 
 use super::*;
 
@@ -28,7 +29,6 @@ fn refusal_replay_selects_the_smallest_bad_row_atomically() {
     ));
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn generated_sources_have_one_exact_unprojected_contract() {
     let forbidden = [
