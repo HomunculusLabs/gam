@@ -2591,8 +2591,15 @@ impl SaeManifoldTerm {
         } else {
             None
         };
-        let patchd_obb_inv_tau = match self.assignment.mode {
-            AssignmentMode::OrderedBetaBernoulli { temperature, .. } => 1.0 / temperature,
+        // #2933 F03 — `1/τ` of a per-logit sigmoid gate (ordered Beta--Bernoulli,
+        // ThresholdGate), whose logit moves only its own atom's reconstruction leg;
+        // `0` for the simplex and support gates.
+        let independent_gate_inv_tau = crate::assignment::sigmoid_gate_frame(&self.assignment.mode)
+            .map_or(0.0, |(_, temperature)| 1.0 / temperature);
+        // #2933 F03 — the ThresholdGate prior's logit curvature scales with
+        // `λ_sparse`; every other mode's diagonal-prior leg ignores it.
+        let threshold_strength = match self.assignment.mode {
+            AssignmentMode::ThresholdGate { .. } => rho.lambda_sparse()?,
             _ => 0.0,
         };
         let mut jet_window: std::collections::VecDeque<SaeRowJets> =
@@ -2707,30 +2714,27 @@ impl SaeManifoldTerm {
                                 SaeLocalRowVar::Coord { atom: atom_a, .. },
                                 SaeLocalRowVar::Coord { atom: atom_b, .. },
                             ) => {
+                                // #2330 / #2371 / #2933 F03 -- independent sigmoid gate
+                                // gradient of the GN curvature (ordered Beta--Bernoulli
+                                // and ThresholdGate). `B[a,b] = <J_a, J_b>` and each leg
+                                // `J_k` carries its INDEPENDENT gate
+                                // `g_k = sigma((l_k - threshold)/tau)` linearly, so
+                                // `dB/dl_w = [1(w==a) + 1(w==b)] * (1-g_w)/tau * B`.
+                                // The matching leg gate is `g_w`, so a single
+                                // `(1 - a_soft[atom_w])` is correct per side:
+                                // same-atom-both gives sided=2, one-sided cross-atom
+                                // gives sided=1 (the #2371 term wrongly dropped as
+                                // exactly zero). The softmax factor is 0 for every
+                                // non-softmax mode and `independent_gate_inv_tau` is 0
+                                // for softmax, so each family reads only its own leg.
+                                let sided =
+                                    (atom_w == atom_a) as u32 + (atom_w == atom_b) as u32;
                                 sae_dot(jets.first(a), jets.first(b))
                                     * (Self::softmax_data_weight_product_logit_factor(
                                         a_soft, atom_a, atom_b, atom_w, inv_tau,
-                                    ) + if patchd_is_obb {
-                                        // #2330 / #2371 -- ordered-Beta--Bernoulli gate
-                                        // gradient of the GN curvature. `B[a,b] = <J_a, J_b>`
-                                        // and each leg `J_k` carries its INDEPENDENT gate
-                                        // `g_k = sigma(l_k/tau)` linearly, so
-                                        // `dB/dl_w = [1(w==a) + 1(w==b)] * (1-g_w)/tau * B`.
-                                        // The matching leg gate is `g_w`, so a single
-                                        // `(1 - a_soft[atom_w])` is correct per side:
-                                        // same-atom-both gives sided=2 (bitwise the prior
-                                        // landed value), one-sided cross-atom gives sided=1
-                                        // (the #2371 term wrongly dropped as exactly zero).
-                                        // The softmax factor above is 0 here (`inv_tau` is
-                                        // 0 for non-softmax modes), so softmax is unchanged.
-                                        let sided = (atom_w == atom_a) as u32
-                                            + (atom_w == atom_b) as u32;
-                                        sided as f64
-                                            * (1.0 - a_soft[atom_w])
-                                            * patchd_obb_inv_tau
-                                    } else {
-                                        0.0
-                                    })
+                                    ) + sided as f64
+                                        * (1.0 - a_soft[atom_w])
+                                        * independent_gate_inv_tau)
                             }
                             _ => {
                                 sae_dot(jets.second(a, w), jets.first(b))
@@ -2804,13 +2808,21 @@ impl SaeManifoldTerm {
                         }
                         if a == b && a == w {
                             // #2080 — the gate prior's logit Jacobian has the exact curvature
-                            // `2z(1 − z)/τ²` in both `B` and `A`.
+                            // `2z(1 − z)/τ²` in both `B` and `A`. #2933 F03 — the
+                            // ThresholdGate prior's own logit curvature is the PSD clamp in
+                            // `B` and the signed value in `A`, so each operator reads its own
+                            // derivative off the shared seam. Softmax's entropy block is
+                            // differentiated above and ordered Beta--Bernoulli's prior by
+                            // `patchd_obb_adjoint` below, so the seam's `None` channel is
+                            // silent for them.
                             if let SaeLocalRowVar::Logit { atom } = jets.vars[a] {
-                                dh += crate::assignment::gate_logit_jacobian_third_weighted(
-                                    &self.assignment,
-                                    self.row_loss_weights.as_deref(),
+                                dh += self.assignment_prior_hdiag_derivative_entry(
+                                    threshold_strength,
                                     row,
                                     atom,
+                                    jets.vars[w],
+                                    None,
+                                    exact_a,
                                 );
                             }
                             if let SaeLocalRowVar::Coord { atom, axis } = jets.vars[a] {
@@ -3001,8 +3013,8 @@ impl SaeManifoldTerm {
         // derivative the curvature channels differentiate. All three come from
         // one value, so they cannot name different operators.
         //
-        // No bundle ⇒ the dense `DeflatedArrowSolver` selected inverse on the
-        // caller's `cache`, which is `B`. A bundle ⇒ the exact observed
+        // No bundle ⇒ the dense exact-A pseudo-inverse built on the caller's
+        // `cache` (`dense_exact_a_logdet_channels`). A bundle ⇒ the exact observed
         // information, carried with its own cache.
         let logdet_derivative_bundle = evidence
             .as_ref()
@@ -3011,6 +3023,30 @@ impl SaeManifoldTerm {
         let evidence_operator = evidence
             .as_ref()
             .map_or(EvidenceOperator::Majorizer, |geometry| geometry.operator);
+        // #2933 F03 — the derivative accepts only the identity of the value it
+        // differentiates. Both production value routes rank the exact observed
+        // information `½log|A|`: the dense direct-logdet criterion off one joint
+        // eigensystem (no bundle, no system), and the streaming criterion off
+        // `exact_a_evidence_system`, whose artifact hands this assembler a bundle
+        // naming that operator TOGETHER with its matrix-free system. Every other
+        // pairing — a system without its bundle, a bundle without its system, or a
+        // bundle naming the majorizer — would contract `B` channels, or the inverses
+        // of two different operators, against an `A`-valued score. Refuse it.
+        match (evidence.as_ref(), matrix_free_system) {
+            (None, None) => {}
+            (Some(geometry), Some(_)) if geometry.operator.is_exact_a() => {}
+            (bundle, system) => {
+                return Err(OuterGradientError::internal(format!(
+                    "analytic_outer_rho_gradient_components_with_bundle: the criterion value \
+                     ranks the exact observed information ½log|A|, but this derivative route \
+                     pairs evidence operator {:?} with matrix-free system present = {}. Only \
+                     the dense exact-A route (neither) and the streaming exact-A route (both, \
+                     the bundle naming ExactObservedInformation) differentiate that value.",
+                    bundle.map(|geometry| geometry.operator),
+                    system.is_some(),
+                )));
+            }
+        }
         let n_params = rho.to_flat().len();
         let mut explicit = Array1::<f64>::zeros(n_params);
         let mut logdet_trace = Array1::<f64>::zeros(n_params);
@@ -3019,7 +3055,7 @@ impl SaeManifoldTerm {
         let rank_charge = self
             .production_rank_charge_derivative(target, rho, loss, cache)
             .map_err(OuterGradientError::internal)?;
-        // #2330 Phase-2 / #2333 — which majorizer the logdet channels belong to
+        // #2330 Phase-2 / #2333 — which operator the logdet channels belong to
         // is a property of the ROUTE, and it is known here, before any of them is
         // produced. On the dense direct-logdet route the ranked term is ½log|A|,
         // so `logdet_trace` and `Γ` come from `dense_exact_a_logdet_channels`
@@ -3030,23 +3066,23 @@ impl SaeManifoldTerm {
         // skipped rather than computed and overwritten. The `explicit`, `occam`
         // and rank-charge-direct channels are majorizer-independent and are
         // produced on every route.
-        // #2500 — and only where the dense θ-adjoint reconstruction MODELS this
-        // fit's assignment family. Taking the exact-A arm with a `Γ` that is not
-        // the θ-derivative of `A` would trade the B-route's staged value↔gradient
-        // gap for an outright wrong gradient; deciding it HERE, with the rest of
-        // the route, is also what keeps the B-majorizer producers alive for a
-        // family that needs them.
-        let exact_a_logdet_route = logdet_derivative_bundle.is_none()
-            && matrix_free_system.is_none()
-            && self.dense_exact_a_theta_adjoint_is_modelled();
+        //
+        // #2933 F03 — this used to also require a family predicate
+        // (`dense_exact_a_theta_adjoint_is_modelled`) that excluded ThresholdGate,
+        // because `logdet_theta_adjoint_dense` lacked the independent-sigmoid
+        // data-weight leg and the gate prior's signed logit curvature. Those legs
+        // now exist, and the dense exact-A reconstruction models every family, so
+        // the route alone decides. Before, a dense ThresholdGate fit ranked ½log|A|
+        // and returned `½tr(B⁻¹∂B)` channels from cached `B` geometry.
+        let exact_a_logdet_route = logdet_derivative_bundle.is_none();
 
         // #2087/#2330 ROUTE-COHERENCE GUARD. The VALUE's log-determinant route and
         // THIS gradient's are selected by two unrelated predicates:
         //
         //   value    `streaming_plan().admitted_or_error(..).direct_logdet_admitted()`
         //            — a working-set/memory admission (construction_quasi_laplace.rs).
-        //   gradient `exact_a_logdet_route` above — the bundle / matrix-free /
-        //            assignment-family triple. Nothing consults the value's admission.
+        //   gradient `exact_a_logdet_route` above — the bundle / matrix-free pair.
+        //            Nothing consults the value's admission.
         //
         // ⚠ WHAT EACH VALUE ROUTE PRICES CHANGED UNDER #2509 PHASE-2b (`5563a2a18`),
         // AND THIS GUARD'S PREMISE DID NOT. Until then, "not admitted ⇒ delegates to
@@ -4505,47 +4541,6 @@ impl SaeManifoldTerm {
             delta_gamma_t[r] = weight * de_dt[r];
         }
         Ok((delta_trace, delta_gamma_t))
-    }
-
-    /// #2500 — does [`Self::logdet_theta_adjoint_dense`] model this fit's
-    /// assignment family? The exact-A logdet channels are taken only where it
-    /// does; elsewhere the B-majorizer channels stand, because those are modelled
-    /// for EVERY family.
-    ///
-    /// The dense reconstruction carries three prior legs: the softmax entropy
-    /// Gershgorin majorizer (`want_entropy`), the ordered-Beta–Bernoulli Patch-D
-    /// cross-row adjoint, and the periodic-ARD majorizer diagonal. It carries no
-    /// per-atom-logistic GATE legs, which is what a `ThresholdGate` row needs.
-    /// `TopK` mints no free logit at all, so there is
-    /// nothing for a gate leg to model and the reconstruction is complete there by
-    /// construction.
-    ///
-    /// MEASURED on `threshold_gate_tiny_fixture`, dense vs the production
-    /// `logdet_theta_adjoint` on the SAME inverse:
-    ///
-    /// ```text
-    ///   deflation-free arm   worst |production − dense| = 2.53e0  (on a 8.91e-1 entry)
-    ///   deflating arm        worst |production − dense| = 3.31e0  (on a −2.50e-1 entry)
-    /// ```
-    ///
-    /// and against a central finite difference of `½(log|A| − log|A_tt|)` (the
-    /// criterion's complexity when this was measured) in a logit, the dense Γ read `1.373e-1` where the FD read `3.521e-1`, with a
-    /// SIGN FLIP on the next logit. So this is not a tolerance question.
-    ///
-    /// Before the sparse operator was modelled, a ThresholdGate fit could not
-    /// reach this code at all — the sparse curvature operator map refused
-    /// first — so the gap was unreachable rather than absent. Gating here keeps
-    /// that family on the fully-modelled `½log|B|` channels (`logdet_theta_adjoint`
-    /// and `assignment_log_strength_hessian_trace` both carry it), which is the
-    /// same staged position the matrix-free and bundle routes already hold until
-    /// Phase-2b.
-    fn dense_exact_a_theta_adjoint_is_modelled(&self) -> bool {
-        match self.assignment.mode {
-            AssignmentMode::Softmax { .. }
-            | AssignmentMode::OrderedBetaBernoulli { .. }
-            | AssignmentMode::TopK { .. } => true,
-            AssignmentMode::ThresholdGate { .. } => false,
-        }
     }
 
     pub(crate) fn dense_exact_a_logdet_channels(

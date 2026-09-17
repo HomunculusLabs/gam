@@ -608,22 +608,29 @@ fn threshold_gate_outer_solve_is_not_aborted_by_an_unmodelled_sparse_operator_25
     }
 }
 
-/// #2500 GATE 8 — the measurement that justifies refusing the exact-A override
-/// for a ThresholdGate fit: on the SAME inverse, the dense θ-adjoint
-/// reconstruction and the production one disagree by MORE than the entry's own
-/// magnitude. They are not interchangeable for this family, so a fit of it must
-/// not have its logdet channels overwritten with the exact-A pair (GATE 9).
+/// #2500 GATE 8, restated by #2933 F03 — for a ThresholdGate fit the dense θ-adjoint
+/// reconstruction and the production Trace-seam majorizer adjoint are ONE derivative,
+/// entry by entry on the same inverse.
 ///
-/// `logdet_theta_adjoint_dense` carries the softmax entropy Gershgorin majorizer,
-/// the ordered-Beta–Bernoulli Patch-D cross-row adjoint and the periodic-ARD
-/// majorizer diagonal. It carries no per-atom-logistic GATE leg,
-/// which is what a threshold-gate row needs. Against a
-/// central finite difference of `½(log|A| − log|A_tt|)` (the criterion's
-/// complexity when this was measured) in a logit the dense Γ
-/// read `1.373e-1` where the FD read `3.521e-1`, with a sign flip on the next
-/// logit, so this is not a tolerance question.
+/// This gate used to assert the opposite. `logdet_theta_adjoint_dense` then carried no
+/// independent-sigmoid data-weight leg and no gate prior leg, so on this fixture the
+/// two disagreed by more than an entry's own magnitude (worst 2.53e0 on a 8.91e-1 entry
+/// deflation-free, 3.31e0 on a −2.50e-1 entry straddling), and
+/// `dense_exact_a_theta_adjoint_is_modelled` kept ThresholdGate on the `B` channels while
+/// the criterion ranked `A`. With both legs installed, the dense jet loop and the
+/// resident Trace kernel, two independent implementations, must agree.
+///
+/// Control: on the same inverse the dense EXACT-A adjoint differs from the majorizer
+/// one by the signed prior curvature and the residual-curvature leg, so the comparison
+/// is free to separate operators and must do so by far more than the parity bar.
 #[test]
-fn dense_theta_adjoint_is_not_interchangeable_for_a_threshold_gate_2500() {
+fn dense_theta_adjoint_matches_the_trace_majorizer_adjoint_for_a_threshold_gate_2933() {
+    let max_gap = |x: &Array1<f64>, y: &Array1<f64>| -> f64 {
+        x.iter()
+            .zip(y.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max)
+    };
     for straddle in [false, true] {
         let (term, target, rho) = threshold_gate_tiny_fixture(straddle);
         let (_loss, cache) = frozen_cache(&term, &target, &rho);
@@ -635,29 +642,38 @@ fn dense_theta_adjoint_is_not_interchangeable_for_a_threshold_gate_2500() {
             .materialize_joint_inverse(&cache, &solver)
             .expect("joint inverse");
         let dense = term
-            .logdet_theta_adjoint_dense(
-                &rho,
-                &cache,
-                &g,
-                false,
-                false,
-                None,
-            )
-            .expect("dense theta adjoint");
-        // Per ENTRY: an error exceeding that entry's own magnitude means the dense
-        // value is not even the right scale there, let alone a usable substitute.
-        let worst = production
+            .logdet_theta_adjoint_dense(&rho, &cache, &g, false, false, None)
+            .expect("dense majorizer theta adjoint");
+        let exact = term
+            .logdet_theta_adjoint_dense(&rho, &cache, &g, false, true, None)
+            .expect("dense exact-A theta adjoint");
+        let scale = production
             .t
             .iter()
-            .zip(dense.t.iter())
-            .filter(|(p, _)| p.abs() > 1.0e-3)
-            .map(|(p, d)| (p - d).abs() / p.abs())
-            .fold(0.0_f64, f64::max);
+            .chain(production.beta.iter())
+            .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+        let parity = max_gap(&production.t, &dense.t).max(max_gap(&production.beta, &dense.beta));
+        let separation = max_gap(&exact.t, &dense.t).max(max_gap(&exact.beta, &dense.beta));
+        println!(
+            "[#2933 F03 GATE 8] straddle={straddle}: ‖Γ‖∞={scale:.6e} parity={parity:.6e} \
+             exact-A separation={separation:.6e}"
+        );
         assert!(
-            worst > 1.0,
-            "#2500 (straddle={straddle}): refusing the exact-A override for this family is \
-             only justified if the two θ-adjoints genuinely disagree; worst per-entry \
-             relative gap = {worst:.3}"
+            scale > 1.0e-3,
+            "#2933 F03 (straddle={straddle}): the majorizer θ-adjoint must be non-trivial for \
+             parity to mean anything; ‖Γ‖∞={scale:.6e}"
+        );
+        assert!(
+            separation > 1.0e-3 * scale,
+            "#2933 F03 (straddle={straddle}): control — the exact-A adjoint must separate from \
+             the majorizer one on this inverse, or the parity below cannot fail; separation \
+             {separation:.6e} against ‖Γ‖∞={scale:.6e}"
+        );
+        assert!(
+            parity <= 1.0e-10 * scale.max(1.0),
+            "#2933 F03 (straddle={straddle}): the dense majorizer θ-adjoint departs from the \
+             Trace-seam one (max|Δ|={parity:.6e} against ‖Γ‖∞={scale:.6e}); a ThresholdGate \
+             gate leg is missing or differs between the two implementations"
         );
     }
 }

@@ -950,9 +950,13 @@ impl SaeManifoldTerm {
     /// Resident `Γ = tr(H⁻¹ ∂H/∂θ)` majorizer θ-adjoint of a threshold-gate fit
     /// over the joint selected inverse (#2333).
     ///
-    /// `H` is the operator the criterion factor builds (Gauss–Newton data
-    /// curvature plus the prior majorizers), so every channel is differentiated
-    /// on the branch the criterion prices. This is the sole θ-adjoint consumer of
+    /// `H` is the majorizer the Newton factor builds (Gauss–Newton data curvature
+    /// plus the prior majorizers), so every channel is differentiated on the
+    /// majorizer branch. The criterion ranks the exact observed information
+    /// instead, so this is not the derivative of the criterion (#2933 F03); the
+    /// outer gradient takes `logdet_theta_adjoint_dense` on the dense exact-A
+    /// route and `logdet_theta_adjoint_from_probes` on the matrix-free lane.
+    /// This is the sole θ-adjoint consumer of
     /// the Trace seam: it builds the joint selected-inverse blocks, folds the
     /// deflation map of each row into `E_tt`, projects every semantic output base
     /// into the row metric chart, and sends the independent-logistic
@@ -974,9 +978,10 @@ impl SaeManifoldTerm {
                     .to_string(),
             );
         }
-        // Only a threshold-gate fit reaches this majorizer θ-adjoint: the dense
-        // exact-A route owns every other family (`logdet_theta_adjoint_dense`),
-        // and the matrix-free lane owns the from-probes one.
+        // The majorizer θ-adjoint is modelled here for the threshold gate alone.
+        // Since #2933 F03 the dense exact-A route owns that family as well
+        // (`logdet_theta_adjoint_dense`), and the matrix-free lane owns the
+        // from-probes one, so no production outer gradient reaches this.
         let (inv_tau, threshold_strength) = match self.assignment.mode {
             AssignmentMode::ThresholdGate { temperature, .. } => {
                 (temperature.recip(), rho.lambda_sparse()?)

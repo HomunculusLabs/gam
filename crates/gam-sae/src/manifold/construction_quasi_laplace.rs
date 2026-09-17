@@ -7231,6 +7231,10 @@ impl SaeManifoldTerm {
         // the exact-A joint adjoint is owned by `logdet_theta_adjoint_dense` (with
         // the priced pseudo-inverse) and by `logdet_theta_adjoint_from_probes`.
         // A threshold-gate fit reduces through the resident Trace seam (#2333).
+        // #2933 F03 — no production criterion ranks `½log|B|`, and a dense
+        // threshold-gate fit now takes the exact-A route like every other family,
+        // so the outer gradient no longer contracts this Γ against an `A`-valued
+        // score; the outer-gradient assembler refuses the route that would.
         self.contracted_trace_adjoint(rho, cache, solver)
     }
 
