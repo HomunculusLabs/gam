@@ -909,6 +909,7 @@ fn support_arrow_majorizer_inverse(
     system: &ArrowSchurSystem,
     factors: &ArrowFactorSlab,
     rhs: &SaeArrowVector,
+    exact_reduced_inverse: Option<&[Array1<f64>]>,
 ) -> Result<SaeArrowVector, String> {
     let backend = CpuBatchedBlockSolver;
     let coordinate_dim = *system.row_offsets.last().unwrap_or(&0);
@@ -929,6 +930,12 @@ fn support_arrow_majorizer_inverse(
     let reduced_rhs = &rhs.beta - &eliminated;
     let solved_beta = if system.k == 0 {
         Array1::<f64>::zeros(0)
+    } else if let Some(vectors) = exact_reduced_inverse {
+        // #2576: a dense-spectrum evidence bundle spans the inverse of the reduced Schur
+        // the evidence priced, so the reduced solve is one fold over its vectors, not a
+        // √ε CG. Where that evidence pinned a numerically null direction at unit
+        // stiffness, the fold applies the same pin; flexible GMRES admits either.
+        exact_reduced_inverse_apply(vectors, &reduced_rhs)
     } else {
         let tolerance = f64::EPSILON.sqrt();
         let (solved, report) = reduced_schur_inverse_apply(
@@ -975,6 +982,29 @@ fn support_arrow_majorizer_inverse(
         t: solved_t,
         beta: solved_beta,
     })
+}
+
+/// #2576: `S⁻¹ r` off a derivative bundle that spans the reduced Schur's inverse
+/// exactly, `(1/k) Σ_i x_i (x_iᵀ r)` with `x_i = √(k/λ_i)·v_i` over the complete dense
+/// spectrum. The vectors fold over the length-only tree, so the result does not
+/// depend on thread count.
+fn exact_reduced_inverse_apply(vectors: &[Array1<f64>], rhs: &Array1<f64>) -> Array1<f64> {
+    let scale = 1.0 / vectors.len() as f64;
+    gam_linalg::pairwise_reduce::par_deterministic_block_fold(
+        vectors.len(),
+        |range: core::ops::Range<usize>| {
+            let mut partial = Array1::<f64>::zeros(rhs.len());
+            for vector in &vectors[range] {
+                partial.scaled_add(scale * vector.dot(rhs), vector);
+            }
+            partial
+        },
+        |mut left: Array1<f64>, right: Array1<f64>| {
+            left += &right;
+            left
+        },
+    )
+    .unwrap_or_else(|| Array1::<f64>::zeros(rhs.len()))
 }
 
 /// `(tr((G + lambda*S)^-1 G), dim null(S))` for one atom's blocks.
@@ -3752,8 +3782,9 @@ impl SaeSupportSparseTerm {
         target: ArrayView2<'_, f64>,
         ard_precisions: &[Vec<f64>],
         system: &ArrowSchurSystem,
-        derivative_vectors: &[Array1<f64>],
+        derivative: &RationalLogdetDerivativeBundle,
     ) -> Result<SaeArrowVector, String> {
+        let derivative_vectors = derivative.vectors.as_slice();
         if derivative_vectors.is_empty() {
             return Err(
                 "support reduced-logdet profile adjoint requires a non-empty derivative bundle"
@@ -3842,7 +3873,7 @@ impl SaeSupportSparseTerm {
             &rows,
             &factors,
             std::slice::from_ref(&gamma),
-            derivative_vectors.len(),
+            derivative,
         )?
         .pop()
         .ok_or_else(|| {
@@ -3894,7 +3925,7 @@ impl SaeSupportSparseTerm {
             &rows,
             &factors,
             directions,
-            bundle.vectors.len(),
+            bundle,
         )?;
         let weight = bundle.probe_sample_weight();
         let accumulate = |range: Range<usize>| -> Result<Vec<f64>, String> {
@@ -3953,17 +3984,21 @@ impl SaeSupportSparseTerm {
     ///
     /// A dense pseudoinverse is admitted only when assembling all `dim` analytic
     /// columns costs no more operator directions than the derivative bundle's
-    /// `derivative_vector_count` vectors already paid for, and its complete
-    /// eigensystem workspace fits the cgroup-aware in-core ledger. This is a scale
-    /// transition derived from work and storage, not a dimension knob.
+    /// vectors already paid for, and its complete eigensystem workspace fits the
+    /// cgroup-aware in-core ledger. This is a scale transition derived from work and
+    /// storage, not a dimension knob. Otherwise flexible GMRES runs, and where the
+    /// bundle spans the reduced Schur's inverse exactly
+    /// ([`RationalLogdetDerivativeBundle::exact_inverse_vectors`]) its preconditioner
+    /// folds that inverse instead of running a CG per direction (#2576).
     fn support_reduced_logdet_adjoint_solves(
         &self,
         system: &ArrowSchurSystem,
         rows: &[SupportOuterDifferentialRow],
         factors: &ArrowFactorSlab,
         rhs: &[SaeArrowVector],
-        derivative_vector_count: usize,
+        derivative: &RationalLogdetDerivativeBundle,
     ) -> Result<Vec<SaeArrowVector>, String> {
+        let derivative_vector_count = derivative.vectors.len();
         let coordinate_dim = *system.row_offsets.last().unwrap_or(&0);
         let full_dim = coordinate_dim
             .checked_add(system.k)
@@ -3981,7 +4016,14 @@ impl SaeSupportSparseTerm {
                     solve_b_preconditioned_gmres_with(
                         rhs,
                         |vector| self.support_outer_exact_hessian_apply(system, rows, vector),
-                        |residual| support_arrow_majorizer_inverse(system, factors, residual),
+                        |residual| {
+                            support_arrow_majorizer_inverse(
+                                system,
+                                factors,
+                                residual,
+                                derivative.exact_inverse_vectors(),
+                            )
+                        },
                     )
                     .map_err(|error| {
                         format!("support reduced-logdet profile adjoint solve: {error}")
@@ -4303,7 +4345,7 @@ impl SaeSupportSparseTerm {
                 beta: Array1::<f64>::zeros(beta_dim),
             },
             |vector| self.support_outer_exact_hessian_apply(&system, &rows, vector),
-            |rhs| support_arrow_majorizer_inverse(&system, &factors, rhs),
+            |rhs| support_arrow_majorizer_inverse(&system, &factors, rhs, None),
             gradient_band,
         )
         .map_err(|error| {
@@ -8667,6 +8709,206 @@ mod tests {
             "a row limited to 1e-2 per sweep needs over 400 sweeps to reach t near 4; \
              certified at sweep {}",
             report.iterations
+        );
+    }
+
+    /// #2576: where the evidence lane takes the dense reduced Schur's complete spectrum, the
+    /// profile adjoint's majorizer inverse folds over the bundle's vectors instead of running
+    /// a √ε CG. The fold is that inverse only if the bundle priced the SAME reduced Schur the
+    /// adjoint eliminates against: one assembled system and the same undamped row factors.
+    /// On a resolved positive definite fixture the fold must solve the majorizer arrow
+    /// `B x = r` to the backward error of a backward-stable dense solve, `dim²·ε` (the γ bound
+    /// of the Householder tridiagonalisation the eigensystem rests on). A bundle priced at
+    /// another λ, a stale operator, must miss that bar by orders of magnitude, or the bar
+    /// discriminates nothing.
+    #[test]
+    fn majorizer_inverse_folds_the_dense_spectrum_bundle_into_the_arrow_inverse_2576() {
+        let periodic: Arc<dyn SaeBasisSecondJet> =
+            Arc::new(PeriodicHarmonicEvaluator::new(3).expect("periodic"));
+        let patch: Arc<dyn SaeBasisSecondJet> =
+            Arc::new(EuclideanPatchEvaluator::new(2, 1).expect("patch"));
+        let atoms = vec![
+            atom(
+                "circle",
+                SaeAtomBasisKind::Periodic,
+                1,
+                periodic,
+                &[0.05],
+                array![[0.2, -0.3], [1.1, 0.4], [-0.4, 0.9]],
+            ),
+            atom(
+                "plane",
+                SaeAtomBasisKind::Linear,
+                2,
+                patch,
+                &[0.1, -0.2],
+                array![[0.3, 0.1], [2.0, -0.7], [-1.0, 1.3]],
+            ),
+        ];
+        let specs = vec![
+            SaeAssignmentAtomSpec {
+                latent_dim: 1,
+                manifold: SaeAtomBasisKind::Periodic.latent_manifold(1),
+                retraction: gam_problem::LatentRetractionRegistry::all_euclidean(),
+            },
+            SaeAssignmentAtomSpec::euclidean(2),
+        ];
+        // Rows fire both atoms, the circle alone, or the plane alone, so both constant
+        // columns are identified separately and the decoder gram spans every coefficient
+        // without leaning on the penalties' rank.
+        let n_obs = 9usize;
+        let mut indices = Vec::with_capacity(n_obs);
+        let mut gates = Vec::with_capacity(n_obs);
+        let mut coords = Vec::with_capacity(n_obs);
+        let mut target = Array2::<f64>::zeros((n_obs, 2));
+        for row in 0..n_obs {
+            let s = row as f64;
+            let phase = 0.18 * (0.7 * s + 0.3).sin();
+            let plane = [0.8 * (1.3 * s).cos(), 0.2 * s - 0.8];
+            match row % 3 {
+                0 => {
+                    indices.push(vec![0u32, 1]);
+                    gates.push(vec![1.0, 1.0]);
+                    coords.push(vec![phase, plane[0], plane[1]]);
+                }
+                1 => {
+                    indices.push(vec![0u32]);
+                    gates.push(vec![1.0]);
+                    coords.push(vec![phase]);
+                }
+                _ => {
+                    indices.push(vec![1u32]);
+                    gates.push(vec![1.0]);
+                    coords.push(plane.to_vec());
+                }
+            }
+            target[[row, 0]] = (0.9 * s).sin() + 0.3;
+            target[[row, 1]] = (0.5 * s).cos() - 0.1 * s;
+        }
+        let state = SaeAssignmentState::from_topk_support_heterogeneous(
+            n_obs, 2, 2, specs, indices, gates, coords,
+        )
+        .expect("state");
+        let term = SaeSupportSparseTerm::new(atoms, state).expect("term");
+        let ard = vec![vec![1.0], vec![1.0, 1.0]];
+        let lambda = vec![0.4, 2.2];
+        let system = term
+            .assemble_arrow_schur(target.view(), &lambda, &ard)
+            .expect("assemble");
+        let dense_bundle = |system: &ArrowSchurSystem| {
+            let mut lane =
+                gam_solve::arrow_schur::SurrogateLaneState::new(sae_surrogate_lane_config());
+            lane.request_logdet_derivative_bundle();
+            let options = gam_solve::arrow_schur::ArrowSolveOptions::inexact_pcg()
+                .with_evidence_unit_deflation(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR);
+            gam_solve::arrow_schur::matrix_free_arrow_evidence_evaluation(
+                system,
+                0.0,
+                0.0,
+                &options,
+                gam_solve::arrow_schur::SCHUR_SLQ_LOGDET_PROBES,
+                gam_solve::arrow_schur::SCHUR_SLQ_LOGDET_LANCZOS_STEPS,
+                gam_solve::arrow_schur::SCHUR_SLQ_LOGDET_SEED,
+                &mut lane,
+                true,
+            )
+            .expect("dense evidence evaluation");
+            lane.take_logdet_derivative_bundle()
+                .expect("the evaluation emits its derivative bundle")
+        };
+        let bundle = dense_bundle(&system);
+        let vectors = bundle
+            .exact_inverse_vectors()
+            .expect("a dense spectrum bundle spans the inverse it priced");
+        assert_eq!(vectors.len(), system.k, "one vector per reduced-Schur mode");
+        let factors = CpuBatchedBlockSolver
+            .factor_blocks(&system.rows, 0.0, system.d, true)
+            .expect("row factors");
+
+        let coordinate_dim = *system.row_offsets.last().unwrap_or(&0);
+        let dim = coordinate_dim + system.k;
+        let mut majorizer = Array2::<f64>::zeros((dim, dim));
+        for column in 0..dim {
+            let mut unit = SaeArrowVector {
+                t: Array1::zeros(coordinate_dim),
+                beta: Array1::zeros(system.k),
+            };
+            if column < coordinate_dim {
+                unit.t[column] = 1.0;
+            } else {
+                unit.beta[column - coordinate_dim] = 1.0;
+            }
+            let applied = support_arrow_majorizer_apply(&system, &unit).expect("majorizer apply");
+            majorizer
+                .slice_mut(ndarray::s![..coordinate_dim, column])
+                .assign(&applied.t);
+            majorizer
+                .slice_mut(ndarray::s![coordinate_dim.., column])
+                .assign(&applied.beta);
+        }
+        let symmetric = (&majorizer + &majorizer.t()) * 0.5;
+        let (spectrum, _) = symmetric.eigh(Side::Lower).expect("majorizer spectrum");
+        let lowest = spectrum.iter().copied().fold(f64::INFINITY, f64::min);
+        let highest = spectrum.iter().copied().fold(0.0_f64, f64::max);
+        // The reduced Schur's spectrum lies inside B's, so a B resolved above √ε·‖B‖ leaves
+        // no mode for the evidence to pin, and the bundle must be the plain inverse.
+        assert!(
+            lowest > f64::EPSILON.sqrt() * highest,
+            "the fixture must be resolved positive definite: spectrum [{lowest:.3e}, {highest:.3e}]"
+        );
+
+        let rhs = SaeArrowVector {
+            t: Array1::from_shape_fn(coordinate_dim, |i| (0.37 * i as f64).sin() + 0.1),
+            beta: Array1::from_shape_fn(system.k, |i| (0.61 * i as f64).cos() - 0.2),
+        };
+        let mut rhs_flat = Array1::<f64>::zeros(dim);
+        rhs_flat
+            .slice_mut(ndarray::s![..coordinate_dim])
+            .assign(&rhs.t);
+        rhs_flat
+            .slice_mut(ndarray::s![coordinate_dim..])
+            .assign(&rhs.beta);
+        let backward_error = |solved: &SaeArrowVector| {
+            let mut flat = Array1::<f64>::zeros(dim);
+            flat.slice_mut(ndarray::s![..coordinate_dim])
+                .assign(&solved.t);
+            flat.slice_mut(ndarray::s![coordinate_dim..])
+                .assign(&solved.beta);
+            let residual = &rhs_flat - &majorizer.dot(&flat);
+            residual.dot(&residual).sqrt()
+                / (highest * flat.dot(&flat).sqrt() + rhs_flat.dot(&rhs_flat).sqrt())
+        };
+
+        let folded = support_arrow_majorizer_inverse(&system, &factors, &rhs, Some(vectors))
+            .expect("folded majorizer inverse");
+        let iterated = support_arrow_majorizer_inverse(&system, &factors, &rhs, None)
+            .expect("CG majorizer inverse");
+        let folded_error = backward_error(&folded);
+        let iterated_error = backward_error(&iterated);
+        let bar = (dim * dim) as f64 * f64::EPSILON;
+        assert!(
+            folded_error <= bar,
+            "the dense-spectrum fold must invert the majorizer arrow: backward error \
+             {folded_error:.3e} > dim²·ε = {bar:.3e} (the √ε CG route reaches {iterated_error:.3e})"
+        );
+
+        let stale_lambda = vec![lambda[0] * 16.0, lambda[1] / 16.0];
+        let stale_system = term
+            .assemble_arrow_schur(target.view(), &stale_lambda, &ard)
+            .expect("stale assemble");
+        let stale_bundle = dense_bundle(&stale_system);
+        let stale = support_arrow_majorizer_inverse(
+            &system,
+            &factors,
+            &rhs,
+            stale_bundle.exact_inverse_vectors(),
+        )
+        .expect("stale fold");
+        let stale_error = backward_error(&stale);
+        assert!(
+            stale_error > f64::EPSILON.sqrt(),
+            "a bundle priced at another λ must not invert this arrow, or the bar above \
+             discriminates nothing: backward error {stale_error:.3e}"
         );
     }
 

@@ -195,6 +195,10 @@ pub struct RationalLogdetDerivativeBundle {
     metrics: RationalLogdetEvaluationMetrics,
     probe_count: usize,
     value_std_err: f64,
+    /// True only when `from_positive_spectrum` built the bundle, whose vectors
+    /// satisfy `(1/k) Σ_i x_i x_iᵀ = S̃⁻¹` for the operator `S̃` the evaluation
+    /// priced (#2576).
+    exact_inverse: bool,
 }
 
 /// Standard error of the mean of `samples`, taken as independent draws of one
@@ -253,6 +257,7 @@ impl RationalLogdetDerivativeBundle {
             },
             probe_count: 0,
             value_std_err: 0.0,
+            exact_inverse: true,
         })
     }
 
@@ -262,6 +267,21 @@ impl RationalLogdetDerivativeBundle {
     #[must_use]
     pub fn evaluation_metrics(&self) -> RationalLogdetEvaluationMetrics {
         self.metrics
+    }
+
+    /// #2576: the bundle's vectors when they span the inverse of the operator this
+    /// bundle's value priced. That holds only when `from_positive_spectrum` built
+    /// the bundle off a complete dense spectrum `V Λ Vᵀ`, where
+    /// `(1/k) Σ_i x_i x_iᵀ = V Λ⁻¹ Vᵀ`, so a consumer may apply that inverse as
+    /// `(1/k) Σ_i x_i (x_iᵀ r)` without a CG solve. It is the reduced Schur's own
+    /// inverse when no direction was conditioned. Where the evidence policy pinned a
+    /// numerically null direction at unit stiffness, or a β-gauge quotient installed
+    /// `P S P + Q Qᵀ`, it is the inverse of that conditioned operator, the one `log|S|`
+    /// priced. A rational surrogate bundle carries probes and quadrature weights,
+    /// spans nothing exact, and returns `None`.
+    #[must_use]
+    pub fn exact_inverse_vectors(&self) -> Option<&[Array1<f64>]> {
+        self.exact_inverse.then_some(self.vectors.as_slice())
     }
 
     /// Hutchinson probes behind this bundle. Zero on the exact dense route, whose
@@ -822,6 +842,7 @@ impl RationalLogdetPlan {
             metrics,
             probe_count,
             value_std_err,
+            exact_inverse: false,
         })
     }
 }
@@ -1666,6 +1687,81 @@ mod tests {
             .expect("eval2")
             .estimate;
         assert_eq!(e1, e2, "fixed plan must be bit-deterministic");
+    }
+
+    /// #2576: a dense-spectrum bundle's vectors average to the inverse of the operator
+    /// they came from, so `exact_inverse_vectors` offers them and folding them solves
+    /// `S x = r` to the backward error of a backward-stable dense solve, `dim²·ε`. A
+    /// rational surrogate's vectors fold in probes and quadrature weights, so the gate
+    /// refuses them, and folding them anyway misses that bar by orders of magnitude.
+    #[test]
+    fn only_a_dense_spectrum_bundle_offers_its_vectors_as_an_inverse_2576() {
+        let dim = 12usize;
+        let eigenvalues =
+            Array1::from_shape_fn(dim, |i| 10f64.powf(-2.0 + 4.0 * i as f64 / (dim - 1) as f64));
+        // A Householder reflector is orthogonal to rounding, so its columns are an
+        // eigenbasis of `S = V Λ Vᵀ`.
+        let u = Array1::from_shape_fn(dim, |i| (0.83 * i as f64).sin() + 0.4);
+        let reflection = 2.0 / u.dot(&u);
+        let mut basis = Array2::<f64>::eye(dim);
+        for r in 0..dim {
+            for c in 0..dim {
+                basis[[r, c]] -= reflection * u[r] * u[c];
+            }
+        }
+        let mut operator = Array2::<f64>::zeros((dim, dim));
+        for (index, &lambda) in eigenvalues.iter().enumerate() {
+            let column = basis.column(index);
+            for r in 0..dim {
+                for c in 0..dim {
+                    operator[[r, c]] += lambda * column[r] * column[c];
+                }
+            }
+        }
+        let rhs = Array1::from_shape_fn(dim, |i| (0.29 * i as f64).cos() - 0.1);
+        let largest = eigenvalues[dim - 1];
+        let backward_error = |vectors: &[Array1<f64>]| {
+            let inverse_rank = 1.0 / vectors.len() as f64;
+            let mut solved = Array1::<f64>::zeros(dim);
+            for vector in vectors {
+                solved.scaled_add(inverse_rank * vector.dot(&rhs), vector);
+            }
+            let residual = &rhs - &operator.dot(&solved);
+            residual.dot(&residual).sqrt()
+                / (largest * solved.dot(&solved).sqrt() + rhs.dot(&rhs).sqrt())
+        };
+
+        let dense = RationalLogdetDerivativeBundle::from_positive_spectrum(&eigenvalues, &basis)
+            .expect("a positive spectrum builds the dense bundle");
+        let vectors = dense
+            .exact_inverse_vectors()
+            .expect("a dense spectrum bundle spans the inverse it priced");
+        let bar = (dim * dim) as f64 * f64::EPSILON;
+        let dense_error = backward_error(vectors);
+        assert!(
+            dense_error <= bar,
+            "folding the dense bundle must solve S x = r: backward error {dense_error:.3e} > \
+             dim²·ε = {bar:.3e}"
+        );
+
+        let plan =
+            RationalLogdetPlan::build(dim, 4, 2576, eigenvalues[0], largest, 1e-8).expect("plan");
+        let eval = plan
+            .evaluate(&|v: ArrayView1<f64>| operator.dot(&v), 1e-12, 10_000)
+            .expect("eval");
+        let surrogate = plan
+            .into_directional_derivative_bundle(eval)
+            .expect("surrogate bundle");
+        assert!(
+            surrogate.exact_inverse_vectors().is_none(),
+            "a rational surrogate bundle must not offer its vectors as an inverse"
+        );
+        let surrogate_error = backward_error(&surrogate.vectors);
+        assert!(
+            surrogate_error > f64::EPSILON.sqrt(),
+            "folding the surrogate's probe vectors must not solve S x = r, or the gate refuses \
+             nothing: backward error {surrogate_error:.3e}"
+        );
     }
 
     #[test]

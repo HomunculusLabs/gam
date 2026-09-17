@@ -835,7 +835,7 @@ impl SaeSupportOuterObjective {
                 self.target.view(),
                 &self.ard_precisions,
                 &system,
-                &logdet_derivative.vectors,
+                &logdet_derivative,
             )
             .map_err(outer_error)?;
         let mut gradient = Array1::<f64>::zeros(self.layout.group_keys.len());
