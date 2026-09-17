@@ -1024,23 +1024,152 @@ impl DiagonalCriterion<'_> {
 
     /// Outer ranges of `C′` and `C″` over `[a, b]`, each widened by its own
     /// forward-error band so rounding of the endpoint shares cannot shrink them.
+    ///
+    /// The cell range from [`Self::natural_ranges`] is intersected with `C′` in
+    /// centred form from each endpoint, `C′(a) + (u − a)·C″([a, b])` and
+    /// `C′(b) − (b − u)·C″([a, b])`. Both hold for every `u` in the cell by the
+    /// fundamental theorem of calculus, so the intersection still contains `C′`.
+    /// Along a tail plateau `C′` is small but has one sign, and the centred form
+    /// lets such a cell retire by that sign instead of by subdivision.
+    ///
+    /// Where the data term and the log-determinant pairs cancel, the cell range of
+    /// `C″` is itself crosswise and the first-order form is as wide as it. So `C′`
+    /// is also intersected with the second-order forms
+    /// `C′(a) + (u − a)·C″(a) + ½(u − a)²·C‴([a, b])` and the same from `b`, and
+    /// `C″` with `C″(a) + (u − a)·C‴([a, b])` and the same from `b` (Taylor with
+    /// the Lagrange remainder). On draw 357 of the split-penalty replay `C′` is
+    /// −1.914e-10 across the cell `[−0.7324, −0.7310]`, the first-order form left
+    /// its upper end at 2.1e-10, and the search ran out of subdivisions on that
+    /// cell. The second-order form excludes zero there (#2902 row 4).
     fn derivative_ranges(
         &self,
         a: f64,
         b: f64,
     ) -> Option<(gam_math::score_opt::ClosedInterval, gam_math::score_opt::ClosedInterval)> {
+        let (first, second, third) = self.natural_ranges(a, b)?;
+        if !(b > a) {
+            return Some((first, second));
+        }
+        let (at_a, curvature_a, _) = self.natural_ranges(a, a)?;
+        let (at_b, curvature_b, _) = self.natural_ranges(b, b)?;
+        let width = b - a;
+        // Over the cell, `u − a` and `b − u` both run over `[0, width]`, so a term
+        // `(u − a)·I` spans `width·[min(I.lo, 0), max(I.hi, 0)]`.
+        let span = |lo: f64, hi: f64, scale: f64| (scale * lo.min(0.0), scale * hi.max(0.0));
+        let (rise_lo, rise_hi) = span(second.lo, second.hi, width);
+        let (tilt_a_lo, tilt_a_hi) = span(curvature_a.lo, curvature_a.hi, width);
+        let (tilt_b_lo, tilt_b_hi) = span(-curvature_b.hi, -curvature_b.lo, width);
+        let (bend_lo, bend_hi) = span(third.lo, third.hi, 0.5 * width * width);
+        let (turn_lo, turn_hi) = span(third.lo, third.hi, width);
+        let magnitude = [
+            at_a.lo, at_a.hi, at_b.lo, at_b.hi, curvature_a.lo, curvature_a.hi, curvature_b.lo,
+            curvature_b.hi,
+        ]
+        .iter()
+        .fold(0.0_f64, |m, v| m.max(v.abs()))
+            + [rise_lo, rise_hi, tilt_a_lo, tilt_a_hi, tilt_b_lo, tilt_b_hi, turn_lo, turn_hi]
+                .iter()
+                .fold(0.0_f64, |m, v| m.max(v.abs()))
+            + bend_lo.abs().max(bend_hi.abs());
+        let band = gam_linalg::roundoff::accumulation_band(8, magnitude);
+        let lo = first
+            .lo
+            .max(at_a.lo + rise_lo - band)
+            .max(at_b.lo - rise_hi - band)
+            .max(at_a.lo + tilt_a_lo + bend_lo - band)
+            .max(at_b.lo + tilt_b_lo + bend_lo - band);
+        let hi = first
+            .hi
+            .min(at_a.hi + rise_hi + band)
+            .min(at_b.hi - rise_lo + band)
+            .min(at_a.hi + tilt_a_hi + bend_hi + band)
+            .min(at_b.hi + tilt_b_hi + bend_hi + band);
+        let curvature_lo = second
+            .lo
+            .max(curvature_a.lo + turn_lo - band)
+            .max(curvature_b.lo - turn_hi - band);
+        let curvature_hi = second
+            .hi
+            .min(curvature_a.hi + turn_hi + band)
+            .min(curvature_b.hi - turn_lo + band);
+        // Every enclosure intersected here contains `C′` or `C″`; an empty
+        // intersection breaks that contract and is refused rather than reconciled.
+        if !(lo <= hi && curvature_lo <= curvature_hi) {
+            return None;
+        }
+        Some((
+            gam_math::score_opt::ClosedInterval::new(lo, hi),
+            gam_math::score_opt::ClosedInterval::new(curvature_lo, curvature_hi),
+        ))
+    }
+
+    /// Outer ranges of `C′` and `C″` over `[a, b]` from the share ranges of each
+    /// spectrum.
+    ///
+    /// The log-determinant spectra enter `C′` as
+    /// `Σ_j s(u + ln ν_j) − Σ_k s(u + ln μ_k)`, and `C″` the same way with
+    /// `g = s(1 − s)`. Enclosing the two sums separately subtracts their ranges
+    /// crosswise. On a slice whose other scales dominate this one, the two
+    /// spectra come in near-equal pairs, so the crosswise width is the whole of
+    /// both ranges while each pair barely moves. On the coupled dense pair,
+    /// `ν = 5.433397857875894e-13` against `μ = 5.433407919278328e-13` left `C′`
+    /// enclosed in `±2.6e-4` over cells whose exact slope was about `1e-7`, and
+    /// the certified search ran out of subdivisions (#2902). So both spectra are
+    /// sorted and paired from the smallest up: a direction only this scale
+    /// reaches has no Occam partner and sits at the top of `ν`. Any pairing is an
+    /// exact regrouping of the sums. With `d = ln ν − ln μ`,
+    /// `s(u + ln ν) − s(u + ln μ) = ∫ g` over a shift of length `|d|`, so it has
+    /// the sign of `d` and magnitude at most `|d|·max g`. Likewise
+    /// `g(u + ln ν) − g(u + ln μ)` has magnitude at most `|d|·max|g′|`, where
+    /// `g′ = s(1 − s)(1 − 2s)`. Each maximum is taken over the shares the pair
+    /// spans on the cell. Each pair keeps the intersection of that bound with its
+    /// crosswise range. `C‴` pairs the same way, with `g(1 − 2s)` differences
+    /// bounded by `|d|·max|g(1 − 6s + 6s²)|`.
+    fn natural_ranges(
+        &self,
+        a: f64,
+        b: f64,
+    ) -> Option<(
+        gam_math::score_opt::ClosedInterval,
+        gam_math::score_opt::ClosedInterval,
+        gam_math::score_opt::ClosedInterval,
+    )> {
         let (t_a, t_b) = (a.exp(), b.exp());
         if !(t_a.is_finite() && t_b.is_finite()) {
             return None;
         }
         let root_three = 3.0_f64.sqrt();
+        let root_six = 6.0_f64.sqrt();
         let spread_stationary = [0.5_f64];
         let skew_stationary = [(3.0 - root_three) / 6.0, (3.0 + root_three) / 6.0];
+        let torsion_stationary = [0.5_f64, (3.0 - root_six) / 6.0, (3.0 + root_six) / 6.0];
         let rank = self.rank as f64;
         let (mut first_lo, mut first_hi) = (-rank, -rank);
         let (mut second_lo, mut second_hi) = (0.0_f64, 0.0_f64);
-        let (mut first_magnitude, mut second_magnitude) = (rank, 0.0_f64);
-        for (&square, &nu) in self.squares.iter().zip(self.generalized.iter()) {
+        let (mut third_lo, mut third_hi) = (0.0_f64, 0.0_f64);
+        let (mut first_magnitude, mut second_magnitude, mut third_magnitude) =
+            (rank, 0.0_f64, 0.0_f64);
+        let spread = |s: f64| s * (1.0 - s);
+        let skew = |s: f64| s * (1.0 - s) * (1.0 - 2.0 * s);
+        let torsion = |s: f64| s * (1.0 - s) * (1.0 - 6.0 * s + 6.0 * s * s);
+        let mut nu_order: Vec<usize> = (0..self.generalized.len())
+            .filter(|&index| self.generalized[index] > 0.0)
+            .collect();
+        nu_order.sort_by(|&left, &right| {
+            self.generalized[left].total_cmp(&self.generalized[right])
+        });
+        let mut mu_order: Vec<usize> = (0..self.occam.len())
+            .filter(|&index| self.occam[index] > 0.0)
+            .collect();
+        mu_order.sort_by(|&left, &right| self.occam[left].total_cmp(&self.occam[right]));
+        let pairs = nu_order.len().min(mu_order.len());
+        let mut nu_paired = vec![false; self.generalized.len()];
+        let mut mu_paired = vec![false; self.occam.len()];
+        for index in 0..pairs {
+            nu_paired[nu_order[index]] = true;
+            mu_paired[mu_order[index]] = true;
+        }
+        for (index, (&square, &nu)) in self.squares.iter().zip(self.generalized.iter()).enumerate() {
             let (scaled_a, scaled_b) = (t_a * nu, t_b * nu);
             if !(scaled_a.is_finite() && scaled_b.is_finite()) {
                 return None;
@@ -1048,23 +1177,33 @@ impl DiagonalCriterion<'_> {
             let share_lo = scaled_a / (1.0 + scaled_a);
             let share_hi = scaled_b / (1.0 + scaled_b);
             let (spread_lo, spread_hi) =
-                share_polynomial_range(share_lo, share_hi, |s| s * (1.0 - s), &spread_stationary);
-            let (skew_lo, skew_hi) = share_polynomial_range(
-                share_lo,
-                share_hi,
-                |s| s * (1.0 - s) * (1.0 - 2.0 * s),
-                &skew_stationary,
-            );
-            first_lo += square * spread_lo + share_lo;
-            first_hi += square * spread_hi + share_hi;
-            second_lo += square * skew_lo + spread_lo;
-            second_hi += square * skew_hi + spread_hi;
+                share_polynomial_range(share_lo, share_hi, spread, &spread_stationary);
+            let (skew_lo, skew_hi) =
+                share_polynomial_range(share_lo, share_hi, skew, &skew_stationary);
+            let (torsion_lo, torsion_hi) =
+                share_polynomial_range(share_lo, share_hi, torsion, &torsion_stationary);
+            first_lo += square * spread_lo;
+            first_hi += square * spread_hi;
+            second_lo += square * skew_lo;
+            second_hi += square * skew_hi;
+            third_lo += square * torsion_lo;
+            third_hi += square * torsion_hi;
+            if !nu_paired[index] {
+                first_lo += share_lo;
+                first_hi += share_hi;
+                second_lo += spread_lo;
+                second_hi += spread_hi;
+                third_lo += skew_lo;
+                third_hi += skew_hi;
+            }
             first_magnitude += square * spread_hi.abs().max(spread_lo.abs()) + share_hi.abs();
             second_magnitude += square * skew_hi.abs().max(skew_lo.abs()) + spread_hi.abs();
+            third_magnitude +=
+                square * torsion_hi.abs().max(torsion_lo.abs()) + skew_hi.abs().max(skew_lo.abs());
         }
-        // The Occam spectrum enters with a MINUS sign, so its share range
+        // The Occam spectrum enters with a MINUS sign, so an unpaired share range
         // subtracts crosswise: its largest share lowers the derivative's floor.
-        for &mu in self.occam {
+        for (index, &mu) in self.occam.iter().enumerate() {
             let (scaled_a, scaled_b) = (t_a * mu, t_b * mu);
             if !(scaled_a.is_finite() && scaled_b.is_finite()) {
                 return None;
@@ -1072,23 +1211,80 @@ impl DiagonalCriterion<'_> {
             let share_lo = scaled_a / (1.0 + scaled_a);
             let share_hi = scaled_b / (1.0 + scaled_b);
             let (spread_lo, spread_hi) =
-                share_polynomial_range(share_lo, share_hi, |s| s * (1.0 - s), &spread_stationary);
-            first_lo -= share_hi;
-            first_hi -= share_lo;
-            second_lo -= spread_hi;
-            second_hi -= spread_lo;
+                share_polynomial_range(share_lo, share_hi, spread, &spread_stationary);
+            let (skew_lo, skew_hi) =
+                share_polynomial_range(share_lo, share_hi, skew, &skew_stationary);
+            if !mu_paired[index] {
+                first_lo -= share_hi;
+                first_hi -= share_lo;
+                second_lo -= spread_hi;
+                second_hi -= spread_lo;
+                third_lo -= skew_hi;
+                third_hi -= skew_lo;
+            }
             first_magnitude += share_hi.abs();
             second_magnitude += spread_hi.abs().max(spread_lo.abs());
+            third_magnitude += skew_hi.abs().max(skew_lo.abs());
         }
-        let terms = 4 * self.squares.len() + 3 * self.occam.len() + 1;
+        let share = |scaled: f64| scaled / (1.0 + scaled);
+        for index in 0..pairs {
+            let (nu, mu) = (self.generalized[nu_order[index]], self.occam[mu_order[index]]);
+            let (nu_lo, nu_hi) = (share(t_a * nu), share(t_b * nu));
+            let (mu_lo, mu_hi) = (share(t_a * mu), share(t_b * mu));
+            let (nu_spread_lo, nu_spread_hi) =
+                share_polynomial_range(nu_lo, nu_hi, spread, &spread_stationary);
+            let (mu_spread_lo, mu_spread_hi) =
+                share_polynomial_range(mu_lo, mu_hi, spread, &spread_stationary);
+            let (nu_skew_lo, nu_skew_hi) = share_polynomial_range(nu_lo, nu_hi, skew, &skew_stationary);
+            let (mu_skew_lo, mu_skew_hi) = share_polynomial_range(mu_lo, mu_hi, skew, &skew_stationary);
+            let gap = nu.ln() - mu.ln();
+            let (span_lo, span_hi) = (share(t_a * nu.min(mu)), share(t_b * nu.max(mu)));
+            let (_, spread_max) =
+                share_polynomial_range(span_lo, span_hi, spread, &spread_stationary);
+            let (skew_min, skew_max) =
+                share_polynomial_range(span_lo, span_hi, skew, &skew_stationary);
+            let (torsion_min, torsion_max) =
+                share_polynomial_range(span_lo, span_hi, torsion, &torsion_stationary);
+            let slope_bound = gap.abs() * spread_max;
+            let curvature_bound = gap.abs() * skew_min.abs().max(skew_max.abs());
+            let torsion_bound = gap.abs() * torsion_min.abs().max(torsion_max.abs());
+            if !(slope_bound.is_finite() && curvature_bound.is_finite() && torsion_bound.is_finite()) {
+                return None;
+            }
+            let (signed_lo, signed_hi) = if gap >= 0.0 {
+                (0.0, slope_bound)
+            } else {
+                (-slope_bound, 0.0)
+            };
+            // Rounding can leave the two bounds a hair apart at a point cell; the
+            // band added below covers that hair, so the pair keeps its hull.
+            let (pair_lo, pair_hi) = ((nu_lo - mu_hi).max(signed_lo), (nu_hi - mu_lo).min(signed_hi));
+            first_lo += pair_lo.min(pair_hi);
+            first_hi += pair_lo.max(pair_hi);
+            let (bent_lo, bent_hi) = (
+                (nu_spread_lo - mu_spread_hi).max(-curvature_bound),
+                (nu_spread_hi - mu_spread_lo).min(curvature_bound),
+            );
+            second_lo += bent_lo.min(bent_hi);
+            second_hi += bent_lo.max(bent_hi);
+            let (twist_lo, twist_hi) = (
+                (nu_skew_lo - mu_skew_hi).max(-torsion_bound),
+                (nu_skew_hi - mu_skew_lo).min(torsion_bound),
+            );
+            third_lo += twist_lo.min(twist_hi);
+            third_hi += twist_lo.max(twist_hi);
+        }
+        let terms = 5 * self.squares.len() + 4 * self.occam.len() + 6 * pairs + 1;
         let first_band = gam_linalg::roundoff::accumulation_band(terms, first_magnitude);
         let second_band = gam_linalg::roundoff::accumulation_band(terms, second_magnitude);
+        let third_band = gam_linalg::roundoff::accumulation_band(terms, third_magnitude);
         Some((
             gam_math::score_opt::ClosedInterval::new(first_lo - first_band, first_hi + first_band),
             gam_math::score_opt::ClosedInterval::new(
                 second_lo - second_band,
                 second_hi + second_band,
             ),
+            gam_math::score_opt::ClosedInterval::new(third_lo - third_band, third_hi + third_band),
         ))
     }
 
@@ -3772,6 +3968,130 @@ mod selection_replay_tests {
                 );
             }
         }
+    }
+
+    /// #2902: on a tail plateau the two log-determinant spectra come in near-equal
+    /// pairs. The paired, centred enclosure must still contain `C′` and `C″`, and
+    /// the certified search must finish over the whole window instead of
+    /// exhausting its subdivisions. The spectra are the coupled dense pair's
+    /// axis-1 slice at `ln t = (18, 0)`, where the crosswise enclosure refused.
+    #[test]
+    fn paired_spectra_certify_a_tail_plateau_2902() {
+        let generalized = [
+            2.48379138847655e-7,
+            5.433397857875894e-13,
+            3.215731391695153e-13,
+            4.727515454438352e-15,
+            8.324201263235987e-16,
+            3.0588533320371987e-16,
+            6.792526470844082e-17,
+        ];
+        let occam = [
+            5.433407919278328e-13,
+            3.2157340977465174e-13,
+            4.7275155803531896e-15,
+            8.324201266050822e-16,
+            3.0588533360082377e-16,
+            6.792526477702502e-17,
+        ];
+        let squares = [1.7_f64, 0.4, 2.2, 0.05, 0.9, 1.1, 0.3];
+        let criterion = DiagonalCriterion {
+            squares: &squares,
+            generalized: &generalized,
+            rank: 1,
+            occam: &occam,
+            constant: 0.0,
+        };
+        let jet = |u: f64| criterion.jet(u).expect("evaluable jet").0;
+        for (cell_lo, cell_hi) in [(30.91_f64, 30.9111_f64), (30.0, 33.0), (-18.0, 42.0)] {
+            let (first_range, second_range) = criterion
+                .derivative_ranges(cell_lo, cell_hi)
+                .expect("evaluable cell");
+            for index in 0..=16 {
+                let u = cell_lo + (cell_hi - cell_lo) * index as f64 / 16.0;
+                let [_, first, second, _] = jet(u);
+                assert!(
+                    first_range.lo <= first && first <= first_range.hi,
+                    "C' {first} at u={u} escapes {first_range:?} on [{cell_lo}, {cell_hi}]"
+                );
+                assert!(
+                    second_range.lo <= second && second <= second_range.hi,
+                    "C'' {second} at u={u} escapes {second_range:?} on [{cell_lo}, {cell_hi}]"
+                );
+            }
+        }
+        criterion
+            .select(-18.0, 42.0)
+            .expect("the paired enclosure certifies the plateau");
+    }
+
+    /// #2902: where the data term and the log-determinant pairs cancel, the cell
+    /// range of `C″` is crosswise and the first-order centred form cannot give `C′`
+    /// a sign. The spectra are draw 357's axis-1 slice from the split-penalty
+    /// replay (`a_split_penalty_reproduces_the_single_scale_law`), which ran out of
+    /// subdivisions on the cell `[−0.732421875, −0.73095703125]`. The second-order
+    /// enclosure must still contain `C′` and `C″`, must give that cell its sign,
+    /// and the certified search must finish over the whole window.
+    #[test]
+    fn a_cancelling_slice_takes_its_sign_from_the_second_order_form_2902() {
+        let squares = [
+            0.0019305094414728218,
+            0.01003959414067558,
+            0.015890890388347078,
+            0.0002931438173635976,
+        ];
+        let generalized = [
+            0.00337861862107217,
+            0.0033748178802278823,
+            0.0033672419945676687,
+            0.003344717051138586,
+        ];
+        let occam = [
+            0.0033900723827513172,
+            0.003390072382751316,
+            0.003390072382751315,
+            0.003390072382751314,
+        ];
+        let criterion = DiagonalCriterion {
+            squares: &squares,
+            generalized: &generalized,
+            rank: 0,
+            occam: &occam,
+            constant: 0.0,
+        };
+        let jet = |u: f64| criterion.jet(u).expect("evaluable jet").0;
+        for (cell_lo, cell_hi) in [
+            (-0.732421875_f64, -0.73095703125_f64),
+            (-1.0, 0.5),
+            (-6.0, 6.0),
+            (2.9, 3.1),
+        ] {
+            let (first_range, second_range) = criterion
+                .derivative_ranges(cell_lo, cell_hi)
+                .expect("evaluable cell");
+            for index in 0..=16 {
+                let u = cell_lo + (cell_hi - cell_lo) * index as f64 / 16.0;
+                let [_, first, second, _] = jet(u);
+                assert!(
+                    first_range.lo <= first && first <= first_range.hi,
+                    "C' {first} at u={u} escapes {first_range:?} on [{cell_lo}, {cell_hi}]"
+                );
+                assert!(
+                    second_range.lo <= second && second <= second_range.hi,
+                    "C'' {second} at u={u} escapes {second_range:?} on [{cell_lo}, {cell_hi}]"
+                );
+            }
+        }
+        let (first_range, _) = criterion
+            .derivative_ranges(-0.732421875, -0.73095703125)
+            .expect("evaluable cell");
+        assert!(
+            first_range.hi < 0.0,
+            "C' is negative across the cell, but its enclosure {first_range:?} does not exclude zero"
+        );
+        criterion
+            .select(-6.0, 6.0)
+            .expect("the second-order enclosure certifies the cancelling slice");
     }
 
     /// The geometry a bare generalized spectrum corresponds to: unit
