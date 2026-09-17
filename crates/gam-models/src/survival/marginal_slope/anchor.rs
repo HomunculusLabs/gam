@@ -49,8 +49,8 @@ use smallvec::SmallVec;
 /// residual is `log Σ_k w_k Φ(∓η_k) − log Φ(∓q)` on whichever tail is the
 /// smaller, i.e. the RELATIVE error of the anchored marginal probability on
 /// the side where relative error is the meaningful one. Where one float step
-/// of `α` moves the residual by more than this, a root is held to what that
-/// step resolves instead ([`anchor_residual_resolution`]).
+/// of `α` moves the residual by more than this, or the residual's own rounding
+/// exceeds it, a root is held to that instead ([`anchor_residual_resolution`]).
 pub(crate) const ANCHOR_LOG_RESIDUAL_TOL: f64 = 1e-13;
 
 /// A finite law on the projected score, borrowed from wherever the family
@@ -234,8 +234,12 @@ pub(crate) fn gaussian_anchor(q: f64, observed_slope: f64) -> f64 {
 /// Entries in a global law's cross-row root table: a power of two.
 const SHARED_ROOT_SLOTS: usize = 256;
 
-/// One stored anchor: the exact inputs of the equation it solved and its
-/// root, published under a sequence lock so a reader sees all three from one
+/// The implicit derivatives an [`AnchorDerivatives`] carries beside `α`.
+const IMPLICIT_DERIVATIVES: usize = 9;
+
+/// One stored anchor: the exact inputs of the equation it solved, its root,
+/// and — once a consumer that reads them has differentiated that root — its
+/// implicit derivatives, published under a sequence lock so a reader sees one
 /// completed write or nothing.
 #[derive(Debug)]
 struct RootSlot {
@@ -243,6 +247,18 @@ struct RootSlot {
     q: AtomicU64,
     slope: AtomicU64,
     root: AtomicU64,
+    /// `[α_q, α_b, α_qq, α_qb, α_bb, α_qqq, α_qqb, α_qbb, α_bbb]` at `root`,
+    /// `NaN` while no consumer has differentiated it.
+    derivatives: [AtomicU64; IMPLICIT_DERIVATIVES],
+}
+
+/// A completed read of a [`RootSlot`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct StoredAnchor {
+    q: u64,
+    slope: u64,
+    root: f64,
+    derivatives: Option<AnchorDerivatives>,
 }
 
 impl RootSlot {
@@ -253,12 +269,13 @@ impl RootSlot {
             q: AtomicU64::new(nan),
             slope: AtomicU64::new(nan),
             root: AtomicU64::new(nan),
+            derivatives: std::array::from_fn(|_| AtomicU64::new(nan)),
         }
     }
 
-    /// `(q bits, b bits, root)` from one completed write, or `None` while a
-    /// writer holds the slot or finished a write during the read.
-    fn read(&self) -> Option<(u64, u64, f64)> {
+    /// The stored anchor from one completed write, or `None` while a writer
+    /// holds the slot or finished a write during the read.
+    fn read(&self) -> Option<StoredAnchor> {
         let before = self.sequence.load(Ordering::Acquire);
         if before & 1 == 1 {
             return None;
@@ -266,12 +283,39 @@ impl RootSlot {
         let q = self.q.load(Ordering::Acquire);
         let slope = self.slope.load(Ordering::Acquire);
         let root = f64::from_bits(self.root.load(Ordering::Acquire));
-        (self.sequence.load(Ordering::Acquire) == before).then_some((q, slope, root))
+        let implicit: [f64; IMPLICIT_DERIVATIVES] = std::array::from_fn(|index| {
+            f64::from_bits(self.derivatives[index].load(Ordering::Acquire))
+        });
+        if self.sequence.load(Ordering::Acquire) != before {
+            return None;
+        }
+        let derivatives = implicit
+            .iter()
+            .all(|value| value.is_finite())
+            .then_some(AnchorDerivatives {
+                alpha: root,
+                a_q: implicit[0],
+                a_b: implicit[1],
+                a_qq: implicit[2],
+                a_qb: implicit[3],
+                a_bb: implicit[4],
+                a_qqq: implicit[5],
+                a_qqb: implicit[6],
+                a_qbb: implicit[7],
+                a_bbb: implicit[8],
+            });
+        Some(StoredAnchor {
+            q,
+            slope,
+            root,
+            derivatives,
+        })
     }
 
-    /// Publish a solved anchor. A writer that finds the slot held skips it:
-    /// the slot is a cache, and the other writer's root serves as well.
-    fn write(&self, q: u64, slope: u64, root: f64) {
+    /// Publish a solved anchor, with its derivatives where the writer has
+    /// them. A writer that finds the slot held skips it: the slot is a cache,
+    /// and the other writer's anchor serves as well.
+    fn write(&self, anchor: &StoredAnchor) {
         let before = self.sequence.load(Ordering::Acquire);
         if before & 1 == 1
             || self
@@ -281,9 +325,15 @@ impl RootSlot {
         {
             return;
         }
-        self.q.store(q, Ordering::Release);
-        self.slope.store(slope, Ordering::Release);
-        self.root.store(root.to_bits(), Ordering::Release);
+        self.q.store(anchor.q, Ordering::Release);
+        self.slope.store(anchor.slope, Ordering::Release);
+        self.root.store(anchor.root.to_bits(), Ordering::Release);
+        let implicit = anchor.derivatives.map_or([f64::NAN; IMPLICIT_DERIVATIVES], |d| {
+            [d.a_q, d.a_b, d.a_qq, d.a_qb, d.a_bb, d.a_qqq, d.a_qqb, d.a_qbb, d.a_bbb]
+        });
+        for (cell, value) in self.derivatives.iter().zip(implicit) {
+            cell.store(value.to_bits(), Ordering::Release);
+        }
         self.sequence.store(before + 2, Ordering::Release);
     }
 }
@@ -350,10 +400,12 @@ impl AnchorRootCache {
 /// without evaluating the residual. On a global law, rows asking the same
 /// equation — every row entering at the time origin shares its entry index —
 /// find one row's root in the cross-row table. At a new iterate the slot's
-/// root is the previous iterate's, one Newton probe away after a Newton step.
-/// A root stored by a rejected trial far from this iterate can mislead the
-/// seed, so a refused warm solve retries from the closed form, which depends
-/// only on `(q, b)` and cannot be poisoned.
+/// anchor seeds the solve: its root moved to the new inputs along its stored
+/// first derivatives where a consumer has differentiated it, the bare root
+/// otherwise. A seed stored by a rejected trial far from this iterate can
+/// mislead the solve, so a refused warm solve retries from the closed form,
+/// which depends only on `(q, b)` and cannot be poisoned; however it is
+/// seeded, a solve returns only a root meeting [`anchor_residual_resolution`].
 pub(crate) fn solve_anchor_in_slot(
     q: f64,
     observed_slope: f64,
@@ -361,50 +413,128 @@ pub(crate) fn solve_anchor_in_slot(
     row: usize,
     slot: SurvivalInterceptSlotKind,
 ) -> Result<f64, String> {
-    let Some(cache) = context.roots else {
-        return solve_anchor(q, observed_slope, context.grid);
+    anchor_in_slot(q, observed_slope, context, row, slot, false).map(|anchor| anchor.root)
+}
+
+/// [`AnchorDerivatives`] through the law's root slots (gam#2928).
+///
+/// A slot whose stored inputs are bitwise `(q, b)` and that holds derivatives
+/// answers with them: they are what [`AnchorDerivatives::at`] returned at the
+/// stored root, so the order-two lowering and the value path read the same
+/// bits they would compute. Otherwise the root comes through the path of
+/// [`solve_anchor_in_slot`], is differentiated once, and is published with its
+/// derivatives.
+pub(crate) fn anchor_derivatives_in_slot(
+    q: f64,
+    observed_slope: f64,
+    context: AnchorRowContext<'_>,
+    row: usize,
+    slot: SurvivalInterceptSlotKind,
+) -> Result<AnchorDerivatives, String> {
+    let anchor = anchor_in_slot(q, observed_slope, context, row, slot, true)?;
+    match anchor.derivatives {
+        Some(derivatives) => Ok(derivatives),
+        None => AnchorDerivatives::at(anchor.root, q, observed_slope, context.grid),
+    }
+}
+
+/// The warm seed a stored anchor gives for `(q, b)`: its root moved along its
+/// stored first derivatives, or the bare root while it holds none. It is only
+/// a seed — the solve certifies whatever it starts from.
+fn predicted_seed(stored: &StoredAnchor, q: f64, observed_slope: f64) -> f64 {
+    let Some(derivatives) = stored.derivatives else {
+        return stored.root;
     };
+    let predicted = stored.root
+        + derivatives.a_q * (q - f64::from_bits(stored.q))
+        + derivatives.a_b * (observed_slope - f64::from_bits(stored.slope));
+    if predicted.is_finite() {
+        predicted
+    } else {
+        stored.root
+    }
+}
+
+/// The slot path both entries share: the anchor for `(q, b)`, carrying
+/// derivatives whenever `differentiate` asks for them.
+fn anchor_in_slot(
+    q: f64,
+    observed_slope: f64,
+    context: AnchorRowContext<'_>,
+    row: usize,
+    slot: SurvivalInterceptSlotKind,
+    differentiate: bool,
+) -> Result<StoredAnchor, String> {
     let inputs = (q.to_bits(), observed_slope.to_bits());
+    let differentiated = |root: f64| -> Result<Option<AnchorDerivatives>, String> {
+        if differentiate {
+            AnchorDerivatives::at(root, q, observed_slope, context.grid).map(Some)
+        } else {
+            Ok(None)
+        }
+    };
+    let Some(cache) = context.roots else {
+        let root = solve_anchor(q, observed_slope, context.grid)?;
+        return Ok(StoredAnchor {
+            q: inputs.0,
+            slope: inputs.1,
+            root,
+            derivatives: differentiated(root)?,
+        });
+    };
     let own = cache.slot(row, slot);
-    let mut seed = None;
-    if let Some((stored_q, stored_slope, root)) = own.and_then(RootSlot::read)
-        && root.is_finite()
-    {
-        if (stored_q, stored_slope) == inputs {
-            return Ok(root);
-        }
-        seed = Some(root);
-    }
+    let own_stored = own
+        .and_then(RootSlot::read)
+        .filter(|stored| stored.root.is_finite());
     let shared = cache.shared_slot(inputs.0, inputs.1);
-    if let Some((stored_q, stored_slope, root)) = shared.and_then(RootSlot::read)
-        && root.is_finite()
-        && (stored_q, stored_slope) == inputs
-    {
-        if let Some(own) = own {
-            own.write(inputs.0, inputs.1, root);
-        }
-        return Ok(root);
-    }
-    let root = match seed {
-        Some(seed) => match solve_anchor_from(q, observed_slope, context.grid, seed) {
-            Ok(root) => root,
-            Err(warm_failure) => {
-                log::debug!(
-                    "[survival-marginal-slope anchor] row {row}: the slot's seed {seed} did not \
-                     solve ({warm_failure}); retrying from the closed form"
-                );
-                solve_anchor(q, observed_slope, context.grid)?
+    let own_match = own_stored.filter(|stored| (stored.q, stored.slope) == inputs);
+    let shared_match = if own_match.is_some() {
+        None
+    } else {
+        shared
+            .and_then(RootSlot::read)
+            .filter(|stored| stored.root.is_finite() && (stored.q, stored.slope) == inputs)
+    };
+    let root = match own_match.or(shared_match) {
+        Some(stored) if stored.derivatives.is_some() || !differentiate => {
+            if shared_match.is_some()
+                && let Some(own) = own
+            {
+                own.write(&stored);
             }
+            return Ok(stored);
+        }
+        Some(stored) => stored.root,
+        None => match own_stored {
+            Some(stored) => {
+                let seed = predicted_seed(&stored, q, observed_slope);
+                match solve_anchor_from(q, observed_slope, context.grid, seed) {
+                    Ok(root) => root,
+                    Err(warm_failure) => {
+                        log::debug!(
+                            "[survival-marginal-slope anchor] row {row}: the slot's seed {seed} did \
+                             not solve ({warm_failure}); retrying from the closed form"
+                        );
+                        solve_anchor(q, observed_slope, context.grid)?
+                    }
+                }
+            }
+            None => solve_anchor(q, observed_slope, context.grid)?,
         },
-        None => solve_anchor(q, observed_slope, context.grid)?,
+    };
+    let anchor = StoredAnchor {
+        q: inputs.0,
+        slope: inputs.1,
+        root,
+        derivatives: differentiated(root)?,
     };
     if let Some(own) = own {
-        own.write(inputs.0, inputs.1, root);
+        own.write(&anchor);
     }
     if let Some(shared) = shared {
-        shared.write(inputs.0, inputs.1, root);
+        shared.write(&anchor);
     }
-    Ok(root)
+    Ok(anchor)
 }
 
 /// Solve the anchoring equation for `α` at the marginal index `q` and the
@@ -421,8 +551,9 @@ pub(crate) fn solve_anchor_in_slot(
 /// Halley's step where it agrees with Newton's, a doubling search until both
 /// sides of the root are seen, bisection whenever a step leaves the bracket or
 /// fails to halve. It returns only an `α` whose residual meets
-/// [`anchor_residual_resolution`] — the tolerance, or the residual one float
-/// step of `α` resolves where that is coarser — and refuses otherwise. It does
+/// [`anchor_residual_resolution`] — the tolerance, or where coarser the
+/// residual one float step of `α` resolves or the residual's own rounding —
+/// and refuses otherwise. It does
 /// not stop on bracket width, so no returned root carries a residual above
 /// that criterion.
 pub(crate) fn solve_anchor(q: f64, observed_slope: f64, grid: AnchorGrid<'_>) -> Result<f64, String> {
@@ -472,9 +603,10 @@ fn solve_anchor_with(
     let mut alpha = seed;
     let mut step_cap = (0.25 * (1.0 + seed.abs())).max(1.0);
     let mut last_step = f64::INFINITY;
+    let rounding = anchor_residual_rounding(log_target, grid.len());
     for _ in 0..ANCHOR_SOLVE_MAX_EVALUATIONS {
         let (value, first, second) = residual(alpha, observed_slope, grid, survival_side, log_target)?;
-        if value.abs() <= anchor_residual_resolution(alpha, first) {
+        if value.abs() <= anchor_residual_resolution(alpha, first, rounding) {
             return Ok(alpha);
         }
         let root_is_above = if increasing { value < 0.0 } else { value > 0.0 };
@@ -537,15 +669,29 @@ fn solve_anchor_with(
 /// adjacent floats.
 const ANCHOR_SOLVE_MAX_EVALUATIONS: usize = 256;
 
-/// The `|F|` a root is held to (gam#2928): [`ANCHOR_LOG_RESIDUAL_TOL`], or —
-/// where one floating-point step of `α` already moves the residual by more
-/// than that — the residual that step resolves, `|F′(α)|·ulp(α)`. The float
-/// nearest the root always meets it, so a solve stops on this criterion or
-/// refuses; it never stops on a bracket width.
+/// The `|F|` a root is held to (gam#2928): [`ANCHOR_LOG_RESIDUAL_TOL`], or the
+/// coarser of what the arithmetic can resolve — the residual one
+/// floating-point step of `α` moves, `|F′(α)|·ulp(α)`, and the residual's own
+/// rounding ([`anchor_residual_rounding`]). The float nearest the root meets
+/// it, so a solve stops on this criterion or refuses; it never stops on a
+/// bracket width.
 #[inline]
-pub(crate) fn anchor_residual_resolution(alpha: f64, first: f64) -> f64 {
+pub(crate) fn anchor_residual_resolution(alpha: f64, first: f64, rounding: f64) -> f64 {
     let magnitude = alpha.abs();
-    ANCHOR_LOG_RESIDUAL_TOL.max(first.abs() * (magnitude.next_up() - magnitude))
+    ANCHOR_LOG_RESIDUAL_TOL
+        .max(first.abs() * (magnitude.next_up() - magnitude))
+        .max(rounding)
+}
+
+/// The rounding the residual `log T − log Φ(∓q)` carries on a law of `nodes`
+/// nodes (gam#2941): two logarithms of magnitude about `|log Φ(∓q)|`, each
+/// formed by at most four rounded operations at that magnitude, and `nodes`
+/// terms summed. Deep in a tail it is the binding floor: at `q = −89.4` both
+/// logarithms sit near −4000 and a residual cannot be resolved below about
+/// 3e-12, however close `α` is to the root.
+#[inline]
+pub(crate) fn anchor_residual_rounding(log_target: f64, nodes: usize) -> f64 {
+    f64::EPSILON * (nodes as f64 + 8.0 * (1.0 + log_target.abs()))
 }
 
 /// The smallest marginal tail the linear-space residual sums directly. Every
@@ -724,6 +870,87 @@ enum Var {
     B,
 }
 
+/// The law's density weights at an anchor, normalized in log space (gam#2941):
+/// `ω_k = w_k φ(η_k) / Σ_j w_j φ(η_j)` with `η_k = α + b·u_k`.
+///
+/// Every implicit derivative of the anchor is a ratio of density sums — to
+/// each other and to `φ(q)` — so it reads the weights only through `ω` and the
+/// scale only through [`AnchorDensity::log_density_ratio`]. Deep in either tail
+/// every `φ(η_k)` underflows while those ratios are finite. Each exponent is
+/// formed against the heaviest node `*` as `log w_k − log w_* − ½(η_k − η_*)(η_k
+/// + η_*)`, whose difference `η_k − η_* = b·(u_k − u_*)` carries no cancellation,
+/// so a weight keeps its digits where `½η²` alone would round them away.
+pub(crate) struct AnchorDensity {
+    weights: SmallVec<[f64; 128]>,
+    heaviest_log_weight: f64,
+    heaviest_eta: f64,
+    log_relative_sum: f64,
+}
+
+impl AnchorDensity {
+    pub(crate) fn at(alpha: f64, observed_slope: f64, grid: AnchorGrid<'_>) -> Result<Self, String> {
+        let m = grid.len();
+        let mut heaviest = None;
+        let mut heaviest_log_density = f64::NEG_INFINITY;
+        for k in 0..m {
+            let eta = alpha + observed_slope * grid.nodes[k];
+            let log_density = grid.log_weights[k] - 0.5 * eta * eta;
+            if log_density > heaviest_log_density {
+                heaviest_log_density = log_density;
+                heaviest = Some(k);
+            }
+        }
+        let Some(heaviest) = heaviest else {
+            return Err(format!(
+                "survival marginal-slope anchor density has no finite node at α={alpha}, b={observed_slope}"
+            ));
+        };
+        let heaviest_node = grid.nodes[heaviest];
+        let heaviest_log_weight = grid.log_weights[heaviest];
+        let heaviest_eta = alpha + observed_slope * heaviest_node;
+        let mut weights = SmallVec::with_capacity(m);
+        let mut sum = 0.0;
+        for k in 0..m {
+            let eta = alpha + observed_slope * grid.nodes[k];
+            let exponent = (grid.log_weights[k] - heaviest_log_weight)
+                - 0.5 * (observed_slope * (grid.nodes[k] - heaviest_node)) * (eta + heaviest_eta);
+            let relative = exponent.exp();
+            weights.push(relative);
+            sum += relative;
+        }
+        if !(sum.is_finite() && sum > 0.0) {
+            return Err(format!(
+                "survival marginal-slope anchor density weights are not normalizable: Σ={sum:e} at α={alpha}, b={observed_slope}"
+            ));
+        }
+        for weight in weights.iter_mut() {
+            *weight /= sum;
+        }
+        Ok(Self {
+            weights,
+            heaviest_log_weight,
+            heaviest_eta,
+            log_relative_sum: sum.ln(),
+        })
+    }
+
+    /// `ω_k`, in the law's node order.
+    #[inline]
+    pub(crate) fn weights(&self) -> &[f64] {
+        &self.weights
+    }
+
+    /// `log φ(q) − log Σ_k w_k φ(η_k)`, its quadratic terms combined as the
+    /// product `(q − η_*)(q + η_*)`: at a tail root `q` and `η_*` agree to many
+    /// digits, and their squares would not.
+    #[inline]
+    pub(crate) fn log_density_ratio(&self, q: f64) -> f64 {
+        -self.heaviest_log_weight
+            - self.log_relative_sum
+            - 0.5 * (q - self.heaviest_eta) * (q + self.heaviest_eta)
+    }
+}
+
 impl AnchorDerivatives {
     /// Differentiate at an already solved anchor.
     pub(crate) fn at(
@@ -734,26 +961,29 @@ impl AnchorDerivatives {
     ) -> Result<Self, String> {
         // Moments of the law against the derivatives of `F(x) = Φ(−x)`:
         //   F′ = −φ, F″ = xφ, F‴ = (1 − x²)φ,
-        // each weighted by `u_k^j` for the `b`-derivatives.
+        // each weighted by `u_k^j` for the `b`-derivatives. Every implicit
+        // derivative is homogeneous of degree zero in `G`, so `G` is divided
+        // through by `Σ_k w_k φ(η_k)` (gam#2941): the moments read the
+        // normalized weights `ω_k`, and `φ(q)` becomes the finite ratio `ρ`.
+        let density = AnchorDensity::at(alpha, observed_slope, grid)?;
         let mut p = [0.0_f64; 4];
         let mut s2 = [0.0_f64; 4];
         let mut s3 = [0.0_f64; 4];
-        for (&u, &w) in grid.nodes.iter().zip(grid.weights.iter()) {
+        for (&u, &omega) in grid.nodes.iter().zip(density.weights().iter()) {
             let eta = alpha + observed_slope * u;
-            let pdf = w * normal_pdf(eta);
             let mut power = 1.0;
             for j in 0..4 {
-                p[j] += pdf * power;
-                s2[j] += pdf * eta * power;
-                s3[j] += pdf * (1.0 - eta * eta) * power;
+                p[j] += omega * power;
+                s2[j] += omega * eta * power;
+                s3[j] += omega * (1.0 - eta * eta) * power;
                 power *= u;
             }
         }
-        let phi_q = normal_pdf(q);
+        let rho = density.log_density_ratio(q).exp();
         // Partial derivatives of G by order. In `q` alone: `−F^{(n)}(q) =
         // −(−1)^n He_{n−1}(q) φ(q)`; in `(α, b)` the law's moments above, by
         // total order and by the number of `b`'s. Order zero is never read.
-        let g_q = [0.0, phi_q, -q * phi_q, -(1.0 - q * q) * phi_q];
+        let g_q = [0.0, rho, -q * rho, -(1.0 - q * q) * rho];
         let g_ab = [[0.0; 4], [-p[0], -p[1], -p[2], -p[3]], s2, s3];
         // `na` in α, `nq` in q, `nb` in b; mixed q/(α, b) derivatives vanish.
         let g = |na: usize, nq: usize, nb: usize| -> f64 {
@@ -822,30 +1052,16 @@ impl AnchorDerivatives {
             a_qbb: third(Var::Q, Var::B, Var::B),
             a_bbb: third(Var::B, Var::B, Var::B),
         };
+        let implicit = [
+            out.a_q, out.a_b, out.a_qq, out.a_qb, out.a_bb, out.a_qqq, out.a_qqb, out.a_qbb, out.a_bbb,
+        ];
+        if !implicit.iter().all(|value| value.is_finite()) {
+            return Err(format!(
+                "survival marginal-slope anchor derivatives are not representable at α={alpha}, q={q}, b={observed_slope}: {implicit:?}"
+            ));
+        }
         Ok(out)
     }
-}
-
-/// `∂α/∂q = φ(q) / Σ_k w_k φ(η_k)` at a solved anchor: the factor the exit rate
-/// `α̇₁ = α_q·q̇₁` carries on the value path.
-pub(crate) fn anchor_q_derivative(
-    alpha: f64,
-    q: f64,
-    observed_slope: f64,
-    grid: AnchorGrid<'_>,
-) -> Result<f64, String> {
-    let density: f64 = grid
-        .nodes
-        .iter()
-        .zip(grid.weights.iter())
-        .map(|(&u, &w)| w * normal_pdf(alpha + observed_slope * u))
-        .sum();
-    if !(density.is_finite() && density > 0.0) {
-        return Err(format!(
-            "survival marginal-slope anchor density underflowed: Σ w φ(η)={density:e} at α={alpha}, q={q}, b={observed_slope}"
-        ));
-    }
-    Ok(normal_pdf(q) / density)
 }
 
 /// The order of the anchor's Taylor table. The order-≤4 carriers read `α`
@@ -860,11 +1076,13 @@ const TAYLOR_SLOTS: usize = ANCHOR_TAYLOR_ORDER + 1;
 /// derivative stack a carrier composes.
 const FACTORIAL: [f64; TAYLOR_SLOTS] = [1.0, 1.0, 2.0, 6.0, 24.0, 120.0];
 
-/// `scale·[·, F′, F″, F‴, F⁗, F⁽⁵⁾](x)` with `F(x) = Φ(−x)`, `F^{(n)} =
-/// (−1)^n He_{n−1}(x) φ(x)`. The value slot is never read and holds zero.
+/// `[·, F′, F″, F‴, F⁗, F⁽⁵⁾](x)` with `F(x) = Φ(−x)`, `F^{(n)} = (−1)^n
+/// He_{n−1}(x) φ(x)`, with `φ(x)` replaced by the caller's `density` — a
+/// normalized node weight or the ratio `φ(q)/Σ w φ(η)` (gam#2941). The value
+/// slot is never read and holds zero.
 #[inline]
-fn survival_cdf_derivative_stack(x: f64, scale: f64) -> [f64; TAYLOR_SLOTS] {
-    let pdf = scale * normal_pdf(x);
+fn survival_cdf_derivative_stack(x: f64, density: f64) -> [f64; TAYLOR_SLOTS] {
+    let pdf = density;
     let x2 = x * x;
     [
         0.0,
@@ -946,10 +1164,14 @@ impl AnchorTaylor {
         observed_slope: f64,
         grid: AnchorGrid<'_>,
     ) -> Result<Self, String> {
-        // moments[n][s] = Σ_k w_k u_k^s F^{(n)}(η_k), 1 ≤ n ≤ 5, s ≤ n.
+        // moments[n][s] = Σ_k w_k u_k^s F^{(n)}(η_k), 1 ≤ n ≤ 5, s ≤ n, divided
+        // through by `Σ_k w_k φ(η_k)` like `G` in [`AnchorDerivatives::at`]: the
+        // table is homogeneous of degree zero in `H`, and the normalized form
+        // stays finite where every node's density underflows (gam#2941).
+        let density = AnchorDensity::at(alpha, observed_slope, grid)?;
         let mut moments = [[0.0_f64; TAYLOR_SLOTS]; TAYLOR_SLOTS];
-        for (&u, &w) in grid.nodes.iter().zip(grid.weights.iter()) {
-            let stack = survival_cdf_derivative_stack(alpha + observed_slope * u, w);
+        for (&u, &omega) in grid.nodes.iter().zip(density.weights().iter()) {
+            let stack = survival_cdf_derivative_stack(alpha + observed_slope * u, omega);
             let mut power = 1.0;
             for s in 0..TAYLOR_SLOTS {
                 for n in s.max(1)..TAYLOR_SLOTS {
@@ -964,7 +1186,7 @@ impl AnchorTaylor {
                 "survival marginal-slope anchor has no finite gradient: H_α={h_alpha:e} at α={alpha}, q={q}, b={observed_slope}"
             ));
         }
-        let target = survival_cdf_derivative_stack(q, 1.0);
+        let target = survival_cdf_derivative_stack(q, density.log_density_ratio(q).exp());
         let mut delta = TruncatedBivariate::ZERO;
         for _ in 0..ANCHOR_TAYLOR_ORDER {
             let mut rest = TruncatedBivariate::ZERO;
@@ -1432,13 +1654,19 @@ mod anchor_tests {
         // Stored under exactly these inputs the slot IS the answer: a sentinel
         // comes back, which no solve could produce.
         let own = cache.slot(2, slot).expect("row 2 slot");
-        own.write(q.to_bits(), b.to_bits(), 123.0);
+        let sentinel = |q: f64, b: f64, root: f64| StoredAnchor {
+            q: q.to_bits(),
+            slope: b.to_bits(),
+            root,
+            derivatives: None,
+        };
+        own.write(&sentinel(q, b, 123.0));
         assert_eq!(solve_anchor_in_slot(q, b, context, 2, slot).expect("reuse"), 123.0);
         for (nudged_q, nudged_b) in [
             (f64::from_bits(q.to_bits() + 1), b),
             (q, f64::from_bits(b.to_bits() + 1)),
         ] {
-            own.write(q.to_bits(), b.to_bits(), 123.0);
+            own.write(&sentinel(q, b, 123.0));
             let nudged = solve_anchor_in_slot(nudged_q, nudged_b, context, 2, slot).expect("nudged");
             let fresh = solve_anchor(nudged_q, nudged_b, grid.view()).expect("fresh nudged");
             assert!(
@@ -1447,23 +1675,304 @@ mod anchor_tests {
             );
         }
 
-        cache.slot(1, slot).expect("row 1 slot").write(q.to_bits(), b.to_bits(), cold);
+        cache.slot(1, slot).expect("row 1 slot").write(&sentinel(q, b, cold));
         let warm = solve_anchor_in_slot(0.7003, 1.0996, context, 1, slot).expect("warm solve");
         let fresh = solve_anchor(0.7003, 1.0996, grid.view()).expect("fresh solve");
         assert!((warm - fresh).abs() <= 1e-10 * (1.0 + fresh.abs()), "warm {warm} vs fresh {fresh}");
         assert_eq!(
-            cache.slot(1, slot).and_then(RootSlot::read).map(|(sq, sb, root)| (sq, sb, root.to_bits())),
+            cache
+                .slot(1, slot)
+                .and_then(RootSlot::read)
+                .map(|stored| (stored.q, stored.slope, stored.root.to_bits())),
             Some((0.7003_f64.to_bits(), 1.0996_f64.to_bits(), warm.to_bits())),
             "the warm solve is published under its own inputs"
         );
 
-        cache.slot(3, slot).expect("row 3 slot").write(5.0_f64.to_bits(), 0.2_f64.to_bits(), 1e6);
+        cache.slot(3, slot).expect("row 3 slot").write(&sentinel(5.0, 0.2, 1e6));
         let poisoned = solve_anchor_in_slot(-0.4, 0.9, context, 3, slot).expect("poisoned seed");
         let reference = solve_anchor(-0.4, 0.9, grid.view()).expect("reference");
         assert!(
             (poisoned - reference).abs() <= 1e-10 * (1.0 + reference.abs()),
             "poisoned {poisoned} vs reference {reference}"
         );
+    }
+
+    /// A point-mass law at `u₀ = 0` anchors at `α = q` for every slope, so
+    /// `α_q = 1` and every other derivative vanishes, and at `α = q` the
+    /// normalized tables form each of those from identical operands: the
+    /// implicit-derivative table must be exactly `(1, 0, …, 0)` and the Taylor
+    /// table `c[1][0] = 1` with the rest zero up to the rounding of a degree-five
+    /// polynomial in `q`. Deep in both tails, where `φ(q)` and `φ(η)` have long
+    /// underflowed and the linear-space moments refused (gam#2941). Off the
+    /// origin the solve must land on the closed form `q − b·u₀` within its
+    /// certified error.
+    #[test]
+    fn point_mass_law_anchor_tables_are_the_closed_form_in_both_tails() {
+        let origin = owned(vec![0.0], vec![1.0]);
+        let shifted = owned(vec![0.37], vec![1.0]);
+        let qs = [
+            -90.0, -84.0, -80.0, -70.55899843438496, -12.0, 0.0, 12.0, 70.55899843438496, 80.0, 84.0, 90.0,
+        ];
+        let bs = [-25.0, -21.12209971696722, -1.0, 0.0, 1.0, 21.12209971696722, 25.0];
+        for &q in &qs {
+            for &b in &bs {
+                let d = AnchorDerivatives::at(q, q, b, origin.view())
+                    .unwrap_or_else(|e| panic!("q={q} b={b}: derivatives refused: {e}"));
+                assert_eq!(
+                    [d.a_q, d.a_b, d.a_qq, d.a_qb, d.a_bb, d.a_qqq, d.a_qqb, d.a_qbb, d.a_bbb],
+                    [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    "q={q} b={b}: point-mass derivatives"
+                );
+                let taylor = AnchorTaylor::at(q, q, b, origin.view())
+                    .unwrap_or_else(|e| panic!("q={q} b={b}: Taylor table refused: {e}"));
+                for i in 0..TAYLOR_SLOTS {
+                    for j in 0..TAYLOR_SLOTS - i {
+                        let expected = match (i, j) {
+                            (0, 0) => q,
+                            (1, 0) => 1.0,
+                            _ => 0.0,
+                        };
+                        let rounding = 64.0 * f64::EPSILON * (1.0 + q.abs()).powi((i + j) as i32 + 1);
+                        assert!(
+                            (taylor.coefficients[i][j] - expected).abs() <= rounding,
+                            "q={q} b={b}: Taylor c[{i}][{j}] = {:+.17e}, expected {expected} (rounding {rounding:.3e})",
+                            taylor.coefficients[i][j]
+                        );
+                    }
+                }
+
+                let u0 = 0.37;
+                let alpha = solve_anchor(q, b, shifted.view())
+                    .unwrap_or_else(|e| panic!("q={q} b={b}: point-mass solve refused: {e}"));
+                let survival_side = q >= 0.0;
+                let log_target = if survival_side {
+                    normal_logcdf(-q)
+                } else {
+                    normal_logcdf(q)
+                };
+                let (_, first, _) = anchor_log_residual(alpha, b, shifted.view(), survival_side, log_target)
+                    .expect("point-mass residual");
+                let certified = anchor_residual_resolution(
+                    alpha,
+                    first,
+                    anchor_residual_rounding(log_target, shifted.view().len()),
+                ) / first.abs()
+                    + 2.0 * f64::EPSILON * (q.abs() + (b * u0).abs());
+                assert!(
+                    (alpha - (q - b * u0)).abs() <= certified,
+                    "q={q} b={b}: point-mass root {alpha:+.17e} vs closed form {:+.17e} (certified {certified:.3e})",
+                    q - b * u0
+                );
+                let shifted_derivatives = AnchorDerivatives::at(alpha, q, b, shifted.view())
+                    .unwrap_or_else(|e| panic!("q={q} b={b}: shifted derivatives refused: {e}"));
+                assert!(
+                    (shifted_derivatives.a_b + u0).abs() <= 4.0 * f64::EPSILON,
+                    "q={q} b={b}: α_b {} vs −u₀",
+                    shifted_derivatives.a_b
+                );
+            }
+        }
+    }
+
+    /// Deep in both tails of a skewed and a Gauss–Hermite law — `|q|` to 80,
+    /// `|b|` to 25, and the 2768 fixture's refused point — the anchor solves and
+    /// its derivatives are finite and are central differences of the solved
+    /// anchor (gam#2941). The bound is the difference's own error: the Taylor
+    /// remainder `h²/6·|α‴|` (α‴ from the table at the stencil's three points)
+    /// plus each stencil root's certified error `resolution/|F′|` over `h`, plus
+    /// the table's rounding.
+    #[test]
+    fn anchor_derivatives_match_differences_deep_in_both_tails() {
+        let (nodes, weights) = gauss_hermite_probabilists(65).expect("grid");
+        let gaussian = owned(nodes, weights);
+        let skewed = skewed_grid();
+        // The 32 scores ((7i) mod 32)/8 − 2 of gnomon's delayed-entry calibration
+        // fixture at equal weight (a permutation of −2 + k/8, taken ascending):
+        // every startup seed there was refused at the first point below.
+        let calibrate = owned((0..32).map(|k| k as f64 / 8.0 - 2.0).collect(), vec![1.0 / 32.0; 32]);
+        let points = [
+            (-83.97022428333848, -0.09658543743257131),
+            (-70.55899843438496, -21.12209971696722),
+            (-84.0, -3.0),
+            (-84.0, 12.0),
+            (-90.0, -25.0),
+            (-90.0, 25.0),
+            (90.0, -25.0),
+            (90.0, 4.0),
+            (-80.0, -25.0),
+            (-80.0, 25.0),
+            (80.0, -25.0),
+            (80.0, 25.0),
+            (-40.0, 7.0),
+            (55.0, -12.0),
+        ];
+        // The calibration point really is one where the linear-space moments
+        // underflowed: at its anchor `Σ_k w_k φ(η_k)` rounds to zero.
+        let (refused_q, refused_b) = (-83.97022428333848, -0.09658543743257131);
+        let refused_alpha = solve_anchor(refused_q, refused_b, calibrate.view()).expect("calibration anchor");
+        let linear_density: f64 = calibrate
+            .nodes
+            .iter()
+            .zip(calibrate.weights.iter())
+            .map(|(&u, &w)| w * normal_pdf(refused_alpha + refused_b * u))
+            .sum();
+        assert_eq!(
+            linear_density, 0.0,
+            "the calibration point must be one where Σ w φ(η) underflows (α={refused_alpha})"
+        );
+        for (label, grid) in [("skewed", &skewed), ("gaussian", &gaussian), ("calibrate", &calibrate)] {
+            let m = grid.view().len() as f64;
+            let widest_node = grid.nodes.iter().fold(0.0_f64, |widest, u| widest.max(u.abs()));
+            let solve = |q: f64, b: f64| -> (f64, f64, AnchorDerivatives) {
+                let alpha = solve_anchor(q, b, grid.view())
+                    .unwrap_or_else(|e| panic!("{label} q={q} b={b}: solve refused: {e}"));
+                let survival_side = q >= 0.0;
+                let log_target = if survival_side {
+                    normal_logcdf(-q)
+                } else {
+                    normal_logcdf(q)
+                };
+                let (_, first, _) = anchor_log_residual(alpha, b, grid.view(), survival_side, log_target)
+                    .expect("residual");
+                let certified = anchor_residual_resolution(
+                    alpha,
+                    first,
+                    anchor_residual_rounding(log_target, grid.view().len()),
+                ) / first.abs();
+                let derivatives = AnchorDerivatives::at(alpha, q, b, grid.view())
+                    .unwrap_or_else(|e| panic!("{label} q={q} b={b}: derivatives refused: {e}"));
+                (alpha, certified, derivatives)
+            };
+            for &(q, b) in &points {
+                let (alpha, _, d) = solve(q, b);
+                // The table's rounding: its log-density ratio forms products of
+                // indices as large as `|q| + |α| + |b|·max|u|`.
+                let scale = 1.0 + q.abs() + alpha.abs() + b.abs() * widest_node;
+                let table_rounding = (m + 4.0) * f64::EPSILON * scale * scale;
+                // Each stencil is divided by its representable width, so the
+                // rounding of `q ± h` is not an error of the difference.
+                let (q_up, q_down) = (q + 1e-3 * (1.0 + q.abs()), q - 1e-3 * (1.0 + q.abs()));
+                let (up, up_error, d_up) = solve(q_up, b);
+                let (down, down_error, d_down) = solve(q_down, b);
+                let width_q = q_up - q_down;
+                let fd_q = (up - down) / width_q;
+                let third_q = d.a_qqq.abs().max(d_up.a_qqq.abs()).max(d_down.a_qqq.abs());
+                let bound_q = width_q * width_q / 24.0 * third_q
+                    + (up_error + down_error) / width_q
+                    + table_rounding * (1.0 + d.a_q.abs());
+                assert!(
+                    (d.a_q - fd_q).abs() <= bound_q,
+                    "{label} q={q} b={b}: α_q {:+.17e} vs difference {fd_q:+.17e} (bound {bound_q:.3e})",
+                    d.a_q
+                );
+                let (b_up, b_down) = (b + 1e-3 * (1.0 + b.abs()), b - 1e-3 * (1.0 + b.abs()));
+                let (right, right_error, d_right) = solve(q, b_up);
+                let (left, left_error, d_left) = solve(q, b_down);
+                let width_b = b_up - b_down;
+                let fd_b = (right - left) / width_b;
+                let third_b = d.a_bbb.abs().max(d_right.a_bbb.abs()).max(d_left.a_bbb.abs());
+                let bound_b = width_b * width_b / 24.0 * third_b
+                    + (right_error + left_error) / width_b
+                    + table_rounding * (1.0 + d.a_b.abs());
+                assert!(
+                    (d.a_b - fd_b).abs() <= bound_b,
+                    "{label} q={q} b={b}: α_b {:+.17e} vs difference {fd_b:+.17e} (bound {bound_b:.3e})",
+                    d.a_b
+                );
+                let taylor = AnchorTaylor::at(d.alpha, q, b, grid.view())
+                    .unwrap_or_else(|e| panic!("{label} q={q} b={b}: Taylor table refused: {e}"));
+                assert!(
+                    taylor.coefficients.iter().flatten().all(|c| c.is_finite()),
+                    "{label} q={q} b={b}: Taylor table not finite"
+                );
+            }
+        }
+    }
+
+    /// A slot keeps derivatives for exactly the equation its root solved
+    /// (gam#2928): a root-only consumer stores none, the first differentiating
+    /// consumer adds `AnchorDerivatives::at` of that root, a sentinel table
+    /// stored under `(q, b)` answers for `(q, b)` alone, and a one-bit change in
+    /// either input is solved and differentiated afresh. A seed predicted from
+    /// stored derivatives — sound or poisoned — reaches a root meeting the
+    /// resolution criterion, within what the residuals allow of a cold solve.
+    #[test]
+    fn anchor_slot_keeps_derivatives_of_exactly_its_own_equation() {
+        let grid = skewed_grid();
+        let cache = AnchorRootCache::new(3, false);
+        let context = AnchorRowContext {
+            grid: grid.view(),
+            roots: Some(&cache),
+        };
+        let slot = SurvivalInterceptSlotKind::Exit;
+        let (q, b) = (0.9_f64, 1.3_f64);
+
+        let root = solve_anchor_in_slot(q, b, context, 0, slot).expect("root");
+        let stored = cache.slot(0, slot).and_then(RootSlot::read).expect("stored root");
+        assert!(stored.derivatives.is_none(), "a root-only consumer stores no derivatives");
+        let derivatives = anchor_derivatives_in_slot(q, b, context, 0, slot).expect("derivatives");
+        assert_eq!(derivatives, AnchorDerivatives::at(root, q, b, grid.view()).expect("reference"));
+        assert_eq!(
+            cache.slot(0, slot).and_then(RootSlot::read).and_then(|stored| stored.derivatives),
+            Some(derivatives),
+            "the differentiated root is published with its derivatives"
+        );
+
+        let mut sentinel = derivatives;
+        sentinel.a_qq = 42.0;
+        let own = cache.slot(0, slot).expect("row 0 slot");
+        let store = |derivatives: AnchorDerivatives| StoredAnchor {
+            q: q.to_bits(),
+            slope: b.to_bits(),
+            root,
+            derivatives: Some(derivatives),
+        };
+        own.write(&store(sentinel));
+        assert_eq!(anchor_derivatives_in_slot(q, b, context, 0, slot).expect("hit"), sentinel);
+        for (nudged_q, nudged_b) in [
+            (f64::from_bits(q.to_bits() + 1), b),
+            (q, f64::from_bits(b.to_bits() + 1)),
+        ] {
+            own.write(&store(sentinel));
+            let fresh = anchor_derivatives_in_slot(nudged_q, nudged_b, context, 0, slot).expect("nudged");
+            assert_ne!(fresh, sentinel, "a one-bit-different equation is not a hit");
+            assert_eq!(
+                fresh,
+                AnchorDerivatives::at(fresh.alpha, nudged_q, nudged_b, grid.view()).expect("nudged reference")
+            );
+        }
+
+        // A seed predicted from sound and from poisoned derivatives.
+        let (warm_q, warm_b) = (1.05_f64, 1.21_f64);
+        let log_target = normal_logcdf(-warm_q);
+        let residual = |alpha: f64| {
+            anchor_log_residual(alpha, warm_b, grid.view(), true, log_target).expect("residual")
+        };
+        let cold = solve_anchor(warm_q, warm_b, grid.view()).expect("cold");
+        let mut poisoned = derivatives;
+        poisoned.a_q = 1e6;
+        poisoned.a_b = -1e6;
+        for (row, table) in [(1, derivatives), (2, poisoned)] {
+            cache.slot(row, slot).expect("slot").write(&store(table));
+            let warm = solve_anchor_in_slot(warm_q, warm_b, context, row, slot).expect("predicted warm solve");
+            let (f_warm, d_warm, _) = residual(warm);
+            let (f_cold, d_cold, _) = residual(cold);
+            assert!(
+                f_warm.abs()
+                    <= anchor_residual_resolution(
+                        warm,
+                        d_warm,
+                        anchor_residual_rounding(log_target, grid.view().len())
+                    ),
+                "row {row}: warm root {warm:+.17e} has residual {f_warm:.3e}"
+            );
+            let (_, d_mid, _) = residual(warm + 0.5 * (cold - warm));
+            let bound = (f_warm.abs() + f_cold.abs()) / d_warm.abs().min(d_cold.abs()).min(d_mid.abs());
+            assert!(
+                (warm - cold).abs() <= bound,
+                "row {row}: warm {warm:+.17e} vs cold {cold:+.17e} exceeds the residual bound {bound:.3e}"
+            );
+        }
     }
 
     /// Rows asking a global law the same equation share one root through the
@@ -1487,10 +1996,18 @@ mod anchor_tests {
         cache
             .shared_slot(q.to_bits(), b.to_bits())
             .expect("global law table")
-            .write(q.to_bits(), b.to_bits(), 77.0);
+            .write(&StoredAnchor {
+                q: q.to_bits(),
+                slope: b.to_bits(),
+                root: 77.0,
+                derivatives: None,
+            });
         assert_eq!(solve_anchor_in_slot(q, b, context, 1, slot).expect("row 1"), 77.0);
         assert_eq!(
-            cache.slot(1, slot).and_then(RootSlot::read),
+            cache
+                .slot(1, slot)
+                .and_then(RootSlot::read)
+                .map(|stored| (stored.q, stored.slope, stored.root)),
             Some((q.to_bits(), b.to_bits(), 77.0))
         );
 
@@ -1628,11 +2145,21 @@ mod anchor_tests {
                     let (f_linear, d_linear, _) = reference(linear);
                     let (f_logged, d_logged, _) = reference(logged);
                     assert!(
-                        f_linear.abs() <= anchor_residual_resolution(linear, d_linear) + noise,
+                        f_linear.abs()
+                            <= anchor_residual_resolution(
+                                linear,
+                                d_linear,
+                                anchor_residual_rounding(log_target, grid.view().len())
+                            ) + noise,
                         "{label} q={q} b={b}: linear root {linear:+.17e} has reference residual {f_linear:.3e}"
                     );
                     assert!(
-                        f_logged.abs() <= anchor_residual_resolution(logged, d_logged),
+                        f_logged.abs()
+                            <= anchor_residual_resolution(
+                                logged,
+                                d_logged,
+                                anchor_residual_rounding(log_target, grid.view().len())
+                            ),
                         "{label} q={q} b={b}: log root {logged:+.17e} has reference residual {f_logged:.3e}"
                     );
                     let (_, d_mid, _) = reference(linear + 0.5 * (logged - linear));

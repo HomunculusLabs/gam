@@ -641,6 +641,18 @@ impl AnchoredStaticSlopeGeometry {
         solve_anchor_in_slot(q, observed_slope, Self::context(inputs), inputs.row, slot)
     }
 
+    /// One location channel's anchor with its implicit derivatives, through
+    /// the row's slot.
+    #[inline]
+    fn derivatives(
+        q: f64,
+        observed_slope: f64,
+        inputs: &RigidRowInputs,
+        slot: SurvivalInterceptSlotKind,
+    ) -> Result<AnchorDerivatives, String> {
+        anchor_derivatives_in_slot(q, observed_slope, Self::context(inputs), inputs.row, slot)
+    }
+
     /// `[α(q₀, b), α(q₁, b), α_q(q₁, b)·q̇₁]` over any jet (gam#2928).
     ///
     /// The roots are solved on the real values. A carrier with derivative
@@ -662,8 +674,10 @@ impl AnchoredStaticSlopeGeometry {
         let alpha1 = Self::anchor(q1.value(), b, inputs, SurvivalInterceptSlotKind::Exit)?;
         if std::mem::size_of::<T>() == std::mem::size_of::<f64>() {
             // A carrier the size of one `f64` has no derivative channel: the
-            // roots and `α_q(q₁, b)` are the whole answer.
-            let rate_factor = anchor_q_derivative(alpha1, q1.value(), b, grid)?;
+            // roots and `α_q(q₁, b)` are the whole answer, read from the exit
+            // slot's derivatives (the same bits `φ(q₁)/Σ_k w_k φ(η_k)` gives).
+            let rate_factor =
+                Self::derivatives(q1.value(), b, inputs, SurvivalInterceptSlotKind::Exit)?.a_q;
             return Ok([
                 q0.constant_like(alpha0),
                 q1.constant_like(alpha1),
@@ -684,29 +698,18 @@ impl AnchoredStaticSlopeGeometry {
         primaries: &[f64; STATIC_SLOPE_PRIMARIES],
         inputs: &RigidRowInputs,
     ) -> Result<AnchoredRowState, String> {
-        let grid = Self::context(inputs).grid;
         let observed_slope = inputs.probit_scale * primaries[PRIMARY_SLOPE];
-        let entry = AnchorDerivatives::at(
-            Self::anchor(
-                primaries[PRIMARY_Q0],
-                observed_slope,
-                inputs,
-                SurvivalInterceptSlotKind::Entry,
-            )?,
+        let entry = Self::derivatives(
             primaries[PRIMARY_Q0],
             observed_slope,
-            grid,
+            inputs,
+            SurvivalInterceptSlotKind::Entry,
         )?;
-        let exit = AnchorDerivatives::at(
-            Self::anchor(
-                primaries[PRIMARY_Q1],
-                observed_slope,
-                inputs,
-                SurvivalInterceptSlotKind::Exit,
-            )?,
+        let exit = Self::derivatives(
             primaries[PRIMARY_Q1],
             observed_slope,
-            grid,
+            inputs,
+            SurvivalInterceptSlotKind::Exit,
         )?;
         Ok(AnchoredRowState {
             entry,
@@ -1603,6 +1606,106 @@ mod anchored_frame_tests {
                                 "t4 [{a}][{b}][{d}][{c}] {} vs central difference {finite}",
                                 tower.t4[a][b][d][c]
                             );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Delayed-entry rows deep in both tails (gam#2941): the entry anchor at
+    /// `q₀` and the exit anchor at `q₁` both at `|q|` of 84–90, where every
+    /// node's density underflows — a 32-row delayed-entry calibration refused
+    /// all its startup seeds with `G_α = 0` at `q ≈ −84`. On a skewed and a
+    /// Gauss–Hermite law, event and censored, the direct lowering and the
+    /// production tower admit the row with finite channels and agree, and the
+    /// lowering's gradient and Hessian are central differences of the value.
+    #[test]
+    fn anchored_frame_admits_delayed_entry_rows_deep_in_both_tails() {
+        let skewed = skewed_law();
+        let gaussian = gaussian_law();
+        for (label, law) in [("skewed", &skewed), ("gaussian", &gaussian)] {
+            // −83.970… with slope −0.0966 is the point a 32-row delayed-entry
+            // calibration refused on every startup seed.
+            for &q0 in &[-90.0, -84.0, -83.97022428333848, 84.0, 90.0] {
+                for &slope in &[-2.5, -0.09658543743257131, 0.4, 3.0] {
+                    for &di in &[0.0, 1.0] {
+                        let row = inputs(law, 1.0, 0.8, 1.0, di);
+                        // The exit index after the entry index, as follow-up moves on.
+                        let primaries = [q0, q0 + 0.6, 1.3, slope];
+                        let context = format!("{label} q₀={q0} q₁={} g={slope} event={di}", q0 + 0.6);
+                        let (value, gradient, hessian) =
+                            rigid_row_order2::<STATIC_SLOPE_PRIMARIES, AnchoredStaticSlopeGeometry>(
+                                &primaries, &row,
+                            )
+                            .unwrap_or_else(|e| panic!("{context}: direct lowering refused: {e}"));
+                        assert!(
+                            value.is_finite()
+                                && gradient.iter().all(|g| g.is_finite())
+                                && hessian.iter().flatten().all(|h| h.is_finite()),
+                            "{context}: non-finite direct lowering"
+                        );
+                        let vars: [<AnchoredStaticSlopeGeometry as SlopeRowGeometry<
+                            STATIC_SLOPE_PRIMARIES,
+                        >>::Tower4; STATIC_SLOPE_PRIMARIES] =
+                            std::array::from_fn(|axis| JetScalar::variable(primaries[axis], axis));
+                        let tower =
+                            rigid_row_nll::<STATIC_SLOPE_PRIMARIES, AnchoredStaticSlopeGeometry, _>(
+                                &vars, &row,
+                            )
+                            .unwrap_or_else(|e| panic!("{context}: tower refused: {e}"));
+                        assert!(close(tower.v, value, 1e-12), "{context}: tower value {} vs {value}", tower.v);
+                        for a in 0..STATIC_SLOPE_PRIMARIES {
+                            assert!(
+                                close(tower.g[a], gradient[a], 1e-9),
+                                "{context}: tower gradient [{a}] {} vs direct {}",
+                                tower.g[a],
+                                gradient[a]
+                            );
+                            for b in 0..STATIC_SLOPE_PRIMARIES {
+                                assert!(
+                                    close(tower.h[a][b], hessian[a][b], 1e-8),
+                                    "{context}: tower Hessian [{a}][{b}] {} vs direct {}",
+                                    tower.h[a][b],
+                                    hessian[a][b]
+                                );
+                            }
+                        }
+                        let value_at = |point: &[f64; STATIC_SLOPE_PRIMARIES]| -> f64 {
+                            rigid_row_value::<STATIC_SLOPE_PRIMARIES, AnchoredStaticSlopeGeometry>(point, &row)
+                                .unwrap_or_else(|e| panic!("{context}: value refused: {e}"))
+                        };
+                        for axis in 0..STATIC_SLOPE_PRIMARIES {
+                            let step = 1e-5 * (1.0 + primaries[axis].abs());
+                            let mut up = primaries;
+                            let mut down = primaries;
+                            up[axis] += step;
+                            down[axis] -= step;
+                            let width = up[axis] - down[axis];
+                            let finite = (value_at(&up) - value_at(&down)) / width;
+                            assert!(
+                                close(finite, gradient[axis], 5e-6),
+                                "{context}: gradient axis {axis}: analytic {:+.12e} vs central difference {finite:+.12e}",
+                                gradient[axis]
+                            );
+                            let (_, gradient_up, _) =
+                                rigid_row_order2::<STATIC_SLOPE_PRIMARIES, AnchoredStaticSlopeGeometry>(
+                                    &up, &row,
+                                )
+                                .expect("up");
+                            let (_, gradient_down, _) =
+                                rigid_row_order2::<STATIC_SLOPE_PRIMARIES, AnchoredStaticSlopeGeometry>(
+                                    &down, &row,
+                                )
+                                .expect("down");
+                            for other in 0..STATIC_SLOPE_PRIMARIES {
+                                let finite = (gradient_up[other] - gradient_down[other]) / width;
+                                assert!(
+                                    close(finite, hessian[axis][other], 5e-6),
+                                    "{context}: Hessian [{axis}][{other}]: analytic {:+.12e} vs central difference {finite:+.12e}",
+                                    hessian[axis][other]
+                                );
+                            }
                         }
                     }
                 }
