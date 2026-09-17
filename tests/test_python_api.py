@@ -373,15 +373,40 @@ def test_numpy_inputs_and_outputs() -> None:
         "y ~ x0",
         family="gaussian",
     )
-    raw = model.predict(x_test, return_type="numpy")
-    assert raw.shape == (2, 2)
-    # The numpy-return contract is column-ordered (eta, mean). Identity link
-    # means the two columns must agree numerically, and both columns must
-    # match the analytic predictions — a swapped eta/mean column would fail
-    # the dict-mode test above; here we lock in the array-mode contract.
-    raw = np.asarray(raw, dtype=float)
-    np.testing.assert_allclose(raw[:, 0], raw[:, 1], atol=1e-9)
-    np.testing.assert_allclose(raw[:, 1], [2.5, 3.5], atol=1e-3)
+    raw = np.asarray(model.predict(x_test, return_type="numpy"), dtype=float)
+    table = model.predict(x_test, return_type="pandas")
+    # A plain Gaussian fit publishes the estimand-explicit schema (#2785). Under
+    # the identity link its plug-in linear predictor and its posterior mean
+    # agree, and the posterior mean must match the analytic predictions.
+    assert raw.shape == (2, len(table.columns))
+    posterior_mean = table["posterior_mean"].to_numpy(dtype=float)
+    np.testing.assert_allclose(
+        table["linear_predictor_plugin"].to_numpy(dtype=float), posterior_mean, atol=1e-9
+    )
+    np.testing.assert_allclose(posterior_mean, [2.5, 3.5], atol=1e-3)
+
+    # The numpy-return contract is the prediction table's columns stacked in the
+    # table's fixed order (docs/data-input.md). The identity link makes every
+    # point column coincide, so the order is checked on a log-link fit, whose
+    # plug-in linear predictor, plug-in mean and posterior mean differ. The
+    # pandas table is the reference: it keeps covariance provenance in `attrs`,
+    # where a dict result carries it as extra scalar keys.
+    counts = gamfit.fit(
+        {"x0": x_train[:, 0].tolist(), "y": [1.0, 2.0, 4.0, 7.0]},
+        "y ~ x0",
+        family="poisson",
+    )
+    raw_counts = np.asarray(counts.predict(x_test, return_type="numpy"), dtype=float)
+    frame = counts.predict(x_test, return_type="pandas")
+    columns = [frame[name].to_numpy(dtype=float) for name in frame.columns]
+    assert raw_counts.shape == (2, len(columns))
+    assert not any(
+        np.allclose(columns[i], columns[j])
+        for i in range(len(columns))
+        for j in range(i + 1, len(columns))
+    ), "the log-link table's columns must differ pairwise for the order check to have power"
+    for index, values in enumerate(columns):
+        np.testing.assert_array_equal(raw_counts[:, index], values)
 
 
 def test_sklearn_regressor_accepts_rhs_only_formula_with_separate_target() -> None:
