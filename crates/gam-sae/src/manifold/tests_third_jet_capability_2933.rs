@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! #2933 F02 — a basis third jet is Analytic, CertifiedZero or Unavailable, and
 //! only the first two may feed an exact observed-information derivative.
 //!
