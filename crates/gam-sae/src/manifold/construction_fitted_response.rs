@@ -193,9 +193,11 @@ impl SaeManifoldTerm {
         Ok(divergence)
     }
 
-    /// Rademacher Hutchinson estimate of `tr(A⁺G)`: each probe is one data
-    /// curvature apply and one Krylov exact-stationarity solve against the cached
-    /// arrow factorization, so nothing `dim × dim` is formed.
+    /// Rademacher Hutchinson estimate of `tr(A⁺G)` and its standard error: each
+    /// probe is one data curvature apply and one Krylov exact-stationarity solve
+    /// against the cached arrow factorization, so nothing `dim × dim` is formed.
+    /// The standard error is the sample standard deviation of the probe values
+    /// over `√probes`.
     fn hutchinson_fitted_response_divergence(
         &self,
         rho: &SaeManifoldRho,
@@ -203,7 +205,7 @@ impl SaeManifoldTerm {
         cache: &ArrowFactorCache,
         probes: usize,
         seed: u64,
-    ) -> Result<f64, String> {
+    ) -> Result<(f64, f64), String> {
         let total_t = cache.delta_t_len();
         let k = cache.k;
         let second_jets = self.atom_second_jets()?;
@@ -223,8 +225,12 @@ impl SaeManifoldTerm {
         let apply_b_raw = |vector: &SaeArrowVector| -> Result<SaeArrowVector, String> {
             apply_raw_cached_arrow_hessian(cache, vector.t.view(), vector.beta.view())
         };
-        let probes = probes.max(1);
-        let mut accumulated = 0.0_f64;
+        if probes < 2 {
+            return Err(format!(
+                "Hutchinson divergence needs at least two probes for a standard error; got {probes}"
+            ));
+        }
+        let mut values = Vec::with_capacity(probes);
         for probe in 0..probes {
             let mut state = seed.wrapping_add(probe as u64);
             let mut bits = 0u64;
@@ -245,13 +251,21 @@ impl SaeManifoldTerm {
             };
             let gz = self.apply_data_gauss_newton(cache, &second_jets, &border, &z)?;
             let response = solve_exact_stationarity_krylov(&gz, &apply_a, &apply_b, &apply_b_raw)?;
-            accumulated += z.t.dot(&response.t) + z.beta.dot(&response.beta);
+            values.push(z.t.dot(&response.t) + z.beta.dot(&response.beta));
         }
-        let divergence = accumulated / probes as f64;
-        if !divergence.is_finite() {
-            return Err(format!("Hutchinson divergence is non-finite: {divergence}"));
+        let count = probes as f64;
+        let divergence = values.iter().sum::<f64>() / count;
+        let spread = values
+            .iter()
+            .map(|value| (value - divergence) * (value - divergence))
+            .sum::<f64>();
+        let standard_error = (spread / (count - 1.0) / count).sqrt();
+        if !(divergence.is_finite() && standard_error.is_finite()) {
+            return Err(format!(
+                "Hutchinson divergence is non-finite: {divergence} (standard error {standard_error})"
+            ));
         }
-        Ok(divergence)
+        Ok((divergence, standard_error))
     }
 
     /// The whitening metric the data likelihood is assembled through, or `None`

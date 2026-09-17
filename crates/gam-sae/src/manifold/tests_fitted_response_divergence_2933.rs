@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! #2933 F36 — the joint fitted-response divergence `tr(∂f̂/∂y)` of the SAE
 //! reconstruction against direct re-solves of the perturbed inner problem.
 //!
