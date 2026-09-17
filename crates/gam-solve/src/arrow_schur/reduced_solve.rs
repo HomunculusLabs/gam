@@ -79,6 +79,90 @@ pub(crate) fn tile_schur_partial<B: BatchedBlockSolver>(
     Ok(partial)
 }
 
+/// A reduced-Schur chunk partial holding only the `(a, b)` pairs its rows touch,
+/// keyed `a·k + b`, each accumulating `-Σ_rows Σ_c left[c, a]·right[c, b]`.
+///
+/// Every stored value is accumulated in the same row, `c`, `a`, `b` order and from
+/// the same `+0.0` start as a dense zero-seeded `k×k` partial under the CPU
+/// `block_gemm_subtract`, so it is the same f64. A pair no row of the chunk touches
+/// is `+0.0` in the dense partial and absent here, which changes at most the sign
+/// of a zero entry after the fold.
+#[derive(Default)]
+struct TouchedPairPartial {
+    values: std::collections::HashMap<usize, f64>,
+    left_active: Vec<(usize, f64)>,
+    right_active: Vec<(usize, f64)>,
+}
+
+impl TouchedPairPartial {
+    fn clear(&mut self) {
+        self.values.clear();
+    }
+
+    /// `schur[a, b] += partial[a, b]` for every stored pair.
+    fn fold_into(&self, schur: &mut Array2<f64>) {
+        let schur_flat = schur
+            .as_slice_mut()
+            .expect("TouchedPairPartial::fold_into: reduced Schur must be standard-layout");
+        for (&key, &value) in &self.values {
+            schur_flat[key] += value;
+        }
+    }
+}
+
+/// Subtract one row's Schur contribution into a [`TouchedPairPartial`].
+///
+/// The loop is `block_gemm_subtract`'s on the CPU backend, with the dense `k×k`
+/// write replaced by a keyed one: for each factor row `c`, the nonzero entries of
+/// `left[c, ·]` and `right[c, ·]` in column order, then `partial[a, b] -= l·r` over
+/// their product in `a`, `b` order.
+fn subtract_row_schur_contribution_touched_pairs<B: BatchedBlockSolver>(
+    sys: &ArrowSchurSystem,
+    row_idx: usize,
+    row: &ArrowRowBlock,
+    htt_factor: ArrayView2<'_, f64>,
+    backend: &B,
+    kind: SchurReductionKind,
+    partial: &mut TouchedPairPartial,
+) -> Result<(), ArrowSchurError> {
+    let (left, right) =
+        row_schur_contribution_factors(sys, row_idx, row, htt_factor, backend, kind)?;
+    let k = sys.k;
+    let TouchedPairPartial {
+        values,
+        left_active,
+        right_active,
+    } = partial;
+    for c in 0..left.nrows() {
+        left_active.clear();
+        right_active.clear();
+        let left_row = left.row(c);
+        let right_row = right.row(c);
+        let left_row = left_row
+            .as_slice()
+            .expect("touched-pair Schur subtract: left row must be contiguous");
+        let right_row = right_row
+            .as_slice()
+            .expect("touched-pair Schur subtract: right row must be contiguous");
+        for col in 0..k {
+            let l = left_row[col];
+            let r = right_row[col];
+            if l != 0.0 {
+                left_active.push((col, l));
+            }
+            if r != 0.0 {
+                right_active.push((col, r));
+            }
+        }
+        for &(a, lca) in left_active.iter() {
+            for &(b, rcb) in right_active.iter() {
+                *values.entry(a * k + b).or_insert(0.0) -= lca * rcb;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Reduce the per-row Schur contributions `Σ_i H_tβ^(i)ᵀ (H_tt^(i))⁻¹ H_tβ^(i)`
 /// out of `schur` (seeded with `H_ββ + ρ_β·I`).
 ///
@@ -153,9 +237,9 @@ pub(crate) fn reduce_row_schur_contributions<B: BatchedBlockSolver + Sync>(
         // into the `k×k` `schur` independently — the same dense-assembly axis the
         // multi-GPU tile path partitions, and the dense-Direct analog of the
         // per-row matvec / streaming `accumulate_chunk` loops already parallelized
-        // for #1017. At the SAE Direct-solve shape (`n` in the thousands, wide
-        // border `k`) this O(n·d·k²) reduction is the dense assembly's whole cost
-        // and was the last serial CPU step on the dense-Schur build.
+        // for #1017. A row's contribution touches only the columns where its two
+        // factor rows are nonzero (`block_gemm_subtract` skips the rest, #1995), so
+        // its cost is the factor materialization and block solve, not `d·k²`.
         //
         // Fan it across rayon over fixed row chunks: each chunk reduces its rows
         // (in row order) into a private zero-seeded `k×k` partial, then the
@@ -180,13 +264,18 @@ pub(crate) fn reduce_row_schur_contributions<B: BatchedBlockSolver + Sync>(
         if parallel {
             // Deterministic ordered fold: chunk partials hold `-Σ contribution`
             // over their rows, so `schur += partial` reproduces the serial
-            // `schur -= Σ contribution` in fixed (chunk, a, b) order.
+            // `schur -= Σ contribution` in fixed chunk order. Each partial stores
+            // only the `(a, b)` pairs its rows touch, so the fold costs the touched
+            // pairs rather than `k²` per chunk: with dense `k×k` partials the
+            // main-thread fold was 66% of the build at `k = 4096`, 30,000 rows and
+            // 28 active atoms (#2900, job 1148662), and the per-thread partials
+            // held `8·k²` bytes each.
             return fold_row_chunk_partials(
                 n_rows,
-                || Array2::<f64>::zeros((k, k)),
-                |partial| partial.fill(0.0),
+                TouchedPairPartial::default,
+                TouchedPairPartial::clear,
                 |i, partial| {
-                    subtract_row_schur_contribution(
+                    subtract_row_schur_contribution_touched_pairs(
                         sys,
                         i,
                         &sys.rows[i],
@@ -196,13 +285,7 @@ pub(crate) fn reduce_row_schur_contributions<B: BatchedBlockSolver + Sync>(
                         partial,
                     )
                 },
-                |partial| {
-                    for a in 0..k {
-                        for b in 0..k {
-                            schur[[a, b]] += partial[[a, b]];
-                        }
-                    }
-                },
+                |partial| partial.fold_into(schur),
             );
         }
         // Serial in-place reduction (original order) — bit-for-bit reference.

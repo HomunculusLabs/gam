@@ -119,6 +119,8 @@ mod streaming_exact_a_carrier_2731_tests;
 mod tests;
 #[cfg(test)]
 mod tests_device_gauge_2660;
+#[cfg(test)]
+mod touched_pair_fold_2900_tests;
 
 pub(crate) use factorization::*;
 // `SPECTRAL_DEFLATION_REL_FLOOR` is consumed cross-crate (gam-sae streaming plan)
