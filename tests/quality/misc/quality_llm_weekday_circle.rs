@@ -144,19 +144,14 @@ fn weekday_month_coeffs(interaction: f64) -> (Array2<f64>, Array2<f64>) {
 /// interaction strength. Returns `(edge_p_value, interaction_fraction,
 /// fissions)`.
 ///
-/// `with_covariance` controls the carve channel, mirroring the two #975
-/// oracle paths exactly:
-///   * `false` (energy-only) — no posterior covariance is handed to the
-///     carve, so the fission decision rests on the interaction-energy dial
-///     alone (`fraction ≤ FISSION_MAX_INTERACTION_FRACTION`). This is the
-///     correct channel for the additive (superposition) verdict: a genuinely
-///     additive plant must fission, and only the energy path can certify
-///     "negligible" without a Wald test that would price in ridge/noise
-///     residue.
+/// `with_covariance` controls the carve channel:
 ///   * `true` — the scale-included posterior covariance + joint covariance
-///     are supplied, so the gauge-projected Wald binding test runs and
-///     `edge_p_value` is populated. This is the channel for the binding
-///     verdict: a jointly-planted interaction must reject the additive null.
+///     are supplied, so the gauge-projected Wald binding test runs, and a
+///     split is certified when the discarded interaction energy lies inside
+///     the carve's resolution band: its rounding floor plus the posterior's
+///     α-level bound (#2946). This channel carries both verdicts.
+///   * `false` (bare) — no covariance: only the rounding floor can certify a
+///     split, so a noisy estimate stays whole and contested.
 fn carve_weekday_month(
     interaction: f64,
     noise: f64,
@@ -202,16 +197,23 @@ fn carve_weekday_month(
 #[test]
 fn weekday_is_bound_to_month_when_planted_jointly_and_fissions_when_additive() {
     // --- Superposition world: weekday + month act ADDITIVELY -------------
-    // Near-noiseless additive samples carry negligible interaction energy:
-    // the carve must FISSION the pair into two independent atoms. Run on the
-    // energy-only channel (no covariance) — the fission certificate rests on
-    // the interaction-energy dial being below FISSION_MAX_INTERACTION_FRACTION
-    // (1e-6), the same channel the #975 additive-fission oracle uses.
-    let (_add_p, add_frac, add_fissions) = carve_weekday_month(0.0, 1e-5, false, 7);
+    // Near-noiseless additive samples: the carve must FISSION the pair into
+    // two independent atoms. Run on the covariance channel: the certificate is
+    // that the discarded interaction energy lies inside the carve's resolution
+    // band (rounding plus the posterior's α-level bound) with no binding proven.
+    let (_add_p, add_frac, add_fissions) = carve_weekday_month(0.0, 1e-5, true, 7);
     assert!(
         add_fissions,
         "additive weekday+month surface must fission (interaction_fraction={:.3e})",
         add_frac,
+    );
+    // Control: the same noisy estimate handed over bare clears the rounding
+    // floor, so nothing certifies the split and the pair stays contested.
+    let (_bare_p, bare_frac, bare_fissions) = carve_weekday_month(0.0, 1e-5, false, 7);
+    assert!(
+        !bare_fissions,
+        "a bare noisy additive estimate must not be certified (interaction_fraction={:.3e})",
+        bare_frac,
     );
     assert!(
         add_frac < 1e-6,

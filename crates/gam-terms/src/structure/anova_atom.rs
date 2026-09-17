@@ -55,9 +55,11 @@
 //! fraction of (centered) surface energy carried by the interaction — a
 //! continuous "how bound" number — and the planted-partial-binding power
 //! curve lives on exactly this dial. The binding test rejects when the
-//! data PROVES `f₁₂ ≠ 0`; fission additionally demands the interaction be
-//! energetically negligible, because absence of evidence is not evidence
-//! of absence. Atoms failing both stay whole and CONTESTED — the
+//! data PROVES `f₁₂ ≠ 0`; fission additionally demands that the interaction
+//! energy the split discards be unresolved at the carve's own resolution,
+//! its rounding floor plus the posterior's α-level bound ([`carve`]),
+//! because absence of evidence is not evidence of absence. Atoms failing
+//! both stay whole and CONTESTED — the
 //! demote-never-reject philosophy: the claim goes to the evidence ledger
 //! (`structure_evidence::ClaimKind::BindingEdge`, p-value calibrated via
 //! `structure_evidence::log_e_from_p_calibrator`) and earns a probe
@@ -93,23 +95,6 @@ use crate::inference::smooth_test::{
     SmoothTestInput, SmoothTestResult, SmoothTestScale, wood_smooth_test,
 };
 use gam_linalg::faer_ndarray::FaerEigh;
-
-/// Interaction energy fraction at or below which the interaction block is
-/// energetically negligible and lossless fission is on the table. The bar is
-/// the finite-sample NOISE FLOOR of the interaction estimate, not exact
-/// algebraic zero. A planted, exactly-additive coefficient matrix carves to
-/// numerical zero (≈ f64 roundoff), but a real REML fit of a genuinely
-/// separable surface over noisy scattered codes cannot drive its penalized
-/// interaction block below the variance its own estimator injects: a 5%-noise
-/// pair fit lands at ~`1e-4` of centered surface energy (a relative amplitude of
-/// `1e-2`, ≈ √fraction). `1e-4` sits just above that estimator floor so a
-/// separable atom actually fissions end to end (the `carve` path, which the
-/// planted in-module tests do not exercise), while staying far below any
-/// genuine interaction — the bound
-/// panels carry fractions orders of magnitude larger, and the companion binding
-/// Wald test resolves small-but-real interactions besides. Auto-applied — no
-/// knob.
-pub(crate) const FISSION_MAX_INTERACTION_FRACTION: f64 = 1e-4;
 
 /// Which binding notion a carve report speaks about (see module docs).
 ///
@@ -207,8 +192,8 @@ impl ChildDecoder {
 /// main-effect blocks. Gauge choice (documented, fixed): the grand mean
 /// `g₀` rides with child A; child B is centered. The interaction energy
 /// the split discards is DECLARED in `reconstruction_defect` — by the
-/// fission rule it is ≤ `FISSION_MAX_INTERACTION_FRACTION`, but it is
-/// never silently zero.
+/// fission rule it is unresolved at the carve's resolution ([`carve`]), but
+/// it is never silently zero.
 #[derive(Clone, Debug)]
 pub struct FissionPlan {
     /// Per output dimension: child atom on factor A (`g₀ + f₁`).
@@ -239,7 +224,7 @@ pub struct CarveReport {
     /// dial (0 = perfectly additive, 1 = pure interaction).
     pub interaction_fraction: f64,
     /// The lossless split, present iff this notion's carve allows it:
-    /// interaction energetically negligible AND not proven present.
+    /// interaction unresolved at the carve's resolution AND not proven present.
     pub fission: Option<FissionPlan>,
 }
 
@@ -883,12 +868,31 @@ pub struct CarveInput<'a> {
 ///
 /// Fission rule (asymmetric on purpose): the test REJECTING proves
 /// binding and always blocks the split; the test NOT rejecting is only
-/// absence of evidence, so the split additionally requires the
-/// interaction to be energetically negligible
-/// (`FISSION_MAX_INTERACTION_FRACTION`). An atom with a fat but
-/// unproven interaction stays whole and contested — route its
-/// `edge_p_value` into the evidence ledger and let the probe loop earn
-/// the verdict.
+/// absence of evidence, so the split additionally requires the discarded
+/// interaction to be unresolved at the carve's own resolution (#2946).
+///
+/// - What the split discards: the parent is `g₀ + f₁ + f₂ + f₁₂` row by row on
+///   any code measure, so the children lose exactly `Ê = Σ_d Σ_n f₁₂,d(θ_n)²`,
+///   the #2946 R7 cross-block energy of the two-block partition. Dependent codes
+///   leave this identity intact; they only stop `Ê` from being a variance share.
+/// - Rounding: `R = Σ_n band_n²`, the numerical-additivity floor below.
+/// - Estimation: with `x_n = vec(φ̃¹_n φ̃²_nᵀ)` (row-major), `f₁₂,d(θ_n) = x_nᵀ vec(C_d)`,
+///   so the scale-included posterior covariance `Σ_d` gives the posterior error
+///   energy `P = Σ_d tr(G Σ_d)`, `G = Σ_n x_n x_nᵀ`, carried with its own
+///   accumulation band. `P` is covariant: the gauge directions annihilate every
+///   `x_n`, `x` and `Σ` transform contragrediently under any reparameterization of
+///   either factor basis, and it scales as the response squared.
+///
+/// On an exactly additive surface the computed interaction values are estimation
+/// error plus rounding. Markov on the second moment bounds the estimation part's
+/// energy by `P/α` with probability at least `1 − α`, and the triangle inequality on
+/// the per-row values then gives the split's certificate `√Ê ≤ √R + √(P/α)`, at the
+/// carve's own `α` — no literal. An additive surface splits with probability at
+/// least `1 − 2α` at every sample size; a fixed interaction share grows `Ê` with `n`
+/// while `P` stays `O(σ²·rank)`, so it is kept. Without a covariance `P` is zero and
+/// only the rounding floor certifies, so a bare noisy estimate stays whole and
+/// contested — route its `edge_p_value` into the evidence ledger and let the probe
+/// loop earn the verdict.
 pub fn carve(input: &CarveInput<'_>, alpha: f64) -> Result<CarveReport, String> {
     let n = input.phi_a.nrows();
     if input.phi_b.nrows() != n {
@@ -1090,7 +1094,99 @@ pub fn carve(input: &CarveInput<'_>, alpha: f64) -> Result<CarveReport, String> 
     // sat a whole solve backward error below the floor (#2822).
     let numerically_additive = interaction_energy <= interaction_band_energy;
     let binding_proven = !numerically_additive && edge_p_value.is_some_and(|p| p <= alpha);
-    let negligible = interaction_fraction <= FISSION_MAX_INTERACTION_FRACTION;
+    // The posterior error energy of the interaction values (fission rule above):
+    // `G = Σ_n x_n x_nᵀ` with `x_n = vec(φ̃¹_n φ̃²_nᵀ)` row-major and
+    // `P = Σ_d Σ_ab G_ab Σ_d[a,b]`. Its band is γ over the accumulation depth (the
+    // centered factors, their products, `n − 1` row additions and `D·(M₁M₂)² − 1`
+    // contractions) times the absolute shadow `Σ_d Σ_ab |G|_ab·|Σ_d[a,b]|`, to first
+    // order in `u`.
+    let interaction_width = m1 * m2;
+    let dims = input.coeffs.len();
+    let posterior_blocks: Option<Vec<ArrayView2<'_, f64>>> =
+        match (input.coeff_covariance, input.joint_coeff_covariance) {
+            (Some(covs), _) => {
+                if let Some(dim) = covs
+                    .iter()
+                    .position(|cov| cov.dim() != (interaction_width, interaction_width))
+                {
+                    return Err(format!(
+                        "carve: coefficient covariance {dim} is {:?}; the tensor block needs \
+                         {interaction_width}×{interaction_width}",
+                        covs[dim].dim()
+                    ));
+                }
+                Some(covs.iter().map(|cov| cov.view()).collect())
+            }
+            (None, Some(joint)) => {
+                let total = dims * interaction_width;
+                if joint.dim() != (total, total) {
+                    return Err(format!(
+                        "carve: joint coefficient covariance is {:?}; {dims} outputs need \
+                         {total}×{total}",
+                        joint.dim()
+                    ));
+                }
+                Some(
+                    (0..dims)
+                        .map(|dim| {
+                            let start = dim * interaction_width;
+                            let end = start + interaction_width;
+                            joint.slice(s![start..end, start..end])
+                        })
+                        .collect(),
+                )
+            }
+            (None, None) => None,
+        };
+    let (posterior_energy, posterior_band) = match posterior_blocks {
+        None => (0.0, 0.0),
+        Some(blocks) => {
+            let mut gram = Array2::<f64>::zeros((interaction_width, interaction_width));
+            let mut gram_shadow = Array2::<f64>::zeros((interaction_width, interaction_width));
+            let mut products = vec![0.0f64; interaction_width];
+            for row in 0..n {
+                for j in 0..m1 {
+                    for k in 0..m2 {
+                        products[j * m2 + k] = phi_a_c[[row, j]] * phi_b_c[[row, k]];
+                    }
+                }
+                for a in 0..interaction_width {
+                    for b in 0..interaction_width {
+                        let term = products[a] * products[b];
+                        gram[[a, b]] += term;
+                        gram_shadow[[a, b]] += term.abs();
+                    }
+                }
+            }
+            let mut energy = 0.0f64;
+            let mut shadow = 0.0f64;
+            for block in &blocks {
+                for a in 0..interaction_width {
+                    for b in 0..interaction_width {
+                        energy += gram[[a, b]] * block[[a, b]];
+                        shadow += gram_shadow[[a, b]] * block[[a, b]].abs();
+                    }
+                }
+            }
+            let operations = n + blocks.len() * interaction_width * interaction_width + 6;
+            (
+                energy,
+                gam_linalg::roundoff::accumulation_growth(operations) * shadow,
+            )
+        }
+    };
+    if !(posterior_energy.is_finite() && posterior_band.is_finite())
+        || posterior_energy < -posterior_band
+    {
+        return Err(format!(
+            "carve: the coefficient covariance gives the interaction values a posterior error \
+             energy of {posterior_energy} (band {posterior_band}); a covariance is positive \
+             semidefinite"
+        ));
+    }
+    let resolution_band = interaction_band_energy.sqrt()
+        + ((posterior_energy + posterior_band) / alpha).sqrt();
+    let negligible = interaction_energy.sqrt() <= resolution_band;
     let fission = if negligible && !binding_proven {
         Some(FissionPlan {
             child_a,
@@ -1564,9 +1660,10 @@ mod tests {
     }
 
     /// END-TO-END, additive side: a planted ADDITIVE surface fit from
-    /// near-noiseless samples carries negligible interaction energy and
-    /// fissions (energy-only path — no covariance handed to the carve, so
-    /// the decision rests on the dial alone).
+    /// near-noiseless samples splits once the carve holds the fit's covariance:
+    /// its interaction energy is estimation noise inside `√R + √(P/α)`. Handed
+    /// over bare, the same estimate clears the rounding floor alone and stays
+    /// whole, the control showing the posterior term is what certifies the split.
     #[test]
     fn tensor_surface_fit_additive_surface_fissions() {
         let n = 40usize;
@@ -1585,7 +1682,29 @@ mod tests {
             responses[[t, 0]] = y[t] + 1e-5 * (0.9 * t as f64).sin();
         }
         let fit = fit_tensor_surface(phi_a.view(), phi_b.view(), responses.view()).expect("fit");
-        let input = CarveInput {
+        let with_covariance = CarveInput {
+            phi_a: phi_a.view(),
+            phi_b: phi_b.view(),
+            coeffs: &fit.coeffs,
+            coeff_band: &fit.coeff_band,
+            coeff_covariance: Some(&fit.coeff_covariance),
+            joint_coeff_covariance: None,
+            kernel_a: None,
+            kernel_b: None,
+            edf: None,
+            residual_df: fit.residual_df,
+            scale: SmoothTestScale::Estimated,
+            notion: BindingNotion::Representational,
+        };
+        let report = carve(&with_covariance, 0.05).expect("carve");
+        assert!(
+            report.fission.is_some(),
+            "an additive surface with its covariance must split (fraction = {}, p = {:?})",
+            report.interaction_fraction,
+            report.edge_p_value
+        );
+
+        let bare = CarveInput {
             phi_a: phi_a.view(),
             phi_b: phi_b.view(),
             coeffs: &fit.coeffs,
@@ -1599,14 +1718,13 @@ mod tests {
             scale: SmoothTestScale::Estimated,
             notion: BindingNotion::Representational,
         };
-        let report = carve(&input, 0.05).expect("carve");
+        let bare_report = carve(&bare, 0.05).expect("carve");
         assert!(
-            report.interaction_fraction < FISSION_MAX_INTERACTION_FRACTION,
-            "additive surface fit must carry negligible interaction \
-             (fraction = {})",
-            report.interaction_fraction
+            bare_report.fission.is_none(),
+            "without a covariance only the rounding floor certifies, and a noisy estimate \
+             clears it (fraction = {})",
+            bare_report.interaction_fraction
         );
-        assert!(report.fission.is_some());
     }
 
     /// The three-valued joint decision: both arms additive → joint
