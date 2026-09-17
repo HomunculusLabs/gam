@@ -16,6 +16,8 @@ extern crate gam_model_kernels;
 mod macros;
 #[cfg(test)]
 mod matern_collapse_1629_tests;
+#[cfg(test)]
+mod test_support;
 
 // `bail_*` shorthands whose error types were relocated to the neutral
 // `gam-problem` crate. Re-exporting the `#[macro_export]` macros here makes
@@ -82,6 +84,7 @@ pub mod family_runtime;
 pub(crate) mod fnv1a;
 pub mod gamlss;
 pub mod joint_penalty;
+pub(crate) mod latent_anchor;
 pub(crate) mod location_scale_engine;
 pub mod marginal_slope_orthogonal;
 pub mod marginal_slope_shared;

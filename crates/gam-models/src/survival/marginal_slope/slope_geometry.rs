@@ -638,7 +638,13 @@ impl AnchoredStaticSlopeGeometry {
         inputs: &RigidRowInputs,
         slot: SurvivalInterceptSlotKind,
     ) -> Result<f64, String> {
-        solve_anchor_in_slot(q, observed_slope, Self::context(inputs), inputs.row, slot)
+        solve_anchor_in_slot(
+            q,
+            observed_slope,
+            Self::context(inputs),
+            inputs.row,
+            survival_anchor_slot(slot),
+        )
     }
 
     /// One location channel's anchor with its implicit derivatives, through
@@ -650,7 +656,13 @@ impl AnchoredStaticSlopeGeometry {
         inputs: &RigidRowInputs,
         slot: SurvivalInterceptSlotKind,
     ) -> Result<AnchorDerivatives, String> {
-        anchor_derivatives_in_slot(q, observed_slope, Self::context(inputs), inputs.row, slot)
+        anchor_derivatives_in_slot(
+            q,
+            observed_slope,
+            Self::context(inputs),
+            inputs.row,
+            survival_anchor_slot(slot),
+        )
     }
 
     /// `[α(q₀, b), α(q₁, b), α_q(q₁, b)·q̇₁]` over any jet (gam#2928).
