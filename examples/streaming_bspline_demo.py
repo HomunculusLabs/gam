@@ -13,7 +13,7 @@ def main() -> None:
 
     model = gamfit.fit(
         {"y": y, "t": t},
-        "y ~ bspline(t, k=24, periodic=true, period=2*pi, origin=0)",
+        "y ~ s(t, bs='bspline', k=24, periodic=true, period=2*pi, origin=0)",
         family="gaussian",
     )
     summary = model.summary()
